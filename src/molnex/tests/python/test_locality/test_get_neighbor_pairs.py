@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 import torch as pt
-from molpot_op.locality.neighbors import get_neighbor_pairs
+from molnex.F.locality import get_neighbor_pairs
 import tempfile
 
 def sort_neighbors(neighbors, deltas, distances):

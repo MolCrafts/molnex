@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
 project(molnex LANGUAGES CXX)
 
-# Add the op subdirectory
-add_subdirectory(src/op)
+# Build C++ extensions from src/molnex/op
+add_subdirectory(src/molnex/op)

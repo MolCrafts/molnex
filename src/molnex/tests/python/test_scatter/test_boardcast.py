@@ -1,5 +1,5 @@
 from itertools import product
-import molpot_op
+import molnex.F.scatter
 import pytest
 import torch
 from .utils import devices

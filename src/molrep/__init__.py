@@ -11,13 +11,9 @@ from molrep.encoder.embedding import AtomEmbedding
 from molrep.encoder.transformer import TransformerBlock, TransformerEncoder
 from molrep.head.scalar_head import ScalarHead
 
-# Functional API (PyTorch-style)
-from molrep import F
-
 __all__ = [
     "AtomEmbedding",
     "TransformerBlock",
     "TransformerEncoder",
-    "ScalarHead",
-    "F",  # Functional API
+    "ScalarHead"
 ]

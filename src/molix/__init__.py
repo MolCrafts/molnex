@@ -10,9 +10,6 @@ from molix.steps.eval_step import EvalStep
 from molix.steps.test_step import TestStep
 from molix.steps.predict_step import PredictStep
 
-# Functional API (PyTorch-style)
-from molix import F
-
 __all__ = [
     "Stage",
     "TrainState",
@@ -21,6 +18,5 @@ __all__ = [
     "TrainStep",
     "EvalStep",
     "TestStep",
-    "PredictStep",
-    "F",  # Functional API
+    "PredictStep"
 ]

@@ -2,7 +2,7 @@ from itertools import product
 
 import pytest
 import torch
-import molpot_op
+import molnex.F.scatter
 from torch.autograd import gradcheck
 from .utils import devices, dtypes, tensor
 

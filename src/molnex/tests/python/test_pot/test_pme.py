@@ -1,7 +1,7 @@
 import torch
 import pytest
 import numpy as np
-from molpot_op.pot import PMEkernel
+from molnex.F.pot import pme_kernel
 
 class PmeModule(torch.nn.Module):
     def __init__(self):

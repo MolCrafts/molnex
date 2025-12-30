@@ -116,6 +116,39 @@ def collate_frames(frames: list, config: Config | None = None) -> AtomicTD:
     if pbcs:
         data[("meta", "pbc")] = pbcs  # Keep as list
     
+    # Extract targets from metadata["target"] if present
+    # Collect all unique target keys across frames
+    target_keys = set()
+    for frame in frames:
+        if hasattr(frame, 'metadata') and "target" in frame.metadata:
+            target_keys.update(frame.metadata["target"].keys())
+    
+    # For each target key, extract values
+    for key in target_keys:
+        values = []
+        is_per_atom = False
+        
+        for frame in frames:
+            if hasattr(frame, 'metadata') and "target" in frame.metadata:
+                value = frame.metadata["target"].get(key)
+                if value is not None:
+                    # Convert to tensor
+                    value_tensor = torch.tensor(value, dtype=config.dtype if not isinstance(value, (int, str)) else torch.float32)
+                    
+                    # Check if per-atom (shape matches number of atoms)
+                    if value_tensor.ndim >= 1 and len(value_tensor) == len(z_list[len(values)]):
+                        is_per_atom = True
+                    
+                    values.append(value_tensor)
+        
+        if values:
+            # Per-atom targets use NestedTensor, scalar targets use regular tensor
+            if is_per_atom and any(v.ndim >= 1 for v in values):
+                data[("target", key)] = torch.nested.nested_tensor(values, dtype=config.dtype)
+            else:
+                # Stack scalar values
+                data[("target", key)] = torch.stack(values) if values[0].ndim == 0 else torch.stack(values)
+    
     return AtomicTD(data, batch_size=[])
 
 
