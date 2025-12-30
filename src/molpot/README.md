@@ -16,7 +16,7 @@ MolPot provides reusable building blocks for molecular machine learning potentia
 ## Installation
 
 ```bash
-cd molnex/src/molpot
+cd molix/src/molpot
 pip install -e .
 ```
 
@@ -25,7 +25,7 @@ pip install -e .
 ```python
 import torch
 from molpot import PiNet2, EnergyLoss, AtomicTD
-from molnex.core.trainer import Trainer
+from molix.core.trainer import Trainer
 
 # 1. Create model (pure composition of components)
 model = PiNet2(
@@ -133,10 +133,10 @@ class MyModel(nn.Module):
 
 ```bash
 # Run tests
-pytest molnex/src/molpot/tests/ -v
+pytest molix/src/molpot/tests/ -v
 
 # Run example
-python molnex/examples/train_pinet2_simple.py
+python molix/examples/train_pinet2_simple.py
 ```
 
 ## Adding New Potentials
@@ -169,7 +169,6 @@ class SchNet(nn.Module):
 
 - PyTorch >= 2.0
 - TensorDict >= 0.2
-- torch-scatter >= 2.1
 
 ## License
 

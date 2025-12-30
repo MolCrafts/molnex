@@ -1,32 +1,29 @@
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_backend"
+requires = ["scikit-build-core"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "molnex"
-version = "0.1.0"
-description = "Unified modeling of molecular potentials and properties with physics-aware ML"
+version = "2.0.0"
+description = "TensorDict-first molecular ML framework"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.0",
-    "torch-scatter>=2.1",
-    "numpy>=1.21",
-    "molcrafts-molpy>=0.2.0",
+  "torch>=2.0",
+  "numpy>=2.0",
+  "tensordict>=0.3.0",
+  "sphericart",
+  "molcrafts-molpy>=0.2.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
-]
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.scikit-build]
+wheel.packages = ["src/molix", "src/molrep", "src/molpot", "src/op/binding"]
+cmake.source-dir = "."
+cmake.minimum-version = "3.20"
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-addopts = "-v --tb=short"
+[[tool.scikit-build.overrides]]
+if.any.env.BUILD_DOCS = true
+wheel.cmake = false

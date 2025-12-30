@@ -1,8 +1,10 @@
-"""Pooling and aggregation operations for atomic-to-molecular readout."""
+"""Pooling and aggregation operations for atomic-to-molecular readout.
+
+Pure PyTorch implementation (no torch_scatter dependency).
+"""
 
 import torch
 import torch.nn as nn
-from torch_scatter import scatter
 
 
 class SumPooling(nn.Module):
@@ -34,7 +36,14 @@ class SumPooling(nn.Module):
         if dim_size is None:
             dim_size = int(batch.max()) + 1
         
-        return scatter(x, batch, dim=0, dim_size=dim_size, reduce="sum")
+        # Pure PyTorch implementation using index_add_
+        if x.dim() == 1:
+            out = torch.zeros(dim_size, dtype=x.dtype, device=x.device)
+        else:
+            out = torch.zeros(dim_size, x.shape[1], dtype=x.dtype, device=x.device)
+        
+        out.index_add_(0, batch, x)
+        return out
     
     def __repr__(self) -> str:
         return "SumPooling()"
@@ -69,7 +78,23 @@ class MeanPooling(nn.Module):
         if dim_size is None:
             dim_size = int(batch.max()) + 1
         
-        return scatter(x, batch, dim=0, dim_size=dim_size, reduce="mean")
+        # Sum pooling
+        if x.dim() == 1:
+            out_sum = torch.zeros(dim_size, dtype=x.dtype, device=x.device)
+        else:
+            out_sum = torch.zeros(dim_size, x.shape[1], dtype=x.dtype, device=x.device)
+        out_sum.index_add_(0, batch, x)
+        
+        # Count atoms per molecule
+        counts = torch.zeros(dim_size, dtype=x.dtype, device=x.device)
+        ones = torch.ones_like(batch, dtype=x.dtype)
+        counts.index_add_(0, batch, ones)
+        
+        # Average
+        if x.dim() == 1:
+            return out_sum / counts.clamp(min=1)
+        else:
+            return out_sum / counts.unsqueeze(-1).clamp(min=1)
     
     def __repr__(self) -> str:
         return "MeanPooling()"
@@ -104,7 +129,19 @@ class MaxPooling(nn.Module):
         if dim_size is None:
             dim_size = int(batch.max()) + 1
         
-        return scatter(x, batch, dim=0, dim_size=dim_size, reduce="max")
+        # Pure PyTorch implementation
+        if x.dim() == 1:
+            out = torch.full((dim_size,), float('-inf'), dtype=x.dtype, device=x.device)
+        else:
+            out = torch.full((dim_size, x.shape[1]), float('-inf'), dtype=x.dtype, device=x.device)
+        
+        # Scatter max using loop (not the most efficient, but pure PyTorch)
+        for mol_idx in range(dim_size):
+            mask = batch == mol_idx
+            if mask.any():
+                out[mol_idx] = x[mask].max(dim=0)[0] if x.dim() > 1 else x[mask].max()
+        
+        return out
     
     def __repr__(self) -> str:
         return "MaxPooling()"

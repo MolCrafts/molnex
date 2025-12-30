@@ -1,6 +1,8 @@
-"""Prediction heads."""
+"""Prediction heads.
 
-from molpot.heads.energy import EnergyHead
-from molpot.heads.force import ForceHead
+All heads are TensorDictModules with explicit in_keys/out_keys.
+"""
 
-__all__ = ["EnergyHead", "ForceHead"]
+from molpot.heads.heads import EnergyHead, ForceHead, TypeHead
+
+__all__ = ["EnergyHead", "ForceHead", "TypeHead"]

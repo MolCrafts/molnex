@@ -1,7 +1,8 @@
-"""Loss functions."""
+"""Loss functions.
 
-from molpot.losses.energy import EnergyLoss
-from molpot.losses.force import ForceLoss
-from molpot.losses.combined import CombinedLoss
+All losses are TensorDictModules.
+"""
+
+from molpot.losses.losses import EnergyLoss, ForceLoss, CombinedLoss
 
 __all__ = ["EnergyLoss", "ForceLoss", "CombinedLoss"]

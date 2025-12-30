@@ -1,0 +1,19 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/anaconda
+{
+  "name": "molnex[cuda]",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+  "features": {
+    "ghcr.io/molcrafts/features/molvis:latest": {
+      "computeBackend": "cuda",
+      "cudaVersion": "12.1"
+    }
+  },
+  "runArgs": [
+    "--runtime",
+    "nvidia",
+    "--gpus",
+    "all"
+  ],
+  "remoteUser": "root"
+}
