@@ -1,7 +1,7 @@
-"""Transformer block with NestedTensor support.
+"""Transformer block with padded tensor and mask support.
 
 Follows PyTorch tutorial: PreNorm + MHA + FFN + residuals.
-Uses F.scaled_dot_product_attention directly (no wrapper).
+Uses F.scaled_dot_product_attention with attention masks.
 """
 
 import torch
@@ -12,14 +12,13 @@ from tensordict.nn import TensorDictModuleBase
 
 
 class TransformerBlock(TensorDictModuleBase):
-    """Single Transformer block with NestedTensor support.
+    """Single Transformer block with padded tensor and mask support.
     
     Architecture (PreNorm):
         x → LayerNorm → MultiHeadAttention → Residual
           → LayerNorm → FFN → Residual
     
-    Uses F.scaled_dot_product_attention directly for attention computation.
-    Supports NestedTensor inputs for variable-length sequences.
+    Uses F.scaled_dot_product_attention with attention masks for variable-length sequences.
     
     Args:
         d_model: Model dimension
@@ -29,14 +28,14 @@ class TransformerBlock(TensorDictModuleBase):
         
     Example:
         >>> block = TransformerBlock(d_model=128, nhead=4)
-        >>> h_nt = torch.nested.nested_tensor([
-        ...     torch.randn(3, 128),
-        ...     torch.randn(5, 128),
-        ... ])
-        >>> td = TensorDict({("atoms", "h"): h_nt}, batch_size=[])
+        >>> h = torch.randn(2, 5, 128)  # [B, L, d_model]
+        >>> mask = torch.ones(2, 5, dtype=torch.bool)  # [B, L]
+        >>> mask[0, 3:] = False  # First molecule has 3 atoms
+        >>> mask[1, 4:] = False  # Second molecule has 4 atoms
+        >>> td = TensorDict({("atoms", "h"): h, ("atoms", "mask"): mask}, batch_size=[])
         >>> td = block(td)
-        >>> td["atoms", "h"].is_nested
-        True
+        >>> td["atoms", "h"].shape
+        torch.Size([2, 5, 128])
     """
     
     def __init__(
@@ -79,60 +78,67 @@ class TransformerBlock(TensorDictModuleBase):
         
         self.dropout = dropout
     
-    def forward(self, td: TensorDict) -> TensorDict:
         """Forward pass through Transformer block.
         
         Args:
-            td: TensorDict with ("atoms", "h") NestedTensor [B, (Li), d_model]
+            td: TensorDict with:
+                - ("atoms", "h"): Padded tensor [B, L, d_model]
+                - ("atoms", "mask"): Boolean mask [B, L]
             
         Returns:
             TensorDict with updated ("atoms", "h")
         """
-        h_nt = td["atoms", "h"]  # NestedTensor [B, (Li), d_model]
+        h = td["atoms", "h"]  # [B, L, d_model]
+        mask = td["atoms", "mask"]  # [B, L]
         
         # Self-attention with PreNorm
-        h_norm = self.norm1(h_nt)
-        h_nt = h_nt + self._self_attention(h_norm)
+        h_norm = self.norm1(h)
+        h = h + self._self_attention(h_norm, mask)
         
         # FFN with PreNorm
-        h_norm = self.norm2(h_nt)
-        h_nt = h_nt + self.ffn(h_norm)
+        h_norm = self.norm2(h)
+        h = h + self.ffn(h_norm)
         
-        td["atoms", "h"] = h_nt
+        td["atoms", "h"] = h
         return td
     
-    def _self_attention(self, x: torch.Tensor) -> torch.Tensor:
+    def _self_attention(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Multi-head self-attention using F.scaled_dot_product_attention.
         
         Args:
-            x: NestedTensor [B, (Li), d_model]
+            x: Padded tensor [B, L, d_model]
+            mask: Boolean mask [B, L] (True = valid position)
             
         Returns:
-            Attention output [B, (Li), d_model]
+            Attention output [B, L, d_model]
         """
         # Project to Q, K, V
-        q = self.q_proj(x)  # [B, (Li), d_model]
+        q = self.q_proj(x)  # [B, L, d_model]
         k = self.k_proj(x)
         v = self.v_proj(x)
         
-        # Reshape for multi-head: [B, (Li), d_model] → [B, (Li), nhead, d_head]
-        # Then transpose to [B, nhead, (Li), d_head]
-        B = x.size(0)
+        # Reshape for multi-head: [B, L, d_model] → [B, L, nhead, d_head]
+        # Then transpose to [B, nhead, L, d_head]
+        B, L = x.size(0), x.size(1)
         
-        q = q.reshape(B, -1, self.nhead, self.d_head).transpose(1, 2).contiguous()
-        k = k.reshape(B, -1, self.nhead, self.d_head).transpose(1, 2).contiguous()
-        v = v.reshape(B, -1, self.nhead, self.d_head).transpose(1, 2).contiguous()
+        q = q.reshape(B, L, self.nhead, self.d_head).transpose(1, 2).contiguous()
+        k = k.reshape(B, L, self.nhead, self.d_head).transpose(1, 2).contiguous()
+        v = v.reshape(B, L, self.nhead, self.d_head).transpose(1, 2).contiguous()
         
-        # Scaled dot-product attention (supports NestedTensor directly)
+        # Create attention mask: [B, L] -> [B, 1, 1, L] for broadcasting
+        # False positions should be masked with -inf in attention
+        attn_mask = mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, L]
+        
+        # Scaled dot-product attention with mask
         attn_out = F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=None,  # NestedTensor handles variable lengths automatically
+            attn_mask=attn_mask,
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=False,
-        )  # [B, nhead, (Li), d_head]
+        )  # [B, nhead, L, d_head]
         
-        # Reshape back: [B, nhead, (Li), d_head] → [B, (Li), d_model]
-        attn_out = attn_out.transpose(1, 2).contiguous().reshape(B, -1, self.d_model)
+        # Reshape back: [B, nhead, L, d_head] → [B, L, d_model]
+        attn_out = attn_out.transpose(1, 2).contiguous().reshape(B, L, self.d_model)
         
         # Output projection
         attn_out = self.out_proj(attn_out)
@@ -158,14 +164,12 @@ class TransformerEncoder(TensorDictModuleBase):
         
     Example:
         >>> encoder = TransformerEncoder(num_layers=6, d_model=128, nhead=4)
-        >>> h_nt = torch.nested.nested_tensor([
-        ...     torch.randn(3, 128),
-        ...     torch.randn(5, 128),
-        ... ])
-        >>> td = TensorDict({("atoms", "h"): h_nt}, batch_size=[])
+        >>> h = torch.randn(2, 5, 128)
+        >>> mask = torch.ones(2, 5, dtype=torch.bool)
+        >>> td = TensorDict({("atoms", "h"): h, ("atoms", "mask"): mask}, batch_size=[])
         >>> td = encoder(td)
-        >>> td["rep", "h"].is_nested
-        True
+        >>> td["rep", "h"].shape
+        torch.Size([2, 5, 128])
     """
     
     def __init__(

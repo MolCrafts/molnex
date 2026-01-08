@@ -2,9 +2,6 @@
 molnex.F - Functional stateless API for all operations
 """
 
-# Ensure C++ library is loaded
-from .. import op
-
 from .locality import *
 from .scatter import *
 from .pot import *

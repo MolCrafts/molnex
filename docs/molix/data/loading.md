@@ -15,7 +15,7 @@ graph LR
     A[Source Files] --> B[Sequence[molpy.Frame]]
     B --> C[Dataset]
     C --> D[DataLoader]
-    D -- nested_collate_fn --> E[Batched AtomicTD]
+    D -- collate_atomic_tds --> E[Batched AtomicTD]
 ```
 
 ## 1. The Common Currency: `molpy.Frame`
@@ -57,26 +57,27 @@ class FramesDataset(torch.utils.data.Dataset):
 
 ## 3. The Collate Function
 
-The magic happens in the `collate_fn`. This is where a list of `molpy.Frame` objects (a batch) gets converted into a single `AtomicTD` (Atomic TensorDict).
+The value is in the `collate_fn`. This is where a list of `molpy.Frame` objects (a batch) gets converted into a single `AtomicTD` (Atomic TensorDict).
 
-Molnex provides **`molix.data.collate.nested_collate_fn`** for this purpose.
+Molnex provides **`molix.data.collate.collate_atomic_tds`** for this purpose.
 
-### NestedTensors
+### Padded Tensors with Masks
 
-`nested_collate_fn` produces an `AtomicTD` containing PyTorch **NestedTensors** for atomic properties. This is critical for handling batches of molecules with different numbers of atoms without wasteful padding.
+`collate_atomic_tds` produces an `AtomicTD` containing **padded tensors** and **masks** for atomic properties. This efficiently handles batches of molecules with different numbers of atoms.
 
-- `("atoms", "x_nt")`: NestedTensor of positions.
-- `("atoms", "z_nt")`: NestedTensor of atomic numbers.
+- `("atoms", "xyz")`: Padded tensor of positions `[B, max_atoms, 3]`.
+- `("atoms", "Z")`: Padded tensor of atomic numbers `[B, max_atoms]`.
+- `("atoms", "mask")`: Boolean mask `[B, max_atoms]` where True indicates a valid atom.
 
 ```python
 from torch.utils.data import DataLoader
-from molix.data.collate import nested_collate_fn
+from molix.data.collate import collate_atomic_tds
 
 loader = DataLoader(
     dataset,
     batch_size=32,
     shuffle=True,
-    collate_fn=nested_collate_fn
+    collate_fn=collate_atomic_tds
 )
 ```
 
@@ -105,7 +106,7 @@ class LazyDataset(torch.utils.data.Dataset):
 ```python
 def custom_collate(batch):
     # 1. Collate structure
-    atomic_td = nested_collate_fn(batch)
+    atomic_td = collate_atomic_tds(batch)
     
     # 2. Collate properties
     # Assume 'energy' is stored in frame.properties
@@ -125,7 +126,7 @@ def custom_collate(batch):
 loader = DataLoader(
     dataset,
     batch_size=64,
-    collate_fn=nested_collate_fn,
+    collate_fn=collate_atomic_tds,
     num_workers=4,
     pin_memory=True
 )

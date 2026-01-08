@@ -157,12 +157,12 @@ class Trainer:
     ) -> TrainState:
         """Execute training loop with direct model/loss/optimizer."""
         # Hook: on_train_start
-        if self.hooks:
+        if self.hooks is not None:
             self._call_hooks("on_train_start", self, self.state)
         
         for epoch in range(max_epochs):
             # Hook: on_epoch_start
-            if self.hooks:
+            if self.hooks is not None:
                 self._call_hooks("on_epoch_start", self, self.state)
             
             # Training phase
@@ -171,7 +171,7 @@ class Trainer:
             
             for batch in datamodule.train_dataloader():
                 # Hook: on_train_batch_start
-                if self.hooks:
+                if self.hooks is not None:
                     self._call_hooks("on_train_batch_start", self, self.state, batch)
                 
                 # Forward pass
@@ -187,7 +187,7 @@ class Trainer:
                 self.optimizer.step()
                 
                 # Hook: on_train_batch_end
-                if self.hooks:
+                if self.hooks is not None:
                     outputs = {"loss": loss, "predictions": predictions}
                     self._call_hooks("on_train_batch_end", self, self.state, batch, outputs)
                 
@@ -199,7 +199,7 @@ class Trainer:
             
             for batch in datamodule.val_dataloader():
                 # Hook: on_eval_batch_start
-                if self.hooks:
+                if self.hooks is not None:
                     self._call_hooks("on_eval_batch_start", self, self.state, batch)
                 
                 # Forward pass (no gradients)
@@ -210,18 +210,18 @@ class Trainer:
                 loss = self.loss_fn(predictions, targets)
                 
                 # Hook: on_eval_batch_end
-                if self.hooks:
+                if self.hooks is not None:
                     outputs = {"loss": loss, "predictions": predictions}
                     self._call_hooks("on_eval_batch_end", self, self.state, batch, outputs)
             
             # Hook: on_epoch_end
-            if self.hooks:
+            if self.hooks is not None:
                 self._call_hooks("on_epoch_end", self, self.state)
             
             self.state.increment_epoch()
         
         # Hook: on_train_end
-        if self.hooks:
+        if self.hooks is not None:
             self._call_hooks("on_train_end", self, self.state)
         
         return self.state
@@ -232,25 +232,25 @@ class Trainer:
     ) -> TrainState:
         """Execute training loop with step objects (backward compatible)."""
         # Hook: on_train_start
-        if self.hooks:
+        if self.hooks is not None:
             self._call_hooks("on_train_start", self, self.state)
         
         for epoch in range(max_epochs):
             # Hook: on_epoch_start
-            if self.hooks:
+            if self.hooks is not None:
                 self._call_hooks("on_epoch_start", self, self.state)
             
             # Training phase
             self.state.set_stage(Stage.TRAIN)
             for batch in datamodule.train_dataloader():
                 # Hook: on_train_batch_start
-                if self.hooks:
+                if self.hooks is not None:
                     self._call_hooks("on_train_batch_start", self, self.state, batch)
                 
                 result = self.train_step.run(self.state, batch=batch)
                 
                 # Hook: on_train_batch_end
-                if self.hooks:
+                if self.hooks is not None:
                     self._call_hooks("on_train_batch_end", self, self.state, batch, result)
                 
                 self.state.increment_step()
@@ -259,55 +259,23 @@ class Trainer:
             self.state.set_stage(Stage.EVAL)
             for batch in datamodule.val_dataloader():
                 # Hook: on_eval_batch_start
-                if self.hooks:
+                if self.hooks is not None:
                     self._call_hooks("on_eval_batch_start", self, self.state, batch)
                 
                 result = self.eval_step.run(self.state, batch=batch)
                 
                 # Hook: on_eval_batch_end
-                if self.hooks:
+                if self.hooks is not None:
                     self._call_hooks("on_eval_batch_end", self, self.state, batch, result)
             
             # Hook: on_epoch_end
-            if self.hooks:
+            if self.hooks is not None:
                 self._call_hooks("on_epoch_end", self, self.state)
             
             self.state.increment_epoch()
         
         # Hook: on_train_end
-        if self.hooks:
+        if self.hooks is not None:
             self._call_hooks("on_train_end", self, self.state)
         
         return self.state
-    
-    @property
-    def tasks(self) -> Iterable[Any]:
-        """Return sequence of task nodes (step objects)."""
-        return [self.train_step, self.eval_step]
-    
-    @property
-    def links(self) -> Iterable[dict]:
-        """Return sequence of links representing flow between tasks."""
-        return [
-            {"source": "train_step", "target": "eval_step", "type": "stage_flow"}
-        ]
-    
-    @property
-    def metadata(self) -> dict:
-        """Return metadata about the workflow (stage ordering, loop structure, etc.)."""
-        return {
-            "stage_order": [Stage.TRAIN.value, Stage.EVAL.value],
-            "loop_structure": {
-                "description": "epoch loop with train and eval stages",
-                "stages": {
-                    "train": {
-                        "step_type": "TrainStep",
-                        "iterates_over": "train_dataloader",
-                    },
-                    "eval": {
-                        "step_type": "EvalStep",
-                        "iterates_over": "val_dataloader",
-                    },
-                },
-            },
-        }

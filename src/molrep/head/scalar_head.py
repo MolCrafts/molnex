@@ -26,11 +26,10 @@ class ScalarHead(nn.Module):
         
     Example:
         >>> head = ScalarHead(d_model=128, hidden_dim=64)
-        >>> h_nt = torch.nested.nested_tensor([
-        ...     torch.randn(5, 128),  # 5 atoms
-        ...     torch.randn(3, 128),  # 3 atoms
-        ... ])
-        >>> td = TensorDict({("rep", "h"): h_nt}, batch_size=[])
+        >>> h = torch.randn(2, 5, 128)
+        >>> mask = torch.ones(2, 5, dtype=torch.bool)
+        >>> mask[0, 3:] = False  # First molecule has 3 atoms
+        >>> td = TensorDict({("rep", "h"): h, ("atoms", "mask"): mask}, batch_size=[])
         >>> td = head(td)
         >>> td["pred", "scalar"].shape
         torch.Size([2])
@@ -65,16 +64,18 @@ class ScalarHead(nn.Module):
         
         Args:
             td: TensorDict with:
-                - ("rep", "h"): NestedTensor [B, (Li), d_model]
+                - ("rep", "h"): Padded tensor [B, L, d_model]
+                - ("atoms", "mask"): Boolean mask [B, L]
                 
         Returns:
             TensorDict with:
                 - ("pred", "scalar"): Tensor [B]
         """
-        h_nt = td["rep", "h"]  # NestedTensor [B, (Li), d_model]
+        h = td["rep", "h"]  # [B, L, d_model]
+        mask = td["atoms", "mask"]  # [B, L]
         
         # Pool per-atom features to per-molecule
-        h_pooled = self._pool(h_nt)  # [B, d_model]
+        h_pooled = self._pool(h, mask)  # [B, d_model]
         
         # MLP prediction: [B, d_model] -> [B, 1] -> [B]
         scalar = self.mlp(h_pooled).squeeze(-1)
@@ -82,27 +83,34 @@ class ScalarHead(nn.Module):
         td["pred", "scalar"] = scalar
         return td
     
-    def _pool(self, h_nt: torch.Tensor) -> torch.Tensor:
-        """Pool NestedTensor over atoms.
+    def _pool(self, h: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Pool padded tensor over atoms using mask.
         
         Args:
-            h_nt: NestedTensor [B, (Li), d_model]
+            h: Padded tensor [B, L, d_model]
+            mask: Boolean mask [B, L] (True = valid atom)
             
         Returns:
             Pooled tensor [B, d_model]
         """
-        # Convert NestedTensor to list for pooling
-        h_list = h_nt.unbind()
+        # Expand mask to match feature dimension: [B, L] -> [B, L, 1]
+        mask_expanded = mask.unsqueeze(-1).float()  # [B, L, 1]
         
         if self.pooling == "mean":
-            # Mean pooling: average over atoms
-            h_pooled = torch.stack([h.mean(dim=0) for h in h_list])
+            # Mean pooling: sum over valid atoms and divide by count
+            h_masked = h * mask_expanded  # Zero out padded positions
+            h_sum = h_masked.sum(dim=1)  # [B, d_model]
+            atom_counts = mask_expanded.sum(dim=1)  # [B, 1]
+            h_pooled = h_sum / atom_counts.clamp(min=1)  # Avoid division by zero
         elif self.pooling == "sum":
-            # Sum pooling
-            h_pooled = torch.stack([h.sum(dim=0) for h in h_list])
+            # Sum pooling: sum over valid atoms
+            h_masked = h * mask_expanded
+            h_pooled = h_masked.sum(dim=1)  # [B, d_model]
         elif self.pooling == "max":
-            # Max pooling over atoms
-            h_pooled = torch.stack([h.max(dim=0)[0] for h in h_list])
+            # Max pooling: mask out padded positions with -inf before max
+            h_masked = h.clone()
+            h_masked[~mask] = float('-inf')
+            h_pooled = h_masked.max(dim=1)[0]  # [B, d_model]
         
         return h_pooled
     
@@ -123,19 +131,20 @@ if __name__ == "__main__":
     head = ScalarHead(d_model=128, hidden_dim=64, pooling="mean")
     print(f"\nModule: {head}")
     
-    # Create test data (variable-length per-atom representations)
-    h_nt = torch.nested.nested_tensor([
-        torch.randn(5, 128),  # 5 atoms
-        torch.randn(3, 128),  # 3 atoms
-        torch.randn(7, 128),  # 7 atoms
-    ])
+    # Create test data (padded per-atom representations)
+    h = torch.randn(3, 7, 128)  # [B=3, L=7, d_model=128]
+    mask = torch.zeros(3, 7, dtype=torch.bool)
+    mask[0, :5] = True  # 5 atoms
+    mask[1, :3] = True  # 3 atoms
+    mask[2, :7] = True  # 7 atoms
     
     td = TensorDict({
-        ("rep", "h"): h_nt,
+        ("rep", "h"): h,
+        ("atoms", "mask"): mask,
     }, batch_size=[])
     
     print(f"\nInput:")
-    print(f"  h_nt is nested: {h_nt.is_nested}")
+    print(f"  h shape: {h.shape}")
     print(f"  Batch size: 3")
     print(f"  Atom counts: [5, 3, 7]")
     

@@ -2,11 +2,11 @@
 
 ## What AtomicTD is
 
-MolNex v2.0 uses a hierarchical TensorDict schema where all molecular data flows through `AtomicTD`, the protocol-level container defined in `molix.data`. The schema organizes fields into explicit namespaces that correspond to physical or semantic groupings. Each namespace acts as a first-level key in the TensorDict hierarchy, and individual fields are accessed as second-level keys under their parent namespace. For example, atomic positions are stored as `atoms.x`, bond distances as `bonds.dist`, and molecular energy as `target.energy`. This two-level structure allows models, datasets, and analysis tools to work with a consistent and self-documenting data layout.
+MolNex v2.0 uses a hierarchical TensorDict schema where all molecular data flows through `AtomicTD`, the protocol-level container defined in `molix.data`. The schema organizes fields into explicit namespaces that correspond to physical or semantic groupings. Each namespace acts as a first-level key in the TensorDict hierarchy, and individual fields are accessed as second-level keys under their parent namespace. For example, atomic positions are stored as `atoms.x`, neighbor distances as `pairs.dist`, and molecular energy as `target.energy`. This two-level structure allows models, datasets, and analysis tools to work with a consistent and self-documenting data layout.
 
 ## Why namespaces exist
 
-The namespace design solves several long-standing problems in molecular machine learning workflows. Without explicit namespaces, field names must encode their semantic category through prefixes or suffixes, leading to inconsistent conventions across codebases (such as `atom_z` versus `z_atom` versus `atomic_number`). Namespaces eliminate this ambiguity by making the category explicit and separating it from the field identity. They also simplify batch processing and transfer between representations, since each namespace can be treated as a cohesive unit with its own mutability rules and gradient requirements. For instance, all topology fields under `bonds.*`, `angles.*`, and `dihedrals.*` are immutable after construction, while `atoms.x` is mutable to support molecular dynamics and gradient-based force computation. This design also ensures that predictions and targets use identical keys within the `target.*` namespace, enabling direct loss computation without manual key translation.
+The namespace design solves several long-standing problems in molecular machine learning workflows. Without explicit namespaces, field names must encode their semantic category through prefixes or suffixes, leading to inconsistent conventions across codebases (such as `atom_z` versus `z_atom` versus `atomic_number`). Namespaces eliminate this ambiguity by making the category explicit and separating it from the field identity. They also simplify batch processing and transfer between representations, since each namespace can be treated as a cohesive unit with its own mutability rules and gradient requirements. For instance, all topology fields under `bonds.*`, `pairs.*`, `angles.*`, and `dihedrals.*` are immutable after construction, while `atoms.x` is mutable to support molecular dynamics and gradient-based force computation. This design also ensures that predictions and targets use identical keys within the `target.*` namespace, enabling direct loss computation without manual key translation.
 
 ## AtomicTD Schema
 
@@ -14,12 +14,13 @@ The following sections define the complete schema for `AtomicTD`. Each namespace
 
 ### Atomic Properties (`atoms.*`)
 
-The `atoms` namespace contains per-atom properties, including both input features (such as atomic numbers and positions) and learned representations (such as hidden states). Positions in `atoms.x` are mutable and support gradient computation for force prediction.
+The `atoms` namespace contains per-atom properties, including both input features (such as atomic numbers and positions) and learned representations (such as hidden states). Positions in `atoms.xyz` are mutable and support gradient computation for force prediction.
 
 | Field | Shape | Type | Description |
 |-------|-------|------|-------------|
-| `atoms.z` | `[N]` | int64 | Atomic numbers |
-| `atoms.x` | `[N, 3]` | dtype | Atomic positions (mutable) |
+| `atoms.Z` | `[N]` | int64 | Atomic numbers |
+| `atoms.xyz` | `[N, 3]` | dtype | Atomic positions (mutable) |
+| `atoms.batch` | `[N]` | int64 | Molecule indices for each atom |
 | `atoms.v` | `[N, 3]` | dtype | Atomic velocities (optional) |
 | `atoms.f` | `[N, 3]` | dtype | Atomic forces (optional, target) |
 | `atoms.q` | `[N]` | dtype | Atomic charges (optional) |
@@ -27,7 +28,6 @@ The `atoms` namespace contains per-atom properties, including both input feature
 | `atoms.h` | `[N, D]` | dtype | Hidden states (invariant) |
 | `atoms.h_eq` | `[N, D, 3]` | dtype | Equivariant hidden states (optional) |
 | `atoms.h_sph` | `[N, D]` | dtype | Spherical harmonic features (optional) |
-| `atoms.type_logits` | `[N, T]` | dtype | Type prediction logits (optional) |
 
 ### Bond Topology (`bonds.*`)
 
@@ -66,14 +66,16 @@ The `dihedrals` namespace represents four-body torsional interactions. Atom indi
 | `dihedrals.phi` | `[D]` | dtype | Dihedral values (radians) |
 | `dihedrals.type` | `[D]` | int64 | Dihedral types (optional) |
 
-### Graph Metadata (`graph.*`)
+### Pair Topology (`pairs.*`)
 
-The `graph` namespace stores batch-level information for managing multiple molecules in a single TensorDict. The `graph.batch` field maps each atom to its parent molecule, enabling efficient batched operations.
+The `pairs` namespace represents neighbor lists. Atom indices are stored separately as `i` and `j`, where `j` is the neighbor atom.
 
 | Field | Shape | Type | Description |
 |-------|-------|------|-------------|
-| `graph.batch` | `[N]` | int64 | Molecule indices for each atom |
-| `graph.num_atoms` | `[B]` | int64 | Atoms per molecule (optional) |
+| `pairs.i` | `[E]` | int64 | Source atom index |
+| `pairs.j` | `[E]` | int64 | Neighbor atom index |
+| `pairs.diff` | `[E, 3]` | dtype | Neighbor vector (i - j) |
+| `pairs.dist` | `[E]` | dtype | Neighbor distance |
 
 ### Molecular Targets (`target.*`)
 
@@ -91,7 +93,7 @@ Namespace names are lowercase and use either plural forms (such as `atoms`, `bon
 
 Field names within a namespace use lowercase with underscore separators, such as `h_sph` for spherical harmonic features or `type_logits` for type prediction outputs. Target fields in the `target` namespace do not use a `y_` prefix, so molecular energy is stored as `target.energy` rather than `target.y_energy`. Model predictions write to the same keys as the ground truth, avoiding the need for separate prediction namespaces or output key translation.
 
-Topology indices are stored in separate fields rather than stacked tensors. For bonds, the source and target atom indices are accessed as `bonds.i` and `bonds.j` respectively, rather than indexing into a single `bonds.i[2, E]` tensor. This design simplifies code that constructs or queries topology and aligns with entity-level naming conventions used in MolPy. Index field names use semantic identifiers: `i` for the source atom, `j` for the target or center atom, `k` for the third atom in angles, and `l` for the fourth atom in dihedrals.
+Topology indices are stored in separate fields rather than stacked tensors. For bonds and neighbor pairs, the source and target atom indices are accessed as `bonds.i`/`bonds.j` and `pairs.i`/`pairs.j` respectively, rather than indexing into a single `bonds.i[2, E]` tensor. This design simplifies code that constructs or queries topology and aligns with entity-level naming conventions used in MolPy. Index field names use semantic identifiers: `i` for the source atom, `j` for the target or center atom, `k` for the third atom in angles, and `l` for the fourth atom in dihedrals.
 
 ## Key Alignment Between Targets and Predictions
 
@@ -110,13 +112,13 @@ loss = (pred_td["target", "energy"] - atomic_td["target", "energy"]).pow(2).mean
 
 ## Immutability and Gradient Requirements
 
-Different namespaces have different mutability semantics. The `atoms.x` field is mutable and typically requires gradients for force prediction, since forces are computed as the negative gradient of energy with respect to positions. All topology fields under `bonds.*`, `angles.*`, and `dihedrals.*` are immutable after construction, reflecting the fact that molecular topology does not change during a single forward pass or trajectory segment. These namespaces can be explicitly locked using `atomic_td["bonds"].lock_()` to enforce immutability at the TensorDict level and prevent accidental modification.
+Different namespaces have different mutability semantics. The `atoms.xyz` field is mutable and typically requires gradients for force prediction, since forces are computed as the negative gradient of energy with respect to positions. All topology fields under `bonds.*`, `pairs.*`, `angles.*`, and `dihedrals.*` are immutable after construction, reflecting the fact that molecular topology does not change during a single forward pass or trajectory segment. These namespaces can be explicitly locked using `atomic_td["bonds"].lock_()` and `atomic_td["pairs"].lock_()` to enforce immutability at the TensorDict level and prevent accidental modification.
 
-When using models with a `ForceHead` module, the `atoms.x` field must have gradients enabled before the forward pass:
+When using models with a `ForceHead` module, the `atoms.xyz` field must have gradients enabled before the forward pass:
 
 ```python
-atomic_td["atoms", "x"].requires_grad = True
-output_td = model(atomic_td)  # ForceHead computes F = -dE/dx
+atomic_td["atoms", "xyz"].requires_grad = True
+output_td = model(atomic_td)  # ForceHead computes F = -dE/dxyz
 ```
 
 ## Example Usage
@@ -128,8 +130,8 @@ from molix.data import AtomicTD, Config
 
 # Create
 atomic_td = AtomicTD.create(
-    z=torch.tensor([8, 1, 1]),  # O, H, H
-    x=torch.randn(3, 3),
+    Z=torch.tensor([8, 1, 1]),  # O, H, H
+    xyz=torch.randn(3, 3),
     batch=torch.tensor([0, 0, 0]),
     bond_i=torch.tensor([0, 1, 0]),  # Separate i
     bond_j=torch.tensor([1, 2, 2]),  # Separate j
@@ -138,7 +140,7 @@ atomic_td = AtomicTD.create(
 )
 
 # Access
-z = atomic_td["atoms", "z"]
+Z = atomic_td["atoms", "Z"]
 energy = atomic_td["target", "energy"]
 
 # Properties
@@ -177,11 +179,11 @@ This change makes target field names consistent with prediction field names, sin
 
 Finally, v2.0 requires an explicit `Config` object to be passed during `AtomicTD` creation, ensuring that dtype and device settings are consistently applied across all fields. In v1.0, the config was inferred or defaulted:
 ```python
-atomic_td = AtomicTD.create(z=..., x=..., batch=...)
+atomic_td = AtomicTD.create(Z=..., xyz=..., batch=...)
 ```
 
 **After**:
 ```python
 config = Config(dtype=torch.float32)
-atomic_td = AtomicTD.create(z=..., x=..., batch=..., config=config)
+atomic_td = AtomicTD.create(Z=..., xyz=..., batch=..., config=config)
 ```

@@ -112,20 +112,21 @@ def md17_collate_fn(frames: list[molpy.Frame]):
         
     Returns:
         Tuple of (batch_td, targets) where:
-            - batch_td: AtomicTD with NestedTensor fields for molecular structures
-            - targets: Dict with "energy" [B] and "forces" NestedTensor [B, (Li), 3]
+        Tuple of (batch_td, targets) where:
+            - batch_td: AtomicTD with padded tensor fields for molecular structures
+            - targets: Dict with "energy" [B] and "forces" padded tensor [B, max_atoms, 3]
             
     Example:
         >>> from torch.utils.data import DataLoader
         >>> dataset = MD17Dataset(root="./data/md17", molecule="aspirin")
         >>> loader = DataLoader(dataset, batch_size=32, collate_fn=md17_collate_fn)
         >>> batch_td, targets = next(iter(loader))
-        >>> batch_td["atoms", "x"].is_nested
-        True
+        >>> batch_td["atoms", "x"].shape
+        torch.Size([32, 21, 3])  # [B, max_atoms, 3]
         >>> targets["energy"].shape
         torch.Size([32])
-        >>> targets["forces"].is_nested
-        True
+        >>> targets["forces"].shape
+        torch.Size([32, 21, 3])
     """
     from molix.data.collate import collate_frames
     
@@ -135,19 +136,27 @@ def md17_collate_fn(frames: list[molpy.Frame]):
         dtype=torch.float32
     )
     
-    # Forces are per-atom, so use NestedTensor
+    # Forces are per-atom, so use padded tensor
     forces_list = [
         torch.tensor(frame.metadata["target"]["forces"], dtype=torch.float32)
         for frame in frames
     ]
-    forces_nt = torch.nested.nested_tensor(forces_list, dtype=torch.float32)
     
-    # Collate frames into batched AtomicTD with NestedTensors
+    # Pad forces
+    max_atoms = max(len(f) for f in forces_list)
+    batch_size = len(frames)
+    forces_padded = torch.zeros(batch_size, max_atoms, 3, dtype=torch.float32)
+    
+    for i, f in enumerate(forces_list):
+        n_atoms = len(f)
+        forces_padded[i, :n_atoms] = f
+        
+    # Collate frames into batched AtomicTD (uses padded tensors internally)
     batch_td = collate_frames(frames)
     
     targets = {
         "energy": energies,
-        "forces": forces_nt
+        "forces": forces_padded
     }
     
     return batch_td, targets

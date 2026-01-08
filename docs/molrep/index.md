@@ -70,3 +70,7 @@ MolRep models output a standard feature vector for each atom.
 
 ### Why standardized output?
 This standardization allows `molpot` (the potential module) to consume features from *any* `molrep` encoder without caring about the internal details of how those features were generated.
+
+## Equivariant Potential Network
+
+`EquivariantPotentialNet` is an end-to-end equivariant energy model that consumes precomputed neighbor lists via `pairs.*` keys and uses cuEquivariance operators for spherical harmonics and tensor products. It writes molecular energies to `target.energy` and relies on autograd for forces. The model expects `atoms.xyz` to have gradients enabled when forces are needed.

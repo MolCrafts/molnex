@@ -1,156 +1,157 @@
 """Collate functions for batching molecular data.
 
-Provides collate_fn implementations for converting list[molpy.Frame] to batched
-AtomicTD with NestedTensor support for variable-length molecules.
+Provides collate_fn implementations for batching AtomicTD objects.
+Uses padded tensors with masks for all atom-level fields.
 """
 
 import torch
 from tensordict import TensorDict
 
-from molix.data.atomic_td import AtomicTD, Config
+from molix.data.atomic_td import AtomicTD
 
 
-def collate_frames(frames: list, config: Config | None = None) -> AtomicTD:
-    """Universal collate function: list[molpy.Frame] -> AtomicTD with NestedTensors.
+def collate_atomic_tds(atomic_tds: list[AtomicTD]) -> AtomicTD:
+    """Collate a list of AtomicTD into a single batched AtomicTD.
     
-    This is the canonical collate function for batching molecular data. It converts
-    a list of molpy.Frame objects into an AtomicTD with NestedTensor fields for
-    efficient variable-length batching without padding.
-    
-    All frames must have the same structure:
-        - frame["atoms"]["x"]: positions [Ni, 3]
-        - frame["atoms"]["z"]: atomic numbers [Ni]
-        - frame["atoms"]["v"]: velocities [Ni, 3] (optional)
+    Uses padding + attention mask for all atom-level fields to handle 
+    variable-length molecules.
     
     Args:
-        frames: List of molpy.Frame objects
-        config: Optional Config for dtype control
+        atomic_tds: List of AtomicTD objects (each representing a single molecule)
         
     Returns:
-        AtomicTD with NestedTensor fields:
-            - ("atoms", "x"): NestedTensor [B, (Li), 3]
-            - ("atoms", "z"): NestedTensor [B, (Li)]
-            - ("atoms", "v"): NestedTensor [B, (Li), 3] (if present)
-            - ("graph", "num_atoms"): Tensor [B]
-            - ("graph", "batch_size"): int scalar
-            
+        Batched AtomicTD with:
+            - atoms.Z: Padded tensor [B, max_atoms] with padding_idx=0
+            - atoms.mask: Boolean mask [B, max_atoms] (True = valid atom)
+            - atoms.xyz: Padded tensor [B, max_atoms, 3]
+            - target.*: Stacked per-molecule targets
+            - graph.batch: Batch indices for all atoms
+            - graph.num_atoms: Number of atoms per molecule [B]
+    
     Example:
-        >>> from molpy import Frame
-        >>> import numpy as np
-        >>> 
-        >>> frame1 = Frame(blocks={"atoms": {"x": np.random.randn(3, 3), "z": np.array([6, 1, 1])}})
-        >>> frame2 = Frame(blocks={"atoms": {"x": np.random.randn(5, 3), "z": np.array([6, 1, 1, 1, 1])}})
-        >>> 
-        >>> batch = collate_frames([frame1, frame2])
-        >>> batch["atoms", "z"].is_nested
-        True
-        >>> batch["graph", "num_atoms"].tolist()
-        [3, 5]
+        >>> td1 = AtomicTD.create(Z=torch.tensor([6, 1, 1]), xyz=torch.randn(3, 3), batch=torch.zeros(3, dtype=torch.long))
+        >>> td2 = AtomicTD.create(Z=torch.tensor([8, 1]), xyz=torch.randn(2, 3), batch=torch.zeros(2, dtype=torch.long))
+        >>> batched = collate_atomic_tds([td1, td2])
+        >>> batched["atoms", "Z"].shape
+        torch.Size([2, 3])  # [batch_size, max_atoms]
+        >>> batched["atoms", "mask"].shape
+        torch.Size([2, 3])  # [batch_size, max_atoms]
+        >>> batched["atoms", "xyz"].shape
+        torch.Size([2, 3, 3])  # [batch_size, max_atoms, 3]
     """
-    if config is None:
-        config = Config()
+    assert len(atomic_tds) > 0, "Cannot collate empty list"
     
-    assert len(frames) > 0, "Cannot collate empty list of frames"
+    # Collect per-atom fields
+    Z_list = [td["atoms", "Z"] for td in atomic_tds]
+    xyz_list = [td["atoms", "xyz"] for td in atomic_tds]
     
-    # Extract per-molecule data
-    x_list = []
-    z_list = []
-    v_list = []
-    has_velocities = False
+    # Pad atomic numbers with 0 (padding_idx)
+    max_atoms = max(len(Z) for Z in Z_list)
+    batch_size = len(atomic_tds)
     
-    for frame in frames:
-        atoms_block = frame["atoms"]
-        
-        # Positions (required) - ensure shape is (N, 3)
-        x = torch.tensor(atoms_block["x"], dtype=config.dtype)
-        if x.ndim == 1:
-            # If 1D, reshape to (N//3, 3)
-            x = x.reshape(-1, 3)
-        x_list.append(x)
-        
-        # Atomic numbers (required)
-        z = torch.tensor(atoms_block["z"], dtype=torch.long)
-        z_list.append(z)
-        
-        # Velocities (optional)
-        if "v" in atoms_block.keys():
-            v = torch.tensor(atoms_block["v"], dtype=config.dtype)
-            if v.ndim == 1:
-                v = v.reshape(-1, 3)
-            v_list.append(v)
-            has_velocities = True
+    Z_padded = torch.zeros(batch_size, max_atoms, dtype=torch.long)
+    mask = torch.zeros(batch_size, max_atoms, dtype=torch.bool)
+    xyz_padded = torch.zeros(batch_size, max_atoms, 3, dtype=torch.float32)
     
-    # Create NestedTensors
-    x_nt = torch.nested.nested_tensor(x_list, dtype=config.dtype)
-    z_nt = torch.nested.nested_tensor(z_list, dtype=torch.long)
+    for i, (Z, xyz) in enumerate(zip(Z_list, xyz_list)):
+        n_atoms = len(Z)
+        Z_padded[i, :n_atoms] = Z
+        mask[i, :n_atoms] = True
+        xyz_padded[i, :n_atoms] = xyz
     
-    # Metadata
-    num_atoms = torch.tensor([len(z) for z in z_list], dtype=torch.long)
-    batch_size = len(frames)
-    
-    # Build data dict
     data = {
-        ("atoms", "x"): x_nt,
-        ("atoms", "z"): z_nt,
-        ("graph", "num_atoms"): num_atoms,
-        ("graph", "batch_size"): torch.tensor(batch_size, dtype=torch.long),
+        ("atoms", "Z"): Z_padded,
+        ("atoms", "mask"): mask,
+        ("atoms", "xyz"): xyz_padded,
     }
     
-    # Add velocities if present
-    if has_velocities:
-        v_nt = torch.nested.nested_tensor(v_list, dtype=config.dtype)
-        data[("atoms", "v")] = v_nt
+    # Update batch indices
+    num_atoms_per_mol = [len(Z) for Z in Z_list]
+    batch_indices = []
+    for mol_idx, num_atoms in enumerate(num_atoms_per_mol):
+        batch_indices.append(torch.full((num_atoms,), mol_idx, dtype=torch.int64))
+    data[("graph", "batch")] = torch.cat(batch_indices)
+    data[("graph", "num_atoms")] = torch.tensor(num_atoms_per_mol, dtype=torch.int64)
     
-    # Extract metadata (box, pbc, etc.) if present
-    boxes = []
-    pbcs = []
-    for frame in frames:
-        if hasattr(frame, 'metadata'):
-            if "box" in frame.metadata:
-                boxes.append(frame.metadata["box"])
-            if "pbc" in frame.metadata:
-                pbcs.append(frame.metadata["pbc"])
+    # Optional per-atom fields
+    optional_atom_fields = [("v", torch.float32, 3), ("f", torch.float32, 3), 
+                           ("q", torch.float32, 1), ("type", torch.int64, 1)]
+    for field, dtype, dim in optional_atom_fields:
+        if ("atoms", field) in atomic_tds[0].keys(include_nested=True):
+            field_list = [td["atoms", field] for td in atomic_tds]
+            
+            # Create padded tensor based on field dimension
+            if dim == 1:
+                field_padded = torch.zeros(batch_size, max_atoms, dtype=dtype)
+                for i, field_val in enumerate(field_list):
+                    n_atoms = len(field_val)
+                    field_padded[i, :n_atoms] = field_val
+            else:  # dim == 3
+                field_padded = torch.zeros(batch_size, max_atoms, dim, dtype=dtype)
+                for i, field_val in enumerate(field_list):
+                    n_atoms = len(field_val)
+                    field_padded[i, :n_atoms] = field_val
+            
+            data[("atoms", field)] = field_padded
     
-    if boxes:
-        data[("meta", "box")] = boxes  # Keep as list (not tensorized)
-    if pbcs:
-        data[("meta", "pbc")] = pbcs  # Keep as list
-    
-    # Extract targets from metadata["target"] if present
-    # Collect all unique target keys across frames
+    # Collect all target keys
     target_keys = set()
-    for frame in frames:
-        if hasattr(frame, 'metadata') and "target" in frame.metadata:
-            target_keys.update(frame.metadata["target"].keys())
+    for td in atomic_tds:
+        for key in td.keys(include_nested=True):
+            if key[0] == "target":
+                target_keys.add(key[1])
     
-    # For each target key, extract values
-    for key in target_keys:
-        values = []
-        is_per_atom = False
+    # Stack per-molecule targets
+    for target_key in target_keys:
+        target_values = []
+        for td in atomic_tds:
+            if ("target", target_key) in td.keys(include_nested=True):
+                target_values.append(td["target", target_key])
         
-        for frame in frames:
-            if hasattr(frame, 'metadata') and "target" in frame.metadata:
-                value = frame.metadata["target"].get(key)
-                if value is not None:
-                    # Convert to tensor
-                    value_tensor = torch.tensor(value, dtype=config.dtype if not isinstance(value, (int, str)) else torch.float32)
-                    
-                    # Check if per-atom (shape matches number of atoms)
-                    if value_tensor.ndim >= 1 and len(value_tensor) == len(z_list[len(values)]):
-                        is_per_atom = True
-                    
-                    values.append(value_tensor)
+        if target_values:
+            # Stack along batch dimension
+            stacked = torch.cat(target_values, dim=0)
+            data[("target", target_key)] = stacked
+    
+    # Optional topology fields (bonds, angles, dihedrals)
+    # These need special handling for batch offsets
+    if ("bonds", "i") in atomic_tds[0].keys(include_nested=True):
+        bond_i_list = []
+        bond_j_list = []
+        offset = 0
+        for td in atomic_tds:
+            num_atoms = len(td["atoms", "Z"])
+            bond_i_list.append(td["bonds", "i"] + offset)
+            bond_j_list.append(td["bonds", "j"] + offset)
+            offset += num_atoms
         
-        if values:
-            # Per-atom targets use NestedTensor, scalar targets use regular tensor
-            if is_per_atom and any(v.ndim >= 1 for v in values):
-                data[("target", key)] = torch.nested.nested_tensor(values, dtype=config.dtype)
-            else:
-                # Stack scalar values
-                data[("target", key)] = torch.stack(values) if values[0].ndim == 0 else torch.stack(values)
+        data[("bonds", "i")] = torch.cat(bond_i_list)
+        data[("bonds", "j")] = torch.cat(bond_j_list)
+        
+        # Bond vectors and distances
+        if ("bonds", "diff") in atomic_tds[0].keys(include_nested=True):
+            data[("bonds", "diff")] = torch.cat([td["bonds", "diff"] for td in atomic_tds])
+        if ("bonds", "dist") in atomic_tds[0].keys(include_nested=True):
+            data[("bonds", "dist")] = torch.cat([td["bonds", "dist"] for td in atomic_tds])
+    
+    # Handle pairs.* fields (for neighbor lists used by EquivariantPotentialNet)
+    if ("pairs", "i") in atomic_tds[0].keys(include_nested=True):
+        pair_i_list = []
+        pair_j_list = []
+        offset = 0
+        for td in atomic_tds:
+            num_atoms = len(td["atoms", "Z"])
+            pair_i_list.append(td["pairs", "i"] + offset)
+            pair_j_list.append(td["pairs", "j"] + offset)
+            offset += num_atoms
+        
+        data[("pairs", "i")] = torch.cat(pair_i_list)
+        data[("pairs", "j")] = torch.cat(pair_j_list)
+        
+        # Pair vectors and distances
+        if ("pairs", "diff") in atomic_tds[0].keys(include_nested=True):
+            data[("pairs", "diff")] = torch.cat([td["pairs", "diff"] for td in atomic_tds])
+        if ("pairs", "dist") in atomic_tds[0].keys(include_nested=True):
+            data[("pairs", "dist")] = torch.cat([td["pairs", "dist"] for td in atomic_tds])
     
     return AtomicTD(data, batch_size=[])
-
-
-# Alias for backward compatibility
-nested_collate_fn = collate_frames

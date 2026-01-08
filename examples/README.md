@@ -24,7 +24,7 @@ Energy Prediction (U0 in eV)
 
 - **Dataset**: QM9 (~130k molecules, automatic download)
 - **Target**: Internal energy at 0K (U0)
-- **Model**: Transformer with NestedTensor support for variable-length molecules
+- **Model**: Transformer with padded tensor support for variable-length molecules
 - **Training**: MSE loss with MAE metric tracking
 
 ### Quick Start
@@ -168,8 +168,30 @@ More examples coming soon:
 
 - **MD17**: Molecular dynamics force field prediction
 - **Multi-task**: Predicting multiple properties simultaneously
-- **Custom architectures**: GNN-based models, equivariant networks
+- **Equivariant potential**: `EquivariantPotentialNet` with precomputed `pairs.*` and cuEquivariance ops
 - **Transfer learning**: Pre-training and fine-tuning strategies
+
+### EquivariantPotentialNet (forward-only)
+
+This model consumes neighbor lists produced upstream and uses cuEquivariance operators for equivariant message passing.
+
+```python
+from molrep.models import EquivariantPotentialNet
+
+model = EquivariantPotentialNet(
+    num_atom_types=100,
+    hidden_dim=128,
+    equivariant_dim=64,
+    num_blocks=3,
+    lmax=3,
+    cutoff=5.0,
+    num_rbf=32,
+    tensor_product_op_factory=make_cue_tensor_product,
+    spherical_harmonics_op=make_cue_spherical_harmonics,
+)
+```
+
+`make_cue_tensor_product` and `make_cue_spherical_harmonics` are project-specific wrappers around `cuequivariance_torch` operators.
 
 ## Contributing
 

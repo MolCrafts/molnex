@@ -1,26 +1,39 @@
 """AtomicTD: TensorDict-based atomistic data structure.
 
 Protocol-level data container for molecular systems.
-Moved to molix as it's infrastructure, not potential-specific.
-
 Schema conventions:
 - Separate index fields: bonds.i/j, angles.i/j/k, dihedrals.i/j/k/l
 - target.* namespace for molecular targets (no y_ prefix)
 - Hierarchical keys: ("namespace", "field")
-- Configurable dtype via Config
+- Global dtype configuration (float32 for values, int64 for indices)
 """
 
-from typing import Optional
 from dataclasses import dataclass
 
 import torch
 from tensordict import TensorDict
 
 
+# Global configuration
 @dataclass
 class Config:
     """Global configuration for TensorDict."""
     dtype: torch.dtype = torch.float32
+
+
+# Global config instance
+_global_config = Config()
+
+
+def set_default_dtype(dtype: torch.dtype) -> None:
+    """Set global default dtype for AtomicTD."""
+    global _global_config
+    _global_config.dtype = dtype
+
+
+def get_default_dtype() -> torch.dtype:
+    """Get global default dtype for AtomicTD."""
+    return _global_config.dtype
 
 
 class AtomicTD(TensorDict):
@@ -29,25 +42,25 @@ class AtomicTD(TensorDict):
     Field naming convention (hierarchical keys):
     
     Atomic properties:
-    - ("atoms", "z"): Atomic numbers [N] (int64)
-    - ("atoms", "x"): Atomic positions [N, 3] (dtype)
-    - ("atoms", "v"): Atomic velocities [N, 3] (dtype, optional)
-    - ("atoms", "f"): Atomic forces [N, 3] (dtype, optional, target)
-    - ("atoms", "q"): Atomic charges [N] (dtype, optional)
+    - ("atoms", "Z"): Atomic numbers [N] (int64)
+    - ("atoms", "xyz"): Atomic positions [N, 3] (float32)
+    - ("atoms", "v"): Atomic velocities [N, 3] (float32, optional)
+    - ("atoms", "f"): Atomic forces [N, 3] (float32, optional, target)
+    - ("atoms", "q"): Atomic charges [N] (float32, optional)
     - ("atoms", "type"): Atom types [N] (int64, optional)
     
     Bond topology (separate i/j indices):
     - ("bonds", "i"): Bond source indices [E] (int64, optional)
     - ("bonds", "j"): Bond target indices [E] (int64, optional)
-    - ("bonds", "vec"): Bond vectors [E, 3] (dtype, optional)
-    - ("bonds", "dist"): Bond distances [E] (dtype, optional)
+    - ("bonds", "vec"): Bond vectors [E, 3] (float32, optional)
+    - ("bonds", "dist"): Bond distances [E] (float32, optional)
     - ("bonds", "type"): Bond types [E] (int64, optional)
     
     Angle topology (separate i/j/k indices):
     - ("angles", "i"): Angle first atom [A] (int64, optional)
     - ("angles", "j"): Angle center atom [A] (int64, optional)
     - ("angles", "k"): Angle third atom [A] (int64, optional)
-    - ("angles", "theta"): Angle values [A] (dtype, optional)
+    - ("angles", "theta"): Angle values [A] (float32, optional)
     - ("angles", "type"): Angle types [A] (int64, optional)
     
     Dihedral topology (separate i/j/k/l indices):
@@ -55,35 +68,26 @@ class AtomicTD(TensorDict):
     - ("dihedrals", "j"): Dihedral second atom [D] (int64, optional)
     - ("dihedrals", "k"): Dihedral third atom [D] (int64, optional)
     - ("dihedrals", "l"): Dihedral fourth atom [D] (int64, optional)
-    - ("dihedrals", "phi"): Dihedral values [D] (dtype, optional)
+    - ("dihedrals", "phi"): Dihedral values [D] (float32, optional)
     - ("dihedrals", "type"): Dihedral types [D] (int64, optional)
-    
-    Improper topology (separate i/j/k/l indices):
-    - ("impropers", "i"): Improper first atom [I] (int64, optional)
-    - ("impropers", "j"): Improper second atom [I] (int64, optional)
-    - ("impropers", "k"): Improper third atom [I] (int64, optional)
-    - ("impropers", "l"): Improper fourth atom [I] (int64, optional)
-    - ("impropers", "type"): Improper types [I] (int64, optional)
     
     Graph metadata:
     - ("graph", "batch"): Molecule indices [N] (int64)
     - ("graph", "num_atoms"): Atoms per molecule [B] (int64, optional)
     
     Molecular targets (target.* namespace, no y_ prefix):
-    - ("target", "energy"): Molecular energy [B] (dtype, optional)
-    - ("target", "dipole"): Dipole moment [B, 3] (dtype, optional)
-    - ("target", "stress"): Stress tensor [B, 3, 3] (dtype, optional)
+    - ("target", "energy"): Molecular energy [B] (float32, optional)
+    - ("target", "dipole"): Dipole moment [B, 3] (float32, optional)
+    - ("target", "stress"): Stress tensor [B, 3, 3] (float32, optional)
     
     Example:
-        >>> config = Config(dtype=torch.float32)
         >>> atomic_td = AtomicTD.create(
-        ...     z=torch.tensor([8, 1, 1]),
-        ...     x=torch.randn(3, 3),
+        ...     Z=torch.tensor([8, 1, 1]),
+        ...     xyz=torch.randn(3, 3),
         ...     batch=torch.tensor([0, 0, 0]),
         ...     bond_i=torch.tensor([0, 1, 0]),
         ...     bond_j=torch.tensor([1, 2, 2]),
         ...     energy=torch.tensor([0.5]),
-        ...     config=config
         ... )
         >>> atomic_td["target", "energy"]
         tensor([0.5000])
@@ -92,55 +96,53 @@ class AtomicTD(TensorDict):
     @classmethod
     def create(
         cls,
-        z: torch.Tensor,
-        x: torch.Tensor,
+        Z: torch.Tensor,
+        xyz: torch.Tensor,
         batch: torch.Tensor,
-        config: Optional[Config] = None,
         # Atomic properties
-        v: Optional[torch.Tensor] = None,
-        f: Optional[torch.Tensor] = None,
-        q: Optional[torch.Tensor] = None,
-        atom_type: Optional[torch.Tensor] = None,
+        v: torch.Tensor | None = None,
+        f: torch.Tensor | None = None,
+        q: torch.Tensor | None = None,
+        atom_type: torch.Tensor | None = None,
         # Bond topology (separate i/j indices)
-        bond_i: Optional[torch.Tensor] = None,
-        bond_j: Optional[torch.Tensor] = None,
-        bond_vec: Optional[torch.Tensor] = None,
-        bond_dist: Optional[torch.Tensor] = None,
-        bond_type: Optional[torch.Tensor] = None,
+        bond_i: torch.Tensor | None = None,
+        bond_j: torch.Tensor | None = None,
+        bond_vec: torch.Tensor | None = None,
+        bond_dist: torch.Tensor | None = None,
+        bond_type: torch.Tensor | None = None,
         # Angle topology (separate i/j/k indices)
-        angle_i: Optional[torch.Tensor] = None,
-        angle_j: Optional[torch.Tensor] = None,
-        angle_k: Optional[torch.Tensor] = None,
-        angle_theta: Optional[torch.Tensor] = None,
-        angle_type: Optional[torch.Tensor] = None,
+        angle_i: torch.Tensor | None = None,
+        angle_j: torch.Tensor | None = None,
+        angle_k: torch.Tensor | None = None,
+        angle_theta: torch.Tensor | None = None,
+        angle_type: torch.Tensor | None = None,
         # Dihedral topology (separate i/j/k/l indices)
-        dihedral_i: Optional[torch.Tensor] = None,
-        dihedral_j: Optional[torch.Tensor] = None,
-        dihedral_k: Optional[torch.Tensor] = None,
-        dihedral_l: Optional[torch.Tensor] = None,
-        dihedral_phi: Optional[torch.Tensor] = None,
-        dihedral_type: Optional[torch.Tensor] = None,
+        dihedral_i: torch.Tensor | None = None,
+        dihedral_j: torch.Tensor | None = None,
+        dihedral_k: torch.Tensor | None = None,
+        dihedral_l: torch.Tensor | None = None,
+        dihedral_phi: torch.Tensor | None = None,
+        dihedral_type: torch.Tensor | None = None,
         # Improper topology (separate i/j/k/l indices)
-        improper_i: Optional[torch.Tensor] = None,
-        improper_j: Optional[torch.Tensor] = None,
-        improper_k: Optional[torch.Tensor] = None,
-        improper_l: Optional[torch.Tensor] = None,
-        improper_type: Optional[torch.Tensor] = None,
+        improper_i: torch.Tensor | None = None,
+        improper_j: torch.Tensor | None = None,
+        improper_k: torch.Tensor | None = None,
+        improper_l: torch.Tensor | None = None,
+        improper_type: torch.Tensor | None = None,
         # Graph metadata
-        num_atoms: Optional[torch.Tensor] = None,
+        num_atoms: torch.Tensor | None = None,
         # Molecular targets (target.* namespace, no y_ prefix)
-        energy: Optional[torch.Tensor] = None,
-        dipole: Optional[torch.Tensor] = None,
-        stress: Optional[torch.Tensor] = None,
+        energy: torch.Tensor | None = None,
+        dipole: torch.Tensor | None = None,
+        stress: torch.Tensor | None = None,
         **kwargs
     ) -> "AtomicTD":
         """Create AtomicTD with explicit field names.
         
         Args:
-            z: Atomic numbers [N]
-            x: Atomic positions [N, 3]
+            Z: Atomic numbers [N]
+            xyz: Atomic positions [N, 3]
             batch: Molecule indices [N]
-            config: Configuration (dtype)
             v: Atomic velocities [N, 3] (optional)
             f: Atomic forces [N, 3] (optional, target)
             q: Atomic charges [N] (optional)
@@ -167,15 +169,12 @@ class AtomicTD(TensorDict):
         Returns:
             AtomicTD instance
         """
-        if config is None:
-            config = Config()
-        
-        dtype = config.dtype
+        dtype = get_default_dtype()
         
         # Required fields
         data = {
-            ("atoms", "z"): z.long(),
-            ("atoms", "x"): x.to(dtype),
+            ("atoms", "Z"): Z.long(),
+            ("atoms", "xyz"): xyz.to(dtype),
             ("graph", "batch"): batch.long(),
         }
         
@@ -255,37 +254,3 @@ class AtomicTD(TensorDict):
         data.update(kwargs)
         
         return cls(data, batch_size=[])
-    
-    @property
-    def num_atoms(self) -> int:
-        """Number of atoms."""
-        return len(self["atoms", "z"])
-    
-    @property
-    def num_molecules(self) -> int:
-        """Number of molecules."""
-        return int(self["graph", "batch"].max()) + 1
-    
-    @property
-    def num_bonds(self) -> int:
-        """Number of bonds."""
-        try:
-            return len(self["bonds", "i"])
-        except KeyError:
-            return 0
-    
-    @property
-    def num_angles(self) -> int:
-        """Number of angles."""
-        try:
-            return len(self["angles", "i"])
-        except KeyError:
-            return 0
-    
-    @property
-    def num_dihedrals(self) -> int:
-        """Number of dihedrals."""
-        try:
-            return len(self["dihedrals", "i"])
-        except KeyError:
-            return 0
