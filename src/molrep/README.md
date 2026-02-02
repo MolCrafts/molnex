@@ -4,7 +4,7 @@
 
 ## Features
 
-- Uses **AtomicTD** from molix as the batch container
+- Uses **AtomTD** from molix as the batch container
 
 Provides TensorDictModule components for representation learning:
 - **Initializers**: Atom embeddings, spherical harmonics
@@ -14,12 +14,12 @@ Provides TensorDictModule components for representation learning:
 ## Example
 
 ```python
-from molix.data.atomic_td import AtomicTD
+from molix.data.atomic_td import AtomTD
 from molrep import MolRepModel, ProxyLabeler
 import torch
 
-# Create batch using AtomicTD
-batch = AtomicTD.create(
+# Create batch using AtomTD
+batch = AtomTD.create(
     z=torch.tensor([6, 1, 1, 1, 1]),
     x=torch.randn(5, 3),
     batch=torch.tensor([0, 0, 0, 0, 0]),

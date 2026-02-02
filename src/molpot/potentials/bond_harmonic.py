@@ -1,7 +1,7 @@
-"""Harmonic bond potential implementation."""
-
 import torch
+from typing import Union
 from molpot.potentials.base import BasePotential
+from molix.data.atom_td import AtomTD
 
 
 class BondHarmonic(BasePotential):
@@ -51,26 +51,39 @@ class BondHarmonic(BasePotential):
         self.register_buffer("k", k)
         self.register_buffer("r0", r0)
     
-    def forward(self, data) -> torch.Tensor:
+    def forward(self, data: Union[AtomTD, dict, None] = None, **kwargs) -> torch.Tensor:
         """Compute harmonic bond energy.
         
         Args:
-            data: AtomicTD or Frame with fields:
-                - ["atoms"]["x"]: Positions [N, 3]
-                - ["bonds"]["i"]: Bond indices [2, num_bonds]
-                - ["bonds"]["type"]: Bond types [num_bonds]
+            data: Optional AtomTD or Frame (dict)
+            **kwargs: Alternate way to pass explicit tensors:
+                - pos: Positions [N, 3]
+                - bond_index: Bond indices [2, num_bonds]
+                - bond_types: Bond types [num_bonds]
                 
         Returns:
             Total bond energy (scalar)
         """
-        # Extract data using nested access
-        pos = data["atoms"]["x"]
-        bond_index = data["bonds"]["i"]
-        bond_types = data["bonds"]["type"]
+        # Extract data
+        pos = kwargs.get("pos")
+        bond_index = kwargs.get("bond_index")
+        bond_types = kwargs.get("bond_types")
         
+        if pos is None and data is not None:
+            if hasattr(data, "xyz"):
+                pos = data.xyz
+                bond_index = torch.stack([data.bond_i, data.bond_j], dim=0) if bond_index is None else bond_index
+                bond_types = data.bond_type if bond_types is None else bond_types
+            elif isinstance(data, (dict, list)):
+                pos = data["atoms"]["x"]
+                bond_index = data["bonds"]["i"] if bond_index is None else bond_index
+                bond_types = data["bonds"]["type"] if bond_types is None else bond_types
+        
+        if pos is None or bond_index is None or bond_types is None:
+            raise ValueError("BondHarmonic requires pos, bond_index, and bond_types.")
+            
         # Convert numpy to torch if needed
         if not isinstance(pos, torch.Tensor):
-            import numpy as np
             pos = torch.from_numpy(pos).float()
             bond_index = torch.from_numpy(bond_index).long()
             bond_types = torch.from_numpy(bond_types).long()

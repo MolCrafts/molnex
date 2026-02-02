@@ -1,7 +1,7 @@
-"""Harmonic angle potential implementation."""
-
 import torch
+from typing import Union
 from molpot.potentials.base import BasePotential
+from molix.data.atom_td import AtomTD
 
 
 class AngleHarmonic(BasePotential):
@@ -51,26 +51,41 @@ class AngleHarmonic(BasePotential):
         self.register_buffer("k", k)
         self.register_buffer("theta0", theta0)
     
-    def forward(self, data) -> torch.Tensor:
+    def forward(self, data: Union[AtomTD, dict, None] = None, **kwargs) -> torch.Tensor:
         """Compute harmonic angle energy.
         
         Args:
-            data: AtomicTD or Frame with fields:
-                - ["atoms"]["x"]: Positions [N, 3]
-                - ["angles"]["i"]: Angle indices [3, num_angles] (i-j-k triplets)
-                - ["angles"]["type"]: Angle types [num_angles]
+            data: Optional AtomTD or Frame (dict)
+            **kwargs: Alternate way to pass explicit tensors:
+                - pos: Positions [N, 3]
+                - angle_index: Angle indices [3, num_angles] (i-j-k triplets)
+                - angle_types: Angle types [num_angles]
                 
         Returns:
             Total angle energy (scalar)
         """
-        # Extract data using nested access
-        pos = data["atoms"]["x"]
-        angle_index = data["angles"]["i"]
-        angle_types = data["angles"]["type"]
+        # Extract data
+        pos = kwargs.get("pos")
+        angle_index = kwargs.get("angle_index")
+        angle_types = kwargs.get("angle_types")
         
+        if pos is None and data is not None:
+            if hasattr(data, "xyz"):
+                pos = data.xyz
+                # Angle indices are not natively in AtomTD yet, but could be passed in data dict
+                if isinstance(data, dict):
+                    angle_index = data.get("angles", {}).get("i") if angle_index is None else angle_index
+                    angle_types = data.get("angles", {}).get("type") if angle_types is None else angle_types
+            elif isinstance(data, (dict, list)):
+                pos = data["atoms"]["x"]
+                angle_index = data["angles"]["i"] if angle_index is None else angle_index
+                angle_types = data["angles"]["type"] if angle_types is None else angle_types
+        
+        if pos is None or angle_index is None or angle_types is None:
+            raise ValueError("AngleHarmonic requires pos, angle_index, and angle_types.")
+            
         # Convert numpy to torch if needed
         if not isinstance(pos, torch.Tensor):
-            import numpy as np
             pos = torch.from_numpy(pos).float()
             angle_index = torch.from_numpy(angle_index).long()
             angle_types = torch.from_numpy(angle_types).long()

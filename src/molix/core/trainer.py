@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import logging
+from molix import logger
 from collections.abc import Callable, Iterable
 from typing import Any
 
+import torch
 import torch.nn as nn
 
 from molix.core.hooks import Hook
 from molix.core.state import Stage, TrainState
-from molix.steps.eval_step import EvalStep
-from molix.steps.train_step import TrainStep
+from molix.core.steps import DefaultTrainStep, DefaultEvalStep, Step
 
-logger = logging.getLogger(__name__)
+logger = logger.getLogger(__name__)
 
 
 class DataModule:
@@ -54,9 +54,10 @@ class Trainer:
         model: nn.Module | None = None,
         loss_fn: Callable | None = None,
         optimizer_factory: Callable | None = None,
-        train_step: TrainStep | None = None,
-        eval_step: EvalStep | None = None,
+        train_step: Step | None = None,
+        eval_step: Step | None = None,
         hooks: list[Hook | tuple[Hook, int]] | None = None,
+        eval_every_n_steps: int | None = None,
     ):
         """Initialize trainer.
         
@@ -64,32 +65,41 @@ class Trainer:
             model: Neural network model (for direct training)
             loss_fn: Loss function (for direct training)
             optimizer_factory: Factory to create optimizer from parameters
-            train_step: Training step (for step-based training, backward compatible)
-            eval_step: Evaluation step (for step-based training, backward compatible)
+            train_step: Training step implementing Step protocol. If None, uses
+                DefaultTrainStep.
+            eval_step: Evaluation step implementing Step protocol. If None, uses
+                DefaultEvalStep.
             hooks: List of hooks or (hook, priority) tuples. Hooks execute in
                    registration order by default. Use tuples to override priority
                    (lower priority = earlier execution, default = 100).
+            eval_every_n_steps: Run evaluation every N training steps (in addition
+                   to epoch-end eval). If None (default), only epoch-end eval runs.
+                   Must be > 0 if provided.
             
         Note:
-            Use either (model, loss_fn, optimizer_factory) for direct training
-            OR (train_step, eval_step) for step-based training (legacy).
+            For training with default steps:
+                trainer = Trainer(model=model, loss_fn=loss_fn, optimizer_factory=opt_factory)
+            
+            For custom steps:
+                trainer = Trainer(model=model, loss_fn=loss_fn, optimizer_factory=opt_factory,
+                                train_step=MyCustomStep(), eval_step=MyCustomStep())
+            
+        Raises:
+            ValueError: If eval_every_n_steps is <= 0
         """
-        # Direct training mode
-        if model is not None:
-            self.model = model
-            self.loss_fn = loss_fn
-            self.optimizer = optimizer_factory(model.parameters()) if optimizer_factory else None
-            self.train_step = None
-            self.eval_step = None
-            self._use_direct_training = True
-        else:
-            # Step-based training (backward compatible)
-            self.model = None
-            self.loss_fn = None
-            self.optimizer = None
-            self.train_step = train_step or TrainStep()
-            self.eval_step = eval_step or EvalStep()
-            self._use_direct_training = False
+        # Validate eval_every_n_steps
+        if eval_every_n_steps is not None and eval_every_n_steps <= 0:
+            raise ValueError(f"eval_every_n_steps must be > 0, got {eval_every_n_steps}")
+        self.eval_every_n_steps = eval_every_n_steps
+        
+        # Initialize model, loss, optimizer
+        self.model = model
+        self.loss_fn = loss_fn
+        self.optimizer = optimizer_factory(model.parameters()) if optimizer_factory and model else None
+        
+        # Use default steps if not provided, or accept custom steps
+        self.train_step = train_step if train_step is not None else DefaultTrainStep()
+        self.eval_step = eval_step if eval_step is not None else DefaultEvalStep()
         
         self.state = TrainState()
         
@@ -126,10 +136,7 @@ class Trainer:
         Returns:
             Final training state
         """
-        if self._use_direct_training:
-            return self._train_direct(datamodule, max_epochs)
-        else:
-            return self._train_with_steps(datamodule, max_epochs)
+        return self._train(datamodule, max_epochs)
     
     def _call_hooks(self, hook_name: str, *args, **kwargs) -> None:
         """Call a hook on all registered hooks.
@@ -150,12 +157,12 @@ class Trainer:
                     exc_info=True
                 )
     
-    def _train_direct(
+    def _train(
         self,
         datamodule: DataModule,
         max_epochs: int,
     ) -> TrainState:
-        """Execute training loop with direct model/loss/optimizer."""
+        """Execute training loop."""
         # Hook: on_train_start
         if self.hooks is not None:
             self._call_hooks("on_train_start", self, self.state)
@@ -174,24 +181,25 @@ class Trainer:
                 if self.hooks is not None:
                     self._call_hooks("on_train_batch_start", self, self.state, batch)
                 
-                # Forward pass
-                predictions = self.model(batch)
-                
-                # Compute loss
-                targets = batch.get("y_energy") if isinstance(batch, dict) else batch
-                loss = self.loss_fn(predictions, targets)
-                
-                # Backward pass
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
+                # Delegate computation to train_step
+                outputs = self.train_step.on_train_batch(self, self.state, batch)
                 
                 # Hook: on_train_batch_end
                 if self.hooks is not None:
-                    outputs = {"loss": loss, "predictions": predictions}
                     self._call_hooks("on_train_batch_end", self, self.state, batch, outputs)
                 
                 self.state.increment_step()
+                self.state.steps_since_last_eval += 1
+                
+                # Check if step-based eval should run
+                if (self.eval_every_n_steps is not None and 
+                    self.state.steps_since_last_eval >= self.eval_every_n_steps):
+                    self._run_eval_phase(datamodule)
+                    self.state.steps_since_last_eval = 0
+                    
+                    # Call step-based eval completion hook
+                    if self.hooks is not None:
+                        self._call_hooks("on_eval_step_complete", self, self.state)
             
             # Validation phase
             self.state.set_stage(Stage.EVAL)
@@ -202,16 +210,11 @@ class Trainer:
                 if self.hooks is not None:
                     self._call_hooks("on_eval_batch_start", self, self.state, batch)
                 
-                # Forward pass (no gradients)
-                predictions = self.model(batch)
-                
-                # Compute loss (for logging)
-                targets = batch.get("y_energy") if isinstance(batch, dict) else batch
-                loss = self.loss_fn(predictions, targets)
+                # Delegate computation to eval_step
+                outputs = self.eval_step.on_eval_batch(self, self.state, batch)
                 
                 # Hook: on_eval_batch_end
                 if self.hooks is not None:
-                    outputs = {"loss": loss, "predictions": predictions}
                     self._call_hooks("on_eval_batch_end", self, self.state, batch, outputs)
             
             # Hook: on_epoch_end
@@ -225,57 +228,30 @@ class Trainer:
             self._call_hooks("on_train_end", self, self.state)
         
         return self.state
-    def _train_with_steps(
-        self,
-        datamodule: DataModule,
-        max_epochs: int,
-    ) -> TrainState:
-        """Execute training loop with step objects (backward compatible)."""
-        # Hook: on_train_start
-        if self.hooks is not None:
-            self._call_hooks("on_train_start", self, self.state)
+    
+    def _run_eval_phase(self, datamodule: DataModule) -> None:
+        """Run evaluation phase (internal helper).
         
-        for epoch in range(max_epochs):
-            # Hook: on_epoch_start
+        Args:
+            datamodule: Data module providing validation dataloader
+        """
+        # Save current stage and switch to eval
+        prev_stage = self.state.stage
+        self.state.set_stage(Stage.EVAL)
+        self.model.eval()
+        
+        for batch in datamodule.val_dataloader():
+            # Hook: on_eval_batch_start
             if self.hooks is not None:
-                self._call_hooks("on_epoch_start", self, self.state)
+                self._call_hooks("on_eval_batch_start", self, self.state, batch)
             
-            # Training phase
-            self.state.set_stage(Stage.TRAIN)
-            for batch in datamodule.train_dataloader():
-                # Hook: on_train_batch_start
-                if self.hooks is not None:
-                    self._call_hooks("on_train_batch_start", self, self.state, batch)
-                
-                result = self.train_step.run(self.state, batch=batch)
-                
-                # Hook: on_train_batch_end
-                if self.hooks is not None:
-                    self._call_hooks("on_train_batch_end", self, self.state, batch, result)
-                
-                self.state.increment_step()
+            # Delegate computation to eval_step
+            outputs = self.eval_step.on_eval_batch(self, self.state, batch)
             
-            # Validation phase
-            self.state.set_stage(Stage.EVAL)
-            for batch in datamodule.val_dataloader():
-                # Hook: on_eval_batch_start
-                if self.hooks is not None:
-                    self._call_hooks("on_eval_batch_start", self, self.state, batch)
-                
-                result = self.eval_step.run(self.state, batch=batch)
-                
-                # Hook: on_eval_batch_end
-                if self.hooks is not None:
-                    self._call_hooks("on_eval_batch_end", self, self.state, batch, result)
-            
-            # Hook: on_epoch_end
+            # Hook: on_eval_batch_end
             if self.hooks is not None:
-                self._call_hooks("on_epoch_end", self, self.state)
-            
-            self.state.increment_epoch()
+                self._call_hooks("on_eval_batch_end", self, self.state, batch, outputs)
         
-        # Hook: on_train_end
-        if self.hooks is not None:
-            self._call_hooks("on_train_end", self, self.state)
-        
-        return self.state
+        # Restore training mode
+        self.model.train()
+        self.state.set_stage(prev_stage)

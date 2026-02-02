@@ -1,15 +1,14 @@
 """Base dataset class for molix with built-in preprocess support."""
 
 from typing import Sequence, Tuple
+from molix.data.atom_td import AtomTD
 from torch.utils.data import Dataset as TorchDataset
 import torch
 
-import molpy as mp
-
 from .preprocess import DatasetPreprocessor
+from torch.utils.data import random_split, Subset
 
-
-class Dataset(TorchDataset[mp.Frame]):
+class Dataset(TorchDataset[AtomTD]):
     """Base dataset class for molix with built-in preprocess support.
     
     This class extends torch.utils.data.Dataset with molix-specific features:
@@ -30,7 +29,7 @@ class Dataset(TorchDataset[mp.Frame]):
         ...     def __len__(self):
         ...         return len(self.data)
         ...     
-        ...     def __getitem__(self, idx) -> mp.Frame:
+        ...     def __getitem__(self, idx) -> AtomTD:
         ...         item = self.data[idx]
         ...         return self._apply_preprocess(item)
         >>> 
@@ -53,9 +52,9 @@ class Dataset(TorchDataset[mp.Frame]):
         """
         self.preprocessors = list(preprocessors) if preprocessors else []
         self._preprocessed = False
-        self._processed_frames: dict[int, mp.Frame] | None = None
+        self._processed_frames: dict[int, AtomTD] | None = None
     
-    def _apply_preprocess(self, frames: Sequence[mp.Frame]) -> Sequence[mp.Frame]:
+    def _apply_preprocess(self, frames: Sequence[AtomTD]) -> Sequence[AtomTD]:
         """Apply preprocessors to all frames.
         
         This method processes all frames together. Preprocessors that need
@@ -98,7 +97,7 @@ class Dataset(TorchDataset[mp.Frame]):
         self,
         train_ratio: float = 0.8,
         random_seed: int | None = 42,
-    ) -> Tuple["Dataset", "Dataset"]:
+    ) -> Tuple[Subset, Subset]:
         """Split dataset into train and validation subsets.
         
         This method uses torch.utils.data.random_split internally but returns
@@ -114,7 +113,6 @@ class Dataset(TorchDataset[mp.Frame]):
         Example:
             >>> train_dataset, val_dataset = dataset.split(train_ratio=0.8, random_seed=42)
         """
-        from torch.utils.data import random_split
         
         total_size = len(self)  # type: ignore[arg-type]
         train_size = int(train_ratio * total_size)
@@ -125,40 +123,40 @@ class Dataset(TorchDataset[mp.Frame]):
             self, [train_size, val_size], generator=generator
         )
         
-        # Wrap Subset in Dataset to preserve preprocessors
-        train_dataset = _SubsetDataset(self, train_subset.indices)
-        val_dataset = _SubsetDataset(self, val_subset.indices)
+        # # Wrap Subset in Dataset to preserve preprocessors
+        # train_dataset = _SubsetDataset(self, train_subset.indices)
+        # val_dataset = _SubsetDataset(self, val_subset.indices)
         
-        print(f"Split dataset: {len(train_dataset)} train, {len(val_dataset)} val\n")
-        return train_dataset, val_dataset
+        # print(f"Split dataset: {len(train_dataset)} train, {len(val_dataset)} val\n")
+        return train_subset, val_subset
 
 
-class _SubsetDataset(Dataset):
-    """Internal wrapper for dataset subsets that preserves preprocessors."""
+# class _SubsetDataset(Dataset):
+#     """Internal wrapper for dataset subsets that preserves preprocessors."""
     
-    def __init__(self, dataset: Dataset, indices: Sequence[int]):
-        """Initialize subset dataset.
+#     def __init__(self, dataset: Dataset, indices: Sequence[int]):
+#         """Initialize subset dataset.
         
-        Args:
-            dataset: Parent dataset
-            indices: Indices to include in subset
-        """
-        super().__init__(preprocessors=dataset.preprocessors)
-        self.dataset = dataset
-        self.indices = list(indices)
+#         Args:
+#             dataset: Parent dataset
+#             indices: Indices to include in subset
+#         """
+#         super().__init__(preprocessors=dataset.preprocessors)
+#         self.dataset = dataset
+#         self.indices = list(indices)
     
-    def __len__(self) -> int:
-        """Return length of subset."""
-        return len(self.indices)
+#     def __len__(self) -> int:
+#         """Return length of subset."""
+#         return len(self.indices)
     
-    def __getitem__(self, idx: int) -> mp.Frame:
-        """Get item from subset.
+#     def __getitem__(self, idx: int) -> AtomTD:
+#         """Get item from subset.
         
-        Args:
-            idx: Index in subset
+#         Args:
+#             idx: Index in subset
             
-        Returns:
-            Frame from parent dataset
-        """
-        actual_idx = self.indices[idx]
-        return self.dataset[actual_idx]
+#         Returns:
+#             Frame from parent dataset
+#         """
+#         actual_idx = self.indices[idx]
+#         return self.dataset[actual_idx]

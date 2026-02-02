@@ -21,7 +21,7 @@ class SumPooling(nn.Module):
         self,
         x: torch.Tensor,
         batch: torch.Tensor,
-        dim_size: int = None,
+        dim_size: int | None = None,
     ) -> torch.Tensor:
         """Pool atomic features to molecular features via summation.
         
@@ -63,7 +63,7 @@ class MeanPooling(nn.Module):
         self,
         x: torch.Tensor,
         batch: torch.Tensor,
-        dim_size: int = None,
+        dim_size: int | None = None,
     ) -> torch.Tensor:
         """Pool atomic features to molecular features via averaging.
         
@@ -114,7 +114,7 @@ class MaxPooling(nn.Module):
         self,
         x: torch.Tensor,
         batch: torch.Tensor,
-        dim_size: int = None,
+        dim_size: int | None = None,
     ) -> torch.Tensor:
         """Pool atomic features to molecular features via max operation.
         

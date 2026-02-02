@@ -5,22 +5,22 @@ import shutil
 import tarfile
 import urllib.request
 from pathlib import Path
-from typing import Literal, Sequence, TYPE_CHECKING
+from typing import Sequence
 
 import numpy as np
-import molpy as mp
 from molpy.io.data.xyz import XYZReader
 import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from molix.data.dataset import Dataset as BaseDataset
+from molix.data.dataset import Dataset
 from molix.data.preprocess import DatasetPreprocessor
+import random
 
-from molix.data import AtomicTD
+from molix.data import AtomTD
 
 
-class QM9Dataset(BaseDataset):
+class QM9Dataset(Dataset):
     """QM9 dataset for molecular property prediction.
     
     Downloads and caches the QM9 dataset tarball, applies the standard exclusion
@@ -125,14 +125,13 @@ class QM9Dataset(BaseDataset):
         
         # Random sampling if total is specified
         if self.total is not None and self.total < len(self.xyz_members):
-            import random
             random.seed(42)  # For reproducibility
             self.xyz_members = random.sample(self.xyz_members, self.total)
             self.xyz_members.sort()  # Keep sorted for consistency
             print(f"Randomly sampled {self.total} molecules from QM9 dataset")
         
         # Memory cache for frames
-        self._frames: list["AtomicTD"] = []
+        self._frames: list["AtomTD"] = []
     
     def _download_tarball(self, url: str):
         """Download the QM9 tarball from URL."""
@@ -204,11 +203,11 @@ class QM9Dataset(BaseDataset):
             return len(self._frames)
         return len(self.xyz_members)
     
-    def _load_all_frames(self) -> list["AtomicTD"]:
-        """Load all raw frames from the dataset and convert to AtomicTD.
+    def _load_all_frames(self) -> list["AtomTD"]:
+        """Load all raw frames from the dataset and convert to AtomTD.
         
         Returns:
-            List of AtomicTD instances with proper schema
+            List of AtomTD instances with proper schema
         """
         
         atomic_tds = []
@@ -278,8 +277,8 @@ class QM9Dataset(BaseDataset):
                 data[("target", "G")] = torch.tensor([float(meta['G'])], dtype=torch.float32)
                 data[("target", "Cv")] = torch.tensor([float(meta['Cv'])], dtype=torch.float32)
                 
-                # Create AtomicTD directly from data dict
-                atomic_td = AtomicTD(data, batch_size=[])
+                # Create AtomTD directly from data dict
+                atomic_td = AtomTD(data, batch_size=[])
                 atomic_tds.append(atomic_td)
 
         except Exception as e:
@@ -316,6 +315,6 @@ class QM9Dataset(BaseDataset):
         
         self._preprocessed = True
     
-    def __getitem__(self, idx: int) -> mp.Frame:
-        """Get a molecule as a mp.Frame with properties in metadata['target']."""
+    def __getitem__(self, idx: int) -> AtomTD:
+        """Get a molecule as a AtomTD with properties in metadata['target']."""
         return self._frames[idx]

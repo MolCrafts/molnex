@@ -20,14 +20,14 @@ model = MolRepModel.from_config(
 
 ## 2. Prepare Input
 
-We wrap our atomic data in an `AtomicTD`.
+We wrap our atomic data in an `AtomTD`.
 
 ```python
-from molix.data.atomic_td import AtomicTD
+from molix.data.atomic_td import AtomTD
 import torch
 
 # Define a water molecule
-batch = AtomicTD.create(
+batch = AtomTD.create(
     z=torch.tensor([8, 1, 1]),               # O, H, H
     x=torch.tensor([[0., 0., 0.],            # Oxygen at origin
                     [0.75, 0.58, 0.],        # Hydrogen 1

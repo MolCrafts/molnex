@@ -1,18 +1,13 @@
-"""Prediction head TensorDictModule components.
-
-All components properly inherit from TensorDictModule.
-"""
+"""Prediction heads for molecular property prediction."""
 
 import torch
-from tensordict import TensorDict
-from tensordict.nn import TensorDictModule
+import torch.nn as nn
 
 
-class EnergyHead(TensorDictModule):
+class EnergyHead(nn.Module):
     """Predict molecular energy from atomic representations.
     
-    in_keys: [("atoms", "h"), ("graph", "batch")]
-    out_keys: [("target", "energy")]
+    Performs node-to-graph pooling after an atomic MLP.
     """
     
     def __init__(self, hidden_dim: int = 64):
@@ -21,26 +16,14 @@ class EnergyHead(TensorDictModule):
         Args:
             hidden_dim: Dimension of hidden representation
         """
-        module = _EnergyHeadModule(hidden_dim)
-        super().__init__(
-            module=module,
-            in_keys=[("atoms", "h"), ("graph", "batch")],
-            out_keys=[("target", "energy")],
-        )
-
-
-class _EnergyHeadModule(torch.nn.Module):
-    """Internal module for EnergyHead."""
-    
-    def __init__(self, hidden_dim: int):
         super().__init__()
-        self.atomic_mlp = torch.nn.Sequential(
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.SiLU(),
-            torch.nn.Linear(hidden_dim, 1),
+        self.atomic_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 1),
         )
     
-    def forward(self, atoms_h: torch.Tensor, graph_batch: torch.Tensor):
+    def forward(self, atoms_h: torch.Tensor, graph_batch: torch.Tensor) -> torch.Tensor:
         """Predict molecular energy.
         
         Args:
@@ -65,27 +48,17 @@ class _EnergyHeadModule(torch.nn.Module):
         return molecular_energies
 
 
-class ForceHead(TensorDictModule):
+class ForceHead(nn.Module):
     """Derive forces from energy via autograd.
     
-    in_keys: [("target", "energy"), ("atoms", "x")]
-    out_keys: [("atoms", "f")]
+    F = -dE/dx
     """
     
     def __init__(self):
         """Initialize force head."""
-        module = _ForceHeadModule()
-        super().__init__(
-            module=module,
-            in_keys=[("target", "energy"), ("atoms", "x")],
-            out_keys=[("atoms", "f")],
-        )
-
-
-class _ForceHeadModule(torch.nn.Module):
-    """Internal module for ForceHead."""
+        super().__init__()
     
-    def forward(self, target_energy: torch.Tensor, atoms_x: torch.Tensor):
+    def forward(self, target_energy: torch.Tensor, atoms_x: torch.Tensor) -> torch.Tensor:
         """Derive forces from energy.
         
         Args:
@@ -105,19 +78,15 @@ class _ForceHeadModule(torch.nn.Module):
         forces = -torch.autograd.grad(
             target_energy.sum(),
             atoms_x,
-            create_graph=True,
-            retain_graph=True,
+            create_graph=self.training,
+            retain_graph=self.training,
         )[0]
         
         return forces
 
 
-class TypeHead(TensorDictModule):
-    """Predict atom types from atomic representations.
-    
-    in_keys: [("atoms", "h")]
-    out_keys: [("atoms", "type_logits")]
-    """
+class TypeHead(nn.Module):
+    """Predict atom types from atomic representations."""
     
     def __init__(self, hidden_dim: int = 64, num_types: int = 100):
         """Initialize type head.
@@ -126,13 +95,20 @@ class TypeHead(TensorDictModule):
             hidden_dim: Dimension of hidden representation
             num_types: Number of atom types to predict
         """
-        module = torch.nn.Sequential(
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.SiLU(),
-            torch.nn.Linear(hidden_dim, num_types),
+        super().__init__()
+        self.module = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, num_types),
         )
-        super().__init__(
-            module=module,
-            in_keys=[("atoms", "h")],
-            out_keys=[("atoms", "type_logits")],
-        )
+    
+    def forward(self, atoms_h: torch.Tensor) -> torch.Tensor:
+        """Predict atom type logits.
+        
+        Args:
+            atoms_h: Atomic hidden states [N, D]
+            
+        Returns:
+            Type logits [N, num_types]
+        """
+        return self.module(atoms_h)

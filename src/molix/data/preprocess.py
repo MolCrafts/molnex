@@ -9,16 +9,13 @@ DatasetPreprocessor provides a base class for preprocessing operations that:
 """Data preprocessing for molecular datasets."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Any, Sequence, Generic, TypeVar
 from pydantic import BaseModel, Field
 import numpy as np
 import torch
 from tqdm import tqdm
-from molnex.F.locality import get_neighbor_pairs
-from molix.data.atomic_td import AtomicTD
-
-import molpy
+from molix.F.locality import get_neighbor_pairs
+from molix.data.atom_td import AtomTD
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -48,7 +45,7 @@ class DatasetPreprocessor(ABC, Generic[T]):
         >>> processed_frames = preprocessor.preprocess(all_frames)
     """
     
-    config_type: type[T] = BaseModel
+    config_type: type[T]
     
     def __init__(self, **config_kwargs: Any):
         """Initialize preprocessor with configuration.
@@ -59,7 +56,7 @@ class DatasetPreprocessor(ABC, Generic[T]):
         self.config: T = self.config_type(**config_kwargs)
     
     @abstractmethod
-    def preprocess(self, frames: Sequence[molpy.Frame]) -> Sequence[molpy.Frame]:
+    def preprocess(self, frames: Sequence[AtomTD]) -> Sequence[AtomTD]:
         """Process all frames.
         
         This method receives all frames and processes them. Preprocessors that
@@ -88,8 +85,8 @@ class DatasetPreprocessor(ABC, Generic[T]):
 class AtomicDressConfig(BaseModel):
     """Configuration for atomic dress preprocessing."""
     elements: list[int]
-    target_key: str = "U0"
-    unit: str = "eV"
+    input_key: tuple[str, str] = ("target", "E")
+    output_key: tuple[str, str] = ("target", "E")
 
 
 class AtomicDressPreprocessor(DatasetPreprocessor):
@@ -99,16 +96,16 @@ class AtomicDressPreprocessor(DatasetPreprocessor):
     Then subtracts atomic contributions from the target.
     """
     
-    def __init__(self, elements: list[int], target_key: str = "U0", unit: str = "eV"):
-        self.config = AtomicDressConfig(elements=elements, target_key=target_key, unit=unit)
+    def __init__(self, elements: list[int], input_key: tuple[str, str] = ("target", "E"), output_key: tuple[str, str] = ("target", "E")):
+        self.config = AtomicDressConfig(elements=elements, input_key=input_key, output_key=output_key)
         self.atomic_energies: dict[int, float] = {}
         self.fit_error: float | None = None
     
-    def fit(self, frames: Sequence["AtomicTD"]) -> None:
+    def fit(self, frames: Sequence["AtomTD"]) -> None:
         """Fit atomic energies from frames.
         
         Args:
-            frames: Sequence of AtomicTD to fit on
+            frames: Sequence of AtomTD to fit on
         """
         print(f"Fitting atomic dress for elements {self.config.elements}...")
         
@@ -122,7 +119,7 @@ class AtomicDressPreprocessor(DatasetPreprocessor):
                 counts[i] = (frame['atoms', "Z"] == elem).sum().item()
             
             X_list.append(counts)
-            y_list.append(frame[("target", self.config.target_key)].item())
+            y_list.append(frame[self.config.output_key].item())
         
         X = torch.stack(X_list).numpy()
         y = np.array(y_list)
@@ -139,41 +136,31 @@ class AtomicDressPreprocessor(DatasetPreprocessor):
         residual = X @ beta - y
         self.fit_error = float(np.sqrt(np.mean(residual**2)))
         
-        print(f"Atomic energies ({self.config.unit}):")
         for elem, energy in self.atomic_energies.items():
             print(f"  Element {elem}: {energy:.4f}")
-        print(f"Fit RMSE: {self.fit_error:.4f} {self.config.unit}\n")
+        print(f"Fit RMSE: {self.fit_error:.4f}\n")
     
-    def preprocess(self, frames: Sequence["AtomicTD"]) -> Sequence["AtomicTD"]:
+    def preprocess(self, frames: Sequence["AtomTD"]) -> Sequence["AtomTD"]:
         """Subtract atomic contributions from target.
         
         Must call fit() first!
         
         Args:
-            frames: Sequence of AtomicTD to preprocess
+            frames: Sequence of AtomTD to preprocess
             
         Returns:
-            Sequence of AtomicTD with atomic contributions subtracted
+            Sequence of AtomTD with atomic contributions subtracted
         """
         if not self.atomic_energies:
             self.fit(frames)
         
-        result_frames = []
+        output_key = self.config.output_key
+        
         for frame in tqdm(frames, desc="atomic dressing"):
             # Compute atomic contribution
             contrib = sum(self.atomic_energies[int(z.item())] for z in frame['atoms', "Z"])
-            
-            # Subtract from target
-            target_key = ("target", self.config.target_key)
-            new_target = frame[target_key] - contrib
-            
-            # Create new frame with updated target
-            new_data = {k: v for k, v in frame.items()}
-            new_data[target_key] = new_target
-            
-            new_frame = AtomicTD(new_data, batch_size=[])
-            result_frames.append(new_frame)
-        return result_frames
+            frame[output_key] = frame[output_key] - contrib
+        return frames
 
 
 class NeighborListConfig(BaseModel):
@@ -189,7 +176,7 @@ class NeighborListPreprocessor(DatasetPreprocessor[NeighborListConfig]):
     """Add neighbor list to each frame.
     
     Computes pairwise neighbor lists within a cutoff distance and adds
-    bond topology fields to AtomicTD.
+    bond topology fields to AtomTD.
     """
     
     config_type = NeighborListConfig
@@ -197,25 +184,25 @@ class NeighborListPreprocessor(DatasetPreprocessor[NeighborListConfig]):
     def __init__(self, **config_kwargs: Any):
         super().__init__(**config_kwargs)
     
-    def preprocess(self, frames: Sequence["AtomicTD"]) -> Sequence["AtomicTD"]:
+    def preprocess(self, frames: Sequence["AtomTD"]) -> Sequence["AtomTD"]:
         """Compute neighbor lists for each frame.
         
         Args:
-            frames: Sequence of AtomicTD objects
+            frames: Sequence of AtomTD objects
             
         Returns:
-            Sequence of AtomicTD with bond topology added
+            Sequence of AtomTD with bond topology added
         """
         
         result_frames = []
         for frame in tqdm(frames, desc="Computing neighbor lists"):
-            # Get positions (already a tensor in AtomicTD)
+            # Get positions (already a tensor in AtomTD)
             positions = frame["atoms", "xyz"]
             
             # Determine box_vectors for PBC
             box_vectors = None
             if self.config.pbc:
-                # AtomicTD doesn't have metadata for box, so use None
+                # AtomTD doesn't have metadata for box, so use None
                 # This will be handled by get_neighbor_pairs
                 box_vectors = None
             

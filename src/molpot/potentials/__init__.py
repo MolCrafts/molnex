@@ -8,7 +8,7 @@ This module provides implementations of classic force field potentials:
 
 All potentials follow the same interface:
 - Parameters are type-indexed and stored in __init__
-- forward() accepts only AtomicTD and returns energy
+- forward() accepts only AtomTD and returns energy
 """
 
 from molpot.potentials.base import BasePotential

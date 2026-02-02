@@ -9,7 +9,7 @@ $$ \vec{F}_i = -\nabla_{\vec{r}_i} E $$
 When you create input data, simply enable gradient tracking on positions.
 
 ```python
-batch = AtomicTD.create(...)
+batch = AtomTD.create(...)
 batch["atoms", "x"].requires_grad_(True)
 ```
 

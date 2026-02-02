@@ -1,16 +1,16 @@
 # TensorDict Schema Reference
 
-## What AtomicTD is
+## What AtomTD is
 
-MolNex v2.0 uses a hierarchical TensorDict schema where all molecular data flows through `AtomicTD`, the protocol-level container defined in `molix.data`. The schema organizes fields into explicit namespaces that correspond to physical or semantic groupings. Each namespace acts as a first-level key in the TensorDict hierarchy, and individual fields are accessed as second-level keys under their parent namespace. For example, atomic positions are stored as `atoms.x`, neighbor distances as `pairs.dist`, and molecular energy as `target.energy`. This two-level structure allows models, datasets, and analysis tools to work with a consistent and self-documenting data layout.
+MolNex v2.0 uses a hierarchical TensorDict schema where all molecular data flows through `AtomTD`, the protocol-level container defined in `molix.data`. The schema organizes fields into explicit namespaces that correspond to physical or semantic groupings. Each namespace acts as a first-level key in the TensorDict hierarchy, and individual fields are accessed as second-level keys under their parent namespace. For example, atomic positions are stored as `atoms.x`, neighbor distances as `pairs.dist`, and molecular energy as `target.energy`. This two-level structure allows models, datasets, and analysis tools to work with a consistent and self-documenting data layout.
 
 ## Why namespaces exist
 
 The namespace design solves several long-standing problems in molecular machine learning workflows. Without explicit namespaces, field names must encode their semantic category through prefixes or suffixes, leading to inconsistent conventions across codebases (such as `atom_z` versus `z_atom` versus `atomic_number`). Namespaces eliminate this ambiguity by making the category explicit and separating it from the field identity. They also simplify batch processing and transfer between representations, since each namespace can be treated as a cohesive unit with its own mutability rules and gradient requirements. For instance, all topology fields under `bonds.*`, `pairs.*`, `angles.*`, and `dihedrals.*` are immutable after construction, while `atoms.x` is mutable to support molecular dynamics and gradient-based force computation. This design also ensures that predictions and targets use identical keys within the `target.*` namespace, enabling direct loss computation without manual key translation.
 
-## AtomicTD Schema
+## AtomTD Schema
 
-The following sections define the complete schema for `AtomicTD`. Each namespace groups related fields according to their physical meaning and usage patterns. Fields marked as optional may be absent depending on the dataset or task. All shape annotations use `N` for the number of atoms, `E` for the number of bonds, `A` for angles, `D` for dihedrals, `B` for batch size, and `D` for hidden dimensionality.
+The following sections define the complete schema for `AtomTD`. Each namespace groups related fields according to their physical meaning and usage patterns. Fields marked as optional may be absent depending on the dataset or task. All shape annotations use `N` for the number of atoms, `E` for the number of bonds, `A` for angles, `D` for dihedrals, `B` for batch size, and `D` for hidden dimensionality.
 
 ### Atomic Properties (`atoms.*`)
 
@@ -123,13 +123,13 @@ output_td = model(atomic_td)  # ForceHead computes F = -dE/dxyz
 
 ## Example Usage
 
-The following example demonstrates how to create an `AtomicTD` instance for a water molecule, access fields through namespaces, and query batch-level properties:
+The following example demonstrates how to create an `AtomTD` instance for a water molecule, access fields through namespaces, and query batch-level properties:
 
 ```python
-from molix.data import AtomicTD, Config
+from molix.data import AtomTD, Config
 
 # Create
-atomic_td = AtomicTD.create(
+atomic_td = AtomTD.create(
     Z=torch.tensor([8, 1, 1]),  # O, H, H
     xyz=torch.randn(3, 3),
     batch=torch.tensor([0, 0, 0]),
@@ -177,13 +177,13 @@ energy = td["target", "energy"]
 
 This change makes target field names consistent with prediction field names, since both now use the same keys within the `target` namespace.
 
-Finally, v2.0 requires an explicit `Config` object to be passed during `AtomicTD` creation, ensuring that dtype and device settings are consistently applied across all fields. In v1.0, the config was inferred or defaulted:
+Finally, v2.0 requires an explicit `Config` object to be passed during `AtomTD` creation, ensuring that dtype and device settings are consistently applied across all fields. In v1.0, the config was inferred or defaulted:
 ```python
-atomic_td = AtomicTD.create(Z=..., xyz=..., batch=...)
+atomic_td = AtomTD.create(Z=..., xyz=..., batch=...)
 ```
 
 **After**:
 ```python
 config = Config(dtype=torch.float32)
-atomic_td = AtomicTD.create(Z=..., xyz=..., batch=..., config=config)
+atomic_td = AtomTD.create(Z=..., xyz=..., batch=..., config=config)
 ```

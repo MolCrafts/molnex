@@ -1,22 +1,48 @@
 """Molix: Unified modeling of molecular potentials and properties with physics-aware ML.
 
-Molix is a standalone ML training system with structural protocol compatibility to MolExp.
+Molix is the canonical base package for shared NN utilities, ops, and training.
 """
+
+from pathlib import Path
+import sys
+import torch
+
+_lib_loaded = False
+
+def _load_ops_library() -> None:
+    """Load the C++ ops library (formerly loaded by molnex)."""
+    global _lib_loaded
+    if _lib_loaded:
+        return
+    if sys.platform == "win32":
+        lib_name = "molnex_opLib.pyd"
+    elif sys.platform == "darwin":
+        lib_name = "libmolnex_opLib.dylib"
+    else:
+        lib_name = "libmolnex_opLib.so"
+
+    # Library resides under molix/op in this monorepo
+    candidate = Path(__file__).resolve().parents[0] / "op" / lib_name
+    if candidate.exists():
+        torch.ops.load_library(str(candidate))
+        _lib_loaded = True
+
+_load_ops_library()
 
 from molix.core.state import Stage, TrainState, StepResult
 from molix.core.trainer import Trainer
-from molix.steps.train_step import TrainStep
-from molix.steps.eval_step import EvalStep
-from molix.steps.test_step import TestStep
-from molix.steps.predict_step import PredictStep
+from molix.core.losses import MSELoss, MAELoss, WeightedLoss
+from molix.config import config
+from molix import logger
 
 __all__ = [
     "Stage",
     "TrainState",
     "StepResult",
     "Trainer",
-    "TrainStep",
-    "EvalStep",
-    "TestStep",
-    "PredictStep"
+    "MSELoss",
+    "MAELoss",
+    "WeightedLoss",
+    "config",
+    "logger",
 ]

@@ -1,6 +1,6 @@
 # Data Loading Patterns
 
-Molnex follows a strict but flexible pattern for loading molecular data. The core philosophy is to keep data in a standard, easy-to-manipulate format (`molpy.Frame`) as long as possible, and only convert to efficient tensor structures (`AtomicTD`) at the last possible moment (collate).
+Molnex follows a strict but flexible pattern for loading molecular data. The core philosophy is to keep data in a standard, easy-to-manipulate format (`molpy.Frame`) as long as possible, and only convert to efficient tensor structures (`AtomTD`) at the last possible moment (collate).
 
 ## The Pipeline
 
@@ -8,14 +8,14 @@ The recommended data pipeline consists of three stages:
 
 1.  **Source**: Data is loaded into a python sequence of `molpy.Frame` objects (`Sequence[molpy.Frame]`).
 2.  **Dataset**: A `torch.utils.data.Dataset` wraps this sequence, responsible for indexing and on-the-fly transformations.
-3.  **Loader**: A `torch.utils.data.DataLoader` batches the frames and uses a specific `collate_fn` to convert them into a batched `AtomicTD`.
+3.  **Loader**: A `torch.utils.data.DataLoader` batches the frames and uses a specific `collate_fn` to convert them into a batched `AtomTD`.
 
 ```mermaid
 graph LR
     A[Source Files] --> B[Sequence[molpy.Frame]]
     B --> C[Dataset]
     C --> D[DataLoader]
-    D -- collate_atomic_tds --> E[Batched AtomicTD]
+    D -- collate_atomic_tds --> E[Batched AtomTD]
 ```
 
 ## 1. The Common Currency: `molpy.Frame`
@@ -57,13 +57,13 @@ class FramesDataset(torch.utils.data.Dataset):
 
 ## 3. The Collate Function
 
-The value is in the `collate_fn`. This is where a list of `molpy.Frame` objects (a batch) gets converted into a single `AtomicTD` (Atomic TensorDict).
+The value is in the `collate_fn`. This is where a list of `molpy.Frame` objects (a batch) gets converted into a single `AtomTD` (Atomic TensorDict).
 
 Molnex provides **`molix.data.collate.collate_atomic_tds`** for this purpose.
 
 ### Padded Tensors with Masks
 
-`collate_atomic_tds` produces an `AtomicTD` containing **padded tensors** and **masks** for atomic properties. This efficiently handles batches of molecules with different numbers of atoms.
+`collate_atomic_tds` produces an `AtomTD` containing **padded tensors** and **masks** for atomic properties. This efficiently handles batches of molecules with different numbers of atoms.
 
 - `("atoms", "xyz")`: Padded tensor of positions `[B, max_atoms, 3]`.
 - `("atoms", "Z")`: Padded tensor of atomic numbers `[B, max_atoms]`.

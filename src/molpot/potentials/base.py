@@ -11,6 +11,7 @@ import torch.nn as nn
 import numpy as np
 from abc import ABC, abstractmethod
 from typing import Union
+from molix.data.atom_td import AtomTD
 
 
 class BasePotential(nn.Module, ABC):
@@ -27,41 +28,27 @@ class BasePotential(nn.Module, ABC):
     name: str = "base"
     type: str = "unknown"
     
-    def calc_energy(self, data, **kwargs) -> float:
+    def calc_energy(self, data=None, **kwargs) -> float:
         """Calculate energy (PotentialProtocol method).
         
         This method provides compatibility with molpy's Potential interface.
         It calls forward() and converts the result to a Python float.
-        
-        Args:
-            data: AtomicTD or Frame (both implement same protocol)
-            **kwargs: Additional arguments (ignored)
-            
-        Returns:
-            Energy as Python float
         """
-        energy_tensor = self.forward(data)
+        energy_tensor = self.forward(data, **kwargs)
         return float(energy_tensor.item())
     
-    def calc_forces(self, data, **kwargs) -> np.ndarray:
+    def calc_forces(self, data=None, **kwargs) -> np.ndarray:
         """Calculate forces via autograd (PotentialProtocol method).
         
         Computes forces as F = -dE/dx using PyTorch autograd.
-        
-        Args:
-            data: AtomicTD or Frame (both implement same protocol)
-            **kwargs: Additional arguments (ignored)
-            
-        Returns:
-            Forces as numpy array [N, 3]
         """
         # Extract positions and enable gradients
-        pos = self._get_positions(data)
+        pos = self._get_positions(data, **kwargs)
         original_requires_grad = pos.requires_grad
         pos.requires_grad_(True)
         
         # Compute energy
-        energy = self.forward(data)
+        energy = self.forward(data, **kwargs)
         
         # Compute forces via autograd: F = -dE/dx
         forces = -torch.autograd.grad(
@@ -77,48 +64,37 @@ class BasePotential(nn.Module, ABC):
         return forces.detach().cpu().numpy()
     
     @abstractmethod
-    def forward(self, data) -> torch.Tensor:
+    def forward(self, data: Union[AtomTD, dict, None] = None, **kwargs) -> torch.Tensor:
         """Forward pass - must be implemented by subclasses.
         
         Args:
-            data: AtomicTD or Frame (both support Frame protocol)
-                  Expected fields depend on potential type:
-                  - Classic: ("atoms", "x"), ("atoms", "type"), ("graph", "batch")
-                  - ML: ("atoms", "x"), ("atoms", "z"), ("graph", "batch")
+            data: Optional AtomTD or Frame (dict)
+            **kwargs: Alternate way to pass explicit tensors (pos, atom_types, etc.)
             
         Returns:
             Energy as torch.Tensor (scalar)
         """
         pass
     
-    def _get_positions(self, data) -> torch.Tensor:
-        """Extract positions from data (Frame or AtomicTD).
+    def _get_positions(self, data=None, **kwargs) -> torch.Tensor:
+        """Extract positions from data or kwargs."""
+        pos = kwargs.get("pos")
+        if pos is None and data is not None:
+            if hasattr(data, "xyz"): # AtomTD
+                pos = data.xyz
+            elif isinstance(data, (dict, list)): # Frame/dict
+                try:
+                    pos = data["atoms"]["x"]
+                except (KeyError, TypeError):
+                    pos = data.get("x")
         
-        Both Frame and AtomicTD support nested dict access:
-        - Frame: data["atoms"]["x"] returns numpy array
-        - AtomicTD: data["atoms"]["x"] returns torch.Tensor (TensorDict native)
-        
-        Args:
-            data: AtomicTD or Frame
+        if pos is None:
+            raise ValueError("Could not extract positions from data or kwargs.")
             
-        Returns:
-            Positions tensor [N, 3]
-        """
-        try:
-            # Nested access works for both Frame and TensorDict
-            pos = data["atoms"]["x"]
+        if isinstance(pos, np.ndarray):
+            pos = torch.from_numpy(pos).float()
             
-            # Convert numpy to torch if needed (for Frame compatibility)
-            if isinstance(pos, np.ndarray):
-                pos = torch.from_numpy(pos).float()
-            
-            return pos
-        except (KeyError, TypeError) as e:
-            raise ValueError(
-                f"Could not extract positions from data. "
-                f"Expected nested access data['atoms']['x']. "
-                f"Error: {e}"
-            )
+        return pos
     
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(name='{self.name}', type='{self.type}')"

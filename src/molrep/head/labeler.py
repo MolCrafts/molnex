@@ -3,7 +3,7 @@
 from typing import Protocol, runtime_checkable
 import torch
 
-from molix.data.atomic_td import AtomicTD
+from molix.data.atom_td import AtomTD
 
 
 @runtime_checkable
@@ -13,7 +13,7 @@ class Labeler(Protocol):
     num_types: int
     type_map: dict[int, str]
     
-    def label(self, batch: AtomicTD) -> torch.Tensor:
+    def label(self, batch: AtomTD) -> torch.Tensor:
         """Generate type labels for atoms in batch."""
         ...
 
@@ -49,9 +49,8 @@ class ProxyLabeler:
     def type_map(self) -> dict[int, str]:
         return self._type_map
     
-    def label(self, batch: AtomicTD) -> torch.Tensor:
+    def label(self, z: torch.Tensor) -> torch.Tensor:
         """Generate proxy labels based on atomic numbers."""
-        z = batch["atoms", "z"]
         labels = torch.full_like(z, 10)  # Default to OTHER
         
         for element, type_idx in self._ELEMENT_TYPES.items():

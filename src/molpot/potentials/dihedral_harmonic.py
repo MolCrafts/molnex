@@ -1,7 +1,7 @@
-"""Harmonic dihedral potential implementation."""
-
 import torch
+from typing import Union
 from molpot.potentials.base import BasePotential
+from molix.data.atom_td import AtomTD
 
 
 class DihedralHarmonic(BasePotential):
@@ -51,26 +51,40 @@ class DihedralHarmonic(BasePotential):
         self.register_buffer("k", k)
         self.register_buffer("phi0", phi0)
     
-    def forward(self, data) -> torch.Tensor:
+    def forward(self, data: Union[AtomTD, dict, None] = None, **kwargs) -> torch.Tensor:
         """Compute harmonic dihedral energy.
         
         Args:
-            data: AtomicTD or Frame with fields:
-                - ["atoms"]["x"]: Positions [N, 3]
-                - ["dihedrals"]["i"]: Dihedral indices [4, num_dihedrals] (i-j-k-l)
-                - ["dihedrals"]["type"]: Dihedral types [num_dihedrals]
+            data: Optional AtomTD or Frame (dict)
+            **kwargs: Alternate way to pass explicit tensors:
+                - pos: Positions [N, 3]
+                - dihedral_index: Dihedral indices [4, num_dihedrals] (i-j-k-l)
+                - dihedral_types: Dihedral types [num_dihedrals]
                 
         Returns:
             Total dihedral energy (scalar)
         """
-        # Extract data using nested access
-        pos = data["atoms"]["x"]
-        dihedral_index = data["dihedrals"]["i"]
-        dihedral_types = data["dihedrals"]["type"]
+        # Extract data
+        pos = kwargs.get("pos")
+        dihedral_index = kwargs.get("dihedral_index")
+        dihedral_types = kwargs.get("dihedral_types")
         
+        if pos is None and data is not None:
+            if hasattr(data, "xyz"):
+                pos = data.xyz
+                if isinstance(data, dict):
+                    dihedral_index = data.get("dihedrals", {}).get("i") if dihedral_index is None else dihedral_index
+                    dihedral_types = data.get("dihedrals", {}).get("type") if dihedral_types is None else dihedral_types
+            elif isinstance(data, (dict, list)):
+                pos = data["atoms"]["x"]
+                dihedral_index = data["dihedrals"]["i"] if dihedral_index is None else dihedral_index
+                dihedral_types = data["dihedrals"]["type"] if dihedral_types is None else dihedral_types
+        
+        if pos is None or dihedral_index is None or dihedral_types is None:
+            raise ValueError("DihedralHarmonic requires pos, dihedral_index, and dihedral_types.")
+            
         # Convert numpy to torch if needed
         if not isinstance(pos, torch.Tensor):
-            import numpy as np
             pos = torch.from_numpy(pos).float()
             dihedral_index = torch.from_numpy(dihedral_index).long()
             dihedral_types = torch.from_numpy(dihedral_types).long()

@@ -1,6 +1,6 @@
 import torch
 
-from molix.data import AtomicTD
+from molix.data import AtomTD
 from molix.data.preprocess import NeighborListPreprocessor
 
 
@@ -27,7 +27,7 @@ class TestNeighborListPreprocessor:
             ],
             dtype=torch.float32,
         )
-        frame = AtomicTD(
+        frame = AtomTD(
             {
                 ("atoms", "Z"): torch.tensor([8, 1, 1]),
                 ("atoms", "xyz"): positions,
@@ -65,7 +65,7 @@ class TestNeighborListPreprocessor:
             ],
             dtype=torch.float32,
         )
-        frame = AtomicTD(
+        frame = AtomTD(
             {
                 ("atoms", "Z"): torch.tensor([1, 1, 1]),
                 ("atoms", "xyz"): positions,

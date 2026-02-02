@@ -8,7 +8,7 @@ MolNex v2.0 organizes components into 7 roles, all following the TensorDictModul
 
 ### 1. Data Pipeline (`molix.data`)
 
-**Purpose**: Construct and preprocess AtomicTD
+**Purpose**: Construct and preprocess AtomTD
 
 **Components**:
 - `TopologyBuilder` - Build neighbor topology
@@ -16,8 +16,8 @@ MolNex v2.0 organizes components into 7 roles, all following the TensorDictModul
 - `Normalizer` - Center molecules
 
 **Contract**:
-- Input: Raw atomic data or partially constructed AtomicTD
-- Output: Fully preprocessed AtomicTD
+- Input: Raw atomic data or partially constructed AtomTD
+- Output: Fully preprocessed AtomTD
 - No ML logic (pure data processing)
 
 **Example**:
@@ -39,8 +39,8 @@ pipeline = torch.nn.Sequential(
 - `SphericalEmbedding` - Embed bond vectors → spherical harmonics
 
 **Contract**:
-- Input: AtomicTD (with topology)
-- Output: AtomicTD with `atoms.h`, `atoms.h_sph`, etc.
+- Input: AtomTD (with topology)
+- Output: AtomTD with `atoms.h`, `atoms.h_sph`, etc.
 - Declare representation space (invariant/equivariant/spherical)
 
 **Example**:
@@ -61,7 +61,7 @@ initializer = AtomEmbedding(num_types=100, hidden_dim=64)
 - `GeometryInteraction` - Geometry-aware message passing with RBF
 
 **Contract**:
-- Input: AtomicTD with representations
+- Input: AtomTD with representations
 - Output: Updated representations (in-place or new)
 - Preserve representation space properties
 
@@ -84,7 +84,7 @@ interaction = TopologyInteraction(hidden_dim=64)
 - `TypeHead` - Predict atom types
 
 **Contract**:
-- Input: AtomicTD with representations
+- Input: AtomTD with representations
 - Output: Predictions in `target.*` namespace
 - Key alignment: predictions use same keys as targets
 
@@ -226,9 +226,9 @@ Components fail fast on:
 ## Package Boundaries
 
 ### molix: Data Pipeline
-- **Responsibility**: Construct/preprocess AtomicTD
+- **Responsibility**: Construct/preprocess AtomTD
 - **No ML logic**: Pure data processing
-- **Exports**: AtomicTD, Config, TopologyBuilder, etc.
+- **Exports**: AtomTD, Config, TopologyBuilder, etc.
 
 ### molrep: Representation Learning
 - **Responsibility**: Learn atomic representations

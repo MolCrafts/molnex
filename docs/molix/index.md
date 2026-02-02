@@ -7,7 +7,7 @@ Molix is the training backbone of the MolNex ecosystem. It provides a clean, mod
 If you are new to Molix, we recommend the following learning path:
 
 1.  [**Quickstart**](quickstart.md): Train your first model in 2 minutes.
-2.  [**Data Pipelines**](data/datamodules.md): Learn how to handle molecular data with `AtomicTD`.
+2.  [**Data Pipelines**](data/datamodules.md): Learn how to handle molecular data with `AtomTD`.
 3.  [**The Trainer**](core/trainer.md): Understand the core training loop.
 4.  [**Hooks**](core/hooks.md): Master the plugin system (checkpointing, logging).
 

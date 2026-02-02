@@ -45,10 +45,10 @@ Data in MolNex is handled using `tensordict`. This allows us to group related te
 Let's create a synthetic batch representing a single molecule (e.g., Methane):
 
 ```python
-from molix.data.atomic_td import AtomicTD
+from molix.data.atomic_td import AtomTD
 
 # Create a sample batch of data
-batch = AtomicTD.create(
+batch = AtomTD.create(
     z=torch.tensor([6, 1, 1, 1, 1]),      # Atomic numbers
     x=torch.randn(5, 3),                   # Random positions
     batch=torch.tensor([0, 0, 0, 0, 0]),   # Batch indices
@@ -106,7 +106,7 @@ You can run the full example below to see it in action.
 import torch
 import torch.nn as nn
 from molix.core.trainer import Trainer
-from molix.data.atomic_td import AtomicTD
+from molix.data.atomic_td import AtomTD
 
 class SimpleModel(nn.Module):
     def __init__(self):
@@ -137,7 +137,7 @@ class SimpleDataModule:
 
 def main():
     # 1. Data
-    batch = AtomicTD.create(
+    batch = AtomTD.create(
         z=torch.tensor([6, 1, 1, 1, 1]),
         x=torch.randn(5, 3),
         batch=torch.tensor([0, 0, 0, 0, 0]),

@@ -1,11 +1,5 @@
-"""Scalar prediction head for molrep.
-
-Pools per-atom representations to per-molecule and predicts scalar properties.
-"""
-
 import torch
 import torch.nn as nn
-from tensordict import TensorDict
 
 
 class ScalarHead(nn.Module):
@@ -23,16 +17,6 @@ class ScalarHead(nn.Module):
         d_model: Input dimension (from encoder)
         hidden_dim: Hidden layer dimension
         pooling: Pooling method ('mean', 'sum', or 'max')
-        
-    Example:
-        >>> head = ScalarHead(d_model=128, hidden_dim=64)
-        >>> h = torch.randn(2, 5, 128)
-        >>> mask = torch.ones(2, 5, dtype=torch.bool)
-        >>> mask[0, 3:] = False  # First molecule has 3 atoms
-        >>> td = TensorDict({("rep", "h"): h, ("atoms", "mask"): mask}, batch_size=[])
-        >>> td = head(td)
-        >>> td["pred", "scalar"].shape
-        torch.Size([2])
     """
     
     def __init__(
@@ -59,29 +43,23 @@ class ScalarHead(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
     
-    def forward(self, td: TensorDict) -> TensorDict:
+    def forward(self, h: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Forward pass: pool and predict.
         
         Args:
-            td: TensorDict with:
-                - ("rep", "h"): Padded tensor [B, L, d_model]
-                - ("atoms", "mask"): Boolean mask [B, L]
+            h: Padded tensor [B, L, d_model]
+            mask: Boolean mask [B, L]
                 
         Returns:
-            TensorDict with:
-                - ("pred", "scalar"): Tensor [B]
+            Tensor [B]
         """
-        h = td["rep", "h"]  # [B, L, d_model]
-        mask = td["atoms", "mask"]  # [B, L]
-        
         # Pool per-atom features to per-molecule
         h_pooled = self._pool(h, mask)  # [B, d_model]
         
         # MLP prediction: [B, d_model] -> [B, 1] -> [B]
         scalar = self.mlp(h_pooled).squeeze(-1)
         
-        td["pred", "scalar"] = scalar
-        return td
+        return scalar
     
     def _pool(self, h: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Pool padded tensor over atoms using mask.
@@ -138,11 +116,6 @@ if __name__ == "__main__":
     mask[1, :3] = True  # 3 atoms
     mask[2, :7] = True  # 7 atoms
     
-    td = TensorDict({
-        ("rep", "h"): h,
-        ("atoms", "mask"): mask,
-    }, batch_size=[])
-    
     print(f"\nInput:")
     print(f"  h shape: {h.shape}")
     print(f"  Batch size: 3")
@@ -150,9 +123,8 @@ if __name__ == "__main__":
     
     # Forward pass
     with torch.no_grad():
-        td = head(td)
+        scalar = head(h, mask)
     
-    scalar = td["pred", "scalar"]
     print(f"\nOutput:")
     print(f"  scalar shape: {scalar.shape}")
     print(f"  scalar values: {scalar}")

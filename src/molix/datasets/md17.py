@@ -102,9 +102,9 @@ class MD17Dataset(Dataset):
 
 
 def md17_collate_fn(frames: list[molpy.Frame]):
-    """Collate function for MD17 dataset: list[molpy.Frame] -> (AtomicTD, targets).
+    """Collate function for MD17 dataset: list[molpy.Frame] -> (AtomTD, targets).
     
-    Converts a batch of molpy.Frame objects into a batched AtomicTD with
+    Converts a batch of molpy.Frame objects into a batched AtomTD with
     NestedTensor fields and extracts energy/force targets.
     
     Args:
@@ -113,7 +113,7 @@ def md17_collate_fn(frames: list[molpy.Frame]):
     Returns:
         Tuple of (batch_td, targets) where:
         Tuple of (batch_td, targets) where:
-            - batch_td: AtomicTD with padded tensor fields for molecular structures
+            - batch_td: AtomTD with padded tensor fields for molecular structures
             - targets: Dict with "energy" [B] and "forces" padded tensor [B, max_atoms, 3]
             
     Example:
@@ -151,7 +151,7 @@ def md17_collate_fn(frames: list[molpy.Frame]):
         n_atoms = len(f)
         forces_padded[i, :n_atoms] = f
         
-    # Collate frames into batched AtomicTD (uses padded tensors internally)
+    # Collate frames into batched AtomTD (uses padded tensors internally)
     batch_td = collate_frames(frames)
     
     targets = {

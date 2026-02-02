@@ -1,19 +1,19 @@
 # Data Pipelines
 
-Organizing data code is as important as organizing model code. Molix encourages the use of **DataModules** and **AtomicTD** (Atomic TensorDict) to keep your pipelines clean.
+Organizing data code is as important as organizing model code. Molix encourages the use of **DataModules** and **AtomTD** (Atomic TensorDict) to keep your pipelines clean.
 
 ## Atomic TensorDict
 
 ### What is it?
-`AtomicTD` is a specialized dictionary for molecular data. It groups arrays with specific meanings (like atomic positions `x` or atomic numbers `z`) and handles batching automatically.
+`AtomTD` is a specialized dictionary for molecular data. It groups arrays with specific meanings (like atomic positions `x` or atomic numbers `z`) and handles batching automatically.
 
 ### Creating Data
 ```python
-from molix.data.atomic_td import AtomicTD
+from molix.data.atomic_td import AtomTD
 import torch
 
 # Create a single molecule (Methane)
-mol = AtomicTD.create(
+mol = AtomTD.create(
     z=torch.tensor([6, 1, 1, 1, 1]),      # Carbon + 4 Hydrogens
     x=torch.randn(5, 3),                   # Random 3D positions
     batch=torch.zeros(5, dtype=torch.long) # All belong to molecule 0

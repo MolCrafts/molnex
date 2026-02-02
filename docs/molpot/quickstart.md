@@ -27,10 +27,10 @@ potential = BondHarmonic(k=k, r0=r0)
 We create two atoms positioned $1.5$Å apart. Since $r_0=1.0$, the bond is stretched by $0.5$Å.
 
 ```python
-from molix.data.atomic_td import AtomicTD
+from molix.data.atomic_td import AtomTD
 
 # Two atoms at (0,0,0) and (1.5, 0, 0)
-batch = AtomicTD.create(
+batch = AtomTD.create(
     z=torch.tensor([1, 1]),
     x=torch.tensor([[0., 0., 0.], [1.5, 0., 0.]]),
     batch=torch.tensor([0, 0]),

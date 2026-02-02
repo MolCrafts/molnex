@@ -18,7 +18,7 @@ We avoid heavy C++ kernels where possible. This makes the code readable, debugga
 
 ## Design
 
-All potentials take an `AtomicTD` as input and output scalar energy (and optionally forces). This standardized contract makes it easy to swap potentials in benchmarks.
+All potentials take an `AtomTD` as input and output scalar energy (and optionally forces). This standardized contract makes it easy to swap potentials in benchmarks.
 python
 from molpot import GaussianRBF, CosineCutoff
 

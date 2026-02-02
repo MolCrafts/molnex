@@ -9,14 +9,14 @@ to override execution order (lower priority = earlier execution).
 
 from __future__ import annotations
 
-import logging
+from molix import logger
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from molix.core.trainer import Trainer
     from molix.core.state import TrainState
 
-logger = logging.getLogger(__name__)
+logger = logger.getLogger(__name__)
 
 
 class Hook(Protocol):
@@ -145,6 +145,18 @@ class Hook(Protocol):
             outputs: Outputs from the evaluation step (loss, metrics, etc.)
         """
         ...
+    
+    def on_eval_step_complete(self, trainer: "Trainer", state: "TrainState") -> None:
+        """Called after step-based evaluation completes (not on epoch-end eval).
+        
+        This hook is only triggered when eval runs due to the eval_every_n_steps
+        parameter being reached. Epoch-end evals do not trigger this hook.
+        
+        Args:
+            trainer: The trainer instance
+            state: Current training state (steps_since_last_eval reset to 0)
+        """
+        ...
 
 
 class BaseHook:
@@ -192,50 +204,58 @@ class BaseHook:
     def on_eval_batch_end(self, trainer: "Trainer", state: "TrainState", batch: Any, outputs: Any) -> None:
         """Called after processing each validation batch."""
         pass
+    
+    def on_eval_step_complete(self, trainer: "Trainer", state: "TrainState") -> None:
+        """Called after step-based evaluation completes (not on epoch-end eval)."""
+        pass
 
 
 # Built-in Hooks
 
 class TensorBoardHook(BaseHook):
-    """Logs training metrics to TensorBoard with comprehensive tracking.
+    """Logs training metrics to TensorBoard from outputs TensorDict.
     
-    Supports automatic metric logging, hyperparameter tracking, model graph
-    visualization, weight/gradient histograms, and learning rate logging.
+    Reads metrics from configured paths in the outputs TensorDict and logs them
+    to TensorBoard. Supports model graph visualization, weight/gradient histograms,
+    and hyperparameter tracking.
     
     Args:
         log_dir: Directory to save TensorBoard logs (default: "./runs")
         log_every_n_steps: Log scalars every N steps (default: 1)
-        log_metrics: Auto-log metrics from MetricsHook (default: False)
+        metric_paths: List of paths to read from outputs TensorDict.
+                     Each path is a list of keys, TensorBoard name is auto-generated
+                     by joining with '/'. (default: train/eval loss/MAE/RMSE)
         log_hparams: Log hyperparameters for HParams dashboard (default: False)
         log_graph: Log model graph on first batch (default: False)
         log_histograms: Log weight/gradient histograms (default: False)
-        log_lr: Log learning rate from optimizer (default: False)
         hparams: Hyperparameters dict (required if log_hparams=True)
         histogram_freq: Log histograms every N epochs (default: 1)
-        scalar_keys: Additional output keys to log as scalars (default: None)
+        register_artifacts: Register logs as artifacts (default: False)
     
     Example:
         ```python
         from molix.core.hooks import TensorBoardHook, MetricsHook
         from molix.core.metrics import MAE, RMSE
         
-        # Basic usage (backward compatible)
+        # Basic usage with default paths
         hook = TensorBoardHook(log_dir="./runs")
         
-        # With metric logging
-        hooks = [
-            MetricsHook(metrics=[MAE(), RMSE()]),
-            TensorBoardHook(log_dir="./runs", log_metrics=True),
-        ]
+        # Custom metric paths (TensorBoard names auto-generated)
+        hook = TensorBoardHook(
+            log_dir="./runs",
+            metric_paths=[
+                ["train", "loss"],    # -> "train/loss"
+                ["train", "MAE"],     # -> "train/MAE"
+                ["eval", "RMSE"],     # -> "eval/RMSE"
+            ],
+        )
         
         # Full featured
         hook = TensorBoardHook(
             log_dir="./runs",
-            log_metrics=True,
             log_hparams=True,
             log_graph=True,
             log_histograms=True,
-            log_lr=True,
             hparams={"lr": 0.001, "batch_size": 32},
             histogram_freq=5,
         )
@@ -246,29 +266,50 @@ class TensorBoardHook(BaseHook):
         self,
         log_dir: str = "./runs",
         log_every_n_steps: int = 1,
-        log_metrics: bool = False,
+        metric_paths: list[list[str]] | None = None,
         log_hparams: bool = False,
         log_graph: bool = False,
         log_histograms: bool = False,
-        log_lr: bool = False,
         hparams: dict | None = None,
         histogram_freq: int = 1,
-        scalar_keys: list[str] | None = None,
         register_artifacts: bool = False,
     ):
+        """Initialize TensorBoardHook.
+        
+        Args:
+            log_dir: Directory for TensorBoard logs
+            log_every_n_steps: Log frequency
+            metric_paths: List of paths to read from outputs TensorDict.
+                         Each path is a list of keys. TensorBoard name is auto-generated
+                         by joining path with '/'. Example:
+                         [["train", "loss"],      # -> "train/loss"
+                          ["train", "MAE"],       # -> "train/MAE"
+                          ["eval", "RMSE"]]       # -> "eval/RMSE"
+            log_hparams: Log hyperparameters
+            log_graph: Log model graph
+            log_histograms: Log weight/gradient histograms
+            hparams: Hyperparameter dict
+            histogram_freq: Histogram logging frequency
+            register_artifacts: Register logs as artifacts
+        """
         from torch.utils.tensorboard import SummaryWriter
         self.SummaryWriter = SummaryWriter
         
         self.log_dir = log_dir
         self.log_every_n_steps = log_every_n_steps
-        self.log_metrics = log_metrics
+        self.metric_paths = metric_paths or [
+            ["train", "loss"],
+            ["train", "MAE"],
+            ["train", "RMSE"],
+            ["eval", "loss"],
+            ["eval", "MAE"],
+            ["eval", "RMSE"],
+        ]
         self.log_hparams = log_hparams
         self.log_graph = log_graph
         self.log_histograms = log_histograms
-        self.log_lr = log_lr
         self.hparams = hparams or {}
         self.histogram_freq = histogram_freq
-        self.scalar_keys = scalar_keys or ["loss"]
         self.register_artifacts = register_artifacts
         
         self.writer = None
@@ -288,64 +329,82 @@ class TensorBoardHook(BaseHook):
     def on_train_batch_start(self, trainer, state, batch):
         """Log model graph on first batch."""
         if self.log_graph and not self._graph_logged:
-            # Handle TensorDict inputs - extract first tensor
+            # Handle AtomTD or other inputs
             import torch
             input_tensor = None
-            if hasattr(batch, "get"):
-                # Try to get a tensor from TensorDict
+            if hasattr(batch, "to_model_kwargs"):
+                # For AtomTD, get a representative tensor (e.g., xyz)
+                input_tensor = batch.xyz
+            elif isinstance(batch, dict):
                 for key in batch.keys():
                     value = batch[key]
                     if isinstance(value, torch.Tensor):
                         input_tensor = value
                         break
-                    elif hasattr(value, "get"):
-                        # Nested TensorDict
-                        for subkey in value.keys():
-                            subvalue = value[subkey]
-                            if isinstance(subvalue, torch.Tensor):
-                                input_tensor = subvalue
-                                break
-            else:
+            elif isinstance(batch, torch.Tensor):
                 input_tensor = batch
             
             if input_tensor is not None:
-                self.writer.add_graph(trainer.model, input_tensor)
-                logger.info("Logged model graph to TensorBoard")
+                # trainer.model might expect multiple args, SummaryWriter.add_graph
+                # might need adjustments if the model takes a dict or multiple args.
+                # However, for now we just try with one tensor if possible.
+                try:
+                    self.writer.add_graph(trainer.model, input_tensor)
+                    logger.info("Logged model graph to TensorBoard")
+                except Exception as e:
+                    logger.warning(f"Failed to log model graph: {e}")
             self._graph_logged = True
     
     def on_train_batch_end(self, trainer, state, batch, outputs):
-        """Log training scalars and learning rate."""
+        """Log training scalars from state dict."""
         if state.global_step % self.log_every_n_steps == 0:
-            # Log custom scalars
-            if isinstance(outputs, dict):
-                for key in self.scalar_keys:
-                    if key in outputs:
-                        value = outputs[key]
+            # Log metrics from configured paths
+            for path in self.metric_paths:
+                if path[0] == "train":  # Only log train metrics here
+                    value = self._extract_from_path(state, path)
+                    if value is not None:
                         value = value.item() if hasattr(value, "item") else value
-                        self.writer.add_scalar(f"Train/{key}", value, state.global_step)
-            
-            # Log learning rate
-            if self.log_lr and trainer.optimizer:
-                lr = trainer.optimizer.param_groups[0]['lr']
-                self.writer.add_scalar("LR", lr, state.global_step)
+                        tb_name = "/".join(path)
+                        self.writer.add_scalar(tb_name, value, state.global_step)
     
     def on_eval_batch_end(self, trainer, state, batch, outputs):
-        """Log validation scalars."""
-        if isinstance(outputs, dict):
-            for key in self.scalar_keys:
-                if key in outputs:
-                    value = outputs[key]
+        """Log evaluation scalars from state dict."""
+        # Log metrics from configured paths
+        for path in self.metric_paths:
+            if path[0] == "eval":  # Only log eval metrics here
+                value = self._extract_from_path(state, path)
+                if value is not None:
                     value = value.item() if hasattr(value, "item") else value
-                    self.writer.add_scalar(f"Val/{key}", value, state.global_step)
+                    tb_name = "/".join(path)
+                    self.writer.add_scalar(tb_name, value, state.global_step)
+    
+    def _extract_from_path(self, data: Any, path: list[str]) -> Any:
+        """Extract value from nested dict/TensorDict using key path.
+        
+        Args:
+            data: The data structure to extract from
+            path: List of keys to traverse
+        
+        Returns:
+            The value at the path, or None if not found
+        """
+        try:
+            value = data
+            for key in path:
+                if hasattr(value, "get"):
+                    value = value.get(key)
+                    if value is None:
+                        return None
+                elif hasattr(value, "__getitem__"):
+                    value = value[key]
+                else:
+                    return None
+            return value
+        except (KeyError, IndexError, TypeError):
+            return None
     
     def on_epoch_end(self, trainer, state):
-        """Log epoch number, metrics, and histograms."""
-        self.writer.add_scalar("Epoch", state.epoch, state.global_step)
-        
-        # Log metrics from MetricsHook
-        if self.log_metrics and trainer:
-            self._log_metrics_from_hooks(trainer, state)
-        
+        """Log histograms."""
         # Log histograms
         if self.log_histograms and (state.epoch + 1) % self.histogram_freq == 0:
             self._log_histograms(trainer, state)
@@ -375,24 +434,6 @@ class TensorBoardHook(BaseHook):
                         src=log_dir_path,
                     )
                     logger.info(f"Registered TensorBoard logs as artifact: {log_dir_path}")
-    
-    def _log_metrics_from_hooks(self, trainer, state):
-        """Extract and log metrics from MetricsHook instances."""
-        # Find MetricsHook instances
-        for hook in trainer.hooks:
-            hook_obj = hook[0] if isinstance(hook, tuple) else hook
-            if hook_obj.__class__.__name__ == "MetricsHook":
-                # Extract metrics
-                for metric in hook_obj.metrics:
-                    value = metric.compute()
-                    metric_name = metric.__class__.__name__
-                    
-                    # Log with train/val prefix
-                    self.writer.add_scalar(
-                        f"Metrics/train/{metric_name}",
-                        value,
-                        state.epoch
-                    )
     
     def _log_histograms(self, trainer, state):
         """Log weight and gradient histograms."""
@@ -599,10 +640,14 @@ class MetricsHook(BaseHook):
         self.val_targets: list[Any] = []
     
     def _extract_value(self, data: Any, keys: tuple) -> Any:
-        """Extract value from nested dict/TensorDict using key path."""
+        """Extract value from nested dict/dataclass using key path."""
         value = data
         for key in keys:
-            if hasattr(value, "__getitem__"):
+            if isinstance(value, dict):
+                value = value[key]
+            elif hasattr(value, key):
+                value = getattr(value, key)
+            elif hasattr(value, "__getitem__"):
                 value = value[key]
             else:
                 raise KeyError(f"Cannot extract key {key} from {type(value)}")
@@ -618,21 +663,38 @@ class MetricsHook(BaseHook):
         self.val_targets = []
     
     def on_train_batch_end(self, trainer, state, batch, outputs):
-        """Update metrics with training batch."""
+        """Update metrics with training batch and write to state."""
         preds = self._extract_value(outputs, self.pred_key)
         targets = self._extract_value(batch, self.target_key)
         
         for metric in self.metrics:
             metric.update(preds, targets)
+            # Write current metric value to state
+            value = metric.compute()
+            metric_name = metric.__class__.__name__
+            state[f"{self.prefix_train}/{metric_name}"] = value
     
     def on_eval_batch_end(self, trainer, state, batch, outputs):
-        """Update metrics with validation batch."""
+        """Update metrics with validation batch and write accumulated metrics to state."""
         preds = self._extract_value(outputs, self.pred_key)
         targets = self._extract_value(batch, self.target_key)
         
-        # Store for separate validation metrics
+        # Store for accumulated validation metrics computation
         self.val_preds.append(preds.detach().cpu())
         self.val_targets.append(targets.detach().cpu())
+        
+        # Compute accumulated eval metrics and write to state
+        import torch
+        if self.val_preds:
+            for metric in self.metrics:
+                metric.reset()
+                preds_cat = torch.cat(self.val_preds)
+                targets_cat = torch.cat(self.val_targets)
+                metric.update(preds_cat, targets_cat)
+                value = metric.compute()
+                metric_name = metric.__class__.__name__
+                # Write to state
+                state[f"{self.prefix_val}/{metric_name}"] = value
     
     def on_epoch_end(self, trainer, state):
         """Compute and log all metrics at epoch end."""
@@ -659,6 +721,60 @@ class MetricsHook(BaseHook):
                 metric_name = metric.__class__.__name__
                 print(f"  {self.prefix_val}/{metric_name}: {value:.4f}")
 
+
+class StepSpeedHook(BaseHook):
+    """Track training step speed and write to outputs.
+    
+    Measures steps per second during training and writes to outputs["performance"]["step_per_second"].
+    This can then be logged by TensorBoardHook or other hooks.
+    
+    Args:
+        window_size: Number of steps to average over (default: 10)
+    
+    Example:
+        ```python
+        from molix.core.hooks import StepSpeedHook, TensorBoardHook
+        
+        hooks = [
+            StepSpeedHook(window_size=10),
+            TensorBoardHook(
+                metric_paths=[
+                    ["performance", "step_per_second"],
+                ],
+            ),
+        ]
+        ```
+    """
+    
+    def __init__(self, window_size: int = 10):
+        self.window_size = window_size
+        self._step_start_time = None
+        self._steps_in_window = 0
+    
+    def on_train_start(self, trainer, state):
+        """Initialize timing."""
+        import time
+        self._step_start_time = time.time()
+        self._steps_in_window = 0
+    
+    def on_train_batch_end(self, trainer, state, batch, outputs):
+        """Compute step speed and write to state."""
+        import time
+        
+        self._steps_in_window += 1
+        
+        # Compute speed every window_size steps
+        if self._steps_in_window >= self.window_size:
+            if self._step_start_time is not None:
+                elapsed = time.time() - self._step_start_time
+                steps_per_sec = self._steps_in_window / elapsed
+                
+                # Write to state
+                state["performance/step_per_second"] = steps_per_sec
+                
+                # Reset for next window
+                self._step_start_time = time.time()
+                self._steps_in_window = 0
 
 
 class ProfilerHook(BaseHook):
@@ -835,8 +951,16 @@ class ProfilerHook(BaseHook):
         if self.export_tensorboard:
             tb_dir = self.output_dir / "tensorboard"
             tb_dir.mkdir(parents=True, exist_ok=True)
-            prof.export_stacks(
-                str(tb_dir / "profiler.pt.trace.json"),
-                "self_cuda_time_total"
-            )
-            logger.info(f"Exported TensorBoard profiler to {tb_dir}")
+            
+            # export_stacks requires with_stack=True
+            if self.with_stack:
+                prof.export_stacks(
+                    str(tb_dir / "profiler.pt.trace.json"),
+                    "self_cuda_time_total"
+                )
+                logger.info(f"Exported TensorBoard profiler stacks to {tb_dir}")
+            else:
+                logger.warning(
+                    "Skipping export_stacks() because with_stack=False. "
+                    "Set with_stack=True to enable stack trace export."
+                )

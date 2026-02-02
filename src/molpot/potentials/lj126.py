@@ -2,7 +2,8 @@
 
 import torch
 from molpot.potentials.base import BasePotential
-from molpot.data.atomic_td import AtomicTD
+from typing import Union
+from molix.data.atom_td import AtomTD
 from molpot.graph.radius_graph import radius_graph
 
 
@@ -58,26 +59,39 @@ class LJ126(BasePotential):
         self.register_buffer("sigma", sigma)
         self.cutoff = cutoff
     
-    def forward(self, data) -> torch.Tensor:
+    def forward(self, data: Union[AtomTD, dict, None] = None, **kwargs) -> torch.Tensor:
         """Compute LJ126 energy.
         
         Args:
-            data: AtomicTD or Frame with fields:
-                - ["atoms"]["x"]: Positions [N, 3]
-                - ["atoms"]["type"]: Atom types [N]
-                - ["graph"]["batch"]: Batch indices [N]
+            data: Optional AtomTD or Frame (dict)
+            **kwargs: Alternate way to pass explicit tensors:
+                - pos: Positions [N, 3]
+                - atom_types: Atom types [N]
+                - batch: Batch indices [N]
                 
         Returns:
             Total LJ energy (scalar)
         """
-        # Extract data using nested access (works for both Frame and AtomicTD)
-        pos = data["atoms"]["x"]
-        atom_types = data["atoms"]["type"]
-        batch = data["graph"]["batch"]
+        # Extract data
+        pos = kwargs.get("pos")
+        atom_types = kwargs.get("atom_types")
+        batch = kwargs.get("batch")
         
+        if pos is None and data is not None:
+            if hasattr(data, "xyz"):
+                pos = data.xyz
+                atom_types = data.Z if atom_types is None else atom_types
+                batch = data.batch if batch is None else batch
+            elif isinstance(data, (dict, list)):
+                pos = data["atoms"]["x"]
+                atom_types = data["atoms"]["type"] if atom_types is None else atom_types
+                batch = data["graph"]["batch"] if batch is None else batch
+        
+        if pos is None or atom_types is None or batch is None:
+            raise ValueError("LJ126 requires pos, atom_types, and batch.")
+            
         # Convert numpy to torch if needed (for Frame compatibility)
         if not isinstance(pos, torch.Tensor):
-            import numpy as np
             pos = torch.from_numpy(pos).float()
             atom_types = torch.from_numpy(atom_types).long()
             batch = torch.from_numpy(batch).long()

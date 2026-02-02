@@ -12,4 +12,4 @@ Molnex provides a robust set of tools for handling molecular data.
     - Learn how to encapsulate your data pipeline for reproducible training with the `Trainer`.
 
 - [**Atomic TensorDict**](datamodules.md#atomic-tensordict)
-    - Understand the `AtomicTD` data structure used by models.
+    - Understand the `AtomTD` data structure used by models.

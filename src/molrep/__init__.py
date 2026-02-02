@@ -1,32 +1,44 @@
 """molrep: Molecular representation learning.
 
 Provides components for building molecular representation models:
-- AtomTypeEmbedding: Embed atomic numbers to learned embeddings
-- TransformerBlock: Single SDPA-based transformer block
-- TransformerEncoder: Stack of transformer blocks
-- EdgeBiasMLP: Convert RBF features to attention bias
-- ScalarHead: Pooling + MLP for scalar prediction
-- EnergyHead: Energy prediction head with masked pooling
-- EquivariantPotentialNet: Equivariant potential network with cuEquivariance
+
+Embeddings:
+  - JointEmbedding: Combined discrete + continuous embedding
+  - SphericalHarmonics: Equivariant angular basis functions
+  - BesselRBF: Radial basis functions with Bessel functions
+  - CosineCutoff: Cosine-based cutoff envelope
+  - PolynomialCutoff: Polynomial-based cutoff envelope
+
+Heads and Pooling:
+  - ScalarHead: Pooling + MLP for scalar prediction
+  - EnergyHead: Energy prediction head with scatter pooling
+  - ForceHead: Compute forces via autograd -dE/dpos
+  - StressHead: Compute stress tensor via autograd
+  - masked_sum_pooling: Sum pooling with mask support
+  - masked_mean_pooling: Mean pooling with mask support
 """
 
-from molrep.encoder.embedding import AtomTypeEmbedding
-from molrep.encoder.transformer import TransformerBlock, TransformerEncoder
-from molrep.encoder.edge_bias import EdgeBiasMLP, densify_edge_bias
+from molrep.embedding import (
+    JointEmbedding,
+    SphericalHarmonics,
+    BesselRBF,
+    CosineCutoff,
+    PolynomialCutoff,
+)
 from molrep.head.scalar_head import ScalarHead
 from molrep.readout.pooling import masked_sum_pooling, masked_mean_pooling
-from molrep.readout.heads import EnergyHead
-from molrep.models.equivariant_potential import EquivariantPotentialNet
+from molrep.readout.heads import EnergyHead, ForceHead, StressHead
 
 __all__ = [
-    "AtomTypeEmbedding",
-    "TransformerBlock",
-    "TransformerEncoder",
-    "EdgeBiasMLP",
-    "densify_edge_bias",
+    "JointEmbedding",
+    "SphericalHarmonics",
+    "BesselRBF",
+    "CosineCutoff",
+    "PolynomialCutoff",
     "ScalarHead",
     "masked_sum_pooling",
     "masked_mean_pooling",
     "EnergyHead",
-    "EquivariantPotentialNet",
+    "ForceHead",
+    "StressHead",
 ]

@@ -4,19 +4,20 @@ MolPot provides reusable building blocks for molecular machine learning potentia
 
 ## Design Philosophy
 
-**Component-First Architecture**: All reusable components (RBF, MLP, pooling, etc.) live in common modules. Model-specific code is pure composition.
+**Component-First Architecture**: All reusable components (heads, pooling, etc.) are implemented as TensorDictModuleBase for consistency.
 
 **Clear Boundaries**:
-- **Multi-head outputs** → model (via componentized heads)
-- **Multi-loss composition** → loss_fn (composable loss modules)
-- **Training strategy** → Trainer (AMP, grad clip, scheduler, logging, etc.)
+- **Multi-head outputs** → molpot.heads (TensorDictModule-based prediction heads)
+- **Generic losses** → molix.core.losses (no domain-specific naming)
+- **Configurations** → molix.config (Pydantic specs)
+- **Training strategy** → molix.core.trainer (AMP, grad clip, scheduler, logging, etc.)
 
 **Pure PyTorch**: No PyTorch Geometric dependency. All graph operations implemented in pure PyTorch.
 
 ## Installation
 
 ```bash
-cd molix/src/molpot
+cd molnex/src/molpot
 pip install -e .
 ```
 
@@ -24,18 +25,22 @@ pip install -e .
 
 ```python
 import torch
-from molpot import PiNet2, EnergyLoss, AtomicTD
+from molpot import EnergyHead, ForceHead, LJ126
+from molix.core.losses import MSELoss, WeightedLoss
 from molix.core.trainer import Trainer
 
 # 1. Create model (pure composition of components)
-model = PiNet2(
+model = MyModel(
     hidden_dim=128,
     num_layers=3,
     cutoff=5.0,
 )
 
-# 2. Create loss
-loss_fn = EnergyLoss()
+# 2. Create generic losses (no domain-specific naming)
+loss_fn = WeightedLoss([
+    (1.0, MSELoss(pred_key="energy", target_key="energy")),
+    (10.0, MSELoss(pred_key="forces", target_key="forces")),
+])
 
 # 3. Train with direct interface
 trainer = Trainer(
@@ -49,113 +54,96 @@ trainer.train(datamodule, max_epochs=100)
 
 ## Components
 
-### Data Structures
-- **AtomicTD**: TensorDict-based atomistic batch representation
-- **collate_atomic**: Collation function for batching molecules
+### Classic Potentials
+- **BasePotential**: Base class for all potentials (PyTorch nn.Module)
+- **LJ126**: Lennard-Jones 12-6 potential
+- **BondHarmonic**: Harmonic bond stretching
+- **AngleHarmonic**: Harmonic angle bending
+- **DihedralHarmonic**: Harmonic dihedral torsion
 
-### Graph Construction
-- **radius_graph**: Pure PyTorch neighbor list construction
-
-### Feature Engineering
-- **GaussianRBF**: Radial basis functions for distance featurization
-- **CosineCutoff**: Smooth cutoff function
-- **PolynomialCutoff**: Alternative cutoff with continuous derivatives
-- **Geometry utilities**: Distance, angle, dihedral calculations
-
-### Neural Network Primitives
-- **MLP**: Configurable multi-layer perceptron
+### Prediction Heads
+- **EnergyHead**: Molecular energy from atomic energies
+- **ForceHead**: Forces via autograd (F = -dE/dpos)
+- **TypeHead**: Atom type classification
 
 ### Readout Operations
 - **SumPooling**: Aggregate atomic features via summation
 - **MeanPooling**: Aggregate atomic features via averaging
 - **MaxPooling**: Aggregate atomic features via max operation
 
-### Prediction Heads
-- **EnergyHead**: Molecular energy from atomic energies
-- **ForceHead**: Forces via autograd (F = -dE/dpos)
-
-### Loss Functions
-- **EnergyLoss**: MSE loss for energy prediction
-- **ForceLoss**: MSE loss for force prediction
-- **CombinedLoss**: Weighted combination of energy and force losses
-
-### Models
-- **PiNet2**: Simplified PiNet implementation (component-first)
-
 ## Architecture
 
 ```
 molnex/src/molpot/
-├── data/           # AtomicTD, collation
-├── graph/          # Radius graph (pure PyTorch)
-├── feats/          # RBF, cutoff, geometry
-├── nn/             # MLP, normalization
-├── readout/        # Pooling operations
-├── heads/          # Energy, force heads
-├── losses/         # Energy, force, combined losses
-└── models/         # PiNet2, etc.
+├── potentials/     # Classic force field potentials
+├── heads/          # ML prediction heads (TensorDictModule)
+└── readout/        # Pooling operations (TensorDictModuleBase)
+```
+
+Generic losses and configs are in `molix`:
+```
+molnex/src/molix/
+├── core/
+│   ├── losses/     # Generic loss functions (MSELoss, MAELoss, WeightedLoss)
+│   └── trainer.py  # Training engine
+└── config/         # Pydantic configuration specs
+    ├── heads.py    # Head configurations
+    └── losses.py   # Loss configurations
 ```
 
 ## Example: Building a Custom Model
 
 ```python
-from molpot import (
-    GaussianRBF, CosineCutoff, radius_graph,
-    MLP, SumPooling, EnergyHead
-)
+from molpot import EnergyHead, SumPooling
+from molrep import TransformerEncoder  # Representations from molrep
+from molix.core.losses import MSELoss, WeightedLoss
 
 class MyModel(nn.Module):
     def __init__(self):
         super().__init__()
-        # Reuse components
-        self.rbf = GaussianRBF(num_rbf=50, cutoff=5.0)
-        self.cutoff = CosineCutoff(cutoff=5.0)
-        self.mlp = MLP(in_dim=50, out_dim=128, hidden_dims=[128])
-        self.energy_head = EnergyHead()
+        # Use molrep for representations
+        self.encoder = TransformerEncoder(...)
+        
+        # Use molpot for prediction
+        self.energy_head = EnergyHead(hidden_dim=128)
     
     def forward(self, batch):
-        # Build graph
-        edge_index, edge_vec = radius_graph(
-            batch["pos"], batch["batch"], cutoff=5.0
-        )
+        # Encode molecular structure
+        node_feats = self.encoder(batch)
         
-        # Compute features
-        distances = torch.norm(edge_vec, dim=-1)
-        rbf_feats = self.rbf(distances)
-        cutoff_vals = self.cutoff(distances)
-        
-        # ... your model logic ...
-        
-        return self.energy_head(atomic_energies, batch["batch"])
+        # Predict energy
+        batch["node_feats"] = node_feats
+        return self.energy_head(batch)
 ```
 
 ## Testing
 
 ```bash
 # Run tests
-pytest molix/src/molpot/tests/ -v
+pytest molnex/src/molpot/tests/ -v
 
 # Run example
-python molix/examples/train_pinet2_simple.py
+python molnex/examples/train_example.py
 ```
 
 ## Adding New Potentials
 
 To add a new potential (e.g., SchNet, PaiNN):
 
-1. **Reuse existing components** (RBF, MLP, pooling, heads, losses)
+1. **Reuse existing components** from molrep (encoder), molpot (heads, pooling)
 2. **Implement model-specific logic** (message passing, updates)
 3. **Compose into model class**
-4. **Use same Trainer** (no training code needed)
+4. **Use generic molix losses** (configurable keys, no domain assumptions)
 
 Example:
 ```python
+from molpot import EnergyHead
+from molix import MSELoss, WeightedLoss, Trainer
+
 class SchNet(nn.Module):
     def __init__(self):
         # Reuse components
-        self.rbf = GaussianRBF(...)
-        self.mlp = MLP(...)
-        self.energy_head = EnergyHead()
+        self.energy_head = EnergyHead(...)
         
         # SchNet-specific
         self.interaction_blocks = ...
@@ -163,6 +151,13 @@ class SchNet(nn.Module):
     def forward(self, batch):
         # SchNet logic using components
         ...
+
+# Training with generic losses
+loss_fn = WeightedLoss([
+    (1.0, MSELoss(pred_key="energy", target_key="energy")),
+    (10.0, MSELoss(pred_key="forces", target_key="forces")),
+])
+trainer = Trainer(model=SchNet(), loss_fn=loss_fn)
 ```
 
 ## Dependencies
