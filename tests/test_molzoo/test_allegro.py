@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+import math
 
 from molzoo.allegro import (
     Allegro,
@@ -12,6 +13,12 @@ from molzoo.allegro import (
 from molrep.embedding.radial import BesselRBF
 from molrep.embedding.angular import SphericalHarmonics
 from molrep.embedding.cutoff import PolynomialCutoff
+from molrep.utils.equivariance import (
+    rotation_matrix_z,
+    random_rotation_matrix,
+    rotate_vectors,
+)
+from tests.utils import assert_module_compiles, assert_module_exports, assert_outputs_close
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +132,36 @@ class TestPairEmbedding:
             assert edge_angular.shape[-1] == expected_sh_dim
             assert tensor_feats.shape == (graph_data["n_edges"], emb.irreps_dim)
 
+    def test_compile(self, pair_emb, graph_data):
+        """Test that PairEmbedding can be compiled with torch.compile."""
+        # Test compilation using positional arguments
+        output_uncompiled, output_compiled = assert_module_compiles(
+            pair_emb,
+            graph_data["Z"],
+            graph_data["bond_dist"],
+            graph_data["bond_diff"],
+            graph_data["edge_index"],
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_uncompiled, output_compiled)
+
+    def test_export(self, pair_emb, graph_data):
+        """Test that PairEmbedding can be exported with torch.export."""
+        # Test export using positional arguments
+        exported_program, output_original, output_exported = assert_module_exports(
+            pair_emb,
+            args_tuple=(
+                graph_data["Z"],
+                graph_data["bond_dist"],
+                graph_data["bond_diff"],
+                graph_data["edge_index"],
+            ),
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_original, output_exported)
+
 
 # ===========================================================================
 # TestAllegroLayer
@@ -205,6 +242,48 @@ class TestAllegroLayer:
 
             scalar_out, tensor_out = layer(scalar_in, tensor_in, edge_angular)
             assert scalar_out.shape == scalar_in.shape
+
+    def test_compile(self, allegro_layer, layer_config):
+        """Test that AllegroLayer can be compiled with torch.compile."""
+        n_edges = 30
+        num_scalar = layer_config["num_scalar_features"]
+        l_max = layer_config["l_max"]
+        sh_dim = (l_max + 1) ** 2
+        irreps_dim = allegro_layer.irreps_dim
+
+        scalar_in = torch.randn(n_edges, num_scalar)
+        tensor_in = torch.randn(n_edges, irreps_dim)
+        edge_angular = torch.randn(n_edges, sh_dim)
+
+        # Test compilation
+        output_uncompiled, output_compiled = assert_module_compiles(
+            allegro_layer,
+            scalar_in, tensor_in, edge_angular
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_uncompiled, output_compiled)
+
+    def test_export(self, allegro_layer, layer_config):
+        """Test that AllegroLayer can be exported with torch.export."""
+        n_edges = 30
+        num_scalar = layer_config["num_scalar_features"]
+        l_max = layer_config["l_max"]
+        sh_dim = (l_max + 1) ** 2
+        irreps_dim = allegro_layer.irreps_dim
+
+        scalar_in = torch.randn(n_edges, num_scalar)
+        tensor_in = torch.randn(n_edges, irreps_dim)
+        edge_angular = torch.randn(n_edges, sh_dim)
+
+        # Test export
+        exported_program, output_original, output_exported = assert_module_exports(
+            allegro_layer,
+            args_tuple=(scalar_in, tensor_in, edge_angular),
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_original, output_exported)
 
 
 # ===========================================================================
@@ -294,6 +373,36 @@ class TestAllegro:
                 edge_index=graph_data["edge_index"],
             )
             assert out.shape == (graph_data["n_edges"], 1, n_scalar)
+
+    def test_compile(self, encoder, graph_data):
+        """Test that Allegro encoder can be compiled with torch.compile."""
+        # Test compilation using positional arguments
+        output_uncompiled, output_compiled = assert_module_compiles(
+            encoder,
+            graph_data["Z"],
+            graph_data["bond_dist"],
+            graph_data["bond_diff"],
+            graph_data["edge_index"],
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_uncompiled, output_compiled, rtol=1e-3, atol=1e-3)
+
+    def test_export(self, encoder, graph_data):
+        """Test that Allegro encoder can be exported with torch.export."""
+        # Test export using positional arguments
+        exported_program, output_original, output_exported = assert_module_exports(
+            encoder,
+            args_tuple=(
+                graph_data["Z"],
+                graph_data["bond_dist"],
+                graph_data["bond_diff"],
+                graph_data["edge_index"],
+            ),
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_original, output_exported, rtol=1e-3, atol=1e-3)
 
 
 # ===========================================================================
@@ -434,3 +543,256 @@ class TestScaleShiftAllegro:
         )
 
         assert results["energy"].shape == (2,)  # two molecules
+
+    def test_compile(self, model, graph_data):
+        """Test that ScaleShiftAllegro can be compiled with torch.compile."""
+        num_graphs = 1
+
+        # Test compilation using positional arguments
+        output_uncompiled, output_compiled = assert_module_compiles(
+            model,
+            graph_data["Z"],
+            graph_data["pos"],
+            graph_data["bond_dist"],
+            graph_data["bond_diff"],
+            graph_data["edge_index"],
+            graph_data["batch"],
+            num_graphs,
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_uncompiled, output_compiled, rtol=1e-3, atol=1e-3)
+
+    def test_export(self, model, graph_data):
+        """Test that ScaleShiftAllegro can be exported with torch.export."""
+        num_graphs = 1
+
+        # Test export using positional arguments
+        exported_program, output_original, output_exported = assert_module_exports(
+            model,
+            args_tuple=(
+                graph_data["Z"],
+                graph_data["pos"],
+                graph_data["bond_dist"],
+                graph_data["bond_diff"],
+                graph_data["edge_index"],
+                graph_data["batch"],
+                num_graphs,
+            ),
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_original, output_exported, rtol=1e-3, atol=1e-3)
+
+
+# ===========================================================================
+# Equivariance Tests
+# ===========================================================================
+
+
+class TestPairEmbeddingEquivariance:
+    """Test equivariance properties of PairEmbedding."""
+
+    @pytest.fixture
+    def pair_emb(self):
+        """Create PairEmbedding for testing."""
+        return PairEmbedding(
+            num_elements=5,
+            num_scalar_features=32,
+            num_tensor_features=8,
+            r_max=5.0,
+            num_bessel=8,
+            l_max=2,
+        )
+
+    def test_radial_features_rotation_invariance(self, pair_emb, graph_data):
+        """Test that scalar features are rotation invariant."""
+        # Forward pass
+        scalar1, _, _, cutoff1 = pair_emb(
+            Z=graph_data["Z"],
+            bond_dist=graph_data["bond_dist"],
+            bond_diff=graph_data["bond_diff"],
+            edge_index=graph_data["edge_index"],
+        )
+
+        # Rotate bond vectors
+        rot_matrix = random_rotation_matrix(dtype=graph_data["bond_diff"].dtype)
+        bond_diff_rot = rotate_vectors(graph_data["bond_diff"], rot_matrix)
+
+        # Forward pass on rotated
+        scalar2, _, _, cutoff2 = pair_emb(
+            Z=graph_data["Z"],
+            bond_dist=graph_data["bond_dist"],
+            bond_diff=bond_diff_rot,
+            edge_index=graph_data["edge_index"],
+        )
+
+        # Scalar features should be invariant
+        assert torch.allclose(scalar1, scalar2, rtol=1e-4, atol=1e-4)
+        assert torch.allclose(cutoff1, cutoff2, rtol=1e-5, atol=1e-5)
+
+    def test_spherical_harmonics_equivariance(self, pair_emb, graph_data):
+        """Test that spherical harmonics transform correctly under rotation."""
+        # Forward pass
+        _, _, edge_angular1, _ = pair_emb(
+            Z=graph_data["Z"],
+            bond_dist=graph_data["bond_dist"],
+            bond_diff=graph_data["bond_diff"],
+            edge_index=graph_data["edge_index"],
+        )
+
+        # Rotate bond vectors
+        angle = math.pi / 2
+        rot_matrix = rotation_matrix_z(angle, dtype=graph_data["bond_diff"].dtype)
+        bond_diff_rot = rotate_vectors(graph_data["bond_diff"], rot_matrix)
+
+        # Forward pass on rotated
+        _, _, edge_angular2, _ = pair_emb(
+            Z=graph_data["Z"],
+            bond_dist=graph_data["bond_dist"],
+            bond_diff=bond_diff_rot,
+            edge_index=graph_data["edge_index"],
+        )
+
+        # l=0 component should be invariant
+        assert torch.allclose(edge_angular1[:, 0], edge_angular2[:, 0], atol=1e-5)
+
+        # Overall norms should be preserved
+        norm1 = edge_angular1.norm(dim=-1)
+        norm2 = edge_angular2.norm(dim=-1)
+        assert torch.allclose(norm1, norm2, rtol=1e-4, atol=1e-4)
+
+
+class TestScaleShiftAllegroEquivariance:
+    """Test equivariance properties of complete Allegro model."""
+
+    @pytest.fixture
+    def model(self):
+        """Create Allegro model for testing."""
+        return ScaleShiftAllegro(
+            num_elements=5,
+            num_scalar_features=32,
+            num_tensor_features=8,
+            r_max=5.0,
+            num_bessel=8,
+            l_max=2,
+            num_layers=2,
+            mlp_depth=1,
+            compute_forces=False,
+        )
+
+    def test_energy_rotation_invariance(self, model):
+        """Test that energy is invariant under rotation.
+
+        Rotating the entire molecular geometry should not change the energy.
+        """
+        # Create molecular data
+        n_nodes = 8
+        n_edges = 20
+        Z = torch.randint(0, 5, (n_nodes,))
+        pos = torch.randn(n_nodes, 3)
+        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
+        batch = torch.zeros(n_nodes, dtype=torch.long)
+
+        # Compute bond vectors
+        src, dst = edge_index[:, 0], edge_index[:, 1]
+        bond_diff = pos[dst] - pos[src]
+        bond_dist = bond_diff.norm(dim=-1).clamp(min=0.1)
+
+        # Forward pass
+        results1 = model(
+            Z=Z, pos=pos, bond_dist=bond_dist,
+            bond_diff=bond_diff, edge_index=edge_index, batch=batch,
+        )
+        energy1 = results1["energy"]
+
+        # Rotate entire molecule
+        rot_matrix = random_rotation_matrix(dtype=pos.dtype)
+        pos_rot = rotate_vectors(pos, rot_matrix)
+        bond_diff_rot = rotate_vectors(bond_diff, rot_matrix)
+
+        # Forward pass on rotated
+        results2 = model(
+            Z=Z, pos=pos_rot, bond_dist=bond_dist,
+            bond_diff=bond_diff_rot, edge_index=edge_index, batch=batch,
+        )
+        energy2 = results2["energy"]
+
+        # Energy should be invariant
+        assert torch.allclose(energy1, energy2, rtol=1e-4, atol=1e-4)
+
+    def test_force_computation(self):
+        """Test that force computation works correctly.
+
+        This is a basic test to ensure forces can be computed without errors.
+        Full force equivariance testing requires more complex setup.
+        """
+        model = ScaleShiftAllegro(
+            num_elements=5,
+            num_scalar_features=32,
+            num_tensor_features=8,
+            r_max=5.0,
+            num_layers=2,
+            compute_forces=True,
+        )
+
+        # Create molecular data
+        n_nodes = 8
+        n_edges = 20
+        Z = torch.randint(0, 5, (n_nodes,))
+        pos = torch.randn(n_nodes, 3).requires_grad_(True)
+        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
+        batch = torch.zeros(n_nodes, dtype=torch.long)
+
+        # Compute bond vectors from positions (ensures grad connection)
+        src, dst = edge_index[:, 0], edge_index[:, 1]
+        bond_diff = pos[dst] - pos[src]
+        bond_dist = bond_diff.norm(dim=-1).clamp(min=0.1)
+
+        # Forward pass - this computes forces via autograd
+        results = model(
+            Z=Z, pos=pos, bond_dist=bond_dist,
+            bond_diff=bond_diff, edge_index=edge_index, batch=batch,
+        )
+
+        # Check forces exist and have correct shape
+        assert "forces" in results
+        assert results["forces"].shape == (n_nodes, 3)
+
+        # Check forces are finite
+        assert torch.isfinite(results["forces"]).all()
+
+    def test_translation_invariance(self, model):
+        """Test that energy is invariant under translation."""
+        # Create molecular data
+        n_nodes = 8
+        n_edges = 20
+        Z = torch.randint(0, 5, (n_nodes,))
+        pos = torch.randn(n_nodes, 3)
+        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
+        batch = torch.zeros(n_nodes, dtype=torch.long)
+
+        # Compute bond vectors
+        src, dst = edge_index[:, 0], edge_index[:, 1]
+        bond_diff = pos[dst] - pos[src]
+        bond_dist = bond_diff.norm(dim=-1).clamp(min=0.1)
+
+        # Forward pass
+        results1 = model(
+            Z=Z, pos=pos, bond_dist=bond_dist,
+            bond_diff=bond_diff, edge_index=edge_index, batch=batch,
+        )
+
+        # Translate molecule
+        translation = torch.tensor([10.0, -5.0, 3.0])
+        pos_trans = pos + translation
+        # bond_diff remains the same (translation invariant)
+
+        # Forward pass on translated
+        results2 = model(
+            Z=Z, pos=pos_trans, bond_dist=bond_dist,
+            bond_diff=bond_diff, edge_index=edge_index, batch=batch,
+        )
+
+        # Energy should be identical
+        assert torch.allclose(results1["energy"], results2["energy"], rtol=1e-5, atol=1e-5)

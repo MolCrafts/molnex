@@ -162,16 +162,16 @@ class EmbeddingBlock(nn.Module):
 
     def forward(
         self,
-        node_attrs: dict[str, torch.Tensor],
+        Z: torch.Tensor,
         bond_dist: torch.Tensor,
         bond_diff: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute initial node and edge features.
 
         Args:
-            node_attrs: Dictionary of node attributes (e.g., {"Z": ...}).
-            bond_dist: Bond distances.
-            bond_diff: Bond vectors (target - source).
+            Z: Atomic numbers (n_nodes,).
+            bond_dist: Bond distances (n_edges,).
+            bond_diff: Bond vectors (target - source) (n_edges, 3).
 
         Returns:
             tuple of:
@@ -180,7 +180,7 @@ class EmbeddingBlock(nn.Module):
                 - edge_feats: Radial basis features (n_edges, num_bessel).
         """
         # Node features
-        node_feats = self.node_embedding(**node_attrs)
+        node_feats = self.node_embedding(Z=Z)
 
         # Edge direction
         edge_dir = bond_diff / (bond_dist.unsqueeze(-1) + 1e-8)
@@ -572,7 +572,7 @@ class MACE(nn.Module):
 
     def forward(
         self,
-        node_attrs: dict[str, torch.Tensor],
+        Z: torch.Tensor,
         bond_dist: torch.Tensor,
         bond_diff: torch.Tensor,
         edge_index: torch.Tensor,
@@ -581,7 +581,7 @@ class MACE(nn.Module):
         """Extract per-layer geometric features.
 
         Args:
-            node_attrs: Dictionary of node attributes (e.g., {"Z": ...}).
+            Z: Atomic numbers (n_nodes,).
             bond_dist: Bond distances (n_edges,).
             bond_diff: Bond vectors (n_edges, 3).
             edge_index: Edge indices (n_edges, 2).
@@ -591,7 +591,7 @@ class MACE(nn.Module):
         """
         # ---- Embedding ----
         node_feats_init, edge_attrs, edge_feats = self.embedding(
-            node_attrs=node_attrs,
+            Z=Z,
             bond_dist=bond_dist,
             bond_diff=bond_diff,
         )
@@ -600,7 +600,7 @@ class MACE(nn.Module):
         node_feats = self.initial_projection(node_feats_init)
 
         # Primary species attribute for contraction/updates
-        z = node_attrs["Z"]
+        z = Z
 
         # ---- Interaction-Product-Update loop ----
         per_layer_features: list[torch.Tensor] = []
@@ -815,30 +815,32 @@ class ScaleShiftMACE(nn.Module):
 
     def forward(
         self,
-        node_attrs: dict[str, torch.Tensor],
+        Z: torch.Tensor,
         pos: torch.Tensor,
         bond_dist: torch.Tensor,
         bond_diff: torch.Tensor,
         edge_index: torch.Tensor,
         batch: torch.Tensor,
+        num_graphs: int,
         **_kwargs,
     ) -> dict[str, torch.Tensor]:
         """Predict energy and optionally forces.
 
         Args:
-            node_attrs: Dictionary of node attributes (e.g., {"Z": ...}).
+            Z: Atomic numbers (n_nodes,).
             pos: Atomic positions (requires_grad=True if compute_forces=True).
             bond_dist: Bond distances (n_edges,).
             bond_diff: Bond vectors (n_edges, 3).
             edge_index: Edge indices (n_edges, 2).
             batch: Batch indices (n_nodes,).
+            num_graphs: Number of graphs in the batch.
 
         Returns:
             Dictionary with "energy" and optionally "forces".
         """
         # 1. Encode: per-layer geometric features
         per_layer_features = self.encoder(
-            node_attrs=node_attrs,
+            Z=Z,
             bond_dist=bond_dist,
             bond_diff=bond_diff,
             edge_index=edge_index,
@@ -858,7 +860,7 @@ class ScaleShiftMACE(nn.Module):
         atomic_energy = atomic_energy * self.scale + self.shift
 
         # 3. Energy head: pool to molecular energies
-        energy = self.energy_head(atomic_energy, batch)
+        energy = self.energy_head(atomic_energy, batch, num_graphs)
 
         results = {"energy": energy}
 

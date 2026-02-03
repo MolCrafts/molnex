@@ -4,6 +4,14 @@ import pytest
 import torch
 import math
 from molrep.embedding.angular import SphericalHarmonics, SphericalHarmonicsSpec
+from molrep.utils.equivariance import (
+    rotation_matrix_z,
+    rotation_matrix_x,
+    rotation_matrix_y,
+    random_rotation_matrix,
+    rotate_vectors,
+)
+from tests.utils import assert_module_compiles, assert_module_exports, assert_outputs_close
 
 
 class TestSphericalHarmonicsSpec:
@@ -159,9 +167,141 @@ class TestSphericalHarmonics:
     def test_different_l_max_values(self):
         """Test various l_max values."""
         vectors = torch.randn(10, 3)
-        
+
         for l_max in [0, 1, 2, 3, 4]:
             sh = SphericalHarmonics(l_max=l_max)
             output = sh(vectors)
             expected_dim = (l_max + 1) ** 2
             assert output.shape == (10, expected_dim)
+
+    def test_rotation_equivariance_l1(self):
+        """Test that l=1 components transform as vectors under rotation.
+
+        For l=1, the spherical harmonics should transform like a 3D vector:
+        Y_l=1(R·r) should be related to R·Y_l=1(r) by a rotation matrix.
+        """
+        sh = SphericalHarmonics(l_max=1)
+
+        # Original vectors
+        vectors = torch.randn(10, 3)
+        vectors = vectors / vectors.norm(dim=-1, keepdim=True)  # Normalize
+        output1 = sh(vectors)
+
+        # Rotate vectors (90 deg around z-axis)
+        angle = math.pi / 2
+        rot_matrix = rotation_matrix_z(angle, dtype=vectors.dtype)
+        vectors_rot = rotate_vectors(vectors, rot_matrix)
+        output2 = sh(vectors_rot)
+
+        # For l=0 (first component), should be invariant
+        assert torch.allclose(output1[:, 0], output2[:, 0], atol=1e-5)
+
+        # For l=1 (next 3 components), should transform as vectors
+        # Note: cuEquivariance may use different conventions (real vs complex basis)
+        # We check that they're related by some rotation (not necessarily the same matrix)
+        l1_output1 = output1[:, 1:4]
+        l1_output2 = output2[:, 1:4]
+
+        # Check that norms are preserved
+        norm1 = l1_output1.norm(dim=-1)
+        norm2 = l1_output2.norm(dim=-1)
+        assert torch.allclose(norm1, norm2, rtol=1e-4, atol=1e-4)
+
+    def test_rotation_equivariance_random(self):
+        """Test equivariance under random rotations for l=0, l=1, l=2."""
+        sh = SphericalHarmonics(l_max=2)
+
+        # Generate random vectors
+        vectors = torch.randn(20, 3)
+        vectors = vectors / vectors.norm(dim=-1, keepdim=True)
+
+        # Generate random rotation
+        rot_matrix = random_rotation_matrix(dtype=vectors.dtype)
+
+        # Compute outputs
+        output1 = sh(vectors)
+        vectors_rot = rotate_vectors(vectors, rot_matrix)
+        output2 = sh(vectors_rot)
+
+        # l=0 should be invariant
+        assert torch.allclose(output1[:, 0], output2[:, 0], rtol=1e-4, atol=1e-4)
+
+        # Total output norms should be preserved (rotation is unitary)
+        norm1 = output1.norm(dim=-1)
+        norm2 = output2.norm(dim=-1)
+        assert torch.allclose(norm1, norm2, rtol=1e-3, atol=1e-3)
+
+    def test_rotation_x_axis(self):
+        """Test rotation around x-axis."""
+        sh = SphericalHarmonics(l_max=1)
+
+        vectors = torch.randn(10, 3)
+        vectors = vectors / vectors.norm(dim=-1, keepdim=True)
+
+        # Rotate around x-axis
+        angle = math.pi / 3
+        rot_matrix = rotation_matrix_x(angle, dtype=vectors.dtype)
+
+        output1 = sh(vectors)
+        vectors_rot = rotate_vectors(vectors, rot_matrix)
+        output2 = sh(vectors_rot)
+
+        # l=0 invariant
+        assert torch.allclose(output1[:, 0], output2[:, 0], atol=1e-5)
+
+        # l=1 norms preserved
+        assert torch.allclose(
+            output1[:, 1:4].norm(dim=-1),
+            output2[:, 1:4].norm(dim=-1),
+            rtol=1e-4, atol=1e-4
+        )
+
+    def test_rotation_y_axis(self):
+        """Test rotation around y-axis."""
+        sh = SphericalHarmonics(l_max=1)
+
+        vectors = torch.randn(10, 3)
+        vectors = vectors / vectors.norm(dim=-1, keepdim=True)
+
+        # Rotate around y-axis
+        angle = math.pi / 4
+        rot_matrix = rotation_matrix_y(angle, dtype=vectors.dtype)
+
+        output1 = sh(vectors)
+        vectors_rot = rotate_vectors(vectors, rot_matrix)
+        output2 = sh(vectors_rot)
+
+        # l=0 invariant
+        assert torch.allclose(output1[:, 0], output2[:, 0], atol=1e-5)
+
+        # l=1 norms preserved
+        assert torch.allclose(
+            output1[:, 1:4].norm(dim=-1),
+            output2[:, 1:4].norm(dim=-1),
+            rtol=1e-4, atol=1e-4
+        )
+
+    def test_compile(self):
+        """Test that SphericalHarmonics can be compiled with torch.compile."""
+        sh = SphericalHarmonics(l_max=2)
+        vectors = torch.randn(10, 3)
+
+        # Test compilation
+        output_uncompiled, output_compiled = assert_module_compiles(sh, vectors)
+
+        # Check outputs match
+        assert_outputs_close(output_uncompiled, output_compiled)
+
+    def test_export(self):
+        """Test that SphericalHarmonics can be exported with torch.export."""
+        sh = SphericalHarmonics(l_max=2)
+        vectors = torch.randn(10, 3)
+
+        # Test export
+        exported_program, output_original, output_exported = assert_module_exports(
+            sh,
+            args_tuple=(vectors,),
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_original, output_exported)

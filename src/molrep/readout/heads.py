@@ -36,17 +36,22 @@ class EnergyHead(nn.Module):
             raise ValueError(f"pooling must be 'sum' or 'mean', got '{pooling}'")
         self.pooling = pooling
 
-    def forward(self, node_energy: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        node_energy: torch.Tensor,
+        batch: torch.Tensor,
+        num_graphs: int,
+    ) -> torch.Tensor:
         """Pool node energies to molecular energies.
 
         Args:
             node_energy: Per-atom energies [N].
             batch: Batch indices [N].
+            num_graphs: Number of graphs in the batch.
 
         Returns:
             Molecular energy [B].
         """
-        num_graphs = int(batch.max().item()) + 1
         energy = torch.zeros(
             num_graphs, dtype=node_energy.dtype, device=node_energy.device
         )

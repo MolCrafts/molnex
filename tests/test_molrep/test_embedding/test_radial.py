@@ -3,6 +3,7 @@
 import pytest
 import torch
 from molrep.embedding.radial import BesselRBF, BesselRBFSpec
+from tests.utils import assert_module_compiles, assert_module_exports, assert_outputs_close
 
 
 class TestBesselRBFSpec:
@@ -116,4 +117,29 @@ class TestBesselRBF:
         out_f64 = rbf(dist_f64)
         # Note: BesselRBF casts to float internally
         assert out_f64.dtype in [torch.float32, torch.float64]
+
+    def test_compile(self):
+        """Test that BesselRBF can be compiled with torch.compile."""
+        rbf = BesselRBF(num_radial=8, r_cut=5.0)
+        distances = torch.tensor([1.0, 2.0, 3.0, 4.0])
+
+        # Test compilation
+        output_uncompiled, output_compiled = assert_module_compiles(rbf, distances)
+
+        # Check outputs match
+        assert_outputs_close(output_uncompiled, output_compiled)
+
+    def test_export(self):
+        """Test that BesselRBF can be exported with torch.export."""
+        rbf = BesselRBF(num_radial=8, r_cut=5.0)
+        distances = torch.tensor([1.0, 2.0, 3.0, 4.0])
+
+        # Test export
+        exported_program, output_original, output_exported = assert_module_exports(
+            rbf,
+            args_tuple=(distances,),
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_original, output_exported)
 

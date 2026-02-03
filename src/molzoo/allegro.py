@@ -572,6 +572,7 @@ class ScaleShiftAllegro(nn.Module):
         bond_diff: torch.Tensor,
         edge_index: torch.Tensor,
         batch: torch.Tensor,
+        num_graphs: int,
         **_kwargs,
     ) -> dict[str, torch.Tensor]:
         """Predict energy and optionally forces.
@@ -583,6 +584,7 @@ class ScaleShiftAllegro(nn.Module):
             bond_diff: Bond vectors (n_edges, 3).
             edge_index: Edge indices (n_edges, 2).
             batch: Batch indices (n_nodes,).
+            num_graphs: Number of graphs in the batch.
 
         Returns:
             Dictionary with "energy" and optionally "forces".
@@ -617,7 +619,7 @@ class ScaleShiftAllegro(nn.Module):
         atomic_energies = atomic_energies * self.scale + self.shift
 
         # 4. Energy head: pool to molecular energies
-        energy = self.energy_head(atomic_energies, batch)
+        energy = self.energy_head(atomic_energies, batch, num_graphs)
 
         results: dict[str, torch.Tensor] = {"energy": energy}
 

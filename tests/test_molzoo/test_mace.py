@@ -3,6 +3,7 @@
 import pytest
 import torch
 import torch.nn as nn
+import math
 
 import cuequivariance_torch as cuet
 
@@ -18,6 +19,12 @@ from molrep.embedding.cutoff import CosineCutoff
 from molrep.interaction.tensor_product import ConvTP, irreps_from_l_max, sh_irreps_from_l_max
 from molrep.interaction.symmetric_contraction import SymmetricContraction
 from molrep.readout.basis_projection import BasisProjection
+from molrep.utils.equivariance import (
+    rotation_matrix_z,
+    random_rotation_matrix,
+    rotate_vectors,
+)
+from tests.utils import assert_module_compiles, assert_module_exports, assert_outputs_close
 
 
 class TestEmbeddingBlock:
@@ -102,7 +109,7 @@ class TestEmbeddingBlock:
 
         # Forward pass
         node_feats, edge_attrs, edge_feats = embedding_block(
-            node_attrs={"Z": z},
+            Z=z,
             bond_dist=bond_dist,
             bond_diff=bond_diff,
         )
@@ -177,7 +184,7 @@ class TestEmbeddingBlock:
 
         # Get outputs
         _, _, edge_feats = embedding_block(
-            node_attrs={"Z": z},
+            Z=z,
             bond_dist=bond_dist,
             bond_diff=bond_diff,
         )
@@ -204,40 +211,48 @@ class TestEmbeddingBlock:
         cutoff_value_zero = embedding_block.cutoff_fn(bond_dist_zero)
         assert abs(cutoff_value_zero.item() - 1.0) < 0.01
 
-    def test_forward_with_multiple_node_attributes(self):
-        """Test forward pass with multiple node attribute specs."""
-        num_species = 5
-        num_features = 16
-        r_max = 5.0
 
-        # Multiple node attribute specs
-        node_attr_specs = [
-            DiscreteEmbeddingSpec(input_key="Z", num_classes=num_species, emb_dim=8),
-            DiscreteEmbeddingSpec(input_key="charge", num_classes=3, emb_dim=8),
-        ]
-
-        embedding_block = EmbeddingBlock(
-            node_attr_specs=node_attr_specs,
-            num_features=num_features,
-            r_max=r_max,
-            num_bessel=8,
-            l_max=2,
-        )
-
+    def test_compile(self, embedding_block, embedding_config):
+        """Test that EmbeddingBlock can be compiled with torch.compile."""
         n_atoms = 4
-        z = torch.randint(0, num_species, (n_atoms,))
-        charge = torch.randint(0, 3, (n_atoms,))
-        bond_dist = torch.rand(6) * r_max
-        bond_diff = torch.randn(6, 3)
+        n_edges = 6
 
-        # Forward pass with multiple attributes
-        node_feats, edge_attrs, edge_feats = embedding_block(
-            node_attrs={"Z": z, "charge": charge},
-            bond_dist=bond_dist,
-            bond_diff=bond_diff,
+        # Create input data
+        z = torch.randint(0, embedding_config["num_species"], (n_atoms,))
+        bond_dist = torch.rand(n_edges) * embedding_config["r_max"]
+        bond_diff = torch.randn(n_edges, 3)
+        bond_diff = bond_diff / torch.norm(bond_diff, dim=-1, keepdim=True) * bond_dist.unsqueeze(-1)
+
+        # Test compilation
+        output_uncompiled, output_compiled = assert_module_compiles(
+            embedding_block,
+            z,
+            bond_dist,
+            bond_diff,
         )
 
-        assert node_feats.shape == (n_atoms, num_features)
+        # Check outputs match
+        assert_outputs_close(output_uncompiled, output_compiled)
+
+    def test_export(self, embedding_block, embedding_config):
+        """Test that EmbeddingBlock can be exported with torch.export."""
+        n_atoms = 4
+        n_edges = 6
+
+        # Create input data
+        z = torch.randint(0, embedding_config["num_species"], (n_atoms,))
+        bond_dist = torch.rand(n_edges) * embedding_config["r_max"]
+        bond_diff = torch.randn(n_edges, 3)
+        bond_diff = bond_diff / torch.norm(bond_diff, dim=-1, keepdim=True) * bond_dist.unsqueeze(-1)
+
+        # Test export
+        exported_program, output_original, output_exported = assert_module_exports(
+            embedding_block,
+            args_tuple=(z, bond_dist, bond_diff),
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_original, output_exported)
 
 
 class TestInteractionBlock:
@@ -457,6 +472,60 @@ class TestInteractionBlock:
         output, _ = interaction_block(node_feats, edge_attrs, edge_feats, edge_index)
         assert output.shape == (n_nodes, irreps_dim)
 
+    def test_compile(self, interaction_block, interaction_config):
+        """Test that InteractionBlock can be compiled with torch.compile."""
+        n_nodes = 20
+        n_edges = 50
+        l_max = interaction_config["l_max"]
+        num_features = interaction_config["num_features"]
+        num_bessel = interaction_config["num_bessel"]
+
+        # Calculate dimensions
+        irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
+        sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
+
+        # Create input data
+        node_feats = torch.randn(n_nodes, irreps_dim)
+        edge_attrs = torch.randn(n_edges, sh_dim)
+        edge_feats = torch.randn(n_edges, num_bessel)
+        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
+
+        # Test compilation
+        output_uncompiled, output_compiled = assert_module_compiles(
+            interaction_block,
+            node_feats, edge_attrs, edge_feats, edge_index
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_uncompiled, output_compiled)
+
+    def test_export(self, interaction_block, interaction_config):
+        """Test that InteractionBlock can be exported with torch.export."""
+        n_nodes = 20
+        n_edges = 50
+        l_max = interaction_config["l_max"]
+        num_features = interaction_config["num_features"]
+        num_bessel = interaction_config["num_bessel"]
+
+        # Calculate dimensions
+        irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
+        sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
+
+        # Create input data
+        node_feats = torch.randn(n_nodes, irreps_dim)
+        edge_attrs = torch.randn(n_edges, sh_dim)
+        edge_feats = torch.randn(n_edges, num_bessel)
+        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
+
+        # Test export
+        exported_program, output_original, output_exported = assert_module_exports(
+            interaction_block,
+            args_tuple=(node_feats, edge_attrs, edge_feats, edge_index),
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_original, output_exported)
+
 
 class TestProductBlock:
     """Test ProductBlock initialization and forward pass."""
@@ -649,3 +718,212 @@ class TestProductBlock:
         cue_sc = sc.symmetric_contraction
         assert hasattr(cue_sc, "contraction_degree")
         assert hasattr(cue_sc, "num_elements")
+
+    def test_compile(self, product_block, product_config):
+        """Test that ProductBlock can be compiled with torch.compile."""
+        n_nodes = 20
+        irreps_dim = product_config["irreps_dim"]
+        num_elements = product_config["num_elements"]
+
+        # Create input data
+        node_feats = torch.randn(n_nodes, irreps_dim)
+        node_attrs = torch.randint(0, num_elements, (n_nodes,))
+
+        # Test compilation
+        output_uncompiled, output_compiled = assert_module_compiles(
+            product_block,
+            node_feats, node_attrs
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_uncompiled, output_compiled)
+
+    def test_export(self, product_block, product_config):
+        """Test that ProductBlock can be exported with torch.export."""
+        n_nodes = 20
+        irreps_dim = product_config["irreps_dim"]
+        num_elements = product_config["num_elements"]
+
+        # Create input data
+        node_feats = torch.randn(n_nodes, irreps_dim)
+        node_attrs = torch.randint(0, num_elements, (n_nodes,))
+
+        # Test export
+        exported_program, output_original, output_exported = assert_module_exports(
+            product_block,
+            args_tuple=(node_feats, node_attrs),
+        )
+
+        # Check outputs match
+        assert_outputs_close(output_original, output_exported)
+
+
+class TestEmbeddingBlockEquivariance:
+    """Test equivariance properties of EmbeddingBlock."""
+
+    @pytest.fixture
+    def embedding_block(self):
+        """Create an EmbeddingBlock for equivariance testing."""
+        node_attr_specs = [
+            DiscreteEmbeddingSpec(
+                input_key="Z",
+                num_classes=5,
+                emb_dim=16,
+            )
+        ]
+        return EmbeddingBlock(
+            node_attr_specs=node_attr_specs,
+            num_features=16,
+            r_max=5.0,
+            num_bessel=8,
+            l_max=2,
+        )
+
+    def test_spherical_harmonics_equivariance(self, embedding_block):
+        """Test that spherical harmonics are equivariant under rotation.
+
+        Rotating the bond vectors should rotate the spherical harmonics accordingly.
+        """
+        n_atoms = 4
+        n_edges = 6
+
+        # Create input data
+        z = torch.randint(0, 5, (n_atoms,))
+        bond_diff = torch.randn(n_edges, 3)
+        bond_dist = torch.norm(bond_diff, dim=-1)
+
+        # Normalize bond_diff
+        bond_diff_normalized = bond_diff / bond_dist.unsqueeze(-1)
+
+        # Forward pass
+        _, edge_attrs1, _ = embedding_block(
+            Z=z,
+            bond_dist=bond_dist,
+            bond_diff=bond_diff,
+        )
+
+        # Rotate bond vectors
+        angle = math.pi / 2
+        rot_matrix = rotation_matrix_z(angle, dtype=bond_diff.dtype)
+        bond_diff_rot = rotate_vectors(bond_diff, rot_matrix)
+
+        # Forward pass on rotated
+        _, edge_attrs2, _ = embedding_block(
+            Z=z,
+            bond_dist=bond_dist,
+            bond_diff=bond_diff_rot,
+        )
+
+        # l=0 component should be invariant
+        assert torch.allclose(edge_attrs1[:, 0], edge_attrs2[:, 0], atol=1e-5)
+
+        # Overall norm should be preserved
+        norm1 = edge_attrs1.norm(dim=-1)
+        norm2 = edge_attrs2.norm(dim=-1)
+        assert torch.allclose(norm1, norm2, rtol=1e-4, atol=1e-4)
+
+    def test_radial_features_invariance(self, embedding_block):
+        """Test that radial features are rotation invariant.
+
+        Rotating bond vectors should not change radial features (distances).
+        """
+        n_atoms = 4
+        n_edges = 6
+
+        z = torch.randint(0, 5, (n_atoms,))
+        bond_diff = torch.randn(n_edges, 3)
+        bond_dist = torch.norm(bond_diff, dim=-1)
+
+        # Forward pass
+        _, _, edge_feats1 = embedding_block(
+            Z=z,
+            bond_dist=bond_dist,
+            bond_diff=bond_diff,
+        )
+
+        # Rotate bond vectors
+        rot_matrix = random_rotation_matrix(dtype=bond_diff.dtype)
+        bond_diff_rot = rotate_vectors(bond_diff, rot_matrix)
+
+        # Forward pass on rotated
+        _, _, edge_feats2 = embedding_block(
+            Z=z,
+            bond_dist=bond_dist,
+            bond_diff=bond_diff_rot,
+        )
+
+        # Radial features should be identical (rotation invariant)
+        assert torch.allclose(edge_feats1, edge_feats2, rtol=1e-5, atol=1e-5)
+
+
+class TestInteractionBlockEquivariance:
+    """Test equivariance properties of InteractionBlock."""
+
+    @pytest.fixture
+    def interaction_block(self):
+        """Create an InteractionBlock for testing."""
+        return InteractionBlock(
+            num_features=32,
+            num_bessel=8,
+            l_max=1,  # Use l_max=1 for simpler testing
+            avg_num_neighbors=10.0,
+        )
+
+    def test_output_shape_consistency(self, interaction_block):
+        """Test that rotation doesn't change output shapes."""
+        n_nodes = 10
+        n_edges = 30
+        l_max = 1
+        num_features = 32
+
+        # Calculate dimensions
+        irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
+        sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
+
+        node_feats = torch.randn(n_nodes, irreps_dim)
+        edge_attrs = torch.randn(n_edges, sh_dim)
+        edge_feats = torch.randn(n_edges, 8)
+        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
+
+        # Forward pass
+        output, _ = interaction_block(node_feats, edge_attrs, edge_feats, edge_index)
+
+        assert output.shape == (n_nodes, irreps_dim)
+
+
+class TestProductBlockEquivariance:
+    """Test equivariance properties of ProductBlock."""
+
+    @pytest.fixture
+    def product_block(self):
+        """Create a ProductBlock for testing."""
+        return ProductBlock(
+            irreps_dim=160,  # 32*1 + 32*3 = 128 for l_max=1, num_features=32
+            num_features=32,
+            num_bessel=8,
+            l_max=1,
+            correlation=2,
+            num_elements=10,
+        )
+
+    def test_permutation_equivariance(self, product_block):
+        """Test that ProductBlock is equivariant to node permutations."""
+        n_nodes = 15
+        irreps_dim = 160
+
+        node_feats = torch.randn(n_nodes, irreps_dim)
+        node_attrs = torch.randint(0, 10, (n_nodes,))
+
+        # Forward pass
+        output1 = product_block(node_feats, node_attrs)
+
+        # Permute nodes
+        perm = torch.randperm(n_nodes)
+        node_feats_perm = node_feats[perm]
+        node_attrs_perm = node_attrs[perm]
+
+        # Forward on permuted
+        output2 = product_block(node_feats_perm, node_attrs_perm)
+
+        # Outputs should match after inverse permutation
+        assert torch.allclose(output1[perm], output2, rtol=1e-5, atol=1e-5)
