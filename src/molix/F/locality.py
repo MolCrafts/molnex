@@ -2,7 +2,7 @@
 Functional API for locality operations (molix)
 """
 
-from torch import empty, ops, Tensor
+from torch import Tensor, empty, ops
 
 
 def get_neighbor_pairs(
@@ -10,7 +10,7 @@ def get_neighbor_pairs(
     cutoff: float,
     max_num_pairs: int = -1,
     box_vectors: Tensor | None = None,
-    check_errors: bool = False
+    check_errors: bool = False,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """Returns indices and distances of atom pairs within a given cutoff distance.
 

@@ -27,10 +27,10 @@ class Task:
         """Deterministic identifier used in cache key computation."""
         return type(self).__name__
 
-    def execute(self, data: Any) -> Any:
+    def execute(self, data: dict) -> dict:
         raise NotImplementedError
 
-    def __call__(self, data: Any) -> Any:
+    def __call__(self, data: dict) -> dict:
         return self.execute(data)
 
 
@@ -42,7 +42,7 @@ class SampleTask(Task):
     Examples: neighbor list, graph construction, augmentation.
     """
 
-    def execute(self, sample: dict) -> dict:
+    def execute(self, data: dict) -> dict:
         raise NotImplementedError
 
 
@@ -61,7 +61,7 @@ class DatasetTask(Task):
         """Fit global parameters from the training set."""
         raise NotImplementedError
 
-    def execute(self, sample: dict) -> dict:
+    def execute(self, data: dict) -> dict:
         """Apply fitted parameters to a single sample."""
         raise NotImplementedError
 
@@ -82,5 +82,5 @@ class BatchTask(Task):
     Examples: force padding, negative sampling, batch augmentation.
     """
 
-    def execute(self, batch: dict) -> dict:
+    def execute(self, data: dict) -> dict:
         raise NotImplementedError

@@ -123,9 +123,9 @@ class MaxPooling(nn.Module):
             dim_size = int(batch.max()) + 1
 
         if x.dim() == 1:
-            out = torch.full((dim_size,), float('-inf'), dtype=x.dtype, device=x.device)
+            out = torch.full((dim_size,), float("-inf"), dtype=x.dtype, device=x.device)
         else:
-            out = torch.full((dim_size, x.shape[1]), float('-inf'), dtype=x.dtype, device=x.device)
+            out = torch.full((dim_size, x.shape[1]), float("-inf"), dtype=x.dtype, device=x.device)
 
         for mol_idx in range(dim_size):
             mask = batch == mol_idx

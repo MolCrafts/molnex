@@ -104,8 +104,6 @@ class LJ126(nn.Module):
         if num_graphs is None:
             num_graphs = int(edge_batch.max().item()) + 1
 
-        energy = torch.zeros(
-            num_graphs, dtype=pair_energy.dtype, device=pair_energy.device
-        )
+        energy = torch.zeros(num_graphs, dtype=pair_energy.dtype, device=pair_energy.device)
         energy.index_add_(0, edge_batch, pair_energy)
         return energy

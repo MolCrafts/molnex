@@ -1,9 +1,9 @@
 """Neural network utilities for molix."""
 
-from .mlp import KeyedMLP, KeyedMLPSpec
 from .locality import NeighborList
-from .scatter import ScatterSum, BatchAggregation
+from .mlp import KeyedMLP, KeyedMLPSpec
 from .pot import PMEElectrostatics
+from .scatter import BatchAggregation, ScatterSum
 
 __all__ = [
     "KeyedMLP",

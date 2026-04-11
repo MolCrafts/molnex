@@ -5,8 +5,9 @@ including rotation matrix generation and transformation of features.
 """
 
 import math
-import torch
+
 import cuequivariance as cue
+import torch
 
 
 def random_rotation_matrix(dtype: torch.dtype = torch.float32) -> torch.Tensor:
@@ -42,11 +43,7 @@ def rotation_matrix_z(angle: float, dtype: torch.dtype = torch.float32) -> torch
         3x3 rotation matrix for rotation around z-axis.
     """
     cos_a, sin_a = math.cos(angle), math.sin(angle)
-    return torch.tensor([
-        [cos_a, -sin_a, 0],
-        [sin_a, cos_a, 0],
-        [0, 0, 1]
-    ], dtype=dtype)
+    return torch.tensor([[cos_a, -sin_a, 0], [sin_a, cos_a, 0], [0, 0, 1]], dtype=dtype)
 
 
 def rotation_matrix_x(angle: float, dtype: torch.dtype = torch.float32) -> torch.Tensor:
@@ -60,11 +57,7 @@ def rotation_matrix_x(angle: float, dtype: torch.dtype = torch.float32) -> torch
         3x3 rotation matrix for rotation around x-axis.
     """
     cos_a, sin_a = math.cos(angle), math.sin(angle)
-    return torch.tensor([
-        [1, 0, 0],
-        [0, cos_a, -sin_a],
-        [0, sin_a, cos_a]
-    ], dtype=dtype)
+    return torch.tensor([[1, 0, 0], [0, cos_a, -sin_a], [0, sin_a, cos_a]], dtype=dtype)
 
 
 def rotation_matrix_y(angle: float, dtype: torch.dtype = torch.float32) -> torch.Tensor:
@@ -78,11 +71,7 @@ def rotation_matrix_y(angle: float, dtype: torch.dtype = torch.float32) -> torch
         3x3 rotation matrix for rotation around y-axis.
     """
     cos_a, sin_a = math.cos(angle), math.sin(angle)
-    return torch.tensor([
-        [cos_a, 0, sin_a],
-        [0, 1, 0],
-        [-sin_a, 0, cos_a]
-    ], dtype=dtype)
+    return torch.tensor([[cos_a, 0, sin_a], [0, 1, 0], [-sin_a, 0, cos_a]], dtype=dtype)
 
 
 def rotate_vectors(vectors: torch.Tensor, rot_matrix: torch.Tensor) -> torch.Tensor:
@@ -136,14 +125,14 @@ def rotate_irreps_features_simple(
             # In ir_mul layout: features are ordered as (ir_dim, mul)
             # So for l=1 with mul=M, we have shape (3, M) flattened to (3*M,)
             # which means: [x1, x2, ..., xM, y1, y2, ..., yM, z1, z2, ..., zM]
-            vec_block = features[:, offset:offset + mul * 3]  # (n_nodes, 3*mul)
+            vec_block = features[:, offset : offset + mul * 3]  # (n_nodes, 3*mul)
             vec_block_reshaped = vec_block.reshape(n_nodes, 3, mul)  # (n_nodes, 3, mul)
 
             # Apply rotation to xyz components
-            vec_block_rotated = torch.einsum('ij,njm->nim', rot_matrix, vec_block_reshaped)
+            vec_block_rotated = torch.einsum("ij,njm->nim", rot_matrix, vec_block_reshaped)
 
             # Reshape back
-            rotated[:, offset:offset + mul * 3] = vec_block_rotated.reshape(n_nodes, 3 * mul)
+            rotated[:, offset : offset + mul * 3] = vec_block_rotated.reshape(n_nodes, 3 * mul)
             offset += mul * dim_l
         else:
             # Higher-order irreps: for proper equivariance, need Wigner D matrices

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import torch
 
-from molix.F.locality import get_neighbor_pairs
 from molix.data.task import SampleTask
+from molix.F.locality import get_neighbor_pairs
 
 
 def _normalize_to_E2(edge_index: torch.Tensor) -> torch.Tensor:
@@ -43,9 +43,9 @@ class NeighborList(SampleTask):
     def task_id(self) -> str:
         return f"nlist:cut={self.cutoff}:max={self.max_num_pairs}:pbc={self.pbc}"
 
-    def execute(self, sample: dict) -> dict:
-        pos = sample["pos"]
-        box_vectors = sample.get("cell") if self.pbc else None
+    def execute(self, data: dict) -> dict:
+        pos = data["pos"]
+        box_vectors = data.get("cell") if self.pbc else None
 
         neighbors, deltas, distances, _ = get_neighbor_pairs(
             positions=pos,
@@ -64,7 +64,7 @@ class NeighborList(SampleTask):
             distances = distances[valid]
 
         return {
-            **sample,
+            **data,
             "edge_index": edge_index,
             "bond_diff": deltas.float(),
             "bond_dist": distances.float(),

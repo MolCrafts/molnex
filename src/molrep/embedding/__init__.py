@@ -8,10 +8,10 @@ Provides embedding and feature extraction modules:
 - PolynomialCutoff: Polynomial-based cutoff envelope
 """
 
-from .node import JointEmbedding
-from .cutoff import CosineCutoff, PolynomialCutoff
-from .radial import BesselRBF
 from .angular import SphericalHarmonics
+from .cutoff import CosineCutoff, PolynomialCutoff
+from .node import JointEmbedding
+from .radial import BesselRBF
 
 __all__ = [
     "JointEmbedding",
@@ -20,4 +20,3 @@ __all__ = [
     "CosineCutoff",
     "PolynomialCutoff",
 ]
-

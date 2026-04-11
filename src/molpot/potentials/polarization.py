@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
 
@@ -108,7 +110,7 @@ class Polarization(nn.Module):
 
     @staticmethod
     def _cg_solve(
-        matvec: callable,
+        matvec: Callable,
         b: torch.Tensor,
         max_iter: int = 50,
         tol: float = 1e-6,

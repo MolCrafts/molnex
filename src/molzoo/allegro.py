@@ -28,14 +28,12 @@ Reference:
 
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
-from pydantic import BaseModel, ConfigDict, Field
-
 import cuequivariance as cue
 import cuequivariance_torch as cuet
-from cuequivariance import Irreps, O3
-
+import torch
+import torch.nn as nn
+from cuequivariance import O3, Irreps
+from pydantic import BaseModel, ConfigDict, Field
 from tensordict.nn import TensorDictModuleBase
 
 from molix import config
@@ -44,7 +42,6 @@ from molrep.embedding.angular import SphericalHarmonics
 from molrep.embedding.cutoff import PolynomialCutoff
 from molrep.embedding.radial import BesselRBF
 from molrep.interaction.tensor_product import irreps_from_l_max, sh_irreps_from_l_max
-
 
 # ===========================================================================
 # PairEmbedding Block
@@ -113,9 +110,7 @@ class PairEmbedding(nn.Module):
         # tensor_dim = num_tensor_features per irrep channel
         with cue.assume(O3):
             self.irreps_dim = Irreps(irreps_from_l_max(l_max, num_tensor_features)).dim
-        self.tensor_env = nn.Linear(
-            num_scalar_features, num_tensor_features, dtype=config.ftype
-        )
+        self.tensor_env = nn.Linear(num_scalar_features, num_tensor_features, dtype=config.ftype)
 
     def forward(
         self,
@@ -165,13 +160,14 @@ class PairEmbedding(nn.Module):
         # Expand env_weights across angular components:
         # (n_edges, num_tensor) × (n_edges, sh_dim) → (n_edges, num_tensor * sh_dim)
         # Using ir_mul layout: for each (l,m), repeat num_tensor times
-        sh_dim = edge_angular.shape[-1]
         # ir_mul layout: group by irrep, then channels
         # edge_angular: (n_edges, sh_dim) where sh_dim = sum(2l+1)
         # We want: for each l, multiply env_weights[:, :num_tensor] with Y_l^m
         tensor_features = torch.zeros(
-            edge_angular.shape[0], self.irreps_dim,
-            dtype=edge_angular.dtype, device=edge_angular.device,
+            edge_angular.shape[0],
+            self.irreps_dim,
+            dtype=edge_angular.dtype,
+            device=edge_angular.device,
         )
         offset_sh = 0
         offset_tp = 0
@@ -267,9 +263,7 @@ class AllegroLayer(nn.Module):
         self.latent_mlp = nn.Sequential(*mlp_layers)
 
         # Tensor environment: scalar → mixing weights for tensor features
-        self.tensor_env = nn.Linear(
-            num_scalar_features, num_tensor_features, dtype=config.ftype
-        )
+        self.tensor_env = nn.Linear(num_scalar_features, num_tensor_features, dtype=config.ftype)
 
         with cue.assume(O3):
             self.irreps_dim = Irreps(irreps_str).dim

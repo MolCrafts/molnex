@@ -30,18 +30,16 @@ Reference:
 
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
-from pydantic import BaseModel, ConfigDict, Field
-
 import cuequivariance as cue
 import cuequivariance_torch as cuet
-from cuequivariance import Irreps, O3
-
+import torch
+import torch.nn as nn
+from cuequivariance import O3, Irreps
+from pydantic import BaseModel, ConfigDict, Field
 from tensordict.nn import TensorDictModuleBase
 
 from molix import config
-from molix.data.types import GraphBatch, NodeRepAtoms
+from molix.data.types import GraphBatch
 from molrep.embedding.angular import SphericalHarmonics
 from molrep.embedding.cutoff import CosineCutoff
 from molrep.embedding.node import (
@@ -58,7 +56,6 @@ from molrep.interaction.tensor_product import (
     sh_irreps_from_l_max,
 )
 from molrep.readout.product_head import ProductHead
-
 
 # ===========================================================================
 # Embedding Block

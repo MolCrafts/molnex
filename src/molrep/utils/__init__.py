@@ -1,10 +1,10 @@
 """Utility modules for molrep."""
 
 from .geometry import (
+    CosineCutoff,
+    GaussianRBF,
     NeighborGraphBuilder,
     SphericalBasis,
-    GaussianRBF,
-    CosineCutoff,
 )
 
 __all__ = [

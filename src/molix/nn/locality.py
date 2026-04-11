@@ -2,8 +2,8 @@
 Module wrappers for locality operations (molix)
 """
 
-import torch
 import torch.nn as nn
+
 from ..F import locality as F
 
 

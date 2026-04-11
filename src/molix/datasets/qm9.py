@@ -8,7 +8,6 @@ import shutil
 import tarfile
 import urllib.request
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 import torch
@@ -35,10 +34,23 @@ class QM9Source:
     EXCLUDE_URL = "https://figshare.com/ndownloader/files/3195404"
 
     PROPERTY_NAMES = [
-        "tag", "index",
-        "A", "B", "C", "mu", "alpha",
-        "homo", "lumo", "gap", "r2", "zpve",
-        "U0", "U", "H", "G", "Cv",
+        "tag",
+        "index",
+        "A",
+        "B",
+        "C",
+        "mu",
+        "alpha",
+        "homo",
+        "lumo",
+        "gap",
+        "r2",
+        "zpve",
+        "U0",
+        "U",
+        "H",
+        "G",
+        "Cv",
     ]
 
     def __init__(
@@ -117,9 +129,7 @@ class QM9Source:
             self.tarball_path.write_bytes(response.read())
 
     def _download_exclusion_list(self) -> None:
-        req = urllib.request.Request(
-            self.EXCLUDE_URL, headers={"User-Agent": "Mozilla/5.0"}
-        )
+        req = urllib.request.Request(self.EXCLUDE_URL, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req) as response:
             self.exclude_path.write_bytes(response.read())
 
@@ -168,9 +178,7 @@ class QM9Source:
                     excluded.add(int(parts[0]))
         return excluded
 
-    def _load_member_text(
-        self, member_name: str, tar: tarfile.TarFile | None
-    ) -> str:
+    def _load_member_text(self, member_name: str, tar: tarfile.TarFile | None) -> str:
         if self.extract:
             return (self.extracted_path / member_name).read_text(encoding="utf-8")
 
@@ -200,9 +208,7 @@ class QM9Source:
         for key in self.PROPERTY_NAMES:
             if key in ("tag", "index"):
                 continue
-            targets[key] = torch.tensor(
-                [float(frame.metadata[key])], dtype=torch.float32
-            )
+            targets[key] = torch.tensor([float(frame.metadata[key])], dtype=torch.float32)
 
         return {"Z": z, "pos": pos, "targets": targets}
 

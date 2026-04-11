@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
-import os
 import ssl
 import urllib.request
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import torch
 
 from molix.data.source import Sample
 
-ssl._create_default_https_context = ssl._create_unverified_context
+ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[assignment]
 
 
 class MD17Source:
@@ -48,8 +45,7 @@ class MD17Source:
 
         if not self.filepath.exists():
             raise FileNotFoundError(
-                f"MD17 file not found at {self.filepath}. "
-                "Set download=True or place it manually."
+                f"MD17 file not found at {self.filepath}. Set download=True or place it manually."
             )
 
         data = np.load(self.filepath)

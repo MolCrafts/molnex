@@ -53,34 +53,28 @@ class AtomicDress(DatasetTask):
         y = np.asarray(y_vals, dtype=np.float64)
         beta, *_ = np.linalg.lstsq(x, y, rcond=None)
 
-        self.atomic_energies = {
-            elem: float(beta[idx]) for idx, elem in enumerate(self.elements)
-        }
+        self.atomic_energies = {elem: float(beta[idx]) for idx, elem in enumerate(self.elements)}
 
-    def execute(self, sample: dict) -> dict:
+    def execute(self, data: dict) -> dict:
         if not self.atomic_energies:
             raise RuntimeError("AtomicDress.fit() must be called before execute()")
 
-        targets = dict(sample.get("targets", {}))
+        targets = dict(data.get("targets", {}))
         if self.target_key not in targets:
             raise KeyError(f"Missing target '{self.target_key}'")
 
-        baseline = sum(
-            self.atomic_energies.get(int(z.item()), 0.0) for z in sample["Z"]
-        )
+        baseline = sum(self.atomic_energies.get(int(z.item()), 0.0) for z in data["Z"])
         value = targets[self.target_key].reshape(-1)[0]
         corrected = value - torch.tensor(baseline, dtype=value.dtype, device=value.device)
         targets[self.output_key] = corrected.reshape(1)
 
-        return {**sample, "targets": targets}
+        return {**data, "targets": targets}
 
     def state_dict(self) -> dict[str, Any]:
         elems = sorted(self.atomic_energies.keys())
         return {
             "elements": torch.tensor(elems, dtype=torch.long),
-            "energies": torch.tensor(
-                [self.atomic_energies[e] for e in elems], dtype=torch.float64
-            ),
+            "energies": torch.tensor([self.atomic_energies[e] for e in elems], dtype=torch.float64),
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:

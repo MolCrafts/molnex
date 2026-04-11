@@ -28,9 +28,7 @@ class LayerPooling(nn.Module):
     def __init__(self, reduction: str = "mean"):
         super().__init__()
         if reduction not in ("mean", "sum", "last"):
-            raise ValueError(
-                f"reduction must be 'mean', 'sum', or 'last', got '{reduction}'"
-            )
+            raise ValueError(f"reduction must be 'mean', 'sum', or 'last', got '{reduction}'")
         self.reduction = reduction
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:

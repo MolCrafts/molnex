@@ -71,9 +71,7 @@ class EnergyHead(nn.Module):
 
         num_molecules = int(graph_batch.max().item()) + 1
         molecular_energies = torch.zeros(
-            num_molecules,
-            dtype=atomic_energies.dtype,
-            device=atomic_energies.device
+            num_molecules, dtype=atomic_energies.dtype, device=atomic_energies.device
         )
         molecular_energies.index_add_(0, graph_batch, atomic_energies)
 
@@ -82,10 +80,10 @@ class EnergyHead(nn.Module):
 
 class TypeHead(nn.Module):
     """Predict atom types from atomic representations."""
-    
+
     def __init__(self, hidden_dim: int = 64, num_types: int = 100):
         """Initialize type head.
-        
+
         Args:
             hidden_dim: Dimension of hidden representation
             num_types: Number of atom types to predict
@@ -96,13 +94,13 @@ class TypeHead(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, num_types),
         )
-    
+
     def forward(self, atoms_h: torch.Tensor) -> torch.Tensor:
         """Predict atom type logits.
-        
+
         Args:
             atoms_h: Atomic hidden states [N, D]
-            
+
         Returns:
             Type logits [N, num_types]
         """

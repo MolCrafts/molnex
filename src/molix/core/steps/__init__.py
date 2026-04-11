@@ -9,8 +9,8 @@ from __future__ import annotations
 from typing import Any
 
 from molix.core.steps.base import Step
-from molix.core.steps.train_step import DefaultTrainStep
 from molix.core.steps.eval_step import DefaultEvalStep
+from molix.core.steps.train_step import DefaultTrainStep
 
 _NON_MODEL_KEYS = frozenset({"targets", "extras"})
 

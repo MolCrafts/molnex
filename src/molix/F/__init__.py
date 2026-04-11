@@ -3,8 +3,8 @@ molix.F - Functional stateless API for common operations (mirrors former molnex.
 """
 
 from .locality import *
-from .scatter import *
 from .pot import *
+from .scatter import *
 
 __all__ = [
     # locality

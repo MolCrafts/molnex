@@ -5,9 +5,6 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Protocol, runtime_checkable
 
-import torch
-
-
 Sample = dict[str, Any]
 
 
@@ -62,9 +59,7 @@ class SubsetSource:
 
     @property
     def source_id(self) -> str:
-        idx_hash = hashlib.sha256(
-            str(sorted(self._indices)).encode()
-        ).hexdigest()[:12]
+        idx_hash = hashlib.sha256(str(sorted(self._indices)).encode()).hexdigest()[:12]
         return f"{self._source.source_id}:subset={idx_hash}"
 
     def __len__(self) -> int:
