@@ -1,27 +1,24 @@
-"""Allegro: Strictly local equivariant interatomic potential.
+"""Allegro: local equivariant edge encoder.
 
-Pair-level equivariant neural network using iterated tensor products
-without message passing. Features live on edges (pairs) rather than nodes.
+Pair-level equivariant encoder using iterated tensor products without message
+passing. It returns edge features only; downstream parameterization, potential
+composition, and force derivation live outside this module.
 
 Example:
-    >>> from molzoo.allegro import Allegro, ScaleShiftAllegro
-    >>>
-    >>> # Feature extractor only
+    >>> from molzoo.allegro import Allegro
     >>> encoder = Allegro(
     ...     num_elements=118,
     ...     num_scalar_features=64,
     ...     num_tensor_features=16,
     ...     r_max=5.0,
     ... )
-    >>>
-    >>> # Complete energy/force model
-    >>> model = ScaleShiftAllegro(
-    ...     num_elements=118,
-    ...     num_scalar_features=64,
-    ...     num_tensor_features=16,
-    ...     r_max=5.0,
-    ...     compute_forces=True,
+    >>> features = encoder(
+    ...     Z=Z,
+    ...     bond_dist=bond_dist,
+    ...     bond_diff=bond_diff,
+    ...     edge_index=edge_index,
     ... )
+    >>> print(features.shape)  # (n_edges, num_layers, num_scalar)
 
 Reference:
     Musaelian et al. "Learning Local Equivariant Representations for
@@ -39,12 +36,14 @@ import cuequivariance as cue
 import cuequivariance_torch as cuet
 from cuequivariance import Irreps, O3
 
+from tensordict.nn import TensorDictModuleBase
+
 from molix import config
+from molix.data.types import GraphBatch
 from molrep.embedding.angular import SphericalHarmonics
 from molrep.embedding.cutoff import PolynomialCutoff
 from molrep.embedding.radial import BesselRBF
 from molrep.interaction.tensor_product import irreps_from_l_max, sh_irreps_from_l_max
-from molrep.readout import EnergyHead, ForceHead
 
 
 # ===========================================================================
@@ -348,26 +347,33 @@ class AllegroSpec(BaseModel):
     mlp_depth: int = Field(1, ge=0)
 
 
-class Allegro(nn.Module):
+class Allegro(TensorDictModuleBase):
     """Allegro equivariant feature encoder.
 
-    Pair-level feature extractor using iterated tensor products without
-    message passing. Returns per-layer scalar edge features for downstream
-    readout.
+    Accepts a ``GraphBatch`` TensorDict and writes ``edge_features``
+    into the ``edges`` sub-dict.
 
     Architecture::
 
-        Input (Z, bond_dist, bond_diff, edge_index)
+        GraphBatch(atoms, edges)
           → [PairEmbedding] → scalar_features, tensor_features, edge_angular
           → [AllegroLayer₁] → (scalars₁, tensors₁)
-          → [AllegroLayer₂] → (scalars₂, tensors₂)
           → ...
-          → per_layer_scalars (n_edges, num_layers, num_scalar)
+          → edges.edge_features (n_edges, num_layers, num_scalar)
 
-    Attributes:
-        embedding: PairEmbedding for initial edge features.
-        layers: AllegroLayer modules for pair-level tensor products.
+    Reference:
+        Musaelian et al. "Learning Local Equivariant Representations for
+        Large-Scale Atomistic Dynamics" Nature Communications 2023
+        https://arxiv.org/abs/2204.05249
     """
+
+    in_keys = [
+        ("atoms", "Z"),
+        ("edges", "edge_index"),
+        ("edges", "bond_diff"),
+        ("edges", "bond_dist"),
+    ]
+    out_keys = [("edges", "edge_features")]
 
     def __init__(
         self,
@@ -417,25 +423,21 @@ class Allegro(nn.Module):
             ]
         )
 
-    def forward(
-        self,
-        Z: torch.Tensor,
-        bond_dist: torch.Tensor,
-        bond_diff: torch.Tensor,
-        edge_index: torch.Tensor,
-        **_kwargs,
-    ) -> torch.Tensor:
+    def forward(self, td: GraphBatch) -> GraphBatch:
         """Extract per-layer pair scalar features.
 
         Args:
-            Z: Atomic numbers (n_nodes,).
-            bond_dist: Bond distances (n_edges,).
-            bond_diff: Bond vectors (n_edges, 3).
-            edge_index: Edge indices (n_edges, 2).
+            td: ``GraphBatch`` with ``atoms`` and ``edges`` sub-dicts.
 
         Returns:
-            Per-layer scalar features (n_edges, num_layers, num_scalar).
+            Same ``GraphBatch`` with ``edges.edge_features``
+            ``(n_edges, num_layers, num_scalar)`` added.
         """
+        Z = td["atoms", "Z"]
+        bond_dist = td["edges", "bond_dist"]
+        bond_diff = td["edges", "bond_diff"]
+        edge_index = td["edges", "edge_index"]
+
         scalar_features, tensor_features, edge_angular, _ = self.embedding(
             Z=Z,
             bond_dist=bond_dist,
@@ -453,179 +455,5 @@ class Allegro(nn.Module):
             )
             per_layer_scalars.append(scalar_features)
 
-        return torch.stack(per_layer_scalars, dim=1)
-
-
-# ===========================================================================
-# ScaleShiftAllegro (Complete Model)
-# ===========================================================================
-
-
-class ScaleShiftAllegroSpec(BaseModel):
-    """Configuration for the complete ScaleShiftAllegro model."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    encoder_spec: AllegroSpec
-    compute_forces: bool = False
-    atomic_inter_scale: float = 1.0
-    atomic_inter_shift: float = 0.0
-
-
-class ScaleShiftAllegro(nn.Module):
-    """Complete Allegro model: Encoder + Readout + Prediction Heads.
-
-    Combines three components:
-    1. **Allegro encoder**: Pair-level geometric feature extraction.
-    2. **Readout layers**: Per-layer MLP projections from edge scalars to pair energies.
-    3. **Prediction heads**: Edge→node scatter, energy pooling, force computation.
-
-    Architecture::
-
-        Input (Z, pos, bond_dist, bond_diff, edge_index, batch)
-          → [Allegro] → per_layer_scalars (n_edges, num_layers, num_scalar)
-          → [Readouts] → per_layer_pair_energies (n_edges, num_layers)
-          → sum over layers → pair_energies (n_edges,)
-          → scatter_sum to target nodes → atomic_energies (n_nodes,)
-          → scale_shift → [EnergyHead] → energy
-          → [ForceHead] → forces (optional)
-
-    Attributes:
-        encoder: Allegro feature encoder.
-        readouts: Per-layer readout modules.
-        energy_head: Energy pooling head.
-        force_head: Force computation head (optional).
-    """
-
-    def __init__(
-        self,
-        *,
-        num_elements: int,
-        num_scalar_features: int = 64,
-        num_tensor_features: int = 16,
-        r_max: float,
-        num_bessel: int = 8,
-        l_max: int = 2,
-        num_layers: int = 2,
-        mlp_depth: int = 1,
-        compute_forces: bool = False,
-        atomic_inter_scale: float = 1.0,
-        atomic_inter_shift: float = 0.0,
-    ):
-        super().__init__()
-
-        self.compute_forces = compute_forces
-
-        # 1. Allegro Encoder
-        self.encoder = Allegro(
-            num_elements=num_elements,
-            num_scalar_features=num_scalar_features,
-            num_tensor_features=num_tensor_features,
-            r_max=r_max,
-            num_bessel=num_bessel,
-            l_max=l_max,
-            num_layers=num_layers,
-            mlp_depth=mlp_depth,
-        )
-
-        # 2. Readout layers (Linear for intermediate, MLP for last)
-        self.readouts = nn.ModuleList()
-        for i in range(num_layers):
-            if i < num_layers - 1:
-                self.readouts.append(
-                    nn.Linear(num_scalar_features, 1, dtype=config.ftype)
-                )
-            else:
-                self.readouts.append(
-                    nn.Sequential(
-                        nn.Linear(num_scalar_features, 16, dtype=config.ftype),
-                        nn.SiLU(),
-                        nn.Linear(16, 1, dtype=config.ftype),
-                    )
-                )
-
-        # Scale and shift
-        self.register_buffer(
-            "scale", torch.tensor(atomic_inter_scale, dtype=config.ftype)
-        )
-        self.register_buffer(
-            "shift", torch.tensor(atomic_inter_shift, dtype=config.ftype)
-        )
-
-        # 3. Prediction heads
-        self.energy_head = EnergyHead(pooling="sum")
-        if compute_forces:
-            self.force_head = ForceHead()
-
-        self.config = ScaleShiftAllegroSpec(
-            encoder_spec=self.encoder.config,
-            compute_forces=compute_forces,
-            atomic_inter_scale=atomic_inter_scale,
-            atomic_inter_shift=atomic_inter_shift,
-        )
-
-    def forward(
-        self,
-        Z: torch.Tensor,
-        pos: torch.Tensor,
-        bond_dist: torch.Tensor,
-        bond_diff: torch.Tensor,
-        edge_index: torch.Tensor,
-        batch: torch.Tensor,
-        num_graphs: int,
-        **_kwargs,
-    ) -> dict[str, torch.Tensor]:
-        """Predict energy and optionally forces.
-
-        Args:
-            Z: Atomic numbers (n_nodes,).
-            pos: Atomic positions (n_nodes, 3).
-            bond_dist: Bond distances (n_edges,).
-            bond_diff: Bond vectors (n_edges, 3).
-            edge_index: Edge indices (n_edges, 2).
-            batch: Batch indices (n_nodes,).
-            num_graphs: Number of graphs in the batch.
-
-        Returns:
-            Dictionary with "energy" and optionally "forces".
-        """
-        # 1. Encode: per-layer pair scalar features
-        per_layer_scalars = self.encoder(
-            Z=Z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff,
-            edge_index=edge_index,
-        )
-        # Shape: (n_edges, num_layers, num_scalar)
-
-        # 2. Readout: per-layer scalars → per-layer pair energies
-        per_layer_energies = []
-        for i, readout in enumerate(self.readouts):
-            pair_e = readout(per_layer_scalars[:, i, :]).squeeze(-1)  # (n_edges,)
-            per_layer_energies.append(pair_e)
-
-        # Sum per-layer pair energies
-        pair_energies = torch.stack(per_layer_energies, dim=-1).sum(dim=-1)  # (n_edges,)
-
-        # 3. Scatter pair energies to target nodes
-        dst = edge_index[:, 1]
-        n_nodes = int(batch.shape[0])
-        atomic_energies = torch.zeros(
-            n_nodes, dtype=pair_energies.dtype, device=pair_energies.device
-        )
-        atomic_energies.index_add_(0, dst, pair_energies)
-
-        # Scale and shift
-        atomic_energies = atomic_energies * self.scale + self.shift
-
-        # 4. Energy head: pool to molecular energies
-        energy = self.energy_head(atomic_energies, batch, num_graphs)
-
-        results: dict[str, torch.Tensor] = {"energy": energy}
-
-        # 5. Force head (optional)
-        if self.compute_forces:
-            forces = self.force_head(energy, pos)
-            results["forces"] = forces
-
-        return results
+        td["edges", "edge_features"] = torch.stack(per_layer_scalars, dim=1)
+        return td

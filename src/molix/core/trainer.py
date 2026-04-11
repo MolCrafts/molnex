@@ -12,23 +12,9 @@ import torch.nn as nn
 from molix.core.hooks import Hook
 from molix.core.state import Stage, TrainState
 from molix.core.steps import DefaultTrainStep, DefaultEvalStep, Step
+from molix.data.datamodule import DataModuleProtocol
 
 logger = logger.getLogger(__name__)
-
-
-class DataModule:
-    """Simple data module interface.
-    
-    Provides train and validation dataloaders.
-    """
-    
-    def train_dataloader(self) -> Iterable[Any]:
-        """Return training dataloader."""
-        raise NotImplementedError
-    
-    def val_dataloader(self) -> Iterable[Any]:
-        """Return validation dataloader."""
-        raise NotImplementedError
 
 
 class Trainer:
@@ -124,7 +110,7 @@ class Trainer:
     
     def train(
         self,
-        datamodule: DataModule,
+        datamodule: DataModuleProtocol,
         max_epochs: int = 1,
     ) -> TrainState:
         """Execute training loop.
@@ -159,15 +145,23 @@ class Trainer:
     
     def _train(
         self,
-        datamodule: DataModule,
+        datamodule: DataModuleProtocol,
         max_epochs: int,
     ) -> TrainState:
         """Execute training loop."""
+        # DataModule setup
+        if hasattr(datamodule, "setup"):
+            datamodule.setup("fit")
+
         # Hook: on_train_start
         if self.hooks is not None:
             self._call_hooks("on_train_start", self, self.state)
-        
+
         for epoch in range(max_epochs):
+            # DataModule epoch sync (DDP sampler shuffle)
+            if hasattr(datamodule, "on_epoch_start"):
+                datamodule.on_epoch_start(epoch)
+
             # Hook: on_epoch_start
             if self.hooks is not None:
                 self._call_hooks("on_epoch_start", self, self.state)
@@ -229,7 +223,7 @@ class Trainer:
         
         return self.state
     
-    def _run_eval_phase(self, datamodule: DataModule) -> None:
+    def _run_eval_phase(self, datamodule: DataModuleProtocol) -> None:
         """Run evaluation phase (internal helper).
         
         Args:

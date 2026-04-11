@@ -17,7 +17,7 @@ def radius_graph(
         cutoff: Cutoff radius
         
     Returns:
-        edge_index: [2, num_edges]
+        edge_index: [num_edges, 2]
         edge_vec: [num_edges, 3] (pos_j - pos_i)
     """
     # Note: get_neighbor_pairs expects (positions, cutoff, ...)
@@ -46,7 +46,7 @@ def radius_graph(
     
     mask = batch[node_i] == batch[node_j]
     
-    edge_index = neighbors[mask].T  # [2, num_edges]
+    edge_index = neighbors[mask]  # [num_edges, 2]
     edge_vec = deltas[mask]  # [num_edges, 3]
     
     return edge_index, edge_vec

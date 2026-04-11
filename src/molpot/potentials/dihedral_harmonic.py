@@ -1,7 +1,6 @@
 import torch
-from typing import Union
+from typing import Any
 from molpot.potentials.base import BasePotential
-from molix.data.atom_td import AtomTD
 
 
 class DihedralHarmonic(BasePotential):
@@ -51,11 +50,11 @@ class DihedralHarmonic(BasePotential):
         self.register_buffer("k", k)
         self.register_buffer("phi0", phi0)
     
-    def forward(self, data: Union[AtomTD, dict, None] = None, **kwargs) -> torch.Tensor:
+    def forward(self, data: dict[str, Any] | None = None, **kwargs) -> torch.Tensor:
         """Compute harmonic dihedral energy.
         
         Args:
-            data: Optional AtomTD or Frame (dict)
+            data: Optional dictionary with molecular fields
             **kwargs: Alternate way to pass explicit tensors:
                 - pos: Positions [N, 3]
                 - dihedral_index: Dihedral indices [4, num_dihedrals] (i-j-k-l)
@@ -70,15 +69,12 @@ class DihedralHarmonic(BasePotential):
         dihedral_types = kwargs.get("dihedral_types")
         
         if pos is None and data is not None:
-            if hasattr(data, "xyz"):
-                pos = data.xyz
-                if isinstance(data, dict):
-                    dihedral_index = data.get("dihedrals", {}).get("i") if dihedral_index is None else dihedral_index
-                    dihedral_types = data.get("dihedrals", {}).get("type") if dihedral_types is None else dihedral_types
-            elif isinstance(data, (dict, list)):
-                pos = data["atoms"]["x"]
-                dihedral_index = data["dihedrals"]["i"] if dihedral_index is None else dihedral_index
-                dihedral_types = data["dihedrals"]["type"] if dihedral_types is None else dihedral_types
+            if isinstance(data, dict):
+                pos = data.get("pos")
+                dihedral_index = data.get("dihedral_index") if dihedral_index is None else dihedral_index
+                dihedral_types = data.get("dihedral_types") if dihedral_types is None else dihedral_types
+                if pos is None and "atoms" in data:
+                    pos = data["atoms"]["x"]
         
         if pos is None or dihedral_index is None or dihedral_types is None:
             raise ValueError("DihedralHarmonic requires pos, dihedral_index, and dihedral_types.")

@@ -3,9 +3,6 @@
 from typing import Protocol, runtime_checkable
 import torch
 
-from molix.data.atom_td import AtomTD
-
-
 @runtime_checkable
 class Labeler(Protocol):
     """Protocol for atom type labelers."""
@@ -13,7 +10,7 @@ class Labeler(Protocol):
     num_types: int
     type_map: dict[int, str]
     
-    def label(self, batch: AtomTD) -> torch.Tensor:
+    def label(self, z: torch.Tensor) -> torch.Tensor:
         """Generate type labels for atoms in batch."""
         ...
 

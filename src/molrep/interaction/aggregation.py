@@ -82,24 +82,15 @@ class MessageAggregation(nn.Module):
         
         Args:
             messages: Edge messages (n_edges, irreps_dim)
-            edge_index: Edge indices (n_edges, 2)
-                * edge_index[0, :] = source nodes (j)
-                * edge_index[1, :] = target nodes (i)
+            edge_index: Edge indices ``(E, 2)`` where
+                ``edge_index[:, 0]`` = source, ``edge_index[:, 1]`` = target.
             edge_cutoff: Optional cutoff values (n_edges,)
             n_nodes: Optional explicit node count.
-        
+
         Returns:
             Aggregated features. Output shape: (n_nodes, irreps_dim)
         """
-        # Note: MACE convention is usually edge_index[0] as source, edge_index[1] as target
-        # Our implementation previously used edge_index[:, 1] as target.
-        # Let's check the shape of edge_index. Usually (2, n_edges) in PyG
-        # and our previous code used edge_index[:, 1] which implies (n_edges, 2).
-        
-        if edge_index.shape[0] == 2 and edge_index.shape[1] != 2:
-            target_indices = edge_index[1]
-        else:
-            target_indices = edge_index[:, 1]
+        target_indices = edge_index[:, 1]
         
         # Apply cutoff weighting if enabled
         if self.config.apply_cutoff and edge_cutoff is not None:

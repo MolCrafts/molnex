@@ -1,15 +1,16 @@
-# Data Documentation
+# Molix Data
 
-Molnex provides a robust set of tools for handling molecular data.
+`molix.data` provides the molecular data pipeline:
 
-## Guides
+- **Types** (`types.py`): Nested TensorDict subclasses — `AtomData`, `EdgeData`, `GraphData`, `GraphBatch`
+- **Sources**: `DataSource` protocol and `InMemorySource` / `SubsetSource` implementations
+- **Pipeline**: Task-based preprocessing pipeline (sample-level, dataset-level, batch-level)
+- **Tasks**: Built-in preprocessing tasks (`NeighborList`, `AtomicDress`)
+- **Collation**: `collate_molecules` converts sample dicts into nested `GraphBatch`
+- **DataModule**: DDP-aware data module integrating pipeline + collation + DataLoader
 
-- [**Data Loading Patterns**](loading.md)
-    - Learn the standard `Frame -> Dataset -> DataLoader` pipeline.
-    - understand how `molpy.Frame` and `nested_collate_fn` work together.
+Recommended reading order:
 
-- [**DataModules**](datamodules.md)
-    - Learn how to encapsulate your data pipeline for reproducible training with the `Trainer`.
-
-- [**Atomic TensorDict**](datamodules.md#atomic-tensordict)
-    - Understand the `AtomTD` data structure used by models.
+1. [Batch Schema Reference](../../tensordict_schema.md)
+2. [Data Loading](loading.md)
+3. [DataModules](datamodules.md)

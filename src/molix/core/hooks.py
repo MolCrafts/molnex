@@ -213,16 +213,16 @@ class BaseHook:
 # Built-in Hooks
 
 class TensorBoardHook(BaseHook):
-    """Logs training metrics to TensorBoard from outputs TensorDict.
+    """Logs training metrics to TensorBoard from trainer state.
     
-    Reads metrics from configured paths in the outputs TensorDict and logs them
+    Reads metrics from configured key paths in state and logs them
     to TensorBoard. Supports model graph visualization, weight/gradient histograms,
     and hyperparameter tracking.
     
     Args:
         log_dir: Directory to save TensorBoard logs (default: "./runs")
         log_every_n_steps: Log scalars every N steps (default: 1)
-        metric_paths: List of paths to read from outputs TensorDict.
+        metric_paths: List of key paths to read from trainer state.
                      Each path is a list of keys, TensorBoard name is auto-generated
                      by joining with '/'. (default: train/eval loss/MAE/RMSE)
         log_hparams: Log hyperparameters for HParams dashboard (default: False)
@@ -279,7 +279,7 @@ class TensorBoardHook(BaseHook):
         Args:
             log_dir: Directory for TensorBoard logs
             log_every_n_steps: Log frequency
-            metric_paths: List of paths to read from outputs TensorDict.
+            metric_paths: List of key paths to read from trainer state.
                          Each path is a list of keys. TensorBoard name is auto-generated
                          by joining path with '/'. Example:
                          [["train", "loss"],      # -> "train/loss"
@@ -329,13 +329,16 @@ class TensorBoardHook(BaseHook):
     def on_train_batch_start(self, trainer, state, batch):
         """Log model graph on first batch."""
         if self.log_graph and not self._graph_logged:
-            # Handle AtomTD or other inputs
             import torch
             input_tensor = None
-            if hasattr(batch, "to_model_kwargs"):
-                # For AtomTD, get a representative tensor (e.g., xyz)
-                input_tensor = batch.xyz
-            elif isinstance(batch, dict):
+            if isinstance(batch, dict):
+                model_inputs = batch.get("model_inputs", batch)
+                if isinstance(model_inputs, dict):
+                    for value in model_inputs.values():
+                        if isinstance(value, torch.Tensor):
+                            input_tensor = value
+                            break
+            if input_tensor is None and isinstance(batch, dict):
                 for key in batch.keys():
                     value = batch[key]
                     if isinstance(value, torch.Tensor):
@@ -379,7 +382,7 @@ class TensorBoardHook(BaseHook):
                     self.writer.add_scalar(tb_name, value, state.global_step)
     
     def _extract_from_path(self, data: Any, path: list[str]) -> Any:
-        """Extract value from nested dict/TensorDict using key path.
+        """Extract value from nested dictionary-like data via key path.
         
         Args:
             data: The data structure to extract from
@@ -558,7 +561,6 @@ class ProgressBarHook(BaseHook):
         self.desc = desc
         self.leave = leave
         self.pbar = None
-        self.total_steps = None
     
     def on_train_start(self, trainer, state):
         """Initialize progress bar."""

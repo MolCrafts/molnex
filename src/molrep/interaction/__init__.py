@@ -13,6 +13,7 @@ from .tensor_product import (
 )
 from .symmetric_contraction import SymmetricContraction, SymmetricContractionSpec
 from .element_update import ElementUpdate, ElementUpdateSpec
+from .radial_mlp import RadialWeightMLP, RadialWeightMLPSpec
 
 __all__ = [
     "MessageAggregation",
@@ -26,4 +27,6 @@ __all__ = [
     "SymmetricContractionSpec",
     "ElementUpdate",
     "ElementUpdateSpec",
+    "RadialWeightMLP",
+    "RadialWeightMLPSpec",
 ]

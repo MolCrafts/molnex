@@ -82,19 +82,23 @@ class DefaultEvalStep:
             Dictionary with "loss" and "predictions" keys
         """
         # Forward pass (no gradients)
+        from molix.core.steps import extract_model_inputs
+
         with torch.no_grad():
-            if hasattr(batch, "to_model_kwargs"):
-                predictions = trainer.model(**batch.to_model_kwargs())
+            if isinstance(batch, dict):
+                model_inputs = extract_model_inputs(batch)
+                predictions = trainer.model(**model_inputs)
             else:
                 predictions = trainer.model(batch)
-            
+
             # Compute loss (loss_fn should handle batch format)
             loss = trainer.loss_fn(predictions, batch)
         
         # Write loss to state
         state["eval/loss"] = loss.item()
         
-        # Return only predictions in outputs
+        # Return predictions and loss for hooks/metrics
         return {
+            "loss": loss,
             "predictions": predictions,
         }

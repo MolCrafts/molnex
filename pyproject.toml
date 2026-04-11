@@ -5,22 +5,47 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "molnex"
 version = "2.0.0"
-description = "TensorDict-first molecular ML framework"
+description = "Dict-first molecular ML framework"
 readme = "README.md"
+license = "BSD-3-Clause"
 requires-python = ">=3.10"
+authors = [
+  { name = "MolCrafts" },
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: BSD License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Chemistry",
+  "Topic :: Scientific/Engineering :: Physics",
+]
 dependencies = [
-  "torch>=2.0",
-  "tensordict>=0.3.0",
+  "torch>=2.6",
+  "tensordict",
   "cuequivariance",
   "cuequivariance-torch",
-  "molcrafts-molpy>=0.2.0",
-  "pydantic"
+  "molcrafts-molpy>=0.3.0",
+  "molcfg",
+  "mollog",
+  "numpy",
+  "pydantic",
+  "tqdm",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 
+[project.urls]
+Repository = "https://github.com/molcrafts/molnex"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [tool.scikit-build]
-wheel.packages = ["src/molix", "src/molrep", "src/molpot"]
+wheel.packages = ["src/molix", "src/molrep", "src/molpot", "src/molzoo"]
 cmake.source-dir = "."
 cmake.version = ">4.00.0"

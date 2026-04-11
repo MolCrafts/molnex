@@ -1,63 +1,37 @@
-# molrep: Molecular Typing and Embedding
+# molrep
 
-`molrep` is a subpackage in `molix/src/molrep/` for molecule/atom feature prediction.
+Molecular representation learning components (Embedding / Interaction / Readout), built on pure PyTorch modules.
 
-## Features
+## Input Conventions
 
-- Uses **AtomTD** from molix as the batch container
+Components consume the following tensors (or subsets):
 
-Provides TensorDictModule components for representation learning:
-- **Initializers**: Atom embeddings, spherical harmonics
-- **Interactions**: Message passing blocks (topology, geometry)
-- **Encoders**: Complete encoder architectures
+- `Z`: Atomic numbers `(N,)`
+- `pos`: Coordinates `(N, 3)`
+- `edge_index`: Edge indices `(E, 2)`
+- `bond_diff`: Edge vectors `(E, 3)`
+- `bond_dist`: Edge distances `(E,)`
 
-## Example
+## Usage
 
 ```python
-from molix.data.atomic_td import AtomTD
-from molrep import MolRepModel, ProxyLabeler
 import torch
+from molrep.embedding.node import DiscreteEmbeddingSpec, JointEmbedding
 
-# Create batch using AtomTD
-batch = AtomTD.create(
-    z=torch.tensor([6, 1, 1, 1, 1]),
-    x=torch.randn(5, 3),
-    batch=torch.tensor([0, 0, 0, 0, 0]),
+embed = JointEmbedding(
+    embedding_specs=[
+        DiscreteEmbeddingSpec(input_key="Z", num_classes=119, emb_dim=64),
+    ],
+    out_dim=128,
 )
 
-# Create model with transformer encoder
-model = MolRepModel.from_config(
-    encoder_type='geometry',
-    hidden_dim=64,
-    num_heads=4,
-    num_types=11,
-)
-
-# Predict types
-types = model.predict_types(batch)  # [5]
-
-# Or extract features only
-features = model.extract_features(batch)  # [5, 64]
+Z = torch.tensor([6, 1, 1, 1, 1])
+h = embed(Z=Z)
+print(h.shape)  # (5, 128)
 ```
 
-## Architecture
+## Modules
 
-- TopologyEncoder: Uses `torch.nn.TransformerEncoder` with per-molecule attention mask
-- GeometryEncoder: Equivariant transformer with edge-conditioned attention
-
-## File Structure
-
-```
-molix/src/molrep/
-├── encoder/
-│   ├── topology.py   # Transformer-based topology encoder
-│   └── geometry.py   # SO(3)-equivariant geometry encoder
-├── head/
-│   ├── type_head.py  # Classification head
-│   └── labeler.py    # Labeler protocol + ProxyLabeler
-├── export/
-│   └── exporter.py   # Type export utilities
-├── utils/
-│   └── geometry.py   # NeighborGraphBuilder, SphericalBasis, etc.
-└── model.py          # MolRepModel composition
-```
+- `embedding/`: Node, radial, angular, and cutoff embeddings
+- `interaction/`: Equivariant linear, tensor product, symmetric contraction, aggregation
+- `readout/`: Pooling, ProductHead, ScalarHead

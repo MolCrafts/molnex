@@ -9,13 +9,18 @@ Embeddings:
   - CosineCutoff: Cosine-based cutoff envelope
   - PolynomialCutoff: Polynomial-based cutoff envelope
 
-Heads and Pooling:
+Interactions:
+  - ConvTP: Tensor product convolution
+  - RadialWeightMLP: Radial-to-TP-weight MLP
+  - SymmetricContraction: Multi-body basis construction
+  - EquivariantLinear: SO(3)-equivariant linear
+  - ElementUpdate: Element-specific residual
+  - MessageAggregation: Scatter-sum aggregation
+
+Readout:
+  - ProductHead: Multi-body basis → scalar features
   - ScalarHead: Pooling + MLP for scalar prediction
-  - EnergyHead: Energy prediction head with scatter pooling
-  - ForceHead: Compute forces via autograd -dE/dpos
-  - StressHead: Compute stress tensor via autograd
-  - masked_sum_pooling: Sum pooling with mask support
-  - masked_mean_pooling: Mean pooling with mask support
+  - masked_sum_pooling / masked_mean_pooling
 """
 
 from molrep.embedding import (
@@ -27,7 +32,7 @@ from molrep.embedding import (
 )
 from molrep.head.scalar_head import ScalarHead
 from molrep.readout.pooling import masked_sum_pooling, masked_mean_pooling
-from molrep.readout.heads import EnergyHead, ForceHead, StressHead
+from molrep.readout.product_head import ProductHead
 
 __all__ = [
     "JointEmbedding",
@@ -36,9 +41,7 @@ __all__ = [
     "CosineCutoff",
     "PolynomialCutoff",
     "ScalarHead",
+    "ProductHead",
     "masked_sum_pooling",
     "masked_mean_pooling",
-    "EnergyHead",
-    "ForceHead",
-    "StressHead",
 ]

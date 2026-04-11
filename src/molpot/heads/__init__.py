@@ -1,8 +1,8 @@
 """Prediction heads.
 
-All heads are TensorDictModules with explicit in_keys/out_keys.
+All heads are plain PyTorch modules.
 """
 
-from molpot.heads.heads import EnergyHead, ForceHead, TypeHead
+from molpot.heads.heads import AtomicEnergyMLP, EnergyHead, TypeHead
 
-__all__ = ["EnergyHead", "ForceHead", "TypeHead"]
+__all__ = ["AtomicEnergyMLP", "EnergyHead", "TypeHead"]

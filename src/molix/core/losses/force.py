@@ -10,7 +10,7 @@ class MAELoss(nn.Module):
     """Generic MAE (L1) loss with configurable keys.
     
     Computes mean absolute error between predicted and target values.
-    Works with dictionaries, dataclasses (like AtomTD), and plain tensors.
+    Works with dictionaries and plain tensors.
     
     Args:
         pred_key: Key to extract from prediction dict/dataclass
@@ -38,8 +38,8 @@ class MAELoss(nn.Module):
         """Compute MAE loss.
         
         Args:
-            pred: Predictions (dict/dataclass with pred_key or tensor)
-            target: Targets (dict/dataclass with target_key or tensor)
+            pred: Predictions (dict with pred_key or tensor)
+            target: Targets (dict with target_key or tensor)
             
         Returns:
             MAE loss

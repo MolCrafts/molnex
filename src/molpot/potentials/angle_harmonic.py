@@ -1,7 +1,6 @@
 import torch
-from typing import Union
+from typing import Any
 from molpot.potentials.base import BasePotential
-from molix.data.atom_td import AtomTD
 
 
 class AngleHarmonic(BasePotential):
@@ -51,11 +50,11 @@ class AngleHarmonic(BasePotential):
         self.register_buffer("k", k)
         self.register_buffer("theta0", theta0)
     
-    def forward(self, data: Union[AtomTD, dict, None] = None, **kwargs) -> torch.Tensor:
+    def forward(self, data: dict[str, Any] | None = None, **kwargs) -> torch.Tensor:
         """Compute harmonic angle energy.
         
         Args:
-            data: Optional AtomTD or Frame (dict)
+            data: Optional dictionary with molecular fields
             **kwargs: Alternate way to pass explicit tensors:
                 - pos: Positions [N, 3]
                 - angle_index: Angle indices [3, num_angles] (i-j-k triplets)
@@ -70,16 +69,12 @@ class AngleHarmonic(BasePotential):
         angle_types = kwargs.get("angle_types")
         
         if pos is None and data is not None:
-            if hasattr(data, "xyz"):
-                pos = data.xyz
-                # Angle indices are not natively in AtomTD yet, but could be passed in data dict
-                if isinstance(data, dict):
-                    angle_index = data.get("angles", {}).get("i") if angle_index is None else angle_index
-                    angle_types = data.get("angles", {}).get("type") if angle_types is None else angle_types
-            elif isinstance(data, (dict, list)):
-                pos = data["atoms"]["x"]
-                angle_index = data["angles"]["i"] if angle_index is None else angle_index
-                angle_types = data["angles"]["type"] if angle_types is None else angle_types
+            if isinstance(data, dict):
+                pos = data.get("pos")
+                angle_index = data.get("angle_index") if angle_index is None else angle_index
+                angle_types = data.get("angle_types") if angle_types is None else angle_types
+                if pos is None and "atoms" in data:
+                    pos = data["atoms"]["x"]
         
         if pos is None or angle_index is None or angle_types is None:
             raise ValueError("AngleHarmonic requires pos, angle_index, and angle_types.")

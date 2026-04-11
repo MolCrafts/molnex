@@ -1,6 +1,6 @@
 [project]
 site_name = "MolNex Documentation"
-site_description = "Molecular Machine Learning Framework"
+site_description = "Dict-first molecular ML framework"
 
 # Navigation
 nav = [
@@ -14,8 +14,12 @@ nav = [
         { "Quickstart" = "molix/quickstart.md" },
         { "Core" = [
             { "The Trainer" = "molix/core/trainer.md" },
-            { "Data Modules" = "molix/data/datamodules.md" },
             { "Hooks System" = "molix/core/hooks.md" }
+        ]},
+        { "Data" = [
+            { "Overview" = "molix/data/index.md" },
+            { "Data Loading" = "molix/data/loading.md" },
+            { "Data Modules" = "molix/data/datamodules.md" }
         ]}
     ]},
     { "MolRep (Representation)" = [
@@ -33,6 +37,10 @@ nav = [
             { "Components" = "molpot/components.md" },
             { "Gradients & Forces" = "molpot/gradients.md" }
         ]}
+    ]},
+    { "Reference" = [
+        { "Batch Schema" = "tensordict_schema.md" },
+        { "Component Taxonomy" = "component_taxonomy.md" }
     ]}
 ]
 

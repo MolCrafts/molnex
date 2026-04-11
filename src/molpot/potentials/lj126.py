@@ -1,131 +1,111 @@
-"""Lennard-Jones 12-6 potential implementation."""
+"""Lennard-Jones 12-6 potential."""
+
+from __future__ import annotations
+
+from typing import Callable
 
 import torch
-from molpot.potentials.base import BasePotential
-from typing import Union
-from molix.data.atom_td import AtomTD
-from molpot.graph.radius_graph import radius_graph
+import torch.nn as nn
 
 
-class LJ126(BasePotential):
-    """Lennard-Jones 12-6 potential.
-    
-    Energy formula:
-        E_ij = 4 * epsilon_ij * [(sigma_ij / r_ij)^12 - (sigma_ij / r_ij)^6]
-    
-    Parameters are stored as type-indexed matrices:
-        epsilon[type_i, type_j]: Well depth
-        sigma[type_i, type_j]: Zero-crossing distance
-    
-    Attributes:
-        epsilon: Well depth parameters [num_types, num_types]
-        sigma: Zero-crossing distance parameters [num_types, num_types]
-        cutoff: Cutoff radius for neighbor search
+def lj126_pair_energy(
+    distance: torch.Tensor,
+    epsilon_ij: torch.Tensor,
+    sigma_ij: torch.Tensor,
+) -> torch.Tensor:
+    """LJ 12-6 pair energy kernel.
+
+    ``E_ij = 4 * epsilon_ij * [(sigma_ij / r)^12 - (sigma_ij / r)^6]``
     """
-    
-    name = "lj126_torch"
-    type = "pair"
-    
+    sr = sigma_ij / distance.clamp(min=1e-6)
+    sr6 = sr.pow(6)
+    sr12 = sr6.pow(2)
+    return 4.0 * epsilon_ij * (sr12 - sr6)
+
+
+def lorentz_berthelot(
+    atom_params: dict[str, torch.Tensor],
+    edge_index: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Lorentz-Berthelot mixing rules: per-atom → per-pair.
+
+    Args:
+        atom_params: Must contain ``"epsilon"`` ``(N,)`` and ``"sigma"`` ``(N,)``.
+        edge_index: Edge indices ``(E, 2)``.
+
+    Returns:
+        Dict with ``"epsilon_ij"`` ``(E,)`` and ``"sigma_ij"`` ``(E,)``.
+    """
+    src, dst = edge_index[:, 0], edge_index[:, 1]
+    epsilon = atom_params["epsilon"]
+    sigma = atom_params["sigma"]
+    return {
+        "epsilon_ij": torch.sqrt(epsilon[src] * epsilon[dst] + 1e-12),
+        "sigma_ij": 0.5 * (sigma[src] + sigma[dst]),
+    }
+
+
+class LJ126(nn.Module):
+    """Lennard-Jones 12-6 potential.
+
+    Pure physics: takes per-pair parameters and distances, returns energy.
+
+    Args:
+        mixing_fn: Converts per-atom params to per-pair params.
+            Defaults to ``lorentz_berthelot``.
+        bidirectional: Halve pair energies to avoid double-counting.
+        energy_scale: Multiplicative energy scaling factor.
+    """
+
     def __init__(
         self,
-        epsilon: torch.Tensor,
-        sigma: torch.Tensor,
-        cutoff: float = 10.0,
+        mixing_fn: Callable[
+            [dict[str, torch.Tensor], torch.Tensor],
+            dict[str, torch.Tensor],
+        ] = lorentz_berthelot,
+        bidirectional: bool = True,
+        energy_scale: float = 1.0,
     ):
-        """Initialize LJ126 potential.
-        
-        Args:
-            epsilon: Well depth matrix [num_types, num_types]
-            sigma: Zero-crossing distance matrix [num_types, num_types]
-            cutoff: Cutoff radius for neighbor search (default: 10.0 Å)
-        """
         super().__init__()
-        
-        # Validate shapes
-        if epsilon.shape != sigma.shape:
-            raise ValueError(
-                f"epsilon and sigma must have same shape, got "
-                f"epsilon: {epsilon.shape}, sigma: {sigma.shape}"
-            )
-        
-        if epsilon.ndim != 2 or epsilon.shape[0] != epsilon.shape[1]:
-            raise ValueError(
-                f"epsilon must be square matrix [num_types, num_types], "
-                f"got shape {epsilon.shape}"
-            )
-        
-        # Register as buffers (not trainable parameters by default)
-        self.register_buffer("epsilon", epsilon)
-        self.register_buffer("sigma", sigma)
-        self.cutoff = cutoff
-    
-    def forward(self, data: Union[AtomTD, dict, None] = None, **kwargs) -> torch.Tensor:
-        """Compute LJ126 energy.
-        
+        self.mixing_fn = mixing_fn
+        self.bidirectional = bidirectional
+        self.energy_scale = energy_scale
+
+    def forward(
+        self,
+        *,
+        distance: torch.Tensor,
+        epsilon_ij: torch.Tensor,
+        sigma_ij: torch.Tensor,
+        edge_batch: torch.Tensor | None = None,
+        num_graphs: int | None = None,
+    ) -> torch.Tensor:
+        """Compute LJ 12-6 energy.
+
         Args:
-            data: Optional AtomTD or Frame (dict)
-            **kwargs: Alternate way to pass explicit tensors:
-                - pos: Positions [N, 3]
-                - atom_types: Atom types [N]
-                - batch: Batch indices [N]
-                
+            distance: Pairwise distances ``(E,)``.
+            epsilon_ij: Per-pair well depth ``(E,)``.
+            sigma_ij: Per-pair zero-crossing distance ``(E,)``.
+            edge_batch: Graph index per edge ``(E,)``.
+                If None, returns summed scalar.
+            num_graphs: Number of graphs (inferred from edge_batch if None).
+
         Returns:
-            Total LJ energy (scalar)
+            Per-graph energy ``(B,)`` or scalar if no batching.
         """
-        # Extract data
-        pos = kwargs.get("pos")
-        atom_types = kwargs.get("atom_types")
-        batch = kwargs.get("batch")
-        
-        if pos is None and data is not None:
-            if hasattr(data, "xyz"):
-                pos = data.xyz
-                atom_types = data.Z if atom_types is None else atom_types
-                batch = data.batch if batch is None else batch
-            elif isinstance(data, (dict, list)):
-                pos = data["atoms"]["x"]
-                atom_types = data["atoms"]["type"] if atom_types is None else atom_types
-                batch = data["graph"]["batch"] if batch is None else batch
-        
-        if pos is None or atom_types is None or batch is None:
-            raise ValueError("LJ126 requires pos, atom_types, and batch.")
-            
-        # Convert numpy to torch if needed (for Frame compatibility)
-        if not isinstance(pos, torch.Tensor):
-            pos = torch.from_numpy(pos).float()
-            atom_types = torch.from_numpy(atom_types).long()
-            batch = torch.from_numpy(batch).long()
-        
-        # Build neighbor list
-        edge_index, edge_vec = radius_graph(pos, batch, cutoff=self.cutoff)
-        
-        # Get atom types for each edge
-        type_i = atom_types[edge_index[0]]  # [num_edges]
-        type_j = atom_types[edge_index[1]]  # [num_edges]
-        
-        # Look up parameters for each edge
-        epsilon_ij = self.epsilon[type_i, type_j]  # [num_edges]
-        sigma_ij = self.sigma[type_i, type_j]  # [num_edges]
-        
-        # Compute distances
-        distances = torch.norm(edge_vec, dim=-1)  # [num_edges]
-        
-        # Avoid division by zero
-        distances = torch.clamp(distances, min=1e-6)
-        
-        # Compute LJ potential
-        # E = 4 * epsilon * [(sigma/r)^12 - (sigma/r)^6]
-        sigma_over_r = sigma_ij / distances
-        sigma_over_r_6 = sigma_over_r ** 6
-        sigma_over_r_12 = sigma_over_r_6 ** 2
-        
-        energy_per_edge = 4.0 * epsilon_ij * (sigma_over_r_12 - sigma_over_r_6)
-        
-        # Sum over all edges (divide by 2 to avoid double counting)
-        total_energy = 0.5 * energy_per_edge.sum()
-        
-        return total_energy
-    
-    def __repr__(self) -> str:
-        num_types = self.epsilon.shape[0]
-        return f"LJ126(num_types={num_types}, cutoff={self.cutoff})"
+        pair_energy = lj126_pair_energy(distance, epsilon_ij, sigma_ij)
+        pair_energy = pair_energy * self.energy_scale
+        if self.bidirectional:
+            pair_energy = 0.5 * pair_energy
+
+        if edge_batch is None:
+            return pair_energy.sum()
+
+        if num_graphs is None:
+            num_graphs = int(edge_batch.max().item()) + 1
+
+        energy = torch.zeros(
+            num_graphs, dtype=pair_energy.dtype, device=pair_energy.device
+        )
+        energy.index_add_(0, edge_batch, pair_energy)
+        return energy

@@ -1,104 +1,181 @@
-from __future__ import annotations
-import torch
-from molix.data.atom_td import AtomTD
+"""Graph-aware collation producing nested GraphBatch TensorDicts.
 
-
-"""Collate functions for batching molecular data.
-
-Provides collate_fn implementations for batching AtomTD objects by concatenation.
+Collates a list of single-molecule sample dicts into a ``GraphBatch``
+with per-level batch sizes: atoms (N), edges (E), graphs (B).
 """
 
-def collate_atomic_tds(atomic_tds: list[AtomTD]) -> AtomTD:
-    """Collate a list of AtomTD into a single batched AtomTD by concatenation.
-    
-    Concatenates all atom-level and bond-level fields along the first dimension.
-    Handles bond index offsets based on cumulative atom counts.
-    
-    Args:
-        atomic_tds: List of AtomTD objects (each representing a single molecule)
-        
-    Returns:
-        Batched AtomTD with concatenated fields and proper batch indices.
-    """
-    assert len(atomic_tds) > 0, "Cannot collate empty list"
-    
-    # 1. Handle atom-level fields
-    Z = torch.cat([td.Z for td in atomic_tds], dim=0)
-    xyz = torch.cat([td.xyz for td in atomic_tds], dim=0)
-    
-    # Calculate cumulative offsets for indices
-    num_atoms_list = [len(td.Z) for td in atomic_tds]
-    offsets = torch.zeros(len(atomic_tds), dtype=torch.long)
-    offsets[1:] = torch.cumsum(torch.tensor(num_atoms_list[:-1]), dim=0)
-    
-    # 2. Handle batch indices
-    batch_list = []
-    for i, n in enumerate(num_atoms_list):
-        batch_list.append(torch.full((n,), i, dtype=torch.long))
-    batch = torch.cat(batch_list, dim=0)
-    
-    # 3. Handle optional atom fields
-    v = torch.cat([td.v for td in atomic_tds], dim=0) if atomic_tds[0].v is not None else None
-    f = torch.cat([td.f for td in atomic_tds], dim=0) if atomic_tds[0].f is not None else None
-    q = torch.cat([td.q for td in atomic_tds], dim=0) if atomic_tds[0].q is not None else None
-    atom_type = torch.cat([td.atom_type for td in atomic_tds], dim=0) if atomic_tds[0].atom_type is not None else None
-    
-    # 4. Handle bond-level fields with offsets
-    bond_i = None
-    bond_j = None
-    bond_vec = None
-    bond_dist = None
-    bond_type = None
-    
-    if atomic_tds[0].bond_i is not None:
-        bond_i_list = []
-        bond_j_list = []
-        for i, td in enumerate(atomic_tds):
-            bond_i_list.append(td.bond_i + offsets[i])
-            bond_j_list.append(td.bond_j + offsets[i])
-        bond_i = torch.cat(bond_i_list, dim=0)
-        bond_j = torch.cat(bond_j_list, dim=0)
-        
-        if atomic_tds[0].bond_vec is not None:
-            bond_vec = torch.cat([td.bond_vec for td in atomic_tds], dim=0)
-        if atomic_tds[0].bond_dist is not None:
-            bond_dist = torch.cat([td.bond_dist for td in atomic_tds], dim=0)
-        if atomic_tds[0].bond_type is not None:
-            bond_type = torch.cat([td.bond_type for td in atomic_tds], dim=0)
-            
-    # 5. Handle molecule-level fields (stack them)
-    energy = None
-    if atomic_tds[0].energy is not None:
-        energy = torch.cat([td.energy for td in atomic_tds], dim=0)
-    
-    dipole = None
-    if atomic_tds[0].dipole is not None:
-        dipole = torch.cat([td.dipole for td in atomic_tds], dim=0)
-        
-    stress = None
-    if atomic_tds[0].stress is not None:
-        stress = torch.cat([td.stress for td in atomic_tds], dim=0)
+from __future__ import annotations
 
-    num_atoms = torch.tensor(num_atoms_list, dtype=torch.long)
-    
-    # 6. Handle angle and dihedral fields (omitted for brevity but same logic with offsets)
-    # They can be added as needed.
-    
-    return AtomTD.create(
-        Z=Z,
-        xyz=xyz,
-        batch=batch,
-        v=v,
-        f=f,
-        q=q,
-        atom_type=atom_type,
-        bond_i=bond_i,
-        bond_j=bond_j,
-        bond_vec=bond_vec,
-        bond_dist=bond_dist,
-        bond_type=bond_type,
-        num_atoms=num_atoms,
-        energy=energy,
-        dipole=dipole,
-        stress=stress
+from dataclasses import dataclass, field
+
+import torch
+from tensordict import TensorDict
+
+from molix.data.types import AtomData, EdgeData, GraphBatch, GraphData
+
+
+# ---------------------------------------------------------------------------
+# Target schema
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TargetSchema:
+    """Declares how targets are collated.
+
+    ``graph_level`` targets (e.g. energy) are per-molecule scalars → ``(B,)``.
+    ``atom_level`` targets (e.g. forces) are per-atom tensors → ``(N_total, ...)``.
+    """
+
+    graph_level: frozenset[str] = field(
+        default_factory=lambda: frozenset(
+            {"energy", "U0", "U", "H", "G", "Cv", "mu", "alpha",
+             "homo", "lumo", "gap", "r2", "zpve", "A", "B", "C"}
+        )
+    )
+    atom_level: frozenset[str] = field(
+        default_factory=lambda: frozenset({"forces"})
+    )
+
+
+DEFAULT_TARGET_SCHEMA = TargetSchema()
+
+
+# ---------------------------------------------------------------------------
+# Edge normalisation
+# ---------------------------------------------------------------------------
+
+
+def _normalize_edge_index(edge_index: torch.Tensor) -> torch.Tensor:
+    """Normalize edge_index to canonical ``(E, 2)`` format."""
+    if edge_index.ndim != 2:
+        raise ValueError(f"edge_index must be 2D, got shape {tuple(edge_index.shape)}")
+    if edge_index.shape[1] == 2:
+        return edge_index.long()
+    if edge_index.shape[0] == 2:
+        return edge_index.t().contiguous().long()
+    raise ValueError(
+        f"edge_index must have shape (E, 2) or (2, E), got {tuple(edge_index.shape)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Collate
+# ---------------------------------------------------------------------------
+
+
+def collate_molecules(
+    samples: list[dict],
+    target_schema: TargetSchema = DEFAULT_TARGET_SCHEMA,
+) -> GraphBatch:
+    """Collate molecule samples into a nested GraphBatch.
+
+    Each sample is a plain dict with at least ``Z`` and ``pos`` keys.
+    Optional: ``edge_index``, ``bond_diff``, ``bond_dist``, ``targets``.
+
+    Args:
+        samples: List of single-molecule sample dicts.
+        target_schema: Declares which targets are graph-level vs atom-level.
+
+    Returns:
+        Nested ``GraphBatch`` TensorDict.
+    """
+    if not samples:
+        raise ValueError("Cannot collate an empty sample list")
+
+    z_all: list[torch.Tensor] = []
+    pos_all: list[torch.Tensor] = []
+    batch_all: list[torch.Tensor] = []
+    num_atoms: list[int] = []
+
+    edge_all: list[torch.Tensor] = []
+    diff_all: list[torch.Tensor] = []
+    dist_all: list[torch.Tensor] = []
+
+    graph_targets: dict[str, list[torch.Tensor]] = {}
+    atom_targets: dict[str, list[torch.Tensor]] = {}
+
+    atom_offset = 0
+
+    for graph_idx, sample in enumerate(samples):
+        if "Z" not in sample or "pos" not in sample:
+            raise KeyError("Each sample must contain 'Z' and 'pos'")
+
+        z = sample["Z"].long()
+        pos = sample["pos"].float()
+        n_atoms = int(z.shape[0])
+
+        z_all.append(z)
+        pos_all.append(pos)
+        batch_all.append(
+            torch.full((n_atoms,), graph_idx, dtype=torch.long, device=z.device)
+        )
+        num_atoms.append(n_atoms)
+
+        if "edge_index" in sample and sample["edge_index"] is not None:
+            edge_index = _normalize_edge_index(sample["edge_index"])
+            edge_all.append(edge_index + atom_offset)
+
+            if "bond_diff" in sample and sample["bond_diff"] is not None:
+                diff_all.append(sample["bond_diff"].float())
+            if "bond_dist" in sample and sample["bond_dist"] is not None:
+                dist_all.append(sample["bond_dist"].float())
+
+        for name, value in sample.get("targets", {}).items():
+            value = value if isinstance(value, torch.Tensor) else torch.tensor(value)
+            if name in target_schema.atom_level:
+                atom_targets.setdefault(name, []).append(value.float())
+            else:
+                graph_targets.setdefault(name, []).append(value.reshape(-1).float())
+
+        atom_offset += n_atoms
+
+    # --- Build atom-level TensorDict ---
+    atoms_dict: dict[str, torch.Tensor] = {
+        "Z": torch.cat(z_all, dim=0),
+        "pos": torch.cat(pos_all, dim=0),
+        "batch": torch.cat(batch_all, dim=0),
+    }
+    for name, vals in atom_targets.items():
+        atoms_dict[name] = torch.cat(vals, dim=0)
+
+    n_total = atoms_dict["Z"].shape[0]
+    atoms = AtomData(atoms_dict, batch_size=[n_total])
+
+    # --- Build edge-level TensorDict ---
+    if edge_all:
+        edges_dict: dict[str, torch.Tensor] = {
+            "edge_index": torch.cat(edge_all, dim=0),
+        }
+        if diff_all:
+            edges_dict["bond_diff"] = torch.cat(diff_all, dim=0)
+        if dist_all:
+            edges_dict["bond_dist"] = torch.cat(dist_all, dim=0)
+        e_total = edges_dict["edge_index"].shape[0]
+        edges = EdgeData(edges_dict, batch_size=[e_total])
+    else:
+        # Empty edge data
+        edges = EdgeData(
+            edge_index=torch.zeros(0, 2, dtype=torch.long),
+            bond_diff=torch.zeros(0, 3),
+            bond_dist=torch.zeros(0),
+            batch_size=[0],
+        )
+
+    # --- Build graph-level TensorDict ---
+    num_graphs = len(samples)
+    graphs_dict: dict[str, torch.Tensor] = {
+        "num_atoms": torch.tensor(num_atoms, dtype=torch.long),
+    }
+    for name, vals in graph_targets.items():
+        graphs_dict[name] = torch.cat(vals, dim=0)
+
+    graphs = GraphData(graphs_dict, batch_size=[num_graphs])
+
+    # --- Assemble top-level GraphBatch ---
+    return GraphBatch(
+        atoms=atoms,
+        edges=edges,
+        graphs=graphs,
+        batch_size=[],
     )

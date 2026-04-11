@@ -10,7 +10,7 @@ class MSELoss(nn.Module):
     """Generic MSE loss with configurable keys.
     
     Computes mean squared error between predicted and target values.
-    Works with dictionaries, dataclasses (like AtomTD), and plain tensors.
+    Works with dictionaries and plain tensors.
     
     Args:
         pred_key: Key to extract from prediction dict/dataclass
@@ -38,8 +38,8 @@ class MSELoss(nn.Module):
         """Compute MSE loss.
         
         Args:
-            pred: Predictions (dict/dataclass with pred_key or tensor)
-            target: Targets (dict/dataclass with target_key or tensor)
+            pred: Predictions (dict with pred_key or tensor)
+            target: Targets (dict with target_key or tensor)
             
         Returns:
             MSE loss

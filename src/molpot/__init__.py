@@ -1,34 +1,82 @@
 """MolPot: ML Potential Toolkit.
 
-TensorDictModule-based components for molecular ML potentials.
-
-Note: AtomTD is now in molix.data (protocol-level infrastructure).
-Import from molix.data instead of molpot.data.
-
-Loss functions have been moved to molix.core.losses.
+Pure PyTorch components for molecular ML potentials.
 """
 
-# Classic potentials
-from molpot.potentials import BasePotential, LJ126, BondHarmonic, AngleHarmonic, DihedralHarmonic
+# Potentials
+from molpot.potentials import (
+    BasePotential,
+    LJ126,
+    lorentz_berthelot,
+    BondHarmonic,
+    AngleHarmonic,
+    DihedralHarmonic,
+    RepulsionExp6,
+    DispersionC6,
+    ChargeTransfer,
+    Polarization,
+    geometric_arithmetic_mixing,
+)
 
 # Prediction heads
-from molpot.heads import EnergyHead, ForceHead, TypeHead
+from molpot.heads import AtomicEnergyMLP, EnergyHead, TypeHead
 
-# Readout operations
-from molpot.readout import SumPooling, MeanPooling
+# Physical derivation
+from molpot.derivation import EnergyAggregation, ForceDerivation, StressDerivation
+
+# Pooling
+from molpot.pooling import (
+    LayerPooling,
+    EdgeToNodePooling,
+    SumPooling,
+    MeanPooling,
+    MaxPooling,
+)
+
+# Composition
+from molpot.composition import (
+    LJParameterHead,
+    RepulsionParameterHead,
+    ChargeTransferParameterHead,
+    ChargeHead,
+    TSScalingHead,
+    MultiHead,
+    PotentialComposer,
+)
 
 __all__ = [
     # Potentials
     "BasePotential",
     "LJ126",
+    "lorentz_berthelot",
     "BondHarmonic",
     "AngleHarmonic",
     "DihedralHarmonic",
+    "RepulsionExp6",
+    "DispersionC6",
+    "ChargeTransfer",
+    "Polarization",
+    "geometric_arithmetic_mixing",
     # Heads
+    "AtomicEnergyMLP",
     "EnergyHead",
-    "ForceHead",
     "TypeHead",
-    # Readout
+    # Derivation
+    "EnergyAggregation",
+    "ForceDerivation",
+    "StressDerivation",
+    # Pooling
+    "LayerPooling",
+    "EdgeToNodePooling",
     "SumPooling",
     "MeanPooling",
+    "MaxPooling",
+    # Composition
+    "LJParameterHead",
+    "RepulsionParameterHead",
+    "ChargeTransferParameterHead",
+    "ChargeHead",
+    "TSScalingHead",
+    "MultiHead",
+    "PotentialComposer",
 ]

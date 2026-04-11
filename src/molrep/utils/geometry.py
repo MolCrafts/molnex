@@ -27,7 +27,7 @@ class NeighborGraphBuilder:
             batch: Molecule indices [N]
             
         Returns:
-            edge_index [2, E], edge_vec [E, 3], edge_dist [E]
+            edge_index [E, 2], edge_vec [E, 3], edge_dist [E]
         """
         device = positions.device
         num_mols = int(batch.max().item()) + 1
@@ -68,16 +68,16 @@ class NeighborGraphBuilder:
             if len(src) > 0:
                 global_src = mol_indices[src]
                 global_dst = mol_indices[dst]
-                edge_indices.append(torch.stack([global_src, global_dst], dim=0))
+                edge_indices.append(torch.stack([global_src, global_dst], dim=1))
                 edge_vecs.append(diff[src, dst])
                 edge_dists.append(dist[src, dst])
         
         if edge_indices:
-            edge_index = torch.cat(edge_indices, dim=1)
+            edge_index = torch.cat(edge_indices, dim=0)
             edge_vec = torch.cat(edge_vecs, dim=0)
             edge_dist = torch.cat(edge_dists, dim=0)
         else:
-            edge_index = torch.zeros((2, 0), dtype=torch.long, device=device)
+            edge_index = torch.zeros((0, 2), dtype=torch.long, device=device)
             edge_vec = torch.zeros((0, 3), dtype=positions.dtype, device=device)
             edge_dist = torch.zeros((0,), dtype=positions.dtype, device=device)
         

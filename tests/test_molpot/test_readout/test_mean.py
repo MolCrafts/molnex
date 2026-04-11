@@ -1,6 +1,6 @@
 import torch
 
-from molpot.readout.pooling import MeanPooling
+from molpot.pooling import MeanPooling
 
 
 class TestMeanPooling:

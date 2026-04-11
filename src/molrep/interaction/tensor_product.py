@@ -90,7 +90,7 @@ class ConvTP(nn.Module):
         Args:
             node_features: Node features.
             edge_angular: Spherical harmonics.
-            edge_index: Edge indices (n_edges, 2) or (2, n_edges).
+            edge_index: Edge indices ``(E, 2)``.
             tp_weights: TP weights.
         
         Returns:

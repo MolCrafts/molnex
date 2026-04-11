@@ -10,9 +10,10 @@ import cuequivariance_torch as cuet
 from molzoo.mace import (
     EmbeddingBlock,
     InteractionBlock,
-    ProductBlock,
 )
+from molrep.readout.product_head import ProductHead
 from molrep.embedding.node import DiscreteEmbeddingSpec, JointEmbedding
+from molrep.interaction.radial_mlp import RadialWeightMLP
 from molrep.embedding.radial import BesselRBF
 from molrep.embedding.angular import SphericalHarmonics
 from molrep.embedding.cutoff import CosineCutoff
@@ -285,7 +286,7 @@ class TestInteractionBlock:
 
         # Check radial_mlp
         assert hasattr(interaction_block, "radial_mlp")
-        assert isinstance(interaction_block.radial_mlp, nn.Sequential)
+        assert isinstance(interaction_block.radial_mlp, RadialWeightMLP)
 
         # Check linear
         assert hasattr(interaction_block, "linear")
@@ -305,7 +306,7 @@ class TestInteractionBlock:
         assert hasattr(block.conv_tp, "weight_numel")
 
         # Verify MLP output dimension matches weight_numel
-        mlp_output_layer = block.radial_mlp[-1]
+        mlp_output_layer = block.radial_mlp.mlp[-1]
         assert mlp_output_layer.out_features == block.conv_tp.weight_numel
 
     def test_config_storage(self, interaction_block, interaction_config):
@@ -385,7 +386,7 @@ class TestInteractionBlock:
 
     def test_radial_mlp_architecture(self, interaction_block, interaction_config):
         """Test radial_mlp MLP architecture."""
-        mlp = interaction_block.radial_mlp
+        mlp = interaction_block.radial_mlp.mlp
         num_features = interaction_config["num_features"]
         num_bessel = interaction_config["num_bessel"]
         weight_numel = interaction_block.conv_tp.weight_numel
@@ -445,8 +446,8 @@ class TestInteractionBlock:
             )
 
             # MLP hidden dimension should match num_features
-            assert block.radial_mlp[0].out_features == num_features
-            assert block.radial_mlp[2].in_features == num_features
+            assert block.radial_mlp.mlp[0].out_features == num_features
+            assert block.radial_mlp.mlp[2].in_features == num_features
 
     def test_edge_index_format(self, interaction_block, interaction_config):
         """Test that edge_index format (n_edges, 2) works correctly."""
@@ -527,190 +528,190 @@ class TestInteractionBlock:
         assert_outputs_close(output_original, output_exported)
 
 
-class TestProductBlock:
-    """Test ProductBlock initialization and forward pass."""
+class TestProductHead:
+    """Test ProductHead initialization and forward pass."""
 
     @pytest.fixture
     def product_config(self):
-        """Common configuration for product basis block tests."""
+        """Common configuration for product head tests."""
         return {
-            "irreps_dim": 576,  # For num_features=64, l_max=2 (uniform): 64*1 + 64*3 + 64*5 = 576
-            "num_features": 64,
-            "num_bessel": 8,
+            "hidden_dim": 576,  # For num_features=64, l_max=2 (uniform): 64*1 + 64*3 + 64*5 = 576
+            "out_dim": 64,
+            "num_radial": 8,
             "l_max": 2,
-            "correlation": 2,
-            "num_elements": 118,
+            "max_body_order": 2,
+            "num_species": 118,
         }
 
     @pytest.fixture
-    def product_block(self, product_config):
-        """Create a ProductBlock instance."""
-        return ProductBlock(**product_config)
+    def product_head(self, product_config):
+        """Create a ProductHead instance."""
+        return ProductHead(**product_config)
 
-    def test_initialization(self, product_block, product_config):
+    def test_initialization(self, product_head, product_config):
         """Test that EquivariantProductBasisBlock initializes all components correctly."""
         # Check symmetric_contraction
-        assert hasattr(product_block, "symmetric_contraction")
-        assert isinstance(product_block.symmetric_contraction, SymmetricContraction)
+        assert hasattr(product_head, "symmetric_contraction")
+        assert isinstance(product_head.symmetric_contraction, SymmetricContraction)
 
         # Check basis_projection
-        assert hasattr(product_block, "basis_projection")
-        assert isinstance(product_block.basis_projection, BasisProjection)
+        assert hasattr(product_head, "basis_projection")
+        assert isinstance(product_head.basis_projection, BasisProjection)
 
         # Check linear
-        assert hasattr(product_block, "linear")
-        assert isinstance(product_block.linear, nn.Linear)
-        assert product_block.linear.in_features == product_config["irreps_dim"]
-        assert product_block.linear.out_features == product_config["num_features"]
+        assert hasattr(product_head, "linear")
+        assert isinstance(product_head.linear, nn.Linear)
+        assert product_head.linear.in_features == product_config["hidden_dim"]
+        assert product_head.linear.out_features == product_config["out_dim"]
 
-    def test_symmetric_contraction_config(self, product_block, product_config):
+    def test_symmetric_contraction_config(self, product_head, product_config):
         """Test that SymmetricContraction is configured correctly."""
-        sc = product_block.symmetric_contraction
-        assert sc.config.hidden_dim == product_config["irreps_dim"]
-        assert sc.config.num_species == product_config["num_elements"]
-        assert sc.config.max_body_order == product_config["correlation"]
+        sc = product_head.symmetric_contraction
+        assert sc.config.hidden_dim == product_config["hidden_dim"]
+        assert sc.config.num_species == product_config["num_species"]
+        assert sc.config.max_body_order == product_config["max_body_order"]
 
-    def test_basis_projection_config(self, product_block, product_config):
+    def test_basis_projection_config(self, product_head, product_config):
         """Test that BasisProjection is configured correctly."""
-        bp = product_block.basis_projection
-        assert bp.config.hidden_dim == product_config["irreps_dim"]
-        assert bp.config.num_radial == product_config["num_bessel"]
+        bp = product_head.basis_projection
+        assert bp.config.hidden_dim == product_config["hidden_dim"]
+        assert bp.config.num_radial == product_config["num_radial"]
         assert bp.config.l_max == product_config["l_max"]
-        assert bp.config.max_body_order == product_config["correlation"]
+        assert bp.config.max_body_order == product_config["max_body_order"]
 
-    def test_forward_output_shapes(self, product_block, product_config):
+    def test_forward_output_shapes(self, product_head, product_config):
         """Test forward pass returns correct output shapes."""
         n_nodes = 20
-        irreps_dim = product_config["irreps_dim"]
-        num_features = product_config["num_features"]
-        num_elements = product_config["num_elements"]
+        hidden_dim = product_config["hidden_dim"]
+        out_dim = product_config["out_dim"]
+        num_species = product_config["num_species"]
 
         # Create input data
-        node_feats = torch.randn(n_nodes, irreps_dim)
-        node_attrs = torch.randint(0, num_elements, (n_nodes,))
+        node_features = torch.randn(n_nodes, hidden_dim)
+        atom_types = torch.randint(0, num_species, (n_nodes,))
 
         # Forward pass
-        output = product_block(node_feats, node_attrs)
+        output = product_head(node_features, atom_types)
 
         # Check output shape
-        assert output.shape == (n_nodes, num_features)
+        assert output.shape == (n_nodes, out_dim)
 
-    def test_forward_dtype(self, product_block, product_config):
+    def test_forward_dtype(self, product_head, product_config):
         """Test that forward pass preserves dtype."""
         n_nodes = 10
-        irreps_dim = product_config["irreps_dim"]
+        hidden_dim = product_config["hidden_dim"]
 
         # Test with float32
-        node_feats = torch.randn(n_nodes, irreps_dim, dtype=torch.float32)
-        node_attrs = torch.randint(0, product_config["num_elements"], (n_nodes,))
+        node_features = torch.randn(n_nodes, hidden_dim, dtype=torch.float32)
+        atom_types = torch.randint(0, product_config["num_species"], (n_nodes,))
 
-        output = product_block(node_feats, node_attrs)
+        output = product_head(node_features, atom_types)
         assert output.dtype == torch.float32
 
-    def test_different_correlation_orders(self, product_config):
-        """Test initialization with different correlation (body order) values."""
-        for correlation in [1, 2, 3]:
-            block = ProductBlock(
-                irreps_dim=product_config["irreps_dim"],
-                num_features=product_config["num_features"],
-                num_bessel=product_config["num_bessel"],
+    def test_different_max_body_orders(self, product_config):
+        """Test initialization with different max_body_order values."""
+        for max_body_order in [1, 2, 3]:
+            head = ProductHead(
+                hidden_dim=product_config["hidden_dim"],
+                out_dim=product_config["out_dim"],
+                num_radial=product_config["num_radial"],
                 l_max=product_config["l_max"],
-                correlation=correlation,
-                num_elements=product_config["num_elements"],
+                max_body_order=max_body_order,
+                num_species=product_config["num_species"],
             )
 
             # Should initialize without errors
-            assert block.symmetric_contraction.config.max_body_order == correlation
-            assert block.basis_projection.config.max_body_order == correlation
+            assert head.symmetric_contraction.config.max_body_order == max_body_order
+            assert head.basis_projection.config.max_body_order == max_body_order
 
-    def test_different_num_elements(self, product_config):
-        """Test initialization with different num_elements values."""
-        for num_elements in [10, 50, 118]:
-            block = ProductBlock(
-                irreps_dim=product_config["irreps_dim"],
-                num_features=product_config["num_features"],
-                num_bessel=product_config["num_bessel"],
+    def test_different_num_species(self, product_config):
+        """Test initialization with different num_species values."""
+        for num_species in [10, 50, 118]:
+            head = ProductHead(
+                hidden_dim=product_config["hidden_dim"],
+                out_dim=product_config["out_dim"],
+                num_radial=product_config["num_radial"],
                 l_max=product_config["l_max"],
-                correlation=product_config["correlation"],
-                num_elements=num_elements,
+                max_body_order=product_config["max_body_order"],
+                num_species=num_species,
             )
 
-            assert block.symmetric_contraction.config.num_species == num_elements
+            assert head.symmetric_contraction.config.num_species == num_species
 
-    def test_batch_processing(self, product_block, product_config):
-        """Test that the block processes batches correctly."""
+    def test_batch_processing(self, product_head, product_config):
+        """Test that the head processes batches correctly."""
         # Test with different batch sizes
         for n_nodes in [5, 20, 100]:
-            node_feats = torch.randn(n_nodes, product_config["irreps_dim"])
-            node_attrs = torch.randint(0, product_config["num_elements"], (n_nodes,))
+            node_features = torch.randn(n_nodes, product_config["hidden_dim"])
+            atom_types = torch.randint(0, product_config["num_species"], (n_nodes,))
 
-            output = product_block(node_feats, node_attrs)
-            assert output.shape == (n_nodes, product_config["num_features"])
+            output = product_head(node_features, atom_types)
+            assert output.shape == (n_nodes, product_config["out_dim"])
 
-    def test_symmetric_contraction_component(self, product_block, product_config):
+    def test_symmetric_contraction_component(self, product_head, product_config):
         """Test symmetric_contraction component works independently."""
         n_nodes = 15
-        irreps_dim = product_config["irreps_dim"]
+        hidden_dim = product_config["hidden_dim"]
 
-        node_feats = torch.randn(n_nodes, irreps_dim)
-        node_attrs = torch.randint(0, product_config["num_elements"], (n_nodes,))
+        node_features = torch.randn(n_nodes, hidden_dim)
+        atom_types = torch.randint(0, product_config["num_species"], (n_nodes,))
 
         # Call symmetric_contraction directly
-        basis = product_block.symmetric_contraction(node_feats, node_attrs)
+        basis = product_head.symmetric_contraction(node_features, atom_types)
 
         # Output should have same shape as input (contraction preserves dimension)
-        assert basis.shape == (n_nodes, irreps_dim)
+        assert basis.shape == (n_nodes, hidden_dim)
 
-    def test_basis_projection_component(self, product_block, product_config):
+    def test_basis_projection_component(self, product_head, product_config):
         """Test basis_projection component works independently."""
         n_nodes = 15
-        irreps_dim = product_config["irreps_dim"]
+        hidden_dim = product_config["hidden_dim"]
 
         # Create dummy basis features
-        basis = torch.randn(n_nodes, irreps_dim)
+        basis = torch.randn(n_nodes, hidden_dim)
 
         # Call basis_projection directly (passthrough in current implementation)
-        features = product_block.basis_projection(basis)
+        features = product_head.basis_projection(basis)
 
         # Currently acts as identity
         assert torch.equal(features, basis)
 
-    def test_linear_component(self, product_block, product_config):
+    def test_linear_component(self, product_head, product_config):
         """Test linear component works independently."""
         n_nodes = 15
-        irreps_dim = product_config["irreps_dim"]
-        num_features = product_config["num_features"]
+        hidden_dim = product_config["hidden_dim"]
+        out_dim = product_config["out_dim"]
 
         # Create dummy features
-        features = torch.randn(n_nodes, irreps_dim)
+        features = torch.randn(n_nodes, hidden_dim)
 
         # Call linear directly
-        output = product_block.linear(features)
+        output = product_head.linear(features)
 
-        assert output.shape == (n_nodes, num_features)
+        assert output.shape == (n_nodes, out_dim)
 
-    def test_gradient_flow(self, product_block, product_config):
-        """Test that gradients flow through the block correctly."""
+    def test_gradient_flow(self, product_head, product_config):
+        """Test that gradients flow through the head correctly."""
         n_nodes = 10
-        irreps_dim = product_config["irreps_dim"]
+        hidden_dim = product_config["hidden_dim"]
 
-        node_feats = torch.randn(n_nodes, irreps_dim, requires_grad=True)
-        node_attrs = torch.randint(0, product_config["num_elements"], (n_nodes,))
+        node_features = torch.randn(n_nodes, hidden_dim, requires_grad=True)
+        atom_types = torch.randint(0, product_config["num_species"], (n_nodes,))
 
         # Forward pass
-        output = product_block(node_feats, node_attrs)
+        output = product_head(node_features, atom_types)
 
         # Backward pass
         loss = output.sum()
         loss.backward()
 
         # Check gradients exist
-        assert node_feats.grad is not None
-        assert not torch.isnan(node_feats.grad).any()
+        assert node_features.grad is not None
+        assert not torch.isnan(node_features.grad).any()
 
-    def test_cuequivariance_integration(self, product_block):
+    def test_cuequivariance_integration(self, product_head):
         """Test that cuEquivariance SymmetricContraction is used."""
-        sc = product_block.symmetric_contraction
+        sc = product_head.symmetric_contraction
         assert hasattr(sc, "symmetric_contraction")
         assert isinstance(sc.symmetric_contraction, cuet.SymmetricContraction)
 
@@ -719,39 +720,39 @@ class TestProductBlock:
         assert hasattr(cue_sc, "contraction_degree")
         assert hasattr(cue_sc, "num_elements")
 
-    def test_compile(self, product_block, product_config):
-        """Test that ProductBlock can be compiled with torch.compile."""
+    def test_compile(self, product_head, product_config):
+        """Test that ProductHead can be compiled with torch.compile."""
         n_nodes = 20
-        irreps_dim = product_config["irreps_dim"]
-        num_elements = product_config["num_elements"]
+        hidden_dim = product_config["hidden_dim"]
+        num_species = product_config["num_species"]
 
         # Create input data
-        node_feats = torch.randn(n_nodes, irreps_dim)
-        node_attrs = torch.randint(0, num_elements, (n_nodes,))
+        node_features = torch.randn(n_nodes, hidden_dim)
+        atom_types = torch.randint(0, num_species, (n_nodes,))
 
         # Test compilation
         output_uncompiled, output_compiled = assert_module_compiles(
-            product_block,
-            node_feats, node_attrs
+            product_head,
+            node_features, atom_types
         )
 
         # Check outputs match
         assert_outputs_close(output_uncompiled, output_compiled)
 
-    def test_export(self, product_block, product_config):
-        """Test that ProductBlock can be exported with torch.export."""
+    def test_export(self, product_head, product_config):
+        """Test that ProductHead can be exported with torch.export."""
         n_nodes = 20
-        irreps_dim = product_config["irreps_dim"]
-        num_elements = product_config["num_elements"]
+        hidden_dim = product_config["hidden_dim"]
+        num_species = product_config["num_species"]
 
         # Create input data
-        node_feats = torch.randn(n_nodes, irreps_dim)
-        node_attrs = torch.randint(0, num_elements, (n_nodes,))
+        node_features = torch.randn(n_nodes, hidden_dim)
+        atom_types = torch.randint(0, num_species, (n_nodes,))
 
         # Test export
         exported_program, output_original, output_exported = assert_module_exports(
-            product_block,
-            args_tuple=(node_feats, node_attrs),
+            product_head,
+            args_tuple=(node_features, atom_types),
         )
 
         # Check outputs match
@@ -891,39 +892,39 @@ class TestInteractionBlockEquivariance:
         assert output.shape == (n_nodes, irreps_dim)
 
 
-class TestProductBlockEquivariance:
-    """Test equivariance properties of ProductBlock."""
+class TestProductHeadEquivariance:
+    """Test equivariance properties of ProductHead."""
 
     @pytest.fixture
-    def product_block(self):
-        """Create a ProductBlock for testing."""
-        return ProductBlock(
-            irreps_dim=160,  # 32*1 + 32*3 = 128 for l_max=1, num_features=32
-            num_features=32,
-            num_bessel=8,
+    def product_head(self):
+        """Create a ProductHead for testing."""
+        return ProductHead(
+            hidden_dim=160,  # 32*1 + 32*3 = 128 for l_max=1, out_dim=32
+            out_dim=32,
+            num_radial=8,
             l_max=1,
-            correlation=2,
-            num_elements=10,
+            max_body_order=2,
+            num_species=10,
         )
 
-    def test_permutation_equivariance(self, product_block):
-        """Test that ProductBlock is equivariant to node permutations."""
+    def test_permutation_equivariance(self, product_head):
+        """Test that ProductHead is equivariant to node permutations."""
         n_nodes = 15
-        irreps_dim = 160
+        hidden_dim = 160
 
-        node_feats = torch.randn(n_nodes, irreps_dim)
-        node_attrs = torch.randint(0, 10, (n_nodes,))
+        node_features = torch.randn(n_nodes, hidden_dim)
+        atom_types = torch.randint(0, 10, (n_nodes,))
 
         # Forward pass
-        output1 = product_block(node_feats, node_attrs)
+        output1 = product_head(node_features, atom_types)
 
         # Permute nodes
         perm = torch.randperm(n_nodes)
-        node_feats_perm = node_feats[perm]
-        node_attrs_perm = node_attrs[perm]
+        node_features_perm = node_features[perm]
+        atom_types_perm = atom_types[perm]
 
         # Forward on permuted
-        output2 = product_block(node_feats_perm, node_attrs_perm)
+        output2 = product_head(node_features_perm, atom_types_perm)
 
         # Outputs should match after inverse permutation
         assert torch.allclose(output1[perm], output2, rtol=1e-5, atol=1e-5)

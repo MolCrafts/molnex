@@ -1,6 +1,6 @@
 import torch
 
-from molpot.readout.pooling import SumPooling
+from molpot.pooling import SumPooling
 
 
 class TestSumPooling:

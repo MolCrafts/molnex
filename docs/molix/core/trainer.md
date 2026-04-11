@@ -1,70 +1,78 @@
 # The Machine Learning Trainer
 
-The `Trainer` is the heart of Molix. It abstracts away the boilerplate of the training loop—device management, gradient accumulation, validation intervals—so you can focus on your model and data.
+The `Trainer` is the heart of Molix. It manages the training loop — epoch/step iteration, train/eval stage transitions, hook dispatch, and state tracking — so you can focus on your model and data.
+
+## What the Trainer Owns
+
+- **Loop control**: epoch and step iteration
+- **State management**: `TrainState` with epoch, global_step, stage
+- **Hook dispatch**: lifecycle callbacks at epoch/batch boundaries
+- **Stage transitions**: switching between `Stage.TRAIN` and `Stage.EVAL`
+- **Step delegation**: forwarding batches to `DefaultTrainStep` / `DefaultEvalStep`
+
+The Trainer intentionally does **not** own device transfer, AMP, gradient accumulation, checkpoint saving, or scheduler stepping. These concerns belong in custom steps or hooks.
 
 ## Basic Usage
-
-At its simplest, the Trainer just needs a model, a loss function, and an optimizer factory.
 
 ```python
 from molix.core.trainer import Trainer
 
 trainer = Trainer(
     model=my_model,
-    loss_fn=torch.nn.MSELoss(),
-    optimizer_factory=lambda p: torch.optim.Adam(p, lr=1e-3)
+    loss_fn=my_loss_fn,
+    optimizer_factory=lambda p: torch.optim.Adam(p, lr=1e-3),
 )
 
 trainer.train(datamodule, max_epochs=100)
 ```
 
-The trainer handles the rest: iterating over epochs, switching between train/eval modes, and calling hooks at the right times.
-
 ## The Training Loop
 
-Under the hood, the Trainer implements a standard, robust optimization loop:
-
-1.  **Epoch Start**: Reset meters, call `on_epoch_start` hooks.
+1.  **Epoch Start**: Call `on_epoch_start` hooks.
 2.  **Training Phase**:
     *   Iterate over the training dataloader.
-    *   Move batch to device.
-    *   **Step Execution**: Forward pass $\rightarrow$ Compute Loss $\rightarrow$ Backward pass $\rightarrow$ Optimizer Step.
+    *   Delegate to `train_step.on_train_batch(trainer, state, batch)`.
     *   Call batch-level hooks.
 3.  **Validation Phase**:
-    *   Switch to eval mode (no grad).
-    *   Iterate over validation dataloader.
-    *   Compute metrics.
-4.  **Epoch End**: Save checkpoints, call `on_epoch_end`.
+    *   Switch to eval mode.
+    *   Delegate to `eval_step.on_eval_batch(trainer, state, batch)`.
+    *   Call batch-level hooks.
+4.  **Epoch End**: Call `on_epoch_end` hooks.
 
 ## Understanding TrainState
 
-The `TrainState` object is passed to every hook and step. It acts as the "source of truth" for the training progress. It tracks:
+The `TrainState` object is passed to every hook and step. It tracks:
 
 *   `epoch`: The current epoch index (0-based).
 *   `global_step`: The total number of optimizer steps taken across all epochs.
 *   `stage`: The current execution phase (`Stage.TRAIN` or `Stage.EVAL`).
 
-Hooks read this state to decide when to act (e.g., "log to WandB every 50 steps").
+Hooks read this state to decide when to act (e.g., "log every 50 steps").
 
 ## Customizing the Loop: Steps
 
-Sometimes, the standard "forward-backward-step" loop isn't enough. You might be training a GAN (requires alternating updates), doing Reinforcement Learning, or using a complex gradient accumulation schedule.
-
-Molix allows you to replace the inner loop logic by providing custom `TrainStep` and `EvalStep` objects.
+Molix allows you to replace the inner loop logic by providing custom step objects that implement the `Step` protocol.
 
 ```python
-from molix.steps.train_step import TrainStep
+from molix.core.steps import DefaultTrainStep
 
-class GANTrainStep(TrainStep):
-    def run(self, state, batch):
+class GANTrainStep:
+    def on_train_batch(self, trainer, state, batch):
         # 1. Update Discriminator
         ...
         # 2. Update Generator
         ...
         return {"loss_g": loss_g, "loss_d": loss_d}
 
-# Pass your custom logic to the Trainer
-trainer = Trainer(train_step=GANTrainStep(), ...)
+    def on_eval_batch(self, trainer, state, batch):
+        ...
+
+trainer = Trainer(
+    model=model,
+    loss_fn=loss_fn,
+    optimizer_factory=opt_factory,
+    train_step=GANTrainStep(),
+)
 ```
 
-This modularity ensures that `molix` scales from simple regression tasks to cutting-edge research without requiring you to maintain a separate codebase for "weird" training loops.
+This modularity ensures that `molix` scales from simple regression tasks to cutting-edge research without requiring you to maintain a separate codebase for non-standard training loops.

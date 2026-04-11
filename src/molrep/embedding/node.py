@@ -4,7 +4,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from pydantic import BaseModel, Field, model_validator
-from molix.data.atom_td import AtomTD
 import cuequivariance_torch as cuet
 import cuequivariance as cue
 
@@ -15,7 +14,7 @@ class DiscreteEmbeddingSpec(BaseModel):
     numbers) into continuous vectors.
     
     Attributes:
-        input_key: TensorDict key to read discrete features from. Can be a
+        input_key: Key to read discrete features from. Can be a
             string like "Z" or nested tuple like ("atom", "Z").
         num_classes: Number of discrete categories (vocabulary size).
             Must be positive.
@@ -34,7 +33,7 @@ class ContinuousEmbeddingSpec(BaseModel):
     distances) into learned representations via an MLP.
     
     Attributes:
-        input_key: TensorDict key to read continuous features from.
+        input_key: Key to read continuous features from.
         in_dim: Input feature dimension. Must be positive.
         emb_dim: Output embedding dimension. Must be positive.
         use_bias: Whether to use bias in linear layers. Defaults to True.
@@ -55,7 +54,7 @@ class JointEmbeddingSpec(BaseModel):
     Attributes:
         specs: List of individual embedding specs to combine.
         out_dim: Final output dimension after projection. Must be positive.
-        output_key: TensorDict key to write combined embeddings to.
+        output_key: Key to write combined embeddings to.
     
     Note:
         The input_keys property is automatically derived from the specs.

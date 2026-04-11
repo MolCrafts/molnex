@@ -1,48 +1,27 @@
-# Automatic Gradients
+# Gradients and Forces
 
-One of the killer features of `molpot` is that you rarely need to write code to calculate forces. Because we build on PyTorch, we use **Automatic Differentiation** to compute forces as the negative gradient of the energy.
+In MolPot, forces are computed via autograd:
 
-$$ \vec{F}_i = -\nabla_{\vec{r}_i} E $$
+$$
+F = -\frac{\partial E}{\partial x}
+$$
 
-## Enabling Gradients
-
-When you create input data, simply enable gradient tracking on positions.
-
-```python
-batch = AtomTD.create(...)
-batch["atoms", "x"].requires_grad_(True)
-```
-
-## computing Forces
-
-You can compute forces manually using `torch.autograd.grad`.
+## Usage
 
 ```python
-# 1. Forward Pass
-energy = model(batch)
+import torch
+from molpot.derivation import ForceDerivation
 
-# 2. Backward Pass (Compute derivatives)
-forces = -torch.autograd.grad(
-    energy, 
-    batch["atoms", "x"], 
-    create_graph=True,  # Keep graph if you need Hessians later
-    retain_graph=True
-)[0]
+pos = torch.randn(10, 3, requires_grad=True)
+energy = (pos ** 2).sum().reshape(1)
+
+force_deriv = ForceDerivation()
+forces = force_deriv(energy, pos)
+print(forces.shape)  # (10, 3)
 ```
 
-## The ForceHead
+Prerequisite: `pos.requires_grad = True`.
 
-In practice, you should use `molpot.heads.ForceHead`. This component wraps the logic above and handles edge cases (like batching) for you.
+## How It Works
 
-```python
-from molpot.heads import ForceHead
-
-model = ForceHead(energy_model)
-outputs = model(batch)
-# outputs["target", "force"] now contains the computed forces
-```
-
-## Why is this better?
-1.  **Consistency**: Guaranteed conservation of energy (forces are conservative).
-2.  **Simplicity**: You only design the Energy function.
-3.  **Higher Order**: You can easily compute Hessians (vibration) or stress tensors.
+`ForceDerivation` uses `torch.autograd.grad` to compute the negative gradient of the scalar energy with respect to atomic positions. This is the standard approach in ML potentials, ensuring exact forces consistent with the energy surface.

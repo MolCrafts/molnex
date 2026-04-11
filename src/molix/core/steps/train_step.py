@@ -64,8 +64,11 @@ class DefaultTrainStep:
             Dictionary with "loss" and "predictions" keys
         """
         # Forward pass
-        if hasattr(batch, "to_model_kwargs"):
-            predictions = trainer.model(**batch.to_model_kwargs())
+        from molix.core.steps import extract_model_inputs
+
+        if isinstance(batch, dict):
+            model_inputs = extract_model_inputs(batch)
+            predictions = trainer.model(**model_inputs)
         else:
             predictions = trainer.model(batch)
         
@@ -80,8 +83,9 @@ class DefaultTrainStep:
         # Write loss to state
         state["train/loss"] = loss.item()
         
-        # Return only predictions in outputs
+        # Return predictions and loss for hooks/metrics
         return {
+            "loss": loss,
             "predictions": predictions,
         }
     

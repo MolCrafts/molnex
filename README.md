@@ -1,87 +1,86 @@
-# Molix
+# MolNex
 
-**Unified modeling of molecular potentials and properties with physics-aware ML**
+**Dict-first molecular ML framework for unified modeling of molecular potentials and properties with physics-aware ML.**
 
-Molix is a standalone machine learning training system capable of unified modeling for molecular potentials. It is designed to be structurally compatible with MolExp protocols while maintaining complete independence.
+MolNex is a modular framework composed of four packages that cover the full pipeline from molecular representation to potential evaluation and training.
 
-## Core Features
+## Packages
 
-**Standalone Training System**
-Molix operates as a completely independent training system. It manages its own training loops, state, and execution flow without requiring any external dependencies for its core logic. This design ensures that Molix is lightweight and easy to integrate into various environments.
-
-**ML-First API**
-We built the API with machine learning practitioners in mind. Instead of generic workflow terms, Molix uses standard ML terminology like `Trainer`, `TrainState`, and `StepResult`. This reduces the cognitive load for users already familiar with the PyTorch ecosystem.
-
-**Structural Protocol Compatibility**
-Molix achieves compatibility with MolExp through structure, not inheritance. By using duck typing and matching protocol shapes, Molix objects can be consumed by systems expecting MolExp interfaces without adding a hard dependency on the MolExp library itself.
+| Package | Role | Description |
+|---------|------|-------------|
+| **molix** | Training infrastructure | Trainer, TrainState, Step protocol, Hook lifecycle, data utilities |
+| **molrep** | Representation learning | Embedding, Interaction, Readout pipeline with equivariant operations |
+| **molpot** | Potential functions | Classical potentials, autograd forces, PotentialComposer |
+| **molzoo** | Pre-built encoders | MACE, Allegro (encoder-only, no built-in readout) |
 
 ## Installation
 
-### What it is
-The minimal setup required to run Molix on your local machine.
-
-### Why strictly separated
-We keep the installation simple to ensure you only get the dependencies you need for training, without the weight of larger frameworks.
-
-### How to use it
-To install Molix in editable mode for development:
+Requires Python >= 3.10 and PyTorch >= 2.6.
 
 ```bash
-cd molix
-pip install -e .
+pip install -e ".[dev]"
 ```
 
 ## Quick Start
 
-### What it is
-A minimal example demonstrating how to set up a training loop with a custom model and data.
-
-### Why this design
-This example highlights the separation between data, model execution, and the training loop, which gives you granular control over every step of the process.
-
-### How to use it
-Here is a complete, runnable script to train a simple model:
-
 ```python
-from molix import Trainer, TrainStep, EvalStep
+import torch
+from molzoo import MACE, MACESpec
+from molpot import LayerPooling, PotentialComposer, LJParameterHead, LJ126
 
-# 1. Define your data handling
-class MyDataModule:
-    """Manages training and validation data streams."""
-    def train_dataloader(self):
-        # Yield your training batches here
-        for batch in training_data:
-            yield batch
-    
-    def val_dataloader(self):
-        # Yield your validation batches here
-        for batch in validation_data:
-            yield batch
+# 1. Build an encoder
+spec = MACESpec(num_elements=119, num_features=64, r_max=5.0)
+encoder = MACE(spec)
 
-# 2. Define the execution steps
-def forward_pass(batch):
-    """The model's forward pass logic."""
-    return model(batch)
+# 2. Compose a potential from encoder features
+pool = LayerPooling("mean")
+composer = PotentialComposer(
+    head=LJParameterHead(feature_dim=64),
+    terms={"lj": LJ126()},
+)
 
-def optimizer_step():
-    """The optimization logic."""
-    optimizer.step()
+# 3. Train with molix
+from molix import Trainer
 
-# Wrap functions into executable steps
-train_step = TrainStep(forward_fn=forward_pass, optimizer_fn=optimizer_step)
-eval_step = EvalStep(forward_fn=forward_pass)
+trainer = Trainer(
+    model=encoder,
+    loss_fn=my_loss,
+    optimizer_factory=lambda p: torch.optim.Adam(p, lr=1e-3),
+)
+final_state = trainer.train(datamodule, max_epochs=100)
+```
 
-# 3. Initialize the Trainer
-trainer = Trainer(train_step=train_step, eval_step=eval_step)
+## Data Format
 
-# 4. Start Training
-datamodule = MyDataModule()
-final_state = trainer.train(datamodule, max_epochs=10)
+MolNex uses nested `TensorDict` subclasses (`molix.data.types`) with per-level batch sizes:
 
-print(f"Training complete: {final_state.epoch} epochs, {final_state.global_step} steps")
+```
+GraphBatch (batch_size=[])
+├── "atoms": AtomData (batch_size=[N])
+│   ├── Z: atomic numbers (N,)
+│   ├── pos: positions (N, 3)
+│   └── batch: graph membership (N,)
+├── "edges": EdgeData (batch_size=[E])
+│   ├── edge_index: source-target pairs (E, 2)
+│   ├── bond_diff: edge vectors (E, 3)
+│   └── bond_dist: edge distances (E,)
+└── "graphs": GraphData (batch_size=[B])
+    ├── num_atoms: (B,)
+    └── <targets>: energy, forces, etc.
+```
+
+Samples are plain dicts (`{"Z": tensor, "pos": tensor, "targets": {...}}`).
+The transition to nested TensorDict happens at `collate_molecules`.
+
+Access: `batch["atoms", "Z"]`, `batch["edges", "bond_dist"]`.
+
+## Testing
+
+```bash
+python -m pytest tests/ -v
+python -m pytest tests/ --cov=src --cov-report=term-missing
 ```
 
 ## License
 
-See LICENSE file.
-
+BSD 3-Clause. See [LICENSE](LICENSE).

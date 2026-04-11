@@ -10,8 +10,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from abc import ABC, abstractmethod
-from typing import Union
-from molix.data.atom_td import AtomTD
+from typing import Any
 
 
 class BasePotential(nn.Module, ABC):
@@ -64,11 +63,11 @@ class BasePotential(nn.Module, ABC):
         return forces.detach().cpu().numpy()
     
     @abstractmethod
-    def forward(self, data: Union[AtomTD, dict, None] = None, **kwargs) -> torch.Tensor:
+    def forward(self, data: dict[str, Any] | None = None, **kwargs) -> torch.Tensor:
         """Forward pass - must be implemented by subclasses.
         
         Args:
-            data: Optional AtomTD or Frame (dict)
+            data: Optional dictionary with molecule fields
             **kwargs: Alternate way to pass explicit tensors (pos, atom_types, etc.)
             
         Returns:
@@ -80,13 +79,13 @@ class BasePotential(nn.Module, ABC):
         """Extract positions from data or kwargs."""
         pos = kwargs.get("pos")
         if pos is None and data is not None:
-            if hasattr(data, "xyz"): # AtomTD
-                pos = data.xyz
-            elif isinstance(data, (dict, list)): # Frame/dict
-                try:
-                    pos = data["atoms"]["x"]
-                except (KeyError, TypeError):
-                    pos = data.get("x")
+            if isinstance(data, dict):
+                pos = data.get("pos")
+                if pos is None:
+                    try:
+                        pos = data["atoms"]["x"]
+                    except (KeyError, TypeError):
+                        pos = data.get("x")
         
         if pos is None:
             raise ValueError("Could not extract positions from data or kwargs.")

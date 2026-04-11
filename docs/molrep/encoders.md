@@ -1,47 +1,45 @@
 # MolRep Encoders
 
-Encoders are the backbone of any representation learning model. They effectively "read" a molecule—translating it from raw atoms and bonds into dense vector representations. These vectors can then be used for property prediction, pre-training, or similarity search.
+`molrep` provides composable building blocks for molecular encoders. Pre-built encoder assemblies (MACE, Allegro) are available in `molzoo`.
 
-`molrep` offers two distinct families of encoders depending on your data: **Geometry** and **Topology**.
+## Embedding Layer
 
-## Geometry Encoders
-
-If you are building an interatomic potential or predicting quantum properties (like Formation Energy), the 3D shape of the molecule is critical. A `GeometryEncoder` uses the precise $(x, y, z)$ coordinates of every atom.
-
-It works by constructing a radius graph—connecting atoms that are close to each other in 3D space—and passing messages along these edges. The message functions are typically rotationally invariant, meaning the specific orientation of the molecule doesn't change the result.
+The first step is converting raw atomic numbers into learnable vectors:
 
 ```python
-from molrep import MolRepModel
+from molrep.embedding.node import DiscreteEmbeddingSpec, JointEmbedding
 
-# Create a geometry-aware model
-model = MolRepModel.from_config(
-    encoder_type='geometry',
-    hidden_dim=128,
-    num_heads=8,
-    cutoff=5.0  # Interaction radius in Angstroms
-)
-
-features = model.extract_features(batch)
-```
-
-## Topology Encoders
-
-For many tasks, especially in drug discovery, precise 3D coordinates are unknown or unreliable. Instead, you might only have a SMILES string or a 2D connectivity graph.
-
-The `TopologyEncoder` ignores spatial positions entirely. It treats the molecule as a graph where atoms are nodes and chemical bonds are edges. This makes it perfect for large-scale pre-training on databases like PubChem or ChEMBL.
-
-```python
-# Create a topology-based (graph) model
-model = MolRepModel.from_config(
-    encoder_type='topology',
-    hidden_dim=128,
-    num_layers=4,
-    use_bond_types=True
+embed = JointEmbedding(
+    embedding_specs=[
+        DiscreteEmbeddingSpec(input_key="Z", num_classes=119, emb_dim=64),
+    ],
+    out_dim=128,
 )
 ```
 
-## Atom Embedding
+## Radial and Angular Features
 
-Before any graph or geometry processing begins, the raw atomic numbers must be converted into vectors. The `AtomEmbedding` layer handles this automatically. It maps integer element types (H=1, C=6) to learnable vectors, often initializing them with basic chemical knowledge.
+Distance and angle information is expanded into basis functions:
 
-This embedding layer is shared across different encoder types, allowing you to easily transfer chemical knowledge between geometric and topological models.
+```python
+from molrep.embedding.radial import BesselRBF
+from molrep.embedding.cutoff import CosineCutoff
+
+rbf = BesselRBF(num_rbf=8, cutoff=5.0)
+cutoff = CosineCutoff(cutoff=5.0)
+```
+
+## Interaction Blocks
+
+Interaction modules process message-passing updates with equivariant operations:
+
+- `ConvTP`: Tensor product convolution
+- `EquivariantLinear`: SO(3)-equivariant linear layer
+- `SymmetricContraction`: Multi-body basis construction
+- `MessageAggregation`: Scatter-sum aggregation
+
+## Readout
+
+- `ProductHead`: Multi-body basis to scalar features
+- `ScalarHead`: Pooling + MLP for scalar prediction
+- `masked_sum_pooling` / `masked_mean_pooling`: Graph-level aggregation

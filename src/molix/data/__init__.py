@@ -1,29 +1,74 @@
-"""Data processing components for molix.
+"""Data pipeline for molecular ML.
 
-This module provides data processing components including:
-- Dataset base class with preprocess support
-- DatasetPreprocessor base class and implementations
-- AtomTD, the protocol-level dataclass container for molecular data
+Simple by default. Complex workflows → use molexp.
 """
 
-from molix.data.atom_td import AtomTD
-from molix.data.dataset import Dataset
-from molix.data.preprocess import (
-    DatasetPreprocessor,
-    AtomicDressPreprocessor,
-    NeighborListPreprocessor,
-    AtomicDressConfig,
-    NeighborListConfig,
+# Task hierarchy
+from molix.data.task import (
+    BatchTask,
+    DatasetTask,
+    Runnable,
+    SampleTask,
+    Task,
 )
-from molix.data.collate import collate_atomic_tds
+
+# Pipeline DSL
+from molix.data.pipeline import PipelineDSL, PipelineSpec, pipeline
+
+# Built-in tasks
+from molix.data.tasks import AtomicDress, NeighborList
+
+# Data sources
+from molix.data.source import DataSource, InMemorySource, SubsetSource
+
+# Dataset + DataModule
+from molix.data.dataset import CachedDataset
+from molix.data.datamodule import DataModule, DataModuleProtocol
+
+# Collation
+from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
+
+# Types
+from molix.data.types import (
+    AtomData,
+    EdgeData,
+    EdgeRepEdges,
+    GraphBatch,
+    GraphData,
+    NodeRepAtoms,
+)
 
 __all__ = [
-    "AtomTD",
-    "Dataset",
-    "DatasetPreprocessor",
-    "AtomicDressPreprocessor",
-    "NeighborListPreprocessor",
-    "AtomicDressConfig",
-    "NeighborListConfig",
-    "collate_atomic_tds",
+    # Task hierarchy
+    "Task",
+    "SampleTask",
+    "DatasetTask",
+    "BatchTask",
+    "Runnable",
+    # Pipeline
+    "pipeline",
+    "PipelineDSL",
+    "PipelineSpec",
+    # Built-in tasks
+    "NeighborList",
+    "AtomicDress",
+    # Sources
+    "DataSource",
+    "InMemorySource",
+    "SubsetSource",
+    # Dataset + DataModule
+    "CachedDataset",
+    "DataModule",
+    "DataModuleProtocol",
+    # Collation
+    "collate_molecules",
+    "TargetSchema",
+    "DEFAULT_TARGET_SCHEMA",
+    # Types
+    "AtomData",
+    "EdgeData",
+    "GraphData",
+    "GraphBatch",
+    "NodeRepAtoms",
+    "EdgeRepEdges",
 ]

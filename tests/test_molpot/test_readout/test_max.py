@@ -1,6 +1,6 @@
 import torch
 
-from molpot.readout.pooling import MaxPooling
+from molpot.pooling import MaxPooling
 
 
 class TestMaxPooling:

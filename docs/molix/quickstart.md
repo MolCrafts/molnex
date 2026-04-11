@@ -30,35 +30,39 @@ Instead of writing a `for epoch in range(10):` loop, we initialize the `Trainer`
 ```python
 from molix.core.trainer import Trainer
 
-# 3. Initialize Trainer
+class SimpleDataModule:
+    def __init__(self, loader):
+        self._loader = loader
+
+    def train_dataloader(self):
+        return self._loader
+
+    def val_dataloader(self):
+        return self._loader
+
 trainer = Trainer(
     model=model,
     loss_fn=nn.MSELoss(),
-    optimizer_factory=lambda p: torch.optim.SGD(p, lr=0.1)
+    optimizer_factory=lambda p: torch.optim.SGD(p, lr=0.1),
 )
 
-# 4. Train!
-# We pass the same loader for train and val just for this demo
-trainer.train(
-    train_dataloader=dataloader, 
-    val_dataloader=dataloader, 
-    max_epochs=5
-)
+trainer.train(SimpleDataModule(dataloader), max_epochs=5)
 ```
 
 ## 3. That's it?
 
 Yes. Under the hood, this simple call handled:
-*   Device placement (CPU/GPU)
-*   Gradient zeroing and stepping
-*   Validation loop (no-grad context)
-*   Loss logging
-*   Progress bar (if hook enabled)
+
+* Device placement (CPU/GPU)
+* Gradient zeroing and stepping
+* Validation loop (no-grad context)
+* Loss logging
+* Progress bar (if hook enabled)
 
 ## Next Steps
 
 Now that you know the basics, explore the powerful features that make Molix unique:
 
-*   [**Hooks**](core/hooks.md): Add checkpointing, TensorBoard logging, and early stopping.
-*   [**Data Modules**](data/datamodules.md): Organize your data loading logic.
-*   [**The Trainer API**](core/trainer.md): Deep dive into `TrainState` and custom steps.
+* [**Hooks**](core/hooks.md): Add checkpointing, TensorBoard logging, and early stopping.
+* [**Data Modules**](data/datamodules.md): Organize your data loading logic.
+* [**The Trainer API**](core/trainer.md): Deep dive into `TrainState` and custom steps.
