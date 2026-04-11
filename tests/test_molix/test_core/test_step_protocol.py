@@ -40,6 +40,12 @@ def _make_batch():
 
 # Mock datamodule
 class MockDataModule:
+    def setup(self, stage: str = "fit") -> None:
+        pass
+
+    def on_epoch_start(self, epoch: int) -> None:
+        pass
+
     def train_dataloader(self):
         for _ in range(3):
             yield _make_batch()

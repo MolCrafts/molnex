@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 
 class Stage(str, Enum):
@@ -71,43 +71,45 @@ class TrainState(dict):
 
     @property
     def epoch(self) -> int:
-        """Get epoch counter."""
-        return int(self.get("epoch", 0))
+        return self["epoch"]
 
     @epoch.setter
     def epoch(self, value: int) -> None:
-        """Set epoch counter."""
         self["epoch"] = value
 
     @property
     def global_step(self) -> int:
-        """Get global step counter."""
-        return int(self.get("global_step", 0))
+        return self["global_step"]
 
     @global_step.setter
     def global_step(self, value: int) -> None:
-        """Set global step counter."""
         self["global_step"] = value
 
     @property
     def stage(self) -> Stage:
-        """Get training stage."""
-        return self.get("stage", Stage.TRAIN)
+        return self["stage"]
 
     @stage.setter
     def stage(self, value: Stage) -> None:
-        """Set training stage."""
         self["stage"] = value
 
     @property
     def steps_since_last_eval(self) -> int:
-        """Get steps since last eval."""
-        return int(self.get("steps_since_last_eval", 0))
+        return self["steps_since_last_eval"]
 
     @steps_since_last_eval.setter
     def steps_since_last_eval(self, value: int) -> None:
-        """Set steps since last eval."""
         self["steps_since_last_eval"] = value
+
+    @property
+    def best_metric(self) -> float | None:
+        """Get best tracked metric value (if set)."""
+        return self.get("best_metric")
+
+    @best_metric.setter
+    def best_metric(self, value: float | None) -> None:
+        """Set best tracked metric value."""
+        self["best_metric"] = value
 
 
 @dataclass
@@ -120,6 +122,6 @@ class StepResult:
         logs: Additional logging information
     """
 
-    loss: Optional[Any] = None
+    loss: Any = None
     result: Any = None
     logs: Mapping[str, Any] = field(default_factory=dict)

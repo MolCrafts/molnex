@@ -458,16 +458,31 @@ class TensorBoardHook(BaseHook):
 class CheckpointHook(BaseHook):
     """Saves model checkpoints during training.
 
+    Uses :class:`~molix.core.checkpoint.Checkpoint` for complete
+    serialisation (model, optimizer, lr_scheduler, AMP scaler, RNG states)
+    and :class:`~molix.core.checkpoint.CheckpointBackend` for pluggable
+    storage (default: ``TorchSaveBackend`` with atomic writes).
+
     Args:
         checkpoint_dir: Directory to save checkpoints (default: "./checkpoints")
         save_every_n_epochs: Save checkpoint every N epochs (default: 1)
         save_last: Always save the last checkpoint (default: True)
+        save_best: Track a metric and save ``best.pt`` when it improves.
+        best_metric_name: State key of the metric to track (default: "eval/loss").
+        best_metric_mode: ``"min"`` or ``"max"`` (default: "min").
+        save_snapshot: Write a torchrun-elastic snapshot after every save.
+        backend: Checkpoint I/O backend. If ``None``, uses
+            :class:`~molix.core.checkpoint.TorchSaveBackend`.
 
     Example:
         ```python
         from molix.core.hooks import CheckpointHook
 
-        hook = CheckpointHook(checkpoint_dir="./ckpt", save_every_n_epochs=5)
+        hook = CheckpointHook(
+            checkpoint_dir="./ckpt",
+            save_every_n_epochs=5,
+            save_best=True,
+        )
         trainer = Trainer(model=model, hooks=[hook])
         ```
     """
@@ -477,28 +492,55 @@ class CheckpointHook(BaseHook):
         checkpoint_dir: str = "./checkpoints",
         save_every_n_epochs: int = 1,
         save_last: bool = True,
-        register_artifacts: bool = False,
+        save_best: bool = False,
+        best_metric_name: str = "eval/loss",
+        best_metric_mode: str = "min",
+        save_snapshot: bool = False,
+        backend: Any | None = None,
     ):
-        import os
+        from pathlib import Path
 
-        import torch
-
-        self.os = os
-        self.torch = torch
-
-        self.checkpoint_dir = checkpoint_dir
+        self._checkpoint_dir = Path(checkpoint_dir)
         self.save_every_n_epochs = save_every_n_epochs
         self.save_last = save_last
-        self.register_artifacts = register_artifacts
+        self.save_best = save_best
+        self.best_metric_name = best_metric_name
+        self.best_metric_mode = best_metric_mode
+        self.save_snapshot = save_snapshot
+
+        if backend is not None:
+            self._backend = backend
+        else:
+            from molix.core.checkpoint import TorchSaveBackend
+
+            self._backend = TorchSaveBackend()
 
     def on_train_start(self, trainer, state):
         """Create checkpoint directory."""
-        self.os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     def on_epoch_end(self, trainer, state):
-        """Save checkpoint at specified intervals."""
+        """Save periodic and best-model checkpoints."""
         if (state.epoch + 1) % self.save_every_n_epochs == 0:
             self._save_checkpoint(trainer, state, f"epoch_{state.epoch}.pt")
+
+        # Best-model tracking
+        if self.save_best:
+            current = state.get(self.best_metric_name)
+            if current is not None:
+                best = trainer._checkpoint.best_metric
+                is_better = (
+                    best is None
+                    or (self.best_metric_mode == "min" and current < best)
+                    or (self.best_metric_mode == "max" and current > best)
+                )
+                if is_better:
+                    trainer._checkpoint.best_metric = current
+                    state["best_metric"] = current
+                    self._save_checkpoint(trainer, state, "best.pt")
+                    logger.info(
+                        f"New best {self.best_metric_name}={current:.6g}"
+                    )
 
     def on_train_end(self, trainer, state):
         """Save final checkpoint."""
@@ -506,30 +548,30 @@ class CheckpointHook(BaseHook):
             self._save_checkpoint(trainer, state, "last.pt")
 
     def _save_checkpoint(self, trainer, state, filename):
-        """Save checkpoint to file."""
-        filepath = self.os.path.join(self.checkpoint_dir, filename)
-        checkpoint = {
-            "epoch": state.epoch,
-            "global_step": state.global_step,
-            "model_state_dict": trainer.model.state_dict() if trainer.model else None,
-            "optimizer_state_dict": trainer.optimizer.state_dict() if trainer.optimizer else None,
-        }
-        self.torch.save(checkpoint, filepath)
+        """Save checkpoint using Checkpoint and backend."""
+        trainer._checkpoint.epoch = state.epoch
+        trainer._checkpoint.global_step = state.global_step
+
+        sd = trainer._checkpoint.state_dict()
+        filepath = self._checkpoint_dir / filename
+        self._backend.save(sd, filepath)
         logger.info(f"Saved checkpoint to {filepath}")
 
-        # Register checkpoint as artifact
-        if self.register_artifacts and hasattr(trainer, "ctx"):
-            ctx = trainer.ctx
-            if ctx:
-                from pathlib import Path
+        if self.save_snapshot:
+            self._save_elastic_snapshot(sd)
 
-                checkpoint_path = Path(filepath)
-                if checkpoint_path.exists():
-                    ctx.save_artifact(
-                        name=f"checkpoint_{filename}",
-                        src=checkpoint_path,
-                    )
-                    logger.info(f"Registered checkpoint as artifact: {checkpoint_path}")
+    def _save_elastic_snapshot(self, state_dict):
+        """Save a snapshot for torchrun elastic restart."""
+        import os
+        from pathlib import Path
+
+        run_id = os.environ.get("TORCHELASTIC_RUN_ID")
+        snapshot_dir = os.environ.get("TORCHELASTIC_SNAPSHOT_DIR", "./snapshots")
+        if run_id:
+            snap_path = Path(snapshot_dir) / run_id / "snapshot.pt"
+            snap_path.parent.mkdir(parents=True, exist_ok=True)
+            self._backend.save(state_dict, snap_path)
+            logger.info(f"Saved elastic snapshot to {snap_path}")
 
 
 class ProgressBarHook(BaseHook):

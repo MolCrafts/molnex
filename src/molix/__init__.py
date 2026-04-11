@@ -34,6 +34,7 @@ _load_ops_library()
 
 from molix import logger
 from molix.config import config
+from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
 from molix.core.losses import MAELoss, MSELoss, WeightedLoss
 from molix.core.state import Stage, StepResult, TrainState
 from molix.core.trainer import Trainer
@@ -41,8 +42,11 @@ from molix.core.trainer import Trainer
 __all__ = [
     "Stage",
     "TrainState",
+    "Checkpoint",
     "StepResult",
     "Trainer",
+    "CheckpointBackend",
+    "TorchSaveBackend",
     "MSELoss",
     "MAELoss",
     "WeightedLoss",

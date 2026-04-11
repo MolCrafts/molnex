@@ -28,23 +28,23 @@ def test_trainstate_counter_increment():
 
 def test_trainer_parameter_storage():
     """Verify eval_every_n_steps parameter is stored correctly."""
-    trainer = Trainer(eval_every_n_steps=100)
+    trainer = _make_trainer(eval_every_n_steps=100)
     assert trainer.eval_every_n_steps == 100
-    
-    trainer_none = Trainer(eval_every_n_steps=None)
+
+    trainer_none = _make_trainer(eval_every_n_steps=None)
     assert trainer_none.eval_every_n_steps is None
-    
-    trainer_default = Trainer()
+
+    trainer_default = _make_trainer()
     assert trainer_default.eval_every_n_steps is None
 
 
 def test_trainer_parameter_validation():
     """Verify ValueError raised on invalid eval_every_n_steps input."""
     with pytest.raises(ValueError, match="must be > 0"):
-        Trainer(eval_every_n_steps=0)
-    
+        _make_trainer(eval_every_n_steps=0)
+
     with pytest.raises(ValueError, match="must be > 0"):
-        Trainer(eval_every_n_steps=-5)
+        _make_trainer(eval_every_n_steps=-5)
 
 
 def test_hook_on_eval_step_complete_exists():
@@ -71,7 +71,7 @@ def test_hook_on_eval_step_complete_callable():
 def test_trainer_eval_every_n_steps_disabled_by_default():
     """Verify step-based eval logic is disabled when eval_every_n_steps=None."""
     state = TrainState()
-    trainer = Trainer(eval_every_n_steps=None)
+    trainer = _make_trainer(eval_every_n_steps=None)
 
     # Simulate multiple steps
     for _ in range(100):
@@ -110,6 +110,12 @@ class _MockDataModule:
 
     def __init__(self, batches_per_epoch: int = 5):
         self._n = batches_per_epoch
+
+    def setup(self, stage: str = "fit") -> None:
+        pass
+
+    def on_epoch_start(self, epoch: int) -> None:
+        pass
 
     def train_dataloader(self):
         for _ in range(self._n):
