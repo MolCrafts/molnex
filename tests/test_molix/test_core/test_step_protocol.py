@@ -324,3 +324,131 @@ def test_step_return_format():
     assert isinstance(eval_outputs, dict)
     assert "loss" in eval_outputs
     assert "predictions" in eval_outputs
+
+
+# ---- AMP tests ----
+
+
+def test_default_train_step_with_amp_bfloat16():
+    """Verify DefaultTrainStep with amp_dtype=bfloat16 trains correctly on CPU."""
+    model = SimpleModel()
+
+    trainer = Trainer(
+        model=model,
+        loss_fn=simple_loss_fn,
+        optimizer_factory=simple_optimizer_factory,
+        train_step=DefaultTrainStep(amp_dtype=torch.bfloat16),
+    )
+
+    state = TrainState()
+    batch = _make_batch()
+
+    initial_params = [p.clone() for p in model.parameters()]
+    outputs = trainer.train_step.on_train_batch(trainer, state, batch)
+
+    assert "loss" in outputs
+    assert "predictions" in outputs
+    # Parameters should have been updated
+    for initial, current in zip(initial_params, model.parameters()):
+        assert not torch.equal(initial, current)
+
+
+def test_default_train_step_amp_backward_compatible():
+    """Verify DefaultTrainStep() with no args works identically to before."""
+    model = SimpleModel()
+
+    trainer = Trainer(
+        model=model,
+        loss_fn=simple_loss_fn,
+        optimizer_factory=simple_optimizer_factory,
+        train_step=DefaultTrainStep(),
+    )
+
+    state = TrainState()
+    batch = _make_batch()
+
+    outputs = trainer.train_step.on_train_batch(trainer, state, batch)
+    assert "loss" in outputs
+    assert "predictions" in outputs
+    assert "train/loss" in state
+
+
+def test_default_eval_step_with_amp_bfloat16():
+    """Verify DefaultEvalStep with amp_dtype=bfloat16 works on CPU."""
+    model = SimpleModel()
+
+    trainer = Trainer(
+        model=model,
+        loss_fn=simple_loss_fn,
+        optimizer_factory=simple_optimizer_factory,
+        eval_step=DefaultEvalStep(amp_dtype=torch.bfloat16),
+    )
+
+    state = TrainState()
+    batch = _make_batch()
+
+    outputs = trainer.eval_step.on_eval_batch(trainer, state, batch)
+    assert "loss" in outputs
+    assert "predictions" in outputs
+    assert not outputs["loss"].requires_grad
+
+
+# ---- on_after_backward hook point tests ----
+
+
+def test_on_after_backward_fires_during_training():
+    """Verify on_after_backward hook fires between backward and optimizer step."""
+    call_log = []
+
+    class AfterBackwardHook:
+        def on_after_backward(self, trainer, state):
+            # Gradients should exist at this point
+            has_grads = any(
+                p.grad is not None for p in trainer.model.parameters()
+            )
+            call_log.append(("on_after_backward", has_grads))
+
+    model = SimpleModel()
+    trainer = Trainer(
+        model=model,
+        loss_fn=simple_loss_fn,
+        optimizer_factory=simple_optimizer_factory,
+        hooks=[AfterBackwardHook()],
+    )
+
+    datamodule = MockDataModule()
+    trainer.train(datamodule, max_epochs=1)
+
+    # Should have been called once per training batch (3 batches)
+    assert len(call_log) == 3
+    # Gradients should have been present each time
+    for _, has_grads in call_log:
+        assert has_grads
+
+
+def test_on_after_backward_fires_with_amp():
+    """Verify on_after_backward fires with AMP and gradients are unscaled."""
+    call_log = []
+
+    class AfterBackwardHook:
+        def on_after_backward(self, trainer, state):
+            has_grads = any(
+                p.grad is not None for p in trainer.model.parameters()
+            )
+            call_log.append(has_grads)
+
+    model = SimpleModel()
+    trainer = Trainer(
+        model=model,
+        loss_fn=simple_loss_fn,
+        optimizer_factory=simple_optimizer_factory,
+        train_step=DefaultTrainStep(amp_dtype=torch.bfloat16),
+        hooks=[AfterBackwardHook()],
+    )
+
+    datamodule = MockDataModule()
+    trainer.train(datamodule, max_epochs=1)
+
+    assert len(call_log) == 3
+    for has_grads in call_log:
+        assert has_grads

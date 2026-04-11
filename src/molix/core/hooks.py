@@ -9,7 +9,10 @@ to override execution order (lower priority = earlier execution).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol
+
+import torch.nn as nn
 
 from molix import logger as _logger_mod
 
@@ -116,6 +119,19 @@ class Hook(Protocol):
         """
         ...
 
+    def on_after_backward(self, trainer: "Trainer", state: "TrainState") -> None:
+        """Called after backward pass, before optimizer step.
+
+        Gradients are available and unscaled (if AMP is active, unscale
+        has already been applied). Use this hook for gradient manipulation
+        (clipping, logging, etc.).
+
+        Args:
+            trainer: The trainer instance
+            state: Current training state
+        """
+        ...
+
     def on_eval_batch_end(
         self, trainer: "Trainer", state: "TrainState", batch: Any, outputs: Any
     ) -> None:
@@ -180,6 +196,10 @@ class BaseHook:
         self, trainer: "Trainer", state: "TrainState", batch: Any, outputs: Any
     ) -> None:
         """Called after processing each training batch."""
+        pass
+
+    def on_after_backward(self, trainer: "Trainer", state: "TrainState") -> None:
+        """Called after backward pass, before optimizer step."""
         pass
 
     def on_eval_batch_start(self, trainer: "Trainer", state: "TrainState", batch: Any) -> None:
@@ -458,31 +478,16 @@ class TensorBoardHook(BaseHook):
 class CheckpointHook(BaseHook):
     """Saves model checkpoints during training.
 
-    Uses :class:`~molix.core.checkpoint.Checkpoint` for complete
-    serialisation (model, optimizer, lr_scheduler, AMP scaler, RNG states)
-    and :class:`~molix.core.checkpoint.CheckpointBackend` for pluggable
-    storage (default: ``TorchSaveBackend`` with atomic writes).
-
     Args:
         checkpoint_dir: Directory to save checkpoints (default: "./checkpoints")
         save_every_n_epochs: Save checkpoint every N epochs (default: 1)
         save_last: Always save the last checkpoint (default: True)
-        save_best: Track a metric and save ``best.pt`` when it improves.
-        best_metric_name: State key of the metric to track (default: "eval/loss").
-        best_metric_mode: ``"min"`` or ``"max"`` (default: "min").
-        save_snapshot: Write a torchrun-elastic snapshot after every save.
-        backend: Checkpoint I/O backend. If ``None``, uses
-            :class:`~molix.core.checkpoint.TorchSaveBackend`.
 
     Example:
         ```python
         from molix.core.hooks import CheckpointHook
 
-        hook = CheckpointHook(
-            checkpoint_dir="./ckpt",
-            save_every_n_epochs=5,
-            save_best=True,
-        )
+        hook = CheckpointHook(checkpoint_dir="./ckpt", save_every_n_epochs=5)
         trainer = Trainer(model=model, hooks=[hook])
         ```
     """
@@ -492,55 +497,28 @@ class CheckpointHook(BaseHook):
         checkpoint_dir: str = "./checkpoints",
         save_every_n_epochs: int = 1,
         save_last: bool = True,
-        save_best: bool = False,
-        best_metric_name: str = "eval/loss",
-        best_metric_mode: str = "min",
-        save_snapshot: bool = False,
-        backend: Any | None = None,
+        register_artifacts: bool = False,
     ):
-        from pathlib import Path
+        import os
 
-        self._checkpoint_dir = Path(checkpoint_dir)
+        import torch
+
+        self.os = os
+        self.torch = torch
+
+        self.checkpoint_dir = checkpoint_dir
         self.save_every_n_epochs = save_every_n_epochs
         self.save_last = save_last
-        self.save_best = save_best
-        self.best_metric_name = best_metric_name
-        self.best_metric_mode = best_metric_mode
-        self.save_snapshot = save_snapshot
-
-        if backend is not None:
-            self._backend = backend
-        else:
-            from molix.core.checkpoint import TorchSaveBackend
-
-            self._backend = TorchSaveBackend()
+        self.register_artifacts = register_artifacts
 
     def on_train_start(self, trainer, state):
         """Create checkpoint directory."""
-        self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.os.makedirs(self.checkpoint_dir, exist_ok=True)
 
     def on_epoch_end(self, trainer, state):
-        """Save periodic and best-model checkpoints."""
+        """Save checkpoint at specified intervals."""
         if (state.epoch + 1) % self.save_every_n_epochs == 0:
             self._save_checkpoint(trainer, state, f"epoch_{state.epoch}.pt")
-
-        # Best-model tracking
-        if self.save_best:
-            current = state.get(self.best_metric_name)
-            if current is not None:
-                best = trainer._checkpoint.best_metric
-                is_better = (
-                    best is None
-                    or (self.best_metric_mode == "min" and current < best)
-                    or (self.best_metric_mode == "max" and current > best)
-                )
-                if is_better:
-                    trainer._checkpoint.best_metric = current
-                    state["best_metric"] = current
-                    self._save_checkpoint(trainer, state, "best.pt")
-                    logger.info(
-                        f"New best {self.best_metric_name}={current:.6g}"
-                    )
 
     def on_train_end(self, trainer, state):
         """Save final checkpoint."""
@@ -548,30 +526,30 @@ class CheckpointHook(BaseHook):
             self._save_checkpoint(trainer, state, "last.pt")
 
     def _save_checkpoint(self, trainer, state, filename):
-        """Save checkpoint using Checkpoint and backend."""
-        trainer._checkpoint.epoch = state.epoch
-        trainer._checkpoint.global_step = state.global_step
-
-        sd = trainer._checkpoint.state_dict()
-        filepath = self._checkpoint_dir / filename
-        self._backend.save(sd, filepath)
+        """Save checkpoint to file."""
+        filepath = self.os.path.join(self.checkpoint_dir, filename)
+        checkpoint = {
+            "epoch": state.epoch,
+            "global_step": state.global_step,
+            "model_state_dict": trainer.model.state_dict() if trainer.model else None,
+            "optimizer_state_dict": trainer.optimizer.state_dict() if trainer.optimizer else None,
+        }
+        self.torch.save(checkpoint, filepath)
         logger.info(f"Saved checkpoint to {filepath}")
 
-        if self.save_snapshot:
-            self._save_elastic_snapshot(sd)
+        # Register checkpoint as artifact
+        if self.register_artifacts and hasattr(trainer, "ctx"):
+            ctx = trainer.ctx
+            if ctx:
+                from pathlib import Path
 
-    def _save_elastic_snapshot(self, state_dict):
-        """Save a snapshot for torchrun elastic restart."""
-        import os
-        from pathlib import Path
-
-        run_id = os.environ.get("TORCHELASTIC_RUN_ID")
-        snapshot_dir = os.environ.get("TORCHELASTIC_SNAPSHOT_DIR", "./snapshots")
-        if run_id:
-            snap_path = Path(snapshot_dir) / run_id / "snapshot.pt"
-            snap_path.parent.mkdir(parents=True, exist_ok=True)
-            self._backend.save(state_dict, snap_path)
-            logger.info(f"Saved elastic snapshot to {snap_path}")
+                checkpoint_path = Path(filepath)
+                if checkpoint_path.exists():
+                    ctx.save_artifact(
+                        name=f"checkpoint_{filename}",
+                        src=checkpoint_path,
+                    )
+                    logger.info(f"Registered checkpoint as artifact: {checkpoint_path}")
 
 
 class ProgressBarHook(BaseHook):
@@ -983,33 +961,6 @@ class ProfilerHook(BaseHook):
                         )
                         logger.info(f"Registered profiler TensorBoard logs as artifact: {tb_dir}")
 
-    @classmethod
-    def for_diagnosis(cls, output_dir: str = "./profiler_output") -> "ProfilerHook":
-        """Create a profiler configured for full performance diagnosis.
-
-        Enables all options needed to answer: data-slow, operator-slow,
-        communication-slow, or graph-break-slow.
-
-        Args:
-            output_dir: Directory for profiler outputs.
-
-        Returns:
-            Configured ProfilerHook instance.
-        """
-        return cls(
-            output_dir=output_dir,
-            schedule_wait=2,
-            schedule_warmup=2,
-            schedule_active=6,
-            profile_memory=True,
-            with_stack=True,
-            with_flops=True,
-            with_modules=True,
-            record_shapes=True,
-            export_chrome_trace=True,
-            export_tensorboard=True,
-        )
-
     def _on_trace_ready(self, prof):
         """Callback when trace is ready - export to files."""
         # Export Chrome Trace
@@ -1034,84 +985,95 @@ class ProfilerHook(BaseHook):
                 )
 
 
-class DataLoaderProfilingHook(BaseHook):
-    """Measures wall-clock time between batches to detect data loading bottlenecks.
+class GradClipHook(BaseHook):
+    """Clip gradient norms after backward pass.
 
-    All diagnostic state is internal to this hook. Access results via the
-    hook instance directly, not through TrainState.
+    Applies ``torch.nn.utils.clip_grad_norm_`` at the ``on_after_backward``
+    stage and writes the pre-clip gradient norm to ``state["train/grad_norm"]``.
 
     Args:
-        log_every_n_steps: Log timing summary every N steps.
-
-    Attributes:
-        median_data_wait_ms: Median time waiting for next batch (ms).
-        median_compute_ms: Median time in forward/backward/optimizer (ms).
-        is_data_bottleneck: True when data wait exceeds compute time.
+        max_norm: Maximum norm of the gradients.
+        norm_type: Type of the used p-norm (default: 2.0, i.e. L2).
 
     Example:
         ```python
-        dl_hook = DataLoaderProfilingHook(log_every_n_steps=50)
-        trainer = Trainer(model=model, hooks=[dl_hook])
-        trainer.train(dm, max_epochs=5)
+        from molix.core.hooks import GradClipHook
 
-        # After training, inspect:
-        print(dl_hook.median_data_wait_ms)
-        print(dl_hook.is_data_bottleneck)
+        hook = GradClipHook(max_norm=1.0)
+        trainer = Trainer(model=model, hooks=[hook])
         ```
     """
 
-    def __init__(self, log_every_n_steps: int = 50):
-        self.log_every_n_steps = log_every_n_steps
+    def __init__(self, max_norm: float, norm_type: float = 2.0):
+        self.max_norm = max_norm
+        self.norm_type = norm_type
 
-        self._batch_end_time: float | None = None
-        self._batch_start_time: float = 0.0
-        self._data_wait_times: list[float] = []
-        self._compute_times: list[float] = []
+    def on_after_backward(self, trainer, state):
+        """Clip gradients and record pre-clip norm."""
+        import torch
 
-        # Public read-only diagnostics
-        self.median_data_wait_ms: float = 0.0
-        self.median_compute_ms: float = 0.0
-        self.is_data_bottleneck: bool = False
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            trainer.model.parameters(),
+            self.max_norm,
+            norm_type=self.norm_type,
+        )
+        state["train/grad_norm"] = grad_norm.item()
+
+
+class ActivationCheckpointingHook(BaseHook):
+    """Apply activation checkpointing to model layers at training start.
+
+    Wraps matching submodules with ``torch.utils.checkpoint.checkpoint``
+    using ``use_reentrant=False`` (recommended for DDP compatibility).
+
+    Args:
+        check_fn: Predicate selecting which submodules to wrap.
+            If None, wraps all direct children of the model.
+
+    Example:
+        ```python
+        from molix.core.hooks import ActivationCheckpointingHook
+
+        hook = ActivationCheckpointingHook(
+            check_fn=lambda m: isinstance(m, InteractionBlock),
+        )
+        trainer = Trainer(model=model, hooks=[hook])
+        ```
+    """
+
+    def __init__(self, check_fn: Callable[[nn.Module], bool] | None = None):
+        self.check_fn = check_fn
 
     def on_train_start(self, trainer, state):
-        """Reset timing state."""
-        self._batch_end_time = None
-        self._data_wait_times.clear()
-        self._compute_times.clear()
+        """Wrap matching modules with activation checkpointing."""
+        _apply_activation_checkpointing(trainer.model, self.check_fn)
 
-    def on_train_batch_start(self, trainer, state, batch):
-        """Record data wait time (gap since last batch_end)."""
-        import time
 
-        now = time.perf_counter()
-        if self._batch_end_time is not None:
-            self._data_wait_times.append((now - self._batch_end_time) * 1000)
-        self._batch_start_time = now
+def _apply_activation_checkpointing(
+    model: nn.Module,
+    check_fn: Callable[[nn.Module], bool] | None = None,
+) -> None:
+    """Wrap matching submodules with activation checkpointing.
 
-    def on_train_batch_end(self, trainer, state, batch, outputs):
-        """Record compute time and periodically update diagnostics."""
-        import time
-        import statistics
+    Args:
+        model: The model to apply checkpointing to.
+        check_fn: Predicate that selects which submodules to wrap.
+            If None, wraps all direct children.
+    """
+    from torch.utils.checkpoint import checkpoint
 
-        now = time.perf_counter()
-        self._batch_end_time = now
-        self._compute_times.append((now - self._batch_start_time) * 1000)
+    if check_fn is None:
+        targets = set(model.children())
+    else:
+        targets = {m for m in model.modules() if m is not model and check_fn(m)}
 
-        step = state.global_step
-        if (
-            step > 0
-            and step % self.log_every_n_steps == 0
-            and self._data_wait_times
-        ):
-            self.median_data_wait_ms = statistics.median(self._data_wait_times)
-            self.median_compute_ms = statistics.median(self._compute_times)
-            self.is_data_bottleneck = self.median_data_wait_ms > self.median_compute_ms
-            logger.info(
-                "Step %d: data_wait=%.1fms compute=%.1fms (data_bottleneck=%s)",
-                step,
-                self.median_data_wait_ms,
-                self.median_compute_ms,
-                self.is_data_bottleneck,
-            )
-            self._data_wait_times.clear()
-            self._compute_times.clear()
+    for module in targets:
+        original_forward = module.forward
+
+        def _make_checkpointed(fn):
+            def checkpointed_forward(*args, **kwargs):
+                return checkpoint(fn, *args, use_reentrant=False, **kwargs)
+
+            return checkpointed_forward
+
+        module.forward = _make_checkpointed(original_forward)  # type: ignore[method-assign]
