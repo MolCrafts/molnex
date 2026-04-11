@@ -941,6 +941,33 @@ class ProfilerHook(BaseHook):
                         )
                         logger.info(f"Registered profiler TensorBoard logs as artifact: {tb_dir}")
 
+    @classmethod
+    def for_diagnosis(cls, output_dir: str = "./profiler_output") -> "ProfilerHook":
+        """Create a profiler configured for full performance diagnosis.
+
+        Enables all options needed to answer: data-slow, operator-slow,
+        communication-slow, or graph-break-slow.
+
+        Args:
+            output_dir: Directory for profiler outputs.
+
+        Returns:
+            Configured ProfilerHook instance.
+        """
+        return cls(
+            output_dir=output_dir,
+            schedule_wait=2,
+            schedule_warmup=2,
+            schedule_active=6,
+            profile_memory=True,
+            with_stack=True,
+            with_flops=True,
+            with_modules=True,
+            record_shapes=True,
+            export_chrome_trace=True,
+            export_tensorboard=True,
+        )
+
     def _on_trace_ready(self, prof):
         """Callback when trace is ready - export to files."""
         # Export Chrome Trace
@@ -963,3 +990,86 @@ class ProfilerHook(BaseHook):
                     "Skipping export_stacks() because with_stack=False. "
                     "Set with_stack=True to enable stack trace export."
                 )
+
+
+class DataLoaderProfilingHook(BaseHook):
+    """Measures wall-clock time between batches to detect data loading bottlenecks.
+
+    All diagnostic state is internal to this hook. Access results via the
+    hook instance directly, not through TrainState.
+
+    Args:
+        log_every_n_steps: Log timing summary every N steps.
+
+    Attributes:
+        median_data_wait_ms: Median time waiting for next batch (ms).
+        median_compute_ms: Median time in forward/backward/optimizer (ms).
+        is_data_bottleneck: True when data wait exceeds compute time.
+
+    Example:
+        ```python
+        dl_hook = DataLoaderProfilingHook(log_every_n_steps=50)
+        trainer = Trainer(model=model, hooks=[dl_hook])
+        trainer.train(dm, max_epochs=5)
+
+        # After training, inspect:
+        print(dl_hook.median_data_wait_ms)
+        print(dl_hook.is_data_bottleneck)
+        ```
+    """
+
+    def __init__(self, log_every_n_steps: int = 50):
+        self.log_every_n_steps = log_every_n_steps
+
+        self._batch_end_time: float | None = None
+        self._batch_start_time: float = 0.0
+        self._data_wait_times: list[float] = []
+        self._compute_times: list[float] = []
+
+        # Public read-only diagnostics
+        self.median_data_wait_ms: float = 0.0
+        self.median_compute_ms: float = 0.0
+        self.is_data_bottleneck: bool = False
+
+    def on_train_start(self, trainer, state):
+        """Reset timing state."""
+        self._batch_end_time = None
+        self._data_wait_times.clear()
+        self._compute_times.clear()
+
+    def on_train_batch_start(self, trainer, state, batch):
+        """Record data wait time (gap since last batch_end)."""
+        import time
+
+        now = time.perf_counter()
+        if self._batch_end_time is not None:
+            self._data_wait_times.append((now - self._batch_end_time) * 1000)
+        self._batch_start_time = now
+
+    def on_train_batch_end(self, trainer, state, batch, outputs):
+        """Record compute time and periodically update diagnostics."""
+        import time
+        import statistics
+
+        now = time.perf_counter()
+        self._batch_end_time = now
+        self._compute_times.append((now - self._batch_start_time) * 1000)
+
+        step = state.global_step
+        if (
+            step > 0
+            and step % self.log_every_n_steps == 0
+            and self._data_wait_times
+        ):
+            self.median_data_wait_ms = statistics.median(self._data_wait_times)
+            self.median_compute_ms = statistics.median(self._compute_times)
+            self.is_data_bottleneck = self.median_data_wait_ms > self.median_compute_ms
+            logger.info(
+                "Step %d: data_wait=%.1fms compute=%.1fms (data_bottleneck=%s)",
+                step,
+                self.median_data_wait_ms,
+                self.median_compute_ms,
+                self.is_data_bottleneck,
+            )
+            self._data_wait_times.clear()
+            self._compute_times.clear()
