@@ -111,18 +111,36 @@ class Trainer:
     def train(
         self,
         datamodule: DataModuleProtocol,
-        max_epochs: int = 1,
+        max_epochs: int | None = None,
+        max_steps: int | None = None,
     ) -> TrainState:
         """Execute training loop.
 
+        When both ``max_epochs`` and ``max_steps`` are provided, training
+        stops at whichever limit is reached first.
+
         Args:
             datamodule: Data module providing train/val dataloaders
-            max_epochs: Maximum number of epochs to train
+            max_epochs: Maximum number of epochs to train.
+            max_steps: Maximum number of training steps (batches) across
+                all epochs.
 
         Returns:
             Final training state
+
+        Raises:
+            ValueError: If neither ``max_epochs`` nor ``max_steps`` is set,
+                or if either value is <= 0.
         """
-        return self._train(datamodule, max_epochs)
+        if max_epochs is None and max_steps is None:
+            raise ValueError(
+                "At least one of max_epochs or max_steps must be specified"
+            )
+        if max_epochs is not None and max_epochs <= 0:
+            raise ValueError(f"max_epochs must be > 0, got {max_epochs}")
+        if max_steps is not None and max_steps <= 0:
+            raise ValueError(f"max_steps must be > 0, got {max_steps}")
+        return self._train(datamodule, max_epochs, max_steps)
 
     def _call_hooks(self, hook_name: str, *args, **kwargs) -> None:
         """Call a hook on all registered hooks.
@@ -145,10 +163,19 @@ class Trainer:
     def _train(
         self,
         datamodule: DataModuleProtocol,
-        max_epochs: int,
+        max_epochs: int | None,
+        max_steps: int | None,
     ) -> TrainState:
-        """Execute training loop."""
+        """Execute training loop.
+
+        Stops at whichever limit (epochs or steps) is reached first.
+        """
         assert self.model is not None, "Trainer.model must be set before calling train()"
+
+        # Use a large sentinel when the limit is not set so the loop
+        # condition stays simple.
+        epoch_limit = max_epochs if max_epochs is not None else float("inf")
+        step_limit = max_steps if max_steps is not None else float("inf")
 
         # DataModule setup
         if hasattr(datamodule, "setup"):
@@ -158,7 +185,10 @@ class Trainer:
         if self.hooks is not None:
             self._call_hooks("on_train_start", self, self.state)
 
-        for epoch in range(max_epochs):
+        epoch = 0
+        step_limit_reached = False
+
+        while epoch < epoch_limit and not step_limit_reached:
             # DataModule epoch sync (DDP sampler shuffle)
             if hasattr(datamodule, "on_epoch_start"):
                 datamodule.on_epoch_start(epoch)
@@ -198,6 +228,11 @@ class Trainer:
                     if self.hooks is not None:
                         self._call_hooks("on_eval_step_complete", self, self.state)
 
+                # Check max_steps limit
+                if self.state.global_step >= step_limit:
+                    step_limit_reached = True
+                    break
+
             # Validation phase
             self.state.set_stage(Stage.EVAL)
             self.model.eval()
@@ -219,6 +254,7 @@ class Trainer:
                 self._call_hooks("on_epoch_end", self, self.state)
 
             self.state.increment_epoch()
+            epoch += 1
 
         # Hook: on_train_end
         if self.hooks is not None:
