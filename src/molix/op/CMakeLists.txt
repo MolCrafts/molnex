@@ -1,91 +1,62 @@
 cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
 
-# Configure
-set(NAME molnex_op)
-project(${NAME} LANGUAGES CXX)
+project(molnex_op LANGUAGES CXX)
 
-# Force disable CUDA
-option(ENABLE_CUDA "Enable CUDA support" OFF)
-set(ENABLE_CUDA OFF CACHE BOOL "" FORCE)
+set(MOLNEX_OP_LIBRARY_NAME molnex_opLib)
 
-# Set PyTorch CPU-only variables
-set(USE_CUDA OFF CACHE BOOL "Use CUDA" FORCE)
-set(USE_CUDNN OFF CACHE BOOL "Use CUDNN" FORCE)
-set(TORCH_CUDA_ARCH_LIST "" CACHE STRING "TORCH_CUDA_ARCH_LIST" FORCE)
+option(MOLNEX_OP_ENABLE_CUDA "Build CUDA kernels" OFF)
 
-# Force CPU-only environment for PyTorch
-set(ENV{USE_CUDA} "0")
-set(ENV{USE_CUDNN} "0")
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Skip CUDA checks
-find_package(CUDAToolkit QUIET)
-if(CUDAToolkit_FOUND AND CUDAToolkit_NVCC_EXECUTABLE)
-  message(STATUS "NVCC found: ${CUDAToolkit_NVCC_EXECUTABLE}")
-  # But we're forcing CPU-only anyway
-  message(STATUS "CUDA found but disabled by configuration")
-else()
-  message(STATUS "NVCC not found. CUDA features will be disabled.")
-endif()
-
-# Find dependencies
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
-# find_package(pybind11 REQUIRED)
-
-# # Add pybind11 include directories globally (needed by torch/extension.h)
-# include_directories(${pybind11_INCLUDE_DIRS})
-
-# Special handling for PyTorch with potential CUDA dependency
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-if(DEFINED ENV{TORCH_CUDA_ARCH_LIST})
-  unset(ENV{TORCH_CUDA_ARCH_LIST})
-endif()
-
-# Try to find Torch with CUDA disabled
-set(_OLD_CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH})
-get_filename_component(_CONDA_PREFIX "$ENV{CONDA_PREFIX}" ABSOLUTE)
-set(CMAKE_PREFIX_PATH ${_CONDA_PREFIX} ${CMAKE_PREFIX_PATH})
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(Torch REQUIRED)
-set(CMAKE_PREFIX_PATH ${_OLD_CMAKE_PREFIX_PATH})
 
-enable_testing()
+file(GLOB_RECURSE MOLNEX_OP_SOURCES CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+)
 
-# Source files of the library
-file(GLOB_RECURSE SRC_FILES src/*.cpp)
-# Explicitly exclude CUDA files
-if(ENABLE_CUDA)
-  file(GLOB_RECURSE SRC_FILES ${SRC_FILES} src/*.cu)
-  # For segment_coo.cu
-  add_definitions(-D__CUDA_NO_HALF_OPERATORS__)
-  add_definitions(-DWITH_CUDA)
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
+if(MOLNEX_OP_ENABLE_CUDA)
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+
+  file(GLOB_RECURSE MOLNEX_OP_CUDA_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu"
+  )
+
+  list(APPEND MOLNEX_OP_SOURCES ${MOLNEX_OP_CUDA_SOURCES})
 endif()
 
-message(STATUS "Found src files: ${SRC_FILES}")
+message(STATUS "molnex_op: CUDA=${MOLNEX_OP_ENABLE_CUDA}")
+message(STATUS "molnex_op: sources=${MOLNEX_OP_SOURCES}")
 
-# Build the library
-set(LIBRARY ${NAME}Lib)
-add_library(${LIBRARY} SHARED ${SRC_FILES})
-set_property(TARGET ${LIBRARY} PROPERTY CXX_STANDARD 17)
-target_include_directories(${LIBRARY} PRIVATE ${Python3_INCLUDE_DIRS} include)
-target_link_libraries(${LIBRARY} ${TORCH_LIBRARIES} ${Python3_LIBRARIES})
+add_library(${MOLNEX_OP_LIBRARY_NAME} SHARED ${MOLNEX_OP_SOURCES})
 
-# Add compile definitions for Windows DLL export/import
-if(WIN32)
-  target_compile_definitions(${LIBRARY} PRIVATE
-    torchscatter_EXPORTS
-    C10_BUILD_SHARED_LIBS
-    TORCH_API=__declspec(dllexport)
-    C10_API=__declspec(dllexport)
+target_include_directories(${MOLNEX_OP_LIBRARY_NAME} PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+
+target_link_libraries(${MOLNEX_OP_LIBRARY_NAME} PRIVATE Python::Module)
+target_link_libraries(${MOLNEX_OP_LIBRARY_NAME} PRIVATE ${TORCH_LIBRARIES})
+
+if(TORCH_CXX_FLAGS)
+  separate_arguments(_MOLNEX_TORCH_CXX_FLAGS NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
+  target_compile_options(${MOLNEX_OP_LIBRARY_NAME} PRIVATE ${_MOLNEX_TORCH_CXX_FLAGS})
+endif()
+
+if(MOLNEX_OP_ENABLE_CUDA)
+  target_compile_definitions(${MOLNEX_OP_LIBRARY_NAME} PRIVATE
+    WITH_CUDA
+    __CUDA_NO_HALF_OPERATORS__
+  )
+  target_compile_options(${MOLNEX_OP_LIBRARY_NAME} PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
   )
 endif()
 
-# Define suffix for Python extension on Windows (.pyd)
-if(WIN32)
-  set_target_properties(${LIBRARY} PROPERTIES SUFFIX ".pyd")
-endif()
-
-# Installation - install compiled library to source directory for editable install
-install(TARGETS ${LIBRARY}
-    LIBRARY DESTINATION ${CMAKE_SOURCE_DIR}/src/molix/op
-    RUNTIME DESTINATION ${CMAKE_SOURCE_DIR}/src/molix/op
+set_target_properties(${MOLNEX_OP_LIBRARY_NAME} PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
 )
