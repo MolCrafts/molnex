@@ -1,81 +1,78 @@
 # MolNex Documentation
 
-## Molecular Machine Learning Framework
+MolNex is a general molecular machine learning framework organized as a stack of packages with distinct responsibilities:
 
-MolNex is a modular framework for building and training molecular machine learning models. It unifies training, representation learning, and potential energy surface modeling into a cohesive ecosystem.
+- `molix`: training infrastructure
+- `molrep`: representation learning
+- `molpot`: potentials and composition
+- `molzoo`: assembled reference model families
 
-## The MolNex Ecosystem
+This documentation is organized to help you understand those responsibilities first, then how the layers compose, and only after that the package-level APIs.
 
-MolNex is designed as a collection of specialized libraries that work together to solve molecular ML problems. Unlike monolithic frameworks, you can pick and choose the pieces you need.
+## Reading Path
 
-It consists of four primary components:
+If you are new to the project, read in this order:
 
-<div class="grid cards" markdown>
+1. [Architecture](architecture.md) for the package boundaries and stack layout.
+2. [Core concepts](concepts.md) for the shared vocabulary used across the docs.
+3. One of the package guides under [Package Guides](#package-guides), depending on which layer you are working in.
+4. The implementation docs under `docs/molix`, `docs/molrep`, or `docs/molpot` when you need package-level APIs.
 
--   :material-school: **molix**
+If you want to run the project first and read later:
 
-    ---
+1. [Installation](get-started/installation.md)
+2. [Quick start](get-started/quick-start.md)
 
-    **Training Framework**
-    
-    A clean, component-based training system with a powerful hook mechanism.
-    
-    [:octicons-arrow-right-24: Learn more](molix/index.md)
+## Docs Map
 
--   :material-molecule: **molrep**
+### Architecture
 
-    ---
+- [Architecture](architecture.md): the four-layer stack, ownership boundaries, and how the packages depend on one another
+- [Core concepts](concepts.md): the shared concepts used across training, representation, composition, and model assembly
 
-    **Representations**
-    
-    Embeddings and interactions for turning molecular graphs into semantic vectors.
-    
-    [:octicons-arrow-right-24: Learn more](molrep/index.md)
+### Package Guides
 
--   :material-atom: **molpot**
+- [molix](packages/molix.md): what the training and execution layer owns, and what it must not absorb
+- [molrep](packages/molrep.md): what belongs in the representation layer and how it feeds higher layers
+- [molpot](packages/molpot.md): what belongs in composition and potential construction, and where its boundaries stop
+- [molzoo](packages/molzoo.md): what a reference model family is in MolNex and why it sits above the reusable layers
 
-    ---
+### Getting Started
 
-    **Potentials**
-    
-    Building blocks for state-of-the-art machine learning potentials.
-    
-    [:octicons-arrow-right-24: Learn more](molpot/index.md)
+- [Installation](get-started/installation.md): environment setup
+- [Quick start](get-started/quick-start.md): minimal end-to-end path through the stack
 
--   :material-robot: **molzoo**
+### Package-Level Implementation Docs
 
-    ---
+- [molix docs](molix/index.md): trainer, hooks, and data pipeline details
+- [molrep docs](molrep/index.md): encoders and representation modules
+- [molpot docs](molpot/index.md): composition components, gradients, and related modeling utilities
 
-    **Encoder Zoo**
-    
-    Pre-built encoder architectures (MACE, Allegro) ready to use.
+### Reference and Specs
 
-</div>
+- [Component taxonomy](component_taxonomy.md): current package/component inventory
+- [TensorDict schema](tensordict_schema.md): current batch structure reference
+- [Core interface stabilization spec](specs/core-interface-stabilization.md): current interface cleanup work
 
-## Getting Started
+## Reading Order
 
-If you are new to MolNex, we recommend starting with the guides below. They will walk you through setting up your environment and training your first physics-aware model.
+Start from responsibilities and boundaries.
 
-<div class="grid cards" markdown>
+Before reading APIs, decide which layer a concept belongs to:
 
--   :material-rocket-launch: **Installation**
+- execution and lifecycle belong to `molix`
+- learned molecular features belong to `molrep`
+- structured composition and potential assembly belong to `molpot`
+- curated reference architectures belong to `molzoo`
 
-    ---
+After that, move to composition:
 
-    Get MolNex installed on your machine.
-    
-    [:octicons-arrow-right-24: Install MolNex](get-started/installation.md)
+- how training invokes models
+- how representations feed downstream modeling layers
+- how assembled model families are built from lower-level modules
 
--   :material-book-open-variant: **Quick Start**
+Then move to APIs:
 
-    ---
-
-    Train a physics-aware model in 5 minutes.
-    
-    [:octicons-arrow-right-24: Start Training](get-started/quick-start.md)
-
-</div>
-
-## License
-
-BSD 3-Clause License. See [LICENSE](https://github.com/molcrafts/molnex/blob/master/LICENSE) for details.
+- package guides for ownership
+- package implementation docs for concrete modules
+- quick starts and reference pages for operational details

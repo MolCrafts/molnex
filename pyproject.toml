@@ -10,7 +10,7 @@ readme = "README.md"
 license = "BSD-3-Clause"
 requires-python = ">=3.10"
 authors = [
-  { name = "MolCrafts" },
+  { name = "Roy Kid" },
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
