@@ -85,9 +85,6 @@ class DefaultEvalStep:
         # Forward pass (no gradients)
         from molix.core.steps import extract_model_inputs
 
-        assert trainer.model is not None, "trainer.model must be set"
-        assert trainer.loss_fn is not None, "trainer.loss_fn must be set"
-
         with torch.no_grad():
             if isinstance(batch, dict):
                 model_inputs = extract_model_inputs(batch)
