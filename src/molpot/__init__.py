@@ -4,44 +4,43 @@ Pure PyTorch components for molecular ML potentials.
 """
 
 # Potentials
-from molpot.potentials import (
-    BasePotential,
-    LJ126,
-    lorentz_berthelot,
-    BondHarmonic,
-    AngleHarmonic,
-    DihedralHarmonic,
-    RepulsionExp6,
-    DispersionC6,
-    ChargeTransfer,
-    Polarization,
-    geometric_arithmetic_mixing,
+# Composition
+from molpot.composition import (
+    ChargeHead,
+    ChargeTransferParameterHead,
+    LJParameterHead,
+    MultiHead,
+    PotentialComposer,
+    RepulsionParameterHead,
+    TSScalingHead,
 )
-
-# Prediction heads
-from molpot.heads import AtomicEnergyMLP, EnergyHead, TypeHead
 
 # Physical derivation
 from molpot.derivation import EnergyAggregation, ForceDerivation, StressDerivation
 
+# Prediction heads
+from molpot.heads import AtomicEnergyMLP, EnergyHead, TypeHead
+
 # Pooling
 from molpot.pooling import (
-    LayerPooling,
     EdgeToNodePooling,
-    SumPooling,
-    MeanPooling,
+    LayerPooling,
     MaxPooling,
+    MeanPooling,
+    SumPooling,
 )
-
-# Composition
-from molpot.composition import (
-    LJParameterHead,
-    RepulsionParameterHead,
-    ChargeTransferParameterHead,
-    ChargeHead,
-    TSScalingHead,
-    MultiHead,
-    PotentialComposer,
+from molpot.potentials import (
+    LJ126,
+    AngleHarmonic,
+    BasePotential,
+    BondHarmonic,
+    ChargeTransfer,
+    DihedralHarmonic,
+    DispersionC6,
+    Polarization,
+    RepulsionExp6,
+    geometric_arithmetic_mixing,
+    lorentz_berthelot,
 )
 
 __all__ = [

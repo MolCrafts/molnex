@@ -4,6 +4,18 @@ Simple by default. Complex workflows → use molexp.
 """
 
 # Task hierarchy
+# Collation
+from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
+from molix.data.datamodule import DataModule, DataModuleProtocol
+
+# Dataset + DataModule
+from molix.data.dataset import CachedDataset
+
+# Pipeline DSL
+from molix.data.pipeline import PipelineDSL, PipelineSpec, pipeline
+
+# Data sources
+from molix.data.source import DataSource, InMemorySource, SubsetSource
 from molix.data.task import (
     BatchTask,
     DatasetTask,
@@ -12,21 +24,8 @@ from molix.data.task import (
     Task,
 )
 
-# Pipeline DSL
-from molix.data.pipeline import PipelineDSL, PipelineSpec, pipeline
-
 # Built-in tasks
 from molix.data.tasks import AtomicDress, NeighborList
-
-# Data sources
-from molix.data.source import DataSource, InMemorySource, SubsetSource
-
-# Dataset + DataModule
-from molix.data.dataset import CachedDataset
-from molix.data.datamodule import DataModule, DataModuleProtocol
-
-# Collation
-from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
 
 # Types
 from molix.data.types import (

@@ -24,14 +24,14 @@ Readout:
 """
 
 from molrep.embedding import (
-    JointEmbedding,
-    SphericalHarmonics,
     BesselRBF,
     CosineCutoff,
+    JointEmbedding,
     PolynomialCutoff,
+    SphericalHarmonics,
 )
 from molrep.head.scalar_head import ScalarHead
-from molrep.readout.pooling import masked_sum_pooling, masked_mean_pooling
+from molrep.readout.pooling import masked_mean_pooling, masked_sum_pooling
 from molrep.readout.product_head import ProductHead
 
 __all__ = [

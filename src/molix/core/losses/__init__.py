@@ -6,9 +6,9 @@ Provides reusable, configurable loss functions:
 - WeightedLoss: Weighted combination of multiple losses
 """
 
+from molix.core.losses.combined import WeightedLoss
 from molix.core.losses.energy import MSELoss
 from molix.core.losses.force import MAELoss
-from molix.core.losses.combined import WeightedLoss
 
 __all__ = [
     "MSELoss",

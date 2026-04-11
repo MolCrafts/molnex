@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import torch
 import torch.distributed as dist
@@ -16,10 +15,10 @@ from molix.data.dataset import CachedDataset
 from molix.data.pipeline import PipelineSpec, _call_task
 from molix.data.source import DataSource, SubsetSource
 
-
 # ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------
+
 
 @runtime_checkable
 class DataModuleProtocol(Protocol):
@@ -35,6 +34,7 @@ class DataModuleProtocol(Protocol):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _is_distributed() -> bool:
     return dist.is_available() and dist.is_initialized()
 
@@ -47,9 +47,7 @@ def _get_world_size() -> int:
     return dist.get_world_size() if _is_distributed() else 1
 
 
-def _split_indices(
-    n: int, train_ratio: float, seed: int
-) -> tuple[list[int], list[int]]:
+def _split_indices(n: int, train_ratio: float, seed: int) -> tuple[list[int], list[int]]:
     gen = torch.Generator().manual_seed(seed)
     perm = torch.randperm(n, generator=gen).tolist()
     split = int(n * train_ratio)
@@ -59,6 +57,7 @@ def _split_indices(
 # ---------------------------------------------------------------------------
 # DataModule
 # ---------------------------------------------------------------------------
+
 
 class DataModule:
     """DDP-aware data module that drives a :class:`PipelineSpec`.
@@ -121,9 +120,7 @@ class DataModule:
 
         # 1. Split
         if self.val_source is None:
-            train_idx, val_idx = _split_indices(
-                len(self.source), self.train_val_split, self.seed
-            )
+            train_idx, val_idx = _split_indices(len(self.source), self.train_val_split, self.seed)
             train_src: DataSource = SubsetSource(self.source, train_idx)
             val_src: DataSource = SubsetSource(self.source, val_idx)
         else:
@@ -137,25 +134,17 @@ class DataModule:
                 train_samples = self.pipeline.prepare(
                     train_src, fit_samples=fit, cache_dir=self.cache_dir
                 )
-                val_samples = self.pipeline.prepare(
-                    val_src, cache_dir=self.cache_dir
-                )
+                val_samples = self.pipeline.prepare(val_src, cache_dir=self.cache_dir)
             dist.barrier()
             if _get_rank() != 0:
-                train_samples = self.pipeline.prepare(
-                    train_src, cache_dir=self.cache_dir
-                )
-                val_samples = self.pipeline.prepare(
-                    val_src, cache_dir=self.cache_dir
-                )
+                train_samples = self.pipeline.prepare(train_src, cache_dir=self.cache_dir)
+                val_samples = self.pipeline.prepare(val_src, cache_dir=self.cache_dir)
         else:
             fit = [train_src[i] for i in range(len(train_src))]
             train_samples = self.pipeline.prepare(
                 train_src, fit_samples=fit, cache_dir=self.cache_dir
             )
-            val_samples = self.pipeline.prepare(
-                val_src, cache_dir=self.cache_dir
-            )
+            val_samples = self.pipeline.prepare(val_src, cache_dir=self.cache_dir)
 
         # 3. Wrap as Dataset
         self.train_dataset = CachedDataset(train_samples)
@@ -217,7 +206,7 @@ class DataModule:
         schema = self.target_schema
         batch_tasks = self.pipeline.batch_tasks
 
-        def collate(samples: list[dict]) -> dict:
+        def collate(samples: list[dict]) -> dict:  # type: ignore[return]
             batch = collate_molecules(samples, schema)
             for entry in batch_tasks:
                 batch = _call_task(entry.task, batch)

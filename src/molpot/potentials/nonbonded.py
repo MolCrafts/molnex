@@ -9,10 +9,10 @@ import torch.nn as nn
 
 from molpot.potentials.mixing import geometric_arithmetic_mixing
 
-
 # ---------------------------------------------------------------------------
 # Default mixing functions
 # ---------------------------------------------------------------------------
+
 
 def repulsion_mixing(
     atom_params: dict[str, torch.Tensor],
@@ -20,7 +20,8 @@ def repulsion_mixing(
 ) -> dict[str, torch.Tensor]:
     """Mixing rules for RepulsionExp6 parameters."""
     return geometric_arithmetic_mixing(
-        atom_params, edge_index,
+        atom_params,
+        edge_index,
         geometric_keys=["eps_rep", "lam_rep"],
         arithmetic_keys=["r_star"],
     )
@@ -32,7 +33,8 @@ def dispersion_mixing(
 ) -> dict[str, torch.Tensor]:
     """Mixing rules for DispersionC6 parameters."""
     return geometric_arithmetic_mixing(
-        atom_params, edge_index,
+        atom_params,
+        edge_index,
         geometric_keys=["c6"],
         arithmetic_keys=["r_star"],
     )
@@ -44,7 +46,8 @@ def ct_mixing(
 ) -> dict[str, torch.Tensor]:
     """Mixing rules for ChargeTransfer parameters."""
     return geometric_arithmetic_mixing(
-        atom_params, edge_index,
+        atom_params,
+        edge_index,
         geometric_keys=["eps_ct", "lam_ct"],
         arithmetic_keys=["r_star"],
     )
@@ -53,6 +56,7 @@ def ct_mixing(
 # ---------------------------------------------------------------------------
 # Helper: reduce pair energies to per-graph energies
 # ---------------------------------------------------------------------------
+
 
 def _reduce_pair_energy(
     pair_energy: torch.Tensor,
@@ -70,9 +74,7 @@ def _reduce_pair_energy(
     if num_graphs is None:
         num_graphs = int(edge_batch.max().item()) + 1
 
-    energy = torch.zeros(
-        num_graphs, dtype=pair_energy.dtype, device=pair_energy.device
-    )
+    energy = torch.zeros(num_graphs, dtype=pair_energy.dtype, device=pair_energy.device)
     energy.index_add_(0, edge_batch, pair_energy)
     return energy
 
@@ -80,6 +82,7 @@ def _reduce_pair_energy(
 # ---------------------------------------------------------------------------
 # RepulsionExp6
 # ---------------------------------------------------------------------------
+
 
 class RepulsionExp6(nn.Module):
     """Buckingham-style exponential repulsion with a short-range r^-12 wall.
@@ -144,6 +147,7 @@ class RepulsionExp6(nn.Module):
 # DispersionC6
 # ---------------------------------------------------------------------------
 
+
 class DispersionC6(nn.Module):
     """Tang-Toennies-style C6 dispersion.
 
@@ -204,6 +208,7 @@ class DispersionC6(nn.Module):
 # ---------------------------------------------------------------------------
 # ChargeTransfer
 # ---------------------------------------------------------------------------
+
 
 class ChargeTransfer(nn.Module):
     """Charge-transfer potential.

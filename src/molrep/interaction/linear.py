@@ -1,7 +1,7 @@
 """Equivariant linear layer using cuEquivariance.
 
-Implements SO(3)-equivariant linear transformations for node features while 
-preserving irreducible representation structure using cuEquivariance's 
+Implements SO(3)-equivariant linear transformations for node features while
+preserving irreducible representation structure using cuEquivariance's
 hardware-accelerated kernels.
 
 Reference:
@@ -10,25 +10,24 @@ Reference:
 """
 
 from __future__ import annotations
+
+import cuequivariance as cue
+import cuequivariance_torch as cuet
 import torch
 import torch.nn as nn
 from pydantic import BaseModel
 
-import cuequivariance as cue
-import cuequivariance_torch as cuet
-
 from molix import config
-
 
 Key = str | tuple[str, ...]
 
 
 class EquivariantLinearSpec(BaseModel):
     """Specification for equivariant linear transformation.
-    
+
     Defines parameters for an SO(3)-equivariant linear layer that transforms
     node features while preserving their irreducible representation structure.
-    
+
     Attributes:
         irreps_in: Input irreps string (e.g., "128x0e+128x1o").
             Defines the structure of input features.
@@ -43,14 +42,14 @@ class EquivariantLinearSpec(BaseModel):
 
 class EquivariantLinear(nn.Module):
     """SO(3)-equivariant linear transformation module.
-    
+
     Applies an equivariant linear transformation to features represented as
     direct sums of irreducible representations. This layer preserves the
     geometric structure (l-values) while allowing channel mixing.
-    
+
     The transformation is performed using cuEquivariance's Linear layer,
     which respects the symmetry constraints of the O3 group.
-    
+
     Attributes:
         config: EquivariantLinearSpec configuration.
         irreps_in: Input irreps object.
@@ -65,7 +64,7 @@ class EquivariantLinear(nn.Module):
         irreps_out: str,
     ):
         """Initialize equivariant linear module.
-        
+
         Args:
             irreps_in: Input irreps specification (e.g., "128x0e+64x1o+32x2e").
             irreps_out: Output irreps specification. Can differ in channel
@@ -92,13 +91,13 @@ class EquivariantLinear(nn.Module):
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """Apply equivariant linear transformation.
-        
+
         Args:
             features: Input features. Shape: (..., irreps_in.dim)
-                
+
         Returns:
             Transformed features. Output shape: (..., irreps_out.dim)
-            
+
         Note:
             The transformation preserves SO(3) equivariance: if the input
             is rotated, the output rotates accordingly.

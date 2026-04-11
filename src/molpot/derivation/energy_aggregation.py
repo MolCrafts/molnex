@@ -56,18 +56,12 @@ class EnergyAggregation(nn.Module):
         if num_graphs is None:
             num_graphs = int(batch.max().item()) + 1
 
-        energy = torch.zeros(
-            num_graphs, dtype=node_energy.dtype, device=node_energy.device
-        )
+        energy = torch.zeros(num_graphs, dtype=node_energy.dtype, device=node_energy.device)
         energy.index_add_(0, batch, node_energy)
 
         if self.pooling == "mean":
-            counts = torch.zeros(
-                num_graphs, dtype=node_energy.dtype, device=node_energy.device
-            )
-            counts.index_add_(
-                0, batch, torch.ones_like(node_energy)
-            )
+            counts = torch.zeros(num_graphs, dtype=node_energy.dtype, device=node_energy.device)
+            counts.index_add_(0, batch, torch.ones_like(node_energy))
             energy = energy / counts.clamp(min=1)
 
         return energy

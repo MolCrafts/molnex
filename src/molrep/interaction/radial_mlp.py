@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RadialWeightMLPSpec(BaseModel):

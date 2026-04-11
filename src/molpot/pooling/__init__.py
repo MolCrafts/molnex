@@ -6,9 +6,9 @@ Provides adapters for different encoder output formats:
 - SumPooling / MeanPooling / MaxPooling: node-to-graph aggregation
 """
 
-from molpot.pooling.layer_pooling import LayerPooling
 from molpot.pooling.edge_to_node import EdgeToNodePooling
-from molpot.pooling.graph_pooling import SumPooling, MeanPooling, MaxPooling
+from molpot.pooling.graph_pooling import MaxPooling, MeanPooling, SumPooling
+from molpot.pooling.layer_pooling import LayerPooling
 
 __all__ = [
     "LayerPooling",

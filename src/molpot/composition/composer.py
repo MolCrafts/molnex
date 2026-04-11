@@ -31,9 +31,7 @@ class PotentialComposer(nn.Module):
     ):
         super().__init__()
         if not potentials:
-            raise ValueError(
-                "PotentialComposer requires at least one potential."
-            )
+            raise ValueError("PotentialComposer requires at least one potential.")
         self.head = head
         self.potentials = nn.ModuleDict(potentials)
 
@@ -90,9 +88,7 @@ class PotentialComposer(nn.Module):
                 **pair_params,
             )
             term_energies[name] = energy
-            total_energy = (
-                energy if total_energy is None else total_energy + energy
-            )
+            total_energy = energy if total_energy is None else total_energy + energy
 
         assert total_energy is not None
 
@@ -106,10 +102,7 @@ class PotentialComposer(nn.Module):
         if compute_forces:
             pos = data["pos"]
             if not pos.requires_grad:
-                raise RuntimeError(
-                    "compute_forces=True requires "
-                    "data['pos'].requires_grad=True"
-                )
+                raise RuntimeError("compute_forces=True requires data['pos'].requires_grad=True")
             forces = -torch.autograd.grad(
                 total_energy.sum(),
                 pos,

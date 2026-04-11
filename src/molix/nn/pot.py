@@ -2,8 +2,8 @@
 Module wrappers for potential operations (molix)
 """
 
-import torch
 import torch.nn as nn
+
 from ..F import pot as F
 
 

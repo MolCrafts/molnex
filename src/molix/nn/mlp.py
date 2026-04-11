@@ -2,10 +2,8 @@
 
 from typing import Any
 
-import torch
 import torch.nn as nn
 from pydantic import BaseModel, Field
-
 
 Key = str | tuple[str, ...]
 
@@ -64,7 +62,9 @@ class KeyedMLP(nn.Module):
         act_fn = activation_map[self.config.activation.lower()]
 
         layers: list[nn.Module] = []
-        layers.append(nn.Linear(self.config.in_dim, self.config.hidden_dims[0], bias=self.config.use_bias))
+        layers.append(
+            nn.Linear(self.config.in_dim, self.config.hidden_dims[0], bias=self.config.use_bias)
+        )
         layers.append(act_fn)
 
         for idx in range(len(self.config.hidden_dims) - 1):
@@ -77,16 +77,18 @@ class KeyedMLP(nn.Module):
             )
             layers.append(act_fn)
 
-        layers.append(nn.Linear(self.config.hidden_dims[-1], self.config.out_dim, bias=self.config.use_bias))
+        layers.append(
+            nn.Linear(self.config.hidden_dims[-1], self.config.out_dim, bias=self.config.use_bias)
+        )
 
         self.mlp = nn.Sequential(*layers)
 
     def forward(self, data: Any) -> Any:
         """Apply MLP to input_key and store result in output_key.
-        
+
         Args:
             data: dict or dataclass containing the input_key
-            
+
         Returns:
             The modified data container
         """
@@ -94,14 +96,14 @@ class KeyedMLP(nn.Module):
             features = data[self.input_key]
         else:
             features = getattr(data, self.input_key)
-            
+
         # Apply MLP
         out = self.mlp(features)
-        
+
         # Store result
         if isinstance(data, dict):
             data[self.output_key] = out
         else:
             setattr(data, self.output_key, out)
-            
+
         return data

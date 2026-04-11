@@ -37,6 +37,7 @@ class TaskEntry:
 # Dispatch
 # ---------------------------------------------------------------------------
 
+
 def _call_task(task: Any, data: Any) -> Any:
     """Dispatch: Runnable.execute → callable → TypeError."""
     if isinstance(task, Runnable):
@@ -50,6 +51,7 @@ def _call_task(task: Any, data: Any) -> Any:
 # PipelineSpec
 # ---------------------------------------------------------------------------
 
+
 class PipelineSpec:
     """Compiled, immutable pipeline description.
 
@@ -57,9 +59,7 @@ class PipelineSpec:
     ``pipeline_id`` and a ``to_dict()`` for serialisation.
     """
 
-    def __init__(
-        self, name: str, pipeline_id: str, entries: list[TaskEntry]
-    ) -> None:
+    def __init__(self, name: str, pipeline_id: str, entries: list[TaskEntry]) -> None:
         self.name = name
         self.pipeline_id = pipeline_id
         self.entries = entries
@@ -109,9 +109,9 @@ class PipelineSpec:
             return self._load_cache(cache_path)
 
         # Fit DatasetTasks, then apply all prepare tasks
-        samples = fit_samples if fit_samples is not None else [
-            source[i] for i in range(len(source))
-        ]
+        samples = (
+            fit_samples if fit_samples is not None else [source[i] for i in range(len(source))]
+        )
         current = list(samples)
         for entry in self.prepare_tasks:
             if isinstance(entry.task, DatasetTask):
@@ -139,9 +139,7 @@ class PipelineSpec:
     def _cache_path(self, source: Any, cache_dir: str | Path | None) -> Path | None:
         if cache_dir is None:
             return None
-        key = hashlib.sha256(
-            f"{source.source_id}|{self.pipeline_id}".encode()
-        ).hexdigest()[:16]
+        key = hashlib.sha256(f"{source.source_id}|{self.pipeline_id}".encode()).hexdigest()[:16]
         return Path(cache_dir) / key
 
     def _save_cache_atomic(self, path: Path, samples: list[dict]) -> None:
@@ -170,9 +168,7 @@ class PipelineSpec:
         tmp.rename(path)
 
     def _load_cache(self, path: Path) -> list[dict]:
-        samples: list[dict] = torch.load(
-            path / "samples.pt", weights_only=False
-        )
+        samples: list[dict] = torch.load(path / "samples.pt", weights_only=False)
 
         state_path = path / "task_states.pt"
         if state_path.exists():
@@ -204,6 +200,7 @@ class PipelineSpec:
 # DSL
 # ---------------------------------------------------------------------------
 
+
 class PipelineDSL:
     """Builder for constructing a :class:`PipelineSpec`.
 
@@ -220,6 +217,7 @@ class PipelineDSL:
 
     def task(self, fn: Any = None, *, name: str | None = None) -> Any:
         """Register a bare function as a sample-level task."""
+
         def decorator(f: Any) -> Any:
             entry_name = name or getattr(f, "__name__", "task")
             self._entries.append(TaskEntry(entry_name, f))

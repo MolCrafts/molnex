@@ -23,9 +23,7 @@ class MultiHead(nn.Module):
             raise ValueError("MultiHead requires at least one head.")
         self.heads = nn.ModuleDict(heads)
 
-    def forward(
-        self, node_features: torch.Tensor, **extra
-    ) -> dict[str, torch.Tensor]:
+    def forward(self, node_features: torch.Tensor, **extra) -> dict[str, torch.Tensor]:
         """Run all heads and merge outputs.
 
         Args:

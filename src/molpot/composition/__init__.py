@@ -13,10 +13,10 @@ Build force fields by composing pooling, parameter heads, and potentials::
 
 from molpot.composition.composer import PotentialComposer
 from molpot.composition.heads import (
+    ChargeHead,
+    ChargeTransferParameterHead,
     LJParameterHead,
     RepulsionParameterHead,
-    ChargeTransferParameterHead,
-    ChargeHead,
     TSScalingHead,
 )
 from molpot.composition.multi_head import MultiHead

@@ -2,8 +2,8 @@
 Module wrappers for scatter operations (molix)
 """
 
-import torch
 import torch.nn as nn
+
 from ..F import scatter as F
 
 

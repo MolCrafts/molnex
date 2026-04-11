@@ -9,10 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import torch
-from tensordict import TensorDict
 
 from molix.data.types import AtomData, EdgeData, GraphBatch, GraphData
-
 
 # ---------------------------------------------------------------------------
 # Target schema
@@ -29,13 +27,27 @@ class TargetSchema:
 
     graph_level: frozenset[str] = field(
         default_factory=lambda: frozenset(
-            {"energy", "U0", "U", "H", "G", "Cv", "mu", "alpha",
-             "homo", "lumo", "gap", "r2", "zpve", "A", "B", "C"}
+            {
+                "energy",
+                "U0",
+                "U",
+                "H",
+                "G",
+                "Cv",
+                "mu",
+                "alpha",
+                "homo",
+                "lumo",
+                "gap",
+                "r2",
+                "zpve",
+                "A",
+                "B",
+                "C",
+            }
         )
     )
-    atom_level: frozenset[str] = field(
-        default_factory=lambda: frozenset({"forces"})
-    )
+    atom_level: frozenset[str] = field(default_factory=lambda: frozenset({"forces"}))
 
 
 DEFAULT_TARGET_SCHEMA = TargetSchema()
@@ -54,9 +66,7 @@ def _normalize_edge_index(edge_index: torch.Tensor) -> torch.Tensor:
         return edge_index.long()
     if edge_index.shape[0] == 2:
         return edge_index.t().contiguous().long()
-    raise ValueError(
-        f"edge_index must have shape (E, 2) or (2, E), got {tuple(edge_index.shape)}"
-    )
+    raise ValueError(f"edge_index must have shape (E, 2) or (2, E), got {tuple(edge_index.shape)}")
 
 
 # ---------------------------------------------------------------------------
@@ -107,9 +117,7 @@ def collate_molecules(
 
         z_all.append(z)
         pos_all.append(pos)
-        batch_all.append(
-            torch.full((n_atoms,), graph_idx, dtype=torch.long, device=z.device)
-        )
+        batch_all.append(torch.full((n_atoms,), graph_idx, dtype=torch.long, device=z.device))
         num_atoms.append(n_atoms)
 
         if "edge_index" in sample and sample["edge_index"] is not None:

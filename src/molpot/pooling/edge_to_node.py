@@ -29,9 +29,7 @@ class EdgeToNodePooling(nn.Module):
     def __init__(self, reduction: str = "mean"):
         super().__init__()
         if reduction not in ("mean", "sum"):
-            raise ValueError(
-                f"reduction must be 'mean' or 'sum', got '{reduction}'"
-            )
+            raise ValueError(f"reduction must be 'mean' or 'sum', got '{reduction}'")
         self.reduction = reduction
 
     def forward(
@@ -54,16 +52,15 @@ class EdgeToNodePooling(nn.Module):
         feat_dim = edge_features.shape[-1]
 
         node_features = torch.zeros(
-            num_nodes, feat_dim,
+            num_nodes,
+            feat_dim,
             dtype=edge_features.dtype,
             device=edge_features.device,
         )
         node_features.index_add_(0, dst, edge_features)
 
         if self.reduction == "mean":
-            counts = torch.zeros(
-                num_nodes, dtype=edge_features.dtype, device=edge_features.device
-            )
+            counts = torch.zeros(num_nodes, dtype=edge_features.dtype, device=edge_features.device)
             counts.index_add_(0, dst, torch.ones_like(dst, dtype=edge_features.dtype))
             node_features = node_features / counts.clamp(min=1.0).unsqueeze(-1)
 
