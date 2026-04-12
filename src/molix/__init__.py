@@ -33,7 +33,10 @@ def _load_ops_library() -> None:
 _load_ops_library()
 
 from molix import logger
+from molix.compile import maybe_compile
 from molix.config import config
+from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
+from molix.core.hooks import DataLoaderProfilingHook, ProfilerHook
 from molix.core.losses import MAELoss, MSELoss, WeightedLoss
 from molix.core.state import Stage, StepResult, TrainState
 from molix.core.trainer import Trainer
@@ -41,11 +44,17 @@ from molix.core.trainer import Trainer
 __all__ = [
     "Stage",
     "TrainState",
+    "Checkpoint",
     "StepResult",
     "Trainer",
+    "CheckpointBackend",
+    "TorchSaveBackend",
     "MSELoss",
     "MAELoss",
     "WeightedLoss",
     "config",
     "logger",
+    "maybe_compile",
+    "ProfilerHook",
+    "DataLoaderProfilingHook",
 ]

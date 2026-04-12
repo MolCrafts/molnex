@@ -1,15 +1,23 @@
 # Molix
 
-Molix is the training infrastructure layer. Core objects:
+Molix is the training layer of MolNex.
 
-- `Trainer`: Main training loop controller
-- `TrainState`: Epoch, step, and stage tracking
-- `Step`: Train/eval batch computation protocol
-- `Hook`: Lifecycle callbacks (logging, metrics, checkpoint, profiling)
+Its job is to make experimentation repeatable without turning the training system into the center of the project. Molix handles orchestration, lifecycle, and extensibility, while staying intentionally smaller than the modeling layers it supports.
 
-The data interface is unified as plain batch dictionaries (`dict[str, Tensor | dict]`).
+## Design Role
 
-Recommended reading order:
+Molix exists to answer a simple question: how should training infrastructure support molecular research without taking it over?
+
+The answer in MolNex is to keep the execution layer clear, lightweight, and extensible. Training should provide structure, not lock the rest of the stack into one worldview.
+
+## What Molix Optimizes For
+
+- a training loop that stays understandable
+- extension points for real research workflows
+- separation between orchestration and model design
+- enough structure to support growth without unnecessary framework weight
+
+## Suggested Reading
 
 1. [Quickstart](quickstart.md)
 2. [The Trainer](core/trainer.md)

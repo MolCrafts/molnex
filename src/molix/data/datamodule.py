@@ -78,6 +78,8 @@ class DataModule:
         batch_size: Samples per batch (per rank in DDP).
         num_workers: DataLoader worker processes.
         pin_memory: Pin memory for GPU transfer.
+        persistent_workers: Keep workers alive between epochs (requires num_workers > 0).
+        prefetch_factor: Batches prefetched per worker. None uses PyTorch default.
         cache_dir: Disk cache root.
         seed: RNG seed for splitting and DDP sampler.
     """
@@ -93,6 +95,8 @@ class DataModule:
         batch_size: int = 32,
         num_workers: int = 0,
         pin_memory: bool = True,
+        persistent_workers: bool = False,
+        prefetch_factor: int | None = None,
         cache_dir: str | Path | None = None,
         seed: int = 42,
     ) -> None:
@@ -104,6 +108,8 @@ class DataModule:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
+        self.persistent_workers = persistent_workers and num_workers > 0
+        self.prefetch_factor = prefetch_factor
         self.cache_dir = str(cache_dir) if cache_dir else None
         self.seed = seed
 
@@ -175,6 +181,8 @@ class DataModule:
             sampler=self._train_sampler,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            persistent_workers=self.persistent_workers,
+            prefetch_factor=self.prefetch_factor,
             collate_fn=self._make_collate_fn(),
             drop_last=_is_distributed(),
         )
@@ -199,6 +207,8 @@ class DataModule:
             sampler=self._val_sampler,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            persistent_workers=self.persistent_workers,
+            prefetch_factor=self.prefetch_factor,
             collate_fn=self._make_collate_fn(),
         )
 

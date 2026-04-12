@@ -10,7 +10,7 @@ readme = "README.md"
 license = "BSD-3-Clause"
 requires-python = ">=3.10"
 authors = [
-  { name = "MolCrafts" },
+  { name = "Roy Kid" },
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -35,13 +35,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.15", "ty>=0.0.25"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "pytest-benchmark>=4.0", "ruff>=0.15", "ty>=0.0.25"]
+bench = ["pytest-benchmark>=4.0"]
 
 [project.urls]
 Repository = "https://github.com/molcrafts/molnex"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+python_files = ["test_*", "bm_*"]
+python_classes = ["Test*", "BM*"]
 
 [tool.scikit-build]
 wheel.packages = ["src/molix", "src/molrep", "src/molpot", "src/molzoo"]

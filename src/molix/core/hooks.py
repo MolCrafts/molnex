@@ -9,7 +9,10 @@ to override execution order (lower priority = earlier execution).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol
+
+import torch.nn as nn
 
 from molix import logger as _logger_mod
 
@@ -116,6 +119,19 @@ class Hook(Protocol):
         """
         ...
 
+    def on_after_backward(self, trainer: "Trainer", state: "TrainState") -> None:
+        """Called after backward pass, before optimizer step.
+
+        Gradients are available and unscaled (if AMP is active, unscale
+        has already been applied). Use this hook for gradient manipulation
+        (clipping, logging, etc.).
+
+        Args:
+            trainer: The trainer instance
+            state: Current training state
+        """
+        ...
+
     def on_eval_batch_end(
         self, trainer: "Trainer", state: "TrainState", batch: Any, outputs: Any
     ) -> None:
@@ -180,6 +196,10 @@ class BaseHook:
         self, trainer: "Trainer", state: "TrainState", batch: Any, outputs: Any
     ) -> None:
         """Called after processing each training batch."""
+        pass
+
+    def on_after_backward(self, trainer: "Trainer", state: "TrainState") -> None:
+        """Called after backward pass, before optimizer step."""
         pass
 
     def on_eval_batch_start(self, trainer: "Trainer", state: "TrainState", batch: Any) -> None:
@@ -963,3 +983,97 @@ class ProfilerHook(BaseHook):
                     "Skipping export_stacks() because with_stack=False. "
                     "Set with_stack=True to enable stack trace export."
                 )
+
+
+class GradClipHook(BaseHook):
+    """Clip gradient norms after backward pass.
+
+    Applies ``torch.nn.utils.clip_grad_norm_`` at the ``on_after_backward``
+    stage and writes the pre-clip gradient norm to ``state["train/grad_norm"]``.
+
+    Args:
+        max_norm: Maximum norm of the gradients.
+        norm_type: Type of the used p-norm (default: 2.0, i.e. L2).
+
+    Example:
+        ```python
+        from molix.core.hooks import GradClipHook
+
+        hook = GradClipHook(max_norm=1.0)
+        trainer = Trainer(model=model, hooks=[hook])
+        ```
+    """
+
+    def __init__(self, max_norm: float, norm_type: float = 2.0):
+        self.max_norm = max_norm
+        self.norm_type = norm_type
+
+    def on_after_backward(self, trainer, state):
+        """Clip gradients and record pre-clip norm."""
+        import torch
+
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            trainer.model.parameters(),
+            self.max_norm,
+            norm_type=self.norm_type,
+        )
+        state["train/grad_norm"] = grad_norm.item()
+
+
+class ActivationCheckpointingHook(BaseHook):
+    """Apply activation checkpointing to model layers at training start.
+
+    Wraps matching submodules with ``torch.utils.checkpoint.checkpoint``
+    using ``use_reentrant=False`` (recommended for DDP compatibility).
+
+    Args:
+        check_fn: Predicate selecting which submodules to wrap.
+            If None, wraps all direct children of the model.
+
+    Example:
+        ```python
+        from molix.core.hooks import ActivationCheckpointingHook
+
+        hook = ActivationCheckpointingHook(
+            check_fn=lambda m: isinstance(m, InteractionBlock),
+        )
+        trainer = Trainer(model=model, hooks=[hook])
+        ```
+    """
+
+    def __init__(self, check_fn: Callable[[nn.Module], bool] | None = None):
+        self.check_fn = check_fn
+
+    def on_train_start(self, trainer, state):
+        """Wrap matching modules with activation checkpointing."""
+        _apply_activation_checkpointing(trainer.model, self.check_fn)
+
+
+def _apply_activation_checkpointing(
+    model: nn.Module,
+    check_fn: Callable[[nn.Module], bool] | None = None,
+) -> None:
+    """Wrap matching submodules with activation checkpointing.
+
+    Args:
+        model: The model to apply checkpointing to.
+        check_fn: Predicate that selects which submodules to wrap.
+            If None, wraps all direct children.
+    """
+    from torch.utils.checkpoint import checkpoint
+
+    if check_fn is None:
+        targets = set(model.children())
+    else:
+        targets = {m for m in model.modules() if m is not model and check_fn(m)}
+
+    for module in targets:
+        original_forward = module.forward
+
+        def _make_checkpointed(fn):
+            def checkpointed_forward(*args, **kwargs):
+                return checkpoint(fn, *args, use_reentrant=False, **kwargs)
+
+            return checkpointed_forward
+
+        module.forward = _make_checkpointed(original_forward)  # type: ignore[method-assign]
