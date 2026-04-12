@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import io
 import random
 import shutil
+import sys
 import tarfile
 import urllib.request
 from pathlib import Path
 
 import numpy as np
 import torch
-from molpy.io.data.xyz import XYZReader
 from tqdm import tqdm
 
 from molix.data.source import Sample
@@ -154,7 +153,7 @@ class QM9Source:
     def _index_archive(self) -> list[str]:
         xyz_files: list[str] = []
         with tarfile.open(self.tarball_path, "r:bz2") as tar:
-            for member in tqdm(tar, desc="Indexing QM9 archive"):
+            for member in tqdm(tar, desc="Indexing QM9 archive", file=sys.stdout):
                 if not member.name.endswith(".xyz"):
                     continue
                 try:
@@ -192,23 +191,35 @@ class QM9Source:
         return f.read().decode("utf-8")
 
     def _parse_xyz(self, content: str) -> Sample:
-        content = content.replace("*^", "E")
-        reader = XYZReader(io.StringIO(content), header=self.PROPERTY_NAMES)
-        frame = reader.read()
+        from molpy.core.element import Element
 
-        z = torch.from_numpy(frame["atoms"]["number"]).long()
-        pos = torch.from_numpy(
-            np.stack(
-                (frame["atoms"]["x"], frame["atoms"]["y"], frame["atoms"]["z"]),
-                axis=1,
-            )
-        ).float()
+        content = content.replace("*^", "E")
+        lines = content.splitlines()
+
+        natoms = int(lines[0].strip())
+        # QM9 comment line: space-separated values in PROPERTY_NAMES order
+        prop_values = lines[1].split()
+        metadata = dict(zip(self.PROPERTY_NAMES, prop_values))
+
+        symbols: list[str] = []
+        xs, ys, zs = [], [], []
+        for line in lines[2 : 2 + natoms]:
+            parts = line.split()
+            symbols.append(parts[0])
+            xs.append(float(parts[1]))
+            ys.append(float(parts[2]))
+            zs.append(float(parts[3]))
+
+        z = torch.tensor(
+            [Element.get_atomic_number(sym) for sym in symbols], dtype=torch.long
+        )
+        pos = torch.tensor(list(zip(xs, ys, zs)), dtype=torch.float32)
 
         targets: dict[str, torch.Tensor] = {}
         for key in self.PROPERTY_NAMES:
             if key in ("tag", "index"):
                 continue
-            targets[key] = torch.tensor([float(frame.metadata[key])], dtype=torch.float32)
+            targets[key] = torch.tensor([float(metadata[key])], dtype=torch.float32)
 
         return {"Z": z, "pos": pos, "targets": targets}
 
@@ -218,7 +229,7 @@ class QM9Source:
         if not self.extract:
             tar = tarfile.open(self.tarball_path, "r:bz2")
         try:
-            for name in tqdm(self.xyz_members, desc="Loading QM9"):
+            for name in tqdm(self.xyz_members, desc="Loading QM9", file=sys.stdout):
                 content = self._load_member_text(name, tar)
                 samples.append(self._parse_xyz(content))
         finally:
