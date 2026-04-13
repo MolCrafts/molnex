@@ -98,18 +98,29 @@ class TestAllegroLayer:
     """AllegroLayer shape preservation and compile compatibility."""
 
     def test_preserves_batch_dimension(self):
+        num_scalar = 16
+        num_tensor = 8
+        # latent_in_dim for layer 0: 1 * num_scalar + num_tensor
         module = AllegroLayer(
-            num_scalar_features=16,
-            num_tensor_features=8,
+            num_scalar_features=num_scalar,
+            num_tensor_features=num_tensor,
             l_max=2,
             mlp_depth=1,
+            latent_in_dim=num_scalar + num_tensor,
         )
+        n_nodes = 4
         n_edges = 6
-        scalar_in = torch.randn(n_edges, 16)
+        edge_index = torch.tensor(
+            [[0, 1], [1, 0], [1, 2], [2, 1], [2, 3], [3, 2]], dtype=torch.long
+        )
+        # accumulated_scalars for layer 0 = initial embedding scalars
+        accumulated_scalars = torch.randn(n_edges, num_scalar)
         tensor_in = torch.randn(n_edges, module.irreps_dim)
         edge_angular = torch.randn(n_edges, 9)
-        scalar_out, tensor_out = module(scalar_in, tensor_in, edge_angular)
-        assert scalar_out.shape == scalar_in.shape
+        scalar_out, tensor_out = module(
+            accumulated_scalars, tensor_in, edge_angular, edge_index, n_nodes
+        )
+        assert scalar_out.shape == (n_edges, num_scalar)
         assert tensor_out.shape == tensor_in.shape
 
     @pytest.mark.xfail(
@@ -117,18 +128,31 @@ class TestAllegroLayer:
         strict=False,
     )
     def test_compile(self):
+        num_scalar = 16
+        num_tensor = 8
         module = AllegroLayer(
-            num_scalar_features=16,
-            num_tensor_features=8,
+            num_scalar_features=num_scalar,
+            num_tensor_features=num_tensor,
             l_max=2,
             mlp_depth=1,
+            latent_in_dim=num_scalar + num_tensor,
         )
+        n_nodes = 4
         n_edges = 6
-        scalar_in = torch.randn(n_edges, 16)
+        edge_index = torch.tensor(
+            [[0, 1], [1, 0], [1, 2], [2, 1], [2, 3], [3, 2]], dtype=torch.long
+        )
+        accumulated_scalars = torch.randn(n_edges, num_scalar)
         tensor_in = torch.randn(n_edges, module.irreps_dim)
         edge_angular = torch.randn(n_edges, 9)
         assert_compile_compatible(
-            module, scalar_in, tensor_in, edge_angular, strict=False,
+            module,
+            accumulated_scalars,
+            tensor_in,
+            edge_angular,
+            edge_index,
+            n_nodes,
+            strict=False,
         )
 
 
