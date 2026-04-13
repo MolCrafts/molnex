@@ -4,18 +4,6 @@ Simple by default. Complex workflows → use molexp.
 """
 
 # Task hierarchy
-# Collation
-from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
-from molix.data.datamodule import DataModule, DataModuleProtocol
-
-# Dataset + DataModule
-from molix.data.dataset import CachedDataset
-
-# Pipeline DSL
-from molix.data.pipeline import PipelineDSL, PipelineSpec, pipeline
-
-# Data sources
-from molix.data.source import DataSource, InMemorySource, SubsetSource
 from molix.data.task import (
     BatchTask,
     DatasetTask,
@@ -24,8 +12,33 @@ from molix.data.task import (
     Task,
 )
 
+# Pipeline DSL
+from molix.data.pipeline import PipelineDSL, PipelineSpec, pipeline
+
 # Built-in tasks
 from molix.data.tasks import AtomicDress, NeighborList
+
+# Data sources
+from molix.data.source import DataSource, InMemorySource, SubsetSource
+
+# Dataset classes
+from molix.data.dataset import (
+    BaseDataset,
+    CacheValidationError,
+    CachedDataset,
+    MmapDataset,
+    SubsetDataset,
+    is_cache_ready,
+)
+
+# Cache identity helper (workflow-side utility)
+from molix.data.identity import compute_cache_identity
+
+# DataModule
+from molix.data.datamodule import DataModule, DataModuleProtocol
+
+# Collation
+from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
 
 # Types
 from molix.data.types import (
@@ -55,8 +68,16 @@ __all__ = [
     "DataSource",
     "InMemorySource",
     "SubsetSource",
-    # Dataset + DataModule
+    # Dataset classes
+    "BaseDataset",
     "CachedDataset",
+    "MmapDataset",
+    "SubsetDataset",
+    "CacheValidationError",
+    "is_cache_ready",
+    # Cache identity
+    "compute_cache_identity",
+    # DataModule
     "DataModule",
     "DataModuleProtocol",
     # Collation

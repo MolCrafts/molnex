@@ -15,6 +15,8 @@ from molpot.potentials.nonbonded import (
 )
 from molpot.potentials.mixing import geometric_arithmetic_mixing
 
+from tests.utils import assert_compile_compatible
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -179,6 +181,18 @@ class TestRepulsionExp6:
         e_bi = RepulsionExp6(bidirectional=True)(**kwargs)
         assert torch.allclose(e_bi, 0.5 * e_uni, atol=1e-6)
 
+    @pytest.mark.xfail(reason="batched path uses index_add_ scatter; may break graph", strict=False)
+    def test_compile(self):
+        pot = RepulsionExp6(bidirectional=False)
+        assert_compile_compatible(
+            pot,
+            strict=False,
+            distance=torch.tensor([2.0]),
+            eps_rep_ij=torch.tensor([0.1]),
+            lam_rep_ij=torch.tensor([10.0]),
+            r_star_ij=torch.tensor([1.5]),
+        )
+
 
 # ---------------------------------------------------------------------------
 # DispersionC6 tests
@@ -231,6 +245,17 @@ class TestDispersionC6:
         e1 = DispersionC6(bidirectional=False, energy_scale=1.0)(**kwargs)
         e3 = DispersionC6(bidirectional=False, energy_scale=3.0)(**kwargs)
         assert torch.allclose(e3, 3.0 * e1, atol=1e-6)
+
+    @pytest.mark.xfail(reason="batched path uses index_add_ scatter; may break graph", strict=False)
+    def test_compile(self):
+        pot = DispersionC6(bidirectional=False)
+        assert_compile_compatible(
+            pot,
+            strict=False,
+            distance=torch.tensor([2.0]),
+            c6_ij=torch.tensor([5.0]),
+            r_star_ij=torch.tensor([1.5]),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +310,18 @@ class TestChargeTransfer:
         e_uni = ChargeTransfer(bidirectional=False)(**kwargs)
         e_bi = ChargeTransfer(bidirectional=True)(**kwargs)
         assert torch.allclose(e_bi, 0.5 * e_uni, atol=1e-6)
+
+    @pytest.mark.xfail(reason="batched path uses index_add_ scatter; may break graph", strict=False)
+    def test_compile(self):
+        pot = ChargeTransfer(bidirectional=False)
+        assert_compile_compatible(
+            pot,
+            strict=False,
+            distance=torch.tensor([2.0]),
+            eps_ct_ij=torch.tensor([0.01]),
+            lam_ct_ij=torch.tensor([3.0]),
+            r_star_ij=torch.tensor([1.5]),
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -1,238 +1,264 @@
-"""QM9 DataSource: molecular property prediction."""
+"""QM9 data source: 130k small organic molecules with quantum chemical properties.
+
+Reference:
+    Ramakrishnan et al. "Quantum chemistry structures and properties of 134 kilo molecules"
+    Scientific Data 1, 140022 (2014). https://doi.org/10.1038/sdata.2014.22
+
+Usage pattern (new API)::
+
+    from molix.data import pipeline, AtomicDress, NeighborList, MmapDataset
+    from molix.datasets.qm9 import QM9Source, download_qm9, QM9_TARGET_SCHEMA
+
+    # 1. Workflow-side: materialize once into a shared cache directory.
+    download_qm9(data_dir)                       # optional; QM9Source does it lazily
+    source = QM9Source(data_dir)
+    pipe = pipeline("qm9").add(...).build()
+    pipe.materialize(source, sink=cache_path)
+
+    # 2. Training-side: zero pipeline work, just read.
+    ds = MmapDataset.from_cache(cache_path)
+    dm = DataModule(*ds.split(ratio=0.8),
+                    target_schema=QM9_TARGET_SCHEMA, ...)
+"""
 
 from __future__ import annotations
 
 import random
-import shutil
 import sys
 import tarfile
 import urllib.request
 from pathlib import Path
 
-import numpy as np
 import torch
 from tqdm import tqdm
 
+from molix.data.collate import TargetSchema
 from molix.data.source import Sample
 
 
-class QM9Source:
-    """DataSource for the QM9 dataset (molecular properties).
+# All scalar properties exposed by raw QM9 records (excluding "tag" and "index").
+_QM9_GRAPH_TARGETS: frozenset[str] = frozenset(
+    {"A", "B", "C", "mu", "alpha", "homo", "lumo", "gap", "r2", "zpve",
+     "U0", "U", "H", "G", "Cv"}
+)
 
-    Each sample contains ``Z``, ``pos``, and scalar targets
-    (``U0``, ``H``, ``G``, ``mu``, etc.).
+
+QM9_TARGET_SCHEMA: TargetSchema = TargetSchema(
+    graph_level=_QM9_GRAPH_TARGETS,
+    atom_level=frozenset(),
+)
+
+
+# ---------------------------------------------------------------------------
+# Raw loader helpers
+# ---------------------------------------------------------------------------
+
+_PROPERTY_NAMES = [
+    "tag", "index",
+    "A", "B", "C", "mu", "alpha",
+    "homo", "lumo", "gap", "r2", "zpve",
+    "U0", "U", "H", "G", "Cv",
+]
+
+_DEFAULT_URL = "https://ndownloader.figshare.com/files/3195389"
+_EXCLUDE_URL = "https://figshare.com/ndownloader/files/3195404"
+
+
+def _download(url: str, dest: Path) -> None:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req) as r:
+        dest.write_bytes(r.read())
+
+
+def _load_exclusion_list(path: Path) -> set[int]:
+    excluded: set[int] = set()
+    for line in path.read_text().splitlines()[9:-1]:
+        parts = line.split()
+        if parts:
+            excluded.add(int(parts[0]))
+    return excluded
+
+
+def _parse_xyz(content: str) -> dict:
+    from molpy.core.element import Element
+
+    content = content.replace("*^", "E")
+    lines = content.splitlines()
+    natoms = int(lines[0].strip())
+    prop_values = lines[1].split()
+    metadata = dict(zip(_PROPERTY_NAMES, prop_values))
+
+    symbols, xs, ys, zs = [], [], [], []
+    for line in lines[2: 2 + natoms]:
+        parts = line.split()
+        symbols.append(parts[0])
+        xs.append(float(parts[1]))
+        ys.append(float(parts[2]))
+        zs.append(float(parts[3]))
+
+    z = torch.tensor(
+        [Element.get_atomic_number(s) for s in symbols], dtype=torch.long
+    )
+    pos = torch.tensor(list(zip(xs, ys, zs)), dtype=torch.float32)
+
+    targets: dict[str, torch.Tensor] = {}
+    for key in _PROPERTY_NAMES:
+        if key in ("tag", "index"):
+            continue
+        targets[key] = torch.tensor([float(metadata[key])], dtype=torch.float32)
+
+    return {"Z": z, "pos": pos, "targets": targets}
+
+
+def _filter_targets(sample: dict, kept: frozenset[str]) -> dict:
+    """Drop targets not in *kept* to shrink cache when user wants a subset."""
+    targets = {k: v for k, v in sample.get("targets", {}).items() if k in kept}
+    return {**sample, "targets": targets}
+
+
+def _ensure_downloaded(root: Path) -> None:
+    """Download the QM9 tarball and exclusion list if not already present.
+
+    Idempotent — safe to call unconditionally at the start of a workflow's
+    ``prepare_data`` stage.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    tarball = root / "qm9.tar.bz2"
+    exclude_file = root / "qm9_exclude.txt"
+    if not tarball.exists():
+        print("Downloading QM9 tarball...", flush=True)
+        _download(_DEFAULT_URL, tarball)
+    if not exclude_file.exists():
+        _download(_EXCLUDE_URL, exclude_file)
+
+
+def download_qm9(root: str | Path) -> Path:
+    """Public entry point: ensure QM9 raw files are present in *root*.
+
+    Equivalent to constructing :class:`QM9Source` purely for its download
+    side-effect, but skips the expensive raw parse. Use this in a
+    workflow's ``prepare_data`` stage when you want downloading decoupled
+    from source construction.
+    """
+    root = Path(root)
+    _ensure_downloaded(root)
+    return root
+
+
+def _load_raw(root: Path, total: int | None) -> list[dict]:
+    """Return all raw QM9 samples as ``list[dict]`` (auto-downloads if needed)."""
+    _ensure_downloaded(root)
+    tarball = root / "qm9.tar.bz2"
+    exclude_file = root / "qm9_exclude.txt"
+
+    excluded = _load_exclusion_list(exclude_file)
+
+    members: list[str] = []
+    tar_info_cache: dict[str, tarfile.TarInfo] = {}
+    with tarfile.open(tarball, "r:bz2") as tar:
+        for member in tqdm(tar, desc="Indexing QM9", file=sys.stdout):
+            if not member.name.endswith(".xyz"):
+                continue
+            try:
+                mol_idx = int(member.name[-10:-4])
+            except ValueError:
+                continue
+            if mol_idx in excluded:
+                continue
+            members.append(member.name)
+            tar_info_cache[member.name] = member
+    members.sort()
+
+    if total is not None and total < len(members):
+        random.seed(42)
+        members = sorted(random.sample(members, total))
+
+    samples: list[dict] = []
+    with tarfile.open(tarball, "r:bz2") as tar:
+        for name in tqdm(members, desc="Loading QM9", file=sys.stdout):
+            f = tar.extractfile(tar_info_cache[name])
+            assert f is not None
+            samples.append(_parse_xyz(f.read().decode("utf-8")))
+
+    return samples
+
+
+# ---------------------------------------------------------------------------
+# QM9Source — raw DataSource (no pipeline, no cache)
+# ---------------------------------------------------------------------------
+
+
+class QM9Source:
+    """DataSource exposing raw QM9 samples for pipeline consumption.
+
+    A :class:`QM9Source` is the "dataset" layer in the molix separation: it
+    only knows where raw data lives and how to index it. Preprocessing,
+    caching, and DataLoader behavior are layered on top via a pipeline
+    (``pipe.materialize(source, sink=...)``) and :class:`MmapDataset.from_cache`.
 
     Args:
-        root: Directory for downloaded/extracted files.
-        source: URL or local path to the tarball.  Defaults to Figshare.
-        extract: If *True*, extract the tarball to disk for faster IO.
-        total: Subsample to at most this many molecules.
+        root: Directory for the raw QM9 tarball (downloaded on first use).
+        total: Subsample to at most this many molecules (reproducible seed).
+        targets: If given, keep only these scalar properties in each sample.
+            ``None`` keeps all of :data:`_QM9_GRAPH_TARGETS`.
+        download: Download raw files if missing. Set to ``False`` in
+            offline / test environments.
+
+    Attributes:
+        source_id: Stable identifier used by
+            :func:`~molix.data.compute_cache_identity` and recorded in the
+            cache ``meta.json``.
     """
-
-    DEFAULT_URL = "https://ndownloader.figshare.com/files/3195389"
-    EXCLUDE_URL = "https://figshare.com/ndownloader/files/3195404"
-
-    PROPERTY_NAMES = [
-        "tag",
-        "index",
-        "A",
-        "B",
-        "C",
-        "mu",
-        "alpha",
-        "homo",
-        "lumo",
-        "gap",
-        "r2",
-        "zpve",
-        "U0",
-        "U",
-        "H",
-        "G",
-        "Cv",
-    ]
 
     def __init__(
         self,
-        root: str | Path = "./data/qm9",
-        source: str | Path | None = None,
-        extract: bool = False,
+        root: str | Path,
+        *,
         total: int | None = None,
+        targets: list[str] | tuple[str, ...] | None = None,
+        download: bool = True,
     ) -> None:
         self.root = Path(root)
-        self.tarball_path = self.root / "qm9.tar.bz2"
-        self.extracted_path = self.root / "qm9_extracted"
-        self.exclude_path = self.root / "qm9_exclude.txt"
-        self.extract = extract
-        self.total = total
 
-        self.root.mkdir(parents=True, exist_ok=True)
-
-        if source is None:
-            source = self.DEFAULT_URL
-
-        source_is_url = isinstance(source, str) and source.startswith("http")
-        source_path = Path(source) if not source_is_url else None
-
-        if source_path is not None and source_path.exists():
-            if source_path.resolve() != self.tarball_path.resolve():
-                shutil.copy2(source_path, self.tarball_path)
-        elif source_is_url and not self.tarball_path.exists():
-            self._download_tarball(str(source))
-
-        if not self.exclude_path.exists():
-            self._download_exclusion_list()
-
-        if not self.tarball_path.exists():
-            raise RuntimeError(f"QM9 tarball not found at {self.tarball_path}")
-
-        self.excluded_indices = self._load_exclusion_list()
-        self._tar_info_cache: dict[str, tarfile.TarInfo] = {}
-
-        if self.extract:
-            if not self.extracted_path.exists() or not any(self.extracted_path.iterdir()):
-                self._extract_tarball()
-            self.xyz_members = self._index_files()
+        if targets is not None:
+            kept = frozenset(targets)
+            unknown = kept - _QM9_GRAPH_TARGETS
+            if unknown:
+                raise ValueError(
+                    f"Unknown QM9 targets {sorted(unknown)}. "
+                    f"Available: {sorted(_QM9_GRAPH_TARGETS)}"
+                )
+            self._targets: tuple[str, ...] | None = tuple(sorted(kept))
+            kept_set = kept
         else:
-            self.xyz_members = self._index_archive()
+            self._targets = None
+            kept_set = _QM9_GRAPH_TARGETS
 
-        if self.total is not None and self.total < len(self.xyz_members):
-            random.seed(42)
-            self.xyz_members = sorted(random.sample(self.xyz_members, self.total))
+        if download:
+            _ensure_downloaded(self.root)
+        elif not (self.root / "qm9.tar.bz2").exists():
+            raise FileNotFoundError(
+                f"QM9 tarball not found at {self.root / 'qm9.tar.bz2'}. "
+                "Set download=True or call download_qm9() first."
+            )
 
-        # Lazy loaded samples
-        self._samples: list[Sample] | None = None
+        samples = _load_raw(self.root, total)
+        if self._targets is not None:
+            samples = [_filter_targets(s, kept_set) for s in samples]
+        self._samples = samples
+        self._total = total
 
     # -- DataSource protocol ------------------------------------------------
 
     @property
     def source_id(self) -> str:
-        return f"qm9:n={len(self)}:excl={len(self.excluded_indices)}"
+        parts = [f"qm9:v1:n={len(self._samples)}"]
+        if self._targets is not None:
+            parts.append(f"targets={'+'.join(self._targets)}")
+        return ":".join(parts)
 
     def __len__(self) -> int:
-        if self._samples is not None:
-            return len(self._samples)
-        return len(self.xyz_members)
+        return len(self._samples)
 
     def __getitem__(self, idx: int) -> Sample:
-        if self._samples is None:
-            self._load_all()
-        assert self._samples is not None
         return self._samples[idx]
-
-    # -- Download / IO helpers ----------------------------------------------
-
-    def _download_tarball(self, url: str) -> None:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req) as response:
-            self.tarball_path.write_bytes(response.read())
-
-    def _download_exclusion_list(self) -> None:
-        req = urllib.request.Request(self.EXCLUDE_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req) as response:
-            self.exclude_path.write_bytes(response.read())
-
-    def _extract_tarball(self) -> None:
-        self.extracted_path.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(self.tarball_path, "r:bz2") as tar:
-            tar.extractall(path=self.extracted_path)
-
-    def _index_files(self) -> list[str]:
-        members = [f.name for f in self.extracted_path.glob("*.xyz")]
-        xyz_files: list[str] = []
-        for name in members:
-            try:
-                mol_idx = int(name[-10:-4])
-            except ValueError:
-                continue
-            if mol_idx not in self.excluded_indices:
-                xyz_files.append(name)
-        xyz_files.sort()
-        return xyz_files
-
-    def _index_archive(self) -> list[str]:
-        xyz_files: list[str] = []
-        with tarfile.open(self.tarball_path, "r:bz2") as tar:
-            for member in tqdm(tar, desc="Indexing QM9 archive", file=sys.stdout):
-                if not member.name.endswith(".xyz"):
-                    continue
-                try:
-                    mol_idx = int(member.name[-10:-4])
-                except ValueError:
-                    continue
-                if mol_idx in self.excluded_indices:
-                    continue
-                xyz_files.append(member.name)
-                self._tar_info_cache[member.name] = member
-        xyz_files.sort()
-        return xyz_files
-
-    def _load_exclusion_list(self) -> set[int]:
-        excluded: set[int] = set()
-        if self.exclude_path.exists():
-            lines = self.exclude_path.read_text().splitlines()
-            for line in lines[9:-1]:
-                parts = line.split()
-                if parts:
-                    excluded.add(int(parts[0]))
-        return excluded
-
-    def _load_member_text(self, member_name: str, tar: tarfile.TarFile | None) -> str:
-        if self.extract:
-            return (self.extracted_path / member_name).read_text(encoding="utf-8")
-
-        if tar is None:
-            raise RuntimeError("tar file handle is required when extract=False")
-
-        tar_info = self._tar_info_cache[member_name]
-        f = tar.extractfile(tar_info)
-        if f is None:
-            raise RuntimeError(f"Failed to read {member_name}")
-        return f.read().decode("utf-8")
-
-    def _parse_xyz(self, content: str) -> Sample:
-        from molpy.core.element import Element
-
-        content = content.replace("*^", "E")
-        lines = content.splitlines()
-
-        natoms = int(lines[0].strip())
-        # QM9 comment line: space-separated values in PROPERTY_NAMES order
-        prop_values = lines[1].split()
-        metadata = dict(zip(self.PROPERTY_NAMES, prop_values))
-
-        symbols: list[str] = []
-        xs, ys, zs = [], [], []
-        for line in lines[2 : 2 + natoms]:
-            parts = line.split()
-            symbols.append(parts[0])
-            xs.append(float(parts[1]))
-            ys.append(float(parts[2]))
-            zs.append(float(parts[3]))
-
-        z = torch.tensor(
-            [Element.get_atomic_number(sym) for sym in symbols], dtype=torch.long
-        )
-        pos = torch.tensor(list(zip(xs, ys, zs)), dtype=torch.float32)
-
-        targets: dict[str, torch.Tensor] = {}
-        for key in self.PROPERTY_NAMES:
-            if key in ("tag", "index"):
-                continue
-            targets[key] = torch.tensor([float(metadata[key])], dtype=torch.float32)
-
-        return {"Z": z, "pos": pos, "targets": targets}
-
-    def _load_all(self) -> None:
-        samples: list[Sample] = []
-        tar = None
-        if not self.extract:
-            tar = tarfile.open(self.tarball_path, "r:bz2")
-        try:
-            for name in tqdm(self.xyz_members, desc="Loading QM9", file=sys.stdout):
-                content = self._load_member_text(name, tar)
-                samples.append(self._parse_xyz(content))
-        finally:
-            if tar is not None:
-                tar.close()
-        self._samples = samples

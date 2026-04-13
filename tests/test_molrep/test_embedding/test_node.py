@@ -9,6 +9,8 @@ from molrep.embedding.node import (
     JointEmbedding,
 )
 
+from tests.utils import assert_compile_compatible
+
 class TestDiscreteEmbeddingSpec:
     """Test DiscreteEmbeddingSpec configuration."""
 
@@ -116,3 +118,17 @@ class TestJointEmbedding:
         
         assert attr.grad is not None
         assert not torch.isnan(attr.grad).any()
+
+    def test_compile(self):
+        """Test that JointEmbedding can be compiled with torch.compile."""
+        specs = [
+            DiscreteEmbeddingSpec(input_key="Z", num_classes=10, emb_dim=16),
+            ContinuousEmbeddingSpec(input_key="pos", in_dim=3, emb_dim=32),
+        ]
+        joint = JointEmbedding(embedding_specs=specs, out_dim=64)
+
+        n_atoms = 5
+        z = torch.randint(0, 10, (n_atoms,))
+        pos = torch.randn(n_atoms, 3)
+
+        assert_compile_compatible(joint, Z=z, pos=pos, strict=False)

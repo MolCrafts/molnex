@@ -4,9 +4,18 @@ import pytest
 import torch
 import torch.nn as nn
 
+from molix.config import set_precision
 from molix.core.trainer import Trainer
 from molix.core.state import TrainState, Stage
 from molix.core.steps import Step, DefaultTrainStep, DefaultEvalStep, extract_model_inputs
+
+
+@pytest.fixture(autouse=True)
+def _reset_precision():
+    """Ensure each test starts from fp32 since precision is global state."""
+    set_precision("fp32")
+    yield
+    set_precision("fp32")
 
 
 # Simple test model following canonical MolNex contract: forward(**model_inputs)
@@ -330,15 +339,16 @@ def test_step_return_format():
 
 
 def test_default_train_step_with_amp_bfloat16():
-    """Verify DefaultTrainStep with amp_dtype=bfloat16 trains correctly on CPU."""
+    """Verify DefaultTrainStep with bf16-mixed precision trains correctly on CPU."""
     model = SimpleModel()
 
     trainer = Trainer(
         model=model,
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
-        train_step=DefaultTrainStep(amp_dtype=torch.bfloat16),
+        train_step=DefaultTrainStep(),
     )
+    trainer.set_precision("bf16-mixed")
 
     state = TrainState()
     batch = _make_batch()
@@ -374,15 +384,16 @@ def test_default_train_step_amp_backward_compatible():
 
 
 def test_default_eval_step_with_amp_bfloat16():
-    """Verify DefaultEvalStep with amp_dtype=bfloat16 works on CPU."""
+    """Verify DefaultEvalStep with bf16-mixed precision works on CPU."""
     model = SimpleModel()
 
     trainer = Trainer(
         model=model,
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
-        eval_step=DefaultEvalStep(amp_dtype=torch.bfloat16),
+        eval_step=DefaultEvalStep(),
     )
+    trainer.set_precision("bf16-mixed")
 
     state = TrainState()
     batch = _make_batch()
@@ -442,9 +453,10 @@ def test_on_after_backward_fires_with_amp():
         model=model,
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
-        train_step=DefaultTrainStep(amp_dtype=torch.bfloat16),
+        train_step=DefaultTrainStep(),
         hooks=[AfterBackwardHook()],
     )
+    trainer.set_precision("bf16-mixed")
 
     datamodule = MockDataModule()
     trainer.train(datamodule, max_epochs=1)

@@ -27,9 +27,10 @@ dependencies = [
   "cuequivariance-torch",
   "molcrafts-molpy>=0.3.0",
   "python-multipart",
-  "molcfg>=1.0.0",
-  "mollog>=1.0.0",
+  "molcrafts-mollog>=1.0.0",
+  "molcrafts-molcfg>=1.0.0",
   "numpy",
+  "opt_einsum_fx",
   "pydantic",
   "tqdm",
 ]

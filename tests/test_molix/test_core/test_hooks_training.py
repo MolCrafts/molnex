@@ -1,8 +1,10 @@
 """Tests for GradClipHook and ActivationCheckpointingHook."""
 
+import pytest
 import torch
 import torch.nn as nn
 
+from molix.config import set_precision
 from molix.core.hooks import (
     ActivationCheckpointingHook,
     GradClipHook,
@@ -10,6 +12,13 @@ from molix.core.hooks import (
 from molix.core.state import TrainState
 from molix.core.steps import DefaultTrainStep
 from molix.core.trainer import Trainer
+
+
+@pytest.fixture(autouse=True)
+def _reset_precision():
+    set_precision("fp32")
+    yield
+    set_precision("fp32")
 
 
 # ---- Test fixtures ----
@@ -148,9 +157,10 @@ def test_grad_clip_hook_with_amp():
         model=model,
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
-        train_step=DefaultTrainStep(amp_dtype=torch.bfloat16),
+        train_step=DefaultTrainStep(),
         hooks=[hook],
     )
+    trainer.set_precision("bf16-mixed")
 
     datamodule = MockDataModule()
     state = trainer.train(datamodule, max_epochs=1)
@@ -282,7 +292,7 @@ def test_all_three_features_together():
         model=model,
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
-        train_step=DefaultTrainStep(amp_dtype=torch.bfloat16),
+        train_step=DefaultTrainStep(),
         hooks=[
             ActivationCheckpointingHook(
                 check_fn=lambda m: isinstance(m, nn.Linear),
@@ -290,6 +300,7 @@ def test_all_three_features_together():
             GradClipHook(max_norm=1.0),
         ],
     )
+    trainer.set_precision("bf16-mixed")
 
     datamodule = MockDataModule()
     state = trainer.train(datamodule, max_epochs=1)

@@ -39,11 +39,7 @@ def maybe_compile(
     if not compile:
         return module
     logger.info(
-        "Compiling module %s with backend=%s, fullgraph=%s, mode=%s",
-        module.__class__.__name__,
-        backend,
-        fullgraph,
-        mode,
+        f"Compiling module {module.__class__.__name__} with backend={backend}, fullgraph={fullgraph}, mode={mode}"
     )
     return torch.compile(
         module,

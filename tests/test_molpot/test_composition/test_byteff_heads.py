@@ -13,6 +13,8 @@ from molpot.composition.heads import (
 )
 from molpot.composition.multi_head import MultiHead
 
+from tests.utils import assert_compile_compatible
+
 
 @pytest.fixture
 def node_features():
@@ -49,6 +51,10 @@ class TestRepulsionParameterHead:
         assert torch.all(out["eps_rep"] >= 0.5)
         assert torch.all(out["lam_rep"] >= 0.3)
 
+    def test_compile(self, node_features):
+        head = RepulsionParameterHead(feature_dim=16)
+        assert_compile_compatible(head, node_features, strict=False)
+
 
 # ---------------------------------------------------------------------------
 # ChargeTransferParameterHead
@@ -68,6 +74,10 @@ class TestChargeTransferParameterHead:
         out = head(node_features)
         assert torch.all(out["eps_ct"] > 0)
         assert torch.all(out["lam_ct"] > 0)
+
+    def test_compile(self, node_features):
+        head = ChargeTransferParameterHead(feature_dim=16)
+        assert_compile_compatible(head, node_features, strict=False)
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +117,11 @@ class TestChargeHead:
         out["charge"].sum().backward()
         assert x.grad is not None
 
+    @pytest.mark.xfail(reason="ChargeHead uses scatter for per-graph charge conservation", strict=False)
+    def test_compile(self, node_features, batch):
+        head = ChargeHead(feature_dim=16)
+        assert_compile_compatible(head, node_features, strict=False, batch=batch)
+
 
 # ---------------------------------------------------------------------------
 # TSScalingHead
@@ -144,6 +159,10 @@ class TestTSScalingHead:
         assert ts_head.c6_free is not None
         assert ts_head.alpha_free is not None
         assert ts_head.r_star_free is not None
+
+    def test_compile(self, ts_head, node_features):
+        Z = torch.tensor([1, 6, 8, 1, 6], dtype=torch.long)
+        assert_compile_compatible(ts_head, node_features, strict=False, Z=Z)
 
 
 # ---------------------------------------------------------------------------
@@ -190,3 +209,12 @@ class TestMultiHead:
         assert "c6" in out
         assert "alpha" in out
         assert "r_star" in out
+
+    @pytest.mark.xfail(reason="MultiHead may include ChargeHead scatter; graph breaks possible", strict=False)
+    def test_compile(self, node_features, batch):
+        multi = MultiHead({
+            "rep": RepulsionParameterHead(feature_dim=16),
+            "ct": ChargeTransferParameterHead(feature_dim=16),
+            "charge": ChargeHead(feature_dim=16),
+        })
+        assert_compile_compatible(multi, node_features, strict=False, batch=batch)

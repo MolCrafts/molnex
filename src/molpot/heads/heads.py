@@ -69,7 +69,7 @@ class EnergyHead(nn.Module):
         """
         atomic_energies = self.atomic_mlp(atoms_h).squeeze(-1)
 
-        num_molecules = int(graph_batch.max().item()) + 1
+        num_molecules = int(graph_batch.max()) + 1
         molecular_energies = torch.zeros(
             num_molecules, dtype=atomic_energies.dtype, device=atomic_energies.device
         )

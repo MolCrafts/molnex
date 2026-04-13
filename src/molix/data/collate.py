@@ -23,29 +23,17 @@ class TargetSchema:
 
     ``graph_level`` targets (e.g. energy) are per-molecule scalars → ``(B,)``.
     ``atom_level`` targets (e.g. forces) are per-atom tensors → ``(N_total, ...)``.
+
+    Generic defaults are intentionally minimal: dataset modules that ship
+    with molix expose module-level schema constants
+    (e.g. :data:`molix.datasets.qm9.QM9_TARGET_SCHEMA`) that workflows pass
+    explicitly to :class:`DataModule`. :class:`DataModule` also checks
+    ``getattr(dataset, "target_schema", ...)`` as a fallback for any subclass
+    that declares its own.
     """
 
     graph_level: frozenset[str] = field(
-        default_factory=lambda: frozenset(
-            {
-                "energy",
-                "U0",
-                "U",
-                "H",
-                "G",
-                "Cv",
-                "mu",
-                "alpha",
-                "homo",
-                "lumo",
-                "gap",
-                "r2",
-                "zpve",
-                "A",
-                "B",
-                "C",
-            }
-        )
+        default_factory=lambda: frozenset({"energy"})
     )
     atom_level: frozenset[str] = field(default_factory=lambda: frozenset({"forces"}))
 

@@ -77,3 +77,92 @@ hooks = [
 ```
 
 This system ensures robust pipelines where critical infrastructure (like setting up distributed process groups) always happens before user logic.
+
+## State-Key Naming Convention
+
+Hooks communicate through a shared `TrainState` dict. A *producer* hook writes
+scalars during the training loop; *consumer* hooks (`Log`, `TensorBoardHook`, …)
+read those scalars by key. Because keys are the public contract between hooks,
+they need a naming convention.
+
+### Flat keys with a namespace prefix
+
+State keys are always flat strings of the form `"<namespace>/<name>"`. Nested
+dicts (`state["train"]["loss"]`) are **not** used — a single `state.get(key)`
+call must return the value.
+
+| Namespace     | Meaning                                                                 |
+|---------------|-------------------------------------------------------------------------|
+| `train/`      | Values produced during training batches (one per step).                 |
+| `val/`        | Values produced during validation passes.                               |
+| `test/`       | Values produced during test passes.                                     |
+| `performance/`| Hardware-agnostic throughput / timing (step/s, samples/s, …).           |
+| `gpu/`        | CUDA-device telemetry (memory, utilisation, …).                         |
+| `system/`     | Host-side telemetry (CPU, RAM, disk, network). Reserved.                |
+| `opt/`        | Optimiser-derived scalars other than gradients (e.g. `opt/lr`).         |
+
+If a scalar does not fit any of the above, pick a new top-level namespace
+rather than overloading an existing one. Don't put loss under `performance/`.
+
+### Name form within a namespace
+
+- Use **lower_snake_case** for descriptive names: `performance/step_per_second`.
+- Use bracket notation to embed units directly: `GPU-State/peak[GB]`,
+  `GPU-State/alloc[GB]`. A reader should not need to open the hook to know
+  what "1.23" means.
+- Use the **class name verbatim** (no casefolding) when the name *is* an
+  identity, e.g. metrics: `train/MAE`, `val/RMSE`. This matches the
+  `class.__name__` that `MetricsHook` writes.
+- Keep names stable. Renaming a key is a breaking change for every
+  downstream consumer.
+
+### Advertising produced keys (`ScalarHook`)
+
+Any hook that writes to `state` and expects another hook to consume those
+values **must** subclass `ScalarHook` and declare `scalar_keys`:
+
+```python
+from molix.core.hooks import ScalarHook
+
+class GPUMemoryHook(ScalarHook):
+    scalar_keys = ("GPU-State/alloc[GB]", "GPU-State/resv[GB]", "GPU-State/peak[GB]")
+
+    def on_train_batch_end(self, trainer, state, batch, outputs):
+        state["GPU-State/alloc[GB]"] = torch.cuda.memory_allocated() / 1e9
+        ...
+```
+
+For hooks whose key set depends on runtime configuration (e.g. `MetricsHook`
+whose names come from the metric list), override `scalar_keys` as a
+`@property` that returns the computed tuple.
+
+`scalar_keys` is the single source of truth:
+
+- **`Log(keys=...)`** and **`TensorBoardHook(keys=..., eval_keys=...)`**
+  accept either flat strings or `ScalarHook` instances. Passing the hook
+  itself expands to its `scalar_keys`, so call sites don't need to hard-code
+  key names.
+- Linting / introspection tools can diff *declared* keys against keys
+  actually written to catch typos.
+
+### Canonical keys produced by built-in hooks
+
+| Producer                    | Key(s)                                                               |
+|-----------------------------|----------------------------------------------------------------------|
+| `Trainer` (DefaultTrainStep)| `train/loss`                                                         |
+| `MetricsHook`               | `{prefix_train}/{MetricCls}`, `{prefix_val}/{MetricCls}` (dynamic)   |
+| `StepSpeedHook`             | `performance/step_per_second`                                        |
+| `GPUMemoryHook`             | `GPU-State/alloc[GB]`, `GPU-State/resv[GB]`, `GPU-State/peak[GB]`    |
+| `GradClipHook`              | `train/grad_norm`                                                    |
+
+Default `TrainState` keys (written by the trainer, not by hooks) are
+`epoch`, `global_step`, `stage`, `steps_since_last_eval`. These are reserved
+and must not be overwritten by hooks.
+
+### Rule of thumb
+
+> If another hook might want this value, namespace it and put it in `state`.
+> If it is an internal detail of the hook, keep it on `self`.
+
+This keeps `state` a tidy, introspectable dashboard rather than a dumping
+ground.

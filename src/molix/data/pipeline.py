@@ -1,26 +1,44 @@
-"""Pipeline DSL and spec for composing data tasks.
+"""Pipeline DSL and spec for composing data transforms.
+
+A :class:`PipelineSpec` is a pure transform description — it knows what
+per-sample / per-dataset work to do, but not where results live on disk or
+when to run. Those are scheduling concerns that belong to the caller
+(workflow / user script).
+
+Capabilities exposed:
+
+* :meth:`PipelineSpec.transform` — apply prepare tasks to a single sample.
+* :meth:`PipelineSpec.run` — iterate a :class:`~molix.data.DataSource`,
+  fit any :class:`~molix.data.DatasetTask`, yield processed samples.
+* :meth:`PipelineSpec.materialize` — convenience: run + write the
+  molix-standard cache format to a resolved *sink* directory (the caller
+  decides where the sink lives; the pipeline does not).
 
 Usage::
 
-    pipe = pipeline("qm9")
-    pipe.add(AtomicDress(elements=[1, 6, 7, 8, 9]))
-    pipe.add(NeighborList(cutoff=5.0))
-    spec = pipe.build()
+    pipe = pipeline("qm9").add(NeighborList(cutoff=5.0)).build()
 
-    samples = spec.prepare(source, cache_dir="./cache")
+    # In-memory:
+    processed = list(pipe.run(source))
+
+    # On-disk cache (workflow decides sink):
+    pipe.materialize(source, sink=Path("/ws/data/qm9/prepared-rcut5.0"))
+    ds = MmapDataset.from_cache(Path("/ws/data/qm9/prepared-rcut5.0"))
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
-import shutil
+import os
+import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
-
-import torch
+from typing import TYPE_CHECKING, Any
 
 from molix.data.task import BatchTask, DatasetTask, Runnable, SampleTask
+
+if TYPE_CHECKING:
+    from molix.data.source import DataSource
 
 
 class TaskEntry:
@@ -56,7 +74,12 @@ class PipelineSpec:
     """Compiled, immutable pipeline description.
 
     Structurally aligned with ``molexp.WorkflowSpec``: has a deterministic
-    ``pipeline_id`` and a ``to_dict()`` for serialisation.
+    :attr:`pipeline_id` and a :meth:`to_dict` for serialisation.
+
+    Scheduling-free: this class exposes no ``workspace`` / ``cache_dir`` /
+    ``cache_identity`` concepts. If a caller wants a shared on-disk asset,
+    it resolves a concrete path and passes it as :meth:`materialize`'s
+    ``sink`` argument.
     """
 
     def __init__(self, name: str, pipeline_id: str, entries: list[TaskEntry]) -> None:
@@ -68,7 +91,7 @@ class PipelineSpec:
 
     @property
     def prepare_tasks(self) -> list[TaskEntry]:
-        """Tasks executed during :meth:`prepare` (SampleTask + DatasetTask + bare callables)."""
+        """Tasks executed during :meth:`run` (SampleTask + DatasetTask + bare callables)."""
         return [
             e
             for e in self.entries
@@ -81,103 +104,141 @@ class PipelineSpec:
         """Tasks executed post-collate inside DataLoader."""
         return [e for e in self.entries if isinstance(e.task, BatchTask)]
 
-    # -- Core: prepare ------------------------------------------------------
+    # -- Transform (per-sample) --------------------------------------------
 
-    def prepare(
+    def transform(self, sample: dict) -> dict:
+        """Apply every prepare task to *sample* in order.
+
+        Per-sample transform. Caller must ensure any
+        :class:`~molix.data.DatasetTask` in the pipeline has been fitted
+        (e.g. via a prior :meth:`run` / :meth:`materialize`); an unfitted
+        :class:`DatasetTask` will raise per the task's own contract.
+        """
+        for entry in self.prepare_tasks:
+            sample = _call_task(entry.task, sample)
+        return sample
+
+    # -- Run (iterate source) ----------------------------------------------
+
+    def run(
         self,
-        source: Any,
+        source: "DataSource",
         *,
-        fit_samples: list[dict] | None = None,
-        cache_dir: str | Path | None = None,
-    ) -> list[dict]:
-        """Fit + transform + cache → ``list[Sample]``.
+        fit_source: "DataSource | None" = None,
+    ) -> Iterator[dict]:
+        """Iterate *source*, fit any :class:`DatasetTask`, yield processed samples.
 
-        In DDP the :class:`DataModule` ensures only rank 0 calls this
-        with ``fit_samples``; other ranks call after a barrier and hit
-        the cache path.
+        Pure in-memory; no disk I/O. Call :meth:`materialize` to persist
+        results to the molix-standard cache format.
 
         Args:
             source: :class:`DataSource` providing raw samples.
-            fit_samples: Samples for :class:`DatasetTask` fitting.
-                If *None*, all source samples are used.
-            cache_dir: Root directory for disk cache.
+            fit_source: Source used for :meth:`DatasetTask.fit`. Defaults to
+                *source*; pass a distinct source (e.g. train-only split) to
+                fit statistics without peeking at the full dataset.
+
+        Yields:
+            Processed sample dicts in *source* order.
         """
-        cache_path = self._cache_path(source, cache_dir)
+        prepare = self.prepare_tasks
+        has_dataset_task = any(isinstance(e.task, DatasetTask) for e in prepare)
 
-        # Fast path: load from cache
-        if cache_path is not None and (cache_path / "meta.json").exists():
-            return self._load_cache(cache_path)
+        # Case A: explicit fit_source (subset). Separate fit pass on the
+        # subset, then apply tasks to the full source.
+        if has_dataset_task and fit_source is not None:
+            fit_data = [fit_source[i] for i in range(len(fit_source))]
+            for entry in prepare:
+                if isinstance(entry.task, DatasetTask):
+                    entry.task.fit(fit_data)
+                fit_data = [_call_task(entry.task, s) for s in fit_data]
 
-        # Fit DatasetTasks, then apply all prepare tasks
-        samples = (
-            fit_samples if fit_samples is not None else [source[i] for i in range(len(source))]
-        )
-        current = list(samples)
-        for entry in self.prepare_tasks:
-            if isinstance(entry.task, DatasetTask):
-                entry.task.fit(current)
-            current = [_call_task(entry.task, s) for s in current]
-
-        # If fit_samples was a subset, re-execute on the full source
-        if fit_samples is not None:
-            result: list[dict] = []
             for i in range(len(source)):
                 s = source[i]
-                for entry in self.prepare_tasks:
+                for entry in prepare:
                     s = _call_task(entry.task, s)
-                result.append(s)
-        else:
-            result = current
+                yield s
+            return
 
-        if cache_path is not None:
-            self._save_cache_atomic(cache_path, result)
+        # Case B: fit on the full source. Interleave fit() with execute() so
+        # each task is applied to every sample exactly once (no double pass).
+        buffered = [source[i] for i in range(len(source))]
+        for entry in prepare:
+            if isinstance(entry.task, DatasetTask):
+                entry.task.fit(buffered)
+            buffered = [_call_task(entry.task, s) for s in buffered]
+        yield from buffered
 
-        return result
+    # -- Materialize (run + write standard cache format) -------------------
 
-    # -- Cache (single-file, atomic) ----------------------------------------
+    def materialize(
+        self,
+        source: "DataSource",
+        *,
+        sink: str | Path,
+        fit_source: "DataSource | None" = None,
+        overwrite: bool = False,
+        wait_timeout: float = 600.0,
+    ) -> None:
+        """Run the pipeline against *source* and write the result to *sink*.
 
-    def _cache_path(self, source: Any, cache_dir: str | Path | None) -> Path | None:
-        if cache_dir is None:
-            return None
-        key = hashlib.sha256(f"{source.source_id}|{self.pipeline_id}".encode()).hexdigest()[:16]
-        return Path(cache_dir) / key
+        Convenience wrapper around :meth:`run` + :meth:`MmapDataset.write_cache`.
 
-    def _save_cache_atomic(self, path: Path, samples: list[dict]) -> None:
-        tmp = path.with_name(path.name + ".tmp")
-        if tmp.exists():
-            shutil.rmtree(tmp)
-        tmp.mkdir(parents=True)
+        *sink* is an already-resolved path — the caller (workflow / user
+        script) decides where cache assets live and how they are named.
+        Pipeline has no opinion on workspaces or directory conventions.
 
-        # Single-file save (performance: 1 syscall, not N)
-        torch.save(samples, tmp / "samples.pt")
+        Idempotent: if ``<sink>/meta.json`` has ``status == "ready"`` and
+        ``overwrite=False``, this returns immediately. Callers typically
+        invoke ``materialize`` unconditionally from their ``prepare_data``
+        task; subsequent calls across sweep runs are no-ops.
 
-        # DatasetTask fitted state
-        states: dict[str, Any] = {}
+        DDP defensive guard: when ``RANK`` env var is non-zero, this
+        method polls ``<sink>/meta.json`` up to ``wait_timeout`` seconds
+        instead of writing (protects against accidental concurrent
+        materialization from worker ranks). Materialization should normally
+        be driven from rank 0 / a dedicated ``prepare_data`` stage.
+
+        Args:
+            source: Source of raw samples.
+            sink: Target cache directory. Its parent must exist or be
+                creatable.
+            fit_source: Optional fit-source (see :meth:`run`).
+            overwrite: If True, replace a ready sink.
+            wait_timeout: Seconds to poll for ``meta.json`` when invoked
+                from a non-zero rank.
+        """
+        from molix.data.dataset import MmapDataset, _is_ready  # avoid import cycle
+
+        sink = Path(sink)
+
+        if _rank() != 0:
+            _wait_for_ready(sink, timeout=wait_timeout)
+            return
+
+        if _is_ready(sink) and not overwrite:
+            return
+
+        processed = list(self.run(source, fit_source=fit_source))
+
+        task_states: dict[str, Any] = {}
         for entry in self.entries:
             if isinstance(entry.task, DatasetTask):
-                states[entry.name] = entry.task.state_dict()
-        if states:
-            torch.save(states, tmp / "task_states.pt")
+                task_states[entry.name] = entry.task.state_dict()
 
-        meta = {"n": len(samples), "pipeline_id": self.pipeline_id}
-        (tmp / "meta.json").write_text(json.dumps(meta))
+        fit_source_id = (
+            fit_source.source_id if fit_source is not None else source.source_id
+        )
 
-        # Atomic swap
-        if path.exists():
-            shutil.rmtree(path)
-        tmp.rename(path)
-
-    def _load_cache(self, path: Path) -> list[dict]:
-        samples: list[dict] = torch.load(path / "samples.pt", weights_only=False)
-
-        state_path = path / "task_states.pt"
-        if state_path.exists():
-            states = torch.load(state_path, weights_only=False)
-            for entry in self.entries:
-                if entry.name in states and isinstance(entry.task, DatasetTask):
-                    entry.task.load_state_dict(states[entry.name])
-
-        return samples
+        MmapDataset.write_cache(
+            sink,
+            processed,
+            pipeline_id=self.pipeline_id,
+            source_id=source.source_id,
+            fit_source_id=fit_source_id,
+            pipeline_spec=self.to_dict(),
+            task_states=task_states or None,
+            overwrite=overwrite,
+        )
 
     # -- Serialisation ------------------------------------------------------
 
@@ -194,6 +255,34 @@ class PipelineSpec:
                 for e in self.entries
             ],
         }
+
+
+# ---------------------------------------------------------------------------
+# DDP helpers (defensive — materialize is expected to run on rank 0 only)
+# ---------------------------------------------------------------------------
+
+
+def _rank() -> int:
+    try:
+        return int(os.environ.get("RANK", "0"))
+    except ValueError:
+        return 0
+
+
+def _wait_for_ready(sink: Path, *, timeout: float) -> None:
+    """Poll ``<sink>/meta.json`` for ``status == "ready"`` up to *timeout* seconds."""
+    from molix.data.dataset import _is_ready  # avoid import cycle
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _is_ready(sink):
+            return
+        time.sleep(0.5)
+    raise TimeoutError(
+        f"Timed out waiting {timeout:.0f}s for ready cache at {sink}. "
+        "materialize() should be called from rank 0 (e.g. prepare_data) "
+        "before workers start."
+    )
 
 
 # ---------------------------------------------------------------------------

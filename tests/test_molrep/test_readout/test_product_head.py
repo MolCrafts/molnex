@@ -5,6 +5,8 @@ import torch
 from molrep.readout.product_head import ProductHead, ProductHeadSpec
 from molix import config
 
+from tests.utils import assert_compile_compatible
+
 
 class TestProductHeadSpec:
     """Test ProductHeadSpec configuration."""
@@ -103,3 +105,21 @@ class TestProductHead:
         
         assert node_features.grad is not None
         assert not torch.isnan(node_features.grad).any()
+
+    @pytest.mark.xfail(
+        reason="ProductHead uses SymmetricContraction which breaks torch.compile fullgraph",
+        strict=False,
+    )
+    def test_compile(self):
+        """Test that ProductHead can be compiled with torch.compile."""
+        head = ProductHead(
+            hidden_dim=64,
+            out_dim=1,
+            num_radial=8,
+            l_max=2,
+            max_body_order=2,
+            num_species=10,
+        )
+        node_features = torch.randn(20, 64, dtype=config.ftype)
+        atom_types = torch.randint(0, 10, (20,), dtype=torch.long)
+        assert_compile_compatible(head, node_features, atom_types, strict=False)

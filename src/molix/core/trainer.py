@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 
 from molix import logger as _logger_mod
+from molix.config import config
+from molix.config import set_precision as _set_precision_global
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
 from molix.core.hooks import Hook
 from molix.core.state import Stage, TrainState
@@ -42,8 +44,6 @@ class Trainer:
         loss_fn: Callable,
         optimizer_factory: Callable,
         lr_scheduler_factory: Callable | None = None,
-        use_amp: bool = False,
-        amp_dtype: torch.dtype = torch.float16,
         train_step: Step | None = None,
         eval_step: Step | None = None,
         hooks: list[Hook | tuple[Hook, int]] | None = None,
@@ -59,8 +59,6 @@ class Trainer:
             optimizer_factory: Factory to create optimizer from parameters.
             lr_scheduler_factory: Factory to create lr scheduler from optimizer.
                 Called as ``lr_scheduler_factory(optimizer)``.
-            use_amp: Enable automatic mixed precision training.
-            amp_dtype: Data type for AMP autocast (default: float16).
             train_step: Training step implementing Step protocol. If None, uses
                 DefaultTrainStep.
             eval_step: Evaluation step implementing Step protocol. If None, uses
@@ -94,9 +92,9 @@ class Trainer:
             else None
         )
 
-        # AMP scaler
-        self.scaler = torch.amp.GradScaler() if use_amp else None
-        self.amp_dtype = amp_dtype
+        # Scaler reflects current global config. Call :meth:`set_precision`
+        # to change it after construction.
+        self.scaler = torch.amp.GradScaler() if config["use_amp"] else None
 
         # Checkpoint backend
         self._checkpoint_backend = checkpoint_backend or TorchSaveBackend()
@@ -128,6 +126,30 @@ class Trainer:
                     normalized.append((item, 100, idx))
             normalized.sort(key=lambda x: (x[1], x[2]))
             self.hooks = [hook for hook, _, _ in normalized]
+
+    def set_precision(self, mode: str) -> None:
+        """Configure training precision and sync the AMP ``GradScaler``.
+
+        Delegates to :func:`molix.config.set_precision` (which writes
+        ``ftype`` / ``use_amp`` / ``amp_dtype`` into the global
+        :data:`molix.config.config`), then (re)creates ``self.scaler`` to
+        match ``config["use_amp"]`` and updates the checkpoint aggregate so
+        the new scaler is saved/loaded.
+
+        Must be called **before** ``trainer.train()``. For ``"fp64"`` the
+        model must additionally be constructed (or cast) with the new
+        ``ftype``, because layers bake in ``config.ftype`` at ``__init__``.
+
+        Args:
+            mode: One of ``"fp32"``, ``"fp64"``, ``"fp16-mixed"``,
+                ``"bf16-mixed"``.
+
+        Raises:
+            ValueError: If ``mode`` is not a supported preset.
+        """
+        _set_precision_global(mode)
+        self.scaler = torch.amp.GradScaler() if config["use_amp"] else None
+        self._checkpoint.scaler = self.scaler
 
     def train(
         self,
@@ -298,6 +320,44 @@ class Trainer:
 
         self._call_hooks("on_train_end", self, self.state)
         return self.state
+
+    def compile(
+        self,
+        *,
+        backend: str = "inductor",
+        fullgraph: bool = False,
+        dynamic: bool | None = None,
+        mode: str | None = None,
+    ) -> "Trainer":
+        """Compile the model with ``torch.compile`` for optimized execution.
+
+        Can be chained after construction::
+
+            trainer = Trainer(model, ...).compile(mode="max-autotune")
+
+        Args:
+            backend: Compile backend (default: ``"inductor"``).
+            fullgraph: If True, require single graph (error on graph breaks).
+            dynamic: Enable dynamic shape tracing.
+            mode: Compile mode (``"default"``, ``"reduce-overhead"``,
+                ``"max-autotune"``).
+
+        Returns:
+            ``self`` for method chaining.
+        """
+        from molix.compile import maybe_compile
+
+        self.model = maybe_compile(
+            self.model,
+            compile=True,
+            backend=backend,
+            fullgraph=fullgraph,
+            dynamic=dynamic,
+            mode=mode,
+        )
+        # Keep checkpoint in sync so state_dict() sees the compiled wrapper
+        self._checkpoint.model = self.model
+        return self
 
     def _run_eval_phase(self, datamodule: DataModuleProtocol) -> None:
         """Run evaluation phase (internal helper)."""

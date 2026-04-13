@@ -6,6 +6,8 @@ from molrep.interaction.linear import EquivariantLinear, EquivariantLinearSpec
 from cuequivariance import Irreps
 from molix import config
 
+from tests.utils import assert_compile_compatible
+
 
 class TestEquivariantLinearSpec:
     """Test EquivariantLinearSpec configuration."""
@@ -164,3 +166,16 @@ class TestEquivariantLinear:
             irreps_out_obj = cue.Irreps("O3", irreps_out)
             out_dim = irreps_out_obj.dim
             assert output.shape == (10, out_dim)
+
+    @pytest.mark.xfail(
+        reason="cuEquivariance equivariant linear may have graph breaks under torch.compile",
+        strict=False,
+    )
+    def test_compile(self):
+        """Test that EquivariantLinear can be compiled with torch.compile."""
+        linear = EquivariantLinear(
+            irreps_in="32x0e + 16x1o",
+            irreps_out="16x0e + 8x1o",
+        )
+        features = torch.randn(10, 80, dtype=config.ftype)
+        assert_compile_compatible(linear, features, strict=False)

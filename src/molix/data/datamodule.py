@@ -1,19 +1,17 @@
-"""DDP-aware DataModule with pipeline integration."""
+"""DDP-aware DataModule."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from pathlib import Path
+from collections.abc import Callable, Iterable
 from typing import Protocol, runtime_checkable
 
-import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 
 from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
-from molix.data.dataset import CachedDataset
-from molix.data.pipeline import PipelineSpec, _call_task
-from molix.data.source import DataSource, SubsetSource
+from molix.data.dataset import BaseDataset
+from molix.data.pipeline import TaskEntry, _call_task
+
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -31,7 +29,7 @@ class DataModuleProtocol(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# DDP helpers
 # ---------------------------------------------------------------------------
 
 
@@ -47,120 +45,80 @@ def _get_world_size() -> int:
     return dist.get_world_size() if _is_distributed() else 1
 
 
-def _split_indices(n: int, train_ratio: float, seed: int) -> tuple[list[int], list[int]]:
-    gen = torch.Generator().manual_seed(seed)
-    perm = torch.randperm(n, generator=gen).tolist()
-    split = int(n * train_ratio)
-    return perm[:split], perm[split:]
-
-
 # ---------------------------------------------------------------------------
 # DataModule
 # ---------------------------------------------------------------------------
 
 
 class DataModule:
-    """DDP-aware data module that drives a :class:`PipelineSpec`.
+    """DDP-aware DataLoader wrapper.
 
-    Lifecycle (called by Trainer)::
+    Takes pre-built train/val datasets and wraps them in DataLoaders.
+    Dataset construction (downloading, pipeline transforms, caching,
+    storage strategy) is the dataset class's responsibility — not ours.
 
-        setup("fit")            # split, fit, transform, cache
-        train_dataloader()      # DataLoader + DistributedSampler if DDP
-        on_epoch_start(epoch)   # sampler.set_epoch for DDP shuffling
+    Usage::
+
+        pipe.materialize(source, sink=cache_path)
+        ds = MmapDataset.from_cache(cache_path)
+        train_ds, val_ds = ds.split(ratio=0.8)
+        dm = DataModule(train_ds, val_ds,
+                        target_schema=QM9_TARGET_SCHEMA,
+                        batch_tasks=pipe.batch_tasks,
+                        batch_size=32, num_workers=4)
+        trainer.train(datamodule=dm, max_epochs=100)
 
     Args:
-        source: Raw data provider.
-        pipeline: Compiled :class:`PipelineSpec`.
-        val_source: Separate validation source.  If *None*,
-            ``source`` is split by ``train_val_split``.
-        train_val_split: Fraction used for training.
-        target_schema: How targets are collated (graph vs atom level).
+        train_dataset: Pre-built training dataset.
+        val_dataset: Pre-built validation dataset.
+        target_schema: Which target keys are graph-level vs atom-level.
+        batch_tasks: Post-collate transforms (from pipeline.batch_tasks).
         batch_size: Samples per batch (per rank in DDP).
         num_workers: DataLoader worker processes.
-        pin_memory: Pin memory for GPU transfer.
-        persistent_workers: Keep workers alive between epochs (requires num_workers > 0).
-        prefetch_factor: Batches prefetched per worker. None uses PyTorch default.
-        cache_dir: Disk cache root.
-        seed: RNG seed for splitting and DDP sampler.
+        pin_memory: Pin tensors for faster GPU transfer.
+        persistent_workers: Keep workers alive between epochs.
+        prefetch_factor: Batches prefetched per worker.
+        seed: RNG seed for DDP sampler shuffling.
     """
 
     def __init__(
         self,
-        source: DataSource,
-        pipeline: PipelineSpec,
+        train_dataset: BaseDataset,
+        val_dataset: BaseDataset,
         *,
-        val_source: DataSource | None = None,
-        train_val_split: float = 0.8,
-        target_schema: TargetSchema = DEFAULT_TARGET_SCHEMA,
+        target_schema: TargetSchema | None = None,
+        batch_tasks: list[TaskEntry] | None = None,
         batch_size: int = 32,
         num_workers: int = 0,
         pin_memory: bool = True,
         persistent_workers: bool = False,
         prefetch_factor: int | None = None,
-        cache_dir: str | Path | None = None,
         seed: int = 42,
     ) -> None:
-        self.source = source
-        self.pipeline = pipeline
-        self.val_source = val_source
-        self.train_val_split = train_val_split
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
+        # Auto-discover schema via getattr (some dataset subclasses declare
+        # a .target_schema attribute). Explicit user override always wins.
+        if target_schema is None:
+            target_schema = getattr(train_dataset, "target_schema", DEFAULT_TARGET_SCHEMA)
         self.target_schema = target_schema
+        self.batch_tasks: list[TaskEntry] = batch_tasks or []
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers and num_workers > 0
         self.prefetch_factor = prefetch_factor
-        self.cache_dir = str(cache_dir) if cache_dir else None
         self.seed = seed
 
-        self.train_dataset: CachedDataset | None = None
-        self.val_dataset: CachedDataset | None = None
         self._train_sampler: DistributedSampler | None = None
         self._val_sampler: DistributedSampler | None = None
 
-    # -- Lifecycle ----------------------------------------------------------
+    # -- Lifecycle (Trainer calls these) ------------------------------------
 
     def setup(self, stage: str = "fit") -> None:
-        if stage != "fit":
-            return
-
-        # 1. Split
-        if self.val_source is None:
-            train_idx, val_idx = _split_indices(len(self.source), self.train_val_split, self.seed)
-            train_src: DataSource = SubsetSource(self.source, train_idx)
-            val_src: DataSource = SubsetSource(self.source, val_idx)
-        else:
-            train_src = self.source
-            val_src = self.val_source
-
-        # 2. Prepare (DDP-aware)
-        if _is_distributed():
-            if _get_rank() == 0:
-                fit = [train_src[i] for i in range(len(train_src))]
-                train_samples = self.pipeline.prepare(
-                    train_src, fit_samples=fit, cache_dir=self.cache_dir
-                )
-                val_samples = self.pipeline.prepare(val_src, cache_dir=self.cache_dir)
-            dist.barrier()
-            if _get_rank() != 0:
-                train_samples = self.pipeline.prepare(train_src, cache_dir=self.cache_dir)
-                val_samples = self.pipeline.prepare(val_src, cache_dir=self.cache_dir)
-        else:
-            fit = [train_src[i] for i in range(len(train_src))]
-            train_samples = self.pipeline.prepare(
-                train_src, fit_samples=fit, cache_dir=self.cache_dir
-            )
-            val_samples = self.pipeline.prepare(val_src, cache_dir=self.cache_dir)
-
-        # 3. Wrap as Dataset
-        self.train_dataset = CachedDataset(train_samples)
-        self.val_dataset = CachedDataset(val_samples)
-
-    # -- DataLoaders --------------------------------------------------------
+        pass  # datasets are ready at construction time
 
     def train_dataloader(self) -> DataLoader:
-        assert self.train_dataset is not None, "Call setup('fit') first"
-
         if _is_distributed():
             self._train_sampler = DistributedSampler(
                 self.train_dataset,
@@ -188,8 +146,6 @@ class DataModule:
         )
 
     def val_dataloader(self) -> DataLoader:
-        assert self.val_dataset is not None, "Call setup('fit') first"
-
         if _is_distributed():
             self._val_sampler = DistributedSampler(
                 self.val_dataset,
@@ -212,17 +168,8 @@ class DataModule:
             collate_fn=self._make_collate_fn(),
         )
 
-    def _make_collate_fn(self):
-        schema = self.target_schema
-        batch_tasks = self.pipeline.batch_tasks
-
-        def collate(samples: list[dict]) -> dict:  # type: ignore[return]
-            batch = collate_molecules(samples, schema)
-            for entry in batch_tasks:
-                batch = _call_task(entry.task, batch)
-            return batch
-
-        return collate
+    def _make_collate_fn(self) -> "_CollateFn":
+        return _CollateFn(self.target_schema, self.batch_tasks)
 
     # -- Epoch hook ---------------------------------------------------------
 
@@ -231,3 +178,27 @@ class DataModule:
             self._train_sampler.set_epoch(epoch)
         if self._val_sampler is not None:
             self._val_sampler.set_epoch(epoch)
+
+
+# ---------------------------------------------------------------------------
+# Picklable collate wrapper (required for Python 3.14+ forkserver workers)
+# ---------------------------------------------------------------------------
+
+
+class _CollateFn:
+    """Picklable collate callable for DataLoader workers.
+
+    Python 3.14 changed the default multiprocessing start method on POSIX to
+    ``forkserver``, which requires all worker arguments to be picklable.
+    A plain closure (local function) is not picklable; a top-level class is.
+    """
+
+    def __init__(self, schema: TargetSchema, batch_tasks: list[TaskEntry]) -> None:
+        self.schema = schema
+        self.batch_tasks = batch_tasks
+
+    def __call__(self, samples: list[dict]) -> dict:
+        batch = collate_molecules(samples, self.schema)
+        for entry in self.batch_tasks:
+            batch = _call_task(entry.task, batch)
+        return batch

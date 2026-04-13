@@ -10,6 +10,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from molix.config import set_precision
 from molix.core.checkpoint import (
     TorchSaveBackend,
     Checkpoint,
@@ -19,6 +20,13 @@ from molix.core.checkpoint import (
 from molix.core.hooks import CheckpointHook
 from molix.core.state import TrainState
 from molix.core.trainer import Trainer
+
+
+@pytest.fixture(autouse=True)
+def _reset_precision():
+    set_precision("fp32")
+    yield
+    set_precision("fp32")
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +346,8 @@ class TestTrainerNewParams:
         assert trainer._checkpoint.lr_scheduler is trainer.lr_scheduler
 
     def test_use_amp(self):
-        trainer = _make_trainer(use_amp=True)
+        trainer = _make_trainer()
+        trainer.set_precision("fp16-mixed")
         assert trainer.scaler is not None
         assert trainer._checkpoint.scaler is trainer.scaler
 

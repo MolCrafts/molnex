@@ -4,6 +4,8 @@ import pytest
 import torch
 from molrep.readout.pooling import ScatterPooling, PoolingSpec
 
+from tests.utils import assert_compile_compatible
+
 
 class TestPoolingSpec:
     """Test PoolingSpec configuration."""
@@ -137,3 +139,18 @@ class TestScatterPooling:
         
         assert node_features.grad is not None
         assert not torch.isnan(node_features.grad).any()
+
+    @pytest.mark.xfail(
+        reason="ScatterPooling uses scatter ops which may cause graph breaks under torch.compile",
+        strict=False,
+    )
+    def test_compile(self):
+        """Test that ScatterPooling can be compiled with torch.compile."""
+        pooling = ScatterPooling(strategy="sum")
+        node_features = torch.randn(45, 32)
+        batch = torch.cat([
+            torch.zeros(10, dtype=torch.long),
+            torch.ones(15, dtype=torch.long),
+            torch.full((20,), 2, dtype=torch.long),
+        ])
+        assert_compile_compatible(pooling, node_features, batch, strict=False)
