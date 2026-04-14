@@ -1018,6 +1018,62 @@ class GPUMemoryHook(ScalarHook):
             state["GPU-State/peak[GB]"] = 0.0
 
 
+class GPUUtilizationHook(ScalarHook):
+    """Record GPU SM / memory-bandwidth utilization (%) via NVML per batch.
+
+    Writes two scalars to ``state`` on ``on_train_batch_end``:
+
+    - ``GPU-State/util[%]``:     SM utilization (instantaneous NVML sample).
+    - ``GPU-State/mem_util[%]``: Memory-bandwidth utilization.
+
+    Backed by ``nvidia-ml-py`` (imported as ``pynvml``). The call takes
+    ~100µs and does not trigger a CUDA synchronization, so it is safe to
+    run every step.
+
+    Requires CUDA and ``nvidia-ml-py`` — install via the ``profile`` or
+    ``dev`` extras (``pip install -e ".[profile]"``). Raises at
+    ``on_train_start`` if either is unavailable rather than silently
+    reporting zeros.
+    """
+
+    scalar_keys = ("GPU-State/util[%]", "GPU-State/mem_util[%]")
+
+    def on_train_start(self, trainer, state):
+        import torch
+
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "GPUUtilizationHook requires CUDA but torch.cuda.is_available() is False."
+            )
+        try:
+            import pynvml
+        except ImportError as exc:
+            raise ImportError(
+                "GPUUtilizationHook requires nvidia-ml-py. "
+                'Install with `pip install -e ".[profile]"` or `pip install nvidia-ml-py`.'
+            ) from exc
+
+        pynvml.nvmlInit()
+        idx = torch.cuda.current_device()
+        self._pynvml = pynvml
+        self._handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+
+    def on_train_batch_end(self, trainer, state, batch, outputs):
+        rates = self._pynvml.nvmlDeviceGetUtilizationRates(self._handle)
+        state["GPU-State/util[%]"] = float(rates.gpu)
+        state["GPU-State/mem_util[%]"] = float(rates.memory)
+
+    def on_train_end(self, trainer, state):
+        pynvml = getattr(self, "_pynvml", None)
+        if pynvml is not None:
+            try:
+                pynvml.nvmlShutdown()
+            except Exception:
+                pass
+        self._pynvml = None
+        self._handle = None
+
+
 def _parse_fmt_width(fmt: str) -> int:
     """Extract the width component from a format spec like ``"{:>12.4g}"``."""
     import re

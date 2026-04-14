@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import platform
+import time
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import torch
@@ -272,9 +275,14 @@ class Trainer:
         if self._resume_from_checkpoint is not None:
             self._load_checkpoint(self._resume_from_checkpoint)
 
+        self._log_setup_banner(datamodule, max_epochs, max_steps)
+
         self._call_hooks("on_train_start", self, self.state)
 
         epoch = self.state.epoch
+        start_epoch = epoch
+        start_global_step = self.state.global_step
+        start_time = time.perf_counter()
         step_limit_reached = False
 
         while epoch < epoch_limit and not step_limit_reached:
@@ -319,6 +327,13 @@ class Trainer:
             epoch += 1
 
         self._call_hooks("on_train_end", self, self.state)
+
+        elapsed = time.perf_counter() - start_time
+        self._log_summary_banner(
+            elapsed=elapsed,
+            epochs_done=epoch - start_epoch,
+            steps_done=self.state.global_step - start_global_step,
+        )
         return self.state
 
     def compile(
@@ -358,6 +373,127 @@ class Trainer:
         # Keep checkpoint in sync so state_dict() sees the compiled wrapper
         self._checkpoint.model = self.model
         return self
+
+    def _log_setup_banner(
+        self,
+        datamodule: DataModuleProtocol,
+        max_epochs: int | None,
+        max_steps: int | None,
+    ) -> None:
+        """Print a LAMMPS-style setup banner before training starts."""
+        n_params = sum(p.numel() for p in self.model.parameters())
+        n_trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        model_device = next((p.device for p in self.model.parameters()), torch.device("cpu"))
+        model_dtype = next((p.dtype for p in self.model.parameters()), config["ftype"])
+
+        use_amp = bool(config["use_amp"])
+        amp_dtype = config["amp_dtype"] if use_amp else None
+
+        opt_name = type(self.optimizer).__name__
+        lrs = [g.get("lr") for g in self.optimizer.param_groups]
+        lr_str = ", ".join(f"{lr:.3e}" for lr in lrs if lr is not None) or "n/a"
+        sched_name = type(self.lr_scheduler).__name__ if self.lr_scheduler else "None"
+        hooks_str = ", ".join(h.__class__.__name__ for h in self.hooks) or "None"
+        batch_size = getattr(datamodule, "batch_size", "n/a")
+
+        cuda_ok = torch.cuda.is_available()
+        if cuda_ok:
+            gpu_name = torch.cuda.get_device_name(0)
+            n_gpu = torch.cuda.device_count()
+            gpu_line = f"GPUs           : {n_gpu}x {gpu_name}"
+        else:
+            gpu_line = "GPUs           : none (CPU only)"
+
+        max_epochs_str = str(max_epochs) if max_epochs is not None else "unlimited"
+        max_steps_str = str(max_steps) if max_steps is not None else "unlimited"
+        started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        lines = [
+            "=" * 72,
+            "  Molix Trainer — run starting",
+            "=" * 72,
+            f"  Started at     : {started_at}",
+            f"  Host / Python  : {platform.node()} / Python {platform.python_version()}",
+            f"  PyTorch        : {torch.__version__}",
+            f"  {gpu_line}",
+            "-" * 72,
+            "  Model",
+            f"    class        : {type(self.model).__name__}",
+            f"    device       : {model_device}",
+            f"    dtype        : {model_dtype}",
+            f"    parameters   : {n_params:,} ({n_trainable:,} trainable)",
+            "-" * 72,
+            "  Precision",
+            f"    ftype        : {config['ftype']}",
+            f"    use_amp      : {use_amp}" + (f"  (amp_dtype={amp_dtype})" if use_amp else ""),
+            f"    matmul       : {torch.get_float32_matmul_precision()}",
+            "-" * 72,
+            "  Optimization",
+            f"    optimizer    : {opt_name}",
+            f"    lr           : {lr_str}",
+            f"    scheduler    : {sched_name}",
+            f"    loss_fn      : {getattr(self.loss_fn, '__name__', type(self.loss_fn).__name__)}",
+            "-" * 72,
+            "  Data / Run",
+            f"    datamodule   : {type(datamodule).__name__}",
+            f"    batch_size   : {batch_size}",
+            f"    max_epochs   : {max_epochs_str}",
+            f"    max_steps    : {max_steps_str}",
+            f"    eval_every   : "
+            + (f"{self.eval_every_n_steps} steps" if self.eval_every_n_steps else "epoch-end"),
+            f"    resume_epoch : {self.state.epoch}, global_step: {self.state.global_step}",
+            f"    hooks        : {hooks_str}",
+            "=" * 72,
+        ]
+        for line in lines:
+            logger.info(line)
+
+    def _log_summary_banner(
+        self,
+        elapsed: float,
+        epochs_done: int,
+        steps_done: int,
+    ) -> None:
+        """Print a LAMMPS-style summary banner after training ends."""
+        elapsed_str = str(timedelta(seconds=int(elapsed)))
+        per_epoch = (elapsed / epochs_done) if epochs_done > 0 else 0.0
+        per_step = (elapsed / steps_done) if steps_done > 0 else 0.0
+        steps_per_sec = (steps_done / elapsed) if elapsed > 0 else 0.0
+        finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        peak_mem_line = None
+        if torch.cuda.is_available():
+            try:
+                peak = torch.cuda.max_memory_allocated() / (1024**3)
+                peak_mem_line = f"    peak GPU mem : {peak:.2f} GiB"
+            except Exception:
+                peak_mem_line = None
+
+        lines = [
+            "=" * 72,
+            "  Molix Trainer — run finished",
+            "=" * 72,
+            f"  Finished at    : {finished_at}",
+            "  Timing",
+            f"    wall time    : {elapsed_str}  ({elapsed:.2f} s)",
+            f"    epochs done  : {epochs_done}",
+            f"    steps done   : {steps_done}",
+            f"    s / epoch    : {per_epoch:.3f}",
+            f"    s / step     : {per_step:.4f}",
+            f"    steps / s    : {steps_per_sec:.2f}",
+            "  Final state",
+            f"    epoch        : {self.state.epoch}",
+            f"    global_step  : {self.state.global_step}",
+        ]
+        best = self.state.get("best_metric") if hasattr(self.state, "get") else None
+        if best is not None:
+            lines.append(f"    best_metric  : {best}")
+        if peak_mem_line is not None:
+            lines.append("  Memory")
+            lines.append(peak_mem_line)
+        lines.append("=" * 72)
+        for line in lines:
+            logger.info(line)
 
     def _run_eval_phase(self, datamodule: DataModuleProtocol) -> None:
         """Run evaluation phase (internal helper)."""

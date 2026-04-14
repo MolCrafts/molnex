@@ -167,6 +167,8 @@ class PairEmbedding(nn.Module):
         num_bessel: int = 8,
         l_max: int = 2,
         type_emb_dim: int = 16,
+        scalar_mlp_hiddens: list[int] | None = None,
+        poly_p: int = 6,
     ):
         super().__init__()
 
@@ -176,7 +178,7 @@ class PairEmbedding(nn.Module):
 
         # Radial basis + cutoff
         self.radial_basis = BesselRBF(r_cut=r_max, num_radial=num_bessel)
-        self.cutoff_fn = PolynomialCutoff(r_cut=r_max)
+        self.cutoff_fn = PolynomialCutoff(r_cut=r_max, exponent=poly_p)
 
         # Angular basis
         self.spherical_harmonics = SphericalHarmonics(l_max=l_max)
@@ -185,14 +187,19 @@ class PairEmbedding(nn.Module):
         # concatenated to preserve centre-neighbour directionality.
         self.type_embedding = nn.Embedding(num_elements, type_emb_dim, dtype=config.ftype)
 
-        # Scalar MLP: (edge_radial ⊕ type_src ⊕ type_dst) → scalar features
+        # Two-body scalar MLP: (edge_radial ⊕ type_src ⊕ type_dst) →
+        # hidden_1 → hidden_2 → … → num_scalar_features.
         scalar_in_dim = num_bessel + 2 * type_emb_dim
-        self.scalar_mlp = nn.Sequential(
-            nn.Linear(scalar_in_dim, num_scalar_features, dtype=config.ftype),
-            nn.SiLU(),
-            nn.Linear(num_scalar_features, num_scalar_features, dtype=config.ftype),
-            nn.SiLU(),
-        )
+        if scalar_mlp_hiddens is None:
+            scalar_mlp_hiddens = [num_scalar_features, num_scalar_features]
+        hiddens = list(scalar_mlp_hiddens) + [num_scalar_features]
+        layers: list[nn.Module] = []
+        prev = scalar_in_dim
+        for h in hiddens:
+            layers.append(nn.Linear(prev, h, dtype=config.ftype))
+            layers.append(nn.SiLU())
+            prev = h
+        self.scalar_mlp = nn.Sequential(*layers)
 
         # Tensor track: scalar → environment weights for initial tensor features
         with cue.assume(O3):
@@ -312,6 +319,7 @@ class AllegroLayer(nn.Module):
         l_max: int = 2,
         mlp_depth: int = 1,
         latent_in_dim: int | None = None,
+        latent_mlp_hiddens: list[int] | None = None,
     ):
         super().__init__()
 
@@ -362,12 +370,21 @@ class AllegroLayer(nn.Module):
             if latent_in_dim is not None
             else num_scalar_features + num_tensor_features
         )
+        # Per-layer hidden schedule: if ``latent_mlp_hiddens`` is given, build
+        # an MLP whose hidden widths follow the list and whose final output is
+        # ``num_scalar_features``. Each hidden layer is followed by SiLU; the
+        # final projection is linear (no activation), matching Allegro's spec.
+        # ``mlp_depth=0`` with no hiddens → a single linear projection.
+        if latent_mlp_hiddens is None:
+            hiddens = [num_scalar_features] * mlp_depth
+        else:
+            hiddens = list(latent_mlp_hiddens)
         mlp_layers: list[nn.Module] = []
         in_dim = actual_latent_in_dim
-        for _ in range(mlp_depth):
-            mlp_layers.append(nn.Linear(in_dim, num_scalar_features, dtype=config.ftype))
+        for h in hiddens:
+            mlp_layers.append(nn.Linear(in_dim, h, dtype=config.ftype))
             mlp_layers.append(nn.SiLU())
-            in_dim = num_scalar_features
+            in_dim = h
         mlp_layers.append(nn.Linear(in_dim, num_scalar_features, dtype=config.ftype))
         self.latent_mlp = nn.Sequential(*mlp_layers)
 
@@ -480,6 +497,9 @@ class AllegroSpec(BaseModel):
     l_max: int = Field(2, ge=0)
     num_layers: int = Field(2, gt=0)
     mlp_depth: int = Field(1, ge=0)
+    poly_p: int = Field(6, ge=1)
+    scalar_mlp_hiddens: list[int] | None = None
+    latent_mlp_hiddens: list[int] | None = None
 
 
 class Allegro(TensorDictModuleBase):
@@ -530,6 +550,9 @@ class Allegro(TensorDictModuleBase):
         l_max: int = 2,
         num_layers: int = 2,
         mlp_depth: int = 1,
+        poly_p: int = 6,
+        scalar_mlp_hiddens: list[int] | None = None,
+        latent_mlp_hiddens: list[int] | None = None,
     ):
         super().__init__()
 
@@ -542,6 +565,9 @@ class Allegro(TensorDictModuleBase):
             l_max=l_max,
             num_layers=num_layers,
             mlp_depth=mlp_depth,
+            poly_p=poly_p,
+            scalar_mlp_hiddens=scalar_mlp_hiddens,
+            latent_mlp_hiddens=latent_mlp_hiddens,
         )
 
         # Pair embedding (two-body)
@@ -552,6 +578,8 @@ class Allegro(TensorDictModuleBase):
             r_max=r_max,
             num_bessel=num_bessel,
             l_max=l_max,
+            scalar_mlp_hiddens=scalar_mlp_hiddens,
+            poly_p=poly_p,
         )
 
         # Allegro layers with increasing DenseNet input dimension.
@@ -566,6 +594,7 @@ class Allegro(TensorDictModuleBase):
                     l_max=l_max,
                     mlp_depth=mlp_depth,
                     latent_in_dim=(i + 1) * num_scalar_features + num_tensor_features,
+                    latent_mlp_hiddens=latent_mlp_hiddens,
                 )
                 for i in range(num_layers)
             ]
