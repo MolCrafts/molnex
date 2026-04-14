@@ -19,7 +19,7 @@ import torch
 from molix.data.collate import TargetSchema
 from molix.data.datamodule import DataModule
 from molix.data.dataset import MmapDataset
-from molix.data.pipeline import pipeline
+from molix.data.pipeline import Pipeline
 from molix.data.source import InMemorySource
 from molix.data.task import SampleTask
 from molix.data.types import GraphBatch
@@ -66,7 +66,7 @@ def test_mmap_dataset_with_num_workers_4(tmp_path):
     """
     raw = _raw_samples(16)
     src = InMemorySource(raw)
-    spec = pipeline("e2e").add(FakeNeighborList()).build()
+    spec = Pipeline("e2e").add(FakeNeighborList()).build()
     sink = tmp_path / "prepared"
     spec.materialize(src, sink=sink)
     full = MmapDataset.from_cache(sink)
@@ -99,7 +99,7 @@ def test_collate_picklable_with_batch_tasks(tmp_path):
 
     raw = _raw_samples(8)
     src = InMemorySource(raw)
-    spec = pipeline("p").add(FakeNeighborList()).build()
+    spec = Pipeline("p").add(FakeNeighborList()).build()
     sink = tmp_path / "prepared"
     spec.materialize(src, sink=sink)
     ds = MmapDataset.from_cache(sink)

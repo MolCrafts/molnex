@@ -103,27 +103,50 @@ class BaseDataset(Dataset[Any], ABC):
     def __getitem__(self, idx: int) -> dict: ...  # type: ignore[override]
 
     def split(
-        self, ratio: float = 0.8, seed: int = 42
-    ) -> tuple["SubsetDataset", "SubsetDataset"]:
-        """Split into train / val subsets without copying data.
+        self,
+        ratio: float | None = None,
+        *,
+        sizes: tuple[int, ...] | None = None,
+        seed: int = 42,
+    ) -> tuple["SubsetDataset", ...]:
+        """Split into N shuffled subsets without copying data.
+
+        Exactly one of ``ratio`` (2-way split) or ``sizes`` (N-way split)
+        must be provided.
 
         Args:
-            ratio: Fraction of samples used for training.
+            ratio: Fraction of samples for the first subset. Produces a
+                ``(train, val)`` 2-tuple.
+            sizes: Per-subset sizes; must sum to ``len(self)``. Produces
+                an N-tuple of :class:`SubsetDataset` views in the given
+                order.
             seed: RNG seed for reproducible shuffling.
 
         Returns:
-            ``(train_dataset, val_dataset)`` as :class:`SubsetDataset` views.
+            Tuple of :class:`SubsetDataset` views over this dataset.
         """
         import torch as _torch
+
+        if (ratio is None) == (sizes is None):
+            raise ValueError("Provide exactly one of `ratio` or `sizes`.")
 
         n = len(self)
         gen = _torch.Generator().manual_seed(seed)
         perm = _torch.randperm(n, generator=gen).tolist()
-        cut = int(n * ratio)
-        return (
-            SubsetDataset(self, perm[:cut]),
-            SubsetDataset(self, perm[cut:]),
-        )
+
+        if ratio is not None:
+            cut = int(n * ratio)
+            return (SubsetDataset(self, perm[:cut]), SubsetDataset(self, perm[cut:]))
+
+        assert sizes is not None
+        if sum(sizes) != n:
+            raise ValueError(f"sizes must sum to len(self)={n}, got sum={sum(sizes)}")
+        parts: list[SubsetDataset] = []
+        offset = 0
+        for sz in sizes:
+            parts.append(SubsetDataset(self, perm[offset:offset + sz]))
+            offset += sz
+        return tuple(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -215,23 +238,6 @@ def _is_ready(path: Path) -> bool:
         return meta.get("status") == "ready"
     except (json.JSONDecodeError, OSError):
         return False
-
-
-def is_cache_ready(path: str | Path) -> bool:
-    """Return ``True`` if *path* is a complete, ready cache directory.
-
-    A cache is considered ready when its ``meta.json`` exists and contains
-    ``"status": "ready"``.  This is the public counterpart of the internal
-    :func:`_is_ready` helper and is suitable for use in workflow scripts to
-    skip expensive materialization when the cache already exists.
-
-    Args:
-        path: Cache directory to inspect.
-
-    Returns:
-        ``True`` if the cache is ready, ``False`` otherwise.
-    """
-    return _is_ready(Path(path))
 
 
 def _validate_cache(path: Path) -> None:

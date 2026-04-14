@@ -13,7 +13,7 @@ from molix.data.task import (
 )
 
 # Pipeline DSL
-from molix.data.pipeline import PipelineDSL, PipelineSpec, pipeline
+from molix.data.pipeline import Pipeline, PipelineSpec
 
 # Built-in tasks
 from molix.data.tasks import AtomicDress, NeighborList
@@ -28,11 +28,7 @@ from molix.data.dataset import (
     CachedDataset,
     MmapDataset,
     SubsetDataset,
-    is_cache_ready,
 )
-
-# Cache identity helper (workflow-side utility)
-from molix.data.identity import compute_cache_identity
 
 # DataModule
 from molix.data.datamodule import DataModule, DataModuleProtocol
@@ -58,8 +54,7 @@ __all__ = [
     "BatchTask",
     "Runnable",
     # Pipeline
-    "pipeline",
-    "PipelineDSL",
+    "Pipeline",
     "PipelineSpec",
     # Built-in tasks
     "NeighborList",
@@ -74,9 +69,6 @@ __all__ = [
     "MmapDataset",
     "SubsetDataset",
     "CacheValidationError",
-    "is_cache_ready",
-    # Cache identity
-    "compute_cache_identity",
     # DataModule
     "DataModule",
     "DataModuleProtocol",

@@ -13,14 +13,16 @@ Each batch element is a `GraphBatch` (nested TensorDict, see [Batch Schema](../.
 ## Using the Built-in DataModule
 
 ```python
-from molix.data import DataModule, pipeline, NeighborList, AtomicDress
-from molix.datasets.qm9 import QM9Source
+from molix.data import DataModule, Pipeline, NeighborList, AtomicDress
+from molix.datasets import QM9Source
 
 source = QM9Source(root="./data/qm9", total=1000)
 
-pipe = pipeline(
-    NeighborList(cutoff=5.0),
-    AtomicDress(target_key="U0"),
+pipe = (
+    Pipeline("qm9")
+    .add(NeighborList(cutoff=5.0))
+    .add(AtomicDress(target_key="U0"))
+    .build()
 )
 
 dm = DataModule(source=source, pipeline=pipe, batch_size=32)

@@ -2,7 +2,7 @@ import torch
 
 from molix.data.task import SampleTask, DatasetTask, Runnable
 from molix.data.tasks import AtomicDress, NeighborList
-from molix.data.pipeline import pipeline
+from molix.data.pipeline import Pipeline
 
 
 def _compute_neighbor_list_naive(positions: torch.Tensor, cutoff: float):
@@ -101,7 +101,7 @@ class TestAtomicDress:
 
 class TestPipeline:
     def test_three_registration_methods(self):
-        pipe = pipeline("test")
+        pipe = Pipeline("test")
 
         # Method 1: decorator
         @pipe.task
@@ -119,7 +119,7 @@ class TestPipeline:
         assert spec.pipeline_id  # non-empty hash
 
     def test_isinstance_dispatch(self):
-        pipe = pipeline("test")
+        pipe = Pipeline("test")
         pipe.add(AtomicDress(elements=[1, 6]))
         pipe.add(NeighborList(cutoff=5.0, max_num_pairs=10))
         spec = pipe.build()

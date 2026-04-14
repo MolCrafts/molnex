@@ -13,17 +13,23 @@ Capabilities exposed:
 * :meth:`PipelineSpec.materialize` — convenience: run + write the
   molix-standard cache format to a resolved *sink* directory (the caller
   decides where the sink lives; the pipeline does not).
+* :meth:`PipelineSpec.cache_identity` — stable hash for the
+  (pipeline, source, fit_source) triple, suitable for naming cache dirs.
+* :meth:`PipelineSpec.is_cache_ready` — probe a sink directory to see if
+  a previous :meth:`materialize` committed successfully.
 
 Usage::
 
-    pipe = pipeline("qm9").add(NeighborList(cutoff=5.0)).build()
+    pipe = Pipeline("qm9").add(NeighborList(cutoff=5.0)).build()
 
     # In-memory:
     processed = list(pipe.run(source))
 
     # On-disk cache (workflow decides sink):
-    pipe.materialize(source, sink=Path("/ws/data/qm9/prepared-rcut5.0"))
-    ds = MmapDataset.from_cache(Path("/ws/data/qm9/prepared-rcut5.0"))
+    sink = workspace / "data" / f"qm9__{pipe.cache_identity(source)}"
+    if not pipe.is_cache_ready(sink):
+        pipe.materialize(source, sink=sink)
+    ds = MmapDataset.from_cache(sink)
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +45,13 @@ from molix.data.task import BatchTask, DatasetTask, Runnable, SampleTask
 
 if TYPE_CHECKING:
     from molix.data.source import DataSource
+
+
+# Bump when the cache identity schema changes in an identity-affecting way
+# (e.g. new required meta fields, different serialization layout). Kept in
+# sync with ``CACHE_SCHEMA_VERSION`` in ``molix.data.dataset``.
+_IDENTITY_SCHEMA_VERSION = 1
+_IDENTITY_HASH_LEN = 12
 
 
 class TaskEntry:
@@ -240,6 +253,58 @@ class PipelineSpec:
             overwrite=overwrite,
         )
 
+    # -- Cache identity / readiness ----------------------------------------
+
+    def cache_identity(
+        self,
+        source: "DataSource",
+        *,
+        fit_source: "DataSource | None" = None,
+        extra: Mapping[str, str] | None = None,
+    ) -> str:
+        """Return a short stable hash for this ``(pipeline, source, fit_source)``.
+
+        The formula folds in :attr:`pipeline_id`, ``source.source_id``, the
+        fit source's id (defaults to *source*), and any workflow-local
+        *extra* dimensions (e.g. ``{"impl": "v2"}``). Callers treat the
+        return value as opaque and use it as part of a cache directory
+        name.
+
+        Args:
+            source: Raw data source to be materialised.
+            fit_source: Source used for :meth:`DatasetTask.fit`. Defaults
+                to *source*; pass a distinct source (e.g. train-only
+                split) when fitting statistics should not see the full
+                dataset.
+            extra: Additional string key/value pairs to fold into the
+                hash. Keys are sorted for stability.
+        """
+        fs_id = fit_source.source_id if fit_source is not None else source.source_id
+        parts = [
+            f"schema={_IDENTITY_SCHEMA_VERSION}",
+            f"pipeline_id={self.pipeline_id}",
+            f"source_id={source.source_id}",
+            f"fit_source_id={fs_id}",
+        ]
+        if extra:
+            for k in sorted(extra):
+                parts.append(f"{k}={extra[k]}")
+        digest = hashlib.sha256("|".join(parts).encode()).hexdigest()
+        return digest[:_IDENTITY_HASH_LEN]
+
+    @staticmethod
+    def is_cache_ready(path: str | Path) -> bool:
+        """Return ``True`` if *path* is a cache dir committed by
+        :meth:`materialize`.
+
+        A cache is considered ready when its ``meta.json`` exists and
+        carries ``"status": "ready"``. Use this in workflow
+        ``prepare_data`` steps to skip expensive materialisation when a
+        previous run already wrote the sink.
+        """
+        from molix.data.dataset import _is_ready  # avoid import cycle
+        return _is_ready(Path(path))
+
     # -- Serialisation ------------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
@@ -290,14 +355,22 @@ def _wait_for_ready(sink: Path, *, timeout: float) -> None:
 # ---------------------------------------------------------------------------
 
 
-class PipelineDSL:
+class Pipeline:
     """Builder for constructing a :class:`PipelineSpec`.
 
-    Supports three equivalent task registration methods:
+    Instantiate directly — there is no separate factory function.
+    Supports three equivalent task registration styles::
 
-    1. ``@pipe.task`` decorator (bare function → treated as SampleTask).
-    2. ``pipe.add(TaskInstance())`` for typed tasks.
-    3. ``pipe.add(any_callable, name="x")`` for third-party integration.
+        pipe = (
+            Pipeline("qm9")
+            .add(NeighborList(cutoff=5.0))          # typed task instance
+            .add(my_callable, name="normalize")     # bare callable
+            .task(                                  # @decorator form
+                lambda s: {**s, "flag": True},
+                name="flag",
+            )
+        )
+        spec = pipe.build()                         # → PipelineSpec
     """
 
     def __init__(self, name: str) -> None:
@@ -316,8 +389,8 @@ class PipelineDSL:
             return decorator(fn)
         return decorator
 
-    def add(self, task: Any, *, name: str | None = None) -> PipelineDSL:
-        """Add a Task instance or callable."""
+    def add(self, task: Any, *, name: str | None = None) -> Pipeline:
+        """Add a Task instance or callable. Returns *self* for chaining."""
         entry_name = name or getattr(task, "task_id", type(task).__name__)
         self._entries.append(TaskEntry(entry_name, task))
         return self
@@ -325,11 +398,6 @@ class PipelineDSL:
     def build(self) -> PipelineSpec:
         pid = _stable_pipeline_id(self.name, self._entries)
         return PipelineSpec(self.name, pid, list(self._entries))
-
-
-def pipeline(name: str) -> PipelineDSL:
-    """Create a new pipeline builder."""
-    return PipelineDSL(name)
 
 
 def _stable_pipeline_id(name: str, entries: list[TaskEntry]) -> str:

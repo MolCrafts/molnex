@@ -12,13 +12,14 @@ benchmark used in the Allegro paper (Musaelian et al. 2023).
 
 Usage::
 
-    from molix.data import pipeline, NeighborList, MmapDataset
-    from molix.datasets.revmd17 import RevMD17Source, REVMD17_TARGET_SCHEMA
+    from molix.data import Pipeline, NeighborList, MmapDataset
+    from molix.datasets import RevMD17Source
 
     source = RevMD17Source(data_dir, molecule="aspirin")
-    pipe = pipeline("revmd17-aspirin").add(NeighborList(cutoff=7.0)).build()
+    pipe = Pipeline("revmd17-aspirin").add(NeighborList(cutoff=7.0)).build()
     pipe.materialize(source, sink=cache)
     ds = MmapDataset.from_cache(cache)
+    # RevMD17Source.TARGET_SCHEMA exposes graph {"energy"} + atom {"forces"}.
 """
 
 from __future__ import annotations
@@ -34,12 +35,6 @@ from molix.data.collate import TargetSchema
 from molix.data.source import Sample
 
 ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[assignment]
-
-
-REVMD17_TARGET_SCHEMA: TargetSchema = TargetSchema(
-    graph_level=frozenset({"energy"}),
-    atom_level=frozenset({"forces"}),
-)
 
 
 # Canonical 10 molecules of revMD17 and their filenames on the mirror.
@@ -71,6 +66,11 @@ class RevMD17Source:
 
     # Figshare mirror of the revised dataset (Christensen et al.).
     BASE_URL = "https://figshare.com/ndownloader/files/23950376"
+
+    TARGET_SCHEMA: TargetSchema = TargetSchema(
+        graph_level=frozenset({"energy"}),
+        atom_level=frozenset({"forces"}),
+    )
 
     def __init__(
         self,
@@ -127,4 +127,4 @@ class RevMD17Source:
         }
 
 
-__all__ = ["RevMD17Source", "REVMD17_TARGET_SCHEMA"]
+__all__ = ["RevMD17Source"]

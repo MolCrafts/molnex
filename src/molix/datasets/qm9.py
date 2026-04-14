@@ -6,19 +6,19 @@ Reference:
 
 Usage pattern (new API)::
 
-    from molix.data import pipeline, AtomicDress, NeighborList, MmapDataset
-    from molix.datasets.qm9 import QM9Source, download_qm9, QM9_TARGET_SCHEMA
+    from molix.data import Pipeline, AtomicDress, NeighborList, MmapDataset
+    from molix.datasets import QM9Source
 
     # 1. Workflow-side: materialize once into a shared cache directory.
-    download_qm9(data_dir)                       # optional; QM9Source does it lazily
+    QM9Source.download(data_dir)                 # optional; constructor does it lazily
     source = QM9Source(data_dir)
-    pipe = pipeline("qm9").add(...).build()
+    pipe = Pipeline("qm9").add(...).build()
     pipe.materialize(source, sink=cache_path)
 
     # 2. Training-side: zero pipeline work, just read.
     ds = MmapDataset.from_cache(cache_path)
     dm = DataModule(*ds.split(ratio=0.8),
-                    target_schema=QM9_TARGET_SCHEMA, ...)
+                    target_schema=QM9Source.TARGET_SCHEMA, ...)
 """
 
 from __future__ import annotations
@@ -40,12 +40,6 @@ from molix.data.source import Sample
 _QM9_GRAPH_TARGETS: frozenset[str] = frozenset(
     {"A", "B", "C", "mu", "alpha", "homo", "lumo", "gap", "r2", "zpve",
      "U0", "U", "H", "G", "Cv"}
-)
-
-
-QM9_TARGET_SCHEMA: TargetSchema = TargetSchema(
-    graph_level=_QM9_GRAPH_TARGETS,
-    atom_level=frozenset(),
 )
 
 
@@ -132,19 +126,6 @@ def _ensure_downloaded(root: Path) -> None:
         _download(_EXCLUDE_URL, exclude_file)
 
 
-def download_qm9(root: str | Path) -> Path:
-    """Public entry point: ensure QM9 raw files are present in *root*.
-
-    Equivalent to constructing :class:`QM9Source` purely for its download
-    side-effect, but skips the expensive raw parse. Use this in a
-    workflow's ``prepare_data`` stage when you want downloading decoupled
-    from source construction.
-    """
-    root = Path(root)
-    _ensure_downloaded(root)
-    return root
-
-
 def _load_raw(root: Path, total: int | None) -> list[dict]:
     """Return all raw QM9 samples as ``list[dict]`` (auto-downloads if needed)."""
     _ensure_downloaded(root)
@@ -200,15 +181,28 @@ class QM9Source:
         root: Directory for the raw QM9 tarball (downloaded on first use).
         total: Subsample to at most this many molecules (reproducible seed).
         targets: If given, keep only these scalar properties in each sample.
-            ``None`` keeps all of :data:`_QM9_GRAPH_TARGETS`.
+            ``None`` keeps all of :attr:`QM9Source.ALL_TARGETS`.
         download: Download raw files if missing. Set to ``False`` in
             offline / test environments.
 
     Attributes:
         source_id: Stable identifier used by
-            :func:`~molix.data.compute_cache_identity` and recorded in the
-            cache ``meta.json``.
+            :meth:`PipelineSpec.cache_identity` and recorded in the cache
+            ``meta.json``.
+
+    Class attributes:
+        TARGET_SCHEMA: :class:`TargetSchema` covering every scalar target
+            that appears in the raw QM9 records (graph-level; no
+            atom-level targets).
+        ALL_TARGETS: Frozen set of scalar property names exposed by raw
+            QM9 records (excluding ``tag`` and ``index``).
     """
+
+    ALL_TARGETS: frozenset[str] = _QM9_GRAPH_TARGETS
+    TARGET_SCHEMA: TargetSchema = TargetSchema(
+        graph_level=_QM9_GRAPH_TARGETS,
+        atom_level=frozenset(),
+    )
 
     def __init__(
         self,
@@ -239,7 +233,7 @@ class QM9Source:
         elif not (self.root / "qm9.tar.bz2").exists():
             raise FileNotFoundError(
                 f"QM9 tarball not found at {self.root / 'qm9.tar.bz2'}. "
-                "Set download=True or call download_qm9() first."
+                "Set download=True or call QM9Source.download() first."
             )
 
         samples = _load_raw(self.root, total)
@@ -247,6 +241,21 @@ class QM9Source:
             samples = [_filter_targets(s, kept_set) for s in samples]
         self._samples = samples
         self._total = total
+
+    # -- Idempotent raw-file downloader ------------------------------------
+
+    @classmethod
+    def download(cls, root: str | Path) -> Path:
+        """Ensure raw QM9 files are present in *root*.
+
+        Equivalent to constructing ``QM9Source(root, download=True)`` purely
+        for its download side-effect, but skips the expensive raw parse.
+        Use this in a workflow's ``prepare_data`` stage when downloading
+        should be decoupled from source construction.
+        """
+        root = Path(root)
+        _ensure_downloaded(root)
+        return root
 
     # -- DataSource protocol ------------------------------------------------
 

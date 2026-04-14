@@ -1,15 +1,16 @@
-"""Standard data sources for molecular machine learning."""
+"""Standard data sources for molecular machine learning.
 
-from molix.datasets.qm9 import QM9_TARGET_SCHEMA, QM9Source, download_qm9
-from molix.datasets.revmd17 import REVMD17_TARGET_SCHEMA, RevMD17Source
-from molix.datasets.threebpa import THREEBPA_TARGET_SCHEMA, ThreeBPASource
+Each source owns a ``TARGET_SCHEMA`` class attribute (the set of graph-level
+and atom-level targets it exposes). Downloaders, when applicable, live as
+classmethods on the source itself (e.g. :meth:`QM9Source.download`).
+"""
+
+from molix.datasets.qm9 import QM9Source
+from molix.datasets.revmd17 import RevMD17Source
+from molix.datasets.threebpa import ThreeBPASource
 
 __all__ = [
     "QM9Source",
-    "QM9_TARGET_SCHEMA",
-    "download_qm9",
     "RevMD17Source",
-    "REVMD17_TARGET_SCHEMA",
     "ThreeBPASource",
-    "THREEBPA_TARGET_SCHEMA",
 ]

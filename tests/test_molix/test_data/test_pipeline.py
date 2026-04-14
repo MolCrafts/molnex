@@ -1,4 +1,4 @@
-"""Tests for PipelineSpec / PipelineDSL.
+"""Tests for PipelineSpec / Pipeline.
 
 Pipeline is a pure transform; it has no scheduling knobs
 (``workspace`` / ``cache_dir`` / ``cache_identity``). These tests cover:
@@ -19,7 +19,7 @@ import pytest
 import torch
 
 from molix.data.dataset import MmapDataset
-from molix.data.pipeline import PipelineSpec, pipeline
+from molix.data.pipeline import Pipeline, PipelineSpec
 from molix.data.source import InMemorySource
 from molix.data.task import DatasetTask, SampleTask
 
@@ -90,7 +90,7 @@ def _samples(n: int = 8) -> list[dict]:
 class TestTransform:
     def test_applies_prepare_tasks_in_order(self):
         counter = CountingSample("a")
-        spec = pipeline("p").add(counter).build()
+        spec = Pipeline("p").add(counter).build()
         out = spec.transform({"y": torch.tensor([0.0])})
         assert out["a"] is True
         assert counter.calls == 1
@@ -109,7 +109,7 @@ class TestTransform:
 
         counter = CountingSample("a")
         batch = NoopBatch()
-        spec = pipeline("p").add(counter).add(batch).build()
+        spec = Pipeline("p").add(counter).add(batch).build()
         spec.transform({"y": torch.tensor([0.0])})
         assert counter.calls == 1
         assert batch.calls == 0
@@ -124,7 +124,7 @@ class TestRun:
     def test_sample_task_runs_once_per_sample(self):
         src = InMemorySource(_samples(10))
         counter = CountingSample()
-        spec = pipeline("p").add(counter).build()
+        spec = Pipeline("p").add(counter).build()
         out = list(spec.run(src))
         assert len(out) == 10
         assert counter.calls == 10
@@ -132,7 +132,7 @@ class TestRun:
     def test_dataset_task_fit_called_once_on_full_source(self):
         src = InMemorySource(_samples(8))
         shift = MeanShift("y")
-        spec = pipeline("p").add(shift).build()
+        spec = Pipeline("p").add(shift).build()
         list(spec.run(src))
         assert shift.fit_calls == 1
         assert shift.exec_calls == 8  # one execute per sample
@@ -141,7 +141,7 @@ class TestRun:
         src = InMemorySource(_samples(10))          # y = 0..9
         fit_src = InMemorySource(_samples(5))       # y = 0..4, mean = 2.0
         shift = MeanShift("y")
-        spec = pipeline("p").add(shift).build()
+        spec = Pipeline("p").add(shift).build()
         list(spec.run(src, fit_source=fit_src))
         assert shift.fit_calls == 1
         assert abs(shift.mean - 2.0) < 1e-9
@@ -152,7 +152,7 @@ class TestRun:
         import types
 
         src = InMemorySource(_samples(3))
-        spec = pipeline("p").add(CountingSample()).build()
+        spec = Pipeline("p").add(CountingSample()).build()
         it = spec.run(src)
         assert isinstance(it, types.GeneratorType)
 
@@ -165,7 +165,7 @@ class TestRun:
 class TestMaterialize:
     def test_writes_standard_cache_layout(self, tmp_path):
         src = InMemorySource(_samples(4))
-        spec = pipeline("p").add(CountingSample()).build()
+        spec = Pipeline("p").add(CountingSample()).build()
         sink = tmp_path / "asset"
         spec.materialize(src, sink=sink)
 
@@ -176,7 +176,7 @@ class TestMaterialize:
 
     def test_meta_records_ids(self, tmp_path):
         src = InMemorySource(_samples(4), name="src-a")
-        spec = pipeline("p").add(MeanShift("y")).build()
+        spec = Pipeline("p").add(MeanShift("y")).build()
         sink = tmp_path / "asset"
         spec.materialize(src, sink=sink)
 
@@ -189,7 +189,7 @@ class TestMaterialize:
 
     def test_roundtrip_via_from_cache(self, tmp_path):
         src = InMemorySource(_samples(6))           # y = 0..5, mean = 2.5
-        spec = pipeline("p").add(MeanShift("y")).build()
+        spec = Pipeline("p").add(MeanShift("y")).build()
         sink = tmp_path / "asset"
         spec.materialize(src, sink=sink)
 
@@ -202,7 +202,7 @@ class TestMaterialize:
         """DatasetTask.state_dict is captured into the cache and restorable
         via MmapDataset.from_cache().get_task_state()."""
         src = InMemorySource(_samples(6))           # mean = 2.5
-        spec = pipeline("p").add(MeanShift("y")).build()
+        spec = Pipeline("p").add(MeanShift("y")).build()
         sink = tmp_path / "asset"
         spec.materialize(src, sink=sink)
 
@@ -214,21 +214,21 @@ class TestMaterialize:
     def test_idempotent_noop_when_ready(self, tmp_path):
         src = InMemorySource(_samples(4))
         shift1 = MeanShift("y")
-        spec1 = pipeline("p").add(shift1).build()
+        spec1 = Pipeline("p").add(shift1).build()
         sink = tmp_path / "asset"
         spec1.materialize(src, sink=sink)
         assert shift1.exec_calls == 4
 
         # Second call on a ready sink must not invoke fit/execute.
         shift2 = MeanShift("y")
-        spec2 = pipeline("p").add(shift2).build()
+        spec2 = Pipeline("p").add(shift2).build()
         spec2.materialize(src, sink=sink)
         assert shift2.fit_calls == 0
         assert shift2.exec_calls == 0
 
     def test_overwrite_rewrites(self, tmp_path):
         src = InMemorySource(_samples(4))
-        spec = pipeline("p").add(CountingSample()).build()
+        spec = Pipeline("p").add(CountingSample()).build()
         sink = tmp_path / "asset"
         spec.materialize(src, sink=sink)
         spec.materialize(src, sink=sink, overwrite=True)
@@ -238,7 +238,7 @@ class TestMaterialize:
     def test_fit_source_recorded_in_meta(self, tmp_path):
         src = InMemorySource(_samples(10), name="full")
         fit_src = InMemorySource(_samples(5), name="fit-only")
-        spec = pipeline("p").add(MeanShift("y")).build()
+        spec = Pipeline("p").add(MeanShift("y")).build()
         sink = tmp_path / "asset"
         spec.materialize(src, sink=sink, fit_source=fit_src)
 
@@ -255,18 +255,18 @@ class TestMaterialize:
 
 class TestPipelineId:
     def test_stable_across_builds(self):
-        a = pipeline("p").add(CountingSample("a")).add(MeanShift("y")).build()
-        b = pipeline("p").add(CountingSample("a")).add(MeanShift("y")).build()
+        a = Pipeline("p").add(CountingSample("a")).add(MeanShift("y")).build()
+        b = Pipeline("p").add(CountingSample("a")).add(MeanShift("y")).build()
         assert a.pipeline_id == b.pipeline_id
 
     def test_changes_with_task_order(self):
-        a = pipeline("p").add(CountingSample("a")).add(MeanShift("y")).build()
-        b = pipeline("p").add(MeanShift("y")).add(CountingSample("a")).build()
+        a = Pipeline("p").add(CountingSample("a")).add(MeanShift("y")).build()
+        b = Pipeline("p").add(MeanShift("y")).add(CountingSample("a")).build()
         assert a.pipeline_id != b.pipeline_id
 
     def test_changes_with_task_config(self):
-        a = pipeline("p").add(MeanShift("y")).build()
-        b = pipeline("p").add(MeanShift("z")).build()
+        a = Pipeline("p").add(MeanShift("y")).build()
+        b = Pipeline("p").add(MeanShift("z")).build()
         assert a.pipeline_id != b.pipeline_id
 
 
@@ -276,16 +276,19 @@ class TestPipelineId:
 
 
 class TestNoSchedulingConcepts:
-    """Design-constraint regression: pipeline is pure transform.
+    """Design-constraint regression: pipeline does not embed scheduling state.
 
-    If any of the forbidden names appear on the public API, scheduling
-    policy is bleeding into the transform layer. Redesign it.
+    The pipeline owns no workspace/cache-directory concept — callers still
+    decide *where* the cache lives. :meth:`cache_identity` and
+    :meth:`is_cache_ready` are deliberately *not* listed as forbidden:
+    they are pure utility helpers (string / bool) that let the caller
+    choose a sink path.
     """
 
-    FORBIDDEN = ("workspace", "cache_dir", "cache_identity", "name_hint")
+    FORBIDDEN = ("workspace", "cache_dir", "name_hint")
 
     def test_no_forbidden_attributes(self):
-        spec = pipeline("p").add(CountingSample()).build()
+        spec = Pipeline("p").add(CountingSample()).build()
         for name in self.FORBIDDEN:
             assert not hasattr(spec, name), f"pipeline leaks {name!r}"
 
@@ -315,7 +318,7 @@ class TestNoSchedulingConcepts:
 class TestMaterializeRankGuard:
     def test_rank_nonzero_polls_for_ready(self, tmp_path, monkeypatch):
         src = InMemorySource(_samples(3))
-        spec = pipeline("p").add(CountingSample()).build()
+        spec = Pipeline("p").add(CountingSample()).build()
         sink = tmp_path / "asset"
         sink.mkdir()
         (sink / "_READY").write_text("")    # pre-existing
@@ -326,7 +329,7 @@ class TestMaterializeRankGuard:
 
     def test_rank_nonzero_times_out_without_ready(self, tmp_path, monkeypatch):
         src = InMemorySource(_samples(3))
-        spec = pipeline("p").add(CountingSample()).build()
+        spec = Pipeline("p").add(CountingSample()).build()
         sink = tmp_path / "asset"
         monkeypatch.setenv("RANK", "1")
         with pytest.raises(TimeoutError, match="_READY"):

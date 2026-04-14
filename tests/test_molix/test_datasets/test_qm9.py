@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from molix.data import MmapDataset, pipeline
-from molix.datasets.qm9 import QM9_TARGET_SCHEMA, QM9Source, download_qm9
+from molix.data import MmapDataset, Pipeline
+from molix.datasets.qm9 import QM9Source
 
 
 # ---------------------------------------------------------------------------
@@ -85,11 +85,11 @@ def fake_qm9_root(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-class TestDownloadQm9:
+class TestQM9SourceDownload:
     def test_noop_when_files_present(self, fake_qm9_root):
         # Files already exist; should not raise, not modify.
         before = (fake_qm9_root / "qm9.tar.bz2").stat().st_mtime_ns
-        download_qm9(fake_qm9_root)
+        QM9Source.download(fake_qm9_root)
         after = (fake_qm9_root / "qm9.tar.bz2").stat().st_mtime_ns
         assert before == after
 
@@ -144,7 +144,7 @@ class TestQM9SourceWithMaterialize:
 
     def test_materialize_roundtrip(self, fake_qm9_root, tmp_path):
         src = QM9Source(fake_qm9_root, download=False, targets=["U0"])
-        spec = pipeline("qm9-test").build()       # no-op pipeline
+        spec = Pipeline("qm9-test").build()       # no-op pipeline
         sink = tmp_path / "prepared"
 
         spec.materialize(src, sink=sink)
@@ -156,8 +156,8 @@ class TestQM9SourceWithMaterialize:
         u0s = sorted(float(ds[i]["targets"]["U0"].item()) for i in range(3))
         assert u0s == [1.0, 2.0, 3.0]
 
-    def test_qm9_schema_exported(self):
-        """QM9_TARGET_SCHEMA is exported as a module-level constant for workflows."""
-        assert "U0" in QM9_TARGET_SCHEMA.graph_level
-        assert "gap" in QM9_TARGET_SCHEMA.graph_level
-        assert QM9_TARGET_SCHEMA.atom_level == frozenset()
+    def test_qm9_schema_exported_on_class(self):
+        """QM9Source.TARGET_SCHEMA is exposed as a class attribute for workflows."""
+        assert "U0" in QM9Source.TARGET_SCHEMA.graph_level
+        assert "gap" in QM9Source.TARGET_SCHEMA.graph_level
+        assert QM9Source.TARGET_SCHEMA.atom_level == frozenset()

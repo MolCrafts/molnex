@@ -63,7 +63,7 @@ class DataModule:
         ds = MmapDataset.from_cache(cache_path)
         train_ds, val_ds = ds.split(ratio=0.8)
         dm = DataModule(train_ds, val_ds,
-                        target_schema=QM9_TARGET_SCHEMA,
+                        target_schema=QM9Source.TARGET_SCHEMA,
                         batch_tasks=pipe.batch_tasks,
                         batch_size=32, num_workers=4)
         trainer.train(datamodule=dm, max_epochs=100)

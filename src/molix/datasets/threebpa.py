@@ -18,10 +18,11 @@ atom row is ``<symbol> x y z fx fy fz`` (eV/Å).
 
 Usage::
 
-    from molix.datasets.threebpa import ThreeBPASource, THREEBPA_TARGET_SCHEMA
+    from molix.datasets import ThreeBPASource
 
     src_train = ThreeBPASource(data_dir / "train_300K.xyz", tag="train_300K")
     src_600   = ThreeBPASource(data_dir / "test_600K.xyz",  tag="test_600K")
+    # Target layout: ThreeBPASource.TARGET_SCHEMA.
 """
 
 from __future__ import annotations
@@ -32,12 +33,6 @@ import torch
 
 from molix.data.collate import TargetSchema
 from molix.data.source import Sample
-
-
-THREEBPA_TARGET_SCHEMA: TargetSchema = TargetSchema(
-    graph_level=frozenset({"energy"}),
-    atom_level=frozenset({"forces"}),
-)
 
 
 def _parse_extxyz(path: Path) -> list[Sample]:
@@ -88,6 +83,11 @@ class ThreeBPASource:
              to make :attr:`source_id` distinct between temperature shards.
     """
 
+    TARGET_SCHEMA: TargetSchema = TargetSchema(
+        graph_level=frozenset({"energy"}),
+        atom_level=frozenset({"forces"}),
+    )
+
     def __init__(self, path: str | Path, *, tag: str) -> None:
         self.path = Path(path)
         if not self.path.exists():
@@ -110,4 +110,4 @@ class ThreeBPASource:
         return self._samples[idx]
 
 
-__all__ = ["ThreeBPASource", "THREEBPA_TARGET_SCHEMA"]
+__all__ = ["ThreeBPASource"]

@@ -12,7 +12,7 @@ _lib_loaded = False
 
 
 def _load_ops_library() -> None:
-    """Load the C++ ops library (formerly loaded by molnex)."""
+    """Load the C++ ops library. Raises ImportError with build instructions if missing."""
     global _lib_loaded
     if _lib_loaded:
         return
@@ -23,16 +23,23 @@ def _load_ops_library() -> None:
     else:
         lib_name = "libmolnex_opLib.so"
 
-    # Library resides under molix/op in this monorepo
     candidate = Path(__file__).resolve().parents[0] / "op" / lib_name
-    if candidate.exists():
-        torch.ops.load_library(str(candidate))
-        _lib_loaded = True
+    if not candidate.exists():
+        op_src = candidate.parents[0]
+        raise ImportError(
+            f"molix native op library not found at {candidate}.\n"
+            f"Build it with:\n"
+            f"  cmake -S {op_src} -B {op_src}/build -DMOLNEX_OP_ENABLE_CUDA=ON\n"
+            f"  cmake --build {op_src}/build -j\n"
+            f"(drop -DMOLNEX_OP_ENABLE_CUDA=ON for CPU-only builds.)"
+        )
+    torch.ops.load_library(str(candidate))
+    _lib_loaded = True
 
 
 _load_ops_library()
 
-from molix import logger
+from molix import logger, logging
 from molix.compile import maybe_compile
 from molix.config import config
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
@@ -54,6 +61,7 @@ __all__ = [
     "WeightedLoss",
     "config",
     "logger",
+    "logging",
     "maybe_compile",
     "ProfilerHook",
 ]
