@@ -48,7 +48,6 @@ endif()
 
 if(MOLNEX_OP_ENABLE_CUDA)
   target_compile_definitions(${MOLNEX_OP_LIBRARY_NAME} PRIVATE
-    WITH_CUDA
     __CUDA_NO_HALF_OPERATORS__
   )
   target_compile_options(${MOLNEX_OP_LIBRARY_NAME} PRIVATE

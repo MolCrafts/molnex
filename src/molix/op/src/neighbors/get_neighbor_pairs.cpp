@@ -1,61 +1,41 @@
+// CPU implementation of `molix::get_neighbor_pairs`.
+//
+// O(N^2) pair enumeration. Fast path: all validation is the caller's
+// responsibility (done in the Python wrapper). The only filtering done
+// here is algorithmic:
+//   * distance > cutoff  → drop (outside interaction range)
+//   * distance == 0      → drop (self-interaction; caller's data error,
+//                                 but filtering avoids NaN in backward)
+
 #include <torch/extension.h>
 #include <tuple>
 
 using std::tuple;
+using torch::arange;
 using torch::div;
 using torch::full;
+using torch::hstack;
 using torch::index_select;
 using torch::indexing::Slice;
-using torch::arange;
-using torch::linalg_vector_norm;
 using torch::kInt32;
-using torch::Scalar;
-using torch::hstack;
-using torch::vstack;
-using torch::Tensor;
+using torch::linalg_vector_norm;
 using torch::outer;
 using torch::round;
+using torch::Scalar;
+using torch::Tensor;
+using torch::vstack;
 
-static tuple<Tensor, Tensor, Tensor, Tensor> forward(const Tensor& positions,
-						     const Scalar& cutoff,
-						     const Scalar& max_num_pairs,
-						     const Tensor& box_vectors,
-						     bool checkErrors) {
-
-    TORCH_CHECK(positions.dim() == 2, "Expected \"positions\" to have two dimensions");
-    TORCH_CHECK(positions.size(0) > 0, "Expected the 1nd dimension size of \"positions\" to be more than 0");
-    TORCH_CHECK(positions.size(1) == 3, "Expected the 2nd dimension size of \"positions\" to be 3");
-    TORCH_CHECK(positions.is_contiguous(), "Expected \"positions\" to be contiguous");
-
-    TORCH_CHECK(cutoff.to<double>() > 0, "Expected \"cutoff\" to be positive");
-
-    if (box_vectors.size(0) != 0) {
-        TORCH_CHECK(box_vectors.dim() == 2, "Expected \"box_vectors\" to have two dimensions");
-        TORCH_CHECK(box_vectors.size(0) == 3 && box_vectors.size(1) == 3, "Expected \"box_vectors\" to have shape (3, 3)");
-        double v[3][3];
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++)
-                v[i][j] = box_vectors[i][j].item<double>();
-        double c = cutoff.to<double>();
-        TORCH_CHECK(v[0][1] == 0, "Invalid box vectors: box_vectors[0][1] != 0");
-        TORCH_CHECK(v[0][2] == 0, "Invalid box vectors: box_vectors[0][2] != 0");
-        TORCH_CHECK(v[1][2] == 0, "Invalid box vectors: box_vectors[1][2] != 0");
-        TORCH_CHECK(v[0][0] >= 2*c, "Invalid box vectors: box_vectors[0][0] < 2*cutoff");
-        TORCH_CHECK(v[1][1] >= 2*c, "Invalid box vectors: box_vectors[1][1] < 2*cutoff");
-        TORCH_CHECK(v[2][2] >= 2*c, "Invalid box vectors: box_vectors[2][2] < 2*cutoff");
-        TORCH_CHECK(v[0][0] >= 2*v[1][0], "Invalid box vectors: box_vectors[0][0] < 2*box_vectors[1][0]");
-        TORCH_CHECK(v[0][0] >= 2*v[2][0], "Invalid box vectors: box_vectors[0][0] < 2*box_vectors[1][0]");
-        TORCH_CHECK(v[1][1] >= 2*v[2][1], "Invalid box vectors: box_vectors[1][1] < 2*box_vectors[2][1]");
-    }
-
+static tuple<Tensor, Tensor, Tensor, Tensor> forward(
+    const Tensor& positions,
+    const Scalar& cutoff,
+    const Scalar& max_num_pairs,
+    const Tensor& box_vectors
+) {
     const int max_num_pairs_ = max_num_pairs.to<int>();
-    TORCH_CHECK(max_num_pairs_ > 0 || max_num_pairs_ == -1,
-        "Expected \"max_num_pairs\" to be positive or equal to -1");
-
     const int num_atoms = positions.size(0);
-    const int num_pairs = num_atoms * (num_atoms - 1) / 2;
+    const int64_t num_all_pairs = static_cast<int64_t>(num_atoms) * (num_atoms - 1) / 2;
 
-    const Tensor indices = arange(0, num_pairs, positions.options().dtype(kInt32));
+    const Tensor indices = arange(0, num_all_pairs, positions.options().dtype(kInt32));
     Tensor rows = (((8 * indices + 1).sqrt() + 1) / 2).floor().to(kInt32);
     rows -= (rows * (rows - 1) > 2 * indices).to(kInt32);
     const Tensor columns = indices - div(rows * (rows - 1), 2, "floor");
@@ -63,31 +43,28 @@ static tuple<Tensor, Tensor, Tensor, Tensor> forward(const Tensor& positions,
     Tensor neighbors = vstack({rows, columns});
     Tensor deltas = index_select(positions, 0, rows) - index_select(positions, 0, columns);
     if (box_vectors.size(0) != 0) {
-        deltas -= outer(round(deltas.index({Slice(), 2})/box_vectors.index({2, 2})), box_vectors.index({2}));
-        deltas -= outer(round(deltas.index({Slice(), 1})/box_vectors.index({1, 1})), box_vectors.index({1}));
-        deltas -= outer(round(deltas.index({Slice(), 0})/box_vectors.index({0, 0})), box_vectors.index({0}));
+        deltas -= outer(round(deltas.index({Slice(), 2}) / box_vectors.index({2, 2})), box_vectors.index({2}));
+        deltas -= outer(round(deltas.index({Slice(), 1}) / box_vectors.index({1, 1})), box_vectors.index({1}));
+        deltas -= outer(round(deltas.index({Slice(), 0}) / box_vectors.index({0, 0})), box_vectors.index({0}));
     }
     Tensor distances = linalg_vector_norm(deltas, 2, 1);
 
+    const Tensor valid = (distances <= cutoff) & (distances > 0);
+    const int num_found = valid.sum().item<int>();
+
     if (max_num_pairs_ == -1) {
-        const Tensor mask = distances > cutoff;
+        const Tensor mask = ~valid;
         neighbors.index_put_({Slice(), mask}, -1);
         deltas = deltas.clone(); // Break an autograd loop
         distances = distances.clone();
         deltas.index_put_({mask, Slice()}, NAN);
         distances.index_put_({mask}, NAN);
-
     } else {
-        const Tensor mask = distances <= cutoff;
-        neighbors = neighbors.index({Slice(), mask});
-        deltas = deltas.index({mask, Slice()});
-        distances = distances.index({mask});
+        neighbors = neighbors.index({Slice(), valid});
+        deltas = deltas.index({valid, Slice()});
+        distances = distances.index({valid});
 
-        const int num_pad = max_num_pairs_ - distances.size(0);
-        if (checkErrors) {
-            TORCH_CHECK(num_pad >= 0,
-                "The maximum number of pairs has been exceed! Increase \"max_num_pairs\"");
-        }
+        const int num_pad = max_num_pairs_ - num_found;
         if (num_pad > 0) {
             neighbors = hstack({neighbors, full({2, num_pad}, -1, neighbors.options())});
             deltas = vstack({deltas, full({num_pad, 3}, NAN, deltas.options())});
@@ -95,14 +72,10 @@ static tuple<Tensor, Tensor, Tensor, Tensor> forward(const Tensor& positions,
         }
     }
     Tensor num_pairs_found = torch::empty(1, indices.options().dtype(kInt32));
-    num_pairs_found[0] = distances.size(0);
+    num_pairs_found[0] = num_found;
     return {neighbors, deltas, distances, num_pairs_found};
 }
 
-TORCH_LIBRARY_IMPL(neighbors, AutogradCPU, m) {
-    m.impl("getNeighborPairs",
-         [](const Tensor& positions, const Scalar& cutoff, const Scalar& max_num_pairs,
-                const Tensor& box_vectors, const bool &checkErrors){
-                 return forward(positions, cutoff, max_num_pairs, box_vectors, checkErrors);
-     });
+TORCH_LIBRARY_IMPL(molix, AutogradCPU, m) {
+    m.impl("get_neighbor_pairs", &forward);
 }

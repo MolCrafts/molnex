@@ -14,7 +14,7 @@ class NeighborList(nn.Module):
         self.pbc = pbc
 
     def forward(self, positions, cell):
-        return F.get_neighbor_pairs(positions, self.cutoff, box_vectors=cell, check_errors=False)
+        return F.get_neighbor_pairs(positions, self.cutoff, box_vectors=cell)
 
     def extra_repr(self):
         return f"cutoff={self.cutoff}, pbc={self.pbc}"

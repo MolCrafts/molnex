@@ -30,13 +30,11 @@ class NeighborList(SampleTask):
         cutoff: float = 5.0,
         max_num_pairs: int = 512,
         pbc: bool = False,
-        check_errors: bool = True,
         filter_padding: bool = True,
     ) -> None:
         self.cutoff = cutoff
         self.max_num_pairs = max_num_pairs
         self.pbc = pbc
-        self.check_errors = check_errors
         self.filter_padding = filter_padding
 
     @property
@@ -52,7 +50,6 @@ class NeighborList(SampleTask):
             cutoff=self.cutoff,
             max_num_pairs=self.max_num_pairs,
             box_vectors=box_vectors,
-            check_errors=self.check_errors,
         )
 
         edge_index = _normalize_to_E2(neighbors)

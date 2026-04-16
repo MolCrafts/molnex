@@ -1,13 +1,11 @@
+#include <ATen/Dispatch_v2.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
-#include <exception>
-#include <stdexcept>
 #include <torch/extension.h>
 #include <algorithm>
 #include <tuple>
 
-#include "common/accessor.cuh"
-#include "common/atomicAdd.cuh"
+#include "molix/accessor.cuh"
 
 using c10::cuda::CUDAStreamGuard;
 using c10::cuda::getCurrentCUDAStream;
@@ -63,7 +61,10 @@ template <typename scalar_t> __global__ void forward_kernel(
     }
     const scalar_t distance2 = delta_x * delta_x + delta_y * delta_y + delta_z * delta_z;
 
-    if (distance2 > cutoff2) return;
+    // Drop pairs outside cutoff and self-interactions (identical positions).
+    // Filtering at forward avoids divide-by-zero in backward and keeps pair
+    // set physically meaningful.
+    if (distance2 > cutoff2 || distance2 == scalar_t(0)) return;
 
     const int32_t i_pair = store_all_pairs ? index : atomicAdd(&i_curr_pair[0], 1);
     //We handle too many neighbors outside of the kernel
@@ -106,31 +107,19 @@ public:
                                const Tensor& positions,
                                const Scalar& cutoff,
                                const Scalar& max_num_pairs,
-                               const Tensor& box_vectors,
-			       bool checkErrors) {
+                               const Tensor& box_vectors) {
+        // Fast path: input validation is the caller's responsibility (Python).
         const auto stream = getCurrentCUDAStream(positions.get_device());
         const CUDAStreamGuard guard(stream);
-        TORCH_CHECK(positions.dim() == 2, "Expected \"positions\" to have two dimensions");
-        TORCH_CHECK(positions.size(0) > 0, "Expected the 1nd dimension size of \"positions\" to be more than 0");
-        TORCH_CHECK(positions.size(1) == 3, "Expected the 2nd dimension size of \"positions\" to be 3");
-        TORCH_CHECK(positions.is_contiguous(), "Expected \"positions\" to be contiguous");
-        TORCH_CHECK(max_num_pairs.toInt() > 0 || max_num_pairs.toInt() == -1,
-            "Expected \"max_num_pairs\" to be positive or equal to -1");
 
         const bool use_periodic = (box_vectors.size(0) != 0);
-        if (use_periodic) {
-            TORCH_CHECK(box_vectors.dim() == 2, "Expected \"box_vectors\" to have two dimensions");
-            TORCH_CHECK(box_vectors.size(0) == 3 && box_vectors.size(1) == 3, "Expected \"box_vectors\" to have shape (3, 3)");
-        }
-
-        // Decide the algorithm
         const bool store_all_pairs = max_num_pairs.toInt() == -1;
         const int num_atoms = positions.size(0);
-        const int num_all_pairs = num_atoms * (num_atoms - 1) / 2;
-	const int max_num_pairs_ = store_all_pairs ? num_all_pairs : (max_num_pairs.toInt());
+        const int64_t num_all_pairs = static_cast<int64_t>(num_atoms) * (num_atoms - 1) / 2;
+        const int max_num_pairs_ = store_all_pairs ? static_cast<int>(num_all_pairs) : max_num_pairs.toInt();
 
         const int num_threads = 128;
-        const int num_blocks = max((num_all_pairs + num_threads - 1) / num_threads, 1);
+        const int num_blocks = max(static_cast<int>((num_all_pairs + num_threads - 1) / num_threads), 1);
 
         const TensorOptions options = positions.options();
         const Tensor i_curr_pair = zeros(1, options.dtype(kInt32));
@@ -138,26 +127,24 @@ public:
         const Tensor deltas = full({max_num_pairs_, 3}, NAN, options);
         const Tensor distances = full(max_num_pairs_, NAN, options);
 
-        AT_DISPATCH_FLOATING_TYPES(positions.scalar_type(), "getNeighborPairs::forward", [&]() {
-	  const scalar_t cutoff_ = cutoff.to<scalar_t>();
-	  TORCH_CHECK(cutoff_ > 0, "Expected \"cutoff\" to be positive");
-            forward_kernel<<<num_blocks, num_threads, 0, stream>>>(
-                num_all_pairs,
-                get_accessor<scalar_t, 2>(positions),
-                cutoff_ * cutoff_,
-                store_all_pairs,
-                use_periodic,
-                get_accessor<int32_t, 1>(i_curr_pair),
-                get_accessor<int32_t, 2>(neighbors),
-                get_accessor<scalar_t, 2>(deltas),
-                get_accessor<scalar_t, 1>(distances),
-                get_accessor<scalar_t, 2>(box_vectors));
-        });
-        // Synchronize and check the number of pairs found. Note that this is incompatible with CUDA graphs
-        if (checkErrors) {
-            int num_found_pairs = i_curr_pair.item<int32_t>();
-            TORCH_CHECK(num_found_pairs <= max_num_pairs_, "Too many neighbor pairs found. Maximum is " + std::to_string(max_num_pairs_), " but found " + std::to_string(num_found_pairs));
-        }
+        AT_DISPATCH_V2(positions.scalar_type(), "get_neighbor_pairs::forward",
+            AT_WRAP([&] {
+                const scalar_t cutoff_ = cutoff.to<scalar_t>();
+                forward_kernel<<<num_blocks, num_threads, 0, stream>>>(
+                    num_all_pairs,
+                    get_accessor<scalar_t, 2>(positions),
+                    cutoff_ * cutoff_,
+                    store_all_pairs,
+                    use_periodic,
+                    get_accessor<int32_t, 1>(i_curr_pair),
+                    get_accessor<int32_t, 2>(neighbors),
+                    get_accessor<scalar_t, 2>(deltas),
+                    get_accessor<scalar_t, 1>(distances),
+                    get_accessor<scalar_t, 2>(box_vectors));
+            }),
+            AT_EXPAND(AT_FLOATING_TYPES));
+        // Callers inspecting overflow check `i_curr_pair` against
+        // `max_num_pairs` themselves (avoids a D2H sync on hot path).
         ctx->save_for_backward({neighbors, deltas, distances});
         ctx->saved_data["num_atoms"] = num_atoms;
         return {neighbors, deltas, distances, i_curr_pair};
@@ -180,27 +167,28 @@ public:
         const Tensor distances = data[2];
         const Tensor grad_positions = zeros({num_atoms, 3}, grad_distances.options());
 
-        AT_DISPATCH_FLOATING_TYPES(grad_distances.scalar_type(), "getNeighborPairs::backward", [&]() {
-            const CUDAStreamGuard guard(stream);
-            backward_kernel<<<blocks, num_threads, 0, stream>>>(
-                get_accessor<int32_t, 2>(neighbors),
-                get_accessor<scalar_t, 2>(deltas),
-                get_accessor<scalar_t, 2>(grad_deltas),
-                get_accessor<scalar_t, 1>(distances),
-                get_accessor<scalar_t, 1>(grad_distances),
-                get_accessor<scalar_t, 2>(grad_positions));
-        });
+        AT_DISPATCH_V2(grad_distances.scalar_type(), "get_neighbor_pairs::backward",
+            AT_WRAP([&] {
+                const CUDAStreamGuard guard(stream);
+                backward_kernel<<<blocks, num_threads, 0, stream>>>(
+                    get_accessor<int32_t, 2>(neighbors),
+                    get_accessor<scalar_t, 2>(deltas),
+                    get_accessor<scalar_t, 2>(grad_deltas),
+                    get_accessor<scalar_t, 1>(distances),
+                    get_accessor<scalar_t, 1>(grad_distances),
+                    get_accessor<scalar_t, 2>(grad_positions));
+            }),
+            AT_EXPAND(AT_FLOATING_TYPES));
 
-        return {grad_positions, Tensor(), Tensor(), Tensor(), Tensor(), Tensor()};
-      }
+        return {grad_positions, Tensor(), Tensor(), Tensor(), Tensor()};
+    }
 };
 
-TORCH_LIBRARY_IMPL(neighbors, AutogradCUDA, m) {
-  m.impl("getNeighborPairs",
-	 [](const Tensor& positions, const Scalar& cutoff, const Scalar& max_num_pairs,
-	    const Tensor& box_vectors, const bool &checkErrors){
-	     const tensor_list results = Autograd::apply(positions, cutoff, max_num_pairs,
-							 box_vectors, checkErrors);
-	     return make_tuple(results[0], results[1], results[2], results[3]);
-	 });
+TORCH_LIBRARY_IMPL(molix, AutogradCUDA, m) {
+    m.impl("get_neighbor_pairs",
+           [](const Tensor& positions, const Scalar& cutoff, const Scalar& max_num_pairs,
+              const Tensor& box_vectors) {
+               const tensor_list results = Autograd::apply(positions, cutoff, max_num_pairs, box_vectors);
+               return make_tuple(results[0], results[1], results[2], results[3]);
+           });
 }
