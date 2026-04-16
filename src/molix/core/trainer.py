@@ -53,6 +53,7 @@ class Trainer:
         eval_every_n_steps: int | None = None,
         resume_from_checkpoint: str | Path | None = None,
         checkpoint_backend: CheckpointBackend | None = None,
+        device: str | torch.device | None = None,
     ):
         """Initialize trainer.
 
@@ -76,6 +77,12 @@ class Trainer:
                    or ``"auto"`` to detect torchrun elastic snapshots.
             checkpoint_backend: Backend for checkpoint I/O. Defaults to
                    :class:`TorchSaveBackend`.
+            device: Target device for the model (e.g. ``"cuda"``, ``"cuda:0"``,
+                   ``"cpu"``). When set, the model is moved to this device at the
+                   start of :meth:`train`. Each batch is then automatically moved
+                   to the same device by the default steps. If ``None`` (default),
+                   the model is left on its current device and device placement is
+                   the caller's responsibility.
 
         Raises:
             ValueError: If eval_every_n_steps is <= 0
@@ -83,6 +90,7 @@ class Trainer:
         if eval_every_n_steps is not None and eval_every_n_steps <= 0:
             raise ValueError(f"eval_every_n_steps must be > 0, got {eval_every_n_steps}")
         self.eval_every_n_steps = eval_every_n_steps
+        self.device = torch.device(device) if device is not None else None
 
         self.model = model
         self.loss_fn = loss_fn
@@ -269,6 +277,10 @@ class Trainer:
         """
         epoch_limit = max_epochs if max_epochs is not None else float("inf")
         step_limit = max_steps if max_steps is not None else float("inf")
+
+        if self.device is not None:
+            self.model = self.model.to(self.device)
+            self._checkpoint.model = self.model
 
         datamodule.setup("fit")
 

@@ -421,8 +421,8 @@ class CheckpointHook(BaseHook):
         checkpoint = {
             "epoch": state.epoch,
             "global_step": state.global_step,
-            "model_state_dict": trainer.model.state_dict() if trainer.model else None,
-            "optimizer_state_dict": trainer.optimizer.state_dict() if trainer.optimizer else None,
+            "model_state_dict": trainer.model.state_dict() if trainer.model is not None else None,
+            "optimizer_state_dict": trainer.optimizer.state_dict() if trainer.optimizer is not None else None,
         }
         self.torch.save(checkpoint, filepath)
         logger.info(f"Saved checkpoint to {filepath}")
@@ -616,29 +616,7 @@ class MetricsHook(ScalarHook):
                 state[f"{self.prefix_val}/{metric_name}"] = value
 
     def on_epoch_end(self, trainer, state):
-        """Compute and log all metrics at epoch end."""
-        import torch
-
-        print(f"\nEpoch {state.epoch + 1} Metrics:")
-
-        # Compute training metrics
-        for metric in self.metrics:
-            value = metric.compute()
-            metric_name = metric.__class__.__name__
-            print(f"  {self.prefix_train}/{metric_name}: {value:.4f}")
-
-        # Compute validation metrics if we have validation data
-        if self.val_preds:
-            # Reset metrics and compute on validation data
-            for metric in self.metrics:
-                metric.reset()
-                preds = torch.cat(self.val_preds)
-                targets = torch.cat(self.val_targets)
-                metric.update(preds, targets)
-
-                value = metric.compute()
-                metric_name = metric.__class__.__name__
-                print(f"  {self.prefix_val}/{metric_name}: {value:.4f}")
+        """No-op: metrics are written to state incrementally in on_eval_batch_end."""
 
 
 class StepSpeedHook(ScalarHook):
@@ -1177,26 +1155,25 @@ class Log(BaseHook):
         self.every_n_steps = every_n_steps
         self.keys = _collect_keys(keys)
         self.fmt = fmt
-        self._since_last_print = 0
 
     def _columns(self) -> list[str]:
         return ["step", "epoch", *self.keys]
 
     def on_train_start(self, trainer, state):
-        self._since_last_print = 0
         width = _parse_fmt_width(self.fmt)
         header = " ".join(f"{c:>{width}}" for c in self._columns())
         print(header, flush=True)
 
     def on_train_batch_end(self, trainer, state, batch, outputs):
-        self._since_last_print += 1
-        if self._since_last_print < self.every_n_steps:
+        # global_step is incremented *after* this hook fires, so add 1 to get
+        # the 1-based step number and trigger at clean multiples (10, 20, 30…).
+        step = int(state.get("global_step", 0)) + 1
+        if step % self.every_n_steps != 0:
             return
-        self._since_last_print = 0
 
         width = _parse_fmt_width(self.fmt)
         parts = [
-            f"{int(state.get('global_step', 0)):>{width}d}",
+            f"{step:>{width}d}",
             f"{int(state.get('epoch', 0)):>{width}d}",
         ]
         for key in self.keys:

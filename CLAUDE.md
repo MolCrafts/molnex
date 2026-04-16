@@ -47,8 +47,8 @@ GraphBatch (batch_size=[])
 │   ├── pos: positions (N, 3)
 │   └── batch: graph membership (N,)
 ├── "edges": EdgeData (batch_size=[E])
-│   ├── edge_index: source-target pairs (E, 2)
-│   ├── bond_diff: edge vectors (E, 3)
+│   ├── edge_index: source-target pairs (E, 2)   # [:,0]=source, [:,1]=target
+│   ├── bond_diff: edge vectors (E, 3)            # pos[target] - pos[source]
 │   └── bond_dist: edge distances (E,)
 └── "graphs": GraphData (batch_size=[B])  [optional]
     ├── num_atoms: (B,)
@@ -56,6 +56,25 @@ GraphBatch (batch_size=[])
 ```
 
 Access: `batch["atoms", "Z"]`, `batch["edges", "bond_dist"]`. Encoder outputs extend via inheritance: `NodeRepAtoms` adds `node_features`, `EdgeRepEdges` adds `edge_features`.
+
+### Edge Convention (MUST follow everywhere)
+
+```
+edge_index[:, 0]  — source atom  (the "centre" in Allegro; the "sender" in MACE ConvTP)
+edge_index[:, 1]  — target atom  (the "neighbour" in Allegro; the "receiver" in MACE ConvTP)
+bond_diff         — pos[target] - pos[source]   (displacement vector, source → target)
+bond_dist         — ‖bond_diff‖
+```
+
+`NeighborList` defaults to **full bidirectional** edges (`symmetry=True`, `E = 2 × n_pairs`).
+Pass `symmetry=False` to get only the upper-triangle half-pairs (`E = n_pairs`) when you explicitly
+want to exploit Newton's-3rd-law symmetry.  The two modes produce different `task_id`s so pipeline
+caches are kept separate.
+
+**Why bond_diff = pos[target] − pos[source]?**  This makes the displacement vector point in the
+same direction as the edge (source → target), which is the convention expected by `SphericalHarmonics`
+and all `cuEquivariance`-based tensor products in this repo.  The C++ `getNeighborPairs` kernel
+returns `pos[rows] − pos[cols]` (opposite sign); `NeighborList.execute` negates it.
 
 ### Module Dependency Graph
 

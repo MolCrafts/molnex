@@ -42,15 +42,18 @@ class DefaultTrainStep:
         batch: Any,
     ) -> dict[str, Any]:
         """Execute training batch computation."""
-        from molix.core.steps import extract_model_inputs
+        from molix.core.steps import batch_to_device, extract_model_inputs
 
         assert trainer.model is not None, "trainer.model must be set"
         assert trainer.loss_fn is not None, "trainer.loss_fn must be set"
         assert trainer.optimizer is not None, "trainer.optimizer must be set"
 
-        device_type = next(trainer.model.parameters()).device.type
+        model_device = next(trainer.model.parameters()).device
+        device_type = model_device.type
         amp_enabled = bool(config["use_amp"])
         amp_dtype = config["amp_dtype"]
+
+        batch = batch_to_device(batch, model_device)
 
         ctx = (
             torch.amp.autocast(device_type, dtype=amp_dtype)
