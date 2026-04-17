@@ -21,9 +21,12 @@ class DataSource(Protocol):
 
     @property
     def source_id(self) -> str:
-        """Unique, deterministic identifier for cache key computation.
+        """Unique, deterministic, cheap identifier for cache key computation.
 
-        Must be stable across runs for the same data.
+        This is a source-declared semantic/version identity, not an automatic
+        content hash. The pipeline treats it as opaque and folds it into the
+        cache key; callers are responsible for bumping it when they want cache
+        invalidation after raw-data changes.
         """
         ...
 

@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from molix.data import MmapDataset, Pipeline
+from molix.datasets import qm9 as qm9_mod
 from molix.datasets.qm9 import QM9Source
 
 
@@ -95,6 +96,15 @@ class TestQM9SourceDownload:
 
 
 class TestQM9Source:
+    def test_source_id_does_not_load_raw_samples(self, fake_qm9_root, monkeypatch):
+        def fail_load_raw(root, total):  # noqa: ARG001
+            raise AssertionError("_load_raw should not run when only source_id is used")
+
+        monkeypatch.setattr(qm9_mod, "_load_raw", fail_load_raw)
+        src = QM9Source(fake_qm9_root, download=False)
+        source_id = src.source_id
+        assert source_id.startswith("qm9:v2:")
+
     def test_basic_indexing(self, fake_qm9_root):
         src = QM9Source(fake_qm9_root, download=False)
         assert len(src) == 3
@@ -137,6 +147,12 @@ class TestQM9Source:
         a = QM9Source(fake_qm9_root, download=False, targets=["gap", "U0"]).source_id
         b = QM9Source(fake_qm9_root, download=False, targets=["U0", "gap"]).source_id
         assert a == b
+
+    def test_source_id_reflects_total_parameter(self, fake_qm9_root):
+        full = QM9Source(fake_qm9_root, download=False).source_id
+        partial = QM9Source(fake_qm9_root, download=False, total=2).source_id
+        assert full != partial
+        assert "total=2" in partial
 
 
 class TestQM9SourceWithMaterialize:

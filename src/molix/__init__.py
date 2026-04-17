@@ -37,6 +37,29 @@ def _load_ops_library() -> None:
     _lib_loaded = True
 
 
+def ensure_op_registered(op_name: str) -> None:
+    """Ensure a named ``torch.ops.molix`` op is registered in this process.
+
+    This is a defensive helper for editable installs, worker subprocesses,
+    and import paths that reach ``molix.F`` modules before callers have
+    imported the top-level ``molix`` package explicitly.
+    """
+    _load_ops_library()
+    if hasattr(torch.ops.molix, op_name):
+        return
+
+    candidate = Path(__file__).resolve().parents[0] / "op"
+    raise RuntimeError(
+        f"molix native op 'molix::{op_name}' is not registered after loading "
+        f"the native library from {candidate}. "
+        "The shared library is likely stale relative to the Python sources. "
+        "Rebuild it with:\n"
+        f"  cmake -S {candidate} -B {candidate}/build -DMOLNEX_OP_ENABLE_CUDA=ON\n"
+        f"  cmake --build {candidate}/build -j\n"
+        "(drop -DMOLNEX_OP_ENABLE_CUDA=ON for CPU-only builds.)"
+    )
+
+
 _load_ops_library()
 
 from molix import logger, logging

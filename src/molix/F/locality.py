@@ -7,6 +7,7 @@ tensors and forward to ``torch.ops.molix.*``.
 
 from __future__ import annotations
 
+from molix import ensure_op_registered
 from torch import Tensor, empty, ops
 
 
@@ -35,6 +36,8 @@ def get_neighbor_pairs(
         ``distances`` is ``(max_num_pairs,)``, and ``num_pairs`` is a 1-elem
         int32 tensor holding the actual count within cutoff.
     """
+    ensure_op_registered("get_neighbor_pairs")
+
     if box_vectors is None:
         box_vectors = empty((0, 0), device=positions.device, dtype=positions.dtype)
 

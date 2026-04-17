@@ -212,7 +212,7 @@ class QM9Source:
         targets: list[str] | tuple[str, ...] | None = None,
         download: bool = True,
     ) -> None:
-        self.root = Path(root)
+        self.root = Path(root).expanduser().resolve()
 
         if targets is not None:
             kept = frozenset(targets)
@@ -223,24 +223,35 @@ class QM9Source:
                     f"Available: {sorted(_QM9_GRAPH_TARGETS)}"
                 )
             self._targets: tuple[str, ...] | None = tuple(sorted(kept))
-            kept_set = kept
         else:
             self._targets = None
-            kept_set = _QM9_GRAPH_TARGETS
+        self._samples: list[dict] | None = None
+        self._total = total
 
         if download:
             _ensure_downloaded(self.root)
-        elif not (self.root / "qm9.tar.bz2").exists():
-            raise FileNotFoundError(
-                f"QM9 tarball not found at {self.root / 'qm9.tar.bz2'}. "
-                "Set download=True or call QM9Source.download() first."
-            )
+        else:
+            tarball = self.root / "qm9.tar.bz2"
+            exclude_file = self.root / "qm9_exclude.txt"
+            if not tarball.exists():
+                raise FileNotFoundError(
+                    f"QM9 tarball not found at {tarball}. "
+                    "Set download=True or call QM9Source.download() first."
+                )
+            if not exclude_file.exists():
+                raise FileNotFoundError(
+                    f"QM9 exclusion list not found at {exclude_file}. "
+                    "Set download=True or call QM9Source.download() first."
+                )
 
-        samples = _load_raw(self.root, total)
+    def _ensure_samples_loaded(self) -> None:
+        if self._samples is not None:
+            return
+        samples = _load_raw(self.root, self._total)
         if self._targets is not None:
-            samples = [_filter_targets(s, kept_set) for s in samples]
+            kept = frozenset(self._targets)
+            samples = [_filter_targets(s, kept) for s in samples]
         self._samples = samples
-        self._total = total
 
     # -- Idempotent raw-file downloader ------------------------------------
 
@@ -261,13 +272,19 @@ class QM9Source:
 
     @property
     def source_id(self) -> str:
-        parts = [f"qm9:v1:n={len(self._samples)}"]
+        parts = [f"qm9:root={self.root}"]
+        if self._total is not None:
+            parts.append(f"total={self._total}")
         if self._targets is not None:
             parts.append(f"targets={'+'.join(self._targets)}")
         return ":".join(parts)
 
     def __len__(self) -> int:
+        self._ensure_samples_loaded()
+        assert self._samples is not None
         return len(self._samples)
 
     def __getitem__(self, idx: int) -> Sample:
+        self._ensure_samples_loaded()
+        assert self._samples is not None
         return self._samples[idx]
