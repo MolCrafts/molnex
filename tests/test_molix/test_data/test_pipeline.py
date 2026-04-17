@@ -1,336 +1,224 @@
-"""Tests for PipelineSpec / Pipeline.
+"""Tests for the declarative PipelineSpec and Pipeline builder.
 
-Pipeline is a pure transform; it has no scheduling knobs
-(``workspace`` / ``cache_dir`` / ``cache_identity``). These tests cover:
-
-* ``transform(sample)`` — per-sample application
-* ``run(source)`` — single-pass iteration semantics, DatasetTask.fit flow
-* ``materialize(source, sink=...)`` — integration with the standard cache
-  format (including task_states round-trip through
-  :class:`MmapDataset.from_cache`)
-* Pipeline public API must not expose any scheduling concept
+Pipeline is now a pure data structure — no execution, no IO, no caching.
+Those concerns live in :mod:`molix.data.execute` and :mod:`molix.data.cache`
+and are tested separately.
 """
 
 from __future__ import annotations
 
-from typing import Any
+import inspect
 
 import pytest
 import torch
 
-from molix.data.dataset import MmapDataset
-from molix.data.pipeline import Pipeline, PipelineSpec
-from molix.data.source import InMemorySource
-from molix.data.task import DatasetTask, SampleTask
+from molix.data.pipeline import Pipeline, PipelineSpec, TaskEntry
+from molix.data.task import BatchTask, DatasetTask, SampleTask
 
 
 # ---------------------------------------------------------------------------
-# Helpers: tiny instrumented tasks
+# Stub tasks for identity / grouping tests
 # ---------------------------------------------------------------------------
 
 
-class CountingSample(SampleTask):
-    """Adds a counter; counts how many times execute() was called."""
-
-    def __init__(self, name: str = "counter") -> None:
+class _Sample(SampleTask):
+    def __init__(self, name: str = "s") -> None:
         self._name = name
-        self.calls = 0
 
     @property
     def task_id(self) -> str:
-        return f"counting:{self._name}"
+        return f"sample:{self._name}"
 
     def execute(self, data: dict) -> dict:
-        self.calls += 1
         return {**data, self._name: True}
 
 
-class MeanShift(DatasetTask):
-    """Fit the mean of a target across samples, subtract on execute."""
-
+class _Dataset(DatasetTask):
     def __init__(self, key: str = "y") -> None:
         self.key = key
-        self.mean = 0.0
-        self.fit_calls = 0
-        self.exec_calls = 0
 
     @property
     def task_id(self) -> str:
-        return f"mean_shift:{self.key}"
+        return f"dataset:{self.key}"
 
-    def fit(self, samples: list[dict]) -> None:
-        self.fit_calls += 1
-        ys = [float(s[self.key].item()) for s in samples]
-        self.mean = sum(ys) / len(ys)
+    def fit(self, samples: list[dict]) -> None: ...
 
     def execute(self, data: dict) -> dict:
-        self.exec_calls += 1
-        return {**data, self.key: data[self.key] - self.mean}
-
-    def state_dict(self) -> dict[str, Any]:
-        return {"mean": torch.tensor(self.mean, dtype=torch.float64)}
-
-    def load_state_dict(self, state: dict[str, Any]) -> None:
-        self.mean = float(state["mean"].item())
+        return data
 
 
-def _samples(n: int = 8) -> list[dict]:
-    return [
-        {"Z": torch.tensor([1, 6]), "pos": torch.zeros(2, 3),
-         "y": torch.tensor([float(i)])}
-        for i in range(n)
-    ]
+class _Batch(BatchTask):
+    def __init__(self, name: str = "b") -> None:
+        self._name = name
+
+    @property
+    def task_id(self) -> str:
+        return f"batch:{self._name}"
+
+    def execute(self, data: dict) -> dict:
+        return data
 
 
 # ---------------------------------------------------------------------------
-# transform (per-sample)
+# Builder DSL
 # ---------------------------------------------------------------------------
 
 
-class TestTransform:
-    def test_applies_prepare_tasks_in_order(self):
-        counter = CountingSample("a")
-        spec = Pipeline("p").add(counter).build()
-        out = spec.transform({"y": torch.tensor([0.0])})
-        assert out["a"] is True
-        assert counter.calls == 1
+class TestBuilder:
+    def test_add_returns_self_for_chaining(self):
+        p = Pipeline("x")
+        assert p.add(_Sample()) is p
 
-    def test_skips_batch_tasks(self):
-        """transform must only apply prepare tasks; BatchTasks are post-collate."""
-        from molix.data.task import BatchTask
+    def test_add_task_instance(self):
+        spec = Pipeline("p").add(_Sample("foo")).build()
+        assert len(spec.tasks) == 1
+        assert spec.tasks[0].task.task_id == "sample:foo"
 
-        class NoopBatch(BatchTask):
-            def __init__(self):
-                self.calls = 0
+    def test_add_bare_callable(self):
+        spec = Pipeline("p").add(lambda s: s, name="noop").build()
+        assert spec.tasks[0].name == "noop"
 
-            def execute(self, data: dict) -> dict:
-                self.calls += 1
-                return data
+    def test_decorator_task(self):
+        p = Pipeline("p")
 
-        counter = CountingSample("a")
-        batch = NoopBatch()
-        spec = Pipeline("p").add(counter).add(batch).build()
-        spec.transform({"y": torch.tensor([0.0])})
-        assert counter.calls == 1
-        assert batch.calls == 0
+        @p.task
+        def add_tag(s: dict) -> dict:
+            return {**s, "tag": True}
 
+        spec = p.build()
+        assert spec.tasks[0].name == "add_tag"
 
-# ---------------------------------------------------------------------------
-# run (single-pass iteration over source)
-# ---------------------------------------------------------------------------
+    def test_decorator_with_explicit_name(self):
+        p = Pipeline("p")
 
+        @p.task(name="custom")
+        def _f(s: dict) -> dict:
+            return s
 
-class TestRun:
-    def test_sample_task_runs_once_per_sample(self):
-        src = InMemorySource(_samples(10))
-        counter = CountingSample()
-        spec = Pipeline("p").add(counter).build()
-        out = list(spec.run(src))
-        assert len(out) == 10
-        assert counter.calls == 10
+        spec = p.build()
+        assert spec.tasks[0].name == "custom"
 
-    def test_dataset_task_fit_called_once_on_full_source(self):
-        src = InMemorySource(_samples(8))
-        shift = MeanShift("y")
-        spec = Pipeline("p").add(shift).build()
-        list(spec.run(src))
-        assert shift.fit_calls == 1
-        assert shift.exec_calls == 8  # one execute per sample
-
-    def test_fit_source_scopes_fit_to_subset(self):
-        src = InMemorySource(_samples(10))          # y = 0..9
-        fit_src = InMemorySource(_samples(5))       # y = 0..4, mean = 2.0
-        shift = MeanShift("y")
-        spec = Pipeline("p").add(shift).build()
-        list(spec.run(src, fit_source=fit_src))
-        assert shift.fit_calls == 1
-        assert abs(shift.mean - 2.0) < 1e-9
-
-    def test_returns_iterator(self):
-        """run() is a generator — not eagerly materialized internally except
-        where fit() forces it."""
-        import types
-
-        src = InMemorySource(_samples(3))
-        spec = Pipeline("p").add(CountingSample()).build()
-        it = spec.run(src)
-        assert isinstance(it, types.GeneratorType)
+    def test_rejects_non_task_non_callable(self):
+        with pytest.raises(TypeError, match="Task"):
+            Pipeline("p").add(42)    # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
-# materialize (run + write standard cache format)
+# Grouping
 # ---------------------------------------------------------------------------
 
 
-class TestMaterialize:
-    def test_writes_standard_cache_layout(self, tmp_path):
-        src = InMemorySource(_samples(4))
-        spec = Pipeline("p").add(CountingSample()).build()
-        sink = tmp_path / "asset"
-        spec.materialize(src, sink=sink)
+class TestGrouping:
+    def test_prepare_tasks_include_sample_and_dataset(self):
+        spec = (
+            Pipeline("p")
+            .add(_Sample())
+            .add(_Dataset())
+            .add(_Batch())
+            .build()
+        )
+        assert len(spec.prepare_tasks) == 2
+        assert len(spec.batch_tasks) == 1
 
-        assert (sink / "_READY").exists()
-        assert (sink / "meta.json").exists()
-        assert (sink / "samples.bin").exists()
-        assert (sink / "samples.idx").exists()
+    def test_plain_callable_counts_as_prepare(self):
+        spec = Pipeline("p").add(lambda s: s, name="noop").build()
+        assert len(spec.prepare_tasks) == 1
+        assert len(spec.batch_tasks) == 0
 
-    def test_meta_records_ids(self, tmp_path):
-        src = InMemorySource(_samples(4), name="src-a")
-        spec = Pipeline("p").add(MeanShift("y")).build()
-        sink = tmp_path / "asset"
-        spec.materialize(src, sink=sink)
-
-        import json
-        meta = json.loads((sink / "meta.json").read_text())
-        assert meta["pipeline_id"] == spec.pipeline_id
-        assert meta["source_id"] == src.source_id
-        assert meta["fit_source_id"] == src.source_id
-        assert meta["pipeline_spec"]["name"] == "p"
-
-    def test_roundtrip_via_from_cache(self, tmp_path):
-        src = InMemorySource(_samples(6))           # y = 0..5, mean = 2.5
-        spec = Pipeline("p").add(MeanShift("y")).build()
-        sink = tmp_path / "asset"
-        spec.materialize(src, sink=sink)
-
-        ds = MmapDataset.from_cache(sink)
-        assert len(ds) == 6
-        # Cached samples should have had the mean subtracted.
-        assert abs(float(ds[0]["y"].item()) - (-2.5)) < 1e-6
-
-    def test_task_states_roundtrip(self, tmp_path):
-        """DatasetTask.state_dict is captured into the cache and restorable
-        via MmapDataset.from_cache().get_task_state()."""
-        src = InMemorySource(_samples(6))           # mean = 2.5
-        spec = Pipeline("p").add(MeanShift("y")).build()
-        sink = tmp_path / "asset"
-        spec.materialize(src, sink=sink)
-
-        ds = MmapDataset.from_cache(sink)
-        # entry name defaults to task.task_id when add() is called without name=
-        state = ds.get_task_state("mean_shift:y")
-        assert abs(float(state["mean"].item()) - 2.5) < 1e-9
-
-    def test_idempotent_noop_when_ready(self, tmp_path):
-        src = InMemorySource(_samples(4))
-        shift1 = MeanShift("y")
-        spec1 = Pipeline("p").add(shift1).build()
-        sink = tmp_path / "asset"
-        spec1.materialize(src, sink=sink)
-        assert shift1.exec_calls == 4
-
-        # Second call on a ready sink must not invoke fit/execute.
-        shift2 = MeanShift("y")
-        spec2 = Pipeline("p").add(shift2).build()
-        spec2.materialize(src, sink=sink)
-        assert shift2.fit_calls == 0
-        assert shift2.exec_calls == 0
-
-    def test_overwrite_rewrites(self, tmp_path):
-        src = InMemorySource(_samples(4))
-        spec = Pipeline("p").add(CountingSample()).build()
-        sink = tmp_path / "asset"
-        spec.materialize(src, sink=sink)
-        spec.materialize(src, sink=sink, overwrite=True)
-        ds = MmapDataset.from_cache(sink)
-        assert len(ds) == 4
-
-    def test_fit_source_recorded_in_meta(self, tmp_path):
-        src = InMemorySource(_samples(10), name="full")
-        fit_src = InMemorySource(_samples(5), name="fit-only")
-        spec = Pipeline("p").add(MeanShift("y")).build()
-        sink = tmp_path / "asset"
-        spec.materialize(src, sink=sink, fit_source=fit_src)
-
-        import json
-        meta = json.loads((sink / "meta.json").read_text())
-        assert meta["source_id"] == src.source_id
-        assert meta["fit_source_id"] == fit_src.source_id
+    def test_prepare_tasks_order_preserved(self):
+        a, b = _Sample("a"), _Sample("b")
+        spec = Pipeline("p").add(a).add(b).build()
+        assert [e.task for e in spec.prepare_tasks] == [a, b]
 
 
 # ---------------------------------------------------------------------------
-# pipeline_id / DSL invariants
+# pipeline_id determinism
 # ---------------------------------------------------------------------------
 
 
 class TestPipelineId:
     def test_stable_across_builds(self):
-        a = Pipeline("p").add(CountingSample("a")).add(MeanShift("y")).build()
-        b = Pipeline("p").add(CountingSample("a")).add(MeanShift("y")).build()
+        a = Pipeline("p").add(_Sample("a")).add(_Dataset("y")).build()
+        b = Pipeline("p").add(_Sample("a")).add(_Dataset("y")).build()
         assert a.pipeline_id == b.pipeline_id
 
-    def test_changes_with_task_order(self):
-        a = Pipeline("p").add(CountingSample("a")).add(MeanShift("y")).build()
-        b = Pipeline("p").add(MeanShift("y")).add(CountingSample("a")).build()
+    def test_task_order_changes_id(self):
+        a = Pipeline("p").add(_Sample("a")).add(_Dataset("y")).build()
+        b = Pipeline("p").add(_Dataset("y")).add(_Sample("a")).build()
         assert a.pipeline_id != b.pipeline_id
 
-    def test_changes_with_task_config(self):
-        a = Pipeline("p").add(MeanShift("y")).build()
-        b = Pipeline("p").add(MeanShift("z")).build()
+    def test_task_config_changes_id(self):
+        a = Pipeline("p").add(_Dataset("y")).build()
+        b = Pipeline("p").add(_Dataset("z")).build()
         assert a.pipeline_id != b.pipeline_id
+
+    def test_pipeline_name_changes_id(self):
+        a = Pipeline("a").build()
+        b = Pipeline("b").build()
+        assert a.pipeline_id != b.pipeline_id
+
+    def test_id_is_hex_and_short(self):
+        pid = Pipeline("p").add(_Sample()).build().pipeline_id
+        assert len(pid) == 16
+        int(pid, 16)
 
 
 # ---------------------------------------------------------------------------
-# Scheduling purity: PipelineSpec public API must not leak scheduling concepts
+# Scheduling purity: the spec must not expose any IO/cache/DDP concept.
 # ---------------------------------------------------------------------------
 
 
 class TestNoSchedulingConcepts:
-    """Design-constraint regression: pipeline does not embed scheduling state.
-
-    The pipeline owns no workspace/cache-directory concept — callers still
-    decide *where* the cache lives. :meth:`cache_identity` and
-    :meth:`is_cache_ready` are deliberately *not* listed as forbidden:
-    they are pure utility helpers (string / bool) that let the caller
-    choose a sink path.
-    """
-
-    FORBIDDEN = ("workspace", "cache_dir", "name_hint")
+    FORBIDDEN = (
+        "materialize", "cache_identity", "is_cache_ready", "run", "transform",
+        "save", "load", "write_cache", "from_cache", "from_samples",
+        "collect_task_states",
+    )
 
     def test_no_forbidden_attributes(self):
-        spec = Pipeline("p").add(CountingSample()).build()
+        spec = Pipeline("p").add(_Sample()).build()
         for name in self.FORBIDDEN:
-            assert not hasattr(spec, name), f"pipeline leaks {name!r}"
+            assert not hasattr(spec, name), f"PipelineSpec leaks {name!r}"
 
-    def test_materialize_has_no_forbidden_kwargs(self):
-        import inspect
-
-        params = inspect.signature(PipelineSpec.materialize).parameters
-        for name in self.FORBIDDEN:
-            assert name not in params, (
-                f"materialize() has forbidden kwarg {name!r}; "
-                "cache placement is a caller concern"
-            )
-
-    def test_run_has_no_forbidden_kwargs(self):
-        import inspect
-
-        params = inspect.signature(PipelineSpec.run).parameters
-        for name in self.FORBIDDEN:
-            assert name not in params
+    def test_public_surface(self):
+        """PipelineSpec exposes only declarative accessors."""
+        public = {
+            n for n in dir(PipelineSpec)
+            if not n.startswith("_")
+        }
+        assert public == {"name", "pipeline_id", "tasks", "prepare_tasks",
+                          "batch_tasks", "to_dict"}
 
 
 # ---------------------------------------------------------------------------
-# DDP rank guard on materialize
+# to_dict
 # ---------------------------------------------------------------------------
 
 
-class TestMaterializeRankGuard:
-    def test_rank_nonzero_polls_for_ready(self, tmp_path, monkeypatch):
-        src = InMemorySource(_samples(3))
-        spec = Pipeline("p").add(CountingSample()).build()
-        sink = tmp_path / "asset"
-        sink.mkdir()
-        (sink / "_READY").write_text("")    # pre-existing
+class TestToDict:
+    def test_contains_task_names_and_types(self):
+        spec = (
+            Pipeline("p")
+            .add(_Sample("a"))
+            .add(_Batch("b"))
+            .build()
+        )
+        d = spec.to_dict()
+        assert d["name"] == "p"
+        assert d["pipeline_id"] == spec.pipeline_id
+        names = [t["name"] for t in d["tasks"]]
+        types = [t["type"] for t in d["tasks"]]
+        assert names == ["sample:a", "batch:b"]
+        assert types == ["_Sample", "_Batch"]
 
-        monkeypatch.setenv("RANK", "1")
-        # Should return immediately without calling write_cache.
-        spec.materialize(src, sink=sink, wait_timeout=1.0)
 
-    def test_rank_nonzero_times_out_without_ready(self, tmp_path, monkeypatch):
-        src = InMemorySource(_samples(3))
-        spec = Pipeline("p").add(CountingSample()).build()
-        sink = tmp_path / "asset"
-        monkeypatch.setenv("RANK", "1")
-        with pytest.raises(TimeoutError, match="_READY"):
-            spec.materialize(src, sink=sink, wait_timeout=0.5)
+# ---------------------------------------------------------------------------
+# TaskEntry is immutable (catches accidental mutation of shared specs)
+# ---------------------------------------------------------------------------
+
+
+class TestTaskEntryImmutability:
+    def test_is_frozen(self):
+        e = TaskEntry(name="x", task=_Sample())
+        with pytest.raises(Exception):    # FrozenInstanceError or AttributeError
+            e.name = "y"                  # type: ignore[misc]

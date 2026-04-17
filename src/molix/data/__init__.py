@@ -1,6 +1,21 @@
 """Data pipeline for molecular ML.
 
-Simple by default. Complex workflows → use molexp.
+Layering:
+    task     — Task / SampleTask / DatasetTask / BatchTask (transform primitives).
+    source   — DataSource protocol + in-memory and subset sources.
+    pipeline — declarative container: what tasks to run, in what order, with
+               what identity.
+    execute  — run(), transform(), collect_task_states(): executes a pipeline.
+    cache    — cache(), cache_key(), is_ready(), save(), load(): short-lived
+               scratch cache of pipeline output.
+    ddp      — rank(), wait_for_ready(): opt-in distributed coordination.
+    dataset  — MmapDataset, CachedDataset, SubsetDataset: readers over cache
+               files.
+
+``execute`` / ``cache`` / ``ddp`` are *sub-module imports* — they belong to
+the workflow layer and are kept off the top-level export surface to keep
+``from molix.data import *`` focused on the pieces every training script
+needs.
 """
 
 # Task hierarchy
@@ -12,19 +27,18 @@ from molix.data.task import (
     Task,
 )
 
-# Pipeline DSL
-from molix.data.pipeline import Pipeline, PipelineSpec
-
 # Built-in tasks
 from molix.data.tasks import AtomicDress, NeighborList
 
 # Data sources
 from molix.data.source import DataSource, InMemorySource, SubsetSource
 
+# Pipeline DSL
+from molix.data.pipeline import Pipeline, PipelineSpec, TaskEntry
+
 # Dataset classes
 from molix.data.dataset import (
     BaseDataset,
-    CacheValidationError,
     CachedDataset,
     MmapDataset,
     SubsetDataset,
@@ -34,7 +48,11 @@ from molix.data.dataset import (
 from molix.data.datamodule import DataModule, DataModuleProtocol
 
 # Collation
-from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
+from molix.data.collate import (
+    DEFAULT_TARGET_SCHEMA,
+    TargetSchema,
+    collate_molecules,
+)
 
 # Types
 from molix.data.types import (
@@ -53,9 +71,6 @@ __all__ = [
     "DatasetTask",
     "BatchTask",
     "Runnable",
-    # Pipeline
-    "Pipeline",
-    "PipelineSpec",
     # Built-in tasks
     "NeighborList",
     "AtomicDress",
@@ -63,12 +78,15 @@ __all__ = [
     "DataSource",
     "InMemorySource",
     "SubsetSource",
+    # Pipeline
+    "Pipeline",
+    "PipelineSpec",
+    "TaskEntry",
     # Dataset classes
     "BaseDataset",
     "CachedDataset",
     "MmapDataset",
     "SubsetDataset",
-    "CacheValidationError",
     # DataModule
     "DataModule",
     "DataModuleProtocol",

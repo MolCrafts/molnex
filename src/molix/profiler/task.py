@@ -7,7 +7,7 @@ or BatchTask) in complete isolation.  Accepts either a
 
 For :class:`~molix.data.task.DatasetTask`, a ``fit()`` call is made on the
 provided source before timing begins (mirroring what
-:meth:`~molix.data.pipeline.PipelineSpec.prepare` does).
+:func:`~molix.data.execute.run` does).
 
 Example::
 
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from molix.data.pipeline import _call_task
+from molix.data.execute import call_task
 from molix.data.task import DatasetTask
 from molix.profiler._utils import Timer, TimingStat, _fmt_table
 
@@ -139,7 +139,7 @@ class TaskProfiler:
             idx = i % n_source
             sample = source[idx]  # type: ignore[index]
             with Timer() as t:
-                _call_task(self.task, sample)
+                call_task(self.task, sample)
             if i >= n_warmup:
                 times_ms.append(t.elapsed * 1000)
 

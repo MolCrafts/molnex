@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import Protocol, runtime_checkable
 
 import torch.distributed as dist
@@ -10,7 +10,8 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
 from molix.data.dataset import BaseDataset
-from molix.data.pipeline import TaskEntry, _call_task
+from molix.data.execute import call_task
+from molix.data.pipeline import TaskEntry
 
 
 # ---------------------------------------------------------------------------
@@ -59,8 +60,9 @@ class DataModule:
 
     Usage::
 
-        pipe.materialize(source, sink=cache_path)
-        ds = MmapDataset.from_cache(cache_path)
+        from molix.data.cache import cache
+        cache(pipe, source, sink=cache_path, fit_source=train_source)
+        ds = MmapDataset(cache_path)
         train_ds, val_ds = ds.split(ratio=0.8)
         dm = DataModule(train_ds, val_ds,
                         target_schema=QM9Source.TARGET_SCHEMA,
@@ -87,7 +89,7 @@ class DataModule:
         val_dataset: BaseDataset,
         *,
         target_schema: TargetSchema | None = None,
-        batch_tasks: list[TaskEntry] | None = None,
+        batch_tasks: Sequence[TaskEntry] | None = None,
         batch_size: int = 32,
         num_workers: int = 0,
         pin_memory: bool = True,
@@ -102,7 +104,7 @@ class DataModule:
         if target_schema is None:
             target_schema = getattr(train_dataset, "target_schema", DEFAULT_TARGET_SCHEMA)
         self.target_schema = target_schema
-        self.batch_tasks: list[TaskEntry] = batch_tasks or []
+        self.batch_tasks: tuple[TaskEntry, ...] = tuple(batch_tasks) if batch_tasks else ()
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
@@ -193,12 +195,14 @@ class _CollateFn:
     A plain closure (local function) is not picklable; a top-level class is.
     """
 
-    def __init__(self, schema: TargetSchema, batch_tasks: list[TaskEntry]) -> None:
+    def __init__(
+        self, schema: TargetSchema, batch_tasks: Sequence[TaskEntry]
+    ) -> None:
         self.schema = schema
         self.batch_tasks = batch_tasks
 
     def __call__(self, samples: list[dict]) -> dict:
         batch = collate_molecules(samples, self.schema)
         for entry in self.batch_tasks:
-            batch = _call_task(entry.task, batch)
+            batch = call_task(entry.task, batch)
         return batch

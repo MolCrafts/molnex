@@ -4,20 +4,26 @@ Reference:
     Ramakrishnan et al. "Quantum chemistry structures and properties of 134 kilo molecules"
     Scientific Data 1, 140022 (2014). https://doi.org/10.1038/sdata.2014.22
 
-Usage pattern (new API)::
+Usage pattern::
 
-    from molix.data import Pipeline, AtomicDress, NeighborList, MmapDataset
+    from molix.data import Pipeline, AtomicDress, NeighborList, MmapDataset, SubsetSource
+    from molix.data.cache import cache, cache_key, is_ready
     from molix.datasets import QM9Source
 
-    # 1. Workflow-side: materialize once into a shared cache directory.
-    QM9Source.download(data_dir)                 # optional; constructor does it lazily
+    # 1. Workflow-side: build the pipeline cache once per run.
+    QM9Source.download(data_dir)                 # constructor does this lazily too
     source = QM9Source(data_dir)
-    pipe = Pipeline("qm9").add(...).build()
-    pipe.materialize(source, sink=cache_path)
+    train = SubsetSource(source, train_idx)       # split first!
+    pipe = Pipeline("qm9").add(AtomicDress(...)).add(NeighborList(...)).build()
+
+    sink = run_dir / "cache" / f"{pipe.name}.pt"
+    if not is_ready(sink):
+        cache(pipe, source, sink=sink, fit_source=train)
 
     # 2. Training-side: zero pipeline work, just read.
-    ds = MmapDataset.from_cache(cache_path)
-    dm = DataModule(*ds.split(ratio=0.8),
+    ds = MmapDataset(sink)
+    dm = DataModule(SubsetDataset(ds, train_idx),
+                    SubsetDataset(ds, val_idx),
                     target_schema=QM9Source.TARGET_SCHEMA, ...)
 """
 
@@ -174,8 +180,8 @@ class QM9Source:
 
     A :class:`QM9Source` is the "dataset" layer in the molix separation: it
     only knows where raw data lives and how to index it. Preprocessing,
-    caching, and DataLoader behavior are layered on top via a pipeline
-    (``pipe.materialize(source, sink=...)``) and :class:`MmapDataset.from_cache`.
+    caching, and DataLoader behavior are layered on top via
+    :func:`molix.data.cache.cache` and :class:`MmapDataset`.
 
     Args:
         root: Directory for the raw QM9 tarball (downloaded on first use).
@@ -186,9 +192,9 @@ class QM9Source:
             offline / test environments.
 
     Attributes:
-        source_id: Stable identifier used by
-            :meth:`PipelineSpec.cache_identity` and recorded in the cache
-            ``meta.json``.
+        source_id: Stable identifier folded into
+            :func:`molix.data.cache.cache_key` so that caches invalidate on
+            a raw-data change.
 
     Class attributes:
         TARGET_SCHEMA: :class:`TargetSchema` covering every scalar target

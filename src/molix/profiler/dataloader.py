@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from torch.utils.data import DataLoader, Dataset
 
@@ -269,17 +270,28 @@ class DataLoaderProfiler:
     # -- Helpers ----------------------------------------------------------------
 
     def _source_to_dataset(self, source: object) -> Dataset:
-        """Convert a DataSource to a CachedDataset of plain sample dicts."""
+        """Convert a DataSource to a CachedDataset of plain sample dicts.
+
+        Writes the samples to a process-temp file so that the profiler
+        exercises the same code path real workflows do (cache file →
+        CachedDataset).
+        """
+        import tempfile
+
+        from molix.data.cache import save
+
         n = len(source)  # type: ignore[arg-type]
         samples = [source[i] for i in range(n)]  # type: ignore[index]
-        return CachedDataset(samples)
+        tmp_file = Path(tempfile.mkdtemp(prefix="molix_profiler_")) / "samples.pt"
+        save(tmp_file, samples)
+        return CachedDataset(tmp_file)
 
     def _make_dataloader(self, dataset: Dataset) -> DataLoader:
         schema = self.target_schema
         pipeline = self.pipeline
 
         def collate_fn(batch_samples: list[dict]) -> object:
-            from molix.data.pipeline import _call_task as _ct
+            from molix.data.execute import call_task as _ct
             batch = collate_molecules(batch_samples, schema)
             if pipeline is not None:
                 for entry in pipeline.batch_tasks:

@@ -1,4 +1,4 @@
-"""Tests for QM9Source + integration with pipeline.materialize.
+"""Tests for QM9Source + integration with the cache() workflow.
 
 Uses a synthetic QM9 tarball placed in tmp_path to avoid network downloads.
 """
@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from molix.data import MmapDataset, Pipeline
+from molix.data.cache import cache
 from molix.datasets import qm9 as qm9_mod
 from molix.datasets.qm9 import QM9Source
 
@@ -155,19 +156,18 @@ class TestQM9Source:
         assert "total=2" in partial
 
 
-class TestQM9SourceWithMaterialize:
-    """End-to-end: QM9Source → pipeline.materialize → MmapDataset.from_cache."""
+class TestQM9SourceWithCache:
+    """End-to-end: QM9Source → cache() → MmapDataset."""
 
-    def test_materialize_roundtrip(self, fake_qm9_root, tmp_path):
+    def test_cache_roundtrip(self, fake_qm9_root, tmp_path):
         src = QM9Source(fake_qm9_root, download=False, targets=["U0"])
         spec = Pipeline("qm9-test").build()       # no-op pipeline
-        sink = tmp_path / "prepared"
+        sink = tmp_path / "prepared.pt"
 
-        spec.materialize(src, sink=sink)
-        ds = MmapDataset.from_cache(sink)
+        cache(spec, src, sink=sink)
+        ds = MmapDataset(sink)
 
         assert len(ds) == 3
-        assert ds.meta["source_id"] == src.source_id
         # U0 targets survive the round-trip
         u0s = sorted(float(ds[i]["targets"]["U0"].item()) for i in range(3))
         assert u0s == [1.0, 2.0, 3.0]

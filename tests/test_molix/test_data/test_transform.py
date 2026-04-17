@@ -115,7 +115,7 @@ class TestPipeline:
         pipe.add(lambda s: {**s, "extra": 1}, name="extra")
 
         spec = pipe.build()
-        assert len(spec.entries) == 3
+        assert len(spec.tasks) == 3
         assert spec.pipeline_id  # non-empty hash
 
     def test_isinstance_dispatch(self):
