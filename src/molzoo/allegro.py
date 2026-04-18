@@ -28,6 +28,8 @@ Reference:
 
 from __future__ import annotations
 
+import math
+
 import cuequivariance as cue
 import cuequivariance_torch as cuet
 import torch
@@ -268,17 +270,21 @@ class AllegroLayer(nn.Module):
 
     Each layer:
 
-    1. Computes per-edge env weights from the most recent scalar features.
+    1. Computes per-edge env weights from the current scalar features.
     2. Pre-scales ``tensor_features`` channel-wise by those env weights.
     3. Aggregates *unweighted* spherical harmonics to source nodes, giving a
        single-channel neighbourhood embedding ``node_Y`` (many-body context).
+       The aggregation is normalized by ``1/sqrt(avg_num_neighbors)`` per the
+       Allegro SI (falls back to per-sample ``1/sqrt(|N(i)|)`` when the
+       constant is not supplied).
     4. Tensor-products the scaled edge features with the neighbourhood Y,
        using ``ChannelWiseTensorProduct(irreps_in, sh_irreps)`` — the same
        fast kernel path as in the original Allegro reference.
     5. Projects the TP output back to ``irreps_in`` via an equivariant linear.
     6. Extracts L=0 scalar invariants from the new tensor features.
-    7. Runs a latent MLP on all accumulated scalars (DenseNet) plus the fresh
-       invariants, producing updated scalar features.
+    7. Runs a latent MLP on ``[current_scalar, invariants]`` and applies the
+       paper's residual update ``x_L = a·x_{L-1} + b·MLP(..)`` with
+       ``α = residual_alpha`` and ``a = 1/√(1+α²)``, ``b = α/√(1+α²)``.
     8. Scales the new tensor features by per-channel weights derived from the
        updated scalars.
 
@@ -291,7 +297,7 @@ class AllegroLayer(nn.Module):
     Instead we factor the product as::
 
         TP(env_w_{ij} · V_{ij},  Y_agg_i)
-        where  Y_agg_i = (1/|N(i)|) * sum_{k in N(i)} Y_k   (single-channel)
+        where  Y_agg_i = normalize * sum_{k in N(i)} Y_k   (single-channel)
 
     By the bilinearity of the CG tensor product:
 
@@ -306,9 +312,12 @@ class AllegroLayer(nn.Module):
     Attributes:
         tp: cuEquivariance ChannelWiseTensorProduct (irreps_in × sh_irreps).
         tp_linear: Equivariant linear projecting TP output back to irreps_in.
-        env_embed: Linear mapping the most-recent scalars → pre-TP env weights.
-        latent_mlp: MLP processing the DenseNet-accumulated scalar track.
+        env_embed: Linear mapping the current scalars → pre-TP env weights.
+        latent_mlp: MLP processing ``[current scalar, fresh invariants]``.
         tensor_env: Linear mapping updated scalars → post-TP tensor env weights.
+        residual_a, residual_b: Pre-computed residual mixing coefficients.
+        avg_num_neighbors: Dataset-level constant used for sqrt-normalisation
+            of the neighbour aggregation (``None`` → per-sample fallback).
     """
 
     def __init__(
@@ -317,15 +326,19 @@ class AllegroLayer(nn.Module):
         num_scalar_features: int,
         num_tensor_features: int,
         l_max: int = 2,
-        mlp_depth: int = 1,
-        latent_in_dim: int | None = None,
         latent_mlp_hiddens: list[int] | None = None,
+        latent_activation: type[nn.Module] | None = nn.SiLU,
+        avg_num_neighbors: float | None = None,
+        residual_alpha: float = 0.5,
     ):
         super().__init__()
 
         self.num_scalar_features = num_scalar_features
         self.num_tensor_features = num_tensor_features
         self.l_max = l_max
+        self.avg_num_neighbors = (
+            float(avg_num_neighbors) if avg_num_neighbors is not None else None
+        )
 
         irreps_str = irreps_from_l_max(l_max, num_tensor_features)
         sh_irreps_str = sh_irreps_from_l_max(l_max)
@@ -354,42 +367,30 @@ class AllegroLayer(nn.Module):
             dtype=config.ftype,
         )
 
-        # Pre-TP env embed: maps the most recent scalars → per-channel scale
-        # factors applied to tensor_features *before* the tensor product.
-        # Encodes the chemical context of the current edge into the geometric
-        # query without requiring multi-channel Y aggregation.
+        # Pre-TP env embed: current scalars → per-channel tensor_features scale.
         self.env_embed = nn.Linear(num_scalar_features, num_tensor_features, dtype=config.ftype)
 
-        # DenseNet latent MLP:
-        # Input = all accumulated scalars (embedding + all previous layers)
-        #         + L=0 invariants from the new tensor features.
-        # latent_in_dim for layer i (0-indexed) =
-        #     (i + 1) * num_scalar_features + num_tensor_features
-        actual_latent_in_dim = (
-            latent_in_dim
-            if latent_in_dim is not None
-            else num_scalar_features + num_tensor_features
-        )
-        # Per-layer hidden schedule: if ``latent_mlp_hiddens`` is given, build
-        # an MLP whose hidden widths follow the list and whose final output is
-        # ``num_scalar_features``. Each hidden layer is followed by SiLU; the
-        # final projection is linear (no activation), matching Allegro's spec.
-        # ``mlp_depth=0`` with no hiddens → a single linear projection.
-        if latent_mlp_hiddens is None:
-            hiddens = [num_scalar_features] * mlp_depth
-        else:
-            hiddens = list(latent_mlp_hiddens)
+        # Latent MLP input = [current scalar features, fresh L=0 invariants].
+        latent_in_dim = num_scalar_features + num_tensor_features
+        hiddens = list(latent_mlp_hiddens) if latent_mlp_hiddens else []
         mlp_layers: list[nn.Module] = []
-        in_dim = actual_latent_in_dim
+        in_dim = latent_in_dim
         for h in hiddens:
             mlp_layers.append(nn.Linear(in_dim, h, dtype=config.ftype))
-            mlp_layers.append(nn.SiLU())
+            if latent_activation is not None:
+                mlp_layers.append(latent_activation())
             in_dim = h
         mlp_layers.append(nn.Linear(in_dim, num_scalar_features, dtype=config.ftype))
         self.latent_mlp = nn.Sequential(*mlp_layers)
 
         # Post-TP tensor env: maps updated scalars → per-channel output scaling
         self.tensor_env = nn.Linear(num_scalar_features, num_tensor_features, dtype=config.ftype)
+
+        # Residual coefficients (Allegro SI): x_L = a·x_{L-1} + b·MLP(...).
+        alpha = float(residual_alpha)
+        denom = math.sqrt(1.0 + alpha * alpha)
+        self.residual_a = 1.0 / denom
+        self.residual_b = alpha / denom
 
         with cue.assume(O3):
             self.irreps_dim = Irreps(irreps_str).dim
@@ -400,7 +401,7 @@ class AllegroLayer(nn.Module):
 
     def forward(
         self,
-        accumulated_scalars: torch.Tensor,
+        scalar_features: torch.Tensor,
         tensor_features: torch.Tensor,
         edge_angular: torch.Tensor,
         edge_index: torch.Tensor,
@@ -409,10 +410,9 @@ class AllegroLayer(nn.Module):
         """Update pair features via neighbourhood-aggregated tensor product.
 
         Args:
-            accumulated_scalars: DenseNet-concatenated scalar track from all
-                previous layers including the initial embedding
-                ``(n_edges, k * num_scalar_features)`` where k = number of
-                layers seen so far (including embedding).
+            scalar_features: Current scalar features
+                ``(n_edges, num_scalar_features)`` produced by the previous
+                layer (or the pair embedding for layer 0).
             tensor_features: Equivariant tensor track ``(n_edges, irreps_dim)``.
             edge_angular: Spherical harmonics reused from embedding
                 ``(n_edges, sh_dim)``.
@@ -427,18 +427,12 @@ class AllegroLayer(nn.Module):
         src = edge_index[:, 0]
 
         # --- Pre-scale tensor_features by env weights (fast, left-side only) ---
-        # env_w is derived from the most-recent scalar features of the current
-        # edge, encoding its chemical context into the TP query.
-        current_scalars = accumulated_scalars[:, -self.num_scalar_features :]
-        env_w = self.env_embed(current_scalars)  # (n_edges, num_tensor)
+        env_w = self.env_embed(scalar_features)  # (n_edges, num_tensor)
         scaled_V = _scale_by_channel(
             tensor_features, env_w, self.l_max, self.num_tensor_features
         )  # (n_edges, irreps_dim)
 
         # --- Many-body neighbourhood aggregation (single-channel Y) ---
-        # Aggregate *unweighted* spherical harmonics to source nodes.
-        # Result: Y_agg[i] = mean_k Y(r_{ik}), same shape as sh_irreps.
-        # This stays single-channel, preserving the fast TP kernel path.
         node_Y = torch.zeros(
             n_nodes,
             self._sh_dim,
@@ -446,13 +440,23 @@ class AllegroLayer(nn.Module):
             device=tensor_features.device,
         )
         node_Y.scatter_add_(0, src.unsqueeze(-1).expand_as(edge_angular), edge_angular)
-        src_count = torch.zeros(
-            n_nodes, dtype=tensor_features.dtype, device=tensor_features.device
-        )
-        src_count.scatter_add_(
-            0, src, torch.ones(src.shape[0], dtype=tensor_features.dtype, device=tensor_features.device)
-        )
-        node_Y = node_Y / src_count.clamp(min=1.0).unsqueeze(-1)
+
+        # sqrt-normalise per Allegro SI. If avg_num_neighbors is given it is
+        # a dataset-wide constant; otherwise fall back to per-node sqrt(|N(i)|).
+        if self.avg_num_neighbors is not None:
+            node_Y = node_Y / math.sqrt(self.avg_num_neighbors)
+        else:
+            src_count = torch.zeros(
+                n_nodes, dtype=tensor_features.dtype, device=tensor_features.device
+            )
+            src_count.scatter_add_(
+                0,
+                src,
+                torch.ones(
+                    src.shape[0], dtype=tensor_features.dtype, device=tensor_features.device
+                ),
+            )
+            node_Y = node_Y / src_count.clamp(min=1.0).sqrt().unsqueeze(-1)
 
         # Pull aggregated neighbourhood Y back to each edge via its source atom
         edge_node_Y = node_Y[src]  # (n_edges, sh_dim)
@@ -461,16 +465,13 @@ class AllegroLayer(nn.Module):
         tp_out = self.tp(scaled_V, edge_node_Y)
         new_tensor = self.tp_linear(tp_out)
 
-        # --- Scalar track update (DenseNet) ---
-        # Extract L=0 scalar invariants (first block in ir_mul layout)
+        # --- Scalar track update (paper residual, α = residual_alpha) ---
         invariants = new_tensor[:, : self.num_tensor_features]
-
-        # Latent MLP on all accumulated scalars + fresh invariants
-        combined = torch.cat([accumulated_scalars, invariants], dim=-1)
-        updated_scalars = self.latent_mlp(combined)
+        combined = torch.cat([scalar_features, invariants], dim=-1)
+        mlp_out = self.latent_mlp(combined)
+        updated_scalars = self.residual_a * scalar_features + self.residual_b * mlp_out
 
         # --- Tensor track update ---
-        # Post-TP channel-wise scaling by weights from updated scalars
         env_weights_out = self.tensor_env(updated_scalars)
         updated_tensor = _scale_by_channel(
             new_tensor, env_weights_out, self.l_max, self.num_tensor_features
@@ -496,10 +497,11 @@ class AllegroSpec(BaseModel):
     num_bessel: int = Field(8, gt=0)
     l_max: int = Field(2, ge=0)
     num_layers: int = Field(2, gt=0)
-    mlp_depth: int = Field(1, ge=0)
     poly_p: int = Field(6, ge=1)
     scalar_mlp_hiddens: list[int] | None = None
     latent_mlp_hiddens: list[int] | None = None
+    avg_num_neighbors: float | None = None
+    residual_alpha: float = 0.5
 
 
 class Allegro(TensorDictModuleBase):
@@ -512,18 +514,13 @@ class Allegro(TensorDictModuleBase):
 
         GraphBatch(atoms, edges)
           → [PairEmbedding]  → scalar₀, tensor₀, edge_angular
-          → [AllegroLayer₁]  → scalar₁, tensor₁  (accumulated=[scalar₀, scalar₁])
+          → [AllegroLayer₁]  → scalar₁, tensor₁   (residual on scalar track)
           → ...
           → edges.edge_features (n_edges, num_layers, num_scalar)
 
-    Key algorithmic properties vs. a naive pair-only model:
+    The scalar track uses the Allegro SI residual update with α = 0.5:
 
-    * **Many-body interactions**: each layer aggregates env-weighted spherical
-      harmonics from all neighbours of the source atom, so the tensor product
-      captures the local chemical environment rather than just the bond vector.
-    * **DenseNet scalar accumulation**: each layer's latent MLP receives the
-      concatenation of ALL previous layer scalar outputs, preserving gradient
-      pathways to early-layer features.
+        x_L = (1/√(1+α²)) x_{L-1} + (α/√(1+α²)) MLP([x_{L-1}, invariants_L])
 
     Reference:
         Musaelian et al. "Learning Local Equivariant Representations for
@@ -549,10 +546,12 @@ class Allegro(TensorDictModuleBase):
         num_bessel: int = 8,
         l_max: int = 2,
         num_layers: int = 2,
-        mlp_depth: int = 1,
         poly_p: int = 6,
         scalar_mlp_hiddens: list[int] | None = None,
         latent_mlp_hiddens: list[int] | None = None,
+        latent_activation: type[nn.Module] | None = nn.SiLU,
+        avg_num_neighbors: float | None = None,
+        residual_alpha: float = 0.5,
     ):
         super().__init__()
 
@@ -564,10 +563,11 @@ class Allegro(TensorDictModuleBase):
             num_bessel=num_bessel,
             l_max=l_max,
             num_layers=num_layers,
-            mlp_depth=mlp_depth,
             poly_p=poly_p,
             scalar_mlp_hiddens=scalar_mlp_hiddens,
             latent_mlp_hiddens=latent_mlp_hiddens,
+            avg_num_neighbors=avg_num_neighbors,
+            residual_alpha=residual_alpha,
         )
 
         # Pair embedding (two-body)
@@ -582,21 +582,20 @@ class Allegro(TensorDictModuleBase):
             poly_p=poly_p,
         )
 
-        # Allegro layers with increasing DenseNet input dimension.
-        # Layer i receives accumulated scalars of dim (i+1)*num_scalar_features
-        # (embedding + outputs of layers 0..i-1) plus num_tensor_features
-        # invariants from the current TP.
+        # Allegro layers: identical signature across layers since the residual
+        # update keeps ``scalar_features`` at ``num_scalar_features`` dim.
         self.layers = nn.ModuleList(
             [
                 AllegroLayer(
                     num_scalar_features=num_scalar_features,
                     num_tensor_features=num_tensor_features,
                     l_max=l_max,
-                    mlp_depth=mlp_depth,
-                    latent_in_dim=(i + 1) * num_scalar_features + num_tensor_features,
                     latent_mlp_hiddens=latent_mlp_hiddens,
+                    latent_activation=latent_activation,
+                    avg_num_neighbors=avg_num_neighbors,
+                    residual_alpha=residual_alpha,
                 )
-                for i in range(num_layers)
+                for _ in range(num_layers)
             ]
         )
 
@@ -623,20 +622,15 @@ class Allegro(TensorDictModuleBase):
             edge_index=edge_index,
         )
 
-        # DenseNet accumulation: start with the embedding scalars.
-        accumulated: list[torch.Tensor] = [scalar_features]
         per_layer_scalars: list[torch.Tensor] = []
-
         for layer in self.layers:
-            accumulated_cat = torch.cat(accumulated, dim=-1)
             scalar_features, tensor_features = layer(
-                accumulated_scalars=accumulated_cat,
+                scalar_features=scalar_features,
                 tensor_features=tensor_features,
                 edge_angular=edge_angular,
                 edge_index=edge_index,
                 n_nodes=n_nodes,
             )
-            accumulated.append(scalar_features)
             per_layer_scalars.append(scalar_features)
 
         td["edges", "edge_features"] = torch.stack(per_layer_scalars, dim=1)

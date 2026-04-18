@@ -60,19 +60,28 @@ class TestBesselRBF:
         output = rbf(distances)
         assert output.shape == (100, 50, 16)
     
-    def test_cutoff_behavior(self):
-        """Test that values beyond cutoff are small."""
-        rbf = BesselRBF(num_radial=8, r_cut=5.0)
-        
-        # Distances within and beyond cutoff
+    def test_cutoff_behavior_raw(self):
+        """Raw (un-normalised) Bessel basis decays at and past the cutoff.
+
+        This property only holds for the un-normalised basis, since
+        shift+scale normalisation re-centres each channel.
+        """
+        rbf = BesselRBF(num_radial=8, r_cut=5.0, normalize=False)
+
         distances = torch.tensor([2.0, 4.9, 5.0, 6.0, 10.0])
         output = rbf(distances)
-        
-        # Values at cutoff should be zero or very small
-        # Note: Bessel functions don't strictly go to zero, but decay significantly
+
         assert output[2].abs().max() < 0.15  # At r_cut
         assert output[3].abs().max() < 0.15  # Beyond r_cut
         assert output[4].abs().max() < 0.15  # Far beyond r_cut
+
+    def test_normalized_basis_stats(self):
+        """Normalised basis has ~0 mean and ~1 std under r ~ Uniform([0, r_cut])."""
+        rbf = BesselRBF(num_radial=8, r_cut=5.0, normalize=True)
+        r = torch.linspace(1e-3, 5.0, 10000)
+        phi = rbf(r)
+        assert phi.mean(dim=0).abs().max() < 0.01
+        assert (phi.std(dim=0) - 1.0).abs().max() < 0.01
     
     def test_zero_distance(self):
         """Test behavior at zero distance."""

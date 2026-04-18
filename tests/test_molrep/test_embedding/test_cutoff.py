@@ -2,7 +2,12 @@
 
 import pytest
 import torch
-from molrep.embedding.cutoff import CosineCutoff, CosineCutoffSpec
+from molrep.embedding.cutoff import (
+    CosineCutoff,
+    CosineCutoffSpec,
+    PolynomialCutoff,
+    PolynomialCutoffSpec,
+)
 
 from tests.utils import assert_compile_compatible
 
@@ -156,4 +161,47 @@ class TestCosineCutoff:
         cutoff = CosineCutoff(r_cut=5.0)
         distances = torch.tensor([1.0, 2.0, 3.0, 4.0])
         assert_compile_compatible(cutoff, distances, strict=False)
+
+
+class TestPolynomialCutoff:
+    """Test PolynomialCutoff follows the NequIP/DimeNet envelope formula."""
+
+    def test_boundary_values(self):
+        """u(0) == 1 and u(r >= r_cut) == 0 for all supported exponents."""
+        for p in (2, 6, 48):
+            cutoff = PolynomialCutoff(r_cut=5.0, exponent=p)
+            r = torch.tensor([0.0, 5.0, 6.0, 10.0])
+            out = cutoff(r)
+            assert torch.isclose(out[0], torch.tensor(1.0))
+            assert out[1].item() == 0.0
+            assert out[2].item() == 0.0
+            assert out[3].item() == 0.0
+
+    @pytest.mark.parametrize("p", [2, 6, 48])
+    def test_matches_paper_formula(self, p):
+        """u(x) == 1 - (p+1)(p+2)/2·x^p + p(p+2)·x^(p+1) - p(p+1)/2·x^(p+2)."""
+        cutoff = PolynomialCutoff(r_cut=1.0, exponent=p)
+        r = torch.tensor([0.25, 0.5, 0.75, 0.9])
+        got = cutoff(r)
+        expected = (
+            1.0
+            - ((p + 1.0) * (p + 2.0) / 2.0) * r ** p
+            + p * (p + 2.0) * r ** (p + 1)
+            - (p * (p + 1.0) / 2.0) * r ** (p + 2)
+        )
+        assert torch.allclose(got, expected, rtol=1e-5, atol=1e-5)
+
+    def test_smooth_gradient_at_cutoff(self):
+        """Derivative vanishes at r = r_cut (critical for autograd forces)."""
+        cutoff = PolynomialCutoff(r_cut=5.0, exponent=6)
+        r = torch.tensor([5.0 - 1e-4], requires_grad=True)
+        out = cutoff(r).sum()
+        out.backward()
+        assert r.grad.abs().item() < 1e-2
+
+    def test_invalid_exponent(self):
+        with pytest.raises(ValueError):
+            PolynomialCutoffSpec(r_cut=5.0, exponent=0)
+        with pytest.raises(ValueError):
+            PolynomialCutoffSpec(r_cut=5.0, exponent=-1)
 

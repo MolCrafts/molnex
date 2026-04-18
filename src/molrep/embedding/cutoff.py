@@ -92,23 +92,27 @@ class PolynomialCutoffSpec(BaseModel):
 
 
 class PolynomialCutoff(nn.Module):
-    """Polynomial cutoff function module.
+    """Polynomial cutoff envelope used in NequIP / Allegro.
 
-    Applies a smooth polynomial cutoff to distance values:
-        E(u) = 1 - p*u^n + q*u^(n-1) - s*u^(n-2)  for u < 1
-        E(u) = 0                                    for u >= 1
+    Applies the Klicpera-et-al. (2020) polynomial envelope to distance values:
+        u(r) = 1 - ((p+1)(p+2)/2) * x^p
+                 + p * (p+2)       * x^(p+1)
+                 - (p(p+1)/2)      * x^(p+2)           for x = r/r_cut < 1
+        u(r) = 0                                        for r >= r_cut
 
-    where u = r/r_cut and n is the exponent. For the default n=6:
-        E(u) = 1 - 6u^5 + 15u^4 - 10u^3
+    For the default p=6 this gives ``1 - 28 x^6 + 48 x^7 - 21 x^8``.
 
-    This cutoff has continuous derivatives up to order (n-3), providing
-    smooth transitions that are important for force calculations in
-    molecular dynamics.
+    The envelope vanishes smoothly with continuous derivatives up to order
+    ``(p-1)`` at ``r = r_cut``, which is necessary for stable autograd forces.
+
+    Reference:
+        Klicpera, Groß, Günnemann, "Directional Message Passing for Molecular
+        Graphs", ICLR 2020.  Used as the standard cutoff in NequIP/Allegro.
 
     Attributes:
         config: PolynomialCutoffSpec configuration.
         r_cut: Buffer storing cutoff radius.
-        exponent: Polynomial exponent.
+        exponent: Polynomial exponent ``p``.
     """
 
     def __init__(self, *, r_cut: float, exponent: int = 6):
@@ -125,7 +129,6 @@ class PolynomialCutoff(nn.Module):
             exponent=exponent,
         )
 
-        # Register r_cut buffer
         r_cut_tensor = torch.tensor(float(self.config.r_cut))
         self.register_buffer("r_cut", r_cut_tensor, persistent=False)
         self.r_cut: torch.Tensor
@@ -142,33 +145,17 @@ class PolynomialCutoff(nn.Module):
             Cutoff values. Values range from 1.0 (at r=0) to 0.0 (at r>=r_cut).
         """
         r = r.float()
+        x = r / self.r_cut
+        mask = x < 1.0
 
-        # Normalized distance: u = r / r_cut
-        u = r / self.r_cut
+        p = float(self.exponent)
+        c_p = (p + 1.0) * (p + 2.0) / 2.0
+        c_p1 = p * (p + 2.0)
+        c_p2 = p * (p + 1.0) / 2.0
 
-        # Create mask for distances within cutoff
-        mask = u < 1.0
+        x_p = torch.pow(x, p)
+        x_p1 = x_p * x
+        x_p2 = x_p1 * x
 
-        # Polynomial coefficients: p*u^n - q*u^(n-1) + s*u^(n-2)
-        p = self.exponent
-        q = p * (p - 1) // 2
-        s = p * (p - 1) * (p - 2) // 6
-
-        # Precompute powers for efficiency
-        u2 = u * u
-        u3 = u2 * u
-
-        if self.exponent == 6:
-            # Optimized path for common case (n=6)
-            c = 1.0 - 6.0 * u3 * u2 + 15.0 * u2 * u2 - 10.0 * u3
-        else:
-            # General path for arbitrary exponent
-            u_n = torch.pow(u, self.exponent)
-            u_n1 = torch.pow(u, self.exponent - 1)
-            u_n2 = torch.pow(u, self.exponent - 2)
-            c = 1.0 - p * u_n + q * u_n1 - s * u_n2
-
-        # Apply mask to set values outside cutoff to zero
-        result = torch.where(mask, c, torch.zeros_like(r))
-
-        return result
+        c = 1.0 - c_p * x_p + c_p1 * x_p1 - c_p2 * x_p2
+        return torch.where(mask, c, torch.zeros_like(c))

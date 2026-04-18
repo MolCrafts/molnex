@@ -33,6 +33,7 @@ dependencies = [
   "opt_einsum_fx",
   "pydantic",
   "tqdm",
+  "pynvml",
 ]
 
 [project.optional-dependencies]

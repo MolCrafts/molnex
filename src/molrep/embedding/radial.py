@@ -19,11 +19,18 @@ class BesselRBFSpec(BaseModel):
             Must be positive.
         num_radial: Number of radial basis functions. Must be positive.
         eps: Small constant to avoid division by zero. Defaults to 1e-8.
+        normalize: Whether to apply shift+scale normalization per the Allegro
+            SI. When True, each basis function is standardized to zero mean /
+            unit variance assuming r ~ Uniform([0, r_cut]). Defaults to True.
+        normalize_samples: Number of quadrature samples used to estimate μ_n
+            and σ_n at init time. Defaults to 4096.
     """
 
     r_cut: float = Field(..., gt=0)
     num_radial: int = Field(..., gt=0)
     eps: float = 1e-8
+    normalize: bool = True
+    normalize_samples: int = Field(4096, gt=0)
 
 
 class BesselRBF(nn.Module):
@@ -32,14 +39,21 @@ class BesselRBF(nn.Module):
     Computes Bessel RBF features from distance values using the formula:
         phi_n(r) = sqrt(2/r_cut) * sin(n*pi*r/r_cut) / (r + eps)
 
-    where n ranges from 1 to num_radial. These features provide a smooth,
-    localized representation of interatomic distances.
+    When ``normalize=True`` (Allegro SI convention) the basis is additionally
+    shifted and scaled so that each channel has zero mean and unit variance
+    under the assumption r ~ Uniform([0, r_cut]):
+        B_n(r) = (phi_n(r) - μ_n) / σ_n
+
+    The statistics μ_n, σ_n are computed numerically once at construction time
+    via a dense Riemann sum and stored as non-trainable buffers.
 
     Attributes:
         config: BesselRBFSpec configuration.
         freqs: Buffer storing frequency values n*pi/r_cut.
         prefactor: Buffer storing normalization constant sqrt(2/r_cut).
         eps: Small constant for numerical stability.
+        normalize: Whether shift+scale normalization is applied.
+        mu, sigma: Buffers with per-channel statistics (only when normalize).
 
     Input shape:
         r: (...,) tensor of distance values.
@@ -54,6 +68,8 @@ class BesselRBF(nn.Module):
         r_cut: float,
         num_radial: int,
         eps: float = 1e-8,
+        normalize: bool = True,
+        normalize_samples: int = 4096,
     ) -> None:
         """Initialize Bessel RBF module.
 
@@ -61,6 +77,8 @@ class BesselRBF(nn.Module):
             r_cut: Cutoff radius for normalization.
             num_radial: Number of radial basis functions.
             eps: Small constant to avoid division by zero. Defaults to 1e-8.
+            normalize: Apply Allegro-SI shift+scale normalization.
+            normalize_samples: Grid size for μ_n / σ_n estimation.
         """
         super().__init__()
 
@@ -68,22 +86,51 @@ class BesselRBF(nn.Module):
             r_cut=r_cut,
             num_radial=num_radial,
             eps=eps,
+            normalize=normalize,
+            normalize_samples=normalize_samples,
         )
 
         self.r_cut = float(self.config.r_cut)
         num = int(self.config.num_radial)
 
-        # Compute frequencies: n*pi/r_cut for n=1..num_radial
         freqs = torch.arange(1, num + 1, dtype=torch.float32) * (math.pi / self.r_cut)
         self.register_buffer("freqs", freqs, persistent=False)
         self.freqs: torch.Tensor
 
-        # Compute normalization prefactor: sqrt(2/r_cut)
         prefactor = torch.tensor(math.sqrt(2.0 / self.r_cut), dtype=torch.float32)
         self.register_buffer("prefactor", prefactor, persistent=False)
         self.prefactor: torch.Tensor
 
         self.eps = float(self.config.eps)
+        self.normalize = bool(self.config.normalize)
+
+        if self.normalize:
+            mu, sigma = self._compute_stats(self.config.normalize_samples)
+        else:
+            mu = torch.zeros(num, dtype=torch.float32)
+            sigma = torch.ones(num, dtype=torch.float32)
+        self.register_buffer("mu", mu, persistent=False)
+        self.register_buffer("sigma", sigma, persistent=False)
+        self.mu: torch.Tensor
+        self.sigma: torch.Tensor
+
+    def _raw_basis(self, r: torch.Tensor) -> torch.Tensor:
+        """Compute raw (un-normalised) Bessel basis."""
+        rr = r.unsqueeze(-1)
+        return self.prefactor * torch.sin(rr * self.freqs) / (rr + self.eps)
+
+    @torch.no_grad()
+    def _compute_stats(self, n_samples: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Estimate μ_n and σ_n under r ~ Uniform([eps, r_cut]).
+
+        Uniform sampling over ``[eps, r_cut]`` avoids the r=0 singularity while
+        matching the Allegro SI's stated assumption to within ``eps``.
+        """
+        r = torch.linspace(self.eps, self.r_cut, n_samples, dtype=torch.float32)
+        phi = self._raw_basis(r)
+        mu = phi.mean(dim=0)
+        sigma = phi.std(dim=0).clamp(min=1e-8)
+        return mu, sigma
 
     def forward(self, r: torch.Tensor) -> torch.Tensor:
         """Compute Bessel RBF features from distances.
@@ -95,11 +142,7 @@ class BesselRBF(nn.Module):
             RBF features. Output shape: (..., num_radial)
         """
         r = r.float()
-
-        # Expand dims for broadcasting: (..., 1) * (num_radial,) -> (..., num_radial)
-        rr = r.unsqueeze(-1)
-        x = rr * self.freqs
-
-        phi = self.prefactor * torch.sin(x) / (rr + self.eps)
-
+        phi = self._raw_basis(r)
+        if self.normalize:
+            phi = (phi - self.mu) / self.sigma
         return phi
