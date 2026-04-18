@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import torch.nn as nn
 
 from molix import logger as _logger_mod
+from molix import logging as _logging_mod
 
 if TYPE_CHECKING:
     from molix.core.state import TrainState
@@ -524,23 +525,40 @@ class CheckpointHook(BaseHook):
         checkpoint = self._build_state_dict(trainer, state)
         self.torch.save(checkpoint, filepath)
 
-        # File-side: structured record. Users wanting a clean console
-        # should set ``stream_level=WARNING`` / ``file_level=INFO`` in
-        # ``logging.basicConfig`` so this line stays in the log file only.
+        # File-side: structured record under the module logger. Lands in
+        # ``train.log`` via the root handler, and in ``warnings.log`` too
+        # if it ever gets raised to WARNING.
         logger.info(f"Saved checkpoint to {filepath}")
 
-        # Console-side: if a Log hook is present, inline the event as a
-        # thin separator so it visually belongs to the training table.
-        # Dedupe by (filename, step): ``on_epoch_end`` + ``on_train_end``
-        # both fire at the same step on the last epoch, but from the
-        # user's point of view it's the same save — announce once.
+        # Event-side: routed through the dedicated events channel so the
+        # record shows up (a) inline on stdout via PrettyTextFormatter's
+        # ``announce`` rendering and (b) in ``events.log`` if
+        # :func:`molix.logging.configure_run` is in effect. Dedupe by
+        # ``(filename, step)``: ``on_epoch_end`` + ``on_train_end`` both
+        # fire at the same step on the last epoch, but from the user's
+        # point of view it's the same save — announce once.
         marker = (filename, step)
         if self._last_announced == marker:
             return
         self._last_announced = marker
-        log_hook = _find_log_hook(trainer)
-        if log_hook is not None:
-            log_hook.announce(f"ckpt: {filename} @ step={step}")
+        message = f"ckpt: {filename} @ step={step}"
+        evt = _logging_mod.events_logger()
+        width = _logging_mod.get_table_width()
+        if _logging_mod.has_effective_handlers(evt):
+            evt.info(
+                message,
+                kind="announce",
+                table_width=width,
+                category="checkpoint",
+                filename=filename,
+                step=step,
+                filepath=filepath,
+            )
+        else:
+            # Zero-config fallback — still show the event inline on stdout.
+            prefix = f"─── {message} "
+            pad = max(3, width - len(prefix))
+            print(prefix + "─" * pad, flush=True)
 
         # Register checkpoint as artifact
         if self.register_artifacts and hasattr(trainer, "ctx"):
@@ -1227,22 +1245,6 @@ def _collect_keys(items) -> list[str]:
     return out
 
 
-def _find_log_hook(trainer) -> "Log | None":
-    """Locate the active :class:`Log` hook on *trainer*, if any.
-
-    Event-producing hooks use this to route intermittent notifications
-    (checkpoint saved, LR reduced, precision switched, …) to the Log
-    hook's ``announce`` channel so they render inside the training
-    table's visual frame instead of breaking it with a raw INFO line.
-    Returns ``None`` when no ``Log`` is registered, in which case the
-    caller should fall back to :mod:`logging`.
-    """
-    for hook in getattr(trainer, "hooks", ()):
-        if isinstance(hook, Log):
-            return hook
-    return None
-
-
 class Log(BaseHook):
     """Periodic LAMMPS-thermo-style stdout logger.
 
@@ -1298,6 +1300,9 @@ class Log(BaseHook):
         self.epoch_separator = epoch_separator
         self._rows_since_header = 0
         self._last_epoch: int | None = None
+        # Lazily resolved so importing this module doesn't force logging
+        # config — handlers might be attached later via configure_run.
+        self._metrics = _logging_mod.metrics_logger()
 
     def _columns(self) -> list[str]:
         return ["step", "epoch", *self.keys]
@@ -1309,10 +1314,22 @@ class Log(BaseHook):
         # ``" ".join(...)`` adds (n_cols - 1) single-space separators.
         return n_cols * col_w + max(0, n_cols - 1)
 
-    def _print_header(self) -> None:
-        width = _parse_fmt_width(self.fmt)
-        header = " ".join(f"{c:>{width}}" for c in self._columns())
-        print(header, flush=True)
+    def _emit_header(self) -> None:
+        """Log a ``kind=header`` record — formatter renders aligned text."""
+        if _logging_mod.has_effective_handlers(self._metrics):
+            self._metrics.info(
+                "metrics header",
+                kind="header",
+                columns=self._columns(),
+            )
+        else:
+            # Zero-config / unit-test fallback: render the same aligned
+            # header as :class:`PrettyTextFormatter` would produce and
+            # write it directly to stdout. Keeps the hook usable without
+            # any call to :func:`molix.logging.basicConfig`.
+            width = _parse_fmt_width(self.fmt)
+            header = " ".join(f"{c:>{width}}" for c in self._columns())
+            print(header, flush=True)
         self._rows_since_header = 0
 
     def announce(self, message: str) -> None:
@@ -1327,35 +1344,53 @@ class Log(BaseHook):
             ─── ckpt: last.pt @ step=3000 ────────────────────────────
                 4000          0    6.02e-02     223.9       0.0808    46.4
 
-        Safe to call before :meth:`on_train_start` — it becomes a no-op
-        rather than printing a stray separator during module import.
+        The record routes through the ``molix.events`` channel so it
+        also lands in ``events.log`` when :func:`molix.logging.configure_run`
+        is in effect. Safe to call before :meth:`on_train_start` — it
+        becomes a no-op rather than emitting a stray record during
+        module import.
         """
         if self._last_epoch is None:
             return
+        evt = _logging_mod.events_logger()
         width = self._table_width()
-        prefix = f"─── {message} "
-        pad = max(3, width - len(prefix))
-        print(prefix + "─" * pad, flush=True)
+        if _logging_mod.has_effective_handlers(evt):
+            evt.info(
+                message,
+                kind="announce",
+                table_width=width,
+            )
+        else:
+            prefix = f"─── {message} "
+            pad = max(3, width - len(prefix))
+            print(prefix + "─" * pad, flush=True)
         # Invalidate header so the next row re-prints column names.
         self._rows_since_header = self.header_every_n_rows
 
     def on_train_start(self, trainer, state):
         self._rows_since_header = 0
         self._last_epoch = int(state.get("epoch", 0))
-        self._print_header()
+        # Publish table width so off-hook announcers align with our columns.
+        _logging_mod.set_table_width(self._table_width())
+        self._emit_header()
 
     def on_epoch_end(self, trainer, state):
         """Draw an epoch-boundary separator so the table reads as sections."""
         if not self.epoch_separator:
             return
-        # Only draw once per epoch transition and only after we've printed
-        # at least one row — otherwise epochs with zero logged steps
-        # produce consecutive separators.
         epoch = int(state.get("epoch", 0))
         if epoch == self._last_epoch:
             return
         width = self._table_width()
-        print("─" * width, flush=True)
+        if _logging_mod.has_effective_handlers(self._metrics):
+            self._metrics.info(
+                "epoch separator",
+                kind="epoch_sep",
+                epoch=epoch,
+                table_width=width,
+            )
+        else:
+            print("─" * width, flush=True)
         self._last_epoch = epoch
         # Force header reprint at the start of the new epoch's rows.
         self._rows_since_header = self.header_every_n_rows
@@ -1368,18 +1403,34 @@ class Log(BaseHook):
             return
 
         if self._rows_since_header >= self.header_every_n_rows:
-            self._print_header()
+            self._emit_header()
 
-        width = _parse_fmt_width(self.fmt)
-        parts = [
-            f"{step:>{width}d}",
-            f"{int(state.get('epoch', 0)):>{width}d}",
-        ]
+        values: dict[str, Any] = {
+            "step": step,
+            "epoch": int(state.get("epoch", 0)),
+        }
         for key in self.keys:
-            val = state.get(key)
-            if isinstance(val, (int, float)):
-                parts.append(self.fmt.format(val))
-            else:
-                parts.append(f"{'nan':>{width}}")
-        print(" ".join(parts), flush=True)
+            values[key] = state.get(key)
+
+        if _logging_mod.has_effective_handlers(self._metrics):
+            self._metrics.info(
+                "metrics row",
+                kind="row",
+                columns=self._columns(),
+                values=values,
+            )
+        else:
+            # Zero-config fallback: same layout PrettyTextFormatter uses.
+            width = _parse_fmt_width(self.fmt)
+            parts: list[str] = [
+                f"{values['step']:>{width}d}",
+                f"{values['epoch']:>{width}d}",
+            ]
+            for key in self.keys:
+                v = values.get(key)
+                if isinstance(v, (int, float)) and not (isinstance(v, float) and v != v):
+                    parts.append(self.fmt.format(v))
+                else:
+                    parts.append(f"{'nan':>{width}}")
+            print(" ".join(parts), flush=True)
         self._rows_since_header += 1

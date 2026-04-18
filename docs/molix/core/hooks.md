@@ -237,6 +237,55 @@ register a `Log` hook simply see the INFO line on stdout (default
 behaviour, no surprise regression).
 
 Any custom hook with intermittent events (LR adjustments, precision
-switches, detected OOMs, …) should follow the same pattern — use the
-`_find_log_hook` helper (or register against `state` and let `Log` pick
-it up) rather than direct `print` / `logger.info`.
+switches, detected OOMs, …) should route through the dedicated events
+channel rather than `print` / raw `logger.info`:
+
+```python
+from molix import logging
+
+logging.events_logger().info(
+    "lr reduced: 1e-3 → 5e-4 @ step=3000",
+    kind="announce",
+    message="lr reduced: 1e-3 → 5e-4 @ step=3000",
+    table_width=logging.get_table_width(),
+    category="lr_schedule",
+)
+```
+
+The ``kind="announce"`` tag drives the console formatter to render it
+as a ``─── message ───`` separator flush with the table; the
+``molix.events`` channel lands the same record in ``events.log`` when
+:func:`molix.logging.configure_run` is in effect.
+
+## Sink Routing (`configure_run`)
+
+`molix.logging.configure_run(run_dir, ...)` wires up five handlers in
+one call, giving every record a routing path per the channel model:
+
+| Sink            | Level         | Filter                                    |
+|-----------------|---------------|-------------------------------------------|
+| stdout          | any           | `metrics` OR `events` OR level ≥ console  |
+| `train.log`     | INFO (config) | — (full audit)                             |
+| `metrics.csv`   | INFO          | channel = `molix.metrics`, kind ∈ header\|row |
+| `events.log`    | INFO          | channel = `molix.events`                  |
+| `warnings.log`  | WARNING       | — (level threshold)                        |
+
+```python
+from molix import logging
+
+logging.configure_run(
+    run_dir=out_dir / "logs",
+    console_level="WARNING",   # stdout shows metrics + events + warnings
+    file_level="INFO",          # train.log gets every INFO record
+)
+```
+
+After this call, the `Log` hook's aligned table rows show up on stdout
+*and* as CSV rows in `metrics.csv`; `CheckpointHook`'s saves show up
+inline on stdout *and* as timestamped lines in `events.log` *and* as
+structured `Saved checkpoint to ...` INFO in `train.log`. Warnings and
+errors land in `warnings.log` on top of the console and audit streams.
+
+The legacy `basicConfig(level=..., file_level=..., filename=...)` form
+still works for simple scripts that only want a stream + one file; use
+`configure_run` when you want the split-sink layout.
