@@ -197,22 +197,24 @@ class Trainer:
         return self._train(datamodule, max_epochs, max_steps)
 
     def _call_hooks(self, hook_name: str, *args, **kwargs) -> None:
-        """Call a hook on all registered hooks.
+        """Call ``hook_name`` on every registered hook.
 
-        Args:
-            hook_name: Name of the hook method to call
-            *args: Positional arguments to pass to hook
-            **kwargs: Keyword arguments to pass to hook
+        Hook errors propagate to the caller. Swallowing them silently hid a
+        NaNGuardHook fatal signal behind 15k lines of repeated tracebacks;
+        fail-loud is the safer default — a hook that needs to tolerate its
+        own errors should catch them itself.
         """
         for hook in self.hooks:
-            try:
-                method = getattr(hook, hook_name, None)
-                if method is not None and callable(method):
+            method = getattr(hook, hook_name, None)
+            if method is not None and callable(method):
+                try:
                     method(*args, **kwargs)
-            except Exception as e:
-                logger.error(
-                    f"Error in hook {hook.__class__.__name__}.{hook_name}: {e}", exc_info=True
-                )
+                except Exception:
+                    logger.error(
+                        f"Fatal error in hook {hook.__class__.__name__}.{hook_name}",
+                        exc_info=True,
+                    )
+                    raise
 
     def _load_checkpoint(self, path: str | Path) -> None:
         """Load checkpoint and restore all training state.

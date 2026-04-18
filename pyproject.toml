@@ -33,7 +33,7 @@ dependencies = [
   "opt_einsum_fx",
   "pydantic",
   "tqdm",
-  "pynvml",
+  "nvidia-ml-py",
 ]
 
 [project.optional-dependencies]
@@ -45,7 +45,6 @@ dev = [
   "ty>=0.0.25",
 ]
 bench = ["pytest-benchmark>=4.0"]
-profile = ["nvidia-ml-py"]
 
 [project.urls]
 Repository = "https://github.com/molcrafts/molnex"

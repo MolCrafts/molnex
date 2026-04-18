@@ -1141,14 +1141,12 @@ class GPUUtilizationHook(ScalarHook):
     - ``gpu/util_pct``:     SM utilization (instantaneous NVML sample).
     - ``gpu/mem_util_pct``: Memory-bandwidth utilization.
 
-    Backed by ``nvidia-ml-py`` (imported as ``pynvml``). The call takes
-    ~100µs and does not trigger a CUDA synchronization, so it is safe to
-    run every step.
+    Backed by NVIDIA's official ``nvidia-ml-py`` PyPI package.
 
-    Requires CUDA and ``nvidia-ml-py`` — install via the ``profile`` or
-    ``dev`` extras (``pip install -e ".[profile]"``). Raises at
-    ``on_train_start`` if either is unavailable rather than silently
-    reporting zeros.
+    The NVML call takes ~100µs and does not trigger a CUDA
+    synchronization, so it is safe to run every step. Raises at
+    ``on_train_start`` if CUDA or ``nvidia-ml-py`` is unavailable rather
+    than silently reporting zeros.
     """
 
     scalar_keys = ("gpu/util_pct", "gpu/mem_util_pct")
@@ -1161,31 +1159,31 @@ class GPUUtilizationHook(ScalarHook):
                 "GPUUtilizationHook requires CUDA but torch.cuda.is_available() is False."
             )
         try:
-            import pynvml
+            import pynvml as nvml
         except ImportError as exc:
             raise ImportError(
-                "GPUUtilizationHook requires nvidia-ml-py. "
-                'Install with `pip install -e ".[profile]"` or `pip install nvidia-ml-py`.'
+                "GPUUtilizationHook requires the official `nvidia-ml-py` package "
+                "(`pip install nvidia-ml-py`)."
             ) from exc
 
-        pynvml.nvmlInit()
+        nvml.nvmlInit()
         idx = torch.cuda.current_device()
-        self._pynvml = pynvml
-        self._handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+        self._nvml = nvml
+        self._handle = nvml.nvmlDeviceGetHandleByIndex(idx)
 
     def on_train_batch_end(self, trainer, state, batch, outputs):
-        rates = self._pynvml.nvmlDeviceGetUtilizationRates(self._handle)
+        rates = self._nvml.nvmlDeviceGetUtilizationRates(self._handle)
         state["gpu/util_pct"] = float(rates.gpu)
         state["gpu/mem_util_pct"] = float(rates.memory)
 
     def on_train_end(self, trainer, state):
-        pynvml = getattr(self, "_pynvml", None)
-        if pynvml is not None:
+        nvml = getattr(self, "_nvml", None)
+        if nvml is not None:
             try:
-                pynvml.nvmlShutdown()
+                nvml.nvmlShutdown()
             except Exception:
                 pass
-        self._pynvml = None
+        self._nvml = None
         self._handle = None
 
 

@@ -615,12 +615,17 @@ class Allegro(TensorDictModuleBase):
         edge_index = td["edges", "edge_index"]
         n_nodes: int = int(Z.shape[0])
 
-        scalar_features, tensor_features, edge_angular, _ = self.embedding(
+        scalar_features, tensor_features, edge_angular, edge_cutoff = self.embedding(
             Z=Z,
             bond_dist=bond_dist,
             bond_diff=bond_diff,
             edge_index=edge_index,
         )
+        # Allegro SI: every latent embedding is multiplied by u(r_ij) so that
+        # features (and their derivatives) vanish smoothly at r_cut. Without
+        # this, bias/type-embed paths leak non-zero activations past the
+        # cutoff and blow up on deep (≥3-layer) stacks.
+        u = edge_cutoff.unsqueeze(-1)
 
         per_layer_scalars: list[torch.Tensor] = []
         for layer in self.layers:
@@ -631,7 +636,7 @@ class Allegro(TensorDictModuleBase):
                 edge_index=edge_index,
                 n_nodes=n_nodes,
             )
-            per_layer_scalars.append(scalar_features)
+            per_layer_scalars.append(scalar_features * u)
 
         td["edges", "edge_features"] = torch.stack(per_layer_scalars, dim=1)
         return td

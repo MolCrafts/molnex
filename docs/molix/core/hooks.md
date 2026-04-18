@@ -153,7 +153,7 @@ whose names come from the metric list), override `scalar_keys` as a
 | `MetricsHook`               | `{prefix_train}/{MetricCls}`, `{prefix_val}/{MetricCls}` (dynamic)   |
 | `StepSpeedHook`             | `performance/step_per_second`                                        |
 | `GPUMemoryHook`             | `gpu/alloc_gib`, `gpu/resv_gib`, `gpu/peak_gib`                      |
-| `GPUUtilizationHook`        | `gpu/util_pct`, `gpu/mem_util_pct`                                   |
+| `GPUUtilizationHook`        | `gpu/util_pct`, `gpu/mem_util_pct` (requires `nvidia-ml-py`)         |
 | `GradClipHook`              | `train/grad_norm`                                                    |
 
 Default `TrainState` keys (written by the trainer, not by hooks) are
