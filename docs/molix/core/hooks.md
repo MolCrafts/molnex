@@ -167,3 +167,76 @@ and must not be overwritten by hooks.
 
 This keeps `state` a tidy, introspectable dashboard rather than a dumping
 ground.
+
+## Console Output Design
+
+Long training runs produce two very different output workloads:
+
+* a **live stream a human watches** — scannable at a glance, one visual
+  frame, must not be fragmented by intermittent messages;
+* a **full audit trail for post-mortem / `grep`** — timestamps, levels,
+  every INFO, warnings with stack traces.
+
+Molix keeps them orthogonal. The design is built on five principles:
+
+| # | Principle                                                                            |
+|---|--------------------------------------------------------------------------------------|
+| P1 | One visual frame per stream. stdout = training table + banners; file = everything.  |
+| P2 | Reprint the table header periodically (`Log.header_every_n_rows`, default 50).      |
+| P3 | Mark epoch boundaries visibly; never let epoch 0's last row abut epoch 1's first.   |
+| P4 | Intermittent events render as **thin separators**, not as raw INFO lines.           |
+| P5 | stdout stream level ≥ WARNING by default; INFO goes to the log file only.           |
+
+### Wiring
+
+```python
+from molix import logging
+
+logging.basicConfig(
+    level=logging.WARNING,      # console: warnings + errors only (P5)
+    file_level=logging.INFO,    # file: full INFO audit trail
+    filename=run_dir / "train.log",
+    filemode="w",
+)
+```
+
+### The `Log` hook owns the training table
+
+`Log` prints one row every N training batches. It also:
+
+* reprints the header every `header_every_n_rows` rows (P2),
+* draws a `────────` separator at each epoch transition (P3),
+* exposes an `announce(message)` method event-producing hooks can call
+  to inline a `─── <message> ───` line into the table (P4).
+
+```python
+log = Log(
+    every_n_steps=200,
+    keys=[metrics, step_speed, gpu],
+    header_every_n_rows=25,      # reprint header every 25 rows
+    epoch_separator=True,         # default — flip off to disable P3
+)
+```
+
+### Event-producing hooks should announce, not print
+
+A `CheckpointHook` that wrote `logger.info("Saved checkpoint to /tmp/...")`
+every epoch would slice the training table open with a fully-prefixed
+timestamped log line. Instead, it looks up the active `Log` hook and
+calls `log.announce("ckpt: last.pt @ step=3000")`, which renders as::
+
+      1000          0    2.65e-03    0.1535     --         57.6
+      2000          0    3.18e-03    0.1031     --         56.9
+      ─── ckpt: last.pt @ step=3000 ──────────────────────────────
+           step      epoch   train/loss   train/MAE   eval/MAE  step/s
+      3000          0    1.93e-03    0.0597     0.0808     57.6
+
+The same hook still calls `logger.info(...)` for the file audit trail —
+the console routing is additive, not a replacement. Users who don't
+register a `Log` hook simply see the INFO line on stdout (default
+behaviour, no surprise regression).
+
+Any custom hook with intermittent events (LR adjustments, precision
+switches, detected OOMs, …) should follow the same pattern — use the
+`_find_log_hook` helper (or register against `state` and let `Log` pick
+it up) rather than direct `print` / `logger.info`.

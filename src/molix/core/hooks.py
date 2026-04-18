@@ -514,7 +514,17 @@ class CheckpointHook(BaseHook):
         filepath = self.os.path.join(self.checkpoint_dir, filename)
         checkpoint = self._build_state_dict(trainer, state)
         self.torch.save(checkpoint, filepath)
+
+        # File-side: structured record. Users wanting a clean console
+        # should set ``stream_level=WARNING`` / ``file_level=INFO`` in
+        # ``logging.basicConfig`` so this line stays in the log file only.
         logger.info(f"Saved checkpoint to {filepath}")
+        # Console-side: if a Log hook is present, inline the event as a
+        # thin separator so it visually belongs to the training table.
+        log_hook = _find_log_hook(trainer)
+        if log_hook is not None:
+            step = int(state.get("global_step", 0))
+            log_hook.announce(f"ckpt: {filename} @ step={step}")
 
         # Register checkpoint as artifact
         if self.register_artifacts and hasattr(trainer, "ctx"):
@@ -1201,6 +1211,22 @@ def _collect_keys(items) -> list[str]:
     return out
 
 
+def _find_log_hook(trainer) -> "Log | None":
+    """Locate the active :class:`Log` hook on *trainer*, if any.
+
+    Event-producing hooks use this to route intermittent notifications
+    (checkpoint saved, LR reduced, precision switched, …) to the Log
+    hook's ``announce`` channel so they render inside the training
+    table's visual frame instead of breaking it with a raw INFO line.
+    Returns ``None`` when no ``Log`` is registered, in which case the
+    caller should fall back to :mod:`logging`.
+    """
+    for hook in getattr(trainer, "hooks", ()):
+        if isinstance(hook, Log):
+            return hook
+    return None
+
+
 class Log(BaseHook):
     """Periodic LAMMPS-thermo-style stdout logger.
 
@@ -1242,20 +1268,81 @@ class Log(BaseHook):
         keys,
         *,
         fmt: str = "{:>12.4g}",
+        header_every_n_rows: int = 50,
+        epoch_separator: bool = True,
     ):
         if every_n_steps <= 0:
             raise ValueError("every_n_steps must be positive")
+        if header_every_n_rows <= 0:
+            raise ValueError("header_every_n_rows must be positive")
         self.every_n_steps = every_n_steps
         self.keys = _collect_keys(keys)
         self.fmt = fmt
+        self.header_every_n_rows = header_every_n_rows
+        self.epoch_separator = epoch_separator
+        self._rows_since_header = 0
+        self._last_epoch: int | None = None
 
     def _columns(self) -> list[str]:
         return ["step", "epoch", *self.keys]
 
-    def on_train_start(self, trainer, state):
+    def _table_width(self) -> int:
+        """Total rendered width of one row, including column separators."""
+        col_w = _parse_fmt_width(self.fmt)
+        n_cols = len(self._columns())
+        # ``" ".join(...)`` adds (n_cols - 1) single-space separators.
+        return n_cols * col_w + max(0, n_cols - 1)
+
+    def _print_header(self) -> None:
         width = _parse_fmt_width(self.fmt)
         header = " ".join(f"{c:>{width}}" for c in self._columns())
         print(header, flush=True)
+        self._rows_since_header = 0
+
+    def announce(self, message: str) -> None:
+        """Emit a thin separator + *message* between table rows.
+
+        Event-producing hooks (checkpoint saved, LR reduced, precision
+        switched, …) call this to inline a one-liner event into the
+        training table without breaking column alignment. Forces a header
+        reprint on the next row so whoever is watching doesn't lose
+        context::
+
+            ─── ckpt: last.pt @ step=3000 ────────────────────────────
+                4000          0    6.02e-02     223.9       0.0808    46.4
+
+        Safe to call before :meth:`on_train_start` — it becomes a no-op
+        rather than printing a stray separator during module import.
+        """
+        if self._last_epoch is None:
+            return
+        width = self._table_width()
+        prefix = f"─── {message} "
+        pad = max(3, width - len(prefix))
+        print(prefix + "─" * pad, flush=True)
+        # Invalidate header so the next row re-prints column names.
+        self._rows_since_header = self.header_every_n_rows
+
+    def on_train_start(self, trainer, state):
+        self._rows_since_header = 0
+        self._last_epoch = int(state.get("epoch", 0))
+        self._print_header()
+
+    def on_epoch_end(self, trainer, state):
+        """Draw an epoch-boundary separator so the table reads as sections."""
+        if not self.epoch_separator:
+            return
+        # Only draw once per epoch transition and only after we've printed
+        # at least one row — otherwise epochs with zero logged steps
+        # produce consecutive separators.
+        epoch = int(state.get("epoch", 0))
+        if epoch == self._last_epoch:
+            return
+        width = self._table_width()
+        print("─" * width, flush=True)
+        self._last_epoch = epoch
+        # Force header reprint at the start of the new epoch's rows.
+        self._rows_since_header = self.header_every_n_rows
 
     def on_train_batch_end(self, trainer, state, batch, outputs):
         # global_step is incremented *after* this hook fires, so add 1 to get
@@ -1263,6 +1350,9 @@ class Log(BaseHook):
         step = int(state.get("global_step", 0)) + 1
         if step % self.every_n_steps != 0:
             return
+
+        if self._rows_since_header >= self.header_every_n_rows:
+            self._print_header()
 
         width = _parse_fmt_width(self.fmt)
         parts = [
@@ -1276,3 +1366,4 @@ class Log(BaseHook):
             else:
                 parts.append(f"{'nan':>{width}}")
         print(" ".join(parts), flush=True)
+        self._rows_since_header += 1

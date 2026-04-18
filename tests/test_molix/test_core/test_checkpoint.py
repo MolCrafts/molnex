@@ -492,6 +492,26 @@ class TestCheckpointHookIntegration:
         sd = TorchSaveBackend().load(Path(ckpt_dir) / "last.pt")
         assert "lr_scheduler_state_dict" in sd
 
+    def test_announces_through_log_hook_when_present(self, tmp_path, capsys):
+        """P4: CheckpointHook inlines the save event via Log.announce."""
+        from molix.core.hooks import Log
+
+        ckpt_dir = str(tmp_path / "ckpts")
+        log_hook = Log(every_n_steps=1, keys=["train/loss"])
+        ckpt_hook = CheckpointHook(
+            checkpoint_dir=ckpt_dir,
+            save_every_n_epochs=1,
+            save_last=False,
+        )
+        trainer = _make_trainer(hooks=[log_hook, ckpt_hook])
+        trainer.train(_MockDataModule(batches_per_epoch=2), max_epochs=1)
+
+        out = capsys.readouterr().out
+        # Expect a ``─── ckpt: epoch_0.pt @ step=N ─── ... ───`` separator
+        # somewhere in the run output, not just a raw "Saved checkpoint to"
+        # line slicing through the table.
+        assert "─── ckpt: epoch_0.pt @ step=" in out
+
 
 # ---------------------------------------------------------------------------
 # DefaultTrainStep with lr_scheduler
