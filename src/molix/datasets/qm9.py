@@ -204,6 +204,12 @@ class QM9Source:
             QM9 records (excluding ``tag`` and ``index``).
     """
 
+    # Semantic version of the *source* — bump when the raw-sample schema
+    # changes (e.g. new target keys, dtype changes, different XYZ parser).
+    # Folded into :attr:`source_id` so pipeline caches invalidate across
+    # versions without the user having to manually clear them.
+    SOURCE_VERSION: str = "v2"
+
     ALL_TARGETS: frozenset[str] = _QM9_GRAPH_TARGETS
     TARGET_SCHEMA: TargetSchema = TargetSchema(
         graph_level=_QM9_GRAPH_TARGETS,
@@ -278,7 +284,19 @@ class QM9Source:
 
     @property
     def source_id(self) -> str:
-        parts = [f"qm9:root={self.root}"]
+        """Semantic identity for :func:`molix.data.cache.cache_key`.
+
+        Derived from ``SOURCE_VERSION`` plus any configured
+        ``total`` / ``targets`` sub-selection. The tarball root is
+        intentionally *not* folded in — raw QM9 is a fixed public dataset,
+        so two ``QM9Source(root=X)`` and ``QM9Source(root=Y)`` instances
+        with the same version and same targets produce the same pipeline
+        cache regardless of where the bytes live on disk. That lets caches
+        survive re-homes of the data directory and lets workflows share
+        caches across machines. To force a split, subclass and override
+        :attr:`SOURCE_VERSION`.
+        """
+        parts = [f"qm9:{self.SOURCE_VERSION}"]
         if self._total is not None:
             parts.append(f"total={self._total}")
         if self._targets is not None:

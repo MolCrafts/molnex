@@ -282,7 +282,12 @@ class Trainer:
             self.model = self.model.to(self.device)
             self._checkpoint.model = self.model
 
-        datamodule.setup("fit")
+        # ``setup`` / ``on_epoch_start`` are optional on the datamodule
+        # contract so ad-hoc / test harnesses don't need to spell out empty
+        # method bodies just to satisfy the Trainer.
+        setup = getattr(datamodule, "setup", None)
+        if callable(setup):
+            setup("fit")
 
         if self._resume_from_checkpoint is not None:
             self._load_checkpoint(self._resume_from_checkpoint)
@@ -298,7 +303,9 @@ class Trainer:
         step_limit_reached = False
 
         while epoch < epoch_limit and not step_limit_reached:
-            datamodule.on_epoch_start(epoch)
+            on_epoch_start = getattr(datamodule, "on_epoch_start", None)
+            if callable(on_epoch_start):
+                on_epoch_start(epoch)
             self._call_hooks("on_epoch_start", self, self.state)
 
             # Training phase
@@ -312,6 +319,15 @@ class Trainer:
 
                 self.state.increment_step()
                 self.state.steps_since_last_eval += 1
+
+                # Step step-based schedulers per training batch. ``ReduceLROnPlateau``
+                # is the odd one out — its ``step`` takes a metric argument and is
+                # stepped at epoch end after evaluation (see below).
+                if self.lr_scheduler is not None and not isinstance(
+                    self.lr_scheduler,
+                    torch.optim.lr_scheduler.ReduceLROnPlateau,
+                ):
+                    self.lr_scheduler.step()
 
                 if (
                     self.eval_every_n_steps is not None
@@ -333,6 +349,18 @@ class Trainer:
                 self._call_hooks("on_eval_batch_start", self, self.state, batch)
                 outputs = self.eval_step.on_eval_batch(self, self.state, batch)
                 self._call_hooks("on_eval_batch_end", self, self.state, batch, outputs)
+
+            # ReduceLROnPlateau is metric-driven and only advances at epoch
+            # boundaries. Pull the metric the Checkpoint aggregate is tracking
+            # (``best_metric_name``, defaults to ``eval/loss``) so the
+            # scheduler sees the same signal the user's checkpoint hook does.
+            if isinstance(
+                self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau
+            ):
+                metric_name = self._checkpoint.best_metric_name
+                metric = self.state.get(metric_name)
+                if metric is not None:
+                    self.lr_scheduler.step(float(metric))
 
             self._call_hooks("on_epoch_end", self, self.state)
             self.state.increment_epoch()

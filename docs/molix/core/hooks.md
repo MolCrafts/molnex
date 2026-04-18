@@ -107,9 +107,9 @@ rather than overloading an existing one. Don't put loss under `performance/`.
 ### Name form within a namespace
 
 - Use **lower_snake_case** for descriptive names: `performance/step_per_second`.
-- Use bracket notation to embed units directly: `GPU-State/peak[GB]`,
-  `GPU-State/alloc[GB]`. A reader should not need to open the hook to know
-  what "1.23" means.
+- Encode units as a trailing snake_case suffix: `gpu/peak_gib`, `gpu/util_pct`.
+  Avoid brackets/backslashes/square braces — keys round-trip through
+  TensorBoard tags, Parquet column names, and filesystem paths.
 - Use the **class name verbatim** (no casefolding) when the name *is* an
   identity, e.g. metrics: `train/MAE`, `val/RMSE`. This matches the
   `class.__name__` that `MetricsHook` writes.
@@ -125,10 +125,10 @@ values **must** subclass `ScalarHook` and declare `scalar_keys`:
 from molix.core.hooks import ScalarHook
 
 class GPUMemoryHook(ScalarHook):
-    scalar_keys = ("GPU-State/alloc[GB]", "GPU-State/resv[GB]", "GPU-State/peak[GB]")
+    scalar_keys = ("gpu/alloc_gib", "gpu/resv_gib", "gpu/peak_gib")
 
     def on_train_batch_end(self, trainer, state, batch, outputs):
-        state["GPU-State/alloc[GB]"] = torch.cuda.memory_allocated() / 1e9
+        state["gpu/alloc_gib"] = torch.cuda.memory_allocated() / (1024**3)
         ...
 ```
 
@@ -152,7 +152,8 @@ whose names come from the metric list), override `scalar_keys` as a
 | `Trainer` (DefaultTrainStep)| `train/loss`                                                         |
 | `MetricsHook`               | `{prefix_train}/{MetricCls}`, `{prefix_val}/{MetricCls}` (dynamic)   |
 | `StepSpeedHook`             | `performance/step_per_second`                                        |
-| `GPUMemoryHook`             | `GPU-State/alloc[GB]`, `GPU-State/resv[GB]`, `GPU-State/peak[GB]`    |
+| `GPUMemoryHook`             | `gpu/alloc_gib`, `gpu/resv_gib`, `gpu/peak_gib`                      |
+| `GPUUtilizationHook`        | `gpu/util_pct`, `gpu/mem_util_pct`                                   |
 | `GradClipHook`              | `train/grad_norm`                                                    |
 
 Default `TrainState` keys (written by the trainer, not by hooks) are

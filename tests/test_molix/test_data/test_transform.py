@@ -6,6 +6,7 @@ from molix.data.pipeline import Pipeline
 
 
 def _compute_neighbor_list_naive(positions: torch.Tensor, cutoff: float):
+    """Upper-triangle (i > j) reference pairs + distances via O(N^2) scan."""
     diff = positions.unsqueeze(0) - positions.unsqueeze(1)
     dist = torch.norm(diff, dim=2)
     mask = (dist < cutoff) & (dist > 0)
@@ -24,7 +25,13 @@ class TestNeighborList:
         assert isinstance(t, SampleTask)
         assert isinstance(t, Runnable)
 
-    def test_small_system_pairs(self):
+    def test_small_system_pairs_symmetric_default(self):
+        """Default ``symmetry=True`` returns full bidirectional edges.
+
+        Every upper-triangle pair from the naive reference must appear in
+        both directions, so ``E == 2 * n_pairs`` and every distance is
+        duplicated. This is the Allegro / MACE-facing production path.
+        """
         positions = torch.tensor(
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             dtype=torch.float32,
@@ -32,18 +39,64 @@ class TestNeighborList:
         sample = {"Z": torch.tensor([8, 1, 1]), "pos": positions,
                   "targets": {"U0": torch.tensor([0.0])}}
 
-        task = NeighborList(cutoff=2.0, max_num_pairs=10)
-        result = task(sample)
-
+        result = NeighborList(cutoff=2.0, max_num_pairs=10)(sample)
         edge_index = result["edge_index"]
-        assert edge_index.ndim == 2
-        assert edge_index.shape[1] == 2
 
-        op_dist = result["bond_dist"]
         ref_i, ref_j, _, ref_dist = _compute_neighbor_list_naive(positions, 2.0)
+        assert edge_index.ndim == 2 and edge_index.shape[1] == 2
+        assert edge_index.shape[0] == 2 * ref_i.numel()
 
-        assert edge_index[:, 0].numel() == ref_i.numel()
-        assert torch.allclose(op_dist.sort().values, ref_dist.sort().values, atol=1e-5)
+        edges = {(int(a), int(b)) for a, b in edge_index.tolist()}
+        for a, b in zip(ref_i.tolist(), ref_j.tolist()):
+            assert (a, b) in edges and (b, a) in edges
+
+        doubled = torch.cat([ref_dist, ref_dist]).sort().values
+        assert torch.allclose(
+            result["bond_dist"].sort().values, doubled, atol=1e-5
+        )
+
+    def test_small_system_pairs_half(self):
+        """With ``symmetry=False`` the output matches the upper-triangle reference."""
+        positions = torch.tensor(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            dtype=torch.float32,
+        )
+        sample = {"Z": torch.tensor([8, 1, 1]), "pos": positions,
+                  "targets": {"U0": torch.tensor([0.0])}}
+
+        result = NeighborList(cutoff=2.0, max_num_pairs=10, symmetry=False)(sample)
+        edge_index = result["edge_index"]
+
+        ref_i, ref_j, _, ref_dist = _compute_neighbor_list_naive(positions, 2.0)
+        assert edge_index.shape == (ref_i.numel(), 2)
+        assert torch.allclose(
+            result["bond_dist"].sort().values, ref_dist.sort().values, atol=1e-5
+        )
+
+    def test_bond_diff_source_to_target_convention(self):
+        """``bond_diff[k] == pos[target_k] - pos[source_k]`` for every edge.
+
+        Locks in the edge convention documented in CLAUDE.md: edge_index[:,0]
+        is the source, edge_index[:,1] is the target, and bond_diff points
+        source → target. Required by SphericalHarmonics and cuEquivariance.
+        """
+        positions = torch.tensor(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            dtype=torch.float32,
+        )
+        sample = {"Z": torch.tensor([8, 1, 1]), "pos": positions,
+                  "targets": {"U0": torch.tensor([0.0])}}
+
+        # Test both modes to make sure the convention holds bidirectionally.
+        for symmetry in (True, False):
+            result = NeighborList(
+                cutoff=2.0, max_num_pairs=10, symmetry=symmetry,
+            )(sample)
+            edge_index = result["edge_index"]
+            expected = positions[edge_index[:, 1]] - positions[edge_index[:, 0]]
+            assert torch.allclose(result["bond_diff"], expected, atol=1e-5), (
+                f"bond_diff violates source→target convention (symmetry={symmetry})"
+            )
 
     def test_cutoff_behavior(self):
         positions = torch.tensor(

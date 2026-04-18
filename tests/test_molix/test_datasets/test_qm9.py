@@ -104,7 +104,9 @@ class TestQM9Source:
         monkeypatch.setattr(qm9_mod, "_load_raw", fail_load_raw)
         src = QM9Source(fake_qm9_root, download=False)
         source_id = src.source_id
-        assert source_id.startswith("qm9:v2:")
+        # Version namespace: exactly "qm9:v2" when no sub-selector is set,
+        # or "qm9:v2:<extra>..." when total / targets are configured.
+        assert source_id == "qm9:v2" or source_id.startswith("qm9:v2:")
 
     def test_basic_indexing(self, fake_qm9_root):
         src = QM9Source(fake_qm9_root, download=False)

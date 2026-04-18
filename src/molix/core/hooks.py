@@ -368,30 +368,63 @@ class TensorBoardHook(BaseHook):
 class CheckpointHook(BaseHook):
     """Saves model checkpoints during training.
 
+    Delegates to :meth:`trainer._checkpoint.state_dict` so that the saved
+    payload always carries the *complete* set of resume-critical state
+    (model, optimizer, lr_scheduler, AMP scaler, RNG states, counters,
+    best-metric tracking). That matches what
+    :meth:`trainer._load_checkpoint` consumes on resume, so the save/load
+    round-trip round-trips — no silent drift between what the hook writes
+    and what the Trainer reads.
+
     Args:
-        checkpoint_dir: Directory to save checkpoints (default: "./checkpoints")
-        save_every_n_epochs: Save checkpoint every N epochs (default: 1)
-        save_last: Always save the last checkpoint (default: True)
+        checkpoint_dir: Directory to save checkpoints into.
+        save_every_n_epochs: Save an ``epoch_{N}.pt`` snapshot every N epochs.
+            Use a large number (e.g. ``10_000``) to disable periodic saves
+            and rely solely on ``save_last`` / ``save_best``.
+        save_last: Write ``last.pt`` at end of training and on every epoch-end
+            save (so a kill -9'd run still has a resumable snapshot).
+        save_best: Track a scalar metric in :class:`TrainState` and write
+            ``best.pt`` whenever it improves.
+        best_metric_name: Key in ``state`` to track for ``save_best``
+            (default ``"eval/loss"``).
+        best_metric_mode: ``"min"`` (smaller = better) or ``"max"``.
+        register_artifacts: Register each written checkpoint via
+            ``trainer.ctx.save_artifact`` (if present).
 
     Example:
         ```python
-        from molix.core.hooks import CheckpointHook
-
-        hook = CheckpointHook(checkpoint_dir="./ckpt", save_every_n_epochs=5)
+        hook = CheckpointHook(
+            checkpoint_dir="./ckpt",
+            save_every_n_epochs=5,
+            save_best=True,
+            best_metric_name="eval/MAE",
+            best_metric_mode="min",
+        )
         trainer = Trainer(model=model, hooks=[hook])
         ```
     """
+
+    _MINUS_INF = float("-inf")
+    _PLUS_INF = float("inf")
 
     def __init__(
         self,
         checkpoint_dir: str = "./checkpoints",
         save_every_n_epochs: int = 1,
         save_last: bool = True,
+        save_best: bool = False,
+        best_metric_name: str = "eval/loss",
+        best_metric_mode: str = "min",
         register_artifacts: bool = False,
     ):
         import os
 
         import torch
+
+        if best_metric_mode not in ("min", "max"):
+            raise ValueError(
+                f"best_metric_mode must be 'min' or 'max', got {best_metric_mode!r}"
+            )
 
         self.os = os
         self.torch = torch
@@ -399,31 +432,87 @@ class CheckpointHook(BaseHook):
         self.checkpoint_dir = checkpoint_dir
         self.save_every_n_epochs = save_every_n_epochs
         self.save_last = save_last
+        self.save_best = save_best
+        self.best_metric_name = best_metric_name
+        self.best_metric_mode = best_metric_mode
         self.register_artifacts = register_artifacts
 
+        self._best_value: float | None = None
+
     def on_train_start(self, trainer, state):
-        """Create checkpoint directory."""
+        """Create checkpoint directory and sync best-metric metadata."""
         self.os.makedirs(self.checkpoint_dir, exist_ok=True)
+        # Push tracking config into trainer._checkpoint so the saved payload
+        # self-describes its own best-metric semantics.
+        ckpt = getattr(trainer, "_checkpoint", None)
+        if ckpt is not None:
+            ckpt.best_metric_name = self.best_metric_name
 
     def on_epoch_end(self, trainer, state):
-        """Save checkpoint at specified intervals."""
-        if (state.epoch + 1) % self.save_every_n_epochs == 0:
+        """Save periodic / best / last checkpoints at epoch end."""
+        if self.save_every_n_epochs > 0 and (state.epoch + 1) % self.save_every_n_epochs == 0:
             self._save_checkpoint(trainer, state, f"epoch_{state.epoch}.pt")
-
-    def on_train_end(self, trainer, state):
-        """Save final checkpoint."""
+        if self.save_best:
+            self._maybe_save_best(trainer, state)
         if self.save_last:
             self._save_checkpoint(trainer, state, "last.pt")
+
+    def on_train_end(self, trainer, state):
+        """Save final ``last.pt``."""
+        if self.save_last:
+            self._save_checkpoint(trainer, state, "last.pt")
+
+    def _is_improvement(self, candidate: float) -> bool:
+        if self._best_value is None:
+            return True
+        if self.best_metric_mode == "min":
+            return candidate < self._best_value
+        return candidate > self._best_value
+
+    def _maybe_save_best(self, trainer, state):
+        try:
+            raw = state[self.best_metric_name]
+        except KeyError:
+            return  # metric not populated yet
+        value = float(raw)
+        if not self._is_improvement(value):
+            return
+        self._best_value = value
+        ckpt = getattr(trainer, "_checkpoint", None)
+        if ckpt is not None:
+            ckpt.best_metric = value
+        self._save_checkpoint(trainer, state, "best.pt")
+
+    def _build_state_dict(self, trainer, state) -> dict:
+        """Produce the complete resume-ready state dict.
+
+        Prefers the Trainer-owned :class:`Checkpoint` aggregate (includes
+        RNG, AMP scaler, lr_scheduler, best-metric tracking); falls back
+        to a minimal snapshot if the trainer doesn't expose one (e.g.
+        a stub trainer used in a focused unit test).
+        """
+        ckpt = getattr(trainer, "_checkpoint", None)
+        if ckpt is not None:
+            ckpt.epoch = int(state.epoch)
+            ckpt.global_step = int(state.global_step)
+            if self.save_best and self._best_value is not None:
+                ckpt.best_metric = self._best_value
+            return ckpt.state_dict()
+        # Fallback: minimal payload.
+        sd: dict = {
+            "epoch": int(state.epoch),
+            "global_step": int(state.global_step),
+        }
+        if trainer.model is not None:
+            sd["model_state_dict"] = trainer.model.state_dict()
+        if trainer.optimizer is not None:
+            sd["optimizer_state_dict"] = trainer.optimizer.state_dict()
+        return sd
 
     def _save_checkpoint(self, trainer, state, filename):
         """Save checkpoint to file."""
         filepath = self.os.path.join(self.checkpoint_dir, filename)
-        checkpoint = {
-            "epoch": state.epoch,
-            "global_step": state.global_step,
-            "model_state_dict": trainer.model.state_dict() if trainer.model is not None else None,
-            "optimizer_state_dict": trainer.optimizer.state_dict() if trainer.optimizer is not None else None,
-        }
+        checkpoint = self._build_state_dict(trainer, state)
         self.torch.save(checkpoint, filepath)
         logger.info(f"Saved checkpoint to {filepath}")
 
@@ -961,20 +1050,24 @@ class GPUMemoryHook(ScalarHook):
 
     Writes three scalars to ``state`` each ``on_train_batch_end``:
 
-    - ``GPU-State/alloc[GB]``: currently allocated memory (``memory_allocated``).
-    - ``GPU-State/resv[GB]``:  reserved memory (``memory_reserved``).
-    - ``GPU-State/peak[GB]``:  peak ``memory_allocated`` since the last batch;
+    - ``gpu/alloc_gib``: currently allocated memory (``memory_allocated``).
+    - ``gpu/resv_gib``:  reserved memory (``memory_reserved``).
+    - ``gpu/peak_gib``:  peak ``memory_allocated`` since the last batch;
       ``reset_peak_memory_stats`` is called after reading so the value always
       reflects the *window* between consecutive reads — most useful for
       locating OOM hotspots inside :class:`Log`.
+
+    Key names are slash/underscore only (no brackets), so they round-trip
+    cleanly through TensorBoard tags, Parquet column names, and filesystem
+    paths.
 
     No-op when ``torch.cuda.is_available()`` is ``False``; the keys are still
     written (as ``0.0``) so headers stay aligned.
     """
 
-    scalar_keys = ("GPU-State/alloc[GB]", "GPU-State/resv[GB]", "GPU-State/peak[GB]")
+    scalar_keys = ("gpu/alloc_gib", "gpu/resv_gib", "gpu/peak_gib")
 
-    _GB = 10 ** 9
+    _GB = 1024 ** 3  # GiB, matches the ``_gib`` suffix on the keys
 
     def on_train_start(self, trainer, state):
         import torch
@@ -986,14 +1079,14 @@ class GPUMemoryHook(ScalarHook):
         import torch
 
         if torch.cuda.is_available():
-            state["GPU-State/alloc[GB]"] = torch.cuda.memory_allocated() / self._GB
-            state["GPU-State/resv[GB]"] = torch.cuda.memory_reserved() / self._GB
-            state["GPU-State/peak[GB]"] = torch.cuda.max_memory_allocated() / self._GB
+            state["gpu/alloc_gib"] = torch.cuda.memory_allocated() / self._GB
+            state["gpu/resv_gib"] = torch.cuda.memory_reserved() / self._GB
+            state["gpu/peak_gib"] = torch.cuda.max_memory_allocated() / self._GB
             torch.cuda.reset_peak_memory_stats()
         else:
-            state["GPU-State/alloc[GB]"] = 0.0
-            state["GPU-State/resv[GB]"] = 0.0
-            state["GPU-State/peak[GB]"] = 0.0
+            state["gpu/alloc_gib"] = 0.0
+            state["gpu/resv_gib"] = 0.0
+            state["gpu/peak_gib"] = 0.0
 
 
 class GPUUtilizationHook(ScalarHook):
@@ -1001,8 +1094,8 @@ class GPUUtilizationHook(ScalarHook):
 
     Writes two scalars to ``state`` on ``on_train_batch_end``:
 
-    - ``GPU-State/util[%]``:     SM utilization (instantaneous NVML sample).
-    - ``GPU-State/mem_util[%]``: Memory-bandwidth utilization.
+    - ``gpu/util_pct``:     SM utilization (instantaneous NVML sample).
+    - ``gpu/mem_util_pct``: Memory-bandwidth utilization.
 
     Backed by ``nvidia-ml-py`` (imported as ``pynvml``). The call takes
     ~100µs and does not trigger a CUDA synchronization, so it is safe to
@@ -1014,7 +1107,7 @@ class GPUUtilizationHook(ScalarHook):
     reporting zeros.
     """
 
-    scalar_keys = ("GPU-State/util[%]", "GPU-State/mem_util[%]")
+    scalar_keys = ("gpu/util_pct", "gpu/mem_util_pct")
 
     def on_train_start(self, trainer, state):
         import torch
@@ -1038,8 +1131,8 @@ class GPUUtilizationHook(ScalarHook):
 
     def on_train_batch_end(self, trainer, state, batch, outputs):
         rates = self._pynvml.nvmlDeviceGetUtilizationRates(self._handle)
-        state["GPU-State/util[%]"] = float(rates.gpu)
-        state["GPU-State/mem_util[%]"] = float(rates.memory)
+        state["gpu/util_pct"] = float(rates.gpu)
+        state["gpu/mem_util_pct"] = float(rates.memory)
 
     def on_train_end(self, trainer, state):
         pynvml = getattr(self, "_pynvml", None)
@@ -1085,7 +1178,7 @@ def _collect_keys(items) -> list[str]:
 
     Accepts::
 
-        keys=["train/loss", step_speed_hook, "GPU-State/peak[GB]"]
+        keys=["train/loss", step_speed_hook, "gpu/peak_gib"]
 
     where any ``ScalarHook`` is expanded to its ``scalar_keys``. Duplicates
     are preserved in order of first occurrence.
