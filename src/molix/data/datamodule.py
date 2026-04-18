@@ -81,6 +81,31 @@ class DataModule:
         persistent_workers: Keep workers alive between epochs.
         prefetch_factor: Batches prefetched per worker.
         seed: RNG seed for DDP sampler shuffling.
+        multiprocessing_context: Start method for DataLoader worker
+            processes. Defaults to ``"spawn"`` — this is the future-proof
+            choice for three reasons:
+
+            1. Python 3.14 switched the POSIX default start method to
+               ``forkserver``. The forkserver daemon itself is launched
+               via ``os.fork()``, and PyTorch (plus most scientific
+               libs) spawns background threads at import, so by the
+               time the first DataLoader is built the main process is
+               already multi-threaded. That triggers
+               ``DeprecationWarning: This process ... is multi-threaded,
+               use of fork() may lead to deadlocks in the child``.
+               ``spawn`` never forks.
+            2. ``spawn`` is the only safe start method when CUDA
+               tensors live in the parent (``fork`` silently duplicates
+               CUDA contexts, which is undefined behaviour).
+            3. It's the default on macOS and Windows already, so
+               ``spawn``-clean code is what survives portability.
+
+            The cost is a slower worker boot (~1–5 s each), paid once
+            per run when ``persistent_workers=True`` — negligible for
+            any real training job. Pass ``"fork"`` / ``"forkserver"``
+            explicitly if you need to opt out (e.g. pure-CPU Linux
+            jobs with cold-start cost sensitivity). Ignored when
+            ``num_workers == 0``.
     """
 
     def __init__(
@@ -96,6 +121,7 @@ class DataModule:
         persistent_workers: bool = False,
         prefetch_factor: int | None = None,
         seed: int = 42,
+        multiprocessing_context: str | None = "spawn",
     ) -> None:
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
@@ -111,9 +137,18 @@ class DataModule:
         self.persistent_workers = persistent_workers and num_workers > 0
         self.prefetch_factor = prefetch_factor
         self.seed = seed
+        self.multiprocessing_context = multiprocessing_context
 
         self._train_sampler: DistributedSampler | None = None
         self._val_sampler: DistributedSampler | None = None
+
+    def _worker_context(self) -> str | None:
+        """Start method passed to :class:`DataLoader`, or ``None`` for sync.
+
+        ``DataLoader`` rejects ``multiprocessing_context`` when
+        ``num_workers == 0``, so we only forward it for the async path.
+        """
+        return self.multiprocessing_context if self.num_workers > 0 else None
 
     # -- Lifecycle (Trainer calls these) ------------------------------------
 
@@ -145,6 +180,7 @@ class DataModule:
             prefetch_factor=self.prefetch_factor,
             collate_fn=self._make_collate_fn(),
             drop_last=_is_distributed(),
+            multiprocessing_context=self._worker_context(),
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -168,6 +204,7 @@ class DataModule:
             persistent_workers=self.persistent_workers,
             prefetch_factor=self.prefetch_factor,
             collate_fn=self._make_collate_fn(),
+            multiprocessing_context=self._worker_context(),
         )
 
     def _make_collate_fn(self) -> "_CollateFn":
@@ -183,16 +220,19 @@ class DataModule:
 
 
 # ---------------------------------------------------------------------------
-# Picklable collate wrapper (required for Python 3.14+ forkserver workers)
+# Picklable collate wrapper (required for non-fork start methods)
 # ---------------------------------------------------------------------------
 
 
 class _CollateFn:
     """Picklable collate callable for DataLoader workers.
 
-    Python 3.14 changed the default multiprocessing start method on POSIX to
-    ``forkserver``, which requires all worker arguments to be picklable.
-    A plain closure (local function) is not picklable; a top-level class is.
+    ``spawn`` / ``forkserver`` start methods both send the collate callable
+    to workers through ``pickle``, so a local closure won't survive the
+    trip. A top-level class keeps it picklable on every supported Python
+    and every platform (``spawn`` is already the default on macOS/Windows
+    and is what we default to in :class:`DataModule` to sidestep the
+    Python 3.14 multi-threaded-fork DeprecationWarning).
     """
 
     def __init__(

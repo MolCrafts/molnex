@@ -190,6 +190,51 @@ class TestPickling:
 
 
 # ---------------------------------------------------------------------------
+# Worker start method (Python 3.14 multi-threaded-fork deprecation)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerContext:
+    def test_default_is_spawn(self, _dm_factory):
+        """Default sidesteps Python 3.14's multi-threaded forkserver warning."""
+        dm = _dm_factory()
+        assert dm.multiprocessing_context == "spawn"
+
+    def test_context_forwarded_when_workers_enabled(self, _dm_factory):
+        dm = _dm_factory(num_workers=2, persistent_workers=False)
+        dl = dm.train_dataloader()
+        # torch.DataLoader resolves the string to a BaseContext object.
+        ctx = dl.multiprocessing_context
+        assert ctx is not None
+        # Accept either the raw string (some torch versions keep it) or a
+        # resolved BaseContext (others resolve eagerly).
+        name = ctx if isinstance(ctx, str) else ctx.get_start_method()
+        assert name == "spawn"
+
+    def test_context_ignored_when_num_workers_zero(self, _dm_factory):
+        dm = _dm_factory(num_workers=0)
+        dl = dm.train_dataloader()
+        # DataLoader normalises an unused context to ``None`` in sync mode.
+        assert dl.multiprocessing_context is None
+
+    def test_explicit_override(self, tmp_path):
+        train, val = _write_and_load_split(tmp_path, 4, 2)
+        dm = DataModule(
+            train, val,
+            batch_size=2,
+            num_workers=2,
+            persistent_workers=False,
+            pin_memory=False,
+            multiprocessing_context="forkserver",
+        )
+        assert dm.multiprocessing_context == "forkserver"
+        dl = dm.train_dataloader()
+        ctx = dl.multiprocessing_context
+        name = ctx if isinstance(ctx, str) else ctx.get_start_method()
+        assert name == "forkserver"
+
+
+# ---------------------------------------------------------------------------
 # Epoch hook
 # ---------------------------------------------------------------------------
 
