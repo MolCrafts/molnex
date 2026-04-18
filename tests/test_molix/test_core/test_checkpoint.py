@@ -512,6 +512,25 @@ class TestCheckpointHookIntegration:
         # line slicing through the table.
         assert "─── ckpt: epoch_0.pt @ step=" in out
 
+    def test_epoch_end_plus_train_end_dedup_last_pt(self, tmp_path, capsys):
+        """``on_epoch_end`` + ``on_train_end`` landing on the same step
+        must not write ``last.pt`` twice (nor announce twice)."""
+        from molix.core.hooks import Log
+
+        ckpt_dir = str(tmp_path / "ckpts")
+        log_hook = Log(every_n_steps=1, keys=["train/loss"])
+        ckpt_hook = CheckpointHook(
+            checkpoint_dir=ckpt_dir,
+            save_every_n_epochs=10_000,  # disable periodic epoch_*.pt saves
+            save_last=True,
+        )
+        trainer = _make_trainer(hooks=[log_hook, ckpt_hook])
+        trainer.train(_MockDataModule(batches_per_epoch=2), max_epochs=1)
+
+        out = capsys.readouterr().out
+        # Exactly one inline announcement for last.pt — not two.
+        assert out.count("─── ckpt: last.pt @ step=") == 1, out
+
 
 # ---------------------------------------------------------------------------
 # DefaultTrainStep with lr_scheduler

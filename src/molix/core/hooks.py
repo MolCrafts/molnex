@@ -438,6 +438,13 @@ class CheckpointHook(BaseHook):
         self.register_artifacts = register_artifacts
 
         self._best_value: float | None = None
+        # (filename, global_step) pair for the most recent *announce* — used
+        # to dedupe the visual console line when ``on_epoch_end`` and
+        # ``on_train_end`` both fire on the final step of a run. The disk
+        # write itself is not deduped: the second save legitimately
+        # captures post-``increment_epoch`` state (epoch counter bumped),
+        # so the file on disk always reflects the most recent write.
+        self._last_announced: tuple[str, int] | None = None
 
     def on_train_start(self, trainer, state):
         """Create checkpoint directory and sync best-metric metadata."""
@@ -458,7 +465,7 @@ class CheckpointHook(BaseHook):
             self._save_checkpoint(trainer, state, "last.pt")
 
     def on_train_end(self, trainer, state):
-        """Save final ``last.pt``."""
+        """Save final ``last.pt`` unless ``on_epoch_end`` just wrote it."""
         if self.save_last:
             self._save_checkpoint(trainer, state, "last.pt")
 
@@ -510,7 +517,9 @@ class CheckpointHook(BaseHook):
         return sd
 
     def _save_checkpoint(self, trainer, state, filename):
-        """Save checkpoint to file."""
+        """Save checkpoint to disk; dedupe redundant console announces."""
+        step = int(state.get("global_step", 0))
+
         filepath = self.os.path.join(self.checkpoint_dir, filename)
         checkpoint = self._build_state_dict(trainer, state)
         self.torch.save(checkpoint, filepath)
@@ -519,11 +528,18 @@ class CheckpointHook(BaseHook):
         # should set ``stream_level=WARNING`` / ``file_level=INFO`` in
         # ``logging.basicConfig`` so this line stays in the log file only.
         logger.info(f"Saved checkpoint to {filepath}")
+
         # Console-side: if a Log hook is present, inline the event as a
         # thin separator so it visually belongs to the training table.
+        # Dedupe by (filename, step): ``on_epoch_end`` + ``on_train_end``
+        # both fire at the same step on the last epoch, but from the
+        # user's point of view it's the same save — announce once.
+        marker = (filename, step)
+        if self._last_announced == marker:
+            return
+        self._last_announced = marker
         log_hook = _find_log_hook(trainer)
         if log_hook is not None:
-            step = int(state.get("global_step", 0))
             log_hook.announce(f"ckpt: {filename} @ step={step}")
 
         # Register checkpoint as artifact
