@@ -32,6 +32,7 @@ import torch
 from torch.utils.data import Dataset
 
 from molix.data.cache import load as _load_cache
+from molix.data.cache import unpack_one as _unpack_one
 
 
 __all__ = ["BaseDataset", "MmapDataset", "CachedDataset", "SubsetDataset"]
@@ -88,19 +89,26 @@ class BaseDataset(Dataset[Any], ABC):
 
 
 class _CacheBacked(BaseDataset):
-    """Shared implementation: load a cache file, expose samples + task_states."""
+    """Shared implementation: load a cache file, expose samples + task_states.
+
+    The cache is in packed layout (see :func:`molix.data.cache._pack_samples`)
+    — a fixed number of big concat tensors plus cumsum pointers. ``__getitem__``
+    reconstructs a sample dict on the fly by slicing into those tensors, so the
+    per-item cost is O(n_keys) and uses views (no storage copy when ``mmap=True``).
+    """
 
     def __init__(self, sink: str | Path, *, mmap: bool) -> None:
         self._sink = Path(sink)
-        data = _load_cache(self._sink, mmap=mmap)
-        self._samples: list[dict] = data["samples"]
-        self._task_states: dict[str, Any] = data.get("task_states", {}) or {}
+        payload = _load_cache(self._sink, mmap=mmap)
+        self._payload: dict[str, Any] = payload
+        self._n_samples: int = int(payload["n_samples"])
+        self._task_states: dict[str, Any] = payload.get("task_states", {}) or {}
 
     def __len__(self) -> int:
-        return len(self._samples)
+        return self._n_samples
 
     def __getitem__(self, idx: int) -> dict:  # type: ignore[override]
-        return self._samples[idx]
+        return _unpack_one(self._payload, idx)
 
     @property
     def sink(self) -> Path:
