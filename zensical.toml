@@ -1,0 +1,48 @@
+[project]
+site_name = "MolNex Documentation"
+site_description = "Dict-first molecular ML framework"
+
+# Navigation
+nav = [
+    { "Home" = "index.md" },
+    { "Get Started" = [
+        { "Installation" = "get-started/installation.md" },
+        { "Quick Start" = "get-started/quick-start.md" }
+    ]},
+    { "Molix (Training)" = [
+        { "Overview" = "molix/index.md" },
+        { "Quickstart" = "molix/quickstart.md" },
+        { "Core" = [
+            { "The Trainer" = "molix/core/trainer.md" },
+            { "Hooks System" = "molix/core/hooks.md" }
+        ]},
+        { "Data" = [
+            { "Overview" = "molix/data/index.md" },
+            { "Data Loading" = "molix/data/loading.md" },
+            { "Data Modules" = "molix/data/datamodules.md" }
+        ]}
+    ]},
+    { "MolRep (Representation)" = [
+        { "Overview" = "molrep/index.md" },
+        { "Quickstart" = "molrep/quickstart.md" },
+        { "Modules" = [
+            { "Encoders" = "molrep/encoders.md" },
+            { "Atom Embeddings" = "molrep/modules/embedding.md" }
+        ]}
+    ]},
+    { "MolPot (Potentials)" = [
+        { "Overview" = "molpot/index.md" },
+        { "Quickstart" = "molpot/quickstart.md" },
+        { "Physics" = [
+            { "Components" = "molpot/components.md" },
+            { "Gradients & Forces" = "molpot/gradients.md" }
+        ]}
+    ]},
+    { "Reference" = [
+        { "Batch Schema" = "tensordict_schema.md" },
+        { "Component Taxonomy" = "component_taxonomy.md" }
+    ]}
+]
+
+[project.theme]
+name = "material"

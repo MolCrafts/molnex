@@ -1,0 +1,96 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "torch>=2.10"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "molnex"
+version = "0.1.0"
+description = "Dict-first molecular ML framework"
+readme = "README.md"
+license = "BSD-3-Clause"
+requires-python = ">=3.10"
+authors = [
+  { name = "Roy Kid" },
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Chemistry",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+  "torch>=2.10",
+  "tensordict",
+  "cuequivariance",
+  "cuequivariance-torch",
+  "molcrafts-molpy>=0.3.0",
+  "python-multipart",
+  "molcrafts-mollog>=1.0.0",
+  "molcrafts-molcfg>=1.0.0",
+  "numpy",
+  "opt_einsum_fx",
+  "pydantic",
+  "tqdm",
+  "nvidia-ml-py",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+  "pytest-benchmark>=4.0",
+  "ruff>=0.15",
+  "ty>=0.0.25",
+]
+bench = ["pytest-benchmark>=4.0"]
+
+[project.urls]
+Repository = "https://github.com/molcrafts/molnex"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+python_files = ["test_*", "bm_*"]
+python_classes = ["Test*", "BM*"]
+
+[tool.scikit-build]
+wheel.packages = ["src/molix", "src/molrep", "src/molpot", "src/molzoo"]
+cmake.source-dir = "."
+cmake.version = ">4.00.0"
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+  "E402",  # module-level import not at top (needed for conditional imports)
+  "E741",  # ambiguous variable name (common in ML: l for layers, etc.)
+  "F403",  # star imports in __init__.py (intentional for re-export)
+  "F405",  # star import usage (consequence of F403 pattern)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]  # re-exports don't need to be "used"
+
+[tool.ty]
+[tool.ty.rules]
+# Downgrade false positives from torch ops stubs and third-party libraries
+invalid-argument-type = "warn"
+# not-subscriptable: register_buffer returns None in stubs but attr is Tensor at runtime
+not-subscriptable = "warn"
+# unresolved-attribute: third-party libs without stubs (torch ops, mollog, cuequivariance)
+unresolved-attribute = "warn"
+# call-non-callable: Optional types narrowed by runtime asserts
+call-non-callable = "warn"
+# invalid-return-type: some return types involve third-party Unknown types (metrics, collate)
+invalid-return-type = "warn"
+# invalid-method-override: Dataset generic covariance and task param naming
+invalid-method-override = "warn"
+# invalid-assignment: intentional ssl context bypass for dataset downloading
+invalid-assignment = "warn"
+
+[tool.ty.environment]
+python-version = "3.12"

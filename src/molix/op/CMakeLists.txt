@@ -1,0 +1,61 @@
+cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
+
+project(molnex_op LANGUAGES CXX)
+
+set(MOLNEX_OP_LIBRARY_NAME molnex_opLib)
+
+option(MOLNEX_OP_ENABLE_CUDA "Build CUDA kernels" OFF)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(Torch REQUIRED)
+
+file(GLOB_RECURSE MOLNEX_OP_SOURCES CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+)
+
+if(MOLNEX_OP_ENABLE_CUDA)
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+
+  file(GLOB_RECURSE MOLNEX_OP_CUDA_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu"
+  )
+
+  list(APPEND MOLNEX_OP_SOURCES ${MOLNEX_OP_CUDA_SOURCES})
+endif()
+
+message(STATUS "molnex_op: CUDA=${MOLNEX_OP_ENABLE_CUDA}")
+message(STATUS "molnex_op: sources=${MOLNEX_OP_SOURCES}")
+
+add_library(${MOLNEX_OP_LIBRARY_NAME} SHARED ${MOLNEX_OP_SOURCES})
+
+target_include_directories(${MOLNEX_OP_LIBRARY_NAME} PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+
+target_link_libraries(${MOLNEX_OP_LIBRARY_NAME} PRIVATE Python::Module)
+target_link_libraries(${MOLNEX_OP_LIBRARY_NAME} PRIVATE ${TORCH_LIBRARIES})
+
+if(TORCH_CXX_FLAGS)
+  separate_arguments(_MOLNEX_TORCH_CXX_FLAGS NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
+  target_compile_options(${MOLNEX_OP_LIBRARY_NAME} PRIVATE ${_MOLNEX_TORCH_CXX_FLAGS})
+endif()
+
+if(MOLNEX_OP_ENABLE_CUDA)
+  target_compile_definitions(${MOLNEX_OP_LIBRARY_NAME} PRIVATE
+    __CUDA_NO_HALF_OPERATORS__
+  )
+  target_compile_options(${MOLNEX_OP_LIBRARY_NAME} PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+  )
+endif()
+
+set_target_properties(${MOLNEX_OP_LIBRARY_NAME} PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+)
