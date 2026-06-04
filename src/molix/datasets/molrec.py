@@ -50,7 +50,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import molrs
 import numpy as np
 import torch
 from molpy.core.element import Element
@@ -90,6 +89,12 @@ class MolRecSource:
         self.total = total
         if not self.record_path.exists():
             raise FileNotFoundError(f"MolRec record not found: {self.record_path}")
+
+        # Imported lazily: molrs is a native (Rust/pyo3) dependency with no wheel
+        # for every platform (e.g. linux-aarch64). Only MolRecSource needs it, so
+        # keeping the import here lets the rest of ``molix.datasets`` (QM9Source,
+        # RevMD17Source, …) load on platforms where molrs is unavailable.
+        import molrs
 
         record = molrs.MolRec.read_zarr(str(self.record_path))
 

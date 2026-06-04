@@ -107,7 +107,11 @@ class IPLayer(nn.Module):
         inter: torch.Tensor,
     ) -> torch.Tensor:
         out = prop.new_zeros(prop.shape[0], *inter.shape[1:])
-        out.index_add_(0, src, inter)
+        # Accumulate in ``out``'s dtype: under AMP autocast ``inter`` may be a
+        # reduced-precision (bf16/fp16) activation while ``out`` follows the
+        # fp32 ``prop`` dtype; index_add_ requires matching scalar types and
+        # fp32 accumulation is the numerically correct choice for a reduction.
+        out.index_add_(0, src, inter.to(out.dtype))
         return out
 
 
