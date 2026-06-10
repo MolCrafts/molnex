@@ -191,6 +191,47 @@ class _CacheBacked(BaseDataset):
         total_edges = int(edge_ptr[-1].item())
         return total_edges / total_atoms
 
+    def _ptr_counts(self, ptr_key: str) -> torch.Tensor:
+        """Per-sample counts ``(n_samples,)`` from the ``ptr_key`` cumsum pointer."""
+        ptr = self._payload.get(ptr_key)
+        if ptr is None:
+            kind = "per-atom" if ptr_key == "atom_ptr" else "per-edge"
+            raise ValueError(
+                f"cache at {self.sink} has no '{ptr_key}' pointer — it was "
+                f"built without {kind} keys. Re-run the pipeline with a task "
+                f"that emits {kind} tensors (e.g. NeighborList for edges) to "
+                "make these counts available."
+            )
+        return (ptr[1:] - ptr[:-1]).long()
+
+    @cached_property
+    def atom_counts(self) -> torch.Tensor:
+        """Per-sample atom counts, shape ``(n_samples,)``, dtype ``long``.
+
+        Derived from the packed ``atom_ptr`` cumsum pointer
+        (``ptr[idx+1] - ptr[idx]``) in one vectorized pass — no sample is
+        unpacked. Used by
+        :class:`~molix.data.sampler.TokenBudgetBatchSampler` to enforce
+        per-batch atom budgets.
+
+        Raises:
+            ValueError: The cache was built without per-atom keys.
+        """
+        return self._ptr_counts("atom_ptr")
+
+    @cached_property
+    def edge_counts(self) -> torch.Tensor:
+        """Per-sample edge counts, shape ``(n_samples,)``, dtype ``long``.
+
+        Derived from the packed ``edge_ptr`` cumsum pointer
+        (``ptr[idx+1] - ptr[idx]``) in one vectorized pass — no sample is
+        unpacked.
+
+        Raises:
+            ValueError: The cache was built without per-edge keys.
+        """
+        return self._ptr_counts("edge_ptr")
+
     @cached_property
     def max_atoms(self) -> int:
         """Largest single-sample atom count. ``0`` if no per-atom keys."""
@@ -311,6 +352,36 @@ class SubsetDataset(BaseDataset):
             return 0.0
         n_edges = (edge_ptr[idx + 1] - edge_ptr[idx]).sum()
         return float(n_edges.item()) / float(n_atoms.item())
+
+    @cached_property
+    def atom_counts(self) -> torch.Tensor:
+        """Per-sample atom counts over this subset's indices, ``(len(self),)``, dtype ``long``.
+
+        Gathers the wrapped dataset's :attr:`atom_counts` at this view's
+        packed indices — defined explicitly (not ``__getattr__``-forwarded)
+        so the values are remapped instead of silently returning the
+        full-dataset vector. Nested subsets compose naturally.
+
+        Raises:
+            ValueError: The wrapped cache was built without per-atom keys
+                (propagated from the wrapped dataset's :attr:`atom_counts`).
+        """
+        idx = torch.as_tensor(self._indices, dtype=torch.long)
+        return self._dataset.atom_counts[idx]
+
+    @cached_property
+    def edge_counts(self) -> torch.Tensor:
+        """Per-sample edge counts over this subset's indices, ``(len(self),)``, dtype ``long``.
+
+        Gathers the wrapped dataset's :attr:`edge_counts` at this view's
+        packed indices; see :attr:`atom_counts` for why this is explicit.
+
+        Raises:
+            ValueError: The wrapped cache was built without per-edge keys
+                (propagated from the wrapped dataset's :attr:`edge_counts`).
+        """
+        idx = torch.as_tensor(self._indices, dtype=torch.long)
+        return self._dataset.edge_counts[idx]
 
     @cached_property
     def max_atoms(self) -> int:

@@ -15,6 +15,7 @@ from molix.core.steps import batch_to
 from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
 from molix.data.dataset import BaseDataset
 from molix.data.pipeline import Node
+from molix.data.sampler import TokenBudgetBatchSampler
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -90,7 +91,22 @@ class DataModule:
         target_schema: Which target keys are graph-level vs atom-level.
         batch_nodes: Post-collate :class:`Node` instances (from
             :attr:`PipelineSpec.batch_nodes`).
-        batch_size: Samples per batch (per rank in DDP).
+        batch_size: Samples per batch (per rank in DDP). Ignored for the
+            train loader when a token budget is set (see below).
+        max_atoms_per_batch: Optional per-batch total-atom budget. Setting
+            this (and/or ``max_edges_per_batch``) switches the *train*
+            dataloader to a
+            :class:`~molix.data.sampler.TokenBudgetBatchSampler` so each
+            batch packs as many samples as fit under the budget — keeping
+            GNN compute (O(edges)) per batch approximately constant
+            instead of swinging with sample sizes. Requires a
+            packed-cache-backed train dataset; incompatible with DDP
+            (raises at dataloader construction). The val loader keeps the
+            fixed ``batch_size`` — eval has no backward pass, so memory
+            headroom is ample and fixed batches keep metric accumulation
+            simple.
+        max_edges_per_batch: Optional per-batch total-edge budget; same
+            semantics as ``max_atoms_per_batch``, both may be combined.
         num_workers: DataLoader worker processes.
         pin_memory: Pin tensors for faster GPU transfer.
         persistent_workers: Keep workers alive between epochs.
@@ -108,6 +124,8 @@ class DataModule:
         target_schema: TargetSchema | None = None,
         batch_nodes: Sequence[Node] | None = None,
         batch_size: int = 32,
+        max_atoms_per_batch: int | None = None,
+        max_edges_per_batch: int | None = None,
         num_workers: int = 4,
         pin_memory: bool = True,
         persistent_workers: bool = True,
@@ -122,6 +140,8 @@ class DataModule:
         self.target_schema = target_schema
         self.batch_nodes: tuple[Node, ...] = tuple(batch_nodes) if batch_nodes else ()
         self.batch_size = batch_size
+        self.max_atoms_per_batch = max_atoms_per_batch
+        self.max_edges_per_batch = max_edges_per_batch
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers and num_workers > 0
@@ -159,7 +179,16 @@ class DataModule:
     def train_dataloader(self) -> DataLoader:
         """Build the training :class:`~torch.utils.data.DataLoader`.
 
-        Under DDP, wraps the train dataset in a shuffling
+        With a token budget set (``max_atoms_per_batch`` /
+        ``max_edges_per_batch``), batches come from a
+        :class:`~molix.data.sampler.TokenBudgetBatchSampler` seeded with
+        ``seed + epoch`` — a fresh sampler per epoch, so epochs reshuffle
+        and epoch *k*'s composition is re-derivable on resume.
+        ``batch_size`` / ``shuffle`` / ``sampler`` / ``drop_last`` /
+        ``generator`` are not passed in that mode (PyTorch makes them
+        mutually exclusive with ``batch_sampler``).
+
+        Otherwise: under DDP, wraps the train dataset in a shuffling
         :class:`~torch.utils.data.DistributedSampler` (shuffle handled by
         the sampler, ``drop_last=True``); otherwise shuffles directly. The
         collate function casts floating-point leaves to the captured
@@ -167,7 +196,39 @@ class DataModule:
 
         Returns:
             A configured training ``DataLoader``.
+
+        Raises:
+            ValueError: A token budget is set while running under DDP —
+                dynamic batching has no cross-rank partitioning protocol
+                yet. Drop the budget kwargs or run single-process.
         """
+        if self.max_atoms_per_batch is not None or self.max_edges_per_batch is not None:
+            if _is_distributed():
+                raise ValueError(
+                    "max_atoms_per_batch / max_edges_per_batch are not "
+                    "supported under DDP: dynamic batching is incompatible "
+                    "with DistributedSampler's fixed per-rank partitioning. "
+                    "Remove the budget kwargs or run single-process; DDP "
+                    "support belongs to a future spec."
+                )
+            batch_sampler = TokenBudgetBatchSampler(
+                self.train_dataset,
+                max_atoms=self.max_atoms_per_batch,
+                max_edges=self.max_edges_per_batch,
+                seed=self.seed + self._epoch,
+            )
+            return DataLoader(
+                self.train_dataset,
+                batch_sampler=batch_sampler,
+                num_workers=self.num_workers,
+                pin_memory=self.pin_memory,
+                persistent_workers=self.persistent_workers,
+                prefetch_factor=self.prefetch_factor,
+                collate_fn=self._make_collate_fn(),
+                multiprocessing_context=self._worker_context(),
+                worker_init_fn=self._worker_init_fn(),
+            )
+
         if _is_distributed():
             self._train_sampler = DistributedSampler(
                 self.train_dataset,

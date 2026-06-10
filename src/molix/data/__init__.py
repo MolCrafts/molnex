@@ -40,6 +40,9 @@ from molix.data.dataset import (
 # Pipeline DSL
 from molix.data.pipeline import DAGCache, Edge, Node, Pipeline, PipelineSpec
 
+# Batch sampling
+from molix.data.sampler import TokenBudgetBatchSampler
+
 # Data sources
 from molix.data.source import DataSource, InMemorySource, SubsetSource
 from molix.data.task import (
@@ -59,6 +62,8 @@ from molix.data.tasks import (
 )
 
 __all__ = [
+    # Batch sampling
+    "TokenBudgetBatchSampler",
     # Task hierarchy
     "Task",
     "SampleTask",
