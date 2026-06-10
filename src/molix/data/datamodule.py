@@ -131,6 +131,7 @@ class DataModule:
 
         self._train_sampler: DistributedSampler | None = None
         self._val_sampler: DistributedSampler | None = None
+        self._epoch = 0
 
     def _worker_context(self) -> str | None:
         """Start method passed to :class:`DataLoader`, or ``None`` for sync.
@@ -180,9 +181,11 @@ class DataModule:
         else:
             self._train_sampler = None
             shuffle = True
-            # Seed the shuffle RNG so epoch ordering is reproducible and
-            # independent of global-RNG consumption elsewhere in the process.
-            generator = make_generator(self.seed)
+            # Seed the shuffle RNG from (seed, epoch) so each epoch gets a
+            # different permutation, yet epoch k's order is re-derivable on
+            # resume without checkpointing generator state — mirrors
+            # DistributedSampler.set_epoch semantics.
+            generator = make_generator(self.seed + self._epoch)
 
         return DataLoader(
             self.train_dataset,
@@ -251,15 +254,18 @@ class DataModule:
     # -- Epoch hook ---------------------------------------------------------
 
     def on_epoch_start(self, epoch: int) -> None:
-        """Reseed the DDP samplers for *epoch* so shuffling differs each epoch.
+        """Reseed shuffling for *epoch* so the permutation differs each epoch.
 
-        Calls ``set_epoch(epoch)`` on the train/val
+        Records *epoch* so the next :meth:`train_dataloader` call seeds its
+        shuffle generator with ``seed + epoch``, and calls
+        ``set_epoch(epoch)`` on the train/val
         :class:`~torch.utils.data.DistributedSampler` instances when they
-        exist (i.e. under DDP); a no-op otherwise.
+        exist (i.e. under DDP).
 
         Args:
             epoch: The epoch index about to start.
         """
+        self._epoch = epoch
         if self._train_sampler is not None:
             self._train_sampler.set_epoch(epoch)
         if self._val_sampler is not None:
