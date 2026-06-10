@@ -123,3 +123,6 @@ cython_debug/
 examples/
 
 .claude/worktrees/
+
+# HPC sbatch logs
+slurm-*.out

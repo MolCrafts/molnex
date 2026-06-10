@@ -51,6 +51,7 @@ class MetricsHook(ScalarHook):
         prefix_train: str = "train",
         prefix_val: str = "eval",
         name_prefix: str = "",
+        train_every_n_steps: int = 1,
     ):
         import copy
 
@@ -61,6 +62,12 @@ class MetricsHook(ScalarHook):
         self.prefix_train = prefix_train
         self.prefix_val = prefix_val
         self.name_prefix = name_prefix
+        # Each train-metric ``compute()`` forces a ``.item()`` CPU↔GPU sync.
+        # Computing it every step throttles a launch-bound loop; sample it
+        # every ``train_every_n_steps`` batches instead (the value is only
+        # read by ``Log`` on its own, usually coarser, cadence).
+        self.train_every_n_steps = max(1, train_every_n_steps)
+        self._train_batch_count = 0
 
     def _scalar_name(self, metric: Any) -> str:
         return self.name_prefix + type(metric).__name__
@@ -89,17 +96,30 @@ class MetricsHook(ScalarHook):
                 raise KeyError(f"Cannot extract key {key} from {type(value)}")
         return value
 
-    def on_epoch_start(self, trainer, state):
-        """Reset the eval-side metric accumulators before a new epoch."""
+    def on_eval_phase_start(self, trainer, state):
+        """Reset the eval-side accumulators at the start of *every* eval phase.
+
+        Fired before the eval batch loop for both step-based and epoch-end
+        eval, so each phase accumulates from a clean slate — independent of
+        ``on_epoch_start`` (which does not run between mid-epoch step-based
+        evals). This is the structural guard against the cross-phase
+        accumulator bleed that produced the train-MAE-exploded-to-203 bug.
+        """
         for metric in self.val_metrics:
             metric.reset()
 
     def on_train_batch_end(self, trainer, state, batch, outputs):
         """Compute each train metric on this batch and write it to ``state[prefix_train]``.
 
-        Train metrics are reset every step, so each value is the per-batch
-        metric rather than a running average.
+        Train metrics are reset every computed step, so each value is the
+        per-batch metric rather than a running average. Throttled by
+        ``train_every_n_steps`` so the ``compute()`` sync doesn't fire on
+        every micro-step of a launch-bound loop.
         """
+        self._train_batch_count += 1
+        if self._train_batch_count % self.train_every_n_steps != 0:
+            return
+
         preds = self._extract_value(outputs, self.pred_key)
         targets = self._extract_value(batch, self.target_key)
 
@@ -117,15 +137,16 @@ class MetricsHook(ScalarHook):
             metric.update(preds, targets)
 
     def on_eval_step_complete(self, trainer, state):
-        """Finalize the accumulated eval metrics into ``state[prefix_val]`` and reset.
+        """Finalize the accumulated eval metrics into ``state[prefix_val]``.
 
         Fired at the end of every eval phase so the values are published
-        before the LR scheduler reads ``best_metric_name``.
+        before the LR scheduler reads ``best_metric_name``. The reset lives
+        in :meth:`on_eval_phase_start` (start-of-phase), so the published
+        value here reflects exactly this phase's accumulation.
         """
         val_ns = state[self.prefix_val]
         for metric in self.val_metrics:
             val_ns[self._scalar_name(metric)] = metric.compute()
-            metric.reset()
 
 
 class StepSpeedHook(ScalarHook):

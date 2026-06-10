@@ -50,6 +50,7 @@ class Trainer:
         eval_step: Step | None = None,
         hooks: list[Hook | tuple[Hook, int]] | None = None,
         eval_every_n_steps: int | None = None,
+        accumulate_grad_batches: int = 1,
         resume_from_checkpoint: str | Path | None = None,
         checkpoint_backend: CheckpointBackend | None = None,
         device: str | torch.device | None = None,
@@ -69,12 +70,21 @@ class Trainer:
             hooks: List of hooks or (hook, priority) tuples. Hooks execute in
                    registration order by default. Use tuples to override priority
                    (lower priority = earlier execution, default = 100).
-            eval_every_n_steps: Run evaluation every N training steps. When set,
-                   this is the exclusive eval cadence — epoch-end eval is
+            eval_every_n_steps: Run evaluation every N *optimizer* steps. When
+                   set, this is the exclusive eval cadence — epoch-end eval is
                    suppressed so short epochs (e.g. revmd17's ~30-step epoch)
                    do not silently override the configured schedule. If None
                    (default), only epoch-end eval runs.
                    Must be > 0 if provided.
+            accumulate_grad_batches: Number of micro-batches whose gradients
+                   are accumulated before one optimizer step. ``1`` (default)
+                   = step every batch. With ``N``, the loss is scaled by
+                   ``1/N`` and the optimizer / LR scheduler / ``global_step``
+                   advance once per ``N`` micro-batches — so ``global_step``,
+                   ``max_steps`` and ``eval_every_n_steps`` all count optimizer
+                   steps, letting you trade a launch-bound small physical batch
+                   for a larger effective batch without the memory cost.
+                   Must be > 0.
             resume_from_checkpoint: Path to a checkpoint file to resume from,
                    or ``"auto"`` to detect torchrun elastic snapshots.
             checkpoint_backend: Backend for checkpoint I/O. Defaults to
@@ -93,7 +103,12 @@ class Trainer:
         """
         if eval_every_n_steps is not None and eval_every_n_steps <= 0:
             raise ValueError(f"eval_every_n_steps must be > 0, got {eval_every_n_steps}")
+        if accumulate_grad_batches <= 0:
+            raise ValueError(f"accumulate_grad_batches must be > 0, got {accumulate_grad_batches}")
         self.eval_every_n_steps = eval_every_n_steps
+        self.accumulate_grad_batches = accumulate_grad_batches
+        # Monotonic micro-batch counter driving accumulation-window boundaries.
+        self._micro_step = 0
         self.device = torch.device(device) if device is not None else None
 
         self.model = model
@@ -321,21 +336,34 @@ class Trainer:
             self.model.train()
 
             model_device = next(self.model.parameters()).device
+            accum = self.accumulate_grad_batches
             for batch in datamodule.train_dataloader():
                 batch = batch_to(batch, device=model_device)
                 self._call_hooks("on_train_batch_start", self, self.state, batch)
                 outputs = self.train_step.on_train_batch(self, self.state, batch)
                 self._call_hooks("on_train_batch_end", self, self.state, batch, outputs)
 
+                self._micro_step += 1
+                # Optimizer-step boundary: only here do global_step, the LR
+                # scheduler, the eval cadence and the step limit advance, so
+                # they all count optimizer steps rather than micro-batches.
+                if self._micro_step % accum != 0:
+                    continue
+
                 self.state.increment_step()
                 self.state.steps_since_last_eval += 1
 
-                # Step step-based schedulers per training batch. ``ReduceLROnPlateau``
-                # is the odd one out — its ``step`` takes a metric argument and is
-                # stepped at epoch end after evaluation (see below).
-                if self.lr_scheduler is not None and not isinstance(
-                    self.lr_scheduler,
-                    torch.optim.lr_scheduler.ReduceLROnPlateau,
+                # Step step-based schedulers per optimizer step. Skip the
+                # advance when an AMP inf/nan-skipped step didn't apply, and
+                # skip ``ReduceLROnPlateau`` (metric-driven, stepped at epoch
+                # end after evaluation — see below).
+                if (
+                    self.lr_scheduler is not None
+                    and not isinstance(
+                        self.lr_scheduler,
+                        torch.optim.lr_scheduler.ReduceLROnPlateau,
+                    )
+                    and outputs.get("optimizer_applied", True)
                 ):
                     self.lr_scheduler.step()
 
@@ -554,6 +582,11 @@ class Trainer:
         prev_stage = self.state.stage
         self.state.set_stage(Stage.EVAL)
         self.model.eval()
+
+        # Fire BEFORE the batch loop so accumulating hooks reset their
+        # eval-side buffers; makes every eval phase self-contained
+        # regardless of trigger (step-based or epoch-end).
+        self._call_hooks("on_eval_phase_start", self, self.state)
 
         model_device = next(self.model.parameters()).device
         for batch in datamodule.val_dataloader():

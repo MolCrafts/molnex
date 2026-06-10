@@ -216,3 +216,39 @@ def test_train_both_limits_steps_first():
     state = trainer.train(dm, max_epochs=100, max_steps=7)
     assert state.global_step == 7
     assert state.epoch == 2  # partial second epoch still counted
+
+
+# ---------------------------------------------------------------------------
+# gradient accumulation
+# ---------------------------------------------------------------------------
+
+
+def test_accumulate_grad_batches_rejects_non_positive():
+    with pytest.raises(ValueError, match="accumulate_grad_batches must be > 0"):
+        _make_trainer(accumulate_grad_batches=0)
+
+
+def test_accumulate_grad_batches_counts_optimizer_steps():
+    """global_step / max_steps count optimizer steps, not micro-batches."""
+    dm = _MockDataModule(batches_per_epoch=8)
+    trainer = _make_trainer(accumulate_grad_batches=2)
+    state = trainer.train(dm, max_epochs=1)
+    # 8 micro-batches / accum=2 → 4 optimizer steps
+    assert state.global_step == 4
+
+
+def test_accumulate_grad_batches_updates_params():
+    """Training with accumulation still updates parameters."""
+    dm = _MockDataModule(batches_per_epoch=6)
+    trainer = _make_trainer(accumulate_grad_batches=3)
+    initial = [p.clone() for p in trainer.model.parameters()]
+    trainer.train(dm, max_epochs=1)
+    assert any(not torch.equal(i, c) for i, c in zip(initial, trainer.model.parameters()))
+
+
+def test_accumulate_grad_batches_one_is_per_batch():
+    """accumulate_grad_batches=1 (default) steps every micro-batch."""
+    dm = _MockDataModule(batches_per_epoch=5)
+    trainer = _make_trainer(accumulate_grad_batches=1)
+    state = trainer.train(dm, max_epochs=1)
+    assert state.global_step == 5

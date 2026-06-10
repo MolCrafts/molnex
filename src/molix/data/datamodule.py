@@ -10,6 +10,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 
 from molix.config import config
+from molix.core.seed import make_generator, make_worker_init_fn
 from molix.core.steps import batch_to
 from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
 from molix.data.dataset import BaseDataset
@@ -139,6 +140,10 @@ class DataModule:
         """
         return self.multiprocessing_context if self.num_workers > 0 else None
 
+    def _worker_init_fn(self):
+        """Per-worker seeding callable, or ``None`` for the sync path."""
+        return make_worker_init_fn(self.seed) if self.num_workers > 0 else None
+
     # -- Lifecycle (Trainer calls these) ------------------------------------
 
     def setup(self, stage: str = "fit") -> None:
@@ -171,9 +176,13 @@ class DataModule:
                 seed=self.seed,
             )
             shuffle = False
+            generator = None
         else:
             self._train_sampler = None
             shuffle = True
+            # Seed the shuffle RNG so epoch ordering is reproducible and
+            # independent of global-RNG consumption elsewhere in the process.
+            generator = make_generator(self.seed)
 
         return DataLoader(
             self.train_dataset,
@@ -187,6 +196,8 @@ class DataModule:
             collate_fn=self._make_collate_fn(),
             drop_last=_is_distributed(),
             multiprocessing_context=self._worker_context(),
+            worker_init_fn=self._worker_init_fn(),
+            generator=generator,
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -221,6 +232,7 @@ class DataModule:
             prefetch_factor=self.prefetch_factor,
             collate_fn=self._make_collate_fn(),
             multiprocessing_context=self._worker_context(),
+            worker_init_fn=self._worker_init_fn(),
         )
 
     def _make_collate_fn(self) -> "_CollateFn":

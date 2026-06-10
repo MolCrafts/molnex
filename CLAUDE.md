@@ -133,16 +133,29 @@ returns `pos[rows] − pos[cols]` (opposite sign); `NeighborList.execute` negate
 molix.config (global dtype singleton)
     ↓
 molrep.embedding → molrep.interaction → molrep.readout
-    ↓                                       ↓
-molzoo (MACE, Allegro encoders)         molpot.heads
-    ↓                                       ↓
-molpot.composition (PotentialComposer)  molpot.potentials
-    ↓
-molix.core (Trainer, TrainState, Step, Hook)
+    │  └── molrep.heads (ScalarHead, …)        │
+    │            ↑ (molpot.heads → molrep.embedding)
+    ↓            │                              ↓
+molzoo (MACE, Allegro, PiNet encoders) ──→ molpot.heads
+    ↓                                          ↓
+molpot.composition (PotentialComposer,    molpot.potentials
+    Sonata, build_sonata)                      ↓
+    ↓                              molpot.derivation (EnergyAggregation,
+molix.core (Trainer, TrainState, Step, Hook)    ForceDerivation)
     ↓
 molix.data (Dataset, collate, preprocess)
 molix.datasets (QM9, RevMD17, ThreeBPA, WaterLES)
+molix.analysis (trajectory diagnostics) ──→ molzoo.quantization
 ```
+
+Notes on cross-package edges (verified against imports):
+- `molzoo` consumes `molrep.readout`/`molrep.interaction` and `molpot.derivation`
+  (PiNet's energy/force head is co-located with the encoder by design).
+- `molpot.heads` imports `molrep.embedding` (e.g. `heads/edge.py`) — the arrow
+  runs heads→embedding, **not** readout→heads.
+- `molrep.heads` (`ScalarHead`, …) is a distinct sub-tree from `molpot.heads`.
+- `molix.analysis` reuses the `molzoo.quantization` T_eff scalars for the
+  quantization-as-thermal-noise diagnostics.
 
 ### State namespace contract
 

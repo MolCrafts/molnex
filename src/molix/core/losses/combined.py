@@ -9,11 +9,19 @@ import torch.nn as nn
 class WeightedLoss(nn.Module):
     """Weighted combination of multiple loss functions.
 
-    Computes L = Σ w_i * L_i(pred, target) for multiple loss terms.
-    Each loss term is a (weight, loss_fn) tuple.
+    Computes ``L = Σ wᵢ · Lᵢ(pred, target)`` over the supplied terms. Each
+    term is a ``(weight, loss_fn)`` tuple.
+
+    The weights are held as a registered buffer, so they move with
+    :meth:`~torch.nn.Module.to` / ``.cuda()`` and ride along in
+    ``state_dict`` — no per-step device copy. Every term is evaluated and
+    summed; a term that raises (e.g. a missing target key) propagates
+    rather than being silently skipped, because silently dropping a term
+    means training a *different* objective than intended (energy-only when
+    you asked for energy+force) with no signal.
 
     Args:
-        losses: List of (weight, loss_fn) tuples
+        losses: List of ``(weight, loss_fn)`` tuples.
     """
 
     def __init__(
@@ -22,51 +30,27 @@ class WeightedLoss(nn.Module):
     ):
         super().__init__()
         self.losses = nn.ModuleList([loss_fn for _, loss_fn in losses])
-        self.weights = torch.tensor([weight for weight, _ in losses])
+        self.register_buffer(
+            "weights",
+            torch.tensor([float(weight) for weight, _ in losses]),
+        )
+        self.weights: torch.Tensor
 
     def forward(
         self,
         pred: Any,
         target: Any,
     ) -> torch.Tensor:
-        """Compute weighted combination of losses.
+        """Compute the weighted sum of all loss terms.
 
         Args:
-            pred: Predictions (dict/dataclass or tensor)
-            target: Targets (dict/dataclass or tensor)
+            pred: Predictions (dict/dataclass or tensor).
+            target: Targets (dict/dataclass or tensor).
 
         Returns:
-            Weighted sum of all losses
+            Weighted sum of all losses (scalar tensor).
         """
-        device = self._get_device(pred)
-        total_loss = torch.tensor(0.0, device=device)
-        self.weights = self.weights.to(device)
-
+        total_loss = self.weights.new_zeros(())
         for weight, loss_fn in zip(self.weights, self.losses):
-            try:
-                loss_val = loss_fn(pred, target)
-                total_loss = total_loss + weight * loss_val
-            except (KeyError, AttributeError):
-                # Skip if keys don't exist in pred/target
-                continue
-
+            total_loss = total_loss + weight * loss_fn(pred, target)
         return total_loss
-
-    def _get_device(self, pred: Any) -> torch.device:
-        """Get device from first available tensor."""
-        if isinstance(pred, torch.Tensor):
-            return pred.device
-
-        if isinstance(pred, dict):
-            for value in pred.values():
-                if isinstance(value, torch.Tensor):
-                    return value.device
-
-        # Dataclass or other object
-        for attr in dir(pred):
-            if not attr.startswith("_"):
-                val = getattr(pred, attr)
-                if isinstance(val, torch.Tensor):
-                    return val.device
-
-        return torch.device("cpu")

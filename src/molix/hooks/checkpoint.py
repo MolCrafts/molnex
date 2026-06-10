@@ -83,11 +83,20 @@ class CheckpointHook(BaseHook):
         self._last_announced: tuple[str, int] | None = None
 
     def on_train_start(self, trainer, state):
-        """Create checkpoint directory and sync best-metric metadata."""
+        """Create checkpoint directory and sync best-metric metadata.
+
+        On resume, seed ``self._best_value`` from the restored checkpoint's
+        ``best_metric`` so the first post-resume eval is compared against the
+        true historical best — otherwise ``_best_value`` is ``None`` and that
+        eval always counts as an "improvement", overwriting ``best.pt`` with a
+        possibly-worse model.
+        """
         self.os.makedirs(self.checkpoint_dir, exist_ok=True)
         ckpt = getattr(trainer, "_checkpoint", None)
         if ckpt is not None:
             ckpt.best_metric_name = self.best_metric_name
+            if self._best_value is None and ckpt.best_metric is not None:
+                self._best_value = float(ckpt.best_metric)
 
     def on_train_batch_end(self, trainer, state, batch, outputs):
         """Write step-indexed periodic snapshot.

@@ -27,7 +27,7 @@ def batch_to(
     and bare tensors. Non-tensor leaves are returned unchanged.
 
     Args:
-        batch: TensorDict / GraphBatch / nested dict / Tensor / other.
+        batch: TensorDict / nested dict / Tensor / other.
         device: Target device, or ``None`` to leave the device alone.
         dtype: Target floating-point dtype, or ``None`` to leave it alone.
 

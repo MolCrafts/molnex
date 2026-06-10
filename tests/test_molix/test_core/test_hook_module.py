@@ -48,6 +48,7 @@ def test_hook_lifecycle_methods_present() -> None:
         "on_epoch_end",
         "on_train_batch_start",
         "on_train_batch_end",
+        "on_eval_phase_start",
         "on_eval_batch_start",
         "on_after_backward",
         "on_eval_batch_end",

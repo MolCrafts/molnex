@@ -144,6 +144,7 @@ def test_train_eval_train_cycle_train_mae_reflects_last_batch_only():
     assert state["train"]["MAE"] == torch.tensor(0.2).abs().item()
 
     # Eval phase with an outlier batch (MAE=50) and a normal one (MAE=0.3).
+    hook.on_eval_phase_start(trainer=None, state=state)
     eval_batch(50.0)
     eval_batch(0.3)
     hook.on_eval_step_complete(trainer=None, state=state)
@@ -173,14 +174,15 @@ def test_val_metrics_reset_between_eval_phases():
             outputs={"predictions": preds},
         )
 
-    hook.on_epoch_start(trainer=None, state=state)
-
     # First eval phase — MAE=10.
+    hook.on_eval_phase_start(trainer=None, state=state)
     eval_batch(10.0)
     hook.on_eval_step_complete(trainer=None, state=state)
     assert abs(state["eval"]["MAE"] - 10.0) < 1e-6
 
-    # Second eval phase — MAE=0.1. Must not be influenced by first phase.
+    # Second eval phase — MAE=0.1. The start-of-phase reset must clear the
+    # first phase's accumulation so it is not influenced by it.
+    hook.on_eval_phase_start(trainer=None, state=state)
     eval_batch(0.1)
     hook.on_eval_step_complete(trainer=None, state=state)
     assert abs(state["eval"]["MAE"] - 0.1) < 1e-6, (

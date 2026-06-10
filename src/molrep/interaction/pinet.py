@@ -244,6 +244,36 @@ class EquivarLayer(nn.Module):
         return px_new, ix, dotted_px
 
 
+class OutLayer(nn.Module):
+    """Per-block output head with residual accumulation (PiNN ``OutLayer``).
+
+    Mirrors ``pinn.networks.pinet2.OutLayer``: an ``FFLayer`` (with activation
+    and bias) followed by **one biasless linear** projecting to ``out_units``,
+    added to the running output from the previous block::
+
+        output_i = Dense_biasless(FFLayer(p1_i)) + output_{i-1}
+
+    The PiNet2 per-atom energy is the residual sum of these per-block heads
+    applied to each block's *raw* scalar output (before the ``ResUpdate`` state
+    update). The absolute energy zero-point is owned by the atomic dress, so the
+    final projection carries no bias.
+    """
+
+    def __init__(
+        self,
+        n_nodes: Sequence[int],
+        *,
+        out_units: int = 1,
+        activation: str | type[nn.Module] | None = "tanh",
+    ) -> None:
+        super().__init__()
+        self.ff_layer = FFLayer(n_nodes, activation=activation, use_bias=True)
+        self.out_units = nn.LazyLinear(int(out_units), bias=False, dtype=config.ftype)
+
+    def forward(self, px: torch.Tensor, prev_output: torch.Tensor) -> torch.Tensor:
+        return self.out_units(self.ff_layer(px)) + prev_output
+
+
 class GCBlock(nn.Module):
     """One PiNet graph-convolution block."""
 

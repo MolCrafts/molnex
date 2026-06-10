@@ -24,14 +24,14 @@ class TestEnergyAggregation:
         head = EnergyAggregation(pooling="mean")
         node_energy = torch.randn(10)
         batch = torch.tensor([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
-        energy = head(node_energy, batch)
+        energy = head(node_energy, batch, num_graphs=2)
         assert energy.shape == (2,)
 
     def test_forward_shape_sum_pooling(self):
         head = EnergyAggregation(pooling="sum")
         node_energy = torch.randn(15)
         batch = torch.tensor([0] * 5 + [1] * 5 + [2] * 5)
-        energy = head(node_energy, batch)
+        energy = head(node_energy, batch, num_graphs=3)
         assert energy.shape == (3,)
 
     def test_differentiable(self):

@@ -84,6 +84,9 @@ class Calculator(torch.nn.Module):
         charges: torch.Tensor,
         cell: torch.Tensor,
         positions: torch.Tensor,
+        periodic: Optional[torch.Tensor] = None,
+        kvectors: Optional[torch.Tensor] = None,
+        node_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute the Fourier-domain long-range contribution.
 
@@ -91,6 +94,9 @@ class Calculator(torch.nn.Module):
             charges: Atomic charges ``(n_atoms, n_channels)``.
             cell: Unit cell matrix ``(3, 3)``.
             positions: Cartesian coordinates ``(n_atoms, 3)``.
+            periodic: Boolean mask ``(3,)`` for periodic directions.
+            kvectors: Optional precomputed k-vectors ``(n_kvecs, 3)``.
+            node_mask: Optional boolean mask ``(n_atoms,)``.
 
         Returns:
             K-space potential ``(n_atoms, n_channels)``.
