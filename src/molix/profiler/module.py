@@ -89,6 +89,7 @@ class ModuleResult:
     launch_bound_pct: float | None = None
     op_table: str | None = None
     op_calls_per_step: float | None = None
+    submodule_table: str | None = None
 
     def print_report(self) -> None:
         """Print a human-readable performance report to stdout."""
@@ -148,6 +149,10 @@ class ModuleResult:
         if self.op_calls_per_step is not None:
             print(f"  Op calls/step:{self.op_calls_per_step:>12,.0f}")
         print("─" * 72)
+        if self.submodule_table is not None:
+            print("Forward time by submodule (per step):")
+            print(self.submodule_table)
+            print("─" * 72)
         if self.op_table is not None:
             print(self.op_table)
         print()
@@ -418,6 +423,7 @@ class ModuleProfiler:
         n_steps: int = 100,
         n_warmup: int = 10,
         op_rows: int = 12,
+        submodules: bool = False,
     ) -> ModuleResult:
         """Run the profiler.
 
@@ -445,6 +451,11 @@ class ModuleProfiler:
             n_steps: Number of steps to measure.
             n_warmup: Number of steps to discard before timing starts.
             op_rows: Number of top ops to show in the breakdown table.
+            submodules: Also attribute forward time to the module's top-level
+                named children (architectural breakdown — e.g. embedding vs
+                interaction vs readout — complementing the aten-level op
+                table). Measured in a separate hooked forward-only pass so it
+                does not perturb the wall / op windows.
 
         Returns:
             :class:`ModuleResult` with component, full-step and op statistics.
@@ -538,6 +549,10 @@ class ModuleProfiler:
             gpu_active, cpu_dispatch, op_calls, op_table = self._op_breakdown(module, data, op_rows)
             lb_pct = (wall_ms - gpu_active) / wall_ms * 100.0 if wall_ms > 0 else 0.0
 
+        submodule_table = None
+        if submodules:
+            submodule_table = self._submodule_breakdown(module, data, n_steps, n_warmup, use_cuda)
+
         if not original_training:
             module.eval()
 
@@ -573,7 +588,115 @@ class ModuleProfiler:
             launch_bound_pct=lb_pct,
             op_table=op_table,
             op_calls_per_step=op_calls,
+            submodule_table=submodule_table,
         )
+
+    def _submodule_breakdown(
+        self,
+        module: nn.Module,
+        data: object,
+        n_steps: int,
+        n_warmup: int,
+        use_cuda: bool,
+    ) -> str | None:
+        """Attribute forward time to top-level named children via hooks.
+
+        A separate forward-only pass (no backward/optimizer) so the hook
+        overhead never lands in the wall / op windows. Each child is
+        bracket-timed with CUDA events (GPU) or ``perf_counter`` (CPU);
+        children not invoked in ``forward`` are dropped. Returns a rendered
+        table (child, mean ms/step, % of summed children), or ``None`` when
+        the module has no named children.
+        """
+        # Expand container children (ModuleList / Sequential / ModuleDict) into
+        # their entries: the container itself is never *called* (you index into
+        # it), so a hook on it would never fire and the bulk of an interaction
+        # stack would go unattributed.
+        children: list[tuple[str, nn.Module]] = []
+        for name, child in module.named_children():
+            if isinstance(child, (nn.ModuleList, nn.Sequential, nn.ModuleDict)):
+                children.extend((f"{name}.{sub}", m) for sub, m in child.named_children())
+            else:
+                children.append((name, child))
+        if not children:
+            return None
+
+        pending: dict[str, object] = {}
+        elapsed: dict[str, list[float]] = {name: [] for name, _ in children}
+        handles = []
+
+        def _pre(name):
+            def hook(_mod, _inp):
+                if use_cuda:
+                    ev = torch.cuda.Event(enable_timing=True)
+                    ev.record()
+                    pending[name] = ev
+                else:
+                    pending[name] = time.perf_counter()
+
+            return hook
+
+        def _post(name):
+            def hook(_mod, _inp, _out):
+                start = pending.pop(name, None)
+                if start is None:
+                    return
+                if use_cuda:
+                    end = torch.cuda.Event(enable_timing=True)
+                    end.record()
+                    elapsed[name].append(("cuda", start, end))
+                else:
+                    elapsed[name].append(time.perf_counter() - start)
+
+            return hook
+
+        for name, child in children:
+            handles.append(child.register_forward_pre_hook(_pre(name)))
+            handles.append(child.register_forward_hook(_post(name)))
+
+        try:
+            batch_iter = iter(_make_batch_iter(data, n_warmup + n_steps))
+            with torch.no_grad():
+                for step in range(n_warmup + n_steps):
+                    batch = _move_to_device(next(batch_iter), self.device)
+                    module(batch)
+                    if use_cuda and step == n_warmup - 1:
+                        torch.cuda.synchronize()
+                        for v in elapsed.values():
+                            v.clear()  # drop warmup samples
+            if use_cuda:
+                torch.cuda.synchronize()
+        finally:
+            for h in handles:
+                h.remove()
+
+        # Resolve CUDA event pairs to milliseconds.
+        means: dict[str, float] = {}
+        for name, samples in elapsed.items():
+            if not samples:
+                continue
+            if use_cuda:
+                ms = [s.elapsed_time(e) for _, s, e in samples]
+            else:
+                ms = [v * 1000.0 for v in samples]
+            means[name] = sum(ms) / len(ms)
+        if not means:
+            return None
+
+        captured = sum(means.values())
+        denom = captured or 1.0
+        rows = [
+            {
+                "submodule": name[:36],
+                "fwd_ms": f"{ms:.4f}",
+                "%captured": f"{ms / denom * 100:.1f}",
+            }
+            for name, ms in sorted(means.items(), key=lambda kv: kv[1], reverse=True)
+        ]
+        # Σ row: compare to the report's Forward mean to read coverage —
+        # the gap is inline/functional ops not inside a named child.
+        rows.append({"submodule": "Σ captured", "fwd_ms": f"{captured:.4f}", "%captured": "100.0"})
+        return _fmt_table(rows, ["submodule", "fwd_ms", "%captured"], col_width=10)
 
     def _full_step(self, module: nn.Module, batch: object) -> None:
         """One untimed train step: zero_grad → fwd → loss → backward → opt.step."""
