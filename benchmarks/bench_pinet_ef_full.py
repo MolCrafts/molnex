@@ -36,7 +36,7 @@ from molzoo.pinet import PiNet, PiNetPotential
 RMD17_ROOT = "/home/jicli594/work/pinet-training/data"
 VARIANTS = {"PiNet(r1)": 1, "PiNet2-P3(r3)": 3, "PiNet2-P5(r5)": 5}
 PRECISIONS = ["fp32", "fp64", "bf16-mixed", "fp16-mixed"]
-COMPILERS = ["eager", "inductor", "cudagraphs", "reduce-overhead"]
+COMPILERS = ["eager", "cudagraphs"]
 _KW = {
     "inductor": {"backend": "inductor"},
     "cudagraphs": {"backend": "cudagraphs"},
