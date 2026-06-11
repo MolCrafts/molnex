@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -239,6 +240,36 @@ class Trainer:
                     )
                     raise
 
+    @staticmethod
+    def _needs_device_move(batch: Any, device: torch.device) -> bool:
+        """Whether *batch* has any leaf not already on *device*.
+
+        Decided once per epoch / eval phase on the first batch (batches from
+        one dataloader are device-homogeneous), so the per-step loop skips
+        both the ``batch_to`` call and its leaf-device walk when the data is
+        already in place — the dominant Trainer-loop overhead in same-device
+        (CPU, or pre-moved) training. A genuine move (CPU→cuda) returns True
+        and ``batch_to`` runs every step as before.
+
+        Args:
+            batch: A collated batch (``TensorDict`` / dict / tensor).
+            device: The model's device.
+
+        Returns:
+            ``True`` if a move is required (or cannot be ruled out cheaply).
+        """
+        values = getattr(batch, "values", None)
+        if not callable(getattr(batch, "apply", None)):
+            return True  # plain dict / tensor / unknown — let batch_to decide
+        dev = getattr(batch, "device", None)
+        if dev is not None:
+            return dev != device
+        try:
+            leaves = values(include_nested=True, leaves_only=True)
+            return any(v.device != device for v in leaves)
+        except (AttributeError, TypeError):
+            return True
+
     def _load_checkpoint(self, path: str | Path) -> None:
         """Load checkpoint and restore all training state.
 
@@ -349,8 +380,12 @@ class Trainer:
 
             model_device = next(self.model.parameters()).device
             accum = self.accumulate_grad_batches
+            needs_move: bool | None = None
             for batch in datamodule.train_dataloader():
-                batch = batch_to(batch, device=model_device)
+                if needs_move is None:
+                    needs_move = self._needs_device_move(batch, model_device)
+                if needs_move:
+                    batch = batch_to(batch, device=model_device)
                 self._call_hooks("on_train_batch_start", self, self.state, batch)
                 outputs = self.train_step.on_train_batch(self, self.state, batch)
                 self._call_hooks("on_train_batch_end", self, self.state, batch, outputs)
@@ -622,8 +657,12 @@ class Trainer:
         self._call_hooks("on_eval_phase_start", self, self.state)
 
         model_device = next(self.model.parameters()).device
+        needs_move: bool | None = None
         for batch in datamodule.val_dataloader():
-            batch = batch_to(batch, device=model_device)
+            if needs_move is None:
+                needs_move = self._needs_device_move(batch, model_device)
+            if needs_move:
+                batch = batch_to(batch, device=model_device)
             self._call_hooks("on_eval_batch_start", self, self.state, batch)
             outputs = self.eval_step.on_eval_batch(self, self.state, batch)
             self._call_hooks("on_eval_batch_end", self, self.state, batch, outputs)

@@ -310,3 +310,41 @@ def test_eval_starvation_no_warning_without_step_cadence(monkeypatch):
     trainer = _make_trainer()
     trainer.train(dm, max_epochs=2)
     assert not [m for m in messages if "no evaluation ran this epoch" in m]
+
+
+# ---------------------------------------------------------------------------
+# per-epoch device-move decision (batch_to hot-path skip)
+# ---------------------------------------------------------------------------
+
+
+def test_needs_device_move_false_when_already_on_device():
+    """A batch whose leaves are all on the target device needs no move."""
+    from tensordict import TensorDict
+
+    from molix.core.trainer import Trainer
+
+    batch = TensorDict(
+        {"atoms": TensorDict({"pos": torch.randn(4, 3)}, batch_size=[4])}, batch_size=[]
+    )
+    assert Trainer._needs_device_move(batch, torch.device("cpu")) is False
+
+
+def test_needs_device_move_true_for_foreign_device():
+    """A move is required when the target differs from the leaves' device."""
+    from tensordict import TensorDict
+
+    from molix.core.trainer import Trainer
+
+    batch = TensorDict(
+        {"atoms": TensorDict({"pos": torch.randn(4, 3)}, batch_size=[4])}, batch_size=[]
+    )
+    assert Trainer._needs_device_move(batch, torch.device("meta")) is True
+
+
+def test_train_loop_runs_without_per_step_move_on_cpu():
+    """Training still updates params when the per-epoch skip path is taken."""
+    dm = _MockDataModule(batches_per_epoch=5)
+    trainer = _make_trainer()
+    initial = [p.clone() for p in trainer.model.parameters()]
+    trainer.train(dm, max_epochs=1)
+    assert any(not torch.equal(i, c) for i, c in zip(initial, trainer.model.parameters()))
