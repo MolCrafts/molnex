@@ -10,7 +10,8 @@ criteria:
       fast-path TensorDict matches collate_molecules over the same per-sample
       dicts: identical key sets, torch.equal per leaf, identical dtypes, and
       identical batch_size on atoms/edges/graphs and top level.
-    status: pending
+    status: verified
+    last_checked: 2026-06-10
   - id: ac-002
     summary: Edge-less handling matches oracle, incl. empty-edge fallback
     type: code
@@ -19,7 +20,8 @@ criteria:
       schema with no edge keys, where the fast-path edges TensorDict equals the
       collate.py:149-156 fallback (edge_index zeros(0,2) long, bond_diff
       zeros(0,3), bond_dist zeros(0), batch_size=[0]) and equals the oracle output.
-    status: pending
+    status: verified
+    last_checked: 2026-06-10
   - id: ac-003
     summary: TargetSchema routing identical to oracle for atom/graph/scalar targets
     type: code
@@ -28,7 +30,8 @@ criteria:
       graph_level (e.g. energy) targets, plus a python-scalar target, show
       atom-level targets concatenated under atoms and graph-level targets
       reshape(-1) under graphs, torch.equal to collate_molecules output.
-    status: pending
+    status: verified
+    last_checked: 2026-06-10
   - id: ac-004
     summary: SubsetDataset views and singleton batches collate equivalently
     type: code
@@ -36,7 +39,8 @@ criteria:
       Tests collate via SubsetDataset.packed_view() (split-produced shuffled
       indices) and via a single-index batch; both equal the oracle leaf-for-leaf
       with correct local-to-packed index remapping.
-    status: pending
+    status: verified
+    last_checked: 2026-06-10
   - id: ac-005
     summary: cache.py stays IO-only — no tensordict or TargetSchema import
     type: code
@@ -44,7 +48,8 @@ criteria:
       A test (or equivalent static assertion) reads src/molix/data/cache.py
       source and asserts neither "tensordict" nor "TargetSchema" appears in its
       import statements; git diff for this spec leaves cache.py unmodified.
-    status: pending
+    status: verified
+    last_checked: 2026-06-10
   - id: ac-006
     summary: DataModule routes packed datasets to fast path, falls back otherwise
     type: code
@@ -54,7 +59,8 @@ criteria:
       count == 0) and emitted batches equal the slow-path batches; with a
       non-packed BaseDataset, _CollateFn + collate_molecules is used and output
       is unchanged.
-    status: pending
+    status: verified
+    last_checked: 2026-06-10
   - id: ac-007
     summary: Spawn-worker integration (num_workers=2) yields correct batches
     type: code
@@ -63,7 +69,8 @@ criteria:
       through DataModule with num_workers=2 (spawn) on a packed dataset; every
       batch is a TensorDict with correct atoms/edges/graphs shapes and values
       equal to the num_workers=0 fast-path output for the same index order.
-    status: pending
+    status: verified
+    last_checked: 2026-06-10
   - id: ac-008
     summary: batch_nodes and batch_to(ftype) post-steps apply on fast path
     type: code
@@ -71,7 +78,8 @@ criteria:
       A test registers a marker batch node and a non-default ftype; fast-path
       batches show the node's effect and all floating-point leaves cast to the
       captured ftype, matching _CollateFn semantics.
-    status: pending
+    status: verified
+    last_checked: 2026-06-10
   - id: ac-009
     summary: Collate callable pickles without capturing payload tensors
     type: code
@@ -80,7 +88,8 @@ criteria:
       restored callable produces correct batches; pickled state excludes the
       lazily built PackedView (asserted via __getstate__ contents), payload
       reached only through the dataset reference.
-    status: pending
+    status: verified
+    last_checked: 2026-06-10
   - id: ac-010
     summary: Eager actionable ValueError on empty indices or missing Z/pos
     type: code
@@ -88,7 +97,8 @@ criteria:
       pytest.raises(ValueError) tests pass for collate_packed with an empty
       index list and with a payload schema lacking Z or pos; messages name the
       offending condition.
-    status: pending
+    status: verified
+    last_checked: 2026-06-10
   - id: ac-011
     summary: New public symbols carry Google docstrings with tensor shapes
     type: docs
@@ -98,13 +108,19 @@ criteria:
       ``(E, 2)``, ``(N,)``) and Args/Returns/Raises sections where applicable;
       ruff check passes.
     status: pending
+    note: |
+      Audited green by the documenter agent (all five symbols carry
+      Google-style docstrings with tensor shapes; ruff clean). Left
+      pending per evaluator-protocol — docs criteria are owed to a human
+      reviewer / `/mol:close --manual`, not auto-verified by /mol:impl.
   - id: ac-012
     summary: Full check and test suite pass
     type: runtime
     pass_when: |
       `ruff check src/ && ruff format --check src/` and
       `python -m pytest tests/ -v` both exit 0 on the branch containing this spec.
-    status: pending
+    status: verified
+    last_checked: 2026-06-10
 ---
 
 # Acceptance criteria

@@ -34,6 +34,7 @@ from molix.data.dataset import (
     BaseDataset,
     CachedDataset,
     MmapDataset,
+    PackedView,
     SubsetDataset,
 )
 

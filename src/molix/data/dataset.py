@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -38,8 +39,62 @@ __all__ = [
     "BaseDataset",
     "CachedDataset",
     "MmapDataset",
+    "PackedView",
     "SubsetDataset",
 ]
+
+
+@dataclass(frozen=True)
+class PackedView:
+    """Read-only handle onto a :class:`~molix.data.cache.PackedCache` payload.
+
+    Exposes exactly what the packed-aware collate fast path
+    (:func:`molix.data.collate.collate_packed`) needs — the packed payload
+    dict, its cumsum pointers / schema, and a local→packed index remap —
+    without callers reaching into a dataset's private ``_payload``. A
+    :class:`SubsetDataset`'s view carries an ``index_map`` so its local
+    indices resolve to packed (global) rows; a full dataset's view uses
+    identity mapping. Holds only a reference to the (possibly mmap'd)
+    payload — never a tensor copy.
+
+    Args:
+        payload: The packed-cache payload mapping (``atoms`` / ``edges`` /
+            ``graphs`` / ``scalars`` buckets, ``atom_ptr`` / ``edge_ptr``,
+            ``schema``, ``n_samples``).
+        index_map: Packed row index per local index, or ``None`` for the
+            identity mapping of a full dataset.
+    """
+
+    payload: Mapping[str, Any]
+    index_map: tuple[int, ...] | None = None
+
+    def map_indices(self, local_indices: Sequence[int]) -> list[int]:
+        """Resolve *local_indices* to packed (global) row indices.
+
+        Args:
+            local_indices: Indices in this view's local coordinate.
+
+        Returns:
+            The corresponding packed-cache row indices.
+        """
+        if self.index_map is None:
+            return [int(i) for i in local_indices]
+        return [self.index_map[i] for i in local_indices]
+
+    def remap(self, local_indices: Sequence[int]) -> "PackedView":
+        """Return a sub-view restricted/reordered to *local_indices*.
+
+        Composes index maps so nested subsets resolve straight to packed
+        rows in a single hop.
+
+        Args:
+            local_indices: Indices in this view's local coordinate.
+
+        Returns:
+            A new :class:`PackedView` over the same payload whose identity
+            is *local_indices* expressed as packed rows.
+        """
+        return PackedView(self.payload, tuple(self.map_indices(local_indices)))
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +192,15 @@ class _CacheBacked(BaseDataset):
 
     def __getitem__(self, idx: int) -> dict:  # type: ignore[override]
         return PackedCache.unpack_sample(self._payload, idx)
+
+    def packed_view(self) -> PackedView:
+        """Return a read-only :class:`PackedView` over this cache's payload.
+
+        Identity-mapped (local index == packed row). Consumed by
+        :func:`molix.data.collate.collate_packed` to build batches by
+        slicing the packed tensors directly.
+        """
+        return PackedView(self._payload)
 
     @property
     def sink(self) -> Path:
@@ -335,6 +399,20 @@ class SubsetDataset(BaseDataset):
         wrapped dataset.
         """
         return self._dataset[self._indices[idx]]
+
+    def packed_view(self) -> PackedView:
+        """Return a :class:`PackedView` remapped to this subset's indices.
+
+        Delegates to the wrapped dataset's view and composes the index
+        maps, so a (possibly nested) subset's local indices resolve to
+        packed rows in one hop.
+
+        Raises:
+            AttributeError: The wrapped dataset is not packed-cache-backed
+                (has no ``packed_view``); the caller treats this as
+                "no fast path" and falls back to per-sample collation.
+        """
+        return self._dataset.packed_view().remap(self._indices)
 
     @cached_property
     def avg_num_neighbors(self) -> float:

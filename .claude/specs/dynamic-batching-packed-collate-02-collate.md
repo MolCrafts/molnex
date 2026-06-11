@@ -1,6 +1,6 @@
 ---
 title: Packed 感知的 collate 快速路径（packed-aware collate fast path）
-status: approved
+status: code-complete
 created: 2026-06-10
 ---
 
@@ -34,13 +34,14 @@ created: 2026-06-10
 
 ## Tasks
 
-- [ ] Write failing equivalence tests for collate_packed vs collate_molecules (tests/test_molix/test_data/test_collate_packed.py): multi-sample with edges, edge-less samples mixed in, all-edge-less fallback, graph+atom targets per TargetSchema, scalar targets, SubsetDataset views, singleton batches — asserting torch.equal per leaf, same key sets, same dtypes, same batch_size attrs
-- [ ] Implement PackedView and packed_view() accessors on _CacheBacked and SubsetDataset in src/molix/data/dataset.py (read-only; local→packed remap; cache.py untouched, no tensordict/TargetSchema import there)
-- [ ] Implement collate_packed in src/molix/data/collate.py (vectorized edge_index rebase via repeat_interleave, batch column, TargetSchema routing, empty-edge fallback identical to collate.py:149-156, eager actionable ValueError)
-- [ ] Write failing integration tests for DataModule fast-path routing in tests/test_molix/test_data/test_collate_packed.py: num_workers=0 and spawn num_workers=2 end-to-end, fallback for non-packed dataset, batch_nodes + ftype cast applied, collate callable pickles without captured payload tensors
-- [ ] Implement _IndexDataset and _PackedCollateFn wiring in src/molix/data/datamodule.py (construction-time detection, DDP and non-packed fallback to _CollateFn, batch_nodes + batch_to post-steps, lazy view excluded from __getstate__, -01 batch_sampler passthrough preserved)
-- [ ] Add Google-style docstrings with tensor shapes for collate_packed, PackedView, packed_view, _IndexDataset, _PackedCollateFn in src/molix/data/collate.py, src/molix/data/dataset.py, src/molix/data/datamodule.py
-- [ ] Run full check + test suite
+- [x] Write failing equivalence tests for collate_packed vs collate_molecules (tests/test_molix/test_data/test_collate_packed.py): multi-sample with edges, edge-less samples mixed in, all-edge-less fallback, graph+atom targets per TargetSchema, scalar targets, SubsetDataset views, singleton batches — asserting torch.equal per leaf, same key sets, same dtypes, same batch_size attrs
+- [x] Implement PackedView and packed_view() accessors on _CacheBacked and SubsetDataset in src/molix/data/dataset.py (read-only; local→packed remap; cache.py untouched, no tensordict/TargetSchema import there)
+- [x] Implement collate_packed in src/molix/data/collate.py (vectorized edge_index rebase via repeat_interleave, batch column, TargetSchema routing, empty-edge fallback identical to collate.py:149-156, eager actionable ValueError)
+- [x] Write failing integration tests for DataModule fast-path routing in tests/test_molix/test_data/test_collate_packed.py: num_workers=0 and spawn num_workers=2 end-to-end, fallback for non-packed dataset, batch_nodes + ftype cast applied, collate callable pickles without captured payload tensors
+- [x] Implement _IndexDataset and _PackedCollateFn wiring in src/molix/data/datamodule.py (construction-time detection, DDP and non-packed fallback to _CollateFn, batch_nodes + batch_to post-steps, lazy view excluded from __getstate__, -01 batch_sampler passthrough preserved)
+- [x] Add Google-style docstrings with tensor shapes for collate_packed, PackedView, packed_view, _IndexDataset, _PackedCollateFn in src/molix/data/collate.py, src/molix/data/dataset.py, src/molix/data/datamodule.py
+- [x] Run full check + test suite
+- [x] Hygiene cleanup (/mol:simplify): dropped dead `graph_stacked` param from `_route_target` (3 call sites), renamed `_e_counts`→`e_counts`, refreshed stale RED docstring; import-hoisting deferred to /mol:refactor
 
 ## Testing strategy
 
