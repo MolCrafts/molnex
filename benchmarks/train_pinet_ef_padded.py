@@ -28,7 +28,6 @@ _fc.donated_buffer = False  # let cudagraphs survive the create_graph double bac
 
 from tensordict import TensorDict  # noqa: E402
 
-from molix.core.losses import energy_force_mse  # noqa: E402
 from molix.core.metrics import MAE, RMSE  # noqa: E402
 from molix.core.seed import seed_everything  # noqa: E402
 from molix.data import AtomicDress, NeighborList, Pipeline  # noqa: E402
@@ -76,7 +75,14 @@ class PaddedWrap(torch.nn.Module):
 
 
 def pad_batch(batch: TensorDict, e_pad: int) -> TensorDict:
-    """Append one far ghost atom (trash graph) and pad edges to *e_pad* dead edges."""
+    """Fixed-shape batch: one far ghost atom (trash graph) + dead edges to e_pad.
+
+    The model only reads atoms.{Z,pos,batch} and edges.edge_index, so the
+    padded atoms/graphs carry only those (model inputs). The real-sized E/F
+    *targets* are lifted to top-level keys ``E_tgt`` (B,) / ``F_tgt`` (N,3) so
+    the loss/metrics compare them against the wrapper's sliced predictions
+    without any padded/ghost contamination.
+    """
     Z = batch["atoms", "Z"]
     pos = batch["atoms", "pos"]
     ab = batch["atoms", "batch"]
@@ -93,22 +99,29 @@ def pad_batch(batch: TensorDict, e_pad: int) -> TensorDict:
     e = ei.shape[0]
     if e > e_pad:
         raise ValueError(f"batch has {e} edges > e_pad={e_pad}; raise e_pad")
-    n_dead = e_pad - e
-    dead = torch.tensor([[0, ghost_idx]], device=dev).repeat(n_dead, 1)  # real0→ghost
-    eip = torch.cat([ei, dead], dim=0)
-    edges = TensorDict({"edge_index": eip}, batch_size=[e_pad])
+    dead = torch.tensor([[0, ghost_idx]], device=dev).repeat(e_pad - e, 1)  # real0→ghost
+    edges = TensorDict({"edge_index": torch.cat([ei, dead], dim=0)}, batch_size=[e_pad])
 
     num_atoms = batch["graphs", "num_atoms"]
-    graphs_d = {"num_atoms": torch.cat([num_atoms, num_atoms.new_ones(1)])}
-    for k in batch["graphs"].keys():
-        if k != "num_atoms":
-            v = batch["graphs", k]
-            pad = v.new_zeros((1, *v.shape[1:])) if v.ndim else v.new_zeros(1)
-            graphs_d[k] = torch.cat([v, pad])
-    graphs = TensorDict(graphs_d, batch_size=[g + 1])
-    return TensorDict({"atoms": atoms, "edges": edges, "graphs": graphs}, batch_size=[]).to(
-        dev, non_blocking=True
+    graphs = TensorDict(
+        {"num_atoms": torch.cat([num_atoms, num_atoms.new_ones(1)])}, batch_size=[g + 1]
     )
+    out = TensorDict({"atoms": atoms, "edges": edges, "graphs": graphs}, batch_size=[])
+    # real-sized targets at top level (not under the padded namespaces)
+    out["E_tgt"] = batch["graphs", "energy"].reshape(-1)
+    out["F_tgt"] = batch["atoms", "forces"]
+    return out.to(dev, non_blocking=True)
+
+
+def ef_loss_padded(lambda_f: float):
+    """EF loss reading real-sized top-level targets vs wrapper-sliced preds."""
+
+    def _fn(preds, batch):
+        e = torch.nn.functional.mse_loss(preds["energy"].reshape(-1), batch["E_tgt"])
+        f = torch.nn.functional.mse_loss(preds["forces"], batch["F_tgt"])
+        return e + lambda_f * f
+
+    return _fn
 
 
 class PaddedDataModule:
@@ -190,13 +203,13 @@ def _metric_hooks():
         MetricsHook(
             metrics=[MAE(), RMSE()],
             pred_key=("predictions", "energy"),
-            target_key=("graphs", "energy"),
+            target_key=("E_tgt",),
             name_prefix="E_",
         ),
         MetricsHook(
             metrics=[MAE(), RMSE()],
             pred_key=("predictions", "forces"),
-            target_key=("atoms", "forces"),
+            target_key=("F_tgt",),
             name_prefix="F_",
         ),
     ]
@@ -240,7 +253,7 @@ def train_once(mode, train_ds, val_ds, e_pad, schema, epochs, lambda_f, device):
     rec = Rec()
     trainer = Trainer(
         model=model,
-        loss_fn=energy_force_mse(lambda_F=lambda_f, per_atom=True),
+        loss_fn=ef_loss_padded(lambda_f),
         optimizer_factory=lambda p: torch.optim.Adam(p, lr=1e-3),
         hooks=[*_metric_hooks(), rec],
         device=device,
