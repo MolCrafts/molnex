@@ -224,7 +224,7 @@ def train_once(mode, train_ds, val_ds, e_pad, schema, epochs, lambda_f, device):
     seed_everything(0)
     inner = build_model().to(device)
     dm = PaddedDataModule(train_ds, val_ds, 32, e_pad, schema)
-    warm = next(iter(dm.train_dataloader()))
+    warm = next(iter(dm.train_dataloader())).to(device)
     n_real_atoms = 32 * 21  # aspirin
     inner.train()
     inner(warm)  # materialise on the padded shape
