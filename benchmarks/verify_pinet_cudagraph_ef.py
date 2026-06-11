@@ -73,6 +73,31 @@ def _gmax_rel(ga, gb):
     return worst
 
 
+def _diagnose(ga, gb):
+    """How wrong is gb vs ga? Direction (cosine), magnitude (rel-L2), spread."""
+    names = [n for n in ga if n in gb]
+    a = torch.cat([ga[n].flatten().double() for n in names])
+    b = torch.cat([gb[n].flatten().double() for n in names])
+    cos = torch.nn.functional.cosine_similarity(a, b, dim=0).item()
+    rel_l2 = ((b - a).norm() / (a.norm() + 1e-30)).item()
+    per_param = sorted(
+        ((((gb[n] - ga[n]).norm() / (ga[n].norm() + 1e-30)).item(), n) for n in names),
+        reverse=True,
+    )
+    rels = [r for r, _ in per_param]
+    over1e3 = sum(r > 1e-3 for r in rels)
+    over1e2 = sum(r > 1e-2 for r in rels)
+    return {
+        "cosine": cos,
+        "rel_l2": rel_l2,
+        "median_rel": rels[len(rels) // 2],
+        "n_over_1e-3": over1e3,
+        "n_over_1e-2": over1e2,
+        "n_params": len(names),
+        "worst": per_param[:4],
+    }
+
+
 def verify(dtype: torch.dtype) -> bool:
     """eager-vs-eager noise floor vs cudagraphs-vs-eager gap, at one dtype."""
     torch.manual_seed(0)
@@ -108,7 +133,23 @@ def verify(dtype: torch.dtype) -> bool:
     print(f"forward forces max|Δ|={(e_f - c_f).abs().max().item():.2e}")
     print(f"grad noise floor (eager vs eager):  abs={floor_abs:.2e}  rel={floor_rel:.2e}")
     print(f"grad gap (cudagraphs vs eager):      abs={gap_abs:.2e}  rel={gap_rel:.2e}")
-    # within ~3x the floor (both abs and rel) → indistinguishable from fp noise
+
+    fd = _diagnose(e_g, c_g)  # how wrong are the cudagraphs grads?
+    nd = _diagnose(e_g, e2_g)  # eager-vs-eager reference
+    print("\nhow wrong (cudagraphs vs eager double-backward grads):")
+    print(
+        f"  cosine(grad direction) = {fd['cosine']:.6f}   (eager-vs-eager ref {nd['cosine']:.6f})"
+    )
+    print(
+        f"  ||Δg|| / ||g||  (rel-L2)= {fd['rel_l2']:.3e}   (eager-vs-eager ref {nd['rel_l2']:.1e})"
+    )
+    print(f"  median per-param rel-L2 = {fd['median_rel']:.3e}")
+    n3, n2, npar = fd["n_over_1e-3"], fd["n_over_1e-2"], fd["n_params"]
+    print(f"  params rel-L2 > 1e-3    = {n3}/{npar}   > 1e-2 = {n2}")
+    print("  worst params (rel-L2):")
+    for r, n in fd["worst"]:
+        print(f"    {r:.2e}  {n}")
+
     ok = gap_rel <= max(floor_rel * 3, 1e-6) and gap_abs <= max(floor_abs * 3, 1e-9)
     print(f"→ cudagraphs grads within noise floor at {name}: {ok}")
     return ok

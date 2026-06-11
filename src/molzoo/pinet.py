@@ -459,19 +459,22 @@ class PiNetPotential(nn.Module):
           unsupported (``RuntimeError: ... does not currently support double
           backward``), so it raises loudly at the first training step.
         * ``backend="cudagraphs"`` — does **not** raise (it runs ~5.7× faster),
-          but the double backward through the replayed graph produces
-          **silently wrong parameter gradients**: GH200-verified, the forward
-          energy/forces match eager to machine precision, yet the grads diverge
-          ~4e-4 *relative* — and this gap persists in fp64 (10^10× the
-          eager-vs-eager scatter_add noise floor), so it is a real correctness
-          bug, not precision noise. Never use ``cudagraphs`` for force training:
-          a model trained on it learns from corrupt gradients with no error.
+          and the double backward through the replayed graph is *almost* right:
+          GH200-verified, forward energy/forces match eager to machine
+          precision and the parameter-gradient **direction is identical**
+          (cosine 1.000000), with whole-gradient ``‖Δg‖/‖g‖ ≈ 1–2e-5`` (worst
+          single param ~3–5e-4, none over 0.1 %). But this gap persists in fp64
+          (above the ~1e-16 eager-vs-eager floor), so it is a real, systematic
+          deviation — cudagraphs force training is **not bit-equivalent to
+          eager**, just very close. Likely harmless (far under fp32 training
+          noise), but unvalidated for converged force-field accuracy; prefer
+          eager when reproducibility matters, and never assume it is exact.
 
-        Force training must stay **eager**. The launch-bound remedy is a larger
-        physical batch (bs64 ~tripled revMD17 EF throughput, dropping launch-
-        bound 65 % → 42 %) or ``Trainer(accumulate_grad_batches=…)``.
+        The launch-bound remedy that needs no such caveat is a larger physical
+        batch (bs64 ~tripled revMD17 EF throughput, dropping launch-bound
+        65 % → 42 %) or ``Trainer(accumulate_grad_batches=…)``.
         Force *inference* (``create_graph=False``, no double backward) compiles
-        fine and is correct — reduce-overhead reached ~8.8× there.
+        cleanly and exactly — reduce-overhead reached ~8.8× there.
 
         Materialise lazy parameters with one warm-up forward before calling
         this, so the compiled graph captures concrete shapes.
