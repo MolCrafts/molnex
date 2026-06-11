@@ -24,6 +24,14 @@ from pathlib import Path
 
 import torch
 
+# compile_energy(cudagraphs) + force training (create_graph=True double
+# backward) trips aot_autograd's donated-buffer optimisation in a real
+# training loop (RuntimeError: ... requires create_graph=False). Disable it so
+# the cudagraphs run can actually train and be compared. Eager is unaffected.
+import torch._functorch.config as _functorch_config
+
+_functorch_config.donated_buffer = False
+
 from molix.core.hook import BaseHook
 from molix.core.losses import energy_force_mse
 from molix.core.metrics import MAE, RMSE
