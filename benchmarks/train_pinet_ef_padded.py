@@ -227,7 +227,8 @@ def train_once(mode, train_ds, val_ds, e_pad, schema, epochs, lambda_f, device):
     warm = next(iter(dm.train_dataloader())).to(device)
     n_real_atoms = 32 * 21  # aspirin
     inner.train()
-    inner(warm)  # materialise on the padded shape
+    inner(warm)  # materialise lazy params/buffers on the padded shape
+    inner.to(device)  # sweep lazily-created buffers (cutoff r_cut etc.) to device
     if mode == "cudagraphs":
         inner.compile_energy(backend="cudagraphs")
     model = PaddedWrap(inner, n_real_atoms, 32)
