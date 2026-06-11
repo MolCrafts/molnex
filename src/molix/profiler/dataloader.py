@@ -125,6 +125,29 @@ class DataLoaderResult:
 # ---------------------------------------------------------------------------
 
 
+class _ProfilerCollate:
+    """Picklable collate callable for the profiler's worker DataLoaders.
+
+    A top-level class (not a closure) so ``spawn`` / ``forkserver`` workers
+    can pickle it; mirrors :class:`molix.data.datamodule._CollateFn` minus
+    the dtype cast (the profiler measures raw collation throughput).
+
+    Args:
+        schema: How targets are routed during collation.
+        batch_nodes: Post-collate :class:`Node` instances to apply in order.
+    """
+
+    def __init__(self, schema: TargetSchema, batch_nodes: tuple) -> None:
+        self.schema = schema
+        self.batch_nodes = batch_nodes
+
+    def __call__(self, batch_samples: list[dict]) -> object:
+        batch = collate_molecules(batch_samples, self.schema)
+        for entry in self.batch_nodes:
+            batch = entry.apply(batch)
+        return batch
+
+
 def _extract_batch_counts(batch: object) -> tuple[int, int]:
     """Extract (n_atoms, n_graphs) from a TensorDict batch."""
     try:
@@ -285,16 +308,14 @@ class DataLoaderProfiler:
         return CachedDataset(tmp_file)
 
     def _make_dataloader(self, dataset: Dataset) -> DataLoader:
-        schema = self.target_schema
-        pipeline = self.pipeline
-
-        def collate_fn(batch_samples: list[dict]) -> object:
-            batch = collate_molecules(batch_samples, schema)
-            if pipeline is not None:
-                for entry in pipeline.batch_nodes:
-                    batch = entry.apply(batch)
-            return batch
-
+        batch_nodes = self.pipeline.batch_nodes if self.pipeline is not None else ()
+        # A picklable top-level collate (not a closure) so num_workers > 0
+        # under spawn/forkserver can ship it to workers — same rationale as
+        # molix.data.datamodule._CollateFn.
+        collate_fn = _ProfilerCollate(self.target_schema, batch_nodes)
+        kwargs = {}
+        if self.num_workers > 0:
+            kwargs["multiprocessing_context"] = "spawn"
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
@@ -303,4 +324,5 @@ class DataLoaderProfiler:
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
             collate_fn=collate_fn,
+            **kwargs,
         )
