@@ -114,9 +114,10 @@ def pad_batch(batch: TensorDict, e_pad: int) -> TensorDict:
 class PaddedDataModule:
     """Yields fixed-shape ghost-padded batches; drop_last keeps the shape constant."""
 
-    def __init__(self, train_ds, val_ds, batch_size, e_pad, schema, seed=0):
+    def __init__(self, train_ds, val_ds, batch_size, e_pad, schema, device="cpu", seed=0):
         self.train_ds, self.val_ds = train_ds, val_ds
         self.bs, self.e_pad, self.schema, self.seed = batch_size, e_pad, schema, seed
+        self.device = device
         self._epoch = 0
 
     def setup(self, stage="fit"):
@@ -133,7 +134,10 @@ class PaddedDataModule:
             idx = torch.randperm(n, generator=g).tolist()
         for s in range(0, n - self.bs + 1, self.bs):  # drop_last
             chunk = idx[s : s + self.bs]
-            batch = collate_molecules([ds[i] for i in chunk], self.schema)
+            # move to device BEFORE padding so pad_batch builds all its tensors
+            # (ghost atom, dead edges) on-device → fully on-device batch, no
+            # reliance on the Trainer's per-batch move for this hand-built TD.
+            batch = collate_molecules([ds[i] for i in chunk], self.schema).to(self.device)
             yield pad_batch(batch, self.e_pad)
 
     def train_dataloader(self):
@@ -223,7 +227,7 @@ def train_once(mode, train_ds, val_ds, e_pad, schema, epochs, lambda_f, device):
 
     seed_everything(0)
     inner = build_model().to(device)
-    dm = PaddedDataModule(train_ds, val_ds, 32, e_pad, schema)
+    dm = PaddedDataModule(train_ds, val_ds, 32, e_pad, schema, device=device)
     warm = next(iter(dm.train_dataloader())).to(device)
     n_real_atoms = 32 * 21  # aspirin
     inner.train()

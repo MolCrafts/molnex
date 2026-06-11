@@ -12,17 +12,10 @@ echo "=== node $(hostname) arch $(uname -m) $(date) ==="
 source "${LMOD_PKG:-/software/sse2/el9_epyc9005/manual/lmod/lmod/lmod}/init/bash"
 module purge
 module load GPU/buildenv-gcccuda/2026.03-cu13.0
-module load GPU/Python/3.13.5-bare-gcc-2025b-eb
-WORKTREE=/home/jicli594/work/molcrafts/molnex/.claude/worktrees/trainer-dataset-fixes
-VENV="$WORKTREE/.venv-gpu"
-cd "$WORKTREE"
-if [ ! -x "$VENV/bin/python" ]; then
-  python -m venv "$VENV"; "$VENV/bin/pip" install -q --upgrade pip
-  "$VENV/bin/pip" install -q "torch>=2.10" "scikit-build-core>=0.10" "cmake>=4.0.0" ninja
-  MOLNEX_OP_ENABLE_CUDA=OFF "$VENV/bin/pip" install -q --no-build-isolation -e ".[dev]"
-else
-  MOLNEX_OP_ENABLE_CUDA=OFF "$VENV/bin/pip" install -q --no-build-isolation -e . --force-reinstall --no-deps
-fi
+# Use the prebuilt aarch64 venv (molnex editable on the MAIN checkout, with its
+# own aarch64 ext) — no install, no rebuild, and it never touches the worktree .so.
+VENV=/home/jicli594/work/molcrafts/.aarch64
+cd /home/jicli594/work/molcrafts/molnex/.claude/worktrees/trainer-dataset-fixes
 "$VENV/bin/python" -c "import molix,torch;print('molix OK',torch.__version__,torch.cuda.is_available())"
 OMP_NUM_THREADS=16 "$VENV/bin/python" benchmarks/train_pinet_ef_padded.py \
     --epochs 300 --n-total 1000 --lambda-f 100 --e-pad 14000 \
