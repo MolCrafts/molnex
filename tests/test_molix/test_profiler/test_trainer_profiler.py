@@ -35,9 +35,12 @@ class TestTrainerProfiler:
         assert result.steps_per_sec > 0
         assert result.wall_ms_per_step > 0
         assert 0 < len(result.hotspots) <= 8
-        # hotspot rows carry the per-step attribution columns
+        # baseline-subtracted attribution columns
         row = result.hotspots[0]
-        assert {"func", "self_us", "cum_us", "calls"} <= set(row)
+        assert {"func", "added_us", "gross_us", "calls"} <= set(row)
+        # raw-loop baseline is measured; overhead is loop minus baseline
+        assert result.baseline_ms_per_step > 0
+        assert result.overhead_ms_per_step >= 0
 
     def test_hotspots_include_trainer_machinery(self):
         result = TrainerProfiler(device="cpu").run(n_steps=200, n_warmup=10, top=20)
