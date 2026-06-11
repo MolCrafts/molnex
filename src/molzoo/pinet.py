@@ -458,17 +458,18 @@ class PiNetPotential(nn.Module):
           a second time through an ``aot_autograd``-compiled region is
           unsupported (``RuntimeError: ... does not currently support double
           backward``), so it raises loudly at the first training step.
-        * ``backend="cudagraphs"`` — does **not** raise (it runs ~5.7× faster),
-          and the double backward through the replayed graph is *almost* right:
-          GH200-verified, forward energy/forces match eager to machine
-          precision and the parameter-gradient **direction is identical**
-          (cosine 1.000000), with whole-gradient ``‖Δg‖/‖g‖ ≈ 1–2e-5`` (worst
-          single param ~3–5e-4, none over 0.1 %). But this gap persists in fp64
-          (above the ~1e-16 eager-vs-eager floor), so it is a real, systematic
-          deviation — cudagraphs force training is **not bit-equivalent to
-          eager**, just very close. Likely harmless (far under fp32 training
-          noise), but unvalidated for converged force-field accuracy; prefer
-          eager when reproducibility matters, and never assume it is exact.
+        * ``backend="cudagraphs"`` — does **not** raise (and with
+          ``torch._functorch.config.donated_buffer=False`` + fixed-shape
+          padding it will run a full training loop ~2× faster), but it trains a
+          **broken force field**. A single-step gradient check looked benign
+          (cosine 1.000000, ``‖Δg‖/‖g‖≈1e-7``), yet that deviation accumulates:
+          over 300 epochs on rMD17 aspirin, GH200-measured, cudagraphs reaches
+          **force MAE ≈ 24** vs eager's **≈ 1.9 (13× worse)** under identical
+          seed/data/padding (eager+same-padding matches plain eager, so the
+          padding is exonerated — the corruption is the cudagraph-replayed
+          double backward). Energy looks deceptively fine only because a
+          force-weighted loss leaves it loosely fit and noisy. **Never use
+          ``cudagraphs`` for force training.**
 
         The launch-bound remedy that needs no such caveat is a larger physical
         batch (bs64 ~tripled revMD17 EF throughput, dropping launch-bound
