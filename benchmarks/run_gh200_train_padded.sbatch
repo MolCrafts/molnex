@@ -12,6 +12,9 @@ echo "=== node $(hostname) arch $(uname -m) $(date) ==="
 source "${LMOD_PKG:-/software/sse2/el9_epyc9005/manual/lmod/lmod/lmod}/init/bash"
 module purge
 module load GPU/buildenv-gcccuda/2026.03-cu13.0
+# newer libstdc++ (CXXABI_1.3.15) for the GCC-14.3-built aarch64 ext
+GCC_LIB=$(dirname "$(g++ -print-file-name=libstdc++.so.6)")
+export LD_LIBRARY_PATH="$GCC_LIB:${LD_LIBRARY_PATH:-}"
 # Use the prebuilt aarch64 venv (molnex editable on the MAIN checkout, with its
 # own aarch64 ext) — no install, no rebuild, and it never touches the worktree .so.
 VENV=/home/jicli594/work/molcrafts/.aarch64
