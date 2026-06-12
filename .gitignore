@@ -126,3 +126,4 @@ examples/
 
 # HPC sbatch logs
 slurm-*.out
+jobs/
