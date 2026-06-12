@@ -182,8 +182,35 @@ def test_default_train_step_computes_loss_and_updates():
         assert not torch.equal(initial, current), "Parameters should have been updated"
 
 
-def test_default_eval_step_no_gradient():
-    """Verify DefaultEvalStep does not compute gradients."""
+def test_default_eval_step_no_grad_opt_in():
+    """``DefaultEvalStep(no_grad=True)`` suppresses the autograd graph."""
+    model = SimpleModel()
+
+    trainer = Trainer(
+        model=model,
+        loss_fn=simple_loss_fn,
+        optimizer_factory=simple_optimizer_factory,
+        eval_step=DefaultEvalStep(no_grad=True),
+    )
+
+    state = TrainState()
+    batch = _make_batch()
+
+    outputs = trainer.eval_step.on_eval_batch(trainer, state, batch)
+
+    assert "loss" in outputs
+    assert "predictions" in outputs
+    assert isinstance(outputs["loss"], torch.Tensor)
+    assert isinstance(outputs["predictions"], torch.Tensor)
+
+    # no_grad=True → no graph
+    assert not outputs["loss"].requires_grad
+    assert not outputs["predictions"].requires_grad
+
+
+def test_default_eval_step_keeps_graph_by_default():
+    """The default ``DefaultEvalStep`` keeps the graph alive so force models
+    (F = -dE/dx) get valid eval forces."""
     model = SimpleModel()
 
     trainer = Trainer(
@@ -195,18 +222,10 @@ def test_default_eval_step_no_gradient():
     state = TrainState()
     batch = _make_batch()
 
-    # Execute eval step
     outputs = trainer.eval_step.on_eval_batch(trainer, state, batch)
 
-    # Check outputs
-    assert "loss" in outputs
-    assert "predictions" in outputs
-    assert isinstance(outputs["loss"], torch.Tensor)
-    assert isinstance(outputs["predictions"], torch.Tensor)
-
-    # Verify no gradients computed
-    assert not outputs["loss"].requires_grad
-    assert not outputs["predictions"].requires_grad
+    # default no_grad=False → graph is live (loss is differentiable)
+    assert outputs["loss"].requires_grad
 
 
 def test_trainer_delegates_to_train_step():
@@ -385,7 +404,7 @@ def test_default_eval_step_with_amp_bfloat16():
         model=model,
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
-        eval_step=DefaultEvalStep(),
+        eval_step=DefaultEvalStep(no_grad=True),
     )
     trainer.set_precision("bf16-mixed")
 
@@ -395,6 +414,7 @@ def test_default_eval_step_with_amp_bfloat16():
     outputs = trainer.eval_step.on_eval_batch(trainer, state, batch)
     assert "loss" in outputs
     assert "predictions" in outputs
+    # no_grad=True path → no autograd graph even under autocast
     assert not outputs["loss"].requires_grad
 
 

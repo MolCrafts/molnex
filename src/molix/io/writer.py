@@ -68,6 +68,19 @@ class JournalWriter:
             ``O(num_records / chunk_rows)``.
         spec_version: Recorded into ``attrs["spec_version"]`` so a
             future reader can detect format drift.
+        autoflush: When ``True``, every :meth:`append` drains the buffer
+            to the Zarr store immediately (mirrors a line-buffered
+            :class:`logging.FileHandler`: each record reaches the OS at
+            once instead of only at :meth:`close`). This is what makes a
+            run survive a hard ``SIGKILL`` — e.g. an HPC walltime timeout
+            that skips ``close()`` — since flushed Zarr chunks live in the
+            OS page cache and outlast the killed process. Default ``False``
+            (buffer until :meth:`flush` / :meth:`close`).
+        fsync: When ``True``, every :meth:`flush` additionally ``fsync``s
+            the freshly written store files, so records survive even a node
+            crash / power loss (the page cache is forced to stable storage).
+            Stronger and slower than ``autoflush`` alone; combine with
+            ``autoflush=True`` for per-record durability. Default ``False``.
     """
 
     def __init__(
@@ -78,6 +91,8 @@ class JournalWriter:
         chunk_rows: int = 1024,
         shard_rows: int = 1_048_576,
         spec_version: str = _SPEC_VERSION,
+        autoflush: bool = False,
+        fsync: bool = False,
     ) -> None:
         if chunk_rows <= 0:
             raise ValueError(f"chunk_rows must be positive, got {chunk_rows}")
@@ -94,6 +109,8 @@ class JournalWriter:
         self._run_id = run_id
         self._chunk_rows = chunk_rows
         self._shard_rows = shard_rows
+        self._autoflush = bool(autoflush)
+        self._fsync = bool(fsync)
         self._closed = False
 
         self._root = zarr.open(str(self._path), mode="a")
@@ -208,8 +225,16 @@ class JournalWriter:
                     f"Unknown record type {other!r}; expected one of {_RESERVED_TYPES!r}"
                 )
 
+        if self._autoflush:
+            self.flush()
+
     def flush(self) -> None:
-        """Drain the in-memory buffer into the Zarr arrays."""
+        """Drain the in-memory buffer into the Zarr arrays.
+
+        When the writer was constructed with ``fsync=True`` the freshly
+        written store files are additionally ``fsync``-ed, forcing the OS
+        page cache to stable storage so records survive a node crash.
+        """
         if self._closed:
             raise RuntimeError("JournalWriter.flush called after close()")
         n = len(self._buffer["type"])
@@ -223,6 +248,40 @@ class JournalWriter:
             self._buffer[name] = []
 
         self._n_rows = new_total
+
+        if self._fsync:
+            self._fsync_store()
+
+    def _fsync_store(self) -> None:
+        """Best-effort ``fsync`` of every file (and dir) under the store path.
+
+        Zarr's ``LocalStore`` writes chunk/metadata files through ordinary
+        buffered I/O, so a flushed record lives only in the OS page cache
+        until the kernel syncs it. Walking the store and ``fsync``-ing each
+        descriptor forces those bytes to disk, which is what upgrades the
+        durability guarantee from "survives SIGKILL" to "survives power
+        loss". Errors are swallowed: a failed fsync must never crash a
+        training run (the in-cache data is still there for a SIGKILL).
+        """
+        for dirpath, _dirnames, filenames in os.walk(self._path):
+            for name in filenames:
+                fpath = os.path.join(dirpath, name)
+                try:
+                    fd = os.open(fpath, os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                except OSError:
+                    pass
+            try:
+                dfd = os.open(dirpath, os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+            except OSError:
+                pass
 
     def close(self) -> None:
         """Flush, write the derived index, and mark the writer closed."""

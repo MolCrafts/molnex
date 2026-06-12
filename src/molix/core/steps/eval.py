@@ -23,13 +23,17 @@ class DefaultEvalStep:
     ``GradScaler`` is used during evaluation.
 
     Args:
-        no_grad: Wrap forward in ``torch.no_grad()`` (default ``True``).
-            Set ``False`` for models that derive forces via
-            ``torch.autograd.grad`` (e.g. Sonata), which needs an active
-            autograd graph.
+        no_grad: Wrap forward in ``torch.no_grad()`` (default ``False``).
+            The default keeps the autograd graph alive so models that
+            derive forces via ``torch.autograd.grad`` (PiNet, Sonata, any
+            ``F = -dE/dx`` potential) produce *valid* eval forces out of
+            the box — running such a model under ``no_grad`` silently
+            evaluates forces on a graph that excludes the eval input, or
+            crashes. Set ``True`` only for pure energy/property models
+            where the small graph-construction memory saving matters.
     """
 
-    def __init__(self, *, no_grad: bool = True) -> None:
+    def __init__(self, *, no_grad: bool = False) -> None:
         self._no_grad = no_grad
 
     def on_train_batch(self, trainer: "Trainer", state: "TrainState", batch: Any) -> dict[str, Any]:

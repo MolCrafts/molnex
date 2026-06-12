@@ -18,18 +18,25 @@ class ProgressBarHook(BaseHook):
         leave: Leave progress bar after completion (default: True).
     """
 
-    def __init__(self, desc: str = "Training", leave: bool = True):
+    def __init__(self, desc: str = "Training", leave: bool = True, loss_refresh_every: int = 1):
         from tqdm import tqdm
 
         self.tqdm = tqdm
 
         self.desc = desc
         self.leave = leave
+        # The loss postfix requires a ``.item()`` CPU↔GPU sync. Refreshing it
+        # every step serialises a launch-bound training loop, so allow
+        # throttling: the bar still advances every batch, but the displayed
+        # loss is sampled only every ``loss_refresh_every`` batches.
+        self.loss_refresh_every = max(1, loss_refresh_every)
         self.pbar = None
+        self._update_count = 0
 
     def on_train_start(self, trainer, state):
         """Initialize progress bar."""
         self.pbar = None
+        self._update_count = 0
 
     def on_epoch_start(self, trainer, state):
         """Update progress bar for new epoch."""
@@ -40,15 +47,17 @@ class ProgressBarHook(BaseHook):
             self.pbar.reset()
 
     def on_train_batch_end(self, trainer, state, batch, outputs):
-        """Update progress bar after each batch."""
+        """Update progress bar after each batch (loss postfix throttled)."""
         if self.pbar is not None:
-            postfix = {}
-            if isinstance(outputs, dict) and "loss" in outputs:
-                loss_value = (
-                    outputs["loss"].item() if hasattr(outputs["loss"], "item") else outputs["loss"]
-                )
-                postfix["loss"] = f"{loss_value:.4f}"
-            self.pbar.set_postfix(postfix)
+            self._update_count += 1
+            if (
+                isinstance(outputs, dict)
+                and "loss" in outputs
+                and self._update_count % self.loss_refresh_every == 0
+            ):
+                loss = outputs["loss"]
+                loss_value = loss.item() if hasattr(loss, "item") else loss
+                self.pbar.set_postfix({"loss": f"{loss_value:.4f}"})
             self.pbar.update(1)
 
     def on_train_end(self, trainer, state):
@@ -78,6 +87,14 @@ def _render_cell(value: Any, fmt: str, width: int) -> str:
       so silent path-resolution failures can no longer masquerade as
       training divergence.
     """
+    # 0-dim tensors are stored by hooks that defer the CPU↔GPU sync to the
+    # (throttled) render path — materialise here, not per training step.
+    if hasattr(value, "item") and hasattr(value, "dim"):
+        try:
+            if value.dim() == 0:
+                value = value.item()
+        except (RuntimeError, ValueError):
+            return f"{_MISSING_CELL:>{width}}"
     if isinstance(value, bool):
         return fmt.format(int(value))
     if isinstance(value, int):

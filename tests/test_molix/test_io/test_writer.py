@@ -167,3 +167,66 @@ def test_empty_key_rejected(tmp_path: Path) -> None:
                 wall_time_ns=1,
                 value=0.0,
             )
+
+
+# ---------------------------------------------------------------------------
+# Durability flags — autoflush (SIGKILL-safe) + fsync (crash-safe).
+# A logging.FileHandler-style line-buffered sink: each append reaches the OS
+# at once, so a hard kill that skips close() still leaves the records on disk.
+# ---------------------------------------------------------------------------
+
+
+def _read_scalars(tmp_path: Path, run_id: str = "run0") -> list[float]:
+    """Read back value_scalar without going through close()/the index group."""
+    import zarr
+
+    grp = zarr.open(str(tmp_path), mode="r")[f"metrics/records/{run_id}"]
+    return [float(v) for v in grp["value_scalar"][:]]
+
+
+def test_default_buffers_until_flush(tmp_path: Path) -> None:
+    """Without autoflush, appended records are NOT on disk until flush/close."""
+    from molix.io import JournalWriter
+
+    writer = JournalWriter(tmp_path, run_id="run0")  # no context manager → no close
+    _append_scalar(writer, step=0, value=1.0)
+    _append_scalar(writer, step=1, value=2.0)
+    assert _read_scalars(tmp_path) == []  # still buffered in memory
+
+    writer.flush()
+    assert _read_scalars(tmp_path) == [1.0, 2.0]
+
+
+def test_autoflush_persists_without_close(tmp_path: Path) -> None:
+    """autoflush=True: records survive even when close() never runs (SIGKILL)."""
+    from molix.io import JournalWriter
+
+    writer = JournalWriter(tmp_path, run_id="run0", autoflush=True)
+    _append_scalar(writer, step=0, value=10.0)
+    _append_scalar(writer, step=1, value=20.0)
+    # Deliberately DO NOT call writer.close() — simulate a killed process.
+    assert _read_scalars(tmp_path) == [10.0, 20.0]
+
+
+def test_autoflush_reader_recovers_without_index(tmp_path: Path) -> None:
+    """JournalReader reads an autoflushed, never-closed run (rebuilds the key index)."""
+    from molix.io import JournalReader, JournalWriter
+
+    writer = JournalWriter(tmp_path, run_id="run0", autoflush=True)
+    _append_scalar(writer, step=0, key="train/loss", value=0.5)
+    _append_scalar(writer, step=1, key="eval/E_MAE", value=0.1)
+    # no close()
+
+    reader = JournalReader(tmp_path, run_id="run0")
+    assert len(reader) == 2
+    assert set(reader.keys()) == {"train/loss", "eval/E_MAE"}
+
+
+def test_fsync_flag_persists_and_is_safe(tmp_path: Path) -> None:
+    """autoflush + fsync: still correct, and fsync over the store does not error."""
+    from molix.io import JournalWriter
+
+    writer = JournalWriter(tmp_path, run_id="run0", autoflush=True, fsync=True)
+    _append_scalar(writer, step=0, value=42.0)
+    _append_scalar(writer, step=1, value=43.0)
+    assert _read_scalars(tmp_path) == [42.0, 43.0]

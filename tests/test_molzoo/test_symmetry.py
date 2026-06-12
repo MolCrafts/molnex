@@ -69,7 +69,8 @@ def make_pipeline(encoder, is_edge_encoder: bool = False):
             node_feats = layer_pool(result["atoms", "node_features"])
 
         atom_energy = energy_mlp(node_feats)
-        mol_energy = energy_agg(atom_energy, batch["atoms", "batch"])
+        atom_batch = batch["atoms", "batch"]
+        mol_energy = energy_agg(atom_energy, atom_batch, num_graphs=int(atom_batch.max()) + 1)
         forces = force_deriv(mol_energy, pos)
 
         return mol_energy, forces, node_feats

@@ -41,21 +41,21 @@ class EnergyAggregation(nn.Module):
         self,
         node_energy: torch.Tensor,
         batch: torch.Tensor,
-        num_graphs: int | None = None,
+        num_graphs: int,
     ) -> torch.Tensor:
         """Pool node energies to molecular energies.
 
         Args:
             node_energy: Per-atom energies ``(N,)``.
             batch: Batch indices ``(N,)``.
-            num_graphs: Number of graphs in the batch. If None, inferred from batch.
+            num_graphs: Number of graphs in the batch. Pass the known
+                graph count (e.g. ``batch_td["graphs"].batch_size[0]``) — it
+                is required so the output can be sized without a
+                ``batch.max().item()`` CPU↔GPU sync per step.
 
         Returns:
             Molecular energy ``(B,)``.
         """
-        if num_graphs is None:
-            num_graphs = int(batch.max().item()) + 1
-
         energy = torch.zeros(num_graphs, dtype=node_energy.dtype, device=node_energy.device)
         energy.index_add_(0, batch, node_energy)
 

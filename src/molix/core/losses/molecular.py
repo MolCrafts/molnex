@@ -39,6 +39,8 @@ def energy_mse(
     *,
     pred_key: str = "energy",
     reduction: str = "mean",
+    per_atom: bool = False,
+    num_atoms_key: str = "num_atoms",
 ) -> Callable[[Mapping[str, Any], Any], torch.Tensor]:
     """MSE between predicted energy and a graph-level target.
 
@@ -49,6 +51,14 @@ def energy_mse(
             prediction in its output dict.
         reduction: ``'mean'``, ``'sum'``, or ``'none'`` — forwarded to
             :class:`torch.nn.MSELoss`.
+        per_atom: When ``True``, divide the energy residual by each graph's
+            atom count before squaring, so the loss is in (energy/atom)²
+            and large molecules don't dominate variable-size batches. The
+            atom count is read from ``batch["graphs", num_atoms_key]``.
+            Leave ``False`` to match references that fit total-energy MSE
+            (e.g. fixed-composition rMD17).
+        num_atoms_key: Graph-level key holding the per-graph atom count,
+            used only when ``per_atom`` is set.
 
     Returns:
         ``loss_fn(preds, batch) -> Tensor`` suitable for the Trainer's
@@ -59,6 +69,10 @@ def energy_mse(
     def _fn(preds: Mapping[str, Any], batch: Any) -> torch.Tensor:
         e_pred = preds[pred_key]
         e_true = batch["graphs", target_key].view_as(e_pred)
+        if per_atom:
+            n_atoms = batch["graphs", num_atoms_key].view_as(e_pred).to(e_pred.dtype)
+            scale = n_atoms.clamp(min=1)
+            return mse(e_pred / scale, e_true / scale)
         return mse(e_pred, e_true)
 
     return _fn
@@ -72,6 +86,8 @@ def energy_force_mse(
     force_pred_key: str = "forces",
     lambda_F: float = 1.0,
     reduction: str = "mean",
+    per_atom: bool = False,
+    num_atoms_key: str = "num_atoms",
 ) -> Callable[[Mapping[str, Any], Any], torch.Tensor]:
     """Energy MSE + ``lambda_F`` × forces MSE.
 
@@ -85,8 +101,14 @@ def energy_force_mse(
         force_target_key: Atom-level force target key in the batch.
         energy_pred_key: Energy key on the model-forward output dict.
         force_pred_key: Force key on the model-forward output dict.
-        lambda_F: Weight on the force-MSE term.
+        lambda_F: Weight on the force-MSE term (the literature ``rho``).
+            The force MSE is already per-atom (atom-level vectors), so it is
+            directly comparable across system sizes; pair with
+            ``per_atom=True`` to put the energy term on the same footing.
         reduction: Forwarded to both :class:`torch.nn.MSELoss` instances.
+        per_atom: Normalize the energy residual by atom count — see
+            :func:`energy_mse`. The force term is unaffected.
+        num_atoms_key: Graph-level per-graph atom-count key for ``per_atom``.
 
     Returns:
         ``loss_fn(preds, batch) -> Tensor``.
@@ -95,6 +117,8 @@ def energy_force_mse(
         energy_target_key,
         pred_key=energy_pred_key,
         reduction=reduction,
+        per_atom=per_atom,
+        num_atoms_key=num_atoms_key,
     )
     mse_f = nn.MSELoss(reduction=reduction)
 
