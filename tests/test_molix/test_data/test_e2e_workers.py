@@ -9,21 +9,20 @@ real training runs:
 * MmapDataset must round-trip through pickle intact
 
 Test flow mirrors the data path of train_allegro_qm9.py:
-pipeline → cache() → MmapDataset → Subset → DataModule(num_workers>0) → iterate.
+pipeline → PipelineSpec.cache() → MmapDataset → Subset →
+DataModule(num_workers>0) → iterate.
 """
 
 from __future__ import annotations
 
 import torch
+from tensordict import TensorDict
 
-from molix.data.cache import cache
 from molix.data.collate import TargetSchema
 from molix.data.datamodule import DataModule
-from molix.data.dataset import MmapDataset
 from molix.data.pipeline import Pipeline
 from molix.data.source import InMemorySource
 from molix.data.task import SampleTask
-from molix.data.types import GraphBatch
 
 
 class FakeNeighborList(SampleTask):
@@ -65,52 +64,50 @@ def _raw_samples(n: int = 16) -> list[dict]:
 
 
 def test_mmap_dataset_with_num_workers_4(tmp_path):
-    """Reproduces the training data path: cache() → MmapDataset → split →
+    """Reproduces the training data path: cache() → dataset → split →
     DataModule with forkserver + multiple workers → iterate one epoch."""
     src = InMemorySource(_raw_samples(16))
-    spec = Pipeline("e2e").add(FakeNeighborList()).build()
-    sink = tmp_path / "prepared.pt"
-    cache(spec, src, sink=sink)
+    pipe = Pipeline("e2e").add(FakeNeighborList()).build()
+    dag = pipe.cache(src, base_dir=tmp_path)
 
-    full = MmapDataset(sink)
+    full = dag.dataset(mmap=True)
     train, val = full.split(ratio=0.75, seed=0)
     assert len(train) == 12 and len(val) == 4
 
     schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset())
     dm = DataModule(
-        train, val,
+        train,
+        val,
         target_schema=schema,
         batch_size=4,
-        num_workers=4,           # triggers forkserver path
-        pin_memory=False,        # avoid CUDA on CI
+        num_workers=4,  # triggers forkserver path
+        pin_memory=False,  # avoid CUDA on CI
         prefetch_factor=2,
     )
 
     seen_batches = 0
     for batch in dm.train_dataloader():
-        assert isinstance(batch, GraphBatch)
-        assert batch["atoms", "Z"].shape[0] == 4 * 4   # 4 mols × 4 atoms each
+        assert isinstance(batch, TensorDict)
+        assert batch["atoms", "Z"].shape[0] == 4 * 4  # 4 mols × 4 atoms each
         assert batch["graphs", "U0"].shape == (4,)
         assert batch["edges", "edge_index"].shape[1] == 2
         seen_batches += 1
-    assert seen_batches == 3   # 12 / 4
+    assert seen_batches == 3  # 12 / 4
 
 
-def test_collate_picklable_with_batch_tasks(tmp_path):
-    """Collate fn wraps batch_tasks; must still pickle."""
+def test_collate_picklable_with_batch_nodes(tmp_path):
+    """Collate fn wraps batch_nodes; must still pickle."""
     import pickle
 
     src = InMemorySource(_raw_samples(8))
-    spec = Pipeline("p").add(FakeNeighborList()).build()
-    sink = tmp_path / "prepared.pt"
-    cache(spec, src, sink=sink)
+    pipe = Pipeline("p").add(FakeNeighborList()).build()
+    dag = pipe.cache(src, base_dir=tmp_path)
 
-    ds = MmapDataset(sink)
+    ds = dag.dataset(mmap=True)
     train, val = ds.split(ratio=0.5)
 
     schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset())
-    dm = DataModule(train, val, target_schema=schema, batch_size=2,
-                    num_workers=0, pin_memory=False)
+    dm = DataModule(train, val, target_schema=schema, batch_size=2, num_workers=0, pin_memory=False)
 
     fn = dm._make_collate_fn()
-    pickle.loads(pickle.dumps(fn))   # must not raise
+    pickle.loads(pickle.dumps(fn))  # must not raise

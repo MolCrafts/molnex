@@ -1,18 +1,26 @@
 # MolRep
 
-MolRep is the representation layer of MolNex.
+MolRep is the representation learning package in MolNex. Use it for molecular
+embeddings, radial and angular bases, equivariant interaction blocks, pooling,
+and readout primitives.
 
-Its purpose is to turn molecular structure into useful internal representations without tying that work to one training recipe or one physical objective. This is where MolNex concentrates the expressive part of the stack.
+## Tutorials
 
-## Design Role
+- [Build an Encoder](tutorials/build-an-encoder.md): start from atom embeddings
+  and produce node features.
 
-MolRep exists because representation learning should be reusable. Good molecular features, interactions, and readout logic should not need to be reinvented every time the downstream task changes.
+## User Guide
 
-The layer is designed to stay modular, so different modeling ideas can share a common vocabulary instead of each becoming its own isolated system.
+- [Encoders](user-guide/encoders.md): compose embeddings, interaction blocks,
+  and readouts.
+- [Embeddings](user-guide/embeddings.md): turn atomic numbers and scalar inputs
+  into learned features.
 
-## What MolRep Optimizes For
+## Explanation
 
-- reusable molecular building blocks
-- expressive representations without framework sprawl
-- clean separation between feature learning and downstream objectives
-- a modeling layer that can support both experimentation and reuse
+- [Representation Learning](explanation/representation-learning.md): how
+  MolRep fits between raw graph data and downstream potentials or model heads.
+
+## API
+
+See [molrep API Reference](../api/molrep.md).

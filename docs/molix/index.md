@@ -1,25 +1,38 @@
 # Molix
 
-Molix is the training layer of MolNex.
+Molix is the training and execution package in MolNex. Use it when you need
+training loops, data modules, hooks, checkpoints, metrics, or the nested
+`GraphBatch` data contract used by models and losses.
 
-Its job is to make experimentation repeatable without turning the training system into the center of the project. Molix handles orchestration, lifecycle, and extensibility, while staying intentionally smaller than the modeling layers it supports.
+## Tutorials
 
-## Design Role
+- [Quick Start](tutorials/quick-start.md): train a small PyTorch model with
+  `Trainer`.
+- [Train a Graph Model](tutorials/train-a-graph-model.md): use a nested
+  molecular `GraphBatch` end to end.
 
-Molix exists to answer a simple question: how should training infrastructure support molecular research without taking it over?
+## User Guide
 
-The answer in MolNex is to keep the execution layer clear, lightweight, and extensible. Training should provide structure, not lock the rest of the stack into one worldview.
+- [Trainer](user-guide/trainer.md): configure the training loop.
+- [Hooks](user-guide/hooks.md): add logging, metrics, checkpointing, and custom
+  lifecycle behavior.
+- [Data Pipeline](user-guide/data.md): understand sources, preprocessing,
+  caching, collation, and data modules.
+- [Data Loading](user-guide/data-loading.md): convert flat samples into
+  `GraphBatch` objects.
+- [Data Modules](user-guide/data-modules.md): wire datasets into `Trainer`.
 
-## What Molix Optimizes For
+## Explanation
 
-- a training loop that stays understandable
-- extension points for real research workflows
-- separation between orchestration and model design
-- enough structure to support growth without unnecessary framework weight
+- [Execution Model](explanation/execution-model.md): how Molix separates
+  trainer, steps, hooks, and state.
+- [Batch Schema](explanation/batch-schema.md): the raw sample and post-collate
+  `TensorDict` shapes.
+- [Throughput & `torch.compile`](explanation/throughput-and-compilation.md):
+  why PiNet training is launch-bound, the front/back-end compile sweep, the
+  fixed-length-padding + CUDA-graphs ~5x path, and the `max-autotune`
+  shared-memory failure (and what GPU "shared memory" is vs HBM).
 
-## Suggested Reading
+## API
 
-1. [Quickstart](quickstart.md)
-2. [The Trainer](core/trainer.md)
-3. [Hooks System](core/hooks.md)
-4. [Data Overview](data/index.md)
+See [molix API Reference](../api/molix.md).

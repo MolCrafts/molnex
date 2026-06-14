@@ -32,7 +32,9 @@ class DataSource(Protocol):
 
     def __len__(self) -> int: ...
 
-    def __getitem__(self, idx: int) -> Sample: ...
+    def __getitem__(self, idx: int) -> Sample:
+        """Return the ``idx``-th raw sample as a flat ``dict`` (e.g. ``Z`` / ``pos``)."""
+        ...
 
 
 class InMemorySource:
@@ -44,12 +46,14 @@ class InMemorySource:
 
     @property
     def source_id(self) -> str:
+        """Cache-key identity ``memory:<name>:<n_samples>``."""
         return f"memory:{self._name}:{len(self._samples)}"
 
     def __len__(self) -> int:
         return len(self._samples)
 
     def __getitem__(self, idx: int) -> Sample:
+        """Return the ``idx``-th wrapped sample dict (no copy)."""
         return self._samples[idx]
 
 
@@ -62,6 +66,8 @@ class SubsetSource:
 
     @property
     def source_id(self) -> str:
+        """Cache-key identity: the parent's ``source_id`` plus a 12-hex hash
+        of the sorted index list, so different subsets get distinct caches."""
         idx_hash = hashlib.sha256(str(sorted(self._indices)).encode()).hexdigest()[:12]
         return f"{self._source.source_id}:subset={idx_hash}"
 
@@ -69,4 +75,8 @@ class SubsetSource:
         return len(self._indices)
 
     def __getitem__(self, idx: int) -> Sample:
+        """Return the sample at the ``idx``-th index of this subset view.
+
+        Maps the local index through ``self._indices`` to the parent source.
+        """
         return self._source[self._indices[idx]]

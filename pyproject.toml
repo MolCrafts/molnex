@@ -1,10 +1,15 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "torch>=2.10"]
+# ``cmake>=4`` and ``ninja`` are pinned in build-system.requires so that
+# scikit-build-core's build environment uses the right toolchain even on
+# CI runners where the system cmake is 3.x.  ``torch>=2.10`` is required
+# during build because ``src/molix/op/CMakeLists.txt`` does
+# ``find_package(Torch REQUIRED)`` and consumes its CMake config.
+requires = ["scikit-build-core>=0.10", "torch>=2.10", "cmake>=4.0.0", "ninja"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "molnex"
-version = "0.1.0"
+version = "0.2.0"
 description = "Dict-first molecular ML framework"
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -34,6 +39,9 @@ dependencies = [
   "pydantic",
   "tqdm",
   "nvidia-ml-py",
+  "zarr>=3.0",
+  "numcodecs>=0.13",
+  "typer>=0.12",
 ]
 
 [project.optional-dependencies]
@@ -44,7 +52,14 @@ dev = [
   "ruff>=0.15",
   "ty>=0.0.25",
 ]
+docs = [
+  "zensical>=0.0.27",
+  "mkdocstrings[python]>=0.30",
+]
 bench = ["pytest-benchmark>=4.0"]
+
+[project.scripts]
+molnex = "molix.cli:app"
 
 [project.urls]
 Repository = "https://github.com/molcrafts/molnex"
@@ -91,6 +106,12 @@ invalid-return-type = "warn"
 invalid-method-override = "warn"
 # invalid-assignment: intentional ssl context bypass for dataset downloading
 invalid-assignment = "warn"
+# unsupported-operator: nn.Buffer / cuequivariance ops narrow imprecisely; runtime is fine
+unsupported-operator = "warn"
+# too-many-positional-arguments: cuequivariance Irrep ctor positional API not in stubs
+too-many-positional-arguments = "warn"
+# call-top-callable: torch lazy generators / dataloaders typed as object in stubs
+call-top-callable = "warn"
 
 [tool.ty.environment]
 python-version = "3.12"

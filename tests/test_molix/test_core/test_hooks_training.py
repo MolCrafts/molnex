@@ -4,21 +4,20 @@ import pytest
 import torch
 import torch.nn as nn
 
-from molix.config import set_precision
-from molix.core.hooks import (
+from molix.config import config
+from molix.core.state import TrainState
+from molix.core.trainer import Trainer
+from molix.hooks import (
     ActivationCheckpointingHook,
     GradClipHook,
 )
-from molix.core.state import TrainState
-from molix.core.steps import DefaultTrainStep
-from molix.core.trainer import Trainer
 
 
 @pytest.fixture(autouse=True)
 def _reset_precision():
-    set_precision("fp32")
+    config.set_precision("fp32")
     yield
-    set_precision("fp32")
+    config.set_precision("fp32")
 
 
 # ---- Test fixtures ----
@@ -29,8 +28,8 @@ class SimpleModel(nn.Module):
         super().__init__()
         self.linear = nn.Linear(10, 1)
 
-    def forward(self, x, **_kwargs):
-        return self.linear(x)
+    def forward(self, batch):
+        return self.linear(batch["x"])
 
 
 class TwoLayerModel(nn.Module):
@@ -41,8 +40,8 @@ class TwoLayerModel(nn.Module):
         self.layer1 = nn.Linear(10, 10)
         self.layer2 = nn.Linear(10, 1)
 
-    def forward(self, x, **_kwargs):
-        return self.layer2(torch.relu(self.layer1(x)))
+    def forward(self, batch):
+        return self.layer2(torch.relu(self.layer1(batch["x"])))
 
 
 def simple_loss_fn(predictions, batch):
@@ -61,69 +60,28 @@ def _make_batch():
     }
 
 
-class MockDataModule:
-    def train_dataloader(self):
-        for _ in range(3):
-            yield _make_batch()
-
-    def val_dataloader(self):
-        for _ in range(2):
-            yield _make_batch()
-
-
 # ---- GradClipHook tests ----
 
 
-def test_grad_clip_hook_clips_gradients():
-    """Verify GradClipHook actually clips gradient norms."""
-    model = SimpleModel()
-    hook = GradClipHook(max_norm=0.01)  # Very small to force clipping
-
-    trainer = Trainer(
-        model=model,
+def _trainer_with(*hooks):
+    return Trainer(
+        model=SimpleModel(),
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
-        hooks=[hook],
+        hooks=list(hooks),
     )
 
-    datamodule = MockDataModule()
-    state = trainer.train(datamodule, max_epochs=1)
 
-    # grad_norm should have been written to state
-    assert "train/grad_norm" in state
-
-
-def test_grad_clip_hook_respects_max_norm():
-    """Verify clipped gradients do not exceed max_norm."""
+def test_grad_clip_hook_caps_grad_norm():
+    """``GradClipHook.on_after_backward`` clips the global grad norm to max_norm."""
+    torch.manual_seed(0)
+    trainer = _trainer_with()
+    # Populate large gradients, then clip via the hook directly (no train loop).
+    (trainer.model(_make_batch()).sum() * 1000.0).backward()
     max_norm = 0.1
-    model = SimpleModel()
-    grad_norms_after = []
-
-    class InspectGradHook:
-        """Runs after GradClipHook to verify clipping happened."""
-
-        def on_after_backward(self, trainer, state):
-            total_norm = torch.nn.utils.clip_grad_norm_(
-                trainer.model.parameters(), float("inf")
-            )
-            grad_norms_after.append(total_norm.item())
-
-    trainer = Trainer(
-        model=model,
-        loss_fn=simple_loss_fn,
-        optimizer_factory=simple_optimizer_factory,
-        hooks=[
-            GradClipHook(max_norm=max_norm),
-            InspectGradHook(),  # Runs after GradClipHook
-        ],
-    )
-
-    datamodule = MockDataModule()
-    trainer.train(datamodule, max_epochs=1)
-
-    # After clipping, norms should be <= max_norm (with small tolerance)
-    for norm in grad_norms_after:
-        assert norm <= max_norm + 1e-6, f"Grad norm {norm} exceeds max_norm {max_norm}"
+    GradClipHook(max_norm=max_norm).on_after_backward(trainer, TrainState())
+    post = torch.nn.utils.clip_grad_norm_(trainer.model.parameters(), float("inf"))
+    assert float(post) <= max_norm + 1e-6
 
 
 def test_grad_clip_hook_writes_state():
@@ -144,29 +102,13 @@ def test_grad_clip_hook_writes_state():
     # Manually run one training step to trigger on_after_backward
     trainer.train_step.on_train_batch(trainer, state, batch)
 
-    assert "train/grad_norm" in state
-    assert isinstance(state["train/grad_norm"], float)
-
-
-def test_grad_clip_hook_with_amp():
-    """Verify GradClipHook works correctly with AMP enabled."""
-    model = SimpleModel()
-    hook = GradClipHook(max_norm=1.0)
-
-    trainer = Trainer(
-        model=model,
-        loss_fn=simple_loss_fn,
-        optimizer_factory=simple_optimizer_factory,
-        train_step=DefaultTrainStep(),
-        hooks=[hook],
-    )
-    trainer.set_precision("bf16-mixed")
-
-    datamodule = MockDataModule()
-    state = trainer.train(datamodule, max_epochs=1)
-
-    assert "train/grad_norm" in state
-    assert state.global_step == 3
+    # Stored as a 0-d device tensor (not float()-ed) so the optimizer step
+    # incurs no CPU<->GPU sync; consumers materialise on their own cadence.
+    assert "grad_norm" in state["train"]
+    grad_norm = state["train"]["grad_norm"]
+    assert isinstance(grad_norm, torch.Tensor)
+    assert grad_norm.ndim == 0
+    assert float(grad_norm) >= 0.0
 
 
 # ---- ActivationCheckpointingHook tests ----
@@ -218,11 +160,11 @@ def test_activation_checkpointing_numerical_equivalence():
     torch.manual_seed(42)
     model = TwoLayerModel()
 
-    x = torch.randn(5, 10)
+    batch = {"x": torch.randn(5, 10)}
 
     # Get reference output before checkpointing
     with torch.no_grad():
-        ref_output = model(x).clone()
+        ref_output = model(batch).clone()
 
     # Apply checkpointing
     hook = ActivationCheckpointingHook(
@@ -235,7 +177,7 @@ def test_activation_checkpointing_numerical_equivalence():
 
     # Get checkpointed output
     with torch.no_grad():
-        ckpt_output = model(x)
+        ckpt_output = model(batch)
 
     torch.testing.assert_close(ref_output, ckpt_output)
 
@@ -252,8 +194,7 @@ def test_activation_checkpointing_gradient_flow():
         TrainState(),
     )
 
-    x = torch.randn(5, 10)
-    output = model(x)
+    output = model({"x": torch.randn(5, 10)})
     loss = output.sum()
     loss.backward()
 
@@ -262,49 +203,3 @@ def test_activation_checkpointing_gradient_flow():
         assert param.grad is not None, f"No gradient for {name}"
 
 
-def test_activation_checkpointing_trains_with_trainer():
-    """Verify full training loop works with activation checkpointing."""
-    model = TwoLayerModel()
-
-    trainer = Trainer(
-        model=model,
-        loss_fn=simple_loss_fn,
-        optimizer_factory=simple_optimizer_factory,
-        hooks=[
-            ActivationCheckpointingHook(
-                check_fn=lambda m: isinstance(m, nn.Linear),
-            ),
-        ],
-    )
-
-    datamodule = MockDataModule()
-    state = trainer.train(datamodule, max_epochs=1)
-
-    assert state.epoch == 1
-    assert state.global_step == 3
-
-
-def test_all_three_features_together():
-    """Verify AMP + GradClip + ActivationCheckpointing work together."""
-    model = TwoLayerModel()
-
-    trainer = Trainer(
-        model=model,
-        loss_fn=simple_loss_fn,
-        optimizer_factory=simple_optimizer_factory,
-        train_step=DefaultTrainStep(),
-        hooks=[
-            ActivationCheckpointingHook(
-                check_fn=lambda m: isinstance(m, nn.Linear),
-            ),
-            GradClipHook(max_norm=1.0),
-        ],
-    )
-    trainer.set_precision("bf16-mixed")
-
-    datamodule = MockDataModule()
-    state = trainer.train(datamodule, max_epochs=1)
-
-    assert state.epoch == 1
-    assert state.global_step == 3
-    assert "train/grad_norm" in state

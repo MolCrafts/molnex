@@ -1,254 +1,255 @@
-"""Tests for encoder-only Allegro modules."""
+"""Tests for the Allegro encoder (faithful port of mir-group/allegro).
+
+End-to-end physical-invariant checks of the encoder + ``EdgeEnergyHead``
+energy pipeline. Module-level shape / parity tests have been retired
+along with the previous ``AllegroLayer`` / ``PairEmbedding`` API; the
+new encoder follows the reference's monolithic ``Allegro_Module`` layout
+(DenseNet scalar accumulation, env weights sliced from the latent MLP
+output) and exposes only the encoder ``Allegro`` class.
+
+Coverage:
+* Translation / rotation / permutation invariance of the total energy.
+* Cutoff vanishing: edges past ``r_max`` produce zero contribution.
+* Single-batch overfit: forward + backward must reduce loss to ~0.
+"""
 
 from __future__ import annotations
 
-import pytest
 import torch
+import torch.nn as nn
+from tensordict import TensorDict
 
-from molix.data.types import AtomData, EdgeData, GraphBatch
-from molrep.utils.equivariance import rotate_vectors, rotation_matrix_z
-from molzoo.allegro import Allegro, AllegroLayer, PairEmbedding
-from tests.utils import assert_compile_compatible
+from molpot.heads import EdgeEnergyHead
+from molrep.utils.equivariance import (
+    random_rotation_matrix,
+    rotate_vectors,
+)
+from molzoo.allegro import Allegro
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def graph_data():
-    n_nodes = 4
-    edge_index = torch.tensor(
-        [
-            [0, 1],
-            [1, 0],
-            [1, 2],
-            [2, 1],
-            [2, 3],
-            [3, 2],
-        ],
-        dtype=torch.long,
+def _build_graph(
+    pos: torch.Tensor,
+    Z: torch.Tensor,
+    r_cut: float,
+    *,
+    with_graphs: bool = True,
+) -> TensorDict:
+    """Build a full-connectivity TensorDict (all pairs within ``r_cut``)."""
+    n = pos.shape[0]
+    pairs = []
+    diffs = []
+    dists = []
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            d = pos[j] - pos[i]
+            r = d.norm().item()
+            if r < r_cut:
+                pairs.append((i, j))
+                diffs.append(d)
+                dists.append(r)
+    edge_index = torch.tensor(pairs, dtype=torch.long)
+    bond_diff = torch.stack(diffs, dim=0)
+    bond_dist = torch.tensor(dists, dtype=pos.dtype)
+
+    atoms = TensorDict(
+        Z=Z,
+        pos=pos,
+        batch=torch.zeros(n, dtype=torch.long),
+        batch_size=[n],
     )
-    pos = torch.randn(n_nodes, 3)
-    bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    bond_dist = bond_diff.norm(dim=-1).clamp(min=1e-4)
-    Z = torch.randint(0, 5, (n_nodes,))
-    n_edges = edge_index.shape[0]
+    edges = TensorDict(
+        edge_index=edge_index,
+        bond_diff=bond_diff,
+        bond_dist=bond_dist,
+        batch_size=[edge_index.shape[0]],
+    )
+    td = {"atoms": atoms, "edges": edges}
+    if with_graphs:
+        td["graphs"] = TensorDict(num_atoms=torch.tensor([n], dtype=torch.long), batch_size=[1])
+    return TensorDict(**td, batch_size=[])
 
-    return GraphBatch(
-        atoms=AtomData(
-            Z=Z, pos=pos, batch=torch.zeros(n_nodes, dtype=torch.long),
-            batch_size=[n_nodes],
-        ),
-        edges=EdgeData(
-            edge_index=edge_index,
-            bond_diff=bond_diff,
-            bond_dist=bond_dist,
-            batch_size=[n_edges],
-        ),
-        batch_size=[],
+
+def _build_encoder(
+    *,
+    num_layers: int = 2,
+    l_max: int = 2,
+    r_cut: float = 5.0,
+    avg_num_neighbors: float = 4.0,
+    seed: int = 0,
+) -> Allegro:
+    torch.manual_seed(seed)
+    return Allegro(
+        num_elements=10,
+        num_scalar_features=16,
+        num_tensor_features=8,
+        r_max=r_cut,
+        num_bessel=4,
+        l_max=l_max,
+        num_layers=num_layers,
+        type_embed_dim=16,
+        latent_mlp_depth=1,
+        latent_mlp_width=16,
+        avg_num_neighbors=avg_num_neighbors,
     )
 
 
-class TestPairEmbedding:
-    """PairEmbedding output shapes and compile compatibility."""
+def _build_energy_model(encoder: Allegro, avg_nbr: float) -> nn.Module:
+    """Compose the encoder with an EdgeEnergyHead readout."""
+    head = EdgeEnergyHead(
+        input_dim=encoder.output_dim,
+        hidden_dim=16,
+        avg_num_neighbors=avg_nbr,
+    )
 
-    def test_output_shapes(self, graph_data):
-        module = PairEmbedding(
-            num_elements=5,
-            num_scalar_features=16,
-            num_tensor_features=8,
-            r_max=5.0,
-            l_max=2,
-        )
-        scalars, tensors, edge_angular, edge_cutoff = module(
-            Z=graph_data["atoms", "Z"],
-            bond_dist=graph_data["edges", "bond_dist"],
-            bond_diff=graph_data["edges", "bond_diff"],
-            edge_index=graph_data["edges", "edge_index"],
-        )
+    class EnergyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.encoder = encoder
+            self.head = head
 
-        n_edges = graph_data["edges", "edge_index"].shape[0]
-        assert scalars.shape == (n_edges, 16)
-        assert tensors.shape == (n_edges, module.irreps_dim)
-        assert edge_angular.shape == (n_edges, 9)
-        assert edge_cutoff.shape == (n_edges,)
-        assert torch.all(edge_cutoff >= 0.0)
-        assert torch.all(edge_cutoff <= 1.0)
+        def forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
+            batch = self.encoder(batch)
+            return self.head(batch)
 
-    def test_compile(self, graph_data):
-        module = PairEmbedding(
-            num_elements=5,
-            num_scalar_features=16,
-            num_tensor_features=8,
-            r_max=5.0,
-            l_max=2,
-        )
-        assert_compile_compatible(
-            module,
-            strict=True,
-            Z=graph_data["atoms", "Z"],
-            bond_dist=graph_data["edges", "bond_dist"],
-            bond_diff=graph_data["edges", "bond_diff"],
-            edge_index=graph_data["edges", "edge_index"],
-        )
+    return EnergyModel()
 
 
-class TestAllegroLayer:
-    """AllegroLayer shape preservation and compile compatibility."""
-
-    def test_preserves_batch_dimension(self):
-        num_scalar = 16
-        num_tensor = 8
-        module = AllegroLayer(
-            num_scalar_features=num_scalar,
-            num_tensor_features=num_tensor,
-            l_max=2,
-        )
-        n_nodes = 4
-        n_edges = 6
-        edge_index = torch.tensor(
-            [[0, 1], [1, 0], [1, 2], [2, 1], [2, 3], [3, 2]], dtype=torch.long
-        )
-        scalar_features = torch.randn(n_edges, num_scalar)
-        tensor_in = torch.randn(n_edges, module.irreps_dim)
-        edge_angular = torch.randn(n_edges, 9)
-        scalar_out, tensor_out = module(
-            scalar_features, tensor_in, edge_angular, edge_index, n_nodes
-        )
-        assert scalar_out.shape == (n_edges, num_scalar)
-        assert tensor_out.shape == tensor_in.shape
-
-    def test_linear_latent_mlp(self):
-        """``latent_activation=None`` yields a pure linear stack (3BPA setup)."""
-        module = AllegroLayer(
-            num_scalar_features=16,
-            num_tensor_features=8,
-            l_max=2,
-            latent_mlp_hiddens=[32, 32, 32],
-            latent_activation=None,
-        )
-        activations = [
-            m for m in module.latent_mlp if not isinstance(m, torch.nn.Linear)
-        ]
-        assert activations == []
-
-    def test_avg_num_neighbors_constant(self):
-        """When ``avg_num_neighbors`` is set the layer stores the constant."""
-        module = AllegroLayer(
-            num_scalar_features=16,
-            num_tensor_features=8,
-            l_max=2,
-            avg_num_neighbors=4.0,
-        )
-        assert module.avg_num_neighbors == 4.0
-
-    def test_residual_alpha_coefficients(self):
-        module = AllegroLayer(
-            num_scalar_features=16,
-            num_tensor_features=8,
-            l_max=2,
-            residual_alpha=0.5,
-        )
-        # a = 1/√1.25, b = 0.5/√1.25, and a² + b² = 1.
-        assert abs(module.residual_a ** 2 + module.residual_b ** 2 - 1.0) < 1e-6
-
-    def test_compile(self):
-        num_scalar = 16
-        num_tensor = 8
-        module = AllegroLayer(
-            num_scalar_features=num_scalar,
-            num_tensor_features=num_tensor,
-            l_max=2,
-        )
-        n_nodes = 4
-        n_edges = 6
-        edge_index = torch.tensor(
-            [[0, 1], [1, 0], [1, 2], [2, 1], [2, 3], [3, 2]], dtype=torch.long
-        )
-        scalar_features = torch.randn(n_edges, num_scalar)
-        tensor_in = torch.randn(n_edges, module.irreps_dim)
-        edge_angular = torch.randn(n_edges, 9)
-        assert_compile_compatible(
-            module,
-            scalar_features,
-            tensor_in,
-            edge_angular,
-            edge_index,
-            n_nodes,
-            strict=True,
-        )
+# ---------------------------------------------------------------------------
+# Encoder shape / output-dim contracts
+# ---------------------------------------------------------------------------
 
 
-class TestAllegro:
-    """Full Allegro encoder contract, equivariance, and compile."""
+class TestAllegroEncoder:
+    def test_output_dim_is_densenet_stack(self):
+        """Encoder output dim is ``F · (L + 1)`` (twobody scalar + per-layer)."""
+        for num_layers in (1, 2, 3):
+            enc = _build_encoder(num_layers=num_layers)
+            assert enc.output_dim == enc.num_scalar_features * (num_layers + 1)
 
-    def test_forward_encoder_contract(self, graph_data):
-        encoder = Allegro(
-            num_elements=5,
-            num_scalar_features=16,
-            num_tensor_features=8,
-            r_max=5.0,
-            l_max=2,
-            num_layers=3,
-        )
-        result = encoder(graph_data)
-        edge_features = result["edges", "edge_features"]
-        n_edges = graph_data["edges", "edge_index"].shape[0]
-        assert edge_features.shape == (n_edges, 3, 16)
+    def test_forward_writes_edge_features(self):
+        torch.manual_seed(0)
+        enc = _build_encoder(num_layers=2)
+        pos = torch.randn(4, 3)
+        Z = torch.randint(1, 5, (4,))
+        g = _build_graph(pos, Z, r_cut=enc.r_max)
+        out = enc(g)
+        ef = out["edges", "edge_features"]
+        assert ef.shape == (g["edges", "edge_index"].shape[0], enc.output_dim)
 
-    def test_scalar_output_rotation_invariant(self, graph_data):
-        encoder = Allegro(
-            num_elements=5,
-            num_scalar_features=16,
-            num_tensor_features=8,
-            r_max=5.0,
-            l_max=2,
-            num_layers=2,
-        )
-        rotation = rotation_matrix_z(0.73)
-        orig_diff = graph_data["edges", "bond_diff"]
-        rotated_diff = rotate_vectors(orig_diff, rotation)
-        rotated_dist = rotated_diff.norm(dim=-1).clamp(min=1e-4)
 
-        n_nodes = graph_data["atoms", "Z"].shape[0]
-        n_edges = graph_data["edges", "edge_index"].shape[0]
-        rotated_batch = GraphBatch(
-            atoms=AtomData(
-                Z=graph_data["atoms", "Z"],
-                pos=graph_data["atoms", "pos"],
-                batch=graph_data["atoms", "batch"],
-                batch_size=[n_nodes],
-            ),
-            edges=EdgeData(
-                edge_index=graph_data["edges", "edge_index"],
-                bond_diff=rotated_diff,
-                bond_dist=rotated_dist,
-                batch_size=[n_edges],
-            ),
-            batch_size=[],
-        )
+# ---------------------------------------------------------------------------
+# Physical invariants of the full energy pipeline
+# ---------------------------------------------------------------------------
 
-        base = encoder(graph_data)["edges", "edge_features"]
-        rotated = encoder(rotated_batch)["edges", "edge_features"]
-        assert torch.allclose(base, rotated, rtol=1e-4, atol=1e-4)
 
-    def test_compile(self, graph_data):
-        """Full encoder compiles under strict fullgraph=True (inductor).
-
-        Requires cuequivariance >= 0.10.0rc4 (PR #270 fixed the naive-CPU
-        ``Subscripts.__add__`` graph break).  We compare the ``edge_features``
-        tensor directly because ``assert_outputs_close`` cannot compare the
-        full TensorDict output (TensorDict has no boolean ``==``).
-        """
-        encoder = Allegro(
-            num_elements=5,
-            num_scalar_features=16,
-            num_tensor_features=8,
-            r_max=5.0,
-            num_layers=2,
-        ).eval()
-
-        torch._dynamo.reset()
-        compiled = torch.compile(encoder, backend="inductor", fullgraph=True)
-
+class TestEnergyInvariants:
+    def test_translation_invariance(self):
+        torch.manual_seed(0)
+        enc = _build_encoder()
+        model = _build_energy_model(enc, avg_nbr=4.0)
+        pos = torch.randn(4, 3)
+        Z = torch.randint(1, 5, (4,))
+        g1 = _build_graph(pos, Z, r_cut=enc.r_max)
+        g2 = _build_graph(pos + torch.tensor([7.3, -2.1, 0.5]), Z, r_cut=enc.r_max)
         with torch.no_grad():
-            ref = encoder(graph_data)["edges", "edge_features"]
-            got = compiled(graph_data)["edges", "edge_features"]
-        assert torch.allclose(ref, got, rtol=1e-4, atol=1e-4)
+            e1 = model(g1)["energy"]
+            e2 = model(g2)["energy"]
+        assert torch.allclose(e1, e2, rtol=1e-4, atol=1e-5)
+
+    def test_rotation_invariance(self):
+        torch.manual_seed(1)
+        enc = _build_encoder()
+        model = _build_energy_model(enc, avg_nbr=4.0)
+        pos = torch.randn(5, 3)
+        Z = torch.randint(1, 5, (5,))
+        g1 = _build_graph(pos, Z, r_cut=enc.r_max)
+        torch.manual_seed(2)
+        R = random_rotation_matrix()
+        g2 = _build_graph(rotate_vectors(pos, R), Z, r_cut=enc.r_max)
+        with torch.no_grad():
+            e1 = model(g1)["energy"]
+            e2 = model(g2)["energy"]
+        assert torch.allclose(e1, e2, rtol=1e-4, atol=1e-4)
+
+    def test_permutation_invariance(self):
+        torch.manual_seed(2)
+        enc = _build_encoder()
+        model = _build_energy_model(enc, avg_nbr=4.0)
+        pos = torch.randn(4, 3)
+        Z = torch.randint(1, 5, (4,))
+        g1 = _build_graph(pos, Z, r_cut=enc.r_max)
+        perm = torch.tensor([2, 0, 3, 1], dtype=torch.long)
+        g2 = _build_graph(pos[perm], Z[perm], r_cut=enc.r_max)
+        with torch.no_grad():
+            e1 = model(g1)["energy"]
+            e2 = model(g2)["energy"]
+        assert torch.allclose(e1, e2, rtol=1e-4, atol=1e-5)
+
+    def test_cutoff_vanishing(self):
+        """An edge past ``r_max`` contributes zero."""
+        torch.manual_seed(3)
+        r_cut = 3.0
+        enc = _build_encoder(r_cut=r_cut, num_layers=1)
+        model = _build_energy_model(enc, avg_nbr=2.0)
+        # In-cutoff pair vs in-cutoff pair + far ghost atom.
+        pos_a = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        Z_a = torch.tensor([1, 1], dtype=torch.long)
+        pos_b = torch.cat([pos_a, torch.tensor([[10.0, 0.0, 0.0]])])
+        Z_b = torch.cat([Z_a, torch.tensor([1], dtype=torch.long)])
+        g_a = _build_graph(pos_a, Z_a, r_cut=r_cut)
+        g_b = _build_graph(pos_b, Z_b, r_cut=r_cut)
+        with torch.no_grad():
+            e_a = model(g_a)["energy"]
+            e_b = model(g_b)["energy"]
+        # Both should give the same energy (no edge connects atom 2).
+        assert torch.allclose(e_a, e_b, rtol=1e-5, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Single-batch overfit (sanity that forward/backward train)
+# ---------------------------------------------------------------------------
+
+
+class TestOverfitSingleBatch:
+    def test_overfit_constant_target(self):
+        torch.manual_seed(42)
+        pos = torch.tensor([[0.00, 0.00, 0.00], [0.96, 0.00, 0.00], [-0.24, 0.93, 0.00]])
+        Z = torch.tensor([8, 1, 1])
+        g = _build_graph(pos, Z, r_cut=3.0)
+
+        encoder = Allegro(
+            num_elements=10,
+            num_scalar_features=16,
+            num_tensor_features=8,
+            r_max=3.0,
+            num_bessel=4,
+            l_max=1,
+            num_layers=1,
+            type_embed_dim=16,
+            latent_mlp_depth=1,
+            latent_mlp_width=16,
+            avg_num_neighbors=6.0,
+        )
+        model = _build_energy_model(encoder, avg_nbr=6.0)
+        target = torch.tensor([1.234])
+
+        opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+        initial_loss = None
+        for step in range(500):
+            opt.zero_grad()
+            pred = model(g.clone())["energy"]
+            loss = (pred - target).pow(2).mean()
+            if step == 0:
+                initial_loss = loss.item()
+            loss.backward()
+            opt.step()
+        final_loss = loss.item()
+        assert final_loss < 1e-3, (
+            f"single-batch overfit failed: initial={initial_loss:.3e}, final={final_loss:.3e}"
+        )

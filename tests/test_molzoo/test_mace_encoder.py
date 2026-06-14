@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import pytest
 import torch
+from tensordict import TensorDict
 
 from molrep.embedding.node import DiscreteEmbeddingSpec
 from molzoo import MACE
-from molix.data.types import AtomData, EdgeData, GraphBatch
-from tests.utils import assert_compile_compatible
 
 
 @pytest.fixture
@@ -32,19 +31,19 @@ def graph_data():
     bond_dist = bond_diff.norm(dim=-1).clamp(min=1e-4)
     n_edges = edge_index.shape[0]
 
-    atoms = AtomData(
+    atoms = TensorDict(
         Z=torch.randint(0, 6, (n_nodes,)),
         pos=pos,
         batch=torch.zeros(n_nodes, dtype=torch.long),
         batch_size=[n_nodes],
     )
-    edges = EdgeData(
+    edges = TensorDict(
         edge_index=edge_index,
         bond_diff=bond_diff,
         bond_dist=bond_dist,
         batch_size=[n_edges],
     )
-    return GraphBatch(atoms=atoms, edges=edges, batch_size=[])
+    return TensorDict(atoms=atoms, edges=edges, batch_size=[])
 
 
 def _build_encoder() -> MACE:
@@ -74,11 +73,3 @@ class TestMACE:
         n_nodes = graph_data["atoms", "Z"].shape[0]
         assert isinstance(node_features, torch.Tensor)
         assert node_features.shape == (n_nodes, 2, 16)
-
-    @pytest.mark.xfail(
-        reason="TensorDict access + cuEquivariance not yet fullgraph-compatible",
-        strict=False,
-    )
-    def test_compile(self, graph_data):
-        encoder = _build_encoder()
-        assert_compile_compatible(encoder, graph_data, strict=False)

@@ -3,7 +3,7 @@
 All molpot potentials inherit from BasePotential, which provides:
 - PyTorch nn.Module functionality
 - PotentialProtocol compliance (calc_energy, calc_forces)
-- Automatic force computation via autograd
+- Automatic force computation via functorch (``torch.func.grad``)
 """
 
 from abc import ABC, abstractmethod
@@ -28,7 +28,7 @@ class BasePotential(nn.Module, ABC):
     name: str = "base"
     type: str = "unknown"
 
-    def calc_energy(self, data=None, **kwargs) -> float:
+    def calc_energy(self, data=None, **kwargs: Any) -> float:
         """Calculate energy (PotentialProtocol method).
 
         This method provides compatibility with molpy's Potential interface.
@@ -37,46 +37,38 @@ class BasePotential(nn.Module, ABC):
         energy_tensor = self.forward(data, **kwargs)
         return float(energy_tensor.item())
 
-    def calc_forces(self, data=None, **kwargs) -> np.ndarray:
-        """Calculate forces via autograd (PotentialProtocol method).
+    def calc_forces(self, data=None, **kwargs: Any) -> np.ndarray:
+        """Calculate forces via functorch (PotentialProtocol method).
 
-        Computes forces as F = -dE/dx using PyTorch autograd.
+        Computes forces as ``F = -∂E/∂x`` with ``torch.func.grad``: the energy
+        is differentiated as a pure function of positions, which are passed back
+        in through ``pos=`` so :meth:`forward` evaluates at the candidate
+        geometry (``_get_positions`` resolves ``kwargs["pos"]`` first).
         """
-        # Extract positions and enable gradients
-        pos = self._get_positions(data, **kwargs)
-        original_requires_grad = pos.requires_grad
-        pos.requires_grad_(True)
+        pos = self._get_positions(data, **kwargs).detach()
 
-        # Compute energy
-        energy = self.forward(data, **kwargs)
+        def energy_fn(p: torch.Tensor) -> torch.Tensor:
+            return self.forward(data, **{**kwargs, "pos": p}).sum()
 
-        # Compute forces via autograd: F = -dE/dx
-        forces = -torch.autograd.grad(
-            energy,
-            pos,
-            create_graph=False,
-            retain_graph=False,
-        )[0]
-
-        # Restore original requires_grad state
-        pos.requires_grad_(original_requires_grad)
+        forces = -torch.func.grad(energy_fn)(pos)
 
         return forces.detach().cpu().numpy()
 
     @abstractmethod
-    def forward(self, data: dict[str, Any] | None = None, **kwargs) -> torch.Tensor:
+    def forward(self, data: dict[str, Any] | None = None, **kwargs: Any) -> torch.Tensor:
         """Forward pass - must be implemented by subclasses.
 
         Args:
             data: Optional dictionary with molecule fields
-            **kwargs: Alternate way to pass explicit tensors (pos, atom_types, etc.)
+            **kwargs: Alternate way to pass explicit tensors such as positions
+                or atom types.
 
         Returns:
             Energy as torch.Tensor (scalar)
         """
         pass
 
-    def _get_positions(self, data=None, **kwargs) -> torch.Tensor:
+    def _get_positions(self, data=None, **kwargs: Any) -> torch.Tensor:
         """Extract positions from data or kwargs."""
         pos = kwargs.get("pos")
         if pos is None and data is not None:

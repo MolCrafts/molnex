@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 from pydantic import BaseModel, Field
 
+from molix import config
+
 
 class BesselRBFSpec(BaseModel):
     """Specification for Bessel radial basis function.
@@ -141,8 +143,124 @@ class BesselRBF(nn.Module):
         Returns:
             RBF features. Output shape: (..., num_radial)
         """
-        r = r.float()
         phi = self._raw_basis(r)
         if self.normalize:
             phi = (phi - self.mu) / self.sigma
         return phi
+
+
+class PolynomialBasisSpec(BaseModel):
+    """Configuration for polynomial radial basis."""
+
+    powers: list[int] = Field(..., min_length=1)
+
+
+class PolynomialBasis(nn.Module):
+    """Polynomial radial basis: ``fc ** power`` for each power in ``[1..n_basis]``.
+
+    A cutoff vector ``fc`` is required — unlike BesselRBF, the polynomial basis
+    itself does not apply a cutoff; it only shapes the envelope passed in.
+    """
+
+    def __init__(self, n_basis: int) -> None:
+        super().__init__()
+        powers = list(range(1, int(n_basis) + 1))
+        if not powers:
+            raise ValueError("n_basis must define at least one polynomial power.")
+        self.config = PolynomialBasisSpec(powers=powers)
+        self.register_buffer("powers", torch.tensor(powers, dtype=config.ftype), persistent=False)
+        self.powers: torch.Tensor
+
+    @property
+    def output_dim(self) -> int:
+        """Number of radial basis channels."""
+        return int(self.powers.numel())
+
+    def forward(self, r: torch.Tensor, *, fc: torch.Tensor) -> torch.Tensor:
+        """Evaluate polynomial basis channels.
+
+        Args:
+            r: Distances ``(E,)``. Unused — present for API symmetry.
+            fc: Cutoff values ``(E,)``.
+
+        Returns:
+            Basis tensor ``(E, output_dim)``.
+        """
+        del r
+        return fc.unsqueeze(-1).pow(self.powers)
+
+
+class GaussianBasisSpec(BaseModel):
+    """Configuration for Gaussian radial basis."""
+
+    centers: list[float] = Field(..., min_length=1)
+    gamma: list[float] = Field(..., min_length=1)
+
+
+class GaussianBasis(nn.Module):
+    """Gaussian radial basis: ``exp(-gamma * (r - center)^2)``.
+
+    Centers are auto-spaced linearly over ``[0, r_cut]`` when not provided.
+    An optional cutoff ``fc`` can be multiplied in.
+    """
+
+    def __init__(
+        self,
+        *,
+        center: float | list[float] | None = None,
+        gamma: float | list[float] = 3.0,
+        r_cut: float,
+        n_basis: int,
+    ) -> None:
+        super().__init__()
+        if center is None:
+            centers = torch.linspace(0.0, float(r_cut), int(n_basis), dtype=config.ftype)
+        elif isinstance(center, (int, float)):
+            centers = torch.full((int(n_basis),), float(center), dtype=config.ftype)
+        else:
+            centers = torch.tensor(list(center), dtype=config.ftype)
+        if centers.numel() != int(n_basis):
+            raise ValueError(
+                f"center must contain n_basis={n_basis} values, got {centers.numel()}."
+            )
+
+        if isinstance(gamma, (int, float)):
+            gammas = torch.full_like(centers, float(gamma))
+        else:
+            gammas = torch.tensor(list(gamma), dtype=config.ftype)
+            if gammas.numel() == 1:
+                gammas = gammas.expand_as(centers).clone()
+        if gammas.numel() != centers.numel():
+            raise ValueError(
+                f"gamma must be scalar or contain {centers.numel()} values, got {gammas.numel()}."
+            )
+
+        self.config = GaussianBasisSpec(
+            centers=[float(v) for v in centers.tolist()],
+            gamma=[float(v) for v in gammas.tolist()],
+        )
+        self.register_buffer("centers", centers, persistent=False)
+        self.register_buffer("gamma", gammas, persistent=False)
+        self.centers: torch.Tensor
+        self.gamma: torch.Tensor
+
+    @property
+    def output_dim(self) -> int:
+        """Number of radial basis channels."""
+        return int(self.centers.numel())
+
+    def forward(self, r: torch.Tensor, *, fc: torch.Tensor | None = None) -> torch.Tensor:
+        """Evaluate Gaussian basis channels.
+
+        Args:
+            r: Distances ``(E,)``.
+            fc: Optional cutoff values ``(E,)``.
+
+        Returns:
+            Basis tensor ``(E, output_dim)``.
+        """
+        rr = r.to(dtype=self.centers.dtype).unsqueeze(-1)
+        basis = torch.exp(-self.gamma * (rr - self.centers).pow(2))
+        if fc is not None:
+            basis = basis * fc.unsqueeze(-1)
+        return basis

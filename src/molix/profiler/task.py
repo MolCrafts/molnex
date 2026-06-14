@@ -7,7 +7,7 @@ or BatchTask) in complete isolation.  Accepts either a
 
 For :class:`~molix.data.task.DatasetTask`, a ``fit()`` call is made on the
 provided source before timing begins (mirroring what
-:func:`~molix.data.execute.run` does).
+:meth:`~molix.data.pipeline.PipelineSpec.run` does).
 
 Example::
 
@@ -25,10 +25,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from molix.data.execute import call_task
+from molix.data.pipeline import Node
 from molix.data.task import DatasetTask
 from molix.profiler._utils import Timer, TimingStat, _fmt_table
-
 
 # ---------------------------------------------------------------------------
 # Result
@@ -132,6 +131,10 @@ class TaskProfiler:
             all_samples = [source[i] for i in range(n_source)]  # type: ignore[index]
             self.task.fit(all_samples)
 
+        task_name = type(self.task).__name__
+        task_id = getattr(self.task, "task_id", task_name)
+        entry = Node(name=task_name, task=self.task)
+
         total = n_warmup + n_samples
         times_ms: list[float] = []
 
@@ -139,12 +142,9 @@ class TaskProfiler:
             idx = i % n_source
             sample = source[idx]  # type: ignore[index]
             with Timer() as t:
-                call_task(self.task, sample)
+                entry.apply(sample)
             if i >= n_warmup:
                 times_ms.append(t.elapsed * 1000)
-
-        task_name = type(self.task).__name__
-        task_id = getattr(self.task, "task_id", task_name)
         desc = getattr(source, "describe", lambda: type(source).__name__)()
 
         return TaskResult(

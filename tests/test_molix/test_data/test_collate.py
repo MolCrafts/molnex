@@ -1,7 +1,7 @@
 import torch
+from tensordict import TensorDict
 
 from molix.data.collate import collate_molecules
-from molix.data.types import GraphBatch
 
 
 def test_collate_basic_fields_and_offsets():
@@ -24,7 +24,7 @@ def test_collate_basic_fields_and_offsets():
 
     batch = collate_molecules([sample1, sample2])
 
-    assert isinstance(batch, GraphBatch)
+    assert isinstance(batch, TensorDict)
     assert batch["atoms", "Z"].shape == (5,)
     assert batch["atoms", "pos"].shape == (5, 3)
     assert batch["atoms", "batch"].tolist() == [0, 0, 1, 1, 1]

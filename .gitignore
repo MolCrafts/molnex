@@ -17,6 +17,12 @@ eggs/
 .eggs/
 lib/
 lib64/
+!src/molpot/potentials/elec/lib/
+!src/molpot/potentials/elec/lib/**
+!tests/test_molpot/test_elec/lib/
+!tests/test_molpot/test_elec/lib/**
+src/molpot/potentials/elec/lib/__pycache__/
+tests/test_molpot/test_elec/lib/__pycache__/
 parts/
 sdist/
 var/
@@ -116,5 +122,10 @@ cython_debug/
 # Examples (not shipped)
 examples/
 
-# Claude Code settings (project-local)
-.claude/
+.claude/worktrees/
+
+# HPC sbatch logs
+slurm-*.out
+jobs/
+.venv-gpu/
+molnex-bench-*.out

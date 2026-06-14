@@ -2,7 +2,7 @@
 
 Provides two generators:
 
-- :class:`MockBatch` — callable that produces a :class:`~molix.data.types.GraphBatch`
+- :class:`MockBatch` — produces a nested ``TensorDict`` batch
   with configurable (or random) atom / edge / graph counts.  Used with
   :class:`~molix.profiler.module.ModuleProfiler`.
 
@@ -18,7 +18,7 @@ Example::
 
     # Fixed shape — same batch every call
     factory = MockBatch(n_atoms=64, n_edges=512, n_graphs=8)
-    batch = factory()   # -> GraphBatch
+    batch = factory()   # -> TensorDict
 
     # Variable shape — drawn from a range on each call
     factory = MockBatch(n_atoms=(30, 100), n_edges=(100, 600), n_graphs=(2, 8))
@@ -35,8 +35,8 @@ import random
 from typing import Union
 
 import torch
-
-from molix.data.types import AtomData, EdgeData, GraphBatch, GraphData
+import torch.nn as nn
+from tensordict import TensorDict
 
 # Type alias: int means fixed; tuple[int, int] means sample from [lo, hi]
 _IntOrRange = Union[int, tuple[int, int]]
@@ -63,7 +63,7 @@ def _resolve(value: _IntOrRange) -> int:
 
 
 class MockBatch:
-    """Callable factory that generates synthetic :class:`~molix.data.types.GraphBatch` instances.
+    """Callable factory that generates synthetic ``TensorDict`` instances.
 
     Useful for profiling model forward/backward passes without a real dataset.
     Shapes can be fixed or randomised per call to stress-test variable-size inputs.
@@ -79,7 +79,7 @@ class MockBatch:
     Example::
 
         factory = MockBatch(n_atoms=64, n_edges=512, n_graphs=8)
-        batch = factory()   # produces a GraphBatch
+        batch = factory()   # produces a TensorDict
 
         # Variable sizes — good for stress testing
         factory = MockBatch(n_atoms=(32, 128), n_edges=(128, 1024), n_graphs=(2, 16))
@@ -107,11 +107,11 @@ class MockBatch:
         if seed is not None:
             self._torch_gen.manual_seed(seed)
 
-    def __call__(self) -> GraphBatch:
-        """Generate a fresh :class:`~molix.data.types.GraphBatch`.
+    def __call__(self) -> TensorDict:
+        """Generate a fresh ``TensorDict``.
 
         Returns:
-            A ``GraphBatch`` with random tensor values and the configured shape.
+            A ``TensorDict`` with random tensor values and the configured shape.
         """
         n_a = _resolve(self.n_atoms)
         n_e = _resolve(self.n_edges)
@@ -126,13 +126,11 @@ class MockBatch:
         # Distribute atoms across graphs (roughly equal split)
         batch_vec = torch.zeros(n_a, dtype=torch.long, device=dev)
         if n_g > 1 and n_a > 0:
-            boundaries = sorted(
-                self._rng.sample(range(1, n_a), min(n_g - 1, n_a - 1))
-            )
+            boundaries = sorted(self._rng.sample(range(1, n_a), min(n_g - 1, n_a - 1)))
             for graph_idx, start in enumerate(boundaries):
                 batch_vec[start:] = graph_idx + 1
 
-        atoms = AtomData({"Z": Z, "pos": pos, "batch": batch_vec}, batch_size=[n_a])
+        atoms = TensorDict({"Z": Z, "pos": pos, "batch": batch_vec}, batch_size=[n_a])
 
         # --- Edge data ---
         if n_e > 0 and n_a > 1:
@@ -148,16 +146,16 @@ class MockBatch:
             bond_dist = torch.zeros(0, device=dev)
             n_e = 0
 
-        edges = EdgeData(
+        edges = TensorDict(
             {"edge_index": edge_index, "bond_diff": bond_diff, "bond_dist": bond_dist},
             batch_size=[n_e],
         )
 
         # --- Graph data ---
         num_atoms_per_graph = torch.bincount(batch_vec, minlength=n_g).long()
-        graphs = GraphData({"num_atoms": num_atoms_per_graph}, batch_size=[n_g])
+        graphs = TensorDict({"num_atoms": num_atoms_per_graph}, batch_size=[n_g])
 
-        return GraphBatch({"atoms": atoms, "edges": edges, "graphs": graphs}, batch_size=[])
+        return TensorDict({"atoms": atoms, "edges": edges, "graphs": graphs}, batch_size=[])
 
     def describe(self) -> str:
         """Return a human-readable description of the batch shape configuration.
@@ -165,6 +163,7 @@ class MockBatch:
         Returns:
             Description string.
         """
+
         def _fmt(v: _IntOrRange) -> str:
             return str(v) if isinstance(v, int) else f"{v[0]}–{v[1]}"
 
@@ -215,8 +214,7 @@ class MockSource:
         # Pre-generate atom counts for each sample so source_id is stable
         rng = random.Random(seed)
         self._atom_counts: list[int] = [
-            _resolve(n_atoms) if not isinstance(n_atoms, int) else n_atoms
-            for _ in range(n_samples)
+            _resolve(n_atoms) if not isinstance(n_atoms, int) else n_atoms for _ in range(n_samples)
         ]
         # Per-sample generator seeds for reproducible, independent samples
         self._seeds: list[int] = [rng.randint(0, 2**31) for _ in range(n_samples)]
@@ -253,3 +251,56 @@ class MockSource:
             Description string.
         """
         return f"MockSource(n_samples={self.n_samples}, n_atoms={self.n_atoms})"
+
+
+class MockModel(nn.Module):
+    """MolNex encoder-protocol model with negligible compute.
+
+    Mirrors the molzoo encoder contract — ``forward(td: TensorDict) ->
+    TensorDict`` reads ``atoms.pos`` and writes per-layer node features
+    ``(N, 1, n_features)`` under ``atoms.node_features`` — but does only a
+    single scalar multiply, so a Trainer loop wrapped around it spends
+    essentially all its time in framework machinery (Step dispatch, hooks,
+    ``batch_to``, TrainState writes), not model FLOPs. That is exactly what
+    :class:`~molix.profiler.trainer.TrainerProfiler` needs to isolate the
+    Trainer's own per-step overhead.
+
+    One scalar :class:`~torch.nn.Parameter` keeps the autograd graph real so
+    ``backward`` and the optimizer step exercise their normal paths.
+
+    Args:
+        n_features: Width of the emitted ``node_features`` feature axis.
+    """
+
+    def __init__(self, n_features: int = 1) -> None:
+        super().__init__()
+        self.w = nn.Parameter(torch.zeros(1))
+        self.n_features = n_features
+
+    def forward(self, batch: TensorDict) -> TensorDict:
+        """Write ``atoms.node_features`` ``(N, 1, n_features)`` and return *batch*.
+
+        Args:
+            batch: Post-collate nested batch with ``atoms.pos`` ``(N, 3)``.
+
+        Returns:
+            The same batch, with ``node_features`` written under ``atoms``.
+        """
+        pos = batch["atoms", "pos"]
+        val = (pos.sum(dim=-1, keepdim=True) * self.w.sum()).unsqueeze(1)
+        batch["atoms", "node_features"] = val.expand(-1, 1, self.n_features)
+        return batch
+
+
+def mock_node_feature_loss(predictions: TensorDict, batch: TensorDict) -> torch.Tensor:
+    """Sum of ``atoms.node_features`` — the default loss for :class:`MockModel`.
+
+    Args:
+        predictions: Batch returned by :class:`MockModel` (carries
+            ``atoms.node_features``).
+        batch: The input batch (unused; present for the loss-fn signature).
+
+    Returns:
+        A scalar loss whose backward touches the model's parameter.
+    """
+    return predictions["atoms", "node_features"].sum()

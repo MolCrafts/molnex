@@ -3,20 +3,16 @@
 from __future__ import annotations
 
 import io
-import sys
-from pathlib import Path
 
 import pytest
-from mollog import Level, TextFormatter
+from mollog import Level
 
 from molix import logging as mlogging
 from molix.logging import (
     ChannelFilter,
     CSVMetricsFormatter,
     EventFormatter,
-    EVENTS_LOGGER_NAME,
     KindFilter,
-    METRICS_LOGGER_NAME,
     PrettyTextFormatter,
     configure_run,
     events_logger,
@@ -25,7 +21,6 @@ from molix.logging import (
     metrics_logger,
     set_table_width,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixture: ensure each test starts with a clean molix logger tree.
@@ -95,8 +90,9 @@ def _make_record(
     message: str = "",
     logger_name: str = "molix.metrics",
 ) -> object:
-    from mollog.record import LogRecord
     from datetime import datetime
+
+    from mollog import LogRecord
 
     return LogRecord(
         level=Level.INFO,
@@ -112,26 +108,52 @@ class TestPrettyTextFormatter:
         fmt = PrettyTextFormatter(col_width=10)
         rec = _make_record({"kind": "header", "columns": ["step", "loss"]})
         out = fmt.format(rec)
-        assert out == "      step       loss"
+        # Two-row layout: category row (empty here — no namespace prefix)
+        # over item row ("step" / "loss").
+        top, bot = out.split("\n")
+        assert top.split() == []  # no slash-prefix → empty category
+        assert bot.split() == ["step", "loss"]
 
     def test_row_renders_aligned_values(self):
         fmt = PrettyTextFormatter(col_width=10, row_fmt="{:>10.4g}")
-        rec = _make_record({
-            "kind": "row",
-            "columns": ["step", "loss"],
-            "values": {"step": 42, "loss": 0.125},
-        })
+        rec = _make_record(
+            {
+                "kind": "row",
+                "columns": ["step", "loss"],
+                "values": {"step": 42, "loss": 0.125},
+            }
+        )
         out = fmt.format(rec)
         assert out.split() == ["42", "0.125"]
 
-    def test_row_missing_value_becomes_nan(self):
+    def test_row_missing_value_renders_as_dash_not_nan(self):
+        """Missing path → ``"—"``, distinct from a real numerical NaN's
+        ``"nan"``. Reserves ``"nan"`` for genuine model divergence so a
+        silent path-resolution failure can't masquerade as one."""
         fmt = PrettyTextFormatter(col_width=10, row_fmt="{:>10.4g}")
-        rec = _make_record({
-            "kind": "row",
-            "columns": ["step", "missing"],
-            "values": {"step": 1},
-        })
-        assert "nan" in fmt.format(rec)
+        rec = _make_record(
+            {
+                "kind": "row",
+                "columns": ["step", "missing"],
+                "values": {"step": 1},
+            }
+        )
+        out = fmt.format(rec)
+        assert "—" in out
+        assert "nan" not in out
+
+    def test_row_real_nan_renders_as_nan(self):
+        fmt = PrettyTextFormatter(col_width=10, row_fmt="{:>10.4g}")
+        rec = _make_record(
+            {
+                "kind": "row",
+                "columns": ["step", "loss"],
+                "values": {"step": 1, "loss": float("nan")},
+            }
+        )
+        out = fmt.format(rec)
+        assert "nan" in out
+        assert "—" not in out
 
     def test_epoch_sep_is_full_width_dashes(self):
         fmt = PrettyTextFormatter()
@@ -171,11 +193,15 @@ class TestCSVMetricsFormatter:
     def test_row_after_header_produces_csv_data(self):
         f = CSVMetricsFormatter()
         f.format(_make_record({"kind": "header", "columns": ["step", "loss"]}))
-        data = f.format(_make_record({
-            "kind": "row",
-            "columns": ["step", "loss"],
-            "values": {"step": 10, "loss": 0.5},
-        }))
+        data = f.format(
+            _make_record(
+                {
+                    "kind": "row",
+                    "columns": ["step", "loss"],
+                    "values": {"step": 10, "loss": 0.5},
+                }
+            )
+        )
         assert data == "10,0.5"
 
     def test_other_kinds_drop_to_empty_string(self):
@@ -186,22 +212,26 @@ class TestCSVMetricsFormatter:
     def test_csv_cell_quotes_commas_and_newlines(self):
         f = CSVMetricsFormatter()
         f.format(_make_record({"kind": "header", "columns": ["a", "note"]}))
-        rec = _make_record({
-            "kind": "row",
-            "columns": ["a", "note"],
-            "values": {"a": 1, "note": "a,b\nc"},
-        })
+        rec = _make_record(
+            {
+                "kind": "row",
+                "columns": ["a", "note"],
+                "values": {"a": 1, "note": "a,b\nc"},
+            }
+        )
         out = f.format(rec)
         assert out == '1,"a,b\nc"'
 
     def test_nan_becomes_empty_cell(self):
         f = CSVMetricsFormatter()
         f.format(_make_record({"kind": "header", "columns": ["x"]}))
-        rec = _make_record({
-            "kind": "row",
-            "columns": ["x"],
-            "values": {"x": float("nan")},
-        })
+        rec = _make_record(
+            {
+                "kind": "row",
+                "columns": ["x"],
+                "values": {"x": float("nan")},
+            }
+        )
         assert f.format(rec) == ""
 
     def test_formatter_always_writes_header(self):
@@ -266,8 +296,7 @@ class TestConfigureRun:
         configure_run(run_dir)
         m = metrics_logger()
         m.info("h", kind="header", columns=["step", "loss"])
-        m.info("r", kind="row", columns=["step", "loss"],
-               values={"step": 1, "loss": 0.5})
+        m.info("r", kind="row", columns=["step", "loss"], values={"step": 1, "loss": 0.5})
         mlogging.shutdown()
 
         csv = (run_dir / "metrics.csv").read_text()
@@ -281,12 +310,10 @@ class TestConfigureRun:
         configure_run(run_dir)
         m = metrics_logger()
         m.info("h", kind="header", columns=["step", "loss"])
-        m.info("r", kind="row", columns=["step", "loss"],
-               values={"step": 1, "loss": 0.5})
+        m.info("r", kind="row", columns=["step", "loss"], values={"step": 1, "loss": 0.5})
         # Periodic reprint — same columns.
         m.info("h", kind="header", columns=["step", "loss"])
-        m.info("r", kind="row", columns=["step", "loss"],
-               values={"step": 2, "loss": 0.3})
+        m.info("r", kind="row", columns=["step", "loss"], values={"step": 2, "loss": 0.3})
         mlogging.shutdown()
 
         lines = (run_dir / "metrics.csv").read_text().splitlines()

@@ -78,6 +78,16 @@ class RepulsionParameterHead(nn.Module):
         )
 
     def forward(self, node_features: torch.Tensor, **kwargs) -> dict[str, torch.Tensor]:
+        """Predict per-atom repulsion parameters from node features.
+
+        Args:
+            node_features: Per-atom features ``(N, feature_dim)``.
+            **kwargs: Ignored; accepted for a uniform parameter-head signature.
+
+        Returns:
+            Dict with ``eps_rep`` ``(N,)`` and ``lam_rep`` ``(N,)``, each
+            ``softplus``-mapped to stay above its configured floor.
+        """
         raw = self.mlp(node_features)
         eps_rep = F.softplus(raw[:, 0]) + self.min_eps
         lam_rep = F.softplus(raw[:, 1]) + self.min_lam
@@ -111,6 +121,16 @@ class ChargeTransferParameterHead(nn.Module):
         )
 
     def forward(self, node_features: torch.Tensor, **kwargs) -> dict[str, torch.Tensor]:
+        """Predict per-atom charge-transfer parameters from node features.
+
+        Args:
+            node_features: Per-atom features ``(N, feature_dim)``.
+            **kwargs: Ignored; accepted for a uniform parameter-head signature.
+
+        Returns:
+            Dict with ``eps_ct`` ``(N,)`` and ``lam_ct`` ``(N,)``, each
+            ``softplus``-mapped to stay above its configured floor.
+        """
         raw = self.mlp(node_features)
         eps_ct = F.softplus(raw[:, 0]) + self.min_eps
         lam_ct = F.softplus(raw[:, 1]) + self.min_lam

@@ -30,7 +30,9 @@ def pme_direct(
     coulomb: float,
 ) -> Tensor:
     """Direct-space PME contribution."""
-    return ops.molix.pme_direct(positions, charges, neighbors, deltas, distances, exclusions, alpha, coulomb)
+    return ops.molix.pme_direct(
+        positions, charges, neighbors, deltas, distances, exclusions, alpha, coulomb
+    )
 
 
 def pme_reciprocal(
@@ -49,6 +51,16 @@ def pme_reciprocal(
 ) -> Tensor:
     """Reciprocal-space PME contribution."""
     return ops.molix.pme_reciprocal(
-        positions, charges, box_vectors, gridx, gridy, gridz, order, alpha, coulomb,
-        xmoduli, ymoduli, zmoduli,
+        positions,
+        charges,
+        box_vectors,
+        gridx,
+        gridy,
+        gridz,
+        order,
+        alpha,
+        coulomb,
+        xmoduli,
+        ymoduli,
+        zmoduli,
     )

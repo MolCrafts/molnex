@@ -7,21 +7,18 @@ Reference:
 Usage pattern::
 
     from molix.data import Pipeline, AtomicDress, NeighborList, MmapDataset, SubsetSource
-    from molix.data.cache import cache, cache_key, is_ready
     from molix.datasets import QM9Source
 
-    # 1. Workflow-side: build the pipeline cache once per run.
+    # 1. Workflow-side: build the pipeline cache once per run (DDP-aware).
     QM9Source.download(data_dir)                 # constructor does this lazily too
     source = QM9Source(data_dir)
     train = SubsetSource(source, train_idx)       # split first!
     pipe = Pipeline("qm9").add(AtomicDress(...)).add(NeighborList(...)).build()
 
-    sink = run_dir / "cache" / f"{pipe.name}.pt"
-    if not is_ready(sink):
-        cache(pipe, source, sink=sink, fit_source=train)
+    packed = pipe.cache(source, base_dir=run_dir / "cache", fit_source=train)
 
     # 2. Training-side: zero pipeline work, just read.
-    ds = MmapDataset(sink)
+    ds = MmapDataset(packed.sink)
     dm = DataModule(SubsetDataset(ds, train_idx),
                     SubsetDataset(ds, val_idx),
                     target_schema=QM9Source.TARGET_SCHEMA, ...)
@@ -38,14 +35,15 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
+from molix import logger as _logger_mod
 from molix.data.collate import TargetSchema
 from molix.data.source import Sample
 
+logger = _logger_mod.getLogger(__name__)
 
 # All scalar properties exposed by raw QM9 records (excluding "tag" and "index").
 _QM9_GRAPH_TARGETS: frozenset[str] = frozenset(
-    {"A", "B", "C", "mu", "alpha", "homo", "lumo", "gap", "r2", "zpve",
-     "U0", "U", "H", "G", "Cv"}
+    {"A", "B", "C", "mu", "alpha", "homo", "lumo", "gap", "r2", "zpve", "U0", "U", "H", "G", "Cv"}
 )
 
 
@@ -54,10 +52,23 @@ _QM9_GRAPH_TARGETS: frozenset[str] = frozenset(
 # ---------------------------------------------------------------------------
 
 _PROPERTY_NAMES = [
-    "tag", "index",
-    "A", "B", "C", "mu", "alpha",
-    "homo", "lumo", "gap", "r2", "zpve",
-    "U0", "U", "H", "G", "Cv",
+    "tag",
+    "index",
+    "A",
+    "B",
+    "C",
+    "mu",
+    "alpha",
+    "homo",
+    "lumo",
+    "gap",
+    "r2",
+    "zpve",
+    "U0",
+    "U",
+    "H",
+    "G",
+    "Cv",
 ]
 
 _DEFAULT_URL = "https://ndownloader.figshare.com/files/3195389"
@@ -89,16 +100,14 @@ def _parse_xyz(content: str) -> dict:
     metadata = dict(zip(_PROPERTY_NAMES, prop_values))
 
     symbols, xs, ys, zs = [], [], [], []
-    for line in lines[2: 2 + natoms]:
+    for line in lines[2 : 2 + natoms]:
         parts = line.split()
         symbols.append(parts[0])
         xs.append(float(parts[1]))
         ys.append(float(parts[2]))
         zs.append(float(parts[3]))
 
-    z = torch.tensor(
-        [Element.get_atomic_number(s) for s in symbols], dtype=torch.long
-    )
+    z = torch.tensor([Element.get_atomic_number(s) for s in symbols], dtype=torch.long)
     pos = torch.tensor(list(zip(xs, ys, zs)), dtype=torch.float32)
 
     targets: dict[str, torch.Tensor] = {}
@@ -126,7 +135,7 @@ def _ensure_downloaded(root: Path) -> None:
     tarball = root / "qm9.tar.bz2"
     exclude_file = root / "qm9_exclude.txt"
     if not tarball.exists():
-        print("Downloading QM9 tarball...", flush=True)
+        logger.info("Downloading QM9 tarball...")
         _download(_DEFAULT_URL, tarball)
     if not exclude_file.exists():
         _download(_EXCLUDE_URL, exclude_file)
@@ -137,37 +146,52 @@ def _load_raw(root: Path, total: int | None) -> list[dict]:
     _ensure_downloaded(root)
     tarball = root / "qm9.tar.bz2"
     exclude_file = root / "qm9_exclude.txt"
+    index_file = root / "qm9.index.txt"
 
     excluded = _load_exclusion_list(exclude_file)
 
-    members: list[str] = []
-    tar_info_cache: dict[str, tarfile.TarInfo] = {}
-    with tarfile.open(tarball, "r:bz2") as tar:
-        for member in tqdm(tar, desc="Indexing QM9", file=sys.stdout):
-            if not member.name.endswith(".xyz"):
-                continue
-            try:
-                mol_idx = int(member.name[-10:-4])
-            except ValueError:
-                continue
-            if mol_idx in excluded:
-                continue
-            members.append(member.name)
-            tar_info_cache[member.name] = member
-    members.sort()
+    # On first run, walk the 130k tar headers once to build the member list and
+    # persist it next to the tarball. Subsequent runs (including smokes) skip
+    # the ~40s bz2 header walk entirely.
+    if index_file.exists():
+        members = [line for line in index_file.read_text().splitlines() if line]
+    else:
+        members = []
+        with tarfile.open(tarball, "r:bz2") as tar:
+            for member in tqdm(tar, desc="Indexing QM9", file=sys.stdout):
+                if not member.name.endswith(".xyz"):
+                    continue
+                try:
+                    mol_idx = int(member.name[-10:-4])
+                except ValueError:
+                    continue
+                if mol_idx in excluded:
+                    continue
+                members.append(member.name)
+        members.sort()
+        index_file.write_text("\n".join(members) + "\n")
 
     if total is not None and total < len(members):
         random.seed(42)
         members = sorted(random.sample(members, total))
 
-    samples: list[dict] = []
+    wanted = set(members)
+    samples_by_name: dict[str, dict] = {}
     with tarfile.open(tarball, "r:bz2") as tar:
-        for name in tqdm(members, desc="Loading QM9", file=sys.stdout):
-            f = tar.extractfile(tar_info_cache[name])
+        pbar = tqdm(total=len(wanted), desc="Loading QM9", file=sys.stdout)
+        for tarinfo in tar:
+            name = tarinfo.name
+            if name not in wanted:
+                continue
+            f = tar.extractfile(tarinfo)
             assert f is not None
-            samples.append(_parse_xyz(f.read().decode("utf-8")))
+            samples_by_name[name] = _parse_xyz(f.read().decode("utf-8"))
+            pbar.update(1)
+            if len(samples_by_name) == len(wanted):
+                break  # early exit once every wanted member is loaded
+        pbar.close()
 
-    return samples
+    return [samples_by_name[n] for n in members]
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +205,8 @@ class QM9Source:
     A :class:`QM9Source` is the "dataset" layer in the molix separation: it
     only knows where raw data lives and how to index it. Preprocessing,
     caching, and DataLoader behavior are layered on top via
-    :func:`molix.data.cache.cache` and :class:`MmapDataset`.
+    :meth:`PipelineSpec.cache <molix.data.pipeline.PipelineSpec.cache>` and
+    :class:`MmapDataset`.
 
     Args:
         root: Directory for the raw QM9 tarball (downloaded on first use).
@@ -193,8 +218,8 @@ class QM9Source:
 
     Attributes:
         source_id: Stable identifier folded into
-            :func:`molix.data.cache.cache_key` so that caches invalidate on
-            a raw-data change.
+            :meth:`PipelineSpec.cache_key <molix.data.pipeline.PipelineSpec.cache_key>`
+            so that caches invalidate on a raw-data change.
 
     Class attributes:
         TARGET_SCHEMA: :class:`TargetSchema` covering every scalar target
@@ -284,7 +309,7 @@ class QM9Source:
 
     @property
     def source_id(self) -> str:
-        """Semantic identity for :func:`molix.data.cache.cache_key`.
+        """Semantic identity for :meth:`PipelineSpec.cache_key`.
 
         Derived from ``SOURCE_VERSION`` plus any configured
         ``total`` / ``targets`` sub-selection. The tarball root is
@@ -309,6 +334,12 @@ class QM9Source:
         return len(self._samples)
 
     def __getitem__(self, idx: int) -> Sample:
+        """Return the ``idx``-th QM9 molecule as a flat sample dict.
+
+        Lazily parses the tarball on first access. Each sample holds ``Z``
+        (atomic numbers), ``pos`` ``(N, 3)`` positions, and a ``targets``
+        sub-dict of the configured scalar properties.
+        """
         self._ensure_samples_loaded()
         assert self._samples is not None
         return self._samples[idx]

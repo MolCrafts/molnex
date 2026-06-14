@@ -143,6 +143,14 @@ class GaussianRBF(nn.Module):
             self.register_buffer("widths", widths)
 
     def forward(self, distances: torch.Tensor) -> torch.Tensor:
+        """Expand distances onto the Gaussian radial basis.
+
+        Args:
+            distances: Pairwise distances ``(...,)``.
+
+        Returns:
+            Radial-basis features ``(..., n_rbf)``, one Gaussian per center.
+        """
         return torch.exp(-((distances.unsqueeze(-1) - self.centers) ** 2) / (self.widths**2))
 
 
@@ -154,5 +162,14 @@ class CosineCutoff(nn.Module):
         self.cutoff = cutoff
 
     def forward(self, distances: torch.Tensor) -> torch.Tensor:
+        """Evaluate the smooth cosine cutoff.
+
+        Args:
+            distances: Pairwise distances ``(...,)``.
+
+        Returns:
+            Cutoff values in ``[0, 1]`` (same shape as ``distances``), zero
+            for ``distances >= cutoff``.
+        """
         cutoffs = 0.5 * (torch.cos(math.pi * distances / self.cutoff) + 1)
         return cutoffs * (distances < self.cutoff).float()

@@ -1,4 +1,4 @@
-"""Tests for QM9Source + integration with the cache() workflow.
+"""Tests for QM9Source + integration with :meth:`PipelineSpec.cache`.
 
 Uses a synthetic QM9 tarball placed in tmp_path to avoid network downloads.
 """
@@ -10,13 +10,10 @@ import tarfile
 from pathlib import Path
 
 import pytest
-import torch
 
-from molix.data import MmapDataset, Pipeline
-from molix.data.cache import cache
+from molix.data import Pipeline
 from molix.datasets import qm9 as qm9_mod
 from molix.datasets.qm9 import QM9Source
-
 
 # ---------------------------------------------------------------------------
 # Fake QM9 tarball fixture
@@ -38,13 +35,21 @@ def _xyz_record(
     props = [
         "gdb",
         str(index),
-        "1.0", "1.0", "1.0",           # A B C
-        "0.0", "0.0",                  # mu alpha
-        "-0.1", "0.1",                 # homo lumo
+        "1.0",
+        "1.0",
+        "1.0",  # A B C
+        "0.0",
+        "0.0",  # mu alpha
+        "-0.1",
+        "0.1",  # homo lumo
         str(gap),
-        "0.0", "0.0",                  # r2 zpve
-        str(U0), "0.0", "0.0", "0.0",  # U0 U H G
-        "0.0",                          # Cv
+        "0.0",
+        "0.0",  # r2 zpve
+        str(U0),
+        "0.0",
+        "0.0",
+        "0.0",  # U0 U H G
+        "0.0",  # Cv
     ]
     lines = [
         str(natoms),
@@ -52,7 +57,7 @@ def _xyz_record(
         "O   0.0  0.0  0.0",
         "H   0.76 0.59 0.0",
         "H  -0.76 0.59 0.0",
-        "",                             # freq line (ignored by _parse_xyz)
+        "",  # freq line (ignored by _parse_xyz)
     ]
     return "\n".join(lines) + "\n"
 
@@ -115,7 +120,7 @@ class TestQM9Source:
         assert "Z" in sample
         assert "pos" in sample
         assert "targets" in sample
-        assert sample["Z"].shape[0] == 3        # O + H + H
+        assert sample["Z"].shape[0] == 3  # O + H + H
         assert sample["pos"].shape == (3, 3)
 
     def test_source_id_stable(self, fake_qm9_root):
@@ -125,9 +130,7 @@ class TestQM9Source:
 
     def test_source_id_reflects_targets_filter(self, fake_qm9_root):
         full = QM9Source(fake_qm9_root, download=False).source_id
-        filtered = QM9Source(
-            fake_qm9_root, download=False, targets=["U0", "gap"]
-        ).source_id
+        filtered = QM9Source(fake_qm9_root, download=False, targets=["U0", "gap"]).source_id
         assert full != filtered
         assert "targets=" not in full
         assert "targets=U0+gap" in filtered
@@ -159,15 +162,13 @@ class TestQM9Source:
 
 
 class TestQM9SourceWithCache:
-    """End-to-end: QM9Source → cache() → MmapDataset."""
+    """End-to-end: QM9Source -> PipelineSpec.cache -> MmapDataset."""
 
     def test_cache_roundtrip(self, fake_qm9_root, tmp_path):
         src = QM9Source(fake_qm9_root, download=False, targets=["U0"])
-        spec = Pipeline("qm9-test").build()       # no-op pipeline
-        sink = tmp_path / "prepared.pt"
-
-        cache(spec, src, sink=sink)
-        ds = MmapDataset(sink)
+        spec = Pipeline("qm9-test").build()  # no-op pipeline
+        dag = spec.cache(src, base_dir=tmp_path)
+        ds = dag.dataset(mmap=True)
 
         assert len(ds) == 3
         # U0 targets survive the round-trip

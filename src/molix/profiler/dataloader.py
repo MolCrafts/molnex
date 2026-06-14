@@ -34,7 +34,6 @@ from molix.data.dataset import CachedDataset
 from molix.data.pipeline import PipelineSpec
 from molix.profiler._utils import TimingStat, ValueStat, _fmt_table
 
-
 # ---------------------------------------------------------------------------
 # Result
 # ---------------------------------------------------------------------------
@@ -71,10 +70,7 @@ class DataLoaderResult:
     def print_report(self) -> None:
         """Print a human-readable throughput report to stdout."""
         s = self.load_time
-        print(
-            f"\nDataLoader Profile  "
-            f"(n={self.n_batches} batches, num_workers={self.num_workers})"
-        )
+        print(f"\nDataLoader Profile  (n={self.n_batches} batches, num_workers={self.num_workers})")
         print(f"Data: {self.data_description}")
         print("─" * 72)
 
@@ -129,8 +125,31 @@ class DataLoaderResult:
 # ---------------------------------------------------------------------------
 
 
+class _ProfilerCollate:
+    """Picklable collate callable for the profiler's worker DataLoaders.
+
+    A top-level class (not a closure) so ``spawn`` / ``forkserver`` workers
+    can pickle it; mirrors :class:`molix.data.datamodule._CollateFn` minus
+    the dtype cast (the profiler measures raw collation throughput).
+
+    Args:
+        schema: How targets are routed during collation.
+        batch_nodes: Post-collate :class:`Node` instances to apply in order.
+    """
+
+    def __init__(self, schema: TargetSchema, batch_nodes: tuple) -> None:
+        self.schema = schema
+        self.batch_nodes = batch_nodes
+
+    def __call__(self, batch_samples: list[dict]) -> object:
+        batch = collate_molecules(batch_samples, self.schema)
+        for entry in self.batch_nodes:
+            batch = entry.apply(batch)
+        return batch
+
+
 def _extract_batch_counts(batch: object) -> tuple[int, int]:
-    """Extract (n_atoms, n_graphs) from a GraphBatch."""
+    """Extract (n_atoms, n_graphs) from a TensorDict batch."""
     try:
         n_atoms = int(batch["atoms"]["Z"].shape[0])  # type: ignore[index]
         n_graphs = int(batch["graphs"]["num_atoms"].shape[0])  # type: ignore[index]
@@ -158,7 +177,7 @@ class DataLoaderProfiler:
         persistent_workers: Keep workers alive between epochs.
         target_schema: How targets are collated into batches.
         pipeline: Optional :class:`~molix.data.pipeline.PipelineSpec` whose
-            ``batch_tasks`` are applied inside ``collate_fn``.
+            ``batch_nodes`` are applied inside ``collate_fn``.
 
     Example::
 
@@ -245,9 +264,7 @@ class DataLoaderProfiler:
             t0 = time.perf_counter()
 
         if not load_times_ms:
-            raise RuntimeError(
-                f"Not enough batches in DataLoader: needed {total}, got fewer."
-            )
+            raise RuntimeError(f"Not enough batches in DataLoader: needed {total}, got fewer.")
 
         timing = TimingStat.from_list(load_times_ms)
         mean_load_s = timing.mean_ms / 1000.0
@@ -258,8 +275,12 @@ class DataLoaderProfiler:
             load_time=timing,
             throughput_graphs_per_sec=mean_graphs / mean_load_s if mean_load_s > 0 else 0.0,
             throughput_atoms_per_sec=mean_atoms / mean_load_s if mean_load_s > 0 else 0.0,
-            batch_atom_stats=ValueStat.from_list(atom_counts) if atom_counts else ValueStat(0, 0, 0, 0),
-            batch_graph_stats=ValueStat.from_list(graph_counts) if graph_counts else ValueStat(0, 0, 0, 0),
+            batch_atom_stats=ValueStat.from_list(atom_counts)
+            if atom_counts
+            else ValueStat(0, 0, 0, 0),
+            batch_graph_stats=ValueStat.from_list(graph_counts)
+            if graph_counts
+            else ValueStat(0, 0, 0, 0),
             n_batches=len(load_times_ms),
             num_workers=self.num_workers,
             batch_size=self.batch_size,
@@ -278,26 +299,23 @@ class DataLoaderProfiler:
         """
         import tempfile
 
-        from molix.data.cache import save
+        from molix.data.cache import PackedCache
 
         n = len(source)  # type: ignore[arg-type]
         samples = [source[i] for i in range(n)]  # type: ignore[index]
         tmp_file = Path(tempfile.mkdtemp(prefix="molix_profiler_")) / "samples.pt"
-        save(tmp_file, samples)
+        PackedCache(tmp_file).save(samples)
         return CachedDataset(tmp_file)
 
     def _make_dataloader(self, dataset: Dataset) -> DataLoader:
-        schema = self.target_schema
-        pipeline = self.pipeline
-
-        def collate_fn(batch_samples: list[dict]) -> object:
-            from molix.data.execute import call_task as _ct
-            batch = collate_molecules(batch_samples, schema)
-            if pipeline is not None:
-                for entry in pipeline.batch_tasks:
-                    batch = _ct(entry.task, batch)
-            return batch
-
+        batch_nodes = self.pipeline.batch_nodes if self.pipeline is not None else ()
+        # A picklable top-level collate (not a closure) so num_workers > 0
+        # under spawn/forkserver can ship it to workers — same rationale as
+        # molix.data.datamodule._CollateFn.
+        collate_fn = _ProfilerCollate(self.target_schema, batch_nodes)
+        kwargs = {}
+        if self.num_workers > 0:
+            kwargs["multiprocessing_context"] = "spawn"
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
@@ -306,4 +324,5 @@ class DataLoaderProfiler:
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
             collate_fn=collate_fn,
+            **kwargs,
         )

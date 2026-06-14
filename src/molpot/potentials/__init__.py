@@ -10,11 +10,14 @@
 - Polarization: Self-consistent induced-dipole polarization
 """
 
-from molpot.potentials.angle_harmonic import AngleHarmonic
+from molpot.potentials.angles import AngleHarmonic
 from molpot.potentials.base import BasePotential
-from molpot.potentials.bond_harmonic import BondHarmonic
-from molpot.potentials.dihedral_harmonic import DihedralHarmonic
-from molpot.potentials.lj126 import LJ126, lorentz_berthelot
+from molpot.potentials.bonds import BondHarmonic
+from molpot.potentials.dihedrals import DihedralHarmonic
+from molpot.potentials.elec import (
+    EwaldMultipoleEnergy,
+    EwaldMultipoleEnergySpec,
+)
 from molpot.potentials.mixing import geometric_arithmetic_mixing
 from molpot.potentials.nonbonded import (
     ChargeTransfer,
@@ -25,6 +28,7 @@ from molpot.potentials.nonbonded import (
     repulsion_mixing,
 )
 from molpot.potentials.polarization import Polarization
+from molpot.potentials.vdw import LJ126, lorentz_berthelot
 
 __all__ = [
     "BasePotential",
@@ -33,6 +37,8 @@ __all__ = [
     "BondHarmonic",
     "AngleHarmonic",
     "DihedralHarmonic",
+    "EwaldMultipoleEnergy",
+    "EwaldMultipoleEnergySpec",
     "geometric_arithmetic_mixing",
     "RepulsionExp6",
     "DispersionC6",

@@ -1,8 +1,8 @@
 """Tests for MmapDataset / CachedDataset / SubsetDataset.
 
-These classes are now thin wrappers over a ``.pt`` cache file produced by
-:func:`molix.data.cache.save` (or :func:`molix.data.cache.cache`). The tests
-drive the whole read path end-to-end via save→load.
+These classes are thin readers over a :class:`PackedCache` file (normally
+produced by :meth:`PipelineSpec.cache <molix.data.pipeline.PipelineSpec.cache>`).
+The tests drive the whole read path end-to-end via PackedCache.save → load.
 """
 
 from __future__ import annotations
@@ -13,14 +13,13 @@ from pathlib import Path
 import pytest
 import torch
 
-from molix.data.cache import save
+from molix.data.cache import PackedCache
 from molix.data.dataset import (
     BaseDataset,
     CachedDataset,
     MmapDataset,
     SubsetDataset,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,7 +40,7 @@ def _make_samples(n: int = 8) -> list[dict]:
 
 def _make_cache(tmp_path: Path, n: int = 8, *, task_states=None) -> Path:
     sink = tmp_path / "x.pt"
-    save(sink, _make_samples(n), task_states=task_states)
+    PackedCache(sink).save(_make_samples(n), task_states=task_states)
     return sink
 
 
@@ -54,7 +53,7 @@ class TestMmapDataset:
     def test_len_and_getitem(self, tmp_path):
         samples = _make_samples(4)
         sink = tmp_path / "x.pt"
-        save(sink, samples)
+        PackedCache(sink).save(samples)
         ds = MmapDataset(sink)
         assert len(ds) == 4
         assert torch.equal(ds[0]["Z"], samples[0]["Z"])
@@ -62,7 +61,7 @@ class TestMmapDataset:
     def test_values_survive_roundtrip(self, tmp_path):
         samples = _make_samples(6)
         sink = tmp_path / "x.pt"
-        save(sink, samples)
+        PackedCache(sink).save(samples)
         ds = MmapDataset(sink)
         for i, orig in enumerate(samples):
             item = ds[i]
@@ -74,14 +73,12 @@ class TestMmapDataset:
         samples = [
             {
                 "Z": torch.tensor([1, 6], dtype=torch.int64),
-                "pos": torch.tensor(
-                    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float32
-                ),
+                "pos": torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float32),
                 "flag": torch.tensor([True, False], dtype=torch.bool),
             }
         ]
         sink = tmp_path / "x.pt"
-        save(sink, samples)
+        PackedCache(sink).save(samples)
         ds = MmapDataset(sink)
         item = ds[0]
         assert item["Z"].dtype == torch.int64
@@ -116,7 +113,7 @@ class TestMmapDataset:
         """spawn-mode DataLoader workers pickle the dataset."""
         samples = _make_samples(4)
         sink = tmp_path / "x.pt"
-        save(sink, samples)
+        PackedCache(sink).save(samples)
         ds = MmapDataset(sink)
         ds2 = pickle.loads(pickle.dumps(ds))
         for i in range(len(samples)):
@@ -132,7 +129,7 @@ class TestCachedDataset:
     def test_len_and_getitem(self, tmp_path):
         samples = _make_samples(5)
         sink = tmp_path / "x.pt"
-        save(sink, samples)
+        PackedCache(sink).save(samples)
         ds = CachedDataset(sink)
         assert len(ds) == 5
         assert torch.equal(ds[2]["Z"], samples[2]["Z"])
@@ -146,9 +143,7 @@ class TestCachedDataset:
             task_states={"dress": {"baseline": torch.tensor([1.0])}},
         )
         ds = CachedDataset(sink)
-        assert torch.equal(
-            ds.get_task_state("dress")["baseline"], torch.tensor([1.0])
-        )
+        assert torch.equal(ds.get_task_state("dress")["baseline"], torch.tensor([1.0]))
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +161,7 @@ class TestSubsetDataset:
     def test_len_and_getitem_remapping(self, tmp_path):
         samples = _make_samples(8)
         sink = tmp_path / "x.pt"
-        save(sink, samples)
+        PackedCache(sink).save(samples)
         full = MmapDataset(sink)
         sub = SubsetDataset(full, [0, 3, 7])
         assert len(sub) == 3
@@ -192,7 +187,7 @@ class TestSubsetDataset:
 class TestSplit:
     def _full(self, tmp_path, n=20):
         sink = tmp_path / "x.pt"
-        save(sink, _make_samples(n))
+        PackedCache(sink).save(_make_samples(n))
         return MmapDataset(sink)
 
     def test_split_sizes(self, tmp_path):

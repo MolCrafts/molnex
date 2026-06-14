@@ -21,6 +21,7 @@ class KeyedMLPSpec(BaseModel):
 
     @property
     def key(self) -> Key:
+        """The container key this spec reads from (alias of ``input_key``)."""
         return self.input_key
 
 

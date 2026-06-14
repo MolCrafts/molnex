@@ -4,10 +4,9 @@ import pytest
 import torch
 import torch.nn as nn
 
+from molix.core.hook import BaseHook
 from molix.core.state import TrainState
 from molix.core.trainer import Trainer
-from molix.core.hooks import BaseHook
-from molix.core.steps import DefaultTrainStep, DefaultEvalStep, extract_model_inputs
 
 
 def test_trainstate_counter_init():
@@ -21,7 +20,7 @@ def test_trainstate_counter_increment():
     state = TrainState()
     state.steps_since_last_eval += 1
     assert state.steps_since_last_eval == 1
-    
+
     state.steps_since_last_eval += 1
     assert state.steps_since_last_eval == 2
 
@@ -56,13 +55,14 @@ def test_hook_on_eval_step_complete_exists():
 
 def test_hook_on_eval_step_complete_callable():
     """Verify on_eval_step_complete can be overridden."""
+
     class CustomHook(BaseHook):
         def __init__(self):
             self.called = False
-        
+
         def on_eval_step_complete(self, trainer, state):
             self.called = True
-    
+
     hook = CustomHook()
     hook.on_eval_step_complete(None, TrainState())
     assert hook.called is True
@@ -71,7 +71,7 @@ def test_hook_on_eval_step_complete_callable():
 def test_trainer_eval_every_n_steps_disabled_by_default():
     """Verify step-based eval logic is disabled when eval_every_n_steps=None."""
     state = TrainState()
-    trainer = _make_trainer(eval_every_n_steps=None)
+    _make_trainer(eval_every_n_steps=None)
 
     # Simulate multiple steps
     for _ in range(100):
@@ -88,13 +88,14 @@ def test_trainer_eval_every_n_steps_disabled_by_default():
 # Fixtures for max_steps tests
 # ---------------------------------------------------------------------------
 
+
 class _SimpleModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.linear = nn.Linear(10, 1)
 
-    def forward(self, x, **_kwargs):
-        return self.linear(x)
+    def forward(self, batch):
+        return self.linear(batch["x"])
 
 
 def _simple_loss(predictions, batch):
@@ -139,6 +140,7 @@ def _make_trainer(**kwargs):
 # max_steps / max_epochs validation
 # ---------------------------------------------------------------------------
 
+
 def test_train_requires_at_least_one_limit():
     """ValueError when neither max_epochs nor max_steps is set."""
     trainer = _make_trainer()
@@ -166,6 +168,7 @@ def test_train_rejects_non_positive_max_steps():
 # max_epochs only (existing behaviour)
 # ---------------------------------------------------------------------------
 
+
 def test_train_max_epochs_only():
     """Training with only max_epochs completes the expected epochs."""
     dm = _MockDataModule(batches_per_epoch=3)
@@ -178,6 +181,7 @@ def test_train_max_epochs_only():
 # ---------------------------------------------------------------------------
 # max_steps only
 # ---------------------------------------------------------------------------
+
 
 def test_train_max_steps_only():
     """Training with only max_steps stops at the step limit."""
@@ -192,6 +196,7 @@ def test_train_max_steps_only():
 # ---------------------------------------------------------------------------
 # Both limits — whichever comes first
 # ---------------------------------------------------------------------------
+
 
 def test_train_both_limits_epochs_first():
     """When max_epochs is the binding constraint, stop by epochs."""
@@ -211,3 +216,135 @@ def test_train_both_limits_steps_first():
     state = trainer.train(dm, max_epochs=100, max_steps=7)
     assert state.global_step == 7
     assert state.epoch == 2  # partial second epoch still counted
+
+
+# ---------------------------------------------------------------------------
+# gradient accumulation
+# ---------------------------------------------------------------------------
+
+
+def test_accumulate_grad_batches_rejects_non_positive():
+    with pytest.raises(ValueError, match="accumulate_grad_batches must be > 0"):
+        _make_trainer(accumulate_grad_batches=0)
+
+
+def test_accumulate_grad_batches_counts_optimizer_steps():
+    """global_step / max_steps count optimizer steps, not micro-batches."""
+    dm = _MockDataModule(batches_per_epoch=8)
+    trainer = _make_trainer(accumulate_grad_batches=2)
+    state = trainer.train(dm, max_epochs=1)
+    # 8 micro-batches / accum=2 → 4 optimizer steps
+    assert state.global_step == 4
+
+
+def test_accumulate_grad_batches_updates_params():
+    """Training with accumulation still updates parameters."""
+    dm = _MockDataModule(batches_per_epoch=6)
+    trainer = _make_trainer(accumulate_grad_batches=3)
+    initial = [p.clone() for p in trainer.model.parameters()]
+    trainer.train(dm, max_epochs=1)
+    assert any(not torch.equal(i, c) for i, c in zip(initial, trainer.model.parameters()))
+
+
+def test_accumulate_grad_batches_one_is_per_batch():
+    """accumulate_grad_batches=1 (default) steps every micro-batch."""
+    dm = _MockDataModule(batches_per_epoch=5)
+    trainer = _make_trainer(accumulate_grad_batches=1)
+    state = trainer.train(dm, max_epochs=1)
+    assert state.global_step == 5
+
+
+# ---------------------------------------------------------------------------
+# eval starvation warning
+# ---------------------------------------------------------------------------
+
+
+def _capture_warnings(monkeypatch):
+    """Record messages passed to the trainer module logger's ``warning``.
+
+    mollog emits from a background thread, so fd/sys capture is racy —
+    intercepting the call itself is deterministic.
+    """
+    import molix.core.trainer as trainer_mod
+
+    messages: list[str] = []
+    original = trainer_mod.logger.warning
+
+    def recording(msg, *args, **kwargs):
+        messages.append(str(msg))
+        return original(msg, *args, **kwargs)
+
+    monkeypatch.setattr(trainer_mod.logger, "warning", recording)
+    return messages
+
+
+def test_eval_starvation_warns_once(monkeypatch):
+    """Warn once when eval_every_n_steps exceeds whole epochs.
+
+    With a 5-step epoch and eval_every_n_steps=100, epochs complete with
+    zero evals (epoch-end eval is suppressed by the step cadence) — the
+    trainer must surface that instead of staying silent.
+    """
+    messages = _capture_warnings(monkeypatch)
+    dm = _MockDataModule(batches_per_epoch=5)
+    trainer = _make_trainer(eval_every_n_steps=100)
+    trainer.train(dm, max_epochs=3)
+    starved = [m for m in messages if "no evaluation ran this epoch" in m]
+    assert len(starved) == 1  # once, not per epoch
+    assert "eval_every_n_steps=100" in starved[0]
+
+
+def test_eval_starvation_no_warning_when_cadence_fits(monkeypatch):
+    """No starvation warning when evals actually run within the epoch."""
+    messages = _capture_warnings(monkeypatch)
+    dm = _MockDataModule(batches_per_epoch=5)
+    trainer = _make_trainer(eval_every_n_steps=2)
+    trainer.train(dm, max_epochs=2)
+    assert not [m for m in messages if "no evaluation ran this epoch" in m]
+
+
+def test_eval_starvation_no_warning_without_step_cadence(monkeypatch):
+    """Default epoch-end eval schedule never triggers the starvation warning."""
+    messages = _capture_warnings(monkeypatch)
+    dm = _MockDataModule(batches_per_epoch=5)
+    trainer = _make_trainer()
+    trainer.train(dm, max_epochs=2)
+    assert not [m for m in messages if "no evaluation ran this epoch" in m]
+
+
+# ---------------------------------------------------------------------------
+# per-epoch device-move decision (batch_to hot-path skip)
+# ---------------------------------------------------------------------------
+
+
+def test_needs_device_move_false_when_already_on_device():
+    """A batch whose leaves are all on the target device needs no move."""
+    from tensordict import TensorDict
+
+    from molix.core.trainer import Trainer
+
+    batch = TensorDict(
+        {"atoms": TensorDict({"pos": torch.randn(4, 3)}, batch_size=[4])}, batch_size=[]
+    )
+    assert Trainer._needs_device_move(batch, torch.device("cpu")) is False
+
+
+def test_needs_device_move_true_for_foreign_device():
+    """A move is required when the target differs from the leaves' device."""
+    from tensordict import TensorDict
+
+    from molix.core.trainer import Trainer
+
+    batch = TensorDict(
+        {"atoms": TensorDict({"pos": torch.randn(4, 3)}, batch_size=[4])}, batch_size=[]
+    )
+    assert Trainer._needs_device_move(batch, torch.device("meta")) is True
+
+
+def test_train_loop_runs_without_per_step_move_on_cpu():
+    """Training still updates params when the per-epoch skip path is taken."""
+    dm = _MockDataModule(batches_per_epoch=5)
+    trainer = _make_trainer()
+    initial = [p.clone() for p in trainer.model.parameters()]
+    trainer.train(dm, max_epochs=1)
+    assert any(not torch.equal(i, c) for i, c in zip(initial, trainer.model.parameters()))

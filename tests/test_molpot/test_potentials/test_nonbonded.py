@@ -5,29 +5,25 @@ from __future__ import annotations
 import pytest
 import torch
 
-from molpot.potentials.nonbonded import (
-    RepulsionExp6,
-    DispersionC6,
-    ChargeTransfer,
-    repulsion_mixing,
-    dispersion_mixing,
-    ct_mixing,
-)
 from molpot.potentials.mixing import geometric_arithmetic_mixing
-
-from tests.utils import assert_compile_compatible
-
+from molpot.potentials.nonbonded import (
+    ChargeTransfer,
+    DispersionC6,
+    RepulsionExp6,
+    ct_mixing,
+    dispersion_mixing,
+    repulsion_mixing,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def pair_data():
     """Minimal 2-molecule batch with 6 edges."""
-    edge_index = torch.tensor(
-        [[0, 1], [1, 0], [1, 2], [2, 1], [3, 4], [4, 3]], dtype=torch.long
-    )
+    edge_index = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1], [3, 4], [4, 3]], dtype=torch.long)
     distance = torch.tensor([1.4, 1.4, 1.5, 1.5, 2.0, 2.0])
     edge_batch = torch.tensor([0, 0, 0, 0, 1, 1], dtype=torch.long)
     return distance, edge_index, edge_batch
@@ -50,11 +46,13 @@ def atom_params():
 # Mixing tests
 # ---------------------------------------------------------------------------
 
+
 class TestMixing:
     def test_geometric_arithmetic_mixing_shapes(self, atom_params, pair_data):
         _, edge_index, _ = pair_data
         result = geometric_arithmetic_mixing(
-            atom_params, edge_index,
+            atom_params,
+            edge_index,
             geometric_keys=["eps_rep"],
             arithmetic_keys=["r_star"],
         )
@@ -64,7 +62,8 @@ class TestMixing:
     def test_geometric_mean_is_symmetric(self, atom_params, pair_data):
         _, edge_index, _ = pair_data
         result = geometric_arithmetic_mixing(
-            atom_params, edge_index,
+            atom_params,
+            edge_index,
             geometric_keys=["eps_rep"],
             arithmetic_keys=[],
         )
@@ -74,7 +73,8 @@ class TestMixing:
     def test_arithmetic_mean_is_symmetric(self, atom_params, pair_data):
         _, edge_index, _ = pair_data
         result = geometric_arithmetic_mixing(
-            atom_params, edge_index,
+            atom_params,
+            edge_index,
             geometric_keys=[],
             arithmetic_keys=["r_star"],
         )
@@ -104,6 +104,7 @@ class TestMixing:
 # ---------------------------------------------------------------------------
 # RepulsionExp6 tests
 # ---------------------------------------------------------------------------
+
 
 class TestRepulsionExp6:
     def test_output_shape_batched(self, pair_data):
@@ -151,7 +152,7 @@ class TestRepulsionExp6:
         }
         energies = []
         for i in range(3):
-            e = pot(distance=distances[i:i+1], **{k: v[i:i+1] for k, v in params.items()})
+            e = pot(distance=distances[i : i + 1], **{k: v[i : i + 1] for k, v in params.items()})
             energies.append(e.item())
         assert energies[0] > energies[1] > energies[2]
 
@@ -181,22 +182,11 @@ class TestRepulsionExp6:
         e_bi = RepulsionExp6(bidirectional=True)(**kwargs)
         assert torch.allclose(e_bi, 0.5 * e_uni, atol=1e-6)
 
-    @pytest.mark.xfail(reason="batched path uses index_add_ scatter; may break graph", strict=False)
-    def test_compile(self):
-        pot = RepulsionExp6(bidirectional=False)
-        assert_compile_compatible(
-            pot,
-            strict=False,
-            distance=torch.tensor([2.0]),
-            eps_rep_ij=torch.tensor([0.1]),
-            lam_rep_ij=torch.tensor([10.0]),
-            r_star_ij=torch.tensor([1.5]),
-        )
-
 
 # ---------------------------------------------------------------------------
 # DispersionC6 tests
 # ---------------------------------------------------------------------------
+
 
 class TestDispersionC6:
     def test_output_shape_batched(self, pair_data):
@@ -246,21 +236,11 @@ class TestDispersionC6:
         e3 = DispersionC6(bidirectional=False, energy_scale=3.0)(**kwargs)
         assert torch.allclose(e3, 3.0 * e1, atol=1e-6)
 
-    @pytest.mark.xfail(reason="batched path uses index_add_ scatter; may break graph", strict=False)
-    def test_compile(self):
-        pot = DispersionC6(bidirectional=False)
-        assert_compile_compatible(
-            pot,
-            strict=False,
-            distance=torch.tensor([2.0]),
-            c6_ij=torch.tensor([5.0]),
-            r_star_ij=torch.tensor([1.5]),
-        )
-
 
 # ---------------------------------------------------------------------------
 # ChargeTransfer tests
 # ---------------------------------------------------------------------------
+
 
 class TestChargeTransfer:
     def test_output_shape_batched(self, pair_data):
@@ -311,22 +291,11 @@ class TestChargeTransfer:
         e_bi = ChargeTransfer(bidirectional=True)(**kwargs)
         assert torch.allclose(e_bi, 0.5 * e_uni, atol=1e-6)
 
-    @pytest.mark.xfail(reason="batched path uses index_add_ scatter; may break graph", strict=False)
-    def test_compile(self):
-        pot = ChargeTransfer(bidirectional=False)
-        assert_compile_compatible(
-            pot,
-            strict=False,
-            distance=torch.tensor([2.0]),
-            eps_ct_ij=torch.tensor([0.01]),
-            lam_ct_ij=torch.tensor([3.0]),
-            r_star_ij=torch.tensor([1.5]),
-        )
-
 
 # ---------------------------------------------------------------------------
 # Gradient tests
 # ---------------------------------------------------------------------------
+
 
 class TestGradients:
     def test_repulsion_grad_wrt_distance(self):

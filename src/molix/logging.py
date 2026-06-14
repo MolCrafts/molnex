@@ -45,10 +45,17 @@ import sys
 from pathlib import Path
 from typing import IO, Any
 
-from mollog import FileHandler, Filter, Level, Logger, StreamHandler, TextFormatter
+from mollog import (
+    FileHandler,
+    Filter,
+    Formatter,
+    Level,
+    Logger,
+    LogRecord,
+    StreamHandler,
+    TextFormatter,
+)
 from mollog import get_logger as _mollog_get_logger
-from mollog.formatter import Formatter
-from mollog.record import LogRecord
 
 __all__ = [
     "MOLIX_LOGGER_NAME",
@@ -185,10 +192,13 @@ def basicConfig(  # noqa: N802 — stdlib naming
     logger.add_handler(stream_handler)
 
     if filename is not None:
+        # mollog.FileHandler currently only accepts (path, level); `mode` /
+        # `encoding` parameters from the stdlib FileHandler API are not
+        # forwarded here. If a future mollog release adds them, the kwargs
+        # should be re-introduced.
+        del filemode, encoding
         file_handler = FileHandler(
             Path(filename),
-            mode=filemode,
-            encoding=encoding,
             level=file_lvl,
         )
         file_handler.set_formatter(resolved_file_fmt)
@@ -268,6 +278,30 @@ def get_table_width() -> int:
     return _table_width
 
 
+# Distinct from ``"nan"`` so silent path-resolution failures no longer look
+# like training divergence in the rendered table. Mirrored by
+# :data:`molix.core.hooks._MISSING_CELL`.
+_MISSING_METRIC_CELL = "—"
+
+
+def _render_metric_cell(value: Any, row_fmt: str, col_width: int) -> str:
+    """Render one metric-row cell — numeric, real-NaN, or missing.
+
+    Real numerical NaN renders as ``"nan"`` so model-divergence stays
+    visible. Anything that isn't a scalar (``None``, missing path,
+    non-scalar tensor) renders as :data:`_MISSING_METRIC_CELL`.
+    """
+    if isinstance(value, bool):
+        return row_fmt.format(int(value))
+    if isinstance(value, int):
+        return row_fmt.format(value)
+    if isinstance(value, float):
+        if value != value:
+            return f"{'nan':>{col_width}}"
+        return row_fmt.format(value)
+    return f"{_MISSING_METRIC_CELL:>{col_width}}"
+
+
 def _csv_cell(value: Any) -> str:
     """Render one CSV cell — quote only when needed, elide NaN as empty."""
     if value is None:
@@ -283,6 +317,28 @@ def _csv_cell(value: Any) -> str:
     if any(c in s for c in (",", '"', "\n")):
         return '"' + s.replace('"', '""') + '"'
     return s
+
+
+def split_header_rows(columns: list[str], col_width: int) -> tuple[str, str]:
+    """Render the 2-row table header.
+
+    Top row shows the category (namespace prefix before ``/``), bottom
+    row shows the item name; columns with no slash leave the top row
+    blank. Shared by :class:`PrettyTextFormatter` and
+    :meth:`molix.core.hooks.Log._emit_header` so both render identically.
+
+    Args:
+        columns: Display names — ``"train/loss"``, ``"epoch"``, …
+        col_width: Width each cell is right-padded to.
+
+    Returns:
+        ``(top_row, bottom_row)`` — already space-joined, ready to print.
+    """
+    cats = [c.split("/", 1)[0] if "/" in c else "" for c in columns]
+    items = [c.split("/", 1)[1] if "/" in c else c for c in columns]
+    top = " ".join(f"{c:>{col_width}}" for c in cats)
+    bot = " ".join(f"{c:>{col_width}}" for c in items)
+    return top, bot
 
 
 class PrettyTextFormatter(Formatter):
@@ -324,18 +380,14 @@ class PrettyTextFormatter(Formatter):
         extra = record.extra or {}
         kind = extra.get("kind")
         if kind == "header":
-            cols = extra["columns"]
-            return " ".join(f"{c:>{self._col_width}}" for c in cols)
+            top, bot = split_header_rows(extra["columns"], self._col_width)
+            return f"{top}\n{bot}"
         if kind == "row":
             cols = extra["columns"]
             values = extra["values"]
             parts: list[str] = []
             for c in cols:
-                v = values.get(c)
-                if isinstance(v, (int, float)) and not (isinstance(v, float) and v != v):
-                    parts.append(self._row_fmt.format(v))
-                else:
-                    parts.append(f"{'nan':>{self._col_width}}")
+                parts.append(_render_metric_cell(values.get(c), self._row_fmt, self._col_width))
             return " ".join(parts)
         width = int(extra.get("table_width", get_table_width()))
         if kind == "epoch_sep":
@@ -527,22 +579,22 @@ def configure_run(
 
     # 1. stdout — pretty view (metrics + events + WARNING+ only).
     stdout_handler = StreamHandler(stream=stream or sys.stdout, level=Level.DEBUG)
-    stdout_handler.set_formatter(
-        PrettyTextFormatter(col_width=col_width, row_fmt=row_fmt)
-    )
+    stdout_handler.set_formatter(PrettyTextFormatter(col_width=col_width, row_fmt=row_fmt))
     stdout_handler.add_filter(_StdoutConsoleFilter(console_lvl))
     root.add_handler(stdout_handler)
 
     # 2. train.log — full structured audit trail.
     train_handler = FileHandler(
-        run_dir / "train.log", mode="w", level=file_lvl, encoding="utf-8",
+        run_dir / "train.log",
+        level=file_lvl,
     )
     train_handler.set_formatter(TextFormatter())
     root.add_handler(train_handler)
 
     # 3. metrics.csv — structured training-table sink.
     csv_handler = FileHandler(
-        run_dir / "metrics.csv", mode="w", level=Level.INFO, encoding="utf-8",
+        run_dir / "metrics.csv",
+        level=Level.INFO,
     )
     csv_handler.set_formatter(CSVMetricsFormatter())
     csv_handler.add_filter(ChannelFilter(METRICS_LOGGER_NAME))
@@ -552,7 +604,8 @@ def configure_run(
 
     # 4. events.log — inline-announce timeline.
     events_handler = FileHandler(
-        run_dir / "events.log", mode="w", level=Level.INFO, encoding="utf-8",
+        run_dir / "events.log",
+        level=Level.INFO,
     )
     events_handler.set_formatter(EventFormatter())
     events_handler.add_filter(ChannelFilter(EVENTS_LOGGER_NAME))
@@ -560,7 +613,8 @@ def configure_run(
 
     # 5. warnings.log — everything WARNING+, structured.
     warn_handler = FileHandler(
-        run_dir / "warnings.log", mode="w", level=Level.WARNING, encoding="utf-8",
+        run_dir / "warnings.log",
+        level=Level.WARNING,
     )
     warn_handler.set_formatter(TextFormatter())
     root.add_handler(warn_handler)

@@ -1,0 +1,267 @@
+"""Basic calculator workflow and torch.compile smoke tests."""
+
+import sys
+from pathlib import Path
+
+import pytest
+import torch
+
+from molpot.potentials.elec import (
+    Calculator,
+    CoulombPotential,
+    EwaldCalculator,
+    P3MCalculator,
+    PMECalculator,
+)
+from molpot.potentials.elec.prefactors import kcalmol_A
+
+sys.path.append(str(Path(__file__).parents[1]))
+from helpers import DEVICES, DTYPES
+
+SMEARING = 1
+LR_WAVELENGTH = SMEARING / 4
+MESH_SPACING = SMEARING / 4
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize(
+    ("CalculatorClass", "params"),
+    [
+        (
+            Calculator,
+            {
+                "potential": CoulombPotential(smearing=None),
+            },
+        ),
+        (
+            EwaldCalculator,
+            {
+                "potential": CoulombPotential(smearing=SMEARING),
+                "lr_wavelength": LR_WAVELENGTH,
+            },
+        ),
+        (
+            PMECalculator,
+            {
+                "potential": CoulombPotential(smearing=SMEARING),
+                "mesh_spacing": MESH_SPACING,
+            },
+        ),
+        (
+            P3MCalculator,
+            {
+                "potential": CoulombPotential(smearing=SMEARING),
+                "mesh_spacing": MESH_SPACING,
+            },
+        ),
+    ],
+)
+class TestWorkflow:
+    def cscl_system(self, device=None, dtype=None):
+        """CsCl crystal. Same as in the madelung test"""
+        positions = torch.tensor([[0, 0, 0], [0.5, 0.5, 0.5]], dtype=dtype, device=device)
+        charges = torch.tensor([1.0, -1.0], dtype=dtype, device=device).reshape((-1, 1))
+        cell = torch.eye(3, dtype=dtype, device=device)
+        neighbor_indices = torch.tensor([[0, 1]], dtype=torch.int64, device=device)
+        neighbor_distances = torch.tensor([0.8660], dtype=dtype, device=device)
+
+        return charges, cell, positions, neighbor_indices, neighbor_distances
+
+    def test_smearing_non_positive(self, CalculatorClass, params, device, dtype):
+        if CalculatorClass in [EwaldCalculator, PMECalculator, P3MCalculator]:
+            params_mod = params.copy()
+            params_mod["potential"] = CoulombPotential(smearing=0.0)
+            match = r"`smearing` is 0.0 but must be positive"
+            with pytest.raises(ValueError, match=match):
+                CalculatorClass(**params_mod)
+
+            match = r"`smearing` is -0.1 but must be positive"
+            params_mod["potential"] = CoulombPotential(smearing=-0.1)
+            with pytest.raises(ValueError, match=match):
+                CalculatorClass(**params_mod)
+
+    def test_interpolation_order_error(self, CalculatorClass, params, device, dtype):
+        if CalculatorClass in [PMECalculator, P3MCalculator]:
+            match = "`interpolation_nodes` is 10"
+            params_mod = params.copy()
+            params_mod["interpolation_nodes"] = 10
+            with pytest.raises(ValueError, match=match):
+                CalculatorClass(**params_mod)
+
+    def test_lr_wavelength_non_positive(self, CalculatorClass, params, device, dtype):
+        if CalculatorClass in [EwaldCalculator]:
+            params_mod = params.copy()
+            params_mod["lr_wavelength"] = 0.0
+
+            match = "`lr_wavelength` is 0.0 but must be positive"
+            with pytest.raises(ValueError, match=match):
+                CalculatorClass(**params_mod)
+
+            params_mod["lr_wavelength"] = -0.1
+            match = "`lr_wavelength` is -0.1 but must be positive"
+            with pytest.raises(ValueError, match=match):
+                CalculatorClass(**params_mod)
+
+    def test_dtype_device(self, CalculatorClass, params, device, dtype):
+        """Test that the output dtype and device are the same as the input."""
+        calculator = CalculatorClass(**params)
+        calculator.to(device=device, dtype=dtype)
+        potential = calculator(*self.cscl_system(device=device, dtype=dtype))
+
+        assert potential.dtype == dtype
+
+        if isinstance(device, torch.device):
+            assert potential.device == device
+        else:
+            assert potential.device.type == device
+
+    def check_operation(self, calculator, device, dtype):
+        """Make sure computation runs and returns a torch.Tensor."""
+        descriptor = calculator.forward(*self.cscl_system(device=device, dtype=dtype))
+        assert type(descriptor) is torch.Tensor
+
+    def test_operation_as_python(self, CalculatorClass, params, device, dtype):
+        """Run `check_operation` as a normal python script"""
+        calculator = CalculatorClass(**params)
+        calculator.to(device=device, dtype=dtype)
+        self.check_operation(calculator=calculator, device=device, dtype=dtype)
+
+    def test_operation_as_torch_compile(self, CalculatorClass, params, device, dtype):
+        """Run `check_operation` through torch.compile."""
+        calculator = CalculatorClass(**params)
+        calculator.to(device=device, dtype=dtype)
+        compiled = torch.compile(calculator, backend="eager")
+        self.check_operation(calculator=compiled, device=device, dtype=dtype)
+
+    def test_compile_repeated_calls(self, CalculatorClass, params, device, dtype):
+        """Compiled calculators should be reusable across calls."""
+        calculator = CalculatorClass(**params)
+        calculator.to(device=device, dtype=dtype)
+        compiled = torch.compile(calculator, backend="eager")
+        self.check_operation(calculator=compiled, device=device, dtype=dtype)
+        self.check_operation(calculator=compiled, device=device, dtype=dtype)
+
+    def test_not_nan(self, CalculatorClass, params, device, dtype):
+        """Make sure derivatives are not NaN."""
+        calculator = CalculatorClass(**params)
+        calculator.to(device=device, dtype=dtype)
+        system = self.cscl_system(device=device, dtype=dtype)
+        system[0].requires_grad = True
+        system[1].requires_grad = True
+        system[2].requires_grad = True
+        system[-1].requires_grad = True
+        energy = calculator.forward(*system).sum()
+
+        # charges
+        assert not torch.isnan(torch.autograd.grad(energy, system[0], retain_graph=True)[0]).any()
+
+        # neighbor distances
+        assert not torch.isnan(torch.autograd.grad(energy, system[-1], retain_graph=True)[0]).any()
+
+        # positions, cell
+        if CalculatorClass in [PMECalculator, P3MCalculator]:
+            assert not torch.isnan(
+                torch.autograd.grad(energy, system[1], retain_graph=True)[0]
+            ).any()
+            assert not torch.isnan(
+                torch.autograd.grad(energy, system[2], retain_graph=True)[0]
+            ).any()
+
+    def test_smearing_incompatability(self, CalculatorClass, params, device, dtype):
+        """Test calculator/potential incompatibility errors."""
+        if CalculatorClass in [EwaldCalculator, PMECalculator, P3MCalculator]:
+            params = params.copy()
+            params["potential"] = CoulombPotential(smearing=None)
+            match = (
+                r"Must specify (range radius|smearing) to use a potential with "
+                r".*Calculator"
+            )
+            with pytest.raises(ValueError, match=match):
+                CalculatorClass(**params)
+
+    def test_periodicity_true_value(
+        self,
+        CalculatorClass,
+        params,
+        device,
+        dtype,
+    ):
+        """Test that values coincide with values from LAMMPS"""
+        true_value = -383.44635
+        if CalculatorClass in [EwaldCalculator]:
+            charges, cell, positions, neighbor_indices, neighbor_distances = self.cscl_system(
+                device=device, dtype=dtype
+            )
+            cell = torch.tensor([10, 10, 30], dtype=dtype, device=device).diag()
+            res = (
+                CalculatorClass(**params)
+                .to(device)
+                .forward(
+                    charges=charges,
+                    cell=cell,
+                    positions=positions,
+                    neighbor_indices=neighbor_indices,
+                    neighbor_distances=neighbor_distances,
+                    periodic=torch.tensor([True, True, False], device=device),
+                )
+                .T
+                @ charges
+            )
+            assert torch.allclose(
+                res * kcalmol_A,
+                torch.tensor(true_value, dtype=dtype, device=device),
+                rtol=1e-3,
+            )
+
+    def test_potential_and_calculator_incompatability(
+        self,
+        CalculatorClass,
+        params,
+        device,
+        dtype,
+    ):
+        """Test calculator/potential type errors."""
+        params = params.copy()
+        params["potential"] = torch.nn.Identity()
+        with pytest.raises(TypeError, match="Potential must be an instance of Potential, got.*"):
+            CalculatorClass(**params)
+
+
+def test_kspace_filter_error_catch():
+    interpolation_nodes = 5
+
+    calculator = P3MCalculator(
+        potential=CoulombPotential(smearing=1, exclusion_radius=4.5),
+        interpolation_nodes=interpolation_nodes,
+        full_neighbor_list=True,
+        mesh_spacing=0.5,
+    )
+
+    charges = torch.ones([4, 1])
+    positions = torch.arange(4 * 3).reshape(4, 3).to(torch.float32)
+    cell = torch.tensor(
+        [
+            [-2.2958, -0.5882, -0.0797],
+            [1.3575, -0.2575, -1.9272],
+            [1.9694, -5.7254, 2.1524],
+        ],
+    )
+
+    neighbor_indices = torch.zeros((0, 2), dtype=torch.int64)
+    neighbor_distances = torch.zeros((0,))
+
+    match = (
+        "NaNs detected in the k-space filter result. This are probably caused "
+        "by an unsuitable `mesh_spacing`, resulting in a problematic grid of "
+        r"shape: \[1, 16, 16, 32\]. Try adjsuting the grid by using a "
+        "different `mesh_spacing` value."
+    )
+    with pytest.raises(ValueError, match=match):
+        calculator.forward(
+            charges=charges,
+            positions=positions,
+            cell=cell,
+            neighbor_indices=neighbor_indices,
+            neighbor_distances=neighbor_distances,
+        )

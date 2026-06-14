@@ -7,8 +7,9 @@ tensors and forward to ``torch.ops.molix.*``.
 
 from __future__ import annotations
 
-from molix import ensure_op_registered
 from torch import Tensor, empty, ops
+
+from molix import ensure_op_registered
 
 
 def get_neighbor_pairs(

@@ -1,181 +1,133 @@
-# MolNex
+<div align="center">
 
-MolNex is a general molecular machine learning framework organized as a stack of packages rather than a single monolithic library.
+<h1>
+  <img src=".github/assets/moko.svg" alt="" height="48" align="absmiddle">
+  &nbsp;MolNex
+</h1>
 
-It is built for projects where training infrastructure, representation learning, compositional modeling, and reference model families need to coexist in one codebase without collapsing into one layer. Instead of centering the framework around one model class or one end-to-end API, MolNex splits the system into four packages with distinct ownership:
+<p><strong>A layered molecular machine-learning framework — train, represent, compose, and assemble.</strong></p>
 
-- `molix`: training and execution
-- `molrep`: representation learning
-- `molpot`: potentials and composition
-- `molzoo`: assembled reference model families
+<p>
+  <a href="https://github.com/MolCrafts/molnex/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/MolCrafts/molnex/ci.yml?style=flat-square&logo=githubactions&logoColor=white&label=CI" alt="CI"></a>
+  <a href="https://pypi.org/project/molnex/"><img src="https://img.shields.io/pypi/v/molnex?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
+  <a href="https://pypi.org/project/molnex/"><img src="https://img.shields.io/pypi/pyversions/molnex?style=flat-square&logo=python&logoColor=white" alt="Python"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-18432B?style=flat-square" alt="License"></a>
+  <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json&style=flat-square" alt="Ruff"></a>
+</p>
 
-That structure matters because these parts change for different reasons. Training systems evolve around execution and lifecycle concerns. Representation modules evolve around feature construction and interaction design. Compositional modeling evolves around output structure and domain-specific assembly. Reference models evolve as curated combinations of lower-level parts. Treating them as one layer makes the project harder to extend, test, and reason about.
+<p>
+  <a href="https://molcrafts.github.io/molnex/"><b>Documentation</b></a> &nbsp;&middot;&nbsp;
+  <a href="#quick-start"><b>Quick start</b></a> &nbsp;&middot;&nbsp;
+  <a href="#molcrafts-ecosystem"><b>Ecosystem</b></a>
+</p>
 
-## Framework Scope
+</div>
 
-MolNex is a framework for building molecular ML systems as a set of cooperating layers.
+MolNex is a molecular machine-learning framework organized as four cooperating
+packages — `molix`, `molrep`, `molpot`, and `molzoo` — that can be used together
+or independently.
 
-It is not a single model library, and it is not a trainer wrapped around one preferred architecture. The project is meant to support:
+> **Under active development.** Public APIs may change between minor releases.
 
-- reusable training infrastructure
-- reusable representation modules
-- reusable composition and potential layers
-- assembled model families built from those lower-level components
+## Vision
 
-The intended result is a codebase where a user can understand which layer they are working in, what that layer is allowed to own, and how it connects to the rest of the stack.
+Molecular ML projects rarely need just one model. They accumulate training
+infrastructure, representation modules, compositional output layers, and several
+reference architectures — and when all of that collapses into a single library
+built around one preferred model, the codebase becomes hard to extend, test, and
+reason about.
 
-## Layered Infrastructure
+MolNex exists to keep those concerns apart so they can grow at their own pace. It
+aspires to be a framework where a contributor always knows which layer they are
+working in, what that layer is allowed to own, and how it connects to the rest of
+the stack — rather than a trainer wrapped around one favorite architecture.
 
-The simplest way to read MolNex is as a layered framework:
+That separation is what unlocks the goal: multiple model families living in one
+codebase, training infrastructure and representation modules reused freely across
+them, and reference models that stay replaceable examples of assembly instead of
+becoming the framework itself.
 
-1. `molix` runs training and evaluation.
-2. `molrep` defines how molecular structure becomes learned representations.
-3. `molpot` defines how representations are turned into compositional outputs or potential-based models.
-4. `molzoo` assembles reference model families from the lower-level pieces.
+## Capabilities
 
-These concerns are separated because they should not move at the same rate and they should not carry the same responsibilities.
+| Package | Capability |
+|---------|------------|
+| `molix`   | Training and execution — `Trainer`, `TrainState`, step protocol, hook lifecycle, packed-cache data pipeline, dataset loaders (QM9, RevMD17, 3BPA, Water-LES, MolRec), checkpointing, `torch.compile` / CUDA-graph and AOT-Inductor export, an in-process Langevin MD driver, trajectory diagnostics, and native C++ ops |
+| `molrep`  | Representation learning — node/radial/angular embeddings, cutoffs, equivariant interaction blocks (tensor products, symmetric contraction), pooling and readout heads |
+| `molpot`  | Potentials and composition — classical potential terms (LJ, harmonic bonds/angles/dihedrals, electrostatics), prediction heads, force/stress derivation, and the `PotentialComposer` assembly layer |
+| `molzoo`  | Assembled reference models — curated encoder and potential families (MACE, Allegro, PiNet, Sonata), each with a paper-traceable spec |
 
-If training logic is embedded in model definitions, experimentation becomes harder to control. If representation modules are tied to one assembled architecture, reuse drops quickly. If compositional modeling is mixed into the training layer, domain logic leaks into infrastructure. If reference models become the framework surface, the lower-level stack becomes harder to evolve.
+## Install
 
-MolNex is structured to avoid that collapse.
+```bash
+pip install molnex
+```
 
-## Package Boundaries
+Requires Python >= 3.10 and PyTorch >= 2.10. The package builds native C++ ops
+via scikit-build-core and CMake >= 4.0; an editable install is
+`pip install -e ".[dev]"`. See [Installation](https://molcrafts.github.io/molnex/installation/)
+for the full build setup.
 
-### `molix`
+## Quick start
 
-`molix` owns execution, training lifecycle, state, orchestration, and data flow.
+Train a model with `molix.Trainer`:
 
-It should own:
+```python
+import torch
+from molix.core.trainer import Trainer
 
-- training and evaluation loops
-- train state and stage tracking
-- step protocols
-- hooks, callbacks, checkpointing, and orchestration utilities
-- the framework-side path by which batches move through execution
+trainer = Trainer(
+    model=model,                       # any nn.Module
+    loss_fn=loss_fn,                   # (predictions, batch) -> scalar
+    optimizer_factory=lambda p: torch.optim.SGD(p, lr=0.1),
+)
 
-It should not own:
+state = trainer.train(datamodule, max_epochs=5)
+print(state["train/loss"])
+```
 
-- representation learning logic
-- model-specific architecture decisions
-- potential construction or compositional output logic
-- curated model families
+See the [Molix Quick Start](https://molcrafts.github.io/molnex/molix/tutorials/quick-start/)
+for the runnable end-to-end version, and
+[Train a Graph Model](https://molcrafts.github.io/molnex/molix/tutorials/train-a-graph-model/)
+for molecular graph batches.
 
-It relates to the rest of the stack by running them. `molix` is the execution layer that coordinates models and losses without becoming the definition of those models.
+## Documentation
 
-### `molrep`
+- [Documentation home](https://molcrafts.github.io/molnex/)
+- [Installation](https://molcrafts.github.io/molnex/installation/)
+- [Molix](https://molcrafts.github.io/molnex/molix/) — training, hooks, data, and execution
+- [MolRep](https://molcrafts.github.io/molnex/molrep/) — representation learning modules
+- [MolPot](https://molcrafts.github.io/molnex/molpot/) — potential composition and physical outputs
+- [MolZoo](https://molcrafts.github.io/molnex/molzoo/) — reference encoder families
+- [API Reference](https://molcrafts.github.io/molnex/api/)
 
-`molrep` owns representation learning modules.
+## MolCrafts ecosystem
 
-It should own:
+| Project | Role |
+|---------|------|
+| [molpy](https://github.com/MolCrafts/molpy)     | Python toolkit — the shared molecular data model & workflow layer |
+| [molrs](https://github.com/MolCrafts/molrs)     | Rust core — molecular data structures & compute kernels (native + WASM) |
+| [molpack](https://github.com/MolCrafts/molpack) | Packmol-grade molecular packing (Rust + Python) |
+| [molvis](https://github.com/MolCrafts/molvis)   | WebGL molecular visualization & editing |
+| [molexp](https://github.com/MolCrafts/molexp)   | Workflow & experiment-management platform |
+| **molnex** | Molecular machine-learning framework — this repo |
+| [molq](https://github.com/MolCrafts/molq)       | Unified job queue — local / SLURM / PBS / LSF |
+| [molcfg](https://github.com/MolCrafts/molcfg)   | Layered configuration library |
+| [mollog](https://github.com/MolCrafts/mollog)   | Structured logging, stdlib-compatible |
+| [molhub](https://github.com/MolCrafts/molhub)   | Molecular dataset hub |
+| [molmcp](https://github.com/MolCrafts/molmcp)   | MCP server for the ecosystem |
+| [molrec](https://github.com/MolCrafts/molrec)   | Atomistic record specification |
 
-- embeddings
-- interaction blocks
-- pooling and readout primitives
-- reusable modules for turning molecular inputs into learned features
+## Contributing
 
-It should not own:
-
-- training lifecycle
-- checkpointing and orchestration
-- package-level reference architectures
-- downstream composition logic that belongs to potential assembly
-
-It relates to the rest of the stack by providing reusable modeling parts. `molrep` is where feature construction and interaction design live, independent of how a full system is trained or assembled.
-
-### `molpot`
-
-`molpot` owns potential construction and compositional modeling layers.
-
-It should own:
-
-- potential terms
-- output parameterization and composition
-- modeling layers that assemble structured downstream predictions from learned representations
-
-It should not own:
-
-- generic training infrastructure
-- the full representation learning stack
-- the role of a catch-all domain package
-- assembled model families that should live one layer higher
-
-It relates to the rest of the stack by consuming learned representations and exposing structured modeling components. `molpot` is a modeling layer, not the identity of the whole framework.
-
-### `molzoo`
-
-`molzoo` owns assembled reference model families built from lower-level components.
-
-It should own:
-
-- curated model families
-- reference assemblies of encoder or end-to-end model stacks
-- package-level entry points for known architectures
-
-It should not own:
-
-- generic training infrastructure
-- low-level representation primitives
-- the reusable composition layer
-- framework-wide architectural policy
-
-It relates to the rest of the stack by packaging lower-level parts into concrete reference models. `molzoo` should demonstrate how the system is assembled, not replace the system beneath it.
-
-## Separation Rationale
-
-MolNex is split by architectural responsibility rather than by file type or by research topic.
-
-This has direct consequences:
-
-- training infrastructure can evolve without rewriting model code
-- representation modules can be reused across multiple assembled models
-- compositional modeling stays separate from orchestration concerns
-- reference models remain replaceable examples of assembly rather than framework-defining abstractions
-- contributors can make changes in one layer without silently changing ownership in another
-
-The split is meant to keep the framework predictable as it grows.
-
-## Design Rules
-
-These are the architectural rules that shape the project:
-
-- package boundaries are part of the public design, not just an internal folder layout
-- execution, representation, composition, and assembly are different responsibilities and should remain different responsibilities
-- reusable lower-level modules should not depend on one curated top-level model family
-- reference models should be built from the stack, not treated as the stack
-- the docs should explain ownership and composition before listing APIs
-
-## Infrastructure Priorities
-
-MolNex is optimized for:
-
-- projects that need more than one model family in one codebase
-- reuse of training infrastructure across different model assemblies
-- reuse of representation modules across different downstream modeling choices
-- composition of structured modeling layers without pushing them into the trainer
-- contributor workflows where package ownership and review boundaries are explicit
-- documentation that helps readers understand where new code belongs
-
-## Docs Map
-
-The documentation is organized around responsibilities first, then composition, then APIs.
-
-Start here:
-
-- [Documentation home](docs/index.md): navigation map for the docs set
-- [Architecture](docs/architecture.md): how the four-layer stack fits together
-- [Core concepts](docs/concepts.md): the vocabulary used across the framework
-- [Package guide: molix](docs/packages/molix.md)
-- [Package guide: molrep](docs/packages/molrep.md)
-- [Package guide: molpot](docs/packages/molpot.md)
-- [Package guide: molzoo](docs/packages/molzoo.md)
-
-If you want to get running quickly, use:
-
-- [Installation](docs/get-started/installation.md)
-- [Quick start](docs/get-started/quick-start.md)
-
-If you want package-level implementation docs, continue into the existing package sections under [`docs/molix`](docs/molix/index.md), [`docs/molrep`](docs/molrep/index.md), and [`docs/molpot`](docs/molpot/index.md).
+Contributions are welcome — see the [documentation](https://molcrafts.github.io/molnex/)
+to get started.
 
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE).
+BSD-3-Clause — see [LICENSE](LICENSE).
+
+<hr>
+
+<div align="center">
+<sub>Crafted with 💚 by <a href="https://github.com/MolCrafts">MolCrafts</a></sub>
+</div>

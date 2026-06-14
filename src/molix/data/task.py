@@ -16,7 +16,9 @@ from typing import Any, Protocol, runtime_checkable
 class Runnable(Protocol):
     """Sync task protocol, structurally aligned with molexp.Runnable."""
 
-    def execute(self, data: Any) -> Any: ...
+    def execute(self, data: Any) -> Any:
+        """Transform *data* and return the result (structural ``execute`` contract)."""
+        ...
 
 
 class Task:
@@ -28,9 +30,15 @@ class Task:
         return type(self).__name__
 
     def execute(self, data: dict) -> dict:
+        """Transform a sample dict — abstract; subclasses must override.
+
+        Raises:
+            NotImplementedError: Always, on the base class.
+        """
         raise NotImplementedError
 
     def __call__(self, data: dict) -> dict:
+        """Call the task, delegating to :meth:`execute`."""
         return self.execute(data)
 
 
@@ -43,6 +51,11 @@ class SampleTask(Task):
     """
 
     def execute(self, data: dict) -> dict:
+        """Transform one sample dict — abstract; subclasses must override.
+
+        Raises:
+            NotImplementedError: Always, on this base class.
+        """
         raise NotImplementedError
 
 
@@ -74,13 +87,35 @@ class DatasetTask(Task):
 
 
 class BatchTask(Task):
-    """Post-collate batch processing.
+    """Post-collate batch processing. **Extension point — no built-in subclasses.**
 
-    Executed after ``collate_molecules`` inside the DataLoader's
-    ``collate_fn``.  Runs on the hot path — keep it fast.
+    Executed after :func:`~molix.data.collate.collate_molecules` inside the
+    DataLoader's ``collate_fn``. Input and output are both
+    ``TensorDict`` (nested), not raw
+    sample dicts. Runs on the hot path of every training step — keep it
+    fast.
 
-    Examples: force padding, negative sampling, batch augmentation.
+    molix ships no built-in :class:`BatchTask` subclass. The base class
+    exists so custom post-collate transforms can be plugged into
+    :meth:`Pipeline.add` and routed through
+    :attr:`~molix.data.pipeline.PipelineSpec.batch_nodes` to the
+    :class:`~molix.data.datamodule._CollateFn`.
+
+    Use this only when the transform **must** operate on the collated
+    batch (e.g. batch-level augmentation that mixes atoms across graphs,
+    dense-padding for ``torch.compile``). Transforms expressible per
+    sample should subclass :class:`SampleTask` instead — they benefit
+    from per-sample caching, which :class:`BatchTask` cannot (the input
+    shape is not known until collate time).
     """
 
     def execute(self, data: dict) -> dict:
+        """Transform a collated batch — abstract; custom subclasses override.
+
+        Input and output are both nested ``TensorDict`` batches, not raw
+        sample dicts.
+
+        Raises:
+            NotImplementedError: Always, on this base class.
+        """
         raise NotImplementedError

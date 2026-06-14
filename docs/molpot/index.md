@@ -1,18 +1,26 @@
 # MolPot
 
-MolPot is the composition and potentials layer of MolNex.
+MolPot is the potential and composition package in MolNex. Use it for
+classical potential terms, learned parameter heads, pooling, energy aggregation,
+force derivation, and potential composition.
 
-Its purpose is to give specialized modeling components their own place in the architecture, instead of forcing every downstream problem into the same abstraction.
+## Tutorials
 
-## Design Role
+- [Build a Potential](tutorials/build-a-potential.md): call a potential term and
+  compose learned parameters with pairwise distances.
 
-MolPot exists because some molecular tasks need more structure in how outputs, parameters, and model components are assembled. Those concerns deserve their own layer, with language that matches the problem rather than being squeezed into one generic API.
+## User Guide
 
-It is one module inside a general framework, not the definition of the framework itself.
+- [Components](user-guide/components.md): potential terms, heads, pooling, and
+  composition layers.
+- [Gradients and Forces](user-guide/gradients.md): derive forces from energies
+  with autograd.
 
-## What MolPot Optimizes For
+## Explanation
 
-- a natural home for composable downstream modeling
-- composability across learned components and specialized terms
-- clearer expression of modeling assumptions
-- support for potential-based work without making it the center of the project
+- [Potential Composition](explanation/potential-composition.md): how MolPot
+  connects encoder features, heads, potential terms, and physical outputs.
+
+## API
+
+See [molpot API Reference](../api/molpot.md).

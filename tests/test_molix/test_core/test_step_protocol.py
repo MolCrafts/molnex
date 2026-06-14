@@ -4,28 +4,28 @@ import pytest
 import torch
 import torch.nn as nn
 
-from molix.config import set_precision
+from molix.config import config
+from molix.core.state import TrainState
+from molix.core.steps import DefaultEvalStep, DefaultTrainStep
 from molix.core.trainer import Trainer
-from molix.core.state import TrainState, Stage
-from molix.core.steps import Step, DefaultTrainStep, DefaultEvalStep, extract_model_inputs
 
 
 @pytest.fixture(autouse=True)
 def _reset_precision():
     """Ensure each test starts from fp32 since precision is global state."""
-    set_precision("fp32")
+    config.set_precision("fp32")
     yield
-    set_precision("fp32")
+    config.set_precision("fp32")
 
 
-# Simple test model following canonical MolNex contract: forward(**model_inputs)
+# Simple test model following canonical MolNex contract: forward(batch)
 class SimpleModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.linear = nn.Linear(10, 1)
 
-    def forward(self, x, **_kwargs):
-        return self.linear(x)
+    def forward(self, batch):
+        return self.linear(batch["x"])
 
 
 def simple_loss_fn(predictions, batch):
@@ -122,8 +122,7 @@ def test_trainer_accepts_custom_step():
 
         def on_train_batch(self, trainer, state, batch):
             self.train_called = True
-            model_inputs = extract_model_inputs(batch)
-            predictions = trainer.model(**model_inputs)
+            predictions = trainer.model(batch)
             loss = trainer.loss_fn(predictions, batch)
             trainer.optimizer.zero_grad()
             loss.backward()
@@ -133,8 +132,7 @@ def test_trainer_accepts_custom_step():
         def on_eval_batch(self, trainer, state, batch):
             self.eval_called = True
             with torch.no_grad():
-                model_inputs = extract_model_inputs(batch)
-                predictions = trainer.model(**model_inputs)
+                predictions = trainer.model(batch)
                 loss = trainer.loss_fn(predictions, batch)
             return {"loss": loss, "predictions": predictions}
 
@@ -184,8 +182,35 @@ def test_default_train_step_computes_loss_and_updates():
         assert not torch.equal(initial, current), "Parameters should have been updated"
 
 
-def test_default_eval_step_no_gradient():
-    """Verify DefaultEvalStep does not compute gradients."""
+def test_default_eval_step_no_grad_opt_in():
+    """``DefaultEvalStep(no_grad=True)`` suppresses the autograd graph."""
+    model = SimpleModel()
+
+    trainer = Trainer(
+        model=model,
+        loss_fn=simple_loss_fn,
+        optimizer_factory=simple_optimizer_factory,
+        eval_step=DefaultEvalStep(no_grad=True),
+    )
+
+    state = TrainState()
+    batch = _make_batch()
+
+    outputs = trainer.eval_step.on_eval_batch(trainer, state, batch)
+
+    assert "loss" in outputs
+    assert "predictions" in outputs
+    assert isinstance(outputs["loss"], torch.Tensor)
+    assert isinstance(outputs["predictions"], torch.Tensor)
+
+    # no_grad=True → no graph
+    assert not outputs["loss"].requires_grad
+    assert not outputs["predictions"].requires_grad
+
+
+def test_default_eval_step_keeps_graph_by_default():
+    """The default ``DefaultEvalStep`` keeps the graph alive so force models
+    (F = -dE/dx) get valid eval forces."""
     model = SimpleModel()
 
     trainer = Trainer(
@@ -197,18 +222,10 @@ def test_default_eval_step_no_gradient():
     state = TrainState()
     batch = _make_batch()
 
-    # Execute eval step
     outputs = trainer.eval_step.on_eval_batch(trainer, state, batch)
 
-    # Check outputs
-    assert "loss" in outputs
-    assert "predictions" in outputs
-    assert isinstance(outputs["loss"], torch.Tensor)
-    assert isinstance(outputs["predictions"], torch.Tensor)
-
-    # Verify no gradients computed
-    assert not outputs["loss"].requires_grad
-    assert not outputs["predictions"].requires_grad
+    # default no_grad=False → graph is live (loss is differentiable)
+    assert outputs["loss"].requires_grad
 
 
 def test_trainer_delegates_to_train_step():
@@ -221,8 +238,7 @@ def test_trainer_delegates_to_train_step():
 
         def on_train_batch(self, trainer, state, batch):
             self.train_calls += 1
-            model_inputs = extract_model_inputs(batch)
-            predictions = trainer.model(**model_inputs)
+            predictions = trainer.model(batch)
             loss = trainer.loss_fn(predictions, batch)
             trainer.optimizer.zero_grad()
             loss.backward()
@@ -232,8 +248,7 @@ def test_trainer_delegates_to_train_step():
         def on_eval_batch(self, trainer, state, batch):
             self.eval_calls += 1
             with torch.no_grad():
-                model_inputs = extract_model_inputs(batch)
-                predictions = trainer.model(**model_inputs)
+                predictions = trainer.model(batch)
                 loss = trainer.loss_fn(predictions, batch)
             return {"loss": loss, "predictions": predictions}
 
@@ -267,8 +282,7 @@ def test_custom_step_gradient_accumulation():
             self.accumulated = 0
 
         def on_train_batch(self, trainer, state, batch):
-            model_inputs = extract_model_inputs(batch)
-            predictions = trainer.model(**model_inputs)
+            predictions = trainer.model(batch)
             loss = trainer.loss_fn(predictions, batch) / self.accumulation_steps
 
             loss.backward()
@@ -283,8 +297,7 @@ def test_custom_step_gradient_accumulation():
 
         def on_eval_batch(self, trainer, state, batch):
             with torch.no_grad():
-                model_inputs = extract_model_inputs(batch)
-                predictions = trainer.model(**model_inputs)
+                predictions = trainer.model(batch)
                 loss = trainer.loss_fn(predictions, batch)
             return {"loss": loss, "predictions": predictions}
 
@@ -380,7 +393,7 @@ def test_default_train_step_amp_backward_compatible():
     outputs = trainer.train_step.on_train_batch(trainer, state, batch)
     assert "loss" in outputs
     assert "predictions" in outputs
-    assert "train/loss" in state
+    assert "loss" in state["train"]
 
 
 def test_default_eval_step_with_amp_bfloat16():
@@ -391,7 +404,7 @@ def test_default_eval_step_with_amp_bfloat16():
         model=model,
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
-        eval_step=DefaultEvalStep(),
+        eval_step=DefaultEvalStep(no_grad=True),
     )
     trainer.set_precision("bf16-mixed")
 
@@ -401,56 +414,45 @@ def test_default_eval_step_with_amp_bfloat16():
     outputs = trainer.eval_step.on_eval_batch(trainer, state, batch)
     assert "loss" in outputs
     assert "predictions" in outputs
+    # no_grad=True path → no autograd graph even under autocast
     assert not outputs["loss"].requires_grad
 
 
 # ---- on_after_backward hook point tests ----
 
 
-def test_on_after_backward_fires_during_training():
-    """Verify on_after_backward hook fires between backward and optimizer step."""
+def test_on_after_backward_fires_with_grads_present():
+    """``DefaultTrainStep.on_train_batch`` fires ``on_after_backward`` once the
+    accumulation window closes, with gradients populated."""
     call_log = []
 
     class AfterBackwardHook:
         def on_after_backward(self, trainer, state):
-            # Gradients should exist at this point
-            has_grads = any(
-                p.grad is not None for p in trainer.model.parameters()
-            )
-            call_log.append(("on_after_backward", has_grads))
+            has_grads = any(p.grad is not None for p in trainer.model.parameters())
+            call_log.append(has_grads)
 
-    model = SimpleModel()
     trainer = Trainer(
-        model=model,
+        model=SimpleModel(),
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
         hooks=[AfterBackwardHook()],
     )
 
-    datamodule = MockDataModule()
-    trainer.train(datamodule, max_epochs=1)
+    trainer.train_step.on_train_batch(trainer, TrainState(), _make_batch())
 
-    # Should have been called once per training batch (3 batches)
-    assert len(call_log) == 3
-    # Gradients should have been present each time
-    for _, has_grads in call_log:
-        assert has_grads
+    assert call_log == [True]
 
 
 def test_on_after_backward_fires_with_amp():
-    """Verify on_after_backward fires with AMP and gradients are unscaled."""
+    """Same firing contract holds with AMP enabled (grads unscaled before the hook)."""
     call_log = []
 
     class AfterBackwardHook:
         def on_after_backward(self, trainer, state):
-            has_grads = any(
-                p.grad is not None for p in trainer.model.parameters()
-            )
-            call_log.append(has_grads)
+            call_log.append(any(p.grad is not None for p in trainer.model.parameters()))
 
-    model = SimpleModel()
     trainer = Trainer(
-        model=model,
+        model=SimpleModel(),
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
         train_step=DefaultTrainStep(),
@@ -458,9 +460,6 @@ def test_on_after_backward_fires_with_amp():
     )
     trainer.set_precision("bf16-mixed")
 
-    datamodule = MockDataModule()
-    trainer.train(datamodule, max_epochs=1)
+    trainer.train_step.on_train_batch(trainer, TrainState(), _make_batch())
 
-    assert len(call_log) == 3
-    for has_grads in call_log:
-        assert has_grads
+    assert call_log == [True]

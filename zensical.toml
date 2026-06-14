@@ -1,48 +1,169 @@
 [project]
 site_name = "MolNex Documentation"
 site_description = "Dict-first molecular ML framework"
+site_url = "https://molcrafts.github.io/molnex/"
+repo_url = "https://github.com/molcrafts/molnex"
+repo_name = "molcrafts/molnex"
+edit_uri = "edit/main/docs"
+docs_dir = "docs"
+site_dir = "site"
+extra_javascript = [
+    "javascripts/mathjax.js",
+    { path = "https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js", async = true },
+]
 
-# Navigation
 nav = [
     { "Home" = "index.md" },
-    { "Get Started" = [
-        { "Installation" = "get-started/installation.md" },
-        { "Quick Start" = "get-started/quick-start.md" }
-    ]},
-    { "Molix (Training)" = [
+    { "Installation" = "installation.md" },
+    { "Molix" = [
         { "Overview" = "molix/index.md" },
-        { "Quickstart" = "molix/quickstart.md" },
-        { "Core" = [
-            { "The Trainer" = "molix/core/trainer.md" },
-            { "Hooks System" = "molix/core/hooks.md" }
+        { "Tutorials" = [
+            { "Quick Start" = "molix/tutorials/quick-start.md" },
+            { "Train a Graph Model" = "molix/tutorials/train-a-graph-model.md" }
         ]},
-        { "Data" = [
-            { "Overview" = "molix/data/index.md" },
-            { "Data Loading" = "molix/data/loading.md" },
-            { "Data Modules" = "molix/data/datamodules.md" }
+        { "User Guide" = [
+            { "Trainer" = "molix/user-guide/trainer.md" },
+            { "Hooks" = "molix/user-guide/hooks.md" },
+            { "Data Pipeline" = "molix/user-guide/data.md" },
+            { "Data Loading" = "molix/user-guide/data-loading.md" },
+            { "Data Modules" = "molix/user-guide/data-modules.md" }
+        ]},
+        { "Explanation" = [
+            { "Execution Model" = "molix/explanation/execution-model.md" },
+            { "Batch Schema" = "molix/explanation/batch-schema.md" }
         ]}
     ]},
-    { "MolRep (Representation)" = [
+    { "MolRep" = [
         { "Overview" = "molrep/index.md" },
-        { "Quickstart" = "molrep/quickstart.md" },
-        { "Modules" = [
-            { "Encoders" = "molrep/encoders.md" },
-            { "Atom Embeddings" = "molrep/modules/embedding.md" }
+        { "Tutorials" = [
+            { "Build an Encoder" = "molrep/tutorials/build-an-encoder.md" }
+        ]},
+        { "User Guide" = [
+            { "Encoders" = "molrep/user-guide/encoders.md" },
+            { "Embeddings" = "molrep/user-guide/embeddings.md" }
+        ]},
+        { "Explanation" = [
+            { "Representation Learning" = "molrep/explanation/representation-learning.md" }
         ]}
     ]},
-    { "MolPot (Potentials)" = [
+    { "MolPot" = [
         { "Overview" = "molpot/index.md" },
-        { "Quickstart" = "molpot/quickstart.md" },
-        { "Physics" = [
-            { "Components" = "molpot/components.md" },
-            { "Gradients & Forces" = "molpot/gradients.md" }
+        { "Tutorials" = [
+            { "Build a Potential" = "molpot/tutorials/build-a-potential.md" }
+        ]},
+        { "User Guide" = [
+            { "Components" = "molpot/user-guide/components.md" },
+            { "Gradients and Forces" = "molpot/user-guide/gradients.md" }
+        ]},
+        { "Explanation" = [
+            { "Potential Composition" = "molpot/explanation/potential-composition.md" }
         ]}
     ]},
-    { "Reference" = [
-        { "Batch Schema" = "tensordict_schema.md" },
-        { "Component Taxonomy" = "component_taxonomy.md" }
+    { "MolZoo" = [
+        { "Overview" = "molzoo/index.md" },
+        { "Tutorial" = "molzoo/tutorials/index.md" },
+        { "User Guide" = [
+            { "Allegro" = "molzoo/user-guide/allegro.md" }
+        ]},
+        { "Spec" = [
+            { "Allegro Spec" = "molzoo/specs/allegro.md" }
+        ]}
+    ]},
+    { "API Reference" = [
+        { "Overview" = "api/index.md" },
+        { "molix" = "api/molix.md" },
+        { "molrep" = "api/molrep.md" },
+        { "molpot" = "api/molpot.md" },
+        { "molzoo" = "api/molzoo.md" }
     ]}
 ]
 
 [project.theme]
 name = "material"
+features = [
+    "navigation.sections",
+    "navigation.indexes",
+    "content.code.copy",
+    "search.highlight",
+]
+
+[project.theme.palette]
+scheme = "default"
+primary = "indigo"
+accent = "blue"
+
+[project.theme.font]
+text = "Inter"
+code = "JetBrains Mono"
+
+[project.markdown_extensions.abbr]
+
+[project.markdown_extensions.admonition]
+
+[project.markdown_extensions.attr_list]
+
+[project.markdown_extensions.def_list]
+
+[project.markdown_extensions.footnotes]
+
+[project.markdown_extensions.md_in_html]
+
+[project.markdown_extensions.tables]
+
+[project.markdown_extensions.toc]
+permalink = true
+
+[project.markdown_extensions."pymdownx.arithmatex"]
+generic = true
+
+[project.markdown_extensions."pymdownx.betterem"]
+
+[project.markdown_extensions."pymdownx.caret"]
+
+[project.markdown_extensions."pymdownx.details"]
+
+[project.markdown_extensions."pymdownx.highlight"]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+use_pygments = false
+
+[project.markdown_extensions."pymdownx.inlinehilite"]
+
+[project.markdown_extensions."pymdownx.keys"]
+
+[project.markdown_extensions."pymdownx.magiclink"]
+
+[project.markdown_extensions."pymdownx.mark"]
+
+[project.markdown_extensions."pymdownx.smartsymbols"]
+
+[project.markdown_extensions."pymdownx.superfences"]
+
+[project.markdown_extensions."pymdownx.tabbed"]
+alternate_style = true
+combine_header_slug = true
+
+[project.markdown_extensions."pymdownx.tasklist"]
+custom_checkbox = true
+
+[project.markdown_extensions."pymdownx.tilde"]
+
+[project.plugins.search]
+enabled = true
+
+[project.plugins.mkdocstrings]
+default_handler = "python"
+inventory_project = "molnex"
+inventory_version = "0.1.0"
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+show_source = false
+show_signature_annotations = true
+show_root_heading = true
+show_root_full_path = false
+members_order = "source"

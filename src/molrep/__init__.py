@@ -30,9 +30,9 @@ from molrep.embedding import (
     PolynomialCutoff,
     SphericalHarmonics,
 )
-from molrep.head.scalar_head import ScalarHead
+from molrep.heads.scalar import ScalarHead
 from molrep.readout.pooling import masked_mean_pooling, masked_sum_pooling
-from molrep.readout.product_head import ProductHead
+from molrep.readout.product import ProductHead
 
 __all__ = [
     "JointEmbedding",

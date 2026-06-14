@@ -1,16 +1,20 @@
-"""Graph-aware collation producing nested GraphBatch TensorDicts.
+"""Graph-aware collation producing nested TensorDict batches.
 
-Collates a list of single-molecule sample dicts into a ``GraphBatch``
-with per-level batch sizes: atoms (N), edges (E), graphs (B).
+Collates a list of single-molecule sample dicts into a nested
+``TensorDict`` with per-level batch sizes: atoms (N), edges (E), graphs (B).
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import torch
+from tensordict import TensorDict
 
-from molix.data.types import AtomData, EdgeData, GraphBatch, GraphData
+if TYPE_CHECKING:
+    from molix.data.dataset import PackedView
 
 # ---------------------------------------------------------------------------
 # Target schema
@@ -32,9 +36,7 @@ class TargetSchema:
     any subclass that declares its own.
     """
 
-    graph_level: frozenset[str] = field(
-        default_factory=lambda: frozenset({"energy"})
-    )
+    graph_level: frozenset[str] = field(default_factory=lambda: frozenset({"energy"}))
     atom_level: frozenset[str] = field(default_factory=lambda: frozenset({"forces"}))
 
 
@@ -65,8 +67,8 @@ def _normalize_edge_index(edge_index: torch.Tensor) -> torch.Tensor:
 def collate_molecules(
     samples: list[dict],
     target_schema: TargetSchema = DEFAULT_TARGET_SCHEMA,
-) -> GraphBatch:
-    """Collate molecule samples into a nested GraphBatch.
+) -> TensorDict:
+    """Collate molecule samples into a nested TensorDict.
 
     Each sample is a plain dict with at least ``Z`` and ``pos`` keys.
     Optional: ``edge_index``, ``bond_diff``, ``bond_dist``, ``targets``.
@@ -76,7 +78,7 @@ def collate_molecules(
         target_schema: Declares which targets are graph-level vs atom-level.
 
     Returns:
-        Nested ``GraphBatch`` TensorDict.
+        Nested ``TensorDict`` with ``atoms``, ``edges``, ``graphs`` namespaces.
     """
     if not samples:
         raise ValueError("Cannot collate an empty sample list")
@@ -100,7 +102,7 @@ def collate_molecules(
             raise KeyError("Each sample must contain 'Z' and 'pos'")
 
         z = sample["Z"].long()
-        pos = sample["pos"].float()
+        pos = sample["pos"]
         n_atoms = int(z.shape[0])
 
         z_all.append(z)
@@ -113,16 +115,16 @@ def collate_molecules(
             edge_all.append(edge_index + atom_offset)
 
             if "bond_diff" in sample and sample["bond_diff"] is not None:
-                diff_all.append(sample["bond_diff"].float())
+                diff_all.append(sample["bond_diff"])
             if "bond_dist" in sample and sample["bond_dist"] is not None:
-                dist_all.append(sample["bond_dist"].float())
+                dist_all.append(sample["bond_dist"])
 
         for name, value in sample.get("targets", {}).items():
             value = value if isinstance(value, torch.Tensor) else torch.tensor(value)
             if name in target_schema.atom_level:
-                atom_targets.setdefault(name, []).append(value.float())
+                atom_targets.setdefault(name, []).append(value)
             else:
-                graph_targets.setdefault(name, []).append(value.reshape(-1).float())
+                graph_targets.setdefault(name, []).append(value.reshape(-1))
 
         atom_offset += n_atoms
 
@@ -136,7 +138,7 @@ def collate_molecules(
         atoms_dict[name] = torch.cat(vals, dim=0)
 
     n_total = atoms_dict["Z"].shape[0]
-    atoms = AtomData(atoms_dict, batch_size=[n_total])
+    atoms = TensorDict(atoms_dict, batch_size=[n_total])
 
     # --- Build edge-level TensorDict ---
     if edge_all:
@@ -148,10 +150,10 @@ def collate_molecules(
         if dist_all:
             edges_dict["bond_dist"] = torch.cat(dist_all, dim=0)
         e_total = edges_dict["edge_index"].shape[0]
-        edges = EdgeData(edges_dict, batch_size=[e_total])
+        edges = TensorDict(edges_dict, batch_size=[e_total])
     else:
         # Empty edge data
-        edges = EdgeData(
+        edges = TensorDict(
             edge_index=torch.zeros(0, 2, dtype=torch.long),
             bond_diff=torch.zeros(0, 3),
             bond_dist=torch.zeros(0),
@@ -166,12 +168,170 @@ def collate_molecules(
     for name, vals in graph_targets.items():
         graphs_dict[name] = torch.cat(vals, dim=0)
 
-    graphs = GraphData(graphs_dict, batch_size=[num_graphs])
+    graphs = TensorDict(graphs_dict, batch_size=[num_graphs])
 
-    # --- Assemble top-level GraphBatch ---
-    return GraphBatch(
+    # --- Assemble top-level TensorDict ---
+    return TensorDict(
         atoms=atoms,
         edges=edges,
         graphs=graphs,
         batch_size=[],
     )
+
+
+# ---------------------------------------------------------------------------
+# Packed-aware fast path
+# ---------------------------------------------------------------------------
+
+_TARGET_PREFIX = "targets."
+
+
+def _gather_indices(ptr: torch.Tensor, idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Row gather-index and per-sample counts for slicing a packed bucket.
+
+    Given a cumsum pointer ``ptr`` ``(n_samples + 1,)`` and selected sample
+    indices ``idx`` ``(B,)``, returns ``(gather, counts)`` where ``counts``
+    ``(B,)`` is each selected sample's element count and ``gather``
+    ``(sum(counts),)`` indexes the packed concat tensor in sample-major
+    order — so ``packed[gather]`` equals concatenating per-sample slices.
+    """
+    counts = ptr[idx + 1] - ptr[idx]
+    starts = ptr[idx]
+    total = int(counts.sum().item())
+    seg = torch.repeat_interleave(torch.arange(idx.numel()), counts)
+    new_offsets = torch.cumsum(counts, 0) - counts
+    gather = starts[seg] + (torch.arange(total) - new_offsets[seg])
+    return gather, counts
+
+
+def collate_packed(
+    view: "PackedView",
+    indices: Sequence[int],
+    target_schema: TargetSchema = DEFAULT_TARGET_SCHEMA,
+) -> TensorDict:
+    """Collate a batch directly from packed cache tensors (no per-sample dicts).
+
+    Functionally identical to running :func:`collate_molecules` over
+    ``[dataset[i] for i in indices]``, but builds the nested
+    ``atoms`` / ``edges`` / ``graphs`` :class:`~tensordict.TensorDict` by
+    slicing the packed concat tensors and vectorizing the ``edge_index``
+    rebase — bypassing the unpack→repack round trip. Per-key routing and
+    dtypes mirror :func:`collate_molecules` exactly (it is the equivalence
+    oracle).
+
+    Args:
+        view: A :class:`~molix.data.dataset.PackedView` onto the cache
+            payload; ``view.map_indices`` resolves *indices* to packed
+            rows.
+        indices: Sample indices in the view's local coordinate. Must be
+            non-empty.
+        target_schema: Routes target keys — ``atom_level`` names become
+            per-atom ``(N, ...)`` leaves under ``atoms``; all others
+            become per-graph leaves under ``graphs``.
+
+    Returns:
+        Nested ``TensorDict`` with ``atoms`` ``(N,)`` / ``edges`` ``(E,)``
+        / ``graphs`` ``(B,)`` namespaces — leaf-for-leaf equal to
+        :func:`collate_molecules`.
+
+    Raises:
+        ValueError: *indices* is empty, or the cache schema lacks ``Z`` or
+            ``pos`` per-atom keys.
+    """
+    if len(indices) == 0:
+        raise ValueError("Cannot collate an empty sample list")
+
+    payload = view.payload
+    packed = view.map_indices(indices)
+    idx = torch.as_tensor(packed, dtype=torch.long)
+    n_graphs = idx.numel()
+
+    atoms_bucket: Mapping[str, torch.Tensor] = payload.get("atoms", {})
+    edges_bucket: Mapping[str, torch.Tensor] = payload.get("edges", {})
+    graphs_bucket: Mapping[str, torch.Tensor] = payload.get("graphs", {})
+    scalars_bucket: Mapping[str, list[Any]] = payload.get("scalars", {})
+
+    for required in ("Z", "pos"):
+        if required not in atoms_bucket:
+            raise ValueError(
+                f"packed cache has no per-atom '{required}' key — collate_packed "
+                f"requires both 'Z' and 'pos'. Rebuild the cache from samples "
+                f"that carry '{required}'."
+            )
+
+    atom_ptr = payload["atom_ptr"]
+    a_gather, counts = _gather_indices(atom_ptr, idx)
+    new_atom_offsets = torch.cumsum(counts, 0) - counts
+    seg = torch.repeat_interleave(torch.arange(n_graphs), counts)
+
+    # --- atom level ---
+    atoms_dict: dict[str, torch.Tensor] = {
+        "Z": atoms_bucket["Z"][a_gather].long(),
+        "pos": atoms_bucket["pos"][a_gather],
+        "batch": seg.long(),
+    }
+
+    # --- graph-level accumulator (filled by target routing below) ---
+    graphs_dict: dict[str, torch.Tensor] = {
+        "num_atoms": counts.long(),
+    }
+
+    def _route_target(key: str, value: torch.Tensor) -> None:
+        """Place a target key under atoms (atom_level) or graphs, oracle-style.
+
+        *value* is the per-sample values stacked/concatenated in sample-major
+        order. atom_level targets keep the raw concat (oracle cats raw);
+        graph targets are flattened, which equals the oracle's per-sample
+        ``reshape(-1)`` then ``cat`` for sample-major data.
+        """
+        name = key[len(_TARGET_PREFIX) :]
+        if name in target_schema.atom_level:
+            atoms_dict[name] = value
+        else:
+            graphs_dict[name] = value.reshape(-1)
+
+    # atom-bucket targets
+    for key in atoms_bucket:
+        if key.startswith(_TARGET_PREFIX):
+            _route_target(key, atoms_bucket[key][a_gather])
+
+    # --- edge level ---
+    if "edge_index" in edges_bucket:
+        edge_ptr = payload["edge_ptr"]
+        e_gather, e_counts = _gather_indices(edge_ptr, idx)
+        e_seg = torch.repeat_interleave(torch.arange(n_graphs), e_counts)
+        edge_index = edges_bucket["edge_index"][e_gather].long()
+        edge_index = edge_index + new_atom_offsets[e_seg].unsqueeze(1)
+        edges_dict: dict[str, torch.Tensor] = {"edge_index": edge_index}
+        if "bond_diff" in edges_bucket:
+            edges_dict["bond_diff"] = edges_bucket["bond_diff"][e_gather]
+        if "bond_dist" in edges_bucket:
+            edges_dict["bond_dist"] = edges_bucket["bond_dist"][e_gather]
+        for key in edges_bucket:
+            if key.startswith(_TARGET_PREFIX):
+                _route_target(key, edges_bucket[key][e_gather])
+        e_total = int(edge_index.shape[0])
+        edges = TensorDict(edges_dict, batch_size=[e_total])
+    else:
+        edges = TensorDict(
+            edge_index=torch.zeros(0, 2, dtype=torch.long),
+            bond_diff=torch.zeros(0, 3),
+            bond_dist=torch.zeros(0),
+            batch_size=[0],
+        )
+
+    # graph-bucket and scalar-bucket targets
+    for key in graphs_bucket:
+        if key.startswith(_TARGET_PREFIX):
+            _route_target(key, graphs_bucket[key][idx])
+    for key in scalars_bucket:
+        if key.startswith(_TARGET_PREFIX):
+            name = key[len(_TARGET_PREFIX) :]
+            vals = [scalars_bucket[key][i] for i in packed]
+            graphs_dict[name] = torch.tensor(vals).reshape(-1)
+
+    n_total = int(atoms_dict["Z"].shape[0])
+    atoms = TensorDict(atoms_dict, batch_size=[n_total])
+    graphs = TensorDict(graphs_dict, batch_size=[n_graphs])
+
+    return TensorDict(atoms=atoms, edges=edges, graphs=graphs, batch_size=[])

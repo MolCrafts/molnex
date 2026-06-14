@@ -4,92 +4,41 @@ Tests three physical symmetries that molecular models must satisfy:
 1. Translation invariance — features/energy unchanged under rigid shifts
 2. Rotation invariance/equivariance — scalar features/energy invariant, forces equivariant
 3. Permutation equivariance — features permute with atom reordering
+
+Generic graph-transform helpers live in ``tests.symmetry_helpers`` and are
+reused by every symmetry test in this repo (encoder, head, pipeline).
 """
 
 from __future__ import annotations
 
 import pytest
 import torch
+from tensordict import TensorDict
 
-from molix.data.types import AtomData, EdgeData, GraphBatch
+from molpot.derivation import EnergyAggregation, ForceDerivation
+from molpot.heads import AtomicEnergyMLP
+from molpot.pooling import EdgeToNodePooling, LayerPooling
 from molrep.embedding.node import DiscreteEmbeddingSpec
 from molrep.utils.equivariance import random_rotation_matrix, rotate_vectors
-from molpot.pooling import LayerPooling, EdgeToNodePooling
-from molpot.heads import AtomicEnergyMLP
-from molpot.derivation import EnergyAggregation, ForceDerivation
 from molzoo import MACE, Allegro
-
+from tests.symmetry_helpers import (
+    make_graph_batch,
+    permute_graph,
+    recompute_edge_geometry,
+    rotate_graph,
+    translate_graph,
+)
 
 # ---------------------------------------------------------------------------
-# Helpers: build and transform GraphBatch
+# Pipeline builder (encoder → energy → forces)
 # ---------------------------------------------------------------------------
-
-
-def make_graph_batch(
-    pos: torch.Tensor,
-    Z: torch.Tensor,
-    edge_index: torch.Tensor,
-    batch: torch.Tensor,
-) -> GraphBatch:
-    """Build a GraphBatch from raw tensors, computing bond_diff and bond_dist."""
-    bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    bond_dist = bond_diff.norm(dim=-1).clamp(min=1e-6)
-    n_atoms = pos.shape[0]
-    n_edges = edge_index.shape[0]
-    return GraphBatch(
-        atoms=AtomData(Z=Z, pos=pos, batch=batch, batch_size=[n_atoms]),
-        edges=EdgeData(
-            edge_index=edge_index,
-            bond_diff=bond_diff,
-            bond_dist=bond_dist,
-            batch_size=[n_edges],
-        ),
-        batch_size=[],
-    )
-
-
-def translate_graph(batch: GraphBatch, t: torch.Tensor) -> GraphBatch:
-    """Translate all positions by vector t. bond_diff/bond_dist unchanged."""
-    pos = batch["atoms", "pos"] + t
-    return make_graph_batch(
-        pos=pos,
-        Z=batch["atoms", "Z"],
-        edge_index=batch["edges", "edge_index"],
-        batch=batch["atoms", "batch"],
-    )
-
-
-def rotate_graph(batch: GraphBatch, R: torch.Tensor) -> GraphBatch:
-    """Rotate all positions by rotation matrix R."""
-    pos = rotate_vectors(batch["atoms", "pos"], R)
-    return make_graph_batch(
-        pos=pos,
-        Z=batch["atoms", "Z"],
-        edge_index=batch["edges", "edge_index"],
-        batch=batch["atoms", "batch"],
-    )
-
-
-def permute_graph(
-    batch: GraphBatch, perm: torch.Tensor
-) -> GraphBatch:
-    """Permute atom ordering. Returns new GraphBatch with remapped edges."""
-    inv_perm = torch.empty_like(perm)
-    inv_perm[perm] = torch.arange(len(perm))
-
-    pos = batch["atoms", "pos"][perm]
-    Z = batch["atoms", "Z"][perm]
-    batch_idx = batch["atoms", "batch"][perm]
-    edge_index = inv_perm[batch["edges", "edge_index"]]
-
-    return make_graph_batch(pos=pos, Z=Z, edge_index=edge_index, batch=batch_idx)
 
 
 def make_pipeline(encoder, is_edge_encoder: bool = False):
     """Build an energy+force pipeline from an encoder.
 
-    Computes bond_diff from pos inside the forward pass so autograd
-    can trace gradients for force derivation.
+    Computes bond_diff from pos inside the forward pass so the functorch force
+    closure can trace gradients pos → geometry → energy for force derivation.
     """
     layer_pool = LayerPooling("mean")
     edge_to_node = EdgeToNodePooling("mean") if is_edge_encoder else None
@@ -97,27 +46,49 @@ def make_pipeline(encoder, is_edge_encoder: bool = False):
     energy_agg = EnergyAggregation(pooling="sum")
     force_deriv = ForceDerivation()
 
-    def forward(batch: GraphBatch):
-        pos = batch["atoms", "pos"]
+    def _energy_and_feats(batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
         edge_index = batch["edges", "edge_index"]
+        pos = batch["atoms", "pos"]
 
-        # Recompute from pos for autograd graph
-        bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-        bond_dist = bond_diff.norm(dim=-1).clamp(min=1e-6)
-        batch["edges", "bond_diff"] = bond_diff
-        batch["edges", "bond_dist"] = bond_dist
+        recompute_edge_geometry(batch)
 
         result = encoder(batch)
 
         if is_edge_encoder:
-            feats = layer_pool(result["edges", "edge_features"])
+            ef = result["edges", "edge_features"]
+            # Allegro emits a DenseNet stack of per-layer scalars in a single
+            # flat ``(E, F·(L+1))`` tensor. Reshape into ``(E, L+1, F)`` so the
+            # pipeline's ``LayerPooling("mean")`` reduces over the layer axis
+            # and yields the same per-edge feature dim ``F`` the downstream
+            # ``AtomicEnergyMLP(hidden_dim=F)`` expects.
+            F_dim = encoder.num_scalar_features
+            ef = ef.view(ef.shape[0], -1, F_dim)
+            feats = layer_pool(ef)
             node_feats = edge_to_node(feats, edge_index, num_nodes=pos.shape[0])
         else:
             node_feats = layer_pool(result["atoms", "node_features"])
 
         atom_energy = energy_mlp(node_feats)
-        mol_energy = energy_agg(atom_energy, batch["atoms", "batch"])
-        forces = force_deriv(mol_energy, pos)
+        atom_batch = batch["atoms", "batch"]
+        mol_energy = energy_agg(atom_energy, atom_batch, num_graphs=int(atom_batch.max()) + 1)
+        return mol_energy, node_feats
+
+    def forward(batch: TensorDict):
+        pos = batch["atoms", "pos"].detach()
+
+        # Eager pass for energy + features (using the original geometry).
+        b0 = batch.clone()
+        b0["atoms", "pos"] = pos
+        mol_energy, node_feats = _energy_and_feats(b0)
+
+        # Forces via functorch: F = -∂E/∂pos, energy traced as a pure
+        # function of positions (edge geometry recomputed inside).
+        def energy_of_pos(p: torch.Tensor) -> torch.Tensor:
+            b = batch.clone()
+            b["atoms", "pos"] = p
+            return _energy_and_feats(b)[0].sum()
+
+        forces = force_deriv(energy_of_pos, pos)
 
         return mol_energy, forces, node_feats
 
@@ -133,18 +104,30 @@ def make_pipeline(encoder, is_edge_encoder: bool = False):
 def small_molecule():
     """5-atom chain with 8 edges, 2 molecules (3+2)."""
     torch.manual_seed(42)
-    pos = torch.tensor([
-        [0.0, 0.0, 0.0],
-        [1.2, 0.3, 0.0],
-        [2.5, 0.0, 0.1],
-        [4.0, 0.5, 0.0],
-        [5.3, 0.2, 0.1],
-    ], dtype=torch.float32)
+    pos = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [1.2, 0.3, 0.0],
+            [2.5, 0.0, 0.1],
+            [4.0, 0.5, 0.0],
+            [5.3, 0.2, 0.1],
+        ],
+        dtype=torch.float32,
+    )
     Z = torch.tensor([6, 1, 8, 6, 1], dtype=torch.long)
-    edge_index = torch.tensor([
-        [0, 1], [1, 0], [1, 2], [2, 1],
-        [2, 3], [3, 2], [3, 4], [4, 3],
-    ], dtype=torch.long)
+    edge_index = torch.tensor(
+        [
+            [0, 1],
+            [1, 0],
+            [1, 2],
+            [2, 1],
+            [2, 3],
+            [3, 2],
+            [3, 4],
+            [4, 3],
+        ],
+        dtype=torch.long,
+    )
     batch = torch.tensor([0, 0, 0, 1, 1], dtype=torch.long)
     return make_graph_batch(pos, Z, edge_index, batch)
 
@@ -172,6 +155,10 @@ def allegro_encoder():
         num_tensor_features=8,
         r_max=8.0,
         num_layers=2,
+        type_embed_dim=16,
+        latent_mlp_depth=1,
+        latent_mlp_width=16,
+        avg_num_neighbors=4.0,
     )
     encoder.eval()
     return encoder
@@ -208,7 +195,10 @@ class TestTranslationInvariance:
             ref = allegro_encoder(small_molecule.clone())["edges", "edge_features"]
             shifted = allegro_encoder(translate_graph(small_molecule, t))["edges", "edge_features"]
 
-        assert torch.allclose(ref, shifted, atol=1e-5, rtol=1e-5)
+        # Tolerance is float32-ULP — `(pos+t)[j]-(pos+t)[i]` is not
+        # bit-exactly `pos[j]-pos[i]` for `t ≈ 10*randn`, so the encoder
+        # input `bond_diff` differs by ~ULP and propagates linearly.
+        assert torch.allclose(ref, shifted, atol=1e-4, rtol=1e-4)
 
     @pytest.mark.parametrize("seed", SEEDS)
     def test_mace_pipeline_energy_and_forces(self, mace_encoder, small_molecule, seed):
@@ -261,7 +251,7 @@ class TestRotationEquivariance:
 
     _mace_rotation_xfail = pytest.mark.xfail(
         reason="MACE rotation invariance requires cuequivariance_ops_torch GPU kernel; "
-               "naive fallback introduces O(0.1) numerical error in SymmetricContraction",
+        "naive fallback introduces O(0.1) numerical error in SymmetricContraction",
         strict=False,
     )
 
@@ -431,7 +421,9 @@ class TestPermutationEquivariance:
         assert torch.allclose(e_ref, e_p, atol=1e-5, rtol=1e-5)
 
     @pytest.mark.parametrize("seed", SEEDS)
-    def test_allegro_pipeline_energy_permutation_invariance(self, allegro_encoder, small_molecule, seed):
+    def test_allegro_pipeline_energy_permutation_invariance(
+        self, allegro_encoder, small_molecule, seed
+    ):
         torch.manual_seed(seed)
         n = small_molecule["atoms", "Z"].shape[0]
         perm = torch.randperm(n)
@@ -466,7 +458,9 @@ class TestPermutationEquivariance:
         assert torch.allclose(f_ref[perm], f_p, atol=1e-5, rtol=1e-5)
 
     @pytest.mark.parametrize("seed", SEEDS)
-    def test_allegro_pipeline_force_permutation_equivariance(self, allegro_encoder, small_molecule, seed):
+    def test_allegro_pipeline_force_permutation_equivariance(
+        self, allegro_encoder, small_molecule, seed
+    ):
         """F(perm(x))[i] = F(x)[perm[i]]"""
         torch.manual_seed(seed)
         n = small_molecule["atoms", "Z"].shape[0]

@@ -5,9 +5,9 @@ atomic-level predictions. These consume representation outputs and produce
 observable physical quantities.
 """
 
-from molpot.derivation.energy_aggregation import EnergyAggregation
-from molpot.derivation.force_derivation import ForceDerivation
-from molpot.derivation.stress_derivation import StressDerivation
+from molpot.derivation.energy import EnergyAggregation
+from molpot.derivation.force import ForceDerivation
+from molpot.derivation.stress import StressDerivation
 
 __all__ = [
     "EnergyAggregation",

@@ -19,7 +19,8 @@ from molpot.composition.heads import (
     RepulsionParameterHead,
     TSScalingHead,
 )
-from molpot.composition.multi_head import MultiHead
+from molpot.composition.multihead import MultiHead
+from molpot.composition.sonata import Sonata, SonataSpec, build_sonata
 
 __all__ = [
     "LJParameterHead",
@@ -29,4 +30,7 @@ __all__ = [
     "TSScalingHead",
     "MultiHead",
     "PotentialComposer",
+    "Sonata",
+    "SonataSpec",
+    "build_sonata",
 ]
