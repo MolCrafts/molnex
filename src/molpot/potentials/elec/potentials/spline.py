@@ -95,18 +95,14 @@ class SplinePotential(Potential):
             self._krn_spline = CubicSpline(k_grid**2, yhat_grid)
 
         if y_at_zero is None:
-            self._y_at_zero = self._spline(
-                torch.zeros(1, dtype=self.r_grid.dtype, device=self.r_grid.device)
-            )
+            self._y_at_zero = self._spline(self.r_grid.new_zeros(1))
         else:
             self._y_at_zero = torch.tensor(
                 y_at_zero, dtype=self.r_grid.dtype, device=self.r_grid.device
             )
 
         if yhat_at_zero is None:
-            self._yhat_at_zero = self._krn_spline(
-                torch.zeros(1, dtype=self.k_grid.dtype, device=self.k_grid.device)
-            )
+            self._yhat_at_zero = self._krn_spline(self.k_grid.new_zeros(1))
         else:
             self._yhat_at_zero = torch.tensor(
                 yhat_at_zero, dtype=self.k_grid.dtype, device=self.k_grid.device

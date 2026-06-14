@@ -30,7 +30,6 @@ from molix.data.cache import PackedCache
 from molix.data.datamodule import DataModule
 from molix.data.dataset import CachedDataset
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -159,9 +158,7 @@ _FTYPE_PER_MODE = {
 
 class TestPrecisionFlowsToBatch:
     @pytest.mark.parametrize("mode,expected", list(_FTYPE_PER_MODE.items()))
-    def test_collate_emits_correct_dtype(
-        self, tmp_path: Path, mode: str, expected: torch.dtype
-    ):
+    def test_collate_emits_correct_dtype(self, tmp_path: Path, mode: str, expected: torch.dtype):
         config.set_precision(mode)
         dm = _build_dm(tmp_path)  # _CollateFn captures ftype here
         batch = next(iter(dm.train_dataloader()))

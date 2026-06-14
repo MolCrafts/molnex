@@ -35,11 +35,14 @@ class JournalReader:
     def __init__(self, path: str | os.PathLike[str], run_id: str) -> None:
         import zarr
 
-        self._zarr = zarr
+        # Zarr groups/arrays are dynamically typed (``Array | Group`` unions
+        # whose subscripting ty cannot resolve); annotate as ``Any`` so record
+        # access reads as the plain dict-of-arrays it is at runtime.
+        self._zarr: Any = zarr
         self._path = Path(path)
         self._run_id = run_id
-        self._root = zarr.open(str(self._path), mode="r")
-        self._grp = self._root[f"metrics/records/{run_id}"]
+        self._root: Any = zarr.open(str(self._path), mode="r")
+        self._grp: Any = self._root[f"metrics/records/{run_id}"]
 
     def __len__(self) -> int:
         """Number of records in the store."""

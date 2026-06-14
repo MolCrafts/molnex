@@ -283,7 +283,7 @@ def compute_spline_ft(
         )
     ) / (3.0 * r0)
 
-    ft_sum = torch.pi * 2 / 3 * torch.sum(ft_interval / dr, axis=1).reshape(-1, 1)
+    ft_sum = torch.pi * 2 / 3 * torch.sum(ft_interval / dr, dim=1).reshape(-1, 1)
     ft_limit = torch.sum(
         -(
             dr
@@ -300,7 +300,7 @@ def compute_spline_ft(
             )
         )
         / 90,
-        axis=1,
+        dim=1,
     )
 
     safe_k = torch.where(k == 0, 1.0, k)

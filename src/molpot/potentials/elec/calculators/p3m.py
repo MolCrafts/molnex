@@ -42,7 +42,7 @@ class P3MCalculator(PMECalculator):
             device=self.potential.smearing.device,
             dtype=self.potential.smearing.dtype,
         )
-        ns_mesh = torch.ones(3, dtype=int, device=cell.device)
+        ns_mesh = torch.ones(3, dtype=torch.long, device=cell.device)
 
         self.kspace_filter: P3MKSpaceFilter = P3MKSpaceFilter(
             cell=cell,

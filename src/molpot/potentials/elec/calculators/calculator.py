@@ -85,8 +85,8 @@ class Calculator(torch.nn.Module):
         cell: torch.Tensor,
         positions: torch.Tensor,
         periodic: Optional[torch.Tensor] = None,
-        kvectors: Optional[torch.Tensor] = None,
         node_mask: Optional[torch.Tensor] = None,
+        kvectors: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute the Fourier-domain long-range contribution.
 

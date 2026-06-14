@@ -99,9 +99,9 @@ class MeshInterpolator(torch.nn.Module):
         Returns:
             Mesh positions ``(nx, ny, nz, 3)``.
         """
-        nx = self.ns_mesh[0]
-        ny = self.ns_mesh[1]
-        nz = self.ns_mesh[2]
+        nx = int(self.ns_mesh[0])
+        ny = int(self.ns_mesh[1])
+        nz = int(self.ns_mesh[2])
 
         grid_scaled = torch.stack(
             torch.meshgrid(

@@ -39,6 +39,11 @@ from molix.data.task import BatchTask, DatasetTask, Runnable, SampleTask
 __all__ = ["Node", "Edge", "DAGCache", "PipelineSpec", "Pipeline"]
 
 
+# Reserved node name for the raw-source cache materialised when a pipeline has
+# no cacheable transform nodes — a "no-op" pipeline still yields a dataset.
+_SOURCE_NODE = "__source__"
+
+
 # ---------------------------------------------------------------------------
 # Node
 # ---------------------------------------------------------------------------
@@ -160,9 +165,12 @@ class DAGCache:
         if not self.node_caches:
             raise RuntimeError("DAGCache has no cacheable nodes.")
         names = [n.name for n in self.spec.prepare_nodes if n.name in self.node_caches]
-        if not names:
-            raise RuntimeError("DAGCache has no cacheable nodes.")
-        return self.node_caches[names[-1]]
+        if names:
+            return self.node_caches[names[-1]]
+        # No transform nodes: a no-op pipeline caches the raw source verbatim.
+        if _SOURCE_NODE in self.node_caches:
+            return self.node_caches[_SOURCE_NODE]
+        raise RuntimeError("DAGCache has no cacheable nodes.")
 
     def dataset(self, *, mmap: bool = True):
         """Create a dataset reading from the final node's cache.
@@ -413,7 +421,7 @@ class PipelineSpec:
         node_keys = self._node_cache_keys(source, fit_source, extra)
 
         if not prepare:
-            return DAGCache(spec=self, node_caches={}, base_dir=base_dir)
+            return self._cache_source_only(source, base_dir, fit_source, extra, overwrite)
 
         # Resolve fit states: fit_source > fit_states > auto-fit on source
         if fit_states is not None:
@@ -468,6 +476,34 @@ class PipelineSpec:
                 node_caches[node.name] = PackedCache(sink)
 
         return DAGCache(spec=self, node_caches=node_caches, base_dir=base_dir)
+
+    def _cache_source_only(
+        self,
+        source: Any,
+        base_dir: Path,
+        fit_source: Any | None,
+        extra: dict[str, str] | None,
+        overwrite: bool,
+    ) -> DAGCache:
+        """Materialise the raw source when the pipeline has no transform nodes.
+
+        A no-op pipeline still produces a usable dataset by caching the source
+        samples verbatim under the reserved :data:`_SOURCE_NODE` key, identified
+        by the empty-pipeline fallback :meth:`cache_key`. Rank-aware to match
+        :meth:`cache`: rank 0 writes, other ranks wait.
+        """
+        key = self.cache_key(source, fit_source=fit_source, extra=extra)
+        sink = base_dir / f"{self.name}-{key}.pt"
+        packed = PackedCache(sink)
+        if self._is_primary_rank():
+            base_dir.mkdir(parents=True, exist_ok=True)
+            if overwrite or not packed.is_ready():
+                samples = [source[j] for j in range(len(source))]
+                packed.save(samples, task_states={}, overwrite=overwrite)
+        else:
+            packed.wait_until_ready()
+            packed = PackedCache(sink)
+        return DAGCache(spec=self, node_caches={_SOURCE_NODE: packed}, base_dir=base_dir)
 
     # -- execution ---------------------------------------------------------
 

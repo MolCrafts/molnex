@@ -176,7 +176,7 @@ class GridSearchTuner(TunerBase):
         positions: torch.Tensor,
         cutoff: float,
         calculator: type[Calculator],
-        error_bounds: type[TuningErrorBounds],
+        error_bounds: TuningErrorBounds,
         params: list[dict],
         neighbor_indices: torch.Tensor,
         neighbor_distances: torch.Tensor,
