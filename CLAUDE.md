@@ -31,7 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |---------|------|-------------|
 | **molix** | Training infrastructure | Trainer, TrainState (dict), Step protocol, Hook lifecycle |
 | **molrep** | Representation learning | Embedding → Interaction → Readout pipeline, equivariance via cuEquivariance |
-| **molpot** | Potential functions | BasePotential (nn.Module + ABC), autograd forces, PotentialComposer |
+| **molpot** | Potential functions | BasePotential (nn.Module + ABC), functorch forces, PotentialComposer |
 | **molzoo** | Pre-built encoders | Encoder-only (MACE, Allegro, PiNet, Sonata), no readout — downstream uses molpot |
 
 ## Build & Development
@@ -145,7 +145,7 @@ molix.core (Trainer, TrainState, Step, Hook)    ForceDerivation)
     ↓
 molix.data (Dataset, collate, preprocess)
 molix.datasets (QM9, RevMD17, ThreeBPA, WaterLES)
-molix.analysis (trajectory diagnostics) ──→ molzoo.quantization
+molix.analysis (trajectory diagnostics) ──→ molix.quant
 ```
 
 Notes on cross-package edges (verified against imports):
@@ -154,8 +154,9 @@ Notes on cross-package edges (verified against imports):
 - `molpot.heads` imports `molrep.embedding` (e.g. `heads/edge.py`) — the arrow
   runs heads→embedding, **not** readout→heads.
 - `molrep.heads` (`ScalarHead`, …) is a distinct sub-tree from `molpot.heads`.
-- `molix.analysis` reuses the `molzoo.quantization` T_eff scalars for the
-  quantization-as-thermal-noise diagnostics.
+- `molix.analysis` reuses the `molix.quant` T_eff scalars for the
+  quantization-as-thermal-noise diagnostics (quantization infra lives in the
+  `molix` base layer, operating on generic `nn.Module` / `state_dict`).
 
 ### State namespace contract
 
@@ -256,7 +257,7 @@ hooks (`MetricsHook`, `TensorBoardHook`) should write their
 - **Encoder-only molzoo**: Encoders take a batch `TensorDict` and write per-layer features `(N, layers, features)` under `atoms.node_features`; readout/potentials handled by molpot
 - **Pydantic configs**: All block configs use `BaseModel` with `ConfigDict(arbitrary_types_allowed=True)`
 - **cuEquivariance**: Tensor products use `cuequivariance` / `cuequivariance_torch` for GPU-accelerated equivariant operations
-- **Autograd forces**: `BasePotential.calc_forces()` computes `F = -dE/dx` via `torch.autograd.grad`
+- **Functorch forces**: `BasePotential.calc_forces()` computes `F = -dE/dx` via `torch.func.grad` (energy as a pure function of positions; compile-friendly, no double-backward)
 - **Functional composition**: `PotentialComposer` chains pooling → parameter heads → potential terms → aggregation
 - **Hook protocol**: Lifecycle callbacks (`on_train_start`, `on_epoch_end`, etc.) via `Hook` protocol
 - **Step protocol**: `DefaultTrainStep` / `DefaultEvalStep` wrap forward → loss → backward → optimizer
@@ -280,7 +281,7 @@ are documented in the table above, not enforced by Python types.
 
 **New encoder** (molzoo): Implement `forward(td: TensorDict) -> TensorDict`, reading `td["atoms", "Z"]` / `td["edges", ...]` and writing per-layer features `(N, layers, features)` back under `atoms.node_features`. Use `molrep` building blocks. Add paper reference.
 
-**New potential** (molpot): Inherit `BasePotential`, implement `forward() -> scalar energy Tensor`. Forces come from autograd automatically.
+**New potential** (molpot): Inherit `BasePotential`, implement `forward() -> scalar energy Tensor`. Forces come from functorch (`torch.func.grad`) automatically — `forward` must read positions via `pos=`/`_get_positions` so the energy can be differentiated as a function of positions.
 
 **New embedding/interaction** (molrep): Pure `nn.Module`, use `cuequivariance` for equivariant layers.
 

@@ -24,13 +24,13 @@ class DefaultEvalStep:
 
     Args:
         no_grad: Wrap forward in ``torch.no_grad()`` (default ``False``).
-            The default keeps the autograd graph alive so models that
-            derive forces via ``torch.autograd.grad`` (PiNet, Sonata, any
-            ``F = -dE/dx`` potential) produce *valid* eval forces out of
-            the box — running such a model under ``no_grad`` silently
-            evaluates forces on a graph that excludes the eval input, or
-            crashes. Set ``True`` only for pure energy/property models
-            where the small graph-construction memory saving matters.
+            Force models now derive ``F = -∂E/∂pos`` via functorch
+            (``torch.func.grad``), which manages its own differentiation and
+            so produces valid eval forces even under ``no_grad``. The
+            ``enable_grad`` default is kept as a harmless safety margin for any
+            consumer that still inspects the outer eval graph; set ``True`` for
+            pure energy/property models where the small graph-construction
+            memory saving matters.
     """
 
     def __init__(self, *, no_grad: bool = False) -> None:

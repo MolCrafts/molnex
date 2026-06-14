@@ -9,8 +9,8 @@ from molix.md import (
     build_paired_trajectory,
     make_pinet_calculator,
 )
-from molzoo.pinet import PiNet, PiNetPotential
-from molzoo.quantization import quantize_state_dict
+from molix.quant import Quantizer
+from molzoo.pinet import PiNetPotential
 from tests.symmetry_helpers import make_graph_batch
 
 _DEVICE = torch.device("cpu")
@@ -18,7 +18,7 @@ _DEVICE = torch.device("cpu")
 
 def _tiny_potential() -> PiNetPotential:
     torch.manual_seed(0)
-    enc = PiNet(
+    return PiNetPotential(
         atom_types=[1, 6, 7, 8],
         r_max=4.0,
         n_basis=3,
@@ -27,8 +27,8 @@ def _tiny_potential() -> PiNetPotential:
         ii_nodes=[8, 8],
         depth=2,
         rank=3,
-    )
-    return PiNetPotential(encoder=enc, hidden_dim=16).to(_DEVICE).eval()
+        hidden_dim=16,
+    ).to(_DEVICE).eval()
 
 
 def _template():
@@ -52,7 +52,7 @@ def _warmed_ref_and_quant(template):
     quant = _tiny_potential()
     ref(template.clone(), compute_forces=False)  # warmup lazy params
     quant(template.clone(), compute_forces=False)
-    quant.load_state_dict(quantize_state_dict(ref.state_dict(), "int4"))
+    quant.load_state_dict(Quantizer("int4").quantize_state_dict(ref.state_dict()))
     return ref, quant
 
 

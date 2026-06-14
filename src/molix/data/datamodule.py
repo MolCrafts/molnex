@@ -114,6 +114,7 @@ class DataModule:
         prefetch_factor: int | None = None,
         seed: int = 42,
         multiprocessing_context: str | None = "spawn",
+        train_drop_last: bool = False,
     ) -> None:
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
@@ -128,6 +129,9 @@ class DataModule:
         self.prefetch_factor = prefetch_factor
         self.seed = seed
         self.multiprocessing_context = multiprocessing_context
+        # Drop the last partial train batch so every batch has the same number
+        # of graphs — required (with fixed-length padding) for CUDA-graph capture.
+        self.train_drop_last = train_drop_last
 
         self._train_sampler: DistributedSampler | None = None
         self._val_sampler: DistributedSampler | None = None
@@ -194,7 +198,7 @@ class DataModule:
             persistent_workers=self.persistent_workers,
             prefetch_factor=self.prefetch_factor,
             collate_fn=self._make_collate_fn(),
-            drop_last=_is_distributed(),
+            drop_last=self.train_drop_last or _is_distributed(),
             multiprocessing_context=self._worker_context(),
             worker_init_fn=self._worker_init_fn(),
             generator=generator,

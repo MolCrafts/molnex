@@ -49,10 +49,22 @@ class Checkpoint:
     # ------------------------------------------------------------------
 
     def _unwrap_model(self) -> nn.Module:
-        """Return the underlying module, unwrapping DDP/FSDP if needed."""
-        if hasattr(self.model, "module"):
-            return cast(nn.Module, self.model.module)  # type: ignore[union-attr]
-        return self.model
+        """Return the underlying module, unwrapping torch.compile + DDP/FSDP.
+
+        ``torch.compile`` returns an ``OptimizedModule`` that holds the original
+        module as ``._orig_mod`` and whose ``state_dict()`` prefixes every key
+        with ``_orig_mod.``; DDP/FSDP expose theirs as ``.module``. Unwrapping
+        both — compile first, since ``torch.compile(DDP(model))`` nests in that
+        order — keeps checkpoints wrapper-agnostic: a checkpoint saved from a
+        compiled run loads cleanly into an uncompiled model (e.g. for eval) and
+        vice versa, with no key-prefix surgery at the call site.
+        """
+        model = self.model
+        if hasattr(model, "_orig_mod"):  # torch.compile OptimizedModule
+            model = model._orig_mod  # type: ignore[union-attr]
+        if hasattr(model, "module"):  # DDP / FSDP
+            model = model.module  # type: ignore[union-attr]
+        return cast(nn.Module, model)
 
     # ------------------------------------------------------------------
     # Serialization

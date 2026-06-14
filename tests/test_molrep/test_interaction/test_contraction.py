@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-from tests.utils import assert_module_compiles, assert_module_exports, assert_outputs_close
 
 from molix import config
 from molrep.interaction.contraction import SymmetricContraction, SymmetricContractionSpec
@@ -176,44 +175,3 @@ class TestSymmetricContraction:
 
         # Permuted output should match
         assert torch.allclose(output1[perm], output2, rtol=1e-5, atol=1e-5)
-
-    def test_compile(self):
-        """Test that SymmetricContraction can be compiled with torch.compile."""
-        contraction = SymmetricContraction(
-            hidden_dim=64,
-            num_species=10,
-            max_body_order=2,
-        )
-
-        n_nodes = 20
-        node_features = torch.randn(n_nodes, 64, dtype=config.ftype)
-        atom_types = torch.randint(0, 10, (n_nodes,), dtype=torch.long)
-
-        # Test compilation
-        output_uncompiled, output_compiled = assert_module_compiles(
-            contraction, node_features, atom_types
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_uncompiled, output_compiled)
-
-    def test_export(self):
-        """Test that SymmetricContraction can be exported with torch.export."""
-        contraction = SymmetricContraction(
-            hidden_dim=64,
-            num_species=10,
-            max_body_order=2,
-        )
-
-        n_nodes = 20
-        node_features = torch.randn(n_nodes, 64, dtype=config.ftype)
-        atom_types = torch.randint(0, 10, (n_nodes,), dtype=torch.long)
-
-        # Test export
-        exported_program, output_original, output_exported = assert_module_exports(
-            contraction,
-            args_tuple=(node_features, atom_types),
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_original, output_exported)

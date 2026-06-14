@@ -1,11 +1,11 @@
 """Force seam: wrap a PiNetPotential as a position-only ``force_fn`` for MD.
 
-The integrator drives positions and needs *live* forces, so unlike the static
-paired-delta path (which detaches the input), each call here rebuilds a fresh
-grad-tracking ``pos`` leaf, runs ``PiNetPotential.forward(td, compute_forces=True)``
-on a clone of the molecule template, and returns ``(energy, forces)`` detached
-for the integrator's arithmetic. Rebuilding the leaf every step keeps the autograd
-graph clean and supports PiNet's double-backward force path.
+The integrator drives positions and needs *live* forces. Each call swaps the
+candidate positions into a clone of the molecule template, runs
+``PiNetPotential.forward(td, compute_forces=True)`` — which derives forces
+functionally via ``torch.func.grad`` (no ``requires_grad`` bookkeeping needed on
+the input) — and returns ``(energy, forces)`` detached for the integrator's
+arithmetic.
 """
 
 from __future__ import annotations
@@ -34,8 +34,7 @@ def build_force_fn(model: nn.Module, template: TensorDict) -> ForceFn:
 
     def force_fn(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         batch = template.clone()
-        leaf = pos.detach().clone().requires_grad_(True)
-        batch["atoms", "pos"] = leaf
+        batch["atoms", "pos"] = pos.detach()
         out = model(batch, compute_forces=True)
         return out["energy"].sum().detach(), out["forces"].detach()
 

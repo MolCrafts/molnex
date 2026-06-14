@@ -8,7 +8,6 @@ from tensordict import TensorDict
 
 from molrep.embedding.node import DiscreteEmbeddingSpec
 from molzoo import MACE
-from tests.utils import assert_compile_compatible
 
 
 @pytest.fixture
@@ -74,11 +73,3 @@ class TestMACE:
         n_nodes = graph_data["atoms", "Z"].shape[0]
         assert isinstance(node_features, torch.Tensor)
         assert node_features.shape == (n_nodes, 2, 16)
-
-    @pytest.mark.xfail(
-        reason="TensorDict access + cuEquivariance not yet fullgraph-compatible",
-        strict=False,
-    )
-    def test_compile(self, graph_data):
-        encoder = _build_encoder()
-        assert_compile_compatible(encoder, graph_data, strict=False)

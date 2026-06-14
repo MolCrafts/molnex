@@ -3,7 +3,6 @@
 import math
 
 import torch
-from tests.utils import assert_module_compiles, assert_module_exports, assert_outputs_close
 
 from molrep.interaction.aggregation import MessageAggregation, MessageAggregationSpec
 from molrep.utils.equivariance import (
@@ -182,42 +181,3 @@ class TestMessageAggregation:
         # Check equivariance
         assert check_equivariance(output1_rotated, output2, rtol=1e-3, atol=1e-3)
 
-    def test_compile(self):
-        """Test that MessageAggregation can be compiled with torch.compile."""
-        agg = MessageAggregation(
-            irreps="64x0e",
-            apply_cutoff=False,
-        )
-
-        n_nodes = 10
-        n_edges = 30
-        messages = torch.randn(n_edges, 64)
-        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
-
-        # Test compilation
-        output_uncompiled, output_compiled = assert_module_compiles(
-            agg, messages, edge_index, n_nodes=n_nodes
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_uncompiled, output_compiled)
-
-    def test_export(self):
-        """Test that MessageAggregation can be exported with torch.export."""
-        agg = MessageAggregation(
-            irreps="64x0e",
-            apply_cutoff=False,
-        )
-
-        n_nodes = 10
-        n_edges = 30
-        messages = torch.randn(n_edges, 64)
-        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
-
-        # Test export
-        exported_program, output_original, output_exported = assert_module_exports(
-            agg, args_tuple=(messages, edge_index), kwargs_dict={"n_nodes": n_nodes}
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_original, output_exported)

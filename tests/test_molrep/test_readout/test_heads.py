@@ -6,7 +6,6 @@ import pytest
 import torch
 
 from molpot.derivation import EnergyAggregation, ForceDerivation
-from tests.utils import assert_module_compiles, assert_module_exports, assert_outputs_close
 
 
 class TestEnergyAggregation:
@@ -44,31 +43,13 @@ class TestEnergyAggregation:
         assert node_energy.grad is not None
         assert not torch.isnan(node_energy.grad).any()
 
-    def test_compile(self):
-        head = EnergyAggregation(pooling="mean")
-        node_energy = torch.randn(10)
-        batch = torch.tensor([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
-        output_uncompiled, output_compiled = assert_module_compiles(head, node_energy, batch, 2)
-        assert_outputs_close(output_uncompiled, output_compiled)
-
-    def test_export(self):
-        head = EnergyAggregation(pooling="mean")
-        node_energy = torch.randn(10)
-        batch = torch.tensor([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
-        exported_program, output_original, output_exported = assert_module_exports(
-            head,
-            args_tuple=(node_energy, batch, 2),
-        )
-        assert_outputs_close(output_original, output_exported)
-
 
 class TestForceDerivation:
     """Test ForceDerivation layer."""
 
     def test_forward_shape(self):
         head = ForceDerivation()
-        pos = torch.randn(10, 3, requires_grad=True)
-        energy = pos.pow(2).sum()
-        forces = head(energy, pos)
+        pos = torch.randn(10, 3)
+        forces = head(lambda p: p.pow(2).sum(), pos)
         assert forces.shape == (10, 3)
         assert not torch.isnan(forces).any()

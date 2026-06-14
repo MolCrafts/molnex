@@ -22,7 +22,7 @@ from typing import Any
 
 import torch
 
-from molzoo.quantization import t_eff_ratio
+from molix.quant import EffectiveTemperature
 
 
 def _flatten_frames(df: torch.Tensor) -> torch.Tensor:
@@ -125,11 +125,13 @@ def t_eff_colored(
     """Colored-noise effective-temperature ratio (Eq8 colored branch, criterion h).
 
     Replaces ⟨|ΔF|²⟩·Δt with the zero-frequency spectral density ∫C(τ)dτ = C0·τ_c
-    and reuses the white-noise scalar :func:`molzoo.quantization.t_eff_ratio`. When
-    τ_c ≈ Δt this reduces to the white-noise estimate.
+    and reuses the white-noise scalar :meth:`molix.quant.EffectiveTemperature.ratio`.
+    When τ_c ≈ Δt this reduces to the white-noise estimate.
     """
     ac = autocorr_df(df, dt)
-    return t_eff_ratio(ac["C0"], ac["tau_c"], gamma, mass, dof, t_target)
+    return EffectiveTemperature(dt=ac["tau_c"], gamma=gamma, mass=mass, dof=dof).ratio(
+        ac["C0"], t_target
+    )
 
 
 def vacf(vel: torch.Tensor, max_lag: int | None = None) -> torch.Tensor:

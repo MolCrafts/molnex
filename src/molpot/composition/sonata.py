@@ -336,9 +336,10 @@ class Sonata(nn.Module):
             batch: Post-collate :class:`TensorDict` carrying ``atoms``,
                 ``edges``, and ``graphs`` sub-dicts. Periodic systems
                 must include ``("graphs", "cell")``.
-            compute_forces: Derive forces ``F = -∂U/∂pos`` via autograd.
-            compute_stress: Derive stress ``σ = (1/V) ∂U/∂ε`` via a
-                differentiable strain perturbation. Requires
+            compute_forces: Derive forces ``F = -∂U/∂pos`` via functorch
+                (``torch.func.grad``).
+            compute_stress: Derive stress ``σ = (1/V) ∂U/∂ε`` via functorch
+                through a differentiable strain perturbation. Requires
                 ``("graphs", "cell")``.
             kvec_indices: optional ``(M, 3)`` precomputed integer
                 triplet array forwarded to
@@ -358,147 +359,151 @@ class Sonata(nn.Module):
         """
         atom_batch = batch["atoms", "batch"]
         edge_index = batch["edges", "edge_index"]
+        src, dst = edge_index[:, 0], edge_index[:, 1]
+        head = self.perm_multipole_head
 
-        # -- prepare positions / cell with the right grad attachments --
-        pos = batch["atoms", "pos"]
-        cell = batch.get(("graphs", "cell"))
+        pos0 = batch["atoms", "pos"].detach()
+        cell0 = batch.get(("graphs", "cell"))
+        if compute_stress and cell0 is None:
+            raise ValueError("compute_stress=True requires `('graphs', 'cell')` in the batch.")
 
-        cell_orig: torch.Tensor | None = None
-        strain: torch.Tensor | None = None
-        if compute_stress:
-            if cell is None:
-                raise ValueError("compute_stress=True requires `('graphs', 'cell')` in the batch.")
-            cell_orig = cell
-            pos_orig = pos.detach()
-            if compute_forces:
-                pos_orig = pos_orig.requires_grad_(True)
-            strain = torch.zeros_like(cell_orig, requires_grad=True)
-            sym_eps = 0.5 * (strain + strain.transpose(-1, -2))
-            eye_b = torch.eye(3, dtype=cell_orig.dtype, device=cell_orig.device).expand_as(
-                cell_orig
+        def _run_pipeline(
+            b: TensorDict, pos: torch.Tensor, cell: torch.Tensor | None
+        ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+            """Encoder → multipole head → Ewald → short-range on a prepared batch.
+
+            ``b`` must already carry ``pos`` and (for the grad paths) the edge
+            geometry recomputed from ``pos``; ``pos`` / ``cell`` are passed
+            explicitly to Ewald so the gradient flows through them.
+            """
+            # -- encoder writes edge_features (and edge_tensor_features) --
+            self.encoder(b)
+            # -- head writes per-atom moments + molecular dipole --
+            head_out = head(b)
+
+            # -- Ewald: read moments from the batch --
+            q = b["atoms", head.out_charge_key]
+            mu = b.get(("atoms", head.out_dipole_key)) if head.dipole else None
+            Theta = b.get(("atoms", head.out_quadrupole_key)) if head.quadrupole else None
+
+            # Theta lives in the (N, 5) real-spherical 2e basis (cuequivariance
+            # output). EwaldMultipoleEnergy.forward expects Q in (N, 3, 3)
+            # symmetric traceless Cartesian form; convert here at the composer
+            # boundary so neither the head nor the potential needs to know
+            # about the basis swap.
+            Q_cart = _theta_to_cartesian_quadrupole(Theta) if Theta is not None else None
+
+            ewald_out = self.ewald(
+                q=q,
+                pos=pos,
+                cell=cell,
+                batch=atom_batch,
+                mu=mu,
+                Q=Q_cart,
+                kvec_indices=kvec_indices,
             )
+            energy_es = ewald_out["pot"]
+            if energy_es.dim() == 0:
+                energy_es = energy_es.unsqueeze(0)
+
+            n_graphs = int(energy_es.shape[0])
+
+            # -- short-range head(s) --
+            energy_short = torch.zeros(n_graphs, dtype=energy_es.dtype, device=energy_es.device)
+            if self.short_range_head is not None:
+                heads_iter = (
+                    self.short_range_head
+                    if isinstance(self.short_range_head, nn.ModuleList)
+                    else [self.short_range_head]
+                )
+                for sr_head in heads_iter:
+                    sr_out = sr_head(b)
+                    if not isinstance(sr_out, dict):
+                        raise TypeError(
+                            f"Short-range head {type(sr_head).__name__} must return "
+                            f"a dict; got {type(sr_out).__name__}."
+                        )
+                    if "energy_short" not in sr_out:
+                        raise KeyError(
+                            f"Short-range head {type(sr_head).__name__} must return "
+                            f"a dict with key 'energy_short'; got keys {list(sr_out)}."
+                        )
+                    energy_short = energy_short + sr_out["energy_short"]
+
+            energy = energy_short + energy_es
+
+            out: dict[str, torch.Tensor] = {
+                "energy": energy,
+                "energy_short": energy_short,
+                "energy_es": energy_es,
+                "atomic_charges": q,
+                "phi": ewald_out["phi"],
+                "field": ewald_out["field"],
+            }
+            if mu is not None:
+                out["atomic_dipoles"] = mu
+            if Theta is not None:
+                out["atomic_quadrupoles"] = Theta
+            if "molecular_dipole" in head_out:
+                out["molecular_dipole"] = head_out["molecular_dipole"]
+            if "charge_sum_pre_proj" in head_out:
+                out["charge_sum_pre_proj"] = head_out["charge_sum_pre_proj"]
+            if "charge_sum_post_proj" in head_out:
+                out["charge_sum_post_proj"] = head_out["charge_sum_post_proj"]
+            return energy, out
+
+        def _strained(pos_orig: torch.Tensor, strain: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            """Apply a symmetric strain to positions and cell (ε = 0 is identity)."""
+            sym_eps = 0.5 * (strain + strain.transpose(-1, -2))
+            eye_b = torch.eye(3, dtype=strain.dtype, device=strain.device).expand_as(strain)
             i_plus = eye_b + sym_eps
             pos = torch.einsum("aij,aj->ai", i_plus[atom_batch], pos_orig)
-            cell = torch.einsum("bij,blj->bli", i_plus, cell_orig)
-            pos_for_force_grad: torch.Tensor | None = pos_orig if compute_forces else None
-        elif compute_forces:
-            pos = pos.detach().requires_grad_(True)
-            pos_for_force_grad = pos
-        else:
-            pos_for_force_grad = None
+            cell = torch.einsum("bij,blj->bli", i_plus, cell0)
+            return pos, cell
 
-        # When pos / cell were updated we must recompute edge geometry
-        # so encoder, head, and Ewald all see the differentiable values.
-        # bond_diff / bond_dist are stored in the batch and the encoder
-        # reads them rather than recomputing from pos.
-        if compute_forces or compute_stress:
-            bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-            bond_dist = bond_diff.norm(dim=-1)
-            batch[("atoms", "pos")] = pos
-            batch[("edges", "bond_diff")] = bond_diff
-            batch[("edges", "bond_dist")] = bond_dist
-            if compute_stress:
-                batch[("graphs", "cell")] = cell
+        def _prepare(b: TensorDict, pos: torch.Tensor, cell: torch.Tensor | None) -> None:
+            """Write ``pos`` + recomputed edge geometry (and cell) into ``b`` in place.
 
-        # -- encoder writes edge_features (and edge_tensor_features) --
-        self.encoder(batch)
+            The encoder reads ``bond_diff`` / ``bond_dist`` from the batch rather
+            than recomputing from ``pos``, so they must be refreshed for the
+            gradient to flow pos → geometry → energy.
+            """
+            bond_diff = pos[dst] - pos[src]
+            b[("atoms", "pos")] = pos
+            b[("edges", "bond_diff")] = bond_diff
+            b[("edges", "bond_dist")] = bond_diff.norm(dim=-1)
+            if cell is not None:
+                b[("graphs", "cell")] = cell
 
-        # -- head writes per-atom moments + molecular dipole --
-        head_out = self.perm_multipole_head(batch)
+        # -- eager pass: materialises lazy params and produces the outputs, using
+        #    the batch's cached edge geometry (the original non-grad path). --
+        _energy, out = _run_pipeline(batch.clone(), pos0, cell0)
 
-        # -- Ewald: read moments from the batch --
-        head = self.perm_multipole_head
-        q = batch["atoms", head.out_charge_key]
-        mu = batch.get(("atoms", head.out_dipole_key)) if head.dipole else None
-        Theta = batch.get(("atoms", head.out_quadrupole_key)) if head.quadrupole else None
-
-        # Theta lives in the (N, 5) real-spherical 2e basis (cuequivariance
-        # output). EwaldMultipoleEnergy.forward expects Q in (N, 3, 3)
-        # symmetric traceless Cartesian form; convert here at the composer
-        # boundary so neither the head nor the potential needs to know
-        # about the basis swap.
-        Q_cart = _theta_to_cartesian_quadrupole(Theta) if Theta is not None else None
-
-        ewald_out = self.ewald(
-            q=q,
-            pos=pos,
-            cell=cell,
-            batch=atom_batch,
-            mu=mu,
-            Q=Q_cart,
-            kvec_indices=kvec_indices,
-        )
-        energy_es = ewald_out["pot"]
-        if energy_es.dim() == 0:
-            energy_es = energy_es.unsqueeze(0)
-
-        n_graphs = int(energy_es.shape[0])
-
-        # -- short-range head(s) --
-        if self.short_range_head is None:
-            energy_short = torch.zeros(n_graphs, dtype=energy_es.dtype, device=energy_es.device)
-        else:
-            heads_iter = (
-                self.short_range_head
-                if isinstance(self.short_range_head, nn.ModuleList)
-                else [self.short_range_head]
-            )
-            energy_short = torch.zeros(n_graphs, dtype=energy_es.dtype, device=energy_es.device)
-            for sr_head in heads_iter:
-                sr_out = sr_head(batch)
-                if not isinstance(sr_out, dict):
-                    raise TypeError(
-                        f"Short-range head {type(sr_head).__name__} must return "
-                        f"a dict; got {type(sr_out).__name__}."
-                    )
-                if "energy_short" not in sr_out:
-                    raise KeyError(
-                        f"Short-range head {type(sr_head).__name__} must return "
-                        f"a dict with key 'energy_short'; got keys {list(sr_out)}."
-                    )
-                energy_short = energy_short + sr_out["energy_short"]
-
-        energy = energy_short + energy_es
-
-        # -- pack output --
-        out: dict[str, torch.Tensor] = {
-            "energy": energy,
-            "energy_short": energy_short,
-            "energy_es": energy_es,
-            "atomic_charges": q,
-            "phi": ewald_out["phi"],
-            "field": ewald_out["field"],
-        }
-        if mu is not None:
-            out["atomic_dipoles"] = mu
-        if Theta is not None:
-            out["atomic_quadrupoles"] = Theta
-        if "molecular_dipole" in head_out:
-            out["molecular_dipole"] = head_out["molecular_dipole"]
-        if "charge_sum_pre_proj" in head_out:
-            out["charge_sum_pre_proj"] = head_out["charge_sum_pre_proj"]
-        if "charge_sum_post_proj" in head_out:
-            out["charge_sum_post_proj"] = head_out["charge_sum_post_proj"]
-
-        # -- forces --
+        # -- forces via functorch: F = -∂E/∂pos. At ε = 0 the strain is the
+        #    identity, so differentiating w.r.t. positions on the original
+        #    geometry suffices whether or not stress is also requested. --
         if compute_forces:
-            assert pos_for_force_grad is not None
-            forces = -torch.autograd.grad(
-                energy.sum(),
-                pos_for_force_grad,
-                create_graph=self.training,
-                retain_graph=compute_stress or self.training,
-            )[0]
-            out["forces"] = forces
+            def energy_of_pos(p: torch.Tensor) -> torch.Tensor:
+                b = batch.clone()
+                _prepare(b, p, cell0)
+                return _run_pipeline(b, p, cell0)[0].sum()
 
-        # -- stress --
+            out["forces"] = -torch.func.grad(energy_of_pos)(pos0)
+
+        # -- stress via functorch: σ = (1/V) ∂E/∂ε through a differentiable
+        #    strain perturbation of positions + cell. --
         if compute_stress:
-            assert strain is not None and cell_orig is not None
-            stress_eps = torch.autograd.grad(
-                energy.sum(),
-                strain,
-                create_graph=self.training,
-            )[0]
+            assert cell0 is not None
+
+            def energy_of_strain(strain: torch.Tensor) -> torch.Tensor:
+                pos, cell = _strained(pos0, strain)
+                b = batch.clone()
+                _prepare(b, pos, cell)
+                return _run_pipeline(b, pos, cell)[0].sum()
+
+            strain0 = torch.zeros_like(cell0)
+            stress_eps = torch.func.grad(energy_of_strain)(strain0)
+            cell_orig = cell0
             # ``stress_eps`` is ``∂E/∂strain[a, b] = ∂E/∂sym_eps[a, b]``
             # (chain rule through ``sym_eps = (strain + strainᵀ)/2``).
             # The standard physics convention treats ε as a *symmetric*

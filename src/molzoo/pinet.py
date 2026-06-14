@@ -3,7 +3,7 @@
 PiNet is a multi-rank representation architecture (P1 scalar, P3 vector, P5
 rank-5). The encoder produces ``(N, layers, features)`` node features; the
 PiNet-specific head pools across layers, predicts per-atom energies, and
-derives forces via autograd. The head lives alongside the encoder (not under
+derives forces via functorch (``torch.func.grad``). The head lives alongside the encoder (not under
 ``molpot``) because the pool-then-readout pattern only makes sense for PiNet's
 multi-layer output shape — there is no MACE/Allegro reuse to extract.
 
@@ -22,7 +22,6 @@ Reference:
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from typing import Literal
 
 import torch
@@ -95,8 +94,8 @@ class PiNet(TensorDictModuleBase):
     Edge geometry (``bond_diff`` = ``pos[target] - pos[source]`` and
     ``bond_dist`` = ``‖bond_diff‖``) is derived from ``pos`` + ``edge_index``
     inside ``forward``. Caching them in the pipeline buys nothing (one
-    gather + diff + norm per step) and breaks autograd-through-pos for
-    force training.
+    gather + diff + norm per step) and breaks the gradient flow pos → geometry
+    that force derivation needs.
 
     Writes in place:
 
@@ -342,38 +341,45 @@ def _pool_layer(features: torch.Tensor, reduction: str) -> torch.Tensor:
 
 
 class PiNetPotential(nn.Module):
-    """PiNet energy + force prediction model.
+    """PiNet energy + force prediction model — ready to use from hyperparameters.
 
-    Pools the encoder's ``(N, layers, features)`` output across the layer
-    axis, predicts per-atom energies via a 2-layer MLP, aggregates them to
-    graph energies, and derives forces via ``torch.autograd.grad`` when
-    ``compute_forces`` (or ``compute_forces_default``) is set.
+    Pass PiNet hyperparameters directly; the encoder is built internally, e.g.::
 
-    Per-element baseline subtraction (atomic dress) is handled at cache
-    time by :class:`molix.data.AtomicDress` — labels are already dressed
-    when they reach this model, so no runtime dress add is needed.
+        model = PiNetPotential(atom_types=[1, 6, 7, 8], r_max=4.5, depth=5,
+                               hidden_dim=64, compute_forces=True)
+
+    Predicts per-atom energies via per-block OutLayers, aggregates them to graph
+    energies, and derives forces as ``F = -∂E/∂pos`` with ``torch.func.grad``
+    (functorch) when ``compute_forces`` is set. The functorch path traces the
+    force into the forward graph, so ``energy → force → loss`` is a single
+    backward that ``torch.compile(fullgraph=True)`` can capture — no
+    double-backward barrier.
+
+    Per-element baseline subtraction (atomic dress) is handled at cache time by
+    :class:`molix.data.AtomicDress` — labels are already dressed when they reach
+    this model, so no runtime dress add is needed.
 
     Args:
-        encoder: :class:`PiNet` (or any module that writes ``("atoms",
-            "node_features")`` into a ``TensorDict``).
         hidden_dim: Hidden dimension of the per-atom energy MLP.
         layer_reduction: How to pool across GC-block layers
             (``"mean"`` / ``"sum"`` / ``"last"``).
         compute_forces: Default value for forward's ``compute_forces``
             kwarg. Set to ``True`` for force training so the Trainer's plain
             ``model(batch)`` call returns ``{"energy", "forces"}``.
+        **pinet_kwargs: PiNet hyperparameters (``atom_types``, ``r_max``,
+            ``depth``, ``n_basis``, …) used to build the encoder.
     """
 
     def __init__(
         self,
         *,
-        encoder: nn.Module,
         hidden_dim: int = 64,
         layer_reduction: Literal["mean", "sum", "last"] = "mean",
         compute_forces: bool = False,
+        **pinet_kwargs: object,
     ) -> None:
         super().__init__()
-        self.encoder = encoder
+        self.encoder = PiNet(**pinet_kwargs)
         # ``layer_reduction`` is accepted for API compatibility but unused by the
         # energy head: PiNet2 does NOT pool layers — it accumulates a per-block
         # OutLayer residually (see below), so there is no layer axis to reduce.
@@ -387,7 +393,7 @@ class PiNetPotential(nn.Module):
         # per-atom energy = Σ_b OutLayer_b(p1_block_output_b), each OutLayer a
         # tanh FFLayer([hidden_dim]) -> biasless Linear(1). The absolute energy
         # zero-point is owned by the atomic dress, so the projection has no bias.
-        depth: int = int(getattr(encoder, "depth", 1))
+        depth: int = int(getattr(self.encoder, "depth", 1))
         self.out_layers = nn.ModuleList(
             [OutLayer([hidden_dim], out_units=1, activation="tanh") for _ in range(depth)]
         )
@@ -399,22 +405,46 @@ class PiNetPotential(nn.Module):
     ) -> dict[str, torch.Tensor]:
         if compute_forces is None:
             compute_forces = self.compute_forces_default
-        grad_ctx = torch.enable_grad() if compute_forces else nullcontext()
+        if compute_forces:
+            return self._forward_functorch(batch)
         energy_forward = self._compiled_energy_forward or self._energy_forward
-        with grad_ctx:
-            if compute_forces and not batch["atoms", "pos"].requires_grad:
-                batch["atoms", "pos"] = batch["atoms", "pos"].clone().requires_grad_(True)
-            out = energy_forward(batch)
-            if compute_forces:
-                out["forces"] = self.force_derivation(out["energy"], batch["atoms", "pos"])
+        return energy_forward(batch)
+
+    def _forward_functorch(self, batch: TensorDict) -> dict[str, torch.Tensor]:
+        """Force forward via ``torch.func.grad`` (no double-backward barrier).
+
+        ``energy_fn`` recomputes the energy from a clone of the batch with the
+        candidate positions swapped in; PiNet derives all edge geometry from
+        positions internally, so the gradient flows pos → geometry → energy.
+
+        The eager energy pass runs FIRST, for two reasons: it produces the energy
+        outputs (connected to the parameters, with ``pos`` detached, so an
+        energy+force loss trains via ordinary autograd), and it materializes
+        PiNet's lazy parameters in normal eager mode — materializing them inside
+        the ``torch.func.grad`` transform below corrupts functorch's tensor
+        wrappers and segfaults.
+        """
+        pos = batch["atoms", "pos"].detach()
+        base = batch.clone()
+        base["atoms", "pos"] = pos
+
+        out = self._energy_forward(base.clone())
+
+        def energy_fn(p: torch.Tensor) -> torch.Tensor:
+            b = base.clone()
+            b["atoms", "pos"] = p
+            return self._energy_forward(b)["energy"].sum()
+
+        out["forces"] = self.force_derivation(energy_fn, pos)
         return out
 
     def _energy_forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
         """Compilable energy computation: encoder -> per-block OutLayer sum -> aggregate.
 
-        Extracted so ``torch.compile`` can wrap it without hitting the
-        double-backward limitation that ``ForceDerivation``'s internal
-        ``torch.autograd.grad`` triggers.
+        Extracted as a single region so ``torch.compile`` can wrap the
+        energy-only path (see :meth:`compile_energy`), and so the functorch force
+        closure in :meth:`_forward_functorch` can call it as a pure function of
+        positions.
 
         Per-atom energy is the residual sum of per-block OutLayers applied to
         each GC block's raw scalar output ``p1_block_outputs`` ``(N, depth, D)``
@@ -429,6 +459,14 @@ class PiNetPotential(nn.Module):
         atom_energy = output.squeeze(-1)
 
         atom_batch = batch["atoms", "batch"]
+        # Fixed-length padding (CUDA-graph path): a boolean ("atoms","mask") marks
+        # real atoms. Zeroing ghost-atom energy here makes padded atoms contribute
+        # 0 to per-graph energy — and therefore 0 to forces (the total energy no
+        # longer depends on their positions). Real atoms are untouched because no
+        # padding edge connects to them, so energy/forces match the unpadded batch.
+        # No-op for unpadded batches (no "mask" key). See data.tasks.PadMolecularBatch.
+        if "mask" in batch["atoms"].keys():
+            atom_energy = atom_energy * batch["atoms", "mask"].to(atom_energy.dtype)
         num_graphs = batch["graphs"].batch_size[0]
         energy = self.energy_aggregation(atom_energy, atom_batch, num_graphs=num_graphs)
 
@@ -448,29 +486,37 @@ class PiNetPotential(nn.Module):
         that leaves the GPU idle. Measured on a GH200 it cuts QM9 (energy-only)
         op-calls/step ~7.1k → ~2.8k and lifts throughput ~1.5× at bs32/bs128.
 
-        **Does NOT work for force training.** When ``compute_forces=True`` the
-        loss backprops through forces, and ``ForceDerivation`` builds its force
-        with ``create_graph=True`` (a *double* backward). Backpropagating a
-        second time through an ``aot_autograd``-compiled region is unsupported
-        (``RuntimeError: ... does not currently support double backward``), so
-        calling this on a force model and then training raises. Force training
-        must stay eager — use a larger physical batch (bs128 drops revMD17 to
-        ~11 % launch-bound) or ``Trainer(accumulate_grad_batches=…)`` instead.
-        Force *inference* (``create_graph=False``) is fine.
+        **Energy-only — does not accelerate force training.** The compiled
+        callable is invoked only on the ``compute_forces=False`` path; with
+        ``compute_forces=True`` the model routes through
+        :meth:`_forward_functorch`, which calls the *eager* ``_energy_forward``
+        inside its ``torch.func.grad`` closure. So compiling here leaves force
+        training unchanged. (The force forward is separately fullgraph-compilable
+        via functorch — wrap ``model(b, compute_forces=True)`` directly — because
+        ``torch.func.grad`` traces the force into the forward graph and needs no
+        double backward; that path is unrelated to this method.)
 
         Materialise lazy parameters with one warm-up forward before calling
         this, so the compiled graph captures concrete shapes.
 
-        Use the **default** inductor mode. ``mode="reduce-overhead"`` (CUDA
-        graphs) is *counterproductive* here: molecular batches have variable
-        atom/edge counts, and CUDA graphs require static shapes — measured on a
-        GH200 it ran slower than eager (the per-step capture/guard overhead
-        dominates, op-calls/step stay ~7.2k instead of dropping to ~2.8k).
+        Use the **default** inductor mode *for this ragged energy-only path*.
+        ``mode="reduce-overhead"`` (CUDA graphs) is *counterproductive* here:
+        without padding, molecular batches have variable atom/edge counts, and
+        CUDA graphs require static shapes — measured on a GH200 it ran slower
+        than eager (the per-step capture/guard overhead dominates, op-calls/step
+        stay ~7.2k instead of dropping to ~2.8k).
+
+        For **force training**, do NOT use this method: compile the whole model
+        instead (``trainer.compile(cuda_graphs=True)`` /
+        ``molix.compile.CUDA_GRAPH_PRESET``) on *padded* fixed shapes
+        (``PadMolecularBatch`` + ``drop_last=True``). There ``reduce-overhead``
+        is the **fastest** config (~10x eager), the opposite of the ragged case
+        — see ``docs/molix/explanation/throughput-and-compilation.md``.
 
         Args:
             backend: ``torch.compile`` backend (default ``"inductor"``).
             **kwargs: Forwarded to :func:`torch.compile`. Avoid
-                ``mode="reduce-overhead"`` for ragged molecular batches.
+                ``mode="reduce-overhead"`` for ragged (unpadded) batches.
         """
         self._compiled_energy_forward = torch.compile(
             self._energy_forward, backend=backend, **kwargs

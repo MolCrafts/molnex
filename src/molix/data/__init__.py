@@ -55,6 +55,7 @@ from molix.data.tasks import (
     AtomicDress,
     ConstantLabel,
     NeighborList,
+    PadMolecularBatch,
     UnitConvert,
 )
 
@@ -69,6 +70,7 @@ __all__ = [
     "AtomicDress",
     "ConstantLabel",
     "NeighborList",
+    "PadMolecularBatch",
     "UnitConvert",
     # Sources
     "DataSource",

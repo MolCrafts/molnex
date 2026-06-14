@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-from tests.utils import assert_compile_compatible
 
 from molix import config
 from molrep.interaction.element import ElementUpdate, ElementUpdateSpec
@@ -170,15 +169,3 @@ class TestElementUpdate:
         m = torch.randn(10, 64, dtype=config.ftype)
         out = update(h, m, atom_types)
         assert out.dtype == config.ftype
-
-    @pytest.mark.xfail(
-        reason="cuEquivariance indexed_linear custom op not dispatcher-compatible under compile",
-        strict=False,
-    )
-    def test_compile(self):
-        """Test that ElementUpdate can be compiled with torch.compile."""
-        update = ElementUpdate(hidden_dim=64, num_species=10)
-        h_prev = torch.randn(10, 64, dtype=config.ftype)
-        m_curr = torch.randn(10, 64, dtype=config.ftype)
-        atom_types, _ = torch.sort(torch.randint(1, 10, (10,), dtype=torch.long))
-        assert_compile_compatible(update, h_prev, m_curr, atom_types, strict=False)

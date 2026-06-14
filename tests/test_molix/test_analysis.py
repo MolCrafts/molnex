@@ -19,7 +19,7 @@ from molix.analysis import (
     t_eff_colored,
     vacf,
 )
-from molzoo.quantization import t_eff_ratio
+from molix.quant import EffectiveTemperature
 
 _DT = torch.float64
 
@@ -129,7 +129,9 @@ def test_t_eff_colored_reduces_to_white():
     torch.manual_seed(8)
     df = torch.randn(4000, 6, 3, dtype=_DT) * 0.02  # white
     out = autocorr_df(df, dt=0.5)
-    white = t_eff_ratio(out["C0"], 0.5, gamma=0.01, mass=12.0, dof=18, t_target=300.0)
+    white = EffectiveTemperature(dt=0.5, gamma=0.01, mass=12.0, dof=18).ratio(
+        out["C0"], t_target=300.0
+    )
     colored = t_eff_colored(df, dt=0.5, gamma=0.01, mass=12.0, dof=18, t_target=300.0)
     assert abs(colored - white) / white < 0.4  # tau_c ~ dt -> colored ~ white
 

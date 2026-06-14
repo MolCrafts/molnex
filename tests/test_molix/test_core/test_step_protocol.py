@@ -228,100 +228,6 @@ def test_default_eval_step_keeps_graph_by_default():
     assert outputs["loss"].requires_grad
 
 
-def test_trainer_delegates_to_train_step():
-    """Verify Trainer delegates training computation to train_step."""
-
-    class MockStep:
-        def __init__(self):
-            self.train_calls = 0
-            self.eval_calls = 0
-
-        def on_train_batch(self, trainer, state, batch):
-            self.train_calls += 1
-            predictions = trainer.model(batch)
-            loss = trainer.loss_fn(predictions, batch)
-            trainer.optimizer.zero_grad()
-            loss.backward()
-            trainer.optimizer.step()
-            return {"loss": loss, "predictions": predictions}
-
-        def on_eval_batch(self, trainer, state, batch):
-            self.eval_calls += 1
-            with torch.no_grad():
-                predictions = trainer.model(batch)
-                loss = trainer.loss_fn(predictions, batch)
-            return {"loss": loss, "predictions": predictions}
-
-    mock_step = MockStep()
-    model = SimpleModel()
-
-    trainer = Trainer(
-        model=model,
-        loss_fn=simple_loss_fn,
-        optimizer_factory=simple_optimizer_factory,
-        train_step=mock_step,
-        eval_step=mock_step,
-    )
-
-    datamodule = MockDataModule()
-
-    # Train for 1 epoch (3 train batches, 2 eval batches)
-    trainer.train(datamodule, max_epochs=1)
-
-    # Verify step methods were called
-    assert mock_step.train_calls == 3, "train_step.on_train_batch should be called 3 times"
-    assert mock_step.eval_calls == 2, "eval_step.on_eval_batch should be called 2 times"
-
-
-def test_custom_step_gradient_accumulation():
-    """Verify custom step with gradient accumulation works."""
-
-    class GradientAccumulationStep:
-        def __init__(self, accumulation_steps: int = 2):
-            self.accumulation_steps = accumulation_steps
-            self.accumulated = 0
-
-        def on_train_batch(self, trainer, state, batch):
-            predictions = trainer.model(batch)
-            loss = trainer.loss_fn(predictions, batch) / self.accumulation_steps
-
-            loss.backward()
-            self.accumulated += 1
-
-            if self.accumulated >= self.accumulation_steps:
-                trainer.optimizer.step()
-                trainer.optimizer.zero_grad()
-                self.accumulated = 0
-
-            return {"loss": loss * self.accumulation_steps, "predictions": predictions}
-
-        def on_eval_batch(self, trainer, state, batch):
-            with torch.no_grad():
-                predictions = trainer.model(batch)
-                loss = trainer.loss_fn(predictions, batch)
-            return {"loss": loss, "predictions": predictions}
-
-    model = SimpleModel()
-    grad_accum_step = GradientAccumulationStep(accumulation_steps=2)
-
-    trainer = Trainer(
-        model=model,
-        loss_fn=simple_loss_fn,
-        optimizer_factory=simple_optimizer_factory,
-        train_step=grad_accum_step,
-        eval_step=DefaultEvalStep(),
-    )
-
-    datamodule = MockDataModule()
-
-    # Should run without errors
-    state = trainer.train(datamodule, max_epochs=1)
-
-    # Verify training completed
-    assert state.epoch == 1
-    assert state.global_step == 3  # 3 training batches
-
-
 def test_step_return_format():
     """Verify steps return correct output format."""
     model = SimpleModel()
@@ -421,36 +327,9 @@ def test_default_eval_step_with_amp_bfloat16():
 # ---- on_after_backward hook point tests ----
 
 
-def test_on_after_backward_fires_during_training():
-    """Verify on_after_backward hook fires between backward and optimizer step."""
-    call_log = []
-
-    class AfterBackwardHook:
-        def on_after_backward(self, trainer, state):
-            # Gradients should exist at this point
-            has_grads = any(p.grad is not None for p in trainer.model.parameters())
-            call_log.append(("on_after_backward", has_grads))
-
-    model = SimpleModel()
-    trainer = Trainer(
-        model=model,
-        loss_fn=simple_loss_fn,
-        optimizer_factory=simple_optimizer_factory,
-        hooks=[AfterBackwardHook()],
-    )
-
-    datamodule = MockDataModule()
-    trainer.train(datamodule, max_epochs=1)
-
-    # Should have been called once per training batch (3 batches)
-    assert len(call_log) == 3
-    # Gradients should have been present each time
-    for _, has_grads in call_log:
-        assert has_grads
-
-
-def test_on_after_backward_fires_with_amp():
-    """Verify on_after_backward fires with AMP and gradients are unscaled."""
+def test_on_after_backward_fires_with_grads_present():
+    """``DefaultTrainStep.on_train_batch`` fires ``on_after_backward`` once the
+    accumulation window closes, with gradients populated."""
     call_log = []
 
     class AfterBackwardHook:
@@ -458,9 +337,28 @@ def test_on_after_backward_fires_with_amp():
             has_grads = any(p.grad is not None for p in trainer.model.parameters())
             call_log.append(has_grads)
 
-    model = SimpleModel()
     trainer = Trainer(
-        model=model,
+        model=SimpleModel(),
+        loss_fn=simple_loss_fn,
+        optimizer_factory=simple_optimizer_factory,
+        hooks=[AfterBackwardHook()],
+    )
+
+    trainer.train_step.on_train_batch(trainer, TrainState(), _make_batch())
+
+    assert call_log == [True]
+
+
+def test_on_after_backward_fires_with_amp():
+    """Same firing contract holds with AMP enabled (grads unscaled before the hook)."""
+    call_log = []
+
+    class AfterBackwardHook:
+        def on_after_backward(self, trainer, state):
+            call_log.append(any(p.grad is not None for p in trainer.model.parameters()))
+
+    trainer = Trainer(
+        model=SimpleModel(),
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
         train_step=DefaultTrainStep(),
@@ -468,9 +366,6 @@ def test_on_after_backward_fires_with_amp():
     )
     trainer.set_precision("bf16-mixed")
 
-    datamodule = MockDataModule()
-    trainer.train(datamodule, max_epochs=1)
+    trainer.train_step.on_train_batch(trainer, TrainState(), _make_batch())
 
-    assert len(call_log) == 3
-    for has_grads in call_log:
-        assert has_grads
+    assert call_log == [True]

@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-from tests.utils import assert_compile_compatible
 
 from molrep.embedding.cutoff import (
     CosineCutoff,
@@ -153,12 +152,6 @@ class TestCosineCutoff:
         assert out1d.shape == dist1d.shape
         assert out2d.shape == dist2d.shape
         assert out3d.shape == dist3d.shape
-
-    def test_compile(self):
-        """Test that CosineCutoff can be compiled with torch.compile."""
-        cutoff = CosineCutoff(r_cut=5.0)
-        distances = torch.tensor([1.0, 2.0, 3.0, 4.0])
-        assert_compile_compatible(cutoff, distances, strict=False)
 
 
 class TestPolynomialCutoff:

@@ -1,27 +1,30 @@
-"""Stress tensor derivation via autograd: sigma = (1/V) dE/dstrain.
+"""Stress tensor derivation via functorch: ``σ = (1/V) ∂E/∂ε``.
 
-Single responsibility: compute the stress tensor from the gradient of
-energy with respect to a strain tensor.
+Single responsibility: compute the stress tensor from the gradient of energy
+with respect to a strain tensor, using ``torch.func.grad`` (functorch).
 
 Example:
     >>> deriv = StressDerivation()
-    >>> strain = torch.zeros(3, 3, requires_grad=True)
-    >>> energy = some_energy_fn(strain)
-    >>> stress = deriv(energy, strain, cell)
+    >>> strain = torch.zeros_like(cell)        # linearization point ε = 0
+    >>> stress = deriv(energy_fn, strain, cell)  # energy_fn(strain) -> scalar
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import torch
 import torch.nn as nn
 
 
 class StressDerivation(nn.Module):
-    """Compute stress tensor via autograd as ``(1/V) * dE/dstrain``.
+    """Compute the stress tensor functionally as ``(1/V) ∂E/∂ε``.
 
-    Expects the upstream code to apply a symmetric strain displacement
-    to positions before the energy computation. The strain tensor must
-    have ``requires_grad=True``.
+    Takes the energy as a **pure function of a strain tensor** and differentiates
+    it with ``torch.func.grad``, the compile-friendly counterpart of the old
+    ``torch.autograd.grad`` path (traced into the forward graph, no
+    double-backward barrier). ``energy_fn`` must apply the strain to positions
+    (and cell) internally so the gradient flows ε → geometry → energy.
     """
 
     def __init__(self):
@@ -29,26 +32,25 @@ class StressDerivation(nn.Module):
 
     def forward(
         self,
-        energy: torch.Tensor,
+        energy_fn: Callable[[torch.Tensor], torch.Tensor],
         strain: torch.Tensor,
         cell: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute stress tensor from energy gradient w.r.t. strain.
+        """Compute the stress tensor from the energy gradient w.r.t. strain.
 
         Args:
-            energy: Molecular energy (scalar or ``(B,)``).
-            strain: Strain tensor with ``requires_grad=True``.
-            cell: Unit cell tensor.
+            energy_fn: Maps a strain tensor (same shape as ``cell``) to a
+                **scalar** total energy, applying the strain to positions/cell
+                internally. Evaluated at ``strain``.
+            strain: Strain tensor, typically zeros (the linearization point
+                ε = 0). Does not need ``requires_grad`` — ``torch.func.grad``
+                tracks the input itself.
+            cell: Unit cell tensor; its determinant gives the volume.
 
         Returns:
             Stress tensor.
         """
-        grad = torch.autograd.grad(
-            energy.sum(),
-            strain,
-            create_graph=self.training,
-            retain_graph=self.training,
-        )[0]
+        grad = torch.func.grad(energy_fn)(strain)
 
         volume = torch.det(cell).abs()
         stress = grad / volume.view(-1, 1, 1)

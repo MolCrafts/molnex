@@ -37,8 +37,8 @@ from tests.symmetry_helpers import (
 def make_pipeline(encoder, is_edge_encoder: bool = False):
     """Build an energy+force pipeline from an encoder.
 
-    Computes bond_diff from pos inside the forward pass so autograd
-    can trace gradients for force derivation.
+    Computes bond_diff from pos inside the forward pass so the functorch force
+    closure can trace gradients pos → geometry → energy for force derivation.
     """
     layer_pool = LayerPooling("mean")
     edge_to_node = EdgeToNodePooling("mean") if is_edge_encoder else None
@@ -46,9 +46,9 @@ def make_pipeline(encoder, is_edge_encoder: bool = False):
     energy_agg = EnergyAggregation(pooling="sum")
     force_deriv = ForceDerivation()
 
-    def forward(batch: TensorDict):
-        pos = batch["atoms", "pos"]
+    def _energy_and_feats(batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
         edge_index = batch["edges", "edge_index"]
+        pos = batch["atoms", "pos"]
 
         recompute_edge_geometry(batch)
 
@@ -71,7 +71,24 @@ def make_pipeline(encoder, is_edge_encoder: bool = False):
         atom_energy = energy_mlp(node_feats)
         atom_batch = batch["atoms", "batch"]
         mol_energy = energy_agg(atom_energy, atom_batch, num_graphs=int(atom_batch.max()) + 1)
-        forces = force_deriv(mol_energy, pos)
+        return mol_energy, node_feats
+
+    def forward(batch: TensorDict):
+        pos = batch["atoms", "pos"].detach()
+
+        # Eager pass for energy + features (using the original geometry).
+        b0 = batch.clone()
+        b0["atoms", "pos"] = pos
+        mol_energy, node_feats = _energy_and_feats(b0)
+
+        # Forces via functorch: F = -∂E/∂pos, energy traced as a pure
+        # function of positions (edge geometry recomputed inside).
+        def energy_of_pos(p: torch.Tensor) -> torch.Tensor:
+            b = batch.clone()
+            b["atoms", "pos"] = p
+            return _energy_and_feats(b)[0].sum()
+
+        forces = force_deriv(energy_of_pos, pos)
 
         return mol_energy, forces, node_feats
 
