@@ -5,11 +5,12 @@ All notable changes to MolNex are documented here. The format follows
 [Semantic Versioning](https://semver.org/) (public APIs may still change between
 minor releases while < 1.0).
 
-## [0.2.0] - 2026-06-14
+## [Unreleased]
 
-The first substantial release after the initial scaffold — `molix` grows a full
-execution/analysis stack, the data pipeline moves to a packed on-disk cache, and
-`molzoo` gains the PiNet and Sonata reference models.
+Work accumulated on top of the initial scaffold while the package version stays
+`0.1.0` — `molix` grows a full execution/analysis stack, the data pipeline moves
+to a packed on-disk cache, and `molzoo` gains the PiNet and Sonata reference
+models.
 
 ### Added
 
@@ -65,5 +66,3 @@ execution/analysis stack, the data pipeline moves to a packed on-disk cache, and
 ## [0.1.0]
 
 - Initial four-package scaffold (`molix`, `molrep`, `molpot`, `molzoo`).
-
-[0.2.0]: https://github.com/MolCrafts/molnex/releases/tag/v0.2.0
