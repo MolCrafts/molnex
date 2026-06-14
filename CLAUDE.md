@@ -25,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**MolNex** (v0.1.0) is a dict-first molecular ML framework for unified modeling of molecular potentials and properties with physics-aware ML. It is composed of four packages:
+**MolNex** (v0.2.0) is a dict-first molecular ML framework for unified modeling of molecular potentials and properties with physics-aware ML. It is composed of four packages:
 
 | Package | Role | Key Patterns |
 |---------|------|-------------|
@@ -144,8 +144,9 @@ molpot.composition (PotentialComposer,    molpot.potentials
 molix.core (Trainer, TrainState, Step, Hook)    ForceDerivation)
     ↓
 molix.data (Dataset, collate, preprocess)
-molix.datasets (QM9, RevMD17, ThreeBPA, WaterLES)
-molix.analysis (trajectory diagnostics) ──→ molix.quant
+molix.datasets (QM9, RevMD17, ThreeBPA, WaterLES, MolRec)
+molix.md (Langevin velocity-Verlet) ─→ molix.analysis (trajectory diagnostics) ─→ molix.quant
+molix.export (AOT Inductor) · molix.compile (torch.compile / CUDA-graph capture)   [leaf execution utils]
 ```
 
 Notes on cross-package edges (verified against imports):
@@ -157,6 +158,10 @@ Notes on cross-package edges (verified against imports):
 - `molix.analysis` reuses the `molix.quant` T_eff scalars for the
   quantization-as-thermal-noise diagnostics (quantization infra lives in the
   `molix` base layer, operating on generic `nn.Module` / `state_dict`).
+- `molix.md` (in-process Langevin velocity-Verlet driver) feeds trajectories to
+  `molix.analysis`; `molix.export` (AOT Inductor) and `molix.compile`
+  (`torch.compile` / CUDA-graph capture) are leaf execution utilities that wrap a
+  trained model — nothing in the core training loop imports them.
 
 ### State namespace contract
 
