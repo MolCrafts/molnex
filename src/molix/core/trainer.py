@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import copy
+import math
 import platform
 import time
 from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -75,8 +77,10 @@ class Trainer:
             eval_every_n_steps: Run evaluation every N *optimizer* steps. When
                    set, this is the exclusive eval cadence — epoch-end eval is
                    suppressed so short epochs (e.g. revmd17's ~30-step epoch)
-                   do not silently override the configured schedule. If None
-                   (default), only epoch-end eval runs.
+                   do not silently override the configured schedule. If the
+                   cadence exceeds an entire epoch (zero evals in an epoch),
+                   a warning is logged once. If None (default), only
+                   epoch-end eval runs.
                    Must be > 0 if provided.
             accumulate_grad_batches: Number of micro-batches whose gradients
                    are accumulated before one optimizer step. ``1`` (default)
@@ -89,6 +93,13 @@ class Trainer:
                    Must be > 0.
             resume_from_checkpoint: Path to a checkpoint file to resume from,
                    or ``"auto"`` to detect torchrun elastic snapshots.
+                   Restoring covers model/optimizer/scheduler state, counters
+                   and RNG states. Bit-reproducible continuation is only
+                   guaranteed from epoch-boundary checkpoints: resuming from a
+                   mid-epoch ``step_<N>.pt`` restarts the interrupted epoch's
+                   data stream from batch 0 (there is no sampler
+                   fast-forward), so the consumed batch sequence differs from
+                   the uninterrupted run.
             checkpoint_backend: Backend for checkpoint I/O. Defaults to
                    :class:`TorchSaveBackend`.
             device: Target device for the model (e.g. ``"cuda"``, ``"cuda:0"``,
@@ -230,6 +241,36 @@ class Trainer:
                         exc_info=True,
                     )
                     raise
+
+    @staticmethod
+    def _needs_device_move(batch: Any, device: torch.device) -> bool:
+        """Whether *batch* has any leaf not already on *device*.
+
+        Decided once per epoch / eval phase on the first batch (batches from
+        one dataloader are device-homogeneous), so the per-step loop skips
+        both the ``batch_to`` call and its leaf-device walk when the data is
+        already in place — the dominant Trainer-loop overhead in same-device
+        (CPU, or pre-moved) training. A genuine move (CPU→cuda) returns True
+        and ``batch_to`` runs every step as before.
+
+        Args:
+            batch: A collated batch (``TensorDict`` / dict / tensor).
+            device: The model's device.
+
+        Returns:
+            ``True`` if a move is required (or cannot be ruled out cheaply).
+        """
+        values = getattr(batch, "values", None)
+        if not callable(getattr(batch, "apply", None)):
+            return True  # plain dict / tensor / unknown — let batch_to decide
+        dev = getattr(batch, "device", None)
+        if dev is not None:
+            return dev != device
+        try:
+            leaves = values(include_nested=True, leaves_only=True)
+            return any(v.device != device for v in leaves)
+        except (AttributeError, TypeError):
+            return True
 
     def _load_checkpoint(self, path: str | Path) -> None:
         """Load checkpoint and restore all training state.
@@ -445,8 +486,10 @@ class Trainer:
         start_global_step = self.state.global_step
         start_time = time.perf_counter()
         step_limit_reached = False
+        warned_eval_starved = False
 
         while epoch < epoch_limit and not step_limit_reached:
+            epoch_start_step = self.state.global_step
             on_epoch_start = getattr(datamodule, "on_epoch_start", None)
             if callable(on_epoch_start):
                 on_epoch_start(epoch)
@@ -458,8 +501,12 @@ class Trainer:
 
             model_device = next(self.model.parameters()).device
             accum = self.accumulate_grad_batches
+            needs_move: bool | None = None
             for batch in datamodule.train_dataloader():
-                batch = batch_to(batch, device=model_device)
+                if needs_move is None:
+                    needs_move = self._needs_device_move(batch, model_device)
+                if needs_move:
+                    batch = batch_to(batch, device=model_device)
                 self._call_hooks("on_train_batch_start", self, self.state, batch)
                 outputs = self.train_step.on_train_batch(self, self.state, batch)
                 self._call_hooks("on_train_batch_end", self, self.state, batch, outputs)
@@ -508,6 +555,27 @@ class Trainer:
             if self.eval_every_n_steps is None and self.state.steps_since_last_eval != 0:
                 self._run_eval_phase(datamodule)
                 self.state.steps_since_last_eval = 0
+
+            # A step cadence larger than the epoch silently produces zero
+            # evals (and no best-checkpoint updates) for multiple epochs —
+            # surface that once instead of leaving the user to notice the
+            # missing eval columns.
+            steps_this_epoch = self.state.global_step - epoch_start_step
+            if (
+                not warned_eval_starved
+                and self.eval_every_n_steps is not None
+                and steps_this_epoch > 0
+                and self.state.steps_since_last_eval >= steps_this_epoch
+            ):
+                epochs_per_eval = math.ceil(self.eval_every_n_steps / steps_this_epoch)
+                logger.warning(
+                    f"eval_every_n_steps={self.eval_every_n_steps} exceeds "
+                    f"this epoch's {steps_this_epoch} optimizer step(s) and "
+                    "epoch-end eval is suppressed when a step cadence is set "
+                    "— no evaluation ran this epoch. At this epoch length "
+                    f"the first eval lands after ~{epochs_per_eval} epoch(s)."
+                )
+                warned_eval_starved = True
 
             # ReduceLROnPlateau is metric-driven and only advances at epoch
             # boundaries. Pull the metric the Checkpoint aggregate is tracking
@@ -746,8 +814,12 @@ class Trainer:
         self._call_hooks("on_eval_phase_start", self, self.state)
 
         model_device = next(self.model.parameters()).device
+        needs_move: bool | None = None
         for batch in datamodule.val_dataloader():
-            batch = batch_to(batch, device=model_device)
+            if needs_move is None:
+                needs_move = self._needs_device_move(batch, model_device)
+            if needs_move:
+                batch = batch_to(batch, device=model_device)
             self._call_hooks("on_eval_batch_start", self, self.state, batch)
             outputs = self.eval_step.on_eval_batch(self, self.state, batch)
             self._call_hooks("on_eval_batch_end", self, self.state, batch, outputs)

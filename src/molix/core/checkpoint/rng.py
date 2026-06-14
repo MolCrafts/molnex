@@ -7,6 +7,10 @@ from typing import Any
 
 import torch
 
+from molix import logger as _logger_mod
+
+logger = _logger_mod.getLogger(__name__)
+
 
 def capture_rng_states() -> dict[str, Any]:
     """Capture current RNG states for reproducible checkpoint resume.
@@ -40,8 +44,22 @@ def restore_rng_states(states: dict[str, Any]) -> None:
     """
     if "torch" in states:
         torch.random.set_rng_state(states["torch"])
-    if "cuda" in states and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(states["cuda"])
+    if "cuda" in states:
+        if not torch.cuda.is_available():
+            logger.warning(
+                "partial RNG restore: checkpoint contains CUDA RNG states "
+                "but CUDA is unavailable — resumed run is not "
+                "bit-reproducible on this machine"
+            )
+        elif torch.cuda.device_count() != len(states["cuda"]):
+            logger.warning(
+                "partial RNG restore: checkpoint has CUDA RNG states for "
+                f"{len(states['cuda'])} device(s) but "
+                f"{torch.cuda.device_count()} are visible — skipping CUDA "
+                "restore"
+            )
+        else:
+            torch.cuda.set_rng_state_all(states["cuda"])
     if "numpy" in states:
         try:
             import numpy as np

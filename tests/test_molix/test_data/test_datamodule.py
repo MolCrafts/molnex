@@ -258,6 +258,102 @@ class TestEpochHook:
 
 
 # ---------------------------------------------------------------------------
+# Non-DDP epoch reshuffle (regression: identical permutation every epoch)
+# ---------------------------------------------------------------------------
+
+
+def _make_shuffle_dm(tmp_path: Path, tag: str, *, seed: int = 123, n_train: int = 64) -> DataModule:
+    """Build a DataModule whose samples carry a unique ``U0`` identity.
+
+    Args:
+        tmp_path: Pytest temp directory for the packed caches.
+        tag: Unique filename tag so multiple modules can share ``tmp_path``.
+        seed: DataModule shuffle seed.
+        n_train: Number of training samples (``U0`` runs ``0..n_train-1``).
+
+    Returns:
+        A non-DDP DataModule with ``num_workers=0``.
+    """
+    samples = _make_samples(n_train + 2)
+    train_sink = tmp_path / f"shuffle_train_{tag}.pt"
+    val_sink = tmp_path / f"shuffle_val_{tag}.pt"
+    PackedCache(train_sink).save(samples[:n_train])
+    PackedCache(val_sink).save(samples[n_train:])
+    return DataModule(
+        CachedDataset(train_sink),
+        CachedDataset(val_sink),
+        batch_size=8,
+        num_workers=0,
+        pin_memory=False,
+        seed=seed,
+    )
+
+
+def _loader_order(dl: DataLoader) -> list[float]:
+    """Iterate *dl* and return per-sample ``U0`` identities in yield order."""
+    return [float(u) for batch in dl for u in batch["graphs", "U0"]]
+
+
+class TestEpochReshuffle:
+    """Non-DDP shuffle must reseed per epoch, mirroring ``DistributedSampler.set_epoch``.
+
+    The Trainer rebuilds the train dataloader each epoch and calls
+    ``on_epoch_start(epoch)`` first; these tests simulate exactly that
+    sequence. Sample identity is recovered from the unique ``U0`` target.
+    """
+
+    def test_epoch_reshuffle_differs(self, tmp_path):
+        """Two consecutive epochs must yield different sample permutations."""
+        dm = _make_shuffle_dm(tmp_path, "reshuffle")
+
+        dm.on_epoch_start(0)
+        order_epoch0 = _loader_order(dm.train_dataloader())
+        dm.on_epoch_start(1)
+        order_epoch1 = _loader_order(dm.train_dataloader())
+
+        # Same multiset of samples either way — only the order may change.
+        assert sorted(order_epoch0) == sorted(order_epoch1)
+        # 64! permutations: a seeded reshuffle colliding is astronomically
+        # unlikely, so equality here means the epoch seed was not advanced.
+        assert order_epoch0 != order_epoch1
+
+    def test_epoch_shuffle_resume_derivable(self, tmp_path):
+        """Resume at epoch k must reproduce epoch k's permutation by derivation.
+
+        A fresh DataModule with the same seed, told via ``on_epoch_start(1)``
+        that it is resuming at epoch 1, must yield exactly the epoch-1 order
+        of a continuously-trained DataModule — and that order must differ
+        from epoch 0 (otherwise "reproducing" it is vacuous).
+        """
+        dm_continuous = _make_shuffle_dm(tmp_path, "cont", seed=777)
+        dm_continuous.on_epoch_start(0)
+        order_epoch0 = _loader_order(dm_continuous.train_dataloader())
+        dm_continuous.on_epoch_start(1)
+        order_epoch1_continuous = _loader_order(dm_continuous.train_dataloader())
+
+        dm_fresh = _make_shuffle_dm(tmp_path, "fresh", seed=777)
+        dm_fresh.on_epoch_start(1)
+        order_epoch1_fresh = _loader_order(dm_fresh.train_dataloader())
+
+        # (a) Resume reproducibility: epoch-1 order is derivable from
+        #     (seed, epoch) alone, independent of prior-epoch history.
+        assert order_epoch1_fresh == order_epoch1_continuous
+        # (b) Guard against the degenerate pre-fix world where every epoch
+        #     shares one permutation, which would make (a) pass vacuously.
+        assert order_epoch1_continuous != order_epoch0
+
+    def test_same_epoch_same_order(self, tmp_path):
+        """Rebuilding the dataloader within one epoch must not change the order."""
+        dm = _make_shuffle_dm(tmp_path, "same")
+        dm.on_epoch_start(0)
+
+        order_first = _loader_order(dm.train_dataloader())
+        order_second = _loader_order(dm.train_dataloader())
+
+        assert order_first == order_second
+
+
+# ---------------------------------------------------------------------------
 # Explicit 3-step path: cache → dataset → DataModule
 # (replaces the removed from_cached_pipeline)
 # ---------------------------------------------------------------------------

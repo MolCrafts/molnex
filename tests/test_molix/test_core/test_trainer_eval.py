@@ -252,3 +252,99 @@ def test_accumulate_grad_batches_one_is_per_batch():
     trainer = _make_trainer(accumulate_grad_batches=1)
     state = trainer.train(dm, max_epochs=1)
     assert state.global_step == 5
+
+
+# ---------------------------------------------------------------------------
+# eval starvation warning
+# ---------------------------------------------------------------------------
+
+
+def _capture_warnings(monkeypatch):
+    """Record messages passed to the trainer module logger's ``warning``.
+
+    mollog emits from a background thread, so fd/sys capture is racy —
+    intercepting the call itself is deterministic.
+    """
+    import molix.core.trainer as trainer_mod
+
+    messages: list[str] = []
+    original = trainer_mod.logger.warning
+
+    def recording(msg, *args, **kwargs):
+        messages.append(str(msg))
+        return original(msg, *args, **kwargs)
+
+    monkeypatch.setattr(trainer_mod.logger, "warning", recording)
+    return messages
+
+
+def test_eval_starvation_warns_once(monkeypatch):
+    """Warn once when eval_every_n_steps exceeds whole epochs.
+
+    With a 5-step epoch and eval_every_n_steps=100, epochs complete with
+    zero evals (epoch-end eval is suppressed by the step cadence) — the
+    trainer must surface that instead of staying silent.
+    """
+    messages = _capture_warnings(monkeypatch)
+    dm = _MockDataModule(batches_per_epoch=5)
+    trainer = _make_trainer(eval_every_n_steps=100)
+    trainer.train(dm, max_epochs=3)
+    starved = [m for m in messages if "no evaluation ran this epoch" in m]
+    assert len(starved) == 1  # once, not per epoch
+    assert "eval_every_n_steps=100" in starved[0]
+
+
+def test_eval_starvation_no_warning_when_cadence_fits(monkeypatch):
+    """No starvation warning when evals actually run within the epoch."""
+    messages = _capture_warnings(monkeypatch)
+    dm = _MockDataModule(batches_per_epoch=5)
+    trainer = _make_trainer(eval_every_n_steps=2)
+    trainer.train(dm, max_epochs=2)
+    assert not [m for m in messages if "no evaluation ran this epoch" in m]
+
+
+def test_eval_starvation_no_warning_without_step_cadence(monkeypatch):
+    """Default epoch-end eval schedule never triggers the starvation warning."""
+    messages = _capture_warnings(monkeypatch)
+    dm = _MockDataModule(batches_per_epoch=5)
+    trainer = _make_trainer()
+    trainer.train(dm, max_epochs=2)
+    assert not [m for m in messages if "no evaluation ran this epoch" in m]
+
+
+# ---------------------------------------------------------------------------
+# per-epoch device-move decision (batch_to hot-path skip)
+# ---------------------------------------------------------------------------
+
+
+def test_needs_device_move_false_when_already_on_device():
+    """A batch whose leaves are all on the target device needs no move."""
+    from tensordict import TensorDict
+
+    from molix.core.trainer import Trainer
+
+    batch = TensorDict(
+        {"atoms": TensorDict({"pos": torch.randn(4, 3)}, batch_size=[4])}, batch_size=[]
+    )
+    assert Trainer._needs_device_move(batch, torch.device("cpu")) is False
+
+
+def test_needs_device_move_true_for_foreign_device():
+    """A move is required when the target differs from the leaves' device."""
+    from tensordict import TensorDict
+
+    from molix.core.trainer import Trainer
+
+    batch = TensorDict(
+        {"atoms": TensorDict({"pos": torch.randn(4, 3)}, batch_size=[4])}, batch_size=[]
+    )
+    assert Trainer._needs_device_move(batch, torch.device("meta")) is True
+
+
+def test_train_loop_runs_without_per_step_move_on_cpu():
+    """Training still updates params when the per-epoch skip path is taken."""
+    dm = _MockDataModule(batches_per_epoch=5)
+    trainer = _make_trainer()
+    initial = [p.clone() for p in trainer.model.parameters()]
+    trainer.train(dm, max_epochs=1)
+    assert any(not torch.equal(i, c) for i, c in zip(initial, trainer.model.parameters()))

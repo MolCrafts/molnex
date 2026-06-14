@@ -69,11 +69,15 @@ class DefaultTrainStep:
         is_window_start = trainer._micro_step % accum == 0
         is_window_end = (trainer._micro_step + 1) % accum == 0
 
-        device_type = next(trainer.model.parameters()).device.type
+        # Only resolve the model device + AMP dtype when autocast is actually
+        # used — otherwise this walked model.parameters() and hit the config
+        # dict every micro-batch for a context that is a no-op.
         amp_enabled = bool(config["use_amp"])
-        amp_dtype = config["amp_dtype"]
-
-        ctx = torch.amp.autocast(device_type, dtype=amp_dtype) if amp_enabled else nullcontext()
+        if amp_enabled:
+            device_type = next(trainer.model.parameters()).device.type
+            ctx = torch.amp.autocast(device_type, dtype=config["amp_dtype"])
+        else:
+            ctx = nullcontext()
         with ctx:
             predictions = trainer.model(batch)
             loss = trainer.loss_fn(predictions, batch)

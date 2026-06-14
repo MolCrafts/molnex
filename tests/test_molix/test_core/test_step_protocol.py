@@ -228,6 +228,100 @@ def test_default_eval_step_keeps_graph_by_default():
     assert outputs["loss"].requires_grad
 
 
+def test_trainer_delegates_to_train_step():
+    """Verify Trainer delegates training computation to train_step."""
+
+    class MockStep:
+        def __init__(self):
+            self.train_calls = 0
+            self.eval_calls = 0
+
+        def on_train_batch(self, trainer, state, batch):
+            self.train_calls += 1
+            predictions = trainer.model(batch)
+            loss = trainer.loss_fn(predictions, batch)
+            trainer.optimizer.zero_grad()
+            loss.backward()
+            trainer.optimizer.step()
+            return {"loss": loss, "predictions": predictions}
+
+        def on_eval_batch(self, trainer, state, batch):
+            self.eval_calls += 1
+            with torch.no_grad():
+                predictions = trainer.model(batch)
+                loss = trainer.loss_fn(predictions, batch)
+            return {"loss": loss, "predictions": predictions}
+
+    mock_step = MockStep()
+    model = SimpleModel()
+
+    trainer = Trainer(
+        model=model,
+        loss_fn=simple_loss_fn,
+        optimizer_factory=simple_optimizer_factory,
+        train_step=mock_step,
+        eval_step=mock_step,
+    )
+
+    datamodule = MockDataModule()
+
+    # Train for 1 epoch (3 train batches, 2 eval batches)
+    trainer.train(datamodule, max_epochs=1)
+
+    # Verify step methods were called
+    assert mock_step.train_calls == 3, "train_step.on_train_batch should be called 3 times"
+    assert mock_step.eval_calls == 2, "eval_step.on_eval_batch should be called 2 times"
+
+
+def test_custom_step_gradient_accumulation():
+    """Verify custom step with gradient accumulation works."""
+
+    class GradientAccumulationStep:
+        def __init__(self, accumulation_steps: int = 2):
+            self.accumulation_steps = accumulation_steps
+            self.accumulated = 0
+
+        def on_train_batch(self, trainer, state, batch):
+            predictions = trainer.model(batch)
+            loss = trainer.loss_fn(predictions, batch) / self.accumulation_steps
+
+            loss.backward()
+            self.accumulated += 1
+
+            if self.accumulated >= self.accumulation_steps:
+                trainer.optimizer.step()
+                trainer.optimizer.zero_grad()
+                self.accumulated = 0
+
+            return {"loss": loss * self.accumulation_steps, "predictions": predictions}
+
+        def on_eval_batch(self, trainer, state, batch):
+            with torch.no_grad():
+                predictions = trainer.model(batch)
+                loss = trainer.loss_fn(predictions, batch)
+            return {"loss": loss, "predictions": predictions}
+
+    model = SimpleModel()
+    grad_accum_step = GradientAccumulationStep(accumulation_steps=2)
+
+    trainer = Trainer(
+        model=model,
+        loss_fn=simple_loss_fn,
+        optimizer_factory=simple_optimizer_factory,
+        train_step=grad_accum_step,
+        eval_step=DefaultEvalStep(),
+    )
+
+    datamodule = MockDataModule()
+
+    # Should run without errors
+    state = trainer.train(datamodule, max_epochs=1)
+
+    # Verify training completed
+    assert state.epoch == 1
+    assert state.global_step == 3  # 3 training batches
+
+
 def test_step_return_format():
     """Verify steps return correct output format."""
     model = SimpleModel()

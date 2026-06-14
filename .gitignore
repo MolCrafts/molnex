@@ -127,3 +127,5 @@ examples/
 # HPC sbatch logs
 slurm-*.out
 jobs/
+.venv-gpu/
+molnex-bench-*.out

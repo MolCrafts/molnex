@@ -121,6 +121,28 @@ class TestBatchTo:
         assert out["edges", "edge_index"].device.type == "cpu"
         assert out["edges", "edge_index"].dtype is torch.long
 
+    def test_same_device_move_returns_batch_unchanged(self, tmp_path):
+        """Device-only move to where the batch already lives is a no-op fast path.
+
+        The batch's leaves are all on CPU; moving to CPU must skip the
+        ``TensorDict.apply`` rebuild and return the same object — this is the
+        per-step Trainer-loop optimization, harmless because the values are
+        already correct.
+        """
+        dm = _build_dm(tmp_path)
+        batch = next(iter(dm.train_dataloader()))
+        out = batch_to(batch, device=torch.device("cpu"))
+        assert out is batch  # no rebuild
+        assert out["atoms", "pos"].device.type == "cpu"
+
+    def test_same_device_move_still_casts_with_dtype(self, tmp_path):
+        """The fast path only triggers for device-only moves, never when dtype is set."""
+        dm = _build_dm(tmp_path)
+        batch = next(iter(dm.train_dataloader()))
+        out = batch_to(batch, device=torch.device("cpu"), dtype=torch.float64)
+        assert out is not batch
+        assert out["atoms", "pos"].dtype is torch.float64
+
 
 # ---------------------------------------------------------------------------
 # End-to-end: set_precision flows through to the emitted batch

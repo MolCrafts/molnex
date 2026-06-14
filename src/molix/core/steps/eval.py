@@ -54,8 +54,9 @@ class DefaultEvalStep:
         Runs the forward pass under ``torch.no_grad()`` (or
         ``torch.enable_grad()`` when ``no_grad=False``), optionally inside
         :func:`torch.amp.autocast` when ``config["use_amp"]`` is set, then
-        evaluates the loss. Writes ``state["eval"]["loss"]`` as a Python
-        float.
+        evaluates the loss. Writes ``state["eval"]["loss"]`` as a detached
+        tensor (no per-batch GPU sync); consumers materialize via
+        ``float()``.
 
         Args:
             trainer: The owning :class:`~molix.core.trainer.Trainer`
@@ -69,15 +70,19 @@ class DefaultEvalStep:
         assert trainer.model is not None
         assert trainer.loss_fn is not None
 
-        device_type = next(trainer.model.parameters()).device.type
+        # Resolve autocast args only when AMP is on (see DefaultTrainStep).
         amp_enabled = bool(config["use_amp"])
-        amp_dtype = config["amp_dtype"]
-
         grad_ctx = torch.no_grad() if self._no_grad else torch.enable_grad()
-        amp_ctx = torch.amp.autocast(device_type, dtype=amp_dtype) if amp_enabled else nullcontext()
+        if amp_enabled:
+            device_type = next(trainer.model.parameters()).device.type
+            amp_ctx = torch.amp.autocast(device_type, dtype=config["amp_dtype"])
+        else:
+            amp_ctx = nullcontext()
         with grad_ctx, amp_ctx:
             predictions = trainer.model(batch)
             loss = trainer.loss_fn(predictions, batch)
 
-        state["eval"]["loss"] = loss.item()
+        # Detached tensor (not .item()) so eval doesn't force a GPU→CPU sync
+        # every batch — mirrors train/loss; consumers materialize via float().
+        state["eval"]["loss"] = loss.detach()
         return {"loss": loss, "predictions": predictions}
