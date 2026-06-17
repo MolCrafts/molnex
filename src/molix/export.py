@@ -28,6 +28,7 @@ def export_model(
     *,
     device: str = "auto",
     name: str = "model",
+    dynamic_shapes: object | None = None,
 ) -> Path:
     """Export an nn.Module to an AOT-compiled shared library with weights and metadata.
 
@@ -40,6 +41,9 @@ def export_model(
         device: Target device (``"auto"``, ``"cuda"``, or ``"cpu"``).
             ``"auto"`` picks CUDA when available, else CPU.
         name: Base name for the exported artifact files (default ``"model"``).
+        dynamic_shapes: Optional ``torch.export`` dynamic-shape spec (per-input
+            dict of ``{dim_index: Dim}``) so a single ``.so`` serves varying input
+            sizes — e.g. the per-step edge count in MD. ``None`` traces static shapes.
 
     Returns:
         The export directory as a :class:`Path`.
@@ -75,6 +79,7 @@ def export_model(
         torch._export.aot_compile(
             target_model,
             args=device_inputs,
+            dynamic_shapes=dynamic_shapes,
             options={"aot_inductor.output_path": so_path},
         )
 

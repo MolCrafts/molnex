@@ -68,6 +68,9 @@ Repository = "https://github.com/molcrafts/molnex"
 pythonpath = ["."]
 python_files = ["test_*", "bm_*"]
 python_classes = ["Test*", "BM*"]
+markers = [
+  "slow: marks tests that compile/AOT-export models (deselect with '-m \"not slow\"')",
+]
 
 [tool.scikit-build]
 wheel.packages = ["src/molix", "src/molrep", "src/molpot", "src/molzoo"]

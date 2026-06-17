@@ -22,8 +22,10 @@
 #include <vector>
 
 #include <ATen/Tensor.h>
-#include <c10/cuda/CUDAStream.h>
 #include <torch/csrc/inductor/aoti_runner/model_container_runner.h>
+#ifdef MOLNEX_INTERFACE_CUDA
+#include <c10/cuda/CUDAStream.h>
+#endif
 
 namespace molnex::interface {
 
@@ -64,10 +66,13 @@ class ModelRunner {
   /// device.
   std::vector<at::Tensor> run(const std::vector<at::Tensor>& inputs);
 
+#ifdef MOLNEX_INTERFACE_CUDA
   /// Asynchronous CUDA inference. Throws std::runtime_error if the
-  /// runner was loaded for a CPU model.
+  /// runner was loaded for a CPU model. Only available when
+  /// libmolnex_interface was built with a CUDA toolkit present.
   std::vector<at::Tensor> run_async(const std::vector<at::Tensor>& inputs,
                                     at::cuda::CUDAStream stream);
+#endif
 
   /// Reload constants from a `.pt` state_dict file (the artifact
   /// `<model_dir>/<name>.pt` follows this format). Performs a

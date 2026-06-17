@@ -16,7 +16,9 @@
 
 #include <torch/csrc/api/include/torch/serialize.h>
 #include <torch/csrc/inductor/aoti_runner/model_container_runner_cpu.h>
+#ifdef MOLNEX_INTERFACE_CUDA
 #include <torch/csrc/inductor/aoti_runner/model_container_runner_cuda.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -93,12 +95,18 @@ ModelRunner::ModelRunner(const std::string& model_dir,
   }
 
   if (device_ == "cuda") {
+#ifdef MOLNEX_INTERFACE_CUDA
     runner_ = std::make_unique<torch::inductor::AOTIModelContainerRunnerCuda>(
         so_path.string(),
         static_cast<size_t>(num_models),
         /*device_str=*/"cuda",
         /*cubin_dir=*/"",
         /*run_single_threaded=*/false);
+#else
+    throw std::runtime_error(
+        "model meta.json device=cuda, but libmolnex_interface was built CPU-only "
+        "(no CUDA toolkit at build time); rebuild where CUDA is available");
+#endif
   } else {
     runner_ = std::make_unique<torch::inductor::AOTIModelContainerRunnerCpu>(
         so_path.string(),
@@ -113,6 +121,7 @@ std::vector<at::Tensor> ModelRunner::run(const std::vector<at::Tensor>& inputs) 
   return runner_->run(inputs);
 }
 
+#ifdef MOLNEX_INTERFACE_CUDA
 std::vector<at::Tensor> ModelRunner::run_async(
     const std::vector<at::Tensor>& inputs,
     at::cuda::CUDAStream stream) {
@@ -128,6 +137,7 @@ std::vector<at::Tensor> ModelRunner::run_async(
   }
   return cuda_runner->run_with_cuda_stream(inputs, stream);
 }
+#endif
 
 void ModelRunner::update_weights(const std::string& weight_path) {
   auto bytes = read_binary(weight_path);
