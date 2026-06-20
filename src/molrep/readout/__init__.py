@@ -16,3 +16,4 @@ __all__ = [
     "ProductHead",
     "ProductHeadSpec",
 ]
+from .scalar import NonLinearBiasReadout  # noqa: E402,F401

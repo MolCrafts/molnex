@@ -9,7 +9,7 @@ Provides embedding and feature extraction modules:
 
 from .angular import SphericalHarmonics
 from .cutoff import CosineCutoff, HalfCosineCutoff, PolynomialCutoff, TanhCutoff
-from .node import JointEmbedding
+from .node import JointEmbedding, JointFeatureEmbedding, JointFeatureSpec
 from .radial import BesselRBF, GaussianBasis, PolynomialBasis
 
 __all__ = [
@@ -18,6 +18,8 @@ __all__ = [
     "GaussianBasis",
     "HalfCosineCutoff",
     "JointEmbedding",
+    "JointFeatureEmbedding",
+    "JointFeatureSpec",
     "PolynomialBasis",
     "PolynomialCutoff",
     "SphericalHarmonics",

@@ -17,7 +17,7 @@ from molpot.heads.element import (
     ElementAlphaTable,
     ElementChargeTable,
 )
-from molpot.heads.energy import AtomicEnergyMLP, EnergyHead
+from molpot.heads.energy import AtomicEnergyMLP, AtomicReferenceEnergy, EnergyHead
 from molpot.heads.multipole import (
     PermMultipoleHead,
     PermMultipoleHeadSpec,
@@ -27,6 +27,7 @@ from molpot.heads.type import TypeHead
 
 __all__ = [
     "AtomicEnergyMLP",
+    "AtomicReferenceEnergy",
     "BondChargeHead",
     "ChargeResponseHead",
     "DipoleHead",
