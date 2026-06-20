@@ -21,8 +21,10 @@ import cuequivariance as cue
 import cuequivariance_torch as cuet
 import torch
 import torch.nn as nn
+from tensordict import TensorDict
 
 from molix import config
+from molpot.derivation.force import ForceDerivation
 from molpot.heads.energy import AtomicReferenceEnergy
 from molpot.heads.rescale import GlobalRescale
 from molrep.embedding.angular import SphericalHarmonics
@@ -161,6 +163,7 @@ class MACEOMol(nn.Module):
             )
         self.readout = NonLinearBiasReadout(irreps_in=feat0, mlp_dim=mlp_dim)
         self.scale_shift = GlobalRescale(scale=scale, shift=shift)
+        self.force_derivation = ForceDerivation()
 
     def energy_forces(
         self,
@@ -185,6 +188,39 @@ class MACEOMol(nn.Module):
             compute_forces: whether to compute ``-dE/dx``.
         """
         positions = positions.clone().requires_grad_(compute_forces)
+        total_energy = self._compute_energy(
+            positions, Z, edge_index, batch, total_charge, total_spin, shifts
+        )
+        out = {"energy": total_energy}
+        if compute_forces:
+            grad = torch.autograd.grad(total_energy.sum(), positions, create_graph=self.training)[0]
+            out["forces"] = -grad
+        return out
+
+    def _compute_energy(
+        self,
+        positions: torch.Tensor,
+        Z: torch.Tensor,
+        edge_index: torch.Tensor,
+        batch: torch.Tensor,
+        total_charge: torch.Tensor,
+        total_spin: torch.Tensor,
+        shifts: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Per-graph total energy ``(B,)`` as a pure function of ``positions``.
+
+        Shared core of :meth:`energy_forces` and :meth:`forward`. Recomputes all
+        position-derived geometry internally so it can be differentiated with
+        either ``torch.autograd.grad`` or ``torch.func.grad`` (ForceDerivation).
+
+        Args:
+            positions: ``(N, 3)``.
+            Z: atomic numbers ``(N,)``.
+            edge_index: ``(2, E)`` sender/receiver.
+            batch: graph index per atom ``(N,)``.
+            total_charge / total_spin: per-graph ``(B,)``.
+            shifts: optional PBC shift vectors ``(E, 3)``.
+        """
         num_nodes = positions.shape[0]
         num_graphs = int(batch.max().item()) + 1
 
@@ -226,13 +262,55 @@ class MACEOMol(nn.Module):
         node_es = self.readout(feats_last).squeeze(-1)
         node_inter = self.scale_shift(node_es)
         inter_e = _scatter_sum(node_inter, batch, num_graphs)
-        total_energy = e0 + inter_e
+        return e0 + inter_e
 
-        out = {"energy": total_energy}
-        if compute_forces:
-            grad = torch.autograd.grad(total_energy.sum(), positions, create_graph=self.training)[0]
-            out["forces"] = -grad
-        return out
+    def forward(self, td: TensorDict) -> TensorDict:
+        """Run MACE-OMOL on a post-collate batch, writing energy and forces.
+
+        Reads ``atoms.{Z,pos,batch}``, ``edges.edge_index`` (``(E, 2)`` with
+        ``[:,0]`` source / ``[:,1]`` target per the molnex edge convention), and
+        per-graph ``graphs.{total_charge,total_spin}`` (defaulting to a neutral
+        singlet when absent). Forces are obtained through
+        :class:`molpot.derivation.ForceDerivation` (``F = -∂E/∂pos`` via
+        ``torch.func.grad``). Writes ``graphs.energy`` ``(B,)`` and
+        ``atoms.forces`` ``(N, 3)`` back into ``td`` and returns it.
+
+        Args:
+            td: post-collate ``TensorDict`` with ``atoms`` / ``edges`` (and
+                optionally ``graphs``) sub-dicts.
+
+        Returns:
+            The same ``td`` with ``graphs.energy`` and ``atoms.forces`` added.
+        """
+        Z = td["atoms", "Z"]
+        positions = td["atoms", "pos"]
+        batch = td["atoms", "batch"]
+        # molnex edge_index is (E, 2) [source, target]; the core wants (2, E).
+        edge_index = td["edges", "edge_index"].t().contiguous()
+        num_graphs = int(batch.max().item()) + 1
+
+        nested = td.keys(include_nested=True)
+        if ("graphs", "total_charge") in nested:
+            total_charge = td["graphs", "total_charge"]
+        else:
+            total_charge = torch.zeros(num_graphs, dtype=torch.long, device=Z.device)
+        if ("graphs", "total_spin") in nested:
+            total_spin = td["graphs", "total_spin"]
+        else:
+            total_spin = torch.zeros(num_graphs, dtype=torch.long, device=Z.device)
+
+        energy = self._compute_energy(positions, Z, edge_index, batch, total_charge, total_spin)
+
+        def energy_fn(pos: torch.Tensor) -> torch.Tensor:
+            return self._compute_energy(pos, Z, edge_index, batch, total_charge, total_spin).sum()
+
+        forces = self.force_derivation(energy_fn, positions)
+
+        if "graphs" not in td.keys():
+            td["graphs"] = TensorDict({}, batch_size=[num_graphs])
+        td["graphs", "energy"] = energy
+        td["atoms", "forces"] = forces
+        return td
 
 
 def load_omol_state_dict(model: MACEOMol, cueq_state: dict) -> tuple[list, list]:

@@ -11,7 +11,8 @@ criteria:
       molzoo/__init__ imports it lazily. An integration test shows the
       TensorDict path agrees with the raw energy_forces path to machine
       precision on a small charged molecule.
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
   - id: ac-002
     summary: molzoo-spec backfilled for mace_omol
     type: docs

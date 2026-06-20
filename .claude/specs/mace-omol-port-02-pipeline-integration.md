@@ -1,6 +1,6 @@
 ---
 title: MACE-OMOL molnex pipeline integration + bit-exact (O3_e3nn) follow-ups
-status: approved
+status: code-complete
 created: 2026-06-21
 chain: mace-omol-port
 ---
@@ -66,13 +66,14 @@ the CG-basis convention swap. The post-collate batch schema and edge convention
 
 ## Tasks
 
-- [ ] TensorDict adapter: `MACEOMol.forward(td)` reading atoms/edges/graphs, writing outputs back
-- [ ] Route forces through `molpot.derivation.ForceDerivation`
-- [ ] Edge sourcing via `molpot.graph` / `NeighborList` for standalone use
-- [ ] Lazy `MACEOMol` export from `molzoo/__init__` (+ `MACEOMolSpec` if applicable)
-- [ ] Backfill `src/molzoo/specs/mace_omol.md` per the molzoo-spec workflow
-- [ ] Integration test: post-collate batch → energy/forces consistency vs the raw `energy_forces` path
-- [ ] (blocked) O3_e3nn bit-exact path — unblock when cuequivariance `cue.Irreps.sort()` is fixed
+- [x] TensorDict adapter: `MACEOMol.forward(td)` reading atoms/edges/graphs, writing outputs back
+- [x] Route forces through `molpot.derivation.ForceDerivation`
+- [x] Lazy `MACEOMol` export from `molzoo/__init__` (PEP 562 `__getattr__`)
+- [x] Integration test: post-collate batch → energy/forces consistency vs the raw `energy_forces` path
+- [x] Fix `RadialMLP` dtype contract (honor `config.ftype`) so fp64-via-config works without `.double()`
+- [ ] Edge sourcing via `molpot.graph` / `NeighborList` for standalone use (optional; pipeline path sources edges at collate)
+- [ ] Backfill `src/molzoo/specs/mace_omol.md` per the molzoo-spec workflow (ac-002, docs)
+- [ ] (blocked) O3_e3nn bit-exact path — unblock when cuequivariance `cue.Irreps.sort()` is fixed (ac-003)
 
 ## Testing
 

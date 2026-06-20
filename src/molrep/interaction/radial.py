@@ -16,6 +16,8 @@ import torch
 import torch.nn as nn
 from pydantic import BaseModel, ConfigDict, Field
 
+from molix import config
+
 
 class RadialWeightMLPSpec(BaseModel):
     """Configuration for RadialWeightMLP.
@@ -122,11 +124,12 @@ class RadialMLP(nn.Module):
         modules: list[nn.Module] = []
         in_channels = channels_list[0]
         n = len(channels_list)
+        ftype = config.ftype
         for idx, out_channels in enumerate(channels_list[1:], start=1):
-            modules.append(nn.Linear(in_channels, out_channels, bias=True))
+            modules.append(nn.Linear(in_channels, out_channels, bias=True, dtype=ftype))
             in_channels = out_channels
             if idx < n - 1:
-                modules.append(nn.LayerNorm(out_channels))
+                modules.append(nn.LayerNorm(out_channels, dtype=ftype))
                 modules.append(nn.SiLU())
         self.net = nn.Sequential(*modules)
         self.hs = list(channels_list)
