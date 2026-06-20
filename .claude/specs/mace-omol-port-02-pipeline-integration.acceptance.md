@@ -20,7 +20,8 @@ criteria:
       src/molzoo/specs/mace_omol.md exists with §2/§3.1/§5 filled from the paper
       + reference impl, status at least `partial`, per the CLAUDE.md molzoo-spec
       workflow.
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
   - id: ac-003
     summary: bit-exact (~1e-8) model-level match via e3nn-convention CG group
     type: scientific

@@ -71,8 +71,8 @@ the CG-basis convention swap. The post-collate batch schema and edge convention
 - [x] Lazy `MACEOMol` export from `molzoo/__init__` (PEP 562 `__getattr__`)
 - [x] Integration test: post-collate batch → energy/forces consistency vs the raw `energy_forces` path
 - [x] Fix `RadialMLP` dtype contract (honor `config.ftype`) so fp64-via-config works without `.double()`
+- [x] Backfill `src/molzoo/specs/mace_omol.md` per the molzoo-spec workflow (ac-002, docs) — status `partial`, mirrored to docs + zensical
 - [ ] Edge sourcing via `molpot.graph` / `NeighborList` for standalone use (optional; pipeline path sources edges at collate)
-- [ ] Backfill `src/molzoo/specs/mace_omol.md` per the molzoo-spec workflow (ac-002, docs)
 - [ ] (blocked) O3_e3nn bit-exact path — unblock when cuequivariance `cue.Irreps.sort()` is fixed (ac-003)
 
 ## Testing
