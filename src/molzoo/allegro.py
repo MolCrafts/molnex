@@ -515,7 +515,11 @@ class Allegro(TensorDictModuleBase):
                 poly,
                 shared_weights=True,
                 internal_weights=True,
-                method="uniform_1d",
+                # Pure-torch dispatch so functorch (ForceDerivation) / torch.compile
+                # can trace the force: the fused `uniform_1d` kernel is a custom
+                # autograd.Function with no functorch setup_context. `naive` is
+                # numerically identical (matches to ~1e-15).
+                method="naive",
                 dtype=config.ftype,
             )
             self.tps.append(tp)
