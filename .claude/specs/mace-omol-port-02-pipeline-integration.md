@@ -26,11 +26,14 @@ total_spin, ...)`) and wires it into the **molnex runtime contract**:
    `src/molzoo/specs/mace_omol.md` per CLAUDE.md's molzoo-spec workflow.)
 2. **Model-level accuracy (ac-003, carried from 01 ac-007)** — RESOLVED. The
    accepted bar is E/F within **1e-4** of official OMOL (operator decision,
-   2026-06-21); the default cue `"O3"` group already achieves **7e-7 eV /
-   4.3e-6 eV·Å** (01 ac-006), well inside it. The ~1e-8 bit-exact stretch goal
-   via the e3nn-convention `O3_e3nn` group is dropped: it is unneeded at 1e-4
-   and unavailable in cuequivariance 0.10 (no `O3_e3nn` group). The
-   `MACEOMol(group=)` hook is kept for if it returns.
+   2026-06-21); the cue `"O3"` group already achieves **7e-7 eV / 4.3e-6 eV·Å**
+   (01 ac-006), well inside it. Measurement settles the question: O3 vs O3_e3nn
+   Clebsch-Gordan differ only ~1.4e-8/op and the cue-O3 twin (into which the
+   official e3nn weights are converted) already matches e3nn to 1.5e-8 — so the
+   7e-7 is molnex's reimplementation accumulation, **not** a convention diff,
+   and `O3_e3nn` would not reduce it (only add an `e3nn` dependency). The
+   e3nn-convention pursuit is dropped and the dead `MACEOMol(group=)` hook
+   removed; molnex uses cue `"O3"` everywhere.
 
 ## Domain basis
 
@@ -74,8 +77,8 @@ the CG-basis convention swap. The post-collate batch schema and edge convention
 - [x] Fix `RadialMLP` dtype contract (honor `config.ftype`) so fp64-via-config works without `.double()`
 - [x] Backfill `src/molzoo/specs/mace_omol.md` per the molzoo-spec workflow (ac-002, docs) — status `partial`, mirrored to docs + zensical
 - [x] Model-level E/F accuracy ≤ 1e-4 vs official (ac-003) — met at 7e-7 eV / 4.3e-6 eV·Å with default cue O3 (01 ac-006); 1e-4 is the accepted bar (operator decision)
+- [x] Drop O3_e3nn pursuit + remove dead `MACEOMol(group=)` hook (CG diff only 1.4e-8/op; 7e-7 is reimplementation accumulation, O3_e3nn would not help)
 - [ ] Edge sourcing via `molpot.graph` / `NeighborList` for standalone use (optional; pipeline path sources edges at collate)
-- [~] O3_e3nn bit-exact (~1e-8) — dropped: unneeded for the 1e-4 bar and unavailable in cueq 0.10 (no `O3_e3nn` group); `MACEOMol(group=)` hook kept
 
 ## Testing
 

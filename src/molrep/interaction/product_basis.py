@@ -46,16 +46,14 @@ class EquivariantProductBasis(nn.Module):
         correlation: int,
         num_elements: int = 1,
         use_sc: bool = True,
-        group=None,
     ) -> None:
         super().__init__()
         ftype = config.ftype
         self.use_sc = use_sc
         self.num_elements = int(num_elements)
-        grp = group if group is not None else "O3"
 
-        irreps_in = cue.Irreps(grp, node_feats_irreps)
-        irreps_out = cue.Irreps(grp, target_irreps)
+        irreps_in = cue.Irreps("O3", node_feats_irreps)
+        irreps_out = cue.Irreps("O3", target_irreps)
 
         self.symmetric_contractions = cuet.SymmetricContraction(
             irreps_in,

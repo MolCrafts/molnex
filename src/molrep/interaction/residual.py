@@ -78,22 +78,20 @@ class ResidualInteraction(nn.Module):
         target_irreps: str,
         hidden_irreps: str,
         radial_mlp: list[int],
-        group=None,
     ) -> None:
         super().__init__()
         ftype = config.ftype
-        grp = group if group is not None else "O3"
 
-        node_feats = cue.Irreps(grp, node_feats_irreps)
-        edge_attrs = cue.Irreps(grp, edge_attrs_irreps)
-        edge_feats = cue.Irreps(grp, edge_feats_irreps)
-        edge_ir = cue.Irreps(grp, edge_irreps)
-        target = cue.Irreps(grp, target_irreps)
-        hidden = cue.Irreps(grp, hidden_irreps)
-        node_attrs = cue.Irreps(grp, node_attrs_irreps)
+        node_feats = cue.Irreps("O3", node_feats_irreps)
+        edge_attrs = cue.Irreps("O3", edge_attrs_irreps)
+        edge_feats = cue.Irreps("O3", edge_feats_irreps)
+        edge_ir = cue.Irreps("O3", edge_irreps)
+        target = cue.Irreps("O3", target_irreps)
+        hidden = cue.Irreps("O3", hidden_irreps)
+        node_attrs = cue.Irreps("O3", node_attrs_irreps)
 
         n_scalar = sum(mi.mul for mi in node_feats if mi.ir.l == 0)
-        node_scalar = cue.Irreps(grp, f"{n_scalar}x0e")
+        node_scalar = cue.Irreps("O3", f"{n_scalar}x0e")
 
         def lin(i_in, i_out):
             return cuet.Linear(i_in, i_out, layout=cue.ir_mul, dtype=ftype)

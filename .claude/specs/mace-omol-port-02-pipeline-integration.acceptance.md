@@ -23,17 +23,18 @@ criteria:
     status: verified
     last_checked: 2026-06-21
   - id: ac-003
-    summary: model-level E/F within 1e-4 of official OMOL (default cue O3 group)
+    summary: model-level E/F within 1e-4 of official OMOL (cue O3 group)
     type: scientific
     pass_when: |
       MACEOMol with official weights matches official OMOL energy/forces to
       |dE| < 1e-4 eV and max|dF| < 1e-4 eV/Ang. Achieved 7.0e-7 eV / 4.3e-6
-      eV/Ang with the default cue "O3" group (mace-omol-port-01 ac-006,
-      scripts/omol_port/verify_e2e.py: PASS) — well inside the 1e-4 bar.
-      Bit-exact ~1e-8 via the e3nn-convention CG group is an unneeded stretch
-      goal and is unavailable in cuequivariance 0.10 (no O3_e3nn group); the
-      MACEOMol(group=) hook remains for if it returns. The 1e-4 tolerance is
-      the accepted requirement (operator decision, 2026-06-21).
+      eV/Ang with the cue "O3" group (mace-omol-port-01 ac-006,
+      scripts/omol_port/verify_e2e.py: PASS) — well inside the 1e-4 bar. The
+      residual is molnex reimplementation accumulation, NOT a CG-convention
+      difference: O3 vs O3_e3nn CG differ only ~1.4e-8/op and the O3 twin (into
+      which the official weights are converted) already matches e3nn to 1.5e-8,
+      so the e3nn-convention group is neither used nor needed. The dead
+      group= hook was removed. 1e-4 is the accepted bar (operator, 2026-06-21).
     status: verified
     last_checked: 2026-06-21
 ---

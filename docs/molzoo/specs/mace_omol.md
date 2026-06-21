@@ -150,7 +150,6 @@ $$
 | `charge_classes` / `charge_offset` | charge embedding table | `201` / `100` | charge `q` → index `q+offset` |
 | `spin_classes` / `spin_offset` | spin embedding table | `101` / `0` | |
 | `scale` / `shift` | global rescale | `1.0` / `0.0` | |
-| `group` | CG group override | `None` (`"O3"`) | `O3_e3nn` for bit-exact — blocked (A3) |
 
 ## 5. Reference Crosswalk
 
@@ -175,7 +174,7 @@ $$
 |----|------------|--------|------|------------|
 | A1 | PolynomialCutoff + trainable un-normalised Bessel (`eps=0`) | OMOL variant vs standard MACE | low | `scripts/omol_port/verify_radial.py` (7e-15) |
 | A2 | charge/spin via `JointFeatureEmbedding` added to node feats + into E0 | OMOL conditioning | low | `scripts/omol_port/verify_joint_embed.py` (0) |
-| A3 | cue `"O3"` group (not `O3_e3nn`) | `O3_e3nn` absent in cueq 0.10; unneeded at the accepted 1e-4 bar | low | residual 7e-7 eV / 4.3e-6 eV·Å vs official — inside 1e-4 (`mace-omol-port-02` ac-003 verified) |
+| A3 | cue `"O3"` group everywhere (no `O3_e3nn`) | weights are converted into the cue-O3 twin, so O3 is the native target; O3 vs O3_e3nn CG differ only ~1.4e-8/op and the O3 twin already matches e3nn to 1.5e-8 — O3_e3nn would not reduce the residual and would add an `e3nn` dep | low | residual 7e-7 eV / 4.3e-6 eV·Å vs official (reimplementation accumulation, not a convention diff) — inside the 1e-4 bar (`mace-omol-port-02` ac-003) |
 | A4 | TensorDict `forward` forces via `ForceDerivation` (`func.grad`); `energy_forces` via `autograd.grad` | compile-friendly molnex contract | low | `tests/test_molzoo/test_mace_omol.py` (1e-8 vs autograd) |
 | A5 | edge convention `v=pos[t]-pos[s]`, `edge_index (E,2)→(2,E)` | MolNex collate schema | low | `tests/test_molzoo/test_mace_omol.py` |
 | A6 | `RadialMLP` honors `config.ftype` | fp64-via-config without `.double()` | low | `tests/test_molzoo/test_mace_omol.py` (fp64) |
@@ -190,9 +189,11 @@ decision, 2026-06-21). The full model with official OMOL weights reproduces the
 official cueq OMOL twin on a charged molecule to **7.0e-7 eV / 4.3e-6 eV·Å**
 (`scripts/omol_port/verify_e2e.py`, RESULT: PASS) — three to four orders inside
 the bar; the cueq twin itself matches e3nn OMOL to 1.5e-8 eV / 3.2e-8 eV·Å
-(`scripts/omol_port/verify_omol_cueq_equiv.py`). Bit-exact (~1e-8) via the
-`O3_e3nn` CG group is an unneeded stretch goal and is unavailable in
-cuequivariance 0.10 (A3).
+(`scripts/omol_port/verify_omol_cueq_equiv.py`). The 7e-7 residual is molnex's
+own reimplementation accumulation, **not** a CG-convention difference: O3 vs
+O3_e3nn Clebsch-Gordan differ only ~1.4e-8/op and the O3 twin already aligns
+with e3nn to 1.5e-8, so the e3nn-convention group is neither used nor needed
+(A3).
 
 ### 7.2 Symmetry and Shape Tests
 
@@ -242,7 +243,7 @@ for this spec (tracked in `scripts/omol_port/SPEC.md`).
 
 Triggers a `molzoo-auditor` pass when: (a) `load_omol_state_dict` reports
 missing learnable keys; (b) `verify_e2e.py` E/F residual regresses > 10×;
-(c) cuEquivariance is bumped (CG-basis / `O3_e3nn` status may change, A3);
+(c) cuEquivariance is bumped (cue-O3 CG basis may shift, A3);
 (d) the per-layer irreps schedule (A7) changes. §6/§7 are the enforcement
 surface; block-level `verify_*.py` are the source of truth for §5 `matched`
 rows.
@@ -252,6 +253,9 @@ rows.
 - 2026-06-21: created from paper + `ACEsuit/mace@v0.3.16`; filled §1–§9 from the
   `mace-omol-port-01/02` implementation (status draft → partial). §5 rows
   `matched` per `scripts/omol_port/verify_*.py`.
-- 2026-06-21: accuracy bar set to 1e-4 (operator); default cue O3 meets it at
-  7e-7 eV / 4.3e-6 eV·Å. O3_e3nn bit-exact dropped (absent in cueq 0.10).
-  `mace-omol-port-02` ac-003 verified; chain `mace-omol-port` done.
+- 2026-06-21: accuracy bar set to 1e-4 (operator); cue O3 meets it at
+  7e-7 eV / 4.3e-6 eV·Å. `mace-omol-port-02` ac-003 verified; chain done.
+- 2026-06-21: measured O3 vs O3_e3nn CG = 1.4e-8/op → the 7e-7 residual is
+  reimplementation accumulation, not a convention diff. Dropped the O3_e3nn
+  pursuit entirely and removed the dead `MACEOMol(group=)` hook from
+  MACEOMol / ResidualInteraction / EquivariantProductBasis (always cue O3).

@@ -64,11 +64,9 @@ class MACEOMol(nn.Module):
         spin_offset: int = 0,
         scale: float = 1.0,
         shift: float = 0.0,
-        group=None,
     ) -> None:
         super().__init__()
         ftype = config.ftype
-        self._group = group
         n_el = len(atomic_numbers)
         self.register_buffer(
             "z_table", torch.tensor(atomic_numbers, dtype=torch.long), persistent=True
@@ -148,7 +146,6 @@ class MACEOMol(nn.Module):
                     target_irreps=target,
                     hidden_irreps=hidden_sched[i],
                     radial_mlp=[128, 128, 128],
-                    group=group,
                 )
             )
             self.products.append(
@@ -158,7 +155,6 @@ class MACEOMol(nn.Module):
                     correlation=correlation,
                     num_elements=1,
                     use_sc=True,
-                    group=group,
                 )
             )
         self.readout = NonLinearBiasReadout(irreps_in=feat0, mlp_dim=mlp_dim)
