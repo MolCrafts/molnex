@@ -24,6 +24,8 @@ import torch
 import torch.nn as nn
 from pydantic import BaseModel, Field
 
+from molix import config
+
 Key = str | tuple[str, ...]
 
 
@@ -91,7 +93,11 @@ def _monomial_table(ls: list[int]) -> tuple[torch.Tensor, torch.Tensor, torch.Te
                 out_idx.append(l * l + m)
     return (
         torch.tensor(exps, dtype=torch.long),
-        torch.tensor(coeffs, dtype=torch.get_default_dtype()),
+        # Use the configured runtime float dtype, not the global torch default
+        # (float32). The SH coefficients carry irrational factors (sqrt(15), …);
+        # truncating them to float32 caps l>=2 rotation equivariance at ~1e-8,
+        # which no later `.double()` can recover (the bits are already gone).
+        torch.tensor(coeffs, dtype=config.ftype),
         torch.tensor(out_idx, dtype=torch.long),
     )
 
@@ -173,7 +179,12 @@ class SphericalHarmonics(nn.Module):
         """
         v = vectors
         if self.normalize:
-            v = v / torch.linalg.norm(v, dim=-1, keepdim=True)
+            # Clamp the norm so a zero-length vector (the origin) yields v=0
+            # rather than 0/0 = NaN. The module contract promises origin-safety;
+            # real edges are never zero-length, so this only guards the degenerate
+            # input. l=0 stays its constant; l>0 monomials vanish at v=0.
+            norm = torch.linalg.norm(v, dim=-1, keepdim=True)
+            v = v / norm.clamp_min(torch.finfo(v.dtype).tiny)
 
         x_pow = self._power_table(v[..., 0])
         y_pow = self._power_table(v[..., 1])
