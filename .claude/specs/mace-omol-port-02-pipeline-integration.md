@@ -1,6 +1,6 @@
 ---
 title: MACE-OMOL molnex pipeline integration + bit-exact (O3_e3nn) follow-ups
-status: code-complete
+status: done
 created: 2026-06-21
 chain: mace-omol-port
 ---
@@ -24,12 +24,13 @@ total_spin, ...)`) and wires it into the **molnex runtime contract**:
    `molpot.graph` / `NeighborList`, and is lazily imported from
    `molzoo/__init__`. (Also: backfill the molzoo-spec at
    `src/molzoo/specs/mace_omol.md` per CLAUDE.md's molzoo-spec workflow.)
-2. **Bit-exact match (ac-007, carried from 01, upstream-blocked)** — drop the
-   model-level residual from ~7e-7 eV to ~1e-8 eV by building the equivariant
-   ops with the e3nn-convention `O3_e3nn` CG group. `MACEOMol(group=)` plumbing
-   already exists but is unusable: `O3_e3nn` crashes `cue.Irreps.sort()` in
-   cuequivariance 0.10. Blocked until the upstream bug is fixed or `O3_e3nn` is
-   vendored.
+2. **Model-level accuracy (ac-003, carried from 01 ac-007)** — RESOLVED. The
+   accepted bar is E/F within **1e-4** of official OMOL (operator decision,
+   2026-06-21); the default cue `"O3"` group already achieves **7e-7 eV /
+   4.3e-6 eV·Å** (01 ac-006), well inside it. The ~1e-8 bit-exact stretch goal
+   via the e3nn-convention `O3_e3nn` group is dropped: it is unneeded at 1e-4
+   and unavailable in cuequivariance 0.10 (no `O3_e3nn` group). The
+   `MACEOMol(group=)` hook is kept for if it returns.
 
 ## Domain basis
 
@@ -72,8 +73,9 @@ the CG-basis convention swap. The post-collate batch schema and edge convention
 - [x] Integration test: post-collate batch → energy/forces consistency vs the raw `energy_forces` path
 - [x] Fix `RadialMLP` dtype contract (honor `config.ftype`) so fp64-via-config works without `.double()`
 - [x] Backfill `src/molzoo/specs/mace_omol.md` per the molzoo-spec workflow (ac-002, docs) — status `partial`, mirrored to docs + zensical
+- [x] Model-level E/F accuracy ≤ 1e-4 vs official (ac-003) — met at 7e-7 eV / 4.3e-6 eV·Å with default cue O3 (01 ac-006); 1e-4 is the accepted bar (operator decision)
 - [ ] Edge sourcing via `molpot.graph` / `NeighborList` for standalone use (optional; pipeline path sources edges at collate)
-- [ ] (blocked) O3_e3nn bit-exact path — unblock when cuequivariance `cue.Irreps.sort()` is fixed (ac-003)
+- [~] O3_e3nn bit-exact (~1e-8) — dropped: unneeded for the 1e-4 bar and unavailable in cueq 0.10 (no `O3_e3nn` group); `MACEOMol(group=)` hook kept
 
 ## Testing
 

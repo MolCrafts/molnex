@@ -175,7 +175,7 @@ $$
 |----|------------|--------|------|------------|
 | A1 | PolynomialCutoff + trainable un-normalised Bessel (`eps=0`) | OMOL variant vs standard MACE | low | `scripts/omol_port/verify_radial.py` (7e-15) |
 | A2 | charge/spin via `JointFeatureEmbedding` added to node feats + into E0 | OMOL conditioning | low | `scripts/omol_port/verify_joint_embed.py` (0) |
-| A3 | cue `"O3"` group (not `O3_e3nn`) | `O3_e3nn` crashes `cue.Irreps.sort()` in cueq 0.10 | low | residual 7e-7 eV vs official; bit-exact blocked (`mace-omol-port-02` ac-003) |
+| A3 | cue `"O3"` group (not `O3_e3nn`) | `O3_e3nn` absent in cueq 0.10; unneeded at the accepted 1e-4 bar | low | residual 7e-7 eV / 4.3e-6 eV·Å vs official — inside 1e-4 (`mace-omol-port-02` ac-003 verified) |
 | A4 | TensorDict `forward` forces via `ForceDerivation` (`func.grad`); `energy_forces` via `autograd.grad` | compile-friendly molnex contract | low | `tests/test_molzoo/test_mace_omol.py` (1e-8 vs autograd) |
 | A5 | edge convention `v=pos[t]-pos[s]`, `edge_index (E,2)→(2,E)` | MolNex collate schema | low | `tests/test_molzoo/test_mace_omol.py` |
 | A6 | `RadialMLP` honors `config.ftype` | fp64-via-config without `.double()` | low | `tests/test_molzoo/test_mace_omol.py` (fp64) |
@@ -185,11 +185,14 @@ $$
 
 ### 7.1 Research Reproduction
 
-The full model with official OMOL weights reproduces the official cueq OMOL twin
-on a charged molecule to **7.0e-7 eV / 4.3e-6 eV·Å** (`scripts/omol_port/verify_e2e.py`,
-RESULT: PASS); the cueq twin itself matches e3nn OMOL to 1.5e-8 eV / 3.2e-8 eV·Å
-(`scripts/omol_port/verify_omol_cueq_equiv.py`). Bit-exact (~1e-8) model-level
-match via `O3_e3nn` is **not claimed** — blocked upstream (A3).
+The accepted accuracy bar is E/F within **1e-4** of official OMOL (operator
+decision, 2026-06-21). The full model with official OMOL weights reproduces the
+official cueq OMOL twin on a charged molecule to **7.0e-7 eV / 4.3e-6 eV·Å**
+(`scripts/omol_port/verify_e2e.py`, RESULT: PASS) — three to four orders inside
+the bar; the cueq twin itself matches e3nn OMOL to 1.5e-8 eV / 3.2e-8 eV·Å
+(`scripts/omol_port/verify_omol_cueq_equiv.py`). Bit-exact (~1e-8) via the
+`O3_e3nn` CG group is an unneeded stretch goal and is unavailable in
+cuequivariance 0.10 (A3).
 
 ### 7.2 Symmetry and Shape Tests
 
@@ -248,4 +251,7 @@ rows.
 
 - 2026-06-21: created from paper + `ACEsuit/mace@v0.3.16`; filled §1–§9 from the
   `mace-omol-port-01/02` implementation (status draft → partial). §5 rows
-  `matched` per `scripts/omol_port/verify_*.py`; bit-exact O3_e3nn `not claimed`.
+  `matched` per `scripts/omol_port/verify_*.py`.
+- 2026-06-21: accuracy bar set to 1e-4 (operator); default cue O3 meets it at
+  7e-7 eV / 4.3e-6 eV·Å. O3_e3nn bit-exact dropped (absent in cueq 0.10).
+  `mace-omol-port-02` ac-003 verified; chain `mace-omol-port` done.

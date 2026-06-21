@@ -23,14 +23,17 @@ criteria:
     status: verified
     last_checked: 2026-06-21
   - id: ac-003
-    summary: bit-exact (~1e-8) model-level match via e3nn-convention CG group
+    summary: model-level E/F within 1e-4 of official OMOL (default cue O3 group)
     type: scientific
     pass_when: |
-      Building the equivariant ops with the e3nn-convention O3 group drops the
-      model-level residual to ~1e-8 eV (scripts/omol_port/verify_e2e.py under
-      group=O3_e3nn). BLOCKED: O3_e3nn crashes cue.Irreps.sort() in
-      cuequivariance 0.10; MACEOMol(group=) plumbing exists but is unusable
-      until the upstream bug is fixed or O3_e3nn is vendored.
-    evaluator_hint: manual
-    status: pending
+      MACEOMol with official weights matches official OMOL energy/forces to
+      |dE| < 1e-4 eV and max|dF| < 1e-4 eV/Ang. Achieved 7.0e-7 eV / 4.3e-6
+      eV/Ang with the default cue "O3" group (mace-omol-port-01 ac-006,
+      scripts/omol_port/verify_e2e.py: PASS) — well inside the 1e-4 bar.
+      Bit-exact ~1e-8 via the e3nn-convention CG group is an unneeded stretch
+      goal and is unavailable in cuequivariance 0.10 (no O3_e3nn group); the
+      MACEOMol(group=) hook remains for if it returns. The 1e-4 tolerance is
+      the accepted requirement (operator decision, 2026-06-21).
+    status: verified
+    last_checked: 2026-06-21
 ---
