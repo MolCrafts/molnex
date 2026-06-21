@@ -243,19 +243,16 @@ class TestTranslationInvariance:
 class TestRotationEquivariance:
     """Scalar features and energy are rotation-invariant. Forces are rotation-equivariant.
 
-    Note: MACE rotation tests require cuequivariance_ops_torch (GPU kernel)
-    for full numerical accuracy. The naive CPU fallback introduces larger
-    numerical errors in the SymmetricContraction. These tests are marked
-    xfail when the GPU kernel is unavailable.
+    The MACE encoder propagates a *pure-scalar* node state between layers and
+    keeps mixed-l components only transiently inside each tensor-product message
+    (contracted back to invariants by the ProductHead). Rotation invariance is
+    therefore exact to float precision on both CPU and GPU — these tests were
+    previously xfailed under a misdiagnosis ("missing cuequivariance_ops_torch
+    GPU kernel"); the real cause was non-equivariant scalar->mixed-l plain
+    linear layers in the encoder. See molrep/readout/product.py and
+    molzoo/mace.py for the fix.
     """
 
-    _mace_rotation_xfail = pytest.mark.xfail(
-        reason="MACE rotation invariance requires cuequivariance_ops_torch GPU kernel; "
-        "naive fallback introduces O(0.1) numerical error in SymmetricContraction",
-        strict=False,
-    )
-
-    @_mace_rotation_xfail
     @pytest.mark.parametrize("seed", SEEDS)
     def test_mace_encoder_scalar_invariance(self, mace_encoder, small_molecule, seed):
         torch.manual_seed(seed)
@@ -278,7 +275,6 @@ class TestRotationEquivariance:
 
         assert torch.allclose(ref, rotated, atol=1e-4, rtol=1e-4)
 
-    @_mace_rotation_xfail
     @pytest.mark.parametrize("seed", SEEDS)
     def test_mace_pipeline_energy_invariance(self, mace_encoder, small_molecule, seed):
         torch.manual_seed(seed)
@@ -311,7 +307,6 @@ class TestRotationEquivariance:
 
         assert torch.allclose(e_ref, e_r, atol=1e-4, rtol=1e-4)
 
-    @_mace_rotation_xfail
     @pytest.mark.parametrize("seed", SEEDS)
     def test_mace_pipeline_force_equivariance(self, mace_encoder, small_molecule, seed):
         """F(Rx) = R @ F(x)"""

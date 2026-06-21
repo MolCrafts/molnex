@@ -286,14 +286,15 @@ class TestInteractionBlock:
         num_features = interaction_config["num_features"]
         num_bessel = interaction_config["num_bessel"]
 
-        # Calculate irreps dimension (uniform multiplicity after optimization)
+        # Calculate irreps dimension (uniform multiplicity after optimization).
+        # This is the *message* dim; the node state itself is pure scalar.
         irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
 
         # Calculate spherical harmonics dimension
         sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
 
-        # Create input data
-        node_feats = torch.randn(n_nodes, irreps_dim)
+        # Node state is pure scalar (num_features); messages are mixed-l.
+        node_feats = torch.randn(n_nodes, num_features)
         edge_attrs = torch.randn(n_edges, sh_dim)
         edge_feats = torch.randn(n_edges, num_bessel)
         edge_index = torch.randint(0, n_nodes, (n_edges, 2))
@@ -306,9 +307,9 @@ class TestInteractionBlock:
             edge_index=edge_index,
         )
 
-        # Check output shapes
+        # Message is mixed-l (irreps_dim); skip is the scalar node state.
         assert output_feats.shape == (n_nodes, irreps_dim)
-        assert skip_connection.shape == (n_nodes, irreps_dim)
+        assert skip_connection.shape == (n_nodes, num_features)
 
     def test_skip_connection_is_input(self, interaction_block, interaction_config):
         """Test that skip connection returns the original input."""
@@ -317,12 +318,11 @@ class TestInteractionBlock:
         l_max = interaction_config["l_max"]
         num_features = interaction_config["num_features"]
 
-        # Calculate dimensions (uniform multiplicity)
-        irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
+        # Node state is pure scalar (num_features); messages are mixed-l.
         sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
 
         # Create input data
-        node_feats = torch.randn(n_nodes, irreps_dim)
+        node_feats = torch.randn(n_nodes, num_features)
         edge_attrs = torch.randn(n_edges, sh_dim)
         edge_feats = torch.randn(n_edges, interaction_config["num_bessel"])
         edge_index = torch.randint(0, n_nodes, (n_edges, 2))
@@ -410,12 +410,12 @@ class TestInteractionBlock:
         l_max = interaction_config["l_max"]
         num_features = interaction_config["num_features"]
 
-        # Calculate dimensions (uniform multiplicity)
+        # Message dim is mixed-l; node state is pure scalar.
         irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
         sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
 
-        # Create input data
-        node_feats = torch.randn(n_nodes, irreps_dim)
+        # Create input data (scalar node state)
+        node_feats = torch.randn(n_nodes, num_features)
         edge_attrs = torch.randn(n_edges, sh_dim)
         edge_feats = torch.randn(n_edges, interaction_config["num_bessel"])
         edge_index = torch.randint(0, n_nodes, (n_edges, 2))
@@ -458,7 +458,10 @@ class TestProductHead:
         # Check linear
         assert hasattr(product_head, "linear")
         assert isinstance(product_head.linear, nn.Linear)
-        assert product_head.linear.in_features == product_config["hidden_dim"]
+        # The contraction emits invariant scalars (num_features), so the readout
+        # linear maps num_features -> out_dim (not the full mixed-l hidden_dim).
+        num_features = product_config["hidden_dim"] // (product_config["l_max"] + 1) ** 2
+        assert product_head.linear.in_features == num_features
         assert product_head.linear.out_features == product_config["out_dim"]
 
     def test_symmetric_contraction_config(self, product_head, product_config):
@@ -550,14 +553,17 @@ class TestProductHead:
         n_nodes = 15
         hidden_dim = product_config["hidden_dim"]
 
+        # Input is the mixed-l message (hidden_dim); the contraction outputs
+        # invariant scalars (num_features).
+        num_features = hidden_dim // (product_config["l_max"] + 1) ** 2
         node_features = torch.randn(n_nodes, hidden_dim)
         atom_types = torch.randint(0, product_config["num_species"], (n_nodes,))
 
         # Call symmetric_contraction directly
         basis = product_head.symmetric_contraction(node_features, atom_types)
 
-        # Output should have same shape as input (contraction preserves dimension)
-        assert basis.shape == (n_nodes, hidden_dim)
+        # Contraction maps mixed-l input -> invariant scalar output.
+        assert basis.shape == (n_nodes, num_features)
 
     def test_basis_projection_component(self, product_head, product_config):
         """Test basis_projection component works independently."""
@@ -576,11 +582,11 @@ class TestProductHead:
     def test_linear_component(self, product_head, product_config):
         """Test linear component works independently."""
         n_nodes = 15
-        hidden_dim = product_config["hidden_dim"]
         out_dim = product_config["out_dim"]
 
-        # Create dummy features
-        features = torch.randn(n_nodes, hidden_dim)
+        # The readout linear consumes the contracted scalars (num_features).
+        num_features = product_config["hidden_dim"] // (product_config["l_max"] + 1) ** 2
+        features = torch.randn(n_nodes, num_features)
 
         # Call linear directly
         output = product_head.linear(features)
@@ -733,11 +739,11 @@ class TestInteractionBlockEquivariance:
         l_max = 1
         num_features = 32
 
-        # Calculate dimensions
+        # Message dim is mixed-l; node state is pure scalar.
         irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
         sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
 
-        node_feats = torch.randn(n_nodes, irreps_dim)
+        node_feats = torch.randn(n_nodes, num_features)
         edge_attrs = torch.randn(n_edges, sh_dim)
         edge_feats = torch.randn(n_edges, 8)
         edge_index = torch.randint(0, n_nodes, (n_edges, 2))

@@ -71,13 +71,27 @@ class SymmetricContraction(nn.Module):
         hidden_dim: int,
         num_species: int,
         max_body_order: int = 2,
+        irreps_in: str | None = None,
+        irreps_out: str | None = None,
     ):
         """Initialize symmetric contraction layer.
 
         Args:
-            hidden_dim: Dimension of input node features.
+            hidden_dim: Dimension of input node features. Used to build the
+                default pure-scalar (``{hidden_dim}x0e``) irreps when
+                ``irreps_in`` / ``irreps_out`` are not supplied.
             num_species: Number of atomic species.
             max_body_order: Maximum body order (1-3).
+            irreps_in: Explicit input irreps (e.g. ``"16x0e + 16x1o + 16x2e"``).
+                When ``None`` the input is assumed to be pure scalars
+                (``{hidden_dim}x0e``). MACE feeds *mixed-l equivariant* node
+                features here, so the real irreps MUST be passed — declaring a
+                mixed-l tensor as ``{hidden_dim}x0e`` makes cuEquivariance treat
+                the l>0 components as scalars and silently breaks rotation
+                invariance (dims collide so no error is raised).
+            irreps_out: Explicit output irreps. When ``None`` it mirrors the
+                input. The MACE readout requests scalars only (``Nx0e``) so the
+                contracted node features are rotation-invariant.
         """
         super().__init__()
 
@@ -87,9 +101,10 @@ class SymmetricContraction(nn.Module):
             max_body_order=max_body_order,
         )
 
-        # Build cuEquivariance irreps for scalars only (L=0)
-        irreps_in = f"{hidden_dim}x0e"
-        irreps_out = irreps_in
+        # Default to a pure-scalar (L=0) contraction; callers handling
+        # mixed-l equivariant features (MACE) pass the real irreps instead.
+        irreps_in = irreps_in if irreps_in is not None else f"{hidden_dim}x0e"
+        irreps_out = irreps_out if irreps_out is not None else irreps_in
 
         cue_irreps_in = cue.Irreps("O3", irreps_in)
         cue_irreps_out = cue.Irreps("O3", irreps_out)
