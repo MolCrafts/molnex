@@ -65,6 +65,10 @@ class EquivariantProductBasis(nn.Module):
             original_mace=True,
             dtype=ftype,
             math_dtype=ftype,
+            # Pure-torch path: the fused kernel is a custom autograd.Function with
+            # no setup_context, so functorch (ForceDerivation) / torch.compile
+            # cannot trace it. The fallback is numerically identical.
+            use_fallback=True,
         )
         self.linear = cuet.Linear(irreps_out, irreps_out, layout=cue.ir_mul, dtype=ftype)
 

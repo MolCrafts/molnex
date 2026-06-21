@@ -139,6 +139,85 @@ def test_missing_charge_spin_defaults_to_neutral(model, single_graph):
     assert torch.allclose(out["graphs", "energy"], ref["energy"], atol=1e-9, rtol=0)
 
 
+def test_force_loss_reaches_parameters_in_eval_mode(model, single_graph):
+    """Force-supervised training must backprop to the parameters.
+
+    Regression for ``mace_omol.py`` ``energy_forces`` gating ``create_graph`` on
+    ``self.training``: with the model in its default eval mode the autograd
+    force was detached from the parameter graph, so a force loss produced zero
+    gradient for every parameter (and ``loss.backward()`` raised). The robust
+    form keeps the force in the graph whenever grad is enabled, so a strict
+    majority of parameters receive a gradient. See spec
+    ``cuet-force-doublebackward`` Findings (run 2).
+
+    The readout's output layers are zero-initialised (MACE starts at the E0
+    baseline), which makes a fresh model's energy position-independent and its
+    forces identically zero — a degenerate state in which no force loss can
+    reach any parameter. Perturb the parameters first so the model produces real
+    forces, then assert the loss reaches them.
+    """
+    pos, Z, batch, tc, ts = single_graph
+    edge_index = _full_edges(batch).t().contiguous()
+    assert not model.training  # default eval mode — the regression condition
+
+    torch.manual_seed(7)
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(torch.randn_like(p) * 0.05)
+
+    model.zero_grad(set_to_none=True)
+    out = model.energy_forces(pos, Z, edge_index, batch, tc, ts, compute_forces=True)
+    forces = out["forces"]
+    assert forces.abs().max() > 0.0, "perturbed model still produces zero forces"
+
+    loss = (forces**2).mean()
+    loss.backward()
+
+    params = list(model.parameters())
+    n_with_grad = sum(
+        int(p.grad is not None and float(p.grad.abs().sum()) > 0.0) for p in params
+    )
+    assert n_with_grad > len(params) // 2, (
+        f"force loss reached only {n_with_grad}/{len(params)} parameters; "
+        "the force is detached from the parameter graph"
+    )
+
+
+def test_functorch_force_loss_trains_via_forward(model, single_graph):
+    """The molnex-pipeline ``forward`` (functorch ``ForceDerivation``) unlocks
+    force-supervised training.
+
+    ``forward`` derives forces with ``torch.func.grad`` (compile-friendly, single
+    backward). That transform cannot trace cuEquivariance's fused custom ops, so
+    before the functorch port it raised ``setup_context``; now the spherical
+    harmonics are pure-torch and the equivariant tensor products run on their
+    ``use_fallback`` path, so a force loss backprops to the parameters. See spec
+    ``cuet-force-doublebackward`` Resolution (run 3, functorch port).
+    """
+    pos, Z, batch, tc, ts = single_graph
+
+    torch.manual_seed(7)
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(torch.randn_like(p) * 0.05)
+
+    td = _make_batch(pos, Z, batch, _full_edges(batch), tc, ts)
+    out = model.forward(td)
+    forces = out["atoms", "forces"]
+    assert forces.abs().max() > 0.0
+
+    model.zero_grad(set_to_none=True)
+    (forces**2).mean().backward()
+
+    params = list(model.parameters())
+    n_with_grad = sum(
+        int(p.grad is not None and float(p.grad.abs().sum()) > 0.0) for p in params
+    )
+    assert n_with_grad > len(params) // 2, (
+        f"functorch force loss reached only {n_with_grad}/{len(params)} parameters"
+    )
+
+
 def test_batched_graphs(model):
     """Two molecules in one batch: per-graph energies, correct atom routing."""
     torch.manual_seed(2)

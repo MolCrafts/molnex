@@ -108,6 +108,9 @@ class ResidualInteraction(nn.Module):
             shared_weights=False,
             internal_weights=False,
             dtype=ftype,
+            # Pure-torch path so functorch (ForceDerivation) / torch.compile can
+            # trace the force: the fused kernel has no functorch setup_context.
+            use_fallback=True,
         )
         irreps_mid = self.conv_tp.irreps_out
 

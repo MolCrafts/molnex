@@ -106,6 +106,9 @@ class SymmetricContraction(nn.Module):
             layout_out=cue.ir_mul,
             original_mace=True,
             dtype=config.ftype,
+            # Pure-torch path so functorch (ForceDerivation) / torch.compile can
+            # trace the force: the fused kernel has no functorch setup_context.
+            use_fallback=True,
         )
 
     def forward(

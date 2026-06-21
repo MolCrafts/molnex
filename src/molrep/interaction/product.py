@@ -91,6 +91,9 @@ class ConvTP(nn.Module):
             layout=cue.ir_mul,
             shared_weights=False,
             internal_weights=False,
+            # Pure-torch path so functorch (ForceDerivation) / torch.compile can
+            # trace the force: the fused kernel has no functorch setup_context.
+            use_fallback=True,
         )
 
         self.weight_numel = self.cue_tp.weight_numel

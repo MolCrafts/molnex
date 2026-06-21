@@ -189,7 +189,16 @@ class MACEOMol(nn.Module):
         )
         out = {"energy": total_energy}
         if compute_forces:
-            grad = torch.autograd.grad(total_energy.sum(), positions, create_graph=self.training)[0]
+            # ``create_graph`` must stay True whenever grad is enabled, not only
+            # in train mode: force-supervised losses backprop through the force
+            # into the parameters (mixed 2nd derivative dE/dx d\theta), and the
+            # model is often left in eval mode. Gating solely on ``self.training``
+            # silently detached the force from the parameter graph. Pure inference
+            # opts out via ``torch.no_grad()`` / ``compute_forces=False``.
+            create_graph = self.training or torch.is_grad_enabled()
+            grad = torch.autograd.grad(
+                total_energy.sum(), positions, create_graph=create_graph
+            )[0]
             out["forces"] = -grad
         return out
 
