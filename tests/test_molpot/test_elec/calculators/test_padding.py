@@ -1,11 +1,15 @@
 import os
+import sys
 import time
+from pathlib import Path
 
 import numpy
 import torch
 from ase.io import read
-from ase.neighborlist import neighbor_list
 from torch.nn.utils.rnn import pad_sequence
+
+sys.path.append(str(Path(__file__).parents[1]))
+from helpers import periodic_neighbor_list
 
 from molpot.potentials.elec import CoulombPotential, EwaldCalculator
 from molpot.potentials.elec.lib import compute_batched_kvectors
@@ -31,10 +35,15 @@ i_list, j_list, d_list, pos_list, cell_list, charges_list, periodic_list = (
 )
 
 for atoms in systems:
-    i_, j_, d_ = neighbor_list("ijd", atoms, cutoff=5.0)
-    i_list.append(torch.tensor(i_, dtype=torch.long))
-    j_list.append(torch.tensor(j_, dtype=torch.long))
-    d_list.append(torch.tensor(d_, dtype=torch.float32))
+    # Full periodic neighbour list via our own pure-torch op.
+    pos_t = torch.tensor(atoms.get_positions(), dtype=torch.float64)
+    cell_t = torch.tensor(numpy.array(atoms.get_cell()), dtype=torch.float64)
+    pairs_, _, dist_ = periodic_neighbor_list(
+        pos_t, cell_t, cutoff=5.0, full_list=True, periodic=bool(atoms.get_pbc().all())
+    )
+    i_list.append(pairs_[:, 0].to(torch.long))
+    j_list.append(pairs_[:, 1].to(torch.long))
+    d_list.append(dist_.to(torch.float32))
     pos_list.append(torch.tensor(atoms.get_positions(), dtype=torch.float32))
     cell_list.append(torch.tensor(numpy.array(atoms.get_cell()), dtype=torch.float32))
     charges_list.append(torch.tensor(atoms.get_initial_charges(), dtype=torch.float32) + 1)
