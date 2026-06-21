@@ -20,7 +20,12 @@ criteria:
       d=spatially-correlated, e=COM-momentum injection,
       f=unbalanced injection/needs thermostat friction,
       g=configuration-locked distortion, h=altered structure/dynamics).
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
+    note: |
+      Relocated to src/molix/analysis/verdict.py (_FAILURE_FORM:27-36);
+      all 8 a-h forms covered by test_each_single_violation_is_structured_with_named_form
+      (tests/test_molix/test_verdict.py:55, PASS).
   - id: ac-003
     summary: Combined biased+correlated fixture reports PES-distortion form
     type: scientific
@@ -28,7 +33,12 @@ criteria:
       A fixture violating criteria a and d together is characterized as
       "biased + spatially-correlated => PES distortion, not noise"
       with criteria ordered by the documented physical priority.
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
+    note: |
+      characterize_failure (verdict.py:99-100) + _PRIORITY:38; asserted by
+      test_biased_plus_correlated_is_pes_distortion
+      (tests/test_molix/test_verdict.py:66, PASS).
   - id: ac-004
     summary: Threshold constants are explicit, named, and documented
     type: code
@@ -47,7 +57,13 @@ criteria:
       8 boolean criterion columns, verdict, form, and T_eff_ratio;
       a missing condition key from either input table appears as an
       incomplete-cell row rather than being silently dropped.
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
+    note: |
+      build_machine_table (verdict.py:118-129) + incomplete-row path
+      (run_verdict:165-174); asserted by test_machine_table_schema_is_stable
+      and test_run_verdict_joins_and_flags_incomplete
+      (tests/test_molix/test_verdict.py:73,91, PASS).
   - id: ac-006
     summary: Human-readable report renders per-cell verdict and T_eff
     type: code

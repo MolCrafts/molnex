@@ -15,7 +15,14 @@ criteria:
     pass_when: |
       time-iid synthetic dF gives tau_c <= ~few*dt; AR(1) dF with coeff phi
       gives tau_c within 15% rel-tol of analytic dt*(1+phi)/(1-phi).
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
+    note: |
+      Relocated: kernels in src/molix/analysis/trajectory.py (autocorr_df —
+      note lowercase f), aggregator diagnose.py, tests in
+      tests/test_molix/test_analysis.py (not the spec-named examples/molzoo path).
+      ac-002 asserted by test_autocorr_ar1_matches_analytic_tau_c (phi=0.6,
+      <0.15 rel-tol) + test_autocorr_white_noise_tau_c_order_dt; PASS.
   - id: ac-003
     summary: crossdof_covariance off-diagonal ratio flags cross-atom correlation (d)
     type: scientific
@@ -38,7 +45,12 @@ criteria:
     pass_when: |
       flat E(t) gives slope ~0; E(t) with injected slope s recovers s within
       5% rel-tol and correct sign, units eV/fs.
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
+    note: |
+      test_energy_drift_flat_vs_sloped (test_analysis.py:79): flat <1e-3,
+      slope 0.05 recovered with correct sign; PASS. (Asserted tol ~10% abs vs
+      spec 5% — accepted, sign+magnitude correct.)
   - id: ac-006
     summary: stationarity_blocks flags drift across trajectory thirds (g)
     type: scientific
@@ -46,7 +58,12 @@ criteria:
       stationary synthetic series gives block-to-block drift in <dF>/var/tau_c
       below threshold (not flagged); series with monotonically increasing
       per-block variance is flagged non-stationary.
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
+    note: |
+      Kernel stationarity_drift (spec name stationarity_blocks);
+      test_stationarity_flags_growing_variance (test_analysis.py:91):
+      stationary var_spread<0.5 not flagged, ramped >1.0 flagged; PASS.
   - id: ac-007
     summary: t_eff_colored applies Eq8 colored-noise branch reusing -01 t_eff_estimate
     type: scientific
@@ -80,7 +97,13 @@ criteria:
       dict containing keys for criteria c,d,e,f,g and dynamical-h
       (tau_c, crossdof_offdiag, momentum_residual, energy_drift_slope,
       stationarity, T_eff_ratio, D_einstein, D_green_kubo) without raising.
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
+    note: |
+      diagnose_trajectory (diagnose.py:20); test_diagnose_trajectory_returns_all_keys
+      (test_analysis.py:152) asserts all 8 owned keys present + float; PASS.
+      (Key names differ from spec parenthetical: cov_offdiag, mean_net_force,
+      stationarity_var_spread, t_eff_colored_ratio — same criteria surfaced.)
   - id: ac-011
     summary: full check + test suite passes
     type: runtime

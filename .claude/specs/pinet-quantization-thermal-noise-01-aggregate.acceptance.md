@@ -9,14 +9,28 @@ criteria:
       equals <|ΔF|^2>*dt/(2*gamma*mass*dof) and a dimensional-analysis case
       (eV^2/Å^2 * fs over the denominator) reduces to a temperature ratio;
       old N^2*s heuristic is gone from the docstring.
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
+    note: |
+      Relocated: implemented as EffectiveTemperature.energy in
+      src/molix/quant.py:303 (Eq8 <|dF|^2>*dt/(2*gamma*mass*dof), d=3N),
+      not the spec-named examples/molzoo path. Tested by
+      test_effective_temperature_matches_eq8 + _ratio_is_dimensionless
+      (tests/test_molix/test_quant.py:130,142, PASS). No N^2*s heuristic
+      remains (grep empty).
   - id: ac-002
     summary: T_eff is reported as a ratio to T_target, scaling as 1/gamma
     type: code
     pass_when: |
       test_t_eff.py asserts t_eff_estimate output halves when gamma doubles
       (1/γ scaling) and is returned as T_eff/T_target, never a bare number.
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
+    note: |
+      Relocated: EffectiveTemperature.ratio (src/molix/quant.py:305-307)
+      returns dimensionless T_eff/T_target; 1/γ scaling asserted by
+      test_effective_temperature_scales_as_inverse_gamma
+      (tests/test_molix/test_quant.py:136, PASS).
   - id: ac-003
     summary: fp64-vs-fp64 control yields zero residual diagnostics
     type: scientific
@@ -24,7 +38,13 @@ criteria:
       a control row built from an fp64 reference quantized against itself
       produces F_bias, F_rms, and T_eff_ratio all == 0 (within _EPS) in the
       aggregated table.
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
+    note: |
+      Null control satisfied via model-vs-itself rather than an aggregated
+      CSV row (no such table exists): test_force_delta_zero_residual_has_zero_moments
+      (zero dF -> all moments 0.0) and test_null_control_identical_weights_zero_delta
+      (identical state_dict -> F_rms/F_bias ~0, abs 1e-10), tests/test_molix/test_quant.py:172,212 PASS.
   - id: ac-004
     summary: aggregation emits one row per matrix cell with verdict columns
     type: code

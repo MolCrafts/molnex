@@ -1,6 +1,6 @@
 ---
 title: Packed 感知的 collate 快速路径（packed-aware collate fast path）
-status: code-complete
+status: done
 created: 2026-06-10
 ---
 
