@@ -1,9 +1,19 @@
-"""Trajectory diagnostics for the quantization-as-thermal-noise study (criteria c-h).
+"""Diagnostics for the quantization-as-thermal-noise study.
 
-Pure numerical kernels over a paired-trajectory artifact plus the
-``diagnose_trajectory`` aggregator. See :mod:`molix.analysis.trajectory`.
+Phase-A static aggregation (criteria a/b) in :mod:`molix.analysis.aggregate`,
+trajectory kernels (criteria c-h) in :mod:`molix.analysis.trajectory` +
+``diagnose_trajectory``, and the cross-condition verdict synthesis in
+:mod:`molix.analysis.verdict`.
 """
 
+from molix.analysis.aggregate import (
+    CONDITION_KEYS,
+    PHASE_A_THRESHOLDS,
+    ROW_COLUMNS,
+    PhaseAAggregator,
+    PhaseACell,
+    PhaseAThresholds,
+)
 from molix.analysis.diagnose import diagnose_trajectory
 from molix.analysis.trajectory import (
     autocorr_df,
@@ -29,7 +39,13 @@ from molix.analysis.verdict import (
 )
 
 __all__ = [
+    "CONDITION_KEYS",
+    "PHASE_A_THRESHOLDS",
+    "ROW_COLUMNS",
     "VERDICT_THRESHOLDS",
+    "PhaseAAggregator",
+    "PhaseACell",
+    "PhaseAThresholds",
     "VerdictThresholds",
     "autocorr_df",
     "build_machine_table",

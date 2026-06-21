@@ -1,6 +1,6 @@
 ---
 title: PiNet Quantization-as-Thermal-Noise — Phase A Aggregation + T_eff Correction
-status: approved
+status: done
 created: 2026-06-01
 chain: pinet-quantization-thermal-noise
 ---
@@ -40,17 +40,24 @@ Phase A 已基本构建：`quant_study.py` 提供 `fake_quantize_tensor` / `quan
 放置说明：`examples/molzoo/` 与 Phase A 既有脚本同列。注意 `examples/` 被 gitignore（实验代码未纳入版本控制）——Phase A 已接受此约定；若该聚合能力需版本控制/复用，应迁至受跟踪的 `src/` 位置，否则默认留在 `examples/` 与 Phase A 保持一致。
 
 ## Files to create or modify
-- /Users/roykid/work/molcrafts/molnex/examples/molzoo/quant_study.py
-- /Users/roykid/work/molcrafts/molnex/examples/molzoo/aggregate_phase_a.py (new)
-- /Users/roykid/work/molcrafts/molnex/examples/molzoo/tests/test_t_eff.py (new)
-- /Users/roykid/work/molcrafts/molnex/examples/molzoo/tests/test_aggregate_phase_a.py (new)
+
+RELOCATED to version-controlled `src/` (the spec body originally sketched these
+under the gitignored `examples/molzoo/`, which was never materialized; per the
+"放置说明" above, version-controlled/reused capability moves to `src/`):
+
+- `src/molix/quant.py` — `EffectiveTemperature` (Eq8 T_eff, OOP) + `ForceDelta` (ΔF moments)
+- `src/molix/analysis/aggregate.py` (new) — `PhaseAAggregator` / `PhaseACell` /
+  `PhaseAThresholds` (OOP Phase-A cross-condition aggregation → diagnostic table + CSV)
+- `src/molix/analysis/__init__.py` — exports the aggregator alongside the verdict/diagnostics
+- `tests/test_molix/test_quant.py` — Eq8 / ΔF-moment tests
+- `tests/test_molix/test_aggregate.py` (new) — table schema / a-b verdicts / control / CSV
 
 ## Tasks
-- [ ] Write failing tests for t_eff_estimate dimensional correctness per Eq8 (examples/molzoo/tests/test_t_eff.py)
-- [ ] Implement t_eff_estimate(f_rms_sq, dt, gamma, mass, dof) -> T_eff/T_target in examples/molzoo/quant_study.py
-- [ ] Replace dimensionally-wrong T_eff heuristic in quant_study.py module docstring (line ~19) with Eq8
-- [ ] Write failing tests for cross-condition aggregation table schema (examples/molzoo/tests/test_aggregate_phase_a.py)
-- [ ] Implement aggregate_phase_a.py: load sweep checkpoints, run evaluate_quantization over the variable matrix, emit long-form CSV + console table with unbiased/gaussian/T_eff_ratio verdict columns
-- [ ] Add docstrings per Python style with units (ΔF in eV/Å, T_eff in K, Δt in fs) on t_eff_estimate and aggregate entrypoint
-- [ ] Verify aggregated table against a known fp64-vs-fp64 control (ΔF≡0 ⇒ F_bias and T_eff_ratio collapse to 0)
-- [ ] Run full check + test suite
+- [x] Eq8 T_eff implemented as OOP `EffectiveTemperature` (quant.py); dimensionally-wrong N²·s heuristic removed
+- [x] T_eff reported as dimensionless `T_eff/T_target` ratio scaling as 1/γ (`EffectiveTemperature.ratio`)
+- [x] Cross-condition aggregation as OOP `PhaseAAggregator.table/row` → one row per matrix cell
+- [x] Phase-A `unbiased` (criterion a) + `gaussian` (criterion b) verdict columns, with thresholds in `PhaseAThresholds`
+- [x] CSV emitter (`PhaseAAggregator.to_csv`) without re-rolling a PiNet ctor
+- [x] Google-style docstrings with units (ΔF eV/Å, T_eff via Eq8, Δt fs)
+- [x] fp64-vs-fp64 null control (ΔF≡0 ⇒ F_bias / F_rms / T_eff_ratio collapse to 0)
+- [x] ruff clean + relocated test suite green (39 passed)
