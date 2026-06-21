@@ -78,3 +78,53 @@ def test_run_records_trajectory_shapes():
     assert out["pos"].shape == (10, 4, 3)
     assert out["vel"].shape == (10, 4, 3)
     assert out["energy"].shape == (10,)
+
+
+def test_force_caching_matches_naive_step_loop():
+    """``run`` (one force eval/step via cache) is bit-identical to a per-step ``step`` loop."""
+    k, mass, dt, gamma, kbt = 1.0, 1.0, 0.05, 3.0, 1.0
+    pos0 = torch.randn(6, 3, dtype=_DTYPE)
+    vel0 = torch.randn(6, 3, dtype=_DTYPE)
+
+    cached = LangevinVerletIntegrator(_harmonic(k), dt=dt, gamma=gamma, kbt=kbt, mass=mass, seed=11)
+    out = cached.run(pos0.clone(), vel0.clone(), 30)
+
+    naive = LangevinVerletIntegrator(_harmonic(k), dt=dt, gamma=gamma, kbt=kbt, mass=mass, seed=11)
+    p, v = pos0.clone(), vel0.clone()
+    for i in range(30):
+        p, v, _, _ = naive.step(p, v)
+        assert torch.equal(out["pos"][i], p)
+        assert torch.equal(out["vel"][i], v)
+
+
+def test_step_cached_round_trip_matches_step():
+    """``initial_force`` + ``step_cached`` reproduces ``step`` exactly (same seed)."""
+    k, mass, dt, gamma, kbt = 1.0, 1.0, 0.05, 2.0, 1.5
+    pos0 = torch.randn(5, 3, dtype=_DTYPE)
+    vel0 = torch.randn(5, 3, dtype=_DTYPE)
+
+    a = LangevinVerletIntegrator(_harmonic(k), dt=dt, gamma=gamma, kbt=kbt, mass=mass, seed=3)
+    pa, va, _, _ = a.step(pos0.clone(), vel0.clone())
+
+    b = LangevinVerletIntegrator(_harmonic(k), dt=dt, gamma=gamma, kbt=kbt, mass=mass, seed=3)
+    force = b.initial_force(pos0.clone())
+    pb, vb, _, fb = b.step_cached(pos0.clone(), vel0.clone(), force)
+    assert torch.equal(pa, pb)
+    assert torch.equal(va, vb)
+
+
+def test_compile_matches_eager():
+    """``compile=True`` integrates to the same trajectory as eager (same seed)."""
+    k, mass, dt, gamma, kbt = 1.0, 1.0, 0.02, 2.0, 1.0
+    pos0 = torch.randn(4, 3, dtype=_DTYPE)
+    vel0 = torch.randn(4, 3, dtype=_DTYPE)
+
+    eager = LangevinVerletIntegrator(_harmonic(k), dt=dt, gamma=gamma, kbt=kbt, mass=mass, seed=5)
+    out_e = eager.run(pos0.clone(), vel0.clone(), 15)
+
+    comp = LangevinVerletIntegrator(
+        _harmonic(k), dt=dt, gamma=gamma, kbt=kbt, mass=mass, seed=5, compile=True
+    )
+    out_c = comp.run(pos0.clone(), vel0.clone(), 15)
+    assert torch.allclose(out_e["pos"], out_c["pos"], atol=1e-10)
+    assert torch.allclose(out_e["vel"], out_c["vel"], atol=1e-10)
