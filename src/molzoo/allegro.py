@@ -296,6 +296,10 @@ class AllegroSpec(BaseModel):
     latent_mlp_depth: int = Field(2, ge=0)
     latent_mlp_width: int = Field(128, gt=0)
     avg_num_neighbors: float = Field(..., gt=0.0)
+    # Dispatch method for the per-layer ``cuet.SegmentedPolynomial`` (uuu
+    # Contracter). See :meth:`Allegro.__init__` for the kernel/force-path
+    # rationale behind the ``"uniform_1d"`` default.
+    tp_method: str = "uniform_1d"
     # When True, ``forward`` additionally writes the final layer's tensor
     # features (full irreps stack, mul=num_tensor_features, ir_mul layout)
     # to ``("edges", "edge_tensor_features")`` so equivariant downstream
@@ -377,7 +381,31 @@ class Allegro(TensorDictModuleBase):
         latent_activation: Optional[type[nn.Module]] = nn.SiLU,
         avg_num_neighbors: float,
         expose_tensor_track: bool = False,
+        tp_method: str = "uniform_1d",
     ):
+        """Build the Allegro encoder.
+
+        Args:
+            tp_method: Dispatch method for the per-layer
+                ``cuet.SegmentedPolynomial`` that runs the uuu Contracter
+                (``u,iu,ju,ku+ijk`` descriptor).
+
+                * ``"uniform_1d"`` (default) — the fused CUDA kernel the
+                  reference Allegro uses; optimal for this single-uniform-mode
+                  descriptor. On CPU it falls back to a pure-torch path. The
+                  fused kernel is a legacy ``autograd.Function`` without a
+                  functorch ``setup_context``, so ``torch.func.grad`` cannot
+                  trace it — :class:`~molpot.derivation.ForceDerivation` detects
+                  this and transparently computes forces with
+                  ``torch.autograd.grad`` instead (eager-correct, trainable,
+                  GH200-verified; not ``torch.compile(fullgraph)``-able).
+                * ``"fused_tp"`` — the fused 4-operand kernel; same
+                  functorch/force behaviour as ``uniform_1d``.
+                * ``"naive"`` — pure-torch reference. The only method
+                  ``torch.func.grad`` can trace, so it is the one to use when you
+                  need the force path to ``torch.compile(fullgraph=True)`` — at
+                  the cost of the fused-kernel speedup on GPU.
+        """
         super().__init__()
 
         self.config = AllegroSpec(
@@ -394,8 +422,10 @@ class Allegro(TensorDictModuleBase):
             latent_mlp_width=latent_mlp_width,
             avg_num_neighbors=avg_num_neighbors,
             expose_tensor_track=expose_tensor_track,
+            tp_method=tp_method,
         )
         self.expose_tensor_track = bool(expose_tensor_track)
+        self._tp_method = str(tp_method)
 
         # Reference requires even type_embed_dim (split between center and neighbor).
         if type_embed_dim % 2 != 0:
@@ -515,11 +545,12 @@ class Allegro(TensorDictModuleBase):
                 poly,
                 shared_weights=True,
                 internal_weights=True,
-                # Pure-torch dispatch so functorch (ForceDerivation) / torch.compile
-                # can trace the force: the fused `uniform_1d` kernel is a custom
-                # autograd.Function with no functorch setup_context. `naive` is
-                # numerically identical (matches to ~1e-15).
-                method="naive",
+                # ``tp_method`` selects the kernel. Default ``"uniform_1d"`` is
+                # the fused CUDA kernel (fast on GPU); ``ForceDerivation`` falls
+                # back to ``torch.autograd.grad`` for it since functorch can't
+                # trace the fused op. Use ``"naive"`` for a fullgraph-compilable
+                # force path. See ``Allegro.__init__``.
+                method=self._tp_method,
                 dtype=config.ftype,
             )
             self.tps.append(tp)

@@ -13,6 +13,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from molpot.derivation.force import functorch_or_autograd_forces
+
 
 class BasePotential(nn.Module, ABC):
     """Base class for all molpot PyTorch potentials.
@@ -43,14 +45,18 @@ class BasePotential(nn.Module, ABC):
         Computes forces as ``F = -∂E/∂x`` with ``torch.func.grad``: the energy
         is differentiated as a pure function of positions, which are passed back
         in through ``pos=`` so :meth:`forward` evaluates at the candidate
-        geometry (``_get_positions`` resolves ``kwargs["pos"]`` first).
+        geometry (``_get_positions`` resolves ``kwargs["pos"]`` first). Falls
+        back to ``torch.autograd.grad`` when the energy graph contains a
+        functorch-incompatible op (e.g. a fused cuEquivariance kernel) so eager
+        force evaluation never crashes — see
+        :func:`molpot.derivation.force.functorch_or_autograd_forces`.
         """
         pos = self._get_positions(data, **kwargs).detach()
 
         def energy_fn(p: torch.Tensor) -> torch.Tensor:
             return self.forward(data, **{**kwargs, "pos": p}).sum()
 
-        forces = -torch.func.grad(energy_fn)(pos)
+        forces = functorch_or_autograd_forces(energy_fn, pos)
 
         return forces.detach().cpu().numpy()
 
