@@ -37,9 +37,31 @@ from molrep.readout.scalar import NonLinearBiasReadout
 
 
 def _scatter_sum(src, index, dim_size):
-    out = src.new_zeros((dim_size, *src.shape[1:]))
-    out.index_add_(0, index, src)
-    return out
+    """Sum ``src`` rows into ``dim_size`` buckets given by ``index`` (dim 0).
+
+    Implemented as a one-hot matmul instead of ``index_add_``. The natural
+    ``out.index_add_(0, index, src)`` is correct in eager, but under
+    ``torch.compile`` its scatter reduction runs in a *different order* than
+    eager (CUDA: non-deterministic ``atomicAdd``; CPU: it additionally trips
+    the torch-2.12 ``index.is_vec`` SIMD-codegen crash). ``inter_e`` is a small
+    difference of large terms (catastrophic cancellation), so that float64
+    ordering difference gets amplified to ~4% between compiled and eager
+    energy. This is NOT a wrong-codegen miscompile: forcing
+    ``torch.use_deterministic_algorithms(True)`` (CUDA) or
+    ``torch._inductor.config.cpp.simdlen = 0`` (CPU) makes ``index_add_``
+    bit-exact again. The one-hot matmul is deterministic and has no scatter
+    node, so it is bit-exact under compile on both backends with NO global
+    flags, and stays functorch-traceable. Cost: a dense ``(E, dim_size)``
+    one-hot = ``O(E * dim_size)`` — negligible for molecular graphs (OMOL/QM9),
+    but heavy for very large periodic systems.
+
+    TODO: switch back to the cheaper ``index_add_`` once we either (a) move to
+    a torch where the compiled scatter is deterministic by default, or (b) set
+    the determinism / ``cpp.simdlen`` knobs on the compile path — needed to
+    drop the O(E*dim_size) memory for large periodic systems.
+    """
+    onehot = (index.view(-1, 1) == torch.arange(dim_size, device=src.device).view(1, -1)).to(src.dtype)
+    return (onehot.t() @ src.reshape(src.shape[0], -1)).reshape(dim_size, *src.shape[1:])
 
 
 class MACEOMol(nn.Module):
@@ -227,7 +249,11 @@ class MACEOMol(nn.Module):
             shifts: optional PBC shift vectors ``(E, 3)``.
         """
         num_nodes = positions.shape[0]
-        num_graphs = int(batch.max().item()) + 1
+        # Derive the graph count from the per-graph ``total_charge`` length (a
+        # static shape) rather than ``int(batch.max().item())``: the ``.item()``
+        # forces a host sync that breaks the dynamo graph, blocking
+        # ``torch.compile(fullgraph=True)`` of the functorch force path.
+        num_graphs = total_charge.shape[0]
 
         sender, receiver = edge_index[0], edge_index[1]
         vectors = positions[receiver] - positions[sender]
