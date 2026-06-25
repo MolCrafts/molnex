@@ -1,10 +1,22 @@
-"""In-process molecular-dynamics driver: Langevin velocity-Verlet integration.
+"""Component-based, compilable in-process MD engine.
 
-Model-agnostic integrator (BAOAB Langevin splitting) plus a force seam that wraps
-``PiNetPotential`` with a live (grad-tracking) position leaf, paired reference vs
-quantized trajectory runners, and an optional ASE-Calculator shell. Used by the
-PiNet quantization-as-thermal-noise study to generate paired trajectories whose
-force residual ΔF(t) is analyzed for Langevin-noise behavior.
+Component layecake (mirrors molpy's ``Potential`` vs ``ForceField`` split):
+
+* :class:`~molix.md.types.ForceOutput` / :class:`~molix.md.types.MDState` —
+  typed pytree contracts crossing component boundaries.
+* :class:`~molix.md.forcefield.ForceField` (``PotentialForceField`` over a
+  molpot Potential; ``HarmonicForceField`` / ``LennardJonesForceField`` analytic)
+  — binds a model to a system, maps positions to ``(energy, forces)``.
+* :class:`~molix.md.integrators.LangevinVerletIntegrator` — advances an
+  ``MDState`` (BAOAB); ``step`` / ``rollout`` ``torch.compile(fullgraph=True)``
+  to a single graph including a traceable force field.
+* :class:`~molix.md.runner.MDRunner` — drives the integrator through the molix
+  hook lifecycle; :class:`~molix.md.runner.TrajectoryHook` captures trajectories.
+
+Scope: open (non-periodic) systems, short small-displacement trajectories. The
+neighbour list (``edge_index``) is frozen for the whole run — there is no
+rebuild — so this is a study/inference engine for near-equilibrium dynamics, not
+general production MD. See :class:`~molix.md.forcefield.PotentialForceField`.
 """
 
 from molix.md.ase_shim import HAS_ASE, make_pinet_calculator
@@ -14,17 +26,36 @@ from molix.md.dynamics import (
     evaluate_delta_along_trajectory,
     run_trajectory,
 )
-from molix.md.force_seam import build_force_fn
-from molix.md.integrators import LangevinVerletIntegrator
+from molix.md.forcefield import (
+    ForceField,
+    HarmonicForceField,
+    LennardJonesForceField,
+    PotentialForceField,
+)
+from molix.md.integrators import (
+    EV_PER_AMU_A2_FS2,
+    Integrator,
+    LangevinVerletIntegrator,
+    as_mass_col,
+)
 from molix.md.runner import MDRunner, TrajectoryHook
+from molix.md.types import ForceOutput, MDState
 
 __all__ = [
+    "EV_PER_AMU_A2_FS2",
     "HAS_ASE",
+    "ForceField",
+    "ForceOutput",
+    "HarmonicForceField",
+    "Integrator",
     "LangevinVerletIntegrator",
+    "LennardJonesForceField",
     "MDRunner",
+    "MDState",
+    "PotentialForceField",
     "TrajectoryArtifact",
     "TrajectoryHook",
-    "build_force_fn",
+    "as_mass_col",
     "build_paired_trajectory",
     "evaluate_delta_along_trajectory",
     "make_pinet_calculator",

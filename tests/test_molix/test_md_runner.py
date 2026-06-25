@@ -9,22 +9,14 @@ namespaces), and the reference :class:`TrajectoryHook` capture / persistence.
 import torch
 
 from molix.core.hook import BaseHook
-from molix.md import LangevinVerletIntegrator, MDRunner, TrajectoryHook
+from molix.md import HarmonicForceField, LangevinVerletIntegrator, MDRunner, TrajectoryHook
 
 _DTYPE = torch.float64
 
 
-def _harmonic(k: float):
-    def force_fn(pos: torch.Tensor):
-        energy = 0.5 * k * (pos**2).sum()
-        return energy, -k * pos
-
-    return force_fn
-
-
 def _integrator(seed: int = 0):
     return LangevinVerletIntegrator(
-        _harmonic(1.0), dt=0.01, gamma=1.0, kbt=1.0, mass=1.0, seed=seed
+        HarmonicForceField(1.0).to(_DTYPE), dt=0.01, gamma=1.0, kbt=1.0, mass=1.0, seed=seed
     )
 
 
@@ -105,6 +97,29 @@ def test_trajectory_hook_persists_pt_and_xyz(tmp_path):
     assert lines[0] == "4"
     assert "Etot=" in lines[1] and "T=" in lines[1]
     assert lines[2].split()[0] == "H"  # Z=1 -> H
+
+
+def test_trajectory_hook_shard_flush_matches_single_buffer(tmp_path):
+    """Shard-flushing (bounded host memory) yields the same trajectory as one
+    in-memory buffer, and cleans up its shard files."""
+    p0 = torch.zeros(3, 3, dtype=_DTYPE)
+    v0 = torch.randn(3, 3, dtype=_DTYPE)
+
+    big = tmp_path / "big.pt"  # one buffer (flush_every >> frames)
+    MDRunner(_integrator(seed=7), mass=1.0, hooks=[TrajectoryHook(big, flush_every=1000)]).run(
+        p0.clone(), v0.clone(), 10
+    )
+    small = tmp_path / "small.pt"  # flush every 2 frames -> 5 shards
+    MDRunner(_integrator(seed=7), mass=1.0, hooks=[TrajectoryHook(small, flush_every=2)]).run(
+        p0.clone(), v0.clone(), 10
+    )
+
+    a = torch.load(big, weights_only=True)
+    b = torch.load(small, weights_only=True)
+    assert b["pos"].shape == (10, 3, 3)
+    for key in ("pos", "vel", "forces", "pe", "temp"):
+        assert torch.equal(a[key], b[key]), key
+    assert not list(tmp_path.glob("small.part*.pt"))  # shards removed
 
 
 def test_trajectory_hook_without_numbers_skips_xyz(tmp_path):

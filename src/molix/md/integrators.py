@@ -1,29 +1,26 @@
-"""Model-agnostic Langevin velocity-Verlet integrator (BAOAB splitting).
+"""Integrator components: advance an :class:`~molix.md.types.MDState` over a
+:class:`~molix.md.forcefield.ForceField` (BAOAB Langevin velocity-Verlet).
 
-The integrator is decoupled from any potential: it accepts a ``force_fn`` mapping
-positions ``(N, 3)`` to ``(energy, forces)`` so it can be unit-tested against an
-analytic toy potential (e.g. a harmonic oscillator) without PiNet.
+An ``Integrator`` is an :class:`torch.nn.Module` that *holds a ``ForceField``
+component* (not a closure) and advances state. The hot step is static and
+typed — no ``isinstance`` on mass, no ``if gamma > 0`` branch (the O step is
+written as an identity-at-γ=0 update), no ``None`` noise — so
+:meth:`LangevinVerletIntegrator.step` and :meth:`LangevinVerletIntegrator.rollout`
+``torch.compile(fullgraph=True)`` to a single graph *including* a traceable
+force field (PiNet's functorch force path is graph-break-free).
 
-BAOAB ordering per step (Leimkuhler & Matthews): B (half kick) → A (half drift) →
-O (Ornstein-Uhlenbeck friction + noise) → A (half drift) → B (half kick). With
-``gamma = 0`` the O step is the identity and BAOAB reduces to plain velocity-Verlet
-(NVE). The O step satisfies the per-degree-of-freedom fluctuation-dissipation
-relation, so the long-time kinetic energy obeys equipartition ⟨½ m v²⟩ = ½ k_B T.
+BAOAB ordering (Leimkuhler & Matthews): B (half kick) → A (half drift) → O
+(Ornstein-Uhlenbeck) → A → B. The O step ``v ← c1·v + c2·σ·ξ`` with
+``c1 = e^{-γΔt}``, ``c2 = √(1-c1²)``, ``σ = √(k_BT/m)`` satisfies the
+per-DoF fluctuation-dissipation relation. At ``γ = 0``: ``c1 = 1``, ``c2 = 0`` →
+the O step is the identity (``0·σ·ξ = 0``) and BAOAB reduces to velocity-Verlet
+(NVE) — which is exactly why the branch can be dropped.
 
-Units are caller-defined but must be mutually consistent (e.g. forces eV/Å, mass
-amu, Δt fs, γ 1/fs, ``kbt`` = k_B·T in eV).
-
-``torch.compile``. The hot per-step update is factored into a pure tensor-in /
-tensor-out core, :meth:`LangevinVerletIntegrator._step_core`, that takes the
-entry force AND the O-step noise as explicit tensor arguments — no Python
-``Generator`` object, no lazy state mutation — so it compiles to a single graph
-(``fullgraph=True``) provided ``force_fn`` itself is traceable (a PiNet forward
-with fixed-shape edges is, verified graph-break-free). Pass ``compile=True`` to
-wrap the core in :func:`torch.compile`; noise is still drawn eagerly outside the
-compiled region. The loop also caches the entry force across steps (one
-``force_fn`` evaluation per step instead of two), numerically identical to the
-naive two-evaluation form because the end-of-step force at ``x_{n+1}`` is exactly
-the start-of-step force of step ``n+1``.
+Units — one self-consistent system. The arithmetic ``v += Δt·F/m`` needs
+``[F] = [m][length]/[time]²``, so eV/Å + amu + fs is **not** consistent. The
+canonical system is (amu, Å, fs) with energy in amu·Å²/fs² (= ``EV_PER_AMU_A2_FS2``
+eV); drive an eV/Å potential by converting at the force field
+(``PotentialForceField(..., energy_scale=1/EV_PER_AMU_A2_FS2)``).
 
 Reference:
     Leimkuhler & Matthews, "Rational Construction of Stochastic Numerical
@@ -34,170 +31,167 @@ Reference:
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
 
 import torch
+from torch import nn
 
-ForceFn = Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
+from molix.md.forcefield import ForceField
+from molix.md.types import MDState
+
+#: Energy-unit bridge: 1 amu·Å²/fs² = 103.6426965638 eV.
+EV_PER_AMU_A2_FS2 = 103.6426965638
 
 
-class LangevinVerletIntegrator:
-    """Langevin velocity-Verlet (BAOAB) integrator over an injected force function.
+def as_mass_col(mass: float | torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """Mass reshaped to broadcast against ``(N, 3)`` in ``ref``'s dtype/device.
+
+    A per-atom ``(N,)`` tensor becomes ``(N, 1)``; a scalar stays scalar. Shared
+    by the integrator and :class:`molix.md.MDRunner` so both use one mass
+    convention for kinetic energy.
+    """
+    if isinstance(mass, torch.Tensor):
+        m = mass.to(dtype=ref.dtype, device=ref.device)
+        return m.reshape(-1, 1) if m.dim() == 1 else m
+    return torch.as_tensor(mass, dtype=ref.dtype, device=ref.device)
+
+
+class Integrator(nn.Module):
+    """Abstract integrator over a :class:`~molix.md.forcefield.ForceField` component.
 
     Args:
-        force_fn: Maps positions ``(N, 3)`` to ``(energy, forces (N, 3))``.
+        force: The force-field component supplying ``forward(pos) -> ForceOutput``.
+    """
+
+    def __init__(self, force: ForceField) -> None:
+        super().__init__()
+        self.force = force
+
+    def initial(self, pos: torch.Tensor, vel: torch.Tensor) -> MDState:
+        """Seed an :class:`~molix.md.types.MDState`, evaluating the entry force."""
+        out = self.force(pos)
+        return MDState(pos, vel, out.forces, out.energy)
+
+    def step(self, state: MDState, noise: torch.Tensor) -> MDState:  # noqa: D102
+        raise NotImplementedError
+
+    def rollout(self, state: MDState, n_steps: int) -> MDState:  # noqa: D102
+        raise NotImplementedError
+
+
+class LangevinVerletIntegrator(Integrator):
+    """Langevin velocity-Verlet (BAOAB) over a force-field component.
+
+    Args:
+        force: Force-field component (``forward(pos) -> ForceOutput``).
         dt: Timestep Δt.
-        gamma: Langevin friction γ (``0`` → NVE).
+        gamma: Langevin friction γ (``0`` → NVE; the O step becomes the identity).
         kbt: Thermal energy k_B·T (energy units).
-        mass: Particle mass — scalar or per-atom tensor broadcastable to ``(N, 1)``.
-        seed: Seed for the noise generator (reproducible trajectories).
-        compile: When ``True``, wrap the per-step core in :func:`torch.compile`
-            (``fullgraph=True, dynamic=False``) the first time it runs. Requires
-            ``force_fn`` to be traceable and fixed-shape across steps; for PiNet
-            that means a fixed-shape edge list. Default ``False`` (eager).
+        mass: Particle mass — scalar or per-atom ``(N,)`` tensor, strictly positive.
+        seed: Seed for the eager noise generator (reproducible :meth:`advance` /
+            :meth:`run`). :meth:`rollout` uses global RNG so it stays compilable.
+
+    Scalar parameters are immutable after construction (baked into the compiled
+    graph). Buffers ``dt``/``c1``/``c2``/``mass_col``/``inv_mass``/``sigma`` carry
+    the precomputed step constants; nothing is recomputed per step.
     """
 
     def __init__(
         self,
-        force_fn: ForceFn,
+        force: ForceField,
         *,
         dt: float,
         gamma: float,
         kbt: float,
         mass: float | torch.Tensor,
         seed: int = 0,
-        compile: bool = False,
     ) -> None:
-        self.force_fn = force_fn
-        self.dt = float(dt)
+        super().__init__(force)
+        if isinstance(mass, torch.Tensor):
+            if not bool((mass > 0).all()):
+                raise ValueError("mass must be strictly positive")
+        elif mass <= 0:
+            raise ValueError("mass must be strictly positive")
         self.gamma = float(gamma)
-        self.kbt = float(kbt)
-        self._mass = mass
         self._seed = int(seed)
-        self._c1 = math.exp(-self.gamma * self.dt)
-        self._c2 = math.sqrt(max(0.0, 1.0 - self._c1 * self._c1))
+        c1 = math.exp(-float(gamma) * float(dt))
+        c2 = math.sqrt(max(0.0, 1.0 - c1 * c1))
+        ref = torch.zeros(())  # CPU fp32 reference for buffer construction
+        mass_col = as_mass_col(mass, ref)
+        self.register_buffer("dt", torch.as_tensor(float(dt)))
+        self.register_buffer("c1", torch.as_tensor(c1))
+        self.register_buffer("c2", torch.as_tensor(c2))
+        self.register_buffer("mass_col", mass_col)
+        self.register_buffer("inv_mass", mass_col.reciprocal())
+        self.register_buffer("sigma", math.sqrt(float(kbt)) * mass_col.rsqrt())
         self._generator: torch.Generator | None = None
-        self._compile = bool(compile)
-        self._stepper: ForceFn | None = None  # lazily-built (maybe compiled) core driver
 
-    def _mass_col(self, ref: torch.Tensor) -> torch.Tensor:
-        """Mass reshaped to broadcast against ``(N, 3)`` in ref's dtype/device."""
-        if isinstance(self._mass, torch.Tensor):
-            m = self._mass.to(dtype=ref.dtype, device=ref.device)
-            return m.reshape(-1, 1) if m.dim() == 1 else m
-        return torch.as_tensor(self._mass, dtype=ref.dtype, device=ref.device)
+    def step(self, state: MDState, noise: torch.Tensor) -> MDState:
+        """One BAOAB step from the cached entry force and a pre-drawn ``noise``.
 
-    def _noise(self, ref: torch.Tensor) -> torch.Tensor:
+        Pure and static (no Python branch on γ, no ``isinstance``): the O step is
+        applied unconditionally and is the identity when γ = 0 (c2 = 0). Returns
+        the advanced state with the end-of-step force/energy cached for the next
+        step (one force-field evaluation per step). ``torch.compile``-able.
+        """
+        half_dt = 0.5 * self.dt
+        vel = state.vel + half_dt * state.force * self.inv_mass  # B (cached force)
+        pos = state.pos + half_dt * vel  # A
+        vel = self.c1 * vel + self.c2 * self.sigma * noise  # O (identity at γ=0)
+        pos = pos + half_dt * vel  # A
+        out = self.force(pos)
+        vel = vel + half_dt * out.forces * self.inv_mass  # B
+        return MDState(pos, vel, out.forces, out.energy)
+
+    def draw_noise(self, ref: torch.Tensor) -> torch.Tensor:
+        """Reproducible O-step noise ``(N, 3)`` from a seeded generator (eager).
+
+        Used by :meth:`advance` / :meth:`run`; kept out of :meth:`rollout` so the
+        compiled path has no ``Generator`` object in the graph.
+        """
         if self._generator is None or self._generator.device != ref.device:
             self._generator = torch.Generator(device=ref.device).manual_seed(self._seed)
         return torch.randn(ref.shape, generator=self._generator, dtype=ref.dtype, device=ref.device)
 
-    def _step_core(
-        self,
-        pos: torch.Tensor,
-        vel: torch.Tensor,
-        force: torch.Tensor,
-        noise: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """One BAOAB step from a *cached entry force* and a *pre-drawn noise*.
+    def advance(self, state: MDState) -> MDState:
+        """Eager single step: draw reproducible noise, then :meth:`step`."""
+        return self.step(state, self.draw_noise(state.vel))
 
-        Pure tensor-in / tensor-out (no Generator, no lazy state) so it is
-        ``torch.compile``-able. ``force`` must equal ``force_fn(pos)[1]``; the
-        returned force is ``force_fn`` at the new position, ready to feed back as
-        the next step's ``force`` (force caching → one evaluation per step). The
-        ``noise`` argument is consumed only when ``gamma > 0`` (the O step);
-        callers pass a dummy for NVE.
+    def rollout(self, state: MDState, n_steps: int) -> MDState:
+        """Advance ``n_steps`` and return the final state (compile-friendly).
 
-        Args:
-            pos: Positions ``(N, 3)``.
-            vel: Velocities ``(N, 3)``.
-            force: Entry force ``(N, 3)`` ``= force_fn(pos)[1]``.
-            noise: Standard-normal tensor ``(N, 3)`` for the O step.
+        Draws noise with global ``torch.randn_like`` inside the loop so the whole
+        rollout — including the force field — is ``torch.compile(fullgraph=True)``
+        traceable. Seed the global RNG (``torch.manual_seed``) for reproducibility.
+        """
+        for _ in range(n_steps):
+            state = self.step(state, torch.randn_like(state.vel))
+        return state
+
+    def run(
+        self, pos: torch.Tensor, vel: torch.Tensor, n_steps: int, *, stride: int = 1
+    ) -> dict[str, torch.Tensor]:
+        """Eager trajectory: record every ``stride``-th frame's pos/vel/energy.
+
+        History is detached and moved to CPU as recorded, so device memory does
+        not grow with ``n_steps`` (host memory grows O(T·N/stride); raise
+        ``stride`` or use :class:`molix.md.TrajectoryHook` for long runs).
+        Reproducible via the seeded generator.
 
         Returns:
-            ``(pos, vel, energy, force)`` at the advanced position.
+            ``pos`` / ``vel`` ``(⌈n_steps/stride⌉, N, 3)`` and ``energy``
+            ``(⌈n_steps/stride⌉,)`` (detached, on CPU).
         """
-        mass = self._mass_col(pos)
-        half_dt = 0.5 * self.dt
-        vel = vel + half_dt * force / mass  # B (uses cached force at pos)
-        pos = pos + half_dt * vel  # A
-        if self.gamma > 0.0:  # O
-            sigma = math.sqrt(self.kbt) * mass.rsqrt()  # sqrt(kbt/m) per DoF
-            vel = self._c1 * vel + self._c2 * sigma * noise
-        pos = pos + half_dt * vel  # A
-        energy, force = self.force_fn(pos)
-        vel = vel + half_dt * force / mass  # B
-        return pos, vel, energy, force
-
-    def _draw_noise(self, vel: torch.Tensor) -> torch.Tensor:
-        """O-step noise ``(N, 3)``: real draw under Langevin, zeros under NVE.
-
-        Drawn *outside* the compiled core to keep the ``Generator`` out of the
-        graph. Under NVE (``gamma == 0``) the O step is skipped, so a cheap zero
-        tensor is returned without touching the RNG (preserving the no-RNG NVE
-        contract the legacy :meth:`step` had)."""
-        if self.gamma > 0.0:
-            return self._noise(vel)
-        return torch.zeros_like(vel)
-
-    def _get_stepper(self) -> ForceFn:
-        """Return the per-step driver, building (and optionally compiling) once."""
-        if self._stepper is None:
-            self._stepper = (
-                torch.compile(self._step_core, fullgraph=True, dynamic=False)
-                if self._compile
-                else self._step_core
-            )
-        return self._stepper
-
-    def initial_force(self, pos: torch.Tensor) -> torch.Tensor:
-        """Entry force ``force_fn(pos)[1]`` to seed a force-cached stepping loop."""
-        return self.force_fn(pos)[1]
-
-    def step_cached(
-        self, pos: torch.Tensor, vel: torch.Tensor, force: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """One step from a cached entry force; returns ``(pos, vel, energy, force)``.
-
-        The advance primitive shared by :meth:`run` and :class:`molix.md.MDRunner`:
-        draws the O-step noise eagerly, then calls the (possibly compiled) core.
-        Pair with :meth:`initial_force` to seed the first ``force``.
-        """
-        return self._get_stepper()(pos, vel, force, self._draw_noise(vel))
-
-    def step(
-        self, pos: torch.Tensor, vel: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Advance one BAOAB step, computing the entry force internally.
-
-        Kept for direct callers and unit tests that drive the integrator one
-        step at a time. :meth:`run` uses :meth:`step_cached` (force caching) for
-        a single ``force_fn`` evaluation per step.
-        """
-        _, force = self.force_fn(pos)
-        return self._step_core(pos, vel, force, self._draw_noise(vel))
-
-    def run(self, pos: torch.Tensor, vel: torch.Tensor, n_steps: int) -> dict[str, torch.Tensor]:
-        """Integrate ``n_steps`` steps, recording per-step pos/vel/energy.
-
-        Uses force caching (one ``force_fn`` evaluation per step) and, when the
-        integrator was built with ``compile=True``, a :func:`torch.compile`-d
-        step core. Numerically identical to the legacy per-step :meth:`step`
-        loop.
-
-        Returns:
-            Dict with ``pos`` / ``vel`` of shape ``(n_steps, N, 3)`` and ``energy``
-            of shape ``(n_steps,)`` (detached).
-        """
+        stride = max(1, int(stride))
         pos_hist: list[torch.Tensor] = []
         vel_hist: list[torch.Tensor] = []
         energy_hist: list[torch.Tensor] = []
-        force = self.initial_force(pos)  # seed the cache; reused as each step's entry force
-        for _ in range(n_steps):
-            pos, vel, energy, force = self.step_cached(pos, vel, force)
-            pos_hist.append(pos.detach().clone())
-            vel_hist.append(vel.detach().clone())
-            energy_hist.append(energy.detach().reshape(()).clone())
+        state = self.initial(pos, vel)
+        for i in range(n_steps):
+            state = self.advance(state)
+            if (i + 1) % stride == 0:
+                pos_hist.append(state.pos.detach().to("cpu"))
+                vel_hist.append(state.vel.detach().to("cpu"))
+                energy_hist.append(state.energy.detach().reshape(()).to("cpu"))
         return {
             "pos": torch.stack(pos_hist),
             "vel": torch.stack(vel_hist),
