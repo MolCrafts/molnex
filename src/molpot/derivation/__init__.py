@@ -6,12 +6,13 @@ observable physical quantities.
 """
 
 from molpot.derivation.energy import EnergyAggregation
-from molpot.derivation.force import ForceDerivation, functorch_or_autograd_forces
+from molpot.derivation.force import ForceDerivation, autograd_forces, functorch_forces
 from molpot.derivation.stress import StressDerivation
 
 __all__ = [
     "EnergyAggregation",
     "ForceDerivation",
     "StressDerivation",
-    "functorch_or_autograd_forces",
+    "autograd_forces",
+    "functorch_forces",
 ]

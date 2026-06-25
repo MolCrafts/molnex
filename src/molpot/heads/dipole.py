@@ -12,19 +12,12 @@ import torch
 import torch.nn as nn
 
 from molix import config
+from molix.F.scatter import scatter_sum
+from molpot.heads._common import graph_counts as _graph_counts
 
 
 def _scatter_sum(src: torch.Tensor, index: torch.Tensor, dim_size: int) -> torch.Tensor:
-    out = torch.zeros(dim_size, *src.shape[1:], dtype=src.dtype, device=src.device)
-    if src.numel() == 0:
-        return out
-    expand_index = index.view(-1, *([1] * (src.dim() - 1))).expand_as(src)
-    return out.scatter_add_(0, expand_index, src)
-
-
-def _graph_counts(batch: torch.Tensor, num_graphs: int) -> torch.Tensor:
-    ones = torch.ones(batch.shape[0], dtype=config.ftype, device=batch.device)
-    return _scatter_sum(ones, batch, num_graphs).clamp(min=1.0)
+    return scatter_sum(src, index, dim_size=dim_size)
 
 
 def _charge_neutralize(

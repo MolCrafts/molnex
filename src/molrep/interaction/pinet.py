@@ -94,7 +94,11 @@ class PILayer(nn.Module):
     ) -> torch.Tensor:
         inter = torch.cat([prop[src], prop[dst]], dim=-1)
         weights = self.ff_layer(inter).reshape(-1, self.out_dim, self.n_basis)
-        return torch.einsum("ecb,eb->ec", weights, basis)
+        # (E,out_dim,n_basis)·(E,n_basis) contraction. Written as a broadcast
+        # multiply + sum (not einsum) so torch.compile fuses it into one triton
+        # reduction instead of a cuBLAS matrix-VECTOR (gemv) call — bit-identical,
+        # but removes a memory-bound, GPU-underutilizing kernel per block.
+        return (weights * basis.unsqueeze(1)).sum(-1)
 
 
 class IPLayer(nn.Module):
@@ -169,9 +173,12 @@ class DotLayer(nn.Module):
             self.wj = nn.Linear(self.channels, self.channels, bias=False, dtype=config.ftype)
 
     def forward(self, px: torch.Tensor) -> torch.Tensor:
+        # Contract the equivariant spatial axis (dim 1, the L=1/L=2 index): written
+        # as elementwise-multiply + sum so torch.compile fuses it into a triton
+        # reduction rather than a cuBLAS gemv — bit-identical to the einsum.
         if self.weighted:
-            return torch.einsum("ixr,ixr->ir", self.wi(px), self.wj(px))
-        return torch.einsum("ixr,ixr->ir", px, px)
+            return (self.wi(px) * self.wj(px)).sum(1)
+        return (px * px).sum(1)
 
 
 class InvarLayer(nn.Module):

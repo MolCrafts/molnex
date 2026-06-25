@@ -60,15 +60,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from molix import config
 from molix.F.scatter import scatter_sum
+from molpot.heads._common import graph_counts as _graph_counts
 
 __all__ = ["BondChargeHead"]
-
-
-def _graph_counts(batch: torch.Tensor, num_graphs: int) -> torch.Tensor:
-    ones = torch.ones(batch.shape[0], dtype=config.ftype, device=batch.device)
-    return scatter_sum(ones, batch, dim=0, dim_size=num_graphs).clamp(min=1.0)
 
 
 class BondChargeHead(nn.Module):

@@ -134,8 +134,11 @@ def test_missing_charge_spin_defaults_to_neutral(model, single_graph):
         batch_size=[],
     )
     out = model.forward(td)
-    neutral = torch.zeros(1, dtype=torch.long)
-    ref = model.energy_forces(pos, Z, edge_e2.t().contiguous(), batch, neutral, neutral)
+    # forward defaults to the OMOL neutral closed-shell singlet: charge=0, spin=1
+    # (spin index 1 is a trained row; spin 0 hits an untrained embedding).
+    charge = torch.zeros(1, dtype=torch.long)
+    spin = torch.ones(1, dtype=torch.long)
+    ref = model.energy_forces(pos, Z, edge_e2.t().contiguous(), batch, charge, spin)
     assert torch.allclose(out["graphs", "energy"], ref["energy"], atol=1e-9, rtol=0)
 
 

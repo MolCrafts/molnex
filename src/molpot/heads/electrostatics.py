@@ -18,8 +18,6 @@ batch keys. This mirrors the molrep / molzoo encoder convention.
 
 from __future__ import annotations
 
-from typing import Sequence
-
 import cuequivariance as cue
 import cuequivariance_torch as cuet
 import torch
@@ -28,23 +26,7 @@ import torch.nn.functional as F
 from pydantic import BaseModel, ConfigDict, Field
 
 from molix import config
-
-# ---------------------------------------------------------------------------
-# Shared helper — mirrors PermMultipoleHead._equivariant_moment_readout, kept
-# private to this module to avoid coupling to multipole.py's internals.
-# ---------------------------------------------------------------------------
-
-
-def _scalar_mlp(in_dim: int, hidden: Sequence[int], out_dim: int) -> nn.Sequential:
-    """``[Linear → SiLU] × len(hidden) → Linear`` (no activation on final layer)."""
-    layers: list[nn.Module] = []
-    prev = in_dim
-    for h in hidden:
-        layers.append(nn.Linear(prev, h, dtype=config.ftype))
-        layers.append(nn.SiLU())
-        prev = h
-    layers.append(nn.Linear(prev, out_dim, dtype=config.ftype))
-    return nn.Sequential(*layers)
+from molpot.heads._common import scalar_mlp as _scalar_mlp
 
 
 def _find_irrep_offset(tensor_irreps: cue.Irreps, target_ir: cue.Irrep) -> int:

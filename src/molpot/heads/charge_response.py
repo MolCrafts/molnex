@@ -18,16 +18,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from molix import config
+from molix.F.scatter import scatter_sum
 
 ANG2BOHR = 1.8897259886
 
 
 def _scatter_sum(src: torch.Tensor, index: torch.Tensor, dim_size: int) -> torch.Tensor:
-    out = torch.zeros(dim_size, *src.shape[1:], dtype=src.dtype, device=src.device)
-    if src.numel() == 0:
-        return out
-    expand_index = index.view(-1, *([1] * (src.dim() - 1))).expand_as(src)
-    return out.scatter_add_(0, expand_index, src)
+    return scatter_sum(src, index, dim_size=dim_size)
 
 
 def _relative_atom_indices(

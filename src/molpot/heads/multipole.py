@@ -52,7 +52,6 @@ References for the components actually used here:
 from __future__ import annotations
 
 import math
-from typing import Sequence
 
 import cuequivariance as cue
 import cuequivariance_torch as cuet
@@ -62,22 +61,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from tensordict import TensorDict
 
 from molix import config
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _scalar_mlp(in_dim: int, hidden: Sequence[int], out_dim: int) -> nn.Sequential:
-    """``[Linear → SiLU] × len(hidden) → Linear`` (no activation on final layer)."""
-    layers: list[nn.Module] = []
-    prev = in_dim
-    for h in hidden:
-        layers.append(nn.Linear(prev, h, dtype=config.ftype))
-        layers.append(nn.SiLU())
-        prev = h
-    layers.append(nn.Linear(prev, out_dim, dtype=config.ftype))
-    return nn.Sequential(*layers)
+from molpot.heads._common import scalar_mlp as _scalar_mlp
 
 
 def _find_irrep_offset(

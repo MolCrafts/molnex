@@ -24,6 +24,7 @@ import torch.nn as nn
 from tensordict import TensorDict
 
 from molix import config
+from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
 from molpot.derivation.force import ForceDerivation
 from molpot.heads.energy import AtomicReferenceEnergy
 from molpot.heads.rescale import GlobalRescale
@@ -34,34 +35,6 @@ from molrep.embedding.radial import BesselRBF
 from molrep.interaction.product_basis import EquivariantProductBasis
 from molrep.interaction.residual import ResidualInteraction
 from molrep.readout.scalar import NonLinearBiasReadout
-
-
-def _scatter_sum(src, index, dim_size):
-    """Sum ``src`` rows into ``dim_size`` buckets given by ``index`` (dim 0).
-
-    Implemented as a one-hot matmul instead of ``index_add_``. The natural
-    ``out.index_add_(0, index, src)`` is correct in eager, but under
-    ``torch.compile`` its scatter reduction runs in a *different order* than
-    eager (CUDA: non-deterministic ``atomicAdd``; CPU: it additionally trips
-    the torch-2.12 ``index.is_vec`` SIMD-codegen crash). ``inter_e`` is a small
-    difference of large terms (catastrophic cancellation), so that float64
-    ordering difference gets amplified to ~4% between compiled and eager
-    energy. This is NOT a wrong-codegen miscompile: forcing
-    ``torch.use_deterministic_algorithms(True)`` (CUDA) or
-    ``torch._inductor.config.cpp.simdlen = 0`` (CPU) makes ``index_add_``
-    bit-exact again. The one-hot matmul is deterministic and has no scatter
-    node, so it is bit-exact under compile on both backends with NO global
-    flags, and stays functorch-traceable. Cost: a dense ``(E, dim_size)``
-    one-hot = ``O(E * dim_size)`` — negligible for molecular graphs (OMOL/QM9),
-    but heavy for very large periodic systems.
-
-    TODO: switch back to the cheaper ``index_add_`` once we either (a) move to
-    a torch where the compiled scatter is deterministic by default, or (b) set
-    the determinism / ``cpp.simdlen`` knobs on the compile path — needed to
-    drop the O(E*dim_size) memory for large periodic systems.
-    """
-    onehot = (index.view(-1, 1) == torch.arange(dim_size, device=src.device).view(1, -1)).to(src.dtype)
-    return (onehot.t() @ src.reshape(src.shape[0], -1)).reshape(dim_size, *src.shape[1:])
 
 
 class MACEOMol(nn.Module):
@@ -181,7 +154,9 @@ class MACEOMol(nn.Module):
             )
         self.readout = NonLinearBiasReadout(irreps_in=feat0, mlp_dim=mlp_dim)
         self.scale_shift = GlobalRescale(scale=scale, shift=shift)
-        self.force_derivation = ForceDerivation()
+        # MACE uses cuEquivariance fused kernels → autograd (functorch rejects
+        # their legacy autograd.Function); matches the upstream MACE library.
+        self.force_derivation = ForceDerivation(method="autograd")
 
     def energy_forces(
         self,
@@ -238,7 +213,7 @@ class MACEOMol(nn.Module):
 
         Shared core of :meth:`energy_forces` and :meth:`forward`. Recomputes all
         position-derived geometry internally so it can be differentiated with
-        either ``torch.autograd.grad`` or ``torch.func.grad`` (ForceDerivation).
+        ``torch.autograd.grad`` (ForceDerivation(method="autograd")).
 
         Args:
             positions: ``(N, 3)``.
@@ -328,7 +303,9 @@ class MACEOMol(nn.Module):
         if ("graphs", "total_spin") in nested:
             total_spin = td["graphs", "total_spin"]
         else:
-            total_spin = torch.zeros(num_graphs, dtype=torch.long, device=Z.device)
+            # OMOL convention: 1 = closed-shell singlet (spin_offset=0 → index 1,
+            # a trained row). Spin 0 hits an untrained embedding row → garbage.
+            total_spin = torch.ones(num_graphs, dtype=torch.long, device=Z.device)
 
         energy = self._compute_energy(positions, Z, edge_index, batch, total_charge, total_spin)
 

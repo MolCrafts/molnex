@@ -395,10 +395,9 @@ class Allegro(TensorDictModuleBase):
                   descriptor. On CPU it falls back to a pure-torch path. The
                   fused kernel is a legacy ``autograd.Function`` without a
                   functorch ``setup_context``, so ``torch.func.grad`` cannot
-                  trace it — :class:`~molpot.derivation.ForceDerivation` detects
-                  this and transparently computes forces with
-                  ``torch.autograd.grad`` instead (eager-correct, trainable,
-                  GH200-verified; not ``torch.compile(fullgraph)``-able).
+                  trace it — derive forces with
+                  ``ForceDerivation(method="autograd")`` (eager-correct,
+                  trainable, GH200-verified; not ``torch.compile(fullgraph)``-able).
                 * ``"fused_tp"`` — the fused 4-operand kernel; same
                   functorch/force behaviour as ``uniform_1d``.
                 * ``"naive"`` — pure-torch reference. The only method
@@ -546,10 +545,10 @@ class Allegro(TensorDictModuleBase):
                 shared_weights=True,
                 internal_weights=True,
                 # ``tp_method`` selects the kernel. Default ``"uniform_1d"`` is
-                # the fused CUDA kernel (fast on GPU); ``ForceDerivation`` falls
-                # back to ``torch.autograd.grad`` for it since functorch can't
-                # trace the fused op. Use ``"naive"`` for a fullgraph-compilable
-                # force path. See ``Allegro.__init__``.
+                # the fused CUDA kernel (fast on GPU); pair it with
+                # ``ForceDerivation(method="autograd")`` since functorch can't
+                # trace the fused op. Use ``"naive"`` + ``method="functorch"``
+                # for a fullgraph-compilable force path. See ``Allegro.__init__``.
                 method=self._tp_method,
                 dtype=config.ftype,
             )

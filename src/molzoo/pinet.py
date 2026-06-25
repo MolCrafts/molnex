@@ -82,6 +82,36 @@ def _compute_d5(d3: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _edge_bond_diff(edges, pos: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    """Source→target edge displacement, periodic-boundary-correct and differentiable.
+
+    Open systems: recompute ``pos[target] - pos[source]`` so forces flow to ``pos``.
+    Periodic systems: the neighbour list supplies the *minimum-image* ``bond_diff``
+    (the molix analogue of PiNN replicating periodic images). We take that imaged
+    value but route the gradient through the raw displacement via a straight-through
+    term — exact, because ∂(imaged diff)/∂pos = ∂raw/∂pos = identity (the per-edge
+    cell-shift is constant). A no-op for open systems, where the supplied
+    ``bond_diff`` already equals ``raw``.
+
+    Args:
+        edges: The batch's ``edges`` sub-TensorDict (may carry ``bond_diff``).
+        pos: Atom positions ``(N, 3)``.
+        edge_index: Source/target pairs ``(E, 2)``; ``[:,0]``=source, ``[:,1]``=target.
+
+    Returns:
+        Edge displacement ``(E, 3)`` with periodic-correct value and exact gradient.
+    """
+    raw = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    if "bond_diff" in edges.keys():
+        # ``.detach()`` on the supplied value makes this robust whether the
+        # neighbour list's bond_diff is a detached cache leaf (training) or a
+        # live in-graph tensor (an MD force_fn that recomputes it): the gradient
+        # always flows solely through ``raw`` (the correct, cell-shift-invariant
+        # ∂/∂pos), never double-counting a live supplied tensor.
+        return edges["bond_diff"].detach() + (raw - raw.detach())
+    return raw
+
+
 class PiNet(TensorDictModuleBase):
     """PiNet feature encoder.
 
@@ -253,10 +283,9 @@ class PiNet(TensorDictModuleBase):
         pos = td["atoms", "pos"]
         edge_index = td["edges", "edge_index"]
 
-        # Edge geometry derived from pos + edge_index per forward.
-        # One gather + diff + norm — cheaper than caching, and gradients flow
-        # back to pos naturally so force training needs no special path.
-        bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+        # Edge geometry: PBC-correct (uses the neighbour list's minimum-image
+        # bond_diff under periodic boundaries) and differentiable. See _edge_bond_diff.
+        bond_diff = _edge_bond_diff(td["edges"], pos, edge_index)
         bond_dist = bond_diff.norm(dim=-1).clamp(min=1e-8)
 
         idx = self._z_to_idx[Z]
@@ -398,7 +427,8 @@ class PiNetPotential(nn.Module):
             [OutLayer([hidden_dim], out_units=1, activation="tanh") for _ in range(depth)]
         )
         self.energy_aggregation = EnergyAggregation(pooling="sum")
-        self.force_derivation = ForceDerivation()
+        # PiNet is pure-PyTorch → functorch (single backward, torch.compile-friendly).
+        self.force_derivation = ForceDerivation(method="functorch")
 
     def forward(
         self, batch: TensorDict, *, compute_forces: bool | None = None
@@ -590,7 +620,7 @@ class PiNetDipole(nn.Module):
             )
             edge_index = batch["edges", "edge_index"]
             pos = batch["atoms", "pos"]
-            bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+            bond_diff = _edge_bond_diff(batch["edges"], pos, edge_index)
         edge_vectors = None
         if self.head.uses_bc and "i3_features" in batch["edges"].keys():
             edge_vectors = _pool_layer(
@@ -683,7 +713,7 @@ class PiNetPolarizability(nn.Module):
             )
         pos = batch["atoms", "pos"]
         edge_index = batch["edges", "edge_index"]
-        bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+        bond_diff = _edge_bond_diff(batch["edges"], pos, edge_index)
         return self.head(
             pos=pos,
             Z=batch["atoms", "Z"],

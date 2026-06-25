@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from molpot.derivation import ForceDerivation
+from molpot.derivation import ForceDerivation, autograd_forces, functorch_forces
 
 
 class _LegacySquare(torch.autograd.Function):
@@ -20,60 +20,58 @@ class _LegacySquare(torch.autograd.Function):
         return 2.0 * x * g  # differentiable in x -> double-backward works
 
 
-def _functorch_rejects(fn, x) -> bool:
-    try:
-        torch.func.grad(fn)(x)
-        return False
-    except RuntimeError as e:
-        return "setup_context" in str(e)
-
-
 class TestForceDerivation:
-    def test_forward_forces(self):
-        head = ForceDerivation()
-        atoms_x = torch.randn(2, 3)
-        # E = Σ x²  ->  F = -∂E/∂x = -2x
-        forces = head(lambda p: p.pow(2).sum(), atoms_x)
-        assert forces.shape == atoms_x.shape
-        assert torch.allclose(forces, -2.0 * atoms_x, atol=1e-6)
+    def test_default_is_autograd(self):
+        assert ForceDerivation().method == "autograd"
 
-    def test_functorch_incompatible_op_does_not_crash_and_is_correct(self):
-        """Eager must NOT crash when the energy graph contains a
-        functorch-incompatible op — it falls back to ``torch.autograd.grad``."""
+    def test_invalid_method_rejected(self):
+        with pytest.raises(ValueError, match="method must be one of"):
+            ForceDerivation(method="nope")
+
+    @pytest.mark.parametrize("method", ["functorch", "autograd"])
+    def test_forces_correct_on_pure_torch(self, method):
+        head = ForceDerivation(method=method)
+        x = torch.randn(2, 3)
+        # E = Σ x²  ->  F = -∂E/∂x = -2x
+        forces = head(lambda p: p.pow(2).sum(), x)
+        assert forces.shape == x.shape
+        assert torch.allclose(forces, -2.0 * x, atol=1e-6)
+
+    def test_functorch_raises_on_incompatible_op(self):
+        """No fallback: the functorch backend must surface the setup_context
+        error on a fused-kernel-like op rather than silently switching backend."""
         x = torch.randn(4, 3)
         energy = lambda p: _LegacySquare.apply(p).sum()  # noqa: E731
+        head = ForceDerivation(method="functorch")
+        with pytest.raises(RuntimeError, match="setup_context"):
+            head(energy, x)
 
-        # Precondition: functorch genuinely rejects this op (else the test is moot).
-        assert _functorch_rejects(energy, x)
-
-        head = ForceDerivation()
-        with pytest.warns(RuntimeWarning, match="functorch-incompatible"):
-            forces = head(energy, x)  # would raise without the fallback
+    def test_autograd_handles_incompatible_op(self):
+        """The autograd backend computes correct forces on the fused-kernel-like
+        op that functorch rejects."""
+        x = torch.randn(4, 3)
+        energy = lambda p: _LegacySquare.apply(p).sum()  # noqa: E731
+        forces = ForceDerivation(method="autograd")(energy, x)
         assert torch.allclose(forces, -2.0 * x, atol=1e-6)
-        assert head._functorch_unsupported is True  # sticky after first fallback
 
-    def test_fallback_supports_double_backward_for_force_training(self):
-        """The autograd fallback must keep the force connected to parameters so a
-        force loss backprops into them (the whole point of force supervision)."""
+    def test_autograd_supports_double_backward_for_force_training(self):
+        """The autograd backend keeps the force connected to parameters so a
+        force loss backprops into them (the point of force supervision)."""
         w = torch.nn.Parameter(torch.tensor(1.7))
         x = torch.randn(5, 3)
 
         def energy(p):
             return _LegacySquare.apply(w * p).sum()  # E = Σ (w p)²
 
-        head = ForceDerivation()
-        with pytest.warns(RuntimeWarning):
-            forces = head(energy, x)  # F = -2 w² x
+        forces = ForceDerivation(method="autograd")(energy, x)  # F = -2 w² x
         assert torch.allclose(forces, -2.0 * w**2 * x, atol=1e-5)
 
-        (forces.pow(2).sum()).backward()  # double backward -> w.grad
+        forces.pow(2).sum().backward()  # double backward -> w.grad
         assert w.grad is not None and w.grad.abs() > 0
 
-    def test_functorch_path_unaffected_for_compatible_ops(self):
-        """Pure-torch energies still go through functorch (no spurious fallback),
-        preserving the compile-friendly single-backward path."""
-        head = ForceDerivation()
+    def test_module_functions_match(self):
+        """The standalone helpers equal the module backends."""
         x = torch.randn(3, 3)
-        forces = head(lambda p: p.pow(2).sum(), x)
-        assert torch.allclose(forces, -2.0 * x, atol=1e-6)
-        assert head._functorch_unsupported is False
+        e = lambda p: p.pow(2).sum()  # noqa: E731
+        assert torch.allclose(functorch_forces(e, x), -2.0 * x, atol=1e-6)
+        assert torch.allclose(autograd_forces(e, x), -2.0 * x, atol=1e-6)

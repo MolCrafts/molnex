@@ -75,7 +75,12 @@ def export_model(
 
     so_path = str(export_dir / f"{name}.so")
 
-    with torch.no_grad():
+    # Force models compute F = -dE/dx via autograd.grad *inside* forward. dynamo/
+    # export only traces autograd ops when this flag is on (else raises Unsupported),
+    # and grad must be enabled during tracing so the force backward is captured into
+    # the .so. (Energy-only forwards are unaffected.)
+    torch._dynamo.config.trace_autograd_ops = True
+    with torch.enable_grad():
         torch._export.aot_compile(
             target_model,
             args=device_inputs,
