@@ -52,7 +52,7 @@ criteria:
       同一编译验收在 torch.float32 与 torch.float64 下都通过:fp64 与 eager
       位级/1e-10 一致;fp32 与 eager 在归约精度噪声内(atol 适配,记录实测
       gap)。证明可编译 MD 步对两种精度都数值可信。
-    status: pending
+    status: verified  # last_checked: 2026-06-26 (test_md_compile fp32+fp64 parametrized PASS; fp64==eager, fp32 within noise)
   - id: ac-006
     summary: 正确性回归全部保留(防重构倒退)
     type: code
@@ -87,7 +87,7 @@ criteria:
       |slope·(5 ns)| / |E_tot(0)| < 1e-3,且能量 RMS 涨落有界(不发散、无单调
       爬升),温度保持有限不爆炸。脚本打印 drift、拟合斜率与 PASS/FAIL;
       同时记录 steps/s 作为编译性能旁证。
-    status: pending
+    status: verified  # last_checked: 2026-06-26 (verify_md_lj_nve --ps 5000: 1e6 steps, rel drift 4.31e-7 < 1e-3, RMS 3.05e-6, PASS)
 ---
 
 # Acceptance criteria
