@@ -145,7 +145,7 @@ molix.core (Trainer, TrainState, Step, Hook)    ForceDerivation)
     ↓
 molix.data (Dataset, collate, preprocess)
 molix.datasets (QM9, RevMD17, ThreeBPA, WaterLES, MolRec)
-molix.md (Langevin velocity-Verlet) ─→ molix.analysis (trajectory diagnostics) ─→ molix.quant
+molix.md (Langevin velocity-Verlet) ─→ molix.quant (T_eff / quantization scalars)
 molix.export (AOT Inductor) · molix.compile (torch.compile / CUDA-graph capture)   [leaf execution utils]
 ```
 
@@ -155,11 +155,14 @@ Notes on cross-package edges (verified against imports):
 - `molpot.heads` imports `molrep.embedding` (e.g. `heads/edge.py`) — the arrow
   runs heads→embedding, **not** readout→heads.
 - `molrep.heads` (`ScalarHead`, …) is a distinct sub-tree from `molpot.heads`.
-- `molix.analysis` reuses the `molix.quant` T_eff scalars for the
-  quantization-as-thermal-noise diagnostics (quantization infra lives in the
-  `molix` base layer, operating on generic `nn.Module` / `state_dict`).
-- `molix.md` (in-process Langevin velocity-Verlet driver) feeds trajectories to
-  `molix.analysis`; `molix.export` (AOT Inductor) and `molix.compile`
+- `molix.quant` holds the T_eff / quantization-as-thermal-noise scalars
+  (quantization infra in the `molix` base layer, operating on generic
+  `nn.Module` / `state_dict`). The thermal-noise *study* layer (trajectory
+  diagnostics, active learning, colored-noise thermostats) was migrated out to
+  the `pinet-quant` project (`csmd` package); molnex keeps only the reusable MD
+  engine (`molix.md`) and `molix.quant`.
+- `molix.md` (in-process Langevin velocity-Verlet driver) produces paired
+  trajectories; `molix.export` (AOT Inductor) and `molix.compile`
   (`torch.compile` / CUDA-graph capture) are leaf execution utilities that wrap a
   trained model — nothing in the core training loop imports them.
 
