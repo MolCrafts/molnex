@@ -30,19 +30,15 @@ criteria:
     status: verified
     last_checked: 2026-06-26
   - id: ac-004
-    summary: bond_index [2,N] + bond_types round-trips through collate_molecules preserving connectivity
+    summary: bond_index [2,N] + bond_types round-trips through collate_molecules AND collate_packed preserving connectivity
     type: code
     pass_when: |
       A test feeds a synthetic bond_index [2,N] + bond_types (and molpy
       atomi/atomj columns via bond_index_from_columns) through collate_molecules
-      and asserts source/target atom pairs and bond_types are preserved after
-      atom-offset rebase (batch["bonds","bond_index"] / ["bond_types"]).
-      AMENDED (impl): scope narrowed from the original "collate_molecules AND
-      collate_packed" — the collate_packed/PackedCache bonds-bucket path is
-      DEFERRED as YAGNI: no dataset produces bond_index samples today, so the
-      packed-cache bond bucket would be speculative infra. The spec-01 registry
-      already reserves the bond_index offset slot; add the packed path when a
-      real producer (a bonded-topology dataset) lands. See spec Out of scope.
+      AND through the PackedCache/collate_packed fast path, and asserts
+      source/target atom pairs and bond_types are preserved after atom-offset
+      rebase (batch["bonds","bond_index"] / ["bond_types"]); the packed fast
+      path equals the collate_molecules oracle on the bonds namespace.
     status: verified
     last_checked: 2026-06-26
   - id: ac-005

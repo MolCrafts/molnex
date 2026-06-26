@@ -50,7 +50,7 @@ Entities touched:
 - [x] Write failing tests for BondHarmonic canonical contract: `[E, 2]` edge_index rejected, missing `bond_types` rejected, canonical `[2, N]` path, empty `[2, 0]` returns 0 (`tests/test_molpot/test_potentials/test_bonds.py`)
 - [x] Implement canonical `bond_index` contract in `src/molpot/potentials/bonds/harmonic.py`: remove the `edge_index`/`bonds["i"]` fallback, validate `[2, N]`, raise clear edge≠bond error on `[E, 2]`
 - [x] Write failing tests for multi-molecule `bond_index` atom-offset and synthetic-`[2, N]` round-trip through collate (`tests/test_molix/test_data/test_bond_collate.py`)
-- [x] Wire `bond_index` / `bond_types` through `src/molix/data/collate.py` `collate_molecules` into a `"bonds"` namespace, consuming the sub-spec 01 offset-registry entry (collate_packed/cache bonds-bucket DEFERRED — see Out of scope)
+- [x] Wire `bond_index` / `bond_types` through both `collate_molecules` (bonds namespace) and `collate_packed` + the `PackedCache` bonds bucket (`bond_ptr`, dim-1 concat), consuming the sub-spec 01 offset-registry entry
 - [x] Implement `bond_index_from_columns` in `src/molix/datasets/_bond_adapter.py` mapping molpy `atomi`/`atomj`/type columns to canonical `bond_index` + `bond_types`
 - [x] Add Google-style docstrings with units and the intentional-transpose note in `harmonic.py`
 - [x] Verify a 2-molecule batch BondHarmonic energy equals the sum of per-molecule energies (offset-fix validation case)
@@ -70,4 +70,3 @@ Entities touched:
 - Any `edge_index` / neighbor-list / `bond_diff` / `bond_dist` changes — owned by sub-spec 02; `harmonic.py` reads only `pos` / `bond_index` / `bond_types`, never `edge_diff` / `edge_dist`.
 - Angle / dihedral / improper bonded terms — same covalent-topology contract applies but they are separate potentials, not part of this fix.
 - A general molpy importer — only the minimal column→COO boundary helper is added; full structure/topology ingestion is deliberately not built.
-- **DEFERRED (impl): the `collate_packed` / `PackedCache` bonds-bucket path.** No dataset produces `bond_index` samples today, so a packed-cache bond bucket (`bond_ptr`, dim-1 concat, schema "bond" level) would be speculative infra (YAGNI). `collate_molecules` carries `bond_index`/`bond_types` into a `"bonds"` namespace and proves the registry-driven atom-offset; the spec-01 registry already reserves the `bond_index` slot for the packed path. Add it when a real bonded-topology producer lands. `ac-004` was amended to this delivered scope.

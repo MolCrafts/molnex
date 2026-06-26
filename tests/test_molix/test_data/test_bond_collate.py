@@ -7,7 +7,9 @@ a topological energy must therefore equal the sum of per-molecule energies.
 
 import torch
 
-from molix.data.collate import collate_molecules
+from molix.data.cache import PackedCache
+from molix.data.collate import collate_molecules, collate_packed
+from molix.data.dataset import MmapDataset
 from molix.datasets._bond_adapter import bond_index_from_columns
 from molpot.potentials.bonds import BondHarmonic
 
@@ -74,3 +76,32 @@ def test_bond_index_from_columns_roundtrip():
     }
     batch = collate_molecules([sample])
     assert torch.equal(batch["bonds", "bond_index"], bi)
+
+
+def test_packed_cache_bonds_roundtrip_equals_molecules(tmp_path):
+    # bond_index survives PackedCache save/load and collate_packed equals the
+    # collate_molecules oracle on the bonds namespace (ac-004 packed path).
+    samples = [
+        _mol([[0.0, 0.0, 0.0], [1.2, 0.0, 0.0]], [[0], [1]], [0]),
+        _mol(
+            [[0.0, 0.0, 0.0], [0.9, 0.0, 0.0], [0.9, 0.9, 0.0]],
+            [[0, 1], [1, 2]],
+            [0, 1],
+        ),
+    ]
+    # add edges-free Z/pos only; cache requires consistent schema
+    sink = tmp_path / "bonded.pt"
+    PackedCache(sink).save(samples)
+    ds = MmapDataset(sink)
+
+    # per-sample unpack restores bond_index/bond_types
+    assert torch.equal(ds[1]["bond_index"], samples[1]["bond_index"])
+    assert torch.equal(ds[1]["bond_types"], samples[1]["bond_types"])
+
+    indices = [0, 1]
+    fast = collate_packed(ds.packed_view(), indices)
+    oracle = collate_molecules([ds[i] for i in indices])
+    assert torch.equal(fast["bonds", "bond_index"], oracle["bonds", "bond_index"])
+    assert torch.equal(fast["bonds", "bond_types"], oracle["bonds", "bond_types"])
+    # offset applied: m2's bonds rebased by +2 atoms
+    assert fast["bonds", "bond_index"].tolist() == [[0, 2, 3], [1, 3, 4]]

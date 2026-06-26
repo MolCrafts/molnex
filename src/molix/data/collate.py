@@ -394,4 +394,21 @@ def collate_packed(
     atoms = TensorDict(atoms_dict, batch_size=[n_total])
     graphs = TensorDict(graphs_dict, batch_size=[n_graphs])
 
-    return TensorDict(atoms=atoms, edges=edges, graphs=graphs, batch_size=[])
+    out = TensorDict(atoms=atoms, edges=edges, graphs=graphs, batch_size=[])
+
+    # --- covalent-bond level (mirror of collate_molecules' bonds namespace) ---
+    bonds_bucket: Mapping[str, torch.Tensor] = payload.get("bonds", {})
+    if "bond_index" in bonds_bucket and payload.get("bond_ptr") is not None:
+        b_gather, b_counts = _gather_indices(payload["bond_ptr"], idx)
+        b_seg = torch.repeat_interleave(torch.arange(n_graphs), b_counts)
+        # bond_index is COO [2, N]: gather columns, offset both rows by the
+        # owning sample's atom base (registry "bond_index", index_axis 0).
+        bond_index = rebase(
+            bonds_bucket["bond_index"][:, b_gather].long(), new_atom_offsets[b_seg], "bond_index"
+        )
+        bonds_dict: dict[str, torch.Tensor] = {"bond_index": bond_index}
+        if "bond_types" in bonds_bucket:
+            bonds_dict["bond_types"] = bonds_bucket["bond_types"][b_gather]
+        out["bonds"] = TensorDict(bonds_dict, batch_size=[])
+
+    return out
