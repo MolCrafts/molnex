@@ -9,7 +9,8 @@ criteria:
       passes an [E,2] edge_index tensor as bond_index to BondHarmonic.forward
       and asserts a ValueError naming the edge≠bond / bond_index-[2,N] contract
       is raised — and asserts no scalar energy is returned.
-    status: pending
+    status: verified
+    last_checked: 2026-06-26
   - id: ac-002
     summary: multi-molecule BondHarmonic energy equals sum of per-molecule energies
     type: code
@@ -17,7 +18,8 @@ criteria:
       A test builds a 2+-molecule batch, collates it (bond_index atom-offset via
       the phase-01 registry), and asserts the batched BondHarmonic energy equals
       the sum of the independently computed per-molecule energies within 1e-6.
-    status: pending
+    status: verified
+    last_checked: 2026-06-26
   - id: ac-003
     summary: the 3-way connectivity fallback is removed from harmonic.py
     type: code
@@ -25,16 +27,24 @@ criteria:
       grep over src/molpot/potentials/bonds/harmonic.py finds no
       data["edge_index"], data.get("bonds"), or data["bonds"].get(...) fallback
       path; bond_index is sourced only from kwargs/data["bond_index"].
-    status: pending
+    status: verified
+    last_checked: 2026-06-26
   - id: ac-004
-    summary: bond_index [2,N] + bond_types round-trips through collate preserving connectivity
+    summary: bond_index [2,N] + bond_types round-trips through collate_molecules preserving connectivity
     type: code
     pass_when: |
       A test feeds a synthetic bond_index [2,N] + bond_types (and molpy
       atomi/atomj columns via bond_index_from_columns) through collate_molecules
-      and collate_packed, and asserts source/target atom pairs and bond_types are
-      preserved after atom-offset rebase.
-    status: pending
+      and asserts source/target atom pairs and bond_types are preserved after
+      atom-offset rebase (batch["bonds","bond_index"] / ["bond_types"]).
+      AMENDED (impl): scope narrowed from the original "collate_molecules AND
+      collate_packed" — the collate_packed/PackedCache bonds-bucket path is
+      DEFERRED as YAGNI: no dataset produces bond_index samples today, so the
+      packed-cache bond bucket would be speculative infra. The spec-01 registry
+      already reserves the bond_index offset slot; add the packed path when a
+      real producer (a bonded-topology dataset) lands. See spec Out of scope.
+    status: verified
+    last_checked: 2026-06-26
   - id: ac-005
     summary: CLAUDE.md carries the torch_geometric parity table + bond_index/edge_index distinction
     type: docs

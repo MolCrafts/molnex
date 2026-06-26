@@ -130,6 +130,9 @@ def collate_molecules(
     diff_all: list[torch.Tensor] = []
     dist_all: list[torch.Tensor] = []
 
+    bond_all: list[torch.Tensor] = []
+    btype_all: list[torch.Tensor] = []
+
     graph_targets: dict[str, list[torch.Tensor]] = {}
     atom_targets: dict[str, list[torch.Tensor]] = {}
 
@@ -156,6 +159,13 @@ def collate_molecules(
                 diff_all.append(sample["edge_diff"])
             if "edge_dist" in sample and sample["edge_dist"] is not None:
                 dist_all.append(sample["edge_dist"])
+
+        # Covalent bonds: bond_index is COO [2, n_bonds] — offset both rows by
+        # atom_offset (registry "bond_index", index_axis 0) and concat on dim 1.
+        if "bond_index" in sample and sample["bond_index"] is not None:
+            bond_all.append(rebase(sample["bond_index"].long(), atom_offset, "bond_index"))
+            if "bond_types" in sample and sample["bond_types"] is not None:
+                btype_all.append(sample["bond_types"])
 
         for name, value in sample.get("targets", {}).items():
             value = value if isinstance(value, torch.Tensor) else torch.tensor(value)
@@ -209,12 +219,24 @@ def collate_molecules(
     graphs = TensorDict(graphs_dict, batch_size=[num_graphs])
 
     # --- Assemble top-level TensorDict ---
-    return TensorDict(
+    out = TensorDict(
         atoms=atoms,
         edges=edges,
         graphs=graphs,
         batch_size=[],
     )
+
+    # --- Optional covalent-bond namespace (only when samples carry bonds) ---
+    # batch_size=[] because bond_index is COO [2, N_bonds] (leading dim 2, not
+    # N_bonds) and so cannot share a batch axis with bond_types [N_bonds] — the
+    # same deliberate [2, N] vs [E, 2] layout split that guards edge != bond.
+    if bond_all:
+        bonds_dict: dict[str, torch.Tensor] = {"bond_index": torch.cat(bond_all, dim=1)}
+        if btype_all:
+            bonds_dict["bond_types"] = torch.cat(btype_all, dim=0)
+        out["bonds"] = TensorDict(bonds_dict, batch_size=[])
+
+    return out
 
 
 # ---------------------------------------------------------------------------
