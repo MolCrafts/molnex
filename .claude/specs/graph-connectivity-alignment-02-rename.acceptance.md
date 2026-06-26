@@ -8,7 +8,8 @@ criteria:
       ripgrep for the literals "bond_diff", "bond_dist", 'bond_diff',
       'bond_dist' across src/ and tests/ returns zero matches; the
       edges namespace is accessed only via edge_diff / edge_dist.
-    status: pending
+    status: verified
+    last_checked: 2026-06-26
   - id: ac-002
     summary: Sign invariant and reverse-edge negation pinned post-rename
     type: scientific
@@ -32,7 +33,8 @@ criteria:
     pass_when: |
       the repo check + full pytest suite run clean; no test raises
       KeyError(("edges", "bond_diff")) or KeyError(("edges", "bond_dist")).
-    status: pending
+    status: verified
+    last_checked: 2026-06-26
   - id: ac-005
     summary: format_version=2 cache loads via alias yielding edge_* keys
     type: code
@@ -41,7 +43,8 @@ criteria:
       written with format_version=2 (bond_diff/bond_dist buckets) loads and
       exposes edge_diff/edge_dist with a DeprecationWarning, while a freshly
       written cache reports FORMAT_VERSION=3 and carries edge_* natively.
-    status: pending
+    status: verified
+    last_checked: 2026-06-26
 ---
 
 # Acceptance criteria

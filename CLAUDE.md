@@ -82,14 +82,14 @@ TensorDict (batch_size=[])
 │   └── batch: graph membership (N,)
 ├── "edges": TensorDict (batch_size=[E])
 │   ├── edge_index: source-target pairs (E, 2)   # [:,0]=source, [:,1]=target
-│   ├── bond_diff: edge vectors (E, 3)            # pos[target] - pos[source]
-│   └── bond_dist: edge distances (E,)
+│   ├── edge_diff: edge vectors (E, 3)            # pos[target] - pos[source]
+│   └── edge_dist: edge distances (E,)
 └── "graphs": TensorDict (batch_size=[B])  [optional]
     ├── num_atoms: (B,)
     └── <targets>
 ```
 
-Access: `batch["atoms", "Z"]`, `batch["edges", "bond_dist"]`. Encoders
+Access: `batch["atoms", "Z"]`, `batch["edges", "edge_dist"]`. Encoders
 mutate the batch in place, writing `node_features` under `atoms` and
 `edge_features` under `edges` — no subclass swap.
 
@@ -113,8 +113,8 @@ docstring for full rationale.
 ```
 edge_index[:, 0]  — source atom  (the "centre" in Allegro; the "sender" in MACE ConvTP)
 edge_index[:, 1]  — target atom  (the "neighbour" in Allegro; the "receiver" in MACE ConvTP)
-bond_diff         — pos[target] - pos[source]   (displacement vector, source → target)
-bond_dist         — ‖bond_diff‖
+edge_diff         — pos[target] - pos[source]   (displacement vector, source → target)
+edge_dist         — ‖edge_diff‖
 ```
 
 `NeighborList` defaults to **full bidirectional** edges (`symmetry=True`, `E = 2 × n_pairs`).
@@ -122,7 +122,7 @@ Pass `symmetry=False` to get only the upper-triangle half-pairs (`E = n_pairs`) 
 want to exploit Newton's-3rd-law symmetry.  The two modes produce different `task_id`s so pipeline
 caches are kept separate.
 
-**Why bond_diff = pos[target] − pos[source]?**  This makes the displacement vector point in the
+**Why edge_diff = pos[target] − pos[source]?**  This makes the displacement vector point in the
 same direction as the edge (source → target), which is the convention expected by `SphericalHarmonics`
 and all `cuEquivariance`-based tensor products in this repo.  The C++ `getNeighborPairs` kernel
 returns `pos[rows] − pos[cols]` (opposite sign); `NeighborList.execute` negates it.

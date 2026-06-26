@@ -1,6 +1,6 @@
 ---
 title: Rename edges-namespace geometry keys bond_diff/bond_dist to edge_diff/edge_dist
-status: approved
+status: code-complete
 created: 2026-06-26
 ---
 
@@ -110,15 +110,15 @@ Docs + benchmarks (outside grep gate but kept correct):
 - `CHANGELOG.md`
 
 ## Tasks
-- [ ] Write failing sign-invariant test for edge geometry (tests/test_molix/test_data/test_neighbor_sign.py) asserting edge_diff[e] == pos[target] - pos[source] and that symmetry=True appends reverse edges with negated edge_diff, using the new key names
-- [ ] Write failing cache-alias test (tests/test_molix/test_data/test_cache_alias.py) that loads a format_version=2 cache carrying bond_diff/bond_dist and asserts it is read as edge_diff/edge_dist with a DeprecationWarning
-- [ ] Implement edge_diff/edge_dist producer keys in src/molix/data/tasks/neighbor.py and src/molix/data/collate.py, updating docstrings and leaving the negation logic unchanged
-- [ ] Bump PackedCache.FORMAT_VERSION 2->3 and add the read-time bond_*->edge_* alias with deprecation note in src/molix/data/cache.py
-- [ ] Sweep all src consumer key-string reads to edge_diff/edge_dist (molzoo allegro/mace/pinet, molpot composition + heads, molix.md.forcefield, molix.profiler, molix.lammps.adapter)
-- [ ] Sweep all test fixtures and assertions to edge_diff/edge_dist across tests/ (collate, datamodule, composition/sonata, heads, molzoo, symmetry_helpers, md/lammps)
-- [ ] Update CLAUDE.md Edge Convention and Post-collate batch schema to edge_diff/edge_dist preserving the sign/direction wording, and sweep docs/, README files, benchmarks, and CHANGELOG
-- [ ] Verify rotation + permutation equivariance tests (tests/test_molzoo/test_symmetry.py, tests/symmetry_helpers.py) pass post-rename
-- [ ] Run full check + test suite
+- [x] Write failing sign-invariant test for edge geometry (tests/test_molix/test_data/test_neighbor_sign.py) asserting edge_diff[e] == pos[target] - pos[source] and that symmetry=True appends reverse edges with negated edge_diff, using the new key names
+- [x] Write failing cache-alias test (tests/test_molix/test_data/test_cache_alias.py) that loads a format_version=2 cache carrying bond_diff/bond_dist and asserts it is read as edge_diff/edge_dist with a DeprecationWarning
+- [x] Implement edge_diff/edge_dist producer keys in src/molix/data/tasks/neighbor.py and src/molix/data/collate.py, updating docstrings and leaving the negation logic unchanged
+- [x] Bump PackedCache.FORMAT_VERSION 2->3 and add the read-time bond_*->edge_* alias with deprecation note in src/molix/data/cache.py
+- [x] Sweep all src consumer key-string reads to edge_diff/edge_dist (molzoo allegro/mace/pinet, molpot composition + heads, molix.md.forcefield, molix.profiler, molix.lammps.adapter)
+- [x] Sweep all test fixtures and assertions to edge_diff/edge_dist across tests/ (collate, datamodule, composition/sonata, heads, molzoo, symmetry_helpers, md/lammps)
+- [x] Update CLAUDE.md Edge Convention and Post-collate batch schema to edge_diff/edge_dist preserving the sign/direction wording, and sweep docs/, README files, benchmarks, and CHANGELOG
+- [x] Verify rotation + permutation equivariance tests (tests/test_molzoo/test_symmetry.py, tests/symmetry_helpers.py) pass post-rename
+- [x] Run full check + test suite
 
 ## Testing strategy
 - **Happy path**: a collated batch exposes `batch["edges", "edge_diff"]` `(E, 3)` and `batch["edges", "edge_dist"]` `(E,)`; downstream encoders consume them and run end-to-end without `KeyError`.

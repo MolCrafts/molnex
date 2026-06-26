@@ -50,8 +50,8 @@ class ForceField(nn.Module):
 class PotentialForceField(ForceField):
     """Bind a molpot Potential to a fixed system template.
 
-    The collated template carries a *precomputed* ``edges.bond_diff`` /
-    ``bond_dist`` from its build-time positions; PiNet's ``_edge_bond_diff`` would
+    The collated template carries a *precomputed* ``edges.edge_diff`` /
+    ``edge_dist`` from its build-time positions; PiNet's ``_edge_bond_diff`` would
     use that as a straight-through *value*, freezing the PES (constant force) if
     left in place. The template is therefore stripped of those keys **once** so
     the Potential recomputes geometry from the live positions every call (correct
@@ -70,7 +70,7 @@ class PotentialForceField(ForceField):
             potential in the integrator's (amu, Å, fs) system. Default ``1.0``.
     """
 
-    _STALE_EDGE_KEYS = ("bond_diff", "bond_dist")
+    _STALE_EDGE_KEYS = ("edge_diff", "edge_dist")
 
     def __init__(
         self, potential: nn.Module, template: TensorDict, *, energy_scale: float = 1.0

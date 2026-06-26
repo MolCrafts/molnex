@@ -46,7 +46,7 @@ not an encoder-only feature extractor: its `forward` writes `graphs.energy` and
 | In | `graphs.total_charge` | `(B,)` | long | Optional; per-graph total charge. Absent → neutral (0) |
 | In | `graphs.total_spin` | `(B,)` | long | Optional; per-graph spin. Absent → singlet (0) |
 
-`edges.bond_diff` / `edges.bond_dist` are **not** consumed: `forward` recomputes
+`edges.edge_diff` / `edges.edge_dist` are **not** consumed: `forward` recomputes
 edge vectors from `atoms.pos` so the energy is differentiable w.r.t. positions.
 
 ### 2.2 Outputs

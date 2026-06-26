@@ -54,9 +54,9 @@ def _factory(device: str, dtype: torch.dtype | None = None):
     def cast():
         b = f()
         b["atoms", "pos"] = b["atoms", "pos"].to(dtype)
-        if ("edges", "bond_diff") in b.keys(include_nested=True):
-            b["edges", "bond_diff"] = b["edges", "bond_diff"].to(dtype)
-            b["edges", "bond_dist"] = b["edges", "bond_dist"].to(dtype)
+        if ("edges", "edge_diff") in b.keys(include_nested=True):
+            b["edges", "edge_diff"] = b["edges", "edge_diff"].to(dtype)
+            b["edges", "edge_dist"] = b["edges", "edge_dist"].to(dtype)
         return b
 
     return cast

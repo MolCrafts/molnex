@@ -464,14 +464,14 @@ class Sonata(nn.Module):
         def _prepare(b: TensorDict, pos: torch.Tensor, cell: torch.Tensor | None) -> None:
             """Write ``pos`` + recomputed edge geometry (and cell) into ``b`` in place.
 
-            The encoder reads ``bond_diff`` / ``bond_dist`` from the batch rather
+            The encoder reads ``edge_diff`` / ``edge_dist`` from the batch rather
             than recomputing from ``pos``, so they must be refreshed for the
             gradient to flow pos → geometry → energy.
             """
-            bond_diff = pos[dst] - pos[src]
+            edge_diff = pos[dst] - pos[src]
             b[("atoms", "pos")] = pos
-            b[("edges", "bond_diff")] = bond_diff
-            b[("edges", "bond_dist")] = bond_diff.norm(dim=-1)
+            b[("edges", "edge_diff")] = edge_diff
+            b[("edges", "edge_dist")] = edge_diff.norm(dim=-1)
             if cell is not None:
                 b[("graphs", "cell")] = cell
 

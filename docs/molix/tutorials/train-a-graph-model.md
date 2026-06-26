@@ -48,8 +48,8 @@ atoms = AtomData(
 
 edges = EdgeData(
     edge_index=torch.zeros(0, 2, dtype=torch.long),
-    bond_diff=torch.zeros(0, 3),
-    bond_dist=torch.zeros(0),
+    edge_diff=torch.zeros(0, 3),
+    edge_dist=torch.zeros(0),
     batch_size=[0],
 )
 

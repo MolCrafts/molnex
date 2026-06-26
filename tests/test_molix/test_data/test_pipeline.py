@@ -625,7 +625,7 @@ class TestEdges:
     def test_key_based_edge_derivation(self):
         spec = (
             Pipeline("p")
-            .add(CountingSample("a"), writes={"edge_index", "bond_diff"})
+            .add(CountingSample("a"), writes={"edge_index", "edge_diff"})
             .add(CountingSample("b"), reads={"edge_index"})
             .build()
         )

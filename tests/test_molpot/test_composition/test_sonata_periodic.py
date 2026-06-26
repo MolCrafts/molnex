@@ -10,8 +10,8 @@ covers one acceptance criterion:
   ``dh = 1e-4``, on a differentiable strain ``ε``.
 
 The force / stress tests use ``TensorDict`` clones constructed inside
-the test loop; positions / cells are perturbed and ``bond_diff /
-bond_dist`` are recomputed exactly the way ``Sonata.forward`` does it
+the test loop; positions / cells are perturbed and ``edge_diff /
+edge_dist`` are recomputed exactly the way ``Sonata.forward`` does it
 internally, so the FD path samples the same ``E(pos, cell)`` surface
 autograd differentiates.
 
@@ -74,7 +74,7 @@ _REQUIRES_CUE_OPS = pytest.mark.skipif(
 )
 
 # ---------------------------------------------------------------------------
-# Helpers — minimum-image bond_diff and batch reconstruction
+# Helpers — minimum-image edge_diff and batch reconstruction
 # ---------------------------------------------------------------------------
 
 
@@ -90,13 +90,13 @@ def _build_graph_batch(
 ) -> TensorDict:
     """Build a ``TensorDict`` from positions, optionally applying minimum-image
     convention to the edge geometry for orthorhombic ``cell`` inputs."""
-    bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
     if minimum_image and cell is not None:
         edge_batch = batch_idx[edge_index[:, 0]]
         cell_per_edge = cell[edge_batch]  # (E, 3, 3)
         cell_diag = torch.diagonal(cell_per_edge, dim1=-2, dim2=-1)  # (E, 3)
-        bond_diff = bond_diff - cell_diag * torch.round(bond_diff / cell_diag)
-    bond_dist = bond_diff.norm(dim=-1)
+        edge_diff = edge_diff - cell_diag * torch.round(edge_diff / cell_diag)
+    edge_dist = edge_diff.norm(dim=-1)
 
     n_atoms = pos.shape[0]
     n_edges = edge_index.shape[0]
@@ -117,8 +117,8 @@ def _build_graph_batch(
         atoms=TensorDict(Z=Z, pos=pos, batch=batch_idx, batch_size=[n_atoms]),
         edges=TensorDict(
             edge_index=edge_index,
-            bond_diff=bond_diff,
-            bond_dist=bond_dist,
+            edge_diff=edge_diff,
+            edge_dist=edge_dist,
             batch_size=[n_edges],
         ),
         graphs=TensorDict(**graphs_kwargs),
@@ -221,7 +221,7 @@ class TestCellPeriodicConsistency:
     def test_cell_periodic_atom0_shift(
         self, sonata_pipeline: Sonata, sample_neutral_batch_periodic: TensorDict
     ) -> None:
-        # Reconstruct the periodic batch with MI bond_diff so the test
+        # Reconstruct the periodic batch with MI edge_diff so the test
         # is consistent with itself before/after the shift.
         pos = sample_neutral_batch_periodic["atoms", "pos"].clone()
         Z = sample_neutral_batch_periodic["atoms", "Z"]

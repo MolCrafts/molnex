@@ -101,19 +101,19 @@ class TestEmbeddingBlock:
 
         # Create input data
         z = torch.randint(0, embedding_config["num_species"], (n_atoms,))
-        bond_dist = torch.rand(n_edges) * embedding_config["r_max"]
-        bond_diff = torch.randn(n_edges, 3)
+        edge_dist = torch.rand(n_edges) * embedding_config["r_max"]
+        edge_diff = torch.randn(n_edges, 3)
 
-        # Normalize bond_diff to match bond_dist
-        bond_diff = (
-            bond_diff / torch.norm(bond_diff, dim=-1, keepdim=True) * bond_dist.unsqueeze(-1)
+        # Normalize edge_diff to match edge_dist
+        edge_diff = (
+            edge_diff / torch.norm(edge_diff, dim=-1, keepdim=True) * edge_dist.unsqueeze(-1)
         )
 
         # Forward pass
         node_feats, edge_attrs, edge_feats = embedding_block(
             Z=z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff,
+            edge_dist=edge_dist,
+            edge_diff=edge_diff,
         )
 
         # Check shapes
@@ -139,10 +139,10 @@ class TestEmbeddingBlock:
     def test_radial_embedding_component(self, embedding_block, embedding_config):
         """Test radial_embedding component works independently."""
         n_edges = 10
-        bond_dist = torch.rand(n_edges) * embedding_config["r_max"]
+        edge_dist = torch.rand(n_edges) * embedding_config["r_max"]
 
         # Call radial_embedding directly
-        edge_radial = embedding_block.radial_embedding(bond_dist)
+        edge_radial = embedding_block.radial_embedding(edge_dist)
 
         assert edge_radial.shape == (n_edges, embedding_config["num_bessel"])
         assert edge_radial.dtype == torch.float32
@@ -164,10 +164,10 @@ class TestEmbeddingBlock:
     def test_cutoff_component(self, embedding_block, embedding_config):
         """Test cutoff_fn component works independently."""
         n_edges = 12
-        bond_dist = torch.rand(n_edges) * embedding_config["r_max"]
+        edge_dist = torch.rand(n_edges) * embedding_config["r_max"]
 
         # Call cutoff_fn directly
-        cutoff_values = embedding_block.cutoff_fn(bond_dist)
+        cutoff_values = embedding_block.cutoff_fn(edge_dist)
 
         assert cutoff_values.shape == (n_edges,)
         assert cutoff_values.dtype == torch.float32
@@ -178,10 +178,10 @@ class TestEmbeddingBlock:
     def test_edge_feats_includes_cutoff(self, embedding_block, embedding_config):
         """Test that edge_feats properly applies cutoff to radial basis."""
         n_edges = 6
-        bond_dist = torch.rand(n_edges) * embedding_config["r_max"]
-        bond_diff = torch.randn(n_edges, 3)
-        bond_diff = (
-            bond_diff / torch.norm(bond_diff, dim=-1, keepdim=True) * bond_dist.unsqueeze(-1)
+        edge_dist = torch.rand(n_edges) * embedding_config["r_max"]
+        edge_diff = torch.randn(n_edges, 3)
+        edge_diff = (
+            edge_diff / torch.norm(edge_diff, dim=-1, keepdim=True) * edge_dist.unsqueeze(-1)
         )
 
         z = torch.randint(0, embedding_config["num_species"], (3,))
@@ -189,13 +189,13 @@ class TestEmbeddingBlock:
         # Get outputs
         _, _, edge_feats = embedding_block(
             Z=z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff,
+            edge_dist=edge_dist,
+            edge_diff=edge_diff,
         )
 
         # Compute expected edge_feats manually
-        edge_radial = embedding_block.radial_embedding(bond_dist)
-        cutoff_values = embedding_block.cutoff_fn(bond_dist)
+        edge_radial = embedding_block.radial_embedding(edge_dist)
+        cutoff_values = embedding_block.cutoff_fn(edge_dist)
         expected_edge_feats = edge_radial * cutoff_values.unsqueeze(-1)
 
         # Check they match
@@ -204,8 +204,8 @@ class TestEmbeddingBlock:
     def test_cutoff_at_boundary(self, embedding_block, embedding_config):
         """Test cutoff behavior at r_max boundary."""
         # Distance at cutoff should give near-zero cutoff value
-        bond_dist = torch.tensor([embedding_config["r_max"]])
-        cutoff_value = embedding_block.cutoff_fn(bond_dist)
+        edge_dist = torch.tensor([embedding_config["r_max"]])
+        cutoff_value = embedding_block.cutoff_fn(edge_dist)
 
         # Cosine cutoff should be near 0 at r_max
         assert cutoff_value.item() < 0.01
@@ -655,26 +655,26 @@ class TestEmbeddingBlockEquivariance:
 
         # Create input data
         z = torch.randint(0, 5, (n_atoms,))
-        bond_diff = torch.randn(n_edges, 3)
-        bond_dist = torch.norm(bond_diff, dim=-1)
+        edge_diff = torch.randn(n_edges, 3)
+        edge_dist = torch.norm(edge_diff, dim=-1)
 
         # Forward pass
         _, edge_attrs1, _ = embedding_block(
             Z=z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff,
+            edge_dist=edge_dist,
+            edge_diff=edge_diff,
         )
 
         # Rotate bond vectors
         angle = math.pi / 2
-        rot_matrix = rotation_matrix_z(angle, dtype=bond_diff.dtype)
-        bond_diff_rot = rotate_vectors(bond_diff, rot_matrix)
+        rot_matrix = rotation_matrix_z(angle, dtype=edge_diff.dtype)
+        bond_diff_rot = rotate_vectors(edge_diff, rot_matrix)
 
         # Forward pass on rotated
         _, edge_attrs2, _ = embedding_block(
             Z=z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff_rot,
+            edge_dist=edge_dist,
+            edge_diff=bond_diff_rot,
         )
 
         # l=0 component should be invariant
@@ -694,25 +694,25 @@ class TestEmbeddingBlockEquivariance:
         n_edges = 6
 
         z = torch.randint(0, 5, (n_atoms,))
-        bond_diff = torch.randn(n_edges, 3)
-        bond_dist = torch.norm(bond_diff, dim=-1)
+        edge_diff = torch.randn(n_edges, 3)
+        edge_dist = torch.norm(edge_diff, dim=-1)
 
         # Forward pass
         _, _, edge_feats1 = embedding_block(
             Z=z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff,
+            edge_dist=edge_dist,
+            edge_diff=edge_diff,
         )
 
         # Rotate bond vectors
-        rot_matrix = random_rotation_matrix(dtype=bond_diff.dtype)
-        bond_diff_rot = rotate_vectors(bond_diff, rot_matrix)
+        rot_matrix = random_rotation_matrix(dtype=edge_diff.dtype)
+        bond_diff_rot = rotate_vectors(edge_diff, rot_matrix)
 
         # Forward pass on rotated
         _, _, edge_feats2 = embedding_block(
             Z=z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff_rot,
+            edge_dist=edge_dist,
+            edge_diff=bond_diff_rot,
         )
 
         # Radial features should be identical (rotation invariant)

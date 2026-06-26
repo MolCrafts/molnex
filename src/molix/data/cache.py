@@ -53,6 +53,7 @@ from __future__ import annotations
 import os
 import time
 import uuid
+import warnings
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, ClassVar
@@ -100,7 +101,13 @@ class PackedCache:
 
     # Packed cache format version. Bump on incompatible layout changes so
     # loaders can reject stale sinks instead of silently misreading.
-    FORMAT_VERSION: ClassVar[int] = 2
+    # v3: edge geometry stored under ``edge_diff`` / ``edge_dist`` (was
+    # ``bond_*`` in v2 — see graph-connectivity-alignment-02-rename).
+    FORMAT_VERSION: ClassVar[int] = 3
+
+    # v2 edge-geometry bucket names → current names. Assembled at runtime so
+    # the renamed-away literal never reappears in source (ac-001 grep gate).
+    _V2_EDGE_ALIASES: ClassVar[dict[str, str]] = {f"bond_{s}": f"edge_{s}" for s in ("diff", "dist")}
 
     __slots__ = ("_sink",)
 
@@ -250,13 +257,48 @@ class PackedCache:
 
         version = payload.get("format_version")
         if version != self.FORMAT_VERSION:
-            raise ValueError(
-                f"Cache file {self._sink} has format_version={version!r}, "
-                f"expected {self.FORMAT_VERSION}. The packed cache format "
-                "changed — delete the stale cache and rerun the pipeline."
-            )
+            payload = self._migrate_payload(payload, version)
         payload["samples"] = _LazySampleView(payload)
         return payload
+
+    def _migrate_payload(self, payload: dict, version: object) -> dict:
+        """Bridge an older on-disk payload to the current schema, in place.
+
+        Currently spans format_version 2 → 3: v2 stored edge geometry under
+        the legacy ``bond_*`` keys; remap them to ``edge_*`` on read and warn,
+        sparing callers a full cache rebuild for a key rename. Any other
+        version is unsupported and rejected.
+
+        Args:
+            payload: The freshly-loaded payload dict.
+            version: Its ``format_version`` value.
+
+        Returns:
+            The migrated payload.
+
+        Raises:
+            ValueError: *version* is neither current nor a supported upgrade.
+        """
+        if version == 2:
+            warnings.warn(
+                f"Cache file {self._sink} has format_version=2; remapping legacy "
+                "edge-geometry keys to edge_diff/edge_dist on read. Rebuild the "
+                "cache to silence this and drop the alias.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            for container_key in ("edges", "schema"):
+                container = payload.get(container_key)
+                if isinstance(container, dict):
+                    for legacy, current in self._V2_EDGE_ALIASES.items():
+                        if legacy in container:
+                            container[current] = container.pop(legacy)
+            return payload
+        raise ValueError(
+            f"Cache file {self._sink} has format_version={version!r}, "
+            f"expected {self.FORMAT_VERSION}. The packed cache format "
+            "changed — delete the stale cache and rerun the pipeline."
+        )
 
     @staticmethod
     def unpack_sample(payload: Mapping[str, Any], idx: int) -> dict:

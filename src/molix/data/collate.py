@@ -109,7 +109,7 @@ def collate_molecules(
     """Collate molecule samples into a nested TensorDict.
 
     Each sample is a plain dict with at least ``Z`` and ``pos`` keys.
-    Optional: ``edge_index``, ``bond_diff``, ``bond_dist``, ``targets``.
+    Optional: ``edge_index``, ``edge_diff``, ``edge_dist``, ``targets``.
 
     Args:
         samples: List of single-molecule sample dicts.
@@ -152,10 +152,10 @@ def collate_molecules(
             edge_index = _normalize_edge_index(sample["edge_index"])
             edge_all.append(rebase(edge_index, atom_offset, "edge_index"))
 
-            if "bond_diff" in sample and sample["bond_diff"] is not None:
-                diff_all.append(sample["bond_diff"])
-            if "bond_dist" in sample and sample["bond_dist"] is not None:
-                dist_all.append(sample["bond_dist"])
+            if "edge_diff" in sample and sample["edge_diff"] is not None:
+                diff_all.append(sample["edge_diff"])
+            if "edge_dist" in sample and sample["edge_dist"] is not None:
+                dist_all.append(sample["edge_dist"])
 
         for name, value in sample.get("targets", {}).items():
             value = value if isinstance(value, torch.Tensor) else torch.tensor(value)
@@ -184,17 +184,17 @@ def collate_molecules(
             "edge_index": torch.cat(edge_all, dim=0),
         }
         if diff_all:
-            edges_dict["bond_diff"] = torch.cat(diff_all, dim=0)
+            edges_dict["edge_diff"] = torch.cat(diff_all, dim=0)
         if dist_all:
-            edges_dict["bond_dist"] = torch.cat(dist_all, dim=0)
+            edges_dict["edge_dist"] = torch.cat(dist_all, dim=0)
         e_total = edges_dict["edge_index"].shape[0]
         edges = TensorDict(edges_dict, batch_size=[e_total])
     else:
         # Empty edge data
         edges = TensorDict(
             edge_index=torch.zeros(0, 2, dtype=torch.long),
-            bond_diff=torch.zeros(0, 3),
-            bond_dist=torch.zeros(0),
+            edge_diff=torch.zeros(0, 3),
+            edge_dist=torch.zeros(0),
             batch_size=[0],
         )
 
@@ -341,10 +341,10 @@ def collate_packed(
         edge_index = edges_bucket["edge_index"][e_gather].long()
         edge_index = rebase(edge_index, new_atom_offsets[e_seg], "edge_index")
         edges_dict: dict[str, torch.Tensor] = {"edge_index": edge_index}
-        if "bond_diff" in edges_bucket:
-            edges_dict["bond_diff"] = edges_bucket["bond_diff"][e_gather]
-        if "bond_dist" in edges_bucket:
-            edges_dict["bond_dist"] = edges_bucket["bond_dist"][e_gather]
+        if "edge_diff" in edges_bucket:
+            edges_dict["edge_diff"] = edges_bucket["edge_diff"][e_gather]
+        if "edge_dist" in edges_bucket:
+            edges_dict["edge_dist"] = edges_bucket["edge_dist"][e_gather]
         for key in edges_bucket:
             if key.startswith(_TARGET_PREFIX):
                 _route_target(key, edges_bucket[key][e_gather])
@@ -353,8 +353,8 @@ def collate_packed(
     else:
         edges = TensorDict(
             edge_index=torch.zeros(0, 2, dtype=torch.long),
-            bond_diff=torch.zeros(0, 3),
-            bond_dist=torch.zeros(0),
+            edge_diff=torch.zeros(0, 3),
+            edge_dist=torch.zeros(0),
             batch_size=[0],
         )
 

@@ -225,7 +225,7 @@ def full_multipole_pipeline():
 class _PipelineModule(nn.Module):
     """Minimal Allegro→PermMultipoleHead pipeline.
 
-    Re-derives ``bond_diff`` / ``bond_dist`` from ``pos`` inside ``forward``
+    Re-derives ``edge_diff`` / ``edge_dist`` from ``pos`` inside ``forward``
     so that the encoder always sees fresh edge geometry under
     rotate / translate / permute transforms.
     """
@@ -264,7 +264,7 @@ class TestTranslationInvariance:
             shifted = charge_only_pipeline(translate_graph(small_molecule_neutral, t))
 
         # Float32 ULP — translation amplifies pos magnitudes by ~10×, so
-        # bond_diff differs at ~1e-5; tolerances mirror the encoder tests.
+        # edge_diff differs at ~1e-5; tolerances mirror the encoder tests.
         assert torch.allclose(
             ref["atomic_charges"], shifted["atomic_charges"], atol=1e-4, rtol=1e-4
         )

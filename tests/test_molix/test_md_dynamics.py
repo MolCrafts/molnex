@@ -134,7 +134,7 @@ def test_null_paired_trajectory_zero_df():
 
 def test_force_seam_tracks_live_geometry():
     """PotentialForceField must recompute edge geometry from the live positions,
-    not a frozen template ``bond_diff`` — regression for the constant-PES bug
+    not a frozen template ``edge_diff`` — regression for the constant-PES bug
     where swapping only ``pos`` left energy/force pinned to the initial geometry.
     """
     template = _template()

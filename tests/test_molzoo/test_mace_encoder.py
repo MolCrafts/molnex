@@ -27,8 +27,8 @@ def graph_data():
         dtype=torch.long,
     )
     pos = torch.randn(n_nodes, 3)
-    bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    bond_dist = bond_diff.norm(dim=-1).clamp(min=1e-4)
+    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    edge_dist = edge_diff.norm(dim=-1).clamp(min=1e-4)
     n_edges = edge_index.shape[0]
 
     atoms = TensorDict(
@@ -39,8 +39,8 @@ def graph_data():
     )
     edges = TensorDict(
         edge_index=edge_index,
-        bond_diff=bond_diff,
-        bond_dist=bond_dist,
+        edge_diff=edge_diff,
+        edge_dist=edge_dist,
         batch_size=[n_edges],
     )
     return TensorDict(atoms=atoms, edges=edges, batch_size=[])

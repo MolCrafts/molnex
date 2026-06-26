@@ -16,8 +16,8 @@ Example:
     ... )
     >>> features = encoder(
     ...     Z=Z,
-    ...     bond_dist=bond_dist,
-    ...     bond_diff=bond_diff,
+    ...     edge_dist=edge_dist,
+    ...     edge_diff=edge_diff,
     ...     edge_index=edge_index,
     ... )
     >>> print(features.shape)  # (n_nodes, num_layers, num_features)
@@ -151,15 +151,15 @@ class EmbeddingBlock(nn.Module):
     def forward(
         self,
         Z: torch.Tensor,
-        bond_dist: torch.Tensor,
-        bond_diff: torch.Tensor,
+        edge_dist: torch.Tensor,
+        edge_diff: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute initial node and edge features.
 
         Args:
             Z: Atomic numbers (n_nodes,).
-            bond_dist: Bond distances (n_edges,).
-            bond_diff: Bond vectors (target - source) (n_edges, 3).
+            edge_dist: Bond distances (n_edges,).
+            edge_diff: Bond vectors (target - source) (n_edges, 3).
 
         Returns:
             tuple of:
@@ -171,14 +171,14 @@ class EmbeddingBlock(nn.Module):
         node_feats = self.node_embedding(Z=Z)
 
         # Edge direction
-        edge_dir = bond_diff / (bond_dist.unsqueeze(-1) + 1e-8)
+        edge_dir = edge_diff / (edge_dist.unsqueeze(-1) + 1e-8)
 
         # Spherical harmonics
         edge_attrs = self.spherical_harmonics(edge_dir)
 
         # Radial basis * cutoff → edge_feats
-        edge_radial = self.radial_embedding(bond_dist)
-        edge_cutoff = self.cutoff_fn(bond_dist)
+        edge_radial = self.radial_embedding(edge_dist)
+        edge_cutoff = self.cutoff_fn(edge_dist)
         edge_feats = edge_radial * edge_cutoff.unsqueeze(-1)
 
         return node_feats, edge_attrs, edge_feats
@@ -377,8 +377,8 @@ class MACE(TensorDictModuleBase):
         ("atoms", "Z"),
         ("atoms", "pos"),
         ("edges", "edge_index"),
-        ("edges", "bond_diff"),
-        ("edges", "bond_dist"),
+        ("edges", "edge_diff"),
+        ("edges", "edge_dist"),
     ]
     out_keys = [("atoms", "node_features")]
 
@@ -509,15 +509,15 @@ class MACE(TensorDictModuleBase):
             ``(n_nodes, num_interactions, num_features)`` added.
         """
         Z = td["atoms", "Z"]
-        bond_dist = td["edges", "bond_dist"]
-        bond_diff = td["edges", "bond_diff"]
+        edge_dist = td["edges", "edge_dist"]
+        edge_diff = td["edges", "edge_diff"]
         edge_index = td["edges", "edge_index"]
 
         # ---- Embedding ----
         node_feats_init, edge_attrs, edge_feats = self.embedding(
             Z=Z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff,
+            edge_dist=edge_dist,
+            edge_diff=edge_diff,
         )
 
         # ---- Initial projection: scalar embeddings -> hidden irreps ----

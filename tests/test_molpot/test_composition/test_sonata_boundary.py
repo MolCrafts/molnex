@@ -90,8 +90,8 @@ def sonata_and_batch() -> tuple[Sonata, TensorDict]:
         edge_index = torch.tensor(
             [[i, j] for i in range(4) for j in range(4) if i != j], dtype=torch.long
         )
-        bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-        bond_dist = bond_diff.norm(dim=-1)
+        edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+        edge_dist = edge_diff.norm(dim=-1)
         batch_idx = torch.zeros(4, dtype=torch.long)
         cell = 10.0 * torch.eye(3, dtype=torch.float64).unsqueeze(0)
         total_charge = torch.zeros(1, dtype=torch.float64)
@@ -101,8 +101,8 @@ def sonata_and_batch() -> tuple[Sonata, TensorDict]:
             atoms=TensorDict(Z=Z, pos=pos, batch=batch_idx, batch_size=[4]),
             edges=TensorDict(
                 edge_index=edge_index,
-                bond_diff=bond_diff,
-                bond_dist=bond_dist,
+                edge_diff=edge_diff,
+                edge_dist=edge_dist,
                 batch_size=[edge_index.shape[0]],
             ),
             graphs=TensorDict(

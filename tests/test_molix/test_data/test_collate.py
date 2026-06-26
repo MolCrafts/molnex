@@ -9,16 +9,16 @@ def test_collate_basic_fields_and_offsets():
         "Z": torch.tensor([1, 8], dtype=torch.long),
         "pos": torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
         "edge_index": torch.tensor([[0, 1]], dtype=torch.long),
-        "bond_diff": torch.tensor([[1.0, 0.0, 0.0]]),
-        "bond_dist": torch.tensor([1.0]),
+        "edge_diff": torch.tensor([[1.0, 0.0, 0.0]]),
+        "edge_dist": torch.tensor([1.0]),
         "targets": {"U0": torch.tensor([1.5])},
     }
     sample2 = {
         "Z": torch.tensor([6, 1, 1], dtype=torch.long),
         "pos": torch.tensor([[0.0, 1.0, 0.0], [0.0, 2.0, 0.0], [1.0, 1.0, 0.0]]),
         "edge_index": torch.tensor([[0, 1], [0, 2]], dtype=torch.long),
-        "bond_diff": torch.tensor([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]),
-        "bond_dist": torch.tensor([1.0, 1.0]),
+        "edge_diff": torch.tensor([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]),
+        "edge_dist": torch.tensor([1.0, 1.0]),
         "targets": {"U0": torch.tensor([2.5])},
     }
 

@@ -29,7 +29,7 @@ class _DummyTDPotential(nn.Module):
 
     def forward(self, batch, *, compute_forces: bool = False):
         pos = batch["atoms", "pos"]
-        bd = batch["edges", "bond_dist"]
+        bd = batch["edges", "edge_dist"]
         out = {"energy": (bd**2).sum().reshape(1), "atomic_energy": torch.zeros(pos.shape[0])}
         if compute_forces:
             out["forces"] = torch.zeros_like(pos)
@@ -71,13 +71,13 @@ def test_unknown_adapter_raises():
 
 
 def test_tensordict_adapter_edge_convention(graph):
-    """bond_diff = pos[target] - pos[source]; single-graph batch metadata."""
+    """edge_diff = pos[target] - pos[source]; single-graph batch metadata."""
     Z, pos, edge_index = graph
     batch = MolnexTensorDictAdapter().build_inputs(_DummyTDPotential(), Z, pos, edge_index)
     expected = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    assert torch.allclose(batch["edges", "bond_diff"], expected)
+    assert torch.allclose(batch["edges", "edge_diff"], expected)
     assert torch.allclose(
-        batch["edges", "bond_dist"], expected.norm(dim=-1).clamp(min=1e-6)
+        batch["edges", "edge_dist"], expected.norm(dim=-1).clamp(min=1e-6)
     )
     assert (batch["atoms", "batch"] == 0).all()
     assert batch["graphs", "num_atoms"].item() == 3

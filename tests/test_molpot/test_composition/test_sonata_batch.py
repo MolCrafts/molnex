@@ -82,8 +82,8 @@ def _make_single_graph(
     edge_index = torch.tensor(
         [[i, j] for i in range(n) for j in range(n) if i != j], dtype=torch.long
     )
-    bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    bond_dist = bond_diff.norm(dim=-1)
+    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    edge_dist = edge_diff.norm(dim=-1)
     batch_idx = torch.zeros(n, dtype=torch.long)
     num_atoms = torch.tensor([n], dtype=torch.long)
 
@@ -99,8 +99,8 @@ def _make_single_graph(
         atoms=TensorDict(Z=Z, pos=pos, batch=batch_idx, batch_size=[n]),
         edges=TensorDict(
             edge_index=edge_index,
-            bond_diff=bond_diff,
-            bond_dist=bond_dist,
+            edge_diff=edge_diff,
+            edge_dist=edge_dist,
             batch_size=[edge_index.shape[0]],
         ),
         graphs=TensorDict(**graphs_kwargs),
@@ -130,8 +130,8 @@ def _stack_graphs(graphs: list[TensorDict]) -> TensorDict:
         offset += n_g
     batch_idx = torch.cat(batch_parts, dim=0)
     edge_index = torch.cat(edge_parts, dim=0)
-    bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    bond_dist = bond_diff.norm(dim=-1)
+    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    edge_dist = edge_diff.norm(dim=-1)
 
     total_charge = torch.cat([g["graphs", "total_charge"] for g in graphs], dim=0)  # (B,)
 
@@ -149,8 +149,8 @@ def _stack_graphs(graphs: list[TensorDict]) -> TensorDict:
         atoms=TensorDict(Z=Z, pos=pos, batch=batch_idx, batch_size=[pos.shape[0]]),
         edges=TensorDict(
             edge_index=edge_index,
-            bond_diff=bond_diff,
-            bond_dist=bond_dist,
+            edge_diff=edge_diff,
+            edge_dist=edge_dist,
             batch_size=[edge_index.shape[0]],
         ),
         graphs=TensorDict(
