@@ -22,8 +22,8 @@ def _stub_batch(*, n_atoms=3, n_edges=6, feat_dim=8):
     )
     edges = TensorDict(
         edge_index=edge_index,
-        bond_diff=torch.randn(n_edges, 3),
-        bond_dist=torch.rand(n_edges) + 0.5,
+        edge_diff=torch.randn(n_edges, 3),
+        edge_dist=torch.rand(n_edges) + 0.5,
         batch_size=[n_edges],
     )
     edges["edge_features"] = torch.randn(n_edges, feat_dim)
@@ -111,8 +111,8 @@ class TestEmptyGraph:
         )
         edges = TensorDict(
             edge_index=torch.empty(0, 2, dtype=torch.long),
-            bond_diff=torch.empty(0, 3),
-            bond_dist=torch.empty(0),
+            edge_diff=torch.empty(0, 3),
+            edge_dist=torch.empty(0),
             batch_size=[0],
         )
         edges["edge_features"] = torch.empty(0, 8)

@@ -9,8 +9,8 @@ Components consume the following tensors (or subsets):
 - `Z`: Atomic numbers `(N,)`
 - `pos`: Coordinates `(N, 3)`
 - `edge_index`: Edge indices `(E, 2)`
-- `bond_diff`: Edge vectors `(E, 3)`
-- `bond_dist`: Edge distances `(E,)`
+- `edge_diff`: Edge vectors `(E, 3)`
+- `edge_dist`: Edge distances `(E,)`
 
 ## Usage
 

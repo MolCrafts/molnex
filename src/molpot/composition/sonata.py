@@ -452,7 +452,9 @@ class Sonata(nn.Module):
                 out["charge_sum_post_proj"] = head_out["charge_sum_post_proj"]
             return energy, out
 
-        def _strained(pos_orig: torch.Tensor, strain: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        def _strained(
+            pos_orig: torch.Tensor, strain: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             """Apply a symmetric strain to positions and cell (ε = 0 is identity)."""
             sym_eps = 0.5 * (strain + strain.transpose(-1, -2))
             eye_b = torch.eye(3, dtype=strain.dtype, device=strain.device).expand_as(strain)
@@ -464,14 +466,14 @@ class Sonata(nn.Module):
         def _prepare(b: TensorDict, pos: torch.Tensor, cell: torch.Tensor | None) -> None:
             """Write ``pos`` + recomputed edge geometry (and cell) into ``b`` in place.
 
-            The encoder reads ``bond_diff`` / ``bond_dist`` from the batch rather
+            The encoder reads ``edge_diff`` / ``edge_dist`` from the batch rather
             than recomputing from ``pos``, so they must be refreshed for the
             gradient to flow pos → geometry → energy.
             """
-            bond_diff = pos[dst] - pos[src]
+            edge_diff = pos[dst] - pos[src]
             b[("atoms", "pos")] = pos
-            b[("edges", "bond_diff")] = bond_diff
-            b[("edges", "bond_dist")] = bond_diff.norm(dim=-1)
+            b[("edges", "edge_diff")] = edge_diff
+            b[("edges", "edge_dist")] = edge_diff.norm(dim=-1)
             if cell is not None:
                 b[("graphs", "cell")] = cell
 
@@ -483,6 +485,7 @@ class Sonata(nn.Module):
         #    identity, so differentiating w.r.t. positions on the original
         #    geometry suffices whether or not stress is also requested. --
         if compute_forces:
+
             def energy_of_pos(p: torch.Tensor) -> torch.Tensor:
                 b = batch.clone()
                 _prepare(b, p, cell0)

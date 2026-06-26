@@ -20,7 +20,7 @@ one by name and stamp it into ``meta.json`` for provenance.
 
 Edge convention follows the repo-wide rule (see ``CLAUDE.md`` → Edge Convention):
 ``edge_index[:, 0]`` is the source, ``[:, 1]`` the target, and
-``bond_diff = pos[target] - pos[source]``. The C++ side sorts edges by
+``edge_diff = pos[target] - pos[source]``. The C++ side sorts edges by
 ``(source, target)`` before the call; adapters must not assume any other order.
 """
 
@@ -107,8 +107,8 @@ class MolnexTensorDictAdapter(LammpsAdapter):
         n = Z.shape[0]
         src = edge_index[:, 0]
         tgt = edge_index[:, 1]
-        bond_diff = pos[tgt] - pos[src]                       # pos[target] - pos[source]
-        bond_dist = bond_diff.norm(dim=-1).clamp(min=1e-6)
+        edge_diff = pos[tgt] - pos[src]  # pos[target] - pos[source]
+        edge_dist = edge_diff.norm(dim=-1).clamp(min=1e-6)
         return TensorDict(
             atoms=TensorDict(
                 Z=Z,
@@ -118,8 +118,8 @@ class MolnexTensorDictAdapter(LammpsAdapter):
             ),
             edges=TensorDict(
                 edge_index=edge_index,
-                bond_diff=bond_diff,
-                bond_dist=bond_dist,
+                edge_diff=edge_diff,
+                edge_dist=edge_dist,
                 batch_size=[edge_index.shape[0]],
             ),
             graphs=TensorDict(

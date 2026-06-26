@@ -40,7 +40,7 @@ composer = PotentialComposer(
 node_features = torch.randn(12, 64)
 data = {
     "edge_index": torch.randint(0, 12, (40, 2)),
-    "bond_dist": torch.rand(40) + 0.5,
+    "edge_dist": torch.rand(40) + 0.5,
     "batch": torch.zeros(12, dtype=torch.long),
 }
 

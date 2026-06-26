@@ -82,14 +82,14 @@ TensorDict (batch_size=[])
 │   └── batch: graph membership (N,)
 ├── "edges": TensorDict (batch_size=[E])
 │   ├── edge_index: source-target pairs (E, 2)   # [:,0]=source, [:,1]=target
-│   ├── bond_diff: edge vectors (E, 3)            # pos[target] - pos[source]
-│   └── bond_dist: edge distances (E,)
+│   ├── edge_diff: edge vectors (E, 3)            # pos[target] - pos[source]
+│   └── edge_dist: edge distances (E,)
 └── "graphs": TensorDict (batch_size=[B])  [optional]
     ├── num_atoms: (B,)
     └── <targets>
 ```
 
-Access: `batch["atoms", "Z"]`, `batch["edges", "bond_dist"]`. Encoders
+Access: `batch["atoms", "Z"]`, `batch["edges", "edge_dist"]`. Encoders
 mutate the batch in place, writing `node_features` under `atoms` and
 `edge_features` under `edges` — no subclass swap.
 
@@ -113,8 +113,8 @@ docstring for full rationale.
 ```
 edge_index[:, 0]  — source atom  (the "centre" in Allegro; the "sender" in MACE ConvTP)
 edge_index[:, 1]  — target atom  (the "neighbour" in Allegro; the "receiver" in MACE ConvTP)
-bond_diff         — pos[target] - pos[source]   (displacement vector, source → target)
-bond_dist         — ‖bond_diff‖
+edge_diff         — pos[target] - pos[source]   (displacement vector, source → target)
+edge_dist         — ‖edge_diff‖
 ```
 
 `NeighborList` defaults to **full bidirectional** edges (`symmetry=True`, `E = 2 × n_pairs`).
@@ -122,10 +122,44 @@ Pass `symmetry=False` to get only the upper-triangle half-pairs (`E = n_pairs`) 
 want to exploit Newton's-3rd-law symmetry.  The two modes produce different `task_id`s so pipeline
 caches are kept separate.
 
-**Why bond_diff = pos[target] − pos[source]?**  This makes the displacement vector point in the
+**Why edge_diff = pos[target] − pos[source]?**  This makes the displacement vector point in the
 same direction as the edge (source → target), which is the convention expected by `SphericalHarmonics`
 and all `cuEquivariance`-based tensor products in this repo.  The C++ `getNeighborPairs` kernel
 returns `pos[rows] − pos[cols]` (opposite sign); `NeighborList.execute` negates it.
+
+### `edge_index` (cutoff graph) vs `bond_index` (covalent topology)
+
+Two **different** connectivity objects, with **deliberately different shapes**
+so one can never be silently used as the other:
+
+| field | shape | meaning | offset axis |
+|---|---|---|---|
+| `edge_index` | `(E, 2)` | geometric neighbour graph `G(r_c)` — recomputed from positions each step, bidirectional, includes through-space contacts | rows |
+| `bond_index` | `(2, N)` COO | fixed covalent topology (from molpy `atomi`/`atomj`), paired with `bond_types`; consumed by `BondHarmonic` and other bonded terms | columns |
+
+A within-cutoff neighbour is **not** a chemical bond. `BondHarmonic` rejects a
+`(E, 2)` tensor passed as `bond_index` (raises, rather than computing a wrong
+energy) — the transpose is a type-level anti-alias guard. The collated batch
+exposes bonds under a `"bonds"` namespace (`batch["bonds", "bond_index"]`,
+`batch["bonds", "bond_types"]`, `batch_size=[]`).
+
+### torch_geometric collate/Batch parity
+
+molnex's batch is a plain nested `TensorDict`, not a PyG `Data`/`Batch`. The
+collate intentionally implements only the lazy subset of PyG's batching:
+
+| PyG feature | molnex | why |
+|---|---|---|
+| `__inc__` / `__cat_dim__` (per-key offset on batching) | **implemented** as the declarative `INDEX_KEYS` registry + `rebase()` in `collate.py` | the one piece worth having — also fixes the latent un-offset `bond_index` bug |
+| `follow_batch` (per-attribute batch vectors) | **skip** | no consumer |
+| `ptr` (cumsum boundaries) | **skip** — derive on demand from `graphs.num_atoms` / `atom_ptr` | redundant to materialise |
+| `to_data_list()` / unbatch | **skip** | `PackedCache` covers persistence/unpack |
+| `exclude_keys` | **skip** | no consumer |
+| arbitrary `HeteroData` node/edge types | **skip** | fixed `atoms`/`edges`/`graphs`/`bonds` namespaces are the contract |
+
+The packed-mmap collate fast path (`collate_packed`) is a deliberate
+divergence from PyG's per-sample Python `Collater` — faster and HPC-fs
+friendly for fixed-schema molecular data.
 
 ### Module Dependency Graph
 

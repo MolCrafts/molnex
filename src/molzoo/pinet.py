@@ -86,15 +86,15 @@ def _edge_bond_diff(edges, pos: torch.Tensor, edge_index: torch.Tensor) -> torch
     """Source→target edge displacement, periodic-boundary-correct and differentiable.
 
     Open systems: recompute ``pos[target] - pos[source]`` so forces flow to ``pos``.
-    Periodic systems: the neighbour list supplies the *minimum-image* ``bond_diff``
+    Periodic systems: the neighbour list supplies the *minimum-image* ``edge_diff``
     (the molix analogue of PiNN replicating periodic images). We take that imaged
     value but route the gradient through the raw displacement via a straight-through
     term — exact, because ∂(imaged diff)/∂pos = ∂raw/∂pos = identity (the per-edge
     cell-shift is constant). A no-op for open systems, where the supplied
-    ``bond_diff`` already equals ``raw``.
+    ``edge_diff`` already equals ``raw``.
 
     Args:
-        edges: The batch's ``edges`` sub-TensorDict (may carry ``bond_diff``).
+        edges: The batch's ``edges`` sub-TensorDict (may carry ``edge_diff``).
         pos: Atom positions ``(N, 3)``.
         edge_index: Source/target pairs ``(E, 2)``; ``[:,0]``=source, ``[:,1]``=target.
 
@@ -102,13 +102,13 @@ def _edge_bond_diff(edges, pos: torch.Tensor, edge_index: torch.Tensor) -> torch
         Edge displacement ``(E, 3)`` with periodic-correct value and exact gradient.
     """
     raw = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    if "bond_diff" in edges.keys():
+    if "edge_diff" in edges.keys():
         # ``.detach()`` on the supplied value makes this robust whether the
-        # neighbour list's bond_diff is a detached cache leaf (training) or a
+        # neighbour list's edge_diff is a detached cache leaf (training) or a
         # live in-graph tensor (an MD force_fn that recomputes it): the gradient
         # always flows solely through ``raw`` (the correct, cell-shift-invariant
         # ∂/∂pos), never double-counting a live supplied tensor.
-        return edges["bond_diff"].detach() + (raw - raw.detach())
+        return edges["edge_diff"].detach() + (raw - raw.detach())
     return raw
 
 
@@ -121,8 +121,8 @@ class PiNet(TensorDictModuleBase):
     * ``("atoms", "pos")``: positions ``(N, 3)``.
     * ``("edges", "edge_index")``: source-target pairs ``(E, 2)``.
 
-    Edge geometry (``bond_diff`` = ``pos[target] - pos[source]`` and
-    ``bond_dist`` = ``‖bond_diff‖``) is derived from ``pos`` + ``edge_index``
+    Edge geometry (``edge_diff`` = ``pos[target] - pos[source]`` and
+    ``edge_dist`` = ``‖edge_diff‖``) is derived from ``pos`` + ``edge_index``
     inside ``forward``. Caching them in the pipeline buys nothing (one
     gather + diff + norm per step) and breaks the gradient flow pos → geometry
     that force derivation needs.
@@ -284,36 +284,36 @@ class PiNet(TensorDictModuleBase):
         edge_index = td["edges", "edge_index"]
 
         # Edge geometry: PBC-correct (uses the neighbour list's minimum-image
-        # bond_diff under periodic boundaries) and differentiable. See _edge_bond_diff.
-        bond_diff = _edge_bond_diff(td["edges"], pos, edge_index)
-        bond_dist = bond_diff.norm(dim=-1).clamp(min=1e-8)
+        # edge_diff under periodic boundaries) and differentiable. See _edge_bond_diff.
+        edge_diff = _edge_bond_diff(td["edges"], pos, edge_index)
+        edge_dist = edge_diff.norm(dim=-1).clamp(min=1e-8)
 
         idx = self._z_to_idx[Z]
         p1 = torch.nn.functional.one_hot(idx, num_classes=self.n_elem).to(pos.dtype)
         tensors: dict[str, torch.Tensor] = {"edge_index": edge_index, "p1": p1}
 
-        d3 = bond_diff / bond_dist.unsqueeze(-1)
+        d3 = edge_diff / edge_dist.unsqueeze(-1)
         tensors["d3"] = d3
         if self.rank >= 3:
             tensors["p3"] = torch.zeros(
                 Z.shape[0],
                 3,
                 1,
-                dtype=bond_diff.dtype,
-                device=bond_diff.device,
+                dtype=edge_diff.dtype,
+                device=edge_diff.device,
             )
         if self.rank >= 5:
             tensors["p5"] = torch.zeros(
                 Z.shape[0],
                 5,
                 1,
-                dtype=bond_diff.dtype,
-                device=bond_diff.device,
+                dtype=edge_diff.dtype,
+                device=edge_diff.device,
             )
             tensors["d5"] = _compute_d5(d3)
 
-        fc = self.cutoff(bond_dist)
-        basis = self.basis_fn(bond_dist, fc=fc)
+        fc = self.cutoff(edge_dist)
+        basis = self.basis_fn(edge_dist, fc=fc)
 
         p1_states: list[torch.Tensor] = []
         p1_block_outputs: list[torch.Tensor] = []
@@ -612,7 +612,7 @@ class PiNetDipole(nn.Module):
             )
         edge_scalars = None
         edge_index = None
-        bond_diff = None
+        edge_diff = None
         if self.head.uses_bc and "i1_features" in batch["edges"].keys():
             edge_scalars = _pool_layer(
                 batch["edges", "i1_features"],
@@ -620,7 +620,7 @@ class PiNetDipole(nn.Module):
             )
             edge_index = batch["edges", "edge_index"]
             pos = batch["atoms", "pos"]
-            bond_diff = _edge_bond_diff(batch["edges"], pos, edge_index)
+            edge_diff = _edge_bond_diff(batch["edges"], pos, edge_index)
         edge_vectors = None
         if self.head.uses_bc and "i3_features" in batch["edges"].keys():
             edge_vectors = _pool_layer(
@@ -645,7 +645,7 @@ class PiNetDipole(nn.Module):
             edge_scalars=edge_scalars,
             edge_vectors=edge_vectors,
             edge_index=edge_index,
-            bond_diff=bond_diff,
+            edge_diff=edge_diff,
             oxidation=oxidation,
             total_charge=total_charge,
         )
@@ -713,14 +713,14 @@ class PiNetPolarizability(nn.Module):
             )
         pos = batch["atoms", "pos"]
         edge_index = batch["edges", "edge_index"]
-        bond_diff = _edge_bond_diff(batch["edges"], pos, edge_index)
+        edge_diff = _edge_bond_diff(batch["edges"], pos, edge_index)
         return self.head(
             pos=pos,
             Z=batch["atoms", "Z"],
             atom_batch=atom_batch,
             num_graphs=num_graphs,
             edge_index=edge_index,
-            bond_diff=bond_diff,
+            edge_diff=edge_diff,
             node_scalars=node_scalars,
             edge_scalars=edge_scalars,
             edge_vectors=edge_vectors,

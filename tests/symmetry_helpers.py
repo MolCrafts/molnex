@@ -16,7 +16,7 @@ Three physical symmetries every encoder + property head must satisfy:
 This module provides three things:
 
     1. :func:`make_graph_batch` — build a ``TensorDict`` from raw
-       tensors, computing ``bond_diff`` / ``bond_dist`` from positions.
+       tensors, computing ``edge_diff`` / ``edge_dist`` from positions.
     2. :func:`translate_graph` / :func:`rotate_graph` /
        :func:`permute_graph` — the three input transforms.
     3. :func:`recompute_edge_geometry` — call inside a forward pass so
@@ -53,11 +53,11 @@ def make_graph_batch(
             auto-derived from ``batch`` and always present.
 
     Returns:
-        A fully-formed ``TensorDict`` with ``bond_diff = pos[dst] - pos[src]``
-        and ``bond_dist = ‖bond_diff‖`` recomputed from ``pos``.
+        A fully-formed ``TensorDict`` with ``edge_diff = pos[dst] - pos[src]``
+        and ``edge_dist = ‖edge_diff‖`` recomputed from ``pos``.
     """
-    bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    bond_dist = bond_diff.norm(dim=-1).clamp(min=1e-6)
+    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    edge_dist = edge_diff.norm(dim=-1).clamp(min=1e-6)
     n_atoms = pos.shape[0]
     n_edges = edge_index.shape[0]
     n_graphs = int(batch.max().item()) + 1 if n_atoms > 0 else 0
@@ -73,8 +73,8 @@ def make_graph_batch(
         atoms=TensorDict(Z=Z, pos=pos, batch=batch, batch_size=[n_atoms]),
         edges=TensorDict(
             edge_index=edge_index,
-            bond_diff=bond_diff,
-            bond_dist=bond_dist,
+            edge_diff=edge_diff,
+            edge_dist=edge_dist,
             batch_size=[n_edges],
         ),
         graphs=graph_data,
@@ -127,17 +127,17 @@ def permute_graph(batch: TensorDict, perm: torch.Tensor) -> TensorDict:
 
 
 def recompute_edge_geometry(batch: TensorDict) -> TensorDict:
-    """Re-derive ``bond_diff`` / ``bond_dist`` from ``pos`` in-place.
+    """Re-derive ``edge_diff`` / ``edge_dist`` from ``pos`` in-place.
 
     Call this at the start of a pipeline forward when ``pos`` carries
     ``requires_grad`` so autograd can trace ``∂E/∂pos`` for force tests.
     """
     pos = batch["atoms", "pos"]
     edge_index = batch["edges", "edge_index"]
-    bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    bond_dist = bond_diff.norm(dim=-1).clamp(min=1e-6)
-    batch["edges", "bond_diff"] = bond_diff
-    batch["edges", "bond_dist"] = bond_dist
+    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    edge_dist = edge_diff.norm(dim=-1).clamp(min=1e-6)
+    batch["edges", "edge_diff"] = edge_diff
+    batch["edges", "edge_dist"] = edge_dist
     return batch
 
 

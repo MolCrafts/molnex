@@ -38,8 +38,8 @@ One skill + one agent keep `<encoder>.md` aligned with code and paper:
 Both encoders accept keyword tensors:
 
 - `Z`: Atomic numbers `(N,)`
-- `bond_dist`: Edge distances `(E,)`
-- `bond_diff`: Edge vectors `(E, 3)`
+- `edge_dist`: Edge distances `(E,)`
+- `edge_diff`: Edge vectors `(E, 3)`
 - `edge_index`: Edge indices `(E, 2)`
 
 Output: `(N, num_layers, feature_dim)` — per-atom, per-layer features.
@@ -62,8 +62,8 @@ encoder = MACE(MACESpec(
 Z = torch.randint(0, 10, (20,))
 features = encoder(
     Z=Z,
-    bond_dist=torch.rand(80),
-    bond_diff=torch.randn(80, 3),
+    edge_dist=torch.rand(80),
+    edge_diff=torch.randn(80, 3),
     edge_index=torch.randint(0, 20, (80, 2)),
 )
 

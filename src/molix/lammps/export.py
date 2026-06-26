@@ -53,7 +53,7 @@ def _example_system(species: list[int], cutoff: float, dtype: torch.dtype, devic
     z0 = species[0]
     z1 = species[1] if len(species) > 1 else species[0]
     Z = torch.tensor([z0, z1], dtype=torch.long, device=device)
-    r = min(0.5 * cutoff, max(cutoff - 0.5, 0.3))             # comfortably inside the cutoff
+    r = min(0.5 * cutoff, max(cutoff - 0.5, 0.3))  # comfortably inside the cutoff
     pos = torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=dtype, device=device)
     edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long, device=device)
     return Z, pos, edge_index
@@ -120,9 +120,9 @@ def export_for_lammps(
     n_dim = torch.export.Dim("n_atoms", min=1, max=1 << 20)
     e_dim = torch.export.Dim("n_edges", min=1, max=1 << 24)
     dynamic_shapes = (
-        {0: n_dim},              # Z (N,)
-        {0: n_dim},              # pos (N, 3)
-        {0: e_dim},              # edge_index (E, 2)
+        {0: n_dim},  # Z (N,)
+        {0: n_dim},  # pos (N, 3)
+        {0: e_dim},  # edge_index (E, 2)
     )
 
     export_model(

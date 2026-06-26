@@ -26,8 +26,8 @@ top-level keys** (no `"atoms"` / `"edges"` nesting):
 - `Z`: `LongTensor[N]` - Atomic numbers
 - `pos`: `FloatTensor[N, 3]` - Atom positions
 - `edge_index` (optional, added by `NeighborList`): `LongTensor[E, 2]` - Edge source-target pairs
-- `bond_diff` (optional, added by `NeighborList`): `FloatTensor[E, 3]` - Edge vectors
-- `bond_dist` (optional, added by `NeighborList`): `FloatTensor[E]` - Edge distances
+- `edge_diff` (optional, added by `NeighborList`): `FloatTensor[E, 3]` - Edge vectors
+- `edge_dist` (optional, added by `NeighborList`): `FloatTensor[E]` - Edge distances
 - `targets` (optional): `dict[str, Tensor]` - Target labels
 
 Access with flat keys: `sample["Z"]`, `sample["edge_index"]`,
@@ -47,8 +47,8 @@ GraphBatch (batch_size=[])
 │   └── <atom-level targets, e.g. forces>
 ├── "edges": EdgeData (batch_size=[E_total])
 │   ├── edge_index: LongTensor[E_total, 2]
-│   ├── bond_diff: FloatTensor[E_total, 3]
-│   └── bond_dist: FloatTensor[E_total]
+│   ├── edge_diff: FloatTensor[E_total, 3]
+│   └── edge_dist: FloatTensor[E_total]
 └── "graphs": GraphData (batch_size=[B])
     ├── num_atoms: LongTensor[B]
     └── <graph-level targets, e.g. energy, U0>

@@ -37,7 +37,7 @@ from tests.symmetry_helpers import (
 def make_pipeline(encoder, is_edge_encoder: bool = False):
     """Build an energy+force pipeline from an encoder.
 
-    Computes bond_diff from pos inside the forward pass so the functorch force
+    Computes edge_diff from pos inside the forward pass so the functorch force
     closure can trace gradients pos → geometry → energy for force derivation.
     """
     layer_pool = LayerPooling("mean")
@@ -197,7 +197,7 @@ class TestTranslationInvariance:
 
         # Tolerance is float32-ULP — `(pos+t)[j]-(pos+t)[i]` is not
         # bit-exactly `pos[j]-pos[i]` for `t ≈ 10*randn`, so the encoder
-        # input `bond_diff` differs by ~ULP and propagates linearly.
+        # input `edge_diff` differs by ~ULP and propagates linearly.
         assert torch.allclose(ref, shifted, atol=1e-4, rtol=1e-4)
 
     @pytest.mark.parametrize("seed", SEEDS)

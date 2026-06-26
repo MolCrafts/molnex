@@ -73,10 +73,10 @@ class NeighborList(SampleTask):
         Calls the C++ kernel on the sample's ``pos`` (and ``cell`` under
         PBC), normalises pair indices to ``(E, 2)``, optionally strips
         NaN-padded rows, and negates the kernel's delta so that
-        ``bond_diff = pos[target] - pos[source]`` per the repo Edge
+        ``edge_diff = pos[target] - pos[source]`` per the repo Edge
         Convention. With ``symmetry=True`` the reverse edge is appended for
         every pair (``E = 2 * n_pairs``), with the sign-flipped
-        ``bond_diff`` and duplicated distances.
+        ``edge_diff`` and duplicated distances.
 
         Args:
             data: A sample dict with ``pos`` ``(N, 3)`` and, under PBC, a
@@ -84,8 +84,8 @@ class NeighborList(SampleTask):
 
         Returns:
             A new sample dict adding ``edge_index`` ``(E, 2)`` (source in
-            column 0, target in column 1), ``bond_diff`` ``(E, 3)``
-            (``pos[target] - pos[source]``), and ``bond_dist`` ``(E,)``.
+            column 0, target in column 1), ``edge_diff`` ``(E, 3)``
+            (``pos[target] - pos[source]``), and ``edge_dist`` ``(E,)``.
         """
         pos = data["pos"]
         box_vectors = data.get("cell") if self.pbc else None
@@ -105,21 +105,21 @@ class NeighborList(SampleTask):
             deltas = deltas[valid]
             distances = distances[valid]
 
-        # Convention: bond_diff = pos[target] - pos[source]  (source → target).
+        # Convention: edge_diff = pos[target] - pos[source]  (source → target).
         # The C++ kernel returns deltas = pos[rows] - pos[cols] = pos[source] - pos[target],
         # so we negate.  See CLAUDE.md "Edge Convention" for the full spec.
-        bond_diff = -deltas
+        edge_diff = -deltas
 
         if self.symmetry:
             # Add reverse edges: for each (src→tgt), append (tgt→src).
-            # bond_diff reverses sign: pos[new_tgt] - pos[new_src] = -bond_diff.
+            # edge_diff reverses sign: pos[new_tgt] - pos[new_src] = -edge_diff.
             edge_index = torch.cat([edge_index, edge_index[:, [1, 0]]], dim=0)
-            bond_diff = torch.cat([bond_diff, -bond_diff], dim=0)
+            edge_diff = torch.cat([edge_diff, -edge_diff], dim=0)
             distances = torch.cat([distances, distances], dim=0)
 
         return {
             **data,
             "edge_index": edge_index,
-            "bond_diff": bond_diff,
-            "bond_dist": distances,
+            "edge_diff": edge_diff,
+            "edge_dist": distances,
         }

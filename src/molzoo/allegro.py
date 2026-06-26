@@ -323,8 +323,8 @@ class Allegro(TensorDictModuleBase):
 
     * ``("atoms","Z")`` — atomic numbers ``(N,)``.
     * ``("edges","edge_index")`` — ``(E, 2)``, ``[:,0]=src/center``.
-    * ``("edges","bond_diff")`` — ``(E, 3)``, ``pos[dst] - pos[src]``.
-    * ``("edges","bond_dist")`` — ``(E,)``.
+    * ``("edges","edge_diff")`` — ``(E, 3)``, ``pos[dst] - pos[src]``.
+    * ``("edges","edge_dist")`` — ``(E,)``.
 
     Output:
 
@@ -359,8 +359,8 @@ class Allegro(TensorDictModuleBase):
     in_keys = [
         ("atoms", "Z"),
         ("edges", "edge_index"),
-        ("edges", "bond_diff"),
-        ("edges", "bond_dist"),
+        ("edges", "edge_diff"),
+        ("edges", "edge_dist"),
     ]
     out_keys = [("edges", "edge_features")]
 
@@ -589,18 +589,18 @@ class Allegro(TensorDictModuleBase):
     def forward(self, td: TensorDict) -> TensorDict:
         """Run the encoder and write ``("edges","edge_features")`` in place."""
         Z = td["atoms", "Z"]
-        bond_dist = td["edges", "bond_dist"]
-        bond_diff = td["edges", "bond_diff"]
+        edge_dist = td["edges", "edge_dist"]
+        edge_diff = td["edges", "edge_diff"]
         edge_index = td["edges", "edge_index"]
         n_nodes: int = int(Z.shape[0])
         src = edge_index[:, 0]
         dst = edge_index[:, 1]
 
         # === 1. Bessel × polynomial cutoff (BesselEdgeLengthEncoding) ===
-        x_norm = (bond_dist / self.r_max).unsqueeze(-1)  # (E, 1)
+        x_norm = (edge_dist / self.r_max).unsqueeze(-1)  # (E, 1)
         # torch.sinc(z) = sin(πz)/(πz); sinc(n·r/r_max) · n.
         bessel = torch.sinc(x_norm * self.bessel_n) * self.bessel_n  # (E, num_bessel)
-        edge_cutoff = self.cutoff_fn(bond_dist)  # (E,)
+        edge_cutoff = self.cutoff_fn(edge_dist)  # (E,)
         edge_radial = bessel * edge_cutoff.unsqueeze(-1)  # (E, num_bessel)
 
         # === 2. ProductTypeEmbedding: type_embed × basis_linear(bessel) ===
@@ -613,11 +613,11 @@ class Allegro(TensorDictModuleBase):
         # twobody_scalar_embed: (E, type_embed_dim)
 
         # === 3. Spherical harmonics + initial tensor track V_0 ===
-        # ``SphericalHarmonics(normalize=True)`` normalises ``bond_diff`` internally
-        # (cuEquivariance kernel). NeighborList guarantees ``bond_dist > 0``
+        # ``SphericalHarmonics(normalize=True)`` normalises ``edge_diff`` internally
+        # (cuEquivariance kernel). NeighborList guarantees ``edge_dist > 0``
         # (self-edges excluded by ``get_neighbor_pairs``), so no ``+ε`` shim
-        # is needed; passing ``bond_diff`` directly saves one division per edge.
-        tensor_basis = self.spherical_harmonics(bond_diff)  # (E, irreps_sh_dim)
+        # is needed; passing ``edge_diff`` directly saves one division per edge.
+        tensor_basis = self.spherical_harmonics(edge_diff)  # (E, irreps_sh_dim)
         v0_weights = self.env_embed_linear(twobody_scalar_embed)  # (E, weight_numel)
         tensor_features = _make_weighted_channels(
             tensor_basis,

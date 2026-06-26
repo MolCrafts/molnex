@@ -54,36 +54,41 @@ class BondHarmonic(BasePotential):
         """Compute harmonic bond energy.
 
         Args:
-            data: Optional dictionary with molecular fields
-            **kwargs: Alternate way to pass explicit tensors, including:
+            data: Optional batch dict. Reads ``pos`` (or ``atoms.pos``),
+                canonical ``bond_index`` (or ``bonds.bond_index``), and
+                ``bond_types`` (or ``bonds.bond_types``). There is no
+                ``edge_index`` fallback — a geometric cutoff edge is not a
+                bond.
+            **kwargs: Alternate way to pass explicit tensors:
                 - pos: Positions [N, 3]
-                - bond_index: Bond indices [2, num_bonds]
+                - bond_index: COO bond indices [2, num_bonds] (NOT [E, 2])
                 - bond_types: Bond types [num_bonds]
 
         Returns:
-            Total bond energy (scalar)
+            Total bond energy (scalar).
+
+        Raises:
+            ValueError: ``pos`` / ``bond_index`` / ``bond_types`` missing, or
+                ``bond_index`` is not COO ``[2, num_bonds]`` (e.g. a geometric
+                ``edge_index`` ``[E, 2]`` was passed).
         """
-        # Extract data
+        # Extract data — canonical covalent connectivity only. There is no
+        # edge_index fallback: a geometric cutoff edge is NOT a chemical bond
+        # (edge != bond), and unlike bond_index it carries no bond_type — so
+        # routing it here is a category error, not a convenience.
         pos = kwargs.get("pos")
         bond_index = kwargs.get("bond_index")
         bond_types = kwargs.get("bond_types")
 
-        if pos is None and data is not None:
-            if isinstance(data, dict):
+        if data is not None and isinstance(data, dict):
+            if pos is None:
                 pos = data.get("pos")
-                if bond_index is None:
-                    if "edge_index" in data:
-                        bond_index = data["edge_index"]
-                    elif "bond_index" in data:
-                        bond_index = data["bond_index"]
-                if bond_types is None:
-                    bond_types = data.get("bond_types")
-                if pos is None and "atoms" in data:
-                    pos = data["atoms"]["x"]
-                if bond_index is None and "bonds" in data:
-                    bond_index = data["bonds"].get("i")
-                if bond_types is None and "bonds" in data:
-                    bond_types = data["bonds"].get("type")
+                if pos is None and isinstance(data.get("atoms"), dict):
+                    pos = data["atoms"].get("pos")
+            if bond_index is None:
+                bond_index = data.get("bond_index")
+            if bond_types is None:
+                bond_types = data.get("bond_types")
 
         if pos is None or bond_index is None or bond_types is None:
             raise ValueError("BondHarmonic requires pos, bond_index, and bond_types.")
@@ -93,6 +98,18 @@ class BondHarmonic(BasePotential):
             pos = torch.from_numpy(pos).float()
             bond_index = torch.from_numpy(bond_index).long()
             bond_types = torch.from_numpy(bond_types).long()
+
+        # Canonical bond_index is COO [2, num_bonds] — deliberately a different
+        # shape from the geometric neighbour graph edge_index [E, 2], so a cutoff
+        # pair can never be silently mis-indexed as a bond. Reject anything else
+        # loudly instead of computing a wrong energy. See CLAUDE.md (bond_index
+        # vs edge_index).
+        if bond_index.ndim != 2 or bond_index.shape[0] != 2:
+            raise ValueError(
+                f"bond_index must be COO [2, num_bonds] covalent topology; got shape "
+                f"{tuple(bond_index.shape)}. A neighbour-graph edge_index [E, 2] is not "
+                "a bond list — see the bond_index vs edge_index distinction in CLAUDE.md."
+            )
 
         # Handle empty bonds
         if bond_index.size(1) == 0:

@@ -54,8 +54,8 @@ def _build_graph(
                 diffs.append(d)
                 dists.append(r)
     edge_index = torch.tensor(pairs, dtype=torch.long)
-    bond_diff = torch.stack(diffs, dim=0)
-    bond_dist = torch.tensor(dists, dtype=pos.dtype)
+    edge_diff = torch.stack(diffs, dim=0)
+    edge_dist = torch.tensor(dists, dtype=pos.dtype)
 
     atoms = TensorDict(
         Z=Z,
@@ -65,8 +65,8 @@ def _build_graph(
     )
     edges = TensorDict(
         edge_index=edge_index,
-        bond_diff=bond_diff,
-        bond_dist=bond_dist,
+        edge_diff=edge_diff,
+        edge_dist=edge_dist,
         batch_size=[edge_index.shape[0]],
     )
     td = {"atoms": atoms, "edges": edges}

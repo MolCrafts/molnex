@@ -35,8 +35,8 @@ def _make_batch(pos, Z, batch, edge_index_e2, total_charge, total_spin) -> Tenso
     """Assemble a post-collate-style TensorDict (atoms / edges / graphs)."""
     src = edge_index_e2[:, 0]
     dst = edge_index_e2[:, 1]
-    bond_diff = pos[dst] - pos[src]
-    bond_dist = torch.linalg.norm(bond_diff, dim=-1)
+    edge_diff = pos[dst] - pos[src]
+    edge_dist = torch.linalg.norm(edge_diff, dim=-1)
     n = Z.shape[0]
     e = edge_index_e2.shape[0]
     b = total_charge.shape[0]
@@ -46,8 +46,8 @@ def _make_batch(pos, Z, batch, edge_index_e2, total_charge, total_spin) -> Tenso
             "edges": TensorDict(
                 {
                     "edge_index": edge_index_e2,
-                    "bond_diff": bond_diff,
-                    "bond_dist": bond_dist,
+                    "edge_diff": edge_diff,
+                    "edge_dist": edge_dist,
                 },
                 batch_size=[e],
             ),

@@ -69,8 +69,8 @@ def test_execute_padding_edges_are_ghost_self_loops():
     # every padding edge self-loops on the first ghost atom (index n)
     assert torch.equal(pad_edges, torch.full((9, 2), n, dtype=pad_edges.dtype))
     # non-index edge fields are zero-padded
-    assert out["edges", "bond_diff"][e:].abs().max().item() == 0.0
-    assert out["edges", "bond_dist"][e:].abs().max().item() == 0.0
+    assert out["edges", "edge_diff"][e:].abs().max().item() == 0.0
+    assert out["edges", "edge_dist"][e:].abs().max().item() == 0.0
 
 
 def test_execute_real_rows_preserved():
