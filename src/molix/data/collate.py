@@ -48,6 +48,44 @@ DEFAULT_TARGET_SCHEMA = TargetSchema()
 # ---------------------------------------------------------------------------
 
 
+# Atom-index offset registry — the lazy declarative subset of PyTorch
+# Geometric's ``Data.__inc__`` / ``__cat_dim__`` contract. Each connectivity
+# key maps to ``(cat_dim, index_axis)``: ``cat_dim`` is the axis along which
+# per-molecule tensors concatenate (the "count" axis), and ``index_axis`` is
+# the axis carrying atom indices, over which the running ``atom_offset``
+# broadcasts when rebasing local indices into global ones on multi-molecule
+# batching. Only ``edge_index`` is produced by a task today; the others are
+# declared-but-unproduced, reserved for sub-spec 03 / future bonded terms so
+# the differing-axis path is exercised before a real producer exists.
+INDEX_KEYS: dict[str, tuple[int, int]] = {
+    "edge_index": (0, 1),  # [E, 2] — count axis 0, both columns are atom indices
+    "bond_index": (1, 0),  # [2, N] COO — count axis 1, both rows are atom indices
+    "angle_index": (1, 0),  # [3, N]
+    "dihedral_index": (1, 0),  # [4, N]
+}
+
+
+def rebase(tensor: torch.Tensor, offset: int | torch.Tensor, key: str) -> torch.Tensor:
+    """Shift a registered atom-index tensor into global coordinates.
+
+    Args:
+        tensor: A connectivity tensor whose entries are *local* atom indices
+            (e.g. ``edge_index`` ``(E, 2)`` or ``bond_index`` ``(2, N)``).
+        offset: Either a scalar (the running ``atom_offset`` int in
+            :func:`collate_molecules`), broadcast over the whole tensor, or a
+            per-count-element ``(count,)`` tensor (the gathered segment offsets
+            in :func:`collate_packed`), broadcast over ``key``'s ``index_axis``.
+        key: A key in :data:`INDEX_KEYS` selecting the ``index_axis``.
+
+    Returns:
+        ``tensor`` with each atom index rebased by ``offset``.
+    """
+    if isinstance(offset, torch.Tensor) and offset.ndim >= 1:
+        index_axis = INDEX_KEYS[key][1]
+        return tensor + offset.unsqueeze(index_axis)
+    return tensor + offset
+
+
 def _normalize_edge_index(edge_index: torch.Tensor) -> torch.Tensor:
     """Normalize edge_index to canonical ``(E, 2)`` format."""
     if edge_index.ndim != 2:
@@ -112,7 +150,7 @@ def collate_molecules(
 
         if "edge_index" in sample and sample["edge_index"] is not None:
             edge_index = _normalize_edge_index(sample["edge_index"])
-            edge_all.append(edge_index + atom_offset)
+            edge_all.append(rebase(edge_index, atom_offset, "edge_index"))
 
             if "bond_diff" in sample and sample["bond_diff"] is not None:
                 diff_all.append(sample["bond_diff"])
@@ -301,7 +339,7 @@ def collate_packed(
         e_gather, e_counts = _gather_indices(edge_ptr, idx)
         e_seg = torch.repeat_interleave(torch.arange(n_graphs), e_counts)
         edge_index = edges_bucket["edge_index"][e_gather].long()
-        edge_index = edge_index + new_atom_offsets[e_seg].unsqueeze(1)
+        edge_index = rebase(edge_index, new_atom_offsets[e_seg], "edge_index")
         edges_dict: dict[str, torch.Tensor] = {"edge_index": edge_index}
         if "bond_diff" in edges_bucket:
             edges_dict["bond_diff"] = edges_bucket["bond_diff"][e_gather]
