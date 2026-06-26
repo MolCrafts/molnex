@@ -129,3 +129,6 @@ slurm-*.out
 jobs/
 .venv-gpu/
 molnex-bench-*.out
+
+# Benchmark scratch outputs (paper artifacts live in pinet-quant)
+benchmarks/results/
