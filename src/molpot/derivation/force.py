@@ -88,9 +88,7 @@ class ForceDerivation(nn.Module):
     def __init__(self, method: Literal["functorch", "autograd"] = "autograd"):
         super().__init__()
         if method not in _BACKENDS:
-            raise ValueError(
-                f"method must be one of {sorted(_BACKENDS)}, got {method!r}"
-            )
+            raise ValueError(f"method must be one of {sorted(_BACKENDS)}, got {method!r}")
         self.method = method
 
     def forward(

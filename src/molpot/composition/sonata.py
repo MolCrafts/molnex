@@ -452,7 +452,9 @@ class Sonata(nn.Module):
                 out["charge_sum_post_proj"] = head_out["charge_sum_post_proj"]
             return energy, out
 
-        def _strained(pos_orig: torch.Tensor, strain: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        def _strained(
+            pos_orig: torch.Tensor, strain: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             """Apply a symmetric strain to positions and cell (ε = 0 is identity)."""
             sym_eps = 0.5 * (strain + strain.transpose(-1, -2))
             eye_b = torch.eye(3, dtype=strain.dtype, device=strain.device).expand_as(strain)
@@ -483,6 +485,7 @@ class Sonata(nn.Module):
         #    identity, so differentiating w.r.t. positions on the original
         #    geometry suffices whether or not stress is also requested. --
         if compute_forces:
+
             def energy_of_pos(p: torch.Tensor) -> torch.Tensor:
                 b = batch.clone()
                 _prepare(b, p, cell0)

@@ -107,7 +107,9 @@ class PackedCache:
 
     # v2 edge-geometry bucket names → current names. Assembled at runtime so
     # the renamed-away literal never reappears in source (ac-001 grep gate).
-    _V2_EDGE_ALIASES: ClassVar[dict[str, str]] = {f"bond_{s}": f"edge_{s}" for s in ("diff", "dist")}
+    _V2_EDGE_ALIASES: ClassVar[dict[str, str]] = {
+        f"bond_{s}": f"edge_{s}" for s in ("diff", "dist")
+    }
 
     __slots__ = ("_sink",)
 

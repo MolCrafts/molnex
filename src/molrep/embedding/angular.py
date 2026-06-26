@@ -196,7 +196,5 @@ class SphericalHarmonics(nn.Module):
             * torch.index_select(z_pow, -1, self._exp_z)
             * self._coeffs
         )
-        out = torch.zeros(
-            *v.shape[:-1], self._out_dim, dtype=v.dtype, device=v.device
-        )
+        out = torch.zeros(*v.shape[:-1], self._out_dim, dtype=v.dtype, device=v.device)
         return out.index_add(-1, self._out_idx, mono)

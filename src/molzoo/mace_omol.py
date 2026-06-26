@@ -193,9 +193,7 @@ class MACEOMol(nn.Module):
             # silently detached the force from the parameter graph. Pure inference
             # opts out via ``torch.no_grad()`` / ``compute_forces=False``.
             create_graph = self.training or torch.is_grad_enabled()
-            grad = torch.autograd.grad(
-                total_energy.sum(), positions, create_graph=create_graph
-            )[0]
+            grad = torch.autograd.grad(total_energy.sum(), positions, create_graph=create_graph)[0]
             out["forces"] = -grad
         return out
 

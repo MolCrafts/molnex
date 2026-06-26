@@ -107,7 +107,7 @@ class MolnexTensorDictAdapter(LammpsAdapter):
         n = Z.shape[0]
         src = edge_index[:, 0]
         tgt = edge_index[:, 1]
-        edge_diff = pos[tgt] - pos[src]                       # pos[target] - pos[source]
+        edge_diff = pos[tgt] - pos[src]  # pos[target] - pos[source]
         edge_dist = edge_diff.norm(dim=-1).clamp(min=1e-6)
         return TensorDict(
             atoms=TensorDict(

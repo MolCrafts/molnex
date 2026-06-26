@@ -31,7 +31,7 @@ def _op_lib_candidates() -> list[Path]:
     arch = platform.machine()  # 'x86_64', 'aarch64', ... — matches CMAKE_SYSTEM_PROCESSOR
     return [
         op_dir / f"{prefix}molnex_opLib.{arch}.{ext}",  # arch-tagged (current builds)
-        op_dir / f"{prefix}molnex_opLib.{ext}",         # legacy un-tagged (older builds)
+        op_dir / f"{prefix}molnex_opLib.{ext}",  # legacy un-tagged (older builds)
     ]
 
 
