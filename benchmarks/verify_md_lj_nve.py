@@ -22,11 +22,15 @@ from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
 
 import torch
 
 from molix.md import LangevinVerletIntegrator, LennardJonesForceField
 from molix.md.runner import KB_AMU_A_FS
+
+# Persistent artifact dir (versioned with the repo for the paper).
+_OUT_DEFAULT = Path(__file__).resolve().parent / "results" / "md_lj_nve"
 
 # Argon in (amu, Å, fs): ε = 0.0103 eV, σ = 3.4 Å, m = 39.95 amu.
 _EPS = 0.0103 / 103.6426965638  # eV -> amu·Å²/fs²
@@ -68,6 +72,8 @@ def main() -> int:
     ap.add_argument("--sample-every", type=int, default=2000, help="steps between energy samples")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--no-compile", action="store_true")
+    ap.add_argument("--out", type=Path, default=_OUT_DEFAULT, help="artifact dir (npz + png)")
+    ap.add_argument("--no-save", action="store_true", help="skip writing artifacts")
     args = ap.parse_args()
 
     n_steps = int(args.ps * 1000.0 / _DT)
@@ -84,12 +90,19 @@ def main() -> int:
     e0 = _total_energy(state.energy, state.vel)
     ts: list[float] = []
     es: list[float] = []
+    pes: list[float] = []
+    kes: list[float] = []
+    traj: list[torch.Tensor] = []
     t_wall = time.perf_counter()
     for i in range(n_steps):
         state = step(state, noise)
         if i % args.sample_every == 0:
+            ke = 0.5 * _MASS * float((state.vel * state.vel).sum())
             ts.append(i * _DT / 1000.0)  # ps
-            es.append(_total_energy(state.energy, state.vel))
+            pes.append(float(state.energy))
+            kes.append(ke)
+            es.append(float(state.energy) + ke)
+            traj.append(state.pos.detach().cpu().clone())
     wall = time.perf_counter() - t_wall
 
     t = torch.tensor(ts, dtype=_DTYPE)
@@ -110,7 +123,63 @@ def main() -> int:
     print(f"  temperature finite: {torch.isfinite(e).all().item()}   steps/s = {rate:.0f}")
     ok = rel_drift < 1e-3 and bool(torch.isfinite(e).all())
     print("RESULT:", "PASS" if ok else "FAIL")
+
+    if not args.no_save:
+        _save_artifacts(args.out, t, e, pes, kes, traj, e0, rel_drift, rms_rel, ns, args)
+
     return 0 if ok else 1
+
+
+def _save_artifacts(out, t, e, pes, kes, traj, e0, rel_drift, rms_rel, ns, args):
+    """Write trajectory + energy series (.npz) and an energy-conservation figure (.png)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out.mkdir(parents=True, exist_ok=True)
+    pe = torch.tensor(pes, dtype=_DTYPE)
+    ke = torch.tensor(kes, dtype=_DTYPE)
+    positions = torch.stack(traj).numpy()  # (frames, N, 3)
+
+    npz = out / "lj13_nve.npz"
+    import numpy as np
+
+    np.savez_compressed(
+        npz,
+        time_ps=t.numpy(),
+        e_total=e.numpy(),
+        e_pot=pe.numpy(),
+        e_kin=ke.numpy(),
+        positions=positions,
+        meta=np.array(
+            f"LJ13 argon NVE; dt={_DT}fs; T0={args.t0}K; duration={ns:.3f}ns; "
+            f"eps={_EPS:.6e} amuA2/fs2; sigma={_SIGMA}A; mass={_MASS}amu; seed={args.seed}; "
+            f"rel_drift={rel_drift:.3e}; rel_rms={rms_rel:.3e}; units=(amu,A,fs)"
+        ),
+    )
+
+    # Energy-conservation figure: relative total-energy drift (ppm) + PE/KE exchange.
+    fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(6.0, 5.0), sharex=True)
+    ax0.plot(t.numpy(), ((e - e0) / abs(e0) * 1e6).numpy(), lw=0.8, color="C3")
+    ax0.axhline(0.0, color="k", lw=0.5, ls=":")
+    ax0.set_ylabel(r"$(E_{\rm tot}-E_0)/|E_0|$  [ppm]")
+    ax0.set_title(
+        f"LJ$_{{13}}$ NVE, {ns:.1f} ns, dt={_DT:g} fs — rel. drift {rel_drift:.1e}, RMS {rms_rel:.1e}"
+    )
+    ax1.plot(t.numpy(), pe.numpy(), lw=0.7, color="C0", label="potential")
+    ax1.plot(t.numpy(), ke.numpy(), lw=0.7, color="C1", label="kinetic")
+    ax1.plot(t.numpy(), e.numpy(), lw=0.9, color="k", label="total")
+    ax1.set_xlabel("time [ps]")
+    ax1.set_ylabel(r"energy [amu$\cdot$Å$^2$/fs$^2$]")
+    ax1.legend(loc="best", fontsize=8, ncol=3)
+    fig.tight_layout()
+    png = out / "lj13_nve_energy.png"
+    fig.savefig(png, dpi=200)
+    plt.close(fig)
+
+    print(f"  saved: {npz}")
+    print(f"  saved: {png}")
 
 
 if __name__ == "__main__":
