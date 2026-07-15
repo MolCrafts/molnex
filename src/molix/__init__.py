@@ -12,14 +12,13 @@ import torch
 _lib_loaded = False
 
 
-def _op_lib_candidates() -> list[Path]:
-    """Candidate op-library paths, most-specific first.
+def _op_lib_path() -> Path:
+    """Op-library path for the running machine.
 
     The build (``op/CMakeLists.txt``) tags the artifact with the target
     architecture — ``libmolnex_opLib.<machine>.so`` (e.g. ``...x86_64.so``,
     ``...aarch64.so``) — so per-arch builds coexist in one in-source ``op/``
-    directory. Prefer the file matching the running machine; fall back to the
-    legacy un-tagged name so pre-tagging builds keep loading.
+    directory.
     """
     if sys.platform == "win32":
         prefix, ext = "", "pyd"
@@ -29,10 +28,7 @@ def _op_lib_candidates() -> list[Path]:
         prefix, ext = "lib", "so"
     op_dir = Path(__file__).resolve().parents[0] / "op"
     arch = platform.machine()  # 'x86_64', 'aarch64', ... — matches CMAKE_SYSTEM_PROCESSOR
-    return [
-        op_dir / f"{prefix}molnex_opLib.{arch}.{ext}",  # arch-tagged (current builds)
-        op_dir / f"{prefix}molnex_opLib.{ext}",  # legacy un-tagged (older builds)
-    ]
+    return op_dir / f"{prefix}molnex_opLib.{arch}.{ext}"
 
 
 def _load_ops_library() -> None:
@@ -41,14 +37,12 @@ def _load_ops_library() -> None:
     if _lib_loaded:
         return
 
-    candidates = _op_lib_candidates()
-    candidate = next((c for c in candidates if c.exists()), None)
-    if candidate is None:
-        op_src = candidates[0].parents[0]
-        tried = "\n".join(f"  - {c}" for c in candidates)
+    candidate = _op_lib_path()
+    if not candidate.exists():
+        op_src = candidate.parents[0]
         raise ImportError(
-            f"molix native op library not found for machine '{platform.machine()}'. Tried:\n"
-            f"{tried}\n"
+            f"molix native op library not found for machine '{platform.machine()}' "
+            f"at {candidate}.\n"
             f"Build it with:\n"
             f"  cmake -S {op_src} -B {op_src}/build -DMOLNEX_OP_ENABLE_CUDA=ON\n"
             f"  cmake --build {op_src}/build -j\n"
