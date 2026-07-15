@@ -622,7 +622,7 @@ class Trainer:
             trainer = Trainer(model, ...).compile(mode="max-autotune")
 
         Args:
-            cuda_graphs: Apply :data:`molix.compile.CUDA_GRAPH_PRESET`
+            cuda_graphs: Apply :data:`molix.compile.Compiler.CUDA_GRAPH_PRESET`
                 (``backend="inductor", fullgraph=True, dynamic=False,
                 mode="reduce-overhead"``) — inductor fusion + CUDA graphs, the
                 fastest force-training config. Overrides the four params below.
@@ -639,17 +639,15 @@ class Trainer:
         Returns:
             ``self`` for method chaining.
         """
-        from molix.compile import maybe_compile
+        from molix.compile import Compiler
 
-        self.model = maybe_compile(
-            self.model,
-            compile=True,
+        self.model = Compiler(
             cuda_graphs=cuda_graphs,
             backend=backend,
             fullgraph=fullgraph,
             dynamic=dynamic,
             mode=mode,
-        )
+        )(self.model)
         # Keep checkpoint in sync so state_dict() sees the compiled wrapper
         self._checkpoint.model = self.model
         return self

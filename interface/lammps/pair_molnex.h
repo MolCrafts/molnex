@@ -1,11 +1,11 @@
 /* PairMolnex — generic LAMMPS pair_style for any molnex potential exported via
-   molix.lammps.export_for_lammps. Evaluates the AOT-Inductor model through the
+   molix.engine.export_for_lammps. Evaluates the AOT-Inductor model through the
    molnex C++ runtime (molnex::interface::ModelRunner).
 
    One pair style, any model. Everything model-specific is read from the export
    directory's `<name>.meta.json` `lammps` block (cutoff, native units, compute
    dtype, capabilities) — there is no per-model C++. Model input/output glue lives
-   on the Python export side as a molix.lammps.LammpsAdapter.
+   on the Python export side as a molix.engine.EngineAdapter.
 
    Command:
        pair_style molnex <model_dir> [name]
@@ -38,6 +38,8 @@ PairStyle(molnex,PairMolnex);
 #include <string>
 #include <vector>
 
+#include <ATen/core/Tensor.h>
+
 namespace molnex::interface {
 class ModelRunner;
 }
@@ -65,6 +67,13 @@ class PairMolnex : public Pair {
   bool fp64_model;                   // true if meta model_dtype == float64
   double energy_conv;                // model-energy-unit -> LAMMPS-energy-unit factor
   double force_conv;                 // model-force-unit  -> LAMMPS-force-unit  factor
+
+  // CUDA-graph fast path (meta `cuda_graph`): fixed N + padded E_max, captured
+  // once and replayed. Persistent device buffers are updated in place each step.
+  bool use_cuda_graph = false;
+  int n_fixed = 0;                   // fixed atom count N (meta `n_atoms`)
+  int64_t e_max = 0;                 // fixed padded edge count (meta `e_max`)
+  at::Tensor Zg_, posg_, edgeg_, maskg_;   // persistent device input buffers
 
   virtual void allocate();
 };

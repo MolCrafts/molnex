@@ -281,7 +281,13 @@ class PiNet(TensorDictModuleBase):
         """
         Z = td["atoms", "Z"]
         pos = td["atoms", "pos"]
-        edge_index = td["edges", "edge_index"]
+        # Force a standard row-major layout. Eager is stride-invariant, but
+        # AOTInductor specializes the compiled kernel on the traced edge_index
+        # stride: without this, a contiguous edge_index from a C++ caller (e.g.
+        # pair_style molnex) is indexed with the trace-time stride and silently
+        # scrambles source/target. ``.contiguous()`` traces into the graph and
+        # normalizes any input layout at runtime.
+        edge_index = td["edges", "edge_index"].contiguous()
 
         # Edge geometry: PBC-correct (uses the neighbour list's minimum-image
         # edge_diff under periodic boundaries) and differentiable. See _edge_bond_diff.
@@ -538,7 +544,7 @@ class PiNetPotential(nn.Module):
 
         For **force training**, do NOT use this method: compile the whole model
         instead (``trainer.compile(cuda_graphs=True)`` /
-        ``molix.compile.CUDA_GRAPH_PRESET``) on *padded* fixed shapes
+        ``molix.Compiler.CUDA_GRAPH_PRESET``) on *padded* fixed shapes
         (``PadMolecularBatch`` + ``drop_last=True``). There ``reduce-overhead``
         is the **fastest** config (~10x eager), the opposite of the ragged case
         — see ``docs/molix/explanation/throughput-and-compilation.md``.

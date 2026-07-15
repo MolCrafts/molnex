@@ -1,11 +1,11 @@
 # `pair_style molnex` — one LAMMPS pair style for every molnex potential
 
 A single generic LAMMPS pair style that evaluates **any** molnex potential
-exported via `molix.lammps.export_for_lammps`. There is no per-model C++: the
+exported via `molix.engine.export_for_lammps`. There is no per-model C++: the
 pair style reads everything model-specific (cutoff, native units, compute dtype,
 supported species, capabilities) from the export directory's
-`<name>.meta.json` `lammps` block, and runs the AOT-Inductor `.so` through the
-shared `molnex::interface::ModelRunner`.
+`<name>.meta.json` `lammps` block, and runs the AOT-Inductor `.pt2` package
+through the shared `molnex::interface::ModelRunner`.
 
 ```
 pair_style molnex <model_dir> [name]
@@ -13,14 +13,14 @@ pair_coeff * * <Z_type1> <Z_type2> ... <Z_typeN>
 ```
 
 * `<model_dir>` — an export directory produced by `export_for_lammps`
-  (contains `<name>.so`, `<name>.pt`, `<name>.meta.json`).
+  (contains `<name>.pt2` and `<name>.meta.json`).
 * `[name]` — artifact basename inside `<model_dir>` (default `model`).
 * `pair_coeff` maps each LAMMPS atom type to an atomic number `Z`.
 
 ## The contract (what makes a model "molnex-LAMMPS compatible")
 
 The protocol boundary is the **AOTI export calling convention**, not a model's
-in-memory `forward` — a `TensorDict` cannot cross into C++. The exported `.so`
+in-memory `forward` — a `TensorDict` cannot cross into C++. The exported `.pt2`
 must take flat tensors and return flat tensors:
 
 | direction | tensors |
@@ -28,7 +28,7 @@ must take flat tensors and return flat tensors:
 | inputs  | `Z (N,)` int64 · `pos (N,3)` float · `edge_index (E,2)` int64 (sorted by `(src,tgt)`) |
 | outputs | `energy ()` scalar float · `forces (N,3)` float |
 
-`N` (atoms) and `E` (edges) are exported as **dynamic** dimensions, so one `.so`
+`N` (atoms) and `E` (edges) are exported as **dynamic** dimensions, so one `.pt2`
 serves every MD frame. Units, cutoff, dtype, and species travel in `meta.json`.
 
 ## Exporting a model (Python side)
@@ -36,7 +36,7 @@ serves every MD frame. Units, cutoff, dtype, and species travel in `meta.json`.
 ### molnex-native potential (PiNet, etc.)
 
 ```python
-from molix.lammps import export_for_lammps
+from molix.engine import export_for_lammps
 
 export_for_lammps(
     pinet_potential,                 # nested-TensorDict forward → {"energy","forces"}
@@ -58,12 +58,12 @@ Two cases:
    ```python
    export_for_lammps(my_model, "out", species=[1,8], cutoff=5.0, adapter="flat")
    ```
-2. **Different input/output**: subclass `LammpsAdapter` (~15 lines) — map the flat
+2. **Different input/output**: subclass `EngineAdapter` (~15 lines) — map the flat
    `(Z, pos, edge_index)` onto your model's inputs and read back `(energy, forces)`:
    ```python
-   from molix.lammps import LammpsAdapter, export_for_lammps
+   from molix.engine import EngineAdapter, export_for_lammps
 
-   class MyNetAdapter(LammpsAdapter):
+   class MyNetAdapter(EngineAdapter):
        name = "mynet"
        def build_inputs(self, model, Z, pos, edge_index):
            return MyGraph(z=Z, r=pos, edges=edge_index)      # your model's input
@@ -95,7 +95,7 @@ exact LAMMPS it will be loaded into — link `liblammps.so` from a
 (A wheel that ships `PKG_PLUGIN` can still *load* the plugin at runtime, but the
 `.so` itself must be compiled against matching headers/lib — there is no
 universal binary.) Requires LibTorch (the active venv's torch) and a C++17
-compiler; `molnex_interface` (CPU-only or CUDA, auto-detected) builds from the
+compiler; `molix.engine` (CPU-only or CUDA, auto-detected) builds from the
 parent `interface/` directory.
 
 The output is **arch-tagged** — `<MOLNEXPLUGIN_OUTPUT_DIR>/molnexplugin.so`,

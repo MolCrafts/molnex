@@ -4,7 +4,7 @@
  * interface/src/model_runner.cpp (parse_device_field): meta.json is small and
  * flat enough that a real JSON library is not worth pulling into the LAMMPS
  * plugin link. We only read a handful of scalar fields from the `lammps` block
- * that molix.lammps.export_for_lammps writes; key names are unique within the
+ * that molix.engine.export_for_lammps writes; key names are unique within the
  * file so a whole-text search is unambiguous.
  *
  * Header-only so the plugin links nothing extra beyond libmolnex_interface.

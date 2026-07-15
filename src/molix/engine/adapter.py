@@ -8,14 +8,14 @@ calling convention**, not a model's in-memory ``forward``:
     inputs  : Z ``(N,)`` int64, pos ``(N, 3)`` float, edge_index ``(E, 2)`` int64
     outputs : energy ``()`` scalar float, forces ``(N, 3)`` float
 
-An :class:`LammpsAdapter` is the Python-side shim that maps this flat convention
+An :class:`EngineAdapter` is the Python-side shim that maps this flat convention
 onto a specific model's real input/output shapes. A molnex-native model (nested
 ``TensorDict`` forward) uses :class:`MolnexTensorDictAdapter`; a third-party model
 that already speaks the flat convention uses :class:`FlatTensorAdapter`; anything
 else gets a ~15-line subclass implementing :meth:`build_inputs` / :meth:`read_outputs`.
 
 Adapters self-register under a string name (the same strategy-pattern + registry
-used by :mod:`molix.quant`), so :func:`molix.lammps.export_for_lammps` can select
+used by :mod:`molix.quant`), so :func:`molix.engine.export_for_lammps` can select
 one by name and stamp it into ``meta.json`` for provenance.
 
 Edge convention follows the repo-wide rule (see ``CLAUDE.md`` → Edge Convention):
@@ -32,26 +32,26 @@ import torch
 import torch.nn as nn
 
 
-class LammpsAdapter(ABC):
+class EngineAdapter(ABC):
     """Strategy mapping the flat LAMMPS calling convention onto one model.
 
     Concrete subclasses set a class-level :attr:`name` (auto-registered) and
     implement :meth:`build_inputs` (flat tensors → model input) and
     :meth:`read_outputs` (model output → ``(energy_scalar, forces)``). The whole
-    adapter is wrapped in :class:`LammpsForward`, which is the ``nn.Module`` that
+    adapter is wrapped in :class:`EngineForward`, which is the ``nn.Module`` that
     actually gets AOT-exported.
     """
 
     name: str = ""
-    _registry: dict[str, type[LammpsAdapter]] = {}
+    _registry: dict[str, type[EngineAdapter]] = {}
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         if cls.name:
-            LammpsAdapter._registry[cls.name] = cls
+            EngineAdapter._registry[cls.name] = cls
 
     @classmethod
-    def from_name(cls, name: str) -> LammpsAdapter:
+    def from_name(cls, name: str) -> EngineAdapter:
         """Instantiate the registered adapter for ``name`` (e.g. ``"molnex-tensordict"``)."""
         try:
             return cls._registry[name]()
@@ -88,7 +88,7 @@ class LammpsAdapter(ABC):
         return f"{type(self).__name__}()"
 
 
-class MolnexTensorDictAdapter(LammpsAdapter):
+class MolnexTensorDictAdapter(EngineAdapter):
     """Adapter for molnex-native potentials (PiNet, MACE, … via ``PiNetPotential``-style).
 
     Builds the post-collate nested ``TensorDict`` (``atoms`` / ``edges`` / ``graphs``
@@ -134,12 +134,12 @@ class MolnexTensorDictAdapter(LammpsAdapter):
         return out["energy"].sum(), out["forces"]
 
 
-class FlatTensorAdapter(LammpsAdapter):
+class FlatTensorAdapter(EngineAdapter):
     """Adapter for third-party models already speaking the flat convention.
 
     The wrapped model must implement ``forward(Z, pos, edge_index)`` returning
     either ``(energy, forces)`` or a dict with ``"energy"`` / ``"forces"`` keys.
-    Use this as the zero-glue path; write a bespoke :class:`LammpsAdapter`
+    Use this as the zero-glue path; write a bespoke :class:`EngineAdapter`
     subclass when a model needs real input/output translation.
     """
 
@@ -157,19 +157,19 @@ class FlatTensorAdapter(LammpsAdapter):
         return energy.sum(), forces
 
 
-class LammpsForward(nn.Module):
+class EngineForward(nn.Module):
     """Flat-convention ``nn.Module`` wrapper that is the actual AOT-export target.
 
-    Holds a potential and an :class:`LammpsAdapter`. Its ``forward(Z, pos,
+    Holds a potential and an :class:`EngineAdapter`. Its ``forward(Z, pos,
     edge_index)`` returns ``(energy_scalar, forces)`` — the exact signature the
     C++ ``pair_style molnex`` invokes through the AOTI runner.
     """
 
-    def __init__(self, model: nn.Module, adapter: LammpsAdapter | str = "molnex-tensordict"):
+    def __init__(self, model: nn.Module, adapter: EngineAdapter | str = "molnex-tensordict"):
         super().__init__()
         self.model = model
         self.adapter = (
-            adapter if isinstance(adapter, LammpsAdapter) else LammpsAdapter.from_name(adapter)
+            adapter if isinstance(adapter, EngineAdapter) else EngineAdapter.from_name(adapter)
         )
 
     def forward(

@@ -3,7 +3,7 @@
    Generalized from the PiNet-specific pair_pinet.cpp: model-specific knobs
    (cutoff, native units, compute dtype) are read from the export's meta.json
    rather than hardcoded, so the same pair style serves any molnex potential
-   exported via molix.lammps.export_for_lammps.
+   exported via molix.engine.export_for_lammps.
 */
 
 #include "pair_molnex.h"
@@ -95,7 +95,7 @@ void PairMolnex::settings(int narg, char **arg)
   }
   if (!molnex::lammps_meta::has_field(meta, "lammps"))
     error->all(FLERR, "pair_style molnex: {} has no 'lammps' block — export with "
-                      "molix.lammps.export_for_lammps, not the bare export_model",
+                      "molix.engine.export_for_lammps, not the bare Exporter",
                meta_path);
 
   try {
@@ -112,13 +112,32 @@ void PairMolnex::settings(int narg, char **arg)
       energy_conv = energy_unit_in_eV(model_units) / energy_unit_in_eV(lmp_units);
     }
     force_conv = energy_conv;   // force = energy / Å, distance unchanged
+
+    // CUDA-graph fast path: fixed N + padded E_max, captured once & replayed.
+    use_cuda_graph = molnex::lammps_meta::get_bool(meta, "cuda_graph", false);
+    if (use_cuda_graph) {
+      n_fixed = static_cast<int>(molnex::lammps_meta::get_number(meta, "n_atoms"));
+      e_max = static_cast<int64_t>(molnex::lammps_meta::get_number(meta, "e_max"));
+    }
   } catch (const std::exception &e) {
     error->all(FLERR, "pair_style molnex: malformed meta.json: {}", e.what());
   }
 
   // Load the AOTI model now (so errors surface at setup, not first step).
+  // run_single_threaded (the ModelRunner default) is required for graph capture.
   runner = std::make_unique<molnex::interface::ModelRunner>(model_dir, /*num_models=*/1, model_name);
   device = runner->device();
+
+  if (use_cuda_graph) {
+    if (device != "cuda")
+      error->all(FLERR, "pair_style molnex: meta cuda_graph=true but device={} (need cuda)", device);
+    auto dev = at::Device(at::kCUDA);
+    at::ScalarType mdt = fp64_model ? at::kDouble : at::kFloat;
+    Zg_ = at::zeros({n_fixed}, at::TensorOptions().dtype(at::kLong).device(dev));
+    posg_ = at::zeros({n_fixed, 3}, at::TensorOptions().dtype(mdt).device(dev));
+    edgeg_ = at::zeros({e_max, 2}, at::TensorOptions().dtype(at::kLong).device(dev));
+    maskg_ = at::zeros({e_max}, at::TensorOptions().dtype(at::kBool).device(dev));
+  }
   if (comm->me == 0)
     utils::logmesg(lmp,
                    "pair_molnex: loaded '{}' from {} (device={}, model units={}, "
@@ -220,17 +239,42 @@ void PairMolnex::compute(int eflag, int vflag)
   }
   at::Tensor edge_index = at::from_blob(edges.data(), {ne, 2}, opt_l).clone();
 
-  // --- to model dtype/device, run ---
+  // --- run: CUDA-graph fast path (fixed N + padded E_max) or dynamic run ---
   at::ScalarType mdt = fp64_model ? at::kDouble : at::kFloat;   // from meta.json
-  auto dev = (device == "cuda") ? at::Device(at::kCUDA) : at::Device(at::kCPU);
-  std::vector<at::Tensor> inputs = {
-      Z.to(dev),
-      pos.to(mdt).to(dev),
-      edge_index.to(dev),
-  };
-  std::vector<at::Tensor> out = runner->run(inputs);   // [energy_total, forces(N,3)]
-  at::Tensor e_t = out[0].to(at::kDouble).to(at::kCPU);
-  at::Tensor f_t = out[1].to(at::kDouble).to(at::kCPU).contiguous();
+  at::Tensor e_t, f_t;
+#ifdef MOLNEX_INTERFACE_CUDA
+  if (use_cuda_graph) {
+    if (nlocal != n_fixed)
+      error->all(FLERR, "pair_molnex cuda_graph: nlocal={} != fixed N={} "
+                        "(export n_atoms must match the system)", nlocal, n_fixed);
+    if (ne > e_max)
+      error->all(FLERR, "pair_molnex cuda_graph: {} edges > e_max {} "
+                        "(re-export with a larger e_max)", ne, e_max);
+    // pad edges to e_max (extra rows = (0,0), inert via mask) + valid-edge mask
+    std::vector<int64_t> pedges(2 * e_max, 0);
+    for (int64_t k = 0; k < ne; k++) { pedges[2*k] = ep[k].first; pedges[2*k+1] = ep[k].second; }
+    at::Tensor mask_cpu = at::zeros({e_max}, at::TensorOptions().dtype(at::kBool));
+    auto ma = mask_cpu.accessor<bool, 1>();
+    for (int64_t k = 0; k < ne; k++) ma[k] = true;
+    at::Tensor edges_cpu = at::from_blob(pedges.data(), {e_max, 2}, opt_l).clone();
+    // update the persistent device buffers in place, then capture/replay
+    Zg_.copy_(Z);
+    posg_.copy_(pos.to(mdt));
+    edgeg_.copy_(edges_cpu);
+    maskg_.copy_(mask_cpu);
+    std::vector<at::Tensor> inputs = {Zg_, posg_, edgeg_, maskg_};
+    std::vector<at::Tensor> out = runner->run_graphed(inputs);   // [energy, forces(N,3)]
+    e_t = out[0].to(at::kDouble).to(at::kCPU);
+    f_t = out[1].to(at::kDouble).to(at::kCPU).contiguous();
+  } else
+#endif
+  {
+    auto dev = (device == "cuda") ? at::Device(at::kCUDA) : at::Device(at::kCPU);
+    std::vector<at::Tensor> inputs = {Z.to(dev), pos.to(mdt).to(dev), edge_index.to(dev)};
+    std::vector<at::Tensor> out = runner->run(inputs);   // [energy_total, forces(N,3)]
+    e_t = out[0].to(at::kDouble).to(at::kCPU);
+    f_t = out[1].to(at::kDouble).to(at::kCPU).contiguous();
+  }
 
   // --- scatter forces + energy back to LAMMPS (converted to LAMMPS units) ---
   auto fa = f_t.accessor<double, 2>();

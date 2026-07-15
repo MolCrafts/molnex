@@ -15,8 +15,10 @@
 #include <stdexcept>
 
 #include <torch/csrc/api/include/torch/serialize.h>
-#include <torch/csrc/inductor/aoti_runner/model_container_runner_cpu.h>
+#include <torch/csrc/inductor/aoti_package/model_package_loader.h>
 #ifdef MOLNEX_INTERFACE_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <torch/csrc/inductor/aoti_runner/model_container_runner_cuda.h>
 #endif
 
@@ -72,15 +74,16 @@ const char* scalar_type_name(c10::ScalarType st) {
 
 ModelRunner::ModelRunner(const std::string& model_dir,
                          int num_models,
-                         const std::string& name) {
+                         const std::string& name,
+                         bool run_single_threaded) {
   fs::path dir(model_dir);
   if (!fs::exists(dir) || !fs::is_directory(dir)) {
     throw std::runtime_error("model_dir does not exist: " + model_dir);
   }
-  fs::path so_path = dir / (name + ".so");
+  fs::path pt2_path = dir / (name + ".pt2");
   fs::path meta_path = dir / (name + ".meta.json");
-  if (!fs::exists(so_path)) {
-    throw std::runtime_error("missing artifact: " + so_path.string());
+  if (!fs::exists(pt2_path)) {
+    throw std::runtime_error("missing artifact: " + pt2_path.string());
   }
   if (!fs::exists(meta_path)) {
     throw std::runtime_error("missing artifact: " + meta_path.string());
@@ -93,26 +96,31 @@ ModelRunner::ModelRunner(const std::string& model_dir,
   if (device_ != "cpu" && device_ != "cuda") {
     throw std::runtime_error("unsupported device in meta.json: " + device_);
   }
-
+#ifndef MOLNEX_INTERFACE_CUDA
   if (device_ == "cuda") {
-#ifdef MOLNEX_INTERFACE_CUDA
-    runner_ = std::make_unique<torch::inductor::AOTIModelContainerRunnerCuda>(
-        so_path.string(),
-        static_cast<size_t>(num_models),
-        /*device_str=*/"cuda",
-        /*cubin_dir=*/"",
-        /*run_single_threaded=*/false);
-#else
     throw std::runtime_error(
         "model meta.json device=cuda, but libmolnex_interface was built CPU-only "
         "(no CUDA toolkit at build time); rebuild where CUDA is available");
-#endif
-  } else {
-    runner_ = std::make_unique<torch::inductor::AOTIModelContainerRunnerCpu>(
-        so_path.string(),
-        static_cast<size_t>(num_models),
-        /*run_single_threaded=*/false);
   }
+#endif
+
+  // AOTIModelPackageLoader unpacks the `.pt2`, builds the right
+  // CPU/CUDA runner for the package's device, and (crucially) wires the
+  // proxy executor for any custom ops that stayed un-lowered — the bare
+  // AOTIModelContainerRunner does not, which is why we load the package,
+  // not a raw `.so`. `num_models` constant buffers enable the
+  // double-buffered weight hot-reload in update_weights().
+  //
+  // NB: the second arg is the AOTI *model name* inside the archive, NOT the
+  // file stem. `aoti_compile_and_package` always names it "model" (zip path
+  // .../aotinductor/model/); our `name` only selects the `<name>.pt2` file.
+  loader_ = std::make_unique<torch::inductor::AOTIModelPackageLoader>(
+      pt2_path.string(),
+      /*model_name=*/"model",
+      run_single_threaded,
+      /*num_runners=*/static_cast<size_t>(num_models),
+      /*device_index=*/-1);
+  runner_ = loader_->get_runner();
 }
 
 ModelRunner::~ModelRunner() = default;
@@ -129,13 +137,55 @@ std::vector<at::Tensor> ModelRunner::run_async(
     throw std::runtime_error("run_async only supported on CUDA runners");
   }
   auto* cuda_runner =
-      dynamic_cast<torch::inductor::AOTIModelContainerRunnerCuda*>(runner_.get());
+      dynamic_cast<torch::inductor::AOTIModelContainerRunnerCuda*>(runner_);
   if (cuda_runner == nullptr) {
     // Should be unreachable given device_ == "cuda", but keep the
     // invariant honest.
     throw std::runtime_error("internal: CUDA device but non-CUDA runner");
   }
   return cuda_runner->run_with_cuda_stream(inputs, stream);
+}
+
+std::vector<at::Tensor> ModelRunner::run_graphed(
+    const std::vector<at::Tensor>& inputs) {
+  if (device_ != "cuda") {
+    throw std::runtime_error("run_graphed only supported on CUDA runners");
+  }
+  auto* cuda_runner =
+      dynamic_cast<torch::inductor::AOTIModelContainerRunnerCuda*>(runner_);
+  if (cuda_runner == nullptr) {
+    throw std::runtime_error("internal: CUDA device but non-CUDA runner");
+  }
+
+  if (!graph_captured_) {
+    // The caller just populated the input buffers on the current stream;
+    // make those copies visible before the side-stream warmup reads them.
+    at::cuda::getCurrentCUDAStream().synchronize();
+    // Warm up on a side stream so the caching allocator already owns every
+    // scratch buffer BEFORE capture (capture forbids new cudaMalloc), then
+    // capture run() into a graph. Requires the runner loaded
+    // run_single_threaded (else run() does a capture-illegal alloc/sync —
+    // PyTorch #158834).
+    auto capture_stream = at::cuda::getStreamFromPool();
+    {
+      at::cuda::CUDAStreamGuard guard(capture_stream);
+      for (int i = 0; i < 3; ++i) {
+        cuda_runner->run_with_cuda_stream(inputs, capture_stream);
+      }
+      capture_stream.synchronize();
+      graph_ = std::make_unique<at::cuda::CUDAGraph>();
+      graph_->capture_begin();
+      graph_outputs_ = cuda_runner->run_with_cuda_stream(inputs, capture_stream);
+      graph_->capture_end();
+    }
+    graph_captured_ = true;
+    return graph_outputs_;
+  }
+
+  // Steady state: contents of `inputs` were updated in place by the caller;
+  // replay re-runs the captured kernels reading the same fixed addresses.
+  graph_->replay();
+  return graph_outputs_;
 }
 #endif
 

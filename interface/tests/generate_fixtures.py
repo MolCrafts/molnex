@@ -2,7 +2,8 @@
 
 Invoked as a ctest fixture before any subtest runs. Produces:
 
-    <out_dir>/model_<device>/                  exported model dir
+    <out_dir>/model_<device>/<name>.pt2        exported AOTI package
+    <out_dir>/model_<device>/<name>.meta.json  device + provenance
     <out_dir>/reference_<device>.pt            {input, output} reference
     <out_dir>/alt_<device>.pt                  alternative state_dict
     <out_dir>/reference_alt_<device>.pt        {input, output} with alt weights
@@ -11,7 +12,7 @@ Invoked as a ctest fixture before any subtest runs. Produces:
 the device based on what's present.
 
 This script *requires* a working editable install of MolNex so that
-``molix.export.export_model`` is importable; the test harness is
+``molix.export.Exporter`` is importable; the test harness is
 expected to be run inside the project's dev environment.
 """
 
@@ -46,43 +47,32 @@ def _export_with_runtime_constants(
     device: str,
     name: str = "model",
 ) -> None:
-    """Mirror of molix.export.export_model but with runtime constant folding.
+    """Export via molix.export.Exporter with runtime constant folding.
 
-    Default AOTI compilation folds small constants (like Linear bias) into
-    the .so as literals, making them unreloadable via update_weights().
-    `aot_inductor.use_runtime_constant_folding=True` keeps every parameter
-    as an updateable constant buffer — required to exercise the reload
-    path in this test suite.
+    Default AOTI compilation folds small constants (like a Linear bias)
+    into the package as literals, making them unreloadable via
+    update_weights(). `aot_inductor.use_runtime_constant_folding=True`
+    keeps every parameter as an updateable constant buffer — required to
+    exercise the reload path in this test suite. A dynamic batch dim is
+    declared so one package serves the varying input sizes the tests use.
     """
     import json
 
+    from molix.export import Exporter
+
     export_dir.mkdir(parents=True, exist_ok=True)
-    so_path = str(export_dir / f"{name}.so")
-    model.eval()
-    target = model.to(device)
+    target = model.to(device).eval()
     device_inputs = tuple(
         t.to(device) if isinstance(t, torch.Tensor) else t for t in example_inputs
     )
-    with torch.no_grad():
-        torch._export.aot_compile(
-            target,
-            args=device_inputs,
-            options={
-                "aot_inductor.output_path": so_path,
-                "aot_inductor.use_runtime_constant_folding": True,
-            },
-        )
-    torch.save(dict(target.state_dict()), export_dir / f"{name}.pt")
-    meta = {
-        "device": device,
-        "input_shapes": [
-            list(t.shape) if isinstance(t, torch.Tensor) else None for t in device_inputs
-        ],
-        "input_dtypes": [
-            str(t.dtype) if isinstance(t, torch.Tensor) else type(t).__name__ for t in device_inputs
-        ],
-        "model_class": model.__class__.__name__,
-    }
+    batch = torch.export.Dim("batch", min=2, max=4096)
+    Exporter(target).export(
+        device_inputs,
+        export_dir / f"{name}.pt2",
+        dynamic_shapes=({0: batch},),
+        inductor_configs={"aot_inductor.use_runtime_constant_folding": True},
+    )
+    meta = {"device": device, "model_class": model.__class__.__name__}
     (export_dir / f"{name}.meta.json").write_text(json.dumps(meta, indent=2))
 
 

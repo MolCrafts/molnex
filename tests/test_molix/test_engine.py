@@ -1,4 +1,4 @@
-"""Tests for the generic ``pair_style molnex`` interface (molix.lammps).
+"""Tests for the generic ``pair_style molnex`` interface (molix.engine).
 
 Covers the Python export side end-to-end: adapter registry + flat-convention
 calling, the molnex ``TensorDict`` construction (edge convention!), and the
@@ -15,13 +15,14 @@ import pytest
 import torch
 import torch.nn as nn
 
-from molix.lammps import (
+from molix.engine import (
+    EngineAdapter,
+    EngineForward,
     FlatTensorAdapter,
-    LammpsAdapter,
-    LammpsForward,
     MolnexTensorDictAdapter,
     export_for_lammps,
 )
+from molix.export import Exporter
 
 
 class _DummyTDPotential(nn.Module):
@@ -60,14 +61,14 @@ def graph():
 
 
 def test_registry_has_builtin_adapters():
-    assert "molnex-tensordict" in LammpsAdapter.names()
-    assert "flat" in LammpsAdapter.names()
-    assert isinstance(LammpsAdapter.from_name("flat"), FlatTensorAdapter)
+    assert "molnex-tensordict" in EngineAdapter.names()
+    assert "flat" in EngineAdapter.names()
+    assert isinstance(EngineAdapter.from_name("flat"), FlatTensorAdapter)
 
 
 def test_unknown_adapter_raises():
     with pytest.raises(ValueError, match="unknown adapter"):
-        LammpsAdapter.from_name("does-not-exist")
+        EngineAdapter.from_name("does-not-exist")
 
 
 def test_tensordict_adapter_edge_convention(graph):
@@ -85,14 +86,14 @@ def test_tensordict_adapter_edge_convention(graph):
 
 def test_lammps_forward_shapes_tensordict(graph):
     Z, pos, edge_index = graph
-    e, f = LammpsForward(_DummyTDPotential(), "molnex-tensordict")(Z, pos, edge_index)
+    e, f = EngineForward(_DummyTDPotential(), "molnex-tensordict")(Z, pos, edge_index)
     assert e.shape == ()                       # scalar total energy
     assert f.shape == (3, 3)
 
 
 def test_lammps_forward_shapes_flat(graph):
     Z, pos, edge_index = graph
-    e, f = LammpsForward(_FlatEFPotential(), "flat")(Z, pos, edge_index)
+    e, f = EngineForward(_FlatEFPotential(), "flat")(Z, pos, edge_index)
     assert e.shape == ()
     assert f.shape == (3, 3)
 
@@ -106,9 +107,24 @@ def test_export_for_lammps_validates_inputs(tmp_path):
         )
 
 
+def test_export_for_lammps_cpu_refused(tmp_path):
+    """CPU force export is disabled (torch 2.12 miscompiles the backward scatter)."""
+    with pytest.raises(RuntimeError, match="disabled on CPU"):
+        export_for_lammps(
+            _FlatEFPotential(),
+            tmp_path / "x",
+            species=[1, 6, 8],
+            cutoff=4.5,
+            units="real",
+            adapter="flat",
+            device="cpu",
+        )
+
+
 @pytest.mark.slow
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="force export requires CUDA")
 def test_export_for_lammps_roundtrip(tmp_path):
-    """AOTI export writes the lammps meta block and a dynamic-shape .so."""
+    """AOTI export writes the lammps meta block and a dynamic-shape ``.pt2``."""
     outdir = export_for_lammps(
         _FlatEFPotential(),
         tmp_path / "flat_export",
@@ -116,10 +132,10 @@ def test_export_for_lammps_roundtrip(tmp_path):
         cutoff=4.5,
         units="real",
         adapter="flat",
-        device="cpu",
+        device="cuda",
     )
     meta = json.loads((outdir / "model.meta.json").read_text())
-    assert (outdir / "model.so").exists()
+    assert (outdir / "model.pt2").exists()
     lm = meta["lammps"]
     assert lm["cutoff"] == 4.5
     assert lm["units"] == "real"
@@ -128,10 +144,10 @@ def test_export_for_lammps_roundtrip(tmp_path):
     assert lm["inputs"] == ["Z", "pos", "edge_index"]
     assert lm["outputs"] == ["energy", "forces"]
 
-    # the exported .so serves N/E different from the trace (MD needs this)
-    runner = torch._export.aot_load(str(outdir / "model.so"), device="cpu")
-    Z = torch.tensor([1, 6, 8, 1])
-    pos = torch.randn(4, 3)
-    ei = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1], [2, 3], [3, 2]])
+    # the exported .pt2 serves N/E different from the trace (MD needs this)
+    runner = Exporter.load(outdir / "model.pt2")
+    Z = torch.tensor([1, 6, 8, 1], device="cuda")
+    pos = torch.randn(4, 3, device="cuda")
+    ei = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1], [2, 3], [3, 2]], device="cuda")
     e, f = runner(Z, pos, ei)
     assert f.shape == (4, 3)

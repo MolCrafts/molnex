@@ -7,7 +7,7 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
-from molix.compile import CUDA_GRAPH_PRESET
+from molix.compile import Compiler
 from molix.core.trainer import Trainer
 
 
@@ -60,7 +60,7 @@ def test_compile_checkpoint_sync():
 
 def test_cuda_graphs_preset_values():
     """The named preset is exactly the benchmarked winning force-training config."""
-    assert CUDA_GRAPH_PRESET == {
+    assert Compiler.CUDA_GRAPH_PRESET == {
         "backend": "inductor",
         "fullgraph": True,
         "dynamic": False,
