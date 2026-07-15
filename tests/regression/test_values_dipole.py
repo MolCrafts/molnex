@@ -1,15 +1,10 @@
-import sys
-from pathlib import Path
-
 import pytest
 import torch
 from ase.io import read
 
 from molpot.potentials.elec import CalculatorDipole, PotentialDipole
 from molpot.potentials.elec.prefactors import eV_A
-
-sys.path.append(str(Path(__file__).parents[1]))
-from helpers import (
+from tests.regression.conftest import (
     DEVICES,
     DIPOLES_TEST_FRAMES,
     DTYPES,

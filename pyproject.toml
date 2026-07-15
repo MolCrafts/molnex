@@ -65,12 +65,16 @@ molnex = "molix.cli:app"
 Repository = "https://github.com/molcrafts/molnex"
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = [".", "src"]
 python_files = ["test_*", "bm_*"]
 python_classes = ["Test*", "BM*"]
 markers = [
   "slow: marks tests that compile/AOT-export models (deselect with '-m \"not slow\"')",
+  "regression: numerical reference-value parity suites under tests/regression/ (excluded by default; run with '-m regression')",
 ]
+# Unit runs stay fast: tests/regression/ is auto-marked and skipped by default.
+# A CLI -m overrides this (e.g. `pytest -m regression`, `pytest -m ""` for everything).
+addopts = ["-m", "not regression"]
 
 [tool.scikit-build]
 wheel.packages = ["src/molix", "src/molrep", "src/molpot", "src/molzoo"]

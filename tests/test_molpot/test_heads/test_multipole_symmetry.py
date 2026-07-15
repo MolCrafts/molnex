@@ -32,7 +32,7 @@ rotation tests parametrise on Euler angles and apply ``cuet.Rotation`` to
 the output. Translation/permutation tests still use a 3×3 matrix because
 those symmetries are independent of the irrep order.
 
-The graph-transform helpers come from ``tests.symmetry_helpers`` so the
+The graph-transform helpers come from ``tests.conftest`` so the
 encoder-only and pipeline tests share one definition of "translate / rotate
 / permute a TensorDict".
 """
@@ -51,7 +51,7 @@ from tensordict import TensorDict
 from molpot.heads import PermMultipoleHead
 from molrep.utils.equivariance import random_rotation_matrix, rotate_vectors
 from molzoo import Allegro
-from tests.symmetry_helpers import (
+from tests.conftest import (
     make_graph_batch,
     permute_graph,
     recompute_edge_geometry,

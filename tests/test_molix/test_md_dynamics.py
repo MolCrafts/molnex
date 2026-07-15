@@ -12,7 +12,7 @@ from molix.md import (
 )
 from molix.quant import Quantizer
 from molzoo.pinet import PiNetPotential
-from tests.symmetry_helpers import make_graph_batch
+from tests.conftest import make_graph_batch
 
 _DEVICE = torch.device("cpu")
 

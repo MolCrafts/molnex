@@ -1,7 +1,7 @@
 """Parity test: ``EwaldMultipoleEnergy.self_contribution`` vs the oracle.
 
 Five constants — ``energy_q, phi_q, energy_u, energy_Q, field_u`` — must
-reproduce the analytic forms in :func:`tests._oracles.screened_coulomb.self_corrections`
+reproduce the analytic forms in :func:`tests.test_molpot.test_les_parity.conftest.self_corrections`
 to ≤1e-6 across a range of σ.
 """
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from molpot.potentials import EwaldMultipoleEnergy
-from tests._oracles.screened_coulomb import self_corrections as oracle_self_corrections
+from tests.test_molpot.test_les_parity.conftest import self_corrections as oracle_self_corrections
 
 
 @pytest.mark.parametrize("sigma", [0.5, 1.0, 2.0])

@@ -1,6 +1,3 @@
-import sys
-from pathlib import Path
-
 import ase
 import torch
 
@@ -9,9 +6,7 @@ from molpot.potentials.elec import (
     EwaldCalculator,
 )
 from molpot.potentials.elec.tuning.tuner import TuningTimings
-
-sys.path.append(str(Path(__file__).parents[1]))
-from helpers import define_crystal, neighbor_list
+from tests.regression.conftest import define_crystal, neighbor_list
 
 DTYPE = torch.float32
 DEFAULT_CUTOFF = 4.4

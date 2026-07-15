@@ -27,7 +27,7 @@ import cuequivariance as cue
 import cuequivariance_torch as cuet
 import torch
 from tensordict import TensorDict
-from tests.symmetry_helpers import (
+from tests.conftest import (
     permute_graph,
     rotate_graph,
     translate_graph,

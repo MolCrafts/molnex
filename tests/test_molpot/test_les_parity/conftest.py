@@ -472,7 +472,7 @@ def brute_reciprocal(
 
 
 # ---------------------------------------------------------------------------
-# Self-tests — run with `python tests/_oracles/screened_coulomb.py`.
+# Self-tests — run with `python tests/test_molpot/test_les_parity/conftest.py`.
 #
 # These are sanity checks on the oracle itself, not parity tests against
 # any production code. They cross-check the oracle against:

@@ -1,6 +1,4 @@
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -15,9 +13,7 @@ from molpot.potentials.elec import (
     P3MCalculator,
     PMECalculator,
 )
-
-sys.path.append(str(Path(__file__).parents[1]))
-from helpers import (
+from tests.regression.conftest import (
     COULOMB_TEST_FRAMES,
     compute_distances,
     define_crystal,

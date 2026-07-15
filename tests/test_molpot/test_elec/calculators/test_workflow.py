@@ -1,8 +1,5 @@
 """Basic calculator workflow and torch.compile smoke tests."""
 
-import sys
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -14,9 +11,7 @@ from molpot.potentials.elec import (
     PMECalculator,
 )
 from molpot.potentials.elec.prefactors import kcalmol_A
-
-sys.path.append(str(Path(__file__).parents[1]))
-from helpers import DEVICES, DTYPES
+from tests.test_molpot.test_elec.conftest import DEVICES, DTYPES
 
 SMEARING = 1
 LR_WAVELENGTH = SMEARING / 4

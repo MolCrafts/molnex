@@ -1,18 +1,14 @@
 import os
-import sys
 import time
-from pathlib import Path
 
 import numpy
 import torch
 from ase.io import read
 from torch.nn.utils.rnn import pad_sequence
 
-sys.path.append(str(Path(__file__).parents[1]))
-from helpers import periodic_neighbor_list
-
 from molpot.potentials.elec import CoulombPotential, EwaldCalculator
 from molpot.potentials.elec.lib import compute_batched_kvectors
+from tests.test_molpot.test_elec.conftest import periodic_neighbor_list
 
 calc = EwaldCalculator(
     potential=CoulombPotential(smearing=1.0, prefactor=1.0),

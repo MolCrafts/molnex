@@ -16,7 +16,7 @@ from molix.quant import (
     QuantScheme,
 )
 from molzoo.pinet import PiNetPotential
-from tests.symmetry_helpers import make_graph_batch
+from tests.conftest import make_graph_batch
 
 # PiNet uses lazy params and make_graph_batch builds CPU metadata; keep tensors on CPU.
 _DEVICE = torch.device("cpu")

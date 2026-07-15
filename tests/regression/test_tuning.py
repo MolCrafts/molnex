@@ -1,6 +1,3 @@
-import sys
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -12,9 +9,7 @@ from molpot.potentials.elec import (
 )
 from molpot.potentials.elec.tuning import tune_ewald, tune_p3m, tune_pme
 from molpot.potentials.elec.tuning.tuner import TunerBase
-
-sys.path.append(str(Path(__file__).parents[1]))
-from helpers import DEVICES, DTYPES, define_crystal, neighbor_list
+from tests.regression.conftest import DEVICES, DTYPES, define_crystal, neighbor_list
 
 DEFAULT_CUTOFF = 4.4
 

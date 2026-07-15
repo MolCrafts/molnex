@@ -1,14 +1,10 @@
 import math
-import sys
-from pathlib import Path
 
 import pytest
 import torch
 
 from molpot.potentials.elec import Calculator, CoulombPotential
-
-sys.path.append(str(Path(__file__).parents[1]))
-from helpers import neighbor_list
+from tests.regression.conftest import neighbor_list
 
 DTYPE = torch.float64
 

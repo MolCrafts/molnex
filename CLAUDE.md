@@ -40,8 +40,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install (editable, with C++ extensions via scikit-build-core + CMake >=4.0)
 pip install -e ".[dev]"
 
-# Run all tests
+# Run unit tests (default; tests/regression/ is auto-excluded via addopts)
 python -m pytest tests/ -v
+
+# Run the numerical regression suite (reference-value parity; slow, ~minutes)
+python -m pytest -m regression
 
 # Run single test file
 python -m pytest tests/test_molzoo/test_mace.py -v
@@ -54,6 +57,20 @@ python -m pytest tests/ --cov=src --cov-report=term-missing
 ```
 
 Python >=3.10 required. Requires `torch>=2.10` (always use latest stable PyTorch).
+
+### Test layout rules
+
+- `tests/` contains **only** `test_*.py`, `conftest.py`, `__init__.py`, and data
+  files — no `helpers.py` / free-floating utility modules. Shared test code
+  lives in the nearest `conftest.py` and is imported by package path
+  (e.g. `from tests.conftest import make_graph_batch`).
+- **Unit tests** (everything outside `tests/regression/`) test one function or
+  module and must finish in seconds.
+- **`tests/regression/`** holds numerical reference-value parity suites
+  (Ewald/PME/P3M vs Madelung constants, GROMACS, espressomd — vendored from
+  torch-pme). Auto-marked `regression` by its `conftest.py` and excluded from
+  the default run; CI / pre-push should run `pytest -m regression` separately.
+- `slow` marker: AOT-export / compile tests (deselect with `-m "not slow"`).
 
 ## Architecture
 
@@ -180,7 +197,8 @@ molix.core (Trainer, TrainState, Step, Hook)    ForceDerivation)
 molix.data (Dataset, collate, preprocess)
 molix.datasets (QM9, RevMD17, ThreeBPA, WaterLES, MolRec)
 molix.md (Langevin velocity-Verlet) ─→ molix.quant (T_eff / quantization scalars)
-molix.export (AOT Inductor) · molix.compile (torch.compile / CUDA-graph capture)   [leaf execution utils]
+molix.export (Exporter, AOTInductor .pt2) · molix.compile (Compiler, torch.compile / CUDA graphs)   [leaf execution utils]
+molix.engine (EngineAdapter/EngineForward/StaticForward, export_for_lammps) ─→ interface/ (C++ pair_style molnex)
 ```
 
 Notes on cross-package edges (verified against imports):
@@ -196,9 +214,17 @@ Notes on cross-package edges (verified against imports):
   the `pinet-quant` project (`csmd` package); molnex keeps only the reusable MD
   engine (`molix.md`) and `molix.quant`.
 - `molix.md` (in-process Langevin velocity-Verlet driver) produces paired
-  trajectories; `molix.export` (AOT Inductor) and `molix.compile`
-  (`torch.compile` / CUDA-graph capture) are leaf execution utilities that wrap a
-  trained model — nothing in the core training loop imports them.
+  trajectories; `molix.export` (`Exporter` — AOTInductor `.pt2`, with
+  `export_pretraced` for in-forward autograd force heads) and `molix.compile`
+  (`Compiler` — `torch.compile`, `cuda_graphs=True` preset) are leaf execution
+  utilities that wrap a trained model — nothing in the core training loop
+  imports them.
+- `molix.engine` is the engine-neutral export bridge: `EngineAdapter` /
+  `EngineForward` map a model onto the flat `(Z, pos, edge_index) -> (energy,
+  forces)` convention, `StaticForward` is the fixed-shape CUDA-graph-capturable
+  variant, and `export_for_lammps` is the LAMMPS preset. The engine-specific C++
+  (`pair_style molnex`, AOTI `ModelRunner`) lives in the repo-root `interface/`
+  — no per-model C++ there.
 
 ### State namespace contract
 

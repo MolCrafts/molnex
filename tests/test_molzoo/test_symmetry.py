@@ -5,7 +5,7 @@ Tests three physical symmetries that molecular models must satisfy:
 2. Rotation invariance/equivariance — scalar features/energy invariant, forces equivariant
 3. Permutation equivariance — features permute with atom reordering
 
-Generic graph-transform helpers live in ``tests.symmetry_helpers`` and are
+Generic graph-transform helpers live in ``tests.conftest`` and are
 reused by every symmetry test in this repo (encoder, head, pipeline).
 """
 
@@ -21,7 +21,7 @@ from molpot.pooling import EdgeToNodePooling, LayerPooling
 from molrep.embedding.node import DiscreteEmbeddingSpec
 from molrep.utils.equivariance import random_rotation_matrix, rotate_vectors
 from molzoo import MACE, Allegro
-from tests.symmetry_helpers import (
+from tests.conftest import (
     make_graph_batch,
     permute_graph,
     recompute_edge_geometry,

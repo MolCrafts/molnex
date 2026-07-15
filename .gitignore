@@ -120,7 +120,7 @@ cython_debug/
 .benchmarks/
 
 # Examples (not shipped)
-examples/
+/examples/
 
 .claude/worktrees/
 

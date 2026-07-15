@@ -10,7 +10,7 @@ from molrep.embedding.radial import GaussianBasis, PolynomialBasis
 from molrep.interaction.pinet import DotLayer, PIXLayer
 from molrep.utils.equivariance import random_rotation_matrix, rotate_vectors
 from molzoo import PiNet
-from tests.symmetry_helpers import (
+from tests.conftest import (
     make_graph_batch,
     permute_graph,
     rotate_graph,
