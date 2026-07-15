@@ -94,6 +94,25 @@ def test_functorch_forces_match_autograd_reference():
     )
 
 
+def test_eval_single_pass_matches_train_two_pass():
+    """eval() takes the fused grad(has_aux) single pass; outputs must be
+    identical (same keys, same values) to the training two-pass path."""
+    model = _model()
+    torch.manual_seed(1)
+    batch = _batch()
+
+    model.train()
+    out_train = model(batch.clone(), compute_forces=True)
+    model.eval()
+    out_eval = model(batch.clone(), compute_forces=True)
+
+    assert set(out_eval) == set(out_train)
+    for key in ("energy", "atomic_energy", "forces"):
+        assert torch.allclose(out_eval[key], out_train[key].detach(), atol=1e-6, rtol=1e-6), (
+            f"{key} diverges between eval single-pass and train two-pass"
+        )
+
+
 def test_force_loss_single_backward_populates_param_grads():
     """A force-loss single backward trains params with no double-backward error."""
     model = _model()

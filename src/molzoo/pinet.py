@@ -423,6 +423,9 @@ class PiNetPotential(nn.Module):
         # Set by :meth:`compile_energy`; when present, the energy forward runs
         # through the compiled callable instead of the eager method.
         self._compiled_energy_forward = None
+        # Lazy params must be materialized outside any functorch transform; the
+        # first forward flips this (see _forward_functorch).
+        self._materialized = False
 
         # Per-block output heads, residually accumulated (PiNN PiNet2 OutLayer):
         # per-atom energy = Σ_b OutLayer_b(p1_block_output_b), each OutLayer a
@@ -453,25 +456,45 @@ class PiNetPotential(nn.Module):
         candidate positions swapped in; PiNet derives all edge geometry from
         positions internally, so the gradient flows pos → geometry → energy.
 
-        The eager energy pass runs FIRST, for two reasons: it produces the energy
-        outputs (connected to the parameters, with ``pos`` detached, so an
-        energy+force loss trains via ordinary autograd), and it materializes
-        PiNet's lazy parameters in normal eager mode — materializing them inside
-        the ``torch.func.grad`` transform below corrupts functorch's tensor
-        wrappers and segfaults.
+        **Training** (``self.training``): an eager energy pass runs FIRST — it
+        produces energy outputs connected to the parameters (with ``pos``
+        detached) so an energy+force loss trains via ordinary autograd — then
+        ``torch.func.grad`` reruns the energy graph for forces. Cost: 2 forwards
+        + 1 backward per step.
+
+        **Inference** (``eval()``): the energy outputs need no autograd graph,
+        so a single ``torch.func.grad(..., has_aux=True)`` pass returns forces
+        AND energies from one forward + one backward — the eager energy pass is
+        skipped entirely (~25-40% faster per MD step; the win that motivated
+        this split is the pinet-quant water NVE workhorse, which cannot
+        ``torch.compile`` its fake-quantized forward).
+
+        Lazy parameters must be materialized OUTSIDE the functorch transform
+        (materializing inside corrupts its tensor wrappers and segfaults) —
+        training does so via its eager pass; inference runs a one-time throwaway
+        eager pass on the first call.
         """
         pos = batch["atoms", "pos"].detach()
         base = batch.clone()
         base["atoms", "pos"] = pos
 
-        out = self._energy_forward(base.clone())
-
-        def energy_fn(p: torch.Tensor) -> torch.Tensor:
+        def energy_fn(p: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
             b = base.clone()
             b["atoms", "pos"] = p
-            return self._energy_forward(b)["energy"].sum()
+            out = self._energy_forward(b)
+            return out["energy"].sum(), out
 
-        out["forces"] = self.force_derivation(energy_fn, pos)
+        if not self.training:
+            if not self._materialized:
+                self._energy_forward(base.clone())  # materialize lazy params eagerly
+                self._materialized = True
+            grad, out = torch.func.grad(energy_fn, has_aux=True)(pos)
+            out["forces"] = -grad
+            return out
+
+        out = self._energy_forward(base.clone())
+        self._materialized = True
+        out["forces"] = self.force_derivation(lambda p: energy_fn(p)[0], pos)
         return out
 
     def _energy_forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
