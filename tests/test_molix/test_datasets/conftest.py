@@ -364,6 +364,9 @@ def molrec_qm9_record(tmp_path: Path) -> MolRecQM9Fixture:
     """
     import molrs
 
+    if not hasattr(molrs, "MolRec"):
+        pytest.skip("molrs.MolRec not available in this molrs build")
+
     teacher_id = "teacherA"
     rng = np.random.default_rng(0)
 
@@ -419,6 +422,9 @@ def molrec_force_record(tmp_path: Path) -> MolRecForceFixture:
     be verified. The ``method`` dict names both teachers.
     """
     import molrs
+
+    if not hasattr(molrs, "MolRec"):
+        pytest.skip("molrs.MolRec not available in this molrs build")
 
     elements = ["H", "H", "O"]
     expected_Z = [1, 1, 8]

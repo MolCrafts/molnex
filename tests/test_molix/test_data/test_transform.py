@@ -256,12 +256,16 @@ class TestUnitConvert:
         assert task.factors["length"] == pytest.approx(0.52918, rel=1e-4)
 
     def test_incompatible_dimensions_raises(self):
-        """pint rejects hartree → Å (energy vs length)."""
-        with pytest.raises(pint.errors.DimensionalityError):
+        """Registry rejects hartree → Å (energy vs length)."""
+        import molrs
+
+        with pytest.raises((pint.errors.DimensionalityError, molrs.UnitsError)):
             UnitConvert({"x": ("hartree", "angstrom")})
 
     def test_unknown_unit_raises(self):
-        with pytest.raises(pint.errors.UndefinedUnitError):
+        import molrs
+
+        with pytest.raises((pint.errors.UndefinedUnitError, molrs.UnitsError)):
             UnitConvert({"x": ("nonsense", "eV")})
 
     def test_missing_target_raises(self):
@@ -288,7 +292,8 @@ class TestUnitConvert:
         t = UnitConvert({"U0": ("hartree", "eV")})
         assert "U0" in t.task_id
         assert "hartree" in t.task_id
-        assert "electron_volt" in t.task_id
+        # User-supplied dst string is preserved (not registry-canonicalized).
+        assert "eV" in t.task_id
 
     def test_task_id_order_invariant(self):
         t1 = UnitConvert({"U0": ("hartree", "eV"), "U": ("hartree", "eV")})
