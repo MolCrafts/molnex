@@ -31,7 +31,7 @@ chain: md-component-engine
 | molpy | molnex MD(本 spec) | 职责 |
 |---|---|---|
 | `Potential`(功能形式/模型) | **`Potential(nn.Module)`** = `molpot.BasePotential` / `PiNetPotential`(已存在,**复用不重写**) | 从 batch `TensorDict` 算能量;力经 `ForceDerivation(method="functorch")` 求 |
-| `Potentials`(frame-bound 可求值) | **`ForceField(nn.Module)`**(新增) | 把一个 `Potential` **绑定到体系模板**,对 `pos` 暴露 `forward(pos)->ForceOutput` + `calc_energy/calc_forces` | 
+| `Potentials`(frame-bound 可求值) | **`ForceField(nn.Module)`**(新增) | 把一个 `Potential` **绑定到体系模板**,对 `pos` 暴露 `forward(pos)->ForceOutput` + `calc_energy/calc_forces` |
 | `PotentialLike` Protocol | `ForceField` 的 `calc_energy/calc_forces` | 积分器消费的统一求值接口 |
 | `Frame`/`Block`(列式状态) | `MDState` NamedTuple(typed) + `ForceField` 内部持有的 `TensorDict` 模板 | tensordict↔typed 平衡点 |
 
