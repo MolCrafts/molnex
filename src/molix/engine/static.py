@@ -14,6 +14,7 @@ Export this with ``dynamic_shapes=None`` and load the ``.pt2`` with
 deployer (C++ ``pair_style molnex``) can capture ``runner->run`` in an
 ``at::cuda::CUDAGraph`` and replay it each step. Measured ~2.9x on aspirin.
 """
+
 from __future__ import annotations
 
 import torch
@@ -57,12 +58,15 @@ class StaticForward(nn.Module):
         edge_dist = edge_diff.norm(dim=-1).clamp(min=1e-8)
         td = TensorDict(
             atoms=TensorDict(
-                Z=Z, pos=pos,
+                Z=Z,
+                pos=pos,
                 batch=torch.zeros(self.n_atoms, dtype=torch.long, device=pos.device),
                 batch_size=[self.n_atoms],
             ),
             edges=TensorDict(
-                edge_index=edge_index, edge_diff=edge_diff, edge_dist=edge_dist,
+                edge_index=edge_index,
+                edge_diff=edge_diff,
+                edge_dist=edge_dist,
                 batch_size=[self.e_max],
             ),
             graphs=TensorDict(

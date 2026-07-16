@@ -235,7 +235,7 @@ class MACEOMol(nn.Module):
         lengths = torch.linalg.norm(vectors, dim=-1, keepdim=True)
 
         # one-hot node attrs over the element table
-        z_index = torch.searchsorted(self.z_table, Z)
+        z_index = torch.searchsorted(self.z_table, Z.reshape(-1)).to(dtype=torch.long)
         node_attrs = torch.zeros(
             num_nodes, self.z_table.numel(), dtype=positions.dtype, device=positions.device
         )

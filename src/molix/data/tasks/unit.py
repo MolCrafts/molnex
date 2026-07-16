@@ -57,8 +57,8 @@ class UnitConvert(SampleTask):
                     f"(src_unit, dst_unit), got {pair!r}"
                 )
             src_str, dst_str = pair
-            src_unit = UnitSystem.Unit(src_str)
-            dst_unit = UnitSystem.Unit(dst_str)
+            src_unit = UnitSystem.Unit(src_str)  # type: ignore[call-arg]
+            dst_unit = UnitSystem.Unit(dst_str)  # type: ignore[call-arg]
             factor = float((1.0 * src_unit).to(dst_unit).magnitude)
             if not _is_finite(factor):
                 raise ValueError(

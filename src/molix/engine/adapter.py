@@ -153,7 +153,7 @@ class FlatTensorAdapter(EngineAdapter):
     def read_outputs(self, out: object) -> tuple[torch.Tensor, torch.Tensor]:
         if isinstance(out, dict):
             return out["energy"].sum(), out["forces"]
-        energy, forces = out  # type: ignore[misc]
+        energy, forces = out  # type: ignore[misc,not-iterable]
         return energy.sum(), forces
 
 

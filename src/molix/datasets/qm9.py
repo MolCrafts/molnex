@@ -91,7 +91,7 @@ def _load_exclusion_list(path: Path) -> set[int]:
 
 
 def _parse_xyz(content: str) -> dict:
-    from molpy.core.element import Element
+    from molrs import Element
 
     content = content.replace("*^", "E")
     lines = content.splitlines()

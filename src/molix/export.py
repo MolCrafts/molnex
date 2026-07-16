@@ -116,9 +116,7 @@ class Exporter:
             TypeError: If *example_inputs* is not a tuple.
         """
         self._prepare(example_inputs)
-        exported = torch.export.export(
-            self.module, example_inputs, dynamic_shapes=dynamic_shapes
-        )
+        exported = torch.export.export(self.module, example_inputs, dynamic_shapes=dynamic_shapes)
         return self._package(exported, path, inductor_configs)
 
     def export_pretraced(
@@ -175,9 +173,7 @@ class Exporter:
 
     def _prepare(self, example_inputs: tuple[torch.Tensor, ...]) -> None:
         if not isinstance(example_inputs, tuple):
-            raise TypeError(
-                f"example_inputs must be a tuple, got {type(example_inputs).__name__}"
-            )
+            raise TypeError(f"example_inputs must be a tuple, got {type(example_inputs).__name__}")
         self.module.eval()
         # Warm up: materialize lazy params at concrete shapes BEFORE tracing
         # (materializing them inside a functorch trace corrupts its wrappers).

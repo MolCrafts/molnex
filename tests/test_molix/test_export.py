@@ -78,9 +78,7 @@ def test_load_and_run_matches_eager(tmp_path: Path, small_mlp: nn.Sequential) ->
     assert torch.allclose(expected, actual, atol=1e-5)
 
 
-def test_dynamic_shapes_one_package_varying_batch(
-    tmp_path: Path, small_mlp: nn.Sequential
-) -> None:
+def test_dynamic_shapes_one_package_varying_batch(tmp_path: Path, small_mlp: nn.Sequential) -> None:
     """One ``.pt2`` with a dynamic batch dim serves multiple sizes (no padding)."""
     x = torch.randn(4, 10)
     b = torch.export.Dim("b", min=2, max=4096)

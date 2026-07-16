@@ -1,10 +1,19 @@
 # molzoo
 
-Molecular model zoo. Provides encoder architectures (MACE, Allegro, PiNet). The
-PiNet module additionally ships an energy+force potential head (`PiNetPotential`)
-co-located with the encoder, because PiNet2's per-block residual readout only
-makes sense for its multi-layer output shape. The Sonata permanent-electrostatics
-model lives in `molpot.composition` (`Sonata` / `build_sonata`), not here.
+Molecular model zoo. Provides encoder architectures (MACE, Allegro, PiNet).
+
+PiNet is a **package** (`molzoo/pinet/`), not a single file:
+
+| Module | Role |
+|--------|------|
+| `spec` | `PiNetSpec` config |
+| `geometry` | PBC-safe edge displacement helpers |
+| `encoder` | `PiNet` feature encoder (molrep GC blocks only) |
+| `potential` | `PiNetPotential` energy + functorch forces (composition; long-term home molpot) |
+| `properties` | `PiNetDipole` / `PiNetPolarizability` façades over molpot heads |
+
+Public imports stay stable: `from molzoo.pinet import PiNet, PiNetPotential`.
+The Sonata model lives in `molpot.composition`, not here.
 
 ## Model Specifications
 

@@ -52,7 +52,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from molpy.core.element import Element
+from molrs import Element
 
 from molix.data.collate import TargetSchema
 from molix.data.source import Sample

@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Literal
 
 import torch
-from molpy.core.element import Element
+from molrs import Element
 
 from molix.data.collate import TargetSchema
 from molix.data.source import Sample

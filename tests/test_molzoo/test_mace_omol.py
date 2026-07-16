@@ -177,9 +177,7 @@ def test_force_loss_reaches_parameters_in_eval_mode(model, single_graph):
     loss.backward()
 
     params = list(model.parameters())
-    n_with_grad = sum(
-        int(p.grad is not None and float(p.grad.abs().sum()) > 0.0) for p in params
-    )
+    n_with_grad = sum(int(p.grad is not None and float(p.grad.abs().sum()) > 0.0) for p in params)
     assert n_with_grad > len(params) // 2, (
         f"force loss reached only {n_with_grad}/{len(params)} parameters; "
         "the force is detached from the parameter graph"
@@ -213,9 +211,7 @@ def test_functorch_force_loss_trains_via_forward(model, single_graph):
     (forces**2).mean().backward()
 
     params = list(model.parameters())
-    n_with_grad = sum(
-        int(p.grad is not None and float(p.grad.abs().sum()) > 0.0) for p in params
-    )
+    n_with_grad = sum(int(p.grad is not None and float(p.grad.abs().sum()) > 0.0) for p in params)
     assert n_with_grad > len(params) // 2, (
         f"functorch force loss reached only {n_with_grad}/{len(params)} parameters"
     )

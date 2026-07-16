@@ -119,6 +119,13 @@ unsupported-operator = "warn"
 too-many-positional-arguments = "warn"
 # call-top-callable: torch lazy generators / dataloaders typed as object in stubs
 call-top-callable = "warn"
+# missing-argument / unresolved-import / not-iterable / no-matching-overload:
+# pint Unit stubs, torch index ops, and heterogeneous event sample lists —
+# runtime-correct; stubs over-constrain (same class of FP as above).
+missing-argument = "warn"
+unresolved-import = "warn"
+not-iterable = "warn"
+no-matching-overload = "warn"
 
 [tool.ty.environment]
 python-version = "3.12"

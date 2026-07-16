@@ -1,23 +1,11 @@
-"""Force path of ``PiNetPotential`` — functorch (``torch.func.grad``).
-
-``PiNetPotential`` derives forces only via functorch, which traces the force into
-the forward graph so ``energy → force → loss`` is a single backward (no
-double-backward barrier). Function-level gates:
-
-  * NUM  — functorch forces match a plain ``torch.autograd.grad`` reference
-    (scientific correctness of the force derivation).
-  * G3c  — one force-loss ``.backward()`` populates parameter grads, no error.
-
-The ``torch.compile`` execution of this path is an integration concern, not a
-unit test, so it is not gated here.
-"""
+"""Unit tests for molzoo.pinet.potential.PiNetPotential (forces + energy)."""
 
 from __future__ import annotations
 
 import torch
 from tensordict import TensorDict
 
-from molzoo.pinet import PiNetPotential
+from molzoo.pinet import PiNet, PiNetPotential
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -58,7 +46,7 @@ def _batch(
 
 def _model() -> PiNetPotential:
     torch.manual_seed(0)
-    model = PiNetPotential(
+    return PiNetPotential(
         atom_types=[1, 6, 7, 8],
         r_max=4.0,
         n_basis=4,
@@ -69,12 +57,60 @@ def _model() -> PiNetPotential:
         rank=3,
         hidden_dim=16,
     ).to(DEVICE)
-    model(_batch(), compute_forces=False)  # materialise lazy params
-    return model
+
+
+def test_energy_and_force_shapes():
+    model = PiNetPotential(
+        atom_types=[1, 6, 7, 8],
+        r_max=4.0,
+        n_basis=3,
+        pp_nodes=[8, 8],
+        pi_nodes=[8, 8],
+        ii_nodes=[8, 8],
+        depth=2,
+        rank=3,
+        hidden_dim=8,
+        compute_forces=True,
+    )
+    n = 4
+    batch = TensorDict(
+        atoms=TensorDict(
+            Z=torch.tensor([1, 6, 7, 8]),
+            pos=torch.randn(n, 3),
+            batch=torch.zeros(n, dtype=torch.long),
+            batch_size=[n],
+        ),
+        edges=TensorDict(
+            edge_index=torch.tensor(
+                [[0, 1], [1, 0], [0, 2], [2, 0], [1, 3], [3, 1], [2, 3], [3, 2]],
+                dtype=torch.long,
+            ),
+            batch_size=[8],
+        ),
+        graphs=TensorDict(num_atoms=torch.tensor([n]), batch_size=[1]),
+        batch_size=[],
+    )
+    out = model(batch, compute_forces=True)
+    assert out["energy"].shape == (1,)
+    assert out["forces"].shape == (n, 3)
+
+
+def test_encoder_kwarg_composition():
+    enc = PiNet(
+        atom_types=[1, 6, 7, 8],
+        r_max=4.0,
+        n_basis=3,
+        pp_nodes=[8, 8],
+        pi_nodes=[8, 8],
+        ii_nodes=[8, 8],
+        depth=2,
+        rank=1,
+    )
+    model = PiNetPotential(encoder=enc, hidden_dim=8, compute_forces=False)
+    assert model.encoder is enc
 
 
 def test_functorch_forces_match_autograd_reference():
-    """functorch forces == a plain -autograd.grad(E, pos) reference."""
     model = _model()
     model.eval()
     batch = _batch()
@@ -95,8 +131,6 @@ def test_functorch_forces_match_autograd_reference():
 
 
 def test_eval_single_pass_matches_train_two_pass():
-    """eval() takes the fused grad(has_aux) single pass; outputs must be
-    identical (same keys, same values) to the training two-pass path."""
     model = _model()
     torch.manual_seed(1)
     batch = _batch()
@@ -114,14 +148,19 @@ def test_eval_single_pass_matches_train_two_pass():
 
 
 def test_force_loss_single_backward_populates_param_grads():
-    """A force-loss single backward trains params with no double-backward error."""
     model = _model()
     model.train()
     batch = _batch()
 
     out = model(batch.clone(), compute_forces=True)
     loss = (out["forces"] - batch["atoms", "forces"]).pow(2).mean()
-    loss.backward()  # must not raise the double-backward RuntimeError
+    loss.backward()
 
     n_grad = sum(1 for p in model.parameters() if p.grad is not None and p.grad.abs().sum() > 0)
     assert n_grad > 0, "no parameter received a gradient from the force loss"
+
+
+def test_no_lazy_linear_in_potential():
+    model = _model()
+    for m in model.modules():
+        assert type(m).__name__ != "LazyLinear"

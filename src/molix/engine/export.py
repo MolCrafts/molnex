@@ -149,8 +149,9 @@ def export_for_lammps(
         adapter_name = "molnex-tensordict-static"
         # static example: N atoms, E_max edges (all valid here is fine for tracing).
         gen = torch.Generator().manual_seed(0)
-        pos = ((torch.rand(n_atoms, 3, generator=gen, dtype=torch.float64) - 0.5) * 0.45 * cutoff
-               ).to(dtype=resolved_dtype, device=device)
+        pos = (
+            (torch.rand(n_atoms, 3, generator=gen, dtype=torch.float64) - 0.5) * 0.45 * cutoff
+        ).to(dtype=resolved_dtype, device=device)
         sp = sorted(set(species))
         Z = torch.tensor([sp[i % len(sp)] for i in range(n_atoms)], dtype=torch.long, device=device)
         ei = torch.randint(0, n_atoms, (e_max, 2), generator=gen, dtype=torch.long).to(device)

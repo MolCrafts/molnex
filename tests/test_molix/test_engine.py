@@ -77,9 +77,7 @@ def test_tensordict_adapter_edge_convention(graph):
     batch = MolnexTensorDictAdapter().build_inputs(_DummyTDPotential(), Z, pos, edge_index)
     expected = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
     assert torch.allclose(batch["edges", "edge_diff"], expected)
-    assert torch.allclose(
-        batch["edges", "edge_dist"], expected.norm(dim=-1).clamp(min=1e-6)
-    )
+    assert torch.allclose(batch["edges", "edge_dist"], expected.norm(dim=-1).clamp(min=1e-6))
     assert (batch["atoms", "batch"] == 0).all()
     assert batch["graphs", "num_atoms"].item() == 3
 
@@ -87,7 +85,7 @@ def test_tensordict_adapter_edge_convention(graph):
 def test_lammps_forward_shapes_tensordict(graph):
     Z, pos, edge_index = graph
     e, f = EngineForward(_DummyTDPotential(), "molnex-tensordict")(Z, pos, edge_index)
-    assert e.shape == ()                       # scalar total energy
+    assert e.shape == ()  # scalar total energy
     assert f.shape == (3, 3)
 
 
@@ -102,9 +100,7 @@ def test_export_for_lammps_validates_inputs(tmp_path):
     with pytest.raises(ValueError, match="species"):
         export_for_lammps(_FlatEFPotential(), tmp_path / "x", species=[], cutoff=4.5)
     with pytest.raises(ValueError, match="units"):
-        export_for_lammps(
-            _FlatEFPotential(), tmp_path / "x", species=[1], cutoff=4.5, units="lj"
-        )
+        export_for_lammps(_FlatEFPotential(), tmp_path / "x", species=[1], cutoff=4.5, units="lj")
 
 
 def test_export_for_lammps_cpu_refused(tmp_path):
@@ -128,7 +124,7 @@ def test_export_for_lammps_roundtrip(tmp_path):
     outdir = export_for_lammps(
         _FlatEFPotential(),
         tmp_path / "flat_export",
-        species=[8, 1, 6],          # deliberately unsorted → stored sorted
+        species=[8, 1, 6],  # deliberately unsorted → stored sorted
         cutoff=4.5,
         units="real",
         adapter="flat",

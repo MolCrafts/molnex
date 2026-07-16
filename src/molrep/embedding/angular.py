@@ -191,10 +191,10 @@ class SphericalHarmonics(nn.Module):
         z_pow = self._power_table(v[..., 2])
 
         mono = (
-            torch.index_select(x_pow, -1, self._exp_x)
-            * torch.index_select(y_pow, -1, self._exp_y)
-            * torch.index_select(z_pow, -1, self._exp_z)
+            torch.index_select(x_pow, -1, self._exp_x.to(dtype=torch.long))
+            * torch.index_select(y_pow, -1, self._exp_y.to(dtype=torch.long))
+            * torch.index_select(z_pow, -1, self._exp_z.to(dtype=torch.long))
             * self._coeffs
         )
         out = torch.zeros(*v.shape[:-1], self._out_dim, dtype=v.dtype, device=v.device)
-        return out.index_add(-1, self._out_idx, mono)
+        return out.index_add(-1, self._out_idx.to(dtype=torch.long), mono)

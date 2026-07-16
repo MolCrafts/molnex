@@ -32,7 +32,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | **molix** | Training infrastructure | Trainer, TrainState (dict), Step protocol, Hook lifecycle |
 | **molrep** | Representation learning | Embedding → Interaction → Readout pipeline, equivariance via cuEquivariance |
 | **molpot** | Potential functions | BasePotential (nn.Module + ABC), functorch forces, PotentialComposer |
-| **molzoo** | Pre-built encoders | Encoder-only (MACE, Allegro, PiNet, Sonata), no readout — downstream uses molpot |
+| **molzoo** | Pre-built encoders | Encoder recipes (MACE, Allegro, PiNet); physics heads/derivation stay in molpot |
+
+### Industrial layout + test mirror (hard rules)
+
+One-way dependency: `molix` ← `molrep` ← `molzoo` / `molpot` (molpot must not import molzoo).
+Prefer explicit `nn.Linear(in, out)` over `LazyLinear` on any compile / export / functorch path.
+
+Source ↔ unit-test path mirror:
+
+```
+src/<pkg>/<area>/<module>.py  →  tests/test_<pkg>/test_<area>/test_<module>.py
+```
+
+Gate for the PiNet spine: `python scripts/check_test_mirror.py --strict-pinet`.
+See `.claude/notes/notes.md` §"Industrial module layout" for the full decision.
+
+PiNet package layout:
+
+```
+src/molrep/interaction/pinet/   # pure GC blocks (no energy/force)
+src/molzoo/pinet/               # spec, geometry, encoder, potential, properties
+```
 
 ## Build & Development
 

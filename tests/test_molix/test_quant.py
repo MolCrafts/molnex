@@ -180,17 +180,21 @@ def test_force_delta_zero_residual_has_zero_moments():
 # --------------------------------------------------------------------------- #
 def _tiny_potential() -> PiNetPotential:
     torch.manual_seed(0)
-    return PiNetPotential(
-        atom_types=[1, 6, 7, 8],
-        r_max=4.0,
-        n_basis=3,
-        pp_nodes=[8, 8],
-        pi_nodes=[8, 8],
-        ii_nodes=[8, 8],
-        depth=2,
-        rank=3,
-        hidden_dim=16,
-    ).to(_DEVICE).eval()
+    return (
+        PiNetPotential(
+            atom_types=[1, 6, 7, 8],
+            r_max=4.0,
+            n_basis=3,
+            pp_nodes=[8, 8],
+            pi_nodes=[8, 8],
+            ii_nodes=[8, 8],
+            depth=2,
+            rank=3,
+            hidden_dim=16,
+        )
+        .to(_DEVICE)
+        .eval()
+    )
 
 
 def _tiny_batch():

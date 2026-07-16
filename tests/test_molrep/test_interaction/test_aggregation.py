@@ -180,4 +180,3 @@ class TestMessageAggregation:
 
         # Check equivariance
         assert check_equivariance(output1_rotated, output2, rtol=1e-3, atol=1e-3)
-

@@ -10,17 +10,22 @@ from __future__ import annotations
 
 import pytest
 import torch
+from tests.conftest import make_graph_batch
 
 from molix.data import PadMolecularBatch
-from tests.conftest import make_graph_batch
 
 
 def _batch() -> tuple[object, int, int]:
     """A 2-molecule collated batch (4 + 3 atoms, fully-connected per mol)."""
     pos = torch.tensor(
         [
-            [0.0, 0.0, 0.0], [1.1, 0.1, 0.0], [0.3, 1.2, 0.2], [1.4, 1.1, -0.1],
-            [0.0, 0.0, 0.0], [1.0, 0.2, 0.1], [0.2, 1.0, -0.2],
+            [0.0, 0.0, 0.0],
+            [1.1, 0.1, 0.0],
+            [0.3, 1.2, 0.2],
+            [1.4, 1.1, -0.1],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.2, 0.1],
+            [0.2, 1.0, -0.2],
         ],
         dtype=torch.float32,
     )

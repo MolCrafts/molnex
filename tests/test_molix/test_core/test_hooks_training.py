@@ -201,5 +201,3 @@ def test_activation_checkpointing_gradient_flow():
     # All parameters should have gradients
     for name, param in model.named_parameters():
         assert param.grad is not None, f"No gradient for {name}"
-
-
