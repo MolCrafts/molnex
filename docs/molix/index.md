@@ -28,6 +28,10 @@ training loops, data modules, hooks, checkpoints, metrics, or the nested
   trainer, steps, hooks, and state.
 - [Batch Schema](explanation/batch-schema.md): the raw sample and post-collate
   `TensorDict` shapes.
+- [Throughput & `torch.compile`](explanation/throughput-and-compilation.md):
+  why PiNet training is launch-bound, the front/back-end compile sweep, the
+  fixed-length-padding + CUDA-graphs ~5x path, and the `max-autotune`
+  shared-memory failure (and what GPU "shared memory" is vs HBM).
 
 ## API
 

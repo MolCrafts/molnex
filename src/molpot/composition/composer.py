@@ -5,6 +5,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from molpot.derivation import ForceDerivation
+
 
 class PotentialComposer(nn.Module):
     """Compose parameter head + potentials into a force field.
@@ -34,6 +36,7 @@ class PotentialComposer(nn.Module):
             raise ValueError("PotentialComposer requires at least one potential.")
         self.head = head
         self.potentials = nn.ModuleDict(potentials)
+        self.force_derivation = ForceDerivation()
 
     def forward(
         self,
@@ -65,31 +68,33 @@ class PotentialComposer(nn.Module):
         # 1. Head: features → per-atom params
         atom_params = self.head(node_features, **(head_kwargs or {}))
 
-        # 2. Distance (recompute from pos for autograd)
+        # 2. Distance (recompute from pos so forces can flow pos -> distance)
         pos = data.get("pos")
         if pos is not None:
             distance = (pos[dst] - pos[src]).norm(dim=-1)
         else:
-            distance = data["bond_dist"]
+            distance = data["edge_dist"]
 
         # 3. Evaluate each potential (each applies its own mixing)
         edge_batch = batch[src]
         num_graphs = data.get("num_graphs")
 
-        term_energies: dict[str, torch.Tensor] = {}
+        def _term_energies(distance: torch.Tensor) -> dict[str, torch.Tensor]:
+            terms: dict[str, torch.Tensor] = {}
+            for name, potential in self.potentials.items():
+                pair_params = potential.mixing_fn(atom_params, edge_index)
+                terms[name] = potential(
+                    distance=distance,
+                    edge_batch=edge_batch,
+                    num_graphs=num_graphs,
+                    **pair_params,
+                )
+            return terms
+
+        term_energies = _term_energies(distance)
         total_energy: torch.Tensor | None = None
-
-        for name, potential in self.potentials.items():
-            pair_params = potential.mixing_fn(atom_params, edge_index)
-            energy = potential(
-                distance=distance,
-                edge_batch=edge_batch,
-                num_graphs=num_graphs,
-                **pair_params,
-            )
-            term_energies[name] = energy
+        for energy in term_energies.values():
             total_energy = energy if total_energy is None else total_energy + energy
-
         assert total_energy is not None
 
         outputs: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {
@@ -98,17 +103,19 @@ class PotentialComposer(nn.Module):
             "parameters": atom_params,
         }
 
-        # 4. Forces
+        # 4. Forces via functorch: F = -∂E/∂pos, with the energy traced as a
+        #    pure function of positions (recomputing edge distances inside).
         if compute_forces:
-            pos = data["pos"]
-            if not pos.requires_grad:
-                raise RuntimeError("compute_forces=True requires data['pos'].requires_grad=True")
-            forces = -torch.autograd.grad(
-                total_energy.sum(),
-                pos,
-                create_graph=self.training,
-                retain_graph=self.training,
-            )[0]
-            outputs["forces"] = forces
+            if pos is None:
+                raise RuntimeError("compute_forces=True requires data['pos'].")
+
+            def energy_fn(p: torch.Tensor) -> torch.Tensor:
+                d = (p[dst] - p[src]).norm(dim=-1)
+                total = None
+                for e in _term_energies(d).values():
+                    total = e if total is None else total + e
+                return total.sum()
+
+            outputs["forces"] = self.force_derivation(energy_fn, pos)
 
         return outputs

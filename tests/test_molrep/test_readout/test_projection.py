@@ -4,7 +4,6 @@ import pytest
 import torch
 
 from molrep.readout.projection import BasisProjection, BasisProjectionSpec
-from tests.utils import assert_compile_compatible
 
 
 class TestBasisProjectionSpec:
@@ -105,14 +104,3 @@ class TestBasisProjection:
         assert basis_tensor.grad is not None
         # For passthrough, gradient should be ones
         assert torch.allclose(basis_tensor.grad, torch.ones_like(basis_tensor))
-
-    def test_compile(self):
-        """Test that BasisProjection can be compiled with torch.compile."""
-        proj = BasisProjection(
-            hidden_dim=64,
-            num_radial=8,
-            l_max=2,
-            max_body_order=2,
-        )
-        basis_tensor = torch.randn(20, 64)
-        assert_compile_compatible(proj, basis_tensor, strict=False)

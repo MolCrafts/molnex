@@ -16,6 +16,8 @@ import torch
 import torch.nn as nn
 from pydantic import BaseModel, ConfigDict, Field
 
+from molix import config
+
 
 class RadialWeightMLPSpec(BaseModel):
     """Configuration for RadialWeightMLP.
@@ -91,3 +93,54 @@ class RadialWeightMLP(nn.Module):
             Tensor product weights ``(n_edges, out_dim)``.
         """
         return self.mlp(edge_feats)
+
+
+class RadialMLP(nn.Module):
+    """Radial MLP with ``Linear -> LayerNorm -> SiLU`` blocks (ESEN/FairChem style).
+
+    Faithful to ``mace.modules.radial.RadialMLP``: given ``channels_list``
+    ``[c0, c1, ..., cN]`` it builds, for each ``ci`` (i>=1), a ``Linear`` and —
+    for every layer except the last — a ``LayerNorm`` and ``SiLU``. The final
+    layer is a bare ``Linear``. Layers live under ``self.net`` so the official
+    weights (``...net.0``, ``...net.1``, ``...net.3`` …) transfer by direct copy.
+
+    Used by the nonlinear residual interaction for both the tensor-product
+    weight generator and the edge-density MLP.
+
+    Reference:
+        Batatia et al. NeurIPS 2022; FairChem/ESEN radial MLP.
+        https://arxiv.org/abs/2206.07697
+    """
+
+    def __init__(self, channels_list: list[int]) -> None:
+        """Initialize the radial MLP.
+
+        Args:
+            channels_list: Channel sizes ``[in, hidden..., out]`` (>= 2 entries).
+        """
+        super().__init__()
+        if len(channels_list) < 2:
+            raise ValueError("channels_list must have at least [in, out].")
+        modules: list[nn.Module] = []
+        in_channels = channels_list[0]
+        n = len(channels_list)
+        ftype = config.ftype
+        for idx, out_channels in enumerate(channels_list[1:], start=1):
+            modules.append(nn.Linear(in_channels, out_channels, bias=True, dtype=ftype))
+            in_channels = out_channels
+            if idx < n - 1:
+                modules.append(nn.LayerNorm(out_channels, dtype=ftype))
+                modules.append(nn.SiLU())
+        self.net = nn.Sequential(*modules)
+        self.hs = list(channels_list)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Apply the radial MLP.
+
+        Args:
+            inputs: Edge features ``(n_edges, channels_list[0])``.
+
+        Returns:
+            ``(n_edges, channels_list[-1])``.
+        """
+        return self.net(inputs)

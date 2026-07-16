@@ -114,6 +114,21 @@ class Hook(Protocol):
         """
         ...
 
+    def on_eval_phase_start(self, trainer: "Trainer", state: "TrainState") -> None:
+        """Called once at the start of every eval phase, before the batch loop.
+
+        Fires for *both* step-based (``eval_every_n_steps``) and epoch-end
+        eval, so accumulating hooks (e.g. :class:`MetricsHook`) can reset
+        their eval-side buffers here and make each eval phase fully
+        self-contained — no reliance on ``on_epoch_start`` (which does not
+        fire between mid-epoch step-based evals).
+
+        Args:
+            trainer: The trainer instance
+            state: Current training state (stage already set to EVAL)
+        """
+        ...
+
     def on_eval_batch_start(self, trainer: "Trainer", state: "TrainState", batch: Any) -> None:
         """Called before processing each validation batch.
 
@@ -205,6 +220,10 @@ class BaseHook:
 
     def on_after_backward(self, trainer: "Trainer", state: "TrainState") -> None:
         """Called after backward pass, before optimizer step."""
+        pass
+
+    def on_eval_phase_start(self, trainer: "Trainer", state: "TrainState") -> None:
+        """Called once at the start of every eval phase, before the batch loop."""
         pass
 
     def on_eval_batch_start(self, trainer: "Trainer", state: "TrainState", batch: Any) -> None:

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -38,8 +39,62 @@ __all__ = [
     "BaseDataset",
     "CachedDataset",
     "MmapDataset",
+    "PackedView",
     "SubsetDataset",
 ]
+
+
+@dataclass(frozen=True)
+class PackedView:
+    """Read-only handle onto a :class:`~molix.data.cache.PackedCache` payload.
+
+    Exposes exactly what the packed-aware collate fast path
+    (:func:`molix.data.collate.collate_packed`) needs — the packed payload
+    dict, its cumsum pointers / schema, and a local→packed index remap —
+    without callers reaching into a dataset's private ``_payload``. A
+    :class:`SubsetDataset`'s view carries an ``index_map`` so its local
+    indices resolve to packed (global) rows; a full dataset's view uses
+    identity mapping. Holds only a reference to the (possibly mmap'd)
+    payload — never a tensor copy.
+
+    Args:
+        payload: The packed-cache payload mapping (``atoms`` / ``edges`` /
+            ``graphs`` / ``scalars`` buckets, ``atom_ptr`` / ``edge_ptr``,
+            ``schema``, ``n_samples``).
+        index_map: Packed row index per local index, or ``None`` for the
+            identity mapping of a full dataset.
+    """
+
+    payload: Mapping[str, Any]
+    index_map: tuple[int, ...] | None = None
+
+    def map_indices(self, local_indices: Sequence[int]) -> list[int]:
+        """Resolve *local_indices* to packed (global) row indices.
+
+        Args:
+            local_indices: Indices in this view's local coordinate.
+
+        Returns:
+            The corresponding packed-cache row indices.
+        """
+        if self.index_map is None:
+            return [int(i) for i in local_indices]
+        return [self.index_map[i] for i in local_indices]
+
+    def remap(self, local_indices: Sequence[int]) -> "PackedView":
+        """Return a sub-view restricted/reordered to *local_indices*.
+
+        Composes index maps so nested subsets resolve straight to packed
+        rows in a single hop.
+
+        Args:
+            local_indices: Indices in this view's local coordinate.
+
+        Returns:
+            A new :class:`PackedView` over the same payload whose identity
+            is *local_indices* expressed as packed rows.
+        """
+        return PackedView(self.payload, tuple(self.map_indices(local_indices)))
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +193,15 @@ class _CacheBacked(BaseDataset):
     def __getitem__(self, idx: int) -> dict:  # type: ignore[override]
         return PackedCache.unpack_sample(self._payload, idx)
 
+    def packed_view(self) -> PackedView:
+        """Return a read-only :class:`PackedView` over this cache's payload.
+
+        Identity-mapped (local index == packed row). Consumed by
+        :func:`molix.data.collate.collate_packed` to build batches by
+        slicing the packed tensors directly.
+        """
+        return PackedView(self._payload)
+
     @property
     def sink(self) -> Path:
         """Path to the cache file backing this dataset."""
@@ -190,6 +254,47 @@ class _CacheBacked(BaseDataset):
             return 0.0
         total_edges = int(edge_ptr[-1].item())
         return total_edges / total_atoms
+
+    def _ptr_counts(self, ptr_key: str) -> torch.Tensor:
+        """Per-sample counts ``(n_samples,)`` from the ``ptr_key`` cumsum pointer."""
+        ptr = self._payload.get(ptr_key)
+        if ptr is None:
+            kind = "per-atom" if ptr_key == "atom_ptr" else "per-edge"
+            raise ValueError(
+                f"cache at {self.sink} has no '{ptr_key}' pointer — it was "
+                f"built without {kind} keys. Re-run the pipeline with a task "
+                f"that emits {kind} tensors (e.g. NeighborList for edges) to "
+                "make these counts available."
+            )
+        return (ptr[1:] - ptr[:-1]).long()
+
+    @cached_property
+    def atom_counts(self) -> torch.Tensor:
+        """Per-sample atom counts, shape ``(n_samples,)``, dtype ``long``.
+
+        Derived from the packed ``atom_ptr`` cumsum pointer
+        (``ptr[idx+1] - ptr[idx]``) in one vectorized pass — no sample is
+        unpacked. Used by
+        :class:`~molix.data.sampler.TokenBudgetBatchSampler` to enforce
+        per-batch atom budgets.
+
+        Raises:
+            ValueError: The cache was built without per-atom keys.
+        """
+        return self._ptr_counts("atom_ptr")
+
+    @cached_property
+    def edge_counts(self) -> torch.Tensor:
+        """Per-sample edge counts, shape ``(n_samples,)``, dtype ``long``.
+
+        Derived from the packed ``edge_ptr`` cumsum pointer
+        (``ptr[idx+1] - ptr[idx]``) in one vectorized pass — no sample is
+        unpacked.
+
+        Raises:
+            ValueError: The cache was built without per-edge keys.
+        """
+        return self._ptr_counts("edge_ptr")
 
     @cached_property
     def max_atoms(self) -> int:
@@ -295,6 +400,20 @@ class SubsetDataset(BaseDataset):
         """
         return self._dataset[self._indices[idx]]
 
+    def packed_view(self) -> PackedView:
+        """Return a :class:`PackedView` remapped to this subset's indices.
+
+        Delegates to the wrapped dataset's view and composes the index
+        maps, so a (possibly nested) subset's local indices resolve to
+        packed rows in one hop.
+
+        Raises:
+            AttributeError: The wrapped dataset is not packed-cache-backed
+                (has no ``packed_view``); the caller treats this as
+                "no fast path" and falls back to per-sample collation.
+        """
+        return self._dataset.packed_view().remap(self._indices)
+
     @cached_property
     def avg_num_neighbors(self) -> float:
         """Split-local ⟨|N(i)|⟩ = Σ_{i∈subset} n_edges_i / Σ_{i∈subset} n_atoms_i."""
@@ -311,6 +430,36 @@ class SubsetDataset(BaseDataset):
             return 0.0
         n_edges = (edge_ptr[idx + 1] - edge_ptr[idx]).sum()
         return float(n_edges.item()) / float(n_atoms.item())
+
+    @cached_property
+    def atom_counts(self) -> torch.Tensor:
+        """Per-sample atom counts over this subset's indices, ``(len(self),)``, dtype ``long``.
+
+        Gathers the wrapped dataset's :attr:`atom_counts` at this view's
+        packed indices — defined explicitly (not ``__getattr__``-forwarded)
+        so the values are remapped instead of silently returning the
+        full-dataset vector. Nested subsets compose naturally.
+
+        Raises:
+            ValueError: The wrapped cache was built without per-atom keys
+                (propagated from the wrapped dataset's :attr:`atom_counts`).
+        """
+        idx = torch.as_tensor(self._indices, dtype=torch.long)
+        return self._dataset.atom_counts[idx]
+
+    @cached_property
+    def edge_counts(self) -> torch.Tensor:
+        """Per-sample edge counts over this subset's indices, ``(len(self),)``, dtype ``long``.
+
+        Gathers the wrapped dataset's :attr:`edge_counts` at this view's
+        packed indices; see :attr:`atom_counts` for why this is explicit.
+
+        Raises:
+            ValueError: The wrapped cache was built without per-edge keys
+                (propagated from the wrapped dataset's :attr:`edge_counts`).
+        """
+        idx = torch.as_tensor(self._indices, dtype=torch.long)
+        return self._dataset.edge_counts[idx]
 
     @cached_property
     def max_atoms(self) -> int:

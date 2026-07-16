@@ -8,6 +8,7 @@ reflecting only the latest train batch.
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from molix.core.metrics import MAE, RMSE
@@ -138,12 +139,15 @@ def test_train_eval_train_cycle_train_mae_reflects_last_batch_only():
     hook.on_epoch_start(trainer=None, state=state)
 
     # Two train batches with MAE=0.1 then MAE=0.2 (per batch, not cumulative).
+    # Train metrics are stored as 0-d device tensors (no hot-path sync), so
+    # materialise with float() before comparing.
     train_batch(0.1)
-    assert state["train"]["MAE"] == torch.tensor(0.1).abs().item()
+    assert float(state["train"]["MAE"]) == pytest.approx(0.1)
     train_batch(0.2)
-    assert state["train"]["MAE"] == torch.tensor(0.2).abs().item()
+    assert float(state["train"]["MAE"]) == pytest.approx(0.2)
 
     # Eval phase with an outlier batch (MAE=50) and a normal one (MAE=0.3).
+    hook.on_eval_phase_start(trainer=None, state=state)
     eval_batch(50.0)
     eval_batch(0.3)
     hook.on_eval_step_complete(trainer=None, state=state)
@@ -153,7 +157,7 @@ def test_train_eval_train_cycle_train_mae_reflects_last_batch_only():
     # Next train batch: MAE must be exactly this batch's value, NOT
     # contaminated by the outlier eval batch.
     train_batch(0.25)
-    assert abs(state["train"]["MAE"] - 0.25) < 1e-6, (
+    assert abs(float(state["train"]["MAE"]) - 0.25) < 1e-6, (
         f"train/MAE polluted after eval: got {state['train']['MAE']}, expected 0.25"
     )
 
@@ -173,14 +177,15 @@ def test_val_metrics_reset_between_eval_phases():
             outputs={"predictions": preds},
         )
 
-    hook.on_epoch_start(trainer=None, state=state)
-
     # First eval phase — MAE=10.
+    hook.on_eval_phase_start(trainer=None, state=state)
     eval_batch(10.0)
     hook.on_eval_step_complete(trainer=None, state=state)
     assert abs(state["eval"]["MAE"] - 10.0) < 1e-6
 
-    # Second eval phase — MAE=0.1. Must not be influenced by first phase.
+    # Second eval phase — MAE=0.1. The start-of-phase reset must clear the
+    # first phase's accumulation so it is not influenced by it.
+    hook.on_eval_phase_start(trainer=None, state=state)
     eval_batch(0.1)
     hook.on_eval_step_complete(trainer=None, state=state)
     assert abs(state["eval"]["MAE"] - 0.1) < 1e-6, (

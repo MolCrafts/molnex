@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from molix import config
 from molrep.interaction.contraction import SymmetricContraction
+from molrep.interaction.product import irreps_from_l_max
 from molrep.readout.projection import BasisProjection
 
 Key = str | tuple[str, ...]
@@ -100,11 +101,28 @@ class ProductHead(nn.Module):
             num_species=num_species,
         )
 
+        # ``hidden_dim`` is the *full* mixed-l feature dim emitted by the
+        # interaction block (e.g. 144 = 16x0e+16x1o+16x2e for l_max=2). Recover
+        # the per-l multiplicity (scalar channel count) so the contraction can
+        # be told the *real* irreps. Declaring this mixed-l tensor as pure
+        # scalars is the rotation-invariance bug this head exists to avoid.
+        per_channel_dim = (l_max + 1) ** 2
+        if hidden_dim % per_channel_dim != 0:
+            raise ValueError(
+                f"hidden_dim={hidden_dim} is not a multiple of (l_max+1)^2="
+                f"{per_channel_dim}; cannot infer the mixed-l irreps multiplicity."
+            )
+        num_features = hidden_dim // per_channel_dim
+        irreps_in = irreps_from_l_max(l_max, num_features)
+        irreps_out = f"{num_features}x0e"  # invariant scalar output
+
         # Single-responsibility sub-modules
         self.symmetric_contraction = SymmetricContraction(
             hidden_dim=hidden_dim,
             num_species=num_species,
             max_body_order=max_body_order,
+            irreps_in=irreps_in,
+            irreps_out=irreps_out,
         )
 
         self.basis_projection = BasisProjection(
@@ -114,7 +132,9 @@ class ProductHead(nn.Module):
             max_body_order=max_body_order,
         )
 
-        self.linear = nn.Linear(hidden_dim, out_dim, dtype=config.ftype)
+        # The contraction emits ``num_features`` invariant scalars; the readout
+        # linear maps those scalars (not the full mixed-l dim) to ``out_dim``.
+        self.linear = nn.Linear(num_features, out_dim, dtype=config.ftype)
 
     def forward(
         self,

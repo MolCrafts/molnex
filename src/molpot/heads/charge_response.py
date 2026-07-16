@@ -18,16 +18,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from molix import config
+from molix.F.scatter import scatter_sum
 
 ANG2BOHR = 1.8897259886
 
 
 def _scatter_sum(src: torch.Tensor, index: torch.Tensor, dim_size: int) -> torch.Tensor:
-    out = torch.zeros(dim_size, *src.shape[1:], dtype=src.dtype, device=src.device)
-    if src.numel() == 0:
-        return out
-    expand_index = index.view(-1, *([1] * (src.dim() - 1))).expand_as(src)
-    return out.scatter_add_(0, expand_index, src)
+    return scatter_sum(src, index, dim_size=dim_size)
 
 
 def _relative_atom_indices(
@@ -141,7 +138,7 @@ class ChargeResponseHead(nn.Module):
         atom_batch: torch.Tensor,
         num_graphs: int,
         edge_index: torch.Tensor,
-        bond_diff: torch.Tensor,
+        edge_diff: torch.Tensor,
         node_scalars: torch.Tensor,
         edge_scalars: torch.Tensor,
         edge_vectors: torch.Tensor | None = None,
@@ -154,7 +151,7 @@ class ChargeResponseHead(nn.Module):
             atom_batch: Graph membership per atom ``(N,)``.
             num_graphs: Number of graphs in the batch.
             edge_index: Source/target atom pairs ``(E, 2)``.
-            bond_diff: Edge displacement vectors ``(E, 3)``.
+            edge_diff: Edge displacement vectors ``(E, 3)``.
             node_scalars: Per-atom scalar features ``(N, F_n)``.
             edge_scalars: Per-edge scalar features ``(E, F_e)``.
             edge_vectors: Optional per-edge vector features ``(E, 3)``.
@@ -179,7 +176,7 @@ class ChargeResponseHead(nn.Module):
 
         if self.variant == "local":
             chi = self._make_local_chi(edge_index, edge_response, atom_batch, rel, counts, nmax)
-            alpha = self._local_alpha(edge_index, bond_diff, edge_response, atom_batch, num_graphs)
+            alpha = self._local_alpha(edge_index, edge_diff, edge_response, atom_batch, num_graphs)
         elif self.variant == "localchi":
             chi = self._make_local_chi(edge_index, edge_response, atom_batch, rel, counts, nmax)
             alpha = self._chi_to_alpha(pos, atom_batch, num_graphs, chi)
@@ -323,12 +320,12 @@ class ChargeResponseHead(nn.Module):
         dense_pos = dense_pos * ANG2BOHR
         return -torch.einsum("bix,bij,bjy->bxy", dense_pos, chi, dense_pos)
 
-    def _local_alpha(self, edge_index, bond_diff, edge_response, atom_batch, num_graphs):
-        pos_dtype = bond_diff.dtype
+    def _local_alpha(self, edge_index, edge_diff, edge_response, atom_batch, num_graphs):
+        pos_dtype = edge_diff.dtype
         if edge_index.numel() == 0:
-            return torch.zeros(num_graphs, 3, 3, dtype=pos_dtype, device=bond_diff.device)
+            return torch.zeros(num_graphs, 3, 3, dtype=pos_dtype, device=edge_diff.device)
         src = edge_index[:, 0]
-        edge_vec = bond_diff * ANG2BOHR
+        edge_vec = edge_diff * ANG2BOHR
         weighted = edge_response.unsqueeze(-1).unsqueeze(-1).abs() * (
             edge_vec.unsqueeze(-1) * edge_vec.unsqueeze(-2)
         )

@@ -120,6 +120,15 @@ cython_debug/
 .benchmarks/
 
 # Examples (not shipped)
-examples/
+/examples/
 
 .claude/worktrees/
+
+# HPC sbatch logs
+slurm-*.out
+jobs/
+.venv-gpu/
+molnex-bench-*.out
+
+# Benchmark scratch outputs (paper artifacts live in pinet-quant)
+benchmarks/results/

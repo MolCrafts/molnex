@@ -47,8 +47,8 @@ class FakeNeighborList(SampleTask):
         return {
             **data,
             "edge_index": edge_index,
-            "bond_diff": diff.float(),
-            "bond_dist": dist.float(),
+            "edge_diff": diff.float(),
+            "edge_dist": dist.float(),
         }
 
 

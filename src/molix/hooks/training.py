@@ -35,7 +35,19 @@ class GradClipHook(ScalarHook):
         self.norm_type = norm_type
 
     def on_after_backward(self, trainer, state):
-        """Clip gradients in-place and record the pre-clip L2 norm."""
+        """Clip gradients in-place and record the pre-clip L2 norm.
+
+        The norm is stored as the **0-d device tensor** returned by
+        ``clip_grad_norm_`` — *not* ``float()``-ed. Materialising it here would
+        force a CPU↔GPU sync on **every** optimizer step, draining the GPU queue
+        and serialising the otherwise-overlapped launch pipeline (this alone
+        dropped compiled PiNet training from ~19 to a few steps/s). Downstream
+        consumers materialise on their own throttled cadence: the async
+        :class:`~molix.hooks.JournalHook` copies it through a pinned buffer +
+        CUDA event, and progress / TensorBoard hooks coerce via ``.item()`` when
+        they sample. Same hot-path contract as
+        :class:`~molix.hooks.scalar.MetricsHook` / ``StepSpeedHook``.
+        """
         import torch
 
         total_norm = torch.nn.utils.clip_grad_norm_(
@@ -43,7 +55,7 @@ class GradClipHook(ScalarHook):
             self.max_norm,
             norm_type=self.norm_type,
         )
-        state["train"]["grad_norm"] = float(total_norm)
+        state["train"]["grad_norm"] = total_norm.detach()
 
 
 class ActivationCheckpointingHook(BaseHook):

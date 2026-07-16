@@ -31,7 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |---------|------|-------------|
 | **molix** | Training infrastructure | Trainer, TrainState (dict), Step protocol, Hook lifecycle |
 | **molrep** | Representation learning | Embedding → Interaction → Readout pipeline, equivariance via cuEquivariance |
-| **molpot** | Potential functions | BasePotential (nn.Module + ABC), autograd forces, PotentialComposer |
+| **molpot** | Potential functions | BasePotential (nn.Module + ABC), functorch forces, PotentialComposer |
 | **molzoo** | Pre-built encoders | Encoder-only (MACE, Allegro, PiNet, Sonata), no readout — downstream uses molpot |
 
 ## Build & Development
@@ -40,8 +40,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install (editable, with C++ extensions via scikit-build-core + CMake >=4.0)
 pip install -e ".[dev]"
 
-# Run all tests
+# Run unit tests (default; tests/regression/ is auto-excluded via addopts)
 python -m pytest tests/ -v
+
+# Run the numerical regression suite (reference-value parity; slow, ~minutes)
+python -m pytest -m regression
 
 # Run single test file
 python -m pytest tests/test_molzoo/test_mace.py -v
@@ -54,6 +57,20 @@ python -m pytest tests/ --cov=src --cov-report=term-missing
 ```
 
 Python >=3.10 required. Requires `torch>=2.10` (always use latest stable PyTorch).
+
+### Test layout rules
+
+- `tests/` contains **only** `test_*.py`, `conftest.py`, `__init__.py`, and data
+  files — no `helpers.py` / free-floating utility modules. Shared test code
+  lives in the nearest `conftest.py` and is imported by package path
+  (e.g. `from tests.conftest import make_graph_batch`).
+- **Unit tests** (everything outside `tests/regression/`) test one function or
+  module and must finish in seconds.
+- **`tests/regression/`** holds numerical reference-value parity suites
+  (Ewald/PME/P3M vs Madelung constants, GROMACS, espressomd — vendored from
+  torch-pme). Auto-marked `regression` by its `conftest.py` and excluded from
+  the default run; CI / pre-push should run `pytest -m regression` separately.
+- `slow` marker: AOT-export / compile tests (deselect with `-m "not slow"`).
 
 ## Architecture
 
@@ -82,14 +99,14 @@ TensorDict (batch_size=[])
 │   └── batch: graph membership (N,)
 ├── "edges": TensorDict (batch_size=[E])
 │   ├── edge_index: source-target pairs (E, 2)   # [:,0]=source, [:,1]=target
-│   ├── bond_diff: edge vectors (E, 3)            # pos[target] - pos[source]
-│   └── bond_dist: edge distances (E,)
+│   ├── edge_diff: edge vectors (E, 3)            # pos[target] - pos[source]
+│   └── edge_dist: edge distances (E,)
 └── "graphs": TensorDict (batch_size=[B])  [optional]
     ├── num_atoms: (B,)
     └── <targets>
 ```
 
-Access: `batch["atoms", "Z"]`, `batch["edges", "bond_dist"]`. Encoders
+Access: `batch["atoms", "Z"]`, `batch["edges", "edge_dist"]`. Encoders
 mutate the batch in place, writing `node_features` under `atoms` and
 `edge_features` under `edges` — no subclass swap.
 
@@ -113,8 +130,8 @@ docstring for full rationale.
 ```
 edge_index[:, 0]  — source atom  (the "centre" in Allegro; the "sender" in MACE ConvTP)
 edge_index[:, 1]  — target atom  (the "neighbour" in Allegro; the "receiver" in MACE ConvTP)
-bond_diff         — pos[target] - pos[source]   (displacement vector, source → target)
-bond_dist         — ‖bond_diff‖
+edge_diff         — pos[target] - pos[source]   (displacement vector, source → target)
+edge_dist         — ‖edge_diff‖
 ```
 
 `NeighborList` defaults to **full bidirectional** edges (`symmetry=True`, `E = 2 × n_pairs`).
@@ -122,10 +139,44 @@ Pass `symmetry=False` to get only the upper-triangle half-pairs (`E = n_pairs`) 
 want to exploit Newton's-3rd-law symmetry.  The two modes produce different `task_id`s so pipeline
 caches are kept separate.
 
-**Why bond_diff = pos[target] − pos[source]?**  This makes the displacement vector point in the
+**Why edge_diff = pos[target] − pos[source]?**  This makes the displacement vector point in the
 same direction as the edge (source → target), which is the convention expected by `SphericalHarmonics`
 and all `cuEquivariance`-based tensor products in this repo.  The C++ `getNeighborPairs` kernel
 returns `pos[rows] − pos[cols]` (opposite sign); `NeighborList.execute` negates it.
+
+### `edge_index` (cutoff graph) vs `bond_index` (covalent topology)
+
+Two **different** connectivity objects, with **deliberately different shapes**
+so one can never be silently used as the other:
+
+| field | shape | meaning | offset axis |
+|---|---|---|---|
+| `edge_index` | `(E, 2)` | geometric neighbour graph `G(r_c)` — recomputed from positions each step, bidirectional, includes through-space contacts | rows |
+| `bond_index` | `(2, N)` COO | fixed covalent topology (from molpy `atomi`/`atomj`), paired with `bond_types`; consumed by `BondHarmonic` and other bonded terms | columns |
+
+A within-cutoff neighbour is **not** a chemical bond. `BondHarmonic` rejects a
+`(E, 2)` tensor passed as `bond_index` (raises, rather than computing a wrong
+energy) — the transpose is a type-level anti-alias guard. The collated batch
+exposes bonds under a `"bonds"` namespace (`batch["bonds", "bond_index"]`,
+`batch["bonds", "bond_types"]`, `batch_size=[]`).
+
+### torch_geometric collate/Batch parity
+
+molnex's batch is a plain nested `TensorDict`, not a PyG `Data`/`Batch`. The
+collate intentionally implements only the lazy subset of PyG's batching:
+
+| PyG feature | molnex | why |
+|---|---|---|
+| `__inc__` / `__cat_dim__` (per-key offset on batching) | **implemented** as the declarative `INDEX_KEYS` registry + `rebase()` in `collate.py` | the one piece worth having — also fixes the latent un-offset `bond_index` bug |
+| `follow_batch` (per-attribute batch vectors) | **skip** | no consumer |
+| `ptr` (cumsum boundaries) | **skip** — derive on demand from `graphs.num_atoms` / `atom_ptr` | redundant to materialise |
+| `to_data_list()` / unbatch | **skip** | `PackedCache` covers persistence/unpack |
+| `exclude_keys` | **skip** | no consumer |
+| arbitrary `HeteroData` node/edge types | **skip** | fixed `atoms`/`edges`/`graphs`/`bonds` namespaces are the contract |
+
+The packed-mmap collate fast path (`collate_packed`) is a deliberate
+divergence from PyG's per-sample Python `Collater` — faster and HPC-fs
+friendly for fixed-schema molecular data.
 
 ### Module Dependency Graph
 
@@ -133,16 +184,47 @@ returns `pos[rows] − pos[cols]` (opposite sign); `NeighborList.execute` negate
 molix.config (global dtype singleton)
     ↓
 molrep.embedding → molrep.interaction → molrep.readout
-    ↓                                       ↓
-molzoo (MACE, Allegro encoders)         molpot.heads
-    ↓                                       ↓
-molpot.composition (PotentialComposer)  molpot.potentials
-    ↓
-molix.core (Trainer, TrainState, Step, Hook)
+    │  └── molrep.heads (ScalarHead, …)        │
+    │            ↑ (molpot.heads → molrep.embedding)
+    ↓            │                              ↓
+molzoo (MACE, Allegro, PiNet encoders) ──→ molpot.heads
+    ↓                                          ↓
+molpot.composition (PotentialComposer,    molpot.potentials
+    Sonata, build_sonata)                      ↓
+    ↓                              molpot.derivation (EnergyAggregation,
+molix.core (Trainer, TrainState, Step, Hook)    ForceDerivation)
     ↓
 molix.data (Dataset, collate, preprocess)
-molix.datasets (QM9, RevMD17, ThreeBPA, WaterLES)
+molix.datasets (QM9, RevMD17, ThreeBPA, WaterLES, MolRec)
+molix.md (Langevin velocity-Verlet) ─→ molix.quant (T_eff / quantization scalars)
+molix.export (Exporter, AOTInductor .pt2) · molix.compile (Compiler, torch.compile / CUDA graphs)   [leaf execution utils]
+molix.engine (EngineAdapter/EngineForward/StaticForward, export_for_lammps) ─→ interface/ (C++ pair_style molnex)
 ```
+
+Notes on cross-package edges (verified against imports):
+- `molzoo` consumes `molrep.readout`/`molrep.interaction` and `molpot.derivation`
+  (PiNet's energy/force head is co-located with the encoder by design).
+- `molpot.heads` imports `molrep.embedding` (e.g. `heads/edge.py`) — the arrow
+  runs heads→embedding, **not** readout→heads.
+- `molrep.heads` (`ScalarHead`, …) is a distinct sub-tree from `molpot.heads`.
+- `molix.quant` holds the T_eff / quantization-as-thermal-noise scalars
+  (quantization infra in the `molix` base layer, operating on generic
+  `nn.Module` / `state_dict`). The thermal-noise *study* layer (trajectory
+  diagnostics, active learning, colored-noise thermostats) was migrated out to
+  the `pinet-quant` project (`csmd` package); molnex keeps only the reusable MD
+  engine (`molix.md`) and `molix.quant`.
+- `molix.md` (in-process Langevin velocity-Verlet driver) produces paired
+  trajectories; `molix.export` (`Exporter` — AOTInductor `.pt2`, with
+  `export_pretraced` for in-forward autograd force heads) and `molix.compile`
+  (`Compiler` — `torch.compile`, `cuda_graphs=True` preset) are leaf execution
+  utilities that wrap a trained model — nothing in the core training loop
+  imports them.
+- `molix.engine` is the engine-neutral export bridge: `EngineAdapter` /
+  `EngineForward` map a model onto the flat `(Z, pos, edge_index) -> (energy,
+  forces)` convention, `StaticForward` is the fixed-shape CUDA-graph-capturable
+  variant, and `export_for_lammps` is the LAMMPS preset. The engine-specific C++
+  (`pair_style molnex`, AOTI `ModelRunner`) lives in the repo-root `interface/`
+  — no per-model C++ there.
 
 ### State namespace contract
 
@@ -243,7 +325,7 @@ hooks (`MetricsHook`, `TensorBoardHook`) should write their
 - **Encoder-only molzoo**: Encoders take a batch `TensorDict` and write per-layer features `(N, layers, features)` under `atoms.node_features`; readout/potentials handled by molpot
 - **Pydantic configs**: All block configs use `BaseModel` with `ConfigDict(arbitrary_types_allowed=True)`
 - **cuEquivariance**: Tensor products use `cuequivariance` / `cuequivariance_torch` for GPU-accelerated equivariant operations
-- **Autograd forces**: `BasePotential.calc_forces()` computes `F = -dE/dx` via `torch.autograd.grad`
+- **Functorch forces**: `BasePotential.calc_forces()` computes `F = -dE/dx` via `torch.func.grad` (energy as a pure function of positions; compile-friendly, no double-backward)
 - **Functional composition**: `PotentialComposer` chains pooling → parameter heads → potential terms → aggregation
 - **Hook protocol**: Lifecycle callbacks (`on_train_start`, `on_epoch_end`, etc.) via `Hook` protocol
 - **Step protocol**: `DefaultTrainStep` / `DefaultEvalStep` wrap forward → loss → backward → optimizer
@@ -267,7 +349,7 @@ are documented in the table above, not enforced by Python types.
 
 **New encoder** (molzoo): Implement `forward(td: TensorDict) -> TensorDict`, reading `td["atoms", "Z"]` / `td["edges", ...]` and writing per-layer features `(N, layers, features)` back under `atoms.node_features`. Use `molrep` building blocks. Add paper reference.
 
-**New potential** (molpot): Inherit `BasePotential`, implement `forward() -> scalar energy Tensor`. Forces come from autograd automatically.
+**New potential** (molpot): Inherit `BasePotential`, implement `forward() -> scalar energy Tensor`. Forces come from functorch (`torch.func.grad`) automatically — `forward` must read positions via `pos=`/`_get_positions` so the energy can be differentiated as a function of positions.
 
 **New embedding/interaction** (molrep): Pure `nn.Module`, use `cuequivariance` for equivariant layers.
 

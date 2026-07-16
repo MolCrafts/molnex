@@ -3,7 +3,7 @@
 PiNet is a multi-rank representation architecture (P1 scalar, P3 vector, P5
 rank-5). The encoder produces ``(N, layers, features)`` node features; the
 PiNet-specific head pools across layers, predicts per-atom energies, and
-derives forces via autograd. The head lives alongside the encoder (not under
+derives forces via functorch (``torch.func.grad``). The head lives alongside the encoder (not under
 ``molpot``) because the pool-then-readout pattern only makes sense for PiNet's
 multi-layer output shape — there is no MACE/Allegro reuse to extract.
 
@@ -22,7 +22,6 @@ Reference:
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from typing import Literal
 
 import torch
@@ -31,12 +30,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from tensordict import TensorDict
 from tensordict.nn import TensorDictModuleBase
 
-from molix import config
 from molpot.derivation import EnergyAggregation, ForceDerivation
 from molpot.heads import ChargeResponseHead, DipoleHead
 from molrep.embedding.cutoff import CosineCutoff, HalfCosineCutoff, TanhCutoff
 from molrep.embedding.radial import GaussianBasis, PolynomialBasis
-from molrep.interaction.pinet import GCBlock, ResUpdate
+from molrep.interaction.pinet import GCBlock, OutLayer, ResUpdate
 
 __all__ = [
     "PiNet",
@@ -84,6 +82,36 @@ def _compute_d5(d3: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _edge_bond_diff(edges, pos: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    """Source→target edge displacement, periodic-boundary-correct and differentiable.
+
+    Open systems: recompute ``pos[target] - pos[source]`` so forces flow to ``pos``.
+    Periodic systems: the neighbour list supplies the *minimum-image* ``edge_diff``
+    (the molix analogue of PiNN replicating periodic images). We take that imaged
+    value but route the gradient through the raw displacement via a straight-through
+    term — exact, because ∂(imaged diff)/∂pos = ∂raw/∂pos = identity (the per-edge
+    cell-shift is constant). A no-op for open systems, where the supplied
+    ``edge_diff`` already equals ``raw``.
+
+    Args:
+        edges: The batch's ``edges`` sub-TensorDict (may carry ``edge_diff``).
+        pos: Atom positions ``(N, 3)``.
+        edge_index: Source/target pairs ``(E, 2)``; ``[:,0]``=source, ``[:,1]``=target.
+
+    Returns:
+        Edge displacement ``(E, 3)`` with periodic-correct value and exact gradient.
+    """
+    raw = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    if "edge_diff" in edges.keys():
+        # ``.detach()`` on the supplied value makes this robust whether the
+        # neighbour list's edge_diff is a detached cache leaf (training) or a
+        # live in-graph tensor (an MD force_fn that recomputes it): the gradient
+        # always flows solely through ``raw`` (the correct, cell-shift-invariant
+        # ∂/∂pos), never double-counting a live supplied tensor.
+        return edges["edge_diff"].detach() + (raw - raw.detach())
+    return raw
+
+
 class PiNet(TensorDictModuleBase):
     """PiNet feature encoder.
 
@@ -93,15 +121,19 @@ class PiNet(TensorDictModuleBase):
     * ``("atoms", "pos")``: positions ``(N, 3)``.
     * ``("edges", "edge_index")``: source-target pairs ``(E, 2)``.
 
-    Edge geometry (``bond_diff`` = ``pos[target] - pos[source]`` and
-    ``bond_dist`` = ``‖bond_diff‖``) is derived from ``pos`` + ``edge_index``
+    Edge geometry (``edge_diff`` = ``pos[target] - pos[source]`` and
+    ``edge_dist`` = ``‖edge_diff‖``) is derived from ``pos`` + ``edge_index``
     inside ``forward``. Caching them in the pipeline buys nothing (one
-    gather + diff + norm per step) and breaks autograd-through-pos for
-    force training.
+    gather + diff + norm per step) and breaks the gradient flow pos → geometry
+    that force derivation needs.
 
     Writes in place:
 
-    * ``("atoms", "node_features")``: scalar P1 states ``(N, depth, D)``.
+    * ``("atoms", "node_features")``: scalar P1 *states* ``(N, depth, D)`` —
+      residually-updated running states (used by feature-pooling heads).
+    * ``("atoms", "p1_block_outputs")``: scalar P1 *raw block outputs*
+      ``(N, depth, D)`` — each block's output before the ResUpdate, fed to the
+      PiNet2 per-block OutLayer for residual energy accumulation.
     * ``("atoms", "p3_features")``: vector P3 states ``(N, depth, 3, D)``.
     * ``("atoms", "p5_features")``: rank-5 P5 states ``(N, depth, 5, D)``.
     * ``("edges", "i1_features")``: scalar pair interactions ``(E, depth, D * n_props)``.
@@ -161,8 +193,11 @@ class PiNet(TensorDictModuleBase):
         self.output_dim = self.feature_dim
         self.edge_output_dim = self.feature_dim * self.n_props
 
-        self.element_embedding = nn.Embedding(len(cfg.atom_types), self.feature_dim)
-        self.element_embedding = self.element_embedding.to(dtype=config.ftype)
+        # One-hot atom embedding (PiNN PiNet2: ``atom_types`` is the one-hot
+        # basis; the scalar P1 track starts as a one-hot of dimension n_elem,
+        # NOT a learnable embedding). The first GCBlock's PILayer/ResUpdate then
+        # lift it to ``feature_dim``.
+        self.n_elem = len(cfg.atom_types)
         self.register_buffer(
             "_atom_types",
             torch.tensor(cfg.atom_types, dtype=torch.long),
@@ -207,7 +242,10 @@ class PiNet(TensorDictModuleBase):
             ]
         )
 
-        p1_dims = [self.feature_dim] + [self.feature_dim] * self.depth
+        # p1 starts as a one-hot of width ``n_elem``; every block thereafter
+        # outputs ``feature_dim``. The first ResUpdate therefore projects
+        # n_elem -> feature_dim (biaslessly), matching PiNN.
+        p1_dims = [self.n_elem] + [self.feature_dim] * self.depth
         self.res_update1 = torch.nn.ModuleList(
             [ResUpdate(in_dim=p1_dims[i], out_dim=p1_dims[i + 1]) for i in range(self.depth)]
         )
@@ -243,42 +281,48 @@ class PiNet(TensorDictModuleBase):
         """
         Z = td["atoms", "Z"]
         pos = td["atoms", "pos"]
-        edge_index = td["edges", "edge_index"]
+        # Force a standard row-major layout. Eager is stride-invariant, but
+        # AOTInductor specializes the compiled kernel on the traced edge_index
+        # stride: without this, a contiguous edge_index from a C++ caller (e.g.
+        # pair_style molnex) is indexed with the trace-time stride and silently
+        # scrambles source/target. ``.contiguous()`` traces into the graph and
+        # normalizes any input layout at runtime.
+        edge_index = td["edges", "edge_index"].contiguous()
 
-        # Edge geometry derived from pos + edge_index per forward.
-        # One gather + diff + norm — cheaper than caching, and gradients flow
-        # back to pos naturally so force training needs no special path.
-        bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-        bond_dist = bond_diff.norm(dim=-1).clamp(min=1e-8)
+        # Edge geometry: PBC-correct (uses the neighbour list's minimum-image
+        # edge_diff under periodic boundaries) and differentiable. See _edge_bond_diff.
+        edge_diff = _edge_bond_diff(td["edges"], pos, edge_index)
+        edge_dist = edge_diff.norm(dim=-1).clamp(min=1e-8)
 
         idx = self._z_to_idx[Z]
-        p1 = self.element_embedding(idx)
+        p1 = torch.nn.functional.one_hot(idx, num_classes=self.n_elem).to(pos.dtype)
         tensors: dict[str, torch.Tensor] = {"edge_index": edge_index, "p1": p1}
 
-        d3 = bond_diff / bond_dist.unsqueeze(-1)
+        d3 = edge_diff / edge_dist.unsqueeze(-1)
         tensors["d3"] = d3
         if self.rank >= 3:
             tensors["p3"] = torch.zeros(
                 Z.shape[0],
                 3,
                 1,
-                dtype=bond_diff.dtype,
-                device=bond_diff.device,
+                dtype=edge_diff.dtype,
+                device=edge_diff.device,
             )
         if self.rank >= 5:
             tensors["p5"] = torch.zeros(
                 Z.shape[0],
                 5,
                 1,
-                dtype=bond_diff.dtype,
-                device=bond_diff.device,
+                dtype=edge_diff.dtype,
+                device=edge_diff.device,
             )
             tensors["d5"] = _compute_d5(d3)
 
-        fc = self.cutoff(bond_dist)
-        basis = self.basis_fn(bond_dist, fc=fc)
+        fc = self.cutoff(edge_dist)
+        basis = self.basis_fn(edge_dist, fc=fc)
 
         p1_states: list[torch.Tensor] = []
+        p1_block_outputs: list[torch.Tensor] = []
         p3_states: list[torch.Tensor] = []
         p5_states: list[torch.Tensor] = []
         i1_states: list[torch.Tensor] = []
@@ -287,6 +331,9 @@ class PiNet(TensorDictModuleBase):
 
         for i, block in enumerate(self.gc_blocks):
             new = block(tensors, basis)
+            # Raw per-block scalar output (PiNN feeds THIS, not the res-updated
+            # state, to its per-block OutLayer for residual energy accumulation).
+            p1_block_outputs.append(new["p1"])
             tensors["p1"] = self.res_update1[i](tensors["p1"], new["p1"])
             p1_states.append(tensors["p1"])
             i1_states.append(new["i1"])
@@ -302,6 +349,7 @@ class PiNet(TensorDictModuleBase):
                 i5_states.append(new["i5"])
 
         td["atoms", "node_features"] = torch.stack(p1_states, dim=1)
+        td["atoms", "p1_block_outputs"] = torch.stack(p1_block_outputs, dim=1)
         td["edges", "i1_features"] = torch.stack(i1_states, dim=1)
         if self.rank >= 3:
             td["atoms", "p3_features"] = torch.stack(p3_states, dim=1)
@@ -328,77 +376,156 @@ def _pool_layer(features: torch.Tensor, reduction: str) -> torch.Tensor:
 
 
 class PiNetPotential(nn.Module):
-    """PiNet energy + force prediction model.
+    """PiNet energy + force prediction model — ready to use from hyperparameters.
 
-    Pools the encoder's ``(N, layers, features)`` output across the layer
-    axis, predicts per-atom energies via a 2-layer MLP, aggregates them to
-    graph energies, and derives forces via ``torch.autograd.grad`` when
-    ``compute_forces`` (or ``compute_forces_default``) is set.
+    Pass PiNet hyperparameters directly; the encoder is built internally, e.g.::
 
-    Per-element baseline subtraction (atomic dress) is handled at cache
-    time by :class:`molix.data.AtomicDress` — labels are already dressed
-    when they reach this model, so no runtime dress add is needed.
+        model = PiNetPotential(atom_types=[1, 6, 7, 8], r_max=4.5, depth=5,
+                               hidden_dim=64, compute_forces=True)
+
+    Predicts per-atom energies via per-block OutLayers, aggregates them to graph
+    energies, and derives forces as ``F = -∂E/∂pos`` with ``torch.func.grad``
+    (functorch) when ``compute_forces`` is set. The functorch path traces the
+    force into the forward graph, so ``energy → force → loss`` is a single
+    backward that ``torch.compile(fullgraph=True)`` can capture — no
+    double-backward barrier.
+
+    Per-element baseline subtraction (atomic dress) is handled at cache time by
+    :class:`molix.data.AtomicDress` — labels are already dressed when they reach
+    this model, so no runtime dress add is needed.
 
     Args:
-        encoder: :class:`PiNet` (or any module that writes ``("atoms",
-            "node_features")`` into a ``TensorDict``).
         hidden_dim: Hidden dimension of the per-atom energy MLP.
         layer_reduction: How to pool across GC-block layers
             (``"mean"`` / ``"sum"`` / ``"last"``).
         compute_forces: Default value for forward's ``compute_forces``
             kwarg. Set to ``True`` for force training so the Trainer's plain
             ``model(batch)`` call returns ``{"energy", "forces"}``.
+        **pinet_kwargs: PiNet hyperparameters (``atom_types``, ``r_max``,
+            ``depth``, ``n_basis``, …) used to build the encoder.
     """
 
     def __init__(
         self,
         *,
-        encoder: nn.Module,
         hidden_dim: int = 64,
         layer_reduction: Literal["mean", "sum", "last"] = "mean",
         compute_forces: bool = False,
+        **pinet_kwargs: object,
     ) -> None:
         super().__init__()
-        self.encoder = encoder
+        self.encoder = PiNet(**pinet_kwargs)
+        # ``layer_reduction`` is accepted for API compatibility but unused by the
+        # energy head: PiNet2 does NOT pool layers — it accumulates a per-block
+        # OutLayer residually (see below), so there is no layer axis to reduce.
         self.layer_reduction = layer_reduction
         self.compute_forces_default = compute_forces
+        # Set by :meth:`compile_energy`; when present, the energy forward runs
+        # through the compiled callable instead of the eager method.
+        self._compiled_energy_forward = None
+        # Lazy params must be materialized outside any functorch transform; the
+        # first forward flips this (see _forward_functorch).
+        self._materialized = False
 
-        input_dim: int = getattr(encoder, "output_dim", 16)
-        self.node_mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim, dtype=config.ftype),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, 1, dtype=config.ftype),
+        # Per-block output heads, residually accumulated (PiNN PiNet2 OutLayer):
+        # per-atom energy = Σ_b OutLayer_b(p1_block_output_b), each OutLayer a
+        # tanh FFLayer([hidden_dim]) -> biasless Linear(1). The absolute energy
+        # zero-point is owned by the atomic dress, so the projection has no bias.
+        depth: int = int(getattr(self.encoder, "depth", 1))
+        self.out_layers = nn.ModuleList(
+            [OutLayer([hidden_dim], out_units=1, activation="tanh") for _ in range(depth)]
         )
         self.energy_aggregation = EnergyAggregation(pooling="sum")
-        self.force_derivation = ForceDerivation()
+        # PiNet is pure-PyTorch → functorch (single backward, torch.compile-friendly).
+        self.force_derivation = ForceDerivation(method="functorch")
 
     def forward(
         self, batch: TensorDict, *, compute_forces: bool | None = None
     ) -> dict[str, torch.Tensor]:
         if compute_forces is None:
             compute_forces = self.compute_forces_default
-        grad_ctx = torch.enable_grad() if compute_forces else nullcontext()
-        with grad_ctx:
-            if compute_forces and not batch["atoms", "pos"].requires_grad:
-                batch["atoms", "pos"] = batch["atoms", "pos"].clone().requires_grad_(True)
-            out = self._energy_forward(batch)
-            if compute_forces:
-                out["forces"] = self.force_derivation(out["energy"], batch["atoms", "pos"])
+        if compute_forces:
+            return self._forward_functorch(batch)
+        energy_forward = self._compiled_energy_forward or self._energy_forward
+        return energy_forward(batch)
+
+    def _forward_functorch(self, batch: TensorDict) -> dict[str, torch.Tensor]:
+        """Force forward via ``torch.func.grad`` (no double-backward barrier).
+
+        ``energy_fn`` recomputes the energy from a clone of the batch with the
+        candidate positions swapped in; PiNet derives all edge geometry from
+        positions internally, so the gradient flows pos → geometry → energy.
+
+        **Training** (``self.training``): an eager energy pass runs FIRST — it
+        produces energy outputs connected to the parameters (with ``pos``
+        detached) so an energy+force loss trains via ordinary autograd — then
+        ``torch.func.grad`` reruns the energy graph for forces. Cost: 2 forwards
+        + 1 backward per step.
+
+        **Inference** (``eval()``): the energy outputs need no autograd graph,
+        so a single ``torch.func.grad(..., has_aux=True)`` pass returns forces
+        AND energies from one forward + one backward — the eager energy pass is
+        skipped entirely (~25-40% faster per MD step; the win that motivated
+        this split is the pinet-quant water NVE workhorse, which cannot
+        ``torch.compile`` its fake-quantized forward).
+
+        Lazy parameters must be materialized OUTSIDE the functorch transform
+        (materializing inside corrupts its tensor wrappers and segfaults) —
+        training does so via its eager pass; inference runs a one-time throwaway
+        eager pass on the first call.
+        """
+        pos = batch["atoms", "pos"].detach()
+        base = batch.clone()
+        base["atoms", "pos"] = pos
+
+        def energy_fn(p: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+            b = base.clone()
+            b["atoms", "pos"] = p
+            out = self._energy_forward(b)
+            return out["energy"].sum(), out
+
+        if not self.training:
+            if not self._materialized:
+                self._energy_forward(base.clone())  # materialize lazy params eagerly
+                self._materialized = True
+            grad, out = torch.func.grad(energy_fn, has_aux=True)(pos)
+            out["forces"] = -grad
+            return out
+
+        out = self._energy_forward(base.clone())
+        self._materialized = True
+        out["forces"] = self.force_derivation(lambda p: energy_fn(p)[0], pos)
         return out
 
     def _energy_forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
-        """Compilable energy computation: encoder -> pool -> head -> aggregate.
+        """Compilable energy computation: encoder -> per-block OutLayer sum -> aggregate.
 
-        Extracted so ``torch.compile`` can wrap it without hitting the
-        double-backward limitation that ``ForceDerivation``'s internal
-        ``torch.autograd.grad`` triggers.
+        Extracted as a single region so ``torch.compile`` can wrap the
+        energy-only path (see :meth:`compile_energy`), and so the functorch force
+        closure in :meth:`_forward_functorch` can call it as a pure function of
+        positions.
+
+        Per-atom energy is the residual sum of per-block OutLayers applied to
+        each GC block's raw scalar output ``p1_block_outputs`` ``(N, depth, D)``
+        — the PiNet2 output mechanism (no layer pooling).
         """
         batch = self.encoder(batch)
 
-        node_feats = _pool_layer(batch["atoms", "node_features"], self.layer_reduction)
-        atom_energy = self.node_mlp(node_feats).squeeze(-1)
+        block_outputs = batch["atoms", "p1_block_outputs"]  # (N, depth, D)
+        output = block_outputs.new_zeros(block_outputs.shape[0], 1)
+        for i, out_layer in enumerate(self.out_layers):
+            output = out_layer(block_outputs[:, i, :], output)
+        atom_energy = output.squeeze(-1)
 
         atom_batch = batch["atoms", "batch"]
+        # Fixed-length padding (CUDA-graph path): a boolean ("atoms","mask") marks
+        # real atoms. Zeroing ghost-atom energy here makes padded atoms contribute
+        # 0 to per-graph energy — and therefore 0 to forces (the total energy no
+        # longer depends on their positions). Real atoms are untouched because no
+        # padding edge connects to them, so energy/forces match the unpadded batch.
+        # No-op for unpadded batches (no "mask" key). See data.tasks.PadMolecularBatch.
+        if "mask" in batch["atoms"].keys():
+            atom_energy = atom_energy * batch["atoms", "mask"].to(atom_energy.dtype)
         num_graphs = batch["graphs"].batch_size[0]
         energy = self.energy_aggregation(atom_energy, atom_batch, num_graphs=num_graphs)
 
@@ -407,20 +534,52 @@ class PiNetPotential(nn.Module):
             "energy": energy,
         }
 
-    def compile_encoder(self, *, backend: str = "inductor", **kwargs) -> None:
-        """Compile only the encoder, leaving the head and force derivation eager.
+    def compile_energy(self, *, backend: str = "inductor", **kwargs) -> None:
+        """Compile the whole energy forward (encoder → per-block OutLayer sum →
+        aggregation) as one region. **Energy-only training / inference.**
 
-        ``torch.compile`` on the full :class:`PiNetPotential` is not supported
-        for force training because :class:`ForceDerivation` calls
-        ``torch.autograd.grad`` internally, which triggers a double-backward
-        through the compiled graph that ``aot_autograd`` cannot handle.
+        This is the launch-bound remedy for energy models: the energy forward
+        fires hundreds of tiny kernels per step (the GC-block message-passing
+        loop plus the per-block ``OutLayer`` residual loop), and
+        ``torch.compile`` (inductor) fuses them, collapsing the CPU dispatch
+        that leaves the GPU idle. Measured on a GH200 it cuts QM9 (energy-only)
+        op-calls/step ~7.1k → ~2.8k and lifts throughput ~1.5× at bs32/bs128.
 
-        For energy-only training, ``torch.compile(potential)`` works fine.
-        For energy+force training, call ``potential.compile_encoder()``
-        before the Trainer — this compiles the encoder (95%+ of compute)
-        while leaving the ``autograd.grad`` path eager.
+        **Energy-only — does not accelerate force training.** The compiled
+        callable is invoked only on the ``compute_forces=False`` path; with
+        ``compute_forces=True`` the model routes through
+        :meth:`_forward_functorch`, which calls the *eager* ``_energy_forward``
+        inside its ``torch.func.grad`` closure. So compiling here leaves force
+        training unchanged. (The force forward is separately fullgraph-compilable
+        via functorch — wrap ``model(b, compute_forces=True)`` directly — because
+        ``torch.func.grad`` traces the force into the forward graph and needs no
+        double backward; that path is unrelated to this method.)
+
+        Materialise lazy parameters with one warm-up forward before calling
+        this, so the compiled graph captures concrete shapes.
+
+        Use the **default** inductor mode *for this ragged energy-only path*.
+        ``mode="reduce-overhead"`` (CUDA graphs) is *counterproductive* here:
+        without padding, molecular batches have variable atom/edge counts, and
+        CUDA graphs require static shapes — measured on a GH200 it ran slower
+        than eager (the per-step capture/guard overhead dominates, op-calls/step
+        stay ~7.2k instead of dropping to ~2.8k).
+
+        For **force training**, do NOT use this method: compile the whole model
+        instead (``trainer.compile(cuda_graphs=True)`` /
+        ``molix.Compiler.CUDA_GRAPH_PRESET``) on *padded* fixed shapes
+        (``PadMolecularBatch`` + ``drop_last=True``). There ``reduce-overhead``
+        is the **fastest** config (~10x eager), the opposite of the ragged case
+        — see ``docs/molix/explanation/throughput-and-compilation.md``.
+
+        Args:
+            backend: ``torch.compile`` backend (default ``"inductor"``).
+            **kwargs: Forwarded to :func:`torch.compile`. Avoid
+                ``mode="reduce-overhead"`` for ragged (unpadded) batches.
         """
-        self.encoder = torch.compile(self.encoder, backend=backend, **kwargs)
+        self._compiled_energy_forward = torch.compile(
+            self._energy_forward, backend=backend, **kwargs
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +641,7 @@ class PiNetDipole(nn.Module):
             )
         edge_scalars = None
         edge_index = None
-        bond_diff = None
+        edge_diff = None
         if self.head.uses_bc and "i1_features" in batch["edges"].keys():
             edge_scalars = _pool_layer(
                 batch["edges", "i1_features"],
@@ -490,7 +649,7 @@ class PiNetDipole(nn.Module):
             )
             edge_index = batch["edges", "edge_index"]
             pos = batch["atoms", "pos"]
-            bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+            edge_diff = _edge_bond_diff(batch["edges"], pos, edge_index)
         edge_vectors = None
         if self.head.uses_bc and "i3_features" in batch["edges"].keys():
             edge_vectors = _pool_layer(
@@ -515,7 +674,7 @@ class PiNetDipole(nn.Module):
             edge_scalars=edge_scalars,
             edge_vectors=edge_vectors,
             edge_index=edge_index,
-            bond_diff=bond_diff,
+            edge_diff=edge_diff,
             oxidation=oxidation,
             total_charge=total_charge,
         )
@@ -583,14 +742,14 @@ class PiNetPolarizability(nn.Module):
             )
         pos = batch["atoms", "pos"]
         edge_index = batch["edges", "edge_index"]
-        bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+        edge_diff = _edge_bond_diff(batch["edges"], pos, edge_index)
         return self.head(
             pos=pos,
             Z=batch["atoms", "Z"],
             atom_batch=atom_batch,
             num_graphs=num_graphs,
             edge_index=edge_index,
-            bond_diff=bond_diff,
+            edge_diff=edge_diff,
             node_scalars=node_scalars,
             edge_scalars=edge_scalars,
             edge_vectors=edge_vectors,

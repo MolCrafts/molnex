@@ -38,8 +38,8 @@ def _stub_batch(
     )
     edges = TensorDict(
         edge_index=edge_index,
-        bond_diff=torch.randn(n_edges, 3),
-        bond_dist=torch.rand(n_edges) + 0.5,
+        edge_diff=torch.randn(n_edges, 3),
+        edge_dist=torch.rand(n_edges) + 0.5,
         batch_size=[n_edges],
     )
     edges["edge_features"] = torch.randn(n_edges, feat_dim)

@@ -31,7 +31,7 @@ Reference implementation:
 MolNex adaptation:
 
 - PiNN's `ind_2[:, 0]` maps to MolNex `edge_index[:, 0]` source atom.
-- PiNN's `diff = coord[j] - coord[i]` maps to MolNex `bond_diff`.
+- PiNN's `diff = coord[j] - coord[i]` maps to MolNex `edge_diff`.
 - PiNN's neighbor-list ownership stays outside the encoder; MolNex receives
   already-collated edges.
 
@@ -47,7 +47,7 @@ MolNex adaptation:
 
 ## 5. Mathematical Contract
 
-For every edge `(i, j)`, `bond_diff = r_j - r_i` and `bond_dist = ||r_j-r_i||`.
+For every edge `(i, j)`, `edge_diff = r_j - r_i` and `edge_dist = ||r_j-r_i||`.
 `d3` is the normalized edge direction. `d5` follows PiNN's five-component
 rank-5 basis:
 

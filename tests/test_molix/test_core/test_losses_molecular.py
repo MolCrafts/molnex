@@ -13,8 +13,8 @@ def _sample(Z, pos, *, U0=None, forces=None):
         "Z": torch.as_tensor(Z, dtype=torch.long),
         "pos": torch.as_tensor(pos, dtype=torch.float32),
         "edge_index": torch.zeros(0, 2, dtype=torch.long),
-        "bond_diff": torch.zeros(0, 3),
-        "bond_dist": torch.zeros(0),
+        "edge_diff": torch.zeros(0, 3),
+        "edge_dist": torch.zeros(0),
         "targets": {},
     }
     if U0 is not None:

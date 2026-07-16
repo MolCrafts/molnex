@@ -3,6 +3,7 @@
 Molix is the canonical base package for shared NN utilities, ops, and training.
 """
 
+import platform
 import sys
 from pathlib import Path
 
@@ -11,23 +12,37 @@ import torch
 _lib_loaded = False
 
 
+def _op_lib_path() -> Path:
+    """Op-library path for the running machine.
+
+    The build (``op/CMakeLists.txt``) tags the artifact with the target
+    architecture — ``libmolnex_opLib.<machine>.so`` (e.g. ``...x86_64.so``,
+    ``...aarch64.so``) — so per-arch builds coexist in one in-source ``op/``
+    directory.
+    """
+    if sys.platform == "win32":
+        prefix, ext = "", "pyd"
+    elif sys.platform == "darwin":
+        prefix, ext = "lib", "dylib"
+    else:
+        prefix, ext = "lib", "so"
+    op_dir = Path(__file__).resolve().parents[0] / "op"
+    arch = platform.machine()  # 'x86_64', 'aarch64', ... — matches CMAKE_SYSTEM_PROCESSOR
+    return op_dir / f"{prefix}molnex_opLib.{arch}.{ext}"
+
+
 def _load_ops_library() -> None:
     """Load the C++ ops library. Raises ImportError with build instructions if missing."""
     global _lib_loaded
     if _lib_loaded:
         return
-    if sys.platform == "win32":
-        lib_name = "molnex_opLib.pyd"
-    elif sys.platform == "darwin":
-        lib_name = "libmolnex_opLib.dylib"
-    else:
-        lib_name = "libmolnex_opLib.so"
 
-    candidate = Path(__file__).resolve().parents[0] / "op" / lib_name
+    candidate = _op_lib_path()
     if not candidate.exists():
         op_src = candidate.parents[0]
         raise ImportError(
-            f"molix native op library not found at {candidate}.\n"
+            f"molix native op library not found for machine '{platform.machine()}' "
+            f"at {candidate}.\n"
             f"Build it with:\n"
             f"  cmake -S {op_src} -B {op_src}/build -DMOLNEX_OP_ENABLE_CUDA=ON\n"
             f"  cmake --build {op_src}/build -j\n"
@@ -63,13 +78,13 @@ def ensure_op_registered(op_name: str) -> None:
 _load_ops_library()
 
 from molix import logger, logging
-from molix.compile import maybe_compile
+from molix.compile import Compiler
 from molix.config import config
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
 from molix.core.losses import MAELoss, MSELoss, WeightedLoss
 from molix.core.state import Stage, StepResult, TrainState
 from molix.core.trainer import Trainer
-from molix.export import export_model
+from molix.export import Exporter
 from molix.hooks import JournalHook, ProfilerHook
 
 __all__ = [
@@ -86,8 +101,8 @@ __all__ = [
     "config",
     "logger",
     "logging",
-    "export_model",
-    "maybe_compile",
+    "Exporter",
+    "Compiler",
     "ProfilerHook",
     "JournalHook",
 ]

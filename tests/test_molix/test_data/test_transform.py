@@ -56,7 +56,7 @@ class TestNeighborList:
             assert (a, b) in edges and (b, a) in edges
 
         doubled = torch.cat([ref_dist, ref_dist]).sort().values
-        assert torch.allclose(result["bond_dist"].sort().values, doubled, atol=1e-5)
+        assert torch.allclose(result["edge_dist"].sort().values, doubled, atol=1e-5)
 
     def test_small_system_pairs_half(self):
         """With ``symmetry=False`` the output matches the upper-triangle reference."""
@@ -75,13 +75,13 @@ class TestNeighborList:
 
         ref_i, ref_j, _, ref_dist = _compute_neighbor_list_naive(positions, 2.0)
         assert edge_index.shape == (ref_i.numel(), 2)
-        assert torch.allclose(result["bond_dist"].sort().values, ref_dist.sort().values, atol=1e-5)
+        assert torch.allclose(result["edge_dist"].sort().values, ref_dist.sort().values, atol=1e-5)
 
     def test_bond_diff_source_to_target_convention(self):
-        """``bond_diff[k] == pos[target_k] - pos[source_k]`` for every edge.
+        """``edge_diff[k] == pos[target_k] - pos[source_k]`` for every edge.
 
         Locks in the edge convention documented in CLAUDE.md: edge_index[:,0]
-        is the source, edge_index[:,1] is the target, and bond_diff points
+        is the source, edge_index[:,1] is the target, and edge_diff points
         source → target. Required by SphericalHarmonics and cuEquivariance.
         """
         positions = torch.tensor(
@@ -103,8 +103,8 @@ class TestNeighborList:
             )(sample)
             edge_index = result["edge_index"]
             expected = positions[edge_index[:, 1]] - positions[edge_index[:, 0]]
-            assert torch.allclose(result["bond_diff"], expected, atol=1e-5), (
-                f"bond_diff violates source→target convention (symmetry={symmetry})"
+            assert torch.allclose(result["edge_diff"], expected, atol=1e-5), (
+                f"edge_diff violates source→target convention (symmetry={symmetry})"
             )
 
     def test_cutoff_behavior(self):
@@ -119,7 +119,7 @@ class TestNeighborList:
         }
 
         result = NeighborList(cutoff=2.0, max_num_pairs=10)(sample)
-        assert torch.all(result["bond_dist"] <= 2.0)
+        assert torch.all(result["edge_dist"] <= 2.0)
 
     def test_task_id_deterministic(self):
         t1 = NeighborList(cutoff=5.0, max_num_pairs=512)

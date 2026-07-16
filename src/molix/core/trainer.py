@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import copy
+import math
 import platform
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -50,6 +54,7 @@ class Trainer:
         eval_step: Step | None = None,
         hooks: list[Hook | tuple[Hook, int]] | None = None,
         eval_every_n_steps: int | None = None,
+        accumulate_grad_batches: int = 1,
         resume_from_checkpoint: str | Path | None = None,
         checkpoint_backend: CheckpointBackend | None = None,
         device: str | torch.device | None = None,
@@ -69,14 +74,32 @@ class Trainer:
             hooks: List of hooks or (hook, priority) tuples. Hooks execute in
                    registration order by default. Use tuples to override priority
                    (lower priority = earlier execution, default = 100).
-            eval_every_n_steps: Run evaluation every N training steps. When set,
-                   this is the exclusive eval cadence — epoch-end eval is
+            eval_every_n_steps: Run evaluation every N *optimizer* steps. When
+                   set, this is the exclusive eval cadence — epoch-end eval is
                    suppressed so short epochs (e.g. revmd17's ~30-step epoch)
-                   do not silently override the configured schedule. If None
-                   (default), only epoch-end eval runs.
+                   do not silently override the configured schedule. If the
+                   cadence exceeds an entire epoch (zero evals in an epoch),
+                   a warning is logged once. If None (default), only
+                   epoch-end eval runs.
                    Must be > 0 if provided.
+            accumulate_grad_batches: Number of micro-batches whose gradients
+                   are accumulated before one optimizer step. ``1`` (default)
+                   = step every batch. With ``N``, the loss is scaled by
+                   ``1/N`` and the optimizer / LR scheduler / ``global_step``
+                   advance once per ``N`` micro-batches — so ``global_step``,
+                   ``max_steps`` and ``eval_every_n_steps`` all count optimizer
+                   steps, letting you trade a launch-bound small physical batch
+                   for a larger effective batch without the memory cost.
+                   Must be > 0.
             resume_from_checkpoint: Path to a checkpoint file to resume from,
                    or ``"auto"`` to detect torchrun elastic snapshots.
+                   Restoring covers model/optimizer/scheduler state, counters
+                   and RNG states. Bit-reproducible continuation is only
+                   guaranteed from epoch-boundary checkpoints: resuming from a
+                   mid-epoch ``step_<N>.pt`` restarts the interrupted epoch's
+                   data stream from batch 0 (there is no sampler
+                   fast-forward), so the consumed batch sequence differs from
+                   the uninterrupted run.
             checkpoint_backend: Backend for checkpoint I/O. Defaults to
                    :class:`TorchSaveBackend`.
             device: Target device for the model (e.g. ``"cuda"``, ``"cuda:0"``,
@@ -93,7 +116,12 @@ class Trainer:
         """
         if eval_every_n_steps is not None and eval_every_n_steps <= 0:
             raise ValueError(f"eval_every_n_steps must be > 0, got {eval_every_n_steps}")
+        if accumulate_grad_batches <= 0:
+            raise ValueError(f"accumulate_grad_batches must be > 0, got {accumulate_grad_batches}")
         self.eval_every_n_steps = eval_every_n_steps
+        self.accumulate_grad_batches = accumulate_grad_batches
+        # Monotonic micro-batch counter driving accumulation-window boundaries.
+        self._micro_step = 0
         self.device = torch.device(device) if device is not None else None
 
         self.model = model
@@ -214,6 +242,36 @@ class Trainer:
                     )
                     raise
 
+    @staticmethod
+    def _needs_device_move(batch: Any, device: torch.device) -> bool:
+        """Whether *batch* has any leaf not already on *device*.
+
+        Decided once per epoch / eval phase on the first batch (batches from
+        one dataloader are device-homogeneous), so the per-step loop skips
+        both the ``batch_to`` call and its leaf-device walk when the data is
+        already in place — the dominant Trainer-loop overhead in same-device
+        (CPU, or pre-moved) training. A genuine move (CPU→cuda) returns True
+        and ``batch_to`` runs every step as before.
+
+        Args:
+            batch: A collated batch (``TensorDict`` / dict / tensor).
+            device: The model's device.
+
+        Returns:
+            ``True`` if a move is required (or cannot be ruled out cheaply).
+        """
+        values = getattr(batch, "values", None)
+        if not callable(getattr(batch, "apply", None)):
+            return True  # plain dict / tensor / unknown — let batch_to decide
+        dev = getattr(batch, "device", None)
+        if dev is not None:
+            return dev != device
+        try:
+            leaves = values(include_nested=True, leaves_only=True)
+            return any(v.device != device for v in leaves)
+        except (AttributeError, TypeError):
+            return True
+
     def _load_checkpoint(self, path: str | Path) -> None:
         """Load checkpoint and restore all training state.
 
@@ -263,6 +321,125 @@ class Trainer:
         p = Path(path)
         return p if p.exists() else None
 
+    def smoke(self, datamodule: DataModuleProtocol, steps: int = 3) -> None:
+        """Run an unlogged smoke pass — call this **before** :meth:`train`.
+
+        Deliberately a standalone, caller-invoked method, NOT folded into
+        :meth:`train`: the smoke pass is a separate concern (pay one-off costs +
+        sanity-check data) and keeping it out of the training loop avoids
+        entangling its state snapshot/restore and compile side effects with the
+        recorded run. Typical use::
+
+            trainer.smoke(datamodule, steps=3)
+            trainer.train(datamodule, max_steps=...)
+
+        What it does:
+
+        - **Compilation / autotune.** A few full train steps (forward → loss →
+          backward → optimizer step) on real batches trigger ``torch.compile``
+          graph capture and cuDNN / inductor autotuning, so the first *logged*
+          step — and the ``step_per_second`` it feeds — reflects steady-state
+          throughput instead of being dominated by one-off compile latency.
+        - **Real-data check.** Running actual dataloader batches surfaces
+          shape / dtype / NaN problems immediately, before training starts. A
+          non-finite warmup loss aborts loudly.
+
+        The pass fires **no hooks** and does **not** advance ``global_step``, so
+        nothing reaches the journal, metrics, checkpoints or the step counters.
+        Model parameters, optimizer state, AMP-scaler state and the (CPU + CUDA)
+        RNG state are snapshotted before and restored after, so a subsequent
+        :meth:`train` is bit-identical to one launched without warmup — step-0
+        weights and data ordering are unchanged. A best-effort eval-graph warmup
+        compiles the ``model.eval()`` path too; any failure there is logged and
+        skipped (it never blocks training).
+
+        Args:
+            datamodule: Provides ``train_dataloader`` (and optionally
+                ``val_dataloader``) supplying real batches to warm up on.
+            steps: Number of full train steps to run. ``<= 0`` is a no-op.
+        """
+        if steps <= 0:
+            return
+
+        if self.device is not None:
+            self.model = self.model.to(self.device)
+            self._checkpoint.model = self.model
+
+        logger.info(
+            f"Smoke: {steps} step(s) on real data — "
+            "compiling + checking (unlogged; state restored after)."
+        )
+        t0 = time.perf_counter()
+
+        # Snapshot every mutable piece so the warmup is invisible to the real run.
+        model_snap = {k: v.detach().clone() for k, v in self.model.state_dict().items()}
+        opt_snap = copy.deepcopy(self.optimizer.state_dict())
+        scaler_snap = copy.deepcopy(self.scaler.state_dict()) if self.scaler is not None else None
+        cpu_rng = torch.get_rng_state()
+        cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+
+        model_device = next(self.model.parameters()).device
+        amp_enabled = bool(config["use_amp"])
+        amp_dtype = config["amp_dtype"]
+        device_type = model_device.type
+
+        try:
+            self.model.train()
+            loader = datamodule.train_dataloader()
+            it = iter(loader)
+            for i in range(steps):
+                try:
+                    batch = next(it)
+                except StopIteration:
+                    it = iter(loader)
+                    batch = next(it)
+                batch = batch_to(batch, device=model_device)
+
+                ctx = (
+                    torch.amp.autocast(device_type, dtype=amp_dtype)
+                    if amp_enabled
+                    else nullcontext()
+                )
+                self.optimizer.zero_grad(set_to_none=True)
+                with ctx:
+                    predictions = self.model(batch)
+                    loss = self.loss_fn(predictions, batch)
+                if not torch.isfinite(loss).all():
+                    raise RuntimeError(
+                        f"Smoke warmup produced a non-finite loss ({loss.detach()}) on "
+                        f"warmup step {i}; aborting before the real run starts."
+                    )
+                if self.scaler is not None:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    loss.backward()
+                    self.optimizer.step()
+
+            # Best-effort eval-graph warmup (a separate compile under eval()).
+            val_dl = getattr(datamodule, "val_dataloader", None)
+            if callable(val_dl):
+                try:
+                    self.model.eval()
+                    vbatch = batch_to(next(iter(val_dl())), device=model_device)
+                    self.eval_step.on_eval_batch(self, self.state, vbatch)
+                except Exception as exc:  # noqa: BLE001
+                    logger.info(f"Smoke warmup: eval-graph warmup skipped ({exc!r}).")
+        finally:
+            # Restore: the real run must start from the exact pre-warmup state.
+            self.model.load_state_dict(model_snap)
+            self.optimizer.load_state_dict(opt_snap)
+            if self.scaler is not None and scaler_snap is not None:
+                self.scaler.load_state_dict(scaler_snap)
+            torch.set_rng_state(cpu_rng)
+            if cuda_rng is not None:
+                torch.cuda.set_rng_state_all(cuda_rng)
+            self.optimizer.zero_grad(set_to_none=True)
+            self.model.train()
+
+        logger.info(f"Smoke done in {time.perf_counter() - t0:.1f}s (state restored).")
+
     def _train(
         self,
         datamodule: DataModuleProtocol,
@@ -309,8 +486,10 @@ class Trainer:
         start_global_step = self.state.global_step
         start_time = time.perf_counter()
         step_limit_reached = False
+        warned_eval_starved = False
 
         while epoch < epoch_limit and not step_limit_reached:
+            epoch_start_step = self.state.global_step
             on_epoch_start = getattr(datamodule, "on_epoch_start", None)
             if callable(on_epoch_start):
                 on_epoch_start(epoch)
@@ -321,21 +500,38 @@ class Trainer:
             self.model.train()
 
             model_device = next(self.model.parameters()).device
+            accum = self.accumulate_grad_batches
+            needs_move: bool | None = None
             for batch in datamodule.train_dataloader():
-                batch = batch_to(batch, device=model_device)
+                if needs_move is None:
+                    needs_move = self._needs_device_move(batch, model_device)
+                if needs_move:
+                    batch = batch_to(batch, device=model_device)
                 self._call_hooks("on_train_batch_start", self, self.state, batch)
                 outputs = self.train_step.on_train_batch(self, self.state, batch)
                 self._call_hooks("on_train_batch_end", self, self.state, batch, outputs)
 
+                self._micro_step += 1
+                # Optimizer-step boundary: only here do global_step, the LR
+                # scheduler, the eval cadence and the step limit advance, so
+                # they all count optimizer steps rather than micro-batches.
+                if self._micro_step % accum != 0:
+                    continue
+
                 self.state.increment_step()
                 self.state.steps_since_last_eval += 1
 
-                # Step step-based schedulers per training batch. ``ReduceLROnPlateau``
-                # is the odd one out — its ``step`` takes a metric argument and is
-                # stepped at epoch end after evaluation (see below).
-                if self.lr_scheduler is not None and not isinstance(
-                    self.lr_scheduler,
-                    torch.optim.lr_scheduler.ReduceLROnPlateau,
+                # Step step-based schedulers per optimizer step. Skip the
+                # advance when an AMP inf/nan-skipped step didn't apply, and
+                # skip ``ReduceLROnPlateau`` (metric-driven, stepped at epoch
+                # end after evaluation — see below).
+                if (
+                    self.lr_scheduler is not None
+                    and not isinstance(
+                        self.lr_scheduler,
+                        torch.optim.lr_scheduler.ReduceLROnPlateau,
+                    )
+                    and outputs.get("optimizer_applied", True)
                 ):
                     self.lr_scheduler.step()
 
@@ -359,6 +555,27 @@ class Trainer:
             if self.eval_every_n_steps is None and self.state.steps_since_last_eval != 0:
                 self._run_eval_phase(datamodule)
                 self.state.steps_since_last_eval = 0
+
+            # A step cadence larger than the epoch silently produces zero
+            # evals (and no best-checkpoint updates) for multiple epochs —
+            # surface that once instead of leaving the user to notice the
+            # missing eval columns.
+            steps_this_epoch = self.state.global_step - epoch_start_step
+            if (
+                not warned_eval_starved
+                and self.eval_every_n_steps is not None
+                and steps_this_epoch > 0
+                and self.state.steps_since_last_eval >= steps_this_epoch
+            ):
+                epochs_per_eval = math.ceil(self.eval_every_n_steps / steps_this_epoch)
+                logger.warning(
+                    f"eval_every_n_steps={self.eval_every_n_steps} exceeds "
+                    f"this epoch's {steps_this_epoch} optimizer step(s) and "
+                    "epoch-end eval is suppressed when a step cadence is set "
+                    "— no evaluation ran this epoch. At this epoch length "
+                    f"the first eval lands after ~{epochs_per_eval} epoch(s)."
+                )
+                warned_eval_starved = True
 
             # ReduceLROnPlateau is metric-driven and only advances at epoch
             # boundaries. Pull the metric the Checkpoint aggregate is tracking
@@ -387,6 +604,7 @@ class Trainer:
     def compile(
         self,
         *,
+        cuda_graphs: bool = False,
         backend: str = "inductor",
         fullgraph: bool = False,
         dynamic: bool | None = None,
@@ -396,9 +614,22 @@ class Trainer:
 
         Can be chained after construction::
 
+            # Force training (energy → functorch force → loss is one fullgraph):
+            # the benchmarked winning config — ~10x eager on PiNet/GH200.
+            trainer = Trainer(model, ...).compile(cuda_graphs=True)
+
+            # Custom config:
             trainer = Trainer(model, ...).compile(mode="max-autotune")
 
         Args:
+            cuda_graphs: Apply :data:`molix.compile.Compiler.CUDA_GRAPH_PRESET`
+                (``backend="inductor", fullgraph=True, dynamic=False,
+                mode="reduce-overhead"``) — inductor fusion + CUDA graphs, the
+                fastest force-training config. Overrides the four params below.
+                REQUIRES static shapes: register
+                :class:`molix.data.tasks.PadMolecularBatch` and set the train
+                loader's ``drop_last=True`` (see
+                ``docs/molix/explanation/throughput-and-compilation.md``).
             backend: Compile backend (default: ``"inductor"``).
             fullgraph: If True, require single graph (error on graph breaks).
             dynamic: Enable dynamic shape tracing.
@@ -408,16 +639,15 @@ class Trainer:
         Returns:
             ``self`` for method chaining.
         """
-        from molix.compile import maybe_compile
+        from molix.compile import Compiler
 
-        self.model = maybe_compile(
-            self.model,
-            compile=True,
+        self.model = Compiler(
+            cuda_graphs=cuda_graphs,
             backend=backend,
             fullgraph=fullgraph,
             dynamic=dynamic,
             mode=mode,
-        )
+        )(self.model)
         # Keep checkpoint in sync so state_dict() sees the compiled wrapper
         self._checkpoint.model = self.model
         return self
@@ -543,6 +773,27 @@ class Trainer:
         for line in lines:
             logger.info(line)
 
+    def evaluate(self, datamodule: DataModuleProtocol) -> dict[str, Any]:
+        """Run one full evaluation phase and return the published eval metrics.
+
+        Runs the *same* eval path the train loop uses (:meth:`_run_eval_phase` ->
+        ``on_eval_step_complete``), so the registered eval hooks (``MetricsHook``,
+        ...) populate ``state["eval"]`` exactly as they do mid-training — no
+        separate eval loop, model reload, or metric re-implementation at the call
+        site. Evaluates the current in-memory model on ``datamodule.val_dataloader()``.
+
+        Args:
+            datamodule: Provides ``val_dataloader()`` with the eval batches.
+
+        Returns:
+            A shallow copy of ``state["eval"]`` — the metric scalars published by
+            the eval hooks (e.g. ``{"E_MAE": ..., "F_MAE": ..., "loss": ...}``),
+            in the model's native units. Empty if no eval hook published anything.
+        """
+        self._run_eval_phase(datamodule)
+        evals = self.state.get("eval")
+        return dict(evals) if evals else {}
+
     def _run_eval_phase(self, datamodule: DataModuleProtocol) -> None:
         """Run evaluation phase and fire ``on_eval_step_complete``.
 
@@ -555,9 +806,18 @@ class Trainer:
         self.state.set_stage(Stage.EVAL)
         self.model.eval()
 
+        # Fire BEFORE the batch loop so accumulating hooks reset their
+        # eval-side buffers; makes every eval phase self-contained
+        # regardless of trigger (step-based or epoch-end).
+        self._call_hooks("on_eval_phase_start", self, self.state)
+
         model_device = next(self.model.parameters()).device
+        needs_move: bool | None = None
         for batch in datamodule.val_dataloader():
-            batch = batch_to(batch, device=model_device)
+            if needs_move is None:
+                needs_move = self._needs_device_move(batch, model_device)
+            if needs_move:
+                batch = batch_to(batch, device=model_device)
             self._call_hooks("on_eval_batch_start", self, self.state, batch)
             outputs = self.eval_step.on_eval_batch(self, self.state, batch)
             self._call_hooks("on_eval_batch_end", self, self.state, batch, outputs)

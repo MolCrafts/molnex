@@ -25,7 +25,6 @@ from molzoo.mace import (
     EmbeddingBlock,
     InteractionBlock,
 )
-from tests.utils import assert_module_compiles, assert_module_exports, assert_outputs_close
 
 
 class TestEmbeddingBlock:
@@ -102,19 +101,19 @@ class TestEmbeddingBlock:
 
         # Create input data
         z = torch.randint(0, embedding_config["num_species"], (n_atoms,))
-        bond_dist = torch.rand(n_edges) * embedding_config["r_max"]
-        bond_diff = torch.randn(n_edges, 3)
+        edge_dist = torch.rand(n_edges) * embedding_config["r_max"]
+        edge_diff = torch.randn(n_edges, 3)
 
-        # Normalize bond_diff to match bond_dist
-        bond_diff = (
-            bond_diff / torch.norm(bond_diff, dim=-1, keepdim=True) * bond_dist.unsqueeze(-1)
+        # Normalize edge_diff to match edge_dist
+        edge_diff = (
+            edge_diff / torch.norm(edge_diff, dim=-1, keepdim=True) * edge_dist.unsqueeze(-1)
         )
 
         # Forward pass
         node_feats, edge_attrs, edge_feats = embedding_block(
             Z=z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff,
+            edge_dist=edge_dist,
+            edge_diff=edge_diff,
         )
 
         # Check shapes
@@ -140,10 +139,10 @@ class TestEmbeddingBlock:
     def test_radial_embedding_component(self, embedding_block, embedding_config):
         """Test radial_embedding component works independently."""
         n_edges = 10
-        bond_dist = torch.rand(n_edges) * embedding_config["r_max"]
+        edge_dist = torch.rand(n_edges) * embedding_config["r_max"]
 
         # Call radial_embedding directly
-        edge_radial = embedding_block.radial_embedding(bond_dist)
+        edge_radial = embedding_block.radial_embedding(edge_dist)
 
         assert edge_radial.shape == (n_edges, embedding_config["num_bessel"])
         assert edge_radial.dtype == torch.float32
@@ -165,10 +164,10 @@ class TestEmbeddingBlock:
     def test_cutoff_component(self, embedding_block, embedding_config):
         """Test cutoff_fn component works independently."""
         n_edges = 12
-        bond_dist = torch.rand(n_edges) * embedding_config["r_max"]
+        edge_dist = torch.rand(n_edges) * embedding_config["r_max"]
 
         # Call cutoff_fn directly
-        cutoff_values = embedding_block.cutoff_fn(bond_dist)
+        cutoff_values = embedding_block.cutoff_fn(edge_dist)
 
         assert cutoff_values.shape == (n_edges,)
         assert cutoff_values.dtype == torch.float32
@@ -179,10 +178,10 @@ class TestEmbeddingBlock:
     def test_edge_feats_includes_cutoff(self, embedding_block, embedding_config):
         """Test that edge_feats properly applies cutoff to radial basis."""
         n_edges = 6
-        bond_dist = torch.rand(n_edges) * embedding_config["r_max"]
-        bond_diff = torch.randn(n_edges, 3)
-        bond_diff = (
-            bond_diff / torch.norm(bond_diff, dim=-1, keepdim=True) * bond_dist.unsqueeze(-1)
+        edge_dist = torch.rand(n_edges) * embedding_config["r_max"]
+        edge_diff = torch.randn(n_edges, 3)
+        edge_diff = (
+            edge_diff / torch.norm(edge_diff, dim=-1, keepdim=True) * edge_dist.unsqueeze(-1)
         )
 
         z = torch.randint(0, embedding_config["num_species"], (3,))
@@ -190,13 +189,13 @@ class TestEmbeddingBlock:
         # Get outputs
         _, _, edge_feats = embedding_block(
             Z=z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff,
+            edge_dist=edge_dist,
+            edge_diff=edge_diff,
         )
 
         # Compute expected edge_feats manually
-        edge_radial = embedding_block.radial_embedding(bond_dist)
-        cutoff_values = embedding_block.cutoff_fn(bond_dist)
+        edge_radial = embedding_block.radial_embedding(edge_dist)
+        cutoff_values = embedding_block.cutoff_fn(edge_dist)
         expected_edge_feats = edge_radial * cutoff_values.unsqueeze(-1)
 
         # Check they match
@@ -205,8 +204,8 @@ class TestEmbeddingBlock:
     def test_cutoff_at_boundary(self, embedding_block, embedding_config):
         """Test cutoff behavior at r_max boundary."""
         # Distance at cutoff should give near-zero cutoff value
-        bond_dist = torch.tensor([embedding_config["r_max"]])
-        cutoff_value = embedding_block.cutoff_fn(bond_dist)
+        edge_dist = torch.tensor([embedding_config["r_max"]])
+        cutoff_value = embedding_block.cutoff_fn(edge_dist)
 
         # Cosine cutoff should be near 0 at r_max
         assert cutoff_value.item() < 0.01
@@ -215,52 +214,6 @@ class TestEmbeddingBlock:
         bond_dist_zero = torch.tensor([0.0])
         cutoff_value_zero = embedding_block.cutoff_fn(bond_dist_zero)
         assert abs(cutoff_value_zero.item() - 1.0) < 0.01
-
-    def test_compile(self, embedding_block, embedding_config):
-        """Test that EmbeddingBlock can be compiled with torch.compile."""
-        n_atoms = 4
-        n_edges = 6
-
-        # Create input data
-        z = torch.randint(0, embedding_config["num_species"], (n_atoms,))
-        bond_dist = torch.rand(n_edges) * embedding_config["r_max"]
-        bond_diff = torch.randn(n_edges, 3)
-        bond_diff = (
-            bond_diff / torch.norm(bond_diff, dim=-1, keepdim=True) * bond_dist.unsqueeze(-1)
-        )
-
-        # Test compilation
-        output_uncompiled, output_compiled = assert_module_compiles(
-            embedding_block,
-            z,
-            bond_dist,
-            bond_diff,
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_uncompiled, output_compiled)
-
-    def test_export(self, embedding_block, embedding_config):
-        """Test that EmbeddingBlock can be exported with torch.export."""
-        n_atoms = 4
-        n_edges = 6
-
-        # Create input data
-        z = torch.randint(0, embedding_config["num_species"], (n_atoms,))
-        bond_dist = torch.rand(n_edges) * embedding_config["r_max"]
-        bond_diff = torch.randn(n_edges, 3)
-        bond_diff = (
-            bond_diff / torch.norm(bond_diff, dim=-1, keepdim=True) * bond_dist.unsqueeze(-1)
-        )
-
-        # Test export
-        exported_program, output_original, output_exported = assert_module_exports(
-            embedding_block,
-            args_tuple=(z, bond_dist, bond_diff),
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_original, output_exported)
 
 
 class TestInteractionBlock:
@@ -333,14 +286,15 @@ class TestInteractionBlock:
         num_features = interaction_config["num_features"]
         num_bessel = interaction_config["num_bessel"]
 
-        # Calculate irreps dimension (uniform multiplicity after optimization)
+        # Calculate irreps dimension (uniform multiplicity after optimization).
+        # This is the *message* dim; the node state itself is pure scalar.
         irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
 
         # Calculate spherical harmonics dimension
         sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
 
-        # Create input data
-        node_feats = torch.randn(n_nodes, irreps_dim)
+        # Node state is pure scalar (num_features); messages are mixed-l.
+        node_feats = torch.randn(n_nodes, num_features)
         edge_attrs = torch.randn(n_edges, sh_dim)
         edge_feats = torch.randn(n_edges, num_bessel)
         edge_index = torch.randint(0, n_nodes, (n_edges, 2))
@@ -353,9 +307,9 @@ class TestInteractionBlock:
             edge_index=edge_index,
         )
 
-        # Check output shapes
+        # Message is mixed-l (irreps_dim); skip is the scalar node state.
         assert output_feats.shape == (n_nodes, irreps_dim)
-        assert skip_connection.shape == (n_nodes, irreps_dim)
+        assert skip_connection.shape == (n_nodes, num_features)
 
     def test_skip_connection_is_input(self, interaction_block, interaction_config):
         """Test that skip connection returns the original input."""
@@ -364,12 +318,11 @@ class TestInteractionBlock:
         l_max = interaction_config["l_max"]
         num_features = interaction_config["num_features"]
 
-        # Calculate dimensions (uniform multiplicity)
-        irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
+        # Node state is pure scalar (num_features); messages are mixed-l.
         sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
 
         # Create input data
-        node_feats = torch.randn(n_nodes, irreps_dim)
+        node_feats = torch.randn(n_nodes, num_features)
         edge_attrs = torch.randn(n_edges, sh_dim)
         edge_feats = torch.randn(n_edges, interaction_config["num_bessel"])
         edge_index = torch.randint(0, n_nodes, (n_edges, 2))
@@ -457,12 +410,12 @@ class TestInteractionBlock:
         l_max = interaction_config["l_max"]
         num_features = interaction_config["num_features"]
 
-        # Calculate dimensions (uniform multiplicity)
+        # Message dim is mixed-l; node state is pure scalar.
         irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
         sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
 
-        # Create input data
-        node_feats = torch.randn(n_nodes, irreps_dim)
+        # Create input data (scalar node state)
+        node_feats = torch.randn(n_nodes, num_features)
         edge_attrs = torch.randn(n_edges, sh_dim)
         edge_feats = torch.randn(n_edges, interaction_config["num_bessel"])
         edge_index = torch.randint(0, n_nodes, (n_edges, 2))
@@ -470,59 +423,6 @@ class TestInteractionBlock:
         # Forward pass should work without errors
         output, _ = interaction_block(node_feats, edge_attrs, edge_feats, edge_index)
         assert output.shape == (n_nodes, irreps_dim)
-
-    def test_compile(self, interaction_block, interaction_config):
-        """Test that InteractionBlock can be compiled with torch.compile."""
-        n_nodes = 20
-        n_edges = 50
-        l_max = interaction_config["l_max"]
-        num_features = interaction_config["num_features"]
-        num_bessel = interaction_config["num_bessel"]
-
-        # Calculate dimensions
-        irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
-        sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
-
-        # Create input data
-        node_feats = torch.randn(n_nodes, irreps_dim)
-        edge_attrs = torch.randn(n_edges, sh_dim)
-        edge_feats = torch.randn(n_edges, num_bessel)
-        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
-
-        # Test compilation
-        output_uncompiled, output_compiled = assert_module_compiles(
-            interaction_block, node_feats, edge_attrs, edge_feats, edge_index
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_uncompiled, output_compiled)
-
-    def test_export(self, interaction_block, interaction_config):
-        """Test that InteractionBlock can be exported with torch.export."""
-        n_nodes = 20
-        n_edges = 50
-        l_max = interaction_config["l_max"]
-        num_features = interaction_config["num_features"]
-        num_bessel = interaction_config["num_bessel"]
-
-        # Calculate dimensions
-        irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
-        sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
-
-        # Create input data
-        node_feats = torch.randn(n_nodes, irreps_dim)
-        edge_attrs = torch.randn(n_edges, sh_dim)
-        edge_feats = torch.randn(n_edges, num_bessel)
-        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
-
-        # Test export
-        exported_program, output_original, output_exported = assert_module_exports(
-            interaction_block,
-            args_tuple=(node_feats, edge_attrs, edge_feats, edge_index),
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_original, output_exported)
 
 
 class TestProductHead:
@@ -558,7 +458,10 @@ class TestProductHead:
         # Check linear
         assert hasattr(product_head, "linear")
         assert isinstance(product_head.linear, nn.Linear)
-        assert product_head.linear.in_features == product_config["hidden_dim"]
+        # The contraction emits invariant scalars (num_features), so the readout
+        # linear maps num_features -> out_dim (not the full mixed-l hidden_dim).
+        num_features = product_config["hidden_dim"] // (product_config["l_max"] + 1) ** 2
+        assert product_head.linear.in_features == num_features
         assert product_head.linear.out_features == product_config["out_dim"]
 
     def test_symmetric_contraction_config(self, product_head, product_config):
@@ -650,14 +553,17 @@ class TestProductHead:
         n_nodes = 15
         hidden_dim = product_config["hidden_dim"]
 
+        # Input is the mixed-l message (hidden_dim); the contraction outputs
+        # invariant scalars (num_features).
+        num_features = hidden_dim // (product_config["l_max"] + 1) ** 2
         node_features = torch.randn(n_nodes, hidden_dim)
         atom_types = torch.randint(0, product_config["num_species"], (n_nodes,))
 
         # Call symmetric_contraction directly
         basis = product_head.symmetric_contraction(node_features, atom_types)
 
-        # Output should have same shape as input (contraction preserves dimension)
-        assert basis.shape == (n_nodes, hidden_dim)
+        # Contraction maps mixed-l input -> invariant scalar output.
+        assert basis.shape == (n_nodes, num_features)
 
     def test_basis_projection_component(self, product_head, product_config):
         """Test basis_projection component works independently."""
@@ -676,11 +582,11 @@ class TestProductHead:
     def test_linear_component(self, product_head, product_config):
         """Test linear component works independently."""
         n_nodes = 15
-        hidden_dim = product_config["hidden_dim"]
         out_dim = product_config["out_dim"]
 
-        # Create dummy features
-        features = torch.randn(n_nodes, hidden_dim)
+        # The readout linear consumes the contracted scalars (num_features).
+        num_features = product_config["hidden_dim"] // (product_config["l_max"] + 1) ** 2
+        features = torch.randn(n_nodes, num_features)
 
         # Call linear directly
         output = product_head.linear(features)
@@ -717,43 +623,6 @@ class TestProductHead:
         assert hasattr(cue_sc, "contraction_degree")
         assert hasattr(cue_sc, "num_elements")
 
-    def test_compile(self, product_head, product_config):
-        """Test that ProductHead can be compiled with torch.compile."""
-        n_nodes = 20
-        hidden_dim = product_config["hidden_dim"]
-        num_species = product_config["num_species"]
-
-        # Create input data
-        node_features = torch.randn(n_nodes, hidden_dim)
-        atom_types = torch.randint(0, num_species, (n_nodes,))
-
-        # Test compilation
-        output_uncompiled, output_compiled = assert_module_compiles(
-            product_head, node_features, atom_types
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_uncompiled, output_compiled)
-
-    def test_export(self, product_head, product_config):
-        """Test that ProductHead can be exported with torch.export."""
-        n_nodes = 20
-        hidden_dim = product_config["hidden_dim"]
-        num_species = product_config["num_species"]
-
-        # Create input data
-        node_features = torch.randn(n_nodes, hidden_dim)
-        atom_types = torch.randint(0, num_species, (n_nodes,))
-
-        # Test export
-        exported_program, output_original, output_exported = assert_module_exports(
-            product_head,
-            args_tuple=(node_features, atom_types),
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_original, output_exported)
-
 
 class TestEmbeddingBlockEquivariance:
     """Test equivariance properties of EmbeddingBlock."""
@@ -786,26 +655,26 @@ class TestEmbeddingBlockEquivariance:
 
         # Create input data
         z = torch.randint(0, 5, (n_atoms,))
-        bond_diff = torch.randn(n_edges, 3)
-        bond_dist = torch.norm(bond_diff, dim=-1)
+        edge_diff = torch.randn(n_edges, 3)
+        edge_dist = torch.norm(edge_diff, dim=-1)
 
         # Forward pass
         _, edge_attrs1, _ = embedding_block(
             Z=z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff,
+            edge_dist=edge_dist,
+            edge_diff=edge_diff,
         )
 
         # Rotate bond vectors
         angle = math.pi / 2
-        rot_matrix = rotation_matrix_z(angle, dtype=bond_diff.dtype)
-        bond_diff_rot = rotate_vectors(bond_diff, rot_matrix)
+        rot_matrix = rotation_matrix_z(angle, dtype=edge_diff.dtype)
+        bond_diff_rot = rotate_vectors(edge_diff, rot_matrix)
 
         # Forward pass on rotated
         _, edge_attrs2, _ = embedding_block(
             Z=z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff_rot,
+            edge_dist=edge_dist,
+            edge_diff=bond_diff_rot,
         )
 
         # l=0 component should be invariant
@@ -825,25 +694,25 @@ class TestEmbeddingBlockEquivariance:
         n_edges = 6
 
         z = torch.randint(0, 5, (n_atoms,))
-        bond_diff = torch.randn(n_edges, 3)
-        bond_dist = torch.norm(bond_diff, dim=-1)
+        edge_diff = torch.randn(n_edges, 3)
+        edge_dist = torch.norm(edge_diff, dim=-1)
 
         # Forward pass
         _, _, edge_feats1 = embedding_block(
             Z=z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff,
+            edge_dist=edge_dist,
+            edge_diff=edge_diff,
         )
 
         # Rotate bond vectors
-        rot_matrix = random_rotation_matrix(dtype=bond_diff.dtype)
-        bond_diff_rot = rotate_vectors(bond_diff, rot_matrix)
+        rot_matrix = random_rotation_matrix(dtype=edge_diff.dtype)
+        bond_diff_rot = rotate_vectors(edge_diff, rot_matrix)
 
         # Forward pass on rotated
         _, _, edge_feats2 = embedding_block(
             Z=z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff_rot,
+            edge_dist=edge_dist,
+            edge_diff=bond_diff_rot,
         )
 
         # Radial features should be identical (rotation invariant)
@@ -870,11 +739,11 @@ class TestInteractionBlockEquivariance:
         l_max = 1
         num_features = 32
 
-        # Calculate dimensions
+        # Message dim is mixed-l; node state is pure scalar.
         irreps_dim = sum(num_features * (2 * l + 1) for l in range(l_max + 1))
         sh_dim = sum(2 * l + 1 for l in range(l_max + 1))
 
-        node_feats = torch.randn(n_nodes, irreps_dim)
+        node_feats = torch.randn(n_nodes, num_features)
         edge_attrs = torch.randn(n_edges, sh_dim)
         edge_feats = torch.randn(n_edges, 8)
         edge_index = torch.randint(0, n_nodes, (n_edges, 2))

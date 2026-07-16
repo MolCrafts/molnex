@@ -48,10 +48,14 @@ class ProfilerHook(BaseHook):
         export_chrome_trace: bool = True,
         export_tensorboard: bool = False,
         register_artifacts: bool = False,
+        print_summary: bool = True,
+        summary_row_limit: int = 15,
     ):
         from pathlib import Path
 
         self.output_dir = Path(output_dir)
+        self.print_summary = print_summary
+        self.summary_row_limit = summary_row_limit
         self.schedule_wait = schedule_wait
         self.schedule_warmup = schedule_warmup
         self.schedule_active = schedule_active
@@ -134,8 +138,49 @@ class ProfilerHook(BaseHook):
                         )
                         logger.info(f"Registered profiler TensorBoard logs as artifact: {tb_dir}")
 
+    def _print_summary(self, prof):
+        """Print an op-level summary to stdout so the bottleneck is visible
+        without opening the Chrome trace.
+
+        Shows the top ops by self-CUDA time plus aggregate CPU/CUDA totals and
+        the total op-call count over the profiled window. A CPU total that
+        dwarfs the CUDA total (and a high op count) is the signature of a
+        launch-bound step — the GPU is idle waiting on CPU kernel dispatch.
+        """
+        import torch
+
+        ka = prof.key_averages()
+        sort_key = "self_cuda_time_total" if torch.cuda.is_available() else "self_cpu_time_total"
+        logger.info(
+            "Profiler op summary (top %d by %s):\n%s",
+            self.summary_row_limit,
+            sort_key,
+            ka.table(sort_by=sort_key, row_limit=self.summary_row_limit),
+        )
+
+        def _us(attr: str) -> float:
+            return sum(getattr(e, attr, 0) for e in ka) / 1e3  # → ms
+
+        cpu_ms = _us("self_cpu_time_total")
+        cuda_ms = _us("self_device_time_total") or _us("self_cuda_time_total")
+        n_calls = sum(e.count for e in ka)
+        verdict = "LAUNCH-BOUND (GPU idle on CPU dispatch)" if cpu_ms > cuda_ms else "compute-bound"
+        logger.info(
+            "Totals over window: CPU self=%.1f ms, CUDA self=%.1f ms, op-calls=%d  →  %s",
+            cpu_ms,
+            cuda_ms,
+            n_calls,
+            verdict,
+        )
+
     def _on_trace_ready(self, prof):
         """Callback when trace is ready - export to files."""
+        if self.print_summary:
+            try:
+                self._print_summary(prof)
+            except Exception as exc:  # never let a summary error abort training
+                logger.warning("Profiler summary failed: %s", exc)
+
         if self.export_chrome_trace:
             trace_path = self.output_dir / "trace.json"
             prof.export_chrome_trace(str(trace_path))

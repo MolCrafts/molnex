@@ -196,3 +196,126 @@ def test_no_interference_with_existing_hooks() -> None:
     assert state["global_step"] == 1
     assert state["train"] == {"loss": 0.5}
     assert state["eval"] == {"MAE": 0.07}
+
+
+# ---------------------------------------------------------------------------
+# Async writer (pinned-buffer + cuda.Event + background drain) — these run on
+# CPU by driving the drain loop with fake events, so they need no GPU.
+# ---------------------------------------------------------------------------
+
+
+class _FakeEvent:
+    """Stand-in for a torch.cuda.Event: reports not-ready for the first
+    ``ready_after`` ``query()`` calls, then ready forever."""
+
+    def __init__(self, ready_after: int = 0) -> None:
+        self._calls = 0
+        self._ready_after = ready_after
+
+    def query(self) -> bool:
+        ready = self._calls >= self._ready_after
+        self._calls += 1
+        return ready
+
+
+def _scalar_factory(key: str, step: int, value: float):
+    return lambda: {
+        "type": "scalar",
+        "key": key,
+        "step": step,
+        "wall_time_ns": 0,
+        "value": value,
+    }
+
+
+def test_async_writer_writes_ready_records() -> None:
+    """An event=None record is appended verbatim by the background thread."""
+    from molix.hooks.journal import _AsyncJournalWriter
+
+    writer = _CapturingWriter()
+    aw = _AsyncJournalWriter(writer, poll_interval_s=1e-4)
+    aw.submit(None, _scalar_factory("train/loss", 1, 0.5))
+    aw.shutdown()
+
+    assert len(writer.records) == 1
+    assert writer.records[0]["key"] == "train/loss"
+    assert writer.records[0]["value"] == 0.5
+
+
+def test_async_writer_preserves_per_key_step_order() -> None:
+    """A not-ready record is written BEFORE a later ready record for the same
+    key — the drain loop never advances past a pending event."""
+    from molix.hooks.journal import _AsyncJournalWriter
+
+    writer = _CapturingWriter()
+    aw = _AsyncJournalWriter(writer, poll_interval_s=1e-4)
+    # step 10's event is not ready for its first 3 queries; step 20 is ready.
+    aw.submit(_FakeEvent(ready_after=3), _scalar_factory("train/loss", 10, 1.0))
+    aw.submit(None, _scalar_factory("train/loss", 20, 2.0))
+    aw.shutdown()
+
+    steps = [r["step"] for r in writer.records]
+    assert steps == [10, 20], f"expected in-order [10, 20], got {steps}"
+
+
+def test_async_writer_drains_all_before_shutdown_returns() -> None:
+    """shutdown() blocks until every queued record (incl. delayed ones) lands."""
+    from molix.hooks.journal import _AsyncJournalWriter
+
+    writer = _CapturingWriter()
+    aw = _AsyncJournalWriter(writer, poll_interval_s=1e-4)
+    for i in range(5):
+        aw.submit(_FakeEvent(ready_after=2), _scalar_factory("train/loss", i, float(i)))
+    aw.shutdown()
+
+    assert [r["step"] for r in writer.records] == [0, 1, 2, 3, 4]
+
+
+def test_async_writer_shutdown_without_submit_is_noop() -> None:
+    """shutdown() is safe when the thread was never started."""
+    from molix.hooks.journal import _AsyncJournalWriter
+
+    writer = _CapturingWriter()
+    aw = _AsyncJournalWriter(writer, poll_interval_s=1e-4)
+    aw.shutdown()  # must not hang or raise
+    assert writer.records == []
+
+
+def test_async_falls_back_to_sync_without_cuda(monkeypatch) -> None:
+    """async_writes=True with no CUDA behaves exactly like the sync path."""
+    import torch
+
+    from molix.hooks import JournalHook
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    state = TrainState()
+    state["global_step"] = 1
+    state["train"]["loss"] = 0.5
+
+    writer = _CapturingWriter()
+    hook = JournalHook(every_n_steps=1, store=writer, async_writes=True)
+    assert hook._async is None  # no background thread spun up
+
+    hook.on_train_batch_end(trainer=None, state=state, batch=None, outputs=None)
+    keys = {r["key"] for r in writer.records}
+    assert keys == {"train/loss"}
+    assert writer.records[0]["value"] == pytest.approx(0.5)
+
+
+def test_async_on_train_end_drains_then_closes() -> None:
+    """on_train_end joins the drain thread before closing the writer, so all
+    enqueued records are present and no append races close()."""
+    from molix.hooks import JournalHook
+    from molix.hooks.journal import _AsyncJournalWriter
+
+    writer = _CapturingWriter()
+    hook = JournalHook(every_n_steps=1, store=writer)
+    # Force-activate async regardless of CUDA availability for the test.
+    hook._async = _AsyncJournalWriter(writer, poll_interval_s=1e-4)
+    hook._async.submit(_FakeEvent(ready_after=2), _scalar_factory("train/loss", 1, 0.5))
+
+    hook.on_train_end(trainer=None, state=TrainState())
+
+    assert writer.closed is True
+    assert any(r["key"] == "train/loss" for r in writer.records), "record dropped before close"

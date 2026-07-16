@@ -8,7 +8,7 @@ import torch
 from molrep.utils.equivariance import random_rotation_matrix, rotate_vectors
 from molzoo import PiNet
 from molzoo.pinet import PiNetDipole, PiNetPolarizability, PiNetPotential
-from tests.symmetry_helpers import make_graph_batch, rotate_graph, translate_graph
+from tests.conftest import make_graph_batch, rotate_graph, translate_graph
 
 
 def _graph(total_charge: float = 0.0):
@@ -52,8 +52,17 @@ def _encoder(rank: int = 3) -> PiNet:
 
 class TestPiNetPotential:
     def test_energy_and_force_shapes(self):
-        enc = _encoder(rank=3)
-        model = PiNetPotential(encoder=enc, hidden_dim=8)
+        model = PiNetPotential(
+            atom_types=[1, 6, 7, 8],
+            r_max=4.0,
+            n_basis=3,
+            pp_nodes=[8, 8],
+            pi_nodes=[8, 8],
+            ii_nodes=[8, 8],
+            depth=2,
+            rank=3,
+            hidden_dim=8,
+        )
         g = _graph()
         g["atoms", "pos"] = g["atoms", "pos"].clone().requires_grad_(True)
         out = model(g, compute_forces=True)

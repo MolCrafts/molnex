@@ -35,6 +35,7 @@ import random
 from typing import Union
 
 import torch
+import torch.nn as nn
 from tensordict import TensorDict
 
 # Type alias: int means fixed; tuple[int, int] means sample from [lo, hi]
@@ -137,16 +138,16 @@ class MockBatch:
             src = torch.randint(0, n_a, (n_e,), device=dev, generator=gen)
             dst = torch.randint(0, n_a, (n_e,), device=dev, generator=gen)
             edge_index = torch.stack([src, dst], dim=1)  # (E, 2)
-            bond_diff = torch.randn(n_e, 3, device=dev, generator=gen)
-            bond_dist = torch.rand(n_e, device=dev, generator=gen) * 5.0
+            edge_diff = torch.randn(n_e, 3, device=dev, generator=gen)
+            edge_dist = torch.rand(n_e, device=dev, generator=gen) * 5.0
         else:
             edge_index = torch.zeros(0, 2, dtype=torch.long, device=dev)
-            bond_diff = torch.zeros(0, 3, device=dev)
-            bond_dist = torch.zeros(0, device=dev)
+            edge_diff = torch.zeros(0, 3, device=dev)
+            edge_dist = torch.zeros(0, device=dev)
             n_e = 0
 
         edges = TensorDict(
-            {"edge_index": edge_index, "bond_diff": bond_diff, "bond_dist": bond_dist},
+            {"edge_index": edge_index, "edge_diff": edge_diff, "edge_dist": edge_dist},
             batch_size=[n_e],
         )
 
@@ -250,3 +251,56 @@ class MockSource:
             Description string.
         """
         return f"MockSource(n_samples={self.n_samples}, n_atoms={self.n_atoms})"
+
+
+class MockModel(nn.Module):
+    """MolNex encoder-protocol model with negligible compute.
+
+    Mirrors the molzoo encoder contract — ``forward(td: TensorDict) ->
+    TensorDict`` reads ``atoms.pos`` and writes per-layer node features
+    ``(N, 1, n_features)`` under ``atoms.node_features`` — but does only a
+    single scalar multiply, so a Trainer loop wrapped around it spends
+    essentially all its time in framework machinery (Step dispatch, hooks,
+    ``batch_to``, TrainState writes), not model FLOPs. That is exactly what
+    :class:`~molix.profiler.trainer.TrainerProfiler` needs to isolate the
+    Trainer's own per-step overhead.
+
+    One scalar :class:`~torch.nn.Parameter` keeps the autograd graph real so
+    ``backward`` and the optimizer step exercise their normal paths.
+
+    Args:
+        n_features: Width of the emitted ``node_features`` feature axis.
+    """
+
+    def __init__(self, n_features: int = 1) -> None:
+        super().__init__()
+        self.w = nn.Parameter(torch.zeros(1))
+        self.n_features = n_features
+
+    def forward(self, batch: TensorDict) -> TensorDict:
+        """Write ``atoms.node_features`` ``(N, 1, n_features)`` and return *batch*.
+
+        Args:
+            batch: Post-collate nested batch with ``atoms.pos`` ``(N, 3)``.
+
+        Returns:
+            The same batch, with ``node_features`` written under ``atoms``.
+        """
+        pos = batch["atoms", "pos"]
+        val = (pos.sum(dim=-1, keepdim=True) * self.w.sum()).unsqueeze(1)
+        batch["atoms", "node_features"] = val.expand(-1, 1, self.n_features)
+        return batch
+
+
+def mock_node_feature_loss(predictions: TensorDict, batch: TensorDict) -> torch.Tensor:
+    """Sum of ``atoms.node_features`` — the default loss for :class:`MockModel`.
+
+    Args:
+        predictions: Batch returned by :class:`MockModel` (carries
+            ``atoms.node_features``).
+        batch: The input batch (unused; present for the loss-fn signature).
+
+    Returns:
+        A scalar loss whose backward touches the model's parameter.
+    """
+    return predictions["atoms", "node_features"].sum()

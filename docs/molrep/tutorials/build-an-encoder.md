@@ -37,12 +37,12 @@ features.
 from molrep.embedding.cutoff import CosineCutoff
 from molrep.embedding.radial import BesselRBF
 
-bond_dist = torch.rand(12) * 5.0
+edge_dist = torch.rand(12) * 5.0
 
 rbf = BesselRBF(r_cut=5.0, num_radial=8)
 cutoff = CosineCutoff(r_cut=5.0)
 
-edge_features = rbf(bond_dist) * cutoff(bond_dist).unsqueeze(-1)
+edge_features = rbf(edge_dist) * cutoff(edge_dist).unsqueeze(-1)
 print(edge_features.shape)  # torch.Size([12, 8])
 ```
 

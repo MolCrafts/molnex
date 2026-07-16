@@ -51,7 +51,7 @@ becoming the framework itself.
 
 | Package | Capability |
 |---------|------------|
-| `molix`   | Training and execution — `Trainer`, `TrainState`, step protocol, hook lifecycle, data pipeline, dataset loaders (QM9, RevMD17, 3BPA, Water-LES), checkpointing, and native C++ ops |
+| `molix`   | Training and execution — `Trainer`, `TrainState`, step protocol, hook lifecycle, packed-cache data pipeline, dataset loaders (QM9, RevMD17, 3BPA, Water-LES, MolRec), checkpointing, `torch.compile` / CUDA-graph and AOT-Inductor export, an in-process Langevin MD driver, trajectory diagnostics, and native C++ ops |
 | `molrep`  | Representation learning — node/radial/angular embeddings, cutoffs, equivariant interaction blocks (tensor products, symmetric contraction), pooling and readout heads |
 | `molpot`  | Potentials and composition — classical potential terms (LJ, harmonic bonds/angles/dihedrals, electrostatics), prediction heads, force/stress derivation, and the `PotentialComposer` assembly layer |
 | `molzoo`  | Assembled reference models — curated encoder and potential families (MACE, Allegro, PiNet, Sonata), each with a paper-traceable spec |

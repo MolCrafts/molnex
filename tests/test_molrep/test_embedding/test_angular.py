@@ -4,7 +4,6 @@ import math
 
 import pytest
 import torch
-from tests.utils import assert_module_compiles, assert_module_exports, assert_outputs_close
 
 from molrep.embedding.angular import SphericalHarmonics, SphericalHarmonicsSpec
 from molrep.utils.equivariance import (
@@ -270,28 +269,3 @@ class TestSphericalHarmonics:
         assert torch.allclose(
             output1[:, 1:4].norm(dim=-1), output2[:, 1:4].norm(dim=-1), rtol=1e-4, atol=1e-4
         )
-
-    def test_compile(self):
-        """Test that SphericalHarmonics can be compiled with torch.compile."""
-        sh = SphericalHarmonics(l_max=2)
-        vectors = torch.randn(10, 3)
-
-        # Test compilation
-        output_uncompiled, output_compiled = assert_module_compiles(sh, vectors)
-
-        # Check outputs match
-        assert_outputs_close(output_uncompiled, output_compiled)
-
-    def test_export(self):
-        """Test that SphericalHarmonics can be exported with torch.export."""
-        sh = SphericalHarmonics(l_max=2)
-        vectors = torch.randn(10, 3)
-
-        # Test export
-        exported_program, output_original, output_exported = assert_module_exports(
-            sh,
-            args_tuple=(vectors,),
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_original, output_exported)

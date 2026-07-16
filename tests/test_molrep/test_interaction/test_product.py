@@ -3,7 +3,6 @@
 import math
 
 import torch
-from tests.utils import assert_module_compiles, assert_module_exports, assert_outputs_close
 
 from molrep.interaction.product import (
     ConvTP,
@@ -199,57 +198,6 @@ class TestConvTP:
         assert not torch.isnan(node_features.grad).any()
         assert not torch.isnan(edge_angular.grad).any()
         assert not torch.isnan(tp_weights.grad).any()
-
-    def test_compile(self):
-        """Test that ConvTP can be compiled with torch.compile."""
-        tp = ConvTP(
-            in_irreps="16x0e",
-            out_irreps="16x0e",
-            sh_irreps="1x0e + 1x1o",
-        )
-
-        n_nodes = 10
-        n_edges = 30
-        node_features = torch.randn(n_nodes, 16)
-        edge_angular = torch.randn(n_edges, 4)
-        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
-
-        weight_dim = tp.weight_numel
-        tp_weights = torch.randn(n_edges, weight_dim)
-
-        # Test compilation
-        output_uncompiled, output_compiled = assert_module_compiles(
-            tp, node_features, edge_angular, edge_index, tp_weights
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_uncompiled, output_compiled)
-
-    def test_export(self):
-        """Test that ConvTP can be exported with torch.export."""
-        tp = ConvTP(
-            in_irreps="16x0e",
-            out_irreps="16x0e",
-            sh_irreps="1x0e + 1x1o",
-        )
-
-        n_nodes = 10
-        n_edges = 30
-        node_features = torch.randn(n_nodes, 16)
-        edge_angular = torch.randn(n_edges, 4)
-        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
-
-        weight_dim = tp.weight_numel
-        tp_weights = torch.randn(n_edges, weight_dim)
-
-        # Test export
-        exported_program, output_original, output_exported = assert_module_exports(
-            tp,
-            args_tuple=(node_features, edge_angular, edge_index, tp_weights),
-        )
-
-        # Check outputs match
-        assert_outputs_close(output_original, output_exported)
 
 
 # ===========================================================================

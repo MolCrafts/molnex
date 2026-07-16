@@ -46,11 +46,16 @@ class Metric(Protocol):
         """
         ...
 
-    def compute(self) -> float | dict[str, float]:
+    def compute(self) -> torch.Tensor | dict[str, torch.Tensor]:
         """Compute final metric value from accumulated state.
 
+        Returns a 0-d :class:`torch.Tensor` left on the inputs' device (the
+        torchmetrics contract). Materialising it to a Python ``float`` via
+        ``.item()`` forces a CPU↔GPU sync, so callers do that only off the
+        training hot path (the async journal copies the tensor instead).
+
         Returns:
-            Metric value (float) or dict of metric values
+            A 0-d metric tensor, or a dict of such tensors.
         """
         ...
 
@@ -79,7 +84,7 @@ class BaseMetric(ABC):
             def compute(self):
                 preds = torch.cat(self.preds)
                 targets = torch.cat(self.targets)
-                return my_metric_fn(preds, targets).item()
+                return my_metric_fn(preds, targets)  # 0-d tensor, no .item()
 
             def reset(self):
                 self.preds = []
@@ -109,8 +114,12 @@ class BaseMetric(ABC):
         ...
 
     @abstractmethod
-    def compute(self) -> float:
-        """Compute final metric value from accumulated state."""
+    def compute(self) -> torch.Tensor:
+        """Compute final metric value from accumulated state.
+
+        Returns a 0-d tensor on the inputs' device — no ``.item()`` so the
+        training hot path never blocks on a CPU↔GPU sync.
+        """
         ...
 
     @abstractmethod
@@ -143,13 +152,13 @@ class MAE(BaseMetric):
         self.preds.append(preds.detach())
         self.targets.append(targets.detach())
 
-    def compute(self) -> float:
-        """Compute MAE from accumulated predictions and targets."""
+    def compute(self) -> torch.Tensor:
+        """Compute MAE as a 0-d tensor on the inputs' device (no ``.item()``)."""
         if not self.preds:
-            return 0.0
+            return torch.zeros(())
         preds = torch.cat(self.preds)
         targets = torch.cat(self.targets)
-        return torch.mean(torch.abs(preds - targets)).item()
+        return torch.mean(torch.abs(preds - targets))
 
     def reset(self) -> None:
         """Clear accumulated predictions and targets."""
@@ -181,13 +190,13 @@ class RMSE(BaseMetric):
         self.preds.append(preds.detach())
         self.targets.append(targets.detach())
 
-    def compute(self) -> float:
-        """Compute RMSE from accumulated predictions and targets."""
+    def compute(self) -> torch.Tensor:
+        """Compute RMSE as a 0-d tensor on the inputs' device (no ``.item()``)."""
         if not self.preds:
-            return 0.0
+            return torch.zeros(())
         preds = torch.cat(self.preds)
         targets = torch.cat(self.targets)
-        return torch.sqrt(torch.mean((preds - targets) ** 2)).item()
+        return torch.sqrt(torch.mean((preds - targets) ** 2))
 
     def reset(self) -> None:
         """Clear accumulated predictions and targets."""
@@ -219,13 +228,13 @@ class MSE(BaseMetric):
         self.preds.append(preds.detach())
         self.targets.append(targets.detach())
 
-    def compute(self) -> float:
-        """Compute MSE from accumulated predictions and targets."""
+    def compute(self) -> torch.Tensor:
+        """Compute MSE as a 0-d tensor on the inputs' device (no ``.item()``)."""
         if not self.preds:
-            return 0.0
+            return torch.zeros(())
         preds = torch.cat(self.preds)
         targets = torch.cat(self.targets)
-        return torch.mean((preds - targets) ** 2).item()
+        return torch.mean((preds - targets) ** 2)
 
     def reset(self) -> None:
         """Clear accumulated predictions and targets."""
@@ -259,20 +268,22 @@ class R2Score(BaseMetric):
         self.preds.append(preds.detach())
         self.targets.append(targets.detach())
 
-    def compute(self) -> float:
-        """Compute R² from accumulated predictions and targets."""
+    def compute(self) -> torch.Tensor:
+        """Compute R² as a 0-d tensor on the inputs' device (no ``.item()``).
+
+        The degenerate ``ss_tot == 0`` case (zero-variance targets) is
+        resolved with :func:`torch.where` rather than a Python ``if`` so the
+        method never forces a CPU↔GPU sync on the hot path.
+        """
         if not self.preds:
-            return 0.0
+            return torch.zeros(())
         preds = torch.cat(self.preds)
         targets = torch.cat(self.targets)
 
         ss_res = torch.sum((targets - preds) ** 2)
         ss_tot = torch.sum((targets - torch.mean(targets)) ** 2)
 
-        if ss_tot == 0:
-            return 0.0
-
-        return (1 - ss_res / ss_tot).item()
+        return torch.where(ss_tot == 0, ss_tot.new_zeros(()), 1 - ss_res / ss_tot)
 
     def reset(self) -> None:
         """Clear accumulated predictions and targets."""
@@ -309,13 +320,13 @@ class Accuracy(BaseMetric):
         self.preds.append(preds.detach())
         self.targets.append(targets.detach())
 
-    def compute(self) -> float:
-        """Compute accuracy from accumulated predictions and targets."""
+    def compute(self) -> torch.Tensor:
+        """Compute accuracy as a 0-d tensor on the inputs' device (no ``.item()``)."""
         if not self.preds:
-            return 0.0
+            return torch.zeros(())
         preds = torch.cat(self.preds)
         targets = torch.cat(self.targets)
-        return torch.mean((preds == targets).float()).item()
+        return torch.mean((preds == targets).float())
 
     def reset(self) -> None:
         """Clear accumulated predictions and targets."""
@@ -335,8 +346,8 @@ class MetricCollection:
         # Update all metrics
         metrics.update(preds, targets)
 
-        # Compute all metrics
-        results = metrics.compute()  # {"MAE": 0.5, "RMSE": 0.7, "R2Score": 0.9}
+        # Compute all metrics (0-d tensors; call float()/.item() off hot path)
+        results = metrics.compute()  # {"MAE": tensor(0.5), "RMSE": tensor(0.7), ...}
 
         # Reset all metrics
         metrics.reset()
@@ -360,8 +371,12 @@ class MetricCollection:
         for metric in self.metrics.values():
             metric.update(preds, targets)
 
-    def compute(self) -> dict[str, float]:  # type: ignore[return]
-        """Compute all metrics and return as dict."""
+    def compute(self) -> dict[str, torch.Tensor]:  # type: ignore[return]
+        """Compute all metrics, each a 0-d tensor on the inputs' device.
+
+        No ``.item()`` is taken here — callers materialise to Python floats
+        off the training hot path (the async journal copies the tensors).
+        """
         return {name: metric.compute() for name, metric in self.metrics.items()}
 
     def reset(self) -> None:

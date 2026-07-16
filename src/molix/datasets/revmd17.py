@@ -24,6 +24,10 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
+import json
+import tarfile
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -33,7 +37,40 @@ from molix.data.collate import TargetSchema
 from molix.data.source import Sample
 
 _TARBALL_NAME = "rmd17.tar.bz2"
+_FIGSHARE_ARTICLE_ID = 12672038
 _FIGSHARE_ARTICLE = "https://figshare.com/articles/dataset/Revised_MD17_dataset_rMD17_/12672038"
+# Per-file download URLs are resolved through the figshare REST API: the public
+# ``ndownloader`` HTML endpoint sits behind an anti-bot WAF that answers scripted
+# GETs with an empty ``202``, whereas the API returns direct CDN links.
+_FIGSHARE_FILES_API = f"https://api.figshare.com/v2/articles/{_FIGSHARE_ARTICLE_ID}/files"
+
+
+@contextlib.contextmanager
+def _download_lock(lock_path: Path):
+    """Best-effort inter-process lock so concurrent jobs download once.
+
+    Uses ``fcntl.flock`` on a sidecar file; degrades to a no-op where flock is
+    unavailable (non-POSIX, some network filesystems). Correctness never relies
+    on the lock — the caller re-checks the target exists and renames atomically —
+    it only avoids redundant simultaneous downloads.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover — non-POSIX
+        yield
+        return
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        except OSError:  # pragma: no cover — flock unsupported on this fs
+            yield
+            return
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 # Canonical 10 molecules of revMD17 and their filenames on the mirror.
@@ -63,9 +100,6 @@ class RevMD17Source:
         download: Download the file if it does not exist.
     """
 
-    # Figshare mirror of the revised dataset (Christensen et al.).
-    BASE_URL = "https://figshare.com/ndownloader/files/23950376"
-
     TARGET_SCHEMA: TargetSchema = TargetSchema(
         graph_level=frozenset({"energy"}),
         atom_level=frozenset({"forces"}),
@@ -73,21 +107,54 @@ class RevMD17Source:
 
     @classmethod
     def _materialise(cls, root: Path, filename: str) -> None:
-        """Fetch the figshare tarball + extract ``filename``.
+        """Download the per-molecule NPZ straight from the figshare record.
 
-        Delegates the WAF-passing HTTP fetch and the flock-guarded extract
-        to :mod:`molhub.io`. Tarball cached at ``root / rmd17.tar.bz2`` for
-        reuse across molecules; both fetch + extract are concurrent-safe
-        so simultaneous slurm jobs serialise instead of clobbering files.
+        Self-contained — molix.datasets depends only on the stdlib for I/O, not
+        on any sibling package. Resolves download URLs via the figshare REST API
+        (the HTML ``ndownloader`` endpoint is WAF-gated and 202s scripted GETs;
+        the API's CDN links are not). Eight of the ten molecules are published as
+        standalone NPZ files and fetched directly; the remaining two (salicylic,
+        uracil) live only inside the ``rmd17.tar.bz2`` archive, so for those the
+        archive is downloaded (cached for reuse) and the member extracted. Every
+        write goes through a ``*.part`` temp file renamed atomically into place,
+        and a ``*.lock`` sidecar serialises concurrent SLURM jobs so they
+        download once instead of clobbering each other.
+
+        Reference:
+            figshare article 12672038 — Christensen & von Lilienfeld, revMD17.
         """
-        # Imported lazily: the molhub download helpers are only needed when
-        # actually materialising the figshare tarball, so merely importing
-        # this module (and thus ``molix.datasets``) stays dependency-light.
-        from molhub.io import extract_member_locked, fetch_locked  # ty: ignore[unresolved-import]
-
-        tarball = root / _TARBALL_NAME
-        fetch_locked(cls.BASE_URL, tarball, referer=_FIGSHARE_ARTICLE)
-        extract_member_locked(tarball, f"rmd17/npz_data/{filename}", root / filename)
+        target = root / filename
+        with _download_lock(root / f"{filename}.lock"):
+            if target.exists():  # another job won the race while we waited
+                return
+            req = urllib.request.Request(_FIGSHARE_FILES_API, headers={"User-Agent": "molix"})
+            with urllib.request.urlopen(req) as resp:  # noqa: S310 — pinned figshare API
+                files = json.load(resp)
+            by_name = {f["name"]: f["download_url"] for f in files}
+            if filename in by_name:
+                tmp = root / f"{filename}.part"
+                urllib.request.urlretrieve(by_name[filename], tmp)  # noqa: S310 — figshare CDN
+                tmp.replace(target)
+                return
+            # Not published standalone — fall back to the archive + extract.
+            archive_url = by_name.get(_TARBALL_NAME)
+            if archive_url is None:
+                raise FileNotFoundError(
+                    f"revMD17: neither {filename!r} nor {_TARBALL_NAME!r} listed in "
+                    f"figshare article {_FIGSHARE_ARTICLE_ID}; browse {_FIGSHARE_ARTICLE}"
+                )
+            tarball = root / _TARBALL_NAME
+            if not tarball.exists():
+                tmp = root / f"{_TARBALL_NAME}.part"
+                urllib.request.urlretrieve(archive_url, tmp)  # noqa: S310 — figshare CDN
+                tmp.replace(tarball)
+            with tarfile.open(tarball, "r:bz2") as tar:
+                member = tar.extractfile(f"rmd17/npz_data/{filename}")
+                if member is None:
+                    raise FileNotFoundError(f"revMD17: {filename!r} absent from {_TARBALL_NAME}")
+                tmp = root / f"{filename}.part"
+                tmp.write_bytes(member.read())
+                tmp.replace(target)
 
     def __init__(
         self,

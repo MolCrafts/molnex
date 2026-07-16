@@ -343,7 +343,8 @@ def _make_molrs_frame(elements: list[str], xyz_f32: np.ndarray):
 
     frame = molrs.Frame()
     block = molrs.Block()
-    block.insert("element", np.array(elements, dtype=str))
+    # molrs rejects dtype=object columns — use a numpy unicode-str column.
+    block.insert("element", np.array(elements, dtype=np.str_))
     block.insert("x", np.ascontiguousarray(xyz_f32[:, 0], dtype=np.float32))
     block.insert("y", np.ascontiguousarray(xyz_f32[:, 1], dtype=np.float32))
     block.insert("z", np.ascontiguousarray(xyz_f32[:, 2], dtype=np.float32))

@@ -69,8 +69,10 @@ _RESERVED_TOP_KEYS = frozenset(
         "n_samples",
         "atom_ptr",
         "edge_ptr",
+        "bond_ptr",
         "atoms",
         "edges",
+        "bonds",
         "graphs",
         "scalars",
         "schema",
@@ -100,7 +102,9 @@ class PackedCache:
 
     # Packed cache format version. Bump on incompatible layout changes so
     # loaders can reject stale sinks instead of silently misreading.
-    FORMAT_VERSION: ClassVar[int] = 2
+    # v3: edge geometry stored under ``edge_diff`` / ``edge_dist`` (was
+    # ``bond_*`` in v2 — see graph-connectivity-alignment-02-rename).
+    FORMAT_VERSION: ClassVar[int] = 3
 
     __slots__ = ("_sink",)
 
@@ -313,6 +317,12 @@ def _pack_samples(samples: list[dict]) -> dict[str, Any]:
         }
 
     flats = [_flatten(s) for s in samples]
+
+    # Pull covalent-bond keys out before generic schema inference. bond_index is
+    # COO [2, N_bonds] (tracks bonds on dim 1, not dim 0) and so does not fit the
+    # atom/edge/graph leading-dim model — pack it into a dedicated bonds bucket.
+    bonds_bucket, bond_ptr = _extract_bonds(flats)
+
     keys = set(flats[0].keys())
     for i, f in enumerate(flats[1:], start=1):
         if set(f.keys()) != keys:
@@ -349,6 +359,7 @@ def _pack_samples(samples: list[dict]) -> dict[str, Any]:
         "schema": schema,
         "atoms": {k: torch.cat([f[k] for f in flats], dim=0) for k in atom_keys},
         "edges": {k: torch.cat([f[k] for f in flats], dim=0) for k in edge_keys},
+        "bonds": bonds_bucket,
         "graphs": {k: torch.stack([f[k] for f in flats], dim=0) for k in graph_keys},
         "scalars": {k: [f[k] for f in flats] for k in scalar_keys},
     }
@@ -356,7 +367,56 @@ def _pack_samples(samples: list[dict]) -> dict[str, Any]:
         payload["atom_ptr"] = torch.tensor(atom_ptr, dtype=torch.long)
     if edge_keys:
         payload["edge_ptr"] = torch.tensor(edge_ptr, dtype=torch.long)
+    if bond_ptr is not None:
+        payload["bond_ptr"] = bond_ptr
     return payload
+
+
+# Covalent-bond sample keys handled outside the dim-0 schema model.
+_BOND_INDEX_KEY = "bond_index"
+_BOND_TYPES_KEY = "bond_types"
+
+
+def _extract_bonds(
+    flats: list[dict[str, Any]],
+) -> tuple[dict[str, torch.Tensor], torch.Tensor | None]:
+    """Pop ``bond_index`` / ``bond_types`` from *flats* into a packed bonds bucket.
+
+    ``bond_index`` is COO ``[2, N_bonds]`` (concatenated along dim 1);
+    ``bond_types`` is ``[N_bonds]`` (dim 0). Returns ``(bonds, bond_ptr)`` where
+    ``bond_ptr`` is the per-sample cumsum over ``N_bonds``, or ``({}, None)`` if
+    no sample carries bonds. Mutates *flats* in place, removing the bond keys so
+    they bypass generic schema inference.
+
+    Raises:
+        ValueError: some-but-not-all samples carry ``bond_index``.
+    """
+    present = [_BOND_INDEX_KEY in f and f[_BOND_INDEX_KEY] is not None for f in flats]
+    if not any(present):
+        return {}, None
+    if not all(present):
+        raise ValueError("bond_index must be present in all samples or none.")
+
+    bi_list: list[torch.Tensor] = []
+    bt_list: list[torch.Tensor] = []
+    n_bonds: list[int] = []
+    have_types = all(f.get(_BOND_TYPES_KEY) is not None for f in flats)
+    for f in flats:
+        bi = f.pop(_BOND_INDEX_KEY).long()
+        bi_list.append(bi)
+        n_bonds.append(int(bi.shape[1]))
+        bt = f.pop(_BOND_TYPES_KEY, None)
+        if have_types:
+            bt_list.append(bt)
+
+    bonds: dict[str, torch.Tensor] = {_BOND_INDEX_KEY: torch.cat(bi_list, dim=1)}
+    if have_types:
+        bonds[_BOND_TYPES_KEY] = torch.cat(bt_list, dim=0)
+
+    bond_ptr = [0]
+    for nb in n_bonds:
+        bond_ptr.append(bond_ptr[-1] + nb)
+    return bonds, torch.tensor(bond_ptr, dtype=torch.long)
 
 
 def _unpack_one(payload: Mapping[str, Any], idx: int) -> dict:
@@ -379,6 +439,15 @@ def _unpack_one(payload: Mapping[str, Any], idx: int) -> dict:
         e0, e1 = int(edge_ptr[idx]), int(edge_ptr[idx + 1])
         for k, t in payload["edges"].items():
             flat[k] = t[e0:e1]
+
+    bond_ptr = payload.get("bond_ptr")
+    if bond_ptr is not None:
+        b0, b1 = int(bond_ptr[idx]), int(bond_ptr[idx + 1])
+        bonds = payload.get("bonds", {})
+        if _BOND_INDEX_KEY in bonds:
+            flat[_BOND_INDEX_KEY] = bonds[_BOND_INDEX_KEY][:, b0:b1]  # COO dim 1
+        if _BOND_TYPES_KEY in bonds:
+            flat[_BOND_TYPES_KEY] = bonds[_BOND_TYPES_KEY][b0:b1]
 
     for k, t in payload["graphs"].items():
         flat[k] = t[idx]

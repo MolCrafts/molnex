@@ -34,11 +34,15 @@ from molix.data.dataset import (
     BaseDataset,
     CachedDataset,
     MmapDataset,
+    PackedView,
     SubsetDataset,
 )
 
 # Pipeline DSL
 from molix.data.pipeline import DAGCache, Edge, Node, Pipeline, PipelineSpec
+
+# Batch sampling
+from molix.data.sampler import TokenBudgetBatchSampler
 
 # Data sources
 from molix.data.source import DataSource, InMemorySource, SubsetSource
@@ -55,10 +59,13 @@ from molix.data.tasks import (
     AtomicDress,
     ConstantLabel,
     NeighborList,
+    PadMolecularBatch,
     UnitConvert,
 )
 
 __all__ = [
+    # Batch sampling
+    "TokenBudgetBatchSampler",
     # Task hierarchy
     "Task",
     "SampleTask",
@@ -69,6 +76,7 @@ __all__ = [
     "AtomicDress",
     "ConstantLabel",
     "NeighborList",
+    "PadMolecularBatch",
     "UnitConvert",
     # Sources
     "DataSource",

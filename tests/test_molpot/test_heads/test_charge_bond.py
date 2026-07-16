@@ -54,16 +54,16 @@ def _make_inputs(n_atoms: int = 5, node_dim: int = 8, seed: int = 0):
     pos = torch.randn(n_atoms, 3, dtype=torch.float64)
     node_features = torch.randn(n_atoms, node_dim, dtype=torch.float64)
     edge_index, half_index = _bidirectional_edges(n_atoms)
-    bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    bond_dist = bond_diff.norm(dim=-1)
+    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    edge_dist = edge_diff.norm(dim=-1)
     atom_batch = torch.zeros(n_atoms, dtype=torch.long)
     return {
         "pos": pos,
         "node_features": node_features,
         "edge_index": edge_index,
         "half_index": half_index,
-        "bond_diff": bond_diff,
-        "bond_dist": bond_dist,
+        "edge_diff": edge_diff,
+        "edge_dist": edge_dist,
         "atom_batch": atom_batch,
     }
 
@@ -80,7 +80,7 @@ def test_neutral_sum_is_zero_without_projection():
     out = head(
         node_features=inp["node_features"],
         edge_index=inp["edge_index"],
-        bond_dist=inp["bond_dist"],
+        edge_dist=inp["edge_dist"],
         atom_batch=inp["atom_batch"],
         num_graphs=1,
     )
@@ -94,7 +94,7 @@ def test_pair_antisymmetry():
     out = head(
         node_features=inp["node_features"],
         edge_index=inp["edge_index"],
-        bond_dist=inp["bond_dist"],
+        edge_dist=inp["edge_dist"],
         atom_batch=inp["atom_batch"],
         num_graphs=1,
     )
@@ -116,7 +116,7 @@ def test_half_list_matches_full_list():
     out_full = full(
         node_features=inp["node_features"],
         edge_index=inp["edge_index"],
-        bond_dist=inp["bond_dist"],
+        edge_dist=inp["edge_dist"],
         atom_batch=inp["atom_batch"],
         num_graphs=1,
     )
@@ -124,11 +124,11 @@ def test_half_list_matches_full_list():
     half = _build_head(charge_projection=False, full_neighbor_list=False)
     half.load_state_dict(full.state_dict())
     half_edge_index = inp["edge_index"][inp["half_index"]]
-    half_bond_dist = inp["bond_dist"][inp["half_index"]]
+    half_bond_dist = inp["edge_dist"][inp["half_index"]]
     out_half = half(
         node_features=inp["node_features"],
         edge_index=half_edge_index,
-        bond_dist=half_bond_dist,
+        edge_dist=half_bond_dist,
         atom_batch=inp["atom_batch"],
         num_graphs=1,
     )
@@ -148,7 +148,7 @@ def test_projection_to_nonzero_total_charge():
         out = head(
             node_features=inp["node_features"],
             edge_index=inp["edge_index"],
-            bond_dist=inp["bond_dist"],
+            edge_dist=inp["edge_dist"],
             atom_batch=inp["atom_batch"],
             num_graphs=1,
             total_charge=torch.tensor([q_net], dtype=torch.float64),
@@ -174,7 +174,7 @@ def test_diagnostics_record_pre_and_post_sums():
     out = head(
         node_features=inp["node_features"],
         edge_index=inp["edge_index"],
-        bond_dist=inp["bond_dist"],
+        edge_dist=inp["edge_dist"],
         atom_batch=inp["atom_batch"],
         num_graphs=1,
         total_charge=torch.tensor([1.0], dtype=torch.float64),
@@ -191,7 +191,7 @@ def test_rotation_invariance_of_atomic_charges():
     out_ref = head(
         node_features=inp["node_features"],
         edge_index=inp["edge_index"],
-        bond_dist=inp["bond_dist"],
+        edge_dist=inp["edge_dist"],
         atom_batch=inp["atom_batch"],
         num_graphs=1,
     )
@@ -199,12 +199,12 @@ def test_rotation_invariance_of_atomic_charges():
     theta = torch.tensor(0.7, dtype=torch.float64)
     cos, sin = torch.cos(theta), torch.sin(theta)
     R = torch.tensor([[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float64)
-    bond_diff_rot = inp["bond_diff"] @ R.T
+    bond_diff_rot = inp["edge_diff"] @ R.T
     bond_dist_rot = bond_diff_rot.norm(dim=-1)
     out_rot = head(
         node_features=inp["node_features"],
         edge_index=inp["edge_index"],
-        bond_dist=bond_dist_rot,
+        edge_dist=bond_dist_rot,
         atom_batch=inp["atom_batch"],
         num_graphs=1,
     )
@@ -225,7 +225,7 @@ def test_batched_two_graphs_each_neutral():
     node_features = torch.cat([inp_a["node_features"], inp_b["node_features"]], dim=0)
     edge_b_shifted = inp_b["edge_index"] + n_a
     edge_index = torch.cat([inp_a["edge_index"], edge_b_shifted], dim=0)
-    bond_dist = torch.cat([inp_a["bond_dist"], inp_b["bond_dist"]], dim=0)
+    edge_dist = torch.cat([inp_a["edge_dist"], inp_b["edge_dist"]], dim=0)
     atom_batch = torch.cat(
         [torch.zeros(n_a, dtype=torch.long), torch.ones(n_b, dtype=torch.long)],
         dim=0,
@@ -234,7 +234,7 @@ def test_batched_two_graphs_each_neutral():
     out = head(
         node_features=node_features,
         edge_index=edge_index,
-        bond_dist=bond_dist,
+        edge_dist=edge_dist,
         atom_batch=atom_batch,
         num_graphs=2,
     )
@@ -260,7 +260,7 @@ def test_head_calls_kernel_directly():
     out = head(
         node_features=inp["node_features"],
         edge_index=inp["edge_index"],
-        bond_dist=inp["bond_dist"],
+        edge_dist=inp["edge_dist"],
         atom_batch=inp["atom_batch"],
         num_graphs=1,
     )

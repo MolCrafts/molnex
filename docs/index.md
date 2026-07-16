@@ -3,10 +3,13 @@
 MolNex is a Python framework for molecular machine learning. It is split into
 four packages that can be used together or independently:
 
-- `molix` provides training, data loading, state, hooks, and execution utilities.
+- `molix` provides training, data loading, state, hooks, execution utilities
+  (`torch.compile` / CUDA-graph, AOT export), an in-process MD driver, and
+  trajectory diagnostics.
 - `molrep` provides representation learning modules for molecular structure.
 - `molpot` provides potential, composition, pooling, head, and derivation layers.
-- `molzoo` provides assembled reference encoder families such as MACE and Allegro.
+- `molzoo` provides assembled reference encoder families such as MACE, Allegro,
+  and PiNet.
 
 ## Start Here
 

@@ -10,7 +10,27 @@ class TestMAE:
         preds = torch.tensor([1.0, 2.0, 3.0])
         targets = torch.tensor([1.0, 2.0, 3.0])
         metric.update(preds, targets)
-        assert metric.compute() == pytest.approx(0.0)
+        assert float(metric.compute()) == pytest.approx(0.0)
+
+    def test_compute_returns_zero_dim_tensor(self):
+        """compute() returns a 0-d tensor (torchmetrics contract), not a float —
+        so the training hot path never .item()-syncs."""
+        metric = MAE()
+        metric.update(torch.tensor([1.0, 2.0]), torch.tensor([1.5, 2.5]))
+        out = metric.compute()
+        assert isinstance(out, torch.Tensor)
+        assert out.ndim == 0
+        assert float(out) == pytest.approx(0.5)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_compute_stays_on_device(self):
+        """compute() keeps the result on the inputs' device (no implicit copy)."""
+        metric = MAE()
+        metric.update(
+            torch.tensor([1.0, 2.0], device="cuda"),
+            torch.tensor([1.5, 2.5], device="cuda"),
+        )
+        assert metric.compute().is_cuda
 
     def test_reset(self):
         metric = MAE()
@@ -26,7 +46,7 @@ class TestRMSE:
         preds = torch.tensor([1.0, 2.0, 3.0])
         targets = torch.tensor([1.0, 3.0, 5.0])
         metric.update(preds, targets)
-        assert metric.compute() == pytest.approx((5.0 / 3.0) ** 0.5, abs=1e-3)
+        assert float(metric.compute()) == pytest.approx((5.0 / 3.0) ** 0.5, abs=1e-3)
 
 
 class TestMSE:
@@ -35,7 +55,7 @@ class TestMSE:
         preds = torch.tensor([1.0, 2.0, 3.0])
         targets = torch.tensor([1.0, 3.0, 5.0])
         metric.update(preds, targets)
-        assert metric.compute() == pytest.approx(5.0 / 3.0, abs=1e-3)
+        assert float(metric.compute()) == pytest.approx(5.0 / 3.0, abs=1e-3)
 
 
 class TestR2Score:
@@ -44,7 +64,7 @@ class TestR2Score:
         preds = torch.tensor([1.0, 2.0, 3.0])
         targets = torch.tensor([1.0, 2.0, 3.0])
         metric.update(preds, targets)
-        assert metric.compute() == pytest.approx(1.0)
+        assert float(metric.compute()) == pytest.approx(1.0)
 
 
 class TestAccuracy:
@@ -53,7 +73,7 @@ class TestAccuracy:
         preds = torch.tensor([0, 1, 2, 3])
         targets = torch.tensor([0, 1, 1, 1])
         metric.update(preds, targets)
-        assert metric.compute() == pytest.approx(0.5)
+        assert float(metric.compute()) == pytest.approx(0.5)
 
 
 class TestMetricCollection:
@@ -72,4 +92,4 @@ class TestMetricCollection:
         targets = torch.tensor([1.5, 2.5], device="cuda")
         metrics.update(preds, targets)
         results = metrics.compute()
-        assert results["MAE"] == pytest.approx(0.5)
+        assert float(results["MAE"]) == pytest.approx(0.5)

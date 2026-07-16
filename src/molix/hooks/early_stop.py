@@ -18,11 +18,17 @@ class EarlyStop(BaseHook):
     """Abort training when a stop condition is met.
 
     Args:
-        if_nan: Abort when ``state["train"]["loss"]`` or any model
-            parameter becomes non-finite (NaN or ±inf). On detection,
-            saves ``<out_dir>/nan_checkpoint.pt`` and raises
-            ``RuntimeError`` so the Trainer unwinds cleanly. The
+        if_nan: Abort when ``state["train"]["loss"]`` becomes non-finite
+            (NaN or ±inf). On detection, saves ``<out_dir>/nan_checkpoint.pt``
+            and raises ``RuntimeError`` so the Trainer unwinds cleanly. The
             caller can catch it and translate to a distinct exit code.
+        param_check_every_n_steps: Also scan *every* model parameter for
+            non-finiteness, but only every N steps. ``0`` (default) disables
+            the parameter scan entirely — it launches one reduction kernel
+            **per parameter tensor** every step, which throttles a
+            launch-bound training loop; the loss check catches the same
+            divergence one step later in practice. Set e.g. ``50`` to keep a
+            periodic parameter audit at negligible cost.
 
     Example::
 
@@ -35,31 +41,40 @@ class EarlyStop(BaseHook):
         if_nan: bool = False,
         model: nn.Module | None = None,
         out_dir: str | Path | None = None,
+        param_check_every_n_steps: int = 0,
     ) -> None:
         if if_nan and model is None:
-            raise ValueError("EarlyStop(if_nan=True) requires `model=` to check parameters.")
+            raise ValueError("EarlyStop(if_nan=True) requires `model=` for the NaN checkpoint.")
+        if param_check_every_n_steps < 0:
+            raise ValueError("param_check_every_n_steps must be >= 0.")
         self._if_nan = if_nan
         self._model = model
         self._out_dir = Path(out_dir) if out_dir is not None else None
+        self._param_check_every = param_check_every_n_steps
+        self._batch_count = 0
 
     def on_train_batch_end(self, trainer, state, batch, outputs) -> None:
-        """Abort training if a non-finite loss or parameter is detected.
+        """Abort training if a non-finite loss (or, optionally, parameter) is seen.
 
-        No-op unless ``if_nan=True``. Checks ``state["train"]["loss"]`` and,
-        when a model was supplied, every parameter; the first non-finite
-        value triggers :meth:`_abort`.
+        No-op unless ``if_nan=True``. Always checks ``state["train"]["loss"]``;
+        scans all parameters only on the ``param_check_every_n_steps`` cadence
+        (off by default — the per-step scan is a launch-bound bottleneck).
         """
         if not self._if_nan:
             return
+        self._batch_count += 1
+
         loss = state["train"].get("loss")
         if loss is not None and not math.isfinite(float(loss)):
-            self._abort(state, reason=f"non-finite loss={loss}")
+            self._abort(state, reason=f"non-finite loss={float(loss)}")
             return
-        assert self._model is not None
-        for name, p in self._model.named_parameters():
-            if not torch.isfinite(p).all():
-                self._abort(state, reason=f"non-finite parameter {name}")
-                return
+
+        if self._param_check_every and self._batch_count % self._param_check_every == 0:
+            assert self._model is not None
+            for name, p in self._model.named_parameters():
+                if not torch.isfinite(p).all():
+                    self._abort(state, reason=f"non-finite parameter {name}")
+                    return
 
     def _abort(self, state, *, reason: str) -> None:
         step = int(state.get("global_step", 0))

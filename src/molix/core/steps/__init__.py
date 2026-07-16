@@ -27,7 +27,7 @@ def batch_to(
     and bare tensors. Non-tensor leaves are returned unchanged.
 
     Args:
-        batch: TensorDict / GraphBatch / nested dict / Tensor / other.
+        batch: TensorDict / nested dict / Tensor / other.
         device: Target device, or ``None`` to leave the device alone.
         dtype: Target floating-point dtype, or ``None`` to leave it alone.
 
@@ -38,6 +38,25 @@ def batch_to(
     """
     if device is None and dtype is None:
         return batch
+
+    # Fast path: a device-only move whose target every leaf already sits on
+    # is pure waste — ``TensorDict.apply`` would still walk, re-validate and
+    # rebuild the whole tree. Skip it. This is the single largest per-step
+    # Trainer overhead in same-device (CPU, or pre-moved) training; for a
+    # genuine cross-device move the guard falls through and the move runs.
+    if dtype is None and device is not None and hasattr(batch, "values"):
+        target = torch.device(device)
+        dev = getattr(batch, "device", None)
+        if dev is not None:
+            if dev == target:
+                return batch
+        else:
+            try:
+                leaves = batch.values(include_nested=True, leaves_only=True)
+                if all(v.device == target for v in leaves):
+                    return batch
+            except (AttributeError, TypeError):
+                pass
 
     def _move(t: torch.Tensor) -> torch.Tensor:
         eff_dtype = dtype if (dtype is not None and t.is_floating_point()) else None

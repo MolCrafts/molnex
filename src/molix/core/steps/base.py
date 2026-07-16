@@ -29,45 +29,35 @@ class Step(Protocol):
     The Trainer provides access to model, optimizer, loss function, and other
     resources through the `trainer` parameter.
 
-    Example:
-        ```python
-        class GradientAccumulationStep:
-            def __init__(self, accumulation_steps: int = 4):
-                self.accumulation_steps = accumulation_steps
-                self.accumulated = 0
+    Gradient accumulation is **not** a Step concern — it is owned by the
+    Trainer via ``Trainer(accumulate_grad_batches=N)``, which scales the loss
+    and gates the optimizer / LR-scheduler / ``global_step`` advance on
+    accumulation boundaries. A custom Step that re-implemented accumulation by
+    skipping ``optimizer.step()`` would desync the scheduler (which the Trainer
+    still advances per optimizer step). Implement a custom Step only to change
+    the *computation* (e.g. an auxiliary loss term), not the step cadence.
 
+    Example — a custom step that adds an L2 activation penalty::
+
+        class PenalizedStep:
             def on_train_batch(self, trainer, state, batch):
                 predictions = trainer.model(batch)
-                targets = batch.get("y_energy") if isinstance(batch, dict) else batch
-                loss = trainer.loss_fn(predictions, targets) / self.accumulation_steps
-
+                loss = trainer.loss_fn(predictions, batch)
+                loss = loss + 1e-4 * predictions["energy"].square().mean()
+                trainer.optimizer.zero_grad()
                 loss.backward()
-                self.accumulated += 1
-
-                if self.accumulated >= self.accumulation_steps:
-                    trainer.optimizer.step()
-                    trainer.optimizer.zero_grad()
-                    self.accumulated = 0
-
-                return {"loss": loss * self.accumulation_steps, "predictions": predictions}
-
-            def on_eval_batch(self, trainer, state, batch):
-                with torch.no_grad():
-                    predictions = trainer.model(batch)
-                    targets = batch.get("y_energy") if isinstance(batch, dict) else batch
-                    loss = trainer.loss_fn(predictions, targets)
+                trainer._call_hooks("on_after_backward", trainer, state)
+                trainer.optimizer.step()
+                state["train"]["loss"] = loss.detach()
                 return {"loss": loss, "predictions": predictions}
 
-        trainer = Trainer(
-            model=model,
-            loss_fn=loss_fn,
-            optimizer_factory=opt_factory,
-            train_step=GradientAccumulationStep(accumulation_steps=4),
-        )
-        ```
+            def on_eval_batch(self, trainer, state, batch):
+                predictions = trainer.model(batch)
+                loss = trainer.loss_fn(predictions, batch)
+                return {"loss": loss, "predictions": predictions}
 
     See Also:
-        - DefaultTrainStep: Default training step implementation
+        - DefaultTrainStep: Default training step (AMP + gradient accumulation)
         - DefaultEvalStep: Default evaluation step implementation
     """
 
@@ -110,9 +100,9 @@ class Step(Protocol):
                 # Forward pass
                 predictions = trainer.model(batch)
 
-                # Compute loss
-                targets = batch["y_energy"]
-                loss = trainer.loss_fn(predictions, targets)
+                # Compute loss (loss_fn reads nested targets from the batch,
+                # e.g. batch["graphs", "energy"])
+                loss = trainer.loss_fn(predictions, batch)
 
                 # Backward pass
                 trainer.optimizer.zero_grad()
@@ -156,12 +146,10 @@ class Step(Protocol):
         Example:
             ```python
             def on_eval_batch(self, trainer, state, batch):
-                # Forward pass (no gradients)
-                with torch.no_grad():
-                    predictions = trainer.model(batch)
-                    targets = batch["y_energy"]
-                    loss = trainer.loss_fn(predictions, targets)
-
+                # Forward pass. Do NOT wrap force models in torch.no_grad():
+                # F = -dE/dx needs a live graph (see DefaultEvalStep.no_grad).
+                predictions = trainer.model(batch)
+                loss = trainer.loss_fn(predictions, batch)
                 return {"loss": loss, "predictions": predictions}
             ```
         """

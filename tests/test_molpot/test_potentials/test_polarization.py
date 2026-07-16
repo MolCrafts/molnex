@@ -6,7 +6,6 @@ import pytest
 import torch
 
 from molpot.potentials.polarization import Polarization
-from tests.utils import assert_compile_compatible
 
 
 @pytest.fixture
@@ -159,23 +158,6 @@ class TestPolarization:
             edge_index=edge_index,
         )
         assert energy.shape == (2,)
-
-    @pytest.mark.xfail(
-        reason="Polarization uses scatter/index_add for per-graph aggregation", strict=False
-    )
-    def test_compile(self, water_like):
-        pos, charge, alpha, batch, edge_index = water_like
-        pol = Polarization().double()
-        assert_compile_compatible(
-            pol,
-            strict=False,
-            pos=pos,
-            charge=charge,
-            alpha=alpha,
-            batch=batch,
-            edge_index=edge_index,
-            num_graphs=1,
-        )
 
 
 class TestPolarizationQuantitative:

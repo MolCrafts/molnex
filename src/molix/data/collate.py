@@ -6,10 +6,15 @@ Collates a list of single-molecule sample dicts into a nested
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import torch
 from tensordict import TensorDict
+
+if TYPE_CHECKING:
+    from molix.data.dataset import PackedView
 
 # ---------------------------------------------------------------------------
 # Target schema
@@ -43,6 +48,44 @@ DEFAULT_TARGET_SCHEMA = TargetSchema()
 # ---------------------------------------------------------------------------
 
 
+# Atom-index offset registry — the lazy declarative subset of PyTorch
+# Geometric's ``Data.__inc__`` / ``__cat_dim__`` contract. Each connectivity
+# key maps to ``(cat_dim, index_axis)``: ``cat_dim`` is the axis along which
+# per-molecule tensors concatenate (the "count" axis), and ``index_axis`` is
+# the axis carrying atom indices, over which the running ``atom_offset``
+# broadcasts when rebasing local indices into global ones on multi-molecule
+# batching. Only ``edge_index`` is produced by a task today; the others are
+# declared-but-unproduced, reserved for sub-spec 03 / future bonded terms so
+# the differing-axis path is exercised before a real producer exists.
+INDEX_KEYS: dict[str, tuple[int, int]] = {
+    "edge_index": (0, 1),  # [E, 2] — count axis 0, both columns are atom indices
+    "bond_index": (1, 0),  # [2, N] COO — count axis 1, both rows are atom indices
+    "angle_index": (1, 0),  # [3, N]
+    "dihedral_index": (1, 0),  # [4, N]
+}
+
+
+def rebase(tensor: torch.Tensor, offset: int | torch.Tensor, key: str) -> torch.Tensor:
+    """Shift a registered atom-index tensor into global coordinates.
+
+    Args:
+        tensor: A connectivity tensor whose entries are *local* atom indices
+            (e.g. ``edge_index`` ``(E, 2)`` or ``bond_index`` ``(2, N)``).
+        offset: Either a scalar (the running ``atom_offset`` int in
+            :func:`collate_molecules`), broadcast over the whole tensor, or a
+            per-count-element ``(count,)`` tensor (the gathered segment offsets
+            in :func:`collate_packed`), broadcast over ``key``'s ``index_axis``.
+        key: A key in :data:`INDEX_KEYS` selecting the ``index_axis``.
+
+    Returns:
+        ``tensor`` with each atom index rebased by ``offset``.
+    """
+    if isinstance(offset, torch.Tensor) and offset.ndim >= 1:
+        index_axis = INDEX_KEYS[key][1]
+        return tensor + offset.unsqueeze(index_axis)
+    return tensor + offset
+
+
 def _normalize_edge_index(edge_index: torch.Tensor) -> torch.Tensor:
     """Normalize edge_index to canonical ``(E, 2)`` format."""
     if edge_index.ndim != 2:
@@ -66,7 +109,7 @@ def collate_molecules(
     """Collate molecule samples into a nested TensorDict.
 
     Each sample is a plain dict with at least ``Z`` and ``pos`` keys.
-    Optional: ``edge_index``, ``bond_diff``, ``bond_dist``, ``targets``.
+    Optional: ``edge_index``, ``edge_diff``, ``edge_dist``, ``targets``.
 
     Args:
         samples: List of single-molecule sample dicts.
@@ -86,6 +129,9 @@ def collate_molecules(
     edge_all: list[torch.Tensor] = []
     diff_all: list[torch.Tensor] = []
     dist_all: list[torch.Tensor] = []
+
+    bond_all: list[torch.Tensor] = []
+    btype_all: list[torch.Tensor] = []
 
     graph_targets: dict[str, list[torch.Tensor]] = {}
     atom_targets: dict[str, list[torch.Tensor]] = {}
@@ -107,12 +153,19 @@ def collate_molecules(
 
         if "edge_index" in sample and sample["edge_index"] is not None:
             edge_index = _normalize_edge_index(sample["edge_index"])
-            edge_all.append(edge_index + atom_offset)
+            edge_all.append(rebase(edge_index, atom_offset, "edge_index"))
 
-            if "bond_diff" in sample and sample["bond_diff"] is not None:
-                diff_all.append(sample["bond_diff"])
-            if "bond_dist" in sample and sample["bond_dist"] is not None:
-                dist_all.append(sample["bond_dist"])
+            if "edge_diff" in sample and sample["edge_diff"] is not None:
+                diff_all.append(sample["edge_diff"])
+            if "edge_dist" in sample and sample["edge_dist"] is not None:
+                dist_all.append(sample["edge_dist"])
+
+        # Covalent bonds: bond_index is COO [2, n_bonds] — offset both rows by
+        # atom_offset (registry "bond_index", index_axis 0) and concat on dim 1.
+        if "bond_index" in sample and sample["bond_index"] is not None:
+            bond_all.append(rebase(sample["bond_index"].long(), atom_offset, "bond_index"))
+            if "bond_types" in sample and sample["bond_types"] is not None:
+                btype_all.append(sample["bond_types"])
 
         for name, value in sample.get("targets", {}).items():
             value = value if isinstance(value, torch.Tensor) else torch.tensor(value)
@@ -141,17 +194,17 @@ def collate_molecules(
             "edge_index": torch.cat(edge_all, dim=0),
         }
         if diff_all:
-            edges_dict["bond_diff"] = torch.cat(diff_all, dim=0)
+            edges_dict["edge_diff"] = torch.cat(diff_all, dim=0)
         if dist_all:
-            edges_dict["bond_dist"] = torch.cat(dist_all, dim=0)
+            edges_dict["edge_dist"] = torch.cat(dist_all, dim=0)
         e_total = edges_dict["edge_index"].shape[0]
         edges = TensorDict(edges_dict, batch_size=[e_total])
     else:
         # Empty edge data
         edges = TensorDict(
             edge_index=torch.zeros(0, 2, dtype=torch.long),
-            bond_diff=torch.zeros(0, 3),
-            bond_dist=torch.zeros(0),
+            edge_diff=torch.zeros(0, 3),
+            edge_dist=torch.zeros(0),
             batch_size=[0],
         )
 
@@ -166,9 +219,196 @@ def collate_molecules(
     graphs = TensorDict(graphs_dict, batch_size=[num_graphs])
 
     # --- Assemble top-level TensorDict ---
-    return TensorDict(
+    out = TensorDict(
         atoms=atoms,
         edges=edges,
         graphs=graphs,
         batch_size=[],
     )
+
+    # --- Optional covalent-bond namespace (only when samples carry bonds) ---
+    # batch_size=[] because bond_index is COO [2, N_bonds] (leading dim 2, not
+    # N_bonds) and so cannot share a batch axis with bond_types [N_bonds] — the
+    # same deliberate [2, N] vs [E, 2] layout split that guards edge != bond.
+    if bond_all:
+        bonds_dict: dict[str, torch.Tensor] = {"bond_index": torch.cat(bond_all, dim=1)}
+        if btype_all:
+            bonds_dict["bond_types"] = torch.cat(btype_all, dim=0)
+        out["bonds"] = TensorDict(bonds_dict, batch_size=[])
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Packed-aware fast path
+# ---------------------------------------------------------------------------
+
+_TARGET_PREFIX = "targets."
+
+
+def _gather_indices(ptr: torch.Tensor, idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Row gather-index and per-sample counts for slicing a packed bucket.
+
+    Given a cumsum pointer ``ptr`` ``(n_samples + 1,)`` and selected sample
+    indices ``idx`` ``(B,)``, returns ``(gather, counts)`` where ``counts``
+    ``(B,)`` is each selected sample's element count and ``gather``
+    ``(sum(counts),)`` indexes the packed concat tensor in sample-major
+    order — so ``packed[gather]`` equals concatenating per-sample slices.
+    """
+    counts = ptr[idx + 1] - ptr[idx]
+    starts = ptr[idx]
+    total = int(counts.sum().item())
+    seg = torch.repeat_interleave(torch.arange(idx.numel()), counts)
+    new_offsets = torch.cumsum(counts, 0) - counts
+    gather = starts[seg] + (torch.arange(total) - new_offsets[seg])
+    return gather, counts
+
+
+def collate_packed(
+    view: "PackedView",
+    indices: Sequence[int],
+    target_schema: TargetSchema = DEFAULT_TARGET_SCHEMA,
+) -> TensorDict:
+    """Collate a batch directly from packed cache tensors (no per-sample dicts).
+
+    Functionally identical to running :func:`collate_molecules` over
+    ``[dataset[i] for i in indices]``, but builds the nested
+    ``atoms`` / ``edges`` / ``graphs`` :class:`~tensordict.TensorDict` by
+    slicing the packed concat tensors and vectorizing the ``edge_index``
+    rebase — bypassing the unpack→repack round trip. Per-key routing and
+    dtypes mirror :func:`collate_molecules` exactly (it is the equivalence
+    oracle).
+
+    Args:
+        view: A :class:`~molix.data.dataset.PackedView` onto the cache
+            payload; ``view.map_indices`` resolves *indices* to packed
+            rows.
+        indices: Sample indices in the view's local coordinate. Must be
+            non-empty.
+        target_schema: Routes target keys — ``atom_level`` names become
+            per-atom ``(N, ...)`` leaves under ``atoms``; all others
+            become per-graph leaves under ``graphs``.
+
+    Returns:
+        Nested ``TensorDict`` with ``atoms`` ``(N,)`` / ``edges`` ``(E,)``
+        / ``graphs`` ``(B,)`` namespaces — leaf-for-leaf equal to
+        :func:`collate_molecules`.
+
+    Raises:
+        ValueError: *indices* is empty, or the cache schema lacks ``Z`` or
+            ``pos`` per-atom keys.
+    """
+    if len(indices) == 0:
+        raise ValueError("Cannot collate an empty sample list")
+
+    payload = view.payload
+    packed = view.map_indices(indices)
+    idx = torch.as_tensor(packed, dtype=torch.long)
+    n_graphs = idx.numel()
+
+    atoms_bucket: Mapping[str, torch.Tensor] = payload.get("atoms", {})
+    edges_bucket: Mapping[str, torch.Tensor] = payload.get("edges", {})
+    graphs_bucket: Mapping[str, torch.Tensor] = payload.get("graphs", {})
+    scalars_bucket: Mapping[str, list[Any]] = payload.get("scalars", {})
+
+    for required in ("Z", "pos"):
+        if required not in atoms_bucket:
+            raise ValueError(
+                f"packed cache has no per-atom '{required}' key — collate_packed "
+                f"requires both 'Z' and 'pos'. Rebuild the cache from samples "
+                f"that carry '{required}'."
+            )
+
+    atom_ptr = payload["atom_ptr"]
+    a_gather, counts = _gather_indices(atom_ptr, idx)
+    new_atom_offsets = torch.cumsum(counts, 0) - counts
+    seg = torch.repeat_interleave(torch.arange(n_graphs), counts)
+
+    # --- atom level ---
+    atoms_dict: dict[str, torch.Tensor] = {
+        "Z": atoms_bucket["Z"][a_gather].long(),
+        "pos": atoms_bucket["pos"][a_gather],
+        "batch": seg.long(),
+    }
+
+    # --- graph-level accumulator (filled by target routing below) ---
+    graphs_dict: dict[str, torch.Tensor] = {
+        "num_atoms": counts.long(),
+    }
+
+    def _route_target(key: str, value: torch.Tensor) -> None:
+        """Place a target key under atoms (atom_level) or graphs, oracle-style.
+
+        *value* is the per-sample values stacked/concatenated in sample-major
+        order. atom_level targets keep the raw concat (oracle cats raw);
+        graph targets are flattened, which equals the oracle's per-sample
+        ``reshape(-1)`` then ``cat`` for sample-major data.
+        """
+        name = key[len(_TARGET_PREFIX) :]
+        if name in target_schema.atom_level:
+            atoms_dict[name] = value
+        else:
+            graphs_dict[name] = value.reshape(-1)
+
+    # atom-bucket targets
+    for key in atoms_bucket:
+        if key.startswith(_TARGET_PREFIX):
+            _route_target(key, atoms_bucket[key][a_gather])
+
+    # --- edge level ---
+    if "edge_index" in edges_bucket:
+        edge_ptr = payload["edge_ptr"]
+        e_gather, e_counts = _gather_indices(edge_ptr, idx)
+        e_seg = torch.repeat_interleave(torch.arange(n_graphs), e_counts)
+        edge_index = edges_bucket["edge_index"][e_gather].long()
+        edge_index = rebase(edge_index, new_atom_offsets[e_seg], "edge_index")
+        edges_dict: dict[str, torch.Tensor] = {"edge_index": edge_index}
+        if "edge_diff" in edges_bucket:
+            edges_dict["edge_diff"] = edges_bucket["edge_diff"][e_gather]
+        if "edge_dist" in edges_bucket:
+            edges_dict["edge_dist"] = edges_bucket["edge_dist"][e_gather]
+        for key in edges_bucket:
+            if key.startswith(_TARGET_PREFIX):
+                _route_target(key, edges_bucket[key][e_gather])
+        e_total = int(edge_index.shape[0])
+        edges = TensorDict(edges_dict, batch_size=[e_total])
+    else:
+        edges = TensorDict(
+            edge_index=torch.zeros(0, 2, dtype=torch.long),
+            edge_diff=torch.zeros(0, 3),
+            edge_dist=torch.zeros(0),
+            batch_size=[0],
+        )
+
+    # graph-bucket and scalar-bucket targets
+    for key in graphs_bucket:
+        if key.startswith(_TARGET_PREFIX):
+            _route_target(key, graphs_bucket[key][idx])
+    for key in scalars_bucket:
+        if key.startswith(_TARGET_PREFIX):
+            name = key[len(_TARGET_PREFIX) :]
+            vals = [scalars_bucket[key][i] for i in packed]
+            graphs_dict[name] = torch.tensor(vals).reshape(-1)
+
+    n_total = int(atoms_dict["Z"].shape[0])
+    atoms = TensorDict(atoms_dict, batch_size=[n_total])
+    graphs = TensorDict(graphs_dict, batch_size=[n_graphs])
+
+    out = TensorDict(atoms=atoms, edges=edges, graphs=graphs, batch_size=[])
+
+    # --- covalent-bond level (mirror of collate_molecules' bonds namespace) ---
+    bonds_bucket: Mapping[str, torch.Tensor] = payload.get("bonds", {})
+    if "bond_index" in bonds_bucket and payload.get("bond_ptr") is not None:
+        b_gather, b_counts = _gather_indices(payload["bond_ptr"], idx)
+        b_seg = torch.repeat_interleave(torch.arange(n_graphs), b_counts)
+        # bond_index is COO [2, N]: gather columns, offset both rows by the
+        # owning sample's atom base (registry "bond_index", index_axis 0).
+        bond_index = rebase(
+            bonds_bucket["bond_index"][:, b_gather].long(), new_atom_offsets[b_seg], "bond_index"
+        )
+        bonds_dict: dict[str, torch.Tensor] = {"bond_index": bond_index}
+        if "bond_types" in bonds_bucket:
+            bonds_dict["bond_types"] = bonds_bucket["bond_types"][b_gather]
+        out["bonds"] = TensorDict(bonds_dict, batch_size=[])
+
+    return out

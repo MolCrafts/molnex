@@ -14,6 +14,12 @@ Three profilers, each targeting a single component:
 
 - :class:`DataLoaderProfiler` — DataLoader stall-time measurement.
 
+- :class:`TrainerProfiler` — Trainer-loop per-step framework overhead.
+  Drives a real Trainer over a near-zero-compute
+  :class:`~molix.profiler.mock.MockModel` so a ``cProfile`` window
+  attributes wall time to loop machinery (Step dispatch, hooks,
+  ``batch_to``, TrainState writes), not model FLOPs.
+
 Two data generators for use when no real dataset is available:
 
 - :class:`MockBatch` — callable that produces a
@@ -45,7 +51,7 @@ Typical workflow::
     result = ModuleProfiler(rbf).run_fn(
         forward_fn=lambda: rbf(dist),
         backward_fn=lambda out: out.sum(),
-        label="bond_dist E=512",
+        label="edge_dist E=512",
     )
     result.print_report()
 
@@ -58,20 +64,25 @@ Typical workflow::
 """
 
 from molix.profiler.dataloader import DataLoaderProfiler, DataLoaderResult
-from molix.profiler.mock import MockBatch, MockSource
+from molix.profiler.mock import MockBatch, MockModel, MockSource, mock_node_feature_loss
 from molix.profiler.module import ModuleProfiler, ModuleResult
 from molix.profiler.task import TaskProfiler, TaskResult
+from molix.profiler.trainer import TrainerProfiler, TrainerResult
 
 __all__ = [
     # Profilers
     "TaskProfiler",
     "ModuleProfiler",
     "DataLoaderProfiler",
+    "TrainerProfiler",
     # Results
     "TaskResult",
     "ModuleResult",
     "DataLoaderResult",
+    "TrainerResult",
     # Data generators
     "MockBatch",
     "MockSource",
+    "MockModel",
+    "mock_node_feature_loss",
 ]

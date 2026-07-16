@@ -18,7 +18,7 @@ loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_mol
 `collate_molecules` produces a nested `GraphBatch`:
 
 - Atom-level fields (`Z`, `pos`) → `AtomData` (batch_size=[N_total])
-- Edge fields (`edge_index`, `bond_diff`, `bond_dist`) → `EdgeData` (batch_size=[E_total])
+- Edge fields (`edge_index`, `edge_diff`, `edge_dist`) → `EdgeData` (batch_size=[E_total])
 - Graph-level metadata + targets → `GraphData` (batch_size=[B])
 
 ## Preprocessing Tasks

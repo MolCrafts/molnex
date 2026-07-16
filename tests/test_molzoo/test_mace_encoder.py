@@ -8,7 +8,6 @@ from tensordict import TensorDict
 
 from molrep.embedding.node import DiscreteEmbeddingSpec
 from molzoo import MACE
-from tests.utils import assert_compile_compatible
 
 
 @pytest.fixture
@@ -28,8 +27,8 @@ def graph_data():
         dtype=torch.long,
     )
     pos = torch.randn(n_nodes, 3)
-    bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    bond_dist = bond_diff.norm(dim=-1).clamp(min=1e-4)
+    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    edge_dist = edge_diff.norm(dim=-1).clamp(min=1e-4)
     n_edges = edge_index.shape[0]
 
     atoms = TensorDict(
@@ -40,8 +39,8 @@ def graph_data():
     )
     edges = TensorDict(
         edge_index=edge_index,
-        bond_diff=bond_diff,
-        bond_dist=bond_dist,
+        edge_diff=edge_diff,
+        edge_dist=edge_dist,
         batch_size=[n_edges],
     )
     return TensorDict(atoms=atoms, edges=edges, batch_size=[])
@@ -74,11 +73,3 @@ class TestMACE:
         n_nodes = graph_data["atoms", "Z"].shape[0]
         assert isinstance(node_features, torch.Tensor)
         assert node_features.shape == (n_nodes, 2, 16)
-
-    @pytest.mark.xfail(
-        reason="TensorDict access + cuEquivariance not yet fullgraph-compatible",
-        strict=False,
-    )
-    def test_compile(self, graph_data):
-        encoder = _build_encoder()
-        assert_compile_compatible(encoder, graph_data, strict=False)

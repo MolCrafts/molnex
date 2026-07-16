@@ -55,7 +55,13 @@ if(MOLNEX_OP_ENABLE_CUDA)
   )
 endif()
 
+# Tag the artifact with the target architecture (e.g. libmolnex_opLib.x86_64.so,
+# libmolnex_opLib.aarch64.so) so builds for different arches can coexist in the
+# same in-source ``op/`` directory without clobbering each other. The Python
+# loader (molix/__init__.py) selects the file matching the running machine and
+# falls back to the legacy un-tagged name for older builds.
 set_target_properties(${MOLNEX_OP_LIBRARY_NAME} PROPERTIES
+  OUTPUT_NAME "molnex_opLib.${CMAKE_SYSTEM_PROCESSOR}"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
 )
