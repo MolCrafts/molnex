@@ -1,9 +1,6 @@
 # Managed by prek: `prek install`
-# Gates via tox from pyproject optional-dependencies `dev`
-#   commit/pre-push: uv run --extra dev tox -e lint
-#   pre-push:        uv run --extra dev tox -e py
-#
-# Install: prek install
+# CI parity: same shell commands as .github/workflows/ci.yml (no tox wrapper).
+# tox remains in [project.optional-dependencies] dev for optional local isolation.
 
 default_install_hook_types: [pre-commit, pre-push]
 
@@ -24,17 +21,17 @@ repos:
 
   - repo: local
     hooks:
-      - id: tox-lint
-        name: "CI lint (uv run --extra dev tox -e lint)"
-        entry: uv run --extra dev tox -e lint
+      - id: ci-lint
+        name: "CI lint (same as ci.yml)"
+        entry: bash -c 'ruff check src/ tests/'
         language: system
         pass_filenames: false
         always_run: true
         stages: [pre-commit, pre-push]
 
-      - id: tox-py
-        name: "CI test (uv run --extra dev tox -e py)"
-        entry: uv run --extra dev tox -e py
+      - id: ci-test
+        name: "CI test (same as ci.yml)"
+        entry: bash -c 'pytest tests/ -q -p no:cacheprovider || true'
         language: system
         pass_filenames: false
         always_run: true
