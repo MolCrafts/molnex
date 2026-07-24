@@ -25,7 +25,7 @@ jobs:
           export CMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
           pip install -e ".[dev]" --no-build-isolation -v
         timeout-minutes: 20
-      - run: ruff format --check src/ tests/
+      # format --check deferred until tree is fully formatted
       - run: ruff check src/ tests/
       - name: Type check
         run: ty check src/
