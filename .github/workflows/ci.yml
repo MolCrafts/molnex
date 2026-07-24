@@ -1,18 +1,6 @@
 name: CI
 
-# Stock ``ubuntu-latest`` GitHub runners can install the project end-to-end
-# *without* a GPU because:
-#   * ``molnex_op`` defaults to ``MOLNEX_OP_ENABLE_CUDA=OFF`` and only needs
-#     a C++17 toolchain + libtorch (CMake config shipped inside the torch
-#     wheel).
-#   * ``cuequivariance-torch`` is a ``py3-none-any`` wheel and only depends
-#     on ``cuequivariance`` (also pure Python).  The CUDA kernel companion
-#     packages (``cuequivariance-ops-torch-cu1X``) are *not* required at
-#     install time and are not pulled in transitively.
-#
-# What this means for CI: lint + type-check + the pytest suite all run on
-# the stock runner.  Tests that strictly require CUDA must self-skip via
-# ``pytest.importorskip`` or ``pytest.mark.skipif(not torch.cuda.is_available())``.
+# Lint/test gates use tox (pyproject [tool.tox]); torch CPU wheel for stock runners.
 
 on:
   push:
@@ -25,98 +13,32 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      # CI runs Python 3.13 even though local dev uses 3.14, because
-      # PyTorch's CPU wheel index does not yet ship cp314 builds.  We
-      # need the CPU torch wheel (not the default PyPI CUDA build), as
-      # the latter's Caffe2Config.cmake hard-fails ``find_package(Torch)``
-      # whenever CUDA libs are absent — even with MOLNEX_OP_ENABLE_CUDA
-      # off, that check still runs.  Lint + typecheck don't need 3.14
-      # parity (Alvis covers that locally); they are syntactic/static
-      # checks.
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-
-      # Pre-install build prerequisites in the outer env so the
-      # subsequent ``pip install --no-build-isolation`` can use them:
-      #   * ``scikit-build-core`` is the build backend declared in
-      #     ``pyproject.toml``.  Without it in the outer env, pip's
-      #     PEP 517 hook fails with ``BackendUnavailable``.
-      #   * ``torch`` from the CPU index — ships ``TorchConfig.cmake``
-      #     without baked-in CUDA dependency, so ``find_package(Torch)``
-      #     in ``src/molix/op/CMakeLists.txt`` resolves on a stock
-      #     runner.
-      #   * ``cmake>=4`` and ``ninja`` are the toolchain
-      #     ``scikit-build-core`` shells out to.
-      - name: Install build prerequisites
-        run: |
-          python -m pip install --upgrade pip
-          pip install "scikit-build-core>=0.10" "cmake>=4" ninja
-          pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.10"
-
-      # ``CMAKE_PREFIX_PATH`` exposes the torch CMake config dir so
-      # ``find_package(Torch)`` resolves on stock GitHub runners (Alvis
-      # picks this up via system hooks; bare Ubuntu does not).
-      - name: Install project
-        run: |
-          export CMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
-          echo "CMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH"
-          pip install -e ".[dev]" --no-build-isolation -v
-        timeout-minutes: 20
-
-      - name: Ruff format
-        run: ruff format --check src/ tests/
-
-      - name: Ruff lint
-        run: ruff check src/ tests/
-
-      # Advisory only: ty surfaces a real signal (mollog / molpy version
-      # skew between Alvis dev env and PyPI — e.g. ``mollog.FileHandler``
-      # ``mode``/``encoding`` kwargs and ``molpy.UnitSystem`` are present
-      # locally but missing from the PyPI-resolved versions).  Once the
-      # upstream packages are republished or pyproject pins are tightened,
-      # drop ``continue-on-error`` so type errors gate CI again.
-      - name: Type check
-        run: ty check src/
-        continue-on-error: true
+      - uses: astral-sh/setup-uv@v6
+      - name: uv run --extra dev tox -e lint
+        run: uv run --extra dev tox -e lint
 
   test:
     name: Test (CPU)
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-
-      - name: Install build prerequisites
+      - uses: astral-sh/setup-uv@v6
+      - name: Install build prerequisites (CPU torch)
         run: |
           python -m pip install --upgrade pip
           pip install "scikit-build-core>=0.10" "cmake>=4" ninja
           pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.10"
-
-      - name: Install project
+      - name: uv run --extra dev tox -e py
         run: |
           export CMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
-          echo "CMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH"
-          pip install -e ".[dev]" --no-build-isolation -v
-        timeout-minutes: 20
-
-      # Advisory only on first cut: most tests aren't GPU-guarded yet, so
-      # CPU-only runs surface failures in CUDA-pinned ones (cuequivariance
-      # ops, etc.).  ``-p no:cacheprovider`` skips ``.pytest_cache`` (fresh
-      # runner each time).  Once GPU-strict tests self-skip via
-      # ``pytest.importorskip`` / ``skipif(not torch.cuda.is_available())``,
-      # drop ``continue-on-error`` so the suite gates CI.
-      - name: Run tests
-        run: pytest tests/ -q -p no:cacheprovider
-        continue-on-error: true
+          uv run --extra dev tox -e py
         timeout-minutes: 30
+        continue-on-error: true

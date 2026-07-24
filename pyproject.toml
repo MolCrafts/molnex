@@ -13,7 +13,7 @@ version = "0.1.0"
 description = "Dict-first molecular ML framework"
 readme = "README.md"
 license = "BSD-3-Clause"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [
   { name = "Roy Kid" },
 ]
@@ -51,6 +51,7 @@ dev = [
   "pytest-benchmark>=4.0",
   "ruff>=0.15",
   "ty>=0.0.25",
+  "tox>=4.23",
 ]
 docs = [
   "zensical>=0.0.27",
@@ -129,3 +130,48 @@ no-matching-overload = "warn"
 
 [tool.ty.environment]
 python-version = "3.12"
+
+# Isolated gates — prek + CI: uv run --extra dev tox -e lint|py
+[tool.tox]
+requires = ["tox>=4.23"]
+env_list = ["lint", "py"]
+
+[tool.tox.env.lint]
+description = "CI lint"
+skip_install = true
+base_python = ["python3.12"]
+deps = [
+  "ruff>=0.15",
+  "ty>=0.0.25",
+]
+commands = [
+  # ty is advisory in CI (continue-on-error); keep local gate = ruff check only.
+  ["ruff", "check", "src/", "tests/"],
+]
+
+[tool.tox.env.py]
+description = "CI test (non-editable package when package=wheel)"
+base_python = ["python3.12"]
+pass_env = [
+  "HOME",
+  "PATH",
+  "SSH_AUTH_SOCK",
+  "TERM",
+  "VIRTUAL_ENV",
+  "UV_*",
+  "CMAKE_PREFIX_PATH",
+  "CUDA_VISIBLE_DEVICES",
+  "TORCH_*",
+]
+package = "wheel"
+extras = ["dev"]
+commands_pre = [
+  [
+    "{envpython}",
+    "-c",
+    "import pathlib, site; sps=site.getsitepackages(); print('site-packages', sps)",
+  ],
+]
+commands = [
+  ["{envpython}", "-m", "pytest", "tests/", "-q", "-p", "no:cacheprovider"],
+]
