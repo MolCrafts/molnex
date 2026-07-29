@@ -1,6 +1,6 @@
-"""Tests for ``MolRecSource`` — molrs ``MolRec`` (.zarr) distillation loader.
+"""Tests for ``MolRecSource`` — molpy ``MolRec`` (.zarr) distillation loader.
 
-``MolRecSource`` adapts a single-teacher view of a molrs ``MolRec`` archive
+``MolRecSource`` adapts a single-teacher view of a molpy ``MolRec`` archive
 into the flat-sample :class:`molix.data.source.DataSource` contract. One record
 may carry observables from several teachers (``teacherA.energy``,
 ``teacherB.energy``, ...); a ``MolRecSource`` is pinned to exactly one teacher
@@ -17,7 +17,7 @@ Acceptance trace
 * ac-007 → ``TestMolRecQM9Roundtrip`` (15 float32 scalars lossless)
 * ac-008 → ``TestMolRecForceRoundtrip`` (forces shape + lossless, energy lossless)
 
-Note on dtypes: molrs zarr storage upcasts float32 -> float64 on read-back, so
+Note on dtypes: zarr storage may upcast float32 -> float64 on read-back, so
 these tests assert that ``MolRecSource`` *output* is ``torch.float32`` (the
 source casts) and verify value losslessness with ``np.allclose`` /
 ``torch.allclose`` — never that the raw zarr is float32.
@@ -32,8 +32,11 @@ import torch
 from molix.data.collate import TargetSchema
 from molix.data.source import DataSource
 
-# Import under test: not yet implemented. The whole module is expected to fail
-# at import time (RED) until ``src/molix/datasets/molrec.py`` exists.
+# MolRec is an optional molpy public surface (never import molrs from molnex).
+molpy = pytest.importorskip("molpy")
+if not hasattr(molpy, "MolRec"):
+    pytest.skip("molpy.MolRec not available in this molpy build", allow_module_level=True)
+
 from molix.datasets import MolRecSource
 
 # ---------------------------------------------------------------------------
@@ -217,7 +220,7 @@ class TestMolRecQM9Roundtrip:
     def test_all_fifteen_scalars_lossless(self, molrec_qm9_record):
         """ac-007: all 15 float32 scalar targets survive write -> read exactly.
 
-        molrs upcasts to float64 on disk; casting f32->f64->f32 is exact, so
+        storage may upcast to float64 on disk; casting f32->f64->f32 is exact, so
         the source's float32 output must equal the original float32 values.
         Probability/energy exact column is 1e-10; we use 1e-6 numerical to also
         cover the storage round-trip safely.

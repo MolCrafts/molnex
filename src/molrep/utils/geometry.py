@@ -155,11 +155,19 @@ class GaussianRBF(nn.Module):
 
 
 class CosineCutoff(nn.Module):
-    """Smooth cosine cutoff function."""
+    """Smooth cosine cutoff — thin wrapper over the canonical embedding impl.
+
+    The single implementation lives in :class:`molrep.embedding.cutoff.CosineCutoff`
+    (``r_cut=``). This class keeps the historical ``cutoff=`` constructor for
+    utils callers.
+    """
 
     def __init__(self, cutoff: float):
         super().__init__()
-        self.cutoff = cutoff
+        from molrep.embedding.cutoff import CosineCutoff as _CanonicalCosineCutoff
+
+        self.cutoff = float(cutoff)
+        self._impl = _CanonicalCosineCutoff(r_cut=self.cutoff)
 
     def forward(self, distances: torch.Tensor) -> torch.Tensor:
         """Evaluate the smooth cosine cutoff.
@@ -171,5 +179,4 @@ class CosineCutoff(nn.Module):
             Cutoff values in ``[0, 1]`` (same shape as ``distances``), zero
             for ``distances >= cutoff``.
         """
-        cutoffs = 0.5 * (torch.cos(math.pi * distances / self.cutoff) + 1)
-        return cutoffs * (distances < self.cutoff).float()
+        return self._impl(distances)

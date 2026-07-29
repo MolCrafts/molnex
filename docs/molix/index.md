@@ -2,14 +2,15 @@
 
 Molix is the training and execution package in MolNex. Use it when you need
 training loops, data modules, hooks, checkpoints, metrics, or the nested
-`GraphBatch` data contract used by models and losses.
+plain-`TensorDict` batch contract used by models and losses (namespaces
+`atoms` / `edges` / `graphs` / `bonds`).
 
 ## Tutorials
 
 - [Quick Start](tutorials/quick-start.md): train a small PyTorch model with
   `Trainer`.
 - [Train a Graph Model](tutorials/train-a-graph-model.md): use a nested
-  molecular `GraphBatch` end to end.
+  molecular batch end to end.
 
 ## User Guide
 

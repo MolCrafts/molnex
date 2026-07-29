@@ -279,15 +279,19 @@ class MeshInterpolator(torch.nn.Module):
             dim=0,
         )
 
-        x_shifts, y_shifts, z_shifts = torch.meshgrid(
-            torch.arange(self.interpolation_nodes, device=self._device),
-            torch.arange(self.interpolation_nodes, device=self._device),
-            torch.arange(self.interpolation_nodes, device=self._device),
-            indexing="ij",
-        )
-        self.x_shifts = x_shifts.flatten()
-        self.y_shifts = y_shifts.flatten()
-        self.z_shifts = z_shifts.flatten()
+        # meshgrid shifts depend only on interpolation_nodes + device — cache them.
+        cache_key = (int(self.interpolation_nodes), str(self._device))
+        if getattr(self, "_shift_cache_key", None) != cache_key:
+            x_shifts, y_shifts, z_shifts = torch.meshgrid(
+                torch.arange(self.interpolation_nodes, device=self._device),
+                torch.arange(self.interpolation_nodes, device=self._device),
+                torch.arange(self.interpolation_nodes, device=self._device),
+                indexing="ij",
+            )
+            self.x_shifts = x_shifts.flatten()
+            self.y_shifts = y_shifts.flatten()
+            self.z_shifts = z_shifts.flatten()
+            self._shift_cache_key = cache_key
 
         self.x_indices = indices_to_interpolate[self.x_shifts, :, 0]
         self.y_indices = indices_to_interpolate[self.y_shifts, :, 1]
@@ -318,15 +322,16 @@ class MeshInterpolator(torch.nn.Module):
         ny = int(self.ns_mesh[1])
         nz = int(self.ns_mesh[2])
         rho_mesh = torch.zeros((n_channels, nx, ny, nz), dtype=self._dtype, device=self._device)
+        # Spatial interpolation weights are channel-independent — compute once.
+        spatial = (
+            self.interpolation_weights[self.x_shifts, :, 0]
+            * self.interpolation_weights[self.y_shifts, :, 1]
+            * self.interpolation_weights[self.z_shifts, :, 2]
+        )
         for a in range(n_channels):
             rho_mesh[a].index_put_(
                 (self.x_indices, self.y_indices, self.z_indices),
-                (
-                    particle_weights[:, a]
-                    * self.interpolation_weights[self.x_shifts, :, 0]
-                    * self.interpolation_weights[self.y_shifts, :, 1]
-                    * self.interpolation_weights[self.z_shifts, :, 2]
-                ),
+                particle_weights[:, a] * spatial,
                 accumulate=True,
             )
 

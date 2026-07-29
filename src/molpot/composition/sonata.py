@@ -49,6 +49,7 @@ import torch.nn as nn
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 
+from molpot.derivation import ForceDerivation
 from molpot.heads.multipole import PermMultipoleHead, PermMultipoleHeadSpec
 from molpot.potentials.elec.ewald_multipole import (
     EwaldMultipoleEnergy,
@@ -255,6 +256,10 @@ class Sonata(nn.Module):
         self.encoder = encoder
         self.perm_multipole_head = perm_multipole_head
         self.ewald = ewald
+        # Pure-torch multipole-Ewald graph → functorch force path.
+        # Stress keeps a custom symmetric-ε post-process after torch.func.grad
+        # (not a drop-in for StressDerivation's isotropic V scaling).
+        self.force_derivation = ForceDerivation(method="functorch")
 
         # Wrap a list of heads in nn.ModuleList; otherwise store the single
         # head (or None) directly. Storing as None on the attribute keeps
@@ -336,11 +341,12 @@ class Sonata(nn.Module):
             batch: Post-collate :class:`TensorDict` carrying ``atoms``,
                 ``edges``, and ``graphs`` sub-dicts. Periodic systems
                 must include ``("graphs", "cell")``.
-            compute_forces: Derive forces ``F = -∂U/∂pos`` via functorch
-                (``torch.func.grad``).
-            compute_stress: Derive stress ``σ = (1/V) ∂U/∂ε`` via functorch
-                through a differentiable strain perturbation. Requires
-                ``("graphs", "cell")``.
+            compute_forces: Derive forces ``F = -∂U/∂pos`` via
+                :class:`~molpot.derivation.ForceDerivation`
+                (``method="functorch"``).
+            compute_stress: Derive stress ``σ = (1/V) ∂U/∂ε`` via
+                ``torch.func.grad`` through a differentiable strain
+                perturbation. Requires ``("graphs", "cell")``.
             kvec_indices: optional ``(M, 3)`` precomputed integer
                 triplet array forwarded to
                 :meth:`EwaldMultipoleEnergy._compute_reciprocal` to
@@ -481,9 +487,10 @@ class Sonata(nn.Module):
         #    the batch's cached edge geometry (the original non-grad path). --
         _energy, out = _run_pipeline(batch.clone(), pos0, cell0)
 
-        # -- forces via functorch: F = -∂E/∂pos. At ε = 0 the strain is the
-        #    identity, so differentiating w.r.t. positions on the original
-        #    geometry suffices whether or not stress is also requested. --
+        # -- forces via ForceDerivation (functorch): F = -∂E/∂pos. At ε = 0
+        #    the strain is the identity, so differentiating w.r.t. positions
+        #    on the original geometry suffices whether or not stress is also
+        #    requested. --
         if compute_forces:
 
             def energy_of_pos(p: torch.Tensor) -> torch.Tensor:
@@ -491,7 +498,7 @@ class Sonata(nn.Module):
                 _prepare(b, p, cell0)
                 return _run_pipeline(b, p, cell0)[0].sum()
 
-            out["forces"] = -torch.func.grad(energy_of_pos)(pos0)
+            out["forces"] = self.force_derivation(energy_of_pos, pos0)
 
         # -- stress via functorch: σ = (1/V) ∂E/∂ε through a differentiable
         #    strain perturbation of positions + cell. --

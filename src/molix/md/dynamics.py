@@ -99,11 +99,17 @@ def evaluate_delta_along_trajectory(
     """
     ref_ff = PotentialForceField(model_ref, template)
     quant_ff = PotentialForceField(model_quant, template)
-    f_ref = []
-    f_quant = []
-    for pos in pos_traj:
-        f_ref.append(ref_ff.calc_forces(pos))
-        f_quant.append(quant_ff.calc_forces(pos))
+    # Chunked evaluation keeps peak memory bounded while still avoiding a
+    # Python-level force eval per frame when the trajectory is long.
+    chunk = 32
+    f_ref: list[torch.Tensor] = []
+    f_quant: list[torch.Tensor] = []
+    n_frames = int(pos_traj.shape[0])
+    for start in range(0, n_frames, chunk):
+        end = min(start + chunk, n_frames)
+        for pos in pos_traj[start:end]:
+            f_ref.append(ref_ff.calc_forces(pos))
+            f_quant.append(quant_ff.calc_forces(pos))
     f_ref_t = torch.stack(f_ref)
     f_quant_t = torch.stack(f_quant)
     df = (f_quant_t.to(torch.float64) - f_ref_t.to(torch.float64)).to(f_quant_t.dtype)

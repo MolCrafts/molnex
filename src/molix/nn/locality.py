@@ -15,13 +15,16 @@ class NeighborList(nn.Module):
 
     Args:
         cutoff: Neighbor cutoff radius.
-        pbc: Whether periodic boundary conditions apply.
+        pbc: Whether periodic boundary conditions apply (``box_vectors`` used
+            only when ``True``).
+        max_num_pairs: Buffer size for the C++ kernel (``-1`` = all pairs).
     """
 
-    def __init__(self, cutoff, pbc=True):
+    def __init__(self, cutoff, pbc=True, max_num_pairs: int = -1):
         super().__init__()
         self.cutoff = cutoff
         self.pbc = pbc
+        self.max_num_pairs = max_num_pairs
 
     def forward(self, positions, cell):
         """Return neighbor pairs for ``positions`` under the given cell.
@@ -34,11 +37,17 @@ class NeighborList(nn.Module):
             The neighbor-pair output of
             :func:`molix.F.locality.get_neighbor_pairs`.
         """
-        return F.get_neighbor_pairs(positions, self.cutoff, box_vectors=cell)
+        box = cell if self.pbc else None
+        return F.get_neighbor_pairs(
+            positions,
+            self.cutoff,
+            max_num_pairs=self.max_num_pairs,
+            box_vectors=box,
+        )
 
     def extra_repr(self):
-        """Render ``cutoff`` and ``pbc`` for ``repr(module)``."""
-        return f"cutoff={self.cutoff}, pbc={self.pbc}"
+        """Render constructor args for ``repr(module)``."""
+        return f"cutoff={self.cutoff}, pbc={self.pbc}, max_num_pairs={self.max_num_pairs}"
 
 
 __all__ = ["NeighborList"]

@@ -73,6 +73,7 @@ class SymmetricContraction(nn.Module):
         max_body_order: int = 2,
         irreps_in: str | None = None,
         irreps_out: str | None = None,
+        use_fallback: bool = True,
     ):
         """Initialize symmetric contraction layer.
 
@@ -92,8 +93,11 @@ class SymmetricContraction(nn.Module):
             irreps_out: Explicit output irreps. When ``None`` it mirrors the
                 input. The MACE readout requests scalars only (``Nx0e``) so the
                 contracted node features are rotation-invariant.
+            use_fallback: Pure-torch cuEq path (default ``True``, functorch-safe).
+                Set ``False`` for fused kernels when forces use autograd.
         """
         super().__init__()
+        self.use_fallback = use_fallback
 
         self.config = SymmetricContractionSpec(
             hidden_dim=hidden_dim,
@@ -121,9 +125,7 @@ class SymmetricContraction(nn.Module):
             layout_out=cue.ir_mul,
             original_mace=True,
             dtype=config.ftype,
-            # Pure-torch path so functorch (ForceDerivation) / torch.compile can
-            # trace the force: the fused kernel has no functorch setup_context.
-            use_fallback=True,
+            use_fallback=use_fallback,
         )
 
     def forward(

@@ -2,14 +2,15 @@
 
 Single responsibility: atomic forces as the negative gradient of energy w.r.t.
 atomic positions. Two **explicit** backends — the caller picks one per model;
-there is no auto-detection and no fallback:
+there is no auto-detection and no silent fallback:
 
 * **functorch** (``torch.func.grad``) — for pure-PyTorch models (e.g. PiNet).
   The transform is traced into the forward graph, so ``energy → force → loss``
   is a single backward and composes with ``torch.compile(fullgraph=True)``.
   It does NOT work on cuEquivariance *fused* kernels: those register a legacy
   ``autograd.Function`` without a ``setup_context`` staticmethod, which the
-  functorch transforms reject (pytorch#170834).
+  functorch transforms reject (pytorch#170834). Supports ``has_aux=True`` so
+  energy side-outputs can be returned with a single pass.
 
 * **autograd** (``torch.autograd.grad``) — for models built on cuEq fused ops
   (e.g. MACE), matching the upstream MACE library. Eager-correct, trains (the
@@ -30,7 +31,7 @@ Example:
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Literal
+from typing import Any, Literal, overload
 
 import torch
 import torch.nn as nn
@@ -47,6 +48,18 @@ def functorch_forces(
     without ``setup_context`` — pytorch#170834).
     """
     return -torch.func.grad(energy_fn)(pos)
+
+
+def functorch_forces_with_aux(
+    energy_fn: Callable[[torch.Tensor], tuple[torch.Tensor, Any]],
+    pos: torch.Tensor,
+) -> tuple[torch.Tensor, Any]:
+    """``F = -∂E/∂pos`` plus auxiliary outputs via ``torch.func.grad(..., has_aux=True)``.
+
+    ``energy_fn`` must return ``(scalar_energy, aux)``. Returns ``(forces, aux)``.
+    """
+    grad, aux = torch.func.grad(energy_fn, has_aux=True)(pos)
+    return -grad, aux
 
 
 def autograd_forces(
@@ -91,21 +104,52 @@ class ForceDerivation(nn.Module):
             raise ValueError(f"method must be one of {sorted(_BACKENDS)}, got {method!r}")
         self.method = method
 
+    @overload
     def forward(
         self,
         energy_fn: Callable[[torch.Tensor], torch.Tensor],
         pos: torch.Tensor,
-    ) -> torch.Tensor:
+        *,
+        has_aux: Literal[False] = False,
+    ) -> torch.Tensor: ...
+
+    @overload
+    def forward(
+        self,
+        energy_fn: Callable[[torch.Tensor], tuple[torch.Tensor, Any]],
+        pos: torch.Tensor,
+        *,
+        has_aux: Literal[True],
+    ) -> tuple[torch.Tensor, Any]: ...
+
+    def forward(
+        self,
+        energy_fn: Callable,
+        pos: torch.Tensor,
+        *,
+        has_aux: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, Any]:
         """Forces as the negative gradient of energy w.r.t. positions.
 
         Args:
-            energy_fn: Maps positions ``(N, 3)`` to a **scalar** total energy,
-                closing over the model parameters and the rest of the batch.
-                Must recompute position-derived geometry inside itself so the
-                gradient flows through it.
+            energy_fn: Maps positions ``(N, 3)`` to a **scalar** total energy
+                (or ``(scalar, aux)`` when ``has_aux=True``), closing over the
+                model parameters and the rest of the batch. Must recompute
+                position-derived geometry inside itself so the gradient flows
+                through it.
             pos: Atomic positions ``(N, 3)``. Does not need ``requires_grad``.
+            has_aux: If ``True``, ``energy_fn`` returns ``(energy, aux)`` and this
+                method returns ``(forces, aux)``. Only supported for
+                ``method="functorch"`` (single-pass eval path for PiNet).
 
         Returns:
-            Atomic forces ``(N, 3)``.
+            Atomic forces ``(N, 3)``, or ``(forces, aux)`` when ``has_aux=True``.
         """
+        if has_aux:
+            if self.method != "functorch":
+                raise ValueError(
+                    "has_aux=True requires ForceDerivation(method='functorch'); "
+                    f"got method={self.method!r}"
+                )
+            return functorch_forces_with_aux(energy_fn, pos)
         return _BACKENDS[self.method](energy_fn, pos)

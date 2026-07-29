@@ -257,15 +257,15 @@ class TestUnitConvert:
 
     def test_incompatible_dimensions_raises(self):
         """Registry rejects hartree → Å (energy vs length)."""
-        import molrs
+        from molpy import UnitsError
 
-        with pytest.raises((pint.errors.DimensionalityError, molrs.UnitsError)):
+        with pytest.raises((pint.errors.DimensionalityError, UnitsError)):
             UnitConvert({"x": ("hartree", "angstrom")})
 
     def test_unknown_unit_raises(self):
-        import molrs
+        from molpy import UnitsError
 
-        with pytest.raises((pint.errors.UndefinedUnitError, molrs.UnitsError)):
+        with pytest.raises((pint.errors.UndefinedUnitError, UnitsError)):
             UnitConvert({"x": ("nonsense", "eV")})
 
     def test_missing_target_raises(self):

@@ -1,4 +1,4 @@
-"""molpy/molrs bonds-block -> canonical bond_index [2, N] boundary helper.
+"""molpy bonds-block -> canonical bond_index [2, N] boundary helper.
 
 molpy's ``Atomistic.to_frame()`` emits a ``bonds`` block with columns
 ``atomi`` / ``atomj`` (the covalent connectivity) plus a bond-type column.

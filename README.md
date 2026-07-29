@@ -51,10 +51,10 @@ becoming the framework itself.
 
 | Package | Capability |
 |---------|------------|
-| `molix`   | Training and execution — `Trainer`, `TrainState`, step protocol, hook lifecycle, packed-cache data pipeline, dataset loaders (QM9, RevMD17, 3BPA, Water-LES, MolRec), checkpointing, `torch.compile` / CUDA-graph and AOT-Inductor export, an in-process Langevin MD driver, trajectory diagnostics, and native C++ ops |
-| `molrep`  | Representation learning — node/radial/angular embeddings, cutoffs, equivariant interaction blocks (tensor products, symmetric contraction), pooling and readout heads |
-| `molpot`  | Potentials and composition — classical potential terms (LJ, harmonic bonds/angles/dihedrals, electrostatics), prediction heads, force/stress derivation, and the `PotentialComposer` assembly layer |
-| `molzoo`  | Assembled reference models — curated encoder and potential families (MACE, Allegro, PiNet, Sonata), each with a paper-traceable spec |
+| `molix`   | Training and execution — `Trainer`, `TrainState`, step protocol, hook lifecycle, packed-cache data pipeline, dataset loaders (QM9, RevMD17, 3BPA, Water-LES, MolRec), checkpointing, `torch.compile` / CUDA-graph and AOT-Inductor export, in-process Langevin MD, engine/LAMMPS export bridge, and arch-tagged native C++ ops |
+| `molrep`  | Representation learning — node/radial/angular embeddings, cutoffs, equivariant interaction blocks (tensor products, symmetric contraction, PiNet GC blocks), pooling and readout heads |
+| `molpot`  | Potentials and composition — classical potential terms (LJ, harmonic bonds/angles/dihedrals, electrostatics / PME), prediction heads, force/stress derivation (`ForceDerivation`), `PotentialComposer`, and assembled models such as Sonata |
+| `molzoo`  | Assembled reference encoders — MACE, Allegro, PiNet (plus full energy/force façades `PiNetPotential` / `MACEOMol`); each family should ship a paper-traceable spec under `src/molzoo/specs/` |
 
 ## Install
 

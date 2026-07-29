@@ -141,6 +141,8 @@ class MACEOMol(nn.Module):
                     target_irreps=target,
                     hidden_irreps=hidden_sched[i],
                     radial_mlp=[128, 128, 128],
+                    # autograd force path → fused cuEq kernels OK
+                    use_fallback=False,
                 )
             )
             self.products.append(
@@ -150,6 +152,7 @@ class MACEOMol(nn.Module):
                     correlation=correlation,
                     num_elements=1,
                     use_sc=True,
+                    use_fallback=False,
                 )
             )
         self.readout = NonLinearBiasReadout(irreps_in=feat0, mlp_dim=mlp_dim)
@@ -180,21 +183,21 @@ class MACEOMol(nn.Module):
             shifts: optional PBC shift vectors ``(E, 3)``.
             compute_forces: whether to compute ``-dE/dx``.
         """
-        positions = positions.clone().requires_grad_(compute_forces)
+        # Force path always goes through ForceDerivation (autograd backend —
+        # cuEq fused kernels). Do not hand-roll torch.autograd.grad here.
+        pos = positions.detach()
+
+        def energy_fn(p: torch.Tensor) -> torch.Tensor:
+            return self._compute_energy(
+                p, Z, edge_index, batch, total_charge, total_spin, shifts
+            ).sum()
+
         total_energy = self._compute_energy(
-            positions, Z, edge_index, batch, total_charge, total_spin, shifts
+            pos, Z, edge_index, batch, total_charge, total_spin, shifts
         )
         out = {"energy": total_energy}
         if compute_forces:
-            # ``create_graph`` must stay True whenever grad is enabled, not only
-            # in train mode: force-supervised losses backprop through the force
-            # into the parameters (mixed 2nd derivative dE/dx d\theta), and the
-            # model is often left in eval mode. Gating solely on ``self.training``
-            # silently detached the force from the parameter graph. Pure inference
-            # opts out via ``torch.no_grad()`` / ``compute_forces=False``.
-            create_graph = self.training or torch.is_grad_enabled()
-            grad = torch.autograd.grad(total_energy.sum(), positions, create_graph=create_graph)[0]
-            out["forces"] = -grad
+            out["forces"] = self.force_derivation(energy_fn, pos)
         return out
 
     def _compute_energy(
@@ -275,9 +278,10 @@ class MACEOMol(nn.Module):
         ``[:,0]`` source / ``[:,1]`` target per the molnex edge convention), and
         per-graph ``graphs.{total_charge,total_spin}`` (defaulting to a neutral
         singlet when absent). Forces are obtained through
-        :class:`molpot.derivation.ForceDerivation` (``F = -∂E/∂pos`` via
-        ``torch.func.grad``). Writes ``graphs.energy`` ``(B,)`` and
-        ``atoms.forces`` ``(N, 3)`` back into ``td`` and returns it.
+        :class:`molpot.derivation.ForceDerivation` (``method="autograd"`` —
+        ``F = -∂E/∂pos`` via ``torch.autograd.grad``; cuEq-safe). Writes
+        ``graphs.energy`` ``(B,)`` and ``atoms.forces`` ``(N, 3)`` back into
+        ``td`` and returns it.
 
         Args:
             td: post-collate ``TensorDict`` with ``atoms`` / ``edges`` (and

@@ -57,7 +57,7 @@ class UnitConvert(SampleTask):
                     f"(src_unit, dst_unit), got {pair!r}"
                 )
             src_str, dst_str = pair
-            # UnitSystem() is the shared registry instance (molrs UnitRegistry);
+            # UnitSystem() is the shared molpy registry instance;
             # ``UnitSystem.Unit`` is an unbound descriptor and cannot be called
             # on the class.
             ureg = UnitSystem()

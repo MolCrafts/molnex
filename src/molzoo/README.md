@@ -23,10 +23,12 @@ Each model in this package ships with **one** spec artifact in `specs/`:
 
 **Read the spec before modifying the model** — any change to a module's math MUST be reflected in the corresponding spec.
 
-| Model   | Spec | Paper |
-|---------|------|-------|
-| Allegro | [`specs/allegro.md`](specs/allegro.md) | Musaelian et al., Nat. Commun. 2023 ([arXiv](https://arxiv.org/abs/2204.05249)) |
-| MACE    | *(todo)* | Batatia et al., NeurIPS 2022 ([arXiv](https://arxiv.org/abs/2206.07697)) |
+| Model     | Spec | Paper |
+|-----------|------|-------|
+| Allegro   | [`specs/allegro.md`](specs/allegro.md) | Musaelian et al., Nat. Commun. 2023 ([arXiv](https://arxiv.org/abs/2204.05249)) |
+| MACE      | [`specs/mace.md`](specs/mace.md) | Batatia et al., NeurIPS 2022 ([arXiv](https://arxiv.org/abs/2206.07697)) |
+| PiNet     | [`specs/pinet2.md`](specs/pinet2.md) | package under `molzoo/pinet/` |
+| MACE-OMOL | [`specs/mace_omol.md`](specs/mace_omol.md) | full energy/force model (lazy import) |
 
 ### Spec workflow
 
