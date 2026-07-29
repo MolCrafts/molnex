@@ -90,12 +90,31 @@ class NeighborList(SampleTask):
         pos = data["pos"]
         box_vectors = data.get("cell") if self.pbc else None
 
-        neighbors, deltas, distances, _ = get_neighbor_pairs(
+        # O(N²) pair enum in the C++ kernel — size the buffer from N when the
+        # caller left the small default (512) on a larger system.
+        n_atoms = int(pos.shape[0])
+        half_complete = n_atoms * (n_atoms - 1) // 2
+        max_pairs = self.max_num_pairs
+        if max_pairs > 0 and half_complete > max_pairs:
+            max_pairs = half_complete
+
+        neighbors, deltas, distances, num_pairs = get_neighbor_pairs(
             positions=pos,
             cutoff=self.cutoff,
-            max_num_pairs=self.max_num_pairs,
+            max_num_pairs=max_pairs,
             box_vectors=box_vectors,
         )
+        n_found = int(num_pairs.reshape(-1)[0].item()) if num_pairs.numel() else 0
+        # Strict greater: n_found == max_pairs is a full-but-valid buffer (e.g.
+        # all half-pairs within cutoff when max_pairs == N(N-1)/2).
+        if max_pairs > 0 and n_found > max_pairs:
+            raise RuntimeError(
+                f"Neighbor buffer overflow: found {n_found} pairs > "
+                f"max_num_pairs={max_pairs} (N={n_atoms}, cutoff={self.cutoff}). "
+                "Increase max_num_pairs or lower the cutoff. "
+                "Note: the kernel is O(N²); large condensed-phase systems need a "
+                "cell-list/Verlet neighbour algorithm (not yet in molix.op)."
+            )
 
         edge_index = _normalize_to_E2(neighbors)
 

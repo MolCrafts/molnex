@@ -59,6 +59,8 @@ class ResidualInteraction(nn.Module):
         target_irreps: Tensor-product / output irreps (also the gated nonlin output).
         hidden_irreps: ``skip_tp`` output irreps (consumed by the product block).
         radial_mlp: Hidden sizes of the radial MLPs, e.g. ``[128, 128, 128]``.
+        use_fallback: Pure-torch cuEq path (default ``True``, functorch-safe).
+            Set ``False`` for fused kernels when forces use autograd (OMOL).
     """
 
     def __init__(
@@ -72,9 +74,11 @@ class ResidualInteraction(nn.Module):
         target_irreps: str,
         hidden_irreps: str,
         radial_mlp: list[int],
+        use_fallback: bool = True,
     ) -> None:
         super().__init__()
         ftype = config.ftype
+        self.use_fallback = use_fallback
 
         node_feats = cue.Irreps("O3", node_feats_irreps)
         edge_attrs = cue.Irreps("O3", edge_attrs_irreps)
@@ -102,9 +106,7 @@ class ResidualInteraction(nn.Module):
             shared_weights=False,
             internal_weights=False,
             dtype=ftype,
-            # Pure-torch path so functorch (ForceDerivation) / torch.compile can
-            # trace the force: the fused kernel has no functorch setup_context.
-            use_fallback=True,
+            use_fallback=use_fallback,
         )
         irreps_mid = self.conv_tp.irreps_out
 

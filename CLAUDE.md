@@ -39,6 +39,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 One-way dependency: `molix` ← `molrep` ← `molzoo` / `molpot` (molpot must not import molzoo).
 Prefer explicit `nn.Linear(in, out)` over `LazyLinear` on any compile / export / functorch path.
 
+**molpy only (never bare molrs).** All Python code under `src/` and `tests/` must
+use `from molpy import …` for Element / Frame / Block / Box / Trajectory /
+UnitsError / UnitSystem / MolRec / etc. Do **not** `import molrs` or
+`from molrs import …` — molrs is the Rust core behind molpy, not a molnex
+dependency surface.
+
 Source ↔ unit-test path mirror:
 
 ```
@@ -346,7 +352,7 @@ hooks (`MetricsHook`, `TensorBoardHook`) should write their
 - **Encoder-only molzoo**: Encoders take a batch `TensorDict` and write per-layer features `(N, layers, features)` under `atoms.node_features`; readout/potentials handled by molpot
 - **Pydantic configs**: All block configs use `BaseModel` with `ConfigDict(arbitrary_types_allowed=True)`
 - **cuEquivariance**: Tensor products use `cuequivariance` / `cuequivariance_torch` for GPU-accelerated equivariant operations
-- **Functorch forces**: `BasePotential.calc_forces()` computes `F = -dE/dx` via `torch.func.grad` (energy as a pure function of positions; compile-friendly, no double-backward)
+- **Force derivation (dual backends)**: `molpot.derivation.ForceDerivation` is the single entry for `F = -dE/dpos`. Default `method="autograd"` (`torch.autograd.grad`) works for every model, including cuEquivariance fused ops. Use `method="functorch"` (`torch.func.grad`) only for pure-PyTorch energy graphs (e.g. PiNet) when you want a single backward + `torch.compile(fullgraph=True)`. `BasePotential.calc_forces` uses the autograd backend so the molpy protocol path stays universal. Do not hand-roll a third force path inside encoders.
 - **Functional composition**: `PotentialComposer` chains pooling → parameter heads → potential terms → aggregation
 - **Hook protocol**: Lifecycle callbacks (`on_train_start`, `on_epoch_end`, etc.) via `Hook` protocol
 - **Step protocol**: `DefaultTrainStep` / `DefaultEvalStep` wrap forward → loss → backward → optimizer
@@ -370,7 +376,7 @@ are documented in the table above, not enforced by Python types.
 
 **New encoder** (molzoo): Implement `forward(td: TensorDict) -> TensorDict`, reading `td["atoms", "Z"]` / `td["edges", ...]` and writing per-layer features `(N, layers, features)` back under `atoms.node_features`. Use `molrep` building blocks. Add paper reference.
 
-**New potential** (molpot): Inherit `BasePotential`, implement `forward() -> scalar energy Tensor`. Forces come from functorch (`torch.func.grad`) automatically — `forward` must read positions via `pos=`/`_get_positions` so the energy can be differentiated as a function of positions.
+**New potential** (molpot): Inherit `BasePotential`, implement `forward() -> scalar energy Tensor`. Forces come from `ForceDerivation` / `BasePotential.calc_forces` (autograd by default; functorch only when the energy graph is pure torch) — `forward` must read positions via `pos=`/`_get_positions` so the energy can be differentiated as a function of positions.
 
 **New embedding/interaction** (molrep): Pure `nn.Module`, use `cuequivariance` for equivariant layers.
 

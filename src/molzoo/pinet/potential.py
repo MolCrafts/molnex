@@ -1,9 +1,10 @@
 """PiNet energy + force potential (encoder composition + derivation).
 
-Industrial note: this module is a *composition* of molrep encoder blocks and
-molpot derivation/heads. Long-term home is ``molpot``; it remains under
-``molzoo.pinet`` for import stability while the package boundary migration
-completes. Public import path: ``from molzoo.pinet import PiNetPotential``.
+Physics (force derivation, energy aggregation) lives in ``molpot`` via
+:class:`molpot.composition.energy_force.EnergyForceModel`. This module only
+wires the PiNet encoder + per-block OutLayers — the long-term home for a fully
+generic encoder→energy façade remains ``molpot``; public import stays
+``from molzoo.pinet import PiNetPotential``.
 """
 
 from __future__ import annotations
@@ -14,13 +15,14 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molpot.derivation import EnergyAggregation, ForceDerivation
+from molpot.composition.energy_force import EnergyForceModel
+from molpot.derivation import EnergyAggregation
 from molrep.interaction.pinet import OutLayer
 
 from .encoder import PiNet
 
 
-class PiNetPotential(nn.Module):
+class PiNetPotential(EnergyForceModel):
     """PiNet energy + force prediction model — ready to use from hyperparameters.
 
     Pass PiNet hyperparameters directly; the encoder is built internally::
@@ -28,8 +30,9 @@ class PiNetPotential(nn.Module):
         model = PiNetPotential(atom_types=[1, 6, 7, 8], r_max=4.5, depth=5,
                                hidden_dim=64, compute_forces=True)
 
-    Forces use ``ForceDerivation(method="functorch")`` (pure-PyTorch graph).
-    All linears are fully specified at construction — no lazy materialisation.
+    Forces use ``ForceDerivation(method="functorch")`` (pure-PyTorch graph)
+    through :class:`EnergyForceModel`. All linears are fully specified at
+    construction — no lazy materialisation.
     """
 
     def __init__(
@@ -41,15 +44,13 @@ class PiNetPotential(nn.Module):
         encoder: PiNet | None = None,
         **pinet_kwargs: object,
     ) -> None:
-        super().__init__()
+        super().__init__(force_method="functorch", compute_forces=compute_forces)
         if encoder is not None and pinet_kwargs:
             raise ValueError("Pass either encoder=... or PiNet kwargs, not both.")
         self.encoder = encoder if encoder is not None else PiNet(**pinet_kwargs)  # type: ignore[arg-type]
         # Accepted for API compatibility; PiNet2 accumulates per-block OutLayers
         # residually — there is no layer axis to reduce for energy.
         self.layer_reduction = layer_reduction
-        self.compute_forces_default = compute_forces
-        self._compiled_energy_forward = None
 
         depth: int = int(getattr(self.encoder, "depth", 1))
         feature_dim: int = int(getattr(self.encoder, "feature_dim", hidden_dim))
@@ -65,44 +66,8 @@ class PiNetPotential(nn.Module):
             ]
         )
         self.energy_aggregation = EnergyAggregation(pooling="sum")
-        self.force_derivation = ForceDerivation(method="functorch")
 
-    def forward(
-        self, batch: TensorDict, *, compute_forces: bool | None = None
-    ) -> dict[str, torch.Tensor]:
-        if compute_forces is None:
-            compute_forces = self.compute_forces_default
-        if compute_forces:
-            return self._forward_functorch(batch)
-        energy_forward = self._compiled_energy_forward or self._energy_forward
-        return energy_forward(batch)
-
-    def _forward_functorch(self, batch: TensorDict) -> dict[str, torch.Tensor]:
-        """Force forward via ``torch.func.grad`` (no double-backward barrier).
-
-        **Training**: eager energy pass (params connected) + functorch force
-        pass. **Eval**: single ``grad(..., has_aux=True)`` pass.
-        """
-        pos = batch["atoms", "pos"].detach()
-        base = batch.clone()
-        base["atoms", "pos"] = pos
-
-        def energy_fn(p: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-            b = base.clone()
-            b["atoms", "pos"] = p
-            out = self._energy_forward(b)
-            return out["energy"].sum(), out
-
-        if not self.training:
-            grad, out = torch.func.grad(energy_fn, has_aux=True)(pos)
-            out["forces"] = -grad
-            return out
-
-        out = self._energy_forward(base.clone())
-        out["forces"] = self.force_derivation(lambda p: energy_fn(p)[0], pos)
-        return out
-
-    def _energy_forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
+    def energy_forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
         """Compilable energy: encoder → per-block OutLayer sum → aggregate."""
         batch = self.encoder(batch)
 
@@ -123,12 +88,6 @@ class PiNetPotential(nn.Module):
             "energy": energy,
         }
 
-    def compile_energy(self, *, backend: str = "inductor", **kwargs) -> None:
-        """Compile the energy-only forward (not the force training path).
-
-        See module docs / ``docs/molix/explanation/throughput-and-compilation.md``
-        for when to use this vs whole-model CUDA graphs on padded batches.
-        """
-        self._compiled_energy_forward = torch.compile(
-            self._energy_forward, backend=backend, **kwargs
-        )
+    # Back-compat alias used by older call sites / docs.
+    def _energy_forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
+        return self.energy_forward(batch)

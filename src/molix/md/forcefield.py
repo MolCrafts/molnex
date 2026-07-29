@@ -81,17 +81,23 @@ class PotentialForceField(ForceField):
         for key in self._STALE_EDGE_KEYS:
             if ("edges", key) in batch.keys(include_nested=True):
                 del batch["edges", key]
-        # Plain attribute (a TensorDict, not a Parameter/buffer); cloned per call
-        # so the module state is never mutated → torch.compile-safe.
+        # Working batch: reuse structure and only replace pos each step
+        # (full TensorDict.clone() every MD step was a measurable alloc cost).
+        # Potential paths that need isolation (PiNet) clone internally.
         self._template = batch
+        self._work = batch.clone()
         ref = batch["atoms", "pos"]
         self._device = ref.device
         self._dtype = ref.dtype
         self.register_buffer("energy_scale", torch.as_tensor(float(energy_scale)))
 
+    def _batch_at(self, pos: torch.Tensor) -> TensorDict:
+        """Bind live positions into the reusable working batch (in-place pos)."""
+        self._work["atoms", "pos"] = pos.to(device=self._device, dtype=self._dtype)
+        return self._work
+
     def forward(self, pos: torch.Tensor) -> ForceOutput:
-        batch = self._template.clone()
-        batch["atoms", "pos"] = pos.to(device=self._device, dtype=self._dtype)
+        batch = self._batch_at(pos)
         out = self.potential(batch, compute_forces=True)
         energy = out["energy"].sum().detach() * self.energy_scale
         forces = out["forces"].detach() * self.energy_scale
@@ -99,8 +105,7 @@ class PotentialForceField(ForceField):
 
     def calc_energy(self, pos: torch.Tensor) -> torch.Tensor:
         """Energy only — skips the force derivation (cheaper than :meth:`forward`)."""
-        batch = self._template.clone()
-        batch["atoms", "pos"] = pos.to(device=self._device, dtype=self._dtype)
+        batch = self._batch_at(pos)
         out = self.potential(batch, compute_forces=False)
         return out["energy"].sum().detach() * self.energy_scale
 

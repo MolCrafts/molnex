@@ -264,9 +264,9 @@ def dimer_classes() -> tuple[str, ...]:
 # MolRec (.zarr) fixtures for MolRecSource tests
 # ---------------------------------------------------------------------------
 #
-# These build real molrs ``MolRec`` archives on disk so the MolRecSource tests
+# These build real molpy ``MolRec`` archives on disk so the MolRecSource tests
 # exercise the genuine zarr read-back path (including the float32 -> float64
-# upcast that molrs storage performs). The fixtures keep the *original* float32
+# upcast that zarr storage may perform). The fixtures keep the *original* float32
 # arrays they wrote available to the tests via a small dataclass, so the
 # round-trip losslessness assertions compare against ground truth, not against
 # whatever dtype came back off disk.
@@ -334,22 +334,22 @@ class MolRecForceFixture:
     n_frames: int
 
 
-def _make_molrs_frame(elements: list[str], xyz_f32: np.ndarray):
-    """Build a single molrs ``Frame`` from symbols + float32 ``(n, 3)`` xyz.
+def _make_molpy_frame(elements: list[str], xyz_f32: np.ndarray):
+    """Build a single molpy ``Frame`` from symbols + float32 ``(n, 3)`` xyz.
 
-    The box is a fixed 20 Å cubic cell (float64 ndarray as molrs.Box requires).
+    The box is a fixed 20 Å cubic cell (float64 ndarray as molpy.Box requires).
     """
-    import molrs
+    from molpy import Block, Box, Frame
 
-    frame = molrs.Frame()
-    block = molrs.Block()
-    # molrs rejects dtype=object columns — use a numpy unicode-str column.
+    frame = Frame()
+    block = Block()
+    # Frame blocks reject dtype=object columns — use a numpy unicode-str column.
     block.insert("element", np.array(elements, dtype=np.str_))
     block.insert("x", np.ascontiguousarray(xyz_f32[:, 0], dtype=np.float32))
     block.insert("y", np.ascontiguousarray(xyz_f32[:, 1], dtype=np.float32))
     block.insert("z", np.ascontiguousarray(xyz_f32[:, 2], dtype=np.float32))
     frame["atoms"] = block
-    frame.box = molrs.Box(np.eye(3) * 20.0)
+    frame.box = Box(np.eye(3) * 20.0)
     return frame
 
 
@@ -362,10 +362,12 @@ def molrec_qm9_record(tmp_path: Path) -> MolRecQM9Fixture:
     as a scalar observable of shape ``(3,)`` float32 under the ``"teacherA."``
     prefix. No forces are written (scalar-only record).
     """
-    import molrs
+    import molpy
+    from molpy import Trajectory
 
-    if not hasattr(molrs, "MolRec"):
-        pytest.skip("molrs.MolRec not available in this molrs build")
+    if not hasattr(molpy, "MolRec"):
+        pytest.skip("molpy.MolRec not available in this molpy build")
+    MolRec = molpy.MolRec
 
     teacher_id = "teacherA"
     rng = np.random.default_rng(0)
@@ -376,9 +378,9 @@ def molrec_qm9_record(tmp_path: Path) -> MolRecQM9Fixture:
     positions = [rng.random((len(sym), 3)).astype(np.float32) for sym, _ in specs]
     n_frames = len(specs)
 
-    frames = [_make_molrs_frame(el, pos) for el, pos in zip(elements, positions)]
-    rec = molrs.MolRec()
-    rec.set_trajectory(molrs.Trajectory.from_frames(frames))
+    frames = [_make_molpy_frame(el, pos) for el, pos in zip(elements, positions)]
+    rec = MolRec()
+    rec.set_trajectory(Trajectory.from_frames(frames))
 
     # Distinct deterministic float32 values per target so the round-trip test
     # can detect any cross-target mixing.
@@ -421,10 +423,12 @@ def molrec_force_record(tmp_path: Path) -> MolRecForceFixture:
     ``energy`` scalar ``(4,)`` with *different* values, so teacher-isolation can
     be verified. The ``method`` dict names both teachers.
     """
-    import molrs
+    import molpy
+    from molpy import Trajectory
 
-    if not hasattr(molrs, "MolRec"):
-        pytest.skip("molrs.MolRec not available in this molrs build")
+    if not hasattr(molpy, "MolRec"):
+        pytest.skip("molpy.MolRec not available in this molpy build")
+    MolRec = molpy.MolRec
 
     elements = ["H", "H", "O"]
     expected_Z = [1, 1, 8]
@@ -437,9 +441,9 @@ def molrec_force_record(tmp_path: Path) -> MolRecForceFixture:
     energy_b = (np.arange(n_frames, dtype=np.float32) * -2.25 + 3.5).astype(np.float32)
     forces_a = rng.random((n_frames, n_atoms, 3)).astype(np.float32)
 
-    frames = [_make_molrs_frame(elements, pos) for pos in positions]
-    rec = molrs.MolRec()
-    rec.set_trajectory(molrs.Trajectory.from_frames(frames))
+    frames = [_make_molpy_frame(elements, pos) for pos in positions]
+    rec = MolRec()
+    rec.set_trajectory(Trajectory.from_frames(frames))
 
     rec.observables.add_scalar(
         "teacherA.energy",

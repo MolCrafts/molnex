@@ -44,30 +44,35 @@ def scatter_sum(
     return out.scatter_add_(dim, index, src)
 
 
+# One-hot matmul allocates ``(E, dim_size)``. Above this element budget use
+# ``index_add_`` to avoid OOM on large periodic systems (review: O(E·N) risk).
+_ONEHOT_ELEMENT_BUDGET = 2_000_000
+
+
 def scatter_sum_compile_safe(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     """Sum ``src`` rows into ``dim_size`` buckets given by ``index`` (dim 0).
 
-    Implemented as a one-hot matmul instead of ``index_add_``. The natural
-    ``out.index_add_(0, index, src)`` is correct in eager, but under
-    ``torch.compile`` its scatter reduction runs in a *different order* than
-    eager (CUDA: non-deterministic ``atomicAdd``; CPU: it additionally trips
-    the torch-2.12 ``index.is_vec`` SIMD-codegen crash). When the scattered
-    energy is a small difference of large terms (catastrophic cancellation, as
-    in MACE ``inter_e``), that float64 ordering difference is amplified to ~4%
-    between compiled and eager. This is NOT a wrong-codegen miscompile: forcing
-    ``torch.use_deterministic_algorithms(True)`` (CUDA) or
-    ``torch._inductor.config.cpp.simdlen = 0`` (CPU) makes ``index_add_``
-    bit-exact again. The one-hot matmul is deterministic and has no scatter
-    node, so it is bit-exact under compile on both backends with NO global
-    flags, and stays functorch-traceable. Cost: a dense ``(E, dim_size)``
-    one-hot = ``O(E * dim_size)`` — negligible for molecular graphs, but heavy
-    for very large periodic systems.
+    For small ``E * dim_size`` (typical molecular graphs) uses a one-hot matmul
+    that is bit-exact under ``torch.compile`` without global determinism flags
+    (see historical note: ``index_add_`` scatter order can differ under
+    inductor). For large systems (``E * dim_size > 2e6``) falls back to
+    ``index_add_`` to avoid O(E·N) memory blow-ups.
 
-    TODO: switch back to the cheaper ``index_add_`` once we either (a) move to
-    a torch where the compiled scatter is deterministic by default, or (b) set
-    the determinism / ``cpp.simdlen`` knobs on the compile path — needed to
-    drop the O(E*dim_size) memory for large periodic systems.
+    Force exact one-hot always with env ``MOLNEX_SCATTER_ONEHOT=1``.
+    Force ``index_add_`` always with ``MOLNEX_SCATTER_ONEHOT=0``.
     """
+    import os
+
+    n_src = src.shape[0]
+    budget = n_src * int(dim_size)
+    flag = os.environ.get("MOLNEX_SCATTER_ONEHOT")
+    use_onehot = flag == "1" or (flag is None and budget <= _ONEHOT_ELEMENT_BUDGET)
+
+    if not use_onehot:
+        out_shape = (dim_size, *src.shape[1:])
+        out = torch.zeros(out_shape, dtype=src.dtype, device=src.device)
+        return out.index_add_(0, index, src)
+
     onehot = (index.view(-1, 1) == torch.arange(dim_size, device=src.device).view(1, -1)).to(
         src.dtype
     )

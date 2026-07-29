@@ -64,6 +64,7 @@ class ConvTP(nn.Module):
         in_irreps: str,
         out_irreps: str,
         sh_irreps: str,
+        use_fallback: bool = True,
     ):
         """Initialize channelwise tensor product layer.
 
@@ -71,6 +72,10 @@ class ConvTP(nn.Module):
             in_irreps: Input irreps for node features.
             out_irreps: Output irreps for messages.
             sh_irreps: Irreps for spherical harmonics.
+            use_fallback: If ``True`` (default), pure-torch cuEq path so
+                ``ForceDerivation(method="functorch")`` can trace. Set
+                ``False`` for fused kernels when forces use
+                ``method="autograd"`` (e.g. MACE-OMOL).
         """
         super().__init__()
 
@@ -79,6 +84,7 @@ class ConvTP(nn.Module):
             out_irreps=out_irreps,
             sh_irreps=sh_irreps,
         )
+        self.use_fallback = use_fallback
 
         irreps_in = cue.Irreps("O3", in_irreps)
         irreps_sh = cue.Irreps("O3", sh_irreps)
@@ -91,9 +97,7 @@ class ConvTP(nn.Module):
             layout=cue.ir_mul,
             shared_weights=False,
             internal_weights=False,
-            # Pure-torch path so functorch (ForceDerivation) / torch.compile can
-            # trace the force: the fused kernel has no functorch setup_context.
-            use_fallback=True,
+            use_fallback=use_fallback,
         )
 
         self.weight_numel = self.cue_tp.weight_numel

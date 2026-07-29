@@ -37,7 +37,7 @@ from molix.data.source import Sample
 
 def _parse_extxyz(path: Path) -> list[Sample]:
     """Parse an extended-XYZ file shipped with the 3BPA benchmark."""
-    from molrs import Element
+    from molpy import Element
 
     samples: list[Sample] = []
     lines = path.read_text().splitlines()

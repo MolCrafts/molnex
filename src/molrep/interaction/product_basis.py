@@ -46,11 +46,13 @@ class EquivariantProductBasis(nn.Module):
         correlation: int,
         num_elements: int = 1,
         use_sc: bool = True,
+        use_fallback: bool = True,
     ) -> None:
         super().__init__()
         ftype = config.ftype
         self.use_sc = use_sc
         self.num_elements = int(num_elements)
+        self.use_fallback = use_fallback
 
         irreps_in = cue.Irreps("O3", node_feats_irreps)
         irreps_out = cue.Irreps("O3", target_irreps)
@@ -65,10 +67,9 @@ class EquivariantProductBasis(nn.Module):
             original_mace=True,
             dtype=ftype,
             math_dtype=ftype,
-            # Pure-torch path: the fused kernel is a custom autograd.Function with
-            # no setup_context, so functorch (ForceDerivation) / torch.compile
-            # cannot trace it. The fallback is numerically identical.
-            use_fallback=True,
+            # use_fallback=True: pure-torch path for functorch forces.
+            # use_fallback=False: fused cuEq kernel (autograd force path only).
+            use_fallback=use_fallback,
         )
         self.linear = cuet.Linear(irreps_out, irreps_out, layout=cue.ir_mul, dtype=ftype)
 
@@ -91,7 +92,13 @@ class EquivariantProductBasis(nn.Module):
             ``(N, target_irreps.dim)`` node features.
         """
         if self.num_elements == 1:
-            index = torch.zeros(node_feats.shape[0], dtype=torch.int32, device=node_feats.device)
+            n = node_feats.shape[0]
+            # Reuse a cached zeros index when N is stable (avoids per-forward alloc).
+            cache = getattr(self, "_zeros_index", None)
+            if cache is None or cache.shape[0] != n or cache.device != node_feats.device:
+                cache = torch.zeros(n, dtype=torch.int32, device=node_feats.device)
+                self._zeros_index = cache
+            index = cache
         else:
             index = node_attrs.argmax(dim=-1).to(torch.int32)
         out = self.symmetric_contractions(node_feats.flatten(1), index)
