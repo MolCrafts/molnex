@@ -15,7 +15,6 @@ from molpot.composition import (
     Sonata,
     SonataSpec,
     TSScalingHead,
-    build_sonata,
 )
 
 # Physical derivation
@@ -83,5 +82,4 @@ __all__ = [
     "PotentialComposer",
     "Sonata",
     "SonataSpec",
-    "build_sonata",
 ]

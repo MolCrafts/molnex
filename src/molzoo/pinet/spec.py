@@ -26,3 +26,6 @@ class PiNetSpec(BaseModel):
     activation: str = "tanh"
     weighted: bool = False
     rank: Literal[1, 3, 5] = 3
+    #: Emit the per-block ``p3``/``p5`` and ``i1``/``i3``/``i5`` tracks that the
+    #: PiNet property heads consume. See :class:`~molzoo.pinet.encoder.PiNet`.
+    emit_property_features: bool = True

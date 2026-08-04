@@ -17,7 +17,7 @@ models.
 **molix — training & execution**
 - `torch.compile` / CUDA-graph capture and AOT-Inductor model export
   (`molix.compile`, `molix.export`).
-- In-process Langevin velocity-Verlet MD driver (`molix.md`) with an ASE shim.
+- In-process Langevin velocity-Verlet MD driver (`molix.md`).
 - Trajectory diagnostics and a thermal-noise verdict (`molix.analysis`), plus
   weight-quantization tooling with paired force-Δ and effective-temperature
   scalars (`molix.quant`).

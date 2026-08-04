@@ -1,10 +1,18 @@
 """K-space convolution filter for reciprocal-space potential calculations."""
 
+import os
 from typing import Optional
 
 import torch
 
 from molpot.potentials.elec.lib.kvectors import generate_kvectors_for_mesh
+
+#: Default for :attr:`KSpaceFilter.check_nan`, read once at import.
+#: The guard is a full-mesh reduction — a device sync barrier on the PME hot
+#: path — so it is off unless ``MOLNEX_PME_CHECK_NAN=1`` is exported. Set
+#: ``filter.check_nan = True`` (or pass ``check_nan=True``) to enable it for a
+#: single instance without touching the environment.
+CHECK_NAN_DEFAULT: bool = os.environ.get("MOLNEX_PME_CHECK_NAN", "") == "1"
 
 
 class KSpaceKernel(torch.nn.Module):
@@ -48,6 +56,12 @@ class KSpaceFilter(torch.nn.Module):
             ``"ortho"``).
         ifft_norm: Normalization for inverse FFT (``"forward"``, ``"backward"``,
             ``"ortho"``).
+        check_nan: Raise :class:`ValueError` when :meth:`forward` produces NaNs
+            (usually an unsuitable ``mesh_spacing``). The scan is a full-mesh
+            reduction and therefore a device sync barrier on the PME hot path,
+            so it defaults to :data:`CHECK_NAN_DEFAULT` (off unless
+            ``MOLNEX_PME_CHECK_NAN=1``). Enable it per instance when debugging
+            a grid; the attribute stays writable after construction.
     """
 
     def __init__(
@@ -57,11 +71,13 @@ class KSpaceFilter(torch.nn.Module):
         kernel: KSpaceKernel,
         fft_norm: str = "ortho",
         ifft_norm: str = "ortho",
+        check_nan: bool | None = None,
     ):
         super().__init__()
 
         self._fft_norm = fft_norm
         self._ifft_norm = ifft_norm
+        self.check_nan = CHECK_NAN_DEFAULT if check_nan is None else bool(check_nan)
         if fft_norm not in ["ortho", "forward", "backward"]:
             raise ValueError(f"Invalid option '{fft_norm}' for the `fft_norm` parameter.")
         if ifft_norm not in ["ortho", "forward", "backward"]:
@@ -119,15 +135,9 @@ class KSpaceFilter(torch.nn.Module):
             s=mesh_values.shape[-3:],
         )
 
-        # Full-mesh NaN scan is a device sync barrier on the PME hot path.
-        # Opt in only when debugging (env MOLNEX_PME_CHECK_NAN=1) or via
-        # ``self.check_nan = True`` on the instance.
-        check_nan = getattr(self, "check_nan", False)
-        if not check_nan:
-            import os
-
-            check_nan = os.environ.get("MOLNEX_PME_CHECK_NAN", "") == "1"
-        if check_nan and torch.isnan(result).any():
+        # Full-mesh NaN scan is a device sync barrier on the PME hot path —
+        # opt in per instance (see ``check_nan`` in the class docstring).
+        if self.check_nan and torch.isnan(result).any():
             raise ValueError(
                 "NaNs detected in the k-space filter result. This are probably caused "
                 "by an unsuitable `mesh_spacing`, resulting in a problematic grid of "
@@ -174,6 +184,7 @@ class P3MKSpaceFilter(KSpaceFilter):
         ifft_norm: Inverse FFT normalization.
         mode: 0 for potential, 1 for energy, 2 for dipolar torque, 3 for dipolar force.
         differential_order: Order of the difference operator (1-6).
+        check_nan: See :class:`KSpaceFilter`.
 
     Reference:
         Deserno, M. & Holm, C. J. Chem. Phys. 109, 7678–7693 (1998)
@@ -189,6 +200,7 @@ class P3MKSpaceFilter(KSpaceFilter):
         ifft_norm: str = "ortho",
         mode: int = 0,
         differential_order: int = 2,
+        check_nan: bool | None = None,
     ):
         self.interpolation_nodes = interpolation_nodes
         if mode not in [0, 1, 2, 3]:
@@ -200,7 +212,7 @@ class P3MKSpaceFilter(KSpaceFilter):
             )
         self.differential_order = differential_order
 
-        super().__init__(cell, ns_mesh, kernel, fft_norm, ifft_norm)
+        super().__init__(cell, ns_mesh, kernel, fft_norm, ifft_norm, check_nan)
         self.register_buffer(
             "_diff_coeff",
             torch.tensor(

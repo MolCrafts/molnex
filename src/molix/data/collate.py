@@ -246,22 +246,34 @@ def collate_molecules(
 _TARGET_PREFIX = "targets."
 
 
-def _gather_indices(ptr: torch.Tensor, idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Row gather-index and per-sample counts for slicing a packed bucket.
+def _gather_indices(
+    ptr: torch.Tensor, idx: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Row gather-index, counts, segment ids and offsets for a packed bucket.
 
     Given a cumsum pointer ``ptr`` ``(n_samples + 1,)`` and selected sample
-    indices ``idx`` ``(B,)``, returns ``(gather, counts)`` where ``counts``
-    ``(B,)`` is each selected sample's element count and ``gather``
-    ``(sum(counts),)`` indexes the packed concat tensor in sample-major
-    order — so ``packed[gather]`` equals concatenating per-sample slices.
+    indices ``idx`` ``(B,)``, returns ``(gather, counts, seg, offsets)``:
+
+    * ``counts`` ``(B,)`` — each selected sample's element count.
+    * ``gather`` ``(sum(counts),)`` — indexes the packed concat tensor in
+      sample-major order, so ``packed[gather]`` equals concatenating the
+      per-sample slices.
+    * ``seg`` ``(sum(counts),)`` — owning sample position per gathered row
+      (i.e. the batch vector for the atom bucket).
+    * ``offsets`` ``(B,)`` — exclusive-cumsum start of each sample in the
+      gathered output, used to rebase local atom indices.
+
+    ``seg`` and ``offsets`` fall out of building ``gather`` and every caller
+    needs at least one of them, so they are returned rather than recomputed
+    (a second ``repeat_interleave`` per bucket, per batch, per worker).
     """
     counts = ptr[idx + 1] - ptr[idx]
     starts = ptr[idx]
     total = int(counts.sum().item())
     seg = torch.repeat_interleave(torch.arange(idx.numel()), counts)
-    new_offsets = torch.cumsum(counts, 0) - counts
-    gather = starts[seg] + (torch.arange(total) - new_offsets[seg])
-    return gather, counts
+    offsets = torch.cumsum(counts, 0) - counts
+    gather = starts[seg] + (torch.arange(total) - offsets[seg])
+    return gather, counts, seg, offsets
 
 
 def collate_packed(
@@ -320,9 +332,7 @@ def collate_packed(
             )
 
     atom_ptr = payload["atom_ptr"]
-    a_gather, counts = _gather_indices(atom_ptr, idx)
-    new_atom_offsets = torch.cumsum(counts, 0) - counts
-    seg = torch.repeat_interleave(torch.arange(n_graphs), counts)
+    a_gather, counts, seg, new_atom_offsets = _gather_indices(atom_ptr, idx)
 
     # --- atom level ---
     atoms_dict: dict[str, torch.Tensor] = {
@@ -358,8 +368,7 @@ def collate_packed(
     # --- edge level ---
     if "edge_index" in edges_bucket:
         edge_ptr = payload["edge_ptr"]
-        e_gather, e_counts = _gather_indices(edge_ptr, idx)
-        e_seg = torch.repeat_interleave(torch.arange(n_graphs), e_counts)
+        e_gather, _e_counts, e_seg, _ = _gather_indices(edge_ptr, idx)
         edge_index = edges_bucket["edge_index"][e_gather].long()
         edge_index = rebase(edge_index, new_atom_offsets[e_seg], "edge_index")
         edges_dict: dict[str, torch.Tensor] = {"edge_index": edge_index}
@@ -399,8 +408,7 @@ def collate_packed(
     # --- covalent-bond level (mirror of collate_molecules' bonds namespace) ---
     bonds_bucket: Mapping[str, torch.Tensor] = payload.get("bonds", {})
     if "bond_index" in bonds_bucket and payload.get("bond_ptr") is not None:
-        b_gather, b_counts = _gather_indices(payload["bond_ptr"], idx)
-        b_seg = torch.repeat_interleave(torch.arange(n_graphs), b_counts)
+        b_gather, _b_counts, b_seg, _ = _gather_indices(payload["bond_ptr"], idx)
         # bond_index is COO [2, N]: gather columns, offset both rows by the
         # owning sample's atom base (registry "bond_index", index_axis 0).
         bond_index = rebase(

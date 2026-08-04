@@ -1,7 +1,7 @@
 import pytest
 import torch
-from ase.io import read
 
+from molix.datasets._extxyz import parse_extxyz_frames
 from molpot.potentials.elec import CalculatorDipole, PotentialDipole
 from molpot.potentials.elec.prefactors import eV_A
 from tests.regression.conftest import (
@@ -12,11 +12,11 @@ from tests.regression.conftest import (
     neighbor_list,
 )
 
-frames = read(DIPOLES_TEST_FRAMES, ":3")
+frames = parse_extxyz_frames(DIPOLES_TEST_FRAMES)[:3]
 cutoffs = [3.9986718930, 4.0000000000, 4.7363281250]
 alphas = [0.8819831493, 0.8956299559, 0.7215211182]
-energies = [frame.get_potential_energy() for frame in frames]
-forces = [frame.get_forces() for frame in frames]
+energies = [frame.energy for frame in frames]
+forces = [frame.forces for frame in frames]
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -116,9 +116,9 @@ class TestDipoles:
             lr_wavelength=0.1,
         )
         calc.to(device=device, dtype=dtype)
-        positions = torch.tensor(frame.get_positions(), dtype=dtype, device=device)
-        dipoles = torch.tensor(frame.get_array("dipoles"), dtype=dtype, device=device)
-        cell = torch.tensor(frame.get_cell().array, dtype=dtype, device=device)
+        positions = torch.tensor(frame.pos, dtype=dtype, device=device)
+        dipoles = torch.tensor(frame.arrays["dipoles"], dtype=dtype, device=device)
+        cell = torch.tensor(frame.cell, dtype=dtype, device=device)
         neighbor_indices, neighbor_shifts = neighbor_list(
             positions=positions,
             periodic=True,

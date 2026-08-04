@@ -44,7 +44,7 @@ def _batch(
     )
 
 
-def _model() -> PiNetPotential:
+def _model(*, compute_forces: bool = True) -> PiNetPotential:
     torch.manual_seed(0)
     return PiNetPotential(
         atom_types=[1, 6, 7, 8],
@@ -56,6 +56,7 @@ def _model() -> PiNetPotential:
         depth=3,
         rank=3,
         hidden_dim=16,
+        compute_forces=compute_forces,
     ).to(DEVICE)
 
 
@@ -90,9 +91,9 @@ def test_energy_and_force_shapes():
         graphs=TensorDict(num_atoms=torch.tensor([n]), batch_size=[1]),
         batch_size=[],
     )
-    out = model(batch, compute_forces=True)
-    assert out["energy"].shape == (1,)
-    assert out["forces"].shape == (n, 3)
+    batch = model(batch)
+    assert batch["graphs", "energy"].shape == (1,)
+    assert batch["atoms", "forces"].shape == (n, 3)
 
 
 def test_encoder_kwarg_composition():
@@ -110,57 +111,63 @@ def test_encoder_kwarg_composition():
     assert model.encoder is enc
 
 
-def test_functorch_forces_match_autograd_reference():
-    model = _model()
+def test_func_forces_match_autograd_reference():
+    model = _model(compute_forces=True)
     model.eval()
     batch = _batch()
 
-    f_functorch = model(batch.clone(), compute_forces=True)["forces"].detach()
+    b1 = model(batch.clone())
+    f_func = b1["atoms", "forces"].detach()
+
+    # Energy-only model for the reference path (same architecture / weights).
+    ref_model = _model(compute_forces=False)
+    ref_model.load_state_dict(
+        {k: v for k, v in model.state_dict().items()},
+        strict=False,
+    )
+    # Copy only shared params (force pipeline has no extra params).
+    ref_model.load_state_dict(model.state_dict())
+    ref_model.eval()
 
     ref = batch.clone()
     pos = ref["atoms", "pos"].detach().clone().requires_grad_(True)
     ref["atoms", "pos"] = pos
     with torch.enable_grad():
-        energy = model(ref, compute_forces=False)["energy"].sum()
+        ref = ref_model(ref)
+        energy = ref["graphs", "energy"].sum()
     f_autograd = -torch.autograd.grad(energy, pos)[0].detach()
 
-    assert f_functorch.shape == f_autograd.shape
-    assert torch.allclose(f_functorch, f_autograd, atol=1e-5, rtol=1e-5), (
-        f"max abs diff {(f_functorch - f_autograd).abs().max().item():.3e}"
+    assert f_func.shape == f_autograd.shape
+    assert torch.allclose(f_func, f_autograd, atol=1e-5, rtol=1e-5), (
+        f"max abs diff {(f_func - f_autograd).abs().max().item():.3e}"
     )
 
 
-def test_eval_single_pass_matches_train_two_pass():
-    model = _model()
+def test_eval_and_train_forward_match():
+    model = _model(compute_forces=True)
     torch.manual_seed(1)
     batch = _batch()
 
     model.train()
-    out_train = model(batch.clone(), compute_forces=True)
+    out_train = model(batch.clone())
     model.eval()
-    out_eval = model(batch.clone(), compute_forces=True)
+    out_eval = model(batch.clone())
 
-    assert set(out_eval) == set(out_train)
-    for key in ("energy", "atomic_energy", "forces"):
-        assert torch.allclose(out_eval[key], out_train[key].detach(), atol=1e-6, rtol=1e-6), (
-            f"{key} diverges between eval single-pass and train two-pass"
-        )
+    for key in (("graphs", "energy"), ("atoms", "energy"), ("atoms", "forces")):
+        assert torch.allclose(out_eval[key], out_train[key].detach(), atol=1e-6, rtol=1e-6), key
 
 
 def test_force_loss_single_backward_populates_param_grads():
-    model = _model()
+    model = _model(compute_forces=True)
     model.train()
-    batch = _batch()
-
-    out = model(batch.clone(), compute_forces=True)
-    loss = (out["forces"] - batch["atoms", "forces"]).pow(2).mean()
-    loss.backward()
+    batch = model(_batch().clone())
+    batch["atoms", "forces"].pow(2).mean().backward()
 
     n_grad = sum(1 for p in model.parameters() if p.grad is not None and p.grad.abs().sum() > 0)
     assert n_grad > 0, "no parameter received a gradient from the force loss"
 
 
 def test_no_lazy_linear_in_potential():
-    model = _model()
+    model = _model(compute_forces=True)
     for m in model.modules():
         assert type(m).__name__ != "LazyLinear"

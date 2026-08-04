@@ -9,7 +9,7 @@ This spec covers the MolNex PyTorch port of Teoroo-CMC/PiNN `PiNet2` at
 charge-response, and polarizability models are downstream `molpot` modules.
 
 Out of scope: TensorFlow checkpoint import, PiNN YAML compatibility, BPNN,
-legacy PiNet, PiNNAcLe, PiNNwall, and ASE calculator wrappers.
+legacy PiNet, PiNNAcLe, and PiNNwall wrappers.
 
 ## 2. Paper↔Code Mapping
 
@@ -40,6 +40,15 @@ MolNex adaptation:
 - PiNN's Keras `out_extra` readouts are not embedded in the encoder. MolNex
   writes raw `i1/i3/i5` representation tracks and downstream `molpot` heads
   perform task-specific projections.
+- MolNex adds `emit_property_features` (no PiNN counterpart). The `i1/i3/i5`
+  tracks are per-*edge*, so at typical neighbour counts they dominate the
+  encoder's output volume while being read only by the property heads
+  (`PiNetDipole`, `PiNetPolarizability`) — never by the energy/force path.
+  The flag gates only the stacking and TensorDict write; the tracks are still
+  computed inside each block, so gated and ungated encoders produce
+  bit-identical `node_features`, `p1_block_outputs`, energies and forces.
+  Default `True` (PiNN-equivalent emission); `PiNetPotential` defaults the
+  encoders it constructs itself to `False`.
 - PiNN cutoff functions are zeroed outside `r_max` because MolNex edges may be
   supplied by arbitrary preprocessing tasks.
 - The encoder writes TensorDict keys in place rather than returning TensorFlow
@@ -55,13 +64,16 @@ rank-5 basis:
 
 The encoder outputs per-block scalar states `(N, depth, D)`, optional vector
 states `(N, depth, 3, D)`, optional rank-5 states `(N, depth, 5, D)`, and
-per-edge interaction tracks.
+per-edge interaction tracks. The scalar states (`node_features`,
+`p1_block_outputs`) are always written; the vector, rank-5 and per-edge tracks
+are written only when `emit_property_features` is set (see §4).
 
 ## 6. Config Mapping
 
 `PiNet2Spec` mirrors PiNN constructor arguments: `atom_types`, `r_max`,
 `cutoff_type`, `basis_type`, `n_basis`, `gamma`, `center`, `pp_nodes`,
-`pi_nodes`, `ii_nodes`, `depth`, `activation`, `weighted`, and `rank`.
+`pi_nodes`, `ii_nodes`, `depth`, `activation`, `weighted`, and `rank`, plus the
+MolNex-only `emit_property_features` (§4).
 
 ## 7. Benchmark Contract
 

@@ -124,14 +124,17 @@ class MaxPooling(nn.Module):
 
         if x.dim() == 1:
             out = torch.full((dim_size,), float("-inf"), dtype=x.dtype, device=x.device)
+            index = batch
         else:
             out = torch.full((dim_size, x.shape[1]), float("-inf"), dtype=x.dtype, device=x.device)
+            index = batch.unsqueeze(-1).expand_as(x)
 
-        for mol_idx in range(dim_size):
-            mask = batch == mol_idx
-            if mask.any():
-                out[mol_idx] = x[mask].max(dim=0)[0] if x.dim() > 1 else x[mask].max()
-
+        # One fused scatter instead of a Python loop over molecules. The loop
+        # form issued ``dim_size`` kernel launches *and* a ``mask.any()``
+        # device→host sync per molecule, making pooling cost scale with batch
+        # size. ``include_self=True`` against the ``-inf`` fill reproduces the
+        # loop's semantics exactly, including ``-inf`` rows for empty graphs.
+        out.scatter_reduce_(0, index, x, reduce="amax", include_self=True)
         return out
 
     def __repr__(self) -> str:

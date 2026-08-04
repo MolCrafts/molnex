@@ -18,17 +18,22 @@ from molpot.derivation import ForceDerivation
 
 
 class EnergyForceModel(nn.Module):
-    """Energy model + optional forces via the shared :class:`ForceDerivation`.
+    """Energy model + optional forces; **one backend per instance, no mixing**.
 
-    Subclasses implement :meth:`energy_forward` only. Force paths:
+    Subclasses implement :meth:`energy_forward` only. Force composition is
+    entirely determined by ``force_method``:
 
-    * **eval + functorch**: single ``grad(..., has_aux=True)`` pass.
-    * **train + functorch**: eager energy (params connected) + force pass.
-    * **autograd**: always ``ForceDerivation(method="autograd")`` (cuEq-safe).
+    * **``functorch``** — always one energy evaluation via
+      ``ForceDerivation(..., has_aux=True)`` (train and eval). Never calls
+      ``torch.autograd.grad``.
+    * **``autograd``** — always one ``energy_forward`` on a ``requires_grad``
+      position leaf, then
+      :meth:`ForceDerivation.forces_from_energy` (autograd-only). Never calls
+      ``torch.func.grad``.
 
     Args:
-        force_method: ``"functorch"`` or ``"autograd"`` (see
-            :class:`molpot.derivation.ForceDerivation`).
+        force_method: ``"functorch"`` or ``"autograd"`` — fixed for the life
+            of the module; see :class:`~molpot.derivation.ForceDerivation`.
         compute_forces: Default for :meth:`forward` when ``compute_forces`` is
             not passed explicitly.
     """
@@ -62,34 +67,41 @@ class EnergyForceModel(nn.Module):
         pos = batch["atoms", "pos"].detach()
         base = batch.clone()
         base["atoms", "pos"] = pos
+        method = self.force_derivation.method
 
-        if self.force_derivation.method == "functorch" and not self.training:
+        if method == "functorch":
+            return self._forces_functorch(base, pos)
+        if method == "autograd":
+            return self._forces_autograd(base, pos)
+        raise RuntimeError(f"unknown force method {method!r}")  # pragma: no cover
 
-            def energy_fn_aux(p: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-                b = base.clone()
-                b["atoms", "pos"] = p
-                out = self.energy_forward(b)
-                return out["energy"].sum(), out
+    def _forces_functorch(
+        self, base: TensorDict, pos: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """Functorch-only 1-pass: ``grad(..., has_aux=True)``."""
 
-            forces, out = self.force_derivation(energy_fn_aux, pos, has_aux=True)
-            out["forces"] = forces
-            return out
-
-        def energy_fn(p: torch.Tensor) -> torch.Tensor:
+        def energy_fn_aux(p: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
             b = base.clone()
             b["atoms", "pos"] = p
-            return self.energy_forward(b)["energy"].sum()
+            out = self.energy_forward(b)
+            return out["energy"].sum(), out
 
-        # Training (or autograd): keep an eager energy pass so parameters stay
-        # connected for a force-supervised loss when using functorch's separate
-        # force transform; autograd_forces already handles create_graph.
-        if self.force_derivation.method == "functorch":
-            out = self.energy_forward(base.clone())
-            out["forces"] = self.force_derivation(energy_fn, pos)
-            return out
+        forces, out = self.force_derivation(energy_fn_aux, pos, has_aux=True)
+        out["forces"] = forces
+        return out
 
-        out = self.energy_forward(base.clone())
-        out["forces"] = self.force_derivation(energy_fn, pos)
+    def _forces_autograd(
+        self, base: TensorDict, pos: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """Autograd-only 1-pass: energy on ``p``, then ``forces_from_energy``."""
+        p = pos.detach().requires_grad_(True)
+        base["atoms", "pos"] = p
+        out = self.energy_forward(base)
+        # create_graph only in train so force-supervised loss reaches θ;
+        # eval keeps value-only forces (MD / inference).
+        out["forces"] = self.force_derivation.forces_from_energy(
+            out["energy"], p, create_graph=self.training
+        )
         return out
 
     def compile_energy(self, *, backend: str = "inductor", **kwargs) -> None:

@@ -74,7 +74,7 @@ class WaterLESSource:
             ``"val"`` slice the same upstream ``train-…`` file via the
             deterministic tail-slice with :attr:`TRAIN_VAL_RATIO`.
         download: If ``True``, fetch any missing file from
-            :attr:`BASE_URL` via :mod:`urllib.request` (no ASE).
+            :attr:`BASE_URL` via :mod:`urllib.request`.
         verify_checksum: If ``True``, compute SHA-256 of every consumed
             file and compare against :attr:`_CHECKSUMS`. Default ``False``
             so the placeholder digests in ``_data_acquisition.md`` do not

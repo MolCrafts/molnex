@@ -1,7 +1,7 @@
 """Shared fixtures for ``WaterLESSource`` / ``ChargedDimersSource`` tests.
 
 Both fixtures write extended-XYZ files to a ``tmp_path`` directory in the
-exact format ASE expects (``ase.io.read(..., format="extxyz", index=":")``):
+exact extended-XYZ format consumed by ``parse_extxyz_frames``:
 a comment line carrying ``Lattice="..."``, ``Properties=...``, ``energy=...``
 (eV) and ``pbc="T T T"``, then atom rows ``<symbol> x y z fx fy fz``.
 

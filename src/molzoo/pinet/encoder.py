@@ -32,6 +32,9 @@ class PiNet(TensorDictModuleBase):
 
     * ``("atoms", "node_features")``: scalar P1 states ``(N, depth, D)``.
     * ``("atoms", "p1_block_outputs")``: raw block outputs ``(N, depth, D)``.
+
+    And, when ``emit_property_features`` is set (the default):
+
     * ``("atoms", "p3_features")`` / ``("atoms", "p5_features")`` when enabled.
     * ``("edges", "i1_features")`` (+ ``i3`` / ``i5`` when enabled).
     """
@@ -60,7 +63,25 @@ class PiNet(TensorDictModuleBase):
         activation: str = "tanh",
         weighted: bool = False,
         rank: Literal[1, 3, 5] = 3,
+        emit_property_features: bool = True,
     ) -> None:
+        """Build a PiNet encoder.
+
+        Args:
+            emit_property_features: Also stack and write the per-block
+                equivariant node states (``p3``/``p5``) and interaction states
+                (``i1``/``i3``/``i5``) that the PiNet property heads
+                (:class:`~molzoo.pinet.properties.PiNetDipole`,
+                :class:`~molzoo.pinet.properties.PiNetPolarizability`) consume.
+                The energy/force path never reads them, and the ``i*`` tracks
+                are per-*edge* — at a typical 30 neighbours/atom they dominate
+                the encoder's output volume (~150x the bytes the energy path
+                actually reads) and stay pinned for the force double-backward.
+                Leave ``True`` when attaching a property head; set ``False``
+                for pure energy/force models. Every other argument is
+                unaffected — the tracks are still computed inside each block,
+                only the extra stack + write is skipped.
+        """
         super().__init__()
         self.config = PiNetSpec(
             atom_types=atom_types or [1, 6, 7, 8],
@@ -77,6 +98,7 @@ class PiNet(TensorDictModuleBase):
             activation=activation,
             weighted=weighted,
             rank=rank,
+            emit_property_features=emit_property_features,
         )
         cfg = self.config
         if cfg.pp_nodes[-1] != cfg.ii_nodes[-1]:
@@ -84,6 +106,7 @@ class PiNet(TensorDictModuleBase):
 
         self.rank = int(cfg.rank)
         self.depth = int(cfg.depth)
+        self.emit_property_features = bool(cfg.emit_property_features)
         self.feature_dim = int(cfg.ii_nodes[-1])
         self.n_props = int(self.rank // 2) + 1
         self.output_dim = self.feature_dim
@@ -193,6 +216,12 @@ class PiNet(TensorDictModuleBase):
         fc = self.cutoff(edge_dist)
         basis = self.basis_fn(edge_dist, fc=fc)
 
+        # The p3/p5 and i1/i3/i5 histories are only read by the property heads.
+        # For a pure energy/force model they are dead weight — and the ``i*``
+        # tracks are per-edge, so at ~30 neighbours/atom they dominate both the
+        # copy cost and the memory pinned for the force double-backward. Skip
+        # accumulating them entirely rather than stacking and discarding.
+        emit_props = self.emit_property_features
         p1_states: list[torch.Tensor] = []
         p1_block_outputs: list[torch.Tensor] = []
         p3_states: list[torch.Tensor] = []
@@ -206,25 +235,29 @@ class PiNet(TensorDictModuleBase):
             p1_block_outputs.append(new["p1"])
             tensors["p1"] = self.res_update1[i](tensors["p1"], new["p1"])
             p1_states.append(tensors["p1"])
-            i1_states.append(new["i1"])
+            if emit_props:
+                i1_states.append(new["i1"])
 
             if self.rank >= 3:
                 tensors["p3"] = self.res_update3[i](tensors["p3"], new["p3"])
-                p3_states.append(tensors["p3"])
-                i3_states.append(new["i3"])
+                if emit_props:
+                    p3_states.append(tensors["p3"])
+                    i3_states.append(new["i3"])
 
             if self.rank >= 5:
                 tensors["p5"] = self.res_update5[i](tensors["p5"], new["p5"])
-                p5_states.append(tensors["p5"])
-                i5_states.append(new["i5"])
+                if emit_props:
+                    p5_states.append(tensors["p5"])
+                    i5_states.append(new["i5"])
 
         td["atoms", "node_features"] = torch.stack(p1_states, dim=1)
         td["atoms", "p1_block_outputs"] = torch.stack(p1_block_outputs, dim=1)
-        td["edges", "i1_features"] = torch.stack(i1_states, dim=1)
-        if self.rank >= 3:
-            td["atoms", "p3_features"] = torch.stack(p3_states, dim=1)
-            td["edges", "i3_features"] = torch.stack(i3_states, dim=1)
-        if self.rank >= 5:
-            td["atoms", "p5_features"] = torch.stack(p5_states, dim=1)
-            td["edges", "i5_features"] = torch.stack(i5_states, dim=1)
+        if emit_props:
+            td["edges", "i1_features"] = torch.stack(i1_states, dim=1)
+            if self.rank >= 3:
+                td["atoms", "p3_features"] = torch.stack(p3_states, dim=1)
+                td["edges", "i3_features"] = torch.stack(i3_states, dim=1)
+            if self.rank >= 5:
+                td["atoms", "p5_features"] = torch.stack(p5_states, dim=1)
+                td["edges", "i5_features"] = torch.stack(i5_states, dim=1)
         return td
