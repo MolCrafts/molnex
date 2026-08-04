@@ -13,7 +13,7 @@ import pytest
 
 
 def test_top_level_imports_succeed() -> None:
-    """All 12 concrete hooks importable from ``molix.hooks``."""
+    """Concrete hooks importable from ``molix.hooks``."""
     from molix.hooks import (  # noqa: F401
         ActivationCheckpointingHook,
         CheckpointHook,
@@ -23,6 +23,7 @@ def test_top_level_imports_succeed() -> None:
         JournalHook,
         Log,
         MetricsHook,
+        MolRecMetricsHook,
         ProfilerHook,
         ProgressBarHook,
         StepSpeedHook,
@@ -41,6 +42,7 @@ def test_per_module_imports() -> None:
     from molix.hooks.checkpoint import CheckpointHook  # noqa: F401
     from molix.hooks.gpu import GPUMemoryHook, GPUUtilsHook  # noqa: F401
     from molix.hooks.journal import JournalHook  # noqa: F401
+    from molix.hooks.molrec_metrics import MolRecMetricsHook  # noqa: F401
     from molix.hooks.profiler import ProfilerHook  # noqa: F401
     from molix.hooks.progress import Log, ProgressBarHook  # noqa: F401
     from molix.hooks.scalar import MetricsHook, StepSpeedHook  # noqa: F401
