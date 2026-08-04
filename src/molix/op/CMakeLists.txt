@@ -40,6 +40,33 @@ target_include_directories(${MOLNEX_OP_LIBRARY_NAME} PRIVATE
 
 target_link_libraries(${MOLNEX_OP_LIBRARY_NAME} PRIVATE Python::Module)
 target_link_libraries(${MOLNEX_OP_LIBRARY_NAME} PRIVATE ${TORCH_LIBRARIES})
+# torch::autograd::_wrap_outputs (used by custom autograd Functions) lives in
+# libtorch_python, which is NOT part of ${TORCH_LIBRARIES}. Without it, the
+# shared lib builds cleanly but fails at torch.ops.load_library with
+# ``undefined symbol: ..._wrap_outputs...``.
+find_library(
+  TORCH_PYTHON_LIBRARY
+  torch_python
+  PATHS
+    "${TORCH_INSTALL_PREFIX}/lib"
+    "${TORCH_INSTALL_PREFIX}/lib64"
+    "${TORCH_LIBRARY_DIRS}"
+  NO_DEFAULT_PATH
+)
+if(NOT TORCH_PYTHON_LIBRARY)
+  find_library(TORCH_PYTHON_LIBRARY torch_python REQUIRED)
+endif()
+# GNU ld may drop torch_python if it appears unused at link time; force keep
+# it so autograd Node / _wrap_outputs resolve at load time. --no-as-needed is
+# Linux/GNU-ld only (ld64 / MSVC reject the flag).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_options(${MOLNEX_OP_LIBRARY_NAME} PRIVATE "LINKER:--no-as-needed")
+  target_link_libraries(${MOLNEX_OP_LIBRARY_NAME} PRIVATE ${TORCH_PYTHON_LIBRARY})
+  target_link_options(${MOLNEX_OP_LIBRARY_NAME} PRIVATE "LINKER:--as-needed")
+else()
+  target_link_libraries(${MOLNEX_OP_LIBRARY_NAME} PRIVATE ${TORCH_PYTHON_LIBRARY})
+endif()
+message(STATUS "molnex_op: TORCH_PYTHON_LIBRARY=${TORCH_PYTHON_LIBRARY}")
 
 if(TORCH_CXX_FLAGS)
   separate_arguments(_MOLNEX_TORCH_CXX_FLAGS NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
@@ -55,7 +82,13 @@ if(MOLNEX_OP_ENABLE_CUDA)
   )
 endif()
 
+# Tag the artifact with the target architecture (e.g. libmolnex_opLib.x86_64.so,
+# libmolnex_opLib.aarch64.so) so builds for different arches can coexist in the
+# same in-source ``op/`` directory without clobbering each other. The Python
+# loader (molix/__init__.py) loads only the arch-tagged name matching
+# platform.machine() / CMAKE_SYSTEM_PROCESSOR — there is no untagged fallback.
 set_target_properties(${MOLNEX_OP_LIBRARY_NAME} PROPERTIES
+  OUTPUT_NAME "molnex_opLib.${CMAKE_SYSTEM_PROCESSOR}"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
 )

@@ -12,19 +12,12 @@ import torch
 import torch.nn as nn
 
 from molix import config
+from molix.F.scatter import scatter_sum
+from molpot.heads._common import graph_counts as _graph_counts
 
 
 def _scatter_sum(src: torch.Tensor, index: torch.Tensor, dim_size: int) -> torch.Tensor:
-    out = torch.zeros(dim_size, *src.shape[1:], dtype=src.dtype, device=src.device)
-    if src.numel() == 0:
-        return out
-    expand_index = index.view(-1, *([1] * (src.dim() - 1))).expand_as(src)
-    return out.scatter_add_(0, expand_index, src)
-
-
-def _graph_counts(batch: torch.Tensor, num_graphs: int) -> torch.Tensor:
-    ones = torch.ones(batch.shape[0], dtype=config.ftype, device=batch.device)
-    return _scatter_sum(ones, batch, num_graphs).clamp(min=1.0)
+    return scatter_sum(src, index, dim_size=dim_size)
 
 
 def _charge_neutralize(
@@ -141,7 +134,7 @@ class DipoleHead(nn.Module):
         edge_scalars: torch.Tensor | None = None,
         edge_vectors: torch.Tensor | None = None,
         edge_index: torch.Tensor | None = None,
-        bond_diff: torch.Tensor | None = None,
+        edge_diff: torch.Tensor | None = None,
         oxidation: torch.Tensor | None = None,
         total_charge: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
@@ -160,7 +153,7 @@ class DipoleHead(nn.Module):
             edge_scalars: Per-edge scalar features ``(E, F_e)`` (bond-charge term).
             edge_vectors: Per-edge vector features ``(E, 3)``.
             edge_index: Source/target atom pairs ``(E, 2)`` (bond terms).
-            bond_diff: Edge displacement vectors ``(E, 3)`` (bond terms).
+            edge_diff: Edge displacement vectors ``(E, 3)`` (bond terms).
             oxidation: Per-atom oxidation states ``(N,)`` (``ad_os`` term).
             total_charge: Optional per-graph net charge ``(num_graphs,)`` for
                 the charge-neutrality projection.
@@ -211,7 +204,7 @@ class DipoleHead(nn.Module):
 
         if self.uses_bc:
             assert edge_scalars is not None and edge_index is not None
-            assert bond_diff is not None
+            assert edge_diff is not None
             edge_batch = atom_batch[edge_index[:, 0]]
             bond_charge = self.bond_scalar_mlp(edge_scalars).squeeze(-1)
             if edge_vectors is not None:
@@ -219,7 +212,7 @@ class DipoleHead(nn.Module):
                     edge_vectors.square().sum(dim=1),
                 ).squeeze(-1)
             out["bond_charges"] = bond_charge
-            bond_dipoles = bond_charge.unsqueeze(-1) * bond_diff
+            bond_dipoles = bond_charge.unsqueeze(-1) * edge_diff
             out["bond_dipoles"] = bond_dipoles
             dipole = dipole + _scatter_sum(bond_dipoles, edge_batch, num_graphs)
             if self.regularization:

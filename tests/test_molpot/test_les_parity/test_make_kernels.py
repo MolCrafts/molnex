@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from molpot.potentials import EwaldMultipoleEnergy
-from tests._oracles.screened_coulomb import make_kernels as oracle_make_kernels
+from tests.test_molpot.test_les_parity.conftest import make_kernels as oracle_make_kernels
 
 
 @pytest.fixture(scope="module")

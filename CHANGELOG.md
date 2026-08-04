@@ -54,7 +54,7 @@ models.
 - `TrainState` enforces a fixed namespace layout (nested writes only; slash- and
   tuple-path reads) to prevent train/eval metric collisions.
 - Edge convention standardized repo-wide: `edge_index[:,0]` = source,
-  `[:,1]` = target, `bond_diff = pos[target] - pos[source]`.
+  `[:,1]` = target, `edge_diff = pos[target] - pos[source]`.
 
 ### Fixed
 - `RevMD17Source` downloads directly from the figshare REST API using only the

@@ -47,7 +47,7 @@ def _make_varied_samples(n: int) -> list[dict]:
 
     Returns:
         Flat sample dicts with per-atom (``Z``, ``pos``), per-edge
-        (``edge_index``, ``bond_diff``, ``bond_dist``) and graph-level
+        (``edge_index``, ``edge_diff``, ``edge_dist``) and graph-level
         (``targets.U0`` — unique identity ``float(i)``) keys.
     """
     torch.manual_seed(0)
@@ -60,8 +60,8 @@ def _make_varied_samples(n: int) -> list[dict]:
                 "Z": torch.ones(na, dtype=torch.long),
                 "pos": torch.randn(na, 3),
                 "edge_index": torch.randint(0, na, (ne, 2), dtype=torch.long),
-                "bond_diff": torch.randn(ne, 3),
-                "bond_dist": torch.rand(ne) + 0.5,
+                "edge_diff": torch.randn(ne, 3),
+                "edge_dist": torch.rand(ne) + 0.5,
                 "targets": {"U0": torch.tensor([float(i)])},
             }
         )

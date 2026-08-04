@@ -24,6 +24,7 @@ weight *values* while compute stays at ``config["ftype"]``.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 
 import torch
@@ -48,12 +49,25 @@ class QuantScheme(ABC):
 
     @classmethod
     def from_name(cls, name: str) -> QuantScheme:
-        """Instantiate the registered scheme for ``name`` (e.g. ``"int8"``)."""
+        """Instantiate the scheme for ``name`` (e.g. ``"int8"``, ``"int4_pc"``).
+
+        Registered schemes resolve first. Unregistered symmetric-integer schemes of
+        the form ``"int<N>"`` / ``"int<N>_pc"`` (any bit width ``N ≥ 2``) are built on
+        the fly from :class:`IntScheme`, so a bit-width sweep needs no extra classes.
+        """
         try:
             return cls._registry[name]()
         except KeyError:
-            valid = ", ".join(sorted(cls._registry))
-            raise ValueError(f"unknown scheme {name!r}; valid schemes: {valid}") from None
+            pass
+        m = re.fullmatch(r"int(\d+)(_pc)?", name)
+        if m and int(m.group(1)) >= 2:
+            scheme = IntScheme()
+            scheme.n_bits = int(m.group(1))
+            scheme.per_channel = m.group(2) is not None
+            scheme.name = name
+            return scheme
+        valid = ", ".join(sorted(cls._registry))
+        raise ValueError(f"unknown scheme {name!r}; valid schemes: {valid}") from None
 
     @classmethod
     def names(cls) -> tuple[str, ...]:

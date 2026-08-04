@@ -119,11 +119,19 @@ class KSpaceFilter(torch.nn.Module):
             s=mesh_values.shape[-3:],
         )
 
-        if torch.isnan(result).any():
+        # Full-mesh NaN scan is a device sync barrier on the PME hot path.
+        # Opt in only when debugging (env MOLNEX_PME_CHECK_NAN=1) or via
+        # ``self.check_nan = True`` on the instance.
+        check_nan = getattr(self, "check_nan", False)
+        if not check_nan:
+            import os
+
+            check_nan = os.environ.get("MOLNEX_PME_CHECK_NAN", "") == "1"
+        if check_nan and torch.isnan(result).any():
             raise ValueError(
                 "NaNs detected in the k-space filter result. This are probably caused "
                 "by an unsuitable `mesh_spacing`, resulting in a problematic grid of "
-                f"shape: {list(mesh_values.shape)}. Try adjsuting the grid by using a "
+                f"shape: {list(mesh_values.shape)}. Try adjusting the grid by using a "
                 "different `mesh_spacing` value."
             )
 

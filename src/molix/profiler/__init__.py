@@ -51,7 +51,7 @@ Typical workflow::
     result = ModuleProfiler(rbf).run_fn(
         forward_fn=lambda: rbf(dist),
         backward_fn=lambda out: out.sum(),
-        label="bond_dist E=512",
+        label="edge_dist E=512",
     )
     result.print_report()
 

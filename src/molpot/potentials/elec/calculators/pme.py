@@ -64,6 +64,16 @@ class PMECalculator(Calculator):
             method="Lagrange",
         )
         self.interpolation_nodes: int = interpolation_nodes
+        # Cache last (cell, ns) so fixed-cell MD does not rebuild k-filter every step.
+        self._cached_cell: Optional[torch.Tensor] = None
+        self._cached_ns: Optional[torch.Tensor] = None
+
+    def _mesh_cache_valid(self, cell: torch.Tensor, ns: torch.Tensor) -> bool:
+        if self._cached_cell is None or self._cached_ns is None:
+            return False
+        if self._cached_cell.device != cell.device or self._cached_ns.device != ns.device:
+            return False
+        return bool(torch.equal(self._cached_ns, ns) and torch.allclose(self._cached_cell, cell))
 
     def _compute_kspace(
         self,
@@ -91,8 +101,11 @@ class PMECalculator(Calculator):
             raise NotImplementedError("Batching not implemented for mesh-based calculators")
         ns = get_ns_mesh(cell, self.mesh_spacing)
 
-        self.mesh_interpolator.update(cell, ns)
-        self.kspace_filter.update(cell, ns)
+        if not self._mesh_cache_valid(cell, ns):
+            self.mesh_interpolator.update(cell, ns)
+            self.kspace_filter.update(cell, ns)
+            self._cached_cell = cell.detach().clone()
+            self._cached_ns = ns.detach().clone()
 
         self.mesh_interpolator.compute_weights(positions)
         rho_mesh = self.mesh_interpolator.points_to_mesh(particle_weights=charges)

@@ -66,8 +66,8 @@ def _make_batch_fp64(
     cell: torch.Tensor | None = None,
 ) -> TensorDict:
     """Assemble a float64 ``TensorDict`` with per-graph ``total_charge``."""
-    bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    bond_dist = bond_diff.norm(dim=-1)
+    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    edge_dist = edge_diff.norm(dim=-1)
     n_atoms = pos.shape[0]
     n_edges = edge_index.shape[0]
     n_graphs = int(total_charge.shape[0])
@@ -87,8 +87,8 @@ def _make_batch_fp64(
         atoms=TensorDict(Z=Z, pos=pos, batch=batch_idx, batch_size=[n_atoms]),
         edges=TensorDict(
             edge_index=edge_index,
-            bond_diff=bond_diff,
-            bond_dist=bond_dist,
+            edge_diff=edge_diff,
+            edge_dist=edge_dist,
             batch_size=[n_edges],
         ),
         graphs=TensorDict(**graphs_kwargs),

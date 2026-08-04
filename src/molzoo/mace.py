@@ -16,8 +16,8 @@ Example:
     ... )
     >>> features = encoder(
     ...     Z=Z,
-    ...     bond_dist=bond_dist,
-    ...     bond_diff=bond_diff,
+    ...     edge_dist=edge_dist,
+    ...     edge_diff=edge_diff,
     ...     edge_index=edge_index,
     ... )
     >>> print(features.shape)  # (n_nodes, num_layers, num_features)
@@ -151,15 +151,15 @@ class EmbeddingBlock(nn.Module):
     def forward(
         self,
         Z: torch.Tensor,
-        bond_dist: torch.Tensor,
-        bond_diff: torch.Tensor,
+        edge_dist: torch.Tensor,
+        edge_diff: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute initial node and edge features.
 
         Args:
             Z: Atomic numbers (n_nodes,).
-            bond_dist: Bond distances (n_edges,).
-            bond_diff: Bond vectors (target - source) (n_edges, 3).
+            edge_dist: Bond distances (n_edges,).
+            edge_diff: Bond vectors (target - source) (n_edges, 3).
 
         Returns:
             tuple of:
@@ -171,14 +171,14 @@ class EmbeddingBlock(nn.Module):
         node_feats = self.node_embedding(Z=Z)
 
         # Edge direction
-        edge_dir = bond_diff / (bond_dist.unsqueeze(-1) + 1e-8)
+        edge_dir = edge_diff / (edge_dist.unsqueeze(-1) + 1e-8)
 
         # Spherical harmonics
         edge_attrs = self.spherical_harmonics(edge_dir)
 
         # Radial basis * cutoff → edge_feats
-        edge_radial = self.radial_embedding(bond_dist)
-        edge_cutoff = self.cutoff_fn(bond_dist)
+        edge_radial = self.radial_embedding(edge_dist)
+        edge_cutoff = self.cutoff_fn(edge_dist)
         edge_feats = edge_radial * edge_cutoff.unsqueeze(-1)
 
         return node_feats, edge_attrs, edge_feats
@@ -253,12 +253,21 @@ class InteractionBlock(nn.Module):
             avg_num_neighbors=avg_num_neighbors,
         )
 
-        irreps_str = irreps_from_l_max(l_max, num_features)
+        # Node *state* is pure scalar (l=0); the mixed-l message irreps live only
+        # transiently in the tensor-product output, where they are contracted
+        # back to invariant scalars by the downstream ProductHead. Keeping the
+        # node state scalar makes every node-state operation (node_linear,
+        # ElementUpdate, projections) equivariant by construction — fabricating
+        # l>0 node components from scalars via a plain/dense linear is exactly
+        # what breaks rotation invariance.
+        node_irreps_str = f"{num_features}x0e"
+        irreps_str = irreps_from_l_max(l_max, num_features)  # mixed-l message irreps
         sh_irreps_str = sh_irreps_from_l_max(l_max)
 
-        # 1. Tensor product convolution (define first to get weight_numel)
+        # 1. Tensor product convolution (define first to get weight_numel):
+        #    scalar node features ⊗ Y_l(r̂) -> mixed-l equivariant messages.
         self.conv_tp = ConvTP(
-            in_irreps=irreps_str,
+            in_irreps=node_irreps_str,
             out_irreps=irreps_str,
             sh_irreps=sh_irreps_str,
         )
@@ -266,10 +275,10 @@ class InteractionBlock(nn.Module):
         # Actual TP output irreps (may differ from requested out_irreps)
         tp_out_irreps = str(self.conv_tp.cue_tp.irreps_out)
 
-        # 2. Pre-convolution equivariant linear
+        # 2. Pre-convolution equivariant linear (scalar -> scalar)
         self.node_linear = cuet.Linear(
-            irreps_in=cue.Irreps("O3", irreps_str),
-            irreps_out=cue.Irreps("O3", irreps_str),
+            irreps_in=cue.Irreps("O3", node_irreps_str),
+            irreps_out=cue.Irreps("O3", node_irreps_str),
             layout=cue.ir_mul,
             dtype=config.ftype,
         )
@@ -368,8 +377,8 @@ class MACE(TensorDictModuleBase):
         ("atoms", "Z"),
         ("atoms", "pos"),
         ("edges", "edge_index"),
-        ("edges", "bond_diff"),
-        ("edges", "bond_dist"),
+        ("edges", "edge_diff"),
+        ("edges", "edge_dist"),
     ]
     out_keys = [("atoms", "node_features")]
 
@@ -424,13 +433,15 @@ class MACE(TensorDictModuleBase):
             num_bessel=num_bessel,
             l_max=l_max,
         )
-        # Hidden irreps dimension for message passing paths
+        # Mixed-l message dimension (transient TP output consumed by ProductHead)
         irreps_str = irreps_from_l_max(l_max, num_features)
         with cue.assume(O3):
             irreps_dim = Irreps(irreps_str).dim
 
-        # Initial projection: scalar embeddings -> hidden irreps
-        self.initial_projection = nn.Linear(num_features, irreps_dim, dtype=config.ftype)
+        # The node *state* carried between layers is pure scalar (num_features);
+        # only the per-edge messages are mixed-l. This keeps every node-state
+        # op equivariant. Initial projection is therefore scalar -> scalar.
+        self.initial_projection = nn.Linear(num_features, num_features, dtype=config.ftype)
 
         # Interaction blocks
         self.interactions = nn.ModuleList(
@@ -460,26 +471,29 @@ class MACE(TensorDictModuleBase):
             ]
         )
 
-        # Projection: num_features → irreps_dim (for residual path)
+        # Projection of the (scalar) product readout back into the scalar node
+        # state for the residual path. Scalar -> scalar keeps it equivariant.
         self.projections = nn.ModuleList(
             [
-                nn.Linear(num_features, irreps_dim, dtype=config.ftype)
+                nn.Linear(num_features, num_features, dtype=config.ftype)
                 for _ in range(num_interactions)
             ]
         )
 
-        # Element-specific residual updates (all layers except last)
+        # Element-specific residual updates (all layers except last). Operates on
+        # the scalar node state, so ElementUpdate's scalar (l=0) treatment is now
+        # correct rather than silently mixing l>0 components.
         self.element_updates = nn.ModuleList(
             [
-                ElementUpdate(hidden_dim=irreps_dim, num_species=num_elements)
+                ElementUpdate(hidden_dim=num_features, num_species=num_elements)
                 for _ in range(max(num_interactions - 1, 0))
             ]
         )
 
-        # Layer normalization (all layers except last)
+        # Layer normalization (all layers except last) over the scalar state.
         self.layer_norms = nn.ModuleList(
             [
-                nn.LayerNorm(irreps_dim) if layer_norm else nn.Identity()
+                nn.LayerNorm(num_features) if layer_norm else nn.Identity()
                 for _ in range(max(num_interactions - 1, 0))
             ]
         )
@@ -495,15 +509,15 @@ class MACE(TensorDictModuleBase):
             ``(n_nodes, num_interactions, num_features)`` added.
         """
         Z = td["atoms", "Z"]
-        bond_dist = td["edges", "bond_dist"]
-        bond_diff = td["edges", "bond_diff"]
+        edge_dist = td["edges", "edge_dist"]
+        edge_diff = td["edges", "edge_diff"]
         edge_index = td["edges", "edge_index"]
 
         # ---- Embedding ----
         node_feats_init, edge_attrs, edge_feats = self.embedding(
             Z=Z,
-            bond_dist=bond_dist,
-            bond_diff=bond_diff,
+            edge_dist=edge_dist,
+            edge_diff=edge_diff,
         )
 
         # ---- Initial projection: scalar embeddings -> hidden irreps ----

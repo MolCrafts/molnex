@@ -161,6 +161,14 @@ class DataModule:
         self._train_sampler: DistributedSampler | None = None
         self._val_sampler: DistributedSampler | None = None
         self._epoch = 0
+        # Cached loaders (non-DDP, non-budget): built once and reused across epochs
+        # so persistent workers survive and the DataLoader/worker pool is not rebuilt
+        # — with a spawn context the per-epoch rebuild re-spawns workers (re-importing
+        # the whole stack) every epoch, ~38 s/epoch and an eventual deadlock. The
+        # stored shuffle generator is reseeded per epoch so reshuffling is preserved.
+        self._train_loader: DataLoader | None = None
+        self._val_loader: DataLoader | None = None
+        self._shuffle_generator: torch.Generator | None = None
 
     def _worker_context(self) -> str | None:
         """Start method passed to :class:`DataLoader`, or ``None`` for sync.
@@ -242,6 +250,16 @@ class DataModule:
                 worker_init_fn=self._worker_init_fn(),
             )
 
+        # Cached fast path: reuse the loader across epochs (persistent workers
+        # survive; no per-epoch rebuild). Reseed the stored shuffle generator so the
+        # next __iter__ reshuffles with (seed, epoch) — same permutation the
+        # rebuild-every-epoch code produced, so resume-determinism is preserved.
+        # Excluded under DDP (DistributedSampler.set_epoch handles reshuffle).
+        if self._train_loader is not None and not _is_distributed():
+            if self._shuffle_generator is not None:
+                self._shuffle_generator.manual_seed(self.seed + self._epoch)
+            return self._train_loader
+
         if _is_distributed():
             self._train_sampler = DistributedSampler(
                 self.train_dataset,
@@ -258,11 +276,13 @@ class DataModule:
             # Seed the shuffle RNG from (seed, epoch) so each epoch gets a
             # different permutation, yet epoch k's order is re-derivable on
             # resume without checkpointing generator state — mirrors
-            # DistributedSampler.set_epoch semantics.
-            generator = make_generator(self.seed + self._epoch)
+            # DistributedSampler.set_epoch semantics. Stored so the cached loader
+            # can be reseeded each epoch.
+            self._shuffle_generator = make_generator(self.seed + self._epoch)
+            generator = self._shuffle_generator
 
         loader_dataset, collate_fn = self._resolve_collation(self.train_dataset)
-        return DataLoader(
+        loader = DataLoader(
             loader_dataset,
             batch_size=self.batch_size,
             shuffle=shuffle,
@@ -277,6 +297,9 @@ class DataModule:
             worker_init_fn=self._worker_init_fn(),
             generator=generator,
         )
+        if not _is_distributed():
+            self._train_loader = loader  # cache for subsequent epochs
+        return loader
 
     def val_dataloader(self) -> DataLoader:
         """Build the validation :class:`~torch.utils.data.DataLoader`.
@@ -289,6 +312,11 @@ class DataModule:
         Returns:
             A configured validation ``DataLoader``.
         """
+        # Cached (non-DDP): val never shuffles, so the same loader is reused every
+        # eval phase — no per-eval worker re-spawn.
+        if self._val_loader is not None and not _is_distributed():
+            return self._val_loader
+
         if _is_distributed():
             self._val_sampler = DistributedSampler(
                 self.val_dataset,
@@ -300,7 +328,7 @@ class DataModule:
             self._val_sampler = None
 
         loader_dataset, collate_fn = self._resolve_collation(self.val_dataset)
-        return DataLoader(
+        loader = DataLoader(
             loader_dataset,
             batch_size=self.batch_size,
             shuffle=False,
@@ -313,6 +341,9 @@ class DataModule:
             multiprocessing_context=self._worker_context(),
             worker_init_fn=self._worker_init_fn(),
         )
+        if not _is_distributed():
+            self._val_loader = loader
+        return loader
 
     def _make_collate_fn(self) -> "_CollateFn":
         return _CollateFn(self.target_schema, self.batch_nodes)

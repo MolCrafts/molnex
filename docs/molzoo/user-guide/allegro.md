@@ -57,8 +57,8 @@ MolNex stores this as:
 ```text
 edge_index[:, 0] = i
 edge_index[:, 1] = j
-bond_diff        = pos[j] - pos[i]
-bond_dist        = ||bond_diff||
+edge_diff        = pos[j] - pos[i]
+edge_dist        = ||edge_diff||
 ```
 
 ## 2. Energy Decomposition
@@ -261,7 +261,7 @@ $$
 MolNex implements this as:
 
 ```python
-tensor_basis = self.spherical_harmonics(bond_diff)
+tensor_basis = self.spherical_harmonics(edge_diff)
 v0_weights = self.env_embed_linear(twobody_scalar_embed)
 tensor_features = _make_weighted_channels(
     tensor_basis,
@@ -441,8 +441,8 @@ edge_index = torch.tensor(
 
 src = edge_index[:, 0]
 dst = edge_index[:, 1]
-bond_diff = pos[dst] - pos[src]
-bond_dist = bond_diff.norm(dim=-1)
+edge_diff = pos[dst] - pos[src]
+edge_dist = edge_diff.norm(dim=-1)
 
 batch = GraphBatch(
     atoms=AtomData(
@@ -453,8 +453,8 @@ batch = GraphBatch(
     ),
     edges=EdgeData(
         edge_index=edge_index,
-        bond_diff=bond_diff,
-        bond_dist=bond_dist,
+        edge_diff=edge_diff,
+        edge_dist=edge_dist,
         batch_size=[len(edge_index)],
     ),
     graphs=GraphData(
@@ -585,13 +585,13 @@ Then train with `molix.core.trainer.Trainer`.
 Wrong edge direction:
 
 ```text
-bond_diff = pos[source] - pos[target]  # wrong for MolNex Allegro
+edge_diff = pos[source] - pos[target]  # wrong for MolNex Allegro
 ```
 
 Correct:
 
 ```text
-bond_diff = pos[target] - pos[source]
+edge_diff = pos[target] - pos[source]
 ```
 
 Using half edges:

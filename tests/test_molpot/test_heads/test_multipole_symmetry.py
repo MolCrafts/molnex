@@ -32,7 +32,7 @@ rotation tests parametrise on Euler angles and apply ``cuet.Rotation`` to
 the output. Translation/permutation tests still use a 3×3 matrix because
 those symmetries are independent of the irrep order.
 
-The graph-transform helpers come from ``tests.symmetry_helpers`` so the
+The graph-transform helpers come from ``tests.conftest`` so the
 encoder-only and pipeline tests share one definition of "translate / rotate
 / permute a TensorDict".
 """
@@ -51,7 +51,7 @@ from tensordict import TensorDict
 from molpot.heads import PermMultipoleHead
 from molrep.utils.equivariance import random_rotation_matrix, rotate_vectors
 from molzoo import Allegro
-from tests.symmetry_helpers import (
+from tests.conftest import (
     make_graph_batch,
     permute_graph,
     recompute_edge_geometry,
@@ -225,7 +225,7 @@ def full_multipole_pipeline():
 class _PipelineModule(nn.Module):
     """Minimal Allegro→PermMultipoleHead pipeline.
 
-    Re-derives ``bond_diff`` / ``bond_dist`` from ``pos`` inside ``forward``
+    Re-derives ``edge_diff`` / ``edge_dist`` from ``pos`` inside ``forward``
     so that the encoder always sees fresh edge geometry under
     rotate / translate / permute transforms.
     """
@@ -264,7 +264,7 @@ class TestTranslationInvariance:
             shifted = charge_only_pipeline(translate_graph(small_molecule_neutral, t))
 
         # Float32 ULP — translation amplifies pos magnitudes by ~10×, so
-        # bond_diff differs at ~1e-5; tolerances mirror the encoder tests.
+        # edge_diff differs at ~1e-5; tolerances mirror the encoder tests.
         assert torch.allclose(
             ref["atomic_charges"], shifted["atomic_charges"], atol=1e-4, rtol=1e-4
         )

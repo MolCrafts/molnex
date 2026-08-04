@@ -1,59 +1,62 @@
-"""Tests for molix.compile module."""
+"""Tests for molix.compile.Compiler."""
 
 import torch
 import torch.nn as nn
 
-from molix.compile import count_graph_breaks, maybe_compile
+from molix.compile import Compiler
 
 
-class TestMaybeCompile:
-    """Tests for maybe_compile()."""
+class TestCompiler:
+    """Tests for Compiler configuration + application."""
 
-    def test_compile_false_returns_same_module(self):
+    def test_call_returns_compiled_wrapper(self):
         module = nn.Linear(10, 5)
-        result = maybe_compile(module, compile=False)
-        assert result is module
-
-    def test_compile_true_returns_compiled(self):
-        module = nn.Linear(10, 5)
-        result = maybe_compile(module, compile=True, backend="eager")
-        # Compiled module is not the same object
+        result = Compiler(backend="eager")(module)
         assert result is not module
 
     def test_compiled_module_produces_same_output(self):
         module = nn.Linear(10, 5)
         x = torch.randn(3, 10)
-
         with torch.no_grad():
             expected = module(x)
-
-        compiled = maybe_compile(module, compile=True, backend="eager")
+        compiled = Compiler(backend="eager")(module)
         with torch.no_grad():
             actual = compiled(x)
-
         assert torch.allclose(expected, actual)
 
-    def test_default_is_no_compile(self):
-        module = nn.Linear(10, 5)
-        result = maybe_compile(module)
-        assert result is module
+    def test_cuda_graph_preset_values(self):
+        """The named preset is exactly the benchmarked winning force-training config."""
+        assert Compiler.CUDA_GRAPH_PRESET == {
+            "backend": "inductor",
+            "fullgraph": True,
+            "dynamic": False,
+            "mode": "reduce-overhead",
+        }
+
+    def test_cuda_graphs_applies_preset(self):
+        c = Compiler(cuda_graphs=True)
+        assert (c.backend, c.fullgraph, c.dynamic, c.mode) == (
+            "inductor",
+            True,
+            False,
+            "reduce-overhead",
+        )
+
+    def test_cuda_graphs_overrides_explicit_args(self):
+        c = Compiler(cuda_graphs=True, dynamic=True, mode="max-autotune")
+        assert c.dynamic is False
+        assert c.mode == "reduce-overhead"
 
 
 class TestCountGraphBreaks:
-    """Tests for count_graph_breaks()."""
+    """Tests for Compiler.count_graph_breaks()."""
 
     def test_simple_linear_no_breaks(self):
         module = nn.Linear(10, 5)
         x = torch.randn(3, 10)
-        breaks = count_graph_breaks(module, x)
-        assert breaks == 0
+        assert Compiler.count_graph_breaks(module, x) == 0
 
     def test_sequential_no_breaks(self):
-        module = nn.Sequential(
-            nn.Linear(10, 20),
-            nn.ReLU(),
-            nn.Linear(20, 5),
-        )
+        module = nn.Sequential(nn.Linear(10, 20), nn.ReLU(), nn.Linear(20, 5))
         x = torch.randn(3, 10)
-        breaks = count_graph_breaks(module, x)
-        assert breaks == 0
+        assert Compiler.count_graph_breaks(module, x) == 0

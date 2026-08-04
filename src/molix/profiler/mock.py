@@ -138,16 +138,16 @@ class MockBatch:
             src = torch.randint(0, n_a, (n_e,), device=dev, generator=gen)
             dst = torch.randint(0, n_a, (n_e,), device=dev, generator=gen)
             edge_index = torch.stack([src, dst], dim=1)  # (E, 2)
-            bond_diff = torch.randn(n_e, 3, device=dev, generator=gen)
-            bond_dist = torch.rand(n_e, device=dev, generator=gen) * 5.0
+            edge_diff = torch.randn(n_e, 3, device=dev, generator=gen)
+            edge_dist = torch.rand(n_e, device=dev, generator=gen) * 5.0
         else:
             edge_index = torch.zeros(0, 2, dtype=torch.long, device=dev)
-            bond_diff = torch.zeros(0, 3, device=dev)
-            bond_dist = torch.zeros(0, device=dev)
+            edge_diff = torch.zeros(0, 3, device=dev)
+            edge_dist = torch.zeros(0, device=dev)
             n_e = 0
 
         edges = TensorDict(
-            {"edge_index": edge_index, "bond_diff": bond_diff, "bond_dist": bond_dist},
+            {"edge_index": edge_index, "edge_diff": edge_diff, "edge_dist": edge_dist},
             batch_size=[n_e],
         )
 

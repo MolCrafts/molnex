@@ -25,3 +25,142 @@ validation, but `nn.Module` with `forward(td: TensorDict) -> TensorDict` is
 also valid.
 
 **Status.** stable (promoted to CLAUDE.md).
+
+---
+
+## Industrial module layout + test mirror (2026-07-16)
+
+**Context.** PiNet train/infer work was blocked by god-files (`molzoo/pinet.py`
+756 LOC, `molrep/interaction/pinet.py` 11 classes), dual homes
+(heads/pooling/export), and tests that crossed package boundaries
+(`test_molzoo` owning `PadMolecularBatch` and molrep layer checks).
+
+**Decision — package ownership (one-way):**
+
+```
+molix  → infra (data, trainer, compile, export, md)
+molrep → pure representation (embedding / interaction / readout)
+molpot → physics (heads / derivation / potentials)
+molzoo → recipes that wire molrep blocks into encoders (+ temporary
+         potential façades under molzoo.pinet.potential for import
+         stability; long-term home is molpot)
+```
+
+Hard rules:
+1. `molrep` must not import `molpot` or `molzoo`.
+2. `molpot` must not import `molzoo` (accept encoder Protocol / tensors).
+3. One physics concept → one owner package (no duplicate CosineCutoff, etc.).
+4. Prefer explicit `nn.Linear(in, out)` over `LazyLinear` on any export /
+   functorch / compile path.
+
+**Decision — source ↔ test mirror:**
+
+```
+src/<pkg>/<area>/<module>.py
+  → tests/test_<pkg>/test_<area>/test_<module>.py
+```
+
+- One source module ↔ one primary test module.
+- One public class ↔ dedicated test class (and preferred: dedicated file when
+  the source file still hosts multiple public types during migration).
+- Cross-package integration tests go under `tests/regression/` or an explicit
+  `test_*_integration.py` name — never as a substitute for unit mirrors.
+- Gate: `python scripts/check_test_mirror.py --strict-pinet`.
+
+**PiNet spine layout (landed):**
+
+```
+src/molrep/interaction/pinet/{ff,message,residual,blocks}.py
+src/molzoo/pinet/{spec,geometry,encoder,potential,properties}.py
+tests/test_molrep/test_interaction/test_pinet/...
+tests/test_molzoo/test_pinet/...
+tests/test_molix/test_data/test_tasks/test_pad.py
+```
+
+**Status.** active (PiNet spine done; full-repo mirror is incremental).
+
+---
+
+## Force derivation — dual explicit backends (2026-07-29)
+
+**Context.** CLAUDE.md and some docs still said “forces always via
+`torch.func.grad`”. Reality is more nuanced: cuEquivariance fused kernels
+register a legacy `autograd.Function` without `setup_context`, so
+`torch.func.grad` rejects them (pytorch#170834). PiNet (pure torch) benefits
+from functorch + `torch.compile(fullgraph)`; MACE / OMOL need autograd.
+
+**Decision.** Canonical entry is `molpot.derivation.ForceDerivation`:
+
+| `method` | Implementation | Use when |
+|----------|----------------|----------|
+| `"autograd"` (default) | `torch.autograd.grad` | cuEq / MACE / any model; always correct |
+| `"functorch"` | `torch.func.grad` | pure-torch energy graphs (e.g. PiNet) for single-backward + fullgraph |
+
+`BasePotential.calc_forces` uses `ForceDerivation(method="autograd")` (protocol
+path must work for every potential). Models must not invent a third force path.
+
+**Status.** active (promoted into CLAUDE.md Key Design Patterns; docs/gradients
+aligned). Landed 2026-07-29: OMOL/`energy_forces`, Sonata forces, PiNet via
+`EnergyForceModel`, `BasePotential.calc_forces` all go through `ForceDerivation`.
+`has_aux` supported on functorch backend for single-pass eval.
+
+---
+
+## Soft-optional native deps for datasets (2026-07-29)
+
+**Context.** `MolRecSource` needs `molpy.MolRec` (optional public surface;
+not every molpy build ships labeled-configuration records). Hard-importing
+optional surfaces broke `from molix.datasets import …` for every source.
+
+**Decision.**
+1. Soft-import `MolRecSource` in `molix.datasets.__init__`; on failure export a
+   stub class whose `__init__` raises a clear `ImportError` (never `None`).
+2. All Element / Frame / Block / Box / Trajectory / UnitsError / MolRec access
+   goes through **`molpy` only**.
+3. QM9 / ThreeBPA / WaterLES / MolRec Element lookups use `molpy.Element`.
+
+**Status.** active.
+
+---
+
+## Never import molrs from molnex Python (2026-07-29)
+
+**Context.** molrs is the Rust core; molpy is the supported Python façade
+(re-exports Element, Frame, Trajectory, UnitsError, …). Direct `import molrs`
+couples molnex to native ABI details and bypasses molpy versioning.
+
+**Decision.** **Hard rule:** no `import molrs` / `from molrs import …` in
+`src/` or `tests/`. Use `from molpy import …` exclusively. Ecosystem README
+may still *mention* molrs as a dependency of molpy.
+
+**Status.** active.
+
+---
+
+## Native op lib — arch tag + torch_python (2026-07-29)
+
+**Context.** Custom autograd Functions need `torch::autograd::_wrap_outputs` from
+`libtorch_python`, which is not in `${TORCH_LIBRARIES}`. Also multi-arch HPC
+nodes need both x86_64 and aarch64 builds in the same tree.
+
+**Decision.**
+- CMake `OUTPUT_NAME = molnex_opLib.${CMAKE_SYSTEM_PROCESSOR}`; loader loads only
+  the arch-tagged path (no untagged fallback).
+- Always link `torch_python`; on Linux wrap with GNU-ld `--no-as-needed` /
+  `--as-needed` so the DSO is kept at load time. Non-Linux: plain link only.
+
+**Status.** active.
+
+---
+
+## cuEq `use_fallback` split by force backend (2026-07-29)
+
+**Context.** Hardcoding `use_fallback=True` on every TP / SymmetricContraction
+abandoned fused kernels even when forces used autograd (OMOL).
+
+**Decision.** Constructors take `use_fallback: bool = True` (functorch-safe
+default). Autograd-only full models (e.g. `MACEOMol`) pass `use_fallback=False`.
+Encoder-only MACE keeps default True so composed functorch force paths stay
+traceable.
+
+**Status.** active.

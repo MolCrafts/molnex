@@ -11,11 +11,12 @@ from molix.quant import (
     ForceDelta,
     Int4Scheme,
     Int8Scheme,
-    QuantScheme,
+    IntScheme,
     Quantizer,
+    QuantScheme,
 )
 from molzoo.pinet import PiNetPotential
-from tests.symmetry_helpers import make_graph_batch
+from tests.conftest import make_graph_batch
 
 # PiNet uses lazy params and make_graph_batch builds CPU metadata; keep tensors on CPU.
 _DEVICE = torch.device("cpu")
@@ -29,9 +30,34 @@ def test_scheme_registry_names():
     assert isinstance(QuantScheme.from_name("int8"), Int8Scheme)
 
 
-def test_from_name_rejects_unknown():
+@pytest.mark.parametrize("name", ["int1", "float5", "garbage", "int_pc", "int0"])
+def test_from_name_rejects_unknown(name):
+    # int1/int0 are below the N>=2 floor; the rest match no registered or dynamic scheme.
     with pytest.raises(ValueError, match="unknown scheme"):
-        QuantScheme.from_name("int3")
+        QuantScheme.from_name(name)
+
+
+@pytest.mark.parametrize(
+    ("name", "n_bits", "per_channel"),
+    [("int3", 3, False), ("int16", 16, False), ("int5_pc", 5, True), ("int2", 2, False)],
+)
+def test_from_name_builds_dynamic_int(name, n_bits, per_channel):
+    """Unregistered ``int<N>`` / ``int<N>_pc`` schemes are synthesized on the fly."""
+    scheme = QuantScheme.from_name(name)
+    assert isinstance(scheme, IntScheme)
+    assert scheme.n_bits == n_bits
+    assert scheme.per_channel is per_channel
+    assert scheme.name == name
+
+
+def test_dynamic_int_bit_width_monotonic():
+    """A finer dynamic scheme (int6) must quantize less coarsely than int4."""
+    torch.manual_seed(7)
+    w = torch.randn(128, 128, dtype=torch.float32)
+    err4 = (QuantScheme.from_name("int4").quantize(w) - w).abs().mean()
+    err6 = (QuantScheme.from_name("int6").quantize(w) - w).abs().mean()
+    err8 = (QuantScheme.from_name("int8").quantize(w) - w).abs().mean()
+    assert err8 < err6 < err4
 
 
 def test_all_schemes_change_high_precision_weights():
@@ -154,17 +180,21 @@ def test_force_delta_zero_residual_has_zero_moments():
 # --------------------------------------------------------------------------- #
 def _tiny_potential() -> PiNetPotential:
     torch.manual_seed(0)
-    return PiNetPotential(
-        atom_types=[1, 6, 7, 8],
-        r_max=4.0,
-        n_basis=3,
-        pp_nodes=[8, 8],
-        pi_nodes=[8, 8],
-        ii_nodes=[8, 8],
-        depth=2,
-        rank=3,
-        hidden_dim=16,
-    ).to(_DEVICE).eval()
+    return (
+        PiNetPotential(
+            atom_types=[1, 6, 7, 8],
+            r_max=4.0,
+            n_basis=3,
+            pp_nodes=[8, 8],
+            pi_nodes=[8, 8],
+            ii_nodes=[8, 8],
+            depth=2,
+            rank=3,
+            hidden_dim=16,
+        )
+        .to(_DEVICE)
+        .eval()
+    )
 
 
 def _tiny_batch():

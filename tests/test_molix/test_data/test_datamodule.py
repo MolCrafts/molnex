@@ -23,8 +23,8 @@ def _make_samples(n: int = 10) -> list[dict]:
             "Z": torch.tensor([1, 6], dtype=torch.long),
             "pos": torch.randn(2, 3),
             "edge_index": torch.tensor([[0, 1]], dtype=torch.long),
-            "bond_diff": torch.randn(1, 3),
-            "bond_dist": torch.tensor([1.5]),
+            "edge_diff": torch.randn(1, 3),
+            "edge_dist": torch.tensor([1.5]),
             "targets": {"U0": torch.tensor([float(i)])},
         }
         for i in range(n)

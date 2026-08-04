@@ -64,8 +64,8 @@ def _make_batch(n_atoms: int = 32, n_edges: int = 128, n_graphs: int = 4) -> Ten
             "edges": TensorDict(
                 {
                     "edge_index": torch.randint(0, n_atoms, (n_edges, 2)),
-                    "bond_diff": torch.randn(n_edges, 3),
-                    "bond_dist": torch.rand(n_edges),
+                    "edge_diff": torch.randn(n_edges, 3),
+                    "edge_dist": torch.rand(n_edges),
                 },
                 batch_size=[n_edges],
             ),

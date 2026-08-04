@@ -1,10 +1,19 @@
 # molzoo
 
-Molecular model zoo. Provides encoder architectures (MACE, Allegro, PiNet). The
-PiNet module additionally ships an energy+force potential head (`PiNetPotential`)
-co-located with the encoder, because PiNet2's per-block residual readout only
-makes sense for its multi-layer output shape. The Sonata permanent-electrostatics
-model lives in `molpot.composition` (`Sonata` / `build_sonata`), not here.
+Molecular model zoo. Provides encoder architectures (MACE, Allegro, PiNet).
+
+PiNet is a **package** (`molzoo/pinet/`), not a single file:
+
+| Module | Role |
+|--------|------|
+| `spec` | `PiNetSpec` config |
+| `geometry` | PBC-safe edge displacement helpers |
+| `encoder` | `PiNet` feature encoder (molrep GC blocks only) |
+| `potential` | `PiNetPotential` energy + functorch forces (composition; long-term home molpot) |
+| `properties` | `PiNetDipole` / `PiNetPolarizability` façades over molpot heads |
+
+Public imports stay stable: `from molzoo.pinet import PiNet, PiNetPotential`.
+The Sonata model lives in `molpot.composition`, not here.
 
 ## Model Specifications
 
@@ -14,10 +23,12 @@ Each model in this package ships with **one** spec artifact in `specs/`:
 
 **Read the spec before modifying the model** — any change to a module's math MUST be reflected in the corresponding spec.
 
-| Model   | Spec | Paper |
-|---------|------|-------|
-| Allegro | [`specs/allegro.md`](specs/allegro.md) | Musaelian et al., Nat. Commun. 2023 ([arXiv](https://arxiv.org/abs/2204.05249)) |
-| MACE    | *(todo)* | Batatia et al., NeurIPS 2022 ([arXiv](https://arxiv.org/abs/2206.07697)) |
+| Model     | Spec | Paper |
+|-----------|------|-------|
+| Allegro   | [`specs/allegro.md`](specs/allegro.md) | Musaelian et al., Nat. Commun. 2023 ([arXiv](https://arxiv.org/abs/2204.05249)) |
+| MACE      | [`specs/mace.md`](specs/mace.md) | Batatia et al., NeurIPS 2022 ([arXiv](https://arxiv.org/abs/2206.07697)) |
+| PiNet     | [`specs/pinet2.md`](specs/pinet2.md) | package under `molzoo/pinet/` |
+| MACE-OMOL | [`specs/mace_omol.md`](specs/mace_omol.md) | full energy/force model (lazy import) |
 
 ### Spec workflow
 
@@ -38,8 +49,8 @@ One skill + one agent keep `<encoder>.md` aligned with code and paper:
 Both encoders accept keyword tensors:
 
 - `Z`: Atomic numbers `(N,)`
-- `bond_dist`: Edge distances `(E,)`
-- `bond_diff`: Edge vectors `(E, 3)`
+- `edge_dist`: Edge distances `(E,)`
+- `edge_diff`: Edge vectors `(E, 3)`
 - `edge_index`: Edge indices `(E, 2)`
 
 Output: `(N, num_layers, feature_dim)` — per-atom, per-layer features.
@@ -62,8 +73,8 @@ encoder = MACE(MACESpec(
 Z = torch.randint(0, 10, (20,))
 features = encoder(
     Z=Z,
-    bond_dist=torch.rand(80),
-    bond_diff=torch.randn(80, 3),
+    edge_dist=torch.rand(80),
+    edge_diff=torch.randn(80, 3),
     edge_index=torch.randint(0, 20, (80, 2)),
 )
 

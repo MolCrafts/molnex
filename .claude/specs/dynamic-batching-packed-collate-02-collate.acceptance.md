@@ -107,12 +107,16 @@ criteria:
       each have Google-style docstrings annotating tensor shapes (e.g.
       ``(E, 2)``, ``(N,)``) and Args/Returns/Raises sections where applicable;
       ruff check passes.
-    status: pending
+    status: verified
+    last_checked: 2026-06-21
     note: |
       Audited green by the documenter agent (all five symbols carry
-      Google-style docstrings with tensor shapes; ruff clean). Left
-      pending per evaluator-protocol — docs criteria are owed to a human
-      reviewer / `/mol:close --manual`, not auto-verified by /mol:impl.
+      Google-style docstrings with tensor shapes; ruff clean). Manually
+      reviewed + approved 2026-06-21: collate_packed / PackedView /
+      packed_view carry Args/Returns/Raises with (N,)/(E,)/(B,) shape
+      annotations; _IndexDataset / _PackedCollateFn carry class docstrings
+      (tensor shapes N/A — they pass bare int indices). `ruff check
+      src/molix/data/collate.py` clean; ac-012 full ruff+pytest verified.
   - id: ac-012
     summary: Full check and test suite pass
     type: runtime

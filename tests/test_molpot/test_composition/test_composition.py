@@ -36,8 +36,8 @@ def molecular_batch():
         ],
         dtype=torch.long,
     )
-    bond_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    bond_dist = bond_diff.norm(dim=-1)
+    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    edge_dist = edge_diff.norm(dim=-1)
     batch_idx = torch.tensor([0, 0, 0, 1, 1], dtype=torch.long)
     Z = torch.tensor([1, 6, 8, 1, 6], dtype=torch.long)
 
@@ -50,8 +50,8 @@ def molecular_batch():
         ),
         edges=TensorDict(
             edge_index=edge_index,
-            bond_diff=bond_diff,
-            bond_dist=bond_dist,
+            edge_diff=edge_diff,
+            edge_dist=edge_dist,
             batch_size=[6],
         ),
         batch_size=[],

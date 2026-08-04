@@ -160,7 +160,7 @@ else:                                      # variable-shape path
 ```
 
 Inside MolNex, the winning combo is the named `cuda_graphs` preset — use
-`trainer.compile(cuda_graphs=True)` (or `molix.compile.CUDA_GRAPH_PRESET`)
+`trainer.compile(cuda_graphs=True)` (or `molix.compile.Compiler.CUDA_GRAPH_PRESET`)
 instead of spelling out the four flags, so the config can't drift.
 
 `cuda_graphs=True` additionally: registers `PadMolecularBatch` (pads atoms→

@@ -52,8 +52,8 @@ For Allegro the required fields are:
 ```text
 ("atoms", "Z")
 ("edges", "edge_index")
-("edges", "bond_diff")
-("edges", "bond_dist")
+("edges", "edge_diff")
+("edges", "edge_dist")
 ```
 
 In a real pipeline, use `NeighborList(symmetry=True)` so every undirected
@@ -81,7 +81,7 @@ The edge convention is fixed:
 ```text
 edge_index[:, 0] = source / center
 edge_index[:, 1] = target / neighbor
-bond_diff        = pos[target] - pos[source]
+edge_diff        = pos[target] - pos[source]
 ```
 
 ## 3. Compute Dataset Statistics

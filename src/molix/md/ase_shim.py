@@ -12,7 +12,7 @@ import torch
 from tensordict import TensorDict
 from torch import nn
 
-from molix.md.force_seam import build_force_fn
+from molix.md.forcefield import PotentialForceField
 
 try:
     from ase.calculators.calculator import Calculator
@@ -39,7 +39,7 @@ def make_pinet_calculator(model: nn.Module, template: TensorDict):
     if not HAS_ASE:
         raise RuntimeError("ASE is not installed; use the in-process integrator instead.")
 
-    force_fn = build_force_fn(model, template)
+    force = PotentialForceField(model, template)
     ref_pos = template["atoms", "pos"]
 
     class PiNetCalculator(Calculator):  # type: ignore[misc, valid-type]
@@ -50,8 +50,8 @@ def make_pinet_calculator(model: nn.Module, template: TensorDict):
             pos = torch.as_tensor(
                 self.atoms.get_positions(), dtype=ref_pos.dtype, device=ref_pos.device
             )
-            energy, forces = force_fn(pos)
-            self.results["energy"] = float(energy)
-            self.results["forces"] = forces.cpu().numpy()
+            out = force(pos)
+            self.results["energy"] = float(out.energy)
+            self.results["forces"] = out.forces.cpu().numpy()
 
     return PiNetCalculator()

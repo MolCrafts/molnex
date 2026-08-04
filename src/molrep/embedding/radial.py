@@ -33,6 +33,7 @@ class BesselRBFSpec(BaseModel):
     eps: float = 1e-8
     normalize: bool = True
     normalize_samples: int = Field(4096, gt=0)
+    trainable: bool = False
 
 
 class BesselRBF(nn.Module):
@@ -72,6 +73,7 @@ class BesselRBF(nn.Module):
         eps: float = 1e-8,
         normalize: bool = True,
         normalize_samples: int = 4096,
+        trainable: bool = False,
     ) -> None:
         """Initialize Bessel RBF module.
 
@@ -79,8 +81,13 @@ class BesselRBF(nn.Module):
             r_cut: Cutoff radius for normalization.
             num_radial: Number of radial basis functions.
             eps: Small constant to avoid division by zero. Defaults to 1e-8.
+                Pass ``0.0`` to match the official MACE basis exactly.
             normalize: Apply Allegro-SI shift+scale normalization.
             normalize_samples: Grid size for μ_n / σ_n estimation.
+            trainable: If True, the per-channel frequencies ``freqs`` become a
+                learnable ``nn.Parameter`` (persistent in the state_dict). With
+                ``normalize=False`` and ``eps=0`` this reproduces the official
+                MACE spherical Bessel basis bit-for-bit.
         """
         super().__init__()
 
@@ -90,16 +97,20 @@ class BesselRBF(nn.Module):
             eps=eps,
             normalize=normalize,
             normalize_samples=normalize_samples,
+            trainable=trainable,
         )
 
         self.r_cut = float(self.config.r_cut)
         num = int(self.config.num_radial)
 
-        freqs = torch.arange(1, num + 1, dtype=torch.float32) * (math.pi / self.r_cut)
-        self.register_buffer("freqs", freqs, persistent=False)
+        freqs = torch.arange(1, num + 1, dtype=config.ftype) * (math.pi / self.r_cut)
+        if self.config.trainable:
+            self.freqs = nn.Parameter(freqs)
+        else:
+            self.register_buffer("freqs", freqs, persistent=False)
         self.freqs: torch.Tensor
 
-        prefactor = torch.tensor(math.sqrt(2.0 / self.r_cut), dtype=torch.float32)
+        prefactor = torch.tensor(math.sqrt(2.0 / self.r_cut), dtype=config.ftype)
         self.register_buffer("prefactor", prefactor, persistent=False)
         self.prefactor: torch.Tensor
 
@@ -109,8 +120,8 @@ class BesselRBF(nn.Module):
         if self.normalize:
             mu, sigma = self._compute_stats(self.config.normalize_samples)
         else:
-            mu = torch.zeros(num, dtype=torch.float32)
-            sigma = torch.ones(num, dtype=torch.float32)
+            mu = torch.zeros(num, dtype=config.ftype)
+            sigma = torch.ones(num, dtype=config.ftype)
         self.register_buffer("mu", mu, persistent=False)
         self.register_buffer("sigma", sigma, persistent=False)
         self.mu: torch.Tensor
@@ -128,7 +139,7 @@ class BesselRBF(nn.Module):
         Uniform sampling over ``[eps, r_cut]`` avoids the r=0 singularity while
         matching the Allegro SI's stated assumption to within ``eps``.
         """
-        r = torch.linspace(self.eps, self.r_cut, n_samples, dtype=torch.float32)
+        r = torch.linspace(self.eps, self.r_cut, n_samples, dtype=config.ftype)
         phi = self._raw_basis(r)
         mu = phi.mean(dim=0)
         sigma = phi.std(dim=0).clamp(min=1e-8)

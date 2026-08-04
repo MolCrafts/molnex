@@ -1,8 +1,8 @@
-"""Read a labeled-configuration dataset from a molrs ``MolRec`` zarr record.
+"""Read a labeled-configuration dataset from a molpy ``MolRec`` zarr record.
 
 A *labeled-configuration dataset* (e.g. the output of distilling a teacher
 potential over a set of conformers) is stored as an ordinary, **unchanged**
-:class:`molrs.MolRec` record:
+:class:`molpy.MolRec` record:
 
 * **Conformers** live in the record's ``trajectory`` (one frame each, an
   ``atoms`` block of ``element``/``x``/``y``/``z`` plus a ``box``). Frames may
@@ -15,18 +15,19 @@ potential over a set of conformers) is stored as an ordinary, **unchanged**
 * **Teacher provenance** lives in the record's free-form ``method`` JSON tree
   (e.g. ``method["teacherA"] = {"theory_level": ..., "units": ...}``).
 
-This convention needs **no molrs change**: it builds entirely on ``MolRec``'s
+This convention needs **no molpy change**: it builds entirely on ``MolRec``'s
 generic primitives (arbitrary observable keys/axes; arbitrary ``method`` JSON).
 
-Pinned ``molrs.MolRec`` API (verified against the installed wheel):
-    write  rec = molrs.MolRec(); rec.set_trajectory(molrs.Trajectory.from_frames(frames));
+Pinned ``molpy.MolRec`` API (public surface only — never import ``molrs``)::
+
+    write  rec = MolRec(); rec.set_trajectory(Trajectory.from_frames(frames));
            rec.observables.add_scalar/add_vector(name, data, unit=, axes=,
            time_dependent=, domain=); rec.method = {...}; rec.write_zarr(path)
-    read   L = molrs.MolRec.read_zarr(path); L.count_frames();
+    read   L = MolRec.read_zarr(path); L.count_frames();
            L.trajectory.frames[i]["atoms"].view("element"|"x"|"y"|"z");
            L.trajectory.frames[i].box.matrix; L.observables.keys();
            obs = L.observables.get(key); obs.kind ("scalar"|"vector"); obs.data
-    Note   molrs zarr storage returns float64 on read-back. This source casts
+    Note   zarr storage may return float64 on read-back. This source casts
            positions/targets to ``float32`` (matching the other molix sources,
            e.g. :class:`~molix.datasets.RevMD17Source`); values are lossless
            because float32 is exactly representable in float64.
@@ -52,10 +53,22 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from molpy.core.element import Element
+from molpy import Element
 
 from molix.data.collate import TargetSchema
 from molix.data.source import Sample
+
+# MolRec is an optional public surface on molpy (not every build ships the
+# labeled-record type). Soft-fail at import so ``molix.datasets`` still loads
+# QM9 / WaterLES / … when MolRec is absent. Never import molrs directly.
+try:
+    from molpy import MolRec
+except ImportError as _molrec_exc:  # pragma: no cover - optional surface
+    raise ImportError(
+        "MolRecSource requires molpy.MolRec (labeled-configuration records). "
+        "Install a molpy build that exposes MolRec on the public API; "
+        "do not import molrs from molnex."
+    ) from _molrec_exc
 
 
 class MolRecSource:
@@ -68,7 +81,7 @@ class MolRecSource:
 
     Args:
         record_path: Path to the ``.zarr`` record written by
-            :meth:`molrs.MolRec.write_zarr`.
+            :meth:`molpy.MolRec.write_zarr`.
         teacher_id: Which teacher's labels to expose. Selects the
             ``"<teacher_id>."``-prefixed observables; the prefix is stripped to
             form ``targets`` names.
@@ -90,13 +103,7 @@ class MolRecSource:
         if not self.record_path.exists():
             raise FileNotFoundError(f"MolRec record not found: {self.record_path}")
 
-        # Imported lazily: molrs is a native (Rust/pyo3) dependency with no wheel
-        # for every platform (e.g. linux-aarch64). Only MolRecSource needs it, so
-        # keeping the import here lets the rest of ``molix.datasets`` (QM9Source,
-        # RevMD17Source, …) load on platforms where molrs is unavailable.
-        import molrs
-
-        record = molrs.MolRec.read_zarr(str(self.record_path))
+        record = MolRec.read_zarr(str(self.record_path))
 
         prefix = f"{teacher_id}."
         all_keys = list(record.observables.keys())

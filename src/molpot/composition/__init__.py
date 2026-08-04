@@ -12,6 +12,7 @@ Build force fields by composing pooling, parameter heads, and potentials::
 """
 
 from molpot.composition.composer import PotentialComposer
+from molpot.composition.energy_force import EnergyForceModel
 from molpot.composition.heads import (
     ChargeHead,
     ChargeTransferParameterHead,
@@ -30,6 +31,7 @@ __all__ = [
     "TSScalingHead",
     "MultiHead",
     "PotentialComposer",
+    "EnergyForceModel",
     "Sonata",
     "SonataSpec",
     "build_sonata",

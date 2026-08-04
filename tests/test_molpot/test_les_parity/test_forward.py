@@ -20,7 +20,7 @@ import pytest
 import torch
 
 from molpot.potentials import EwaldMultipoleEnergy
-from tests._oracles.screened_coulomb import (
+from tests.test_molpot.test_les_parity.conftest import (
     brute_realspace,
     brute_reciprocal,
 )

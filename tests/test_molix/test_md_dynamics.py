@@ -5,30 +5,35 @@ import torch
 
 from molix.md import (
     HAS_ASE,
+    PotentialForceField,
     TrajectoryArtifact,
     build_paired_trajectory,
     make_pinet_calculator,
 )
 from molix.quant import Quantizer
 from molzoo.pinet import PiNetPotential
-from tests.symmetry_helpers import make_graph_batch
+from tests.conftest import make_graph_batch
 
 _DEVICE = torch.device("cpu")
 
 
 def _tiny_potential() -> PiNetPotential:
     torch.manual_seed(0)
-    return PiNetPotential(
-        atom_types=[1, 6, 7, 8],
-        r_max=4.0,
-        n_basis=3,
-        pp_nodes=[8, 8],
-        pi_nodes=[8, 8],
-        ii_nodes=[8, 8],
-        depth=2,
-        rank=3,
-        hidden_dim=16,
-    ).to(_DEVICE).eval()
+    return (
+        PiNetPotential(
+            atom_types=[1, 6, 7, 8],
+            r_max=4.0,
+            n_basis=3,
+            pp_nodes=[8, 8],
+            pi_nodes=[8, 8],
+            ii_nodes=[8, 8],
+            depth=2,
+            rank=3,
+            hidden_dim=16,
+        )
+        .to(_DEVICE)
+        .eval()
+    )
 
 
 def _template():
@@ -125,6 +130,34 @@ def test_null_paired_trajectory_zero_df():
         seed=1,
     )
     assert art.df.abs().max().item() == pytest.approx(0.0, abs=1e-10)
+
+
+def test_force_seam_tracks_live_geometry():
+    """PotentialForceField must recompute edge geometry from the live positions,
+    not a frozen template ``edge_diff`` — regression for the constant-PES bug
+    where swapping only ``pos`` left energy/force pinned to the initial geometry.
+    """
+    template = _template()
+    ref = _tiny_potential()
+    ref(template.clone(), compute_forces=False)  # warmup lazy params
+    ff = PotentialForceField(ref, template)
+    pos0 = template["atoms", "pos"]
+    out0 = ff(pos0)
+    torch.manual_seed(1)
+    pos1 = pos0 + 0.3 * torch.randn_like(pos0)  # non-rigid displacement
+    out1 = ff(pos1)
+    assert (out1.energy - out0.energy).abs().item() > 1e-6, "energy frozen at initial geometry"
+    assert (out1.forces - out0.forces).abs().max().item() > 1e-6, (
+        "forces frozen at initial geometry"
+    )
+
+
+def test_paired_trajectory_energy_varies():
+    """End-to-end: the PES must be sampled, so energy is not constant over steps."""
+    template = _template()
+    ref, quant = _warmed_ref_and_quant(template)
+    art = _run(ref, quant, template, n_steps=8)
+    assert art.energy.std().item() > 1e-9, "energy constant — PES not sampled"
 
 
 @pytest.mark.skipif(not HAS_ASE, reason="ASE not installed")

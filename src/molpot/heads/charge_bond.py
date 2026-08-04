@@ -60,15 +60,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from molix import config
 from molix.F.scatter import scatter_sum
+from molpot.heads._common import graph_counts as _graph_counts
 
 __all__ = ["BondChargeHead"]
-
-
-def _graph_counts(batch: torch.Tensor, num_graphs: int) -> torch.Tensor:
-    ones = torch.ones(batch.shape[0], dtype=config.ftype, device=batch.device)
-    return scatter_sum(ones, batch, dim=0, dim_size=num_graphs).clamp(min=1.0)
 
 
 class BondChargeHead(nn.Module):
@@ -104,7 +99,7 @@ class BondChargeHead(nn.Module):
         node_features: ``(N, node_dim)`` invariant per-atom features.
         edge_index: ``(E, 2)`` directed edges; ``[:, 0]`` source,
             ``[:, 1]`` target (matches CLAUDE.md edge convention).
-        bond_dist: ``(E,)`` per-edge distances ``\\|r_{ij}\\|``.
+        edge_dist: ``(E,)`` per-edge distances ``\\|r_{ij}\\|``.
         atom_batch: ``(N,)`` int graph membership of each atom.
         num_graphs: number of graphs in the batch.
         edge_features: optional ``(E, edge_dim)`` invariant edge
@@ -157,7 +152,7 @@ class BondChargeHead(nn.Module):
         self,
         node_features: torch.Tensor,
         edge_index: torch.Tensor,
-        bond_dist: torch.Tensor,
+        edge_dist: torch.Tensor,
         edge_features: torch.Tensor | None,
     ) -> torch.Tensor:
         """Compute per-edge ``q_{ij}`` via one batched antisymmetric MLP call.
@@ -173,7 +168,7 @@ class BondChargeHead(nn.Module):
         tgt = edge_index[:, 1]
         h_src = node_features[src]
         h_tgt = node_features[tgt]
-        dist = bond_dist.unsqueeze(-1)
+        dist = edge_dist.unsqueeze(-1)
 
         fwd_parts = [h_src, h_tgt, dist]
         rev_parts = [h_tgt, h_src, dist]
@@ -191,7 +186,7 @@ class BondChargeHead(nn.Module):
         *,
         node_features: torch.Tensor,
         edge_index: torch.Tensor,
-        bond_dist: torch.Tensor,
+        edge_dist: torch.Tensor,
         atom_batch: torch.Tensor,
         num_graphs: int,
         edge_features: torch.Tensor | None = None,
@@ -206,7 +201,7 @@ class BondChargeHead(nn.Module):
         Args:
             node_features: Per-atom features ``(N, F)``.
             edge_index: Source/target atom pairs ``(E, 2)``.
-            bond_dist: Edge distances ``(E,)``.
+            edge_dist: Edge distances ``(E,)``.
             atom_batch: Graph membership per atom ``(N,)``.
             num_graphs: Number of graphs in the batch.
             edge_features: Optional per-edge features ``(E, F_e)``.
@@ -219,7 +214,7 @@ class BondChargeHead(nn.Module):
             (``charge_sum_pre_proj`` / ``charge_sum_post_proj``, ``(num_graphs,)``).
         """
         n_atoms = node_features.shape[0]
-        q_ij = self._bond_charges(node_features, edge_index, bond_dist, edge_features)
+        q_ij = self._bond_charges(node_features, edge_index, edge_dist, edge_features)
 
         src = edge_index[:, 0]
         charges = torch.zeros(n_atoms, dtype=q_ij.dtype, device=q_ij.device)

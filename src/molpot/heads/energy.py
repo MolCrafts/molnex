@@ -1,7 +1,86 @@
 """Per-atom energy heads."""
 
+from __future__ import annotations
+
+from collections.abc import Sequence
+
 import torch
 import torch.nn as nn
+
+from molix import config
+
+
+class AtomicReferenceEnergy(nn.Module):
+    """Per-element reference (isolated-atom) energy ``E0``, additive & frozen.
+
+    Returns a fixed per-atom baseline ``E0[Z_i]`` that is added to the model's
+    predicted interaction energy. This is the counterpart of the official MACE
+    ``AtomicEnergiesBlock`` (``mace.modules.blocks``), which computes
+    ``one_hot(Z over the model's element table) @ atomic_energies``. Here the
+    table is stored **Z-indexed** so the encoder can pass raw atomic numbers
+    directly; a weight converter is responsible for scattering MACE's
+    element-table-ordered ``atomic_energies`` into Z slots via the model's
+    ``atomic_numbers`` (z-table).
+
+    The ``atomic_energies`` buffer is persistent (appears in ``state_dict``)
+    and **not** learnable, matching MACE.
+
+    Args:
+        atomic_energies: Either a 1D tensor/sequence of reference energies in
+            element-table order (then ``atomic_numbers`` must be given), or a
+            dense Z-indexed 1D tensor (``atomic_numbers=None``).
+        atomic_numbers: Element table (z-table) mapping table position → atomic
+            number ``Z``. When given, ``atomic_energies`` is scattered into a
+            dense Z-indexed lookup.
+        max_z: Optional explicit table size ``max_z + 1``; defaults to the
+            largest ``Z`` present.
+
+    Reference:
+        Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
+        Networks for Fast and Accurate Force Fields" NeurIPS 2022.
+        https://arxiv.org/abs/2206.07697
+    """
+
+    def __init__(
+        self,
+        *,
+        atomic_energies: torch.Tensor | Sequence[float],
+        atomic_numbers: torch.Tensor | Sequence[int] | None = None,
+        max_z: int | None = None,
+    ) -> None:
+        super().__init__()
+        e0 = torch.as_tensor(atomic_energies, dtype=config.ftype).flatten()
+
+        if atomic_numbers is not None:
+            z = torch.as_tensor(atomic_numbers).flatten().to(torch.long)
+            if z.shape != e0.shape:
+                raise ValueError(
+                    f"atomic_energies ({tuple(e0.shape)}) and atomic_numbers "
+                    f"({tuple(z.shape)}) must have the same length."
+                )
+            size = (int(max_z) if max_z is not None else int(z.max().item())) + 1
+            lookup = torch.zeros(size, dtype=config.ftype)
+            lookup[z] = e0
+        else:
+            lookup = e0
+
+        self.register_buffer("atomic_energies", lookup)
+        self.atomic_energies: torch.Tensor
+
+    def forward(self, Z: torch.Tensor) -> torch.Tensor:
+        """Return per-atom reference energy ``E0[Z]``.
+
+        Args:
+            Z: Atomic numbers ``(N,)`` (integer).
+
+        Returns:
+            Per-atom reference energies ``(N,)``.
+        """
+        return self.atomic_energies[Z.to(torch.long)]
+
+    def extra_repr(self) -> str:
+        """Render the Z-table size for ``repr(module)``."""
+        return f"num_z={self.atomic_energies.shape[0]}"
 
 
 class AtomicEnergyMLP(nn.Module):

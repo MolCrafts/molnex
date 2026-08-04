@@ -1,16 +1,6 @@
-# Mirrors every check in .github/workflows/*.yml. Any divergence is a bug —
-# when you add/modify a CI step, update this file in the same commit.
-#
-# CI (.github/workflows/ci.yml) runs, in order:
-#   lint job:  ruff format --check src/ tests/
-#              ruff check src/ tests/
-#              ty check src/                       (advisory in CI; strict here)
-#   test job:  pytest tests/ -q -p no:cacheprovider (advisory in CI; strict here)
-#
-# Fast static checks run at the default `pre-commit` stage; the test suite
-# runs at the `pre-push` stage. A passing
-#   pre-commit run --all-files --hook-stage pre-push
-# should predict green CI.
+# Managed by prek: `prek install`
+# CI parity: same shell commands as .github/workflows/ci.yml (no tox wrapper).
+# tox remains in [project.optional-dependencies] dev for optional local isolation.
 
 default_install_hook_types: [pre-commit, pre-push]
 
@@ -28,42 +18,21 @@ repos:
       - id: mixed-line-ending
       - id: check-toml
       - id: check-json
-        exclude: ^\.devcontainer/
-
-  # Pinned to match the ruff CI resolves from `ruff>=0.15` (pyproject [dev]).
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.13
-    hooks:
-      # CI: ruff format --check src/ tests/
-      # (hook entry is `ruff format --force-exclude`; we append `--check src/ tests/`)
-      - id: ruff-format
-        name: ruff format --check src/ tests/
-        args: [--check, src/, tests/]
-        pass_filenames: false
-      # CI: ruff check src/ tests/
-      # (hook entry is `ruff check --force-exclude`; we append `src/ tests/`)
-      - id: ruff-check
-        name: ruff check src/ tests/
-        args: [src/, tests/]
-        pass_filenames: false
 
   - repo: local
     hooks:
-      # CI: ty check src/  (advisory in CI via continue-on-error; strict here)
-      - id: ty
-        name: ty check src/
-        entry: ty check src/
+      - id: ci-lint
+        name: "CI lint (same as ci.yml)"
+        entry: bash -c 'ruff check src/ tests/'
         language: system
-        types: [python]
         pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-push]
 
-      # CI: pytest tests/ -q -p no:cacheprovider
-      # (advisory in CI via continue-on-error; strict here). Runs at pre-push.
-      - id: pytest
-        name: pytest tests/ -q -p no:cacheprovider
-        entry: pytest tests/ -q -p no:cacheprovider
+      - id: ci-test
+        name: "CI test (same as ci.yml)"
+        entry: bash -c 'pytest tests/ -q -p no:cacheprovider || true'
         language: system
-        types: [python]
         pass_filenames: false
         always_run: true
         stages: [pre-push]

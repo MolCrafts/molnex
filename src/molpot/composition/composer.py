@@ -73,7 +73,7 @@ class PotentialComposer(nn.Module):
         if pos is not None:
             distance = (pos[dst] - pos[src]).norm(dim=-1)
         else:
-            distance = data["bond_dist"]
+            distance = data["edge_dist"]
 
         # 3. Evaluate each potential (each applies its own mixing)
         edge_batch = batch[src]

@@ -5,7 +5,7 @@ Tests three physical symmetries that molecular models must satisfy:
 2. Rotation invariance/equivariance — scalar features/energy invariant, forces equivariant
 3. Permutation equivariance — features permute with atom reordering
 
-Generic graph-transform helpers live in ``tests.symmetry_helpers`` and are
+Generic graph-transform helpers live in ``tests.conftest`` and are
 reused by every symmetry test in this repo (encoder, head, pipeline).
 """
 
@@ -21,7 +21,7 @@ from molpot.pooling import EdgeToNodePooling, LayerPooling
 from molrep.embedding.node import DiscreteEmbeddingSpec
 from molrep.utils.equivariance import random_rotation_matrix, rotate_vectors
 from molzoo import MACE, Allegro
-from tests.symmetry_helpers import (
+from tests.conftest import (
     make_graph_batch,
     permute_graph,
     recompute_edge_geometry,
@@ -37,7 +37,7 @@ from tests.symmetry_helpers import (
 def make_pipeline(encoder, is_edge_encoder: bool = False):
     """Build an energy+force pipeline from an encoder.
 
-    Computes bond_diff from pos inside the forward pass so the functorch force
+    Computes edge_diff from pos inside the forward pass so the functorch force
     closure can trace gradients pos → geometry → energy for force derivation.
     """
     layer_pool = LayerPooling("mean")
@@ -197,7 +197,7 @@ class TestTranslationInvariance:
 
         # Tolerance is float32-ULP — `(pos+t)[j]-(pos+t)[i]` is not
         # bit-exactly `pos[j]-pos[i]` for `t ≈ 10*randn`, so the encoder
-        # input `bond_diff` differs by ~ULP and propagates linearly.
+        # input `edge_diff` differs by ~ULP and propagates linearly.
         assert torch.allclose(ref, shifted, atol=1e-4, rtol=1e-4)
 
     @pytest.mark.parametrize("seed", SEEDS)
@@ -243,19 +243,16 @@ class TestTranslationInvariance:
 class TestRotationEquivariance:
     """Scalar features and energy are rotation-invariant. Forces are rotation-equivariant.
 
-    Note: MACE rotation tests require cuequivariance_ops_torch (GPU kernel)
-    for full numerical accuracy. The naive CPU fallback introduces larger
-    numerical errors in the SymmetricContraction. These tests are marked
-    xfail when the GPU kernel is unavailable.
+    The MACE encoder propagates a *pure-scalar* node state between layers and
+    keeps mixed-l components only transiently inside each tensor-product message
+    (contracted back to invariants by the ProductHead). Rotation invariance is
+    therefore exact to float precision on both CPU and GPU — these tests were
+    previously xfailed under a misdiagnosis ("missing cuequivariance_ops_torch
+    GPU kernel"); the real cause was non-equivariant scalar->mixed-l plain
+    linear layers in the encoder. See molrep/readout/product.py and
+    molzoo/mace.py for the fix.
     """
 
-    _mace_rotation_xfail = pytest.mark.xfail(
-        reason="MACE rotation invariance requires cuequivariance_ops_torch GPU kernel; "
-        "naive fallback introduces O(0.1) numerical error in SymmetricContraction",
-        strict=False,
-    )
-
-    @_mace_rotation_xfail
     @pytest.mark.parametrize("seed", SEEDS)
     def test_mace_encoder_scalar_invariance(self, mace_encoder, small_molecule, seed):
         torch.manual_seed(seed)
@@ -278,7 +275,6 @@ class TestRotationEquivariance:
 
         assert torch.allclose(ref, rotated, atol=1e-4, rtol=1e-4)
 
-    @_mace_rotation_xfail
     @pytest.mark.parametrize("seed", SEEDS)
     def test_mace_pipeline_energy_invariance(self, mace_encoder, small_molecule, seed):
         torch.manual_seed(seed)
@@ -311,7 +307,6 @@ class TestRotationEquivariance:
 
         assert torch.allclose(e_ref, e_r, atol=1e-4, rtol=1e-4)
 
-    @_mace_rotation_xfail
     @pytest.mark.parametrize("seed", SEEDS)
     def test_mace_pipeline_force_equivariance(self, mace_encoder, small_molecule, seed):
         """F(Rx) = R @ F(x)"""

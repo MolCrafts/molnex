@@ -62,8 +62,8 @@ def _make_varied_samples(n: int, *, with_scalar: bool = True) -> list[dict]:
 
     Returns:
         Flat sample dicts with per-atom (``Z``, ``pos``, ``targets.forces``),
-        per-edge (``edge_index`` ``(E, 2)``, ``bond_diff`` ``(E, 3)``,
-        ``bond_dist`` ``(E,)``) and graph-level (``targets.U0`` shape
+        per-edge (``edge_index`` ``(E, 2)``, ``edge_diff`` ``(E, 3)``,
+        ``edge_dist`` ``(E,)``) and graph-level (``targets.U0`` shape
         ``(1,)``, unique identity ``float(i)``) keys.
     """
     torch.manual_seed(0)
@@ -82,8 +82,8 @@ def _make_varied_samples(n: int, *, with_scalar: bool = True) -> list[dict]:
                 "Z": torch.ones(na, dtype=torch.long),
                 "pos": torch.randn(na, 3),
                 "edge_index": torch.randint(0, na, (ne, 2), dtype=torch.long),
-                "bond_diff": torch.randn(ne, 3),
-                "bond_dist": torch.rand(ne) + 0.5,
+                "edge_diff": torch.randn(ne, 3),
+                "edge_dist": torch.rand(ne) + 0.5,
                 "targets": targets,
             }
         )
@@ -107,8 +107,8 @@ def _make_mixed_edge_samples(n: int) -> list[dict]:
                 "Z": torch.ones(na, dtype=torch.long),
                 "pos": torch.randn(na, 3),
                 "edge_index": torch.randint(0, na, (ne, 2), dtype=torch.long),
-                "bond_diff": torch.randn(ne, 3),
-                "bond_dist": torch.rand(ne),
+                "edge_diff": torch.randn(ne, 3),
+                "edge_dist": torch.rand(ne),
                 "targets": {"U0": torch.tensor([float(i)])},
             }
         )
@@ -120,7 +120,7 @@ def _make_edgeless_samples(n: int) -> list[dict]:
 
     Exercises the all-edge-less fallback: ``collate_molecules`` emits the
     canonical empty-edge TensorDict (``edge_index`` ``zeros(0, 2)`` long,
-    ``bond_diff`` ``zeros(0, 3)``, ``bond_dist`` ``zeros(0)``,
+    ``edge_diff`` ``zeros(0, 3)``, ``edge_dist`` ``zeros(0)``,
     ``batch_size=[0]``).
     """
     torch.manual_seed(2)
@@ -254,8 +254,8 @@ class TestEquivalenceEdgeless:
         assert list(edges.batch_size) == [0]
         assert torch.equal(edges["edge_index"], torch.zeros(0, 2, dtype=torch.long))
         assert edges["edge_index"].dtype == torch.long
-        assert torch.equal(edges["bond_diff"], torch.zeros(0, 3))
-        assert torch.equal(edges["bond_dist"], torch.zeros(0))
+        assert torch.equal(edges["edge_diff"], torch.zeros(0, 3))
+        assert torch.equal(edges["edge_dist"], torch.zeros(0))
 
 
 class TestTargetSchemaRouting:

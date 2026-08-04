@@ -57,15 +57,21 @@ class UnitConvert(SampleTask):
                     f"(src_unit, dst_unit), got {pair!r}"
                 )
             src_str, dst_str = pair
-            src_unit = UnitSystem.Unit(src_str)
-            dst_unit = UnitSystem.Unit(dst_str)
+            # UnitSystem() is the shared molpy registry instance;
+            # ``UnitSystem.Unit`` is an unbound descriptor and cannot be called
+            # on the class.
+            ureg = UnitSystem()
+            src_unit = ureg.Unit(src_str)
+            dst_unit = ureg.Unit(dst_str)
             factor = float((1.0 * src_unit).to(dst_unit).magnitude)
             if not _is_finite(factor):
                 raise ValueError(
                     f"UnitConvert: non-finite factor for '{key}' ({src_str} → {dst_str})"
                 )
             factors[str(key)] = factor
-            units_repr[str(key)] = (str(src_unit), str(dst_unit))
+            # Keep the *user-supplied* unit strings in the task_id so cache keys
+            # stay stable across registry renames (e.g. ``eV`` vs ``electron_volt``).
+            units_repr[str(key)] = (str(src_str), str(dst_str))
 
         self.factors: dict[str, float] = factors
         self._units: dict[str, tuple[str, str]] = units_repr

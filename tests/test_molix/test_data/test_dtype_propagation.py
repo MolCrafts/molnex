@@ -49,8 +49,8 @@ def _make_samples(n: int = 6) -> list[dict]:
             "Z": torch.tensor([1, 6], dtype=torch.long),
             "pos": torch.randn(2, 3, dtype=torch.float32),
             "edge_index": torch.tensor([[0, 1]], dtype=torch.long),
-            "bond_diff": torch.randn(1, 3, dtype=torch.float32),
-            "bond_dist": torch.tensor([1.5], dtype=torch.float32),
+            "edge_diff": torch.randn(1, 3, dtype=torch.float32),
+            "edge_dist": torch.tensor([1.5], dtype=torch.float32),
             "targets": {"U0": torch.tensor([float(i)], dtype=torch.float32)},
         }
         for i in range(n)
@@ -107,7 +107,7 @@ class TestBatchTo:
         batch = next(iter(dm.train_dataloader()))
         out = batch_to(batch, dtype=torch.float64)
         assert out["atoms", "pos"].dtype is torch.float64
-        assert out["edges", "bond_diff"].dtype is torch.float64
+        assert out["edges", "edge_diff"].dtype is torch.float64
         assert out["edges", "edge_index"].dtype is torch.long
         assert out["atoms", "Z"].dtype is torch.long
 
@@ -163,8 +163,8 @@ class TestPrecisionFlowsToBatch:
         dm = _build_dm(tmp_path)  # _CollateFn captures ftype here
         batch = next(iter(dm.train_dataloader()))
         assert batch["atoms", "pos"].dtype is expected
-        assert batch["edges", "bond_diff"].dtype is expected
-        assert batch["edges", "bond_dist"].dtype is expected
+        assert batch["edges", "edge_diff"].dtype is expected
+        assert batch["edges", "edge_dist"].dtype is expected
         assert batch["graphs", "U0"].dtype is expected
         # Integers untouched
         assert batch["atoms", "Z"].dtype is torch.long

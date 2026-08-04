@@ -296,6 +296,10 @@ class AllegroSpec(BaseModel):
     latent_mlp_depth: int = Field(2, ge=0)
     latent_mlp_width: int = Field(128, gt=0)
     avg_num_neighbors: float = Field(..., gt=0.0)
+    # Dispatch method for the per-layer ``cuet.SegmentedPolynomial`` (uuu
+    # Contracter). See :meth:`Allegro.__init__` for the kernel/force-path
+    # rationale behind the ``"uniform_1d"`` default.
+    tp_method: str = "uniform_1d"
     # When True, ``forward`` additionally writes the final layer's tensor
     # features (full irreps stack, mul=num_tensor_features, ir_mul layout)
     # to ``("edges", "edge_tensor_features")`` so equivariant downstream
@@ -319,8 +323,8 @@ class Allegro(TensorDictModuleBase):
 
     * ``("atoms","Z")`` — atomic numbers ``(N,)``.
     * ``("edges","edge_index")`` — ``(E, 2)``, ``[:,0]=src/center``.
-    * ``("edges","bond_diff")`` — ``(E, 3)``, ``pos[dst] - pos[src]``.
-    * ``("edges","bond_dist")`` — ``(E,)``.
+    * ``("edges","edge_diff")`` — ``(E, 3)``, ``pos[dst] - pos[src]``.
+    * ``("edges","edge_dist")`` — ``(E,)``.
 
     Output:
 
@@ -355,8 +359,8 @@ class Allegro(TensorDictModuleBase):
     in_keys = [
         ("atoms", "Z"),
         ("edges", "edge_index"),
-        ("edges", "bond_diff"),
-        ("edges", "bond_dist"),
+        ("edges", "edge_diff"),
+        ("edges", "edge_dist"),
     ]
     out_keys = [("edges", "edge_features")]
 
@@ -377,7 +381,30 @@ class Allegro(TensorDictModuleBase):
         latent_activation: Optional[type[nn.Module]] = nn.SiLU,
         avg_num_neighbors: float,
         expose_tensor_track: bool = False,
+        tp_method: str = "uniform_1d",
     ):
+        """Build the Allegro encoder.
+
+        Args:
+            tp_method: Dispatch method for the per-layer
+                ``cuet.SegmentedPolynomial`` that runs the uuu Contracter
+                (``u,iu,ju,ku+ijk`` descriptor).
+
+                * ``"uniform_1d"`` (default) — the fused CUDA kernel the
+                  reference Allegro uses; optimal for this single-uniform-mode
+                  descriptor. On CPU it falls back to a pure-torch path. The
+                  fused kernel is a legacy ``autograd.Function`` without a
+                  functorch ``setup_context``, so ``torch.func.grad`` cannot
+                  trace it — derive forces with
+                  ``ForceDerivation(method="autograd")`` (eager-correct,
+                  trainable, GH200-verified; not ``torch.compile(fullgraph)``-able).
+                * ``"fused_tp"`` — the fused 4-operand kernel; same
+                  functorch/force behaviour as ``uniform_1d``.
+                * ``"naive"`` — pure-torch reference. The only method
+                  ``torch.func.grad`` can trace, so it is the one to use when you
+                  need the force path to ``torch.compile(fullgraph=True)`` — at
+                  the cost of the fused-kernel speedup on GPU.
+        """
         super().__init__()
 
         self.config = AllegroSpec(
@@ -394,8 +421,10 @@ class Allegro(TensorDictModuleBase):
             latent_mlp_width=latent_mlp_width,
             avg_num_neighbors=avg_num_neighbors,
             expose_tensor_track=expose_tensor_track,
+            tp_method=tp_method,
         )
         self.expose_tensor_track = bool(expose_tensor_track)
+        self._tp_method = str(tp_method)
 
         # Reference requires even type_embed_dim (split between center and neighbor).
         if type_embed_dim % 2 != 0:
@@ -515,7 +544,12 @@ class Allegro(TensorDictModuleBase):
                 poly,
                 shared_weights=True,
                 internal_weights=True,
-                method="uniform_1d",
+                # ``tp_method`` selects the kernel. Default ``"uniform_1d"`` is
+                # the fused CUDA kernel (fast on GPU); pair it with
+                # ``ForceDerivation(method="autograd")`` since functorch can't
+                # trace the fused op. Use ``"naive"`` + ``method="functorch"``
+                # for a fullgraph-compilable force path. See ``Allegro.__init__``.
+                method=self._tp_method,
                 dtype=config.ftype,
             )
             self.tps.append(tp)
@@ -555,18 +589,18 @@ class Allegro(TensorDictModuleBase):
     def forward(self, td: TensorDict) -> TensorDict:
         """Run the encoder and write ``("edges","edge_features")`` in place."""
         Z = td["atoms", "Z"]
-        bond_dist = td["edges", "bond_dist"]
-        bond_diff = td["edges", "bond_diff"]
+        edge_dist = td["edges", "edge_dist"]
+        edge_diff = td["edges", "edge_diff"]
         edge_index = td["edges", "edge_index"]
         n_nodes: int = int(Z.shape[0])
         src = edge_index[:, 0]
         dst = edge_index[:, 1]
 
         # === 1. Bessel × polynomial cutoff (BesselEdgeLengthEncoding) ===
-        x_norm = (bond_dist / self.r_max).unsqueeze(-1)  # (E, 1)
+        x_norm = (edge_dist / self.r_max).unsqueeze(-1)  # (E, 1)
         # torch.sinc(z) = sin(πz)/(πz); sinc(n·r/r_max) · n.
         bessel = torch.sinc(x_norm * self.bessel_n) * self.bessel_n  # (E, num_bessel)
-        edge_cutoff = self.cutoff_fn(bond_dist)  # (E,)
+        edge_cutoff = self.cutoff_fn(edge_dist)  # (E,)
         edge_radial = bessel * edge_cutoff.unsqueeze(-1)  # (E, num_bessel)
 
         # === 2. ProductTypeEmbedding: type_embed × basis_linear(bessel) ===
@@ -579,11 +613,11 @@ class Allegro(TensorDictModuleBase):
         # twobody_scalar_embed: (E, type_embed_dim)
 
         # === 3. Spherical harmonics + initial tensor track V_0 ===
-        # ``SphericalHarmonics(normalize=True)`` normalises ``bond_diff`` internally
-        # (cuEquivariance kernel). NeighborList guarantees ``bond_dist > 0``
+        # ``SphericalHarmonics(normalize=True)`` normalises ``edge_diff`` internally
+        # (cuEquivariance kernel). NeighborList guarantees ``edge_dist > 0``
         # (self-edges excluded by ``get_neighbor_pairs``), so no ``+ε`` shim
-        # is needed; passing ``bond_diff`` directly saves one division per edge.
-        tensor_basis = self.spherical_harmonics(bond_diff)  # (E, irreps_sh_dim)
+        # is needed; passing ``edge_diff`` directly saves one division per edge.
+        tensor_basis = self.spherical_harmonics(edge_diff)  # (E, irreps_sh_dim)
         v0_weights = self.env_embed_linear(twobody_scalar_embed)  # (E, weight_numel)
         tensor_features = _make_weighted_channels(
             tensor_basis,

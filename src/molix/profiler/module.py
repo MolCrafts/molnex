@@ -676,9 +676,9 @@ class ModuleProfiler:
             if not samples:
                 continue
             if use_cuda:
-                ms = [s.elapsed_time(e) for _, s, e in samples]
+                ms = [s.elapsed_time(e) for _, s, e in samples]  # type: ignore[not-iterable]
             else:
-                ms = [v * 1000.0 for v in samples]
+                ms = [float(v) * 1000.0 for v in samples]  # type: ignore[not-iterable]
             means[name] = sum(ms) / len(ms)
         if not means:
             return None
