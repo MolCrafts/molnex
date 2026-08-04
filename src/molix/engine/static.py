@@ -7,7 +7,7 @@ every step, so :class:`StaticForward` fixes ``N`` atoms and pads the pair list t
 **inert without changing weights or physics**: their ``edge_diff`` is overwritten
 to a length past the cutoff, so the model's ``cutoff(edge_dist)`` zeros their
 energy and force contribution (PiNet consumes the provided ``edge_diff`` via
-``_edge_bond_diff`` and recomputes ``edge_dist`` from it).
+``edge_bond_diff`` and recomputes ``edge_dist`` from it).
 
 Export this with ``dynamic_shapes=None`` and load the ``.pt2`` with
 ``run_single_threaded=True`` (PyTorch #158834, fixed in torch 2.8) — then the

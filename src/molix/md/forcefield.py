@@ -51,7 +51,7 @@ class PotentialForceField(ForceField):
     """Bind a molpot Potential to a fixed system template.
 
     The collated template carries a *precomputed* ``edges.edge_diff`` /
-    ``edge_dist`` from its build-time positions; PiNet's ``_edge_bond_diff`` would
+    ``edge_dist`` from its build-time positions; PiNet's ``edge_bond_diff`` would
     use that as a straight-through *value*, freezing the PES (constant force) if
     left in place. The template is therefore stripped of those keys **once** so
     the Potential recomputes geometry from the live positions every call (correct

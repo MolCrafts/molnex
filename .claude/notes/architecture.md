@@ -55,7 +55,7 @@ Four packages under `src/`: **molix** (infra) ← **molrep** (representation) �
   - `nonbonded.py`, `mixing.py`, `polarization.py`
   - `elec/` — Ewald/PME/P3M stack (calculators / potentials / lib / kernels / tuning) + multipole
 - `src/molpot/heads/` — Energy, edge, multipole, charge, electrostatics, rescale, type
-- `src/molpot/composition/` — PotentialComposer, MultiHead, Sonata (+ `build_sonata`), parameter heads
+- `src/molpot/composition/` — PotentialComposer, MultiHead, Sonata (`from_encoder`), parameter heads
 - `src/molpot/derivation/` — EnergyAggregation, ForceDerivation (explicit `functorch` | `autograd`), StressDerivation
 - `src/molpot/pooling/` — Layer / EdgeToNode / Sum / Mean / Max
 - `src/molpot/graph/radius.py` — `radius_graph` helper (no package `__init__`)
@@ -90,7 +90,7 @@ Four packages under `src/`: **molix** (infra) ← **molrep** (representation) �
 | `molix.nn` | `KeyedMLP`, `KeyedMLPSpec`, `NeighborList`, `ScatterSum`, `BatchAggregation` |
 | `molix.F` | `get_neighbor_pairs`, `pme_direct`, `pme_reciprocal`, `scatter_sum`, `batch_add` |
 | `molix.io` | `JournalReader`, `JournalWriter` |
-| `molix.md` | ForceField family, Langevin integrator, `MDRunner`, trajectory helpers, `make_pinet_calculator` |
+| `molix.md` | ForceField family, Langevin integrator, `MDRunner`, trajectory helpers |
 | `molix.engine` | `EngineAdapter`, `EngineForward`, `FlatTensorAdapter`, `MolnexTensorDictAdapter`, `StaticForward`, `export_for_lammps`, `LAMMPS_META_SCHEMA` |
 | `molix.compile` / `export` / `quant` | `Compiler` / `Exporter` / quant schemes + `Quantizer` |
 
@@ -105,7 +105,7 @@ Four packages under `src/`: **molix** (infra) ← **molrep** (representation) �
 | `molrep.readout` / `heads` | ProductHead, BasisProjection, pooling; ScalarHead, TypeHead, Labeler |
 
 **molpot** (`src/molpot/__init__.py`):
-Classical potentials + `BasePotential`; derivation (`ForceDerivation` dual backend); pooling; composition (`PotentialComposer`, `Sonata`, `build_sonata`); thin head re-exports
+Classical potentials + `BasePotential`; derivation (`ForceDerivation` dual backend); pooling; composition (`PotentialComposer`, `Sonata`, `Sonata.from_encoder`); thin head re-exports
 
 | Subpackage | Exports |
 |---|---|

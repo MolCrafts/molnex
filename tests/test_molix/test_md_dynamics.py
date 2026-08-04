@@ -4,11 +4,9 @@ import pytest
 import torch
 
 from molix.md import (
-    HAS_ASE,
     PotentialForceField,
     TrajectoryArtifact,
     build_paired_trajectory,
-    make_pinet_calculator,
 )
 from molix.quant import Quantizer
 from molzoo.pinet import PiNetPotential
@@ -158,18 +156,3 @@ def test_paired_trajectory_energy_varies():
     ref, quant = _warmed_ref_and_quant(template)
     art = _run(ref, quant, template, n_steps=8)
     assert art.energy.std().item() > 1e-9, "energy constant — PES not sampled"
-
-
-@pytest.mark.skipif(not HAS_ASE, reason="ASE not installed")
-def test_ase_calculator_matches_force_seam():
-    import ase
-
-    template = _template()
-    ref, quant = _warmed_ref_and_quant(template)
-    calc = make_pinet_calculator(ref, template)
-    pos = template["atoms", "pos"]
-    atoms = ase.Atoms(numbers=[1, 6, 7, 8], positions=pos.cpu().numpy())
-    atoms.calc = calc
-    forces_ase = torch.as_tensor(atoms.get_forces(), dtype=pos.dtype)
-    out = ref(template.clone(), compute_forces=True)
-    assert torch.allclose(forces_ase, out["forces"].detach(), atol=1e-4)

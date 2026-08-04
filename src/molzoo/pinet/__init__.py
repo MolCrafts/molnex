@@ -19,11 +19,6 @@ from .potential import PiNetPotential
 from .properties import PiNetDipole, PiNetPolarizability, pool_layer
 from .spec import PiNetSpec
 
-# Back-compat private aliases used by older call sites / docs.
-_compute_d5 = compute_d5
-_edge_bond_diff = edge_bond_diff
-_pool_layer = pool_layer
-
 __all__ = [
     "PiNet",
     "PiNetSpec",

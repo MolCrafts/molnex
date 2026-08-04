@@ -71,6 +71,43 @@ def test_rank_output_shapes(rank):
         assert out["edges", "i5_features"].shape == (8, 2, 5, 8)
 
 
+@pytest.mark.parametrize("rank", [1, 3, 5])
+def test_emit_property_features_off_drops_only_property_tracks(rank):
+    """Opting out skips the property-head tracks; scalar outputs are unchanged."""
+    torch.manual_seed(0)
+    lean = PiNet(
+        atom_types=[1, 6, 7, 8],
+        r_max=4.0,
+        n_basis=3,
+        pp_nodes=[8, 8],
+        pi_nodes=[8, 8],
+        ii_nodes=[8, 8],
+        depth=2,
+        rank=rank,
+        emit_property_features=False,
+    )
+    lean.eval()
+    full = _encoder(rank=rank)  # same seed/architecture, emission on
+
+    out_lean = lean(_graph())
+    out_full = full(_graph())
+
+    # The contract keys survive and are bit-identical to the emitting encoder.
+    for key in ("node_features", "p1_block_outputs"):
+        assert torch.equal(out_lean["atoms", key], out_full["atoms", key])
+
+    # Only the property-head tracks are gone.
+    assert "i1_features" not in out_lean["edges"].keys()
+    for key in ("p3_features", "p5_features"):
+        assert key not in out_lean["atoms"].keys()
+    for key in ("i3_features", "i5_features"):
+        assert key not in out_lean["edges"].keys()
+
+
+def test_emit_property_features_defaults_on():
+    assert PiNet(atom_types=[1, 6]).emit_property_features is True
+
+
 def test_translation_invariance():
     enc = _encoder(rank=5)
     g = _graph()

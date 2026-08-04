@@ -1,10 +1,7 @@
-"""PiNet energy + force potential (encoder composition + derivation).
+"""PiNet energy + force potential (encoder + monomorphic init-fixed pipeline).
 
-Physics (force derivation, energy aggregation) lives in ``molpot`` via
-:class:`molpot.composition.energy_force.EnergyForceModel`. This module only
-wires the PiNet encoder + per-block OutLayers — the long-term home for a fully
-generic encoder→energy façade remains ``molpot``; public import stays
-``from molzoo.pinet import PiNetPotential``.
+All branching is in ``__init__`` (``compute_forces``, ``method``). ``forward``
+always runs one static pipeline — energy-only has **no** Derivative session.
 """
 
 from __future__ import annotations
@@ -15,42 +12,57 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molpot.composition.energy_force import EnergyForceModel
 from molpot.derivation import EnergyAggregation
+from molpot.derivation.protocol import (
+    ENERGY_KEY,
+    POS_KEY,
+    absorb_model_output,
+    call_energy,
+    has_energy,
+    write_energy,
+    write_forces,
+)
 from molrep.interaction.pinet import OutLayer
 
 from .encoder import PiNet
 
 
-class PiNetPotential(EnergyForceModel):
-    """PiNet energy + force prediction model — ready to use from hyperparameters.
+class PiNetPotential(nn.Module):
+    """PiNet energy (+ optional forces) with in-place batch writes.
 
-    Pass PiNet hyperparameters directly; the encoder is built internally::
+    Configuration is fixed at construction; ``forward`` has no flags::
 
-        model = PiNetPotential(atom_types=[1, 6, 7, 8], r_max=4.5, depth=5,
-                               hidden_dim=64, compute_forces=True)
+        # energy only
+        model = PiNetPotential(..., compute_forces=False)
+        batch = model(batch)  # writes graphs.energy
 
-    Forces use ``ForceDerivation(method="functorch")`` (pure-PyTorch graph)
-    through :class:`EnergyForceModel`. All linears are fully specified at
-    construction — no lazy materialisation.
+        # energy + forces (func = compile-friendly 1-pass)
+        model = PiNetPotential(..., compute_forces=True, method="func")
+        batch = model(batch)  # + atoms.forces
+
+        # train force-matching often prefers method="grad"
+        model = PiNetPotential(..., compute_forces=True, method="grad")
     """
 
     def __init__(
         self,
         *,
         hidden_dim: int = 64,
-        layer_reduction: Literal["mean", "sum", "last"] = "mean",
         compute_forces: bool = False,
+        method: Literal["func", "grad"] = "func",
         encoder: PiNet | None = None,
         **pinet_kwargs: object,
     ) -> None:
-        super().__init__(force_method="functorch", compute_forces=compute_forces)
+        super().__init__()
         if encoder is not None and pinet_kwargs:
             raise ValueError("Pass either encoder=... or PiNet kwargs, not both.")
-        self.encoder = encoder if encoder is not None else PiNet(**pinet_kwargs)  # type: ignore[arg-type]
-        # Accepted for API compatibility; PiNet2 accumulates per-block OutLayers
-        # residually — there is no layer axis to reduce for energy.
-        self.layer_reduction = layer_reduction
+        if method not in ("func", "grad"):
+            raise ValueError(f"method must be 'func' or 'grad', got {method!r}")
+        if encoder is not None:
+            self.encoder = encoder
+        else:
+            pinet_kwargs.setdefault("emit_property_features", False)
+            self.encoder = PiNet(**pinet_kwargs)  # type: ignore[arg-type]
 
         depth: int = int(getattr(self.encoder, "depth", 1))
         feature_dim: int = int(getattr(self.encoder, "feature_dim", hidden_dim))
@@ -66,9 +78,24 @@ class PiNetPotential(EnergyForceModel):
             ]
         )
         self.energy_aggregation = EnergyAggregation(pooling="sum")
+        self.compute_forces = compute_forces
+        self.method = method
 
-    def energy_forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
-        """Compilable energy: encoder → per-block OutLayer sum → aggregate."""
+        # Monomorphic pipeline — one bound call path, no runtime if/else.
+        if not compute_forces:
+            self._pipeline = self._write_energy
+        elif method == "func":
+            self._pipeline = self._pipeline_ef_func
+        else:
+            self._pipeline = self._pipeline_ef_grad
+
+    def forward(self, batch: TensorDict) -> TensorDict:
+        """Run the init-fixed pipeline; mutate ``batch`` in place."""
+        return self._pipeline(batch)
+
+    # ------------------------------------------------------------------ energy
+    def _write_energy(self, batch: TensorDict) -> TensorDict:
+        """Energy core only — also the energy-only public pipeline."""
         batch = self.encoder(batch)
 
         block_outputs = batch["atoms", "p1_block_outputs"]  # (N, depth, D)
@@ -82,12 +109,80 @@ class PiNetPotential(EnergyForceModel):
             atom_energy = atom_energy * batch["atoms", "mask"].to(atom_energy.dtype)
         num_graphs = batch["graphs"].batch_size[0]
         energy = self.energy_aggregation(atom_energy, atom_batch, num_graphs=num_graphs)
+        write_energy(batch, energy, atomic_energy=atom_energy)
+        return batch
 
-        return {
-            "atomic_energy": atom_energy,
-            "energy": energy,
-        }
+    # ----------------------------------------------------------- force kernels
+    def _pipeline_ef_func(self, batch: TensorDict) -> TensorDict:
+        """Init-fixed: single ``torch.func.grad(..., has_aux=True)`` pass.
 
-    # Back-compat alias used by older call sites / docs.
-    def _energy_forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
-        return self.energy_forward(batch)
+        Compile-friendly monomorphic path (no session / no set_non_tensor).
+        """
+        pos = batch[POS_KEY].detach()
+        base = batch.clone()
+        base[POS_KEY] = pos
+
+        def energy_fn_aux(p: torch.Tensor) -> tuple[torch.Tensor, TensorDict]:
+            b = base.clone()
+            b[POS_KEY] = p
+            out = call_energy(self, b)
+            b = absorb_model_output(b, out)
+            if not has_energy(b):
+                raise RuntimeError("energy core must write graphs.energy")
+            return b[ENERGY_KEY].sum(), b
+
+        grad, filled = torch.func.grad(energy_fn_aux, has_aux=True)(pos)
+        batch[ENERGY_KEY] = filled[ENERGY_KEY]
+        if "atoms" in filled.keys() and "energy" in filled["atoms"].keys():
+            batch["atoms", "energy"] = filled["atoms", "energy"]
+        write_forces(batch, -grad)
+        return batch
+
+    def _pipeline_ef_grad(self, batch: TensorDict) -> TensorDict:
+        """Init-fixed: one energy pass + ``torch.autograd.grad`` on positions.
+
+        Often faster for force-supervised training (``create_graph`` when
+        ``self.training``).
+        """
+        pos = batch[POS_KEY].detach().requires_grad_(True)
+        batch[POS_KEY] = pos
+        batch = self._write_energy(batch)
+        create_graph = bool(self.training)
+        with torch.enable_grad():
+            (g,) = torch.autograd.grad(
+                batch[ENERGY_KEY].sum(),
+                pos,
+                create_graph=create_graph,
+                retain_graph=create_graph,
+            )
+        write_forces(batch, -g)
+        return batch
+
+    # ---------------------------------------------------------------- compile
+    def compile(
+        self,
+        *,
+        backend: str = "inductor",
+        fullgraph: bool = False,
+        dynamic: bool | None = None,
+        mode: str | None = None,
+    ) -> nn.Module:
+        """Return ``torch.compile(self, ...)`` of this monomorphic module.
+
+        Energy-only and ``method='func'`` force paths are the intended targets.
+        Prefer fixed shapes (``PadMolecularBatch``) for ``fullgraph=True`` /
+        ``mode='reduce-overhead'`` (CUDA graphs)::
+
+            model = PiNetPotential(..., compute_forces=True, method="func")
+            model = model.compile(fullgraph=True)  # OptimizedModule
+
+        Also works via :class:`molix.compile.Compiler` /
+        ``Trainer.compile(...)``.
+        """
+        return torch.compile(
+            self,
+            backend=backend,
+            fullgraph=fullgraph,
+            dynamic=dynamic,
+            mode=mode,
+        )

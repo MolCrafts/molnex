@@ -19,7 +19,6 @@ rebuild — so this is a study/inference engine for near-equilibrium dynamics, n
 general production MD. See :class:`~molix.md.forcefield.PotentialForceField`.
 """
 
-from molix.md.ase_shim import HAS_ASE, make_pinet_calculator
 from molix.md.dynamics import (
     TrajectoryArtifact,
     build_paired_trajectory,
@@ -43,7 +42,6 @@ from molix.md.types import ForceOutput, MDState
 
 __all__ = [
     "EV_PER_AMU_A2_FS2",
-    "HAS_ASE",
     "ForceField",
     "ForceOutput",
     "HarmonicForceField",
@@ -58,6 +56,5 @@ __all__ = [
     "as_mass_col",
     "build_paired_trajectory",
     "evaluate_delta_along_trajectory",
-    "make_pinet_calculator",
     "run_trajectory",
 ]

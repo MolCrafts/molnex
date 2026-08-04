@@ -232,6 +232,9 @@ def test_kspace_filter_error_catch():
         full_neighbor_list=True,
         mesh_spacing=0.5,
     )
+    # The NaN scan is a full-mesh reduction (device sync barrier), so it is
+    # opt-in per instance rather than always on — enable it to exercise the guard.
+    calculator.kspace_filter.check_nan = True
 
     charges = torch.ones([4, 1])
     positions = torch.arange(4 * 3).reshape(4, 3).to(torch.float32)
@@ -249,7 +252,7 @@ def test_kspace_filter_error_catch():
     match = (
         "NaNs detected in the k-space filter result. This are probably caused "
         "by an unsuitable `mesh_spacing`, resulting in a problematic grid of "
-        r"shape: \[1, 16, 16, 32\]. Try adjsuting the grid by using a "
+        r"shape: \[1, 16, 16, 32\]. Try adjusting the grid by using a "
         "different `mesh_spacing` value."
     )
     with pytest.raises(ValueError, match=match):

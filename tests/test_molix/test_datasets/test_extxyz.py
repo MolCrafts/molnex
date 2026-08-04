@@ -109,23 +109,27 @@ class TestParseFixture:
 
 
 class TestNoASE:
-    def test_no_ase_imports_in_datasets(self) -> None:
-        """ac-006: ``src/molix/datasets/`` contains no ASE imports.
+    def test_no_ase_imports_in_src(self) -> None:
+        """Package code under ``src/`` must not import ASE (or e3nn).
 
-        Replaces ASE's ``ase.io.read(..., format="extxyz")`` with the in-tree
-        ``_extxyz.parse_extxyz_frames`` parser. Grep is the binding rule.
+        Extxyz I/O uses the in-tree ``_extxyz.parse_extxyz_frames`` parser.
+        Grep is the binding rule — no soft optional ASE shims either.
         """
         repo_root = Path(__file__).resolve().parents[3]
-        datasets_dir = repo_root / "src" / "molix" / "datasets"
-        result = subprocess.run(
-            ["grep", "-rnE", r"^\s*(import ase|from ase)", str(datasets_dir)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert result.returncode == 1, (  # grep returns 1 when no matches
-            f"ASE import found in src/molix/datasets/:\n{result.stdout}"
-        )
+        src_dir = repo_root / "src"
+        for pattern in (
+            r"^\s*(import ase|from ase)\b",
+            r"^\s*(import e3nn|from e3nn)\b",
+        ):
+            result = subprocess.run(
+                ["grep", "-rnE", pattern, str(src_dir)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert result.returncode == 1, (  # grep returns 1 when no matches
+                f"Forbidden import under src/ (pattern {pattern!r}):\n{result.stdout}"
+            )
 
 
 class TestChargedDimersRemoved:

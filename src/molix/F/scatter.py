@@ -6,6 +6,8 @@ stability; prefer calling the torch primitives directly in new code.
 
 from __future__ import annotations
 
+import os
+
 import torch
 from torch import Tensor
 
@@ -48,6 +50,12 @@ def scatter_sum(
 # ``index_add_`` to avoid OOM on large periodic systems (review: O(E·N) risk).
 _ONEHOT_ELEMENT_BUDGET = 2_000_000
 
+# Read once at import, not per call: ``scatter_sum_compile_safe`` runs inside
+# ``torch.compile`` regions on the MACE interaction hot path, where an
+# ``os.environ`` lookup is both a per-call dict hit and an opaque side effect
+# the compiler must guard against. ``None`` (unset) = decide by element budget.
+_ONEHOT_FLAG: str | None = os.environ.get("MOLNEX_SCATTER_ONEHOT")
+
 
 def scatter_sum_compile_safe(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     """Sum ``src`` rows into ``dim_size`` buckets given by ``index`` (dim 0).
@@ -60,13 +68,11 @@ def scatter_sum_compile_safe(src: Tensor, index: Tensor, dim_size: int) -> Tenso
 
     Force exact one-hot always with env ``MOLNEX_SCATTER_ONEHOT=1``.
     Force ``index_add_`` always with ``MOLNEX_SCATTER_ONEHOT=0``.
+    Both are read once at import (see :data:`_ONEHOT_FLAG`).
     """
-    import os
-
-    n_src = src.shape[0]
-    budget = n_src * int(dim_size)
-    flag = os.environ.get("MOLNEX_SCATTER_ONEHOT")
-    use_onehot = flag == "1" or (flag is None and budget <= _ONEHOT_ELEMENT_BUDGET)
+    use_onehot = _ONEHOT_FLAG == "1" or (
+        _ONEHOT_FLAG is None and src.shape[0] * int(dim_size) <= _ONEHOT_ELEMENT_BUDGET
+    )
 
     if not use_onehot:
         out_shape = (dim_size, *src.shape[1:])

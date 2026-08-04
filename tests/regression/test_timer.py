@@ -1,4 +1,3 @@
-import ase
 import torch
 
 from molpot.potentials.elec import (
@@ -10,9 +9,27 @@ from tests.regression.conftest import define_crystal, neighbor_list
 
 DTYPE = torch.float32
 DEFAULT_CUTOFF = 4.4
-CHARGES_1 = torch.ones((4, 1), dtype=DTYPE)
-POSITIONS_1 = 0.3 * torch.arange(12, dtype=DTYPE).reshape((4, 3))
-CELL_1 = torch.eye(3, dtype=DTYPE)
+
+
+def _supercell(
+    pos: torch.Tensor,
+    charges: torch.Tensor,
+    cell: torch.Tensor,
+    reps: tuple[int, int, int],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Tile a unit cell ``reps`` times along each lattice vector (numpy-free)."""
+    nx, ny, nz = reps
+    images = []
+    for ix in range(nx):
+        for iy in range(ny):
+            for iz in range(nz):
+                shift = ix * cell[0] + iy * cell[1] + iz * cell[2]
+                images.append(pos + shift)
+    pos_sc = torch.cat(images, dim=0)
+    charges_sc = charges.repeat(nx * ny * nz, 1)
+    scale = torch.tensor([nx, ny, nz], dtype=cell.dtype, device=cell.device)
+    cell_sc = cell * scale.unsqueeze(1)
+    return pos_sc, charges_sc, cell_sc
 
 
 def test_timer():
@@ -20,14 +37,11 @@ def test_timer():
     n_repeat_2 = 100
     pos, charges, cell, _, _ = define_crystal()
 
-    # use ase to make system bigger
-    atoms = ase.Atoms("H" * len(pos), positions=pos.numpy(), cell=cell.numpy())
-    atoms.set_initial_charges(charges.numpy().flatten())
-    atoms.repeat((4, 4, 4))
-
-    pos = torch.tensor(atoms.positions, dtype=DTYPE)
-    charges = torch.tensor(atoms.get_initial_charges(), dtype=DTYPE).reshape(-1, 1)
-    cell = torch.tensor(atoms.cell.array, dtype=DTYPE)
+    # Enlarge the crystal without ASE: 4×4×4 supercell of the primitive cell.
+    pos = pos.to(DTYPE)
+    charges = charges.to(DTYPE).reshape(-1, 1)
+    cell = cell.to(DTYPE)
+    pos, charges, cell = _supercell(pos, charges, cell, (4, 4, 4))
 
     neighbor_indices, neighbor_distances = neighbor_list(
         positions=pos, box=cell, cutoff=DEFAULT_CUTOFF

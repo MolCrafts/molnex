@@ -1,31 +1,32 @@
-"""Minimal in-tree extended-XYZ (extxyz) parser — molpy-only stack.
+"""Minimal in-tree extended-XYZ (extxyz) parser — numpy only.
 
 This module exists because :class:`molpy.io.trajectory.xyz.XYZTrajectoryReader`
 only reads the canonical XYZ format (``n_atoms`` + comment + ``element x y z``
 rows) and discards the comment-line metadata that extxyz files carry —
 ``Lattice="..."``, ``Properties=...``, ``energy=...``, ``pbc="..."`` — as well
-as any per-atom columns beyond ``x y z``. The Sonata bulk-water RPBE-D3 data
-ships in extended-XYZ format with per-frame ``cell``, ``energy``, and per-atom
-``forces``, so an extxyz-aware parser is required.
+as any per-atom columns beyond ``x y z``. Dataset fixtures and numerical
+regression frames ship in extended-XYZ with per-frame ``cell`` / ``energy`` and
+per-atom ``forces`` (and optionally ``initial_charges``, ``dipoles``, …).
 
 This parser is intentionally narrow:
 
-* depends on ``numpy`` + Python stdlib only (NO ``ase``);
-* recognises only the column tags this project consumes
-  (``species:S:1``, ``pos:R:3``, ``forces:R:3``) and skips others;
+* depends on ``numpy`` + Python stdlib only (no ASE, no e3nn);
+* requires ``species:S:1`` and ``pos:R:3``;
+* promotes ``forces:R:3`` to :attr:`ExtxyzFrame.forces` when present;
+* stores every other real-valued ``Properties`` column under
+  :attr:`ExtxyzFrame.arrays` (e.g. ``initial_charges``, ``dipoles``);
 * returns a flat list of :class:`ExtxyzFrame` dataclasses; callers
   (e.g. :class:`molix.datasets.water_les.WaterLESSource`) bridge to
   :class:`torch.Tensor` and the flat-sample dict contract.
 
 References:
-    Extended-XYZ format spec (ASE wiki / Schimka et al. 2017 supp.):
-    https://github.com/libAtoms/extxyz
+    Extended-XYZ format: https://github.com/libAtoms/extxyz
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +56,10 @@ class ExtxyzFrame:
         forces: ``(n_atoms, 3)`` forces in eV·Å⁻¹, or ``None`` when the
             ``Properties=`` declaration does not list a ``forces:R:3``
             column.
+        arrays: Other real-valued per-atom columns declared in
+            ``Properties=``, keyed by name (e.g. ``"initial_charges"``
+            ``(n_atoms,)`` or ``"dipoles"`` ``(n_atoms, 3)``). Empty when
+            only species/pos/forces are present.
     """
 
     n_atoms: int
@@ -64,6 +69,7 @@ class ExtxyzFrame:
     species: list[str]
     pos: np.ndarray
     forces: np.ndarray | None
+    arrays: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 def parse_extxyz_frames(path: str | Path) -> list[ExtxyzFrame]:
@@ -114,6 +120,10 @@ def parse_extxyz_frames(path: str | Path) -> list[ExtxyzFrame]:
         forces: np.ndarray | None = (
             np.empty((n_atoms, 3), dtype=np.float64) if layout["has_forces"] else None
         )
+        extra: dict[str, np.ndarray] = {
+            name: np.empty((n_atoms, width) if width > 1 else (n_atoms,), dtype=np.float64)
+            for name, _col, width in layout["real_cols"]
+        }
         for j, row in enumerate(atom_lines):
             parts = row.split()
             if len(parts) < layout["min_cols"]:
@@ -130,6 +140,9 @@ def parse_extxyz_frames(path: str | Path) -> list[ExtxyzFrame]:
             if forces is not None:
                 fc = layout["forces_col"]
                 forces[j] = (float(parts[fc]), float(parts[fc + 1]), float(parts[fc + 2]))
+            for name, col, width in layout["real_cols"]:
+                vals = tuple(float(parts[col + k]) for k in range(width))
+                extra[name][j] = vals if width > 1 else vals[0]
 
         frames.append(
             ExtxyzFrame(
@@ -140,6 +153,7 @@ def parse_extxyz_frames(path: str | Path) -> list[ExtxyzFrame]:
                 species=species,
                 pos=pos,
                 forces=forces,
+                arrays=extra,
             )
         )
         i += 2 + n_atoms
@@ -230,15 +244,16 @@ def _parse_energy(tokens: dict[str, str], *, source: Path, frame_idx: int) -> fl
     return float(raw)
 
 
-def _parse_properties(tokens: dict[str, str], *, source: Path) -> dict[str, int | bool]:
-    """Parse ``Properties=species:S:1:pos:R:3:forces:R:3`` into column offsets.
+def _parse_properties(tokens: dict[str, str], *, source: Path) -> dict:
+    """Parse ``Properties=species:S:1:pos:R:3:…`` into column offsets.
 
     Returns a dict with::
 
         species_col:  column index of the symbol column
         pos_col:      column index where the 3 position columns begin
-        forces_col:   column index where the 3 force columns begin (only if has_forces)
+        forces_col:   column index of forces (only when has_forces)
         has_forces:   whether forces are declared
+        real_cols:    list of ``(name, col, width)`` for other ``R`` columns
         min_cols:     minimum number of columns each atom row must have
     """
     raw = tokens.get("Properties", "species:S:1:pos:R:3")
@@ -249,16 +264,19 @@ def _parse_properties(tokens: dict[str, str], *, source: Path) -> dict[str, int 
     species_col: int | None = None
     pos_col: int | None = None
     forces_col: int | None = None
+    real_cols: list[tuple[str, int, int]] = []
     cursor = 0
     for k in range(0, len(parts), 3):
-        name, _type, width_str = parts[k], parts[k + 1], parts[k + 2]
+        name, typ, width_str = parts[k], parts[k + 1], parts[k + 2]
         width = int(width_str)
         if name == "species":
             species_col = cursor
         elif name == "pos":
             pos_col = cursor
-        elif name == "forces":
+        elif name == "forces" and typ == "R":
             forces_col = cursor
+        elif typ == "R":
+            real_cols.append((name, cursor, width))
         cursor += width
 
     if species_col is None or pos_col is None:
@@ -266,10 +284,11 @@ def _parse_properties(tokens: dict[str, str], *, source: Path) -> dict[str, int 
             f"{source}: Properties tag must declare both species and pos columns; got {raw!r}"
         )
 
-    layout: dict[str, int | bool] = {
+    layout: dict = {
         "species_col": species_col,
         "pos_col": pos_col,
         "has_forces": forces_col is not None,
+        "real_cols": real_cols,
         "min_cols": cursor,
     }
     if forces_col is not None:
