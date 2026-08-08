@@ -178,3 +178,40 @@ def test_mass_must_be_positive():
         _ig(1.0, dt=0.01, gamma=0.0, kbt=0.0, mass=-1.0)
     with pytest.raises(ValueError, match="strictly positive"):
         _ig(1.0, dt=0.01, gamma=0.0, kbt=0.0, mass=torch.tensor([1.0, -2.0, 3.0]))
+
+
+class _CountingNLForce(HarmonicForceField):
+    """Harmonic well that records the positions passed to rebuild_neighbors."""
+
+    def __init__(self, k: float = 1.0):
+        super().__init__(k)
+        self.rebuild_positions: list[torch.Tensor] = []
+
+    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
+        self.rebuild_positions.append(pos.detach().clone())
+
+
+def test_rebuild_every_fires_at_force_evaluation_positions():
+    """NL rebuild must use the positions of the force call, not step-start.
+
+    Velocity-Verlet evaluates F at the end-of-step positions. Rebuilding there
+    (via Integrator.eval_force) keeps F = -∇E on the list's energy surface.
+    """
+    torch.manual_seed(0)
+    force = _CountingNLForce(1.0).to(_DTYPE)
+    ig = LangevinVerletIntegrator(force, dt=0.01, gamma=0.0, kbt=0.0, mass=1.0).cast_state(
+        _DTYPE
+    )
+    ig.rebuild_every = 1
+    pos0 = torch.randn(4, 3, dtype=_DTYPE)
+    vel0 = torch.randn(4, 3, dtype=_DTYPE) * 0.1
+    state = ig.initial(pos0, vel0)
+    # initial() → one force eval at pos0
+    assert len(force.rebuild_positions) == 1
+    assert torch.equal(force.rebuild_positions[0], pos0)
+
+    state = ig.step_nve(state)
+    # second force eval at the *new* positions (not pos0)
+    assert len(force.rebuild_positions) == 2
+    assert torch.equal(force.rebuild_positions[1], state.pos)
+    assert not torch.equal(force.rebuild_positions[1], pos0)

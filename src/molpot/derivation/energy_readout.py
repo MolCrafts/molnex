@@ -65,8 +65,7 @@ class EnergyReadout:
         batch = absorb_model_output(batch, out)
         if not has_energy(batch):
             raise RuntimeError(
-                "energy core must write batch['graphs','energy'] (or return "
-                "a dict with 'energy')"
+                "energy core must write batch['graphs','energy'] (or return a dict with 'energy')"
             )
         return batch
 

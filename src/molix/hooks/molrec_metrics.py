@@ -114,9 +114,7 @@ class MolRecMetricsHook(BaseHook):
         )
         self._writer = None
 
-    def _log_namespaces(
-        self, state: Any, namespaces: tuple[str, ...], *, stage: str
-    ) -> None:
+    def _log_namespaces(self, state: Any, namespaces: tuple[str, ...], *, stage: str) -> None:
         assert self._writer is not None
         step = int(getattr(state, "global_step", 0))
         write_status(

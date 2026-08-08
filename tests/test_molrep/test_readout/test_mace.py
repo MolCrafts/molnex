@@ -1,10 +1,20 @@
-"""Tests for molrep.readout.product module."""
+"""Tests for molrep.readout.mace module."""
 
 import pytest
 import torch
 
 from molix import config
-from molrep.readout.product import ProductHead, ProductHeadSpec
+from molrep.readout.mace import (
+    LinearReadout,
+    NonLinearBiasReadout,
+    NonLinearReadout,
+    ProductHead,
+    ProductHeadSpec,
+)
+
+FEATURES = 8
+MLP_DIM = 4
+N_NODES = 4
 
 
 class TestProductHeadSpec:
@@ -107,3 +117,67 @@ class TestProductHead:
 
         assert node_features.grad is not None
         assert not torch.isnan(node_features.grad).any()
+
+
+@pytest.fixture
+def scalar_feats():
+    """Per-atom scalar node features ``(N, FEATURES)`` matching ``FEATURES x0e``."""
+    torch.manual_seed(0)
+    return torch.randn(N_NODES, FEATURES, dtype=config.ftype)
+
+
+class TestLinearReadout:
+    """Test the MACE ``LinearReadoutBlock`` port."""
+
+    def test_forward_shape(self, scalar_feats):
+        """Projects scalar node features to one number per atom."""
+        head = LinearReadout(irreps_in=f"{FEATURES}x0e")
+        assert head(scalar_feats).shape == (N_NODES, 1)
+
+    def test_state_dict_keys_are_the_weight_transfer_contract(self):
+        """Sub-layer name ``linear`` must stay put — official weights load by key."""
+        head = LinearReadout(irreps_in=f"{FEATURES}x0e")
+        assert sorted(head.state_dict().keys()) == [
+            "linear.f.m.graphs.0.graph.c0",
+            "linear.weight",
+        ]
+
+
+class TestNonLinearReadout:
+    """Test the bias-free gated readout (MACE-MP / MatPES last layer)."""
+
+    def test_forward_shape(self, scalar_feats):
+        """Two equivariant linears with a SiLU gate give one number per atom."""
+        head = NonLinearReadout(irreps_in=f"{FEATURES}x0e", mlp_dim=MLP_DIM)
+        assert head(scalar_feats).shape == (N_NODES, 1)
+
+    def test_state_dict_keys_are_the_weight_transfer_contract(self):
+        """``linear_1`` / ``linear_2`` and no bias entries — MACE's bias-free variant."""
+        head = NonLinearReadout(irreps_in=f"{FEATURES}x0e", mlp_dim=MLP_DIM)
+        assert sorted(head.state_dict().keys()) == [
+            "linear_1.f.m.graphs.0.graph.c0",
+            "linear_1.weight",
+            "linear_2.f.m.graphs.0.graph.c0",
+            "linear_2.weight",
+        ]
+
+
+class TestNonLinearBiasReadout:
+    """Test the biased three-layer readout (MACE-OMOL variant)."""
+
+    def test_forward_shape(self, scalar_feats):
+        """``Linear → SiLU → linear_mid → SiLU → linear_2`` gives one number per atom."""
+        head = NonLinearBiasReadout(irreps_in=f"{FEATURES}x0e", mlp_dim=MLP_DIM)
+        assert head(scalar_feats).shape == (N_NODES, 1)
+
+    def test_state_dict_keys_are_the_weight_transfer_contract(self):
+        """``linear_mid`` plus the two biases distinguish this from NonLinearReadout."""
+        head = NonLinearBiasReadout(irreps_in=f"{FEATURES}x0e", mlp_dim=MLP_DIM)
+        assert sorted(head.state_dict().keys()) == [
+            "linear_1.f.m.graphs.0.graph.c0",
+            "linear_1.weight",
+            "linear_2.bias",
+            "linear_2.weight",
+            "linear_mid.bias",
+            "linear_mid.weight",
+        ]

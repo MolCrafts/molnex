@@ -33,6 +33,12 @@ ALLOW_MISSING: frozenset[str] = frozenset(
         "molpot/potentials/elec/_utils.py",
         "molix/datasets/_bond_adapter.py",
         "molix/datasets/_extxyz.py",
+        # Pure re-export shims left behind by mace-subpackage-restructure-01;
+        # the real modules live under molrep/{interaction/mace,readout}/mace*.
+        # Removed together with the shims in 06-wire.
+        "molrep/interaction/density.py",
+        "molrep/readout/scalar.py",
+        "molrep/readout/product.py",
     }
 )
 
@@ -41,6 +47,7 @@ ALLOW_MISSING: frozenset[str] = frozenset(
 # schema/units modules).
 PINET_SPINE: tuple[str, ...] = (
     "molrep/interaction/pinet/",
+    "molrep/interaction/mace/",
     "molzoo/pinet/",
     "molpot/derivation/force.py",
     "molpot/derivation/energy.py",

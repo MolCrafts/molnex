@@ -36,7 +36,7 @@ import torch
 
 from molix.md.forcefield import ForceField
 from molix.md.integrators import Integrator, LangevinVerletIntegrator
-from molix.md.runner import MDHook, MDRunner, NeighborListHook
+from molix.md.runner import MDHook, MDRunner
 from molix.md.types import ForceOutput, MDState
 from molix.units import KB_AMU_A_FS
 
@@ -136,9 +136,12 @@ class MD:
             this dtype, leaving parameters alone. This is the mixed-precision
             path (e.g. ``torch.bfloat16``). Not combinable with an explicit
             ``integrator`` (wrap the force field yourself in that case).
-        rebuild_every: Rebuild the neighbour list every N steps. ``None``
-            disables rebuilding — correct only for open systems or runs short
-            enough that the initial list stays valid.
+        rebuild_every: Rebuild the neighbour list every N **force evaluations**
+            (one per MD step under BAOAB), at the positions being evaluated.
+            ``None`` freezes the list — correct only for open systems or runs
+            short enough that the initial list stays valid. ``1`` is the
+            accurate NVE setting without a Verlet skin.
+
         hooks: Extra hooks, appended after the neighbour-list hook.
         seed: Seed for the Langevin noise.
         device: Device to place the force field and state on (device, unlike
@@ -218,13 +221,18 @@ class MD:
         self.force = force
         self.integrator = integrator
 
-        run_hooks: list[MDHook | tuple[MDHook, int]] = []
+        # Neighbour-list rebuild belongs in Integrator.eval_force (at the
+        # force-evaluation positions), NOT in a step-start hook: BAOAB/VV
+        # evaluates F at the *end* of the step, so a step-start rebuild leaves
+        # the list one displacement behind the positions in F = -∇E and also
+        # leaves the cached half-kick force inconsistent with the new list.
         if rebuild_every is not None:
-            # Priority 0: the list must be refreshed before any hook that reads
-            # positions or forces for this step.
-            run_hooks.append((NeighborListHook(force, every=rebuild_every), 0))
-        run_hooks.extend(hooks or [])
+            if int(rebuild_every) < 1:
+                raise ValueError(f"rebuild_every must be >= 1, got {rebuild_every}")
+            integrator.rebuild_every = int(rebuild_every)
+            integrator._force_eval_count = 0
         self.rebuild_every = rebuild_every
+        run_hooks: list[MDHook | tuple[MDHook, int]] = list(hooks or [])
         self.runner = MDRunner(integrator, mass=mass_t, hooks=run_hooks)
 
     def set_potential_dtype(self, dtype: torch.dtype) -> "MD":
@@ -252,12 +260,12 @@ class MD:
             vel: Initial velocities ``(N, 3)``, Å/fs.
             n_steps: Number of steps.
             chunk: Steps advanced between hook firings (dynamics are
-                bit-identical; only observation cadence changes). Default: the
-                neighbour-rebuild cadence when one is set — the loop cannot be
-                coarser than the most frequent hook anyway — else 1.
+                bit-identical; only observation cadence changes). Default 1.
+                Neighbour rebuild no longer couples to ``chunk`` — it runs
+                inside each force evaluation when ``rebuild_every`` is set.
         """
         if chunk is None:
-            chunk = self.rebuild_every or 1
+            chunk = 1
         pos, vel = self._cast(pos), self._cast(vel)
         return self.runner.run(pos, vel, n_steps, chunk=chunk)
 

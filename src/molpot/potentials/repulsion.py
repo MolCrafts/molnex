@@ -110,9 +110,7 @@ class ZBLRepulsion(nn.Module):
             / (torch.pow(z_source, self.a_exp) + torch.pow(z_target, self.a_exp))
         )
         x = r / screening_length
-        phi = sum(
-            self.c[k] * torch.exp(-_SCREENING_B[k] * x) for k in range(len(_SCREENING_B))
-        )
+        phi = sum(self.c[k] * torch.exp(-_SCREENING_B[k] * x) for k in range(len(_SCREENING_B)))
 
         radii = self.covalent_radii
         pair_cutoff = radii[z[source]] + radii[z[target]]

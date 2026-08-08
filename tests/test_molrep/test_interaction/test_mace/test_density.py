@@ -1,9 +1,9 @@
-"""Tests for molrep.interaction.density module."""
+"""Tests for molrep.interaction.mace.density module."""
 
 import pytest
 import torch
 
-from molrep.interaction.density import DensityInteraction, DensityResidualInteraction
+from molrep.interaction.mace.density import DensityInteraction, DensityResidualInteraction
 
 N_ELEMENTS = 3
 N_NODES = 4

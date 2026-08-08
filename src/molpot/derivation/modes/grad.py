@@ -49,8 +49,7 @@ class GradMode:
         batch = absorb_model_output(batch, out)
         if not has_energy(batch):
             raise RuntimeError(
-                "model.forward must write batch['graphs','energy'] (or return "
-                "a dict with 'energy')"
+                "model.forward must write batch['graphs','energy'] (or return a dict with 'energy')"
             )
         deriv._energy_ready = True  # type: ignore[attr-defined]
         deriv._lazy_func = False  # type: ignore[attr-defined]

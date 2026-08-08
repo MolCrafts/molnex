@@ -75,9 +75,7 @@ class EnergyForceModel(nn.Module):
             return self._forces_autograd(base, pos)
         raise RuntimeError(f"unknown force method {method!r}")  # pragma: no cover
 
-    def _forces_functorch(
-        self, base: TensorDict, pos: torch.Tensor
-    ) -> dict[str, torch.Tensor]:
+    def _forces_functorch(self, base: TensorDict, pos: torch.Tensor) -> dict[str, torch.Tensor]:
         """Functorch-only 1-pass: ``grad(..., has_aux=True)``."""
 
         def energy_fn_aux(p: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -90,9 +88,7 @@ class EnergyForceModel(nn.Module):
         out["forces"] = forces
         return out
 
-    def _forces_autograd(
-        self, base: TensorDict, pos: torch.Tensor
-    ) -> dict[str, torch.Tensor]:
+    def _forces_autograd(self, base: TensorDict, pos: torch.Tensor) -> dict[str, torch.Tensor]:
         """Autograd-only 1-pass: energy on ``p``, then ``forces_from_energy``."""
         p = pos.detach().requires_grad_(True)
         base["atoms", "pos"] = p

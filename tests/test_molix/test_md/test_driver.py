@@ -8,7 +8,6 @@ from molix.md import (
     HarmonicForceField,
     LangevinVerletIntegrator,
     MaxwellBoltzmann,
-    NeighborListHook,
 )
 
 
@@ -93,17 +92,17 @@ class TestMD:
         with pytest.raises(ValueError, match="dt is required"):
             MD(HarmonicForceField(k=1.0), mass=1.0)
 
-    def test_rebuild_every_installs_the_hook_first(self):
-        """``rebuild_every`` wires a NeighborListHook at priority 0 (the list
-        must refresh before any hook that reads this step's positions); the
-        cadence behaviour itself is NeighborListHook's own unit test."""
+    def test_rebuild_every_configures_the_integrator(self):
+        """``rebuild_every`` is handled in Integrator.eval_force (at force-eval
+        positions), not via a step-start NeighborListHook — the latter lags
+        the list by one displacement and leaks NVE energy."""
         md = MD(HarmonicForceField(k=1.0), mass=1.0, dt=0.01, rebuild_every=5)
-        hook = md.runner.hooks[0]
-        assert isinstance(hook, NeighborListHook)
-        assert hook.cadence == 5
+        assert md.integrator.rebuild_every == 5
+        assert md.runner.hooks == []  # no step-start NL hook
 
-    def test_no_hook_when_rebuild_disabled(self):
+    def test_no_rebuild_when_disabled(self):
         md = MD(HarmonicForceField(k=1.0), mass=1.0, dt=0.01)
+        assert md.integrator.rebuild_every is None
         assert md.runner.hooks == []
 
     def test_temperature_sets_kbt(self):

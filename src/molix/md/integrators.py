@@ -75,6 +75,12 @@ class Integrator(nn.Module):
     def __init__(self, force: ForceField) -> None:
         super().__init__()
         self.force = force
+        #: Rebuild the force field's neighbour list every N **force evaluations**
+        #: (``None`` = never). Rebuild happens *at the positions being evaluated*,
+        #: immediately before ``force(pos)`` — not at step-start on a lagged
+        #: configuration. See :meth:`eval_force`.
+        self.rebuild_every: int | None = None
+        self._force_eval_count: int = 0
 
     @property
     def removed_dof(self) -> int:
@@ -90,11 +96,23 @@ class Integrator(nn.Module):
     def eval_force(self, pos: torch.Tensor) -> ForceOutput:
         """Evaluate the force field, casting its output to the state dtype.
 
+        When :attr:`rebuild_every` is set, the neighbour list is refreshed at
+        ``pos`` *before* the force call (every N evaluations, N=1 ⇒ every
+        force). Velocity-Verlet evaluates forces at the *end* of the step; a
+        rebuild wired to step-start instead leaves the list one displacement
+        behind the positions in ``F = -∇E``, which is a systematic energy leak
+        on long NVE runs.
+
         The force field owns its own precision (deliberately independent of the
         trajectory's — see :class:`molix.md.driver.MD`); the state must not
         silently promote, so energy/forces come back in ``pos``'s dtype. A
         same-dtype ``.to`` is the identity, so the matched case costs nothing.
         """
+        every = self.rebuild_every
+        if every is not None:
+            if self._force_eval_count % every == 0:
+                self.force.rebuild_neighbors(pos)
+            self._force_eval_count += 1
         out = self.force(pos)
         return ForceOutput(out.energy.to(pos.dtype), out.forces.to(pos.dtype))
 

@@ -61,11 +61,7 @@ def index_path(record_root: Path) -> Path:
 
 
 def _is_number(value: JSONValue) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _validate_tags(tags: JSONValue) -> dict[str, JSONValue] | None:
@@ -395,9 +391,7 @@ class MetricsWriter:
     def log(
         self, record: MetricRecord, *, tags: dict[str, JSONValue] | None = None
     ) -> MetricRecord:
-        payload: MetricRecord = {
-            key: value for key, value in record.items() if value is not None
-        }
+        payload: MetricRecord = {key: value for key, value in record.items() if value is not None}
         payload.setdefault("w", _format_wall_time(None))
         if tags is not None:
             payload["tags"] = tags

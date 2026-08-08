@@ -37,9 +37,7 @@ class FuncMode:
             raise RuntimeError("session model is not set")
 
         if backward:
-            if getattr(deriv, "_energy_ready", False) and not getattr(
-                deriv, "_lazy_func", False
-            ):
+            if getattr(deriv, "_energy_ready", False) and not getattr(deriv, "_lazy_func", False):
                 raise RuntimeError(
                     "Energy already materialised without lazy-func state; "
                     "for method='func' use EnergyReadout(backward=True) "
@@ -57,8 +55,7 @@ class FuncMode:
         batch = absorb_model_output(batch, out)
         if not has_energy(batch):
             raise RuntimeError(
-                "model.forward must write batch['graphs','energy'] (or return "
-                "a dict with 'energy')"
+                "model.forward must write batch['graphs','energy'] (or return a dict with 'energy')"
             )
         deriv._energy_ready = True  # type: ignore[attr-defined]
         return batch
@@ -79,8 +76,7 @@ class FuncMode:
             b = absorb_model_output(b, out)
             if not has_energy(b):
                 raise RuntimeError(
-                    "model.forward must write batch['graphs','energy'] inside "
-                    "the func energy path"
+                    "model.forward must write batch['graphs','energy'] inside the func energy path"
                 )
             return b[ENERGY_KEY].sum(), b
 

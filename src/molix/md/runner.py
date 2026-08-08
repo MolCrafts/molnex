@@ -323,22 +323,19 @@ class TrajectoryHook(MDHook):
 
 
 class NeighborListHook(MDHook):
-    """Rebuild the force field's neighbour list every ``every`` steps.
+    """Legacy step-start neighbour rebuild — prefer ``MD(rebuild_every=)``.
 
-    Fires on :meth:`MDHook.on_step_start` — before the step, and therefore
-    before the force evaluation inside it. Rebuilding *after* a step would
-    leave the cached force (which BAOAB's opening half-kick consumes)
-    inconsistent with the list that produced it.
+    .. warning::
 
-    The cadence is a fixed step count, deliberately: a displacement criterion
-    would need a host synchronisation every step to test, which costs more than
-    the occasional redundant rebuild it saves.
-
-    Choosing ``every``: an atom must not traverse the gap between the model
-    cutoff and the neighbour-list cutoff between rebuilds. With no skin — which
-    is all a box smaller than ``4 * r_cut`` allows under minimum image — that
-    means a handful of steps. At 300 K a hydrogen covers ~0.014 A per 0.5 fs
-    step, so ``every=5`` bounds pair-approach error to ~0.14 A.
+        Rebuilding on :meth:`MDHook.on_step_start` refreshes the list at the
+        *start-of-step* positions, while velocity-Verlet evaluates forces at
+        the *end-of-step* positions. That one-step lag makes ``F`` not equal
+        to ``-∇E`` of the energy surface the list defines, and produces a
+        systematic NVE energy drift (measured ~30× worse at ``every=5`` than
+        at ``every=1`` on MACE-MatPES water). ``MD(rebuild_every=)`` now
+        rebuilds inside :meth:`~molix.md.integrators.Integrator.eval_force`
+        at the force-evaluation positions instead; this hook is kept for
+        callers that explicitly want step-start semantics (e.g. tests).
 
     Args:
         force: The force field to refresh.

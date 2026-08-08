@@ -362,12 +362,15 @@ def main() -> None:
         print(f"nothing to do: checkpoint already at step {start_step} >= {args.steps}")
         return
 
-    # The loop can only be as coarse as the most frequent observer.
-    chunk = args.rebuild_every or 1
-    chunk = math.gcd(chunk, args.stride)
+    # Observation cadence only — neighbour rebuild runs inside each force
+    # evaluation (Integrator.eval_force) and must not force chunk=1.
+    chunk = max(1, int(args.stride))
     if args.checkpoint_every:
-        chunk = math.gcd(chunk, args.checkpoint_every)
-    print(f"advancing in chunks of {chunk} steps")
+        chunk = math.gcd(chunk, int(args.checkpoint_every))
+    print(
+        f"advancing in chunks of {chunk} steps "
+        f"(rebuild_every={args.rebuild_every} at force-eval positions)"
+    )
 
     t0 = time.perf_counter()
     md.run(pos, vel, remaining, chunk=chunk)

@@ -31,7 +31,6 @@ Reference:
 from __future__ import annotations
 
 import cuequivariance as cue
-import cuequivariance_torch as cuet
 import torch
 import torch.nn as nn
 from cuequivariance import O3, Irreps
@@ -40,317 +39,27 @@ from tensordict import TensorDict
 from tensordict.nn import TensorDictModuleBase
 
 from molix import config
-from molrep.embedding.angular import SphericalHarmonics
-from molrep.embedding.cutoff import CosineCutoff
+from molrep.embedding.mace import EmbeddingBlock, EmbeddingSpec
 from molrep.embedding.node import (
     ContinuousEmbeddingSpec,
     DiscreteEmbeddingSpec,
-    JointEmbedding,
 )
-from molrep.embedding.radial import BesselRBF
 from molrep.interaction.element import ElementUpdate
-from molrep.interaction.product import (
-    ConvTP,
-    irreps_from_l_max,
-    sh_irreps_from_l_max,
-)
-from molrep.interaction.radial import RadialWeightMLP
+from molrep.interaction.mace.block import InteractionBlock, InteractionSpec
+from molrep.interaction.product import irreps_from_l_max
 from molrep.readout.product import ProductHead
 
-# ===========================================================================
-# Embedding Block
-# ===========================================================================
-
-
-class EmbeddingSpec(BaseModel):
-    """Configuration for the embedding block.
-
-    Attributes:
-        node_attr_specs: Embedding specifications for node attributes
-            (e.g. atomic number Z, charge).
-        num_features: Number of feature channels (scalar multiplicity at l=0).
-        r_max: Radial cutoff distance in Angstroms.
-        num_bessel: Number of Bessel radial basis functions.
-        l_max: Maximum angular momentum order.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    node_attr_specs: list[DiscreteEmbeddingSpec | ContinuousEmbeddingSpec] = Field(
-        ..., min_length=1
-    )
-    num_features: int = Field(..., gt=0)
-    r_max: float = Field(..., gt=0.0)
-    num_bessel: int = Field(8, gt=0)
-    l_max: int = Field(2, ge=0)
-
-
-class EmbeddingBlock(nn.Module):
-    """Node and edge embedding block.
-
-    Computes initial node features via ``JointEmbedding`` and edge features
-    via Bessel radial basis, spherical harmonics, and a cosine cutoff envelope.
-
-    Attributes:
-        node_embedding: Joint embedding for node attributes.
-        radial_embedding: Bessel radial basis functions.
-        spherical_harmonics: Spherical harmonics for edge directions.
-        cutoff_fn: Cosine cutoff envelope.
-    """
-
-    def __init__(
-        self,
-        *,
-        node_attr_specs: list[DiscreteEmbeddingSpec | ContinuousEmbeddingSpec],
-        num_features: int,
-        r_max: float,
-        num_bessel: int = 8,
-        l_max: int = 2,
-    ):
-        """Initialize embedding block.
-
-        Args:
-            node_attr_specs: Embedding specs for node attributes.
-            num_features: Scalar channel multiplicity (l=0 count).
-            r_max: Radial cutoff in Angstroms.
-            num_bessel: Number of Bessel basis functions.
-            l_max: Maximum angular momentum order.
-        """
-        super().__init__()
-
-        self.config = EmbeddingSpec(
-            node_attr_specs=node_attr_specs,
-            num_features=num_features,
-            r_max=r_max,
-            num_bessel=num_bessel,
-            l_max=l_max,
-        )
-
-        # Node embedding
-        self.node_embedding = JointEmbedding(
-            embedding_specs=node_attr_specs,
-            out_dim=num_features,
-        )
-
-        # Edge radial basis
-        self.radial_embedding = BesselRBF(
-            r_cut=r_max,
-            num_radial=num_bessel,
-        )
-
-        # Spherical harmonics
-        self.spherical_harmonics = SphericalHarmonics(
-            l_max=l_max,
-        )
-
-        # Cutoff envelope
-        self.cutoff_fn = CosineCutoff(
-            r_cut=r_max,
-        )
-
-    def forward(
-        self,
-        Z: torch.Tensor,
-        edge_dist: torch.Tensor,
-        edge_diff: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Compute initial node and edge features.
-
-        Args:
-            Z: Atomic numbers (n_nodes,).
-            edge_dist: Bond distances (n_edges,).
-            edge_diff: Bond vectors (target - source) (n_edges, 3).
-
-        Returns:
-            tuple of:
-                - node_feats: Node features (n_nodes, num_features).
-                - edge_attrs: Spherical harmonics (n_edges, sh_dim).
-                - edge_feats: Radial basis features (n_edges, num_bessel).
-        """
-        # Node features
-        node_feats = self.node_embedding(Z=Z)
-
-        # Edge direction
-        edge_dir = edge_diff / (edge_dist.unsqueeze(-1) + 1e-8)
-
-        # Spherical harmonics
-        edge_attrs = self.spherical_harmonics(edge_dir)
-
-        # Radial basis * cutoff → edge_feats
-        edge_radial = self.radial_embedding(edge_dist)
-        edge_cutoff = self.cutoff_fn(edge_dist)
-        edge_feats = edge_radial * edge_cutoff.unsqueeze(-1)
-
-        return node_feats, edge_attrs, edge_feats
-
-
-# ===========================================================================
-# Interaction Block
-# ===========================================================================
-
-
-class InteractionSpec(BaseModel):
-    """Configuration for a single interaction block.
-
-    Attributes:
-        num_features: Scalar channel multiplicity.
-        num_bessel: Number of Bessel radial basis functions.
-        l_max: Maximum angular momentum order.
-        avg_num_neighbors: Average number of neighbors for normalization.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    num_features: int = Field(..., gt=0)
-    num_bessel: int = Field(8, gt=0)
-    l_max: int = Field(2, ge=0)
-    avg_num_neighbors: float = Field(1.0, gt=0.0)
-    use_fallback: bool = True
-
-
-class InteractionBlock(nn.Module):
-    """Equivariant message passing with tensor product convolution.
-
-    Performs geometric message passing via cuEquivariance-accelerated tensor products,
-    returning updated node features and skip connection for residual updates.
-
-    Architecture:
-        node_feats → node_linear → tensor_product(edge_attrs, tp_weights)
-        → aggregate → linear → (node_feats_out, skip_connection)
-
-    Attributes:
-        conv_tp: Tensor product convolution (cuEquivariance ChannelWiseTensorProduct).
-        node_linear: Pre-convolution equivariant linear transformation.
-        radial_mlp: MLP generating tensor product weights from edge features.
-        linear: Post-convolution equivariant linear projection.
-        avg_num_neighbors: Message normalization constant.
-
-    Reference:
-        https://docs.nvidia.com/cuda/cuequivariance/tutorials/pytorch/MACE.html
-    """
-
-    def __init__(
-        self,
-        *,
-        num_features: int,
-        num_bessel: int = 8,
-        l_max: int = 2,
-        avg_num_neighbors: float = 1.0,
-        use_fallback: bool = True,
-    ):
-        """Initialize interaction block.
-
-        Args:
-            num_features: Scalar channel multiplicity.
-            num_bessel: Number of Bessel basis functions.
-            l_max: Maximum angular momentum order.
-            avg_num_neighbors: Average neighbor count for message normalization.
-            use_fallback: Pure-torch cuEq path for the tensor product (default
-                ``True``, functorch-safe); ``False`` selects the fused kernels
-                for autograd-backed force paths.
-        """
-        super().__init__()
-
-        self.config = InteractionSpec(
-            num_features=num_features,
-            num_bessel=num_bessel,
-            l_max=l_max,
-            avg_num_neighbors=avg_num_neighbors,
-            use_fallback=use_fallback,
-        )
-
-        # Node *state* is pure scalar (l=0); the mixed-l message irreps live only
-        # transiently in the tensor-product output, where they are contracted
-        # back to invariant scalars by the downstream ProductHead. Keeping the
-        # node state scalar makes every node-state operation (node_linear,
-        # ElementUpdate, projections) equivariant by construction — fabricating
-        # l>0 node components from scalars via a plain/dense linear is exactly
-        # what breaks rotation invariance.
-        node_irreps_str = f"{num_features}x0e"
-        irreps_str = irreps_from_l_max(l_max, num_features)  # mixed-l message irreps
-        sh_irreps_str = sh_irreps_from_l_max(l_max)
-
-        # 1. Tensor product convolution (define first to get weight_numel):
-        #    scalar node features ⊗ Y_l(r̂) -> mixed-l equivariant messages.
-        self.conv_tp = ConvTP(
-            in_irreps=node_irreps_str,
-            out_irreps=irreps_str,
-            sh_irreps=sh_irreps_str,
-            use_fallback=use_fallback,
-        )
-
-        # Actual TP output irreps (may differ from requested out_irreps)
-        tp_out_irreps = str(self.conv_tp.cue_tp.irreps_out)
-
-        # 2. Pre-convolution equivariant linear (scalar -> scalar)
-        self.node_linear = cuet.Linear(
-            irreps_in=cue.Irreps("O3", node_irreps_str),
-            irreps_out=cue.Irreps("O3", node_irreps_str),
-            layout=cue.ir_mul,
-            dtype=config.ftype,
-        )
-
-        # 3. Radial MLP for TP weights
-        self.radial_mlp = RadialWeightMLP(
-            in_dim=num_bessel,
-            hidden_dim=num_features,
-            out_dim=self.conv_tp.weight_numel,
-            num_layers=2,
-        )
-
-        # 4. Post-convolution equivariant linear
-        self.linear = cuet.Linear(
-            irreps_in=cue.Irreps("O3", tp_out_irreps),
-            irreps_out=cue.Irreps("O3", irreps_str),
-            layout=cue.ir_mul,
-            dtype=config.ftype,
-        )
-
-        self.avg_num_neighbors = avg_num_neighbors
-
-    def forward(
-        self,
-        node_feats: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run one interaction layer.
-
-        Args:
-            node_feats: Node features ``(n_nodes, irreps_dim)``.
-            edge_attrs: Spherical harmonics ``(n_edges, sh_dim)``.
-            edge_feats: Radial basis features ``(n_edges, num_bessel)``.
-            edge_index: Edge indices ``(n_edges, 2)``.
-
-        Returns:
-            tuple of:
-                - ``node_feats``: Updated node features ``(n_nodes, irreps_dim)``.
-                - ``sc``: Skip connection (original input) ``(n_nodes, irreps_dim)``.
-        """
-        sc = node_feats  # skip connection for EquivariantProductBasisBlock
-
-        # Pre-convolution linear
-        node_feats_up = self.node_linear(node_feats)
-
-        # TP weights from radial basis
-        tp_weights = self.radial_mlp(edge_feats)
-
-        # Tensor product convolution with neighbor aggregation
-        messages = self.conv_tp(
-            node_features=node_feats_up,
-            edge_angular=edge_attrs,
-            edge_index=edge_index,
-            tp_weights=tp_weights,
-        )
-
-        # Normalize by average number of neighbors
-        messages = messages / self.avg_num_neighbors
-
-        # Post-convolution linear
-        node_feats = self.linear(messages)
-
-        return node_feats, sc
+#: Blocks promoted to ``molrep`` by mace-subpackage-restructure-01 and re-exported
+#: here so ``from molzoo.mace import EmbeddingBlock`` keeps resolving. Removed in
+#: 06-wire, once the consumers import from their new homes.
+__all__ = [
+    "EmbeddingBlock",
+    "EmbeddingSpec",
+    "InteractionBlock",
+    "InteractionSpec",
+    "MACE",
+    "MACESpec",
+]
 
 
 # ===========================================================================
