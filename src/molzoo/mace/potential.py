@@ -105,6 +105,10 @@ Reference:
 
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
+
 import torch
 from tensordict import TensorDict
 
@@ -112,9 +116,50 @@ from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
 from molix.schema import POS_KEY
 from molpot.derivation.kernels import grad_force_pass
 from molpot.derivation.protocol import write_energy
+from molzoo.mace.checkpoint import MATPES_REMAP, CheckpointRemap
 from molzoo.mace.encoder import MACEEncoder
 from molzoo.mace.geometry import edge_lengths, edge_vectors
 from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec
+
+#: One term of an official irreps string, e.g. ``"128x1o"`` — multiplicity,
+#: angular order ``l``, parity. Parity is fixed by ``l`` in every MACE
+#: configuration, so only the first two groups are read.
+_IRREPS_TERM = re.compile(r"(\d+)x(\d+)([eo])")
+
+
+def _parse_irreps(text: str, key: str) -> tuple[int, int]:
+    """Scalar multiplicity and highest angular order of an official irreps string.
+
+    ``"128x0e+128x1o"`` → ``(128, 1)``; ``"16x0e"`` → ``(16, 0)``. Upstream MACE
+    states channel widths this way, so a checkpoint's ``num_features`` /
+    ``max_hidden_l`` / ``mlp_dim`` are readable from its config instead of being
+    assumed (``scripts/matpes_port/run_nve.py:154-159`` hard-codes ``128 / 1 /
+    16``, which loads a differently sized checkpoint into the wrong model).
+
+    Args:
+        text: Irreps string from the official config.
+        key: Config key it came from, for the error message.
+
+    Returns:
+        ``(multiplicity of the scalar 0e term, highest l over all terms)``.
+
+    Raises:
+        ValueError: If a term is not ``<mul>x<l><parity>``, or the string has
+            no scalar term — the channel width would then be a guess.
+    """
+    terms: list[tuple[int, int]] = []
+    for term in str(text).split("+"):
+        matched = _IRREPS_TERM.fullmatch(term.strip())
+        if matched is None:
+            raise ValueError(f"config key {key} is not an irreps string: {text!r} (term {term!r})")
+        terms.append((int(matched.group(1)), int(matched.group(2))))
+    scalars = [multiplicity for multiplicity, order in terms if order == 0]
+    if not scalars:
+        raise ValueError(
+            f"config key {key} has no scalar (0e) term: {text!r} — the channel "
+            "width is its multiplicity and there is no default"
+        )
+    return scalars[0], max(order for _, order in terms)
 
 
 class MACEPotential(MACEEncoder):
@@ -187,6 +232,137 @@ class MACEPotential(MACEEncoder):
         self._pipeline = self._pipeline_ef if compute_forces else self._write_energy
         #: Element-table gate, spent after the first batch (see ``_write_energy``).
         self._elements_validated = False
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        config_path: str | Path,
+        weights_path: str | Path,
+        *,
+        remap: CheckpointRemap = MATPES_REMAP,
+        map_location: str | torch.device = "cpu",
+        **ctor_kwargs,
+    ) -> MACEPotential:
+        """Build a MatPES potential from an official config json + cueq weights.
+
+        Three steps, nothing hidden: read the config and translate it into a
+        :class:`~molzoo.mace.spec.MACEMatpesSpec`, construct the model, load the
+        weights through ``remap``. It replaces the hand-written construction of
+        ``scripts/matpes_port/run_nve.py:145-169``::
+
+            potential = MACEPotential.from_checkpoint(
+                weights_dir / "matpes_r2scan_config.json",
+                weights_dir / "matpes_r2scan_cueq_state.pt",
+            )
+            potential.eval()   # the caller's step, deliberately not done here
+
+        A runnable end-to-end use — a synthetic official-dialect checkpoint
+        written to a temporary directory, read back through this classmethod,
+        and checked against hard-coded energy / force goldens — is
+        ``regressions/mace-subpackage-restructure-05-checkpoint.py``.
+
+        ``num_features`` / ``max_hidden_l`` / ``mlp_dim`` are **derived** from
+        the config's ``hidden_irreps`` / ``MLP_irreps`` (see
+        :func:`_parse_irreps`); a missing key raises instead of falling back to
+        the shipped ``128 / 1 / 16``, which would load a differently sized
+        checkpoint into the wrong model. The config keys translate as
+        ``max_ell → l_max``, ``radial_MLP → radial_mlp``, ``atomic_inter_scale
+        → scale``, ``atomic_inter_shift → shift``; ``r_max``, ``num_bessel``,
+        ``num_polynomial_cutoff``, ``num_interactions``, ``correlation``,
+        ``atomic_numbers`` and ``atomic_energies`` keep their names. Nothing on
+        this path converts units: ``r_max`` is read in Å, ``atomic_energies`` in
+        eV/atom, ``atomic_inter_shift`` in eV, and the checkpoint's weights are
+        already in that same system (see :mod:`molzoo.mace.checkpoint`).
+
+        **Not validated: the architecture switches.** The variant flags
+        (density interactions, Agnesi distance transform, ZBL pair repulsion,
+        per-layer readout) come from :class:`~molzoo.mace.spec.MACEMatpesSpec`'s
+        defaults and are never compared against the config's own
+        ``pair_repulsion`` / ``distance_transform`` / … entries. A config that
+        switched one of them *off* therefore yields a model that has it *on*,
+        and the load will not object: the fitted constants of those two blocks
+        are registered as buffers, not ``nn.Parameter`` (``ZBLRepulsion`` and
+        ``AgnesiTransform`` are both built with ``trainable=False``), so the
+        unfilled-parameter guard of
+        :meth:`~molzoo.mace.checkpoint.CheckpointRemap.load` never fires and the
+        surplus term quietly keeps its default constants. For anything but a
+        stock MatPES checkpoint, build the spec explicitly and call
+        ``MATPES_REMAP.load`` yourself.
+
+        The ``(missing_buffers, unexpected)`` report of
+        :meth:`~molzoo.mace.checkpoint.CheckpointRemap.load` is dropped here:
+        under the default policy ``unexpected`` is empty by construction (an
+        unhoused key raises instead), and ``missing_buffers`` holds only entries
+        cuEquivariance rebuilds. Pass a ``remap`` with ``on_unexpected="return"``
+        and that list is lost — load by hand if you need to inspect it.
+
+        This constructor covers the **MatPES** family only. An OMol checkpoint
+        is loaded by constructing a :class:`~molzoo.mace.spec.MACEOMolSpec`
+        explicitly and calling
+        ``molzoo.mace.checkpoint.OMOL_REMAP.load(potential, state)`` — its
+        config carries charge/spin fields with no counterpart here.
+
+        Args:
+            config_path: Official config json (the ``model.config`` dumped
+                beside the converted weights).
+            weights_path: ``state_dict`` of the cueq-converted official model,
+                saved by ``torch.save`` and read back with
+                ``weights_only=True``.
+            remap: Key-dialect translation and unexpected-key policy. Defaults
+                to :data:`~molzoo.mace.checkpoint.MATPES_REMAP`, which refuses
+                a checkpoint key with no home.
+            map_location: Device the weights are read onto, forwarded to
+                ``torch.load``. Defaults to CPU: the model is built on the
+                ambient device and moved by the caller.
+            **ctor_kwargs: Passed straight to ``cls`` — ``compute_forces`` /
+                ``use_fallback`` are runtime-environment switches, not
+                scientific content of the checkpoint, so they stay out of the
+                config translation.
+
+        Returns:
+            A ``MACEPotential`` holding the checkpoint's weights, in training
+            mode (call ``.eval()`` yourself).
+
+        Raises:
+            KeyError: If the config lacks a key the spec needs — including
+                ``hidden_irreps`` / ``MLP_irreps``, which are named explicitly
+                because no width default is acceptable.
+            ValueError: If an irreps string cannot be parsed, or the spec
+                rejects the translated configuration.
+            RuntimeError: From ``remap`` — an unhoused checkpoint key, a shape
+                disagreement, or an unfilled parameter.
+        """
+        official = json.loads(Path(config_path).read_text())
+        absent = [key for key in ("hidden_irreps", "MLP_irreps") if key not in official]
+        if absent:
+            raise KeyError(
+                f"official config {Path(config_path).name} is missing {absent}: "
+                "num_features / max_hidden_l / mlp_dim are derived from the irreps "
+                "strings and have no default"
+            )
+        num_features, max_hidden_l = _parse_irreps(official["hidden_irreps"], "hidden_irreps")
+        mlp_dim, _ = _parse_irreps(official["MLP_irreps"], "MLP_irreps")
+
+        spec = MACEMatpesSpec(
+            atomic_numbers=official["atomic_numbers"],
+            atomic_energies=official["atomic_energies"],
+            r_max=official["r_max"],
+            num_bessel=official["num_bessel"],
+            num_polynomial_cutoff=official["num_polynomial_cutoff"],
+            l_max=official["max_ell"],
+            num_features=num_features,
+            max_hidden_l=max_hidden_l,
+            num_interactions=official["num_interactions"],
+            correlation=official["correlation"],
+            mlp_dim=mlp_dim,
+            radial_mlp=official["radial_MLP"],
+            scale=official["atomic_inter_scale"],
+            shift=official["atomic_inter_shift"],
+        )
+
+        model = cls(spec, **ctor_kwargs)
+        remap.load(model, torch.load(weights_path, map_location=map_location, weights_only=True))
+        return model
 
     def forward(self, batch: TensorDict) -> TensorDict:
         """Run the construction-fixed pipeline, mutating ``batch`` in place.

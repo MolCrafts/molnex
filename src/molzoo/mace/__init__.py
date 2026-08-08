@@ -21,6 +21,13 @@ beside it:
 * :mod:`molzoo.mace.potential` — :class:`~molzoo.mace.potential.MACEPotential`,
   the energy/force host on top of that backbone: per-graph energy ``(B,)`` in
   eV and per-atom forces ``(N, 3)`` in eV/Å on the post-collate batch
+* :mod:`molzoo.mace.checkpoint` — official-checkpoint key dialect:
+  :class:`~molzoo.mace.checkpoint.CheckpointRemap`, the two family tables
+  (:data:`~molzoo.mace.checkpoint.MATPES_KEY_REMAP` /
+  :data:`~molzoo.mace.checkpoint.OMOL_KEY_REMAP`) and their preset instances —
+  :data:`~molzoo.mace.checkpoint.MATPES_REMAP`, which refuses a checkpoint key
+  with no home, and :data:`~molzoo.mace.checkpoint.OMOL_REMAP`, which returns
+  the unhoused keys instead. Both are strict about unfilled parameters.
 * :mod:`molzoo.mace.research` — the research encoder (former ``molzoo/mace.py``)
 
 Every legacy ``from molzoo.mace import …`` name still resolves; the final
@@ -45,14 +52,27 @@ from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACESpec
 if TYPE_CHECKING:
     from molrep.embedding.mace import EmbeddingBlock, EmbeddingSpec
     from molrep.interaction.mace.block import InteractionBlock, InteractionSpec
+    from molzoo.mace.checkpoint import (
+        MATPES_KEY_REMAP,
+        MATPES_REMAP,
+        OMOL_KEY_REMAP,
+        OMOL_REMAP,
+        CheckpointRemap,
+    )
     from molzoo.mace.potential import MACEPotential
     from molzoo.mace.research import MACE, MACEResearchSpec
 
-#: Lazily exported (PEP 562): each of these pulls in cuEquivariance.
+#: Lazily exported (PEP 562): each of these pulls in cuEquivariance (or, for
+#: the checkpoint names, torch).
 _LAZY = {
     "MACE": "molzoo.mace.research",
     "MACEPotential": "molzoo.mace.potential",
     "MACEResearchSpec": "molzoo.mace.research",
+    "CheckpointRemap": "molzoo.mace.checkpoint",
+    "MATPES_KEY_REMAP": "molzoo.mace.checkpoint",
+    "MATPES_REMAP": "molzoo.mace.checkpoint",
+    "OMOL_KEY_REMAP": "molzoo.mace.checkpoint",
+    "OMOL_REMAP": "molzoo.mace.checkpoint",
     "EmbeddingBlock": "molrep.embedding.mace",
     "EmbeddingSpec": "molrep.embedding.mace",
     "InteractionBlock": "molrep.interaction.mace.block",
@@ -60,6 +80,7 @@ _LAZY = {
 }
 
 __all__ = [
+    "CheckpointRemap",
     "EmbeddingBlock",
     "EmbeddingSpec",
     "InteractionBlock",
@@ -70,6 +91,10 @@ __all__ = [
     "MACEPotential",
     "MACEResearchSpec",
     "MACESpec",
+    "MATPES_KEY_REMAP",
+    "MATPES_REMAP",
+    "OMOL_KEY_REMAP",
+    "OMOL_REMAP",
 ]
 
 

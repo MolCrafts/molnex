@@ -50,6 +50,7 @@ from molrep.embedding.radial import AgnesiTransform, BesselRBF
 from molrep.interaction.density import DensityInteraction, DensityResidualInteraction
 from molrep.interaction.product_basis import EquivariantProductBasis
 from molrep.readout.scalar import LinearReadout, NonLinearReadout
+from molzoo.mace.checkpoint import MATPES_REMAP
 
 
 def _sh_irreps(l_max: int) -> str:
@@ -378,35 +379,17 @@ class MACEMatpes(nn.Module):
         return td
 
 
-# Official cueq key (or key prefix) → molnex name. ``None`` drops the entry:
-# either it is rebuilt from the constructor arguments (``r_max``, the cutoff
-# scalars, the Z-indexed ``E0`` table) or it is a non-persistent constant.
-# Longest prefix wins, so an exact key overrides its enclosing prefix.
-# Anything unlisted maps through unchanged (``interactions.*``, ``products.*``,
-# ``readouts.*``, ``scale_shift.*``).
-_KEY_REMAP: dict[str, str | None] = {
-    "node_embedding.linear.": "node_embedding.",
-    "radial_embedding.bessel_fn.bessel_weights": "bessel.freqs",
-    "radial_embedding.bessel_fn.": None,
-    "radial_embedding.distance_transform.": "distance_transform.",
-    "radial_embedding.cutoff_fn.": None,
-    "pair_repulsion_fn.p": None,  # exponent is a plain int on ZBLRepulsion
-    "pair_repulsion_fn.": "pair_repulsion.",
-    "atomic_energies_fn.": None,
-    "atomic_numbers": "z_table",
-    "r_max": None,
-    "num_interactions": None,
-}
-_KEY_REMAP_ORDER = sorted(_KEY_REMAP, key=len, reverse=True)
-
-
 def load_matpes_state_dict(model: MACEMatpes, cueq_state: dict) -> None:
     """Load a cueq-converted MACE-MatPES ``state_dict`` into :class:`MACEMatpes`.
 
-    Strict by design: every learnable tensor of ``model`` must be filled by the
-    checkpoint and every checkpoint weight must land somewhere. A silently
-    dropped tensor is the failure mode that produces a model which runs, looks
-    sane, and is quietly wrong — so it raises instead.
+    A thin wrapper over :data:`molzoo.mace.checkpoint.MATPES_REMAP`, the
+    ``on_unexpected="raise"`` preset of
+    :class:`~molzoo.mace.checkpoint.CheckpointRemap`, which now owns the key
+    dialect and the strictness doctrine for both foundation families: every
+    learnable tensor of ``model`` must be filled by the checkpoint and every
+    checkpoint weight must land somewhere. A silently dropped tensor is the
+    failure mode that produces a model which runs, looks sane, and is quietly
+    wrong — so it raises instead.
 
     Args:
         model: Target model, constructed with the checkpoint's hyper-parameters.
@@ -417,48 +400,4 @@ def load_matpes_state_dict(model: MACEMatpes, cueq_state: dict) -> None:
         RuntimeError: If a checkpoint key has no home, a shape disagrees, or a
             model parameter is left unfilled.
     """
-    remap: dict[str, torch.Tensor] = {}
-    for key, value in cueq_state.items():
-        # cueq stores symbolic graph constants and irrep masks alongside the
-        # weights; both are rebuilt by the module and carry nothing learned.
-        if ".graph.c" in key or key.endswith("output_mask"):
-            continue
-        new_key: str | None = key
-        for prefix in _KEY_REMAP_ORDER:
-            if key == prefix or key.startswith(prefix):
-                replacement = _KEY_REMAP[prefix]
-                new_key = (
-                    None
-                    if replacement is None
-                    else replacement + (key[len(prefix) :] if key != prefix else "")
-                )
-                break
-        if new_key is not None:
-            remap[new_key] = value
-
-    own = model.state_dict()
-    unexpected = sorted(set(remap) - set(own))
-    if unexpected:
-        raise RuntimeError(f"checkpoint keys with no home in MACEMatpes: {unexpected}")
-
-    mismatched = []
-    for key, value in remap.items():
-        want = own[key].shape
-        if value.shape == want:
-            continue
-        # MACE stores some frozen scalars as (1,) where molnex holds a 0-d
-        # buffer; identical content, different rank.
-        if value.numel() == own[key].numel():
-            remap[key] = value.reshape(want)
-        else:
-            mismatched.append(f"{key}: checkpoint {tuple(value.shape)} vs model {tuple(want)}")
-    if mismatched:
-        raise RuntimeError(
-            "shape mismatch — model built with the wrong config? " + ", ".join(sorted(mismatched))
-        )
-
-    unfilled = sorted(name for name, _ in model.named_parameters() if name not in remap)
-    if unfilled:
-        raise RuntimeError(f"parameters not covered by the checkpoint: {unfilled}")
-
-    model.load_state_dict(remap, strict=False)
+    MATPES_REMAP.load(model, cueq_state)

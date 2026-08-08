@@ -35,6 +35,7 @@ from molrep.embedding.radial import BesselRBF
 from molrep.interaction.product_basis import EquivariantProductBasis
 from molrep.interaction.residual import ResidualInteraction
 from molrep.readout.scalar import NonLinearBiasReadout
+from molzoo.mace.checkpoint import OMOL_REMAP
 
 
 class MACEOMol(nn.Module):
@@ -347,40 +348,22 @@ class MACEOMol(nn.Module):
         return td
 
 
-# Official cueq key (or key prefix) → molnex name, mirroring
-# ``mace_matpes._KEY_REMAP``. ``None`` drops the entry (rebuilt from the
-# constructor arguments or a non-persistent constant). Longest prefix wins;
-# anything unlisted maps through unchanged (``interactions.*``, ``products.*``,
-# ``joint_embedding.*``, ``scale_shift.*``).
-_KEY_REMAP: dict[str, str | None] = {
-    "node_embedding.linear.": "node_embedding.",
-    "embedding_readout.linear.": "embedding_readout.",
-    "readouts.0.": "readout.",
-    # MACE's trainable Bessel frequencies. Without this entry the key is
-    # simply unexpected and `bessel.freqs` keeps its analytic init — the
-    # official OMOL weights drift ~2e-7 from that init, which was landing
-    # straight in the reported parity residual.
-    "radial_embedding.bessel_fn.bessel_weights": "bessel.freqs",
-    "radial_embedding.bessel_fn.": None,
-    "radial_embedding.cutoff_fn.": None,
-    "atomic_energies_fn.": None,  # handled at construction (Z-indexed)
-    "atomic_numbers": "z_table",
-    "r_max": None,
-    "num_interactions": None,
-}
-_KEY_REMAP_ORDER = sorted(_KEY_REMAP, key=len, reverse=True)
-
-
 def load_omol_state_dict(model: MACEOMol, cueq_state: dict) -> tuple[list[str], list[str]]:
     """Load a cueq-converted MACE-OMOL ``state_dict`` into :class:`MACEOMol`.
 
-    Strict on the silent failure modes (backported from
-    :func:`molzoo.mace_matpes.load_matpes_state_dict`): a learnable parameter
-    the checkpoint does not fill, or a shape mismatch, raises — a silently
-    dropped tensor is exactly how a model runs, looks sane, and is quietly
-    wrong (the ``bessel.freqs`` incident above). Unexpected checkpoint keys
-    are still *returned* rather than raised, because the OMOL checkpoint
-    family carries auxiliary heads this port deliberately does not model.
+    A thin wrapper over :data:`molzoo.mace.checkpoint.OMOL_REMAP`, the
+    ``on_unexpected="return"`` preset of
+    :class:`~molzoo.mace.checkpoint.CheckpointRemap`. Strict on the silent
+    failure modes: a learnable parameter the checkpoint does not fill, or a
+    shape mismatch, raises — a silently dropped tensor is exactly how a model
+    runs, looks sane, and is quietly wrong. That is the ``bessel.freqs``
+    incident: a ``.weight`` / ``.bias`` name-suffix test for "is this tensor
+    learnable?" excused an ``nn.Parameter`` ending in neither, so the
+    checkpoint's fitted Bessel frequencies were dropped and the analytic ones
+    silently stayed; :mod:`molzoo.mace.checkpoint` records it in full.
+    Unexpected checkpoint keys are still *returned* rather than raised, because
+    the OMOL checkpoint family carries auxiliary heads this port deliberately
+    does not model.
 
     Args:
         model: Target model, constructed with the checkpoint's hyper-parameters.
@@ -388,56 +371,12 @@ def load_omol_state_dict(model: MACEOMol, cueq_state: dict) -> tuple[list[str], 
 
     Returns:
         ``(missing_non_learnable, unexpected)`` — buffers the checkpoint did
-        not provide and checkpoint keys with no home, for inspection.
+        not provide and checkpoint keys with no home, for inspection. Both
+        lists are now sorted (they used to come back in checkpoint order); the
+        content is unchanged.
 
     Raises:
         RuntimeError: If a learnable parameter is left unfilled or a shape
             disagrees.
     """
-    remap: dict[str, torch.Tensor] = {}
-    for key, value in cueq_state.items():
-        # cueq stores symbolic graph constants and irrep masks alongside the
-        # weights; both are rebuilt by the module and carry nothing learned.
-        if ".graph.c" in key or key.endswith("output_mask"):
-            continue
-        new_key: str | None = key
-        for prefix in _KEY_REMAP_ORDER:
-            if key == prefix or key.startswith(prefix):
-                replacement = _KEY_REMAP[prefix]
-                new_key = (
-                    None
-                    if replacement is None
-                    else replacement + (key[len(prefix) :] if key != prefix else "")
-                )
-                break
-        if new_key is not None:
-            remap[new_key] = value
-
-    own = model.state_dict()
-    mismatched = []
-    for key, value in remap.items():
-        if key not in own:
-            continue  # reported below as unexpected
-        want = own[key].shape
-        if value.shape == want:
-            continue
-        # MACE stores some frozen scalars as (1,) where molnex holds a 0-d
-        # buffer; identical content, different rank.
-        if value.numel() == own[key].numel():
-            remap[key] = value.reshape(want)
-        else:
-            mismatched.append(f"{key}: checkpoint {tuple(value.shape)} vs model {tuple(want)}")
-    if mismatched:
-        raise RuntimeError(
-            "shape mismatch — model built with the wrong config? " + ", ".join(sorted(mismatched))
-        )
-
-    missing, unexpected = model.load_state_dict(remap, strict=False)
-    # "Learnable" means exactly nn.Parameter — a name-suffix heuristic silently
-    # excused `bessel.freqs` (a Parameter that ends in neither .weight nor .bias)
-    # from this check for as long as it was being dropped.
-    parameters = {name for name, _ in model.named_parameters()}
-    unfilled = sorted(m for m in missing if m in parameters)
-    if unfilled:
-        raise RuntimeError(f"parameters not covered by the checkpoint: {unfilled}")
-    return sorted(set(missing) - parameters), list(unexpected)
+    return OMOL_REMAP.load(model, cueq_state)
