@@ -8,6 +8,7 @@
 - DispersionC6: Tang-Toennies C6 dispersion
 - ChargeTransfer: Charge-transfer potential
 - Polarization: Self-consistent induced-dipole polarization
+- ZBLRepulsion: Ziegler-Biersack-Littmark screened nuclear repulsion
 """
 
 from molpot.potentials.angles import AngleHarmonic
@@ -28,6 +29,7 @@ from molpot.potentials.nonbonded import (
     repulsion_mixing,
 )
 from molpot.potentials.polarization import Polarization
+from molpot.potentials.repulsion import ZBLRepulsion
 from molpot.potentials.vdw import LJ126, lorentz_berthelot
 
 __all__ = [
@@ -47,4 +49,5 @@ __all__ = [
     "dispersion_mixing",
     "ct_mixing",
     "Polarization",
+    "ZBLRepulsion",
 ]

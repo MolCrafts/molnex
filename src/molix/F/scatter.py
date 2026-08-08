@@ -46,43 +46,33 @@ def scatter_sum(
     return out.scatter_add_(dim, index, src)
 
 
-# One-hot matmul allocates ``(E, dim_size)``. Above this element budget use
-# ``index_add_`` to avoid OOM on large periodic systems (review: O(E·N) risk).
-_ONEHOT_ELEMENT_BUDGET = 2_000_000
-
 # Read once at import, not per call: ``scatter_sum_compile_safe`` runs inside
 # ``torch.compile`` regions on the MACE interaction hot path, where an
 # ``os.environ`` lookup is both a per-call dict hit and an opaque side effect
-# the compiler must guard against. ``None`` (unset) = decide by element budget.
-_ONEHOT_FLAG: str | None = os.environ.get("MOLNEX_SCATTER_ONEHOT")
+# the compiler must guard against.
+_ONEHOT_FLAG: bool = os.environ.get("MOLNEX_SCATTER_ONEHOT") == "1"
 
 
 def scatter_sum_compile_safe(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     """Sum ``src`` rows into ``dim_size`` buckets given by ``index`` (dim 0).
 
-    For small ``E * dim_size`` (typical molecular graphs) uses a one-hot matmul
-    that is bit-exact under ``torch.compile`` without global determinism flags
-    (see historical note: ``index_add_`` scatter order can differ under
-    inductor). For large systems (``E * dim_size > 2e6``) falls back to
-    ``index_add_`` to avoid O(E·N) memory blow-ups.
-
-    Force exact one-hot always with env ``MOLNEX_SCATTER_ONEHOT=1``.
-    Force ``index_add_`` always with ``MOLNEX_SCATTER_ONEHOT=0``.
-    Both are read once at import (see :data:`_ONEHOT_FLAG`).
+    Uses ``index_add_`` — the O(E·D) scatter. The alternative one-hot matmul
+    (bit-exact under ``torch.compile`` without global determinism flags, since
+    ``index_add_``'s scatter order can differ under inductor) is an explicit
+    opt-in via env ``MOLNEX_SCATTER_ONEHOT=1``: it turns the reduction into an
+    O(E·N·D) GEMM measured 2.4–3.3x slower than ``index_add_`` at every
+    profiled molecular-graph shape, so exactness must be a deliberate choice,
+    never a size-heuristic default. The flag is read once at import.
     """
-    use_onehot = _ONEHOT_FLAG == "1" or (
-        _ONEHOT_FLAG is None and src.shape[0] * int(dim_size) <= _ONEHOT_ELEMENT_BUDGET
-    )
+    if _ONEHOT_FLAG:
+        onehot = (index.view(-1, 1) == torch.arange(dim_size, device=src.device).view(1, -1)).to(
+            src.dtype
+        )
+        return (onehot.t() @ src.reshape(src.shape[0], -1)).reshape(dim_size, *src.shape[1:])
 
-    if not use_onehot:
-        out_shape = (dim_size, *src.shape[1:])
-        out = torch.zeros(out_shape, dtype=src.dtype, device=src.device)
-        return out.index_add_(0, index, src)
-
-    onehot = (index.view(-1, 1) == torch.arange(dim_size, device=src.device).view(1, -1)).to(
-        src.dtype
-    )
-    return (onehot.t() @ src.reshape(src.shape[0], -1)).reshape(dim_size, *src.shape[1:])
+    out_shape = (dim_size, *src.shape[1:])
+    out = torch.zeros(out_shape, dtype=src.dtype, device=src.device)
+    return out.index_add_(0, index, src)
 
 
 def batch_add(src: Tensor, batch: Tensor, dim_size: int | None = None) -> Tensor:

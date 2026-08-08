@@ -31,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
-__all__ = ["ExtxyzFrame", "parse_extxyz_frames"]
+__all__ = ["ExtxyzFrame", "parse_extxyz_frames", "write_extxyz_frames"]
 
 
 _log = logging.getLogger(__name__)
@@ -294,3 +294,42 @@ def _parse_properties(tokens: dict[str, str], *, source: Path) -> dict:
     if forces_col is not None:
         layout["forces_col"] = forces_col
     return layout
+
+
+def write_extxyz_frames(
+    path: str | Path,
+    *,
+    species: list[str],
+    positions: np.ndarray,
+    energies: np.ndarray | None = None,
+    tags: list[str] | None = None,
+) -> None:
+    """Write frames in extended-XYZ — the write half of :func:`parse_extxyz_frames`.
+
+    Emits ``Properties=species:S:1:pos:R:3`` plus an ``energy=`` token per
+    frame, so the output is readable by this module's own parser (open
+    systems: no ``Lattice`` tag is written).
+
+    Args:
+        path: Output ``.xyz`` file (parent directories must exist).
+        species: Atomic symbols, length ``N`` (constant across frames).
+        positions: Positions ``(T, N, 3)`` in Å.
+        energies: Optional per-frame total energy ``(T,)``; written as the
+            ``energy=`` comment token when given.
+        tags: Optional per-frame extra comment tokens (length ``T``), appended
+            verbatim — e.g. ``"temperature=297.1"``.
+    """
+    pos = np.asarray(positions, dtype=np.float64)
+    n_frames, n_atoms = pos.shape[0], pos.shape[1]
+    if len(species) != n_atoms:
+        raise ValueError(f"{len(species)} species for {n_atoms} atoms")
+    with Path(path).open("w") as fh:
+        for t in range(n_frames):
+            comment = "Properties=species:S:1:pos:R:3"
+            if energies is not None:
+                comment += f" energy={float(energies[t]):.10f}"
+            if tags is not None:
+                comment += f" {tags[t]}"
+            fh.write(f"{n_atoms}\n{comment}\n")
+            for symbol, (x, y, z) in zip(species, pos[t]):
+                fh.write(f"{symbol} {x:.8f} {y:.8f} {z:.8f}\n")

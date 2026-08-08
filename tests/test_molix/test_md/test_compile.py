@@ -1,40 +1,24 @@
-"""Compile + typed-contract tests for the MD component engine (spec ac-003/004/005).
+"""Compile tests for the MD component engine.
 
-- ``MDState`` / ``ForceOutput`` are pytrees (flatten → unflatten round-trip).
-- ``LennardJonesForceField`` closed-form force == ``-∂E/∂pos`` (autograd ref).
-- ``Integrator.step`` / ``rollout`` ``torch.compile(fullgraph=True)`` with 0 graph
-  breaks — including over a real PiNet force field — and == eager where the
-  result is deterministic (step with fixed noise; NVE rollout where noise has
-  zero weight).
+``Integrator.step`` / ``rollout`` must ``torch.compile(fullgraph=True)`` with 0
+graph breaks — including over a real PiNet force field — and match eager where
+the result is deterministic (step with fixed noise; NVE rollout where noise has
+zero weight). The pytree/force-consistency contracts live in
+``test_types.py`` / ``test_forcefield.py``.
 """
 
 import pytest
 import torch
-from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from molix.md import (
-    ForceOutput,
     HarmonicForceField,
     LangevinVerletIntegrator,
     LennardJonesForceField,
-    MDState,
     PotentialForceField,
 )
-from tests.test_molix.test_md_dynamics import _template, _tiny_potential
+from tests.test_molix.test_md.conftest import make_pinet_template, make_tiny_potential
 
 _DTYPE = torch.float64
-
-
-def test_mdstate_forceoutput_are_pytrees():
-    s = MDState(torch.randn(4, 3), torch.randn(4, 3), torch.randn(4, 3), torch.tensor(1.0))
-    leaves, spec = tree_flatten(s)
-    assert len(leaves) == 4
-    rebuilt = tree_unflatten(leaves, spec)
-    assert isinstance(rebuilt, MDState)
-    assert torch.equal(rebuilt.pos, s.pos) and torch.equal(rebuilt.energy, s.energy)
-    fo = ForceOutput(torch.tensor(1.0), torch.randn(4, 3))
-    leaves2, spec2 = tree_flatten(fo)
-    assert isinstance(tree_unflatten(leaves2, spec2), ForceOutput)
 
 
 def test_lj_force_matches_autograd():
@@ -75,9 +59,9 @@ def test_rollout_compile_nve_matches_eager():
 
 
 def _pinet_ig(dtype: torch.dtype):
-    template = _template()
-    model = _tiny_potential()
-    model(template.clone(), compute_forces=False)  # warmup lazy params
+    template = make_pinet_template()
+    model = make_tiny_potential()
+    model(template.clone())  # warmup lazy params
     if dtype == torch.float64:
         model = model.to(torch.float64)
         template["atoms", "pos"] = template["atoms", "pos"].to(torch.float64)
@@ -106,7 +90,7 @@ def test_pinet_step_fullgraph_compiles_and_matches_eager(dtype):
     comp = torch.compile(ig.step, fullgraph=True, backend=_BACKEND)(st, noise)
     atol = 1e-10 if dtype == torch.float64 else 1e-4
     assert torch.allclose(eager.pos, comp.pos, atol=atol)
-    assert torch.allclose(eager.force, comp.force, atol=atol)
+    assert torch.allclose(eager.forces, comp.forces, atol=atol)
     assert torch.allclose(eager.energy, comp.energy, atol=atol)
 
 

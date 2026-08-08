@@ -195,3 +195,33 @@ class TestPolynomialCutoff:
             PolynomialCutoffSpec(r_cut=5.0, exponent=0)
         with pytest.raises(ValueError):
             PolynomialCutoffSpec(r_cut=5.0, exponent=-1)
+
+
+class TestPolynomialCutoffEnvelope:
+    """Test the static envelope used with a per-edge cutoff radius."""
+
+    def test_matches_forward_for_the_module_radius(self):
+        """The module's forward is the static envelope at its own r_cut."""
+        cutoff = PolynomialCutoff(r_cut=5.0, exponent=5)
+        r = torch.linspace(0.0, 6.0, 25)
+        assert torch.allclose(cutoff(r), PolynomialCutoff.envelope(r, 5.0, 5))
+
+    def test_accepts_a_per_element_radius(self):
+        """ZBL needs one cutoff per edge, from the pair's covalent radii."""
+        r = torch.tensor([1.0, 1.0, 1.0])
+        per_edge = torch.tensor([0.8, 2.0, 5.0])
+        out = PolynomialCutoff.envelope(r, per_edge, 5)
+        assert float(out[0]) == 0.0  # beyond its own cutoff
+        assert float(out[1]) > 0.0
+        assert float(out[2]) > float(out[1])  # further inside a wider cutoff
+
+    def test_is_one_at_zero_and_zero_beyond(self):
+        """Envelope endpoints: 1 at contact, exactly 0 past the radius."""
+        assert float(PolynomialCutoff.envelope(torch.zeros(1), 3.0, 5)) == pytest.approx(1.0)
+        assert float(PolynomialCutoff.envelope(torch.tensor([3.5]), 3.0, 5)) == 0.0
+
+    def test_derivative_vanishes_at_the_cutoff(self):
+        """Smooth shutoff is what keeps autograd forces continuous."""
+        r = torch.tensor([2.9999], requires_grad=True)
+        PolynomialCutoff.envelope(r, 3.0, 5).backward()
+        assert abs(float(r.grad)) < 1e-6

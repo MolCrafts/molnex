@@ -18,6 +18,7 @@ not a tutorial; use the MolZoo user guide for narrative and worked examples.
 | Module | Role |
 |--------|------|
 | `molzoo.mace_omol.MACEOMol` | Full energy/force model (OMOL weights); see `mace_omol.md` |
+| `molzoo.mace_matpes.MACEMatpes` | Full energy/force model (MatPES/MP weights); see `mace_matpes.md` |
 | `molpot.composition` / heads / derivation | Energy readout, forces, composition |
 | `molix.data.NeighborList` | Cutoff graph construction |
 

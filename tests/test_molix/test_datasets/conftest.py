@@ -381,6 +381,10 @@ def molrec_qm9_record(tmp_path: Path) -> MolRecQM9Fixture:
     frames = [_make_molpy_frame(el, pos) for el, pos in zip(elements, positions)]
     rec = MolRec()
     rec.set_trajectory(Trajectory.from_frames(frames))
+    # molpy >= 0.12 requires a record to carry a frame / system / status
+    # alongside its trajectory: the trajectory is the time series, the system is
+    # the fixed topology it is a series *of*.
+    rec.set_system(frames[0])
 
     # Distinct deterministic float32 values per target so the round-trip test
     # can detect any cross-target mixing.
@@ -444,6 +448,10 @@ def molrec_force_record(tmp_path: Path) -> MolRecForceFixture:
     frames = [_make_molpy_frame(elements, pos) for pos in positions]
     rec = MolRec()
     rec.set_trajectory(Trajectory.from_frames(frames))
+    # molpy >= 0.12 requires a record to carry a frame / system / status
+    # alongside its trajectory: the trajectory is the time series, the system is
+    # the fixed topology it is a series *of*.
+    rec.set_system(frames[0])
 
     rec.observables.add_scalar(
         "teacherA.energy",

@@ -45,6 +45,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# cuEquivariance fused kernels. Without one of these, cuEq silently degrades
+# to its pure-torch path (~30x slower on MACE-class models) with only a
+# UserWarning — install the extra matching the local CUDA major version.
+cueq-cu12 = ["cuequivariance-ops-torch-cu12"]
+cueq-cu13 = ["cuequivariance-ops-torch-cu13"]
 dev = [
   "pytest>=7.0",
   "pytest-cov>=4.0",

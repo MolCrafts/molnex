@@ -205,6 +205,7 @@ class InteractionSpec(BaseModel):
     num_bessel: int = Field(8, gt=0)
     l_max: int = Field(2, ge=0)
     avg_num_neighbors: float = Field(1.0, gt=0.0)
+    use_fallback: bool = True
 
 
 class InteractionBlock(nn.Module):
@@ -235,6 +236,7 @@ class InteractionBlock(nn.Module):
         num_bessel: int = 8,
         l_max: int = 2,
         avg_num_neighbors: float = 1.0,
+        use_fallback: bool = True,
     ):
         """Initialize interaction block.
 
@@ -243,6 +245,9 @@ class InteractionBlock(nn.Module):
             num_bessel: Number of Bessel basis functions.
             l_max: Maximum angular momentum order.
             avg_num_neighbors: Average neighbor count for message normalization.
+            use_fallback: Pure-torch cuEq path for the tensor product (default
+                ``True``, functorch-safe); ``False`` selects the fused kernels
+                for autograd-backed force paths.
         """
         super().__init__()
 
@@ -251,6 +256,7 @@ class InteractionBlock(nn.Module):
             num_bessel=num_bessel,
             l_max=l_max,
             avg_num_neighbors=avg_num_neighbors,
+            use_fallback=use_fallback,
         )
 
         # Node *state* is pure scalar (l=0); the mixed-l message irreps live only
@@ -270,6 +276,7 @@ class InteractionBlock(nn.Module):
             in_irreps=node_irreps_str,
             out_irreps=irreps_str,
             sh_irreps=sh_irreps_str,
+            use_fallback=use_fallback,
         )
 
         # Actual TP output irreps (may differ from requested out_irreps)
@@ -395,6 +402,7 @@ class MACE(TensorDictModuleBase):
         correlation: int = 2,
         avg_num_neighbors: float = 1.0,
         layer_norm: bool = False,
+        use_fallback: bool = True,
     ):
         """Initialize MACE feature extractor.
 
@@ -409,6 +417,11 @@ class MACE(TensorDictModuleBase):
             correlation: Body-order correlation for symmetric contraction.
             avg_num_neighbors: Average neighbor count for message normalization.
             layer_norm: Whether to apply layer normalization between layers.
+            use_fallback: Pure-torch cuEq path (default ``True``, functorch-safe
+                for ``ForceDerivation(method="functorch")``). Set ``False`` for
+                the fused kernels when forces use the autograd backend — the
+                tensor product and symmetric contraction are the encoder's two
+                hottest blocks.
         """
         super().__init__()
 
@@ -423,6 +436,7 @@ class MACE(TensorDictModuleBase):
             correlation=correlation,
             avg_num_neighbors=avg_num_neighbors,
             layer_norm=layer_norm,
+            use_fallback=use_fallback,
         )
 
         # Embedding
@@ -451,6 +465,7 @@ class MACE(TensorDictModuleBase):
                     num_bessel=num_bessel,
                     l_max=l_max,
                     avg_num_neighbors=avg_num_neighbors,
+                    use_fallback=use_fallback,
                 )
                 for _ in range(num_interactions)
             ]
@@ -466,6 +481,7 @@ class MACE(TensorDictModuleBase):
                     l_max=l_max,
                     max_body_order=correlation,
                     num_species=num_elements,
+                    use_fallback=use_fallback,
                 )
                 for _ in range(num_interactions)
             ]
@@ -588,3 +604,4 @@ class MACESpec(BaseModel):
     correlation: int = Field(2, ge=1, le=3)
     avg_num_neighbors: float = Field(1.0, gt=0.0)
     layer_norm: bool = False
+    use_fallback: bool = True

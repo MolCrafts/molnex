@@ -8,22 +8,37 @@ protocol). Here:
 * a **Potential** is a :class:`molpot.BasePotential` / ``PiNetPotential`` —
   energy from a batch ``TensorDict``;
 * a **ForceField** (this module) is an :class:`torch.nn.Module` that *binds* a
-  Potential (or an analytic form) to a system and maps positions ``(N, 3)`` to a
-  :class:`~molix.md.types.ForceOutput`. The ``Integrator`` consumes a
-  ``ForceField`` component — never a closure.
+  Potential (or an analytic form, or any callable) to a system and maps
+  positions ``(N, 3)`` to a :class:`~molix.md.types.ForceOutput`. The
+  ``Integrator`` consumes a ``ForceField`` component — never a closure.
 
-Scope: open (non-periodic) systems, frozen neighbour list, small displacements
-(see :class:`PotentialForceField`). PBC / minimum-image and neighbour-list
-rebuild are out of scope.
+Precision: a force field owns its own dtype, independent of the trajectory
+state's (see :class:`molix.md.driver.MD` — ``MD(dtype=)`` governs the MD side
+only; :meth:`MD.set_potential_dtype` casts the force field). Implementations
+accept positions in any dtype and return their own; the integrator casts the
+output back to the state dtype at the component boundary.
+
+Periodic systems and neighbour-list rebuild are supported through
+:meth:`ForceField.rebuild_neighbors` +
+:class:`~molix.md.neighbors.PeriodicNeighborList` (driven on a cadence by
+:class:`~molix.md.runner.NeighborListHook`). :class:`PotentialForceField`
+keeps its list frozen — valid for open systems and trajectories short enough
+that no atom changes neighbours; periodic production runs use
+:class:`PeriodicPotentialForceField` (TensorDict potentials consuming
+``edges.shifts``) or :class:`CallableForceField` with a rebuildable list.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import torch
 from tensordict import TensorDict
 from torch import nn
 
+from molix.md.neighbors import NeighborStrategy
 from molix.md.types import ForceOutput
+from molix.schema import ENERGY_KEY, FORCES_KEY, has_forces
 
 
 class ForceField(nn.Module):
@@ -35,8 +50,20 @@ class ForceField(nn.Module):
     an energy-only path is cheaper than a full force evaluation.
     """
 
-    def forward(self, pos: torch.Tensor) -> ForceOutput:  # noqa: D102
+    def forward(self, pos: torch.Tensor) -> ForceOutput:
+        """Energy + forces at ``pos`` ``(N, 3)``."""
         raise NotImplementedError
+
+    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
+        """Refresh any position-derived connectivity this force field caches.
+
+        A no-op by default: force fields with no neighbour list (the analytic
+        ones) and those that deliberately freeze it need do nothing.
+        :class:`~molix.md.runner.NeighborListHook` calls this on a step cadence,
+        before the force evaluation. Implementations must keep every tensor
+        **shape** unchanged so a compiled/graph-captured force path stays valid
+        — see :class:`~molix.md.neighbors.PeriodicNeighborList`.
+        """
 
     def calc_energy(self, pos: torch.Tensor) -> torch.Tensor:
         """Scalar energy ``()`` at ``pos``."""
@@ -56,18 +83,24 @@ class PotentialForceField(ForceField):
     left in place. The template is therefore stripped of those keys **once** so
     the Potential recomputes geometry from the live positions every call (correct
     for **open** systems). The neighbour list (``edge_index``) is **not** rebuilt:
-    valid for short, small-displacement, non-periodic trajectories only.
+    valid for short, small-displacement, non-periodic trajectories only —
+    periodic runs use :class:`PeriodicPotentialForceField`.
+
+    ``.to(dtype)`` / ``.to(device)`` move the working batch together with the
+    module parameters (``_apply`` is overridden), so an explicit cast reaches
+    the whole bound system.
 
     Args:
-        potential: A molpot Potential / ``PiNetPotential``; its
-            ``forward(td, compute_forces=True)`` returns ``{"energy", "forces"}``
-            and must not mutate ``td`` (PiNet clones internally — safe to reuse
-            the template).
+        potential: A molpot Potential / ``PiNetPotential``. Its ``forward(td)``
+            writes ``graphs.energy`` and ``atoms.forces`` into the batch, per
+            :mod:`molix.schema`. Force derivation is fixed at the potential's
+            construction (``compute_forces=True``), not requested per call —
+            the monomorphic contract ``torch.compile`` needs.
         template: System ``TensorDict`` (``atoms.Z``, ``edges.edge_index``,
             ``atoms.batch``, ``graphs``); ``("atoms", "pos")`` is replaced per call.
         energy_scale: Unit-bridge multiplier applied to energy and forces, e.g.
-            ``1 / molix.md.integrators.EV_PER_AMU_A2_FS2`` to drive an eV/Å
-            potential in the integrator's (amu, Å, fs) system. Default ``1.0``.
+            ``1 / molix.units.EV_PER_AMU_A2_FS2`` to drive an eV/Å potential in
+            the integrator's (amu, Å, fs) system. Default ``1.0``.
     """
 
     _STALE_EDGE_KEYS = ("edge_diff", "edge_dist")
@@ -77,19 +110,32 @@ class PotentialForceField(ForceField):
     ) -> None:
         super().__init__()
         self.potential = potential
-        batch = template.clone()
-        for key in self._STALE_EDGE_KEYS:
-            if ("edges", key) in batch.keys(include_nested=True):
-                del batch["edges", key]
         # Working batch: reuse structure and only replace pos each step
         # (full TensorDict.clone() every MD step was a measurable alloc cost).
         # Potential paths that need isolation (PiNet) clone internally.
-        self._template = batch
-        self._work = batch.clone()
-        ref = batch["atoms", "pos"]
+        work = template.clone()
+        for key in self._STALE_EDGE_KEYS:
+            if ("edges", key) in work.keys(include_nested=True):
+                del work["edges", key]
+        self._work = work
+        ref = work["atoms", "pos"]
         self._device = ref.device
         self._dtype = ref.dtype
         self.register_buffer("energy_scale", torch.as_tensor(float(energy_scale)))
+
+    def _apply(self, fn, recurse: bool = True):
+        """Extend ``nn.Module._apply`` to the working batch.
+
+        Without this, ``.to(dtype)`` walks parameters/buffers only and leaves
+        the bound system (``_work``, plain ``TensorDict``) at its construction
+        dtype — an explicit cast that silently does nothing.
+        """
+        module = super()._apply(fn, recurse)
+        self._work = self._work.apply(fn)
+        ref = self._work["atoms", "pos"]
+        self._device = ref.device
+        self._dtype = ref.dtype
+        return module
 
     def _batch_at(self, pos: torch.Tensor) -> TensorDict:
         """Bind live positions into the reusable working batch (in-place pos)."""
@@ -98,16 +144,130 @@ class PotentialForceField(ForceField):
 
     def forward(self, pos: torch.Tensor) -> ForceOutput:
         batch = self._batch_at(pos)
-        out = self.potential(batch, compute_forces=True)
-        energy = out["energy"].sum().detach() * self.energy_scale
-        forces = out["forces"].detach() * self.energy_scale
+        out = self.potential(batch)
+        if not has_forces(out):
+            raise RuntimeError(
+                f"{type(self.potential).__name__} wrote no {FORCES_KEY} — an MD force field "
+                "needs forces. Potentials fix this at construction now (e.g. "
+                "PiNetPotential(..., compute_forces=True)); it is no longer a per-call choice."
+            )
+        energy = out[ENERGY_KEY].sum().detach() * self.energy_scale
+        forces = out[FORCES_KEY].detach() * self.energy_scale
         return ForceOutput(energy, forces)
 
     def calc_energy(self, pos: torch.Tensor) -> torch.Tensor:
-        """Energy only — skips the force derivation (cheaper than :meth:`forward`)."""
-        batch = self._batch_at(pos)
-        out = self.potential(batch, compute_forces=False)
-        return out["energy"].sum().detach() * self.energy_scale
+        """Scalar energy ``()`` at ``pos``.
+
+        No longer cheaper than :meth:`forward`: whether a potential derives
+        forces is fixed when it is constructed, so an energy-only evaluation
+        means constructing an energy-only potential.
+        """
+        out = self.potential(self._batch_at(pos))
+        return out[ENERGY_KEY].sum().detach() * self.energy_scale
+
+
+class PeriodicPotentialForceField(PotentialForceField):
+    """Bind a TensorDict potential to a periodic system with a rebuilding list.
+
+    The component that joins the pieces the package already ships: the
+    ``rebuild_neighbors`` seam, :class:`~molix.md.runner.NeighborListHook`'s
+    cadence, and :class:`~molix.md.neighbors.PeriodicNeighborList`'s
+    fixed-capacity buffers. The working batch's ``edges`` namespace holds the
+    list's live ``edge_index`` ``(capacity, 2)`` and ``shifts``
+    ``(capacity, 3)`` **by reference**, so an in-place rebuild is visible to
+    the potential with every tensor shape unchanged (CUDA-graph safe).
+
+    The potential's ``forward(td)`` must consume ``edges.shifts`` for periodic
+    correctness (e.g. :class:`molzoo.MACEMatpes`); dead padding edges
+    self-annihilate through the cutoff envelope.
+
+    Args:
+        potential: TensorDict potential writing ``graphs.energy`` /
+            ``atoms.forces`` and reading ``edges.shifts``.
+        template: System ``TensorDict``; its ``edges`` namespace is replaced by
+            the neighbour list's buffers.
+        neighbors: The system's rebuilding neighbour list.
+        energy_scale: Unit-bridge multiplier applied to energy and forces.
+    """
+
+    def __init__(
+        self,
+        potential: nn.Module,
+        template: TensorDict,
+        *,
+        neighbors: NeighborStrategy,
+        energy_scale: float = 1.0,
+    ) -> None:
+        super().__init__(potential, template, energy_scale=energy_scale)
+        self.neighbors = neighbors
+        self._bind_neighbors()
+
+    def _bind_neighbors(self) -> None:
+        """Point the working batch's ``edges`` at the list's live buffers."""
+        self._work["edges"] = TensorDict(
+            {"edge_index": self.neighbors.edge_index, "shifts": self.neighbors.shifts},
+            batch_size=[self.neighbors.capacity],
+        )
+
+    def _apply(self, fn, recurse: bool = True):
+        """Cast the neighbour list alongside the module, then re-bind.
+
+        ``TensorDict.apply`` in the parent produces new leaf tensors, which
+        would silently sever the by-reference tie to the list's buffers — a
+        later ``rebuild`` would then update tensors the potential no longer
+        sees.
+        """
+        module = super()._apply(fn, recurse)
+        neighbors = getattr(self, "neighbors", None)
+        if neighbors is not None:
+            ref = self._work["atoms", "pos"]
+            neighbors.to(ref.device, ref.dtype)
+            self._bind_neighbors()
+        return module
+
+    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
+        """Refresh the cutoff graph in place (shapes unchanged)."""
+        self.neighbors.rebuild(pos)
+
+
+class CallableForceField(ForceField):
+    """Adapt any ``pos -> (energy, forces)`` callable to the ForceField contract.
+
+    The escape hatch for force providers that are not TensorDict potentials —
+    an AOTI-exported ``.pt2``, a :class:`molix.engine.StaticForward`, a
+    compiled energy core with hand-rolled autograd, an external engine. The
+    callable may return a :class:`~molix.md.types.ForceOutput` or a plain
+    ``(energy, forces)`` tuple.
+
+    Args:
+        fn: Maps positions ``(N, 3)`` to scalar energy ``()`` and forces
+            ``(N, 3)``.
+        neighbors: Optional rebuildable neighbour list;
+            :meth:`rebuild_neighbors` delegates to it so the standard
+            ``MD(rebuild_every=)`` cadence works.
+        energy_scale: Unit-bridge multiplier applied to energy and forces.
+    """
+
+    def __init__(
+        self,
+        fn: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]],
+        *,
+        neighbors: NeighborStrategy | None = None,
+        energy_scale: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self._fn = fn
+        self.neighbors = neighbors
+        self.register_buffer("energy_scale", torch.as_tensor(float(energy_scale)))
+
+    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
+        """Delegate to the neighbour list, when one is bound."""
+        if self.neighbors is not None:
+            self.neighbors.rebuild(pos)
+
+    def forward(self, pos: torch.Tensor) -> ForceOutput:
+        energy, forces = self._fn(pos)
+        return ForceOutput(energy * self.energy_scale, forces * self.energy_scale)
 
 
 class HarmonicForceField(ForceField):

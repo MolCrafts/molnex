@@ -137,19 +137,25 @@ class PolynomialCutoff(nn.Module):
 
         self.exponent = int(self.config.exponent)
 
-    def forward(self, r: torch.Tensor) -> torch.Tensor:
-        """Apply polynomial cutoff to distances.
+    @staticmethod
+    def envelope(r: torch.Tensor, r_cut: torch.Tensor | float, exponent: int) -> torch.Tensor:
+        """Evaluate the envelope for a per-element (or scalar) cutoff radius.
+
+        Split out from :meth:`forward` because pair-repulsion terms (ZBL) use a
+        **per-edge** cutoff derived from the two atoms' covalent radii, whereas
+        the module itself carries one fixed ``r_cut``.
 
         Args:
-            r: Input distances.
+            r: Distances, any shape.
+            r_cut: Cutoff radius; scalar or broadcastable to ``r``.
+            exponent: Polynomial exponent ``p``.
 
         Returns:
-            Cutoff values. Values range from 1.0 (at r=0) to 0.0 (at r>=r_cut).
+            Envelope values, same shape as ``r``: 1.0 at ``r = 0``, 0.0 for
+            ``r >= r_cut``.
         """
-        x = r / self.r_cut
-        mask = x < 1.0
-
-        p = float(self.exponent)
+        x = r / r_cut
+        p = float(exponent)
         c_p = (p + 1.0) * (p + 2.0) / 2.0
         c_p1 = p * (p + 2.0)
         c_p2 = p * (p + 1.0) / 2.0
@@ -159,7 +165,18 @@ class PolynomialCutoff(nn.Module):
         x_p2 = x_p1 * x
 
         c = 1.0 - c_p * x_p + c_p1 * x_p1 - c_p2 * x_p2
-        return torch.where(mask, c, torch.zeros_like(c))
+        return torch.where(x < 1.0, c, torch.zeros_like(c))
+
+    def forward(self, r: torch.Tensor) -> torch.Tensor:
+        """Apply polynomial cutoff to distances.
+
+        Args:
+            r: Input distances.
+
+        Returns:
+            Cutoff values. Values range from 1.0 (at r=0) to 0.0 (at r>=r_cut).
+        """
+        return self.envelope(r, self.r_cut, self.exponent)
 
 
 class TanhCutoffSpec(BaseModel):

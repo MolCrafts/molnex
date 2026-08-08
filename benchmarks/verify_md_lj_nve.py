@@ -26,8 +26,7 @@ from pathlib import Path
 
 import torch
 
-from molix.md import LangevinVerletIntegrator, LennardJonesForceField
-from molix.md.runner import KB_AMU_A_FS
+from molix.md import KB_AMU_A_FS, LangevinVerletIntegrator, LennardJonesForceField
 
 # Persistent artifact dir (versioned with the repo for the paper).
 _OUT_DEFAULT = Path(__file__).resolve().parent / "results" / "md_lj_nve"

@@ -41,6 +41,7 @@ class ProductHeadSpec(BaseModel):
     l_max: int = Field(2, ge=0)
     max_body_order: int = Field(2, ge=1, le=3)
     num_species: int = Field(118, gt=0)
+    use_fallback: bool = True
 
 
 class ProductHead(nn.Module):
@@ -79,6 +80,7 @@ class ProductHead(nn.Module):
         l_max: int = 2,
         max_body_order: int = 2,
         num_species: int = 118,
+        use_fallback: bool = True,
     ):
         """Initialize product head.
 
@@ -89,6 +91,9 @@ class ProductHead(nn.Module):
             l_max: Maximum angular momentum.
             max_body_order: Maximum body order (1-3).
             num_species: Number of atomic species.
+            use_fallback: Pure-torch cuEq path for the symmetric contraction
+                (default ``True``, functorch-safe). Set ``False`` for the
+                fused kernels when forces use the autograd backend.
         """
         super().__init__()
 
@@ -99,6 +104,7 @@ class ProductHead(nn.Module):
             l_max=l_max,
             max_body_order=max_body_order,
             num_species=num_species,
+            use_fallback=use_fallback,
         )
 
         # ``hidden_dim`` is the *full* mixed-l feature dim emitted by the
@@ -123,6 +129,7 @@ class ProductHead(nn.Module):
             max_body_order=max_body_order,
             irreps_in=irreps_in,
             irreps_out=irreps_out,
+            use_fallback=use_fallback,
         )
 
         self.basis_projection = BasisProjection(

@@ -5,6 +5,7 @@ Provides equivariant layers for message-passing and feature transformation.
 
 from .aggregation import MessageAggregation, MessageAggregationSpec
 from .contraction import SymmetricContraction, SymmetricContractionSpec
+from .density import DensityInteraction, DensityResidualInteraction
 from .element import ElementUpdate, ElementUpdateSpec
 from .gate import GatedNonlinearity
 from .linear import EquivariantLinear
@@ -19,6 +20,8 @@ from .radial import RadialMLP, RadialWeightMLP, RadialWeightMLPSpec
 from .residual import ResidualInteraction
 
 __all__ = [
+    "DensityInteraction",
+    "DensityResidualInteraction",
     "GatedNonlinearity",
     "ResidualInteraction",
     "EquivariantProductBasis",

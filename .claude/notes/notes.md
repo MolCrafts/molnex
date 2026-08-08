@@ -153,14 +153,59 @@ nodes need both x86_64 and aarch64 builds in the same tree.
 
 ---
 
-## cuEq `use_fallback` split by force backend (2026-07-29)
+<!-- mol:note:topic:cueq-use-fallback -->
+## cuEq `use_fallback` split by force backend (2026-08-08)
 
-**Context.** Hardcoding `use_fallback=True` on every TP / SymmetricContraction
-abandoned fused kernels even when forces used autograd (OMOL).
+**Context.** Hardcoding the pure-torch path abandoned fused kernels even when
+forces used autograd; conversely `MACEMatpes` shipped `use_fallback=True` as
+its default — a measured **35.7x** per-step regression with no correctness
+upside (its forces are always autograd, so the functorch reason never applies).
 
-**Decision.** Constructors take `use_fallback: bool = True` (functorch-safe
-default). Autograd-only full models (e.g. `MACEOMol`) pass `use_fallback=False`.
-Encoder-only MACE keeps default True so composed functorch force paths stay
-traceable.
+**Rule**: Block constructors (`ConvTP`, `SymmetricContraction`,
+`DensityInteraction`, `ProductHead`, …) default `use_fallback=True`
+(functorch-safe). **Autograd-only full models default `False`**
+(`MACEMatpes`, `MACEOMol`); CPU/test call sites pass `True` explicitly.
+Composable encoders (`MACE`) expose the knob and inherit the safe default.
+
+**Supersedes**: the 2026-07-29 entry (which left MACEMatpes on the slow
+default and MACE with no knob at all).
 
 **Status.** active.
+
+---
+
+<!-- mol:note:topic:cueq-ops-capability -->
+## [2026-08-08] cuEq fused-kernel capability is probed, never assumed
+
+Without the `cuequivariance-ops-torch` wheel, cuEq honours
+`use_fallback=False` by silently degrading ~30x (one UserWarning).
+
+**Rule**: Report fused-kernel status from an actual
+`import cuequivariance_ops_torch` probe, never from the `use_fallback`
+request flag. GPU installs use the `cueq-cu12` / `cueq-cu13` extras
+(pyproject); a degraded run must warn, not self-report "fused".
+
+---
+
+<!-- mol:note:topic:bench-guard-encoders -->
+## [2026-08-08] Headline-number encoders need a benchmark guard
+
+The `use_fallback` regression shipped because MACE had no benchmark while
+carrying the repo's headline GH200 compile numbers.
+
+**Rule**: Every molzoo encoder whose docs/specs cite performance numbers has a
+`benchmarks/bench_<encoder>.py` guard (see `bench_mace_matpes.py`, which
+asserts the fused/fallback ratio).
+
+---
+
+<!-- mol:note:topic:scatter-onehot-optin -->
+## [2026-08-08] scatter one-hot GEMM is explicit opt-in
+
+The one-hot matmul (bit-exact under inductor) measured 2.4–3.3x slower than
+`index_add_` at every profiled molecular-graph shape, including inside the
+size window that used to auto-select it.
+
+**Rule**: `scatter_sum_compile_safe` defaults to `index_add_`. The one-hot
+GEMM is chosen only by `MOLNEX_SCATTER_ONEHOT=1` (bit-exactness as a
+deliberate, global choice) — never by a size heuristic.

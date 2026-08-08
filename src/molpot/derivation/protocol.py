@@ -12,11 +12,35 @@ from typing import Any, Protocol, runtime_checkable
 import torch
 from tensordict import TensorDict
 
-# Nested post-collate keys (in-place writes).
-ENERGY_KEY: tuple[str, str] = ("graphs", "energy")
-ATOMIC_ENERGY_KEY: tuple[str, str] = ("atoms", "energy")
-FORCES_KEY: tuple[str, str] = ("atoms", "forces")
-POS_KEY: tuple[str, str] = ("atoms", "pos")
+# Nested post-collate keys (in-place writes). The schema is a molix contract;
+# the keys live in molix.schema (single owner) and are re-exported here for
+# potential-side code.
+from molix.schema import (
+    ATOMIC_ENERGY_KEY,
+    ENERGY_KEY,
+    FORCES_KEY,
+    POS_KEY,
+    has_energy,
+    has_forces,
+)
+
+__all__ = [
+    "ATOMIC_ENERGY_KEY",
+    "ENERGY_KEY",
+    "FORCES_KEY",
+    "POS_KEY",
+    "PotentialModule",
+    "absorb_model_output",
+    "attach_session",
+    "call_energy",
+    "detach_session",
+    "ensure_graphs",
+    "get_session",
+    "has_energy",
+    "has_forces",
+    "write_energy",
+    "write_forces",
+]
 
 # Session side-channel: never batch.set_non_tensor (breaks torch.compile / Dynamo).
 _SESSIONS: dict[int, Any] = {}
@@ -69,14 +93,6 @@ def write_forces(batch: TensorDict, forces: torch.Tensor) -> TensorDict:
     """Write peer forces onto ``batch`` (in-place)."""
     batch[FORCES_KEY] = forces
     return batch
-
-
-def has_energy(batch: TensorDict) -> bool:
-    return "graphs" in batch.keys() and "energy" in batch["graphs"].keys()
-
-
-def has_forces(batch: TensorDict) -> bool:
-    return "atoms" in batch.keys() and "forces" in batch["atoms"].keys()
 
 
 def absorb_model_output(batch: TensorDict, out: TensorDict | dict) -> TensorDict:

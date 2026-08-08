@@ -191,6 +191,8 @@ def _tiny_potential() -> PiNetPotential:
             depth=2,
             rank=3,
             hidden_dim=16,
+                    # Monomorphic since b85d12f: force derivation is fixed here.
+            compute_forces=True,
         )
         .to(_DEVICE)
         .eval()
@@ -217,8 +219,8 @@ def test_null_control_identical_weights_zero_delta():
     model = _tiny_potential()
     twin = _tiny_potential()
     batch = _tiny_batch()
-    model(batch.clone(), compute_forces=False)  # materialise lazy params
-    twin(batch.clone(), compute_forces=False)
+    model(batch.clone())  # materialise lazy params
+    twin(batch.clone())
     twin.load_state_dict(model.state_dict())  # identical weights
     s = ForceDelta.between(model, twin, batch).summary()
     assert s["F_rms"] == pytest.approx(0.0, abs=1e-10)
@@ -229,8 +231,8 @@ def test_int4_ptq_perturbs_forces():
     model = _tiny_potential()
     quant = _tiny_potential()
     batch = _tiny_batch()
-    model(batch.clone(), compute_forces=False)
-    quant(batch.clone(), compute_forces=False)
+    model(batch.clone())
+    quant(batch.clone())
     quant.load_state_dict(Quantizer("int4").quantize_state_dict(model.state_dict()))
     s = ForceDelta.between(model, quant, batch).summary()
     assert s["F_rms"] > 0.0

@@ -27,13 +27,13 @@ import cuequivariance as cue
 import cuequivariance_torch as cuet
 import torch
 from tensordict import TensorDict
+
+from molpot.composition import Sonata
 from tests.conftest import (
     permute_graph,
     rotate_graph,
     translate_graph,
 )
-
-from molpot.composition import Sonata
 
 # ---------------------------------------------------------------------------
 # Local helpers

@@ -176,7 +176,7 @@ $$
 | A2 | charge/spin via `JointFeatureEmbedding` added to node feats + into E0 | OMOL conditioning | low | `scripts/omol_port/verify_joint_embed.py` (0) |
 | A3 | cue `"O3"` group everywhere (no `O3_e3nn`) | weights are converted into the cue-O3 twin, so O3 is the native target; O3 vs O3_e3nn CG differ only ~1.4e-8/op and the O3 twin already matches e3nn to 1.5e-8 — O3_e3nn would not reduce the residual and would add an `e3nn` dep | low | residual 7e-7 eV / 4.3e-6 eV·Å vs official (reimplementation accumulation, not a convention diff) — inside the 1e-4 bar (`mace-omol-port-02` ac-003) |
 | A4 | TensorDict `forward` forces via `ForceDerivation` (`func.grad`); `energy_forces` via `autograd.grad` | compile-friendly molnex contract | low | `tests/test_molzoo/test_mace_omol.py` (1e-8 vs autograd) |
-| A5 | edge convention `v=pos[t]-pos[s]`, `edge_index (E,2)→(2,E)` | MolNex collate schema | low | `tests/test_molzoo/test_mace_omol.py` |
+| A5 | edge convention `v=pos[t]-pos[s]`, `edge_index (E,2)` end to end (upstream's `(2,E)` transposed away at the port boundary) | MolNex collate schema | low | `tests/test_molzoo/test_mace_omol.py` |
 | A6 | `RadialMLP` honors `config.ftype` | fp64-via-config without `.double()` | low | `tests/test_molzoo/test_mace_omol.py` (fp64) |
 | A7 | per-layer irreps + edge-mid (128) hardcoded to OMOL dims | faithful OMOL weight load | medium | non-OMOL `l_max≥2`+small `num_features` unsupported; tracked in `mace-omol-port-02` |
 
@@ -189,7 +189,11 @@ decision, 2026-06-21). The full model with official OMOL weights reproduces the
 official cueq OMOL twin on a charged molecule to **7.0e-7 eV / 4.3e-6 eV·Å**
 (`scripts/omol_port/verify_e2e.py`, RESULT: PASS) — three to four orders inside
 the bar; the cueq twin itself matches e3nn OMOL to 1.5e-8 eV / 3.2e-8 eV·Å
-(`scripts/omol_port/verify_omol_cueq_equiv.py`). The 7e-7 residual is molnex's
+(`scripts/omol_port/verify_omol_cueq_equiv.py`). **Caveat (2026-08-07):** the run below predates a loader fix — the official
+trainable Bessel frequencies (`radial_embedding.bessel_fn.bessel_weights`, which
+drift 2.2e-7 from their analytic init) were silently dropped, leaving
+`bessel.freqs` at init. §7.1's 7e-7 eV therefore includes that perturbation and
+should be re-measured. The 7e-7 residual is otherwise molnex's
 own reimplementation accumulation, **not** a CG-convention difference: O3 vs
 O3_e3nn Clebsch-Gordan differ only ~1.4e-8/op and the O3 twin already aligns
 with e3nn to 1.5e-8, so the e3nn-convention group is neither used nor needed
@@ -226,7 +230,7 @@ for this spec (tracked in `scripts/omol_port/SPEC.md`).
 | Charge/spin inputs | dataset / collate | `graphs.total_charge`, `graphs.total_spin` (optional) |
 | Building blocks | `molrep` / `molpot` | reused; not owned here |
 | Forces | `molpot.derivation.ForceDerivation` | `F=-∂E/∂pos` from energy closure |
-| Weight import | `load_omol_state_dict` + `mace.cli.convert_e3nn_cueq` | cueq `state_dict` → `MACEOMol` |
+| Weight import | `load_omol_state_dict` + `mace.cli.convert_e3nn_cueq` | cueq `state_dict` → `MACEOMol`; strict on missing `nn.Parameter`s since 2026-08-07 |
 | Lazy export | `molzoo/__init__` | PEP 562 `__getattr__`; no eager cueq import |
 
 ## 9. Version Pinning

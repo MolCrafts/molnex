@@ -27,12 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from molix import config
-
-
-def _normalize2mom(fn) -> float:
-    gen = torch.Generator(device="cpu").manual_seed(0)
-    z = torch.randn(1_000_000, generator=gen, dtype=torch.float64)
-    return fn(z).pow(2).mean().pow(-0.5).item()
+from molrep.embedding.mlp import normalize2mom
 
 
 class _ScalarO3Linear(nn.Module):
@@ -66,7 +61,7 @@ class NonLinearBiasReadout(nn.Module):
             layout=cue.ir_mul,
             dtype=config.ftype,
         )
-        self._act_cst = _normalize2mom(F.silu)
+        self._act_cst = normalize2mom(F.silu)
         self.linear_mid = _ScalarO3Linear(mlp_dim, mlp_dim)
         self.linear_2 = _ScalarO3Linear(mlp_dim, 1)
 
@@ -85,3 +80,89 @@ class NonLinearBiasReadout(nn.Module):
         x = self._act(self.linear_1(x))
         x = self._act(self.linear_mid(x))
         return self.linear_2(x)
+
+
+class LinearReadout(nn.Module):
+    """Equivariant linear projection of node features to a per-atom scalar.
+
+    MACE's ``LinearReadoutBlock``: one ``cuet.Linear`` onto ``1x0e``. Used for
+    every interaction layer except the last, where the non-linear readout
+    (:class:`NonLinearReadout`) takes over.
+
+    Args:
+        irreps_in: Input node feature irreps, e.g. ``"128x0e+128x1o"``.
+
+    Reference:
+        Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
+        Networks for Fast and Accurate Force Fields" NeurIPS 2022.
+        https://arxiv.org/abs/2206.07697
+    """
+
+    def __init__(self, *, irreps_in: str) -> None:
+        super().__init__()
+        self.linear = cuet.Linear(
+            cue.Irreps("O3", irreps_in),
+            cue.Irreps("O3", "1x0e"),
+            layout=cue.ir_mul,
+            dtype=config.ftype,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Project node features to a per-atom scalar.
+
+        Args:
+            x: Node features ``(N, irreps_in.dim)``.
+
+        Returns:
+            Per-atom scalar ``(N, 1)``.
+        """
+        return self.linear(x)
+
+
+class NonLinearReadout(nn.Module):
+    """Bias-free gated non-linear scalar readout (MACE ``NonLinearReadoutBlock``).
+
+    ``Linear → c·SiLU → Linear``, both equivariant ``cuet.Linear`` layers with no
+    bias; ``c`` is e3nn's moment normalisation constant. This is the readout on
+    the **last** interaction layer of the MACE-MP / MatPES foundation models.
+
+    Distinct from :class:`NonLinearBiasReadout`, which is the OMOL variant with
+    biases and an extra middle layer — do not substitute one for the other, the
+    weight layouts differ.
+
+    Args:
+        irreps_in: Input node feature irreps (last-layer product output).
+        mlp_dim: Hidden scalar width (MACE's ``MLP_irreps``), e.g. 16.
+
+    Reference:
+        Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
+        Networks for Fast and Accurate Force Fields" NeurIPS 2022.
+        https://arxiv.org/abs/2206.07697
+    """
+
+    def __init__(self, *, irreps_in: str, mlp_dim: int = 16) -> None:
+        super().__init__()
+        self.linear_1 = cuet.Linear(
+            cue.Irreps("O3", irreps_in),
+            cue.Irreps("O3", f"{mlp_dim}x0e"),
+            layout=cue.ir_mul,
+            dtype=config.ftype,
+        )
+        self.linear_2 = cuet.Linear(
+            cue.Irreps("O3", f"{mlp_dim}x0e"),
+            cue.Irreps("O3", "1x0e"),
+            layout=cue.ir_mul,
+            dtype=config.ftype,
+        )
+        self._act_cst = normalize2mom(F.silu)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute per-atom scalar energy.
+
+        Args:
+            x: Node features ``(N, irreps_in.dim)``.
+
+        Returns:
+            Per-atom energy ``(N, 1)``.
+        """
+        return self.linear_2(F.silu(self.linear_1(x)) * self._act_cst)

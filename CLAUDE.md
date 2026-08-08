@@ -285,6 +285,12 @@ Pass `symmetry=False` to get only the upper-triangle half-pairs (`E = n_pairs`) 
 want to exploit Newton's-3rd-law symmetry.  The two modes produce different `task_id`s so pipeline
 caches are kept separate.
 
+`edge_index` is `(E, 2)` **everywhere** — including every MACE-family block
+(`DensityInteraction`, `ResidualInteraction`, `ZBLRepulsion`, both model cores).
+Upstream MACE's `(2, E)` layout is transposed away at the checkpoint-port
+boundary and never crosses a module seam; unpack as `source, target`
+(never `sender, receiver`). `(2, N)` is reserved for `bond_index`.
+
 **Why edge_diff = pos[target] − pos[source]?**  This makes the displacement vector point in the
 same direction as the edge (source → target), which is the convention expected by `SphericalHarmonics`
 and all `cuEquivariance`-based tensor products in this repo.  The C++ `getNeighborPairs` kernel
@@ -349,7 +355,9 @@ molix.engine (EngineAdapter/EngineForward/StaticForward, export_for_lammps) ─�
 
 Notes on cross-package edges (verified against imports):
 - `molzoo` consumes `molrep.readout`/`molrep.interaction` and `molpot.derivation`
-  (PiNet's energy/force head is co-located with the encoder by design).
+  (PiNet's energy/force head is co-located with the encoder by design;
+  `MACEMatpes` / `MACEOMol` are full energy/force checkpoint ports under the
+  same scoped exception — pending the mace-subpackage restructure spec).
 - `molpot.heads` imports `molrep.embedding` (e.g. `heads/edge.py`) — the arrow
   runs heads→embedding, **not** readout→heads.
 - `molrep.heads` (`ScalarHead`, …) is a distinct sub-tree from `molpot.heads`.

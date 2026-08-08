@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 from molix import config
 
+from .covalent import covalent_radii
+
 
 class BesselRBFSpec(BaseModel):
     """Specification for Bessel radial basis function.
@@ -275,3 +277,82 @@ class GaussianBasis(nn.Module):
         if fc is not None:
             basis = basis * fc.unsqueeze(-1)
         return basis
+
+
+class AgnesiTransform(nn.Module):
+    """Element-pair distance transform applied before the radial basis.
+
+    Compresses the radial coordinate onto a bounded interval before the Bessel
+    expansion, using a pair-specific length scale ``r_0 = (R_i + R_j) / 2`` built
+    from the two atoms' covalent radii:
+
+    .. math::
+
+        u(r) = \\left[1 + \\frac{a\\,(r/r_0)^q}{1 + (r/r_0)^{q-p}}\\right]^{-1}
+
+    This concentrates basis resolution where the pair distribution is dense,
+    which is what makes a single basis transfer across the periodic table.
+
+    Args:
+        q: Numerator exponent.
+        p: Denominator exponent (``p > q`` gives the long-range decay).
+        a: Overall amplitude.
+        max_z: Largest atomic number in the covalent-radius table.
+        trainable: If ``True``, ``a`` / ``q`` / ``p`` become learnable.
+
+    Reference:
+        Witt et al. "ACEpotentials.jl: A Julia implementation of the atomic
+        cluster expansion" J. Chem. Phys. 159, 164101 (2023), § Radial
+        transformations. https://doi.org/10.1063/5.0158783
+    """
+
+    def __init__(
+        self,
+        *,
+        q: float = 0.9183,
+        p: float = 4.5791,
+        a: float = 1.0805,
+        max_z: int = 118,
+        trainable: bool = False,
+    ) -> None:
+        super().__init__()
+        ftype = config.ftype
+        values = {
+            "q": torch.tensor(float(q), dtype=ftype),
+            "p": torch.tensor(float(p), dtype=ftype),
+            "a": torch.tensor(float(a), dtype=ftype),
+        }
+        for name, value in values.items():
+            if trainable:
+                setattr(self, name, nn.Parameter(value))
+            else:
+                self.register_buffer(name, value)
+        self.q: torch.Tensor
+        self.p: torch.Tensor
+        self.a: torch.Tensor
+
+        self.register_buffer("covalent_radii", covalent_radii(max_z))
+        self.covalent_radii: torch.Tensor
+
+    def forward(
+        self,
+        r: torch.Tensor,
+        z_source: torch.Tensor,
+        z_target: torch.Tensor,
+    ) -> torch.Tensor:
+        """Transform edge distances.
+
+        Args:
+            r: Edge distances ``(E,)``.
+            z_source: Atomic number of each edge's source atom ``(E,)``.
+            z_target: Atomic number of each edge's target atom ``(E,)``.
+
+        Returns:
+            Transformed distances ``(E,)``.
+        """
+        radii = self.covalent_radii
+        r_0 = 0.5 * (radii[z_source.long()] + radii[z_target.long()])
+        x = r / r_0
+        return torch.reciprocal(
+            1.0 + self.a * torch.pow(x, self.q) / (1.0 + torch.pow(x, self.q - self.p))
+        )

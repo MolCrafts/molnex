@@ -36,13 +36,18 @@ ALLOW_MISSING: frozenset[str] = frozenset(
     }
 )
 
-# Packages / prefixes that must be mirrored under --strict-pinet.
+# Packages / prefixes that must be mirrored under --strict-pinet (the flag
+# name is historical; the gate now also guards the MD engine and the shared
+# schema/units modules).
 PINET_SPINE: tuple[str, ...] = (
     "molrep/interaction/pinet/",
     "molzoo/pinet/",
     "molpot/derivation/force.py",
     "molpot/derivation/energy.py",
     "molix/data/tasks/pad.py",
+    "molix/md/",
+    "molix/schema.py",
+    "molix/units.py",
 )
 
 

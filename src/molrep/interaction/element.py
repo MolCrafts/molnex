@@ -51,9 +51,11 @@ class ElementUpdate(nn.Module):
     where each element type $z \\in [0, \\text{num_species}]$ has its own
     $(\\text{hidden_dim} \\times \\text{hidden_dim})$ weight matrix $W_z$.
 
-    Uses cuEquivariance's **indexed_linear** backend for 8-11x speedup:
-        - **indexed_linear**: Hardware-optimized kernel for sorted species indices
-        - **naive**: Fallback for general cases
+    Uses cuEquivariance's ``naive`` indexed-weights backend on every device.
+    The ``indexed_linear`` CUDA kernel requires *sorted* species indices, and
+    the argsort + un-permute round-trip that requirement forces was measured
+    **2.8x slower** than the naive path at production shapes (N=672, H=128,
+    GH200) — the kernel's own advantage never survives the reordering.
 
     Physical Interpretation:
         "I take my current state and add element-specific weighted information
@@ -94,20 +96,10 @@ class ElementUpdate(nn.Module):
         # Create cuEquivariance irreps (scalars only for hidden features)
         irreps = cue.Irreps("O3", f"{hidden_dim}x0e")
 
-        # ``indexed_linear`` is CUDA-only and asserts sorted indices. The
-        # ``naive`` path works on both CUDA and CPU. Keep two layers that
-        # share the same weight parameter and dispatch at forward time based
-        # on the actual tensor device (torch.cuda.is_available() can be true
-        # while the model runs on CPU, which is how most unit tests run).
-        self._linear_indexed = cuet.Linear(
-            irreps_in=irreps,
-            irreps_out=irreps,
-            internal_weights=False,
-            weight_classes=num_species,
-            layout=cue.ir_mul,
-            method="indexed_linear",
-            dtype=config.ftype,
-        )
+        # ``naive`` on every device: the alternative ``indexed_linear`` CUDA
+        # kernel asserts sorted indices, and the argsort + un-permute round
+        # trip that costs measured 2.8x slower than naive at production
+        # shapes (0.974 ms vs 0.343 ms, N=672 H=128, GH200).
         self._linear_naive = cuet.Linear(
             irreps_in=irreps,
             irreps_out=irreps,
@@ -144,35 +136,16 @@ class ElementUpdate(nn.Module):
             Updated features $(n\\_{nodes}, \\text{hidden_dim})$ via:
             $$h\\_new[i] = h\\_prev[i] + W_{Z[i]} \\otimes m\\_curr[i]$$
 
-        Implementation (cuEquivariance indexed_linear):
-            Uses hardware-optimized kernel that:
-            1. Performs indexed lookup of weight matrices (W[species])
-            2. Applies element-specific linear transformation in single kernel
-            3. Aggregates with h_prev for residual connection
-
         Performance:
-            On CUDA the ``indexed_linear`` kernel is 8-11× faster than
-            the naive loop but is CUDA-only and asserts
-            ``weight_indices`` is non-decreasing. Real atom_types from a
-            collated batch are arbitrary, so we sort before and
-            un-permute after. On CPU we use the naive path and skip the
-            sort (the kernel assertion doesn't apply and ``argsort``
-            would just be overhead).
+            The ``naive`` indexed-weights path runs on any device with
+            arbitrary index order. cuEq's ``indexed_linear`` kernel needs
+            sorted indices; the argsort + un-permute round-trip that forces
+            was measured 2.8x slower than this path at production shapes
+            (GH200), so it is deliberately not used.
         """
-        if m_curr.is_cuda:
-            perm = torch.argsort(atom_types, stable=True)
-            inv_perm = torch.empty_like(perm)
-            inv_perm[perm] = torch.arange(perm.numel(), device=perm.device)
-            m_transformed = self._linear_indexed(
-                m_curr[perm],
-                weight=self.weight,
-                weight_indices=atom_types[perm],
-            )[inv_perm]
-        else:
-            m_transformed = self._linear_naive(
-                m_curr,
-                weight=self.weight,
-                weight_indices=atom_types,
-            )
-
+        m_transformed = self._linear_naive(
+            m_curr,
+            weight=self.weight,
+            weight_indices=atom_types,
+        )
         return h_prev + m_transformed

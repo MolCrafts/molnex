@@ -92,7 +92,7 @@ class MolnexTensorDictAdapter(EngineAdapter):
     """Adapter for molnex-native potentials (PiNet, MACE, … via ``PiNetPotential``-style).
 
     Builds the post-collate nested ``TensorDict`` (``atoms`` / ``edges`` / ``graphs``
-    per ``CLAUDE.md``), runs ``model(batch, compute_forces=True)``, and reads the
+    per ``CLAUDE.md``), runs ``model(batch)`` (built with ``compute_forces=True``), reads the
     ``{"energy", "forces"}`` output dict. Energy is summed to a scalar (single
     graph), matching what the C++ pair style accumulates into ``eng_vdwl``.
     """
@@ -179,6 +179,8 @@ class EngineForward(nn.Module):
         if isinstance(inputs, tuple):
             out = self.model(*inputs)
         else:
-            out = self.model(inputs, compute_forces=True)
+            # Monomorphic forward since b85d12f: force derivation is a
+            # construction-time property of the potential, not a call kwarg.
+            out = self.model(inputs)
         energy, forces = self.adapter.read_outputs(out)
         return energy.reshape(()), forces

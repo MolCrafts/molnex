@@ -25,7 +25,7 @@ from tensordict import TensorDict
 
 from molix import config
 from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
-from molpot.derivation.force import ForceDerivation
+from molpot.derivation.force import autograd_forces_from_energy
 from molpot.heads.energy import AtomicReferenceEnergy
 from molpot.heads.rescale import GlobalRescale
 from molrep.embedding.angular import SphericalHarmonics
@@ -38,7 +38,29 @@ from molrep.readout.scalar import NonLinearBiasReadout
 
 
 class MACEOMol(nn.Module):
-    """Native MACE-OMOL energy/force model (cuEquivariance)."""
+    """Native MACE-OMOL energy/force model (cuEquivariance).
+
+    Args:
+        atomic_numbers: Element table (z-table) in checkpoint order.
+        atomic_energies: Per-element reference energies ``E0``, same order.
+        r_max: Radial cutoff in Angstrom.
+        num_bessel: Number of Bessel radial basis functions.
+        num_polynomial_cutoff: Polynomial cutoff exponent ``p``.
+        l_max: Maximum spherical-harmonics order.
+        num_features: Scalar channel multiplicity (``hidden_irreps`` 0e count).
+        num_interactions: Number of interaction/product layers.
+        correlation: Body-order correlation of the symmetric contraction.
+        mlp_dim: Hidden width of the final non-linear readout.
+        edge_channels: Per-``l`` channel count of the mid-layer edge irreps and
+            the radial-MLP hidden width (128 in the shipped OMOL checkpoints —
+            a deliberate bottleneck below ``num_features``).
+        charge_classes: Embedding rows for the total-charge conditioning.
+        charge_offset: Index offset applied to total charge (charge −100 → row 0).
+        spin_classes: Embedding rows for the total-spin conditioning.
+        spin_offset: Index offset applied to total spin.
+        scale: ``atomic_inter_scale``.
+        shift: ``atomic_inter_shift``.
+    """
 
     def __init__(
         self,
@@ -53,6 +75,7 @@ class MACEOMol(nn.Module):
         num_interactions: int = 3,
         correlation: int = 2,
         mlp_dim: int = 16,
+        edge_channels: int = 128,
         charge_classes: int = 201,
         charge_offset: int = 100,
         spin_classes: int = 101,
@@ -61,6 +84,8 @@ class MACEOMol(nn.Module):
         shift: float = 0.0,
     ) -> None:
         super().__init__()
+        if num_interactions < 1:
+            raise ValueError(f"num_interactions must be at least 1, got {num_interactions}")
         ftype = config.ftype
         n_el = len(atomic_numbers)
         self.register_buffer(
@@ -118,15 +143,17 @@ class MACEOMol(nn.Module):
             atomic_numbers=atomic_numbers,
         )
 
-        # per-layer irreps (mirror official ScaleShiftMACE hidden_irreps schedule)
+        # Per-layer irreps (mirror official ScaleShiftMACE hidden_irreps
+        # schedule), built generically: the first layer reads/emits full-width
+        # scalars, mid layers carry the hidden state through the edge_channels
+        # bottleneck, and the last layer collapses back to scalars.
         hidden_full = target.replace(f"+{num_features}x{l_max}{'e' if l_max % 2 == 0 else 'o'}", "")
-        edge0 = feat0
         edge_mid = "+".join(
-            f"128x{l}{'e' if l % 2 == 0 else 'o'}" for l in range(l_max)
-        )  # 128x0e+128x1o+128x2e
-        node_in = [feat0, hidden_full, hidden_full]
-        edge_irr = [edge0, edge_mid, edge_mid]
-        hidden_sched = [hidden_full, hidden_full, feat0]
+            f"{edge_channels}x{l}{'e' if l % 2 == 0 else 'o'}" for l in range(l_max)
+        )  # e.g. 128x0e+128x1o+128x2e
+        node_in = [feat0] + [hidden_full] * (num_interactions - 1)
+        edge_irr = [feat0] + [edge_mid] * (num_interactions - 1)
+        hidden_sched = [hidden_full] * (num_interactions - 1) + [feat0]
 
         self.interactions = nn.ModuleList()
         self.products = nn.ModuleList()
@@ -140,7 +167,7 @@ class MACEOMol(nn.Module):
                     edge_irreps=edge_irr[i],
                     target_irreps=target,
                     hidden_irreps=hidden_sched[i],
-                    radial_mlp=[128, 128, 128],
+                    radial_mlp=[edge_channels] * 3,
                     # autograd force path → fused cuEq kernels OK
                     use_fallback=False,
                 )
@@ -157,9 +184,6 @@ class MACEOMol(nn.Module):
             )
         self.readout = NonLinearBiasReadout(irreps_in=feat0, mlp_dim=mlp_dim)
         self.scale_shift = GlobalRescale(scale=scale, shift=shift)
-        # MACE uses cuEquivariance fused kernels → autograd (functorch rejects
-        # their legacy autograd.Function); matches the upstream MACE library.
-        self.force_derivation = ForceDerivation(method="autograd")
 
     def energy_forces(
         self,
@@ -171,34 +195,35 @@ class MACEOMol(nn.Module):
         total_spin: torch.Tensor,
         shifts: torch.Tensor | None = None,
         compute_forces: bool = True,
-    ) -> dict:
+    ) -> dict[str, torch.Tensor]:
         """Return total energy and forces.
 
         Args:
             positions: ``(N, 3)``.
             Z: atomic numbers ``(N,)``.
-            edge_index: ``(2, E)`` sender/receiver.
+            edge_index: ``(E, 2)`` with ``[:, 0]`` = source, ``[:, 1]`` = target
+                (the repo-wide edge convention).
             batch: graph index per atom ``(N,)``.
             total_charge / total_spin: per-graph ``(B,)``.
             shifts: optional PBC shift vectors ``(E, 3)``.
             compute_forces: whether to compute ``-dE/dx``.
         """
-        # Force path always goes through ForceDerivation (autograd backend —
-        # cuEq fused kernels). Do not hand-roll torch.autograd.grad here.
-        pos = positions.detach()
+        if not compute_forces:
+            return {
+                "energy": self._compute_energy(
+                    positions.detach(), Z, edge_index, batch, total_charge, total_spin, shifts
+                )
+            }
 
-        def energy_fn(p: torch.Tensor) -> torch.Tensor:
-            return self._compute_energy(
-                p, Z, edge_index, batch, total_charge, total_spin, shifts
-            ).sum()
-
-        total_energy = self._compute_energy(
-            pos, Z, edge_index, batch, total_charge, total_spin, shifts
-        )
-        out = {"energy": total_energy}
-        if compute_forces:
-            out["forces"] = self.force_derivation(energy_fn, pos)
-        return out
+        # One forward, then differentiate the graph it built — MACE's own
+        # `get_outputs` shape. A closure that re-runs the energy would cost two
+        # full forwards per call.
+        pos = positions.detach().requires_grad_(True)
+        with torch.enable_grad():
+            energy = self._compute_energy(
+                pos, Z, edge_index, batch, total_charge, total_spin, shifts
+            )
+        return {"energy": energy.detach(), "forces": autograd_forces_from_energy(energy, pos)}
 
     def _compute_energy(
         self,
@@ -214,35 +239,32 @@ class MACEOMol(nn.Module):
 
         Shared core of :meth:`energy_forces` and :meth:`forward`. Recomputes all
         position-derived geometry internally so it can be differentiated with
-        ``torch.autograd.grad`` (ForceDerivation(method="autograd")).
+        ``torch.autograd.grad`` (:func:`~molpot.derivation.force.autograd_forces_from_energy`).
 
         Args:
             positions: ``(N, 3)``.
             Z: atomic numbers ``(N,)``.
-            edge_index: ``(2, E)`` sender/receiver.
+            edge_index: ``(E, 2)`` with ``[:, 0]`` = source, ``[:, 1]`` = target
+                (the repo-wide edge convention).
             batch: graph index per atom ``(N,)``.
             total_charge / total_spin: per-graph ``(B,)``.
             shifts: optional PBC shift vectors ``(E, 3)``.
         """
-        num_nodes = positions.shape[0]
         # Derive the graph count from the per-graph ``total_charge`` length (a
         # static shape) rather than ``int(batch.max().item())``: the ``.item()``
         # forces a host sync that breaks the dynamo graph, blocking
         # ``torch.compile(fullgraph=True)`` of the functorch force path.
         num_graphs = total_charge.shape[0]
 
-        sender, receiver = edge_index[0], edge_index[1]
-        vectors = positions[receiver] - positions[sender]
+        source, target = edge_index[:, 0], edge_index[:, 1]
+        vectors = positions[target] - positions[source]
         if shifts is not None:
             vectors = vectors + shifts
         lengths = torch.linalg.norm(vectors, dim=-1, keepdim=True)
 
         # one-hot node attrs over the element table
         z_index = torch.searchsorted(self.z_table, Z.reshape(-1)).to(dtype=torch.long)
-        node_attrs = torch.zeros(
-            num_nodes, self.z_table.numel(), dtype=positions.dtype, device=positions.device
-        )
-        node_attrs[torch.arange(num_nodes), z_index] = 1.0
+        node_attrs = torch.nn.functional.one_hot(z_index, self.z_table.numel()).to(positions.dtype)
 
         node_e0 = self.atomic_energies(Z)
         e0 = _scatter_sum(node_e0, batch, num_graphs)
@@ -278,8 +300,9 @@ class MACEOMol(nn.Module):
         ``[:,0]`` source / ``[:,1]`` target per the molnex edge convention), and
         per-graph ``graphs.{total_charge,total_spin}`` (defaulting to a neutral
         singlet when absent). Forces are obtained through
-        :class:`molpot.derivation.ForceDerivation` (``method="autograd"`` —
-        ``F = -∂E/∂pos`` via ``torch.autograd.grad``; cuEq-safe). Writes
+        :func:`molpot.derivation.force.autograd_forces_from_energy` (``F = -∂E/∂pos``
+        via ``torch.autograd.grad`` on the energy graph already built by this
+        call — one forward, one backward, as in MACE's ``get_outputs``). Writes
         ``graphs.energy`` ``(B,)`` and ``atoms.forces`` ``(N, 3)`` back into
         ``td`` and returns it.
 
@@ -293,14 +316,16 @@ class MACEOMol(nn.Module):
         Z = td["atoms", "Z"]
         positions = td["atoms", "pos"]
         batch = td["atoms", "batch"]
-        # molnex edge_index is (E, 2) [source, target]; the core wants (2, E).
-        edge_index = td["edges", "edge_index"].t().contiguous()
-        num_graphs = int(batch.max().item()) + 1
+        edge_index = td["edges", "edge_index"]  # (E, 2), the core's own convention
 
         nested = td.keys(include_nested=True)
         if ("graphs", "total_charge") in nested:
             total_charge = td["graphs", "total_charge"]
+            num_graphs = int(total_charge.shape[0])
         else:
+            # Only the defaulting path pays the host sync; a conditioned batch
+            # derives the graph count from a static shape.
+            num_graphs = int(batch.max().item()) + 1
             total_charge = torch.zeros(num_graphs, dtype=torch.long, device=Z.device)
         if ("graphs", "total_spin") in nested:
             total_spin = td["graphs", "total_spin"]
@@ -309,46 +334,110 @@ class MACEOMol(nn.Module):
             # a trained row). Spin 0 hits an untrained embedding row → garbage.
             total_spin = torch.ones(num_graphs, dtype=torch.long, device=Z.device)
 
-        energy = self._compute_energy(positions, Z, edge_index, batch, total_charge, total_spin)
-
-        def energy_fn(pos: torch.Tensor) -> torch.Tensor:
-            return self._compute_energy(pos, Z, edge_index, batch, total_charge, total_spin).sum()
-
-        forces = self.force_derivation(energy_fn, positions)
+        needs_leaf = not (positions.requires_grad and positions.is_leaf)
+        pos = positions.detach().requires_grad_(True) if needs_leaf else positions
+        with torch.enable_grad():
+            energy = self._compute_energy(pos, Z, edge_index, batch, total_charge, total_spin)
+        forces = autograd_forces_from_energy(energy, pos)
 
         if "graphs" not in td.keys():
             td["graphs"] = TensorDict({}, batch_size=[num_graphs])
-        td["graphs", "energy"] = energy
+        td["graphs", "energy"] = energy.detach() if needs_leaf else energy
         td["atoms", "forces"] = forces
         return td
 
 
-def load_omol_state_dict(model: MACEOMol, cueq_state: dict) -> tuple[list, list]:
+# Official cueq key (or key prefix) → molnex name, mirroring
+# ``mace_matpes._KEY_REMAP``. ``None`` drops the entry (rebuilt from the
+# constructor arguments or a non-persistent constant). Longest prefix wins;
+# anything unlisted maps through unchanged (``interactions.*``, ``products.*``,
+# ``joint_embedding.*``, ``scale_shift.*``).
+_KEY_REMAP: dict[str, str | None] = {
+    "node_embedding.linear.": "node_embedding.",
+    "embedding_readout.linear.": "embedding_readout.",
+    "readouts.0.": "readout.",
+    # MACE's trainable Bessel frequencies. Without this entry the key is
+    # simply unexpected and `bessel.freqs` keeps its analytic init — the
+    # official OMOL weights drift ~2e-7 from that init, which was landing
+    # straight in the reported parity residual.
+    "radial_embedding.bessel_fn.bessel_weights": "bessel.freqs",
+    "radial_embedding.bessel_fn.": None,
+    "radial_embedding.cutoff_fn.": None,
+    "atomic_energies_fn.": None,  # handled at construction (Z-indexed)
+    "atomic_numbers": "z_table",
+    "r_max": None,
+    "num_interactions": None,
+}
+_KEY_REMAP_ORDER = sorted(_KEY_REMAP, key=len, reverse=True)
+
+
+def load_omol_state_dict(model: MACEOMol, cueq_state: dict) -> tuple[list[str], list[str]]:
     """Load a cueq-converted MACE-OMOL ``state_dict`` into :class:`MACEOMol`.
 
-    Maps the official cueq key names onto this model's modules (direct copy);
-    returns ``(missing_learnable, unexpected)`` for inspection.
+    Strict on the silent failure modes (backported from
+    :func:`molzoo.mace_matpes.load_matpes_state_dict`): a learnable parameter
+    the checkpoint does not fill, or a shape mismatch, raises — a silently
+    dropped tensor is exactly how a model runs, looks sane, and is quietly
+    wrong (the ``bessel.freqs`` incident above). Unexpected checkpoint keys
+    are still *returned* rather than raised, because the OMOL checkpoint
+    family carries auxiliary heads this port deliberately does not model.
+
+    Args:
+        model: Target model, constructed with the checkpoint's hyper-parameters.
+        cueq_state: ``state_dict`` of the cueq-converted official model.
+
+    Returns:
+        ``(missing_non_learnable, unexpected)`` — buffers the checkpoint did
+        not provide and checkpoint keys with no home, for inspection.
+
+    Raises:
+        RuntimeError: If a learnable parameter is left unfilled or a shape
+            disagrees.
     """
-    remap = {}
-    for k, v in cueq_state.items():
-        nk = k
-        if k.startswith("node_embedding.linear."):
-            nk = "node_embedding." + k.split("node_embedding.linear.")[1]
-        elif k.startswith("embedding_readout.linear."):
-            nk = "embedding_readout." + k.split("embedding_readout.linear.")[1]
-        elif k.startswith("readouts.0."):
-            nk = "readout." + k.split("readouts.0.")[1]
-        elif k.startswith("atomic_energies_fn."):
-            continue  # handled at construction (Z-indexed)
-        remap[nk] = v
+    remap: dict[str, torch.Tensor] = {}
+    for key, value in cueq_state.items():
+        # cueq stores symbolic graph constants and irrep masks alongside the
+        # weights; both are rebuilt by the module and carry nothing learned.
+        if ".graph.c" in key or key.endswith("output_mask"):
+            continue
+        new_key: str | None = key
+        for prefix in _KEY_REMAP_ORDER:
+            if key == prefix or key.startswith(prefix):
+                replacement = _KEY_REMAP[prefix]
+                new_key = (
+                    None
+                    if replacement is None
+                    else replacement + (key[len(prefix) :] if key != prefix else "")
+                )
+                break
+        if new_key is not None:
+            remap[new_key] = value
+
+    own = model.state_dict()
+    mismatched = []
+    for key, value in remap.items():
+        if key not in own:
+            continue  # reported below as unexpected
+        want = own[key].shape
+        if value.shape == want:
+            continue
+        # MACE stores some frozen scalars as (1,) where molnex holds a 0-d
+        # buffer; identical content, different rank.
+        if value.numel() == own[key].numel():
+            remap[key] = value.reshape(want)
+        else:
+            mismatched.append(f"{key}: checkpoint {tuple(value.shape)} vs model {tuple(want)}")
+    if mismatched:
+        raise RuntimeError(
+            "shape mismatch — model built with the wrong config? " + ", ".join(sorted(mismatched))
+        )
+
     missing, unexpected = model.load_state_dict(remap, strict=False)
-    learnable_leaf = (".weight", ".bias")
-    learnable_scalar = ("alpha", "beta", "scale", "shift")
-    miss_learn = [
-        m
-        for m in missing
-        if (m.endswith(learnable_leaf) or m.split(".")[-1] in learnable_scalar)
-        and not m.startswith("atomic_energies")
-        and "scale_shift" not in m
-    ]
-    return miss_learn, unexpected
+    # "Learnable" means exactly nn.Parameter — a name-suffix heuristic silently
+    # excused `bessel.freqs` (a Parameter that ends in neither .weight nor .bias)
+    # from this check for as long as it was being dropped.
+    parameters = {name for name, _ in model.named_parameters()}
+    unfilled = sorted(m for m in missing if m in parameters)
+    if unfilled:
+        raise RuntimeError(f"parameters not covered by the checkpoint: {unfilled}")
+    return sorted(set(missing) - parameters), list(unexpected)

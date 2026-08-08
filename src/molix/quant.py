@@ -31,6 +31,9 @@ import torch
 import torch.nn as nn
 import torch.nn.utils.parametrize as parametrize
 
+from molix.schema import FORCES_KEY
+from molix.units import KB_EV_PER_K
+
 
 class QuantScheme(ABC):
     """Abstract fake-quantization strategy (quantize-then-dequantize to float).
@@ -252,8 +255,10 @@ class ForceDelta:
     @classmethod
     def between(cls, model_ref: nn.Module, model_quant: nn.Module, batch: object) -> ForceDelta:
         """ΔF from a reference vs quantized model on a fresh clone of ``batch`` each."""
-        f_ref = model_ref(batch.clone(), compute_forces=True)["forces"].detach()  # type: ignore[union-attr]
-        f_quant = model_quant(batch.clone(), compute_forces=True)["forces"].detach()  # type: ignore[union-attr]
+        # Potentials fix force derivation at construction (monomorphic forward,
+        # since b85d12f); both models must already be built with it.
+        f_ref = model_ref(batch.clone())[FORCES_KEY].detach()  # type: ignore[union-attr]
+        f_quant = model_quant(batch.clone())[FORCES_KEY].detach()  # type: ignore[union-attr]
         return cls(f_quant - f_ref)
 
     def summary(self) -> dict[str, float]:
@@ -289,8 +294,8 @@ class EffectiveTemperature:
     for the dimensionless reported quantity.
     """
 
-    #: Boltzmann constant in eV/K
-    KB_EV_PER_K: float = 8.617333262e-5
+    #: Boltzmann constant in eV/K (single source: :mod:`molix.units`).
+    KB_EV_PER_K: float = KB_EV_PER_K
 
     def __init__(self, *, dt: float, gamma: float, mass: float, dof: int):
         self.dt = dt

@@ -21,6 +21,9 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
+from molix.schema import ENERGY_KEY, FORCES_KEY
+from molix.units import DEAD_EDGE_CUTOFF_FACTOR
+
 
 class StaticForward(nn.Module):
     """Fixed ``(N, E_max)`` flat forward: ``(Z, pos, edge_index, mask) -> (energy, forces)``.
@@ -33,7 +36,8 @@ class StaticForward(nn.Module):
             edges (real ones first, ``mask=True``; the rest padded, ``mask=False``)
             and fail loudly when the real edge count exceeds ``e_max``.
         cutoff: Neighbour cutoff in Å; padded edges get ``edge_diff`` of length
-            ``10*cutoff`` so ``cutoff(edge_dist)`` zeros them.
+            ``DEAD_EDGE_CUTOFF_FACTOR * cutoff`` (see :mod:`molix.units`) so
+            ``cutoff(edge_dist)`` zeros them.
     """
 
     def __init__(self, model: nn.Module, n_atoms: int, e_max: int, cutoff: float) -> None:
@@ -41,7 +45,7 @@ class StaticForward(nn.Module):
         self.model = model
         self.n_atoms = int(n_atoms)
         self.e_max = int(e_max)
-        self.pad_len = float(cutoff) * 10.0
+        self.pad_len = float(cutoff) * DEAD_EDGE_CUTOFF_FACTOR
 
     def forward(
         self, Z: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor, mask: torch.Tensor
@@ -75,5 +79,7 @@ class StaticForward(nn.Module):
             ),
             batch_size=[],
         )
-        out = self.model(td, compute_forces=True)
-        return out["energy"].reshape(()), out["forces"]
+        # Monomorphic forward since b85d12f: a potential that derives forces was
+        # constructed that way (``PiNetPotential(compute_forces=True)``).
+        out = self.model(td)
+        return out[ENERGY_KEY].reshape(()), out[FORCES_KEY]

@@ -94,7 +94,7 @@ def test_forward_matches_energy_forces(model, single_graph):
     pos, Z, batch, tc, ts = single_graph
     edge_e2 = _full_edges(batch)
 
-    ref = model.energy_forces(pos, Z, edge_e2.t().contiguous(), batch, tc, ts)
+    ref = model.energy_forces(pos, Z, edge_e2, batch, tc, ts)
 
     td = _make_batch(pos.clone(), Z, batch, edge_e2, tc, ts)
     out = model.forward(td)
@@ -138,7 +138,7 @@ def test_missing_charge_spin_defaults_to_neutral(model, single_graph):
     # (spin index 1 is a trained row; spin 0 hits an untrained embedding).
     charge = torch.zeros(1, dtype=torch.long)
     spin = torch.ones(1, dtype=torch.long)
-    ref = model.energy_forces(pos, Z, edge_e2.t().contiguous(), batch, charge, spin)
+    ref = model.energy_forces(pos, Z, edge_e2, batch, charge, spin)
     assert torch.allclose(out["graphs", "energy"], ref["energy"], atol=1e-9, rtol=0)
 
 
@@ -160,7 +160,7 @@ def test_force_loss_reaches_parameters_in_eval_mode(model, single_graph):
     forces, then assert the loss reaches them.
     """
     pos, Z, batch, tc, ts = single_graph
-    edge_index = _full_edges(batch).t().contiguous()
+    edge_index = _full_edges(batch)
     assert not model.training  # default eval mode — the regression condition
 
     torch.manual_seed(7)
@@ -228,7 +228,7 @@ def test_batched_graphs(model):
     edge_e2 = _full_edges(batch)
     td = _make_batch(pos, Z, batch, edge_e2, tc, ts)
     out = model.forward(td)
-    ref = model.energy_forces(pos, Z, edge_e2.t().contiguous(), batch, tc, ts)
+    ref = model.energy_forces(pos, Z, edge_e2, batch, tc, ts)
     assert out["graphs", "energy"].shape == (2,)
     assert torch.allclose(out["graphs", "energy"], ref["energy"], atol=1e-9, rtol=0)
     assert torch.allclose(out["atoms", "forces"], ref["forces"], atol=1e-8, rtol=0)

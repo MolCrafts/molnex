@@ -28,13 +28,16 @@ from molix.export import Exporter
 class _DummyTDPotential(nn.Module):
     """Mimics a molnex potential: nested-TensorDict in, ``{energy, forces}`` out."""
 
-    def forward(self, batch, *, compute_forces: bool = False):
+    def forward(self, batch):
+        # Monomorphic forward, mirroring a real potential since b85d12f: a
+        # potential that derives forces was built that way and always writes them.
         pos = batch["atoms", "pos"]
         bd = batch["edges", "edge_dist"]
-        out = {"energy": (bd**2).sum().reshape(1), "atomic_energy": torch.zeros(pos.shape[0])}
-        if compute_forces:
-            out["forces"] = torch.zeros_like(pos)
-        return out
+        return {
+            "energy": (bd**2).sum().reshape(1),
+            "atomic_energy": torch.zeros(pos.shape[0]),
+            "forces": torch.zeros_like(pos),
+        }
 
 
 class _FlatEFPotential(nn.Module):

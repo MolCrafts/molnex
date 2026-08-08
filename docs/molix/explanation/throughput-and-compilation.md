@@ -185,3 +185,42 @@ At production journal cadence the full hook stack costs only ~2 % (129.8 vs
 132.2) — the earlier ~91 steps/s figure was an artifact of a deliberately
 frequent `journal_every=20`. So the real production throughput with the winning
 combo is **~130 steps/s** (≈10x eager's ~12, ≈4–5x plain compile's ~25–34).
+
+## Does this transfer to cuEquivariance models? (MACE-MatPES, 2026-08-07)
+
+The sweep above is PiNet: **pure torch**, so dynamo has nothing exotic to trace.
+MACE runs cuEquivariance fused kernels, which are custom `autograd.Function`s —
+a plausible reason for dynamo to break the graph and for `fullgraph=True` to
+fail outright. Measured on `molzoo.MACEMatpes` with official
+`mace-matpes-r2scan-0` weights, 193-atom periodic water box (17344 edges), one
+GH200, compiling `_compute_energy` with `autograd.grad` taken *outside* the
+compiled region:
+
+| | fp64 ms (step/s) | fp32 ms (step/s) |
+|---|---|---|
+| eager | 35.7 (28.0) | 35.0 (28.6) |
+| inductor default | 19.0 (52.5) | 19.6 (50.9) |
+| **inductor + `reduce-overhead`** | **4.18 (239)** | **2.40 (417)** |
+| + `fullgraph=True` | 4.19 (239) | 2.40 (417) |
+
+**It transfers unchanged.** `CUDA_GRAPH_PRESET` is the winner here too (8.5x
+eager at fp64, 14.6x at fp32).
+
+Three things worth knowing:
+
+1. **cuEq does not break the graph**: `graph_breaks=0, graphs=1, ops=381`.
+   `fullgraph=True` is therefore free rather than beneficial — it closes no
+   breaks, it only asserts there are none. Keep it as the assertion.
+2. **Compiling fp64 is numerically free**: ΔE = 0, ΔF = 2.6e-14 against eager.
+   fp32 shifts results ~2e-3 eV / ~1.6e-3 eV/Å (inductor fusion reassociates
+   float adds) — expected, not a defect.
+3. **Precision is invisible until the launches are gone.** Eager fp32 ≈ eager
+   fp64 (35.0 vs 35.7 ms) because the step is latency-bound. Under CUDA graphs
+   fp32 is 1.75x fp64. Anyone benchmarking precision *in eager mode* on a small
+   system will wrongly conclude precision does not matter.
+
+Static shapes come free for MD here. Open-system runs freeze the neighbour
+list for the trajectory; periodic runs rebuild it on a cadence into
+fixed-capacity buffers (`molix.md.PeriodicNeighborList` — contents change in
+place, shapes never do). Either way no padding registry is needed, unlike the
+training path.

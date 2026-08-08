@@ -65,7 +65,7 @@ Four packages under `src/`: **molix** (infra) ← **molrep** (representation) �
 - `src/molzoo/mace.py` — MACE encoder + MACESpec
 - `src/molzoo/mace_omol.py` — MACEOMol + `load_omol_state_dict` (lazy via PEP 562)
 - `src/molzoo/pinet/` — industrial split: spec, geometry, encoder, **potential**, properties
-- `src/molzoo/specs/` — `allegro.md`, `mace_omol.md`, `pinet2.md` (**no `mace.md`**)
+- `src/molzoo/specs/` — `allegro.md`, `mace.md`, `mace_matpes.md`, `mace_omol.md`, `pinet2.md`
 
 **tests** (mirror + regression; not a library package)
 - `tests/test_molix/…`, `tests/test_molrep/…`, `tests/test_molpot/…`, `tests/test_molzoo/…`
@@ -120,7 +120,7 @@ Classical potentials + `BasePotential`; derivation (`ForceDerivation` dual backe
 | Subpackage | Exports |
 |---|---|
 | `molzoo.pinet` | `PiNet`, `PiNetSpec`, `PiNetPotential`, `PiNetDipole`, `PiNetPolarizability`, geometry helpers |
-| `molzoo.specs/` | markdown only: `allegro.md`, `mace_omol.md`, `pinet2.md`; **`mace.md` missing** |
+| `molzoo.specs/` | markdown only: `allegro.md`, `mace.md`, `mace_matpes.md`, `mace_omol.md`, `pinet2.md` |
 
 ---
 
@@ -157,6 +157,6 @@ Classical potentials + `BasePotential`; derivation (`ForceDerivation` dual backe
 3. Edge: `edge_index[:,0]=source`, `edge_diff = pos[target]-pos[source]`; `bond_index` is `(2,N)` COO.
 4. Cache: `PackedCache` only — never `TensorDict.memmap_()`.
 5. Forces: single entry `ForceDerivation`; default `autograd` (cuEq-safe); `functorch` only for pure-torch energy graphs.
-6. Known gaps: **PiNet energy/force still subclasses `molpot.composition.EnergyForceModel` but lives under `molzoo.pinet` for import stability** (physics path unified); `molpot.composition.pooling` coexists with `molpot.pooling`; full-repo test-mirror is incremental (PiNet spine gated); neighbor kernel is O(N²) pair enum (auto buffer sizing + overflow assert; cell-list still TODO).
+6. Known gaps: **`molpot.composition.EnergyForceModel` has zero production subclasses** (PiNet uses `molpot.derivation.protocol` helpers; the MACE ports hand-roll the same shape — consolidation is part of the mace-subpackage restructure spec); `molpot.composition.pooling` coexists with `molpot.pooling`; full-repo test-mirror is incremental (PiNet spine gated); neighbor kernel is O(N²) pair enum (auto buffer sizing + overflow assert; cell-list still TODO).
 
 <!-- mol:map:managed end -->

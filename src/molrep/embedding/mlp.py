@@ -16,10 +16,12 @@ Reference:
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from molix import config
 
@@ -130,3 +132,80 @@ class ScalarMLPFunction(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
+
+
+def normalize2mom(act: Callable[[torch.Tensor], torch.Tensor]) -> float:
+    """Return the constant that normalises ``act`` to unit second moment.
+
+    ``c`` such that ``E[(c·act(z))²] = 1`` for ``z ~ N(0, 1)``, estimated on a
+    fixed one-million-sample draw (seed 0) so the value is reproducible across
+    processes and matches e3nn's ``e3nn.math.normalize2mom``.
+
+    Args:
+        act: Elementwise activation.
+
+    Returns:
+        The scaling constant.
+    """
+    gen = torch.Generator(device="cpu").manual_seed(0)
+    z = torch.randn(1_000_000, generator=gen, dtype=torch.float64)
+    return act(z).pow(2).mean().pow(-0.5).item()
+
+
+class MomentNormalizedMLP(nn.Module):
+    """Scalar MLP with ``1/√fan_in`` weight scaling and moment-normalised SiLU.
+
+    Port of e3nn's ``e3nn.nn.FullyConnectedNet`` (with ``act=silu``), which is
+    what MACE uses for its radial weight generator and edge-density head. Each
+    layer computes ``x @ (W / √fan_in)``; every layer but the last then applies
+    ``c·SiLU`` with ``c`` from :func:`normalize2mom`. There are no biases.
+
+    Sub-modules are named ``layer0 … layerN`` so official MACE weights transfer
+    by direct copy.
+
+    Args:
+        channels: Widths ``[in, hidden…, out]`` (at least two entries).
+
+    Reference:
+        Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
+        Networks for Fast and Accurate Force Fields" NeurIPS 2022.
+        https://arxiv.org/abs/2206.07697
+    """
+
+    class _Layer(nn.Module):
+        """One ``x @ (W / √fan_in)`` layer; ``e3nn.nn._fc._Layer`` weight layout."""
+
+        def __init__(self, in_features: int, out_features: int) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(
+                torch.randn(in_features, out_features, dtype=config.ftype)
+            )
+            self.alpha = 1.0 / math.sqrt(in_features)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x @ (self.weight * self.alpha)
+
+    def __init__(self, channels: list[int]) -> None:
+        super().__init__()
+        if len(channels) < 2:
+            raise ValueError(f"channels must have at least [in, out], got {channels}")
+        self.channels = list(channels)
+        self._act_cst = normalize2mom(F.silu)
+        for i, (h_in, h_out) in enumerate(zip(channels, channels[1:])):
+            self.add_module(f"layer{i}", self._Layer(h_in, h_out))
+        self._num_layers = len(channels) - 1
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the MLP.
+
+        Args:
+            x: Input ``(..., channels[0])``.
+
+        Returns:
+            ``(..., channels[-1])``.
+        """
+        for i in range(self._num_layers):
+            x = getattr(self, f"layer{i}")(x)
+            if i < self._num_layers - 1:
+                x = F.silu(x) * self._act_cst
+        return x
