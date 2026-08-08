@@ -15,6 +15,21 @@ PiNet is a **package** (`molzoo/pinet/`), not a single file:
 Public imports stay stable: `from molzoo.pinet import PiNet, PiNetPotential`.
 The Sonata model lives in `molpot.composition`, not here.
 
+MACE is a **package** too (`molzoo/mace/`), since
+mace-subpackage-restructure-02-core:
+
+| Module | Role |
+|--------|------|
+| `spec` | `MACESpec` base + `MACEMatpesSpec` / `MACEOMolSpec` (torch-free) |
+| `geometry` | `edge_vectors` / `edge_lengths` — additive PBC shifts `S = n·h` |
+| `encoder` | `MACEEncoder` — one configuration-driven foundation backbone |
+| `research` | the freely-configurable research `MACE` encoder (former `molzoo/mace.py`) |
+
+`MACESpec` changed meaning with that move: it is now the **shared
+foundation-variant** configuration base in `molzoo.mace.spec`. The research
+encoder's configuration is `MACEResearchSpec`. The names `MACE`,
+`MACEMatpes` and `MACEOMol` keep resolving from their old import paths.
+
 ## Model Specifications
 
 Each model in this package ships with **one** spec artifact in `specs/`:
@@ -46,38 +61,57 @@ One skill + one agent keep `<encoder>.md` aligned with code and paper:
 
 ## Input Conventions
 
-Both encoders accept keyword tensors:
+The encoders take a post-collate batch `TensorDict` and read:
 
-- `Z`: Atomic numbers `(N,)`
-- `edge_dist`: Edge distances `(E,)`
-- `edge_diff`: Edge vectors `(E, 3)`
-- `edge_index`: Edge indices `(E, 2)`
+- `atoms.Z`: Atomic numbers `(N,)`
+- `atoms.pos`: Positions `(N, 3)`
+- `edges.edge_index`: Edge indices `(E, 2)` — `[:,0]` source, `[:,1]` target
+- `edges.edge_diff`: Edge vectors `(E, 3)` — `pos[target] - pos[source]`
+- `edges.edge_dist`: Edge distances `(E,)`
 
-Output: `(N, num_layers, feature_dim)` — per-atom, per-layer features.
+`MACE` writes `atoms.node_features` `(N, num_layers, feature_dim)` back into
+the same batch.
 
 ## Usage
 
-```python
-import torch
-from molzoo import MACE, MACESpec
-from molrep.embedding.node import DiscreteEmbeddingSpec
-from molpot import LayerPooling, PotentialComposer, LJParameterHead, LJ126
+Research encoder — configured by keyword, features per layer:
 
-encoder = MACE(MACESpec(
+```python
+from molzoo import MACE
+from molrep.embedding.node import DiscreteEmbeddingSpec
+
+encoder = MACE(
     node_attr_specs=[DiscreteEmbeddingSpec(input_key="Z", num_classes=119, emb_dim=64)],
     num_elements=119,
     num_features=64,
     r_max=5.0,
-))
-
-Z = torch.randint(0, 10, (20,))
-features = encoder(
-    Z=Z,
-    edge_dist=torch.rand(80),
-    edge_diff=torch.randn(80, 3),
-    edge_index=torch.randint(0, 20, (80, 2)),
 )
-
-pool = LayerPooling("mean")
-node_features = pool(features)  # (20, 64)
+batch = encoder(batch)                       # writes atoms.node_features
+features = batch["atoms", "node_features"]   # (N, num_layers, 64)
 ```
+
+Foundation backbone — configured by a validated spec, composed by the caller:
+
+```python
+from molzoo.mace.encoder import MACEEncoder
+from molzoo.mace.geometry import edge_lengths, edge_vectors
+from molzoo.mace.spec import MACEMatpesSpec
+
+spec = MACEMatpesSpec(atomic_numbers=[1, 6, 8], atomic_energies=[-13.6, -1029.0, -2041.0])
+encoder = MACEEncoder(spec)
+
+vectors = edge_vectors(pos, edge_index)          # optional shifts=... for PBC
+node_attrs = encoder.node_attrs(Z, pos.dtype)
+edge_feats, cutoff = encoder.radial_features(edge_lengths(vectors), Z, edge_index)
+per_layer = encoder.layer_features(
+    node_feats=encoder.initial_node_features(node_attrs),
+    node_attrs=node_attrs,
+    edge_attrs=encoder.angular_features(vectors),
+    edge_feats=edge_feats,
+    edge_index=edge_index,
+    cutoff=cutoff,
+)
+```
+
+Swap `MACEMatpesSpec` for `MACEOMolSpec` to build the charge/spin-conditioned
+OMOL stack from the same backbone.

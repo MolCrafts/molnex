@@ -1,5 +1,7 @@
 """Tests for molrep.embedding.mace module."""
 
+import math
+
 import pytest
 import torch
 
@@ -8,6 +10,11 @@ from molrep.embedding.cutoff import CosineCutoff
 from molrep.embedding.mace import EmbeddingBlock, EmbeddingSpec
 from molrep.embedding.node import DiscreteEmbeddingSpec, JointEmbedding
 from molrep.embedding.radial import BesselRBF
+from molrep.utils.equivariance import (
+    random_rotation_matrix,
+    rotate_vectors,
+    rotation_matrix_z,
+)
 
 
 class TestEmbeddingSpec:
@@ -206,3 +213,103 @@ class TestEmbeddingBlock:
         bond_dist_zero = torch.tensor([0.0])
         cutoff_value_zero = embedding_block.cutoff_fn(bond_dist_zero)
         assert abs(cutoff_value_zero.item() - 1.0) < 0.01
+
+
+class TestEmbeddingBlockEquivariance:
+    """Test equivariance properties of EmbeddingBlock.
+
+    Migrated from ``tests/test_molzoo/test_mace.py`` by
+    mace-subpackage-restructure-02-core (the block now lives in molrep, and
+    the molzoo module/package name clash forced the file's removal).
+    """
+
+    @pytest.fixture
+    def embedding_block(self):
+        """Create an EmbeddingBlock for equivariance testing."""
+        node_attr_specs = [
+            DiscreteEmbeddingSpec(
+                input_key="Z",
+                num_classes=5,
+                emb_dim=16,
+            )
+        ]
+        return EmbeddingBlock(
+            node_attr_specs=node_attr_specs,
+            num_features=16,
+            r_max=5.0,
+            num_bessel=8,
+            l_max=2,
+        )
+
+    def test_spherical_harmonics_equivariance(self, embedding_block):
+        """Test that spherical harmonics are equivariant under rotation.
+
+        Rotating the bond vectors should rotate the spherical harmonics accordingly.
+        """
+        n_atoms = 4
+        n_edges = 6
+
+        # Create input data
+        z = torch.randint(0, 5, (n_atoms,))
+        edge_diff = torch.randn(n_edges, 3)
+        edge_dist = torch.norm(edge_diff, dim=-1)
+
+        # Forward pass
+        _, edge_attrs1, _ = embedding_block(
+            Z=z,
+            edge_dist=edge_dist,
+            edge_diff=edge_diff,
+        )
+
+        # Rotate bond vectors
+        angle = math.pi / 2
+        rot_matrix = rotation_matrix_z(angle, dtype=edge_diff.dtype)
+        bond_diff_rot = rotate_vectors(edge_diff, rot_matrix)
+
+        # Forward pass on rotated
+        _, edge_attrs2, _ = embedding_block(
+            Z=z,
+            edge_dist=edge_dist,
+            edge_diff=bond_diff_rot,
+        )
+
+        # l=0 component should be invariant
+        assert torch.allclose(edge_attrs1[:, 0], edge_attrs2[:, 0], atol=1e-5)
+
+        # Overall norm should be preserved
+        norm1 = edge_attrs1.norm(dim=-1)
+        norm2 = edge_attrs2.norm(dim=-1)
+        assert torch.allclose(norm1, norm2, rtol=1e-4, atol=1e-4)
+
+    def test_radial_features_invariance(self, embedding_block):
+        """Test that radial features are rotation invariant.
+
+        Rotating bond vectors should not change radial features (distances).
+        """
+        n_atoms = 4
+        n_edges = 6
+
+        z = torch.randint(0, 5, (n_atoms,))
+        edge_diff = torch.randn(n_edges, 3)
+        edge_dist = torch.norm(edge_diff, dim=-1)
+
+        # Forward pass
+        _, _, edge_feats1 = embedding_block(
+            Z=z,
+            edge_dist=edge_dist,
+            edge_diff=edge_diff,
+        )
+
+        # Rotate bond vectors
+        rot_matrix = random_rotation_matrix(dtype=edge_diff.dtype)
+        bond_diff_rot = rotate_vectors(edge_diff, rot_matrix)
+
+        # Forward pass on rotated
+        _, _, edge_feats2 = embedding_block(
+            Z=z,
+            edge_dist=edge_dist,
+            edge_diff=bond_diff_rot,
+        )
+
+        # Radial features should be identical (rotation invariant)
+        assert torch.allclose(edge_feats1, edge_feats2, rtol=1e-5, atol=1e-5)

@@ -1,9 +1,13 @@
 """Tests for molrep.interaction.mace.block module."""
 
+import cuequivariance_torch as cuet
 import pytest
 import torch
+import torch.nn as nn
 
 from molrep.interaction.mace.block import InteractionBlock, InteractionSpec
+from molrep.interaction.mace.conv import ConvTP
+from molrep.interaction.radial import RadialWeightMLP
 
 N_NODES = 4
 FEATURES = 8
@@ -93,3 +97,102 @@ class TestInteractionBlock:
             "radial_mlp.mlp.4.bias",
             "radial_mlp.mlp.4.weight",
         ]
+
+    # -- migrated from tests/test_molzoo/test_mace.py by
+    #    mace-subpackage-restructure-02-core (module/package name clash forced
+    #    that file's removal; these cases have no equivalent above) ----------
+
+    @pytest.fixture
+    def interaction_config(self):
+        """Wider configuration inherited with the migrated cases."""
+        return {
+            "num_features": 64,
+            "num_bessel": 8,
+            "l_max": 2,
+            "avg_num_neighbors": 10.0,
+        }
+
+    @pytest.fixture
+    def interaction_block(self, interaction_config):
+        """Create an InteractionBlock instance."""
+        return InteractionBlock(**interaction_config)
+
+    def test_initialization_wires_components(self, interaction_block, interaction_config):
+        """Every sub-block is present and of the expected type."""
+        # conv_tp must be created first to provide weight_numel
+        assert isinstance(interaction_block.conv_tp, ConvTP)
+        assert isinstance(interaction_block.node_linear, cuet.Linear)
+        assert isinstance(interaction_block.radial_mlp, RadialWeightMLP)
+        assert isinstance(interaction_block.linear, cuet.Linear)
+        assert interaction_block.avg_num_neighbors == interaction_config["avg_num_neighbors"]
+
+    def test_initialization_order_fix(self, interaction_config):
+        """conv_tp is initialized before radial_mlp (regression guard).
+
+        Building the radial MLP first raised ``AttributeError: self.conv_tp``,
+        because the MLP's output width is ``conv_tp.weight_numel``.
+        """
+        block = InteractionBlock(**interaction_config)
+        assert hasattr(block.conv_tp, "weight_numel")
+        assert block.radial_mlp.mlp[-1].out_features == block.conv_tp.weight_numel
+
+    def test_config_storage(self, interaction_block, interaction_config):
+        """Constructor kwargs round-trip through the pydantic ``config``."""
+        config = interaction_block.config
+        assert config.num_features == interaction_config["num_features"]
+        assert config.num_bessel == interaction_config["num_bessel"]
+        assert config.l_max == interaction_config["l_max"]
+        assert config.avg_num_neighbors == interaction_config["avg_num_neighbors"]
+
+    def test_radial_mlp_architecture(self, interaction_block, interaction_config):
+        """``Linear → SiLU → Linear → SiLU → Linear`` with MACE's widths."""
+        mlp = interaction_block.radial_mlp.mlp
+        num_features = interaction_config["num_features"]
+        num_bessel = interaction_config["num_bessel"]
+        weight_numel = interaction_block.conv_tp.weight_numel
+
+        assert len(mlp) == 5
+        assert isinstance(mlp[0], nn.Linear)
+        assert isinstance(mlp[1], nn.SiLU)
+        assert isinstance(mlp[2], nn.Linear)
+        assert isinstance(mlp[3], nn.SiLU)
+        assert isinstance(mlp[4], nn.Linear)
+
+        assert mlp[0].in_features == num_bessel
+        assert mlp[0].out_features == num_features
+        assert mlp[2].in_features == num_features
+        assert mlp[2].out_features == num_features
+        assert mlp[4].in_features == num_features
+        assert mlp[4].out_features == weight_numel
+
+    def test_cuequivariance_integration(self, interaction_block):
+        """The convolution is a cuEq ``ChannelWiseTensorProduct``, not a port."""
+        cue_tp = interaction_block.conv_tp.cue_tp
+        assert isinstance(cue_tp, cuet.ChannelWiseTensorProduct)
+        assert hasattr(cue_tp, "irreps_in1")
+        assert hasattr(cue_tp, "irreps_in2")
+        assert hasattr(cue_tp, "irreps_out")
+
+    @pytest.mark.parametrize("l_max", [1, 2, 3])
+    def test_different_l_max_values(self, interaction_config, l_max):
+        """Construction succeeds for every angular order MACE ships."""
+        block = InteractionBlock(
+            num_features=interaction_config["num_features"],
+            num_bessel=interaction_config["num_bessel"],
+            l_max=l_max,
+            avg_num_neighbors=interaction_config["avg_num_neighbors"],
+        )
+        assert block.config.l_max == l_max
+        assert hasattr(block.conv_tp, "weight_numel")
+
+    @pytest.mark.parametrize("num_features", [32, 64, 128])
+    def test_different_num_features(self, interaction_config, num_features):
+        """The radial MLP hidden width tracks ``num_features``."""
+        block = InteractionBlock(
+            num_features=num_features,
+            num_bessel=interaction_config["num_bessel"],
+            l_max=interaction_config["l_max"],
+            avg_num_neighbors=interaction_config["avg_num_neighbors"],
+        )
+        assert block.radial_mlp.mlp[0].out_features == num_features
+        assert block.radial_mlp.mlp[2].in_features == num_features

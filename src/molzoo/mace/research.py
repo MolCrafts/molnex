@@ -1,8 +1,14 @@
-"""MACE: Multi-Atomic Cluster Expansion encoder.
+"""MACE: Multi-Atomic Cluster Expansion research encoder.
 
 Equivariant message-passing encoder that produces per-layer node features.
 Downstream readout, classical potential terms, and force derivation are
 handled outside this module.
+
+This is the *research* encoder (freely configurable node-attribute embeddings,
+element updates and layer norms), as opposed to the foundation-model backbone
+in :mod:`molzoo.mace.encoder`. Its configuration model is therefore named
+:class:`MACEResearchSpec`; ``molzoo.mace.MACESpec`` now refers to the shared
+foundation-variant base in :mod:`molzoo.mace.spec`.
 
 Example:
     >>> from molzoo import MACE
@@ -58,7 +64,7 @@ __all__ = [
     "InteractionBlock",
     "InteractionSpec",
     "MACE",
-    "MACESpec",
+    "MACEResearchSpec",
 ]
 
 
@@ -134,7 +140,13 @@ class MACE(TensorDictModuleBase):
         """
         super().__init__()
 
-        self.config = MACESpec(
+        # Frozen on the hot path: reading ``self.config.num_interactions`` in
+        # ``forward`` is a pydantic attribute lookup inside the layer loop, i.e.
+        # a dynamo graph break (cf. ``mace_matpes.py:118``). ``self.config`` is
+        # kept for provenance only and must not be read by ``forward``.
+        self.num_interactions = num_interactions
+
+        self.config = MACEResearchSpec(
             node_attr_specs=node_attr_specs,
             num_elements=num_elements,
             num_features=num_features,
@@ -251,7 +263,7 @@ class MACE(TensorDictModuleBase):
         # ---- Interaction-Product-Update loop ----
         per_layer_features: list[torch.Tensor] = []
 
-        for i in range(self.config.num_interactions):
+        for i in range(self.num_interactions):
             node_feats_msg, sc = self.interactions[i](
                 node_feats=node_feats,
                 edge_attrs=edge_attrs,
@@ -268,7 +280,7 @@ class MACE(TensorDictModuleBase):
 
             h_proj = self.projections[i](h_product)
 
-            is_last = i == (self.config.num_interactions - 1)
+            is_last = i == (self.num_interactions - 1)
             if not is_last:
                 node_feats = self.element_updates[i](
                     h_prev=sc,
@@ -283,7 +295,7 @@ class MACE(TensorDictModuleBase):
         return td
 
 
-class MACESpec(BaseModel):
+class MACEResearchSpec(BaseModel):
     """Configuration for the MACE feature extractor.
 
     Attributes:
