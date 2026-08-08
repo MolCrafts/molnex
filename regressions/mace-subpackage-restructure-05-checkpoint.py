@@ -4,8 +4,8 @@ Chain step 05 merges the two hand-copied official-checkpoint loaders
 (``molzoo.mace_matpes.load_matpes_state_dict`` /
 ``molzoo.mace_omol.load_omol_state_dict``) into the one
 :class:`molzoo.mace.CheckpointRemap`, and gives step 04's
-:class:`molzoo.mace.MACEPotential` a ``from_checkpoint`` classmethod. Step 07
-then **deletes** the flat modules, so this file must never import them — it
+:class:`molzoo.mace.MACEPotential` a ``from_checkpoint`` classmethod. Step 06
+then **deleted** the flat modules, so this file must never import them — it
 uses ``molzoo.mace`` only and is expected to keep running unchanged afterwards.
 
 Scenario (public API only), start to finish inside one ``tempfile`` directory:

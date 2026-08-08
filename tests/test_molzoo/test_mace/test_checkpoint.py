@@ -1,8 +1,9 @@
 """Tests for molzoo.mace.checkpoint — the one official-checkpoint key remap.
 
 :class:`~molzoo.mace.checkpoint.CheckpointRemap` replaces the two hand-copied
-loaders (``molzoo.mace_matpes.load_matpes_state_dict`` /
-``molzoo.mace_omol.load_omol_state_dict``) with a single type whose only
+loaders of the pre-cutover flat modules (now the thin compatibility aliases
+:func:`molzoo.mace.variants.load_matpes_state_dict` /
+:func:`~molzoo.mace.variants.load_omol_state_dict`) with a single type whose only
 family-dependent behaviour is the ``on_unexpected`` knob: MatPES raises on a
 checkpoint key with no home, OMol returns it (that family ships auxiliary
 heads this port deliberately does not model). Everything else — the
@@ -22,11 +23,12 @@ from the check and left ~2e-7 of the official weights in the parity residual.
 
 Test data is built with the ``_official_state`` round trip — a model's own
 ``state_dict`` renamed into official cueq names and loaded back into a
-differently initialised model — reusing the trick of
-``tests/test_molzoo/test_mace_matpes.py::TestLoadMatpesStateDict._roundtrip_state``
-(:224-240). The inverse name tables below are written out **by hand** rather
-than derived from the tables under test, so a wrong entry in the production
-table cannot cancel itself out in the round trip.
+differently initialised model — the trick the pre-cutover
+``TestLoadMatpesStateDict._roundtrip_state`` used, now shared by that class
+(migrated into this file by ``mace-subpackage-restructure-06-wire``) and by
+:class:`TestCheckpointRemap`. The inverse name tables below are written out
+**by hand** rather than derived from the tables under test, so a wrong entry in
+the production table cannot cancel itself out in the round trip.
 
 Every model here is tiny (2 layers, 16 channels, ``l_max=1``), fp64 (autouse
 ``fp64`` fixture in ``conftest.py``), CPU, ``use_fallback=True`` (no fused
@@ -58,6 +60,7 @@ from molzoo.mace.checkpoint import (
 )
 from molzoo.mace.potential import MACEPotential
 from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec
+from molzoo.mace.variants import MACEMatpes, load_matpes_state_dict
 from tests.test_molzoo.test_mace.conftest import (
     ATOMIC_ENERGIES,
     ATOMIC_NUMBERS,
@@ -457,6 +460,73 @@ class TestFromCheckpoint:
 
         with pytest.raises((KeyError, ValueError), match=absent):
             MACEPotential.from_checkpoint(config_path, weights_path, use_fallback=True)
+
+
+class TestLoadMatpesStateDict:
+    """Test the compatibility alias ``variants.load_matpes_state_dict``.
+
+    Migrated verbatim (criteria and messages) from
+    ``tests/test_molzoo/test_mace_matpes.py::TestLoadMatpesStateDict`` by
+    ``mace-subpackage-restructure-06-wire``. The function lives in
+    :mod:`molzoo.mace.variants`, but everything it promises — the key dialect
+    and the three refusals — is :mod:`molzoo.mace.checkpoint`'s doctrine, so
+    the cases sit next to :class:`TestCheckpointRemap` (spec §5). What they add
+    over that class is the *forwarding*: an alias that quietly called
+    ``load_state_dict`` instead would pass none of the three refusals.
+    """
+
+    def test_roundtrip_restores_every_parameter(self, matpes_variant: MACEMatpes) -> None:
+        """A checkpoint written in official names loads back bit-for-bit."""
+        state = _official_state(matpes_variant, MATPES_OFFICIAL_NAMES)
+        torch.manual_seed(1)
+        fresh = MACEMatpes(
+            atomic_numbers=list(ATOMIC_NUMBERS),
+            atomic_energies=torch.tensor(ATOMIC_ENERGIES),
+            **{**TINY_MATPES_KWARGS, "use_fallback": False},
+        )
+        assert any(
+            not torch.equal(want, got)
+            for (_, want), (_, got) in zip(
+                matpes_variant.named_parameters(), fresh.named_parameters(), strict=True
+            )
+        ), "the two models start out identical — the round trip would be vacuous"
+
+        load_matpes_state_dict(fresh, state)
+
+        for (name, want), (_, got) in zip(
+            matpes_variant.named_parameters(), fresh.named_parameters(), strict=True
+        ):
+            assert torch.equal(want, got), name
+
+    def test_rejects_unknown_checkpoint_key(self, matpes_variant: MACEMatpes) -> None:
+        """A key with no home means the mapping is stale — do not load silently."""
+        state = _official_state(matpes_variant, MATPES_OFFICIAL_NAMES)
+        state[MYSTERY_KEY] = torch.zeros(3)
+        with pytest.raises(RuntimeError, match="no home"):
+            load_matpes_state_dict(matpes_variant, state)
+
+    def test_rejects_missing_parameter(self, matpes_variant: MACEMatpes) -> None:
+        """A parameter the checkpoint never fills would keep its random init."""
+        state = _official_state(matpes_variant, MATPES_OFFICIAL_NAMES)
+        del state[COVERED_PARAMETER]
+        with pytest.raises(RuntimeError, match="not covered"):
+            load_matpes_state_dict(matpes_variant, state)
+
+    def test_rejects_shape_mismatch(self, matpes_variant: MACEMatpes) -> None:
+        """Wrong shapes mean the model was built with the wrong config."""
+        state = _official_state(matpes_variant, MATPES_OFFICIAL_NAMES)
+        state[COVERED_PARAMETER] = torch.zeros(1, 7, dtype=torch.float64)
+        with pytest.raises(RuntimeError, match="shape mismatch"):
+            load_matpes_state_dict(matpes_variant, state)
+
+    def test_accepts_rank_difference_on_frozen_scalars(self, matpes_variant: MACEMatpes) -> None:
+        """MACE stores scale/shift as ``(1,)``; molnex holds a 0-d buffer."""
+        state = _official_state(matpes_variant, MATPES_OFFICIAL_NAMES)
+        state["scale_shift.scale"] = torch.tensor([FROZEN_SCALAR_VALUE], dtype=torch.float64)
+
+        load_matpes_state_dict(matpes_variant, state)
+
+        assert float(matpes_variant.scale_shift.scale) == pytest.approx(FROZEN_SCALAR_VALUE)
 
 
 @pytest.mark.skipif(

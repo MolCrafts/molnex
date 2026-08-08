@@ -1,10 +1,11 @@
 """Tests for molzoo.mace.encoder — the spec-driven MACE backbone.
 
 The chain gate is ``state_dict`` parity: :class:`~molzoo.mace.encoder.MACEEncoder`
-must register exactly the modules the flat ``MACEMatpes`` / ``MACEOMol`` variants
+must register exactly the modules the keyword-constructed
+:class:`molzoo.mace.variants.MACEMatpes` / :class:`~molzoo.mace.variants.MACEOMol`
 register, under exactly the same names, so an official checkpoint keeps loading
-without a key rewrite (05-checkpoint) and the 04 variant classes can simply
-inherit the backbone.
+without a key rewrite (05-checkpoint) and the variant classes can simply inherit
+the backbone.
 
 Everything else here pins one primitive at a time: the encoder exposes
 ``validate_elements`` / ``node_attrs`` / ``initial_node_features`` /
@@ -22,28 +23,15 @@ from typing import Any
 
 import pytest
 import torch
-from molzoo.mace.encoder import MACEEncoder
 from tensordict import TensorDict
 
-from tests.conftest import make_graph_batch, rotate_graph, translate_graph
+from molzoo.mace.encoder import MACEEncoder
+from tests.conftest import rotate_graph, translate_graph
 from tests.test_molzoo.test_mace.conftest import (
-    ATOMIC_ENERGIES,
-    ATOMIC_NUMBERS,
+    CLUSTER_Z,
     TINY_MATPES_KWARGS,
     TINY_OMOL_KWARGS,
 )
-
-#: A five-atom cluster at literal coordinates (Å) — no RNG anywhere.
-CLUSTER_POS = [
-    [0.00, 0.00, 0.00],
-    [0.95, 0.00, 0.00],
-    [-0.24, 0.93, 0.00],
-    [0.00, 0.00, 1.40],
-    [1.20, 1.10, 0.60],
-]
-
-#: Atomic numbers, all inside the ``[1, 6, 8]`` table.
-CLUSTER_Z = [8, 1, 1, 6, 1]
 
 #: Rigid translation applied by the invariance test (Å).
 TRANSLATION = [0.31, -0.72, 1.13]
@@ -63,38 +51,6 @@ EXPECTED_ONE_HOT = [
     [0.0, 1.0, 0.0],
     [1.0, 0.0, 0.0],
 ]
-
-
-def _flat_matpes():
-    """The flat MACEMatpes on :data:`TINY_MATPES_KWARGS` — the parity reference."""
-    from molzoo.mace_matpes import MACEMatpes
-
-    return MACEMatpes(
-        atomic_numbers=list(ATOMIC_NUMBERS),
-        atomic_energies=torch.tensor(ATOMIC_ENERGIES),
-        **TINY_MATPES_KWARGS,
-    )
-
-
-def _flat_omol():
-    """The flat MACEOMol on :data:`TINY_OMOL_KWARGS` — the parity reference.
-
-    ``MACEOMol`` has no ``use_fallback`` argument; it hard-codes the fused
-    cuEq path, which is why the tiny OMOL spec pins ``use_fallback=False``.
-    """
-    from molzoo.mace_omol import MACEOMol
-
-    return MACEOMol(
-        atomic_numbers=list(ATOMIC_NUMBERS),
-        atomic_energies=torch.tensor(ATOMIC_ENERGIES),
-        **TINY_OMOL_KWARGS,
-    )
-
-
-def _full_edge_index(n_atoms: int) -> torch.Tensor:
-    """All ordered intra-cluster pairs as ``(E, 2)`` ``[source, target]``."""
-    pairs = [[i, j] for i in range(n_atoms) for j in range(n_atoms) if i != j]
-    return torch.tensor(pairs, dtype=torch.long)
 
 
 def _rotation_matrix() -> torch.Tensor:
@@ -150,34 +106,6 @@ def _spec_reading_methods(cls: type) -> list[str]:
 
 
 @pytest.fixture
-def cluster() -> TensorDict:
-    """A shift-free five-atom batch built by the shared ``make_graph_batch``."""
-    pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
-    return make_graph_batch(
-        pos=pos,
-        Z=torch.tensor(CLUSTER_Z, dtype=torch.long),
-        edge_index=_full_edge_index(len(CLUSTER_Z)),
-        batch=torch.zeros(len(CLUSTER_Z), dtype=torch.long),
-    )
-
-
-@pytest.fixture
-def periodic_cluster() -> TensorDict:
-    """The same cluster with a non-zero ``edges.shifts`` on the first two edges."""
-    edge_index = _full_edge_index(len(CLUSTER_Z))
-    shifts = torch.zeros(edge_index.shape[0], 3, dtype=torch.float64)
-    shifts[0] = torch.tensor([2.0, 0.0, 0.0], dtype=torch.float64)
-    shifts[1] = torch.tensor([-2.0, 0.0, 0.0], dtype=torch.float64)
-    return make_graph_batch(
-        pos=torch.tensor(CLUSTER_POS, dtype=torch.float64),
-        Z=torch.tensor(CLUSTER_Z, dtype=torch.long),
-        edge_index=edge_index,
-        batch=torch.zeros(len(CLUSTER_Z), dtype=torch.long),
-        shifts=shifts,
-    )
-
-
-@pytest.fixture
 def matpes_encoder(tiny_matpes_spec) -> MACEEncoder:
     """``MACEEncoder`` on the tiny MatPES spec."""
     return MACEEncoder(tiny_matpes_spec).eval()
@@ -194,28 +122,30 @@ class TestMACEEncoder:
 
     # -- state_dict parity: the chain gate -----------------------------------
 
-    def test_state_dict_keys_match_flat_matpes(self, matpes_encoder):
+    def test_state_dict_keys_match_the_matpes_variant(self, matpes_encoder, matpes_variant):
         """Same module names as ``MACEMatpes`` — checkpoints load without a rewrite."""
-        assert set(matpes_encoder.state_dict()) == set(_flat_matpes().state_dict())
+        assert set(matpes_encoder.state_dict()) == set(matpes_variant.state_dict())
 
-    def test_state_dict_shapes_and_dtypes_match_flat_matpes(self, matpes_encoder):
+    def test_state_dict_shapes_and_dtypes_match_the_matpes_variant(
+        self, matpes_encoder, matpes_variant
+    ):
         """Every shared MatPES entry agrees on ``shape`` and ``dtype``."""
-        flat = _flat_matpes().state_dict()
+        oracle = matpes_variant.state_dict()
         own = matpes_encoder.state_dict()
-        mine = {k: (tuple(v.shape), v.dtype) for k, v in own.items() if k in flat}
-        theirs = {k: (tuple(v.shape), v.dtype) for k, v in flat.items() if k in own}
+        mine = {k: (tuple(v.shape), v.dtype) for k, v in own.items() if k in oracle}
+        theirs = {k: (tuple(v.shape), v.dtype) for k, v in oracle.items() if k in own}
         assert mine == theirs
 
-    def test_state_dict_keys_match_flat_omol(self, omol_encoder):
+    def test_state_dict_keys_match_the_omol_variant(self, omol_encoder, omol_variant):
         """Same module names as ``MACEOMol`` — the second variant of one backbone."""
-        assert set(omol_encoder.state_dict()) == set(_flat_omol().state_dict())
+        assert set(omol_encoder.state_dict()) == set(omol_variant.state_dict())
 
-    def test_state_dict_shapes_and_dtypes_match_flat_omol(self, omol_encoder):
+    def test_state_dict_shapes_and_dtypes_match_the_omol_variant(self, omol_encoder, omol_variant):
         """Every shared OMOL entry agrees on ``shape`` and ``dtype``."""
-        flat = _flat_omol().state_dict()
+        oracle = omol_variant.state_dict()
         own = omol_encoder.state_dict()
-        mine = {k: (tuple(v.shape), v.dtype) for k, v in own.items() if k in flat}
-        theirs = {k: (tuple(v.shape), v.dtype) for k, v in flat.items() if k in own}
+        mine = {k: (tuple(v.shape), v.dtype) for k, v in own.items() if k in oracle}
+        theirs = {k: (tuple(v.shape), v.dtype) for k, v in oracle.items() if k in own}
         assert mine == theirs
 
     # -- element table primitives --------------------------------------------

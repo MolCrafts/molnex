@@ -18,10 +18,9 @@ algebra MACE is built from, abbreviated ``cueq`` in key names and throughout
 this module. That conversion (``mace.cli.convert_e3nn_cueq``) is an offline
 step; molnex never imports ``mace-torch``.
 
-:class:`CheckpointRemap` replaces the two hand-copied loaders
-(``molzoo.mace_matpes.load_matpes_state_dict`` /
-``molzoo.mace_omol.load_omol_state_dict``), which had drifted into two
-byte-identical implementations of three ideas:
+:class:`CheckpointRemap` replaces the two hand-copied loaders that the
+pre-cutover flat modules carried (deleted in 06-wire; see git history), which
+had drifted into two byte-identical implementations of three ideas:
 
 1. skip the entries cuEquivariance rebuilds anyway — symbolic graph constants
    (``".graph.c" in key``) and *irrep* masks (``key.endswith("output_mask")``).

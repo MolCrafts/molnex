@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACESpec
 from pydantic import ValidationError
 
+from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACESpec
 from tests.test_molzoo.test_mace.conftest import ATOMIC_ENERGIES, ATOMIC_NUMBERS
 
 #: The five variant switches are required on the base and defaulted on the

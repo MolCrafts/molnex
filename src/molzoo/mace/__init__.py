@@ -1,4 +1,4 @@
-"""MACE sub-package: the research encoder plus the foundation-model core layer.
+"""MACE package — configuration, encoder, energy/force potential, checkpoints.
 
 MACE is a message-passing neural network for the potential energy of a set of
 atoms (Batatia et al., NeurIPS 2022, https://arxiv.org/abs/2206.07697). It is
@@ -10,39 +10,61 @@ implementation of both sides — a configurable research encoder, and the two
 foundation variants (MatPES, OMol) behind
 :class:`~molzoo.mace.potential.MACEPotential`.
 
-Transitional layout, mid-way through the ``mace-subpackage-restructure`` spec
-chain (``.claude/specs/INDEX.md``). ``molzoo/mace.py`` became
-:mod:`molzoo.mace.research`, and the configuration-driven core layer lands
-beside it:
+Layout (industrial split) — one module, one responsibility:
 
-* :mod:`molzoo.mace.spec` — torch-free configuration family
-* :mod:`molzoo.mace.geometry` — MACE edge displacement / length
-* :mod:`molzoo.mace.encoder` — configuration-driven backbone
-* :mod:`molzoo.mace.potential` — :class:`~molzoo.mace.potential.MACEPotential`,
-  the energy/force host on top of that backbone: per-graph energy ``(B,)`` in
-  eV and per-atom forces ``(N, 3)`` in eV/Å on the post-collate batch
-* :mod:`molzoo.mace.checkpoint` — official-checkpoint key dialect:
-  :class:`~molzoo.mace.checkpoint.CheckpointRemap`, the two family tables
-  (:data:`~molzoo.mace.checkpoint.MATPES_KEY_REMAP` /
-  :data:`~molzoo.mace.checkpoint.OMOL_KEY_REMAP`) and their preset instances —
-  :data:`~molzoo.mace.checkpoint.MATPES_REMAP`, which refuses a checkpoint key
-  with no home, and :data:`~molzoo.mace.checkpoint.OMOL_REMAP`, which returns
-  the unhoused keys instead. Both are strict about unfilled parameters.
-* :mod:`molzoo.mace.research` — the research encoder (former ``molzoo/mace.py``)
+* :mod:`molzoo.mace.spec` — configuration and variant presets (torch-free)
+* :mod:`molzoo.mace.geometry` — edge displacement vectors and their lengths,
+  correct under periodic boundary conditions (PBC — the simulation cell is
+  taken to repeat for ever in every direction, so an atom's nearest neighbour
+  may be the copy of an atom across a cell face)
+* :mod:`molzoo.mace.encoder` — feature encoder built from molrep blocks
+* :mod:`molzoo.mace.potential` — per-graph energy ``(B,)`` in eV for the ``B``
+  graphs of a batch (one graph = one molecule or one periodic cell) and
+  per-atom forces ``(N, 3)`` in eV/Å for its ``N`` atoms, on the post-collate
+  batch (the nested ``TensorDict`` schema described in CLAUDE.md)
+* :mod:`molzoo.mace.checkpoint` — official-weight key remap
+  (:class:`~molzoo.mace.checkpoint.CheckpointRemap`, the two family tables and
+  their presets :data:`~molzoo.mace.checkpoint.MATPES_REMAP` /
+  :data:`~molzoo.mace.checkpoint.OMOL_REMAP`; both strict about unfilled
+  parameters, and they differ only in what an unhoused checkpoint key means)
+* :mod:`molzoo.mace.variants` — named foundation models
+  (:class:`~molzoo.mace.variants.MACEMatpes` /
+  :class:`~molzoo.mace.variants.MACEOMol`), kept for the call sites that
+  construct them by keyword
+* :mod:`molzoo.mace.research` — the freely configurable research encoder
 
-Every legacy ``from molzoo.mace import …`` name still resolves; the final
-re-export surface is settled by
-``.claude/specs/mace-subpackage-restructure-06-wire.md``.
+Four names in :data:`__all__` are **not** defined here: ``EmbeddingBlock`` /
+``EmbeddingSpec`` come from :mod:`molrep.embedding.mace` and ``InteractionBlock``
+/ ``InteractionSpec`` from :mod:`molrep.interaction.mace.block`, where they were
+promoted so molrep owns the reusable blocks. They are re-exported unchanged —
+the same class objects, pinned by
+``tests/test_molzoo/test_imports.py::TestMolzooMaceReexports`` — so existing
+``from molzoo.mace import EmbeddingBlock`` imports keep resolving.
 
-``MACESpec`` changed meaning here, deliberately: it is now the shared
-foundation-variant configuration base (:class:`molzoo.mace.spec.MACESpec`).
-The research encoder's own configuration is
-:class:`molzoo.mace.research.MACEResearchSpec`.
+Public import surface is stable::
+
+    from molzoo.mace import MACE, MACEMatpesSpec, MACEPotential
+
+``MACESpec`` names the shared foundation-variant configuration base
+(:class:`molzoo.mace.spec.MACESpec`); the research encoder's own configuration
+is :class:`molzoo.mace.research.MACEResearchSpec`.
 
 The configuration models are imported eagerly — they are torch-free, and
-reading a config should not cost the cuEquivariance stack. Everything else is
-loaded lazily on first attribute access (PEP 562), mirroring
-``molzoo/__init__.py``.
+reading a config should not cost the cuEquivariance stack (NVIDIA's GPU library
+for the equivariant tensor algebra MACE is built from). Everything else is
+loaded **lazily**: the module object does not hold the attribute until someone
+asks for it, at which point the module-level ``__getattr__`` hook of PEP 562
+imports it. That is the same policy as ``molzoo/__init__.py``, which applies it
+to every one of its names.
+
+Reference:
+    Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
+    Networks for Fast and Accurate Force Fields" NeurIPS 2022.
+    https://arxiv.org/abs/2206.07697
+    Batatia et al. "A foundation model for atomistic materials chemistry"
+    (MACE-MP-0). https://arxiv.org/abs/2401.00096
+    Kaplan et al. "A foundational potential energy surface dataset for
+    materials" (MatPES). https://arxiv.org/abs/2503.04070
 """
 
 from typing import TYPE_CHECKING
@@ -61,6 +83,12 @@ if TYPE_CHECKING:
     )
     from molzoo.mace.potential import MACEPotential
     from molzoo.mace.research import MACE, MACEResearchSpec
+    from molzoo.mace.variants import (
+        MACEMatpes,
+        MACEOMol,
+        load_matpes_state_dict,
+        load_omol_state_dict,
+    )
 
 #: Lazily exported (PEP 562): each of these pulls in cuEquivariance (or, for
 #: the checkpoint names, torch).
@@ -68,6 +96,10 @@ _LAZY = {
     "MACE": "molzoo.mace.research",
     "MACEPotential": "molzoo.mace.potential",
     "MACEResearchSpec": "molzoo.mace.research",
+    "MACEMatpes": "molzoo.mace.variants",
+    "MACEOMol": "molzoo.mace.variants",
+    "load_matpes_state_dict": "molzoo.mace.variants",
+    "load_omol_state_dict": "molzoo.mace.variants",
     "CheckpointRemap": "molzoo.mace.checkpoint",
     "MATPES_KEY_REMAP": "molzoo.mace.checkpoint",
     "MATPES_REMAP": "molzoo.mace.checkpoint",
@@ -86,7 +118,9 @@ __all__ = [
     "InteractionBlock",
     "InteractionSpec",
     "MACE",
+    "MACEMatpes",
     "MACEMatpesSpec",
+    "MACEOMol",
     "MACEOMolSpec",
     "MACEPotential",
     "MACEResearchSpec",
@@ -95,6 +129,8 @@ __all__ = [
     "MATPES_REMAP",
     "OMOL_KEY_REMAP",
     "OMOL_REMAP",
+    "load_matpes_state_dict",
+    "load_omol_state_dict",
 ]
 
 
@@ -117,3 +153,17 @@ def __getattr__(name: str):
     import importlib
 
     return getattr(importlib.import_module(module_name), name)
+
+
+def __dir__() -> list[str]:
+    """Report the public surface, so completion survives the lazy table.
+
+    Without this, ``dir(molzoo.mace)`` lists the module globals — which, under
+    the lazy policy, is the torch-free config names and nothing else. It
+    returns exactly :data:`__all__`, the same set ``from molzoo.mace import *``
+    binds, so the two cannot drift apart. Same contract as ``molzoo/__init__``.
+
+    Returns:
+        The names in :data:`__all__`, sorted.
+    """
+    return sorted(__all__)

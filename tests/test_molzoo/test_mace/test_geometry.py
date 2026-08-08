@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+
 from molzoo.mace.geometry import edge_lengths, edge_vectors
 
 #: Three atoms at literal coordinates (Å).

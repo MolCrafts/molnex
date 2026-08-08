@@ -48,6 +48,7 @@ ALLOW_MISSING: frozenset[str] = frozenset(
 PINET_SPINE: tuple[str, ...] = (
     "molrep/interaction/pinet/",
     "molrep/interaction/mace/",
+    "molzoo/mace/",
     "molzoo/pinet/",
     "molpot/derivation/force.py",
     "molpot/derivation/energy.py",

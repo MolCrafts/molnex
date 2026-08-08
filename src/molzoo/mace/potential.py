@@ -41,11 +41,9 @@ the autograd derivative of this same ``E_g``.
 foundation variant. Which variant it is comes entirely from the
 :class:`~molzoo.mace.spec.MACESpec` it is built from — the MatPES density
 stack (arXiv:2503.04070) or the OMOL charge/spin-conditioned residual stack —
-so the two flat modules that duplicate this forward today
-(``molzoo.mace_matpes`` / ``molzoo.mace_omol``) collapse into this single
-class. Those two stay in the tree meanwhile as the numerical parity reference;
-deleting them is the job of the restructure's wiring step
-(``.claude/specs/mace-subpackage-restructure-06-wire.md``).
+so the two pre-cutover flat modules that each duplicated this forward
+(deleted in the restructure's wiring step, 06-wire; see git history) collapse
+into this single class.
 
 It **inherits** :class:`~molzoo.mace.encoder.MACEEncoder` rather than holding
 one, mirroring upstream's ``ScaleShiftMACE(MACE)``: holding an encoder would

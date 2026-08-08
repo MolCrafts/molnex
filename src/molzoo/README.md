@@ -23,12 +23,22 @@ mace-subpackage-restructure-02-core:
 | `spec` | `MACESpec` base + `MACEMatpesSpec` / `MACEOMolSpec` (torch-free) |
 | `geometry` | `edge_vectors` / `edge_lengths` — additive PBC shifts `S = n·h` |
 | `encoder` | `MACEEncoder` — one configuration-driven foundation backbone |
+| `potential` | `MACEPotential` — per-graph energy `(B,)` in eV + per-atom forces `(N, 3)` in eV/Å |
+| `checkpoint` | `CheckpointRemap` + the `MATPES_REMAP` / `OMOL_REMAP` presets — official-weight key remap |
+| `variants` | `MACEMatpes` / `MACEOMol` named foundation models + their `load_*_state_dict` aliases |
 | `research` | the freely-configurable research `MACE` encoder (former `molzoo/mace.py`) |
 
 `MACESpec` changed meaning with that move: it is now the **shared
-foundation-variant** configuration base in `molzoo.mace.spec`. The research
-encoder's configuration is `MACEResearchSpec`. The names `MACE`,
-`MACEMatpes` and `MACEOMol` keep resolving from their old import paths.
+foundation-variant** configuration base in `molzoo.mace.spec` — the thing
+`MACEMatpesSpec` / `MACEOMolSpec` derive from and `MACEPotential` is built
+out of. The research encoder is configured by keyword and keeps its own,
+unrelated `MACEResearchSpec` (`molzoo.mace.research`).
+
+The flat modules `molzoo/mace_matpes.py` and `molzoo/mace_omol.py` were
+deleted in mace-subpackage-restructure-06-wire; the **top-level** names are
+unchanged, so `from molzoo import MACE, MACEMatpes, MACEOMol,
+load_matpes_state_dict, load_omol_state_dict` keeps working (lazily — see
+`molzoo/__init__.py`), as does `from molzoo.mace import MACE`.
 
 ## Model Specifications
 

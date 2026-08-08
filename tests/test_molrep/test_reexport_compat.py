@@ -12,10 +12,8 @@ are absent from these assertions on purpose.
 
 import importlib
 
-import molrep.embedding.mace
 import molrep.interaction
 import molrep.interaction.density
-import molrep.interaction.mace.block
 import molrep.interaction.mace.conv
 import molrep.interaction.mace.density
 import molrep.interaction.product
@@ -23,7 +21,6 @@ import molrep.readout
 import molrep.readout.mace
 import molrep.readout.product
 import molrep.readout.scalar
-import molzoo.mace
 
 # Pre-move lists, copied verbatim from src/molrep/{interaction,readout}/__init__.py
 # at parent commit cf60f99. The move must not add, drop, or reorder a name.
@@ -126,26 +123,6 @@ class TestReadoutProductShim:
         assert molrep.readout.product.ProductHeadSpec is molrep.readout.mace.ProductHeadSpec
 
 
-class TestMolzooMaceShim:
-    """``molzoo.mace`` re-exports the promoted embedding / interaction blocks."""
-
-    def test_embedding_block_is_same_object(self):
-        """``molzoo.mace.EmbeddingBlock`` must be the promoted molrep class."""
-        assert molzoo.mace.EmbeddingBlock is molrep.embedding.mace.EmbeddingBlock
-
-    def test_embedding_spec_is_same_object(self):
-        """``molzoo.mace.EmbeddingSpec`` must be the promoted molrep class."""
-        assert molzoo.mace.EmbeddingSpec is molrep.embedding.mace.EmbeddingSpec
-
-    def test_interaction_block_is_same_object(self):
-        """``molzoo.mace.InteractionBlock`` must be the promoted molrep class."""
-        assert molzoo.mace.InteractionBlock is molrep.interaction.mace.block.InteractionBlock
-
-    def test_interaction_spec_is_same_object(self):
-        """``molzoo.mace.InteractionSpec`` must be the promoted molrep class."""
-        assert molzoo.mace.InteractionSpec is molrep.interaction.mace.block.InteractionSpec
-
-
 class TestPackageExports:
     """Package-level ``__all__`` lists are frozen across the move."""
 
@@ -159,5 +136,5 @@ class TestPackageExports:
 
     def test_legacy_packages_import_clean(self):
         """A cold import of every touched package raises no ImportError."""
-        for name in ("molrep", "molrep.interaction", "molrep.readout", "molzoo.mace"):
+        for name in ("molrep", "molrep.interaction", "molrep.readout"):
             assert importlib.import_module(name) is not None

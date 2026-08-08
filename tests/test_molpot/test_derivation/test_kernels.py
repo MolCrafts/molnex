@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import pytest
 import torch
-from molpot.derivation.kernels import func_force_pass, grad_force_pass
 from tensordict import TensorDict
 
+from molpot.derivation.kernels import func_force_pass, grad_force_pass
 from molpot.derivation.protocol import ENERGY_KEY, FORCES_KEY, POS_KEY
 from tests.test_molpot.test_derivation.conftest import (
     KernelToyPotential,
