@@ -6,16 +6,14 @@ In-place batch contract. Sequential Energy then Force is one model forward when
 
 from __future__ import annotations
 
-import torch
 from tensordict import TensorDict
 
+from molpot.derivation.kernels import grad_force_pass
 from molpot.derivation.protocol import (
-    ENERGY_KEY,
     POS_KEY,
     absorb_model_output,
     call_energy,
     has_energy,
-    write_forces,
 )
 
 
@@ -59,7 +57,6 @@ class GradMode:
         if not getattr(deriv, "_energy_ready", False) or not getattr(deriv, "_backward", False):
             batch = self.run_energy(deriv, batch, backward=True)
 
-        energy = batch[ENERGY_KEY]
         pos = getattr(deriv, "_pos_leaf", None)
         if pos is None:
             pos = batch[POS_KEY]
@@ -69,10 +66,11 @@ class GradMode:
                 "call EnergyReadout(..., backward=True) first"
             )
 
-        create_graph = bool(getattr(deriv.model, "training", False))  # type: ignore[attr-defined]
-        with torch.enable_grad():
-            (g,) = torch.autograd.grad(
-                energy.sum(), pos, create_graph=create_graph, retain_graph=create_graph
-            )
-        write_forces(batch, -g)
-        return batch
+        # Energy is already materialised on the leaf run_energy(backward=True)
+        # installed — energy_core=None keeps the pair at one model forward.
+        return grad_force_pass(
+            None,
+            batch,
+            create_graph=bool(getattr(deriv.model, "training", False)),  # type: ignore[attr-defined]
+            detach_energy=False,
+        )

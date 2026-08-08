@@ -12,16 +12,8 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molpot.derivation import EnergyAggregation
-from molpot.derivation.protocol import (
-    ENERGY_KEY,
-    POS_KEY,
-    absorb_model_output,
-    call_energy,
-    has_energy,
-    write_energy,
-    write_forces,
-)
+from molpot.derivation import EnergyAggregation, func_force_pass, grad_force_pass
+from molpot.derivation.protocol import write_energy
 from molrep.interaction.pinet import OutLayer
 
 from .encoder import PiNet
@@ -118,45 +110,21 @@ class PiNetPotential(nn.Module):
 
         Compile-friendly monomorphic path (no session / no set_non_tensor).
         """
-        pos = batch[POS_KEY].detach()
-        base = batch.clone()
-        base[POS_KEY] = pos
-
-        def energy_fn_aux(p: torch.Tensor) -> tuple[torch.Tensor, TensorDict]:
-            b = base.clone()
-            b[POS_KEY] = p
-            out = call_energy(self, b)
-            b = absorb_model_output(b, out)
-            if not has_energy(b):
-                raise RuntimeError("energy core must write graphs.energy")
-            return b[ENERGY_KEY].sum(), b
-
-        grad, filled = torch.func.grad(energy_fn_aux, has_aux=True)(pos)
-        batch[ENERGY_KEY] = filled[ENERGY_KEY]
-        if "atoms" in filled.keys() and "energy" in filled["atoms"].keys():
-            batch["atoms", "energy"] = filled["atoms", "energy"]
-        write_forces(batch, -grad)
-        return batch
+        return func_force_pass(self._write_energy, batch)
 
     def _pipeline_ef_grad(self, batch: TensorDict) -> TensorDict:
         """Init-fixed: one energy pass + ``torch.autograd.grad`` on positions.
 
         Often faster for force-supervised training (``create_graph`` when
-        ``self.training``).
+        ``self.training``). Energy stays attached (``detach_energy=False``) so
+        an energy loss can share the graph with the force loss.
         """
-        pos = batch[POS_KEY].detach().requires_grad_(True)
-        batch[POS_KEY] = pos
-        batch = self._write_energy(batch)
-        create_graph = bool(self.training)
-        with torch.enable_grad():
-            (g,) = torch.autograd.grad(
-                batch[ENERGY_KEY].sum(),
-                pos,
-                create_graph=create_graph,
-                retain_graph=create_graph,
-            )
-        write_forces(batch, -g)
-        return batch
+        return grad_force_pass(
+            self._write_energy,
+            batch,
+            create_graph=bool(self.training),
+            detach_energy=False,
+        )
 
     # ---------------------------------------------------------------- compile
     def compile(

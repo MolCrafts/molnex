@@ -7,16 +7,15 @@ pass that writes energy and forces. Energy-only uses ``backward=False``.
 
 from __future__ import annotations
 
-import torch
+from functools import partial
+
 from tensordict import TensorDict
 
+from molpot.derivation.kernels import func_force_pass
 from molpot.derivation.protocol import (
-    ENERGY_KEY,
-    POS_KEY,
     absorb_model_output,
     call_energy,
     has_energy,
-    write_forces,
 )
 
 
@@ -65,26 +64,7 @@ class FuncMode:
         if model is None:
             raise RuntimeError("session model is not set")
 
-        pos = batch[POS_KEY].detach()
-        base = batch.clone()
-        base[POS_KEY] = pos
-
-        def energy_fn_aux(p: torch.Tensor) -> tuple[torch.Tensor, TensorDict]:
-            b = base.clone()
-            b[POS_KEY] = p
-            out = call_energy(model, b)
-            b = absorb_model_output(b, out)
-            if not has_energy(b):
-                raise RuntimeError(
-                    "model.forward must write batch['graphs','energy'] inside the func energy path"
-                )
-            return b[ENERGY_KEY].sum(), b
-
-        grad, filled = torch.func.grad(energy_fn_aux, has_aux=True)(pos)
-        batch[ENERGY_KEY] = filled[ENERGY_KEY]
-        if "atoms" in filled.keys() and "energy" in filled["atoms"].keys():
-            batch["atoms", "energy"] = filled["atoms", "energy"]
-        write_forces(batch, -grad)
+        batch = func_force_pass(partial(call_energy, model), batch)
 
         deriv._lazy_func = False  # type: ignore[attr-defined]
         deriv._energy_ready = True  # type: ignore[attr-defined]

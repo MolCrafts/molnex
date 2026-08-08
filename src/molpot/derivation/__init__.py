@@ -14,6 +14,13 @@ Or a potential that fixes forces at init (monomorphic pipeline, preferred)::
     model = PiNetPotential(..., compute_forces=True, method="func")
     batch = model(batch)
     model.compile()  # optional torch.compile of that static forward
+
+Potentials and modes do not hand-roll the pass body: they bind one of the two
+shared batch-level kernels (``energy_core(batch) -> batch`` in, batch with
+``graphs.energy`` / ``atoms.forces`` out)::
+
+    batch = grad_force_pass(self._write_energy, batch, detach_energy=False)
+    batch = func_force_pass(self._write_energy, batch)
 """
 
 from molpot.derivation.energy import EnergyAggregation
@@ -26,6 +33,7 @@ from molpot.derivation.force import (
     functorch_forces_with_aux,
 )
 from molpot.derivation.force_readout import ForceReadout
+from molpot.derivation.kernels import func_force_pass, grad_force_pass
 from molpot.derivation.stress import StressDerivation
 
 __all__ = [
@@ -36,6 +44,8 @@ __all__ = [
     "StressDerivation",
     "autograd_forces",
     "autograd_forces_from_energy",
+    "func_force_pass",
     "functorch_forces",
     "functorch_forces_with_aux",
+    "grad_force_pass",
 ]
