@@ -257,8 +257,8 @@ class ForceDelta:
         """ΔF from a reference vs quantized model on a fresh clone of ``batch`` each."""
         # Potentials fix force derivation at construction (monomorphic forward,
         # since b85d12f); both models must already be built with it.
-        f_ref = model_ref(batch.clone())[FORCES_KEY].detach()  # type: ignore[union-attr]
-        f_quant = model_quant(batch.clone())[FORCES_KEY].detach()  # type: ignore[union-attr]
+        f_ref = model_ref(batch.clone())[FORCES_KEY].detach()
+        f_quant = model_quant(batch.clone())[FORCES_KEY].detach()
         return cls(f_quant - f_ref)
 
     def summary(self) -> dict[str, float]:

@@ -312,7 +312,7 @@ class TrajectoryHook(MDHook):
 
         from molix.datasets._extxyz import write_extxyz_frames
 
-        species = [Element(int(z)).symbol for z in self._numbers.detach().cpu()]  # type: ignore[union-attr]
+        species = [Element(int(z)).symbol for z in self._numbers.detach().cpu()]
         write_extxyz_frames(
             self._out.with_suffix(".xyz"),
             species=species,

@@ -110,7 +110,7 @@ class BaseDataset(Dataset[Any], ABC):
     def __len__(self) -> int: ...
 
     @abstractmethod
-    def __getitem__(self, idx: int) -> dict:  # type: ignore[override]
+    def __getitem__(self, idx: int) -> dict:
         """Return the ``idx``-th sample as a flat ``dict`` (raw-sample shape)."""
         ...
 
@@ -190,7 +190,7 @@ class _CacheBacked(BaseDataset):
     def __len__(self) -> int:
         return self._n_samples
 
-    def __getitem__(self, idx: int) -> dict:  # type: ignore[override]
+    def __getitem__(self, idx: int) -> dict:
         return PackedCache.unpack_sample(self._payload, idx)
 
     def packed_view(self) -> PackedView:
@@ -392,7 +392,7 @@ class SubsetDataset(BaseDataset):
     def __len__(self) -> int:
         return len(self._indices)
 
-    def __getitem__(self, idx: int) -> dict:  # type: ignore[override]
+    def __getitem__(self, idx: int) -> dict:
         """Return the sample at the ``idx``-th index of this subset's view.
 
         Maps the local index through ``self._indices`` and defers to the

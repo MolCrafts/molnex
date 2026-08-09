@@ -230,7 +230,7 @@ def _make_batch_iter(
         return (data[i % len(data)] for i in range(n_total))
 
     # Assume DataLoader or other iterable — wrap with cycling
-    def _cycle(iterable: Iterable, n: int):  # type: ignore[return]
+    def _cycle(iterable: Iterable, n: int):
         buf: list = []
         it = iter(iterable)
         count = 0
@@ -672,9 +672,9 @@ class ModuleProfiler:
             if not samples:
                 continue
             if use_cuda:
-                ms = [s.elapsed_time(e) for _, s, e in samples]  # type: ignore[not-iterable]
+                ms = [s.elapsed_time(e) for _, s, e in samples]
             else:
-                ms = [float(v) * 1000.0 for v in samples]  # type: ignore[not-iterable]
+                ms = [float(v) * 1000.0 for v in samples]
             means[name] = sum(ms) / len(ms)
         if not means:
             return None

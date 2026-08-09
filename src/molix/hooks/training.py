@@ -104,4 +104,4 @@ def _apply_activation_checkpointing(
 
             return checkpointed_forward
 
-        module.forward = _make_checkpointed(original_forward)  # type: ignore[method-assign]
+        module.forward = _make_checkpointed(original_forward)

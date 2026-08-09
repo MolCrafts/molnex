@@ -371,7 +371,7 @@ class MetricCollection:
         for metric in self.metrics.values():
             metric.update(preds, targets)
 
-    def compute(self) -> dict[str, torch.Tensor]:  # type: ignore[return]
+    def compute(self) -> dict[str, torch.Tensor]:
         """Compute all metrics, each a 0-d tensor on the inputs' device.
 
         No ``.item()`` is taken here — callers materialise to Python floats

@@ -567,11 +567,11 @@ class DatasetProfiler:
             inferred field layout and label values.
         """
         with Timer() as timer:
-            data[indices[0]]  # type: ignore[index]
+            data[indices[0]]
         cold_access_ms = timer.elapsed * 1000.0
 
         for i in range(self.n_warmup):
-            data[indices[i % len(indices)]]  # type: ignore[index]
+            data[indices[i % len(indices)]]
 
         access_ms: list[float] = []
         byte_counts: list[int] = []
@@ -581,7 +581,7 @@ class DatasetProfiler:
         target_values: dict[str, list[float]] = {}
         for idx in indices:
             with Timer() as timer:
-                sample = data[idx]  # type: ignore[index]
+                sample = data[idx]
             access_ms.append(timer.elapsed * 1000.0)
 
             n_atoms, n_edges = sample_counts(sample)
@@ -742,7 +742,7 @@ class DatasetProfiler:
                 f"{type(data).__name__} exposes no __len__ / __getitem__, so no sample "
                 f"can be read. {remedy}"
             )
-        n_total = len(data)  # type: ignore[arg-type]
+        n_total = len(data)
         if n_total == 0:
             raise ValueError(f"Cannot profile an empty dataset ({type(data).__name__}). {remedy}")
         return n_total
@@ -785,6 +785,6 @@ class DatasetProfiler:
             path" signal).
         """
         try:
-            return data.packed_view().payload["schema"]  # type: ignore[attr-defined]
+            return data.packed_view().payload["schema"]
         except (AttributeError, KeyError, TypeError):
             return None

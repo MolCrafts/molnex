@@ -124,11 +124,11 @@ class TaskProfiler:
         Returns:
             :class:`TaskResult` with timing statistics.
         """
-        n_source = len(source)  # type: ignore[arg-type]
+        n_source = len(source)
 
         # For DatasetTask: fit on the full source first
         if isinstance(self.task, DatasetTask):
-            all_samples = [source[i] for i in range(n_source)]  # type: ignore[index]
+            all_samples = [source[i] for i in range(n_source)]
             self.task.fit(all_samples)
 
         task_name = type(self.task).__name__
@@ -140,7 +140,7 @@ class TaskProfiler:
 
         for i in range(total):
             idx = i % n_source
-            sample = source[idx]  # type: ignore[index]
+            sample = source[idx]
             with Timer() as t:
                 entry.apply(sample)
             if i >= n_warmup:

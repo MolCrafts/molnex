@@ -162,7 +162,7 @@ class TestWaterLESTargetSchema:
 class TestWaterLESErrors:
     def test_unknown_split_rejected(self, water_les_root):
         with pytest.raises(ValueError, match="split"):
-            WaterLESSource(water_les_root, split="not_a_split")  # type: ignore[arg-type]
+            WaterLESSource(water_les_root, split="not_a_split")
 
     def test_offline_without_files_raises(self, tmp_path):
         empty = tmp_path / "empty"

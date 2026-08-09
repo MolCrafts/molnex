@@ -150,8 +150,8 @@ def batch_counts(batch: object) -> tuple[int, int]:
         those namespaces — this is a diagnostic helper and never raises.
     """
     try:
-        n_atoms = int(batch["atoms"]["Z"].shape[0])  # type: ignore[index]
-        n_graphs = int(batch["graphs"]["num_atoms"].shape[0])  # type: ignore[index]
+        n_atoms = int(batch["atoms"]["Z"].shape[0])
+        n_graphs = int(batch["graphs"]["num_atoms"].shape[0])
         return n_atoms, n_graphs
     except (KeyError, AttributeError, TypeError):
         return 0, 0
@@ -175,11 +175,11 @@ def sample_counts(sample: object) -> tuple[int, int]:
         ``0`` — this is a diagnostic helper and never raises.
     """
     try:
-        n_atoms = int(sample["Z"].shape[0])  # type: ignore[index]
+        n_atoms = int(sample["Z"].shape[0])
     except (KeyError, AttributeError, TypeError, IndexError):
         n_atoms = 0
     try:
-        n_edges = int(sample["edge_index"].shape[0])  # type: ignore[index]
+        n_edges = int(sample["edge_index"].shape[0])
     except (KeyError, AttributeError, TypeError, IndexError):
         n_edges = 0
     return n_atoms, n_edges

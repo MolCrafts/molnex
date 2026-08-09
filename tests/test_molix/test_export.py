@@ -141,9 +141,9 @@ def test_direct_export_on_force_model_raises_no_fallback() -> None:
 
 def test_non_module_raises_typeerror() -> None:
     with pytest.raises(TypeError):
-        Exporter("not_a_module")  # type: ignore[arg-type]
+        Exporter("not_a_module")
 
 
 def test_non_tuple_inputs_raises_typeerror(tmp_path: Path, small_mlp: nn.Sequential) -> None:
     with pytest.raises(TypeError):
-        Exporter(small_mlp).export(torch.randn(4, 10), tmp_path / "m.pt2")  # type: ignore[arg-type]
+        Exporter(small_mlp).export(torch.randn(4, 10), tmp_path / "m.pt2")

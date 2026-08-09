@@ -29,7 +29,7 @@ class GradMode:
         *,
         backward: bool,
     ) -> TensorDict:
-        model = deriv.model  # type: ignore[attr-defined]
+        model = deriv.model
         if model is None:
             raise RuntimeError("session model is not set")
 
@@ -37,11 +37,11 @@ class GradMode:
         if backward:
             pos = pos.detach().requires_grad_(True)
             batch[POS_KEY] = pos
-            deriv._pos_leaf = pos  # type: ignore[attr-defined]
-            deriv._backward = True  # type: ignore[attr-defined]
+            deriv._pos_leaf = pos
+            deriv._backward = True
         else:
-            deriv._backward = False  # type: ignore[attr-defined]
-            deriv._pos_leaf = None  # type: ignore[attr-defined]
+            deriv._backward = False
+            deriv._pos_leaf = None
 
         out = call_energy(model, batch)
         batch = absorb_model_output(batch, out)
@@ -49,8 +49,8 @@ class GradMode:
             raise RuntimeError(
                 "model.forward must write batch['graphs','energy'] (or return a dict with 'energy')"
             )
-        deriv._energy_ready = True  # type: ignore[attr-defined]
-        deriv._lazy_func = False  # type: ignore[attr-defined]
+        deriv._energy_ready = True
+        deriv._lazy_func = False
         return batch
 
     def run_forces(self, deriv: object, batch: TensorDict) -> TensorDict:
@@ -71,6 +71,6 @@ class GradMode:
         return grad_force_pass(
             None,
             batch,
-            create_graph=bool(getattr(deriv.model, "training", False)),  # type: ignore[attr-defined]
+            create_graph=bool(getattr(deriv.model, "training", False)),
             detach_energy=False,
         )

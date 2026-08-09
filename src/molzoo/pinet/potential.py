@@ -54,7 +54,7 @@ class PiNetPotential(nn.Module):
             self.encoder = encoder
         else:
             pinet_kwargs.setdefault("emit_property_features", False)
-            self.encoder = PiNet(**pinet_kwargs)  # type: ignore[arg-type]
+            self.encoder = PiNet(**pinet_kwargs)
 
         depth: int = int(getattr(self.encoder, "depth", 1))
         feature_dim: int = int(getattr(self.encoder, "feature_dim", hidden_dim))

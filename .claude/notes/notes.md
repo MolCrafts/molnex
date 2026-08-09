@@ -247,3 +247,16 @@ silently (caught in molzoo/mace/__init__.py during review).
 
 **Rule**: keep `__all__` alphabetically sorted in every package
 `__init__.py`; re-sort when inserting a name.
+
+<!-- mol:note:topic:ty-ignore-syntax -->
+## [2026-08-09] Type-suppression pragmas: ty syntax only
+
+The repo's checker is ty (no mypy/pyright config exists). mypy-style
+`# type: ignore[code]` is inert under ty — 67 dead pragmas were swept
+2026-08-09. Most suppressions are unnecessary anyway: the known
+TensorDict/torch-stub false-positive classes are already downgraded to
+"warn" via `[tool.ty.rules]` in pyproject.toml.
+
+**Rule**: never write `# type: ignore[...]`. If a per-line suppression
+is truly needed, use `# ty: ignore[rule]`; prefer relying on the
+`[tool.ty.rules]` downgrades over per-line pragmas.

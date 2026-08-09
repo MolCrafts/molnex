@@ -233,7 +233,7 @@ def _parse_pbc(tokens: dict[str, str]) -> tuple[bool, bool, bool]:
     parts = raw.split()
     if len(parts) != 3:
         raise ValueError(f"pbc tag has {len(parts)} entries; need 3")
-    return tuple(p.upper() == "T" for p in parts)  # type: ignore[return-value]
+    return tuple(p.upper() == "T" for p in parts)
 
 
 def _parse_energy(tokens: dict[str, str], *, source: Path, frame_idx: int) -> float:

@@ -62,7 +62,7 @@ def test_has_aux_rejected_on_autograd_instance():
 
 def test_invalid_method_raises():
     try:
-        ForceDerivation(method="magic")  # type: ignore[arg-type]
+        ForceDerivation(method="magic")
         raise AssertionError("expected ValueError")
     except ValueError:
         pass

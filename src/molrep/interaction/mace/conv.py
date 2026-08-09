@@ -89,7 +89,7 @@ class ConvTP(nn.Module):
         irreps_sh = cue.Irreps("O3", sh_irreps)
         irreps_out = cue.Irreps("O3", out_irreps)
 
-        self.cue_tp = cuet.ChannelWiseTensorProduct(  # type: ignore
+        self.cue_tp = cuet.ChannelWiseTensorProduct(
             irreps_in,
             irreps_sh,
             irreps_out,

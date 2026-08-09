@@ -31,7 +31,7 @@ class FuncMode:
         *,
         backward: bool,
     ) -> TensorDict:
-        model = deriv.model  # type: ignore[attr-defined]
+        model = deriv.model
         if model is None:
             raise RuntimeError("session model is not set")
 
@@ -43,30 +43,30 @@ class FuncMode:
                     "then ForceReadout (lazy+flush), or Energy only with "
                     "backward=False"
                 )
-            deriv._lazy_func = True  # type: ignore[attr-defined]
-            deriv._backward = True  # type: ignore[attr-defined]
-            deriv._energy_ready = False  # type: ignore[attr-defined]
+            deriv._lazy_func = True
+            deriv._backward = True
+            deriv._energy_ready = False
             return batch
 
-        deriv._lazy_func = False  # type: ignore[attr-defined]
-        deriv._backward = False  # type: ignore[attr-defined]
+        deriv._lazy_func = False
+        deriv._backward = False
         out = call_energy(model, batch)
         batch = absorb_model_output(batch, out)
         if not has_energy(batch):
             raise RuntimeError(
                 "model.forward must write batch['graphs','energy'] (or return a dict with 'energy')"
             )
-        deriv._energy_ready = True  # type: ignore[attr-defined]
+        deriv._energy_ready = True
         return batch
 
     def run_forces(self, deriv: object, batch: TensorDict) -> TensorDict:
-        model = deriv.model  # type: ignore[attr-defined]
+        model = deriv.model
         if model is None:
             raise RuntimeError("session model is not set")
 
         batch = func_force_pass(partial(call_energy, model), batch)
 
-        deriv._lazy_func = False  # type: ignore[attr-defined]
-        deriv._energy_ready = True  # type: ignore[attr-defined]
-        deriv._backward = True  # type: ignore[attr-defined]
+        deriv._lazy_func = False
+        deriv._energy_ready = True
+        deriv._backward = True
         return batch

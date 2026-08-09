@@ -66,10 +66,10 @@ class Compiler:
         """
         if cuda_graphs:
             p = self.CUDA_GRAPH_PRESET
-            backend = p["backend"]  # type: ignore[assignment]
-            fullgraph = p["fullgraph"]  # type: ignore[assignment]
-            dynamic = p["dynamic"]  # type: ignore[assignment]
-            mode = p["mode"]  # type: ignore[assignment]
+            backend = p["backend"]
+            fullgraph = p["fullgraph"]
+            dynamic = p["dynamic"]
+            mode = p["mode"]
         self.backend = backend
         self.fullgraph = fullgraph
         self.dynamic = dynamic

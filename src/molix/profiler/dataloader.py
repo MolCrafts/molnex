@@ -291,8 +291,8 @@ class DataLoaderProfiler:
 
         from molix.data.cache import PackedCache
 
-        n = len(source)  # type: ignore[arg-type]
-        samples = [source[i] for i in range(n)]  # type: ignore[index]
+        n = len(source)
+        samples = [source[i] for i in range(n)]
         tmp_file = Path(tempfile.mkdtemp(prefix="molix_profiler_")) / "samples.pt"
         PackedCache(tmp_file).save(samples)
         return CachedDataset(tmp_file)
