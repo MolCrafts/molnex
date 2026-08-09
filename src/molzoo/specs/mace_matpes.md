@@ -306,6 +306,7 @@ Two facts worth keeping:
 | 8 | 2026-08-07 | 82c3091 | 1 | wat64_h3o+ | fp64, GH200, full NVE loop `--compile` | 200 | n/a | n/a | 5.0 | incl. | yes | end-to-end MD 37.5 -> 5.0 ms/step (7.5x incl. integrator+hook); trajectory bit-identical to eager (max \|dPos\|=0, max \|dF\|=0, ΔE/atom 1.9e-12 meV); one-off compile ~60 s |
 | 9 | 2026-08-08 | 82c3091 | 1 | wat64_h3o+ | launch gate: rebuild_every=5 + compile, 3 precisions | 2000 | n/a | n/a | 14.9/11.8/13.2 | incl. | yes | dead-edge dE≤1.1e-13 (atomicAdd reorder only); rebuild-vs-fresh dE=0; drift fp64 0.03 / fp32 0.04 / bf16 ~2 meV/atom/ps (bf16 heats — expected physics); bf16 needs autocast INSIDE the compiled callable (52->13.2 ms) |
 | 10 | 2026-08-08 | 82c3091 | 1 | wat64_h3o+ | production 5 ns × 3 precisions (jobs 978984/978985/979020) | 10M | n/a | n/a | — | — | yes | dt=0.5 fs, stride 2000, rebuild_every=5, checkpoint 100k, auto-resume; dirs `mace-r2san-5ns-{fp64,fp32,bf16}` |
+| 11 | 2026-08-09 | 43cd33d | 0 | wat64_h3o+ | official weights, fp64, GH200, full NVE `--compile`, post mace-subpackage-restructure + fix batch (dev unified) | 200 | n/a | n/a | 8.6 | incl. | yes | `mace-nve-validate-1017194` post-restructure gate: single point E=-1015.900312 eV, \|F\|max=3.2866 eV/Å — matches rows 2/3 to all printed digits; E_tot drift -0.0146 meV/atom over 0.10 ps (-0.146 meV/atom/ps, order of row 3); T 283.7-353.7 K; rebuilds 41 (~40 expected at rebuild_every=5); sbatch work/mace-nve/run_gh200_validation.sbatch, job 1017194 |
 
 ## 8. System Boundary
 
