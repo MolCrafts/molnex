@@ -1,3 +1,0 @@
-/home/jicli594/work/molcrafts/molnex/src/molix/op/build-gh200/CMakeFiles/molnex_opLib.dir
-/home/jicli594/work/molcrafts/molnex/src/molix/op/build-gh200/CMakeFiles/edit_cache.dir
-/home/jicli594/work/molcrafts/molnex/src/molix/op/build-gh200/CMakeFiles/rebuild_cache.dir
