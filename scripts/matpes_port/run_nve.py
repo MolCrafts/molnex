@@ -97,6 +97,7 @@ def _matpes_energy_forces(
     *,
     Z: torch.Tensor,
     neighbors: NeighborList,
+    potential_dtype: torch.dtype,
     compile_energy: bool = False,
     autocast_dtype: torch.dtype | None = None,
 ):
@@ -129,11 +130,17 @@ def _matpes_energy_forces(
     batch = torch.zeros(Z.shape[0], dtype=torch.long, device=Z.device)
 
     def energy_forces(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        leaf = pos.detach().requires_grad_(True)
+        # The force field owns its precision: the leaf lives in the MODEL's
+        # dtype (a same-dtype .to is the identity), forces come back in it,
+        # and Integrator.eval_force casts to the state dtype at the boundary —
+        # the split-precision contract of molix.md.driver.MD.
+        leaf = pos.detach().to(potential_dtype).requires_grad_(True)
         with torch.enable_grad():
             # (E, 2) end to end: the list's rebuilt-in-place buffer feeds the
             # core directly — one storage, no per-step transpose.
-            energy = energy_fn(leaf, Z, neighbors.edge_index, batch, 1, neighbors.shifts)
+            energy = energy_fn(
+                leaf, Z, neighbors.edge_index, batch, 1, neighbors.shifts.to(potential_dtype)
+            )
         forces = autograd_forces_from_energy(energy, leaf)
         return energy.sum().detach(), forces.detach()
 
@@ -157,6 +164,14 @@ def main() -> None:
     parser.add_argument("--dt", type=float, default=0.5, help="timestep in fs")
     parser.add_argument("--temperature", type=float, default=300.0, help="initial T in K")
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument(
+        "--potential-precision",
+        choices=["fp64", "fp32"],
+        default=None,
+        help="model/inference precision; defaults to --precision. Setting it below "
+        "--precision runs the split-precision configuration (e.g. an fp64 "
+        "trajectory over fp32 inference; MD state stays at --precision)",
+    )
     parser.add_argument(
         "--precision",
         choices=("fp64", "fp32"),
@@ -303,12 +318,20 @@ def main() -> None:
         f"delay={neighbors.delay}, check={neighbors.check}, r_build={neighbors.r_build:.2f} A"
     )
 
-    model = model.to(device)
+    potential_dtype = {"fp64": torch.float64, "fp32": torch.float32}[
+        args.potential_precision or args.precision
+    ]
+    model = model.to(device=device, dtype=potential_dtype)
+    print(
+        f"precision: MD state {args.precision}, "
+        f"potential {args.potential_precision or args.precision}"
+    )
     force_field = CallableForceField(
         _matpes_energy_forces(
             model,
             Z=Z.to(device),
             neighbors=neighbors,
+            potential_dtype=potential_dtype,
             compile_energy=args.compile,
             autocast_dtype=torch.bfloat16 if args.autocast_bf16 else None,
         ),
