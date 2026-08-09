@@ -52,7 +52,7 @@ run_arm () {
   local name="$1"; shift
   echo "=== arm: $name ==="
   PYTHONPATH=src:. "$PY" scripts/matpes_port/run_nve.py \
-      "${COMMON[@]}" --out "$WD/nve_${name}.pt" "${EXTRA[@]:-}" "$@" \
+      "${COMMON[@]}" --out "$WD/nve_${name}.pt" ${EXTRA[@]+"${EXTRA[@]}"} "$@" \
       2>&1 | grep -vE "UserWarning|warnings.warn|cuequivariance_ops|W[0-9]+ "
 }
 
