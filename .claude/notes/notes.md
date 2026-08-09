@@ -210,3 +210,40 @@ size window that used to auto-select it.
 **Rule**: `scatter_sum_compile_safe` defaults to `index_add_`. The one-hot
 GEMM is chosen only by `MOLNEX_SCATTER_ONEHOT=1` (bit-exactness as a
 deliberate, global choice) — never by a size heuristic.
+
+<!-- mol:note:topic:build-check-scope -->
+## [2026-08-09] build.check covers tests/scripts/regressions + advisory ty
+
+The gate used to lint `src/` only, which let `scripts/` and test-side debt
+accumulate invisibly (found during the mace-restructure follow-up sweep).
+`benchmarks/` is deliberately excluded while the PiNet bench scripts are
+mid-experiment; fold it in once that work lands.
+
+**Rule**: `mol_project.build.check` runs ruff (check + format) over
+`src/ tests/ scripts/ regressions/` plus `ty check src/
+--exit-zero-on-warning` (warnings stay advisory per `[tool.ty.rules]`;
+real type errors block). Do not narrow it back to `src/` alone.
+
+<!-- mol:note:topic:init-dtype-at-construction -->
+## [2026-08-09] Construct at config.ftype; init consumes the global RNG
+
+A 48-site sweep found `nn.Linear`/`nn.Embedding`/`cuet.Linear`/buffer
+constructors omitting `dtype=config.ftype`, yielding silent fp32 params
+under the fp64 config (hidden by post-hoc `.double()` casts in fixtures).
+`cuequivariance_torch.Linear` honours `dtype=` — the old claim that it
+ignores `config.ftype` is false.
+
+**Rule**: every parameter/buffer constructor under `src/` passes
+`dtype=config.ftype` explicitly (fp64-contract tests pin the pattern
+per module). Weight inits draw from the **global** torch RNG (e3nn
+convention; `_ScalarO3Linear` weight ~ N(0,1), bias zero) — never a
+private Generator, never zero-init for trainable readout weights.
+
+<!-- mol:note:topic:all-alphabetized -->
+## [2026-08-09] __all__ stays alphabetized
+
+ruff's isort rule does not cover `__all__` literals, so ordering drifts
+silently (caught in molzoo/mace/__init__.py during review).
+
+**Rule**: keep `__all__` alphabetically sorted in every package
+`__init__.py`; re-sort when inserting a name.

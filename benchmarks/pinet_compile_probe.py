@@ -33,9 +33,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def factory(n=64, e=256, g=4):
-    return MockBatch(
-        n_atoms=n, n_edges=e, n_graphs=g, atomic_numbers=7, device=device, seed=0
-    )
+    return MockBatch(n_atoms=n, n_edges=e, n_graphs=g, atomic_numbers=7, device=device, seed=0)
 
 
 def make_pot(*, forces=False, method="func", rank=3, depth=2, hidden=32):
@@ -247,7 +245,7 @@ def main() -> None:
 
     # L: plain tensors path — extract energy as function of (Z, pos, edge_index, batch)
     #    (future compile surface if TensorDict is the problem)
-    def l():
+    def l_flat():
         pot = make_pot(forces=False).eval()
         batch = factory()()
 
@@ -281,9 +279,7 @@ def main() -> None:
                 for i, out_layer in enumerate(self.out_layers):
                     output = out_layer(block_outputs[:, i, :], output)
                 atom_energy = output.squeeze(-1)
-                return self.energy_aggregation(
-                    atom_energy, atom_batch, num_graphs=num_graphs
-                )
+                return self.energy_aggregation(atom_energy, atom_batch, num_graphs=num_graphs)
 
         flat = FlatEnergy(pot)
         if device == "cuda":
@@ -299,7 +295,7 @@ def main() -> None:
             e = cflat(Z, pos, ei, ab, ng)
         return ("energy", float(e.sum()), "shape", tuple(e.shape))
 
-    try_call("L flat (Z,pos,edge_index) energy fullgraph=True", l)
+    try_call("L flat (Z,pos,edge_index) energy fullgraph=True", l_flat)
 
     print("\n=== DONE ===", flush=True)
 

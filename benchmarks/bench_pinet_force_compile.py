@@ -227,14 +227,20 @@ def run_cell(
 
 
 def print_table(rows: list[Row]) -> None:
-    print(
-        f"\n{'name':<48} {'ms/step':>9} {'peak_alloc':>12} {'peak_rsrv':>10}  status  notes"
-    )
+    print(f"\n{'name':<48} {'ms/step':>9} {'peak_alloc':>12} {'peak_rsrv':>10}  status  notes")
     print("-" * 110)
     for r in rows:
         ms = f"{r.ms:9.3f}" if r.ms == r.ms else f"{'nan':>9}"
-        pa = f"{r.peak_alloc_mib:10.1f} MiB" if r.peak_alloc_mib == r.peak_alloc_mib else f"{'nan':>12}"
-        pr = f"{r.peak_reserved_mib:8.1f} MiB" if r.peak_reserved_mib == r.peak_reserved_mib else f"{'nan':>10}"
+        pa = (
+            f"{r.peak_alloc_mib:10.1f} MiB"
+            if r.peak_alloc_mib == r.peak_alloc_mib
+            else f"{'nan':>12}"
+        )
+        pr = (
+            f"{r.peak_reserved_mib:8.1f} MiB"
+            if r.peak_reserved_mib == r.peak_reserved_mib
+            else f"{'nan':>10}"
+        )
         print(f"{r.name:<48} {ms} {pa:>12} {pr:>10}  {r.status:<5}  {r.notes}")
 
 
@@ -366,8 +372,10 @@ def main() -> None:
             "force-inf func reduce-overhead",
         ):
             if k in by:
-                print(f"  {k}: {by[k].ms / base.ms:.2f}x time, "
-                      f"alloc {by[k].peak_alloc_mib / base.peak_alloc_mib:.2f}x")
+                print(
+                    f"  {k}: {by[k].ms / base.ms:.2f}x time, "
+                    f"alloc {by[k].peak_alloc_mib / base.peak_alloc_mib:.2f}x"
+                )
 
     base_tr = by.get("force-train func eager")
     if base_tr is not None:
@@ -378,8 +386,10 @@ def main() -> None:
             "force-train func reduce-overhead",
         ):
             if k in by:
-                print(f"  {k}: {by[k].ms / base_tr.ms:.2f}x time, "
-                      f"alloc {by[k].peak_alloc_mib / base_tr.peak_alloc_mib:.2f}x")
+                print(
+                    f"  {k}: {by[k].ms / base_tr.ms:.2f}x time, "
+                    f"alloc {by[k].peak_alloc_mib / base_tr.peak_alloc_mib:.2f}x"
+                )
 
     print("\n=== DONE ===")
 

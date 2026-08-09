@@ -164,8 +164,7 @@ def _save_artifacts(out, t, e, pes, kes, traj, e0, rel_drift, rms_rel, ns, args)
     ax0.axhline(0.0, color="k", lw=0.5, ls=":")
     ax0.set_ylabel(r"$(E_{\rm tot}-E_0)/|E_0|$  [ppm]")
     ax0.set_title(
-        f"LJ$_{{13}}$ NVE, {ns:.1f} ns, dt={_DT:g} fs — "
-        f"drift {rel_drift:.1e}, RMS {rms_rel:.1e}"
+        f"LJ$_{{13}}$ NVE, {ns:.1f} ns, dt={_DT:g} fs — drift {rel_drift:.1e}, RMS {rms_rel:.1e}"
     )
     ax1.plot(t.numpy(), pe.numpy(), lw=0.7, color="C0", label="potential")
     ax1.plot(t.numpy(), ke.numpy(), lw=0.7, color="C1", label="kinetic")

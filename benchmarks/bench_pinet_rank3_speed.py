@@ -24,7 +24,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
 
 # PiNet is pure-PyTorch; the arch-tagged C++ op .so may be linked against a
 # different torch ABI (e.g. cpu build vs this CUDA wheel). Soft-skip so the
@@ -218,9 +217,9 @@ def run_matrix(
     if skip_compile:
         rows.append(_row("energy-inf + torch.compile", float("nan"), n_atoms, "skipped"))
     else:
-        pot_ec = build_potential(
-            rank=3, emit_property_features=False, compute_forces=False
-        ).to(device)
+        pot_ec = build_potential(rank=3, emit_property_features=False, compute_forces=False).to(
+            device
+        )
         pot_ec.eval()
         try:
             pot_ec = torch.compile(pot_ec, backend="inductor", fullgraph=False)
@@ -330,9 +329,7 @@ def run_matrix(
     rows.append(_row("force-train func emit=1", ms, n_atoms, "func has_aux + loss.backward"))
 
     # energy-only train (no forces)
-    pot_et = build_potential(
-        rank=3, emit_property_features=False, compute_forces=False
-    ).to(device)
+    pot_et = build_potential(rank=3, emit_property_features=False, compute_forces=False).to(device)
     pot_et.train()
     opt_et = torch.optim.Adam(pot_et.parameters(), lr=1e-3)
 
@@ -438,16 +435,40 @@ def main() -> None:
         return "n/a"
 
     print("\n# Key ratios")
-    print(f"  force-train-func / energy-train = {ratio('force-train func emit=0', 'energy-train (no forces)')}")
-    print(f"  force-train-grad / energy-train = {ratio('force-train grad emit=0', 'energy-train (no forces)')}")
-    print(f"  force-train-func / force-inf    = {ratio('force-train func emit=0', 'force-inf eval emit=0')}")
-    print(f"  force-train-grad / force-inf    = {ratio('force-train grad emit=0', 'force-inf eval emit=0')}")
-    print(f"  force-train-grad / func         = {ratio('force-train grad emit=0', 'force-train func emit=0')}")
-    print(f"  force-inf-grad / func           = {ratio('force-inf eval grad', 'force-inf eval emit=0')}")
-    print(f"  force-inf train-fwd / eval-fwd  = {ratio('force-train forward only', 'force-eval forward only')}")
+    print(
+        "  force-train-func / energy-train = "
+        f"{ratio('force-train func emit=0', 'energy-train (no forces)')}"
+    )
+    print(
+        "  force-train-grad / energy-train = "
+        f"{ratio('force-train grad emit=0', 'energy-train (no forces)')}"
+    )
+    print(
+        "  force-train-func / force-inf    = "
+        f"{ratio('force-train func emit=0', 'force-inf eval emit=0')}"
+    )
+    print(
+        "  force-train-grad / force-inf    = "
+        f"{ratio('force-train grad emit=0', 'force-inf eval emit=0')}"
+    )
+    print(
+        "  force-train-grad / func         = "
+        f"{ratio('force-train grad emit=0', 'force-train func emit=0')}"
+    )
+    print(
+        "  force-inf-grad / func           = "
+        f"{ratio('force-inf eval grad', 'force-inf eval emit=0')}"
+    )
+    print(
+        "  force-inf train-fwd / eval-fwd  = "
+        f"{ratio('force-train forward only', 'force-eval forward only')}"
+    )
     print(f"  enc emit=1 / emit=0             = {ratio('enc rank3 emit=1', 'enc rank3 emit=0')}")
     print(f"  enc rank3 / rank1               = {ratio('enc rank3 emit=0', 'enc rank1 emit=0')}")
-    print(f"  force-inf rank3 / rank1         = {ratio('force-inf eval emit=0', 'force-inf eval rank1')}")
+    print(
+        "  force-inf rank3 / rank1         = "
+        f"{ratio('force-inf eval emit=0', 'force-inf eval rank1')}"
+    )
 
     if args.profile_ops and device.type == "cpu":
         profile_cpu_ops(min(args.steps, 15), args.atoms, args.edges, args.graphs)

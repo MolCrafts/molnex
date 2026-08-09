@@ -5,7 +5,7 @@ mol_project:
   stage: experimental
   build:
     install: "pip install -e '.[dev]'"
-    check: "ruff check src/ && ruff format --check src/"
+    check: "ruff check src/ tests/ scripts/ regressions/ && ruff format --check src/ tests/ scripts/ regressions/ && ty check src/ --exit-zero-on-warning"
     test: "python -m pytest tests/ -v"
     test_single: "python -m pytest {path} -v"
     coverage: "python -m pytest tests/ --cov=src --cov-report=term-missing"
