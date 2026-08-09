@@ -50,12 +50,24 @@ Key = str | tuple[str, ...]
 
 
 class _ScalarO3Linear(nn.Module):
-    """Scalar-only e3nn ``o3.Linear`` with bias: ``(x @ W/sqrt(in)) + b``."""
+    """Scalar-only e3nn ``o3.Linear`` with bias: ``(x @ W/sqrt(in)) + b``.
+
+    Initialisation follows e3nn's ``o3.Linear`` convention: the weight is drawn
+    from the **global** RNG as standard normal ``N(0, 1)`` and the path
+    normalisation ``1/sqrt(in_mul)`` is applied in :meth:`forward`
+    (``self._alpha``) rather than folded into the init, so the stored weight
+    stays unit-variance. The bias is zero-initialised.
+
+    A zero weight (the previous init) makes the layer emit a constant per-atom
+    energy on an untrained model, which silently zeroes the forces and voids
+    every downstream force / parity assertion. Loading a checkpoint overwrites
+    the random init exactly, so weight-transfer paths are unaffected.
+    """
 
     def __init__(self, in_mul: int, out_mul: int) -> None:
         super().__init__()
         self.in_mul, self.out_mul = in_mul, out_mul
-        self.weight = nn.Parameter(torch.zeros(in_mul * out_mul, dtype=config.ftype))
+        self.weight = nn.Parameter(torch.randn(in_mul * out_mul, dtype=config.ftype))
         self.bias = nn.Parameter(torch.zeros(out_mul, dtype=config.ftype))
         self._alpha = 1.0 / math.sqrt(in_mul)
 

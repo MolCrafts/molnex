@@ -23,10 +23,15 @@ The contract under test:
    directly — the kernel is a pure tensor function, and the head
    *calls* it. The shape/dtype contract holds and the resulting energy
    is finite and differentiable through the head MLP.
+7. **Construction-time precision.** Built under
+   ``config.set_precision("fp64")`` the head's parameters come out fp64
+   on their own — the post-hoc ``.to(dtype=torch.float64)`` inside
+   ``_build_head`` is a convenience for the cases above, not the contract.
 """
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from molpot.heads import BondChargeHead
@@ -279,3 +284,35 @@ def test_head_calls_kernel_directly():
     assert torch.isfinite(grad_mu).all()
     assert torch.isfinite(grad_feat).all()
     assert grad_feat.abs().max() > 0.0
+
+
+@pytest.mark.parametrize("edge_dim", [None, 4], ids=["no-edge-features", "edge-features"])
+def test_all_parameters_honour_the_fp64_precision(fp64, edge_dim):
+    """Every parameter is fp64 when the head is built under fp64.
+
+    ``config["ftype"]`` is the single source of truth for the working
+    precision; a layer that ignores it leaves the head mixed-precision and
+    its first forward dies on a dtype-mismatched matmul. Built directly —
+    no ``_build_head`` cast — because the cast is exactly what would mask
+    the defect.
+    """
+    head = BondChargeHead(node_dim=8, edge_dim=edge_dim, hidden_dim=32)
+
+    assert {p.dtype for p in head.parameters()} == {torch.float64}
+
+
+def test_forward_runs_under_the_fp64_precision(fp64):
+    """A head built at fp64 emits fp64 charges from the fp64 sample inputs."""
+    head = BondChargeHead(node_dim=8, hidden_dim=32, charge_projection=False)
+    inp = _make_inputs()
+
+    out = head(
+        node_features=inp["node_features"],
+        edge_index=inp["edge_index"],
+        edge_dist=inp["edge_dist"],
+        atom_batch=inp["atom_batch"],
+        num_graphs=1,
+    )
+
+    assert out["atomic_charges"].dtype == torch.float64
+    assert out["bond_charges"].dtype == torch.float64

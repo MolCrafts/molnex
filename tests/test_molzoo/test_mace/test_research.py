@@ -26,17 +26,26 @@ case no longer depends on the ambient RNG.
 
 The import stays ``from molzoo.mace import MACE``, the stable package surface.
 
-Known debt found while migrating that case — the research encoder **cannot be
-built at fp64**. Under ``config.set_precision("fp64")`` it comes out
-mixed-precision (17 fp64 / 14 fp32 parameters) because
-``molrep.embedding.node`` creates its ``nn.Embedding`` / ``nn.Linear`` layers
-without ``dtype=config.ftype`` (``src/molrep/embedding/node.py:143,147,264,
-269-276``), unlike ``molrep.embedding.mlp`` (``:57``) which honours the
-singleton; the first forward then dies with ``mat1 and mat2 must have the same
-dtype``. The deleted flat test never saw this — it ran at the default fp32.
-This module therefore pins the research encoder at fp32 (:func:`fp32`), which
-is exactly what the flat file did; it is **not** a weakening. Reported, not
-patched: the fix belongs in ``molrep``, not in a test.
+fp64 support is pinned by :meth:`TestMACE.test_builds_and_runs_at_fp64`.
+Until that case is green the research encoder **cannot be built at fp64**:
+under ``config.set_precision("fp64")`` it comes out mixed-precision (17 fp64 /
+14 fp32 parameters) and the first forward dies with ``mat1 and mat2 must have
+the same dtype``. Two ``molrep`` layer families ignore the ``config["ftype"]``
+singleton that ``molrep.embedding.mlp`` (``:57``) honours:
+
+* ``molrep.embedding.node`` — ``nn.Embedding`` / ``nn.Linear`` / ``cuet.Linear``
+  built without ``dtype=`` (``src/molrep/embedding/node.py:143,147,156,264,
+  269-276``), which is where the two ``embedding.node_embedding.*`` fp32
+  parameters come from;
+* ``molrep.interaction.radial.RadialWeightMLP`` — ``nn.Linear`` without
+  ``dtype=`` (``src/molrep/interaction/radial.py:79,82``), which is where the
+  twelve ``interactions.*.radial_mlp.*`` fp32 parameters come from.
+
+The remaining fp32-only cases below (:func:`fp32`) are **not** a weakening —
+they are the coverage the deleted flat file had, kept green across the fix so
+the default precision cannot regress while fp64 is being enabled. Once fp64 is
+green, whoever lands the fix should re-read this note: the site lists above are
+the only part of it that goes stale.
 """
 
 from __future__ import annotations
@@ -101,9 +110,13 @@ def fp32(fp64) -> None:
     config.set_precision("fp64")
 
 
-@pytest.fixture
-def encoder(fp32) -> MACE:
-    """A tiny research MACE — two layers, eight scalar channels, fp32."""
+def tiny_mace() -> MACE:
+    """Build a tiny research MACE at the ambient precision.
+
+    Two layers, eight scalar channels. Called by the fp32 :func:`encoder`
+    fixture and by the fp64 case, so both exercise the same configuration and
+    only the ambient ``config["ftype"]`` differs.
+    """
     return MACE(
         node_attr_specs=[
             DiscreteEmbeddingSpec(input_key="Z", num_classes=NUM_ELEMENTS, emb_dim=NUM_FEATURES)
@@ -118,15 +131,26 @@ def encoder(fp32) -> MACE:
     )
 
 
-@pytest.fixture
-def species_cluster(fp32) -> TensorDict:
-    """The package's five-atom cluster relabelled with research species indices."""
+def tiny_cluster() -> TensorDict:
+    """The package's five-atom cluster at the ambient precision."""
     return make_graph_batch(
         pos=torch.tensor(CLUSTER_POS, dtype=config.ftype),
         Z=torch.tensor(CLUSTER_SPECIES, dtype=torch.long),
         edge_index=full_edge_index(SINGLE_GRAPH),
         batch=torch.zeros(len(CLUSTER_SPECIES), dtype=torch.long),
     )
+
+
+@pytest.fixture
+def encoder(fp32) -> MACE:
+    """A tiny research MACE — two layers, eight scalar channels, fp32."""
+    return tiny_mace()
+
+
+@pytest.fixture
+def species_cluster(fp32) -> TensorDict:
+    """The package's five-atom cluster relabelled with research species indices."""
+    return tiny_cluster()
 
 
 class TestMACE:
@@ -148,4 +172,21 @@ class TestMACE:
         """The encoder contract: ``atoms.node_features`` is ``(N, layers, features)``."""
         node_features = encoder(species_cluster)["atoms", "node_features"]
         assert isinstance(node_features, torch.Tensor)
+        assert node_features.shape == (len(CLUSTER_SPECIES), NUM_INTERACTIONS, NUM_FEATURES)
+
+    def test_builds_and_runs_at_fp64(self):
+        """The encoder is buildable and runnable at the package's ambient fp64.
+
+        Deliberately does **not** request the :func:`fp32` override: it runs
+        under the package-wide autouse ``fp64`` fixture, which is the precision
+        the foundation-weight path uses. Every parameter must come out fp64 —
+        a single fp32 layer both loses the precision the caller asked for and
+        breaks the forward on a dtype-mismatched matmul.
+        """
+        encoder = tiny_mace()
+
+        assert {p.dtype for p in encoder.parameters()} == {torch.float64}
+
+        node_features = encoder(tiny_cluster())["atoms", "node_features"]
+        assert node_features.dtype == torch.float64
         assert node_features.shape == (len(CLUSTER_SPECIES), NUM_INTERACTIONS, NUM_FEATURES)

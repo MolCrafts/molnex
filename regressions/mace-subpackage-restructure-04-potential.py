@@ -53,10 +53,31 @@ lives in this comment only:
                       operation-identical graph, ~2 ulp at these magnitudes,
                       far inside the 1e-12 band the spec asks for.
 
+    goldens re-captured 2026-08-09 at e8d6595 + working-tree dtype/init fixes:
+    ``_ScalarO3Linear`` N(0,1) init + ``config.ftype`` at construction (see
+    commit message); previous values captured at c2ccd6e (2026-08-08), which
+    reproduces them bit-for-bit.
+
+    Only :data:`OMOL` and :data:`OMOL_CATION_ENERGY` moved. Both variants are
+    seeded models, so the shift is an init-stream shift, not a physics change:
+    OMOL's ``joint_embedding`` conditioning tables were built at the torch
+    default fp32 and are now built at ``config.ftype``, and drawing the same
+    number of elements at fp64 consumes the global RNG differently — every
+    parameter constructed after the embedding therefore differs. Decomposed,
+    ``Σ E0[Z]`` is bit-identical (-3110.7999999999997), the embedding readout
+    stays O(1) eV (-1.084109101152535 → -1.454179831707279) and the readout
+    energy moves with the new draw (-31.130204741718686 → 1.102275717507076).
+
+    Unmoved, and re-verified: every MatPES golden (free and periodic energies,
+    the full force table and its checksum) is bit-identical — MatPES's only
+    fp32 leak was the ``cutoff_fn.r_cut`` buffer, and ``r_max=5.0`` is exact in
+    both precisions. The seam-equality legs still hold at ``SEAM_ATOL = 0.0``,
+    and ``Σ_i F_i`` stays at 1.0e-17 (MatPES) / 3.5e-18 (OMOL) eV/Å.
+
 Determinism: ``torch.manual_seed(0)`` immediately before each construction
 (module init is the only RNG consumer), plus a private
 ``torch.Generator().manual_seed(0)`` for the OMOL readout — see
-:func:`wake_zero_init_readout`. Two consecutive runs were byte-identical at
+:func:`wake_readout`. Two consecutive runs were byte-identical at
 capture time.
 
 Run:
@@ -159,12 +180,15 @@ OMOL_KWARGS = dict(
     edge_channels=8,
 )
 
-#: ``molrep.readout.mace._ScalarO3Linear`` zero-initialises weight *and* bias,
-#: so an untrained OMOL ``NonLinearBiasReadout`` emits a constant per-atom
-#: energy and every OMOL force is identically zero. These four ``state_dict``
-#: entries are re-seeded (see :func:`wake_zero_init_readout`) so the OMOL
-#: goldens below are not a vacuous ``0 == 0``.
-ZERO_INIT_READOUT_KEYS = (
+#: ``molrep.readout.mace._ScalarO3Linear`` draws its weight from ``N(0, 1)`` on
+#: the **global** RNG and zero-initialises its bias. These four ``state_dict``
+#: entries are refilled from a *private* generator (see
+#: :func:`wake_readout`) so the OMOL goldens below depend only on that
+#: generator, not on how much global RNG the rest of the model happens to
+#: consume ahead of the readout.
+#: Fill order is load-bearing — the private generator is consumed entry by
+#: entry, so reordering this tuple silently re-rolls every OMOL golden.
+READOUT_WAKE_KEYS = (
     "readout.linear_mid.weight",
     "readout.linear_mid.bias",
     "readout.linear_2.weight",
@@ -205,21 +229,21 @@ MATPES_PERIODIC_ENERGY: list[float] = [-3110.936741536619]
 MATPES_PERIODIC_FORCE_ABS_SUM = 0.6035586909434021
 
 OMOL = Golden(
-    energy=[-3143.014313842871],
+    energy=[-3111.1519041142],
     forces=[
-        [0.0835761466096715, -0.027661029924360432, -0.014209789809885562],
-        [-0.053411295138196244, -0.0595154032557213, -0.013578152445751224],
-        [-0.004522088767538401, 0.019486164597877845, -0.0013636477030469518],
-        [0.05307925742031967, -0.0006937421127873157, -0.0044739342544147884],
-        [-0.07872202012425653, 0.0683840106949912, 0.03362552421309853],
+        [0.0016186653588899126, 0.02170414821495261, 0.006063378516186664],
+        [0.0010368535618123821, 0.005192545579351304, -0.0021008220476804373],
+        [-0.014156038043983701, -0.017889811992860463, -0.0005845605451978166],
+        [0.019110658287980815, -0.020804622960958453, -0.00796628298659983],
+        [-0.007610139164699409, 0.011797741159515, 0.004588287063291421],
     ],
-    force_abs_sum=0.5163022070719174,
+    force_abs_sum=0.1422245554839602,
 )
 
 #: The same OMOL potential and geometry at total charge +1 (spin still 1): the
 #: conditioning must reach the joint embedding, and it moves the energy by
-#: 15.8 eV.
-OMOL_CATION_ENERGY: list[float] = [-3127.2188877088856]
+#: 0.47 eV.
+OMOL_CATION_ENERGY: list[float] = [-3110.6811189024315]
 
 
 # ---------------------------------------------------------------------------
@@ -227,32 +251,43 @@ OMOL_CATION_ENERGY: list[float] = [-3127.2188877088856]
 # ---------------------------------------------------------------------------
 
 
-def wake_zero_init_readout(potential: MACEPotential) -> None:
-    """Re-seed the OMOL readout so its forces are not identically zero.
+def wake_readout(potential: MACEPotential) -> None:
+    """Pin the OMOL readout to a private generator, off the global RNG.
 
-    ``_ScalarO3Linear`` zero-initialises both its weight and its bias, which
-    makes an *untrained* OMOL readout emit a constant per-atom energy — every
-    force would then be exactly zero and the goldens would assert nothing. The
-    four scalar-linear entries are refilled from a private, fixed generator
-    (write-back through the public ``state_dict`` / ``load_state_dict`` pair, no
-    private attribute touched). Checkpoint use is unaffected: official weights
-    overwrite these entries.
+    ``_ScalarO3Linear`` draws its weight from ``N(0, 1)`` on the global RNG and
+    zero-initialises its bias. Refilling all four scalar-linear entries from a
+    private, fixed generator keeps the goldens below stable against changes in
+    how much global RNG the rest of the model consumes before the readout is
+    built (write-back through the public ``state_dict`` / ``load_state_dict``
+    pair, no private attribute touched). Checkpoint use is unaffected: official
+    weights overwrite these entries.
+
+    Both halves of the init are asserted on the way through, because either one
+    silently invalidates the goldens: a weight back at zero would make the
+    untrained readout emit a constant per-atom energy and zero every OMOL force
+    (the state this fills in for historically), and a non-zero bias would mean
+    the init changed again.
 
     Args:
         potential: OMOL potential to modify in place.
 
     Raises:
-        RuntimeError: If a key is missing (the readout was renamed) or is
-            already non-zero (the initialisation changed) — either way the
-            goldens below no longer describe the model that produced them.
+        RuntimeError: If a key is missing (the readout was renamed), a weight is
+            zero, or a bias is non-zero — in each case the goldens below no
+            longer describe the model that produced them.
     """
     state = potential.state_dict()
     generator = torch.Generator().manual_seed(0)
-    for key in ZERO_INIT_READOUT_KEYS:
+    for key in READOUT_WAKE_KEYS:
         if key not in state:
             raise RuntimeError(f"OMOL readout key {key!r} is gone — re-capture the goldens")
-        if float(state[key].abs().max()) != 0.0:
-            raise RuntimeError(f"OMOL readout key {key!r} is no longer zero-init at construction")
+        magnitude = float(state[key].abs().max())
+        if key.endswith(".weight") and magnitude == 0.0:
+            raise RuntimeError(
+                f"OMOL readout weight {key!r} is zero-init again — every force would be zero"
+            )
+        if key.endswith(".bias") and magnitude != 0.0:
+            raise RuntimeError(f"OMOL readout bias {key!r} is no longer zero-init at construction")
         state[key] = torch.empty_like(state[key]).normal_(generator=generator)
     potential.load_state_dict(state, strict=True)
 
@@ -267,13 +302,13 @@ def matpes_potential(*, compute_forces: bool = True) -> MACEPotential:
 
 
 def omol_potential(*, compute_forces: bool = True) -> MACEPotential:
-    """Seed-0 OMOL potential, with the zero-init readout woken up."""
+    """Seed-0 OMOL potential, with the readout pinned to its private generator."""
     spec = MACEOMolSpec(
         atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **OMOL_KWARGS
     )
     torch.manual_seed(0)
     potential = MACEPotential(spec, compute_forces=compute_forces, use_fallback=True).eval()
-    wake_zero_init_readout(potential)
+    wake_readout(potential)
     return potential
 
 

@@ -3,6 +3,8 @@
 import torch
 import torch.nn as nn
 
+from molix import config
+
 
 class TypeHead(nn.Module):
     """Classification head for discrete atom type prediction.
@@ -18,11 +20,12 @@ class TypeHead(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_types = num_types
 
+        ftype = config.ftype
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim, dtype=ftype),
             nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_types),
+            nn.Linear(hidden_dim, num_types, dtype=ftype),
         )
 
     def forward(self, embeddings: torch.Tensor) -> torch.Tensor:

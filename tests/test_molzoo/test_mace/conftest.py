@@ -16,8 +16,8 @@ Everything a second module in this package needs is defined here exactly once:
   ``periodic_cluster`` / ``omol_cluster`` / ``pair_batch`` fixtures — the
   fixed geometries (no RNG anywhere);
 * :func:`full_edge_index` — the ordered intra-graph pair list;
-* :func:`wake_zero_init_readout` — the OMOL readout un-zeroing that keeps
-  force and equivalence assertions non-vacuous;
+* :func:`wake_zero_init_readout` — pins the OMOL readout to a private
+  generator, so state-transfer parity does not ride on the global RNG;
 * ``matpes_variant`` / ``omol_variant`` — the keyword-constructed foundation
   models, used both as the subject of ``test_variants.py`` and as the
   raw-tensor (``energy_forces``) oracle of ``test_potential.py`` /
@@ -151,16 +151,22 @@ def raw_tensors(
 
 
 def wake_zero_init_readout(model: torch.nn.Module) -> None:
-    """Give the OMOL readout non-zero weights so assertions mean something.
+    """Pin the OMOL readout to a private generator, off the global RNG.
 
-    ``molrep.readout.mace._ScalarO3Linear`` zero-initialises **both** its weight
-    and its bias, so an *untrained* ``NonLinearBiasReadout`` emits a constant
-    per-atom energy: a fresh OMOL model's interaction energy is
-    position-independent and its forces are identically zero. Parity, physics
-    and equivalence assertions on such a model are vacuous (0 == 0), so the two
-    scalar linears are filled from a fixed generator first. Checkpoint use is
-    unaffected (official weights overwrite them); the init itself is
-    pre-existing and out of scope for this chain — reported, not patched.
+    ``molrep.readout.mace._ScalarO3Linear`` now draws its weight from ``N(0, 1)``
+    on the **global** RNG and zero-initialises only its bias, so a fresh OMOL
+    ``NonLinearBiasReadout`` is already non-trivial and the assertions here are
+    no longer at risk of being vacuous. (They were: the weight used to be
+    zero-initialised too, which made an untrained model's interaction energy
+    position-independent and every force identically zero, so parity, physics
+    and equivalence assertions all reduced to ``0 == 0``.)
+
+    The helper stays as belt-and-braces determinism for the state-transfer
+    parity tests: it fills both scalar linears from a private, fixed
+    ``torch.Generator``, so the values a test compares across two models depend
+    on that generator alone and not on how much global RNG each model happened
+    to consume before its readout was built. Checkpoint use is unaffected —
+    official weights overwrite these entries.
 
     Args:
         model: An OMOL-configured model exposing ``readout.linear_mid`` /

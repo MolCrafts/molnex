@@ -91,9 +91,9 @@ class DipoleHead(nn.Module):
 
         if self.uses_ac:
             self.charge_mlp = nn.Sequential(
-                nn.Linear(node_scalar_dim, hidden_dim),
+                nn.Linear(node_scalar_dim, hidden_dim, dtype=config.ftype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, 1),
+                nn.Linear(hidden_dim, 1, dtype=config.ftype),
             )
         if self.uses_ad or self.uses_os:
             if node_vector_dim is None:
@@ -108,9 +108,9 @@ class DipoleHead(nn.Module):
             if edge_scalar_dim is None or edge_vector_dim is None:
                 raise ValueError("edge_scalar_dim and edge_vector_dim required for BC variant.")
             self.bond_scalar_mlp = nn.Sequential(
-                nn.Linear(edge_scalar_dim, hidden_dim),
+                nn.Linear(edge_scalar_dim, hidden_dim, dtype=config.ftype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, 1),
+                nn.Linear(hidden_dim, 1, dtype=config.ftype),
             )
             self.bond_vector_mlp = nn.Linear(
                 edge_vector_dim,

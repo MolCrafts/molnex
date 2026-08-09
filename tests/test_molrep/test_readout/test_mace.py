@@ -13,6 +13,7 @@ from molrep.readout.mace import (
     NonLinearReadout,
     ProductHead,
     ProductHeadSpec,
+    _ScalarO3Linear,
 )
 from molrep.readout.projection import BasisProjection
 
@@ -33,6 +34,12 @@ MIGRATED_CONFIG = {
     "num_species": 118,
 }
 MIGRATED_NUM_FEATURES = MIGRATED_CONFIG["hidden_dim"] // (MIGRATED_CONFIG["l_max"] + 1) ** 2
+
+#: Multiplicities giving ``in_mul * out_mul = 16384`` weights — a sample large
+#: enough that the N(0, 1) moments of a correct e3nn-style init land inside the
+#: hard-coded bands of
+#: :meth:`TestScalarO3Linear.test_weight_init_is_standard_normal`.
+NORMAL_SAMPLE_MUL = 128
 
 
 class TestProductHeadSpec:
@@ -258,6 +265,83 @@ def scalar_feats():
     return torch.randn(N_NODES, FEATURES, dtype=config.ftype)
 
 
+class TestScalarO3Linear:
+    """Test the scalar-only ``o3.Linear`` port behind :class:`NonLinearBiasReadout`.
+
+    Initialisation follows e3nn's ``o3.Linear`` convention: the weight is drawn
+    from the **global** RNG as standard normal ``N(0, 1)`` and the path
+    normalisation ``1/sqrt(in_mul)`` is applied in ``forward`` (``self._alpha``),
+    not folded into the init; the bias stays zero.
+    """
+
+    def test_weight_is_not_zero_initialised(self):
+        """A fresh layer must not start from an all-zero weight.
+
+        Zero weights make every downstream assertion on an untrained model
+        vacuous — the readout emits a constant per-atom energy, so the forces
+        are identically zero.
+        """
+        torch.manual_seed(0)
+        layer = _ScalarO3Linear(FEATURES, MLP_DIM)
+
+        assert not torch.equal(layer.weight, torch.zeros_like(layer.weight))
+
+    def test_bias_is_zero_initialised(self):
+        """The bias stays at zero — e3nn's ``o3.Linear`` convention."""
+        torch.manual_seed(0)
+        layer = _ScalarO3Linear(FEATURES, MLP_DIM)
+
+        assert torch.equal(layer.bias, torch.zeros_like(layer.bias))
+
+    def test_weight_init_is_reproducible_under_a_fixed_seed(self):
+        """Two constructions under the same seed give bit-identical weights."""
+        torch.manual_seed(0)
+        first = _ScalarO3Linear(FEATURES, MLP_DIM)
+        torch.manual_seed(0)
+        second = _ScalarO3Linear(FEATURES, MLP_DIM)
+
+        assert torch.equal(first.weight, second.weight)
+
+    def test_weight_init_differs_across_seeds(self):
+        """The weight is drawn from the global RNG, so a new seed changes it."""
+        torch.manual_seed(0)
+        first = _ScalarO3Linear(FEATURES, MLP_DIM)
+        torch.manual_seed(1)
+        second = _ScalarO3Linear(FEATURES, MLP_DIM)
+
+        assert not torch.equal(first.weight, second.weight)
+
+    def test_weight_init_is_standard_normal(self):
+        """Sample moments of the init sit in the N(0, 1) bands at n = 16384.
+
+        The ``1/sqrt(in_mul)`` path normalisation is a ``forward`` factor
+        (``_alpha``), so the stored weight itself is unit-variance.
+        """
+        torch.manual_seed(0)
+        layer = _ScalarO3Linear(NORMAL_SAMPLE_MUL, NORMAL_SAMPLE_MUL)
+
+        assert layer.weight.numel() == 16384
+        assert abs(layer.weight.mean().item()) < 0.1
+        assert 0.9 < layer.weight.std().item() < 1.1
+
+    def test_state_dict_load_overwrites_the_random_init(self):
+        """Loading a checkpoint replaces the init exactly — no blending.
+
+        Guards that giving the layer a random init cannot perturb any
+        loaded-weights path (the foundation-model checkpoints).
+        """
+        torch.manual_seed(0)
+        source = _ScalarO3Linear(FEATURES, MLP_DIM)
+        torch.manual_seed(1)
+        target = _ScalarO3Linear(FEATURES, MLP_DIM)
+        assert not torch.equal(source.weight, target.weight)
+
+        target.load_state_dict(source.state_dict())
+
+        assert torch.equal(target.weight, source.weight)
+        assert torch.equal(target.bias, source.bias)
+
+
 class TestLinearReadout:
     """Test the MACE ``LinearReadoutBlock`` port."""
 
@@ -301,6 +385,20 @@ class TestNonLinearBiasReadout:
         """``Linear → SiLU → linear_mid → SiLU → linear_2`` gives one number per atom."""
         head = NonLinearBiasReadout(irreps_in=f"{FEATURES}x0e", mlp_dim=MLP_DIM)
         assert head(scalar_feats).shape == (N_NODES, 1)
+
+    def test_untrained_output_is_not_constant_across_atoms(self, scalar_feats):
+        """An *untrained* readout must still resolve two different atoms.
+
+        A constant output here means the model's interaction energy is
+        position-independent and its forces are identically zero, which
+        silently voids every force / parity assertion built on a fresh model.
+        """
+        torch.manual_seed(0)
+        head = NonLinearBiasReadout(irreps_in=f"{FEATURES}x0e", mlp_dim=MLP_DIM)
+
+        energies = head(scalar_feats)
+
+        assert not torch.allclose(energies[0], energies[1])
 
     def test_state_dict_keys_are_the_weight_transfer_contract(self):
         """``linear_mid`` plus the two biases distinguish this from NonLinearReadout."""

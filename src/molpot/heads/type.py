@@ -3,6 +3,8 @@
 import torch
 import torch.nn as nn
 
+from molix import config
+
 
 class TypeHead(nn.Module):
     """Predict atom types from atomic representations."""
@@ -16,9 +18,9 @@ class TypeHead(nn.Module):
         """
         super().__init__()
         self.module = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, num_types),
+            nn.Linear(hidden_dim, num_types, dtype=config.ftype),
         )
 
     def forward(self, atoms_h: torch.Tensor) -> torch.Tensor:

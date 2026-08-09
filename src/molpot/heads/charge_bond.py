@@ -60,6 +60,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from molix import config
 from molix.F.scatter import scatter_sum
 from molpot.heads._common import graph_counts as _graph_counts
 
@@ -141,11 +142,11 @@ class BondChargeHead(nn.Module):
 
         in_dim = 2 * node_dim + 1 + self.edge_dim
         self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
+            nn.Linear(in_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, 1, dtype=config.ftype),
         )
 
     def _bond_charges(

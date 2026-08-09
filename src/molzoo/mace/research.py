@@ -232,7 +232,7 @@ class MACE(TensorDictModuleBase):
         # Layer normalization (all layers except last) over the scalar state.
         self.layer_norms = nn.ModuleList(
             [
-                nn.LayerNorm(num_features) if layer_norm else nn.Identity()
+                nn.LayerNorm(num_features, dtype=config.ftype) if layer_norm else nn.Identity()
                 for _ in range(max(num_interactions - 1, 0))
             ]
         )

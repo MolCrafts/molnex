@@ -96,21 +96,21 @@ class ChargeResponseHead(nn.Module):
         self.epsilon = float(epsilon)
 
         self.atom_diag_mlp = nn.Sequential(
-            nn.Linear(node_scalar_dim, hidden_dim),
+            nn.Linear(node_scalar_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, 1, dtype=config.ftype),
         )
         self.edge_scalar_mlp = nn.Sequential(
-            nn.Linear(edge_scalar_dim, hidden_dim),
+            nn.Linear(edge_scalar_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, 1, dtype=config.ftype),
         )
         self.edge_vector_mlp = nn.Linear(edge_vector_dim, 1, dtype=config.ftype)
         if self.iso:
             self.iso_mlp = nn.Sequential(
-                nn.Linear(node_scalar_dim, hidden_dim),
+                nn.Linear(node_scalar_dim, hidden_dim, dtype=config.ftype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, 1),
+                nn.Linear(hidden_dim, 1, dtype=config.ftype),
             )
 
         _default_sigma = {1: 0.312, 6: 0.730, 7: 0.709, 8: 0.661, 16: 1.048, 17: 1.016}

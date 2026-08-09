@@ -191,7 +191,7 @@ def _tiny_potential() -> PiNetPotential:
             depth=2,
             rank=3,
             hidden_dim=16,
-                    # Monomorphic since b85d12f: force derivation is fixed here.
+            # Monomorphic since b85d12f: force derivation is fixed here.
             compute_forces=True,
         )
         .to(_DEVICE)

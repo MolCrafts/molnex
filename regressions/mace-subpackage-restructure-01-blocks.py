@@ -22,6 +22,28 @@ calls. To re-capture, swap the imports below back and print the statistics.
     device / dtype  : CPU, float64 (``config.set_precision("fp64")`` + ``.double()``)
     oracle          : self-baseline (molnex at cf60f99) — no third-party oracle
 
+    goldens re-captured 2026-08-09 at e8d6595 + working-tree dtype/init fixes:
+    ``_ScalarO3Linear`` N(0,1) init + ``config.ftype`` at construction (see
+    commit message); previous values captured at cf60f99 (2026-08-08), which
+    reproduces them bit-for-bit. Three blocks moved, each for one reason:
+
+    * ``InteractionBlock`` — ``radial_mlp`` linears were built at the torch
+      default fp32 and cast by ``.double()`` afterwards; they are now built at
+      ``config.ftype`` directly, so ``kaiming_uniform_`` draws a different
+      (fp64) stream from the same ``manual_seed(0)``.
+    * ``NonLinearBiasReadout`` — ``_ScalarO3Linear`` now draws its weight from
+      ``N(0, 1)`` instead of zero, so the untrained readout is no longer
+      identically zero. The bias is still zero-initialised.
+    * ``EmbeddingBlock`` — same fp32→fp64 init-stream shift in the node
+      embedding. Only the ``node_features`` term of the composite checksum
+      moved (−7.378921712535659 → 18.411832194168696); the deterministic
+      ``edge_angular`` (5.0) and ``edge_radial`` (3.168506132872447) terms are
+      bit-identical, and the weight std stays ≈1 (1.032 → 0.995), so the large
+      swing in the *total* is cancellation bookkeeping, not a scale change.
+
+    Unmoved, and re-verified: every block's ``sorted(state_dict().keys())``,
+    and the five blocks whose parameters were already fp64 at construction.
+
 Run:
     PYTHONPATH=src python regressions/mace-subpackage-restructure-01-blocks.py
 """
@@ -53,7 +75,7 @@ from molrep.readout.mace import (  # noqa: E402
 )
 
 RTOL = 1e-12
-ATOL = 1e-15  # floor so the all-zero NonLinearBiasReadout golden stays comparable
+ATOL = 1e-15  # absolute floor so a golden that lands near zero stays comparable
 
 N, E, F, NUM_RADIAL, L_MAX = 4, 5, 8, 5, 1
 SH = "1x0e+1x1o"
@@ -79,8 +101,8 @@ GOLDENS: dict[str, Golden] = {
         ],
     ),
     "InteractionBlock": Golden(
-        total=0.047010066700050736,
-        absmax=0.048587765503428415,
+        total=0.07905200345001925,
+        absmax=0.07585597226756544,
         keys=[
             "conv_tp.cue_tp.f.m.graphs.0.graph.c0",
             "conv_tp.cue_tp.f.m.graphs.0.graph.c1",
@@ -153,10 +175,12 @@ GOLDENS: dict[str, Golden] = {
         ],
     ),
     "NonLinearBiasReadout": Golden(
-        # _ScalarO3Linear initialises weight and bias to zero, so the untrained
-        # OMOL-variant readout is identically zero. That is the captured state.
-        total=0.0,
-        absmax=0.0,
+        # _ScalarO3Linear draws its weight from N(0, 1) and zero-initialises its
+        # bias, so the untrained OMOL-variant readout is non-trivial. It used to
+        # be identically zero (zero weight *and* zero bias), which silently
+        # zeroed every downstream force — that is what the init fix removed.
+        total=-0.04351653087296714,
+        absmax=0.04499837160305635,
         keys=[
             "linear_1.f.m.graphs.0.graph.c0",
             "linear_1.weight",
@@ -182,8 +206,8 @@ GOLDENS: dict[str, Golden] = {
         ],
     ),
     "EmbeddingBlock": Golden(
-        total=0.7895844203367881,
-        absmax=2.60903517001283,
+        total=26.580338327041144,
+        absmax=2.854573509905571,
         keys=[
             "node_embedding.embedders.0.weight",
             "node_embedding.project.0.f.m.graphs.0.graph.c0",

@@ -73,13 +73,14 @@ class RadialWeightMLP(nn.Module):
             num_layers=num_layers,
         )
 
+        ftype = config.ftype
         layers: list[nn.Module] = []
         current_dim = in_dim
         for _ in range(num_layers):
-            layers.append(nn.Linear(current_dim, hidden_dim))
+            layers.append(nn.Linear(current_dim, hidden_dim, dtype=ftype))
             layers.append(nn.SiLU())
             current_dim = hidden_dim
-        layers.append(nn.Linear(current_dim, out_dim))
+        layers.append(nn.Linear(current_dim, out_dim, dtype=ftype))
 
         self.mlp = nn.Sequential(*layers)
 

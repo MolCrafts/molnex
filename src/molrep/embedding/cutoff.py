@@ -53,7 +53,7 @@ class CosineCutoff(nn.Module):
         )
 
         # Register buffers with type annotations
-        r_cut_tensor = torch.tensor(float(self.config.r_cut))
+        r_cut_tensor = torch.tensor(float(self.config.r_cut), dtype=config.ftype)
         self.register_buffer("r_cut", r_cut_tensor, persistent=False)
         self.r_cut: torch.Tensor
 
@@ -131,7 +131,7 @@ class PolynomialCutoff(nn.Module):
             exponent=exponent,
         )
 
-        r_cut_tensor = torch.tensor(float(self.config.r_cut))
+        r_cut_tensor = torch.tensor(float(self.config.r_cut), dtype=config.ftype)
         self.register_buffer("r_cut", r_cut_tensor, persistent=False)
         self.r_cut: torch.Tensor
 

@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from molix import config
+
 
 class LJParameterHead(nn.Module):
     """Predict per-atom Lennard-Jones parameters from node features.
@@ -31,9 +33,9 @@ class LJParameterHead(nn.Module):
         self.min_epsilon = min_epsilon
         self.min_sigma = min_sigma
         self.mlp = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
+            nn.Linear(feature_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 2),
+            nn.Linear(hidden_dim, 2, dtype=config.ftype),
         )
 
     def forward(self, node_features: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -72,9 +74,9 @@ class RepulsionParameterHead(nn.Module):
         self.min_eps = min_eps
         self.min_lam = min_lam
         self.mlp = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
+            nn.Linear(feature_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 2),
+            nn.Linear(hidden_dim, 2, dtype=config.ftype),
         )
 
     def forward(self, node_features: torch.Tensor, **kwargs) -> dict[str, torch.Tensor]:
@@ -115,9 +117,9 @@ class ChargeTransferParameterHead(nn.Module):
         self.min_eps = min_eps
         self.min_lam = min_lam
         self.mlp = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
+            nn.Linear(feature_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 2),
+            nn.Linear(hidden_dim, 2, dtype=config.ftype),
         )
 
     def forward(self, node_features: torch.Tensor, **kwargs) -> dict[str, torch.Tensor]:
@@ -157,9 +159,9 @@ class ChargeHead(nn.Module):
         super().__init__()
         self.total_charge = total_charge
         self.mlp = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
+            nn.Linear(feature_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, 1, dtype=config.ftype),
         )
 
     def forward(
@@ -220,9 +222,9 @@ class TSScalingHead(nn.Module):
         self.register_buffer("alpha_free", alpha_free)
         self.register_buffer("r_star_free", r_star_free)
         self.mlp = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
+            nn.Linear(feature_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, 1, dtype=config.ftype),
         )
 
     def forward(

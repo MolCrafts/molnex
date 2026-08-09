@@ -5,6 +5,8 @@ import math
 import torch
 import torch.nn as nn
 
+from molix import config
+
 
 class NeighborGraphBuilder:
     """Build neighbor graphs from atomic positions.
@@ -132,8 +134,8 @@ class GaussianRBF(nn.Module):
 
     def __init__(self, num_rbf: int = 50, cutoff: float = 5.0, trainable: bool = False):
         super().__init__()
-        centers = torch.linspace(0, cutoff, num_rbf)
-        widths = torch.full((num_rbf,), cutoff / num_rbf)
+        centers = torch.linspace(0, cutoff, num_rbf, dtype=config.ftype)
+        widths = torch.full((num_rbf,), cutoff / num_rbf, dtype=config.ftype)
 
         if trainable:
             self.centers = nn.Parameter(centers)

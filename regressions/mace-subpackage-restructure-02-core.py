@@ -38,6 +38,25 @@ asserting.
     observed       : new-vs-flat deviation 0.0 (bit-identical) on every entry,
                      and ``sorted(state_dict())`` equal for both variants
 
+    goldens re-captured 2026-08-09 at e8d6595 + working-tree dtype/init fixes:
+    ``_ScalarO3Linear`` N(0,1) init + ``config.ftype`` at construction (see
+    commit message); previous values captured at 1ddd5ff (2026-08-08), which
+    reproduces them bit-for-bit.
+
+    Only :data:`OMOL` moved, and not because of the init change — every
+    parameter here is overwritten by :func:`deterministic_weights`, so this
+    scenario draws no RNG at all. Three OMOL parameters
+    (``joint_embedding.embedders.total_charge.weight``,
+    ``joint_embedding.embedders.total_spin.weight``,
+    ``joint_embedding.project.0.weight``) were built at the torch default fp32
+    before the fix: the fp64 ``linspace`` ramp was rounded into them on the way
+    in, and the conditioning was then contracted in fp32. Both now stay fp64,
+    which is why the shifts sit at the fp32 epsilon scale (≤4.7e-8 relative on
+    the per-layer checksums, ~9.8e-10 eV on the energy) and why the new numbers
+    are the strictly higher-precision ones. :data:`MATPES` is bit-identical
+    across the fix — its only fp32 leak was the ``cutoff_fn.r_cut`` buffer, and
+    ``r_max=5.0`` is exact in both precisions.
+
 Why the energy total is not the only assertion
 ----------------------------------------------
 Under the ``linspace(-0.1, 0.1)`` weight fill the MatPES interaction stack is
@@ -165,11 +184,11 @@ MATPES = MatpesGolden(
     readouts=(6.852674614296589e-12, 3.8986176107825314e-14),
 )
 OMOL = OMolGolden(
-    energy=-3111.2905857515216,
+    energy=-3111.2905857505443,
     e0=-3110.7999999999997,
-    emb=-0.04147213673688674,
-    sumsq=(0.004897576797442622, 2.02047140946756e-06),
-    readout=-0.4491136147850401,
+    emb=-0.04147213575986683,
+    sumsq=(0.00489757656783223, 2.020471377543396e-06),
+    readout=-0.4491136147850327,
 )
 
 

@@ -5,6 +5,8 @@ from typing import Any
 import torch.nn as nn
 from pydantic import BaseModel, Field
 
+from molix.config import config
+
 Key = str | tuple[str, ...]
 
 
@@ -62,9 +64,16 @@ class KeyedMLP(nn.Module):
         }
         act_fn = activation_map[self.config.activation.lower()]
 
+        ftype = config.ftype
+
         layers: list[nn.Module] = []
         layers.append(
-            nn.Linear(self.config.in_dim, self.config.hidden_dims[0], bias=self.config.use_bias)
+            nn.Linear(
+                self.config.in_dim,
+                self.config.hidden_dims[0],
+                bias=self.config.use_bias,
+                dtype=ftype,
+            )
         )
         layers.append(act_fn)
 
@@ -74,12 +83,18 @@ class KeyedMLP(nn.Module):
                     self.config.hidden_dims[idx],
                     self.config.hidden_dims[idx + 1],
                     bias=self.config.use_bias,
+                    dtype=ftype,
                 )
             )
             layers.append(act_fn)
 
         layers.append(
-            nn.Linear(self.config.hidden_dims[-1], self.config.out_dim, bias=self.config.use_bias)
+            nn.Linear(
+                self.config.hidden_dims[-1],
+                self.config.out_dim,
+                bias=self.config.use_bias,
+                dtype=ftype,
+            )
         )
 
         self.mlp = nn.Sequential(*layers)

@@ -199,9 +199,7 @@ def test_rebuild_every_fires_at_force_evaluation_positions():
     """
     torch.manual_seed(0)
     force = _CountingNLForce(1.0).to(_DTYPE)
-    ig = LangevinVerletIntegrator(force, dt=0.01, gamma=0.0, kbt=0.0, mass=1.0).cast_state(
-        _DTYPE
-    )
+    ig = LangevinVerletIntegrator(force, dt=0.01, gamma=0.0, kbt=0.0, mass=1.0).cast_state(_DTYPE)
     ig.rebuild_every = 1
     pos0 = torch.randn(4, 3, dtype=_DTYPE)
     vel0 = torch.randn(4, 3, dtype=_DTYPE) * 0.1

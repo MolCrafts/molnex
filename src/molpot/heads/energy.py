@@ -97,9 +97,9 @@ class AtomicEnergyMLP(nn.Module):
     def __init__(self, hidden_dim: int = 64):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, 1, dtype=config.ftype),
         )
 
     def forward(self, atoms_h: torch.Tensor) -> torch.Tensor:
@@ -125,9 +125,9 @@ class EnergyHead(nn.Module):
     def __init__(self, hidden_dim: int = 64):
         super().__init__()
         self.atomic_mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, 1, dtype=config.ftype),
         )
 
     def forward(self, atoms_h: torch.Tensor, graph_batch: torch.Tensor) -> torch.Tensor:
