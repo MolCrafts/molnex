@@ -2,10 +2,20 @@
 
 A domain type with methods, in the sense the project's design rules mean it:
 "I have a force field and a system; run dynamics at this precision." It owns the
-three things a trajectory needs held together and that no lower layer can decide
-alone — the **integrator**, the **MD-side precision**, and the
-**neighbour-list cadence** — and delegates the loop to
-:class:`~molix.md.runner.MDRunner`.
+two things a trajectory needs held together and that no lower layer can decide
+alone — the **integrator** and the **MD-side precision** — and delegates the
+loop to :class:`~molix.md.runner.MDRunner`.
+
+It does **not** own the neighbour-list cadence, and there is no kwarg for one.
+That decision belongs to :class:`~molix.md.neighbors.NeighborList`
+(``skin`` / ``every`` / ``delay`` / ``check``); the integrator asks it once per
+force evaluation, at the positions being evaluated, and derives *whether* to ask
+from :attr:`~molix.md.forcefield.ForceField.rebuilds_neighbors`. A run that must
+keep its list frozen composes it at the caller, through the existing
+``integrator=`` seam::
+
+    MD(ff, mass=m, integrator=LangevinVerletIntegrator(
+        ff, dt=0.5, gamma=0.0, kbt=0.0, mass=m, rebuild=False))
 
 Precision is split in two, deliberately. ``MD(dtype=)`` governs the **MD side
 only** — trajectory state (positions/velocities), the integrator's step
@@ -54,6 +64,16 @@ class _AutocastForceField(ForceField):
         super().__init__()
         self.inner = inner
         self.autocast_dtype = dtype
+
+    @property
+    def rebuilds_neighbors(self) -> bool:
+        """Delegate: wrapping for precision must not hide a live list.
+
+        ``MD`` applies this wrapper *before* the integrator is constructed, so
+        the integrator would otherwise derive ``False`` from the wrapper's
+        default and a bf16 run would silently freeze its neighbour list.
+        """
+        return self.inner.rebuilds_neighbors
 
     def rebuild_neighbors(self, pos: torch.Tensor) -> None:
         """Delegate: connectivity is not a precision concern."""
@@ -136,16 +156,20 @@ class MD:
             this dtype, leaving parameters alone. This is the mixed-precision
             path (e.g. ``torch.bfloat16``). Not combinable with an explicit
             ``integrator`` (wrap the force field yourself in that case).
-        rebuild_every: Rebuild the neighbour list every N **force evaluations**
-            (one per MD step under BAOAB), at the positions being evaluated.
-            ``None`` freezes the list — correct only for open systems or runs
-            short enough that the initial list stays valid. ``1`` is the
-            accurate NVE setting without a Verlet skin.
-
-        hooks: Extra hooks, appended after the neighbour-list hook.
+        hooks: Hooks driving the observation lifecycle.
         seed: Seed for the Langevin noise.
         device: Device to place the force field and state on (device, unlike
             dtype, must be shared by both sides).
+
+    There is deliberately **no** rebuild-cadence argument. Configure the policy
+    where it lives, on the list —
+    ``NeighborList(cell=…, cutoff=…, positions=…, skin=1.0, every=1, delay=0,
+    check=True)`` — and ``MD`` derives the rest: the integrator asks that policy
+    once per force evaluation iff the force field declares
+    :attr:`~molix.md.forcefield.ForceField.rebuilds_neighbors`. ``skin=0,
+    every=1, delay=0, check=True`` is the accurate no-skin limit (rebuild
+    whenever anything moved at all); ``skin > 0`` is the production setting, and
+    a frozen list is ``integrator=LangevinVerletIntegrator(…, rebuild=False)``.
     """
 
     def __init__(
@@ -160,7 +184,6 @@ class MD:
         integrator: Integrator | None = None,
         dtype: torch.dtype | None = None,
         autocast_dtype: torch.dtype | None = None,
-        rebuild_every: int | None = None,
         hooks: Sequence[MDHook | tuple[MDHook, int]] | None = None,
         seed: int = 0,
         device: torch.device | str | None = None,
@@ -199,9 +222,9 @@ class MD:
             if gamma > 0.0 and kbt == 0.0:
                 raise ValueError("gamma > 0 needs kbt or temperature (a thermostat at 0 K freezes)")
 
-        # Order matters: the neighbour-list hook must see the *inner* force
-        # field's rebuild, and the autocast wrapper forwards it, so wrapping
-        # first and hooking the wrapper is equivalent and keeps one owner.
+        # Wrapping happens before the integrator is built, so the integrator
+        # derives its rebuild switch from the wrapper — which forwards
+        # rebuilds_neighbors to the inner force field, keeping one owner.
         if autocast_dtype is not None:
             force = _AutocastForceField(force, autocast_dtype)
         self.autocast_dtype = autocast_dtype
@@ -221,17 +244,8 @@ class MD:
         self.force = force
         self.integrator = integrator
 
-        # Neighbour-list rebuild belongs in Integrator.eval_force (at the
-        # force-evaluation positions), NOT in a step-start hook: BAOAB/VV
-        # evaluates F at the *end* of the step, so a step-start rebuild leaves
-        # the list one displacement behind the positions in F = -∇E and also
-        # leaves the cached half-kick force inconsistent with the new list.
-        if rebuild_every is not None:
-            if int(rebuild_every) < 1:
-                raise ValueError(f"rebuild_every must be >= 1, got {rebuild_every}")
-            integrator.rebuild_every = int(rebuild_every)
-            integrator._force_eval_count = 0
-        self.rebuild_every = rebuild_every
+        # No cadence poke here, by design: the integrator derived its own
+        # rebuild switch from the force field it holds, and the list owns when.
         run_hooks: list[MDHook | tuple[MDHook, int]] = list(hooks or [])
         self.runner = MDRunner(integrator, mass=mass_t, hooks=run_hooks)
 
@@ -261,8 +275,8 @@ class MD:
             n_steps: Number of steps.
             chunk: Steps advanced between hook firings (dynamics are
                 bit-identical; only observation cadence changes). Default 1.
-                Neighbour rebuild no longer couples to ``chunk`` — it runs
-                inside each force evaluation when ``rebuild_every`` is set.
+                The neighbour policy is independent of ``chunk`` — it runs
+                inside each force evaluation, on the list's own schedule.
         """
         if chunk is None:
             chunk = 1

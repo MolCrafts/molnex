@@ -1,4 +1,4 @@
-"""Shared fixtures for the MD test package: a tiny PiNet system.
+"""Shared fixtures for the MD test package: a tiny PiNet system and a lattice.
 
 Imported by package path (``from tests.test_molix.test_md.conftest import …``)
 per the repo test-layout rule — no free-floating helper modules.
@@ -7,6 +7,28 @@ per the repo test-layout rule — no free-floating helper modules.
 import torch
 
 _DEVICE = torch.device("cpu")
+
+
+def make_cubic_lattice(n_side: int = 3, spacing: float = 3.0) -> tuple[torch.Tensor, torch.Tensor]:
+    """A simple cubic lattice and its cell — a periodic system with real edges.
+
+    The one owner of the MD suite's periodic fixture (``test_forcefield.py``,
+    ``test_neighbors.py`` and ``test_driver.py`` each held or wanted a
+    byte-identical copy). ``n_side=4, spacing=3.0`` is the 64-atom, 12 Å cube
+    the policy and driver suites run argon in: minimum perpendicular half-width
+    6.0 Å, exact coordination shells at 3.0 / 4.2426 / 5.196 Å.
+
+    Args:
+        n_side: Atoms per axis; the system holds ``n_side ** 3`` atoms.
+        spacing: Lattice constant in Angstrom.
+
+    Returns:
+        ``(positions (n_side ** 3, 3), cell (3, 3))`` in Angstrom, ``float64``.
+    """
+    grid = torch.arange(n_side, dtype=torch.float64) * spacing
+    pos = torch.stack(torch.meshgrid(grid, grid, grid, indexing="ij"), dim=-1).reshape(-1, 3)
+    cell = torch.eye(3, dtype=torch.float64) * (n_side * spacing)
+    return pos, cell
 
 
 def make_tiny_potential():

@@ -1,10 +1,11 @@
 """Component-based, compilable in-process MD engine.
 
 :class:`~molix.md.driver.MD` is **the** entry point: it binds a force field to
-an integrator, owns the MD-side precision and the neighbour-list cadence, and
-delegates the loop to :class:`~molix.md.runner.MDRunner`. The lower layers are
-the primitives it composes (use them directly only when you need a custom
-loop):
+an integrator, owns the MD-side precision, and delegates the loop to
+:class:`~molix.md.runner.MDRunner`. The neighbour-list cadence is *not* its —
+that belongs to :class:`~molix.md.neighbors.NeighborList` (see below). The lower
+layers are the primitives it composes (use them directly only when you need a
+custom loop):
 
 * :class:`~molix.md.types.ForceOutput` / :class:`~molix.md.types.MDState` /
   :class:`~molix.md.types.MDObservables` — typed pytree contracts crossing
@@ -24,16 +25,21 @@ loop):
 * :class:`~molix.md.runner.MDRunner` — drives the integrator through the
   :class:`~molix.md.runner.MDHook` lifecycle;
   :class:`~molix.md.runner.TrajectoryHook` captures trajectories,
-  :class:`~molix.md.runner.NeighborListHook` refreshes the neighbour list,
   :class:`~molix.md.runner.MDCheckpointHook` persists restartable state.
 * :class:`~molix.md.driver.MaxwellBoltzmann` — initial-velocity sampler.
 
 Periodic systems are supported through
-:class:`~molix.md.neighbors.NeighborList`, which rebuilds the neighbour
-list on a step cadence into fixed-capacity buffers so the force path can stay
-inside a CUDA graph. A force field that keeps its list frozen (the default for
-:class:`~molix.md.forcefield.PotentialForceField`) remains valid only for open
-systems or trajectories short enough that no atom changes neighbours.
+:class:`~molix.md.neighbors.NeighborList`, which **owns the rebuild policy**:
+a Verlet ``skin`` under the LAMMPS ``every`` / ``delay`` / ``check`` gate,
+rebuilt in place into fixed-capacity buffers so the force path can stay inside
+a CUDA graph. There is exactly one caller —
+:meth:`~molix.md.integrators.Integrator.eval_force` asks once per force
+evaluation, at the positions being evaluated, iff the force field declares
+:attr:`~molix.md.forcefield.ForceField.rebuilds_neighbors`; no driver kwarg and
+no step-start hook. A force field that keeps its list frozen (the default for
+:class:`~molix.md.forcefield.PotentialForceField`, and any integrator built with
+``rebuild=False``) remains valid only for open systems or trajectories short
+enough that no atom changes neighbours.
 """
 
 from molix.md.driver import MD, MaxwellBoltzmann
@@ -52,7 +58,6 @@ from molix.md.runner import (
     MDCheckpointHook,
     MDHook,
     MDRunner,
-    NeighborListHook,
     TrajectoryHook,
 )
 from molix.md.types import ForceOutput, MDObservables, MDState
@@ -78,7 +83,6 @@ __all__ = [
     "MDState",
     "MaxwellBoltzmann",
     "NeighborList",
-    "NeighborListHook",
     "NeighborStrategy",
     "PeriodicPotentialForceField",
     "PotentialForceField",

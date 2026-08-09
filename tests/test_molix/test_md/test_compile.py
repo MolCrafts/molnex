@@ -18,7 +18,11 @@ from molix.md import (
     NeighborList,
     PotentialForceField,
 )
-from tests.test_molix.test_md.conftest import make_pinet_template, make_tiny_potential
+from tests.test_molix.test_md.conftest import (
+    make_cubic_lattice,
+    make_pinet_template,
+    make_tiny_potential,
+)
 
 _DTYPE = torch.float64
 
@@ -32,16 +36,30 @@ def test_lj_force_matches_autograd():
     assert torch.allclose(out.forces, -ref, atol=1e-8), "LJ closed-form force != -dE/dx"
 
 
-def test_ljcut_step_fullgraph_compiles_and_matches_eager():
-    """lj/cut over the fixed-capacity list (index_add + cutoff mask) traces fullgraph."""
-    grid = torch.arange(3, dtype=_DTYPE) * 3.0
-    pos = torch.stack(torch.meshgrid(grid, grid, grid, indexing="ij"), dim=-1).reshape(-1, 3)
+def _ljcut_ig(
+    *, rebuild: bool, skin: float = 0.0
+) -> tuple[LangevinVerletIntegrator, NeighborList, torch.Tensor]:
+    """Argon lj/cut over the 27-atom lattice, with the rebuild switch explicit.
+
+    ``rebuild`` is passed on purpose in both arms: the switch defaults to the
+    force field's ``rebuilds_neighbors`` (``True`` here), and a live policy is
+    an eager, host-syncing decision that cannot live inside a traced step —
+    a compiled-path test must therefore freeze it (``rebuild=False``).
+    """
+    pos, cell = make_cubic_lattice(n_side=3, spacing=3.0)
     torch.manual_seed(2)
     pos = pos + 0.2 * torch.randn_like(pos)
-    cell = torch.eye(3, dtype=_DTYPE) * 9.0
-    nl = NeighborList(cell=cell, cutoff=3.5, positions=pos)
+    nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=skin)
     ff = LennardJonesCutForceField(epsilon=0.7, sigma=2.5, neighbors=nl).to(_DTYPE)
-    ig = LangevinVerletIntegrator(ff, dt=0.5, gamma=0.0, kbt=0.0, mass=39.95, seed=2)
+    ig = LangevinVerletIntegrator(
+        ff, dt=0.5, gamma=0.0, kbt=0.0, mass=39.95, seed=2, rebuild=rebuild
+    )
+    return ig, nl, pos
+
+
+def test_ljcut_step_fullgraph_compiles_and_matches_eager():
+    """lj/cut over the fixed-capacity list (index_add + cutoff mask) traces fullgraph."""
+    ig, _, pos = _ljcut_ig(rebuild=False)
     st = ig.initial(pos, torch.zeros_like(pos))
     noise = torch.zeros_like(pos)
     eager = ig.step(st, noise)
@@ -49,6 +67,33 @@ def test_ljcut_step_fullgraph_compiles_and_matches_eager():
     assert torch.allclose(eager.pos, comp.pos, atol=1e-12)
     assert torch.allclose(eager.forces, comp.forces, atol=1e-12)
     assert torch.allclose(eager.energy, comp.energy, atol=1e-12)
+
+
+def test_frozen_ljcut_rollout_compiles_fullgraph_and_leaves_the_list_alone():
+    """``rebuild=False`` is the compiled-path invariant: dynamo specialises the
+    Python bool, the policy body stays dead, and ``rollout`` — not just ``step``
+    — still traces to one graph and matches eager. A single rebuild inside the
+    loop would show up here as a graph break *and* as a nonzero count."""
+    ig, nl, pos = _ljcut_ig(rebuild=False)
+    vel = torch.zeros_like(pos)
+    eager = ig.rollout(ig.initial(pos.clone(), vel.clone()), 4)
+    comp = torch.compile(ig.rollout, fullgraph=True, backend=_BACKEND)(
+        ig.initial(pos.clone(), vel.clone()), 4
+    )
+    assert torch.allclose(eager.pos, comp.pos, atol=1e-12)
+    assert torch.allclose(eager.forces, comp.forces, atol=1e-12)
+    assert torch.allclose(eager.energy, comp.energy, atol=1e-12)
+    assert nl.rebuild_count == 0, "a frozen integrator rebuilt the list"
+
+
+def test_live_ljcut_advances_eagerly_and_drives_the_policy():
+    """The production counterpart: ``rebuild=True`` keeps the loop eager
+    (``advance_n``) and the list's policy actually fires — the compiled arm
+    above must not be passing because nothing ever rebuilds."""
+    ig, nl, pos = _ljcut_ig(rebuild=True)
+    state = ig.initial(pos, torch.zeros_like(pos))
+    ig.advance_n(state, 4)
+    assert nl.rebuild_count > 0
 
 
 def _harm_ig(gamma: float):

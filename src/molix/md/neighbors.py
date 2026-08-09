@@ -583,7 +583,7 @@ class NeighborList:
         """
         return self._r_build
 
-    def _compute(self, positions: torch.Tensor):
+    def _compute(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run the compiled kernel; returns ``(source, target, shifts)``."""
         pos = positions.detach()
         graph = self._nl.execute({"pos": pos, "cell": self.cell.to(pos.dtype)})
@@ -807,7 +807,9 @@ class NeighborList:
             torch.cat((half_shifts, -half_shifts)),
         )
 
-    def _build_pairs(self, positions: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def _build_pairs(
+        self, positions: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Route the build to the backend ``bin`` selected; ``(source, target, shifts)``.
 
         The single seam between the two backends: the constructor's initial

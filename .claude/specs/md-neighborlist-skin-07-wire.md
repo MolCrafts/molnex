@@ -1,6 +1,6 @@
 ---
 title: Wire the list-owned rebuild policy through integrator, driver and consumers (md-neighborlist-skin link 07)
-status: approved
+status: code-complete
 created: 2026-08-09
 grilled: true
 chain: md-neighborlist-skin
@@ -304,16 +304,16 @@ direct read of `src/molix/md/`, `benchmarks/`, `scripts/`, `docs/`.
 
 ## Tasks
 
-- [ ] Write failing unit tests for the force-field neighbour-policy seam in `tests/test_molix/test_md/test_forcefield.py`, promoting the duplicated cubic-lattice helper into `tests/test_molix/test_md/conftest.py` and re-pointing `tests/test_molix/test_md/test_neighbors.py` at it
-- [ ] Write failing unit tests for the integrator's static rebuild switch in `tests/test_molix/test_md/test_integrators.py` and migrate/extend the compiled-path tests in `tests/test_molix/test_md/test_compile.py` (`rebuild=False` fullgraph, `rebuild=True` eager)
-- [ ] Write failing unit tests for the driver path in `tests/test_molix/test_md/test_driver.py` (removed `rebuild_every` kwarg, derived bool through autocast and compiled force fields, invariant (c) drift ratio, invariant (f) rebuild-count/energy observables)
-- [ ] Generalize `ForceField.rebuild_neighbors` to the list-owned policy and add the `rebuilds_neighbors` property (base + four subclasses) in `src/molix/md/forcefield.py`, with google-style docstrings naming the semantic shift and the forced `neighbors.rebuild(pos)` route
-- [ ] Replace `rebuild_every` / `_force_eval_count` with the construction-time `rebuild` bool and its single guarded call in `src/molix/md/integrators.py`
-- [ ] Remove the `rebuild_every` kwarg, its validation and the attribute poke from `src/molix/md/driver.py`, add the `_AutocastForceField.rebuilds_neighbors` delegation, and rewrite the cadence docstrings to the list-owned policy
-- [ ] Delete `NeighborListHook` and its export, docstring references and `TestNeighborListHook` from `src/molix/md/runner.py`, `src/molix/md/__init__.py` and `tests/test_molix/test_md/test_runner.py`
-- [ ] Migrate the consumers and user-facing docs off `MD(rebuild_every=)`: `benchmarks/verify_md_ljcut_nve.py`, `scripts/matpes_port/run_nve.py`, `docs/molix/user-guide/md.md`, `CHANGELOG.md`
-- [ ] Add regression example `regressions/md-neighborlist-skin-07-wire.py` (public API only; hard-coded goldens, no third-party runtime)
-- [ ] Run full check + test suite
+- [x] Write failing unit tests for the force-field neighbour-policy seam in `tests/test_molix/test_md/test_forcefield.py`, promoting the duplicated cubic-lattice helper into `tests/test_molix/test_md/conftest.py` and re-pointing `tests/test_molix/test_md/test_neighbors.py` at it
+- [x] Write failing unit tests for the integrator's static rebuild switch in `tests/test_molix/test_md/test_integrators.py` and migrate/extend the compiled-path tests in `tests/test_molix/test_md/test_compile.py` (`rebuild=False` fullgraph, `rebuild=True` eager)
+- [x] Write failing unit tests for the driver path in `tests/test_molix/test_md/test_driver.py` (removed `rebuild_every` kwarg, derived bool through autocast and compiled force fields, invariant (c) drift ratio, invariant (f) rebuild-count/energy observables)
+- [x] Generalize `ForceField.rebuild_neighbors` to the list-owned policy and add the `rebuilds_neighbors` property (base + four subclasses) in `src/molix/md/forcefield.py`, with google-style docstrings naming the semantic shift and the forced `neighbors.rebuild(pos)` route
+- [x] Replace `rebuild_every` / `_force_eval_count` with the construction-time `rebuild` bool and its single guarded call in `src/molix/md/integrators.py`
+- [x] Remove the `rebuild_every` kwarg, its validation and the attribute poke from `src/molix/md/driver.py`, add the `_AutocastForceField.rebuilds_neighbors` delegation, and rewrite the cadence docstrings to the list-owned policy
+- [x] Delete `NeighborListHook` and its export, docstring references and `TestNeighborListHook` from `src/molix/md/runner.py`, `src/molix/md/__init__.py` and `tests/test_molix/test_md/test_runner.py`
+- [x] Migrate the consumers and user-facing docs off `MD(rebuild_every=)`: `benchmarks/verify_md_ljcut_nve.py`, `scripts/matpes_port/run_nve.py`, `docs/molix/user-guide/md.md`, `CHANGELOG.md`
+- [x] Add regression example `regressions/md-neighborlist-skin-07-wire.py` (public API only; hard-coded goldens, no third-party runtime)
+- [x] Run full check + test suite
 
 ## Testing strategy
 
@@ -385,8 +385,9 @@ perpendicular half-width 6.0 Å), imported by package path.
   arms to `atol=1e-10, rtol=0`; hard-coded counters —
   `rebuild_count(skin=0.0) == 100` (one policy call per force evaluation over 100
   steps; the entry evaluation sits at the build positions, `max_d2 == 0`, strict
-  `>`, so it does not rebuild) and, per link 04's documented degenerate limit,
-  `ndanger(skin=0.0) == rebuild_count(skin=0.0) == 100` while
+  `>`, so it does not rebuild) and `ndanger(skin=0.0) == 99` — the declined
+  entry evaluation ticks `ago` once, so step 1's rebuild lands at `ago == 2`
+  (not dangerous) and only the 99 subsequent `ago == 1` rebuilds count — while
   `ndanger(skin=0.5) == ndanger(skin=1.0) == 0`. The `rebuild_count == 100`
   literal is the anti-vacuity assertion: a wiring that never calls the policy
   passes every equality test but fails this one.

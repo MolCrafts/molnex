@@ -21,14 +21,7 @@ from molix.md import (
     MDRunner,
 )
 from molix.md.neighbors import NeighborList, NeighborStrategy
-
-
-def _lattice(n_side: int = 3, spacing: float = 3.0) -> tuple[torch.Tensor, torch.Tensor]:
-    """A simple cubic lattice and its cell — a periodic system with real edges."""
-    grid = torch.arange(n_side, dtype=torch.float64) * spacing
-    pos = torch.stack(torch.meshgrid(grid, grid, grid, indexing="ij"), dim=-1).reshape(-1, 3)
-    cell = torch.eye(3, dtype=torch.float64) * (n_side * spacing)
-    return pos, cell
+from tests.test_molix.test_md.conftest import make_cubic_lattice
 
 
 def _triclinic() -> tuple[torch.Tensor, torch.Tensor]:
@@ -70,7 +63,7 @@ def _triclinic() -> tuple[torch.Tensor, torch.Tensor]:
 
 @pytest.fixture
 def nlist():
-    pos, cell = _lattice()
+    pos, cell = make_cubic_lattice()
     return NeighborList(cell=cell, cutoff=3.5, positions=pos), pos
 
 
@@ -94,10 +87,12 @@ class TestNeighborList:
         assert "NeighborList" in names
         # ``__all__`` stays alphabetized (notes, 2026-08-09) inside the
         # PascalCase block that follows the CONSTANT_CASE block, so the entry
-        # sorts above ``NeighborListHook`` instead of keeping the old "P" slot.
+        # sorts into the "N" run instead of keeping the old "P" slot. Pinned
+        # against ``NeighborStrategy`` (a permanent export) rather than the
+        # ``NeighborListHook`` this chain's link 07 deletes.
         pascal = [name for name in names if not name.isupper()]
         assert pascal == sorted(pascal)
-        assert names.index("NeighborList") < names.index("NeighborListHook")
+        assert names.index("NeighborList") < names.index("NeighborStrategy")
 
     def test_md_list_is_not_the_pipeline_task(self):
         """Anti-shadow: two deliberate same-name types in different layers.
@@ -184,14 +179,14 @@ class TestNeighborList:
 
     def test_rejects_cutoff_beyond_half_the_cell(self):
         """Minimum image silently misses images past L/2 — refuse instead."""
-        pos, cell = _lattice()
+        pos, cell = make_cubic_lattice()
         with pytest.raises(ValueError, match="exceeds half the minimum perpendicular cell width"):
             NeighborList(cell=cell, cutoff=5.0, positions=pos)
 
     def test_accepts_orthorhombic_cutoff_just_below_half_the_cell(self):
         """Orthorhombic parity: for a cube ``w_i = ||a_i||``, so the bound stays
         ``4.500 A`` on the 9 A cell and ``4.4 A`` must still build."""
-        pos, cell = _lattice()
+        pos, cell = make_cubic_lattice()
         nl = NeighborList(cell=cell, cutoff=4.4, positions=pos)
         assert nl.cutoff == 4.4
         assert nl.num_edges > 0
@@ -238,13 +233,13 @@ class TestNeighborList:
     def test_rejects_a_non_3x3_cell(self):
         """A batched ``(1, 3, 3)`` cell must fail with a clean ``ValueError`` at
         the guard, not an opaque indexing error deeper in the kernel path."""
-        pos, cell = _lattice()
+        pos, cell = make_cubic_lattice()
         with pytest.raises(ValueError):
             NeighborList(cell=cell.unsqueeze(0), cutoff=3.5, positions=pos)
 
     def test_overflow_raises_rather_than_truncating(self):
         """A truncated neighbour list is a silently wrong energy."""
-        pos, cell = _lattice()
+        pos, cell = make_cubic_lattice()
         nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, capacity_factor=1.0)
         with pytest.raises(RuntimeError, match="overflow"):
             nl.rebuild(pos * 0.5)  # compress: many more pairs inside the cutoff
@@ -265,7 +260,7 @@ def _policy_list(
     perpendicular half-width is 6.0 A and whose neighbour counts are exact
     integers from crystallography (6 at 3.0 A, 12 at 4.2426 A, 8 at 5.196 A).
     """
-    pos, cell = _lattice(n_side=4, spacing=3.0)
+    pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
     nl = NeighborList(
         cell=cell,
         cutoff=cutoff,
@@ -300,20 +295,6 @@ class _Frame(NamedTuple):
     forces: torch.Tensor
 
 
-class _PolicyForceField(LennardJonesCutForceField):
-    """Drive the rebuild *policy* from the force-evaluation seam.
-
-    A three-line preview of link 07's wiring: ``MD(rebuild_every=1)`` calls
-    ``rebuild_neighbors`` once per force evaluation, *at the positions being
-    evaluated*, so handing that call to :meth:`NeighborList.update` puts the
-    gate exactly where the integrator will put it.
-    """
-
-    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
-        """Ask the policy instead of forcing a rebuild."""
-        self.neighbors.update(pos)
-
-
 class _FrameRecorder(MDHook):
     """Capture ``obs.pos`` together with the live list it was evaluated against."""
 
@@ -344,11 +325,18 @@ def _run_lj_lattice(
     gamma = 0, no wall clock, no filesystem, no network. Argon in (amu, A, fs):
     eps = 0.0103 eV, sigma = 2.5 A, cutoff = 3.5 A, m = 39.95 amu, dt = 4 fs.
 
+    No cadence knob is passed: link 07 makes the *force field* declare that it
+    owns a live list (``LennardJonesCutForceField.rebuilds_neighbors``), the
+    integrator derive its static switch from that, and ``rebuild_neighbors``
+    land on :meth:`NeighborList.update` — so the policy runs once per force
+    evaluation, at the positions being evaluated, with no driver kwarg and no
+    ``_PolicyForceField`` preview subclass in the way.
+
     ``capacity_factor=2.5`` is measured, not defensive: at ``skin=0.5`` this run
     reaches 600 live edges against the 519 rows the default 1.35 would allocate
     from the initial 384, and the overflow guard is not what these tests pin.
     """
-    pos, cell = _lattice(n_side=4, spacing=3.0)
+    pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
     neighbors = NeighborList(
         cell=cell,
         cutoff=3.5,
@@ -359,7 +347,7 @@ def _run_lj_lattice(
         check=check,
         capacity_factor=2.5,
     )
-    force = _PolicyForceField(
+    force = LennardJonesCutForceField(
         epsilon=0.0103 / EV_PER_AMU_A2_FS2,  # argon well depth, eV -> amu A^2/fs^2
         sigma=2.5,
         neighbors=neighbors,
@@ -373,7 +361,6 @@ def _run_lj_lattice(
         dt=4.0,
         gamma=0.0,
         dtype=torch.float64,
-        rebuild_every=1,
         hooks=[recorder],
     )
     md.set_potential_dtype(torch.float64)
@@ -462,7 +449,7 @@ class TestNeighborListPolicy:
     def test_a_fresh_list_reports_no_rebuild_history(self):
         """Defaults are the pre-skin behaviour: ``skin=0``, and the
         constructor's initial build is not counted as a rebuild."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl = NeighborList(cell=cell, cutoff=3.5, positions=pos)
         assert (nl.skin, nl.ago, nl.rebuild_count, nl.ndanger) == (0.0, 0, 0, 0)
 
@@ -484,7 +471,7 @@ class TestNeighborListPolicy:
         3.5 A`` alone is admissible in the 12 A cube (half-width 6.0 A), but
         ``skin = 3.0`` makes ``r_build = 6.5 A``, past which the kernel's
         minimum-image reduction silently drops pairs inside the cutoff."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         NeighborList(cell=cell, cutoff=3.5, positions=pos)  # the cutoff alone passes
         with pytest.raises(ValueError, match="r_build"):
             NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=3.0)
@@ -495,7 +482,7 @@ class TestNeighborListPolicy:
         where they stop being inert and start being counted as real pairs. The
         60 A cell keeps the half-width guard — checked first — out of the way,
         so this pins the dead-edge assertion specifically."""
-        pos, _ = _lattice(n_side=4, spacing=3.0)
+        pos, _ = make_cubic_lattice(n_side=4, spacing=3.0)
         cell = torch.eye(3, dtype=torch.float64) * 60.0
         with pytest.raises(ValueError, match="dead"):
             NeighborList(cell=cell, cutoff=1.0, positions=pos, skin=9.0)
@@ -507,7 +494,7 @@ class TestNeighborListPolicy:
     )
     def test_rejects_out_of_domain_policy_parameters(self, skin: float, every: int, delay: int):
         """Each arm has a domain; a silently clamped one disables the gate."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         with pytest.raises(ValueError):
             NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=skin, every=every, delay=delay)
 
@@ -516,7 +503,7 @@ class TestNeighborListPolicy:
         danger threshold ``max(every, delay) = 10`` is an ``ago`` the gate never
         permits (10 % 4 != 0), so ``ndanger`` could never fire and the
         correctness alarm would be silently dead."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         with pytest.raises(ValueError, match="multiple"):
             NeighborList(cell=cell, cutoff=3.5, positions=pos, every=4, delay=10)
 
@@ -705,7 +692,7 @@ class TestNeighborListPolicy:
         surviving index pair is the frozen-shift failure mode, and an
         index-subset check alone would sail straight past it.
         """
-        _, cell = _lattice(n_side=4, spacing=3.0)
+        _, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         _, frames = _run_lj_lattice(skin=0.5)
         n_atoms = 64
         for step, frame in enumerate(frames):
@@ -863,7 +850,7 @@ class TestNeighborListBind:
         re-emit the constructor's. Measured against a list constructed directly
         at the dilated lattice — the same kernel, so any difference is the bind
         having built at the wrong positions."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
         assert nl.num_edges == 1152  # crystallography, link 04
         dilated = pos * 1.05
@@ -883,7 +870,7 @@ class TestNeighborListBind:
         *shift* on a surviving index pair is the frozen-shift failure mode, and
         it is invisible to an index comparison alone.
         """
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl, _ = _policy_list(skin=0.0, capacity_factor=4.0)
         batch = nl.build(_batch(pos))
         before = nl.num_edges
@@ -902,7 +889,7 @@ class TestNeighborListBind:
         """Same liveness, driven through the batch entry point instead: the
         per-step idiom is ``nl.update(batch)``, so that is the path that has to
         keep the tie alive."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl, _ = _policy_list(skin=0.0, capacity_factor=4.0)
         batch = nl.build(_batch(pos))
         before = nl.num_edges
@@ -976,7 +963,7 @@ class TestNeighborListBind:
         """A different ``N`` is a different system: ``_x_hold.copy_`` would raise
         somewhere unhelpful, and the capacity was sized for the original."""
         nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
-        eight_atoms, _ = _lattice(n_side=2, spacing=3.0)
+        eight_atoms, _ = make_cubic_lattice(n_side=2, spacing=3.0)
         with pytest.raises(ValueError, match=r"\b8\b") as excinfo:
             nl.build(_batch(eight_atoms))
         assert "64" in str(excinfo.value)
@@ -1003,7 +990,7 @@ class TestNeighborListBind:
         """A batch may carry its cell; agreeing with the list's is the point of
         checking it. The constructor cell stays the **owner** — the batch's copy
         is validated, never adopted."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
         before = nl.cell.clone()
         nl.build(_batch(pos, cell))
@@ -1013,7 +1000,7 @@ class TestNeighborListBind:
     def test_build_accepts_a_single_system_batched_cell(self):
         """``(1, 3, 3)`` is what a collated batch's ``graphs`` namespace holds for
         one system, so the bind must read through the leading batch dim."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
         before = nl.cell.clone()
         nl.build(_batch(pos, cell.unsqueeze(0)))
@@ -1025,7 +1012,7 @@ class TestNeighborListBind:
         frozen shift, so a disagreement is refused rather than adopted — 0.01 A
         is far below anything physical and far above the fp32 round-trip
         tolerance the check allows."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
         before = nl.cell.clone()
         perturbed = cell.clone()
@@ -1038,7 +1025,7 @@ class TestNeighborListBind:
         """This list is single-system: one cell, one ``_x_hold``, one capacity.
         A ``B > 1`` batch has no meaningful semantics here and is refused by
         name rather than silently reduced to its first row."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
         with pytest.raises(ValueError, match=r"\b2\b") as excinfo:
             nl.build(_batch(pos, cell.repeat(2, 1, 1)))
@@ -1293,7 +1280,7 @@ def _jittered_box() -> tuple[torch.Tensor, torch.Tensor]:
     Returns:
         ``(positions (512, 3), cell (3, 3))`` in Angstrom, ``float64``.
     """
-    pos, cell = _lattice(n_side=8, spacing=3.0)
+    pos, cell = make_cubic_lattice(n_side=8, spacing=3.0)
     torch.manual_seed(0)
     return pos + (torch.rand(pos.shape, dtype=torch.float64) * 2.0 - 1.0) * 0.4, cell
 
@@ -1379,7 +1366,7 @@ def _unwrapped_lattice() -> tuple[torch.Tensor, torch.Tensor]:
     Returns:
         ``(positions (64, 3), cell (3, 3))`` in Angstrom, ``float64``.
     """
-    pos, cell = _lattice(n_side=4, spacing=3.0)
+    pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
     moved = pos.clone()
     rows = (0, 1, 2, 0, 1, 2, 0, 1)
     signs = (1.0, 1.0, 1.0, -1.0, -1.0, -1.0, 1.0, -1.0)
@@ -1404,7 +1391,7 @@ def _coincident_lattice() -> tuple[torch.Tensor, torch.Tensor]:
     Returns:
         ``(positions (64, 3), cell (3, 3))`` in Angstrom, ``float64``.
     """
-    pos, cell = _lattice(n_side=4, spacing=3.0)
+    pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
     moved = pos.clone()
     moved[1] = pos[0]
     moved[2] = pos[3] + cell[0]
@@ -1507,7 +1494,7 @@ class TestNeighborListBinned:
         stencil wraps onto the same bin twice, which is the aliasing regime the
         equivalence fixtures below are built to trip.
         """
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=0.0)
         assert nl.n_bins == (4, 4, 4)
         assert isinstance(nl.n_bins, tuple)
@@ -1519,7 +1506,7 @@ class TestNeighborListBinned:
         time, against the 4^3 = 64 bins of the 12 A cube where the stencil still
         covers everything.
         """
-        pos, cell = _lattice(n_side=8, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=8, spacing=3.0)
         nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=0.0)
         assert nl.n_bins == (9, 9, 9)
 
@@ -1528,7 +1515,7 @@ class TestNeighborListBinned:
         ``floor(12 / 1.75) = 6``. A grid derived from ``cutoff`` would report the
         same ``(6, 6, 6)`` here *only because* the skin is zero — which is why
         the skinned case above pins ``(4, 4, 4)`` and this one pins the move."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=0.0, bin=0.0)
         assert nl.n_bins == (6, 6, 6)
 
@@ -1536,7 +1523,7 @@ class TestNeighborListBinned:
         """``bin=5.0`` in the 12 A cube: ``floor(12 / 5) = 2`` bins of 6.0 A,
         ``k_i = ceil(5.0 / 6.0) = 1``. The explicit knob is a *requested*
         thickness — the effective one is ``w_i / n_i``, never smaller."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=5.0)
         assert nl.n_bins == (2, 2, 2)
 
@@ -1545,7 +1532,7 @@ class TestNeighborListBinned:
         must clamp to a single bin per axis rather than produce a zero-bin grid
         (a division by zero in the flat-id arithmetic). One bin per axis is the
         graceful all-pairs degeneration: correct, just not faster."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=12.0)
         assert nl.n_bins == (1, 1, 1)
 
@@ -1572,7 +1559,7 @@ class TestNeighborListBinned:
         the pre-link behaviour. The explicit form is constructed first so this
         also pins that ``None`` is *accepted*, not just defaulted to.
         """
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         explicit = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=None)
         omitted = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5)
         assert explicit.bin is None
@@ -1586,7 +1573,7 @@ class TestNeighborListBinned:
         """A negative thickness is a typo, and ``0.0`` already means "choose for
         me" — so the message has to name both, or the reader's next guess is
         that ``-1`` was the way to ask for the automatic size."""
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         with pytest.raises(ValueError, match=r"\bbin\b") as excinfo:
             NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=-1.0)
         assert "0.0" in str(excinfo.value)
@@ -1599,7 +1586,7 @@ class TestNeighborListBinned:
         Refused at construction against the half-width cap of 8, with the
         measured numbers in the message: the implied 100 and the cap it broke.
         """
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         with pytest.raises(ValueError, match=r"\bbin\b") as excinfo:
             NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=0.05)
         message = str(excinfo.value)
@@ -1618,7 +1605,7 @@ class TestNeighborListBinned:
         share of the pairs twice — which the duplicate-free and count clauses
         catch, and set equality alone would not.
         """
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         binned, kernel = _binned_pair(pos, cell)
         _assert_paths_agree(binned, kernel, pos)
 
@@ -1633,7 +1620,7 @@ class TestNeighborListBinned:
         would report 384 in both rows, leaving the Verlet skin dead while every
         energy still looked plausible.
         """
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         binned, kernel = _binned_pair(pos, cell, skin=skin)
         assert binned.num_edges == edges
         assert kernel.num_edges == edges
@@ -1680,7 +1667,7 @@ class TestNeighborListBinned:
         untranslated lattice's. Set equality against the kernel cannot see this:
         it would also hold if both paths reconstructed the same wrong geometry.
         """
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         moved, _ = _unwrapped_lattice()
         binned = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=0.0)
         translated = NeighborList(cell=cell, cutoff=3.5, positions=moved, skin=1.5, bin=0.0)
@@ -1728,7 +1715,7 @@ class TestNeighborListBinned:
         be identical with and without a grid: the policy reads displacements and
         a clock, neither of which the build backend touches.
         """
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         binned, kernel = _binned_pair(pos, cell, skin=1.0, capacity_factor=4.0)
         schedule = _policy_schedule(pos)
         by_binned = [binned.update(step) for step in schedule]
@@ -1749,7 +1736,7 @@ class TestNeighborListBinned:
         path that only agreed on the first build would leave the run drifting
         away from the oracle one rebuild at a time.
         """
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         binned, kernel = _binned_pair(pos, cell, skin=1.0, capacity_factor=4.0)
         compared = 0
         for moved in _policy_schedule(pos):
@@ -1770,7 +1757,7 @@ class TestNeighborListBinned:
         promotes *silently*) or on the wrong device. The rebuilt 1152 is the
         cheapest observable that both survived.
         """
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=0.0)
         nl.to(torch.float32)
         nl.rebuild(pos.to(torch.float32))
@@ -1786,7 +1773,7 @@ class TestNeighborListBinned:
         which would be creep that every other strategy — including the stubs in
         this file — would then have to carry.
         """
-        pos, cell = _lattice(n_side=4, spacing=3.0)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=0.0)
         assert isinstance(nl, NeighborStrategy)
         assert "bin" not in NeighborStrategy.__annotations__

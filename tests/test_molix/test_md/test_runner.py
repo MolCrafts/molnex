@@ -9,8 +9,9 @@ trajectory loop stands between a hook test and the method it tests.
 
 import torch
 
+import molix.md
+import molix.md.runner
 from molix.md import (
-    ForceOutput,
     HarmonicForceField,
     LangevinVerletIntegrator,
     MDCheckpointHook,
@@ -18,10 +19,8 @@ from molix.md import (
     MDObservables,
     MDRunner,
     MDState,
-    NeighborListHook,
     TrajectoryHook,
 )
-from molix.md.forcefield import ForceField
 
 _DTYPE = torch.float64
 
@@ -99,8 +98,10 @@ class TestMDRunner:
 
     def test_step_start_precedes_each_advance(self):
         """``on_step_start`` fires before the chunk it precedes — the ordering
-        that lets NeighborListHook refresh position-derived state ahead of the
-        force evaluations inside the advance."""
+        a hook needs to observe or stage per-step state ahead of the force
+        evaluations inside the advance. (Neighbour rebuilds are **not** such a
+        user: the list's policy runs inside ``Integrator.eval_force``, at the
+        positions being evaluated.)"""
         events: list[tuple[str, int]] = []
 
         class _Interleaved(MDHook):
@@ -196,37 +197,20 @@ class TestTrajectoryHook:
         assert TrajectoryHook("x.pt", stride=3).cadence == 3
 
 
-class TestNeighborListHook:
-    class _Recorder(ForceField):
-        def __init__(self):
-            super().__init__()
-            self.rebuilt_at: list[int] = []
+def test_the_step_start_rebuild_hook_is_gone():
+    """``NeighborListHook`` is deleted, not deprecated (``stage: experimental``).
 
-        def rebuild_neighbors(self, pos):
-            self.rebuilt_at.append(int(pos[0, 0]))
-
-        def forward(self, pos):
-            return ForceOutput(pos.sum(), pos)
-
-    def test_rebuilds_on_cadence_with_the_live_positions(self):
-        force = self._Recorder()
-        hook = NeighborListHook(force, every=3)
-        for step in range(9):
-            state = MDState(
-                torch.full((2, 3), float(step)),
-                torch.zeros(2, 3),
-                torch.zeros(2, 3),
-                torch.tensor(0.0),
-            )
-            hook.on_step_start(None, step, state)
-        assert force.rebuilt_at == [0, 3, 6]
-        assert hook.cadence == 3
-
-    def test_rejects_a_nonpositive_cadence(self):
-        import pytest
-
-        with pytest.raises(ValueError, match=">= 1"):
-            NeighborListHook(self._Recorder(), every=0)
+    It rebuilt at the *start-of-step* positions while velocity-Verlet evaluates
+    ``F`` at the end-of-step ones, so ``F`` was not ``-∇E`` of the surface the
+    list defined — a one-signed leak measured ~30× worse at ``every=5`` than at
+    ``every=1``. The seam is ``Integrator.eval_force``; the migration is
+    ``NeighborList(skin=, every=, delay=, check=)``. A back-compat alias would
+    defeat this guard, so the name must be absent from the module, the package
+    namespace and ``__all__``.
+    """
+    assert not hasattr(molix.md.runner, "NeighborListHook")
+    assert not hasattr(molix.md, "NeighborListHook")
+    assert "NeighborListHook" not in molix.md.__all__
 
 
 class TestMDCheckpointHook:

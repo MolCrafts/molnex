@@ -18,10 +18,13 @@ only; :meth:`MD.set_potential_dtype` casts the force field). Implementations
 accept positions in any dtype and return their own; the integrator casts the
 output back to the state dtype at the component boundary.
 
-Periodic systems and neighbour-list rebuild are supported through
-:meth:`ForceField.rebuild_neighbors` +
-:class:`~molix.md.neighbors.NeighborList` (driven on a cadence by
-:class:`~molix.md.runner.NeighborListHook`). :class:`PotentialForceField`
+Periodic systems and neighbour-list refresh are supported through
+:attr:`ForceField.rebuilds_neighbors` (does this force field own a policy?),
+:meth:`ForceField.rebuild_neighbors` (run it at these positions) and
+:class:`~molix.md.neighbors.NeighborList` (the policy itself). The **list**
+owns the cadence — ``skin`` / ``every`` / ``delay`` / ``check`` — and
+:meth:`molix.md.integrators.Integrator.eval_force` asks it once per force
+evaluation, at the positions being evaluated. :class:`PotentialForceField`
 keeps its list frozen — valid for open systems and trajectories short enough
 that no atom changes neighbours; periodic production runs use
 :class:`PeriodicPotentialForceField` (TensorDict potentials consuming
@@ -56,15 +59,54 @@ class ForceField(nn.Module):
         """Energy + forces at ``pos`` ``(N, 3)``."""
         raise NotImplementedError
 
-    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
-        """Refresh any position-derived connectivity this force field caches.
+    @property
+    def rebuilds_neighbors(self) -> bool:
+        """Whether this force field owns a neighbour policy worth asking.
 
-        A no-op by default: force fields with no neighbour list (the analytic
-        ones) and those that deliberately freeze it need do nothing.
-        :class:`~molix.md.runner.NeighborListHook` calls this on a step cadence,
-        before the force evaluation. Implementations must keep every tensor
-        **shape** unchanged so a compiled/graph-captured force path stays valid
-        — see :class:`~molix.md.neighbors.NeighborList`.
+        ``False`` by default — a force field with no list (the analytic ones)
+        has nothing to refresh. A read-only capability property with a
+        documented default that subclasses override, mirroring
+        :attr:`molix.md.integrators.Integrator.removed_dof`; it exists so the
+        integrator can derive its static rebuild switch from a *declared*
+        capability instead of duck-reading ``getattr(force, "neighbors", None)``.
+
+        Two different questions, hence two names: this one answers *can this
+        force field run a policy*, while
+        :attr:`molix.md.integrators.Integrator.rebuild` answers *does this
+        integrator ask*.
+        """
+        return False
+
+    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
+        """Run this force field's neighbour policy at ``pos`` ``(N, 3)``.
+
+        **Not** "rebuild now". The name is historical; the meaning is "the
+        positions are ``pos``, decide" — implementations delegate to
+        :meth:`molix.md.neighbors.NeighborList.update`, which applies the
+        list's own ``skin`` / ``every`` / ``delay`` / ``check`` gate and may
+        well decline. The list is the single owner of the cadence; this seam
+        only carries the positions to it.
+        :meth:`molix.md.integrators.Integrator.eval_force` is the caller, once
+        per force evaluation, at the positions ``F = -∇E`` is taken at.
+
+        A **forced**, unconditional build is still one call away and is not
+        this method: ``force_field.neighbors.rebuild(pos)``, the primitive
+        ``update`` itself delegates to. Counts (``rebuild_count`` /
+        ``ndanger``) are read off the list, which is where they live — hence
+        the ``None`` return.
+
+        A no-op by default: force fields with no neighbour list, and those that
+        deliberately freeze it, need do nothing. Implementations must keep
+        every tensor **shape** unchanged so a compiled / graph-captured force
+        path stays valid — see :class:`~molix.md.neighbors.NeighborList`.
+
+        Note:
+            The policy costs one max-displacement reduction plus a ``float()``
+            host sync per force evaluation. That is strictly cheaper than
+            rebuilding every step, but on GPU it is a per-step device→host sync
+            a fully captured loop would not have — the accepted price of a
+            correct, list-owned cadence. Freeze it with
+            ``Integrator(..., rebuild=False)`` when the list must not move.
         """
 
     def calc_energy(self, pos: torch.Tensor) -> torch.Tensor:
@@ -125,7 +167,9 @@ class PotentialForceField(ForceField):
         self._dtype = ref.dtype
         self.register_buffer("energy_scale", torch.as_tensor(float(energy_scale)))
 
-    def _apply(self, fn, recurse: bool = True):
+    def _apply(
+        self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True
+    ) -> "nn.Module":
         """Extend ``nn.Module._apply`` to the working batch.
 
         Without this, ``.to(dtype)`` walks parameters/buffers only and leaves
@@ -172,8 +216,8 @@ class PeriodicPotentialForceField(PotentialForceField):
     """Bind a TensorDict potential to a periodic system with a rebuilding list.
 
     The component that joins the pieces the package already ships: the
-    ``rebuild_neighbors`` seam, :class:`~molix.md.runner.NeighborListHook`'s
-    cadence, and :class:`~molix.md.neighbors.NeighborList`'s
+    ``rebuild_neighbors`` seam, :class:`~molix.md.neighbors.NeighborList`'s
+    ``skin`` / ``every`` / ``delay`` / ``check`` policy, and its
     fixed-capacity buffers. The working batch's ``edges`` namespace holds the
     list's live ``edge_index`` ``(capacity, 2)`` and ``shifts``
     ``(capacity, 3)`` **by reference**, so an in-place rebuild is visible to
@@ -212,7 +256,9 @@ class PeriodicPotentialForceField(PotentialForceField):
         self.neighbors = neighbors
         self.neighbors.build(self._work)
 
-    def _apply(self, fn, recurse: bool = True):
+    def _apply(
+        self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True
+    ) -> "nn.Module":
         """Cast the neighbour list alongside the module, then let it re-bind.
 
         Both halves are still required. ``TensorDict.apply`` in the parent
@@ -224,16 +270,28 @@ class PeriodicPotentialForceField(PotentialForceField):
         working batch's ``edges`` namespace, and this class merely says when.
         """
         module = super()._apply(fn, recurse)
-        neighbors = getattr(self, "neighbors", None)
-        if neighbors is not None:
-            ref = self._work["atoms", "pos"]
-            neighbors.to(ref.device, ref.dtype)
-            self.neighbors.build(self._work)
+        # Direct attribute access, deliberately: ``neighbors`` is a required
+        # constructor argument, and ``_apply`` cannot fire before construction
+        # completes — a subclass that violates that fails loud here rather
+        # than silently skipping the re-bind.
+        ref = self._work["atoms", "pos"]
+        self.neighbors.to(ref.device, ref.dtype)
+        self.neighbors.build(self._work)
         return module
 
+    @property
+    def rebuilds_neighbors(self) -> bool:
+        """``True`` — a periodic run is exactly the case with a live list."""
+        return True
+
     def rebuild_neighbors(self, pos: torch.Tensor) -> None:
-        """Refresh the cutoff graph in place (shapes unchanged)."""
-        self.neighbors.rebuild(pos)
+        """Ask the list's policy at ``pos``; it rebuilds in place, or declines.
+
+        The rebuild, when it happens, is in place (shapes unchanged), so the
+        ``edges`` buffers bound into the working batch stay valid. Force an
+        unconditional build with ``self.neighbors.rebuild(pos)``.
+        """
+        self.neighbors.update(pos)
 
 
 class CallableForceField(ForceField):
@@ -248,9 +306,10 @@ class CallableForceField(ForceField):
     Args:
         fn: Maps positions ``(N, 3)`` to scalar energy ``()`` and forces
             ``(N, 3)``.
-        neighbors: Optional rebuildable neighbour list;
-            :meth:`rebuild_neighbors` delegates to it so the standard
-            ``MD(rebuild_every=)`` cadence works.
+        neighbors: Optional rebuildable neighbour list. When one is bound,
+            :attr:`rebuilds_neighbors` reports ``True`` and
+            :meth:`rebuild_neighbors` runs its policy, so the integrator
+            derives its rebuild switch without being told.
         energy_scale: Unit-bridge multiplier applied to energy and forces.
     """
 
@@ -266,10 +325,20 @@ class CallableForceField(ForceField):
         self.neighbors = neighbors
         self.register_buffer("energy_scale", torch.as_tensor(float(energy_scale)))
 
+    @property
+    def rebuilds_neighbors(self) -> bool:
+        """Per instance: ``True`` iff a list was bound at construction."""
+        return self.neighbors is not None
+
     def rebuild_neighbors(self, pos: torch.Tensor) -> None:
-        """Delegate to the neighbour list, when one is bound."""
+        """Ask the bound list's policy at ``pos``; a no-op when none is bound.
+
+        The list may decline (its ``skin`` / ``every`` / ``delay`` / ``check``
+        gate). Force an unconditional build with
+        ``self.neighbors.rebuild(pos)``.
+        """
         if self.neighbors is not None:
-            self.neighbors.rebuild(pos)
+            self.neighbors.update(pos)
 
     def forward(self, pos: torch.Tensor) -> ForceOutput:
         energy, forces = self._fn(pos)
@@ -346,8 +415,8 @@ class LennardJonesCutForceField(ForceField):
     LAMMPS ``pair_style lj/cut`` style. Energy and forces are the analytic
     closed form (no autograd) over tensors whose **shapes never change** across
     rebuilds, so ``forward`` stays ``torch.compile(fullgraph=True)`` /
-    CUDA-graph capturable while the list rebuilds eagerly between force
-    evaluations (``MD(rebuild_every=)``).
+    CUDA-graph capturable while the list runs its policy eagerly between force
+    evaluations (:meth:`molix.md.integrators.Integrator.eval_force`).
 
     Pairs beyond ``cutoff`` — including the list's dead padding edges, whose
     shift is ``DEAD_EDGE_CUTOFF_FACTOR × cutoff`` — contribute exactly zero
@@ -411,7 +480,9 @@ class LennardJonesCutForceField(ForceField):
             torch.as_tensor(4.0 * eps * (sr6_cut * sr6_cut - sr6_cut) if shift else 0.0),
         )
 
-    def _apply(self, fn, recurse: bool = True):
+    def _apply(
+        self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True
+    ) -> "nn.Module":
         """Extend ``nn.Module._apply`` to the neighbour list's buffers.
 
         ``forward`` reads ``neighbors.edge_index`` / ``shifts`` live; a
@@ -419,15 +490,25 @@ class LennardJonesCutForceField(ForceField):
         geometry behind — a cross-device indexing error at best.
         """
         module = super()._apply(fn, recurse)
-        neighbors = getattr(self, "neighbors", None)
-        if neighbors is not None:
-            ref = self.epsilon
-            neighbors.to(ref.device, ref.dtype)
+        # Direct access (see PeriodicPotentialForceField._apply): required
+        # attribute, post-construction call site, fail loud over silent skip.
+        ref = self.epsilon
+        self.neighbors.to(ref.device, ref.dtype)
         return module
 
+    @property
+    def rebuilds_neighbors(self) -> bool:
+        """``True`` — lj/cut is defined over a live, rebuildable list."""
+        return True
+
     def rebuild_neighbors(self, pos: torch.Tensor) -> None:
-        """Refresh the cutoff graph in place (shapes unchanged)."""
-        self.neighbors.rebuild(pos)
+        """Ask the list's policy at ``pos``; it rebuilds in place, or declines.
+
+        Inside the half-skin the list keeps the current (superset) buffers,
+        which the ``cutoff_sq`` mask already reduces to the same PES. Force an
+        unconditional build with ``self.neighbors.rebuild(pos)``.
+        """
+        self.neighbors.update(pos)
 
     def forward(self, pos: torch.Tensor) -> ForceOutput:
         """Truncated-LJ energy + forces at ``pos`` ``(N, 3)`` from the live buffers."""

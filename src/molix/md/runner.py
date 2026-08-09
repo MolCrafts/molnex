@@ -24,11 +24,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 import torch
 
-from molix.md.forcefield import ForceField
 from molix.md.integrators import Integrator, _as_mass_col
 from molix.md.types import MDObservables, MDState
 from molix.units import KB_AMU_A_FS
@@ -54,11 +52,15 @@ class MDHook:
     def on_step_start(self, runner: "MDRunner", step: int, state: MDState) -> None:
         """Called before each hook-visible advance.
 
+        Not the place to refresh a neighbour list: velocity-Verlet evaluates
+        ``F`` at the *end-of-step* positions, so a step-start rebuild leaves the
+        connectivity one displacement behind. The list's policy runs inside
+        :meth:`~molix.md.integrators.Integrator.eval_force` instead.
+
         Args:
             runner: The driving runner.
             step: Steps completed so far (``0`` on the first call).
-            state: The live state the upcoming advance will consume — the
-                place to refresh position-derived caches (neighbour lists).
+            state: The live state the upcoming advance will consume.
         """
 
     def on_step_end(self, runner: "MDRunner", step: int, obs: MDObservables) -> None:
@@ -130,9 +132,11 @@ class MDRunner:
         firings (``Integrator.advance_n`` — no per-step Python, no per-step
         thermodynamics). The dynamics are bit-identical to ``chunk=1``; only
         the observation cadence changes, so every declared hook cadence
-        (``TrajectoryHook.stride``, ``NeighborListHook.every``,
-        ``MDCheckpointHook.every``) must be a multiple of ``chunk`` — enforced
-        via :attr:`MDHook.cadence`.
+        (``TrajectoryHook.stride``, ``MDCheckpointHook.every``) must be a
+        multiple of ``chunk`` — enforced via :attr:`MDHook.cadence`. The
+        neighbour policy is **not** among them: it runs inside
+        :meth:`~molix.md.integrators.Integrator.eval_force`, once per force
+        evaluation, whatever ``chunk`` is.
 
         Args:
             pos: Initial positions ``(N, 3)``.
@@ -289,7 +293,7 @@ class TrajectoryHook(MDHook):
             fields = self._stack_buffer()
         if fields is None:
             return
-        payload: dict[str, Any] = {
+        payload: dict[str, torch.Tensor | int] = {
             "pos": fields["pos"].to(torch.float32),
             "vel": fields["vel"].to(torch.float32),
             "pe": fields["pe"],
@@ -320,39 +324,6 @@ class TrajectoryHook(MDHook):
             energies=etot.to(torch.float64).numpy(),
             tags=[f"temperature={float(t):.2f}" for t in temp],
         )
-
-
-class NeighborListHook(MDHook):
-    """Legacy step-start neighbour rebuild — prefer ``MD(rebuild_every=)``.
-
-    .. warning::
-
-        Rebuilding on :meth:`MDHook.on_step_start` refreshes the list at the
-        *start-of-step* positions, while velocity-Verlet evaluates forces at
-        the *end-of-step* positions. That one-step lag makes ``F`` not equal
-        to ``-∇E`` of the energy surface the list defines, and produces a
-        systematic NVE energy drift (measured ~30× worse at ``every=5`` than
-        at ``every=1`` on MACE-MatPES water). ``MD(rebuild_every=)`` now
-        rebuilds inside :meth:`~molix.md.integrators.Integrator.eval_force`
-        at the force-evaluation positions instead; this hook is kept for
-        callers that explicitly want step-start semantics (e.g. tests).
-
-    Args:
-        force: The force field to refresh.
-        every: Step interval. ``1`` rebuilds before every step.
-    """
-
-    def __init__(self, force: ForceField, *, every: int = 1) -> None:
-        if every < 1:
-            raise ValueError(f"every must be >= 1, got {every}")
-        self._force = force
-        self._every = int(every)
-        self.cadence = self._every
-
-    def on_step_start(self, runner: MDRunner, step: int, state: MDState) -> None:
-        """Rebuild on cadence, using the positions the upcoming step will use."""
-        if step % self._every == 0:
-            self._force.rebuild_neighbors(state.pos)
 
 
 class MDCheckpointHook(MDHook):

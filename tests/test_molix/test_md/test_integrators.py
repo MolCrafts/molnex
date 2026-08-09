@@ -8,7 +8,15 @@ lives in ``benchmarks/verify_md_lj_nve.py``, not here.
 import pytest
 import torch
 
-from molix.md import HarmonicForceField, Integrator, LangevinVerletIntegrator, MDState
+from molix.md import (
+    HarmonicForceField,
+    Integrator,
+    LangevinVerletIntegrator,
+    LennardJonesCutForceField,
+    MDState,
+    NeighborList,
+)
+from tests.test_molix.test_md.conftest import make_cubic_lattice
 
 _DTYPE = torch.float64
 
@@ -191,25 +199,89 @@ class _CountingNLForce(HarmonicForceField):
         self.rebuild_positions.append(pos.detach().clone())
 
 
-def test_rebuild_every_fires_at_force_evaluation_positions():
-    """NL rebuild must use the positions of the force call, not step-start.
+def _lj_cut_force() -> tuple[LennardJonesCutForceField, torch.Tensor]:
+    """lj/cut argon over a live list — a force field that owns a policy."""
+    pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
+    nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=0.5, every=1, delay=0, check=True)
+    ff = LennardJonesCutForceField(epsilon=0.7, sigma=2.5, neighbors=nl).to(_DTYPE)
+    return ff, pos
 
-    Velocity-Verlet evaluates F at the end-of-step positions. Rebuilding there
-    (via Integrator.eval_force) keeps F = -∇E on the list's energy surface.
+
+class TestIntegratorRebuildSwitch:
+    """``Integrator.rebuild`` — a construction-time Python bool, not a counter.
+
+    *Whether this integrator asks* the neighbour policy, derived from *whether
+    the force field can answer* (``ForceField.rebuilds_neighbors``). Static so
+    dynamo specialises the branch: ``rebuild=False`` leaves the body dead and
+    ``torch.compile(fullgraph=True)`` still traces one graph, ``rebuild=True``
+    runs the list's policy eagerly between force calls.
     """
-    torch.manual_seed(0)
-    force = _CountingNLForce(1.0).to(_DTYPE)
-    ig = LangevinVerletIntegrator(force, dt=0.01, gamma=0.0, kbt=0.0, mass=1.0).cast_state(_DTYPE)
-    ig.rebuild_every = 1
-    pos0 = torch.randn(4, 3, dtype=_DTYPE)
-    vel0 = torch.randn(4, 3, dtype=_DTYPE) * 0.1
-    state = ig.initial(pos0, vel0)
-    # initial() → one force eval at pos0
-    assert len(force.rebuild_positions) == 1
-    assert torch.equal(force.rebuild_positions[0], pos0)
 
-    state = ig.step_nve(state)
-    # second force eval at the *new* positions (not pos0)
-    assert len(force.rebuild_positions) == 2
-    assert torch.equal(force.rebuild_positions[1], state.pos)
-    assert not torch.equal(force.rebuild_positions[1], pos0)
+    def test_the_switch_is_derived_from_the_force_field(self):
+        """No kwarg ⇒ follow the force field, so no caller has to remember."""
+        listless = Integrator(HarmonicForceField(1.0).to(_DTYPE))
+        ff, _ = _lj_cut_force()
+        live = LangevinVerletIntegrator(ff, dt=0.5, gamma=0.0, kbt=0.0, mass=39.95)
+        assert listless.rebuild is False
+        assert live.rebuild is True
+
+    def test_the_kwarg_overrides_the_derivation_both_ways(self):
+        """The frozen-list run and the forced-policy run are both reachable."""
+        ff, _ = _lj_cut_force()
+        frozen = LangevinVerletIntegrator(ff, dt=0.5, gamma=0.0, kbt=0.0, mass=39.95, rebuild=False)
+        forced = LangevinVerletIntegrator(
+            HarmonicForceField(1.0).to(_DTYPE), dt=0.01, gamma=0.0, kbt=0.0, mass=1.0, rebuild=True
+        )
+        assert frozen.rebuild is False
+        assert forced.rebuild is True
+
+    def test_the_seam_fires_once_per_force_evaluation_at_those_positions(self):
+        """The policy must run at the positions ``F`` is evaluated at.
+
+        Velocity-Verlet evaluates ``F`` at the *end-of-step* positions, so a
+        seam wired to step-start would leave the list one displacement behind
+        the positions entering ``F = -∇E`` — a systematic NVE energy leak
+        (surviving assertion of the deleted ``rebuild_every`` test).
+        """
+        torch.manual_seed(0)
+        force = _CountingNLForce(1.0).to(_DTYPE)
+        ig = LangevinVerletIntegrator(
+            force, dt=0.01, gamma=0.0, kbt=0.0, mass=1.0, rebuild=True
+        ).cast_state(_DTYPE)
+        pos0 = torch.randn(4, 3, dtype=_DTYPE)
+        vel0 = torch.randn(4, 3, dtype=_DTYPE) * 0.1
+        state = ig.initial(pos0, vel0)
+        # initial() → one force eval at pos0
+        assert len(force.rebuild_positions) == 1
+        assert torch.equal(force.rebuild_positions[0], pos0)
+
+        state = ig.step_nve(state)
+        # second force eval at the *new* positions (not pos0)
+        assert len(force.rebuild_positions) == 2
+        assert torch.equal(force.rebuild_positions[1], state.pos)
+        assert not torch.equal(force.rebuild_positions[1], pos0)
+
+    def test_a_disabled_switch_never_touches_the_list(self):
+        """``rebuild=False`` over a list-backed force field freezes the list:
+        the policy clock must not even tick, or the compiled path would carry
+        the host sync it exists to avoid."""
+        ff, pos = _lj_cut_force()
+        ig = LangevinVerletIntegrator(
+            ff, dt=0.5, gamma=0.0, kbt=0.0, mass=39.95, rebuild=False
+        ).cast_state(_DTYPE)
+        state = ig.initial(pos, torch.zeros_like(pos))
+        for _ in range(3):
+            state = ig.step_nve(state)
+        assert ff.neighbors.rebuild_count == 0
+        assert ff.neighbors.ago == 0
+
+    def test_the_modulo_counter_is_gone(self):
+        """One owner: the list. The integrator keeps no cadence state at all."""
+        ig = _ig(1.0, dt=0.01, gamma=0.0, kbt=0.0, mass=1.0)
+        assert not hasattr(ig, "rebuild_every")
+        assert not hasattr(ig, "_force_eval_count")
+
+    def test_a_conforming_subclass_derives_the_switch(self):
+        """``super().__init__(force)`` — the positional seam — still suffices."""
+        ig = _MidpointEuler(HarmonicForceField(1.0).to(_DTYPE), dt=0.01)
+        assert ig.rebuild is False

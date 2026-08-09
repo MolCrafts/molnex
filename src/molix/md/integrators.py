@@ -9,6 +9,15 @@ written as an identity-at-γ=0 update), no ``None`` noise — so
 ``torch.compile(fullgraph=True)`` to a single graph *including* a traceable
 force field (PiNet's functorch force path is graph-break-free).
 
+Neighbour-list cadence is **not** the integrator's: the list owns it (``skin`` /
+``every`` / ``delay`` / ``check`` on :class:`~molix.md.neighbors.NeighborList`)
+and :meth:`Integrator.eval_force` merely asks, once per force evaluation, at the
+positions being evaluated. What the integrator keeps is a construction-time
+on/off, :attr:`Integrator.rebuild`, derived from the force field. Over a live
+list that question is an eager, host-syncing decision, so a compiled rollout is
+built with ``rebuild=False`` (frozen list) while production compiles the force
+field and keeps the loop eager.
+
 BAOAB ordering (Leimkuhler & Matthews): B (half kick) → A (half drift) → O
 (Ornstein-Uhlenbeck) → A → B. The O step ``v ← c1·v + c2·σ·ξ`` with
 ``c1 = e^{-γΔt}``, ``c2 = √(1-c1²)``, ``σ = √(k_BT/m)`` satisfies the
@@ -70,17 +79,26 @@ class Integrator(nn.Module):
 
     Args:
         force: The force-field component supplying ``forward(pos) -> ForceOutput``.
+        rebuild: Whether :meth:`eval_force` asks the force field's neighbour
+            policy. ``None`` (default) derives it from
+            :attr:`~molix.md.forcefield.ForceField.rebuilds_neighbors`, so a
+            list-backed force field drives its list and a listless one costs
+            nothing. Pass ``False`` to freeze the list for a compiled rollout,
+            ``True`` to force the question.
     """
 
-    def __init__(self, force: ForceField) -> None:
+    def __init__(self, force: ForceField, *, rebuild: bool | None = None) -> None:
         super().__init__()
         self.force = force
-        #: Rebuild the force field's neighbour list every N **force evaluations**
-        #: (``None`` = never). Rebuild happens *at the positions being evaluated*,
-        #: immediately before ``force(pos)`` — not at step-start on a lagged
-        #: configuration. See :meth:`eval_force`.
-        self.rebuild_every: int | None = None
-        self._force_eval_count: int = 0
+        #: Whether this integrator asks the force field's neighbour policy once
+        #: per force evaluation. A **plain Python bool**, fixed at construction
+        #: and never a buffer or a tensor: dynamo specialises the branch at
+        #: trace time, so ``rebuild=False`` leaves the body of the guard in
+        #: :meth:`eval_force` dead and the step still traces to one graph.
+        #: Answers *whether this integrator asks*, against
+        #: :attr:`~molix.md.forcefield.ForceField.rebuilds_neighbors`'s
+        #: *whether the force field can*.
+        self.rebuild: bool = bool(force.rebuilds_neighbors) if rebuild is None else bool(rebuild)
 
     @property
     def removed_dof(self) -> int:
@@ -96,23 +114,33 @@ class Integrator(nn.Module):
     def eval_force(self, pos: torch.Tensor) -> ForceOutput:
         """Evaluate the force field, casting its output to the state dtype.
 
-        When :attr:`rebuild_every` is set, the neighbour list is refreshed at
-        ``pos`` *before* the force call (every N evaluations, N=1 ⇒ every
-        force). Velocity-Verlet evaluates forces at the *end* of the step; a
-        rebuild wired to step-start instead leaves the list one displacement
-        behind the positions in ``F = -∇E``, which is a systematic energy leak
-        on long NVE runs.
+        The **only** neighbour-policy seam in the engine. With
+        :attr:`rebuild` set, the force field is asked once here, at ``pos``,
+        immediately before the force call — and the *list* decides, under its
+        own ``skin`` / ``every`` / ``delay`` / ``check`` gate. The integrator
+        keeps no cadence state: no counter, no modulo, no second owner.
+
+        Why here and nowhere else: velocity-Verlet / BAOAB evaluates ``F`` at
+        the *end-of-step* positions, so a refresh wired to step-start leaves
+        the connectivity one displacement behind the positions entering
+        ``F = -∇E`` — a systematic, one-signed energy leak on long NVE runs
+        rather than a symmetric discretisation error.
+
+        Compile invariant: :attr:`rebuild` is a Python bool, so dynamo
+        specialises this branch. ``rebuild=False`` leaves the call dead and
+        ``torch.compile(ig.rollout, fullgraph=True)`` still traces one graph;
+        ``rebuild=True`` is the eager production path, where the policy runs
+        *between* compiled force calls and the list's fixed-capacity buffers
+        keep every shape static, so a compiled / CUDA-graph-captured force
+        field survives each rebuild.
 
         The force field owns its own precision (deliberately independent of the
         trajectory's — see :class:`molix.md.driver.MD`); the state must not
         silently promote, so energy/forces come back in ``pos``'s dtype. A
         same-dtype ``.to`` is the identity, so the matched case costs nothing.
         """
-        every = self.rebuild_every
-        if every is not None:
-            if self._force_eval_count % every == 0:
-                self.force.rebuild_neighbors(pos)
-            self._force_eval_count += 1
+        if self.rebuild:
+            self.force.rebuild_neighbors(pos)
         out = self.force(pos)
         return ForceOutput(out.energy.to(pos.dtype), out.forces.to(pos.dtype))
 
@@ -160,6 +188,10 @@ class LangevinVerletIntegrator(Integrator):
         mass: Particle mass — scalar or per-atom ``(N,)`` tensor, strictly positive.
         seed: Seed for the eager noise generator (reproducible :meth:`advance`).
             :meth:`rollout` uses global RNG so it stays compilable.
+        rebuild: Forwarded to :class:`Integrator` — whether
+            :meth:`Integrator.eval_force` asks the force field's neighbour
+            policy. ``None`` derives it from the force field; ``False`` is the
+            frozen-list configuration a ``fullgraph=True`` rollout needs.
 
     Scalar parameters are immutable after construction (baked into the compiled
     graph). Buffers ``dt``/``c1``/``c2``/``mass_col``/``inv_mass``/``sigma`` carry
@@ -175,8 +207,9 @@ class LangevinVerletIntegrator(Integrator):
         kbt: float,
         mass: float | torch.Tensor,
         seed: int = 0,
+        rebuild: bool | None = None,
     ) -> None:
-        super().__init__(force)
+        super().__init__(force, rebuild=rebuild)
         if isinstance(mass, torch.Tensor):
             if not bool((mass > 0).all()):
                 raise ValueError("mass must be strictly positive")

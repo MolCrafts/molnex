@@ -4,24 +4,37 @@ Drives an FCC argon lattice at the classic ``melt`` state point (ρ* = 0.8442,
 T0* = 1.44, r_c = 2.5σ) under NVE with :class:`molix.md.LennardJonesCutForceField`
 over a rebuilding :class:`molix.md.NeighborList`. The force evaluation
 is ``torch.compile``d — fullgraph inductor by default, ``--cuda-graphs`` for the
-``reduce-overhead`` preset — while the neighbour list rebuilds eagerly inside
-``Integrator.eval_force`` on the ``rebuild_every`` cadence; the fixed-capacity
-buffers keep every tensor shape static across rebuilds, which is what lets the
-compiled force path survive the whole run.
+``reduce-overhead`` preset — while the *list* decides when to rebuild, under its
+own Verlet skin and LAMMPS ``every`` / ``delay`` / ``check`` gate
+(``--skin`` / ``--every`` / ``--delay`` / ``--no-check``). ``Integrator.eval_force``
+asks it once per force evaluation, at the positions being evaluated, and runs the
+answer eagerly *between* compiled force calls; the fixed-capacity buffers keep
+every tensor shape static across rebuilds, which is what lets the compiled force
+path survive the whole run.
+
+The default ``--skin 1.02`` Å is 0.3 σ — the ``neighbor 0.3 bin`` setting shipped
+with the LAMMPS ``melt`` example — giving a half-skin of 0.51 Å against a
+ballistic per-step displacement of order 0.013 Å at T0, i.e. a rebuild every few
+tens of steps rather than every one. ``--skin 0`` is the no-skin limit (rebuild
+whenever anything moved at all), useful as the reference arm.
 
 Pure-GPU requires the molix op built with ``MOLNEX_OP_ENABLE_CUDA=ON`` so the
 neighbour rebuild runs on-device (a CPU-only op build fails at list
 construction with a dispatch error).
 
-Units: (amu, Å, fs) with energy in amu·Å²/fs² (see molix.md.integrators).
+Units: (amu, Å, fs) with energy in amu·Å²/fs² (see molix.md.integrators);
+``skin`` / ``r_build`` in Å, ``every`` / ``delay`` in MD steps.
 
 Run::
 
     PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py            # 100 ps
     PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --ps 5     # smoke
     PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --cuda-graphs
+    PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --skin 0   # no-skin arm
 
-Pass when ``|slope·duration| / |E_tot(0)| < 1e-3`` with bounded RMS fluctuation.
+Pass when ``|slope·duration| / |E_tot(0)| < 1e-3`` with bounded RMS fluctuation
+and — at ``skin > 0``, where the counter carries information — no dangerous
+builds (``ndanger == 0``).
 """
 
 from __future__ import annotations
@@ -102,7 +115,30 @@ def main() -> int:
         default=_T0_STAR * _EPS_EV / KB_EV_PER_K,
         help="initial temperature (K); default T0* = 1.44",
     )
-    ap.add_argument("--rebuild-every", type=int, default=1, help="force evals between rebuilds")
+    ap.add_argument(
+        "--skin",
+        type=float,
+        default=1.02,
+        help="Verlet skin in A (default 1.02 = 0.3 sigma, the LAMMPS melt setting); "
+        "the list is built at cutoff + skin and stays complete to cutoff while no "
+        "atom has moved more than skin/2. 0 = the no-skin limit",
+    )
+    ap.add_argument(
+        "--every", type=int, default=1, help="attempt a rebuild only every N steps (LAMMPS every)"
+    )
+    ap.add_argument(
+        "--delay",
+        type=int,
+        default=0,
+        help="attempt no rebuild until N steps after the last one (LAMMPS delay; "
+        "must be a multiple of --every)",
+    )
+    ap.add_argument(
+        "--no-check",
+        action="store_true",
+        help="rebuild on cadence alone, without the half-skin displacement test "
+        "(cheaper, and never a free optimisation: it accepts missed pairs)",
+    )
     ap.add_argument("--capacity-factor", type=float, default=1.5)
     ap.add_argument("--sample-every", type=int, default=100, help="steps between energy samples")
     ap.add_argument("--seed", type=int, default=1)
@@ -126,7 +162,14 @@ def main() -> int:
 
     try:
         neighbors = NeighborList(
-            cell=cell, cutoff=_CUTOFF, positions=pos, capacity_factor=args.capacity_factor
+            cell=cell,
+            cutoff=_CUTOFF,
+            positions=pos,
+            skin=args.skin,
+            every=args.every,
+            delay=args.delay,
+            check=not args.no_check,
+            capacity_factor=args.capacity_factor,
         )
     except (RuntimeError, NotImplementedError) as err:
         if device.type == "cuda":
@@ -144,6 +187,8 @@ def main() -> int:
         ff = Compiler(cuda_graphs=args.cuda_graphs, fullgraph=True)(ff)
 
     sampler = _EnergySampler(args.dt)
+    # No cadence kwarg: the list owns the policy and the integrator derives its
+    # switch from LennardJonesCutForceField.rebuilds_neighbors.
     md = MD(
         ff,
         mass=_MASS,
@@ -151,13 +196,20 @@ def main() -> int:
         gamma=0.0,  # NVE
         dtype=_DTYPE,
         device=device,
-        rebuild_every=args.rebuild_every,
         hooks=[sampler],
     )
     vel = MaxwellBoltzmann(_MASS, n_atoms=n_atoms).sample(args.t0, seed=args.seed)
 
     md.run(pos, vel, min(3 * args.sample_every, n_steps), chunk=args.sample_every)  # warmup/compile
     sampler.clear()
+    # The warmup left the list built at the *warmup's* final configuration, and
+    # its counters carrying the warmup's rebuilds. Re-phase it onto the timed
+    # run's initial configuration with the forced-build escape hatch (so the
+    # first force evaluation is not served a list held elsewhere under a coarse
+    # every/delay gate), then read the counters, and report deltas: what is
+    # printed is exactly what the timed trajectory paid.
+    neighbors.rebuild(pos)
+    rebuilds_before, ndanger_before = neighbors.rebuild_count, neighbors.ndanger
     if device.type == "cuda":
         torch.cuda.synchronize()
     t_wall = time.perf_counter()
@@ -165,6 +217,8 @@ def main() -> int:
     if device.type == "cuda":
         torch.cuda.synchronize()
     wall = time.perf_counter() - t_wall
+    rebuilds = neighbors.rebuild_count - rebuilds_before
+    ndanger = neighbors.ndanger - ndanger_before
 
     t = torch.tensor(sampler.t_ps, dtype=_DTYPE)
     e = torch.tensor(sampler.etot, dtype=_DTYPE)
@@ -181,15 +235,26 @@ def main() -> int:
         f"lj/cut NVE melt: N={n_atoms} (fcc {args.n}^3)  rho*={_RHO_STAR}  rc={_CUTOFF:.2f} A  "
         f"dt={args.dt} fs  steps={n_steps}  duration={duration / 1000:.3f} ns"
     )
+    print(f"  device={device}  compiled={compiled}  cuda_graphs={args.cuda_graphs}")
     print(
-        f"  device={device}  compiled={compiled}  cuda_graphs={args.cuda_graphs}  "
-        f"rebuild_every={args.rebuild_every}  rebuilds={neighbors.rebuild_count}"
+        f"  policy: skin={neighbors.skin:g} A  every={neighbors.every}  delay={neighbors.delay}  "
+        f"check={neighbors.check}  r_build={neighbors.r_build:.2f} A"
+    )
+    print(
+        f"  rebuilds={rebuilds} ({rebuilds / max(1, n_steps):.3f} of {n_steps} steps)  "
+        f"ndanger={ndanger}"
     )
     print(f"  T0={args.t0:.1f} K  <T>(2nd half)={t_mean:.1f} K  E_tot(0)={e0:.6e}")
     print(f"  rel energy drift (|slope*dur|/|E0|) = {rel_drift:.3e}  (bound 1e-3)")
     print(f"  rel RMS energy fluctuation          = {rms_rel:.3e}")
     print(f"  steps/s = {rate:.0f}   ({rate * args.dt / 1e6 * 86400:.1f} ns/day)")
+    # At skin=0 every rebuild lands on the first permitted opportunity by
+    # construction, so ndanger just counts rebuilds and carries no information;
+    # at skin>0 a nonzero count means a rebuild came too late and pairs were
+    # missed, which is a wrong PES however small the drift happens to look.
     ok = rel_drift < 1e-3 and bool(torch.isfinite(e).all())
+    if neighbors.skin > 0.0:
+        ok = ok and ndanger == 0
     print("RESULT:", "PASS" if ok else "FAIL")
 
     if not args.no_save:
@@ -224,6 +289,8 @@ def _save_artifacts(out, sampler, e0, rel_drift, rms_rel, duration, args, n_atom
         meta=np.array(
             f"lj/cut argon NVE melt; N={n_atoms}; rho*={_RHO_STAR}; rc={_CUTOFF}A; "
             f"dt={args.dt}fs; T0={args.t0:.1f}K; duration={duration:.1f}ps; seed={args.seed}; "
+            f"skin={args.skin}A; every={args.every}; delay={args.delay}; "
+            f"check={not args.no_check}; "
             f"rel_drift={rel_drift:.3e}; rel_rms={rms_rel:.3e}; units=(amu,A,fs)"
         ),
     )

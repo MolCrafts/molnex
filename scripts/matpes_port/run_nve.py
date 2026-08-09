@@ -186,10 +186,28 @@ def main() -> None:
     )
     parser.add_argument("--threads", type=int, default=0, help="torch CPU threads (0 = default)")
     parser.add_argument(
-        "--rebuild-every",
+        "--skin",
+        type=float,
+        default=1.0,
+        help="Verlet skin in A: the list is built at cutoff + skin and stays complete "
+        "to cutoff while no atom has moved more than skin/2 (0 = the no-skin limit, "
+        "rebuild whenever anything moved)",
+    )
+    parser.add_argument(
+        "--every", type=int, default=1, help="attempt a rebuild only every N steps (LAMMPS every)"
+    )
+    parser.add_argument(
+        "--delay",
         type=int,
-        default=5,
-        help="rebuild the neighbour list every N steps (0 = never, frozen list)",
+        default=0,
+        help="attempt no rebuild until N steps after the last one (LAMMPS delay; "
+        "must be a multiple of --every)",
+    )
+    parser.add_argument(
+        "--no-check",
+        action="store_true",
+        help="rebuild on cadence alone, without the half-skin displacement test "
+        "(cheaper, and never free: it accepts missed pairs and the energy leak they cause)",
     )
     parser.add_argument(
         "--capacity-factor",
@@ -206,7 +224,8 @@ def main() -> None:
         "--compile",
         action="store_true",
         help="compile the energy with Compiler(cuda_graphs=True); needs static shapes, "
-        "which the frozen neighbour list provides",
+        "which the neighbour list's fixed-capacity buffers provide across rebuilds "
+        "(the list is refreshed in place, never reallocated)",
     )
     args = parser.parse_args()
 
@@ -262,14 +281,26 @@ def main() -> None:
 
     pos = pos.to(device)
     mass = system["mass"].to(dtype=config.ftype, device=device)
-    # NeighborList validates r_max <= L/2 itself and sizes its buffers
-    # from this configuration; MD(rebuild_every=) drives the refresh cadence.
+    # NeighborList validates r_build <= L/2 itself, sizes its buffers from this
+    # configuration, and owns the refresh policy (skin / every / delay / check);
+    # Integrator.eval_force asks it once per force evaluation.
     neighbors = NeighborList(
-        cell=cell.to(device), cutoff=r_max, positions=pos, capacity_factor=args.capacity_factor
+        cell=cell.to(device),
+        cutoff=r_max,
+        positions=pos,
+        skin=args.skin,
+        every=args.every,
+        delay=args.delay,
+        check=not args.no_check,
+        capacity_factor=args.capacity_factor,
     )
     print(
         f"edges: {neighbors.num_edges} (mean {neighbors.num_edges / Z.numel():.1f} per atom), "
         f"buffer capacity {neighbors.capacity}"
+    )
+    print(
+        f"neighbour policy: skin={neighbors.skin:g} A, every={neighbors.every}, "
+        f"delay={neighbors.delay}, check={neighbors.check}, r_build={neighbors.r_build:.2f} A"
     )
 
     model = model.to(device)
@@ -328,7 +359,8 @@ def main() -> None:
         dtype=config.ftype,
         # autocast lives inside the force field's compiled callable (above);
         # wrapping again here would just add per-call context overhead.
-        rebuild_every=args.rebuild_every or None,
+        # No cadence kwarg: CallableForceField declares rebuilds_neighbors from
+        # the list bound to it, and the integrator derives its switch from that.
         hooks=run_hooks,
         seed=args.seed,
         device=device,
@@ -343,22 +375,22 @@ def main() -> None:
         print(f"nothing to do: checkpoint already at step {start_step} >= {args.steps}")
         return
 
-    # Observation cadence only — neighbour rebuild runs inside each force
+    # Observation cadence only — the neighbour policy runs inside each force
     # evaluation (Integrator.eval_force) and must not force chunk=1.
     chunk = max(1, int(args.stride))
     if args.checkpoint_every:
         chunk = math.gcd(chunk, int(args.checkpoint_every))
-    print(
-        f"advancing in chunks of {chunk} steps "
-        f"(rebuild_every={args.rebuild_every} at force-eval positions)"
-    )
+    print(f"advancing in chunks of {chunk} steps (policy asked at every force evaluation)")
 
+    rebuilds_before, ndanger_before = neighbors.rebuild_count, neighbors.ndanger
     t0 = time.perf_counter()
     md.run(pos, vel, remaining, chunk=chunk)
     elapsed = time.perf_counter() - t0
+    rebuilds = neighbors.rebuild_count - rebuilds_before
+    ndanger = neighbors.ndanger - ndanger_before
     print(
         f"NVE: {remaining} steps in {elapsed:.1f} s ({elapsed / remaining:.4f} s/step); "
-        f"neighbour rebuilds: {neighbors.rebuild_count}"
+        f"neighbour rebuilds: {rebuilds}"
     )
 
     traj = torch.load(args.out, map_location="cpu", weights_only=True)
@@ -380,12 +412,15 @@ def main() -> None:
             f"({n_frames} frames, {rate:.6f} meV/atom/ps); "
             f"T range {float(traj['temp'].min()):.1f}-{float(traj['temp'].max()):.1f} K"
         )
-    expected_rebuilds = (
-        remaining if args.rebuild_every == 1 else remaining // max(args.rebuild_every, 1)
-    )
+    # Measured, not predicted: the cadence is the list's, driven by how far the
+    # atoms actually moved, so there is no step-count formula to check against.
+    # ndanger is the alarm — nonzero at skin > 0 means a rebuild came too late
+    # and pairs were missed, so rerun with a larger skin or a tighter gate.
     print(
-        f"neighbour rebuilds this segment: {neighbors.rebuild_count} "
-        f"(expect ~{expected_rebuilds} for rebuild_every={args.rebuild_every} at force-eval)"
+        f"neighbour rebuilds this segment: {rebuilds} of {remaining} steps "
+        f"({rebuilds / max(1, remaining):.3f} per step); ndanger={ndanger} "
+        f"(skin={neighbors.skin:g} A, every={neighbors.every}, delay={neighbors.delay}, "
+        f"check={neighbors.check})"
     )
     # The comparison step needs the exact graph the trajectory was produced on.
     # edge_index is (E, 2) [source, target] — the repo edge convention.

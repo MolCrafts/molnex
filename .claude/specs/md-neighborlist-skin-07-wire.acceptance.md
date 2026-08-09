@@ -13,7 +13,8 @@ criteria:
       "NeighborListHook") is False and it is absent from molix.md.__all__ (which
       stays alphabetised); MD(HarmonicForceField(k=1.0), mass=1.0, dt=0.01,
       rebuild_every=1) raises TypeError.
-    status: pending
+    status: verified
+    last_checked: 2026-08-09
   - id: ac-002
     summary: the integrator's rebuild switch is derived, static, and overridable
     type: code
@@ -28,7 +29,8 @@ criteria:
       field is wrapped by MD(autocast_dtype=torch.bfloat16) and when it is wrapped
       by torch.compile(ff, backend="eager"); no getattr(force/neighbors, ...,
       default) duck-read appears in src/molix/md/.
-    status: pending
+    status: verified
+    last_checked: 2026-08-09
   - id: ac-003
     summary: the policy runs once per force evaluation at the evaluated positions
     type: code
@@ -41,7 +43,8 @@ criteria:
       to neighbors.update(pos) only (a stub recording both calls sees zero
       rebuild() calls), the base ForceField stays a no-op, and a direct
       neighbors.rebuild(pos) still forces a build (rebuild_count += 1, ago reset).
-    status: pending
+    status: verified
+    last_checked: 2026-08-09
   - id: ac-004
     summary: frozen-list integrators still compile fullgraph; live ones step eagerly
     type: code
@@ -54,7 +57,8 @@ criteria:
       float64, and leaves the list's rebuild_count at 0; the same force field with
       rebuild=True advances eagerly through advance_n and raises rebuild_count
       above 0.
-    status: pending
+    status: verified
+    last_checked: 2026-08-09
   - id: ac-005
     summary: skin-gated NVE drift stays within 3x of the rebuild-every-step baseline
     type: code
@@ -66,7 +70,8 @@ criteria:
       drift max_t |E_tot(t)-E_tot(0)|/|E_tot(0)| satisfies drift(skin=1.0) <= 3 *
       drift(skin=0.0), and drift(skin=0.0) > 0 (a nonzero baseline, so the ratio is
       not vacuous).
-    status: pending
+    status: verified
+    last_checked: 2026-08-09
   - id: ac-006
     summary: driver-path rebuild counters and energies follow the skin as specified
     type: code
@@ -76,10 +81,11 @@ criteria:
       non-increasing in skin with rebuild_count(1.0) < rebuild_count(0.0);
       rebuild_count(skin=0.0) == 100 exactly (one policy call per force evaluation;
       the entry evaluation at the build positions does not rebuild); ndanger == 0
-      at skin 0.5 and 1.0 while ndanger(skin=0.0) == 100 (link 04's documented
-      degenerate limit); the final MDState.energy of all three arms agree to
+      at skin 0.5 and 1.0 while ndanger(skin=0.0) == 99 (the declined entry evaluation ticks ago once,
+      so step 1's rebuild lands at ago == 2; corrected at delivery); the final MDState.energy of all three arms agree to
       atol=1e-10, rtol=0.
-    status: pending
+    status: verified
+    last_checked: 2026-08-09
   - id: ac-007
     summary: benchmark and script consumers expose the list-owned policy flags
     type: code
@@ -95,7 +101,8 @@ criteria:
       longer prints an expected-rebuild heuristic and its --compile help no longer
       claims a "frozen" list; `ruff check scripts/ regressions/ && ruff format
       --check scripts/ regressions/` is clean.
-    status: pending
+    status: verified
+    last_checked: 2026-08-09
   - id: ac-008
     summary: GH200 melt rerun conserves energy with few rebuilds and zero danger
     type: scientific
@@ -126,7 +133,8 @@ criteria:
       Integrator.rebuild and MD state units (A for skin, steps for every/delay),
       the semantic shift of rebuild_neighbors, the forced neighbors.rebuild(pos)
       route, and the per-force-eval host-sync cost.
-    status: pending
+    status: verified
+    last_checked: 2026-08-09
   - id: ac-010
     summary: regression script reproduces the wiring and rebuild-accounting goldens
     type: runtime
@@ -141,7 +149,8 @@ criteria:
       literal to rtol=1e-9; MD(..., rebuild_every=1) raises TypeError and
       molix.md exposes no NeighborListHook. No third-party oracle is imported or
       subprocessed at runtime.
-    status: pending
+    status: verified
+    last_checked: 2026-08-09
 ---
 
 # Acceptance criteria

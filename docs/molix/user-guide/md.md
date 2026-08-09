@@ -50,12 +50,18 @@ silently promote mid-step. For mixed precision inside the model only, use
 | Any `pos -> (energy, forces)` callable (AOTI `.pt2`, compiled closure, external engine) | `CallableForceField` |
 | An analytic test PES | `HarmonicForceField`, `LennardJonesForceField` |
 
-Periodic runs pass `MD(rebuild_every=N)`: `Integrator.eval_force` refreshes
-the neighbour list every N force evaluations, *at the positions being
-evaluated*, into fixed-capacity buffers whose shapes never change — which is
-what lets the force path stay inside a CUDA graph across the whole trajectory.
-(`NeighborListHook` is the legacy step-start variant; its one-step lag between
-list and forces produces a measurable NVE energy drift.)
+The **list owns the rebuild cadence**: `NeighborList(skin=, every=, delay=,
+check=)` carries the LAMMPS `neigh_modify` policy, and `Integrator.eval_force`
+merely asks once per force evaluation, *at the positions being evaluated* —
+the list decides, into fixed-capacity buffers whose shapes never change, which
+is what lets the force path stay inside a CUDA graph across the whole
+trajectory. `skin=0, every=1, delay=0, check=True` is the accurate no-skin
+limit (rebuild whenever anything moved); `skin > 0` is the production setting.
+A frozen list for a fully compiled rollout goes through the integrator seam:
+`MD(ff, ..., integrator=LangevinVerletIntegrator(ff, ..., rebuild=False))`.
+
+Migration: `MD(rebuild_every=)` and `NeighborListHook` are removed —
+the cadence lives on the list now.
 
 A pure-GPU compiled bulk run composes the primitives directly — compile the
 force field, keep the rebuild eager:
@@ -64,11 +70,11 @@ force field, keep the rebuild eager:
 from molix import Compiler
 from molix.md import MD, LennardJonesCutForceField, MaxwellBoltzmann, NeighborList
 
-nl = NeighborList(cell=cell, cutoff=2.5 * sigma, positions=pos)
+nl = NeighborList(cell=cell, cutoff=2.5 * sigma, positions=pos, skin=1.02)
 ff = LennardJonesCutForceField(epsilon=eps, sigma=sigma, neighbors=nl).to("cuda", torch.float64)
 ff = Compiler(cuda_graphs=True)(ff)          # or Compiler(fullgraph=True)
-md = MD(ff, mass=39.95, dt=4.0, gamma=0.0,   # γ=0 → NVE
-        dtype=torch.float64, device="cuda", rebuild_every=1)
+md = MD(ff, mass=39.95, dt=4.0, gamma=0.0,   # γ=0 → NVE; the list owns the cadence
+        dtype=torch.float64, device="cuda")
 vel = MaxwellBoltzmann(39.95, n_atoms=len(pos)).sample(172.0, seed=1)
 state = md.run(pos, vel, n_steps=25_000)
 ```
@@ -114,9 +120,6 @@ asserted anywhere.
   sharded to disk so host memory stays bounded.
 - `MDCheckpointHook` — restartable `(pos, vel, step)` every N steps, written
   atomically; doubles as a heartbeat line in the log.
-- `NeighborListHook` — legacy step-start rebuild (the `MD(rebuild_every=)`
-  cadence itself runs inside `Integrator.eval_force`, not through this hook;
-  see the warning in its docstring).
 
 A custom hook overrides any of `on_run_start` / `on_step_start` /
 `on_step_end(runner, step, obs)` / `on_run_end`; `obs` is a typed
