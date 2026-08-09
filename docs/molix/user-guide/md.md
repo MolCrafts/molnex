@@ -46,13 +46,35 @@ silently promote mid-step. For mixed precision inside the model only, use
 |---|---|
 | A molpot potential + collated template (open system) | `PotentialForceField` |
 | A TensorDict potential reading `edges.shifts` + a periodic cell | `PeriodicPotentialForceField` (owns a rebuilding `PeriodicNeighborList`) |
+| A bulk Lennard-Jones system (periodic, truncated-shifted, LAMMPS `lj/cut`) | `LennardJonesCutForceField` over a `PeriodicNeighborList` |
 | Any `pos -> (energy, forces)` callable (AOTI `.pt2`, compiled closure, external engine) | `CallableForceField` |
 | An analytic test PES | `HarmonicForceField`, `LennardJonesForceField` |
 
-Periodic runs pass `MD(rebuild_every=N)`: a `NeighborListHook` refreshes the
-neighbour list every N steps *before* the force evaluation, into
-fixed-capacity buffers whose shapes never change — which is what lets the
-force path stay inside a CUDA graph across the whole trajectory.
+Periodic runs pass `MD(rebuild_every=N)`: `Integrator.eval_force` refreshes
+the neighbour list every N force evaluations, *at the positions being
+evaluated*, into fixed-capacity buffers whose shapes never change — which is
+what lets the force path stay inside a CUDA graph across the whole trajectory.
+(`NeighborListHook` is the legacy step-start variant; its one-step lag between
+list and forces produces a measurable NVE energy drift.)
+
+A pure-GPU compiled bulk run composes the primitives directly — compile the
+force field, keep the rebuild eager:
+
+```python
+from molix import Compiler
+from molix.md import MD, LennardJonesCutForceField, MaxwellBoltzmann, PeriodicNeighborList
+
+nl = PeriodicNeighborList(cell=cell, cutoff=2.5 * sigma, positions=pos)
+ff = LennardJonesCutForceField(epsilon=eps, sigma=sigma, neighbors=nl).to("cuda", torch.float64)
+ff = Compiler(cuda_graphs=True)(ff)          # or Compiler(fullgraph=True)
+md = MD(ff, mass=39.95, dt=4.0, gamma=0.0,   # γ=0 → NVE
+        dtype=torch.float64, device="cuda", rebuild_every=1)
+vel = MaxwellBoltzmann(39.95, n_atoms=len(pos)).sample(172.0, seed=1)
+state = md.run(pos, vel, n_steps=25_000)
+```
+
+See `benchmarks/verify_md_ljcut_nve.py` for the full melt-benchmark version
+with energy-conservation checks.
 
 ## Observing a run: MD hooks
 

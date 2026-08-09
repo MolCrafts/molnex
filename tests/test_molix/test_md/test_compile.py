@@ -13,7 +13,9 @@ import torch
 from molix.md import (
     HarmonicForceField,
     LangevinVerletIntegrator,
+    LennardJonesCutForceField,
     LennardJonesForceField,
+    PeriodicNeighborList,
     PotentialForceField,
 )
 from tests.test_molix.test_md.conftest import make_pinet_template, make_tiny_potential
@@ -28,6 +30,25 @@ def test_lj_force_matches_autograd():
     out = ff(pos)
     (ref,) = torch.autograd.grad(out.energy, pos)
     assert torch.allclose(out.forces, -ref, atol=1e-8), "LJ closed-form force != -dE/dx"
+
+
+def test_ljcut_step_fullgraph_compiles_and_matches_eager():
+    """lj/cut over the fixed-capacity list (index_add + cutoff mask) traces fullgraph."""
+    grid = torch.arange(3, dtype=_DTYPE) * 3.0
+    pos = torch.stack(torch.meshgrid(grid, grid, grid, indexing="ij"), dim=-1).reshape(-1, 3)
+    torch.manual_seed(2)
+    pos = pos + 0.2 * torch.randn_like(pos)
+    cell = torch.eye(3, dtype=_DTYPE) * 9.0
+    nl = PeriodicNeighborList(cell=cell, cutoff=3.5, positions=pos)
+    ff = LennardJonesCutForceField(epsilon=0.7, sigma=2.5, neighbors=nl).to(_DTYPE)
+    ig = LangevinVerletIntegrator(ff, dt=0.5, gamma=0.0, kbt=0.0, mass=39.95, seed=2)
+    st = ig.initial(pos, torch.zeros_like(pos))
+    noise = torch.zeros_like(pos)
+    eager = ig.step(st, noise)
+    comp = torch.compile(ig.step, fullgraph=True, backend=_BACKEND)(st, noise)
+    assert torch.allclose(eager.pos, comp.pos, atol=1e-12)
+    assert torch.allclose(eager.forces, comp.forces, atol=1e-12)
+    assert torch.allclose(eager.energy, comp.energy, atol=1e-12)
 
 
 def _harm_ig(gamma: float):

@@ -8,6 +8,8 @@ from molix.md import (
     CallableForceField,
     ForceOutput,
     HarmonicForceField,
+    LennardJonesCutForceField,
+    LennardJonesForceField,
     PeriodicNeighborList,
     PeriodicPotentialForceField,
     PotentialForceField,
@@ -213,3 +215,105 @@ class TestHarmonicForceField:
         out = HarmonicForceField(k=2.0).to(torch.float64)(pos)
         (ref,) = torch.autograd.grad(out.energy, pos)
         assert torch.allclose(out.forces, -ref)
+
+
+class TestLennardJonesCutForceField:
+    """Periodic truncated-shifted LJ over the fixed-capacity neighbour list."""
+
+    _EPS, _SIGMA = 0.7, 1.1
+
+    def _dimer(self, d: float, *, box: float = 20.0, cutoff: float = 5.0, shift: bool = True):
+        pos = torch.tensor([[0.0, 0.0, 0.0], [d, 0.0, 0.0]], dtype=torch.float64)
+        cell = torch.eye(3, dtype=torch.float64) * box
+        nl = PeriodicNeighborList(cell=cell, cutoff=cutoff, positions=pos)
+        ff = LennardJonesCutForceField(
+            epsilon=self._EPS, sigma=self._SIGMA, neighbors=nl, shift=shift
+        ).to(torch.float64)
+        return ff, pos
+
+    def test_force_matches_autograd(self):
+        """Closed-form forces must equal -dE/dpos through the mask and the shifts."""
+        pos, cell = _cubic_lattice()
+        torch.manual_seed(0)
+        pos = pos + 0.3 * torch.randn_like(pos)
+        nl = PeriodicNeighborList(cell=cell, cutoff=3.5, positions=pos)
+        ff = LennardJonesCutForceField(epsilon=0.7, sigma=2.5, neighbors=nl).to(torch.float64)
+        leaf = pos.clone().requires_grad_(True)
+        out = ff(leaf)
+        (ref,) = torch.autograd.grad(out.energy, leaf)
+        assert torch.allclose(out.forces, -ref, atol=1e-10), "lj/cut closed form != -dE/dx"
+
+    def test_matches_all_pairs_in_the_open_limit(self):
+        """A cutoff spanning the whole cluster + shift=False is the all-pairs LJ."""
+        torch.manual_seed(1)
+        pos = torch.randn(8, 3, dtype=torch.float64) * 1.5 + 15.0  # blob at box centre
+        cell = torch.eye(3, dtype=torch.float64) * 30.0
+        nl = PeriodicNeighborList(cell=cell, cutoff=14.0, positions=pos)
+        cut = LennardJonesCutForceField(epsilon=0.9, sigma=1.2, neighbors=nl, shift=False).to(
+            torch.float64
+        )
+        ref = LennardJonesForceField(epsilon=0.9, sigma=1.2).to(torch.float64)
+        out, expected = cut(pos), ref(pos)
+        assert torch.allclose(out.energy, expected.energy, atol=1e-10)
+        assert torch.allclose(out.forces, expected.forces, atol=1e-10)
+
+    def test_shift_makes_energy_continuous_at_the_cutoff(self):
+        """Shifted: E→0 continuously at r_cut; unshifted: E→E_lj(r_cut) (the step)."""
+        r_cut = 3.0
+        just_inside = r_cut - 1e-9
+        shifted, pos = self._dimer(just_inside, cutoff=r_cut, shift=True)
+        unshifted, _ = self._dimer(just_inside, cutoff=r_cut, shift=False)
+        sr6 = (self._SIGMA / r_cut) ** 6
+        e_at_cut = 4.0 * self._EPS * (sr6 * sr6 - sr6)
+        assert abs(float(shifted(pos).energy)) < 1e-8
+        assert abs(float(unshifted(pos).energy) - e_at_cut) < 1e-8
+
+    def test_dead_edge_padding_is_invisible(self):
+        """Different capacity factors (more padding) must give identical physics."""
+        pos, cell = _cubic_lattice()
+        outs = []
+        for factor in (1.1, 4.0):
+            nl = PeriodicNeighborList(cell=cell, cutoff=3.5, positions=pos, capacity_factor=factor)
+            ff = LennardJonesCutForceField(epsilon=0.8, sigma=2.5, neighbors=nl).to(torch.float64)
+            outs.append(ff(pos))
+        assert torch.equal(outs[0].energy, outs[1].energy)
+        assert torch.equal(outs[0].forces, outs[1].forces)
+
+    def test_minimum_image_across_the_boundary(self):
+        """Atoms near opposite faces interact at the wrapped distance."""
+        box, r_cut = 12.0, 3.0
+        pos = torch.tensor([[0.6, 0.0, 0.0], [box - 0.6, 0.0, 0.0]], dtype=torch.float64)
+        cell = torch.eye(3, dtype=torch.float64) * box
+        nl = PeriodicNeighborList(cell=cell, cutoff=r_cut, positions=pos)
+        ff = LennardJonesCutForceField(epsilon=self._EPS, sigma=self._SIGMA, neighbors=nl).to(
+            torch.float64
+        )
+        open_ff, open_pos = self._dimer(1.2, cutoff=r_cut)
+        assert torch.allclose(ff(pos).energy, open_ff(open_pos).energy, atol=1e-12)
+
+    def test_rebuild_tracks_pair_departure(self):
+        """A pair leaving the cutoff vanishes from the PES after a rebuild."""
+        ff, pos = self._dimer(1.5, cutoff=3.0)
+        assert float(ff(pos).energy) != 0.0
+        apart = torch.tensor([[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]], dtype=torch.float64)
+        ff.rebuild_neighbors(apart)
+        assert float(ff(apart).energy) == 0.0
+        assert torch.equal(ff(apart).forces, torch.zeros_like(apart))
+
+    def test_cutoff_defaults_to_the_lists(self):
+        ff, _ = self._dimer(1.5, cutoff=3.0)
+        assert float(ff.cutoff_sq) == pytest.approx(9.0)
+
+    def test_rejects_cutoff_beyond_the_list_horizon(self):
+        pos, cell = _cubic_lattice()
+        nl = PeriodicNeighborList(cell=cell, cutoff=3.0, positions=pos)
+        with pytest.raises(ValueError, match="horizon"):
+            LennardJonesCutForceField(epsilon=1.0, sigma=1.0, neighbors=nl, cutoff=4.0)
+
+    def test_to_reaches_the_neighbor_buffers(self):
+        """``.to(dtype)`` must cast the list's shifts alongside the module buffers."""
+        ff, pos = self._dimer(1.5)
+        ff.to(torch.float32)
+        assert ff.neighbors.shifts.dtype == torch.float32
+        out = ff(pos.to(torch.float32))
+        assert out.energy.dtype == torch.float32

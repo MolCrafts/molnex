@@ -25,7 +25,9 @@ Periodic systems and neighbour-list rebuild are supported through
 keeps its list frozen — valid for open systems and trajectories short enough
 that no atom changes neighbours; periodic production runs use
 :class:`PeriodicPotentialForceField` (TensorDict potentials consuming
-``edges.shifts``) or :class:`CallableForceField` with a rebuildable list.
+``edges.shifts``), :class:`LennardJonesCutForceField` (analytic lj/cut over
+the same rebuildable list), or :class:`CallableForceField` with a rebuildable
+list.
 """
 
 from __future__ import annotations
@@ -328,4 +330,121 @@ class LennardJonesForceField(ForceField):
         # F_i = Σ_j 24ε/r²·(2(σ/r)¹² − (σ/r)⁶)·(r_i − r_j);  r_i − r_j = -diff[i, j]
         coef = (24.0 * self.epsilon * (2.0 * inv_r12 - inv_r6) / r2).masked_fill(eye, 0.0)
         force = (coef.unsqueeze(-1) * (-diff)).sum(1)  # (N, 3)
+        return ForceOutput(energy, force)
+
+
+class LennardJonesCutForceField(ForceField):
+    """Truncated(-shifted) Lennard-Jones over a rebuildable neighbour list (``lj/cut``).
+
+    The bulk counterpart of :class:`LennardJonesForceField` (which is all-pairs
+    and open): pair interactions are evaluated on the fixed-capacity buffers of
+    a :class:`~molix.md.neighbors.NeighborStrategy` and truncated at ``cutoff``,
+    LAMMPS ``pair_style lj/cut`` style. Energy and forces are the analytic
+    closed form (no autograd) over tensors whose **shapes never change** across
+    rebuilds, so ``forward`` stays ``torch.compile(fullgraph=True)`` /
+    CUDA-graph capturable while the list rebuilds eagerly between force
+    evaluations (``MD(rebuild_every=)``).
+
+    Pairs beyond ``cutoff`` — including the list's dead padding edges, whose
+    shift is ``DEAD_EDGE_CUTOFF_FACTOR × cutoff`` — contribute exactly zero
+    energy and force. With ``shift=True`` (default) the pair energy is shifted
+    by ``E_lj(cutoff)`` so it reaches zero *continuously* at the cutoff;
+    without the shift, every pair crossing r_cut steps the total energy by
+    ``E_lj(r_cut)``, which reads as noise/drift in an NVE total-energy trace.
+    The forces are identical under both conventions.
+
+    Args:
+        epsilon: Well depth ε, in the run's energy unit (amu·Å²/fs² for the
+            stock integrator — convert eV via ``1/EV_PER_AMU_A2_FS2``).
+        sigma: Zero-crossing distance σ (Å).
+        neighbors: Rebuildable neighbour list with **full bidirectional**
+            edges (each pair present in both directions), e.g.
+            :class:`~molix.md.neighbors.PeriodicNeighborList`.
+        cutoff: Truncation radius r_cut (Å). Defaults to the list's own
+            cutoff, and must not exceed it — pairs between the two radii would
+            simply be absent from the buffers, silently truncating the PES
+            harder than asked.
+        shift: Shift pair energies by ``E_lj(cutoff)`` (see above).
+
+    Reference:
+        Lennard-Jones, "On the Determination of Molecular Fields", Proc. R.
+        Soc. Lond. A 106 (1924) 463. https://doi.org/10.1098/rspa.1924.0082
+        Truncated-and-shifted convention: Allen & Tildesley, "Computer
+        Simulation of Liquids", 2nd ed. (2017), §5.2.
+    """
+
+    def __init__(
+        self,
+        *,
+        epsilon: float,
+        sigma: float,
+        neighbors: NeighborStrategy,
+        cutoff: float | None = None,
+        shift: bool = True,
+    ) -> None:
+        super().__init__()
+        list_cutoff = getattr(neighbors, "cutoff", None)
+        if cutoff is None:
+            if list_cutoff is None:
+                raise ValueError(
+                    "cutoff is required: this neighbour list exposes no .cutoff to default to"
+                )
+            cutoff = float(list_cutoff)
+        elif list_cutoff is not None and float(cutoff) > float(list_cutoff):
+            raise ValueError(
+                f"cutoff {cutoff} A exceeds the neighbour list's horizon {list_cutoff} A; "
+                "pairs between the two radii would be silently missing from the PES"
+            )
+        self.neighbors = neighbors
+        self.shift = bool(shift)
+        eps, sig, r_cut = float(epsilon), float(sigma), float(cutoff)
+        sr6_cut = (sig / r_cut) ** 6
+        self.register_buffer("epsilon", torch.as_tensor(eps))
+        self.register_buffer("sigma", torch.as_tensor(sig))
+        self.register_buffer("cutoff_sq", torch.as_tensor(r_cut * r_cut))
+        self.register_buffer(
+            "energy_shift",
+            torch.as_tensor(4.0 * eps * (sr6_cut * sr6_cut - sr6_cut) if shift else 0.0),
+        )
+
+    def _apply(self, fn, recurse: bool = True):
+        """Extend ``nn.Module._apply`` to the neighbour list's buffers.
+
+        ``forward`` reads ``neighbors.edge_index`` / ``shifts`` live; a
+        ``.to(device/dtype)`` that skipped the list would leave the pair
+        geometry behind — a cross-device indexing error at best.
+        """
+        module = super()._apply(fn, recurse)
+        neighbors = getattr(self, "neighbors", None)
+        if neighbors is not None:
+            ref = self.epsilon
+            neighbors.to(ref.device, ref.dtype)
+        return module
+
+    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
+        """Refresh the cutoff graph in place (shapes unchanged)."""
+        self.neighbors.rebuild(pos)
+
+    def forward(self, pos: torch.Tensor) -> ForceOutput:
+        """Truncated-LJ energy + forces at ``pos`` ``(N, 3)`` from the live buffers."""
+        edge_index = self.neighbors.edge_index  # (capacity, 2)
+        source, target = edge_index[:, 0], edge_index[:, 1]
+        # Minimum-image displacement: live positions + the list's periodic remainder.
+        diff = pos[target] - pos[source] + self.neighbors.shifts  # (capacity, 3)
+        r2 = (diff * diff).sum(-1)
+        inside = r2 < self.cutoff_sq  # dead edges: |shift| ≫ cutoff → excluded here
+        safe_r2 = torch.where(inside, r2, torch.ones_like(r2))
+        inv_r2 = (self.sigma * self.sigma) / safe_r2
+        inv_r6 = inv_r2 * inv_r2 * inv_r2
+        inv_r12 = inv_r6 * inv_r6
+        pair_e = torch.where(
+            inside, 4.0 * self.epsilon * (inv_r12 - inv_r6) - self.energy_shift, 0.0
+        )
+        energy = 0.5 * pair_e.sum()  # bidirectional edges visit each pair twice
+        # Per-edge force on the *source*: 24ε/r²·(2(σ/r)¹² − (σ/r)⁶)·(-diff).
+        # The reverse edge delivers the Newton pair to the other atom, so the
+        # forces need no ½ — only the energy double-counts.
+        coef = torch.where(inside, 24.0 * self.epsilon * (2.0 * inv_r12 - inv_r6) / safe_r2, 0.0)
+        force = torch.zeros_like(pos)
+        force.index_add_(0, source, coef.unsqueeze(-1) * (-diff))
         return ForceOutput(energy, force)

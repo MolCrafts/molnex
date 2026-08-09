@@ -12,7 +12,9 @@ loop):
 * :class:`~molix.md.forcefield.ForceField` (``PotentialForceField`` /
   ``PeriodicPotentialForceField`` over a TensorDict potential;
   ``CallableForceField`` over any ``pos -> (energy, forces)`` callable;
-  ``HarmonicForceField`` / ``LennardJonesForceField`` analytic) — binds a
+  ``HarmonicForceField`` / ``LennardJonesForceField`` analytic;
+  ``LennardJonesCutForceField`` — periodic truncated-shifted LJ over a
+  rebuildable neighbour list, the bulk lj/cut production path) — binds a
   model to a system, maps positions to ``(energy, forces)``.
 * :class:`~molix.md.integrators.Integrator` /
   :class:`~molix.md.integrators.LangevinVerletIntegrator` — advances an
@@ -39,6 +41,7 @@ from molix.md.forcefield import (
     CallableForceField,
     ForceField,
     HarmonicForceField,
+    LennardJonesCutForceField,
     LennardJonesForceField,
     PeriodicPotentialForceField,
     PotentialForceField,
@@ -66,6 +69,7 @@ __all__ = [
     "HarmonicForceField",
     "Integrator",
     "LangevinVerletIntegrator",
+    "LennardJonesCutForceField",
     "LennardJonesForceField",
     "MDCheckpointHook",
     "MDHook",
