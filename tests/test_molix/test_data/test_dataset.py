@@ -20,6 +20,7 @@ from molix.data.dataset import (
     MmapDataset,
     SubsetDataset,
 )
+from tests.test_molix.test_data.conftest import equal_count_samples
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -118,6 +119,30 @@ class TestMmapDataset:
         ds2 = pickle.loads(pickle.dumps(ds))
         for i in range(len(samples)):
             assert torch.equal(ds2[i]["Z"], samples[i]["Z"])
+
+
+# ---------------------------------------------------------------------------
+# Connectivity statistics
+# ---------------------------------------------------------------------------
+
+
+class TestAvgNumNeighbors:
+    """``avg_num_neighbors`` = total_edges / total_atoms from the cache pointers."""
+
+    def test_equal_atom_and_edge_counts(self, tmp_path):
+        """3 x (2 atoms, 2 edges) → exactly 1.0 neighbour per atom.
+
+        ``E == N`` per sample is the degenerate geometry where per-edge
+        keys can be misfiled as per-atom ones; the ``edge_ptr`` that this
+        property reads then never gets written and the property falls back
+        to ``0.0`` — a silently wrong normalisation constant for
+        Allegro/MACE rather than a loud failure. Exact equality (not a
+        tolerance): both totals are integers read off cumsum pointers.
+        """
+        sink = tmp_path / "eq.pt"
+        PackedCache(sink).save(equal_count_samples(3))
+        ds = MmapDataset(sink)
+        assert ds.avg_num_neighbors == 1.0
 
 
 # ---------------------------------------------------------------------------

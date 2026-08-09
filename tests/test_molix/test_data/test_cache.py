@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 import pytest
 import torch
 
 from molix.data.cache import PackedCache
+from tests.test_molix.test_data.conftest import equal_count_samples
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -107,6 +111,81 @@ class TestSaveLoad:
         cache.save(samples)
         loaded = cache.load()
         assert loaded["samples"][0]["n_atoms"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Schema inference — bucket identity
+# ---------------------------------------------------------------------------
+
+
+class TestPackSchema:
+    """Edge keys keep their bucket even when ``n_edges == n_atoms``.
+
+    ``_infer_schema_across`` classifies a key by its leading dim. For a
+    2-atom molecule with one bidirectional pair (``E = 2 = N``) that dim
+    is ambiguous, and the tie must not be broken by numerology: absorbing
+    ``edge_index`` / ``edge_diff`` / ``edge_dist`` into the atoms bucket
+    also suppresses ``edge_ptr``, which is what every downstream edge
+    consumer reads (``MmapDataset.avg_num_neighbors``,
+    ``collate_packed``). The cache is the origin of that silent drop, so
+    it is pinned here at the payload level.
+    """
+
+    def _payload(self, tmp_path: Path, n: int = 3) -> dict[str, Any]:
+        """Save *n* equal-count samples and read the raw on-disk payload."""
+        sink = tmp_path / "eq.pt"
+        PackedCache(sink).save(equal_count_samples(n))
+        return torch.load(sink, weights_only=True)
+
+    def test_edge_index_schema_kind_is_edge(self, tmp_path):
+        """Schema entry for ``edge_index`` is tagged ``"edge"``, not ``"atom"``."""
+        payload = self._payload(tmp_path)
+        assert payload["schema"]["edge_index"][0] == "edge"
+
+    def test_edge_geometry_schema_kind_is_edge(self, tmp_path):
+        """``edge_diff`` / ``edge_dist`` follow ``edge_index`` into the edge kind."""
+        payload = self._payload(tmp_path)
+        assert payload["schema"]["edge_diff"][0] == "edge"
+        assert payload["schema"]["edge_dist"][0] == "edge"
+
+    def test_edge_keys_packed_into_edges_bucket(self, tmp_path):
+        """The three edge keys are stored under ``payload["edges"]``."""
+        payload = self._payload(tmp_path)
+        assert set(payload["edges"]) == {"edge_index", "edge_diff", "edge_dist"}
+
+    def test_edge_keys_absent_from_atoms_bucket(self, tmp_path):
+        """No edge key leaks into ``payload["atoms"]`` (which holds Z / pos only)."""
+        payload = self._payload(tmp_path)
+        assert "edge_index" not in payload["atoms"]
+        assert "edge_diff" not in payload["atoms"]
+        assert "edge_dist" not in payload["atoms"]
+        assert set(payload["atoms"]) == {"Z", "pos"}
+
+    def test_edge_ptr_is_written(self, tmp_path):
+        """``edge_ptr`` exists — its absence is what silences edge consumers."""
+        payload = self._payload(tmp_path)
+        assert "edge_ptr" in payload
+
+    def test_edge_ptr_is_per_sample_cumsum(self, tmp_path):
+        """``edge_ptr`` cumsums 2 edges per sample over 3 samples."""
+        payload = self._payload(tmp_path)
+        assert payload["edge_ptr"].tolist() == [0, 2, 4, 6]
+
+    def test_atom_ptr_unaffected(self, tmp_path):
+        """``atom_ptr`` still cumsums 2 atoms per sample (same numbers, other axis)."""
+        payload = self._payload(tmp_path)
+        assert payload["atom_ptr"].tolist() == [0, 2, 4, 6]
+
+    def test_unpack_roundtrips_edge_keys(self, tmp_path):
+        """Per-sample unpack returns the hand-built edge tensors unchanged."""
+        sink = tmp_path / "eq.pt"
+        samples = equal_count_samples(3)
+        PackedCache(sink).save(samples)
+        payload = PackedCache(sink).load()
+        s2 = PackedCache.unpack_sample(payload, 2)
+        assert torch.equal(s2["edge_index"], samples[2]["edge_index"])
+        assert torch.equal(s2["edge_diff"], samples[2]["edge_diff"])
+        assert torch.equal(s2["edge_dist"], samples[2]["edge_dist"])
 
 
 # ---------------------------------------------------------------------------

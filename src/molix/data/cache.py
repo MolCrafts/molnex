@@ -363,9 +363,15 @@ def _pack_samples(samples: list[dict]) -> dict[str, Any]:
         "graphs": {k: torch.stack([f[k] for f in flats], dim=0) for k in graph_keys},
         "scalars": {k: [f[k] for f in flats] for k in scalar_keys},
     }
-    if atom_keys:
+    # Pointers are written from the *reference* keys (``Z`` / ``edge_index``),
+    # not from bucket emptiness: they describe the sample partition itself, and
+    # every consumer (``MmapDataset.avg_num_neighbors`` / ``edge_counts``,
+    # ``collate_packed``) needs them whenever the reference key exists. Keying
+    # them on bucket emptiness made a misclassified key silently erase the whole
+    # axis.
+    if has_atom_ref:
         payload["atom_ptr"] = torch.tensor(atom_ptr, dtype=torch.long)
-    if edge_keys:
+    if has_edge_ref:
         payload["edge_ptr"] = torch.tensor(edge_ptr, dtype=torch.long)
     if bond_ptr is not None:
         payload["bond_ptr"] = bond_ptr
@@ -375,6 +381,10 @@ def _pack_samples(samples: list[dict]) -> dict[str, Any]:
 # Covalent-bond sample keys handled outside the dim-0 schema model.
 _BOND_INDEX_KEY = "bond_index"
 _BOND_TYPES_KEY = "bond_types"
+
+# Canonical per-edge sample keys, routed by identity when the leading-dim
+# classification is ambiguous (see :func:`_infer_schema_across`).
+_EDGE_KEYS = frozenset({"edge_index", "edge_diff", "edge_dist"})
 
 
 def _extract_bonds(
@@ -575,8 +585,17 @@ def _infer_schema_across(
 
         tracks_atoms = has_atom_ref and all(s0 == na for s0, na in zip(shape0s, n_atoms))
         tracks_edges = has_edge_ref and all(s0 == ne for s0, ne in zip(shape0s, n_edges))
-        # Prefer atom classification when both track (can happen if n_atoms == n_edges
-        # holds across every sample, e.g. in degenerate cases).
+        # Leading-dim classification is ambiguous when n_edges == n_atoms holds for
+        # *every* sample — e.g. 2-atom molecules with a symmetric one-pair neighbour
+        # list (E = 2 = N). Break that tie by identity for the canonical edge keys:
+        # the whole downstream stack addresses them by name (``collate``'s edges
+        # namespace, ``_ref_len(f, "edge_index")`` above), and filing them under
+        # atoms also suppresses ``edge_ptr``, silently dropping every edge instead
+        # of merely relabelling it. ``_extract_bonds`` routes ``bond_index`` by
+        # identity for the same reason. All other ambiguous keys keep the atom
+        # preference (per-atom is the far more common intent).
+        if tracks_atoms and tracks_edges and k in _EDGE_KEYS:
+            tracks_atoms = False
         if tracks_atoms:
             rest_set = set(shape_rests)
             if len(rest_set) != 1:

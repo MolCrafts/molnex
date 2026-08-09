@@ -25,6 +25,11 @@ Fixture geometry (hand-checkable, mirrors ``test_sampler.py``): sample
 ``(1,)`` (never 1 atom/edge), so the packed schema routes ``U0`` to graph,
 ``forces`` to atom, and ``n_heavy`` to scalar with no leading-dim
 ambiguity.
+
+``TestEqualAtomAndEdgeCounts`` deliberately breaks that "never equal"
+property (2-atom molecules, one bidirectional pair → ``E == N``) to pin
+the case where leading-dim classification is ambiguous: the fast path
+must still see the edges the oracle sees.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from tensordict import TensorDict
 from molix.data.cache import PackedCache
 from molix.data.collate import TargetSchema, collate_molecules
 from molix.data.dataset import CachedDataset, MmapDataset, SubsetDataset
+from tests.test_molix.test_data.conftest import equal_count_samples
 
 # ---------------------------------------------------------------------------
 # Fixture sample builders
@@ -189,6 +195,34 @@ def _assert_td_equal(got: TensorDict, want: TensorDict) -> None:
             assert torch.equal(g, w), f"{level}.{key} values differ"
 
 
+def _assert_edges_equal(got: TensorDict, want: TensorDict) -> None:
+    """Assert the ``edges`` namespace of two batches is leaf-for-leaf identical.
+
+    Narrower than :func:`_assert_td_equal` so a failure names the edge
+    namespace directly rather than whichever level the walk reaches first.
+
+    Args:
+        got: Output under test (fast path).
+        want: Oracle output (slow path).
+    """
+    e_got = got["edges"]
+    e_want = want["edges"]
+    assert list(e_got.batch_size) == list(e_want.batch_size), (
+        f"edges batch_size: {list(e_got.batch_size)} != {list(e_want.batch_size)}"
+    )
+    assert set(e_got.keys()) == set(e_want.keys()), (
+        f"edges keys: {set(e_got.keys())} != {set(e_want.keys())}"
+    )
+    for key in e_want.keys():
+        g = e_got[key]
+        w = e_want[key]
+        assert g.dtype == w.dtype, f"edges.{key} dtype: {g.dtype} != {w.dtype}"
+        assert tuple(g.shape) == tuple(w.shape), (
+            f"edges.{key} shape: {tuple(g.shape)} != {tuple(w.shape)}"
+        )
+        assert torch.equal(g, w), f"edges.{key} values differ"
+
+
 def _packed_collate(dataset, indices: list[int], schema: TargetSchema) -> TensorDict:
     """Run the fast path: ``collate_packed(dataset.packed_view(), indices, schema)``.
 
@@ -256,6 +290,45 @@ class TestEquivalenceEdgeless:
         assert edges["edge_index"].dtype == torch.long
         assert torch.equal(edges["edge_diff"], torch.zeros(0, 3))
         assert torch.equal(edges["edge_dist"], torch.zeros(0))
+
+
+class TestEqualAtomAndEdgeCounts:
+    """``E == N`` batches keep their edges on the fast path (ac-001).
+
+    Two-atom molecules with one bidirectional pair make every per-edge
+    tensor's leading dim indistinguishable from a per-atom tensor's. The
+    oracle (per-sample dicts → ``collate_molecules``) is unaffected, so
+    any divergence here is the packed path dropping edges.
+    """
+
+    #: U0 only — these samples carry no atom-level target.
+    SCHEMA_EQ = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset())
+
+    def test_edges_namespace_matches_oracle(self, tmp_path):
+        """Every ``edges`` leaf equals the oracle's for an ``E == N`` cache."""
+        ds = MmapDataset(_save(tmp_path, "eqcount", equal_count_samples(3)))
+        indices = [0, 2]
+        got = _packed_collate(ds, indices, self.SCHEMA_EQ)
+        want = _oracle(ds, indices, self.SCHEMA_EQ)
+        _assert_edges_equal(got, want)
+
+    def test_edge_index_shape_is_not_empty(self, tmp_path):
+        """2 samples x 2 edges → ``edge_index`` ``(4, 2)`` on both paths."""
+        ds = MmapDataset(_save(tmp_path, "eqcount_shape", equal_count_samples(3)))
+        indices = [0, 2]
+        got = _packed_collate(ds, indices, self.SCHEMA_EQ)
+        want = _oracle(ds, indices, self.SCHEMA_EQ)
+        assert tuple(want["edges", "edge_index"].shape) == (4, 2)
+        assert tuple(got["edges", "edge_index"].shape) == (4, 2)
+
+    def test_full_batch_matches_oracle(self, tmp_path):
+        """The whole nested batch — not just edges — equals the oracle."""
+        ds = MmapDataset(_save(tmp_path, "eqcount_full", equal_count_samples(3)))
+        indices = [0, 1]
+        _assert_td_equal(
+            _packed_collate(ds, indices, self.SCHEMA_EQ),
+            _oracle(ds, indices, self.SCHEMA_EQ),
+        )
 
 
 class TestTargetSchemaRouting:
