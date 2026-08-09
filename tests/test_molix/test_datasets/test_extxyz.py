@@ -121,8 +121,11 @@ class TestNoASE:
             r"^\s*(import ase|from ase)\b",
             r"^\s*(import e3nn|from e3nn)\b",
         ):
+            # --include=*.py: src/ also holds C++ sources and CMake build
+            # trees (src/molix/op/build*) — grepping those thousands of
+            # files made this test take ~9 s for a rule about Python imports.
             result = subprocess.run(
-                ["grep", "-rnE", pattern, str(src_dir)],
+                ["grep", "-rnE", "--include=*.py", pattern, str(src_dir)],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -154,6 +157,7 @@ class TestChargedDimersRemoved:
             [
                 "grep",
                 "-rnE",
+                "--include=*.py",
                 r"ChargedDimersSource|charged_dimers\.py",
                 str(src_dir),
             ],

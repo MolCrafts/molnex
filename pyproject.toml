@@ -52,6 +52,7 @@ cueq-cu12 = ["cuequivariance-ops-torch-cu12"]
 cueq-cu13 = ["cuequivariance-ops-torch-cu13"]
 dev = [
   "pytest>=7.0",
+  "pytest-xdist>=3.5",
   "pytest-cov>=4.0",
   "pytest-benchmark>=4.0",
   "ruff>=0.15",
@@ -178,5 +179,5 @@ commands_pre = [
   ],
 ]
 commands = [
-  ["{envpython}", "-m", "pytest", "tests/", "-q", "-p", "no:cacheprovider"],
+  ["{envpython}", "-m", "pytest", "tests/", "-q", "-p", "no:cacheprovider", "-n", "auto", "--dist", "worksteal"],
 ]

@@ -31,7 +31,7 @@ repos:
 
       - id: ci-test
         name: "CI test (same as ci.yml)"
-        entry: bash -c 'pytest tests/ -q -p no:cacheprovider || true'
+        entry: bash -c 'pytest tests/ -q -p no:cacheprovider -n auto --dist worksteal || true'
         language: system
         pass_filenames: false
         always_run: true

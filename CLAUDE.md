@@ -6,7 +6,7 @@ mol_project:
   build:
     install: "pip install -e '.[dev]'"
     check: "ruff check src/ tests/ scripts/ regressions/ && ruff format --check src/ tests/ scripts/ regressions/ && ty check src/ --exit-zero-on-warning"
-    test: "python -m pytest tests/ -v"
+    test: "python -m pytest tests/ -q -n 12 --dist worksteal"
     test_single: "python -m pytest {path} -v"
     coverage: "python -m pytest tests/ --cov=src --cov-report=term-missing"
   arch:
