@@ -275,20 +275,28 @@ class MACEPotential(MACEEncoder):
         eV/atom, ``atomic_inter_shift`` in eV, and the checkpoint's weights are
         already in that same system (see :mod:`molzoo.mace.checkpoint`).
 
-        **Not validated: the architecture switches.** The variant flags
-        (density interactions, Agnesi distance transform, ZBL pair repulsion,
-        per-layer readout) come from :class:`~molzoo.mace.spec.MACEMatpesSpec`'s
-        defaults and are never compared against the config's own
-        ``pair_repulsion`` / ``distance_transform`` / … entries. A config that
-        switched one of them *off* therefore yields a model that has it *on*,
-        and the load will not object: the fitted constants of those two blocks
-        are registered as buffers, not ``nn.Parameter`` (``ZBLRepulsion`` and
+        **Validated when present: the two architecture switches the config
+        spells.** :class:`~molzoo.mace.spec.MACEMatpesSpec` hard-wires
+        ``pair_repulsion="zbl"`` and ``distance_transform="agnesi"``, so a
+        config that names either key with a contradicting value is refused here,
+        before the model is built. It has to be refused at *this* seam because
+        the load cannot see it: the fitted constants of both blocks are
+        registered as buffers, not ``nn.Parameter`` (``ZBLRepulsion`` and
         ``AgnesiTransform`` are both built with ``trainable=False``), so the
         unfilled-parameter guard of
-        :meth:`~molzoo.mace.checkpoint.CheckpointRemap.load` never fires and the
-        surplus term quietly keeps its default constants. For anything but a
-        stock MatPES checkpoint, build the spec explicitly and call
-        ``MATPES_REMAP.load`` yourself.
+        :meth:`~molzoo.mace.checkpoint.CheckpointRemap.load` never fires — the
+        surplus term would keep its default constants and the model would run,
+        look sane, and compute a short-range repulsion (or transform every
+        distance) the checkpoint was never fitted with. ``distance_transform``
+        is compared case-insensitively: the stock dump spells it ``"Agnesi"``.
+
+        **Absence is the documented boundary.** A config naming neither key is
+        accepted on the spec's defaults — older dumps predate the two entries,
+        and ZBL + Agnesi is what a stock MatPES checkpoint was fitted with
+        anyway. The remaining variant flags (density interactions, per-layer
+        readout, conditioning) are likewise taken from the spec and compared
+        against nothing. For anything but a stock MatPES checkpoint, build the
+        spec explicitly and call ``MATPES_REMAP.load`` yourself.
 
         The ``(missing_buffers, unexpected)`` report of
         :meth:`~molzoo.mace.checkpoint.CheckpointRemap.load` is dropped here:
@@ -328,8 +336,9 @@ class MACEPotential(MACEEncoder):
             KeyError: If the config lacks a key the spec needs — including
                 ``hidden_irreps`` / ``MLP_irreps``, which are named explicitly
                 because no width default is acceptable.
-            ValueError: If an irreps string cannot be parsed, or the spec
-                rejects the translated configuration.
+            ValueError: If the config contradicts one of the two hard-wired
+                architecture switches, if an irreps string cannot be parsed, or
+                if the spec rejects the translated configuration.
             RuntimeError: From ``remap`` — an unhoused checkpoint key, a shape
                 disagreement, or an unfilled parameter.
         """
@@ -341,6 +350,26 @@ class MACEPotential(MACEEncoder):
                 "num_features / max_hidden_l / mlp_dim are derived from the irreps "
                 "strings and have no default"
             )
+        if "pair_repulsion" in official and not official["pair_repulsion"]:
+            raise ValueError(
+                f"official config {Path(config_path).name} sets pair_repulsion="
+                f"{official['pair_repulsion']!r}, but MACEMatpesSpec hard-wires "
+                "pair_repulsion='zbl' and the ZBL constants are buffers, so the load "
+                "would not object to the surplus term: build the spec explicitly and "
+                "call MATPES_REMAP.load yourself"
+            )
+        if (
+            "distance_transform" in official
+            and str(official["distance_transform"]).lower() != "agnesi"
+        ):
+            raise ValueError(
+                f"official config {Path(config_path).name} sets distance_transform="
+                f"{official['distance_transform']!r}, but MACEMatpesSpec hard-wires "
+                "distance_transform='agnesi' and the Agnesi constants are buffers, so "
+                "the load would not object to the surplus transform: build the spec "
+                "explicitly and call MATPES_REMAP.load yourself"
+            )
+
         num_features, max_hidden_l = _parse_irreps(official["hidden_irreps"], "hidden_irreps")
         mlp_dim, _ = _parse_irreps(official["MLP_irreps"], "MLP_irreps")
 
