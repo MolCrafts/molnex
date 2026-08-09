@@ -131,8 +131,9 @@ def _parse_irreps(text: str, key: str) -> tuple[int, int]:
     ``"128x0e+128x1o"`` → ``(128, 1)``; ``"16x0e"`` → ``(16, 0)``. Upstream MACE
     states channel widths this way, so a checkpoint's ``num_features`` /
     ``max_hidden_l`` / ``mlp_dim`` are readable from its config instead of being
-    assumed (``scripts/matpes_port/run_nve.py:154-159`` hard-codes ``128 / 1 /
-    16``, which loads a differently sized checkpoint into the wrong model).
+    assumed (``run_nve.py``'s former ``build_model``, removed in
+    ``mace-subpackage-restructure-07-cleanup``, hard-coded ``128 / 1 / 16``,
+    which loads a differently sized checkpoint into the wrong model).
 
     Args:
         text: Irreps string from the official config.
@@ -245,8 +246,10 @@ class MACEPotential(MACEEncoder):
 
         Three steps, nothing hidden: read the config and translate it into a
         :class:`~molzoo.mace.spec.MACEMatpesSpec`, construct the model, load the
-        weights through ``remap``. It replaces the hand-written construction of
-        ``scripts/matpes_port/run_nve.py:145-169``::
+        weights through ``remap``. It replaced the hand-written construction in
+        ``run_nve.py``'s ``build_model`` (removed in
+        ``mace-subpackage-restructure-07-cleanup``, which re-pointed the script
+        here)::
 
             potential = MACEPotential.from_checkpoint(
                 weights_dir / "matpes_r2scan_config.json",
@@ -416,10 +419,12 @@ class MACEPotential(MACEEncoder):
         the forces) and traces into a single TorchDynamo graph.
 
         The first six parameters keep the names and positions of the flat
-        MatPES model's ``_compute_energy`` (``mace_matpes.py:229-237``) so those
-        call sites move over by a pure rename. The flat OMOL model's core
-        (``mace_omol.py:228-237``) took ``total_charge`` / ``total_spin``
-        positionally instead of ``num_graphs`` and does **not** line up.
+        MatPES model's ``_compute_energy``
+        (``src/molzoo/mace_matpes.py:229-237`` at 0e05959, before deletion) so
+        those call sites move over by a pure rename. The flat OMOL model's core
+        (``src/molzoo/mace_omol.py:228-237`` at 0e05959) took ``total_charge`` /
+        ``total_spin`` positionally instead of ``num_graphs`` and does **not**
+        line up.
 
         Args:
             positions: Atom positions ``(N, 3)`` in Å.
@@ -544,7 +549,9 @@ class MACEPotential(MACEEncoder):
             total_spin: Per-graph total spin ``(B,)``, dimensionless; ``None``
                 → ``1``, the closed-shell singlet (all electrons paired, i.e.
                 multiplicity ``2S+1 = 1``). Spin ``0`` would index an untrained
-                embedding row and return garbage (``mace_omol.py:330-335``).
+                embedding row and return garbage
+                (``src/molzoo/mace_omol.py:330-335`` at 0e05959, before
+                deletion).
 
         Returns:
             ``(conditioned node features (N, num_features), e0 (B,) eV)``.
@@ -601,12 +608,14 @@ class MACEPotential(MACEEncoder):
         off, and detaching would cut ``F = -∂E/∂r``.
 
         The ``graphs`` namespace is created here — ``TensorDict({},
-        batch_size=[num_graphs])`` — *before* ``protocol.write_energy`` runs.
-        Order matters: ``protocol.ensure_graphs`` builds ``batch_size=[]``,
-        which silently degrades the post-collate schema (``graphs`` is
-        ``batch_size=[B]``, see CLAUDE.md). That is known debt, owned by
-        ``.claude/specs/mace-subpackage-restructure-07-cleanup.md``; this
-        method only refuses to trip over it.
+        batch_size=[num_graphs])`` — *before* ``protocol.write_energy`` runs, so
+        the post-collate schema (``graphs`` is ``batch_size=[B]``, see
+        CLAUDE.md) holds from this ``B``, the one this method already resolved.
+        It used to be load-bearing: ``protocol.ensure_graphs`` built
+        ``batch_size=[]`` and silently degraded the schema until
+        ``mace-subpackage-restructure-07-cleanup`` taught it ``num_graphs`` and
+        had ``write_energy`` pass ``energy.shape[0]``. The two now agree, and
+        this line stays as the explicit statement of the shape.
 
         Args:
             batch: Post-collate ``TensorDict`` carrying ``atoms.{Z,pos,batch}``

@@ -101,7 +101,8 @@ path must work for every potential). Models must not invent a third force path.
 
 **Status.** active (promoted into CLAUDE.md Key Design Patterns; docs/gradients
 aligned). Landed 2026-07-29: OMOL/`energy_forces`, Sonata forces, PiNet via
-`EnergyForceModel`, `BasePotential.calc_forces` all go through `ForceDerivation`.
+`molpot.derivation.protocol` helpers, `BasePotential.calc_forces` all go
+through `ForceDerivation`.
 `has_aux` supported on functorch backend for single-pass eval.
 
 ---

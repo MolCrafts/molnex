@@ -42,9 +42,13 @@ Four packages under `src/`: **molix** (infra) ← **molrep** (representation) �
 **molrep** — pure representation blocks (no energy/force orchestration)
 - `src/molrep/` — package root re-exports embedding + ScalarHead + ProductHead + pooling
 - `src/molrep/embedding/` — JointEmbedding, RBF, cutoffs, SphericalHarmonics
-- `src/molrep/interaction/` — ConvTP, SymmetricContraction, RadialWeightMLP, ElementUpdate, …
+  - `embedding/mace.py` — MACE-only `EmbeddingBlock` / `EmbeddingSpec`
+- `src/molrep/interaction/` — SymmetricContraction, RadialWeightMLP, ElementUpdate, ResidualInteraction, EquivariantProductBasis, …
+  - `interaction/mace/` — MACE-only blocks (`conv.ConvTP`, `block.InteractionBlock`, `density.{DensityInteraction,DensityResidualInteraction,SKIP_TP_METHOD}`)
   - `interaction/pinet/` — pure GC blocks (FF/message/residual/blocks)
-- `src/molrep/readout/` — ProductHead, BasisProjection, masked pooling, NonLinearBiasReadout
+- `src/molrep/readout/` — BasisProjection, masked pooling
+  - `readout/mace.py` — MACE-only `ProductHead`, `LinearReadout`, `NonLinearReadout`, `NonLinearBiasReadout`
+  - deprecated re-export shims pending removal: `interaction/density.py`, `readout/scalar.py`, `readout/product.py`
 - `src/molrep/heads/` — ScalarHead, TypeHead, Labeler / ProxyLabeler
 - `src/molrep/utils/` — geometry helpers + equivariance test utils
 
@@ -62,10 +66,17 @@ Four packages under `src/`: **molix** (infra) ← **molrep** (representation) �
 
 **molzoo** — encoder recipes (+ temporary PiNet potential façade)
 - `src/molzoo/allegro.py` — Allegro encoder + AllegroSpec
-- `src/molzoo/mace.py` — MACE encoder + MACESpec
-- `src/molzoo/mace_omol.py` — MACEOMol + `load_omol_state_dict` (lazy via PEP 562)
+- `src/molzoo/mace/` — industrial split (mace-subpackage-restructure, `1ddd5ff..e825a51`):
+  - `spec.py` — torch-free `MACESpec` / `MACEMatpesSpec` / `MACEOMolSpec`
+  - `geometry.py` — `edge_vectors` / `edge_lengths` (PBC shifts)
+  - `encoder.py` — `MACEEncoder` block graph (no energy, no forces)
+  - `potential.py` — `MACEPotential` (`energy_core`, `from_checkpoint`, forces)
+  - `checkpoint.py` — `CheckpointRemap` + `MATPES_REMAP` / `OMOL_REMAP`
+  - `variants.py` — `MACEMatpes` / `MACEOMol` thin aliases + `load_{matpes,omol}_state_dict`
+  - `research.py` — encoder-only `MACE` + `MACEResearchSpec`
 - `src/molzoo/pinet/` — industrial split: spec, geometry, encoder, **potential**, properties
 - `src/molzoo/specs/` — `allegro.md`, `mace.md`, `mace_matpes.md`, `mace_omol.md`, `pinet2.md`
+  (`mace_omol.md` and `allegro.md` are mirrored under `docs/molzoo/specs/`)
 
 **tests** (mirror + regression; not a library package)
 - `tests/test_molix/…`, `tests/test_molrep/…`, `tests/test_molpot/…`, `tests/test_molzoo/…`
@@ -114,11 +125,12 @@ Classical potentials + `BasePotential`; derivation (`ForceDerivation` dual backe
 | `molpot.heads` | Energy/edge/multipole/charge/electrostatics/rescale heads |
 | `molpot.derivation` | `EnergyAggregation`, `ForceDerivation`, `StressDerivation`, `autograd_forces`, `functorch_forces` |
 
-**molzoo** (`src/molzoo/__init__.py`):
-`Allegro`, `AllegroSpec`, `MACE`, `MACESpec`, `MACEOMol` (lazy), `PiNet`, `PiNetSpec`, `load_omol_state_dict` (lazy)
+**molzoo** (`src/molzoo/__init__.py`) — **all-lazy** PEP 562 `__getattr__`, no eager import of any model:
+`Allegro`, `AllegroSpec`, `MACE` (← `molzoo.mace.research`), `MACESpec` (← `molzoo.mace.spec`), `MACEMatpes`, `MACEOMol` (both ← `molzoo.mace.variants`), `PiNet`, `PiNetSpec`, `load_matpes_state_dict`, `load_omol_state_dict` (← `molzoo.mace.variants`)
 
 | Subpackage | Exports |
 |---|---|
+| `molzoo.mace` | eager (torch-free): `MACESpec`, `MACEMatpesSpec`, `MACEOMolSpec`. Lazy (PEP 562): `MACEPotential`, `MACEMatpes`, `MACEOMol`, `MACE`, `MACEResearchSpec`, `CheckpointRemap`, `MATPES_REMAP`/`MATPES_KEY_REMAP`, `OMOL_REMAP`/`OMOL_KEY_REMAP`, `load_matpes_state_dict`, `load_omol_state_dict`, `EmbeddingBlock`/`EmbeddingSpec`, `InteractionBlock`/`InteractionSpec`. `MACEEncoder` and `molzoo.mace.geometry` are reached by module path, not re-exported |
 | `molzoo.pinet` | `PiNet`, `PiNetSpec`, `PiNetPotential`, `PiNetDipole`, `PiNetPolarizability`, geometry helpers |
 | `molzoo.specs/` | markdown only: `allegro.md`, `mace.md`, `mace_matpes.md`, `mace_omol.md`, `pinet2.md` |
 
@@ -129,7 +141,7 @@ Classical potentials + `BasePotential`; derivation (`ForceDerivation` dual backe
 - **molix**: PascalCase types + `Hook` suffix; protocols for Step/Hook/DataSource; `TrainState` rejects slash/tuple **writes**; flat-dict pre-collate → nested plain `TensorDict` post-`collate_molecules`; `PackedCache` single-file mmap; arch-tagged native op load; soft-optional `molrs` for MolRec only
 - **molrep**: pure `nn.Module` + Pydantic `*Spec`; cuEquivariance for TP; PiNet GC blocks have **no** energy/force
 - **molpot**: `BasePotential` + explicit force backends; `ForceDerivation(method="autograd"|"functorch")` is the shared contract (default `autograd` for cuEq; `functorch` for pure-torch e.g. PiNet); elec is multi-layer calculator/lib/kernel/tuning
-- **molzoo**: encoder recipes prefer `TensorDictModuleBase` writing `atoms.node_features` `(N, layers, features)`; paper refs in module docstring; **PiNet potential temporarily co-located under `molzoo.pinet.potential`** (long-term home molpot); MACE-OMOL is a full energy/force model (lazy-loaded)
+- **molzoo**: encoder recipes prefer `TensorDictModuleBase` writing `atoms.node_features` `(N, layers, features)`; paper refs in module docstring; **PiNet potential temporarily co-located under `molzoo.pinet.potential`** (long-term home molpot); the MACE foundation variants are full energy/force models — one `molzoo.mace.potential.MACEPotential` with `MACEMatpes` / `MACEOMol` as thin `variants.py` aliases, all reached lazily
 - **tests**: industrial path mirror; unit tests under `tests/`; numerical parity in `tests/regression/`
 
 ---
@@ -147,7 +159,7 @@ Classical potentials + `BasePotential`; derivation (`ForceDerivation` dual backe
 | `molix.md` / `export` / `compile` / `quant` / `engine` | leaf execution utilities → `interface/` C++ |
 | `molrep.embedding` → `interaction` → `readout`/`heads` | representation pipeline |
 | `molpot.heads` / `potentials` / `derivation` / `pooling` / `composition` | physics + composition |
-| `molzoo.*` | encoder recipes (+ temporary full models: PiNetPotential, MACEOMol) |
+| `molzoo.*` | encoder recipes (+ temporary full models: PiNetPotential, `molzoo.mace.MACEPotential` / MACEMatpes / MACEOMol) |
 | `molzoo.specs` | paper↔code contracts (not runtime) |
 | `tests/` | unit mirror + regression oracles |
 
@@ -157,6 +169,6 @@ Classical potentials + `BasePotential`; derivation (`ForceDerivation` dual backe
 3. Edge: `edge_index[:,0]=source`, `edge_diff = pos[target]-pos[source]`; `bond_index` is `(2,N)` COO.
 4. Cache: `PackedCache` only — never `TensorDict.memmap_()`.
 5. Forces: single entry `ForceDerivation`; default `autograd` (cuEq-safe); `functorch` only for pure-torch energy graphs.
-6. Known gaps: **`molpot.composition.EnergyForceModel` has zero production subclasses** (PiNet uses `molpot.derivation.protocol` helpers; the MACE ports hand-roll the same shape — consolidation is part of the mace-subpackage restructure spec); `molpot.composition.pooling` coexists with `molpot.pooling`; full-repo test-mirror is incremental (PiNet spine gated); neighbor kernel is O(N²) pair enum (auto buffer sizing + overflow assert; cell-list still TODO).
+6. Known gaps: `molpot.composition.pooling` coexists with `molpot.pooling`; full-repo test-mirror is incremental (PiNet spine gated); neighbor kernel is O(N²) pair enum (auto buffer sizing + overflow assert; cell-list still TODO). *(Closed 2026-08-09 by `mace-subpackage-restructure-07-cleanup`: the zero-subclass energy/force wrapper in `molpot.composition` was deleted — PiNet goes through `molpot.derivation.protocol` helpers, the MACE variants through `molpot.derivation.kernels.grad_force_pass`.)*
 
 <!-- mol:map:managed end -->

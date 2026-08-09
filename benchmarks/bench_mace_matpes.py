@@ -126,7 +126,7 @@ def main() -> int:
     # Compiled energy core on the fused arm — the run_nve.py production path.
     if device.type == "cuda":
         model = _build_model(False).to(device)
-        energy_fn = Compiler(cuda_graphs=True)(model._compute_energy)
+        energy_fn = Compiler(cuda_graphs=True)(model.energy_core)
 
         def compiled_step():
             leaf = pos.detach().requires_grad_(True)

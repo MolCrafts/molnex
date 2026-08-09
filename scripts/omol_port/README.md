@@ -17,5 +17,10 @@ imports here.
 ## In-tree artifacts
 
 - `SPEC.md` — port design notes
-- `src/molzoo/mace_omol.py` — MolNex model + weight loader
+- `src/molzoo/mace/variants.py` — `MACEOMol` (thin alias over
+  `molzoo.mace.potential.MACEPotential`) + the `load_omol_state_dict`
+  back-compat loader
+- `src/molzoo/mace/checkpoint.py` — `OMOL_REMAP`, the official-weight key
+  remap consumed by `MACEPotential.from_checkpoint`
 - `src/molzoo/specs/mace_omol.md` — paper↔code contract and run log
+  (mirrored byte-for-byte at `docs/molzoo/specs/mace_omol.md`)

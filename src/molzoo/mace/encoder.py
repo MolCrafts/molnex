@@ -15,7 +15,8 @@ into an energy — and differentiating it — is the caller's job.
 Hot-path discipline: every branch is frozen into a plain attribute (or the
 presence of an optional submodule) by ``__init__``. The configuration object
 survives only as ``self._spec``, for provenance; reading a pydantic attribute
-inside a layer loop is a dynamo graph break (cf. ``mace_matpes.py:118``).
+inside a layer loop is a dynamo graph break (cf. ``src/molzoo/mace_matpes.py:118``
+at 0e05959, before deletion).
 
 Reference:
     Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural

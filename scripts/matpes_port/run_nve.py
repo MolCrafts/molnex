@@ -15,7 +15,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import time
 from pathlib import Path
@@ -42,7 +41,7 @@ from molix.md import (  # noqa: E402
 #: preparation; molix.units is the single source.
 from molix.units import KB_AMU_A_FS  # noqa: E402,F401
 from molpot.derivation.force import autograd_forces_from_energy  # noqa: E402
-from molzoo import MACEMatpes, load_matpes_state_dict  # noqa: E402
+from molzoo.mace import MACEPotential  # noqa: E402
 
 
 def read_poscar(path: Path) -> dict[str, torch.Tensor]:
@@ -93,7 +92,7 @@ def read_poscar(path: Path) -> dict[str, torch.Tensor]:
 
 
 def _matpes_energy_forces(
-    model: MACEMatpes,
+    model: MACEPotential,
     *,
     Z: torch.Tensor,
     neighbors: PeriodicNeighborList,
@@ -115,13 +114,13 @@ def _matpes_energy_forces(
     14.6x (fp32) on GH200, see
     ``docs/molix/explanation/throughput-and-compilation.md``.
     """
-    core = model._compute_energy
+    core = model.energy_core
     if autocast_dtype is not None:
         # The autocast region must sit INSIDE the compiled callable: wrapped
         # outside, it invalidates the CUDA-graph capture and the "compiled"
         # bf16 arm runs 4x slower than fp32 (measured 52 vs 12 ms/step).
         # Inside, dynamo traces the region and inductor fuses through it.
-        def core(p, Z, ei, batch, ng, shifts, _f=model._compute_energy, _d=autocast_dtype):
+        def core(p, Z, ei, batch, ng, shifts, _f=model.energy_core, _d=autocast_dtype):
             with torch.autocast(device_type="cuda", dtype=_d):
                 return _f(p, Z, ei, batch, ng, shifts)
 
@@ -140,33 +139,6 @@ def _matpes_energy_forces(
         return energy.sum().detach(), forces.detach()
 
     return energy_forces
-
-
-def build_model(weights_dir: Path, *, use_fallback: bool) -> MACEMatpes:
-    """Construct :class:`MACEMatpes` from the converted checkpoint in ``weights_dir``."""
-    cfg = json.loads((weights_dir / "matpes_r2scan_config.json").read_text())
-    model = MACEMatpes(
-        atomic_numbers=cfg["atomic_numbers"],
-        atomic_energies=torch.tensor(cfg["atomic_energies"], dtype=config.ftype),
-        r_max=cfg["r_max"],
-        num_bessel=cfg["num_bessel"],
-        num_polynomial_cutoff=cfg["num_polynomial_cutoff"],
-        l_max=cfg["max_ell"],
-        num_features=128,
-        max_hidden_l=1,
-        num_interactions=cfg["num_interactions"],
-        correlation=cfg["correlation"],
-        mlp_dim=16,
-        radial_mlp=cfg["radial_MLP"],
-        scale=cfg["atomic_inter_scale"],
-        shift=cfg["atomic_inter_shift"],
-        use_fallback=use_fallback,
-    )
-    state = torch.load(
-        weights_dir / "matpes_r2scan_cueq_state.pt", map_location="cpu", weights_only=True
-    )
-    load_matpes_state_dict(model, state)
-    return model.eval()
 
 
 def main() -> None:
@@ -277,7 +249,13 @@ def main() -> None:
         parser.error("--weights-dir and --out are required unless --dump-system is given")
     Z, pos, cell = system["Z"], system["pos"].to(config.ftype), system["cell"].to(config.ftype)
 
-    model = build_model(args.weights_dir, use_fallback=use_fallback)
+    # from_checkpoint leaves the model in training mode by contract; .eval() is
+    # the caller's step, as the collapsed build_model used to do.
+    model = MACEPotential.from_checkpoint(
+        args.weights_dir / "matpes_r2scan_config.json",
+        args.weights_dir / "matpes_r2scan_cueq_state.pt",
+        use_fallback=use_fallback,
+    ).eval()
     r_max = float(model.cutoff_fn.r_cut)
     print(f"system: {Z.numel()} atoms, cell diag {torch.diagonal(cell).tolist()}, r_max {r_max}")
 
@@ -382,10 +360,27 @@ def main() -> None:
 
     traj = torch.load(args.out, map_location="cpu", weights_only=True)
     etot = traj["etot"] * EV_PER_AMU_A2_FS2
-    drift = float(etot[-1] - etot[0]) / Z.numel()
+    n_frames = int(etot.numel())
+    if n_frames < 2:
+        print(
+            f"E_tot drift: only {n_frames} trajectory frame(s) "
+            f"(stride={args.stride}, steps={args.steps}) — cannot estimate; "
+            f"use checkpoint log instead"
+        )
+    else:
+        # Frames are kept at step stride, 2*stride, ...; span ≈ (n_frames)*stride*dt
+        t_ps = n_frames * args.stride * args.dt * 1e-3
+        dE_meV_atom = float(etot[-1] - etot[0]) / Z.numel() * 1e3
+        rate = dE_meV_atom / t_ps if t_ps > 0 else float("nan")
+        print(
+            f"E_tot drift = {dE_meV_atom:.4f} meV/atom over ~{t_ps:.2f} ps "
+            f"({n_frames} frames, {rate:.6f} meV/atom/ps); "
+            f"T range {float(traj['temp'].min()):.1f}-{float(traj['temp'].max()):.1f} K"
+        )
     print(
-        f"E_tot drift = {drift * 1e3:.4f} meV/atom over {args.steps} steps; "
-        f"T range {float(traj['temp'].min()):.1f}-{float(traj['temp'].max()):.1f} K"
+        f"neighbour rebuilds this segment: {neighbors.rebuild_count} "
+        f"(expect ~{remaining if args.rebuild_every == 1 else remaining // max(args.rebuild_every, 1)} "
+        f"for rebuild_every={args.rebuild_every} at force-eval)"
     )
     # The comparison step needs the exact graph the trajectory was produced on.
     # edge_index is (E, 2) [source, target] — the repo edge convention.

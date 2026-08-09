@@ -16,13 +16,15 @@ an irreps string such as ``128x0e+128x1o`` says how many features of each kind
 a layer carries; ``E0`` is the table of isolated-atom reference energies, one
 per element, in eV/atom.)
 
-Those call sites are real and out of this spec's reach::
+One such call site is still real and out of this spec's reach::
 
-    scripts/matpes_port/run_nve.py:148    MACEMatpes(atomic_numbers=…, …)
     benchmarks/bench_mace_matpes.py:41    MACEMatpes(atomic_numbers=…, …)
 
-so :class:`MACEMatpes` and :class:`MACEOMol` stay constructible by keyword,
-and :func:`load_matpes_state_dict` / :func:`load_omol_state_dict` stay
+``scripts/matpes_port/run_nve.py`` was the second until
+``mace-subpackage-restructure-07-cleanup`` collapsed its ``build_model`` onto
+:meth:`~molzoo.mace.potential.MACEPotential.from_checkpoint`, which builds the
+spec itself. So :class:`MACEMatpes` and :class:`MACEOMol` stay constructible by
+keyword, and :func:`load_matpes_state_dict` / :func:`load_omol_state_dict` stay
 importable as free functions. Both loaders are *only* here for that
 compatibility — CLAUDE.md's "no factory functions" rule would otherwise reject
 them, and they forward, unchanged, to the two preset
@@ -65,23 +67,24 @@ isolated-atom references; the full energy expression, its ``F_i = -∂E/∂r_i``
 force convention and its units are written out in
 :mod:`molzoo.mace.potential`.
 
-Known debt — a private symbol consumed across packages
-------------------------------------------------------
+Resolved debt — the private energy core
+---------------------------------------
 
-``scripts/matpes_port/run_nve.py:118`` binds ``model._compute_energy`` (and
-``benchmarks/bench_mace_matpes.py:129`` hands it to ``Compiler``) as the
-compiled energy core of the MD loop. That is a **private** method crossing a
-package boundary, discovered by the ``mace-subpackage-restructure`` cutover and
-deliberately not fixed here: re-pointing those two consumers at the public
-:meth:`~molzoo.mace.potential.MACEPotential.energy_core` belongs to
-``.claude/specs/mace-subpackage-restructure-07-cleanup.md``. Until then the
-positional signature ``(pos, Z, edge_index, batch, num_graphs, shifts)`` is a
-contract, and :attr:`MACEMatpes._compute_energy` is kept as a *name alias* of
-``energy_core`` — the same function object, so the two can never disagree.
+``scripts/matpes_port/run_nve.py`` used to bind ``model._compute_energy`` (and
+``benchmarks/bench_mace_matpes.py`` to hand it to ``Compiler``) as the compiled
+energy core of the MD loop — a **private** method crossing a package boundary,
+discovered by the ``mace-subpackage-restructure`` cutover. Both consumers were
+re-pointed at the public
+:meth:`~molzoo.mace.potential.MACEPotential.energy_core` by
+``mace-subpackage-restructure-07-cleanup``; no in-tree caller binds the private
+name any more. :attr:`MACEMatpes._compute_energy` is kept as a *name alias* of
+``energy_core`` — the same function object, so the two can never disagree —
+purely as back-compat for out-of-tree callers, and the positional signature
+``(pos, Z, edge_index, batch, num_graphs, shifts)`` stays a contract for them.
 :class:`MACEOMol` deliberately has **no** such alias: the flat OMol model's
 ``_compute_energy`` took ``(…, batch, total_charge, total_spin, shifts)``, so an
 alias of ``energy_core`` there would silently reinterpret the fifth positional
-argument as ``num_graphs``. No in-tree caller binds it.
+argument as ``num_graphs``.
 
 Reference:
     Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
@@ -91,6 +94,8 @@ Reference:
     (MACE-MP-0). https://arxiv.org/abs/2401.00096
     Kaplan et al. "A foundational potential energy surface dataset for
     materials" (MatPES). https://arxiv.org/abs/2503.04070
+    Levine et al. "The Open Molecules 2025 (OMol25) Dataset, Evaluations, and
+    Models" https://arxiv.org/abs/2505.08762
 """
 
 from __future__ import annotations
@@ -136,9 +141,8 @@ def _supplied(**fields: object) -> dict[str, object]:
 def _energy_table(atomic_energies: Sequence[float] | torch.Tensor) -> list[float]:
     """Normalise the ``E0`` table to the plain ``list[float]`` the spec holds.
 
-    ``scripts/matpes_port/run_nve.py:150`` and
-    ``benchmarks/bench_mace_matpes.py:43`` both pass a ``torch.Tensor`` (the
-    script builds ``torch.tensor(cfg["atomic_energies"], dtype=config.ftype)``),
+    ``benchmarks/bench_mace_matpes.py:43`` passes a ``torch.Tensor``
+    (``torch.zeros(len(_Z_TABLE), dtype=config.ftype)``),
     while :class:`~molzoo.mace.spec.MACESpec` keeps the table torch-free so a
     configuration can be read without importing torch. Both shapes are accepted
     here; the tensor is rebuilt inside
@@ -206,12 +210,14 @@ class MACEMatpes(MACEPotential):
             or fewer than two interaction layers.
     """
 
-    #: Name alias of :meth:`~molzoo.mace.potential.MACEPotential.energy_core`,
-    #: kept because ``scripts/matpes_port/run_nve.py:118`` binds this private
-    #: method as its compiled MD energy core. Same function object, so the
-    #: positional signature ``(pos, Z, edge_index, batch, num_graphs, shifts)``
-    #: cannot drift from the public one. Removed by
-    #: ``mace-subpackage-restructure-07-cleanup`` with its consumer.
+    #: Name alias of :meth:`~molzoo.mace.potential.MACEPotential.energy_core`.
+    #: Same function object, so the positional signature
+    #: ``(pos, Z, edge_index, batch, num_graphs, shifts)`` cannot drift from the
+    #: public one. ``mace-subpackage-restructure-07-cleanup`` re-pointed the two
+    #: in-tree consumers (``scripts/matpes_port/run_nve.py``,
+    #: ``benchmarks/bench_mace_matpes.py``) onto ``energy_core``; the alias
+    #: remains as back-compat for out-of-tree callers and may be dropped by a
+    #: future spec.
     _compute_energy = MACEPotential.energy_core
 
     def __init__(

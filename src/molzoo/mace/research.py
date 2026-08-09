@@ -56,8 +56,9 @@ from molrep.interaction.product import irreps_from_l_max
 from molrep.readout.product import ProductHead
 
 #: Blocks promoted to ``molrep`` by mace-subpackage-restructure-01 and re-exported
-#: here so ``from molzoo.mace import EmbeddingBlock`` keeps resolving. Removed in
-#: 06-wire, once the consumers import from their new homes.
+#: here so ``from molzoo.mace import EmbeddingBlock`` keeps resolving. Kept while
+#: ``tests/test_molzoo/test_imports.py::TestMolzooMaceReexports`` pins them to
+#: their promoted ``molrep`` homes by object identity.
 __all__ = [
     "EmbeddingBlock",
     "EmbeddingSpec",
@@ -142,8 +143,9 @@ class MACE(TensorDictModuleBase):
 
         # Frozen on the hot path: reading ``self.config.num_interactions`` in
         # ``forward`` is a pydantic attribute lookup inside the layer loop, i.e.
-        # a dynamo graph break (cf. ``mace_matpes.py:118``). ``self.config`` is
-        # kept for provenance only and must not be read by ``forward``.
+        # a dynamo graph break (cf. ``src/molzoo/mace_matpes.py:118`` at
+        # 0e05959, before deletion). ``self.config`` is kept for provenance
+        # only and must not be read by ``forward``.
         self.num_interactions = num_interactions
 
         self.config = MACEResearchSpec(

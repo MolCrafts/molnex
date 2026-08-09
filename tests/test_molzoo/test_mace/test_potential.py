@@ -336,9 +336,9 @@ class TestMACEPotential:
     ) -> None:
         """A missing ``graphs`` must come back as ``batch_size=[B]``, never ``[]``.
 
-        ``protocol.ensure_graphs`` builds ``batch_size=[]`` (known debt, 07);
-        the potential has to create the namespace itself, *before* calling
-        ``write_energy``, or the post-collate schema silently degrades.
+        Since 07-cleanup ``write_energy`` sizes the namespace itself, but the
+        potential still creates it *before* calling ``write_energy`` so the
+        schema holds even for callers that bypass the protocol helpers.
         """
         del pair_batch["graphs"]
         out = matpes_potential(pair_batch)

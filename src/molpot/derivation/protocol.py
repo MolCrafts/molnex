@@ -1,8 +1,26 @@
-"""Shared keys and contracts for in-place derivative readouts.
+"""Shared keys and helpers for writing energies and forces onto a batch.
 
-No differentiation logic lives here — only the batch key map, session hooks
-(without TensorDict ``set_non_tensor`` — Dynamo-hostile), and how modes invoke
-a potential's **energy core** (never the public pipeline).
+Every model in this repository communicates through one object: the
+*post-collate batch*, a nested :class:`~tensordict.TensorDict` whose ``atoms``
+/ ``edges`` / ``graphs`` sub-dictionaries hold per-atom, per-edge and per-graph
+tensors. :func:`molix.data.collate.collate_molecules` builds that object and
+owns its schema (CLAUDE.md, "Post-collate batch schema"). This module owns only
+the handful of keys a *potential* — a model mapping atomic positions to an
+energy — writes back into it, plus the helpers that perform those writes in
+place.
+
+No differentiation logic lives here: force values arrive already computed.
+``F = -dE/dpos`` is taken by the two *modes* (``molpot.derivation.modes.func``
+and ``.grad`` — the :mod:`torch.func` and :mod:`torch.autograd` backends). Those
+modes call a potential's **energy core**, the private ``_write_energy`` entry
+point that computes the energy and nothing else, never the public ``forward``,
+which may append further readouts a force pass must not re-run;
+:func:`call_energy` is that dispatch.
+
+Readout sessions live in a module-level dictionary keyed by ``id(batch)`` rather
+than on the batch itself. TensorDict's ``set_non_tensor`` would place a plain
+Python object inside a tensor container, which Dynamo — the Python-bytecode
+tracer behind :func:`torch.compile` — cannot trace, so it breaks compilation.
 """
 
 from __future__ import annotations
@@ -68,10 +86,32 @@ def call_energy(model: Any, batch: TensorDict) -> TensorDict:
     return model(batch)
 
 
-def ensure_graphs(batch: TensorDict) -> TensorDict:
-    """Ensure a ``graphs`` sub-TensorDict exists for writing energy."""
+def ensure_graphs(batch: TensorDict, num_graphs: int | None = None) -> TensorDict:
+    """Ensure a ``graphs`` sub-TensorDict exists for writing energy.
+
+    An existing ``graphs`` namespace is returned untouched — its ``batch_size``
+    is never rewritten, even when ``num_graphs`` disagrees with it. The
+    canonical producer of that namespace is
+    :func:`molix.data.collate.collate_molecules`; this helper only fills the
+    gap for batches assembled by hand.
+
+    Args:
+        batch: Post-collate root batch, mutated in place.
+        num_graphs: Number of graphs ``B``. Creates the namespace with the
+            schema-conforming ``batch_size=[B]``. ``None`` (the default)
+            creates it with ``batch_size=[]`` instead, which does **not**
+            conform to CLAUDE.md's ``"graphs": TensorDict(batch_size=[B])``
+            schema: a consumer reading ``batch["graphs"].batch_size[0]``
+            (e.g. ``src/molzoo/pinet/potential.py``) raises ``IndexError`` on
+            it. The fallback exists only as transitional backward
+            compatibility for out-of-tree adapters — every in-tree caller
+            passes ``num_graphs``.
+
+    Returns:
+        The same ``batch``, with a ``graphs`` namespace guaranteed present.
+    """
     if "graphs" not in batch.keys():
-        batch["graphs"] = TensorDict(batch_size=[])
+        batch["graphs"] = TensorDict(batch_size=[] if num_graphs is None else [num_graphs])
     return batch
 
 
@@ -81,8 +121,21 @@ def write_energy(
     *,
     atomic_energy: torch.Tensor | None = None,
 ) -> TensorDict:
-    """Write peer energy keys onto ``batch`` (in-place)."""
-    ensure_graphs(batch)
+    """Write peer energy keys onto ``batch`` (in-place).
+
+    Args:
+        batch: Post-collate root batch, mutated in place.
+        energy: Per-graph energy ``(B,)`` in eV. A 0-dim tensor is accepted and
+            leaves the created ``graphs`` namespace at ``batch_size=[]``.
+        atomic_energy: Optional per-atom energy ``(N,)`` in eV, written under
+            ``("atoms", "energy")``.
+
+    Returns:
+        The same ``batch``.
+    """
+    # B comes from the static shape of a (B,) energy — no host sync, and the
+    # same static-B convention as MACEPotential.energy_core(num_graphs=...).
+    ensure_graphs(batch, energy.shape[0] if energy.dim() == 1 else None)
     batch[ENERGY_KEY] = energy
     if atomic_energy is not None:
         batch[ATOMIC_ENERGY_KEY] = atomic_energy

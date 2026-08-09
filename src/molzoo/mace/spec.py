@@ -22,6 +22,8 @@ Reference:
     (MACE-MP-0). https://arxiv.org/abs/2401.00096
     Kaplan et al. "A foundational potential energy surface dataset for
     materials" (MatPES). https://arxiv.org/abs/2503.04070
+    Levine et al. "The Open Molecules 2025 (OMol25) Dataset, Evaluations, and
+    Models" https://arxiv.org/abs/2505.08762
 """
 
 from __future__ import annotations
@@ -120,7 +122,8 @@ class MACESpec(BaseModel):
 class MACEMatpesSpec(MACESpec):
     """Configuration of the MACE-MatPES foundation model.
 
-    Defaults reproduce ``MACEMatpes.__init__`` (``src/molzoo/mace_matpes.py``),
+    Defaults reproduce ``MACEMatpes.__init__`` of the pre-cutover flat module
+    (``src/molzoo/mace_matpes.py``, deleted in 06-wire; see git history),
     including its materialised ``radial_mlp`` of ``[64, 64, 64]``.
 
     Attributes:
@@ -156,7 +159,8 @@ class MACEMatpesSpec(MACESpec):
 class MACEOMolSpec(MACESpec):
     """Configuration of the MACE-OMOL foundation model.
 
-    Defaults reproduce ``MACEOMol.__init__`` (``src/molzoo/mace_omol.py``).
+    Defaults reproduce ``MACEOMol.__init__`` of the pre-cutover flat module
+    (``src/molzoo/mace_omol.py``, deleted in 06-wire; see git history).
     ``use_fallback`` is not a constructor argument there — the flat model
     hard-codes the fused cuEquivariance path, i.e. ``False``.
 
