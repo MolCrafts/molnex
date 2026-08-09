@@ -1,0 +1,69 @@
+=== node n509 arch aarch64 Sun Aug  9 23:01:00 CEST 2026 ===
+The following modules were not unloaded:
+  (Use "module --force purge" to unload all):
+
+  1) hpc_sysenv/.1   2) hpc/.2.1.0
+***************************************************
+You have loaded a buildenv module
+***************************************************
+This buildenv-gcccuda module makes available:
+ - Compilers:
+   + GCC 14.3: gcc, g++ and gfortran
+ - CUDA SDK 13.0
+ - CUDA capable MPI (GPU aware) library with mpi-wrapped compilers:
+   + MPICH v. 4.3.2 with mpicc, mpifort, etc.
+ - NCCL 2.29.7 (with ofi net plugin)
+ - NVSHMEM 3.4.5
+ - Numerical CPU libraries optimised for the Grace CPU:
+   + OpenBLAS 0.3.32 with BLAS, LAPACK
+   + ScaLAPACK 2.2.2
+   + FFTW 3.3.11
+ - Numerical GPU libraries optimised for the Hopper GPU:
+   + cuFFTMp 12.1.3
+   + CUDA SDK math libraries
+
+Access to the libraries are contained within the standard
+environment variables CPATH (headers) and LIBRARY_PATH (libs)
+which are picked up by default by the compilers. In addition
+relevant variables for `cmake` and `pkg-config` are also set.
+
+arch aarch64 torch 2.12.0+cu130 cuda True
+-- Found Python: /home/jicli594/work/.aarch64/bin/python (found version "3.14.5") found components: Interpreter Development.Module
+-- Found CUDAToolkit: /software/sse2/el9_gh200/manual/CUDA/13.0.3_580.126.20/include (found version "13.0.88")
+-- PyTorch: CUDA detected: 13.0
+-- PyTorch: CUDA nvcc is: /software/sse2/el9_gh200/manual/CUDA/13.0.3_580.126.20/bin/nvcc
+-- PyTorch: CUDA toolkit directory: /software/sse2/el9_gh200/manual/CUDA/13.0.3_580.126.20
+-- PyTorch: Header version is: 13.0
+-- Found Python: /home/jicli594/work/.aarch64/bin/python (found version "3.14.5") found components: Interpreter
+-- /software/sse2/el9_gh200/manual/CUDA/13.0.3_580.126.20/lib64/libnvrtc.so shorthash is 64db9c3f
+-- USE_CUDNN is set to 0. Compiling without cuDNN support
+-- USE_CUSPARSELT is set to 0. Compiling without cuSPARSELt support
+-- USE_CUDSS is set to 0. Compiling without cuDSS support
+-- USE_CUFILE is set to 0. Compiling without cuFile support
+-- Autodetected CUDA architecture(s):  9.0
+CMake Warning at /home/jicli594/work/.aarch64/lib/python3.14/site-packages/torch/share/cmake/Caffe2/public/cuda.cmake:340 (message):
+  pytorch is not compatible with `CMAKE_CUDA_ARCHITECTURES` and will ignore
+  its value.  Please configure `TORCH_CUDA_ARCH_LIST` instead.
+Call Stack (most recent call first):
+  /home/jicli594/work/.aarch64/lib/python3.14/site-packages/torch/share/cmake/Caffe2/Caffe2Config.cmake:86 (include)
+  /home/jicli594/work/.aarch64/lib/python3.14/site-packages/torch/share/cmake/Torch/TorchConfig.cmake:62 (find_package)
+  CMakeLists.txt:15 (find_package)
+
+
+-- Added CUDA NVCC flags for: -gencode;arch=compute_90,code=sm_90
+CMake Warning at /home/jicli594/work/.aarch64/lib/python3.14/site-packages/torch/share/cmake/Torch/TorchConfig.cmake:22 (message):
+  library kineto not found.
+Call Stack (most recent call first):
+  /home/jicli594/work/.aarch64/lib/python3.14/site-packages/torch/share/cmake/Torch/TorchConfig.cmake:119 (append_torchlib_if_found)
+  CMakeLists.txt:15 (find_package)
+
+
+-- Found CUDAToolkit: /software/sse2/el9_gh200/manual/CUDA/13.0.3_580.126.20/targets/sbsa-linux/include;/software/sse2/el9_gh200/manual/CUDA/13.0.3_580.126.20/targets/sbsa-linux/include/cccl (found version "13.0.88")
+-- molnex_op: CUDA=ON
+-- molnex_op: sources=/nobackup/proj/disk/teoroo/personal/jicli594/work/molcrafts/molnex/src/molix/op/src/molix_library.cpp;/nobackup/proj/disk/teoroo/personal/jicli594/work/molcrafts/molnex/src/molix/op/src/molix_meta.cpp;/nobackup/proj/disk/teoroo/personal/jicli594/work/molcrafts/molnex/src/molix/op/src/neighbors/get_neighbor_pairs.cpp;/nobackup/proj/disk/teoroo/personal/jicli594/work/molcrafts/molnex/src/molix/op/src/pme/pme_cpu.cpp;/nobackup/proj/disk/teoroo/personal/jicli594/work/molcrafts/molnex/src/molix/op/src/neighbors/get_neighbor_pairs.cu;/nobackup/proj/disk/teoroo/personal/jicli594/work/molcrafts/molnex/src/molix/op/src/pme/pme_cuda.cu
+-- molnex_op: TORCH_PYTHON_LIBRARY=/home/jicli594/work/.aarch64/lib/python3.14/site-packages/torch/lib/libtorch_python.so
+-- Configuring done (5.4s)
+-- Generating done (0.1s)
+-- Build files have been written to: /nobackup/proj/disk/teoroo/personal/jicli594/work/molcrafts/molnex/src/molix/op/build-gh200
+[100%] Built target molnex_opLib
+=== arm: md64_pot64 ===
