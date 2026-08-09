@@ -12,7 +12,7 @@ unnoticed. This script is the guard:
     ``run_nve.py`` production path) vs eager, on the fused arm.
 
 Random weights (perf only, no physics); a periodic random-dense system builds
-real ``(E, 2)`` edges + shifts through :class:`molix.md.PeriodicNeighborList`.
+real ``(E, 2)`` edges + shifts through :class:`molix.md.NeighborList`.
 Run on a GPU node:
 
     python benchmarks/bench_mace_matpes.py            # defaults: N=192, fp32
@@ -29,7 +29,7 @@ import torch
 
 from molix import config
 from molix.compile import Compiler
-from molix.md import PeriodicNeighborList
+from molix.md import NeighborList
 from molpot.derivation.force import autograd_forces_from_energy
 
 _Z_TABLE = [1, 6, 7, 8, 14, 26]  # small table; dims below are the MatPES-class ones
@@ -49,7 +49,7 @@ def _min_n_atoms() -> int:
     """Smallest ``n_atoms`` whose box half-width strictly exceeds :data:`CUTOFF`.
 
     Minimum image requires ``cutoff <= box / 2``; below that
-    :class:`molix.md.PeriodicNeighborList` raises.
+    :class:`molix.md.NeighborList` raises.
     """
     return math.floor(DENSITY * (2.0 * CUTOFF) ** 3) + 1
 
@@ -82,7 +82,7 @@ def _system(n_atoms: int, device: torch.device):
     Z = _Z_TABLE[0] + torch.zeros(n_atoms, dtype=torch.long, device=device)
     Z[::3] = _Z_TABLE[2]
     Z[::5] = _Z_TABLE[3]
-    neighbors = PeriodicNeighborList(cell=cell, cutoff=CUTOFF, positions=pos)
+    neighbors = NeighborList(cell=cell, cutoff=CUTOFF, positions=pos)
     batch = torch.zeros(n_atoms, dtype=torch.long, device=device)
     return pos, Z, batch, neighbors
 
@@ -119,7 +119,7 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    # Fail here, not 40 frames deep inside PeriodicNeighborList: minimum image
+    # Fail here, not 40 frames deep inside NeighborList: minimum image
     # needs cutoff <= box/2, and the box is derived from --n-atoms at DENSITY.
     box = _box_length(args.n_atoms)
     if box / 2.0 <= CUTOFF:

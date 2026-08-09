@@ -1,4 +1,4 @@
-"""Public-API scenario for the `PeriodicNeighborList` cutoff bound.
+"""Public-API scenario for the `NeighborList` cutoff bound.
 
 Spec: `md-neighborlist-skin-01-guard`.
 
@@ -33,7 +33,7 @@ raise".
 
 Part 2 — completeness at the admitted cutoff.  Twelve atoms, written below as
 literal fractional coordinates and mapped to Cartesian by `frac @ cell`, are
-handed to `PeriodicNeighborList(cutoff=3.9)`.  The live half-pair set it
+handed to `NeighborList(cutoff=3.9)`.  The live half-pair set it
 produces is compared against a brute-force reference computed **in this file**:
 for every i < j, minimise ||r_j - r_i + n . cell|| over all 27 shifts
 n in {-1, 0, 1}^3.  Same pairs, same distances, nothing missed.  Since
@@ -98,7 +98,7 @@ import sys
 
 import torch
 
-from molix.md import PeriodicNeighborList
+from molix.md import NeighborList
 
 # ---------------------------------------------------------------------------
 # The golden triclinic cell.  Rows are the cell vectors a_1, a_2, a_3 (A).
@@ -250,7 +250,7 @@ def refuses(cutoff: float) -> str | None:
         The ``ValueError`` message if the constructor refused, else ``None``.
     """
     try:
-        PeriodicNeighborList(cell=CELL, cutoff=cutoff, positions=positions())
+        NeighborList(cell=CELL, cutoff=cutoff, positions=positions())
     except ValueError as error:
         return str(error)
     return None
@@ -305,7 +305,7 @@ def brute_force_cross_boundary(pos: torch.Tensor) -> int:
 
 
 def live_half_pairs(
-    neighbors: PeriodicNeighborList, pos: torch.Tensor
+    neighbors: NeighborList, pos: torch.Tensor
 ) -> dict[tuple[int, int], list[float]]:
     """Deduplicate the live, symmetry-expanded edge buffer into half pairs.
 
@@ -383,7 +383,7 @@ def check_bound(checker: Checker) -> None:
         "cutoff=4.0001 A was accepted; the bound is 4.000 A exactly",
     )
 
-    accepted = PeriodicNeighborList(cell=CELL, cutoff=CUTOFF, positions=positions())
+    accepted = NeighborList(cell=CELL, cutoff=CUTOFF, positions=positions())
     checker.truth(
         "bound.accepts_3.9_and_builds",
         accepted.num_edges > 0,
@@ -408,7 +408,7 @@ def check_completeness(checker: Checker) -> None:
         N_CROSS_BOUNDARY_PAIRS,
     )
 
-    neighbors = PeriodicNeighborList(cell=CELL, cutoff=CUTOFF, positions=pos)
+    neighbors = NeighborList(cell=CELL, cutoff=CUTOFF, positions=pos)
     observed = live_half_pairs(neighbors, pos)
     checker.exact("list.num_edges", neighbors.num_edges, 2 * N_HALF_PAIRS)
     checker.exact("list.n_half_pairs", len(observed), N_HALF_PAIRS)
@@ -443,7 +443,7 @@ def main() -> int:
     check_completeness(checker)
 
     if checker.failures:
-        print("\nFAILED — PeriodicNeighborList no longer matches the golden bound / reference:")
+        print("\nFAILED — NeighborList no longer matches the golden bound / reference:")
         for failure in checker.failures:
             print(f"  {failure}")
         return 1

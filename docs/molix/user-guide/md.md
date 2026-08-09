@@ -45,8 +45,8 @@ silently promote mid-step. For mixed precision inside the model only, use
 | You have | Use |
 |---|---|
 | A molpot potential + collated template (open system) | `PotentialForceField` |
-| A TensorDict potential reading `edges.shifts` + a periodic cell | `PeriodicPotentialForceField` (owns a rebuilding `PeriodicNeighborList`) |
-| A bulk Lennard-Jones system (periodic, truncated-shifted, LAMMPS `lj/cut`) | `LennardJonesCutForceField` over a `PeriodicNeighborList` |
+| A TensorDict potential reading `edges.shifts` + a periodic cell | `PeriodicPotentialForceField` (owns a rebuilding `NeighborList`) |
+| A bulk Lennard-Jones system (periodic, truncated-shifted, LAMMPS `lj/cut`) | `LennardJonesCutForceField` over a `NeighborList` |
 | Any `pos -> (energy, forces)` callable (AOTI `.pt2`, compiled closure, external engine) | `CallableForceField` |
 | An analytic test PES | `HarmonicForceField`, `LennardJonesForceField` |
 
@@ -62,9 +62,9 @@ force field, keep the rebuild eager:
 
 ```python
 from molix import Compiler
-from molix.md import MD, LennardJonesCutForceField, MaxwellBoltzmann, PeriodicNeighborList
+from molix.md import MD, LennardJonesCutForceField, MaxwellBoltzmann, NeighborList
 
-nl = PeriodicNeighborList(cell=cell, cutoff=2.5 * sigma, positions=pos)
+nl = NeighborList(cell=cell, cutoff=2.5 * sigma, positions=pos)
 ff = LennardJonesCutForceField(epsilon=eps, sigma=sigma, neighbors=nl).to("cuda", torch.float64)
 ff = Compiler(cuda_graphs=True)(ff)          # or Compiler(fullgraph=True)
 md = MD(ff, mass=39.95, dt=4.0, gamma=0.0,   # γ=0 → NVE

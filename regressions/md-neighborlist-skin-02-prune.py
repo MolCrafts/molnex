@@ -215,7 +215,7 @@ def check_deleted_surface(checker: Checker) -> None:
         "surface.no_neighborlist_attribute",
         not hasattr(molix.nn, "NeighborList"),
         "`molix.nn.NeighborList` still resolves; the name must stay free for "
-        "molix.data.tasks.neighbor.NeighborList / molix.md.PeriodicNeighborList",
+        "molix.data.tasks.neighbor.NeighborList / molix.md.NeighborList",
     )
     checker.truth(
         "surface.no_neighborlist_export",

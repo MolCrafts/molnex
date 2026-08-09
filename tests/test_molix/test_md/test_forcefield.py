@@ -10,7 +10,7 @@ from molix.md import (
     HarmonicForceField,
     LennardJonesCutForceField,
     LennardJonesForceField,
-    PeriodicNeighborList,
+    NeighborList,
     PeriodicPotentialForceField,
     PotentialForceField,
 )
@@ -179,7 +179,7 @@ class TestPeriodicPotentialForceField:
         pos, cell = _cubic_lattice()
         outs = []
         for factor in (1.1, 3.0):
-            nl = PeriodicNeighborList(cell=cell, cutoff=3.5, positions=pos, capacity_factor=factor)
+            nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, capacity_factor=factor)
             ff = PeriodicPotentialForceField(
                 _ShiftAwarePairPotential(3.5), _periodic_template(pos), neighbors=nl
             )
@@ -197,7 +197,7 @@ class TestPeriodicPotentialForceField:
         stale list has never seen can differ.
         """
         pos, cell = _cubic_lattice()
-        nl = PeriodicNeighborList(cell=cell, cutoff=3.5, positions=pos, capacity_factor=8.0)
+        nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, capacity_factor=8.0)
         ff = PeriodicPotentialForceField(
             _ShiftAwarePairPotential(3.5), _periodic_template(pos), neighbors=nl
         )
@@ -225,7 +225,7 @@ class TestLennardJonesCutForceField:
     def _dimer(self, d: float, *, box: float = 20.0, cutoff: float = 5.0, shift: bool = True):
         pos = torch.tensor([[0.0, 0.0, 0.0], [d, 0.0, 0.0]], dtype=torch.float64)
         cell = torch.eye(3, dtype=torch.float64) * box
-        nl = PeriodicNeighborList(cell=cell, cutoff=cutoff, positions=pos)
+        nl = NeighborList(cell=cell, cutoff=cutoff, positions=pos)
         ff = LennardJonesCutForceField(
             epsilon=self._EPS, sigma=self._SIGMA, neighbors=nl, shift=shift
         ).to(torch.float64)
@@ -236,7 +236,7 @@ class TestLennardJonesCutForceField:
         pos, cell = _cubic_lattice()
         torch.manual_seed(0)
         pos = pos + 0.3 * torch.randn_like(pos)
-        nl = PeriodicNeighborList(cell=cell, cutoff=3.5, positions=pos)
+        nl = NeighborList(cell=cell, cutoff=3.5, positions=pos)
         ff = LennardJonesCutForceField(epsilon=0.7, sigma=2.5, neighbors=nl).to(torch.float64)
         leaf = pos.clone().requires_grad_(True)
         out = ff(leaf)
@@ -248,7 +248,7 @@ class TestLennardJonesCutForceField:
         torch.manual_seed(1)
         pos = torch.randn(8, 3, dtype=torch.float64) * 1.5 + 15.0  # blob at box centre
         cell = torch.eye(3, dtype=torch.float64) * 30.0
-        nl = PeriodicNeighborList(cell=cell, cutoff=14.0, positions=pos)
+        nl = NeighborList(cell=cell, cutoff=14.0, positions=pos)
         cut = LennardJonesCutForceField(epsilon=0.9, sigma=1.2, neighbors=nl, shift=False).to(
             torch.float64
         )
@@ -273,7 +273,7 @@ class TestLennardJonesCutForceField:
         pos, cell = _cubic_lattice()
         outs = []
         for factor in (1.1, 4.0):
-            nl = PeriodicNeighborList(cell=cell, cutoff=3.5, positions=pos, capacity_factor=factor)
+            nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, capacity_factor=factor)
             ff = LennardJonesCutForceField(epsilon=0.8, sigma=2.5, neighbors=nl).to(torch.float64)
             outs.append(ff(pos))
         assert torch.equal(outs[0].energy, outs[1].energy)
@@ -284,7 +284,7 @@ class TestLennardJonesCutForceField:
         box, r_cut = 12.0, 3.0
         pos = torch.tensor([[0.6, 0.0, 0.0], [box - 0.6, 0.0, 0.0]], dtype=torch.float64)
         cell = torch.eye(3, dtype=torch.float64) * box
-        nl = PeriodicNeighborList(cell=cell, cutoff=r_cut, positions=pos)
+        nl = NeighborList(cell=cell, cutoff=r_cut, positions=pos)
         ff = LennardJonesCutForceField(epsilon=self._EPS, sigma=self._SIGMA, neighbors=nl).to(
             torch.float64
         )
@@ -306,7 +306,7 @@ class TestLennardJonesCutForceField:
 
     def test_rejects_cutoff_beyond_the_list_horizon(self):
         pos, cell = _cubic_lattice()
-        nl = PeriodicNeighborList(cell=cell, cutoff=3.0, positions=pos)
+        nl = NeighborList(cell=cell, cutoff=3.0, positions=pos)
         with pytest.raises(ValueError, match="horizon"):
             LennardJonesCutForceField(epsilon=1.0, sigma=1.0, neighbors=nl, cutoff=4.0)
 

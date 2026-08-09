@@ -20,7 +20,7 @@ output back to the state dtype at the component boundary.
 
 Periodic systems and neighbour-list rebuild are supported through
 :meth:`ForceField.rebuild_neighbors` +
-:class:`~molix.md.neighbors.PeriodicNeighborList` (driven on a cadence by
+:class:`~molix.md.neighbors.NeighborList` (driven on a cadence by
 :class:`~molix.md.runner.NeighborListHook`). :class:`PotentialForceField`
 keeps its list frozen — valid for open systems and trajectories short enough
 that no atom changes neighbours; periodic production runs use
@@ -64,7 +64,7 @@ class ForceField(nn.Module):
         :class:`~molix.md.runner.NeighborListHook` calls this on a step cadence,
         before the force evaluation. Implementations must keep every tensor
         **shape** unchanged so a compiled/graph-captured force path stays valid
-        — see :class:`~molix.md.neighbors.PeriodicNeighborList`.
+        — see :class:`~molix.md.neighbors.NeighborList`.
         """
 
     def calc_energy(self, pos: torch.Tensor) -> torch.Tensor:
@@ -173,7 +173,7 @@ class PeriodicPotentialForceField(PotentialForceField):
 
     The component that joins the pieces the package already ships: the
     ``rebuild_neighbors`` seam, :class:`~molix.md.runner.NeighborListHook`'s
-    cadence, and :class:`~molix.md.neighbors.PeriodicNeighborList`'s
+    cadence, and :class:`~molix.md.neighbors.NeighborList`'s
     fixed-capacity buffers. The working batch's ``edges`` namespace holds the
     list's live ``edge_index`` ``(capacity, 2)`` and ``shifts``
     ``(capacity, 3)`` **by reference**, so an in-place rebuild is visible to
@@ -359,7 +359,7 @@ class LennardJonesCutForceField(ForceField):
         sigma: Zero-crossing distance σ (Å).
         neighbors: Rebuildable neighbour list with **full bidirectional**
             edges (each pair present in both directions), e.g.
-            :class:`~molix.md.neighbors.PeriodicNeighborList`.
+            :class:`~molix.md.neighbors.NeighborList`.
         cutoff: Truncation radius r_cut (Å). Defaults to the list's own
             cutoff, and must not exceed it — pairs between the two radii would
             simply be absent from the buffers, silently truncating the PES

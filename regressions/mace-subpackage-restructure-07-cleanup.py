@@ -199,7 +199,7 @@ def build_edges(pos: torch.Tensor, r_max: float) -> torch.Tensor:
 
     Non-periodic, so no `shifts` accompany it. `torch.cdist` over all ordered
     pairs is O(N^2) and fine at N=6 -- the production path uses
-    `molix.md.PeriodicNeighborList`, which this file deliberately does not pull
+    `molix.md.NeighborList`, which this file deliberately does not pull
     in: it would add a moving part between the goldens and the core under test.
 
     Args:

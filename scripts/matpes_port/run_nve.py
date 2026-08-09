@@ -33,7 +33,7 @@ from molix.md import (  # noqa: E402
     CallableForceField,
     MaxwellBoltzmann,
     MDCheckpointHook,
-    PeriodicNeighborList,
+    NeighborList,
     TrajectoryHook,
 )
 
@@ -96,7 +96,7 @@ def _matpes_energy_forces(
     model: MACEPotential,
     *,
     Z: torch.Tensor,
-    neighbors: PeriodicNeighborList,
+    neighbors: NeighborList,
     compile_energy: bool = False,
     autocast_dtype: torch.dtype | None = None,
 ):
@@ -262,9 +262,9 @@ def main() -> None:
 
     pos = pos.to(device)
     mass = system["mass"].to(dtype=config.ftype, device=device)
-    # PeriodicNeighborList validates r_max <= L/2 itself and sizes its buffers
+    # NeighborList validates r_max <= L/2 itself and sizes its buffers
     # from this configuration; MD(rebuild_every=) drives the refresh cadence.
-    neighbors = PeriodicNeighborList(
+    neighbors = NeighborList(
         cell=cell.to(device), cutoff=r_max, positions=pos, capacity_factor=args.capacity_factor
     )
     print(

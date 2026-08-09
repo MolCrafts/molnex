@@ -457,7 +457,7 @@ class TestMACEMatpes:
     #    class rather than keeping a second class for one production unit) ----
     #
     # A padded (dead) edge must contribute exactly nothing. This is the
-    # load-bearing property of :class:`molix.md.PeriodicNeighborList`: its
+    # load-bearing property of :class:`molix.md.NeighborList`: its
     # fixed-capacity buffers pad with self-loops on atom 0 displaced beyond the
     # cutoff, and the whole rebuild-under-CUDA-graphs design assumes such edges
     # are invisible to the model. Random weights make the check stronger — the
@@ -465,7 +465,7 @@ class TestMACEMatpes:
 
     def test_energy_and_forces_ignore_dead_edges(self, matpes_variant: MACEMatpes) -> None:
         """Same system, 0% vs heavy padding: identical energy and forces."""
-        from molix.md import PeriodicNeighborList
+        from molix.md import NeighborList
 
         cell = torch.eye(3, dtype=torch.float64) * PBC_CELL
         pos = torch.tensor(PBC_POS, dtype=torch.float64)
@@ -474,9 +474,7 @@ class TestMACEMatpes:
 
         outs = []
         for factor in PBC_CAPACITY_FACTORS:
-            nl = PeriodicNeighborList(
-                cell=cell, cutoff=PBC_CUTOFF, positions=pos, capacity_factor=factor
-            )
+            nl = NeighborList(cell=cell, cutoff=PBC_CUTOFF, positions=pos, capacity_factor=factor)
             out = matpes_variant.energy_forces(
                 pos, Z, nl.edge_index, batch, num_graphs=1, shifts=nl.shifts
             )
@@ -492,13 +490,13 @@ class TestMACEMatpes:
         self, matpes_variant: MACEMatpes
     ) -> None:
         """rebuild() at the same positions must not change the physics."""
-        from molix.md import PeriodicNeighborList
+        from molix.md import NeighborList
 
         cell = torch.eye(3, dtype=torch.float64) * PBC_CELL
         pos = torch.tensor(PBC_POS[:3], dtype=torch.float64)
         Z = torch.tensor(PBC_Z[:3], dtype=torch.long)
         batch = torch.zeros(3, dtype=torch.long)
-        nl = PeriodicNeighborList(
+        nl = NeighborList(
             cell=cell,
             cutoff=PBC_CUTOFF,
             positions=pos,

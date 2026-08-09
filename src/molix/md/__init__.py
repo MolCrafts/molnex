@@ -29,7 +29,7 @@ loop):
 * :class:`~molix.md.driver.MaxwellBoltzmann` — initial-velocity sampler.
 
 Periodic systems are supported through
-:class:`~molix.md.neighbors.PeriodicNeighborList`, which rebuilds the neighbour
+:class:`~molix.md.neighbors.NeighborList`, which rebuilds the neighbour
 list on a step cadence into fixed-capacity buffers so the force path can stay
 inside a CUDA graph. A force field that keeps its list frozen (the default for
 :class:`~molix.md.forcefield.PotentialForceField`) remains valid only for open
@@ -47,7 +47,7 @@ from molix.md.forcefield import (
     PotentialForceField,
 )
 from molix.md.integrators import Integrator, LangevinVerletIntegrator
-from molix.md.neighbors import NeighborStrategy, PeriodicNeighborList
+from molix.md.neighbors import NeighborList, NeighborStrategy
 from molix.md.runner import (
     MDCheckpointHook,
     MDHook,
@@ -77,9 +77,9 @@ __all__ = [
     "MDRunner",
     "MDState",
     "MaxwellBoltzmann",
+    "NeighborList",
     "NeighborListHook",
     "NeighborStrategy",
-    "PeriodicNeighborList",
     "PeriodicPotentialForceField",
     "PotentialForceField",
     "TrajectoryHook",

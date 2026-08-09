@@ -3,7 +3,10 @@
 import pytest
 import torch
 
-from molix.md.neighbors import NeighborStrategy, PeriodicNeighborList
+import molix.data.tasks.neighbor
+import molix.md
+import molix.md.neighbors
+from molix.md.neighbors import NeighborList, NeighborStrategy
 
 
 def _lattice(n_side: int = 3, spacing: float = 3.0) -> tuple[torch.Tensor, torch.Tensor]:
@@ -54,11 +57,45 @@ def _triclinic() -> tuple[torch.Tensor, torch.Tensor]:
 @pytest.fixture
 def nlist():
     pos, cell = _lattice()
-    return PeriodicNeighborList(cell=cell, cutoff=3.5, positions=pos), pos
+    return NeighborList(cell=cell, cutoff=3.5, positions=pos), pos
 
 
-class TestPeriodicNeighborList:
+class TestNeighborList:
     """Test the rebuilding fixed-capacity neighbour list."""
+
+    def test_renamed_symbol_is_the_md_export(self):
+        """The MD list is exported as ``NeighborList``; the old name is gone.
+
+        There is no back-compat alias (``stage: experimental``, repo norm), so
+        the old name must be absent from the module *and* from ``__all__`` — a
+        ``PeriodicNeighborList = NeighborList`` shim would defeat this guard.
+        """
+        from molix.md import NeighborList
+
+        assert NeighborList is molix.md.neighbors.NeighborList
+        assert not hasattr(molix.md, "PeriodicNeighborList")
+
+        names = list(molix.md.__all__)
+        assert "PeriodicNeighborList" not in names
+        assert "NeighborList" in names
+        # ``__all__`` stays alphabetized (notes, 2026-08-09) inside the
+        # PascalCase block that follows the CONSTANT_CASE block, so the entry
+        # sorts above ``NeighborListHook`` instead of keeping the old "P" slot.
+        pascal = [name for name in names if not name.isupper()]
+        assert pascal == sorted(pascal)
+        assert names.index("NeighborList") < names.index("NeighborListHook")
+
+    def test_md_list_is_not_the_pipeline_task(self):
+        """Anti-shadow: two deliberate same-name types in different layers.
+
+        ``molix.md.neighbors`` imports the pipeline ``SampleTask`` — the one
+        owner of kernel-output normalisation — into its own namespace. Once the
+        MD buffer owner takes the bare name, that import must be aliased to
+        ``NeighborListTask``, or the class definition rebinds the module-level
+        name and the constructor calls *itself* recursively.
+        """
+        assert molix.md.NeighborList is not molix.data.tasks.neighbor.NeighborList
+        assert molix.md.neighbors.NeighborListTask is molix.data.tasks.neighbor.NeighborList
 
     def test_satisfies_the_neighbor_strategy_protocol(self, nlist):
         nl, _ = nlist
@@ -135,13 +172,13 @@ class TestPeriodicNeighborList:
         """Minimum image silently misses images past L/2 — refuse instead."""
         pos, cell = _lattice()
         with pytest.raises(ValueError, match="exceeds half the minimum perpendicular cell width"):
-            PeriodicNeighborList(cell=cell, cutoff=5.0, positions=pos)
+            NeighborList(cell=cell, cutoff=5.0, positions=pos)
 
     def test_accepts_orthorhombic_cutoff_just_below_half_the_cell(self):
         """Orthorhombic parity: for a cube ``w_i = ||a_i||``, so the bound stays
         ``4.500 A`` on the 9 A cell and ``4.4 A`` must still build."""
         pos, cell = _lattice()
-        nl = PeriodicNeighborList(cell=cell, cutoff=4.4, positions=pos)
+        nl = NeighborList(cell=cell, cutoff=4.4, positions=pos)
         assert nl.cutoff == 4.4
         assert nl.num_edges > 0
 
@@ -152,21 +189,21 @@ class TestPeriodicNeighborList:
         instead of silently dropping pairs inside the cutoff."""
         pos, cell = _triclinic()
         with pytest.raises(ValueError):
-            PeriodicNeighborList(cell=cell, cutoff=5.0, positions=pos)
+            NeighborList(cell=cell, cutoff=5.0, positions=pos)
 
     def test_triclinic_rejection_names_the_perpendicular_bound(self):
         """The measured bound must be observable through the public error, not
         just the refusal: ``min_i w_i / 2 = 4.000 A`` for the golden cell."""
         pos, cell = _triclinic()
         with pytest.raises(ValueError, match=r"4\.000 A"):
-            PeriodicNeighborList(cell=cell, cutoff=4.5, positions=pos)
+            NeighborList(cell=cell, cutoff=4.5, positions=pos)
 
     def test_accepts_triclinic_cutoff_below_the_perpendicular_bound(self):
         """Acceptance must mean "actually built", not "did not raise": below the
         ``4.000 A`` bound the list constructs and reports real edges (closest
         golden pairs are at ``2.0 A``)."""
         pos, cell = _triclinic()
-        nl = PeriodicNeighborList(cell=cell, cutoff=3.9, positions=pos)
+        nl = NeighborList(cell=cell, cutoff=3.9, positions=pos)
         assert nl.cutoff == 3.9
         assert nl.num_edges > 0
 
@@ -182,18 +219,18 @@ class TestPeriodicNeighborList:
             dtype=torch.float64,
         )
         with pytest.raises(ValueError):
-            PeriodicNeighborList(cell=cell, cutoff=3.0, positions=pos)
+            NeighborList(cell=cell, cutoff=3.0, positions=pos)
 
     def test_rejects_a_non_3x3_cell(self):
         """A batched ``(1, 3, 3)`` cell must fail with a clean ``ValueError`` at
         the guard, not an opaque indexing error deeper in the kernel path."""
         pos, cell = _lattice()
         with pytest.raises(ValueError):
-            PeriodicNeighborList(cell=cell.unsqueeze(0), cutoff=3.5, positions=pos)
+            NeighborList(cell=cell.unsqueeze(0), cutoff=3.5, positions=pos)
 
     def test_overflow_raises_rather_than_truncating(self):
         """A truncated neighbour list is a silently wrong energy."""
         pos, cell = _lattice()
-        nl = PeriodicNeighborList(cell=cell, cutoff=3.5, positions=pos, capacity_factor=1.0)
+        nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, capacity_factor=1.0)
         with pytest.raises(RuntimeError, match="overflow"):
             nl.rebuild(pos * 0.5)  # compress: many more pairs inside the cutoff

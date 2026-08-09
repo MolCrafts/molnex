@@ -2,7 +2,7 @@
 
 Drives an FCC argon lattice at the classic ``melt`` state point (ρ* = 0.8442,
 T0* = 1.44, r_c = 2.5σ) under NVE with :class:`molix.md.LennardJonesCutForceField`
-over a rebuilding :class:`molix.md.PeriodicNeighborList`. The force evaluation
+over a rebuilding :class:`molix.md.NeighborList`. The force evaluation
 is ``torch.compile``d — fullgraph inductor by default, ``--cuda-graphs`` for the
 ``reduce-overhead`` preset — while the neighbour list rebuilds eagerly inside
 ``Integrator.eval_force`` on the ``rebuild_every`` cadence; the fixed-capacity
@@ -39,7 +39,7 @@ from molix.md import (
     LennardJonesCutForceField,
     MaxwellBoltzmann,
     MDHook,
-    PeriodicNeighborList,
+    NeighborList,
 )
 
 # Persistent artifact dir (versioned with the repo for the paper).
@@ -125,7 +125,7 @@ def main() -> int:
     pos, cell = pos.to(device), cell.to(device)
 
     try:
-        neighbors = PeriodicNeighborList(
+        neighbors = NeighborList(
             cell=cell, cutoff=_CUTOFF, positions=pos, capacity_factor=args.capacity_factor
         )
     except (RuntimeError, NotImplementedError) as err:

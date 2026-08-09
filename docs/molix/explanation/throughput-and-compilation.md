@@ -221,6 +221,6 @@ Three things worth knowing:
 
 Static shapes come free for MD here. Open-system runs freeze the neighbour
 list for the trajectory; periodic runs rebuild it on a cadence into
-fixed-capacity buffers (`molix.md.PeriodicNeighborList` — contents change in
+fixed-capacity buffers (`molix.md.NeighborList` — contents change in
 place, shapes never do). Either way no padding registry is needed, unlike the
 training path.

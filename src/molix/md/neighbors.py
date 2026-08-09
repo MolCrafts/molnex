@@ -22,9 +22,34 @@ neighbour kernel, whose sequential reduction is complete only up to half the
 smallest **perpendicular width** of the cell: ``w_i = V / ||a_j x a_k||`` in
 Angstrom, for cell vectors ``a_1, a_2, a_3`` (the rows of ``cell``) and volume
 ``V = |det(cell)|``. So ``r_cut`` must not exceed ``min_i w_i / 2`` —
-:class:`PeriodicNeighborList` refuses to construct otherwise rather than
+:class:`NeighborList` refuses to construct otherwise rather than
 silently dropping pairs that are inside the cutoff. For an orthorhombic cell
 ``w_i = ||a_i||``, i.e. the familiar half-shortest-cell-vector bound.
+
+Two ``NeighborList`` classes, deliberately
+-----------------------------------------
+
+The repository holds two classes named ``NeighborList``, in different layers,
+and the collision is intentional rather than an accident awaiting cleanup:
+
+* :class:`molix.md.neighbors.NeighborList` (this one) — the **MD engine**
+  symbol: a *stateful, fixed-capacity buffer owner* holding ``edge_index
+  (capacity, 2)``, ``shifts (capacity, 3)``, ``num_edges`` and
+  ``rebuild_count``, rebuilt in place so shapes never change and the force path
+  stays CUDA-graph capturable. One instance per run, held by a
+  :class:`~molix.md.forcefield.ForceField`.
+* :class:`molix.data.tasks.neighbor.NeighborList` — the **data-pipeline**
+  symbol: a *stateless* ``SampleTask`` mapping one flat sample dict to
+  ``edge_index`` / ``edge_diff`` / ``edge_dist`` and contributing to ``task_id``
+  for cache keying. Constructed once per pipeline definition, no per-call state.
+
+They are not two variants of one concept — a per-run mutable buffer with an
+overflow policy versus a pure pipeline transform — and each is the shortest
+natural name in its own layer, so neither gives up the bare name. Because this
+module *consumes* the pipeline task (see the import below), and a bare
+``from ... import NeighborList`` here would be rebound by the class definition
+further down — making the constructor call itself recursively — the import is
+aliased to ``NeighborListTask``.
 """
 
 from __future__ import annotations
@@ -36,8 +61,10 @@ import torch
 
 # The one owner of kernel-output normalisation (pbc handling, NaN-padding
 # strip, symmetry expansion, edge-sign convention); reimplementing that here
-# against the raw ``molix.F.locality`` kernel would fork it.
-from molix.data.tasks.neighbor import NeighborList
+# against the raw ``molix.F.locality`` kernel would fork it. Aliased because
+# the MD buffer owner defined below is *also* named ``NeighborList`` and would
+# otherwise shadow its own dependency — the class would then call itself.
+from molix.data.tasks.neighbor import NeighborList as NeighborListTask
 from molix.units import DEAD_EDGE_CUTOFF_FACTOR
 
 
@@ -124,7 +151,7 @@ class NeighborStrategy(Protocol):
         ...
 
 
-class PeriodicNeighborList:
+class NeighborList:
     """Minimum-image neighbour list rebuilt into fixed-capacity buffers.
 
     Not an ``nn.Module``: it owns plain buffers and a rebuild policy, and is held
@@ -173,7 +200,7 @@ class PeriodicNeighborList:
         self._device = device if device is not None else positions.device
         self._dtype = positions.dtype
         self.cell = cell.to(device=self._device, dtype=self._dtype)
-        self._nl = NeighborList(cutoff=self.cutoff, pbc=True, symmetry=True)
+        self._nl = NeighborListTask(cutoff=self.cutoff, pbc=True, symmetry=True)
 
         source, target, shifts = self._compute(positions)
         self.capacity = max(1, int(math.ceil(self.capacity_factor * source.numel())))
@@ -230,7 +257,7 @@ class PeriodicNeighborList:
         self,
         device: torch.device | str | torch.dtype | None = None,
         dtype: torch.dtype | None = None,
-    ) -> "PeriodicNeighborList":
+    ) -> "NeighborList":
         """Move / cast the buffers, mirroring ``Tensor.to`` semantics.
 
         Accepts ``nl.to("cuda")``, ``nl.to(torch.float64)`` and

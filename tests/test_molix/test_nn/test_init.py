@@ -8,7 +8,7 @@ here:
   ``nn.Module`` wrapper over :func:`molix.F.locality.get_neighbor_pairs` with
   zero in-tree call sites, and it collided by name with two live classes
   (:class:`molix.data.tasks.neighbor.NeighborList`, which builds the pipeline's
-  edge tensors, and :class:`molix.md.PeriodicNeighborList`). Spec
+  edge tensors, and :class:`molix.md.NeighborList`). Spec
   ``md-neighborlist-skin-02-prune`` deletes it; the name must stay free.
 * ``__all__`` stays alphabetized (``.claude/notes/notes.md:243``). The deletion
   rewrites the literal anyway, so the sorted order is pinned in the same value.

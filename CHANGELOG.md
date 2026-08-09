@@ -94,6 +94,15 @@ models.
   physical constants (`KB_EV_PER_K`, `EV_PER_AMU_A2_FS2`, `KB_AMU_A_FS`) to
   the new `molix.units` — both breaking the latent `molix → molpot` import
   cycle.
+- The MD-side neighbour list is renamed `PeriodicNeighborList` → `NeighborList`
+  (`molix.md.NeighborList`). Every call site moved in the same commit and there
+  is **no back-compat alias** (`stage: experimental`) — update imports. The bare
+  name is now shared with the data-pipeline `SampleTask`
+  `molix.data.tasks.neighbor.NeighborList`, deliberately: one is a stateful
+  per-run fixed-capacity buffer owner, the other a stateless pipeline transform,
+  and each is the natural name in its own layer. `molix.md.neighbors` imports the
+  task as `NeighborListTask` so the class cannot shadow its own dependency.
+  Behaviour, signature and defaults are unchanged.
 - On-disk cache is now the single-file `PackedCache` (`.pt` with packed
   per-atom/edge/graph buckets, `mmap` loads) — replaces per-sample memmap dirs to
   stay within HPC inode budgets.

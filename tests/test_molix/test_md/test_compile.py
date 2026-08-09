@@ -15,7 +15,7 @@ from molix.md import (
     LangevinVerletIntegrator,
     LennardJonesCutForceField,
     LennardJonesForceField,
-    PeriodicNeighborList,
+    NeighborList,
     PotentialForceField,
 )
 from tests.test_molix.test_md.conftest import make_pinet_template, make_tiny_potential
@@ -39,7 +39,7 @@ def test_ljcut_step_fullgraph_compiles_and_matches_eager():
     torch.manual_seed(2)
     pos = pos + 0.2 * torch.randn_like(pos)
     cell = torch.eye(3, dtype=_DTYPE) * 9.0
-    nl = PeriodicNeighborList(cell=cell, cutoff=3.5, positions=pos)
+    nl = NeighborList(cell=cell, cutoff=3.5, positions=pos)
     ff = LennardJonesCutForceField(epsilon=0.7, sigma=2.5, neighbors=nl).to(_DTYPE)
     ig = LangevinVerletIntegrator(ff, dt=0.5, gamma=0.0, kbt=0.0, mass=39.95, seed=2)
     st = ig.initial(pos, torch.zeros_like(pos))
