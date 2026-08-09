@@ -22,6 +22,7 @@ Run on a GPU node:
 from __future__ import annotations
 
 import argparse
+import math
 import time
 
 import torch
@@ -33,6 +34,25 @@ from molpot.derivation.force import autograd_forces_from_energy
 
 _Z_TABLE = [1, 6, 7, 8, 14, 26]  # small table; dims below are the MatPES-class ones
 
+#: ~0.045 atoms/A^3 — condensed-phase-ish density, for a realistic edge count.
+DENSITY = 0.045
+#: Model ``r_max`` *and* neighbour-list cutoff; the two must stay equal.
+CUTOFF = 6.0
+
+
+def _box_length(n_atoms: int) -> float:
+    """Cubic box edge in Angstrom holding ``n_atoms`` at :data:`DENSITY`."""
+    return float((n_atoms / DENSITY) ** (1.0 / 3.0))
+
+
+def _min_n_atoms() -> int:
+    """Smallest ``n_atoms`` whose box half-width strictly exceeds :data:`CUTOFF`.
+
+    Minimum image requires ``cutoff <= box / 2``; below that
+    :class:`molix.md.PeriodicNeighborList` raises.
+    """
+    return math.floor(DENSITY * (2.0 * CUTOFF) ** 3) + 1
+
 
 def _build_model(use_fallback: bool):
     from molzoo import MACEMatpes
@@ -41,7 +61,7 @@ def _build_model(use_fallback: bool):
     return MACEMatpes(
         atomic_numbers=_Z_TABLE,
         atomic_energies=torch.zeros(len(_Z_TABLE), dtype=config.ftype),
-        r_max=6.0,
+        r_max=CUTOFF,
         num_bessel=10,
         num_polynomial_cutoff=5,
         l_max=3,
@@ -56,14 +76,13 @@ def _build_model(use_fallback: bool):
 
 def _system(n_atoms: int, device: torch.device):
     torch.manual_seed(1)
-    # ~0.045 atoms/A^3 — condensed-phase-ish density for a real edge count.
-    box = float((n_atoms / 0.045) ** (1.0 / 3.0))
+    box = _box_length(n_atoms)
     pos = torch.rand(n_atoms, 3, dtype=config.ftype, device=device) * box
     cell = torch.eye(3, dtype=config.ftype, device=device) * box
     Z = _Z_TABLE[0] + torch.zeros(n_atoms, dtype=torch.long, device=device)
     Z[::3] = _Z_TABLE[2]
     Z[::5] = _Z_TABLE[3]
-    neighbors = PeriodicNeighborList(cell=cell, cutoff=6.0, positions=pos)
+    neighbors = PeriodicNeighborList(cell=cell, cutoff=CUTOFF, positions=pos)
     batch = torch.zeros(n_atoms, dtype=torch.long, device=device)
     return pos, Z, batch, neighbors
 
@@ -83,7 +102,13 @@ def _time(fn, steps: int, warmup: int = 5) -> float:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--n-atoms", type=int, default=192)
+    ap.add_argument(
+        "--n-atoms",
+        type=int,
+        default=192,
+        help=f"atoms in the cubic box; must exceed {_min_n_atoms() - 1} so the box "
+        f"half-width stays above the {CUTOFF} A cutoff",
+    )
     ap.add_argument("--steps", type=int, default=20)
     ap.add_argument("--fp64", action="store_true")
     ap.add_argument(
@@ -93,6 +118,17 @@ def main() -> int:
         help="required fused/fallback per-step ratio when the ops wheel is present",
     )
     args = ap.parse_args()
+
+    # Fail here, not 40 frames deep inside PeriodicNeighborList: minimum image
+    # needs cutoff <= box/2, and the box is derived from --n-atoms at DENSITY.
+    box = _box_length(args.n_atoms)
+    if box / 2.0 <= CUTOFF:
+        ap.error(
+            f"--n-atoms {args.n_atoms} gives a {box:.2f} A box at {DENSITY} atoms/A^3, "
+            f"whose half-width {box / 2.0:.2f} A does not exceed the {CUTOFF} A cutoff; "
+            f"the minimum-image neighbour list would miss periodic images. "
+            f"Use --n-atoms {_min_n_atoms()} or more."
+        )
 
     config.set_precision("fp64" if args.fp64 else "fp32")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

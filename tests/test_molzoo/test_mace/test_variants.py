@@ -15,7 +15,7 @@ module and not in ``test_potential.py``.
 
 The load-bearing oddity is ``_compute_energy``: a **private** method consumed
 across packages (``run_nve.py:118`` binds it as the compiled energy core,
-``bench_mace_matpes.py:129`` compiles it). Re-pointing that consumer at the
+``bench_mace_matpes.py``'s compiled arm compiles it). Re-pointing that consumer at the
 public :meth:`~molzoo.mace.potential.MACEPotential.energy_core` belongs to
 ``mace-subpackage-restructure-07-cleanup``; until then the positional signature
 ``(pos, Z, edge_index, batch, num_graphs, shifts)`` is a contract, and the case
@@ -266,7 +266,7 @@ class TestMACEMatpes:
     def test_energy_forces_returns_energy_and_forces(
         self, matpes_variant: MACEMatpes, cluster: TensorDict
     ) -> None:
-        """``bench_mace_matpes.py:115`` calls it with ``num_graphs=`` / ``shifts=``."""
+        """``bench_mace_matpes.py``'s eager arm calls it with ``num_graphs=`` / ``shifts=``."""
         out = matpes_variant.energy_forces(
             cluster["atoms", "pos"],
             cluster["atoms", "Z"],
