@@ -5,9 +5,10 @@ equivariant op. Force-like probe: g = dE/dx (create_graph); backprop g^2;
 the cuet-op weight gradient must be > 0 to train forces. Baseline reproduces
 weight-grad L1 == 0 (BROKEN). Each toggle is a cuet-only candidate fix.
 """
-import torch
+
 import cuequivariance as cue
 import cuequivariance_torch as cuet
+import torch
 from cuequivariance_torch import SphericalHarmonics as CueSH
 
 torch.set_default_dtype(torch.float64)

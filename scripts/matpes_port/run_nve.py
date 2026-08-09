@@ -66,9 +66,10 @@ def read_poscar(path: Path) -> dict[str, torch.Tensor]:
 
     lines = [ln.strip() for ln in path.read_text().splitlines()]
     scale = float(lines[1])
-    cell = torch.tensor(
-        [[float(v) for v in lines[i].split()] for i in (2, 3, 4)], dtype=config.ftype
-    ) * scale
+    cell = (
+        torch.tensor([[float(v) for v in lines[i].split()] for i in (2, 3, 4)], dtype=config.ftype)
+        * scale
+    )
     symbols = lines[5].split()
     counts = [int(v) for v in lines[6].split()]
     mode = lines[7].lower()
@@ -132,9 +133,7 @@ def _matpes_energy_forces(
         with torch.enable_grad():
             # (E, 2) end to end: the list's rebuilt-in-place buffer feeds the
             # core directly — one storage, no per-step transpose.
-            energy = energy_fn(
-                leaf, Z, neighbors.edge_index, batch, 1, neighbors.shifts
-            )
+            energy = energy_fn(leaf, Z, neighbors.edge_index, batch, 1, neighbors.shifts)
         forces = autograd_forces_from_energy(energy, leaf)
         return energy.sum().detach(), forces.detach()
 
@@ -207,7 +206,7 @@ def main() -> None:
         "--compile",
         action="store_true",
         help="compile the energy with Compiler(cuda_graphs=True); needs static shapes, "
-             "which the frozen neighbour list provides",
+        "which the frozen neighbour list provides",
     )
     args = parser.parse_args()
 
@@ -227,8 +226,10 @@ def main() -> None:
         fused_available = True
     except ImportError:
         fused_available = False
-    print(f"device: {device} (cuEq fused kernels: requested={not use_fallback}, "
-          f"available={fused_available})")
+    print(
+        f"device: {device} (cuEq fused kernels: requested={not use_fallback}, "
+        f"available={fused_available})"
+    )
     if not use_fallback and not fused_available:
         print(
             "WARNING: fused kernels requested but cuequivariance-ops-torch is not "
@@ -332,8 +333,10 @@ def main() -> None:
         seed=args.seed,
         device=device,
     )
-    vel = resume_vel if args.resume is not None else MaxwellBoltzmann(mass).sample(
-        args.temperature, seed=args.seed
+    vel = (
+        resume_vel
+        if args.resume is not None
+        else MaxwellBoltzmann(mass).sample(args.temperature, seed=args.seed)
     )
     remaining = args.steps - start_step
     if remaining <= 0:
@@ -377,10 +380,12 @@ def main() -> None:
             f"({n_frames} frames, {rate:.6f} meV/atom/ps); "
             f"T range {float(traj['temp'].min()):.1f}-{float(traj['temp'].max()):.1f} K"
         )
+    expected_rebuilds = (
+        remaining if args.rebuild_every == 1 else remaining // max(args.rebuild_every, 1)
+    )
     print(
         f"neighbour rebuilds this segment: {neighbors.rebuild_count} "
-        f"(expect ~{remaining if args.rebuild_every == 1 else remaining // max(args.rebuild_every, 1)} "
-        f"for rebuild_every={args.rebuild_every} at force-eval)"
+        f"(expect ~{expected_rebuilds} for rebuild_every={args.rebuild_every} at force-eval)"
     )
     # The comparison step needs the exact graph the trajectory was produced on.
     # edge_index is (E, 2) [source, target] — the repo edge convention.
