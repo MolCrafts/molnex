@@ -27,11 +27,13 @@ nav = [
             { "Data Pipeline" = "molix/user-guide/data.md" },
             { "Data Loading" = "molix/user-guide/data-loading.md" },
             { "Data Modules" = "molix/user-guide/data-modules.md" },
+            { "Molecular Dynamics" = "molix/user-guide/md.md" },
             { "Profiling" = "molix/user-guide/profiling.md" }
         ]},
         { "Explanation" = [
             { "Execution Model" = "molix/explanation/execution-model.md" },
-            { "Batch Schema" = "molix/explanation/batch-schema.md" }
+            { "Batch Schema" = "molix/explanation/batch-schema.md" },
+            { "Training Throughput & torch.compile" = "molix/explanation/throughput-and-compilation.md" }
         ]}
     ]},
     { "MolRep" = [

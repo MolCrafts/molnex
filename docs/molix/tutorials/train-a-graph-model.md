@@ -6,7 +6,8 @@ from flat molecule samples. Here, the batch is built directly.
 
 ## 1. Define the Model
 
-Models that receive a `GraphBatch` access data with nested tuple keys:
+A collated batch is a plain nested `TensorDict`, so models read it with tuple
+keys — the first element names the namespace, the second the field:
 
 ```python
 import torch
@@ -36,31 +37,39 @@ class SimpleGraphModel(nn.Module):
 
 ## 2. Build a Batch
 
-```python
-from molix.data.types import AtomData, EdgeData, GraphBatch, GraphData
+Every level is a `tensordict.TensorDict`; there is no molecule-specific
+subclass. The `batch_size` you give each namespace is what makes the three
+different lengths (5 atoms, 0 edges, 1 graph) coexist in one container.
 
-atoms = AtomData(
+```python
+from tensordict import TensorDict
+
+atoms = TensorDict(
     Z=torch.tensor([6, 1, 1, 1, 1]),
     pos=torch.randn(5, 3),
     batch=torch.zeros(5, dtype=torch.long),
     batch_size=[5],
 )
 
-edges = EdgeData(
+edges = TensorDict(
     edge_index=torch.zeros(0, 2, dtype=torch.long),
     edge_diff=torch.zeros(0, 3),
     edge_dist=torch.zeros(0),
     batch_size=[0],
 )
 
-graphs = GraphData(
+graphs = TensorDict(
     num_atoms=torch.tensor([5]),
     energy=torch.tensor([-40.5]),
     batch_size=[1],
 )
 
-batch = GraphBatch(atoms=atoms, edges=edges, graphs=graphs, batch_size=[])
+batch = TensorDict(atoms=atoms, edges=edges, graphs=graphs, batch_size=[])
 ```
+
+This is one methane molecule with no edges — enough to exercise the training
+loop, since the model above only embeds `Z` and pools per graph. A real run
+would let `NeighborList` fill the `edges` namespace.
 
 ## 3. Train
 

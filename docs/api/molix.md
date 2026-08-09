@@ -6,15 +6,15 @@
 
 ::: molix.core.state
 
-::: molix.core.hooks
+::: molix.core.hook
+
+::: molix.hooks
 
 ::: molix.core.losses
 
 ## Data
 
 ::: molix.data
-
-::: molix.data.types
 
 ::: molix.data.collate
 

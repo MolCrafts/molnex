@@ -39,7 +39,14 @@ class Hook(Protocol):
     - Use (hook, priority) tuples to override execution order
     - Lower priority values execute earlier (default priority = 100)
     - Hooks with same priority execute in registration order
-    - If a hook raises an exception, it is logged but training continues
+
+    Errors are fatal, by design. If a hook raises,
+    :meth:`molix.core.trainer.Trainer._call_hooks` logs the exception with a
+    full traceback and then **re-raises** it, so the exception propagates out
+    of the training loop and the run stops. Nothing is swallowed: swallowing
+    hook errors once hid a fatal ``NaNGuardHook`` signal behind thousands of
+    lines of repeated tracebacks. A hook that must tolerate its own failures
+    has to catch them itself.
 
     Example:
         ```python
@@ -166,14 +173,21 @@ class Hook(Protocol):
         ...
 
     def on_eval_step_complete(self, trainer: "Trainer", state: "TrainState") -> None:
-        """Called after step-based evaluation completes (not on epoch-end eval).
+        """Called once at the end of every eval phase, after the batch loop.
 
-        This hook is only triggered when eval runs due to the eval_every_n_steps
-        parameter being reached. Epoch-end evals do not trigger this hook.
+        Fires for *both* triggers — step-based eval (``eval_every_n_steps``)
+        and epoch-end eval — because :meth:`molix.core.trainer.Trainer._run_eval_phase`
+        is the single code path behind both. Eval-publishing hooks
+        (:class:`molix.hooks.MetricsHook`, :class:`molix.hooks.TensorBoardHook`)
+        should write their ``state["eval"]`` scalars here rather than in
+        ``on_epoch_end``, so the values are already published when the LR
+        scheduler reads its monitored metric.
 
         Args:
             trainer: The trainer instance
-            state: Current training state (steps_since_last_eval reset to 0)
+            state: Current training state (every eval batch consumed;
+                ``steps_since_last_eval`` is reset by the train loop *after*
+                the eval phase returns, so it is still non-zero here)
         """
         ...
 
@@ -237,7 +251,7 @@ class BaseHook:
         pass
 
     def on_eval_step_complete(self, trainer: "Trainer", state: "TrainState") -> None:
-        """Called after step-based evaluation completes (not on epoch-end eval)."""
+        """Called once at the end of every eval phase (step-based *and* epoch-end)."""
         pass
 
 
