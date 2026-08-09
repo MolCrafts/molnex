@@ -29,7 +29,13 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from molix.profiler._utils import TimingStat, ValueStat, _fmt_table, reset_peak_memory
+from molix.profiler._utils import (
+    TimingStat,
+    ValueStat,
+    _fmt_table,
+    batch_counts,
+    reset_peak_memory,
+)
 
 # ---------------------------------------------------------------------------
 # Result
@@ -203,16 +209,6 @@ def _move_to_device(batch: object, device: torch.device) -> object:
     if isinstance(batch, dict):
         return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
     return batch
-
-
-def _extract_counts(batch: object) -> tuple[int, int]:
-    """Extract (n_atoms, n_graphs) from a TensorDict batch; returns (0, 0) on failure."""
-    try:
-        n_atoms = int(batch["atoms"]["Z"].shape[0])  # type: ignore[index]
-        n_graphs = int(batch["graphs"]["num_atoms"].shape[0])  # type: ignore[index]
-        return n_atoms, n_graphs
-    except (KeyError, AttributeError, TypeError):
-        return 0, 0
 
 
 def _make_batch_iter(
@@ -536,7 +532,7 @@ class ModuleProfiler:
                 bwd_times_ms.append(bwd_ms)
                 opt_times_ms.append(opt_ms)
                 peak_mem_mb.append(mem_mb)
-                n_a, n_g = _extract_counts(batch)
+                n_a, n_g = batch_counts(batch)
                 atom_counts.append(n_a)
                 graph_counts.append(n_g)
 

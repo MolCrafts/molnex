@@ -22,6 +22,8 @@ plain-`TensorDict` batch contract used by models and losses (namespaces
 - [Data Loading](user-guide/data-loading.md): convert flat samples into
   `GraphBatch` objects.
 - [Data Modules](user-guide/data-modules.md): wire datasets into `Trainer`.
+- [Profiling](user-guide/profiling.md): measure task, module, DataLoader,
+  Trainer and dataset cost with the `molix.profiler` suite.
 - [Molecular Dynamics](user-guide/md.md): run trajectories over a trained
   potential with `MD` — force fields, MD hooks, and the split MD/inference
   precision model.

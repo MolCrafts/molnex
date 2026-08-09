@@ -42,11 +42,14 @@ from tensordict import TensorDict
 _IntOrRange = Union[int, tuple[int, int]]
 
 
-def _resolve(value: _IntOrRange) -> int:
+def _resolve(value: _IntOrRange, rng: random.Random) -> int:
     """Sample a concrete integer from a fixed value or (lo, hi) range.
 
     Args:
         value: Either a fixed ``int`` or a ``(lo, hi)`` inclusive range.
+        rng: Caller-owned generator to draw from. Passed explicitly rather
+            than read off the ``random`` module so a seeded owner
+            (:class:`MockBatch`, :class:`MockSource`) really is reproducible.
 
     Returns:
         A concrete integer.
@@ -54,7 +57,7 @@ def _resolve(value: _IntOrRange) -> int:
     if isinstance(value, int):
         return value
     lo, hi = value
-    return random.randint(lo, hi)
+    return rng.randint(lo, hi)
 
 
 # ---------------------------------------------------------------------------
@@ -113,9 +116,9 @@ class MockBatch:
         Returns:
             A ``TensorDict`` with random tensor values and the configured shape.
         """
-        n_a = _resolve(self.n_atoms)
-        n_e = _resolve(self.n_edges)
-        n_g = _resolve(self.n_graphs)
+        n_a = _resolve(self.n_atoms, self._rng)
+        n_e = _resolve(self.n_edges, self._rng)
+        n_g = _resolve(self.n_graphs, self._rng)
 
         dev = self.device
         gen = self._torch_gen
@@ -213,9 +216,7 @@ class MockSource:
         self.atomic_numbers = atomic_numbers
         # Pre-generate atom counts for each sample so source_id is stable
         rng = random.Random(seed)
-        self._atom_counts: list[int] = [
-            _resolve(n_atoms) if not isinstance(n_atoms, int) else n_atoms for _ in range(n_samples)
-        ]
+        self._atom_counts: list[int] = [_resolve(n_atoms, rng) for _ in range(n_samples)]
         # Per-sample generator seeds for reproducible, independent samples
         self._seeds: list[int] = [rng.randint(0, 2**31) for _ in range(n_samples)]
 

@@ -3,7 +3,7 @@
 Standalone, OOP profiling tools for identifying performance bottlenecks
 **before and outside** of training.  No Trainer, no hooks.
 
-Three profilers, each targeting a single component:
+Five profilers, each targeting a single component:
 
 - :class:`TaskProfiler` — wall-clock timing of a single pipeline task
   (:class:`~molix.data.task.SampleTask`, :class:`~molix.data.task.DatasetTask`,
@@ -13,6 +13,10 @@ Three profilers, each targeting a single component:
   :class:`torch.nn.Module`.
 
 - :class:`DataLoaderProfiler` — DataLoader stall-time measurement.
+
+- :class:`DatasetProfiler` — dataset characterisation: exact packed-pointer
+  size distributions, per-sample access latency and byte footprint, field
+  layout and per-target value statistics.
 
 - :class:`TrainerProfiler` — Trainer-loop per-step framework overhead.
   Drives a real Trainer over a near-zero-compute
@@ -64,25 +68,27 @@ Typical workflow::
 """
 
 from molix.profiler.dataloader import DataLoaderProfiler, DataLoaderResult
+from molix.profiler.dataset import DatasetProfiler, DatasetResult
 from molix.profiler.mock import MockBatch, MockModel, MockSource, mock_node_feature_loss
 from molix.profiler.module import ModuleProfiler, ModuleResult
 from molix.profiler.task import TaskProfiler, TaskResult
 from molix.profiler.trainer import TrainerProfiler, TrainerResult
 
+# Profilers, their result types and the mock data generators share one
+# alphabetically sorted list (notes.md 2026-08-09: `__all__` stays alphabetized).
 __all__ = [
-    # Profilers
-    "TaskProfiler",
-    "ModuleProfiler",
     "DataLoaderProfiler",
-    "TrainerProfiler",
-    # Results
-    "TaskResult",
-    "ModuleResult",
     "DataLoaderResult",
-    "TrainerResult",
-    # Data generators
+    "DatasetProfiler",
+    "DatasetResult",
     "MockBatch",
-    "MockSource",
     "MockModel",
+    "MockSource",
+    "ModuleProfiler",
+    "ModuleResult",
+    "TaskProfiler",
+    "TaskResult",
+    "TrainerProfiler",
+    "TrainerResult",
     "mock_node_feature_loss",
 ]

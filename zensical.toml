@@ -26,7 +26,8 @@ nav = [
             { "Hooks" = "molix/user-guide/hooks.md" },
             { "Data Pipeline" = "molix/user-guide/data.md" },
             { "Data Loading" = "molix/user-guide/data-loading.md" },
-            { "Data Modules" = "molix/user-guide/data-modules.md" }
+            { "Data Modules" = "molix/user-guide/data-modules.md" },
+            { "Profiling" = "molix/user-guide/profiling.md" }
         ]},
         { "Explanation" = [
             { "Execution Model" = "molix/explanation/execution-model.md" },
