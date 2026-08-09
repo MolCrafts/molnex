@@ -18,9 +18,13 @@ longer than the cutoff. Such an edge contributes exactly zero:
 * ``pos[0] - pos[0]`` cancels exactly, so no spurious force reaches atom 0.
 
 Periodicity is handled by the minimum-image convention of the compiled
-neighbour kernel, so ``r_cut`` must not exceed half the shortest cell vector —
+neighbour kernel, whose sequential reduction is complete only up to half the
+smallest **perpendicular width** of the cell: ``w_i = V / ||a_j x a_k||`` in
+Angstrom, for cell vectors ``a_1, a_2, a_3`` (the rows of ``cell``) and volume
+``V = |det(cell)|``. So ``r_cut`` must not exceed ``min_i w_i / 2`` —
 :class:`PeriodicNeighborList` refuses to construct otherwise rather than
-silently missing periodic images.
+silently dropping pairs that are inside the cutoff. For an orthorhombic cell
+``w_i = ||a_i||``, i.e. the familiar half-shortest-cell-vector bound.
 """
 
 from __future__ import annotations
@@ -35,6 +39,54 @@ import torch
 # against the raw ``molix.F.locality`` kernel would fork it.
 from molix.data.tasks.neighbor import NeighborList
 from molix.units import DEAD_EDGE_CUTOFF_FACTOR
+
+
+def _min_perpendicular_width(cell: torch.Tensor) -> float:
+    """Smallest distance between two opposite faces of a periodic cell.
+
+    For cell vectors ``a_1, a_2, a_3`` — the **rows** of ``cell`` — the width
+    perpendicular to the face spanned by ``a_j`` and ``a_k`` is
+    ``w_i = V / ||a_j x a_k||`` with ``V = |det(cell)|``, so the minimum is
+    ``V / max_i ||a_j x a_k||``: one division instead of three. For an
+    orthorhombic cell ``||a_j x a_k|| = ||a_j||*||a_k||`` and
+    ``V = ||a_1||*||a_2||*||a_3||``, hence ``w_i = ||a_i||``.
+
+    Evaluated in ``float64`` so a ``float32`` cell cannot jitter an
+    accept/reject decision taken right at the bound.
+
+    Args:
+        cell: Cell vectors ``(3, 3)`` in Angstrom, one vector per row.
+
+    Returns:
+        The smallest perpendicular width ``min_i w_i`` in Angstrom.
+
+    Raises:
+        ValueError: If ``cell`` is not ``(3, 3)``, or is degenerate (volume
+            zero or non-finite, or two rows collinear). A degenerate cell has
+            no finite width, and returning ``nan`` would make every ``>``
+            comparison against the bound silently succeed.
+    """
+    if tuple(cell.shape) != (3, 3):
+        raise ValueError(f"cell must have shape (3, 3), got {tuple(cell.shape)}")
+    vectors = cell.detach().to(torch.float64)
+    volume = float(torch.linalg.det(vectors).abs())
+    areas = torch.linalg.norm(
+        torch.stack(
+            (
+                torch.linalg.cross(vectors[1], vectors[2]),
+                torch.linalg.cross(vectors[2], vectors[0]),
+                torch.linalg.cross(vectors[0], vectors[1]),
+            )
+        ),
+        dim=-1,
+    )
+    max_area = float(areas.max())
+    if not math.isfinite(volume) or volume <= 0.0 or not math.isfinite(max_area) or max_area <= 0.0:
+        raise ValueError(
+            f"degenerate cell: volume {volume} A^3, largest face area {max_area} A^2; "
+            "a cell with no interior has no perpendicular width to bound the cutoff by."
+        )
+    return volume / max_area
 
 
 @runtime_checkable
@@ -91,8 +143,11 @@ class PeriodicNeighborList:
         device: Device for the buffers; defaults to ``positions``'.
 
     Raises:
-        ValueError: If ``cutoff`` exceeds half the shortest cell vector, which
-            would make the minimum-image convention miss periodic images.
+        ValueError: If ``cell`` is not ``(3, 3)`` or is degenerate, or if
+            ``cutoff`` exceeds half the smallest perpendicular cell width
+            ``w_i = V / ||a_j x a_k||`` (Angstrom; ``w_i = ||a_i||`` for an
+            orthorhombic cell), beyond which the minimum-image reduction
+            silently drops pairs that lie inside the cutoff.
     """
 
     def __init__(
@@ -104,12 +159,14 @@ class PeriodicNeighborList:
         capacity_factor: float = 1.35,
         device: torch.device | None = None,
     ) -> None:
-        half_box = 0.5 * float(torch.linalg.norm(cell, dim=-1).min())
-        if cutoff > half_box:
+        min_width = _min_perpendicular_width(cell)
+        half_width = 0.5 * min_width
+        if cutoff > half_width:
             raise ValueError(
-                f"cutoff {cutoff} A exceeds half the shortest cell vector ({half_box:.3f} A); "
-                "the minimum-image neighbour list would miss periodic images. Use a larger "
-                "cell or a shorter cutoff."
+                f"cutoff {cutoff} A exceeds half the minimum perpendicular cell width "
+                f"({half_width:.3f} A; widths from V/||a_j x a_k||, minimum {min_width:.3f} A); "
+                "the kernel's sequential minimum-image reduction would silently drop pairs "
+                "inside the cutoff. Use a larger cell or a shorter cutoff."
             )
         self.cutoff = float(cutoff)
         self.capacity_factor = float(capacity_factor)

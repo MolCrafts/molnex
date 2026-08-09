@@ -14,6 +14,43 @@ def _lattice(n_side: int = 3, spacing: float = 3.0) -> tuple[torch.Tensor, torch
     return pos, cell
 
 
+def _triclinic() -> tuple[torch.Tensor, torch.Tensor]:
+    """The golden triclinic counterexample and ten atoms placed inside it.
+
+    The cell ``[[10, 0, 0], [6, 8, 0], [0, 0, 10]]`` has ``V = 800 A^3`` and
+    perpendicular widths ``w_i = V / ||a_j x a_k|| = (8.0, 8.0, 10.0) A``, so
+    minimum-image completeness holds only up to ``min_i w_i / 2 = 4.000 A``.
+    Its shortest **row norm** is ``10.0 A``, which a row-norm guard reads as an
+    admissible cutoff of ``5.000 A`` — the gap between ``4.000`` and ``5.000``
+    is the bug this cell pins.
+
+    Positions are literal fractional coordinates mapped by ``frac @ cell`` (no
+    RNG): the closest minimum-image pairs sit at ``2.0 A`` and the next shell
+    at ``4.0 A``, so an accepted ``cutoff = 3.9 A`` yields a non-empty edge set
+    with no pair inside ``0.1 A`` of the cutoff.
+
+    Returns:
+        ``(positions (10, 3), cell (3, 3))`` in Angstrom, ``float64``.
+    """
+    cell = torch.tensor([[10.0, 0.0, 0.0], [6.0, 8.0, 0.0], [0.0, 0.0, 10.0]], dtype=torch.float64)
+    frac = torch.tensor(
+        [
+            [0.05, 0.10, 0.10],
+            [0.25, 0.10, 0.10],
+            [0.45, 0.10, 0.10],
+            [0.65, 0.10, 0.10],
+            [0.05, 0.40, 0.45],
+            [0.25, 0.40, 0.45],
+            [0.45, 0.40, 0.45],
+            [0.05, 0.70, 0.80],
+            [0.25, 0.70, 0.80],
+            [0.45, 0.70, 0.80],
+        ],
+        dtype=torch.float64,
+    )
+    return frac @ cell, cell
+
+
 @pytest.fixture
 def nlist():
     pos, cell = _lattice()
@@ -97,8 +134,62 @@ class TestPeriodicNeighborList:
     def test_rejects_cutoff_beyond_half_the_cell(self):
         """Minimum image silently misses images past L/2 — refuse instead."""
         pos, cell = _lattice()
-        with pytest.raises(ValueError, match="half the shortest cell vector"):
+        with pytest.raises(ValueError, match="exceeds half the minimum perpendicular cell width"):
             PeriodicNeighborList(cell=cell, cutoff=5.0, positions=pos)
+
+    def test_accepts_orthorhombic_cutoff_just_below_half_the_cell(self):
+        """Orthorhombic parity: for a cube ``w_i = ||a_i||``, so the bound stays
+        ``4.500 A`` on the 9 A cell and ``4.4 A`` must still build."""
+        pos, cell = _lattice()
+        nl = PeriodicNeighborList(cell=cell, cutoff=4.4, positions=pos)
+        assert nl.cutoff == 4.4
+        assert nl.num_edges > 0
+
+    def test_rejects_triclinic_cutoff_admitted_by_the_row_norm(self):
+        """The bug, asserted directly: the golden cell's shortest row norm is
+        ``10 A`` (row-norm bound ``5.000 A``) but its narrowest perpendicular
+        width is ``8 A`` (true bound ``4.000 A``), so ``5.0 A`` must be refused
+        instead of silently dropping pairs inside the cutoff."""
+        pos, cell = _triclinic()
+        with pytest.raises(ValueError):
+            PeriodicNeighborList(cell=cell, cutoff=5.0, positions=pos)
+
+    def test_triclinic_rejection_names_the_perpendicular_bound(self):
+        """The measured bound must be observable through the public error, not
+        just the refusal: ``min_i w_i / 2 = 4.000 A`` for the golden cell."""
+        pos, cell = _triclinic()
+        with pytest.raises(ValueError, match=r"4\.000 A"):
+            PeriodicNeighborList(cell=cell, cutoff=4.5, positions=pos)
+
+    def test_accepts_triclinic_cutoff_below_the_perpendicular_bound(self):
+        """Acceptance must mean "actually built", not "did not raise": below the
+        ``4.000 A`` bound the list constructs and reports real edges (closest
+        golden pairs are at ``2.0 A``)."""
+        pos, cell = _triclinic()
+        nl = PeriodicNeighborList(cell=cell, cutoff=3.9, positions=pos)
+        assert nl.cutoff == 3.9
+        assert nl.num_edges > 0
+
+    def test_rejects_a_singular_cell(self):
+        """A zero-volume cell has no finite width. ``V / area`` would be ``nan``
+        and ``cutoff > nan`` is ``False`` — the guard must raise rather than let
+        a degenerate cell through the hole it opens."""
+        cell = torch.tensor(
+            [[10.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 0.0, 10.0]], dtype=torch.float64
+        )
+        pos = torch.tensor(
+            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]],
+            dtype=torch.float64,
+        )
+        with pytest.raises(ValueError):
+            PeriodicNeighborList(cell=cell, cutoff=3.0, positions=pos)
+
+    def test_rejects_a_non_3x3_cell(self):
+        """A batched ``(1, 3, 3)`` cell must fail with a clean ``ValueError`` at
+        the guard, not an opaque indexing error deeper in the kernel path."""
+        pos, cell = _lattice()
+        with pytest.raises(ValueError):
+            PeriodicNeighborList(cell=cell.unsqueeze(0), cutoff=3.5, positions=pos)
 
     def test_overflow_raises_rather_than_truncating(self):
         """A truncated neighbour list is a silently wrong energy."""
