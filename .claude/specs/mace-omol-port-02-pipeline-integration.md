@@ -78,7 +78,7 @@ the CG-basis convention swap. The post-collate batch schema and edge convention
 - [x] Backfill `src/molzoo/specs/mace_omol.md` per the molzoo-spec workflow (ac-002, docs) — status `partial`, mirrored to docs + zensical
 - [x] Model-level E/F accuracy ≤ 1e-4 vs official (ac-003) — met at 7e-7 eV / 4.3e-6 eV·Å with default cue O3 (01 ac-006); 1e-4 is the accepted bar (operator decision)
 - [x] Drop O3_e3nn pursuit + remove dead `MACEOMol(group=)` hook (CG diff only 1.4e-8/op; 7e-7 is reimplementation accumulation, O3_e3nn would not help)
-- [ ] Edge sourcing via `molpot.graph` / `NeighborList` for standalone use (optional; pipeline path sources edges at collate)
+- [ ] Edge sourcing via `molpot.graph` / `NeighborList` for standalone use (optional; pipeline path sources edges at collate) (obsolete — molpot.graph removed by md-neighborlist-skin-02-prune; standalone edge sourcing is molix.md.NeighborList's job)
 
 ## Testing
 

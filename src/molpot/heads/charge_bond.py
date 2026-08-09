@@ -79,7 +79,7 @@ class BondChargeHead(nn.Module):
             the bond distance scalar.
         hidden_dim: Hidden dimension of the bond-charge MLP.
         full_neighbor_list: When ``True`` (default, matches
-            :class:`molix.nn.locality.NeighborList`'s ``symmetry=True``
+            :class:`molix.data.tasks.neighbor.NeighborList`'s ``symmetry=True``
             default), the edge list contains both ``(i, j)`` and
             ``(j, i)`` and ``q_{ij}`` is scattered only to the source
             atom — antisymmetry of the bidirectional pair guarantees
