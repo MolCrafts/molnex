@@ -17,6 +17,12 @@ imports here.
 ## In-tree artifacts
 
 - `SPEC.md` — port design notes
+- `convert_omol_to_cueq_state.py` + `_stub_unpickler.py` — offline, one-run
+  regeneration of `omol_cueq_state.pt` (the plain `weights_only=True`
+  state_dict twin of `OMOL-cueq.model`) without importing mace/e3nn. The
+  419 MB dump itself is deliberately **not** kept: the source checkpoint is
+  downloadable, only the code is preserved. While the dump is absent, the
+  `MOLNEX_MACE_WEIGHTS_DIR`-gated `TestOfficialOMolWeights` cases skip.
 - `src/molzoo/mace/variants.py` — `MACEOMol` (thin alias over
   `molzoo.mace.potential.MACEPotential`) + the `load_omol_state_dict`
   back-compat loader

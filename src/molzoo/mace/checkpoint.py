@@ -60,16 +60,19 @@ quoted here rather than cited by anchor:
   ``src/molzoo/specs/mace_omol.md`` §7.1) is that doctrine defeated by a
   shortcut. MACE expands every interatomic distance ``r`` in a *Bessel* radial
   basis — the functions ``sin(ω_n r) / r``, whose frequencies ``ω_n`` start
-  from the analytic values ``nπ/r_max`` (units Å⁻¹) and are then fitted like
-  any other weight; molnex holds them in the ``nn.Parameter`` ``bessel.freqs``.
-  The check for "was every learnable tensor filled?" used a ``.weight`` /
+  from the analytic values ``nπ/r_max`` (units Å⁻¹) and are declared trainable
+  (an ``nn.Parameter``); molnex holds them as ``bessel.freqs``. The official
+  OMOL checkpoint stores them as the fp32 evaluation of that analytic init
+  (bit-for-bit; ≤1 fp32 ulp, max 2.2e-7 Å⁻¹, from molnex's fp64 re-derivation
+  — measured 2026-08-09, see ``src/molzoo/specs/mace_omol.md`` §7.1). The
+  check for "was every learnable tensor filled?" used a ``.weight`` /
   ``.bias`` **name suffix** heuristic, which silently excused that parameter,
-  since it ends in neither, so the fitted frequencies were dropped and the
-  analytic ones stayed. The official values sit ~2.2e-7 Å⁻¹ away from them, and
-  that difference went straight into the reported energy parity residual
-  (7.0e-7 eV, flagged in §7.1 for re-measurement). Hence: *learnable* means
-  exactly ``nn.Parameter``, i.e. membership in ``model.named_parameters()``,
-  and never a name pattern.
+  since it ends in neither, so the checkpoint's values were dropped and the
+  fp64 analytic ones stayed — a ~2.2e-7 Å⁻¹ offset that went straight into
+  the reported energy parity residual (7.0e-7 eV). Bit-exactness against the
+  official surface requires the checkpoint's values regardless of their
+  provenance. Hence: *learnable* means exactly ``nn.Parameter``, i.e.
+  membership in ``model.named_parameters()``, and never a name pattern.
 
 Both lists returned by :meth:`CheckpointRemap.load` are **sorted**. The flat
 OMol loader handed back torch's ``unexpected_keys`` in checkpoint-iteration

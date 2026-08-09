@@ -193,19 +193,34 @@ $$
 ### 7.1 Research Reproduction
 
 The accepted accuracy bar is E/F within **1e-4** of official OMOL (operator
-decision, 2026-06-21). The full model with official OMOL weights reproduces the
-official cueq OMOL twin on a charged molecule to **7.0e-7 eV / 4.3e-6 eV/Å**
-(`scripts/omol_port/verify_e2e.py`, RESULT: PASS) — three to four orders inside
-the bar; the cueq twin itself matches e3nn OMOL to 1.5e-8 eV / 3.2e-8 eV/Å
-(`scripts/omol_port/verify_omol_cueq_equiv.py`). **Caveat (2026-08-07):** the run below predates a loader fix — the official
-trainable Bessel frequencies (`radial_embedding.bessel_fn.bessel_weights`, which
-drift 2.2e-7 from their analytic init) were silently dropped, leaving
-`bessel.freqs` at init. §7.1's 7e-7 eV therefore includes that perturbation and
-should be re-measured. The 7e-7 residual is otherwise molnex's
-own reimplementation accumulation, **not** a CG-convention difference: O3 vs
-O3_e3nn Clebsch-Gordan differ only ~1.4e-8/op and the O3 twin already aligns
-with e3nn to 1.5e-8, so the e3nn-convention group is neither used nor needed
-(A3).
+decision, 2026-06-21).
+
+**Historical record (2026-06-21; oracles deleted in `b85d12f`, not
+reproducible in-tree — Appendix A).** Full model with official weights vs the
+official cueq OMOL twin, charged molecule: **7.0e-7 eV / 4.3e-6 eV/Å**
+(`verify_e2e.py`, RESULT: PASS); the cueq twin vs e3nn OMOL: 1.5e-8 eV /
+3.2e-8 eV/Å (`verify_omol_cueq_equiv.py`). Three to four orders inside the
+bar. The run predates the 2026-08-07 loader fix (official `bessel_weights`
+silently dropped, `bessel.freqs` left at init), so the 7e-7 eV includes that
+~2.2e-7 Å⁻¹ perturbation; it is otherwise molnex's own reimplementation
+accumulation, **not** a CG-convention difference (O3 vs O3_e3nn CG
+~1.4e-8/op, A3). Re-measuring upstream parity needs an out-of-tree oracle
+(route per Appendix A, 2026-08-09).
+
+**Current in-tree verification (2026-08-09).** `MOLNEX_MACE_WEIGHTS_DIR`-gated
+`tests/test_molzoo/test_mace/test_checkpoint.py::TestOfficialOMolWeights`:
+strict 104-parameter load through `OMOL_REMAP` plus E/F stability goldens on a
+five-atom cluster; the weights dump is regenerated offline by
+`scripts/omol_port/convert_omol_to_cueq_state.py` (no `mace`/`e3nn`). This is
+a stability lock on this machine's own output — not an upstream parity claim.
+
+**Bessel frequencies (measured 2026-08-09).** The official `bessel_weights`
+are bit-for-bit the fp32 evaluation of the analytic init `nπ/r_max` (upcast to
+fp64); the offset from the fp64 analytic values (max 2.2120e-7 Å⁻¹ at n=7,
+≤ 1 fp32 ulp per entry) is fp32 rounding of an untrained parameter, **not**
+fitted drift. Doctrine unchanged: `bessel.freqs` is an `nn.Parameter` and must
+be filled from the checkpoint — bit-exactness against the official surface
+requires the checkpoint's fp32-rounded values, not the fp64 re-derivation.
 
 ### 7.2 Symmetry and Shape Tests
 
@@ -313,3 +328,18 @@ rows.
   Route: `/mol:fix` or a follow-up spec. Combined with the 2026-08-07 caveat
   in §7.1 (the parity run predates the trainable-Bessel loader fix), §7.1
   should be treated as **stale, pending re-measurement**.
+- 2026-08-09: §7.1 rewritten (molzoo-auditor, operator-directed). (a) The
+  mace-torch parity figures are now labelled a dated **historical record**
+  (oracles deleted in `b85d12f`), and the current in-tree surface is named:
+  `MOLNEX_MACE_WEIGHTS_DIR`-gated `TestOfficialOMolWeights` (strict 104-param
+  load + E/F stability goldens) with the dump regenerable via
+  `scripts/omol_port/convert_omol_to_cueq_state.py`. (b) The "fitted drift"
+  reading of `bessel.freqs` is corrected to measurement: the official
+  `bessel_weights` are **bit-for-bit** the fp32 evaluation of the analytic
+  `nπ/r_max` init upcast to fp64 (max 2.2120e-7 Å⁻¹ from the fp64 values at
+  n=7, ≤ 1 fp32 ulp per entry) — storage rounding of an untrained parameter,
+  not training drift; the strict-loading doctrine is unchanged. A ⚠️ was
+  printed (not applied) against `src/molzoo/mace/checkpoint.py`'s docstring
+  ("fitted like any other weight" / "the fitted frequencies were dropped").
+  No section added, removed or renamed; §7.4 untouched; §6 A1/A2 and §7.2's
+  dangling `verify_*.py` anchors remain covered by the entry above.
