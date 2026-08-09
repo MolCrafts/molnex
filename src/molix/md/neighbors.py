@@ -93,25 +93,113 @@ verbatim, and the constructor mirrors ``Neighbor::init`` in rejecting a
 ``delay`` that is not a multiple of ``every`` (which would make the danger
 threshold an ``ago`` the gate never permits, silently killing the alarm).
 
+The binned build
+----------------
+
+``bin=None`` (the default) hands the whole system to the compiled O(N^2) pair
+kernel, which enumerates ``N(N-1)/2`` candidates per rebuild. Passing a float
+switches to a pure-torch **cell list**: atoms are sorted into a periodic grid
+of bins derived once from the cell and ``r_build``, and only a fixed stencil of
+neighbouring bins is searched, so the build is linear in ``N`` at fixed density
+with no per-atom Python loop and no device-specific code
+(:meth:`NeighborList._configure_bins` derives the grid,
+:meth:`NeighborList._build_binned` runs the search). Both backends return the
+same triple into the same ``_write``, so the capacity, the dead-edge padding
+and every consumer are unaffected by which one ran. ``bin`` is a **cost** knob:
+the edge set is identical, and the kernel path is the equivalence oracle the
+binned one is tested against.
+
+**Stencil completeness — why a bounded search is exact.** Bins are cubes in
+*fractional* space: atom A sits in bin ``p_i = floor(s_i n_i)`` along axis
+``i``. If two atoms are ``m`` bins apart along axis ``i`` (minimal modular
+difference), then ``s_B >= (p + m)/n_i`` while ``s_A < (p + 1)/n_i``, so
+``|Ds_i| > (m - 1)/n_i`` **strictly**. The displacement's component along the
+axis normal is ``|Ds_i| w_i``, and ``||d|| >= |d . n_i| = |Ds_i| w_i``, so with
+the *effective* perpendicular bin thickness ``b_i = w_i / n_i`` (Angstrom)
+
+``||d|| > (m - 1) * b_i``
+
+A stencil half-width ``k_i`` with ``k_i * b_i >= r_build`` is therefore
+**complete**: any pair more than ``k_i`` bins apart on some axis has
+``||d|| > k_i b_i >= r_build`` and is excluded by the ``r <= r_build`` filter
+anyway. The strict inequality is what makes the textbook statement exact at the
+boundary — ``b_i = r_build`` gives ``k_i = 1``, i.e. the 27-cell 3x3x3 stencil,
+with no epsilon fudge. ``_configure_bins`` re-checks the relation per axis
+instead of trusting the arithmetic that produced it: an incomplete stencil is a
+silently short neighbour list, which is a wrong energy that never raises.
+
+**Bin size.** The candidate volume for ``b = r_build / k`` is
+``(2 + 1/k)^3 r_build^3`` — ``27 r^3`` at ``k = 1``, ``15.6 r^3`` at ``k = 2``,
+against the ``4.19 r^3`` sphere actually needed — decreasing in ``k`` while the
+sorting and gather cost grows with the bin count. LAMMPS settles this at
+``k = 2`` (``src/nbin_standard.cpp``, ``binsize_optimal = 0.5 * cutneighmax``),
+which is what ``bin=0.0`` requests here.
+
+**Minimum image by fractional rounding is exact inside the half-width guard.**
+Write a periodic displacement as ``d = sum_i f_i a_i``. Its component along the
+axis-``i`` normal is ``|f_i| w_i = |d . n_i| <= ||d||``. So whenever
+``||d|| <= r_build <= min_i w_i / 2 <= w_i / 2`` — exactly the guard above —
+``|f_i| <= 1/2`` on every axis: **any** in-range image is already the one
+``f <- f - round(f)`` selects. Fractional rounding and the kernel's sequential
+diagonal reduction therefore return the same, unique minimum image everywhere
+the guard admits, which is what makes edge-set equality between the two
+backends a theorem rather than a coincidence. (Ties at ``|f_i| = 1/2`` are
+reachable only when ``r_build = min_i w_i / 2`` exactly *and* a pair sits
+exactly on the boundary, where ``torch.round``'s half-to-even and C's
+half-away-from-zero can differ: measure zero, and outside every fixture.)
+
+**Filter parity.** The binned path accepts a pair iff ``0 < r <= r_build``,
+which is the compiled backends' filter verbatim (``(distances <= cutoff) &
+(distances > 0)`` in the C++ kernel; ``distance2 > cutoff2 || distance2 == 0``
+dropped in the CUDA one) — the same *closed* upper bound and the same ``r > 0``
+rejection, so coincident atoms and pairs separated by exactly one lattice
+vector (whose minimum image is the zero vector) are dropped identically.
+
+**Edge order is not part of the contract.** The binned path emits edges in
+bin-sorted order, the kernel in upper-triangle index order. What binds is the
+*set* of ``(source, target, shift)`` triples plus the edge count: consumers
+reduce with order-independent scatter / ``index_add_`` and read the shift
+buffer positionally alongside ``edge_index``, never by index-order assumption.
+
+**Small cells degenerate gracefully.** When ``2 k_i + 1 >= n_i`` on every axis
+the stencil's residue sets cover the whole grid and the search enumerates all
+pairs — correct, just not faster (and a single bin per axis, the ``bin`` wider
+than the cell case, is exactly that). The O(N) win appears once
+``n_i > 2 k_i + 1``, i.e. cells wider than about ``5 r_build / 2`` per axis at
+the automatic bin size, so a small-cell timing is not a regression.
+
 References:
     LAMMPS ``neigh_modify`` documentation —
     https://docs.lammps.org/neigh_modify.html — and ``lammps/lammps`` develop
     ``src/neighbor.cpp`` (``Neighbor::decide``, ``Neighbor::check_distance``,
-    ``Neighbor::init``) / ``src/verlet.cpp``.
+    ``Neighbor::init``) / ``src/verlet.cpp``. The binning policy behind
+    ``bin=0.0`` is ``src/nbin_standard.cpp``
+    (``binsize_optimal = 0.5 * cutneighmax``) and
+    https://docs.lammps.org/neighbor.html; the paper of record is
+    A. P. Thompson et al., *Comput. Phys. Commun.* **271**, 108171 (2022),
+    https://doi.org/10.1016/j.cpc.2021.108171.
 
     K. Nordlund, *Introduction to molecular dynamics simulations*, lecture 3,
     https://www.mv.helsinki.fi/home/knordlun/moldyn/lecture03.pdf — the open,
     directly re-verified source for the two-atom criterion above.
 
+    M. P. Allen & D. J. Tildesley, *Computer Simulation of Liquids*, 2nd ed.,
+    Oxford University Press (2017),
+    https://doi.org/10.1093/oso/9780198803195.001.0001 — cell (link-cell)
+    lists, the 27-cell stencil and minimum-image validity.
+
     L. Verlet, *Phys. Rev.* **159**, 98 (1967),
     https://doi.org/10.1103/PhysRev.159.98 — the original neighbour list.
 
     B. Quentrec & C. Brot, *J. Comput. Phys.* **13**, 430 (1973),
-    https://doi.org/10.1016/0021-9991(73)90046-6 — cell/skin refinement.
+    https://doi.org/10.1016/0021-9991(73)90046-6 — the original cell method,
+    and the skin refinement.
 
     Caveat: the Verlet 1967 and Quentrec & Brot 1973 texts are paywalled and
     were **not** re-verified here; they are cited for attribution only. Every
-    equation above is verified against the Nordlund notes and the LAMMPS source.
+    equation above is verified against the Nordlund notes and the LAMMPS
+    source, and the stencil-completeness and ``|f_i| <= 1/2`` relations are
+    derived in line above rather than taken from a text.
 
 Owning ``edges``: the bind surface
 ----------------------------------
@@ -175,16 +263,25 @@ from tensordict import TensorDict, TensorDictBase
 from molix.data.tasks.neighbor import NeighborList as NeighborListTask
 from molix.units import DEAD_EDGE_CUTOFF_FACTOR
 
+#: Largest stencil half-width ``k_i`` (in bins) the binned build accepts. At the
+#: cap the Python loop runs over ``17^3 = 4913`` bin offsets; beyond it an
+#: absurdly small explicit ``bin`` stops being a fine grid and becomes a hang.
+_MAX_STENCIL_HALF_WIDTH = 8
 
-def _min_perpendicular_width(cell: torch.Tensor) -> float:
-    """Smallest distance between two opposite faces of a periodic cell.
+
+def _perpendicular_widths(cell: torch.Tensor) -> torch.Tensor:
+    """Distances between the three pairs of opposite faces of a periodic cell.
 
     For cell vectors ``a_1, a_2, a_3`` — the **rows** of ``cell`` — the width
     perpendicular to the face spanned by ``a_j`` and ``a_k`` is
-    ``w_i = V / ||a_j x a_k||`` with ``V = |det(cell)|``, so the minimum is
-    ``V / max_i ||a_j x a_k||``: one division instead of three. For an
-    orthorhombic cell ``||a_j x a_k|| = ||a_j||*||a_k||`` and
-    ``V = ||a_1||*||a_2||*||a_3||``, hence ``w_i = ||a_i||``.
+    ``w_i = V / ||a_j x a_k||`` with ``V = |det(cell)|``. For an orthorhombic
+    cell ``||a_j x a_k|| = ||a_j||*||a_k||`` and ``V = ||a_1||*||a_2||*||a_3||``,
+    hence ``w_i = ||a_i||``.
+
+    Two callers need different reductions of the same three numbers: the
+    minimum-image guard bounds ``r_build`` by ``min_i w_i / 2``, while the
+    binned build sizes its grid **per axis** so that a requested bin thickness
+    means the same thing on a sheared cell as on a cube.
 
     Evaluated in ``float64`` so a ``float32`` cell cannot jitter an
     accept/reject decision taken right at the bound.
@@ -193,7 +290,8 @@ def _min_perpendicular_width(cell: torch.Tensor) -> float:
         cell: Cell vectors ``(3, 3)`` in Angstrom, one vector per row.
 
     Returns:
-        The smallest perpendicular width ``min_i w_i`` in Angstrom.
+        The perpendicular widths ``(w_1, w_2, w_3)`` as a ``(3,)`` ``float64``
+        tensor in Angstrom, in cell-row order.
 
     Raises:
         ValueError: If ``cell`` is not ``(3, 3)``, or is degenerate (volume
@@ -221,7 +319,10 @@ def _min_perpendicular_width(cell: torch.Tensor) -> float:
             f"degenerate cell: volume {volume} A^3, largest face area {max_area} A^2; "
             "a cell with no interior has no perpendicular width to bound the cutoff by."
         )
-    return volume / max_area
+    # A positive volume forces every face area positive (a zero area means two
+    # rows are collinear, which collapses the determinant), so this cannot divide
+    # by zero once the guard above has passed.
+    return volume / areas
 
 
 @runtime_checkable
@@ -334,6 +435,23 @@ class NeighborList:
             pulled in by thermal motion (the LJ-lattice test harness needed
             ``2.5`` where the default would have allocated 519 rows against 600
             live edges). Raise it when starting from a lattice.
+        bin: Selects the **build backend** (never the physics — see the module
+            docstring). ``None`` (default) keeps the compiled O(N^2) pair
+            kernel. A float switches to the pure-torch binned (cell-list)
+            build and is the *requested* perpendicular bin thickness in
+            Angstrom: ``0.0`` asks for the automatic ``r_build / 2`` (LAMMPS
+            ``nbin_standard`` ``binsize_optimal``), a positive value asks for
+            that thickness. The effective thickness is ``w_i / n_i`` with
+            ``n_i = max(1, floor(w_i / bin))``, so it is never *smaller* than
+            requested and is reported per axis through :attr:`n_bins`. The
+            binned path wins on cells wider than about ``5 * r_build / 2`` per
+            axis and merely degenerates to an all-pairs search below that.
+            Measured 2026-08-09 (torch 2.12.1+cpu, x86_64, N=4096, 48 A cube,
+            r_build 5.0, n_bins (19,19,19)): binned 0.037 s vs kernel 0.450 s
+            per rebuild at ``OMP_NUM_THREADS=4`` — but 7.2 s vs 1.0 s at the
+            node default of 48 threads, where per-op OpenMP region overhead
+            dominates the 125-offset loop. The thread count is part of any
+            such number; no timing threshold is asserted anywhere.
         device: Device for the buffers; defaults to ``positions``'.
 
     Raises:
@@ -343,8 +461,10 @@ class NeighborList:
             perpendicular cell width ``w_i = V / ||a_j x a_k||`` (Angstrom;
             ``w_i = ||a_i||`` for an orthorhombic cell), beyond which the
             minimum-image reduction silently drops pairs that lie inside the
-            cutoff; or if ``skin`` reaches the dead-edge padding radius
-            ``(DEAD_EDGE_CUTOFF_FACTOR - 1) * cutoff``.
+            cutoff; if ``skin`` reaches the dead-edge padding radius
+            ``(DEAD_EDGE_CUTOFF_FACTOR - 1) * cutoff``; or if ``bin`` is
+            negative or so small that the stencil half-width exceeds
+            ``_MAX_STENCIL_HALF_WIDTH`` bins.
     """
 
     def __init__(
@@ -358,6 +478,7 @@ class NeighborList:
         delay: int = 0,
         check: bool = True,
         capacity_factor: float = 1.35,
+        bin: float | None = None,
         device: torch.device | None = None,
     ) -> None:
         cutoff_f, skin_f = float(cutoff), float(skin)
@@ -377,7 +498,7 @@ class NeighborList:
                 "ndanger silently dead."
             )
 
-        min_width = _min_perpendicular_width(cell)
+        min_width = float(_perpendicular_widths(cell).min())
         half_width = 0.5 * min_width
         r_build = cutoff_f + skin_f
         if r_build > half_width:
@@ -417,8 +538,18 @@ class NeighborList:
             pbc=True,
             symmetry=True,
         )
+        #: Requested perpendicular bin thickness in Angstrom, or ``None`` for
+        #: the compiled O(N^2) backend. A cost knob, never a physics knob.
+        self.bin = None if bin is None else float(bin)
+        #: Bins per cell axis ``(n_1, n_2, n_3)``, ``None`` when ``bin is None``
+        #: and no grid was derived. The only public window onto the stencil.
+        self.n_bins: tuple[int, int, int] | None = None
+        if self.bin is not None:
+            self._configure_bins(self.bin)
 
-        source, target, shifts = self._compute(positions)
+        # Through the dispatch, so the capacity is sized by the backend that
+        # will keep refilling the buffers (the two agree, by the equivalence).
+        source, target, shifts = self._build_pairs(positions)
         self.capacity = max(1, int(math.ceil(self.capacity_factor * source.numel())))
         self.edge_index = torch.zeros(self.capacity, 2, dtype=torch.long, device=self._device)
         self.shifts = torch.zeros(self.capacity, 3, dtype=self._dtype, device=self._device)
@@ -462,6 +593,235 @@ class NeighborList:
         # pos[target]-pos[source] itself, so hand it the periodic remainder.
         shifts = graph["edge_diff"] - (pos[target] - pos[source])
         return source, target, shifts
+
+    def _configure_bins(self, requested: float) -> None:
+        """Derive the bin grid and the search stencil from the cell and ``r_build``.
+
+        Called once from ``__init__`` when ``bin`` is not ``None``. The grid
+        depends only on the (fixed) cell and the (derived) build radius, so
+        nothing here runs again per rebuild; :meth:`to` only carries the two
+        tensors it produces to their new device / dtype.
+
+        Per axis ``i``, with the perpendicular widths ``w_i`` in Angstrom
+        (:func:`_perpendicular_widths`) and all counts dimensionless:
+
+        1. requested thickness ``b = requested`` in Angstrom, or ``r_build / 2``
+           when ``requested == 0.0`` (LAMMPS ``nbin_standard``
+           ``binsize_optimal``);
+        2. ``n_i = max(1, floor(w_i / b))`` — sized on the **perpendicular**
+           width, not the row norm, so a requested thickness means the same
+           thing on a sheared cell as on a cube;
+        3. effective thickness ``b_i = w_i / n_i`` in Angstrom, never below the
+           request except where the ``max(1, ...)`` clamp caught a cell thinner
+           than one requested bin;
+        4. half-width ``k_i = ceil(r_build / b_i)`` bins, bumped while
+           ``k_i * b_i < r_build`` — a float-exactness guard that fires at most
+           once, and the completeness relation the whole search rests on (module
+           docstring);
+        5. offsets ``o_i = unique(arange(-k_i, k_i + 1) mod n_i)``. The
+           **distinct residues** are load-bearing: as soon as ``2 k_i + 1 > n_i``
+           the raw stencil wraps onto the same bin twice, and every candidate
+           pair in it would be emitted twice.
+
+        Sets :attr:`n_bins` (the public diagnostic), ``self._stencil`` — the
+        ``(S, 3)`` Cartesian product of the three residue sets, ``S <= (2 *
+        _MAX_STENCIL_HALF_WIDTH + 1) ** 3`` — and ``self._inv_cell``, the cached
+        ``cell^-1`` the build maps positions to fractional coordinates with.
+
+        Args:
+            requested: Requested perpendicular bin thickness in Angstrom;
+                ``0.0`` asks for the automatic ``r_build / 2``.
+
+        Raises:
+            ValueError: If ``requested`` is negative (``0.0`` is how one asks
+                for the automatic size); if any ``k_i`` exceeds
+                ``_MAX_STENCIL_HALF_WIDTH``, i.e. the bin is so far below
+                ``r_build`` that the stencil loop stops being a search and
+                becomes a hang; or — a fail-loud tripwire on step 4 rather than
+                a user knob — if the completeness relation ``k_i * b_i >=
+                r_build`` fails on any axis, which would be a silently short
+                neighbour list.
+        """
+        if requested < 0.0:
+            raise ValueError(
+                f"bin must be >= 0 A, got {requested} A: a negative bin thickness has no "
+                f"meaning. bin=0.0 selects the automatic r_build / 2 = {0.5 * self._r_build} A "
+                "size (LAMMPS nbin_standard), any positive value is an explicit requested "
+                "perpendicular bin thickness, and bin=None keeps the compiled O(N^2) backend."
+            )
+        thickness = requested if requested > 0.0 else 0.5 * self._r_build
+        widths = [float(width) for width in _perpendicular_widths(self.cell)]
+        counts = [max(1, int(math.floor(width / thickness))) for width in widths]
+        effective = [width / count for width, count in zip(widths, counts, strict=True)]
+        halves: list[int] = []
+        for size in effective:
+            half = int(math.ceil(self._r_build / size))
+            while half * size < self._r_build:  # float-exactness bump; fires at most once
+                half += 1
+            halves.append(half)
+
+        if max(halves) > _MAX_STENCIL_HALF_WIDTH:
+            raise ValueError(
+                f"bin {requested} A gives effective bin thicknesses "
+                f"{[round(size, 6) for size in effective]} A, so the stencil half-widths are "
+                f"{halves} bins — above the cap of {_MAX_STENCIL_HALF_WIDTH}. The build would "
+                f"loop over {math.prod(2 * half + 1 for half in halves)} bin offsets per "
+                f"rebuild, against the {(2 * _MAX_STENCIL_HALF_WIDTH + 1) ** 3} the cap allows. "
+                f"Pass a larger bin, or bin=0.0 for the automatic "
+                f"r_build / 2 = {0.5 * self._r_build} A size."
+            )
+        for count, size, half in zip(counts, effective, halves, strict=True):
+            if half * size < self._r_build:
+                raise ValueError(
+                    f"incomplete stencil from bin {requested} A: an axis with n_i = {count} "
+                    f"bins of b_i = {size} A reaches only k_i * b_i = {half * size} A at "
+                    f"half-width k_i = {half}, short of r_build {self._r_build} A. Pairs "
+                    "further apart than the stencil are dropped without being measured, so "
+                    "this is a tripwire on the derivation above, not a user knob."
+                )
+
+        axes = [
+            torch.unique(
+                torch.arange(-half, half + 1, dtype=torch.long, device=self._device) % count
+            )
+            for count, half in zip(counts, halves, strict=True)
+        ]
+        self._stencil = torch.stack(
+            [axis.reshape(-1) for axis in torch.meshgrid(*axes, indexing="ij")], dim=-1
+        )
+        # Inverted in float64 and cast down: a float32 cell inverted in float32
+        # loses digits the bin index is then floored from.
+        self._inv_cell = torch.linalg.inv(self.cell.to(torch.float64)).to(
+            device=self._device, dtype=self.cell.dtype
+        )
+        self.n_bins = (counts[0], counts[1], counts[2])
+
+    def _build_binned(
+        self, positions: torch.Tensor, n_bins: tuple[int, int, int]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build the pair list from the bin grid; returns ``(source, target, shifts)``.
+
+        The pure-torch O(N) backend behind ``bin=``, with the same return
+        contract as :meth:`_compute` so :meth:`_write` — capacity, overflow and
+        dead-edge padding — is shared verbatim. Atoms are sorted into the
+        :meth:`_configure_bins` grid once, then each of the ``S`` stencil offsets
+        gathers one neighbour bin per atom; the Python loop runs over those
+        offsets (``S <= 4913``, independent of ``N``) and everything inside it is
+        vectorised over all atoms at once. Every tensor is created with an
+        explicit ``device=`` / ``dtype=`` taken from the positions, so the path
+        runs on CUDA unchanged. Eager, like every other build here.
+
+        Fractional coordinates are wrapped into ``[0, 1)`` **for indexing only**:
+        displacements are taken from the unwrapped ``frac`` and the stored
+        ``positions``, so a trajectory that has drifted out of the box keeps
+        both its coordinates and its shifts (module docstring, "Raw
+        displacements, unwrapped positions").
+
+        Args:
+            positions: Positions ``(N, 3)`` in Angstrom, wrapped or not. Cast to
+                the cell's dtype — the precision the buffers already hold.
+            n_bins: Bins per axis, i.e. :attr:`n_bins` narrowed to non-``None``
+                by :meth:`_build_pairs`, which is the only caller.
+
+        Returns:
+            ``(source, target, shifts)``: atom indices ``(E,)`` per the repo
+            edge convention and periodic remainders ``(E, 3)`` in Angstrom, as a
+            **full bidirectional** list — each pair appears as ``(s, t, D)`` and
+            ``(t, s, -D)``. Edge *order* is not part of the contract (module
+            docstring).
+        """
+        cell = self.cell
+        pos = positions.detach().to(cell.dtype)
+        device, dtype = pos.device, pos.dtype
+        n_atoms = int(pos.shape[0])
+        counts_per_axis = torch.tensor(n_bins, dtype=torch.long, device=device)
+        strides = torch.tensor(
+            [n_bins[1] * n_bins[2], n_bins[2], 1], dtype=torch.long, device=device
+        )
+
+        frac = pos @ self._inv_cell
+        # Indexing device only — never differenced, never stored.
+        wrapped = frac - frac.floor()
+        bin_ijk = (wrapped * counts_per_axis.to(dtype)).floor().long()
+        # clamp: frac_w can round to exactly 1.0, and a negative index would wrap
+        # silently through Python's semantics instead of landing in bin 0.
+        bin_ijk = bin_ijk.clamp_(min=0).minimum(counts_per_axis - 1)
+        bin_id = (bin_ijk * strides).sum(-1)
+
+        order = torch.argsort(bin_id, stable=True)
+        occupancy = torch.bincount(bin_id, minlength=n_bins[0] * n_bins[1] * n_bins[2])
+        starts = torch.cumsum(occupancy, 0) - occupancy
+        atoms = torch.arange(n_atoms, dtype=torch.long, device=device)
+        r_build_sq = self._r_build**2
+
+        sources: list[torch.Tensor] = []
+        targets: list[torch.Tensor] = []
+        remainders: list[torch.Tensor] = []
+        for offset in self._stencil:
+            neighbour_bin = (((bin_ijk + offset) % counts_per_axis) * strides).sum(-1)
+            occupied = occupancy[neighbour_bin]
+            total = int(occupied.sum())
+            if total == 0:
+                continue
+            # Ragged gather, the molix.data.collate._gather_indices idiom (that
+            # one is CPU-pinned for DataLoader workers, so it is followed, not
+            # imported): counts -> segment ids -> exclusive cumsum -> row index.
+            segment = torch.repeat_interleave(atoms, occupied)
+            exclusive = torch.cumsum(occupied, 0) - occupied
+            candidate = order[
+                starts[neighbour_bin][segment]
+                + (torch.arange(total, dtype=torch.long, device=device) - exclusive[segment])
+            ]
+
+            half_pair = segment < candidate  # each unordered pair once, no self pairs
+            source, target = segment[half_pair], candidate[half_pair]
+            if source.numel() == 0:
+                continue
+            # Minimum image by fractional rounding — exact here because
+            # r_build <= min_i w_i / 2 bounds every in-range image by |f_i| <= 1/2.
+            fractional = frac[target] - frac[source]
+            displacement = (fractional - fractional.round()) @ cell
+            distance_sq = (displacement * displacement).sum(-1)
+            # 0 < r <= r_build, the compiled kernels' filter verbatim: coincident
+            # atoms and pairs separated by exactly one lattice vector are dropped.
+            keep = (distance_sq <= r_build_sq) & (distance_sq > 0)
+            source, target, displacement = source[keep], target[keep], displacement[keep]
+            sources.append(source)
+            targets.append(target)
+            # Same definition as _compute's edge_diff - (pos[target] - pos[source]),
+            # against the stored (unwrapped) positions.
+            remainders.append(displacement - (pos[target] - pos[source]))
+
+        if sources:
+            half_source, half_target = torch.cat(sources), torch.cat(targets)
+            half_shifts = torch.cat(remainders)
+        else:  # an isolated system at this radius: no half pairs to expand
+            half_source = torch.zeros(0, dtype=torch.long, device=device)
+            half_target = torch.zeros(0, dtype=torch.long, device=device)
+            half_shifts = torch.zeros(0, 3, dtype=dtype, device=device)
+        # Symmetry expansion to the full bidirectional list: the shift flips
+        # sign wholesale with the displacement it is the remainder of.
+        return (
+            torch.cat((half_source, half_target)),
+            torch.cat((half_target, half_source)),
+            torch.cat((half_shifts, -half_shifts)),
+        )
+
+    def _build_pairs(self, positions: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Route the build to the backend ``bin`` selected; ``(source, target, shifts)``.
+
+        The single seam between the two backends: the constructor's initial
+        (capacity-sizing) build and every :meth:`_build_at` go through it, so a
+        binned list is binned from the first edge on and its capacity is sized
+        by the backend that will keep refilling it.
+
+        Args:
+            positions: Positions ``(N, 3)`` in Angstrom to build at.
+        """
+        grid = self.n_bins
+        if grid is None:
+            return self._compute(positions)
+        return self._build_binned(positions, grid)
 
     def _dead_shift(self) -> torch.Tensor:
         """A displacement long enough that every cutoff envelope evaluates to 0."""
@@ -612,7 +972,7 @@ class NeighborList:
         Args:
             positions: Positions ``(N, 3)`` in Angstrom to build at.
         """
-        source, target, shifts = self._compute(positions)
+        source, target, shifts = self._build_pairs(positions)
         self._write(source, target, shifts)
         self._hold(positions)
 
@@ -800,4 +1160,13 @@ class NeighborList:
             self.shifts = self.shifts.to(dtype)
             self.cell = self.cell.to(dtype)
             self._x_hold = self._x_hold.to(dtype)
+        if self.n_bins is not None:
+            # The grid itself is a property of the cell and r_build, so only its
+            # two tensors move: the stencil is integer offsets, and the inverse
+            # cell is re-derived (in float64, then cast) rather than converted,
+            # so a float32 hop does not compound its own rounding.
+            self._stencil = self._stencil.to(self._device)
+            self._inv_cell = torch.linalg.inv(self.cell.to(torch.float64)).to(
+                device=self._device, dtype=self.cell.dtype
+            )
         return self

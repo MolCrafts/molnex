@@ -95,6 +95,16 @@ Note the two-statement idiom: `nl.build(batch).update(batch)` would call
 `build` returns the batch for pipeline composition, so the policy call goes
 through the list.
 
+For large condensed-phase systems, `bin=` selects a pure-torch binned
+(cell-list) O(N) build instead of the O(N²) kernel: `bin=0.0` picks the
+automatic `r_build / 2` size (LAMMPS `nbin_standard`), a positive float is an
+explicit perpendicular bin thickness in Å. The bin size is a cost knob, never
+a physics knob — both backends produce the identical edge set. Measured at
+N=4096 (CPU, `OMP_NUM_THREADS=4`, 2026-08-09): binned 0.037 s vs kernel
+0.450 s per rebuild; at 48 threads the tiny-op OpenMP overhead inverts the
+ratio, so pin the thread count when profiling. No timing threshold is
+asserted anywhere.
+
 ## Observing a run: MD hooks
 
 `MDRunner` drives a small, MD-specific hook protocol (`MDHook`) — these are

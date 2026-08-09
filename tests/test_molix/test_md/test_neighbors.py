@@ -1,6 +1,7 @@
 """Tests for molix.md.neighbors."""
 
 import math
+import re
 from typing import NamedTuple
 
 import pytest
@@ -1114,3 +1115,679 @@ class TestNeighborListBind:
                 return self
 
         assert not isinstance(_PolicyWithoutBuild(), NeighborStrategy)
+
+
+# ---------------------------------------------------------------------------
+# The binned (cell-list) build path: fixtures, edge keys, comparison contract
+# ---------------------------------------------------------------------------
+
+#: ``(source, target, shift)`` with the shift rounded to 6 decimals — one live
+#: edge, reduced to something hashable. Used both directed (as emitted) and
+#: canonicalised low->high (see :func:`_canonical_keys`).
+_EdgeKey = tuple[int, int, tuple[float, ...]]
+
+
+def _directed_keys(nl: NeighborList) -> list[_EdgeKey]:
+    """The live edges as hashable ``(source, target, shift)`` keys, as emitted.
+
+    Only ``[0, num_edges)`` is read: the tail is dead padding, not edges.
+
+    Shift components are integer combinations of the cell rows — exact values
+    like ``12.0`` or ``-6.0`` — so rounding at 6 decimals absorbs the ~1e-13
+    disagreement between two different minimum-image reductions without ever
+    landing near a rounding boundary.
+
+    Args:
+        nl: A built list.
+
+    Returns:
+        One key per live edge, in buffer order. Duplicates here are real
+        duplicates: the same directed edge emitted twice.
+    """
+    n = nl.num_edges
+    sources = nl.edge_index[:n, 0].tolist()
+    targets = nl.edge_index[:n, 1].tolist()
+    shifts = nl.shifts[:n].tolist()
+    return [
+        (source, target, tuple(round(component, 6) for component in shift))
+        for source, target, shift in zip(sources, targets, shifts, strict=True)
+    ]
+
+
+def _canonical_keys(nl: NeighborList) -> list[_EdgeKey]:
+    """The live edges as orientation-free ``(low, high, shift)`` keys.
+
+    Edge **order is not part of the contract** between the two build backends —
+    the binned path emits bin-sorted edges, the kernel upper-triangle-sorted
+    ones — so equality is compared as a *set*. The key must still separate
+    periodic images, which is what the shift carries: for an edge ``(s, t, D)``
+    the reverse edge is ``(t, s, -D)`` (``edge_diff = pos[t] - pos[s] + D``
+    flips sign wholesale), so orienting the shift low->high makes the key
+    independent of which way the edge was emitted, while keeping ``(i, j)``
+    across the ``+x`` face distinct from ``(i, j)`` across the ``-x`` one.
+
+    Note:
+        Both paths emit a **full bidirectional** list, so every undirected pair
+        contributes *two* live edges that share one canonical key: the unique
+        canonical keys number ``num_edges / 2``, not ``num_edges``. The
+        duplicate-free clause is therefore asserted on the *directed* keys (see
+        :func:`_assert_paths_agree`), which is where a wrapped stencil's double
+        emission would actually show up.
+
+    Args:
+        nl: A built list.
+
+    Returns:
+        One key per live edge, in buffer order.
+    """
+    keys: list[_EdgeKey] = []
+    for source, target, shift in _directed_keys(nl):
+        if source < target:
+            keys.append((source, target, shift))
+        else:
+            keys.append((target, source, tuple(-component for component in shift)))
+    return keys
+
+
+def _closest_approach_to(pos: torch.Tensor, cell: torch.Tensor, radius: float) -> float:
+    """``min_{i != j} |r_ij - radius|`` over minimum-image pairs, in Angstrom.
+
+    The float-tie precondition of every binned-vs-kernel comparison. The two
+    backends reduce to the minimum image differently — fractional rounding
+    against the kernel's sequential subtraction — so a pair sitting *on*
+    ``r_build`` could fall on either side of the closed ``r <= r_build`` filter
+    for reasons that have nothing to do with the stencil. Every fixture asserts
+    it keeps clear of that radius, so a failure is always a real disagreement.
+
+    Computed independently of both paths, from fractional rounding, which is
+    exact here: ``r_build <= min_i w_i / 2`` bounds the fractional offset of
+    every in-range image by 1/2 (the lemma the binned path rests on).
+
+    Args:
+        pos: Positions ``(N, 3)`` in Angstrom, wrapped or not.
+        cell: Cell vectors ``(3, 3)`` in Angstrom, one per row.
+        radius: The radius to measure the closest approach to, in Angstrom.
+
+    Returns:
+        The smallest ``|r_ij - radius|`` over all ordered ``i != j`` pairs.
+    """
+    vectors = cell.detach().to(torch.float64)
+    fractional = pos.detach().to(torch.float64) @ torch.linalg.inv(vectors)
+    delta = fractional.unsqueeze(0) - fractional.unsqueeze(1)
+    distance = torch.linalg.norm((delta - torch.round(delta)) @ vectors, dim=-1)
+    off_diagonal = ~torch.eye(pos.shape[0], dtype=torch.bool)
+    return float((distance[off_diagonal] - radius).abs().min())
+
+
+def _assert_paths_agree(binned: NeighborList, kernel: NeighborList, pos: torch.Tensor) -> None:
+    """The full equality contract between the binned build and the kernel oracle.
+
+    Four clauses, all of them load-bearing:
+
+    1. **Precondition** — no pair within 1e-9 A of ``r_build``, so no clause
+       below can be decided by a float tie (:func:`_closest_approach_to`).
+    2. **Counts** — ``num_edges`` equal. Set equality alone cannot see a
+       duplicated edge; a wrapped stencil that emitted every pair twice would
+       double this.
+    3. **Duplicate-free** — every *directed* key occurs once on each path, i.e.
+       ``len(set(directed)) == num_edges``, and the canonical keys come out at
+       exactly ``num_edges / 2`` because both paths emit a full bidirectional
+       list (``(s,t,D)`` and ``(t,s,-D)`` share one canonical key). This is the
+       intrinsic check the aliasing fixture is built to trip, and it does not
+       depend on the oracle.
+    4. **Set equality** of the canonical keys — catches *missing* edges, which
+       counts alone cannot.
+
+    Args:
+        binned: The list built with a ``bin`` grid.
+        kernel: A list over the same geometry and parameters with ``bin=None``.
+        pos: The positions both were built at ``(N, 3)`` in Angstrom.
+    """
+    margin = _closest_approach_to(pos, binned.cell, binned.r_build)
+    assert margin > 1e-9, (
+        f"fixture precondition violated: a pair sits {margin:.3e} A from r_build "
+        f"{binned.r_build} A, where the closed r <= r_build filter is a float coin-flip"
+    )
+    assert binned.num_edges == kernel.num_edges
+    directed_binned, directed_kernel = _directed_keys(binned), _directed_keys(kernel)
+    assert len(set(directed_binned)) == binned.num_edges, "the binned path emitted a duplicate edge"
+    assert len(set(directed_kernel)) == kernel.num_edges, "the kernel path emitted a duplicate edge"
+    canonical_binned = set(_canonical_keys(binned))
+    assert 2 * len(canonical_binned) == binned.num_edges, "the binned list is not bidirectional"
+    assert canonical_binned == set(_canonical_keys(kernel))
+
+
+def _pair_distances(nl: NeighborList, pos: torch.Tensor) -> list[tuple[int, int, float]]:
+    """Live edges as a sorted ``(low, high, |displacement|)`` multiset, in Angstrom.
+
+    Reconstructed the way a consumer does it — ``pos[t] - pos[s] + shift`` —
+    so it reads the *stored* positions through the *stored* shifts. That makes
+    it the observable that catches a build-time coordinate wrap leaking into
+    either of them.
+
+    Args:
+        nl: A built list.
+        pos: The positions it was built at ``(N, 3)`` in Angstrom.
+
+    Returns:
+        One entry per live edge, sorted (a multiset, duplicates kept).
+    """
+    n = nl.num_edges
+    source, target = nl.edge_index[:n, 0], nl.edge_index[:n, 1]
+    distance = torch.linalg.norm(pos[target] - pos[source] + nl.shifts[:n], dim=-1)
+    return sorted(
+        (min(s, t), max(s, t), round(d, 6))
+        for s, t, d in zip(source.tolist(), target.tolist(), distance.tolist(), strict=True)
+    )
+
+
+def _jittered_box() -> tuple[torch.Tensor, torch.Tensor]:
+    """512 atoms in a 24 A cube, jittered off the lattice — the pruning regime.
+
+    The 8x8x8 simple-cubic lattice at 3.0 A displaced by +/-0.4 A uniform under
+    ``torch.manual_seed(0)``. At ``r_build = 5.0 A`` the grid is 9x9x9 with
+    ``k_i = 2``, so the stencil searches 125 of 729 bins: real pruning, and no
+    lattice symmetry left for a broken stencil to hide behind. The closest any
+    pair comes to ``r_build`` is 3.8e-4 A (measured), clear of the 1e-9 tie band.
+
+    Returns:
+        ``(positions (512, 3), cell (3, 3))`` in Angstrom, ``float64``.
+    """
+    pos, cell = _lattice(n_side=8, spacing=3.0)
+    torch.manual_seed(0)
+    return pos + (torch.rand(pos.shape, dtype=torch.float64) * 2.0 - 1.0) * 0.4, cell
+
+
+def _triclinic_forty() -> tuple[torch.Tensor, torch.Tensor]:
+    """40 atoms in the golden triclinic cell — where the ``|f_i| <= 1/2`` lemma is tested.
+
+    The cell ``[[10,0,0],[6,8,0],[0,0,10]]`` has ``V = 800 A^3`` and
+    perpendicular widths ``w = (8, 8, 10) A`` against row norms that are all
+    ``10 A``, so a grid sized on the wrong quantity is immediately visible in
+    ``n_bins``. At ``cutoff = 3.0``, ``skin = 0.5`` the build radius ``3.5 A``
+    stays strictly inside the ``min_i w_i / 2 = 4.000 A`` guard, which is what
+    makes fractional-rounding minimum image and the kernel's sequential
+    reduction provably the same image.
+
+    Fractional coordinates are **literals**: generated offline once with
+    ``torch.manual_seed(1); torch.rand(40, 3, dtype=torch.float64)``, rounded to
+    6 decimals and pasted, so no RNG runs at test time and the geometry cannot
+    drift with a torch RNG change. As pasted, the closest approach to
+    ``r_build`` is 1.1e-3 A (measured), clear of the 1e-9 tie band.
+
+    Returns:
+        ``(positions (40, 3), cell (3, 3))`` in Angstrom, ``float64``.
+    """
+    cell = torch.tensor([[10.0, 0.0, 0.0], [6.0, 8.0, 0.0], [0.0, 0.0, 10.0]], dtype=torch.float64)
+    frac = torch.tensor(
+        [
+            [0.061053, 0.224555, 0.234253],
+            [0.177099, 0.556068, 0.109444],
+            [0.460913, 0.708365, 0.579776],
+            [0.496667, 0.510375, 0.329538],
+            [0.718206, 0.384511, 0.089797],
+            [0.117456, 0.640239, 0.196767],
+            [0.512447, 0.711838, 0.924872],
+            [0.999699, 0.892730, 0.876720],
+            [0.844972, 0.154448, 0.170536],
+            [0.984198, 0.812706, 0.435849],
+            [0.414321, 0.428408, 0.757762],
+            [0.922513, 0.964327, 0.176018],
+            [0.953894, 0.313379, 0.454398],
+            [0.295552, 0.187507, 0.243258],
+            [0.349296, 0.444072, 0.406873],
+            [0.285938, 0.803593, 0.321766],
+            [0.363903, 0.298510, 0.663531],
+            [0.255167, 0.414372, 0.839555],
+            [0.741833, 0.286491, 0.792859],
+            [0.500116, 0.897740, 0.105125],
+            [0.580914, 0.986660, 0.131524],
+            [0.239137, 0.304684, 0.515845],
+            [0.451441, 0.492893, 0.530066],
+            [0.264720, 0.167118, 0.548191],
+            [0.237952, 0.537363, 0.442156],
+            [0.645389, 0.537569, 0.224480],
+            [0.663186, 0.843878, 0.010876],
+            [0.280679, 0.930112, 0.543798],
+            [0.812327, 0.774969, 0.730758],
+            [0.992421, 0.728189, 0.232834],
+            [0.999747, 0.554004, 0.420049],
+            [0.541916, 0.864175, 0.431247],
+            [0.121250, 0.895592, 0.878425],
+            [0.912789, 0.968760, 0.415001],
+            [0.409411, 0.688470, 0.679978],
+            [0.641520, 0.401901, 0.487456],
+            [0.956891, 0.517200, 0.953366],
+            [0.854016, 0.955512, 0.083597],
+            [0.168356, 0.188330, 0.938444],
+            [0.354260, 0.202702, 0.506931],
+        ],
+        dtype=torch.float64,
+    )
+    return frac @ cell, cell
+
+
+def _unwrapped_lattice() -> tuple[torch.Tensor, torch.Tensor]:
+    """The 64-atom lattice with 8 atoms pushed out of the box by whole cell vectors.
+
+    Physically the identical system — a lattice vector is a symmetry — but the
+    coordinates are no longer inside ``[0, L)``, which is exactly the state an
+    unwrapped MD trajectory drifts into. The binned path wraps *fractionally* to
+    index its bins; this fixture is what pins that the wrap is an indexing
+    device only and never reaches the stored positions or the shifts.
+
+    Returns:
+        ``(positions (64, 3), cell (3, 3))`` in Angstrom, ``float64``.
+    """
+    pos, cell = _lattice(n_side=4, spacing=3.0)
+    moved = pos.clone()
+    rows = (0, 1, 2, 0, 1, 2, 0, 1)
+    signs = (1.0, 1.0, 1.0, -1.0, -1.0, -1.0, 1.0, -1.0)
+    for atom, (row, sign) in enumerate(zip(rows, signs, strict=True)):
+        moved[atom] = moved[atom] + sign * cell[row]
+    return moved, cell
+
+
+def _coincident_lattice() -> tuple[torch.Tensor, torch.Tensor]:
+    """The 64-atom lattice carrying both flavours of zero-distance pair.
+
+    ``pos[1]`` is moved onto ``pos[0]`` — coincident in real space — and
+    ``pos[2]`` onto ``pos[3] + a_1``, i.e. coincident only *through* a lattice
+    vector: raw separation 12 A, minimum image the zero vector. The compiled
+    kernel rejects both (``distances > 0``), so the binned path's ``r > 0``
+    filter has to reject exactly the same two and nothing else.
+
+    Every atom still sits on a lattice site, so the pair distances stay
+    ``{0, 3.0, 4.2426, 5.196, ...} A`` and the closest approach to
+    ``r_build = 5.0 A`` remains 0.196 A.
+
+    Returns:
+        ``(positions (64, 3), cell (3, 3))`` in Angstrom, ``float64``.
+    """
+    pos, cell = _lattice(n_side=4, spacing=3.0)
+    moved = pos.clone()
+    moved[1] = pos[0]
+    moved[2] = pos[3] + cell[0]
+    return moved, cell
+
+
+def _binned_pair(
+    pos: torch.Tensor,
+    cell: torch.Tensor,
+    *,
+    bin: float = 0.0,
+    cutoff: float = 3.5,
+    skin: float = 1.5,
+    capacity_factor: float = 1.35,
+) -> tuple[NeighborList, NeighborList]:
+    """Two lists over one geometry: the binned build and its ``bin=None`` oracle.
+
+    The compiled path is not modified by this link, which is precisely what
+    lets it stand as the reference for the new one.
+
+    Args:
+        pos: Positions ``(N, 3)`` in Angstrom.
+        cell: Cell vectors ``(3, 3)`` in Angstrom.
+        bin: Requested perpendicular bin thickness in Angstrom; ``0.0`` selects
+            the automatic ``r_build / 2``.
+        cutoff: Interaction cutoff in Angstrom.
+        skin: Verlet skin in Angstrom.
+        capacity_factor: Buffer headroom, as in the constructor.
+
+    Returns:
+        ``(binned, kernel)`` — both built at ``pos``.
+    """
+    binned = NeighborList(
+        cell=cell,
+        cutoff=cutoff,
+        positions=pos,
+        skin=skin,
+        bin=bin,
+        capacity_factor=capacity_factor,
+    )
+    kernel = NeighborList(
+        cell=cell,
+        cutoff=cutoff,
+        positions=pos,
+        skin=skin,
+        bin=None,
+        capacity_factor=capacity_factor,
+    )
+    return binned, kernel
+
+
+def _policy_schedule(pos: torch.Tensor) -> list[torch.Tensor]:
+    """One atom drifting 0.1 A per step along x, twelve steps.
+
+    Against ``skin = 1.0`` (half-skin 0.5 A) this crosses the rebuild criterion
+    twice, so both arms of the gate are exercised and neither half of a
+    comparison over it is vacuous. Every configuration keeps its closest pair
+    0.034 A away from ``r_build = 4.5 A`` (measured), so the per-rebuild edge-set
+    comparison never rides a float tie.
+
+    Args:
+        pos: The reference positions ``(N, 3)`` in Angstrom.
+
+    Returns:
+        Twelve position tensors, each ``(N, 3)`` in Angstrom.
+    """
+    return [_displaced(pos, 0.1 * step) for step in range(1, 13)]
+
+
+class TestNeighborListBinned:
+    """The pure-torch binned (cell-list) build path behind ``bin=``.
+
+    ``bin=None`` (the default) keeps the compiled O(N^2) kernel and is therefore
+    available as the *oracle*: for every fixture the two backends must return
+    the identical set of ``(source, target, shift)`` triples. Edge order is not
+    part of that contract (see :func:`_canonical_keys`); completeness,
+    duplicate-freedom and the ``0 < r <= r_build`` filter are.
+
+    Reference:
+        Allen, M. P.; Tildesley, D. J. *Computer Simulation of Liquids*, 2nd
+        ed.; Oxford University Press, 2017.
+        https://doi.org/10.1093/oso/9780198803195.001.0001 — cell lists, the
+        27-cell stencil and minimum-image validity.
+
+        Thompson, A. P. et al. *Comput. Phys. Commun.* **271** (2022) 108171,
+        https://doi.org/10.1016/j.cpc.2021.108171; binning policy in
+        ``lammps/lammps`` develop ``src/nbin_standard.cpp``
+        (``binsize_optimal = 0.5 * cutneighmax``), which is the ``bin=0.0``
+        automatic size adopted here.
+    """
+
+    # --- grid derivation: n_bins is the only public window onto the stencil ---
+
+    def test_the_auto_bin_is_half_the_build_radius(self):
+        """``bin=0.0`` requests ``b = r_build / 2`` (LAMMPS ``nbin_standard``).
+
+        On the 12 A cube at ``r_build = 5.0 A`` that is 2.5 A, and
+        ``n_i = floor(w_i / b) = floor(4.8) = 4``, giving effective bins of
+        3.0 A and ``k_i = ceil(5.0 / 3.0) = 2``. So ``2k + 1 = 5 > 4``: the raw
+        stencil wraps onto the same bin twice, which is the aliasing regime the
+        equivalence fixtures below are built to trip.
+        """
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=0.0)
+        assert nl.n_bins == (4, 4, 4)
+        assert isinstance(nl.n_bins, tuple)
+
+    def test_the_auto_grid_scales_with_the_cell(self):
+        """Same 2.5 A request in a 24 A cube: ``floor(24 / 2.5) = 9`` per axis.
+
+        The count is what makes the path O(N): 9^3 = 729 bins searched 125 at a
+        time, against the 4^3 = 64 bins of the 12 A cube where the stencil still
+        covers everything.
+        """
+        pos, cell = _lattice(n_side=8, spacing=3.0)
+        nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=0.0)
+        assert nl.n_bins == (9, 9, 9)
+
+    def test_the_auto_grid_follows_the_build_radius_not_the_cutoff(self):
+        """``skin=0.0`` moves ``r_build`` to 3.5 A, so the auto bin is 1.75 A and
+        ``floor(12 / 1.75) = 6``. A grid derived from ``cutoff`` would report the
+        same ``(6, 6, 6)`` here *only because* the skin is zero — which is why
+        the skinned case above pins ``(4, 4, 4)`` and this one pins the move."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=0.0, bin=0.0)
+        assert nl.n_bins == (6, 6, 6)
+
+    def test_an_explicit_bin_thickness_sizes_the_grid(self):
+        """``bin=5.0`` in the 12 A cube: ``floor(12 / 5) = 2`` bins of 6.0 A,
+        ``k_i = ceil(5.0 / 6.0) = 1``. The explicit knob is a *requested*
+        thickness — the effective one is ``w_i / n_i``, never smaller."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=5.0)
+        assert nl.n_bins == (2, 2, 2)
+
+    def test_a_bin_as_wide_as_the_cell_degenerates_to_one_bin(self):
+        """``max(1, floor(w_i / b))`` — a bin request at or beyond the cell width
+        must clamp to a single bin per axis rather than produce a zero-bin grid
+        (a division by zero in the flat-id arithmetic). One bin per axis is the
+        graceful all-pairs degeneration: correct, just not faster."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=12.0)
+        assert nl.n_bins == (1, 1, 1)
+
+    def test_the_grid_is_sized_on_perpendicular_widths_not_row_norms(self):
+        """The discriminating golden — triclinic sizing, asserted directly.
+
+        For ``[[10,0,0],[6,8,0],[0,0,10]]`` the perpendicular widths are
+        ``w = (8, 8, 10) A`` while **all three row norms are 10 A**. At
+        ``r_build = 3.5 A`` the auto bin is 1.75 A, so sizing on ``w`` gives
+        ``(floor(8/1.75), floor(8/1.75), floor(10/1.75)) = (4, 4, 5)`` where an
+        implementation sizing on ``||a_i||`` would report ``(5, 5, 5)``. That
+        wrong grid makes the bins thinner than requested along the sheared axes
+        and the stencil incomplete — a silently short neighbour list.
+        """
+        pos, cell = _triclinic_forty()
+        nl = NeighborList(cell=cell, cutoff=3.0, positions=pos, skin=0.5, bin=0.0)
+        assert nl.n_bins == (4, 4, 5)
+
+    def test_the_default_backend_reports_no_grid(self):
+        """``bin=None`` — passed or omitted — is the untouched kernel path.
+
+        ``n_bins is None`` is the observable that says "no grid was derived",
+        and the crystallographic 1152 edges say the build itself is bit-for-bit
+        the pre-link behaviour. The explicit form is constructed first so this
+        also pins that ``None`` is *accepted*, not just defaulted to.
+        """
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        explicit = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=None)
+        omitted = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5)
+        assert explicit.bin is None
+        assert explicit.n_bins is None
+        assert omitted.n_bins is None
+        assert explicit.num_edges == omitted.num_edges == 1152
+
+    # --- construction validation: refuse before allocating anything ---------
+
+    def test_a_negative_bin_is_refused(self):
+        """A negative thickness is a typo, and ``0.0`` already means "choose for
+        me" — so the message has to name both, or the reader's next guess is
+        that ``-1`` was the way to ask for the automatic size."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        with pytest.raises(ValueError, match=r"\bbin\b") as excinfo:
+            NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=-1.0)
+        assert "0.0" in str(excinfo.value)
+
+    def test_a_bin_far_below_the_build_radius_is_refused(self):
+        """A 0.05 A bin at ``r_build = 5.0 A`` is a hang, not a fine grid.
+
+        It gives 240 bins per axis, ``k_i = ceil(5.0 / 0.05) = 100`` and a
+        ``201^3 ~ 8.1e6``-offset stencil — a Python loop that never finishes.
+        Refused at construction against the half-width cap of 8, with the
+        measured numbers in the message: the implied 100 and the cap it broke.
+        """
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        with pytest.raises(ValueError, match=r"\bbin\b") as excinfo:
+            NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=0.05)
+        message = str(excinfo.value)
+        assert "100" in message
+        assert re.search(r"\b8\b", message), f"the stencil cap is not named in: {message}"
+        assert "0.0" in message
+
+    # --- equivalence with the kernel oracle ---------------------------------
+
+    def test_the_binned_path_matches_the_kernel_on_the_aliasing_lattice(self):
+        """PRIMARY falsification, in the regime that breaks a naive stencil.
+
+        64 atoms, ``n_bins = (4, 4, 4)``, ``k_i = 2``: the raw offsets
+        ``-2..2 (mod 4)`` visit bins 2 and 3 twice each, so an implementation
+        that does not reduce the stencil to *distinct residues* emits a large
+        share of the pairs twice — which the duplicate-free and count clauses
+        catch, and set equality alone would not.
+        """
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        binned, kernel = _binned_pair(pos, cell)
+        _assert_paths_agree(binned, kernel, pos)
+
+    @pytest.mark.parametrize(("skin", "edges"), [(0.0, 384), (1.5, 1152)], ids=["bare", "skinned"])
+    def test_the_binned_path_builds_at_the_build_radius(self, skin: float, edges: int):
+        """``skin`` sets the radius, ``bin`` only the search strategy.
+
+        Crystallography, not a fit: the simple-cubic lattice has 6 neighbours at
+        3.0 A and 12 more at ``3*sqrt(2) = 4.2426 A`` (the 8 body diagonals at
+        5.196 A stay out of both radii), so 64*6 = 384 edges at ``r_build =
+        3.5 A`` and 64*18 = 1152 at 5.0 A. A binned path that built at ``cutoff``
+        would report 384 in both rows, leaving the Verlet skin dead while every
+        energy still looked plausible.
+        """
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        binned, kernel = _binned_pair(pos, cell, skin=skin)
+        assert binned.num_edges == edges
+        assert kernel.num_edges == edges
+
+    def test_the_binned_path_matches_the_kernel_on_a_jittered_dense_box(self):
+        """512 atoms off-lattice: the stencil actually prunes, 125 bins of 729.
+
+        No lattice symmetry is left to make a half-wrong stencil look right, and
+        no count golden is available — the kernel is the oracle and the only
+        claim is that the two agree edge for edge.
+        """
+        pos, cell = _jittered_box()
+        binned, kernel = _binned_pair(pos, cell)
+        _assert_paths_agree(binned, kernel, pos)
+
+    def test_the_binned_path_matches_the_kernel_on_a_triclinic_cell(self):
+        """Where fractional rounding has to reproduce the kernel's reduction.
+
+        In a sheared cell the two minimum-image algorithms are visibly different
+        procedures; they agree only because ``r_build <= min_i w_i / 2`` bounds
+        every in-range image's fractional offset by 1/2. This fixture is the
+        measurement of that lemma.
+        """
+        pos, cell = _triclinic_forty()
+        binned, kernel = _binned_pair(pos, cell, cutoff=3.0, skin=0.5)
+        _assert_paths_agree(binned, kernel, pos)
+
+    def test_the_binned_path_matches_the_kernel_on_unwrapped_positions(self):
+        """Eight atoms sitting a whole cell vector outside the box.
+
+        The binned path wraps fractionally to index its bins. If that wrapped
+        copy leaked into the displacement or the shift, this fixture — the same
+        physical system as the plain lattice — would disagree with the kernel.
+        """
+        pos, cell = _unwrapped_lattice()
+        binned, kernel = _binned_pair(pos, cell)
+        _assert_paths_agree(binned, kernel, pos)
+
+    def test_a_whole_cell_translation_leaves_the_pair_distances_unchanged(self):
+        """The other half of the wrap invariant, read through the shifts.
+
+        Translating atoms by lattice vectors is a symmetry, so the multiset of
+        ``(low, high, ||pos[t] - pos[s] + shift||)`` must be *identical* to the
+        untranslated lattice's. Set equality against the kernel cannot see this:
+        it would also hold if both paths reconstructed the same wrong geometry.
+        """
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        moved, _ = _unwrapped_lattice()
+        binned = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=0.0)
+        translated = NeighborList(cell=cell, cutoff=3.5, positions=moved, skin=1.5, bin=0.0)
+        assert _pair_distances(translated, moved) == _pair_distances(binned, pos)
+
+    def test_both_paths_drop_the_zero_distance_pairs(self):
+        """``0 < r <= r_build`` filter parity, both flavours of ``r == 0``.
+
+        Atom 1 is coincident with atom 0 in real space; atom 2 is coincident
+        with atom 3 only through ``a_1``, so its raw separation is 12 A and its
+        minimum image is the zero vector. The compiled backends reject both
+        (``distances > 0`` in the C++ path, ``distance2 == 0`` in the CUDA one),
+        so a binned path filtering on ``r <= r_build`` alone would build two
+        self-cancelling edges the oracle does not have — and, worse, a division
+        by zero anywhere a unit vector is taken.
+        """
+        pos, cell = _coincident_lattice()
+        binned, kernel = _binned_pair(pos, cell)
+        _assert_paths_agree(binned, kernel, pos)
+        pairs = {(low, high) for low, high, _ in _canonical_keys(binned)}
+        assert (0, 1) not in pairs
+        assert (2, 3) not in pairs
+
+    def test_the_edge_set_is_independent_of_the_bin_size(self):
+        """``bin`` is a cost knob, never a physics knob.
+
+        The sweep spans every regime the derivation has: 0.0 and 2.5 A give the
+        9x9x9 pruning grid, 5.0 A a coarse 4x4x4 one, and 24.0 A the single-bin
+        full degeneration. A bin size that changes the edge set is a broken
+        stencil derivation, full stop — so all four are compared against the one
+        kernel oracle rather than against each other.
+        """
+        pos, cell = _jittered_box()
+        kernel = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=None)
+        for thickness in (0.0, 2.5, 5.0, 24.0):
+            binned = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=thickness)
+            _assert_paths_agree(binned, kernel, pos)
+
+    # --- orthogonality with the rest of the class ---------------------------
+
+    def test_the_rebuild_policy_is_untouched_by_the_binned_backend(self):
+        """``skin`` decides the radius, ``bin`` the strategy, ``update`` the moment.
+
+        Over one scripted drift the gate's decisions and all three counters must
+        be identical with and without a grid: the policy reads displacements and
+        a clock, neither of which the build backend touches.
+        """
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        binned, kernel = _binned_pair(pos, cell, skin=1.0, capacity_factor=4.0)
+        schedule = _policy_schedule(pos)
+        by_binned = [binned.update(step) for step in schedule]
+        by_kernel = [kernel.update(step) for step in schedule]
+        assert set(by_kernel) == {True, False}  # the schedule exercises both arms
+        assert by_binned == by_kernel
+        assert (binned.ago, binned.rebuild_count, binned.ndanger) == (
+            kernel.ago,
+            kernel.rebuild_count,
+            kernel.ndanger,
+        )
+
+    def test_the_live_edges_after_a_policy_rebuild_match_the_kernel(self):
+        """The same schedule, but checking *what* was built, not *when*.
+
+        A rebuild driven through ``update`` goes down the same dispatch as the
+        constructor's initial build, so the equivalence has to survive it — a
+        path that only agreed on the first build would leave the run drifting
+        away from the oracle one rebuild at a time.
+        """
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        binned, kernel = _binned_pair(pos, cell, skin=1.0, capacity_factor=4.0)
+        compared = 0
+        for moved in _policy_schedule(pos):
+            rebuilt = binned.update(moved)
+            assert kernel.update(moved) is rebuilt
+            if rebuilt:
+                _assert_paths_agree(binned, kernel, moved)
+                compared += 1
+        assert compared == 2  # the schedule crosses the half-skin twice
+
+    def test_a_cast_carries_the_grid_and_the_inverse_cell(self):
+        """``to(dtype)`` must move the binned state with the buffers.
+
+        The stencil and the cached inverse cell are the two tensors nothing else
+        in the class owns, so they are exactly what a ``to`` that only knows
+        about ``edge_index`` / ``shifts`` / ``cell`` / ``_x_hold`` leaves behind
+        — in the wrong dtype (a float64 inverse cell against float32 positions
+        promotes *silently*) or on the wrong device. The rebuilt 1152 is the
+        cheapest observable that both survived.
+        """
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=0.0)
+        nl.to(torch.float32)
+        nl.rebuild(pos.to(torch.float32))
+        assert nl.n_bins == (4, 4, 4)
+        assert nl.num_edges == 1152
+        assert nl.edge_index.dtype == torch.long  # indices are never cast
+
+    def test_the_protocol_does_not_learn_about_bins(self):
+        """The build backend is an implementation detail of *this* class.
+
+        ``NeighborStrategy`` stays as link 04 left it: a binned list satisfies
+        it unchanged, and ``bin`` / ``n_bins`` must not appear in the protocol,
+        which would be creep that every other strategy — including the stubs in
+        this file — would then have to carry.
+        """
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.5, bin=0.0)
+        assert isinstance(nl, NeighborStrategy)
+        assert "bin" not in NeighborStrategy.__annotations__
+        assert "n_bins" not in NeighborStrategy.__annotations__
