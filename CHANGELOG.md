@@ -46,6 +46,8 @@ models.
 - GitHub Actions CI + pre-commit (ruff / ty), channel-based logging via `mollog`.
 
 ### Changed
+
+- `molix.md.NeighborList` gains a TensorDict bind surface: `build(batch)` writes the live `edges.edge_index` / `edges.shifts` buffers into the batch by reference (single owner — `PeriodicPotentialForceField._bind_neighbors` is gone) and `update()` now accepts a batch or a raw positions tensor.
 - MACE family performance + convention fixes (review-driven).
   `MACEMatpes(use_fallback=)` now defaults to `False` (fused cuEq kernels —
   measured ~36x faster per MD step; forces are always autograd there, so the

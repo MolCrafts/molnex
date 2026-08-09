@@ -208,6 +208,31 @@ class TestPeriodicPotentialForceField:
         assert nl.rebuild_count == 1
         assert not torch.equal(stale.energy, fresh.energy)
 
+    def test_a_cast_keeps_the_rebuild_visible(self):
+        """``.to(dtype)`` must leave the by-reference tie alive.
+
+        ``TensorDict.apply`` in the parent ``_apply`` produces *new* leaf
+        tensors and ``NeighborList.to`` rebinds ``shifts`` to a new tensor, so a
+        cast severs the tie twice over unless the owner re-binds afterwards — a
+        later rebuild would then update buffers the potential no longer sees,
+        and the PES would freeze silently.
+
+        Asserted through the public energy rather than through ``_work`` on
+        purpose: this is the property a user has, and it must survive the
+        ownership move of the binding knowledge onto ``NeighborList.build``.
+        """
+        pos, cell = _cubic_lattice()
+        nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, capacity_factor=8.0)
+        ff = PeriodicPotentialForceField(
+            _ShiftAwarePairPotential(3.5), _periodic_template(pos), neighbors=nl
+        ).to(torch.float32)
+        compressed = (pos * 0.8).to(torch.float32)
+        stale = ff(compressed)
+        ff.rebuild_neighbors(compressed)
+        fresh = ff(compressed)
+        assert nl.rebuild_count == 1
+        assert not torch.equal(stale.energy, fresh.energy)
+
 
 class TestHarmonicForceField:
     def test_energy_and_force_are_consistent(self):

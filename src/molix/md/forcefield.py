@@ -179,6 +179,14 @@ class PeriodicPotentialForceField(PotentialForceField):
     ``(capacity, 3)`` **by reference**, so an in-place rebuild is visible to
     the potential with every tensor shape unchanged (CUDA-graph safe).
 
+    The **list** owns that namespace: this class calls
+    :meth:`~molix.md.neighbors.NeighborList.build` on the working batch at
+    construction and again after every cast, and never writes ``edges`` itself.
+    ``build`` also validates that the template describes the system the list
+    was constructed for (atom count, device/dtype, and its ``graphs.cell`` if
+    it carries one), so a mismatched pair is refused here rather than producing
+    a silently wrong PES.
+
     The potential's ``forward(td)`` must consume ``edges.shifts`` for periodic
     correctness (e.g. :class:`molzoo.MACEMatpes`); dead padding edges
     self-annihilate through the cutoff envelope.
@@ -202,29 +210,25 @@ class PeriodicPotentialForceField(PotentialForceField):
     ) -> None:
         super().__init__(potential, template, energy_scale=energy_scale)
         self.neighbors = neighbors
-        self._bind_neighbors()
-
-    def _bind_neighbors(self) -> None:
-        """Point the working batch's ``edges`` at the list's live buffers."""
-        self._work["edges"] = TensorDict(
-            {"edge_index": self.neighbors.edge_index, "shifts": self.neighbors.shifts},
-            batch_size=[self.neighbors.capacity],
-        )
+        self.neighbors.build(self._work)
 
     def _apply(self, fn, recurse: bool = True):
-        """Cast the neighbour list alongside the module, then re-bind.
+        """Cast the neighbour list alongside the module, then let it re-bind.
 
-        ``TensorDict.apply`` in the parent produces new leaf tensors, which
-        would silently sever the by-reference tie to the list's buffers — a
-        later ``rebuild`` would then update tensors the potential no longer
-        sees.
+        Both halves are still required. ``TensorDict.apply`` in the parent
+        produces new leaf tensors and ``NeighborList.to`` rebinds the list's
+        buffers, so a cast severs the by-reference tie twice over — a later
+        ``rebuild`` would update tensors the potential no longer sees, and the
+        PES would freeze silently. Only the *knowledge of how to bind* lives
+        elsewhere now: :meth:`~molix.md.neighbors.NeighborList.build` owns the
+        working batch's ``edges`` namespace, and this class merely says when.
         """
         module = super()._apply(fn, recurse)
         neighbors = getattr(self, "neighbors", None)
         if neighbors is not None:
             ref = self._work["atoms", "pos"]
             neighbors.to(ref.device, ref.dtype)
-            self._bind_neighbors()
+            self.neighbors.build(self._work)
         return module
 
     def rebuild_neighbors(self, pos: torch.Tensor) -> None:

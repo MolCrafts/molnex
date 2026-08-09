@@ -246,11 +246,19 @@ TensorDict (batch_size=[])
 ├── "edges": TensorDict (batch_size=[E])
 │   ├── edge_index: source-target pairs (E, 2)   # [:,0]=source, [:,1]=target
 │   ├── edge_diff: edge vectors (E, 3)            # pos[target] - pos[source]
-│   └── edge_dist: edge distances (E,)
+│   ├── edge_dist: edge distances (E,)
+│   └── shifts: periodic remainders (E, 3)  [optional]  # pos[t]-pos[s]+shift = min-image vector, Å
 └── "graphs": TensorDict (batch_size=[B])  [optional]
     ├── num_atoms: (B,)
+    ├── cell: cell vectors (B, 3, 3)  [optional]  # Å; read by the sonata stress path
     └── <targets>
 ```
+
+`("edges", "shifts")` is written by the MD bind path (`molix.md.NeighborList.build`)
+and read by `molzoo.mace` potentials; `("graphs", "cell")` is read by
+`molpot.composition.sonata` (stress). On the MD bind path the `edges`
+namespace has `batch_size=[capacity]` with live edges in `[0, num_edges)`
+and dead padding beyond — the list owns `edges` once bound.
 
 Access: `batch["atoms", "Z"]`, `batch["edges", "edge_dist"]`. Encoders
 mutate the batch in place, writing `node_features` under `atoms` and

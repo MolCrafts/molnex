@@ -76,6 +76,25 @@ state = md.run(pos, vel, n_steps=25_000)
 See `benchmarks/verify_md_ljcut_nve.py` for the full melt-benchmark version
 with energy-conservation checks.
 
+A batch `TensorDict` can carry the live neighbour buffers directly —
+`build(batch)` binds `edges.edge_index` / `edges.shifts` **by reference**, so
+every in-place rebuild is visible through the batch with no re-binding:
+
+```python
+nl = NeighborList(cell=cell, cutoff=r_cut, positions=pos, skin=1.0)
+nl.build(batch)                 # bind + first build; returns the same batch
+out = potential(nl.build(batch))   # composes with forward(td) -> td
+
+for _ in range(n_steps):
+    ...
+    nl.update(batch)            # per step: policy-gated rebuild
+```
+
+Note the two-statement idiom: `nl.build(batch).update(batch)` would call
+**`TensorDict.update`** (a silent self-merge), not the neighbour policy —
+`build` returns the batch for pipeline composition, so the policy call goes
+through the list.
+
 ## Observing a run: MD hooks
 
 `MDRunner` drives a small, MD-specific hook protocol (`MDHook`) — these are
@@ -85,8 +104,9 @@ with energy-conservation checks.
   sharded to disk so host memory stays bounded.
 - `MDCheckpointHook` — restartable `(pos, vel, step)` every N steps, written
   atomically; doubles as a heartbeat line in the log.
-- `NeighborListHook` — the rebuild cadence (added for you by
-  `MD(rebuild_every=)`).
+- `NeighborListHook` — legacy step-start rebuild (the `MD(rebuild_every=)`
+  cadence itself runs inside `Integrator.eval_force`, not through this hook;
+  see the warning in its docstring).
 
 A custom hook overrides any of `on_run_start` / `on_step_start` /
 `on_step_end(runner, step, obs)` / `on_run_end`; `obs` is a typed

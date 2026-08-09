@@ -5,6 +5,7 @@ from typing import NamedTuple
 
 import pytest
 import torch
+from tensordict import TensorDict
 
 import molix.data.tasks.neighbor
 import molix.md
@@ -748,3 +749,368 @@ class TestNeighborListPolicy:
         counts = [_run_lj_lattice(skin=skin)[0].rebuild_count for skin in (0.0, 0.25, 0.5, 1.0)]
         assert counts == sorted(counts, reverse=True)
         assert counts[-1] < counts[0]
+
+
+def _batch(pos: torch.Tensor, cell: torch.Tensor | None = None) -> TensorDict:
+    """A single-system MD working batch over ``pos``, optionally carrying a cell.
+
+    The same shape ``_periodic_template`` builds in ``test_forcefield.py`` — the
+    batch :class:`~molix.md.forcefield.PeriodicPotentialForceField` binds into —
+    plus the optional ``("graphs", "cell")`` the bind path validates.
+
+    ``graphs`` carries ``batch_size=[]`` on purpose: the container must not be
+    the thing that decides the cell's leading dimension, or ``(3, 3)`` and
+    ``(1, 3, 3)`` could not both be stored and the accept/refuse decision under
+    test would be made by the fixture instead of by ``build``.
+
+    Args:
+        pos: Positions ``(N, 3)`` in Angstrom.
+        cell: Optional cell vectors in Angstrom, any shape — the point of
+            several of these tests is that ``build`` judges the shape.
+
+    Returns:
+        A batch ``TensorDict`` with root ``batch_size=[]``.
+    """
+    n = int(pos.shape[0])
+    data: dict[str, TensorDict] = {
+        "atoms": TensorDict(
+            {
+                "pos": pos,
+                "Z": torch.ones(n, dtype=torch.long),
+                "batch": torch.zeros(n, dtype=torch.long),
+            },
+            batch_size=[n],
+        )
+    }
+    if cell is not None:
+        data["graphs"] = TensorDict({"cell": cell}, batch_size=[])
+    return TensorDict(data, batch_size=[])
+
+
+class TestNeighborListBind:
+    """``build(batch)`` / ``update(batch)`` — the TensorDict side of the list.
+
+    The list owns ``edges`` once bound: ``build`` refreshes the buffers at
+    ``batch["atoms", "pos"]``, validates that the batch describes the system the
+    list was constructed for, writes the *live* buffers into ``batch["edges"]``
+    **by reference** and hands the same batch back so it composes with the
+    repo-wide ``forward(td) -> td`` convention.
+    """
+
+    # --- happy path: bind -------------------------------------------------
+
+    def test_build_returns_the_argument_itself(self):
+        """``potential(nl.build(batch))`` only composes if the return is the
+        argument — a copy would leave the caller holding an unbound batch."""
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        batch = _batch(pos)
+        assert nl.build(batch) is batch
+
+    def test_build_binds_the_live_buffers_by_reference(self):
+        """The load-bearing property of the whole link: **identity**, not equality.
+
+        A container that copied on assignment would give the potential a
+        snapshot, so every later in-place rebuild would be invisible and the PES
+        would silently freeze. This assertion is that alarm.
+        """
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        batch = nl.build(_batch(pos))
+        assert batch["edges", "edge_index"] is nl.edge_index
+        assert batch["edges", "shifts"] is nl.shifts
+
+    def test_bound_edges_span_the_capacity_not_the_live_count(self):
+        """Fixed-capacity buffers go in whole: the tail of dead padding edges is
+        part of the contract (constant shapes for a CUDA graph), so the bound
+        namespace is sized by ``capacity``, never by ``num_edges``."""
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        batch = nl.build(_batch(pos))
+        assert batch["edges"].batch_size == torch.Size([nl.capacity])
+
+    def test_bound_edges_hold_exactly_the_index_and_the_shifts(self):
+        """The bind writes the two keys the periodic potentials read and nothing
+        else — a derived ``edge_diff`` / ``edge_dist`` written here would be a
+        stale straight-through value the moment an atom moves."""
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        batch = nl.build(_batch(pos))
+        assert set(batch["edges"].keys()) == {"edge_index", "shifts"}
+
+    def test_build_is_never_counted_as_a_rebuild(self):
+        """``rebuild_count`` means "rebuilds driven during the run". ``build`` is
+        a binding operation — it also runs on every ``.to()`` re-sync — so
+        counting it would make a dtype cast look like physics."""
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        assert nl.rebuild_count == 0
+        nl.build(_batch(pos))
+        assert nl.rebuild_count == 0
+        nl.rebuild(pos)
+        nl.build(_batch(pos))
+        assert nl.rebuild_count == 1
+
+    def test_build_restarts_the_policy_clock(self):
+        """The buffers are fresh after a bind, so the ``ago`` clock the
+        ``every`` / ``delay`` gate runs on has to start there too — otherwise the
+        next ``update`` measures a staleness that was just eliminated."""
+        nl, pos = _policy_list(skin=1.0, every=4, capacity_factor=4.0)
+        frozen = pos.clone()
+        assert [nl.update(frozen) for _ in range(2)] == [False, False]
+        assert nl.ago == 2
+        nl.build(_batch(pos))
+        assert nl.ago == 0
+
+    def test_build_uses_the_positions_in_the_batch(self):
+        """The bind is also a build: it must land on the batch's geometry, not
+        re-emit the constructor's. Measured against a list constructed directly
+        at the dilated lattice — the same kernel, so any difference is the bind
+        having built at the wrong positions."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
+        assert nl.num_edges == 1152  # crystallography, link 04
+        dilated = pos * 1.05
+        reference = NeighborList(
+            cell=cell, cutoff=3.5, positions=dilated, skin=1.5, capacity_factor=4.0
+        )
+        nl.build(_batch(dilated))
+        assert reference.num_edges != 1152
+        assert nl.num_edges == reference.num_edges
+
+    # --- liveness of the tie ----------------------------------------------
+
+    def test_a_forced_rebuild_is_visible_through_the_bound_batch(self):
+        """An in-place rebuild must reach the batch with no re-binding at all.
+
+        The value read is not redundant with the identity check: a stale
+        *shift* on a surviving index pair is the frozen-shift failure mode, and
+        it is invisible to an index comparison alone.
+        """
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl, _ = _policy_list(skin=0.0, capacity_factor=4.0)
+        batch = nl.build(_batch(pos))
+        before = nl.num_edges
+        compressed = pos * 0.8  # second-neighbour pairs enter the cutoff
+        nl.rebuild(compressed)
+        reference = NeighborList(cell=cell, cutoff=3.5, positions=compressed, capacity_factor=4.0)
+        assert nl.num_edges != before
+        assert nl.num_edges == reference.num_edges
+        assert batch["edges", "edge_index"] is nl.edge_index
+        assert batch["edges", "shifts"] is nl.shifts
+        n = nl.num_edges
+        assert torch.equal(batch["edges", "edge_index"][:n], reference.edge_index[:n])
+        assert torch.equal(batch["edges", "shifts"][:n], reference.shifts[:n])
+
+    def test_a_policy_rebuild_is_visible_through_the_bound_batch(self):
+        """Same liveness, driven through the batch entry point instead: the
+        per-step idiom is ``nl.update(batch)``, so that is the path that has to
+        keep the tie alive."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl, _ = _policy_list(skin=0.0, capacity_factor=4.0)
+        batch = nl.build(_batch(pos))
+        before = nl.num_edges
+        compressed = pos * 0.8
+        assert nl.update(_batch(compressed)) is True
+        reference = NeighborList(cell=cell, cutoff=3.5, positions=compressed, capacity_factor=4.0)
+        assert nl.num_edges != before
+        assert nl.num_edges == reference.num_edges
+        assert batch["edges", "edge_index"] is nl.edge_index
+        assert batch["edges", "shifts"] is nl.shifts
+        n = nl.num_edges
+        assert torch.equal(batch["edges", "edge_index"][:n], reference.edge_index[:n])
+        assert torch.equal(batch["edges", "shifts"][:n], reference.shifts[:n])
+
+    def test_a_bare_cast_severs_the_tie(self):
+        """The documented consequence, pinned so the trade stays visible.
+
+        ``to(dtype)`` rebinds ``shifts`` to a new tensor, so a batch bound
+        beforehand keeps pointing at the old one. Auto-re-binding from inside
+        ``to()`` was rejected — it would make the list hold a reference to a
+        batch it does not own — so the **owner** re-binds; the force-field half
+        of this trade is pinned in ``test_forcefield.py``.
+        """
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        batch = nl.build(_batch(pos))
+        nl.to(torch.float32)
+        assert batch["edges", "shifts"] is not nl.shifts
+        assert batch["edges", "shifts"].dtype == torch.float64
+        assert nl.shifts.dtype == torch.float32
+
+    # --- the list owns ``edges`` once bound --------------------------------
+
+    def test_build_replaces_a_stale_edges_namespace_wholesale(self):
+        """Whatever was under ``edges`` is dropped, not merged.
+
+        A precomputed ``edge_diff`` / ``edge_dist`` pair — exactly what
+        ``PotentialForceField._STALE_EDGE_KEYS`` strips at construction — would
+        be used straight through by a potential and freeze the PES, and a
+        surviving shorter ``edge_index`` would disagree with the capacity.
+        """
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        batch = _batch(pos)
+        batch["edges"] = TensorDict(
+            {
+                "edge_index": torch.zeros(3, 2, dtype=torch.long),
+                "edge_diff": torch.zeros(3, 3, dtype=torch.float64),
+                "edge_dist": torch.zeros(3, dtype=torch.float64),
+            },
+            batch_size=[3],
+        )
+        nl.build(batch)
+        assert set(batch["edges"].keys()) == {"edge_index", "shifts"}
+        assert batch["edges"].batch_size == torch.Size([nl.capacity])
+
+    # --- validation: the batch must describe *this* system -----------------
+
+    def test_build_without_positions_names_the_missing_key(self):
+        """``KeyError(('atoms', 'pos'))`` from three frames deep is the classic
+        two-tier data-contract confusion; the bind names the key it wanted."""
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        n = int(pos.shape[0])
+        batch = TensorDict(
+            {"atoms": TensorDict({"Z": torch.ones(n, dtype=torch.long)}, batch_size=[n])},
+            batch_size=[],
+        )
+        with pytest.raises(ValueError, match="pos") as excinfo:
+            nl.build(batch)
+        assert "atoms" in str(excinfo.value)
+
+    def test_build_rejects_a_different_atom_count(self):
+        """A different ``N`` is a different system: ``_x_hold.copy_`` would raise
+        somewhere unhelpful, and the capacity was sized for the original."""
+        nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
+        eight_atoms, _ = _lattice(n_side=2, spacing=3.0)
+        with pytest.raises(ValueError, match=r"\b8\b") as excinfo:
+            nl.build(_batch(eight_atoms))
+        assert "64" in str(excinfo.value)
+
+    def test_build_rejects_recast_positions(self):
+        """No silent cast: a float32 ``pos`` differenced against a float64
+        ``_x_hold`` promotes silently — a mixed-precision comparison nobody
+        asked for — so the bind names both sides and the owner casts."""
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        with pytest.raises(ValueError, match="float32") as excinfo:
+            nl.build(_batch(pos.to(torch.float32)))
+        assert "float64" in str(excinfo.value)
+
+    def test_build_rejects_positions_on_another_device(self):
+        """The ``meta`` device stands in for a real second device: validation
+        precedes any kernel call, so this needs no CUDA in CI."""
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        elsewhere = torch.empty_like(pos, device="meta")
+        with pytest.raises(ValueError, match="meta") as excinfo:
+            nl.build(_batch(elsewhere))
+        assert "cpu" in str(excinfo.value)
+
+    def test_build_accepts_the_constructor_cell(self):
+        """A batch may carry its cell; agreeing with the list's is the point of
+        checking it. The constructor cell stays the **owner** — the batch's copy
+        is validated, never adopted."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
+        before = nl.cell.clone()
+        nl.build(_batch(pos, cell))
+        assert nl.num_edges == 1152
+        assert torch.equal(nl.cell, before)
+
+    def test_build_accepts_a_single_system_batched_cell(self):
+        """``(1, 3, 3)`` is what a collated batch's ``graphs`` namespace holds for
+        one system, so the bind must read through the leading batch dim."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
+        before = nl.cell.clone()
+        nl.build(_batch(pos, cell.unsqueeze(0)))
+        assert nl.num_edges == 1152
+        assert torch.equal(nl.cell, before)
+
+    def test_build_rejects_a_disagreeing_cell(self):
+        """A cell the list did not build against silently invalidates every
+        frozen shift, so a disagreement is refused rather than adopted — 0.01 A
+        is far below anything physical and far above the fp32 round-trip
+        tolerance the check allows."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
+        before = nl.cell.clone()
+        perturbed = cell.clone()
+        perturbed[0, 0] += 0.01
+        with pytest.raises(ValueError, match="cell"):
+            nl.build(_batch(pos, perturbed))
+        assert torch.equal(nl.cell, before)
+
+    def test_build_rejects_a_multi_system_cell(self):
+        """This list is single-system: one cell, one ``_x_hold``, one capacity.
+        A ``B > 1`` batch has no meaningful semantics here and is refused by
+        name rather than silently reduced to its first row."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
+        with pytest.raises(ValueError, match=r"\b2\b") as excinfo:
+            nl.build(_batch(pos, cell.repeat(2, 1, 1)))
+        assert "cell" in str(excinfo.value)
+
+    # --- one ``update``, two input types -----------------------------------
+
+    def test_the_batch_and_tensor_paths_decide_alike(self):
+        """The dispatch is a type test at the top of one method, so both inputs
+        must trace the same policy exactly: same decisions, same bookkeeping,
+        same buffers. A schedule that both rebuilds and holds, so neither arm of
+        the comparison is vacuous."""
+        nl_tensor, pos = _policy_list(skin=1.0, capacity_factor=4.0)
+        nl_batch, _ = _policy_list(skin=1.0, capacity_factor=4.0)
+        schedule = [_displaced(pos, 0.1 * k) for k in range(1, 13)]
+        by_tensor = [nl_tensor.update(step) for step in schedule]
+        by_batch = [nl_batch.update(_batch(step)) for step in schedule]
+        assert set(by_tensor) == {True, False}  # the schedule exercises both arms
+        assert by_batch == by_tensor
+        assert (nl_batch.ago, nl_batch.rebuild_count, nl_batch.ndanger) == (
+            nl_tensor.ago,
+            nl_tensor.rebuild_count,
+            nl_tensor.ndanger,
+        )
+        assert nl_batch.num_edges == nl_tensor.num_edges
+        assert torch.equal(nl_batch.edge_index, nl_tensor.edge_index)
+        assert torch.equal(nl_batch.shifts, nl_tensor.shifts)
+
+    def test_update_validates_a_batch_exactly_as_build_does(self):
+        """Shared validation, not a second copy: a batch whose ``pos`` was
+        re-cast must fail loud on the hot path too, instead of promoting
+        silently against ``_x_hold`` for the rest of the run."""
+        nl, pos = _policy_list(skin=1.0, capacity_factor=4.0)
+        with pytest.raises(ValueError, match="float32") as excinfo:
+            nl.update(_batch(pos.to(torch.float32)))
+        assert "float64" in str(excinfo.value)
+
+    def test_the_dispatch_has_no_twin_entry_points(self):
+        """One method, two accepted types — ``update_td`` / ``update_pos`` twins
+        are rejected by design: callers would have to know which one their
+        driver holds, and the policy state would live behind two doors."""
+        assert not hasattr(molix.md.neighbors, "update_td")
+        assert not hasattr(molix.md.neighbors, "update_pos")
+        assert not hasattr(NeighborList, "update_td")
+        assert not hasattr(NeighborList, "update_pos")
+
+    # --- protocol -----------------------------------------------------------
+
+    def test_a_list_without_build_fails_the_widened_protocol(self):
+        """``PeriodicPotentialForceField`` calls ``build`` through the
+        ``NeighborStrategy`` annotation, so the protocol has to actually
+        *require* it: a stub carrying every link-04 member but no ``build`` must
+        no longer pass."""
+
+        class _PolicyWithoutBuild:
+            edge_index: torch.Tensor = torch.zeros(1, 2, dtype=torch.long)
+            shifts: torch.Tensor = torch.zeros(1, 3)
+            num_edges: int = 0
+            capacity: int = 1
+            cutoff: float = 3.5
+            skin: float = 0.0
+
+            def rebuild(self, positions: torch.Tensor) -> None:
+                """No-op build."""
+
+            def update(self, positions: TensorDict | torch.Tensor) -> bool:
+                return False
+
+            def to(
+                self,
+                device: torch.device | str | torch.dtype | None = None,
+                dtype: torch.dtype | None = None,
+            ) -> "_PolicyWithoutBuild":
+                return self
+
+        assert not isinstance(_PolicyWithoutBuild(), NeighborStrategy)

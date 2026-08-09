@@ -113,6 +113,26 @@ References:
     were **not** re-verified here; they are cited for attribution only. Every
     equation above is verified against the Nordlund notes and the LAMMPS source.
 
+Owning ``edges``: the bind surface
+----------------------------------
+
+Two entry points, two audiences, one owner. The MD hot path drives the list
+with raw ``(N, 3)`` position tensors in Angstrom (:meth:`NeighborList.rebuild`
+forces a build, :meth:`NeighborList.update` applies the policy); a TensorDict
+caller drives it with the batch itself (:meth:`NeighborList.build` builds *and*
+binds, :meth:`NeighborList.update` again — one method with an ``isinstance``
+dispatch at the top, never an ``update_td`` / ``update_pos`` pair of twins).
+
+**The list owns ``edges`` once bound.** :meth:`NeighborList.build` writes
+``batch["edges"]`` as a ``TensorDict`` holding the live ``edge_index`` /
+``shifts`` buffers **by reference**, replacing whatever was there — including a
+precomputed ``edge_diff`` / ``edge_dist`` pair, which a potential would
+otherwise consume straight through as a value and so freeze the PES. Because
+every rebuild is in place, that tie survives all later ``rebuild`` / ``update``
+calls with no re-binding: the potential simply sees the current neighbour set.
+It does **not** survive :meth:`NeighborList.to`, which rebinds the buffers to
+new tensors — the owner re-binds (see ``PeriodicPotentialForceField._apply``).
+
 Two ``NeighborList`` classes, deliberately
 -----------------------------------------
 
@@ -145,6 +165,7 @@ import math
 from typing import Protocol, runtime_checkable
 
 import torch
+from tensordict import TensorDict, TensorDictBase
 
 # The one owner of kernel-output normalisation (pbc handling, NaN-padding
 # strip, symmetry expansion, edge-sign convention); reimplementing that here
@@ -238,10 +259,22 @@ class NeighborStrategy(Protocol):
         """Recompute the neighbour list at ``positions``, in place."""
         ...
 
-    def update(self, positions: torch.Tensor) -> bool:
+    def build(self, batch: TensorDict) -> TensorDict:
+        """Rebuild at ``batch["atoms", "pos"]`` and bind the buffers into ``batch``.
+
+        Returns the same batch object, with ``batch["edges"]`` holding the
+        strategy's live buffers by reference — the strategy owns that namespace
+        from here on. ``PeriodicPotentialForceField`` calls this through this
+        annotation, at construction and after every ``.to()``.
+        """
+        ...
+
+    def update(self, positions: TensorDict | torch.Tensor) -> bool:
         """Rebuild at ``positions`` if the strategy's policy says so.
 
-        Called once per force evaluation. Returns whether a rebuild happened.
+        Called once per force evaluation, with either the raw ``(N, 3)``
+        positions of the MD hot path or the batch carrying them. Returns
+        whether a rebuild happened.
         """
         ...
 
@@ -264,9 +297,11 @@ class NeighborList:
     :meth:`to` instead (see ``PeriodicPotentialForceField._apply``).
 
     Two entry points drive it: :meth:`rebuild` forces a build unconditionally,
-    :meth:`update` applies the ``every`` / ``delay`` / ``check`` policy. See the
-    module docstring for the half-skin criterion, the unwrapped-positions
-    invariant and what ``check=False`` costs.
+    :meth:`update` applies the ``every`` / ``delay`` / ``check`` policy. A
+    TensorDict caller uses :meth:`build` (force a build *and* bind the buffers
+    into the batch) and the same :meth:`update`, which takes either input type.
+    See the module docstring for the half-skin criterion, the
+    unwrapped-positions invariant and what ``check=False`` costs.
 
     Args:
         cell: Cell vectors ``(3, 3)`` in Angstrom, one vector per row.
@@ -462,6 +497,125 @@ class NeighborList:
         self.ago = 0
         self._x_hold.copy_(positions.detach().to(self._x_hold.dtype))
 
+    def _positions_from(self, batch: TensorDictBase) -> torch.Tensor:
+        """Validate that ``batch`` describes *this* system; return its positions.
+
+        Shared by :meth:`build` and the batch arm of :meth:`update`, so the
+        per-step path cannot drift from the bind-time path. The checks are
+        metadata compares — key presence, shape, ``device``, ``dtype`` — and so
+        cost the hot loop nothing measurable; the single value read is the
+        optional cell comparison, and an MD working batch carries no cell.
+
+        Args:
+            batch: Batch ``TensorDict`` with positions at ``("atoms", "pos")``
+                in Angstrom, optionally carrying ``("graphs", "cell")``.
+
+        Returns:
+            The batch's positions ``(N, 3)`` in Angstrom — the *same* tensor,
+            never a cast copy.
+
+        Raises:
+            ValueError: If ``("atoms", "pos")`` is missing; if its shape is not
+                ``(N, 3)`` for the ``N`` this list was constructed with; if its
+                device or dtype differ from the list's buffers (the owner
+                casts, via :meth:`to` — no silent cast here); or if
+                ``("graphs", "cell")`` is present and is neither ``(3, 3)`` nor
+                ``(1, 3, 3)`` equal to the constructor cell within ``1e-8`` A
+                (``rtol=0``) — loose enough to survive a float32 template
+                round-trip, far below any physically meaningful difference. The
+                constructor cell stays the **owner**: the batch's copy is
+                checked, never adopted, because every frozen shift in the
+                buffers is a lattice vector of *that* cell.
+        """
+        if ("atoms", "pos") not in batch.keys(include_nested=True):
+            present = sorted(
+                "/".join(key) if isinstance(key, tuple) else str(key)
+                for key in batch.keys(include_nested=True)
+            )
+            raise ValueError(
+                "the batch carries no ('atoms', 'pos'): a neighbour list builds at atom "
+                f"positions, and this batch holds {present}. Post-collate batches nest "
+                "positions under the 'atoms' namespace (two-tier data contract); a flat "
+                "sample dict is the other tier and is not what this binds into."
+            )
+        pos = batch["atoms", "pos"]
+        if not isinstance(pos, torch.Tensor):
+            raise ValueError(
+                "('atoms', 'pos') must be a positions tensor (N, 3) in Angstrom, but the "
+                f"batch holds a {type(pos).__name__} there — a nested namespace, not the "
+                "leaf this list builds at."
+            )
+        n_atoms = int(self._x_hold.shape[0])
+        if tuple(pos.shape) != (n_atoms, 3):
+            raise ValueError(
+                f"positions must have shape ({n_atoms}, 3) in Angstrom — this list was "
+                f"constructed for {n_atoms} atoms — but the batch's ('atoms', 'pos') has "
+                f"shape {tuple(pos.shape)}. A different atom count is a different system: "
+                "the capacity was sized for the original and the displacement reference "
+                "_x_hold has its shape."
+            )
+        # _x_hold, not _device/_dtype: it is the tensor these positions are
+        # actually differenced against, and it tracks every to() exactly.
+        if pos.device != self._x_hold.device or pos.dtype != self._x_hold.dtype:
+            raise ValueError(
+                f"positions are on {pos.device} in {pos.dtype}, but this list's buffers are "
+                f"on {self._x_hold.device} in {self._x_hold.dtype}. Nothing is cast here: a "
+                "silently promoted difference against _x_hold is a mixed-precision "
+                "comparison nobody asked for, and a cross-device index is worse. The owner "
+                "casts — call NeighborList.to(device, dtype) first."
+            )
+        if ("graphs", "cell") not in batch.keys(include_nested=True):
+            return pos
+        cell = batch["graphs", "cell"]
+        if not isinstance(cell, torch.Tensor):
+            raise ValueError(
+                "('graphs', 'cell') must be a cell tensor (3, 3) — or (1, 3, 3) for a "
+                f"single-system batch — in Angstrom, but the batch holds a "
+                f"{type(cell).__name__} there."
+            )
+        vectors = cell
+        if vectors.dim() == 3:
+            if vectors.shape[0] != 1:
+                raise ValueError(
+                    f"('graphs', 'cell') has a leading batch dimension of {vectors.shape[0]} "
+                    f"(shape {tuple(vectors.shape)}), but this neighbour list is "
+                    "single-system: one cell, one displacement reference, one capacity. "
+                    "Multi-system batched MD is not supported here rather than silently "
+                    "reduced to the first cell."
+                )
+            vectors = vectors[0]
+        if tuple(vectors.shape) != (3, 3):
+            raise ValueError(
+                "('graphs', 'cell') must be (3, 3), or (1, 3, 3) for a single-system batch, "
+                f"in Angstrom; got shape {tuple(cell.shape)}."
+            )
+        reference = self.cell.detach().to(torch.float64)
+        candidate = vectors.detach().to(device=reference.device, dtype=torch.float64)
+        if not torch.allclose(candidate, reference, rtol=0.0, atol=1e-8):
+            raise ValueError(
+                f"the batch's ('graphs', 'cell')\n{candidate.tolist()}\ndisagrees with the "
+                f"cell this list was built against\n{reference.tolist()}\n(Angstrom, tolerance "
+                "atol=1e-8, rtol=0). The stored shifts are lattice vectors of the "
+                "constructor's cell, so adopting a different one would leave every periodic "
+                "remainder silently wrong; construct a new list instead."
+            )
+        return pos
+
+    def _build_at(self, positions: torch.Tensor) -> None:
+        """Recompute and rewrite the buffers at ``positions``, restarting ``ago``.
+
+        The shared body of :meth:`rebuild` (which adds the counter increment)
+        and :meth:`build` (which adds the batch validation and the bind).
+        Deliberately does *not* touch :attr:`rebuild_count`: only the caller
+        knows whether this build is a rebuild driven by the run.
+
+        Args:
+            positions: Positions ``(N, 3)`` in Angstrom to build at.
+        """
+        source, target, shifts = self._compute(positions)
+        self._write(source, target, shifts)
+        self._hold(positions)
+
     def rebuild(self, positions: torch.Tensor) -> None:
         """Recompute the neighbour list at ``positions`` (eager, outside any graph).
 
@@ -472,12 +626,70 @@ class NeighborList:
         Args:
             positions: Positions ``(N, 3)`` in Angstrom to build at.
         """
-        source, target, shifts = self._compute(positions)
-        self._write(source, target, shifts)
+        self._build_at(positions)
         self.rebuild_count += 1
-        self._hold(positions)
 
-    def update(self, positions: torch.Tensor) -> bool:
+    def build(self, batch: TensorDict) -> TensorDict:
+        """Rebuild at the batch's positions and bind the live buffers into it.
+
+        The TensorDict-side forced build: it validates that ``batch`` describes
+        the system this list was constructed for, rebuilds at
+        ``batch["atoms", "pos"]`` (Angstrom), then writes ``batch["edges"]`` as
+        a ``TensorDict`` of :attr:`edge_index` ``(capacity, 2)`` and
+        :attr:`shifts` ``(capacity, 3)`` held **by reference**, at
+        ``batch_size=[capacity]``. Every later in-place :meth:`rebuild` /
+        :meth:`update` is therefore visible to whatever reads that batch, with
+        no shape change and no re-binding — which is what keeps a compiled or
+        graph-captured force path valid across a rebuild.
+
+        **The list owns ``edges`` once bound.** The namespace is replaced
+        wholesale, not merged: a pre-existing ``edge_diff`` / ``edge_dist``
+        pair would be consumed straight through as a *value* by a potential and
+        freeze the PES, and a surviving shorter ``edge_index`` would disagree
+        with the capacity.
+
+        This is *not* counted as a :attr:`rebuild_count` rebuild — it is a
+        binding operation, and it runs again on every ``.to()`` re-sync, so
+        counting it would make a dtype cast look like physics. It does restart
+        the policy clock (:attr:`ago` back to 0, ``_x_hold`` refreshed): the
+        buffers are fresh here.
+
+        Warning:
+            ``build`` returns the batch so it composes with the repo's
+            ``forward(td) -> td`` convention (``potential(nl.build(batch))``) —
+            **not** so the policy call can be chained.
+            ``nl.build(batch).update(batch)`` parses, but that ``.update`` is
+            ``TensorDict.update``: it merges the batch into itself and never
+            touches this list. The idiom is two statements::
+
+                nl.build(batch)      # once, and after every .to()
+                ...
+                nl.update(batch)     # per step — NeighborList.update
+
+        Args:
+            batch: Batch ``TensorDict`` carrying ``("atoms", "pos")``
+                ``(N, 3)`` in Angstrom and optionally ``("graphs", "cell")``
+                ``(3, 3)`` or ``(1, 3, 3)`` in Angstrom, which is validated
+                against the constructor cell and never adopted.
+
+        Returns:
+            The **same** ``batch`` object, with ``batch["edges"]`` bound.
+
+        Raises:
+            ValueError: Per :meth:`_positions_from` — missing positions, a
+                different atom count, a device/dtype the owner has not cast, or
+                a cell that is not this list's.
+            RuntimeError: If the rebuilt edge count overflows the capacity.
+        """
+        positions = self._positions_from(batch)
+        self._build_at(positions)
+        batch["edges"] = TensorDict(
+            {"edge_index": self.edge_index, "shifts": self.shifts},
+            batch_size=[self.capacity],
+        )
+        return batch
+
+    def update(self, positions: TensorDict | torch.Tensor) -> bool:
         """Rebuild at ``positions`` if the ``every``/``delay``/``check`` gate says so.
 
         Call once per force evaluation, at the positions being evaluated. The
@@ -488,21 +700,43 @@ class NeighborList:
         bound at the first permitted opportunity ``ago == max(every, delay)``
         increments :attr:`ndanger`.
 
+        **One method, two input types.** A raw ``(N, 3)`` tensor is the MD hot
+        path; a batch ``TensorDict`` is the bound path, dispatched by an
+        ``isinstance`` test against ``TensorDictBase`` (so lazy / stacked
+        batches dispatch too) and reduced to its positions by the same
+        validation :meth:`build` runs — a batch whose ``pos`` was silently
+        re-cast therefore fails loud here instead of promoting against
+        ``_x_hold`` for the rest of the run. Everything after the dispatch is
+        identical: same decisions, same :attr:`ago` / :attr:`rebuild_count` /
+        :attr:`ndanger` bookkeeping, same buffers. There is no ``update_td`` /
+        ``update_pos`` pair — the policy state lives behind one door.
+
+        Note:
+            ``nl.update(batch)`` is :class:`NeighborList`'s ``update``;
+            ``batch.update(...)`` is ``TensorDict.update``, a merge that never
+            touches this list. Keep the bind and the step as two statements
+            (see :meth:`build`).
+
         Args:
             positions: Positions ``(N, 3)`` in Angstrom, **unwrapped** (see
-                Raises and the module docstring).
+                Raises and the module docstring), or the batch
+                ``TensorDict`` carrying them at ``("atoms", "pos")``.
 
         Returns:
             ``True`` if the list was rebuilt, ``False`` if the frozen list is
             still valid (or the gate simply did not permit a build this step).
 
         Raises:
+            ValueError: If a batch was passed and it does not describe this
+                system — see :meth:`_positions_from`.
             RuntimeError: If the largest displacement since the last build
                 reaches half the smallest perpendicular cell width — mid-run
                 wrapping, a changed cell, or a blown-up trajectory. Not raised
                 under ``check=False``, which skips the displacement branch
                 entirely.
         """
+        if isinstance(positions, TensorDictBase):
+            positions = self._positions_from(positions)
         self.ago += 1
         if self.ago < self.delay or self.ago % self.every:
             return False  # not a permitted opportunity
@@ -540,6 +774,16 @@ class NeighborList:
         ``nl.to(device, dtype)`` alike. ``_x_hold`` travels with the rest: a
         displacement reference left behind in the old dtype would silently
         promote the next :meth:`update` comparison instead of failing.
+
+        Warning:
+            **This severs any :meth:`build` binding.** The move rebinds
+            :attr:`edge_index` / :attr:`shifts` to *new* tensors, so a batch
+            bound beforehand keeps pointing at the old ones and would freeze at
+            the pre-cast neighbour set. Re-binding from inside ``to`` is
+            deliberately not done — it would make the list hold a reference to
+            a batch it does not own — so the **owner** re-binds: call
+            ``nl.build(batch)`` after the cast (this is exactly what
+            ``PeriodicPotentialForceField._apply`` does).
         """
         if isinstance(device, torch.dtype):
             if dtype is not None:
