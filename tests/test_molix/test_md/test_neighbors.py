@@ -1,11 +1,23 @@
 """Tests for molix.md.neighbors."""
 
+import math
+from typing import NamedTuple
+
 import pytest
 import torch
 
 import molix.data.tasks.neighbor
 import molix.md
 import molix.md.neighbors
+from molix.md import (
+    EV_PER_AMU_A2_FS2,
+    MD,
+    LennardJonesCutForceField,
+    MaxwellBoltzmann,
+    MDHook,
+    MDObservables,
+    MDRunner,
+)
 from molix.md.neighbors import NeighborList, NeighborStrategy
 
 
@@ -234,3 +246,505 @@ class TestNeighborList:
         nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, capacity_factor=1.0)
         with pytest.raises(RuntimeError, match="overflow"):
             nl.rebuild(pos * 0.5)  # compress: many more pairs inside the cutoff
+
+
+def _policy_list(
+    *,
+    skin: float = 0.0,
+    every: int = 1,
+    delay: int = 0,
+    check: bool = True,
+    cutoff: float = 3.5,
+    capacity_factor: float = 1.35,
+) -> tuple[NeighborList, torch.Tensor]:
+    """A policy-configured list over the 4x4x4 lattice, plus its positions.
+
+    The shared fixture of the policy suite: 64 atoms in a 12 A cube, whose
+    perpendicular half-width is 6.0 A and whose neighbour counts are exact
+    integers from crystallography (6 at 3.0 A, 12 at 4.2426 A, 8 at 5.196 A).
+    """
+    pos, cell = _lattice(n_side=4, spacing=3.0)
+    nl = NeighborList(
+        cell=cell,
+        cutoff=cutoff,
+        positions=pos,
+        skin=skin,
+        every=every,
+        delay=delay,
+        check=check,
+        capacity_factor=capacity_factor,
+    )
+    return nl, pos
+
+
+def _displaced(pos: torch.Tensor, distance: float, *, atom: int = 0) -> torch.Tensor:
+    """``pos`` with one atom translated ``distance`` A along x.
+
+    Raw and unwrapped, as an MD trajectory drifts: the displacement test the
+    policy runs is a raw difference, never a minimum image.
+    """
+    moved = pos.clone()
+    moved[atom, 0] += distance
+    return moved
+
+
+class _Frame(NamedTuple):
+    """One observed step: the evaluated configuration and the list behind it."""
+
+    pos: torch.Tensor
+    edge_index: torch.Tensor
+    shifts: torch.Tensor
+    total: torch.Tensor
+    forces: torch.Tensor
+
+
+class _PolicyForceField(LennardJonesCutForceField):
+    """Drive the rebuild *policy* from the force-evaluation seam.
+
+    A three-line preview of link 07's wiring: ``MD(rebuild_every=1)`` calls
+    ``rebuild_neighbors`` once per force evaluation, *at the positions being
+    evaluated*, so handing that call to :meth:`NeighborList.update` puts the
+    gate exactly where the integrator will put it.
+    """
+
+    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
+        """Ask the policy instead of forcing a rebuild."""
+        self.neighbors.update(pos)
+
+
+class _FrameRecorder(MDHook):
+    """Capture ``obs.pos`` together with the live list it was evaluated against."""
+
+    def __init__(self, neighbors: NeighborList) -> None:
+        self._neighbors = neighbors
+        self.frames: list[_Frame] = []
+
+    def on_step_end(self, runner: MDRunner, step: int, obs: MDObservables) -> None:
+        """Snapshot the step; the live edges are the ones ``obs.forces`` used."""
+        n = self._neighbors.num_edges
+        self.frames.append(
+            _Frame(
+                pos=obs.pos.detach().clone(),
+                edge_index=self._neighbors.edge_index[:n].clone(),
+                shifts=self._neighbors.shifts[:n].clone(),
+                total=obs.total.detach().clone(),
+                forces=obs.forces.detach().clone(),
+            )
+        )
+
+
+def _run_lj_lattice(
+    *, skin: float, every: int = 1, delay: int = 0, check: bool = True, n_steps: int = 100
+) -> tuple[NeighborList, list[_Frame]]:
+    """NVE argon over the 64-atom lattice, driving the policy once per force eval.
+
+    Deterministic CPU float64 throughout: seeded Maxwell-Boltzmann velocities,
+    gamma = 0, no wall clock, no filesystem, no network. Argon in (amu, A, fs):
+    eps = 0.0103 eV, sigma = 2.5 A, cutoff = 3.5 A, m = 39.95 amu, dt = 4 fs.
+
+    ``capacity_factor=2.5`` is measured, not defensive: at ``skin=0.5`` this run
+    reaches 600 live edges against the 519 rows the default 1.35 would allocate
+    from the initial 384, and the overflow guard is not what these tests pin.
+    """
+    pos, cell = _lattice(n_side=4, spacing=3.0)
+    neighbors = NeighborList(
+        cell=cell,
+        cutoff=3.5,
+        positions=pos,
+        skin=skin,
+        every=every,
+        delay=delay,
+        check=check,
+        capacity_factor=2.5,
+    )
+    force = _PolicyForceField(
+        epsilon=0.0103 / EV_PER_AMU_A2_FS2,  # argon well depth, eV -> amu A^2/fs^2
+        sigma=2.5,
+        neighbors=neighbors,
+        cutoff=3.5,
+    )
+    recorder = _FrameRecorder(neighbors)
+    velocities = MaxwellBoltzmann(39.95, n_atoms=64).sample(300.0, seed=0)
+    md = MD(
+        force,
+        mass=39.95,
+        dt=4.0,
+        gamma=0.0,
+        dtype=torch.float64,
+        rebuild_every=1,
+        hooks=[recorder],
+    )
+    md.set_potential_dtype(torch.float64)
+    md.run(pos, velocities, n_steps, chunk=1)
+    return neighbors, recorder.frames
+
+
+def _reference_pairs(
+    pos: torch.Tensor, cell: torch.Tensor, cutoff: float
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The exact O(N^2) minimum-image pair set within ``cutoff`` — the oracle.
+
+    Computed from fractional coordinates with ``round`` to the nearest image
+    (exact for a cubic cell), so it holds for the unwrapped positions an MD run
+    drifts into. Shares no code with the neighbour list under test.
+
+    Returns:
+        ``(source, target, distance)`` for every **ordered** pair inside
+        ``cutoff``, with ``distance = ||pos[target] - pos[source] + shift||``.
+    """
+    fractional = pos @ torch.linalg.inv(cell)
+    delta = fractional.unsqueeze(0) - fractional.unsqueeze(1)  # [i, j] = frac[j] - frac[i]
+    delta = delta - torch.round(delta)
+    distance = torch.linalg.norm(delta @ cell, dim=-1)
+    inside = (distance < cutoff) & ~torch.eye(pos.shape[0], dtype=torch.bool)
+    source, target = torch.nonzero(inside, as_tuple=True)
+    return source, target, distance[source, target]
+
+
+class TestNeighborListPolicy:
+    """Verlet skin + LAMMPS ``neigh_modify every/delay/check`` rebuild policy.
+
+    Reference:
+        ``lammps/lammps`` develop, ``src/neighbor.cpp`` — ``Neighbor::decide``
+        (2408-2424), ``Neighbor::check_distance`` (2438-2490), ``Neighbor::init``.
+        K. Nordlund, *Introduction to molecular dynamics simulations*, lecture 3,
+        for the half-skin two-atom criterion.
+    """
+
+    # --- construction contract: r_build derivation, sizing, guards ----------
+
+    def test_build_radius_is_the_cutoff_plus_the_skin(self):
+        """``cutoff`` stays the *interaction* cutoff every consumer means, and
+        ``r_build = cutoff + skin`` is the derived build radius."""
+        nl, _ = _policy_list(skin=1.5)
+        assert nl.cutoff == 3.5
+        assert nl.skin == 1.5
+        assert nl.r_build == pytest.approx(5.0, abs=1e-12)
+
+    def test_build_radius_is_not_settable(self):
+        """Derived, never assigned: a writable ``r_build`` could drift out of
+        step with the capacity, the kernel radius and the half-width guard that
+        were all sized from it at construction."""
+        nl, _ = _policy_list(skin=1.5)
+        with pytest.raises(AttributeError):
+            setattr(nl, "r_build", 6.0)
+
+    def test_skin_extends_the_build_to_the_second_neighbour_shell(self):
+        """Crystallography, not a fit: at ``r_build = 5.0 A`` every atom of the
+        simple-cubic lattice sees 6 neighbours at 3.0 A and 12 at 3*sqrt(2) =
+        4.2426 A (the 8 body-diagonal ones at 5.196 A stay out), so the
+        bidirectional list holds 64 * 18 = 1152 edges."""
+        nl, _ = _policy_list(skin=1.5)
+        assert nl.num_edges == 1152
+
+    def test_zero_skin_builds_only_the_first_shell(self):
+        """The same lattice at ``r_build = cutoff = 3.5 A``: 6 neighbours each,
+        64 * 6 = 384 edges. The 1152/384 = 3.0x ratio is the direct measurement
+        of the ``(1 + s/r_cut)^3`` growth the capacity has to absorb."""
+        nl, _ = _policy_list(skin=0.0)
+        assert nl.num_edges == 384
+
+    def test_capacity_is_sized_from_the_build_radius(self):
+        """Sizing from ``cutoff`` instead would allocate 519 rows for a list
+        that starts with 1152 live edges — an overflow on the constructor's own
+        build, before a single MD step."""
+        nl, _ = _policy_list(skin=1.5)
+        assert nl.capacity >= math.ceil(1.35 * 1152)
+
+    def test_buffer_shapes_stay_the_capacity_under_a_skin(self):
+        """The skin must not cost the constant shapes a CUDA graph needs."""
+        nl, _ = _policy_list(skin=1.5)
+        assert nl.edge_index.shape == (nl.capacity, 2)
+        assert nl.shifts.shape == (nl.capacity, 3)
+
+    def test_a_fresh_list_reports_no_rebuild_history(self):
+        """Defaults are the pre-skin behaviour: ``skin=0``, and the
+        constructor's initial build is not counted as a rebuild."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        nl = NeighborList(cell=cell, cutoff=3.5, positions=pos)
+        assert (nl.skin, nl.ago, nl.rebuild_count, nl.ndanger) == (0.0, 0, 0, 0)
+
+    def test_to_casts_the_displacement_reference(self):
+        """``_x_hold`` must follow ``shifts`` / ``cell`` through a cast.
+
+        Asserted on the buffer dtype rather than through behaviour on purpose:
+        a float64 ``_x_hold`` differenced against float32 positions *promotes
+        silently* — no error, just a mixed-precision comparison nobody asked
+        for — so the dtype is the only observable.
+        """
+        nl, pos = _policy_list(skin=1.5)
+        nl.to(torch.float32)
+        assert nl._x_hold.dtype == torch.float32
+        assert nl.update(_displaced(pos.to(torch.float32), 1.0)) is True
+
+    def test_rejects_a_skin_that_pushes_the_build_past_half_the_cell(self):
+        """The link-01 half-width guard, re-derived on ``r_build``: ``cutoff =
+        3.5 A`` alone is admissible in the 12 A cube (half-width 6.0 A), but
+        ``skin = 3.0`` makes ``r_build = 6.5 A``, past which the kernel's
+        minimum-image reduction silently drops pairs inside the cutoff."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        NeighborList(cell=cell, cutoff=3.5, positions=pos)  # the cutoff alone passes
+        with pytest.raises(ValueError, match="r_build"):
+            NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=3.0)
+
+    def test_rejects_a_skin_that_reaches_the_dead_edge_shift(self):
+        """Dead padding edges sit at ``DEAD_EDGE_CUTOFF_FACTOR * cutoff = 10x``
+        the cutoff; a skin of ``9x`` puts them exactly on the build radius,
+        where they stop being inert and start being counted as real pairs. The
+        60 A cell keeps the half-width guard — checked first — out of the way,
+        so this pins the dead-edge assertion specifically."""
+        pos, _ = _lattice(n_side=4, spacing=3.0)
+        cell = torch.eye(3, dtype=torch.float64) * 60.0
+        with pytest.raises(ValueError, match="dead"):
+            NeighborList(cell=cell, cutoff=1.0, positions=pos, skin=9.0)
+
+    @pytest.mark.parametrize(
+        ("skin", "every", "delay"),
+        [(-0.1, 1, 0), (0.0, 0, 0), (0.0, -1, 0), (0.0, 1, -1)],
+        ids=["negative-skin", "zero-every", "negative-every", "negative-delay"],
+    )
+    def test_rejects_out_of_domain_policy_parameters(self, skin: float, every: int, delay: int):
+        """Each arm has a domain; a silently clamped one disables the gate."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        with pytest.raises(ValueError):
+            NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=skin, every=every, delay=delay)
+
+    def test_rejects_a_delay_that_is_not_a_multiple_of_every(self):
+        """LAMMPS ``Neighbor::init`` parity: with ``every=4, delay=10`` the
+        danger threshold ``max(every, delay) = 10`` is an ``ago`` the gate never
+        permits (10 % 4 != 0), so ``ndanger`` could never fire and the
+        correctness alarm would be silently dead."""
+        pos, cell = _lattice(n_side=4, spacing=3.0)
+        with pytest.raises(ValueError, match="multiple"):
+            NeighborList(cell=cell, cutoff=3.5, positions=pos, every=4, delay=10)
+
+    def test_accepts_a_delay_that_is_a_multiple_of_every(self):
+        """The guard rejects a non-multiple, not a coarse gate as such."""
+        nl, _ = _policy_list(every=4, delay=8)
+        assert (nl.every, nl.delay, nl.ago) == (4, 8, 0)
+
+    def test_accepts_zero_delay_under_any_every(self):
+        """``0 % every == 0`` for every legal ``every``, so the default
+        ``delay=0`` is always LAMMPS-legal — the guard must not read a falsy
+        delay as unset and reject it."""
+        nl, _ = _policy_list(every=7, delay=0)
+        assert (nl.every, nl.delay) == (7, 0)
+
+    # --- gating arithmetic (LAMMPS ``Neighbor::decide``) --------------------
+
+    def test_the_gate_is_conjunctive_and_first_permits_ago_eight(self):
+        """``every=4, delay=8``: both arms must agree. A displacement four times
+        the half-skin cannot pull a rebuild forward — ``ago = 4`` clears
+        ``ago % every`` but not ``ago >= delay``, and nothing before 8 clears
+        both."""
+        nl, pos = _policy_list(skin=1.0, every=4, delay=8)
+        moved = _displaced(pos, 2.0)
+        assert [nl.update(moved) for _ in range(8)] == [False] * 7 + [True]
+        assert (nl.rebuild_count, nl.ago) == (1, 0)
+
+    def test_the_every_arm_alone_first_permits_ago_four(self):
+        """``delay=0`` leaves the cadence arm as the only gate."""
+        nl, pos = _policy_list(skin=1.0, every=4, delay=0)
+        moved = _displaced(pos, 2.0)
+        assert [nl.update(moved) for _ in range(4)] == [False, False, False, True]
+
+    def test_the_delay_arm_alone_first_permits_ago_ten(self):
+        """``every=1`` leaves the delay arm as the only gate."""
+        nl, pos = _policy_list(skin=1.0, every=1, delay=10)
+        moved = _displaced(pos, 2.0)
+        assert [nl.update(moved) for _ in range(10)] == [False] * 9 + [True]
+
+    def test_a_forced_rebuild_rephases_the_schedule(self):
+        """``ago`` counts from the last build, not from an absolute step index:
+        after two blocked updates a forced ``rebuild`` restarts the clock, so
+        the next permitted opportunity is four updates later, not two."""
+        nl, pos = _policy_list(skin=1.0, every=4, delay=0)
+        moved = _displaced(pos, 2.0)
+        assert [nl.update(moved) for _ in range(2)] == [False, False]
+        nl.rebuild(pos)
+        assert nl.ago == 0
+        assert [nl.update(moved) for _ in range(4)] == [False, False, False, True]
+
+    def test_a_displacement_of_exactly_half_the_skin_does_not_rebuild(self):
+        """LAMMPS compares with a strict ``>``: at ``max_i d_i == s/2`` the
+        two-atom criterion ``d_(1) + d_(2) <= s`` still holds, so the list is
+        still provably complete and a rebuild would be wasted work."""
+        nl, pos = _policy_list(skin=1.0)
+        assert nl.update(_displaced(pos, 0.5)) is False
+        assert nl.rebuild_count == 0
+
+    def test_a_displacement_just_past_half_the_skin_rebuilds(self):
+        """The other side of the same strict comparison, one ulp-scale step
+        away: 0.5 + 1e-9 A is no longer covered by the completeness proof."""
+        nl, pos = _policy_list(skin=1.0)
+        assert nl.update(_displaced(pos, 0.5 + 1e-9)) is True
+        assert nl.rebuild_count == 1
+
+    def test_zero_skin_holds_the_list_when_nothing_moved(self):
+        """The degenerate limit is not "rebuild unconditionally": with
+        ``max_d2 == 0`` and a strict ``>``, the list is already exactly right,
+        so the bookkeeping says so."""
+        nl, pos = _policy_list(skin=0.0)
+        assert nl.update(pos.clone()) is False
+        assert nl.rebuild_count == 0
+
+    def test_zero_skin_rebuilds_on_any_motion(self):
+        """``half_skin_sq = 0`` reproduces today's rebuild-every-ask behaviour
+        edge for edge: any nonzero displacement rebuilds."""
+        nl, pos = _policy_list(skin=0.0)
+        assert nl.update(_displaced(pos, 1e-6)) is True
+        assert nl.rebuild_count == 1
+
+    def test_an_unchecked_policy_rebuilds_on_cadence_alone(self):
+        """``check=False`` buys speed by dropping the distance test entirely:
+        every permitted opportunity rebuilds even though nothing has moved."""
+        nl, pos = _policy_list(skin=1.0, every=3, check=False)
+        frozen = pos.clone()
+        assert [nl.update(frozen) for _ in range(6)] == [False, False, True] * 2
+        assert nl.rebuild_count == 2
+
+    def test_ndanger_counts_a_rebuild_at_the_first_permitted_opportunity(self):
+        """``every=1, delay=0`` puts ``_danger_ago`` at 1, so a rebuild that
+        fires immediately may already have been overdue on the step before —
+        which is exactly what the counter is for."""
+        nl, pos = _policy_list(skin=1.0)
+        assert nl.update(_displaced(pos, 1.0)) is True
+        assert nl.ndanger == 1
+        assert nl.update(_displaced(pos, 2.0)) is True
+        assert nl.ndanger == 2
+
+    def test_ndanger_stays_zero_when_the_rebuild_was_not_overdue(self):
+        """``every=2, delay=6`` puts ``_danger_ago`` at 6. The half-skin is
+        crossed only *after* that first opportunity, so the rebuild lands at
+        ``ago = 8`` (7 % 2 != 0) and nothing was missed."""
+        nl, pos = _policy_list(skin=1.0, every=2, delay=6)
+        small, large = _displaced(pos, 0.2), _displaced(pos, 1.0)
+        assert [nl.update(small) for _ in range(6)] == [False] * 6
+        assert [nl.update(large) for _ in range(2)] == [False, True]
+        assert (nl.rebuild_count, nl.ndanger) == (1, 0)
+
+    def test_ndanger_fires_at_the_lammps_threshold(self):
+        """The same coarse gate, but the half-skin is already crossed at the
+        first permitted opportunity: the rebuild lands at ``ago = 6 =
+        max(every, delay)``, ``neighbor.cpp:2488`` verbatim, on a LAMMPS-legal
+        configuration."""
+        nl, pos = _policy_list(skin=1.0, every=2, delay=6)
+        moved = _displaced(pos, 1.0)
+        assert [nl.update(moved) for _ in range(6)] == [False] * 5 + [True]
+        assert (nl.rebuild_count, nl.ndanger) == (1, 1)
+
+    def test_a_full_cell_translation_is_refused_as_unwrapped(self):
+        """Frozen shifts plus a raw displacement test are correct only while
+        positions stay unwrapped. A 12 A jump — one full cell vector, past the
+        6.0 A half-width — means mid-run wrapping, a changed cell, or a blown-up
+        trajectory; all three are fatal and none is recoverable."""
+        nl, pos = _policy_list(skin=1.0)
+        with pytest.raises(RuntimeError, match="unwrapped"):
+            nl.update(_displaced(pos, 12.0))
+
+    def test_an_unchecked_policy_skips_the_unwrapped_guard(self):
+        """Documented consequence, pinned so the trade stays visible: the guard
+        lives inside the displacement branch, so ``check=False`` switches off
+        the invariant alarm along with the criterion."""
+        nl, pos = _policy_list(skin=1.0, check=False)
+        assert nl.update(_displaced(pos, 12.0)) is True
+
+    # --- protocol -----------------------------------------------------------
+
+    def test_a_skinned_list_satisfies_the_widened_protocol(self):
+        """Widening ``NeighborStrategy`` must not push its own implementation
+        out of the contract."""
+        nl, _ = _policy_list(skin=1.5)
+        assert isinstance(nl, NeighborStrategy)
+
+    def test_a_list_without_the_policy_members_fails_the_protocol(self):
+        """The widening is what lets ``forcefield.py`` drop its
+        ``getattr(neighbors, "cutoff", None)`` duck-read, so the protocol has to
+        actually *require* ``cutoff`` / ``skin`` / ``update``: a stub carrying
+        only the buffer members must no longer pass."""
+
+        class _BufferOnly:
+            edge_index: torch.Tensor = torch.zeros(1, 2, dtype=torch.long)
+            shifts: torch.Tensor = torch.zeros(1, 3)
+            num_edges: int = 0
+            capacity: int = 1
+
+            def rebuild(self, positions: torch.Tensor) -> None:
+                """No-op build."""
+
+            def to(
+                self,
+                device: torch.device | str | torch.dtype | None = None,
+                dtype: torch.dtype | None = None,
+            ) -> "_BufferOnly":
+                return self
+
+        assert not isinstance(_BufferOnly(), NeighborStrategy)
+
+    def test_the_interaction_cutoff_is_the_bar_not_the_build_radius(self):
+        """A skinned list holds pairs out to ``r_build = 5.0 A``, but they are
+        only *complete* out to ``cutoff`` between rebuilds — so a 5.0 A
+        interaction cutoff over this list is precisely the silent truncation
+        that check exists to prevent."""
+        nl, _ = _policy_list(skin=1.5)
+        with pytest.raises(ValueError):
+            LennardJonesCutForceField(epsilon=1.0, sigma=2.5, neighbors=nl, cutoff=5.0)
+
+    # --- trajectory falsification (NVE argon over the lattice) -------------
+
+    def test_every_pair_within_the_cutoff_stays_in_the_live_list(self):
+        """PRIMARY falsification: a gated list must never miss a pair.
+
+        At every step the exact minimum-image O(N^2) pair set within the
+        interaction cutoff — recomputed from the very configuration the forces
+        were evaluated at — must be a subset of the live list, and each pair's
+        list-reconstructed distance ``||pos[t] - pos[s] + shift||`` must match
+        the reference. The distance half is not redundant: a stale *shift* on a
+        surviving index pair is the frozen-shift failure mode, and an
+        index-subset check alone would sail straight past it.
+        """
+        _, cell = _lattice(n_side=4, spacing=3.0)
+        _, frames = _run_lj_lattice(skin=0.5)
+        n_atoms = 64
+        for step, frame in enumerate(frames):
+            source, target, reference = _reference_pairs(frame.pos, cell, 3.5)
+            rows = torch.full((n_atoms * n_atoms,), -1, dtype=torch.long)
+            live = frame.edge_index
+            rows[live[:, 0] * n_atoms + live[:, 1]] = torch.arange(live.shape[0])
+            found = rows[source * n_atoms + target]
+            missing = int((found < 0).sum())
+            assert missing == 0, f"step {step}: {missing} pairs inside the cutoff are not listed"
+            reconstructed = torch.linalg.norm(
+                frame.pos[target] - frame.pos[source] + frame.shifts[found], dim=-1
+            )
+            torch.testing.assert_close(reconstructed, reference, atol=1e-9, rtol=0)
+
+    def test_a_skinned_policy_matches_rebuilding_every_force_evaluation(self):
+        """Policy equivalence: the gated ``skin=0.5`` run and a ``skin=0.0`` run
+        that rebuilds at every force evaluation must trace the same physics.
+        Compared at ``atol=1e-10, rtol=0`` rather than bitwise on purpose — the
+        masked-zero skin edges reorder the ``index_add_`` accumulation."""
+        _, gated = _run_lj_lattice(skin=0.5)
+        _, every_eval = _run_lj_lattice(skin=0.0)
+        assert len(gated) == len(every_eval) == 100
+        for step, (a, b) in enumerate(zip(gated, every_eval, strict=True)):
+            torch.testing.assert_close(a.total, b.total, atol=1e-10, rtol=0, msg=f"step {step}")
+            torch.testing.assert_close(a.forces, b.forces, atol=1e-10, rtol=0, msg=f"step {step}")
+
+    def test_the_standard_run_reports_no_dangerous_builds(self):
+        """``skin=0.5`` gives a half-skin of 0.25 A against ~0.01 A of motion
+        per step, so no rebuild is ever overdue. ``ndanger`` is the cheapest
+        correctness alarm available and must stay silent on a sane run — while
+        the gate itself stays alive (``rebuild_count > 0``)."""
+        neighbors, _ = _run_lj_lattice(skin=0.5)
+        assert neighbors.ndanger == 0
+        assert neighbors.rebuild_count > 0
+
+    def test_rebuild_count_falls_as_the_skin_grows(self):
+        """The point of the skin, measured over the same trajectory. The strict
+        inequality at the ends is what catches a dead or inverted gate — plain
+        non-increasing monotonicity is also satisfied by a policy that never
+        rebuilds at all."""
+        counts = [_run_lj_lattice(skin=skin)[0].rebuild_count for skin in (0.0, 0.25, 0.5, 1.0)]
+        assert counts == sorted(counts, reverse=True)
+        assert counts[-1] < counts[0]

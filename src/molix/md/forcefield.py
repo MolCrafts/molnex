@@ -383,14 +383,14 @@ class LennardJonesCutForceField(ForceField):
         shift: bool = True,
     ) -> None:
         super().__init__()
-        list_cutoff = getattr(neighbors, "cutoff", None)
+        # The interaction cutoff, not the list's r_build: a skinned list holds
+        # pairs further out, but only guarantees them *complete* to .cutoff
+        # between rebuilds, so anything beyond is the silent truncation this
+        # check exists to prevent.
+        list_cutoff = float(neighbors.cutoff)
         if cutoff is None:
-            if list_cutoff is None:
-                raise ValueError(
-                    "cutoff is required: this neighbour list exposes no .cutoff to default to"
-                )
-            cutoff = float(list_cutoff)
-        elif list_cutoff is not None and float(cutoff) > float(list_cutoff):
+            cutoff = list_cutoff
+        elif float(cutoff) > list_cutoff:
             raise ValueError(
                 f"cutoff {cutoff} A exceeds the neighbour list's horizon {list_cutoff} A; "
                 "pairs between the two radii would be silently missing from the PES"
