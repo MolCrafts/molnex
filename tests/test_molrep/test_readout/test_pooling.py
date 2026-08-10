@@ -111,10 +111,8 @@ class TestScatterPooling:
             assert graph_features.shape[1] == feat_dim
 
     def test_empty_graph(self):
-        """Test behavior with graph that might have no atoms."""
-        pooling = ScatterPooling(strategy="sum")
-
-        # Graph 0: 5 atoms, Graph 1: 0 atoms (skip), Graph 2: 3 atoms
+        """A graph with no atoms pools to an all-zero row, not an error."""
+        # Graph 0: 5 atoms, Graph 1: 0 atoms, Graph 2: 3 atoms.
         node_features = torch.randn(8, 16)
         batch = torch.cat(
             [
@@ -123,13 +121,18 @@ class TestScatterPooling:
             ]
         )
 
-        try:
-            graph_features = pooling(node_features, batch)
-            # Implementation might handle this differently
-            assert graph_features.shape[1] == 16
-        except Exception:
-            # Empty graphs might not be supported
-            pytest.skip("Empty graphs not supported in this implementation")
+        summed = ScatterPooling(strategy="sum")(node_features, batch)
+        assert summed.shape == (3, 16)
+        assert torch.allclose(summed[0], node_features[:5].sum(dim=0))
+        assert torch.equal(summed[1], torch.zeros(16))
+        assert torch.allclose(summed[2], node_features[5:].sum(dim=0))
+
+        # Mean divides by a clamped count, so the empty graph stays finite.
+        averaged = ScatterPooling(strategy="mean")(node_features, batch)
+        assert torch.allclose(averaged[0], node_features[:5].mean(dim=0))
+        assert torch.equal(averaged[1], torch.zeros(16))
+        assert torch.allclose(averaged[2], node_features[5:].mean(dim=0))
+        assert torch.isfinite(averaged).all()
 
     def test_differentiable(self):
         """Test that gradients flow through pooling."""

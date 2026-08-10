@@ -163,29 +163,31 @@ class ResidualInteraction(nn.Module):
             node_feats: Node features ``(N, node_feats_irreps.dim)``.
             edge_attrs: Spherical harmonics ``(E, edge_attrs_irreps.dim)``.
             edge_feats: Radial basis features ``(E, num_bessel)``.
-            edge_index: ``(2, E)`` with row 0 = sender, row 1 = receiver.
+            edge_index: ``(E, 2)`` with ``[:, 0]`` = source, ``[:, 1]`` = target
+                (the repo-wide edge convention).
             cutoff: Optional per-edge cutoff envelope ``(E, 1)``.
 
         Returns:
             ``(reshaped_message (N, ir_dim, mul), skip (N, hidden_dim))``.
         """
         num_nodes = node_feats.shape[0]
+        source, target = edge_index[:, 0], edge_index[:, 1]
         sc = self.skip_tp(node_feats)
         node_feats = self.linear_up(node_feats)
         node_feats_res = self.linear_res(node_feats)
 
-        source = self.source_embedding(node_attrs)
-        target = self.target_embedding(node_attrs)
-        edge_feats = torch.cat([edge_feats, source[edge_index[0]], target[edge_index[1]]], dim=-1)
+        source_emb = self.source_embedding(node_attrs)
+        target_emb = self.target_embedding(node_attrs)
+        edge_feats = torch.cat([edge_feats, source_emb[source], target_emb[target]], dim=-1)
         tp_weights = self.conv_tp_weights(edge_feats)
         edge_density = torch.tanh(self.density_fn(edge_feats) ** 2)
         if cutoff is not None:
             tp_weights = tp_weights * cutoff
             edge_density = edge_density * cutoff
-        density = _scatter_sum(edge_density, edge_index[1], num_nodes)
+        density = _scatter_sum(edge_density, target, num_nodes)
 
-        mji = self.conv_tp(node_feats[edge_index[0]], edge_attrs, tp_weights)
-        message = _scatter_sum(mji, edge_index[1], num_nodes)
+        mji = self.conv_tp(node_feats[source], edge_attrs, tp_weights)
+        message = _scatter_sum(mji, target, num_nodes)
 
         message = self.linear_1(message) / (density * self.beta + self.alpha)
         message = message + node_feats_res

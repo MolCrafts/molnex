@@ -1,8 +1,8 @@
-"""RED tests for `molpot.composition.sonata` — Sonata composer.
+"""Unit tests for `molpot.composition.sonata` — Sonata composer.
 
 Sub-spec 01 of the Sonata model line. Tests cover:
 
-* ac-001 — `build_sonata` returns a wired `nn.Module` with the right
+* ac-001 — `Sonata.from_encoder` returns a wired `nn.Module` with the right
   sub-module types.
 * ac-002 — `Sonata.__init__` refuses `kappa_head=`, `alpha_head=`,
   `induced_*` kwargs (future `LesPolarizable` composer territory).
@@ -15,10 +15,10 @@ Sub-spec 01 of the Sonata model line. Tests cover:
 * ac-007 — `compute_stress=True` adds a symmetric `(B, 3, 3)` stress.
 * ac-008 — `Sonata.from_spec(sonata.config, encoder)` round-trips when
   state_dict is transferred.
-* ac-009 — `build_sonata` validates `encoder.expose_tensor_track` and
-  `encoder.l_max`.
-* ac-010 — `Sonata`, `SonataSpec`, `build_sonata` are exported from
-  `molpot` and `molpot.composition`.
+* ac-009 — `Sonata.from_encoder` validates `encoder.expose_tensor_track`
+  and `encoder.l_max`.
+* ac-010 — `Sonata` and `SonataSpec` are exported from `molpot` and
+  `molpot.composition`.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import torch.nn as nn
 from tensordict import TensorDict
 
 from molpot import Polarization
-from molpot.composition import Sonata, SonataSpec, build_sonata
+from molpot.composition import Sonata, SonataSpec
 from molpot.heads import EdgeEnergyHead, PermMultipoleHead
 from molpot.potentials import EwaldMultipoleEnergy
 from molzoo import Allegro
@@ -149,8 +149,8 @@ def _short_range_head(encoder: Allegro) -> EdgeEnergyHead:
 # ---------------------------------------------------------------------------
 
 
-def test_build_sonata_returns_wired_model(encoder):
-    model = build_sonata(
+def test_from_encoder_returns_wired_model(encoder):
+    model = Sonata.from_encoder(
         encoder,
         charge=True,
         dipole=True,
@@ -243,7 +243,7 @@ def test_refuse_polarization_in_short_range_list(encoder):
 
 
 def test_forward_output_schema(encoder, batch):
-    sonata = build_sonata(
+    sonata = Sonata.from_encoder(
         encoder,
         charge=True,
         dipole=True,
@@ -283,7 +283,7 @@ def test_forward_output_schema(encoder, batch):
 
 
 def test_energy_decomposition(encoder, batch):
-    sonata = build_sonata(
+    sonata = Sonata.from_encoder(
         encoder,
         charge=True,
         dipole=True,
@@ -303,7 +303,7 @@ def test_energy_decomposition(encoder, batch):
 
 
 def test_compute_forces(encoder, batch):
-    sonata = build_sonata(
+    sonata = Sonata.from_encoder(
         encoder,
         charge=True,
         dipole=True,
@@ -324,7 +324,7 @@ def test_compute_forces(encoder, batch):
 
 
 def test_compute_stress(encoder, batch_with_cell):
-    sonata = build_sonata(
+    sonata = Sonata.from_encoder(
         encoder,
         charge=True,
         dipole=True,
@@ -343,7 +343,7 @@ def test_compute_stress(encoder, batch_with_cell):
 
 
 def test_spec_round_trip(encoder, batch):
-    sonata1 = build_sonata(
+    sonata1 = Sonata.from_encoder(
         encoder,
         charge=True,
         dipole=True,
@@ -369,13 +369,13 @@ def test_spec_round_trip(encoder, batch):
 
 
 # ---------------------------------------------------------------------------
-# ac-009 — build_sonata validates encoder
+# ac-009 — from_encoder validates encoder
 # ---------------------------------------------------------------------------
 
 
-def test_build_sonata_requires_expose_tensor_track(encoder_no_tensor_track):
+def test_from_encoder_requires_expose_tensor_track(encoder_no_tensor_track):
     with pytest.raises(ValueError, match="expose_tensor_track"):
-        build_sonata(
+        Sonata.from_encoder(
             encoder_no_tensor_track,
             charge=True,
             dipole=True,
@@ -384,9 +384,9 @@ def test_build_sonata_requires_expose_tensor_track(encoder_no_tensor_track):
         )
 
 
-def test_build_sonata_requires_lmax_for_dipole(encoder_lmax1):
+def test_from_encoder_requires_lmax_for_dipole(encoder_lmax1):
     with pytest.raises(ValueError, match="l_max"):
-        build_sonata(
+        Sonata.from_encoder(
             encoder_lmax1,
             charge=True,
             dipole=True,
@@ -406,10 +406,11 @@ def test_public_surface_reexports():
 
     assert "Sonata" in molpot.__all__
     assert "SonataSpec" in molpot.__all__
-    assert "build_sonata" in molpot.__all__
+    assert "build_sonata" not in molpot.__all__
     assert "Sonata" in molpot.composition.__all__
     assert "SonataSpec" in molpot.composition.__all__
-    assert "build_sonata" in molpot.composition.__all__
+    assert "build_sonata" not in molpot.composition.__all__
     assert molpot.Sonata is Sonata
     assert molpot.SonataSpec is SonataSpec
-    assert molpot.build_sonata is build_sonata
+    assert not hasattr(molpot, "build_sonata")
+    assert not hasattr(molpot.composition, "build_sonata")

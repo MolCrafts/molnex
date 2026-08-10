@@ -9,4 +9,4 @@ from mollog import get_logger
 
 def getLogger(name: str) -> logging.Logger:
     """Get a logger instance with the specified name."""
-    return get_logger(name)  # type: ignore
+    return get_logger(name)

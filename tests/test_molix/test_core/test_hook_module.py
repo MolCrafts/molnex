@@ -105,11 +105,11 @@ def test_module_does_not_import_concrete_layers() -> None:
 
 
 def test_trainer_imports_hook_from_core_hook_module() -> None:
-    """ac-008 (partial): Trainer pulls the ``Hook`` Protocol from ``molix.core.hook``.
+    """Trainer pulls the ``Hook`` Protocol from ``molix.core.hook``.
 
-    The full ac-008 grep — that ``trainer.py`` has *zero* imports from
-    ``molix.core.hooks`` — fires after cycle 3 (concrete-hook split).
-    Here we only assert the Hook contract has moved to its new home.
+    The concrete-hook split is long done (``molix.core.hooks`` no longer
+    exists anywhere under ``src/``); this asserts the Hook contract lives
+    at its canonical home.
     """
     import molix.core.trainer as trainer_mod
 

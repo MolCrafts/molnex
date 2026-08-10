@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from molpot.derivation.protocol import ENERGY_KEY, FORCES_KEY
 from molrep.utils.equivariance import random_rotation_matrix, rotate_vectors
 from molzoo import PiNet
 from molzoo.pinet import PiNetDipole, PiNetPolarizability, PiNetPotential
@@ -62,13 +63,16 @@ class TestPiNetPotential:
             depth=2,
             rank=3,
             hidden_dim=8,
+            # Monomorphic since b85d12f: force derivation is fixed here, not
+            # requested per call.
+            compute_forces=True,
         )
         g = _graph()
         g["atoms", "pos"] = g["atoms", "pos"].clone().requires_grad_(True)
-        out = model(g, compute_forces=True)
-        assert out["energy"].shape == (1,)
-        assert out["forces"].shape == (4, 3)
-        (out["energy"].sum() + out["forces"].square().sum()).backward()
+        out = model(g)
+        assert out[ENERGY_KEY].shape == (1,)
+        assert out[FORCES_KEY].shape == (4, 3)
+        (out[ENERGY_KEY].sum() + out[FORCES_KEY].square().sum()).backward()
 
 
 class TestPiNetDipole:

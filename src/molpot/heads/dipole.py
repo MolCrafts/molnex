@@ -16,10 +16,6 @@ from molix.F.scatter import scatter_sum
 from molpot.heads._common import graph_counts as _graph_counts
 
 
-def _scatter_sum(src: torch.Tensor, index: torch.Tensor, dim_size: int) -> torch.Tensor:
-    return scatter_sum(src, index, dim_size=dim_size)
-
-
 def _charge_neutralize(
     charges: torch.Tensor,
     batch: torch.Tensor,
@@ -27,12 +23,12 @@ def _charge_neutralize(
     *,
     total_charge: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    pre = _scatter_sum(charges, batch, num_graphs)
+    pre = scatter_sum(charges, batch, dim_size=num_graphs)
     if total_charge is None:
         total_charge = torch.zeros_like(pre)
     correction = (pre - total_charge.view_as(pre)) / _graph_counts(batch, num_graphs)
     charges = charges - correction[batch]
-    post = _scatter_sum(charges, batch, num_graphs)
+    post = scatter_sum(charges, batch, dim_size=num_graphs)
     return charges, pre, post
 
 
@@ -95,9 +91,9 @@ class DipoleHead(nn.Module):
 
         if self.uses_ac:
             self.charge_mlp = nn.Sequential(
-                nn.Linear(node_scalar_dim, hidden_dim),
+                nn.Linear(node_scalar_dim, hidden_dim, dtype=config.ftype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, 1),
+                nn.Linear(hidden_dim, 1, dtype=config.ftype),
             )
         if self.uses_ad or self.uses_os:
             if node_vector_dim is None:
@@ -112,9 +108,9 @@ class DipoleHead(nn.Module):
             if edge_scalar_dim is None or edge_vector_dim is None:
                 raise ValueError("edge_scalar_dim and edge_vector_dim required for BC variant.")
             self.bond_scalar_mlp = nn.Sequential(
-                nn.Linear(edge_scalar_dim, hidden_dim),
+                nn.Linear(edge_scalar_dim, hidden_dim, dtype=config.ftype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, 1),
+                nn.Linear(hidden_dim, 1, dtype=config.ftype),
             )
             self.bond_vector_mlp = nn.Linear(
                 edge_vector_dim,
@@ -180,27 +176,27 @@ class DipoleHead(nn.Module):
                 out["charge_sum_pre_proj"] = pre
                 out["charge_sum_post_proj"] = post
             out["atomic_charges"] = charges
-            dipole = dipole + _scatter_sum(
+            dipole = dipole + scatter_sum(
                 charges.unsqueeze(-1) * pos,
                 atom_batch,
-                num_graphs,
+                dim_size=num_graphs,
             )
 
         if self.uses_os:
             assert oxidation is not None
             ox = oxidation.to(dtype=pos.dtype)
             out["oxidation_charges"] = ox
-            dipole = dipole + _scatter_sum(
+            dipole = dipole + scatter_sum(
                 ox.unsqueeze(-1) * pos,
                 atom_batch,
-                num_graphs,
+                dim_size=num_graphs,
             )
 
         if self.uses_ad or self.uses_os:
             assert node_vectors is not None
             atomic_dipoles = self.atomic_dipole_gate(node_vectors).squeeze(-1)
             out["atomic_dipoles"] = atomic_dipoles
-            dipole = dipole + _scatter_sum(atomic_dipoles, atom_batch, num_graphs)
+            dipole = dipole + scatter_sum(atomic_dipoles, atom_batch, dim_size=num_graphs)
 
         if self.uses_bc:
             assert edge_scalars is not None and edge_index is not None
@@ -214,7 +210,7 @@ class DipoleHead(nn.Module):
             out["bond_charges"] = bond_charge
             bond_dipoles = bond_charge.unsqueeze(-1) * edge_diff
             out["bond_dipoles"] = bond_dipoles
-            dipole = dipole + _scatter_sum(bond_dipoles, edge_batch, num_graphs)
+            dipole = dipole + scatter_sum(bond_dipoles, edge_batch, dim_size=num_graphs)
             if self.regularization:
                 out["bond_charge_l2"] = bond_charge.square().mean()
 

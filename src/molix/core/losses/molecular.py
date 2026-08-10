@@ -31,7 +31,106 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-__all__ = ["energy_mse", "energy_force_mse"]
+__all__ = [
+    "energy_mse",
+    "energy_force_mse",
+    "center_by_group",
+    "molecule_centered_energy_mse",
+    "parameter_bag_mse",
+]
+
+
+def center_by_group(
+    values: torch.Tensor,
+    group_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Subtract per-group means from *values* (Espaloma molecule centering).
+
+    Args:
+        values: Scalar energies ``(B,)`` or ``(B, 1)``.
+        group_ids: Integer molecule / group ids ``(B,)`` aligned with *values*.
+
+    Returns:
+        Centered values with the same shape as *values*.
+    """
+    flat = values.reshape(-1)
+    ids = group_ids.reshape(-1).long()
+    if flat.numel() != ids.numel():
+        raise ValueError(f"values and group_ids length mismatch: {flat.numel()} vs {ids.numel()}")
+    out = flat.clone()
+    for g in ids.unique():
+        mask = ids == g
+        out[mask] = flat[mask] - flat[mask].mean()
+    return out.view_as(values)
+
+
+def molecule_centered_energy_mse(
+    target_key: str = "mm_energy",
+    *,
+    pred_key: str = "energy",
+    group_key: str = "molecule_id_index",
+    reduction: str = "mean",
+) -> Callable[[Mapping[str, Any], Any], torch.Tensor]:
+    """MSE after independent molecule-mean centering of pred and ref energies.
+
+    Both predictions and targets are centered **per molecule** before the MSE
+    (Espaloma relative conformational energy protocol). Units: kcal/mol.
+
+    Args:
+        target_key: Graph-level target at ``batch["graphs", target_key]``.
+        pred_key: Model energy key in ``preds``.
+        group_key: Graph-level integer molecule index at
+            ``batch["graphs", group_key]``.
+        reduction: Forwarded to :class:`torch.nn.MSELoss`.
+
+    Returns:
+        ``loss_fn(preds, batch) -> Tensor``.
+    """
+    mse = nn.MSELoss(reduction=reduction)
+
+    def _fn(preds: Mapping[str, Any], batch: Any) -> torch.Tensor:
+        e_pred = preds[pred_key]
+        e_true = batch["graphs", target_key].view_as(e_pred)
+        groups = batch["graphs", group_key]
+        return mse(center_by_group(e_pred, groups), center_by_group(e_true, groups))
+
+    return _fn
+
+
+def parameter_bag_mse(
+    pred_bags: Mapping[str, torch.Tensor],
+    ref_bags: Mapping[str, torch.Tensor],
+    *,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """Optional B1 diagnostic: MSE between predicted and reference parameter tensors.
+
+    Args:
+        pred_bags: Mapping name → predicted parameter tensor.
+        ref_bags: Mapping name → reference parameter tensor (same keys/shapes).
+        reduction: ``mean`` / ``sum`` / ``none`` over concatenated squared errors.
+
+    Returns:
+        Scalar (or unreduced) MSE over all bag entries.
+    """
+    sq: list[torch.Tensor] = []
+    for key, pref in pred_bags.items():
+        if key not in ref_bags:
+            raise KeyError(f"ref_bags missing key {key!r}")
+        ref = ref_bags[key]
+        if pref.shape != ref.shape:
+            raise ValueError(f"bag {key!r} shape {pref.shape} != ref {ref.shape}")
+        sq.append((pref - ref).reshape(-1).pow(2))
+    if not sq:
+        return torch.zeros(())
+    cat = torch.cat(sq)
+    if reduction == "mean":
+        return cat.mean()
+    if reduction == "sum":
+        return cat.sum()
+    if reduction == "none":
+        return cat
+    raise ValueError(f"Unknown reduction {reduction!r}")
 
 
 def energy_mse(

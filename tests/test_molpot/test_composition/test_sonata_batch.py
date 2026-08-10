@@ -21,7 +21,7 @@ import torch
 from tensordict import TensorDict
 
 from molix.config import config
-from molpot.composition import Sonata, build_sonata
+from molpot.composition import Sonata
 from molzoo import Allegro
 
 # ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ def sonata_fp64() -> Sonata:
             avg_num_neighbors=12.0,
             expose_tensor_track=True,
         )
-        sonata = build_sonata(
+        sonata = Sonata.from_encoder(
             encoder,
             sigma=1.0,
             dl=2.0,

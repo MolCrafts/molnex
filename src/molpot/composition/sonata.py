@@ -542,93 +542,94 @@ class Sonata(nn.Module):
 
         return out
 
+    @classmethod
+    def from_encoder(
+        cls,
+        encoder: nn.Module,
+        *,
+        sigma: float = 1.0,
+        dl: float = 2.0,
+        prefactor: float = 90.4756,
+        charge: bool = True,
+        dipole: bool = True,
+        quadrupole: bool = True,
+        constrain_total_charge: bool = True,
+        short_range_head: nn.Module | list[nn.Module] | None = None,
+        total_charge_key: str = "total_charge",
+        hidden_dim: int = 128,
+        avg_num_neighbors: float | None = None,
+    ) -> "Sonata":
+        """Build a wired :class:`Sonata` from an encoder and loose hyperparameters.
 
-# ---------------------------------------------------------------------------
-# build_sonata factory
-# ---------------------------------------------------------------------------
+        Distinct from :meth:`__init__`, which takes the sub-modules
+        already built: this constructs the :class:`PermMultipoleHead` and
+        :class:`EwaldMultipoleEnergy` for you and validates that the
+        encoder can actually feed them.
 
+        Args:
+            encoder: Allegro-style encoder. Must satisfy
+                ``encoder.expose_tensor_track is True`` and (when ``dipole``
+                or ``quadrupole`` is on) ``encoder.l_max >= 2``.
+            sigma: σ-Gaussian charge-smearing length in Å. Default ``1.0``.
+            dl: Reciprocal-space grid resolution in Å. Default ``2.0``.
+            prefactor: Electrostatic prefactor ``1/(2 ε₀)``. Default
+                ``90.4756`` (eV·Å·e⁻²).
+            charge: Predict atomic charges. Default ``True``.
+            dipole: Predict atomic dipoles. Default ``True``. Requires
+                ``encoder.l_max >= 2``.
+            quadrupole: Predict atomic quadrupoles. Default ``True``.
+                Requires ``encoder.l_max >= 2``.
+            constrain_total_charge: Project per-graph charge sums onto
+                ``total_charge_key``. Default ``True``.
+            short_range_head: Optional ``nn.Module`` (or ``list``) writing
+                ``"energy_short"`` ``(B,)``.
+            total_charge_key: Per-graph total-charge key under ``graphs``.
+                Required when ``constrain_total_charge=True``.
+            hidden_dim: Hidden width of the multipole head's scalar MLPs.
+            avg_num_neighbors: Dataset-wide ⟨|N(i)|⟩ for the edge→atom
+                pool normalisation in the multipole head.
 
-def build_sonata(
-    encoder: nn.Module,
-    *,
-    sigma: float = 1.0,
-    dl: float = 2.0,
-    prefactor: float = 90.4756,
-    charge: bool = True,
-    dipole: bool = True,
-    quadrupole: bool = True,
-    constrain_total_charge: bool = True,
-    short_range_head: nn.Module | list[nn.Module] | None = None,
-    total_charge_key: str = "total_charge",
-    hidden_dim: int = 128,
-    avg_num_neighbors: float | None = None,
-) -> Sonata:
-    """Build a wired :class:`Sonata` from an encoder and loose hyperparameters.
+        Returns:
+            A fully wired :class:`Sonata`.
 
-    Args:
-        encoder: Allegro-style encoder. Must satisfy
-            ``encoder.expose_tensor_track is True`` and (when ``dipole``
-            or ``quadrupole`` is on) ``encoder.l_max >= 2``.
-        sigma: σ-Gaussian charge-smearing length in Å. Default ``1.0``.
-        dl: Reciprocal-space grid resolution in Å. Default ``2.0``.
-        prefactor: Electrostatic prefactor ``1/(2 ε₀)``. Default
-            ``90.4756`` (eV·Å·e⁻²).
-        charge: Predict atomic charges. Default ``True``.
-        dipole: Predict atomic dipoles. Default ``True``. Requires
-            ``encoder.l_max >= 2``.
-        quadrupole: Predict atomic quadrupoles. Default ``True``.
-            Requires ``encoder.l_max >= 2``.
-        constrain_total_charge: Project per-graph charge sums onto
-            ``total_charge_key``. Default ``True``.
-        short_range_head: Optional ``nn.Module`` (or ``list``) writing
-            ``"energy_short"`` ``(B,)``.
-        total_charge_key: Per-graph total-charge key under ``graphs``.
-            Required when ``constrain_total_charge=True``.
-        hidden_dim: Hidden width of the multipole head's scalar MLPs.
-        avg_num_neighbors: Dataset-wide ⟨|N(i)|⟩ for the edge→atom
-            pool normalisation in the multipole head.
+        Raises:
+            ValueError: If ``encoder.expose_tensor_track`` is not ``True``,
+                or if ``dipole`` / ``quadrupole`` is requested but
+                ``encoder.l_max < 2``.
+        """
+        if not getattr(encoder, "expose_tensor_track", False):
+            raise ValueError(
+                "Sonata requires an encoder built with `expose_tensor_track=True` "
+                "to expose the equivariant tensor-track features the multipole "
+                "head consumes. Reconstruct your encoder with this flag set."
+            )
+        if (dipole or quadrupole) and getattr(encoder, "l_max", 0) < 2:
+            raise ValueError(
+                "Sonata requires `encoder.l_max >= 2` when `dipole=True` or "
+                f"`quadrupole=True`; got `l_max={getattr(encoder, 'l_max', None)}`."
+            )
 
-    Returns:
-        A fully wired :class:`Sonata`.
-
-    Raises:
-        ValueError: If ``encoder.expose_tensor_track`` is not ``True``,
-            or if ``dipole`` / ``quadrupole`` is requested but
-            ``encoder.l_max < 2``.
-    """
-    if not getattr(encoder, "expose_tensor_track", False):
-        raise ValueError(
-            "Sonata requires an encoder built with `expose_tensor_track=True` "
-            "to expose the equivariant tensor-track features the multipole "
-            "head consumes. Reconstruct your encoder with this flag set."
+        head = PermMultipoleHead(
+            input_dim=encoder.output_dim,
+            avg_num_neighbors=avg_num_neighbors,
+            charge=charge,
+            dipole=dipole,
+            quadrupole=quadrupole,
+            constrain_total_charge=constrain_total_charge,
+            total_charge_key=total_charge_key,
+            hidden_dim=hidden_dim,
+            tensor_irreps=encoder.tensor_track_irreps,
         )
-    if (dipole or quadrupole) and getattr(encoder, "l_max", 0) < 2:
-        raise ValueError(
-            "Sonata requires `encoder.l_max >= 2` when `dipole=True` or "
-            f"`quadrupole=True`; got `l_max={getattr(encoder, 'l_max', None)}`."
+        ewald = EwaldMultipoleEnergy(
+            sigma=sigma,
+            dl=dl,
+            prefactor=prefactor,
+            remove_self_interaction=True,
+            use_epsilon_r_scaling=False,
         )
-
-    head = PermMultipoleHead(
-        input_dim=encoder.output_dim,
-        avg_num_neighbors=avg_num_neighbors,
-        charge=charge,
-        dipole=dipole,
-        quadrupole=quadrupole,
-        constrain_total_charge=constrain_total_charge,
-        total_charge_key=total_charge_key,
-        hidden_dim=hidden_dim,
-        tensor_irreps=encoder.tensor_track_irreps,
-    )
-    ewald = EwaldMultipoleEnergy(
-        sigma=sigma,
-        dl=dl,
-        prefactor=prefactor,
-        remove_self_interaction=True,
-        use_epsilon_r_scaling=False,
-    )
-    return Sonata(
-        encoder=encoder,
-        perm_multipole_head=head,
-        ewald=ewald,
-        short_range_head=short_range_head,
-    )
+        return cls(
+            encoder=encoder,
+            perm_multipole_head=head,
+            ewald=ewald,
+            short_range_head=short_range_head,
+        )

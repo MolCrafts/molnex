@@ -1,19 +1,28 @@
-"""Labeler protocol and implementations."""
+"""Labeler protocol and implementations.
+
+:class:`TypeSystemLabeler` (condensed MM types) lives in
+:mod:`molrep.condensation.labeler` and is re-exported here so perception-side
+callers import labelers from one place.
+"""
 
 from typing import Protocol, runtime_checkable
 
 import torch
 
+from molrep.condensation.labeler import TypeSystemLabeler
+
+__all__ = ["Labeler", "ProxyLabeler", "TypeSystemLabeler"]
+
 
 @runtime_checkable
 class Labeler(Protocol):
-    """Protocol for atom type labelers."""
+    """Protocol for type labelers (atom proxy or condensed MM types)."""
 
     num_types: int
     type_map: dict[int, str]
 
     def label(self, z: torch.Tensor) -> torch.Tensor:
-        """Generate type labels for atoms in batch."""
+        """Generate type labels for items in a batch."""
         ...
 
 

@@ -371,7 +371,7 @@ class MetricCollection:
         for metric in self.metrics.values():
             metric.update(preds, targets)
 
-    def compute(self) -> dict[str, torch.Tensor]:  # type: ignore[return]
+    def compute(self) -> dict[str, torch.Tensor]:
         """Compute all metrics, each a 0-d tensor on the inputs' device.
 
         No ``.item()`` is taken here — callers materialise to Python floats
@@ -397,3 +397,75 @@ class MetricCollection:
             if hasattr(metric, "to"):
                 metric.to(device)
         return self
+
+
+class MoleculeCenteredRMSE(BaseMetric):
+    """RMSE after per-molecule mean-centering of pred and target (kcal/mol).
+
+    Espaloma relative conformational energy metric. Call
+    :meth:`update` with ``preds``, ``targets``, and integer ``group_ids``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reset()
+
+    def update(
+        self,
+        preds: torch.Tensor,
+        targets: torch.Tensor,
+        group_ids: torch.Tensor | None = None,
+    ) -> None:
+        if group_ids is None:
+            raise ValueError("MoleculeCenteredRMSE.update requires group_ids")
+        from molix.core.losses.molecular import center_by_group
+
+        p = center_by_group(preds.detach().reshape(-1), group_ids.detach().reshape(-1))
+        t = center_by_group(targets.detach().reshape(-1), group_ids.detach().reshape(-1))
+        self.preds.append(p)
+        self.targets.append(t)
+
+    def compute(self) -> torch.Tensor:
+        if not self.preds:
+            return torch.zeros(())
+        p = torch.cat(self.preds)
+        t = torch.cat(self.targets)
+        return torch.sqrt(torch.mean((p - t) ** 2))
+
+    def reset(self) -> None:
+        self.preds: list[torch.Tensor] = []
+        self.targets: list[torch.Tensor] = []
+
+
+class MoleculeCenteredMAE(BaseMetric):
+    """MAE after per-molecule mean-centering of pred and target (kcal/mol)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reset()
+
+    def update(
+        self,
+        preds: torch.Tensor,
+        targets: torch.Tensor,
+        group_ids: torch.Tensor | None = None,
+    ) -> None:
+        if group_ids is None:
+            raise ValueError("MoleculeCenteredMAE.update requires group_ids")
+        from molix.core.losses.molecular import center_by_group
+
+        p = center_by_group(preds.detach().reshape(-1), group_ids.detach().reshape(-1))
+        t = center_by_group(targets.detach().reshape(-1), group_ids.detach().reshape(-1))
+        self.preds.append(p)
+        self.targets.append(t)
+
+    def compute(self) -> torch.Tensor:
+        if not self.preds:
+            return torch.zeros(())
+        p = torch.cat(self.preds)
+        t = torch.cat(self.targets)
+        return torch.mean((p - t).abs())
+
+    def reset(self) -> None:
+        self.preds: list[torch.Tensor] = []
+        self.targets: list[torch.Tensor] = []

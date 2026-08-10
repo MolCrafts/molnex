@@ -1,63 +1,90 @@
 """Component-based, compilable in-process MD engine.
 
-Component layecake (mirrors molpy's ``Potential`` vs ``ForceField`` split):
+:class:`~molix.md.driver.MD` is **the** entry point: it binds a force field to
+an integrator, owns the MD-side precision, and delegates the loop to
+:class:`~molix.md.runner.MDRunner`. The neighbour-list cadence is *not* its —
+that belongs to :class:`~molix.md.neighbors.NeighborList` (see below). The lower
+layers are the primitives it composes (use them directly only when you need a
+custom loop):
 
-* :class:`~molix.md.types.ForceOutput` / :class:`~molix.md.types.MDState` —
-  typed pytree contracts crossing component boundaries.
-* :class:`~molix.md.forcefield.ForceField` (``PotentialForceField`` over a
-  molpot Potential; ``HarmonicForceField`` / ``LennardJonesForceField`` analytic)
-  — binds a model to a system, maps positions to ``(energy, forces)``.
-* :class:`~molix.md.integrators.LangevinVerletIntegrator` — advances an
+* :class:`~molix.md.types.ForceOutput` / :class:`~molix.md.types.MDState` /
+  :class:`~molix.md.types.MDObservables` — typed pytree contracts crossing
+  component boundaries.
+* :class:`~molix.md.forcefield.ForceField` (``PotentialForceField`` /
+  ``PeriodicPotentialForceField`` over a TensorDict potential;
+  ``CallableForceField`` over any ``pos -> (energy, forces)`` callable;
+  ``HarmonicForceField`` / ``LennardJonesForceField`` analytic;
+  ``LennardJonesCutForceField`` — periodic truncated-shifted LJ over a
+  rebuildable neighbour list, the bulk lj/cut production path) — binds a
+  model to a system, maps positions to ``(energy, forces)``.
+* :class:`~molix.md.integrators.Integrator` /
+  :class:`~molix.md.integrators.LangevinVerletIntegrator` — advances an
   ``MDState`` (BAOAB); ``step`` / ``rollout`` ``torch.compile(fullgraph=True)``
-  to a single graph including a traceable force field.
-* :class:`~molix.md.runner.MDRunner` — drives the integrator through the molix
-  hook lifecycle; :class:`~molix.md.runner.TrajectoryHook` captures trajectories.
+  to a single graph including a traceable force field. ``advance_n`` is the
+  eager chunk driver (γ=0 skips the noise draw; bit-identical dynamics).
+* :class:`~molix.md.runner.MDRunner` — drives the integrator through the
+  :class:`~molix.md.runner.MDHook` lifecycle;
+  :class:`~molix.md.runner.TrajectoryHook` captures trajectories,
+  :class:`~molix.md.runner.MDCheckpointHook` persists restartable state.
+* :class:`~molix.md.driver.MaxwellBoltzmann` — initial-velocity sampler.
 
-Scope: open (non-periodic) systems, short small-displacement trajectories. The
-neighbour list (``edge_index``) is frozen for the whole run — there is no
-rebuild — so this is a study/inference engine for near-equilibrium dynamics, not
-general production MD. See :class:`~molix.md.forcefield.PotentialForceField`.
+Periodic systems are supported through
+:class:`~molix.md.neighbors.NeighborList`, which **owns the rebuild policy**:
+a Verlet ``skin`` under the LAMMPS ``every`` / ``delay`` / ``check`` gate,
+rebuilt in place into fixed-capacity buffers so the force path can stay inside
+a CUDA graph. There is exactly one caller —
+:meth:`~molix.md.integrators.Integrator.eval_force` asks once per force
+evaluation, at the positions being evaluated, iff the force field declares
+:attr:`~molix.md.forcefield.ForceField.rebuilds_neighbors`; no driver kwarg and
+no step-start hook. A force field that keeps its list frozen (the default for
+:class:`~molix.md.forcefield.PotentialForceField`, and any integrator built with
+``rebuild=False``) remains valid only for open systems or trajectories short
+enough that no atom changes neighbours.
 """
 
-from molix.md.ase_shim import HAS_ASE, make_pinet_calculator
-from molix.md.dynamics import (
-    TrajectoryArtifact,
-    build_paired_trajectory,
-    evaluate_delta_along_trajectory,
-    run_trajectory,
-)
+from molix.md.driver import MD, MaxwellBoltzmann
 from molix.md.forcefield import (
+    CallableForceField,
     ForceField,
     HarmonicForceField,
+    LennardJonesCutForceField,
     LennardJonesForceField,
+    PeriodicPotentialForceField,
     PotentialForceField,
 )
-from molix.md.integrators import (
-    EV_PER_AMU_A2_FS2,
-    Integrator,
-    LangevinVerletIntegrator,
-    as_mass_col,
+from molix.md.integrators import Integrator, LangevinVerletIntegrator
+from molix.md.neighbors import NeighborList, NeighborStrategy
+from molix.md.runner import (
+    MDCheckpointHook,
+    MDHook,
+    MDRunner,
+    TrajectoryHook,
 )
-from molix.md.runner import MDRunner, TrajectoryHook
-from molix.md.types import ForceOutput, MDState
+from molix.md.types import ForceOutput, MDObservables, MDState
+from molix.units import EV_PER_AMU_A2_FS2, KB_AMU_A_FS, KB_EV_PER_K
 
 __all__ = [
     "EV_PER_AMU_A2_FS2",
-    "HAS_ASE",
+    "KB_AMU_A_FS",
+    "KB_EV_PER_K",
+    "MD",
+    "CallableForceField",
     "ForceField",
     "ForceOutput",
     "HarmonicForceField",
     "Integrator",
     "LangevinVerletIntegrator",
+    "LennardJonesCutForceField",
     "LennardJonesForceField",
+    "MDCheckpointHook",
+    "MDHook",
+    "MDObservables",
     "MDRunner",
     "MDState",
+    "MaxwellBoltzmann",
+    "NeighborList",
+    "NeighborStrategy",
+    "PeriodicPotentialForceField",
     "PotentialForceField",
-    "TrajectoryArtifact",
     "TrajectoryHook",
-    "as_mass_col",
-    "build_paired_trajectory",
-    "evaluate_delta_along_trajectory",
-    "make_pinet_calculator",
-    "run_trajectory",
 ]

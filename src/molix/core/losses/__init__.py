@@ -14,7 +14,13 @@ Molecular-ML presets (``TensorDict``-aware closures):
 from molix.core.losses.combined import WeightedLoss
 from molix.core.losses.energy import MSELoss
 from molix.core.losses.force import MAELoss
-from molix.core.losses.molecular import energy_force_mse, energy_mse
+from molix.core.losses.molecular import (
+    center_by_group,
+    energy_force_mse,
+    energy_mse,
+    molecule_centered_energy_mse,
+    parameter_bag_mse,
+)
 
 __all__ = [
     "MAELoss",
@@ -22,4 +28,7 @@ __all__ = [
     "WeightedLoss",
     "energy_force_mse",
     "energy_mse",
+    "center_by_group",
+    "molecule_centered_energy_mse",
+    "parameter_bag_mse",
 ]

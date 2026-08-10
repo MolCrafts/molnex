@@ -23,10 +23,6 @@ from molix.F.scatter import scatter_sum
 ANG2BOHR = 1.8897259886
 
 
-def _scatter_sum(src: torch.Tensor, index: torch.Tensor, dim_size: int) -> torch.Tensor:
-    return scatter_sum(src, index, dim_size=dim_size)
-
-
 def _relative_atom_indices(
     batch: torch.Tensor, num_graphs: int
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
@@ -100,21 +96,21 @@ class ChargeResponseHead(nn.Module):
         self.epsilon = float(epsilon)
 
         self.atom_diag_mlp = nn.Sequential(
-            nn.Linear(node_scalar_dim, hidden_dim),
+            nn.Linear(node_scalar_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, 1, dtype=config.ftype),
         )
         self.edge_scalar_mlp = nn.Sequential(
-            nn.Linear(edge_scalar_dim, hidden_dim),
+            nn.Linear(edge_scalar_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, 1, dtype=config.ftype),
         )
         self.edge_vector_mlp = nn.Linear(edge_vector_dim, 1, dtype=config.ftype)
         if self.iso:
             self.iso_mlp = nn.Sequential(
-                nn.Linear(node_scalar_dim, hidden_dim),
+                nn.Linear(node_scalar_dim, hidden_dim, dtype=config.ftype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, 1),
+                nn.Linear(hidden_dim, 1, dtype=config.ftype),
             )
 
         _default_sigma = {1: 0.312, 6: 0.730, 7: 0.709, 8: 0.661, 16: 1.048, 17: 1.016}
@@ -208,7 +204,7 @@ class ChargeResponseHead(nn.Module):
 
         if self.iso:
             alpha_iso_atom = F.softplus(self.iso_mlp(node_scalars).squeeze(-1))
-            alpha_iso = _scatter_sum(alpha_iso_atom, atom_batch, num_graphs)
+            alpha_iso = scatter_sum(alpha_iso_atom, atom_batch, dim_size=num_graphs)
             eye3 = torch.eye(3, dtype=alpha.dtype, device=alpha.device)
             alpha_iso_tensor = alpha_iso[:, None, None] * eye3[None]
             alpha = alpha + alpha_iso_tensor
@@ -276,16 +272,25 @@ class ChargeResponseHead(nn.Module):
 
     def _make_eem(self, atom_diag, sigma, pos, atom_batch, num_graphs, counts, nmax):
         eta = self._make_eta(atom_diag, sigma, pos, atom_batch, num_graphs, counts, nmax)
-        chi_blocks = []
-        for b_idx, n in enumerate(counts.tolist()):
-            block = eta[b_idx, :n, :n]
-            inv = torch.linalg.inv(block)
-            chi_blocks.append(self._make_lrf(inv.unsqueeze(0))[0])
-        padded_chi = torch.zeros_like(eta)
-        for b_idx, chi_b in enumerate(chi_blocks):
-            n = chi_b.shape[0]
-            padded_chi[b_idx, :n, :n] = chi_b
-        return padded_chi, eta
+
+        # One batched inverse instead of ``num_graphs`` Python-level
+        # ``torch.linalg.inv`` calls (each a separate LAPACK/cuSOLVER launch,
+        # plus a ``counts.tolist()`` device→host sync to drive the loop).
+        #
+        # ``_make_eta`` masks each padded matrix to its active block, leaving a
+        # zero diagonal on the padding rows — singular, so it cannot be
+        # inverted as-is. Writing 1 onto the inactive diagonal makes it exactly
+        # block-diagonal ``[[A, 0], [0, I]]``, whose inverse is
+        # ``[[A⁻¹, 0], [0, I]]``; masking the identity block back to zero
+        # recovers the per-molecule ``A⁻¹`` padded with zeros. ``_make_lrf`` is
+        # row-sum based, so those zero rows contribute nothing and it yields
+        # the same result the per-block loop produced.
+        idx = torch.arange(nmax, device=eta.device)
+        active = idx.unsqueeze(0) < counts.unsqueeze(1)
+        eta_padded = eta + torch.diag_embed((~active).to(eta.dtype))
+        inv = torch.linalg.inv(eta_padded)
+        block_mask = (active[:, :, None] & active[:, None, :]).to(eta.dtype)
+        return self._make_lrf(inv * block_mask), eta
 
     def _make_eta(self, atom_diag, sigma, pos, atom_batch, num_graphs, counts, nmax):
         dense_pos, _ = _dense_positions(pos, atom_batch, num_graphs)
@@ -330,4 +335,4 @@ class ChargeResponseHead(nn.Module):
             edge_vec.unsqueeze(-1) * edge_vec.unsqueeze(-2)
         )
         edge_batch = atom_batch[src]
-        return _scatter_sum(weighted, edge_batch, num_graphs)
+        return scatter_sum(weighted, edge_batch, dim_size=num_graphs)

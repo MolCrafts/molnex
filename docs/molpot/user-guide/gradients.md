@@ -42,6 +42,59 @@ print(forces.shape)  # torch.Size([10, 3])
 `energy_fn` must recompute any position-derived geometry (edge vectors,
 distances) inside itself so the gradient flows `pos → geometry → energy`.
 
+## Batch-level force-pass kernels (批级力学传递内核)
+
+`ForceDerivation` / `force.py` is the **tensor-level** layer: you hand it
+`energy_fn(pos) -> scalar` and get `forces (N, 3)` back. A potential, though,
+works on a post-collate batch — it has to own the position leaf, write
+`graphs.energy` / `atoms.forces` in place, and decide whether the returned
+energy stays attached. That is the **batch-level** layer,
+`molpot.derivation.kernels`:
+
+| Layer | Module | Signature | Owns |
+|-------|--------|-----------|------|
+| tensor | `molpot.derivation.force` | `energy_fn(pos) -> scalar` | the only `torch.autograd.grad` / `torch.func.grad` calls |
+| batch | `molpot.derivation.kernels` | `energy_core(batch) -> batch` | position-leaf ownership, key writes, `detach_energy` |
+
+```python
+from molpot.derivation import func_force_pass, grad_force_pass
+
+# one energy forward + torch.autograd.grad on the position leaf
+batch = grad_force_pass(self._write_energy, batch, detach_energy=False)
+
+# single torch.func.grad(..., has_aux=True) pass — fullgraph-compilable
+batch = func_force_pass(self._write_energy, batch)
+```
+
+The kernels **compose** `force.py` — they never re-derive a gradient — so the
+backend boundary of the table above still holds: `grad_force_pass` for cuEq
+fused kernels (MACE-shaped), `func_force_pass` for pure-PyTorch graphs (PiNet)
+that want `torch.compile(fullgraph=True)`. `PiNetPotential`, `GradMode` and
+`FuncMode` all bind these; a potential must not hand-roll a third pass body.
+
+`grad_force_pass(energy_core=None, ...)` skips the forward and differentiates
+an energy already materialised on a live position leaf — that is what keeps
+`EnergyReadout(backward=True)` + `ForceReadout` at a single model forward.
+
+### `detach_energy` (three states)
+
+Who owns the position leaf decides whether the returned `graphs.energy` can
+still be part of a loss:
+
+| `detach_energy` | Behaviour | Caller |
+|-----------------|-----------|--------|
+| `False` | never detach — energy stays attached for an energy loss | `PiNetPotential`, `GradMode` |
+| `True` | always detach — energy is a reported quantity only | inference / logging |
+| `None` (default) | detach **iff the kernel created the position leaf**, i.e. the caller had no graph to lose | MACE-style `get_outputs` |
+
+`func_force_pass` has no such knob: its only callers want the energy attached,
+and the fused kernels that need leaf-detaching cannot use functorch anyway
+(pytorch#170834).
+
+Units throughout: positions Å, energies eV, forces eV/Å. The kernels only
+differentiate whatever the energy core wrote, so a core on another unit system
+produces mismatched forces silently.
+
 ## With PotentialComposer
 
 `PotentialComposer` derives forces when positions are present in `data`:

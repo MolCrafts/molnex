@@ -148,9 +148,7 @@ def gpu_matrix(n_steps: int) -> None:
                     {
                         "compiler": cname,
                         "precision": precision,
-                        "wall_ms": f"{res.wall_ms_per_step:.3f}"
-                        if res.wall_ms_per_step
-                        else "n/a",
+                        "wall_ms": f"{res.wall_ms_per_step:.3f}" if res.wall_ms_per_step else "n/a",
                         "atoms/s": f"{res.throughput_atoms_per_sec:,.0f}",
                         "lb%": f"{res.launch_bound_pct:.0f}" if res.launch_bound_pct else "n/a",
                     }

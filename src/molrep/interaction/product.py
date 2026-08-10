@@ -1,16 +1,18 @@
-"""Tensor product convolution for equivariant message passing.
+"""Generic tensor products and irreps helpers for equivariant message passing.
 
-Two tensor-product wrappers are exposed here:
+Exposed here:
 
-- :class:`ConvTP`: thin wrapper around ``cuet.ChannelWiseTensorProduct``
-  (subscripts ``"uv,iu,jv,kuv+ijk"``).  Used by MACE-style encoders.
 - :class:`EquivariantPolynomialTP`: general wrapper around an arbitrary
   ``cue.EquivariantPolynomial``.  Lets callers build custom descriptors via
-  ``cue.SegmentedTensorProduct.from_subscripts(...)``.
+  ``cue.SegmentedTensorProduct.from_subscripts(...)``.  It supports
+  gather/scatter via ``indices_1``/``indices_2``/``indices_out``/``size_out``,
+  mirroring the signature of ``cuet.ChannelWiseTensorProduct``.
+- ``irreps_from_l_max`` / ``sh_irreps_from_l_max``: irreps-string builders
+  shared by MACE, Allegro and the MACE readouts.
 
-Both wrappers support gather/scatter via ``indices_1``/``indices_2``/
-``indices_out``/``size_out``, mirroring the signature of
-``cuet.ChannelWiseTensorProduct``.
+The MACE-specific :class:`~molrep.interaction.mace.conv.ConvTP` wrapper moved to
+:mod:`molrep.interaction.mace.conv`; it is re-exported at the bottom of this
+module so ``from molrep.interaction.product import ConvTP`` keeps working.
 
 Model-specific descriptor builders (e.g. Allegro's per-channel ``"u,iu,ju,ku+ijk"``
 kernel) live in the corresponding ``molzoo`` module, not here.
@@ -24,115 +26,6 @@ import cuequivariance as cue
 import cuequivariance_torch as cuet
 import torch
 import torch.nn as nn
-from pydantic import BaseModel
-
-
-class ConvTPSpec(BaseModel):
-    r"""Specification for tensor product convolution layer.
-
-    One-particle basis:
-    $\phi_{ij} = \sum_{l_1,l_2,m_1,m_2} c_{l_3 m_3}^{l_1 m_1, l_2 m_2}
-    R(r_{ij}) Y_{l_1}^{m_1}(\hat{r}_{ij}) h_j^{l_2 m_2}$
-
-    Attributes:
-        in_irreps: Input irreps.
-        out_irreps: Output irreps.
-        sh_irreps: Spherical harmonics irreps.
-    """
-
-    in_irreps: str
-    out_irreps: str
-    sh_irreps: str
-
-
-class ConvTP(nn.Module):
-    r"""Channelwise tensor product for equivariant message passing.
-
-    Computes messages via tensor product:
-    $$\phi_{ij} = \sum_{l_1,l_2,m_1,m_2} c_{l_3 m_3}^{l_1 m_1, l_2 m_2}
-    R(r_{ij}) Y_{l_1}^{m_1}(\hat{r}_{ij}) h_j^{l_2 m_2}$$
-
-    Attributes:
-        config: ConvTPSpec configuration.
-        cue_tp: ChannelWiseTensorProduct layer.
-        weight_numel: Number of elements in TP weights.
-    """
-
-    def __init__(
-        self,
-        *,
-        in_irreps: str,
-        out_irreps: str,
-        sh_irreps: str,
-        use_fallback: bool = True,
-    ):
-        """Initialize channelwise tensor product layer.
-
-        Args:
-            in_irreps: Input irreps for node features.
-            out_irreps: Output irreps for messages.
-            sh_irreps: Irreps for spherical harmonics.
-            use_fallback: If ``True`` (default), pure-torch cuEq path so
-                ``ForceDerivation(method="functorch")`` can trace. Set
-                ``False`` for fused kernels when forces use
-                ``method="autograd"`` (e.g. MACE-OMOL).
-        """
-        super().__init__()
-
-        self.config = ConvTPSpec(
-            in_irreps=in_irreps,
-            out_irreps=out_irreps,
-            sh_irreps=sh_irreps,
-        )
-        self.use_fallback = use_fallback
-
-        irreps_in = cue.Irreps("O3", in_irreps)
-        irreps_sh = cue.Irreps("O3", sh_irreps)
-        irreps_out = cue.Irreps("O3", out_irreps)
-
-        self.cue_tp = cuet.ChannelWiseTensorProduct(  # type: ignore
-            irreps_in,
-            irreps_sh,
-            irreps_out,
-            layout=cue.ir_mul,
-            shared_weights=False,
-            internal_weights=False,
-            use_fallback=use_fallback,
-        )
-
-        self.weight_numel = self.cue_tp.weight_numel
-
-    def forward(
-        self,
-        node_features: torch.Tensor,
-        edge_angular: torch.Tensor,
-        edge_index: torch.Tensor,
-        tp_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute tensor product messages with integrated gather/scatter.
-
-        Args:
-            node_features: Node features.
-            edge_angular: Spherical harmonics.
-            edge_index: Edge indices ``(E, 2)``.
-            tp_weights: TP weights.
-
-        Returns:
-            Computed messages (n_edges, out_irreps_dim).
-        """
-        indices_1 = edge_index[:, 0]
-        indices_out = edge_index[:, 1]
-
-        messages = self.cue_tp(
-            node_features,
-            edge_angular,
-            tp_weights,
-            indices_1=indices_1,
-            indices_out=indices_out,
-            size_out=node_features.shape[0],
-        )
-
-        return messages
 
 
 def irreps_from_l_max(l_max: int, hidden_dim: int) -> str:
@@ -299,3 +192,11 @@ class EquivariantPolynomialTP(nn.Module):
             output_shapes=sizes_out,
             output_indices=output_indices,
         )[0]
+
+
+# Back-compat re-export of the MACE convolution, moved to
+# ``molrep.interaction.mace.conv`` by mace-subpackage-restructure-01. Kept at the
+# module tail on purpose: ``mace.block`` imports the irreps helpers above from
+# here, so this module must be fully populated before the mace package is pulled
+# in. Removed in 06-wire.
+from molrep.interaction.mace.conv import ConvTP, ConvTPSpec  # noqa: E402,F401

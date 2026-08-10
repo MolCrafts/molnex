@@ -4,9 +4,10 @@ double-backward probe on it vs a fresh clone, and dump the structural diff.
 
 Run in NAIVE mode (no fused-ops LD_LIBRARY_PATH) to isolate the instantiation
 difference (the teacher's 101/103 was measured in naive mode)."""
-import torch
+
 import cuequivariance as cue
 import cuequivariance_torch as cuet
+import torch
 
 torch.set_default_dtype(torch.float64)
 dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -36,10 +37,11 @@ def describe(lin, tag):
     print(f"   weight shapes={wsh}")
     print(f"   vars keys={sorted(k for k in vars(lin) if not k.startswith('_'))}")
     # dig into the wrapped polynomial / method if present
-    for attr in ("f", "module", "linear", "_linear", "tp", "transpose_in", "transpose_out", "layout"):
+    attrs = ("f", "module", "linear", "_linear", "tp", "transpose_in", "transpose_out", "layout")
+    for attr in attrs:
         if hasattr(lin, attr):
             a = getattr(lin, attr)
-            print(f"   .{attr} = {type(a).__name__ if hasattr(a,'__class__') else a}")
+            print(f"   .{attr} = {type(a).__name__ if hasattr(a, '__class__') else a}")
 
 
 # find teacher cuet.Linear modules with l>0 in irreps_in
@@ -57,13 +59,15 @@ for name, m, has_l, iin in cands:
 # pick the first l>0 teacher Linear
 tname, tlin, _, tiin = next((c for c in cands if c[2]), (None, None, None, None))
 if tlin is None:
-    print("no l>0 teacher Linear found"); raise SystemExit
+    print("no l>0 teacher Linear found")
+    raise SystemExit
 din = cue.Irreps(tiin).dim
 describe(tlin, f"TEACHER {tname}")
 print(f"   double-backward weight-grad L1 = {db_probe(tlin, din):.3e}")
 
 # fresh clone with same irreps, our molrep style
-fresh = cuet.Linear(cue.Irreps(tlin.irreps_in), cue.Irreps(tlin.irreps_out),
-                    layout=cue.ir_mul, dtype=torch.float64).to(dev)
+fresh = cuet.Linear(
+    cue.Irreps(tlin.irreps_in), cue.Irreps(tlin.irreps_out), layout=cue.ir_mul, dtype=torch.float64
+).to(dev)
 describe(fresh, "FRESH (molrep-style, layout=ir_mul)")
 print(f"   double-backward weight-grad L1 = {db_probe(fresh, din):.3e}")

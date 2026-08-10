@@ -25,7 +25,7 @@ try:
     from molix.datasets.molrec import MolRecSource
 except ImportError:  # molpy.MolRec (or molrec module deps) not available
 
-    class MolRecSource:  # type: ignore[no-redef]
+    class MolRecSource:
         """Placeholder when ``molpy.MolRec`` is not on the public API."""
 
         def __init__(self, *args, **kwargs):

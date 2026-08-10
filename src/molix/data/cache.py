@@ -63,6 +63,10 @@ __all__ = ["PackedCache"]
 
 
 # Reserved keys in the packed payload — never collide with user sample keys.
+# Note: ``angles`` / ``propers`` / ``impropers`` are intentionally *not*
+# reserved as top-level sample keys — pre-collate samples carry nested column
+# dicts under those names; packing extracts them into payload buckets after
+# flatten (dotted ``angles.atomi`` etc.). Only the ptr keys are reserved.
 _RESERVED_TOP_KEYS = frozenset(
     {
         "format_version",
@@ -70,6 +74,9 @@ _RESERVED_TOP_KEYS = frozenset(
         "atom_ptr",
         "edge_ptr",
         "bond_ptr",
+        "angle_ptr",
+        "proper_ptr",
+        "improper_ptr",
         "atoms",
         "edges",
         "bonds",
@@ -323,6 +330,12 @@ def _pack_samples(samples: list[dict]) -> dict[str, Any]:
     # atom/edge/graph leading-dim model — pack it into a dedicated bonds bucket.
     bonds_bucket, bond_ptr = _extract_bonds(flats)
 
+    # Valence column families (angles / propers / impropers): 1-D columns of
+    # variable term-count, extracted as dedicated buckets with their own ptrs.
+    valence_extracted: dict[str, tuple[dict[str, torch.Tensor], torch.Tensor | None]] = {}
+    for family, required in _VALENCE_REQUIRED.items():
+        valence_extracted[family] = _extract_valence_family(flats, family, required)
+
     keys = set(flats[0].keys())
     for i, f in enumerate(flats[1:], start=1):
         if set(f.keys()) != keys:
@@ -363,18 +376,46 @@ def _pack_samples(samples: list[dict]) -> dict[str, Any]:
         "graphs": {k: torch.stack([f[k] for f in flats], dim=0) for k in graph_keys},
         "scalars": {k: [f[k] for f in flats] for k in scalar_keys},
     }
-    if atom_keys:
+    # Pointers are written from the *reference* keys (``Z`` / ``edge_index``),
+    # not from bucket emptiness: they describe the sample partition itself, and
+    # every consumer (``MmapDataset.avg_num_neighbors`` / ``edge_counts``,
+    # ``collate_packed``) needs them whenever the reference key exists. Keying
+    # them on bucket emptiness made a misclassified key silently erase the whole
+    # axis.
+    if has_atom_ref:
         payload["atom_ptr"] = torch.tensor(atom_ptr, dtype=torch.long)
-    if edge_keys:
+    if has_edge_ref:
         payload["edge_ptr"] = torch.tensor(edge_ptr, dtype=torch.long)
     if bond_ptr is not None:
         payload["bond_ptr"] = bond_ptr
+    for family, (bucket, ptr) in valence_extracted.items():
+        if ptr is not None:
+            payload[family] = bucket
+            payload[_VALENCE_PTR_KEY[family]] = ptr
     return payload
 
 
 # Covalent-bond sample keys handled outside the dim-0 schema model.
 _BOND_INDEX_KEY = "bond_index"
 _BOND_TYPES_KEY = "bond_types"
+
+# Valence column families (nested pre-collate → dotted flat keys after _flatten).
+# Impropers: atomi is the center (molrs center-first).
+_VALENCE_REQUIRED: dict[str, tuple[str, ...]] = {
+    "angles": ("atomi", "atomj", "atomk"),
+    "propers": ("atomi", "atomj", "atomk", "atoml"),
+    "impropers": ("atomi", "atomj", "atomk", "atoml"),
+}
+_VALENCE_OPTIONAL: tuple[str, ...] = ("type",)
+_VALENCE_PTR_KEY: dict[str, str] = {
+    "angles": "angle_ptr",
+    "propers": "proper_ptr",
+    "impropers": "improper_ptr",
+}
+
+# Canonical per-edge sample keys, routed by identity when the leading-dim
+# classification is ambiguous (see :func:`_infer_schema_across`).
+_EDGE_KEYS = frozenset({"edge_index", "edge_diff", "edge_dist"})
 
 
 def _extract_bonds(
@@ -419,6 +460,86 @@ def _extract_bonds(
     return bonds, torch.tensor(bond_ptr, dtype=torch.long)
 
 
+def _extract_valence_family(
+    flats: list[dict[str, Any]],
+    family: str,
+    required: tuple[str, ...],
+) -> tuple[dict[str, torch.Tensor], torch.Tensor | None]:
+    """Pop dotted ``{family}.{col}`` keys into a packed column bucket + ptr.
+
+    Pre-collate nested form flattens to ``angles.atomi`` etc. Columns are 1-D
+    of length ``N_terms`` (variable across samples), so they cannot ride the
+    atom/edge/graph leading-dim model. Mutates *flats* in place.
+
+    Returns:
+        ``(bucket, ptr)`` where *bucket* maps column name → concatenated
+        tensor and *ptr* is the per-sample cumsum over ``N_terms``, or
+        ``({}, None)`` if no sample carries the family.
+
+    Raises:
+        ValueError: mixed presence, missing required column, or length mismatch.
+    """
+    lead_key = f"{family}.{required[0]}"
+    present = [lead_key in f and f[lead_key] is not None for f in flats]
+    if not any(present):
+        return {}, None
+    if not all(present):
+        raise ValueError(
+            f"{family!r} must be present in all samples or none "
+            f"(got presence={present})."
+        )
+
+    col_lists: dict[str, list[torch.Tensor]] = {c: [] for c in required}
+    opt_lists: dict[str, list[torch.Tensor]] = {c: [] for c in _VALENCE_OPTIONAL}
+    have_optional = {c: True for c in _VALENCE_OPTIONAL}
+    n_terms: list[int] = []
+
+    for f in flats:
+        lengths: dict[str, int] = {}
+        for col in required:
+            key = f"{family}.{col}"
+            if key not in f or f[key] is None:
+                raise ValueError(
+                    f"sample is missing required {family!r} column {col!r}"
+                )
+            t = f.pop(key).long().reshape(-1)
+            col_lists[col].append(t)
+            lengths[col] = int(t.shape[0])
+        n0 = lengths[required[0]]
+        for col in required[1:]:
+            if lengths[col] != n0:
+                raise ValueError(
+                    f"{family!r} column lengths differ: {col}={lengths[col]} "
+                    f"vs {required[0]}={n0}"
+                )
+        n_terms.append(n0)
+        for col in _VALENCE_OPTIONAL:
+            key = f"{family}.{col}"
+            val = f.pop(key, None)
+            if val is None:
+                have_optional[col] = False
+            else:
+                ot = val.long().reshape(-1)
+                if int(ot.shape[0]) != n0:
+                    raise ValueError(
+                        f"{family!r} optional {col!r} length {ot.shape[0]} "
+                        f"!= n_terms={n0}"
+                    )
+                opt_lists[col].append(ot)
+
+    bucket: dict[str, torch.Tensor] = {
+        col: torch.cat(ts, dim=0) for col, ts in col_lists.items()
+    }
+    for col, ts in opt_lists.items():
+        if have_optional[col] and ts:
+            bucket[col] = torch.cat(ts, dim=0)
+
+    ptr = [0]
+    for nt in n_terms:
+        ptr.append(ptr[-1] + nt)
+    return bucket, torch.tensor(ptr, dtype=torch.long)
+
+
 def _unpack_one(payload: Mapping[str, Any], idx: int) -> dict:
     n = payload["n_samples"]
     if idx < 0:
@@ -448,6 +569,17 @@ def _unpack_one(payload: Mapping[str, Any], idx: int) -> dict:
             flat[_BOND_INDEX_KEY] = bonds[_BOND_INDEX_KEY][:, b0:b1]  # COO dim 1
         if _BOND_TYPES_KEY in bonds:
             flat[_BOND_TYPES_KEY] = bonds[_BOND_TYPES_KEY][b0:b1]
+
+    # Valence column buckets → dotted keys so _unflatten rebuilds nested dicts.
+    for family in _VALENCE_REQUIRED:
+        ptr_key = _VALENCE_PTR_KEY[family]
+        v_ptr = payload.get(ptr_key)
+        if v_ptr is None:
+            continue
+        v0, v1 = int(v_ptr[idx]), int(v_ptr[idx + 1])
+        bucket = payload.get(family, {})
+        for col, tensor in bucket.items():
+            flat[f"{family}.{col}"] = tensor[v0:v1]
 
     for k, t in payload["graphs"].items():
         flat[k] = t[idx]
@@ -575,8 +707,17 @@ def _infer_schema_across(
 
         tracks_atoms = has_atom_ref and all(s0 == na for s0, na in zip(shape0s, n_atoms))
         tracks_edges = has_edge_ref and all(s0 == ne for s0, ne in zip(shape0s, n_edges))
-        # Prefer atom classification when both track (can happen if n_atoms == n_edges
-        # holds across every sample, e.g. in degenerate cases).
+        # Leading-dim classification is ambiguous when n_edges == n_atoms holds for
+        # *every* sample — e.g. 2-atom molecules with a symmetric one-pair neighbour
+        # list (E = 2 = N). Break that tie by identity for the canonical edge keys:
+        # the whole downstream stack addresses them by name (``collate``'s edges
+        # namespace, ``_ref_len(f, "edge_index")`` above), and filing them under
+        # atoms also suppresses ``edge_ptr``, silently dropping every edge instead
+        # of merely relabelling it. ``_extract_bonds`` routes ``bond_index`` by
+        # identity for the same reason. All other ambiguous keys keep the atom
+        # preference (per-atom is the far more common intent).
+        if tracks_atoms and tracks_edges and k in _EDGE_KEYS:
+            tracks_atoms = False
         if tracks_atoms:
             rest_set = set(shape_rests)
             if len(rest_set) != 1:

@@ -3,9 +3,9 @@ import math
 import numpy as np
 import pytest
 import torch
-from ase.io import read
 
 import molpot.potentials.elec
+from molix.datasets._extxyz import parse_extxyz_frames
 from molpot.potentials.elec import (
     CoulombPotential,
     EwaldCalculator,
@@ -236,11 +236,11 @@ def test_random_structure(
         pme_order = 8
         rcoulomb = 0.3  ; nm
     """
-    frame = read(COULOMB_TEST_FRAMES, frame_index)
+    frame = parse_extxyz_frames(COULOMB_TEST_FRAMES)[frame_index]
 
-    positions = scaling_factor * torch.tensor(frame.positions, dtype=DTYPE) @ ortho
-    cell = scaling_factor * torch.tensor(frame.cell.array, dtype=DTYPE) @ ortho
-    charges = torch.tensor(frame.get_initial_charges(), dtype=DTYPE).reshape((-1, 1))
+    positions = scaling_factor * torch.tensor(frame.pos, dtype=DTYPE) @ ortho
+    cell = scaling_factor * torch.tensor(frame.cell, dtype=DTYPE) @ ortho
+    charges = torch.tensor(frame.arrays["initial_charges"], dtype=DTYPE).reshape((-1, 1))
 
     cutoff *= scaling_factor
     smearing = cutoff / 6.0
@@ -296,12 +296,13 @@ def test_random_structure(
 
     # Compute energy
     energy = torch.sum(potentials * charges)
-    energy_target = torch.tensor(frame.get_potential_energy(), dtype=DTYPE) / scaling_factor
+    energy_target = torch.tensor(frame.energy, dtype=DTYPE) / scaling_factor
     torch.testing.assert_close(energy, energy_target, atol=0.0, rtol=1e-4)
 
     # Compute forces
     forces = torch.autograd.grad(-energy, positions)[0]
-    forces_target = torch.tensor(frame.get_forces(), dtype=DTYPE) / scaling_factor**2
+    assert frame.forces is not None
+    forces_target = torch.tensor(frame.forces, dtype=DTYPE) / scaling_factor**2
     torch.testing.assert_close(forces, forces_target @ ortho, atol=0.0, rtol=5e-3)
 
     # Compute stress

@@ -32,7 +32,7 @@ from torch.utils.data import DataLoader, Dataset
 from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
 from molix.data.dataset import CachedDataset
 from molix.data.pipeline import PipelineSpec
-from molix.profiler._utils import TimingStat, ValueStat, _fmt_table
+from molix.profiler._utils import TimingStat, ValueStat, _fmt_table, batch_counts
 
 # ---------------------------------------------------------------------------
 # Result
@@ -121,7 +121,7 @@ class DataLoaderResult:
 
 
 # ---------------------------------------------------------------------------
-# Batch stats extraction
+# Collate
 # ---------------------------------------------------------------------------
 
 
@@ -146,16 +146,6 @@ class _ProfilerCollate:
         for entry in self.batch_nodes:
             batch = entry.apply(batch)
         return batch
-
-
-def _extract_batch_counts(batch: object) -> tuple[int, int]:
-    """Extract (n_atoms, n_graphs) from a TensorDict batch."""
-    try:
-        n_atoms = int(batch["atoms"]["Z"].shape[0])  # type: ignore[index]
-        n_graphs = int(batch["graphs"]["num_atoms"].shape[0])  # type: ignore[index]
-        return n_atoms, n_graphs
-    except (KeyError, AttributeError, TypeError):
-        return 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +246,7 @@ class DataLoaderProfiler:
             load_ms = (time.perf_counter() - t0) * 1000
             if i >= n_warmup:
                 load_times_ms.append(load_ms)
-                n_a, n_g = _extract_batch_counts(batch)
+                n_a, n_g = batch_counts(batch)
                 atom_counts.append(n_a)
                 graph_counts.append(n_g)
             if i + 1 >= total:
@@ -301,8 +291,8 @@ class DataLoaderProfiler:
 
         from molix.data.cache import PackedCache
 
-        n = len(source)  # type: ignore[arg-type]
-        samples = [source[i] for i in range(n)]  # type: ignore[index]
+        n = len(source)
+        samples = [source[i] for i in range(n)]
         tmp_file = Path(tempfile.mkdtemp(prefix="molix_profiler_")) / "samples.pt"
         PackedCache(tmp_file).save(samples)
         return CachedDataset(tmp_file)

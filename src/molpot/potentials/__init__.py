@@ -3,21 +3,26 @@
 - LJ126: Lennard-Jones 12-6
 - BondHarmonic: Harmonic bond stretching
 - AngleHarmonic: Harmonic angle bending
-- DihedralHarmonic: Harmonic dihedral torsion
+- DihedralHarmonic: Harmonic dihedral / improper-style form (not Class-I proper)
+- ProperTorsionPeriodic: Class-I multi-term cosine proper torsion
+- ImproperPeriodic: Class-I multi-term cosine improper
+- ImproperHarmonic: Harmonic improper torsion
 - RepulsionExp6: Buckingham-style exponential repulsion
 - DispersionC6: Tang-Toennies C6 dispersion
 - ChargeTransfer: Charge-transfer potential
 - Polarization: Self-consistent induced-dipole polarization
+- ZBLRepulsion: Ziegler-Biersack-Littmark screened nuclear repulsion
 """
 
 from molpot.potentials.angles import AngleHarmonic
 from molpot.potentials.base import BasePotential
 from molpot.potentials.bonds import BondHarmonic
-from molpot.potentials.dihedrals import DihedralHarmonic
+from molpot.potentials.dihedrals import DihedralHarmonic, ProperTorsionPeriodic
 from molpot.potentials.elec import (
     EwaldMultipoleEnergy,
     EwaldMultipoleEnergySpec,
 )
+from molpot.potentials.impropers import ImproperHarmonic, ImproperPeriodic
 from molpot.potentials.mixing import geometric_arithmetic_mixing
 from molpot.potentials.nonbonded import (
     ChargeTransfer,
@@ -28,6 +33,7 @@ from molpot.potentials.nonbonded import (
     repulsion_mixing,
 )
 from molpot.potentials.polarization import Polarization
+from molpot.potentials.repulsion import ZBLRepulsion
 from molpot.potentials.vdw import LJ126, lorentz_berthelot
 
 __all__ = [
@@ -37,6 +43,9 @@ __all__ = [
     "BondHarmonic",
     "AngleHarmonic",
     "DihedralHarmonic",
+    "ProperTorsionPeriodic",
+    "ImproperPeriodic",
+    "ImproperHarmonic",
     "EwaldMultipoleEnergy",
     "EwaldMultipoleEnergySpec",
     "geometric_arithmetic_mixing",
@@ -47,4 +56,5 @@ __all__ = [
     "dispersion_mixing",
     "ct_mixing",
     "Polarization",
+    "ZBLRepulsion",
 ]

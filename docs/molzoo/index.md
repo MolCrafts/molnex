@@ -12,7 +12,7 @@ physics heads, derivation, and composition stay in `molpot`.
 | MACE | encoder | `src/molzoo/specs/mace.md` | Writes `atoms.node_features` |
 | PiNet | encoder + temporary potential | `src/molzoo/specs/pinet2.md` (source tree) | Package `molzoo.pinet/` (`encoder`, `potential`, `properties`); long-term potential home is molpot |
 | MACE-OMOL | full energy/force | [`specs/mace_omol.md`](specs/mace_omol.md) | Lazy import; not encoder-only |
-| Sonata | composition | lives in **`molpot.composition`**, not molzoo | `build_sonata` |
+| Sonata | composition | lives in **`molpot.composition`**, not molzoo | `Sonata.from_encoder` |
 
 ## Documentation Layout
 

@@ -26,7 +26,7 @@ The complete project shape is:
 ```text
 source samples
   -> molix.data pipeline
-  -> GraphBatch
+  -> collated nested TensorDict
   -> molzoo encoder
   -> learned features
   -> molpot readout / potential head
@@ -37,7 +37,7 @@ source samples
 For Allegro specifically:
 
 ```text
-GraphBatch
+collated nested TensorDict
   -> molzoo.Allegro
   -> ("edges", "edge_features")
   -> molpot.heads.EdgeEnergyHead
@@ -46,7 +46,8 @@ GraphBatch
 
 ## 2. Prepare the Batch
 
-MolZoo encoders expect a post-collate `GraphBatch`, not a raw sample dict.
+MolZoo encoders expect a post-collate batch — the nested `TensorDict` with
+`atoms` / `edges` / `graphs` namespaces — not a raw sample dict.
 For Allegro the required fields are:
 
 ```text
@@ -68,13 +69,21 @@ pipe = (
     .build()
 )
 
+dag = pipe.cache(source, base_dir="./cache")
+train_ds, val_ds = dag.dataset(mmap=True).split(ratio=0.9, seed=42)
+
 dm = DataModule(
-    source=source,
-    pipeline=pipe,
+    train_ds,
+    val_ds,
+    batch_nodes=pipe.batch_nodes,
     batch_size=32,
 )
 dm.setup("fit")
 ```
+
+`DataModule` consumes pre-built datasets; the source → pipeline → cache →
+dataset chain runs before it. See
+[Data Modules](../../molix/user-guide/data-modules.md) for the full walkthrough.
 
 The edge convention is fixed:
 

@@ -1,12 +1,14 @@
 """Concrete hook implementations driven by :class:`molix.core.trainer.Trainer`.
 
-The contract layer (:class:`Hook` Protocol, :class:`BaseHook`,
-:class:`ScalarHook`) lives in :mod:`molix.core.hook`; this package
-holds every concrete implementation. Naming convention: every
-concrete class carries the ``Hook`` suffix
-(``CheckpointHook``, ``JournalHook``, ``GradClipHook``, …) so the
-boundary against the contract layer (whose three classes are
-suffix-free) stays visually unambiguous.
+The contract layer (:class:`~molix.core.hook.Hook` Protocol,
+:class:`~molix.core.hook.BaseHook`, :class:`~molix.core.hook.ScalarHook`)
+lives in the *singular* module :mod:`molix.core.hook`; this *plural*
+package, :mod:`molix.hooks`, holds every concrete implementation. The
+singular/plural module name is the boundary marker — class names are not,
+since the ``Hook`` suffix appears on both sides (``BaseHook`` /
+``ScalarHook`` in the contract layer; ``CheckpointHook`` / ``JournalHook`` /
+``GradClipHook`` here) and some concrete hooks drop it entirely (``Log``,
+``EarlyStop``).
 
 Dependency direction: ``hooks/ → io/ + core/`` — never the reverse.
 """

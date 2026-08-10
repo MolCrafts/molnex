@@ -296,6 +296,7 @@ class PermMultipoleHead(nn.Module):
                 irreps_in=cue.Irreps(G, [(self._u, "1o")]),
                 irreps_out=cue.Irreps(G, [(1, "1o")]),
                 layout=cue.ir_mul,
+                dtype=config.ftype,
             )
 
         # Θ readout (l=2, parity even): slice 2e block, gate, collapse u·2e → 1·2e.
@@ -313,6 +314,7 @@ class PermMultipoleHead(nn.Module):
                 irreps_in=cue.Irreps(G, [(self._u, "2e")]),
                 irreps_out=cue.Irreps(G, [(1, "2e")]),
                 layout=cue.ir_mul,
+                dtype=config.ftype,
             )
 
     @classmethod

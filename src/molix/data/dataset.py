@@ -110,7 +110,7 @@ class BaseDataset(Dataset[Any], ABC):
     def __len__(self) -> int: ...
 
     @abstractmethod
-    def __getitem__(self, idx: int) -> dict:  # type: ignore[override]
+    def __getitem__(self, idx: int) -> dict:
         """Return the ``idx``-th sample as a flat ``dict`` (raw-sample shape)."""
         ...
 
@@ -166,6 +166,35 @@ class BaseDataset(Dataset[Any], ABC):
         )
 
 
+def _reject_misfiled_edges(payload: Mapping[str, Any], sink: Path | str) -> None:
+    """Raise if *payload* has no ``edge_ptr`` because its edges were misfiled.
+
+    A packed cache written before edge keys were routed by identity classified
+    ``edge_index`` as a per-atom key whenever ``n_edges == n_atoms`` held for
+    every sample, which also suppressed ``edge_ptr``. Its edges are then
+    unreadable: ``collate_packed`` emits an empty edges namespace and
+    ``avg_num_neighbors`` would report ``0.0``. A cache with no edge keys at
+    all is a different, legitimate state and is left alone.
+
+    Args:
+        payload: The packed-cache payload mapping.
+        sink: Path of the backing cache file, for the error message.
+
+    Raises:
+        ValueError: ``edge_index`` is packed under the ``atom`` schema kind.
+    """
+    spec = payload.get("schema", {}).get("edge_index")
+    if spec is None or spec[0] != "atom":
+        return
+    raise ValueError(
+        f"cache at {sink} packs 'edge_index' as a per-atom key and has no "
+        "'edge_ptr' pointer — it was written before per-edge keys were routed "
+        "by identity, so its edges are unreadable (this happens when "
+        "n_edges == n_atoms for every sample). Delete the stale cache and "
+        "re-run the pipeline."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Cache-backed datasets
 # ---------------------------------------------------------------------------
@@ -190,7 +219,7 @@ class _CacheBacked(BaseDataset):
     def __len__(self) -> int:
         return self._n_samples
 
-    def __getitem__(self, idx: int) -> dict:  # type: ignore[override]
+    def __getitem__(self, idx: int) -> dict:
         return PackedCache.unpack_sample(self._payload, idx)
 
     def packed_view(self) -> PackedView:
@@ -243,11 +272,24 @@ class _CacheBacked(BaseDataset):
         ``NeighborList(symmetry=True)`` this equals the mean number of
         neighbours per atom (Allegro/MACE normalisation constant).
 
-        Returns ``0.0`` if the cache has no edge or atom pointers.
+        Returns ``0.0`` when the cache genuinely holds no edges (no
+        :class:`~molix.data.tasks.NeighborList` in the pipeline) or no
+        atoms — zero neighbours per atom is the honest answer there, and
+        profiling an edge-free cache must stay non-fatal.
+
+        Raises:
+            ValueError: The cache packs ``edge_index`` as a per-atom key
+                and therefore carries no ``edge_ptr`` — a stale cache
+                written before edge keys were routed by identity. Its
+                edges are unreadable, so ``0.0`` would hand Allegro/MACE a
+                silently wrong normalisation constant.
         """
         atom_ptr = self._payload.get("atom_ptr")
         edge_ptr = self._payload.get("edge_ptr")
-        if atom_ptr is None or edge_ptr is None:
+        if edge_ptr is None:
+            _reject_misfiled_edges(self._payload, self.sink)
+            return 0.0
+        if atom_ptr is None:
             return 0.0
         total_atoms = int(atom_ptr[-1].item())
         if total_atoms <= 0:
@@ -392,7 +434,7 @@ class SubsetDataset(BaseDataset):
     def __len__(self) -> int:
         return len(self._indices)
 
-    def __getitem__(self, idx: int) -> dict:  # type: ignore[override]
+    def __getitem__(self, idx: int) -> dict:
         """Return the sample at the ``idx``-th index of this subset's view.
 
         Maps the local index through ``self._indices`` and defers to the
@@ -422,7 +464,10 @@ class SubsetDataset(BaseDataset):
             return getattr(self._dataset, "avg_num_neighbors", 0.0)
         atom_ptr = payload.get("atom_ptr")
         edge_ptr = payload.get("edge_ptr")
-        if atom_ptr is None or edge_ptr is None:
+        if edge_ptr is None:
+            _reject_misfiled_edges(payload, getattr(self._dataset, "sink", "<unknown>"))
+            return 0.0
+        if atom_ptr is None:
             return 0.0
         idx = torch.as_tensor(self._indices, dtype=torch.long)
         n_atoms = (atom_ptr[idx + 1] - atom_ptr[idx]).sum()

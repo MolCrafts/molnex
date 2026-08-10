@@ -5,8 +5,8 @@ not a tutorial; use the MolZoo user guide for narrative and worked examples.
 
 | Field | Value |
 |-------|-------|
-| Module | `molzoo.mace` |
-| Entry point | `MACE` (config `MACESpec`) |
+| Module | `molzoo.mace.research` (in the `molzoo.mace` package) |
+| Entry point | `MACE` (config `MACEResearchSpec`, same module); re-exported lazily as `molzoo.MACE` |
 | Paper | Batatia et al., *MACE: Higher Order Equivariant Message Passing Neural Networks for Fast and Accurate Force Fields*, NeurIPS 2022 |
 | arXiv | https://arxiv.org/abs/2206.07697 |
 | DOI | not applicable (NeurIPS proceedings) |
@@ -17,9 +17,12 @@ not a tutorial; use the MolZoo user guide for narrative and worked examples.
 
 | Module | Role |
 |--------|------|
-| `molzoo.mace_omol.MACEOMol` | Full energy/force model (OMOL weights); see `mace_omol.md` |
+| `molzoo.mace.potential.MACEPotential` | Full energy/force model over both foundation variants |
+| `molzoo.mace.variants.MACEOMol` | Thin `MACEPotential` alias for the OMOL weights; see `mace_omol.md` |
+| `molzoo.mace.variants.MACEMatpes` | Thin `MACEPotential` alias for the MatPES/MP weights; see `mace_matpes.md` |
+| `molzoo.mace.checkpoint.CheckpointRemap` | Official-weight key remap (`MATPES_REMAP` / `OMOL_REMAP` presets) |
 | `molpot.composition` / heads / derivation | Energy readout, forces, composition |
-| `molix.data.NeighborList` | Cutoff graph construction |
+| `molix.data.tasks.NeighborList` | Cutoff graph construction |
 
 ## 1. Scope
 
@@ -38,7 +41,8 @@ It does **not** own:
 - training loops or losses
 - OMOL weight import (that is `MACEOMol`)
 
-Those are owned by `molix` and `molpot` (or `mace_omol` for the full-model path).
+Those are owned by `molix` and `molpot` (or `molzoo.mace.potential.MACEPotential`
+for the full-model path).
 
 ## 2. Public Contract
 
@@ -64,7 +68,7 @@ Those are owned by `molix` and `molpot` (or `mace_omol` for the full-model path)
 | Symbol | Meaning | Code anchor |
 |--------|---------|-------------|
 | \(N, E\) | atoms, edges | batch sizes |
-| \(L\) | `num_layers` | `MACESpec` / interaction stack |
+| \(L\) | `num_interactions` | `MACEResearchSpec` / interaction stack |
 | \(F\) | `num_features` | scalar channel multiplicity at \(\ell=0\) |
 | \(\ell_{\max}\) | `l_max` | spherical harmonics / TP |
 
@@ -83,13 +87,13 @@ kernels (see `MACEOMol`).
 
 ## 4. Configuration Contract
 
-| `MACESpec` / ctor field | Meaning | Constraint |
+| `MACEResearchSpec` / ctor field | Meaning | Constraint |
 |-------------------------|---------|------------|
 | `node_attr_specs` | Discrete/continuous embeddings (e.g. Z) | non-empty |
 | `num_elements` | Species table size | > 0 |
 | `num_features` | Channel multiplicity | > 0 |
 | `r_max` | Radial cutoff (Å) | > 0 |
-| `num_layers` | Message-passing depth | ≥ 1 |
+| `num_interactions` | Message-passing depth | ≥ 1 |
 | `l_max` | Angular momentum | ≥ 0 |
 | `num_bessel` | Radial basis size | > 0 |
 
@@ -138,8 +142,9 @@ No dedicated `bench_mace` yet (tracked as perf work queue).
 | Concern | Owner | Contract |
 |---------|-------|----------|
 | Neighbor list | `molix.data.tasks.NeighborList` | cutoff graph, edge convention |
-| Encoder features | `molzoo.MACE` | this spec |
-| Energy / force | `molpot` or `molzoo.MACEOMol` | not this module |
+| Encoder features | `molzoo.mace.research.MACE` | this spec |
+| Energy / force | `molpot` or `molzoo.mace.potential.MACEPotential` | not this module |
+| Foundation-block reuse | `molrep.interaction.mace` / `molrep.readout.mace` / `molrep.embedding.mace` | MACE-only blocks; owned by `molrep`, not here |
 | Training | `molix.Trainer` | TrainState namespaces |
 
 ## 9. Version Pinning
@@ -149,6 +154,7 @@ No dedicated `bench_mace` yet (tracked as perf work queue).
 | Paper | Batatia et al., NeurIPS 2022 |
 | Reference repository | `ACEsuit/mace` (pin TBD on next audit) |
 | Dependencies | `cuequivariance`, `cuequivariance_torch`, `torch>=2.10` |
+| Module relocation | `mace-subpackage-restructure` chain, commits `1ddd5ff..e825a51` (merged 2026-08-09): the flat `src/molzoo/mace.py` became the `src/molzoo/mace/` package (`spec` / `geometry` / `encoder` / `potential` / `checkpoint` / `variants` / `research`) and the MACE-only blocks sank into `molrep/interaction/mace/`, `molrep/readout/mace.py`, `molrep/embedding/mace.py`. This encoder is now `molzoo.mace.research.MACE`. |
 | Public docs mirror | `docs/molzoo/` (encoder docs partial) |
 
 ## 10. Drift Policy
@@ -160,5 +166,13 @@ breaking for specs. Force backend / `use_fallback` defaults require a note in
 
 ## Appendix A. Maintenance Log
 
-- 2026-07-29: Scaffolded from template; encoder-only contract filled from
-  `src/molzoo/mace.py` + industrial layout notes.
+- 2026-07-29: Scaffolded from template; encoder-only contract filled from the
+  then-flat MACE encoder module (today `src/molzoo/mace/research.py`) +
+  industrial layout notes.
+- 2026-08-09: Anchors re-pointed for the `mace-subpackage-restructure` chain
+  (`1ddd5ff..e825a51`). Header module / entry point, §1 full-model pointer,
+  §3.1 and §4 config-class name (`MACESpec` in this file always meant the
+  research encoder's config, which is now `MACEResearchSpec`; `MACESpec` in
+  `molzoo.mace.spec` is the *foundation* config — different class), §8
+  boundary table, §9 pinning. No section added, removed or renamed; no
+  contract change.

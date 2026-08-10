@@ -60,6 +60,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from molix import config
 from molix.F.scatter import scatter_sum
 from molpot.heads._common import graph_counts as _graph_counts
 
@@ -78,7 +79,7 @@ class BondChargeHead(nn.Module):
             the bond distance scalar.
         hidden_dim: Hidden dimension of the bond-charge MLP.
         full_neighbor_list: When ``True`` (default, matches
-            :class:`molix.nn.locality.NeighborList`'s ``symmetry=True``
+            :class:`molix.data.tasks.neighbor.NeighborList`'s ``symmetry=True``
             default), the edge list contains both ``(i, j)`` and
             ``(j, i)`` and ``q_{ij}`` is scattered only to the source
             atom — antisymmetry of the bidirectional pair guarantees
@@ -141,11 +142,11 @@ class BondChargeHead(nn.Module):
 
         in_dim = 2 * node_dim + 1 + self.edge_dim
         self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
+            nn.Linear(in_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, 1, dtype=config.ftype),
         )
 
     def _bond_charges(

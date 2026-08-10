@@ -61,9 +61,9 @@ class Checkpoint:
         """
         model = self.model
         if hasattr(model, "_orig_mod"):  # torch.compile OptimizedModule
-            model = model._orig_mod  # type: ignore[union-attr]
+            model = model._orig_mod
         if hasattr(model, "module"):  # DDP / FSDP
-            model = model.module  # type: ignore[union-attr]
+            model = model.module
         return cast(nn.Module, model)
 
     # ------------------------------------------------------------------

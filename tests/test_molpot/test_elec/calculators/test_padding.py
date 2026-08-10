@@ -1,11 +1,10 @@
 import os
 import time
 
-import numpy
 import torch
-from ase.io import read
 from torch.nn.utils.rnn import pad_sequence
 
+from molix.datasets._extxyz import parse_extxyz_frames
 from molpot.potentials.elec import CoulombPotential, EwaldCalculator
 from molpot.potentials.elec.lib import compute_batched_kvectors
 from tests.test_molpot.test_elec.conftest import periodic_neighbor_list
@@ -18,7 +17,7 @@ calc = EwaldCalculator(
 
 
 xyz_path = os.path.join(os.path.dirname(__file__), "pbc_structures.xyz")
-systems = read(xyz_path, index=":")
+systems = parse_extxyz_frames(xyz_path)
 
 i_list, j_list, d_list, pos_list, cell_list, charges_list, periodic_list = (
     [],
@@ -30,20 +29,21 @@ i_list, j_list, d_list, pos_list, cell_list, charges_list, periodic_list = (
     [],
 )
 
-for atoms in systems:
+for frame in systems:
     # Full periodic neighbour list via our own pure-torch op.
-    pos_t = torch.tensor(atoms.get_positions(), dtype=torch.float64)
-    cell_t = torch.tensor(numpy.array(atoms.get_cell()), dtype=torch.float64)
+    pos_t = torch.tensor(frame.pos, dtype=torch.float64)
+    cell_t = torch.tensor(frame.cell, dtype=torch.float64)
     pairs_, _, dist_ = periodic_neighbor_list(
-        pos_t, cell_t, cutoff=5.0, full_list=True, periodic=bool(atoms.get_pbc().all())
+        pos_t, cell_t, cutoff=5.0, full_list=True, periodic=all(frame.pbc)
     )
     i_list.append(pairs_[:, 0].to(torch.long))
     j_list.append(pairs_[:, 1].to(torch.long))
     d_list.append(dist_.to(torch.float32))
-    pos_list.append(torch.tensor(atoms.get_positions(), dtype=torch.float32))
-    cell_list.append(torch.tensor(numpy.array(atoms.get_cell()), dtype=torch.float32))
-    charges_list.append(torch.tensor(atoms.get_initial_charges(), dtype=torch.float32) + 1)
-    periodic_list.append(torch.tensor(atoms.get_pbc(), dtype=torch.bool))
+    pos_list.append(torch.tensor(frame.pos, dtype=torch.float32))
+    cell_list.append(torch.tensor(frame.cell, dtype=torch.float32))
+    # Fixture has no charge column; use unit charges (was ASE zeros + 1).
+    charges_list.append(torch.ones(frame.n_atoms, dtype=torch.float32))
+    periodic_list.append(torch.tensor(frame.pbc, dtype=torch.bool))
 
 # Pad neighbor indices/distances to the same length for batching
 i_batch = pad_sequence(i_list, batch_first=True, padding_value=0)

@@ -30,7 +30,7 @@ dependencies = [
   "tensordict",
   "cuequivariance",
   "cuequivariance-torch",
-  "molcrafts-molpy>=0.3.0",
+  "molcrafts-molpy>=0.13.0",
   "python-multipart",
   "molcrafts-mollog>=1.0.0",
   "molcrafts-molcfg>=1.0.0",
@@ -45,8 +45,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# cuEquivariance fused kernels. Without one of these, cuEq silently degrades
+# to its pure-torch path (~30x slower on MACE-class models) with only a
+# UserWarning — install the extra matching the local CUDA major version.
+cueq-cu12 = ["cuequivariance-ops-torch-cu12"]
+cueq-cu13 = ["cuequivariance-ops-torch-cu13"]
 dev = [
   "pytest>=7.0",
+  "pytest-xdist>=3.5",
   "pytest-cov>=4.0",
   "pytest-benchmark>=4.0",
   "ruff>=0.15",
@@ -54,7 +60,8 @@ dev = [
   "tox>=4.23",
 ]
 docs = [
-  "zensical>=0.0.27",
+  "zensical>=0.0.51",
+  "molcrafts-zensical-theme>=0.2.3",
   "mkdocstrings[python]>=0.30",
 ]
 bench = ["pytest-benchmark>=4.0"]
@@ -173,5 +180,5 @@ commands_pre = [
   ],
 ]
 commands = [
-  ["{envpython}", "-m", "pytest", "tests/", "-q", "-p", "no:cacheprovider"],
+  ["{envpython}", "-m", "pytest", "tests/", "-q", "-p", "no:cacheprovider", "-n", "auto", "--dist", "worksteal"],
 ]

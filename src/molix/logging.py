@@ -22,7 +22,7 @@ Channel             Logger name           Typical sink
 
 Records carry an ``extra["kind"]`` tag that formatters dispatch on:
 
-* ``header`` / ``row`` — structured table emission by :class:`molix.core.hooks.Log`
+* ``header`` / ``row`` — structured table emission by :class:`molix.hooks.Log`
 * ``epoch_sep`` — full-width ``────`` separator at epoch boundaries
 * ``announce`` — thin ``─── message ───`` separator for intermittent events
 
@@ -153,7 +153,7 @@ def basicConfig(  # noqa: N802 — stdlib naming
     Formatters
     ----------
     By default the stream handler is wired to :class:`PrettyTextFormatter`
-    so :class:`molix.core.hooks.Log`'s ``metrics`` / ``events`` records
+    so :class:`molix.hooks.Log`'s ``metrics`` / ``events`` records
     render as aligned tables and ``─── message ───`` separators out of
     the box; the file handler uses the structured :class:`TextFormatter`.
     Pass *stream_formatter* / *file_formatter* (or *formatter* as a
@@ -243,7 +243,7 @@ def has_effective_handlers(logger: Logger | None = None) -> bool:
     Walks ``logger`` (defaulting to the ``molix`` root) up to — but
     **not** including — the mollog root, whose default stderr
     ``StreamHandler`` would otherwise always return True and prevent
-    the :class:`~molix.core.hooks.Log` hook from printing under a
+    the :class:`~molix.hooks.Log` hook from printing under a
     zero-config / unit-test harness. A False return means "no
     molix-level handler is attached", so callers should fall back to
     :func:`print` for visible output.
@@ -280,7 +280,7 @@ def get_table_width() -> int:
 
 # Distinct from ``"nan"`` so silent path-resolution failures no longer look
 # like training divergence in the rendered table. Mirrored by
-# :data:`molix.core.hooks._MISSING_CELL`.
+# :data:`molix.hooks.progress._MISSING_CELL`.
 _MISSING_METRIC_CELL = "—"
 
 
@@ -325,7 +325,7 @@ def split_header_rows(columns: list[str], col_width: int) -> tuple[str, str]:
     Top row shows the category (namespace prefix before ``/``), bottom
     row shows the item name; columns with no slash leave the top row
     blank. Shared by :class:`PrettyTextFormatter` and
-    :meth:`molix.core.hooks.Log._emit_header` so both render identically.
+    :meth:`molix.hooks.Log._emit_header` so both render identically.
 
     Args:
         columns: Display names — ``"train/loss"``, ``"epoch"``, …
@@ -360,7 +360,7 @@ class PrettyTextFormatter(Formatter):
     ----------
     col_width:
         Width of each column in ``header`` / ``row`` rendering.  Must
-        match the ``fmt`` width used by :class:`molix.core.hooks.Log`.
+        match the ``fmt`` width used by :class:`molix.hooks.Log`.
     row_fmt:
         Numeric format applied to each value in a ``row`` record
         (``"{:>12.4g}"`` by default — width + general-precision 4).
@@ -470,7 +470,7 @@ class KindFilter(Filter):
 class _HeaderOncePerColumnSet(Filter):
     """Drop ``kind=header`` records whose column set matches the previous one.
 
-    The :class:`molix.core.hooks.Log` hook re-emits a ``header`` record
+    The :class:`molix.hooks.Log` hook re-emits a ``header`` record
     at every periodic reprint and after each epoch boundary so the
     console view stays readable. For a CSV sink those repeats would
     produce duplicate header lines, confusing ``pandas.read_csv`` and
@@ -558,7 +558,7 @@ def configure_run(
         traces.
     col_width / row_fmt:
         Passed straight through to :class:`PrettyTextFormatter`. Must
-        match the :class:`molix.core.hooks.Log` ``fmt`` width.
+        match the :class:`molix.hooks.Log` ``fmt`` width.
     stream:
         Override for the stdout stream (defaults to ``sys.stdout``).
 

@@ -132,3 +132,9 @@ molnex-bench-*.out
 
 # Benchmark scratch outputs (paper artifacts live in pinet-quant)
 benchmarks/results/
+
+# machine-local benchmark/probe run logs and arch-tagged op builds
+benchmarks/*.err
+benchmarks/*.out
+src/molix/op/build-*/
+.claude/scheduled_tasks.lock

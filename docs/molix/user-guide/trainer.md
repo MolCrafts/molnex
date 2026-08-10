@@ -23,16 +23,22 @@ state = trainer.train(datamodule, max_epochs=100)
 
 ## Loss Function Contract
 
-The default train and eval steps call:
+The default train and eval steps pass the batch through unmodified:
 
 ```python
-predictions = model(...)
+predictions = model(batch)
 loss = loss_fn(predictions, batch)
 ```
 
-For plain `dict` batches, keys named `targets` and `extras` are not forwarded to
-the model. For non-dict batches such as `GraphBatch`, the whole batch is passed
-to `model(batch)`.
+The whole batch object goes to `model(batch)` — no key filtering, no unpacking
+into keyword arguments — so the model and the loss see exactly the same object.
+For the collated nested `TensorDict` that means the model reads its inputs with
+tuple keys (`batch["atoms", "Z"]`) and the loss reads its targets from the same
+batch (`batch["graphs", "energy"]`).
+
+`loss_fn` must return a scalar tensor; the step calls `.backward()` on it (after
+dividing by `accumulate_grad_batches`) and records the un-scaled value in
+`state["train"]["loss"]`.
 
 ## Loop Control
 

@@ -1,38 +1,32 @@
-# MACE-OMOL port — verification scripts
+# MACE-OMOL port notes
 
-Goal: extend MolNex (molrep/molpot/molzoo, cuEquivariance) so it can load the
-official **MACE-OMOL** foundation model (`MACE-omol-0-extra-large-1024.model`,
-`ScaleShiftMACE`, 1024 ch, r_max=6.0, 3 interactions, correlation=3, 83 elements)
-and reproduce its energy/forces.
+Goal: load the official **MACE-OMOL** foundation model into MolNex
+(`molrep` / `molpot` / `molzoo`, cuEquivariance) and reproduce energy/forces.
 
-These scripts check our ported blocks **bit-for-bit against the official
-`mace-torch`** on CPU (float64). They load the plain-torch molrep/molpot modules
-in isolation (stubbing `molix.config`) so no cuequivariance is required.
+## Dependency policy
 
-## Reference env
-- CPU venv with official mace: `work/.mace-ref` (mace-torch 0.3.16, e3nn 0.4.4).
-- OMOL checkpoint + dumped inventory: `work/mace_models/`
-  (`omol_inventory.json`, full block reference `OMOL_REFERENCE.md`).
+MolNex package code and in-repo scripts **must not** import ASE, e3nn, or
+`mace-torch`. Allowed runtime stack: MolCrafts packages (`molpy`, `mollog`,
+`molcfg`, …), PyTorch / TensorDict, numpy, and cuEquivariance.
 
-## Run
-```bash
-cd /nobackup/proj/disk/teoroo/personal/jicli594/work
-TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 .mace-ref/bin/python \
-    molcrafts/molnex/scripts/omol_port/verify_radial.py
-TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 .mace-ref/bin/python \
-    molcrafts/molnex/scripts/omol_port/verify_e0_scaleshift.py
-```
+Upstream MACE / e3nn comparison is offline, out of this tree: run any
+bit-for-bit oracle against a separate checkout and paste numbers into the
+spec (`src/molzoo/specs/mace_omol.md` §7.4). Do not re-introduce those
+imports here.
 
-## Status (CPU-verified, max|diff| ~ machine eps)
-- `verify_radial.py` — `molrep.embedding.BesselRBF` (normalize=False, eps=0,
-  trainable=True) vs `mace BesselBasis`; `molrep.embedding.PolynomialCutoff` vs
-  `mace PolynomialCutoff`. PASS.
-- `verify_e0_scaleshift.py` — `molpot.heads.AtomicReferenceEnergy` vs
-  `mace AtomicEnergiesBlock`; `molpot.heads.GlobalRescale` vs
-  `mace ScaleShiftBlock` (single head). PASS.
+## In-tree artifacts
 
-## Remaining (equivariant — verify on aarch64 GPU, needs cuequivariance)
-charge/spin joint embedding (project layer), RealAgnosticResidual**NonLinear**
-InteractionBlock (linear_up/conv_tp/skip_tp/gate/linear_1/2/res/density_fn),
-SymmetricContraction product, NonLinearBiasReadout; then the e3nn(mul_ir) →
-cuEq(ir_mul) weight converter and full end-to-end energy/force comparison.
+- `SPEC.md` — port design notes
+- `convert_omol_to_cueq_state.py` + `_stub_unpickler.py` — offline, one-run
+  regeneration of `omol_cueq_state.pt` (the plain `weights_only=True`
+  state_dict twin of `OMOL-cueq.model`) without importing mace/e3nn. The
+  419 MB dump itself is deliberately **not** kept: the source checkpoint is
+  downloadable, only the code is preserved. While the dump is absent, the
+  `MOLNEX_MACE_WEIGHTS_DIR`-gated `TestOfficialOMolWeights` cases skip.
+- `src/molzoo/mace/variants.py` — `MACEOMol` (thin alias over
+  `molzoo.mace.potential.MACEPotential`) + the `load_omol_state_dict`
+  back-compat loader
+- `src/molzoo/mace/checkpoint.py` — `OMOL_REMAP`, the official-weight key
+  remap consumed by `MACEPotential.from_checkpoint`
+- `src/molzoo/specs/mace_omol.md` — paper↔code contract and run log
+  (mirrored byte-for-byte at `docs/molzoo/specs/mace_omol.md`)

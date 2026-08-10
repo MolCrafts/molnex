@@ -67,11 +67,11 @@ import numpy as np
 # scipy is not a hard dep of MolNex tests; fall back to vectorised math.erf
 # if scipy isn't on the path. Both produce identical numerical results.
 try:
-    from scipy.special import erf as _scipy_erf  # type: ignore[import-not-found]
+    from scipy.special import erf as _scipy_erf
 except ImportError:  # pragma: no cover - depends on local install
     _erf_vec = np.vectorize(math.erf, otypes=[np.float64])
 
-    def _scipy_erf(x: np.ndarray) -> np.ndarray:  # type: ignore[no-redef]
+    def _scipy_erf(x: np.ndarray) -> np.ndarray:
         return _erf_vec(x)
 
 

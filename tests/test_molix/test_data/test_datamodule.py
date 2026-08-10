@@ -17,18 +17,54 @@ from molix.data.dataset import CachedDataset
 # ---------------------------------------------------------------------------
 
 
+#: Atom-pair separations (A) alternated by :func:`_make_samples`. The
+#: pipeline tests below build neighbor lists at ``cutoff=3.0``, so even
+#: samples are in-cutoff (one bidirectional pair, 2 edges) and odd samples
+#: are out-of-cutoff (0 edges). The jitter never spans the cutoff.
+_IN_CUTOFF_SEP = 1.5
+_OUT_OF_CUTOFF_SEP = 5.0
+_JITTER = 0.01
+
+
 def _make_samples(n: int = 10) -> list[dict]:
-    return [
-        {
-            "Z": torch.tensor([1, 6], dtype=torch.long),
-            "pos": torch.randn(2, 3),
-            "edge_index": torch.tensor([[0, 1]], dtype=torch.long),
-            "edge_diff": torch.randn(1, 3),
-            "edge_dist": torch.tensor([1.5]),
-            "targets": {"U0": torch.tensor([float(i)])},
-        }
-        for i in range(n)
-    ]
+    """Build *n* two-atom samples with deterministic geometry.
+
+    Positions come from a local :class:`torch.Generator` (seed 0), so the
+    fixture is independent of global RNG state and of test execution
+    order. Separations alternate across the ``3.0`` cutoff used by the
+    pipeline tests, which keeps the per-sample edge count *varying* (2 and
+    0) instead of landing on a constant ``E == n_atoms`` — the degenerate
+    geometry pinned in ``test_cache.py::TestPackSchema``.
+
+    Args:
+        n: Number of samples. ``targets.U0`` carries the identity
+            ``float(i)`` used by the shuffle-order tests.
+
+    Returns:
+        Flat sample dicts with per-atom ``Z`` / ``pos``, one pre-built
+        edge (``edge_index`` ``(1, 2)``, ``edge_diff`` ``(1, 3)``,
+        ``edge_dist`` ``(1,)``) and graph-level ``targets.U0`` ``(1,)``.
+    """
+    gen = torch.Generator().manual_seed(0)
+    samples: list[dict] = []
+    for i in range(n):
+        sep = _IN_CUTOFF_SEP if i % 2 == 0 else _OUT_OF_CUTOFF_SEP
+        pos = torch.tensor([[0.0, 0.0, 0.0], [sep, 0.0, 0.0]])
+        pos = pos + _JITTER * torch.randn(2, 3, generator=gen)
+        # edge_index [[0, 1]] → source 0, target 1; edge_diff follows the
+        # repo convention pos[target] - pos[source].
+        diff = (pos[1] - pos[0]).unsqueeze(0)
+        samples.append(
+            {
+                "Z": torch.tensor([1, 6], dtype=torch.long),
+                "pos": pos,
+                "edge_index": torch.tensor([[0, 1]], dtype=torch.long),
+                "edge_diff": diff,
+                "edge_dist": diff.norm(dim=-1),
+                "targets": {"U0": torch.tensor([float(i)])},
+            }
+        )
+    return samples
 
 
 def _write_and_load_split(tmp_path: Path, train_n: int, val_n: int, dataset_cls=CachedDataset):

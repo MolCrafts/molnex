@@ -6,7 +6,9 @@
 
 ::: molix.core.state
 
-::: molix.core.hooks
+::: molix.core.hook
+
+::: molix.hooks
 
 ::: molix.core.losses
 
@@ -14,13 +16,15 @@
 
 ::: molix.data
 
-::: molix.data.types
-
 ::: molix.data.collate
 
 ::: molix.data.pipeline
 
 ::: molix.data.datamodule
+
+::: molix.data.task
+
+::: molix.data.tasks
 
 ## Datasets
 

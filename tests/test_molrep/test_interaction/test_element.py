@@ -44,8 +44,10 @@ class TestElementUpdate:
         update = ElementUpdate(hidden_dim=64, num_species=10)
         assert update.config.hidden_dim == 64
         assert update.config.num_species == 10
-        assert hasattr(update, "_linear_indexed")
+        # One backend only: the sorted-index `indexed_linear` kernel measured
+        # slower than `naive` once the required argsort round-trip is counted.
         assert hasattr(update, "_linear_naive")
+        assert not hasattr(update, "_linear_indexed")
 
     def test_forward_shape(self):
         """Test output shape."""

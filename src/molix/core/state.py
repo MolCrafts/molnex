@@ -240,7 +240,7 @@ class TrainState(dict):
 
 #: A path into :class:`TrainState`. A bare ``str`` names a top-level key
 #: (``"epoch"``); a ``tuple`` walks the namespace hierarchy
-#: (``("train", "loss")``). Used by :class:`molix.core.hooks.Log`,
+#: (``("train", "loss")``). Used by :class:`molix.hooks.Log`,
 #: :class:`CheckpointHook`, and the LR scheduler metric lookup.
 Path = str | tuple[str, ...]
 

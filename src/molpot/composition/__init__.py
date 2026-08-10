@@ -11,8 +11,8 @@ Build force fields by composing pooling, parameter heads, and potentials::
     outputs = composer(node_features=node_features, data=data)
 """
 
+from molpot.composition.classical_mm import ClassicalMMComposer
 from molpot.composition.composer import PotentialComposer
-from molpot.composition.energy_force import EnergyForceModel
 from molpot.composition.heads import (
     ChargeHead,
     ChargeTransferParameterHead,
@@ -20,8 +20,21 @@ from molpot.composition.heads import (
     RepulsionParameterHead,
     TSScalingHead,
 )
+from molpot.composition.mm_heads import (
+    AngleParamHead,
+    BondParamHead,
+    ImproperParamHead,
+    ProperTorsionParamHead,
+)
 from molpot.composition.multihead import MultiHead
-from molpot.composition.sonata import Sonata, SonataSpec, build_sonata
+from molpot.composition.parameterizer import (
+    KCAL_MOL_TO_EV,
+    ChemEmbeddingsLike,
+    ChemEncoderProtocol,
+    ClassicalMMParameterizer,
+    energy_kcal_to_ev,
+)
+from molpot.composition.sonata import Sonata, SonataSpec
 
 __all__ = [
     "LJParameterHead",
@@ -29,10 +42,18 @@ __all__ = [
     "ChargeTransferParameterHead",
     "ChargeHead",
     "TSScalingHead",
+    "BondParamHead",
+    "AngleParamHead",
+    "ProperTorsionParamHead",
+    "ImproperParamHead",
     "MultiHead",
     "PotentialComposer",
-    "EnergyForceModel",
+    "ClassicalMMComposer",
+    "ClassicalMMParameterizer",
+    "ChemEmbeddingsLike",
+    "ChemEncoderProtocol",
+    "KCAL_MOL_TO_EV",
+    "energy_kcal_to_ev",
     "Sonata",
     "SonataSpec",
-    "build_sonata",
 ]

@@ -112,7 +112,7 @@ class TestBuilder:
 
     def test_rejects_non_task_non_callable(self):
         with pytest.raises(TypeError, match="Task"):
-            Pipeline("p").add(42)  # type: ignore[arg-type]
+            Pipeline("p").add(42)
 
     def test_rejects_duplicate_name_on_add(self):
         p = Pipeline("p").add(CountingSample(), name="shared")
@@ -223,7 +223,7 @@ class TestNode:
     def test_is_frozen(self):
         n = Node(name="x", task=CountingSample())
         with pytest.raises(Exception):
-            n.name = "y"  # type: ignore[misc]
+            n.name = "y"
 
     def test_apply_dispatches_runnable(self):
         t = CountingSample()
@@ -238,7 +238,7 @@ class TestNode:
         assert out["tag"] is True
 
     def test_apply_rejects_non_callable(self):
-        node = Node(name="bad", task=42)  # type: ignore[arg-type]
+        node = Node(name="bad", task=42)
         with pytest.raises(TypeError):
             node.apply({})
 

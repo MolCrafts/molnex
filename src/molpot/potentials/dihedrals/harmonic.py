@@ -6,18 +6,23 @@ from molpot.potentials.base import BasePotential
 
 
 class DihedralHarmonic(BasePotential):
-    """Harmonic dihedral torsion potential.
+    """Harmonic dihedral / improper-style form ``E = ½ k (φ − φ₀)²``.
 
-    Energy formula:
+    **Not** a Class-I proper torsion. For AMBER / GAFF / SMIRNOFF propers use
+    :class:`~molpot.potentials.dihedrals.periodic.ProperTorsionPeriodic`.
+
+    Energy formula::
+
         E = 0.5 * k * (phi - phi0)^2
 
     Parameters are stored as type-indexed vectors:
-        k[dihedral_type]: Force constant
-        phi0[dihedral_type]: Equilibrium dihedral angle (in radians)
+
+    - ``k[dihedral_type]``: Force constant
+    - ``phi0[dihedral_type]``: Equilibrium dihedral angle (radians)
 
     Attributes:
-        k: Force constants [num_dihedral_types]
-        phi0: Equilibrium dihedral angles in radians [num_dihedral_types]
+        k: Force constants ``[num_dihedral_types]``.
+        phi0: Equilibrium dihedral angles in radians ``[num_dihedral_types]``.
     """
 
     name = "dihedral_harmonic_torch"

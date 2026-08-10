@@ -65,3 +65,24 @@ class TestTrainerProfiler:
         result = TrainerProfiler(device="cpu").run(n_steps=100, n_warmup=5, batch=batch, top=5)
         assert result.steps_per_sec > 0
         assert not torch.cuda.is_available() or result.device == "cpu"
+
+    def test_data_description_derived_from_supplied_batch(self):
+        """A caller-supplied batch must not be reported as the default MockBatch.
+
+        ``run(batch=...)`` skips default construction, so the description has
+        to come from the supplied batch itself. Wording is the implementer's
+        choice; the contract pinned here is (a) the default literal is gone and
+        (b) the real atom count is visible in the report line.
+        """
+        batch = MockBatch(n_atoms=7, n_edges=9, n_graphs=3, device="cpu", seed=0)()
+        result = TrainerProfiler(device="cpu").run(n_steps=5, n_warmup=0, batch=batch, top=3)
+        desc = result.data_description
+        assert "MockBatch(n_atoms=32" not in desc  # default literal must not leak
+        assert "7" in desc  # the supplied batch's actual atom count
+
+    def test_data_description_reports_default_batch_shape(self):
+        """With ``batch=None`` the description still describes the built default."""
+        result = TrainerProfiler(device="cpu").run(n_steps=5, n_warmup=0, top=3)
+        desc = result.data_description
+        assert "32" in desc  # default n_atoms
+        assert "128" in desc  # default n_edges

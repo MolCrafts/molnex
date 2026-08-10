@@ -417,7 +417,7 @@ This section constructs a tiny directed graph by hand. In production, let
 
 ```python
 import torch
-from molix.data.types import AtomData, EdgeData, GraphBatch, GraphData
+from tensordict import TensorDict
 
 pos = torch.tensor(
     [
@@ -444,26 +444,30 @@ dst = edge_index[:, 1]
 edge_diff = pos[dst] - pos[src]
 edge_dist = edge_diff.norm(dim=-1)
 
-batch = GraphBatch(
-    atoms=AtomData(
+batch = TensorDict(
+    atoms=TensorDict(
         Z=Z,
         pos=pos,
         batch=torch.zeros(len(Z), dtype=torch.long),
         batch_size=[len(Z)],
     ),
-    edges=EdgeData(
+    edges=TensorDict(
         edge_index=edge_index,
         edge_diff=edge_diff,
         edge_dist=edge_dist,
         batch_size=[len(edge_index)],
     ),
-    graphs=GraphData(
+    graphs=TensorDict(
         num_atoms=torch.tensor([len(Z)]),
         batch_size=[1],
     ),
     batch_size=[],
 )
 ```
+
+Each namespace is a plain `TensorDict` with its own `batch_size` — 3 atoms,
+4 directed edges, 1 graph. This is the same object `collate_molecules` would
+hand you; nothing here is a molecule-specific subclass.
 
 The directed average neighbor count for this toy batch is:
 

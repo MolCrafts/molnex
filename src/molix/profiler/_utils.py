@@ -130,6 +130,62 @@ class ValueStat:
 
 
 # ---------------------------------------------------------------------------
+# Count extraction — one function per tier of the two-tier data contract
+# ---------------------------------------------------------------------------
+
+
+def batch_counts(batch: object) -> tuple[int, int]:
+    """Extract ``(n_atoms, n_graphs)`` from a **post-collate** nested batch.
+
+    Reads the collated tier of the two-tier data contract: a nested
+    ``TensorDict`` addressed by namespace, ``batch["atoms"]["Z"]`` ``(N,)``
+    and ``batch["graphs"]["num_atoms"]`` ``(B,)``. For the raw flat sample
+    tier use :func:`sample_counts`.
+
+    Args:
+        batch: Post-collate batch, normally a nested ``TensorDict``.
+
+    Returns:
+        ``(n_atoms, n_graphs)``, or ``(0, 0)`` if the batch does not carry
+        those namespaces — this is a diagnostic helper and never raises.
+    """
+    try:
+        n_atoms = int(batch["atoms"]["Z"].shape[0])
+        n_graphs = int(batch["graphs"]["num_atoms"].shape[0])
+        return n_atoms, n_graphs
+    except (KeyError, AttributeError, TypeError):
+        return 0, 0
+
+
+def sample_counts(sample: object) -> tuple[int, int]:
+    """Extract ``(n_atoms, n_edges)`` from one **raw** flat sample dict.
+
+    Reads the pre-collate tier of the two-tier data contract: a flat
+    ``dict`` with ``sample["Z"]`` ``(N,)`` and ``sample["edge_index"]``
+    ``(E, 2)``. The two keys are probed independently because
+    ``edge_index`` is genuinely optional — a cache packed before
+    :class:`~molix.data.tasks.NeighborList` ran has atoms but no edges.
+    For the collated nested tier use :func:`batch_counts`.
+
+    Args:
+        sample: Raw sample, normally a flat ``dict`` of tensors.
+
+    Returns:
+        ``(n_atoms, n_edges)``; a missing or malformed key contributes
+        ``0`` — this is a diagnostic helper and never raises.
+    """
+    try:
+        n_atoms = int(sample["Z"].shape[0])
+    except (KeyError, AttributeError, TypeError, IndexError):
+        n_atoms = 0
+    try:
+        n_edges = int(sample["edge_index"].shape[0])
+    except (KeyError, AttributeError, TypeError, IndexError):
+        n_edges = 0
+    return n_atoms, n_edges
+
+
+# ---------------------------------------------------------------------------
 # ASCII table formatter
 # ---------------------------------------------------------------------------
 

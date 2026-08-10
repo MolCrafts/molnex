@@ -101,7 +101,8 @@ path must work for every potential). Models must not invent a third force path.
 
 **Status.** active (promoted into CLAUDE.md Key Design Patterns; docs/gradients
 aligned). Landed 2026-07-29: OMOL/`energy_forces`, Sonata forces, PiNet via
-`EnergyForceModel`, `BasePotential.calc_forces` all go through `ForceDerivation`.
+`molpot.derivation.protocol` helpers, `BasePotential.calc_forces` all go
+through `ForceDerivation`.
 `has_aux` supported on functorch backend for single-pass eval.
 
 ---
@@ -153,14 +154,118 @@ nodes need both x86_64 and aarch64 builds in the same tree.
 
 ---
 
-## cuEq `use_fallback` split by force backend (2026-07-29)
+<!-- mol:note:topic:cueq-use-fallback -->
+## cuEq `use_fallback` split by force backend (2026-08-08)
 
-**Context.** Hardcoding `use_fallback=True` on every TP / SymmetricContraction
-abandoned fused kernels even when forces used autograd (OMOL).
+**Context.** Hardcoding the pure-torch path abandoned fused kernels even when
+forces used autograd; conversely `MACEMatpes` shipped `use_fallback=True` as
+its default — a measured **35.7x** per-step regression with no correctness
+upside (its forces are always autograd, so the functorch reason never applies).
 
-**Decision.** Constructors take `use_fallback: bool = True` (functorch-safe
-default). Autograd-only full models (e.g. `MACEOMol`) pass `use_fallback=False`.
-Encoder-only MACE keeps default True so composed functorch force paths stay
-traceable.
+**Rule**: Block constructors (`ConvTP`, `SymmetricContraction`,
+`DensityInteraction`, `ProductHead`, …) default `use_fallback=True`
+(functorch-safe). **Autograd-only full models default `False`**
+(`MACEMatpes`, `MACEOMol`); CPU/test call sites pass `True` explicitly.
+Composable encoders (`MACE`) expose the knob and inherit the safe default.
+
+**Supersedes**: the 2026-07-29 entry (which left MACEMatpes on the slow
+default and MACE with no knob at all).
+
+**Status.** active.
+
+---
+
+<!-- mol:note:topic:cueq-ops-capability -->
+## [2026-08-08] cuEq fused-kernel capability is probed, never assumed
+
+Without the `cuequivariance-ops-torch` wheel, cuEq honours
+`use_fallback=False` by silently degrading ~30x (one UserWarning).
+
+**Rule**: Report fused-kernel status from an actual
+`import cuequivariance_ops_torch` probe, never from the `use_fallback`
+request flag. GPU installs use the `cueq-cu12` / `cueq-cu13` extras
+(pyproject); a degraded run must warn, not self-report "fused".
+
+---
+
+<!-- mol:note:topic:bench-guard-encoders -->
+## [2026-08-08] Headline-number encoders need a benchmark guard
+
+The `use_fallback` regression shipped because MACE had no benchmark while
+carrying the repo's headline GH200 compile numbers.
+
+**Rule**: Every molzoo encoder whose docs/specs cite performance numbers has a
+`benchmarks/bench_<encoder>.py` guard (see `bench_mace_matpes.py`, which
+asserts the fused/fallback ratio).
+
+---
+
+<!-- mol:note:topic:scatter-onehot-optin -->
+## [2026-08-08] scatter one-hot GEMM is explicit opt-in
+
+The one-hot matmul (bit-exact under inductor) measured 2.4–3.3x slower than
+`index_add_` at every profiled molecular-graph shape, including inside the
+size window that used to auto-select it.
+
+**Rule**: `scatter_sum_compile_safe` defaults to `index_add_`. The one-hot
+GEMM is chosen only by `MOLNEX_SCATTER_ONEHOT=1` (bit-exactness as a
+deliberate, global choice) — never by a size heuristic.
+
+<!-- mol:note:topic:build-check-scope -->
+## [2026-08-09] build.check covers tests/scripts/regressions + advisory ty
+
+The gate used to lint `src/` only, which let `scripts/` and test-side debt
+accumulate invisibly (found during the mace-restructure follow-up sweep).
+`benchmarks/` is deliberately excluded while the PiNet bench scripts are
+mid-experiment; fold it in once that work lands.
+
+**Rule**: `mol_project.build.check` runs ruff (check + format) over
+`src/ tests/ scripts/ regressions/` plus `ty check src/
+--exit-zero-on-warning` (warnings stay advisory per `[tool.ty.rules]`;
+real type errors block). Do not narrow it back to `src/` alone.
+
+<!-- mol:note:topic:init-dtype-at-construction -->
+## [2026-08-09] Construct at config.ftype; init consumes the global RNG
+
+A 48-site sweep found `nn.Linear`/`nn.Embedding`/`cuet.Linear`/buffer
+constructors omitting `dtype=config.ftype`, yielding silent fp32 params
+under the fp64 config (hidden by post-hoc `.double()` casts in fixtures).
+`cuequivariance_torch.Linear` honours `dtype=` — the old claim that it
+ignores `config.ftype` is false.
+
+**Rule**: every parameter/buffer constructor under `src/` passes
+`dtype=config.ftype` explicitly (fp64-contract tests pin the pattern
+per module). Weight inits draw from the **global** torch RNG (e3nn
+convention; `_ScalarO3Linear` weight ~ N(0,1), bias zero) — never a
+private Generator, never zero-init for trainable readout weights.
+
+<!-- mol:note:topic:all-alphabetized -->
+## [2026-08-09] __all__ stays alphabetized
+
+ruff's isort rule does not cover `__all__` literals, so ordering drifts
+silently (caught in molzoo/mace/__init__.py during review).
+
+**Rule**: keep `__all__` alphabetically sorted in every package
+`__init__.py`; re-sort when inserting a name.
+
+<!-- mol:note:topic:ty-ignore-syntax -->
+## [2026-08-09] Type-suppression pragmas: ty syntax only
+
+The repo's checker is ty (no mypy/pyright config exists). mypy-style
+`# type: ignore[code]` is inert under ty — 67 dead pragmas were swept
+2026-08-09. Most suppressions are unnecessary anyway: the known
+TensorDict/torch-stub false-positive classes are already downgraded to
+"warn" via `[tool.ty.rules]` in pyproject.toml.
+
+**Rule**: never write `# type: ignore[...]`. If a per-line suppression
+is truly needed, use `# ty: ignore[rule]`; prefer relying on the
+`[tool.ty.rules]` downgrades over per-line pragmas.
+
+---
+
+## Learnable classical FF placement (2026-08-10)
+
+**Rule.** Reuse molpy≥0.13; no new `Foo(method=…)`; non-diff work sinks to molpy/molrs.
+Full text: [learnable-classical-ff.md](learnable-classical-ff.md).
 
 **Status.** active.

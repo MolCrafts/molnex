@@ -44,7 +44,7 @@ def test_worst_status_ordering() -> None:
 def test_check_results_are_immutable() -> None:
     result = CheckResult("x", Status.OK, "detail")
     with pytest.raises((AttributeError, TypeError)):
-        result.detail = "mutated"  # type: ignore[misc]
+        result.detail = "mutated"
 
 
 # -- the real environment (this venv must be healthy to run the suite) -----

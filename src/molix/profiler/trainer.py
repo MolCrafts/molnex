@@ -51,7 +51,9 @@ class TrainerResult:
             (Trainer self-time minus raw-loop baseline) / ``gross_us``
             (raw Trainer self-time) / ``calls``.
         model_name: ``type(model).__name__``.
-        data_description: Human-readable batch description.
+        data_description: Human-readable batch description — the
+            :class:`~molix.profiler.mock.MockBatch` config when the default
+            batch was built, else the supplied batch's namespace shape.
         baseline_ms_per_step: Raw-loop (no Trainer) wall per step.
         overhead_ms_per_step: ``wall_ms_per_step - baseline_ms_per_step``.
     """
@@ -168,8 +170,18 @@ class TrainerProfiler:
             A :class:`TrainerResult`.
         """
         if batch is None:
-            batch = MockBatch(n_atoms=32, n_edges=128, n_graphs=4, device=str(self.device))()
-        desc = "MockBatch(n_atoms=32, n_edges=128, n_graphs=4)"
+            factory = MockBatch(n_atoms=32, n_edges=128, n_graphs=4, device=str(self.device))
+            batch = factory()
+            desc = factory.describe()
+        else:
+            # Caller-supplied batch: label it from the per-namespace batch_size
+            # of the post-collate contract (``graphs`` is optional there).
+            shape = [
+                f"{tag}={batch[ns].batch_size[0]}"
+                for tag, ns in (("N", "atoms"), ("E", "edges"), ("B", "graphs"))
+                if ns in batch
+            ]
+            desc = f"TensorDict({', '.join(shape)})"
 
         # Warm up both the raw-loop baseline and the Trainer path.
         if n_warmup > 0:
