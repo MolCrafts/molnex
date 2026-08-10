@@ -507,15 +507,32 @@ class LennardJonesCutForceField(ForceField):
         Inside the half-skin the list keeps the current (superset) buffers,
         which the ``cutoff_sq`` mask already reduces to the same PES. Force an
         unconditional build with ``self.neighbors.rebuild(pos)``.
+
+        The list is a **geometry** object and tracks the MD-state dtype (see
+        :meth:`forward`); do not cast ``pos`` to the potential parameter dtype
+        here — that would pull the Verlet skin check onto the pot axis and make
+        a split-precision run no longer vary only the force arithmetic.
         """
         self.neighbors.update(pos)
 
     def forward(self, pos: torch.Tensor) -> ForceOutput:
-        """Truncated-LJ energy + forces at ``pos`` ``(N, 3)`` from the live buffers."""
+        """Truncated-LJ energy + forces at ``pos`` ``(N, 3)`` from the live buffers.
+
+        Positions (and the list's shifts) are cast into the **parameter**
+        dtype before the pair loop so a split-precision configuration
+        (``MD(dtype=fp64)`` + pot buffers in fp32) actually evaluates the PES
+        in pot precision — matching the MACE path, which keeps the neighbour
+        list on the MD axis and only casts into the model at force time. The
+        integrator then casts energy/forces back to the trajectory dtype.
+        """
+        pot_dtype = self.epsilon.dtype
+        pos = pos.to(device=self.epsilon.device, dtype=pot_dtype)
         edge_index = self.neighbors.edge_index  # (capacity, 2)
         source, target = edge_index[:, 0], edge_index[:, 1]
-        # Minimum-image displacement: live positions + the list's periodic remainder.
-        diff = pos[target] - pos[source] + self.neighbors.shifts  # (capacity, 3)
+        # Minimum-image displacement: live positions + the list's periodic
+        # remainder, both in pot precision for the arithmetic.
+        shifts = self.neighbors.shifts.to(dtype=pot_dtype)
+        diff = pos[target] - pos[source] + shifts  # (capacity, 3)
         r2 = (diff * diff).sum(-1)
         inside = r2 < self.cutoff_sq  # dead edges: |shift| ≫ cutoff → excluded here
         safe_r2 = torch.where(inside, r2, torch.ones_like(r2))

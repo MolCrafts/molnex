@@ -31,6 +31,8 @@ Run::
     PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --ps 5     # smoke
     PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --cuda-graphs
     PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --skin 0   # no-skin arm
+    PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py \\
+        --precision fp64 --potential-precision fp32   # split-precision arm
 
 Pass when ``|slope·duration| / |E_tot(0)| < 1e-3`` with bounded RMS fluctuation
 and — at ``skin > 0``, where the counter carries information — no dangerous
@@ -66,18 +68,19 @@ _MASS = 39.95
 _RHO_STAR = 0.8442  # LAMMPS melt reduced density
 _T0_STAR = 1.44  # LAMMPS melt initial reduced temperature
 _CUTOFF = 2.5 * _SIGMA
-_DTYPE = torch.float64
+
+_DTYPE_MAP = {"fp64": torch.float64, "fp32": torch.float32}
 
 
-def _fcc(n_cells: int, a: float) -> tuple[torch.Tensor, torch.Tensor]:
+def _fcc(n_cells: int, a: float, *, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
     """FCC lattice: ``4 n³`` atoms in a cubic box of side ``n·a``."""
     basis = torch.tensor(
-        [[0.0, 0.0, 0.0], [0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]], dtype=_DTYPE
+        [[0.0, 0.0, 0.0], [0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]], dtype=dtype
     )
-    grid = torch.arange(n_cells, dtype=_DTYPE)
+    grid = torch.arange(n_cells, dtype=dtype)
     offsets = torch.stack(torch.meshgrid(grid, grid, grid, indexing="ij"), dim=-1).reshape(-1, 3)
     pos = (offsets.unsqueeze(1) + basis.unsqueeze(0)).reshape(-1, 3) * a
-    cell = torch.eye(3, dtype=_DTYPE) * (n_cells * a)
+    cell = torch.eye(3, dtype=dtype) * (n_cells * a)
     return pos, cell
 
 
@@ -114,6 +117,20 @@ def main() -> int:
         type=float,
         default=_T0_STAR * _EPS_EV / KB_EV_PER_K,
         help="initial temperature (K); default T0* = 1.44",
+    )
+    ap.add_argument(
+        "--precision",
+        choices=("fp64", "fp32"),
+        default="fp64",
+        help="MD-side precision (trajectory state, integrator, mass)",
+    )
+    ap.add_argument(
+        "--potential-precision",
+        choices=("fp64", "fp32"),
+        default=None,
+        help="force-field / inference precision; defaults to --precision. "
+        "Setting it below --precision is the split-precision arm "
+        "(e.g. MD fp64 over pot fp32)",
     )
     ap.add_argument(
         "--skin",
@@ -153,10 +170,13 @@ def main() -> int:
     ap.add_argument("--no-save", action="store_true", help="skip writing artifacts")
     args = ap.parse_args()
 
+    md_dtype = _DTYPE_MAP[args.precision]
+    pot_name = args.potential_precision or args.precision
+    pot_dtype = _DTYPE_MAP[pot_name]
     device = torch.device(args.device)
     n_steps = int(args.ps * 1000.0 / args.dt)
     a = _SIGMA * (4.0 / _RHO_STAR) ** (1.0 / 3.0)
-    pos, cell = _fcc(args.n, a)
+    pos, cell = _fcc(args.n, a, dtype=md_dtype)
     n_atoms = pos.shape[0]
     pos, cell = pos.to(device), cell.to(device)
 
@@ -180,8 +200,16 @@ def main() -> int:
             ) from err
         raise
 
+    # Geometry / nblist stays on the MD-state dtype (like MACE's run_nve path);
+    # only the LJ parameter buffers (and the pair arithmetic that reads them)
+    # sit on pot_dtype. Casting the whole module to pot_dtype would drag the
+    # list with it via _apply and smuggle a second free variable into the
+    # "precision matrix".
     ff = LennardJonesCutForceField(epsilon=_EPS, sigma=_SIGMA, neighbors=neighbors)
-    ff = ff.to(device=device, dtype=_DTYPE)
+    ff = ff.to(device=device, dtype=md_dtype)
+    if pot_dtype != md_dtype:
+        for name in ("epsilon", "sigma", "cutoff_sq", "energy_shift"):
+            ff.register_buffer(name, getattr(ff, name).detach().to(dtype=pot_dtype))
     compiled = not args.no_compile
     if compiled:
         ff = Compiler(cuda_graphs=args.cuda_graphs, fullgraph=True)(ff)
@@ -194,11 +222,12 @@ def main() -> int:
         mass=_MASS,
         dt=args.dt,
         gamma=0.0,  # NVE
-        dtype=_DTYPE,
+        dtype=md_dtype,
         device=device,
         hooks=[sampler],
     )
     vel = MaxwellBoltzmann(_MASS, n_atoms=n_atoms).sample(args.t0, seed=args.seed)
+    vel = vel.to(device=device, dtype=md_dtype)
 
     md.run(pos, vel, min(3 * args.sample_every, n_steps), chunk=args.sample_every)  # warmup/compile
     sampler.clear()
@@ -220,8 +249,8 @@ def main() -> int:
     rebuilds = neighbors.rebuild_count - rebuilds_before
     ndanger = neighbors.ndanger - ndanger_before
 
-    t = torch.tensor(sampler.t_ps, dtype=_DTYPE)
-    e = torch.tensor(sampler.etot, dtype=_DTYPE)
+    t = torch.tensor(sampler.t_ps, dtype=torch.float64)
+    e = torch.tensor(sampler.etot, dtype=torch.float64)
     e0 = float(e[0])
     tc = t - t.mean()
     slope = (tc * (e - e.mean())).sum() / (tc * tc).sum()
@@ -235,7 +264,10 @@ def main() -> int:
         f"lj/cut NVE melt: N={n_atoms} (fcc {args.n}^3)  rho*={_RHO_STAR}  rc={_CUTOFF:.2f} A  "
         f"dt={args.dt} fs  steps={n_steps}  duration={duration / 1000:.3f} ns"
     )
-    print(f"  device={device}  compiled={compiled}  cuda_graphs={args.cuda_graphs}")
+    print(
+        f"  device={device}  compiled={compiled}  cuda_graphs={args.cuda_graphs}  "
+        f"precision: MD {args.precision}, potential {pot_name}"
+    )
     print(
         f"  policy: skin={neighbors.skin:g} A  every={neighbors.every}  delay={neighbors.delay}  "
         f"check={neighbors.check}  r_build={neighbors.r_build:.2f} A"
@@ -258,12 +290,14 @@ def main() -> int:
     print("RESULT:", "PASS" if ok else "FAIL")
 
     if not args.no_save:
-        _save_artifacts(args.out, sampler, e0, rel_drift, rms_rel, duration, args, n_atoms)
+        _save_artifacts(
+            args.out, sampler, e0, rel_drift, rms_rel, duration, args, n_atoms, pot_name
+        )
 
     return 0 if ok else 1
 
 
-def _save_artifacts(out, sampler, e0, rel_drift, rms_rel, duration, args, n_atoms):
+def _save_artifacts(out, sampler, e0, rel_drift, rms_rel, duration, args, n_atoms, pot_name):
     """Write the energy/temperature series (.npz) and a conservation figure (.png)."""
     import matplotlib
 
@@ -278,7 +312,8 @@ def _save_artifacts(out, sampler, e0, rel_drift, rms_rel, duration, args, n_atom
     ke = np.asarray(sampler.ke)
     temp = np.asarray(sampler.temp)
 
-    npz = out / "ljcut_nve.npz"
+    tag = f"md{args.precision[-2:]}_pot{pot_name[-2:]}"
+    npz = out / f"ljcut_nve_{tag}.npz"
     np.savez_compressed(
         npz,
         time_ps=t,
@@ -290,7 +325,7 @@ def _save_artifacts(out, sampler, e0, rel_drift, rms_rel, duration, args, n_atom
             f"lj/cut argon NVE melt; N={n_atoms}; rho*={_RHO_STAR}; rc={_CUTOFF}A; "
             f"dt={args.dt}fs; T0={args.t0:.1f}K; duration={duration:.1f}ps; seed={args.seed}; "
             f"skin={args.skin}A; every={args.every}; delay={args.delay}; "
-            f"check={not args.no_check}; "
+            f"check={not args.no_check}; MD={args.precision}; pot={pot_name}; "
             f"rel_drift={rel_drift:.3e}; rel_rms={rms_rel:.3e}; units=(amu,A,fs)"
         ),
     )
@@ -300,7 +335,7 @@ def _save_artifacts(out, sampler, e0, rel_drift, rms_rel, duration, args, n_atom
     ax0.axhline(0.0, color="k", lw=0.5, ls=":")
     ax0.set_ylabel(r"$(E_{\rm tot}-E_0)/|E_0|$  [ppm]")
     ax0.set_title(
-        f"lj/cut NVE melt, N={n_atoms}, {duration:.0f} ps, dt={args.dt:g} fs — "
+        f"lj/cut NVE melt, N={n_atoms}, {duration:.0f} ps, MD {args.precision}/pot {pot_name} — "
         f"drift {rel_drift:.1e}, RMS {rms_rel:.1e}"
     )
     ax1.plot(t, pe, lw=0.7, color="C0", label="potential")
@@ -312,7 +347,7 @@ def _save_artifacts(out, sampler, e0, rel_drift, rms_rel, duration, args, n_atom
     ax2.set_xlabel("time [ps]")
     ax2.set_ylabel("T [K]")
     fig.tight_layout()
-    png = out / "ljcut_nve_energy.png"
+    png = out / f"ljcut_nve_{tag}_energy.png"
     fig.savefig(png, dpi=200)
     plt.close(fig)
 
