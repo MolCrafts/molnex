@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from molzoo.allegro import Allegro, AllegroSpec
+    from molzoo.chem import ChemPerception, ChemPerceptionSpec
     from molzoo.mace.research import MACE
     from molzoo.mace.spec import MACESpec
     from molzoo.mace.variants import (
@@ -50,6 +51,8 @@ if TYPE_CHECKING:
 _LAZY = {
     "Allegro": "molzoo.allegro",
     "AllegroSpec": "molzoo.allegro",
+    "ChemPerception": "molzoo.chem",
+    "ChemPerceptionSpec": "molzoo.chem",
     "MACE": "molzoo.mace.research",
     "MACESpec": "molzoo.mace.spec",
     "MACEMatpes": "molzoo.mace.variants",
@@ -63,6 +66,8 @@ _LAZY = {
 __all__ = [
     "Allegro",
     "AllegroSpec",
+    "ChemPerception",
+    "ChemPerceptionSpec",
     "MACE",
     "MACEMatpes",
     "MACEOMol",

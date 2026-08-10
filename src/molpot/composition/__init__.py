@@ -27,6 +27,13 @@ from molpot.composition.mm_heads import (
     ProperTorsionParamHead,
 )
 from molpot.composition.multihead import MultiHead
+from molpot.composition.parameterizer import (
+    KCAL_MOL_TO_EV,
+    ChemEmbeddingsLike,
+    ChemEncoderProtocol,
+    ClassicalMMParameterizer,
+    energy_kcal_to_ev,
+)
 from molpot.composition.sonata import Sonata, SonataSpec
 
 __all__ = [
@@ -42,6 +49,11 @@ __all__ = [
     "MultiHead",
     "PotentialComposer",
     "ClassicalMMComposer",
+    "ClassicalMMParameterizer",
+    "ChemEmbeddingsLike",
+    "ChemEncoderProtocol",
+    "KCAL_MOL_TO_EV",
+    "energy_kcal_to_ev",
     "Sonata",
     "SonataSpec",
 ]

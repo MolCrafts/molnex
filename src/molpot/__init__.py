@@ -6,11 +6,13 @@ Pure PyTorch components for molecular ML potentials.
 # Potentials
 # Composition
 from molpot.composition import (
+    KCAL_MOL_TO_EV,
     AngleParamHead,
     BondParamHead,
     ChargeHead,
     ChargeTransferParameterHead,
     ClassicalMMComposer,
+    ClassicalMMParameterizer,
     ImproperParamHead,
     LJParameterHead,
     MultiHead,
@@ -20,6 +22,7 @@ from molpot.composition import (
     Sonata,
     SonataSpec,
     TSScalingHead,
+    energy_kcal_to_ev,
 )
 
 # Physical derivation
@@ -123,6 +126,9 @@ __all__ = [
     "MultiHead",
     "PotentialComposer",
     "ClassicalMMComposer",
+    "ClassicalMMParameterizer",
+    "KCAL_MOL_TO_EV",
+    "energy_kcal_to_ev",
     "Sonata",
     "SonataSpec",
 ]
