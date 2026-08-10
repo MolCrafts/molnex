@@ -29,7 +29,7 @@ Later milestones (not yet specified): B3 energy+force, C torsion/minimize, D1–
 |---:|---|---|---|
 | 01 | mm-param-val-01-molhub-contract | molhub dataset | molecule_id, units, TargetSchema families, MoleculeSplit **[done]** |
 | 02 | mm-param-val-02-zinc-typing | molhub + registry | `dataset:espaloma/zinc-typing@1` **[done]** |
-| 03 | [mm-param-val-03-phalkethoh-mm](mm-param-val-03-phalkethoh-mm.md) | molhub + registry | `dataset:espaloma/phalkethoh-mm-small@1` [approved] |
+| 03 | mm-param-val-03-phalkethoh-mm | molhub + registry | `dataset:espaloma/phalkethoh-mm-small@1` **[done]** |
 | 04 | [mm-param-val-04-workspace](mm-param-val-04-workspace.md) | molexp + molmcp + molnex scripts | workspace scaffold + route hints [approved] |
 | 05 | [mm-param-val-05-potential-parity](mm-param-val-05-potential-parity.md) | molnex molpot | Validation B0 IR/kernel parity [approved] |
 | 06 | [mm-param-val-06-typing-recovery](mm-param-val-06-typing-recovery.md) | molnex molrep | Validation A GAFF typing probe [approved] |
