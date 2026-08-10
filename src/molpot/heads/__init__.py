@@ -22,6 +22,12 @@ from molpot.heads.multipole import (
     PermMultipoleHead,
     PermMultipoleHeadSpec,
 )
+from molpot.heads.provenance import (
+    CoverageRegime,
+    ParameterProvenance,
+    SupportClassifier,
+    attach_provenance,
+)
 from molpot.heads.rescale import GlobalRescale, PerSpeciesScaleShift
 from molpot.heads.type import TypeHead
 
@@ -30,6 +36,7 @@ __all__ = [
     "AtomicReferenceEnergy",
     "BondChargeHead",
     "ChargeResponseHead",
+    "CoverageRegime",
     "DipoleHead",
     "EdgeEnergyHead",
     "ElementAlphaTable",
@@ -38,10 +45,13 @@ __all__ = [
     "GlobalRescale",
     "HardnessHead",
     "HardnessHeadSpec",
+    "ParameterProvenance",
     "PermMultipoleHead",
     "PermMultipoleHeadSpec",
     "PolarizabilityHead",
     "PolarizabilityHeadSpec",
     "PerSpeciesScaleShift",
+    "SupportClassifier",
     "TypeHead",
+    "attach_provenance",
 ]

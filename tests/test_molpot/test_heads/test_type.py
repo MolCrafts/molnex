@@ -38,3 +38,10 @@ class TestTypeHead:
 
         assert out.shape == torch.Size([3, 5])
         assert out.dtype == torch.float64
+
+    def test_decode_with_confidence(self):
+        head = TypeHead(hidden_dim=4, num_types=3)
+        logits = torch.tensor([[5.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+        indices, confidence = head.decode_with_confidence(logits)
+        assert indices.tolist() == [0, 1]
+        assert float(confidence[0]) > float(confidence[1])

@@ -5,6 +5,7 @@ Provides embedding and feature extraction modules:
 - SphericalHarmonics: Equivariant angular basis functions
 - BesselRBF / GaussianBasis / PolynomialBasis: Radial basis functions
 - CosineCutoff / TanhCutoff / HalfCosineCutoff / PolynomialCutoff: Cutoff envelopes
+- ChemicalSupportIndex: L2 kNN chemical-support bank (provenance surfaces)
 """
 
 from .angular import SphericalHarmonics
@@ -18,10 +19,12 @@ from .radial import (
     GaussianBasis,
     PolynomialBasis,
 )
+from .support import ChemicalSupportIndex
 
 __all__ = [
     "AgnesiTransform",
     "BesselRBF",
+    "ChemicalSupportIndex",
     "covalent_radii",
     "MomentNormalizedMLP",
     "normalize2mom",

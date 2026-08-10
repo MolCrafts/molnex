@@ -11,7 +11,7 @@ once ratified, they are the authoritative description of a feature.
 - [learnable-classical-ff-01-ir-kernels](learnable-classical-ff-01-ir-kernels.md) — Potential IR + Class-I kernels (periodic proper, impropers, 1-4 scaling) [done]
 - [learnable-classical-ff-02-valence-topology](learnable-classical-ff-02-valence-topology.md) — molix collate namespaces for angles/propers/impropers [done]
 - [learnable-classical-ff-03-mm-heads](learnable-classical-ff-03-mm-heads.md) — continuous canonical MM parameter heads + ClassicalMMComposer [done]
-- [learnable-classical-ff-04-chem-encoder](learnable-classical-ff-04-chem-encoder.md) — continuous chemical perception (atom/bond embeddings + contexts) [implemented — verify]
+- [learnable-classical-ff-04-chem-encoder](learnable-classical-ff-04-chem-encoder.md) — continuous chemical perception (atom/bond embeddings + contexts) [done]
 - [learnable-classical-ff-05-neural-parameterizer](learnable-classical-ff-05-neural-parameterizer.md) — encoder→heads→IR→classical E/F composition path [done]
 - [learnable-classical-ff-06-condensation](learnable-classical-ff-06-condensation.md) — physics-aware multi-system chemical class condensation [done]
 - [learnable-classical-ff-07-smarts](learnable-classical-ff-07-smarts.md) — SMARTS/SMIRKS symbolic interface + SymbolicForceField [done]
