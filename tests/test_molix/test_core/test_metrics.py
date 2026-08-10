@@ -93,3 +93,27 @@ class TestMetricCollection:
         metrics.update(preds, targets)
         results = metrics.compute()
         assert float(results["MAE"]) == pytest.approx(0.5)
+
+
+class TestMoleculeCenteredRMSE:
+    def test_self_zero(self):
+        from molix.core.metrics import MoleculeCenteredRMSE
+
+        m = MoleculeCenteredRMSE()
+        # values {0,0.25,1.0} same for pred/true → centered RMSE 0
+        e = torch.tensor([0.0, 0.25, 1.0])
+        g = torch.tensor([0, 0, 0])
+        m.update(e, e, g)
+        assert float(m.compute()) == pytest.approx(0.0)
+
+
+class TestMoleculeCenteredMAE:
+    def test_offsets(self):
+        from molix.core.metrics import MoleculeCenteredMAE
+
+        m = MoleculeCenteredMAE()
+        pred = torch.tensor([1.0, 2.0, 5.0, 7.0])
+        true = torch.tensor([10.0, 11.0, 0.0, 2.0])
+        g = torch.tensor([0, 0, 1, 1])
+        m.update(pred, true, g)
+        assert float(m.compute()) == pytest.approx(0.0)

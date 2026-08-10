@@ -37,6 +37,7 @@ from molix.data.dataset import (
     PackedView,
     SubsetDataset,
 )
+from molix.data.group_split import group_split_indices
 
 # Pipeline DSL
 from molix.data.pipeline import DAGCache, Edge, Node, Pipeline, PipelineSpec
@@ -102,4 +103,6 @@ __all__ = [
     "collate_molecules",
     "TargetSchema",
     "DEFAULT_TARGET_SCHEMA",
+    # Group splits
+    "group_split_indices",
 ]

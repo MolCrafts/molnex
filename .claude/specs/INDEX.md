@@ -32,6 +32,6 @@ Later milestones (not yet specified): B3 energy+force, C torsion/minimize, D1–
 | 03 | mm-param-val-03-phalkethoh-mm | molhub + registry | `dataset:espaloma/phalkethoh-mm-small@1` **[done]** |
 | 04 | mm-param-val-04-workspace | molexp + molmcp + molnex scripts | workspace scaffold + route hints **[done]** |
 | 05 | mm-param-val-05-potential-parity | molnex molpot | Validation B0 IR/kernel parity **[done]** |
-| 06 | [mm-param-val-06-typing-recovery](mm-param-val-06-typing-recovery.md) | molnex molrep | Validation A GAFF typing probe [approved] |
-| 07 | [mm-param-val-07-mm-energy](mm-param-val-07-mm-energy.md) | molnex molix | Validation B1/B2 centered MM energy [approved] |
-| 08 | [mm-param-val-08-latent-analysis](mm-param-val-08-latent-analysis.md) | molnex molrep.analysis | Validation D/E latent purity + artifacts [approved] |
+| 06 | mm-param-val-06-typing-recovery | molnex molrep | Validation A GAFF typing probe **[done]** |
+| 07 | mm-param-val-07-mm-energy | molnex molix | Validation B1/B2 centered MM energy **[done]** |
+| 08 | mm-param-val-08-latent-analysis | molnex molrep.analysis | Validation D/E latent purity + artifacts **[done]** |
