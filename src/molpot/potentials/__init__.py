@@ -3,7 +3,10 @@
 - LJ126: Lennard-Jones 12-6
 - BondHarmonic: Harmonic bond stretching
 - AngleHarmonic: Harmonic angle bending
-- DihedralHarmonic: Harmonic dihedral torsion
+- DihedralHarmonic: Harmonic dihedral / improper-style form (not Class-I proper)
+- ProperTorsionPeriodic: Class-I multi-term cosine proper torsion
+- ImproperPeriodic: Class-I multi-term cosine improper
+- ImproperHarmonic: Harmonic improper torsion
 - RepulsionExp6: Buckingham-style exponential repulsion
 - DispersionC6: Tang-Toennies C6 dispersion
 - ChargeTransfer: Charge-transfer potential
@@ -14,11 +17,12 @@
 from molpot.potentials.angles import AngleHarmonic
 from molpot.potentials.base import BasePotential
 from molpot.potentials.bonds import BondHarmonic
-from molpot.potentials.dihedrals import DihedralHarmonic
+from molpot.potentials.dihedrals import DihedralHarmonic, ProperTorsionPeriodic
 from molpot.potentials.elec import (
     EwaldMultipoleEnergy,
     EwaldMultipoleEnergySpec,
 )
+from molpot.potentials.impropers import ImproperHarmonic, ImproperPeriodic
 from molpot.potentials.mixing import geometric_arithmetic_mixing
 from molpot.potentials.nonbonded import (
     ChargeTransfer,
@@ -39,6 +43,9 @@ __all__ = [
     "BondHarmonic",
     "AngleHarmonic",
     "DihedralHarmonic",
+    "ProperTorsionPeriodic",
+    "ImproperPeriodic",
+    "ImproperHarmonic",
     "EwaldMultipoleEnergy",
     "EwaldMultipoleEnergySpec",
     "geometric_arithmetic_mixing",

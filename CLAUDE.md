@@ -617,3 +617,12 @@ One skill + one agent. Both repo-local under `.claude/skills/` and `.claude/agen
 5. `molzoo-auditor` MUST print ≥ 1 verdict per invocation (even `✅ confirmed, no drift`), citing the triggering `run_id` or question + paper section + spec row + code file:line. ⚠️ (code-drift) is print-only; 📝/🆚 produce file diffs in `<encoder>.md`. The auditor never edits code — code changes are always the user's call.
 
 The 10-section structure of `<encoder>.md` is **immutable** — adding / removing / renaming a section is a §10.2 breaking change. Invariants are enforced inside the skill, not via `settings.json` hooks, for now.
+
+## Learnable classical FF — placement (binding)
+
+See `.claude/notes/learnable-classical-ff.md`. Short form:
+
+1. **Reuse first** — molpy `ForceField` / `potential` / Topology enum / SMARTS before inventing molnex twins.
+2. **Generalize without `Foo(method=…)`** — single-responsibility types only; no multi-backend method switches on new APIs.
+3. **Non-diff sinks to molpy/molrs** — *enumeration*, SMARTS, classical non-torch E/F, FF tables under molpy (≥0.13). Imports: `molpy` only (never bare `molrs`).
+4. **Batch topology lives in molix TensorDict**, not molpy Frame. Column form under namespaces, e.g. `batch["angles"]["atomi"]` / `batch["angles", "atomj"]` / `atomk` (propers/impropers add `atoml`; improper **center = atomi**). Stack to COO only at kernel call sites if a potential still wants `[arity, N]`.

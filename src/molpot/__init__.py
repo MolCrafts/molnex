@@ -23,6 +23,21 @@ from molpot.derivation import EnergyAggregation, ForceDerivation, StressDerivati
 # Prediction heads
 from molpot.heads import AtomicEnergyMLP, EnergyHead, TypeHead
 
+# Class-I Potential IR
+from molpot.ir import (
+    CLASS_I_CANONICAL,
+    AngleBag,
+    BondBag,
+    ChargeBag,
+    ImproperHarmonicBag,
+    ImproperPeriodicBag,
+    LJBag,
+    NonbondedScaling,
+    PotentialIR,
+    ProperTorsionBag,
+    UnitTag,
+)
+
 # Pooling
 from molpot.pooling import (
     EdgeToNodePooling,
@@ -39,7 +54,10 @@ from molpot.potentials import (
     ChargeTransfer,
     DihedralHarmonic,
     DispersionC6,
+    ImproperHarmonic,
+    ImproperPeriodic,
     Polarization,
+    ProperTorsionPeriodic,
     RepulsionExp6,
     geometric_arithmetic_mixing,
     lorentz_berthelot,
@@ -53,11 +71,26 @@ __all__ = [
     "BondHarmonic",
     "AngleHarmonic",
     "DihedralHarmonic",
+    "ProperTorsionPeriodic",
+    "ImproperPeriodic",
+    "ImproperHarmonic",
     "RepulsionExp6",
     "DispersionC6",
     "ChargeTransfer",
     "Polarization",
     "geometric_arithmetic_mixing",
+    # Potential IR
+    "UnitTag",
+    "CLASS_I_CANONICAL",
+    "BondBag",
+    "AngleBag",
+    "ProperTorsionBag",
+    "ImproperPeriodicBag",
+    "ImproperHarmonicBag",
+    "LJBag",
+    "ChargeBag",
+    "NonbondedScaling",
+    "PotentialIR",
     # Heads
     "AtomicEnergyMLP",
     "EnergyHead",

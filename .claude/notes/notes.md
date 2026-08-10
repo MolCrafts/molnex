@@ -260,3 +260,12 @@ TensorDict/torch-stub false-positive classes are already downgraded to
 **Rule**: never write `# type: ignore[...]`. If a per-line suppression
 is truly needed, use `# ty: ignore[rule]`; prefer relying on the
 `[tool.ty.rules]` downgrades over per-line pragmas.
+
+---
+
+## Learnable classical FF placement (2026-08-10)
+
+**Rule.** Reuse molpy≥0.13; no new `Foo(method=…)`; non-diff work sinks to molpy/molrs.
+Full text: [learnable-classical-ff.md](learnable-classical-ff.md).
+
+**Status.** active.
