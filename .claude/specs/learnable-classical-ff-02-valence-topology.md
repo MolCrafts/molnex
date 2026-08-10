@@ -1,6 +1,6 @@
 ---
 title: Learnable classical FF — valence topology collate namespaces
-status: approved
+status: done
 created: 2026-08-10
 revised: 2026-08-10
 grilled: true
@@ -159,14 +159,14 @@ Contract lives in this spec + `.claude/notes/learnable-classical-ff.md`.
 
 ## Tasks
 
-- [ ] Write failing collate tests: multi-sample batch rebases `angles.atomi/j/k` by cumulative n_atoms; types concat; empty-N; access `batch["angles"]["atomi"]`
-- [ ] Implement collate_molecules valence namespaces as column TensorDicts (atomi/atomj/atomk/atoml + optional type)
-- [ ] Write failing PackedCache round-trip tests for column buckets + ptrs
-- [ ] Implement PackedCache pack/unpack + collate_packed for angles/propers/impropers columns
-- [ ] Write failing tests for optional stack helpers (columns → [3,N]/[4,N] for 01 kernels only)
-- [ ] Implement stack helpers; do **not** make packed COO the batch schema
-- [ ] Keep existing bonds collate green (no regression)
-- [ ] Run check + unit tests
+- [x] Write failing collate tests: multi-sample batch rebases `angles.atomi/j/k` by cumulative n_atoms; types concat; empty-N; access `batch["angles"]["atomi"]`
+- [x] Implement collate_molecules valence namespaces as column TensorDicts (atomi/atomj/atomk/atoml + optional type)
+- [x] Write failing PackedCache round-trip tests for column buckets + ptrs
+- [x] Implement PackedCache pack/unpack + collate_packed for angles/propers/impropers columns
+- [x] Write failing tests for optional stack helpers (columns → [3,N]/[4,N] for 01 kernels only)
+- [x] Implement stack helpers; do **not** make packed COO the batch schema
+- [x] Keep existing bonds collate green (no regression)
+- [x] Run check + unit tests
 
 ## Testing strategy
 

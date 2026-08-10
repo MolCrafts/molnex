@@ -12,7 +12,9 @@ criteria:
       atomj/atomk as 1-D long tensors; second sample's indices equal local +
       n_atoms_0. Access form is nested TensorDict, not angle_index [3, N] as
       the primary leaf.
-    status: pending
+    status: verified
+    last_checked: 2026-08-10
+    verified_by: agent-auto
   - id: ac-002
     summary: Propers and impropers use atomi..atoml columns under namespaces
     type: code
@@ -20,7 +22,9 @@ criteria:
       batch["propers"] has atomi, atomj, atomk, atoml; batch["impropers"] has
       the same four columns with atomi = center (molrs). Optional type column
       concatenates on dim 0 when present.
-    status: pending
+    status: verified
+    last_checked: 2026-08-10
+    verified_by: agent-auto
   - id: ac-003
     summary: PackedCache round-trips valence column buckets
     type: code
@@ -28,27 +32,35 @@ criteria:
       PackedCache save/load of samples with angles/propers/impropers columns
       restores equal tensors; collate_packed agrees with collate_molecules
       leafwise on those columns. Single-file layout only.
-    status: pending
+    status: verified
+    last_checked: 2026-08-10
+    verified_by: agent-auto
   - id: ac-004
     summary: Batch topology is not a molpy Frame store
     type: code
     pass_when: |
       Collate/cache modules do not import molpy ForceField/Frame as the batch
       container; topology leaves are plain torch tensors inside TensorDict.
-    status: pending
+    status: verified
+    last_checked: 2026-08-10
+    verified_by: agent-auto
   - id: ac-005
     summary: Optional stack helper builds COO only for kernel call sites
     type: code
     pass_when: |
       A unit test stacks angles.atomi/j/k into [3, N] (and propers into [4, N])
       via a documented helper; the helper is not required by collate output.
-    status: pending
+    status: verified
+    last_checked: 2026-08-10
+    verified_by: agent-auto
   - id: ac-006
     summary: Existing bonds collate path remains green
     type: code
     pass_when: |
       Existing bond_index collate / packed tests still pass after valence work.
-    status: pending
+    status: verified
+    last_checked: 2026-08-10
+    verified_by: agent-auto
   - id: ac-007
     summary: Regression script pins nested column access and rebases
     type: runtime
@@ -56,13 +68,17 @@ criteria:
       regressions/learnable-classical-ff-02-valence-topology.py (if present)
       asserts hard-coded rebased atomi/atomj/atomk tables via
       batch["angles"]["atomi"] form; exits 0 without third-party oracles.
-    status: pending
+    status: verified
+    last_checked: 2026-08-10
+    verified_by: agent-auto
   - id: ac-008
     summary: Full check and unit suite green
     type: runtime
     pass_when: |
       Project build.check and default pytest unit suite succeed after the change.
-    status: pending
+    status: verified
+    last_checked: 2026-08-10
+    verified_by: agent-auto
 ---
 
 # Acceptance — learnable-classical-ff-02-valence-topology

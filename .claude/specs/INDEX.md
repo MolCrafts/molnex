@@ -9,7 +9,7 @@ once ratified, they are the authoritative description of a feature.
 - [mace-omol-port-02-pipeline-integration](mace-omol-port-02-pipeline-integration.md) — wire MACEOMol into molnex runtime: TensorDict adapter + molpot/ForceDerivation + lazy molzoo export + RadialMLP dtype fix; all criteria verified (E/F 7e-7 eV / 4e-6 eV·Å ≤ 1e-4 accepted bar; O3_e3nn bit-exact dropped) [done]
 - [lammps-pair-molnex-01-aoti-force-export-wall](lammps-pair-molnex-01-aoti-force-export-wall.md) — AOTI exports MACE-OMol energy bit-exact but forces=0 (cuet fused ops have no export-traceable backward); 5-wall investigation-of-record + TorchScript+libtorch pair_style route forward (run backward() in C++) [investigation-complete]
 - [learnable-classical-ff-01-ir-kernels](learnable-classical-ff-01-ir-kernels.md) — Potential IR + Class-I kernels (periodic proper, impropers, 1-4 scaling) [done]
-- [learnable-classical-ff-02-valence-topology](learnable-classical-ff-02-valence-topology.md) — molix collate namespaces for angles/propers/impropers [approved]
+- [learnable-classical-ff-02-valence-topology](learnable-classical-ff-02-valence-topology.md) — molix collate namespaces for angles/propers/impropers [done]
 - [learnable-classical-ff-03-mm-heads](learnable-classical-ff-03-mm-heads.md) — continuous canonical MM parameter heads + ClassicalMMComposer [approved]
 - [learnable-classical-ff-04-chem-encoder](learnable-classical-ff-04-chem-encoder.md) — continuous chemical perception (atom/bond embeddings + contexts) [approved]
 - [learnable-classical-ff-05-neural-parameterizer](learnable-classical-ff-05-neural-parameterizer.md) — encoder→heads→IR→classical E/F composition path [approved]

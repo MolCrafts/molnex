@@ -60,9 +60,20 @@ DEFAULT_TARGET_SCHEMA = TargetSchema()
 INDEX_KEYS: dict[str, tuple[int, int]] = {
     "edge_index": (0, 1),  # [E, 2] — count axis 0, both columns are atom indices
     "bond_index": (1, 0),  # [2, N] COO — count axis 1, both rows are atom indices
-    "angle_index": (1, 0),  # [3, N]
-    "dihedral_index": (1, 0),  # [4, N]
+    "angle_index": (1, 0),  # [3, N]  (kernel-local COO only; not collate schema)
+    "dihedral_index": (1, 0),  # [4, N] (kernel-local COO only; not collate schema)
 }
+
+# Valence connectivity lives as 1-D atom-index columns under nested namespaces
+# (molpy/molrs Frame style). Required columns per family; optional ``type``.
+# Impropers: atomi is the **center** (molrs center-first).
+_VALENCE_REQUIRED: dict[str, tuple[str, ...]] = {
+    "angles": ("atomi", "atomj", "atomk"),
+    "propers": ("atomi", "atomj", "atomk", "atoml"),
+    "impropers": ("atomi", "atomj", "atomk", "atoml"),
+}
+_VALENCE_OPTIONAL: tuple[str, ...] = ("type",)
+_ATOM_INDEX_COLS: frozenset[str] = frozenset({"atomi", "atomj", "atomk", "atoml"})
 
 
 def rebase(tensor: torch.Tensor, offset: int | torch.Tensor, key: str) -> torch.Tensor:
@@ -97,6 +108,97 @@ def _normalize_edge_index(edge_index: torch.Tensor) -> torch.Tensor:
     raise ValueError(f"edge_index must have shape (E, 2) or (2, E), got {tuple(edge_index.shape)}")
 
 
+def _sample_has_valence(sample: Mapping[str, Any], family: str) -> bool:
+    """Return True if *sample* carries a non-None nested *family* block."""
+    block = sample.get(family)
+    return block is not None and isinstance(block, Mapping)
+
+
+def _collate_valence_family(
+    samples: list[dict],
+    family: str,
+    required: tuple[str, ...],
+    atom_offsets: list[int],
+) -> TensorDict | None:
+    """Collate one valence namespace as 1-D columns rebased by atom offset.
+
+    Pre-collate form (preferred)::
+
+        sample["angles"] = {
+            "atomi": Long[N], "atomj": Long[N], "atomk": Long[N], "type"?: Long[N]
+        }
+
+    All-or-none: every sample must carry the family or none may. Atom-index
+    columns (``atomi``/``atomj``/``atomk``/``atoml``) are shifted by the
+    sample's atom offset; optional ``type`` is concatenated without offset.
+
+    Returns:
+        Nested :class:`~tensordict.TensorDict` with ``batch_size=[N_terms]``,
+        or ``None`` when no sample carries the family.
+
+    Raises:
+        ValueError: mixed presence, missing required columns, or length mismatch.
+        TypeError: family value is not a mapping of tensors.
+    """
+    present = [_sample_has_valence(s, family) for s in samples]
+    if not any(present):
+        return None
+    if not all(present):
+        raise ValueError(
+            f"{family!r} must be present in all samples or none "
+            f"(got presence={present})."
+        )
+
+    cols: dict[str, list[torch.Tensor]] = {c: [] for c in required}
+    optional_lists: dict[str, list[torch.Tensor]] = {c: [] for c in _VALENCE_OPTIONAL}
+    have_optional = {c: True for c in _VALENCE_OPTIONAL}
+
+    for sample, offset in zip(samples, atom_offsets):
+        block = sample[family]
+        if not isinstance(block, Mapping):
+            raise TypeError(
+                f"sample[{family!r}] must be a mapping of column tensors, "
+                f"got {type(block).__name__}"
+            )
+        for col in required:
+            if col not in block or block[col] is None:
+                raise ValueError(
+                    f"sample[{family!r}] missing required column {col!r}"
+                )
+            t = torch.as_tensor(block[col]).long().reshape(-1)
+            if col in _ATOM_INDEX_COLS:
+                t = t + offset
+            cols[col].append(t)
+        n_terms = int(cols[required[0]][-1].shape[0])
+        for col in required[1:]:
+            if int(cols[col][-1].shape[0]) != n_terms:
+                raise ValueError(
+                    f"sample[{family!r}] column lengths differ: "
+                    f"{col}={cols[col][-1].shape[0]} vs {required[0]}={n_terms}"
+                )
+        for col in _VALENCE_OPTIONAL:
+            val = block.get(col)
+            if val is None:
+                have_optional[col] = False
+            else:
+                ot = torch.as_tensor(val).long().reshape(-1)
+                if int(ot.shape[0]) != n_terms:
+                    raise ValueError(
+                        f"sample[{family!r}] optional {col!r} length "
+                        f"{ot.shape[0]} != n_terms={n_terms}"
+                    )
+                optional_lists[col].append(ot)
+
+    out_dict: dict[str, torch.Tensor] = {
+        col: torch.cat(ts, dim=0) for col, ts in cols.items()
+    }
+    for col, ts in optional_lists.items():
+        if have_optional[col] and ts:
+            out_dict[col] = torch.cat(ts, dim=0)
+    n_total = int(out_dict[required[0]].shape[0])
+    return TensorDict(out_dict, batch_size=[n_total])
+
+
 # ---------------------------------------------------------------------------
 # Collate
 # ---------------------------------------------------------------------------
@@ -109,14 +211,33 @@ def collate_molecules(
     """Collate molecule samples into a nested TensorDict.
 
     Each sample is a plain dict with at least ``Z`` and ``pos`` keys.
-    Optional: ``edge_index``, ``edge_diff``, ``edge_dist``, ``targets``.
+    Optional: ``edge_index``, ``edge_diff``, ``edge_dist``, ``targets``,
+    flat ``bond_index`` / ``bond_types``, and nested valence blocks
+    ``angles`` / ``propers`` / ``impropers`` with 1-D atom-index columns
+    (``atomi`` / ``atomj`` / …, optional ``type``).
+
+    Pre-collate valence form (preferred)::
+
+        {
+            "Z": ..., "pos": ...,
+            "angles": {"atomi": Long[N_a], "atomj": Long[N_a],
+                       "atomk": Long[N_a], "type"?: Long[N_a]},
+            "propers": {"atomi": ..., "atomj": ..., "atomk": ..., "atoml": ...},
+            "impropers": {"atomi": ..., ...},  # atomi = center (molrs)
+        }
+
+    Post-collate the same namespaces are nested TensorDicts with columns
+    rebased by cumulative atom offset. Packed COO ``angle_index [3, N]`` is
+    **not** the collate schema (see :mod:`molix.datasets._valence_columns`
+    for optional kernel-local stacks).
 
     Args:
         samples: List of single-molecule sample dicts.
         target_schema: Declares which targets are graph-level vs atom-level.
 
     Returns:
-        Nested ``TensorDict`` with ``atoms``, ``edges``, ``graphs`` namespaces.
+        Nested ``TensorDict`` with ``atoms``, ``edges``, ``graphs`` namespaces
+        and optional ``bonds`` / ``angles`` / ``propers`` / ``impropers``.
     """
     if not samples:
         raise ValueError("Cannot collate an empty sample list")
@@ -125,6 +246,7 @@ def collate_molecules(
     pos_all: list[torch.Tensor] = []
     batch_all: list[torch.Tensor] = []
     num_atoms: list[int] = []
+    atom_offsets: list[int] = []
 
     edge_all: list[torch.Tensor] = []
     diff_all: list[torch.Tensor] = []
@@ -150,6 +272,7 @@ def collate_molecules(
         pos_all.append(pos)
         batch_all.append(torch.full((n_atoms,), graph_idx, dtype=torch.long, device=z.device))
         num_atoms.append(n_atoms)
+        atom_offsets.append(atom_offset)
 
         if "edge_index" in sample and sample["edge_index"] is not None:
             edge_index = _normalize_edge_index(sample["edge_index"])
@@ -235,6 +358,14 @@ def collate_molecules(
         if btype_all:
             bonds_dict["bond_types"] = torch.cat(btype_all, dim=0)
         out["bonds"] = TensorDict(bonds_dict, batch_size=[])
+
+    # --- Optional valence column namespaces (angles / propers / impropers) ---
+    # Primary schema is 1-D columns under nested TensorDict, not packed COO.
+    # Prefer batch_size=[N_terms] when every leaf shares length N_terms.
+    for family, required in _VALENCE_REQUIRED.items():
+        td = _collate_valence_family(samples, family, required, atom_offsets)
+        if td is not None:
+            out[family] = td
 
     return out
 
@@ -418,5 +549,36 @@ def collate_packed(
         if "bond_types" in bonds_bucket:
             bonds_dict["bond_types"] = bonds_bucket["bond_types"][b_gather]
         out["bonds"] = TensorDict(bonds_dict, batch_size=[])
+
+    # --- valence column namespaces (mirror of collate_molecules) ---
+    # Packed payload stores concatenated 1-D columns + angle_ptr / proper_ptr /
+    # improper_ptr. Gather rows, rebase atom-index columns by segment atom base.
+    _FAMILY_PTR = {
+        "angles": "angle_ptr",
+        "propers": "proper_ptr",
+        "impropers": "improper_ptr",
+    }
+    for family, required in _VALENCE_REQUIRED.items():
+        ptr_key = _FAMILY_PTR[family]
+        bucket: Mapping[str, torch.Tensor] = payload.get(family, {})
+        ptr = payload.get(ptr_key)
+        if not bucket or ptr is None:
+            continue
+        v_gather, _v_counts, v_seg, _ = _gather_indices(ptr, idx)
+        seg_offsets = new_atom_offsets[v_seg]
+        fam_dict: dict[str, torch.Tensor] = {}
+        for col, tensor in bucket.items():
+            gathered = tensor[v_gather].long()
+            if col in _ATOM_INDEX_COLS:
+                gathered = gathered + seg_offsets
+            fam_dict[col] = gathered
+        # Ensure required columns are present (defensive for corrupt caches).
+        for col in required:
+            if col not in fam_dict:
+                raise ValueError(
+                    f"packed cache {family!r} bucket missing required column {col!r}"
+                )
+        n_terms = int(fam_dict[required[0]].shape[0])
+        out[family] = TensorDict(fam_dict, batch_size=[n_terms])
 
     return out
