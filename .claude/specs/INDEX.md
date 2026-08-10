@@ -18,3 +18,20 @@ once ratified, they are the authoritative description of a feature.
 - [learnable-classical-ff-08-ff-export](learnable-classical-ff-08-ff-export.md) — Potential IR → OpenMM force-spec compiler (4 translation cases) [done]
 - [learnable-classical-ff-09-provenance](learnable-classical-ff-09-provenance.md) — confidence, chemical-space coverage, provenance surfaces [done]
 - [mace-neighbor-graph-correctness](mace-neighbor-graph-correctness.md) — independent multi-image oracle vs NeighborList (≤ cutoff); E/F wrap-invariance slow; metrics.jsonl/molplot [approved, grilled]
+
+## Chain: mm-param-val (MM Parameter Learning Baseline — milestone 1)
+
+Espaloma-capability validation before project-specific condensation/IR claims. Datasets via **MolHub only**; workspace/workflows via **molexp**; hard-to-find surfaces via **molmcp** route hints. Architecture primitives already landed in `learnable-classical-ff-01..09`.
+
+Later milestones (not yet specified): B3 energy+force, C torsion/minimize, D1–D4 QM, OPLS teacher, physics-aware condensation.
+
+| # | Spec | Owner surface | One-line |
+|---:|---|---|---|
+| 01 | mm-param-val-01-molhub-contract | molhub dataset | molecule_id, units, TargetSchema families, MoleculeSplit **[done]** |
+| 02 | [mm-param-val-02-zinc-typing](mm-param-val-02-zinc-typing.md) | molhub + registry | `dataset:espaloma/zinc-typing@1` [approved] |
+| 03 | [mm-param-val-03-phalkethoh-mm](mm-param-val-03-phalkethoh-mm.md) | molhub + registry | `dataset:espaloma/phalkethoh-mm-small@1` [approved] |
+| 04 | [mm-param-val-04-workspace](mm-param-val-04-workspace.md) | molexp + molmcp + molnex scripts | workspace scaffold + route hints [approved] |
+| 05 | [mm-param-val-05-potential-parity](mm-param-val-05-potential-parity.md) | molnex molpot | Validation B0 IR/kernel parity [approved] |
+| 06 | [mm-param-val-06-typing-recovery](mm-param-val-06-typing-recovery.md) | molnex molrep | Validation A GAFF typing probe [approved] |
+| 07 | [mm-param-val-07-mm-energy](mm-param-val-07-mm-energy.md) | molnex molix | Validation B1/B2 centered MM energy [approved] |
+| 08 | [mm-param-val-08-latent-analysis](mm-param-val-08-latent-analysis.md) | molnex molrep.analysis | Validation D/E latent purity + artifacts [approved] |
