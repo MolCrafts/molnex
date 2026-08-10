@@ -22,6 +22,10 @@
 
 ::: molix.data.datamodule
 
+::: molix.data.task
+
+::: molix.data.tasks
+
 ## Datasets
 
 ::: molix.datasets

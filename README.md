@@ -16,7 +16,7 @@
 </p>
 
 <p>
-  <a href="https://molcrafts.github.io/molnex/"><b>Documentation</b></a> &nbsp;&middot;&nbsp;
+  <a href="https://docs.molcrafts.org/molnex/"><b>Documentation</b></a> &nbsp;&middot;&nbsp;
   <a href="#quick-start"><b>Quick start</b></a> &nbsp;&middot;&nbsp;
   <a href="#molcrafts-ecosystem"><b>Ecosystem</b></a>
 </p>
@@ -62,9 +62,9 @@ becoming the framework itself.
 pip install molnex
 ```
 
-Requires Python >= 3.10 and PyTorch >= 2.10. The package builds native C++ ops
+Requires Python >= 3.12 and PyTorch >= 2.10. The package builds native C++ ops
 via scikit-build-core and CMake >= 4.0; an editable install is
-`pip install -e ".[dev]"`. See [Installation](https://molcrafts.github.io/molnex/installation/)
+`pip install -e ".[dev]"`. See [Installation](https://docs.molcrafts.org/molnex/installation/)
 for the full build setup.
 
 ## Quick start
@@ -85,20 +85,20 @@ state = trainer.train(datamodule, max_epochs=5)
 print(state["train/loss"])
 ```
 
-See the [Molix Quick Start](https://molcrafts.github.io/molnex/molix/tutorials/quick-start/)
+See the [Molix Quick Start](https://docs.molcrafts.org/molnex/molix/tutorials/quick-start/)
 for the runnable end-to-end version, and
-[Train a Graph Model](https://molcrafts.github.io/molnex/molix/tutorials/train-a-graph-model/)
+[Train a Graph Model](https://docs.molcrafts.org/molnex/molix/tutorials/train-a-graph-model/)
 for molecular graph batches.
 
 ## Documentation
 
-- [Documentation home](https://molcrafts.github.io/molnex/)
-- [Installation](https://molcrafts.github.io/molnex/installation/)
-- [Molix](https://molcrafts.github.io/molnex/molix/) — training, hooks, data, and execution
-- [MolRep](https://molcrafts.github.io/molnex/molrep/) — representation learning modules
-- [MolPot](https://molcrafts.github.io/molnex/molpot/) — potential composition and physical outputs
-- [MolZoo](https://molcrafts.github.io/molnex/molzoo/) — reference encoder families
-- [API Reference](https://molcrafts.github.io/molnex/api/)
+- [Documentation home](https://docs.molcrafts.org/molnex/)
+- [Installation](https://docs.molcrafts.org/molnex/installation/)
+- [Molix](https://docs.molcrafts.org/molnex/molix/) — training, hooks, data, and execution
+- [MolRep](https://docs.molcrafts.org/molnex/molrep/) — representation learning modules
+- [MolPot](https://docs.molcrafts.org/molnex/molpot/) — potential composition and physical outputs
+- [MolZoo](https://docs.molcrafts.org/molnex/molzoo/) — reference encoder families
+- [API Reference](https://docs.molcrafts.org/molnex/api/)
 
 ## MolCrafts ecosystem
 
@@ -119,7 +119,7 @@ for molecular graph batches.
 
 ## Contributing
 
-Contributions are welcome — see the [documentation](https://molcrafts.github.io/molnex/)
+Contributions are welcome — see the [documentation](https://docs.molcrafts.org/molnex/)
 to get started.
 
 ## License
