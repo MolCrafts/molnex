@@ -17,3 +17,4 @@ once ratified, they are the authoritative description of a feature.
 - [learnable-classical-ff-07-smarts](learnable-classical-ff-07-smarts.md) — SMARTS/SMIRKS symbolic interface + SymbolicForceField [done]
 - [learnable-classical-ff-08-ff-export](learnable-classical-ff-08-ff-export.md) — Potential IR → OpenMM force-spec compiler (4 translation cases) [done]
 - [learnable-classical-ff-09-provenance](learnable-classical-ff-09-provenance.md) — confidence, chemical-space coverage, provenance surfaces [done]
+- [mace-neighbor-graph-correctness](mace-neighbor-graph-correctness.md) — independent multi-image oracle vs NeighborList (≤ cutoff); E/F wrap-invariance slow; metrics.jsonl/molplot [approved, grilled]
