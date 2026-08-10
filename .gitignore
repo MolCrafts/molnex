@@ -137,3 +137,4 @@ benchmarks/results/
 benchmarks/*.err
 benchmarks/*.out
 src/molix/op/build-*/
+.claude/scheduled_tasks.lock
