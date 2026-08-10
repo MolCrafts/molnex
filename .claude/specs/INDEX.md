@@ -28,7 +28,7 @@ Later milestones (not yet specified): B3 energy+force, C torsion/minimize, D1–
 | # | Spec | Owner surface | One-line |
 |---:|---|---|---|
 | 01 | mm-param-val-01-molhub-contract | molhub dataset | molecule_id, units, TargetSchema families, MoleculeSplit **[done]** |
-| 02 | [mm-param-val-02-zinc-typing](mm-param-val-02-zinc-typing.md) | molhub + registry | `dataset:espaloma/zinc-typing@1` [approved] |
+| 02 | mm-param-val-02-zinc-typing | molhub + registry | `dataset:espaloma/zinc-typing@1` **[done]** |
 | 03 | [mm-param-val-03-phalkethoh-mm](mm-param-val-03-phalkethoh-mm.md) | molhub + registry | `dataset:espaloma/phalkethoh-mm-small@1` [approved] |
 | 04 | [mm-param-val-04-workspace](mm-param-val-04-workspace.md) | molexp + molmcp + molnex scripts | workspace scaffold + route hints [approved] |
 | 05 | [mm-param-val-05-potential-parity](mm-param-val-05-potential-parity.md) | molnex molpot | Validation B0 IR/kernel parity [approved] |
