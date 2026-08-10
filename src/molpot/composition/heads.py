@@ -38,11 +38,13 @@ class LJParameterHead(nn.Module):
             nn.Linear(hidden_dim, 2, dtype=config.ftype),
         )
 
-    def forward(self, node_features: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, node_features: torch.Tensor, **kwargs) -> dict[str, torch.Tensor]:
         """Predict LJ parameters from node features.
 
         Args:
             node_features: Per-node features ``(N, D)``.
+            **kwargs: Ignored; accepted for a uniform parameter-head signature
+                (e.g. MultiHead forwarding ``batch`` / ``Z``).
 
         Returns:
             Dict with ``"epsilon"`` ``(N,)`` and ``"sigma"`` ``(N,)``.

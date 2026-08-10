@@ -1,6 +1,6 @@
 ---
 title: Learnable classical FF — continuous MM parameter heads + ClassicalMMComposer
-status: approved
+status: done
 created: 2026-08-10
 revised: 2026-08-10
 grilled: true
@@ -164,14 +164,14 @@ must remain a thin composition of the primitives.
 
 ## Tasks
 
-- [ ] Write failing tests for BondParamHead / AngleParamHead positivity (softplus) and shapes
-- [ ] Implement BondParamHead, AngleParamHead
-- [ ] Write failing tests for ProperTorsionParamHead multi-term outputs and ImproperParamHead
-- [ ] Implement ProperTorsionParamHead, ImproperParamHead; generalize LJParameterHead only if tests require
-- [ ] Write failing ClassicalMMComposer tests: features→PotentialIR bags; energy finite; endpoint symmetry when inputs symmetric
-- [ ] Implement ClassicalMMComposer.parameterize + energy using IR + 01 kernels; MultiHead+ChargeHead reuse
-- [ ] Export symbols; Google docstrings with units (kcal/mol, Å, e, rad)
-- [ ] Run check + unit tests
+- [x] Write failing tests for BondParamHead / AngleParamHead positivity (softplus) and shapes
+- [x] Implement BondParamHead, AngleParamHead
+- [x] Write failing tests for ProperTorsionParamHead multi-term outputs and ImproperParamHead
+- [x] Implement ProperTorsionParamHead, ImproperParamHead; generalize LJParameterHead only if tests require
+- [x] Write failing ClassicalMMComposer tests: features→PotentialIR bags; energy finite; endpoint symmetry when inputs symmetric
+- [x] Implement ClassicalMMComposer.parameterize + energy using IR + 01 kernels; MultiHead+ChargeHead reuse
+- [x] Export symbols; Google docstrings with units (kcal/mol, Å, e, rad)
+- [x] Run check + unit tests
 
 ## Testing strategy
 
