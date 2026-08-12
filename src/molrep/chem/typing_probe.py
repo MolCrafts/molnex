@@ -4,7 +4,7 @@ Hard isolation rules
 --------------------
 * Temporary :class:`~molrep.heads.TypeHead` sits **on top of** continuous
   embeddings — atom-type labels never enter the encoder as inputs.
-* Production :class:`~molpot.composition.parameterizer.ClassicalMMParameterizer`
+* Production :class:`~molpot.forcefield.ClassicalIMM`
   must not import this module.
 
 References:

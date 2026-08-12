@@ -2,7 +2,7 @@
 
 Loads MolHub ``dataset:espaloma/zinc-typing@1`` when available; otherwise
 operates on a caller-provided batch of continuous features + labels.
-Does not wire into ClassicalMMParameterizer.
+Does not wire into ClassicalIMM.
 """
 
 from __future__ import annotations

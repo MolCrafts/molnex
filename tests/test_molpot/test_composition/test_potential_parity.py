@@ -12,12 +12,9 @@ import math
 import torch
 from tensordict import TensorDict
 
-from molpot.composition.classical_mm import ClassicalMMComposer
 from molpot.derivation import ForceDerivation
+from molpot.forcefield import ForceField
 from molpot.ir import NonbondedScaling, PotentialIR
-from molpot.ir.bags import (
-    BondBag,
-)
 from molpot.potentials.angles import AngleHarmonic
 from molpot.potentials.bonds import BondHarmonic
 from molpot.potentials.dihedrals.periodic import ProperTorsionPeriodic
@@ -128,11 +125,15 @@ class TestPotentialParityTerms:
 
 
 class TestPotentialParityTotal:
-    def test_composer_bonded_bond_only(self):
-        ir = PotentialIR(
-            bonds=BondBag(
-                k=torch.tensor([2.0], dtype=torch.float64),
-                r0=torch.tensor([1.0], dtype=torch.float64),
+    def test_forcefield_bonded_bond_only(self):
+        ff = (
+            ForceField(name="test", units="real")
+            .def_bondstyle("harmonic")
+            .with_params(
+                bonds={
+                    "k": torch.tensor([2.0], dtype=torch.float64),
+                    "r0": torch.tensor([1.0], dtype=torch.float64),
+                }
             )
         )
         batch = TensorDict(
@@ -150,12 +151,10 @@ class TestPotentialParityTotal:
             },
             batch_size=[],
         )
-        # ClassicalMMComposer may read bond_index differently - check helpers
-        composer = ClassicalMMComposer()
-        # Ensure bond_index layout matches composer expectations
-        e = composer.energy(ir, batch)
+        pots = ff.to_potentials()
+        e = pots.calc_energy(batch)
         assert abs(float(e) - 0.25) <= _TOL_E
-        terms = composer.term_energies(ir, batch)
+        terms = pots.term_energies(batch)
         assert abs(float(terms["bonds"]) - 0.25) <= _TOL_E
 
 

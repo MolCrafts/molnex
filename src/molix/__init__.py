@@ -32,23 +32,44 @@ def _op_lib_path() -> Path:
 
 
 def _load_ops_library() -> None:
-    """Load the C++ ops library. Raises ImportError with build instructions if missing."""
+    """Load the C++ ops library when present and ABI-compatible.
+
+    Pure-Python call paths (e.g. ClassicalIMM energy training) do not need the
+    native neighbour/MD ops. A missing or ABI-mismatched ``.so`` (common when
+    switching between CPU and CUDA torch wheels) therefore **warns** rather than
+    hard-failing import — :func:`ensure_op_registered` still raises for callers
+    that actually need a named op.
+    """
     global _lib_loaded
     if _lib_loaded:
         return
 
     candidate = _op_lib_path()
     if not candidate.exists():
+        import warnings
+
         op_src = candidate.parents[0]
-        raise ImportError(
+        warnings.warn(
             f"molix native op library not found for machine '{platform.machine()}' "
-            f"at {candidate}.\n"
-            f"Build it with:\n"
+            f"at {candidate}. Pure-Python paths still work; rebuild for MD/C++ ops:\n"
             f"  cmake -S {op_src} -B {op_src}/build -DMOLNEX_OP_ENABLE_CUDA=ON\n"
-            f"  cmake --build {op_src}/build -j\n"
-            f"(drop -DMOLNEX_OP_ENABLE_CUDA=ON for CPU-only builds.)"
+            f"  cmake --build {op_src}/build -j",
+            stacklevel=2,
         )
-    torch.ops.load_library(str(candidate))
+        return
+    try:
+        torch.ops.load_library(str(candidate))
+    except OSError as exc:
+        import warnings
+
+        warnings.warn(
+            f"molix native op library at {candidate} failed to load ({exc}). "
+            "Likely built against a different torch ABI — pure-Python paths still "
+            "work; rebuild the op against this interpreter's torch to enable "
+            "molix C++/CUDA ops.",
+            stacklevel=2,
+        )
+        return
     _lib_loaded = True
 
 

@@ -3,6 +3,9 @@
 Creates ``Workspace → Project → Experiment → Run`` under an explicit *root*
 (temp in CI) or :data:`DEFAULT_WORKSPACE_ROOT` for operators. Never fetches
 MolHub artifacts; seed run params only record coordinates and program ids.
+
+Knowledge is written as sourced :class:`~molexp.workspace.KnowledgeItem`
+objects (OKF), not unsourced free Notes.
 """
 
 from __future__ import annotations
@@ -12,12 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from scripts.mm_param_learning.constants import (
+    DEFAULT_NORMALIZED_DATA_ROOT,
     DEFAULT_WORKSPACE_ROOT,
     EXPERIMENT_SLUGS,
     KNOWLEDGE_NOTE_NAME,
     MOLHUB_COORDINATES,
     PROGRAM,
     PROJECT_SLUG,
+    PROTOCOL_EXPERIMENT_SLUG,
     VALIDATION_STAGES,
 )
 from scripts.mm_param_learning.workflows import MmParamWorkflows
@@ -25,7 +30,7 @@ from scripts.mm_param_learning.workflows import MmParamWorkflows
 
 def _knowledge_body() -> str:
     lines = [
-        "# MM Parameter-Learning Validation — Stages 1–6",
+        "# MM Parameter-Learning Validation — Stages",
         "",
         f"Program: `{PROGRAM}`",
         "",
@@ -37,24 +42,45 @@ def _knowledge_body() -> str:
         lines.append("")
     lines.extend(
         [
+            "## Hierarchy",
+            "",
+            "Managed by **molexp**: `Workspace → Project → Experiment → Run`.",
+            "Datasets/models coordinates by **molhub** (Python SDK).",
+            "",
             "## MolHub coordinates",
             "",
             "Data is loaded via the **Python molhub SDK** only (no molhub MCP plane).",
-            "Workspace orchestration uses **molexp**.",
+            "Workspace orchestration uses **molexp**; agents discover tools on **molmcp molexp** plane.",
+            "",
+            f"Default normalized PhAlkEthOH root: `{DEFAULT_NORMALIZED_DATA_ROOT}`",
             "",
         ]
     )
     for slug, coord in MOLHUB_COORDINATES.items():
         lines.append(f"- `{slug}` → `{coord}`")
-    lines.append("")
+    lines.extend(
+        [
+            "",
+            "## Protocol train entry",
+            "",
+            "```bash",
+            "python scripts/mm_param_learning/setup_class_i_protocol.py",
+            "python scripts/mm_param_learning/espaloma_mm_protocol_train.py \\",
+            f"  --data-root {DEFAULT_NORMALIZED_DATA_ROOT} --energy-scope full \\",
+            f"  --workspace {DEFAULT_WORKSPACE_ROOT} \\",
+            f"  --experiment {PROTOCOL_EXPERIMENT_SLUG} --run-id protocol-full-energy-mini-001",
+            "```",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
 class MmParamLearningWorkspace:
     """Materialize the milestone-1 validation workspace tree.
 
-    Idempotent: a second call keeps experiment count at four and does not
-    duplicate the validation Knowledge Note.
+    Idempotent: a second call keeps experiment count stable and refreshes
+    the validation KnowledgeItem body.
 
     Args:
         root: Workspace root directory. Defaults to
@@ -65,7 +91,7 @@ class MmParamLearningWorkspace:
         self.root = Path(root) if root is not None else DEFAULT_WORKSPACE_ROOT
 
     def materialize(self) -> dict[str, Any]:
-        """Create workspace layout, four experiments, seed runs, and note.
+        """Create workspace layout, experiments, seed runs, and knowledge.
 
         Returns:
             Summary dict with ``root``, ``project``, ``experiments``, ``note``.
@@ -75,7 +101,7 @@ class MmParamLearningWorkspace:
         """
         try:
             from molexp import Workspace
-            from molexp.workspace.bundle import Bundle
+            from molexp.workspace import SourceRef, write_knowledge_item
         except ImportError as exc:  # pragma: no cover - soft dep
             raise ImportError(
                 "molexp is required for MmParamLearningWorkspace.materialize"
@@ -117,8 +143,22 @@ class MmParamLearningWorkspace:
             workflows.build(slug)
             experiments.append(slug)
 
-        bundle = Bundle(ws.root)
-        note = bundle.create_note(KNOWLEDGE_NOTE_NAME, body=_knowledge_body())
+        sources = [SourceRef(kind="experiment", ref=slug) for slug in experiments]
+        if not sources:
+            sources = [SourceRef(kind="experiment", ref=PROTOCOL_EXPERIMENT_SLUG)]
+        sources.extend(
+            SourceRef(kind="file", ref=coord)
+            for coord in sorted(set(MOLHUB_COORDINATES.values()))
+        )
+        write_knowledge_item(
+            project,
+            name=KNOWLEDGE_NOTE_NAME,
+            kind="ProtocolNote",
+            sources=sources,
+            created_by="mm-param-learning/materialize_workspace",
+            body=_knowledge_body(),
+            title="MM param validation stages",
+        )
 
         return {
             "root": str(self.root),
@@ -126,7 +166,6 @@ class MmParamLearningWorkspace:
             "experiments": experiments,
             "note": KNOWLEDGE_NOTE_NAME,
             "workspace": ws,
-            "note_obj": note,
         }
 
 

@@ -3,7 +3,7 @@
 Eval-only reporting: overall accuracy, per-element accuracy, rare-type
 accuracy, confusion matrix, and molecule-level error counts.
 
-This module is **not** part of production :class:`ClassicalMMParameterizer`.
+This module is **not** part of production :class:`~molpot.forcefield.ClassicalIMM`.
 """
 
 from __future__ import annotations

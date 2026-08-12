@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train bond-head ClassicalMMParameterizer on PhAlkEthOH MM-small (Validation B2 smoke).
+"""Train bond-head ClassicalIMM on PhAlkEthOH MM-small (Validation B2 smoke).
 
 Requires a **normalized** data tree (from molhub convert script)::
 
@@ -24,9 +24,9 @@ from tensordict import TensorDict
 from molhub.dataset import PhalkethohMMDataset
 from molhub.dataset.meta import Targets
 from molix.core.losses.molecular import center_by_group
-from molpot.composition import ClassicalMMComposer, ClassicalMMParameterizer
 from molpot.composition.mm_heads import BondParamHead
-from molrep.chem.encoder import ChemEncoder
+from molpot.forcefield import ClassicalIMM, ForceField
+from molrep.chem.encoder import ChemEncoder  # chem perception only
 
 
 def _group_frames(ds: PhalkethohMMDataset, max_mols: int, max_confs: int) -> dict[str, list]:
@@ -63,7 +63,7 @@ def _to_batch(fr) -> TensorDict:
 
 
 def _run_epoch(
-    model: ClassicalMMParameterizer,
+    model: ClassicalIMM,
     by: dict[str, list],
     *,
     train: bool,
@@ -78,10 +78,11 @@ def _run_epoch(
         mid_map.setdefault(mid, len(mid_map))
         batch0 = _to_batch(frames[0])
         with torch.set_grad_enabled(train):
-            ir = model.parameterize(batch0)
+            # Topology-fixed params from first conf; energy over conf geometries.
+            pots = model(batch0).to_potentials()
             for fr in frames:
                 batch = _to_batch(fr)
-                e = model.energy(batch, ir=ir, pos=batch["atoms", "pos"]).reshape(())
+                e = pots.calc_energy(batch, pos=batch["atoms", "pos"]).reshape(())
                 preds.append(e)
                 refs.append(
                     torch.tensor(float(Targets(fr)["mm_energy"]), dtype=torch.float64)
@@ -137,8 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     encoder = ChemEncoder(atom_dim=32, bond_dim=32)
-    composer = ClassicalMMComposer(bond_head=BondParamHead(feature_dim=32))
-    model = ClassicalMMParameterizer(encoder, composer).double()
+    ff = ForceField(name="learned-mm", units="real").def_bondstyle("harmonic")
+    model = ClassicalIMM(encoder, forcefield=ff, bond_head=BondParamHead(feature_dim=32)).double()
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     history: list[dict] = []

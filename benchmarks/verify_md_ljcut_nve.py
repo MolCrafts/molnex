@@ -27,8 +27,8 @@ Units: (amu, Å, fs) with energy in amu·Å²/fs² (see molix.md.integrators);
 
 Run::
 
-    PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py            # 100 ps
-    PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --ps 5     # smoke
+    PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py            # 100 ps default
+    PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --ps 5000  # 5 ns production
     PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --cuda-graphs
     PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --skin 0   # no-skin arm
     PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py \\

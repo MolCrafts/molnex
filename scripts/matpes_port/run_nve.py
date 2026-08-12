@@ -355,6 +355,10 @@ def main() -> None:
         resume_vel = ckpt["vel"].to(dtype=config.ftype, device=device)
         args.out = args.out.with_name(f"{args.out.stem}.from{start_step}{args.out.suffix}")
         print(f"resuming at step {start_step}; trajectory continues in {args.out}")
+        # NeighborList was built at the IC; resume positions are far away in
+        # unwrapped space. Rebuild here so the unwrap/displacement test is
+        # anchored at the resume frame, not the IC.
+        neighbors.update(pos)
 
     run_hooks: list = [
         TrajectoryHook(

@@ -1,28 +1,16 @@
-"""Public-API regression for ClassicalMMParameterizer (encoder → IR → E/F).
+"""Public-API regression for ClassicalIMM (encoder → ForceField → E/F).
 
-Spec: `learnable-classical-ff-05-neural-parameterizer`.
+::
 
-Hard-coded goldens only — no third-party oracle. Pins:
+    ff_t = model(batch)
+    E = ff_t.to_potentials().calc_energy(batch)
 
-1. FakeEncoder satisfies Protocol; no molzoo import in parameterizer
-2. parameterize → CLASS_I IR (kcal/mol)
-3. Bond harmonic energy golden: k=2, r=1.5, r0=1 → E = 0.25 kcal/mol
-4. compute_forces=True → forces (N,3) matching analytic F = -∂E/∂r
-5. Optional eV conversion at boundary only (IR stays class_i_canonical)
-
-Provenance
-----------
-    formula          : E = ½ k (r − r₀)²  (OpenMM §19 / Class-I)
-    geometry         : two atoms on x-axis at distance r
-    capture command  : PYTHONPATH=src python \
-                      regressions/learnable-classical-ff-05-neural-parameterizer.py
-    date             : 2026-08-10
+Hard-coded goldens only. Bond: k=2, r=1.5, r0=1 → E = 0.25 kcal/mol.
 """
 
 from __future__ import annotations
 
 import ast
-import math
 import sys
 from pathlib import Path
 from typing import Mapping
@@ -63,24 +51,13 @@ class _ConstBond(nn.Module):
 
 
 def main() -> int:
-    from molpot import (
-        KCAL_MOL_TO_EV,
-        ClassicalMMComposer,
-        ClassicalMMParameterizer,
-        PotentialIR,
-        energy_kcal_to_ev,
-    )
-    from molpot.composition.parameterizer import ChemEncoderProtocol
-    from molpot.ir import CLASS_I_CANONICAL
+    from molpot import ClassicalIMM, ForceField
 
     torch.manual_seed(0)
-
-    # --- 1. Protocol + import boundary ---
     features = {"bonds": torch.zeros(1, 4, dtype=torch.float64)}
     encoder = FakeEncoder(features)
-    assert isinstance(encoder, ChemEncoderProtocol)
 
-    path = Path(__file__).resolve().parents[1] / "src/molpot/composition/parameterizer.py"
+    path = Path(__file__).resolve().parents[1] / "src/molpot/forcefield/classical_imm.py"
     tree = ast.parse(path.read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -89,9 +66,9 @@ def main() -> int:
         elif isinstance(node, ast.ImportFrom) and node.module:
             assert not node.module.startswith("molzoo")
 
-    # --- 2. Parameterize IR ---
-    composer = ClassicalMMComposer(bond_head=_ConstBond())
-    param = ClassicalMMParameterizer(encoder=encoder, composer=composer)
+    ff = ForceField(name="test", units="real").def_bondstyle("harmonic")
+    model = ClassicalIMM(encoder=encoder, forcefield=ff, bond_head=_ConstBond())
+
     pos = torch.tensor([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], dtype=torch.float64)
     batch = TensorDict(
         {
@@ -113,39 +90,27 @@ def main() -> int:
         },
         batch_size=[],
     )
-    ir = param.parameterize(batch)
-    assert isinstance(ir, PotentialIR)
-    assert ir.unit_system == "class_i_canonical"
-    assert CLASS_I_CANONICAL["energy"] == "kcal/mol"
 
-    # --- 3. Energy golden ---
-    e = float(param.energy(batch, ir=ir, pos=pos))
-    assert math.isclose(e, 0.25, abs_tol=1e-8), f"bond golden E={e}"
+    filled = model(batch)
+    assert isinstance(filled, ForceField)
+    E = filled.to_potentials().calc_energy(batch)
+    assert abs(float(E) - 0.25) < 1e-10, E
 
-    # --- 4. Forces ---
-    out = param.forward(batch, compute_forces=True)
-    forces = out["forces"]
+    forces = filled.to_potentials().calc_forces(batch)
     assert forces.shape == (2, 3)
-    # F0_x = +k*(r-r0) = 1.0, F1_x = -1.0
-    assert math.isclose(float(forces[0, 0]), 1.0, abs_tol=1e-5)
-    assert math.isclose(float(forces[1, 0]), -1.0, abs_tol=1e-5)
-    assert "energy" in batch["graphs"]
-    assert "forces" in batch["atoms"]
+    assert abs(float(forces[0, 0].detach()) - 1.0) < 1e-6
+    assert abs(float(forces[1, 0].detach()) + 1.0) < 1e-6
 
-    # --- 5. Units boundary ---
-    e_ev = float(energy_kcal_to_ev(torch.tensor(e, dtype=torch.float64)))
-    assert math.isclose(e_ev, e * KCAL_MOL_TO_EV, abs_tol=1e-9)
-    assert ir.unit_system == "class_i_canonical"
+    target = ForceField(name="opls-shaped", units="real")
+    target.def_bondstyle("harmonic")
+    target.def_dihedralstyle("opls")
+    projected = model.project(target)
+    assert projected.dihedral_style() == "opls"
 
-    print("learnable-classical-ff-05-neural-parameterizer: all hard-coded goldens OK")
-    print(f"  bond harmonic E = {e} kcal/mol")
-    print(f"  F0_x = {float(forces[0, 0])}")
+    assert "bond:harmonic" in ff.to_potentials().get_schema()
+    print("learnable-classical-ff-05 ClassicalIMM OK")
     return 0
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as exc:  # noqa: BLE001 — standalone regression script
-        print(f"FAIL: {exc}", file=sys.stderr)
-        raise
+    sys.exit(main())

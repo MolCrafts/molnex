@@ -1,17 +1,10 @@
-"""Modular potential composition.
+"""Modular potential composition (Sonata / generic PotentialComposer).
 
-Build force fields by composing pooling, parameter heads, and potentials::
-
-    pool = LayerPooling("mean")
-    composer = PotentialComposer(
-        head=LJParameterHead(feature_dim=16),
-        potentials={"lj": LJ126()},
-    )
-    node_features = pool(encoder_output)
-    outputs = composer(node_features=node_features, data=data)
+Class-I classical force fields live under :mod:`molpot.forcefield`
+(:class:`~molpot.forcefield.ForceField`, :class:`~molpot.forcefield.ClassicalIMM`).
+Parameter heads for Class-I terms are re-exported here for convenience.
 """
 
-from molpot.composition.classical_mm import ClassicalMMComposer
 from molpot.composition.composer import PotentialComposer
 from molpot.composition.heads import (
     ChargeHead,
@@ -27,13 +20,6 @@ from molpot.composition.mm_heads import (
     ProperTorsionParamHead,
 )
 from molpot.composition.multihead import MultiHead
-from molpot.composition.parameterizer import (
-    KCAL_MOL_TO_EV,
-    ChemEmbeddingsLike,
-    ChemEncoderProtocol,
-    ClassicalMMParameterizer,
-    energy_kcal_to_ev,
-)
 from molpot.composition.sonata import Sonata, SonataSpec
 
 __all__ = [
@@ -48,12 +34,6 @@ __all__ = [
     "ImproperParamHead",
     "MultiHead",
     "PotentialComposer",
-    "ClassicalMMComposer",
-    "ClassicalMMParameterizer",
-    "ChemEmbeddingsLike",
-    "ChemEncoderProtocol",
-    "KCAL_MOL_TO_EV",
-    "energy_kcal_to_ev",
     "Sonata",
     "SonataSpec",
 ]

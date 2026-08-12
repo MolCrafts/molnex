@@ -3,16 +3,19 @@
 Pure PyTorch components for molecular ML potentials.
 """
 
-# Potentials
-# Composition
+from molpot.charge import (
+    AtomicChargeModel,
+    ChargeEquilibrationProblem,
+    ChiEtaHead,
+    DiagonalHardnessKernel,
+    ElectronegativityEqualization,
+    ShieldedCoulombKernel,
+)
 from molpot.composition import (
-    KCAL_MOL_TO_EV,
     AngleParamHead,
     BondParamHead,
     ChargeHead,
     ChargeTransferParameterHead,
-    ClassicalMMComposer,
-    ClassicalMMParameterizer,
     ImproperParamHead,
     LJParameterHead,
     MultiHead,
@@ -22,16 +25,16 @@ from molpot.composition import (
     Sonata,
     SonataSpec,
     TSScalingHead,
-    energy_kcal_to_ev,
 )
-
-# Physical derivation
 from molpot.derivation import EnergyAggregation, ForceDerivation, StressDerivation
-
-# Prediction heads
+from molpot.forcefield import (
+    ClassicalIMM,
+    ForceField,
+    ForceFieldSchemaView,
+    PotentialMeta,
+    Potentials,
+)
 from molpot.heads import AtomicEnergyMLP, EnergyHead, TypeHead
-
-# Class-I Potential IR
 from molpot.ir import (
     CLASS_I_CANONICAL,
     AngleBag,
@@ -45,8 +48,6 @@ from molpot.ir import (
     ProperTorsionBag,
     UnitTag,
 )
-
-# Pooling
 from molpot.pooling import (
     EdgeToNodePooling,
     LayerPooling,
@@ -72,7 +73,6 @@ from molpot.potentials import (
 )
 
 __all__ = [
-    # Potentials
     "BasePotential",
     "LJ126",
     "lorentz_berthelot",
@@ -87,7 +87,6 @@ __all__ = [
     "ChargeTransfer",
     "Polarization",
     "geometric_arithmetic_mixing",
-    # Potential IR
     "UnitTag",
     "CLASS_I_CANONICAL",
     "BondBag",
@@ -99,21 +98,17 @@ __all__ = [
     "ChargeBag",
     "NonbondedScaling",
     "PotentialIR",
-    # Heads
     "AtomicEnergyMLP",
     "EnergyHead",
     "TypeHead",
-    # Derivation
     "EnergyAggregation",
     "ForceDerivation",
     "StressDerivation",
-    # Pooling
     "LayerPooling",
     "EdgeToNodePooling",
     "SumPooling",
     "MeanPooling",
     "MaxPooling",
-    # Composition
     "LJParameterHead",
     "RepulsionParameterHead",
     "ChargeTransferParameterHead",
@@ -125,10 +120,17 @@ __all__ = [
     "ImproperParamHead",
     "MultiHead",
     "PotentialComposer",
-    "ClassicalMMComposer",
-    "ClassicalMMParameterizer",
-    "KCAL_MOL_TO_EV",
-    "energy_kcal_to_ev",
+    "ForceField",
+    "Potentials",
+    "ClassicalIMM",
+    "ForceFieldSchemaView",
+    "PotentialMeta",
+    "AtomicChargeModel",
+    "ChargeEquilibrationProblem",
+    "ChiEtaHead",
+    "DiagonalHardnessKernel",
+    "ElectronegativityEqualization",
+    "ShieldedCoulombKernel",
     "Sonata",
     "SonataSpec",
 ]

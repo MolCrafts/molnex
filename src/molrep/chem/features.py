@@ -51,7 +51,7 @@ class ChemEmbeddings:
         }
 
     def interaction_dict(self) -> dict[str, torch.Tensor]:
-        """Feature mapping keyed for ClassicalMMComposer.
+        """Feature mapping keyed for ClassicalIMM / ForceField heads.
 
         Returns:
             Dict with keys ``atoms``, ``bonds``, ``angles``, ``propers``,

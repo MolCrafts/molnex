@@ -1,136 +1,93 @@
 <!-- mol:note:topic:learnable-classical-ff -->
-# Learnable classical FF — placement & reuse (2026-08-10)
+# Learnable classical FF — ForceField path (2026-08-11)
 
-## Why
+## Rule (binding)
 
-The architecture must sit **between** continuous ML chemical perception and
-classical MM, without re-implementing molpy/molrs force-field infrastructure.
+### OOP, single responsibility, no glue
 
-## Rule (binding for `learnable-classical-ff-*` specs and all new code)
+| Type | Owns |
+|------|------|
+| `ForceField` | styles + param tables; `def_*style`, `with_params`, `to_potentials()` |
+| `Potentials` | `get_schema`, `calc_energy`, `calc_forces` (bound to one FF) |
+| `ClassicalIMM` | encoder + heads → **returns ForceField**; `project` only |
 
-### 1. Prefer existing modules
+No free-function helpers as public API. No `fill` / parameterizer / composer façade.
+No energy method on `ClassicalIMM` — energy is always on `Potentials`.
 
-Before adding a type in molnex, search molpy (≥0.13) / molrs (via molpy only) /
-in-tree molpot/molrep/molix. Prefer **reuse** or **generalize**; invent only
-when no existing owner fits.
-
-Known homes (do not fork):
-
-| Concern | Owner |
-|---------|--------|
-| Force-field model (styles, types, params) | `molpy.core.forcefield.ForceField` / `molpy.potential.*` (molrs-backed) |
-| Classical non-torch E/F | `forcefield.to_potentials().calc_energy/forces(frame)` |
-| Topology **enumerate** (optional offline) | molrs `Topology` via molpy — produces index **columns**, not a second store |
-| Batch topology **storage** | **molix TensorDict only** — never park angles/propers in molpy Frame for the ML path |
-| SMARTS match / typifier base | `molpy.typifier.smarts.SmartsTypifier`, `molrs.perceive.SmartsPattern` |
-| Torch classical terms for **differentiable** training | `molpot.potentials.*` (align names/params with molpy styles) |
-| Batch collate / rebase | `molix.data.collate` |
-| Chem perception (learned continuous) | `molrep` + `molzoo` recipes |
-| Learnable param heads / IR torch bags for training | `molpot.composition` / thin `molpot.ir` **only as torch-facing view** of Class-I params |
-
-### TensorDict topology contract (molix — not molpy)
-
-Post-collate (and flat sample) connectivity for classical MM uses **column
-keys under a namespace**, same spirit as molpy/molrs Frame blocks
-(`atomi` / `atomj` / …), nested in TensorDict:
+### User path
 
 ```python
-batch["bonds", "atomi"]      # (N_b,) long
-batch["bonds", "atomj"]      # (N_b,)
-batch["angles", "atomi"]     # (N_a,)  — user-facing: td["angles"]["atomi"]
-batch["angles", "atomj"]
-batch["angles", "atomk"]     # central atom for angles is atomj (i-j-k)
-batch["propers", "atomi"]    # (N_p,)
-batch["propers", "atomj"]
-batch["propers", "atomk"]
-batch["propers", "atoml"]
-batch["impropers", "atomi"]  # molrs center-first: atomi = center
-batch["impropers", "atomj"]
-batch["impropers", "atomk"]
-batch["impropers", "atoml"]
-# optional type columns:
-batch["angles", "type"]      # (N_a,)  or "angle_types" — pick one, document
+ff = ForceField.class_i(dihedral="fourier")
+model = ClassicalIMM(encoder, forcefield=ff, bond_head=..., ...)
+ff_t = model(batch)                          # ForceField
+E = ff_t.to_potentials().calc_energy(batch)
+ff_opls = model.project(ForceField.opls())   # general → OPLS form only
 ```
 
-**Not** a packed `angle_index [3, N]` as the primary batch schema (that may
-exist only as a kernel-local stack at the potential call site:
-`torch.stack([atomi, atomj, atomk], dim=0)`).
+### `project` contract
 
-**Not** “store the batch in molpy”. molpy may *emit* columns when building a
-sample; the live training/MD batch is TensorDict under molix.
+- **Does:** map continuous/general param tables into a concrete style set
+  (e.g. multi-term Fourier → OPLS `k1..k4` with LAMMPS sign/½ convention).
+- **Does not:** train, evaluate energy, read XML.
+- **Fails loud:** missing required source params, unsupported style pair,
+  non-zero Fourier residual outside n∈{1,2,3,4} or γ∉{0,π}.
+- **Parity:** when the source is already on the OPLS manifold (n=1..4,
+  γ=0,π,0,π), `E`/`F` after project match to numerical tolerance.
 
-Rebase on collate: each of `atomi`/`atomj`/`atomk`/`atoml` is an atom-index
-1-D vector; add `atom_offset` to every present column under the valence
-namespaces (register keys in `INDEX_KEYS` or a sibling column registry).
+### Charge equilibration (P0)
 
-### 2. Generalize without multi-method switch
-
-If two modules do similar work, **promote a single more general type** with one
-clear responsibility — never a switch:
+Algorithm-named solvers under ``molpot.charge`` (no product brands):
 
 ```python
-# ❌ forbidden in new APIs
-Foo(method="a" | "b")
-Bar(mode="x")  # when mode selects unrelated implementations
+from molpot.charge import (
+    AtomicChargeModel, ChiEtaHead,
+    DiagonalHardnessKernel, ElectronegativityEqualization,
+)
 
-# ✅ required
-MoreGeneralFoo(...)          # one implementation, broader domain
-# or two peer types with distinct names if both must exist:
-AutogradForces / FunctorchForces
+charge = AtomicChargeModel(
+    ChiEtaHead(feature_dim=…),
+    ElectronegativityEqualization(DiagonalHardnessKernel()),
+)
+model = ClassicalIMM(encoder, forcefield=ff, charge_model=charge)
+ff_t = model(batch)   # writes atoms.q via EEM KKT; energy still to_potentials()
 ```
 
-Pre-existing `ForceDerivation(method=…)` is **legacy**; do **not** copy this
-pattern into new classical-FF surfaces. New force entry points for Class-I
-training use one path (prefer `BasePotential.calc_forces` / autograd) unless a
-second named type is justified.
+- **Produces ``q`` only** — Coulomb energy via ``pair:coulomb`` on ``Potentials``.
+- Kernels: ``DiagonalHardnessKernel``, ``ShieldedCoulombKernel`` (Ohno).
+- Nonbonded: **Potential terms own cutoffs**; ``Potentials`` only assembles them.
+  - ``ff.def_pairstyle("lj/cut", cutoff=12.0)`` → ``LJCutPotential``
+  - ``ff.def_pairstyle("coulomb", calculator="ewald"|"pme"|"p3m", smearing=…)``
+  - open → ``CoulombOpenPotential``; cell present → ``CoulombPeriodicPotential``
+  - neighbors: open all-pairs; periodic → molrs ``NeighborQuery``
+  - kernels reused: ``lj126_pair_energy``, ``CoulombPotential``, Ewald/PME/P3M calculators
+  - scales: ``ForceField.nonbonded_scaling`` (1–2/1–3/1–4)
+- Later: ACKS2 as separate solver type.
 
-### 3. Non-diff sinks to molpy / molrs
+### Status
 
-Anything that does **not** require PyTorch differentiation **must not** be
-reimplemented in molnex:
+General Class-I and OPLS/GAFF are the **same** container type (specificity differs).
+IO stays in molpy.io (no `ForceField.from_xml`).
 
-- valence enumeration, ring/aromatic perception, SMARTS matching
-- discrete FF table models, style registries, non-torch energy
-- unit conversion tables for engine export (prefer molpy IO / conventions)
-- graph chemical feature extraction from molpy `Atomistic` / Frame
+### Experiment ops (molexp × molhub × molmcp)
 
-Molnex owns:
+Binding for the Class-I reproduction track:
 
-- continuous chem encoder (diff)
-- continuous → MM parameter heads (diff)
-- torch classical energy for training + autograd forces
-- collate of **already-built** valence index tensors into TensorDict batches
-- thin adapters: molpy ForceField / Topology / SMARTS hits → torch IR bags
+| Layer | Owns |
+|-------|------|
+| **molexp** | `Workspace → Project → Experiment → Run`; metrics `t/k/s/v`; sourced `KnowledgeItem` |
+| **molhub** | Coordinates only: `dataset:espaloma/phalkethoh-mm-small@1` (models: run assets until `model:` coords exist) |
+| **molmcp molexp plane** | Scaffold + **knowledge** (`list_knowledge` / `write_knowledge` / `harvest_run` / `get_run_metrics`) |
+| **molnex scripts** | Science: `setup_class_i_protocol.py` → `espaloma_mm_protocol_train.py --workspace … --run-id …` |
 
-**Import hard rule (unchanged):** `from molpy import …` only under `src/` /
-`tests/`; never bare `import molrs`.
+Norms:
 
-### Improper index convention
+1. Register experiment/run via setup (idempotent; **refreshes** parameter_space).
+2. Train under `Run.start()` with `MetricsWriter` + `mark_succeeded` + `harvest_run(Finding)`.
+3. Knowledge is **sourced** (`SourceRef` required) — no free Notes for protocol claims.
+4. Dataset bytes via molhub convert/cache; coordinate is the audit handle, not the blob path.
 
-**Source of truth:** molrs `Topology` impropers = `[center, i, j, k]` (center at
-**row 0**). Torch `improper_index` matches that layout. OpenFF trefoil reordering
-is an **export/import adapter**, not a second internal convention.
+Operator workspace: `…/workspaces/mm-param-learning`, experiment `class-i-full-energy-mini`.
 
-### Dependency pin
+### Supersedes
 
-`molcrafts-molpy>=0.13.0` (molpy 0.13.x line; molrs major.minor paired by molpy).
-
-## Supersedes
-
-- Spec drafts that invented parallel SMARTS engines, valence enumerators, or
-  OpenMM-only IR without molpy ForceField alignment
-- Improper “central at row 1” chain-wide default (replaced by molrs center-first)
-
-## Spec impact (chain)
-
-| Sub-spec | Must change |
-|----------|-------------|
-| 01 | IR bags align to molpy Class-I styles; improper center row 0; no second FF model |
-| 02 | Collate TensorDict namespaces `bonds`/`angles`/`propers`/`impropers` with **atomi… columns** (`td["angles"]["atomi"]`); enum optional upstream; never molpy as batch store |
-| 03–05 | Stay molnex (diff path); inject topology/features from molpy-built tensors |
-| 06 | Perception-side merge; physical_eval may call torch kernels or molpy for residuals |
-| 07 | **Reuse** SmartsTypifier / SmartsPattern; no second matcher engine |
-| 08 | Prefer molpy forcefield IO / conventions; case matrix still molnex if missing |
-| 09 | Thin surfaces only |
-
-**Status.** active (binding for learnable-classical-ff chain).
+Composer / Parameterizer / IR bags as user path; glue free functions; `model.fill`.
