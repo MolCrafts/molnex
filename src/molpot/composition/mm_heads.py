@@ -17,7 +17,8 @@ Units (CLASS_I_CANONICAL)
 -------------------------
 - Bond ``k``: kcal/mol/Å²; ``r0``: Å
 - Angle ``k``: kcal/mol/rad²; ``theta0``: rad ∈ (0, π)
-- Proper / improper periodic ``k``: kcal/mol; ``phase``: rad
+- Proper Cartesian ``a``, ``b``: kcal/mol (unconstrained)
+- Improper periodic ``k``: kcal/mol; ``phase``: rad
 - Improper harmonic ``k``: kcal/mol/rad²; ``chi0``: rad
 
 References:
@@ -136,18 +137,22 @@ class AngleParamHead(nn.Module):
 
 
 class ProperTorsionParamHead(nn.Module):
-    """Map proper-torsion features to multi-term cosine parameters.
+    """Map proper-torsion features to Cartesian Fourier amplitudes.
 
-    Periodicity is a fixed buffer (config-time). Force constants use softplus
-    (``k ≥ 0``); phases are unconstrained (radians).
+    Training coordinates are unconstrained ``(a_n, b_n)`` with default
+    periodicities ``n = 1…6``. Mapping onto the cosine table
+    ``(k, γ, periodicity, idivf)`` happens at IR / ``to_potentials`` /
+    ``project`` export, not in this head.
+
+    Units (``CLASS_I_CANONICAL``): ``a``, ``b`` in kcal/mol; ``idivf``
+    dimensionless. There is no ``c0`` / heat-of-formation offset.
 
     Args:
         feature_dim: Input feature dimension.
         hidden_dim: Hidden layer dimension.
-        n_terms: Number of Fourier terms ``T``.
+        n_terms: Number of Fourier terms ``T``. Defaults to 6.
         periodicity: Integer periodicities of length ``T`` (shared across
             interactions). Defaults to ``(1, 2, …, T)``.
-        min_k: Softplus floor for barrier heights (kcal/mol).
         default_idivf: Default AMBER-style identity divisor per interaction.
     """
 
@@ -155,9 +160,8 @@ class ProperTorsionParamHead(nn.Module):
         self,
         feature_dim: int,
         hidden_dim: int = 64,
-        n_terms: int = 1,
+        n_terms: int = 6,
         periodicity: tuple[int, ...] | list[int] | None = None,
-        min_k: float = 0.0,
         default_idivf: float = 1.0,
     ) -> None:
         super().__init__()
@@ -168,9 +172,7 @@ class ProperTorsionParamHead(nn.Module):
         if len(periodicity) != n_terms:
             raise ValueError(f"periodicity length {len(periodicity)} must equal n_terms={n_terms}")
         self.n_terms = n_terms
-        self.min_k = min_k
         self.default_idivf = default_idivf
-        # k and phase per term
         self.mlp = _mlp(feature_dim, hidden_dim, 2 * n_terms)
         self.register_buffer(
             "periodicity",
@@ -178,24 +180,28 @@ class ProperTorsionParamHead(nn.Module):
         )
 
     def forward(self, features: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Predict multi-term proper torsion parameters.
+        """Predict unconstrained Cartesian proper-torsion amplitudes.
 
         Args:
-            features: Proper features ``(N_propers, feature_dim)``.
+            features: Proper features ``(N_propers, feature_dim)``. Prefer
+                order-invariant pooling so ``(i,j,k,l)`` and ``(l,k,j,i)``
+                match.
 
         Returns:
             Dict with:
 
-            - ``k``: ``(N, T)`` barriers (kcal/mol), ``≥ min_k``
-            - ``phase``: ``(N, T)`` phases (rad), unconstrained
+            - ``a``: ``(N, T)`` cosine amplitudes (kcal/mol), unconstrained
+            - ``b``: ``(N, T)`` sine amplitudes (kcal/mol), unconstrained
             - ``periodicity``: ``(T,)`` integer buffer
-            - ``idivf``: ``(N,)`` identity divisors (positive)
+            - ``idivf``: ``(N,)`` identity divisors
+
+            Does not emit ``k``, ``phase``, or ``c0``.
         """
         n = features.shape[0]
         raw = self.mlp(features)
         t = self.n_terms
-        k = F.softplus(raw[:, :t]) + self.min_k
-        phase = raw[:, t : 2 * t]
+        a = raw[:, :t]
+        b = raw[:, t : 2 * t]
         idivf = torch.full(
             (n,),
             self.default_idivf,
@@ -203,8 +209,8 @@ class ProperTorsionParamHead(nn.Module):
             device=features.device,
         )
         return {
-            "k": k,
-            "phase": phase,
+            "a": a,
+            "b": b,
             "periodicity": self.periodicity,
             "idivf": idivf,
         }
@@ -221,13 +227,18 @@ class ImproperParamHead(nn.Module):
     collisions. Single-mode outputs use the short IR field names (``k``,
     ``chi0`` or ``k``, ``phase``, ``periodicity``, ``idivf``).
 
+    Universal-v0 defaults emit the periodic branch only (``n = 1, 2``)
+    in polar ``(k, phase)`` coordinates — not Cartesian. Harmonic
+    impropers remain available via ``include_harmonic=True``.
+
     Args:
         feature_dim: Input feature dimension.
         hidden_dim: Hidden layer dimension.
         include_harmonic: Emit harmonic improper params.
         include_periodic: Emit multi-term cosine improper params.
-        n_terms: Fourier terms for the periodic branch.
+        n_terms: Fourier terms for the periodic branch. Defaults to 2.
         periodicity: Integer periodicities for the periodic branch.
+            Defaults to ``(1, 2, …, n_terms)``.
         min_k: Softplus floor for force constants / barriers.
         default_idivf: Identity divisor for the periodic branch.
     """
@@ -237,9 +248,9 @@ class ImproperParamHead(nn.Module):
         feature_dim: int,
         hidden_dim: int = 64,
         *,
-        include_harmonic: bool = True,
-        include_periodic: bool = False,
-        n_terms: int = 1,
+        include_harmonic: bool = False,
+        include_periodic: bool = True,
+        n_terms: int = 2,
         periodicity: tuple[int, ...] | list[int] | None = None,
         min_k: float = 1e-4,
         default_idivf: float = 1.0,
@@ -260,7 +271,7 @@ class ImproperParamHead(nn.Module):
             if n_terms < 1:
                 raise ValueError(f"n_terms must be >= 1, got {n_terms}")
             if periodicity is None:
-                periodicity = tuple(2 for _ in range(n_terms))  # common improper n=2
+                periodicity = tuple(range(1, n_terms + 1))
             if len(periodicity) != n_terms:
                 raise ValueError(
                     f"periodicity length {len(periodicity)} must equal n_terms={n_terms}"

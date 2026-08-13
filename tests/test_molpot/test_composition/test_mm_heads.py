@@ -99,31 +99,42 @@ class TestAngleParamHead:
 
 
 # ---------------------------------------------------------------------------
-# ProperTorsionParamHead (ac-003)
+# ProperTorsionParamHead — unconstrained Cartesian (a, b), default n=1..6
 # ---------------------------------------------------------------------------
 
 
 class TestProperTorsionParamHead:
-    def test_multi_term_k_phase_shapes(self):
-        n_terms = 3
+    def test_default_forward_emits_unconstrained_a_b(self):
+        torch.manual_seed(0)
+        head = ProperTorsionParamHead(feature_dim=8)
+        out = head(torch.randn(4, 8))
+        assert set(out) == {"a", "b", "periodicity", "idivf"}
+        assert out["a"].shape == (4, 6)
+        assert out["b"].shape == (4, 6)
+        assert out["periodicity"].tolist() == [1, 2, 3, 4, 5, 6]
+        assert out["idivf"].shape == (4,)
+        assert torch.equal(out["idivf"], torch.ones_like(out["idivf"]))
+        assert "k" not in out
+        assert "phase" not in out
+        assert "c0" not in out
+
+    def test_n_terms_three_shapes(self):
+        torch.manual_seed(0)
         head = ProperTorsionParamHead(
             feature_dim=8,
             hidden_dim=16,
-            n_terms=n_terms,
+            n_terms=3,
             periodicity=(1, 2, 3),
         )
-        features = torch.randn(4, 8)
-        out = head(features)
-        assert out["k"].shape == (4, n_terms)
-        assert out["phase"].shape == (4, n_terms)
-        assert torch.all(out["k"] >= 0)
-        # Fixed periodicity buffer
-        assert out["periodicity"].shape == (n_terms,)
+        out = head(torch.randn(4, 8))
+        assert out["a"].shape == (4, 3)
+        assert out["b"].shape == (4, 3)
         assert out["periodicity"].tolist() == [1, 2, 3]
         assert out["idivf"].shape == (4,)
-        assert torch.all(out["idivf"] > 0)
+        assert "k" not in out
+        assert "phase" not in out
 
-    def test_k_nonneg_large_negative(self):
+    def test_large_negative_features_yield_finite_unconstrained_amplitudes(self):
         head = ProperTorsionParamHead(feature_dim=4, n_terms=2, periodicity=(1, 2))
         with torch.no_grad():
             for p in head.parameters():
@@ -131,15 +142,32 @@ class TestProperTorsionParamHead:
                 if p.ndim == 1:
                     p.fill_(-30.0)
         out = head(torch.full((2, 4), -50.0))
-        assert torch.all(out["k"] >= 0)
+        assert torch.isfinite(out["a"]).all()
+        assert torch.isfinite(out["b"]).all()
+        assert (out["a"] < 0).all()
+        assert (out["b"] < 0).all()
 
 
 # ---------------------------------------------------------------------------
-# ImproperParamHead (ac-004)
+# ImproperParamHead — Universal-v0 default periodic n=1,2 (not Cartesian)
 # ---------------------------------------------------------------------------
 
 
 class TestImproperParamHead:
+    def test_default_is_periodic_n_one_and_two(self):
+        torch.manual_seed(0)
+        head = ImproperParamHead(feature_dim=8)
+        out = head(torch.randn(3, 8))
+        assert "k" in out and "phase" in out
+        assert "periodicity" in out and "idivf" in out
+        assert out["periodicity"].tolist() == [1, 2]
+        assert out["k"].shape == (3, 2)
+        assert out["phase"].shape == (3, 2)
+        assert out["idivf"].shape == (3,)
+        assert torch.all(out["k"] >= 0)
+        assert "chi0" not in out
+        assert "a" not in out and "b" not in out
+
     def test_harmonic_mode(self):
         head = ImproperParamHead(
             feature_dim=8,

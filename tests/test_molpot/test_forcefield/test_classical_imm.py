@@ -19,7 +19,7 @@ from molpot.composition.mm_heads import (
     ProperTorsionParamHead,
 )
 from molpot.composition.multihead import MultiHead
-from molpot.forcefield import ClassicalIMM, ForceField
+from molpot.forcefield import ClassicalIMM, ClassIForceField, ForceField
 
 
 def _two_atom_bond_batch(
@@ -85,6 +85,10 @@ class _FakeEncoder(nn.Module):
 
 
 class TestForceFieldParams:
+    def test_default_template_is_class_i(self):
+        model = ClassicalIMM(_FakeEncoder({}))
+        assert type(model.forcefield) is ClassIForceField
+
     def test_forward_writes_continuous_params(self):
         bond_head = BondParamHead(feature_dim=4, hidden_dim=8)
         angle_head = AngleParamHead(feature_dim=4, hidden_dim=8)
@@ -165,6 +169,25 @@ class TestEnergy:
         energy = model(batch).to_potentials().calc_energy(batch)
         assert energy.shape == ()
         assert math.isclose(float(energy), expected, rel_tol=1e-5, abs_tol=1e-5)
+
+    def test_potentials_is_embeddable_module(self):
+        from molpot.derivation.protocol import ENERGY_KEY, FORCES_KEY
+        from molpot.potentials.base import BasePotential
+
+        ff = (
+            ForceField()
+            .def_bondstyle("harmonic")
+            .with_params(bonds={"k": torch.tensor([2.0]), "r0": torch.tensor([1.0])})
+        )
+        batch = _two_atom_bond_batch(r=1.5)
+        pots = ff.to_potentials()
+        assert isinstance(pots, BasePotential)
+        assert isinstance(pots, nn.Module)
+        out = pots(batch)
+        assert out is batch
+        assert ENERGY_KEY in out.keys(include_nested=True)
+        assert FORCES_KEY in out.keys(include_nested=True)
+        assert out[FORCES_KEY].shape == (2, 3)
 
     def test_forward_returns_only_forcefield(self):
         ff = ForceField().def_bondstyle("harmonic")
@@ -263,7 +286,7 @@ def _butane_like_batch(*, dtype: torch.dtype = torch.float64) -> TensorDict:
 class TestProject:
     def test_project_fourier_to_opls_energy_and_forces_match(self):
         """Representable Fourier (n=1..4, OPLS phases) → OPLS: E/F exact."""
-        src_ff = ForceField.class_i(dihedral="fourier")
+        src_ff = ClassIForceField()
         model = ClassicalIMM(
             _FakeEncoder(
                 {
@@ -285,6 +308,8 @@ class TestProject:
         )
         projected = model.project(tgt, source=filled)
 
+        assert type(filled) is ClassIForceField
+        assert type(projected) is ForceField
         assert projected.dihedral_style() == "opls"
         pp = projected.params("propers")
         assert pp is not None
@@ -301,7 +326,7 @@ class TestProject:
         assert torch.allclose(f_src, f_tgt, atol=1e-8, rtol=0)
 
     def test_project_raises_on_extra_fourier_terms(self):
-        src = ForceField.class_i(dihedral="fourier").with_params(
+        src = ClassIForceField().with_params(
             bonds={
                 "k": torch.tensor([1.0]),
                 "r0": torch.tensor([1.0]),
@@ -319,12 +344,63 @@ class TestProject:
             model.project(tgt, source=src)
 
     def test_project_raises_when_target_bond_missing_in_source(self):
-        src = ForceField(name="src").def_anglestyle("harmonic").with_params(
-            angles={"k": torch.tensor([1.0]), "theta0": torch.tensor([1.0])}
+        src = (
+            ForceField(name="src")
+            .def_anglestyle("harmonic")
+            .with_params(angles={"k": torch.tensor([1.0]), "theta0": torch.tensor([1.0])})
         )
         model = ClassicalIMM(_FakeEncoder({}), forcefield=src)
         tgt = ForceField().def_bondstyle("harmonic").def_anglestyle("harmonic")
         with pytest.raises(ValueError, match="no bonds params"):
+            model.project(tgt, source=src)
+
+    def test_project_cartesian_b_zero_n1_to_n4_gives_opls_k(self):
+        a = torch.tensor([[0.5, 0.3, 0.2, 0.1]], dtype=torch.float64)
+        src = ClassIForceField().with_params(
+            propers={
+                "a": a,
+                "b": torch.zeros(1, 4, dtype=torch.float64),
+                "periodicity": torch.tensor([1, 2, 3, 4], dtype=torch.long),
+                "idivf": torch.ones(1, dtype=torch.float64),
+            }
+        )
+        model = ClassicalIMM(_FakeEncoder({}), forcefield=src)
+        tgt = ForceField().def_dihedralstyle("opls")
+        projected = model.project(tgt, source=src)
+        pp = projected.params("propers")
+        assert pp is not None
+        # K_odd = 2a, K_even = -2a
+        assert torch.allclose(pp["k1"], torch.tensor([1.0], dtype=torch.float64), atol=1e-12)
+        assert torch.allclose(pp["k2"], torch.tensor([-0.6], dtype=torch.float64), atol=1e-12)
+        assert torch.allclose(pp["k3"], torch.tensor([0.4], dtype=torch.float64), atol=1e-12)
+        assert torch.allclose(pp["k4"], torch.tensor([-0.2], dtype=torch.float64), atol=1e-12)
+
+    def test_project_raises_on_n6_cartesian_term(self):
+        src = ClassIForceField().with_params(
+            propers={
+                "a": torch.tensor([[0.5]], dtype=torch.float64),
+                "b": torch.zeros(1, 1, dtype=torch.float64),
+                "periodicity": torch.tensor([6], dtype=torch.long),
+                "idivf": torch.ones(1, dtype=torch.float64),
+            }
+        )
+        model = ClassicalIMM(_FakeEncoder({}), forcefield=src)
+        tgt = ForceField().def_dihedralstyle("opls")
+        with pytest.raises(ValueError, match="n=6"):
+            model.project(tgt, source=src)
+
+    def test_project_raises_on_sine_residual_cartesian(self):
+        src = ClassIForceField().with_params(
+            propers={
+                "a": torch.tensor([[0.0]], dtype=torch.float64),
+                "b": torch.tensor([[0.4]], dtype=torch.float64),
+                "periodicity": torch.tensor([1], dtype=torch.long),
+                "idivf": torch.ones(1, dtype=torch.float64),
+            }
+        )
+        model = ClassicalIMM(_FakeEncoder({}), forcefield=src)
+        tgt = ForceField().def_dihedralstyle("opls")
+        with pytest.raises(ValueError, match="sin|phase"):
             model.project(tgt, source=src)
 
 

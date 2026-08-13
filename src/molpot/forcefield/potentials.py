@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from tensordict import TensorDict
 
+from molpot.derivation.protocol import ENERGY_KEY, FORCES_KEY
 from molpot.forcefield.neighbor_list import NeighborListBuilder
 from molpot.forcefield.pair_terms import (
     CoulombOpenPotential,
@@ -20,6 +21,7 @@ from molpot.forcefield.pair_terms import (
     LJCutPotential,
 )
 from molpot.forcefield.schema import ForceFieldSchemaView, PotentialMeta
+from molpot.ir import ProperTorsionBag
 from molpot.ir.scaling import NonbondedScaling
 from molpot.potentials import (
     AngleHarmonic,
@@ -28,6 +30,7 @@ from molpot.potentials import (
     ImproperPeriodic,
     ProperTorsionPeriodic,
 )
+from molpot.potentials.base import BasePotential
 from molpot.potentials.elec.prefactors import kcalmol_A
 
 if TYPE_CHECKING:
@@ -36,8 +39,12 @@ if TYPE_CHECKING:
 __all__ = ["Potentials"]
 
 
-class Potentials:
-    """Bound classical potentials assembled from a :class:`ForceField`.
+class Potentials(BasePotential):
+    """Classical Class-I energy as a molpot :class:`BasePotential` (``nn.Module``).
+
+    Embed in a larger torch model or bind to MD via
+    :class:`~molix.md.forcefield.PotentialForceField`. ``forward`` on a
+    TensorDict writes ``graphs.energy`` and ``atoms.forces``.
 
     Bonded terms use existing harmonic / torsion kernels. Nonbonded terms are
     concrete Potential objects that own their cutoffs:
@@ -55,13 +62,18 @@ class Potentials:
         E = pots.calc_energy(system)
     """
 
+    name = "class_i"
+    type = "classical"
+
     def __init__(self, forcefield: ForceField) -> None:
+        super().__init__()
         self.forcefield = forcefield
         self._neighbors = NeighborListBuilder()
         self.lj: LJCutPotential | None = None
         self.coulomb_open: CoulombOpenPotential | None = None
         self.coulomb_periodic: CoulombPeriodicPotential | None = None
         self._assemble_pair_potentials()
+        self._assemble_bonded()
 
     def _assemble_pair_potentials(self) -> None:
         ff = self.forcefield
@@ -87,10 +99,73 @@ class Potentials:
                 real_space_cutoff=opts.get("real_space_cutoff"),
             )
 
-    def get_schema(self) -> ForceFieldSchemaView:
-        return PotentialMeta.schema_for(
-            self.forcefield.style_names, units=self.forcefield.units
+    def _assemble_bonded(self) -> None:
+        ff = self.forcefield
+        bp = ff.params("bonds")
+        if bp is not None and "k" in bp and "r0" in bp:
+            self.bond = BondHarmonic(k=bp["k"], r0=bp["r0"])
+        else:
+            self.bond = None
+        ap = ff.params("angles")
+        if ap is not None and "k" in ap and "theta0" in ap:
+            self.angle = AngleHarmonic(k=ap["k"], theta0=ap["theta0"])
+        else:
+            self.angle = None
+        pp = ff.params("propers")
+        if pp is not None:
+            self.proper = self._make_proper(pp)
+        else:
+            self.proper = None
+        ip = ff.params("impropers")
+        if ip is not None and "chi0" in ip:
+            self.improper = ImproperHarmonic(k=ip["k"], chi0=ip["chi0"])
+        elif ip is not None and "periodicity" in ip:
+            self.improper = ImproperPeriodic(
+                k=ip["k"],
+                periodicity=ip["periodicity"],
+                phase=ip["phase"],
+                idivf=ip["idivf"],
+            )
+        else:
+            self.improper = None
+
+    def _make_proper(self, pp: dict[str, torch.Tensor]) -> ProperTorsionPeriodic:
+        if "k1" in pp:
+            k_opls = torch.stack([pp["k1"], pp["k2"], pp["k3"], pp["k4"]], dim=-1)
+            k = 0.5 * k_opls
+            phase = torch.zeros_like(k)
+            phase[:, 1] = math.pi
+            phase[:, 3] = math.pi
+            n = k.shape[0]
+            periodicity = torch.tensor([1, 2, 3, 4], device=k.device, dtype=torch.long)
+            idivf = pp.get("idivf", torch.ones(n, device=k.device, dtype=k.dtype))
+            return ProperTorsionPeriodic(k=k, periodicity=periodicity, phase=phase, idivf=idivf)
+        pp = ProperTorsionBag._cosine_fields(pp)
+        return ProperTorsionPeriodic(
+            k=pp["k"],
+            periodicity=pp["periodicity"],
+            phase=pp["phase"],
+            idivf=pp["idivf"],
         )
+
+    def forward(self, data: Any = None, **kwargs: Any) -> Any:
+        """Energy, or TensorDict with ``graphs.energy`` / ``atoms.forces``.
+
+        A nested TensorDict is treated as an MD / composer batch: energy and
+        forces are written in place and the batch is returned so the module
+        can sit inside :class:`~molix.md.forcefield.PotentialForceField`.
+        """
+        energy, forces = self.calc_energy_forces(data, pos=kwargs.get("pos"))
+        if isinstance(data, TensorDict):
+            if "graphs" not in data.keys():
+                data["graphs"] = TensorDict({}, batch_size=[])
+            data[ENERGY_KEY] = energy
+            data[FORCES_KEY] = forces
+            return data
+        return energy
+
+    def get_schema(self) -> ForceFieldSchemaView:
+        return PotentialMeta.schema_for(self.forcefield.style_names(), units=self.forcefield.units)
 
     def calc_energy(
         self,
@@ -140,12 +215,10 @@ class Potentials:
         terms: dict[str, torch.Tensor] = {}
 
         if ff.bond_style() is not None:
-            bp = ff.params("bonds")
             bond_index = self._bond_index(system)
-            if bp is not None and bond_index is not None and bond_index.size(1) > 0:
+            if self.bond is not None and bond_index is not None and bond_index.size(1) > 0:
                 n = bond_index.size(1)
-                pot = BondHarmonic(k=bp["k"], r0=bp["r0"])
-                terms["bonds"] = pot(
+                terms["bonds"] = self.bond(
                     pos=p,
                     bond_index=bond_index,
                     bond_types=self._identity_types(n, device),
@@ -154,12 +227,10 @@ class Potentials:
                 terms["bonds"] = zero
 
         if ff.angle_style() is not None:
-            ap = ff.params("angles")
             angle_index = self._angle_index(system)
-            if ap is not None and angle_index is not None and angle_index.size(1) > 0:
+            if self.angle is not None and angle_index is not None and angle_index.size(1) > 0:
                 n = angle_index.size(1)
-                pot = AngleHarmonic(k=ap["k"], theta0=ap["theta0"])
-                terms["angles"] = pot(
+                terms["angles"] = self.angle(
                     pos=p,
                     angle_index=angle_index,
                     angle_types=self._identity_types(n, device),
@@ -167,31 +238,11 @@ class Potentials:
             else:
                 terms["angles"] = zero
 
-        dstyle = ff.dihedral_style()
-        if dstyle is not None:
-            pp = ff.params("propers")
+        if ff.dihedral_style() is not None:
             proper_index = self._proper_index(system)
-            if pp is not None and proper_index is not None and proper_index.size(1) > 0:
+            if self.proper is not None and proper_index is not None and proper_index.size(1) > 0:
                 n = proper_index.size(1)
-                if dstyle == "opls" and "k1" in pp:
-                    k_opls = torch.stack(
-                        [pp["k1"], pp["k2"], pp["k3"], pp["k4"]], dim=-1
-                    )
-                    k = 0.5 * k_opls
-                    phase = torch.zeros_like(k)
-                    phase[:, 1] = math.pi
-                    phase[:, 3] = math.pi
-                    periodicity = torch.tensor([1, 2, 3, 4], device=device, dtype=torch.long)
-                    idivf = pp.get("idivf", torch.ones(n, device=device, dtype=dtype))
-                else:
-                    k = pp["k"]
-                    phase = pp["phase"]
-                    periodicity = pp["periodicity"]
-                    idivf = pp["idivf"]
-                pot = ProperTorsionPeriodic(
-                    k=k, periodicity=periodicity, phase=phase, idivf=idivf
-                )
-                terms["propers"] = pot(
+                terms["propers"] = self.proper(
                     pos=p,
                     proper_index=proper_index,
                     proper_types=self._identity_types(n, device),
@@ -200,31 +251,18 @@ class Potentials:
                 terms["propers"] = zero
 
         if ff.improper_style() is not None:
-            ip = ff.params("impropers")
             improper_index = self._improper_index(system)
-            if ip is not None and improper_index is not None and improper_index.size(1) > 0:
+            if (
+                self.improper is not None
+                and improper_index is not None
+                and improper_index.size(1) > 0
+            ):
                 n = improper_index.size(1)
-                if "chi0" in ip:
-                    pot = ImproperHarmonic(k=ip["k"], chi0=ip["chi0"])
-                    terms["impropers"] = pot(
-                        pos=p,
-                        improper_index=improper_index,
-                        improper_types=self._identity_types(n, device),
-                    )
-                elif "periodicity" in ip:
-                    pot = ImproperPeriodic(
-                        k=ip["k"],
-                        periodicity=ip["periodicity"],
-                        phase=ip["phase"],
-                        idivf=ip["idivf"],
-                    )
-                    terms["impropers"] = pot(
-                        pos=p,
-                        improper_index=improper_index,
-                        improper_types=self._identity_types(n, device),
-                    )
-                else:
-                    terms["impropers"] = zero
+                terms["impropers"] = self.improper(
+                    pos=p,
+                    improper_index=improper_index,
+                    improper_types=self._identity_types(n, device),
+                )
             else:
                 terms["impropers"] = zero
 
@@ -242,7 +280,7 @@ class Potentials:
         atoms = self.forcefield.params("atoms")
         if atoms is None:
             return None
-        return atoms.get("q", atoms.get("charge"))
+        return atoms.get("q")
 
     def _lj_params(self) -> tuple[torch.Tensor, torch.Tensor] | None:
         atoms = self.forcefield.params("atoms")
@@ -271,9 +309,7 @@ class Potentials:
         n = pos.shape[0]
         atom_batch = self._atom_batch(system, n, pos.device)
         cell = self._cell(system)
-        built = self._neighbors.build(
-            pos=pos, atom_batch=atom_batch, cell=cell, cutoff=cutoff
-        )
+        built = self._neighbors.build(pos=pos, atom_batch=atom_batch, cell=cell, cutoff=cutoff)
         if built is None:
             return None
         edge_index, dist = built
@@ -299,9 +335,7 @@ class Potentials:
         if params is None:
             return zero
         epsilon, sigma = params
-        pairs = self._scaled_pairs(
-            system, pos, cutoff=self.lj.cutoff, scale_kind="lj"
-        )
+        pairs = self._scaled_pairs(system, pos, cutoff=self.lj.cutoff, scale_kind="lj")
         if pairs is None:
             return zero
         edge_index, dist, scales = pairs

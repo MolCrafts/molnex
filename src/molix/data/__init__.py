@@ -38,6 +38,7 @@ from molix.data.dataset import (
     SubsetDataset,
 )
 from molix.data.group_split import group_split_indices
+from molix.data.pes_bundle import PesBundle
 
 # Pipeline DSL
 from molix.data.pipeline import DAGCache, Edge, Node, Pipeline, PipelineSpec
@@ -104,5 +105,6 @@ __all__ = [
     "TargetSchema",
     "DEFAULT_TARGET_SCHEMA",
     # Group splits
+    "PesBundle",
     "group_split_indices",
 ]

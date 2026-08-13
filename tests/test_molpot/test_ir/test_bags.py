@@ -1,5 +1,7 @@
 """IR parameter bags — field shapes and validation (learnable-classical-ff-01)."""
 
+from dataclasses import fields
+
 import pytest
 import torch
 
@@ -76,6 +78,91 @@ class TestProperTorsionBag:
                 phase=torch.tensor([[0.0]]),
                 idivf=torch.tensor([1.0]),
             )
+
+    def test_fields_exclude_c0_and_cartesian_storage(self):
+        names = {f.name for f in fields(ProperTorsionBag)}
+        assert names == {"k", "phase", "periodicity", "idivf"}
+
+    def test_from_cartesian_maps_hard_coded_goldens(self):
+        dtype = torch.float64
+        # (k, γ)=(2, 0) → (a, b)=(2.0, 0.0)
+        bag = ProperTorsionBag.from_cartesian(
+            a=torch.tensor([[2.0]], dtype=dtype),
+            b=torch.tensor([[0.0]], dtype=dtype),
+            periodicity=torch.tensor([1], dtype=torch.long),
+        )
+        assert torch.allclose(bag.k, torch.tensor([[2.0]], dtype=dtype), atol=1e-12)
+        assert torch.allclose(bag.phase, torch.tensor([[0.0]], dtype=dtype), atol=1e-12)
+
+        # (k, γ)=(1.5, π) → (a, b)=(-1.5, 0.0)
+        bag = ProperTorsionBag.from_cartesian(
+            a=torch.tensor([[-1.5]], dtype=dtype),
+            b=torch.tensor([[0.0]], dtype=dtype),
+            periodicity=torch.tensor([1], dtype=torch.long),
+        )
+        assert torch.allclose(bag.k, torch.tensor([[1.5]], dtype=dtype), atol=1e-12)
+        assert torch.allclose(bag.phase, torch.tensor([[torch.pi]], dtype=dtype), atol=1e-12)
+
+        # (a, b)=(0.6, 0.8) → (k, γ)=(1.0, atan2(0.8, 0.6))
+        bag = ProperTorsionBag.from_cartesian(
+            a=torch.tensor([[0.6]], dtype=dtype),
+            b=torch.tensor([[0.8]], dtype=dtype),
+            periodicity=torch.tensor([1], dtype=torch.long),
+        )
+        assert torch.allclose(bag.k, torch.tensor([[1.0]], dtype=dtype), atol=1e-12)
+        assert torch.allclose(
+            bag.phase,
+            torch.tensor([[0.9272952180016123]], dtype=dtype),
+            atol=1e-12,
+        )
+
+    def test_from_cartesian_round_trip_amplitudes(self):
+        dtype = torch.float64
+        a = torch.tensor([[0.6, -1.5]], dtype=dtype)
+        b = torch.tensor([[0.8, 0.0]], dtype=dtype)
+        bag = ProperTorsionBag.from_cartesian(
+            a=a,
+            b=b,
+            periodicity=torch.tensor([1, 2], dtype=torch.long),
+        )
+        a_back = bag.k * torch.cos(bag.phase)
+        b_back = bag.k * torch.sin(bag.phase)
+        assert torch.allclose(a_back, a, atol=1e-12)
+        assert torch.allclose(b_back, b, atol=1e-12)
+
+    def test_from_cartesian_rejects_shape_mismatch(self):
+        with pytest.raises(ValueError):
+            ProperTorsionBag.from_cartesian(
+                a=torch.tensor([[1.0, 0.0]]),
+                b=torch.tensor([[0.0]]),
+                periodicity=torch.tensor([1, 2], dtype=torch.long),
+            )
+
+    def test_from_cartesian_rejects_non_2d(self):
+        with pytest.raises(ValueError):
+            ProperTorsionBag.from_cartesian(
+                a=torch.tensor([0.6, 0.8]),
+                b=torch.tensor([0.6, 0.8]),
+                periodicity=torch.tensor([1, 2], dtype=torch.long),
+            )
+
+    def test_from_cartesian_zero_amplitude_has_zero_phase(self):
+        bag = ProperTorsionBag.from_cartesian(
+            a=torch.zeros(1, 1, dtype=torch.float64),
+            b=torch.zeros(1, 1, dtype=torch.float64),
+            periodicity=torch.tensor([1], dtype=torch.long),
+        )
+        assert torch.allclose(bag.k, torch.zeros(1, 1, dtype=torch.float64), atol=1e-12)
+        assert torch.allclose(bag.phase, torch.zeros(1, 1, dtype=torch.float64), atol=1e-12)
+
+    def test_from_cartesian_default_idivf_is_ones(self):
+        bag = ProperTorsionBag.from_cartesian(
+            a=torch.tensor([[2.0], [0.0]], dtype=torch.float64),
+            b=torch.tensor([[0.0], [1.0]], dtype=torch.float64),
+            periodicity=torch.tensor([1], dtype=torch.long),
+        )
+        assert bag.idivf.shape == (2,)
+        assert torch.equal(bag.idivf, torch.ones(2, dtype=bag.k.dtype))
 
 
 class TestImproperPeriodicBag:

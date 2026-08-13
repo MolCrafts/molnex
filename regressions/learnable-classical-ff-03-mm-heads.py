@@ -54,7 +54,7 @@ def main() -> int:
     fa = angle_head(torch.randn(3, 8))
     assert (fa["theta0"] > 0).all() and (fa["theta0"] < math.pi).all()
     fp = proper_head(torch.randn(2, 8))
-    assert fp["k"].shape == (2, 3)
+    assert fp["a"].shape == (2, 3) and fp["b"].shape == (2, 3)
 
     ff = ForceField(name="abs", units="real").def_bondstyle("harmonic")
     model = ClassicalIMM(FakeEncoder(), forcefield=ff, bond_head=_ConstBond())

@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.core.losses import energy_force_mse, energy_mse
+from molix.config import config
+from molix.core.losses import WeightedLoss, energy_force_mse, energy_mse
 from molix.core.losses.molecular import (
+    ChargeMSELoss,
+    ProjectedInternalHessianLoss,
+    ScaleNormalizedLoss,
+    TorsionProfileLoss,
     center_by_group,
     molecule_centered_energy_mse,
     parameter_bag_mse,
@@ -155,3 +161,195 @@ class TestParameterBagMse:
         assert float(parameter_bag_mse(a, a)) == 0.0
         b = {"k": torch.tensor([1.0, 4.0])}
         assert float(parameter_bag_mse(a, b)) == ((0.0 + 4.0) / 2.0)
+
+
+# Analytic Wilson GF goldens (Wilson 1941): 2-atom bond along x, k=2 kcal/mol/Å².
+# H_x = k B^T B; H_q = (B^+)^T H_x B^+ = [[2.0]]. Hard-coded 2026-08-13.
+_WILSON_B = torch.tensor([[-1.0, 0.0, 0.0, 1.0, 0.0, 0.0]])
+_WILSON_H_X = torch.tensor(
+    [
+        [2.0, 0.0, 0.0, -2.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [-2.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    ]
+)
+_H_Q_ATOL = 1e-6
+_ENERGY_ATOL = 1e-10
+
+
+class _FixedLoss(torch.nn.Module):
+    """Constant scalar stand-in for wrapping in ScaleNormalizedLoss."""
+
+    def __init__(self, value: float) -> None:
+        super().__init__()
+        self._value = float(value)
+
+    def forward(self, pred: object, target: object) -> torch.Tensor:
+        return torch.tensor(self._value)
+
+
+class TestProjectedInternalHessianLoss:
+    def test_project_hardcoded_wilson_hq_is_two(self):
+        h_q = ProjectedInternalHessianLoss.project(_WILSON_H_X, _WILSON_B)
+        assert torch.allclose(h_q, torch.tensor([[2.0]]), atol=_H_Q_ATOL)
+
+    def test_diagonal_mse_vs_k_two_is_zero(self):
+        loss_fn = ProjectedInternalHessianLoss(target_kind="diagonal")
+        pred = {"hessian": _WILSON_H_X}
+        target = {"B": _WILSON_B, "diagonal": torch.tensor([2.0])}
+        got = loss_fn(pred, target)
+        assert torch.allclose(got, torch.tensor(0.0), atol=_ENERGY_ATOL)
+
+    def test_diagonal_mse_vs_k_zero_is_four(self):
+        loss_fn = ProjectedInternalHessianLoss(target_kind="diagonal")
+        pred = {"hessian": _WILSON_H_X}
+        target = {"B": _WILSON_B, "diagonal": torch.tensor([0.0])}
+        got = loss_fn(pred, target)
+        assert torch.allclose(got, torch.tensor(4.0), atol=_ENERGY_ATOL)
+
+    def test_hq_ref_mse_against_projected_is_zero(self):
+        loss_fn = ProjectedInternalHessianLoss(target_kind="hq_ref")
+        pred = {"hessian": _WILSON_H_X}
+        target = {"B": _WILSON_B, "hq_ref": torch.tensor([[2.0]])}
+        got = loss_fn(pred, target)
+        assert torch.allclose(got, torch.tensor(0.0), atol=_ENERGY_ATOL)
+
+    def test_nonsquare_hessian_raises(self):
+        with pytest.raises(ValueError):
+            ProjectedInternalHessianLoss.project(torch.zeros(6, 5), _WILSON_B)
+
+    def test_b_columns_not_matching_3n_raises(self):
+        with pytest.raises(ValueError):
+            ProjectedInternalHessianLoss.project(_WILSON_H_X, torch.zeros(1, 5))
+
+    def test_hx_yy_noise_leaves_hq_unchanged(self):
+        noisy = _WILSON_H_X.clone()
+        noisy[1, 1] = noisy[1, 1] + 10.0
+        h_q = ProjectedInternalHessianLoss.project(_WILSON_H_X, _WILSON_B)
+        h_q_noisy = ProjectedInternalHessianLoss.project(noisy, _WILSON_B)
+        assert torch.allclose(h_q, h_q_noisy, atol=_H_Q_ATOL)
+        assert torch.allclose(h_q_noisy, torch.tensor([[2.0]]), atol=_H_Q_ATOL)
+
+    def test_diagonal_kind_does_not_penalize_off_diagonals(self):
+        b = torch.tensor(
+            [
+                [-1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                [0.0, -1.0, 0.0, 0.0, 1.0, 0.0],
+            ]
+        )
+        h_q_full = torch.tensor([[2.0, 1.0], [1.0, 3.0]])
+        h_x = b.T @ h_q_full @ b
+        loss_fn = ProjectedInternalHessianLoss(target_kind="diagonal")
+        got = loss_fn({"hessian": h_x}, {"B": b, "diagonal": torch.tensor([2.0, 3.0])})
+        assert torch.allclose(got, torch.tensor(0.0), atol=_ENERGY_ATOL)
+
+    def test_wilson_identity_hq_equals_k(self):
+        k = 2.0
+        b = _WILSON_B
+        h_x = k * (b.T @ b)
+        h_q = ProjectedInternalHessianLoss.project(h_x, b)
+        assert torch.allclose(h_q, torch.tensor([[k]]), atol=_H_Q_ATOL)
+
+
+class TestTorsionProfileLoss:
+    def test_centered_profile_mse_is_zero(self):
+        pred = {"energy": torch.tensor([1.0, 2.0, 5.0, 7.0])}
+        target = {
+            "energy": torch.tensor([10.0, 11.0, 0.0, 2.0]),
+            "molecule_id_index": torch.tensor([0, 0, 1, 1]),
+        }
+        got = TorsionProfileLoss()(pred, target)
+        assert torch.allclose(got, torch.tensor(0.0), atol=_ENERGY_ATOL)
+
+    def test_zero_barrier_weight_profile_mse_is_one(self):
+        pred = {"energy": torch.tensor([0.0, 4.0])}
+        target = {
+            "energy": torch.tensor([0.0, 2.0]),
+            "molecule_id_index": torch.tensor([0, 0]),
+        }
+        got = TorsionProfileLoss(barrier_weight=0.0)(pred, target)
+        assert torch.allclose(got, torch.tensor(1.0), atol=_ENERGY_ATOL)
+
+    def test_barrier_weight_half_gives_three(self):
+        pred = {"energy": torch.tensor([0.0, 4.0])}
+        target = {
+            "energy": torch.tensor([0.0, 2.0]),
+            "molecule_id_index": torch.tensor([0, 0]),
+        }
+        got = TorsionProfileLoss(barrier_weight=0.5)(pred, target)
+        assert torch.allclose(got, torch.tensor(3.0), atol=_ENERGY_ATOL)
+
+    def test_singleton_group_barrier_is_zero(self):
+        pred = {"energy": torch.tensor([3.0])}
+        target = {
+            "energy": torch.tensor([9.0]),
+            "molecule_id_index": torch.tensor([0]),
+        }
+        got = TorsionProfileLoss(barrier_weight=1.0)(pred, target)
+        assert torch.allclose(got, torch.tensor(0.0), atol=_ENERGY_ATOL)
+
+    def test_empty_group_barrier_is_zero(self):
+        pred = {"energy": torch.tensor([1.0, 2.0, 5.0, 7.0])}
+        target = {
+            "energy": torch.tensor([10.0, 11.0, 0.0, 2.0]),
+            "molecule_id_index": torch.tensor([0, 0, 2, 2]),
+        }
+        got = TorsionProfileLoss(barrier_weight=1.0)(pred, target)
+        assert torch.allclose(got, torch.tensor(0.0), atol=_ENERGY_ATOL)
+
+    def test_constant_energy_shift_is_invariant(self):
+        pred = {
+            "energy": torch.tensor([1.0, 2.0, 5.0, 7.0])
+            + torch.tensor([100.0, 100.0, -50.0, -50.0])
+        }
+        target = {
+            "energy": torch.tensor([10.0, 11.0, 0.0, 2.0])
+            + torch.tensor([-3.0, -3.0, 8.0, 8.0]),
+            "molecule_id_index": torch.tensor([0, 0, 1, 1]),
+        }
+        got = TorsionProfileLoss()(pred, target)
+        assert torch.allclose(got, torch.tensor(0.0), atol=_ENERGY_ATOL)
+
+
+class TestChargeMSELoss:
+    def test_mse_is_one_hundredth(self):
+        pred = {"q": torch.tensor([0.2, -0.2])}
+        target = {"q": torch.tensor([0.1, -0.1])}
+        got = ChargeMSELoss()(pred, target)
+        assert torch.allclose(got, torch.tensor(0.01), atol=_ENERGY_ATOL)
+
+    def test_forward_does_not_require_energy_keys(self):
+        pred = {"q": torch.tensor([0.2, -0.2])}
+        target = {"q": torch.tensor([0.1, -0.1])}
+        got = ChargeMSELoss()(pred, target)
+        assert "energy" not in pred
+        assert "energy" not in target
+        assert torch.allclose(got, torch.tensor(0.01), atol=_ENERGY_ATOL)
+
+
+class TestScaleNormalizedLoss:
+    def test_inner_four_scale_two_is_one(self):
+        loss_fn = ScaleNormalizedLoss(_FixedLoss(4.0), scale=2.0)
+        got = loss_fn({}, {})
+        assert torch.allclose(got, torch.tensor(1.0), atol=_ENERGY_ATOL)
+
+    def test_scale_is_buffer_not_parameter(self):
+        loss_fn = ScaleNormalizedLoss(_FixedLoss(4.0), scale=2.0)
+        buffers = dict(loss_fn.named_buffers())
+        assert "scale" in buffers
+        assert buffers["scale"].dtype == config.ftype
+        assert "scale" not in {name for name, _ in loss_fn.named_parameters()}
+
+    def test_zero_scale_raises(self):
+        with pytest.raises(ValueError):
+            ScaleNormalizedLoss(_FixedLoss(4.0), scale=0.0)
+
+    def test_weighted_loss_combo_on_charge_golden(self):
+        loss_fn = WeightedLoss([(1.0, ScaleNormalizedLoss(ChargeMSELoss(), scale=2.0))])
+        pred = {"q": torch.tensor([0.2, -0.2])}
+        target = {"q": torch.tensor([0.1, -0.1])}
+        got = loss_fn(pred, target)
+        assert torch.allclose(got, torch.tensor(0.0025), atol=_ENERGY_ATOL)

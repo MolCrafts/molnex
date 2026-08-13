@@ -6,11 +6,11 @@ Does **not** own IO.
 
 ::
 
-    ff = ForceField.class_i(dihedral="fourier")
+    ff = ClassIForceField()
     model = ClassicalIMM(encoder, forcefield=ff, bond_head=..., ...)
     ff_t = model(batch)                          # → ForceField (copy-on-write)
     E = ff_t.to_potentials().calc_energy(batch)
-    ff_opls = model.project(opls_ff)             # general → concrete form only
+    ff_opls = model.project(OPLSForceField())    # general → concrete form only
 """
 
 from __future__ import annotations
@@ -23,7 +23,8 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molpot.forcefield.container import ForceField
+from molpot.forcefield.container import ClassIForceField, ForceField
+from molpot.ir import ProperTorsionBag
 
 __all__ = ["ClassicalIMM"]
 
@@ -56,7 +57,7 @@ class ClassicalIMM(nn.Module):
         if not isinstance(encoder, nn.Module):
             raise TypeError("encoder must be an nn.Module")
         self.encoder = encoder
-        self.forcefield = forcefield if forcefield is not None else ForceField.class_i()
+        self.forcefield = forcefield if forcefield is not None else ClassIForceField()
         self.bond_head = bond_head
         self.angle_head = angle_head
         self.proper_head = proper_head
@@ -121,28 +122,13 @@ class ClassicalIMM(nn.Module):
         if src is None:
             raise RuntimeError("project requires source=... or a prior forward()")
 
-        out = ForceField(name=target.name, units=target.units)
-        for style_key in target.style_names:
-            cat, _, sname = style_key.partition(":")
-            if cat == "atom":
-                out.def_atomstyle(sname)
-            elif cat == "bond":
-                out.def_bondstyle(sname)
-            elif cat == "angle":
-                out.def_anglestyle(sname)
-            elif cat == "dihedral":
-                out.def_dihedralstyle(sname)
-            elif cat == "improper":
-                out.def_improperstyle(sname)
-            elif cat == "pair":
-                out.def_pairstyle(sname)
+        out = target.clone()
+        out._params = {}
 
         # Bonds
         if out.bond_style() is not None:
             if out.bond_style() != "harmonic":
-                raise ValueError(
-                    f"project: unsupported target bond style {out.bond_style()!r}"
-                )
+                raise ValueError(f"project: unsupported target bond style {out.bond_style()!r}")
             bp = src.params("bonds")
             if bp is None:
                 raise ValueError("project: target has bond:harmonic but source has no bonds params")
@@ -155,9 +141,7 @@ class ClassicalIMM(nn.Module):
         # Angles
         if out.angle_style() is not None:
             if out.angle_style() != "harmonic":
-                raise ValueError(
-                    f"project: unsupported target angle style {out.angle_style()!r}"
-                )
+                raise ValueError(f"project: unsupported target angle style {out.angle_style()!r}")
             ap = src.params("angles")
             if ap is None:
                 raise ValueError(
@@ -359,6 +343,7 @@ class ClassicalIMM(nn.Module):
                 **({"idivf": propers["idivf"]} if "idivf" in propers else {}),
             }
 
+        propers = ProperTorsionBag._cosine_fields(propers)
         k = propers["k"]
         if k.ndim != 2:
             raise ValueError(f"expected proper k [n, n_terms], got {tuple(k.shape)}")
