@@ -18,9 +18,7 @@ once ratified, they are the authoritative description of a feature.
 - [learnable-classical-ff-08-ff-export](learnable-classical-ff-08-ff-export.md) — Potential IR → OpenMM force-spec compiler (4 translation cases) [done]
 - [learnable-classical-ff-09-provenance](learnable-classical-ff-09-provenance.md) — confidence, chemical-space coverage, provenance surfaces [done]
 - [mace-neighbor-graph-correctness](mace-neighbor-graph-correctness.md) — independent multi-image oracle vs NeighborList (≤ cutoff); E/F wrap-invariance slow; metrics.jsonl/molplot [approved, grilled]
-- [universal-class-i-02-fourier](universal-class-i-02-fourier.md) — train proper torsions as (a_n,b_n); export (k,γ); improper n=1,2 [approved, grilled]
-- [universal-class-i-03-losses](universal-class-i-03-losses.md) — projected Hessian, torsion-profile, charge, scale-normalized losses [approved, grilled]
-- [universal-class-i-04-bundle](universal-class-i-04-bundle.md) — PesBundle: one covalent graph, many conformations [approved, grilled]
+
 
 ## Chain: universal-class-i (Universal Class-I library primitives)
 
@@ -29,9 +27,9 @@ Graph → continuous chem perception → analytic Class-I parameters → existin
 | # | Spec | Owner surface | One-line |
 |---:|---|---|---|
 | 01 | universal-class-i-01-encoder | molrep.chem | covalent MP ChemEncoder, S/M/L widths as ctor args **[done]** |
-| 02 | [universal-class-i-02-fourier](universal-class-i-02-fourier.md) | molpot | (a_n,b_n) train coords → (k,γ) at IR **[approved]** |
-| 03 | [universal-class-i-03-losses](universal-class-i-03-losses.md) | molix.core.losses | Wilson H_q, torsion PES, q, L/s² **[approved]** |
-| 04 | [universal-class-i-04-bundle](universal-class-i-04-bundle.md) | molix.data | PesBundle encode-once / eval-many **[approved]** |
+| 02 | universal-class-i-02-fourier | molpot | (a_n,b_n) train coords → (k,γ) at IR **[done]** |
+| 03 | universal-class-i-03-losses | molix.core.losses | Wilson H_q, torsion PES, q, L/s² **[done]** |
+| 04 | universal-class-i-04-bundle | molix.data | PesBundle encode-once / eval-many **[done]** |
 
 ## Chain: mm-param-val (MM Parameter Learning Baseline — milestone 1)
 
