@@ -14,6 +14,7 @@ import torch.nn as nn
 from tensordict import TensorDict
 
 from molix import config
+from molrep.chem.blocks import ChemGraphBlock
 from molrep.chem.context import (
     AngleContext,
     BondContext,
@@ -90,6 +91,11 @@ class ChemEncoder(nn.Module):
         ``compose(batch) -> ChemEmbeddings`` then
         ``write_batch(batch, emb)``; ``embeddings(batch)`` views written fields.
 
+    Coordinates (``atoms.pos`` / ``edge_diff`` / ``edge_dist``) are never
+    read. After the seed bond context, ``n_blocks`` covalent hops update
+    ``h_atom`` / ``h_bond``; angle / proper / improper contexts consume the
+    post-message-passing atom features.
+
     Args:
         atom_dim: Atom feature dimension ``D_a``.
         bond_dim: Bond feature dimension ``D_b``.
@@ -97,8 +103,13 @@ class ChemEncoder(nn.Module):
         proper_dim: Proper-torsion feature dimension.
         improper_dim: Improper feature dimension.
         num_elements: Atomic-number vocabulary size.
-        hidden_dim: Shared hidden width for context MLPs (optional).
+        hidden_dim: Shared hidden width for context MLPs and graph blocks
+            (optional).
         num_bond_types: Bond-type table size; ``0`` disables type conditioning.
+        n_blocks: Number of :class:`~molrep.chem.blocks.ChemGraphBlock`
+            hops. Must be ``4``, ``5``, or ``6`` (S/M/L). Default ``5``.
+        local_attention: If ``True``, each block softmax-normalizes over an
+            atom's covalent neighborhood only. Default ``False``.
     """
 
     in_keys = [
@@ -123,14 +134,21 @@ class ChemEncoder(nn.Module):
         num_elements: int = 119,
         hidden_dim: int | None = None,
         num_bond_types: int = 0,
+        n_blocks: int = 5,
+        local_attention: bool = False,
     ) -> None:
         super().__init__()
+        n_blocks = int(n_blocks)
+        if n_blocks not in {4, 5, 6}:
+            raise ValueError(f"n_blocks must be 4, 5, or 6, got {n_blocks}")
         self.atom_dim = int(atom_dim)
         self.bond_dim = int(bond_dim)
         self.angle_dim = int(angle_dim)
         self.proper_dim = int(proper_dim)
         self.improper_dim = int(improper_dim)
         self.num_elements = int(num_elements)
+        self.n_blocks = n_blocks
+        self.local_attention = bool(local_attention)
 
         self.atom_embed = AtomChemEmbedding(
             atom_dim=self.atom_dim,
@@ -141,6 +159,18 @@ class ChemEncoder(nn.Module):
             bond_dim=self.bond_dim,
             hidden_dim=hidden_dim,
             num_bond_types=num_bond_types,
+        )
+        self.blocks = nn.ModuleList(
+            [
+                ChemGraphBlock(
+                    atom_dim=self.atom_dim,
+                    bond_dim=self.bond_dim,
+                    hidden_dim=hidden_dim,
+                    local_attention=self.local_attention,
+                    num_bond_types=num_bond_types,
+                )
+                for _ in range(self.n_blocks)
+            ]
         )
         self.angle_context = AngleContext(
             atom_dim=self.atom_dim,
@@ -193,6 +223,9 @@ class ChemEncoder(nn.Module):
             atomi, atomj = endpoints
             btype = _get_tensor(bonds, "bond_types", "type", "bond_type")
             h_bond = self.bond_context(h_atom, atomi, atomj, bond_type=btype)
+            if int(atomi.shape[0]) > 0:
+                for block in self.blocks:
+                    h_atom, h_bond = block(h_atom, h_bond, atomi, atomj, bond_type=btype)
 
         # Angles
         angles = _ns(batch, "angles")

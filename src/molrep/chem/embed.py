@@ -86,8 +86,16 @@ class AtomChemEmbedding(nn.Module):
 class BondChemEmbedding(nn.Module):
     """Endpoint-symmetric bond embedding from atom features.
 
-    Implements ``h_ij = ½ (MLP([h_i, h_j]) + MLP([h_j, h_i]))`` so
-    reversing bond endpoints leaves the feature unchanged.
+    Seed (``h_bond is None``)::
+
+        h_ij = ½ (MLP([h_i, h_j]) + MLP([h_j, h_i]))
+
+    Iterative residual (``h_bond`` given)::
+
+        h_ij ← pair + Linear_{D_b→D_b}(h_bond)
+
+    Both forms are invariant under ``(i, j) ↔ (j, i)``. Features are
+    dimensionless learned embeddings (no unit conversion).
 
     Args:
         atom_dim: Input atom feature dimension ``D_a``.
@@ -115,6 +123,7 @@ class BondChemEmbedding(nn.Module):
         self.num_bond_types = int(num_bond_types)
         hid = int(hidden_dim) if hidden_dim is not None else max(self.atom_dim * 2, self.bond_dim)
         self.dir_mlp = _mlp(2 * self.atom_dim, hid, self.bond_dim)
+        self.mix = nn.Linear(self.bond_dim, self.bond_dim, dtype=config.ftype)
         if self.num_bond_types > 0:
             self.type_emb = nn.Embedding(self.num_bond_types, self.bond_dim, dtype=config.ftype)
         else:
@@ -126,6 +135,7 @@ class BondChemEmbedding(nn.Module):
         atomi: torch.Tensor,
         atomj: torch.Tensor,
         bond_type: torch.Tensor | None = None,
+        h_bond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute symmetric bond features.
 
@@ -135,6 +145,8 @@ class BondChemEmbedding(nn.Module):
             atomj: Target atom indices ``(N_bonds,)``.
             bond_type: Optional bond type indices ``(N_bonds,)`` when
                 ``num_bond_types > 0``.
+            h_bond: Optional previous-layer bond features ``(N_bonds, bond_dim)``.
+                ``None`` keeps the seed formula bit-identical.
 
         Returns:
             Bond features ``(N_bonds, bond_dim)`` with ``h_ij == h_ji``.
@@ -148,8 +160,10 @@ class BondChemEmbedding(nn.Module):
         # Direction-specific then mean → endpoint symmetry
         fwd = self.dir_mlp(torch.cat([hi, hj], dim=-1))
         rev = self.dir_mlp(torch.cat([hj, hi], dim=-1))
-        h_bond = 0.5 * (fwd + rev)
+        pair = 0.5 * (fwd + rev)
 
         if self.type_emb is not None and bond_type is not None:
-            h_bond = h_bond + self.type_emb(bond_type.long())
-        return h_bond
+            pair = pair + self.type_emb(bond_type.long())
+        if h_bond is not None:
+            pair = pair + self.mix(h_bond)
+        return pair

@@ -39,6 +39,47 @@ class TestBondContext:
             atol=1e-6,
         )
 
+    def test_h_bond_output_shape(self):
+        torch.manual_seed(1)
+        atom_dim, bond_dim = 8, 6
+        atom_emb = AtomChemEmbedding(atom_dim=atom_dim, num_elements=20)
+        ctx = BondContext(atom_dim=atom_dim, bond_dim=bond_dim)
+        h = atom_emb(torch.tensor([1, 6, 8], dtype=torch.long))
+        atomi = torch.tensor([0, 1], dtype=torch.long)
+        atomj = torch.tensor([1, 2], dtype=torch.long)
+        prev = ctx(h, atomi, atomj)
+        out = ctx(h, atomi, atomj, h_bond=prev)
+        assert out.shape == (2, bond_dim)
+
+    def test_h_bond_reverse_symmetry(self):
+        torch.manual_seed(1)
+        atom_dim, bond_dim = 8, 6
+        atom_emb = AtomChemEmbedding(atom_dim=atom_dim, num_elements=20)
+        ctx = BondContext(atom_dim=atom_dim, bond_dim=bond_dim)
+        h = atom_emb(torch.tensor([1, 6, 8, 7], dtype=torch.long))
+        atomi = torch.tensor([0, 1], dtype=torch.long)
+        atomj = torch.tensor([2, 3], dtype=torch.long)
+        prev = ctx(h, atomi, atomj)
+        assert torch.allclose(
+            ctx(h, atomi, atomj, h_bond=prev),
+            ctx(h, atomj, atomi, h_bond=prev),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+    def test_h_bond_forwards_to_embedding(self):
+        torch.manual_seed(1)
+        atom_dim, bond_dim = 8, 6
+        atom_emb = AtomChemEmbedding(atom_dim=atom_dim, num_elements=20)
+        ctx = BondContext(atom_dim=atom_dim, bond_dim=bond_dim)
+        h = atom_emb(torch.tensor([1, 6, 8], dtype=torch.long))
+        atomi = torch.tensor([0, 1], dtype=torch.long)
+        atomj = torch.tensor([1, 2], dtype=torch.long)
+        prev = ctx(h, atomi, atomj)
+        via_ctx = ctx(h, atomi, atomj, h_bond=prev)
+        via_embed = ctx.embed(h, atomi, atomj, h_bond=prev)
+        assert torch.equal(via_ctx, via_embed)
+
 
 class TestAngleContext:
     def test_shape(self):

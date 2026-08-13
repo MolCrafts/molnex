@@ -1,10 +1,11 @@
 """molrep.chem — continuous chemical perception (no energy / no molpot).
 
 Public surface:
-    AtomChemEmbedding, BondChemEmbedding, context builders, ChemEmbeddings,
-    ChemEncoder.
+    AtomChemEmbedding, BondChemEmbedding, ChemGraphBlock, context builders,
+    ChemEmbeddings, ChemEncoder.
 """
 
+from molrep.chem.blocks import ChemGraphBlock
 from molrep.chem.context import (
     AngleContext,
     BondContext,
@@ -18,15 +19,16 @@ from molrep.chem.typing_metrics import TypingRecoveryMetrics, TypingRecoveryRepo
 from molrep.chem.typing_probe import AtomTypeReadout
 
 __all__ = [
+    "AngleContext",
     "AtomChemEmbedding",
+    "AtomTypeReadout",
     "BondChemEmbedding",
     "BondContext",
-    "AngleContext",
-    "ProperContext",
-    "ImproperContext",
     "ChemEmbeddings",
     "ChemEncoder",
-    "AtomTypeReadout",
+    "ChemGraphBlock",
+    "ImproperContext",
+    "ProperContext",
     "TypingRecoveryMetrics",
     "TypingRecoveryReport",
 ]

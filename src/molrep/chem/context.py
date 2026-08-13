@@ -62,6 +62,7 @@ class BondContext(nn.Module):
         atomi: torch.Tensor,
         atomj: torch.Tensor,
         bond_type: torch.Tensor | None = None,
+        h_bond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Build bond context features ``(N_bonds, bond_dim)``.
 
@@ -70,11 +71,15 @@ class BondContext(nn.Module):
             atomi: Endpoint i indices ``(N_bonds,)``.
             atomj: Endpoint j indices ``(N_bonds,)``.
             bond_type: Optional bond types ``(N_bonds,)``.
+            h_bond: Optional previous-layer bond features
+                ``(N_bonds, bond_dim)``. Forwarded to
+                :class:`~molrep.chem.embed.BondChemEmbedding` without
+                rewriting ``(i,j) ↔ (j,i)``.
 
         Returns:
             Bond features invariant under ``(i,j) → (j,i)``.
         """
-        return self.embed(h_atom, atomi, atomj, bond_type=bond_type)
+        return self.embed(h_atom, atomi, atomj, bond_type=bond_type, h_bond=h_bond)
 
 
 class AngleContext(nn.Module):

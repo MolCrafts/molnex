@@ -43,7 +43,9 @@ class TestAtomTypeReadout:
 
     def test_overfit_fixture_accuracy(self):
         torch.manual_seed(0)
-        enc = ChemEncoder(atom_dim=16, bond_dim=8)
+        # Smallest legal stack: 5-block default is capacity for Universal-M,
+        # not an 80-step 4-atom overfit fixture.
+        enc = ChemEncoder(atom_dim=16, bond_dim=8, n_blocks=4)
         probe = AtomTypeReadout(enc, num_types=2)
         batch = _batch([6, 6, 1, 1], bonds=[(0, 1), (2, 3)])
         y = torch.tensor([0, 0, 1, 1], dtype=torch.long)
