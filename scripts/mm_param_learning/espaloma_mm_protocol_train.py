@@ -47,10 +47,10 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from tensordict import TensorDict
-
 from molhub.dataset import PhalkethohMMDataset
 from molhub.dataset.meta import Targets
+from tensordict import TensorDict
+
 from molpot.charge import (
     AtomicChargeModel,
     ChiEtaHead,
@@ -63,7 +63,7 @@ from molpot.composition.mm_heads import (
     BondParamHead,
     ProperTorsionParamHead,
 )
-from molpot.forcefield import ClassicalIMM, ForceField
+from molpot.forcefield import ClassicalIMM, ClassIForceField
 from molrep.chem.encoder import ChemEncoder
 
 # Espaloma notebook protocol pins
@@ -313,13 +313,10 @@ def build_espaloma_like_model(*, energy_scope: str = "bonded") -> ClassicalIMM:
         proper_dim=ESPALOMA_HIDDEN,
         improper_dim=ESPALOMA_HIDDEN,
         hidden_dim=ESPALOMA_HIDDEN,
+        n_blocks=5,
+        local_attention=False,
     )
-    ff = ForceField.class_i(
-        name="class-i-learned",
-        dihedral="fourier",
-        with_pair=(energy_scope == "full"),
-        with_coulomb=(energy_scope == "full"),
-    )
+    ff = ClassIForceField(name="class-i-learned")
     if energy_scope == "full":
         # Cutoff lives on the Potential (via style options), not on Potentials.
         ff.def_pairstyle("lj/cut", cutoff=10.0)
@@ -478,6 +475,7 @@ def train(
             loss = torch.stack(losses).mean()
             opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             epoch_loss += float(loss.detach())
             n_batches += 1

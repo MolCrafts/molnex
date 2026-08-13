@@ -10,8 +10,9 @@
 #SBATCH --output=class-i-espaloma-scale-%j.out
 
 # Formal Class-I full-energy train at Espaloma MM-small scale:
-#   173 molecules × 100 confs, ChemEncoder dim=128, Adam 1e-4, batch=100,
-#   official splits.json seed=2666, energy_scope=full (bonded+EEM+LJ+Coulomb).
+#   173 molecules × 100 confs, ChemEncoder dim=128 n_blocks=5, Adam 1e-4,
+#   batch=100, clip_grad_norm=1.0, official splits.json seed=2666,
+#   energy_scope=full (bonded+EEM+LJ+Coulomb).
 # Espaloma notebook budget is 10k epochs; we use 1000 + early-stop patience 50.
 #
 #   sbatch scripts/mm_param_learning/run_class_i_espaloma_scale_gh200.sbatch
