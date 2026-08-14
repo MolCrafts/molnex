@@ -9,12 +9,16 @@ per-batch work approximately constant. Per-sample sizes come from the packed
 cache's cumsum pointers (``ptr[idx+1] - ptr[idx]``) — no sample is ever
 unpacked during sampling.
 
-Three layers, deliberately separated:
+Four layers, deliberately separated:
 
 * :class:`TokenBudgetPacker` — the packing rule alone (visit order in,
   batch plan out); no dataset, no RNG, no warning policy.
 * :class:`TokenBudgetBatchSampler` — seeded shuffle + oversize warning on
   top of the packer, over a packed-cache-backed dataset.
+* :class:`TaskMixtureBatchSampler` — hierarchical task → group →
+  configuration sampling: one physical task per batch drawn from a caller
+  supplied mixture, whole sampling units inside it, packed by the same
+  packer under the same token budgets.
 * :class:`BatchSamplerSource` — the protocol a
   :class:`~molix.data.datamodule.DataModule` calls once per epoch to obtain
   a batch sampler, so alternative batching policies can be injected.
@@ -22,8 +26,9 @@ Three layers, deliberately separated:
 
 from __future__ import annotations
 
+import math
 import warnings
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Protocol, runtime_checkable
 
 import torch
@@ -31,7 +36,12 @@ import torch
 from molix.core.seed import make_generator
 from molix.data.dataset import BaseDataset
 
-__all__ = ["BatchSamplerSource", "TokenBudgetBatchSampler", "TokenBudgetPacker"]
+__all__ = [
+    "BatchSamplerSource",
+    "TaskMixtureBatchSampler",
+    "TokenBudgetBatchSampler",
+    "TokenBudgetPacker",
+]
 
 
 class TokenBudgetPacker:
@@ -252,6 +262,549 @@ class TokenBudgetBatchSampler:
         order can produce a different batch count.
         """
         return len(self._batches)
+
+
+class TaskMixtureBatchSampler:
+    """Yield single-task index batches drawn from a task mixture.
+
+    A universal Class-I training collection mixes physically different
+    data — equilibrium snapshots, torsion scans, near-equilibrium
+    relaxations, electrostatic probes — whose natural frame counts are
+    wildly unbalanced, and a torsion scan only carries its torsion
+    profile when its frames are compared *within one batch*. This sampler
+    therefore batches hierarchically: **task → group → configuration**.
+
+    1. Frames of the split are bucketed into **sampling units** keyed
+       ``(task_labels[i], group_ids[i])``, in first-appearance order.
+    2. Units of one task are shuffled and handed to a transient
+       :class:`TokenBudgetPacker` over their *aggregate* atom/edge costs,
+       so a unit is packed whole — a scan never straddles two batches, and
+       a unit larger than the budget becomes a whole singleton batch
+       (warned about once, never split, never dropped).
+    3. The epoch's slots are apportioned across tasks by the mixture and
+       interleaved, so every batch carries exactly one task label. The
+       flat frame pool is structurally unreachable.
+
+    **There is no published precedent for a task → group → configuration
+    hierarchical batch sampler**, so there is no reference implementation
+    to validate against: correctness here is *structural* (mixture
+    fidelity, unit integrity, determinism), while the scientific claim —
+    that per-task gradient contributions track the configured mixture —
+    is measured downstream by the gradient audit. Two published results
+    are cited for the pieces this sampler borrows, and for nothing more:
+
+    * **Stage structure only** — the default Stage A/B/C mixtures below
+      are constructor *data* derived from ByteFF's three-stage curriculum
+      over increasingly diverse PES regions; the mechanism (per-batch
+      mixture draw, unit integrity, token packing) is not from ByteFF.
+    * **Grouping discipline only** — espaloma splits at the molecule
+      level so conformers never straddle a split; this sampler inherits
+      that discipline one level down, making the group id the atomic unit
+      of *sampling* exactly as it is the atomic unit of *splitting* in
+      :func:`~molix.data.group_split.group_split_indices`.
+
+    Stage mixtures (plain ``dict`` constructor data — no ``Stage`` enum,
+    no schedule object; choosing the active stage at epoch *e* stays with
+    the caller):
+
+    ===== =========== ======= ===== =============
+    Stage equilibrium torsion relax electrostatic
+    ===== =========== ======= ===== =============
+    A     0.70        —       0.30  —
+    B     0.35        0.45    0.20  —
+    C     0.25        0.30    0.35  0.10
+    ===== =========== ======= ===== =============
+
+    **Stratified, not i.i.d.** Slots are apportioned by deterministic
+    largest-remainder (Hamilton) rather than drawn per batch from a
+    multinomial: ``base_t = floor(p_t · n)``, and the ``n − Σ base_t``
+    leftover slots go to the largest fractional remainders, ties broken by
+    ascending task name. An **anti-starvation** rule then guarantees that
+    every task with ``p_t > 0`` and at least one available batch receives
+    at least one slot; each such deficit is donated by the task with the
+    largest surplus ``count_t − p_t·n`` (ties: larger count first, then
+    ascending name), taken only from tasks that can spare it (``count ≥
+    2``). The bound is therefore hard rather than statistical:
+    ``|count_t − p_t·n| ≤ 1`` for every task when no override fires, and
+    ``≤ 1 + K`` for donors when ``K`` rare tasks were rescued. Same
+    expected mixture as a per-batch draw, zero sampling variance, exactly
+    reproducible audit numbers.
+
+    **The mixture governs batch shares only.** Frame shares follow from
+    unit sizes and token packing; :meth:`frames_per_task` reports them for
+    audit but does not guarantee them. Comparing either share against a
+    calibration tolerance is the caller's job — this class ships no
+    verdict façade.
+
+    **Determinism.** Every random choice comes from one
+    :func:`~molix.core.seed.make_generator` seeded with ``seed``: tasks
+    are visited in ``sorted(mixture)`` order (independent of ``dict``
+    insertion order), each drawing one unit permutation, and the slot
+    order is one final permutation of the apportioned task multiset. The
+    whole plan is built eagerly in ``__init__``, so ``len()`` and
+    iteration are free and repeatable. The instance holds only the
+    dataset reference, the budgets, the two label tuples, the mixture and
+    the computed ``list[list[int]]`` — no packer and no mmap-backed count
+    vector — so it pickles to an identical plan. Reseed per epoch with
+    ``seed + epoch`` (the convention
+    :class:`~molix.data.datamodule.DataModule` already uses) to reshuffle
+    between epochs while keeping epoch *k* re-derivable on resume.
+
+    Args:
+        dataset: A packed-cache-backed dataset exposing ``atom_counts`` /
+            ``edge_counts`` ``(n_samples,)`` count vectors —
+            :class:`~molix.data.dataset.MmapDataset`,
+            :class:`~molix.data.dataset.CachedDataset`, or a
+            :class:`~molix.data.dataset.SubsetDataset` wrapping either.
+            Unit costs are pointer arithmetic over those vectors; no
+            sample is ever unpacked.
+        indices: The split's dataset indices, e.g. the train list from
+            :func:`~molix.data.group_split.group_split_indices`. Consumed
+            as given — this sampler never splits and never re-derives
+            groups. Yielded batches contain these parent-space indices.
+        task_labels: Per-sample physical task label, ``len(dataset)``
+            long (parent space, the shape
+            :func:`~molix.data.group_split.group_split_indices` already
+            accepts). Labels are opaque strings; molnex never infers them.
+        group_ids: Per-sample group identity, ``len(dataset)`` long. Two
+            scans of one molecule sharing a label *and* a group id merge
+            into one (coarser, still integral) unit — pass a finer id such
+            as ``"<mol>:<dihedral>"`` to keep them separate. A molecule
+            contributing to several tasks yields one unit per task, which
+            is normal: cross-split leakage was already prevented upstream.
+        mixture: Task → probability, summing to 1 within ``1e-9``. A label
+            present in the split must appear here; give it ``0.0`` to
+            exclude it deliberately.
+        max_atoms: Maximum total atom count per batch, or ``None``.
+        max_edges: Maximum total edge count per batch, or ``None``. At
+            least one budget is required; both apply simultaneously when
+            given.
+        batches_per_epoch: Force the epoch length. Default ``None`` picks
+            the longest epoch in which no task is exhausted,
+            ``min over {t : p_t > 0} of floor(len(batches_t) / p_t)``.
+            A larger forced value can exhaust a task: it is then dropped,
+            the remaining probabilities are renormalized, one
+            :class:`UserWarning` fires, and the plan ends at its realized
+            length.
+        seed: Seed for the unit permutations and the slot order.
+
+    Raises:
+        ValueError: A budget is missing or ``<= 0``,
+            ``batches_per_epoch <= 0``, *mixture* is empty / does not sum
+            to 1 within ``1e-9`` / carries a probability outside
+            ``[0, 1]``, a label of the split is absent from *mixture*, a
+            task with ``p_t > 0`` has no unit in the split, a label table
+            length differs from ``len(dataset)``, *indices* is empty or
+            addresses outside the dataset, or *dataset* does not expose
+            the pointer-derived count accessors.
+
+    Reference:
+        Zheng et al. "ByteFF: A Machine Learning Force Field for
+        Drug-like Molecules" arXiv:2408.12817 (2024) — stage structure
+        only. https://arxiv.org/abs/2408.12817
+
+        Wang, Fass, Chodera. "End-to-End Differentiable Construction of
+        Molecular Mechanics Force Fields" Chem. Sci. 13, 12016 (2022) —
+        grouping discipline only. DOI:10.1039/D2SC02739A, https://doi.org/10.1039/D2SC02739A
+    """
+
+    def __init__(
+        self,
+        dataset: BaseDataset,
+        *,
+        indices: Sequence[int],
+        task_labels: Sequence[str],
+        group_ids: Sequence[str | int],
+        mixture: Mapping[str, float],
+        max_atoms: int | None = None,
+        max_edges: int | None = None,
+        batches_per_epoch: int | None = None,
+        seed: int = 42,
+    ) -> None:
+        self._validate_sizes(max_atoms, max_edges, batches_per_epoch)
+        self._validate_mixture(mixture)
+        self._validate_tables(len(dataset), indices, task_labels, group_ids)
+
+        self._dataset = dataset
+        self._max_atoms = max_atoms
+        self._max_edges = max_edges
+        self._task_labels = tuple(task_labels)
+        self._group_ids = tuple(group_ids)
+        self._mixture = dict(mixture)
+        self._batches_per_epoch = batches_per_epoch
+        self._seed = seed
+        self._batches = self._compute_batches(tuple(indices))
+
+    @staticmethod
+    def _validate_sizes(
+        max_atoms: int | None, max_edges: int | None, batches_per_epoch: int | None
+    ) -> None:
+        """Reject missing / non-positive budget and epoch-length knobs."""
+        if max_atoms is None and max_edges is None:
+            raise ValueError(
+                "TaskMixtureBatchSampler needs at least one budget: pass "
+                "max_atoms and/or max_edges (total per-batch atom/edge caps)."
+            )
+        for name, value in (("max_atoms", max_atoms), ("max_edges", max_edges)):
+            if value is not None and value <= 0:
+                raise ValueError(
+                    f"{name} must be > 0, got {value}. Pass a positive "
+                    f"per-batch budget or omit {name} to disable that cap."
+                )
+        if batches_per_epoch is not None and batches_per_epoch <= 0:
+            raise ValueError(
+                f"batches_per_epoch must be > 0, got {batches_per_epoch}. "
+                "Pass a positive epoch length or omit it to use the "
+                "no-exhaustion default."
+            )
+
+    @staticmethod
+    def _validate_mixture(mixture: Mapping[str, float]) -> None:
+        """Reject an empty, out-of-range or non-normalized *mixture*."""
+        if not mixture:
+            raise ValueError(
+                "mixture is empty: pass at least one task -> probability "
+                "entry, e.g. {'equilibrium': 0.7, 'relax': 0.3}."
+            )
+        total = math.fsum(mixture.values())
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError(
+                f"mixture probabilities sum to {total}, not 1.0 (tolerance "
+                f"1e-9); got {dict(mixture)}. Rescale so probabilities sum "
+                "to 1.0."
+            )
+        for task, probability in sorted(mixture.items()):
+            if not 0.0 <= probability <= 1.0:
+                raise ValueError(
+                    f"mixture probability for task {task!r} is {probability}, "
+                    "outside the valid range [0.0, 1.0]. Pass a probability "
+                    "in [0.0, 1.0], using 0.0 to exclude the task."
+                )
+
+    @staticmethod
+    def _validate_tables(
+        n_samples: int,
+        indices: Sequence[int],
+        task_labels: Sequence[str],
+        group_ids: Sequence[str | int],
+    ) -> None:
+        """Reject mis-sized label tables and empty / out-of-range *indices*."""
+        for name, table in (("task_labels", task_labels), ("group_ids", group_ids)):
+            if len(table) != n_samples:
+                raise ValueError(
+                    f"len({name}) is {len(table)} but len(dataset) is "
+                    f"{n_samples}: {name} is a parent-space per-sample "
+                    f"sequence, so fix the {name} accessor that produced it."
+                )
+        if len(indices) == 0:
+            raise ValueError(
+                "indices is empty: pass the split's dataset indices (e.g. the "
+                "train list of group_split_indices); no batch can be formed "
+                "from an empty split."
+            )
+        for index in indices:
+            if not 0 <= index < n_samples:
+                raise ValueError(
+                    f"indices contains {index}, outside the valid range "
+                    f"[0, {n_samples}) for this dataset. Pass split indices "
+                    "addressing the dataset given to this sampler."
+                )
+
+    def _validate_tasks(self, task_units: dict[str, list[tuple[str | int, list[int]]]]) -> None:
+        """Reject a split label missing from the mixture, or a supply-less task."""
+        for task in sorted(task_units):
+            if task not in self._mixture:
+                n_frames = sum(len(frames) for _, frames in task_units[task])
+                raise ValueError(
+                    f"task_labels carries {n_frames} sample(s) labelled "
+                    f"{task!r} in the split, but {task!r} is absent from "
+                    "mixture. Add it with probability 0.0 to exclude it "
+                    "deliberately."
+                )
+        for task, probability in sorted(self._mixture.items()):
+            if probability > 0 and not task_units.get(task):
+                raise ValueError(
+                    f"mixture task {task!r} has probability {probability} but "
+                    "zero sampling units in the split. Set its probability to "
+                    "0.0 or widen the split."
+                )
+
+    def _frame_budgets(self) -> list[tuple[int, torch.Tensor]]:
+        """Resolve ``(budget, per-frame counts)`` pairs for every active budget."""
+        pairs: list[tuple[int, torch.Tensor]] = []
+        try:
+            if self._max_atoms is not None:
+                pairs.append((self._max_atoms, self._dataset.atom_counts))
+            if self._max_edges is not None:
+                pairs.append((self._max_edges, self._dataset.edge_counts))
+        except AttributeError as e:
+            raise ValueError(
+                "TaskMixtureBatchSampler requires a packed-cache-backed "
+                "dataset exposing atom_counts/edge_counts — use MmapDataset, "
+                "CachedDataset, or a SubsetDataset wrapping one of them; got "
+                f"{type(self._dataset).__name__}."
+            ) from e
+        return pairs
+
+    def _bucket_units(
+        self, indices: tuple[int, ...]
+    ) -> dict[str, list[tuple[str | int, list[int]]]]:
+        """Bucket *indices* into sampling units keyed ``(task_label, group_id)``.
+
+        Args:
+            indices: The split's dataset indices, walked in the given order.
+
+        Returns:
+            Task label → its units as ``(group_id, member frame indices)``
+            pairs, both levels in first-appearance order.
+        """
+        unit_frames: dict[tuple[str, str | int], list[int]] = {}
+        for index in indices:
+            key = (self._task_labels[index], self._group_ids[index])
+            unit_frames.setdefault(key, []).append(index)
+
+        task_units: dict[str, list[tuple[str | int, list[int]]]] = {}
+        for (task, group), frames in unit_frames.items():
+            task_units.setdefault(task, []).append((group, frames))
+        return task_units
+
+    def _pack_tasks(
+        self,
+        task_units: dict[str, list[tuple[str | int, list[int]]]],
+        generator: torch.Generator,
+    ) -> tuple[dict[str, list[list[int]]], list[str]]:
+        """Shuffle and pack each task's units into frame-index batches.
+
+        One transient :class:`TokenBudgetPacker` per task over that task's
+        *aggregate* unit costs — transient so no mmap-backed count vector
+        reaches the instance state, and per task because the packer binds
+        its cost vectors at construction. Packed unit positions are
+        expanded into their member frame indices, which is what makes unit
+        integrity structural rather than merely checked.
+
+        Args:
+            task_units: Output of :meth:`_bucket_units`.
+            generator: The single seeded generator; tasks are visited in
+                ``sorted(mixture)`` order and a task with no unit in the
+                split draws nothing.
+
+        Returns:
+            ``(task_batches, oversize)`` — packed frame-index batches per
+            task, and the ``"<task>/<group>"`` names of units whose own
+            aggregate cost exceeds a budget (the packer is silent about
+            them by design; warning is this caller's job).
+        """
+        frame_budgets = self._frame_budgets()
+        task_batches: dict[str, list[list[int]]] = {}
+        oversize: list[str] = []
+        for task in sorted(self._mixture):
+            units = task_units.get(task)
+            if not units:
+                continue
+            packer = TokenBudgetPacker(
+                [
+                    (budget, torch.tensor([int(counts[frames].sum()) for _, frames in units]))
+                    for budget, counts in frame_budgets
+                ]
+            )
+            oversize.extend(
+                f"{task}/{units[position][0]}"
+                for position, flagged in enumerate(packer.oversize_mask().tolist())
+                if flagged
+            )
+            order = torch.randperm(len(units), generator=generator).tolist()
+            task_batches[task] = [
+                [index for position in group for index in units[position][1]]
+                for group in packer.pack(order)
+            ]
+        return task_batches, oversize
+
+    def _epoch_length(self, task_batches: dict[str, list[list[int]]]) -> int:
+        """Number of slots to plan: the forced length, or the no-exhaustion floor.
+
+        Args:
+            task_batches: Packed batches per task, from :meth:`_pack_tasks`.
+
+        Returns:
+            ``batches_per_epoch`` when given, else ``min over {t : p_t > 0}
+            of floor(len(batches_t) / p_t)`` — the longest epoch in which
+            no task runs out. Since every task with ``p_t > 0`` has at
+            least one unit (validated) and ``p_t <= 1``, this is ``>= 1``.
+        """
+        if self._batches_per_epoch is not None:
+            return self._batches_per_epoch
+        return min(
+            math.floor(len(task_batches[task]) / probability)
+            for task, probability in self._mixture.items()
+            if probability > 0
+        )
+
+    def _apportion(self, n: int, task_batches: dict[str, list[list[int]]]) -> dict[str, int]:
+        """Split *n* slots across tasks by largest remainder, then rescue rare tasks.
+
+        Args:
+            n: Epoch length in batches.
+            task_batches: Packed batches per task, used only to tell a
+                supply-less task (never rescued) from a starved one.
+
+        Returns:
+            Task → slot count, summing to *n*.
+        """
+        counts = {task: math.floor(probability * n) for task, probability in self._mixture.items()}
+        remainders = {
+            task: probability * n - counts[task] for task, probability in self._mixture.items()
+        }
+        leftover = n - sum(counts.values())
+        for task in sorted(counts, key=lambda name: (-remainders[name], name))[:leftover]:
+            counts[task] += 1
+
+        for task in sorted(counts):
+            starved = self._mixture[task] > 0 and counts[task] == 0
+            if not starved or not task_batches.get(task):
+                continue
+            donors = [name for name, count in counts.items() if count >= 2]
+            if not donors:
+                continue
+            donor = min(
+                donors,
+                key=lambda name: (-(counts[name] - self._mixture[name] * n), -counts[name], name),
+            )
+            counts[donor] -= 1
+            counts[task] += 1
+        return counts
+
+    def _interleave(
+        self,
+        counts: dict[str, int],
+        n: int,
+        task_batches: dict[str, list[list[int]]],
+        generator: torch.Generator,
+    ) -> tuple[list[list[int]], tuple[str, int] | None]:
+        """Order the apportioned slots and fill each from its task's supply.
+
+        The slot labels are the multiset ``{t repeated counts[t]}`` in
+        sorted task order, permuted once by the shared generator, so
+        mixture fidelity holds per window rather than only per epoch.
+
+        Args:
+            counts: Apportioned slot count per task.
+            n: Epoch length in batches (``sum(counts.values())``).
+            task_batches: Packed batches per task, consumed in order.
+            generator: The single seeded generator.
+
+        Returns:
+            ``(plan, shortfall)`` — the epoch's frame-index batches, and
+            ``(task, slot)`` of the first slot whose task ran out of
+            supply (``None`` when every slot was filled).
+        """
+        multiset: list[str] = []
+        for task in sorted(counts):
+            multiset.extend([task] * counts[task])
+
+        cursors = dict.fromkeys(counts, 0)
+        plan: list[list[int]] = []
+        shortfall: tuple[str, int] | None = None
+        for slot, position in enumerate(torch.randperm(n, generator=generator).tolist()):
+            task = multiset[position]
+            available = task_batches.get(task, [])
+            if cursors[task] >= len(available):
+                if shortfall is None:
+                    shortfall = (task, slot)
+                continue
+            plan.append(available[cursors[task]])
+            cursors[task] += 1
+        return plan, shortfall
+
+    def _compute_batches(self, indices: tuple[int, ...]) -> list[list[int]]:
+        """Build the whole epoch plan eagerly, and own the warning policy.
+
+        Args:
+            indices: The split's dataset indices.
+
+        Returns:
+            The epoch's batches as ``list[list[int]]`` of parent-space
+            dataset indices, every batch single-task by construction.
+        """
+        task_units = self._bucket_units(indices)
+        self._validate_tasks(task_units)
+
+        generator = make_generator(self._seed)
+        task_batches, oversize = self._pack_tasks(task_units, generator)
+        if oversize:
+            warnings.warn(
+                "TaskMixtureBatchSampler: sampling unit(s) "
+                f"{', '.join(oversize)} (task/group) exceed the per-batch "
+                "budget on their own; each is kept whole as a singleton "
+                "batch — never split, never dropped. Raise max_atoms/"
+                "max_edges to avoid singletons.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+        n = self._epoch_length(task_batches)
+        plan, shortfall = self._interleave(
+            self._apportion(n, task_batches), n, task_batches, generator
+        )
+        if shortfall is not None:
+            task, slot = shortfall
+            warnings.warn(
+                f"TaskMixtureBatchSampler: task {task!r} ran out of packed "
+                f"batches at slot {slot} of {n}; its remaining slots are "
+                "dropped, the mixture is renormalized over the surviving "
+                "tasks, and len(sampler) reports the realized length. Lower "
+                "batches_per_epoch (or omit it) to keep every task in supply.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return plan
+
+    def __iter__(self) -> Iterator[list[int]]:
+        """Iterate the eager plan, each item a ``list[int]`` of dataset indices."""
+        return iter(self._batches)
+
+    def __len__(self) -> int:
+        """Realized number of batches in the epoch.
+
+        Equals ``batches_per_epoch`` when that forced length was in
+        supply, the no-exhaustion floor when it was not given, and the
+        shorter realized length when a forced length exhausted a task.
+        """
+        return len(self._batches)
+
+    def batches_per_task(self) -> dict[str, int]:
+        """Count the planned batches carried by each task.
+
+        Free (the plan is eager) and read-only: the returned ``dict`` is a
+        fresh copy, so caller mutation cannot corrupt the plan. This is
+        the realized batch share — the quantity the mixture governs.
+
+        Returns:
+            Task label → number of batches in this epoch's plan; tasks
+            with no realized batch are absent.
+        """
+        counts: dict[str, int] = {}
+        for batch in self._batches:
+            task = self._task_labels[batch[0]]
+            counts[task] = counts.get(task, 0) + 1
+        return counts
+
+    def frames_per_task(self) -> dict[str, int]:
+        """Count the planned frames carried by each task.
+
+        Frame shares follow from unit sizes and token packing; they are
+        reported for audit, **not** guaranteed by the mixture (which
+        governs batch shares only). Comparing them against a calibration
+        tolerance is the caller's job.
+
+        Returns:
+            Task label → number of frames in this epoch's plan; tasks with
+            no realized batch are absent.
+        """
+        counts: dict[str, int] = {}
+        for batch in self._batches:
+            task = self._task_labels[batch[0]]
+            counts[task] = counts.get(task, 0) + len(batch)
+        return counts
 
 
 @runtime_checkable

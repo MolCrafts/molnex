@@ -12,14 +12,22 @@ Spec ``universal-class-i-09-packer`` adds GROUP D: characterization
 goldens pinning the pre-refactor batch plans plus RED tests for the
 extracted ``molix.data.TokenBudgetPacker``.
 
+Spec ``universal-class-i-10-sampler`` adds GROUP E: RED tests for
+``molix.data.sampler.TaskMixtureBatchSampler`` — hierarchical
+task → group → configuration batch sampling over the same packed caches.
+
 Fixture geometry (hand-checkable): sample ``i`` has ``3 + (i % 8)`` atoms
 (cycling 3..10) and ``n_atoms + 2`` edges (cycling 5..12). Edge counts
 never equal atom counts, so the packed-cache schema inference cannot
-misclassify per-edge keys as per-atom.
+misclassify per-edge keys as per-atom. GROUP E's fixtures use explicit
+per-sample atom-count tables instead (see ``TASK_ATOM_COUNTS``), so every
+unit aggregate is a hand-derivable integer.
 """
 
 from __future__ import annotations
 
+import inspect
+import math
 import pickle
 import warnings
 from pathlib import Path
@@ -33,7 +41,7 @@ from molix.data import TokenBudgetPacker
 from molix.data.cache import PackedCache
 from molix.data.datamodule import DataModule
 from molix.data.dataset import CachedDataset, MmapDataset, SubsetDataset
-from molix.data.sampler import TokenBudgetBatchSampler
+from molix.data.sampler import TaskMixtureBatchSampler, TokenBudgetBatchSampler
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -700,3 +708,825 @@ class TestTokenBudgetPacker:
 
         packer = TokenBudgetPacker([(8, golden_ds.atom_counts)])
         assert packer.pack(GOLDEN_PERM) == GOLDEN_PLAN_ATOMS8
+
+
+# ---------------------------------------------------------------------------
+# GROUP E — TaskMixtureBatchSampler
+# (spec universal-class-i-10-sampler)
+# ---------------------------------------------------------------------------
+#
+# One deliberate fixture, hand-derived end to end.  Sample ``i`` carries
+# ``TASK_ATOM_COUNTS[i]`` atoms and ``TASK_ATOM_COUNTS[i] + 2`` edges, so a
+# unit's aggregate cost is ``sum(atoms)`` / ``sum(atoms) + 2 * n_frames``:
+#
+#   idx     task           group    frames  atoms/frame  Σatoms  Σedges
+#   -----------------------------------------------------------------------
+#   0..5    equilibrium    eq0..eq5      1            5       5       7
+#   6..9    torsion        tor_a         4            6      24      32
+#   10..12  torsion        tor_b         3            6      18      24
+#   13,14   torsion        tor_c         2            7      14      18
+#   15..17  relax          rel_a         3            4      12      18
+#   18,19   relax          rel_b         2            4       8      12
+#   20,21   electrostatic  ele_a         2            5      10      14
+#   22,23   electrostatic  ele_b         2            5      10      14
+#
+# Per-task next-fit supply under ``max_atoms=24`` (or 20 — same counts):
+#   equilibrium  6 units × 5 atoms → 4 units (20) + 2 units (10)      = 2 batches
+#   torsion      24 / 18 / 14 — no two aggregate ≤ 24                 = 3 batches
+#   relax        12 + 8 = 20 ≤ 24                                     = 1 batch
+#   electrostatic 10 + 10 = 20 ≤ 24                                   = 1 batch
+#
+# ``max_atoms=20`` additionally makes ``tor_a`` (24 atoms) an oversize unit,
+# kept whole as a singleton batch and warned about exactly once.
+
+#: Per-sample atom counts of the 24-sample task fixture (table above).
+TASK_ATOM_COUNTS = (
+    [5] * 6  # 0..5    equilibrium singletons
+    + [6] * 4  # 6..9    torsion scan tor_a  (oversize at max_atoms=20)
+    + [6] * 3  # 10..12  torsion scan tor_b
+    + [7] * 2  # 13,14   torsion scan tor_c
+    + [4] * 3  # 15..17  relax trajectory rel_a
+    + [4] * 2  # 18,19   relax trajectory rel_b
+    + [5] * 4  # 20..23  electrostatic ele_a / ele_b
+)
+#: Per-sample task labels, parent space, ``len == len(dataset)``.
+TASK_LABELS = ["equilibrium"] * 6 + ["torsion"] * 9 + ["relax"] * 5 + ["electrostatic"] * 4
+#: Per-sample group ids, parent space, ``len == len(dataset)``.
+GROUP_IDS = (
+    [f"eq{i}" for i in range(6)]
+    + ["tor_a"] * 4
+    + ["tor_b"] * 3
+    + ["tor_c"] * 2
+    + ["rel_a"] * 3
+    + ["rel_b"] * 2
+    + ["ele_a"] * 2
+    + ["ele_b"] * 2
+)
+#: Split index list without the electrostatic samples (Stage A/B splits).
+TASK_INDICES_NO_ELECTROSTATIC = list(range(20))
+#: Split index list covering the whole fixture (Stage C splits).
+TASK_INDICES_ALL = list(range(24))
+
+#: ByteFF-derived Stage B mixture (arXiv:2408.12817), sums to 1.0.
+STAGE_B = {"equilibrium": 0.35, "torsion": 0.45, "relax": 0.20}
+#: ByteFF-derived Stage C mixture (arXiv:2408.12817), sums to 1.0.
+STAGE_C = {"equilibrium": 0.25, "torsion": 0.30, "relax": 0.35, "electrostatic": 0.10}
+#: Mixture whose ``electrostatic`` share is small enough that largest-remainder
+#: alone starves it, so the anti-starvation override must fire. Sums to 1.0.
+SCARCE_MIXTURE = {
+    "equilibrium": 0.30,
+    "torsion": 0.35,
+    "relax": 0.33,
+    "electrostatic": 0.02,
+}
+#: Seed for the hard-coded golden plan (spec ``universal-class-i-10-sampler``).
+TASK_SEED = 20260814
+
+# --- Golden plan, captured 2026-08-14 from the scratchpad reference ---------
+# prototype ``task_mixture_prototype.build_plan`` (torch 2.12.1+cpu, CPU,
+# float32), which implements the spec's eager-plan steps 1-7 verbatim:
+#   1. bucket ``indices`` (given order) into units keyed (task_label, group_id)
+#   2. per-unit aggregate cost from ``dataset.atom_counts`` pointer arithmetic
+#   3. ONE ``make_generator(TASK_SEED)``; tasks visited in ``sorted(mixture)``
+#      order — here equilibrium, relax, torsion — each consuming one
+#      ``torch.randperm(n_units, generator=g)``
+#   4. one transient ``TokenBudgetPacker`` per task, ``.pack(shuffled_order)``,
+#      unit positions expanded to member frame indices
+#   5. natural epoch length ``min_{p>0} floor(len(batches_t) / p_t)``
+#      = min(floor(2/0.35)=5, floor(3/0.45)=6, floor(1/0.20)=5) = 5
+#   6. largest-remainder apportionment: base = (1, 1, 2) for
+#      (equilibrium 1.75, relax 1.00, torsion 2.25); leftover 1 goes to the
+#      largest remainder (equilibrium, 0.75) → equilibrium 2, relax 1, torsion 2
+#   7. interleave: multiset ["equilibrium"×2, "relax"×1, "torsion"×2] in sorted
+#      task order, permuted by ``torch.randperm(5, generator=g)`` from the SAME
+#      generator; each slot consumes its task's next unused packed batch
+#
+# Only the *index literals* below come from the prototype — every count in the
+# derivation above is hand-computed from the fixture table. A post-GREEN
+# mismatch therefore means the implementation deviated from the spec algorithm,
+# not that the goldens were stale.
+#
+#: ``list(TaskMixtureBatchSampler(...))`` for Stage B / max_atoms=24 / seed 20260814.
+GOLDEN_TASK_PLAN = [
+    [3, 2, 5, 1],  # equilibrium: 4 units × 5 atoms = 20 (a 5th would be 25 > 24)
+    [15, 16, 17, 18, 19],  # relax: rel_a (12) + rel_b (8) = 20
+    [10, 11, 12],  # torsion: tor_b, 18 atoms
+    [13, 14],  # torsion: tor_c, 14 atoms
+    [0, 4],  # equilibrium: the 2 leftover units, 10 atoms
+]
+#: Hand-derived apportionment of the 5 golden slots (step 6 above).
+GOLDEN_BATCHES_PER_TASK = {"equilibrium": 2, "relax": 1, "torsion": 2}
+#: Frame counts implied by ``GOLDEN_TASK_PLAN`` (6 + 5 + 3 + 2).
+GOLDEN_FRAMES_PER_TASK = {"equilibrium": 6, "relax": 5, "torsion": 5}
+
+#: Units per task in the wide fixture used for the ≥ 200-batch mixture bounds.
+BIG_UNITS_PER_TASK = 96
+#: Atom budget of the wide fixture — every unit costs ≤ 6 and no two fit, so
+#: ``n_batches == n_units`` per task and no unit is oversize.
+BIG_MAX_ATOMS = 6
+#: Forced epoch length with a non-integral apportionment for every task.
+BIG_BATCHES_PER_EPOCH = 203
+
+
+def _make_sized_samples(atom_counts: list[int]) -> list[dict]:
+    """Build samples with the exact per-sample atom counts given.
+
+    Args:
+        atom_counts: Per-sample atom count; edge count is ``atoms + 2`` so the
+            packed-cache schema inference cannot confuse per-atom and per-edge
+            keys (same invariant as :func:`_make_varied_samples`).
+
+    Returns:
+        Flat sample dicts in the pipeline's raw-sample shape.
+    """
+    torch.manual_seed(0)
+    samples = []
+    for i, na in enumerate(atom_counts):
+        ne = na + 2
+        samples.append(
+            {
+                "Z": torch.ones(na, dtype=torch.long),
+                "pos": torch.randn(na, 3),
+                "edge_index": torch.randint(0, na, (ne, 2), dtype=torch.long),
+                "edge_diff": torch.randn(ne, 3),
+                "edge_dist": torch.rand(ne) + 0.5,
+                "targets": {"U0": torch.tensor([float(i)])},
+            }
+        )
+    return samples
+
+
+def _write_task_cache(tmp_path: Path, tag: str) -> Path:
+    """Save the 24-sample task fixture cache under *tmp_path*."""
+    sink = tmp_path / f"task_{tag}.pt"
+    PackedCache(sink).save(_make_sized_samples(TASK_ATOM_COUNTS))
+    return sink
+
+
+def _big_task_tables() -> tuple[list[int], list[str], list[str]]:
+    """Wide fixture: ``BIG_UNITS_PER_TASK`` units for each of the four tasks.
+
+    Equilibrium and electrostatic units are single frames (5 / 4 atoms);
+    torsion and relax units are two frames of 3 atoms (6 atoms aggregate).
+    Under ``BIG_MAX_ATOMS`` every unit is its own batch — no two units fit
+    together (5+4 = 9 > 6) and none is oversize (max aggregate 6 == budget) —
+    so each task supplies exactly ``BIG_UNITS_PER_TASK`` batches.
+
+    Returns:
+        ``(atom_counts, task_labels, group_ids)`` in parent index order:
+        equilibrium block, torsion block, relax block, electrostatic block.
+    """
+    atoms: list[int] = []
+    labels: list[str] = []
+    groups: list[str] = []
+    for k in range(BIG_UNITS_PER_TASK):
+        atoms.append(5)
+        labels.append("equilibrium")
+        groups.append(f"eq{k:03d}")
+    for task, per_frame in (("torsion", 3), ("relax", 3)):
+        for k in range(BIG_UNITS_PER_TASK):
+            for _ in range(2):
+                atoms.append(per_frame)
+                labels.append(task)
+                groups.append(f"{task[:3]}{k:03d}")
+    for k in range(BIG_UNITS_PER_TASK):
+        atoms.append(4)
+        labels.append("electrostatic")
+        groups.append(f"ele{k:03d}")
+    return atoms, labels, groups
+
+
+@pytest.fixture
+def task_ds(tmp_path) -> MmapDataset:
+    """The 24-sample hand-checkable task/group fixture."""
+    return MmapDataset(_write_task_cache(tmp_path, "main"))
+
+
+@pytest.fixture(scope="session")
+def big_task_fixture(tmp_path_factory) -> tuple[MmapDataset, list[str], list[str]]:
+    """Wide read-only fixture: 4 tasks × 96 units → ≥ 200 batches available."""
+    atoms, labels, groups = _big_task_tables()
+    sink = tmp_path_factory.mktemp("big_task") / "big_task.pt"
+    PackedCache(sink).save(_make_sized_samples(atoms))
+    return MmapDataset(sink), labels, groups
+
+
+def _units_in(indices: list[int]) -> dict[tuple[str, str], list[int]]:
+    """Group *indices* into ``(task, group) -> frame indices`` (fixture space)."""
+    units: dict[tuple[str, str], list[int]] = {}
+    for i in indices:
+        units.setdefault((TASK_LABELS[i], GROUP_IDS[i]), []).append(i)
+    return units
+
+
+class TestTaskMixturePlan:
+    """Eager plan: single-task batches and the hard-coded golden (ac-001, ac-007)."""
+
+    def test_every_batch_carries_exactly_one_task_label(self, task_ds):
+        """ac-001: the flat frame pool is structurally unreachable."""
+
+        sampler = TaskMixtureBatchSampler(
+            task_ds,
+            indices=TASK_INDICES_ALL,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_C,
+            max_atoms=24,
+            batches_per_epoch=4,
+            seed=TASK_SEED,
+        )
+        for batch in sampler:
+            assert len(batch) >= 1
+            assert len({TASK_LABELS[i] for i in batch}) == 1
+
+    def test_plan_indices_are_a_duplicate_free_subset_of_the_split(self, task_ds):
+        """ac-001: an epoch never repeats a frame nor reaches outside ``indices``."""
+
+        sampler = TaskMixtureBatchSampler(
+            task_ds,
+            indices=TASK_INDICES_ALL,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_C,
+            max_atoms=24,
+            batches_per_epoch=4,
+            seed=TASK_SEED,
+        )
+        flat = [i for batch in sampler for i in batch]
+        assert len(flat) == len(set(flat))
+        assert set(flat) <= set(TASK_INDICES_ALL)
+
+    def test_natural_epoch_length_is_the_no_exhaustion_floor(self, task_ds):
+        """Step 5: ``min(floor(2/0.35), floor(3/0.45), floor(1/0.20)) == 5``."""
+
+        sampler = TaskMixtureBatchSampler(
+            task_ds,
+            indices=TASK_INDICES_NO_ELECTROSTATIC,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_B,
+            max_atoms=24,
+            seed=TASK_SEED,
+        )
+        assert len(sampler) == 5
+
+    def test_hard_coded_golden_plan(self, task_ds):
+        """ac-007: the captured Stage B plan at ``seed=20260814`` reproduces."""
+
+        sampler = TaskMixtureBatchSampler(
+            task_ds,
+            indices=TASK_INDICES_NO_ELECTROSTATIC,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_B,
+            max_atoms=24,
+            seed=TASK_SEED,
+        )
+        assert list(sampler) == GOLDEN_TASK_PLAN
+
+    def test_hard_coded_golden_audit_dicts(self, task_ds):
+        """ac-007: the audit accessors match the hand-derived apportionment."""
+
+        sampler = TaskMixtureBatchSampler(
+            task_ds,
+            indices=TASK_INDICES_NO_ELECTROSTATIC,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_B,
+            max_atoms=24,
+            seed=TASK_SEED,
+        )
+        assert sampler.batches_per_task() == GOLDEN_BATCHES_PER_TASK
+        assert sampler.frames_per_task() == GOLDEN_FRAMES_PER_TASK
+
+
+class TestTaskMixtureIntegrity:
+    """Unit integrity, budget compliance and the reuse boundary (ac-002/005/006)."""
+
+    def test_scan_units_never_straddle_batches(self, task_ds):
+        """ac-002: each unit's frames land in exactly one batch, whole."""
+
+        with pytest.warns(UserWarning):
+            sampler = TaskMixtureBatchSampler(
+                task_ds,
+                indices=TASK_INDICES_NO_ELECTROSTATIC,
+                task_labels=TASK_LABELS,
+                group_ids=GROUP_IDS,
+                mixture=STAGE_B,
+                max_atoms=20,
+                batches_per_epoch=6,
+                seed=TASK_SEED,
+            )
+        plan = list(sampler)
+        # Apportionment at n=6 is (equilibrium 2, torsion 3, relax 1) == supply,
+        # so every one of the 8 units in the split appears exactly once.
+        for key, frames in _units_in(TASK_INDICES_NO_ELECTROSTATIC).items():
+            hosts = [b for b in plan if set(frames) & set(b)]
+            assert len(hosts) == 1, f"unit {key} straddles {len(hosts)} batches"
+            assert set(frames) <= set(hosts[0])
+
+    def test_oversize_unit_is_kept_whole_as_a_singleton_batch(self, task_ds):
+        """ac-002: ``tor_a`` (24 atoms > 20) is one whole batch, never split."""
+
+        with pytest.warns(UserWarning):
+            sampler = TaskMixtureBatchSampler(
+                task_ds,
+                indices=TASK_INDICES_NO_ELECTROSTATIC,
+                task_labels=TASK_LABELS,
+                group_ids=GROUP_IDS,
+                mixture=STAGE_B,
+                max_atoms=20,
+                batches_per_epoch=6,
+                seed=TASK_SEED,
+            )
+        assert [6, 7, 8, 9] in list(sampler)
+
+    def test_oversize_unit_warns_exactly_once_naming_task_and_group(self, task_ds):
+        """ac-002: one sampler-owned UserWarning naming ``torsion`` + ``tor_a``."""
+
+        with pytest.warns(UserWarning) as record:
+            TaskMixtureBatchSampler(
+                task_ds,
+                indices=TASK_INDICES_NO_ELECTROSTATIC,
+                task_labels=TASK_LABELS,
+                group_ids=GROUP_IDS,
+                mixture=STAGE_B,
+                max_atoms=20,
+                batches_per_epoch=6,
+                seed=TASK_SEED,
+            )
+        oversize = [w for w in record if "tor_a" in str(w.message)]
+        assert len(oversize) == 1
+        assert "torsion" in str(oversize[0].message)
+
+    def test_every_batch_respects_both_budgets(self, task_ds):
+        """ac-005: no non-oversize batch exceeds ``max_atoms`` or ``max_edges``."""
+
+        sampler = TaskMixtureBatchSampler(
+            task_ds,
+            indices=TASK_INDICES_NO_ELECTROSTATIC,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_B,
+            max_atoms=24,
+            max_edges=34,
+            seed=TASK_SEED,
+        )
+        atoms = task_ds.atom_counts
+        edges = task_ds.edge_counts
+        for batch in sampler:
+            # Largest unit costs 24 atoms / 32 edges, so nothing is oversize here.
+            assert int(atoms[batch].sum()) <= 24
+            assert int(edges[batch].sum()) <= 34
+
+    def test_edge_budget_closes_batches_the_atom_budget_would_not(self, task_ds):
+        """ac-005: the edge cap is honoured, not silently dropped.
+
+        All 6 equilibrium units cost 30 atoms — one batch under
+        ``max_atoms=100``. Their 42 edges exceed ``max_edges=32`` after the
+        4th unit (28 edges; a 5th makes 35), so the edge cap alone must split
+        them into 2 batches.
+        """
+
+        sampler = TaskMixtureBatchSampler(
+            task_ds,
+            indices=TASK_INDICES_NO_ELECTROSTATIC,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_B,
+            max_atoms=100,
+            max_edges=32,
+            batches_per_epoch=6,
+            seed=TASK_SEED,
+        )
+        assert sampler.batches_per_task()["equilibrium"] == 2
+        edges = task_ds.edge_counts
+        for batch in sampler:
+            assert int(edges[batch].sum()) <= 32
+
+    def test_single_next_fit_loop_lives_in_the_packer(self):
+        """ac-005: the one open-bin accumulator appears once, inside 09's packer.
+
+        Characterization — green already, like ``TestSamplerGoldenPlan``. It
+        exists so that adding a second next-fit loop while implementing
+        ``TaskMixtureBatchSampler`` turns this test red.
+        """
+        from molix.data import sampler as sampler_module
+
+        source = Path(inspect.getsourcefile(sampler_module)).read_text()
+        assert source.count("current.append(") == 1
+        assert "current.append(" in inspect.getsource(TokenBudgetPacker)
+
+    def test_task_mixture_sampler_has_no_second_packing_loop(self):
+        """ac-005: the sampler delegates instead of re-implementing next-fit."""
+
+        source = inspect.getsource(TaskMixtureBatchSampler)
+        for marker in ("current.append(", "batches.append(current)", "totals ="):
+            assert marker not in source, f"second packing loop marker {marker!r}"
+        assert "TokenBudgetPacker(" in source
+        assert ".pack(" in source
+
+    def test_zero_getitem_calls_during_construction_and_iteration(self, tmp_path):
+        """ac-006: unit costs come from pointers only — no sample is unpacked."""
+
+        ds = _CountingDataset(_write_task_cache(tmp_path, "counting"))
+        sampler = TaskMixtureBatchSampler(
+            ds,
+            indices=TASK_INDICES_ALL,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_C,
+            max_atoms=24,
+            max_edges=34,
+            batches_per_epoch=4,
+            seed=TASK_SEED,
+        )
+        list(sampler)
+        assert ds.getitem_calls == 0
+
+
+class TestTaskMixtureMixture:
+    """Largest-remainder apportionment and anti-starvation (ac-003, ac-004)."""
+
+    def test_stage_b_apportionment_bound_over_203_batches(self, big_task_fixture):
+        """ac-003: ``|count_t - p_t·n| <= 1`` for Stage B, no override fired.
+
+        Deterministic apportionment makes this a hard bound, strictly stronger
+        than a χ² test on a zero-variance realization. Hand-derived at n=203:
+        equilibrium 71.05 → 71, torsion 91.35 → 91, relax 40.6 → 40 + the single
+        leftover (largest remainder 0.6) = 41; all ≤ the 96-unit supply.
+        """
+
+        ds, labels, groups = big_task_fixture
+        non_electrostatic = [i for i, t in enumerate(labels) if t != "electrostatic"]
+        sampler = TaskMixtureBatchSampler(
+            ds,
+            indices=non_electrostatic,
+            task_labels=labels,
+            group_ids=groups,
+            mixture=STAGE_B,
+            max_atoms=BIG_MAX_ATOMS,
+            batches_per_epoch=BIG_BATCHES_PER_EPOCH,
+            seed=TASK_SEED,
+        )
+        assert len(sampler) == BIG_BATCHES_PER_EPOCH
+        counts = sampler.batches_per_task()
+        for task, p in STAGE_B.items():
+            assert abs(counts[task] - p * len(sampler)) <= 1
+
+    def test_stage_c_apportionment_bound_over_203_batches(self, big_task_fixture):
+        """ac-003: same hard bound for the four-task Stage C mixture."""
+
+        ds, labels, groups = big_task_fixture
+        sampler = TaskMixtureBatchSampler(
+            ds,
+            indices=list(range(len(labels))),
+            task_labels=labels,
+            group_ids=groups,
+            mixture=STAGE_C,
+            max_atoms=BIG_MAX_ATOMS,
+            batches_per_epoch=BIG_BATCHES_PER_EPOCH,
+            seed=TASK_SEED,
+        )
+        assert len(sampler) == BIG_BATCHES_PER_EPOCH
+        counts = sampler.batches_per_task()
+        for task, p in STAGE_C.items():
+            assert abs(counts[task] - p * len(sampler)) <= 1
+
+    def test_scarce_stage_c_task_receives_at_least_one_batch(self, task_ds):
+        """ac-004: electrostatic (p=0.10, 1 unit) is never dropped at small n."""
+
+        sampler = TaskMixtureBatchSampler(
+            task_ds,
+            indices=TASK_INDICES_ALL,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_C,
+            max_atoms=24,
+            batches_per_epoch=4,
+            seed=TASK_SEED,
+        )
+        assert sampler.batches_per_task()["electrostatic"] >= 1
+
+    def test_anti_starvation_donor_stays_within_one_plus_k(self, big_task_fixture):
+        """ac-004: the override fires for p=0.02 and the donor deviates ≤ 1+K.
+
+        Hand-derived at n=10 for ``SCARCE_MIXTURE``: bases are (3, 3, 3, 0) for
+        (equilibrium 3.0, torsion 3.5, relax 3.3, electrostatic 0.2); the single
+        leftover goes to torsion (remainder 0.5) → torsion 4. electrostatic is
+        starved, so K=1 and the largest-surplus donor (torsion, 4 - 3.5 = 0.5)
+        gives one back: |4-1 - 3.5| = 0.5 ≤ 1 + K = 2.
+        """
+
+        ds, labels, groups = big_task_fixture
+        n = 10
+        sampler = TaskMixtureBatchSampler(
+            ds,
+            indices=list(range(len(labels))),
+            task_labels=labels,
+            group_ids=groups,
+            mixture=SCARCE_MIXTURE,
+            max_atoms=BIG_MAX_ATOMS,
+            batches_per_epoch=n,
+            seed=TASK_SEED,
+        )
+        counts = sampler.batches_per_task()
+        assert counts["electrostatic"] >= 1
+        rescued = sum(
+            1
+            for task, p in SCARCE_MIXTURE.items()
+            if p > 0 and math.floor(p * n) == 0 and counts.get(task, 0) >= 1
+        )
+        assert rescued >= 1
+        for task, p in SCARCE_MIXTURE.items():
+            assert abs(counts.get(task, 0) - p * n) <= 1 + rescued
+
+
+class TestTaskMixtureDeterminism:
+    """The plan is a pure function of the constructor arguments (ac-008)."""
+
+    def _build(self, dataset, seed: int):
+        """Stage B sampler over the fixture split, at *seed*."""
+
+        return TaskMixtureBatchSampler(
+            dataset,
+            indices=TASK_INDICES_NO_ELECTROSTATIC,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_B,
+            max_atoms=24,
+            seed=seed,
+        )
+
+    def test_same_arguments_give_identical_plans(self, task_ds):
+        """ac-008(a): two instances with identical config agree."""
+        assert list(self._build(task_ds, TASK_SEED)) == list(self._build(task_ds, TASK_SEED))
+
+    def test_seed_plus_one_gives_a_different_plan(self, task_ds):
+        """ac-008(b): reseeding actually reshuffles units and slots."""
+        assert list(self._build(task_ds, TASK_SEED)) != list(self._build(task_ds, TASK_SEED + 1))
+
+    def test_iterating_one_instance_twice_is_stable(self, task_ds):
+        """ac-008(c): ``__iter__`` replays the cached eager plan."""
+        sampler = self._build(task_ds, TASK_SEED)
+        assert list(sampler) == list(sampler)
+
+    def test_pickle_round_trip_gives_an_identical_plan(self, tmp_path):
+        """ac-008(d): no mmap-backed count tensor is stored on the instance."""
+        ds = CachedDataset(_write_task_cache(tmp_path, "pickle"))
+        sampler = self._build(ds, TASK_SEED)
+        restored = pickle.loads(pickle.dumps(sampler))
+        assert list(restored) == list(sampler)
+        assert restored.batches_per_task() == sampler.batches_per_task()
+
+    def test_epoch_one_plan_is_derivable_from_seed_plus_one(self, task_ds):
+        """ac-008(e): resume needs ``seed + epoch`` only, no carried RNG state."""
+        epoch0 = list(self._build(task_ds, TASK_SEED))
+        epoch1 = list(self._build(task_ds, TASK_SEED + 1))
+        fresh_epoch1 = list(self._build(task_ds, TASK_SEED + 1))
+        assert fresh_epoch1 == epoch1
+        assert epoch1 != epoch0
+
+
+class TestTaskMixtureValidation:
+    """Eager ``ValueError``s naming argument, value and fix (ac-009)."""
+
+    def _kwargs(self, **overrides):
+        """Valid Stage B constructor kwargs, with *overrides* applied."""
+        kwargs = dict(
+            indices=TASK_INDICES_NO_ELECTROSTATIC,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_B,
+            max_atoms=24,
+            seed=TASK_SEED,
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_no_budget_raises_naming_both_arguments(self, task_ds):
+        """Neither budget given → the message names ``max_atoms`` and ``max_edges``."""
+
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(max_atoms=None))
+        message = str(excinfo.value)
+        assert "max_atoms" in message
+        assert "max_edges" in message
+
+    def test_zero_max_atoms_raises_naming_the_value(self, task_ds):
+        """``max_atoms=0`` → names the argument and the offending value."""
+
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(max_atoms=0))
+        message = str(excinfo.value)
+        assert "max_atoms" in message
+        assert "0" in message
+
+    def test_negative_max_edges_raises_naming_the_value(self, task_ds):
+        """``max_edges=-5`` → names the argument and the offending value."""
+
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(max_edges=-5))
+        message = str(excinfo.value)
+        assert "max_edges" in message
+        assert "-5" in message
+
+    def test_mixture_not_summing_to_one_raises_naming_the_sum(self, task_ds):
+        """0.5 + 0.25 + 0.5 = 1.25 exactly (binary-exact) → the sum is reported."""
+
+        bad = {"equilibrium": 0.5, "torsion": 0.25, "relax": 0.5}
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(mixture=bad))
+        message = str(excinfo.value)
+        assert "mixture" in message
+        assert "1.25" in message
+
+    def test_mixture_sum_within_one_e_minus_nine_is_accepted(self, task_ds):
+        """The tolerance is ``1e-9`` (``group_split.py:30``), not exact equality."""
+
+        near = {"equilibrium": 0.35, "torsion": 0.45, "relax": 0.20 + 1e-12}
+        sampler = TaskMixtureBatchSampler(task_ds, **self._kwargs(mixture=near))
+        assert len(sampler) >= 1
+
+    def test_negative_probability_raises_naming_task_and_value(self, task_ds):
+        """``equilibrium=-0.1`` (sum still 1.0) → names the task and value."""
+
+        bad = {"equilibrium": -0.1, "torsion": 0.6, "relax": 0.5}
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(mixture=bad))
+        message = str(excinfo.value)
+        assert "equilibrium" in message
+        assert "-0.1" in message
+
+    def test_probability_above_one_raises_naming_task_and_value(self, task_ds):
+        """``equilibrium=1.5`` (sum still 1.0) → names the task and value."""
+
+        bad = {"equilibrium": 1.5, "torsion": -0.5, "relax": 0.0}
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(mixture=bad))
+        message = str(excinfo.value)
+        assert "equilibrium" in message or "torsion" in message
+        assert "1.5" in message or "-0.5" in message
+
+    def test_empty_mixture_raises_naming_the_argument(self, task_ds):
+        """``mixture={}`` has no task to draw → eager ``ValueError``."""
+
+        with pytest.raises(ValueError, match="mixture"):
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(mixture={}))
+
+    def test_split_label_absent_from_mixture_raises(self, task_ds):
+        """4 electrostatic samples in the split, no such key in Stage B."""
+
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(indices=TASK_INDICES_ALL))
+        message = str(excinfo.value)
+        assert "electrostatic" in message
+        assert "4" in message
+
+    def test_task_with_probability_but_no_units_raises(self, task_ds):
+        """Stage C over an electrostatic-free split → names task and probability."""
+
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(mixture=STAGE_C))
+        message = str(excinfo.value)
+        assert "electrostatic" in message
+        assert "0.1" in message
+
+    def test_task_labels_length_mismatch_raises_naming_both_lengths(self, task_ds):
+        """``len(task_labels)`` must equal ``len(dataset)``."""
+
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(task_labels=TASK_LABELS[:20]))
+        message = str(excinfo.value)
+        assert "task_labels" in message
+        assert "20" in message
+        assert "24" in message
+
+    def test_group_ids_length_mismatch_raises_naming_both_lengths(self, task_ds):
+        """``len(group_ids)`` must equal ``len(dataset)``."""
+
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(group_ids=GROUP_IDS[:20]))
+        message = str(excinfo.value)
+        assert "group_ids" in message
+        assert "20" in message
+        assert "24" in message
+
+    def test_empty_indices_raises_naming_the_argument(self, task_ds):
+        """``indices=[]`` cannot form a single batch."""
+
+        with pytest.raises(ValueError, match="indices"):
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(indices=[]))
+
+    def test_out_of_range_index_raises_naming_the_value(self, task_ds):
+        """An index ≥ ``len(dataset)`` is reported with the valid range.
+
+        The other four indices keep one unit per Stage B task, so the
+        out-of-range index is the *only* invalid thing about this call.
+        """
+
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(task_ds, **self._kwargs(indices=[0, 1, 6, 15, 99]))
+        message = str(excinfo.value)
+        assert "indices" in message
+        assert "99" in message
+
+
+class TestTaskMixtureAudit:
+    """Read-only audit accessors and the exhaustion path (ac-010, ac-011)."""
+
+    def _sampler(self, dataset, **overrides):
+        """Stage C sampler covering all four tasks (4 slots, no exhaustion)."""
+
+        kwargs = dict(
+            indices=TASK_INDICES_ALL,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_C,
+            max_atoms=24,
+            batches_per_epoch=4,
+            seed=TASK_SEED,
+        )
+        kwargs.update(overrides)
+        return TaskMixtureBatchSampler(dataset, **kwargs)
+
+    def test_batches_per_task_sums_to_len(self, task_ds):
+        """ac-011: every planned batch is attributed to exactly one task."""
+        sampler = self._sampler(task_ds)
+        assert sum(sampler.batches_per_task().values()) == len(sampler)
+
+    def test_frames_per_task_sums_to_the_planned_frame_count(self, task_ds):
+        """ac-011: every planned frame is attributed to exactly one task."""
+        sampler = self._sampler(task_ds)
+        total = sum(len(batch) for batch in sampler)
+        assert sum(sampler.frames_per_task().values()) == total
+
+    def test_audit_dicts_match_a_direct_recount_of_the_plan(self, task_ds):
+        """ac-011: the accessors report the realized plan, not the request."""
+        sampler = self._sampler(task_ds)
+        batches: dict[str, int] = {}
+        frames: dict[str, int] = {}
+        for batch in sampler:
+            task = TASK_LABELS[batch[0]]
+            batches[task] = batches.get(task, 0) + 1
+            frames[task] = frames.get(task, 0) + len(batch)
+        assert sampler.batches_per_task() == batches
+        assert sampler.frames_per_task() == frames
+
+    def test_mutating_a_returned_dict_does_not_corrupt_the_plan(self, task_ds):
+        """ac-011: accessors hand back fresh copies, not internal state."""
+        sampler = self._sampler(task_ds)
+        snapshot = sampler.batches_per_task()
+        plan = list(sampler)
+        sampler.batches_per_task()["equilibrium"] = 999
+        sampler.frames_per_task().clear()
+        assert sampler.batches_per_task() == snapshot
+        assert list(sampler) == plan
+
+    def test_no_combined_accessor_or_verdict_method_exists(self, task_ds):
+        """ac-011: tolerance comparison stays the caller's job (evidence E2)."""
+        sampler = self._sampler(task_ds)
+        for forbidden in ("check_mixture", "assert_balanced", "mixture_report", "audit"):
+            assert not hasattr(sampler, forbidden)
+
+    def test_exhaustion_warns_exactly_once_naming_the_exhausted_task(self, task_ds):
+        """ac-010: ``batches_per_epoch=7`` demands 3 equilibrium batches of 2."""
+
+        with pytest.warns(UserWarning) as record:
+            TaskMixtureBatchSampler(
+                task_ds,
+                indices=TASK_INDICES_NO_ELECTROSTATIC,
+                task_labels=TASK_LABELS,
+                group_ids=GROUP_IDS,
+                mixture=STAGE_B,
+                max_atoms=24,
+                batches_per_epoch=7,
+                seed=TASK_SEED,
+            )
+        exhausted = [w for w in record if "equilibrium" in str(w.message)]
+        assert len(exhausted) == 1
+
+    def test_exhausted_plan_length_and_composition_are_hand_computed(self, task_ds):
+        """ac-010: apportionment (3, 3, 1) vs supply (2, 3, 1) → 6 realized slots.
+
+        At n=7 Stage B apportions equilibrium 2.45 → 2 + the leftover (largest
+        remainder 0.45) = 3, torsion 3.15 → 3, relax 1.4 → 1. Equilibrium only
+        supplies 2 batches, and neither torsion (3 of 3) nor relax (1 of 1) can
+        absorb the renormalized slot, so the plan ends one short at 6 and every
+        unit of the split is used exactly once.
+        """
+
+        with pytest.warns(UserWarning):
+            sampler = TaskMixtureBatchSampler(
+                task_ds,
+                indices=TASK_INDICES_NO_ELECTROSTATIC,
+                task_labels=TASK_LABELS,
+                group_ids=GROUP_IDS,
+                mixture=STAGE_B,
+                max_atoms=24,
+                batches_per_epoch=7,
+                seed=TASK_SEED,
+            )
+        assert len(sampler) == 6
+        assert sampler.batches_per_task() == {"equilibrium": 2, "torsion": 3, "relax": 1}
+        assert sampler.frames_per_task() == {"equilibrium": 6, "torsion": 9, "relax": 5}
