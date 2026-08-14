@@ -20,6 +20,7 @@ import json
 import os
 import stat
 import struct
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -487,6 +488,94 @@ class TestBlockManifest:
         path.write_text(json.dumps(raw))
         with pytest.raises(ValueError):
             BlockManifest.read(sealed_block)
+
+    # -- units / rows accessors --------------------------------------------
+    # Spec ``streaming-data-tiers-04-scheduler-integration-01-tables`` § 1: two
+    # typed reads of the digest-covered document (``_DIGEST_FIELDS`` already
+    # covers ``units`` / ``rows``), authoritative only on a sealed manifest.
+
+    def test_units_equals_the_appended_unit_count(self, two_unit_block: Path):
+        """ac-001: ``units`` is the committed unit count ``M`` of the sealed block."""
+        manifest = BlockManifest.read(two_unit_block)
+        assert isinstance(manifest.units, int)
+        assert manifest.units == 2
+
+    def test_rows_equals_the_stored_document_entry_for_entry(self, two_unit_block: Path):
+        """ac-001: ``rows`` is a ``Mapping[str, int]`` view of the stored field."""
+        manifest = BlockManifest.read(two_unit_block)
+        stored = json.loads((two_unit_block / "manifest.json").read_text())["rows"]
+        assert isinstance(manifest.rows, Mapping)
+        assert dict(manifest.rows) == stored
+        assert all(isinstance(value, int) for value in manifest.rows.values())
+
+    def test_rows_match_the_hand_computed_two_level_arithmetic(self, two_unit_block: Path):
+        """ac-001: N = (3, 4), n_frames = (2, 3) — the fixture at ``:729-752``.
+
+        molecule = M = 2; molecule_atom = ΣN_m = 3 + 4 = 7;
+        frame_atom = Σ n_m·N_m = 2·3 + 3·4 = 18.
+        """
+        rows = BlockManifest.read(two_unit_block).rows
+        assert rows["molecule"] == 2
+        assert rows["molecule_atom"] == 7
+        assert rows["frame_atom"] == 18
+
+    def test_rows_carries_one_key_per_declared_valence_family(self, two_unit_block: Path):
+        """ac-001: ``molecule_term:<family>`` exists exactly for declared families.
+
+        Counts are the per-unit term tables: bonds 2 + 3, angles 1 + 2,
+        propers 0 + 1; ``improper`` / ``internal`` are never declared here.
+        """
+        rows = BlockManifest.read(two_unit_block).rows
+        assert {name for name in rows if name.startswith("molecule_term:")} == {
+            "molecule_term:bond",
+            "molecule_term:angle",
+            "molecule_term:proper",
+        }
+        assert rows["molecule_term:bond"] == 5
+        assert rows["molecule_term:angle"] == 3
+        assert rows["molecule_term:proper"] == 1
+
+    def test_rows_omits_frame_for_a_block_declaring_no_frame_space_column(self, tmp_path: Path):
+        """ac-001: a ``pos``-only block has no ``"frame"`` key; ``F`` stays a reader fact."""
+        unit = SamplingUnit(
+            key="bare",
+            task="equilibrium",
+            topology={"Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
+            frames={"pos": _halves(6 * 3, 0).reshape(6, 3)},
+        )
+        rows = BlockManifest.read(_write_block(tmp_path / "frameless", [unit])).rows
+        assert "frame" not in rows
+        assert rows["frame_atom"] == 6
+        assert not [name for name in rows if name.startswith("molecule_term:")]
+
+    def test_units_and_rows_are_stale_before_seal(self, tmp_path: Path):
+        """ac-003: the manifest is rewritten on freeze / task registration / seal only.
+
+        Two units of the *same* task trigger exactly one manifest write (the
+        schema freeze, before the first unit's bytes), so the document still
+        reports the pre-append counts while the writer holds two.
+        """
+        root = tmp_path / "unsealed"
+        writer = BlockWriter(root, split="train", provenance=_PROVENANCE)
+        writer.append_unit(_unit("mol-a", "equilibrium", [8, 1, 1], 2, 0))
+        writer.append_unit(_unit("mol-a2", "equilibrium", [8, 1, 1], 2, 10))
+        manifest = BlockManifest.read(root)
+        assert manifest.sealed is False
+        assert writer.unit_count == 2
+        assert manifest.units < writer.unit_count
+        assert dict(manifest.rows) == {}
+
+    def test_units_and_rows_perform_no_digest_work(self, two_unit_block: Path, monkeypatch):
+        """ac-002: ``verify()`` stays the only code path that hashes column bytes."""
+
+        def boom(*args: object, **kwargs: object) -> str:
+            raise RuntimeError("a manifest accessor must never hash column bytes")
+
+        monkeypatch.setattr("molix.store.block._sha256_file", boom)
+        stored = json.loads((two_unit_block / "manifest.json").read_text())["rows"]
+        manifest = BlockManifest.read(two_unit_block)
+        assert manifest.units == 2
+        assert dict(manifest.rows) == stored
 
 
 # ---------------------------------------------------------------------------

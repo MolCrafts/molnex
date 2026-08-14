@@ -793,6 +793,44 @@ class BlockManifest:
         return tuple(self._document.get("task_names", ()))
 
     @property
+    def units(self) -> int:
+        """Committed unit count ``M`` recorded by the last manifest write.
+
+        Authoritative only when :attr:`sealed` is ``True``:
+        :class:`BlockWriter` rewrites ``manifest.json`` on schema freeze, on
+        task registration and on :meth:`BlockWriter.seal` — **not** on every
+        :meth:`BlockWriter.append_unit` — so an unsealed manifest can report
+        fewer units than the writer already holds.
+
+        Returns:
+            The stored ``units`` field as ``int`` (``0`` when absent, i.e.
+            before the first unit was committed).
+        """
+        return int(self._document.get("units", 0))
+
+    @property
+    def rows(self) -> Mapping[str, int]:
+        """Row count per row space, as of the last manifest write.
+
+        Authoritative only when :attr:`sealed` is ``True`` (same staleness
+        rule as :attr:`units`). Keys are the row spaces of the declared
+        columns — ``molecule`` (= ``M``), ``molecule_atom`` (= ``Σ N_m``),
+        ``molecule_term:<family>`` (one per declared valence family),
+        ``frame`` (= ``F``, present only when a frame-space column such as
+        ``energy`` is declared), ``frame_atom`` (= ``Σ n_m·N_m``) and
+        ``bytes``. The stored map is returned as-is: absent spaces are not
+        synthesized, so ``F`` stays a :attr:`BlockReader.frame_count` fact
+        for a block whose only frame payload is ``pos``.
+
+        Returns:
+            Read-only ``{row space: row count}`` mapping of ``int``; empty
+            before the first row-count refresh.
+        """
+        return MappingProxyType(
+            {str(space): int(count) for space, count in self._document.get("rows", {}).items()}
+        )
+
+    @property
     def provenance(self) -> Mapping[str, Any]:
         """Opaque caller-supplied provenance (source, generator, created_at, units)."""
         return self._document.get("provenance", {})

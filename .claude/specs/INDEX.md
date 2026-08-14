@@ -34,6 +34,5 @@ must not be treated as authority for a new training submission.
 | [universal-class-i-07-wilson] | 2026-08-14 | Completed; all 11 acceptance criteria verified. |
 | [universal-class-i-06-hessian] | 2026-08-14 | Completed; all 10 acceptance criteria verified. |
 | `universal-class-i-05-dataset-composition` | 2026-08-14 | Closed in MolNex because dataset composition is not a MolNex responsibility; moved to MolHub as `universal-class-i-01-dataset-composition`. |
-- [streaming-data-tiers-04-scheduler-integration-01-tables](streaming-data-tiers-04-scheduler-integration-01-tables.md) — BlockManifest 类型化 units/rows 访问器 + 采样器标签表泛化（int 码张量/名字典，R1）+ 交叉点实测 bench。 [approved]
 - [streaming-data-tiers-04-scheduler-integration-02-view](streaming-data-tiers-04-scheduler-integration-02-view.md) — 多块 BaseDataset 视图：全局 (block, local) 索引、合并任务字典、全局唯一 group 码、有界 K 读者池、I7/I8 典型拒绝。 [approved]
 - [streaming-data-tiers-04-scheduler-integration-03-plan](streaming-data-tiers-04-scheduler-integration-03-plan.md) — BatchSamplerSource 全局计划 + 块窗消费、("graphs","task") 盖章、visit-order JSON 交接 molhub、I10 覆盖报告。 [approved]

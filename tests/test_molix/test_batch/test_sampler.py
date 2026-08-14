@@ -16,6 +16,12 @@ Spec ``universal-class-i-10-sampler`` adds GROUP E: RED tests for
 ``molix.batch.sampler.TaskMixtureBatchSampler`` — hierarchical
 task → group → configuration batch sampling over the same packed caches.
 
+Spec ``streaming-data-tiers-04-scheduler-integration-01-tables`` adds
+GROUP F: RED tests for ``molix.batch.sampler.FrameLabelTable`` and for
+planning the GROUP E fixture through *either* label representation —
+legacy Python string sequences or the block-native ``(F,)`` integer code
+columns — with one plan, one sampler and no downstream fork.
+
 Fixture geometry (hand-checkable): sample ``i`` has ``3 + (i % 8)`` atoms
 (cycling 3..10) and ``n_atoms + 2`` edges (cycling 5..12). Edge counts
 never equal atom counts, so the packed-cache schema inference cannot
@@ -1530,3 +1536,383 @@ class TestTaskMixtureAudit:
         assert len(sampler) == 6
         assert sampler.batches_per_task() == {"equilibrium": 2, "torsion": 3, "relax": 1}
         assert sampler.frames_per_task() == {"equilibrium": 6, "torsion": 9, "relax": 5}
+
+
+# ---------------------------------------------------------------------------
+# GROUP F — FrameLabelTable and the two sampler table forms
+# (spec streaming-data-tiers-04-scheduler-integration-01-tables)
+# ---------------------------------------------------------------------------
+#
+# The block store already emits its scheduler metadata in bounded integer form
+# (``BlockReader.task_codes`` / ``group_codes`` ``(F,) int32`` plus the
+# ``task_names`` dictionary), so the GROUP E fixture is written here a second
+# time as codes.  Both code tables are hand-transcribed from the GROUP E table
+# above, in first-appearance order — the order ``FrameLabelTable.from_labels``
+# must reproduce from the string tables:
+#
+#   task codes    equilibrium 0 (×6), torsion 1 (×9), relax 2 (×5),
+#                 electrostatic 3 (×4)
+#   group codes   eq0..eq5 → 0..5, tor_a → 6, tor_b → 7, tor_c → 8,
+#                 rel_a → 9, rel_b → 10, ele_a → 11, ele_b → 12
+
+#: Bounded task dictionary; the index *is* the task code stored in a block.
+TASK_NAMES = ("equilibrium", "torsion", "relax", "electrostatic")
+#: Bounded group dictionary, same first-appearance order as ``GROUP_IDS``.
+GROUP_NAMES = tuple(f"eq{i}" for i in range(6)) + (
+    "tor_a",
+    "tor_b",
+    "tor_c",
+    "rel_a",
+    "rel_b",
+    "ele_a",
+    "ele_b",
+)
+#: Group code of ``tor_a`` — the unit that is oversize at ``max_atoms=20``.
+TOR_A_GROUP_CODE = 6
+#: ``(F,) int32`` task codes: the block-native form of ``TASK_LABELS``.
+TASK_CODES = torch.tensor([0] * 6 + [1] * 9 + [2] * 5 + [3] * 4, dtype=torch.int32)
+#: ``(F,) int32`` group codes: the block-native form of ``GROUP_IDS``.
+GROUP_CODES = torch.tensor(
+    [0, 1, 2, 3, 4, 5] + [6] * 4 + [7] * 3 + [8] * 2 + [9] * 3 + [10] * 2 + [11] * 2 + [12] * 2,
+    dtype=torch.int32,
+)
+#: Every parent-space index, for whole-table ``codes_at`` round-trips.
+ALL_FRAMES = list(range(len(TASK_LABELS)))
+
+
+def _frame_label_table() -> type:
+    """Return ``molix.batch.sampler.FrameLabelTable``, imported at call time.
+
+    Deferred on purpose: while the type does not exist yet the RED failure is
+    an ``ImportError`` *inside* the GROUP F tests, so collection of this module
+    — and therefore every pre-existing GROUP A-E test — stays unaffected.
+    """
+    from molix.batch.sampler import FrameLabelTable
+
+    return FrameLabelTable
+
+
+class TestFrameLabelTable:
+    """Per-frame ``(task, group)`` identity of one parent index space (ac-004, ac-005)."""
+
+    def test_from_labels_factorizes_in_first_appearance_order(self):
+        """ac-004: the string tables factorize into exactly the block-native codes."""
+
+        table = _frame_label_table().from_labels(TASK_LABELS, GROUP_IDS)
+        tasks, groups = table.codes_at(ALL_FRAMES)
+        assert tasks == TASK_CODES.tolist()
+        assert groups == GROUP_CODES.tolist()
+
+    def test_from_labels_keeps_the_task_dictionary_in_first_appearance_order(self):
+        """ac-004: ``task_names`` is the bounded dictionary, not a sorted set."""
+
+        table = _frame_label_table().from_labels(TASK_LABELS, GROUP_IDS)
+        assert table.task_names == TASK_NAMES
+
+    def test_len_is_the_frame_count(self):
+        """ac-004: ``len(table)`` is ``F``, the parent index space size."""
+
+        table = _frame_label_table().from_labels(TASK_LABELS, GROUP_IDS)
+        assert len(table) == 24
+
+    def test_task_name_round_trips_every_frame_label(self):
+        """ac-004: decoding every task code reproduces ``TASK_LABELS``."""
+
+        table = _frame_label_table().from_labels(TASK_LABELS, GROUP_IDS)
+        tasks, _ = table.codes_at(ALL_FRAMES)
+        assert [table.task_name(code) for code in tasks] == TASK_LABELS
+
+    def test_group_label_round_trips_every_frame_group_id(self):
+        """ac-004: decoding every group code reproduces ``GROUP_IDS``."""
+
+        table = _frame_label_table().from_labels(TASK_LABELS, GROUP_IDS)
+        _, groups = table.codes_at(ALL_FRAMES)
+        assert [table.group_label(code) for code in groups] == GROUP_IDS
+
+    def test_canonical_constructor_takes_the_block_native_int32_columns(self):
+        """ac-004: ``(F,) int32`` columns + a dictionary are accepted verbatim."""
+
+        table = _frame_label_table()(
+            task_codes=TASK_CODES,
+            group_codes=GROUP_CODES,
+            task_names=TASK_NAMES,
+        )
+        assert len(table) == 24
+        assert table.task_name(1) == "torsion"
+
+    def test_group_label_falls_back_to_str_of_the_code_without_a_dictionary(self):
+        """ac-004: no ``group_names`` → the code renders as ``str(code)``."""
+
+        table = _frame_label_table()(
+            task_codes=TASK_CODES,
+            group_codes=GROUP_CODES,
+            task_names=TASK_NAMES,
+        )
+        assert table.group_label(TOR_A_GROUP_CODE) == "6"
+
+    def test_group_label_uses_the_dictionary_when_group_names_are_given(self):
+        """ac-004: with ``group_names`` the original label comes back."""
+
+        table = _frame_label_table()(
+            task_codes=TASK_CODES,
+            group_codes=GROUP_CODES,
+            task_names=TASK_NAMES,
+            group_names=GROUP_NAMES,
+        )
+        assert table.group_label(TOR_A_GROUP_CODE) == "tor_a"
+
+    def test_codes_at_returns_python_int_pairs_in_the_given_order(self):
+        """ac-004: one gather per table, in the caller's order, Python ints out."""
+
+        table = _frame_label_table().from_labels(TASK_LABELS, GROUP_IDS)
+        tasks, groups = table.codes_at([13, 0, 20, 6])
+        assert tasks == [1, 0, 3, 1]
+        assert groups == [8, 0, 11, 6]
+        assert all(type(code) is int for code in (*tasks, *groups))
+
+    def test_unequal_table_lengths_raise_naming_both_arguments_and_lengths(self):
+        """ac-005: 24 task codes vs 20 group codes → both names, both lengths."""
+
+        with pytest.raises(ValueError) as excinfo:
+            _frame_label_table()(
+                task_codes=TASK_CODES,
+                group_codes=GROUP_CODES[:20],
+                task_names=TASK_NAMES,
+            )
+        message = str(excinfo.value)
+        assert "task_codes" in message
+        assert "group_codes" in message
+        assert "24" in message
+        assert "20" in message
+
+    def test_two_dimensional_code_tensor_raises_naming_the_argument(self):
+        """ac-005: the code tables are ``(F,)``, never ``(4, 6)``."""
+
+        with pytest.raises(ValueError) as excinfo:
+            _frame_label_table()(
+                task_codes=TASK_CODES.reshape(4, 6),
+                group_codes=GROUP_CODES,
+                task_names=TASK_NAMES,
+            )
+        message = str(excinfo.value)
+        assert "task_codes" in message
+        assert "1-D" in message or "(F,)" in message
+
+    def test_floating_code_tensor_raises_naming_the_dtype(self):
+        """ac-005: a float table cannot index a dictionary — reject, never round."""
+
+        with pytest.raises(ValueError) as excinfo:
+            _frame_label_table()(
+                task_codes=TASK_CODES,
+                group_codes=GROUP_CODES.to(torch.float32),
+                task_names=TASK_NAMES,
+            )
+        message = str(excinfo.value)
+        assert "group_codes" in message
+        assert "integ" in message.lower() or "dtype" in message.lower()
+
+    def test_non_cpu_code_tensor_raises_naming_cpu(self):
+        """ac-005: tables live on CPU (a ``meta`` tensor stands in for CUDA)."""
+
+        elsewhere = torch.zeros(len(TASK_LABELS), dtype=torch.int32, device="meta")
+        with pytest.raises(ValueError) as excinfo:
+            _frame_label_table()(
+                task_codes=elsewhere,
+                group_codes=GROUP_CODES,
+                task_names=TASK_NAMES,
+            )
+        message = str(excinfo.value)
+        assert "task_codes" in message
+        assert "cpu" in message.lower()
+
+    def test_negative_code_raises_naming_the_argument(self):
+        """ac-005: codes index dictionaries, so ``-1`` is a table bug, not a wrap."""
+
+        codes = GROUP_CODES.clone()
+        codes[3] = -1
+        with pytest.raises(ValueError) as excinfo:
+            _frame_label_table()(
+                task_codes=TASK_CODES,
+                group_codes=codes,
+                task_names=TASK_NAMES,
+            )
+        message = str(excinfo.value)
+        assert "group_codes" in message
+        assert "-1" in message or "negative" in message.lower()
+
+    def test_task_code_outside_the_dictionary_raises_naming_task_names(self):
+        """ac-005: code 3 with a 2-entry dictionary → names the dictionary and both."""
+
+        with pytest.raises(ValueError) as excinfo:
+            _frame_label_table()(
+                task_codes=TASK_CODES,
+                group_codes=GROUP_CODES,
+                task_names=TASK_NAMES[:2],
+            )
+        message = str(excinfo.value)
+        assert "task_names" in message
+        assert "3" in message
+        assert "2" in message
+
+
+class TestTaskMixtureTableForms:
+    """One sampler, two label representations (ac-005, ac-006, ac-008, ac-009)."""
+
+    def _string_form(self, dataset, **overrides) -> TaskMixtureBatchSampler:
+        """The legacy Stage B sampler over the fixture split, string tables."""
+
+        kwargs = dict(
+            indices=TASK_INDICES_NO_ELECTROSTATIC,
+            task_labels=TASK_LABELS,
+            group_ids=GROUP_IDS,
+            mixture=STAGE_B,
+            max_atoms=24,
+            seed=TASK_SEED,
+        )
+        kwargs.update(overrides)
+        return TaskMixtureBatchSampler(dataset, **kwargs)
+
+    def _code_form(self, dataset, **overrides) -> TaskMixtureBatchSampler:
+        """The same sampler over the block-native ``(F,)`` code columns."""
+
+        kwargs = dict(
+            indices=TASK_INDICES_NO_ELECTROSTATIC,
+            task_labels=TASK_CODES,
+            group_ids=GROUP_CODES,
+            task_names=TASK_NAMES,
+            mixture=STAGE_B,
+            max_atoms=24,
+            seed=TASK_SEED,
+        )
+        kwargs.update(overrides)
+        return TaskMixtureBatchSampler(dataset, **kwargs)
+
+    def test_code_form_plan_equals_the_string_form_plan(self, task_ds):
+        """ac-006: two representations, one plan, at ``seed=TASK_SEED``."""
+
+        assert list(self._code_form(task_ds)) == list(self._string_form(task_ds))
+
+    def test_code_form_batches_per_task_equals_the_string_form(self, task_ds):
+        """ac-006: the batch-share audit dict is representation-independent."""
+
+        code_form = self._code_form(task_ds).batches_per_task()
+        assert code_form == self._string_form(task_ds).batches_per_task()
+
+    def test_code_form_frames_per_task_equals_the_string_form(self, task_ds):
+        """ac-006: the frame-share audit dict is representation-independent."""
+
+        code_form = self._code_form(task_ds).frames_per_task()
+        assert code_form == self._string_form(task_ds).frames_per_task()
+
+    def test_oversize_warning_names_the_group_code_without_a_name_dictionary(self, task_ds):
+        """ac-006: no group dictionary → the warning names ``torsion/6``."""
+
+        with pytest.warns(UserWarning) as record:
+            self._code_form(task_ds, max_atoms=20, batches_per_epoch=6)
+        oversize = [w for w in record if f"torsion/{TOR_A_GROUP_CODE}" in str(w.message)]
+        assert len(oversize) == 1
+
+    def test_oversize_warning_names_the_group_label_when_group_names_are_given(self, task_ds):
+        """ac-006: with a group dictionary the code form names ``torsion/tor_a``."""
+
+        with pytest.warns(UserWarning) as record:
+            self._code_form(
+                task_ds,
+                max_atoms=20,
+                batches_per_epoch=6,
+                group_names=GROUP_NAMES,
+            )
+        oversize = [w for w in record if "torsion/tor_a" in str(w.message)]
+        assert len(oversize) == 1
+
+    def test_mutating_the_caller_code_tensors_changes_neither_plan_nor_audit(self, task_ds):
+        """ac-008: the sampler copies the tables it plans from."""
+
+        task_codes = TASK_CODES.clone()
+        group_codes = GROUP_CODES.clone()
+        sampler = self._code_form(task_ds, task_labels=task_codes, group_ids=group_codes)
+        plan = list(sampler)
+        batches = sampler.batches_per_task()
+        frames = sampler.frames_per_task()
+
+        task_codes.fill_(0)
+        group_codes.fill_(0)
+
+        assert list(sampler) == plan
+        assert sampler.batches_per_task() == batches
+        assert sampler.frames_per_task() == frames
+
+    def test_no_parent_space_table_is_retained_on_the_instance(self, task_ds):
+        """ac-008: the R1 win — no ``(F,)``-length object survives construction.
+
+        The dataset reference is exempt (it *is* ``len(dataset)`` long by
+        definition); every other retained attribute must be shorter.
+        """
+
+        sampler = self._code_form(task_ds)
+        slots = getattr(type(sampler), "__slots__", ())
+        retained = list(vars(sampler).items()) if hasattr(sampler, "__dict__") else []
+        retained += [(name, getattr(sampler, name)) for name in slots]
+        for name, value in retained:
+            if value is task_ds:
+                continue
+            try:
+                size = len(value)
+            except TypeError:
+                continue
+            assert size != len(task_ds), f"sampler retains a parent-space table in {name!r}"
+
+    def test_integer_task_codes_without_task_names_raise_naming_task_names(self, task_ds):
+        """ac-005: integer codes are undecodable without their dictionary."""
+
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(
+                task_ds,
+                indices=TASK_INDICES_NO_ELECTROSTATIC,
+                task_labels=TASK_CODES,
+                group_ids=GROUP_CODES,
+                mixture=STAGE_B,
+                max_atoms=24,
+                seed=TASK_SEED,
+            )
+        message = str(excinfo.value)
+        assert "task_names" in message
+        assert "task_labels" in message
+
+    def test_task_names_with_string_labels_raise_naming_both_arguments(self, task_ds):
+        """ac-005: string labels already carry their names — a dictionary is a bug."""
+
+        with pytest.raises(ValueError) as excinfo:
+            TaskMixtureBatchSampler(
+                task_ds,
+                indices=TASK_INDICES_NO_ELECTROSTATIC,
+                task_labels=TASK_LABELS,
+                group_ids=GROUP_IDS,
+                task_names=TASK_NAMES,
+                mixture=STAGE_B,
+                max_atoms=24,
+                seed=TASK_SEED,
+            )
+        message = str(excinfo.value)
+        assert "task_names" in message
+        assert "task_labels" in message
+
+    def test_espaloma_shaped_construction_yields_a_non_empty_plan(self, task_ds):
+        """ac-009: ``EnergyTaskSamplerSource.batch_sampler``'s exact call shape.
+
+        Tuple string tables, ``indices=range(len(dataset))`` and a single-task
+        mixture at probability 1.0 (``scripts/mm_param_learning/
+        espaloma_mm_protocol_train.py:560-568``) must keep working verbatim.
+        """
+
+        sampler = TaskMixtureBatchSampler(
+            task_ds,
+            indices=range(len(task_ds)),
+            task_labels=("energy",) * len(task_ds),
+            group_ids=tuple(GROUP_IDS),
+            mixture={"energy": 1.0},
+            max_atoms=24,
+            seed=TASK_SEED,
+        )
+        assert len(sampler) >= 1
+        assert all(len(batch) >= 1 for batch in sampler)

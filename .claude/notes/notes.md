@@ -306,3 +306,62 @@ run-to-run on a shared login node — re-measure on the compute node before
 prefetch policy is frozen.
 
 **Status.** active (spec `streaming-data-tiers-02-block-format`, task 8).
+
+---
+
+<!-- mol:note:topic:sampler-plan-table-scale -->
+## [2026-08-14] Sampler plan tables stay in code form; the plan, not the table, is the cost
+
+`scripts/batch/bench_plan_tables.py` on `arrhenius1.hpc.arrhenius.naiss.se`
+(login node, torch 2.12.1+cpu, CPython 3.14.5, `OMP_NUM_THREADS=1`,
+2026-08-14). One synthetic count-only split per cell (10 frames/unit, 4 tasks,
+8–32 atoms/frame, `max_atoms=4096`, seed 20260814) planned through
+`TaskMixtureBatchSampler` in both representations: **list** = per-frame
+`task_labels: list[str]` + `group_ids: list[str]` via
+`FrameLabelTable.from_labels`; **code** = `(F,) int32` `task_codes` /
+`group_codes` + bounded `task_names`. Each cell runs in its own subprocess, so
+`peak` is that cell's `/proc/self/status:VmHWM`; `net` drops the ~301 MB
+interpreter + torch baseline. Both forms produced **byte-identical plans** at
+every F (sha256 over the plan; the bench aborts loudly otherwise).
+
+| F | form | table s | plan s | peak MB | net MB | net B/frame | batches |
+|---|---|---|---|---|---|---|---|
+| 1e6 | list | 0.04 | 1.56 | 485 | 185 | 185 | 4 895 |
+| 1e6 | code | 0.00 | 1.45 | 450 | 149 | 149 | 4 895 |
+| 1e7 | list | 0.32 | 13.75 | 2 067 | 1 766 | 177 | 48 930 |
+| 1e7 | code | 0.04 | 12.74 | 1 776 | 1 475 | 148 | 48 930 |
+| 1e8 | list | 3.20 | 147.42 | 17 534 | 17 234 | 172 | 489 355 |
+| 1e8 | code | 0.50 | 144.11 | 14 876 | 14 576 | 146 | 489 355 |
+
+list/code peak ratio **1.08× (1e6), 1.16× (1e7), 1.18× (1e8)**; table build is
+6–9× cheaper in code form but is only ~2 % of plan time; plan build is within
+1.08× either way. A repeat of the default run reproduced the plan digests
+exactly and the peaks within 1 % (483 / 454 MB at 1e6, 2 082 / 1 765 MB at
+1e7); wall times swing ±20 % on a shared login node, so treat the seconds as
+orders of magnitude and the peaks as the measurement.
+
+**Verdict** (default `--rss-budget-gb 6.0`): `plan-table verdict — no crossover
+below F=1e8 in peak RSS (largest measured ratio 1.16x at F=1e7)`. That default
+run skips both 1e8 cells on projection (21.9 / 14.3 GB > 6.0 GB); they were
+measured in a bounded follow-up (`--frames 100000000 --rss-budget-gb 24`,
+~5 min, sequential, single-threaded) and confirm the trend at 1.18×.
+
+**Rule — chosen representation: code form** (`(F,) int32` columns + bounded
+`task_names`) for `02-view` and `03-plan`. It wins every measured axis, needs
+no decode step, and is the only part of the footprint a successor still gets to
+choose.
+
+**What the numbers actually say.** The `01-tables` hand table is confirmed in
+shape and refuted in emphasis. The steady-state *table* difference is only
+~27–29 B/frame (two list pointers, one 8-char id `str` per unit, `int64`
+instead of `int32` columns); the transient `from_labels` code list (~36
+B/frame) never survives to peak. The shared *planning* machinery — the
+`tuple(indices)` parent-index materialization, the `(task, group)` bucketing
+dict, the per-unit member lists and the plan's own lists — costs ~146 B/frame
+in **both** forms, i.e. ~85 % of the footprint. Code form buys ~17 % (0.29 GB
+at 1e7, 2.7 GB at 1e8); only unit-granularity planning (`03-plan`) can touch
+the other 85 %. Corollary: the `01-tables` Bench paragraph sized the 6.0 GB
+budget on an estimated "≈5 GB at 1e8 list-form" — measured **17.5 GB**, so
+under the default budget 1e8 self-skips by design.
+
+**Status.** active (spec `streaming-data-tiers-04-scheduler-integration-01-tables`, task 7).

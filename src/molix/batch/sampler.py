@@ -15,6 +15,9 @@ Four layers, deliberately separated:
   batch plan out); no dataset, no RNG, no warning policy.
 * :class:`TokenBudgetBatchSampler` — seeded shuffle + oversize warning on
   top of the packer, over a packed-cache-backed dataset.
+* :class:`FrameLabelTable` — the per-frame ``(task, group)`` identity of one
+  parent index space in bounded integer-code form, built either from the
+  legacy Python label sequences or from a block's ``(F,)`` code columns.
 * :class:`TaskMixtureBatchSampler` — hierarchical task → group →
   configuration sampling: one physical task per batch drawn from a caller
   supplied mixture, whole sampling units inside it, packed by the same
@@ -38,6 +41,7 @@ from molix.store.dataset import BaseDataset
 
 __all__ = [
     "BatchSamplerSource",
+    "FrameLabelTable",
     "TaskMixtureBatchSampler",
     "TokenBudgetBatchSampler",
     "TokenBudgetPacker",
@@ -264,6 +268,238 @@ class TokenBudgetBatchSampler:
         return len(self._batches)
 
 
+class FrameLabelTable:
+    """Per-frame ``(task, group)`` identity of one parent index space.
+
+    A scheduler has to answer exactly two questions about frame ``i``:
+    which physical task it belongs to, and which sampling group (scan,
+    trajectory, molecule) it may not be separated from. This type owns
+    that answer in the form the READY-tier block store already emits —
+    two bounded ``(F,)`` integer code columns plus the short dictionaries
+    that render a code as text — so a consumer never has to decode a
+    block's columns into ``F`` Python objects before it can plan.
+
+    Both representations enter through a constructor of their own and
+    leave in the same shape: the canonical constructor takes a block's
+    code columns verbatim, :meth:`from_labels` factorizes the legacy
+    Python label sequences. Downstream code sees codes only.
+
+    Args:
+        task_codes: ``(F,)`` integral CPU tensor of task codes; ``code``
+            indexes *task_names*. Kept by reference — it is only read,
+            never mutated, and never stored beyond this table's lifetime.
+        group_codes: ``(F,)`` integral CPU tensor of group codes, same
+            length as *task_codes*. Two frames share a sampling unit when
+            **both** codes agree.
+        task_names: Bounded task dictionary; ``task_names[c]`` is the
+            label of task code ``c``. Must cover ``max(task_codes) + 1``.
+        group_names: Optional bounded group dictionary used only to render
+            a group label (oversize warnings, audit text). When omitted a
+            group code renders as ``str(code)``.
+
+    Raises:
+        ValueError: A code column is not a 1-D integral CPU tensor, the
+            two columns disagree in length, a code is negative, or a code
+            reaches outside its dictionary.
+    """
+
+    __slots__ = ("_group_codes", "_group_names", "_task_codes", "_task_names")
+
+    def __init__(
+        self,
+        *,
+        task_codes: torch.Tensor,
+        group_codes: torch.Tensor,
+        task_names: Sequence[str],
+        group_names: Sequence[str] | None = None,
+    ) -> None:
+        self._validate_codes("task_codes", task_codes)
+        self._validate_codes("group_codes", group_codes)
+        if len(task_codes) != len(group_codes):
+            raise ValueError(
+                f"len(task_codes) is {len(task_codes)} but len(group_codes) is "
+                f"{len(group_codes)}: both are per-frame columns of the same "
+                "parent index space, so fix the accessor that produced the "
+                "shorter one."
+            )
+        self._task_codes = task_codes
+        self._group_codes = group_codes
+        self._task_names = tuple(str(name) for name in task_names)
+        self._group_names = None if group_names is None else tuple(str(n) for n in group_names)
+        self._validate_dictionary("task_codes", task_codes, "task_names", self._task_names)
+        if self._group_names is not None:
+            self._validate_dictionary("group_codes", group_codes, "group_names", self._group_names)
+
+    @classmethod
+    def from_labels(
+        cls, task_labels: Sequence[str], group_ids: Sequence[str | int]
+    ) -> FrameLabelTable:
+        """Build a table from the legacy per-frame Python label sequences.
+
+        Both sequences are factorized in **first-appearance order** in a
+        single ``O(F)`` pass. That order is plan-irrelevant — a plan
+        depends on the ``(task, group)`` pair identity and on
+        ``sorted(mixture)``, never on code values — and it keeps the
+        block-native and label-native tables identical for a block whose
+        codes were themselves assigned on first appearance.
+
+        Args:
+            task_labels: Per-frame task label, ``F`` long.
+            group_ids: Per-frame group identity, ``F`` long. Rendered as
+                ``str(id)`` in the group dictionary.
+
+        Returns:
+            A table over ``(F,)`` ``int64`` code columns carrying both
+            recovered dictionaries.
+
+        Raises:
+            ValueError: Either argument is a tensor (its 0-dim elements
+                would factorize by identity, one group per frame), or the
+                two sequences differ in length.
+        """
+        for name, labels in (("task_labels", task_labels), ("group_ids", group_ids)):
+            if isinstance(labels, torch.Tensor):
+                raise ValueError(
+                    f"{name} is a tensor, but from_labels factorizes Python "
+                    "label sequences (a tensor's 0-dim elements would hash by "
+                    "identity, yielding one group per frame). Use "
+                    "FrameLabelTable(task_codes=..., group_codes=..., "
+                    "task_names=...) for code columns."
+                )
+        if len(task_labels) != len(group_ids):
+            raise ValueError(
+                f"len(task_labels) is {len(task_labels)} but len(group_ids) is "
+                f"{len(group_ids)}: both are parent-space per-frame sequences, "
+                "so fix the accessor that produced the shorter one."
+            )
+        task_codes, task_names = cls._factorize(task_labels)
+        group_codes, group_names = cls._factorize(group_ids)
+        return cls(
+            task_codes=task_codes,
+            group_codes=group_codes,
+            task_names=task_names,
+            group_names=group_names,
+        )
+
+    def __len__(self) -> int:
+        """Frame count ``F`` of the parent index space this table covers."""
+        return int(self._task_codes.shape[0])
+
+    @property
+    def task_names(self) -> tuple[str, ...]:
+        """The bounded task dictionary; index ``c`` is the label of task code ``c``."""
+        return self._task_names
+
+    def task_name(self, code: int) -> str:
+        """Render one task code as its label.
+
+        Args:
+            code: Task code, ``0 <= code < len(task_names)``.
+
+        Returns:
+            The task label, e.g. ``"torsion"``.
+        """
+        return self._task_names[code]
+
+    def group_label(self, code: int) -> str:
+        """Render one group code as text.
+
+        Args:
+            code: Group code, non-negative.
+
+        Returns:
+            The original group id when a group dictionary was supplied,
+            else ``str(code)`` — the code itself is a stable identity, so
+            a missing dictionary degrades the *text* only.
+        """
+        if self._group_names is None:
+            return str(code)
+        return self._group_names[code]
+
+    def codes_at(self, indices: Sequence[int]) -> tuple[list[int], list[int]]:
+        """Gather the ``(task, group)`` codes of *indices*, in the given order.
+
+        One vectorized gather per column — the reason this type accepts
+        the tensor form at all — instead of ``len(indices)`` per-element
+        tensor reads.
+
+        Args:
+            indices: Parent-space frame indices, each in ``[0, F)``.
+
+        Returns:
+            ``(task_codes, group_codes)`` as two Python ``int`` lists,
+            parallel to *indices*.
+        """
+        selector = torch.as_tensor(tuple(indices), dtype=torch.long)
+        return self._task_codes[selector].tolist(), self._group_codes[selector].tolist()
+
+    @staticmethod
+    def _factorize(labels: Sequence[str | int]) -> tuple[torch.Tensor, tuple[str, ...]]:
+        """Map *labels* to ``(F,) int64`` codes plus a first-appearance dictionary."""
+        lookup: dict[str | int, int] = {}
+        names: list[str] = []
+        codes: list[int] = []
+        for label in labels:
+            code = lookup.get(label)
+            if code is None:
+                code = len(names)
+                lookup[label] = code
+                names.append(str(label))
+            codes.append(code)
+        return torch.tensor(codes, dtype=torch.int64), tuple(names)
+
+    @staticmethod
+    def _validate_codes(name: str, codes: torch.Tensor) -> None:
+        """Reject a column that is not a non-negative 1-D integral CPU code table."""
+        if not isinstance(codes, torch.Tensor):
+            raise ValueError(
+                f"{name} must be a (F,) integral CPU tensor of codes, got "
+                f"{type(codes).__name__}. Pass the block's code column (e.g. "
+                f"reader.task_codes), or build the table with "
+                "FrameLabelTable.from_labels for Python label sequences."
+            )
+        if codes.ndim != 1:
+            raise ValueError(
+                f"{name} has shape {tuple(codes.shape)} but a frame code table is "
+                "1-D (F,), one code per frame. Flatten it, or pass the column "
+                "the block store emitted."
+            )
+        if codes.device.type != "cpu":
+            raise ValueError(
+                f"{name} is on device {codes.device}, but label tables are planned "
+                f"on cpu (planning is pointer arithmetic, not compute). Pass "
+                f"{name}.cpu()."
+            )
+        if codes.dtype.is_floating_point or codes.dtype.is_complex:
+            raise ValueError(
+                f"{name} has dtype {codes.dtype}, but codes index a bounded "
+                "dictionary and must be an integral dtype (e.g. int32/int64) — "
+                f"a float table is never rounded. Pass {name}.to(torch.int64) "
+                "only if the values really are integers."
+            )
+        if codes.numel() and int(codes.min()) < 0:
+            raise ValueError(
+                f"{name} contains the negative code {int(codes.min())}; codes "
+                "index a dictionary from 0, so a negative entry is a table bug "
+                "(never a wrap-around). Fix the producer of that column."
+            )
+
+    @staticmethod
+    def _validate_dictionary(
+        codes_name: str, codes: torch.Tensor, names_name: str, names: tuple[str, ...]
+    ) -> None:
+        """Reject a code that reaches outside its bounded dictionary."""
+        if not codes.numel():
+            return
+        largest = int(codes.max())
+        if largest >= len(names):
+            raise ValueError(
+                f"{codes_name} contains the code {largest} but {names_name} has "
+                f"{len(names)} entries (valid codes are 0..{len(names) - 1}). "
+                f"Pass the full dictionary that column was coded against."
+            )
+
+
 class TaskMixtureBatchSampler:
     """Yield single-task index batches drawn from a task mixture.
 
@@ -275,7 +511,8 @@ class TaskMixtureBatchSampler:
     therefore batches hierarchically: **task → group → configuration**.
 
     1. Frames of the split are bucketed into **sampling units** keyed
-       ``(task_labels[i], group_ids[i])``, in first-appearance order.
+       by the ``(task, group)`` code pair of :class:`FrameLabelTable`, in
+       first-appearance order.
     2. Units of one task are shuffled and handed to a transient
        :class:`TokenBudgetPacker` over their *aggregate* atom/edge costs,
        so a unit is packed whole — a scan never straddles two batches, and
@@ -343,9 +580,12 @@ class TaskMixtureBatchSampler:
     order is one final permutation of the apportioned task multiset. The
     whole plan is built eagerly in ``__init__``, so ``len()`` and
     iteration are free and repeatable. The instance holds only the
-    dataset reference, the budgets, the two label tuples, the mixture and
-    the computed ``list[list[int]]`` — no packer and no mmap-backed count
-    vector — so it pickles to an identical plan. Reseed per epoch with
+    dataset reference, the budgets, the mixture, the computed
+    ``list[list[int]]`` and the parallel per-batch task-name tuple — no
+    packer, no mmap-backed count vector and **no parent-space
+    (``len(dataset)``-long) label table**, which is what keeps a sampler
+    rebuilt every epoch cheap at large frame counts — so it pickles to an
+    identical plan. Reseed per epoch with
     ``seed + epoch`` (the convention
     :class:`~molix.batch.datamodule.DataModule` already uses) to reshuffle
     between epochs while keeping epoch *k* re-derivable on resume.
@@ -362,16 +602,30 @@ class TaskMixtureBatchSampler:
             :func:`~molix.batch.group_split.group_split_indices`. Consumed
             as given — this sampler never splits and never re-derives
             groups. Yielded batches contain these parent-space indices.
-        task_labels: Per-sample physical task label, ``len(dataset)``
-            long (parent space, the shape
+        task_labels: Per-sample physical task, ``len(dataset)`` long
+            (parent space, the shape
             :func:`~molix.batch.group_split.group_split_indices` already
-            accepts). Labels are opaque strings; molnex never infers them.
-        group_ids: Per-sample group identity, ``len(dataset)`` long. Two
-            scans of one molecule sharing a label *and* a group id merge
-            into one (coarser, still integral) unit — pass a finer id such
-            as ``"<mol>:<dihedral>"`` to keep them separate. A molecule
-            contributing to several tasks yields one unit per task, which
-            is normal: cross-split leakage was already prevented upstream.
+            accepts), in **either** representation: a sequence of opaque
+            label strings, or a ``(F,)`` integral CPU tensor of task
+            codes (a block's ``task_codes`` column) together with
+            *task_names*. molnex never infers a task.
+        group_ids: Per-sample group identity, ``len(dataset)`` long, in
+            the same representation as *task_labels*: a sequence of
+            strings/ints, or a ``(F,)`` integral CPU tensor of group
+            codes. Two scans of one molecule sharing a task *and* a group
+            merge into one (coarser, still integral) unit — pass a finer
+            id such as ``"<mol>:<dihedral>"`` to keep them separate. A
+            molecule contributing to several tasks yields one unit per
+            task, which is normal: cross-split leakage was already
+            prevented upstream.
+        task_names: Bounded task dictionary, ``task_names[c]`` naming task
+            code ``c``. **Required** with integer *task_labels* (codes are
+            undecodable without it) and rejected with string
+            *task_labels*, which already carry their names.
+        group_names: Optional bounded group dictionary for integer
+            *group_ids*; it changes the *text* of the oversize warning
+            only (``torsion/tor_a`` instead of ``torsion/6``), never the
+            plan. Rejected with string *group_ids*.
         mixture: Task → probability, summing to 1 within ``1e-9``. A label
             present in the split must appear here; give it ``0.0`` to
             exclude it deliberately.
@@ -394,9 +648,12 @@ class TaskMixtureBatchSampler:
             to 1 within ``1e-9`` / carries a probability outside
             ``[0, 1]``, a label of the split is absent from *mixture*, a
             task with ``p_t > 0`` has no unit in the split, a label table
-            length differs from ``len(dataset)``, *indices* is empty or
-            addresses outside the dataset, or *dataset* does not expose
-            the pointer-derived count accessors.
+            length differs from ``len(dataset)``, *task_names* is missing
+            with integer codes or supplied with string labels, a code
+            table is not a non-negative 1-D integral CPU tensor,
+            *indices* is empty or addresses outside the dataset, or
+            *dataset* does not expose the pointer-derived count
+            accessors.
 
     Reference:
         Zheng et al. "ByteFF: A Machine Learning Force Field for
@@ -413,8 +670,10 @@ class TaskMixtureBatchSampler:
         dataset: BaseDataset,
         *,
         indices: Sequence[int],
-        task_labels: Sequence[str],
-        group_ids: Sequence[str | int],
+        task_labels: Sequence[str] | torch.Tensor,
+        group_ids: Sequence[str | int] | torch.Tensor,
+        task_names: Sequence[str] | None = None,
+        group_names: Sequence[str] | None = None,
         mixture: Mapping[str, float],
         max_atoms: int | None = None,
         max_edges: int | None = None,
@@ -423,17 +682,56 @@ class TaskMixtureBatchSampler:
     ) -> None:
         self._validate_sizes(max_atoms, max_edges, batches_per_epoch)
         self._validate_mixture(mixture)
-        self._validate_tables(len(dataset), indices, task_labels, group_ids)
+        # The one representation dispatch: each FrameLabelTable constructor owns
+        # one label form, so every step below this line sees codes only.
+        if isinstance(task_labels, torch.Tensor):
+            if task_names is None:
+                raise ValueError(
+                    "task_labels is a (F,) integer code column but task_names is "
+                    "None: codes cannot be decoded without their bounded "
+                    "dictionary. Pass task_names (e.g. reader.task_names), or "
+                    "pass task_labels as per-frame label strings."
+                )
+            if not isinstance(group_ids, torch.Tensor):
+                raise ValueError(
+                    "task_labels is a (F,) integer code column but group_ids is a "
+                    f"{type(group_ids).__name__}: both tables describe the same "
+                    "parent index space and must use the same representation. "
+                    "Pass group_ids as its (F,) code column too (e.g. "
+                    "reader.group_codes)."
+                )
+            table = FrameLabelTable(
+                task_codes=task_labels,
+                group_codes=group_ids,
+                task_names=task_names,
+                group_names=group_names,
+            )
+        else:
+            if isinstance(group_ids, torch.Tensor):
+                raise ValueError(
+                    "group_ids is a (F,) integer code column but task_labels is a "
+                    f"{type(task_labels).__name__} of labels: both tables describe "
+                    "the same parent index space and must use the same "
+                    "representation. Pass task_labels as its (F,) code column plus "
+                    "task_names, or group_ids as per-frame ids."
+                )
+            if task_names is not None or group_names is not None:
+                raise ValueError(
+                    "task_names/group_names were given together with string "
+                    "task_labels, which already carry their own names. Drop the "
+                    "dictionaries, or pass task_labels/group_ids as the (F,) "
+                    "integer code columns they belong to."
+                )
+            table = FrameLabelTable.from_labels(task_labels, group_ids)
+        self._validate_tables(len(dataset), indices, table)
 
         self._dataset = dataset
         self._max_atoms = max_atoms
         self._max_edges = max_edges
-        self._task_labels = tuple(task_labels)
-        self._group_ids = tuple(group_ids)
         self._mixture = dict(mixture)
         self._batches_per_epoch = batches_per_epoch
         self._seed = seed
-        self._batches = self._compute_batches(tuple(indices))
+        self._batches, self._batch_tasks = self._compute_batches(tuple(indices), table)
 
     @staticmethod
     def _validate_sizes(
@@ -485,17 +783,15 @@ class TaskMixtureBatchSampler:
     def _validate_tables(
         n_samples: int,
         indices: Sequence[int],
-        task_labels: Sequence[str],
-        group_ids: Sequence[str | int],
+        table: FrameLabelTable,
     ) -> None:
-        """Reject mis-sized label tables and empty / out-of-range *indices*."""
-        for name, table in (("task_labels", task_labels), ("group_ids", group_ids)):
-            if len(table) != n_samples:
-                raise ValueError(
-                    f"len({name}) is {len(table)} but len(dataset) is "
-                    f"{n_samples}: {name} is a parent-space per-sample "
-                    f"sequence, so fix the {name} accessor that produced it."
-                )
+        """Reject a mis-sized label table and empty / out-of-range *indices*."""
+        if len(table) != n_samples:
+            raise ValueError(
+                f"the label table covers {len(table)} frame(s) but len(dataset) "
+                f"is {n_samples}: task_labels and group_ids are parent-space "
+                "per-sample tables, so fix the accessor that produced them."
+            )
         if len(indices) == 0:
             raise ValueError(
                 "indices is empty: pass the split's dataset indices (e.g. the "
@@ -510,7 +806,7 @@ class TaskMixtureBatchSampler:
                     "addressing the dataset given to this sampler."
                 )
 
-    def _validate_tasks(self, task_units: dict[str, list[tuple[str | int, list[int]]]]) -> None:
+    def _validate_tasks(self, task_units: dict[str, list[tuple[str, list[int]]]]) -> None:
         """Reject a split label missing from the mixture, or a supply-less task."""
         for task in sorted(task_units):
             if task not in self._mixture:
@@ -546,31 +842,41 @@ class TaskMixtureBatchSampler:
             ) from e
         return pairs
 
+    @staticmethod
     def _bucket_units(
-        self, indices: tuple[int, ...]
-    ) -> dict[str, list[tuple[str | int, list[int]]]]:
-        """Bucket *indices* into sampling units keyed ``(task_label, group_id)``.
+        indices: tuple[int, ...], table: FrameLabelTable
+    ) -> dict[str, list[tuple[str, list[int]]]]:
+        """Bucket *indices* into sampling units keyed by ``(task, group)`` codes.
+
+        Bucketing is done on the integer code pair — one gather over the
+        whole split instead of ``len(indices)`` per-frame table reads —
+        and each unit's codes are rendered as text exactly once, when the
+        unit is attached to its task.
 
         Args:
             indices: The split's dataset indices, walked in the given order.
+            table: Per-frame ``(task, group)`` identity of the parent
+                index space.
 
         Returns:
-            Task label → its units as ``(group_id, member frame indices)``
-            pairs, both levels in first-appearance order.
+            Task label → its units as ``(group label, member frame
+            indices)`` pairs, both levels in first-appearance order.
         """
-        unit_frames: dict[tuple[str, str | int], list[int]] = {}
-        for index in indices:
-            key = (self._task_labels[index], self._group_ids[index])
-            unit_frames.setdefault(key, []).append(index)
+        task_codes, group_codes = table.codes_at(indices)
+        unit_frames: dict[tuple[int, int], list[int]] = {}
+        for index, task_code, group_code in zip(indices, task_codes, group_codes, strict=True):
+            unit_frames.setdefault((task_code, group_code), []).append(index)
 
-        task_units: dict[str, list[tuple[str | int, list[int]]]] = {}
-        for (task, group), frames in unit_frames.items():
-            task_units.setdefault(task, []).append((group, frames))
+        task_units: dict[str, list[tuple[str, list[int]]]] = {}
+        for (task_code, group_code), frames in unit_frames.items():
+            task_units.setdefault(table.task_name(task_code), []).append(
+                (table.group_label(group_code), frames)
+            )
         return task_units
 
     def _pack_tasks(
         self,
-        task_units: dict[str, list[tuple[str | int, list[int]]]],
+        task_units: dict[str, list[tuple[str, list[int]]]],
         generator: torch.Generator,
     ) -> tuple[dict[str, list[list[int]]], list[str]]:
         """Shuffle and pack each task's units into frame-index batches.
@@ -679,12 +985,14 @@ class TaskMixtureBatchSampler:
         n: int,
         task_batches: dict[str, list[list[int]]],
         generator: torch.Generator,
-    ) -> tuple[list[list[int]], tuple[str, int] | None]:
+    ) -> tuple[list[list[int]], tuple[str, ...], tuple[str, int] | None]:
         """Order the apportioned slots and fill each from its task's supply.
 
         The slot labels are the multiset ``{t repeated counts[t]}`` in
         sorted task order, permuted once by the shared generator, so
-        mixture fidelity holds per window rather than only per epoch.
+        mixture fidelity holds per window rather than only per epoch. The
+        task of every slot actually filled is recorded, which is what lets
+        the audit accessors count without a parent-space label table.
 
         Args:
             counts: Apportioned slot count per task.
@@ -693,8 +1001,9 @@ class TaskMixtureBatchSampler:
             generator: The single seeded generator.
 
         Returns:
-            ``(plan, shortfall)`` — the epoch's frame-index batches, and
-            ``(task, slot)`` of the first slot whose task ran out of
+            ``(plan, plan_tasks, shortfall)`` — the epoch's frame-index
+            batches, the task name of each of them (parallel to *plan*),
+            and ``(task, slot)`` of the first slot whose task ran out of
             supply (``None`` when every slot was filled).
         """
         multiset: list[str] = []
@@ -703,6 +1012,7 @@ class TaskMixtureBatchSampler:
 
         cursors = dict.fromkeys(counts, 0)
         plan: list[list[int]] = []
+        plan_tasks: list[str] = []
         shortfall: tuple[str, int] | None = None
         for slot, position in enumerate(torch.randperm(n, generator=generator).tolist()):
             task = multiset[position]
@@ -712,20 +1022,28 @@ class TaskMixtureBatchSampler:
                     shortfall = (task, slot)
                 continue
             plan.append(available[cursors[task]])
+            plan_tasks.append(task)
             cursors[task] += 1
-        return plan, shortfall
+        return plan, tuple(plan_tasks), shortfall
 
-    def _compute_batches(self, indices: tuple[int, ...]) -> list[list[int]]:
+    def _compute_batches(
+        self, indices: tuple[int, ...], table: FrameLabelTable
+    ) -> tuple[list[list[int]], tuple[str, ...]]:
         """Build the whole epoch plan eagerly, and own the warning policy.
 
         Args:
             indices: The split's dataset indices.
+            table: Per-frame ``(task, group)`` identity of the parent
+                index space. Read here and dropped — nothing
+                ``len(dataset)``-long reaches the instance state.
 
         Returns:
-            The epoch's batches as ``list[list[int]]`` of parent-space
-            dataset indices, every batch single-task by construction.
+            ``(plan, plan_tasks)`` — the epoch's batches as
+            ``list[list[int]]`` of parent-space dataset indices, every
+            batch single-task by construction, and the parallel tuple of
+            their task names.
         """
-        task_units = self._bucket_units(indices)
+        task_units = self._bucket_units(indices, table)
         self._validate_tasks(task_units)
 
         generator = make_generator(self._seed)
@@ -742,7 +1060,7 @@ class TaskMixtureBatchSampler:
             )
 
         n = self._epoch_length(task_batches)
-        plan, shortfall = self._interleave(
+        plan, plan_tasks, shortfall = self._interleave(
             self._apportion(n, task_batches), n, task_batches, generator
         )
         if shortfall is not None:
@@ -756,7 +1074,7 @@ class TaskMixtureBatchSampler:
                 UserWarning,
                 stacklevel=3,
             )
-        return plan
+        return plan, plan_tasks
 
     def __iter__(self) -> Iterator[list[int]]:
         """Iterate the eager plan, each item a ``list[int]`` of dataset indices."""
@@ -778,13 +1096,16 @@ class TaskMixtureBatchSampler:
         fresh copy, so caller mutation cannot corrupt the plan. This is
         the realized batch share — the quantity the mixture governs.
 
+        Counted from the task recorded for each slot when the plan was
+        built, so a caller mutating the code tensors it passed in cannot
+        make the audit drift from the plan.
+
         Returns:
             Task label → number of batches in this epoch's plan; tasks
             with no realized batch are absent.
         """
         counts: dict[str, int] = {}
-        for batch in self._batches:
-            task = self._task_labels[batch[0]]
+        for task in self._batch_tasks:
             counts[task] = counts.get(task, 0) + 1
         return counts
 
@@ -796,13 +1117,15 @@ class TaskMixtureBatchSampler:
         governs batch shares only). Comparing them against a calibration
         tolerance is the caller's job.
 
+        Counted from the per-slot task record of the eager plan, like
+        :meth:`batches_per_task`.
+
         Returns:
             Task label → number of frames in this epoch's plan; tasks with
             no realized batch are absent.
         """
         counts: dict[str, int] = {}
-        for batch in self._batches:
-            task = self._task_labels[batch[0]]
+        for task, batch in zip(self._batch_tasks, self._batches, strict=True):
             counts[task] = counts.get(task, 0) + len(batch)
         return counts
 
