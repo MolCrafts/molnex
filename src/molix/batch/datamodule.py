@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypeGuard, runtime_checkable
 
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
+from molix.batch.block_plan import BlockFrameView
 from molix.batch.collate import (
     DEFAULT_TARGET_SCHEMA,
     MoleculeCollator,
@@ -20,7 +21,7 @@ from molix.batch.task import BatchTask
 from molix.config import config
 from molix.core.seed import make_generator, make_worker_init_fn
 from molix.core.steps import batch_to
-from molix.store.dataset import BaseDataset
+from molix.store.dataset import BaseDataset, PackedView
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -120,7 +121,13 @@ class DataModule:
             composition stays re-derivable on resume. Mutually exclusive
             with ``max_atoms_per_batch`` / ``max_edges_per_batch`` (two
             competing batch policies) and, like them, incompatible with
-            DDP. Omit it and every existing code path is unchanged.
+            DDP. Omit it and every existing code path is unchanged. A
+            multi-block train dataset is driven by
+            :class:`~molix.batch.block_plan.BlockPlanSource` here, whose
+            :class:`~molix.batch.block_plan.BlockPlan` is the consumed
+            order (block-pure batches, at most ``view.max_open`` blocks
+            resident); the matching collate route is picked automatically
+            by :meth:`_resolve_collation`.
         num_workers: DataLoader worker processes.
         pin_memory: Pin tensors for faster GPU transfer.
         persistent_workers: Keep workers alive between epochs.
@@ -422,15 +429,25 @@ class DataModule:
         return _CollateFn(self.target_schema, self.batch_tasks)
 
     def _resolve_collation(self, dataset: BaseDataset) -> tuple[object, object]:
-        """Pick ``(loader_dataset, collate_fn)`` — packed fast path or fallback.
+        """Pick ``(loader_dataset, collate_fn)`` — block, packed, or fallback.
 
-        When *dataset* is packed-cache-backed and we are not under DDP, the
-        DataLoader is fed an :class:`_IndexDataset` (returning bare indices)
-        plus a :class:`_PackedCollateFn` that slices the packed tensors
-        directly via :func:`~molix.batch.collate.collate_packed` — skipping
-        per-sample unpack→repack. Otherwise the dataset is used as-is with
-        the per-sample :class:`_CollateFn`. DDP is out of scope for the
-        fast path, so it always falls back there.
+        Three routes, probed in this order (all fast paths are skipped under
+        DDP, which falls back to the per-sample collate):
+
+        1. **Block view** — a :class:`~molix.batch.block_plan.BlockFrameView`
+           gets an :class:`_IndexDataset` over its global frame rows plus a
+           :class:`_BlockCollateFn`, which materialises one block's frames per
+           batch. Probed *first* because a block view carries no single packed
+           payload: the per-sample fallback is unavailable for it, and silently
+           taking it would raise ``KeyError`` deep in the collate instead of an
+           actionable message here.
+        2. **Packed cache** — a packed-cache-backed dataset gets an
+           :class:`_IndexDataset` (returning bare indices) plus a
+           :class:`_PackedCollateFn` that slices the packed tensors directly via
+           :func:`~molix.batch.collate.collate_packed`, skipping per-sample
+           unpack→repack.
+        3. **Fallback** — the dataset is used as-is with the per-sample
+           :class:`_CollateFn`.
 
         Args:
             dataset: The train or val dataset to collate.
@@ -438,6 +455,10 @@ class DataModule:
         Returns:
             ``(loader_dataset, collate_fn)`` to hand to ``DataLoader``.
         """
+        if not _is_distributed() and _block_capable(dataset):
+            return _IndexDataset(len(dataset)), _BlockCollateFn(
+                dataset, self.target_schema, self.batch_tasks
+            )
         if not _is_distributed() and _packed_capable(dataset):
             return _IndexDataset(len(dataset)), _PackedCollateFn(
                 dataset, self.target_schema, self.batch_tasks
@@ -512,6 +533,29 @@ class _CollateFn:
         for task in self.batch_tasks:
             batch = task.execute(batch)
         return batch_to(batch, dtype=self.ftype)
+
+
+def _block_capable(dataset: BaseDataset) -> TypeGuard[BlockFrameView]:
+    """Whether *dataset* can serve the block-aware collate route.
+
+    A cheap structural probe — ``isinstance`` against the
+    :class:`~molix.batch.block_plan.BlockFrameView` protocol, which reads member
+    presence with :func:`inspect.getattr_static` (Python 3.12+, this project's
+    floor), so no property is evaluated — a view's deliberately raising
+    ``edge_counts`` is not tripped — and no tensor is copied. Every other
+    dataset simply answers ``False``; nothing is raised here, because this is a
+    route probe and not a validation.
+
+    Args:
+        dataset: The train or val dataset about to be collated.
+
+    Returns:
+        ``True`` when *dataset* exposes the multi-block view surface (``locate``
+        / ``reader`` / ``block_ids`` / the ``(F,)`` code tables). Declared as a
+        :class:`~typing.TypeGuard` so the route that follows sees the view
+        surface it is about to consume, rather than the wider dataset type.
+    """
+    return isinstance(dataset, BlockFrameView)
 
 
 def _packed_capable(dataset: BaseDataset) -> bool:
@@ -593,3 +637,131 @@ class _PackedCollateFn:
         state = self.__dict__.copy()
         state["_view"] = None
         return state
+
+
+class _BlockCollateFn:
+    """Picklable block-route collate: one block's frames per batch, task stamped.
+
+    Receives a ``list[int]`` of **global frame rows** (from :class:`_IndexDataset`
+    via the plan's ``batch_sampler``) and builds the batch with the composition the
+    block store documents::
+
+        collate_packed(PackedView(reader.frame_payload(frames)), range(B), schema)
+
+    then applies the same post-collate contract as :class:`_PackedCollateFn` —
+    ``batch_tasks`` in order, followed by
+    :func:`~molix.core.steps.batch_to` with the captured ``ftype``, which casts
+    floating leaves only, so the int64 task label survives untouched. Blocks carry
+    no edges, so the collate's empty-edge fallback is exercised by design and the
+    cutoff graph is built downstream.
+
+    **The batch must be block-pure and single-task.** Both are guarantees of
+    :class:`~molix.batch.block_plan.BlockPlan`, so a violation means the plan was
+    bypassed and is refused rather than papered over: no cross-block payload merge
+    exists on this path, and
+    :class:`~molix.core.steps.multitask.TaskRouter` maps one ``("graphs", "task")``
+    code per batch to one :class:`~molix.core.steps.multitask.TaskSpec`.
+
+    **The task label is stamped from the view's global codes.**
+    ``BlockReader.frame_payload`` skips ``meta.`` routes, so the per-frame task
+    code never reaches the payload; it is stamped here as a ``targets.task`` leaf,
+    which rides the existing target route and lands as a ``(B,)`` int64 leaf at
+    ``("graphs", "task")``. The codes come from ``view.task_codes`` (the merged,
+    global dictionary), never from a block-local ``reader.task_codes``: a block's
+    local ``(0, 1)`` may be global ``(1, 2)`` after the view's merge, so a local
+    stamp would route the same physical task to different losses depending on
+    which block a batch came from.
+
+    Residency is the view's: this callable keeps no reader of its own — holding one
+    past the view's bounded LRU pool would make ``K + 1`` blocks resident — so
+    there is no lazily built per-block state to clear, and :meth:`__getstate__`
+    (mirroring :class:`_PackedCollateFn`) hands out a snapshot carrying the view
+    reference, the schema, the tasks and the dtype, never a payload tensor.
+
+    Args:
+        view: The multi-block :class:`~molix.batch.block_plan.BlockFrameView` the
+            frame rows address.
+        schema: Routes target keys to the ``atoms`` or ``graphs`` namespace.
+        batch_tasks: Post-collate :class:`~molix.batch.task.BatchTask` instances,
+            applied in the given order.
+
+    Raises:
+        ValueError: *schema* declares ``"task"`` atom-level, which would route the
+            stamp to a per-atom leaf instead of the per-graph label ``TaskRouter``
+            reads.
+    """
+
+    def __init__(
+        self, view: BlockFrameView, schema: TargetSchema, batch_tasks: Sequence[BatchTask]
+    ) -> None:
+        if "task" in schema.atom_level:
+            raise ValueError(
+                "target_schema lists 'task' as an atom-level target, but the block "
+                "route stamps 'task' as the per-graph single-task label TaskRouter "
+                'reads at ("graphs", "task"); routing it per atom would make the '
+                "stamp a (N,) leaf and silently break routing. Drop 'task' from "
+                "atom_level, or rename the atom-level target."
+            )
+        self._view = view
+        self.schema = schema
+        self.batch_tasks = batch_tasks
+        self.ftype = config["ftype"]
+
+    def __call__(self, indices: list[int]) -> dict:
+        """Collate one block-pure, single-task batch of global frame rows.
+
+        Args:
+            indices: Global frame rows of the view, ``B`` long, in batch order.
+
+        Returns:
+            The nested ``atoms`` / ``edges`` / ``graphs`` batch, its floating
+            leaves cast to the captured ``ftype`` and ``("graphs", "task")``
+            carrying the batch's ``(B,)`` int64 global task code.
+
+        Raises:
+            ValueError: *indices* span more than one block (the plan was
+                bypassed), or more than one task code.
+            BlockNotReadyError: The owning block is not available — propagated
+                from the view with the block named. Consumption stalls here; it
+                never advances to another block's batches and never substitutes.
+        """
+        frames = torch.as_tensor(indices, dtype=torch.long)
+        blocks, locals_ = self._view.locate(frames)
+        owners = blocks.unique()
+        if owners.numel() != 1:
+            named = [self._view.block_ids[int(block)] for block in owners.tolist()]
+            raise ValueError(
+                f"a block batch holds frames from {owners.numel()} blocks ({named}), "
+                "but this route materialises exactly one block per batch — there is no "
+                "cross-block payload merge here, by design. Every batch a BlockPlan "
+                "emits is block-pure, so this batch did not come from one: drive the "
+                "loader with BlockPlan (DataModule(batch_sampler_source=...))."
+            )
+        block = int(owners[0])
+        reader = self._view.reader(block)
+
+        codes = self._view.task_codes[frames]
+        if codes.unique().numel() != 1:
+            raise ValueError(
+                f"a block batch of {self._view.block_ids[block]} carries the task codes "
+                f"{sorted(set(codes.tolist()))}, but TaskRouter routes one batch to one "
+                'TaskSpec through the single-task label at ("graphs", "task"). Every '
+                "batch a BlockPlan emits is single-task by construction, so this batch "
+                "did not come from one."
+            )
+
+        payload = reader.frame_payload(locals_.tolist())
+        payload["graphs"]["targets.task"] = codes.to(torch.int64)
+        batch = collate_packed(PackedView(payload), range(len(indices)), self.schema)
+        for task in self.batch_tasks:
+            batch = task.execute(batch)
+        return batch_to(batch, dtype=self.ftype)
+
+    def __getstate__(self) -> dict:
+        """Snapshot the picklable state — a view reference, never payload tensors.
+
+        Mirrors :meth:`_PackedCollateFn.__getstate__`: there is no lazily built
+        per-block state to clear here (readers stay in the view's bounded pool), so
+        the snapshot is the whole state, copied rather than aliased.
+        """
+        return self.__dict__.copy()

@@ -34,4 +34,3 @@ must not be treated as authority for a new training submission.
 | [universal-class-i-07-wilson] | 2026-08-14 | Completed; all 11 acceptance criteria verified. |
 | [universal-class-i-06-hessian] | 2026-08-14 | Completed; all 10 acceptance criteria verified. |
 | `universal-class-i-05-dataset-composition` | 2026-08-14 | Closed in MolNex because dataset composition is not a MolNex responsibility; moved to MolHub as `universal-class-i-01-dataset-composition`. |
-- [streaming-data-tiers-04-scheduler-integration-03-plan](streaming-data-tiers-04-scheduler-integration-03-plan.md) — BatchSamplerSource 全局计划 + 块窗消费、("graphs","task") 盖章、visit-order JSON 交接 molhub、I10 覆盖报告。 [approved]

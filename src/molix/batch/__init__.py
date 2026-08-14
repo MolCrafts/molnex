@@ -21,7 +21,10 @@ Surfaces:
   :class:`TokenBudgetBatchSampler` pack samples under atom / edge budgets,
   :class:`TaskMixtureBatchSampler` interleaves per-task streams, and
   :class:`BatchSamplerSource` is the protocol a :class:`DataModule` calls once
-  per epoch. :func:`group_split_indices` splits indices without splitting a
+  per epoch. :class:`BlockPlanSource` implements it over a multi-block
+  :class:`BlockFrameView`, returning a :class:`BlockPlan` (with its
+  :class:`BlockCoverage` rows) that is planned globally and consumed
+  block-windowed. :func:`group_split_indices` splits indices without splitting a
   group across sides.
 * **Loader** — :class:`DataModule` (protocol: :class:`DataModuleProtocol`)
   wraps prebuilt datasets in DDP-aware train / val ``DataLoader`` s.
@@ -31,6 +34,12 @@ Storage lives in :mod:`molix.store`; nothing here reads or writes files.
 
 from __future__ import annotations
 
+from molix.batch.block_plan import (
+    BlockCoverage,
+    BlockFrameView,
+    BlockPlan,
+    BlockPlanSource,
+)
 from molix.batch.bond_adapter import bond_index_from_columns
 from molix.batch.collate import (
     DEFAULT_TARGET_SCHEMA,
@@ -58,6 +67,10 @@ from molix.batch.valence_columns import (
 __all__ = [
     "BatchSamplerSource",
     "BatchTask",
+    "BlockCoverage",
+    "BlockFrameView",
+    "BlockPlan",
+    "BlockPlanSource",
     "DEFAULT_TARGET_SCHEMA",
     "DataModule",
     "DataModuleProtocol",

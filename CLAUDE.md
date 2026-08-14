@@ -237,7 +237,7 @@ python -m pytest tests/test_molzoo/test_mace.py::test_mace_forward -v
 python -m pytest tests/ --cov=src --cov-report=term-missing
 ```
 
-Python >=3.10 required. Requires `torch>=2.10` (always use latest stable PyTorch).
+Python >=3.12 required (pyproject pins >=3.12; the BlockFrameView protocol's raising-property isinstance safety needs 3.12+). Requires `torch>=2.10` (always use latest stable PyTorch).
 
 ### Test layout rules
 

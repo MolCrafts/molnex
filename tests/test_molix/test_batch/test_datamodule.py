@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 import torch
 from torch.utils.data import DataLoader
 
+from molix.batch import datamodule as _datamodule
+from molix.batch.collate import TargetSchema
 from molix.batch.datamodule import DataModule
+from molix.batch.task import BatchTask
+from molix.config import config
+from molix.store.block import BlockReader, BlockWriter, SamplingUnit
+from molix.store.block_view import BlockDataset, BlockNotReadyError
 from molix.store.cache import PackedCache
-from molix.store.dataset import CachedDataset, MmapDataset
+from molix.store.dataset import BaseDataset, CachedDataset, MmapDataset
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -673,3 +681,381 @@ class TestDataModule:
             assert batch["edges", "edge_index"].shape[1] == 2
             seen_batches += 1
         assert seen_batches == 3  # 12 / 4
+
+
+# ---------------------------------------------------------------------------
+# Block collate route
+# (spec streaming-data-tiers-04-scheduler-integration-03-plan, Task 5;
+#  ac-006..ac-010)
+# ---------------------------------------------------------------------------
+
+#: Fixture blocks, deliberately tiny — a unit commit costs ~18 fsyncs
+#: (``.claude/notes/notes.md`` § "[2026-08-14] Block reads stay on mmap")::
+#:
+#:   ordinal  block    frames  units (frames; atoms; task; local task code)
+#:   0        block-p  0..3    u0 (0,1; 3; alpha; 0)   u1 (2,3; 2; beta; 1)
+#:   1        block-q  4,5     u2 (4,5; 4; alpha; 0)
+#:
+#: Both blocks order their task dictionary the same way (``alpha`` first), so the
+#: view's merged dictionary is the identity on each block's *local* codes — the
+#: ac-006 stamp reads ``reader.task_codes`` and this fixture deliberately does not
+#: discriminate local from global codes (see the spec note in the summary).
+_BLOCK_MIXTURE: dict[str, float] = {"alpha": 0.5, "beta": 0.5}
+_BLOCK_SCHEMA = TargetSchema(graph_level=frozenset({"energy"}), atom_level=frozenset())
+
+#: Hand-computed goldens of block-p unit ``u0`` (frames 0, 1): every value is a
+#: multiple of 0.5 and therefore exact in float32 — no FP tolerance is needed.
+_U0_NUM_ATOMS: tuple[int, ...] = (3, 3)
+_U0_ENERGY: tuple[float, ...] = (1.5, 2.0)
+_U0_TASK_CODE = 0
+
+_BLOCK_PROVENANCE: dict[str, object] = {
+    "source": {"name": "molnex-unit-test", "coordinate": "n/a"},
+    "generator": {"tool": "test_datamodule.py", "version": "1", "commit": "0"},
+    "created_at": "2026-08-14T00:00:00+00:00",
+    "units": {"pos": "angstrom", "energy": "kcal/mol", "forces": "kcal/mol/angstrom"},
+}
+
+
+def _block_halves(count: int, start: int) -> torch.Tensor:
+    """*count* distinct multiples of 0.5 — exactly representable in float32."""
+    return (torch.arange(count, dtype=torch.float32) + float(start)) * 0.5
+
+
+def _block_unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) -> SamplingUnit:
+    """One topology plus *n_frames* frames (``pos`` Å, ``energy`` kcal mol⁻¹)."""
+    rows = n_frames * n_atoms
+    return SamplingUnit(
+        key=key,
+        task=task,
+        topology={"Z": torch.tensor([8] + [1] * (n_atoms - 1), dtype=torch.int16)},
+        frames={
+            "pos": _block_halves(rows * 3, offset).reshape(rows, 3),
+            "energy": _block_halves(n_frames, offset + 3),
+        },
+    )
+
+
+def _write_block(root: Path, units: list[SamplingUnit]) -> Path:
+    """Write and seal one block of the two-block fixture."""
+    writer = BlockWriter(root, split="train", provenance=_BLOCK_PROVENANCE)
+    for unit in units:
+        writer.append_unit(unit)
+    writer.seal()
+    return root
+
+
+@pytest.fixture
+def block_view(tmp_path: Path) -> BlockDataset:
+    """The two sealed ``split="train"`` blocks p and q, in view order."""
+    roots = [
+        _write_block(
+            tmp_path / "block-p",
+            [
+                _block_unit("u0", "alpha", 3, 2, 0),
+                _block_unit("u1", "beta", 2, 2, 40),
+            ],
+        ),
+        _write_block(tmp_path / "block-q", [_block_unit("u2", "alpha", 4, 2, 80)]),
+    ]
+    return BlockDataset(roots, max_open=2)
+
+
+@pytest.fixture
+def fp64() -> Iterator[torch.dtype]:
+    """Capture a non-default ``config["ftype"]`` for the duration of one test."""
+    config.set_precision("fp64")
+    try:
+        yield torch.float64
+    finally:
+        config.set_precision("fp32")
+
+
+def _block_collate(
+    view: object,
+    schema: TargetSchema,
+    batch_tasks: tuple[BatchTask, ...] = (),
+) -> object:
+    """Build the block-route collate callable (``datamodule._BlockCollateFn``)."""
+    return _datamodule._BlockCollateFn(view, schema, batch_tasks)
+
+
+class _UnavailableBlockView:
+    """Delegating block view whose ``reader()`` refuses one block ordinal.
+
+    Models a planned block the conveyor cannot supply: the refusal is the view's
+    (:class:`~molix.store.block_view.BlockNotReadyError`, naming the block), and
+    the collate route must let it through untouched — never advancing to another
+    block's frames, never substituting (invariant I8).
+
+    Args:
+        view: The real multi-block view to delegate to.
+        missing: Block ordinal whose reader refuses.
+    """
+
+    def __init__(self, view: BlockDataset, *, missing: int) -> None:
+        self._view = view
+        self._missing = int(missing)
+        #: Block ordinals whose reader was requested, in request order.
+        self.requested: list[int] = []
+
+    def __len__(self) -> int:
+        return len(self._view)
+
+    @property
+    def block_ids(self) -> tuple[str, ...]:
+        return self._view.block_ids
+
+    @property
+    def max_open(self) -> int:
+        return self._view.max_open
+
+    @property
+    def split(self) -> str:
+        return self._view.split
+
+    @property
+    def atom_counts(self) -> torch.Tensor:
+        return self._view.atom_counts
+
+    @property
+    def task_codes(self) -> torch.Tensor:
+        return self._view.task_codes
+
+    @property
+    def group_codes(self) -> torch.Tensor:
+        return self._view.group_codes
+
+    @property
+    def task_names(self) -> tuple[str, ...]:
+        return self._view.task_names
+
+    @property
+    def edge_counts(self) -> NoReturn:
+        return self._view.edge_counts
+
+    def locate(self, frames: Sequence[int] | torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._view.locate(frames)
+
+    def reader(self, block: int) -> BlockReader:
+        row = int(block)
+        self.requested.append(row)
+        if row == self._missing:
+            raise BlockNotReadyError(
+                f"block row {row} at {self._view.block_ids[row]} is not READY: missing "
+                "manifest. A planned block is never skipped and never substituted."
+            )
+        return self._view.reader(row)
+
+
+class _MarkerBatchTask(BatchTask):
+    """Post-collate marker — writes one per-graph float leaf the route test reads."""
+
+    MARK = 0.5
+
+    def execute(self, data: dict) -> dict:
+        """Stamp ``("graphs", "marker")`` with :attr:`MARK` for every graph."""
+        n_graphs = int(data["graphs"].batch_size[0])
+        data["graphs", "marker"] = torch.full((n_graphs,), self.MARK)
+        return data
+
+
+class _PlainDataset(BaseDataset):
+    """A dataset with no packed payload — the per-sample collate fallback."""
+
+    def __init__(self, samples: list[dict]) -> None:
+        self._samples = samples
+
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    def __getitem__(self, idx: int) -> dict:
+        return self._samples[idx]
+
+
+class TestBlockCollation:
+    """The third ``_resolve_collation`` route: one block per batch, task stamped.
+
+    ``BlockReader.frame_payload`` skips ``meta.`` routes, so the per-frame task
+    code never reaches the payload, while
+    :class:`~molix.core.steps.multitask.TaskRouter` requires a single-task
+    ``("graphs", "task")`` label — this route stamps it from
+    ``reader.task_codes`` and asserts the batch is single-task, with no revision
+    to the block format.
+    """
+
+    # -- the ("graphs", "task") stamp (ac-006) -----------------------------
+
+    def test_stamps_graphs_task_int64_from_the_readers_task_codes(self, block_view: BlockDataset):
+        fn = _block_collate(block_view, _BLOCK_SCHEMA)
+
+        batch = fn([0, 1])
+
+        label = batch["graphs", "task"]
+        assert label.dtype is torch.int64
+        assert tuple(label.shape) == (2,)
+        expected = block_view.reader(0).task_codes[torch.tensor([0, 1])].to(torch.int64)
+        assert torch.equal(label, expected)
+        assert label.tolist() == [_U0_TASK_CODE, _U0_TASK_CODE]
+
+    def test_stamped_batch_carries_that_blocks_own_payload(self, block_view: BlockDataset):
+        fn = _block_collate(block_view, _BLOCK_SCHEMA)
+
+        batch = fn([0, 1])
+
+        assert batch["graphs", "num_atoms"].tolist() == list(_U0_NUM_ATOMS)
+        assert batch["graphs", "energy"].tolist() == list(_U0_ENERGY)
+        assert tuple(batch["atoms", "Z"].shape) == (sum(_U0_NUM_ATOMS),)
+        # Blocks carry no edges: the collate's empty-edge fallback is the design.
+        assert tuple(batch["edges", "edge_index"].shape) == (0, 2)
+
+    def test_mixed_task_batch_raises_naming_the_block_and_the_single_task_rule(
+        self, block_view: BlockDataset
+    ):
+        fn = _block_collate(block_view, _BLOCK_SCHEMA)
+
+        # Frame 1 is task ``alpha`` (unit u0), frame 2 is ``beta`` (unit u1).
+        with pytest.raises(ValueError, match="(?i)single[- ]task") as excinfo:
+            fn([1, 2])
+
+        assert "block-p" in str(excinfo.value)
+
+    # -- no skip, no substitution (ac-007) ---------------------------------
+
+    def test_mixed_block_batch_raises_naming_both_blocks_and_the_plan(
+        self, block_view: BlockDataset
+    ):
+        fn = _block_collate(block_view, _BLOCK_SCHEMA)
+
+        with pytest.raises(ValueError, match="BlockPlan") as excinfo:
+            fn([1, 4])
+
+        message = str(excinfo.value)
+        assert "block-p" in message
+        assert "block-q" in message
+
+    def test_unavailable_block_error_propagates_with_the_block_identity(
+        self, block_view: BlockDataset
+    ):
+        fn = _block_collate(_UnavailableBlockView(block_view, missing=1), _BLOCK_SCHEMA)
+
+        with pytest.raises(BlockNotReadyError, match="block-q"):
+            fn([4, 5])
+
+    def test_unavailable_block_produces_no_substitute_batch(self, block_view: BlockDataset):
+        view = _UnavailableBlockView(block_view, missing=1)
+        fn = _block_collate(view, _BLOCK_SCHEMA)
+
+        with pytest.raises(BlockNotReadyError):
+            fn([4, 5])
+
+        # Only the planned block was asked for: the route never advanced to
+        # block-p's frames to keep the loader fed.
+        assert view.requested == [1]
+
+    # -- DataModule wiring (ac-008) ----------------------------------------
+
+    def test_resolve_collation_routes_a_block_view_to_the_block_collate(
+        self, block_view: BlockDataset
+    ):
+        dm = DataModule(
+            block_view,
+            block_view,
+            target_schema=_BLOCK_SCHEMA,
+            batch_size=2,
+            num_workers=0,
+            pin_memory=False,
+        )
+
+        loader_dataset, collate_fn = dm._resolve_collation(block_view)
+
+        assert isinstance(loader_dataset, _datamodule._IndexDataset)
+        assert len(loader_dataset) == len(block_view)
+        assert isinstance(collate_fn, _datamodule._BlockCollateFn)
+
+    def test_resolve_collation_still_routes_a_packed_dataset_to_the_packed_collate(
+        self, _dm_factory
+    ):
+        dm = _dm_factory(batch_size=2)
+
+        loader_dataset, collate_fn = dm._resolve_collation(dm.train_dataset)
+
+        assert isinstance(loader_dataset, _datamodule._IndexDataset)
+        assert isinstance(collate_fn, _datamodule._PackedCollateFn)
+
+    def test_resolve_collation_still_routes_a_plain_dataset_to_the_per_sample_collate(
+        self, _dm_factory
+    ):
+        dm = _dm_factory(batch_size=2)
+        plain = _PlainDataset(_make_samples(2))
+
+        loader_dataset, collate_fn = dm._resolve_collation(plain)
+
+        assert loader_dataset is plain
+        assert isinstance(collate_fn, _datamodule._CollateFn)
+
+    def test_block_plan_source_under_ddp_still_raises(self, block_view: BlockDataset, monkeypatch):
+        from molix.batch.block_plan import BlockPlanSource
+
+        monkeypatch.setattr("molix.batch.datamodule._is_distributed", lambda: True)
+        dm = DataModule(
+            block_view,
+            block_view,
+            target_schema=_BLOCK_SCHEMA,
+            batch_sampler_source=BlockPlanSource(mixture=_BLOCK_MIXTURE, max_atoms=16),
+            batch_size=2,
+            num_workers=0,
+            pin_memory=False,
+        )
+
+        with pytest.raises(ValueError, match="(?i)ddp|distributed") as excinfo:
+            dm.train_dataloader()
+
+        assert "batch_sampler_source" in str(excinfo.value)
+
+    # -- post-collate contract shared with the packed path (ac-009) --------
+
+    def test_batch_tasks_and_ftype_apply_while_the_task_label_stays_int64(
+        self, block_view: BlockDataset, fp64: torch.dtype
+    ):
+        fn = _block_collate(block_view, _BLOCK_SCHEMA, (_MarkerBatchTask(),))
+
+        batch = fn([0, 1])
+
+        assert batch["graphs", "marker"].tolist() == [_MarkerBatchTask.MARK] * 2
+        floating = [
+            leaf
+            for leaf in batch.values(include_nested=True, leaves_only=True)
+            if leaf.dtype.is_floating_point
+        ]
+        assert floating
+        assert all(leaf.dtype is fp64 for leaf in floating)
+        assert batch["graphs", "task"].dtype is torch.int64
+
+    def test_pickle_round_trip_produces_the_same_batch(self, block_view: BlockDataset):
+        import pickle
+
+        fn = _block_collate(block_view, _BLOCK_SCHEMA)
+        expected = fn([0, 1])
+
+        batch = pickle.loads(pickle.dumps(fn))([0, 1])
+
+        assert torch.equal(batch["atoms", "pos"], expected["atoms", "pos"])
+        assert torch.equal(batch["graphs", "energy"], expected["graphs", "energy"])
+        assert torch.equal(batch["graphs", "task"], expected["graphs", "task"])
+
+    def test_getstate_carries_no_payload_tensors(self, block_view: BlockDataset):
+        fn = _block_collate(block_view, _BLOCK_SCHEMA)
+        fn([0, 1])  # warm any lazily built per-block state
+
+        state = fn.__getstate__()
+
+        assert not any(isinstance(value, torch.Tensor) for value in state.values())
+
+    # -- eager refusal (ac-010) --------------------------------------------
+
+    def test_task_declared_atom_level_is_refused_eagerly(self, block_view: BlockDataset):
+        schema = TargetSchema(graph_level=frozenset({"energy"}), atom_level=frozenset({"task"}))
+
+        with pytest.raises(ValueError, match="task"):
+            _block_collate(block_view, schema)
