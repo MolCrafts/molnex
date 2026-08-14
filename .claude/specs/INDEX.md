@@ -9,7 +9,6 @@ must not be treated as authority for a new training submission.
 - [pinet-quantization-thermal-noise-02-md-driver](pinet-quantization-thermal-noise-02-md-driver.md) — in-process velocity-Verlet and Langevin MD driver; approved with acceptance work pending.
 - [cuet-force-doublebackward](cuet-force-doublebackward.md) — cuet equivariant Linear double-backward repair; in progress with acceptance work pending.
 - [mace-neighbor-graph-correctness](mace-neighbor-graph-correctness.md) — independent multi-image neighbor oracle; code complete with one acceptance criterion pending.
-- [universal-class-i-07-wilson](universal-class-i-07-wilson.md) — Wilson B-matrix builder (analytic s-vectors, bonds + angles) for the projected-Hessian loss. [approved]
 - [universal-class-i-08-adapter](universal-class-i-08-adapter.md) — `ClassIPredictions` mapping ClassicalIMM onto the per-task `{energy, forces, hessian, q}` prediction dict. [approved]
 - [universal-class-i-09-packer](universal-class-i-09-packer.md) — reusable token packer extraction + DataModule batch-sampler injection seam (behavior-preserving). [approved]
 - [universal-class-i-10-sampler](universal-class-i-10-sampler.md) — hierarchical task→molecule/scan→configuration curriculum batch sampler with audit accessors. [approved]
@@ -28,5 +27,6 @@ must not be treated as authority for a new training submission.
 | `learnable-classical-ff-01..09` | 2026-08-13 | Completed library chain; removed from the active specification set. |
 | `universal-class-i-01..04` | 2026-08-13 | Completed library steps; removed from the active specification set. |
 | `mm-param-val-01..08` | 2026-08-13 | Closed and removed from the active specification set; superseded by `universal-class-i-05-dataset-composition`. |
+| [universal-class-i-07-wilson] | 2026-08-14 | Completed; all 11 acceptance criteria verified. |
 | [universal-class-i-06-hessian] | 2026-08-14 | Completed; all 10 acceptance criteria verified. |
 | `universal-class-i-05-dataset-composition` | 2026-08-14 | Closed in MolNex because dataset composition is not a MolNex responsibility; moved to MolHub as `universal-class-i-01-dataset-composition`. |
