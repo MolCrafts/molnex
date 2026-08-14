@@ -343,6 +343,10 @@ class Trainer:
         - **Real-data check.** Running actual dataloader batches surfaces
           shape / dtype / NaN problems immediately, before training starts. A
           non-finite warmup loss aborts loudly.
+        - **Configured objective.** The loss comes from
+          ``train_step.compute_loss`` when the Step provides that seam (so a
+          Step owning its own losses, i.e. ``Trainer(loss_fn=None)``, warms up
+          the objective it will actually train), else from ``loss_fn``.
 
         The pass fires **no hooks** and does **not** advance ``global_step``, so
         nothing reaches the journal, metrics, checkpoints or the step counters.
@@ -383,6 +387,11 @@ class Trainer:
         amp_dtype = config["amp_dtype"]
         device_type = model_device.type
 
+        # Warm up the *configured* objective: a Step that owns its losses via
+        # the ``compute_loss`` seam (Trainer(loss_fn=None)) must be routed
+        # through, or smoke would compile a different graph than training uses.
+        compute = getattr(self.train_step, "compute_loss", None)
+
         try:
             self.model.train()
             loader = datamodule.train_dataloader()
@@ -403,7 +412,10 @@ class Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 with ctx:
                     predictions = self.model(batch)
-                    loss = self.loss_fn(predictions, batch)
+                    if compute is not None:
+                        loss = compute(self, self.state, batch, predictions)
+                    else:
+                        loss = self.loss_fn(predictions, batch)
                 if not torch.isfinite(loss).all():
                     raise RuntimeError(
                         f"Smoke warmup produced a non-finite loss ({loss.detach()}) on "

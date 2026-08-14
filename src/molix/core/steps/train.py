@@ -42,7 +42,38 @@ class DefaultTrainStep:
     here would force a CPU↔GPU sync every micro-step and serialise the
     launch-bound pipeline. Consumers (``Log``, ``ProgressBarHook``) call
     ``.item()`` on their own throttled cadence.
+
+    :meth:`compute_loss` is the sanctioned seam for subclasses that need a
+    different *objective* while keeping this cadence byte-for-byte (see
+    :class:`~molix.core.steps.multitask.MultiTaskTrainStep`).
     """
+
+    def compute_loss(
+        self,
+        trainer: "Trainer",
+        state: "TrainState",
+        batch: Any,
+        predictions: Any,
+    ) -> torch.Tensor:
+        """Evaluate the objective for one batch (override point, no cadence).
+
+        Called from inside the autocast block of :meth:`on_train_batch`, so an
+        override sees the same AMP dtype as the forward pass. The default body
+        delegates to ``trainer.loss_fn``; a subclass that owns its losses (e.g.
+        per-task routing) may override this and run with
+        ``Trainer(loss_fn=None)``.
+
+        Args:
+            trainer: The owning :class:`~molix.core.trainer.Trainer`.
+            state: The :class:`~molix.core.state.TrainState` to record into.
+            batch: The collated batch handed to the model.
+            predictions: The model output for ``batch``.
+
+        Returns:
+            The scalar loss tensor to back-propagate.
+        """
+        assert trainer.loss_fn is not None
+        return trainer.loss_fn(predictions, batch)
 
     def on_train_batch(self, trainer: "Trainer", state: "TrainState", batch: Any) -> dict[str, Any]:
         """Run one training micro-batch; step the optimizer on window boundaries.
@@ -62,7 +93,6 @@ class DefaultTrainStep:
             Trainer can suppress the LR-scheduler advance for skipped steps.
         """
         assert trainer.model is not None
-        assert trainer.loss_fn is not None
         assert trainer.optimizer is not None
 
         accum = max(1, trainer.accumulate_grad_batches)
@@ -80,7 +110,7 @@ class DefaultTrainStep:
             ctx = nullcontext()
         with ctx:
             predictions = trainer.model(batch)
-            loss = trainer.loss_fn(predictions, batch)
+            loss = self.compute_loss(trainer, state, batch, predictions)
 
         if is_window_start:
             trainer.optimizer.zero_grad()

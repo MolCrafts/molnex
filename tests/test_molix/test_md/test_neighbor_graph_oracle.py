@@ -197,9 +197,27 @@ def _matpes_weights() -> Path | None:
     return None
 
 
+@pytest.fixture
+def _restore_precision():
+    """Restore the global precision singleton after the fp64 switch below.
+
+    ``config.set_precision`` mutates process-global state. Leaking ``fp64``
+    out of this module made every later-collected module build fp32 modules
+    against fp64 inputs — 7 failures in ``tests/test_molix/test_nn/test_mlp.py``
+    and ``tests/test_molix/test_quant.py`` ("mat1 and mat2 must have the same
+    dtype, but got Float and Double") that vanished when those modules ran
+    alone. Same snapshot/restore pattern as ``test_mlp.py``.
+    """
+    from molix import config
+
+    previous = config["ftype"]
+    yield
+    config.set_precision("fp64" if previous == torch.float64 else "fp32")
+
+
 @pytest.mark.slow
 class TestWrapInvarianceEnergyForces:
-    def test_energy_forces_invariant_under_wrap(self):
+    def test_energy_forces_invariant_under_wrap(self, _restore_precision):
         weights = _matpes_weights()
         if weights is None:
             pytest.skip("MatPES weights not available")

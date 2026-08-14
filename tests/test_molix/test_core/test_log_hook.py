@@ -137,6 +137,33 @@ def test_log_validation_accepts_advertised_hook_paths(capsys):
     log.on_train_start(trainer=_FakeTrainer(), state=TrainState())  # no raise
 
 
+def test_log_validation_accepts_step_advertised_paths():
+    """Per-task scalars are written by the *Step*, not a hook: a step that
+    advertises ``scalar_keys`` makes them valid ``Log`` columns."""
+
+    class _AdvertisingStep:
+        scalar_keys = (("train", "loss_hessian"),)
+
+    class _FakeTrainer:
+        hooks = []
+        train_step = _AdvertisingStep()
+
+    log = Log(1, keys=[("train", "loss_hessian")])
+    log.on_train_start(trainer=_FakeTrainer(), state=TrainState())  # no raise
+
+
+def test_log_validation_rejects_step_path_without_an_advertising_step():
+    """Same key with no advertising step is still rejected — the union widens
+    the advertised set, it does not disable validation."""
+
+    class _FakeTrainer:
+        hooks = []
+
+    log = Log(1, keys=[("train", "loss_hessian")])
+    with pytest.raises(ValueError, match="not advertised"):
+        log.on_train_start(trainer=_FakeTrainer(), state=TrainState())
+
+
 def test_log_validation_skipped_when_trainer_none():
     """``trainer=None`` disables validation so unit tests can drive Log
     without a real Trainer."""

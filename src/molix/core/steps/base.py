@@ -37,6 +37,16 @@ class Step(Protocol):
     still advances per optimizer step). Implement a custom Step only to change
     the *computation* (e.g. an auxiliary loss term), not the step cadence.
 
+    To change only the *objective* while keeping the default cadence, subclass
+    :class:`~molix.core.steps.train.DefaultTrainStep` /
+    :class:`~molix.core.steps.eval.DefaultEvalStep` and override their optional
+    ``compute_loss(trainer, state, batch, predictions)`` seam instead of
+    re-implementing ``on_train_batch`` / ``on_eval_batch``; the seam runs inside
+    the same autocast (and eval grad) context as the forward pass, and a step
+    that owns its losses there may run with ``Trainer(loss_fn=None)``. This
+    Protocol deliberately requires **no** ``compute_loss`` method — it is
+    duck-typed by callers, so third-party steps without it keep working.
+
     Example — a custom step that adds an L2 activation penalty::
 
         class PenalizedStep:
@@ -59,6 +69,10 @@ class Step(Protocol):
     See Also:
         - DefaultTrainStep: Default training step (AMP + gradient accumulation)
         - DefaultEvalStep: Default evaluation step implementation
+        - MultiTaskTrainStep: Per-batch task routing over the ``compute_loss``
+          seam, train side
+        - MultiTaskEvalStep: Per-batch task routing over the ``compute_loss``
+          seam, eval side
     """
 
     def on_train_batch(

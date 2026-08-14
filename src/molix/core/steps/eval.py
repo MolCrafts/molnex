@@ -31,10 +31,42 @@ class DefaultEvalStep:
             consumer that still inspects the outer eval graph; set ``True`` for
             pure energy/property models where the small graph-construction
             memory saving matters.
+
+    :meth:`compute_loss` is the sanctioned seam for subclasses that need a
+    different *objective* while keeping the grad-context / AMP semantics (see
+    :class:`~molix.core.steps.multitask.MultiTaskEvalStep`).
     """
 
     def __init__(self, *, no_grad: bool = False) -> None:
         self._no_grad = no_grad
+
+    def compute_loss(
+        self,
+        trainer: "Trainer",
+        state: "TrainState",
+        batch: Any,
+        predictions: Any,
+    ) -> torch.Tensor:
+        """Evaluate the objective for one batch (override point, no cadence).
+
+        Called from inside the grad-context / autocast block of
+        :meth:`on_eval_batch`, so an override sees the same AMP dtype and the
+        same ``no_grad`` setting as the forward pass. The default body
+        delegates to ``trainer.loss_fn``; a subclass that owns its losses (e.g.
+        per-task routing) may override this and run with
+        ``Trainer(loss_fn=None)``.
+
+        Args:
+            trainer: The owning :class:`~molix.core.trainer.Trainer`.
+            state: The :class:`~molix.core.state.TrainState` to record into.
+            batch: The collated batch handed to the model.
+            predictions: The model output for ``batch``.
+
+        Returns:
+            The scalar loss tensor for this batch.
+        """
+        assert trainer.loss_fn is not None
+        return trainer.loss_fn(predictions, batch)
 
     def on_train_batch(self, trainer: "Trainer", state: "TrainState", batch: Any) -> dict[str, Any]:
         """Not supported — :class:`DefaultEvalStep` handles eval batches only.
@@ -68,7 +100,6 @@ class DefaultEvalStep:
             ``{"loss": <Tensor>, "predictions": <model output>}``.
         """
         assert trainer.model is not None
-        assert trainer.loss_fn is not None
 
         # Resolve autocast args only when AMP is on (see DefaultTrainStep).
         amp_enabled = bool(config["use_amp"])
@@ -80,7 +111,7 @@ class DefaultEvalStep:
             amp_ctx = nullcontext()
         with grad_ctx, amp_ctx:
             predictions = trainer.model(batch)
-            loss = trainer.loss_fn(predictions, batch)
+            loss = self.compute_loss(trainer, state, batch, predictions)
 
         # Detached tensor (not .item()) so eval doesn't force a GPU→CPU sync
         # every batch — mirrors train/loss; consumers materialize via float().

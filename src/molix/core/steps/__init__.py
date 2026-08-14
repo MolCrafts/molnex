@@ -12,6 +12,12 @@ import torch
 
 from molix.core.steps.base import Step
 from molix.core.steps.eval import DefaultEvalStep
+from molix.core.steps.multitask import (
+    MultiTaskEvalStep,
+    MultiTaskTrainStep,
+    TaskRouter,
+    TaskSpec,
+)
 from molix.core.steps.train import DefaultTrainStep
 
 
@@ -74,8 +80,12 @@ def batch_to(
 
 
 __all__ = [
-    "Step",
-    "DefaultTrainStep",
     "DefaultEvalStep",
+    "DefaultTrainStep",
+    "MultiTaskEvalStep",
+    "MultiTaskTrainStep",
+    "Step",
+    "TaskRouter",
+    "TaskSpec",
     "batch_to",
 ]
