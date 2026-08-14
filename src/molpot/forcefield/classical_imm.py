@@ -1,5 +1,10 @@
 """ClassicalIMM — chem encoder + MM heads → continuous Class-I ForceField.
 
+"MM" is *molecular mechanics*: the classical, non-quantum description of a molecule as
+balls and springs. "Class-I" is its standard functional form (harmonic bonds and
+angles, cosine torsions, pairwise Lennard-Jones and Coulomb), and an "MM head" is a
+small network mapping graph features to one family of its parameters.
+
 Single responsibility: map chemistry → parameter tables on a ForceField.
 Does **not** evaluate energy (that is ``ForceField.to_potentials()``).
 Does **not** own IO.
@@ -32,13 +37,27 @@ __all__ = ["ClassicalIMM"]
 class ClassicalIMM(nn.Module):
     """Class-I continuous parameterization: encoder + heads → ForceField.
 
+    "Class-I" is the classical *molecular-mechanics* (MM) functional form — harmonic
+    bonds and angles, cosine torsions, pairwise Lennard-Jones and Coulomb — and this
+    module predicts its parameters as continuous functions of the covalent graph
+    instead of looking them up in a discrete atom-type table.
+
     Args:
-        encoder: Chemical perception module (``forward`` / ``embeddings``).
+        encoder: Chemical perception module (``forward`` / ``embeddings``) writing
+            per-namespace features. Expected to read topology only and never a
+            coordinate; that is what makes the predicted parameters independent of
+            geometry and the resulting forces exactly ``-∂E/∂pos``.
         forcefield: Template ForceField (styles define the classical form).
-        bond_head / angle_head / proper_head / improper_head / atom_head:
-            Parameter heads (features → continuous MM params).
-        charge_model: Optional :class:`~molpot.charge.AtomicChargeModel`
-            that writes partial charges ``atoms.q`` via EEM/QEq-family solve.
+        bond_head: Bond features → ``k`` (kcal mol⁻¹ Å⁻²) and ``r0`` (Å).
+        angle_head: Angle features → ``k`` (kcal mol⁻¹ rad⁻²) and ``theta0`` (rad).
+        proper_head: Proper-torsion features → Fourier amplitudes (kcal/mol).
+        improper_head: Improper features → harmonic and/or cosine improper params
+            (amplitudes in kcal/mol; ``chi0`` / ``phase`` in rad).
+        atom_head: Atom features → per-atom nonbonded params, e.g. the Lennard-Jones
+            well depth ``epsilon`` (kcal/mol) and ``sigma`` (Å).
+        charge_model: Optional :class:`~molpot.charge.AtomicChargeModel` that writes
+            partial charges ``atoms.q`` (elementary charge ``e``) via an
+            electronegativity-equalization (EEM) / charge-equilibration (QEq) solve.
     """
 
     def __init__(
@@ -74,9 +93,22 @@ class ClassicalIMM(nn.Module):
     ) -> ForceField:
         """Write continuous parameters into a copy of the template ForceField.
 
+        Args:
+            batch: Post-collate batch carrying ``atoms.Z`` and the topology
+                namespaces (``bonds`` / ``angles`` / ``propers`` / ``impropers``)
+                that the encoder and the parameter heads read.
+            forcefield: Template to fill instead of ``self.forcefield``; the template
+                itself is never mutated (parameters land on a copy).
+
         Returns:
             Filled :class:`ForceField` (copy-on-write). Energy is **not**
             computed here — call ``ff.to_potentials().calc_energy(batch)``.
+
+        Raises:
+            ValueError: A ``charge_model`` is configured but the encoder produced no
+                ``features["atoms"]`` for it to consume.
+            TypeError: The ``charge_model`` exposes no
+                ``write_forcefield(ff, atom_features, batch)``.
         """
         template = forcefield if forcefield is not None else self.forcefield
         features = self._encode(batch)
@@ -110,7 +142,24 @@ class ClassicalIMM(nn.Module):
         """Project continuous/general parameters onto a concrete ForceField form.
 
         Single responsibility: map source param tables into ``target`` styles.
-        Does not train or evaluate energy.
+        Does not train or evaluate energy. The result starts from ``target.clone()``
+        with the clone's own parameter tables **cleared**, so every parameter in it
+        comes from ``source``.
+
+        Args:
+            target: ForceField whose declared styles fix the concrete functional form
+                to fill — e.g. :class:`~molpot.forcefield.OPLSForceField` for the
+                OPLS ``k1..k4`` torsion table.
+            source: ForceField to read parameters from. Defaults to the ForceField
+                filled by the most recent :meth:`forward`.
+            atol: Absolute tolerance in kcal/mol (the unit of the torsion amplitudes
+                it is compared against) below which a Fourier term OPLS cannot
+                represent — periodicity outside ``n ∈ {1, 2, 3, 4}``, or a phase with
+                a non-zero ``sin γ`` component — counts as zero instead of raising.
+
+        Returns:
+            A new ForceField carrying ``target``'s styles with parameters mapped
+            from ``source``.
 
         Raises:
             RuntimeError: No source ForceField available.
@@ -158,10 +207,14 @@ class ClassicalIMM(nn.Module):
         if tgt_d is not None:
             sp = src.params("propers")
             if sp is None:
-                raise ValueError(
-                    f"project: target has dihedral:{tgt_d} but source has no propers params"
-                )
-            if tgt_d == "opls":
+                if src.dihedral_style() is not None:
+                    raise ValueError(
+                        f"project: source declares dihedral:{src.dihedral_style()!r} "
+                        "but carries no propers params"
+                    )
+                # Source has no torsion terms at all — nothing to project; the
+                # target keeps its declared dihedral style with no params.
+            elif tgt_d == "opls":
                 out = out.with_params(propers=self._propers_to_opls(sp, atol=atol))
             elif tgt_d in ("fourier", "periodic"):
                 if "k1" in sp:
@@ -206,7 +259,7 @@ class ClassicalIMM(nn.Module):
             forward = getattr(self.encoder, "forward", None)
             if callable(forward):
                 try:
-                    forward(batch)  # type: ignore[arg-type]
+                    forward(batch)
                 except TypeError:
                     pass
             return self._normalize_features(embeddings_fn(batch))
@@ -214,7 +267,7 @@ class ClassicalIMM(nn.Module):
         forward = getattr(self.encoder, "forward", None)
         if not callable(forward):
             raise RuntimeError("encoder must implement forward(batch) and/or embeddings(batch)")
-        result = forward(batch)  # type: ignore[misc]
+        result = forward(batch)
 
         from_batch = self._chem_features_on(batch)
         if from_batch is not None:
@@ -324,6 +377,11 @@ class ClassicalIMM(nn.Module):
         Source form (Class-I)::
 
             E = Σ_m (k_m / s) [1 + cos(n_m φ − γ_m)]
+
+        with ``φ`` the i-j-k-l dihedral angle (rad), ``k_m`` the amplitude of term
+        ``m`` (kcal/mol), ``n_m = periodicity`` its integer period, ``γ_m = phase``
+        its offset (rad) and ``s = idivf`` the AMBER-style integer divisor — the same
+        convention as :class:`~molpot.potentials.ProperTorsionPeriodic`.
 
         OPLS (LAMMPS)::
 

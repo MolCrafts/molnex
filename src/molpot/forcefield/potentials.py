@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from tensordict import TensorDict
 
+from molpot.derivation.force import autograd_forces_from_energy
 from molpot.derivation.protocol import ENERGY_KEY, FORCES_KEY
 from molpot.forcefield.neighbor_list import NeighborListBuilder
 from molpot.forcefield.pair_terms import (
@@ -60,6 +61,12 @@ class Potentials(BasePotential):
         ff.def_pairstyle("coulomb", calculator="pme", smearing=5.0)
         pots = ff.to_potentials()
         E = pots.calc_energy(system)
+
+    Args:
+        forcefield: Filled :class:`~molpot.forcefield.ForceField` whose declared
+            styles and parameter tables are assembled into torch terms here. Its
+            unit convention (``units="real"`` by default: kcal/mol, Å) is the unit
+            convention of every energy and force this container returns.
     """
 
     name = "class_i"
@@ -92,7 +99,7 @@ class Potentials(BasePotential):
             calc = str(opts.get("calculator", "ewald"))
             self.coulomb_periodic = CoulombPeriodicPotential(
                 smearing=float(opts.get("smearing", 5.0)),
-                calculator=calc,  # type: ignore[arg-type]
+                calculator=calc,
                 lr_wavelength=float(opts.get("lr_wavelength", 1.0)),
                 mesh_spacing=float(opts.get("mesh_spacing", 1.0)),
                 prefactor=pref,
@@ -165,6 +172,7 @@ class Potentials(BasePotential):
         return energy
 
     def get_schema(self) -> ForceFieldSchemaView:
+        """Metadata of the declared styles: parameter names, units, energy formulas."""
         return PotentialMeta.schema_for(self.forcefield.style_names(), units=self.forcefield.units)
 
     def calc_energy(
@@ -173,6 +181,24 @@ class Potentials(BasePotential):
         *,
         pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Total energy: the sum of every term the ForceField declares.
+
+        Overrides :meth:`~molpot.potentials.base.BasePotential.calc_energy`, which
+        returns a Python ``float``: this returns a **tensor** still attached to the
+        autograd graph, because :meth:`calc_forces` and the Hessian path
+        differentiate it.
+
+        Args:
+            system: Batch / mapping carrying ``atoms.pos`` ``(N, 3)`` Å and the
+                topology namespaces (``bonds`` / ``angles`` / ``propers`` /
+                ``impropers``).
+            pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``.
+
+        Returns:
+            Energy ``(B,)`` over the ``B`` molecules of the batch — shape ``()`` for
+            a single molecule — in the ForceField's unit convention
+            (``units="real"`` default: kcal/mol).
+        """
         p = self._pos(system, pos)
         num_graphs = self._num_graphs(system)
         total = torch.zeros((num_graphs,) if num_graphs > 1 else (), device=p.device, dtype=p.dtype)
@@ -186,10 +212,30 @@ class Potentials(BasePotential):
         *,
         pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Atomic forces ``F = -∂E/∂pos``.
+
+        Delegates to the canonical autograd backend
+        :func:`~molpot.derivation.force.autograd_forces_from_energy` — no
+        second force path lives here. Per-graph energies ``(B,)`` are summed to
+        one scalar before differentiating, so a multi-molecule batch works.
+
+        Positions are re-attached as a fresh ``requires_grad`` leaf taken from
+        ``pos.detach()``: any autograd history the caller's ``pos`` carried is not
+        differentiated through, while the force stays connected to the model
+        parameters ``θ`` (the mixed second derivative ``∂²E/∂pos∂θ`` is kept)
+        whenever grad is enabled, so a force loss can reach the parameter heads.
+
+        Args:
+            system: Batch / mapping carrying ``atoms.pos`` and the topology.
+            pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``.
+
+        Returns:
+            Forces ``(N, 3)`` in the ForceField's unit convention
+            (``units="real"`` default: kcal mol⁻¹ Å⁻¹).
+        """
         p = self._pos(system, pos).detach().requires_grad_(True)
         energy = self.calc_energy(system, pos=p)
-        (grad,) = torch.autograd.grad(energy, p, create_graph=torch.is_grad_enabled())
-        return -grad
+        return autograd_forces_from_energy(energy, p)
 
     def calc_energy_forces(
         self,
@@ -197,10 +243,26 @@ class Potentials(BasePotential):
         *,
         pos: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Energy and forces from one energy evaluation.
+
+        Same canonical backend as :meth:`calc_forces`
+        (:func:`~molpot.derivation.force.autograd_forces_from_energy`), reusing
+        the single energy graph instead of evaluating it twice. Positions are
+        re-attached as a fresh ``requires_grad`` leaf exactly as in
+        :meth:`calc_forces`.
+
+        Args:
+            system: Batch / mapping carrying ``atoms.pos`` and the topology.
+            pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``.
+
+        Returns:
+            Energy ``(B,)`` — ``()`` for a single molecule — and forces ``(N, 3)``,
+            in the ForceField's unit convention (``units="real"`` default:
+            kcal/mol and kcal mol⁻¹ Å⁻¹).
+        """
         p = self._pos(system, pos).detach().requires_grad_(True)
         energy = self.calc_energy(system, pos=p)
-        (grad,) = torch.autograd.grad(energy, p, create_graph=torch.is_grad_enabled())
-        return energy, -grad
+        return energy, autograd_forces_from_energy(energy, p)
 
     def term_energies(
         self,
@@ -208,6 +270,24 @@ class Potentials(BasePotential):
         *,
         pos: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
+        """Energy of each declared term, keyed by term name.
+
+        One entry per style the ForceField declares — ``bonds`` / ``angles`` /
+        ``propers`` / ``impropers`` / ``lj`` / ``coulomb`` — so a bonded-only
+        ForceField yields no ``lj`` and no ``coulomb`` key even when ``epsilon`` /
+        ``sigma`` or charges already sit in its parameter tables. A declared style
+        whose topology or parameters are missing contributes an explicit zero rather
+        than silently disappearing.
+
+        Args:
+            system: Batch / mapping carrying ``atoms.pos`` ``(N, 3)`` Å and the
+                topology namespaces.
+            pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``.
+
+        Returns:
+            Term name → energy ``(B,)`` (``()`` for a single molecule) in the
+            ForceField's unit convention (``units="real"`` default: kcal/mol).
+        """
         p = self._pos(system, pos)
         ff = self.forcefield
         device = p.device
@@ -545,7 +625,7 @@ class Potentials(BasePotential):
         cols = [self._ns_tensor(propers, k) for k in ("atomi", "atomj", "atomk", "atoml")]
         if any(c is None for c in cols):
             return None
-        return torch.stack([c.long() for c in cols], dim=0)  # type: ignore[union-attr]
+        return torch.stack([c.long() for c in cols], dim=0)
 
     def _improper_index(self, system: Any) -> torch.Tensor | None:
         impropers = self._namespace(system, "impropers")
@@ -554,7 +634,7 @@ class Potentials(BasePotential):
         cols = [self._ns_tensor(impropers, k) for k in ("atomi", "atomj", "atomk", "atoml")]
         if any(c is None for c in cols):
             return None
-        return torch.stack([c.long() for c in cols], dim=0)  # type: ignore[union-attr]
+        return torch.stack([c.long() for c in cols], dim=0)
 
     @staticmethod
     def _identity_types(n: int, device: torch.device) -> torch.Tensor:

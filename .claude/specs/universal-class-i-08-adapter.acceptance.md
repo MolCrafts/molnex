@@ -12,7 +12,9 @@ criteria:
       charge head, the counters are 0 for every key not in K, and the ("q",)
       case performs no Potentials assembly / energy evaluation (asserted via a
       counter on ForceField.to_potentials or Potentials.calc_energy).
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-002
     summary: Energy parity with the direct ClassicalIMM path plus shape contract
     type: code
@@ -20,7 +22,9 @@ criteria:
       adapter.energy(batch) equals model(batch).to_potentials().calc_energy(batch)
       with torch.allclose(atol=1e-10) in fp64, and its shape is () for a
       single-graph batch and (2,) for a two-molecule batch.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-003
     summary: Force parity with ForceDerivation and one-pass energy_forces equivalence
     type: code
@@ -30,7 +34,9 @@ criteria:
       adapter.energy_forces(batch) equals (adapter.energy(batch),
       adapter.forces(batch)) within the same tolerance, and a force-MSE
       .backward() produces non-None grads on the bond-head parameters.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-004
     summary: Analytic harmonic-bond goldens for energy, forces and Hessian
     type: code
@@ -43,7 +49,9 @@ criteria:
       tests/test_molpot/test_forcefield/test_predictions.py with the derivation
       and the Wilson 1941 (https://doi.org/10.1063/1.1750829) citation in the
       test docstring.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-005
     summary: q matches the analytic EEM solution and is geometry-independent
     type: code
@@ -53,7 +61,9 @@ criteria:
       and equals AtomicChargeModel.charges(features, batch) built from the same
       head and solver; q for two different conformers of the same topology is
       bit-identical under torch.equal (dq/dx = 0).
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-006
     summary: Bonded-only composition evaluates no LJ or Coulomb term
     type: code
@@ -63,7 +73,9 @@ criteria:
       adapter energy equals the bond golden 12.5 kcal/mol exactly (atol 1e-10)
       and the keys of Potentials.term_energies(batch) are a subset of
       {"bonds","angles","propers","impropers"} ("lj" and "coulomb" absent).
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-007
     summary: predictions.py builds no derivative path of its own
     type: code
@@ -73,7 +85,9 @@ criteria:
       forces are obtained via Potentials/ForceDerivation and the Hessian only via
       the injected molpot.derivation derivation (asserted by a source-text test
       or equivalent static check).
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-008
     summary: Potentials force methods delegate to the canonical autograd helper
     type: code
@@ -84,7 +98,9 @@ criteria:
       methods), and tests/test_molpot/test_forcefield/test_potentials.py shows
       the returned forces equal the pre-change numerics within atol 1e-12 and
       still support force->parameter double backward.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-009
     summary: Fail-loud errors on malformed key sets and missing producers
     type: code
@@ -95,7 +111,9 @@ criteria:
       hessian_derivation; pytest.raises(RuntimeError) passes when "q" is declared
       but the filled ForceField has no atoms["q"]. Every message names the
       offending condition.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-010
     summary: Public symbols documented with units and shapes; __all__ sorted
     type: docs
@@ -119,7 +137,9 @@ criteria:
       atol 1e-10, and asserts a q-only adapter returns a dict without an
       "energy" key. The script imports no third-party oracle and spawns no
       subprocess; goldens are in-file literals.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-012
     summary: Full check and test suite pass
     type: runtime
@@ -128,7 +148,9 @@ criteria:
       tests/ scripts/ regressions/ && ty check src/ --exit-zero-on-warning` and
       `python -m pytest tests/ -q -n 12 --dist worksteal` both exit 0 on the
       branch containing this spec.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
 ---
 
 # Acceptance criteria

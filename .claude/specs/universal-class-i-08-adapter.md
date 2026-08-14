@@ -1,6 +1,6 @@
 ---
 title: Class-I prediction adapter (ClassicalIMM → per-task prediction dict)
-status: approved
+status: code-complete
 created: 2026-08-14
 grilled: true
 ---
@@ -84,15 +84,15 @@ No `librarian_report` was supplied with this task; the survey below was performe
 
 ## Tasks
 
-- [ ] Write failing unit tests for ClassIPredictions (tests/test_molpot/test_forcefield/test_predictions.py → TestClassIPredictions): declared-keys-only dict, energy shape for B=1 and B=2, energy/force parity vs the direct ClassicalIMM+Potentials+ForceDerivation path, one-pass energy_forces equivalence, hessian present only when declared, q parity vs AtomicChargeModel and geometry independence, bonded-only composition evaluating no LJ/Coulomb, and all fail-loud error cases
-- [ ] Write failing unit test for the canonical force delegation (tests/test_molpot/test_forcefield/test_potentials.py → TestPotentials): calc_forces / calc_energy_forces equal autograd_forces_from_energy on the same energy and keep force→parameter double backward
-- [ ] Generalize Potentials.calc_forces and Potentials.calc_energy_forces in src/molpot/forcefield/potentials.py to delegate to molpot.derivation.autograd_forces_from_energy (no third force path; numerics unchanged)
-- [ ] Implement ClassIPredictions in src/molpot/forcefield/predictions.py (init-time key plan; energy / forces / energy_forces / charges / injected hessian_derivation; construction- and call-time fail-loud errors)
-- [ ] Export ClassIPredictions from src/molpot/forcefield/__init__.py and src/molpot/__init__.py, re-sorting both `__all__` lists alphabetically per the notes rule
-- [ ] Add Google-style docstrings per doc.style with units and tensor shapes (kcal/mol, kcal mol⁻¹ Å⁻¹, kcal mol⁻¹ Å⁻², `e`; `(B,)` / `(N, 3)` / `(3N, 3N)` / `(N,)`) to every public symbol in src/molpot/forcefield/predictions.py
-- [ ] Verify against the analytic harmonic-bond and EEM case in tests/test_molpot/test_forcefield/test_predictions.py: E=12.5 kcal/mol, F=(±50,0,0) kcal mol⁻¹ Å⁻¹, H[0,0]=100 / H[0,3]=−100 / H[1,1]=33.333333333333336 kcal mol⁻¹ Å⁻², q=(+0.25,−0.25) e, fp64 atol 1e-10
-- [ ] Add regression example regressions/universal-class-i-08-adapter.py (public API only; hard-coded goldens, no third-party runtime)
-- [ ] Run full check + test suite
+- [x] Write failing unit tests for ClassIPredictions (tests/test_molpot/test_forcefield/test_predictions.py → TestClassIPredictions): declared-keys-only dict, energy shape for B=1 and B=2, energy/force parity vs the direct ClassicalIMM+Potentials+ForceDerivation path, one-pass energy_forces equivalence, hessian present only when declared, q parity vs AtomicChargeModel and geometry independence, bonded-only composition evaluating no LJ/Coulomb, and all fail-loud error cases
+- [x] Write failing unit test for the canonical force delegation (tests/test_molpot/test_forcefield/test_potentials.py → TestPotentials): calc_forces / calc_energy_forces equal autograd_forces_from_energy on the same energy and keep force→parameter double backward
+- [x] Generalize Potentials.calc_forces and Potentials.calc_energy_forces in src/molpot/forcefield/potentials.py to delegate to molpot.derivation.autograd_forces_from_energy (no third force path; numerics unchanged)
+- [x] Implement ClassIPredictions in src/molpot/forcefield/predictions.py (init-time key plan; energy / forces / energy_forces / charges / injected hessian_derivation; construction- and call-time fail-loud errors)
+- [x] Export ClassIPredictions from src/molpot/forcefield/__init__.py and src/molpot/__init__.py, re-sorting both `__all__` lists alphabetically per the notes rule
+- [x] Add Google-style docstrings per doc.style with units and tensor shapes (kcal/mol, kcal mol⁻¹ Å⁻¹, kcal mol⁻¹ Å⁻², `e`; `(B,)` / `(N, 3)` / `(3N, 3N)` / `(N,)`) to every public symbol in src/molpot/forcefield/predictions.py
+- [x] Verify against the analytic harmonic-bond and EEM case in tests/test_molpot/test_forcefield/test_predictions.py: E=12.5 kcal/mol, F=(±50,0,0) kcal mol⁻¹ Å⁻¹, H[0,0]=100 / H[0,3]=−100 / H[1,1]=33.333333333333336 kcal mol⁻¹ Å⁻², q=(+0.25,−0.25) e, fp64 atol 1e-10
+- [x] Add regression example regressions/universal-class-i-08-adapter.py (public API only; hard-coded goldens, no third-party runtime)
+- [x] Run full check + test suite
 
 ## Testing strategy
 
