@@ -365,3 +365,35 @@ budget on an estimated "≈5 GB at 1e8 list-form" — measured **17.5 GB**, so
 under the default budget 1e8 self-skips by design.
 
 **Status.** active (spec `streaming-data-tiers-04-scheduler-integration-01-tables`, task 7).
+
+
+## [2026-08-14] Streaming scheduler integration — sharp edges of record
+
+<!-- mol:note:topic:scheduler-integration-edges -->
+
+**Rule.** The `("graphs","task")` stamp on block-collated batches is the
+**view's global** task code (never block-local `reader.task_codes` — a block's
+local `(0,1)` may be global `(1,2)` after the dictionary merge). Each
+`BlockDataset` merges its OWN dictionary, so two views (e.g. train vs val)
+can assign the same integer to different tasks: a `TaskRouter` shared across
+loaders must be fed views whose dictionaries agree, or the caller must remap.
+Pinned by `regressions/streaming-data-tiers-04-scheduler-integration-03-plan.py`
+(discriminating local!=global fixture; the cross-view case documented in its
+docstring as a deliberate sharp edge).
+
+**Open routes** (named, not silent): `/mol:fix` scoped to `molix.batch.task`
+(`BatchTask.execute` annotated `dict` while the contract is TensorDict — one
+pre-existing ty warn per collate route); `BlockDataset.__getstate__` should
+drop the LRU pool + cached tables so a spawn worker re-opens by path (worker
+pickling currently ships mmap'd column bytes by value — same shape as the
+pre-existing `_PackedCollateFn` debt, worse for the streaming tier;
+`num_workers=0` unaffected); molnex `streaming-data-tiers-06-ddp-plan`
+(cross-rank plan slicing) and molhub `streaming-data-tiers-05-multinode`
+(ledger writer election) are the two named successor specs.
+
+**Status.** Chain closed 2026-08-14: 01-tables 57f2adc (FrameLabelTable +
+sampler generalization + R1 bench: no crossover below 1e8, code-form chosen,
+85% of plan footprint is representation-shared planning machinery →
+unit-granularity planning is the real lever), digest-core revision 180332f
+(task_names covered), 02-view bc75a9d (BlockDataset), 03-plan eb39d8d
+(BlockPlanSource + block collate + visit-order handoff).
