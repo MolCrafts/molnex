@@ -12,6 +12,11 @@ Surfaces:
   is an index view over either, and :class:`BaseDataset` is the shared reader
   protocol. :class:`PackedView` is the read-only handle the packed collate fast
   path consumes.
+* **READY-tier blocks** — :class:`BlockWriter` appends :class:`SamplingUnit`\\ s
+  to one directory of raw little-endian column files, commits each with a crc32
+  record and seals it with per-column sha256; :class:`BlockReader` mmaps a sealed
+  block and serves sampler counts plus a packed-collate payload;
+  :class:`BlockManifest` is the JSON contract of both.
 
 Nothing here builds batches, samples indices or acquires data — those live in
 their own packages.
@@ -19,6 +24,7 @@ their own packages.
 
 from __future__ import annotations
 
+from molix.store.block import BlockManifest, BlockReader, BlockWriter, SamplingUnit
 from molix.store.cache import PackedCache
 from molix.store.dataset import (
     BaseDataset,
@@ -30,9 +36,13 @@ from molix.store.dataset import (
 
 __all__ = [
     "BaseDataset",
+    "BlockManifest",
+    "BlockReader",
+    "BlockWriter",
     "CachedDataset",
     "MmapDataset",
     "PackedCache",
     "PackedView",
+    "SamplingUnit",
     "SubsetDataset",
 ]

@@ -118,6 +118,8 @@ cython_debug/
 
 # Benchmarks
 .benchmarks/
+# default --root of scripts/store/bench_block_read.py (deleted unless --keep)
+.bench-scratch/
 
 # Examples (not shipped)
 /examples/

@@ -9,7 +9,6 @@ must not be treated as authority for a new training submission.
 - [pinet-quantization-thermal-noise-02-md-driver](pinet-quantization-thermal-noise-02-md-driver.md) — in-process velocity-Verlet and Langevin MD driver; approved with acceptance work pending.
 - [cuet-force-doublebackward](cuet-force-doublebackward.md) — cuet equivariant Linear double-backward repair; in progress with acceptance work pending.
 - [mace-neighbor-graph-correctness](mace-neighbor-graph-correctness.md) — independent multi-image neighbor oracle; code complete with one acceptance criterion pending.
-- [streaming-data-tiers-02-block-format](streaming-data-tiers-02-block-format.md) — READY-tier appendable column block store (`molix.store`); successor of molhub streaming-data-tiers-01-strategy. [approved]
 
 ## Closed specifications and chains
 

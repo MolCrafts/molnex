@@ -269,3 +269,40 @@ is truly needed, use `# ty: ignore[rule]`; prefer relying on the
 Full text: [learnable-classical-ff.md](learnable-classical-ff.md).
 
 **Status.** active.
+
+---
+
+<!-- mol:note:topic:block-store-lustre-io -->
+## [2026-08-14] Block reads stay on mmap; the cliff is locality, not the path
+
+`scripts/store/bench_block_read.py` on `arrhenius1.hpc.arrhenius.naiss.se`
+(login node, project Lustre `/nobackup/proj/disk`, PFL 1 stripe × 4 MiB,
+torch 2.12.1+cpu, `OMP_NUM_THREADS=1`), median of 3 runs over a 1.03 GB
+block (256 units × 8192 frames × 40 atoms, 17 columns). One pass gathers
+65536 frames = 31.5 MB of `frame_pos` payload in 256-frame batches; `cold`
+is the first touch after `POSIX_FADV_DONTNEED` (`mincore` witnessed 0.000
+residency), `warm` the repeat. MB/s is useful payload.
+
+| order | path | cold MB/s | warm MB/s |
+|---|---|---|---|
+| sequential | mmap | 104 | 1114 |
+| sequential | pread | 128 | 218 |
+| shuffled | mmap | 2.2 | 602 |
+| shuffled | pread | 1.6 | 178 |
+
+Write side: 1000 small units (12 atoms, 4 frames → 18 fsyncs/unit) commit at
+**153 ms/unit = 6.5 units/s**; the ~1 MB-per-unit read block at 185 ms/unit
+= 21.8 MB/s. `seal()` streams sha256 at **1.4 GB/s** (spec assumed 1 GB/s).
+
+**Rule**: `BlockReader._map_column` stays mmap. Warm, mmap wins 5.1× (seq) /
+3.4× (shuffled); cold the paths are a wash (`pread`'s best reproducible edge
+1.23×, under the spec's 1.5× follow-up threshold), so no `pread` column
+reader. Budget the write path by **fsync latency, not bandwidth** — cost is
+per *unit* (~18 fsyncs), so 200 k units ≈ 8.5 h regardless of unit size.
+Cold shuffled frame access is ~2 MB/s (~3–5 k frames/s) on **both** paths,
+~270× below warm mmap: a consumer pre-warms a block sequentially rather than
+relying on random faults (conveyor concern, `-03`). Cold cells vary up to ~3×
+run-to-run on a shared login node — re-measure on the compute node before
+prefetch policy is frozen.
+
+**Status.** active (spec `streaming-data-tiers-02-block-format`, task 8).
