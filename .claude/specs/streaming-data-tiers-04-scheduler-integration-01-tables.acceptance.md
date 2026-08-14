@@ -49,11 +49,12 @@ criteria:
     type: code
     pass_when: |
       One pytest.raises(ValueError) test per case, each asserting the message names
-      the offending argument and a remedy: unequal task/group table lengths (message
-      contains both argument names and both lengths); a 2-D, floating-dtype, or
-      non-CPU code tensor; a negative code; a task code >= len(task_names);
-      task_names omitted with integer codes; task_names supplied together with
-      string labels.
+      the offending argument and a remedy. In TestFrameLabelTable: unequal
+      task/group table lengths (message contains both argument names and both
+      lengths); a 2-D, floating-dtype, or non-CPU code tensor; a negative code; a
+      task code >= len(task_names). In TestTaskMixtureTableForms (sampler-argument
+      validation — from_labels has no task_names parameter): task_names omitted
+      with integer codes; task_names supplied together with string labels.
     status: pending
   - id: ac-006
     summary: Both table forms produce byte-identical plans and audit dicts
@@ -73,7 +74,8 @@ criteria:
       A source-inspection test asserts that inspect.getsource of _validate_tables,
       _bucket_units, _pack_tasks, _interleave, batches_per_task and frames_per_task
       contains no isinstance(...) check against str, Sequence or torch.Tensor (the
-      dispatch lives only in FrameLabelTable), that the module still contains
+      dispatch lives in the sampler __init__'s constructor selection and inside
+      FrameLabelTable — __init__ is deliberately excluded from this list), that the module still contains
       "current.append(" exactly once and only inside TokenBudgetPacker, and that
       TaskMixtureBatchSampler source still shows no "batches.append(current)" or
       "totals =" marker.
@@ -114,7 +116,9 @@ criteria:
       list-form peak RSS >= 2x code-form peak RSS or stating "no crossover below
       <F_max>"; the run aborts loudly if the two representations produce different
       plans, and skips (with a printed projection) any cell exceeding
-      --rss-budget-gb. The printed numbers, host, torch version and date appear in
+      --rss-budget-gb (default 6.0 GB, stated in --help); the bench exits
+      non-zero if the 1e6 or 1e7 cells were skipped, so the crossover cannot
+      pass trivially unmeasured. The printed numbers, host, torch version and date appear in
       .claude/notes/notes.md under a dated topic note, and the chosen representation
       is written into the spec's Domain basis successor note.
     status: pending

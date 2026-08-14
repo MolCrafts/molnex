@@ -1,6 +1,7 @@
 ---
 title: Block-aware plan behind `batch_sampler_source` (streaming-data-tiers -04, link 03)
 status: approved
+grilled: true
 slug: streaming-data-tiers-04-scheduler-integration-03-plan
 repo: molnex
 chain: streaming-data-tiers-04-scheduler-integration (01-tables → 02-view → 03-plan)
@@ -79,8 +80,8 @@ generalization of that surface satisfies it by construction:
 
 ```
 __len__() -> int                         # global frame count F
-block_ids -> tuple[str, ...]             # block identity strings, ordinal-indexed
-resident_window -> int                   # K, the residency budget in blocks
+block_ids -> tuple[str, ...]             # block identity strings (directory basenames), ordinal-indexed
+max_open -> int                          # K — the view's reader-pool bound, reused as the plan window
 split -> str                             # the single split of this view (purity, I7)
 atom_counts -> Tensor (F,)               # per-frame atom cost, pointer arithmetic only
 task_codes -> Tensor (F,)                # int task code, global dictionary
@@ -91,10 +92,13 @@ locate(frames) -> (Tensor (B,), Tensor (B,))   # (block ordinal, block-local fra
 reader(block: int) -> BlockReader        # the sealed block's reader; residency is the view's concern
 ```
 
-`-02` fixes the concrete class; if it named an accessor differently the mismatch
-surfaces at exactly one place (this protocol) and is a rename, not a redesign. An
-`isinstance` assertion against the real view is part of the test set and the
-regression, so the seam cannot silently rot.
+`-02` fixes the concrete class; the two specs were reconciled 2026-08-14 after a
+three-way audit (vectorized `locate`, `block_ids` basenames, one `max_open` name —
+no `resident_window` alias). Because `runtime_checkable` `isinstance` checks
+member *presence* only, the contract-seam test also **calls** the vectorized
+`locate([0])` and reads `block_ids` / `max_open` against the real `-02` view — a
+behavioural probe, not just an attribute check — so a signature drift fails
+loudly at test time rather than on the first production collate.
 
 ### 2. Planning is global; only the *order* is windowed
 
@@ -117,9 +121,11 @@ regression, so the seam cannot silently rot.
    batches that had to be divided is recorded as `boundary_splits`.
 4. Order the blocks by **first appearance in the plan** (deterministic, derived from
    the plan itself — no second RNG), partition that order into consecutive windows
-   of at most `K = view.resident_window` blocks, and emit, window by window, the
-   plan's batches restricted to that window in plan order. `K ≥ n_blocks` makes this
-   the identity map; `K = 1` makes it strict block-major.
+   of at most `K = view.max_open` blocks, and emit, window by window, the
+   plan's batches restricted to that window in plan order. At `K ≥ n_blocks` the
+   windowing is a no-op, so the emitted order equals the plan order whenever
+   `boundary_splits == 0` (division still fires independently of `K`); `K = 1`
+   makes it strict block-major.
 5. Compute per-block `BlockCoverage` (units = distinct `group_codes` among that
    block's planned frames; frames; batches) and construct the `BlockPlan`.
 
@@ -288,10 +294,10 @@ inspection of the surfaces cited above.
 ## Tasks
 
 - [ ] Write failing unit tests for `BlockPlan` / `BlockCoverage` (tests/test_molix/test_batch/test_block_plan.py → `TestBlockPlan`, `TestBlockCoverage`): iteration yields the stored `list[int]` batches, `__len__`, `visit_order()` first-appearance order, `block_of()`, `write_visit_order()` document keys parsed back with stdlib `json`, and `__post_init__` rejection of a coverage/batches mismatch
-- [ ] Write failing unit tests for `BlockPlanSource` over a stub `BlockFrameView` (tests/test_molix/test_batch/test_block_plan.py → `TestBlockPlanSource`): plan equality with a direct `TaskMixtureBatchSampler` at `K >= n_blocks` and zero boundary splits, block-pure division of a straddling batch with `boundary_splits` counted, strict block-major at `K = 1`, emitted batches are a permutation of planned ones, coverage totals, eager `max_edges` refusal, non-view `TypeError`
+- [ ] Write failing unit tests for `BlockPlanSource` over a stub `BlockFrameView` (tests/test_molix/test_batch/test_block_plan.py → `TestBlockPlanSource`): plan equality with a direct `TaskMixtureBatchSampler` at `K >= n_blocks` and zero boundary splits, block-pure division of a straddling batch with `boundary_splits` counted, strict block-major at `K = 1`, windowed order at `1 < K < n_blocks` (windows of ≤ K distinct blocks, plan order within a window), emitted batches are a permutation of planned ones, coverage totals, eager `max_edges` refusal, non-view `TypeError`
 - [ ] Implement `BlockFrameView`, `BlockCoverage` and `BlockPlan` in src/molix/batch/block_plan.py (frozen value object, `__iter__` / `__len__` / `visit_order` / `block_of` / `write_visit_order`, `molix.visit-order/1` document, `__post_init__` consistency validation)
 - [ ] Implement `BlockPlanSource.batch_sampler` in src/molix/batch/block_plan.py (one global `TaskMixtureBatchSampler` over the view's int-code tables, block-boundary division, `K`-window ordering, coverage accounting)
-- [ ] Write failing unit tests for the block collate route in tests/test_molix/test_batch/test_datamodule.py (`TestBlockCollation`, over two tiny `BlockWriter`-written blocks): `("graphs","task")` stamped int64 from `reader.task_codes`, mixed-task batch raises, mixed-block batch raises, `_resolve_collation` picks the block route before the packed route and leaves both existing routes untouched, DDP still refused, `batch_tasks` + `batch_to(ftype)` applied and the int label uncast, pickle round-trip carries no payload tensors, `"task"` in `atom_level` refused eagerly
+- [ ] Write failing unit tests for the block collate route in tests/test_molix/test_batch/test_datamodule.py (`TestBlockCollation`, over two tiny `BlockWriter`-written blocks): `("graphs","task")` stamped int64 from `reader.task_codes`, mixed-task batch raises, mixed-block batch raises, an unavailable block's error propagating from `view.reader(b)` with the block identity named and no substitute batch produced (ac-007's second clause), `_resolve_collation` picks the block route before the packed route and leaves both existing routes untouched, DDP still refused, `batch_tasks` + `batch_to(ftype)` applied and the int label uncast, pickle round-trip carries no payload tensors, `"task"` in `atom_level` refused eagerly
 - [ ] Implement `_block_capable` and `_BlockCollateFn` and extend `_resolve_collation` in src/molix/batch/datamodule.py (block route first, `_IndexDataset` reused, `__getstate__` mirroring `_PackedCollateFn:591`)
 - [ ] Export `BlockCoverage` / `BlockFrameView` / `BlockPlan` / `BlockPlanSource` from src/molix/batch/__init__.py with an alphabetized `__all__` and add Google-style docstrings with tensor shapes and count units to every new symbol in src/molix/batch/block_plan.py and src/molix/batch/datamodule.py
 - [ ] Add regression example regressions/streaming-data-tiers-04-scheduler-integration-03-plan.py (public API only; three `BlockWriter` blocks, plan + `DataModule` iteration offline, hard-coded goldens, no third-party runtime)
@@ -308,8 +314,8 @@ the `datamodule.py` extension → the existing
 each. No e2e under `tests/`.
 
 - **Fixtures.** Pure planning tests run against a stub `BlockFrameView` holding
-  literal `atom_counts` / `task_codes` / `group_codes` / `block_ids` tensors — no
-  disk, no fsync. Collate-route tests use real blocks written with `BlockWriter`
+  literal `atom_counts` / `task_codes` / `group_codes` tensors and a `block_ids`
+  string tuple — no disk, no fsync. Collate-route tests use real blocks written with `BlockWriter`
   and kept deliberately tiny (≤ 2 units per block, ≤ 4 frames per unit) because a
   unit commit costs ~18 fsyncs (`.claude/notes/notes.md` § "[2026-08-14] Block reads
   stay on mmap").
@@ -319,7 +325,8 @@ each. No e2e under `tests/`.
   the literal task code of its block; coverage rows whose `frames` sum equals the
   planned frame total and whose `units` equal the distinct planned `group_codes`.
 - **Edge cases.** A batch straddling two blocks (divided, counted, never cutting a
-  unit); `K = 1` strict block-major; `K` not dividing the block count; a single-block
+  unit); `K = 1` strict block-major; an unavailable block whose `view.reader(b)`
+  raises — the error propagates with the block identity named, no substitution; `K` not dividing the block count; a single-block
   view (windowing is the identity); a mixed-task batch handed to `_BlockCollateFn`
   (raises); a mixed-block batch (raises); `max_edges` passed (raises, naming
   `edge_counts`); a non-view dataset (`TypeError`); `"task"` declared `atom_level`

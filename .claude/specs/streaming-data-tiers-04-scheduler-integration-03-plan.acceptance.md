@@ -6,7 +6,7 @@ criteria:
     type: code
     pass_when: |
       A test in tests/test_molix/test_batch/test_block_plan.py builds a
-      BlockFrameView whose resident_window >= len(block_ids) and whose planned
+      BlockFrameView whose max_open >= len(block_ids) and whose planned
       batches are all block-pure, and asserts
       [list(b) for b in BlockPlanSource(...).batch_sampler(view, seed=S)] equals
       [list(b) for b in TaskMixtureBatchSampler(view, indices=range(len(view)),
@@ -28,7 +28,7 @@ criteria:
     summary: K-window ordering bounds residency and degenerates correctly
     type: code
     pass_when: |
-      Tests assert: with resident_window == 1 the emitted block sequence is
+      Tests assert: with max_open == 1 the emitted block sequence is
       strictly block-major (each block's batches contiguous); with
       1 < K < n_blocks the visited blocks form consecutive windows of at most K
       distinct blocks and within a window plan order is preserved; with K >= n_blocks

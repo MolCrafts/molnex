@@ -1,6 +1,7 @@
 ---
 title: Multi-block dataset view over sealed READY blocks
 status: approved
+grilled: true
 slug: streaming-data-tiers-04-scheduler-integration-02-view
 repo: molnex
 chain: streaming-data-tiers-04-scheduler-integration (01-tables → 02-view → 03-plan)
@@ -52,7 +53,7 @@ atom_counts = (3,3,4,4,4, 4,4,4,4,4, 3,4,4,4,4)
 group_codes = (0,0,1,1,1, 2,2,2,2,2, 3,4,4,4,4)
 task_names  = ("equilibrium", "relax", "torsion")      # merged, first appearance
 task_codes  = (0,0,1,1,1, 2,2,2,2,2, 1,2,2,2,2)        # C remaps local (0,1) -> global (1,2)
-locate      : 0 -> (0,0), 4 -> (0,4), 5 -> (1,0), 9 -> (1,4), 10 -> (2,0), 14 -> (2,4)
+locate([0,4,5,9,10,14]) -> blocks (0,0,1,1,2,2), locals (0,4,0,4,0,4)
 ```
 
 Reference:
@@ -76,19 +77,32 @@ Reference:
 BlockDataset(roots: Sequence[str | os.PathLike[str]], *, max_open: int = 4)
   __len__() -> int                         # total frames across blocks
   __getitem__(idx) -> dict                 # flat pre-collate sample dict (one frame)
-  locate(idx) -> tuple[int, int]           # global -> (block, local frame)
+  locate(frames) -> tuple[Tensor, Tensor]  # VECTORIZED: (B,) block ordinals, (B,) local rows
   frame_payload(frames) -> dict[str, Any]  # packed-cache-v1 payload, caller order
   reader(block) -> BlockReader             # bounded-K, LRU
   open_blocks -> tuple[int, ...]           # resident block rows, oldest first
-  blocks -> tuple[Path, ...] ; split -> str ; max_atoms -> int
+  blocks -> tuple[Path, ...]               # block directories, given order
+  block_ids -> tuple[str, ...]             # block identity strings = directory basenames
+                                           # (the producer's deterministic root name;
+                                           # the visit-order contract's identity)
+  max_open -> int                          # the reader-pool bound K, read-only
+  split -> str ; max_atoms -> int
   atom_counts -> Tensor(F,) long ; task_codes -> Tensor(F,) long
   task_names -> tuple[str, ...] ; group_codes -> Tensor(F,) long
   edge_counts -> NoReturn                  # raises, never fabricates
 ```
 
+`locate` is **vectorized only** (`Sequence[int] | Tensor -> ((B,) long, (B,) long)`)
+— the shape `-03-plan`'s collate route calls; a scalar lookup is `locate([idx])`.
+`block_ids` and the read-only `max_open` property exist because `-03`'s
+`BlockFrameView` protocol consumes them (`max_open` doubles as the plan's window
+`K`; one name for one number, no `resident_window` alias). [Reconciled 2026-08-14
+after the three-way spec-audit: the protocol previously assumed members this
+surface did not declare.]
+
 *Construction (manifest-only, no column mapped except the per-block counts).* Each root is opened in the given order through `BlockManifest.read` (`block.py:698-727`). Empty `roots` and `max_open < 1` raise `ValueError`. Three named `ValueError` subclasses are defined so 03's scheduler can branch on the failure kind without string matching, while every existing `except ValueError` handler keeps working:
 
-- **`BlockNotReadyError`** — I8. A root with no readable `manifest.json`, an unparsable/wrong-`schema_version` manifest, or `sealed == False` (`block.py:780-783`, `:1308-1312`) raises immediately, naming the block row, its path and its state (`missing manifest` / `unreadable manifest` / `unsealed — the writer has not called seal()`). The block is **never** skipped and **never** substituted by a neighbour: a hole in the plan stalls the view. The same error wraps a mid-epoch failure to (re)open an evicted block, so a block deleted under a running view stalls with the same signal rather than silently shortening the epoch.
+- **`BlockNotReadyError`** — I8. A root with no readable `manifest.json`, an unparsable/wrong-`schema_version` manifest, or `sealed == False` (`block.py:780-783`, `:1308-1312`) raises immediately, naming the block row, its path and its state (`missing manifest` / `unreadable manifest` / `unsealed — the writer has not called seal()`). The block is **never** skipped and **never** substituted by a neighbour: a hole in the plan stalls the view. The same error wraps a mid-epoch failure to (re)open an **evicted, not-yet-mapped** block, so a block deleted under a running view stalls with the same signal rather than silently shortening the epoch. Scope honestly: POSIX mmap survives `unlink`, so a block whose columns are already mapped keeps serving reads after deletion — the guard fires only on a cold (never-opened or LRU-evicted) block, and the test pins exactly that case.
 - **`BlockSplitMismatchError`** — I7. Distinct `manifest.split` values (`block.py:785-788`) across `roots` raise, listing every root with its split and instructing the caller to construct one view per split. Mixing is never inferred, never silently allowed.
 - **`BlockSchemaMismatchError`** — the two "not concatenable" cases: (a) a block's routed (non-`meta.`) column-name set differs from block 0's, checked at construction from the manifests so a cross-block batch cannot fail mid-epoch; (b) a `task` code observed in a block is `>= len(manifest.task_names)`, i.e. the code table and the name table disagree in shape. Both messages name the offending roots and the symmetric difference / the offending code. **(c) named rot, guarded here:** a block declaring the `internal` valence family (`block.py:285-292`, bucket `internals`) is refused, because neither `PackedCache.unpack_sample` (`_VALENCE_PTR_KEY`, `cache.py:402-412`) nor `collate_molecules` has an `internals` route — a view that accepted it would drop that family silently. Refusing is the honest behaviour; wiring `internals` through the collate is a collate-side change (Out of scope, named).
 
@@ -126,7 +140,7 @@ BlockDataset(roots: Sequence[str | os.PathLike[str]], *, max_open: int = 4)
 
 - [ ] Write failing unit tests for the BlockDataset index map and the I7/I8 guards (tests/test_molix/test_store/test_block_view.py → TestBlockDataset): `len`/`locate`/`__getitem__` against the hand-computed fixture, missing / unsealed / deleted-mid-epoch → `BlockNotReadyError`, mixed splits → `BlockSplitMismatchError`, mismatched column set or `internal` family → `BlockSchemaMismatchError`, plus the module layering guard (no `tensordict` / collate import)
 - [ ] Implement `BlockDataset` global index map, `BaseDataset` surface (`__len__`, `__getitem__` via `PackedCache.unpack_sample`, `locate`, `blocks`, `split`, `max_atoms`) and the three typed guards in src/molix/store/block_view.py (new)
-- [ ] Write failing unit tests for the concatenated sampler tables, the bounded-K reader pool and cross-block `frame_payload` (tests/test_molix/test_store/test_block_view.py → TestBlockDataset): `atom_counts` / `task_codes` / `task_names` / `group_codes` literals, dictionary-merge remap and code/name shape mismatch, `edge_counts` refusal incl. propagation through a `max_edges` sampler construction, caller-order parity vs `collate_molecules`, `open_blocks` ≤ `max_open`, payload identity for `max_open=1` vs `8`
+- [ ] Write failing unit tests for the concatenated sampler tables, the bounded-K reader pool and cross-block `frame_payload` (tests/test_molix/test_store/test_block_view.py → TestBlockDataset): `atom_counts` / `task_codes` / `task_names` / `group_codes` literals, dictionary-merge remap and code/name shape mismatch, `block_ids` basenames + read-only `max_open`, `edge_counts` refusal incl. propagation through a `max_edges` sampler construction, caller-order parity vs `collate_molecules`, `open_blocks` ≤ `max_open`, payload identity for `max_open=1` vs `8`, and the unit-level sampler-integration epoch (single-task per batch, group-integral, deterministic, per-task frame totals relax=4 / torsion=9)
 - [ ] Implement the concatenated `atom_counts` / `task_codes` + merged `task_names` / offset `group_codes` tables and the delegating `edge_counts` refusal in src/molix/store/block_view.py
 - [ ] Implement the bounded-K LRU reader pool (`reader`, `open_blocks`) and the order-preserving cross-block `frame_payload` merge in src/molix/store/block_view.py
 - [ ] Export `BlockDataset`, `BlockNotReadyError`, `BlockSchemaMismatchError`, `BlockSplitMismatchError` from src/molix/store/__init__.py (imports, `__all__`, docstring bullet) and add Google-style docstrings with tensor shapes and units to every new public symbol
@@ -142,7 +156,7 @@ Unit tests live only in `tests/test_molix/test_store/test_block_view.py`, mirror
 - **Edge cases.** Empty `roots`, `max_open < 1`, empty `frames`, out-of-range `frames`, negative/out-of-range `idx`; a one-block view (merge path never entered); a batch of one frame; two blocks whose routed column sets differ; a block whose `task` column carries a code beyond its `task_names` length; a block declaring the `internal` family; an unsealed block; a root with no `manifest.json`; a root deleted after construction and then read.
 - **Invariant tests.** I7: a view over one `train` and one `valid` block raises `BlockSplitMismatchError` whose message names both roots and both splits, and the two per-split views each construct fine. I8: the unsealed / missing cases raise `BlockNotReadyError` naming the block row, path and state, and `len(view)` is never computed from the surviving blocks (no partial view is constructible). Bounded-K: with `max_open=1` over three blocks, `len(view.open_blocks) <= 1` after every access during a full sweep, and the payload for a cross-block frame list is `torch.equal` to the same request under `max_open=8`.
 - **Refusal of fabricated edges.** `view.edge_counts` raises `ValueError` whose message names `NeighborList`; constructing `TokenBudgetBatchSampler(view, max_edges=...)` propagates that same `ValueError` (not the `AttributeError`-derived "use MmapDataset" message), and constructing with `max_atoms` only succeeds. No test asserts a zero edge count anywhere.
-- **Sampler integration (unit-level).** `TaskMixtureBatchSampler` over the view with `max_atoms=8`, `max_edges=None`, mixture `{"equilibrium": 0.0, "relax": 0.5, "torsion": 0.5}`, `seed=42`, using the view's concatenated tables in the form 01-tables generalized the sampler to accept: every yielded batch carries exactly one task, every group present in a batch is present whole (frames of a `group_code` never split across batches), and two identical constructions yield identical plans.
+- **Sampler integration (unit-level).** `TaskMixtureBatchSampler` over the view with `max_atoms=8`, `max_edges=None`, mixture `{"equilibrium": 0.0, "relax": 0.5, "torsion": 0.5}`, `seed=42`, using the view's concatenated tables in the form 01-tables generalized the sampler to accept (`task_labels=view.task_codes, group_ids=view.group_codes, task_names=view.task_names` — the name dictionary is required with integer codes per 01's ac-005): every yielded batch carries exactly one task, every group present in a batch is present whole (frames of a `group_code` never split across batches), and two identical constructions yield identical plans.
 - **Layering guard.** An `ast`-level test asserts `src/molix/store/block_view.py` imports neither `tensordict` nor any `molix.batch` symbol.
 
 **Regression example.** `regressions/streaming-data-tiers-04-scheduler-integration-02-view.py` — public API only (`from molix.store import BlockDataset, BlockWriter, PackedView, SamplingUnit` and `from molix.batch.collate import collate_molecules, collate_packed`, `from molix.batch.sampler import TaskMixtureBatchSampler`), no private attribute touched, run as `PYTHONPATH=src python regressions/streaming-data-tiers-04-scheduler-integration-02-view.py`. It writes the A/B/C fixture plus a `valid`-split block and an unsealed block into a `TemporaryDirectory`, then asserts, against **hard-coded literals** embedded in the script: (1) `frame_ptr`, `unit_ptr`, `len`, the six `locate` pairs, `atom_counts`, `group_codes`, merged `task_names` and `task_codes` exactly as tabulated in § Domain basis; (2) cross-block collate parity for frames `[12, 1, 7]` and its reverse against the `collate_molecules` oracle over `view[i]`, leaf-for-leaf with `torch.equal` and the hand-computed bucket sizes `atoms 11 / graphs 3 / edges 0`; (3) a `TaskMixtureBatchSampler` epoch over the view (`max_atoms=8`, `max_edges=None`, `seed=42`) that is single-task per batch, group-integral, deterministic across two constructions, and covers the hand-computed per-task frame totals `relax = 4`, `torsion = 9`; (4) the three refusals — mixed split, unsealed block, `edge_counts` — each caught by type with its message checked for the offending root / state / the `NeighborList` pointer; (5) bounded-K equivalence, `max_open=1` vs `8`, with `open_blocks` never exceeding the cap. **No third-party oracle is imported, subprocessed or consulted**, here or at authoring time: every golden is closed-form integer arithmetic over a deterministic fixture (`torch` and `tensordict` are the runtime container, not oracles), so the header records `capture: derived by hand from the fixture; no external tool` alongside `torch`, `device`, `commit` and `date`, mirroring `regressions/streaming-data-tiers-02-block-format.py:57-78`.

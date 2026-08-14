@@ -7,8 +7,10 @@ criteria:
     pass_when: |
       Tests in tests/test_molix/test_store/test_block_view.py build the three-block
       fixture (A: 5 frames/2 units, B: 5/1, C: 5/2, all split "train") and assert
-      len(view) == 15 and view.locate(g) == (0,0),(0,4),(1,0),(1,4),(2,0),(2,4) for
-      g = 0,4,5,9,10,14; out-of-range and negative g raise IndexError.
+      len(view) == 15 and the vectorized view.locate([0,4,5,9,10,14]) returns
+      block ordinals (0,0,1,1,2,2) and local rows (0,4,0,4,0,4) as two (6,) long
+      tensors; out-of-range and negative frames raise IndexError/ValueError naming
+      the offending value.
     status: pending
   - id: ac-002
     summary: Missing or unsealed block stalls with BlockNotReadyError, never skipped
@@ -16,7 +18,9 @@ criteria:
     pass_when: |
       pytest.raises(BlockNotReadyError) passes for (a) a root with no manifest.json,
       (b) a root whose manifest has sealed == False, (c) a root deleted after
-      construction and then reached through reader()/frame_payload; each message
+      construction and then reached COLD through reader()/frame_payload — the
+      block must never have been opened (POSIX mmap survives unlink, so the
+      guard is pinned on a never-mapped block); each message
       names the block row, its path and its state, and in every case no BlockDataset
       instance exists that reports a length computed from only the surviving blocks.
     status: pending
@@ -123,6 +127,26 @@ criteria:
       relax = 4 and torsion = 9 frames, the three typed refusals, and max_open=1
       vs 8 payload identity — no third-party oracle imported or subprocessed at
       runtime.
+    status: pending
+  - id: ac-014
+    summary: Module layering guard — block_view imports no tensordict or molix.batch
+    type: code
+    pass_when: |
+      An ast-level test in tests/test_molix/test_store/test_block_view.py asserts
+      src/molix/store/block_view.py imports neither tensordict nor any molix.batch
+      symbol at any depth (stdlib + torch + molix.store.* only).
+    status: pending
+  - id: ac-015
+    summary: Unit-level sampler-integration epoch holds the discipline invariants
+    type: code
+    pass_when: |
+      A test constructs TaskMixtureBatchSampler over the fixture view with
+      max_atoms=8, max_edges=None, mixture {"equilibrium": 0.0, "relax": 0.5,
+      "torsion": 0.5}, seed=42, passing task_labels=view.task_codes,
+      group_ids=view.group_codes, task_names=view.task_names, and asserts: every
+      yielded batch is single-task; every group's frames land whole in one batch;
+      two identical constructions yield identical plans; per-task frame totals
+      equal relax=4 and torsion=9.
     status: pending
   - id: ac-013
     summary: Full check and test suite pass
