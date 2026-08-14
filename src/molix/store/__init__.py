@@ -17,6 +17,13 @@ Surfaces:
   record and seals it with per-column sha256; :class:`BlockReader` mmaps a sealed
   block and serves sampler counts plus a packed-collate payload;
   :class:`BlockManifest` is the JSON contract of both.
+* **Multi-block view** — :class:`BlockDataset` indexes an ordered sequence of
+  sealed blocks as one frame space, concatenating the sampler tables and
+  serving an order-preserving cross-block payload. It refuses, by named type,
+  the three ways such a view could lie: :class:`BlockNotReadyError` (a planned
+  block missing or unsealed), :class:`BlockSplitMismatchError` (mixed manifest
+  splits) and :class:`BlockSchemaMismatchError` (blocks that are not
+  concatenable).
 
 Nothing here builds batches, samples indices or acquires data — those live in
 their own packages.
@@ -25,6 +32,12 @@ their own packages.
 from __future__ import annotations
 
 from molix.store.block import BlockManifest, BlockReader, BlockWriter, SamplingUnit
+from molix.store.block_view import (
+    BlockDataset,
+    BlockNotReadyError,
+    BlockSchemaMismatchError,
+    BlockSplitMismatchError,
+)
 from molix.store.cache import PackedCache
 from molix.store.dataset import (
     BaseDataset,
@@ -36,8 +49,12 @@ from molix.store.dataset import (
 
 __all__ = [
     "BaseDataset",
+    "BlockDataset",
     "BlockManifest",
+    "BlockNotReadyError",
     "BlockReader",
+    "BlockSchemaMismatchError",
+    "BlockSplitMismatchError",
     "BlockWriter",
     "CachedDataset",
     "MmapDataset",
