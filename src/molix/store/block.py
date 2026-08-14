@@ -55,7 +55,15 @@ at open (O(M + F) ints, milliseconds) from the stored per-unit **counts**
 (``n_atoms``, ``n_frames``, ``<family>_n``, ``unit_key_len``). One source of
 truth per fact removes the pointer/payload-disagreement class of corruption
 entirely. ``block_digest`` follows the same rule: it is derived from the
-canonical JSON of the manifest core rather than trusted as stored text.
+canonical JSON of the manifest core (:data:`_DIGEST_FIELDS`) on every read
+rather than trusted as stored text, so a forged digest field cannot survive
+:meth:`BlockManifest.read`. Detecting a *tampered core* needs one externally
+recorded digest to compare against — the manifest cannot vouch for itself,
+since the digest lives in the file it covers. That external record is the
+consumer's (molhub's READY ledger copies ``block_digest`` verbatim), which is
+why the core must cover every field a consumer trusts, ``task_names``
+included: a truncated task dictionary changes no payload byte, so no column
+sha256 can witness it.
 
 Column registry — closed and declarative
 ----------------------------------------
@@ -102,14 +110,25 @@ deliberate format revision** — never an incidental producer detail.
 Format identity
 ---------------
 
-``molix.block/1``, ``schema_version = 1``. Revised **in place on 2026-08-14**:
-the column vocabulary moved from coined prefixes (``atom_Z`` / ``frame_pos`` /
-``frame_target_energy`` / ``frame_atom_target_forces`` / ``mol_n_atoms`` /
-``mol_n_frames`` / ``mol_task``) to the names above, and the prefix grammar that
-derived routes from those prefixes became the closed registry. The format id was
-**not** bumped because no block exists outside this repository's tests and
-regressions — there is no on-disk artifact to migrate. Any later change to the
-registry rows, the row spaces or the commit-record layout does bump it.
+``molix.block/1``, ``schema_version = 1``. Revised **in place on 2026-08-14**
+(second revision of the same day): ``task_names`` joined the ``block_digest``
+core :data:`_DIGEST_FIELDS`, which previously covered ``{columns, rows, split,
+units, digests}`` only. Reason — the task dictionary is the sole decoder of the
+``task`` column, and truncating it on disk left every column sha256 *and* the
+block digest intact, so a consumer could silently read wrong task labels. Every
+``block_digest`` literal moves; no column sha256 does, and no on-disk byte
+outside ``manifest.json`` is touched.
+
+Revised **in place on 2026-08-14** (first revision): the column vocabulary moved
+from coined prefixes (``atom_Z`` / ``frame_pos`` / ``frame_target_energy`` /
+``frame_atom_target_forces`` / ``mol_n_atoms`` / ``mol_n_frames`` / ``mol_task``)
+to the names above, and the prefix grammar that derived routes from those
+prefixes became the closed registry.
+
+Neither revision bumped the format id, because no block exists outside this
+repository's tests and regressions — there is no on-disk artifact to migrate.
+Any later change to the registry rows, the row spaces, the digest core or the
+commit-record layout does bump it.
 
 Append / commit protocol
 ------------------------
@@ -251,7 +270,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, NamedTuple
+from typing import Any, Final, NamedTuple, NoReturn
 
 import torch
 
@@ -321,8 +340,21 @@ _REQUIRED_FRAME: Final[str] = "pos"
 # hard-coded in molnex); only key presence is validated.
 _PROVENANCE_KEYS: Final[tuple[str, ...]] = ("source", "generator", "created_at", "units")
 
-# The location-independent core of the manifest that ``block_digest`` covers.
-_DIGEST_FIELDS: Final[tuple[str, ...]] = ("columns", "rows", "split", "units", "digests")
+# The location-independent core of the manifest that ``block_digest`` covers,
+# grouped schema -> shape -> identity -> count -> integrity. The tuple order is
+# presentational only (``_canonical_json`` sorts keys, so it cannot move the
+# digest); it is the order the "missing field" error lists, so keep the grouping
+# when adding a field. Adding or removing a field IS a format revision — every
+# pinned digest downstream moves — so it happens in the docstring's "Format
+# identity" section too, never as an incidental edit.
+_DIGEST_FIELDS: Final[tuple[str, ...]] = (
+    "columns",
+    "rows",
+    "split",
+    "task_names",
+    "units",
+    "digests",
+)
 
 
 class _Route(NamedTuple):
@@ -667,10 +699,17 @@ class BlockManifest:
     Holds the parsed JSON document and owns its two rules: the schema version a
     reader accepts, and the canonical-JSON ``block_digest``. The digest is
     **derived**, never trusted as stored text — it is recomputed on construction
-    from ``{columns, rows, split, units, digests}`` (sorted keys, ``(",", ":")``
-    separators, UTF-8), which makes it independent of provenance and of where the
-    block directory lives, so a sealed block can be copied or moved and still
-    verify.
+    from ``{columns, rows, split, task_names, units, digests}`` (sorted keys,
+    ``(",", ":")`` separators, UTF-8), which makes it independent of provenance
+    and of where the block directory lives, so a sealed block can be copied or
+    moved and still verify.
+
+    Recomputation means a forged ``block_digest`` field is discarded, but it
+    cannot by itself flag a tampered core: the digest lives inside the document
+    it covers. The comparison that catches tampering is a consumer's, against a
+    digest it recorded elsewhere — hence the core covers ``task_names`` too
+    (revision of 2026-08-14), whose truncation moves no payload byte and so
+    escapes every column sha256 and :meth:`BlockReader.verify`.
 
     Args:
         document: Manifest fields — ``format``, ``schema_version``, ``columns``,
@@ -1449,7 +1488,7 @@ class BlockReader:
         return self._n_atoms[self._frame_mol]
 
     @property
-    def edge_counts(self) -> torch.Tensor:
+    def edge_counts(self) -> NoReturn:
         """Never returns — blocks carry no edge columns by design.
 
         Raises:

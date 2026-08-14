@@ -452,11 +452,44 @@ class TestBlockManifest:
     def test_block_digest_is_sha256_of_canonical_json(self, sealed_block: Path):
         raw = json.loads((sealed_block / "manifest.json").read_text())
         canonical = json.dumps(
-            {key: raw[key] for key in ("columns", "rows", "split", "units", "digests")},
+            {
+                key: raw[key]
+                for key in ("columns", "rows", "split", "task_names", "units", "digests")
+            },
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
         assert raw["block_digest"] == hashlib.sha256(canonical).hexdigest()
+
+    def test_block_digest_covers_the_task_dictionary(self, sealed_block: Path):
+        """2026-08-14 revision: ``task_names`` is part of the digested core.
+
+        A truncated task dictionary breaks the ``task`` code -> label mapping
+        without touching one payload byte, so no column sha256 can witness it.
+        The witness is the digested core: the recomputed ``block_digest`` moves
+        away from the value a consumer recorded externally (the molhub READY
+        ledger copies it verbatim), while :meth:`BlockReader.verify` — which
+        hashes column bytes only — stays clean.
+        """
+        recorded = BlockManifest.read(sealed_block).block_digest
+        path = sealed_block / "manifest.json"
+        document = json.loads(path.read_text())
+        assert document["task_names"] == ["equilibrium", "relax", "torsion"]
+        document["task_names"] = ["equilibrium"]
+        path.write_text(json.dumps(document))
+
+        assert BlockManifest.read(sealed_block).block_digest != recorded
+        assert BlockReader(sealed_block).verify() is None
+        assert json.loads(path.read_text())["block_digest"] == recorded
+
+    def test_block_digest_is_recomputed_not_trusted_as_stored_text(self, sealed_block: Path):
+        """A forged ``block_digest`` field is overwritten by the derivation."""
+        path = sealed_block / "manifest.json"
+        document = json.loads(path.read_text())
+        honest = document["block_digest"]
+        document["block_digest"] = "0" * 64
+        path.write_text(json.dumps(document))
+        assert BlockManifest.read(sealed_block).block_digest == honest
 
     def test_block_digest_ignores_provenance_and_location(
         self, tmp_path: Path, units: list[SamplingUnit]

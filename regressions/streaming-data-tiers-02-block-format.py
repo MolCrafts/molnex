@@ -46,8 +46,8 @@ Legs, in order:
    and ``group_codes[f]`` is the owning unit row.
 4. **Relocation (path independence, I1).** The sealed block A is ``shutil.move``\\ d
    to an unrelated directory; ``block_digest`` is unchanged (it covers
-   ``{columns, rows, split, units, digests}`` only — never a path or the
-   provenance), ``verify()`` is clean, and every column reads identically.
+   ``{columns, rows, split, task_names, units, digests}`` only — never a path or
+   the provenance), ``verify()`` is clean, and every column reads identically.
 5. **Collate parity.** The same frames are built three ways —
    ``collate_packed(PackedView(reader.frame_payload(frames)), ...)``, the
    ``PackedCache`` v1 payload, and ``collate_molecules`` over per-frame sample
@@ -73,6 +73,12 @@ Legs, in order:
              Every per-column sha256 is **unchanged** — the payload bytes are the same,
              only the keys moved — while both ``block_digest`` values moved, because the
              digested core covers the column names.
+    repin:   2026-08-14 — ``molix.block/1`` digest-core revision: ``task_names`` joined
+             ``_DIGEST_FIELDS``, closing the hole where a truncated task dictionary
+             (the only decoder of the ``task`` column) left every column sha256 *and*
+             ``block_digest`` intact. Again only the two ``block_digest`` literals move;
+             all 24 per-column sha256 of each block are **unchanged**, since the
+             revision touches ``manifest.json`` alone.
     torch:   2.12.1+cpu
     device:  cpu, float32 / int32 / int16 (exact equality throughout)
     date:    2026-08-14
@@ -158,9 +164,10 @@ _BLOCK_A_COLUMN_SHA256: Mapping[str, str] = {
     "unit_key_len": "a23a868b85672de9418b12652e4c1663cb38054c1206157fbf5826bf10f80b2d",
 }
 
-#: sha256 over the canonical JSON of ``{columns, rows, split, units, digests}`` —
-#: no path, no timestamp, no provenance, which is why relocation cannot move it.
-_BLOCK_A_DIGEST = "223c1547d890ebcf4128a71afdc36bc7c343431259850d063598d20eb0db8414"
+#: sha256 over the canonical JSON of
+#: ``{columns, rows, split, task_names, units, digests}`` — no path, no timestamp,
+#: no provenance, which is why relocation cannot move it.
+_BLOCK_A_DIGEST = "0bddbc9bfbc5ef2a0fe46df0d304787484b6bddea6a9d688f1cbca5d02b6bf75"
 
 #: sha256 of every ``<column>.bin`` of sealed block B (split "valid").
 _BLOCK_B_COLUMN_SHA256: Mapping[str, str] = {
@@ -190,7 +197,7 @@ _BLOCK_B_COLUMN_SHA256: Mapping[str, str] = {
     "unit_key_len": "7aa8ca4a02506da9133d8f889678b76f716ce45d02e22fdb7b70a15e56a0eff8",
 }
 
-_BLOCK_B_DIGEST = "a4055a649b805fa22a09dc2abdc315cf0d8a1a3b22b6b56d866b66992c759a15"
+_BLOCK_B_DIGEST = "436c9d5807a360331e5ca43cfee8944ffa1ec46a3d2a2c9f20be6ddaf006ba46"
 
 # Derived, never stored — asserted against the spec's hand-computed literals.
 _MOL_ATOM_PTR = [0, 3, 7]
