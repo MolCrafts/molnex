@@ -23,9 +23,8 @@ Each item yielded by those loaders is a nested `TensorDict` with `atoms` /
 The wiring is source → `PipelineSpec.cache` → dataset → split → `DataModule`:
 
 ```python
-from molix.data import (
-    AtomicDress, DataModule, NeighborList, Pipeline, SubsetSource,
-)
+from molix.batch import DataModule, PadMolecularBatch
+from molix.data import AtomicDress, NeighborList, Pipeline, SubsetSource
 from molix.store import SubsetDataset
 from molix.datasets import QM9Source
 
@@ -55,7 +54,7 @@ dm = DataModule(
     train_ds,
     val_ds,
     target_schema=QM9Source.TARGET_SCHEMA,
-    batch_nodes=pipe.batch_nodes,
+    batch_tasks=[PadMolecularBatch(max_atoms=1024, max_edges=16384)],
     batch_size=32,
 )
 dm.setup("fit")
@@ -69,14 +68,15 @@ for batch in dm.train_dataloader():
 ```
 
 `target_schema` decides which target names land under `graphs` and which under
-`atoms`; `batch_nodes` carries any `BatchTask` nodes in the pipeline, which run
-after collation and so cannot be cached with the rest.
+`atoms`; `batch_tasks` carries `molix.batch.BatchTask` instances, applied in
+order after collation — post-collate work is configured on the DataModule, not
+in the pipeline, because it cannot be cached with the rest.
 
 ## Minimal Custom DataModule
 
 ```python
 from torch.utils.data import DataLoader
-from molix.data.collate import collate_molecules
+from molix.batch.collate import collate_molecules
 
 class MyDataModule:
     def __init__(self, train_set, val_set, batch_size=32):

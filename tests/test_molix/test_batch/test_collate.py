@@ -1,7 +1,7 @@
 import torch
 from tensordict import TensorDict
 
-from molix.data.collate import INDEX_KEYS, MoleculeCollator, collate_molecules, rebase
+from molix.batch.collate import INDEX_KEYS, MoleculeCollator, collate_molecules, rebase
 
 
 def test_collate_basic_fields_and_offsets():

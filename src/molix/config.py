@@ -6,7 +6,7 @@ floating-point dtype, consumed in two places and only two places:
 1. **Model construction** — encoder / readout / head modules read
    ``config["ftype"]`` in ``__init__`` and bake it into their parameters.
 2. **DataModule collate boundary** —
-   :class:`molix.data.datamodule._CollateFn` captures ``config["ftype"]``
+   :class:`molix.batch.datamodule._CollateFn` captures ``config["ftype"]``
    at construction time (in the parent process, before workers spawn)
    and casts every emitted batch's floating-point tensors via
    :func:`molix.core.steps.batch_to`. Long index tensors
@@ -76,11 +76,11 @@ class MolnexConfig(Config):
 
         Writes ``ftype``, ``use_amp``, and ``amp_dtype`` into this config.
         Must be called **before** both model construction and
-        :class:`~molix.data.datamodule.DataModule` instantiation, because:
+        :class:`~molix.batch.datamodule.DataModule` instantiation, because:
 
         - Model layers bake ``config["ftype"]`` into their parameters at
           ``__init__`` time.
-        - :class:`~molix.data.datamodule._CollateFn` captures
+        - :class:`~molix.batch.datamodule._CollateFn` captures
           ``config["ftype"]`` at construction time so every batch is cast
           to the right dtype on its way out of the dataloader (long
           index tensors are preserved). This means ``set_precision``

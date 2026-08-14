@@ -14,7 +14,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.data.collate import collate_molecules
+from molix.batch.collate import collate_molecules
 
 
 def _mol(
@@ -197,7 +197,7 @@ def test_collate_does_not_import_molpy_as_batch_store():
     """Topology leaves are plain torch tensors inside TensorDict (ac-004)."""
     from pathlib import Path
 
-    import molix.data.collate as collate_mod
+    import molix.batch.collate as collate_mod
     import molix.store.cache as cache_mod
 
     for mod in (collate_mod, cache_mod):

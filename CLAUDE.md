@@ -265,7 +265,7 @@ this wrong and `KeyError(('edges','edge_index'))` is the first thing you see.
 | `DataSource[i]`, pipeline `SampleTask` / `DatasetTask` I/O, `MmapDataset[i]` | **flat `dict`** | `sample["Z"]`, `sample["edge_index"]`, `sample["targets"]["U0"]` |
 | Post-`collate_molecules` (what encoders / losses receive) | **nested `TensorDict`** (plain, no subclass) | `batch["atoms", "Z"]`, `batch["edges", "edge_index"]`, `batch["graphs", "energy"]` |
 
-The single conversion point is `molix.data.collate.collate_molecules`
+The single conversion point is `molix.batch.collate.collate_molecules`
 (invoked by `DataModule._CollateFn`). Stats / diagnostics operating on
 individual cached samples use **flat** keys; model / loss / metric code
 operating on batches uses **nested tuple-keys**.

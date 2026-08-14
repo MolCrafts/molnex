@@ -1,10 +1,12 @@
 """Task hierarchy for data pipeline processing.
 
-Three task types by scope, dispatched via ``isinstance``:
+Two task types by scope, dispatched via ``isinstance``:
 
 - :class:`SampleTask` — per-sample, stateless, parallelisable.
 - :class:`DatasetTask` — fit on full dataset, then apply per-sample.
-- :class:`BatchTask` — post-collate batch processing.
+
+Post-collate transforms are **not** part of this hierarchy — they live in
+:mod:`molix.batch.task` and are configured on the DataModule.
 """
 
 from __future__ import annotations
@@ -84,38 +86,3 @@ class DatasetTask(Task):
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         """Restore fitted state from cache."""
-
-
-class BatchTask(Task):
-    """Post-collate batch processing. **Extension point — no built-in subclasses.**
-
-    Executed after :func:`~molix.data.collate.collate_molecules` inside the
-    DataLoader's ``collate_fn``. Input and output are both
-    ``TensorDict`` (nested), not raw
-    sample dicts. Runs on the hot path of every training step — keep it
-    fast.
-
-    molix ships no built-in :class:`BatchTask` subclass. The base class
-    exists so custom post-collate transforms can be plugged into
-    :meth:`Pipeline.add` and routed through
-    :attr:`~molix.data.pipeline.PipelineSpec.batch_nodes` to the
-    :class:`~molix.data.datamodule._CollateFn`.
-
-    Use this only when the transform **must** operate on the collated
-    batch (e.g. batch-level augmentation that mixes atoms across graphs,
-    dense-padding for ``torch.compile``). Transforms expressible per
-    sample should subclass :class:`SampleTask` instead — they benefit
-    from per-sample caching, which :class:`BatchTask` cannot (the input
-    shape is not known until collate time).
-    """
-
-    def execute(self, data: dict) -> dict:
-        """Transform a collated batch — abstract; custom subclasses override.
-
-        Input and output are both nested ``TensorDict`` batches, not raw
-        sample dicts.
-
-        Raises:
-            NotImplementedError: Always, on this base class.
-        """
-        raise NotImplementedError

@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from molix.data.collate import TargetSchema
+from molix.batch.collate import TargetSchema
 from molix.datasets import WaterLESSource
 
 

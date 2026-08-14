@@ -3,7 +3,7 @@
 Every model in this repository communicates through one object: the
 *post-collate batch*, a nested :class:`~tensordict.TensorDict` whose ``atoms``
 / ``edges`` / ``graphs`` sub-dictionaries hold per-atom, per-edge and per-graph
-tensors. :func:`molix.data.collate.collate_molecules` builds that object and
+tensors. :func:`molix.batch.collate.collate_molecules` builds that object and
 owns its schema (CLAUDE.md, "Post-collate batch schema"). This module owns only
 the handful of keys a *potential* — a model mapping atomic positions to an
 energy — writes back into it, plus the helpers that perform those writes in
@@ -92,7 +92,7 @@ def ensure_graphs(batch: TensorDict, num_graphs: int | None = None) -> TensorDic
     An existing ``graphs`` namespace is returned untouched — its ``batch_size``
     is never rewritten, even when ``num_graphs`` disagrees with it. The
     canonical producer of that namespace is
-    :func:`molix.data.collate.collate_molecules`; this helper only fills the
+    :func:`molix.batch.collate.collate_molecules`; this helper only fills the
     gap for batches assembled by hand.
 
     Args:

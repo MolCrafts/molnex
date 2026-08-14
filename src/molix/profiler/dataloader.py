@@ -24,13 +24,14 @@ Example::
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from torch.utils.data import DataLoader, Dataset
 
-from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
-from molix.data.pipeline import PipelineSpec
+from molix.batch.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
+from molix.batch.task import BatchTask
 from molix.profiler._utils import TimingStat, ValueStat, _fmt_table, batch_counts
 from molix.store.dataset import CachedDataset
 
@@ -129,22 +130,23 @@ class _ProfilerCollate:
     """Picklable collate callable for the profiler's worker DataLoaders.
 
     A top-level class (not a closure) so ``spawn`` / ``forkserver`` workers
-    can pickle it; mirrors :class:`molix.data.datamodule._CollateFn` minus
+    can pickle it; mirrors :class:`molix.batch.datamodule._CollateFn` minus
     the dtype cast (the profiler measures raw collation throughput).
 
     Args:
         schema: How targets are routed during collation.
-        batch_nodes: Post-collate :class:`Node` instances to apply in order.
+        batch_tasks: Post-collate :class:`~molix.batch.task.BatchTask`
+            instances to apply in order.
     """
 
-    def __init__(self, schema: TargetSchema, batch_nodes: tuple) -> None:
+    def __init__(self, schema: TargetSchema, batch_tasks: Sequence[BatchTask]) -> None:
         self.schema = schema
-        self.batch_nodes = batch_nodes
+        self.batch_tasks = batch_tasks
 
     def __call__(self, batch_samples: list[dict]) -> object:
         batch = collate_molecules(batch_samples, self.schema)
-        for entry in self.batch_nodes:
-            batch = entry.apply(batch)
+        for task in self.batch_tasks:
+            batch = task.execute(batch)
         return batch
 
 
@@ -166,8 +168,8 @@ class DataLoaderProfiler:
         pin_memory: Whether to pin memory for GPU transfer.
         persistent_workers: Keep workers alive between epochs.
         target_schema: How targets are collated into batches.
-        pipeline: Optional :class:`~molix.data.pipeline.PipelineSpec` whose
-            ``batch_nodes`` are applied inside ``collate_fn``.
+        batch_tasks: Post-collate :class:`~molix.batch.task.BatchTask`
+            instances applied, in order, inside ``collate_fn``.
 
     Example::
 
@@ -189,14 +191,14 @@ class DataLoaderProfiler:
         pin_memory: bool = False,
         persistent_workers: bool = False,
         target_schema: TargetSchema = DEFAULT_TARGET_SCHEMA,
-        pipeline: PipelineSpec | None = None,
+        batch_tasks: Sequence[BatchTask] = (),
     ) -> None:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers and num_workers > 0
         self.target_schema = target_schema
-        self.pipeline = pipeline
+        self.batch_tasks = tuple(batch_tasks)
 
     def run(
         self,
@@ -298,11 +300,10 @@ class DataLoaderProfiler:
         return CachedDataset(tmp_file)
 
     def _make_dataloader(self, dataset: Dataset) -> DataLoader:
-        batch_nodes = self.pipeline.batch_nodes if self.pipeline is not None else ()
         # A picklable top-level collate (not a closure) so num_workers > 0
         # under spawn/forkserver can ship it to workers — same rationale as
-        # molix.data.datamodule._CollateFn.
-        collate_fn = _ProfilerCollate(self.target_schema, batch_nodes)
+        # molix.batch.datamodule._CollateFn.
+        collate_fn = _ProfilerCollate(self.target_schema, self.batch_tasks)
         kwargs = {}
         if self.num_workers > 0:
             kwargs["multiprocessing_context"] = "spawn"

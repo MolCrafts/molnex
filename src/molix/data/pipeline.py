@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from molix.data.task import BatchTask, DatasetTask, Runnable, SampleTask
+from molix.data.task import DatasetTask, Runnable, SampleTask
 from molix.store.cache import PackedCache
 
 __all__ = ["Node", "Edge", "DAGCache", "PipelineSpec", "Pipeline"]
@@ -63,7 +63,7 @@ class Node:
     """
 
     name: str
-    task: Any  # SampleTask | DatasetTask | BatchTask | Callable
+    task: Any  # SampleTask | DatasetTask | Callable
     reads: frozenset[str] = frozenset()
     writes: frozenset[str] = frozenset()
 
@@ -243,11 +243,6 @@ class PipelineSpec:
     def prepare_nodes(self) -> tuple[Node, ...]:
         """Cacheable nodes in topological order (SampleTask / DatasetTask)."""
         return tuple(n for n in self._topo_order if n.is_cacheable)
-
-    @property
-    def batch_nodes(self) -> tuple[Node, ...]:
-        """BatchTask nodes — post-collate, never cached."""
-        return tuple(n for n in self._topo_order if isinstance(n.task, BatchTask))
 
     # -- introspection -----------------------------------------------------
 
@@ -671,13 +666,12 @@ class Pipeline:
 
     @staticmethod
     def _validate(task: Any) -> None:
-        if isinstance(task, (SampleTask, DatasetTask, BatchTask)):
+        if isinstance(task, (SampleTask, DatasetTask)):
             return
         if callable(task):
             return
         raise TypeError(
-            f"Task must be a SampleTask/DatasetTask/BatchTask or callable, "
-            f"got {type(task).__name__}"
+            f"Task must be a SampleTask/DatasetTask or callable, got {type(task).__name__}"
         )
 
     @staticmethod

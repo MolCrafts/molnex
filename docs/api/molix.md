@@ -16,15 +16,25 @@
 
 ::: molix.data
 
-::: molix.data.collate
-
 ::: molix.data.pipeline
-
-::: molix.data.datamodule
 
 ::: molix.data.task
 
 ::: molix.data.tasks
+
+## Batch construction
+
+::: molix.batch
+
+::: molix.batch.collate
+
+::: molix.batch.datamodule
+
+::: molix.batch.sampler
+
+::: molix.batch.task
+
+::: molix.batch.pad
 
 ## Storage
 

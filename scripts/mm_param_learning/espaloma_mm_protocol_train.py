@@ -30,8 +30,8 @@ Training composition (``universal-class-i-13-grad-audit``)
 
 There is **no** hand-rolled epoch loop and **no** flat conformer pool here.
 The script composes molix primitives — ``ConformerDataset`` +
-``EnergyTaskSamplerSource`` (:class:`molix.data.TaskMixtureBatchSampler`)
-behind a :class:`molix.data.DataModule`, a
+``EnergyTaskSamplerSource`` (:class:`molix.batch.TaskMixtureBatchSampler`)
+behind a :class:`molix.batch.DataModule`, a
 :class:`molix.core.steps.MultiTaskTrainStep` routing the single ``energy``
 task, and :class:`molix.core.trainer.Trainer` with
 ``GradClipHook`` / ``MetricsHook`` / ``CheckpointHook(save_best=True)`` /
@@ -89,6 +89,12 @@ import torch.nn as nn
 from molhub.dataset import PhalkethohMMDataset
 from tensordict import TensorDict
 
+from molix.batch import (
+    DataModule,
+    MoleculeCollator,
+    TargetSchema,
+    TaskMixtureBatchSampler,
+)
 from molix.config import config
 from molix.core.audit import TaskGradientProbe
 from molix.core.hook import BaseHook
@@ -102,12 +108,6 @@ from molix.core.steps import (
     batch_to,
 )
 from molix.core.trainer import Trainer
-from molix.data import (
-    DataModule,
-    MoleculeCollator,
-    TargetSchema,
-    TaskMixtureBatchSampler,
-)
 from molix.hooks import (
     CheckpointHook,
     EarlyStop,
@@ -472,7 +472,7 @@ class ConformerDataset(BaseDataset):
 
     Flat *per conformer* for indexing, but every conformer carries its
     ``molecule_id`` as a sampling-group label, so
-    :class:`~molix.data.TaskMixtureBatchSampler` can keep a molecule's
+    :class:`~molix.batch.TaskMixtureBatchSampler` can keep a molecule's
     conformer set whole inside one batch. ``atom_counts`` is the per-conformer
     cost vector the token packer needs; ``edge_counts`` is zero because this
     protocol builds no cutoff graph (Class-I reads covalent topology only).
@@ -523,8 +523,8 @@ class ConformerDataset(BaseDataset):
 class EnergyTaskSamplerSource:
     """Per-epoch molecule-grouped batch sampler for the single-task protocol.
 
-    Implements the :class:`~molix.data.BatchSamplerSource` protocol:
-    :class:`~molix.data.DataModule` calls
+    Implements the :class:`~molix.batch.BatchSamplerSource` protocol:
+    :class:`~molix.batch.DataModule` calls
     ``batch_sampler(train_dataset, seed=seed + epoch)`` once per epoch, so each
     epoch reshuffles the molecules while epoch *k* stays re-derivable. The
     mixture is a single task at probability 1.0 — this run fits energies only —
@@ -955,7 +955,7 @@ def build_datamodule(
         seed: Base seed; the DataModule reseeds the sampler as ``seed + epoch``.
 
     Returns:
-        A :class:`~molix.data.DataModule` satisfying ``DataModuleProtocol``.
+        A :class:`~molix.batch.DataModule` satisfying ``DataModuleProtocol``.
     """
     train_ds = ConformerDataset(frames_by_mol, split["train"])
     val_ds = ConformerDataset(frames_by_mol, split["val"])

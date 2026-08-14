@@ -66,7 +66,7 @@ class FieldSpec:
 
     This is the **report view** of one entry of a packed cache's
     ``payload["schema"]`` — not to be confused with
-    :class:`molix.data.collate.TargetSchema`, which is a collate-time
+    :class:`molix.batch.collate.TargetSchema`, which is a collate-time
     routing rule. ``FieldSpec`` describes storage, ``TargetSchema``
     describes destination.
 
@@ -137,7 +137,7 @@ class FieldSpec:
 class TargetStat:
     """Numeric distribution of one label column across the sampled records.
 
-    Unrelated to :class:`molix.data.collate.TargetSchema`: this is a
+    Unrelated to :class:`molix.batch.collate.TargetSchema`: this is a
     *measurement* of the label values, whereas ``TargetSchema`` is the rule
     that routes labels into batch namespaces at collate time.
 

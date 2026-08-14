@@ -8,9 +8,9 @@ import pytest
 import torch
 from torch.utils.data import DataLoader
 
-from molix.data.datamodule import DataModule
+from molix.batch.datamodule import DataModule
 from molix.store.cache import PackedCache
-from molix.store.dataset import CachedDataset
+from molix.store.dataset import CachedDataset, MmapDataset
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -172,7 +172,7 @@ class TestCollation:
         assert batch["graphs", "U0"].shape == (4,)
 
     def test_custom_target_schema(self, tmp_path):
-        from molix.data.collate import TargetSchema
+        from molix.batch.collate import TargetSchema
 
         train, val = _write_and_load_split(tmp_path, 4, 2)
         schema = TargetSchema(graph_level={"U0"}, atom_level=set())
@@ -183,7 +183,7 @@ class TestCollation:
         assert "U0" in batch["graphs"].keys()
 
     def test_target_schema_auto_discovered_from_dataset(self, tmp_path):
-        from molix.data.collate import TargetSchema
+        from molix.batch.collate import TargetSchema
 
         class SchemaCarrier(CachedDataset):
             target_schema = TargetSchema(graph_level={"U0"}, atom_level=frozenset())
@@ -196,7 +196,7 @@ class TestCollation:
         assert dm.target_schema.graph_level == frozenset({"U0"})
 
     def test_explicit_target_schema_overrides_dataset(self, tmp_path):
-        from molix.data.collate import TargetSchema
+        from molix.batch.collate import TargetSchema
 
         class SchemaCarrier(CachedDataset):
             target_schema = TargetSchema(graph_level={"foo"}, atom_level=frozenset())
@@ -400,13 +400,10 @@ class TestExplicitCachedPipeline:
         """Explicit 3-step: cache, split, DataModule — yields TensorDict."""
         from tensordict import TensorDict
 
-        from molix.data import InMemorySource, NeighborList, Pipeline
-
         samples = _make_samples(10)
-        source = InMemorySource(samples)
-        pipe = Pipeline("smoke").add(NeighborList(cutoff=3.0, max_num_pairs=32, pbc=False)).build()
-        dag = pipe.cache(source, base_dir=tmp_path, extra={"n_train": "6"})
-        full = dag.dataset(mmap=True)
+        sink = tmp_path / "smoke.pt"
+        PackedCache(sink).save(samples)
+        full = MmapDataset(sink)
         train_ds, val_ds, test_ds = full.split(sizes=(6, 2, 2), seed=7)
 
         dm = DataModule(train_ds, val_ds, batch_size=2, num_workers=0, pin_memory=False)
@@ -428,14 +425,10 @@ class TestExplicitCachedPipeline:
         assert batch["atoms", "Z"].shape[0] == 4  # 2 mols × 2 atoms
 
     def test_two_way_split(self, tmp_path):
-        from molix.data import InMemorySource, NeighborList, Pipeline
-
         samples = _make_samples(8)
-        pipe = (
-            Pipeline("two-way").add(NeighborList(cutoff=3.0, max_num_pairs=32, pbc=False)).build()
-        )
-        dag = pipe.cache(InMemorySource(samples), base_dir=tmp_path)
-        full = dag.dataset(mmap=True)
+        sink = tmp_path / "two-way.pt"
+        PackedCache(sink).save(samples)
+        full = MmapDataset(sink)
         train_ds, val_ds = full.split(sizes=(5, 3))
 
         dm = DataModule(train_ds, val_ds, batch_size=2, num_workers=0, pin_memory=False)
@@ -515,7 +508,7 @@ class TestBatchSamplerInjection:
 
     def test_source_conforms_to_protocol(self):
         """The stub satisfies the runtime-checkable ``BatchSamplerSource``."""
-        from molix.data import BatchSamplerSource
+        from molix.batch import BatchSamplerSource
 
         assert isinstance(_FixedPlanSource(INJECTED_PLAN), BatchSamplerSource)
 
@@ -551,7 +544,7 @@ class TestBatchSamplerInjection:
 
     def test_injected_source_under_ddp_raises(self, tmp_path, monkeypatch):
         """DDP + injected source → ValueError naming the offending kwarg."""
-        monkeypatch.setattr("molix.data.datamodule._is_distributed", lambda: True)
+        monkeypatch.setattr("molix.batch.datamodule._is_distributed", lambda: True)
         dm = _make_injection_dm(
             tmp_path, "ddp", batch_sampler_source=_FixedPlanSource(INJECTED_PLAN)
         )
@@ -573,3 +566,110 @@ class TestBatchSamplerInjection:
         """An object without ``batch_sampler`` is rejected at ``__init__``."""
         with pytest.raises(ValueError, match="batch_sampler"):
             _make_injection_dm(tmp_path, "bad", batch_sampler_source=_NoBatchSamplerSource())
+
+
+# ---------------------------------------------------------------------------
+# Worker start-method regression (preserved from the deleted
+# tests/test_molix/test_data/test_e2e_workers.py, rebuilt on PackedCache)
+# ---------------------------------------------------------------------------
+
+
+def _chain_samples(n: int = 16) -> list[dict]:
+    """Build *n* four-atom samples wired as a linear chain (3 edges each).
+
+    Geometry comes from a local :class:`torch.Generator` (seed 1), so the
+    fixture is independent of global RNG state and of test execution order.
+    The per-sample edge count (3) never equals the atom count (4), so the
+    packed schema routes per-atom and per-edge keys unambiguously.
+
+    Args:
+        n: Number of samples. ``targets.U0`` carries the identity
+            ``float(i)``.
+
+    Returns:
+        Flat sample dicts with per-atom ``Z`` ``(4,)`` / ``pos`` ``(4, 3)``,
+        per-edge ``edge_index`` ``(3, 2)`` / ``edge_diff`` ``(3, 3)`` /
+        ``edge_dist`` ``(3,)`` and graph-level ``targets.U0`` ``(1,)``.
+    """
+    gen = torch.Generator().manual_seed(1)
+    src = torch.arange(3)
+    dst = src + 1
+    edge_index = torch.stack([src, dst], dim=1).long()
+    samples: list[dict] = []
+    for i in range(n):
+        pos = torch.randn(4, 3, generator=gen)
+        diff = pos[dst] - pos[src]
+        samples.append(
+            {
+                "Z": torch.tensor([1, 6, 1, 1], dtype=torch.long),
+                "pos": pos,
+                "edge_index": edge_index.clone(),
+                "edge_diff": diff,
+                "edge_dist": diff.norm(dim=-1),
+                "targets": {"U0": torch.tensor([float(i)])},
+            }
+        )
+    return samples
+
+
+class TestDataModule:
+    """Contracts the DataLoader worker path depends on.
+
+    ``spawn`` / ``forkserver`` send every DataLoader argument to workers
+    through ``pickle``; a collate callable that is a local closure — or one
+    holding an unpicklable batch task — breaks a real training run at epoch
+    start. These two methods pin exactly that.
+    """
+
+    def test_collate_fn_is_picklable(self, _dm_factory):
+        """The collate callable — batch tasks included — survives ``pickle``."""
+        import pickle
+
+        from molix.batch import PadMolecularBatch
+
+        dm = _dm_factory(
+            batch_size=2,
+            batch_tasks=[PadMolecularBatch(max_atoms=8, max_edges=8)],
+        )
+        fn = dm._make_collate_fn()
+        fn2 = pickle.loads(pickle.dumps(fn))  # must not raise
+
+        samples = _make_samples(2)
+        out1 = fn(samples)
+        out2 = fn2(samples)
+        # The task travelled with the callable: both sides pad identically.
+        assert out1["atoms", "Z"].shape == (8,)
+        assert torch.equal(out1["atoms", "Z"], out2["atoms", "Z"])
+
+    def test_train_dataloader_iterates_with_spawn_workers(self, tmp_path):
+        """One epoch through ``num_workers=2`` spawn workers yields real batches."""
+        from tensordict import TensorDict
+
+        from molix.batch.collate import TargetSchema
+
+        sink = tmp_path / "workers.pt"
+        PackedCache(sink).save(_chain_samples(16))
+        full = MmapDataset(sink)
+        train, val = full.split(ratio=0.75, seed=0)
+        assert len(train) == 12 and len(val) == 4
+
+        schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset())
+        dm = DataModule(
+            train,
+            val,
+            target_schema=schema,
+            batch_size=4,
+            num_workers=2,
+            persistent_workers=False,
+            pin_memory=False,  # avoid CUDA on CI
+            prefetch_factor=2,
+        )
+
+        seen_batches = 0
+        for batch in dm.train_dataloader():
+            assert isinstance(batch, TensorDict)
+            assert batch["atoms", "Z"].shape[0] == 4 * 4  # 4 mols × 4 atoms each
+            assert batch["graphs", "U0"].shape == (4,)
+            assert batch["edges", "edge_index"].shape[1] == 2
+            seen_batches += 1
+        assert seen_batches == 3  # 12 / 4

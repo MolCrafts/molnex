@@ -8,7 +8,7 @@ Two regimes (see ``docs/molix/explanation/throughput-and-compilation.md``):
   applies the benchmarked CUDA-graph preset (``reduce-overhead``): inductor
   fusion + CUDA graphs reach ~10x eager on PiNet (measured ~130 steps/s on a
   GH200). REQUIRES static shapes — register
-  :class:`molix.data.tasks.PadMolecularBatch` and set the train loader's
+  :class:`molix.batch.PadMolecularBatch` and set the train loader's
   ``drop_last=True``. Without static shapes inductor recompiles every step and
   ``reduce-overhead`` is *slower* than eager.
 """

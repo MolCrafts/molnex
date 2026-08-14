@@ -2,7 +2,7 @@
 
 Regression net for the 2026-05-18 fp64 production-failure incident.
 ``config.set_precision("fp64")`` previously only updated model construction;
-:class:`molix.data.datamodule._CollateFn` ignored ``config["ftype"]`` and
+:class:`molix.batch.datamodule._CollateFn` ignored ``config["ftype"]`` and
 emitted fp32 batches, which crashed the first training step under fp64.
 
 These tests pin the contract that:
@@ -24,9 +24,9 @@ from pathlib import Path
 import pytest
 import torch
 
+from molix.batch.datamodule import DataModule
 from molix.config import config
 from molix.core.steps import batch_to
-from molix.data.datamodule import DataModule
 from molix.store.cache import PackedCache
 from molix.store.dataset import CachedDataset
 

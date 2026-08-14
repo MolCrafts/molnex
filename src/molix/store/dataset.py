@@ -49,7 +49,7 @@ class PackedView:
     """Read-only handle onto a :class:`~molix.store.cache.PackedCache` payload.
 
     Exposes exactly what the packed-aware collate fast path
-    (:func:`molix.data.collate.collate_packed`) needs — the packed payload
+    (:func:`molix.batch.collate.collate_packed`) needs — the packed payload
     dict, its cumsum pointers / schema, and a local→packed index remap —
     without callers reaching into a dataset's private ``_payload``. A
     :class:`SubsetDataset`'s view carries an ``index_map`` so its local
@@ -104,7 +104,7 @@ class PackedView:
 
 class BaseDataset(Dataset[Any], ABC):
     """Abstract base for molix datasets. Subclass this, not ``Dataset``, so
-    :class:`~molix.data.DataModule` can consume any implementation."""
+    :class:`~molix.batch.DataModule` can consume any implementation."""
 
     @abstractmethod
     def __len__(self) -> int: ...
@@ -226,7 +226,7 @@ class _CacheBacked(BaseDataset):
         """Return a read-only :class:`PackedView` over this cache's payload.
 
         Identity-mapped (local index == packed row). Consumed by
-        :func:`molix.data.collate.collate_packed` to build batches by
+        :func:`molix.batch.collate.collate_packed` to build batches by
         slicing the packed tensors directly.
         """
         return PackedView(self._payload)
@@ -317,7 +317,7 @@ class _CacheBacked(BaseDataset):
         Derived from the packed ``atom_ptr`` cumsum pointer
         (``ptr[idx+1] - ptr[idx]``) in one vectorized pass — no sample is
         unpacked. Used by
-        :class:`~molix.data.sampler.TokenBudgetBatchSampler` to enforce
+        :class:`~molix.batch.sampler.TokenBudgetBatchSampler` to enforce
         per-batch atom budgets.
 
         Raises:
@@ -414,7 +414,7 @@ class SubsetDataset(BaseDataset):
         """Forward unknown public attributes to the wrapped dataset.
 
         Lets subset views transparently expose dataset-declared attributes
-        (e.g. ``target_schema``) so :class:`~molix.data.DataModule`
+        (e.g. ``target_schema``) so :class:`~molix.batch.DataModule`
         auto-discovery works on splits. Private / dunder names raise
         :class:`AttributeError` instead of forwarding — during unpickling
         ``__setstate__`` has not populated ``__dict__`` yet, so reaching

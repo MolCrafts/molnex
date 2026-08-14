@@ -763,7 +763,7 @@ class NeighborList:
             total = int(occupied.sum())
             if total == 0:
                 continue
-            # Ragged gather, the molix.data.collate._gather_indices idiom (that
+            # Ragged gather, the molix.batch.collate._gather_indices idiom (that
             # one is CPU-pinned for DataLoader workers, so it is followed, not
             # imported): counts -> segment ids -> exclusive cumsum -> row index.
             segment = torch.repeat_interleave(atoms, occupied)

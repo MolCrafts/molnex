@@ -30,7 +30,7 @@ from __future__ import annotations
 import torch
 from tensordict import TensorDict
 
-from molix.data.task import BatchTask
+from molix.batch.task import BatchTask
 
 
 class PadMolecularBatch(BatchTask):

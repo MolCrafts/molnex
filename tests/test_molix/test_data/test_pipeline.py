@@ -14,7 +14,7 @@ import torch
 
 from molix.data.pipeline import DAGCache, Node, Pipeline
 from molix.data.source import InMemorySource
-from molix.data.task import BatchTask, DatasetTask, SampleTask
+from molix.data.task import DatasetTask, SampleTask
 
 # ---------------------------------------------------------------------------
 # Stub tasks
@@ -62,13 +62,13 @@ class MeanShift(DatasetTask):
         self.mean = float(state["mean"].item())
 
 
-class NoopBatch(BatchTask):
+class NoopSample(SampleTask):
     def __init__(self) -> None:
         self.calls = 0
 
     @property
     def task_id(self) -> str:
-        return "noop:batch"
+        return "noop:sample"
 
     def execute(self, data: dict) -> dict:
         self.calls += 1
@@ -142,14 +142,12 @@ class TestBuilder:
 
 class TestGrouping:
     def test_prepare_nodes_include_sample_and_dataset(self):
-        spec = Pipeline("p").add(CountingSample()).add(MeanShift()).add(NoopBatch()).build()
+        spec = Pipeline("p").add(CountingSample()).add(MeanShift()).build()
         assert len(spec.prepare_nodes) == 2
-        assert len(spec.batch_nodes) == 1
 
     def test_plain_callable_not_cacheable(self):
         spec = Pipeline("p").add(lambda s: s, name="noop").build()
         assert len(spec.prepare_nodes) == 0  # bare callable is not SampleTask/DatasetTask
-        assert len(spec.batch_nodes) == 0
 
     def test_prepare_nodes_order_preserved(self):
         a, b = CountingSample("a"), CountingSample("b")
@@ -196,14 +194,14 @@ class TestPipelineId:
 
 class TestToDict:
     def test_contains_node_names_and_types(self):
-        spec = Pipeline("p").add(CountingSample("a")).add(NoopBatch()).build()
+        spec = Pipeline("p").add(CountingSample("a")).add(NoopSample()).build()
         d = spec.to_dict()
         assert d["name"] == "p"
         assert d["pipeline_id"] == spec.pipeline_id
         names = [n["name"] for n in d["nodes"]]
         types = [n["type"] for n in d["nodes"]]
-        assert names == ["counting:a", "noop:batch"]
-        assert types == ["CountingSample", "NoopBatch"]
+        assert names == ["counting:a", "noop:sample"]
+        assert types == ["CountingSample", "NoopSample"]
         assert d["edges"]  # linear edge derived
 
     def test_edges_reflect_linear_chain(self):
@@ -263,7 +261,7 @@ class TestNode:
     def test_is_cacheable(self):
         assert Node(name="s", task=CountingSample()).is_cacheable is True
         assert Node(name="d", task=MeanShift()).is_cacheable is True
-        assert Node(name="b", task=NoopBatch()).is_cacheable is False
+        assert Node(name="c", task=lambda sample: sample).is_cacheable is False
 
     def test_needs_fit(self):
         assert Node(name="d", task=MeanShift()).needs_fit is True
@@ -282,14 +280,6 @@ class TestTransform:
         out = spec.transform({"y": torch.tensor([0.0])})
         assert out["a"] is True
         assert counter.calls == 1
-
-    def test_skips_batch_nodes(self):
-        counter = CountingSample("a")
-        batch = NoopBatch()
-        spec = Pipeline("p").add(counter).add(batch).build()
-        spec.transform({"y": torch.tensor([0.0])})
-        assert counter.calls == 1
-        assert batch.calls == 0
 
 
 # ---------------------------------------------------------------------------

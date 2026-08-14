@@ -61,7 +61,8 @@ In a real pipeline, use `NeighborList(symmetry=True)` so every undirected
 neighbor pair is represented as two directed edges.
 
 ```python
-from molix.data import DataModule, NeighborList, Pipeline
+from molix.batch import DataModule
+from molix.data import NeighborList, Pipeline
 
 pipe = (
     Pipeline("allegro-run")
@@ -75,7 +76,6 @@ train_ds, val_ds = dag.dataset(mmap=True).split(ratio=0.9, seed=42)
 dm = DataModule(
     train_ds,
     val_ds,
-    batch_nodes=pipe.batch_nodes,
     batch_size=32,
 )
 dm.setup("fit")

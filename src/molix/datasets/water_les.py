@@ -53,7 +53,7 @@ from typing import Literal
 import torch
 from molpy import Element
 
-from molix.data.collate import TargetSchema
+from molix.batch.collate import TargetSchema
 from molix.data.source import Sample
 from molix.datasets._extxyz import ExtxyzFrame, parse_extxyz_frames
 

@@ -1,7 +1,7 @@
 # Train a Graph Model
 
 This tutorial trains against MolNex's nested `TensorDict` batch format. In real
-data pipelines, `molix.data.collate.collate_molecules` creates this structure
+data pipelines, `molix.batch.collate.collate_molecules` creates this structure
 from flat molecule samples. Here, the batch is built directly.
 
 ## 1. Define the Model

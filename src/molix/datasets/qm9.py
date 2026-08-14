@@ -37,7 +37,7 @@ import torch
 from tqdm import tqdm
 
 from molix import logger as _logger_mod
-from molix.data.collate import TargetSchema
+from molix.batch.collate import TargetSchema
 from molix.data.source import Sample
 
 logger = _logger_mod.getLogger(__name__)

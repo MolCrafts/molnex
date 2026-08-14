@@ -10,11 +10,11 @@ Covers spec ``dynamic-batching-packed-collate-02-collate``:
   Acceptance ac-010.
 * GROUP 3 — layering guard: ``cache.py`` imports no ``tensordict`` /
   ``TargetSchema``. Acceptance ac-005.
-* GROUP 4 — ``DataModule`` fast-path routing, spawn workers, batch_nodes +
+* GROUP 4 — ``DataModule`` fast-path routing, spawn workers, batch_tasks +
   ftype post-steps, pickle without captured payload tensors. Acceptance
   ac-006..009.
 
-Imports of the production surface (``molix.data.collate.collate_packed``,
+Imports of the production surface (``molix.batch.collate.collate_packed``,
 ``packed_view()`` / ``PackedView``, ``_PackedCollateFn`` / ``_IndexDataset``)
 are kept inside test bodies, a holdover from the RED phase that also keeps
 each test's dependency explicit at its use site.
@@ -41,7 +41,8 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.data.collate import TargetSchema, collate_molecules
+from molix.batch.collate import TargetSchema, collate_molecules
+from molix.batch.task import BatchTask
 from molix.store.cache import PackedCache
 from molix.store.dataset import CachedDataset, MmapDataset, SubsetDataset
 from tests.test_molix.conftest import equal_count_samples
@@ -229,7 +230,7 @@ def _packed_collate(dataset, indices: list[int], schema: TargetSchema) -> Tensor
     Deferred import keeps module collection clean while the production
     surface is still absent (RED).
     """
-    from molix.data.collate import collate_packed
+    from molix.batch.collate import collate_packed
 
     return collate_packed(dataset.packed_view(), indices, schema)
 
@@ -386,7 +387,7 @@ class TestEagerErrors:
 
     def test_empty_indices_raises(self, tmp_path):
         """Empty index list → ValueError, matching the oracle's 'empty' wording."""
-        from molix.data.collate import collate_packed
+        from molix.batch.collate import collate_packed
 
         ds = MmapDataset(_save(tmp_path, "empty", _make_varied_samples(8)))
         with pytest.raises(ValueError, match="(?i)empty"):
@@ -394,7 +395,7 @@ class TestEagerErrors:
 
     def test_missing_pos_raises_naming_key(self, tmp_path):
         """A view whose schema lacks pos → ValueError naming the missing key."""
-        from molix.data.collate import collate_packed
+        from molix.batch.collate import collate_packed
 
         # Cache with Z only (no pos) — PackedCache accepts this layout.
         samples = [{"Z": torch.ones(_atom_count(i), dtype=torch.long)} for i in range(4)]
@@ -404,7 +405,7 @@ class TestEagerErrors:
 
     def test_missing_z_raises_naming_key(self, tmp_path):
         """A view whose schema lacks Z → ValueError naming the missing key."""
-        from molix.data.collate import collate_packed
+        from molix.batch.collate import collate_packed
 
         # Cache with pos only (no Z). Uniform atom count so pos packs (without
         # Z there is no per-atom ref key, so a varying-shape pos can't be
@@ -442,10 +443,10 @@ class TestCacheLayering:
 # ===========================================================================
 
 
-class _MarkerNode:
-    """Minimal batch node that stamps a marker leaf onto the graphs namespace."""
+class _MarkerTask(BatchTask):
+    """Minimal batch task that stamps a marker leaf onto the graphs namespace."""
 
-    def apply(self, batch: TensorDict) -> TensorDict:
+    def execute(self, batch: TensorDict) -> TensorDict:
         """Write a constant ``marker`` leaf of shape ``(B,)`` under graphs."""
         b = batch["graphs"].batch_size[0]
         batch["graphs", "marker"] = torch.ones(b, dtype=torch.long)
@@ -477,7 +478,7 @@ def _make_dm(tmp_path: Path, tag: str, *, samples=None, **kwargs):
     Returns:
         A non-DDP DataModule whose train/val splits back the fast path.
     """
-    from molix.data.datamodule import DataModule
+    from molix.batch.datamodule import DataModule
 
     if samples is None:
         samples = _make_varied_samples(12)
@@ -525,7 +526,7 @@ class TestDataModuleFastPathRouting:
 
     def test_packed_uses_packed_collate_fn(self, tmp_path):
         """With a packed dataset, the train collate_fn is the packed fast-path type."""
-        from molix.data.datamodule import _PackedCollateFn
+        from molix.batch.datamodule import _PackedCollateFn
 
         dm = _make_dm(tmp_path, "route")
         loader = dm.train_dataloader()
@@ -561,12 +562,12 @@ class TestDataModuleFastPathRouting:
         _assert_no_unpack(monkeypatch, _run)
         batch = captured["batch"]
         # ftype cast is the only intended transform on the fast path with no
-        # batch nodes; default ftype is float32 so leaves stay identical.
+        # batch tasks; default ftype is float32 so leaves stay identical.
         _assert_td_equal(batch.to(torch.float32), want.to(torch.float32))
 
     def test_non_packed_dataset_falls_back(self, tmp_path):
         """A non-packed dataset uses _CollateFn + collate_molecules."""
-        from molix.data.datamodule import DataModule, _CollateFn
+        from molix.batch.datamodule import DataModule, _CollateFn
 
         samples = _make_varied_samples(6)
         ds = _NonPackedDataset(samples)
@@ -586,11 +587,11 @@ class TestDataModuleFastPathRouting:
 
 
 class TestDataModulePostSteps:
-    """batch_nodes and batch_to(ftype) apply on the fast path (ac-008)."""
+    """batch_tasks and batch_to(ftype) apply on the fast path (ac-008)."""
 
-    def test_batch_node_applied_on_fast_path(self, tmp_path, monkeypatch):
-        """A registered marker batch node stamps its leaf on fast-path batches."""
-        dm = _make_dm(tmp_path, "marker", batch_nodes=[_MarkerNode()])
+    def test_batch_task_applied_on_fast_path(self, tmp_path, monkeypatch):
+        """A registered marker batch task stamps its leaf on fast-path batches."""
+        dm = _make_dm(tmp_path, "marker", batch_tasks=[_MarkerTask()])
         captured: dict = {}
 
         def _run():
@@ -629,7 +630,7 @@ class TestDataModulePickle:
 
     def test_packed_collate_fn_pickles_and_collates(self, tmp_path):
         """pickle round-trip of _PackedCollateFn still produces correct batches."""
-        from molix.data.datamodule import _PackedCollateFn
+        from molix.batch.datamodule import _PackedCollateFn
 
         dm = _make_dm(tmp_path, "pickle")
         loader = dm.train_dataloader()
@@ -644,7 +645,7 @@ class TestDataModulePickle:
 
     def test_pickled_state_excludes_lazy_view(self, tmp_path):
         """__getstate__ of _PackedCollateFn omits the lazily built PackedView field."""
-        from molix.data.datamodule import _PackedCollateFn
+        from molix.batch.datamodule import _PackedCollateFn
 
         dm = _make_dm(tmp_path, "state")
         fn = dm.train_dataloader().collate_fn
@@ -667,7 +668,7 @@ class TestDataModuleSpawnWorkers:
         train_sink = _save(tmp_path, "spawn_train", samples[:8])
         val_sink = _save(tmp_path, "spawn_val", samples[8:])
 
-        from molix.data.datamodule import DataModule, _PackedCollateFn
+        from molix.batch.datamodule import DataModule, _PackedCollateFn
 
         # Val loader never shuffles → deterministic order across worker counts.
         dm_sync = DataModule(

@@ -4,7 +4,7 @@ Spec: ``universal-class-i-09-packer`` (acceptance ac-010).
 
 Two independent parts, both RNG-free and both hard-coded:
 
-**Part A — packing rule.** :class:`~molix.data.TokenBudgetPacker` is handed one
+**Part A — packing rule.** :class:`~molix.batch.TokenBudgetPacker` is handed one
 hard-coded ``(budget, counts)`` pair and one hard-coded *explicit* visit order,
 so the emitted plan is a pure function of the literals in this file — no
 permutation, no seed, no dataset. The expected plan below was derived by hand on
@@ -36,7 +36,7 @@ a first-fit policy would put idx 4 (4 atoms) back into the *closed* bin ``[1]``
 (20 atoms) exceeds the budget on its own and must survive as a singleton batch,
 never dropped — concatenating the plan reproduces the visit order exactly.
 
-**Part B — injection seam.** A tiny :class:`~molix.data.PackedCache` is written
+**Part B — injection seam.** A tiny :class:`~molix.store.PackedCache` is written
 into a :class:`tempfile.TemporaryDirectory`, a module-level stub
 ``BatchSamplerSource`` is injected into ``DataModule(num_workers=0)``, and
 ``on_epoch_start(2)`` is called with the default ``seed=42``. The stub must be
@@ -58,7 +58,7 @@ from pathlib import Path
 
 import torch
 
-from molix.data import DataModule, TokenBudgetPacker
+from molix.batch import DataModule, TokenBudgetPacker
 from molix.store import CachedDataset, PackedCache
 
 # ---------------------------------------------------------------------------

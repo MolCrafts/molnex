@@ -28,7 +28,7 @@ from pathlib import Path
 import torch
 
 from molix.data import NeighborList, Pipeline
-from molix.data.collate import collate_molecules
+from molix.batch.collate import collate_molecules
 from molix.datasets import RevMD17Source
 from molix.profiler._utils import _fmt_table
 from molzoo.pinet import PiNet, PiNetPotential

@@ -31,7 +31,7 @@ from pathlib import Path
 
 import torch
 
-from molix.data.collate import TargetSchema
+from molix.batch.collate import TargetSchema
 from molix.data.source import Sample
 
 

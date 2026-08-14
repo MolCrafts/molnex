@@ -20,7 +20,7 @@ Four layers, deliberately separated:
   supplied mixture, whole sampling units inside it, packed by the same
   packer under the same token budgets.
 * :class:`BatchSamplerSource` — the protocol a
-  :class:`~molix.data.datamodule.DataModule` calls once per epoch to obtain
+  :class:`~molix.batch.datamodule.DataModule` calls once per epoch to obtain
   a batch sampler, so alternative batching policies can be injected.
 """
 
@@ -301,7 +301,7 @@ class TaskMixtureBatchSampler:
       level so conformers never straddle a split; this sampler inherits
       that discipline one level down, making the group id the atomic unit
       of *sampling* exactly as it is the atomic unit of *splitting* in
-      :func:`~molix.data.group_split.group_split_indices`.
+      :func:`~molix.batch.group_split.group_split_indices`.
 
     Stage mixtures (plain ``dict`` constructor data — no ``Stage`` enum,
     no schedule object; choosing the active stage at epoch *e* stays with
@@ -347,7 +347,7 @@ class TaskMixtureBatchSampler:
     the computed ``list[list[int]]`` — no packer and no mmap-backed count
     vector — so it pickles to an identical plan. Reseed per epoch with
     ``seed + epoch`` (the convention
-    :class:`~molix.data.datamodule.DataModule` already uses) to reshuffle
+    :class:`~molix.batch.datamodule.DataModule` already uses) to reshuffle
     between epochs while keeping epoch *k* re-derivable on resume.
 
     Args:
@@ -359,12 +359,12 @@ class TaskMixtureBatchSampler:
             Unit costs are pointer arithmetic over those vectors; no
             sample is ever unpacked.
         indices: The split's dataset indices, e.g. the train list from
-            :func:`~molix.data.group_split.group_split_indices`. Consumed
+            :func:`~molix.batch.group_split.group_split_indices`. Consumed
             as given — this sampler never splits and never re-derives
             groups. Yielded batches contain these parent-space indices.
         task_labels: Per-sample physical task label, ``len(dataset)``
             long (parent space, the shape
-            :func:`~molix.data.group_split.group_split_indices` already
+            :func:`~molix.batch.group_split.group_split_indices` already
             accepts). Labels are opaque strings; molnex never infers them.
         group_ids: Per-sample group identity, ``len(dataset)`` long. Two
             scans of one molecule sharing a label *and* a group id merge
@@ -812,7 +812,7 @@ class BatchSamplerSource(Protocol):
     """Per-epoch provider of a train batch sampler.
 
     Implemented by callers that want to drive batch composition
-    themselves; a :class:`~molix.data.datamodule.DataModule` constructed
+    themselves; a :class:`~molix.batch.datamodule.DataModule` constructed
     with ``batch_sampler_source=`` calls :meth:`batch_sampler` once per
     epoch, immediately before building the train
     :class:`~torch.utils.data.DataLoader`.

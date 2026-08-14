@@ -31,7 +31,7 @@ from tensordict import TensorDict  # noqa: E402
 from molix.core.metrics import MAE, RMSE  # noqa: E402
 from molix.core.seed import seed_everything  # noqa: E402
 from molix.data import AtomicDress, NeighborList, Pipeline  # noqa: E402
-from molix.data.collate import collate_molecules  # noqa: E402
+from molix.batch.collate import collate_molecules  # noqa: E402
 from molix.datasets import RevMD17Source  # noqa: E402
 from molzoo.pinet import PiNet, PiNetPotential  # noqa: E402
 

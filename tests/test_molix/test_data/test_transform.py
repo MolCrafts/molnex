@@ -327,7 +327,6 @@ class TestPipeline:
         spec = pipe.build()
 
         assert len(spec.prepare_nodes) == 2
-        assert len(spec.batch_nodes) == 0
 
         assert isinstance(spec.prepare_nodes[0].task, DatasetTask)
         assert isinstance(spec.prepare_nodes[1].task, SampleTask)

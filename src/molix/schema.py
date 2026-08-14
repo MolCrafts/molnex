@@ -1,7 +1,7 @@
 """Post-collate batch-schema keys shared across the molix stack.
 
 The nested ``atoms / edges / graphs`` TensorDict layout produced by
-:func:`molix.data.collate.collate_molecules` is a molix contract (see
+:func:`molix.batch.collate.collate_molecules` is a molix contract (see
 CLAUDE.md, "Post-collate batch schema"). The tuple keys under which models
 write energy/force outputs live here so every layer — molix execution
 utilities and the higher molpot/molzoo packages alike — addresses one schema

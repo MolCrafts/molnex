@@ -4,16 +4,16 @@ Covers spec ``dynamic-batching-packed-collate-01-sampler``:
 
 * GROUP A — pointer-derived count accessors (``atom_counts`` /
   ``edge_counts``) on ``_CacheBacked`` datasets and ``SubsetDataset``.
-* GROUP B — ``molix.data.sampler.TokenBudgetBatchSampler`` behaviour.
+* GROUP B — ``molix.batch.sampler.TokenBudgetBatchSampler`` behaviour.
 * GROUP C — ``DataModule`` opt-in wiring via ``max_atoms_per_batch`` /
   ``max_edges_per_batch``.
 
 Spec ``universal-class-i-09-packer`` adds GROUP D: characterization
 goldens pinning the pre-refactor batch plans plus RED tests for the
-extracted ``molix.data.TokenBudgetPacker``.
+extracted ``molix.batch.TokenBudgetPacker``.
 
 Spec ``universal-class-i-10-sampler`` adds GROUP E: RED tests for
-``molix.data.sampler.TaskMixtureBatchSampler`` — hierarchical
+``molix.batch.sampler.TaskMixtureBatchSampler`` — hierarchical
 task → group → configuration batch sampling over the same packed caches.
 
 Fixture geometry (hand-checkable): sample ``i`` has ``3 + (i % 8)`` atoms
@@ -36,10 +36,10 @@ import pytest
 import torch
 from torch.utils.data import BatchSampler, Dataset, RandomSampler
 
+from molix.batch import TokenBudgetPacker
+from molix.batch.datamodule import DataModule
+from molix.batch.sampler import TaskMixtureBatchSampler, TokenBudgetBatchSampler
 from molix.core.seed import make_generator
-from molix.data import TokenBudgetPacker
-from molix.data.datamodule import DataModule
-from molix.data.sampler import TaskMixtureBatchSampler, TokenBudgetBatchSampler
 from molix.store.cache import PackedCache
 from molix.store.dataset import CachedDataset, MmapDataset, SubsetDataset
 
@@ -444,7 +444,7 @@ class TestDataModuleDDP:
 
     def test_budget_with_ddp_raises(self, tmp_path, monkeypatch):
         """_is_distributed() True + budget → eager ValueError mentioning DDP."""
-        monkeypatch.setattr("molix.data.datamodule._is_distributed", lambda: True)
+        monkeypatch.setattr("molix.batch.datamodule._is_distributed", lambda: True)
         dm = _make_budget_dm(tmp_path, "ddp", max_atoms_per_batch=16)
         with pytest.raises(ValueError, match="(?i)ddp|distributed"):
             dm.train_dataloader()
@@ -503,7 +503,7 @@ GOLDEN_SEED = 42
 #   from tests.test_molix.test_data.test_sampler import _write_varied_cache
 #   from molix.core.seed import make_generator
 #   from molix.store.dataset import MmapDataset
-#   from molix.data.sampler import TokenBudgetBatchSampler as S
+#   from molix.batch.sampler import TokenBudgetBatchSampler as S
 #   print(torch.randperm(16, generator=make_generator(42)).tolist())
 #   with tempfile.TemporaryDirectory() as td:
 #       ds = MmapDataset(_write_varied_cache(Path(td), 'golden', n=16))
@@ -620,7 +620,7 @@ class TestSamplerSurfacePreservation:
 
 
 class TestTokenBudgetPacker:
-    """``molix.data.TokenBudgetPacker`` — next-fit packing, no dataset/RNG.
+    """``molix.batch.TokenBudgetPacker`` — next-fit packing, no dataset/RNG.
 
     ``TokenBudgetPacker`` is imported inside each test so this class fails
     at call time (RED) without breaking collection of the characterization
@@ -1111,7 +1111,7 @@ class TestTaskMixtureIntegrity:
         exists so that adding a second next-fit loop while implementing
         ``TaskMixtureBatchSampler`` turns this test red.
         """
-        from molix.data import sampler as sampler_module
+        from molix.batch import sampler as sampler_module
 
         source = Path(inspect.getsourcefile(sampler_module)).read_text()
         assert source.count("current.append(") == 1

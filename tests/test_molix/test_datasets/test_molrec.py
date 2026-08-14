@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 import torch
 
-from molix.data.collate import TargetSchema
+from molix.batch.collate import TargetSchema
 from molix.data.source import DataSource
 
 # MolRec is an optional molpy public surface (never import molrs from molnex).

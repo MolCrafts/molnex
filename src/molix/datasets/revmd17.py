@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from molix.data.collate import TargetSchema
+from molix.batch.collate import TargetSchema
 from molix.data.source import Sample
 
 _TARBALL_NAME = "rmd17.tar.bz2"

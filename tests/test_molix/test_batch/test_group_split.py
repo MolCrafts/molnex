@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from molix.data.group_split import group_split_indices
+from molix.batch.group_split import group_split_indices
 
 
 class TestGroupSplitIndices:

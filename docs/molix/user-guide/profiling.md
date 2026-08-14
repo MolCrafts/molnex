@@ -101,9 +101,9 @@ parameter.
 ## TaskProfiler
 
 A *task* is one step of the preprocessing pipeline (`molix.data.task`):
-`SampleTask` transforms one sample dict, `DatasetTask` first fits global
-parameters over the whole dataset and then transforms each sample, and
-`BatchTask` transforms an already-collated batch. `TaskProfiler` times
+`SampleTask` transforms one sample dict and `DatasetTask` first fits global
+parameters over the whole dataset and then transforms each sample. A
+`molix.batch.BatchTask` transforms an already-collated batch. `TaskProfiler` times
 `task.execute(...)` on its own, with no DataLoader, workers or collation in the
 picture.
 
@@ -249,8 +249,9 @@ Configuration is the DataLoader configuration you want to test: `batch_size`,
 `pin_memory` (allocate host buffers in page-locked memory so the copy to the GPU
 can run asynchronously), `persistent_workers` (keep workers alive across epochs;
 silently forced off when `num_workers == 0`), `target_schema` (how labels are
-routed during collation, defaulting to `DEFAULT_TARGET_SCHEMA`), and an optional
-`PipelineSpec` whose `batch_nodes` are applied inside `collate_fn`.
+routed during collation, defaulting to `DEFAULT_TARGET_SCHEMA`), and optional
+`batch_tasks` — `molix.batch.BatchTask` instances applied, in order, inside
+`collate_fn`.
 
 `run()` resolves its argument in three ways. An existing `DataLoader` is used
 as-is and your constructor settings only affect what the report *says*. A

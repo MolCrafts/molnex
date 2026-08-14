@@ -74,7 +74,7 @@ src/molrep/interaction/pinet/{ff,message,residual,blocks}.py
 src/molzoo/pinet/{spec,geometry,encoder,potential,properties}.py
 tests/test_molrep/test_interaction/test_pinet/...
 tests/test_molzoo/test_pinet/...
-tests/test_molix/test_data/test_tasks/test_pad.py
+tests/test_molix/test_batch/test_pad.py
 ```
 
 **Status.** active (PiNet spine done; full-repo mirror is incremental).

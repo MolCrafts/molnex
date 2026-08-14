@@ -16,12 +16,12 @@ import torch
 import torch.nn as nn
 
 from molix import logger as _logger_mod
+from molix.batch.datamodule import DataModuleProtocol
 from molix.config import config
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
 from molix.core.hook import Hook
 from molix.core.state import Stage, TrainState, resolve
 from molix.core.steps import DefaultEvalStep, DefaultTrainStep, Step, batch_to
-from molix.data.datamodule import DataModuleProtocol
 
 logger = _logger_mod.getLogger(__name__)
 
@@ -639,7 +639,7 @@ class Trainer:
                 mode="reduce-overhead"``) — inductor fusion + CUDA graphs, the
                 fastest force-training config. Overrides the four params below.
                 REQUIRES static shapes: register
-                :class:`molix.data.tasks.PadMolecularBatch` and set the train
+                :class:`molix.batch.PadMolecularBatch` and set the train
                 loader's ``drop_last=True`` (see
                 ``docs/molix/explanation/throughput-and-compilation.md``).
             backend: Compile backend (default: ``"inductor"``).

@@ -52,7 +52,7 @@ PINET_SPINE: tuple[str, ...] = (
     "molzoo/pinet/",
     "molpot/derivation/force.py",
     "molpot/derivation/energy.py",
-    "molix/data/tasks/pad.py",
+    "molix/batch/pad.py",
     "molix/md/",
     "molix/schema.py",
     "molix/units.py",

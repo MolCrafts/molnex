@@ -7,7 +7,7 @@ Five profilers, each targeting a single component:
 
 - :class:`TaskProfiler` — wall-clock timing of a single pipeline task
   (:class:`~molix.data.task.SampleTask`, :class:`~molix.data.task.DatasetTask`,
-  or :class:`~molix.data.task.BatchTask`).
+  or :class:`~molix.batch.task.BatchTask`).
 
 - :class:`ModuleProfiler` — forward/backward timing and GPU memory for any
   :class:`torch.nn.Module`.

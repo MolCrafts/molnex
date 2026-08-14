@@ -9,17 +9,17 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from molix.config import config
-from molix.core.seed import make_generator, make_worker_init_fn
-from molix.core.steps import batch_to
-from molix.data.collate import (
+from molix.batch.collate import (
     DEFAULT_TARGET_SCHEMA,
     MoleculeCollator,
     TargetSchema,
     collate_packed,
 )
-from molix.data.pipeline import Node
-from molix.data.sampler import BatchSamplerSource, TokenBudgetBatchSampler
+from molix.batch.sampler import BatchSamplerSource, TokenBudgetBatchSampler
+from molix.batch.task import BatchTask
+from molix.config import config
+from molix.core.seed import make_generator, make_worker_init_fn
+from molix.core.steps import batch_to
 from molix.store.dataset import BaseDataset
 
 # ---------------------------------------------------------------------------
@@ -80,13 +80,12 @@ class DataModule:
 
     Usage::
 
-        dag = pipe.cache(source, base_dir=run_dir / "cache",
-                         fit_source=train_source)
-        full = dag.dataset(mmap=True)
+        full = MmapDataset(cache_file)
         train_ds, val_ds = full.split(sizes=(n_train, n_val), seed=42)
         dm = DataModule(train_ds, val_ds,
                         target_schema=QM9Source.TARGET_SCHEMA,
-                        batch_nodes=pipe.batch_nodes,
+                        batch_tasks=[PadMolecularBatch(max_atoms=256,
+                                                       max_edges=4096)],
                         batch_size=32, num_workers=4)
         trainer.train(datamodule=dm, max_epochs=100)
 
@@ -94,14 +93,15 @@ class DataModule:
         train_dataset: Pre-built training dataset.
         val_dataset: Pre-built validation dataset.
         target_schema: Which target keys are graph-level vs atom-level.
-        batch_nodes: Post-collate :class:`Node` instances (from
-            :attr:`PipelineSpec.batch_nodes`).
+        batch_tasks: Post-collate
+            :class:`~molix.batch.task.BatchTask` instances, applied to every
+            collated batch in the order given.
         batch_size: Samples per batch (per rank in DDP). Ignored for the
             train loader when a token budget is set (see below).
         max_atoms_per_batch: Optional per-batch total-atom budget. Setting
             this (and/or ``max_edges_per_batch``) switches the *train*
             dataloader to a
-            :class:`~molix.data.sampler.TokenBudgetBatchSampler` so each
+            :class:`~molix.batch.sampler.TokenBudgetBatchSampler` so each
             batch packs as many samples as fit under the budget — keeping
             GNN compute (O(edges)) per batch approximately constant
             instead of swinging with sample sizes. Requires a
@@ -113,7 +113,7 @@ class DataModule:
         max_edges_per_batch: Optional per-batch total-edge budget; same
             semantics as ``max_atoms_per_batch``, both may be combined.
         batch_sampler_source: Optional
-            :class:`~molix.data.sampler.BatchSamplerSource` that supplies
+            :class:`~molix.batch.sampler.BatchSamplerSource` that supplies
             the *train* loader's ``batch_sampler`` once per epoch, called
             as ``batch_sampler(train_dataset, seed=seed + epoch)`` — the
             same reseed convention as the budget path, so epoch *k*'s
@@ -132,7 +132,7 @@ class DataModule:
     Raises:
         ValueError: ``batch_sampler_source`` is combined with a token
             budget, or does not implement
-            :class:`~molix.data.sampler.BatchSamplerSource`.
+            :class:`~molix.batch.sampler.BatchSamplerSource`.
     """
 
     def __init__(
@@ -141,7 +141,7 @@ class DataModule:
         val_dataset: BaseDataset,
         *,
         target_schema: TargetSchema | None = None,
-        batch_nodes: Sequence[Node] | None = None,
+        batch_tasks: Sequence[BatchTask] | None = None,
         batch_size: int = 32,
         max_atoms_per_batch: int | None = None,
         max_edges_per_batch: int | None = None,
@@ -175,7 +175,7 @@ class DataModule:
         if target_schema is None:
             target_schema = getattr(train_dataset, "target_schema", DEFAULT_TARGET_SCHEMA)
         self.target_schema = target_schema
-        self.batch_nodes: tuple[Node, ...] = tuple(batch_nodes) if batch_nodes else ()
+        self.batch_tasks: tuple[BatchTask, ...] = tuple(batch_tasks) if batch_tasks else ()
         self.batch_size = batch_size
         self.max_atoms_per_batch = max_atoms_per_batch
         self.max_edges_per_batch = max_edges_per_batch
@@ -248,7 +248,7 @@ class DataModule:
         """Build this epoch's train ``batch_sampler``, or ``None``.
 
         Dispatches the three batch policies in precedence order: an
-        injected :class:`~molix.data.sampler.BatchSamplerSource`, else a
+        injected :class:`~molix.batch.sampler.BatchSamplerSource`, else a
         token budget, else the fixed-``batch_size`` route (``None``). Both
         custom paths are seeded ``self.seed + self._epoch``, so epoch *k*
         reshuffles yet stays re-derivable on resume, and both pass the DDP
@@ -284,7 +284,7 @@ class DataModule:
 
         With a token budget set (``max_atoms_per_batch`` /
         ``max_edges_per_batch``), batches come from a
-        :class:`~molix.data.sampler.TokenBudgetBatchSampler` seeded with
+        :class:`~molix.batch.sampler.TokenBudgetBatchSampler` seeded with
         ``seed + epoch`` — a fresh sampler per epoch, so epochs reshuffle
         and epoch *k*'s composition is re-derivable on resume. With a
         ``batch_sampler_source`` set, that source supplies the batch
@@ -297,7 +297,7 @@ class DataModule:
         :class:`~torch.utils.data.DistributedSampler` (shuffle handled by
         the sampler, ``drop_last=True``); otherwise shuffles directly. The
         collate function casts floating-point leaves to the captured
-        ``ftype`` and applies any post-collate batch nodes.
+        ``ftype`` and applies any post-collate batch tasks.
 
         Returns:
             A configured training ``DataLoader``.
@@ -419,7 +419,7 @@ class DataModule:
         return loader
 
     def _make_collate_fn(self) -> "_CollateFn":
-        return _CollateFn(self.target_schema, self.batch_nodes)
+        return _CollateFn(self.target_schema, self.batch_tasks)
 
     def _resolve_collation(self, dataset: BaseDataset) -> tuple[object, object]:
         """Pick ``(loader_dataset, collate_fn)`` — packed fast path or fallback.
@@ -427,7 +427,7 @@ class DataModule:
         When *dataset* is packed-cache-backed and we are not under DDP, the
         DataLoader is fed an :class:`_IndexDataset` (returning bare indices)
         plus a :class:`_PackedCollateFn` that slices the packed tensors
-        directly via :func:`~molix.data.collate.collate_packed` — skipping
+        directly via :func:`~molix.batch.collate.collate_packed` — skipping
         per-sample unpack→repack. Otherwise the dataset is used as-is with
         the per-sample :class:`_CollateFn`. DDP is out of scope for the
         fast path, so it always falls back there.
@@ -440,7 +440,7 @@ class DataModule:
         """
         if not _is_distributed() and _packed_capable(dataset):
             return _IndexDataset(len(dataset)), _PackedCollateFn(
-                dataset, self.target_schema, self.batch_nodes
+                dataset, self.target_schema, self.batch_tasks
             )
         return dataset, self._make_collate_fn()
 
@@ -501,16 +501,16 @@ class _CollateFn:
     parent and pickled along with this callable.
     """
 
-    def __init__(self, schema: TargetSchema, batch_nodes: Sequence[Node]) -> None:
+    def __init__(self, schema: TargetSchema, batch_tasks: Sequence[BatchTask]) -> None:
         self.schema = schema
         self.collator = MoleculeCollator(schema)
-        self.batch_nodes = batch_nodes
+        self.batch_tasks = batch_tasks
         self.ftype = config["ftype"]
 
     def __call__(self, samples: list[dict]) -> dict:
         batch = self.collator(samples)
-        for entry in self.batch_nodes:
-            batch = entry.apply(batch)
+        for task in self.batch_tasks:
+            batch = task.execute(batch)
         return batch_to(batch, dtype=self.ftype)
 
 
@@ -558,8 +558,8 @@ class _PackedCollateFn:
 
     Receives a ``list[int]`` of sample indices (from :class:`_IndexDataset`
     via the sampler), builds the batch with
-    :func:`~molix.data.collate.collate_packed`, then applies the same
-    post-collate contract as :class:`_CollateFn` — ``batch_nodes`` followed
+    :func:`~molix.batch.collate.collate_packed`, then applies the same
+    post-collate contract as :class:`_CollateFn` — ``batch_tasks`` followed
     by :func:`~molix.core.steps.batch_to` with the captured ``ftype``.
 
     The :class:`~molix.store.dataset.PackedView` is built lazily on first
@@ -569,11 +569,11 @@ class _PackedCollateFn:
     """
 
     def __init__(
-        self, dataset: BaseDataset, schema: TargetSchema, batch_nodes: Sequence[Node]
+        self, dataset: BaseDataset, schema: TargetSchema, batch_tasks: Sequence[BatchTask]
     ) -> None:
         self._dataset = dataset
         self.schema = schema
-        self.batch_nodes = batch_nodes
+        self.batch_tasks = batch_tasks
         self.ftype = config["ftype"]
         self._view = None
 
@@ -584,8 +584,8 @@ class _PackedCollateFn:
 
     def __call__(self, indices: list[int]) -> dict:
         batch = collate_packed(self._packed_view(), indices, self.schema)
-        for entry in self.batch_nodes:
-            batch = entry.apply(batch)
+        for task in self.batch_tasks:
+            batch = task.execute(batch)
         return batch_to(batch, dtype=self.ftype)
 
     def __getstate__(self) -> dict:

@@ -6,6 +6,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from molix.batch.collate import collate_molecules
 from molix.config import config
 from molix.core.losses import WeightedLoss, energy_force_mse, energy_mse
 from molix.core.losses.molecular import (
@@ -18,7 +19,6 @@ from molix.core.losses.molecular import (
     molecule_centered_energy_mse,
     parameter_bag_mse,
 )
-from molix.data.collate import collate_molecules
 
 
 def _sample(Z, pos, *, U0=None, forces=None):
@@ -82,7 +82,7 @@ class TestEnergyForceMSE:
             _sample([1, 6], [[0, 0, 0], [1, 0, 0]], U0=1.0, forces=forces_a),
             _sample([6, 8], [[0, 0, 0], [1.2, 0, 0]], U0=2.0, forces=forces_b),
         ]
-        from molix.data.collate import TargetSchema
+        from molix.batch.collate import TargetSchema
 
         schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset({"forces"}))
         batch = collate_molecules(samples, schema)
@@ -109,7 +109,7 @@ class TestEnergyForceMSE:
     def test_lambda_zero_matches_energy_only(self):
         forces = torch.zeros(1, 3)
         samples = [_sample([1], [[0, 0, 0]], U0=1.0, forces=forces)]
-        from molix.data.collate import TargetSchema
+        from molix.batch.collate import TargetSchema
 
         schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset({"forces"}))
         batch = collate_molecules(samples, schema)

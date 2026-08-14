@@ -34,7 +34,7 @@ Pinned ``molpy.MolRec`` API (public surface only — never import ``molrs``)::
 
 Unlike :class:`~molix.datasets.QM9Source` / :class:`~molix.datasets.RevMD17Source`
 this source ships **no** frozen class-level ``TARGET_SCHEMA``; it builds a
-per-instance :class:`~molix.data.collate.TargetSchema` from whichever observables
+per-instance :class:`~molix.batch.collate.TargetSchema` from whichever observables
 the selected teacher exposes (scalar -> ``graph_level``, vector -> ``atom_level``).
 
 References:
@@ -55,7 +55,7 @@ import numpy as np
 import torch
 from molpy import Element
 
-from molix.data.collate import TargetSchema
+from molix.batch.collate import TargetSchema
 from molix.data.source import Sample
 
 # MolRec is an optional public surface on molpy (not every build ships the

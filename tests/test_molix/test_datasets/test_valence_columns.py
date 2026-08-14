@@ -12,7 +12,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.data.collate import collate_molecules
+from molix.batch.collate import collate_molecules
 from molix.datasets._valence_columns import (
     stack_angle_index,
     stack_improper_index,

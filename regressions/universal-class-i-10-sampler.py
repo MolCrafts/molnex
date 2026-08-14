@@ -2,10 +2,10 @@
 
 Spec: ``universal-class-i-10-sampler`` (acceptance ac-013).
 
-One minimal scenario, public API only: a 24-sample :class:`~molix.data.PackedCache`
+One minimal scenario, public API only: a 24-sample :class:`~molix.store.PackedCache`
 is written into a :class:`tempfile.TemporaryDirectory`, read back through
-:class:`~molix.data.MmapDataset`, and handed to
-:class:`~molix.data.TaskMixtureBatchSampler` with the ByteFF-derived **Stage B**
+:class:`~molix.store.MmapDataset`, and handed to
+:class:`~molix.batch.TaskMixtureBatchSampler` with the ByteFF-derived **Stage B**
 mixture (``equilibrium 0.35 / torsion 0.45 / relax 0.20``, arXiv:2408.12817),
 ``max_atoms=24``, ``indices=range(20)`` (the electrostatic block is excluded from
 this split) and ``seed=20260814``. No third-party oracle is imported,
@@ -60,7 +60,7 @@ from pathlib import Path
 
 import torch
 
-from molix.data import TaskMixtureBatchSampler
+from molix.batch import TaskMixtureBatchSampler
 from molix.store import MmapDataset, PackedCache
 
 # ---------------------------------------------------------------------------

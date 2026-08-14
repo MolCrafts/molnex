@@ -1,8 +1,8 @@
 """Pipeline task profiler.
 
-Profiles a single :class:`~molix.data.task.Task` (SampleTask, DatasetTask,
-or BatchTask) in complete isolation.  Accepts either a
-:class:`~molix.profiler.mock.MockSource` or a real
+Profiles a single :class:`~molix.data.task.Task` (SampleTask or DatasetTask)
+or a :class:`~molix.batch.task.BatchTask` in complete isolation.  Accepts
+either a :class:`~molix.profiler.mock.MockSource` or a real
 :class:`~molix.data.source.DataSource` as the sample provider.
 
 For :class:`~molix.data.task.DatasetTask`, a ``fit()`` call is made on the
@@ -23,10 +23,10 @@ Example::
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
-from molix.data.pipeline import Node
-from molix.data.task import DatasetTask
+from molix.data.task import DatasetTask, Runnable
 from molix.profiler._utils import Timer, TimingStat, _fmt_table
 
 # ---------------------------------------------------------------------------
@@ -104,7 +104,7 @@ class TaskProfiler:
         result.print_report()
     """
 
-    def __init__(self, task: object) -> None:
+    def __init__(self, task: Runnable | Callable[[object], object]) -> None:
         self.task = task
 
     def run(
@@ -133,7 +133,17 @@ class TaskProfiler:
 
         task_name = type(self.task).__name__
         task_id = getattr(self.task, "task_id", task_name)
-        entry = Node(name=task_name, task=self.task)
+        # Dispatch the task directly: ``execute`` for a Runnable (every
+        # SampleTask / DatasetTask / BatchTask), else a plain callable. The
+        # profiler times the transform, so it must not route through a DAG
+        # wrapper it would otherwise be timing too.
+        run_once: Callable[[object], object]
+        if isinstance(self.task, Runnable):
+            run_once = self.task.execute
+        elif callable(self.task):
+            run_once = self.task
+        else:
+            raise TypeError(f"Task {task_name} is neither Runnable nor callable: {type(self.task)}")
 
         total = n_warmup + n_samples
         times_ms: list[float] = []
@@ -142,7 +152,7 @@ class TaskProfiler:
             idx = i % n_source
             sample = source[idx]
             with Timer() as t:
-                entry.apply(sample)
+                run_once(sample)
             if i >= n_warmup:
                 times_ms.append(t.elapsed * 1000)
         desc = getattr(source, "describe", lambda: type(source).__name__)()

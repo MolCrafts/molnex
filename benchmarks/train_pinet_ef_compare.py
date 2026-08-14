@@ -37,7 +37,8 @@ from molix.core.losses import energy_force_mse
 from molix.core.metrics import MAE, RMSE
 from molix.core.seed import seed_everything
 from molix.core.trainer import Trainer
-from molix.data import AtomicDress, DataModule, NeighborList, Pipeline
+from molix.batch import DataModule
+from molix.data import AtomicDress, NeighborList, Pipeline
 from molix.datasets import RevMD17Source
 from molix.hooks.scalar import MetricsHook
 from molzoo.pinet import PiNet, PiNetPotential

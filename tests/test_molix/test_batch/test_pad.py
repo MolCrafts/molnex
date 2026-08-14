@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from molix.data import PadMolecularBatch
+from molix.batch import PadMolecularBatch
 from tests.conftest import make_graph_batch
 
 

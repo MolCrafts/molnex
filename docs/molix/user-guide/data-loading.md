@@ -10,7 +10,7 @@ MolNex data flows from plain dict samples to nested TensorDict batches:
 
 ```python
 from torch.utils.data import DataLoader
-from molix.data.collate import collate_molecules
+from molix.batch.collate import collate_molecules
 
 loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_molecules)
 ```

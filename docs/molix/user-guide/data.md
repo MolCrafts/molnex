@@ -3,10 +3,15 @@
 `molix.data` provides the molecular data pipeline:
 
 - **Sources** (`source.py`): `DataSource` protocol and `InMemorySource` / `SubsetSource` implementations
-- **Tasks** (`task.py`, `tasks/`): transform primitives (`SampleTask`, `DatasetTask`, `BatchTask`) and the built-ins `NeighborList`, `AtomicDress`, `UnitConvert`, `ConstantLabel`, `PadMolecularBatch`
+- **Tasks** (`task.py`, `tasks/`): transform primitives (`SampleTask`, `DatasetTask`) and the built-ins `NeighborList`, `AtomicDress`, `UnitConvert`, `ConstantLabel`. Post-collate transforms (`BatchTask`, `PadMolecularBatch`) live in `molix.batch`
 - **Pipeline** (`pipeline.py`): declarative `Pipeline` / `PipelineSpec` container — which tasks run, in what order, under what cache identity
-- **Collation** (`collate.py`): `collate_molecules` turns sample dicts into a plain nested `TensorDict` with `atoms` / `edges` / `graphs` (and `bonds`) namespaces; `collate_packed` is the equivalent fast path straight off packed cache tensors
-- **DataModule** (`datamodule.py`): DDP-aware data module integrating pipeline + collation + DataLoader
+
+Batch construction lives next door in `molix.batch`:
+
+- **Collation** (`batch/collate.py`): `collate_molecules` turns sample dicts into a plain nested `TensorDict` with `atoms` / `edges` / `graphs` (and `bonds`) namespaces; `collate_packed` is the equivalent fast path straight off packed cache tensors
+- **Post-collate transforms** (`batch/task.py`, `batch/pad.py`): `BatchTask` and the shipped `PadMolecularBatch`, configured as `DataModule(batch_tasks=[...])`
+- **Batch policies** (`batch/sampler.py`, `batch/group_split.py`): token-budget and task-mixture batch samplers, group-aware index splits
+- **DataModule** (`batch/datamodule.py`): DDP-aware data module integrating datasets + collation + DataLoader
 
 Storage lives next door in `molix.store`:
 

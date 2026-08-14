@@ -2,7 +2,7 @@
 
 Currently holds one builder: the degenerate ``n_edges == n_atoms``
 geometry used by ``test_store/test_cache.py``,
-``test_store/test_dataset.py`` and ``test_data/test_collate_packed.py``
+``test_store/test_dataset.py`` and ``test_batch/test_collate_packed.py``
 to pin the packed-cache bucket-identity contract. The three modules
 assert three consequences of the *same* contract and now live in two
 different sub-packages, so the geometry lives at their nearest common
