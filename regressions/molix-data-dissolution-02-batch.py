@@ -61,12 +61,13 @@ gathers from or scatters to a real atom, so real atoms' energy and forces are
 unchanged by padding. A padding edge pointing at a real atom, or a mask one
 element short, would corrupt forces on a CUDA-graph training run with no error.
 
-**Part C — the coupling is cut.** ``PipelineSpec`` must expose no
-``batch_nodes`` attribute: while the pipeline still claimed post-collate
-routing, a ``PadMolecularBatch`` on the ``molix.batch`` base matched neither
-``is_cacheable`` nor ``batch_nodes``, so the padding task was silently dropped
-— a wrong-shape training run with no error. Post-collate configuration belongs
-to the DataModule alone.
+**Part C — the coupling is cut.** No module may claim post-collate routing any
+more: while the acquisition pipeline still did, a ``PadMolecularBatch`` on the
+``molix.batch`` base matched neither its cacheable nor its batch-node branch,
+so the padding task was silently dropped — a wrong-shape training run with no
+error. Post-collate configuration belongs to the DataModule alone. Phase 04
+deleted the pipeline outright, so the check is now that the module holding the
+routing no longer resolves at all.
 
     capture: none — closed-form literals. Every golden above is hand-written
              geometry plus integer index arithmetic; nothing was captured from
@@ -81,6 +82,7 @@ to the DataModule alone.
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import tempfile
 from pathlib import Path
@@ -347,18 +349,15 @@ def _check_padding(workdir: Path, unpadded: TensorDict) -> None:
 
 
 def _check_pipeline_no_longer_routes_batch_tasks() -> None:
-    """Part C: ``PipelineSpec`` must not claim post-collate routing any more."""
-    import molix.data.pipeline as pipeline_module
+    """Part C: nothing in molnex routes post-collate tasks through a pipeline.
 
-    spec_type = pipeline_module.PipelineSpec
-    if not hasattr(spec_type, "prepare_nodes"):
+    Phase 02 moved ``BatchTask`` onto ``DataModule(batch_tasks=...)``; phase 04
+    deleted the acquisition layer that used to own the routing, so the strongest
+    form of the check is that the module which held it no longer resolves.
+    """
+    if importlib.util.find_spec("molix.data") is not None:
         raise AssertionError(
-            "PipelineSpec has no prepare_nodes — the introspection surface moved, "
-            "so the batch_nodes check below would pass vacuously"
-        )
-    if hasattr(spec_type, "batch_nodes"):
-        raise AssertionError(
-            "PipelineSpec still exposes batch_nodes — post-collate tasks belong to "
+            "molix.data still resolves — post-collate tasks belong to "
             "DataModule(batch_tasks=...); a pipeline that keeps routing them would "
             "silently drop a PadMolecularBatch built on the molix.batch base"
         )

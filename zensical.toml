@@ -24,10 +24,11 @@ nav = [
         { "User Guide" = [
             { "Trainer" = "molix/user-guide/trainer.md" },
             { "Hooks" = "molix/user-guide/hooks.md" },
-            { "Data Pipeline" = "molix/user-guide/data.md" },
             { "Data Loading" = "molix/user-guide/data-loading.md" },
             { "Data Modules" = "molix/user-guide/data-modules.md" },
             { "Molecular Dynamics" = "molix/user-guide/md.md" },
+            { "Units" = "molix/user-guide/units.md" },
+            { "Force-field export" = "molix/user-guide/ff-export.md" },
             { "Profiling" = "molix/user-guide/profiling.md" }
         ]},
         { "Explanation" = [
@@ -52,10 +53,12 @@ nav = [
     { "MolPot" = [
         { "Overview" = "molpot/index.md" },
         { "Tutorials" = [
-            { "Build a Potential" = "molpot/tutorials/build-a-potential.md" }
+            { "Build a Potential" = "molpot/tutorials/build-a-potential.md" },
+            { "Class-I ForceField" = "molpot/tutorials/class-i-forcefield.md" }
         ]},
         { "User Guide" = [
             { "Components" = "molpot/user-guide/components.md" },
+            { "ForceField" = "molpot/user-guide/forcefield.md" },
             { "Gradients and Forces" = "molpot/user-guide/gradients.md" }
         ]},
         { "Explanation" = [

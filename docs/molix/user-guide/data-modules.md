@@ -1,9 +1,14 @@
 # Data Modules
 
-`DataModule` is the last stage of the data pipeline: it wraps two pre-built
+`DataModule` is the last stage of the data path: it wraps two pre-built
 datasets in DataLoaders that collate, shard across DDP ranks, and prefetch.
 Everything upstream — downloading, per-sample transforms, caching, splitting —
 happens before it.
+
+Dataset **acquisition** — downloading, parsing, per-sample preprocessing and
+writing the packed cache — is not part of molnex; it lives in
+[MolHub](https://github.com/molcrafts/molhub). molnex starts from the cache
+file MolHub wrote, read through `molix.store`.
 
 The minimal protocol requires:
 
@@ -20,40 +25,27 @@ Each item yielded by those loaders is a nested `TensorDict` with `atoms` /
 
 ## Using the Built-in DataModule
 
-The wiring is source → `PipelineSpec.cache` → dataset → split → `DataModule`:
+The molnex-side wiring is packed cache → dataset → split → `DataModule`. The
+cache was produced upstream by MolHub, which owns the source, the per-sample
+transforms (neighbor list, atomic dress) and the fit of any dataset-level
+statistic — including the rule that such a fit sees training indices only, or
+the val split leaks into the baseline:
 
 ```python
-from molix.batch import DataModule, PadMolecularBatch
-from molix.data import AtomicDress, NeighborList, Pipeline, SubsetSource
-from molix.store import SubsetDataset
-from molix.datasets import QM9Source
+from molix.batch import DataModule, PadMolecularBatch, TargetSchema
+from molix.store import MmapDataset, SubsetDataset
 
-source = QM9Source(root="./data/qm9", total=1000)
+full = MmapDataset("./cache/qm9.pt")  # written by MolHub
 
 train_idx = list(range(800))
 val_idx = list(range(800, 1000))
-
-# AtomicDress fits its per-element baseline with a least-squares solve over a
-# whole dataset. Fit it on the training indices only, or the val split leaks
-# into the baseline.
-train_source = SubsetSource(source, train_idx)
-
-pipe = (
-    Pipeline("qm9")
-    .add(NeighborList(cutoff=5.0))
-    .add(AtomicDress(elements=(1, 6, 7, 8, 9), target_key="U0"))
-    .build()
-)
-
-dag = pipe.cache(source, base_dir="./cache", fit_source=train_source)
-full = dag.dataset(mmap=True)
 train_ds = SubsetDataset(full, train_idx)
 val_ds = SubsetDataset(full, val_idx)
 
 dm = DataModule(
     train_ds,
     val_ds,
-    target_schema=QM9Source.TARGET_SCHEMA,
+    target_schema=TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset()),
     batch_tasks=[PadMolecularBatch(max_atoms=1024, max_edges=16384)],
     batch_size=32,
 )
@@ -70,7 +62,7 @@ for batch in dm.train_dataloader():
 `target_schema` decides which target names land under `graphs` and which under
 `atoms`; `batch_tasks` carries `molix.batch.BatchTask` instances, applied in
 order after collation — post-collate work is configured on the DataModule, not
-in the pipeline, because it cannot be cached with the rest.
+upstream, because it cannot be cached with the rest.
 
 ## Minimal Custom DataModule
 

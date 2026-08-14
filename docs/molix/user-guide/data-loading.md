@@ -2,9 +2,15 @@
 
 MolNex data flows from plain dict samples to nested TensorDict batches:
 
-1. `DataSource.__getitem__` returns a single-sample dict (`Z`, `pos`, `targets`, ...)
+1. `dataset[i]` returns a single-sample dict (`Z`, `pos`, `targets`, ...)
 2. `DataLoader(collate_fn=collate_molecules)` merges samples into one nested `TensorDict`
 3. `Trainer` passes that batch to the model and loss function
+
+Step 1 is where the boundary sits: producing those sample dicts — downloading a
+dataset, parsing it, preprocessing it and writing the packed cache molnex reads
+— is **dataset acquisition**, which lives in
+[MolHub](https://github.com/molcrafts/molhub). molnex owns steps 2 and 3, plus
+the cache reader in `molix.store`.
 
 ## Collation
 
@@ -34,14 +40,15 @@ equivalence oracle for `collate_packed`.
 
 ## Preprocessing Tasks
 
-Tasks run *before* collation, on flat sample dicts, and are composed into a
-`Pipeline`. They come in two flavours:
+Preprocessing runs *before* collation, on flat sample dicts, and is scheduled
+by MolHub. molnex keeps exactly one such step, because the edge convention it
+writes is a molnex contract:
 
-- **`NeighborList`** is a `SampleTask`: it sees one molecule at a time and adds
+- **`molix.batch.NeighborList`** sees one molecule at a time and adds
   `edge_index`, `edge_diff` and `edge_dist` for every pair within `cutoff`.
-- **`AtomicDress`** is a `DatasetTask`: it needs the whole training set, so it
-  runs in two phases — `fit` solves a least-squares problem for a per-element
-  baseline energy, then `execute` subtracts that baseline from each sample's
-  scalar target.
+
+Dataset-level steps (an atomic-dress baseline fitted over the training split,
+unit conversion, constant labels) are MolHub's. molnex reads back whatever fit
+they recorded through `MmapDataset.stats()`.
 
 For the full batch structure, see [Batch Schema](../explanation/batch-schema.md).

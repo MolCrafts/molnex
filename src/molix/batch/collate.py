@@ -28,10 +28,9 @@ class TargetSchema:
     ``graph_level`` targets (e.g. energy) are per-molecule scalars → ``(B,)``.
     ``atom_level`` targets (e.g. forces) are per-atom tensors → ``(N_total, ...)``.
 
-    Generic defaults are intentionally minimal: data-source classes that
-    ship with molix expose schemas as class attributes
-    (e.g. :attr:`molix.datasets.QM9Source.TARGET_SCHEMA`) that workflows
-    pass explicitly to :class:`DataModule`. :class:`DataModule` also
+    Generic defaults are intentionally minimal: dataset adapters
+    (MolHub-owned) expose their own schema as a class attribute, which
+    workflows pass explicitly to :class:`DataModule`. :class:`DataModule` also
     checks ``getattr(dataset, "target_schema", ...)`` as a fallback for
     any subclass that declares its own.
     """

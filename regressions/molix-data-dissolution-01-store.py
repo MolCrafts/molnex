@@ -206,9 +206,23 @@ def _check_roundtrip(workdir: Path) -> None:
     _check_reader(CachedDataset(sink), "CachedDataset")
 
 
+def _resolves(module: str) -> bool:
+    """Whether *module* can still be located by the import system.
+
+    ``find_spec`` imports the parent package first, so once phase 04 deleted
+    ``molix.data`` entirely a submodule query raises instead of returning
+    ``None``. A missing parent is the strongest form of "gone", so it is
+    reported as "does not resolve" rather than propagated.
+    """
+    try:
+        return importlib.util.find_spec(module) is not None
+    except ModuleNotFoundError:
+        return False
+
+
 def _check_dissolved() -> None:
     """Part B: the old ``molix.data`` storage surface is gone, not shimmed."""
-    if importlib.util.find_spec("molix.data.cache") is not None:
+    if _resolves("molix.data.cache"):
         raise AssertionError(
             "molix.data.cache is still importable — the storage layer must live "
             "only in molix.store, with no shim left behind"

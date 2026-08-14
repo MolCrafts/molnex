@@ -246,12 +246,13 @@ class _CacheBacked(BaseDataset):
         return self._task_states[name]
 
     def stats(self) -> dict[str, Any]:
-        """Fitted :class:`DatasetTask` state keyed by task name.
+        """Fitted dataset-level preprocessing state keyed by task name.
 
         Returns a shallow copy of ``{task_name: state_dict}`` for every
-        :class:`~molix.data.task.DatasetTask` in the pipeline that
-        produced this cache (e.g. ``AtomicDress``). The inner dict is the
-        task's own ``state_dict`` payload.
+        dataset-level step that was fitted while producing this cache (e.g.
+        an atomic-dress regression). Those steps are MolHub's; molnex only
+        reads back what the writer recorded. The inner dict is the step's own
+        ``state_dict`` payload.
 
         For dataset-wide connectivity statistics (``avg_num_neighbors``,
         ``max_atoms``, ``max_edges``) use the dedicated properties on this
@@ -364,8 +365,9 @@ class MmapDataset(_CacheBacked):
 
     Args:
         sink: Cache path, or an existing
-            :class:`~molix.store.cache.PackedCache`, normally produced by
-            :meth:`PipelineSpec.cache <molix.data.pipeline.PipelineSpec.cache>`.
+            :class:`~molix.store.cache.PackedCache`, normally written by the
+            MolHub-side preprocessing driver via
+            :meth:`~molix.store.cache.PackedCache.save`.
     """
 
     def __init__(self, sink: str | Path | PackedCache) -> None:
@@ -380,8 +382,9 @@ class CachedDataset(_CacheBacked):
 
     Args:
         sink: Cache path, or an existing
-            :class:`~molix.store.cache.PackedCache`, normally produced by
-            :meth:`PipelineSpec.cache <molix.data.pipeline.PipelineSpec.cache>`.
+            :class:`~molix.store.cache.PackedCache`, normally written by the
+            MolHub-side preprocessing driver via
+            :meth:`~molix.store.cache.PackedCache.save`.
     """
 
     def __init__(self, sink: str | Path | PackedCache) -> None:

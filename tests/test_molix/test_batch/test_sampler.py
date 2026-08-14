@@ -491,7 +491,7 @@ class TestDataModuleEpochRederivation:
 
 #: Sample count of the golden characterization cache.
 GOLDEN_N = 16
-#: Default ``seed`` of ``TokenBudgetBatchSampler.__init__`` (src/molix/data/sampler.py).
+#: Default ``seed`` of ``TokenBudgetBatchSampler.__init__`` (src/molix/batch/sampler.py).
 GOLDEN_SEED = 42
 
 # --- Captured from the PRE-REFACTOR tree on 2026-08-14, torch 2.12.1+cpu ----
@@ -545,7 +545,7 @@ GOLDEN_PLAN_ATOMS8 = [
     [11],
     [1],
 ]
-#: Verbatim oversize warning text (src/molix/data/sampler.py:125-132).
+#: Verbatim oversize warning text (src/molix/batch/sampler.py).
 GOLDEN_OVERSIZE_WARNING = (
     "TokenBudgetBatchSampler: at least one sample exceeds the per-batch "
     "budget on its own; such samples are kept as singleton batches (never "

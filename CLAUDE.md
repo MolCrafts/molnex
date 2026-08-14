@@ -196,7 +196,7 @@ dependency surface.
 TensorDict / torch ecosystem already in `pyproject.toml`, **numpy**, and
 **cuEquivariance** (`cuequivariance` / `cuequivariance_torch`). **No ASE, no
 e3nn, no mace-torch** (or other chemistry-ML wrappers). Extxyz I/O uses
-`molix.datasets._extxyz`; equivariance uses cue only. Upstream oracles live
+`molix.io.extxyz`; equivariance uses cue only. Upstream oracles live
 out-of-tree if ever needed — do not re-introduce those imports here.
 
 Source ↔ unit-test path mirror:
@@ -257,12 +257,12 @@ Python >=3.10 required. Requires `torch>=2.10` (always use latest stable PyTorch
 
 ### Two-tier data contract (raw sample vs collated batch)
 
-The pipeline speaks **two** shapes. They are intentionally different — get
+The data path speaks **two** shapes. They are intentionally different — get
 this wrong and `KeyError(('edges','edge_index'))` is the first thing you see.
 
 | Stage | Container | Example access |
 |---|---|---|
-| `DataSource[i]`, pipeline `SampleTask` / `DatasetTask` I/O, `MmapDataset[i]` | **flat `dict`** | `sample["Z"]`, `sample["edge_index"]`, `sample["targets"]["U0"]` |
+| MolHub-side sample production / preprocessing I/O, `MmapDataset[i]` | **flat `dict`** | `sample["Z"]`, `sample["edge_index"]`, `sample["targets"]["U0"]` |
 | Post-`collate_molecules` (what encoders / losses receive) | **nested `TensorDict`** (plain, no subclass) | `batch["atoms", "Z"]`, `batch["edges", "edge_index"]`, `batch["graphs", "energy"]` |
 
 The single conversion point is `molix.batch.collate.collate_molecules`
@@ -327,8 +327,8 @@ edge_dist         — ‖edge_diff‖
 
 `NeighborList` defaults to **full bidirectional** edges (`symmetry=True`, `E = 2 × n_pairs`).
 Pass `symmetry=False` to get only the upper-triangle half-pairs (`E = n_pairs`) when you explicitly
-want to exploit Newton's-3rd-law symmetry.  The two modes produce different `task_id`s so pipeline
-caches are kept separate.
+want to exploit Newton's-3rd-law symmetry.  The two modes produce different `task_id`s so their
+preprocessed caches are kept separate.
 
 `edge_index` is `(E, 2)` **everywhere** — including every MACE-family block
 (`DensityInteraction`, `ResidualInteraction`, `ZBLRepulsion`, both model cores).
@@ -391,8 +391,8 @@ molpot.composition (PotentialComposer,    molpot.potentials
     ↓                              molpot.derivation (EnergyAggregation,
 molix.core (Trainer, TrainState, Step, Hook)    ForceDerivation)
     ↓
-molix.data (Dataset, collate, preprocess)
-molix.datasets (QM9, RevMD17, ThreeBPA, WaterLES, MolRec)
+molix.batch (collate, NeighborList, DataModule, BatchTask) · molix.store (PackedCache, MmapDataset)
+    ↑ dataset acquisition (download / parse / preprocess / cache write) is MolHub's, not molnex's
 molix.md (Langevin velocity-Verlet) ─→ molix.quant (T_eff / quantization scalars)
 molix.export (Exporter, AOTInductor .pt2) · molix.compile (Compiler, torch.compile / CUDA graphs)   [leaf execution utils]
 molix.engine (EngineAdapter/EngineForward/StaticForward, export_for_lammps) ─→ interface/ (C++ pair_style molnex)

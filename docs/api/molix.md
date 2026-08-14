@@ -12,16 +12,6 @@
 
 ::: molix.core.losses
 
-## Data
-
-::: molix.data
-
-::: molix.data.pipeline
-
-::: molix.data.task
-
-::: molix.data.tasks
-
 ## Batch construction
 
 ::: molix.batch
@@ -55,10 +45,6 @@
 ::: molix.store.cache
 
 ::: molix.store.dataset
-
-## Datasets
-
-::: molix.datasets
 
 ## Force-field export
 

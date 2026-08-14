@@ -3,7 +3,12 @@
 Acceptance trace
 ----------------
 * ac-006 → ``test_parse_water_fixture`` / ``test_no_ase_imports``
-* ac-007 → ``test_charged_dimers_source_absent``
+
+The former ``TestChargedDimersRemoved`` class (ac-007 of the extxyz spec)
+pinned the absence of one dataset adapter; the whole acquisition package is
+gone now (spec molix-data-dissolution-04-etl-exit) and
+``tests/test_repository_boundaries.py`` enforces that outright, so the
+narrower class was retired rather than rewritten.
 """
 
 from __future__ import annotations
@@ -135,44 +140,9 @@ class TestNoASE:
             )
 
 
-class TestChargedDimersRemoved:
-    def test_charged_dimers_source_not_exported(self) -> None:
-        """ac-007: ``ChargedDimersSource`` is gone from ``molix.datasets``."""
-        import molix.datasets as d
-
-        assert "ChargedDimersSource" not in d.__all__
-        assert not hasattr(d, "ChargedDimersSource")
-
-    def test_charged_dimers_file_absent(self) -> None:
-        """ac-007: ``charged_dimers.py`` source file does not exist."""
-        repo_root = Path(__file__).resolve().parents[3]
-        path = repo_root / "src" / "molix" / "datasets" / "charged_dimers.py"
-        assert not path.exists(), f"unexpected file: {path}"
-
-    def test_no_charged_dimers_grep_under_src(self) -> None:
-        """ac-007: no ``ChargedDimersSource`` / ``charged_dimers.py`` under src/."""
-        repo_root = Path(__file__).resolve().parents[3]
-        src_dir = repo_root / "src"
-        result = subprocess.run(
-            [
-                "grep",
-                "-rnE",
-                "--include=*.py",
-                r"ChargedDimersSource|charged_dimers\.py",
-                str(src_dir),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert result.returncode == 1, (
-            f"ChargedDimersSource trace found under src/:\n{result.stdout}"
-        )
-
-
 def test_acceptance_trace_summary() -> None:
     """Self-check: this module covers the criteria its docstring claims."""
-    expected = {"ac-006", "ac-007"}
+    expected = {"ac-006"}
     doc = __doc__ or ""
     found = set(re.findall(r"ac-\d{3}", doc))
     assert expected <= found, f"missing trace: {expected - found}"

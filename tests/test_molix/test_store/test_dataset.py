@@ -1,7 +1,7 @@
 """Tests for MmapDataset / CachedDataset / SubsetDataset.
 
 These classes are thin readers over a :class:`PackedCache` file (normally
-produced by :meth:`PipelineSpec.cache <molix.data.pipeline.PipelineSpec.cache>`).
+written by the MolHub-side preprocessing driver).
 The tests drive the whole read path end-to-end via PackedCache.save → load.
 """
 

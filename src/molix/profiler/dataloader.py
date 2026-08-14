@@ -233,7 +233,7 @@ class DataLoaderProfiler:
         elif isinstance(data, Dataset):
             dl = self._make_dataloader(data)
         else:
-            # Assume DataSource protocol: has __len__ and __getitem__
+            # Assume the structural source protocol: __len__ and __getitem__
             dataset = self._source_to_dataset(data)
             dl = self._make_dataloader(dataset)
 
@@ -283,7 +283,7 @@ class DataLoaderProfiler:
     # -- Helpers ----------------------------------------------------------------
 
     def _source_to_dataset(self, source: object) -> Dataset:
-        """Convert a DataSource to a CachedDataset of plain sample dicts.
+        """Convert an indexable sample source to a CachedDataset of sample dicts.
 
         Writes the samples to a process-temp file so that the profiler
         exercises the same code path real workflows do (cache file →

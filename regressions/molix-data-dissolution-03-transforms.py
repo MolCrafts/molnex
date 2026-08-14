@@ -275,6 +275,20 @@ def _check_extxyz(workdir: Path) -> None:
             raise AssertionError(f"frame {idx} species drift: {frame.species} vs {_SPECIES}")
 
 
+def _resolves(module: str) -> bool:
+    """Whether *module* can still be located by the import system.
+
+    ``find_spec`` imports the parent package first, so once phase 04 deleted
+    ``molix.data`` / ``molix.datasets`` entirely a submodule query raises
+    instead of returning ``None``. A missing parent is the strongest form of
+    "gone", so it is reported as "does not resolve" rather than propagated.
+    """
+    try:
+        return importlib.util.find_spec(module) is not None
+    except ModuleNotFoundError:
+        return False
+
+
 def _check_dissolved() -> None:
     """Part D: the vacated module addresses are gone, not shimmed.
 
@@ -282,7 +296,7 @@ def _check_dissolved() -> None:
         AssertionError: An old address still resolves.
     """
     for module in _VACATED_MODULES:
-        if importlib.util.find_spec(module) is not None:
+        if _resolves(module):
             raise AssertionError(
                 f"{module} is still importable — the transform must live only at "
                 "its new address, with no shim left behind"

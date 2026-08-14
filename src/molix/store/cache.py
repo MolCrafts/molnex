@@ -1,11 +1,11 @@
-"""Short-lived pipeline output cache.
+"""Short-lived preprocessing output cache.
 
 **Scope**: one training run. A :class:`PackedCache` holds a single on-disk
-file that stores the output of a :class:`~molix.data.pipeline.PipelineSpec`
-applied to a :class:`~molix.data.source.DataSource`. It exists so that
-expensive preprocessing (neighbor lists, atomic dress, etc.) is computed
-*once* at the start of a run and reused for every training step thereafter.
-It is explicitly **not** a persistence format:
+file that stores preprocessed samples — the output of a preprocessing plan
+applied to a dataset, both of which are owned by MolHub, outside molnex. It
+exists so that expensive preprocessing (neighbor lists, atomic dress, etc.) is
+computed *once* at the start of a run and reused for every training step
+thereafter. It is explicitly **not** a persistence format:
 
 * no schema version, no ``meta.json``, no ``_READY`` sentinel;
 * no validation beyond "file exists and opens";
@@ -13,16 +13,15 @@ It is explicitly **not** a persistence format:
 * the workflow owns placement and invalidation — typical placement is under
   ``run_ctx.run_dir / "cache"`` so the file is naturally scoped to the run.
 
-If long-term persistence matters, use :mod:`molix.datasets` (curated
-datasets) instead.
+If long-term persistence matters, use a curated MolHub dataset instead.
 
 Single-file layout — one ``<sink>.pt`` per cache, written via
 ``torch.save`` and read via ``torch.load(mmap=True)``. A failed write never
 leaves a partial file behind (atomic ``os.rename``).
 
-Rank / DDP coordination is owned by
-:meth:`molix.data.pipeline.PipelineSpec.cache` — user code never touches the
-rank env var directly.
+Rank / DDP coordination is owned by the caller that materialises the cache
+(the MolHub-side preprocessing driver) — user code never touches the rank env
+var directly.
 
 Why single-file packed-bucket and not ``TensorDict.memmap_()``
 --------------------------------------------------------------
@@ -94,9 +93,8 @@ class PackedCache:
     A :class:`PackedCache` is a thin OOP facade over a single ``.pt`` file:
     it owns readiness checks, atomic save, mmap-backed load, DDP-friendly
     polling, and per-sample unpacking. The cache is identified by its
-    *sink* path alone — identity hashing is handled by
-    :meth:`molix.data.pipeline.Node.cache_key` and normally accessed
-    through :meth:`molix.data.pipeline.PipelineSpec.cache_key`.
+    *sink* path alone — identity hashing (which preprocessing plan produced
+    this file) belongs to the MolHub-side writer that chooses the path.
 
     On-disk layout is a **packed** representation: each sample key is
     concatenated across all samples into a single large tensor (per-atom,
@@ -173,8 +171,8 @@ class PackedCache:
             time.sleep(poll_interval)
         raise TimeoutError(
             f"Timed out waiting {timeout:.0f}s for cache at {self._sink}. "
-            "PipelineSpec.cache() must be driven from rank 0 (e.g. a "
-            "prepare_data stage) before workers start."
+            "The cache must be written from rank 0 (e.g. a prepare_data stage "
+            "running MolHub's preprocessing) before workers start."
         )
 
     # -- IO ----------------------------------------------------------------
@@ -200,10 +198,10 @@ class PackedCache:
                 must share the same schema (same keys, same per-atom /
                 per-edge / per-graph classification per key); the first
                 sample is taken as the reference schema.
-            task_states: Optional fitted state for
-                :class:`~molix.data.task.DatasetTask` instances, typically
-                produced by
-                :meth:`~molix.data.pipeline.PipelineSpec.collect_task_states`.
+            task_states: Optional fitted state for dataset-level
+                preprocessing steps (e.g. an atomic-dress regression),
+                collected by the MolHub-side writer so a later run can reuse
+                the fit instead of recomputing it.
             overwrite: If the sink already exists, replace it. Otherwise
                 keep the existing file (no-op).
         """

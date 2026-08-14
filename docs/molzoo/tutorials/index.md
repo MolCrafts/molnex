@@ -24,8 +24,8 @@ They do not own:
 The complete project shape is:
 
 ```text
-source samples
-  -> molix.data pipeline
+source samples (MolHub acquisition + preprocessing)
+  -> packed cache read through molix.store
   -> collated nested TensorDict
   -> molzoo encoder
   -> learned features
@@ -57,21 +57,16 @@ For Allegro the required fields are:
 ("edges", "edge_dist")
 ```
 
-In a real pipeline, use `NeighborList(symmetry=True)` so every undirected
-neighbor pair is represented as two directed edges.
+In production the edges come from `molix.batch.NeighborList(symmetry=True)`,
+run during preprocessing so every undirected neighbor pair is represented as
+two directed edges. That preprocessing, and the packed cache it writes, are
+MolHub's; the tutorial starts from the cache:
 
 ```python
 from molix.batch import DataModule
-from molix.data import NeighborList, Pipeline
+from molix.store import MmapDataset
 
-pipe = (
-    Pipeline("allegro-run")
-    .add(NeighborList(cutoff=5.0, symmetry=True))
-    .build()
-)
-
-dag = pipe.cache(source, base_dir="./cache")
-train_ds, val_ds = dag.dataset(mmap=True).split(ratio=0.9, seed=42)
+train_ds, val_ds = MmapDataset("./cache/allegro-run.pt").split(ratio=0.9, seed=42)
 
 dm = DataModule(
     train_ds,
@@ -81,8 +76,8 @@ dm = DataModule(
 dm.setup("fit")
 ```
 
-`DataModule` consumes pre-built datasets; the source → pipeline → cache →
-dataset chain runs before it. See
+`DataModule` consumes pre-built datasets; acquisition, preprocessing and cache
+materialisation run before it, outside molnex. See
 [Data Modules](../../molix/user-guide/data-modules.md) for the full walkthrough.
 
 The edge convention is fixed:

@@ -65,7 +65,7 @@ are reserved for inputs the profiler genuinely cannot measure.
 When you want a measurement before a dataset exists, `molix.profiler` ships
 three stand-ins.
 
-`MockSource` implements the `DataSource` protocol — `__len__` plus
+`MockSource` implements the structural source protocol — `__len__` plus
 `__getitem__` returning a flat sample `dict` with `Z` `(N,)` (atomic numbers)
 and `pos` `(N, 3)` (Cartesian positions). Atom counts are either fixed or drawn
 from an inclusive `(lo, hi)` range.
@@ -129,10 +129,10 @@ a real dataset. Indices wrap modulo the source length, so
 milliseconds, `n_samples`, and `data_description`. The report is a single
 "Execute time" row with mean, std, p50, p95, min and max.
 
-Two things to know before pointing it at a `DatasetTask`. First, the profiler
-calls `fit()` on the *entire* source before timing begins, mirroring what
-`PipelineSpec.run` does — that materialises every sample in memory, so use a
-subset for large sources. Second, the fit itself is not timed; only the
+Two things to know before pointing it at a task that carries a `fit()`.
+First, the profiler calls `fit()` on the *entire* source before timing begins,
+mirroring what a real preprocessing run does — that materialises every sample
+in memory, so use a subset for large sources. Second, the fit itself is not timed; only the
 per-sample `execute` is. For a `BatchTask`, whatever `source[i]` returns is fed
 straight to `execute`, so the "source" must already yield collated batches.
 
@@ -256,7 +256,7 @@ routed during collation, defaulting to `DEFAULT_TARGET_SCHEMA`), and optional
 `run()` resolves its argument in three ways. An existing `DataLoader` is used
 as-is and your constructor settings only affect what the report *says*. A
 `torch.utils.data.Dataset` is wrapped in a new DataLoader built from those
-settings. Anything else is treated as a `DataSource`: every sample is
+settings. Anything else is treated as an indexable sample source: every sample is
 materialised, written to a `PackedCache` file in a fresh temporary directory,
 and reopened as a `CachedDataset`, so the measurement exercises the same
 cache-file path a real workflow uses. Be aware that this last route writes to
@@ -443,11 +443,11 @@ properties exist. The profiler then derives size statistics from the records it
 sampled, sets `counts_exact=False`, and says so in a `[WARN]` line. The numbers
 are still useful; they are just estimates from a subset.
 
-One legitimate half-way case: a cache built by a pipeline that never ran
+One legitimate half-way case: a cache whose preprocessing never ran
 `NeighborList` has atoms but no edges, so `edge_counts` raises `ValueError`. The
 profiler catches it, sets `edge_stats=None`, drops the edge row from the report,
 and appends a `[WARN]` carrying the underlying message. Missing edges are a fact
-about your pipeline, not a profiler failure.
+about how the cache was built, not a profiler failure.
 
 ### The sampled path
 

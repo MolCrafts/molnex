@@ -7,9 +7,10 @@ The contract under test is *structural*, not nominal (spec
 molix-data-dissolution-03-transforms): the profiler times
 ``task.execute(sample)`` when the task carries an ``execute``, falls back to
 calling the task, fits first when the task carries a callable ``fit``, and
-refuses anything that is neither — all without importing the pipeline DSL
-that is leaving the repository (``molix.data.pipeline.Node`` /
-``molix.data.task.DatasetTask``).
+refuses anything that is neither — all without importing the acquisition-side
+task hierarchy it used to type-check against. That hierarchy has since been
+deleted from the repository (spec molix-data-dissolution-04-etl-exit), so the
+import pin below is expressed as an allowlist rather than a named module.
 """
 
 from __future__ import annotations
@@ -163,11 +164,22 @@ class TestTaskProfiler:
         assert result.task_id == "_CallableTask"
 
 
-def test_module_does_not_import_the_departing_pipeline_dsl() -> None:
-    """``molix.profiler.task`` must not import from ``molix.data``.
+#: Every in-repo module ``molix.profiler.task`` is allowed to import. The
+#: dispatch is structural, so the profiler needs nothing beyond its own
+#: formatting helpers — it must not reach into a data layer to type-check a
+#: task. Extending this list is a deliberate coupling decision, not a fixup.
+_ALLOWED_MOLNEX_IMPORTS = frozenset({"molix.profiler._utils"})
 
-    The dispatch is structural, so the profiler has no reason to reach into
-    the ETL DSL — and that DSL is leaving the repository.
+
+def test_module_imports_no_molnex_module_outside_the_allowlist() -> None:
+    """``molix.profiler.task`` stays structurally decoupled from the data layers.
+
+    Originally this pinned the absence of the acquisition DSL specifically;
+    that package is deleted now (and
+    ``tests/test_repository_boundaries.py`` enforces its absence tree-wide),
+    so the pin is retargeted at the property that made the DSL import wrong in
+    the first place: the profiler dispatches on duck-typed ``execute`` / ``fit``
+    and therefore imports no molnex module beyond its own helpers.
     """
     source_file = inspect.getsourcefile(task_module)
     assert source_file is not None
@@ -180,5 +192,13 @@ def test_module_does_not_import_the_departing_pipeline_dsl() -> None:
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             imported.append(node.module)
 
-    offenders = [m for m in imported if m == "molix.data" or m.startswith("molix.data.")]
-    assert offenders == [], f"profiler.task still imports the pipeline DSL: {offenders}"
+    molnex_roots = ("molix", "molrep", "molpot", "molzoo")
+    offenders = [
+        module
+        for module in imported
+        if module.split(".")[0] in molnex_roots and module not in _ALLOWED_MOLNEX_IMPORTS
+    ]
+    assert offenders == [], (
+        "profiler.task dispatches structurally; it must not import a molnex "
+        f"data/model module: {offenders}"
+    )

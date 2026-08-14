@@ -17,10 +17,9 @@ plain-`TensorDict` batch contract used by models and losses (namespaces
 - [Trainer](user-guide/trainer.md): configure the training loop.
 - [Hooks](user-guide/hooks.md): add logging, metrics, checkpointing, and custom
   lifecycle behavior.
-- [Data Pipeline](user-guide/data.md): understand sources, preprocessing,
-  caching, collation, and data modules.
 - [Data Loading](user-guide/data-loading.md): convert flat sample dicts into
-  collated nested `TensorDict` batches.
+  collated nested `TensorDict` batches (dataset acquisition itself lives in
+  MolHub).
 - [Data Modules](user-guide/data-modules.md): wire datasets into `Trainer`.
 - [Profiling](user-guide/profiling.md): measure task, module, DataLoader,
   Trainer and dataset cost with the `molix.profiler` suite.

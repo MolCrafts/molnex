@@ -24,7 +24,7 @@ Example::
     factory = MockBatch(n_atoms=(30, 100), n_edges=(100, 600), n_graphs=(2, 8))
     batch = factory()
 
-    # Mock DataSource
+    # Mock sample source
     source = MockSource(n_samples=500, n_atoms=(5, 20))
     sample = source[0]  # -> {"Z": tensor, "pos": tensor}
 """

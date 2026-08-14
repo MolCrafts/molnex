@@ -47,11 +47,12 @@ from molzoo.mace import MACEPotential  # noqa: E402
 def read_poscar(path: Path) -> dict[str, torch.Tensor]:
     """Read a VASP POSCAR/CONTCAR into a system dict.
 
-    Inline rather than in ``molix.datasets`` because this is the only POSCAR
-    reader in the tree; promote it if a second caller appears.
+    Inline rather than in a library package because this is the only POSCAR
+    reader in the tree, and dataset acquisition is MolHub's; promote it there
+    if a second caller appears.
 
-    ``molpy`` is imported inside the function (the pattern ``molix.datasets``
-    already uses for ``Element``) so that ``--system`` runs never touch it. That
+    ``molpy`` is imported inside the function (the usual pattern for
+    ``Element``) so that ``--system`` runs never touch it. That
     matters on aarch64/GH200, where the available molrs build predates
     ``molpy.Element``: system preparation happens wherever molpy works, and the
     compute node only replays the resulting ``system.pt``.

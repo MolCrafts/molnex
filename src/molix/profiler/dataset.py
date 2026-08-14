@@ -345,7 +345,7 @@ class DatasetResult:
         print()
 
     def _print_task_states(self) -> None:
-        """Print the fitted ``DatasetTask`` names, when the cache restored any."""
+        """Print the fitted dataset-task names, when the cache restored any."""
         if self.task_states:
             print(f"  Fitted task states: {', '.join(sorted(self.task_states))}")
             print()
@@ -734,7 +734,7 @@ class DatasetProfiler:
             ValueError: *data* is not a non-empty indexable sequence.
         """
         remedy = (
-            "Point it at a prepared cache (PipelineSpec.run(...) → CachedDataset) "
+            "Point it at a prepared cache (PackedCache → CachedDataset) "
             "or a non-empty Sequence[dict]."
         )
         if not hasattr(data, "__len__") or not hasattr(data, "__getitem__"):

@@ -9,10 +9,9 @@ ancestor rather than being copied (and drifting) in each leaf conftest.
   ``test_store/test_dataset.py`` and ``test_batch/test_collate_packed.py``
   to pin the packed-cache bucket-identity contract.
 - :func:`water_les_root` — the synthetic extended-XYZ water trajectory,
-  read by ``test_io/test_extxyz.py`` (codec) and by
-  ``test_datasets/test_units_contract.py`` (loader). The codec moved to
-  ``molix.io`` while the loader stayed under ``molix.datasets``; the
-  fixture that feeds both moved up here with it.
+  read by ``test_io/test_extxyz.py``. It moved up here when the codec moved
+  to ``molix.io`` and its second consumer, the dataset loader, left the
+  repository with the acquisition layer (now MolHub's).
 """
 
 from __future__ import annotations

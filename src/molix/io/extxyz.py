@@ -16,8 +16,8 @@ This parser is intentionally narrow:
 * stores every other real-valued ``Properties`` column under
   :attr:`ExtxyzFrame.arrays` (e.g. ``initial_charges``, ``dipoles``);
 * returns a flat list of :class:`ExtxyzFrame` dataclasses; callers
-  (e.g. :class:`molix.datasets.water_les.WaterLESSource`) bridge to
-  :class:`torch.Tensor` and the flat-sample dict contract.
+  (dataset adapters, MolHub-owned) bridge to :class:`torch.Tensor` and the
+  flat-sample dict contract.
 
 References:
     Extended-XYZ format: https://github.com/libAtoms/extxyz
