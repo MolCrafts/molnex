@@ -233,15 +233,15 @@ and the collision is intentional rather than an accident awaiting cleanup:
   ``rebuild_count``, rebuilt in place so shapes never change and the force path
   stays CUDA-graph capturable. One instance per run, held by a
   :class:`~molix.md.forcefield.ForceField`.
-* :class:`molix.data.tasks.neighbor.NeighborList` — the **data-pipeline**
-  symbol: a *stateless* ``SampleTask`` mapping one flat sample dict to
-  ``edge_index`` / ``edge_diff`` / ``edge_dist`` and contributing to ``task_id``
+* :class:`molix.batch.neighbor.NeighborList` — the **batch-construction**
+  symbol: a *stateless* transform mapping one flat sample dict to
+  ``edge_index`` / ``edge_diff`` / ``edge_dist`` and carrying a ``task_id``
   for cache keying. Constructed once per pipeline definition, no per-call state.
 
 They are not two variants of one concept — a per-run mutable buffer with an
-overflow policy versus a pure pipeline transform — and each is the shortest
+overflow policy versus a pure sample transform — and each is the shortest
 natural name in its own layer, so neither gives up the bare name. Because this
-module *consumes* the pipeline task (see the import below), and a bare
+module *consumes* the batch-side transform (see the import below), and a bare
 ``from ... import NeighborList`` here would be rebound by the class definition
 further down — making the constructor call itself recursively — the import is
 aliased to ``NeighborListTask``.
@@ -260,7 +260,7 @@ from tensordict import TensorDict, TensorDictBase
 # against the raw ``molix.F.locality`` kernel would fork it. Aliased because
 # the MD buffer owner defined below is *also* named ``NeighborList`` and would
 # otherwise shadow its own dependency — the class would then call itself.
-from molix.data.tasks.neighbor import NeighborList as NeighborListTask
+from molix.batch.neighbor import NeighborList as NeighborListTask
 from molix.units import DEAD_EDGE_CUTOFF_FACTOR
 
 #: Largest stencil half-width ``k_i`` (in bins) the binned build accepts. At the

@@ -22,7 +22,7 @@ tutorial; use the MolZoo user guide for narrative and worked examples.
 | `molzoo.mace.research.MACE` | Encoder-only trainable MACE; see `mace.md` |
 | `molzoo.mace.variants.MACEOMol` | OMOL foundation model (charge/spin conditioned); see `mace_omol.md` |
 | `molzoo.mace.encoder.MACEEncoder` | Shared block graph both variants inherit (`MACEPotential` subclasses it) |
-| `molix.data.tasks.NeighborList` | Cutoff graph construction (PBC minimum image) |
+| `molix.batch.NeighborList` | Cutoff graph construction (PBC minimum image) |
 
 ## 1. Scope
 
@@ -312,7 +312,7 @@ Two facts worth keeping:
 
 | Concern | Owner | Contract |
 |---------|-------|----------|
-| Neighbour list + PBC shifts | caller / `molix.data.tasks.NeighborList` | `(E,2)` edges; `shifts = mic_diff - (pos[t]-pos[s])` |
+| Neighbour list + PBC shifts | caller / `molix.batch.NeighborList` | `(E,2)` edges; `shifts = mic_diff - (pos[t]-pos[s])` |
 | Edge displacements | `molzoo.mace.geometry` | `edge_vectors` / `edge_lengths`; differentiable w.r.t. `pos` |
 | Building blocks | `molrep.interaction.mace` / `molrep.readout.mace` / `molrep.embedding.mace` (+ generic `molrep` / `molpot`) | reused; not owned here |
 | Model graph | `molzoo.mace.encoder.MACEEncoder` | blocks + wiring; no energy, no forces |

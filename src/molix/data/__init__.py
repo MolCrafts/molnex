@@ -10,7 +10,8 @@ Layering:
 Storage lives in :mod:`molix.store` — ``PipelineSpec.cache`` writes a
 :class:`~molix.store.PackedCache` and hands back readers from
 :mod:`molix.store.dataset`. Batch construction (collation, sampling,
-``DataModule``, post-collate ``BatchTask``) lives in :mod:`molix.batch`.
+``DataModule``, post-collate ``BatchTask``) lives in :mod:`molix.batch`, which
+also owns graph construction — :class:`molix.batch.NeighborList`.
 
 There is no free-function cache / execute / ddp surface — all orchestration
 lives on :class:`PipelineSpec` (and on
@@ -35,7 +36,6 @@ from molix.data.task import (
 from molix.data.tasks import (
     AtomicDress,
     ConstantLabel,
-    NeighborList,
     UnitConvert,
 )
 
@@ -48,7 +48,6 @@ __all__ = [
     # Built-in tasks
     "AtomicDress",
     "ConstantLabel",
-    "NeighborList",
     "UnitConvert",
     # Sources
     "DataSource",

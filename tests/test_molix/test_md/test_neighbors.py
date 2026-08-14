@@ -8,7 +8,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-import molix.data.tasks.neighbor
+import molix.batch.neighbor
 import molix.md
 import molix.md.neighbors
 from molix.md import (
@@ -100,14 +100,14 @@ class TestNeighborList:
     def test_md_list_is_not_the_pipeline_task(self):
         """Anti-shadow: two deliberate same-name types in different layers.
 
-        ``molix.md.neighbors`` imports the pipeline ``SampleTask`` — the one
+        ``molix.md.neighbors`` imports the batch-side transform — the one
         owner of kernel-output normalisation — into its own namespace. Once the
         MD buffer owner takes the bare name, that import must be aliased to
         ``NeighborListTask``, or the class definition rebinds the module-level
         name and the constructor calls *itself* recursively.
         """
-        assert molix.md.NeighborList is not molix.data.tasks.neighbor.NeighborList
-        assert molix.md.neighbors.NeighborListTask is molix.data.tasks.neighbor.NeighborList
+        assert molix.md.NeighborList is not molix.batch.neighbor.NeighborList
+        assert molix.md.neighbors.NeighborListTask is molix.batch.neighbor.NeighborList
 
     def test_satisfies_the_neighbor_strategy_protocol(self, nlist):
         nl, _ = nlist

@@ -438,7 +438,7 @@ average atom count `18`, `L=3`, `l_max=2`, `F=128`, `U=32`, and
 
 | Concern | Owner | Contract |
 |---------|-------|----------|
-| edge construction | `molix.data.NeighborList` | creates full directed edges with `symmetry=True`; `edge_diff = pos[dst] - pos[src]` |
+| edge construction | `molix.batch.NeighborList` | creates full directed edges with `symmetry=True`; `edge_diff = pos[dst] - pos[src]` |
 | scalar encoder | `molzoo.Allegro` | reads §2.1 and writes `("edges", "edge_features")` |
 | optional tensor encoder output | `molzoo.Allegro` | writes `("edges", "edge_tensor_features")` only when `expose_tensor_track=True` |
 | pair-energy readout | `molpot.heads.EdgeEnergyHead` | consumes scalar edge features |

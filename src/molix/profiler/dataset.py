@@ -758,7 +758,7 @@ class DatasetProfiler:
             ``(counts, warning)``. ``counts`` is ``None`` when the dataset is
             not cache-backed (silent — the sampled path covers it) or when the
             cache was packed without that pointer (a legitimate case, e.g. no
-            :class:`~molix.data.tasks.NeighborList` in the pipeline), in which
+            :class:`~molix.batch.NeighborList` in the pipeline), in which
             case ``warning`` carries the reason for the report.
         """
         try:

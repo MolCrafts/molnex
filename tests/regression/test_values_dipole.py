@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from molix.datasets._extxyz import parse_extxyz_frames
+from molix.io.extxyz import parse_extxyz_frames
 from molpot.potentials.elec import CalculatorDipole, PotentialDipole
 from molpot.potentials.elec.prefactors import eV_A
 from tests.regression.conftest import (

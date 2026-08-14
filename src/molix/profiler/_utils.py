@@ -164,7 +164,7 @@ def sample_counts(sample: object) -> tuple[int, int]:
     ``dict`` with ``sample["Z"]`` ``(N,)`` and ``sample["edge_index"]``
     ``(E, 2)``. The two keys are probed independently because
     ``edge_index`` is genuinely optional — a cache packed before
-    :class:`~molix.data.tasks.NeighborList` ran has atoms but no edges.
+    :class:`~molix.batch.NeighborList` ran has atoms but no edges.
     For the collated nested tier use :func:`batch_counts`.
 
     Args:

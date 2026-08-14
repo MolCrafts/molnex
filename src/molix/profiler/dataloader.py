@@ -3,7 +3,7 @@
 Measures how much time a training loop spends blocked waiting for the next
 batch — the DataLoader stall time.  Accepts either a
 :class:`~molix.profiler.mock.MockSource` or a real
-:class:`~molix.data.source.DataSource` / :class:`torch.utils.data.Dataset`.
+:class:`~molix.store.dataset.MmapDataset` / :class:`torch.utils.data.Dataset`.
 
 The stall time is measured via the **inter-batch gap technique**: the
 wall-clock elapsed from ``next(iter)`` returning batch *i* to the point
@@ -211,10 +211,10 @@ class DataLoaderProfiler:
         Args:
             data: One of:
 
-                - :class:`~molix.profiler.mock.MockSource` or any
-                  :class:`~molix.data.source.DataSource` — samples are prepared
-                  and wrapped in a :class:`~molix.store.dataset.CachedDataset`
-                  automatically.
+                - :class:`~molix.profiler.mock.MockSource` or any indexable
+                  sample source (``__len__`` / ``__getitem__``) — samples are
+                  prepared and wrapped in a
+                  :class:`~molix.store.dataset.CachedDataset` automatically.
                 - A :class:`torch.utils.data.Dataset` — used directly.
                 - An existing :class:`torch.utils.data.DataLoader` — used as-is,
                   no new DataLoader is constructed.

@@ -5,7 +5,7 @@ import pytest
 import torch
 
 import molpot.potentials.elec
-from molix.datasets._extxyz import parse_extxyz_frames
+from molix.io.extxyz import parse_extxyz_frames
 from molpot.potentials.elec import (
     CoulombPotential,
     EwaldCalculator,

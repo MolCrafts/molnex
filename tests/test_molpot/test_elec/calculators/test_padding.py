@@ -4,7 +4,7 @@ import time
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
-from molix.datasets._extxyz import parse_extxyz_frames
+from molix.io.extxyz import parse_extxyz_frames
 from molpot.potentials.elec import CoulombPotential, EwaldCalculator
 from molpot.potentials.elec.lib import compute_batched_kvectors
 from tests.test_molpot.test_elec.conftest import periodic_neighbor_list

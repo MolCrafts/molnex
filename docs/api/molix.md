@@ -26,6 +26,8 @@
 
 ::: molix.batch
 
+::: molix.batch.neighbor
+
 ::: molix.batch.collate
 
 ::: molix.batch.datamodule
@@ -35,6 +37,16 @@
 ::: molix.batch.task
 
 ::: molix.batch.pad
+
+::: molix.batch.bond_adapter
+
+::: molix.batch.valence_columns
+
+## Run IO
+
+::: molix.io
+
+::: molix.io.extxyz
 
 ## Storage
 

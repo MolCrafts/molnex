@@ -17,7 +17,7 @@ would silently skip firings.
 :class:`TrajectoryHook` captures strided frames to host buffers, spilling to
 on-disk shards every ``flush_every`` frames so host memory stays bounded, and
 writes one ``.pt`` (+ optional extended-XYZ via
-:func:`molix.datasets._extxyz.write_extxyz_frames`) at :meth:`MDHook.on_run_end`.
+:func:`molix.io.extxyz.write_extxyz_frames`) at :meth:`MDHook.on_run_end`.
 """
 
 from __future__ import annotations
@@ -310,7 +310,7 @@ class TrajectoryHook(MDHook):
     def _dump_xyz(self, pos: torch.Tensor, etot: torch.Tensor, temp: torch.Tensor) -> None:
         from molpy import Element
 
-        from molix.datasets._extxyz import write_extxyz_frames
+        from molix.io.extxyz import write_extxyz_frames
 
         species = [Element(int(z)).symbol for z in self._numbers.detach().cpu()]
         write_extxyz_frames(

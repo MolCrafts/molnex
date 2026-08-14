@@ -7,7 +7,7 @@ Provides two generators:
   :class:`~molix.profiler.module.ModuleProfiler`.
 
 - :class:`MockSource` — implements the
-  :class:`~molix.data.source.DataSource` protocol and returns plain
+  indexable-source protocol (``__len__`` / ``__getitem__``) and returns plain
   ``{"Z": ..., "pos": ...}`` sample dicts.  Used with
   :class:`~molix.profiler.task.TaskProfiler` and
   :class:`~molix.profiler.dataloader.DataLoaderProfiler`.
@@ -184,7 +184,7 @@ class MockBatch:
 
 
 class MockSource:
-    """Synthetic :class:`~molix.data.source.DataSource` returning random molecule samples.
+    """Synthetic indexable source returning random molecule samples.
 
     Each sample is a ``dict`` with at minimum ``Z`` (atomic numbers) and
     ``pos`` (Cartesian positions).  Suitable for profiling pipeline tasks

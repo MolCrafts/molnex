@@ -1,4 +1,4 @@
-"""Tests for ``molix.datasets._extxyz`` — in-tree extxyz metadata parser.
+"""Tests for ``molix.io.extxyz`` — in-tree extxyz metadata parser.
 
 Acceptance trace
 ----------------
@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from molix.datasets._extxyz import ExtxyzFrame, parse_extxyz_frames
+from molix.io.extxyz import ExtxyzFrame, parse_extxyz_frames
 
 
 class TestParseFixture:
@@ -112,7 +112,7 @@ class TestNoASE:
     def test_no_ase_imports_in_src(self) -> None:
         """Package code under ``src/`` must not import ASE (or e3nn).
 
-        Extxyz I/O uses the in-tree ``_extxyz.parse_extxyz_frames`` parser.
+        Extxyz I/O uses the in-tree ``molix.io.extxyz.parse_extxyz_frames`` parser.
         Grep is the binding rule — no soft optional ASE shims either.
         """
         repo_root = Path(__file__).resolve().parents[3]

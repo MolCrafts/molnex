@@ -5,9 +5,9 @@ Standalone, OOP profiling tools for identifying performance bottlenecks
 
 Five profilers, each targeting a single component:
 
-- :class:`TaskProfiler` — wall-clock timing of a single pipeline task
-  (:class:`~molix.data.task.SampleTask`, :class:`~molix.data.task.DatasetTask`,
-  or :class:`~molix.batch.task.BatchTask`).
+- :class:`TaskProfiler` — wall-clock timing of a single transform
+  (:class:`~molix.batch.NeighborList`, a :class:`~molix.batch.task.BatchTask`,
+  or any callable), dispatched structurally.
 
 - :class:`ModuleProfiler` — forward/backward timing and GPU memory for any
   :class:`torch.nn.Module`.
@@ -30,13 +30,13 @@ Two data generators for use when no real dataset is available:
   ``TensorDict`` with configurable (optionally random)
   atom / edge / graph counts.
 
-- :class:`MockSource` — :class:`~molix.data.source.DataSource` returning
-  synthetic ``{"Z": ..., "pos": ...}`` sample dicts.
+- :class:`MockSource` — indexable sample source returning synthetic
+  ``{"Z": ..., "pos": ...}`` sample dicts.
 
 Typical workflow::
 
     from molix.profiler import TaskProfiler, MockSource
-    from molix.data.tasks import NeighborList
+    from molix.batch import NeighborList
 
     # Profile a single task with synthetic data
     profiler = TaskProfiler(NeighborList(cutoff=5.0))

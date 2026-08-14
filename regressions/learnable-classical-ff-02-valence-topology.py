@@ -29,7 +29,7 @@ import torch
 
 def main() -> int:
     from molix.batch.collate import collate_molecules, collate_packed
-    from molix.datasets._valence_columns import (
+    from molix.batch.valence_columns import (
         stack_angle_index,
         stack_improper_index,
         stack_proper_index,

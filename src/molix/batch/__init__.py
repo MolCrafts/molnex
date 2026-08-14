@@ -2,6 +2,12 @@
 
 Surfaces:
 
+* **Graph construction** — :class:`NeighborList` builds the cutoff graph
+  (``edge_index`` / ``edge_diff`` / ``edge_dist``) under the repo Edge
+  Convention; :func:`bond_index_from_columns` builds the canonical ``(2, N)``
+  covalent ``bond_index``, and :func:`stack_angle_index` /
+  :func:`stack_proper_index` / :func:`stack_improper_index` stack post-collate
+  valence columns into COO ``[arity, N]`` at kernel call sites.
 * **Collation** — :func:`collate_molecules` (and the reusable
   :class:`MoleculeCollator` callable) turn a list of flat sample dicts into the
   nested ``atoms`` / ``edges`` / ``graphs`` / ``bonds`` ``TensorDict``,
@@ -25,6 +31,7 @@ Storage lives in :mod:`molix.store`; nothing here reads or writes files.
 
 from __future__ import annotations
 
+from molix.batch.bond_adapter import bond_index_from_columns
 from molix.batch.collate import (
     DEFAULT_TARGET_SCHEMA,
     MoleculeCollator,
@@ -33,6 +40,7 @@ from molix.batch.collate import (
 )
 from molix.batch.datamodule import DataModule, DataModuleProtocol
 from molix.batch.group_split import group_split_indices
+from molix.batch.neighbor import NeighborList
 from molix.batch.pad import PadMolecularBatch
 from molix.batch.sampler import (
     BatchSamplerSource,
@@ -41,6 +49,11 @@ from molix.batch.sampler import (
     TokenBudgetPacker,
 )
 from molix.batch.task import BatchTask
+from molix.batch.valence_columns import (
+    stack_angle_index,
+    stack_improper_index,
+    stack_proper_index,
+)
 
 __all__ = [
     "BatchSamplerSource",
@@ -49,11 +62,16 @@ __all__ = [
     "DataModule",
     "DataModuleProtocol",
     "MoleculeCollator",
+    "NeighborList",
     "PadMolecularBatch",
     "TargetSchema",
     "TaskMixtureBatchSampler",
     "TokenBudgetBatchSampler",
     "TokenBudgetPacker",
+    "bond_index_from_columns",
     "collate_molecules",
     "group_split_indices",
+    "stack_angle_index",
+    "stack_improper_index",
+    "stack_proper_index",
 ]

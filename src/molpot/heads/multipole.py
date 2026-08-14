@@ -173,8 +173,8 @@ class PermMultipoleHead(nn.Module):
         total_charge_key: Per-graph total-charge key under ``graphs``.
             **Required** when ``constrain_total_charge=True``; absent →
             ``KeyError`` at forward. For uniformly-neutral datasets
-            (e.g. QM9), inject it via
-            :class:`~molix.data.tasks.ConstantLabel` (``value=0.0``).
+            (e.g. QM9), write a constant ``0.0`` column into the sample so
+            collate routes it under ``graphs``.
         embed_moments: Reserved. Re-injecting moment information into the
             encoder is a v1 TODO; passing ``True`` raises today.
         hidden_dim: Hidden width of the per-moment scalar MLP heads.

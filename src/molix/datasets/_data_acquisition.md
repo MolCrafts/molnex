@@ -13,7 +13,7 @@ default) when knowingly shipping a different upstream snapshot, or by
 leaving the placeholder digests in place until a contributor lands real
 values.
 
-Parsing is done by the in-tree `_extxyz.parse_extxyz_frames` helper.
+Parsing is done by the in-tree `molix.io.extxyz.parse_extxyz_frames` helper.
 There is no `ase` dependency anywhere in `src/molix/datasets/`.
 
 ## 1. WaterLESSource — bulk liquid water (RPBE-D3)

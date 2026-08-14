@@ -1,19 +1,19 @@
-"""Pipeline task profiler.
+"""Single-transform profiler.
 
-Profiles a single :class:`~molix.data.task.Task` (SampleTask or DatasetTask)
-or a :class:`~molix.batch.task.BatchTask` in complete isolation.  Accepts
-either a :class:`~molix.profiler.mock.MockSource` or a real
-:class:`~molix.data.source.DataSource` as the sample provider.
+Times one transform in complete isolation. Dispatch is **structural**, so any
+object works: a :class:`~molix.batch.NeighborList`, a
+:class:`~molix.batch.task.BatchTask`, or a plain callable. Samples come from
+anything with ``__len__`` / ``__getitem__`` — a
+:class:`~molix.profiler.mock.MockSource` or a real dataset source.
 
-For :class:`~molix.data.task.DatasetTask`, a ``fit()`` call is made on the
-provided source before timing begins (mirroring what
-:meth:`~molix.data.pipeline.PipelineSpec.run` does).
+A task that carries a callable ``fit`` is fitted once over the whole source
+before timing begins, so a two-phase transform is measured in its fitted state.
 
 Example::
 
     from molix.profiler.task import TaskProfiler
     from molix.profiler.mock import MockSource
-    from molix.data.tasks import NeighborList
+    from molix.batch import NeighborList
 
     source = MockSource(n_samples=500, n_atoms=(5, 20))
     profiler = TaskProfiler(NeighborList(cutoff=5.0))
@@ -26,7 +26,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from molix.data.task import DatasetTask, Runnable
 from molix.profiler._utils import Timer, TimingStat, _fmt_table
 
 # ---------------------------------------------------------------------------
@@ -82,14 +81,16 @@ class TaskResult:
 
 
 class TaskProfiler:
-    """Profile a single pipeline :class:`~molix.data.task.Task`.
+    """Profile a single sample transform.
 
-    Measures the wall-clock time of ``task.execute(sample)`` in isolation.
-    For :class:`~molix.data.task.DatasetTask`, ``fit()`` is called once on
-    the source before timing starts.
+    Measures the wall-clock time of ``task.execute(sample)`` in isolation,
+    falling back to ``task(sample)`` when the task carries no ``execute``.
+    A task carrying a callable ``fit`` is fitted once on the source before
+    timing starts.
 
     Args:
-        task: The task to profile.
+        task: The transform to profile — anything with an ``execute`` method
+            or anything callable.
 
     Example::
 
@@ -104,7 +105,7 @@ class TaskProfiler:
         result.print_report()
     """
 
-    def __init__(self, task: Runnable | Callable[[object], object]) -> None:
+    def __init__(self, task: object) -> None:
         self.task = task
 
     def run(
@@ -116,34 +117,43 @@ class TaskProfiler:
         """Run the task profiler on ``source``.
 
         Args:
-            source: A :class:`~molix.data.source.DataSource` (or
-                :class:`~molix.profiler.mock.MockSource`) providing raw samples.
+            source: A sample provider supporting ``__len__`` / ``__getitem__``
+                (e.g. :class:`~molix.profiler.mock.MockSource` or a dataset).
             n_samples: Number of samples to time (after warmup).
             n_warmup: Number of samples to discard at the start.
 
         Returns:
             :class:`TaskResult` with timing statistics.
+
+        Raises:
+            TypeError: *task* has neither an ``execute`` method nor a
+                ``__call__``, so there is nothing to time.
         """
         n_source = len(source)
 
-        # For DatasetTask: fit on the full source first
-        if isinstance(self.task, DatasetTask):
+        # Two-phase transform: fit over the whole source before timing, so the
+        # measured ``execute`` is the fitted one.
+        fit = getattr(self.task, "fit", None)
+        if callable(fit):
             all_samples = [source[i] for i in range(n_source)]
-            self.task.fit(all_samples)
+            fit(all_samples)
 
         task_name = type(self.task).__name__
         task_id = getattr(self.task, "task_id", task_name)
-        # Dispatch the task directly: ``execute`` for a Runnable (every
-        # SampleTask / DatasetTask / BatchTask), else a plain callable. The
-        # profiler times the transform, so it must not route through a DAG
-        # wrapper it would otherwise be timing too.
+        # Dispatch structurally: ``execute`` when the task carries one, else the
+        # task's own ``__call__``. The profiler times the transform, so it must
+        # not route through a DAG wrapper it would otherwise be timing too.
         run_once: Callable[[object], object]
-        if isinstance(self.task, Runnable):
-            run_once = self.task.execute
-        elif callable(self.task):
-            run_once = self.task
+        execute = getattr(self.task, "execute", None)
+        call = getattr(self.task, "__call__", None)
+        if callable(execute):
+            run_once = execute
+        elif callable(call):
+            run_once = call
         else:
-            raise TypeError(f"Task {task_name} is neither Runnable nor callable: {type(self.task)}")
+            raise TypeError(
+                f"Task {task_name} has neither an execute() nor a __call__: {type(self.task)}"
+            )
 
         total = n_warmup + n_samples
         times_ms: list[float] = []

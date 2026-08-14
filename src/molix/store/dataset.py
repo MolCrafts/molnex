@@ -273,7 +273,7 @@ class _CacheBacked(BaseDataset):
         neighbours per atom (Allegro/MACE normalisation constant).
 
         Returns ``0.0`` when the cache genuinely holds no edges (no
-        :class:`~molix.data.tasks.NeighborList` in the pipeline) or no
+        :class:`~molix.batch.NeighborList` in the pipeline) or no
         atoms — zero neighbours per atom is the honest answer there, and
         profiling an edge-free cache must stay non-fatal.
 

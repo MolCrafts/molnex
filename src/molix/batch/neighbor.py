@@ -1,10 +1,18 @@
-"""Neighbor list computation task."""
+"""Neighbour-list construction — the owner of the repo Edge Convention.
+
+Builds the cutoff graph (``edge_index`` / ``edge_diff`` / ``edge_dist``) that
+the collate schema in :mod:`molix.batch.collate` consumes, which is why it
+lives beside it rather than in an acquisition-side task tree.
+
+The class is deliberately base-class free: it carries a ``task_id`` and an
+``execute``, which is the whole structural contract an external ETL pipeline
+needs in order to wrap and cache it.
+"""
 
 from __future__ import annotations
 
 import torch
 
-from molix.data.task import SampleTask
 from molix.F.locality import get_neighbor_pairs
 
 
@@ -19,7 +27,7 @@ def _normalize_to_E2(edge_index: torch.Tensor) -> torch.Tensor:
     raise ValueError(f"edge_index shape {tuple(edge_index.shape)} is invalid")
 
 
-class NeighborList(SampleTask):
+class NeighborList:
     """Compute neighbor list for a single sample.
 
     Wraps the compiled C++ backend ``molix.F.locality.get_neighbor_pairs``,
@@ -66,6 +74,10 @@ class NeighborList(SampleTask):
         return (
             f"nlist:cut={self.cutoff}:max={self.max_num_pairs}:pbc={self.pbc}:sym={self.symmetry}"
         )
+
+    def __call__(self, data: dict) -> dict:
+        """Alias of :meth:`execute`, preserved from the former ``Task`` base."""
+        return self.execute(data)
 
     def execute(self, data: dict) -> dict:
         """Compute the neighbour list for one sample and attach edge fields.

@@ -100,15 +100,15 @@ parameter.
 
 ## TaskProfiler
 
-A *task* is one step of the preprocessing pipeline (`molix.data.task`):
-`SampleTask` transforms one sample dict and `DatasetTask` first fits global
-parameters over the whole dataset and then transforms each sample. A
-`molix.batch.BatchTask` transforms an already-collated batch. `TaskProfiler` times
-`task.execute(...)` on its own, with no DataLoader, workers or collation in the
-picture.
+A *task* is one transform step: anything with an `execute(sample)` method (such
+as `molix.batch.NeighborList`, or a `molix.batch.BatchTask` over an
+already-collated batch) or any plain callable. Dispatch is structural, and a
+task carrying a callable `fit` is fitted once over the whole source before
+timing starts. `TaskProfiler` times `task.execute(...)` on its own, with no
+DataLoader, workers or collation in the picture.
 
 ```python
-from molix.data.tasks import NeighborList
+from molix.batch import NeighborList
 from molix.profiler import MockSource, TaskProfiler
 
 source = MockSource(n_samples=500, n_atoms=(5, 20), seed=0)
@@ -120,8 +120,8 @@ print(result.timing.p95_ms)
 ```
 
 The task is the constructor argument; the sample provider is the `run()`
-argument. Any object with `__len__` and `__getitem__` works — a `MockSource`, a
-real `DataSource`, or a dataset. Indices wrap modulo the source length, so
+argument. Any object with `__len__` and `__getitem__` works — a `MockSource` or
+a real dataset. Indices wrap modulo the source length, so
 `n_samples` may exceed the number of distinct samples available.
 
 `TaskResult` carries `task_name`, `task_id` (the task's cache-key identity, e.g.

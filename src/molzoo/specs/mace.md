@@ -22,7 +22,7 @@ not a tutorial; use the MolZoo user guide for narrative and worked examples.
 | `molzoo.mace.variants.MACEMatpes` | Thin `MACEPotential` alias for the MatPES/MP weights; see `mace_matpes.md` |
 | `molzoo.mace.checkpoint.CheckpointRemap` | Official-weight key remap (`MATPES_REMAP` / `OMOL_REMAP` presets) |
 | `molpot.composition` / heads / derivation | Energy readout, forces, composition |
-| `molix.data.tasks.NeighborList` | Cutoff graph construction |
+| `molix.batch.NeighborList` | Cutoff graph construction |
 
 ## 1. Scope
 
@@ -141,7 +141,7 @@ No dedicated `bench_mace` yet (tracked as perf work queue).
 
 | Concern | Owner | Contract |
 |---------|-------|----------|
-| Neighbor list | `molix.data.tasks.NeighborList` | cutoff graph, edge convention |
+| Neighbor list | `molix.batch.NeighborList` | cutoff graph, edge convention |
 | Encoder features | `molzoo.mace.research.MACE` | this spec |
 | Energy / force | `molpot` or `molzoo.mace.potential.MACEPotential` | not this module |
 | Foundation-block reuse | `molrep.interaction.mace` / `molrep.readout.mace` / `molrep.embedding.mace` | MACE-only blocks; owned by `molrep`, not here |

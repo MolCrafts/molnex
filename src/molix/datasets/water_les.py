@@ -55,7 +55,7 @@ from molpy import Element
 
 from molix.batch.collate import TargetSchema
 from molix.data.source import Sample
-from molix.datasets._extxyz import ExtxyzFrame, parse_extxyz_frames
+from molix.io.extxyz import ExtxyzFrame, parse_extxyz_frames
 
 __all__ = ["WaterLESSource"]
 

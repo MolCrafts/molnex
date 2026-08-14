@@ -30,8 +30,8 @@ the spec non-None even though nothing imports.  That leftover is precisely the
 drift being caught.
 
 Section 2 — the capability was never lost, only the duplicate wrapper.  The
-surviving `molix.data.tasks.NeighborList` (module home
-`molix.data.tasks.neighbor`) is run on a hard-coded 3-atom chain and must still
+surviving `molix.batch.NeighborList` (module home
+`molix.batch.neighbor`) is run on a hard-coded 3-atom chain and must still
 produce the documented bidirectional edge list.
 
 The goldens are arithmetic on the page, not a captured measurement.  For atoms
@@ -89,7 +89,7 @@ import torch
 
 import molix.nn
 import molpot
-from molix.data.tasks import NeighborList
+from molix.batch import NeighborList
 
 # ---------------------------------------------------------------------------
 # Section 1 goldens — the surviving public surface of `molix.nn`.
@@ -215,7 +215,7 @@ def check_deleted_surface(checker: Checker) -> None:
         "surface.no_neighborlist_attribute",
         not hasattr(molix.nn, "NeighborList"),
         "`molix.nn.NeighborList` still resolves; the name must stay free for "
-        "molix.data.tasks.neighbor.NeighborList / molix.md.NeighborList",
+        "molix.batch.neighbor.NeighborList / molix.md.NeighborList",
     )
     checker.truth(
         "surface.no_neighborlist_export",
@@ -257,8 +257,8 @@ def check_surviving_neighbor_list(checker: Checker) -> None:
     """
     print(f"\nSurviving neighbour list (3-atom chain at x = 0, 1, 2 A; cutoff = {CUTOFF} A)")
 
-    # `molix.data.tasks.NeighborList` is the package re-export of
-    # `molix.data.tasks.neighbor.NeighborList` — the same class object.
+    # `molix.batch.NeighborList` is the package re-export of
+    # `molix.batch.neighbor.NeighborList` — the same class object.
     task = NeighborList(cutoff=CUTOFF, symmetry=True)
     sample = task.execute({"pos": POSITIONS})
 

@@ -12,7 +12,7 @@ floating-point dtype, consumed in two places and only two places:
    :func:`molix.core.steps.batch_to`. Long index tensors
    (``edge_index``, ``Z``, ``batch``) are left untouched.
 
-Dataset loaders (``QM9Source``, ``RevMD17Source``, ``_extxyz``, …) keep a
+Dataset loaders (``QM9Source``, ``RevMD17Source``, ``molix.io.extxyz``, …) keep a
 canonical fp32 representation on disk — the per-batch up-cast happens
 at the collate boundary, so the :class:`~molix.store.cache.PackedCache`
 stays compact and is reusable across precisions without re-baking.

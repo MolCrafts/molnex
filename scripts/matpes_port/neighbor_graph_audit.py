@@ -44,7 +44,7 @@ from test_molix.test_md.oracle_bruteforce_neighbors import (  # noqa: E402
     neighborlist_edge_keys,
 )
 
-from molix.datasets._extxyz import parse_extxyz_frames  # noqa: E402
+from molix.io.extxyz import parse_extxyz_frames  # noqa: E402
 from molix.md import NeighborList  # noqa: E402
 
 

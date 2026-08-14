@@ -91,7 +91,7 @@ MolNex keeps this structure, but splits responsibilities:
 
 | Paper / reference model concept | MolNex owner |
 |---|---|
-| directed local environment | `molix.data.NeighborList(symmetry=True)` |
+| directed local environment | `molix.batch.NeighborList(symmetry=True)` |
 | edge representation | `molzoo.Allegro` |
 | edge energy readout | `molpot.heads.EdgeEnergyHead` |
 | force derivation and losses | downstream model / `molix` training path |
@@ -413,7 +413,7 @@ aggregation.
 ## 9. Hands-On: Build a Tiny Allegro Batch
 
 This section constructs a tiny directed graph by hand. In production, let
-`molix.data.NeighborList(symmetry=True)` build the edge tensors.
+`molix.batch.NeighborList(symmetry=True)` build the edge tensors.
 
 ```python
 import torch

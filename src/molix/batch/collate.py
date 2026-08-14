@@ -240,7 +240,7 @@ def collate_molecules(
 
     Post-collate the same namespaces are nested TensorDicts with columns
     rebased by cumulative atom offset. Packed COO ``angle_index [3, N]`` is
-    **not** the collate schema (see :mod:`molix.datasets._valence_columns`
+    **not** the collate schema (see :mod:`molix.batch.valence_columns`
     for optional kernel-local stacks).
 
     Args:
