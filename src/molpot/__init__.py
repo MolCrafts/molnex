@@ -26,11 +26,18 @@ from molpot.composition import (
     SonataSpec,
     TSScalingHead,
 )
-from molpot.derivation import EnergyAggregation, ForceDerivation, StressDerivation
+from molpot.derivation import (
+    EnergyAggregation,
+    ForceDerivation,
+    HessianDerivation,
+    StressDerivation,
+)
 from molpot.forcefield import (
     ClassicalIMM,
+    ClassIForceField,
     ForceField,
     ForceFieldSchemaView,
+    OPLSForceField,
     PotentialMeta,
     Potentials,
 )
@@ -103,6 +110,7 @@ __all__ = [
     "TypeHead",
     "EnergyAggregation",
     "ForceDerivation",
+    "HessianDerivation",
     "StressDerivation",
     "LayerPooling",
     "EdgeToNodePooling",
@@ -120,9 +128,11 @@ __all__ = [
     "ImproperParamHead",
     "MultiHead",
     "PotentialComposer",
-    "ForceField",
-    "Potentials",
+    "ClassIForceField",
     "ClassicalIMM",
+    "ForceField",
+    "OPLSForceField",
+    "Potentials",
     "ForceFieldSchemaView",
     "PotentialMeta",
     "AtomicChargeModel",

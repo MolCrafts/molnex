@@ -21,6 +21,16 @@ shared batch-level kernels (``energy_core(batch) -> batch`` in, batch with
 
     batch = grad_force_pass(self._write_energy, batch, detach_energy=False)
     batch = func_force_pass(self._write_energy, batch)
+
+Beside those batch-level passes sit the tensor-level derivation types — one
+stateless :class:`torch.nn.Module` per differentiated quantity, reusable across
+batches: :class:`~molpot.derivation.force.ForceDerivation` for the first
+derivative ``F = -∂E/∂pos`` (eV/Å for an eV core),
+:class:`~molpot.derivation.hessian.HessianDerivation` for the Cartesian second
+derivative ``H = ∂²E/∂pos²`` (energy/Å²; dense ``(3N, 3N)`` or one
+``(3Nᵢ, 3Nᵢ)`` block per molecule), and
+:class:`~molpot.derivation.stress.StressDerivation` for the stress tensor
+``σ = (1/V) ∂E/∂ε`` (energy/Å³).
 """
 
 from molpot.derivation.energy import EnergyAggregation
@@ -33,14 +43,16 @@ from molpot.derivation.force import (
     functorch_forces_with_aux,
 )
 from molpot.derivation.force_readout import ForceReadout
+from molpot.derivation.hessian import HessianDerivation
 from molpot.derivation.kernels import func_force_pass, grad_force_pass
 from molpot.derivation.stress import StressDerivation
 
 __all__ = [
     "EnergyAggregation",
     "EnergyReadout",
-    "ForceReadout",
     "ForceDerivation",
+    "ForceReadout",
+    "HessianDerivation",
     "StressDerivation",
     "autograd_forces",
     "autograd_forces_from_energy",
