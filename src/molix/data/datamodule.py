@@ -20,7 +20,7 @@ from molix.data.collate import (
 )
 from molix.data.dataset import BaseDataset
 from molix.data.pipeline import Node
-from molix.data.sampler import TokenBudgetBatchSampler
+from molix.data.sampler import BatchSamplerSource, TokenBudgetBatchSampler
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -112,6 +112,15 @@ class DataModule:
             simple.
         max_edges_per_batch: Optional per-batch total-edge budget; same
             semantics as ``max_atoms_per_batch``, both may be combined.
+        batch_sampler_source: Optional
+            :class:`~molix.data.sampler.BatchSamplerSource` that supplies
+            the *train* loader's ``batch_sampler`` once per epoch, called
+            as ``batch_sampler(train_dataset, seed=seed + epoch)`` — the
+            same reseed convention as the budget path, so epoch *k*'s
+            composition stays re-derivable on resume. Mutually exclusive
+            with ``max_atoms_per_batch`` / ``max_edges_per_batch`` (two
+            competing batch policies) and, like them, incompatible with
+            DDP. Omit it and every existing code path is unchanged.
         num_workers: DataLoader worker processes.
         pin_memory: Pin tensors for faster GPU transfer.
         persistent_workers: Keep workers alive between epochs.
@@ -119,6 +128,11 @@ class DataModule:
         seed: RNG seed for DDP sampler shuffling.
         multiprocessing_context: Start method for DataLoader worker
             processes. Defaults to ``"spawn"`` — see module docstring.
+
+    Raises:
+        ValueError: ``batch_sampler_source`` is combined with a token
+            budget, or does not implement
+            :class:`~molix.data.sampler.BatchSamplerSource`.
     """
 
     def __init__(
@@ -131,6 +145,7 @@ class DataModule:
         batch_size: int = 32,
         max_atoms_per_batch: int | None = None,
         max_edges_per_batch: int | None = None,
+        batch_sampler_source: BatchSamplerSource | None = None,
         num_workers: int = 4,
         pin_memory: bool = True,
         persistent_workers: bool = True,
@@ -139,6 +154,22 @@ class DataModule:
         multiprocessing_context: str | None = "spawn",
         train_drop_last: bool = False,
     ) -> None:
+        if batch_sampler_source is not None:
+            if not callable(getattr(batch_sampler_source, "batch_sampler", None)):
+                raise ValueError(
+                    "batch_sampler_source must implement the BatchSamplerSource "
+                    "protocol — a batch_sampler(dataset, *, seed: int) -> "
+                    "Iterable[list[int]] method; got "
+                    f"{type(batch_sampler_source).__name__}, which has none."
+                )
+            if max_atoms_per_batch is not None or max_edges_per_batch is not None:
+                raise ValueError(
+                    "batch_sampler_source and max_atoms_per_batch / "
+                    "max_edges_per_batch are two competing batch policies for "
+                    "the train loader — pass exactly one: drop the budget "
+                    "kwargs, or express the budget inside the source."
+                )
+
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         if target_schema is None:
@@ -148,6 +179,7 @@ class DataModule:
         self.batch_size = batch_size
         self.max_atoms_per_batch = max_atoms_per_batch
         self.max_edges_per_batch = max_edges_per_batch
+        self.batch_sampler_source = batch_sampler_source
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers and num_workers > 0
@@ -193,6 +225,60 @@ class DataModule:
         """
         pass  # datasets are ready at construction time
 
+    def _reject_ddp_batch_sampler(self, knob: str) -> None:
+        """Refuse a custom train ``batch_sampler`` while running under DDP.
+
+        Args:
+            knob: The constructor argument(s) that requested the custom
+                batch sampler, named verbatim in the error so the caller
+                knows what to drop.
+
+        Raises:
+            ValueError: A distributed process group is initialised.
+        """
+        if _is_distributed():
+            raise ValueError(
+                f"{knob} not supported under DDP: dynamic batching is "
+                "incompatible with DistributedSampler's fixed per-rank "
+                f"partitioning. Remove {knob} or run single-process; DDP "
+                "support belongs to a future spec."
+            )
+
+    def _epoch_batch_sampler(self) -> Iterable[list[int]] | None:
+        """Build this epoch's train ``batch_sampler``, or ``None``.
+
+        Dispatches the three batch policies in precedence order: an
+        injected :class:`~molix.data.sampler.BatchSamplerSource`, else a
+        token budget, else the fixed-``batch_size`` route (``None``). Both
+        custom paths are seeded ``self.seed + self._epoch``, so epoch *k*
+        reshuffles yet stays re-derivable on resume, and both pass the DDP
+        guard first.
+
+        Returns:
+            An iterable, sized plan of ``list[int]`` sample-index batches,
+            or ``None`` when no custom batch sampler is configured.
+
+        Raises:
+            ValueError: A custom batch sampler is configured under DDP.
+        """
+        if self.batch_sampler_source is not None:
+            self._reject_ddp_batch_sampler("batch_sampler_source")
+            return self.batch_sampler_source.batch_sampler(
+                self.train_dataset, seed=self.seed + self._epoch
+            )
+        if self.max_atoms_per_batch is not None or self.max_edges_per_batch is not None:
+            self._reject_ddp_batch_sampler("max_atoms_per_batch / max_edges_per_batch")
+            # Counts come from the real dataset; the loader may instead see an
+            # _IndexDataset (fast path) — the batch_sampler yields the same
+            # index lists either way.
+            return TokenBudgetBatchSampler(
+                self.train_dataset,
+                max_atoms=self.max_atoms_per_batch,
+                max_edges=self.max_edges_per_batch,
+                seed=self.seed + self._epoch,
+            )
+        return None
+
     def train_dataloader(self) -> DataLoader:
         """Build the training :class:`~torch.utils.data.DataLoader`.
 
@@ -200,10 +286,12 @@ class DataModule:
         ``max_edges_per_batch``), batches come from a
         :class:`~molix.data.sampler.TokenBudgetBatchSampler` seeded with
         ``seed + epoch`` — a fresh sampler per epoch, so epochs reshuffle
-        and epoch *k*'s composition is re-derivable on resume.
+        and epoch *k*'s composition is re-derivable on resume. With a
+        ``batch_sampler_source`` set, that source supplies the batch
+        sampler under the same ``seed + epoch`` convention. In both modes
         ``batch_size`` / ``shuffle`` / ``sampler`` / ``drop_last`` /
-        ``generator`` are not passed in that mode (PyTorch makes them
-        mutually exclusive with ``batch_sampler``).
+        ``generator`` are not passed (PyTorch makes them mutually
+        exclusive with ``batch_sampler``).
 
         Otherwise: under DDP, wraps the train dataset in a shuffling
         :class:`~torch.utils.data.DistributedSampler` (shuffle handled by
@@ -215,28 +303,13 @@ class DataModule:
             A configured training ``DataLoader``.
 
         Raises:
-            ValueError: A token budget is set while running under DDP —
-                dynamic batching has no cross-rank partitioning protocol
-                yet. Drop the budget kwargs or run single-process.
+            ValueError: A token budget or a ``batch_sampler_source`` is set
+                while running under DDP — dynamic batching has no
+                cross-rank partitioning protocol yet. Drop the batching
+                kwarg or run single-process.
         """
-        if self.max_atoms_per_batch is not None or self.max_edges_per_batch is not None:
-            if _is_distributed():
-                raise ValueError(
-                    "max_atoms_per_batch / max_edges_per_batch are not "
-                    "supported under DDP: dynamic batching is incompatible "
-                    "with DistributedSampler's fixed per-rank partitioning. "
-                    "Remove the budget kwargs or run single-process; DDP "
-                    "support belongs to a future spec."
-                )
-            # Counts come from the real dataset; the loader may instead see an
-            # _IndexDataset (fast path) — the batch_sampler yields the same
-            # index lists either way.
-            batch_sampler = TokenBudgetBatchSampler(
-                self.train_dataset,
-                max_atoms=self.max_atoms_per_batch,
-                max_edges=self.max_edges_per_batch,
-                seed=self.seed + self._epoch,
-            )
+        batch_sampler = self._epoch_batch_sampler()
+        if batch_sampler is not None:
             loader_dataset, collate_fn = self._resolve_collation(self.train_dataset)
             return DataLoader(
                 loader_dataset,

@@ -45,7 +45,11 @@ from molix.data.pes_bundle import PesBundle
 from molix.data.pipeline import DAGCache, Edge, Node, Pipeline, PipelineSpec
 
 # Batch sampling
-from molix.data.sampler import TokenBudgetBatchSampler
+from molix.data.sampler import (
+    BatchSamplerSource,
+    TokenBudgetBatchSampler,
+    TokenBudgetPacker,
+)
 
 # Data sources
 from molix.data.source import DataSource, InMemorySource, SubsetSource
@@ -68,7 +72,9 @@ from molix.data.tasks import (
 
 __all__ = [
     # Batch sampling
+    "BatchSamplerSource",
     "TokenBudgetBatchSampler",
+    "TokenBudgetPacker",
     # Task hierarchy
     "Task",
     "SampleTask",

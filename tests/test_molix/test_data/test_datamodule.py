@@ -448,3 +448,128 @@ class TestExplicitCachedPipeline:
         full = CachedDataset(sink)
         with pytest.raises(ValueError, match="sizes must sum to"):
             full.split(sizes=(4, 3))  # sum=7 != 5
+
+
+# ---------------------------------------------------------------------------
+# Batch-sampler injection seam (spec universal-class-i-09-packer)
+# ---------------------------------------------------------------------------
+
+#: Fixed plan handed to the train loader by :class:`_FixedPlanSource`.
+#: Covers the 8-sample train split exactly once, in a non-sorted order so
+#: the yielded ``U0`` identities cannot match by accident.
+INJECTED_PLAN = [[3, 0], [7], [1, 5, 2], [6, 4]]
+#: ``U0`` identities the injected plan must produce (``U0 == float(index)``).
+INJECTED_PLAN_IDENTITIES = [[3.0, 0.0], [7.0], [1.0, 5.0, 2.0], [6.0, 4.0]]
+
+
+class _FixedPlanSource:
+    """Picklable ``BatchSamplerSource`` stub returning one fixed plan.
+
+    Records every ``seed`` it is handed so the ``seed + epoch`` reseed
+    convention can be asserted, and returns the *same* list object every
+    call so ``loader.batch_sampler is source.plan`` is checkable.
+    """
+
+    def __init__(self, plan: list[list[int]]) -> None:
+        self.plan = [list(group) for group in plan]
+        self.seen_seeds: list[int] = []
+
+    def batch_sampler(self, dataset: object, *, seed: int) -> list[list[int]]:
+        """Record *seed* and return the fixed index plan."""
+        self.seen_seeds.append(seed)
+        return self.plan
+
+
+class _NoBatchSamplerSource:
+    """Object that does *not* satisfy the ``BatchSamplerSource`` protocol."""
+
+
+def _make_injection_dm(tmp_path: Path, tag: str, *, seed: int = 42, **dm_kwargs) -> DataModule:
+    """Build a DataModule over an 8-sample train split with ``U0`` identities.
+
+    Args:
+        tmp_path: Pytest temp directory for the packed caches.
+        tag: Unique filename tag so multiple modules can share ``tmp_path``.
+        seed: DataModule shuffle seed.
+        **dm_kwargs: Extra DataModule kwargs (e.g. ``batch_sampler_source``).
+
+    Returns:
+        A non-DDP DataModule whose train samples carry ``U0 == float(index)``.
+    """
+    samples = _make_samples(10)
+    train_sink = tmp_path / f"inject_train_{tag}.pt"
+    val_sink = tmp_path / f"inject_val_{tag}.pt"
+    PackedCache(train_sink).save(samples[:8])
+    PackedCache(val_sink).save(samples[8:])
+    dm_kwargs.setdefault("batch_size", 2)
+    dm_kwargs.setdefault("num_workers", 0)
+    dm_kwargs.setdefault("pin_memory", False)
+    return DataModule(CachedDataset(train_sink), CachedDataset(val_sink), seed=seed, **dm_kwargs)
+
+
+class TestBatchSamplerInjection:
+    """``batch_sampler_source`` drives the train loader's batch composition.
+
+    One symbol (BatchSamplerSource) is imported locally in the protocol-conformance test.
+    """
+
+    def test_source_conforms_to_protocol(self):
+        """The stub satisfies the runtime-checkable ``BatchSamplerSource``."""
+        from molix.data import BatchSamplerSource
+
+        assert isinstance(_FixedPlanSource(INJECTED_PLAN), BatchSamplerSource)
+
+    def test_loader_batch_sampler_is_the_injected_plan(self, tmp_path):
+        """The object returned by the source is handed straight to DataLoader."""
+        source = _FixedPlanSource(INJECTED_PLAN)
+        dm = _make_injection_dm(tmp_path, "plan", batch_sampler_source=source)
+        loader = dm.train_dataloader()
+        assert loader.batch_sampler is source.plan
+
+    def test_loader_batch_size_is_none(self, tmp_path):
+        """DataLoader normalises ``batch_size`` to None on the injected path."""
+        dm = _make_injection_dm(
+            tmp_path, "bs", batch_sampler_source=_FixedPlanSource(INJECTED_PLAN)
+        )
+        assert dm.train_dataloader().batch_size is None
+
+    def test_iteration_yields_exactly_the_injected_groups(self, tmp_path):
+        """Collated batches carry the injected index groups (via ``U0`` identity)."""
+        dm = _make_injection_dm(
+            tmp_path, "iter", batch_sampler_source=_FixedPlanSource(INJECTED_PLAN)
+        )
+        yielded = [[float(u) for u in batch["graphs", "U0"]] for batch in dm.train_dataloader()]
+        assert yielded == INJECTED_PLAN_IDENTITIES
+
+    def test_source_receives_seed_plus_epoch(self, tmp_path):
+        """``on_epoch_start(k)`` then ``train_dataloader()`` passes ``seed + k``."""
+        source = _FixedPlanSource(INJECTED_PLAN)
+        dm = _make_injection_dm(tmp_path, "seed", seed=7, batch_sampler_source=source)
+        dm.on_epoch_start(3)
+        dm.train_dataloader()
+        assert source.seen_seeds[-1] == dm.seed + 3
+
+    def test_injected_source_under_ddp_raises(self, tmp_path, monkeypatch):
+        """DDP + injected source → ValueError naming the offending kwarg."""
+        monkeypatch.setattr("molix.data.datamodule._is_distributed", lambda: True)
+        dm = _make_injection_dm(
+            tmp_path, "ddp", batch_sampler_source=_FixedPlanSource(INJECTED_PLAN)
+        )
+        with pytest.raises(ValueError, match="(?i)ddp|distributed") as excinfo:
+            dm.train_dataloader()
+        assert "batch_sampler_source" in str(excinfo.value)
+
+    def test_source_with_token_budget_raises_eagerly(self, tmp_path):
+        """Two competing batch policies are rejected at ``__init__``."""
+        with pytest.raises(ValueError, match="batch_sampler_source"):
+            _make_injection_dm(
+                tmp_path,
+                "clash",
+                batch_sampler_source=_FixedPlanSource(INJECTED_PLAN),
+                max_atoms_per_batch=16,
+            )
+
+    def test_non_conforming_source_raises_eagerly(self, tmp_path):
+        """An object without ``batch_sampler`` is rejected at ``__init__``."""
+        with pytest.raises(ValueError, match="batch_sampler"):
+            _make_injection_dm(tmp_path, "bad", batch_sampler_source=_NoBatchSamplerSource())

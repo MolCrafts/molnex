@@ -8,6 +8,10 @@ Covers spec ``dynamic-batching-packed-collate-01-sampler``:
 * GROUP C — ``DataModule`` opt-in wiring via ``max_atoms_per_batch`` /
   ``max_edges_per_batch``.
 
+Spec ``universal-class-i-09-packer`` adds GROUP D: characterization
+goldens pinning the pre-refactor batch plans plus RED tests for the
+extracted ``molix.data.TokenBudgetPacker``.
+
 Fixture geometry (hand-checkable): sample ``i`` has ``3 + (i % 8)`` atoms
 (cycling 3..10) and ``n_atoms + 2`` edges (cycling 5..12). Edge counts
 never equal atom counts, so the packed-cache schema inference cannot
@@ -17,12 +21,15 @@ misclassify per-edge keys as per-atom.
 from __future__ import annotations
 
 import pickle
+import warnings
 from pathlib import Path
 
 import pytest
 import torch
 from torch.utils.data import BatchSampler, Dataset, RandomSampler
 
+from molix.core.seed import make_generator
+from molix.data import TokenBudgetPacker
 from molix.data.cache import PackedCache
 from molix.data.datamodule import DataModule
 from molix.data.dataset import CachedDataset, MmapDataset, SubsetDataset
@@ -467,3 +474,229 @@ class TestDataModuleEpochRederivation:
         assert batches_epoch1_fresh == batches_epoch1_cont
         # (b) Guard against a degenerate single-permutation world.
         assert batches_epoch1_cont != batches_epoch0
+
+
+# ---------------------------------------------------------------------------
+# GROUP D — characterization goldens + TokenBudgetPacker
+# (spec universal-class-i-09-packer)
+# ---------------------------------------------------------------------------
+
+#: Sample count of the golden characterization cache.
+GOLDEN_N = 16
+#: Default ``seed`` of ``TokenBudgetBatchSampler.__init__`` (src/molix/data/sampler.py).
+GOLDEN_SEED = 42
+
+# --- Captured from the PRE-REFACTOR tree on 2026-08-14, torch 2.12.1+cpu ----
+# Capture one-liner (run from the repo root, with the molcrafts PYTHONPATH):
+#
+#   python -c "
+#   import sys, tempfile, warnings, torch; from pathlib import Path
+#   sys.path.insert(0, '.')
+#   from tests.test_molix.test_data.test_sampler import _write_varied_cache
+#   from molix.core.seed import make_generator
+#   from molix.data.dataset import MmapDataset
+#   from molix.data.sampler import TokenBudgetBatchSampler as S
+#   print(torch.randperm(16, generator=make_generator(42)).tolist())
+#   with tempfile.TemporaryDirectory() as td:
+#       ds = MmapDataset(_write_varied_cache(Path(td), 'golden', n=16))
+#       print(list(S(ds, max_atoms=16)))
+#       print(list(S(ds, max_atoms=16, max_edges=20)))
+#       warnings.simplefilter('ignore'); print(list(S(ds, max_atoms=8)))
+#   "
+#
+#: ``torch.randperm(16, generator=make_generator(42)).tolist()``.
+GOLDEN_PERM = [6, 3, 0, 7, 10, 15, 2, 12, 14, 9, 8, 5, 4, 13, 11, 1]
+#: Plan for ``max_atoms=16`` over the 16-sample varied cache.
+GOLDEN_PLAN_ATOMS16 = [[6, 3], [0, 7], [10, 15], [2, 12], [14, 9, 8], [5, 4], [13, 11], [1]]
+#: Plan for ``max_atoms=16, max_edges=20`` — the edge cap splits ``[14, 9, 8]``.
+GOLDEN_PLAN_ATOMS16_EDGES20 = [
+    [6, 3],
+    [0, 7],
+    [10, 15],
+    [2, 12],
+    [14, 9],
+    [8, 5],
+    [4, 13],
+    [11, 1],
+]
+#: Plan for ``max_atoms=8`` — samples with 9/10 atoms are kept as singletons.
+GOLDEN_PLAN_ATOMS8 = [
+    [6],
+    [3],
+    [0],
+    [7],
+    [10],
+    [15],
+    [2],
+    [12],
+    [14],
+    [9, 8],
+    [5],
+    [4],
+    [13],
+    [11],
+    [1],
+]
+#: Verbatim oversize warning text (src/molix/data/sampler.py:125-132).
+GOLDEN_OVERSIZE_WARNING = (
+    "TokenBudgetBatchSampler: at least one sample exceeds the per-batch "
+    "budget on its own; such samples are kept as singleton batches (never "
+    "dropped). Raise the budget to avoid singletons."
+)
+#: Instance state that must stay picklable and packer-free after the refactor.
+GOLDEN_SAMPLER_FIELDS = ["_batches", "_dataset", "_max_atoms", "_max_edges", "_seed"]
+
+
+@pytest.fixture
+def golden_ds(tmp_path) -> MmapDataset:
+    """16-sample varied-count dataset backing the characterization goldens.
+
+    Counts are a pure function of the sample index (``3 + i % 8`` atoms,
+    ``atoms + 2`` edges), so rebuilding the cache per test in ``tmp_path``
+    reproduces the captured plans exactly.
+    """
+    return MmapDataset(_write_varied_cache(tmp_path, "golden", n=GOLDEN_N))
+
+
+class TestSamplerGoldenPlan:
+    """Characterization: the pre-refactor plans, pinned as literals.
+
+    Green on the pre-refactor tree by construction — this class exists to
+    prove the ``TokenBudgetPacker`` extraction is behavior-preserving.
+    """
+
+    def test_golden_counts_are_deterministic(self, golden_ds):
+        """The fixture cache reproduces the hand-checkable count tables."""
+        assert golden_ds.atom_counts.tolist() == ATOM_COUNTS[:GOLDEN_N]
+        assert golden_ds.edge_counts.tolist() == EDGE_COUNTS[:GOLDEN_N]
+
+    def test_permutation_matches_golden(self):
+        """The visit order is ``randperm(n, generator=make_generator(seed))``."""
+        perm = torch.randperm(GOLDEN_N, generator=make_generator(GOLDEN_SEED))
+        assert perm.tolist() == GOLDEN_PERM
+
+    def test_atom_budget_plan_matches_golden(self, golden_ds):
+        """max_atoms=16 reproduces the captured batch plan."""
+        sampler = TokenBudgetBatchSampler(golden_ds, max_atoms=16)
+        assert list(sampler) == GOLDEN_PLAN_ATOMS16
+
+    def test_dual_budget_plan_matches_golden(self, golden_ds):
+        """max_atoms=16 + max_edges=20 reproduces the captured batch plan."""
+        sampler = TokenBudgetBatchSampler(golden_ds, max_atoms=16, max_edges=20)
+        assert list(sampler) == GOLDEN_PLAN_ATOMS16_EDGES20
+
+    def test_oversize_plan_matches_golden(self, golden_ds):
+        """max_atoms=8 reproduces the captured singleton-heavy batch plan."""
+        with pytest.warns(UserWarning):
+            sampler = TokenBudgetBatchSampler(golden_ds, max_atoms=8)
+        assert list(sampler) == GOLDEN_PLAN_ATOMS8
+
+
+class TestSamplerSurfacePreservation:
+    """Observable sampler surface pinned across the packer extraction.
+
+    Also green pre-refactor: the packer must stay transient (never stored
+    on the instance) and the warning text/count must not drift.
+    """
+
+    def test_instance_fields_match_golden_list(self, golden_ds):
+        """``vars(sampler)`` keeps exactly its five picklable fields."""
+        sampler = TokenBudgetBatchSampler(golden_ds, max_atoms=16)
+        assert sorted(vars(sampler)) == GOLDEN_SAMPLER_FIELDS
+
+    def test_oversize_warning_text_verbatim_once(self, golden_ds):
+        """Exactly one warning per instance, with the unchanged message."""
+        with pytest.warns(UserWarning) as record:
+            TokenBudgetBatchSampler(golden_ds, max_atoms=8)
+        assert [str(w.message) for w in record] == [GOLDEN_OVERSIZE_WARNING]
+
+
+class TestTokenBudgetPacker:
+    """``molix.data.TokenBudgetPacker`` — next-fit packing, no dataset/RNG.
+
+    ``TokenBudgetPacker`` is imported inside each test so this class fails
+    at call time (RED) without breaking collection of the characterization
+    class above.
+    """
+
+    def test_next_fit_closes_the_single_open_bin(self):
+        """counts [7, 6, 5] / budget 12 → [[0], [1, 2]] (not first-fit [[0, 2], [1]])."""
+
+        packer = TokenBudgetPacker([(12, torch.tensor([7, 6, 5]))])
+        assert packer.pack([0, 1, 2]) == [[0], [1, 2]]
+
+    def test_oversize_singleton_is_emitted_without_warning(self):
+        """counts [3, 20, 4] / budget 10 → singletons, and the packer stays silent."""
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            packer = TokenBudgetPacker([(10, torch.tensor([3, 20, 4]))])
+            assert packer.pack([0, 1, 2]) == [[0], [1], [2]]
+
+    def test_oversize_closes_a_non_empty_bin_first(self):
+        """An oversize index never merges into the open bin — it closes it."""
+
+        packer = TokenBudgetPacker([(10, torch.tensor([2, 3, 25, 4]))])
+        assert packer.pack([0, 1, 2, 3]) == [[0, 1], [2], [3]]
+
+    def test_edge_budget_closes_batch_before_atom_budget(self):
+        """Dual budgets: the binding (edge) cap drives closure, hand-computed."""
+
+        atom_counts = torch.tensor([5, 5, 5, 5])
+        edge_counts = torch.tensor([4, 4, 4, 4])
+        dual = TokenBudgetPacker([(100, atom_counts), (10, edge_counts)])
+        assert dual.pack([0, 1, 2, 3]) == [[0, 1], [2, 3]]
+        # Atoms alone (20 <= 100) would keep all four together — so the edge
+        # budget, not the atom budget, is what closed each batch.
+        atoms_only = TokenBudgetPacker([(100, atom_counts)])
+        assert atoms_only.pack([0, 1, 2, 3]) == [[0, 1, 2, 3]]
+
+    def test_pack_empty_order_returns_empty_plan(self):
+        """An empty visit order packs to no batches at all."""
+
+        packer = TokenBudgetPacker([(10, torch.tensor([3, 4]))])
+        assert packer.pack([]) == []
+
+    def test_empty_budgets_raises_naming_the_pair(self):
+        """``budgets=[]`` is rejected eagerly, naming ``(budget, counts)``."""
+
+        with pytest.raises(ValueError, match=r"\(budget, counts\)"):
+            TokenBudgetPacker(budgets=[])
+
+    def test_oversize_mask_values_single_budget(self):
+        """``counts > budget`` elementwise, as a bool ``(n_samples,)`` tensor."""
+
+        mask = TokenBudgetPacker([(10, torch.tensor([3, 20, 4]))]).oversize_mask()
+        assert mask.dtype == torch.bool
+        assert mask.tolist() == [False, True, False]
+
+    def test_oversize_mask_is_elementwise_or_across_budgets(self):
+        """A sample oversize under *any* budget is masked."""
+
+        packer = TokenBudgetPacker([(10, torch.tensor([3, 20, 4])), (5, torch.tensor([1, 1, 9]))])
+        assert packer.oversize_mask().tolist() == [False, True, True]
+
+    def test_constructs_from_bare_tensors_without_a_dataset(self):
+        """No dataset, no RNG: bare ``(budget, counts)`` tensors are enough."""
+
+        packer = TokenBudgetPacker([(9, torch.tensor([4, 4, 4, 4], dtype=torch.long))])
+        assert not any("dataset" in name for name in vars(packer))
+        assert packer.pack([3, 1, 0, 2]) == [[3, 1], [0, 2]]
+
+    def test_golden_atom_budget_plan_via_packer(self, golden_ds):
+        """Packing the golden permutation reproduces the max_atoms=16 plan."""
+
+        packer = TokenBudgetPacker([(16, golden_ds.atom_counts)])
+        assert packer.pack(GOLDEN_PERM) == GOLDEN_PLAN_ATOMS16
+
+    def test_golden_dual_budget_plan_via_packer(self, golden_ds):
+        """Packing the golden permutation reproduces the dual-budget plan."""
+
+        packer = TokenBudgetPacker([(16, golden_ds.atom_counts), (20, golden_ds.edge_counts)])
+        assert packer.pack(GOLDEN_PERM) == GOLDEN_PLAN_ATOMS16_EDGES20
+
+    def test_golden_oversize_plan_via_packer(self, golden_ds):
+        """Packing the golden permutation reproduces the max_atoms=8 plan."""
+
+        packer = TokenBudgetPacker([(8, golden_ds.atom_counts)])
+        assert packer.pack(GOLDEN_PERM) == GOLDEN_PLAN_ATOMS8
