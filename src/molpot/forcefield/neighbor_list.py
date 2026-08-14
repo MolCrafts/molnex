@@ -1,6 +1,6 @@
 """Neighbor enumeration for ForceField nonbonded terms.
 
-Uses molrs :class:`NeighborQuery` when a cell is available; otherwise
+Uses molpy :class:`NeighborQuery` when a cell is available; otherwise
 all intramolecular half-pairs (open boundary).
 """
 
@@ -35,7 +35,7 @@ class NeighborListBuilder:
             atom_batch: molecule id ``(N,)``.
             cell: optional ``(3, 3)`` periodic cell.
             cutoff: if set, only pairs with ``r < cutoff`` (periodic uses
-                molrs :class:`NeighborQuery`; open uses all-pairs filter).
+                molpy :class:`NeighborQuery`; open uses all-pairs filter).
         """
         n = pos.shape[0]
         if n < 2:
@@ -78,14 +78,14 @@ class NeighborListBuilder:
         cell: torch.Tensor,
         cutoff: float,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """molrs NeighborQuery (self) under PBC; keep intramolecular pairs only."""
-        import molrs
+        """molpy NeighborQuery (self) under PBC; keep intramolecular pairs only."""
+        from molpy import Box, NeighborQuery
 
         device, dtype = pos.device, pos.dtype
         pts = pos.detach().cpu().numpy().astype(np.float64, copy=False)
         h = cell.detach().cpu().numpy().astype(np.float64, copy=False)
-        box = molrs.Box(h)
-        neigh = molrs.NeighborQuery(box, pts, float(cutoff)).query_self()
+        box = Box(h)
+        neigh = NeighborQuery(box, pts, float(cutoff)).query_self()
         if neigh.n_pairs == 0:
             return None
         # query_point_indices = i, point_indices = j (half list)

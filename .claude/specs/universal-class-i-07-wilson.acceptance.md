@@ -11,7 +11,9 @@ criteria:
       and each 3-component atom block of the row has unit norm (dimensionless
       direction cosines). This is the same golden currently hand-typed at
       tests/test_molix/test_core/test_losses_molecular.py:168.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-002
     summary: bend_rows reproduces the analytic right-angle s-vector row
     type: code
@@ -19,7 +21,9 @@ criteria:
       WilsonBMatrix().bend_rows(pos=[[1,0,0],[0,0,0],[0,1,0]] float64,
       angle_index=[[0],[1],[2]]) equals torch.tensor([[0,-1,0, 1,1,0, -1,0,0]])
       to atol 1e-12, i.e. apex atom is angle_index row 1 and row units are Å⁻¹.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-003
     summary: Rows match central finite differences on water (r=0.9572 Å, θ=104.52°)
     type: code
@@ -28,7 +32,9 @@ criteria:
       H=(-0.23921,0.92695,0) in float64, every entry of stretch_rows and
       bend_rows agrees with a central finite difference (h=1e-5 Å) of
       r=‖x_j−x_i‖ and θ=acos(û_ji·û_jk) to atol 1e-7.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-004
     summary: Translational and rotational invariants hold exactly
     type: code
@@ -37,7 +43,9 @@ criteria:
       angle row (atol 1e-12), (b) a global translation of pos leaves B unchanged
       (atol 1e-12), and (c) for a fixed R in SO(3) each per-atom 3-vector block
       of the rotated build equals R @ s of the unrotated build (atol 1e-10).
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-005
     summary: Degenerate geometry and wrong index shapes fail loud
     type: code
@@ -47,7 +55,9 @@ criteria:
       leading dim is not 3; a bond with r < length_tol; and a bend with
       |sin θ| < sin_tol (θ=179.9999°) whose message names the offending row
       index. θ=179° does not raise and still matches finite differences.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-006
     summary: Empty term lists and dtype/device are handled without special-casing
     type: code
@@ -56,7 +66,9 @@ criteria:
       shape (3,0) return tensors of shape (0, 3N) carrying pos's dtype and
       device; a float32 pos yields float32 rows; a graph with no terms yields a
       (0, 3N_g) block from graph_blocks.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-007
     summary: graph_blocks emits independent per-molecule blocks in bonds-then-angles order
     type: code
@@ -67,7 +79,9 @@ criteria:
       rebased indices (atol 1e-12), rows ordered all bonds then all angles in
       input order. A term whose atoms span two graphs, and a non-monotonic
       atom_batch, each raise ValueError naming the offending term/index.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-008
     summary: WilsonBMatrix is exported from molpot and molpot.forcefield
     type: code
@@ -76,7 +90,9 @@ criteria:
       `from molpot.forcefield import WilsonBMatrix` both succeed and bind the
       same class object; the symbol appears in __all__ of both
       src/molpot/__init__.py and src/molpot/forcefield/__init__.py.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-009
     summary: Regression example reproduces hard-coded Wilson goldens end to end
     type: runtime
@@ -89,7 +105,9 @@ criteria:
       ProjectedInternalHessianLoss.project(2·BᵀB, B) == [[2.0]] (atol 1e-6), and
       two-molecule graph_blocks shapes (3,9)/(1,6) equal to the standalone
       single-molecule builds.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
   - id: ac-010
     summary: Docstrings state shapes, per-row units, refs, and the no-Seminario caveat
     type: docs
@@ -110,7 +128,9 @@ criteria:
       tests/ scripts/ regressions/ && ty check src/ --exit-zero-on-warning` and
       `python -m pytest tests/ -q -n 12 --dist worksteal` both exit 0 on the
       branch containing this spec.
-    status: pending
+    status: verified
+    last_checked: 2026-08-14
+    verified_by: mol-impl
 ---
 
 # Acceptance criteria

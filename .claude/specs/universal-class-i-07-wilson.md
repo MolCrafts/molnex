@@ -1,6 +1,6 @@
 ---
 title: Wilson B-matrix builder for Class-I internal coordinates
-status: approved
+status: code-complete
 created: 2026-08-14
 grilled: true
 ---
@@ -158,15 +158,15 @@ scan of `src/molpot/` and `src/molix/core/losses/`. Every candidate is resolved:
 
 ## Tasks
 
-- [ ] Write failing unit tests for WilsonBMatrix stretch/bend rows (tests/test_molpot/test_forcefield/test_wilson.py → TestWilsonBMatrix): diatomic golden row, right-angle bend s-vector golden, water finite-difference agreement, translation/rotation invariants, empty inputs, and loud failures for (E,2)-shaped bond_index, zero-length bond, near-linear angle
-- [ ] Implement WilsonBMatrix.stretch_rows in src/molpot/forcefield/wilson.py (new) with analytic bond s-vectors and the COO shape guard
-- [ ] Implement WilsonBMatrix.bend_rows in src/molpot/forcefield/wilson.py with analytic bend s-vectors (apex = angle_index row 1) and the sin_tol guard
-- [ ] Write failing unit tests for WilsonBMatrix.graph_blocks (tests/test_molpot/test_forcefield/test_wilson.py → TestWilsonBMatrixGraphBlocks): per-graph (n_q_g, 3N_g) shapes, bonds-then-angles row order, block equality against standalone single-molecule builds, cross-graph term and non-monotonic atom_batch raising ValueError
-- [ ] Implement WilsonBMatrix.graph_blocks in src/molpot/forcefield/wilson.py (split by atom_batch, local index rebase, cross-graph and contiguity guards)
-- [ ] Export WilsonBMatrix from src/molpot/forcefield/__init__.py and src/molpot/__init__.py
-- [ ] Add Google-style docstrings per doc.style to src/molpot/forcefield/wilson.py with tensor shapes, per-row units (bond rows dimensionless, angle rows Å⁻¹), the Wilson/Decius/Cross 1955 and Wilson 1941 references, and the explicit no-Seminario-projection caveat
-- [ ] Add regression example regressions/universal-class-i-07-wilson.py (public API only; hard-coded goldens, no third-party runtime)
-- [ ] Run full check + test suite
+- [x] Write failing unit tests for WilsonBMatrix stretch/bend rows (tests/test_molpot/test_forcefield/test_wilson.py → TestWilsonBMatrix): diatomic golden row, right-angle bend s-vector golden, water finite-difference agreement, translation/rotation invariants, empty inputs, and loud failures for (E,2)-shaped bond_index, zero-length bond, near-linear angle
+- [x] Implement WilsonBMatrix.stretch_rows in src/molpot/forcefield/wilson.py (new) with analytic bond s-vectors and the COO shape guard
+- [x] Implement WilsonBMatrix.bend_rows in src/molpot/forcefield/wilson.py with analytic bend s-vectors (apex = angle_index row 1) and the sin_tol guard
+- [x] Write failing unit tests for WilsonBMatrix.graph_blocks (tests/test_molpot/test_forcefield/test_wilson.py → TestWilsonBMatrixGraphBlocks): per-graph (n_q_g, 3N_g) shapes, bonds-then-angles row order, block equality against standalone single-molecule builds, cross-graph term and non-monotonic atom_batch raising ValueError
+- [x] Implement WilsonBMatrix.graph_blocks in src/molpot/forcefield/wilson.py (split by atom_batch, local index rebase, cross-graph and contiguity guards)
+- [x] Export WilsonBMatrix from src/molpot/forcefield/__init__.py and src/molpot/__init__.py
+- [x] Add Google-style docstrings per doc.style to src/molpot/forcefield/wilson.py with tensor shapes, per-row units (bond rows dimensionless, angle rows Å⁻¹), the Wilson/Decius/Cross 1955 and Wilson 1941 references, and the explicit no-Seminario-projection caveat
+- [x] Add regression example regressions/universal-class-i-07-wilson.py (public API only; hard-coded goldens, no third-party runtime)
+- [x] Run full check + test suite
 
 ## Testing strategy
 

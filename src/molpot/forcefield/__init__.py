@@ -9,6 +9,11 @@
     E = pots.calc_energy(batch)
     ff_opls = model.project(OPLSForceField())
     # ff_t is a molpy.ForceField — molpy.io writers take it after realize()
+
+Geometry helpers of the same shape live beside the container:
+:class:`~molpot.forcefield.wilson.WilsonBMatrix` builds the Wilson
+``B = ∂q/∂x`` matrix (rows = bond stretches and bend angles, columns = the
+``3N`` Cartesian components) that a projected-Hessian loss consumes.
 """
 
 from molpot.forcefield.classical_imm import ClassicalIMM
@@ -20,15 +25,17 @@ from molpot.forcefield.schema import (
     PotentialMeta,
     StyleSchema,
 )
+from molpot.forcefield.wilson import WilsonBMatrix
 
 __all__ = [
     "ClassIForceField",
     "ClassicalIMM",
     "ForceField",
-    "OPLSForceField",
-    "Potentials",
     "ForceFieldSchemaView",
+    "OPLSForceField",
     "ParamSpec",
-    "StyleSchema",
     "PotentialMeta",
+    "Potentials",
+    "StyleSchema",
+    "WilsonBMatrix",
 ]

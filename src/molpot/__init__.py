@@ -40,6 +40,7 @@ from molpot.forcefield import (
     OPLSForceField,
     PotentialMeta,
     Potentials,
+    WilsonBMatrix,
 )
 from molpot.heads import AtomicEnergyMLP, EnergyHead, TypeHead
 from molpot.ir import (
@@ -133,6 +134,7 @@ __all__ = [
     "ForceField",
     "OPLSForceField",
     "Potentials",
+    "WilsonBMatrix",
     "ForceFieldSchemaView",
     "PotentialMeta",
     "AtomicChargeModel",
