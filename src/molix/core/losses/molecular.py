@@ -36,6 +36,7 @@ from molix.core.losses.energy import MSELoss
 
 __all__ = [
     "ChargeMSELoss",
+    "ParsleyEnergyWeight",
     "ProjectedInternalHessianLoss",
     "ScaleNormalizedLoss",
     "TorsionProfileLoss",
@@ -50,24 +51,55 @@ __all__ = [
 def center_by_group(
     values: torch.Tensor,
     group_ids: torch.Tensor,
+    *,
+    weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Subtract per-group means from *values* (Espaloma molecule centering).
 
+    With ``weights=None`` each group subtracts its plain mean. With *weights*
+    supplied each group subtracts its weight-normalized mean ``Σwv / Σw``,
+    which is the offset that minimizes the weighted squared residual
+    (``argmin_c Σ w (v − c)² = Σwv / Σw``) and degenerates to the plain mean
+    when all weights are equal. Zero-weight entries then drop out of the
+    offset as well as of the objective.
+
     Args:
-        values: Scalar energies ``(B,)`` or ``(B, 1)``.
+        values: Scalar energies ``(B,)`` or ``(B, 1)``, kcal/mol.
         group_ids: Integer molecule / group ids ``(B,)`` aligned with *values*.
+        weights: Optional non-negative per-configuration weights ``(B,)``
+            (dimensionless, e.g. from :class:`ParsleyEnergyWeight`). Each
+            group's weights must sum to a non-zero value.
 
     Returns:
         Centered values with the same shape as *values*.
+
+    Raises:
+        ValueError: If *group_ids* or *weights* length differs from *values*.
     """
     flat = values.reshape(-1)
     ids = group_ids.reshape(-1).long()
     if flat.numel() != ids.numel():
         raise ValueError(f"values and group_ids length mismatch: {flat.numel()} vs {ids.numel()}")
     out = flat.clone()
+    if weights is None:
+        for g in ids.unique():
+            mask = ids == g
+            out[mask] = flat[mask] - flat[mask].mean()
+        return out.view_as(values)
+    w = weights.reshape(-1).to(flat.dtype)
+    if w.numel() != flat.numel():
+        raise ValueError(f"values and weights length mismatch: {flat.numel()} vs {w.numel()}")
     for g in ids.unique():
         mask = ids == g
-        out[mask] = flat[mask] - flat[mask].mean()
+        w_g = w[mask]
+        total = w_g.sum()
+        if total == 0:
+            raise ValueError(
+                "center_by_group: weights of one group sum to zero — the "
+                "weighted group mean is undefined; supply at least one "
+                "non-zero weight per group."
+            )
+        out[mask] = flat[mask] - (w_g * flat[mask]).sum() / total
     return out.view_as(values)
 
 
@@ -317,6 +349,94 @@ class ProjectedInternalHessianLoss(nn.Module):
         return self.mse(h_q, target[self.hq_ref_key])
 
 
+class ParsleyEnergyWeight(nn.Module):
+    """Parsley per-configuration weight from a relative in-scan energy.
+
+    Maps each configuration's relative QM energy ``ΔE = E_QM − min_scan E_QM``
+    (kcal/mol) to a dimensionless weight, so chemically irrelevant high-energy
+    grid points stop counting as much as the barrier region:
+
+    .. code-block:: text
+
+        w(ΔE) = 1                                        ΔE < denom
+        w(ΔE) = denom / sqrt(denom² + (ΔE − denom)²)     denom ≤ ΔE < upper
+        w(ΔE) = 0                                        ΔE ≥ upper
+
+    At the default ``denom = 1``, ``upper = 5`` kcal/mol the middle branch is
+    ``w(ΔE) = (1 + (ΔE − 1)²)^(−1/2)``: continuous at ``ΔE = denom`` (``w = 1``),
+    positive, and monotonically decreasing to the ``upper`` cutoff.
+
+    Interpretation note: the Parsley requirement text writes the middle branch
+    as ``1/(1+(E−1)²)−½``; the trailing ``−½`` is read here as the **exponent**.
+    The literal "minus one half" reading is discontinuous at ``ΔE = 1``
+    (jumps ``1 → 0.5``) and goes **negative** above 2 kcal/mol, which would
+    reward increasing the error on those configurations — not a plausible
+    objective. The exponent reading also matches the ``energy_denom`` /
+    ``energy_upper`` attenuation of the torsion-profile targets that produced
+    the published numbers.
+
+    Weights are constants of the objective, never a gradient path: the input is
+    detached and the returned tensor has ``requires_grad=False``. It is returned
+    in the **input** dtype; ``denom`` / ``upper`` are non-learnable buffers
+    registered at :data:`~molix.config.config` precision so they ride ``.to()``
+    and ``state_dict``.
+
+    Units: ``denom`` / ``upper`` and the input ``ΔE`` are kcal/mol; the weights
+    are dimensionless. The eq.-3 ``1/dE²`` prefactor is **not** applied here —
+    compose it with :class:`ScaleNormalizedLoss` (``scale=dE``) instead.
+
+    Reference:
+        Qiu et al. "Development and Benchmarking of Open Force Field v1.0.0 —
+        the Parsley Small-Molecule Force Field." *J. Chem. Theory Comput.*
+        **17**, 6262-6280 (2021), §2.1.7 eqs. 3-5.
+        https://doi.org/10.1021/acs.jctc.1c00571
+
+        Boothroyd et al. "Development and Benchmarking of Open Force Field
+        2.0.0 — the Sage Small Molecule Force Field." *J. Chem. Theory Comput.*
+        **19**, 3251-3275 (2023). https://doi.org/10.1021/acs.jctc.3c00039
+    """
+
+    denom: torch.Tensor
+    upper: torch.Tensor
+
+    def __init__(self, *, denom: float = 1.0, upper: float = 5.0) -> None:
+        super().__init__()
+        if denom <= 0:
+            raise ValueError(f"denom must be positive (kcal/mol), got {denom!r}")
+        if upper < denom:
+            raise ValueError(f"upper must be >= denom, got upper={upper!r} denom={denom!r}")
+        self.register_buffer("denom", torch.tensor(float(denom), dtype=config.ftype))
+        self.register_buffer("upper", torch.tensor(float(upper), dtype=config.ftype))
+
+    def forward(self, relative_energies: torch.Tensor) -> torch.Tensor:
+        """Evaluate the three-branch weight on relative in-scan energies.
+
+        Args:
+            relative_energies: Non-negative ``ΔE = E_QM − min_scan E_QM``
+                of any shape, kcal/mol.
+
+        Returns:
+            Weights with the same shape and dtype as *relative_energies*,
+            dimensionless, detached (``requires_grad=False``).
+
+        Raises:
+            ValueError: If any entry is negative — that means absolute rather
+                than relative energies were passed, which would silently weight
+                every configuration at 1.
+        """
+        delta = relative_energies.detach()
+        if bool((delta < 0).any()):
+            raise ValueError(
+                "relative in-scan energies expected (dE = E_QM - min_scan E_QM >= 0); "
+                f"got a negative minimum {float(delta.min())!r}"
+            )
+        denom = self.denom.to(dtype=delta.dtype, device=delta.device)
+        upper = self.upper.to(dtype=delta.dtype, device=delta.device)
+        decay = denom / torch.sqrt(denom.square() + (delta - denom).square())
+        w = torch.where(delta < denom, torch.ones_like(delta), decay)
+        return torch.where(delta >= upper, torch.zeros_like(delta), w)
+
+
 class TorsionProfileLoss(nn.Module):
     """Molecule-centered MSE on a torsion energy profile, optional barrier term.
 
@@ -325,7 +445,18 @@ class TorsionProfileLoss(nn.Module):
     molecule / scan is invisible. An optional barrier term compares
     ``max E − min E`` per group.
 
+    Supplying ``energy_weight`` (e.g. :class:`ParsleyEnergyWeight`) switches
+    the profile term to the Parsley per-configuration weighted form: each scan
+    contributes ``Σ w r² / Σ w`` — one ``O(1)`` number regardless of its grid
+    count — and the centering offset becomes the weighted group mean, so
+    zero-weight configurations drop out of the numerator, the denominator, and
+    the offset alike. The default ``None`` leaves the plain path untouched.
+
     Units: kcal/mol (profile and barrier heights).
+
+    Reference:
+        Qiu et al. *J. Chem. Theory Comput.* **17**, 6262-6280 (2021),
+        §2.1.7 eqs. 3-5. https://doi.org/10.1021/acs.jctc.1c00571
     """
 
     def __init__(
@@ -336,16 +467,46 @@ class TorsionProfileLoss(nn.Module):
         group_key: str = "molecule_id_index",
         barrier_weight: float = 0.0,
         reduction: str = "mean",
+        energy_weight: nn.Module | None = None,
     ) -> None:
+        """Configure the torsion-profile objective.
+
+        Args:
+            pred_key: Key of the predicted scan energies in ``pred``
+                (``(C,)``, kcal/mol).
+            target_key: Key of the reference scan energies in ``target``
+                (``(C,)``, kcal/mol).
+            group_key: Key of the per-configuration scan/group ids in
+                ``target`` (``(C,)``, integer).
+            barrier_weight: Weight of the additive, unweighted barrier-height
+                MSE term (dimensionless multiplier; 0 disables it).
+            reduction: ``"mean"`` / ``"sum"`` / ``"none"``. With
+                ``energy_weight`` set the reduction runs over profiles, not
+                configurations.
+            energy_weight: Optional per-configuration weight policy (e.g.
+                :class:`ParsleyEnergyWeight`) mapping relative in-scan
+                reference energies (kcal/mol) to dimensionless weights;
+                ``None`` keeps the plain mean-centered MSE path.
+        """
         super().__init__()
         self.pred_key = pred_key
         self.target_key = target_key
         self.group_key = group_key
         self.barrier_weight = float(barrier_weight)
         self.mse = nn.MSELoss(reduction=reduction)
+        self.energy_weight = energy_weight
 
     def forward(self, pred: Mapping[str, Any], target: Mapping[str, Any]) -> torch.Tensor:
-        """Centered profile MSE plus ``barrier_weight`` × barrier MSE.
+        """Centered profile term plus ``barrier_weight`` × barrier MSE.
+
+        Without ``energy_weight`` the profile term is the plain mean-centered
+        MSE reduced over **configurations**. With ``energy_weight`` set it is
+        the per-profile ``Σ w r² / Σ w`` vector reduced by the same ``reduction``
+        string over **profiles** (``"mean"`` / ``"sum"`` → scalar, ``"none"`` →
+        ``(G,)``) — that profile-level reduction is what balances scans of
+        different grid counts. The barrier term is unchanged and stays
+        **unweighted** (it is already one scalar per group), and remains
+        additive exactly as before.
 
         Args:
             pred: Mapping with energies at ``pred_key``, kcal/mol.
@@ -353,18 +514,65 @@ class TorsionProfileLoss(nn.Module):
                 (kcal/mol) and integer group ids at ``group_key``.
 
         Returns:
-            Scalar loss in (kcal/mol)².
+            Loss in (kcal/mol)² — scalar, or ``(G,)`` with ``reduction="none"``.
         """
         e_pred = pred[self.pred_key]
         e_true = target[self.target_key]
         groups = target[self.group_key]
-        loss = self.mse(center_by_group(e_pred, groups), center_by_group(e_true, groups))
+        if self.energy_weight is None:
+            loss = self.mse(center_by_group(e_pred, groups), center_by_group(e_true, groups))
+        else:
+            loss = self._weighted_profile(e_pred, e_true, groups)
         if self.barrier_weight == 0.0:
             return loss
         return loss + self.barrier_weight * self.mse(
             self._barrier_heights(e_pred, groups),
             self._barrier_heights(e_true, groups),
         )
+
+    def _weighted_profile(
+        self,
+        e_pred: torch.Tensor,
+        e_true: torch.Tensor,
+        group_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-profile ``Σ w r² / Σ w``, reduced by ``self.mse.reduction``."""
+        flat_pred = e_pred.reshape(-1)
+        flat_true = e_true.reshape(-1)
+        ids = group_ids.reshape(-1).long()
+        weights = self.energy_weight(self._relative_to_group_min(flat_true.detach(), ids))
+        weights = weights.to(flat_pred.dtype)
+        resid = center_by_group(flat_pred, ids, weights=weights) - center_by_group(
+            flat_true, ids, weights=weights
+        )
+        terms: list[torch.Tensor] = []
+        for g in ids.unique():
+            mask = ids == g
+            w_g = weights[mask]
+            terms.append((w_g * resid[mask].square()).sum() / w_g.sum())
+        per_profile = torch.stack(terms) if terms else flat_pred.new_zeros((0,))
+        reduction = self.mse.reduction
+        if reduction == "mean":
+            return per_profile.mean()
+        if reduction == "sum":
+            return per_profile.sum()
+        if reduction == "none":
+            return per_profile
+        raise ValueError(f"Unknown reduction {reduction!r}")
+
+    def _relative_to_group_min(self, values: torch.Tensor, group_ids: torch.Tensor) -> torch.Tensor:
+        """Per-group ``value − min(group)`` — relative in-scan energies, kcal/mol."""
+        flat = values.reshape(-1)
+        ids = group_ids.reshape(-1).long()
+        if flat.numel() != ids.numel():
+            raise ValueError(
+                f"values and group_ids length mismatch: {flat.numel()} vs {ids.numel()}"
+            )
+        out = flat.clone()
+        for g in ids.unique():
+            mask = ids == g
+            out[mask] = flat[mask] - flat[mask].min()
+        return out.view_as(values)
 
     def _barrier_heights(self, values: torch.Tensor, group_ids: torch.Tensor) -> torch.Tensor:
         """Per-group ``max − min`` energy; empty and singleton groups are 0."""

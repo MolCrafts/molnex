@@ -10,6 +10,7 @@ from molix.config import config
 from molix.core.losses import WeightedLoss, energy_force_mse, energy_mse
 from molix.core.losses.molecular import (
     ChargeMSELoss,
+    ParsleyEnergyWeight,
     ProjectedInternalHessianLoss,
     ScaleNormalizedLoss,
     TorsionProfileLoss,
@@ -352,3 +353,297 @@ class TestScaleNormalizedLoss:
         target = {"q": torch.tensor([0.1, -0.1])}
         got = loss_fn(pred, target)
         assert torch.allclose(got, torch.tensor(0.0025), atol=_ENERGY_ATOL)
+
+
+# ---------------------------------------------------------------------------
+# universal-class-i-12-torsion-weights — Parsley per-configuration energy weights
+#
+# Domain basis: Qiu et al., "Development and Benchmarking of Open Force Field
+# v1.0.0 — the Parsley Small-Molecule Force Field", JCTC 17, 6262-6280 (2021),
+# §2.1.7 eqs. 3-5, https://doi.org/10.1021/acs.jctc.1c00571
+#
+#     L_g = Σ_{i∈g} w(ΔE_i)·[ (E_MM,i - c_MM) - (E_QM,i - c_QM) ]² / Σ_{i∈g} w(ΔE_i)
+#     ΔE_i = E_QM,i - min_j∈g E_QM,j                      (kcal/mol)
+#     w(ΔE) = 1                                            ΔE < dE
+#     w(ΔE) = dE / sqrt(dE² + (ΔE - dE)²)                  dE ≤ ΔE < ΔE_max
+#     w(ΔE) = 0                                            ΔE ≥ ΔE_max
+#
+# The trailing "−½" of the requirement text is read as the *exponent*
+# (w = (1 + (ΔE-1)²)^(-1/2)); the literal "minus one half" reading is
+# discontinuous at ΔE = dE and negative for ΔE > 2 (see spec §Domain basis).
+# c_MM / c_QM are the *weighted* group means (argmin_c Σ w (d-c)² = Σwd/Σw).
+#
+# All goldens below are analytic closed forms, hard-coded, float64, atol 1e-12.
+# No oracle software of any kind is involved.
+# ---------------------------------------------------------------------------
+
+_PARSLEY_ATOL = 1e-12
+
+# sqrt(2) and 1/sqrt(2) as exact float64 literals (avoids a new module import).
+_SQRT2 = 1.4142135623730951
+_INV_SQRT2 = 0.7071067811865476
+
+# Fixture P — one scan, exercises all three weight branches at once.
+#   e_true = [0.0, 0.5, 2.0, 7.0]            → ΔE = [0.0, 0.5, 2.0, 7.0]
+#   w      = [1, 1, 1/sqrt(2), 0]            (branch 1, 1, 2, 3)
+#   d      = e_pred - e_true = [-0.5, -0.5, sqrt(2), 50.0]
+#   Σwd    = -0.5 - 0.5 + (1/sqrt(2))·sqrt(2) + 0 = 0  → weighted mean 0
+#   Σwd²   = 0.25 + 0.25 + (1/sqrt(2))·2 + 0 = 0.5 + sqrt(2)
+#   Σw     = 2 + 1/sqrt(2)
+#   L      = (0.5 + sqrt(2)) / (2 + 1/sqrt(2)) = (1 + 2sqrt(2))/(4 + sqrt(2))
+#          = 1/sqrt(2)                        [since (4+sqrt(2))/sqrt(2) = 1+2sqrt(2)]
+_P_E_TRUE = torch.tensor([0.0, 0.5, 2.0, 7.0], dtype=torch.float64)
+_P_E_PRED = torch.tensor([-0.5, 0.0, 2.0 + _SQRT2, 57.0], dtype=torch.float64)
+_P_D = torch.tensor([-0.5, -0.5, _SQRT2, 50.0], dtype=torch.float64)
+_P_WEIGHTS = torch.tensor([1.0, 1.0, _INV_SQRT2, 0.0], dtype=torch.float64)
+_P_GROUP = torch.tensor([0, 0, 0, 0])
+_P_LOSS = 0.7071067811865476  # = 1/sqrt(2), independently re-derived above
+
+# Fixture Q — same scan, uniform +1 offset plus a 50 kcal/mol error parked on
+# the ΔE = 7 (w = 0) configuration:
+#   d = [1, 1, 1, 50]; Σwd/Σw = (2 + 1/sqrt(2))/(2 + 1/sqrt(2)) = 1
+#   r = d - 1 = [0, 0, 0, 49] and w[3] = 0 → L = 0 (analytically exact).
+_Q_E_PRED = torch.tensor([1.0, 1.5, 3.0, 57.0], dtype=torch.float64)
+# Barrier term (unweighted, per-group max-min): pred 57-1 = 56, ref 7-0 = 7,
+# → (56 - 7)² = 2401.
+_Q_BARRIER = 2401.0
+
+# Fixture E — uniform weights (both ΔE < 1 kcal/mol), so the weighted objective
+# must degenerate to the plain mean-centered MSE:
+#   d = [0, 2]; mean 1; r = [-1, 1]; L = (1 + 1)/2 = 1.0 exactly.
+_E_E_TRUE = torch.tensor([0.0, 0.5], dtype=torch.float64)
+_E_E_PRED = torch.tensor([0.0, 2.5], dtype=torch.float64)
+_E_GROUP = torch.tensor([0, 0])
+
+
+class TestParsleyEnergyWeight:
+    def test_branch_table_default_policy(self):
+
+        # denom = 1, upper = 5 kcal/mol.
+        # ΔE = 2 → 1/sqrt(1 + 1) = 1/sqrt(2); ΔE = 3 → 1/sqrt(1 + 4) = 1/sqrt(5).
+        relative = torch.tensor([0.0, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0], dtype=torch.float64)
+        expected = torch.tensor(
+            [1.0, 1.0, 1.0, 0.7071067811865476, 0.4472135954999579, 0.0, 0.0],
+            dtype=torch.float64,
+        )
+        got = ParsleyEnergyWeight()(relative)
+        assert torch.allclose(got, expected, atol=_PARSLEY_ATOL)
+
+    def test_output_dtype_matches_input(self):
+
+        relative = torch.tensor([0.0, 2.0], dtype=torch.float64)
+        assert ParsleyEnergyWeight()(relative).dtype == torch.float64
+
+    def test_continuous_at_lower_boundary(self):
+
+        # The rejected "minus one half" reading jumps 1.0 → 0.5 here.
+        policy = ParsleyEnergyWeight()
+        below = policy(torch.tensor([1.0 - 1e-9], dtype=torch.float64))
+        at = policy(torch.tensor([1.0], dtype=torch.float64))
+        assert torch.allclose(below, at, atol=1e-6)
+        assert torch.allclose(below, torch.tensor([1.0], dtype=torch.float64), atol=1e-6)
+
+    def test_non_negative_on_dense_grid(self):
+
+        relative = torch.arange(0.0, 8.0, 0.01, dtype=torch.float64)
+        got = ParsleyEnergyWeight()(relative)
+        assert bool((got >= 0.0).all())
+
+    def test_monotone_non_increasing_on_dense_grid(self):
+
+        # Second guard on the rejected reading, which increases again past ΔE = 2.
+        relative = torch.arange(0.0, 8.0, 0.01, dtype=torch.float64)
+        got = ParsleyEnergyWeight()(relative)
+        assert bool((torch.diff(got) <= 0.0).all())
+
+    def test_branch_table_non_default_policy(self):
+
+        # denom = 2, upper = 6 kcal/mol.
+        # ΔE = 2 → 2/sqrt(4 + 0) = 1; ΔE = 4 → 2/sqrt(4 + 4) = 1/sqrt(2).
+        relative = torch.tensor([1.0, 2.0, 4.0, 6.0, 10.0], dtype=torch.float64)
+        expected = torch.tensor(
+            [1.0, 1.0, 0.7071067811865475, 0.0, 0.0],
+            dtype=torch.float64,
+        )
+        got = ParsleyEnergyWeight(denom=2.0, upper=6.0)(relative)
+        assert torch.allclose(got, expected, atol=_PARSLEY_ATOL)
+
+    def test_zero_denom_raises(self):
+
+        with pytest.raises(ValueError):
+            ParsleyEnergyWeight(denom=0.0)
+
+    def test_upper_below_denom_raises(self):
+
+        with pytest.raises(ValueError):
+            ParsleyEnergyWeight(denom=1.0, upper=0.5)
+
+    def test_negative_relative_energy_raises(self):
+
+        # Guards a caller passing absolute instead of relative QM energies.
+        with pytest.raises(ValueError):
+            ParsleyEnergyWeight()(torch.tensor([0.0, -0.25], dtype=torch.float64))
+
+    def test_output_is_detached(self):
+
+        relative = torch.tensor([0.0, 2.0], dtype=torch.float64, requires_grad=True)
+        got = ParsleyEnergyWeight()(relative)
+        assert got.requires_grad is False
+
+    def test_denom_and_upper_are_buffers_at_config_ftype(self):
+
+        policy = ParsleyEnergyWeight()
+        buffers = dict(policy.named_buffers())
+        assert "denom" in buffers
+        assert "upper" in buffers
+        assert buffers["denom"].dtype == config.ftype
+        assert buffers["upper"].dtype == config.ftype
+        names = {name for name, _ in policy.named_parameters()}
+        assert "denom" not in names
+        assert "upper" not in names
+
+    def test_buffers_appear_in_state_dict(self):
+
+        state = ParsleyEnergyWeight(denom=2.0, upper=6.0).state_dict()
+        assert set(state) == {"denom", "upper"}
+        assert float(state["denom"]) == 2.0
+        assert float(state["upper"]) == 6.0
+
+    def test_buffers_follow_module_to(self):
+
+        policy = ParsleyEnergyWeight().to(torch.float64)
+        assert policy.denom.dtype == torch.float64
+        assert policy.upper.dtype == torch.float64
+
+
+class TestCenterByGroupWeights:
+    def test_weighted_centering_leaves_zero_weighted_mean_unchanged(self):
+        # Fixture P residuals: Σwd = 0, so weighted centering is the identity.
+        got = center_by_group(_P_D, _P_GROUP, weights=_P_WEIGHTS)
+        assert torch.allclose(got, _P_D, atol=_PARSLEY_ATOL)
+
+    def test_weights_none_matches_plain_mean_golden(self):
+        # Same inputs and golden as TestCenterByGroup.test_exact_centering.
+        values = torch.tensor([1.0, 3.0, 10.0, 14.0])
+        groups = torch.tensor([0, 0, 1, 1])
+        got = center_by_group(values, groups, weights=None)
+        assert torch.equal(got, torch.tensor([-1.0, 1.0, -2.0, 2.0]))
+
+
+class TestTorsionProfileLossParsley:
+    def test_fixture_p_weighted_profile_is_inverse_sqrt_two(self):
+
+        loss_fn = TorsionProfileLoss(energy_weight=ParsleyEnergyWeight())
+        got = loss_fn(
+            {"energy": _P_E_PRED},
+            {"energy": _P_E_TRUE, "molecule_id_index": _P_GROUP},
+        )
+        assert torch.allclose(got, torch.tensor(_P_LOSS, dtype=torch.float64), atol=_PARSLEY_ATOL)
+
+    def test_fixture_q_zero_weight_configuration_is_excluded(self):
+
+        # Analytic value is exactly 0; float64 weighted centering leaves ~1e-32.
+        loss_fn = TorsionProfileLoss(energy_weight=ParsleyEnergyWeight())
+        got = loss_fn(
+            {"energy": _Q_E_PRED},
+            {"energy": _P_E_TRUE, "molecule_id_index": _P_GROUP},
+        )
+        assert torch.allclose(got, torch.tensor(0.0, dtype=torch.float64), atol=_PARSLEY_ATOL)
+
+    def test_fixture_q_barrier_term_stays_unweighted(self):
+
+        loss_fn = TorsionProfileLoss(
+            energy_weight=ParsleyEnergyWeight(),
+            barrier_weight=1.0,
+        )
+        got = loss_fn(
+            {"energy": _Q_E_PRED},
+            {"energy": _P_E_TRUE, "molecule_id_index": _P_GROUP},
+        )
+        assert torch.allclose(
+            got, torch.tensor(_Q_BARRIER, dtype=torch.float64), atol=_PARSLEY_ATOL
+        )
+
+    def test_zero_weight_configuration_gets_zero_gradient(self):
+
+        # dL/dE_MM,j = 2 w_j r_j / Σw → [-0.3694, -0.3694, 0.7388, 0.0].
+        e_pred = _P_E_PRED.clone().requires_grad_()
+        loss_fn = TorsionProfileLoss(energy_weight=ParsleyEnergyWeight())
+        loss_fn(
+            {"energy": e_pred},
+            {"energy": _P_E_TRUE, "molecule_id_index": _P_GROUP},
+        ).backward()
+        grad = e_pred.grad
+        assert grad is not None
+        assert float(grad[3]) == 0.0
+        assert bool(torch.isfinite(grad[:3]).all())
+        assert bool((grad[:3] != 0.0).all())
+
+    def test_reduction_none_is_per_profile_and_grid_count_invariant(self):
+
+        # Group 1 is fixture P with every grid point duplicated (8 points):
+        # numerator and denominator both double → identical per-profile loss.
+        e_pred = torch.cat([_P_E_PRED, _P_E_PRED.repeat_interleave(2)])
+        e_true = torch.cat([_P_E_TRUE, _P_E_TRUE.repeat_interleave(2)])
+        groups = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
+        loss_fn = TorsionProfileLoss(energy_weight=ParsleyEnergyWeight(), reduction="none")
+        got = loss_fn({"energy": e_pred}, {"energy": e_true, "molecule_id_index": groups})
+        assert got.shape == (2,)
+        assert torch.allclose(
+            got,
+            torch.tensor([_P_LOSS, _P_LOSS], dtype=torch.float64),
+            atol=_PARSLEY_ATOL,
+        )
+
+    def test_reduction_sum_adds_profiles(self):
+
+        e_pred = torch.cat([_P_E_PRED, _P_E_PRED.repeat_interleave(2)])
+        e_true = torch.cat([_P_E_TRUE, _P_E_TRUE.repeat_interleave(2)])
+        groups = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
+        loss_fn = TorsionProfileLoss(energy_weight=ParsleyEnergyWeight(), reduction="sum")
+        got = loss_fn({"energy": e_pred}, {"energy": e_true, "molecule_id_index": groups})
+        # 2 / sqrt(2) = sqrt(2)
+        assert torch.allclose(got, torch.tensor(_SQRT2, dtype=torch.float64), atol=_PARSLEY_ATOL)
+
+    def test_reduction_mean_averages_profiles(self):
+
+        e_pred = torch.cat([_P_E_PRED, _P_E_PRED.repeat_interleave(2)])
+        e_true = torch.cat([_P_E_TRUE, _P_E_TRUE.repeat_interleave(2)])
+        groups = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
+        loss_fn = TorsionProfileLoss(energy_weight=ParsleyEnergyWeight(), reduction="mean")
+        got = loss_fn({"energy": e_pred}, {"energy": e_true, "molecule_id_index": groups})
+        assert torch.allclose(got, torch.tensor(_P_LOSS, dtype=torch.float64), atol=_PARSLEY_ATOL)
+
+    def test_equal_weights_match_default_path(self):
+
+        pred = {"energy": _E_E_PRED}
+        target = {"energy": _E_E_TRUE, "molecule_id_index": _E_GROUP}
+        weighted = TorsionProfileLoss(energy_weight=ParsleyEnergyWeight())(pred, target)
+        default = TorsionProfileLoss()(pred, target)
+        assert float(weighted) == 1.0
+        assert float(default) == 1.0
+        assert float(weighted) == float(default)
+
+    def test_singleton_group_with_weights_is_zero(self):
+
+        loss_fn = TorsionProfileLoss(energy_weight=ParsleyEnergyWeight())
+        got = loss_fn(
+            {"energy": torch.tensor([9.0], dtype=torch.float64)},
+            {
+                "energy": torch.tensor([3.0], dtype=torch.float64),
+                "molecule_id_index": torch.tensor([0]),
+            },
+        )
+        assert torch.allclose(got, torch.tensor(0.0, dtype=torch.float64), atol=_PARSLEY_ATOL)
+
+    def test_default_off_equivalence_is_bit_for_bit(self):
+        # Pre-existing fixture from TestTorsionProfileLoss (pred [0, 4], true [0, 2]).
+        pred = {"energy": torch.tensor([0.0, 4.0])}
+        target = {
+            "energy": torch.tensor([0.0, 2.0]),
+            "molecule_id_index": torch.tensor([0, 0]),
+        }
+        implicit = TorsionProfileLoss()(pred, target)
+        explicit = TorsionProfileLoss(energy_weight=None)(pred, target)
+        assert float(implicit) == 1.0
+        assert float(explicit) == float(implicit)

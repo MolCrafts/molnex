@@ -9,7 +9,6 @@ must not be treated as authority for a new training submission.
 - [pinet-quantization-thermal-noise-02-md-driver](pinet-quantization-thermal-noise-02-md-driver.md) — in-process velocity-Verlet and Langevin MD driver; approved with acceptance work pending.
 - [cuet-force-doublebackward](cuet-force-doublebackward.md) — cuet equivariant Linear double-backward repair; in progress with acceptance work pending.
 - [mace-neighbor-graph-correctness](mace-neighbor-graph-correctness.md) — independent multi-image neighbor oracle; code complete with one acceptance criterion pending.
-- [universal-class-i-12-torsion-weights](universal-class-i-12-torsion-weights.md) — Parsley per-configuration energy weights + Σw profile normalization for `TorsionProfileLoss` (opt-in). [approved]
 - [universal-class-i-13-grad-audit](universal-class-i-13-grad-audit.md) — per-task gradient-balance audit primitive (E4/E5 evidence) + flat-pool trainer retirement. [approved]
 
 ## Closed specifications and chains
@@ -23,6 +22,7 @@ must not be treated as authority for a new training submission.
 | `learnable-classical-ff-01..09` | 2026-08-13 | Completed library chain; removed from the active specification set. |
 | `universal-class-i-01..04` | 2026-08-13 | Completed library steps; removed from the active specification set. |
 | `mm-param-val-01..08` | 2026-08-13 | Closed and removed from the active specification set; superseded by `universal-class-i-05-dataset-composition`. |
+| [universal-class-i-12-torsion-weights] | 2026-08-14 | Completed; all 11 acceptance criteria verified. |
 | [universal-class-i-11-step] | 2026-08-14 | Completed; all 14 acceptance criteria verified. |
 | [universal-class-i-10-sampler] | 2026-08-14 | Completed; all 14 acceptance criteria verified. |
 | [universal-class-i-09-packer] | 2026-08-14 | Completed; all 11 acceptance criteria verified. |
