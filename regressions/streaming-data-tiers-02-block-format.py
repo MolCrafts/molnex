@@ -33,7 +33,7 @@ Legs, in order:
 1. **Streaming append + torn-tail resume.** Block A is written twice: once
    uninterrupted, and once with a simulated crash after the last unit's bytes
    were fsynced — ``commit.log`` is truncated **mid-record** and 24 junk bytes
-   are appended to ``frame_pos.bin`` through raw file ops. ``BlockWriter.resume``
+   are appended to ``pos.bin`` through raw file ops. ``BlockWriter.resume``
    must roll both back to the last crc32-valid record; the re-appended, sealed
    block is then asserted **byte-identical** (per-column sha256 + ``block_digest``)
    to the uninterrupted one.
@@ -66,6 +66,13 @@ Legs, in order:
              consulted, here or at authoring time; no network, no subprocess.
     verify:  PYTHONPATH=src python regressions/streaming-data-tiers-02-block-format.py
     commit:  6d425f7 (+ working tree implementing streaming-data-tiers-02-block-format)
+    repin:   2026-08-14 — ``molix.block/1`` column-vocabulary revision (``atom_Z`` ->
+             ``Z``, ``frame_pos`` -> ``pos``, ``frame_target_energy`` -> ``energy``,
+             ``frame_atom_target_forces`` -> ``forces``, ``mol_n_atoms`` /
+             ``mol_n_frames`` / ``mol_task`` -> ``n_atoms`` / ``n_frames`` / ``task``).
+             Every per-column sha256 is **unchanged** — the payload bytes are the same,
+             only the keys moved — while both ``block_digest`` values moved, because the
+             digested core covers the column names.
     torch:   2.12.1+cpu
     device:  cpu, float32 / int32 / int16 (exact equality throughout)
     date:    2026-08-14
@@ -109,13 +116,13 @@ _PROVENANCE: Mapping[str, object] = {
     },
     "created_at": "2026-08-14T00:00:00+00:00",
     "units": {
-        "frame_pos": "angstrom",
-        "frame_target_energy": "kcal/mol",
-        "frame_atom_target_forces": "kcal/mol/angstrom",
+        "pos": "angstrom",
+        "energy": "kcal/mol",
+        "forces": "kcal/mol/angstrom",
     },
 }
 
-#: Columns frozen from the first unit: 5 block-index + atom_Z + frame_pos +
+#: Columns frozen from the first unit: 5 block-index + Z + pos +
 #: 2 frame targets + 3 valence families (their columns plus a derived ``_n``).
 _N_COLUMNS = 24
 #: Commit record: unit_index (i8) + n_columns (i4) + C x committed_len (i8) +
@@ -125,65 +132,65 @@ _RECORD_SIZE = 16 + 8 * _N_COLUMNS
 #: sha256 of every ``<column>.bin`` of sealed block A (split "train"). Identical
 #: for the uninterrupted and the crash-resumed write — that is leg 1's assertion.
 _BLOCK_A_COLUMN_SHA256: Mapping[str, str] = {
+    "Z": "41e4a02fbf3c479370753cff3429c47249e7c0501da052e2c089191ad81378ad",
     "angle_atomi": "d05796eb3a889d209cc6e6e6a1429bbd9d218df2b58146a51be1fcafc3164042",
     "angle_atomj": "ad5dc1478de06a4c2728ea528bd9361a4b945e92a414bf4d180cedaaeaa5f4cc",
     "angle_atomk": "79f2a4da15e31b933ef794b6f0a825d72d2bc94c887c03183baa43a1d09fdbff",
     "angle_n": "34fb5c825de7ca4aea6e712f19d439c1da0c92c37b423936c5f618545ca4fa1f",
     "angle_type": "782486f75e626020735465b875a72f8f468aa5fd32d09f243ca88917f9ce26c1",
-    "atom_Z": "41e4a02fbf3c479370753cff3429c47249e7c0501da052e2c089191ad81378ad",
     "bond_atomi": "396506ae7ff3bbf97f7d4f7aa9497f7ac898d2a06412fbe72000424ce96a312c",
     "bond_atomj": "5e60b07a30d0103e3f73d203b3f5d1a56f3d2fb6be3a3b3e0ab4cce1a7820810",
     "bond_n": "0c40fc912bea3d01b4dbad07de4c8cf177ac0c424bc11d622d2239c0e5988986",
     "bond_type": "c8c362c52a33bdd8c9fa09b44caf5284e23fd17e4976103c51b9f2fadf957033",
-    "frame_atom_target_forces": "41ea8b1086ce68ba58a300e5d2b00ecd0a3ce3fd08f05b9a924f49678dcb82b0",
-    "frame_pos": "5d065d70d3ea9644bab9dcf0165f57c5b873b88dda824cd1ccd814b13fa04a09",
-    "frame_target_energy": "ee186fbbdcdc683c0bf77f3f28a9b4703b3f611a24cb44d4b0d5585b377b8a36",
-    "mol_n_atoms": "8073c94ef47ecc86dcd78a8d9027a23484fadcd7cea37150319ba8cbf1c70b6b",
-    "mol_n_frames": "0c40fc912bea3d01b4dbad07de4c8cf177ac0c424bc11d622d2239c0e5988986",
-    "mol_task": "01acecb507abfe1a354aa8064f4af5d3f1acd019e37db3c11c97523b71c76e9d",
+    "energy": "ee186fbbdcdc683c0bf77f3f28a9b4703b3f611a24cb44d4b0d5585b377b8a36",
+    "forces": "41ea8b1086ce68ba58a300e5d2b00ecd0a3ce3fd08f05b9a924f49678dcb82b0",
+    "n_atoms": "8073c94ef47ecc86dcd78a8d9027a23484fadcd7cea37150319ba8cbf1c70b6b",
+    "n_frames": "0c40fc912bea3d01b4dbad07de4c8cf177ac0c424bc11d622d2239c0e5988986",
+    "pos": "5d065d70d3ea9644bab9dcf0165f57c5b873b88dda824cd1ccd814b13fa04a09",
     "proper_atomi": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119",
     "proper_atomj": "67abdd721024f0ff4e0b3f4c2fc13bc5bad42d0b7851d456d88d203d15aaa450",
     "proper_atomk": "26b25d457597a7b0463f9620f666dd10aa2c4373a505967c7c8d70922a2d6ece",
     "proper_atoml": "9d9f290527a6be626a8f5985b26e19b237b44872b03631811df4416fc1713178",
     "proper_n": "01acecb507abfe1a354aa8064f4af5d3f1acd019e37db3c11c97523b71c76e9d",
     "proper_type": "9d9f290527a6be626a8f5985b26e19b237b44872b03631811df4416fc1713178",
+    "task": "01acecb507abfe1a354aa8064f4af5d3f1acd019e37db3c11c97523b71c76e9d",
     "unit_key_bytes": "89e43d72f79c075a8c4f8f929a416111221e10c73d80614d18dd979aed403b11",
     "unit_key_len": "a23a868b85672de9418b12652e4c1663cb38054c1206157fbf5826bf10f80b2d",
 }
 
 #: sha256 over the canonical JSON of ``{columns, rows, split, units, digests}`` —
 #: no path, no timestamp, no provenance, which is why relocation cannot move it.
-_BLOCK_A_DIGEST = "868910fd174f522ea96bee096bda648e5a3721dba8b45b80a20bdafb49150ce7"
+_BLOCK_A_DIGEST = "223c1547d890ebcf4128a71afdc36bc7c343431259850d063598d20eb0db8414"
 
 #: sha256 of every ``<column>.bin`` of sealed block B (split "valid").
 _BLOCK_B_COLUMN_SHA256: Mapping[str, str] = {
+    "Z": "952e778cb4a51fb98d685f6b6dde89c0e2787f9938eceab7f53944f7fb106fca",
     "angle_atomi": "01acecb507abfe1a354aa8064f4af5d3f1acd019e37db3c11c97523b71c76e9d",
     "angle_atomj": "34fb5c825de7ca4aea6e712f19d439c1da0c92c37b423936c5f618545ca4fa1f",
     "angle_atomk": "0c40fc912bea3d01b4dbad07de4c8cf177ac0c424bc11d622d2239c0e5988986",
     "angle_n": "26b25d457597a7b0463f9620f666dd10aa2c4373a505967c7c8d70922a2d6ece",
     "angle_type": "41d805e613efbe1acb36eaa0127a35da4a1faa1ac97985d078e50d1fd96055fd",
-    "atom_Z": "952e778cb4a51fb98d685f6b6dde89c0e2787f9938eceab7f53944f7fb106fca",
     "bond_atomi": "ad5dc1478de06a4c2728ea528bd9361a4b945e92a414bf4d180cedaaeaa5f4cc",
     "bond_atomj": "4636993d3e1da4e9d6b8f87b79e8f7c6d018580d52661950eabc3845c5897a4d",
     "bond_n": "9d9f290527a6be626a8f5985b26e19b237b44872b03631811df4416fc1713178",
     "bond_type": "11047585fe102fbb5cadb42446612a578d88c6ef5ed076bb7ac360c4f9e4373d",
-    "frame_atom_target_forces": "0525c0dbdf6363a08d4f2aac4247891c9405dbeb9c5a567cc351258b4da29329",
-    "frame_pos": "35c926608bbc6d350fc1b89e20accbb7356a0c4682ed6a3deb97582397191dbf",
-    "frame_target_energy": "648e5ecb219b01d8d51cea6a16190a13f60544f6e34dc5957b0eef31512e311e",
-    "mol_n_atoms": "fb5e512425fc9449316ec95969ebe71e2d576dbab833d61e2a5b9330fd70ee02",
-    "mol_n_frames": "2594b6a92ebfb1c3312deb7d01c015fb95e9fbe9bd7bc6b527af07813ec7b910",
-    "mol_task": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119",
+    "energy": "648e5ecb219b01d8d51cea6a16190a13f60544f6e34dc5957b0eef31512e311e",
+    "forces": "0525c0dbdf6363a08d4f2aac4247891c9405dbeb9c5a567cc351258b4da29329",
+    "n_atoms": "fb5e512425fc9449316ec95969ebe71e2d576dbab833d61e2a5b9330fd70ee02",
+    "n_frames": "2594b6a92ebfb1c3312deb7d01c015fb95e9fbe9bd7bc6b527af07813ec7b910",
+    "pos": "35c926608bbc6d350fc1b89e20accbb7356a0c4682ed6a3deb97582397191dbf",
     "proper_atomi": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119",
     "proper_atomj": "67abdd721024f0ff4e0b3f4c2fc13bc5bad42d0b7851d456d88d203d15aaa450",
     "proper_atomk": "26b25d457597a7b0463f9620f666dd10aa2c4373a505967c7c8d70922a2d6ece",
     "proper_atoml": "9d9f290527a6be626a8f5985b26e19b237b44872b03631811df4416fc1713178",
     "proper_n": "67abdd721024f0ff4e0b3f4c2fc13bc5bad42d0b7851d456d88d203d15aaa450",
     "proper_type": "9d9f290527a6be626a8f5985b26e19b237b44872b03631811df4416fc1713178",
+    "task": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119",
     "unit_key_bytes": "5e8a5d96be6b1d641d98a9895d1cf01657b95ea6868d009315344cc9ea11a34b",
     "unit_key_len": "7aa8ca4a02506da9133d8f889678b76f716ce45d02e22fdb7b70a15e56a0eff8",
 }
 
-_BLOCK_B_DIGEST = "17c809a7d1f7ee9d791b26575d5fc7de98222c603c1e1d43d9c2fe46ab6b93af"
+_BLOCK_B_DIGEST = "a4055a649b805fa22a09dc2abdc315cf0d8a1a3b22b6b56d866b66992c759a15"
 
 # Derived, never stored — asserted against the spec's hand-computed literals.
 _MOL_ATOM_PTR = [0, 3, 7]
@@ -281,7 +288,7 @@ def _unit(key: str, task: str, z: list[int], n_frames: int, offset: int) -> Samp
 
     Args:
         key: Unit identity, stored UTF-8 in ``unit_key_bytes``.
-        task: Task label, stored as a dictionary code in ``mol_task``.
+        task: Task label, stored as a dictionary code in ``task``.
         z: Atomic numbers, ``(N,)``.
         n_frames: Frames of this topology.
         offset: Integer offset feeding :func:`_halves`, distinct per unit.
@@ -294,11 +301,11 @@ def _unit(key: str, task: str, z: list[int], n_frames: int, offset: int) -> Samp
     return SamplingUnit(
         key=key,
         task=task,
-        topology={"atom_Z": torch.tensor(z, dtype=torch.int16), **_valence(n_atoms)},
+        topology={"Z": torch.tensor(z, dtype=torch.int16), **_valence(n_atoms)},
         frames={
-            "frame_pos": _halves(rows * 3, offset).reshape(rows, 3),
-            "frame_atom_target_forces": -_halves(rows * 3, offset + 7).reshape(rows, 3),
-            "frame_target_energy": _halves(n_frames, offset + 3),
+            "pos": _halves(rows * 3, offset).reshape(rows, 3),
+            "forces": -_halves(rows * 3, offset + 7).reshape(rows, 3),
+            "energy": _halves(n_frames, offset + 3),
         },
     )
 
@@ -336,11 +343,11 @@ def _samples(units: Sequence[SamplingUnit]) -> list[dict[str, object]]:
             rows = slice(k * n_atoms, (k + 1) * n_atoms)
             out.append(
                 {
-                    "Z": top["atom_Z"].long(),
-                    "pos": unit.frames["frame_pos"][rows].clone(),
+                    "Z": top["Z"].long(),
+                    "pos": unit.frames["pos"][rows].clone(),
                     "targets": {
-                        "energy": unit.frames["frame_target_energy"][k : k + 1].clone(),
-                        "forces": unit.frames["frame_atom_target_forces"][rows].clone(),
+                        "energy": unit.frames["energy"][k : k + 1].clone(),
+                        "forces": unit.frames["forces"][rows].clone(),
                     },
                     "bond_index": torch.stack([top["bond_atomi"], top["bond_atomj"]]).long(),
                     "bond_types": top["bond_type"].long(),
@@ -468,7 +475,7 @@ def _write_block_through_a_crash(root: Path, units: Sequence[SamplingUnit], *, s
         f"commit.log is {size} B, expected {_RECORD_SIZE} B x {len(units)} committed units",
     )
     os.truncate(log, size - _RECORD_SIZE // 2)  # tear the last record in half
-    with open(root / "frame_pos.bin", "ab") as handle:  # torn column tail
+    with open(root / "pos.bin", "ab") as handle:  # torn column tail
         handle.write(b"\x7f" * 24)
 
     resumed = BlockWriter.resume(root)
@@ -562,14 +569,14 @@ def _check_read_back(reader: BlockReader, units: Sequence[SamplingUnit], label: 
         _require_equal_tensors(reader.column(name), expected, f"{label} column {name!r}")
 
     _require_equal_tensors(
-        reader.column("mol_n_atoms"),
+        reader.column("n_atoms"),
         torch.tensor([unit.n_atoms for unit in units], dtype=torch.int32),
-        f"{label} column 'mol_n_atoms'",
+        f"{label} column 'n_atoms'",
     )
     _require_equal_tensors(
-        reader.column("mol_n_frames"),
+        reader.column("n_frames"),
         torch.tensor([unit.n_frames for unit in units], dtype=torch.int32),
-        f"{label} column 'mol_n_frames'",
+        f"{label} column 'n_frames'",
     )
 
     _require(
@@ -630,10 +637,10 @@ def _check_derived_pointers(reader: BlockReader, root: Path) -> None:
     # topology rows mol_atom_ptr[1] + [0, 4) = 3 .. 7.
     payload = reader.frame_payload([3])
     _require_equal_tensors(
-        payload["atoms"]["pos"], reader.column("frame_pos")[10:14], "frame 3 frame-atom rows 10..14"
+        payload["atoms"]["pos"], reader.column("pos")[10:14], "frame 3 frame-atom rows 10..14"
     )
     _require_equal_tensors(
-        payload["atoms"]["Z"], reader.column("atom_Z")[3:7], "frame 3 topology rows 3..7"
+        payload["atoms"]["Z"], reader.column("Z")[3:7], "frame 3 topology rows 3..7"
     )
 
     declared = BlockManifest.read(root).columns

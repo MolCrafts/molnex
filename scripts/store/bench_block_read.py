@@ -69,7 +69,7 @@ if str(_REPO / "src") not in sys.path:
 
 from molix.store import BlockReader, BlockWriter, SamplingUnit  # noqa: E402
 
-_BENCH_COLUMN = "frame_pos"
+_BENCH_COLUMN = "pos"
 _MB = 1e6
 
 
@@ -156,13 +156,13 @@ class PageCache:
 class FrameLayout:
     """Per-frame byte ranges of one ``frame_atom``-space column.
 
-    Derived from a block's count columns only (``mol_n_atoms`` / ``mol_n_frames``),
+    Derived from a block's count columns only (``n_atoms`` / ``n_frames``),
     so building it does not fault in a single payload page.
 
     Attributes:
         starts: ``(F,)`` first frame-atom row of every frame.
         counts: ``(F,)`` atoms per frame.
-        row_bytes: Bytes of one frame-atom row (``12`` for ``frame_pos``).
+        row_bytes: Bytes of one frame-atom row (``12`` for ``pos``).
     """
 
     starts: torch.Tensor
@@ -362,11 +362,11 @@ class WriteCost:
 class ScratchBlock:
     """Write one disposable sealed block of synthetic units.
 
-    Every unit is one topology (``atom_Z`` plus bonds and angles as int64
-    columns) and ``frames_per_unit`` frames of ``frame_pos`` — the ``frame_atom``
-    float32 bulk this benchmark reads — with a float32 energy and an int64 step
-    counter in frame space. Positions are deterministic ramps: the benchmark
-    measures bytes moving, not chemistry.
+    Every unit is one topology (``Z`` plus bonds and angles as int64 columns)
+    and ``frames_per_unit`` frames of ``pos`` — the ``frame_atom`` float32 bulk
+    this benchmark reads — plus a float32 ``energy`` and an int64
+    ``torsion_angle`` (integer degrees of a scan) in frame space. Positions are
+    deterministic ramps: the benchmark measures bytes moving, not chemistry.
 
     Args:
         root: Directory to create the block in.
@@ -397,7 +397,7 @@ class ScratchBlock:
                 "source": {"synthetic": "bench_block_read"},
                 "generator": {"tool": "bench_block_read.py", "version": "1", "commit": "n/a"},
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "units": {"frame_pos": "angstrom", "frame_target_energy": "kcal/mol"},
+                "units": {"pos": "angstrom", "energy": "kcal/mol"},
             },
         )
         append_seconds = 0.0
@@ -423,7 +423,7 @@ class ScratchBlock:
             key=f"unit-{index:06d}",
             task="torsion" if index % 2 else "equilibrium",
             topology={
-                "atom_Z": torch.full((atoms,), 6, dtype=torch.int16),
+                "Z": torch.full((atoms,), 6, dtype=torch.int16),
                 "bond_atomi": bond_i,
                 "bond_atomj": bond_i + 1,
                 "bond_type": torch.zeros(atoms - 1, dtype=torch.int64),
@@ -432,11 +432,9 @@ class ScratchBlock:
                 "angle_atomk": angle_i + 2,
             },
             frames={
-                "frame_pos": (torch.arange(rows * 3, dtype=torch.float32) * 0.5).reshape(rows, 3),
-                "frame_target_energy": torch.arange(
-                    self._frames_per_unit, dtype=torch.float32
-                ).mul_(0.25),
-                "frame_target_step": torch.arange(self._frames_per_unit, dtype=torch.int64),
+                "pos": (torch.arange(rows * 3, dtype=torch.float32) * 0.5).reshape(rows, 3),
+                "energy": torch.arange(self._frames_per_unit, dtype=torch.float32).mul_(0.25),
+                "torsion_angle": torch.arange(self._frames_per_unit, dtype=torch.int64),
             },
         )
 

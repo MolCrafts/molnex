@@ -19,26 +19,26 @@ On-disk layout
     <block-root>/
       manifest.json   # schema, split, provenance, task dictionary, digests, sealed
       commit.log      # fixed-size crc32 commit records (append-only)
-      mol_n_atoms.bin mol_n_frames.bin mol_task.bin unit_key_len.bin unit_key_bytes.bin
-      atom_Z.bin frame_pos.bin frame_target_energy.bin frame_atom_target_forces.bin
+      n_atoms.bin n_frames.bin task.bin unit_key_len.bin unit_key_bytes.bin
+      Z.bin pos.bin energy.bin forces.bin
       bond_n.bin bond_atomi.bin bond_atomj.bin bond_type.bin  ...
 
 Column files are raw payload only — no header, no padding, no holes. Rows grow
-along dim 0; the inner shape (e.g. ``(3,)`` for ``frame_pos``) is declared once
-in the manifest and never varies. A COO ``(2, N)`` layout is forbidden on disk
-because growing its last axis is not an append, so bonds are stored as two 1-D
-columns (``bond_atomi`` / ``bond_atomj``) and ``bond_index`` is stacked only at
+along dim 0; the inner shape (e.g. ``(3,)`` for ``pos``) is declared once in the
+manifest and never varies. A COO ``(2, N)`` layout is forbidden on disk because
+growing its last axis is not an append, so bonds are stored as two 1-D columns
+(``bond_atomi`` / ``bond_atomj``) and ``bond_index`` is stacked only at
 payload-assembly time.
 
 Storage is **two-level ragged**: molecular topology (atomic numbers, valence
 columns, molecule-local atom indices) is stored **once per unit**, while
 positions / energies / forces are stored per frame. For unit ``m`` with
-``N_m = mol_n_atoms[m]`` atoms and ``n_m = mol_n_frames[m]`` frames::
+``N_m = n_atoms[m]`` atoms and ``n_m = n_frames[m]`` frames::
 
     mol_atom_ptr[m]       = sum_{m'<m} N_m'
     mol_frame_ptr[m]      = sum_{m'<m} n_m'
     mol_frame_atom_ptr[m] = sum_{m'<m} n_m' * N_m'
-    frame_mol             = repeat_interleave(arange(M), mol_n_frames)
+    frame_mol             = repeat_interleave(arange(M), n_frames)
 
 and frame ``f`` of unit ``m`` with local ordinal ``k = f - mol_frame_ptr[m]``
 occupies frame-atom rows ``mol_frame_atom_ptr[m] + k*N_m + [0, N_m)`` and
@@ -52,10 +52,64 @@ Derived, never stored
 ``mol_atom_ptr``, ``mol_frame_ptr``, ``mol_frame_atom_ptr``, every ``<family>_ptr``,
 ``frame_mol`` and ``unit_key_ptr`` are computed by cumsum / ``repeat_interleave``
 at open (O(M + F) ints, milliseconds) from the stored per-unit **counts**
-(``mol_n_atoms``, ``mol_n_frames``, ``<family>_n``, ``unit_key_len``). One source
-of truth per fact removes the pointer/payload-disagreement class of corruption
+(``n_atoms``, ``n_frames``, ``<family>_n``, ``unit_key_len``). One source of
+truth per fact removes the pointer/payload-disagreement class of corruption
 entirely. ``block_digest`` follows the same rule: it is derived from the
 canonical JSON of the manifest core rather than trusted as stored text.
+
+Column registry — closed and declarative
+----------------------------------------
+
+:data:`_COLUMN_ROUTES` is the *whole* column vocabulary of the format: one
+module-level ``name -> (space, target)`` table, declarative the way
+:data:`molix.batch.collate.INDEX_KEYS` is, rather than a prefix grammar parsed
+per name. A column name is either a registered row or a ``ValueError``: no
+prefix is interpreted, so a typo cannot invent a target, and
+:meth:`BlockReader.frame_payload` can never silently drop data. The names are
+the repo's own batch-schema vocabulary (``Z`` / ``pos`` / ``energy`` /
+``forces``, the leaves of the ``atoms`` / ``graphs`` namespaces), and the
+valence rows keep molpy's ``atomi`` / ``atomj`` / ``atomk`` / ``atoml`` names
+verbatim, one per atom of the family's arity (2 / 3 / 4 / 4 / 4)::
+
+    name                space               payload route
+    Z                   molecule_atom       atoms.Z
+    mass                molecule_atom       atoms.mass
+    type                molecule_atom       atoms.type
+    pos                 frame_atom          atoms.pos
+    forces              frame_atom          atoms.targets.forces
+    energy              frame               graphs.targets.energy
+    torsion_angle       frame               graphs.targets.torsion_angle
+    torsion_atoms       molecule            graphs.targets.torsion_atoms
+    hessian_diag        frame               graphs.targets.hessian_diag
+    <family>_atom{i,…}  molecule_term:<f>   bonds.bond_index | <bucket>.atom{i,…}
+    <family>_type       molecule_term:<f>   bonds.bond_types | <bucket>.type
+    <family>_n          molecule            meta.<family>_n
+    n_atoms             molecule            meta.n_atoms
+    n_frames            molecule            meta.n_frames
+    task                molecule            meta.task
+    unit_key_len        molecule            meta.unit_key_len
+    unit_key_bytes      bytes               meta.unit_key_bytes
+
+``Z`` (topology) and ``pos`` (frames) are required of every unit; every other
+row is optional and declared by the first appended unit. ``hessian_diag`` is
+registered but written by nothing in-tree yet — it is the hot-tier successor's
+target, registered now so that producing it later is a producer change rather
+than a format change.
+
+**Adding a target means adding a registry row, and a registry row is a
+deliberate format revision** — never an incidental producer detail.
+
+Format identity
+---------------
+
+``molix.block/1``, ``schema_version = 1``. Revised **in place on 2026-08-14**:
+the column vocabulary moved from coined prefixes (``atom_Z`` / ``frame_pos`` /
+``frame_target_energy`` / ``frame_atom_target_forces`` / ``mol_n_atoms`` /
+``mol_n_frames`` / ``mol_task``) to the names above, and the prefix grammar that
+derived routes from those prefixes became the closed registry. The format id was
+**not** bumped because no block exists outside this repository's tests and
+regressions — there is no on-disk artifact to migrate. Any later change to the
+registry rows, the row spaces or the commit-record layout does bump it.
 
 Append / commit protocol
 ------------------------
@@ -91,7 +145,7 @@ Why no 64-byte alignment field
 The npy-append-array precedent pads its header to 64 bytes because payload
 follows metadata *in the same file*. Here every column is its own file mapped at
 **offset 0**, so each column's row 0 sits on a page boundary by construction;
-intra-column rows (e.g. 12-byte ``frame_pos`` rows) need no alignment because
+intra-column rows (e.g. 12-byte ``pos`` rows) need no alignment because
 mmap correctness and zero-copy depend only on the mapping base pointer. No
 padding, no header, no alignment field — and no reason to add one later.
 
@@ -134,7 +188,7 @@ Measured on Lustre, 2026-08-14
 (login node; project Lustre ``/nobackup/proj/disk``, PFL 1 stripe x 4 MiB;
 torch 2.12.1+cpu, ``OMP_NUM_THREADS=1``), median of 3 runs over a 1.03 GB block
 (256 units x 8192 frames x 40 atoms, 17 columns). One pass gathers 65536 frames
-= 31.5 MB of useful ``frame_pos`` payload in 256-frame batches; ``sequential``
+= 31.5 MB of useful ``pos`` payload in 256-frame batches; ``sequential``
 is frames ``[0, 65536)``, ``shuffled`` is a seeded permutation over all 2.1 M
 frames, so both orders move identical payload bytes. ``cold`` is the first touch
 after ``POSIX_FADV_DONTNEED`` (``mincore`` witnessed 0.000 page residency),
@@ -222,7 +276,12 @@ _DTYPE_STRINGS: Final[dict[torch.dtype, str]] = {
 }
 _TORCH_DTYPES: Final[dict[str, torch.dtype]] = {v: k for k, v in _DTYPE_STRINGS.items()}
 
-# Valence term families and the collate bucket each one feeds.
+# Valence term families, the collate bucket each one feeds, and how many atom
+# columns each term carries. The arity bounds the registry: ``bond_atomk`` is
+# rejected rather than registered, because a third bond atom has no place in the
+# ``(2, T)`` ``bond_index`` the payload stacks and would be silently dropped.
+# ``internal`` keeps the widest slot — an internal coordinate spans up to four
+# atoms — which is what it was allowed before the registry closed.
 _FAMILIES: Final[tuple[str, ...]] = ("bond", "angle", "proper", "improper", "internal")
 _FAMILY_BUCKETS: Final[dict[str, str]] = {
     "bond": "bonds",
@@ -231,24 +290,32 @@ _FAMILY_BUCKETS: Final[dict[str, str]] = {
     "improper": "impropers",
     "internal": "internals",
 }
+_FAMILY_ARITY: Final[dict[str, int]] = {
+    "bond": 2,
+    "angle": 3,
+    "proper": 4,
+    "improper": 4,
+    "internal": 4,
+}
 _ATOM_INDEX_COLUMNS: Final[tuple[str, ...]] = ("atomi", "atomj", "atomk", "atoml")
 
 # Block-index columns synthesised by the writer for every block. They carry the
 # per-unit counts every derived pointer is built from, plus the unit key
-# dictionary; none of them is routed into a batch payload.
+# dictionary; none of them is routed into a batch payload, hence the ``meta.``
+# route prefix. Their dtypes are the writer's, not the caller's.
 _META_ROUTE_PREFIX: Final[str] = "meta."
-_META_COLUMNS: Final[dict[str, tuple[str, str]]] = {
-    "mol_n_atoms": ("<i4", "molecule"),
-    "mol_n_frames": ("<i4", "molecule"),
-    "mol_task": ("<i4", "molecule"),
-    "unit_key_len": ("<i4", "molecule"),
-    "unit_key_bytes": ("|u1", "bytes"),
+_META_DTYPES: Final[dict[str, str]] = {
+    "n_atoms": "<i4",
+    "n_frames": "<i4",
+    "task": "<i4",
+    "unit_key_len": "<i4",
+    "unit_key_bytes": "|u1",
 }
 
 # Columns every block must declare; everything else is optional and declared by
 # the first appended unit.
-_REQUIRED_TOPOLOGY: Final[str] = "atom_Z"
-_REQUIRED_FRAME: Final[str] = "frame_pos"
+_REQUIRED_TOPOLOGY: Final[str] = "Z"
+_REQUIRED_FRAME: Final[str] = "pos"
 
 # Provenance is opaque, caller-supplied JSON (no dataset coordinate is ever
 # hard-coded in molnex); only key presence is validated.
@@ -273,53 +340,77 @@ class _Route(NamedTuple):
     target: str
 
 
-def _column_route(name: str) -> _Route:
-    """Resolve a column name to its row space and payload route.
+# The closed column registry of molix.block/1: the whole vocabulary a block may
+# declare, ``name -> (space, target)``, declarative the way
+# :data:`molix.batch.collate.INDEX_KEYS` is. Adding a target is adding a row
+# here, which is a deliberate format revision — see the module docstring.
+_COLUMN_ROUTES: Final[dict[str, _Route]] = {
+    # topology, stored once per unit
+    "Z": _Route("molecule_atom", "atoms.Z"),
+    "mass": _Route("molecule_atom", "atoms.mass"),
+    "type": _Route("molecule_atom", "atoms.type"),
+    # geometry and targets, stored per frame
+    "pos": _Route("frame_atom", "atoms.pos"),
+    "forces": _Route("frame_atom", "atoms.targets.forces"),
+    "energy": _Route("frame", "graphs.targets.energy"),
+    "torsion_angle": _Route("frame", "graphs.targets.torsion_angle"),
+    "torsion_atoms": _Route("molecule", "graphs.targets.torsion_atoms"),
+    # registered for the hot-tier successor; no in-tree producer writes it yet
+    "hessian_diag": _Route("frame", "graphs.targets.hessian_diag"),
+    # block-index columns synthesised by the writer
+    "n_atoms": _Route("molecule", f"{_META_ROUTE_PREFIX}n_atoms"),
+    "n_frames": _Route("molecule", f"{_META_ROUTE_PREFIX}n_frames"),
+    "task": _Route("molecule", f"{_META_ROUTE_PREFIX}task"),
+    "unit_key_len": _Route("molecule", f"{_META_ROUTE_PREFIX}unit_key_len"),
+    "unit_key_bytes": _Route("bytes", f"{_META_ROUTE_PREFIX}unit_key_bytes"),
+}
 
-    Naming determines the route, table-driven the way
-    :data:`molix.batch.collate.INDEX_KEYS` is declarative rather than hard-coded
-    per call site, so an unroutable column can never enter a block and
+# The valence rows — unchanged molpy vocabulary — expand from the family table so
+# the family/bucket correspondence keeps a single source of truth. Bonds fold
+# their two atom columns into one ``bonds.bond_index`` route because the payload
+# stacks them; every other family keeps 1-D ``atom{i,j,k,l}`` columns.
+for _family, _bucket in _FAMILY_BUCKETS.items():
+    _COLUMN_ROUTES[f"{_family}_n"] = _Route("molecule", f"{_META_ROUTE_PREFIX}{_family}_n")
+    for _column in _ATOM_INDEX_COLUMNS[: _FAMILY_ARITY[_family]]:
+        _COLUMN_ROUTES[f"{_family}_{_column}"] = _Route(
+            f"molecule_term:{_family}",
+            "bonds.bond_index" if _family == "bond" else f"{_bucket}.{_column}",
+        )
+    _COLUMN_ROUTES[f"{_family}_type"] = _Route(
+        f"molecule_term:{_family}",
+        "bonds.bond_types" if _family == "bond" else f"{_bucket}.type",
+    )
+del _family, _bucket, _column
+
+
+def _column_route(name: str) -> _Route:
+    """Look *name* up in the closed column registry.
+
+    The registry is a table, not a grammar: a name is either a row of
+    :data:`_COLUMN_ROUTES` or an error. No prefix is interpreted, so a typo can
+    never invent a target, an unroutable column can never enter a block, and
     :meth:`BlockReader.frame_payload` can never silently drop data.
 
     Args:
-        name: Declared column name, e.g. ``frame_atom_target_forces``.
+        name: Declared column name, e.g. ``forces``.
 
     Returns:
-        The :class:`_Route` for *name*.
+        The :class:`_Route` registered for *name*.
 
     Raises:
-        ValueError: *name* matches no route rule of ``molix.block/1``.
+        ValueError: *name* is not a registered row of ``molix.block/1``. The
+            message lists every row.
     """
-    if name in _META_COLUMNS:
-        return _Route(_META_COLUMNS[name][1], f"{_META_ROUTE_PREFIX}{name}")
-    for family in _FAMILIES:
-        if name == f"{family}_n":
-            return _Route("molecule", f"{_META_ROUTE_PREFIX}{name}")
-        bucket = _FAMILY_BUCKETS[family]
-        for column in _ATOM_INDEX_COLUMNS:
-            if name == f"{family}_{column}":
-                target = "bonds.bond_index" if family == "bond" else f"{bucket}.{column}"
-                return _Route(f"molecule_term:{family}", target)
-        if name == f"{family}_type":
-            target = "bonds.bond_types" if family == "bond" else f"{bucket}.type"
-            return _Route(f"molecule_term:{family}", target)
-    if name == _REQUIRED_FRAME:
-        return _Route("frame_atom", "atoms.pos")
-    if name.startswith("frame_atom_target_"):
-        return _Route("frame_atom", f"atoms.targets.{name[len('frame_atom_target_') :]}")
-    if name.startswith("frame_target_"):
-        return _Route("frame", f"graphs.targets.{name[len('frame_target_') :]}")
-    if name.startswith("mol_target_"):
-        return _Route("molecule", f"graphs.targets.{name[len('mol_target_') :]}")
-    if name in ("atom_Z", "atom_mass", "atom_type"):
-        return _Route("molecule_atom", f"atoms.{name[len('atom_') :]}")
-    raise ValueError(
-        f"column {name!r} matches no route rule of {_FORMAT} — an unroutable column "
-        "cannot enter a block because frame_payload would silently drop it. Use a "
-        "routed name: atom_Z / atom_mass / atom_type, frame_pos, frame_target_<name>, "
-        "frame_atom_target_<name>, mol_target_<name>, <family>_atom{i,j,k,l} or "
-        f"<family>_type with <family> in {_FAMILIES}."
-    )
+    try:
+        return _COLUMN_ROUTES[name]
+    except KeyError as exc:
+        raise ValueError(
+            f"column {name!r} is not a row of the {_FORMAT} column registry, which is "
+            "closed: an unregistered column cannot enter a block because frame_payload "
+            f"would silently drop it. Registered columns: {sorted(_COLUMN_ROUTES)}. "
+            "Adding a target means adding a registry row, which is a deliberate format "
+            "revision, not a producer-side detail."
+        ) from exc
 
 
 def _require_little_endian() -> None:
@@ -430,23 +521,24 @@ class SamplingUnit:
         key: Unit identity, e.g. a molecule id or scan id. Stored UTF-8 encoded
             in the ``unit_key_bytes`` / ``unit_key_len`` columns.
         task: Physical task label (``"equilibrium"``, ``"torsion"``, …). Stored
-            as a dictionary code in ``mol_task``.
-        topology: Molecule-space columns, ``{name: tensor}``. Must contain
-            ``atom_Z`` ``(n_atoms,)``; may contain ``atom_mass`` ``(n_atoms,)``
-            in amu and valence columns ``<family>_atom{i,j,k,l}`` /
-            ``<family>_type`` ``(n_terms,)``.
-        frames: Frame-space columns, ``{name: tensor}``. Must contain
-            ``frame_pos`` ``(n_frames * n_atoms, 3)`` in Å; may contain
-            ``frame_target_<name>`` ``(n_frames, ...)`` and
-            ``frame_atom_target_<name>`` ``(n_frames * n_atoms, ...)`` (e.g.
-            ``frame_target_energy`` in kcal mol⁻¹, ``frame_atom_target_forces``
-            in kcal mol⁻¹ Å⁻¹).
+            as a dictionary code in the ``task`` column.
+        topology: Molecule-space columns, ``{name: tensor}``. Must contain ``Z``
+            ``(n_atoms,)``; may contain ``mass`` ``(n_atoms,)`` in amu, ``type``
+            ``(n_atoms,)``, molecule-space targets such as ``torsion_atoms``,
+            and valence columns ``<family>_atom{i,j,k,l}`` / ``<family>_type``
+            ``(n_terms,)``.
+        frames: Frame-space columns, ``{name: tensor}``. Must contain ``pos``
+            ``(n_frames * n_atoms, 3)`` in Å; may contain the registered
+            frame-space targets ``(n_frames, ...)`` and frame-atom-space targets
+            ``(n_frames * n_atoms, ...)`` — e.g. ``energy`` in kcal mol⁻¹,
+            ``forces`` in kcal mol⁻¹ Å⁻¹.
 
     Raises:
-        ValueError: A required column is missing, a column name is unroutable, a
-            column sits in the wrong mapping, a row count contradicts
-            ``n_atoms`` / ``n_frames``, or a valence atom index falls outside
-            ``[0, n_atoms)``. The message names the offending column.
+        ValueError: A required column is missing, a column name is not a
+            registry row, a column sits in the wrong mapping, a row count
+            contradicts ``n_atoms`` / ``n_frames``, or a valence atom index
+            falls outside ``[0, n_atoms)``. The message names the offending
+            column.
         NotImplementedError: The host is big-endian.
     """
 
@@ -483,12 +575,12 @@ class SamplingUnit:
 
     @property
     def n_atoms(self) -> int:
-        """Atoms in this unit's topology, ``N = len(atom_Z)``."""
+        """Atoms in this unit's topology, ``N = len(Z)``."""
         return int(self.topology[_REQUIRED_TOPOLOGY].shape[0])
 
     @property
     def n_frames(self) -> int:
-        """Frames of this unit, ``len(frame_pos) // n_atoms`` (exact by validation)."""
+        """Frames of this unit, ``len(pos) // n_atoms`` (exact by validation)."""
         return int(self.frames[_REQUIRED_FRAME].shape[0]) // self.n_atoms
 
     def _validate_topology(self) -> None:
@@ -658,7 +750,7 @@ class BlockManifest:
         """Return the declared spec of one column.
 
         Args:
-            name: Column name, e.g. ``frame_pos``.
+            name: Column name, e.g. ``pos``.
 
         Returns:
             Mapping with ``dtype`` (little-endian string), ``inner_shape``
@@ -697,7 +789,7 @@ class BlockManifest:
 
     @property
     def task_names(self) -> tuple[str, ...]:
-        """The bounded task-label dictionary, indexed by ``mol_task`` codes."""
+        """The bounded task-label dictionary, indexed by ``task`` codes."""
         return tuple(self._document.get("task_names", ()))
 
     @property
@@ -750,7 +842,7 @@ class BlockWriter:
 
     The schema is frozen from the first unit — its columns, dtypes and inner
     shapes become the block's contract, plus the synthesised block-index columns
-    (``mol_n_atoms``, ``mol_n_frames``, ``mol_task``, ``unit_key_len``,
+    (``n_atoms``, ``n_frames``, ``task``, ``unit_key_len``,
     ``unit_key_bytes``) and one ``<family>_n`` count column per valence family.
     Every later unit must carry exactly those columns with exactly those dtypes.
 
@@ -967,12 +1059,13 @@ class BlockWriter:
     def _freeze_schema(self, unit: SamplingUnit) -> None:
         """Derive the block's column contract from the first unit and create files."""
         columns: dict[str, dict[str, Any]] = {}
-        for name, (dtype, space) in _META_COLUMNS.items():
+        for name, dtype in _META_DTYPES.items():
+            route = _column_route(name)
             columns[name] = {
                 "dtype": dtype,
                 "inner_shape": [],
-                "space": space,
-                "route": _column_route(name).target,
+                "space": route.space,
+                "route": route.target,
             }
         families: list[str] = []
         for name, tensor in (*unit.topology.items(), *unit.frames.items()):
@@ -1016,9 +1109,9 @@ class BlockWriter:
             if unit.task in self._task_names
             else len(self._task_names)
         )
-        payload["mol_n_atoms"] = torch.tensor([unit.n_atoms], dtype=torch.int32)
-        payload["mol_n_frames"] = torch.tensor([unit.n_frames], dtype=torch.int32)
-        payload["mol_task"] = torch.tensor([task_code], dtype=torch.int32)
+        payload["n_atoms"] = torch.tensor([unit.n_atoms], dtype=torch.int32)
+        payload["n_frames"] = torch.tensor([unit.n_frames], dtype=torch.int32)
+        payload["task"] = torch.tensor([task_code], dtype=torch.int32)
         payload["unit_key_len"] = torch.tensor([len(key_bytes)], dtype=torch.int32)
         payload["unit_key_bytes"] = torch.frombuffer(bytearray(key_bytes), dtype=torch.uint8)
         for name in self._order:
@@ -1201,8 +1294,8 @@ class BlockReader:
         "_mol_atom_ptr",
         "_mol_frame_atom_ptr",
         "_mol_frame_ptr",
-        "_mol_n_atoms",
-        "_mol_n_frames",
+        "_n_atoms",
+        "_n_frames",
         "_root",
         "_term_ptr",
         "_unit_keys",
@@ -1219,13 +1312,13 @@ class BlockReader:
             )
         self._mapped: dict[str, torch.Tensor] = {}
         self._unit_keys: dict[str, int] | None = None
-        self._mol_n_atoms = self._map_column("mol_n_atoms").to(torch.long)
-        self._mol_n_frames = self._map_column("mol_n_frames").to(torch.long)
-        self._mol_atom_ptr = _exclusive_cumsum(self._mol_n_atoms)
-        self._mol_frame_ptr = _exclusive_cumsum(self._mol_n_frames)
-        self._mol_frame_atom_ptr = _exclusive_cumsum(self._mol_n_frames * self._mol_n_atoms)
+        self._n_atoms = self._map_column("n_atoms").to(torch.long)
+        self._n_frames = self._map_column("n_frames").to(torch.long)
+        self._mol_atom_ptr = _exclusive_cumsum(self._n_atoms)
+        self._mol_frame_ptr = _exclusive_cumsum(self._n_frames)
+        self._mol_frame_atom_ptr = _exclusive_cumsum(self._n_frames * self._n_atoms)
         self._frame_mol = torch.repeat_interleave(
-            torch.arange(self._mol_n_atoms.numel()), self._mol_n_frames
+            torch.arange(self._n_atoms.numel()), self._n_frames
         )
         self._term_ptr: dict[str, torch.Tensor] = {
             family: _exclusive_cumsum(self._map_column(f"{family}_n").to(torch.long))
@@ -1277,11 +1370,11 @@ class BlockReader:
         """Return one declared column as a mmap'd tensor.
 
         Args:
-            name: Declared column name, e.g. ``frame_pos``.
+            name: Declared column name, e.g. ``pos``.
 
         Returns:
             ``(rows, *inner_shape)`` tensor in the block's stored dtype and units
-            (Å for ``frame_pos``, kcal mol⁻¹ for ``frame_target_energy``, …).
+            (Å for ``pos``, kcal mol⁻¹ for ``energy``, …).
 
         Raises:
             KeyError: *name* is not declared by this block.
@@ -1291,12 +1384,12 @@ class BlockReader:
     @property
     def unit_count(self) -> int:
         """Number of sampling units (molecules / scans) in the block, ``M``."""
-        return int(self._mol_n_atoms.numel())
+        return int(self._n_atoms.numel())
 
     @property
     def frame_count(self) -> int:
-        """Number of frames in the block, ``F = sum(mol_n_frames)``."""
-        return int(self._mol_n_frames.sum())
+        """Number of frames in the block, ``F = sum(n_frames)``."""
+        return int(self._n_frames.sum())
 
     def __len__(self) -> int:
         """Frame count — a block indexes frames, which is what samplers count."""
@@ -1305,17 +1398,17 @@ class BlockReader:
     @property
     def max_atoms(self) -> int:
         """Largest unit atom count ``max(N_m)`` — a token-budget input."""
-        return int(self._mol_n_atoms.max())
+        return int(self._n_atoms.max())
 
     @property
     def atom_counts(self) -> torch.Tensor:
-        """Atoms per frame ``(F,)`` ``torch.long`` — ``mol_n_atoms[frame_mol]``.
+        """Atoms per frame ``(F,)`` ``torch.long`` — ``n_atoms[frame_mol]``.
 
         Pointer arithmetic only: mirrors
         :attr:`molix.store.dataset.MmapDataset.atom_counts` so a token-budget
         sampler consumes a block without unpacking any frame.
         """
-        return self._mol_n_atoms[self._frame_mol]
+        return self._n_atoms[self._frame_mol]
 
     @property
     def edge_counts(self) -> torch.Tensor:
@@ -1339,7 +1432,7 @@ class BlockReader:
 
     @property
     def mol_atom_ptr(self) -> torch.Tensor:
-        """``(M+1,)`` ``torch.long`` exclusive cumsum of ``mol_n_atoms``.
+        """``(M+1,)`` ``torch.long`` exclusive cumsum of ``n_atoms``.
 
         Topology rows of unit ``m`` are ``mol_atom_ptr[m] + [0, N_m)``. Derived at
         open, never stored.
@@ -1348,7 +1441,7 @@ class BlockReader:
 
     @property
     def mol_frame_ptr(self) -> torch.Tensor:
-        """``(M+1,)`` ``torch.long`` exclusive cumsum of ``mol_n_frames``.
+        """``(M+1,)`` ``torch.long`` exclusive cumsum of ``n_frames``.
 
         Frame rows of unit ``m`` are ``mol_frame_ptr[m] + [0, n_m)``. Derived at
         open, never stored.
@@ -1432,7 +1525,7 @@ class BlockReader:
         Decoding to the ``list[str]`` a sampler accepts is a caller one-liner:
         ``[reader.task_names[c] for c in reader.task_codes.tolist()]``.
         """
-        return self._map_column("mol_task")[self._frame_mol].to(torch.int32)
+        return self._map_column("task")[self._frame_mol].to(torch.int32)
 
     @property
     def group_codes(self) -> torch.Tensor:
@@ -1513,7 +1606,7 @@ class BlockReader:
             )
 
         units = self._frame_mol[selected]
-        counts = self._mol_n_atoms[units]
+        counts = self._n_atoms[units]
         ordinal = selected - self._mol_frame_ptr[units]
         atom_ptr = _exclusive_cumsum(counts)
         segment = torch.repeat_interleave(torch.arange(selected.numel()), counts)

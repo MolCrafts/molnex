@@ -279,7 +279,7 @@ Full text: [learnable-classical-ff.md](learnable-classical-ff.md).
 (login node, project Lustre `/nobackup/proj/disk`, PFL 1 stripe × 4 MiB,
 torch 2.12.1+cpu, `OMP_NUM_THREADS=1`), median of 3 runs over a 1.03 GB
 block (256 units × 8192 frames × 40 atoms, 17 columns). One pass gathers
-65536 frames = 31.5 MB of `frame_pos` payload in 256-frame batches; `cold`
+65536 frames = 31.5 MB of `pos` payload in 256-frame batches; `cold`
 is the first touch after `POSIX_FADV_DONTNEED` (`mincore` witnessed 0.000
 residency), `warm` the repeat. MB/s is useful payload.
 

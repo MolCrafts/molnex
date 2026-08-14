@@ -50,25 +50,25 @@ _PROVENANCE: dict[str, Any] = {
     "generator": {"tool": "test_block.py", "version": "1", "commit": "0"},
     "created_at": "2026-08-14T00:00:00+00:00",
     "units": {
-        "frame_pos": "angstrom",
-        "frame_target_energy": "kcal/mol",
-        "frame_atom_target_forces": "kcal/mol/angstrom",
+        "pos": "angstrom",
+        "energy": "kcal/mol",
+        "forces": "kcal/mol/angstrom",
     },
 }
 
-# The 24 columns frozen from unit "mol-a": 5 required metadata + atom_Z +
-# frame_pos + 2 frame targets + 3 valence families (columns + derived ``_n``).
+# The 24 columns frozen from unit "mol-a": 5 required metadata + Z + pos +
+# 2 frame targets + 3 valence families (columns + derived ``_n``).
 _EXPECTED_COLUMNS = frozenset(
     {
-        "mol_n_atoms",
-        "mol_n_frames",
-        "mol_task",
+        "n_atoms",
+        "n_frames",
+        "task",
         "unit_key_len",
         "unit_key_bytes",
-        "atom_Z",
-        "frame_pos",
-        "frame_target_energy",
-        "frame_atom_target_forces",
+        "Z",
+        "pos",
+        "energy",
+        "forces",
         "bond_n",
         "bond_atomi",
         "bond_atomj",
@@ -111,9 +111,9 @@ def _halves(count: int, start: int) -> torch.Tensor:
 def _frame_columns(n_frames: int, n_atoms: int, offset: int) -> dict[str, torch.Tensor]:
     rows = n_frames * n_atoms
     return {
-        "frame_pos": _halves(rows * 3, offset).reshape(rows, 3),
-        "frame_atom_target_forces": -_halves(rows * 3, offset + 7).reshape(rows, 3),
-        "frame_target_energy": _halves(n_frames, offset + 3),
+        "pos": _halves(rows * 3, offset).reshape(rows, 3),
+        "forces": -_halves(rows * 3, offset + 7).reshape(rows, 3),
+        "energy": _halves(n_frames, offset + 3),
     }
 
 
@@ -149,7 +149,7 @@ def _valence(n_atoms: int) -> dict[str, torch.Tensor]:
 
 def _unit(key: str, task: str, z: list[int], n_frames: int, offset: int) -> SamplingUnit:
     n_atoms = len(z)
-    topology = {"atom_Z": torch.tensor(z, dtype=torch.int16), **_valence(n_atoms)}
+    topology = {"Z": torch.tensor(z, dtype=torch.int16), **_valence(n_atoms)}
     return SamplingUnit(
         key=key,
         task=task,
@@ -189,11 +189,11 @@ def _samples(units: list[SamplingUnit]) -> list[dict]:
             rows = slice(k * n_atoms, (k + 1) * n_atoms)
             out.append(
                 {
-                    "Z": topology["atom_Z"].long(),
-                    "pos": unit.frames["frame_pos"][rows].clone(),
+                    "Z": topology["Z"].long(),
+                    "pos": unit.frames["pos"][rows].clone(),
                     "targets": {
-                        "energy": unit.frames["frame_target_energy"][k : k + 1].clone(),
-                        "forces": unit.frames["frame_atom_target_forces"][rows].clone(),
+                        "energy": unit.frames["energy"][k : k + 1].clone(),
+                        "forces": unit.frames["forces"][rows].clone(),
                     },
                     "bond_index": torch.stack(
                         [topology["bond_atomi"], topology["bond_atomj"]]
@@ -327,51 +327,51 @@ class TestSamplingUnit:
         with pytest.raises(AttributeError):
             unit.key = "other"  # type: ignore[misc]
 
-    def test_rejects_unit_without_frame_pos(self):
-        with pytest.raises(ValueError, match="frame_pos"):
+    def test_rejects_unit_without_pos(self):
+        with pytest.raises(ValueError, match="'pos'"):
             SamplingUnit(
                 key="mol-a",
                 task="equilibrium",
-                topology={"atom_Z": torch.tensor([1, 1], dtype=torch.int16)},
-                frames={"frame_target_energy": _halves(2, 0)},
+                topology={"Z": torch.tensor([1, 1], dtype=torch.int16)},
+                frames={"energy": _halves(2, 0)},
             )
 
-    def test_rejects_frame_pos_rows_not_multiple_of_n_atoms(self):
-        with pytest.raises(ValueError, match="frame_pos"):
+    def test_rejects_pos_rows_not_multiple_of_n_atoms(self):
+        with pytest.raises(ValueError, match="'pos'"):
             SamplingUnit(
                 key="mol-a",
                 task="equilibrium",
-                topology={"atom_Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
-                frames={"frame_pos": _halves(7 * 3, 0).reshape(7, 3)},
+                topology={"Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
+                frames={"pos": _halves(7 * 3, 0).reshape(7, 3)},
             )
 
     def test_rejects_frame_space_row_count_mismatch(self):
-        with pytest.raises(ValueError, match="frame_target_energy"):
+        with pytest.raises(ValueError, match="'energy'"):
             SamplingUnit(
                 key="mol-a",
                 task="equilibrium",
-                topology={"atom_Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
+                topology={"Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
                 frames={
-                    "frame_pos": _halves(6 * 3, 0).reshape(6, 3),
-                    "frame_target_energy": _halves(3, 0),
+                    "pos": _halves(6 * 3, 0).reshape(6, 3),
+                    "energy": _halves(3, 0),
                 },
             )
 
     def test_rejects_frame_atom_space_row_count_mismatch(self):
-        with pytest.raises(ValueError, match="frame_atom_target_forces"):
+        with pytest.raises(ValueError, match="'forces'"):
             SamplingUnit(
                 key="mol-a",
                 task="equilibrium",
-                topology={"atom_Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
+                topology={"Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
                 frames={
-                    "frame_pos": _halves(6 * 3, 0).reshape(6, 3),
-                    "frame_atom_target_forces": _halves(5 * 3, 0).reshape(5, 3),
+                    "pos": _halves(6 * 3, 0).reshape(6, 3),
+                    "forces": _halves(5 * 3, 0).reshape(5, 3),
                 },
             )
 
     def test_rejects_topology_atom_index_outside_range(self):
         topology = {
-            "atom_Z": torch.tensor([8, 1, 1], dtype=torch.int16),
+            "Z": torch.tensor([8, 1, 1], dtype=torch.int16),
             "bond_atomi": torch.tensor([0, 0], dtype=torch.int32),
             "bond_atomj": torch.tensor([1, 3], dtype=torch.int32),  # 3 >= N = 3
         }
@@ -380,7 +380,7 @@ class TestSamplingUnit:
                 key="mol-a",
                 task="equilibrium",
                 topology=topology,
-                frames={"frame_pos": _halves(6 * 3, 0).reshape(6, 3)},
+                frames={"pos": _halves(6 * 3, 0).reshape(6, 3)},
             )
 
     def test_rejects_unroutable_column_name(self):
@@ -389,10 +389,10 @@ class TestSamplingUnit:
                 key="mol-a",
                 task="equilibrium",
                 topology={
-                    "atom_Z": torch.tensor([8, 1, 1], dtype=torch.int16),
+                    "Z": torch.tensor([8, 1, 1], dtype=torch.int16),
                     "mystery": torch.tensor([1, 2, 3], dtype=torch.int32),
                 },
-                frames={"frame_pos": _halves(6 * 3, 0).reshape(6, 3)},
+                frames={"pos": _halves(6 * 3, 0).reshape(6, 3)},
             )
 
 
@@ -414,7 +414,7 @@ class TestBlockManifest:
         assert BlockManifest.read(sealed_block).sealed is True
 
     def test_column_declares_dtype_inner_shape_space_and_route(self, sealed_block: Path):
-        spec = BlockManifest.read(sealed_block).column("frame_pos")
+        spec = BlockManifest.read(sealed_block).column("pos")
         assert spec["dtype"] == "<f4"
         assert list(spec["inner_shape"]) == [3]
         assert spec["space"] == "frame_atom"
@@ -422,9 +422,9 @@ class TestBlockManifest:
 
     def test_column_routes_follow_the_naming_table(self, sealed_block: Path):
         manifest = BlockManifest.read(sealed_block)
-        assert manifest.column("atom_Z")["route"] == "atoms.Z"
-        assert manifest.column("frame_target_energy")["route"] == "graphs.targets.energy"
-        assert manifest.column("frame_atom_target_forces")["route"] == "atoms.targets.forces"
+        assert manifest.column("Z")["route"] == "atoms.Z"
+        assert manifest.column("energy")["route"] == "graphs.targets.energy"
+        assert manifest.column("forces")["route"] == "atoms.targets.forces"
         assert manifest.column("bond_atomi")["route"] == "bonds.bond_index"
         assert manifest.column("bond_type")["route"] == "bonds.bond_types"
         assert manifest.column("angle_atomk")["route"] == "angles.atomk"
@@ -432,11 +432,11 @@ class TestBlockManifest:
 
     def test_column_spaces_follow_the_taxonomy(self, sealed_block: Path):
         manifest = BlockManifest.read(sealed_block)
-        assert manifest.column("mol_n_atoms")["space"] == "molecule"
-        assert manifest.column("atom_Z")["space"] == "molecule_atom"
+        assert manifest.column("n_atoms")["space"] == "molecule"
+        assert manifest.column("Z")["space"] == "molecule_atom"
         assert manifest.column("bond_atomi")["space"] == "molecule_term:bond"
-        assert manifest.column("frame_target_energy")["space"] == "frame"
-        assert manifest.column("frame_pos")["space"] == "frame_atom"
+        assert manifest.column("energy")["space"] == "frame"
+        assert manifest.column("pos")["space"] == "frame_atom"
         assert manifest.column("unit_key_bytes")["space"] == "bytes"
 
     def test_write_atomic_roundtrips_the_json_contract(self, sealed_block: Path, tmp_path: Path):
@@ -545,7 +545,7 @@ class TestBlockWriter:
         bare = SamplingUnit(
             key="mol-d",
             task="equilibrium",
-            topology={"atom_Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
+            topology={"Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
             frames=_frame_columns(2, 3, 0),
         )
         with pytest.raises(ValueError, match="bond_atomi"):
@@ -559,11 +559,11 @@ class TestBlockWriter:
             task="equilibrium",
             topology={
                 **_valence(3),
-                "atom_Z": torch.tensor([8, 1, 1], dtype=torch.int64),  # frozen as <i2
+                "Z": torch.tensor([8, 1, 1], dtype=torch.int64),  # frozen as <i2
             },
             frames=_frame_columns(2, 3, 0),
         )
-        with pytest.raises(ValueError, match="atom_Z"):
+        with pytest.raises(ValueError, match="'Z'"):
             writer.append_unit(widened)
 
     def test_append_unit_takes_no_split_parameter(self, tmp_path: Path):
@@ -587,7 +587,7 @@ class TestBlockWriter:
         writer.append_unit(units[0])
         writer.append_unit(units[1])
         del writer  # simulate the crash: no seal, handles dropped
-        with open(root / "frame_pos.bin", "ab") as handle:  # uncommitted tail
+        with open(root / "pos.bin", "ab") as handle:  # uncommitted tail
             handle.write(b"\x7f" * 24)
 
         resumed = BlockWriter.resume(root)
@@ -605,7 +605,7 @@ class TestBlockWriter:
         writer.append_unit(units[0])
         writer.append_unit(units[1])
         del writer
-        with open(root / "frame_pos.bin", "ab") as handle:
+        with open(root / "pos.bin", "ab") as handle:
             handle.write(b"\x7f" * 24)
         with open(root / "commit.log", "ab") as handle:  # half-written record
             handle.write(b"\x01" * (_RECORD_SIZE // 2))
@@ -623,7 +623,7 @@ class TestBlockWriter:
         writer.append_unit(units[0])
         writer.append_unit(units[1])
         del writer
-        with open(root / "frame_pos.bin", "ab") as handle:
+        with open(root / "pos.bin", "ab") as handle:
             handle.write(b"\x7f" * 24)
 
         resumed = BlockWriter.resume(root)
@@ -650,14 +650,14 @@ class TestBlockReader:
     def test_frame_columns_read_back_bit_for_bit(
         self, reader: BlockReader, units: list[SamplingUnit]
     ):
-        for name in ("frame_pos", "frame_target_energy", "frame_atom_target_forces"):
+        for name in ("pos", "energy", "forces"):
             expected = torch.cat([unit.frames[name] for unit in units], dim=0)
             assert torch.equal(reader.column(name), expected)
 
     def test_topology_columns_read_back_bit_for_bit(
         self, reader: BlockReader, units: list[SamplingUnit]
     ):
-        names = ("atom_Z", "bond_atomi", "bond_atomj", "bond_type", "angle_atomk", "proper_atoml")
+        names = ("Z", "bond_atomi", "bond_atomj", "bond_type", "angle_atomk", "proper_atoml")
         for name in names:
             expected = torch.cat([unit.topology[name] for unit in units], dim=0)
             assert torch.equal(reader.column(name), expected)
@@ -714,15 +714,15 @@ class TestBlockReader:
     def test_verify_raises_naming_the_corrupted_column(
         self, sealed_block: Path, reader: BlockReader
     ):
-        path = sealed_block / "frame_pos.bin"
+        path = sealed_block / "pos.bin"
         flipped = bytes([path.read_bytes()[8] ^ 0xFF])
         _overwrite_bytes(path, 8, flipped)
-        with pytest.raises(ValueError, match="frame_pos"):
+        with pytest.raises(ValueError, match="'pos'"):
             reader.verify()
 
     def test_column_is_a_zero_copy_file_mapping(self, sealed_block: Path, reader: BlockReader):
-        column = reader.column("frame_pos")
-        assert _is_file_backed(column, sealed_block / "frame_pos.bin")
+        column = reader.column("pos")
+        assert _is_file_backed(column, sealed_block / "pos.bin")
 
     # -- two-level row arithmetic (spec § Domain basis, hand-computed) ------
 
@@ -742,13 +742,13 @@ class TestBlockReader:
         # unit 1, k = 3 - 2 = 1 -> mol_frame_atom_ptr[1] + k*N = 6 + 4 = 10 .. 14
         block = BlockReader(two_unit_block)
         payload = block.frame_payload([3])
-        assert torch.equal(payload["atoms"]["pos"], block.column("frame_pos")[10:14])
+        assert torch.equal(payload["atoms"]["pos"], block.column("pos")[10:14])
 
     def test_frame_three_reads_topology_rows_three_to_seven(self, two_unit_block: Path):
         # unit 1 -> mol_atom_ptr[1] + [0, N) = 3 .. 7
         block = BlockReader(two_unit_block)
         payload = block.frame_payload([3])
-        assert torch.equal(payload["atoms"]["Z"], block.column("atom_Z")[3:7])
+        assert torch.equal(payload["atoms"]["Z"], block.column("Z")[3:7])
 
     def test_no_pointer_vector_is_stored_on_disk(self, two_unit_block: Path):
         columns = json.loads((two_unit_block / "manifest.json").read_text())["columns"]
@@ -763,7 +763,7 @@ class TestBlockReader:
         block = BlockReader(root)
         assert block.unit_count == 1
         assert block.frame_count == 2
-        assert torch.equal(block.column("frame_pos"), _unit_a().frames["frame_pos"])
+        assert torch.equal(block.column("pos"), _unit_a().frames["pos"])
 
     def test_single_frame_unit_reads_back(self, tmp_path: Path):
         unit = _unit("mol-single", "equilibrium", [8, 1, 1], 1, 0)
@@ -777,8 +777,8 @@ class TestBlockReader:
         unit = SamplingUnit(
             key="bare",
             task="equilibrium",
-            topology={"atom_Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
-            frames={"frame_pos": _halves(6 * 3, 0).reshape(6, 3)},
+            topology={"Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
+            frames={"pos": _halves(6 * 3, 0).reshape(6, 3)},
         )
         root = _write_block(tmp_path / "bare", [unit])
         block = BlockReader(root)
@@ -862,7 +862,7 @@ class TestBlockReader:
             max_atoms=32,
             seed=7,
         )
-        allowed = {"mol_n_atoms", "mol_n_frames", "mol_task", "unit_key_len", "unit_key_bytes"}
+        allowed = {"n_atoms", "n_frames", "task", "unit_key_len", "unit_key_bytes"}
         allowed |= {f"{family}_n" for family in ("bond", "angle", "proper", "improper", "internal")}
         assert mapped
         assert set(mapped) <= allowed
