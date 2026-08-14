@@ -1,6 +1,7 @@
 ---
 title: MACE-OMOL molnex pipeline integration + bit-exact (O3_e3nn) follow-ups
-status: done
+status: closed
+closed: 2026-08-13
 created: 2026-06-21
 chain: mace-omol-port
 ---

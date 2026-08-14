@@ -141,9 +141,7 @@ class TestCoulombEnergy:
         ff = (
             ForceField(name="mm")
             .def_pairstyle("coulomb")
-            .with_params(
-                atoms={"q": torch.tensor([0.3, -0.3], dtype=torch.float64)}
-            )
+            .with_params(atoms={"q": torch.tensor([0.3, -0.3], dtype=torch.float64)})
         )
         batch = TensorDict(
             {
@@ -178,18 +176,12 @@ class TestCoulombEnergy:
         r = 2.0
         pot = CoulombPotential(prefactor=kcalmol_A)
         e_ref = (q[0] * q[1] * pot.from_dist(torch.tensor([r], dtype=torch.float64))).sum()
-        ff = (
-            ForceField(name="es")
-            .def_pairstyle("coulomb")
-            .with_params(atoms={"q": q})
-        )
+        ff = ForceField(name="es").def_pairstyle("coulomb").with_params(atoms={"q": q})
         batch = TensorDict(
             {
                 "atoms": TensorDict(
                     {
-                        "pos": torch.tensor(
-                            [[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=torch.float64
-                        ),
+                        "pos": torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=torch.float64),
                         "batch": torch.zeros(2, dtype=torch.long),
                     },
                     batch_size=[2],

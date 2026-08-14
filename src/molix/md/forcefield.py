@@ -13,10 +13,10 @@ protocol). Here:
   ``Integrator`` consumes a ``ForceField`` component — never a closure.
 
 Precision: a force field owns its own dtype, independent of the trajectory
-state's (see :class:`molix.md.driver.MD` — ``MD(dtype=)`` governs the MD side
-only; :meth:`MD.set_potential_dtype` casts the force field). Implementations
-accept positions in any dtype and return their own; the integrator casts the
-output back to the state dtype at the component boundary.
+state's (``MD(dtype)`` governs the MD side only; cast the force field with
+``ff.to(dtype)``). Implementations accept positions in any dtype and return
+their own; the integrator casts the output back to the state dtype at the
+component boundary.
 
 Periodic systems and neighbour-list refresh are supported through
 :attr:`ForceField.rebuilds_neighbors` (does this force field own a policy?),
@@ -143,8 +143,9 @@ class PotentialForceField(ForceField):
         template: System ``TensorDict`` (``atoms.Z``, ``edges.edge_index``,
             ``atoms.batch``, ``graphs``); ``("atoms", "pos")`` is replaced per call.
         energy_scale: Unit-bridge multiplier applied to energy and forces, e.g.
-            ``1 / molix.units.EV_PER_AMU_A2_FS2`` to drive an eV/Å potential in
-            the integrator's (amu, Å, fs) system. Default ``1.0``.
+            ``(1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2")``
+            to drive an eV/Å potential in the integrator's (amu, Å, fs)
+            system. Default ``1.0``.
     """
 
     _STALE_EDGE_KEYS = ("edge_diff", "edge_dist")
@@ -428,7 +429,7 @@ class LennardJonesCutForceField(ForceField):
 
     Args:
         epsilon: Well depth ε, in the run's energy unit (amu·Å²/fs² for the
-            stock integrator — convert eV via ``1/EV_PER_AMU_A2_FS2``).
+            stock integrator — convert eV with ``molix.units.units``).
         sigma: Zero-crossing distance σ (Å).
         neighbors: Rebuildable neighbour list with **full bidirectional**
             edges (each pair present in both directions), e.g.
@@ -520,7 +521,7 @@ class LennardJonesCutForceField(ForceField):
 
         Positions (and the list's shifts) are cast into the **parameter**
         dtype before the pair loop so a split-precision configuration
-        (``MD(dtype=fp64)`` + pot buffers in fp32) actually evaluates the PES
+        (``MD(torch.float64)`` + pot buffers in fp32) actually evaluates the PES
         in pot precision — matching the MACE path, which keeps the neighbour
         list on the MD axis and only casts into the model at force time. The
         integrator then casts energy/forces back to the trajectory dtype.

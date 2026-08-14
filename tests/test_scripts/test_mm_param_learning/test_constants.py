@@ -10,12 +10,14 @@ from scripts.mm_param_learning.constants import (
 
 
 class TestConstants:
-    def test_four_experiment_slugs(self):
+    def test_six_experiment_slugs(self):
         assert set(EXPERIMENT_SLUGS) == {
             "potential-parity",
             "zinc-typing-recovery",
             "phalkethoh-mm-energy",
             "latent-analysis",
+            "espaloma-mm-protocol-mini",
+            "class-i-full-energy-mini",
         }
         assert set(MOLHUB_COORDINATES) == set(EXPERIMENT_SLUGS)
 
@@ -23,10 +25,10 @@ class TestConstants:
         for slug, coord in MOLHUB_COORDINATES.items():
             assert coord.startswith("dataset:"), (slug, coord)
 
-    def test_six_validation_stages(self):
-        assert len(VALIDATION_STAGES) == 6
+    def test_seven_validation_stages(self):
+        assert len(VALIDATION_STAGES) == 7
         nums = [n for n, _ in VALIDATION_STAGES]
-        assert nums == ["1", "2", "3", "4", "5", "6"]
+        assert nums == ["1", "2", "3", "4", "5", "6", "7"]
         titles = " ".join(t for _, t in VALIDATION_STAGES).lower()
         assert "inventory" in titles
         assert "b0" in titles or "parity" in titles
@@ -34,3 +36,4 @@ class TestConstants:
         assert "energy" in titles or "b1" in titles
         assert "latent" in titles
         assert "gate" in titles or "synthesis" in titles
+        assert "protocol" in titles

@@ -1,7 +1,7 @@
 import torch
 from tensordict import TensorDict
 
-from molix.data.collate import INDEX_KEYS, collate_molecules, rebase
+from molix.data.collate import INDEX_KEYS, MoleculeCollator, collate_molecules, rebase
 
 
 def test_collate_basic_fields_and_offsets():
@@ -36,6 +36,16 @@ def test_collate_basic_fields_and_offsets():
     assert batch["edges", "edge_index"][1:].tolist() == [[2, 3], [2, 4]]
 
     assert torch.allclose(batch["graphs", "U0"], torch.tensor([1.5, 2.5]))
+
+
+def test_molecule_collator_is_reusable_callable():
+    samples = [
+        {"Z": torch.tensor([1]), "pos": torch.zeros(1, 3), "targets": {"energy": 1.0}},
+        {"Z": torch.tensor([6, 1]), "pos": torch.zeros(2, 3), "targets": {"energy": 2.0}},
+    ]
+    batch = MoleculeCollator()(samples)
+    assert batch["atoms", "batch"].tolist() == [0, 1, 1]
+    assert batch["graphs", "energy"].tolist() == [1.0, 2.0]
 
 
 def test_index_keys_registry_contract():

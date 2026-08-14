@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 import torch
+from tensordict import TensorDict
 
 from molix import config
 
@@ -28,18 +29,17 @@ config.set_precision("fp64")
 
 from molix.compile import Compiler  # noqa: E402
 from molix.md import (  # noqa: E402
-    EV_PER_AMU_A2_FS2,
     MD,
     CallableForceField,
     MaxwellBoltzmann,
     MDCheckpointHook,
     NeighborList,
     TrajectoryHook,
+    VelocityVerletIntegrator,
 )
+from molix.units import units  # noqa: E402
 
-#: Re-exported for the out-of-tree comparison scripts that share this system
-#: preparation; molix.units is the single source.
-from molix.units import KB_AMU_A_FS  # noqa: E402,F401
+_EV_TO_MD = (1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2").magnitude
 from molpot.derivation.force import autograd_forces_from_energy  # noqa: E402
 from molzoo.mace import MACEPotential  # noqa: E402
 
@@ -336,14 +336,14 @@ def main() -> None:
             autocast_dtype=torch.bfloat16 if args.autocast_bf16 else None,
         ),
         neighbors=neighbors,
-        energy_scale=1.0 / EV_PER_AMU_A2_FS2,
+        energy_scale=_EV_TO_MD,
     ).to(device)
 
     t0 = time.perf_counter()
     out0 = force_field(pos)
     print(
-        f"single point: E = {float(out0.energy) * EV_PER_AMU_A2_FS2:.6f} eV, "
-        f"|F|max = {float(out0.forces.abs().max()) * EV_PER_AMU_A2_FS2:.6f} eV/A "
+        f"single point: E = {float(out0.energy) / _EV_TO_MD:.6f} eV, "
+        f"|F|max = {float(out0.forces.abs().max()) / _EV_TO_MD:.6f} eV/A "
         f"({time.perf_counter() - t0:.2f} s)"
     )
 
@@ -378,25 +378,31 @@ def main() -> None:
                 step_offset=start_step,
             )
         )
-    md = MD(
-        force_field,
-        mass=mass,
-        dt=args.dt,
-        gamma=0.0,  # NVE
-        dtype=config.ftype,
-        # autocast lives inside the force field's compiled callable (above);
-        # wrapping again here would just add per-call context overhead.
-        # No cadence kwarg: CallableForceField declares rebuilds_neighbors from
-        # the list bound to it, and the integrator derives its switch from that.
-        hooks=run_hooks,
-        seed=args.seed,
-        device=device,
+    md = (
+        MD(config.ftype)
+        .set_forcefield(force_field)
+        .set_integrator(VelocityVerletIntegrator(args.dt))
+        .set_hooks(run_hooks)
+        .to(device)
     )
-    vel = (
-        resume_vel
-        if args.resume is not None
-        else MaxwellBoltzmann(mass).sample(args.temperature, seed=args.seed)
+    n_atoms = int(pos.shape[0])
+    atoms = TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": pos,
+                    "vel": torch.zeros_like(pos),
+                    "mass": mass,
+                },
+                batch_size=[n_atoms],
+            )
+        },
+        batch_size=[],
     )
+    if args.resume is not None:
+        atoms["atoms", "vel"] = resume_vel
+    else:
+        MaxwellBoltzmann().sample(atoms, args.temperature, seed=args.seed)
     remaining = args.steps - start_step
     if remaining <= 0:
         print(f"nothing to do: checkpoint already at step {start_step} >= {args.steps}")
@@ -411,7 +417,7 @@ def main() -> None:
 
     rebuilds_before, ndanger_before = neighbors.rebuild_count, neighbors.ndanger
     t0 = time.perf_counter()
-    md.run(pos, vel, remaining, chunk=chunk)
+    md.run(atoms, remaining, chunk=chunk)
     elapsed = time.perf_counter() - t0
     rebuilds = neighbors.rebuild_count - rebuilds_before
     ndanger = neighbors.ndanger - ndanger_before
@@ -421,7 +427,7 @@ def main() -> None:
     )
 
     traj = torch.load(args.out, map_location="cpu", weights_only=True)
-    etot = traj["etot"] * EV_PER_AMU_A2_FS2
+    etot = traj["etot"] / _EV_TO_MD
     n_frames = int(etot.numel())
     if n_frames < 2:
         print(
@@ -459,7 +465,7 @@ def main() -> None:
             "shifts": neighbors.shifts.cpu(),
             "num_edges": neighbors.num_edges,
             "rebuild_count": neighbors.rebuild_count,
-            "energy_scale": EV_PER_AMU_A2_FS2,
+            "energy_scale": 1.0 / _EV_TO_MD,
         },
         args.out.with_suffix(".graph.pt"),
     )

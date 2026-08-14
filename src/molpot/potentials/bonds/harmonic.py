@@ -79,6 +79,8 @@ class BondHarmonic(BasePotential):
         pos = kwargs.get("pos")
         bond_index = kwargs.get("bond_index")
         bond_types = kwargs.get("bond_types")
+        term_batch = kwargs.get("term_batch")
+        num_graphs = kwargs.get("num_graphs")
 
         if data is not None and isinstance(data, dict):
             if pos is None:
@@ -132,7 +134,11 @@ class BondHarmonic(BasePotential):
         energy_per_bond = 0.5 * k_bonds * displacement**2
 
         # Sum over all bonds
-        total_energy = energy_per_bond.sum()
+        if term_batch is not None:
+            total_energy = energy_per_bond.new_zeros(int(num_graphs))
+            total_energy.index_add_(0, term_batch.long(), energy_per_bond)
+        else:
+            total_energy = energy_per_bond.sum()
 
         return total_energy
 

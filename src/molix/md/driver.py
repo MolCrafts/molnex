@@ -1,41 +1,25 @@
-"""``MD`` — the molecular-dynamics component.
+"""``MD`` — compose a force field and an integrator, then run a system.
 
-A domain type with methods, in the sense the project's design rules mean it:
-"I have a force field and a system; run dynamics at this precision." It owns the
-two things a trajectory needs held together and that no lower layer can decide
-alone — the **integrator** and the **MD-side precision** — and delegates the
-loop to :class:`~molix.md.runner.MDRunner`.
+``MD`` owns only the **MD-side precision** (trajectory state). Everything
+else is a component the caller builds and attaches:
 
-It does **not** own the neighbour-list cadence, and there is no kwarg for one.
-That decision belongs to :class:`~molix.md.neighbors.NeighborList`
-(``skin`` / ``every`` / ``delay`` / ``check``); the integrator asks it once per
-force evaluation, at the positions being evaluated, and derives *whether* to ask
-from :attr:`~molix.md.forcefield.ForceField.rebuilds_neighbors`. A run that must
-keep its list frozen composes it at the caller, through the existing
-``integrator=`` seam::
+    md = (
+        MD(torch.float64)
+        .set_forcefield(ff)
+        .set_integrator(VelocityVerletIntegrator(dt))
+        .set_hooks([TrajectoryHook(...)])
+        .to(device)
+    )
+    MaxwellBoltzmann().sample(system, 300.0, seed=0)
+    md.run(system, n_steps)
 
-    MD(ff, mass=m, integrator=LangevinVerletIntegrator(
-        ff, dt=0.5, gamma=0.0, kbt=0.0, mass=m, rebuild=False))
+``system`` is a TensorDict. Mass, positions and velocities live under
+``atoms`` (``molix.schema.MASS_KEY`` / ``POS_KEY`` / ``VEL_KEY``). The
+integrator is constructed with ``dt`` only.
 
-Precision is split in two, deliberately. ``MD(dtype=)`` governs the **MD side
-only** — trajectory state (positions/velocities), the integrator's step
-constants, and the mass — never the potential. The potential's precision is an
-independent axis set explicitly via :meth:`MD.set_potential_dtype` (or by
-constructing the force field at the desired dtype), because studying the MD
-process and the inference process separately is the point: an fp64 trajectory
-over an fp32 model is a meaningful, supported configuration. At the component
-boundary the integrator casts the force field's output back into the state
-dtype (``Integrator.eval_force``), so the two precisions never silently
-promote mid-step::
-
-    MD(force, mass=m, dt=0.5, dtype=torch.float64)         # fp64 trajectory
-    md.set_potential_dtype(torch.float32)                  # fp32 inference
-    MD(force, mass=m, dt=0.5, autocast_dtype=torch.bfloat16)  # bf16-mixed model
-
-``autocast_dtype`` leaves parameters alone and wraps each force evaluation in
-``torch.autocast``, which is the only mixed-precision form :mod:`molix.config`
-supports (pure fp16/bf16 parameters are deliberately unsupported there, and
-that stance is kept here).
+Neighbour-list cadence is not ``MD``'s. Configure it on
+:class:`~molix.md.neighbors.NeighborList`. A frozen list for a compiled
+rollout is ``VelocityVerletIntegrator(dt, rebuild=False)``.
 """
 
 from __future__ import annotations
@@ -43,250 +27,142 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import torch
+from tensordict import TensorDict
 
 from molix.md.forcefield import ForceField
-from molix.md.integrators import Integrator, LangevinVerletIntegrator
+from molix.md.integrators import Integrator
 from molix.md.runner import MDHook, MDRunner
-from molix.md.types import ForceOutput, MDState
-from molix.units import KB_AMU_A_FS
+from molix.md.types import MDState
+from molix.schema import MASS_KEY, POS_KEY, VEL_KEY
+from molix.units import units
 
-
-class _AutocastForceField(ForceField):
-    """Wrap a force field so each evaluation runs under ``torch.autocast``.
-
-    Applied around the *force field* rather than the integrator so the reduced
-    precision covers the model only: the BAOAB arithmetic and the accumulated
-    positions/velocities stay in the state dtype, which is what keeps a long
-    trajectory from losing the low bits of its own coordinates.
-    """
-
-    def __init__(self, inner: ForceField, dtype: torch.dtype) -> None:
-        super().__init__()
-        self.inner = inner
-        self.autocast_dtype = dtype
-
-    @property
-    def rebuilds_neighbors(self) -> bool:
-        """Delegate: wrapping for precision must not hide a live list.
-
-        ``MD`` applies this wrapper *before* the integrator is constructed, so
-        the integrator would otherwise derive ``False`` from the wrapper's
-        default and a bf16 run would silently freeze its neighbour list.
-        """
-        return self.inner.rebuilds_neighbors
-
-    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
-        """Delegate: connectivity is not a precision concern."""
-        self.inner.rebuild_neighbors(pos)
-
-    def forward(self, pos: torch.Tensor) -> ForceOutput:
-        device_type = pos.device.type
-        with torch.autocast(device_type=device_type, dtype=self.autocast_dtype):
-            out = self.inner(pos)
-        # Hand the integrator back its own precision; autocast is the model's
-        # business, not the trajectory's.
-        return ForceOutput(out.energy.to(pos.dtype), out.forces.to(pos.dtype))
+_KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
 
 
 class MaxwellBoltzmann:
-    """Maxwell-Boltzmann initial-velocity sampler over a mass profile.
+    """Maxwell-Boltzmann velocities written onto ``atoms.vel``.
 
-    Its own tiny type rather than a method on :class:`MD`: sampling initial
-    conditions is not the run driver's responsibility, and a sampler only
-    needs the masses. Velocities come back in float64 on CPU; :meth:`MD.run`
-    casts them onto the run's dtype/device.
-
-    Args:
-        mass: Per-atom mass ``(N,)`` in amu, or a scalar with ``n_atoms``.
-        n_atoms: Atom count — required when ``mass`` is a scalar (a scalar
-            mass carries no system size); checked against a per-atom mass.
+    Reads ``atoms.mass`` from the system TensorDict. No constructor mass —
+    the system already carries it.
     """
 
-    def __init__(self, mass: float | torch.Tensor, *, n_atoms: int | None = None) -> None:
-        mass_t = torch.as_tensor(mass, dtype=torch.float64)
-        if mass_t.dim() == 0:
-            if n_atoms is None:
-                raise ValueError("scalar mass carries no system size; pass n_atoms")
-            mass_t = mass_t.expand(int(n_atoms))
-        elif n_atoms is not None and int(mass_t.shape[0]) != int(n_atoms):
-            raise ValueError(f"n_atoms={n_atoms} disagrees with mass length {mass_t.shape[0]}")
-        self.mass = mass_t.detach().cpu()
-
-    def sample(self, temperature: float, *, seed: int = 0, remove_com: bool = True) -> torch.Tensor:
-        """Draw velocities ``(N, 3)`` in Å/fs at ``temperature``.
+    def sample(
+        self,
+        system: TensorDict,
+        temperature: float,
+        *,
+        seed: int = 0,
+        remove_com: bool = True,
+    ) -> TensorDict:
+        """Draw velocities at ``temperature`` (K) into ``system["atoms", "vel"]``.
 
         Args:
+            system: TensorDict with ``atoms.mass`` ``(N,)`` or scalar, and
+                ``atoms.pos`` ``(N, 3)`` (for the atom count).
             temperature: Kelvin.
-            seed: Generator seed, so a run is reproducible from its arguments.
-            remove_com: Remove the centre-of-mass momentum, which is what makes
-                the NVE degrees of freedom ``3N - 3``.
+            seed: Generator seed.
+            remove_com: Remove the centre-of-mass momentum (NVE dof ``3N-3``).
+
+        Returns:
+            The same ``system``, with ``atoms.vel`` written in Å/fs (float64).
         """
-        mass_col = self.mass.reshape(-1, 1)
+        pos = system[POS_KEY]
+        mass = system[MASS_KEY]
+        n = int(pos.shape[0])
+        mass_t = torch.as_tensor(mass, dtype=torch.float64)
+        if mass_t.dim() == 0:
+            mass_t = mass_t.expand(n)
+        elif int(mass_t.shape[0]) != n:
+            raise ValueError(f"atoms.mass length {mass_t.shape[0]} disagrees with n_atoms={n}")
+        mass_col = mass_t.reshape(-1, 1)
         generator = torch.Generator().manual_seed(int(seed))
-        noise = torch.randn((mass_col.shape[0], 3), generator=generator, dtype=torch.float64)
-        vel = noise * torch.sqrt(KB_AMU_A_FS * float(temperature) / mass_col)
+        noise = torch.randn((n, 3), generator=generator, dtype=torch.float64)
+        vel = noise * torch.sqrt(_KB_MD * float(temperature) / mass_col)
         if remove_com:
             vel = vel - (mass_col * vel).sum(0) / mass_col.sum()
-        return vel
+        system[VEL_KEY] = vel
+        return system
 
 
 class MD:
-    """Molecular dynamics over a :class:`~molix.md.forcefield.ForceField`.
+    """Compose ``ForceField`` + ``Integrator`` at a chosen MD-state dtype.
 
     Args:
-        force: The force field. Its dtype is **not** touched by ``dtype`` —
-            use :meth:`set_potential_dtype` (or construct it at the precision
-            you want) to control the inference side separately.
-        mass: Per-atom mass ``(N,)`` or a scalar, in amu.
-        dt: Timestep in fs. Required unless ``integrator`` is given.
-        gamma: Langevin friction γ in fs⁻¹. ``0`` (default) integrates NVE —
-            BAOAB's O step becomes the identity.
-        kbt: Thermal energy for the Langevin O step, in the integrator's
-            (amu, Å, fs) energy unit. Ignored at ``gamma=0``.
-        temperature: Convenience alternative to ``kbt``, in kelvin.
-        integrator: A constructed :class:`~molix.md.integrators.Integrator`
-            over ``force`` — the seam for Nosé–Hoover, NPT, or any
-            non-Langevin scheme. Mutually exclusive with
-            ``dt``/``gamma``/``kbt``/``temperature``/``seed``, which
-            parameterise the default :class:`LangevinVerletIntegrator`.
-        dtype: MD-side precision — trajectory state, integrator constants,
-            mass. ``None`` keeps the caller tensors' dtype. The force field is
-            deliberately left alone (see the module docstring).
-        autocast_dtype: Run each force evaluation under ``torch.autocast`` at
-            this dtype, leaving parameters alone. This is the mixed-precision
-            path (e.g. ``torch.bfloat16``). Not combinable with an explicit
-            ``integrator`` (wrap the force field yourself in that case).
-        hooks: Hooks driving the observation lifecycle.
-        seed: Seed for the Langevin noise.
-        device: Device to place the force field and state on (device, unlike
-            dtype, must be shared by both sides).
-
-    There is deliberately **no** rebuild-cadence argument. Configure the policy
-    where it lives, on the list —
-    ``NeighborList(cell=…, cutoff=…, positions=…, skin=1.0, every=1, delay=0,
-    check=True)`` — and ``MD`` derives the rest: the integrator asks that policy
-    once per force evaluation iff the force field declares
-    :attr:`~molix.md.forcefield.ForceField.rebuilds_neighbors`. ``skin=0,
-    every=1, delay=0, check=True`` is the accurate no-skin limit (rebuild
-    whenever anything moved at all); ``skin > 0`` is the production setting, and
-    a frozen list is ``integrator=LangevinVerletIntegrator(…, rebuild=False)``.
+        dtype: MD-side precision — trajectory state after :meth:`run` casts
+            ``atoms.pos`` / ``atoms.vel`` / ``atoms.mass``. ``None`` keeps the
+            system tensors' dtype. Never touches the force field.
     """
 
-    def __init__(
-        self,
-        force: ForceField,
-        *,
-        mass: float | torch.Tensor,
-        dt: float | None = None,
-        gamma: float = 0.0,
-        kbt: float | None = None,
-        temperature: float | None = None,
-        integrator: Integrator | None = None,
-        dtype: torch.dtype | None = None,
-        autocast_dtype: torch.dtype | None = None,
-        hooks: Sequence[MDHook | tuple[MDHook, int]] | None = None,
-        seed: int = 0,
-        device: torch.device | str | None = None,
-    ) -> None:
-        self.dtype = dtype
-        self.device = torch.device(device) if device is not None else None
-
-        mass_t = torch.as_tensor(mass)
-        if dtype is not None:
-            mass_t = mass_t.to(dtype)
-        if self.device is not None:
-            mass_t = mass_t.to(self.device)
-        self.mass = mass_t
-
-        if integrator is not None:
-            if dt is not None or kbt is not None or temperature is not None:
-                raise ValueError(
-                    "integrator= is mutually exclusive with dt/gamma/kbt/temperature/seed — "
-                    "those parameterise the default LangevinVerletIntegrator; a constructed "
-                    "integrator already owns them"
-                )
-            if autocast_dtype is not None:
-                raise ValueError(
-                    "autocast_dtype cannot wrap a constructed integrator's force field; "
-                    "wrap the force field before building the integrator"
-                )
-            if integrator.force is not force:
-                raise ValueError("integrator.force must be the force field given to MD")
-        else:
-            if dt is None:
-                raise ValueError("dt is required when no integrator is given")
-            if kbt is not None and temperature is not None:
-                raise ValueError("give kbt or temperature, not both")
-            if kbt is None:
-                kbt = KB_AMU_A_FS * float(temperature) if temperature is not None else 0.0
-            if gamma > 0.0 and kbt == 0.0:
-                raise ValueError("gamma > 0 needs kbt or temperature (a thermostat at 0 K freezes)")
-
-        # Wrapping happens before the integrator is built, so the integrator
-        # derives its rebuild switch from the wrapper — which forwards
-        # rebuilds_neighbors to the inner force field, keeping one owner.
-        if autocast_dtype is not None:
-            force = _AutocastForceField(force, autocast_dtype)
-        self.autocast_dtype = autocast_dtype
-
-        if integrator is None:
-            integrator = LangevinVerletIntegrator(
-                force, dt=dt, gamma=gamma, kbt=kbt, mass=mass_t, seed=seed
+    def __init__(self, dtype: torch.dtype | None = None) -> None:
+        if dtype is not None and not isinstance(dtype, torch.dtype):
+            raise TypeError(
+                "MD(dtype) takes a torch.dtype; attach the force field with set_forcefield"
             )
-        # MD-side precision: the integrator's own step constants follow the
-        # run dtype; the force field inside it is deliberately not cast.
-        if dtype is not None:
-            integrator = integrator.cast_state(dtype)
-        # Device, unlike dtype, is shared — a cross-device force call cannot
-        # work — so the move recurses through the force field too.
-        if self.device is not None:
-            integrator = integrator.to(self.device)
+        self.dtype = dtype
+        self.device: torch.device | None = None
+        self.force: ForceField | None = None
+        self.integrator: Integrator | None = None
+        self.hooks: list[MDHook | tuple[MDHook, int]] = []
+        self.runner: MDRunner | None = None
+
+    def set_forcefield(self, force: ForceField) -> MD:
+        """Attach the force field. Its dtype is whatever the caller built."""
         self.force = force
-        self.integrator = integrator
-
-        # No cadence poke here, by design: the integrator derived its own
-        # rebuild switch from the force field it holds, and the list owns when.
-        run_hooks: list[MDHook | tuple[MDHook, int]] = list(hooks or [])
-        self.runner = MDRunner(integrator, mass=mass_t, hooks=run_hooks)
-
-    def set_potential_dtype(self, dtype: torch.dtype) -> "MD":
-        """Cast the force field (the inference side) to ``dtype``.
-
-        The explicit counterpart of the constructor's ``dtype``: MD-side and
-        potential-side precision are independent axes, so casting the model is
-        never a side effect of setting the trajectory precision. The
-        integrator's boundary cast keeps the state in the MD dtype regardless
-        of what the model computes in.
-        """
-        self.force.to(dtype)
+        self._wire()
         return self
 
-    def run(
-        self, pos: torch.Tensor, vel: torch.Tensor, n_steps: int, *, chunk: int | None = None
-    ) -> MDState:
-        """Integrate ``n_steps``, returning the final typed :class:`MDState`.
+    def set_integrator(self, integrator: Integrator) -> MD:
+        """Attach a constructed integrator (``VelocityVerletIntegrator(dt)``)."""
+        self.integrator = integrator
+        if self.dtype is not None:
+            self.integrator.cast_state(self.dtype)
+        self._wire()
+        return self
 
-        Trajectory capture is a hook's job — pass a
-        :class:`~molix.md.runner.TrajectoryHook`.
+    def set_hooks(self, hooks: Sequence[MDHook | tuple[MDHook, int]] | None) -> MD:
+        """Replace the observation hooks. Not a dynamics parameter."""
+        self.hooks = list(hooks or [])
+        self._wire()
+        return self
+
+    def to(self, device: torch.device | str) -> MD:
+        """Place the bound integrator and force field on ``device``."""
+        self.device = torch.device(device)
+        if self.integrator is not None:
+            self.integrator.to(self.device)
+        if self.force is not None:
+            self.force.to(self.device)
+        return self
+
+    def _wire(self) -> None:
+        if self.force is None or self.integrator is None:
+            self.runner = None
+            return
+        self.integrator.bind_force(self.force)
+        self.runner = MDRunner(self.integrator, hooks=self.hooks)
+
+    def run(self, system: TensorDict, n_steps: int, *, chunk: int | None = None) -> MDState:
+        """Integrate ``n_steps`` on ``system``, writing ``atoms.pos`` / ``atoms.vel``.
 
         Args:
-            pos: Initial positions ``(N, 3)``, Angstrom.
-            vel: Initial velocities ``(N, 3)``, Å/fs.
+            system: TensorDict with ``atoms.pos``, ``atoms.vel``, ``atoms.mass``.
             n_steps: Number of steps.
-            chunk: Steps advanced between hook firings (dynamics are
-                bit-identical; only observation cadence changes). Default 1.
-                The neighbour policy is independent of ``chunk`` — it runs
-                inside each force evaluation, on the list's own schedule.
+            chunk: Steps advanced between hook firings. Default 1.
         """
+        if self.runner is None:
+            raise RuntimeError("set_forcefield and set_integrator before run")
         if chunk is None:
             chunk = 1
-        pos, vel = self._cast(pos), self._cast(vel)
-        return self.runner.run(pos, vel, n_steps, chunk=chunk)
+        system = self._cast_system(system)
+        return self.runner.run(system, n_steps, chunk=chunk)
 
-    def _cast(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Bring a caller tensor onto the run's dtype/device."""
-        if self.dtype is not None:
-            tensor = tensor.to(self.dtype)
-        if self.device is not None:
-            tensor = tensor.to(self.device)
-        return tensor
+    def _cast_system(self, system: TensorDict) -> TensorDict:
+        """Bring ``atoms.pos`` / ``vel`` / ``mass`` onto the run dtype/device."""
+        for key in (POS_KEY, VEL_KEY, MASS_KEY):
+            tensor = system[key]
+            if self.dtype is not None:
+                tensor = tensor.to(self.dtype)
+            if self.device is not None:
+                tensor = tensor.to(self.device)
+            system[key] = tensor
+        return system

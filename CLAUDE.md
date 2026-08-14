@@ -134,6 +134,41 @@ For non-trivial work, prefer:
 <!-- Free-form additions below this line are preserved across re-runs.
      If a section grows past a screen, promote to .claude/notes/<topic>.md. -->
 
+## Iron law — no training before verified optimization
+
+**Starting a training run is forbidden until the exact network, data-task
+path, batching path, and target hardware have been thoroughly validated and
+optimized.** A speculative full run is not a substitute for this gate.
+
+Binding preflight and sign-off record:
+`.claude/notes/production-training-checklist.md`.
+
+Before any training submission, all of the following evidence must exist for
+the exact configuration being submitted:
+
+1. Dataset coordinates, versions, provenance, units, target schemas, grouping,
+   and molecule-level splits have been validated.
+2. Reference and optimized/packed execution agree on forward outputs, every
+   active loss, gradients, and at least one optimizer update within declared
+   tolerances.
+3. Every active task/head passes a bounded tiny-set overfit test, and finite
+   values, physical invariants, gradient norms, clipping, and outliers have
+   been inspected.
+4. The input path uses real packed molecular batches; avoidable per-molecule
+   serial execution has been profiled and removed.
+5. Representative molecular-size buckets have been calibrated on the target
+   accelerator for batch size, HBM headroom, step time, throughput, and
+   stability. Model dimensions and calibration candidates use powers of two.
+6. A bounded smoke run demonstrates loss movement, validation reporting,
+   checkpoint/resume, and failure recovery.
+7. The evidence is recorded as a versioned **molexp calibration experiment**
+   linked to the production experiment.
+
+If any item is missing or stale, only explicitly bounded validation,
+profiling, or calibration jobs may run. Production launchers must fail closed
+when the calibration evidence or its exact configuration fingerprint is
+absent; they must never silently downgrade this rule to a warning.
+
 ## Project Overview
 
 **MolNex** (v0.1.0) is a dict-first molecular ML framework for unified modeling of molecular potentials and properties with physics-aware ML. It is composed of four packages:
@@ -242,6 +277,8 @@ TensorDict (batch_size=[])
 ├── "atoms": TensorDict (batch_size=[N])
 │   ├── Z: atomic numbers (N,)
 │   ├── pos: positions (N, 3)
+│   ├── mass: atomic masses (N,) amu  [MD]
+│   ├── vel: velocities (N, 3) Å/fs   [MD]
 │   └── batch: graph membership (N,)
 ├── "edges": TensorDict (batch_size=[E])
 │   ├── edge_index: source-target pairs (E, 2)   # [:,0]=source, [:,1]=target
@@ -622,7 +659,8 @@ The 10-section structure of `<encoder>.md` is **immutable** — adding / removin
 
 See `.claude/notes/learnable-classical-ff.md`. Short form:
 
-1. **Reuse first** — molpy `ForceField` / `potential` / Topology enum / SMARTS before inventing molnex twins.
+1. **Reuse first** — molnex `ForceField` **is** `molpy.ForceField` (subclass). No `to_molpy()`. Class-I is `ClassIForceField(ForceField)`, OPLS is `OPLSForceField(ClassIForceField)` — no `ForceField.class_i()` / `.opls()` façades. Override `to_potentials()` for torch; IO is `molpy.io` after `realize(system)`. Graph → SMARTS is `molpy.io.write_smarts` (molrs local-SMARTS). `Condenser` merges params inside those keys; types are registered with molpy `def_type`.
 2. **Generalize without `Foo(method=…)`** — single-responsibility types only; no multi-backend method switches on new APIs.
-3. **Non-diff sinks to molpy/molrs** — *enumeration*, SMARTS, classical non-torch E/F, FF tables under molpy (≥0.13). Imports: `molpy` only (never bare `molrs`).
+3. **Non-diff sinks to molpy/molrs** — *enumeration*, SMARTS, classical non-torch E/F, FF tables under molpy (≥0.13, with `k_B` / `openmm` preset). Imports: `molpy` only (never bare `molrs`).
 4. **Batch topology lives in molix TensorDict**, not molpy Frame. Column form under namespaces, e.g. `batch["angles"]["atomi"]` / `batch["angles", "atomj"]` / `atomk` (propers/impropers add `atoml`; improper **center = atomi**). Stack to COO only at kernel call sites if a potential still wants `[arity, N]`.
+5. **Units** — `from molix.units import units` and pint `.to(...)`. Do not restate conversion floats.

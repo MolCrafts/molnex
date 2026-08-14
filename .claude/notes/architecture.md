@@ -36,6 +36,8 @@ Four packages under `src/`: **molix** (infra) ← **molrep** (representation) �
 - `src/molix/op/` — CMake/C++/CUDA extension (`libmolnex_opLib.<arch>.so`; links `torch_python`)
 - `src/molix/profiler/` — Task/Module/DataLoader/Trainer profilers + mocks
 - `src/molix/md/` — in-process Langevin MD (ForceField, Integrator, MDRunner)
+- `src/molix/units.py` — shared `molpy.UnitSystem` as `units` (pint `.to`)
+- `src/molix/ff_export/` — ForceSpec adapters + `LammpsWriter` (`molpy.io`)
 - `src/molix/engine/` — EngineAdapter / EngineForward / StaticForward / export_for_lammps
 - `src/molix/cli/` — Typer CLI (`molnex check` / doctor)
 
@@ -54,6 +56,7 @@ Four packages under `src/`: **molix** (infra) ← **molrep** (representation) �
 
 **molpot** — physics (potentials, heads, derivation, composition)
 - `src/molpot/` — package root re-exports
+- `src/molpot/forcefield/` — `ForceField` (subclass of `molpy.ForceField`; `to_potentials` override), `ClassIForceField`, `OPLSForceField` + `ClassicalIMM` + torch `Potentials`
 - `src/molpot/potentials/` — BasePotential + classical MM terms
   - `bonds/`, `angles/`, `dihedrals/`, `vdw/`
   - `nonbonded.py`, `mixing.py`, `polarization.py`
@@ -102,6 +105,8 @@ Four packages under `src/`: **molix** (infra) ← **molrep** (representation) �
 | `molix.F` | `get_neighbor_pairs`, `pme_direct`, `pme_reciprocal`, `scatter_sum`, `batch_add` |
 | `molix.io` | `JournalReader`, `JournalWriter` |
 | `molix.md` | ForceField family, Langevin integrator, `MDRunner`, trajectory helpers |
+| `molix.units` | `units` (`molpy.UnitSystem`), `DEAD_EDGE_CUTOFF_FACTOR` |
+| `molix.ff_export` | `ForceFieldCompiler`, adapters, `LammpsWriter`, `ForceSpec` |
 | `molix.engine` | `EngineAdapter`, `EngineForward`, `FlatTensorAdapter`, `MolnexTensorDictAdapter`, `StaticForward`, `export_for_lammps`, `LAMMPS_META_SCHEMA` |
 | `molix.compile` / `export` / `quant` | `Compiler` / `Exporter` / quant schemes + `Quantizer` |
 

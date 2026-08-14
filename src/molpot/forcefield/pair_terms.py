@@ -42,17 +42,22 @@ class LJCutPotential:
         epsilon: torch.Tensor,
         sigma: torch.Tensor,
         scales: torch.Tensor,
+        edge_batch: torch.Tensor | None = None,
+        num_graphs: int | None = None,
     ) -> torch.Tensor:
         """Scalar LJ energy for a half neighbor list."""
         within = distances < self.cutoff
-        if not bool(within.any()):
-            return distances.new_zeros(())
         ei = edge_index[within]
         dist = distances[within]
         sc = scales[within]
         mixed = lorentz_berthelot({"epsilon": epsilon, "sigma": sigma}, ei)
         e_pair = lj126_pair_energy(dist, mixed["epsilon_ij"], mixed["sigma_ij"])
-        return (e_pair * sc).sum()
+        pair_energy = e_pair * sc
+        if edge_batch is None:
+            return pair_energy.sum()
+        energy = pair_energy.new_zeros(int(num_graphs))
+        energy.index_add_(0, edge_batch[within].long(), pair_energy)
+        return energy
 
 
 class CoulombOpenPotential:
@@ -80,18 +85,25 @@ class CoulombOpenPotential:
         distances: torch.Tensor,
         charges: torch.Tensor,
         scales: torch.Tensor,
+        edge_batch: torch.Tensor | None = None,
+        num_graphs: int | None = None,
     ) -> torch.Tensor:
         if self.cutoff is not None:
             within = distances < self.cutoff
             edge_index = edge_index[within]
             distances = distances[within]
             scales = scales[within]
-        if distances.numel() == 0:
-            return charges.new_zeros(())
+            if edge_batch is not None:
+                edge_batch = edge_batch[within]
         v = self.potential.from_dist(distances)
         qi = charges[edge_index[:, 0]]
         qj = charges[edge_index[:, 1]]
-        return (scales * qi * qj * v).sum()
+        pair_energy = scales * qi * qj * v
+        if edge_batch is None:
+            return pair_energy.sum()
+        energy = pair_energy.new_zeros(int(num_graphs))
+        energy.index_add_(0, edge_batch.long(), pair_energy)
+        return energy
 
 
 class CoulombPeriodicPotential:
@@ -119,9 +131,7 @@ class CoulombPeriodicPotential:
         self.mesh_spacing = float(mesh_spacing)
         # real-space neighbor cutoff; default ~3*smearing when unset
         self.real_space_cutoff = (
-            float(real_space_cutoff)
-            if real_space_cutoff is not None
-            else 3.0 * self.smearing
+            float(real_space_cutoff) if real_space_cutoff is not None else 3.0 * self.smearing
         )
         self.potential = CoulombPotential(smearing=self.smearing, prefactor=prefactor)
         self._calc: Calculator = self._build_calculator()
@@ -134,9 +144,7 @@ class CoulombPeriodicPotential:
             return PMECalculator(self.potential, mesh_spacing=self.mesh_spacing)
         if name == "p3m":
             return P3MCalculator(self.potential, mesh_spacing=self.mesh_spacing)
-        raise ValueError(
-            f"unknown electrostatics calculator {name!r}; expected ewald|pme|p3m"
-        )
+        raise ValueError(f"unknown electrostatics calculator {name!r}; expected ewald|pme|p3m")
 
     def energy(
         self,

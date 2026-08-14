@@ -38,5 +38,8 @@ Each package follows the same documentation shape:
 - Understand batch structure: [Molix Batch Schema](molix/explanation/batch-schema.md)
 - Build an encoder: [MolRep Build an Encoder](molrep/tutorials/build-an-encoder.md)
 - Build a potential: [MolPot Build a Potential](molpot/tutorials/build-a-potential.md)
+- Class-I force field: [Class-I ForceField](molpot/tutorials/class-i-forcefield.md)
+- Units (pint): [Molix Units](molix/user-guide/units.md)
+- Export to LAMMPS: [Force-field export](molix/user-guide/ff-export.md)
 - Use MolZoo encoders: [MolZoo Tutorial](molzoo/tutorials/index.md)
 - Look up Python objects: [API Reference](api/index.md)

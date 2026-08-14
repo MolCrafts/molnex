@@ -22,6 +22,7 @@ from molix.data.cache import PackedCache
 # Collation
 from molix.data.collate import (
     DEFAULT_TARGET_SCHEMA,
+    MoleculeCollator,
     TargetSchema,
     collate_molecules,
 )
@@ -102,6 +103,7 @@ __all__ = [
     "DataModuleProtocol",
     # Collation
     "collate_molecules",
+    "MoleculeCollator",
     "TargetSchema",
     "DEFAULT_TARGET_SCHEMA",
     # Group splits

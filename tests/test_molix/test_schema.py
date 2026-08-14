@@ -3,7 +3,16 @@
 import torch
 from tensordict import TensorDict
 
-from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY, FORCES_KEY, POS_KEY, has_energy, has_forces
+from molix.schema import (
+    ATOMIC_ENERGY_KEY,
+    ENERGY_KEY,
+    FORCES_KEY,
+    MASS_KEY,
+    POS_KEY,
+    VEL_KEY,
+    has_energy,
+    has_forces,
+)
 
 
 def _batch(*, energy: bool = False, forces: bool = False) -> TensorDict:
@@ -22,6 +31,8 @@ def test_keys_match_the_documented_schema():
     assert ATOMIC_ENERGY_KEY == ("atoms", "energy")
     assert FORCES_KEY == ("atoms", "forces")
     assert POS_KEY == ("atoms", "pos")
+    assert VEL_KEY == ("atoms", "vel")
+    assert MASS_KEY == ("atoms", "mass")
 
 
 def test_has_energy_and_has_forces_walk_the_nesting():

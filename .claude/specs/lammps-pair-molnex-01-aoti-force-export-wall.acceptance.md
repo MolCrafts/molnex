@@ -1,6 +1,8 @@
 ---
 spec: lammps-pair-molnex-01-aoti-force-export-wall
-status: investigation-complete
+status: closed
+closed: 2026-08-13
+resolution: investigation-complete
 ---
 
 # Acceptance — pair_style molnex AOTI force-export wall

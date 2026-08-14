@@ -1,6 +1,7 @@
 ---
 title: MACE-OMOL native port into molnex (weight-loadable, E/F faithful)
-status: done
+status: closed
+closed: 2026-08-13
 created: 2026-06-21
 chain: mace-omol-port
 ---

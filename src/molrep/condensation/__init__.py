@@ -1,10 +1,11 @@
 """Physics-aware multi-system chemical class condensation.
 
 Turn continuous per-interaction MM parameters into a discrete
-:class:`TypeSystem` per :class:`InteractionClass` via greedy merge under
-:class:`MergeCriterion` budgets. Optional physics gating uses an injected
-``physical_eval`` callable — this package never builds molpot energy graphs
-and never emits SMARTS/SMIRKS text (sub-spec 07).
+:class:`TypeSystem` per :class:`InteractionClass`. The chemical environment
+is the type key (classified first); :class:`Condenser` only merges inside
+a bucket. Optional physics gating uses an injected ``physical_eval``
+callable — this package never builds molpot energy graphs and never
+emits SMARTS/SMIRKS text.
 
 Public surface:
     InteractionClass, MergeCriterion, default_criterion,

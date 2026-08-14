@@ -13,20 +13,16 @@ import math
 
 import torch
 
-from molix.ff_export import (
-    ForceFieldCompiler,
-    scale_amber_vn,
-    scale_bond_k,
-)
+from molix.ff_export import ConventionTable, ForceFieldCompiler
 from molpot.ir import BondBag, PotentialIR, ProperTorsionBag
 
 
 def test_bond_k_golden_100_to_41840():
-    assert scale_bond_k(100.0) == 41840.0
+    assert ConventionTable.default_openmm().scale("bond_harmonic", "k", 100.0) == 41840.0
 
 
 def test_torsion_vn_golden_2_to_4_184():
-    assert scale_amber_vn(2.0) == 4.184
+    assert ConventionTable.default_openmm().scale_amber_vn(2.0) == 4.184
 
 
 def test_compiler_emits_bond_and_torsion_goldens():

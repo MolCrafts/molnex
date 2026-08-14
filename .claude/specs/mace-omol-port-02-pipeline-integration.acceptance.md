@@ -1,5 +1,7 @@
 ---
 slug: mace-omol-port-02-pipeline-integration
+status: closed
+closed: 2026-08-13
 criteria:
   - id: ac-001
     summary: molnex pipeline integration (TensorDict / molpot / neighbor list)

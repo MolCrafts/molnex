@@ -1,9 +1,9 @@
 /* PairMolnex implementation — see pair_molnex.h.
 
    Generalized from the PiNet-specific pair_pinet.cpp: model-specific knobs
-   (cutoff, native units, compute dtype) are read from the export's meta.json
-   rather than hardcoded, so the same pair style serves any molnex potential
-   exported via molix.engine.export_for_lammps.
+   (cutoff, native units, compute dtype, PBC/virial capabilities) are read from
+   the export's meta.json rather than hardcoded, so the same pair style serves
+   any molnex potential exported via molix.engine.export_for_lammps.
 */
 
 #include "pair_molnex.h"
@@ -57,6 +57,10 @@ PairMolnex::PairMolnex(LAMMPS *lmp) : Pair(lmp)
   fp64_model = false;
   energy_conv = 1.0;
   force_conv = 1.0;
+  // ghost force reverse-comm size (fx,fy,fz). Needed when supports_pbc and
+  // the model writes forces on ghosts; also used with newton off.
+  comm_reverse = 3;
+  comm_reverse_off = 3;
 }
 
 PairMolnex::~PairMolnex()
@@ -113,6 +117,9 @@ void PairMolnex::settings(int narg, char **arg)
     }
     force_conv = energy_conv;   // force = energy / Å, distance unchanged
 
+    supports_pbc = molnex::lammps_meta::get_bool(meta, "supports_pbc", false);
+    supports_virial = molnex::lammps_meta::get_bool(meta, "supports_virial", false);
+
     // CUDA-graph fast path: fixed N + padded E_max, captured once & replayed.
     use_cuda_graph = molnex::lammps_meta::get_bool(meta, "cuda_graph", false);
     if (use_cuda_graph) {
@@ -131,6 +138,9 @@ void PairMolnex::settings(int narg, char **arg)
   if (use_cuda_graph) {
     if (device != "cuda")
       error->all(FLERR, "pair_style molnex: meta cuda_graph=true but device={} (need cuda)", device);
+    if (supports_pbc)
+      error->all(FLERR, "pair_style molnex: cuda_graph is incompatible with supports_pbc "
+                        "(ghost count varies; re-export without cuda_graph for PBC MD)");
     auto dev = at::Device(at::kCUDA);
     at::ScalarType mdt = fp64_model ? at::kDouble : at::kFloat;
     Zg_ = at::zeros({n_fixed}, at::TensorOptions().dtype(at::kLong).device(dev));
@@ -141,9 +151,12 @@ void PairMolnex::settings(int narg, char **arg)
   if (comm->me == 0)
     utils::logmesg(lmp,
                    "pair_molnex: loaded '{}' from {} (device={}, model units={}, "
-                   "LAMMPS units={}, dtype={}, cutoff={:.3f} A, energy*={:.6g})\n",
+                   "LAMMPS units={}, dtype={}, cutoff={:.3f} A, energy*={:.6g}, "
+                   "supports_pbc={}, supports_virial={})\n",
                    model_name, model_dir, device, model_units, update->unit_style,
-                   fp64_model ? "float64" : "float32", cut_global, energy_conv);
+                   fp64_model ? "float64" : "float32", cut_global, energy_conv,
+                   supports_pbc ? "true" : "false",
+                   supports_virial ? "true" : "false");
 }
 
 /* pair_coeff * * <Z_type1> <Z_type2> ... <Z_typeN> */
@@ -171,9 +184,10 @@ double PairMolnex::init_one(int /*i*/, int /*j*/)
 
 void PairMolnex::init_style()
 {
-  if (force->newton_pair == 1 && comm->nprocs > 1)
-    error->all(FLERR, "pair_molnex (this version) assumes a single domain; run on 1 MPI rank");
-  // full neighbour list within cut_global
+  if (!supports_pbc && force->newton_pair == 1 && comm->nprocs > 1)
+    error->all(FLERR, "pair_molnex without supports_pbc assumes a single domain; "
+                      "run on 1 MPI rank or re-export with supports_pbc=true");
+  // full neighbour list within cut_global (needed for many-body aggregation)
   neighbor->add_request(this, NeighConst::REQ_FULL);
 }
 
@@ -183,9 +197,13 @@ void PairMolnex::compute(int eflag, int vflag)
 
   const int nlocal = atom->nlocal;
   const int nghost = atom->nghost;
-  if (nghost != 0)
-    error->all(FLERR, "pair_molnex (this version) requires no ghost atoms "
-                      "(single molecule, 1 rank, non-periodic). nghost != 0.");
+  const int nall = nlocal + nghost;
+
+  if (!supports_pbc && nghost != 0)
+    error->all(FLERR, "pair_molnex (supports_pbc=false) requires no ghost atoms "
+                      "(single molecule, 1 rank, non-periodic). nghost={}. "
+                      "Re-export with supports_pbc=true for periodic / multi-rank MD.",
+               nghost);
 
   double **x = atom->x;
   double **f = atom->f;
@@ -197,14 +215,17 @@ void PairMolnex::compute(int eflag, int vflag)
   int **firstneigh = list->firstneigh;
   const double cutsq_g = cut_global * cut_global;
 
+  // Graph atom count: local-only when supports_pbc is false; local+ghost otherwise.
+  const int n_graph = supports_pbc ? nall : nlocal;
+
   // --- node tensors: Z (N,), pos (N,3) ---
   auto opt_f = at::TensorOptions().dtype(at::kDouble);     // build in fp64 then cast
   auto opt_l = at::TensorOptions().dtype(at::kLong);
-  at::Tensor Z = at::empty({nlocal}, opt_l);
-  at::Tensor pos = at::empty({nlocal, 3}, opt_f);
+  at::Tensor Z = at::empty({n_graph}, opt_l);
+  at::Tensor pos = at::empty({n_graph, 3}, opt_f);
   auto Za = Z.accessor<int64_t, 1>();
   auto pa = pos.accessor<double, 2>();
-  for (int i = 0; i < nlocal; i++) {
+  for (int i = 0; i < n_graph; i++) {
     Za[i] = type2z[type[i]];
     pa[i][0] = x[i][0];
     pa[i][1] = x[i][1];
@@ -216,8 +237,12 @@ void PairMolnex::compute(int eflag, int vflag)
   // what the reference data pipeline's nonzero() yields. The raw neighbour-list
   // order gives the same pairs but a different order, which silently produces
   // wrong energy/forces. So collect then sort.
-  std::vector<std::pair<int, int>> ep;
-  ep.reserve(inum * 16);
+  //
+  // With supports_pbc, j may be a ghost: its coordinates already encode the
+  // minimum-image placement, so edge_diff = pos[j]-pos[i] needs no separate
+  // shifts tensor for models that recompute geometry from positions.
+  edge_pairs_.clear();
+  edge_pairs_.reserve(static_cast<size_t>(inum) * 16);
   for (int ii = 0; ii < inum; ii++) {
     int i = ilist[ii];
     double xi = x[i][0], yi = x[i][1], zi = x[i][2];
@@ -225,25 +250,29 @@ void PairMolnex::compute(int eflag, int vflag)
     int jn = numneigh[i];
     for (int jj = 0; jj < jn; jj++) {
       int j = jl[jj] & NEIGHMASK;
-      if (j >= nlocal) continue;   // no ghosts in this regime
+      if (!supports_pbc && j >= nlocal) continue;
+      if (j >= n_graph) continue;
       double dx = x[j][0] - xi, dy = x[j][1] - yi, dz = x[j][2] - zi;
-      if (dx * dx + dy * dy + dz * dz < cutsq_g) ep.emplace_back(i, j);
+      if (dx * dx + dy * dy + dz * dz < cutsq_g) edge_pairs_.emplace_back(i, j);
     }
   }
-  std::sort(ep.begin(), ep.end());
-  int64_t ne = static_cast<int64_t>(ep.size());
-  std::vector<int64_t> edges(2 * ne);
+  std::sort(edge_pairs_.begin(), edge_pairs_.end());
+  const int64_t ne = static_cast<int64_t>(edge_pairs_.size());
+  edge_flat_.resize(static_cast<size_t>(2 * ne));
   for (int64_t k = 0; k < ne; k++) {
-    edges[2 * k] = ep[k].first;       // source
-    edges[2 * k + 1] = ep[k].second;  // target
+    edge_flat_[static_cast<size_t>(2 * k)] = edge_pairs_[static_cast<size_t>(k)].first;
+    edge_flat_[static_cast<size_t>(2 * k + 1)] = edge_pairs_[static_cast<size_t>(k)].second;
   }
-  at::Tensor edge_index = at::from_blob(edges.data(), {ne, 2}, opt_l).clone();
+  at::Tensor edge_index = at::from_blob(edge_flat_.data(), {ne, 2}, opt_l).clone();
 
   // --- run: CUDA-graph fast path (fixed N + padded E_max) or dynamic run ---
   at::ScalarType mdt = fp64_model ? at::kDouble : at::kFloat;   // from meta.json
-  at::Tensor e_t, f_t;
+  at::Tensor e_t, f_t, v_t;
+  bool have_virial_out = false;
 #ifdef MOLNEX_INTERFACE_CUDA
   if (use_cuda_graph) {
+    if (nghost != 0)
+      error->all(FLERR, "pair_molnex cuda_graph: nghost={} (need 0)", nghost);
     if (nlocal != n_fixed)
       error->all(FLERR, "pair_molnex cuda_graph: nlocal={} != fixed N={} "
                         "(export n_atoms must match the system)", nlocal, n_fixed);
@@ -251,34 +280,51 @@ void PairMolnex::compute(int eflag, int vflag)
       error->all(FLERR, "pair_molnex cuda_graph: {} edges > e_max {} "
                         "(re-export with a larger e_max)", ne, e_max);
     // pad edges to e_max (extra rows = (0,0), inert via mask) + valid-edge mask
-    std::vector<int64_t> pedges(2 * e_max, 0);
-    for (int64_t k = 0; k < ne; k++) { pedges[2*k] = ep[k].first; pedges[2*k+1] = ep[k].second; }
+    edge_pad_flat_.assign(static_cast<size_t>(2 * e_max), 0);
+    for (int64_t k = 0; k < ne; k++) {
+      edge_pad_flat_[static_cast<size_t>(2 * k)] = edge_pairs_[static_cast<size_t>(k)].first;
+      edge_pad_flat_[static_cast<size_t>(2 * k + 1)] = edge_pairs_[static_cast<size_t>(k)].second;
+    }
     at::Tensor mask_cpu = at::zeros({e_max}, at::TensorOptions().dtype(at::kBool));
     auto ma = mask_cpu.accessor<bool, 1>();
     for (int64_t k = 0; k < ne; k++) ma[k] = true;
-    at::Tensor edges_cpu = at::from_blob(pedges.data(), {e_max, 2}, opt_l).clone();
+    at::Tensor edges_cpu = at::from_blob(edge_pad_flat_.data(), {e_max, 2}, opt_l).clone();
     // update the persistent device buffers in place, then capture/replay
     Zg_.copy_(Z);
     posg_.copy_(pos.to(mdt));
     edgeg_.copy_(edges_cpu);
     maskg_.copy_(mask_cpu);
     std::vector<at::Tensor> inputs = {Zg_, posg_, edgeg_, maskg_};
-    std::vector<at::Tensor> out = runner->run_graphed(inputs);   // [energy, forces(N,3)]
+    std::vector<at::Tensor> out = runner->run_graphed(inputs);   // [energy, forces(N,3), ?virial]
     e_t = out[0].to(at::kDouble).to(at::kCPU);
     f_t = out[1].to(at::kDouble).to(at::kCPU).contiguous();
+    if (supports_virial && out.size() >= 3) {
+      v_t = out[2].to(at::kDouble).to(at::kCPU).contiguous();
+      have_virial_out = true;
+    }
   } else
 #endif
   {
     auto dev = (device == "cuda") ? at::Device(at::kCUDA) : at::Device(at::kCPU);
     std::vector<at::Tensor> inputs = {Z.to(dev), pos.to(mdt).to(dev), edge_index.to(dev)};
-    std::vector<at::Tensor> out = runner->run(inputs);   // [energy_total, forces(N,3)]
+    std::vector<at::Tensor> out = runner->run(inputs);   // [energy_total, forces(N,3), ?virial]
     e_t = out[0].to(at::kDouble).to(at::kCPU);
     f_t = out[1].to(at::kDouble).to(at::kCPU).contiguous();
+    if (supports_virial && out.size() >= 3) {
+      v_t = out[2].to(at::kDouble).to(at::kCPU).contiguous();
+      have_virial_out = true;
+    }
   }
 
+  if (f_t.size(0) != n_graph)
+    error->all(FLERR, "pair_molnex: model returned forces for {} atoms, expected {}",
+               f_t.size(0), n_graph);
+
   // --- scatter forces + energy back to LAMMPS (converted to LAMMPS units) ---
+  // Write onto local (+ ghost when supports_pbc); reverse_comm pulls ghost
+  // force contributions onto owners for multi-rank / periodic images.
   auto fa = f_t.accessor<double, 2>();
-  for (int i = 0; i < nlocal; i++) {
+  for (int i = 0; i < n_graph; i++) {
     f[i][0] += force_conv * fa[i][0];
     f[i][1] += force_conv * fa[i][1];
     f[i][2] += force_conv * fa[i][2];
@@ -286,12 +332,51 @@ void PairMolnex::compute(int eflag, int vflag)
   double e_model = e_t.item<double>() * energy_conv;
   if (eflag_global) eng_vdwl += e_model;
 
-  static bool dbg_once = true;
-  if (dbg_once) {
-    dbg_once = false;
-    utils::logmesg(lmp, "pair_molnex[dbg] nlocal={} nedges={} energy={:.6f} ({} units)\n",
-                   nlocal, ne, e_model, update->unit_style);
+  if (have_virial_out && vflag_global) {
+    // model virial: (6,) xx,yy,zz,xy,xz,yz in model energy units
+    auto va = v_t.accessor<double, 1>();
+    if (v_t.numel() < 6)
+      error->all(FLERR, "pair_molnex: supports_virial but virial output has {} elements (need 6)",
+                 v_t.numel());
+    virial[0] += energy_conv * va[0];
+    virial[1] += energy_conv * va[1];
+    virial[2] += energy_conv * va[2];
+    virial[3] += energy_conv * va[3];
+    virial[4] += energy_conv * va[4];
+    virial[5] += energy_conv * va[5];
+  } else if (vflag_fdotr) {
+    virial_fdotr_compute();
   }
 
-  if (vflag_fdotr) virial_fdotr_compute();
+  if (supports_pbc && nghost > 0)
+    comm->reverse_comm(this);
+}
+
+/* ----------------------------------------------------------------------
+   reverse communication of ghost forces → owned atoms
+------------------------------------------------------------------------- */
+
+int PairMolnex::pack_reverse_comm(int n, int first, double *buf)
+{
+  int m = 0;
+  const int last = first + n;
+  double **f = atom->f;
+  for (int i = first; i < last; i++) {
+    buf[m++] = f[i][0];
+    buf[m++] = f[i][1];
+    buf[m++] = f[i][2];
+  }
+  return m;
+}
+
+void PairMolnex::unpack_reverse_comm(int n, int *list, double *buf)
+{
+  int m = 0;
+  double **f = atom->f;
+  for (int i = 0; i < n; i++) {
+    const int j = list[i];
+    f[j][0] += buf[m++];
+    f[j][1] += buf[m++];
+    f[j][2] += buf[m++];
+  }
 }

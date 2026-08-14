@@ -26,7 +26,6 @@ def main() -> int:
     args = p.parse_args()
 
     from molhub.dataset import PhalkethohMMDataset
-    from molhub.dataset.meta import Targets
 
     report: dict = {"data_root": str(args.data_root), "splits": {}}
     for split in ("train", "val", "test"):
@@ -34,7 +33,7 @@ def main() -> int:
         by: dict[str, list[float]] = defaultdict(list)
         for i in range(len(ds)):
             fr = ds[i]
-            t = Targets(fr)
+            t = fr.meta
             by[str(t["molecule_id"])].append(float(t["mm_energy"]))
         n_mol = len(by)
         n_fr = len(ds)
@@ -48,8 +47,12 @@ def main() -> int:
             "n_frames": n_fr,
             "n_molecules": n_mol,
             "confs_per_mol_mean": n_fr / n_mol if n_mol else 0,
-            "energy_kcal_mean": float(np.mean([e for es in by.values() for e in es])) if n_fr else None,
-            "energy_kcal_std": float(np.std([e for es in by.values() for e in es])) if n_fr else None,
+            "energy_kcal_mean": float(np.mean([e for es in by.values() for e in es]))
+            if n_fr
+            else None,
+            "energy_kcal_std": float(np.std([e for es in by.values() for e in es]))
+            if n_fr
+            else None,
             "centered_energy_std_kcal": float(np.std(cat)) if cat.size else None,
             "source_id": ds.source_id,
         }

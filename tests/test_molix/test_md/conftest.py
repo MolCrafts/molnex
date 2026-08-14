@@ -5,8 +5,30 @@ per the repo test-layout rule — no free-floating helper modules.
 """
 
 import torch
+from tensordict import TensorDict
 
 _DEVICE = torch.device("cpu")
+
+
+def md_system(
+    pos: torch.Tensor,
+    vel: torch.Tensor,
+    mass: float | torch.Tensor,
+) -> TensorDict:
+    """Minimal MD system: ``atoms.pos`` / ``atoms.vel`` / ``atoms.mass``."""
+    n = int(pos.shape[0])
+    mass_t = torch.as_tensor(mass, dtype=pos.dtype, device=pos.device)
+    if mass_t.dim() == 0:
+        mass_t = mass_t.expand(n).clone()
+    return TensorDict(
+        {
+            "atoms": TensorDict(
+                {"pos": pos, "vel": vel, "mass": mass_t},
+                batch_size=[n],
+            )
+        },
+        batch_size=[],
+    )
 
 
 def make_cubic_lattice(n_side: int = 3, spacing: float = 3.0) -> tuple[torch.Tensor, torch.Tensor]:

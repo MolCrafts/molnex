@@ -50,7 +50,8 @@ def _knowledge_body() -> str:
             "## MolHub coordinates",
             "",
             "Data is loaded via the **Python molhub SDK** only (no molhub MCP plane).",
-            "Workspace orchestration uses **molexp**; agents discover tools on **molmcp molexp** plane.",
+            "Workspace orchestration uses **molexp**; agents discover tools on the"
+            " **molmcp molexp** plane.",
             "",
             f"Default normalized PhAlkEthOH root: `{DEFAULT_NORMALIZED_DATA_ROOT}`",
             "",
@@ -147,8 +148,7 @@ class MmParamLearningWorkspace:
         if not sources:
             sources = [SourceRef(kind="experiment", ref=PROTOCOL_EXPERIMENT_SLUG)]
         sources.extend(
-            SourceRef(kind="file", ref=coord)
-            for coord in sorted(set(MOLHUB_COORDINATES.values()))
+            SourceRef(kind="file", ref=coord) for coord in sorted(set(MOLHUB_COORDINATES.values()))
         )
         write_knowledge_item(
             project,

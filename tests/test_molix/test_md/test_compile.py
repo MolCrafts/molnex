@@ -17,6 +17,7 @@ from molix.md import (
     LennardJonesForceField,
     NeighborList,
     PotentialForceField,
+    VelocityVerletIntegrator,
 )
 from tests.test_molix.test_md.conftest import (
     make_cubic_lattice,
@@ -38,7 +39,7 @@ def test_lj_force_matches_autograd():
 
 def _ljcut_ig(
     *, rebuild: bool, skin: float = 0.0
-) -> tuple[LangevinVerletIntegrator, NeighborList, torch.Tensor]:
+) -> tuple[VelocityVerletIntegrator, NeighborList, torch.Tensor]:
     """Argon lj/cut over the 27-atom lattice, with the rebuild switch explicit.
 
     ``rebuild`` is passed on purpose in both arms: the switch defaults to the
@@ -51,9 +52,7 @@ def _ljcut_ig(
     pos = pos + 0.2 * torch.randn_like(pos)
     nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=skin)
     ff = LennardJonesCutForceField(epsilon=0.7, sigma=2.5, neighbors=nl).to(_DTYPE)
-    ig = LangevinVerletIntegrator(
-        ff, dt=0.5, gamma=0.0, kbt=0.0, mass=39.95, seed=2, rebuild=rebuild
-    )
+    ig = VelocityVerletIntegrator(0.5, rebuild=rebuild).bind_force(ff).bind_mass(39.95)
     return ig, nl, pos
 
 
@@ -61,9 +60,8 @@ def test_ljcut_step_fullgraph_compiles_and_matches_eager():
     """lj/cut over the fixed-capacity list (index_add + cutoff mask) traces fullgraph."""
     ig, _, pos = _ljcut_ig(rebuild=False)
     st = ig.initial(pos, torch.zeros_like(pos))
-    noise = torch.zeros_like(pos)
-    eager = ig.step(st, noise)
-    comp = torch.compile(ig.step, fullgraph=True, backend=_BACKEND)(st, noise)
+    eager = ig.step(st)
+    comp = torch.compile(ig.step, fullgraph=True, backend=_BACKEND)(st)
     assert torch.allclose(eager.pos, comp.pos, atol=1e-12)
     assert torch.allclose(eager.forces, comp.forces, atol=1e-12)
     assert torch.allclose(eager.energy, comp.energy, atol=1e-12)
@@ -96,15 +94,23 @@ def test_live_ljcut_advances_eagerly_and_drives_the_policy():
     assert nl.rebuild_count > 0
 
 
-def _harm_ig(gamma: float):
-    return LangevinVerletIntegrator(
-        HarmonicForceField(1.0).to(_DTYPE), dt=0.01, gamma=gamma, kbt=1.0, mass=1.0, seed=3
+def _harm_langevin(gamma: float):
+    return (
+        LangevinVerletIntegrator(0.01, gamma=gamma, kbt=1.0, seed=3)
+        .bind_force(HarmonicForceField(1.0).to(_DTYPE))
+        .bind_mass(1.0)
+    )
+
+
+def _harm_nve():
+    return (
+        VelocityVerletIntegrator(0.01).bind_force(HarmonicForceField(1.0).to(_DTYPE)).bind_mass(1.0)
     )
 
 
 def test_step_compile_matches_eager_deterministic():
     """``step(state, noise)`` is pure → compiled == eager exactly (any γ)."""
-    ig = _harm_ig(gamma=2.0)
+    ig = _harm_langevin(gamma=2.0)
     st = ig.initial(torch.randn(5, 3, dtype=_DTYPE), torch.randn(5, 3, dtype=_DTYPE))
     noise = torch.randn(5, 3, dtype=_DTYPE)
     eager = ig.step(st, noise)
@@ -117,8 +123,8 @@ def test_rollout_compile_nve_matches_eager():
     """NVE rollout: noise weight c2=0 → compiled == eager despite RNG path."""
     pos = torch.randn(5, 3, dtype=_DTYPE)
     vel = torch.randn(5, 3, dtype=_DTYPE)
-    eager = _harm_ig(0.0).rollout(_harm_ig(0.0).initial(pos.clone(), vel.clone()), 8)
-    ig = _harm_ig(0.0)
+    eager = _harm_nve().rollout(_harm_nve().initial(pos.clone(), vel.clone()), 8)
+    ig = _harm_nve()
     comp = torch.compile(ig.rollout, fullgraph=True)(ig.initial(pos.clone(), vel.clone()), 8)
     assert torch.allclose(eager.pos, comp.pos, atol=1e-10)
     assert torch.allclose(eager.vel, comp.vel, atol=1e-10)
@@ -132,7 +138,7 @@ def _pinet_ig(dtype: torch.dtype):
         model = model.to(torch.float64)
         template["atoms", "pos"] = template["atoms", "pos"].to(torch.float64)
     ff = PotentialForceField(model, template)
-    ig = LangevinVerletIntegrator(ff, dt=0.001, gamma=0.0, kbt=0.0, mass=12.0, seed=1)
+    ig = VelocityVerletIntegrator(0.001).bind_force(ff).bind_mass(12.0)
     pos0 = template["atoms", "pos"].clone()
     return ig, pos0, torch.zeros_like(pos0)
 
@@ -151,9 +157,8 @@ def test_pinet_step_fullgraph_compiles_and_matches_eager(dtype):
     """PiNet force path compiles fullgraph (0 break, else raises) and == eager."""
     ig, pos0, vel0 = _pinet_ig(dtype)
     st = ig.initial(pos0, vel0)
-    noise = torch.zeros_like(pos0)
-    eager = ig.step(st, noise)
-    comp = torch.compile(ig.step, fullgraph=True, backend=_BACKEND)(st, noise)
+    eager = ig.step(st)
+    comp = torch.compile(ig.step, fullgraph=True, backend=_BACKEND)(st)
     atol = 1e-10 if dtype == torch.float64 else 1e-4
     assert torch.allclose(eager.pos, comp.pos, atol=atol)
     assert torch.allclose(eager.forces, comp.forces, atol=atol)

@@ -5,8 +5,8 @@ Spec: `learnable-classical-ff-06-condensation`.
 Hard-coded goldens only — no third-party oracle. Pins:
 
 1. MergeCriterion bond budgets (Å / relative k) accept/reject
-2. Condenser: identical params → 1 type; far params → 2 types
-3. Multi-system merge shares global type ids
+2. Condenser: same environment + close params → 1 type; same env + far params → error
+3. Distinct environments keep distinct type ids (multi-system)
 4. TypeSystem.assign soft-fails out-of-budget rows (UNMATCHED_TYPE_ID)
 5. TypeSystemLabeler satisfies Labeler Protocol
 6. MultiTypeHead additive; TypeHead atom API unchanged
@@ -30,13 +30,13 @@ import torch
 
 def main() -> int:
     from molrep.condensation import (
+        UNMATCHED_TYPE_ID,
         ClassAssignment,
         Condenser,
         InteractionClass,
         PhysicalErrorMetrics,
         TypeSystem,
         TypeSystemLabeler,
-        UNMATCHED_TYPE_ID,
         bond_default_criterion,
     )
     from molrep.heads import Labeler, MultiTypeHead, TypeHead
@@ -63,6 +63,7 @@ def main() -> int:
     r_id = condenser.merge(
         [identical],
         interaction=InteractionClass.BOND,
+        environments=[[0, 0, 0]],
         criterion=crit,
     )
     assert r_id.type_system.n_types == 1
@@ -75,9 +76,20 @@ def main() -> int:
         "k": torch.tensor([300.0, 300.0]),
         "r0": torch.tensor([1.09, 1.5]),
     }
+    try:
+        condenser.greedy_merge(
+            [far],
+            interaction=InteractionClass.BOND,
+            environments=[[0, 0]],
+            criterion=crit,
+        )
+        raise AssertionError("same environment with far params must raise")
+    except ValueError as exc:
+        assert "too coarse" in str(exc)
     r_far = condenser.greedy_merge(
         [far],
         interaction=InteractionClass.BOND,
+        environments=[["cc", "co"]],
         criterion=crit,
     )
     assert r_far.type_system.n_types == 2
@@ -92,6 +104,7 @@ def main() -> int:
     r_ms = condenser.merge(
         [sys_a, sys_b],
         interaction=InteractionClass.BOND,
+        environments=[["cc"], ["cc", "co"]],
         criterion=crit,
     )
     assert r_ms.type_system.n_types == 2
@@ -134,20 +147,23 @@ def main() -> int:
     def hot(_p, _c, _i):
         return 5.0
 
-    r_phys = condenser.merge(
-        [
-            {
-                "k": torch.tensor([300.0, 300.0]),
-                "r0": torch.tensor([1.09, 1.09]),
-            }
-        ],
-        interaction=InteractionClass.BOND,
-        criterion=crit,
-        physical_eval=hot,
-        energy_tol=0.1,
-    )
-    assert r_phys.type_system.n_types == 2
-    assert r_phys.metrics.rejected_by_physics == 1
+    try:
+        condenser.merge(
+            [
+                {
+                    "k": torch.tensor([300.0, 300.0]),
+                    "r0": torch.tensor([1.09, 1.09]),
+                }
+            ],
+            interaction=InteractionClass.BOND,
+            environments=[[0, 0]],
+            criterion=crit,
+            physical_eval=hot,
+            energy_tol=0.1,
+        )
+        raise AssertionError("physics gate must fail the environment bucket")
+    except ValueError as exc:
+        assert "physics" in str(exc)
 
     # --- 9. No SMARTS emitters; no molpot energy imports in condensation ---
     pkg = Path(__file__).resolve().parents[1] / "src/molrep/condensation"

@@ -1,13 +1,17 @@
-"""Physics-aware greedy merge of continuous MM parameters into discrete types.
+"""Merge continuous MM parameters **within** a chemical environment.
 
-:class:`Condenser` never builds energy graphs. Optional physical gating uses an
-injected ``physical_eval`` callable (torch kernel, molpy evaluator, or test
-double) whose residuals feed :class:`PhysicalErrorMetrics`.
+The environment is the type key (classified first). This type never
+looks at atoms, never emits SMARTS, and never builds energy graphs.
+One environment → one type. If members of a bucket exceed
+:class:`MergeCriterion` (or the optional physics gate), the environment
+is too coarse — fail loud instead of spawning a second type with the
+same key.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections import OrderedDict
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,7 +25,6 @@ from molrep.condensation.type_system import TypeSystem
 
 __all__ = ["Condenser", "CondensationResult", "PhysicalEval"]
 
-# physical_eval(prototype, candidate, interaction) -> residual
 PhysicalEval = Callable[
     [Mapping[str, torch.Tensor], Mapping[str, torch.Tensor], InteractionClass],
     Any,
@@ -33,7 +36,7 @@ class CondensationResult:
     """Outputs of one condensation run.
 
     Attributes:
-        type_system: Discrete type table for the interaction class.
+        type_system: Discrete type table (one record per environment).
         assignment: Per-row global type ids with system provenance.
         metrics: Physical residual aggregates (empty if no ``physical_eval``).
     """
@@ -66,21 +69,16 @@ def _row_at(
 ) -> dict[str, torch.Tensor]:
     """Extract one interaction row as a float-tensor mapping."""
     if isinstance(params, torch.Tensor):
-        # Bare tensor: treat as a single unnamed feature vector → "value"
-        # or a stacked table (N, D) with optional key names.
         t = params.detach().to(dtype=torch.float64)
         if t.ndim == 0:
             return {"value": t.clone()}
         if t.ndim == 1:
-            # Ambiguous: (D,) one row vs (N,) scalar-per-row.
-            # Prefer scalar-per-row when param_keys is None and we index.
             if param_keys is not None and len(param_keys) == t.numel():
                 return {
                     k: t[i].detach().to(dtype=torch.float64).clone()
                     for i, k in enumerate(param_keys)
                 }
             return {"value": t[index].detach().to(dtype=torch.float64).clone()}
-        # (N, D) or (N, ...)
         row = t[index]
         if param_keys is not None and row.ndim == 1 and len(param_keys) == row.numel():
             return {
@@ -104,40 +102,54 @@ def _row_at(
 def _flatten_systems(
     params_by_system: Sequence[Mapping[str, torch.Tensor | float] | torch.Tensor],
 ) -> list[tuple[int, int, dict[str, torch.Tensor]]]:
-    """Expand multi-system params to ``(system_id, row_index, row_params)``.
-
-    Sort key (documented, deterministic): ``(system_id ascending,
-    row_index ascending)`` — insertion order within each system, systems in
-    the order provided.
-    """
+    """Expand to ``(system_id, row_index, row_params)``, sorted."""
     rows: list[tuple[int, int, dict[str, torch.Tensor]]] = []
     for sys_id, params in enumerate(params_by_system):
         n = _infer_n_rows(params)
         for row_i in range(n):
             rows.append((sys_id, row_i, _row_at(params, row_i)))
-    # Explicit sort for determinism even if caller order changes later.
     rows.sort(key=lambda item: (item[0], item[1]))
     return rows
 
 
+def _env_key(item: Any) -> Hashable:
+    key = getattr(item, "key", item)
+    if callable(key):
+        key = key()
+    return key
+
+
+def _label(key: Hashable) -> str | None:
+    if isinstance(key, str):
+        return key
+    if isinstance(key, tuple) and key and all(isinstance(p, str) for p in key):
+        return "-".join(key)
+    return None
+
+
+def _mean_params(members: Sequence[Mapping[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    keys = set(members[0])
+    for row in members[1:]:
+        keys &= set(row)
+    return {
+        key: torch.stack([row[key] for row in members], dim=0).mean(dim=0) for key in sorted(keys)
+    }
+
+
 class Condenser:
-    """Physics-aware greedy merge across one or many chemical systems.
+    """One discrete type per chemical environment; prototype is the bucket mean.
 
     Algorithm
     ---------
-    1. Flatten ``params_by_system`` with ``system_id`` tracking.
-    2. Sort by documented key ``(system_id, row_index)``.
-    3. For each row: assign to the first existing type whose prototype
-       passes :class:`MergeCriterion.accepts` **and** the optional physics
-       gate; otherwise spawn a new type.
-    4. Update the type centroid as an online mean of its members.
+    1. Flatten ``params_by_system`` with ``(system_id, row_index)``.
+    2. Group rows by ``environments[s][r]`` (objects with ``.key`` or raw keys).
+    3. Each group is one type. Prototype is the member mean (or the first
+       member when ``update_centroid`` is False).
+    4. Every member must pass :class:`MergeCriterion` against that prototype.
+       Optional ``physical_eval`` with a tolerance is the same contract.
+       Failure means the environment is too coarse — no second type.
 
-    Multi-system merges produce **global** type ids (not renumbered per
-    molecule). No SMARTS text is emitted.
-
-    Args:
-        update_centroid: If True (default), absorb updates the prototype
-            mean; if False, the first member freezes the prototype.
+    Multi-system groups share **global** type ids. No SMARTS text.
     """
 
     def __init__(self, *, update_centroid: bool = True) -> None:
@@ -148,32 +160,31 @@ class Condenser:
         params_by_system: Sequence[Mapping[str, torch.Tensor | float] | torch.Tensor],
         *,
         interaction: InteractionClass,
+        environments: Sequence[Sequence[Any]],
         criterion: MergeCriterion | None = None,
         physical_eval: PhysicalEval | None = None,
         energy_tol: float | None = None,
         force_tol: float | None = None,
     ) -> CondensationResult:
-        """Greedy merge continuous parameters into a discrete type system.
+        """Merge parameters inside each environment bucket.
 
         Args:
-            params_by_system: Sequence of per-system parameter bags. Each bag
-                is a mapping of Class-I tensors with leading batch dim
-                ``(N_sys, ...)`` (or a bare tensor of rows).
-            interaction: Interaction family for this merge.
-            criterion: Merge budgets. Defaults to
-                :func:`~molrep.condensation.criterion.default_criterion`.
-            physical_eval: Optional injected residual evaluator
-                ``(prototype, candidate, interaction) -> residual``.
-                Condensation does **not** import molpot energy graphs; the
-                caller supplies any physical oracle.
-            energy_tol: If set with ``physical_eval``, reject merges whose
-                absolute energy residual exceeds this value.
-            force_tol: If set with ``physical_eval``, reject merges whose
-                absolute force residual exceeds this value.
+            params_by_system: Per-system parameter bags, leading dim
+                ``(N_sys, ...)``.
+            interaction: Interaction family.
+            environments: ``environments[s][r]`` aligned with param rows.
+                Each entry is a hashable key or an object with ``.key``.
+            criterion: Merge budgets. Defaults to the class default.
+            physical_eval: Optional residual evaluator.
+            energy_tol / force_tol: Hard physics gate when ``physical_eval``
+                is set.
 
         Returns:
-            :class:`CondensationResult` with type system, assignment table,
-            and physical metrics.
+            :class:`CondensationResult`.
+
+        Raises:
+            ValueError: Environment/param length mismatch, or a bucket's
+                parameters exceed the criterion / physics gate.
         """
         crit = criterion if criterion is not None else default_criterion(interaction)
         if crit.interaction != interaction:
@@ -181,40 +192,51 @@ class Condenser:
                 f"criterion.interaction={crit.interaction} does not match interaction={interaction}"
             )
 
+        rows = _flatten_systems(params_by_system)
+        keys = self._keys(environments, rows)
+        groups: OrderedDict[Hashable, list[tuple[int, int, int, dict[str, torch.Tensor]]]] = (
+            OrderedDict()
+        )
+        for flat_id, ((sys_id, row_i, params), key) in enumerate(zip(rows, keys, strict=True)):
+            groups.setdefault(key, []).append((flat_id, sys_id, row_i, params))
+
         type_system = TypeSystem(interaction, criterion=crit)
         metrics = PhysicalErrorMetrics()
-        rows = _flatten_systems(params_by_system)
+        assigned: dict[tuple[int, int], int] = {}
 
-        type_ids: list[int] = []
-        system_ids: list[int] = []
-        row_indices: list[int] = []
-
-        for flat_id, (sys_id, row_i, row_params) in enumerate(rows):
-            assigned = self._try_assign(
-                type_system,
-                row_params,
+        for key, members in groups.items():
+            param_rows = [m[3] for m in members]
+            proto = _mean_params(param_rows) if self.update_centroid else dict(param_rows[0])
+            self._check_bucket(
+                proto,
+                param_rows,
                 criterion=crit,
                 physical_eval=physical_eval,
                 energy_tol=energy_tol,
                 force_tol=force_tol,
                 metrics=metrics,
-                support_id=flat_id,
+                interaction=interaction,
             )
-            if assigned is None:
-                assigned = type_system._spawn(row_params, support_id=flat_id)
-            type_ids.append(assigned)
-            system_ids.append(sys_id)
-            row_indices.append(row_i)
+            type_id = type_system._spawn(proto, support_id=members[0][0], label=_label(key))
+            for flat_id, sys_id, row_i, _ in members[1:]:
+                type_system._absorb(
+                    type_id,
+                    proto,
+                    support_id=flat_id,
+                    update_centroid=False,
+                )
+            for _, sys_id, row_i, _ in members:
+                assigned[(sys_id, row_i)] = type_id
 
-        assignment = ClassAssignment(
-            interaction=interaction,
-            type_ids=torch.tensor(type_ids, dtype=torch.long),
-            system_ids=torch.tensor(system_ids, dtype=torch.long),
-            row_indices=torch.tensor(row_indices, dtype=torch.long),
-        )
+        type_ids = [assigned[(s, r)] for s, r, _ in rows]
         return CondensationResult(
             type_system=type_system,
-            assignment=assignment,
+            assignment=ClassAssignment(
+                interaction=interaction,
+                type_ids=torch.tensor(type_ids, dtype=torch.long),
+                system_ids=torch.tensor([s for s, _, _ in rows], dtype=torch.long),
+                row_indices=torch.tensor([r for _, r, _ in rows], dtype=torch.long),
+            ),
             metrics=metrics,
         )
 
@@ -223,60 +245,75 @@ class Condenser:
         params_by_system: Sequence[Mapping[str, torch.Tensor | float] | torch.Tensor],
         *,
         interaction: InteractionClass,
+        environments: Sequence[Sequence[Any]],
         criterion: MergeCriterion | None = None,
         physical_eval: PhysicalEval | None = None,
         energy_tol: float | None = None,
         force_tol: float | None = None,
     ) -> CondensationResult:
-        """Alias of :meth:`merge` (spec name ``Condenser.greedy_merge``)."""
+        """Alias of :meth:`merge`."""
         return self.merge(
             params_by_system,
             interaction=interaction,
+            environments=environments,
             criterion=criterion,
             physical_eval=physical_eval,
             energy_tol=energy_tol,
             force_tol=force_tol,
         )
 
-    def _try_assign(
-        self,
-        type_system: TypeSystem,
-        row_params: Mapping[str, torch.Tensor],
+    @staticmethod
+    def _keys(
+        environments: Sequence[Sequence[Any]],
+        rows: Sequence[tuple[int, int, dict[str, torch.Tensor]]],
+    ) -> list[Hashable]:
+        if len(environments) == 0 and len(rows) == 0:
+            return []
+        n_sys = (max((s for s, _, _ in rows), default=-1) + 1) if rows else 0
+        if len(environments) != n_sys:
+            raise ValueError(
+                f"environments cover {len(environments)} system(s) but params have {n_sys}"
+            )
+        n_rows: dict[int, int] = {}
+        for sys_id, row_i, _ in rows:
+            n_rows[sys_id] = max(n_rows.get(sys_id, 0), row_i + 1)
+        for sys_id, n in n_rows.items():
+            if len(environments[sys_id]) != n:
+                raise ValueError(
+                    f"environments[{sys_id}] has {len(environments[sys_id])} rows; params have {n}"
+                )
+        return [_env_key(environments[s][r]) for s, r, _ in rows]
+
+    @staticmethod
+    def _check_bucket(
+        proto: Mapping[str, torch.Tensor],
+        members: Sequence[Mapping[str, torch.Tensor]],
         *,
         criterion: MergeCriterion,
         physical_eval: PhysicalEval | None,
         energy_tol: float | None,
         force_tol: float | None,
         metrics: PhysicalErrorMetrics,
-        support_id: int,
-    ) -> int | None:
-        """Return type_id if an existing type accepts, else None."""
-        for rec in type_system.records():
-            proto_t = rec.prototype_tensors()
-            if not criterion.accepts(proto_t, row_params):
+        interaction: InteractionClass,
+    ) -> None:
+        gated = physical_eval is not None and (energy_tol is not None or force_tol is not None)
+        for cand in members:
+            if not criterion.accepts(proto, cand):
+                raise ValueError(
+                    "environment is too coarse: member parameters exceed MergeCriterion "
+                    f"for {interaction.value}"
+                )
+            if physical_eval is None:
                 continue
-            if physical_eval is not None and (energy_tol is not None or force_tol is not None):
-                raw = physical_eval(proto_t, row_params, type_system.interaction)
-                e_err, f_err = parse_physical_eval_result(raw)
-                rejected = False
+            e_err, f_err = parse_physical_eval_result(physical_eval(proto, cand, interaction))
+            rejected = False
+            if gated:
                 if energy_tol is not None and e_err is not None and e_err > energy_tol:
                     rejected = True
                 if force_tol is not None and f_err is not None and f_err > force_tol:
                     rejected = True
-                metrics.record(energy_error=e_err, force_error=f_err, rejected=rejected)
-                if rejected:
-                    continue
-            elif physical_eval is not None:
-                # Evaluate for metrics only (no hard gate without tolerances).
-                raw = physical_eval(proto_t, row_params, type_system.interaction)
-                e_err, f_err = parse_physical_eval_result(raw)
-                metrics.record(energy_error=e_err, force_error=f_err, rejected=False)
-
-            type_system._absorb(
-                rec.type_id,
-                row_params,
-                support_id=support_id,
-                update_centroid=self.update_centroid,
-            )
-            return rec.type_id
-        return None
+            metrics.record(energy_error=e_err, force_error=f_err, rejected=rejected)
+            if rejected:
+                raise ValueError(
+                    f"environment is too coarse: physics gate failed for {interaction.value}"
+                )

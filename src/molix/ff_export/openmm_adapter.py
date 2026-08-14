@@ -20,38 +20,21 @@ from __future__ import annotations
 
 from typing import Any
 
-import torch
-
 from molix.ff_export.adapter import BackendAdapter
 from molix.ff_export.cases import TranslationCase
-from molix.ff_export.conventions import (
-    ConventionTable,
-    scale_angle_k,
-    scale_bond_k,
-    scale_energy,
-    scale_length,
-    scale_torsion_k,
-)
+from molix.ff_export.conventions import ConventionTable
 from molix.ff_export.exceptions import UnsupportedTermError
 from molix.ff_export.force_spec import ForceSpec
-from molpot.ir import NonbondedScaling, PotentialIR
+from molpot.ir import PotentialIR
 
 __all__ = ["OpenMMAdapter"]
-
-
-def _as_float_list(t: torch.Tensor) -> list[float]:
-    return [float(x) for x in t.detach().cpu().reshape(-1).tolist()]
-
-
-def _as_int_list(t: torch.Tensor) -> list[int]:
-    return [int(x) for x in t.detach().cpu().reshape(-1).tolist()]
 
 
 class OpenMMAdapter(BackendAdapter):
     """Translate Class-I :class:`~molpot.ir.PotentialIR` into OpenMM force-spec records.
 
-    Does **not** import OpenMM. Unit tests and regressions pin hard-coded
-    numeric goldens (bond ``k`` 100 → 41840; torsion Vn=2 → ``k`` 4.184).
+    Does **not** import OpenMM. Unit tests pin hard-coded numeric goldens
+    (bond ``k`` 100 → 41840; torsion Vn=2 → ``k`` 4.184).
     """
 
     name = "openmm"
@@ -100,7 +83,6 @@ class OpenMMAdapter(BackendAdapter):
         if ir.lj is not None or ir.charges is not None:
             forces.append(self._nonbonded(ir))
 
-        scaling = self._scaling_dict(ir.scaling)
         metadata: dict[str, Any] = {
             "unit_system_source": ir.unit_system,
             "unit_system_target": "openmm_standard",
@@ -111,20 +93,20 @@ class OpenMMAdapter(BackendAdapter):
         return ForceSpec(
             backend=self.name,
             forces=forces,
-            scaling=scaling,
+            scaling=self.scaling_dict(ir.scaling),
             metadata=metadata,
         )
 
     def _bonds(self, ir: PotentialIR) -> dict[str, Any]:
         assert ir.bonds is not None
         row = self.conventions.row("bond_harmonic")
-        k = _as_float_list(ir.bonds.k)
-        r0 = _as_float_list(ir.bonds.r0)
+        k = self.as_floats(ir.bonds.k)
+        r0 = self.as_floats(ir.bonds.r0)
         params = [
             {
                 "type_index": i,
-                "k": scale_bond_k(ki),
-                "r0": scale_length(ri),
+                "k": row.scale("k", ki),
+                "r0": row.scale("r0", ri),
             }
             for i, (ki, ri) in enumerate(zip(k, r0, strict=True))
         ]
@@ -137,13 +119,13 @@ class OpenMMAdapter(BackendAdapter):
     def _angles(self, ir: PotentialIR) -> dict[str, Any]:
         assert ir.angles is not None
         row = self.conventions.row("angle_harmonic")
-        k = _as_float_list(ir.angles.k)
-        theta0 = _as_float_list(ir.angles.theta0)
+        k = self.as_floats(ir.angles.k)
+        theta0 = self.as_floats(ir.angles.theta0)
         params = [
             {
                 "type_index": i,
-                "k": scale_angle_k(ki),
-                "theta0": ti,  # rad unchanged
+                "k": row.scale("k", ki),
+                "theta0": ti,
             }
             for i, (ki, ti) in enumerate(zip(k, theta0, strict=True))
         ]
@@ -157,7 +139,8 @@ class OpenMMAdapter(BackendAdapter):
         assert ir.propers is not None
         bag = ir.propers
         n_types, n_terms = bag.k.shape
-        periodicity = _as_int_list(bag.periodicity)
+        periodicity = self.as_ints(bag.periodicity)
+        row = self.conventions.row("proper_periodic")
         params: list[dict[str, Any]] = []
         for t in range(n_types):
             idivf = float(bag.idivf[t].item())
@@ -171,7 +154,7 @@ class OpenMMAdapter(BackendAdapter):
                         "term_index": m,
                         "periodicity": periodicity[m],
                         "phase": float(bag.phase[t, m].item()),
-                        "k": scale_torsion_k(k_ir),
+                        "k": row.scale("k", k_ir),
                     }
                 )
         case = TranslationCase.DECOMPOSE if n_terms > 1 else TranslationCase.FORM_REPARAMETERIZE
@@ -185,7 +168,8 @@ class OpenMMAdapter(BackendAdapter):
         assert ir.impropers_periodic is not None
         bag = ir.impropers_periodic
         n_types, n_terms = bag.k.shape
-        periodicity = _as_int_list(bag.periodicity)
+        periodicity = self.as_ints(bag.periodicity)
+        row = self.conventions.row("improper_periodic")
         params: list[dict[str, Any]] = []
         for t in range(n_types):
             idivf = float(bag.idivf[t].item())
@@ -199,7 +183,7 @@ class OpenMMAdapter(BackendAdapter):
                         "term_index": m,
                         "periodicity": periodicity[m],
                         "phase": float(bag.phase[t, m].item()),
-                        "k": scale_torsion_k(k_ir),
+                        "k": row.scale("k", k_ir),
                     }
                 )
         case = TranslationCase.DECOMPOSE if n_terms > 1 else TranslationCase.FORM_REPARAMETERIZE
@@ -218,18 +202,18 @@ class OpenMMAdapter(BackendAdapter):
         charges: list[float] = []
 
         if ir.lj is not None:
-            eps = _as_float_list(ir.lj.epsilon)
-            sig = _as_float_list(ir.lj.sigma)
+            eps = self.as_floats(ir.lj.epsilon)
+            sig = self.as_floats(ir.lj.sigma)
             for i, (e, s) in enumerate(zip(eps, sig, strict=True)):
                 params.append(
                     {
                         "type_index": i,
-                        "epsilon": scale_energy(e),
-                        "sigma": scale_length(s),
+                        "epsilon": row_lj.scale("epsilon", e),
+                        "sigma": row_lj.scale("sigma", s),
                     }
                 )
         if ir.charges is not None:
-            charges = _as_float_list(ir.charges.q)
+            charges = self.as_floats(ir.charges.q)
 
         return {
             "type": "NonbondedForce",
@@ -237,17 +221,4 @@ class OpenMMAdapter(BackendAdapter):
             "parameters": params,
             "charges": charges,
             "charge_case": row_q.case.value,
-        }
-
-    @staticmethod
-    def _scaling_dict(scaling: NonbondedScaling | None) -> dict[str, float] | None:
-        if scaling is None:
-            return None
-        return {
-            "scale_q_12": float(scaling.scale_q_12),
-            "scale_q_13": float(scaling.scale_q_13),
-            "scale_q_14": float(scaling.scale_q_14),
-            "scale_lj_12": float(scaling.scale_lj_12),
-            "scale_lj_13": float(scaling.scale_lj_13),
-            "scale_lj_14": float(scaling.scale_lj_14),
         }

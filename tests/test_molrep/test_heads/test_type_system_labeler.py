@@ -46,6 +46,7 @@ class TestTypeSystemLabeler:
         result = Condenser().merge(
             [{"k": torch.tensor([300.0, 300.0]), "r0": torch.tensor([1.09, 1.09])}],
             interaction=InteractionClass.BOND,
+            environments=[[0, 0]],
             criterion=bond_default_criterion(),
         )
         labeler = TypeSystemLabeler(result.type_system)

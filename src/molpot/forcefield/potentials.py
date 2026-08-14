@@ -174,7 +174,8 @@ class Potentials(BasePotential):
         pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
         p = self._pos(system, pos)
-        total = torch.zeros((), device=p.device, dtype=p.dtype)
+        num_graphs = self._num_graphs(system)
+        total = torch.zeros((num_graphs,) if num_graphs > 1 else (), device=p.device, dtype=p.dtype)
         for e in self.term_energies(system, pos=p).values():
             total = total + e
         return total
@@ -211,7 +212,10 @@ class Potentials(BasePotential):
         ff = self.forcefield
         device = p.device
         dtype = p.dtype
-        zero = torch.zeros((), device=device, dtype=dtype)
+        num_graphs = self._num_graphs(system)
+        batched = num_graphs > 1
+        zero = torch.zeros((num_graphs,) if batched else (), device=device, dtype=dtype)
+        atom_batch = self._atom_batch(system, p.shape[0], device)
         terms: dict[str, torch.Tensor] = {}
 
         if ff.bond_style() is not None:
@@ -222,6 +226,8 @@ class Potentials(BasePotential):
                     pos=p,
                     bond_index=bond_index,
                     bond_types=self._identity_types(n, device),
+                    term_batch=atom_batch[bond_index[0]] if batched else None,
+                    num_graphs=num_graphs,
                 )
             else:
                 terms["bonds"] = zero
@@ -234,6 +240,8 @@ class Potentials(BasePotential):
                     pos=p,
                     angle_index=angle_index,
                     angle_types=self._identity_types(n, device),
+                    term_batch=atom_batch[angle_index[0]] if batched else None,
+                    num_graphs=num_graphs,
                 )
             else:
                 terms["angles"] = zero
@@ -246,6 +254,8 @@ class Potentials(BasePotential):
                     pos=p,
                     proper_index=proper_index,
                     proper_types=self._identity_types(n, device),
+                    term_batch=atom_batch[proper_index[0]] if batched else None,
+                    num_graphs=num_graphs,
                 )
             else:
                 terms["propers"] = zero
@@ -313,15 +323,15 @@ class Potentials(BasePotential):
         if built is None:
             return None
         edge_index, dist = built
-        scale_mat = self._pair_scale_matrix(
+        scales = self._pair_scales(
             system,
             n,
+            edge_index,
             pos.device,
             pos.dtype,
             self.forcefield.nonbonded_scaling,
             scale_kind,
         )
-        scales = scale_mat[edge_index[:, 0], edge_index[:, 1]]
         return edge_index, dist, scales
 
     def _lj_energy(
@@ -339,12 +349,16 @@ class Potentials(BasePotential):
         if pairs is None:
             return zero
         edge_index, dist, scales = pairs
+        num_graphs = self._num_graphs(system)
+        atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
         return self.lj.energy(
             edge_index=edge_index,
             distances=dist,
             epsilon=epsilon,
             sigma=sigma,
             scales=scales,
+            edge_batch=atom_batch[edge_index[:, 0]] if num_graphs > 1 else None,
+            num_graphs=num_graphs,
         )
 
     def _coulomb_energy(
@@ -367,11 +381,15 @@ class Potentials(BasePotential):
             if pairs is None:
                 return zero
             edge_index, dist, scales = pairs
+            num_graphs = self._num_graphs(system)
+            atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
             return self.coulomb_open.energy(
                 edge_index=edge_index,
                 distances=dist,
                 charges=q,
                 scales=scales,
+                edge_batch=atom_batch[edge_index[:, 0]] if num_graphs > 1 else None,
+                num_graphs=num_graphs,
             )
 
         assert self.coulomb_periodic is not None
@@ -405,16 +423,36 @@ class Potentials(BasePotential):
                 return b.long()
         return torch.zeros(n, dtype=torch.long, device=device)
 
-    def _pair_scale_matrix(
+    def _num_graphs(self, system: Any) -> int:
+        graphs = self._namespace(system, "graphs")
+        if isinstance(graphs, TensorDict) and graphs.batch_size:
+            return int(graphs.batch_size[0])
+        atoms = self._namespace(system, "atoms")
+        atom_batch = self._ns_tensor(atoms, "batch")
+        if atom_batch is not None and atom_batch.numel():
+            return int(atom_batch.max().item()) + 1
+        return 1
+
+    def _pair_scales(
         self,
         system: Any,
         n: int,
+        edge_index: torch.Tensor,
         device: torch.device,
         dtype: torch.dtype,
         scaling: NonbondedScaling,
         scale_kind: str,
     ) -> torch.Tensor:
-        scale = torch.ones(n, n, device=device, dtype=dtype)
+        scale = torch.ones(edge_index.shape[0], device=device, dtype=dtype)
+        pair_lo = torch.minimum(edge_index[:, 0], edge_index[:, 1])
+        pair_hi = torch.maximum(edge_index[:, 0], edge_index[:, 1])
+        pair_keys = pair_lo * n + pair_hi
+
+        def matches(index: torch.Tensor) -> torch.Tensor:
+            lo = torch.minimum(index[0].long(), index[-1].long())
+            hi = torch.maximum(index[0].long(), index[-1].long())
+            return torch.isin(pair_keys, lo * n + hi)
+
         if scale_kind == "q":
             s12, s13, s14 = (
                 float(scaling.scale_q_12),
@@ -429,21 +467,14 @@ class Potentials(BasePotential):
             )
         bond_index = self._bond_index(system)
         if bond_index is not None and bond_index.numel() > 0:
-            i, j = bond_index[0].long(), bond_index[1].long()
-            scale[i, j] = s12
-            scale[j, i] = s12
+            scale[matches(bond_index)] = s12
         angle_index = self._angle_index(system)
         if angle_index is not None and angle_index.numel() > 0:
-            i, k = angle_index[0].long(), angle_index[2].long()
-            scale[i, k] = s13
-            scale[k, i] = s13
+            scale[matches(angle_index)] = s13
         proper_index = self._proper_index(system)
         if proper_index is not None and proper_index.numel() > 0:
-            i, ell = proper_index[0].long(), proper_index[3].long()
-            free = scale[i, ell] == 1.0
-            i14, l14 = i[free], ell[free]
-            scale[i14, l14] = s14
-            scale[l14, i14] = s14
+            proper_mask = matches(proper_index)
+            scale[proper_mask & (scale == 1.0)] = s14
         return scale
 
     # --- topology readers ---

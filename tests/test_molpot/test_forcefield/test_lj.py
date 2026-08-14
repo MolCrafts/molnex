@@ -12,6 +12,34 @@ from molpot.potentials.vdw.lj126 import lj126_pair_energy
 
 
 class TestLJEnergy:
+    def test_packed_graphs_return_one_energy_per_molecule(self):
+        eps = torch.full((4,), 0.2, dtype=torch.float64)
+        sig = torch.full((4,), 3.0, dtype=torch.float64)
+        ff = (
+            ForceField(name="packed-lj")
+            .def_pairstyle("lj/cut", cutoff=10.0)
+            .with_params(atoms={"epsilon": eps, "sigma": sig})
+        )
+        batch = TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": torch.tensor(
+                            [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+                            dtype=torch.float64,
+                        ),
+                        "batch": torch.tensor([0, 0, 1, 1], dtype=torch.long),
+                    },
+                    batch_size=[4],
+                ),
+                "graphs": TensorDict({}, batch_size=[2]),
+            },
+            batch_size=[],
+        )
+        energy = ff.to_potentials().calc_energy(batch)
+        assert energy.shape == (2,)
+        assert not torch.isclose(energy[0], energy[1])
+
     def test_two_atom_matches_kernel(self):
         eps = torch.tensor([0.1, 0.2], dtype=torch.float64)
         sig = torch.tensor([3.0, 3.0], dtype=torch.float64)
@@ -31,9 +59,7 @@ class TestLJEnergy:
             {
                 "atoms": TensorDict(
                     {
-                        "pos": torch.tensor(
-                            [[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=torch.float64
-                        ),
+                        "pos": torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=torch.float64),
                         "batch": torch.zeros(2, dtype=torch.long),
                     },
                     batch_size=[2],

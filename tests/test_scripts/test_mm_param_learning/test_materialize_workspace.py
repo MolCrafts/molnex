@@ -48,7 +48,7 @@ class TestMmParamLearningWorkspace:
         MmParamLearningWorkspace(root=root).materialize()
         MmParamLearningWorkspace(root=root).materialize()
         exp_dir = root / "projects" / PROJECT_SLUG / "experiments"
-        assert len([p for p in exp_dir.iterdir() if p.is_dir()]) == 4
+        assert len([p for p in exp_dir.iterdir() if p.is_dir()]) == 6
         # Knowledge note not duplicated (single slug dir)
         notes = list(root.rglob(KNOWLEDGE_NOTE_NAME))
         # at most one concept directory with that name

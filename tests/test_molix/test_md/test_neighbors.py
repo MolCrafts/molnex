@@ -12,16 +12,19 @@ import molix.data.tasks.neighbor
 import molix.md
 import molix.md.neighbors
 from molix.md import (
-    EV_PER_AMU_A2_FS2,
     MD,
     LennardJonesCutForceField,
     MaxwellBoltzmann,
     MDHook,
     MDObservables,
     MDRunner,
+    VelocityVerletIntegrator,
 )
 from molix.md.neighbors import NeighborList, NeighborStrategy
-from tests.test_molix.test_md.conftest import make_cubic_lattice
+from molix.units import units
+from tests.test_molix.test_md.conftest import make_cubic_lattice, md_system
+
+_E_EV_TO_MD = (1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2").magnitude
 
 
 def _triclinic() -> tuple[torch.Tensor, torch.Tensor]:
@@ -348,23 +351,22 @@ def _run_lj_lattice(
         capacity_factor=2.5,
     )
     force = LennardJonesCutForceField(
-        epsilon=0.0103 / EV_PER_AMU_A2_FS2,  # argon well depth, eV -> amu A^2/fs^2
+        epsilon=0.0103 * _E_EV_TO_MD,  # argon well depth, eV -> amu A^2/fs^2
         sigma=2.5,
         neighbors=neighbors,
         cutoff=3.5,
     )
     recorder = _FrameRecorder(neighbors)
-    velocities = MaxwellBoltzmann(39.95, n_atoms=64).sample(300.0, seed=0)
-    md = MD(
-        force,
-        mass=39.95,
-        dt=4.0,
-        gamma=0.0,
-        dtype=torch.float64,
-        hooks=[recorder],
+    force.to(dtype=torch.float64)
+    atoms = md_system(pos, torch.zeros_like(pos), 39.95)
+    MaxwellBoltzmann().sample(atoms, 300.0, seed=0)
+    md = (
+        MD(torch.float64)
+        .set_forcefield(force)
+        .set_integrator(VelocityVerletIntegrator(4.0))
+        .set_hooks([recorder])
     )
-    md.set_potential_dtype(torch.float64)
-    md.run(pos, velocities, n_steps, chunk=1)
+    md.run(atoms, n_steps, chunk=1)
     return neighbors, recorder.frames
 
 

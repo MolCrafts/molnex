@@ -15,14 +15,21 @@ from molix.md import (
     LennardJonesCutForceField,
     MDState,
     NeighborList,
+    VelocityVerletIntegrator,
 )
 from tests.test_molix.test_md.conftest import make_cubic_lattice
 
 _DTYPE = torch.float64
 
 
-def _ig(k: float = 1.0, **kw):
-    return LangevinVerletIntegrator(HarmonicForceField(k).to(_DTYPE), **kw)
+def _langevin(k: float = 1.0, *, mass=1.0, **kw):
+    ig = LangevinVerletIntegrator(**kw)
+    return ig.bind_force(HarmonicForceField(k).to(_DTYPE)).bind_mass(mass)
+
+
+def _nve(k: float = 1.0, *, dt: float, mass=1.0, rebuild: bool | None = None):
+    ig = VelocityVerletIntegrator(dt, rebuild=rebuild)
+    return ig.bind_force(HarmonicForceField(k).to(_DTYPE)).bind_mass(mass)
 
 
 def test_step_constants_match_the_closed_form():
@@ -30,7 +37,7 @@ def test_step_constants_match_the_closed_form():
     import math
 
     dt, gamma, kbt, mass = 0.05, 2.0, 1.5, 2.0
-    ig = _ig(1.0, dt=dt, gamma=gamma, kbt=kbt, mass=mass)
+    ig = _langevin(1.0, dt=dt, gamma=gamma, kbt=kbt, mass=mass)
     assert float(ig.c1) == pytest.approx(math.exp(-gamma * dt))
     assert float(ig.c2) == pytest.approx(math.sqrt(1.0 - math.exp(-2.0 * gamma * dt)))
     assert float(ig.sigma) == pytest.approx(math.sqrt(kbt / mass))
@@ -40,7 +47,7 @@ def test_step_constants_match_the_closed_form():
 def test_step_is_one_baoab_update():
     """``step`` applies exactly B-A-O-A-B with the precomputed constants."""
     torch.manual_seed(0)
-    ig = _ig(1.0, dt=0.05, gamma=2.0, kbt=1.5, mass=2.0)
+    ig = _langevin(1.0, dt=0.05, gamma=2.0, kbt=1.5, mass=2.0)
     state = ig.initial(torch.randn(4, 3, dtype=_DTYPE), torch.randn(4, 3, dtype=_DTYPE))
     noise = torch.randn(4, 3, dtype=_DTYPE)
 
@@ -60,25 +67,17 @@ def test_step_is_one_baoab_update():
 
 def test_draw_noise_is_seed_reproducible():
     ref = torch.zeros(5, 3, dtype=_DTYPE)
-    a = _ig(1.0, dt=0.05, gamma=3.0, kbt=1.0, mass=1.0, seed=42)
-    b = _ig(1.0, dt=0.05, gamma=3.0, kbt=1.0, mass=1.0, seed=42)
-    c = _ig(1.0, dt=0.05, gamma=3.0, kbt=1.0, mass=1.0, seed=43)
+    a = _langevin(1.0, dt=0.05, gamma=3.0, kbt=1.0, mass=1.0, seed=42)
+    b = _langevin(1.0, dt=0.05, gamma=3.0, kbt=1.0, mass=1.0, seed=42)
+    c = _langevin(1.0, dt=0.05, gamma=3.0, kbt=1.0, mass=1.0, seed=43)
     assert torch.equal(a.draw_noise(ref), b.draw_noise(ref))  # same seed -> identical
     assert not torch.equal(a.draw_noise(ref), c.draw_noise(ref))  # different seed
 
 
-def test_step_nve_matches_baoab_at_gamma_zero():
-    """The elided O step is the float identity, so the fast path is exact."""
-    torch.manual_seed(0)
-    pos = torch.randn(6, 3, dtype=_DTYPE)
-    vel = torch.randn(6, 3, dtype=_DTYPE)
-    integ = _ig(1.0, dt=0.01, gamma=0.0, kbt=0.0, mass=1.0).cast_state(_DTYPE)
-    state = integ.initial(pos, vel)
-    noise = torch.randn_like(vel)  # multiplied by c2=0 — must not matter
-    via_baoab = integ.step(state, noise)
-    via_nve = integ.step_nve(state)
-    assert torch.equal(via_baoab.pos, via_nve.pos)
-    assert torch.equal(via_baoab.vel, via_nve.vel)
+def test_langevin_rejects_gamma_zero():
+    """NVE is VelocityVerletIntegrator — Langevin is not a gamma switch."""
+    with pytest.raises(ValueError, match="VelocityVerletIntegrator"):
+        LangevinVerletIntegrator(0.01, gamma=0.0, kbt=0.0)
 
 
 def test_advance_n_matches_manual_advance_loop():
@@ -87,10 +86,10 @@ def test_advance_n_matches_manual_advance_loop():
     pos0 = torch.randn(6, 3, dtype=_DTYPE)
     vel0 = torch.randn(6, 3, dtype=_DTYPE)
 
-    chunked = _ig(k, dt=dt, gamma=gamma, kbt=kbt, mass=mass, seed=11)
+    chunked = _langevin(k, dt=dt, gamma=gamma, kbt=kbt, mass=mass, seed=11)
     end_a = chunked.advance_n(chunked.initial(pos0.clone(), vel0.clone()), 5)
 
-    ig = _ig(k, dt=dt, gamma=gamma, kbt=kbt, mass=mass, seed=11)
+    ig = _langevin(k, dt=dt, gamma=gamma, kbt=kbt, mass=mass, seed=11)
     state = ig.initial(pos0.clone(), vel0.clone())
     for _ in range(5):
         state = ig.advance(state)
@@ -108,8 +107,8 @@ class _MidpointEuler(Integrator):
     crashed at runtime.
     """
 
-    def __init__(self, force, dt: float):
-        super().__init__(force)
+    def __init__(self, dt: float):
+        super().__init__()
         self.register_buffer("dt", torch.as_tensor(dt))
 
     def advance(self, state: MDState) -> MDState:
@@ -123,7 +122,7 @@ class _MidpointEuler(Integrator):
 
 
 def test_conforming_subclass_inherits_the_abc_defaults():
-    ig = _MidpointEuler(HarmonicForceField(1.0).to(_DTYPE), dt=0.01).to(_DTYPE)
+    ig = _MidpointEuler(dt=0.01).bind_force(HarmonicForceField(1.0).to(_DTYPE)).to(_DTYPE)
     state = ig.initial(torch.randn(4, 3, dtype=_DTYPE), torch.zeros(4, 3, dtype=_DTYPE))
     out = ig.advance_n(state, 3)  # inherited default: loop over advance
     assert out.pos.shape == (4, 3)
@@ -131,9 +130,9 @@ def test_conforming_subclass_inherits_the_abc_defaults():
     assert ig.removed_dof == 3  # inherited NVE default
 
 
-def test_removed_dof_follows_the_thermostat():
-    assert _ig(1.0, dt=0.01, gamma=0.0, kbt=0.0, mass=1.0).removed_dof == 3
-    assert _ig(1.0, dt=0.01, gamma=2.0, kbt=1.0, mass=1.0).removed_dof == 0
+def test_removed_dof_follows_the_scheme():
+    assert _nve(1.0, dt=0.01, mass=1.0).removed_dof == 3
+    assert _langevin(1.0, dt=0.01, gamma=2.0, kbt=1.0, mass=1.0).removed_dof == 0
 
 
 def test_eval_force_casts_into_the_state_dtype():
@@ -142,7 +141,7 @@ def test_eval_force_casts_into_the_state_dtype():
 
     # Returns strictly fp32 whatever it is fed — the potential's own precision.
     ff = CallableForceField(lambda pos: ((pos.float() ** 2).sum(), -2.0 * pos.float()))
-    ig = LangevinVerletIntegrator(ff, dt=0.01, gamma=0.0, kbt=0.0, mass=1.0).cast_state(_DTYPE)
+    ig = VelocityVerletIntegrator(0.01).bind_force(ff).bind_mass(1.0).cast_state(_DTYPE)
     state = ig.initial(torch.zeros(3, 3, dtype=_DTYPE), torch.zeros(3, 3, dtype=_DTYPE))
     assert state.forces.dtype == _DTYPE
     assert state.energy.dtype == _DTYPE
@@ -154,7 +153,7 @@ def test_eval_force_casts_into_the_state_dtype():
 def test_cast_state_leaves_the_force_field_alone():
     """The MD-side cast must not touch the potential's parameters."""
     ff = HarmonicForceField(1.0)
-    ig = LangevinVerletIntegrator(ff, dt=0.01, gamma=0.0, kbt=0.0, mass=1.0)
+    ig = VelocityVerletIntegrator(0.01).bind_force(ff).bind_mass(1.0)
     ig.cast_state(torch.float64)
     assert ig.dt.dtype == torch.float64
     assert ig.mass_col.dtype == torch.float64
@@ -174,7 +173,7 @@ class _CountingHarmonic(HarmonicForceField):
 def test_force_caching_one_eval_per_step():
     """Force caching: exactly one force-field evaluation per step (+1 to seed)."""
     ff = _CountingHarmonic(1.0).to(_DTYPE)
-    ig = LangevinVerletIntegrator(ff, dt=0.05, gamma=1.0, kbt=1.0, mass=1.0, seed=1)
+    ig = LangevinVerletIntegrator(0.05, gamma=1.0, kbt=1.0, seed=1).bind_force(ff).bind_mass(1.0)
     state = ig.initial(torch.zeros(5, 3, dtype=_DTYPE), torch.zeros(5, 3, dtype=_DTYPE))
     for _ in range(10):
         state = ig.advance(state)
@@ -182,10 +181,11 @@ def test_force_caching_one_eval_per_step():
 
 
 def test_mass_must_be_positive():
+    ig = VelocityVerletIntegrator(0.01)
     with pytest.raises(ValueError, match="strictly positive"):
-        _ig(1.0, dt=0.01, gamma=0.0, kbt=0.0, mass=-1.0)
+        ig.bind_mass(-1.0)
     with pytest.raises(ValueError, match="strictly positive"):
-        _ig(1.0, dt=0.01, gamma=0.0, kbt=0.0, mass=torch.tensor([1.0, -2.0, 3.0]))
+        ig.bind_mass(torch.tensor([1.0, -2.0, 3.0]))
 
 
 class _CountingNLForce(HarmonicForceField):
@@ -219,18 +219,18 @@ class TestIntegratorRebuildSwitch:
 
     def test_the_switch_is_derived_from_the_force_field(self):
         """No kwarg ⇒ follow the force field, so no caller has to remember."""
-        listless = Integrator(HarmonicForceField(1.0).to(_DTYPE))
+        listless = Integrator().bind_force(HarmonicForceField(1.0).to(_DTYPE))
         ff, _ = _lj_cut_force()
-        live = LangevinVerletIntegrator(ff, dt=0.5, gamma=0.0, kbt=0.0, mass=39.95)
+        live = VelocityVerletIntegrator(0.5).bind_force(ff)
         assert listless.rebuild is False
         assert live.rebuild is True
 
     def test_the_kwarg_overrides_the_derivation_both_ways(self):
         """The frozen-list run and the forced-policy run are both reachable."""
         ff, _ = _lj_cut_force()
-        frozen = LangevinVerletIntegrator(ff, dt=0.5, gamma=0.0, kbt=0.0, mass=39.95, rebuild=False)
-        forced = LangevinVerletIntegrator(
-            HarmonicForceField(1.0).to(_DTYPE), dt=0.01, gamma=0.0, kbt=0.0, mass=1.0, rebuild=True
+        frozen = VelocityVerletIntegrator(0.5, rebuild=False).bind_force(ff)
+        forced = VelocityVerletIntegrator(0.01, rebuild=True).bind_force(
+            HarmonicForceField(1.0).to(_DTYPE)
         )
         assert frozen.rebuild is False
         assert forced.rebuild is True
@@ -245,9 +245,12 @@ class TestIntegratorRebuildSwitch:
         """
         torch.manual_seed(0)
         force = _CountingNLForce(1.0).to(_DTYPE)
-        ig = LangevinVerletIntegrator(
-            force, dt=0.01, gamma=0.0, kbt=0.0, mass=1.0, rebuild=True
-        ).cast_state(_DTYPE)
+        ig = (
+            VelocityVerletIntegrator(0.01, rebuild=True)
+            .bind_force(force)
+            .bind_mass(1.0)
+            .cast_state(_DTYPE)
+        )
         pos0 = torch.randn(4, 3, dtype=_DTYPE)
         vel0 = torch.randn(4, 3, dtype=_DTYPE) * 0.1
         state = ig.initial(pos0, vel0)
@@ -255,7 +258,7 @@ class TestIntegratorRebuildSwitch:
         assert len(force.rebuild_positions) == 1
         assert torch.equal(force.rebuild_positions[0], pos0)
 
-        state = ig.step_nve(state)
+        state = ig.step(state)
         # second force eval at the *new* positions (not pos0)
         assert len(force.rebuild_positions) == 2
         assert torch.equal(force.rebuild_positions[1], state.pos)
@@ -266,22 +269,25 @@ class TestIntegratorRebuildSwitch:
         the policy clock must not even tick, or the compiled path would carry
         the host sync it exists to avoid."""
         ff, pos = _lj_cut_force()
-        ig = LangevinVerletIntegrator(
-            ff, dt=0.5, gamma=0.0, kbt=0.0, mass=39.95, rebuild=False
-        ).cast_state(_DTYPE)
+        ig = (
+            VelocityVerletIntegrator(0.5, rebuild=False)
+            .bind_force(ff)
+            .bind_mass(39.95)
+            .cast_state(_DTYPE)
+        )
         state = ig.initial(pos, torch.zeros_like(pos))
         for _ in range(3):
-            state = ig.step_nve(state)
+            state = ig.step(state)
         assert ff.neighbors.rebuild_count == 0
         assert ff.neighbors.ago == 0
 
     def test_the_modulo_counter_is_gone(self):
         """One owner: the list. The integrator keeps no cadence state at all."""
-        ig = _ig(1.0, dt=0.01, gamma=0.0, kbt=0.0, mass=1.0)
+        ig = _nve(1.0, dt=0.01, mass=1.0)
         assert not hasattr(ig, "rebuild_every")
         assert not hasattr(ig, "_force_eval_count")
 
     def test_a_conforming_subclass_derives_the_switch(self):
-        """``super().__init__(force)`` — the positional seam — still suffices."""
-        ig = _MidpointEuler(HarmonicForceField(1.0).to(_DTYPE), dt=0.01)
+        """``bind_force`` derives the switch when ``rebuild`` was left open."""
+        ig = _MidpointEuler(dt=0.01).bind_force(HarmonicForceField(1.0).to(_DTYPE))
         assert ig.rebuild is False

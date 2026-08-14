@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Espaloma-protocol MM fitting on a small PhAlkEthOH subset (our molexp project).
 
-Matches Espaloma's published MM-small toy protocol as closely as our stack allows:
+Matches Espaloma's published MM-small validation protocol as closely as our stack allows:
 
 * molecule-level shuffle/split seed **2666**, ratios **8:1:1** (80/10/10)
 * loss = graph-level **MSE(E_pred, E_ref)** (absolute MM energy, not QM-centering)
@@ -48,9 +48,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 from molhub.dataset import PhalkethohMMDataset
-from molhub.dataset.meta import Targets
 from tensordict import TensorDict
 
+from molix.data import MoleculeCollator, TargetSchema
 from molpot.charge import (
     AtomicChargeModel,
     ChiEtaHead,
@@ -78,7 +78,9 @@ ESPALOMA_N_TORSION_TERMS = 6
 # (Hartree * 627.5094740631). Espaloma notebook reports L1 * 627.5.
 
 
-def enumerate_angles(atomi: np.ndarray, atomj: np.ndarray, n_atoms: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def enumerate_angles(
+    atomi: np.ndarray, atomj: np.ndarray, n_atoms: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """i-j-k angles from undirected bonds (j central)."""
     adj: list[list[int]] = [[] for _ in range(n_atoms)]
     for i, j in zip(atomi.tolist(), atomj.tolist(), strict=True):
@@ -193,9 +195,54 @@ def frame_to_batch(fr, device: torch.device) -> tuple[TensorDict, torch.Tensor, 
             batch_size=[pr_i.shape[0]],
         )
     batch = TensorDict(ns, batch_size=[])
-    energy = torch.tensor(float(Targets(fr)["mm_energy"]), dtype=torch.float64, device=device)
-    mid = str(Targets(fr)["molecule_id"])
+    energy = torch.tensor(float(fr.meta["mm_energy"]), dtype=torch.float64, device=device)
+    mid = str(fr.meta["molecule_id"])
     return batch, energy, mid
+
+
+def frame_to_sample(fr) -> dict:
+    """Convert one MolHub frame to the pre-collate molecular schema."""
+    atoms = fr["atoms"]
+    bonds = fr["bonds"]
+    z = torch.as_tensor(np.asarray(atoms["number"]), dtype=torch.long)
+    pos = torch.stack(
+        [torch.as_tensor(np.asarray(atoms[c]), dtype=torch.float64) for c in ("x", "y", "z")],
+        dim=-1,
+    )
+    atomi = np.asarray(bonds["atomi"], dtype=np.int64)
+    atomj = np.asarray(bonds["atomj"], dtype=np.int64)
+    ang_i, ang_j, ang_k = enumerate_angles(atomi, atomj, int(z.shape[0]))
+    pr_i, pr_j, pr_k, pr_l = enumerate_propers(atomi, atomj, int(z.shape[0]))
+    sample = {
+        "Z": z,
+        "pos": pos,
+        "bond_index": torch.as_tensor(np.stack([atomi, atomj]), dtype=torch.long),
+        "targets": {"mm_energy": float(fr.meta["mm_energy"])},
+    }
+    if ang_i.size:
+        sample["angles"] = {
+            "atomi": torch.as_tensor(ang_i),
+            "atomj": torch.as_tensor(ang_j),
+            "atomk": torch.as_tensor(ang_k),
+        }
+    if pr_i.size:
+        sample["propers"] = {
+            "atomi": torch.as_tensor(pr_i),
+            "atomj": torch.as_tensor(pr_j),
+            "atomk": torch.as_tensor(pr_k),
+            "atoml": torch.as_tensor(pr_l),
+        }
+    return sample
+
+
+_MM_TARGET_SCHEMA = TargetSchema(graph_level=frozenset({"mm_energy"}))
+_MM_COLLATOR = MoleculeCollator(_MM_TARGET_SCHEMA)
+
+
+def frames_to_batch(frames: list, device: torch.device) -> tuple[TensorDict, torch.Tensor]:
+    """Pack heterogeneous conformers into one graph-aware GPU batch."""
+    batch = _MM_COLLATOR([frame_to_sample(frame) for frame in frames]).to(device)
+    return batch, batch["graphs", "mm_energy"]
 
 
 def molecule_split(mol_ids: list[str], seed: int = ESPALOMA_SPLIT_SEED) -> dict[str, list[str]]:
@@ -240,7 +287,7 @@ def load_all_frames(
         ds = PhalkethohMMDataset(data_root, download=False, split=split)
         for i in range(len(ds)):
             fr = ds[i]
-            mid = str(Targets(fr)["molecule_id"])
+            mid = str(fr.meta["molecule_id"])
             n_atoms[mid] = int(len(fr["atoms"]["number"]))
             if max_confs is None or len(by[mid]) < max_confs:
                 by[mid].append(fr)
@@ -290,12 +337,15 @@ def pick_small_molecules(
     data_root: Path, n_mols: int = 12, max_confs: int | None = None
 ) -> dict[str, list]:
     """Legacy mini helper: *n_mols* smallest molecules by atom count."""
-    return pick_molecules(
-        data_root, n_mols=n_mols, max_confs=max_confs, selection="smallest"
-    )
+    return pick_molecules(data_root, n_mols=n_mols, max_confs=max_confs, selection="smallest")
 
 
-def build_espaloma_like_model(*, energy_scope: str = "bonded") -> ClassicalIMM:
+def build_espaloma_like_model(
+    *,
+    energy_scope: str = "bonded",
+    hidden: int = ESPALOMA_HIDDEN,
+    n_blocks: int = 5,
+) -> ClassicalIMM:
     """ChemEncoder + Class-I heads.
 
     Args:
@@ -307,13 +357,13 @@ def build_espaloma_like_model(*, energy_scope: str = "bonded") -> ClassicalIMM:
         raise ValueError(f"energy_scope must be bonded|full, got {energy_scope!r}")
 
     encoder = ChemEncoder(
-        atom_dim=ESPALOMA_HIDDEN,
-        bond_dim=ESPALOMA_HIDDEN,
-        angle_dim=ESPALOMA_HIDDEN,
-        proper_dim=ESPALOMA_HIDDEN,
-        improper_dim=ESPALOMA_HIDDEN,
-        hidden_dim=ESPALOMA_HIDDEN,
-        n_blocks=5,
+        atom_dim=hidden,
+        bond_dim=hidden,
+        angle_dim=hidden,
+        proper_dim=hidden,
+        improper_dim=hidden,
+        hidden_dim=hidden,
+        n_blocks=n_blocks,
         local_attention=False,
     )
     ff = ClassIForceField(name="class-i-learned")
@@ -325,22 +375,20 @@ def build_espaloma_like_model(*, energy_scope: str = "bonded") -> ClassicalIMM:
     atom_head = None
     charge_model = None
     if energy_scope == "full":
-        atom_head = LJParameterHead(
-            feature_dim=ESPALOMA_HIDDEN, hidden_dim=ESPALOMA_HIDDEN
-        )
+        atom_head = LJParameterHead(feature_dim=hidden, hidden_dim=hidden)
         charge_model = AtomicChargeModel(
-            ChiEtaHead(feature_dim=ESPALOMA_HIDDEN, hidden_dim=ESPALOMA_HIDDEN),
+            ChiEtaHead(feature_dim=hidden, hidden_dim=hidden),
             ElectronegativityEqualization(DiagonalHardnessKernel()),
         )
 
     return ClassicalIMM(
         encoder,
         forcefield=ff,
-        bond_head=BondParamHead(feature_dim=ESPALOMA_HIDDEN, hidden_dim=ESPALOMA_HIDDEN),
-        angle_head=AngleParamHead(feature_dim=ESPALOMA_HIDDEN, hidden_dim=ESPALOMA_HIDDEN),
+        bond_head=BondParamHead(feature_dim=hidden, hidden_dim=hidden),
+        angle_head=AngleParamHead(feature_dim=hidden, hidden_dim=hidden),
         proper_head=ProperTorsionParamHead(
-            feature_dim=ESPALOMA_HIDDEN,
-            hidden_dim=ESPALOMA_HIDDEN,
+            feature_dim=hidden,
+            hidden_dim=hidden,
             n_terms=ESPALOMA_N_TORSION_TERMS,
             periodicity=tuple(range(1, ESPALOMA_N_TORSION_TERMS + 1)),
         ),
@@ -364,21 +412,19 @@ def eval_split(
     frames_by_mol: dict[str, list],
     mol_ids: list[str],
     device: torch.device,
+    batch_size: int = ESPALOMA_BATCH_SIZE,
 ) -> dict[str, float]:
     """Topology once per molecule; evaluate all confs; report MAE/RMSE kcal/mol."""
     preds: list[torch.Tensor] = []
     refs: list[torch.Tensor] = []
-    for mid in mol_ids:
-        frames = frames_by_mol[mid]
-        batch0, _, _ = frame_to_batch(frames[0], device)
-        pots = model(batch0).to_potentials()
-        for fr in frames:
-            batch, e_ref, _ = frame_to_batch(fr, device)
-            e = pots.calc_energy(batch, pos=batch["atoms", "pos"]).reshape(())
-            preds.append(e)
-            refs.append(e_ref.reshape(()))
-    pred = torch.stack(preds)
-    ref = torch.stack(refs)
+    frames = [frame for mid in mol_ids for frame in frames_by_mol[mid]]
+    for start in range(0, len(frames), batch_size):
+        batch, ref = frames_to_batch(frames[start : start + batch_size], device)
+        energy = model(batch).to_potentials().calc_energy(batch)
+        preds.append(energy.reshape(-1))
+        refs.append(ref.reshape(-1))
+    pred = torch.cat(preds)
+    ref = torch.cat(refs)
     return {
         "mae_kcal": mae_energy(pred, ref),
         "rmse_kcal": float(torch.sqrt(torch.mean((pred - ref) ** 2)).detach()),
@@ -437,12 +483,6 @@ def train(
     for mid in train_ids:
         train_pool.extend(frames_by_mol[mid])
 
-    # Cache static topology batches for model() (geometry-independent params)
-    topo_batch: dict[str, TensorDict] = {}
-    for mid in frames_by_mol:
-        b0, _, _ = frame_to_batch(frames_by_mol[mid][0], device)
-        topo_batch[mid] = b0
-
     history: list[dict] = []
     best_val = float("inf")
     best_state: dict | None = None
@@ -457,22 +497,10 @@ def train(
         t0 = time.time()
         for start in range(0, len(order), batch_size):
             idx = order[start : start + batch_size]
-            # Espaloma batches mixed graphs; mean MSE(u, u_ref) at graph level.
-            losses: list[torch.Tensor] = []
-            by_mid: dict[str, list] = defaultdict(list)
-            for j in idx:
-                fr = train_pool[j]
-                mid = str(Targets(fr)["molecule_id"])
-                by_mid[mid].append(fr)
-            for mid, frames in by_mid.items():
-                pots = model(topo_batch[mid]).to_potentials()
-                for fr in frames:
-                    batch, e_ref, _ = frame_to_batch(fr, device)
-                    e = pots.calc_energy(batch, pos=batch["atoms", "pos"]).reshape(())
-                    losses.append((e - e_ref.reshape(())) ** 2)
-            if not losses:
-                continue
-            loss = torch.stack(losses).mean()
+            # One packed heterogeneous graph batch → one model/energy launch.
+            batch, reference = frames_to_batch([train_pool[j] for j in idx], device)
+            energy = model(batch).to_potentials().calc_energy(batch).reshape(-1)
+            loss = mse_energy(energy, reference.reshape(-1))
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -482,8 +510,8 @@ def train(
 
         do_eval = (epoch % eval_every == 0) or (epoch == epochs - 1)
         if do_eval:
-            tr = eval_split(model, frames_by_mol, train_ids, device)
-            va = eval_split(model, frames_by_mol, val_ids, device)
+            tr = eval_split(model, frames_by_mol, train_ids, device, batch_size=batch_size)
+            va = eval_split(model, frames_by_mol, val_ids, device, batch_size=batch_size)
             row = {
                 "epoch": epoch,
                 "train_mse": epoch_loss / max(n_batches, 1),
@@ -597,7 +625,9 @@ def main(argv: list[str] | None = None) -> int:
         PROTOCOL_RUN_ID,
     )
 
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument(
         "--data-root",
         type=Path,
@@ -634,8 +664,15 @@ def main(argv: list[str] | None = None) -> int:
         dest="use_official_splits",
         help="Re-shuffle with --seed instead of splits.json",
     )
-    p.add_argument("--epochs", type=int, default=1000, help="Espaloma notebook budget is 10000; formal default 1000")
+    p.add_argument(
+        "--epochs",
+        type=int,
+        default=1000,
+        help="Espaloma notebook budget is 10000; formal default 1000",
+    )
     p.add_argument("--batch-size", type=int, default=ESPALOMA_BATCH_SIZE)
+    p.add_argument("--hidden", type=int, default=ESPALOMA_HIDDEN)
+    p.add_argument("--n-blocks", type=int, choices=(4, 5, 6), default=5)
     p.add_argument("--lr", type=float, default=ESPALOMA_ADAM_LR)
     p.add_argument("--seed", type=int, default=ESPALOMA_SPLIT_SEED)
     p.add_argument("--eval-every", type=int, default=5, help="Full train/val MAE every N epochs")
@@ -743,13 +780,11 @@ def main(argv: list[str] | None = None) -> int:
         mol_ids = list(frames_by_mol.keys())
     else:
         split = molecule_split(mol_ids, seed=args.seed)
-    n_atoms = {
-        mid: int(len(frames_by_mol[mid][0]["atoms"]["number"])) for mid in mol_ids
-    }
+    n_atoms = {mid: int(len(frames_by_mol[mid][0]["atoms"]["number"])) for mid in mol_ids}
 
     if args.energy_scope == "full":
         model_meta = {
-            "encoder": f"ChemEncoder dim={ESPALOMA_HIDDEN}",
+            "encoder": f"ChemEncoder dim={args.hidden}, n_blocks={args.n_blocks}",
             "heads": "Bond+Angle+Proper(n_terms=6)+LJParameterHead+ChiEtaHead",
             "charge": "ElectronegativityEqualization(DiagonalHardnessKernel)",
             "energy": "ForceField.to_potentials Class-I (bonded+LJ+Coulomb open)",
@@ -761,7 +796,7 @@ def main(argv: list[str] | None = None) -> int:
         }
     else:
         model_meta = {
-            "encoder": f"ChemEncoder dim={ESPALOMA_HIDDEN}",
+            "encoder": f"ChemEncoder dim={args.hidden}, n_blocks={args.n_blocks}",
             "heads": "Bond+Angle+Proper(n_terms=6)",
             "energy": "ForceField.to_potentials Class-I (bonded only)",
             "omitted_vs_espaloma": [
@@ -796,7 +831,8 @@ def main(argv: list[str] | None = None) -> int:
                 else f"{args.n_mols} molecules ({args.selection})"
             ),
             "max_confs": args.max_confs,
-            "hidden": ESPALOMA_HIDDEN,
+            "hidden": args.hidden,
+            "n_blocks": args.n_blocks,
             "n_torsion_terms": ESPALOMA_N_TORSION_TERMS,
         },
         "split": {k: v for k, v in split.items() if k != "seed"},
@@ -815,7 +851,9 @@ def main(argv: list[str] | None = None) -> int:
         (root / "metrics").mkdir(exist_ok=True)
         (root / "artifacts" / "setup.json").write_text(json.dumps(meta, indent=2) + "\n")
 
-    def _finish_artifacts(root: Path | None, history: list, final: dict, model: nn.Module) -> Path | None:
+    def _finish_artifacts(
+        root: Path | None, history: list, final: dict, model: nn.Module
+    ) -> Path | None:
         if root is None:
             return None
         (root / "artifacts" / "history.json").write_text(json.dumps(history, indent=2) + "\n")
@@ -825,7 +863,11 @@ def main(argv: list[str] | None = None) -> int:
         return Path(ckpt)
 
     def _run_body(metrics_writer: object | None) -> tuple[list, dict, nn.Module]:
-        model = build_espaloma_like_model(energy_scope=args.energy_scope).to(device)
+        model = build_espaloma_like_model(
+            energy_scope=args.energy_scope,
+            hidden=args.hidden,
+            n_blocks=args.n_blocks,
+        ).to(device)
         history = train(
             model,
             frames_by_mol,
@@ -839,11 +881,13 @@ def main(argv: list[str] | None = None) -> int:
             metrics_writer=metrics_writer,
             early_stop_patience=args.early_stop_patience,
         )
-        te = eval_split(model, frames_by_mol, split["test"], device)
+        te = eval_split(model, frames_by_mol, split["test"], device, batch_size=args.batch_size)
         val_rows = [h for h in history if "val_mae_kcal" in h]
         final = {
             "best_val_mae_kcal": min(h["val_mae_kcal"] for h in val_rows) if val_rows else None,
-            "best_val_epoch": min(val_rows, key=lambda h: h["val_mae_kcal"])["epoch"] if val_rows else None,
+            "best_val_epoch": min(val_rows, key=lambda h: h["val_mae_kcal"])["epoch"]
+            if val_rows
+            else None,
             "test_mae_kcal": te["mae_kcal"],
             "test_rmse_kcal": te["rmse_kcal"],
             "test_n": te["n"],

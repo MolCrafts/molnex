@@ -47,6 +47,16 @@ models.
 
 ### Changed
 
+- Raise the declared floors to `molcrafts-mollog>=1.3.0` and `molcrafts-molcfg>=1.5.0`.
+- **Breaking (`molix.md`): `MD` is a composer, not a façade.**
+  `MD(force, mass=, dt=, gamma=, …)` / `set_potential_dtype` /
+  `autocast_dtype=` are **removed** (no shim — `stage: experimental`).
+  Compose `MD(dtype).set_forcefield(ff).set_integrator(Integrator(dt)).to(device)`.
+  NVE is `VelocityVerletIntegrator(dt)`; Langevin is
+  `LangevinVerletIntegrator(dt, gamma=…, kbt=…)` with `gamma > 0`.
+  Mass lives on `atoms.mass` (`molix.schema.MASS_KEY`); `MD.run(system)` and
+  `MaxwellBoltzmann().sample(system, T)` read it. Force-field dtype is
+  `ff.to(dtype)`.
 - **Breaking (`molix.md`): the neighbour-rebuild cadence has exactly one owner, the list.** `MD(rebuild_every=)` and `molix.md.NeighborListHook` are **removed** (hard removal, no shim — `stage: experimental`), together with `Integrator.rebuild_every` / `_force_eval_count`. The cadence is now configured where it belongs, on `NeighborList(skin=, every=, delay=, check=)`, and `Integrator.eval_force` asks that policy once per force evaluation, at the positions being evaluated — the step-start hook refreshed the list one displacement behind the positions entering `F = -∇E`, a systematic NVE energy leak. Migration: `MD(ff, ..., rebuild_every=1)` → `NeighborList(..., skin=0.0, every=1, delay=0, check=True)` (the accurate no-skin limit; `skin > 0` is the production setting), and a frozen list for a `fullgraph=True` rollout is `MD(ff, ..., integrator=LangevinVerletIntegrator(ff, ..., rebuild=False))`. `ForceField` gains the read-only `rebuilds_neighbors` capability property (`True` on `LennardJonesCutForceField` / `PeriodicPotentialForceField`, per-instance on `CallableForceField`) that the integrator derives its static `rebuild` bool from; `ForceField.rebuild_neighbors(pos)` now *runs the list's policy* (`neighbors.update(pos)`, which may decline) instead of forcing a build — `neighbors.rebuild(pos)` remains the forced-build escape hatch.
 - `molix.md.NeighborList` gains a TensorDict bind surface: `build(batch)` writes the live `edges.edge_index` / `edges.shifts` buffers into the batch by reference (single owner — `PeriodicPotentialForceField._bind_neighbors` is gone) and `update()` now accepts a batch or a raw positions tensor.
 - MACE family performance + convention fixes (review-driven).

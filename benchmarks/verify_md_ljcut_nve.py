@@ -46,16 +46,20 @@ import time
 from pathlib import Path
 
 import torch
+from tensordict import TensorDict
 
 from molix.compile import Compiler
 from molix.md import (
-    KB_EV_PER_K,
     MD,
     LennardJonesCutForceField,
     MaxwellBoltzmann,
     MDHook,
     NeighborList,
+    VelocityVerletIntegrator,
 )
+from molix.units import units
+
+_KB_EV = (1.0 * units.k_B).to("eV / kelvin").magnitude
 
 # Persistent artifact dir (versioned with the repo for the paper).
 _OUT_DEFAULT = Path(__file__).resolve().parent / "results" / "md_ljcut_nve"
@@ -115,7 +119,7 @@ def main() -> int:
     ap.add_argument(
         "--t0",
         type=float,
-        default=_T0_STAR * _EPS_EV / KB_EV_PER_K,
+        default=_T0_STAR * _EPS_EV / _KB_EV,
         help="initial temperature (K); default T0* = 1.44",
     )
     ap.add_argument(
@@ -217,19 +221,29 @@ def main() -> int:
     sampler = _EnergySampler(args.dt)
     # No cadence kwarg: the list owns the policy and the integrator derives its
     # switch from LennardJonesCutForceField.rebuilds_neighbors.
-    md = MD(
-        ff,
-        mass=_MASS,
-        dt=args.dt,
-        gamma=0.0,  # NVE
-        dtype=md_dtype,
-        device=device,
-        hooks=[sampler],
+    md = (
+        MD(md_dtype)
+        .set_forcefield(ff)
+        .set_integrator(VelocityVerletIntegrator(args.dt))
+        .set_hooks([sampler])
+        .to(device)
     )
-    vel = MaxwellBoltzmann(_MASS, n_atoms=n_atoms).sample(args.t0, seed=args.seed)
-    vel = vel.to(device=device, dtype=md_dtype)
+    atoms = TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": pos,
+                    "vel": torch.zeros_like(pos),
+                    "mass": torch.full((n_atoms,), _MASS, device=device, dtype=md_dtype),
+                },
+                batch_size=[n_atoms],
+            )
+        },
+        batch_size=[],
+    )
+    MaxwellBoltzmann().sample(atoms, args.t0, seed=args.seed)
 
-    md.run(pos, vel, min(3 * args.sample_every, n_steps), chunk=args.sample_every)  # warmup/compile
+    md.run(atoms.clone(), min(3 * args.sample_every, n_steps), chunk=args.sample_every)
     sampler.clear()
     # The warmup left the list built at the *warmup's* final configuration, and
     # its counters carrying the warmup's rebuilds. Re-phase it onto the timed
@@ -242,7 +256,7 @@ def main() -> int:
     if device.type == "cuda":
         torch.cuda.synchronize()
     t_wall = time.perf_counter()
-    md.run(pos, vel, n_steps, chunk=args.sample_every)
+    md.run(atoms, n_steps, chunk=args.sample_every)
     if device.type == "cuda":
         torch.cuda.synchronize()
     wall = time.perf_counter() - t_wall

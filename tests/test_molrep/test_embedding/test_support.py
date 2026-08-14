@@ -122,13 +122,7 @@ class TestChemicalSupportIndex:
 
     def test_no_molpot_import_in_support_module(self):
         """molrep embedding support must not depend on molpot (ac-006 spirit)."""
-        path = (
-            Path(__file__).resolve().parents[3]
-            / "src"
-            / "molrep"
-            / "embedding"
-            / "support.py"
-        )
+        path = Path(__file__).resolve().parents[3] / "src" / "molrep" / "embedding" / "support.py"
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

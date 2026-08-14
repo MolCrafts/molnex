@@ -51,9 +51,9 @@ becoming the framework itself.
 
 | Package | Capability |
 |---------|------------|
-| `molix`   | Training and execution — `Trainer`, `TrainState`, step protocol, hook lifecycle, packed-cache data pipeline, dataset loaders (QM9, RevMD17, 3BPA, Water-LES, MolRec), checkpointing, `torch.compile` / CUDA-graph and AOT-Inductor export, in-process Langevin MD, engine/LAMMPS export bridge, and arch-tagged native C++ ops |
+| `molix`   | Training and execution — `Trainer`, `TrainState`, step protocol, hook lifecycle, packed-cache data pipeline, dataset loaders (QM9, RevMD17, 3BPA, Water-LES, MolRec), checkpointing, `torch.compile` / CUDA-graph and AOT-Inductor export, in-process Langevin MD, pint-style `molix.units.units`, Class-I export via `molpy.io`, engine/LAMMPS (`pair_style molnex`) bridge, and arch-tagged native C++ ops |
 | `molrep`  | Representation learning — node/radial/angular embeddings, cutoffs, equivariant interaction blocks (tensor products, symmetric contraction, PiNet GC blocks), pooling and readout heads |
-| `molpot`  | Potentials and composition — classical potential terms (LJ, harmonic bonds/angles/dihedrals, electrostatics / PME), prediction heads, force/stress derivation (`ForceDerivation`), `PotentialComposer`, and assembled models such as Sonata |
+| `molpot`  | Potentials and composition — classical potential terms (LJ, harmonic bonds/angles/dihedrals, electrostatics / PME), `ClassIForceField` / `OPLSForceField` (molpy `ForceField` subclasses; `to_potentials()` is the torch override), prediction heads, force/stress derivation (`ForceDerivation`), `PotentialComposer`, and assembled models such as Sonata |
 | `molzoo`  | Assembled reference encoders — MACE, Allegro, PiNet (plus full energy/force façades `PiNetPotential` / `MACEOMol`); each family should ship a paper-traceable spec under `src/molzoo/specs/` |
 
 ## Install

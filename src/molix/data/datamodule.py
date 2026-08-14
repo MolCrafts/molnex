@@ -14,8 +14,8 @@ from molix.core.seed import make_generator, make_worker_init_fn
 from molix.core.steps import batch_to
 from molix.data.collate import (
     DEFAULT_TARGET_SCHEMA,
+    MoleculeCollator,
     TargetSchema,
-    collate_molecules,
     collate_packed,
 )
 from molix.data.dataset import BaseDataset
@@ -430,11 +430,12 @@ class _CollateFn:
 
     def __init__(self, schema: TargetSchema, batch_nodes: Sequence[Node]) -> None:
         self.schema = schema
+        self.collator = MoleculeCollator(schema)
         self.batch_nodes = batch_nodes
         self.ftype = config["ftype"]
 
     def __call__(self, samples: list[dict]) -> dict:
-        batch = collate_molecules(samples, self.schema)
+        batch = self.collator(samples)
         for entry in self.batch_nodes:
             batch = entry.apply(batch)
         return batch_to(batch, dtype=self.ftype)

@@ -27,6 +27,11 @@ plain-`TensorDict` batch contract used by models and losses (namespaces
 - [Molecular Dynamics](user-guide/md.md): run trajectories over a trained
   potential with `MD` — force fields, MD hooks, and the split MD/inference
   precision model.
+- [Units](user-guide/units.md): pint-style `molix.units.units`
+  (`molpy.UnitSystem`).
+- [Force-field export](user-guide/ff-export.md): `ClassIForceField` /
+  `OPLSForceField` (molpy `ForceField` subclasses) → `realize` +
+  `molpy.io`, or a JSON `ForceSpec`.
 
 ## Explanation
 

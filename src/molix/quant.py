@@ -32,7 +32,7 @@ import torch.nn as nn
 import torch.nn.utils.parametrize as parametrize
 
 from molix.schema import FORCES_KEY
-from molix.units import KB_EV_PER_K
+from molix.units import units
 
 
 class QuantScheme(ABC):
@@ -294,8 +294,8 @@ class EffectiveTemperature:
     for the dimensionless reported quantity.
     """
 
-    #: Boltzmann constant in eV/K (single source: :mod:`molix.units`).
-    KB_EV_PER_K: float = KB_EV_PER_K
+    #: Boltzmann constant in eV/K (pint: ``(1.0 * units.k_B).to("eV / kelvin")``).
+    KB_EV_PER_K: float = (1.0 * units.k_B).to("eV / kelvin").magnitude
 
     def __init__(self, *, dt: float, gamma: float, mass: float, dof: int):
         self.dt = dt

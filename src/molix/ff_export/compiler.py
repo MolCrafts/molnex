@@ -15,7 +15,6 @@ from typing import Any
 
 from molix.ff_export.adapter import BackendAdapter
 from molix.ff_export.force_spec import ForceSpec
-from molix.ff_export.openmm_adapter import OpenMMAdapter as _OpenMMAdapter  # noqa: F401
 from molpot.ir import PotentialIR
 
 __all__ = ["ForceFieldCompiler"]
@@ -62,8 +61,8 @@ class ForceFieldCompiler:
             symbolic: Optional symbolic force-field metadata (passed through).
 
         Returns:
-            Backend force specification (OpenMM units when using
-            :class:`~molix.ff_export.OpenMMAdapter`).
+            Backend force specification (OpenMM or LAMMPS units depending
+            on the adapter).
 
         Raises:
             UnsupportedTermError: When the adapter cannot map an IR bag.

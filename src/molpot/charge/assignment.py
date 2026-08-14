@@ -89,6 +89,4 @@ class AtomicChargeModel(nn.Module):
         """If ``forcefield`` is given, return filled FF; else return ``q`` only."""
         if forcefield is None:
             return self.charges(atom_features, batch, total_charge=total_charge)
-        return self.write_forcefield(
-            forcefield, atom_features, batch, total_charge=total_charge
-        )
+        return self.write_forcefield(forcefield, atom_features, batch, total_charge=total_charge)

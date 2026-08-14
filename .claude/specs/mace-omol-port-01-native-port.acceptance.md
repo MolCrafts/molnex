@@ -1,5 +1,7 @@
 ---
 slug: mace-omol-port-01-native-port
+status: closed
+closed: 2026-08-13
 criteria:
   - id: ac-001
     summary: radial + cutoff blocks match official MACE bit-for-bit

@@ -1,11 +1,10 @@
 """Component-based, compilable in-process MD engine.
 
-:class:`~molix.md.driver.MD` is **the** entry point: it binds a force field to
-an integrator, owns the MD-side precision, and delegates the loop to
-:class:`~molix.md.runner.MDRunner`. The neighbour-list cadence is *not* its —
-that belongs to :class:`~molix.md.neighbors.NeighborList` (see below). The lower
-layers are the primitives it composes (use them directly only when you need a
-custom loop):
+:class:`~molix.md.driver.MD` is the composer: ``MD(dtype).set_forcefield(ff)
+.set_integrator(Integrator(dt)).to(device)``. It owns the MD-side precision
+only. The neighbour-list cadence belongs to
+:class:`~molix.md.neighbors.NeighborList`. The lower layers are the primitives
+the caller composes:
 
 * :class:`~molix.md.types.ForceOutput` / :class:`~molix.md.types.MDState` /
   :class:`~molix.md.types.MDObservables` — typed pytree contracts crossing
@@ -18,15 +17,14 @@ custom loop):
   rebuildable neighbour list, the bulk lj/cut production path) — binds a
   model to a system, maps positions to ``(energy, forces)``.
 * :class:`~molix.md.integrators.Integrator` /
-  :class:`~molix.md.integrators.LangevinVerletIntegrator` — advances an
-  ``MDState`` (BAOAB); ``step`` / ``rollout`` ``torch.compile(fullgraph=True)``
-  to a single graph including a traceable force field. ``advance_n`` is the
-  eager chunk driver (γ=0 skips the noise draw; bit-identical dynamics).
+  :class:`~molix.md.integrators.VelocityVerletIntegrator` (NVE) /
+  :class:`~molix.md.integrators.LangevinVerletIntegrator` (γ>0) — constructed
+  with ``dt`` (Langevin also γ / kT); mass is ``atoms.mass``, bound at run.
 * :class:`~molix.md.runner.MDRunner` — drives the integrator through the
   :class:`~molix.md.runner.MDHook` lifecycle;
   :class:`~molix.md.runner.TrajectoryHook` captures trajectories,
   :class:`~molix.md.runner.MDCheckpointHook` persists restartable state.
-* :class:`~molix.md.driver.MaxwellBoltzmann` — initial-velocity sampler.
+* :class:`~molix.md.driver.MaxwellBoltzmann` — writes ``atoms.vel`` from ``atoms.mass``.
 
 Periodic systems are supported through
 :class:`~molix.md.neighbors.NeighborList`, which **owns the rebuild policy**:
@@ -52,7 +50,7 @@ from molix.md.forcefield import (
     PeriodicPotentialForceField,
     PotentialForceField,
 )
-from molix.md.integrators import Integrator, LangevinVerletIntegrator
+from molix.md.integrators import Integrator, LangevinVerletIntegrator, VelocityVerletIntegrator
 from molix.md.neighbors import NeighborList, NeighborStrategy
 from molix.md.runner import (
     MDCheckpointHook,
@@ -61,12 +59,9 @@ from molix.md.runner import (
     TrajectoryHook,
 )
 from molix.md.types import ForceOutput, MDObservables, MDState
-from molix.units import EV_PER_AMU_A2_FS2, KB_AMU_A_FS, KB_EV_PER_K
+from molix.units import units
 
 __all__ = [
-    "EV_PER_AMU_A2_FS2",
-    "KB_AMU_A_FS",
-    "KB_EV_PER_K",
     "MD",
     "CallableForceField",
     "ForceField",
@@ -87,4 +82,6 @@ __all__ = [
     "PeriodicPotentialForceField",
     "PotentialForceField",
     "TrajectoryHook",
+    "VelocityVerletIntegrator",
+    "units",
 ]

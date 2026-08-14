@@ -37,9 +37,7 @@ def _assert_no_forbidden_imports(package_dir: Path, forbidden: tuple[str, ...]) 
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     for bad in forbidden:
-                        assert not alias.name.startswith(bad), (
-                            f"{path.name} imports {alias.name}"
-                        )
+                        assert not alias.name.startswith(bad), f"{path.name} imports {alias.name}"
             elif isinstance(node, ast.ImportFrom):
                 mod = node.module or ""
                 for bad in forbidden:

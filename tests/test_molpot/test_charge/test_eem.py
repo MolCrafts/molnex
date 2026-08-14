@@ -20,6 +20,21 @@ from molpot.forcefield import ClassicalIMM, ForceField
 
 
 class TestElectronegativityEqualizationDiagonal:
+    def test_heterogeneous_packed_batch_padding_is_nonsingular(self):
+        atom_batch = torch.tensor([0, 0, 1, 1, 1], dtype=torch.long)
+        problem = ChargeEquilibrationProblem(
+            atom_batch=atom_batch,
+            num_graphs=2,
+            total_charge=torch.zeros(2, dtype=torch.float64),
+        )
+        chi = torch.tensor([1.0, 2.0, 1.0, 2.0, 3.0], dtype=torch.float64)
+        eta = torch.ones(5, dtype=torch.float64)
+        q = ElectronegativityEqualization(DiagonalHardnessKernel(), jitter=0.0).solve(
+            chi=chi, eta=eta, problem=problem
+        )
+        torch.testing.assert_close(q[atom_batch == 0].sum(), torch.tensor(0.0, dtype=q.dtype))
+        torch.testing.assert_close(q[atom_batch == 1].sum(), torch.tensor(0.0, dtype=q.dtype))
+
     def test_two_atom_analytic(self):
         """Diagonal A: q1 = (χ2 − χ1)/(η1+η2), q2 = −q1 for Q=0."""
         chi = torch.tensor([2.0, 4.0], dtype=torch.float64)

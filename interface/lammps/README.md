@@ -1,5 +1,11 @@
 # `pair_style molnex` — one LAMMPS pair style for every molnex potential
 
+Classical Class-I / OPLS parameter tables do **not** go through this pair
+style. Compile `ForceField.to_ir()` with `LammpsAdapter` and write
+`system.data` / `system.in.settings` via `LammpsWriter` — see
+[Force-field export](../../docs/molix/user-guide/ff-export.md). This
+document is the AOTI neural-potential path only.
+
 A single generic LAMMPS pair style that evaluates **any** molnex potential
 exported via `molix.engine.export_for_lammps`. There is no per-model C++: the
 pair style reads everything model-specific (cutoff, native units, compute dtype,
@@ -128,17 +134,38 @@ no wheel) lives in `work/lammps-iface-bench/` (`build_lammps.sh` + `build_plugin
 
 ## Scope and roadmap
 
-This version targets the single-molecule regime that the original
-`pinet-quant/lammps_native/pair_pinet` proved out:
+### Open-boundary contract (`supports_pbc=false`)
+
+Single-molecule / one-domain regime:
 
 * single MPI rank, non-periodic (`boundary f f f`) ⇒ no ghost atoms;
 * full neighbour list within the cutoff;
-* no virial output (`virial_fdotr_compute` fallback for pressure).
+* `virial_fdotr_compute` fallback for pressure unless the model emits virial.
 
-The `meta.json` flags `supports_pbc` / `supports_virial` are written (default
-`false`) so the C++ can grow domain-decomposition / ghost reverse-communication
-and a third virial output **without a protocol change** — a PBC-capable export
-just flips the flag and adds `cell` / `edge_shift` inputs to the convention.
+### Ghost / PBC path (`supports_pbc=true`)
+
+Export with `export_for_lammps(..., supports_pbc=True)`. At run time the pair
+style:
+
+* builds `Z` / `pos` over **local + ghost** atoms (ghost coordinates already
+  carry the minimum-image placement from LAMMPS);
+* includes ghost neighbours in `edge_index` (still sorted by `(source,target)`);
+* scatters forces onto ghosts and **reverse-communicates** them to owners;
+* allows multi-rank domain decomposition.
+
+Models that recompute `edge_diff = pos[target] - pos[source]` from positions
+need no separate `shifts` input in this cut. A future export may still add
+explicit `cell` / `edge_shift` tensors for models that require them.
+
+`cuda_graph=true` remains **incompatible** with ghosts (fixed `N`); re-export
+without `cuda_graph` for periodic / multi-rank MD.
+
+### Virial (`supports_virial=true`)
+
+If the AOT package returns a third tensor of shape `(6,)`
+`(xx, yy, zz, xy, xz, yz)` in the model energy unit, it is converted and
+accumulated into the global virial. Otherwise LAMMPS falls back to
+`virial_fdotr_compute` when fdotr virial is requested.
 
 > **CPU caveat.** The functorch force path of some molnex potentials (notably
 > PiNet) is currently miscompiled by the torch 2.12 CPU inductor backend; use a

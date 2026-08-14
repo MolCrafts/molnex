@@ -20,15 +20,22 @@ from molix.md import (
     MDRunner,
     MDState,
     TrajectoryHook,
+    VelocityVerletIntegrator,
 )
+from tests.test_molix.test_md.conftest import md_system
 
 _DTYPE = torch.float64
 
 
 def _integrator(seed: int = 0):
-    return LangevinVerletIntegrator(
-        HarmonicForceField(1.0).to(_DTYPE), dt=0.01, gamma=1.0, kbt=1.0, mass=1.0, seed=seed
+    return LangevinVerletIntegrator(0.01, gamma=1.0, kbt=1.0, seed=seed).bind_force(
+        HarmonicForceField(1.0).to(_DTYPE)
     )
+
+
+def _sys(n: int = 4):
+    pos = torch.zeros(n, 3, dtype=_DTYPE)
+    return md_system(pos, torch.zeros_like(pos), 1.0)
 
 
 def _obs(n_atoms: int = 4, fill: float = 1.0) -> MDObservables:
@@ -67,8 +74,8 @@ class _RecordingHook(MDHook):
 class TestMDRunner:
     def test_fires_lifecycle_and_advances_step(self):
         rec = _RecordingHook()
-        runner = MDRunner(_integrator(), mass=1.0, hooks=[rec])
-        out = runner.run(torch.zeros(4, 3, dtype=_DTYPE), torch.zeros(4, 3, dtype=_DTYPE), 3)
+        runner = MDRunner(_integrator(), hooks=[rec])
+        out = runner.run(_sys(4), 3)
 
         assert rec.events == ["start", "step", "step", "step", "end"]
         assert rec.steps == [1, 2, 3]
@@ -78,8 +85,11 @@ class TestMDRunner:
 
     def test_observables_are_typed_and_consistent(self):
         rec = _RecordingHook()
-        runner = MDRunner(_integrator(), mass=1.0, hooks=[rec])
-        runner.run(torch.randn(4, 3, dtype=_DTYPE), torch.randn(4, 3, dtype=_DTYPE), 2)
+        runner = MDRunner(_integrator(), hooks=[rec])
+        runner.run(
+            md_system(torch.randn(4, 3, dtype=_DTYPE), torch.randn(4, 3, dtype=_DTYPE), 1.0),
+            2,
+        )
 
         last = rec.observed[-1]
         assert torch.allclose(last.total, last.potential + last.kinetic)
@@ -91,9 +101,7 @@ class TestMDRunner:
         "gamma")`` sniffing silently mis-reported temperature for custom
         integrators)."""
         assert _integrator().removed_dof == 0  # gamma > 0
-        nve = LangevinVerletIntegrator(
-            HarmonicForceField(1.0).to(_DTYPE), dt=0.01, gamma=0.0, kbt=0.0, mass=1.0
-        )
+        nve = VelocityVerletIntegrator(0.01).bind_force(HarmonicForceField(1.0).to(_DTYPE))
         assert nve.removed_dof == 3
 
     def test_step_start_precedes_each_advance(self):
@@ -111,8 +119,8 @@ class TestMDRunner:
             def on_step_end(self, runner, step, obs):
                 events.append(("end", step))
 
-        runner = MDRunner(_integrator(), mass=1.0, hooks=[_Interleaved()])
-        runner.run(torch.zeros(2, 3, dtype=_DTYPE), torch.zeros(2, 3, dtype=_DTYPE), 4, chunk=2)
+        runner = MDRunner(_integrator(), hooks=[_Interleaved()])
+        runner.run(_sys(2), 4, chunk=2)
         assert events == [("start", 0), ("end", 2), ("start", 2), ("end", 4)]
 
     def test_misaligned_hook_cadence_is_rejected(self):
@@ -120,9 +128,9 @@ class TestMDRunner:
         import pytest
 
         hook = TrajectoryHook("/tmp/_chunk_misalign.pt", stride=3, write_xyz=False)
-        runner = MDRunner(_integrator(), mass=1.0, hooks=[hook])
+        runner = MDRunner(_integrator(), hooks=[hook])
         with pytest.raises(ValueError, match="multiple of chunk"):
-            runner.run(torch.zeros(2, 3, dtype=_DTYPE), torch.zeros(2, 3, dtype=_DTYPE), 6, chunk=2)
+            runner.run(_sys(2), 6, chunk=2)
 
     def test_hook_priority_orders_firing(self):
         """Lower priority fires earlier; ties keep registration order."""
@@ -137,10 +145,9 @@ class TestMDRunner:
 
         runner = MDRunner(
             _integrator(),
-            mass=1.0,
             hooks=[(_Tagged("late"), 100), (_Tagged("first"), 0), _Tagged("default")],
         )
-        runner.run(torch.zeros(2, 3, dtype=_DTYPE), torch.zeros(2, 3, dtype=_DTYPE), 1)
+        runner.run(_sys(2), 1)
         assert order == ["first", "late", "default"]
 
 

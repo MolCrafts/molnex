@@ -69,6 +69,8 @@ class AngleHarmonic(BasePotential):
         pos = kwargs.get("pos")
         angle_index = kwargs.get("angle_index")
         angle_types = kwargs.get("angle_types")
+        term_batch = kwargs.get("term_batch")
+        num_graphs = kwargs.get("num_graphs")
 
         if pos is None and data is not None:
             if isinstance(data, dict):
@@ -118,7 +120,11 @@ class AngleHarmonic(BasePotential):
         energy_per_angle = 0.5 * k_angles * displacement**2
 
         # Sum over all angles
-        total_energy = energy_per_angle.sum()
+        if term_batch is not None:
+            total_energy = energy_per_angle.new_zeros(int(num_graphs))
+            total_energy.index_add_(0, term_batch.long(), energy_per_angle)
+        else:
+            total_energy = energy_per_angle.sum()
 
         return total_energy
 

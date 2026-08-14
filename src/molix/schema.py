@@ -24,6 +24,10 @@ ATOMIC_ENERGY_KEY: tuple[str, str] = ("atoms", "energy")
 FORCES_KEY: tuple[str, str] = ("atoms", "forces")
 #: Per-atom positions (``batch["atoms", "pos"]``).
 POS_KEY: tuple[str, str] = ("atoms", "pos")
+#: Per-atom velocities (``batch["atoms", "vel"]``) in Å/fs — MD trajectory.
+VEL_KEY: tuple[str, str] = ("atoms", "vel")
+#: Per-atom masses (``batch["atoms", "mass"]``) in amu — MD trajectory.
+MASS_KEY: tuple[str, str] = ("atoms", "mass")
 
 
 def has_energy(batch: TensorDict) -> bool:

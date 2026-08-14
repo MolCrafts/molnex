@@ -16,12 +16,6 @@ from molix.ff_export.conventions import (
     BOND_K_IR_TO_OPENMM,
     KCAL_PER_MOL_TO_KJ_PER_MOL,
     ConventionTable,
-    scale_amber_vn,
-    scale_angle_k,
-    scale_bond_k,
-    scale_energy,
-    scale_length,
-    scale_torsion_k,
 )
 
 
@@ -47,42 +41,45 @@ class TestUnitConstants:
         assert KCAL_PER_MOL_TO_KJ_PER_MOL == 4.184
 
     def test_angstrom_to_nm(self):
-        assert ANGSTROM_TO_NM == 0.1
+        assert ANGSTROM_TO_NM == pytest.approx(0.1)
 
     def test_bond_k_factor_is_418_4(self):
-        # k_omm = k_ir * 4.184 / (0.1 nm)^2 = k_ir * 418.4
         assert BOND_K_IR_TO_OPENMM == pytest.approx(418.4)
 
 
-class TestScaleHelpers:
+class TestConventionTableScale:
     def test_bond_k_golden_100_to_41840(self):
-        """ac-001: k = 100 kcal mol⁻¹ Å⁻² → 41840 kJ mol⁻¹ nm⁻²."""
-        assert scale_bond_k(100.0) == 41840.0
+        """k = 100 kcal mol⁻¹ Å⁻² → 41840 kJ mol⁻¹ nm⁻²."""
+        table = ConventionTable.default_openmm()
+        assert table.scale("bond_harmonic", "k", 100.0) == 41840.0
 
     def test_bond_k_zero(self):
-        assert scale_bond_k(0.0) == 0.0
+        table = ConventionTable.default_openmm()
+        assert table.scale("bond_harmonic", "k", 0.0) == 0.0
 
     def test_torsion_k_unit_scale(self):
-        """IR E=(k/s)[1+cos] prefactor in kcal/mol → OpenMM k in kJ/mol."""
-        assert scale_torsion_k(1.0) == 4.184
+        table = ConventionTable.default_openmm()
+        assert table.scale("proper_periodic", "k", 1.0) == 4.184
 
     def test_amber_vn_golden_2_to_4_184(self):
-        """ac-002: AMBER Vn=2 kcal/mol → OpenMM PeriodicTorsion k=4.184 kJ/mol.
-
-        AMBER: E = (Vn/2)[1 + cos(...)]; OpenMM: E = k[1 + cos(...)].
-        With Vn=2, k_kcal = 1 and k_omm = 4.184.
-        """
-        assert scale_amber_vn(2.0) == 4.184
-        # Same path as IR coefficient after half-barrier reparameterization.
-        assert scale_torsion_k(2.0 / 2.0) == 4.184
+        """AMBER Vn=2 kcal/mol → OpenMM PeriodicTorsion k=4.184 kJ/mol."""
+        table = ConventionTable.default_openmm()
+        assert table.scale_amber_vn(2.0) == 4.184
+        assert table.scale("proper_periodic", "k", 2.0 / 2.0) == 4.184
 
     def test_energy_and_length_scales(self):
-        assert scale_energy(1.0) == 4.184
-        assert scale_length(10.0) == 1.0  # 10 Å = 1 nm
+        table = ConventionTable.default_openmm()
+        assert table.scale("lj", "epsilon", 1.0) == 4.184
+        assert table.scale("lj", "sigma", 10.0) == pytest.approx(1.0)
 
     def test_angle_k_energy_only(self):
-        # θ in rad both sides; only energy unit changes.
-        assert scale_angle_k(10.0) == pytest.approx(41.84)
+        table = ConventionTable.default_openmm()
+        assert table.scale("angle_harmonic", "k", 10.0) == pytest.approx(41.84)
+
+    def test_unknown_field_raises(self):
+        row = ConventionTable.default_openmm()["bond_harmonic"]
+        with pytest.raises(KeyError, match="no unit factor"):
+            row.scale("not_a_field", 1.0)
 
 
 class TestConventionTable:

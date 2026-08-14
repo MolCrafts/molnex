@@ -138,3 +138,10 @@ benchmarks/*.err
 benchmarks/*.out
 src/molix/op/build-*/
 .claude/scheduled_tasks.lock
+
+# machine-local toolchains and virtualenvs (GH200/L40 build environments)
+.cargo-gh200/
+.rustup-gh200/
+.venv*/
+# repo-root slurm job logs
+/*.out

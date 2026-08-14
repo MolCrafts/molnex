@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=class-i-esp-scale
-#SBATCH --account=naiss2025-5-447-gpu
+#SBATCH --account=naiss2026-1-53-gpu
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -39,11 +39,17 @@ cd "${MOLNEX}"
 # shellcheck disable=SC1091
 source "${VENV}/bin/activate"
 
-python -m pip install -q --upgrade pip
-python -m pip install -q "torch>=2.10" tensordict tqdm pydantic pyyaml rich typer fastapi uvicorn maturin
+if [ "${PREPARE_ENV:-0}" = "1" ]; then
+  # Serialize the exceptional mutable setup path; ordinary jobs treat the
+  # shared environment as immutable.
+  exec 9>"${VENV}/.prepare.lock"
+  flock 9
+  python -m pip install -q --upgrade pip
+  python -m pip install -q "torch>=2.10" tensordict tqdm pydantic pyyaml rich typer fastapi uvicorn maturin
+fi
 
-# Ensure local molrs with Neighbors (PyPI 0.13 wheel is incomplete)
-if ! python -c "import molrs; assert hasattr(molrs,'Neighbors')" 2>/dev/null; then
+# Ensure local molrs with Neighbors only during explicit environment setup.
+if [ "${PREPARE_ENV:-0}" = "1" ] && ! python -c "import molrs; assert hasattr(molrs,'Neighbors')" 2>/dev/null; then
   echo "=== maturin develop molrs ==="
   if [ ! -x "${CARGO_HOME}/bin/cargo" ]; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -52,11 +58,12 @@ if ! python -c "import molrs; assert hasattr(molrs,'Neighbors')" 2>/dev/null; th
   fi
   (cd "${MOLCRAFTS}/molrs/molrs-python" && python -m pip uninstall -y molcrafts-molrs 2>/dev/null || true && maturin develop --release)
 fi
-python -m pip install -q -e "${MOLCRAFTS}/molpy"
-python -m pip install -q -e "${MOLCRAFTS}/mollog" -e "${MOLCRAFTS}/molcfg" -e "${MOLCRAFTS}/molq" 2>/dev/null || true
+if [ "${PREPARE_ENV:-0}" = "1" ]; then
+  python -m pip install -q -e "${MOLCRAFTS}/molpy"
+  python -m pip install -q -e "${MOLCRAFTS}/mollog" -e "${MOLCRAFTS}/molcfg" -e "${MOLCRAFTS}/molq" 2>/dev/null || true
+fi
 
 export PYTHONPATH="${MOLNEX}/src:${MOLCRAFTS}/molhub/src:${MOLCRAFTS}/molexp/src:${MOLCRAFTS}/molpy/src:${MOLCRAFTS}/molq/src:${MOLCRAFTS}/mollog/src:${MOLCRAFTS}/molcfg/src:${PYTHONPATH:-}"
-python -m pip install -q --no-build-isolation -e "${MOLNEX}" --no-deps 2>/dev/null || true
 
 python - <<'PY'
 import platform, torch
@@ -66,12 +73,13 @@ if torch.cuda.is_available():
 from molpot.forcefield import ClassicalIMM
 from molhub.dataset import PhalkethohMMDataset
 import molexp
+import scripts.mm_param_learning.espaloma_mm_protocol_train
 print("imports OK")
 PY
 
 WS="${MOLCRAFTS}/workspaces/mm-param-learning"
 DATA="${WS}/cache/espaloma/phalkethoh-mm-small-normalized"
-EXP="class-i-full-energy-espaloma-scale"
+EXP="${EXP:-class-i-full-energy-espaloma-scale}"
 RUN_ID="${RUN_ID:-protocol-full-energy-espaloma-scale-001}"
 N_MOLS="${N_MOLS:-0}"           # 0 = all 173
 MAX_CONFS="${MAX_CONFS:-100}"
@@ -80,8 +88,10 @@ BATCH_SIZE="${BATCH_SIZE:-100}"
 LR="${LR:-1e-4}"
 PATIENCE="${PATIENCE:-50}"
 ENERGY_SCOPE="${ENERGY_SCOPE:-full}"
+HIDDEN="${HIDDEN:-128}"
+N_BLOCKS="${N_BLOCKS:-5}"
 
-echo "=== FORMAL Espaloma-scale: n_mols=${N_MOLS} confs=${MAX_CONFS} epochs=${EPOCHS} batch=${BATCH_SIZE} patience=${PATIENCE} ==="
+echo "=== FORMAL Espaloma-scale: hidden=${HIDDEN} blocks=${N_BLOCKS} n_mols=${N_MOLS} confs=${MAX_CONFS} epochs=${EPOCHS} batch=${BATCH_SIZE} patience=${PATIENCE} ==="
 
 # Register experiment + run under molexp (Python API)
 python - <<PY
@@ -104,20 +114,30 @@ params = {
     "lr": ${LR},
     "batch_size": ${BATCH_SIZE},
     "seed": 2666,
-    "hidden": 128,
+    "hidden": ${HIDDEN},
+    "n_blocks": ${N_BLOCKS},
     "n_torsion_terms": 6,
     "early_stop_patience": ${PATIENCE},
     "use_official_splits": True,
     "train_script": "scripts/mm_param_learning/espaloma_mm_protocol_train.py",
 }
+sweep_space = {
+    "model_sizes": {
+        "small": {"hidden": 64, "n_blocks": 5, "packed_batch_size": 4096},
+        "medium": {"hidden": 512, "n_blocks": 5, "packed_batch_size": 2048},
+        "large": {"hidden": 4096, "n_blocks": 5, "packed_batch_size": 256},
+    },
+    "dataset_coordinate": "dataset:espaloma/phalkethoh-mm-small@1",
+    "calibration_experiment": "class-i-packed-batch-calibration-gh200",
+}
 exp = project.add_experiment(
     "${EXP}",
-    params=params,
-    description="Formal Class-I full energy at Espaloma MM-small scale (173×100, dim=128)",
-    tags=["mm-param-learning", "protocol", "full-energy", "class-i", "espaloma-scale", "formal"],
+    params=sweep_space,
+    description="Power-of-two Class-I model-size sweep with calibrated packed batches",
+    tags=["mm-param-learning", "full-energy", "class-i", "espaloma-scale", "packed-batch", "formal"],
 )
 exp.metadata = exp.metadata.model_copy(
-    update={"description": exp.description, "tags": list(exp.tags), "parameter_space": dict(params)}
+    update={"description": exp.description, "tags": list(exp.tags), "parameter_space": sweep_space}
 )
 exp.save()
 exp.materialize()
@@ -128,25 +148,28 @@ if exp.has_run("${RUN_ID}"):
 else:
     run = exp.add_run(params=params, id="${RUN_ID}")
     run.materialize()
-write_knowledge_item(
-    project,
-    name="class-i-espaloma-scale-protocol",
-    kind="ProtocolNote",
-    sources=[
-        SourceRef(kind="experiment", ref="${EXP}"),
-        SourceRef(kind="file", ref="dataset:espaloma/phalkethoh-mm-small@1"),
-        SourceRef(kind="reference", ref="DOI:10.1039/D2SC02739A"),
-    ],
-    created_by="mm-param-learning/run_class_i_espaloma_scale_gh200",
-    body=(
-        "# Formal Espaloma-scale Class-I full energy\\n\\n"
-        "- Dataset: 173 mol × 100 conf, splits.json seed 2666\\n"
-        "- Model: ChemEncoder dim=128, torsion n_terms=6, EEM+LJ+Coulomb\\n"
-        "- Opt: Adam 1e-4, batch=100, epochs=${EPOCHS}, early_stop=${PATIENCE}\\n"
-    ),
-    cite=[(exp, "derived_from")],
-    title="Espaloma-scale formal protocol",
-)
+if "${MODEL_SIZE:-custom}" == "small":
+    write_knowledge_item(
+        project,
+        name="class-i-power2-packed-size-sweep-protocol",
+        kind="ProtocolNote",
+        sources=[
+            SourceRef(kind="experiment", ref="${EXP}"),
+            SourceRef(kind="experiment", ref="class-i-packed-batch-calibration-gh200"),
+            SourceRef(kind="file", ref="dataset:espaloma/phalkethoh-mm-small@1"),
+            SourceRef(kind="reference", ref="DOI:10.1039/D2SC02739A"),
+        ],
+        created_by="mm-param-learning/run_class_i_espaloma_scale_gh200",
+        body=(
+            "# Power-of-two packed Class-I size sweep\\n\\n"
+            "- Dataset: 173 mol × 100 conf, official seed 2666 splits\\n"
+            "- Models: h64/b4096, h512/b2048, h4096/b256; n_blocks=5\\n"
+            "- Batch sizes selected by GH200 packed forward/backward/Adam calibration\\n"
+            "- Opt: Adam 1e-4, epochs=${EPOCHS}, early_stop=${PATIENCE}\\n"
+        ),
+        cite=[(exp, "derived_from")],
+        title="Power-of-two packed Class-I size sweep protocol",
+    )
 print("run_dir", run.path())
 PY
 
@@ -160,6 +183,8 @@ python -u scripts/mm_param_learning/espaloma_mm_protocol_train.py \
   --use-official-splits \
   --epochs "${EPOCHS}" \
   --batch-size "${BATCH_SIZE}" \
+  --hidden "${HIDDEN}" \
+  --n-blocks "${N_BLOCKS}" \
   --lr "${LR}" \
   --eval-every 5 \
   --early-stop-patience "${PATIENCE}" \

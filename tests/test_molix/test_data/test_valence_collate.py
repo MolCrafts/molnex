@@ -31,13 +31,9 @@ def _mol(
         "pos": torch.zeros(n_atoms, 3),
     }
     if angles is not None:
-        sample["angles"] = {
-            k: torch.as_tensor(v, dtype=torch.long) for k, v in angles.items()
-        }
+        sample["angles"] = {k: torch.as_tensor(v, dtype=torch.long) for k, v in angles.items()}
     if propers is not None:
-        sample["propers"] = {
-            k: torch.as_tensor(v, dtype=torch.long) for k, v in propers.items()
-        }
+        sample["propers"] = {k: torch.as_tensor(v, dtype=torch.long) for k, v in propers.items()}
     if impropers is not None:
         sample["impropers"] = {
             k: torch.as_tensor(v, dtype=torch.long) for k, v in impropers.items()

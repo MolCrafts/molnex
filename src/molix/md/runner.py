@@ -26,10 +26,14 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import torch
+from tensordict import TensorDict
 
 from molix.md.integrators import Integrator, _as_mass_col
 from molix.md.types import MDObservables, MDState
-from molix.units import KB_AMU_A_FS
+from molix.schema import MASS_KEY, POS_KEY, VEL_KEY
+from molix.units import units
+
+_KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
 
 
 class MDHook:
@@ -98,8 +102,6 @@ class MDRunner:
 
     Args:
         integrator: The integrator advancing the typed ``MDState``.
-        mass: Per-atom mass ``(N,)`` or scalar (integrator's mass unit). Used to
-            report kinetic energy / temperature.
         hooks: :class:`MDHook` instances or ``(hook, priority)`` tuples; lower
             priority fires earlier, ties keep registration order.
         kb: Boltzmann constant in the integrator's energy unit (default: the
@@ -114,41 +116,33 @@ class MDRunner:
         self,
         integrator: Integrator,
         *,
-        mass: float | torch.Tensor,
         hooks: Sequence[MDHook | tuple[MDHook, int]] | None = None,
-        kb: float = KB_AMU_A_FS,
+        kb: float = _KB_MD,
         dof: int | None = None,
     ) -> None:
         self.integrator = integrator
         self.hooks: list[MDHook] = _normalize_hooks(hooks)
-        self._mass = mass
         self._kb = float(kb)
         self._dof = dof
 
-    def run(self, pos: torch.Tensor, vel: torch.Tensor, n_steps: int, *, chunk: int = 1) -> MDState:
-        """Integrate ``n_steps`` steps, firing the hook lifecycle per chunk.
+    def run(self, system: TensorDict, n_steps: int, *, chunk: int = 1) -> MDState:
+        """Integrate ``n_steps`` on ``system``, firing hooks per chunk.
 
-        ``chunk > 1`` advances the integrator ``chunk`` steps between hook
-        firings (``Integrator.advance_n`` — no per-step Python, no per-step
-        thermodynamics). The dynamics are bit-identical to ``chunk=1``; only
-        the observation cadence changes, so every declared hook cadence
-        (``TrajectoryHook.stride``, ``MDCheckpointHook.every``) must be a
-        multiple of ``chunk`` — enforced via :attr:`MDHook.cadence`. The
-        neighbour policy is **not** among them: it runs inside
-        :meth:`~molix.md.integrators.Integrator.eval_force`, once per force
-        evaluation, whatever ``chunk`` is.
+        Reads ``atoms.pos`` / ``atoms.vel`` / ``atoms.mass``, binds mass onto
+        the integrator, writes positions and velocities back at the end.
 
         Args:
-            pos: Initial positions ``(N, 3)``.
-            vel: Initial velocities ``(N, 3)``.
+            system: TensorDict with ``atoms.pos``, ``atoms.vel``, ``atoms.mass``.
             n_steps: Number of MD steps.
             chunk: Steps advanced between hook firings.
 
         Returns:
-            The final typed :class:`~molix.md.types.MDState`. Trajectory
-            capture is the job of hooks (see :class:`TrajectoryHook`).
+            The final typed :class:`~molix.md.types.MDState`.
         """
-        mass = _as_mass_col(self._mass, pos)
+        pos = system[POS_KEY]
+        vel = system[VEL_KEY]
+        self.integrator.bind_mass(system[MASS_KEY])
+        mass = _as_mass_col(system[MASS_KEY], pos)
         if self._dof is not None:
             dof = self._dof
         else:
@@ -190,6 +184,8 @@ class MDRunner:
                 hook.on_step_end(self, done, obs)
         for hook in self.hooks:
             hook.on_run_end(self)
+        system[POS_KEY] = md.pos
+        system[VEL_KEY] = md.vel
         return md
 
 

@@ -1,41 +1,43 @@
-"""Integrator components: advance an :class:`~molix.md.types.MDState` over a
-:class:`~molix.md.forcefield.ForceField` (BAOAB Langevin velocity-Verlet).
+"""Integrator components: advance an :class:`~molix.md.types.MDState`.
 
-An ``Integrator`` is an :class:`torch.nn.Module` that *holds a ``ForceField``
-component* (not a closure) and advances state. The hot step is static and
-typed — no ``isinstance`` on mass, no ``if gamma > 0`` branch (the O step is
-written as an identity-at-γ=0 update), no ``None`` noise — so
-:meth:`LangevinVerletIntegrator.step` and :meth:`LangevinVerletIntegrator.rollout`
-``torch.compile(fullgraph=True)`` to a single graph *including* a traceable
-force field (PiNet's functorch force path is graph-break-free).
+An ``Integrator`` is constructed with its own step parameters (``dt``, and
+whatever else that scheme needs) and does **not** take a force field — the
+caller binds one with :meth:`Integrator.bind_force` (or lets
+:class:`~molix.md.driver.MD` do it via ``set_forcefield`` /
+``set_integrator``). The hot step is static and typed so
+``torch.compile(fullgraph=True)`` can include a traceable force field.
 
 Neighbour-list cadence is **not** the integrator's: the list owns it (``skin`` /
 ``every`` / ``delay`` / ``check`` on :class:`~molix.md.neighbors.NeighborList`)
 and :meth:`Integrator.eval_force` merely asks, once per force evaluation, at the
 positions being evaluated. What the integrator keeps is a construction-time
-on/off, :attr:`Integrator.rebuild`, derived from the force field. Over a live
-list that question is an eager, host-syncing decision, so a compiled rollout is
-built with ``rebuild=False`` (frozen list) while production compiles the force
-field and keeps the loop eager.
+on/off, :attr:`Integrator.rebuild`, derived from the force field when bound.
+Over a live list that question is an eager, host-syncing decision, so a
+compiled rollout is built with ``rebuild=False`` (frozen list) while production
+compiles the force field and keeps the loop eager.
 
-BAOAB ordering (Leimkuhler & Matthews): B (half kick) → A (half drift) → O
-(Ornstein-Uhlenbeck) → A → B. The O step ``v ← c1·v + c2·σ·ξ`` with
-``c1 = e^{-γΔt}``, ``c2 = √(1-c1²)``, ``σ = √(k_BT/m)`` satisfies the
-per-DoF fluctuation-dissipation relation. At ``γ = 0``: ``c1 = 1``, ``c2 = 0`` →
-the O step is the identity (``0·σ·ξ = 0``) and BAOAB reduces to velocity-Verlet
-(NVE) — which is exactly why the branch can be dropped.
+Two schemes, two types — no ``gamma=0`` switch. Both are constructed with
+``dt`` (and Langevin's γ / kT); mass is **not** an integrator parameter —
+it lives on ``atoms.mass`` and is bound with :meth:`Integrator.bind_mass`.
+
+* :class:`VelocityVerletIntegrator` — NVE (B-A-A-B; the two half-drifts stay
+  as separate adds).
+* :class:`LangevinVerletIntegrator` — BAOAB Langevin (γ > 0). Ordering
+  (Leimkuhler & Matthews): B (half kick) → A (half drift) → O
+  (Ornstein-Uhlenbeck) → A → B. The O step ``v ← c1·v + c2·σ·ξ`` with
+  ``c1 = e^{-γΔt}``, ``c2 = √(1-c1²)``, ``σ = √(k_BT/m)``.
 
 Units — one self-consistent system. The arithmetic ``v += Δt·F/m`` needs
 ``[F] = [m][length]/[time]²``, so eV/Å + amu + fs is **not** consistent. The
 canonical system is (amu, Å, fs) with energy in amu·Å²/fs²
-(= :data:`molix.units.EV_PER_AMU_A2_FS2` eV); drive an eV/Å potential by
+(``(1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2")``); drive an eV/Å potential by
 converting at the force field
-(``PotentialForceField(..., energy_scale=1/EV_PER_AMU_A2_FS2)``).
+(``PotentialForceField(..., energy_scale=(1.0 * units.eV).to("amu * …").magnitude)``).
 
-Precision boundary: the force field owns its own dtype, independently of the
-trajectory state's (``MD(dtype=)`` governs the state; ``MD.set_potential_dtype``
-the model). :meth:`Integrator.eval_force` casts the force field's output back to
-the state dtype so the two precisions never silently promote mid-step.
+Precision boundary: the force field owns its own dtype; ``MD(dtype)`` governs
+the trajectory state. :meth:`Integrator.eval_force` casts the force field's
+output back to the state dtype so the two precisions never silently promote
+mid-step.
 
 Reference:
     Leimkuhler & Matthews, "Rational Construction of Stochastic Numerical
@@ -67,8 +69,18 @@ def _as_mass_col(mass: float | torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     return torch.as_tensor(mass, dtype=ref.dtype, device=ref.device)
 
 
+def _require_positive_mass(mass: float | torch.Tensor) -> float | torch.Tensor:
+    if isinstance(mass, torch.Tensor):
+        if not bool((mass > 0).all()):
+            raise ValueError("mass must be strictly positive")
+        return mass
+    if mass <= 0:
+        raise ValueError("mass must be strictly positive")
+    return mass
+
+
 class Integrator(nn.Module):
-    """Abstract integrator over a :class:`~molix.md.forcefield.ForceField` component.
+    """Abstract integrator. Constructed without a force field.
 
     The contract :class:`~molix.md.runner.MDRunner` drives — a conforming
     subclass implements :meth:`advance` (one eager step) and :meth:`rollout`
@@ -78,27 +90,43 @@ class Integrator(nn.Module):
     temperature-estimator convention.
 
     Args:
-        force: The force-field component supplying ``forward(pos) -> ForceOutput``.
         rebuild: Whether :meth:`eval_force` asks the force field's neighbour
             policy. ``None`` (default) derives it from
-            :attr:`~molix.md.forcefield.ForceField.rebuilds_neighbors`, so a
-            list-backed force field drives its list and a listless one costs
-            nothing. Pass ``False`` to freeze the list for a compiled rollout,
-            ``True`` to force the question.
+            :attr:`~molix.md.forcefield.ForceField.rebuilds_neighbors` when
+            :meth:`bind_force` runs. Pass ``False`` to freeze the list for a
+            compiled rollout, ``True`` to force the question.
     """
 
-    def __init__(self, force: ForceField, *, rebuild: bool | None = None) -> None:
+    def __init__(self, *, rebuild: bool | None = None) -> None:
         super().__init__()
+        self.force: ForceField | None = None
+        self._rebuild_override: bool | None = rebuild
+        self.rebuild: bool = False if rebuild is None else bool(rebuild)
+
+    def bind_force(self, force: ForceField) -> Integrator:
+        """Attach the force field this integrator will evaluate.
+
+        Rebuild is derived from the force field only when the constructor left
+        it unspecified. A later re-bind keeps an explicit ``rebuild=`` override.
+        """
         self.force = force
-        #: Whether this integrator asks the force field's neighbour policy once
-        #: per force evaluation. A **plain Python bool**, fixed at construction
-        #: and never a buffer or a tensor: dynamo specialises the branch at
-        #: trace time, so ``rebuild=False`` leaves the body of the guard in
-        #: :meth:`eval_force` dead and the step still traces to one graph.
-        #: Answers *whether this integrator asks*, against
-        #: :attr:`~molix.md.forcefield.ForceField.rebuilds_neighbors`'s
-        #: *whether the force field can*.
-        self.rebuild: bool = bool(force.rebuilds_neighbors) if rebuild is None else bool(rebuild)
+        if self._rebuild_override is None:
+            self.rebuild = bool(force.rebuilds_neighbors)
+        return self
+
+    def bind_mass(self, mass: float | torch.Tensor) -> Integrator:
+        """Attach per-atom (or scalar) mass from ``atoms.mass``.
+
+        Mass is system data, not a scheme parameter. The runner binds it from
+        the TensorDict at the start of a run; direct integrator tests bind it
+        the same way.
+        """
+        mass = _require_positive_mass(mass)
+        mass_col = _as_mass_col(mass, torch.zeros(()))
+        self.mass: float | torch.Tensor = mass
+        self.register_buffer("mass_col", mass_col)
+        self.register_buffer("inv_mass", mass_col.reciprocal())
+        return self
 
     @property
     def removed_dof(self) -> int:
@@ -106,8 +134,7 @@ class Integrator(nn.Module):
 
         ``3`` by default — a deterministic integrator conserves the (removed)
         centre-of-mass momentum, leaving ``3N - 3``. Thermostatted integrators
-        that agitate all ``3N`` DoF (Langevin's O step includes the COM)
-        override this to ``0``.
+        that agitate all ``3N`` DoF override this to ``0``.
         """
         return 3
 
@@ -117,28 +144,22 @@ class Integrator(nn.Module):
         The **only** neighbour-policy seam in the engine. With
         :attr:`rebuild` set, the force field is asked once here, at ``pos``,
         immediately before the force call — and the *list* decides, under its
-        own ``skin`` / ``every`` / ``delay`` / ``check`` gate. The integrator
-        keeps no cadence state: no counter, no modulo, no second owner.
+        own ``skin`` / ``every`` / ``delay`` / ``check`` gate.
 
-        Why here and nowhere else: velocity-Verlet / BAOAB evaluates ``F`` at
-        the *end-of-step* positions, so a refresh wired to step-start leaves
-        the connectivity one displacement behind the positions entering
-        ``F = -∇E`` — a systematic, one-signed energy leak on long NVE runs
-        rather than a symmetric discretisation error.
+        Why here and nowhere else: velocity-Verlet evaluates ``F`` at the
+        *end-of-step* positions, so a refresh wired to step-start leaves the
+        connectivity one displacement behind the positions entering
+        ``F = -∇E``.
 
         Compile invariant: :attr:`rebuild` is a Python bool, so dynamo
         specialises this branch. ``rebuild=False`` leaves the call dead and
-        ``torch.compile(ig.rollout, fullgraph=True)`` still traces one graph;
-        ``rebuild=True`` is the eager production path, where the policy runs
-        *between* compiled force calls and the list's fixed-capacity buffers
-        keep every shape static, so a compiled / CUDA-graph-captured force
-        field survives each rebuild.
+        ``torch.compile(ig.rollout, fullgraph=True)`` still traces one graph.
 
-        The force field owns its own precision (deliberately independent of the
-        trajectory's — see :class:`molix.md.driver.MD`); the state must not
-        silently promote, so energy/forces come back in ``pos``'s dtype. A
-        same-dtype ``.to`` is the identity, so the matched case costs nothing.
+        The force field owns its own precision; energy/forces come back in
+        ``pos``'s dtype.
         """
+        if self.force is None:
+            raise RuntimeError("bind a force field before evaluating")
         if self.rebuild:
             self.force.rebuild_neighbors(pos)
         out = self.force(pos)
@@ -163,12 +184,11 @@ class Integrator(nn.Module):
         """Advance ``n_steps`` and return the final state (compile-friendly)."""
         raise NotImplementedError
 
-    def cast_state(self, dtype: torch.dtype) -> "Integrator":
+    def cast_state(self, dtype: torch.dtype) -> Integrator:
         """Cast this integrator's own step-constant buffers to ``dtype``.
 
         Unlike ``.to(dtype)`` this does **not** recurse into the force field:
-        the MD-side precision and the potential's precision are independent
-        concerns (:class:`molix.md.driver.MD` casts the two separately).
+        MD-side precision and the potential's precision are independent.
         """
         for name, buf in self.named_buffers(recurse=False):
             if buf.is_floating_point():
@@ -176,123 +196,114 @@ class Integrator(nn.Module):
         return self
 
 
-class LangevinVerletIntegrator(Integrator):
-    """Langevin velocity-Verlet (BAOAB) over a force-field component.
+class VelocityVerletIntegrator(Integrator):
+    """NVE velocity-Verlet (B-A-A-B). Constructed with ``dt`` only.
+
+    Mass comes from ``atoms.mass`` via :meth:`Integrator.bind_mass`.
 
     Args:
-        force: Force-field component (``forward(pos) -> ForceOutput``).
         dt: Timestep Δt in fs.
-        gamma: Langevin friction γ in fs⁻¹ (``0`` → NVE; the O step becomes the
-            identity).
-        kbt: Thermal energy k_B·T (energy units).
-        mass: Particle mass — scalar or per-atom ``(N,)`` tensor, strictly positive.
-        seed: Seed for the eager noise generator (reproducible :meth:`advance`).
-            :meth:`rollout` uses global RNG so it stays compilable.
-        rebuild: Forwarded to :class:`Integrator` — whether
-            :meth:`Integrator.eval_force` asks the force field's neighbour
-            policy. ``None`` derives it from the force field; ``False`` is the
-            frozen-list configuration a ``fullgraph=True`` rollout needs.
-
-    Scalar parameters are immutable after construction (baked into the compiled
-    graph). Buffers ``dt``/``c1``/``c2``/``mass_col``/``inv_mass``/``sigma`` carry
-    the precomputed step constants; nothing is recomputed per step.
+        rebuild: Forwarded to :class:`Integrator`.
     """
 
-    def __init__(
-        self,
-        force: ForceField,
-        *,
-        dt: float,
-        gamma: float,
-        kbt: float,
-        mass: float | torch.Tensor,
-        seed: int = 0,
-        rebuild: bool | None = None,
-    ) -> None:
-        super().__init__(force, rebuild=rebuild)
-        if isinstance(mass, torch.Tensor):
-            if not bool((mass > 0).all()):
-                raise ValueError("mass must be strictly positive")
-        elif mass <= 0:
-            raise ValueError("mass must be strictly positive")
-        self.gamma = float(gamma)
-        self._seed = int(seed)
-        c1 = math.exp(-float(gamma) * float(dt))
-        c2 = math.sqrt(max(0.0, 1.0 - c1 * c1))
-        ref = torch.zeros(())  # CPU fp32 reference for buffer construction
-        mass_col = _as_mass_col(mass, ref)
+    def __init__(self, dt: float, *, rebuild: bool | None = None) -> None:
+        super().__init__(rebuild=rebuild)
         self.register_buffer("dt", torch.as_tensor(float(dt)))
-        self.register_buffer("c1", torch.as_tensor(c1))
-        self.register_buffer("c2", torch.as_tensor(c2))
-        self.register_buffer("mass_col", mass_col)
-        self.register_buffer("inv_mass", mass_col.reciprocal())
-        self.register_buffer("sigma", math.sqrt(float(kbt)) * mass_col.rsqrt())
-        self._generator: torch.Generator | None = None
 
-    @property
-    def removed_dof(self) -> int:
-        """``0`` under the thermostat (γ>0 agitates all 3N DoF, COM included); ``3`` NVE."""
-        return 0 if self.gamma > 0.0 else 3
+    def step(self, state: MDState) -> MDState:
+        """One NVE step from the cached entry force.
 
-    def step(self, state: MDState, noise: torch.Tensor) -> MDState:
-        """One BAOAB step from the cached entry force and a pre-drawn ``noise``.
-
-        Pure and static (no Python branch on γ, no ``isinstance``): the O step is
-        applied unconditionally and is the identity when γ = 0 (c2 = 0). Returns
-        the advanced state with the end-of-step force/energy cached for the next
-        step (one force-field evaluation per step). ``torch.compile``-able.
+        The two half-drifts stay as separate adds (not fused into one full
+        drift) so the arithmetic matches the BAOAB A-A pair with an identity
+        O step bit-for-bit.
         """
         half_dt = 0.5 * self.dt
         vel = state.vel + half_dt * state.forces * self.inv_mass  # B (cached force)
         pos = state.pos + half_dt * vel  # A
-        vel = self.c1 * vel + self.c2 * self.sigma * noise  # O (identity at γ=0)
         pos = pos + half_dt * vel  # A
         out = self.eval_force(pos)
         vel = vel + half_dt * out.forces * self.inv_mass  # B
         return MDState(pos, vel, out.forces, out.energy)
 
-    def step_nve(self, state: MDState) -> MDState:
-        """One γ=0 step: BAOAB with the identity O step elided.
+    def advance(self, state: MDState) -> MDState:
+        return self.step(state)
 
-        Bit-identical to ``step(state, noise)`` at ``gamma=0`` — there
-        ``c1=1, c2=0``, so ``v ← 1.0·v + 0.0·σ·ξ`` is the identity in floating
-        point too (multiply by 1.0 and add of +0.0 are exact). The two half
-        drifts are kept as **separate adds** to preserve that bit identity;
-        fusing them into one full drift would reassociate. Used by
-        :meth:`advance_n` so long NVE runs skip the per-step noise draw; the
-        compiled :meth:`rollout` keeps the branch-free :meth:`step` per the
-        md-component-engine spec.
-        """
+    def rollout(self, state: MDState, n_steps: int) -> MDState:
+        for _ in range(n_steps):
+            state = self.step(state)
+        return state
+
+
+class LangevinVerletIntegrator(Integrator):
+    """Langevin velocity-Verlet (BAOAB). γ must be strictly positive.
+
+    NVE is :class:`VelocityVerletIntegrator` — not this type with ``gamma=0``.
+    Mass comes from ``atoms.mass`` via :meth:`Integrator.bind_mass`.
+
+    Args:
+        dt: Timestep Δt in fs.
+        gamma: Langevin friction γ in fs⁻¹, strictly positive.
+        kbt: Thermal energy k_B·T in the integrator's energy unit.
+        seed: Seed for the eager noise generator (reproducible :meth:`advance`).
+            :meth:`rollout` uses global RNG so it stays compilable.
+        rebuild: Forwarded to :class:`Integrator`.
+    """
+
+    def __init__(
+        self,
+        dt: float,
+        *,
+        gamma: float,
+        kbt: float,
+        seed: int = 0,
+        rebuild: bool | None = None,
+    ) -> None:
+        super().__init__(rebuild=rebuild)
+        if float(gamma) <= 0.0:
+            raise ValueError(
+                "LangevinVerletIntegrator requires gamma > 0; use VelocityVerletIntegrator for NVE"
+            )
+        if float(kbt) <= 0.0:
+            raise ValueError("LangevinVerletIntegrator requires kbt > 0")
+        self.gamma = float(gamma)
+        self._kbt = float(kbt)
+        self._seed = int(seed)
+        c1 = math.exp(-float(gamma) * float(dt))
+        c2 = math.sqrt(max(0.0, 1.0 - c1 * c1))
+        self.register_buffer("dt", torch.as_tensor(float(dt)))
+        self.register_buffer("c1", torch.as_tensor(c1))
+        self.register_buffer("c2", torch.as_tensor(c2))
+        self._generator: torch.Generator | None = None
+
+    def bind_mass(self, mass: float | torch.Tensor) -> Integrator:
+        """Bind ``atoms.mass`` and rebuild the fluctuation-dissipation σ."""
+        super().bind_mass(mass)
+        self.register_buffer("sigma", math.sqrt(self._kbt) * self.mass_col.rsqrt())
+        return self
+
+    @property
+    def removed_dof(self) -> int:
+        """``0`` — the O step agitates all 3N DoF, COM included."""
+        return 0
+
+    def step(self, state: MDState, noise: torch.Tensor) -> MDState:
+        """One BAOAB step from the cached entry force and a pre-drawn ``noise``."""
         half_dt = 0.5 * self.dt
         vel = state.vel + half_dt * state.forces * self.inv_mass  # B (cached force)
         pos = state.pos + half_dt * vel  # A
-        pos = pos + half_dt * vel  # A (O step elided: identity at γ=0)
+        vel = self.c1 * vel + self.c2 * self.sigma * noise  # O
+        pos = pos + half_dt * vel  # A
         out = self.eval_force(pos)
         vel = vel + half_dt * out.forces * self.inv_mass  # B
         return MDState(pos, vel, out.forces, out.energy)
 
     def advance_n(self, state: MDState, n_steps: int) -> MDState:
-        """Advance ``n_steps`` eagerly with no per-step host work.
-
-        The γ selection is a construction-time Python branch out here in the
-        eager driver — :meth:`step` itself stays branch-free (spec invariant).
-        At γ=0 this also skips the per-step ``randn`` whose contribution the
-        O step would multiply by ``c2=0`` anyway.
-        """
-        if self.gamma == 0.0:
-            for _ in range(n_steps):
-                state = self.step_nve(state)
-            return state
         for _ in range(n_steps):
             state = self.step(state, self.draw_noise(state.vel))
         return state
 
     def draw_noise(self, ref: torch.Tensor) -> torch.Tensor:
-        """Reproducible O-step noise ``(N, 3)`` from a seeded generator (eager).
-
-        Used by :meth:`advance` / :meth:`advance_n`; kept out of :meth:`rollout`
-        so the compiled path has no ``Generator`` object in the graph.
-        """
+        """Reproducible O-step noise ``(N, 3)`` from a seeded generator (eager)."""
         if self._generator is None or self._generator.device != ref.device:
             self._generator = torch.Generator(device=ref.device).manual_seed(self._seed)
         return torch.randn(ref.shape, generator=self._generator, dtype=ref.dtype, device=ref.device)
@@ -302,12 +313,7 @@ class LangevinVerletIntegrator(Integrator):
         return self.step(state, self.draw_noise(state.vel))
 
     def rollout(self, state: MDState, n_steps: int) -> MDState:
-        """Advance ``n_steps`` and return the final state (compile-friendly).
-
-        Draws noise with global ``torch.randn_like`` inside the loop so the whole
-        rollout — including the force field — is ``torch.compile(fullgraph=True)``
-        traceable. Seed the global RNG (``torch.manual_seed``) for reproducibility.
-        """
+        """Advance ``n_steps`` (compile-friendly; global ``torch.randn_like``)."""
         for _ in range(n_steps):
             state = self.step(state, torch.randn_like(state.vel))
         return state

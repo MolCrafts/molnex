@@ -1,7 +1,7 @@
 """LJ-cluster NVE energy-conservation validation (spec md-component-engine ac-008).
 
 Drives a Lennard-Jones cluster (argon parameters, the LJ13 icosahedral minimum)
-under NVE (γ=0) with the compiled MD engine for a long trajectory, and checks the
+under NVE with the compiled MD engine for a long trajectory, and checks the
 total energy shows no systematic drift — the gold-standard integrator test.
 
 Units: (amu, Å, fs) with energy in amu·Å²/fs² (see molix.md.integrators). All
@@ -26,7 +26,10 @@ from pathlib import Path
 
 import torch
 
-from molix.md import KB_AMU_A_FS, LangevinVerletIntegrator, LennardJonesForceField
+from molix.md import LennardJonesForceField, VelocityVerletIntegrator
+from molix.units import units
+
+_KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
 
 # Persistent artifact dir (versioned with the repo for the paper).
 _OUT_DEFAULT = Path(__file__).resolve().parent / "results" / "md_lj_nve"
@@ -76,14 +79,13 @@ def main() -> int:
     args = ap.parse_args()
 
     n_steps = int(args.ps * 1000.0 / _DT)
-    kbt = KB_AMU_A_FS * args.t0
+    kbt = _KB_MD * args.t0
     pos = _icosahedron13(2.0 ** (1.0 / 6.0) * _SIGMA)
     vel = _maxwell_velocities(pos.shape[0], kbt, args.seed)
 
     ff = LennardJonesForceField(epsilon=_EPS, sigma=_SIGMA).to(_DTYPE)
-    ig = LangevinVerletIntegrator(ff, dt=_DT, gamma=0.0, kbt=0.0, mass=_MASS, seed=args.seed)
+    ig = VelocityVerletIntegrator(_DT).bind_force(ff).bind_mass(_MASS)
     step = ig.step if args.no_compile else torch.compile(ig.step, fullgraph=True)
-    noise = torch.zeros_like(vel)  # NVE: O step is the identity (γ=0)
 
     state = ig.initial(pos, vel)
     e0 = _total_energy(state.energy, state.vel)
@@ -94,7 +96,7 @@ def main() -> int:
     traj: list[torch.Tensor] = []
     t_wall = time.perf_counter()
     for i in range(n_steps):
-        state = step(state, noise)
+        state = step(state)
         if i % args.sample_every == 0:
             ke = 0.5 * _MASS * float((state.vel * state.vel).sum())
             ts.append(i * _DT / 1000.0)  # ps

@@ -31,7 +31,7 @@ class ForceOutput(NamedTuple):
 
 
 class MDState(NamedTuple):
-    """Dynamical state advanced one BAOAB step by an ``Integrator``.
+    """Dynamical state advanced one step by an ``Integrator``.
 
     Carries the force-cache (``forces`` / ``energy`` at ``pos``, both from the
     same force-field evaluation) so the loop does one evaluation per step.

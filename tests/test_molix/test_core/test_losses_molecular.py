@@ -306,8 +306,7 @@ class TestTorsionProfileLoss:
             + torch.tensor([100.0, 100.0, -50.0, -50.0])
         }
         target = {
-            "energy": torch.tensor([10.0, 11.0, 0.0, 2.0])
-            + torch.tensor([-3.0, -3.0, 8.0, 8.0]),
+            "energy": torch.tensor([10.0, 11.0, 0.0, 2.0]) + torch.tensor([-3.0, -3.0, 8.0, 8.0]),
             "molecule_id_index": torch.tensor([0, 0, 1, 1]),
         }
         got = TorsionProfileLoss()(pred, target)

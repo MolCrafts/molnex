@@ -1,10 +1,11 @@
-"""Tests for Condenser greedy merge (learnable-classical-ff-06)."""
+"""Tests for Condenser — one type per environment."""
 
 from __future__ import annotations
 
 import ast
 from pathlib import Path
 
+import pytest
 import torch
 
 from molrep.condensation import (
@@ -17,131 +18,143 @@ from molrep.condensation import (
 
 
 class TestCondenser:
-    def test_identical_params_merge_to_one_type(self):
-        condenser = Condenser()
-        params = {
-            "k": torch.tensor([300.0, 300.0, 300.0]),
-            "r0": torch.tensor([1.09, 1.09, 1.09]),
-        }
-        result = condenser.merge(
-            [params],
+    def test_same_environment_identical_params_one_type(self):
+        result = Condenser().merge(
+            [{"k": torch.tensor([300.0, 300.0, 300.0]), "r0": torch.tensor([1.09, 1.09, 1.09])}],
             interaction=InteractionClass.BOND,
+            environments=[[0, 0, 0]],
             criterion=bond_default_criterion(),
         )
         assert result.type_system.n_types == 1
         assert result.type_system.get(0).member_count == 3
         assert result.assignment.type_ids.tolist() == [0, 0, 0]
 
-    def test_far_params_remain_distinct(self):
-        condenser = Condenser()
-        params = {
-            "k": torch.tensor([300.0, 300.0]),
-            "r0": torch.tensor([1.09, 1.5]),  # Δr0 >> 0.01 Å
-        }
-        result = condenser.merge(
-            [params],
+    def test_same_environment_far_params_raises(self):
+        with pytest.raises(ValueError, match="too coarse"):
+            Condenser().merge(
+                [{"k": torch.tensor([300.0, 300.0]), "r0": torch.tensor([1.09, 1.5])}],
+                interaction=InteractionClass.BOND,
+                environments=[[0, 0]],
+                criterion=bond_default_criterion(),
+            )
+
+    def test_different_environments_stay_distinct(self):
+        result = Condenser().merge(
+            [{"k": torch.tensor([300.0, 300.0]), "r0": torch.tensor([1.09, 1.5])}],
             interaction=InteractionClass.BOND,
+            environments=[["cc", "co"]],
             criterion=bond_default_criterion(),
         )
         assert result.type_system.n_types == 2
         assert result.assignment.type_ids.tolist() == [0, 1]
 
-    def test_deterministic_sort_key(self):
-        condenser = Condenser()
-        params = {
-            "k": torch.tensor([300.0, 500.0, 300.0]),
-            "r0": torch.tensor([1.09, 1.5, 1.09]),
-        }
-        r1 = condenser.greedy_merge(
-            [params],
+    def test_multi_system_shares_environment_ids(self):
+        result = Condenser().merge(
+            [
+                {"k": torch.tensor([300.0]), "r0": torch.tensor([1.09])},
+                {"k": torch.tensor([302.0, 500.0]), "r0": torch.tensor([1.091, 1.5])},
+            ],
             interaction=InteractionClass.BOND,
+            environments=[["cc"], ["cc", "co"]],
             criterion=bond_default_criterion(),
         )
-        r2 = condenser.greedy_merge(
-            [params],
-            interaction=InteractionClass.BOND,
-            criterion=bond_default_criterion(),
-        )
-        assert r1.type_system.n_types == r2.type_system.n_types
-        assert r1.assignment.type_ids.tolist() == r2.assignment.type_ids.tolist()
-        assert r1.type_system.prototypes_table() == r2.type_system.prototypes_table()
-
-    def test_multi_system_global_ids(self):
-        condenser = Condenser()
-        sys_a = {"k": torch.tensor([300.0]), "r0": torch.tensor([1.09])}
-        sys_b = {
-            "k": torch.tensor([302.0, 500.0]),  # near 300/1.09 and far
-            "r0": torch.tensor([1.091, 1.5]),
-        }
-        result = condenser.merge(
-            [sys_a, sys_b],
-            interaction=InteractionClass.BOND,
-            criterion=bond_default_criterion(),
-        )
-        # Near-duplicate across systems → one global type; far → second type
         assert result.type_system.n_types == 2
         assert result.assignment.for_system(0).tolist() == [0]
         assert result.assignment.for_system(1).tolist() == [0, 1]
-        assert result.assignment.type_id_at(0, 0) == 0
-        assert result.assignment.type_id_at(1, 1) == 1
 
-    def test_physics_gate_rejects_param_match(self):
-        """physical_eval can block a param-budget merge."""
-        condenser = Condenser()
-
+    def test_physics_gate_rejects_bucket(self):
         def always_hot(proto, cand, interaction):
             return {"energy_error": 10.0}
 
-        params = {
-            "k": torch.tensor([300.0, 301.0]),
-            "r0": torch.tensor([1.09, 1.09]),
-        }
-        result = condenser.merge(
-            [params],
-            interaction=InteractionClass.BOND,
-            criterion=bond_default_criterion(),
-            physical_eval=always_hot,
-            energy_tol=0.1,
-        )
-        # First row spawns type 0; second would match params but physics rejects
-        assert result.type_system.n_types == 2
-        assert result.metrics.rejected_by_physics == 1
-        assert result.metrics.n_compared >= 1
+        with pytest.raises(ValueError, match="physics gate"):
+            Condenser().merge(
+                [{"k": torch.tensor([300.0, 301.0]), "r0": torch.tensor([1.09, 1.09])}],
+                interaction=InteractionClass.BOND,
+                environments=[[0, 0]],
+                criterion=bond_default_criterion(),
+                physical_eval=always_hot,
+                energy_tol=0.1,
+            )
 
-    def test_physics_eval_records_metrics_without_gate(self):
-        condenser = Condenser()
-
+    def test_physics_eval_records_without_gate(self):
         def mild(proto, cand, interaction):
             return 0.01
 
-        params = {
-            "k": torch.tensor([300.0, 300.0]),
-            "r0": torch.tensor([1.09, 1.09]),
-        }
-        result = condenser.merge(
-            [params],
+        result = Condenser().merge(
+            [{"k": torch.tensor([300.0, 300.0]), "r0": torch.tensor([1.09, 1.09])}],
             interaction=InteractionClass.BOND,
+            environments=[[0, 0]],
             criterion=bond_default_criterion(),
             physical_eval=mild,
         )
         assert result.type_system.n_types == 1
         assert isinstance(result.metrics, PhysicalErrorMetrics)
-        assert result.metrics.n_compared == 1
+        assert result.metrics.n_compared == 2
         assert result.metrics.max_abs_energy_error == 0.01
 
-    def test_zero_abs_budget_one_type_per_unique_row(self):
+    def test_zero_abs_budget_same_env_duplicate_ok(self):
         crit = MergeCriterion(
             interaction=InteractionClass.BOND,
             abs_tol={"r0": 0.0, "k": 0.0},
             required_keys=("k", "r0"),
         )
-        condenser = Condenser()
-        params = {
-            "k": torch.tensor([100.0, 100.0, 200.0]),
-            "r0": torch.tensor([1.0, 1.0, 1.0]),
-        }
-        result = condenser.merge([params], interaction=InteractionClass.BOND, criterion=crit)
-        assert result.type_system.n_types == 2
+        result = Condenser().merge(
+            [{"k": torch.tensor([100.0, 100.0]), "r0": torch.tensor([1.0, 1.0])}],
+            interaction=InteractionClass.BOND,
+            environments=[[0, 0]],
+            criterion=crit,
+        )
+        assert result.type_system.n_types == 1
+
+    def test_environment_length_mismatch_raises(self):
+        with pytest.raises(ValueError, match="environments"):
+            Condenser().merge(
+                [{"k": torch.tensor([1.0]), "r0": torch.tensor([1.0])}],
+                interaction=InteractionClass.BOND,
+                environments=[[0, 0]],
+            )
+
+    def test_string_environment_becomes_type_label(self):
+        result = Condenser().merge(
+            [{"k": torch.tensor([200.0, 200.0]), "r0": torch.tensor([1.53, 1.53])}],
+            interaction=InteractionClass.BOND,
+            environments=[["[#6;D1]", "[#6;D1]"]],
+            criterion=bond_default_criterion(),
+        )
+        assert result.type_system.n_types == 1
+        assert result.type_system.get(0).label == "[#6;D1]"
+
+    def test_write_smarts_keys_then_def_type(self):
+        from molpy import BondType, ForceField
+        from molpy.core.atomistic import Atomistic
+        from molpy.io import write_smarts
+
+        mol = Atomistic()
+        atoms = [mol.def_atom({"element": el}) for el in ("C", "C", "O")]
+        mol.def_bond(atoms[0], atoms[1])
+        mol.def_bond(atoms[1], atoms[2])
+        envs = [
+            [
+                tuple(sorted((write_smarts(mol, b.itom), write_smarts(mol, b.jtom))))
+                for b in mol.bonds
+            ]
+        ]
+        result = Condenser().merge(
+            [{"k": torch.tensor([200.0, 320.0]), "r0": torch.tensor([1.53, 1.41])}],
+            interaction=InteractionClass.BOND,
+            environments=envs,
+        )
+        ff = ForceField("t", "real")
+        ff.def_atomstyle("full")
+        ff.def_bondstyle("harmonic")
+        astyle = ff.get_style("atom", "full")
+        bstyle = ff.get_style("bond", "harmonic")
+        for rec in result.type_system.records():
+            si, sj = envs[0][int(result.assignment.row_indices[rec.support_ids[0]])]
+            ai = astyle.get_type_by_name(si) or astyle.def_type(si)
+            aj = astyle.get_type_by_name(sj) or astyle.def_type(sj)
+            bstyle.def_type(ai, aj, name=rec.label, k=rec.prototype["k"], r0=rec.prototype["r0"])
+        assert len(list(ff.get_types(BondType))) == 2
 
     def test_no_smarts_emitters_in_package(self):
         root = Path(__file__).resolve().parents[3] / "src/molrep/condensation"
@@ -155,7 +168,6 @@ class TestCondenser:
                     name = node.name.lower()
                     assert "smarts" not in name and "smirks" not in name
             text = path.read_text().lower()
-            # No function that returns pattern text as its purpose
             assert "def to_smarts" not in text
             assert "def emit_smarts" not in text
             assert "def to_smirks" not in text

@@ -1,5 +1,5 @@
 <!-- mol:note:topic:learnable-classical-ff -->
-# Learnable classical FF — ForceField path (2026-08-11)
+# Learnable classical FF — ForceField path (2026-08-12)
 
 ## Rule (binding)
 
@@ -7,21 +7,34 @@
 
 | Type | Owns |
 |------|------|
-| `ForceField` | styles + param tables; `def_*style`, `with_params`, `to_potentials()` |
-| `Potentials` | `get_schema`, `calc_energy`, `calc_forces` (bound to one FF) |
+| `ForceField` | **is** `molpy.ForceField`; styles + torch param tables; `def_*style`, `with_params`, **override** `to_potentials()`, `realize(system)`, `to_ir()` |
+| `ClassIForceField` | `ForceField` subclass; harmonic bond/angle + Fourier dihedral |
+| `OPLSForceField` | `ClassIForceField` subclass; OPLS `k1..k4` dihedral |
+| `Potentials` | torch `BasePotential`; `calc_energy` / `calc_forces` / `forward` writes `graphs.energy` + `atoms.forces` |
 | `ClassicalIMM` | encoder + heads → **returns ForceField**; `project` only |
+| `LammpsWriter` | TensorDict → molpy `Frame`; `ff.clone().realize(system)` then `molpy.io` |
+| `molpy.io.write_smarts` | graph → local SMARTS (molrs `write_local_smarts`; io surface) |
+| `Condenser` | one type per SMARTS key; mean prototype; fail if the bucket is too wide |
 
+No `to_molpy()`. No `ForceField.class_i()` / `ForceField.opls()` classmethod façades.
+No second ForceField type for SMARTS (`SymbolicForceField` is hand-bind inspect only).
 No free-function helpers as public API. No `fill` / parameterizer / composer façade.
 No energy method on `ClassicalIMM` — energy is always on `Potentials`.
 
 ### User path
 
 ```python
-ff = ForceField.class_i(dihedral="fourier")
+ff = ClassIForceField()
 model = ClassicalIMM(encoder, forcefield=ff, bond_head=..., ...)
-ff_t = model(batch)                          # ForceField
-E = ff_t.to_potentials().calc_energy(batch)
-ff_opls = model.project(ForceField.opls())   # general → OPLS form only
+ff_t = model(batch)                          # ClassIForceField (molpy.ForceField)
+E = ff_t.to_potentials().calc_energy(batch)  # torch override
+ff_opls = model.project(OPLSForceField())    # general → OPLS form only
+ff_t.clone().realize(batch)                  # native types for molpy.io
+envs = [[(write_smarts(mol, b.itom), write_smarts(mol, b.jtom)) for b in mol.bonds]]
+result = Condenser().merge(
+    [ff_t.params("bonds")], interaction=InteractionClass.BOND, environments=envs,
+)
+# register types with molpy: style.def_type(..., **rec.prototype)
 ```
 
 ### `project` contract
@@ -55,39 +68,37 @@ ff_t = model(batch)   # writes atoms.q via EEM KKT; energy still to_potentials()
 - **Produces ``q`` only** — Coulomb energy via ``pair:coulomb`` on ``Potentials``.
 - Kernels: ``DiagonalHardnessKernel``, ``ShieldedCoulombKernel`` (Ohno).
 - Nonbonded: **Potential terms own cutoffs**; ``Potentials`` only assembles them.
-  - ``ff.def_pairstyle("lj/cut", cutoff=12.0)`` → ``LJCutPotential``
-  - ``ff.def_pairstyle("coulomb", calculator="ewald"|"pme"|"p3m", smearing=…)``
-  - open → ``CoulombOpenPotential``; cell present → ``CoulombPeriodicPotential``
-  - neighbors: open all-pairs; periodic → molrs ``NeighborQuery``
-  - kernels reused: ``lj126_pair_energy``, ``CoulombPotential``, Ewald/PME/P3M calculators
-  - scales: ``ForceField.nonbonded_scaling`` (1–2/1–3/1–4)
-- Later: ACKS2 as separate solver type.
+- Later: ACKS2 as a separate solver type.
+
+### Units
+
+`from molix.units import units` — pint-style `molpy.UnitSystem`.
+Do not restate conversion floats.
 
 ### Status
 
-General Class-I and OPLS/GAFF are the **same** container type (specificity differs).
-IO stays in molpy.io (no `ForceField.from_xml`).
+Class-I and OPLS are subclasses of the same `ForceField` container
+(`ClassIForceField`, `OPLSForceField`). IO stays in molpy.io (no
+`ForceField.from_xml`).
 
-### Experiment ops (molexp × molhub × molmcp)
-
-Binding for the Class-I reproduction track:
+### Library and experiment boundaries
 
 | Layer | Owns |
 |-------|------|
-| **molexp** | `Workspace → Project → Experiment → Run`; metrics `t/k/s/v`; sourced `KnowledgeItem` |
-| **molhub** | Coordinates only: `dataset:espaloma/phalkethoh-mm-small@1` (models: run assets until `model:` coords exist) |
-| **molmcp molexp plane** | Scaffold + **knowledge** (`list_knowledge` / `write_knowledge` / `harvest_run` / `get_run_metrics`) |
-| **molnex scripts** | Science: `setup_class_i_protocol.py` → `espaloma_mm_protocol_train.py --workspace … --run-id …` |
+| **molexp** | `Workspace → Project → Experiment → Run`; exact training configuration, task scheduling, metrics, calibration, and evidence |
+| **molhub** | Versioned datasets and collections; parsing, target provenance, units, physical grouping, identity, and splits |
+| **molmcp molexp plane** | Scaffold + **knowledge** |
+| **molnex** | Dataset-agnostic model, loss, packed-collation, optimization, and export primitives |
 
-Norms:
-
-1. Register experiment/run via setup (idempotent; **refreshes** parameter_space).
-2. Train under `Run.start()` with `MetricsWriter` + `mark_succeeded` + `harvest_run(Finding)`.
-3. Knowledge is **sourced** (`SourceRef` required) — no free Notes for protocol claims.
-4. Dataset bytes via molhub convert/cache; coordinate is the audit handle, not the blob path.
-
-Operator workspace: `…/workspaces/mm-param-learning`, experiment `class-i-full-energy-mini`.
+MolNex must never import a concrete MolHub dataset adapter or hard-code a
+dataset coordinate in its library API. A Molexp experiment resolves MolHub
+records and maps them into MolNex's generic sample schema.
 
 ### Supersedes
 
-Composer / Parameterizer / IR bags as user path; glue free functions; `model.fill`.
+Composer / Parameterizer / IR bags as user path; glue free functions; `model.fill`;
+`ForceField.to_molpy()` (the container **is** molpy.ForceField);
+`ForceField.class_i()` / `ForceField.opls()` (use `ClassIForceField` /
+`OPLSForceField`);
+SMARTS induction via a parallel ForceField type (write molpy types instead);
+`molix.units` float constants (`EV_PER_AMU_A2_FS2`, `KB_AMU_A_FS`, …).

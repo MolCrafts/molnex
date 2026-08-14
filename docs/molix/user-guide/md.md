@@ -1,44 +1,63 @@
 # Molecular Dynamics
 
-`molix.md` is the in-process MD engine: BAOAB Langevin velocity-Verlet over
-any trained potential, compilable end to end. **`MD` is the entry point** —
-the lower layers (`ForceField`, `Integrator`, `MDRunner`) are the primitives
-it composes, and you reach for them directly only when you need a custom loop.
+`molix.md` is the in-process MD engine. **`MD` is a composer**, not a façade:
+each component is constructed on its own and attached.
 
 ## Quick start
 
 ```python
 import torch
-from molix.md import MD, MaxwellBoltzmann, PotentialForceField, TrajectoryHook
+from molix.md import (
+    MD,
+    MaxwellBoltzmann,
+    PotentialForceField,
+    TrajectoryHook,
+    VelocityVerletIntegrator,
+)
 
 force = PotentialForceField(potential, template)   # bind a potential to a system
-md = MD(force, mass=masses, dt=0.5, gamma=0.1, temperature=300.0,
-        dtype=torch.float64,
-        hooks=[TrajectoryHook("traj.pt", stride=10, numbers=Z)])
+# system["atoms"] holds pos, vel, mass (amu)
+md = (
+    MD(torch.float64)                              # MD-side dtype only
+    .set_forcefield(force)                         # force field owns its dtype
+    .set_integrator(VelocityVerletIntegrator(0.5))
+    .set_hooks([TrajectoryHook("traj.pt", stride=10, numbers=Z)])
+)
 
-vel = MaxwellBoltzmann(masses).sample(300.0, seed=0)
-final = md.run(pos, vel, n_steps=100_000)          # -> MDState(pos, vel, forces, energy)
+MaxwellBoltzmann().sample(system, 300.0, seed=0)   # reads atoms.mass, writes atoms.vel
+final = md.run(system, n_steps=100_000)            # -> MDState; writes atoms.pos / vel
 ```
 
-Units are (amu, Å, fs); energy in amu·Å²/fs². Drive an eV/Å potential with
-`energy_scale=1 / molix.units.EV_PER_AMU_A2_FS2` on the force field.
+Units are (amu, Å, fs); energy in amu·Å²/fs². Convert with pint-style
+`molix.units.units`::
+
+    from molix.units import units
+    ev_to_md = (1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2").magnitude
+    kcal_to_md = (1.0 * units.kilocalorie_per_mole).to(
+        "amu * angstrom ** 2 / femtosecond ** 2"
+    ).magnitude
+
+Drive an eV/Å potential with `energy_scale=ev_to_md`. Drive a Class-I /
+LAMMPS `units real` (kcal/mol) potential with `energy_scale=kcal_to_md`.
 
 ## Two precisions, deliberately independent
 
-`MD(dtype=)` governs the **MD side only**: trajectory state, integrator step
-constants, mass. The potential's precision is a separate axis:
+`MD(dtype)` governs the **MD side only**: trajectory state and the
+integrator's step constants. The potential's precision is the force field's:
 
 ```python
-md = MD(force, mass=m, dt=0.5, dtype=torch.float64)  # fp64 trajectory ...
-md.set_potential_dtype(torch.float32)                # ... over fp32 inference
+force.to(dtype=torch.float32)                        # inference
+md = (
+    MD(torch.float64)                                # fp64 trajectory
+    .set_forcefield(force)
+    .set_integrator(VelocityVerletIntegrator(0.5))
+)
 ```
 
-This is what lets you study the MD process and the inference process
-separately — an fp64 trajectory over a quantized/fp32 model is a supported,
-meaningful configuration. At the component boundary the integrator casts the
-force field's output back into the state dtype, so the two precisions never
-silently promote mid-step. For mixed precision inside the model only, use
-`MD(autocast_dtype=torch.bfloat16)`.
+The integrator casts force output back into the state dtype at the component
+boundary, so the two precisions never silently promote mid-step. Mixed
+precision inside the model is the force field's job (wrap the callable /
+`torch.autocast` there), not an `MD` keyword.
 
 ## Choosing a force field
 
@@ -57,8 +76,8 @@ the list decides, into fixed-capacity buffers whose shapes never change, which
 is what lets the force path stay inside a CUDA graph across the whole
 trajectory. `skin=0, every=1, delay=0, check=True` is the accurate no-skin
 limit (rebuild whenever anything moved); `skin > 0` is the production setting.
-A frozen list for a fully compiled rollout goes through the integrator seam:
-`MD(ff, ..., integrator=LangevinVerletIntegrator(ff, ..., rebuild=False))`.
+A frozen list for a fully compiled rollout is constructed on the integrator:
+`VelocityVerletIntegrator(dt, rebuild=False)`.
 
 Migration: `MD(rebuild_every=)` and `NeighborListHook` are removed —
 the cadence lives on the list now.
@@ -68,15 +87,25 @@ force field, keep the rebuild eager:
 
 ```python
 from molix import Compiler
-from molix.md import MD, LennardJonesCutForceField, MaxwellBoltzmann, NeighborList
+from molix.md import (
+    MD,
+    LennardJonesCutForceField,
+    MaxwellBoltzmann,
+    NeighborList,
+    VelocityVerletIntegrator,
+)
 
 nl = NeighborList(cell=cell, cutoff=2.5 * sigma, positions=pos, skin=1.02)
 ff = LennardJonesCutForceField(epsilon=eps, sigma=sigma, neighbors=nl).to("cuda", torch.float64)
 ff = Compiler(cuda_graphs=True)(ff)          # or Compiler(fullgraph=True)
-md = MD(ff, mass=39.95, dt=4.0, gamma=0.0,   # γ=0 → NVE; the list owns the cadence
-        dtype=torch.float64, device="cuda")
-vel = MaxwellBoltzmann(39.95, n_atoms=len(pos)).sample(172.0, seed=1)
-state = md.run(pos, vel, n_steps=25_000)
+md = (
+    MD(torch.float64)
+    .set_forcefield(ff)
+    .set_integrator(VelocityVerletIntegrator(4.0))
+    .to("cuda")
+)
+MaxwellBoltzmann().sample(system, 172.0, seed=1)
+state = md.run(system, n_steps=25_000)
 ```
 
 See `benchmarks/verify_md_ljcut_nve.py` for the full melt-benchmark version
@@ -129,8 +158,11 @@ can refuse a chunking that would silently skip it.
 
 ## Custom integrators
 
-`MD(integrator=...)` accepts any constructed `Integrator` subclass. A
-conforming subclass implements `advance` (one eager step) and `rollout`
+`MD.set_integrator(...)` accepts any constructed `Integrator` subclass.
+NVE is `VelocityVerletIntegrator(dt)`. Langevin is
+`LangevinVerletIntegrator(dt, gamma=..., kbt=...)` with `gamma > 0`.
+Mass is `system["atoms", "mass"]` (`molix.schema.MASS_KEY`), bound at run.
+A conforming subclass implements `advance` (one eager step) and `rollout`
 (compile-friendly loop) and inherits `initial` / `advance_n`; override the
 `removed_dof` property if your scheme thermostats all 3N degrees of freedom
 (the temperature estimator reads it — Langevin reports 0, NVE 3).

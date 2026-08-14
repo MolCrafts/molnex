@@ -30,10 +30,11 @@ dependencies = [
   "tensordict",
   "cuequivariance",
   "cuequivariance-torch",
+  # Needs UnitSystem k_B + openmm preset (current 0.13 line).
   "molcrafts-molpy>=0.13.0",
   "python-multipart",
-  "molcrafts-mollog>=1.0.0",
-  "molcrafts-molcfg>=1.0.0",
+  "molcrafts-mollog>=1.3.0",
+  "molcrafts-molcfg>=1.5.0",
   "numpy",
   "opt_einsum_fx",
   "pydantic",

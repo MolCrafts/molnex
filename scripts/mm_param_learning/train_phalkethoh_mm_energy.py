@@ -19,10 +19,9 @@ from collections import defaultdict
 from pathlib import Path
 
 import torch
+from molhub.dataset import PhalkethohMMDataset
 from tensordict import TensorDict
 
-from molhub.dataset import PhalkethohMMDataset
-from molhub.dataset.meta import Targets
 from molix.core.losses.molecular import center_by_group
 from molpot.composition.mm_heads import BondParamHead
 from molpot.forcefield import ClassicalIMM, ForceField
@@ -33,7 +32,7 @@ def _group_frames(ds: PhalkethohMMDataset, max_mols: int, max_confs: int) -> dic
     by: dict[str, list] = defaultdict(list)
     for i in range(len(ds)):
         fr = ds[i]
-        mid = str(Targets(fr)["molecule_id"])
+        mid = str(fr.meta["molecule_id"])
         if mid not in by and len(by) >= max_mols:
             continue
         if len(by[mid]) < max_confs:
@@ -84,9 +83,7 @@ def _run_epoch(
                 batch = _to_batch(fr)
                 e = pots.calc_energy(batch, pos=batch["atoms", "pos"]).reshape(())
                 preds.append(e)
-                refs.append(
-                    torch.tensor(float(Targets(fr)["mm_energy"]), dtype=torch.float64)
-                )
+                refs.append(torch.tensor(float(fr.meta["mm_energy"]), dtype=torch.float64))
                 groups.append(mid_map[mid])
     pred = torch.stack(preds)
     ref = torch.stack(refs)

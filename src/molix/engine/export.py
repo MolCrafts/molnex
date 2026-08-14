@@ -12,7 +12,8 @@ model-agnostic:
 * ``species``       — sorted atomic numbers ``Z`` the model supports
 * ``model_dtype``   — ``"float32"`` / ``"float64"``; the pair style casts positions to this
 * ``inputs`` / ``outputs`` — the flat tensor names/order (provenance + future schema checks)
-* ``supports_pbc`` / ``supports_virial`` — capability flags (reserved; this cut is non-periodic)
+* ``supports_pbc`` / ``supports_virial`` — capability flags read by ``pair_style molnex``
+  (ghost graph + reverse-comm; optional 6-component virial output)
 * ``adapter``       — the registered adapter name used at export time
 
 Because MD changes the edge count ``E`` (and possibly atom count ``N``) every step,
@@ -108,8 +109,11 @@ def export_for_lammps(
         dtype: Compute dtype for the exported model (default: the model's current
             parameter dtype, falling back to ``float32``).
         name: Artifact basename.
-        supports_pbc: Reserved capability flag (this cut is non-periodic).
-        supports_virial: Reserved capability flag (model emits a 3rd virial output).
+        supports_pbc: If true, the pair style builds the graph over local +
+            ghost atoms and reverse-communicates ghost forces. Incompatible
+            with ``cuda_graph``.
+        supports_virial: If true, the model must emit a third ``(6,)`` virial
+            tensor ``(xx, yy, zz, xy, xz, yz)`` in the model energy unit.
         cuda_graph: Export a **fixed-shape** ``.pt2`` (``dynamic_shapes=None``) that
             the C++ side loads ``run_single_threaded`` and wraps in a CUDA graph
             (PyTorch #158834; ~2.9x on small systems). Requires ``n_atoms`` and

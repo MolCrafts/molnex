@@ -59,5 +59,7 @@ class TestForceFieldCompiler:
         )
         assert spec.metadata.get("type_systems") == {"bond": ["C-C"]}
 
-    def test_registry_lists_openmm(self):
-        assert "openmm" in BackendAdapter.names()
+    def test_registry_lists_openmm_and_lammps(self):
+        names = BackendAdapter.names()
+        assert "openmm" in names
+        assert "lammps" in names

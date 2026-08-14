@@ -30,11 +30,10 @@ import torch
 
 def main() -> int:
     from molix.ff_export import (
+        ConventionTable,
         ForceFieldCompiler,
         TranslationCase,
         UnsupportedTermError,
-        scale_amber_vn,
-        scale_bond_k,
     )
     from molpot.ir import (
         BondBag,
@@ -46,11 +45,12 @@ def main() -> int:
         ProperTorsionBag,
     )
 
+    table = ConventionTable.default_openmm()
     # --- 1. Bond k golden ---
-    assert scale_bond_k(100.0) == 41840.0, f"bond k golden: {scale_bond_k(100.0)}"
+    assert table.scale("bond_harmonic", "k", 100.0) == 41840.0
 
     # --- 2. Torsion Vn=2 → k_omm=4.184 ---
-    assert scale_amber_vn(2.0) == 4.184, f"Vn golden: {scale_amber_vn(2.0)}"
+    assert table.scale_amber_vn(2.0) == 4.184
 
     ir = PotentialIR(
         bonds=BondBag(

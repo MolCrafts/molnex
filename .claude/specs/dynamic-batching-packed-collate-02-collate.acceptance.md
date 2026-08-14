@@ -1,5 +1,7 @@
 ---
 slug: dynamic-batching-packed-collate-02-collate
+status: closed
+closed: 2026-08-13
 criteria:
   - id: ac-001
     summary: collate_packed equals collate_molecules on multi-sample batches with edges

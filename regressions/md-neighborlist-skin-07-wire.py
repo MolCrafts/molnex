@@ -39,17 +39,20 @@ policy moved the physics.
 from __future__ import annotations
 
 import torch
+from tensordict import TensorDict
 
 import molix.md
 from molix.md import (
-    EV_PER_AMU_A2_FS2,
     MD,
     HarmonicForceField,
-    LangevinVerletIntegrator,
     LennardJonesCutForceField,
     MaxwellBoltzmann,
     NeighborList,
+    VelocityVerletIntegrator,
 )
+from molix.units import units
+
+_E_EV_TO_MD = (1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2").magnitude
 
 N_STEPS = 100
 EXPECTED_REBUILDS = {0.0: 100, 1.0: 6}
@@ -76,18 +79,27 @@ def _argon_arm(skin: float, *, frozen: bool = False) -> tuple[NeighborList, floa
     """Run 100 NVE steps through the public MD path; return (list, E_tot)."""
     pos, cell = _lattice()
     nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=skin, capacity_factor=2.5)
-    ff = LennardJonesCutForceField(epsilon=0.0103 / EV_PER_AMU_A2_FS2, sigma=2.5, neighbors=nl).to(
+    ff = LennardJonesCutForceField(epsilon=0.0103 * _E_EV_TO_MD, sigma=2.5, neighbors=nl).to(
         torch.float64
     )
-    if frozen:
-        integrator = LangevinVerletIntegrator(
-            ff, dt=4.0, gamma=0.0, kbt=0.0, mass=39.95, rebuild=False
-        )
-        md = MD(ff, mass=39.95, integrator=integrator, dtype=torch.float64)
-    else:
-        md = MD(ff, mass=39.95, dt=4.0, gamma=0.0, dtype=torch.float64)
-    vel = MaxwellBoltzmann(39.95, n_atoms=pos.shape[0]).sample(300.0, seed=0)
-    state = md.run(pos, vel, N_STEPS)
+    ig = VelocityVerletIntegrator(4.0, rebuild=False if frozen else None)
+    md = MD(torch.float64).set_forcefield(ff).set_integrator(ig)
+    n = int(pos.shape[0])
+    atoms = TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": pos,
+                    "vel": torch.zeros_like(pos),
+                    "mass": torch.full((n,), 39.95, dtype=pos.dtype),
+                },
+                batch_size=[n],
+            )
+        },
+        batch_size=[],
+    )
+    MaxwellBoltzmann().sample(atoms, 300.0, seed=0)
+    state = md.run(atoms, N_STEPS)
     kinetic = 0.5 * 39.95 * (state.vel * state.vel).sum()
     return nl, float(state.energy + kinetic)
 
@@ -96,12 +108,16 @@ def main() -> int:
     print("Wiring (derived switch, frozen route, removed owners)")
     pos, cell = _lattice()
     nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=1.0, capacity_factor=2.5)
-    ff = LennardJonesCutForceField(epsilon=0.0103 / EV_PER_AMU_A2_FS2, sigma=2.5, neighbors=nl).to(
+    ff = LennardJonesCutForceField(epsilon=0.0103 * _E_EV_TO_MD, sigma=2.5, neighbors=nl).to(
         torch.float64
     )
-    md = MD(ff, mass=39.95, dt=4.0, gamma=0.0, dtype=torch.float64)
+    md = MD(torch.float64).set_forcefield(ff).set_integrator(VelocityVerletIntegrator(4.0))
     _check("derived.lj_cut_asks_the_policy", md.integrator.rebuild is True)
-    harmonic = MD(HarmonicForceField(1.0), mass=1.0, dt=0.01, dtype=torch.float64)
+    harmonic = (
+        MD(torch.float64)
+        .set_forcefield(HarmonicForceField(1.0))
+        .set_integrator(VelocityVerletIntegrator(0.01))
+    )
     _check("derived.listless_ff_never_asks", harmonic.integrator.rebuild is False)
 
     frozen_nl, _ = _argon_arm(1.0, frozen=True)
@@ -112,7 +128,7 @@ def main() -> int:
     )
 
     try:
-        MD(HarmonicForceField(1.0), mass=1.0, dt=0.01, rebuild_every=1)
+        MD(torch.float64, rebuild_every=1)  # type: ignore[call-arg]
         _check("removed.rebuild_every_kwarg", False, "did not raise")
     except TypeError:
         _check("removed.rebuild_every_kwarg", True)

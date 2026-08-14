@@ -50,23 +50,25 @@ class NeighborListBuilder:
         atom_batch: torch.Tensor,
         cutoff: float | None,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        n = pos.shape[0]
         device = pos.device
-        idx_i = torch.arange(n, device=device).unsqueeze(1).expand(n, n)
-        idx_j = torch.arange(n, device=device).unsqueeze(0).expand(n, n)
-        upper = idx_i < idx_j
-        same = atom_batch.unsqueeze(0) == atom_batch.unsqueeze(1)
-        pair_mask = upper & same
-        diff = pos.unsqueeze(1) - pos.unsqueeze(0)
-        r = torch.linalg.norm(diff, dim=-1)
-        if cutoff is not None:
-            pair_mask = pair_mask & (r < cutoff) & (r > 0)
-        ii = idx_i[pair_mask]
-        jj = idx_j[pair_mask]
-        if ii.numel() == 0:
+        num_graphs = int(atom_batch[-1].item()) + 1
+        counts = torch.bincount(atom_batch, minlength=num_graphs)
+        max_atoms = int(counts.max().item())
+        if max_atoms < 2:
             return None
+        # Generate a padded half-list per graph. Memory scales as B*max(N_g)^2,
+        # not sum(N_g)^2, so heterogeneous packed batches remain practical.
+        local = torch.triu_indices(max_atoms, max_atoms, offset=1, device=device)
+        offsets = torch.cumsum(counts, dim=0) - counts
+        valid = local[1].unsqueeze(0) < counts.unsqueeze(1)
+        ii = (offsets.unsqueeze(1) + local[0].unsqueeze(0))[valid]
+        jj = (offsets.unsqueeze(1) + local[1].unsqueeze(0))[valid]
         edge_index = torch.stack([ii, jj], dim=1)
-        dist = r[pair_mask].clamp(min=1e-12)
+        dist = torch.linalg.norm(pos[ii] - pos[jj], dim=-1).clamp(min=1e-12)
+        if cutoff is not None:
+            within = (dist < cutoff) & (dist > 0)
+            edge_index = edge_index[within]
+            dist = dist[within]
         return edge_index, dist
 
     def _periodic(

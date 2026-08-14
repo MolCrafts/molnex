@@ -61,9 +61,7 @@ class ElectronegativityEqualization:
         if chi.shape[0] != problem.atom_batch.shape[0]:
             raise ValueError("chi/eta length must match number of atoms")
 
-        dense_chi, dense_eta, dense_pos, atom_mask, counts = self._pack(
-            chi, eta, problem
-        )
+        dense_chi, dense_eta, dense_pos, atom_mask, counts = self._pack(chi, eta, problem)
         a = self.kernel.assemble(
             eta=eta,
             dense_eta=dense_eta,
@@ -98,14 +96,9 @@ class ElectronegativityEqualization:
         offsets = torch.zeros(b, dtype=torch.long, device=batch.device)
         if b > 1:
             offsets[1:] = counts.cumsum(0)[:-1]
-        # relative index within molecule
-        # build by scanning — O(N)
-        rel = torch.empty_like(batch)
-        cursor = torch.zeros(b, dtype=torch.long, device=batch.device)
-        for i in range(batch.shape[0]):
-            g = int(batch[i].item())
-            rel[i] = cursor[g]
-            cursor[g] += 1
+        # Packed batches keep each graph contiguous, so relative atom indices
+        # are one vectorized subtraction (no per-atom Python/device sync).
+        rel = torch.arange(batch.shape[0], device=batch.device) - offsets[batch]
 
         dense_chi = torch.zeros(b, n_max, dtype=chi.dtype, device=chi.device)
         dense_eta = torch.zeros(b, n_max, dtype=eta.dtype, device=eta.device)
@@ -134,6 +127,10 @@ class ElectronegativityEqualization:
         # M = [[A, 1], [1^T, 0]]
         m = torch.zeros(b, n + 1, n + 1, device=device, dtype=dtype)
         m[:, :n, :n] = a
+        # Padding variables are disconnected from the physical KKT system.
+        # Pin them with an identity diagonal so shorter graphs remain
+        # nonsingular inside the shared dense solve.
+        m[:, :n, :n] += torch.diag_embed((~atom_mask).to(dtype=dtype))
         m[:, :n, n] = ones
         m[:, n, :n] = ones
         # rhs = [-χ, Q]
@@ -157,10 +154,8 @@ class ElectronegativityEqualization:
         counts: torch.Tensor,
     ) -> torch.Tensor:
         b, n_max = q_dense.shape
-        rel = torch.empty_like(atom_batch)
-        cursor = torch.zeros(b, dtype=torch.long, device=atom_batch.device)
-        for i in range(atom_batch.shape[0]):
-            g = int(atom_batch[i].item())
-            rel[i] = cursor[g]
-            cursor[g] += 1
+        offsets = torch.zeros(b, dtype=torch.long, device=atom_batch.device)
+        if b > 1:
+            offsets[1:] = counts.cumsum(0)[:-1]
+        rel = torch.arange(atom_batch.shape[0], device=atom_batch.device) - offsets[atom_batch]
         return q_dense[atom_batch, rel]

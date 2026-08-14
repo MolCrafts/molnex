@@ -153,6 +153,8 @@ class ProperTorsionPeriodic(BasePotential):
         pos = kwargs.get("pos")
         proper_index = kwargs.get("proper_index")
         proper_types = kwargs.get("proper_types")
+        term_batch = kwargs.get("term_batch")
+        num_graphs = kwargs.get("num_graphs")
 
         if data is not None and isinstance(data, dict):
             if pos is None:
@@ -188,7 +190,12 @@ class ProperTorsionPeriodic(BasePotential):
         # Broadcast: phi [N, 1], n [1, n_terms] → [N, n_terms]
         arg = n.unsqueeze(0) * phi.unsqueeze(1) - phase_t
         term = (k_t / s_t.unsqueeze(1)) * (1.0 + torch.cos(arg))
-        return term.sum()
+        energy_per_proper = term.sum(dim=1)
+        if term_batch is not None:
+            energy = energy_per_proper.new_zeros(int(num_graphs))
+            energy.index_add_(0, term_batch.long(), energy_per_proper)
+            return energy
+        return energy_per_proper.sum()
 
     def __repr__(self) -> str:
         n_types, n_terms = self.k.shape

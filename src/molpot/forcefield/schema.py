@@ -147,9 +147,7 @@ class PotentialMeta:
             name="coulomb",
             index_arity=2,
             energy_formula="ke * qi*qj/r with 1-2/1-3/1-4 scales",
-            params=(
-                ParamSpec("q", "[n_atoms]", "e", "partial charges on atoms"),
-            ),
+            params=(ParamSpec("q", "[n_atoms]", "e", "partial charges on atoms"),),
         ),
     }
 

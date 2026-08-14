@@ -1,6 +1,8 @@
 ---
 title: pair_style molnex — AOTI force-export wall + TorchScript route forward
-status: investigation-complete
+status: closed
+closed: 2026-08-13
+resolution: investigation-complete
 chain: lammps-pair-molnex
 created: 2026-06-23
 ---

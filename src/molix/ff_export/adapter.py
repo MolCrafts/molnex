@@ -14,8 +14,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+import torch
+
 from molix.ff_export.force_spec import ForceSpec
-from molpot.ir import PotentialIR
+from molpot.ir import NonbondedScaling, PotentialIR
 
 __all__ = ["BackendAdapter"]
 
@@ -48,6 +50,30 @@ class BackendAdapter(ABC):
     def names(cls) -> tuple[str, ...]:
         """All registered adapter names."""
         return tuple(sorted(cls._registry))
+
+    @staticmethod
+    def as_floats(t: torch.Tensor) -> list[float]:
+        """Flatten ``t`` to a Python float list (CPU, detached)."""
+        return [float(x) for x in t.detach().cpu().reshape(-1).tolist()]
+
+    @staticmethod
+    def as_ints(t: torch.Tensor) -> list[int]:
+        """Flatten ``t`` to a Python int list (CPU, detached)."""
+        return [int(x) for x in t.detach().cpu().reshape(-1).tolist()]
+
+    @staticmethod
+    def scaling_dict(scaling: NonbondedScaling | None) -> dict[str, float] | None:
+        """Serialize 1–2 / 1–3 / 1–4 nonbonded scales, or ``None``."""
+        if scaling is None:
+            return None
+        return {
+            "scale_q_12": float(scaling.scale_q_12),
+            "scale_q_13": float(scaling.scale_q_13),
+            "scale_q_14": float(scaling.scale_q_14),
+            "scale_lj_12": float(scaling.scale_lj_12),
+            "scale_lj_13": float(scaling.scale_lj_13),
+            "scale_lj_14": float(scaling.scale_lj_14),
+        }
 
     @abstractmethod
     def translate(

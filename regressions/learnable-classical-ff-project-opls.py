@@ -60,11 +60,11 @@ class FakeEncoder(nn.Module):
 
 
 def main() -> int:
-    from molpot.forcefield import ClassicalIMM, ForceField
+    from molpot.forcefield import ClassicalIMM, ClassIForceField, ForceField
 
     model = ClassicalIMM(
         FakeEncoder(),
-        forcefield=ForceField.class_i(dihedral="fourier"),
+        forcefield=ClassIForceField(),
         bond_head=_ConstBond(),
         proper_head=_OplsPhasesProper(),
     )
