@@ -26,6 +26,14 @@
 
 ::: molix.data.tasks
 
+## Storage
+
+::: molix.store
+
+::: molix.store.cache
+
+::: molix.store.dataset
+
 ## Datasets
 
 ::: molix.datasets

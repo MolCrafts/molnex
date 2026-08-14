@@ -1,11 +1,12 @@
-"""Shared fixtures for the ``molix.data`` unit tests.
+"""Shared fixtures for the ``molix`` unit tests.
 
 Currently holds one builder: the degenerate ``n_edges == n_atoms``
-geometry used by ``test_cache.py``, ``test_collate_packed.py`` and
-``test_dataset.py`` to pin the packed-cache bucket-identity contract.
-The three modules assert three consequences of the *same* contract, so
-the geometry lives here rather than being copied (and drifting) three
-times.
+geometry used by ``test_store/test_cache.py``,
+``test_store/test_dataset.py`` and ``test_data/test_collate_packed.py``
+to pin the packed-cache bucket-identity contract. The three modules
+assert three consequences of the *same* contract and now live in two
+different sub-packages, so the geometry lives at their nearest common
+ancestor rather than being copied (and drifting) three times.
 """
 
 from __future__ import annotations

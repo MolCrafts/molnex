@@ -277,6 +277,14 @@ class ProjectedInternalHessianLoss(nn.Module):
     reference (``target_kind="hq_ref"``). Diagonal mode does **not** penalize
     off-diagonal (Class-II) couplings toward zero.
 
+    Layout: ``H_x`` and every ``B`` row use the flat Cartesian index
+    ``i = 3a + c`` for atom ``a`` and component ``c ∈ {x, y, z}`` — i.e.
+    ``x0, y0, z0, x1, …`` — which is the layout ``graphs.hessian`` ``(3N, 3N)``
+    carries through the batch. This ordering is the contract between the
+    Hessian producer (:class:`molpot.derivation.HessianDerivation`) and this
+    consumer; a transposed or atom-major layout silently yields wrong force
+    constants.
+
     Units: ``H_x`` / ``H_q`` match the internal coordinate of each ``B`` row —
     kcal mol⁻¹ Å⁻² (bonds) or kcal mol⁻¹ rad⁻² (angles). Force-constant
     targets use the same units. Cartesian ``H_x`` is never flattened.

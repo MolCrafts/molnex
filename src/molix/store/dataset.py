@@ -1,4 +1,4 @@
-"""Dataset readers over :class:`~molix.data.cache.PackedCache` files.
+"""Dataset readers over :class:`~molix.store.cache.PackedCache` files.
 
 Two concrete implementations, differing only in how the underlying
 ``torch.save`` file is loaded:
@@ -33,7 +33,7 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 
-from molix.data.cache import PackedCache
+from molix.store.cache import PackedCache
 
 __all__ = [
     "BaseDataset",
@@ -46,7 +46,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class PackedView:
-    """Read-only handle onto a :class:`~molix.data.cache.PackedCache` payload.
+    """Read-only handle onto a :class:`~molix.store.cache.PackedCache` payload.
 
     Exposes exactly what the packed-aware collate fast path
     (:func:`molix.data.collate.collate_packed`) needs — the packed payload
@@ -203,7 +203,7 @@ def _reject_misfiled_edges(payload: Mapping[str, Any], sink: Path | str) -> None
 class _CacheBacked(BaseDataset):
     """Shared implementation: load a cache file, expose samples + task_states.
 
-    The cache is in packed layout (see :func:`molix.data.cache._pack_samples`)
+    The cache is in packed layout (see :func:`molix.store.cache._pack_samples`)
     — a fixed number of big concat tensors plus cumsum pointers. ``__getitem__``
     reconstructs a sample dict on the fly by slicing into those tensors, so the
     per-item cost is O(n_keys) and uses views (no storage copy when ``mmap=True``).
@@ -364,7 +364,7 @@ class MmapDataset(_CacheBacked):
 
     Args:
         sink: Cache path, or an existing
-            :class:`~molix.data.cache.PackedCache`, normally produced by
+            :class:`~molix.store.cache.PackedCache`, normally produced by
             :meth:`PipelineSpec.cache <molix.data.pipeline.PipelineSpec.cache>`.
     """
 
@@ -380,7 +380,7 @@ class CachedDataset(_CacheBacked):
 
     Args:
         sink: Cache path, or an existing
-            :class:`~molix.data.cache.PackedCache`, normally produced by
+            :class:`~molix.store.cache.PackedCache`, normally produced by
             :meth:`PipelineSpec.cache <molix.data.pipeline.PipelineSpec.cache>`.
     """
 

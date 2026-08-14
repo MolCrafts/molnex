@@ -13,8 +13,6 @@ from pathlib import Path
 import pytest
 import torch
 
-from molix.data.cache import PackedCache, _flatten
-from molix.data.dataset import CachedDataset
 from molix.profiler.dataset import (
     DatasetProfiler,
     DatasetResult,
@@ -22,6 +20,8 @@ from molix.profiler.dataset import (
     TargetStat,
     _flatten_leaves,
 )
+from molix.store.cache import PackedCache, _flatten
+from molix.store.dataset import CachedDataset
 
 # ---------------------------------------------------------------------------
 # Literal fixtures — no RNG, so every expectation below is analytic
@@ -222,7 +222,7 @@ class TestDatasetResult:
 
 
 def test_flatten_leaves_does_not_raise_on_reserved_key():
-    """Deliberate divergence from :func:`molix.data.cache._flatten`, which validates.
+    """Deliberate divergence from :func:`molix.store.cache._flatten`, which validates.
 
     The packing-time flattener rejects a sample key colliding with a reserved
     packed-cache key; the profiler's read-only walker must survive any malformed

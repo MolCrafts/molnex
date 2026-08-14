@@ -16,8 +16,8 @@ pairwise-nonbonded functional form of OPLS / AMBER / CHARMM).
 Single responsibility: the second derivative of a potential energy surface with
 respect to atomic positions, in the flat Cartesian layout ``i = 3a + c`` for
 atom ``a`` and component ``c ∈ {x, y, z}`` (``x0, y0, z0, x1, …``) that
-:class:`molix.data.pes_bundle.PesBundle` fixes for ``graphs.hessian`` and that
-:class:`molix.core.losses.ProjectedInternalHessianLoss` consumes. Throughout,
+:class:`molix.core.losses.ProjectedInternalHessianLoss` documents for
+``graphs.hessian`` and consumes. Throughout,
 ``N`` is the number of atoms, ``B`` the number of molecules in a batch, and a
 "graph" is one molecule inside a packed (concatenated) batch.
 

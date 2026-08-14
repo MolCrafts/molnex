@@ -24,8 +24,9 @@ The wiring is source → `PipelineSpec.cache` → dataset → split → `DataMod
 
 ```python
 from molix.data import (
-    AtomicDress, DataModule, NeighborList, Pipeline, SubsetDataset, SubsetSource,
+    AtomicDress, DataModule, NeighborList, Pipeline, SubsetSource,
 )
+from molix.store import SubsetDataset
 from molix.datasets import QM9Source
 
 source = QM9Source(root="./data/qm9", total=1000)

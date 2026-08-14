@@ -364,8 +364,8 @@ the fields laid out, and what do the labels look like.
 ```python
 import torch
 
-from molix.data.cache import PackedCache
-from molix.data.dataset import CachedDataset
+from molix.store.cache import PackedCache
+from molix.store.dataset import CachedDataset
 from molix.profiler import DatasetProfiler
 
 

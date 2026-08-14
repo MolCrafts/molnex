@@ -188,7 +188,7 @@ class MolRecSource:
 
         Appends ``:total=<n>`` when a subset was requested. The ``:teacher=``
         component is the only lever needed for per-teacher
-        :class:`~molix.data.cache.PackedCache` invalidation: ``source_id`` is
+        :class:`~molix.store.cache.PackedCache` invalidation: ``source_id`` is
         the root of the pipeline cache-key chain.
         """
         size = sum(f.stat().st_size for f in self.record_path.rglob("*") if f.is_file())

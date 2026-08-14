@@ -582,7 +582,7 @@ class TestCacheDDP:
         monkeypatch.setenv("RANK", "1")
         spec = Pipeline("p").add(_Tag()).build()
         src = _FakeSource("s", _samples(1))
-        import molix.data.cache as cache_mod
+        import molix.store.cache as cache_mod
 
         orig_wait = cache_mod.PackedCache.wait_until_ready
 

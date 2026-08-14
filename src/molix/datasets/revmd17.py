@@ -12,7 +12,8 @@ benchmark used in the Allegro paper (Musaelian et al. 2023).
 
 Usage::
 
-    from molix.data import Pipeline, NeighborList, MmapDataset
+    from molix.data import Pipeline, NeighborList
+    from molix.store import MmapDataset
     from molix.datasets import RevMD17Source
 
     source = RevMD17Source(data_dir, molecule="aspirin")

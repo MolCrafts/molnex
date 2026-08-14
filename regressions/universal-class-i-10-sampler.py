@@ -60,7 +60,8 @@ from pathlib import Path
 
 import torch
 
-from molix.data import MmapDataset, PackedCache, TaskMixtureBatchSampler
+from molix.data import TaskMixtureBatchSampler
+from molix.store import MmapDataset, PackedCache
 
 # ---------------------------------------------------------------------------
 # Fixture tables (see module docstring)

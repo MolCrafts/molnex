@@ -38,10 +38,10 @@ from torch.utils.data import BatchSampler, Dataset, RandomSampler
 
 from molix.core.seed import make_generator
 from molix.data import TokenBudgetPacker
-from molix.data.cache import PackedCache
 from molix.data.datamodule import DataModule
-from molix.data.dataset import CachedDataset, MmapDataset, SubsetDataset
 from molix.data.sampler import TaskMixtureBatchSampler, TokenBudgetBatchSampler
+from molix.store.cache import PackedCache
+from molix.store.dataset import CachedDataset, MmapDataset, SubsetDataset
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -502,7 +502,7 @@ GOLDEN_SEED = 42
 #   sys.path.insert(0, '.')
 #   from tests.test_molix.test_data.test_sampler import _write_varied_cache
 #   from molix.core.seed import make_generator
-#   from molix.data.dataset import MmapDataset
+#   from molix.store.dataset import MmapDataset
 #   from molix.data.sampler import TokenBudgetBatchSampler as S
 #   print(torch.randperm(16, generator=make_generator(42)).tolist())
 #   with tempfile.TemporaryDirectory() as td:

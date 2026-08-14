@@ -30,9 +30,9 @@ from pathlib import Path
 from torch.utils.data import DataLoader, Dataset
 
 from molix.data.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
-from molix.data.dataset import CachedDataset
 from molix.data.pipeline import PipelineSpec
 from molix.profiler._utils import TimingStat, ValueStat, _fmt_table, batch_counts
+from molix.store.dataset import CachedDataset
 
 # ---------------------------------------------------------------------------
 # Result
@@ -211,7 +211,7 @@ class DataLoaderProfiler:
 
                 - :class:`~molix.profiler.mock.MockSource` or any
                   :class:`~molix.data.source.DataSource` — samples are prepared
-                  and wrapped in a :class:`~molix.data.dataset.CachedDataset`
+                  and wrapped in a :class:`~molix.store.dataset.CachedDataset`
                   automatically.
                 - A :class:`torch.utils.data.Dataset` — used directly.
                 - An existing :class:`torch.utils.data.DataLoader` — used as-is,
@@ -289,7 +289,7 @@ class DataLoaderProfiler:
         """
         import tempfile
 
-        from molix.data.cache import PackedCache
+        from molix.store.cache import PackedCache
 
         n = len(source)
         samples = [source[i] for i in range(n)]

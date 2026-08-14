@@ -2,9 +2,9 @@
 
 Answers *"what is in my data, and what does one sample cost?"* for any object
 yielding **flat sample dicts** (the raw-sample tier of the two-tier data
-contract): :class:`~molix.data.dataset.CachedDataset` /
-:class:`~molix.data.dataset.MmapDataset` /
-:class:`~molix.data.dataset.SubsetDataset`, a
+contract): :class:`~molix.store.dataset.CachedDataset` /
+:class:`~molix.store.dataset.MmapDataset` /
+:class:`~molix.store.dataset.SubsetDataset`, a
 :class:`~molix.profiler.mock.MockSource`, or a plain ``Sequence[dict]``.
 Complements :class:`~molix.profiler.dataloader.DataLoaderProfiler`, which
 times batch *throughput* rather than the data itself.
@@ -73,7 +73,7 @@ class FieldSpec:
     Attributes:
         key: Dotted key path into the flat sample, e.g. ``"targets.U0"``.
         axis: Packing axis — ``"atom"``, ``"edge"``, ``"graph"`` or
-            ``"scalar"``, matching :func:`molix.data.cache._infer_schema_across`.
+            ``"scalar"``, matching :func:`molix.store.cache._infer_schema_across`.
         dtype: ``torch.dtype`` of the tensor, or the Python type name for a
             non-tensor scalar.
         extra_shape: Trailing shape after the packing axis — ``(3,)`` for
@@ -110,7 +110,7 @@ class FieldSpec:
         """Infer the layout of one leaf from a single sampled record.
 
         Best-effort fallback for datasets with no packed view; classification
-        mirrors :func:`molix.data.cache._infer_schema_across` (leading
+        mirrors :func:`molix.store.cache._infer_schema_across` (leading
         dimension tracks atoms, else edges, else the field is per-graph) but
         sees one record instead of all of them — the caller reports
         ``fields_exact=False``.
@@ -365,7 +365,7 @@ class DatasetResult:
 def _flatten_leaves(sample: Mapping[str, object], prefix: str = "") -> dict[str, object]:
     """Flatten a nested sample dict to dotted keys, read-only and never raising.
 
-    Deliberately diverges from :func:`molix.data.cache._flatten`, the
+    Deliberately diverges from :func:`molix.store.cache._flatten`, the
     packing-time flattener: that one is a **validator** and raises
     :class:`ValueError` when a sample key collides with a reserved
     packed-cache key (``schema``, ``atom_ptr``, …). This walker performs

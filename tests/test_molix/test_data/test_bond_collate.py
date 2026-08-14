@@ -7,10 +7,10 @@ a topological energy must therefore equal the sum of per-molecule energies.
 
 import torch
 
-from molix.data.cache import PackedCache
 from molix.data.collate import collate_molecules, collate_packed
-from molix.data.dataset import MmapDataset
 from molix.datasets._bond_adapter import bond_index_from_columns
+from molix.store.cache import PackedCache
+from molix.store.dataset import MmapDataset
 from molpot.potentials.bonds import BondHarmonic
 
 

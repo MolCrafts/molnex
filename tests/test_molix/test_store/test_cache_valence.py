@@ -8,9 +8,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from molix.data.cache import PackedCache
 from molix.data.collate import collate_molecules, collate_packed
-from molix.data.dataset import MmapDataset
+from molix.store.cache import PackedCache
+from molix.store.dataset import MmapDataset
 
 
 def _mol(n_atoms: int, **families: dict) -> dict:

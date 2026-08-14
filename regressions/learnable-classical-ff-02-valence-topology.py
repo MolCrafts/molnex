@@ -28,14 +28,14 @@ import torch
 
 
 def main() -> int:
-    from molix.data.cache import PackedCache
     from molix.data.collate import collate_molecules, collate_packed
-    from molix.data.dataset import MmapDataset
     from molix.datasets._valence_columns import (
         stack_angle_index,
         stack_improper_index,
         stack_proper_index,
     )
+    from molix.store.cache import PackedCache
+    from molix.store.dataset import MmapDataset
 
     # --- Fixtures: m1 (3 atoms, 1 angle), m2 (4 atoms, 2 angles) ---
     m1 = {
@@ -141,8 +141,8 @@ def main() -> int:
         assert torch.equal(fast["bonds", "bond_index"], oracle["bonds", "bond_index"])
 
     # --- 7. No molpy as batch store in collate/cache ---
-    import molix.data.cache as cache_mod
     import molix.data.collate as collate_mod
+    import molix.store.cache as cache_mod
 
     for mod in (collate_mod, cache_mod):
         text = Path(mod.__file__).read_text()

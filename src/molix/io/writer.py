@@ -16,7 +16,7 @@ verbatim — only the Python API has been simplified:
 The chunk + shard sizes (``chunks=(1024,)``, ``shards=(1_048_576,)``)
 are deliberate: they collapse up to a million rows into a single
 physical file per parallel array, matching the inode-discipline
-posture of :class:`molix.data.cache.PackedCache` and defending
+posture of :class:`molix.store.cache.PackedCache` and defending
 against the per-record-subdirectory failure mode of
 ``TensorDict.memmap_``.
 """

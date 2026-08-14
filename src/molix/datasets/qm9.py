@@ -6,7 +6,8 @@ Reference:
 
 Usage pattern::
 
-    from molix.data import Pipeline, AtomicDress, NeighborList, MmapDataset, SubsetSource
+    from molix.data import Pipeline, AtomicDress, NeighborList, SubsetSource
+    from molix.store import MmapDataset, SubsetDataset
     from molix.datasets import QM9Source
 
     # 1. Workflow-side: build the pipeline cache once per run (DDP-aware).

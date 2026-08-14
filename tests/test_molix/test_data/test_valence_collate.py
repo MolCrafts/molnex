@@ -197,8 +197,8 @@ def test_collate_does_not_import_molpy_as_batch_store():
     """Topology leaves are plain torch tensors inside TensorDict (ac-004)."""
     from pathlib import Path
 
-    import molix.data.cache as cache_mod
     import molix.data.collate as collate_mod
+    import molix.store.cache as cache_mod
 
     for mod in (collate_mod, cache_mod):
         src = Path(mod.__file__).read_text()

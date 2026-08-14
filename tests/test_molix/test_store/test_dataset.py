@@ -13,14 +13,14 @@ from pathlib import Path
 import pytest
 import torch
 
-from molix.data.cache import PackedCache
-from molix.data.dataset import (
+from molix.store.cache import PackedCache
+from molix.store.dataset import (
     BaseDataset,
     CachedDataset,
     MmapDataset,
     SubsetDataset,
 )
-from tests.test_molix.test_data.conftest import equal_count_samples
+from tests.test_molix.conftest import equal_count_samples
 
 # ---------------------------------------------------------------------------
 # Helpers

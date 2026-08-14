@@ -41,10 +41,10 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.data.cache import PackedCache
 from molix.data.collate import TargetSchema, collate_molecules
-from molix.data.dataset import CachedDataset, MmapDataset, SubsetDataset
-from tests.test_molix.test_data.conftest import equal_count_samples
+from molix.store.cache import PackedCache
+from molix.store.dataset import CachedDataset, MmapDataset, SubsetDataset
+from tests.test_molix.conftest import equal_count_samples
 
 # ---------------------------------------------------------------------------
 # Fixture sample builders
@@ -426,7 +426,7 @@ class TestCacheLayering:
 
     def test_cache_has_no_collate_imports(self):
         """No import line in cache.py references tensordict or TargetSchema."""
-        import molix.data.cache as cache_mod
+        import molix.store.cache as cache_mod
 
         source = Path(cache_mod.__file__).read_text()
         import_lines = [
@@ -653,7 +653,7 @@ class TestDataModulePickle:
         fn([0, 1])
         state = fn.__getstate__()
         # No state entry may hold a PackedView (the lazy field is dropped).
-        from molix.data.dataset import PackedView
+        from molix.store.dataset import PackedView
 
         assert not any(isinstance(v, PackedView) for v in state.values())
 

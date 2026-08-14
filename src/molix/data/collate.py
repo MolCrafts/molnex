@@ -14,7 +14,7 @@ import torch
 from tensordict import TensorDict
 
 if TYPE_CHECKING:
-    from molix.data.dataset import PackedView
+    from molix.store.dataset import PackedView
 
 # ---------------------------------------------------------------------------
 # Target schema
@@ -435,7 +435,7 @@ def collate_packed(
     oracle).
 
     Args:
-        view: A :class:`~molix.data.dataset.PackedView` onto the cache
+        view: A :class:`~molix.store.dataset.PackedView` onto the cache
             payload; ``view.map_indices`` resolves *indices* to packed
             rows.
         indices: Sample indices in the view's local coordinate. Must be

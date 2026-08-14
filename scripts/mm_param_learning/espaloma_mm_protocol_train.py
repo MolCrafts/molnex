@@ -103,7 +103,6 @@ from molix.core.steps import (
 )
 from molix.core.trainer import Trainer
 from molix.data import (
-    BaseDataset,
     DataModule,
     MoleculeCollator,
     TargetSchema,
@@ -116,6 +115,7 @@ from molix.hooks import (
     GradientBalanceHook,
     MetricsHook,
 )
+from molix.store import BaseDataset
 from molpot.charge import (
     AtomicChargeModel,
     ChiEtaHead,

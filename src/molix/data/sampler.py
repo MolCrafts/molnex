@@ -1,4 +1,4 @@
-"""Token-budget batch sampling over :class:`~molix.data.cache.PackedCache` pointers.
+"""Token-budget batch sampling over :class:`~molix.store.cache.PackedCache` pointers.
 
 Molecular samples vary widely in size (QM9 spans 3–29 atoms), so a fixed
 ``batch_size`` makes per-batch compute and memory swing with batch
@@ -34,7 +34,7 @@ from typing import Protocol, runtime_checkable
 import torch
 
 from molix.core.seed import make_generator
-from molix.data.dataset import BaseDataset
+from molix.store.dataset import BaseDataset
 
 __all__ = [
     "BatchSamplerSource",
@@ -167,9 +167,9 @@ class TokenBudgetBatchSampler:
     Args:
         dataset: A packed-cache-backed dataset exposing ``atom_counts`` /
             ``edge_counts`` ``(n_samples,)`` count vectors —
-            :class:`~molix.data.dataset.MmapDataset`,
-            :class:`~molix.data.dataset.CachedDataset`, or a
-            :class:`~molix.data.dataset.SubsetDataset` wrapping either.
+            :class:`~molix.store.dataset.MmapDataset`,
+            :class:`~molix.store.dataset.CachedDataset`, or a
+            :class:`~molix.store.dataset.SubsetDataset` wrapping either.
         max_atoms: Maximum total atom count per batch, or ``None``.
         max_edges: Maximum total edge count per batch, or ``None``.
             At least one budget is required; both apply simultaneously
@@ -353,9 +353,9 @@ class TaskMixtureBatchSampler:
     Args:
         dataset: A packed-cache-backed dataset exposing ``atom_counts`` /
             ``edge_counts`` ``(n_samples,)`` count vectors —
-            :class:`~molix.data.dataset.MmapDataset`,
-            :class:`~molix.data.dataset.CachedDataset`, or a
-            :class:`~molix.data.dataset.SubsetDataset` wrapping either.
+            :class:`~molix.store.dataset.MmapDataset`,
+            :class:`~molix.store.dataset.CachedDataset`, or a
+            :class:`~molix.store.dataset.SubsetDataset` wrapping either.
             Unit costs are pointer arithmetic over those vectors; no
             sample is ever unpacked.
         indices: The split's dataset indices, e.g. the train list from

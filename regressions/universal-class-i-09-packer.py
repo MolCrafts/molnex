@@ -58,7 +58,8 @@ from pathlib import Path
 
 import torch
 
-from molix.data import CachedDataset, DataModule, PackedCache, TokenBudgetPacker
+from molix.data import DataModule, TokenBudgetPacker
+from molix.store import CachedDataset, PackedCache
 
 # ---------------------------------------------------------------------------
 # Part A — hard-coded packing goldens

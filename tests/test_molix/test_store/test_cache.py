@@ -1,4 +1,4 @@
-"""Tests for :class:`molix.data.cache.PackedCache` — file IO + readiness + keys."""
+"""Tests for :class:`molix.store.cache.PackedCache` — file IO + readiness + keys."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 import torch
 
-from molix.data.cache import PackedCache
-from tests.test_molix.test_data.conftest import equal_count_samples
+from molix.store.cache import PackedCache
+from tests.test_molix.conftest import equal_count_samples
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -99,7 +99,7 @@ class TestSaveLoad:
         def boom(*_a, **_kw):
             raise RuntimeError("boom")
 
-        monkeypatch.setattr("molix.data.cache.torch.save", boom)
+        monkeypatch.setattr("molix.store.cache.torch.save", boom)
 
         with pytest.raises(RuntimeError, match="boom"):
             PackedCache(tmp_path / "x.pt").save(_samples(1))

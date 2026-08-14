@@ -4,7 +4,7 @@ A :class:`PipelineSpec` is a compiled, immutable DAG of :class:`Node`
 objects. Each node wraps a task and declares which dict keys it reads and
 writes. Edges are derived automatically from key dependencies. Every
 cacheable node materialises its output to an independent
-:class:`~molix.data.cache.PackedCache`, so changing a downstream task
+:class:`~molix.store.cache.PackedCache`, so changing a downstream task
 never recomputes upstream nodes.
 
 Typical usage::
@@ -33,8 +33,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from molix.data.cache import PackedCache
 from molix.data.task import BatchTask, DatasetTask, Runnable, SampleTask
+from molix.store.cache import PackedCache
 
 __all__ = ["Node", "Edge", "DAGCache", "PipelineSpec", "Pipeline"]
 
@@ -151,7 +151,7 @@ class Edge:
 class DAGCache:
     """Per-node cache collection produced by :meth:`PipelineSpec.cache`.
 
-    Maps each cacheable node name to its :class:`~molix.data.cache.PackedCache`
+    Maps each cacheable node name to its :class:`~molix.store.cache.PackedCache`
     file. The final node's cache is the authoritative pipeline output.
     """
 
@@ -176,10 +176,10 @@ class DAGCache:
         """Create a dataset reading from the final node's cache.
 
         Args:
-            mmap: If ``True`` return :class:`~molix.data.dataset.MmapDataset`,
-                otherwise :class:`~molix.data.dataset.CachedDataset`.
+            mmap: If ``True`` return :class:`~molix.store.dataset.MmapDataset`,
+                otherwise :class:`~molix.store.dataset.CachedDataset`.
         """
-        from molix.data.dataset import CachedDataset, MmapDataset
+        from molix.store.dataset import CachedDataset, MmapDataset
 
         return MmapDataset(self.final.sink) if mmap else CachedDataset(self.final.sink)
 
@@ -191,9 +191,9 @@ class DAGCache:
 
         Args:
             node_name: Name of the node whose cache to read.
-            mmap: If ``True`` return :class:`~molix.data.dataset.MmapDataset`.
+            mmap: If ``True`` return :class:`~molix.store.dataset.MmapDataset`.
         """
-        from molix.data.dataset import CachedDataset, MmapDataset
+        from molix.store.dataset import CachedDataset, MmapDataset
 
         if node_name not in self.node_caches:
             raise KeyError(
@@ -396,7 +396,7 @@ class PipelineSpec:
 
         On rank 0: for each cacheable node in topological order, compute its
         cache key, check for an existing cache, and rebuild if missing. Each
-        node writes an independent :class:`~molix.data.cache.PackedCache`.
+        node writes an independent :class:`~molix.store.cache.PackedCache`.
 
         On other ranks: poll each node's sink file in order until all are
         ready.

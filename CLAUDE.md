@@ -303,7 +303,7 @@ mutate the batch in place, writing `node_features` under `atoms` and
 
 ### Cache format
 
-The on-disk cache is `molix.data.cache.PackedCache` — **one** `.pt` file
+The on-disk cache is `molix.store.cache.PackedCache` — **one** `.pt` file
 per cache with concatenated per-atom / per-edge / per-graph tensors and
 `atom_ptr` / `edge_ptr` cumsum pointers. Loaded via `torch.load(mmap=True)`
 for zero-copy reads; each DataLoader worker shares the OS page cache.
@@ -313,7 +313,7 @@ for zero-copy reads; each DataLoader worker shares the OS page cache.
 sample (~1M files + ~260k dirs for QM9 130k molecules) — blows past HPC
 shared-fs inode budgets and destroys `rsync` / `tar` / `rm` performance.
 `PackedCache`'s single-file packed-bucket layout is strictly better for
-fixed-schema molecular datasets. See `src/molix/data/cache.py` module
+fixed-schema molecular datasets. See `src/molix/store/cache.py` module
 docstring for full rationale.
 
 ### Edge Convention (MUST follow everywhere)

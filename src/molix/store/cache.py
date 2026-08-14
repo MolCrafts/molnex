@@ -587,7 +587,7 @@ class _LazySampleView:
     """List-like view that lazily reconstructs sample dicts on indexing.
 
     Exists mainly for test compatibility; downstream readers like
-    :class:`molix.data.dataset.MmapDataset` call
+    :class:`molix.store.dataset.MmapDataset` call
     :meth:`PackedCache.unpack_sample` directly to avoid the
     method-dispatch indirection in tight loops.
     """

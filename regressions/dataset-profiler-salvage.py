@@ -88,10 +88,10 @@ from pathlib import Path
 import torch
 
 from molix import profiler as profiler_package
-from molix.data.cache import PackedCache
-from molix.data.dataset import CachedDataset
 from molix.profiler import DatasetProfiler, DatasetResult
 from molix.profiler import dataset as dataset_module
+from molix.store.cache import PackedCache
+from molix.store.dataset import CachedDataset
 
 # ---------------------------------------------------------------------------
 # The five samples, written out in full.
@@ -104,7 +104,7 @@ from molix.profiler import dataset as dataset_module
 #
 # The atom counts 3 / 4 / 5 / 6 / 2 are deliberately not monotone and the last
 # record's atom count (2) coincides with its edge count, which is exactly the
-# ambiguity `molix.data.cache._infer_schema_across` resolves by scanning all
+# ambiguity `molix.store.cache._infer_schema_across` resolves by scanning all
 # records: a single-record inference could classify `edge_index` as per-atom.
 # ---------------------------------------------------------------------------
 

@@ -18,9 +18,9 @@ from molix.data.collate import (
     TargetSchema,
     collate_packed,
 )
-from molix.data.dataset import BaseDataset
 from molix.data.pipeline import Node
 from molix.data.sampler import BatchSamplerSource, TokenBudgetBatchSampler
+from molix.store.dataset import BaseDataset
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -518,8 +518,8 @@ def _packed_capable(dataset: BaseDataset) -> bool:
     """Whether *dataset* can serve the packed-aware collate fast path.
 
     True when the dataset exposes a working ``packed_view()`` — i.e. it is
-    (or wraps) a :class:`~molix.data.cache.PackedCache`-backed dataset. A
-    :class:`~molix.data.dataset.SubsetDataset` over a non-packed dataset
+    (or wraps) a :class:`~molix.store.cache.PackedCache`-backed dataset. A
+    :class:`~molix.store.dataset.SubsetDataset` over a non-packed dataset
     has the method but raises :class:`AttributeError` when called, so we
     probe by calling it (cheap — wraps a payload reference, copies no
     tensors).
@@ -562,7 +562,7 @@ class _PackedCollateFn:
     post-collate contract as :class:`_CollateFn` — ``batch_nodes`` followed
     by :func:`~molix.core.steps.batch_to` with the captured ``ftype``.
 
-    The :class:`~molix.data.dataset.PackedView` is built lazily on first
+    The :class:`~molix.store.dataset.PackedView` is built lazily on first
     call and excluded from the pickled state (see :meth:`__getstate__`), so
     the mmap'd payload is re-opened per worker through the dataset
     reference rather than shipped as tensors across the process boundary.

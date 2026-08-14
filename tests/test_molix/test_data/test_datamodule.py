@@ -8,9 +8,9 @@ import pytest
 import torch
 from torch.utils.data import DataLoader
 
-from molix.data.cache import PackedCache
 from molix.data.datamodule import DataModule
-from molix.data.dataset import CachedDataset
+from molix.store.cache import PackedCache
+from molix.store.dataset import CachedDataset
 
 # ---------------------------------------------------------------------------
 # Helpers

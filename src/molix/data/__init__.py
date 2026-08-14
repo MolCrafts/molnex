@@ -6,19 +6,17 @@ Layering:
     pipeline — declarative container: what tasks to run, in what order, with
                what identity; plus ``.run`` / ``.cache`` / ``.cache_key``
                methods for execution and DDP-aware materialisation.
-    cache    — :class:`PackedCache`: short-lived, atomically-written scratch
-               file that stores the output of ``PipelineSpec.cache``.
-    dataset  — MmapDataset, CachedDataset, SubsetDataset: readers over
-               :class:`PackedCache` files.
+
+Storage lives in :mod:`molix.store` — ``PipelineSpec.cache`` writes a
+:class:`~molix.store.PackedCache` and hands back readers from
+:mod:`molix.store.dataset`.
 
 There is no free-function cache / execute / ddp surface — all orchestration
-lives on :class:`PipelineSpec` (and on :class:`PackedCache` for file IO).
+lives on :class:`PipelineSpec` (and on
+:class:`~molix.store.PackedCache` for file IO).
 """
 
 # Task hierarchy
-# Cache
-from molix.data.cache import PackedCache
-
 # Collation
 from molix.data.collate import (
     DEFAULT_TARGET_SCHEMA,
@@ -29,17 +27,7 @@ from molix.data.collate import (
 
 # DataModule
 from molix.data.datamodule import DataModule, DataModuleProtocol
-
-# Dataset classes
-from molix.data.dataset import (
-    BaseDataset,
-    CachedDataset,
-    MmapDataset,
-    PackedView,
-    SubsetDataset,
-)
 from molix.data.group_split import group_split_indices
-from molix.data.pes_bundle import PesBundle
 
 # Pipeline DSL
 from molix.data.pipeline import DAGCache, Edge, Node, Pipeline, PipelineSpec
@@ -99,13 +87,6 @@ __all__ = [
     "Node",
     "Pipeline",
     "PipelineSpec",
-    # Cache
-    "PackedCache",
-    # Dataset classes
-    "BaseDataset",
-    "CachedDataset",
-    "MmapDataset",
-    "SubsetDataset",
     # DataModule
     "DataModule",
     "DataModuleProtocol",
@@ -115,6 +96,5 @@ __all__ = [
     "TargetSchema",
     "DEFAULT_TARGET_SCHEMA",
     # Group splits
-    "PesBundle",
     "group_split_indices",
 ]
