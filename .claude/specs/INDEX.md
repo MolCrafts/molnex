@@ -9,6 +9,11 @@ must not be treated as authority for a new training submission.
 - [pinet-quantization-thermal-noise-02-md-driver](pinet-quantization-thermal-noise-02-md-driver.md) — in-process velocity-Verlet and Langevin MD driver; approved with acceptance work pending.
 - [cuet-force-doublebackward](cuet-force-doublebackward.md) — cuet equivariant Linear double-backward repair; in progress with acceptance work pending.
 - [mace-neighbor-graph-correctness](mace-neighbor-graph-correctness.md) — independent multi-image neighbor oracle; code complete with one acceptance criterion pending.
+- [molix-data-dissolution-01-store](molix-data-dissolution-01-store.md) — PackedCache + dataset readers → `molix.store`; delete PesBundle. [approved]
+- [molix-data-dissolution-02-batch](molix-data-dissolution-02-batch.md) — collate/sampler/DataModule/group_split → `molix.batch`; `batch_nodes`→`batch_tasks` decoupling. [approved]
+- [molix-data-dissolution-03-transforms](molix-data-dissolution-03-transforms.md) — NeighborList/valence/bond adapters → `molix.batch`; extxyz → `molix.io`; profiler de-DSL'd. [approved]
+- [molix-data-dissolution-04-etl-exit](molix-data-dissolution-04-etl-exit.md) — delete `molix/data` + `molix/datasets` + ETL tests/benchmarks; zero-reference gate. [approved]
+- [streaming-data-tiers-02-block-format](streaming-data-tiers-02-block-format.md) — READY-tier appendable column block store (`molix.store`); successor of molhub streaming-data-tiers-01-strategy. [approved]
 
 ## Closed specifications and chains
 
