@@ -12,6 +12,36 @@ dataset, parsing it, preprocessing it and writing the packed cache molnex reads
 [MolHub](https://github.com/molcrafts/molhub). molnex owns steps 2 and 3, plus
 the cache reader in `molix.store`.
 
+## Reading Prepared Blocks
+
+MolHub's `prepare(name, split=..., output_dir=...)` is the producing half of
+that boundary: one call writes `output_dir` as a directory of sealed
+`molix.block/1` block roots. molnex reads that directory back:
+
+```python
+from molix.store import BlockDataset
+
+ds = BlockDataset.load_from_disk("blocks/")
+```
+
+`load_from_disk` does the discovery: the roots are the immediate children of the
+directory carrying a `manifest.json`, **sorted by child name**, so one prepared
+directory always yields the same frame order; children without a manifest (a
+`README.md`, a scratch directory) are ignored, and a directory carrying
+`manifest.json` itself is taken as the single root of a one-block view. Nothing
+already discovered is ever skipped, so every construction refusal still applies
+— `BlockNotReadyError` (a root unreadable or still unsealed),
+`BlockSplitMismatchError` (roots from more than one split),
+`BlockSchemaMismatchError` (roots that are not concatenable) and a plain
+`ValueError` when no root is found at either level.
+
+One directory is one split: `prepare` exports a single split per call and blocks
+are split-pure (`ds.split` is that one manifest split), so build one
+`BlockDataset` per split rather than pointing one view at both. `ds[i]` returns
+the same flat sample dict `MmapDataset[i]` does, so it feeds the collation below
+unchanged. The producing side is documented in MolHub's
+[`docs/reference/python.md`](https://github.com/molcrafts/molhub/blob/main/docs/reference/python.md).
+
 ## Collation
 
 ```python
