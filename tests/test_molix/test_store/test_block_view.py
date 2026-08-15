@@ -297,6 +297,22 @@ def view(roots: list[Path]) -> BlockDataset:
     return BlockDataset(roots)
 
 
+@pytest.fixture
+def prepared(tmp_path: Path) -> Path:
+    """A ``prepare``-shaped directory holding the three sealed roots A, B, C.
+
+    The blocks are written **C, B, A** on purpose: creation order is the reverse
+    of the sorted order, so a discovery that handed back raw directory-listing
+    order (which on ext4/xfs commonly *is* creation order) fails the block-id pin
+    instead of passing by accident.
+    """
+    directory = tmp_path / "prepared"
+    directory.mkdir()
+    for name in ("C", "B", "A"):
+        _write_fixture_block(directory, name)
+    return directory
+
+
 # ---------------------------------------------------------------------------
 # BlockDataset
 # ---------------------------------------------------------------------------
@@ -658,6 +674,107 @@ class TestBlockDataset:
         # relax = mol-b (3 frames) + mol-d (1) = 4; torsion = scan-c (5) +
         # scan-e (4) = 9; equilibrium is excluded by its 0.0 probability.
         assert _sampler(view).frames_per_task() == _SAMPLER_FRAMES_PER_TASK
+
+    # -- directory discovery: load_from_disk -------------------------------
+    #
+    # The consuming half of molhub's `prepare` seam: `prepare` writes a directory
+    # of sealed `molix.block/1` roots, this alternate constructor opens it. Its
+    # only added domain content is *which* roots and *in what order* — every
+    # refusal below block construction stays `__init__`'s.
+
+    def test_load_from_disk_discovers_sealed_roots_in_sorted_child_order(self, prepared: Path):
+        # Discovery order is sorted by child name, not by directory-listing order
+        # (the fixture writes C, B, A): one prepared directory has exactly one
+        # frame index, whatever the filesystem chose to report.
+        discovered = BlockDataset.load_from_disk(prepared)
+        assert discovered.block_ids == ("block-A", "block-B", "block-C")
+        assert len(discovered) == _LEN
+        assert discovered.split == "train"
+
+    def test_load_from_disk_equals_explicit_construction_over_the_same_roots(self, prepared: Path):
+        # Same length, same tables, same first-frame bytes as the explicit
+        # constructor over the same roots in sorted order.
+        explicit = BlockDataset(sorted(prepared.iterdir()))
+        discovered = BlockDataset.load_from_disk(prepared)
+        assert len(discovered) == len(explicit) == _LEN
+        assert torch.equal(discovered.atom_counts, torch.tensor(_ATOM_COUNTS, dtype=torch.long))
+        assert torch.equal(discovered.task_codes, torch.tensor(_TASK_CODES, dtype=torch.long))
+        assert discovered.task_names == _TASK_NAMES
+        _assert_payload_equal(discovered.frame_payload([0]), explicit.frame_payload([0]))
+
+    def test_load_from_disk_of_a_single_sealed_root_is_a_one_block_view(self, roots: list[Path]):
+        # The directory *is* the root (it carries manifest.json itself), so the
+        # view holds block A alone: 5 frames, atom counts (3, 3, 4, 4, 4).
+        single = BlockDataset.load_from_disk(roots[0])
+        assert single.blocks == (roots[0],)
+        assert single.block_ids == ("block-A",)
+        assert len(single) == 5
+        assert torch.equal(single.atom_counts, torch.tensor(_ATOM_COUNTS[:5], dtype=torch.long))
+
+    def test_load_from_disk_ignores_children_that_are_not_sealed_roots(self, prepared: Path):
+        # Only manifest.json-bearing children count: a stray file and a stray
+        # directory without a manifest are skipped, not refused and not indexed.
+        (prepared / "README.md").write_text("written by prepare, not a block\n")
+        (prepared / "scratch").mkdir()
+        discovered = BlockDataset.load_from_disk(prepared)
+        assert discovered.block_ids == ("block-A", "block-B", "block-C")
+        assert len(discovered) == _LEN
+
+    def test_load_from_disk_without_a_discoverable_root_raises_value_error(self, tmp_path: Path):
+        # Loud, not an empty view: an empty index would hide a mis-typed path or a
+        # `prepare` run that never wrote anything.
+        barren = tmp_path / "barren"
+        barren.mkdir()
+        (barren / "notes.txt").write_text("no blocks here\n")
+        with pytest.raises(ValueError) as excinfo:
+            BlockDataset.load_from_disk(barren)
+        message = str(excinfo.value)
+        assert str(barren) in message
+        assert "manifest.json" in message
+
+    def test_load_from_disk_defaults_max_open_to_four(self, prepared: Path):
+        assert BlockDataset.load_from_disk(prepared).max_open == 4
+
+    def test_load_from_disk_passes_max_open_through_to_the_reader_pool(self, prepared: Path):
+        bounded = BlockDataset.load_from_disk(prepared, max_open=1)
+        assert bounded.max_open == 1
+        for frame in range(_LEN):
+            bounded.frame_payload([frame])
+            assert len(bounded.open_blocks) <= 1
+
+    def test_load_from_disk_still_refuses_discovered_roots_of_mixed_splits(self, tmp_path: Path):
+        # I7 is a construction refusal and discovery does not soften it.
+        mixed = tmp_path / "mixed"
+        mixed.mkdir()
+        _write_fixture_block(mixed, "A")
+        _write_block(
+            mixed / "block-valid",
+            [_unit("mol-v", "relax", 3, 2, 500)],
+            split="valid",
+        )
+        with pytest.raises(BlockSplitMismatchError) as excinfo:
+            BlockDataset.load_from_disk(mixed)
+        message = str(excinfo.value)
+        assert "train" in message
+        assert "valid" in message
+
+    def test_load_from_disk_stalls_on_a_discovered_but_unsealed_root(self, tmp_path: Path):
+        # An unsealed block *has* a manifest.json, so it is discovered and then
+        # refused by I8 — it is never quietly skipped, which would silently
+        # shorten the epoch by exactly the frames still being written.
+        partial = tmp_path / "partial"
+        partial.mkdir()
+        _write_fixture_block(partial, "A")
+        unsealed = _write_block(
+            partial / "block-unsealed",
+            [_unit("mol-u", "relax", 3, 2, 400)],
+            seal=False,
+        )
+        with pytest.raises(BlockNotReadyError) as excinfo:
+            BlockDataset.load_from_disk(partial)
+        message = str(excinfo.value)
+        assert str(unsealed) in message
+        assert "unsealed" in message.lower()
 
 
 # ---------------------------------------------------------------------------

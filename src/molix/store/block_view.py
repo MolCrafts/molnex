@@ -265,6 +265,65 @@ class BlockDataset(BaseDataset):
         )
         self._max_atoms = max_atoms
 
+    # -- directory discovery -----------------------------------------------
+
+    @classmethod
+    def load_from_disk(
+        cls,
+        directory: str | os.PathLike[str],
+        *,
+        max_open: int = 4,
+    ) -> BlockDataset:
+        """Open a directory of sealed block roots as one view.
+
+        The consuming half of the cross-repo seam: molhub's ``prepare`` writes a
+        directory of sealed ``molix.block/1`` roots and this alternate constructor
+        reads it, so the only thing the two repos agree on is a directory path. It is
+        the ``load_from_disk`` spelling of the HF-style dataset surface (operator
+        directive, 2026-08-15).
+
+        Discovery is the whole of its domain content — *which* roots, and *in what
+        order*. The roots are the immediate children of *directory* carrying a
+        ``manifest.json``, **sorted by child name**, so one prepared directory has
+        exactly one frame index whatever order the filesystem happens to report;
+        children without a manifest (a ``README.md``, a scratch directory) are not
+        roots and are ignored. A *directory* that carries ``manifest.json`` itself is
+        taken as the single root of a one-block view. Every refusal below block
+        construction stays :meth:`__init__`'s and is not re-checked here: a
+        discovered-but-unsealed root is refused by :class:`BlockNotReadyError`, never
+        quietly skipped, which would shorten the epoch by exactly the frames still
+        being written.
+
+        Args:
+            directory: A ``prepare`` output directory of block roots, or one sealed
+                block root.
+            max_open: Reader-pool bound, forwarded verbatim to :class:`BlockDataset`.
+
+        Returns:
+            A view over the discovered roots, in sorted child-name order.
+
+        Raises:
+            ValueError: *directory* holds no ``manifest.json`` root at either level.
+                An empty view indexes no frame, so it could only hide a mistyped path
+                or a ``prepare`` run that wrote nothing.
+            BlockNotReadyError: A discovered root is unreadable or unsealed.
+            BlockSplitMismatchError: The discovered roots carry more than one split.
+            BlockSchemaMismatchError: The discovered roots are not concatenable.
+        """
+        root = Path(directory)
+        children = sorted(root.iterdir(), key=lambda child: child.name) if root.is_dir() else []
+        discovered = [child for child in children if (child / _MANIFEST_NAME).is_file()]
+        if not discovered and (root / _MANIFEST_NAME).is_file():
+            discovered = [root]
+        if not discovered:
+            raise ValueError(
+                f"no block root found at {root}: neither that directory nor any of its "
+                f"immediate children carries a {_MANIFEST_NAME}. Refusing rather than "
+                "returning an empty view, which would hide a mistyped path or a prepare "
+                "run that wrote nothing."
+            )
+        return cls(discovered, max_open=max_open)
+
     # -- construction guards -----------------------------------------------
 
     @staticmethod
