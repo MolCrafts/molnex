@@ -2,19 +2,19 @@
 
 An ``Integrator`` is constructed with its own step parameters (``dt``, and
 whatever else that scheme needs) and does **not** take a force field — the
-caller binds one with :meth:`Integrator.bind_force` (or lets
-:class:`~molix.md.driver.MD` do it via ``set_forcefield`` /
+caller binds a :class:`PotentialLike` with :meth:`Integrator.bind_force` (or
+lets :class:`~molix.md.driver.MD` do it via ``set_forcefield`` /
 ``set_integrator``). The hot step is static and typed so
-``torch.compile(fullgraph=True)`` can include a traceable force field.
+``torch.compile(fullgraph=True)`` can include a traceable force provider.
 
 Neighbour-list cadence is **not** the integrator's: the list owns it (``skin`` /
 ``every`` / ``delay`` / ``check`` on :class:`~molix.md.neighbors.NeighborList`)
 and :meth:`Integrator.eval_force` merely asks, once per force evaluation, at the
 positions being evaluated. What the integrator keeps is a construction-time
-on/off, :attr:`Integrator.rebuild`, derived from the force field when bound.
+on/off, :attr:`Integrator.rebuild`, derived from the bound provider.
 Over a live list that question is an eager, host-syncing decision, so a
 compiled rollout is built with ``rebuild=False`` (frozen list) while production
-compiles the force field and keeps the loop eager.
+compiles the force path and keeps the loop eager.
 
 Two schemes, two types — no ``gamma=0`` switch. Both are constructed with
 ``dt`` (and Langevin's γ / kT); mass is **not** an integrator parameter —
@@ -30,12 +30,12 @@ it lives on ``atoms.mass`` and is bound with :meth:`Integrator.bind_mass`.
 Units — one self-consistent system. The arithmetic ``v += Δt·F/m`` needs
 ``[F] = [m][length]/[time]²``, so eV/Å + amu + fs is **not** consistent. The
 canonical system is (amu, Å, fs) with energy in amu·Å²/fs²
-(``(1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2")``); drive an eV/Å potential by
-converting at the force field
-(``PotentialForceField(..., energy_scale=(1.0 * units.eV).to("amu * …").magnitude)``).
+(``(1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2")``).
+:class:`~molix.md.driver.MD` converts ``ForceField.units`` through
+:func:`molix.units.preset_energy_to_md`.
 
-Precision boundary: the force field owns its own dtype; ``MD(dtype)`` governs
-the trajectory state. :meth:`Integrator.eval_force` casts the force field's
+Precision boundary: the force provider owns its own dtype; ``MD(dtype)``
+governs the trajectory state. :meth:`Integrator.eval_force` casts the
 output back to the state dtype so the two precisions never silently promote
 mid-step.
 
@@ -48,12 +48,51 @@ Reference:
 from __future__ import annotations
 
 import math
+from typing import Protocol, runtime_checkable
 
 import torch
 from torch import nn
 
-from molix.md.forcefield import ForceField
 from molix.md.types import ForceOutput, MDState
+
+
+@runtime_checkable
+class PotentialLike(Protocol):
+    """Internal ``pos -> ForceOutput`` provider bound on an integrator.
+
+    Not a public type and not :class:`molpy.ForceField`. Public mounting is
+    :meth:`~molix.md.driver.MD.set_forcefield`; :meth:`Integrator.bind_force`
+    is for :class:`~molix.md.driver.MD` wiring and integrator unit tests.
+    ``molpy.optimize``'s ``PotentialLike`` eats a ``Frame`` and is not this
+    protocol.
+
+    Attributes:
+        rebuilds_neighbors: Whether :meth:`rebuild_neighbors` should run
+            before each force evaluation.
+    """
+
+    @property
+    def rebuilds_neighbors(self) -> bool: ...
+
+    def __call__(self, pos: torch.Tensor) -> ForceOutput:
+        """Energy and forces at ``pos`` ``(N, 3)`` Å.
+
+        Args:
+            pos: Positions ``(N, 3)`` in Å.
+
+        Returns:
+            :class:`~molix.md.types.ForceOutput` in the integrator energy unit
+            (amu·Å²/fs²) after any unit conversion the provider applies.
+        """
+        ...
+
+    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
+        """Refresh the neighbour list at ``pos``, or no-op if none is bound.
+
+        Args:
+            pos: Positions ``(N, 3)`` in Å being evaluated.
+        """
+        ...
 
 
 def _as_mass_col(mass: float | torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
@@ -90,24 +129,32 @@ class Integrator(nn.Module):
     temperature-estimator convention.
 
     Args:
-        rebuild: Whether :meth:`eval_force` asks the force field's neighbour
+        rebuild: Whether :meth:`eval_force` asks the bound provider's neighbour
             policy. ``None`` (default) derives it from
-            :attr:`~molix.md.forcefield.ForceField.rebuilds_neighbors` when
-            :meth:`bind_force` runs. Pass ``False`` to freeze the list for a
-            compiled rollout, ``True`` to force the question.
+            :attr:`PotentialLike.rebuilds_neighbors` when :meth:`bind_force`
+            runs. Pass ``False`` to freeze the list for a compiled rollout,
+            ``True`` to force the question.
     """
 
     def __init__(self, *, rebuild: bool | None = None) -> None:
         super().__init__()
-        self.force: ForceField | None = None
+        self.force: PotentialLike | None = None
         self._rebuild_override: bool | None = rebuild
         self.rebuild: bool = False if rebuild is None else bool(rebuild)
 
-    def bind_force(self, force: ForceField) -> Integrator:
-        """Attach the force field this integrator will evaluate.
+    def bind_force(self, force: PotentialLike) -> Integrator:
+        """Attach the :class:`PotentialLike` this integrator will evaluate.
 
-        Rebuild is derived from the force field only when the constructor left
-        it unspecified. A later re-bind keeps an explicit ``rebuild=`` override.
+        Rebuild is derived from :attr:`PotentialLike.rebuilds_neighbors` only
+        when the constructor left it unspecified. A later re-bind keeps an
+        explicit ``rebuild=`` override.
+
+        Args:
+            force: Internal ``pos -> ForceOutput`` provider (MD adapter or an
+                unnamed test helper). Not a :class:`molpy.ForceField`.
+
+        Returns:
+            ``self``.
         """
         self.force = force
         if self._rebuild_override is None:
@@ -122,7 +169,16 @@ class Integrator(nn.Module):
         the same way.
         """
         mass = _require_positive_mass(mass)
-        mass_col = _as_mass_col(mass, torch.zeros(()))
+        if isinstance(mass, torch.Tensor):
+            ref = mass
+        elif hasattr(self, "dt"):
+            ref = self.dt
+        else:
+            raise TypeError(
+                "bind_mass(float) needs the integrator's dt buffer already registered; "
+                f"got scalar mass and no dt on {type(self).__name__}"
+            )
+        mass_col = _as_mass_col(mass, ref)
         self.mass: float | torch.Tensor = mass
         self.register_buffer("mass_col", mass_col)
         self.register_buffer("inv_mass", mass_col.reciprocal())

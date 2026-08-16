@@ -2,7 +2,6 @@
 
 import math
 import re
-from typing import NamedTuple
 
 import pytest
 import torch
@@ -11,20 +10,9 @@ from tensordict import TensorDict
 import molix.batch.neighbor
 import molix.md
 import molix.md.neighbors
-from molix.md import (
-    MD,
-    LennardJonesCutForceField,
-    MaxwellBoltzmann,
-    MDHook,
-    MDObservables,
-    MDRunner,
-    VelocityVerletIntegrator,
-)
+from molix.md import MD, VelocityVerletIntegrator
 from molix.md.neighbors import NeighborList, NeighborStrategy
-from molix.units import units
-from tests.test_molix.test_md.conftest import make_cubic_lattice, md_system
-
-_E_EV_TO_MD = (1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2").magnitude
+from tests.test_molix.test_md.conftest import make_cubic_lattice
 
 
 def _triclinic() -> tuple[torch.Tensor, torch.Tensor]:
@@ -286,88 +274,6 @@ def _displaced(pos: torch.Tensor, distance: float, *, atom: int = 0) -> torch.Te
     moved = pos.clone()
     moved[atom, 0] += distance
     return moved
-
-
-class _Frame(NamedTuple):
-    """One observed step: the evaluated configuration and the list behind it."""
-
-    pos: torch.Tensor
-    edge_index: torch.Tensor
-    shifts: torch.Tensor
-    total: torch.Tensor
-    forces: torch.Tensor
-
-
-class _FrameRecorder(MDHook):
-    """Capture ``obs.pos`` together with the live list it was evaluated against."""
-
-    def __init__(self, neighbors: NeighborList) -> None:
-        self._neighbors = neighbors
-        self.frames: list[_Frame] = []
-
-    def on_step_end(self, runner: MDRunner, step: int, obs: MDObservables) -> None:
-        """Snapshot the step; the live edges are the ones ``obs.forces`` used."""
-        n = self._neighbors.num_edges
-        self.frames.append(
-            _Frame(
-                pos=obs.pos.detach().clone(),
-                edge_index=self._neighbors.edge_index[:n].clone(),
-                shifts=self._neighbors.shifts[:n].clone(),
-                total=obs.total.detach().clone(),
-                forces=obs.forces.detach().clone(),
-            )
-        )
-
-
-def _run_lj_lattice(
-    *, skin: float, every: int = 1, delay: int = 0, check: bool = True, n_steps: int = 100
-) -> tuple[NeighborList, list[_Frame]]:
-    """NVE argon over the 64-atom lattice, driving the policy once per force eval.
-
-    Deterministic CPU float64 throughout: seeded Maxwell-Boltzmann velocities,
-    gamma = 0, no wall clock, no filesystem, no network. Argon in (amu, A, fs):
-    eps = 0.0103 eV, sigma = 2.5 A, cutoff = 3.5 A, m = 39.95 amu, dt = 4 fs.
-
-    No cadence knob is passed: link 07 makes the *force field* declare that it
-    owns a live list (``LennardJonesCutForceField.rebuilds_neighbors``), the
-    integrator derive its static switch from that, and ``rebuild_neighbors``
-    land on :meth:`NeighborList.update` — so the policy runs once per force
-    evaluation, at the positions being evaluated, with no driver kwarg and no
-    ``_PolicyForceField`` preview subclass in the way.
-
-    ``capacity_factor=2.5`` is measured, not defensive: at ``skin=0.5`` this run
-    reaches 600 live edges against the 519 rows the default 1.35 would allocate
-    from the initial 384, and the overflow guard is not what these tests pin.
-    """
-    pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
-    neighbors = NeighborList(
-        cell=cell,
-        cutoff=3.5,
-        positions=pos,
-        skin=skin,
-        every=every,
-        delay=delay,
-        check=check,
-        capacity_factor=2.5,
-    )
-    force = LennardJonesCutForceField(
-        epsilon=0.0103 * _E_EV_TO_MD,  # argon well depth, eV -> amu A^2/fs^2
-        sigma=2.5,
-        neighbors=neighbors,
-        cutoff=3.5,
-    )
-    recorder = _FrameRecorder(neighbors)
-    force.to(dtype=torch.float64)
-    atoms = md_system(pos, torch.zeros_like(pos), 39.95)
-    MaxwellBoltzmann().sample(atoms, 300.0, seed=0)
-    md = (
-        MD(torch.float64)
-        .set_forcefield(force)
-        .set_integrator(VelocityVerletIntegrator(4.0))
-        .set_hooks([recorder])
-    )
-    md.run(atoms, n_steps, chunk=1)
-    return neighbors, recorder.frames
 
 
 def _reference_pairs(
@@ -649,10 +555,9 @@ class TestNeighborListPolicy:
         assert isinstance(nl, NeighborStrategy)
 
     def test_a_list_without_the_policy_members_fails_the_protocol(self):
-        """The widening is what lets ``forcefield.py`` drop its
-        ``getattr(neighbors, "cutoff", None)`` duck-read, so the protocol has to
-        actually *require* ``cutoff`` / ``skin`` / ``update``: a stub carrying
-        only the buffer members must no longer pass."""
+        """The protocol has to actually *require* ``cutoff`` / ``skin`` /
+        ``update``: a stub carrying only the buffer members must no longer
+        pass."""
 
         class _BufferOnly:
             edge_index: torch.Tensor = torch.zeros(1, 2, dtype=torch.long)
@@ -673,80 +578,150 @@ class TestNeighborListPolicy:
         assert not isinstance(_BufferOnly(), NeighborStrategy)
 
     def test_the_interaction_cutoff_is_the_bar_not_the_build_radius(self):
-        """A skinned list holds pairs out to ``r_build = 5.0 A``, but they are
-        only *complete* out to ``cutoff`` between rebuilds — so a 5.0 A
-        interaction cutoff over this list is precisely the silent truncation
-        that check exists to prevent."""
-        nl, _ = _policy_list(skin=1.5)
-        with pytest.raises(ValueError):
-            LennardJonesCutForceField(epsilon=1.0, sigma=2.5, neighbors=nl, cutoff=5.0)
+        """A skinned list holds pairs out to ``r_build``, but they are only
+        *complete* out to ``cutoff`` between rebuilds.
 
-    # --- trajectory falsification (NVE argon over the lattice) -------------
+        After a displacement smaller than the half-skin the list must still
+        contain every pair inside the interaction cutoff — extra skin-shell
+        pairs are allowed, missing in-cutoff pairs are not.
+        """
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
+        nl, _ = _policy_list(skin=1.5)
+        moved = _displaced(pos, 0.4)  # half-skin is 0.75 A
+        assert nl.update(moved) is False
+        source, target, reference = _reference_pairs(moved, cell, 3.5)
+        n_atoms = int(moved.shape[0])
+        rows = torch.full((n_atoms * n_atoms,), -1, dtype=torch.long)
+        live = nl.edge_index[: nl.num_edges]
+        rows[live[:, 0] * n_atoms + live[:, 1]] = torch.arange(live.shape[0])
+        found = rows[source * n_atoms + target]
+        assert int((found < 0).sum()) == 0
+        reconstructed = torch.linalg.norm(moved[target] - moved[source] + nl.shifts[found], dim=-1)
+        torch.testing.assert_close(reconstructed, reference, atol=1e-9, rtol=0)
+
+    # --- trajectory falsification (scripted motion; no deleted LJ adapter) --
 
     def test_every_pair_within_the_cutoff_stays_in_the_live_list(self):
         """PRIMARY falsification: a gated list must never miss a pair.
 
-        At every step the exact minimum-image O(N^2) pair set within the
-        interaction cutoff — recomputed from the very configuration the forces
-        were evaluated at — must be a subset of the live list, and each pair's
-        list-reconstructed distance ``||pos[t] - pos[s] + shift||`` must match
-        the reference. The distance half is not redundant: a stale *shift* on a
-        surviving index pair is the frozen-shift failure mode, and an
-        index-subset check alone would sail straight past it.
+        At every scripted step the exact minimum-image O(N^2) pair set within
+        the interaction cutoff must be a subset of the live list, and each
+        pair's list-reconstructed distance ``||pos[t] - pos[s] + shift||`` must
+        match the reference. The distance half is not redundant: a stale
+        *shift* on a surviving index pair is the frozen-shift failure mode.
         """
-        _, cell = make_cubic_lattice(n_side=4, spacing=3.0)
-        _, frames = _run_lj_lattice(skin=0.5)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
+        nl = NeighborList(
+            cell=cell,
+            cutoff=3.5,
+            positions=pos,
+            skin=0.5,
+            every=1,
+            delay=0,
+            check=True,
+            capacity_factor=2.5,
+        )
         n_atoms = 64
-        for step, frame in enumerate(frames):
-            source, target, reference = _reference_pairs(frame.pos, cell, 3.5)
+        for step in range(20):
+            moved = _displaced(pos, 0.04 * step)
+            nl.update(moved)
+            source, target, reference = _reference_pairs(moved, cell, 3.5)
             rows = torch.full((n_atoms * n_atoms,), -1, dtype=torch.long)
-            live = frame.edge_index
+            live = nl.edge_index[: nl.num_edges]
             rows[live[:, 0] * n_atoms + live[:, 1]] = torch.arange(live.shape[0])
             found = rows[source * n_atoms + target]
             missing = int((found < 0).sum())
             assert missing == 0, f"step {step}: {missing} pairs inside the cutoff are not listed"
             reconstructed = torch.linalg.norm(
-                frame.pos[target] - frame.pos[source] + frame.shifts[found], dim=-1
+                moved[target] - moved[source] + nl.shifts[found], dim=-1
             )
             torch.testing.assert_close(reconstructed, reference, atol=1e-9, rtol=0)
 
-    def test_a_skinned_policy_matches_rebuilding_every_force_evaluation(self):
-        """Policy equivalence: the gated ``skin=0.5`` run and a ``skin=0.0`` run
-        that rebuilds at every force evaluation must trace the same physics.
-        Compared at ``atol=1e-10, rtol=0`` rather than bitwise on purpose — the
-        masked-zero skin edges reorder the ``index_add_`` accumulation."""
-        _, gated = _run_lj_lattice(skin=0.5)
-        _, every_eval = _run_lj_lattice(skin=0.0)
-        assert len(gated) == len(every_eval) == 100
-        for step, (a, b) in enumerate(zip(gated, every_eval, strict=True)):
-            torch.testing.assert_close(a.total, b.total, atol=1e-10, rtol=0, msg=f"step {step}")
-            torch.testing.assert_close(a.forces, b.forces, atol=1e-10, rtol=0, msg=f"step {step}")
-
     def test_the_standard_run_reports_no_dangerous_builds(self):
-        """``skin=0.5`` gives a half-skin of 0.25 A against ~0.01 A of motion
+        """``skin=0.5`` gives a half-skin of 0.25 A against 0.02 A of motion
         per step, so no rebuild is ever overdue. ``ndanger`` is the cheapest
         correctness alarm available and must stay silent on a sane run — while
         the gate itself stays alive (``rebuild_count > 0``)."""
-        neighbors, _ = _run_lj_lattice(skin=0.5)
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
+        neighbors = NeighborList(
+            cell=cell,
+            cutoff=3.5,
+            positions=pos,
+            skin=0.5,
+            every=1,
+            delay=0,
+            check=True,
+            capacity_factor=2.5,
+        )
+        for step in range(1, 21):
+            neighbors.update(_displaced(pos, 0.02 * step))
         assert neighbors.ndanger == 0
         assert neighbors.rebuild_count > 0
 
     def test_rebuild_count_falls_as_the_skin_grows(self):
-        """The point of the skin, measured over the same trajectory. The strict
-        inequality at the ends is what catches a dead or inverted gate — plain
-        non-increasing monotonicity is also satisfied by a policy that never
-        rebuilds at all."""
-        counts = [_run_lj_lattice(skin=skin)[0].rebuild_count for skin in (0.0, 0.25, 0.5, 1.0)]
+        """The point of the skin, measured over the same scripted trajectory.
+        The strict inequality at the ends is what catches a dead or inverted
+        gate — plain non-increasing monotonicity is also satisfied by a policy
+        that never rebuilds at all."""
+        pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
+        schedule = [_displaced(pos, 0.1 * step) for step in range(1, 21)]
+        counts: list[int] = []
+        for skin in (0.0, 0.25, 0.5, 1.0):
+            nl = NeighborList(
+                cell=cell,
+                cutoff=3.5,
+                positions=pos,
+                skin=skin,
+                every=1,
+                delay=0,
+                check=True,
+                capacity_factor=2.5,
+            )
+            for moved in schedule:
+                nl.update(moved)
+            counts.append(nl.rebuild_count)
         assert counts == sorted(counts, reverse=True)
         assert counts[-1] < counts[0]
+
+
+class TestNeighborListMDMount:
+    """A live list reaches the integrator only through ``MD.set_neighbors``."""
+
+    def test_set_neighbors_arms_rebuild(self):
+        from molpy import ForceField
+
+        nl, _ = _policy_list(skin=0.5)
+        md = (
+            MD()
+            .set_forcefield(ForceField())
+            .set_integrator(VelocityVerletIntegrator(0.01))
+            .set_neighbors(nl)
+        )
+        assert md.neighbors is nl
+        assert md.integrator is not None
+        assert md.integrator.rebuild is True
+
+    def test_rebuild_false_never_ticks_the_list(self):
+        from molpy import ForceField
+
+        nl, _ = _policy_list(skin=0.5)
+        md = (
+            MD()
+            .set_forcefield(ForceField())
+            .set_integrator(VelocityVerletIntegrator(0.01, rebuild=False))
+            .set_neighbors(nl)
+        )
+        assert md.integrator is not None
+        assert md.integrator.rebuild is False
+        assert nl.rebuild_count == 0
+        assert nl.ago == 0
 
 
 def _batch(pos: torch.Tensor, cell: torch.Tensor | None = None) -> TensorDict:
     """A single-system MD working batch over ``pos``, optionally carrying a cell.
 
-    The same shape ``_periodic_template`` builds in ``test_forcefield.py`` — the
-    batch :class:`~molix.md.forcefield.PeriodicPotentialForceField` binds into —
-    plus the optional ``("graphs", "cell")`` the bind path validates.
+    The shape ``NeighborList.build`` binds into, plus the optional
+    ``("graphs", "cell")`` the bind path validates.
 
     ``graphs`` carries ``batch_size=[]`` on purpose: the container must not be
     the thing that decides the cell's leading dimension, or ``(3, 3)`` and
@@ -912,8 +887,7 @@ class TestNeighborListBind:
         ``to(dtype)`` rebinds ``shifts`` to a new tensor, so a batch bound
         beforehand keeps pointing at the old one. Auto-re-binding from inside
         ``to()`` was rejected — it would make the list hold a reference to a
-        batch it does not own — so the **owner** re-binds; the force-field half
-        of this trade is pinned in ``test_forcefield.py``.
+        batch it does not own — so the **owner** re-binds after a cast.
         """
         nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
         batch = nl.build(_batch(pos))
@@ -927,10 +901,9 @@ class TestNeighborListBind:
     def test_build_replaces_a_stale_edges_namespace_wholesale(self):
         """Whatever was under ``edges`` is dropped, not merged.
 
-        A precomputed ``edge_diff`` / ``edge_dist`` pair — exactly what
-        ``PotentialForceField._STALE_EDGE_KEYS`` strips at construction — would
-        be used straight through by a potential and freeze the PES, and a
-        surviving shorter ``edge_index`` would disagree with the capacity.
+        A precomputed ``edge_diff`` / ``edge_dist`` pair would be used
+        straight through by a potential and freeze the PES, and a surviving
+        shorter ``edge_index`` would disagree with the capacity.
         """
         nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
         batch = _batch(pos)
@@ -1077,10 +1050,10 @@ class TestNeighborListBind:
     # --- protocol -----------------------------------------------------------
 
     def test_a_list_without_build_fails_the_widened_protocol(self):
-        """``PeriodicPotentialForceField`` calls ``build`` through the
+        """``MD.set_neighbors`` / ``NeighborList.build`` go through the
         ``NeighborStrategy`` annotation, so the protocol has to actually
-        *require* it: a stub carrying every link-04 member but no ``build`` must
-        no longer pass."""
+        *require* ``build``: a stub carrying every policy member but no
+        ``build`` must no longer pass."""
 
         class _PolicyWithoutBuild:
             edge_index: torch.Tensor = torch.zeros(1, 2, dtype=torch.long)

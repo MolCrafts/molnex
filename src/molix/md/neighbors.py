@@ -37,7 +37,7 @@ list is built at the enlarged radius
 
 so that pairs which walk *into* ``r_cut`` between rebuilds are already in the
 buffers. The model's own cutoff envelope masks the skin-region pairs to zero
-(``LennardJonesCutForceField`` compares against ``cutoff_sq``), so the skin
+(the pair evaluation compares against ``cutoff``), so the skin
 costs edges — the live count grows as ``(1 + skin/r_cut)^3`` — but changes no
 energy. Both the capacity and the kernel's ``max_num_pairs`` are therefore
 sized from ``r_build``, never from ``cutoff``.
@@ -219,7 +219,7 @@ otherwise consume straight through as a value and so freeze the PES. Because
 every rebuild is in place, that tie survives all later ``rebuild`` / ``update``
 calls with no re-binding: the potential simply sees the current neighbour set.
 It does **not** survive :meth:`NeighborList.to`, which rebinds the buffers to
-new tensors — the owner re-binds (see ``PeriodicPotentialForceField._apply``).
+new tensors — the owner re-binds (see :meth:`~molix.md.driver.MD.to`).
 
 Two ``NeighborList`` classes, deliberately
 -----------------------------------------
@@ -231,8 +231,8 @@ and the collision is intentional rather than an accident awaiting cleanup:
   symbol: a *stateful, fixed-capacity buffer owner* holding ``edge_index
   (capacity, 2)``, ``shifts (capacity, 3)``, ``num_edges`` and
   ``rebuild_count``, rebuilt in place so shapes never change and the force path
-  stays CUDA-graph capturable. One instance per run, held by a
-  :class:`~molix.md.forcefield.ForceField`.
+  stays CUDA-graph capturable. One instance per run, held by
+  :class:`~molix.md.driver.MD` via :meth:`~molix.md.driver.MD.set_neighbors`.
 * :class:`molix.batch.neighbor.NeighborList` — the **batch-construction**
   symbol: a *stateless* transform mapping one flat sample dict to
   ``edge_index`` / ``edge_diff`` / ``edge_dist`` and carrying a ``task_id``
@@ -327,11 +327,10 @@ def _perpendicular_widths(cell: torch.Tensor) -> torch.Tensor:
 
 @runtime_checkable
 class NeighborStrategy(Protocol):
-    """Contract a force field expects from a rebuildable neighbour list.
+    """Contract MD expects from a rebuildable neighbour list.
 
     Any strategy (minimum-image, Verlet-skin, cell list, …) is usable by
-    :class:`~molix.md.forcefield.PeriodicPotentialForceField` /
-    :class:`~molix.md.forcefield.CallableForceField` as long as it exposes
+    :meth:`~molix.md.driver.MD.set_neighbors` as long as it exposes
     these members with fixed-shape, in-place-rebuilt buffers.
 
     Attributes:
@@ -365,8 +364,8 @@ class NeighborStrategy(Protocol):
 
         Returns the same batch object, with ``batch["edges"]`` holding the
         strategy's live buffers by reference — the strategy owns that namespace
-        from here on. ``PeriodicPotentialForceField`` calls this through this
-        annotation, at construction and after every ``.to()``.
+        from here on. :class:`~molix.md.driver.MD` calls this through this
+        annotation at :meth:`~molix.md.driver.MD.run` and after every ``.to()``.
         """
         ...
 
@@ -392,10 +391,10 @@ class NeighborList:
     """Minimum-image Verlet-skin neighbour list in fixed-capacity buffers.
 
     Not an ``nn.Module``: it owns plain buffers and a rebuild policy, and is held
-    by a :class:`~molix.md.forcefield.ForceField`. Keeping it out of the module
+    by :class:`~molix.md.driver.MD`. Keeping it out of the module
     tree also keeps it out of ``state_dict``, where a per-run neighbour list has
-    no business — the owning force field forwards device/dtype changes through
-    :meth:`to` instead (see ``PeriodicPotentialForceField._apply``).
+    no business — the owner forwards device/dtype changes through
+    :meth:`to` instead (see :meth:`~molix.md.driver.MD.to`).
 
     Two entry points drive it: :meth:`rebuild` forces a build unconditionally,
     :meth:`update` applies the ``every`` / ``delay`` / ``check`` policy. A
@@ -1145,7 +1144,7 @@ class NeighborList:
             deliberately not done — it would make the list hold a reference to
             a batch it does not own — so the **owner** re-binds: call
             ``nl.build(batch)`` after the cast (this is exactly what
-            ``PeriodicPotentialForceField._apply`` does).
+            :meth:`~molix.md.driver.MD.run` does after :meth:`~molix.md.driver.MD.to`).
         """
         if isinstance(device, torch.dtype):
             if dtype is not None:

@@ -12,7 +12,6 @@ import torch
 import molix.md
 import molix.md.runner
 from molix.md import (
-    HarmonicForceField,
     LangevinVerletIntegrator,
     MDCheckpointHook,
     MDHook,
@@ -22,14 +21,14 @@ from molix.md import (
     TrajectoryHook,
     VelocityVerletIntegrator,
 )
-from tests.test_molix.test_md.conftest import md_system
+from tests.test_molix.test_md.conftest import harmonic_potential_like, md_system
 
 _DTYPE = torch.float64
 
 
 def _integrator(seed: int = 0):
     return LangevinVerletIntegrator(0.01, gamma=1.0, kbt=1.0, seed=seed).bind_force(
-        HarmonicForceField(1.0).to(_DTYPE)
+        harmonic_potential_like(1.0)
     )
 
 
@@ -101,7 +100,7 @@ class TestMDRunner:
         "gamma")`` sniffing silently mis-reported temperature for custom
         integrators)."""
         assert _integrator().removed_dof == 0  # gamma > 0
-        nve = VelocityVerletIntegrator(0.01).bind_force(HarmonicForceField(1.0).to(_DTYPE))
+        nve = VelocityVerletIntegrator(0.01).bind_force(harmonic_potential_like(1.0))
         assert nve.removed_dof == 3
 
     def test_step_start_precedes_each_advance(self):

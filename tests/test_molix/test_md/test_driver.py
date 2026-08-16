@@ -2,24 +2,18 @@
 
 import pytest
 import torch
+from tensordict import TensorDict
 
 from molix.md import (
     MD,
-    HarmonicForceField,
     LangevinVerletIntegrator,
-    LennardJonesCutForceField,
     MaxwellBoltzmann,
     MDHook,
-    MDObservables,
-    MDRunner,
-    MDState,
     NeighborList,
+    VelocityInitHook,
     VelocityVerletIntegrator,
 )
-from molix.units import units
 from tests.test_molix.test_md.conftest import make_cubic_lattice, md_system
-
-_E_EV_TO_MD = (1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2").magnitude
 
 
 @pytest.fixture
@@ -30,26 +24,23 @@ def system():
     return md_system(pos, vel, 1.0)
 
 
-def _lj_cut_argon(skin: float) -> tuple[LennardJonesCutForceField, torch.Tensor]:
-    """Argon lj/cut over the 64-atom lattice with a policy-configured list."""
-    pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
-    neighbors = NeighborList(
-        cell=cell,
-        cutoff=3.5,
-        positions=pos,
-        skin=skin,
-        every=1,
-        delay=0,
-        check=True,
-        capacity_factor=2.5,
+def _class_i_harmonic(*, k: float = 2.0, r0: float = 1.0):
+    from molpot.forcefield import ClassIForceField
+
+    return ClassIForceField().with_params(bonds={"k": torch.tensor([k]), "r0": torch.tensor([r0])})
+
+
+def _two_atom_system(*, r: float = 1.5, dtype: torch.dtype = torch.float64) -> TensorDict:
+    pos = torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=dtype)
+    atoms = md_system(pos, torch.zeros_like(pos), 1.0)
+    atoms["bonds"] = TensorDict(
+        {
+            "atomi": torch.tensor([0], dtype=torch.long),
+            "atomj": torch.tensor([1], dtype=torch.long),
+        },
+        batch_size=[1],
     )
-    force = LennardJonesCutForceField(
-        epsilon=0.0103 * _E_EV_TO_MD,
-        sigma=2.5,
-        neighbors=neighbors,
-        cutoff=3.5,
-    )
-    return force, pos
+    return atoms
 
 
 def _nve(force, *, dt: float, dtype=None, hooks=None, rebuild=None) -> MD:
@@ -61,91 +52,154 @@ def _nve(force, *, dt: float, dtype=None, hooks=None, rebuild=None) -> MD:
     )
 
 
-class _TotalEnergyHook(MDHook):
-    """Sample the conserved quantity once per step — the drift observable."""
-
-    def __init__(self) -> None:
-        self.totals: list[torch.Tensor] = []
-
-    def on_step_end(self, runner: MDRunner, step: int, obs: MDObservables) -> None:
-        self.totals.append(obs.total.detach().clone())
-
-
-def _argon_nve(skin: float, *, n_steps: int = 100) -> tuple[NeighborList, MDState, list[float]]:
-    """100 steps of NVE argon through the public ``MD`` path at one skin."""
-    force, pos = _lj_cut_argon(skin)
-    sampler = _TotalEnergyHook()
-    atoms = md_system(pos, torch.zeros_like(pos), 39.95)
-    MaxwellBoltzmann().sample(atoms, 300.0, seed=0)
-    force.to(dtype=torch.float64)
-    md = _nve(force, dt=4.0, dtype=torch.float64, hooks=[sampler])
-    final = md.run(atoms, n_steps, chunk=1)
-    return force.neighbors, final, [float(total) for total in sampler.totals]
-
-
-def _drift(totals: list[float]) -> float:
-    """``max_t |E(t) − E(0)| / |E(0)|`` — the dimensionless conservation metric."""
-    reference = totals[0]
-    return max(abs(total - reference) for total in totals) / abs(reference)
-
-
 class TestMD:
     """Test the MD composer."""
 
-    def test_runs_and_returns_final_state(self, system):
+    def test_runs_and_returns_final_state(self):
         """The run yields the advanced typed state, not the initial one."""
-        pos0 = system["atoms", "pos"].clone()
-        md = _nve(HarmonicForceField(k=1.0), dt=0.01, dtype=torch.float64)
-        out = md.run(system, 3)
+        atoms = _two_atom_system()
+        pos0 = atoms["atoms", "pos"].clone()
+        md = _nve(_class_i_harmonic(), dt=0.01, dtype=torch.float64)
+        out = md.run(atoms, 3)
         assert out.pos.shape == pos0.shape
         assert not torch.allclose(out.pos, pos0)
-        assert torch.equal(system["atoms", "pos"], out.pos)
+        assert torch.equal(atoms["atoms", "pos"], out.pos)
 
-    def test_dtype_governs_the_md_side_only(self, system):
-        """``MD(dtype)`` casts state + integrator constants, never the model."""
-        force = HarmonicForceField(k=1.0)  # constructed fp32
+    def test_dtype_governs_the_md_side_only(self):
+        """``MD(dtype)`` casts state + integrator constants, never the container."""
+        force = _class_i_harmonic()
         md = _nve(force, dt=0.01, dtype=torch.float64)
-        out = md.run(system, 1)
+        out = md.run(_two_atom_system(), 1)
         assert out.pos.dtype == torch.float64
         assert out.forces.dtype == torch.float64
-        assert force.k.dtype == torch.float32
+        assert md.force is force
         assert md.integrator.dt.dtype == torch.float64
 
-    def test_force_field_dtype_is_the_force_fields(self, system):
-        """Cast the model on the force field, not through MD."""
-        force = HarmonicForceField(k=1.0)
-        force.to(dtype=torch.float64)
-        md = _nve(force, dt=0.01, dtype=torch.float64)
-        assert force.k.dtype == torch.float64
-        assert md.force is force
-
-    def test_dtype_none_leaves_precision_alone(self, system):
+    def test_dtype_none_leaves_precision_alone(self):
         """Omitting dtype must not silently downcast a float64 caller."""
-        md = _nve(HarmonicForceField(k=1.0).double(), dt=0.01)
-        assert md.run(system, 1).pos.dtype == torch.float64
+        md = _nve(_class_i_harmonic(), dt=0.01)
+        assert md.run(_two_atom_system(), 1).pos.dtype == torch.float64
 
     def test_run_requires_both_components(self, system):
         with pytest.raises(RuntimeError, match="set_forcefield and set_integrator"):
             MD(torch.float64).run(system, 1)
 
     def test_set_integrator_takes_a_constructed_integrator(self):
-        force = HarmonicForceField(k=1.0).double()
+        from molpy import ForceField as MolpyForceField
+
+        force = MolpyForceField()
         integrator = VelocityVerletIntegrator(0.01)
         md = MD(torch.float64).set_forcefield(force).set_integrator(integrator)
         assert md.integrator is integrator
         assert md.runner.integrator is integrator
 
-    def test_langevin_is_a_constructed_integrator_not_an_md_kwarg(self, system):
-        force = HarmonicForceField(k=1.0)
+    def test_langevin_is_a_constructed_integrator_not_an_md_kwarg(self):
+        force = _class_i_harmonic()
         ig = LangevinVerletIntegrator(0.01, gamma=0.1, kbt=1.0)
         md = MD(torch.float64).set_forcefield(force).set_integrator(ig)
-        out = md.run(system, 2)
-        assert out.pos.shape[0] == 6
+        out = md.run(_two_atom_system(), 2)
+        assert out.pos.shape[0] == 2
 
     def test_facade_constructor_kwargs_are_gone(self):
         """Hard removal: no dt/gamma/force/mass/hooks/device on MD()."""
         with pytest.raises(TypeError):
-            MD(HarmonicForceField(k=1.0), mass=1.0, dt=0.01)  # type: ignore[misc]
+            MD(object(), mass=1.0, dt=0.01)  # type: ignore[misc]
+
+    def test_set_forcefield_accepts_molpy_forcefield_and_returns_self(self):
+        from molpy import ForceField as MolpyForceField
+
+        ff = MolpyForceField()
+        md = MD()
+        assert md.set_forcefield(ff) is md
+        assert md.force is ff
+
+    def test_set_forcefield_accepts_class_i_forcefield_and_returns_self(self):
+        from molpot.forcefield import ClassIForceField
+
+        ff = ClassIForceField()
+        md = MD()
+        assert md.set_forcefield(ff) is md
+        assert md.force is ff
+
+    def test_set_forcefield_accepts_opls_forcefield_and_returns_self(self):
+        from molpot.forcefield import OPLSForceField
+
+        ff = OPLSForceField()
+        md = MD()
+        assert md.set_forcefield(ff) is md
+        assert md.force is ff
+
+    def test_set_forcefield_rejects_object(self):
+        with pytest.raises(TypeError, match="ForceField"):
+            MD().set_forcefield(object())  # type: ignore[arg-type]
+
+    def test_set_forcefield_rejects_bare_module(self):
+        with pytest.raises(TypeError, match="ForceField"):
+            MD().set_forcefield(torch.nn.Module())  # type: ignore[arg-type]
+
+    def test_set_forcefield_rejects_pos_callable(self):
+        def _pos_callable(pos: torch.Tensor) -> torch.Tensor:
+            return pos
+
+        with pytest.raises(TypeError, match="ForceField"):
+            MD().set_forcefield(_pos_callable)  # type: ignore[arg-type]
+
+    def test_bare_molpy_to_potentials_rejects_tensordict(self):
+        from molpy import ForceField as MolpyForceField
+
+        md = (
+            MD()
+            .set_forcefield(MolpyForceField("bare", units="real"))
+            .set_integrator(VelocityVerletIntegrator(0.1))
+        )
+        with pytest.raises(TypeError, match="TensorDict"):
+            md.run(_two_atom_system(), 1)
+
+    def test_set_neighbors_returns_self(self):
+        pos, cell = make_cubic_lattice()
+        neighbors = NeighborList(cell=cell, cutoff=3.5, positions=pos)
+        md = MD()
+        assert md.set_neighbors(neighbors) is md
+        assert md.neighbors is neighbors
+
+    def test_set_forcefield_set_integrator_set_neighbors_arms_rebuild(self):
+        from molpy import ForceField as MolpyForceField
+
+        pos, cell = make_cubic_lattice()
+        neighbors = NeighborList(cell=cell, cutoff=3.5, positions=pos)
+        md = (
+            MD()
+            .set_forcefield(MolpyForceField())
+            .set_integrator(VelocityVerletIntegrator(0.01))
+            .set_neighbors(neighbors)
+        )
+        assert md.integrator is not None
+        assert md.integrator.rebuild is True
+
+    def test_rebuild_is_false_without_set_neighbors(self):
+        from molpy import ForceField as MolpyForceField
+
+        md = MD().set_forcefield(MolpyForceField()).set_integrator(VelocityVerletIntegrator(0.01))
+        assert md.integrator is not None
+        assert md.integrator.rebuild is False
+
+    def test_src_molix_md_has_no_molpot_import(self):
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[3] / "src" / "molix" / "md"
+        offenders: list[str] = []
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name == "molpot" or alias.name.startswith("molpot."):
+                            offenders.append(f"{path}:{node.lineno}: import {alias.name}")
+                elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                    if node.module == "molpot" or node.module.startswith("molpot."):
+                        offenders.append(f"{path}:{node.lineno}: from {node.module}")
+        assert offenders == []
 
 
 class TestMDNeighborPolicy:
@@ -156,43 +210,37 @@ class TestMDNeighborPolicy:
             MD(torch.float64, rebuild_every=1)  # type: ignore[call-arg]
 
     def test_no_step_start_hook_is_installed(self):
-        md = _nve(HarmonicForceField(k=1.0), dt=0.01)
+        from molpy import ForceField as MolpyForceField
+
+        md = _nve(MolpyForceField(), dt=0.01)
         assert md.runner.hooks == []
 
-    def test_the_switch_follows_the_force_field(self):
-        listless = _nve(HarmonicForceField(k=1.0), dt=0.01)
-        force, _ = _lj_cut_argon(skin=1.0)
-        live = _nve(force, dt=4.0, dtype=torch.float64)
+    def test_the_switch_follows_set_neighbors(self):
+        from molpy import ForceField as MolpyForceField
+
+        listless = _nve(MolpyForceField(), dt=0.01)
+        pos, cell = make_cubic_lattice()
+        neighbors = NeighborList(cell=cell, cutoff=3.5, positions=pos)
+        live = (
+            MD()
+            .set_forcefield(MolpyForceField())
+            .set_integrator(VelocityVerletIntegrator(0.01))
+            .set_neighbors(neighbors)
+        )
         assert listless.integrator.rebuild is False
         assert live.integrator.rebuild is True
 
-    def test_a_compiled_force_field_delegates_the_capability(self):
-        force, _ = _lj_cut_argon(skin=1.0)
-        compiled = torch.compile(force, backend="eager")
-        md = _nve(compiled, dt=4.0, dtype=torch.float64)
-        assert md.integrator.rebuild is True
+    def test_rebuild_false_never_ticks_the_list(self):
+        from molpy import ForceField as MolpyForceField
 
-    def test_a_skin_costs_no_energy_conservation(self):
-        _, _, gated = _argon_nve(skin=1.0)
-        _, _, every_eval = _argon_nve(skin=0.0)
-        baseline = _drift(every_eval)
-        assert baseline > 0.0, "the no-skin baseline must have real discretisation drift"
-        assert _drift(gated) <= 3.0 * baseline
-
-    def test_the_skin_buys_rebuilds_without_moving_the_physics(self):
-        arms = {skin: _argon_nve(skin=skin) for skin in (0.0, 0.5, 1.0)}
-        counts = [arms[skin][0].rebuild_count for skin in (0.0, 0.5, 1.0)]
-        assert counts == sorted(counts, reverse=True)
-        assert counts[0] == 100
-        assert counts[-1] < counts[0]
-        assert arms[0.0][0].ndanger == 99
-        assert arms[0.5][0].ndanger == 0
-        assert arms[1.0][0].ndanger == 0
-        reference = arms[0.0][1].energy
-        for skin in (0.5, 1.0):
-            torch.testing.assert_close(
-                arms[skin][1].energy, reference, atol=1e-10, rtol=0, msg=f"skin={skin}"
-            )
+        pos, cell = make_cubic_lattice()
+        neighbors = NeighborList(cell=cell, cutoff=3.5, positions=pos)
+        md = _nve(MolpyForceField(), dt=0.01, rebuild=False)
+        md.set_neighbors(neighbors)
+        assert md.integrator is not None
+        assert md.integrator.rebuild is False
+        assert neighbors.rebuild_count == 0
+        assert neighbors.ago == 0
 
 
 class TestMaxwellBoltzmann:
@@ -202,8 +250,10 @@ class TestMaxwellBoltzmann:
         """Net momentum must vanish, which is what makes the NVE dof 3N-3."""
         pos = torch.zeros(8, 3, dtype=torch.float64)
         atoms = md_system(pos, torch.zeros_like(pos), torch.full((8,), 2.0))
-        MaxwellBoltzmann().sample(atoms, 300.0, seed=1)
-        vel = atoms["atoms", "vel"]
+        vel = MaxwellBoltzmann(300.0, seed=1).velocities(
+            atoms["atoms", "pos"], atoms["atoms", "mass"]
+        )
+        atoms["atoms", "vel"] = vel
         mass = atoms["atoms", "mass"]
         assert vel.shape == (8, 3)
         assert float((mass.reshape(-1, 1).double() * vel).sum(0).abs().max()) < 1e-12
@@ -212,13 +262,12 @@ class TestMaxwellBoltzmann:
         pos = torch.zeros(5, 3)
         a = md_system(pos, torch.zeros_like(pos), 1.0)
         b = md_system(pos.clone(), torch.zeros_like(pos), 1.0)
-        MaxwellBoltzmann().sample(a, 300.0, seed=3)
-        MaxwellBoltzmann().sample(b, 300.0, seed=3)
+        mb = MaxwellBoltzmann(300.0, seed=3)
+        a["atoms", "vel"] = mb.velocities(a["atoms", "pos"], a["atoms", "mass"])
+        b["atoms", "vel"] = mb.velocities(b["atoms", "pos"], b["atoms", "mass"])
         assert torch.equal(a["atoms", "vel"], b["atoms", "vel"])
 
     def test_mass_length_must_match_atoms(self):
-        from tensordict import TensorDict
-
         atoms = TensorDict(
             {
                 "atoms": TensorDict(
@@ -233,4 +282,29 @@ class TestMaxwellBoltzmann:
             batch_size=[],
         )
         with pytest.raises(ValueError, match="n_atoms"):
-            MaxwellBoltzmann().sample(atoms, 300.0, seed=0)
+            MaxwellBoltzmann(300.0, seed=0).velocities(
+                atoms["atoms", "pos"], atoms["atoms", "mass"]
+            )
+
+    def test_on_init_hook_writes_state_vel(self):
+        """Attaching the hook to MD is what actually initializes the trajectory."""
+        atoms = _two_atom_system()
+
+        class _Capture(MDHook):
+            vel = None
+
+            def on_step_end(self, runner, step, obs):
+                if self.vel is None:
+                    self.vel = obs.vel.detach().clone()
+
+        cap = _Capture()
+        (
+            MD(torch.float64)
+            .set_forcefield(_class_i_harmonic())
+            .set_integrator(VelocityVerletIntegrator(0.1))
+            .set_hooks([VelocityInitHook(MaxwellBoltzmann(300.0, seed=1)), cap])
+            .run(atoms, 1)
+        )
+        assert cap.vel is not None
+        assert float(cap.vel.abs().sum()) > 0.0
+        assert float((atoms["atoms", "mass"].reshape(-1, 1) * cap.vel).sum(0).abs().max()) < 1e-12

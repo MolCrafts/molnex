@@ -7,7 +7,41 @@ per the repo test-layout rule — no free-floating helper modules.
 import torch
 from tensordict import TensorDict
 
+from molix.md.types import ForceOutput
+
 _DEVICE = torch.device("cpu")
+
+
+def harmonic_potential_like(
+    k: float = 1.0,
+    *,
+    rebuilds_neighbors: bool = False,
+    neighbors: object | None = None,
+):
+    """Unnamed PotentialLike: ``E = ½k‖x‖²``, ``F = −kx``.
+
+    Not a ``ForceField`` subclass — integrator / runner / compile tests bind
+    this protocol, not a homemade force-field type.
+    """
+
+    class _PotentialLike:
+        def __init__(self) -> None:
+            self.rebuilds_neighbors = bool(rebuilds_neighbors or neighbors is not None)
+            self.rebuild_positions: list[torch.Tensor] = []
+            self.calls = 0
+            self.neighbors = neighbors
+
+        def __call__(self, pos: torch.Tensor) -> ForceOutput:
+            self.calls += 1
+            energy = 0.5 * k * (pos * pos).sum()
+            return ForceOutput(energy, -float(k) * pos)
+
+        def rebuild_neighbors(self, pos: torch.Tensor) -> None:
+            self.rebuild_positions.append(pos.detach().clone())
+            if self.neighbors is not None:
+                self.neighbors.update(pos)
+
+    return _PotentialLike()
 
 
 def md_system(

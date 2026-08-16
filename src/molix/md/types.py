@@ -4,9 +4,9 @@
 ``NamedTuple``s. PyTorch registers namedtuples as pytree nodes, so they
 flatten / unflatten transparently under :func:`torch.compile`, ``torch.func``
 and ``torch.utils._pytree`` with no custom registration. They are the **only**
-data contract crossing component boundaries (``ForceField`` → ``Integrator`` →
+data contract crossing component boundaries (``PotentialLike`` → ``Integrator`` →
 ``MDRunner`` → ``MDHook``); the heterogeneous topology ``TensorDict`` stays
-inside :class:`~molix.md.forcefield.ForceField` (model I/O). This is the
+inside the MD force adapter (model I/O). This is the
 deliberate ``TensorDict`` ↔ typed-state split: rich dict where the model needs
 it, static tensors where the hot loop and type-checking need it.
 """
@@ -19,11 +19,11 @@ import torch
 
 
 class ForceOutput(NamedTuple):
-    """Energy + forces from a :class:`~molix.md.forcefield.ForceField`.
+    """Energy + forces from a :class:`~molix.md.integrators.PotentialLike`.
 
     Attributes:
-        energy: Scalar total energy ``()``.
-        forces: Per-atom forces ``(N, 3)`` ``= -∂E/∂pos``.
+        energy: Scalar total energy ``()`` in amu·Å²/fs².
+        forces: Per-atom forces ``(N, 3)`` ``= -∂E/∂pos`` in the same unit / Å.
     """
 
     energy: torch.Tensor

@@ -50,6 +50,12 @@ class MDHook:
     #: hook's step.
     cadence: int | None = None
 
+    def on_init(self, runner: "MDRunner", state: MDState) -> None:
+        """Called once after the entry force is cached, before any step.
+
+        Mutate ``state`` here (LAMMPS-style ``velocity create``). Default no-op.
+        """
+
     def on_run_start(self, runner: "MDRunner") -> None:
         """Called once before the first step (the entry force is already cached)."""
 
@@ -78,6 +84,23 @@ class MDHook:
 
     def on_run_end(self, runner: "MDRunner") -> None:
         """Called once after the last step (persist buffered results here)."""
+
+
+class VelocityInitHook(MDHook):
+    """Write initial velocities from a distribution (LAMMPS ``velocity create``).
+
+    The distribution is a component with ``velocities(pos, mass) -> (N, 3)``.
+    This hook only decides *when* (``on_init``)::
+
+        VelocityInitHook(MaxwellBoltzmann(300, seed=0))
+    """
+
+    def __init__(self, distribution: object) -> None:
+        self.distribution = distribution
+
+    def on_init(self, runner: "MDRunner", state: MDState) -> None:
+        vel = self.distribution.velocities(state.pos, runner.integrator.mass)
+        state.vel.copy_(vel.to(dtype=state.vel.dtype, device=state.vel.device))
 
 
 def _normalize_hooks(
@@ -156,6 +179,8 @@ class MDRunner:
                     f"{chunk} would silently skip; make it a multiple of chunk"
                 )
         md = self.integrator.initial(pos, vel)
+        for hook in self.hooks:
+            hook.on_init(self, md)
         for hook in self.hooks:
             hook.on_run_start(self)
         done = 0
@@ -288,7 +313,9 @@ class TrajectoryHook(MDHook):
         else:
             fields = self._stack_buffer()
         if fields is None:
-            return
+            raise RuntimeError(
+                f"trajectory {self._out} has no frames (stride={self._stride}); nothing to write"
+            )
         payload: dict[str, torch.Tensor | int] = {
             "pos": fields["pos"].to(torch.float32),
             "vel": fields["vel"].to(torch.float32),

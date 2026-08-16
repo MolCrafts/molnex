@@ -9,27 +9,30 @@ import pytest
 import torch
 
 from molix.md import (
-    HarmonicForceField,
+    ForceOutput,
     Integrator,
     LangevinVerletIntegrator,
-    LennardJonesCutForceField,
     MDState,
-    NeighborList,
     VelocityVerletIntegrator,
 )
-from tests.test_molix.test_md.conftest import make_cubic_lattice
+from tests.test_molix.test_md.conftest import harmonic_potential_like
 
 _DTYPE = torch.float64
 
 
+def _harmonic_potential_like(k: float = 1.0, *, rebuilds_neighbors: bool = False):
+    """Unnamed PotentialLike helper: ``E = ½k‖x‖²``, ``F = −kx``."""
+    return harmonic_potential_like(k, rebuilds_neighbors=rebuilds_neighbors)
+
+
 def _langevin(k: float = 1.0, *, mass=1.0, **kw):
     ig = LangevinVerletIntegrator(**kw)
-    return ig.bind_force(HarmonicForceField(k).to(_DTYPE)).bind_mass(mass)
+    return ig.bind_force(_harmonic_potential_like(k)).bind_mass(mass)
 
 
 def _nve(k: float = 1.0, *, dt: float, mass=1.0, rebuild: bool | None = None):
     ig = VelocityVerletIntegrator(dt, rebuild=rebuild)
-    return ig.bind_force(HarmonicForceField(k).to(_DTYPE)).bind_mass(mass)
+    return ig.bind_force(_harmonic_potential_like(k)).bind_mass(mass)
 
 
 def test_step_constants_match_the_closed_form():
@@ -122,7 +125,7 @@ class _MidpointEuler(Integrator):
 
 
 def test_conforming_subclass_inherits_the_abc_defaults():
-    ig = _MidpointEuler(dt=0.01).bind_force(HarmonicForceField(1.0).to(_DTYPE)).to(_DTYPE)
+    ig = _MidpointEuler(dt=0.01).bind_force(_harmonic_potential_like(1.0)).to(_DTYPE)
     state = ig.initial(torch.randn(4, 3, dtype=_DTYPE), torch.zeros(4, 3, dtype=_DTYPE))
     out = ig.advance_n(state, 3)  # inherited default: loop over advance
     assert out.pos.shape == (4, 3)
@@ -136,12 +139,19 @@ def test_removed_dof_follows_the_scheme():
 
 
 def test_eval_force_casts_into_the_state_dtype():
-    """An fp32 force field driven by an fp64 state must not leak fp32 into it."""
-    from molix.md import CallableForceField
+    """An fp32 force provider driven by an fp64 state must not leak fp32 into it."""
 
-    # Returns strictly fp32 whatever it is fed — the potential's own precision.
-    ff = CallableForceField(lambda pos: ((pos.float() ** 2).sum(), -2.0 * pos.float()))
-    ig = VelocityVerletIntegrator(0.01).bind_force(ff).bind_mass(1.0).cast_state(_DTYPE)
+    class _Fp32Well:
+        rebuilds_neighbors = False
+
+        def __call__(self, pos: torch.Tensor) -> ForceOutput:
+            energy = (pos.float() ** 2).sum()
+            return ForceOutput(energy, -2.0 * pos.float())
+
+        def rebuild_neighbors(self, pos: torch.Tensor) -> None:
+            return None
+
+    ig = VelocityVerletIntegrator(0.01).bind_force(_Fp32Well()).bind_mass(1.0).cast_state(_DTYPE)
     state = ig.initial(torch.zeros(3, 3, dtype=_DTYPE), torch.zeros(3, 3, dtype=_DTYPE))
     assert state.forces.dtype == _DTYPE
     assert state.energy.dtype == _DTYPE
@@ -150,34 +160,26 @@ def test_eval_force_casts_into_the_state_dtype():
     assert advanced.vel.dtype == _DTYPE
 
 
-def test_cast_state_leaves_the_force_field_alone():
-    """The MD-side cast must not touch the potential's parameters."""
-    ff = HarmonicForceField(1.0)
-    ig = VelocityVerletIntegrator(0.01).bind_force(ff).bind_mass(1.0)
+def test_cast_state_leaves_the_force_provider_alone():
+    """The MD-side cast must not require or recurse into the force provider."""
+    helper = _harmonic_potential_like(1.0)
+    ig = VelocityVerletIntegrator(0.01).bind_force(helper).bind_mass(1.0)
     ig.cast_state(torch.float64)
     assert ig.dt.dtype == torch.float64
     assert ig.mass_col.dtype == torch.float64
-    assert ff.k.dtype == torch.float32
-
-
-class _CountingHarmonic(HarmonicForceField):
-    def __init__(self, k: float = 1.0):
-        super().__init__(k)
-        self.calls = 0
-
-    def forward(self, pos):
-        self.calls += 1
-        return super().forward(pos)
+    assert ig.force is helper
 
 
 def test_force_caching_one_eval_per_step():
     """Force caching: exactly one force-field evaluation per step (+1 to seed)."""
-    ff = _CountingHarmonic(1.0).to(_DTYPE)
-    ig = LangevinVerletIntegrator(0.05, gamma=1.0, kbt=1.0, seed=1).bind_force(ff).bind_mass(1.0)
+    helper = _harmonic_potential_like(1.0)
+    ig = (
+        LangevinVerletIntegrator(0.05, gamma=1.0, kbt=1.0, seed=1).bind_force(helper).bind_mass(1.0)
+    )
     state = ig.initial(torch.zeros(5, 3, dtype=_DTYPE), torch.zeros(5, 3, dtype=_DTYPE))
     for _ in range(10):
         state = ig.advance(state)
-    assert ff.calls == 11  # 1 (initial) + 10 (one per step)
+    assert helper.calls == 11  # 1 (initial) + 10 (one per step)
 
 
 def test_mass_must_be_positive():
@@ -188,49 +190,66 @@ def test_mass_must_be_positive():
         ig.bind_mass(torch.tensor([1.0, -2.0, 3.0]))
 
 
-class _CountingNLForce(HarmonicForceField):
-    """Harmonic well that records the positions passed to rebuild_neighbors."""
-
-    def __init__(self, k: float = 1.0):
-        super().__init__(k)
-        self.rebuild_positions: list[torch.Tensor] = []
-
-    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
-        self.rebuild_positions.append(pos.detach().clone())
-
-
-def _lj_cut_force() -> tuple[LennardJonesCutForceField, torch.Tensor]:
-    """lj/cut argon over a live list — a force field that owns a policy."""
-    pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
-    nl = NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=0.5, every=1, delay=0, check=True)
-    ff = LennardJonesCutForceField(epsilon=0.7, sigma=2.5, neighbors=nl).to(_DTYPE)
-    return ff, pos
-
-
 class TestIntegratorRebuildSwitch:
     """``Integrator.rebuild`` — a construction-time Python bool, not a counter.
 
     *Whether this integrator asks* the neighbour policy, derived from *whether
-    the force field can answer* (``ForceField.rebuilds_neighbors``). Static so
+    the bound PotentialLike can answer* (``rebuilds_neighbors``). Static so
     dynamo specialises the branch: ``rebuild=False`` leaves the body dead and
     ``torch.compile(fullgraph=True)`` still traces one graph, ``rebuild=True``
     runs the list's policy eagerly between force calls.
     """
 
+    def test_unnamed_harmonic_potential_like_binds_via_bind_force(self):
+        """``E = ½k‖x‖²`` binds through ``Integrator.bind_force``, not a FF subclass."""
+        helper = _harmonic_potential_like(k=2.0)
+        ig = Integrator().bind_force(helper)
+        pos = torch.tensor([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]], dtype=_DTYPE)
+        out = ig.eval_force(pos)
+        # ‖x‖² = 1 + 4 = 5 → E = ½·2·5 = 5; F = −2x
+        assert float(out.energy) == pytest.approx(5.0, abs=1e-10)
+        assert torch.equal(out.forces, -2.0 * pos)
+
+    def test_rebuild_true_when_helper_reports_rebuilds_neighbors(self):
+        helper = _harmonic_potential_like(1.0, rebuilds_neighbors=True)
+        ig = Integrator().bind_force(helper)
+        assert ig.rebuild is True
+
+    def test_rebuild_false_when_helper_does_not_report_rebuilds_neighbors(self):
+        helper = _harmonic_potential_like(1.0, rebuilds_neighbors=False)
+        ig = Integrator().bind_force(helper)
+        assert ig.rebuild is False
+
+    def test_no_class_defined_in_this_file_subclasses_forcefield(self):
+        import inspect
+
+        from molpy import ForceField as MolpyForceField
+
+        import tests.test_molix.test_md.test_integrators as this_module
+        from molix.md import ForceField
+
+        for name, obj in inspect.getmembers(this_module, inspect.isclass):
+            if obj.__module__ != this_module.__name__:
+                continue
+            assert not issubclass(obj, ForceField), name
+            assert not issubclass(obj, MolpyForceField), name
+
     def test_the_switch_is_derived_from_the_force_field(self):
-        """No kwarg ⇒ follow the force field, so no caller has to remember."""
-        listless = Integrator().bind_force(HarmonicForceField(1.0).to(_DTYPE))
-        ff, _ = _lj_cut_force()
-        live = VelocityVerletIntegrator(0.5).bind_force(ff)
+        """No kwarg ⇒ follow the force provider, so no caller has to remember."""
+        listless = Integrator().bind_force(_harmonic_potential_like(1.0))
+        live = VelocityVerletIntegrator(0.5).bind_force(
+            _harmonic_potential_like(1.0, rebuilds_neighbors=True)
+        )
         assert listless.rebuild is False
         assert live.rebuild is True
 
     def test_the_kwarg_overrides_the_derivation_both_ways(self):
         """The frozen-list run and the forced-policy run are both reachable."""
-        ff, _ = _lj_cut_force()
-        frozen = VelocityVerletIntegrator(0.5, rebuild=False).bind_force(ff)
+        frozen = VelocityVerletIntegrator(0.5, rebuild=False).bind_force(
+            _harmonic_potential_like(1.0, rebuilds_neighbors=True)
+        )
         forced = VelocityVerletIntegrator(0.01, rebuild=True).bind_force(
-            HarmonicForceField(1.0).to(_DTYPE)
+            _harmonic_potential_like(1.0)
         )
         assert frozen.rebuild is False
         assert forced.rebuild is True
@@ -244,10 +263,10 @@ class TestIntegratorRebuildSwitch:
         (surviving assertion of the deleted ``rebuild_every`` test).
         """
         torch.manual_seed(0)
-        force = _CountingNLForce(1.0).to(_DTYPE)
+        helper = _harmonic_potential_like(1.0, rebuilds_neighbors=True)
         ig = (
             VelocityVerletIntegrator(0.01, rebuild=True)
-            .bind_force(force)
+            .bind_force(helper)
             .bind_mass(1.0)
             .cast_state(_DTYPE)
         )
@@ -255,31 +274,31 @@ class TestIntegratorRebuildSwitch:
         vel0 = torch.randn(4, 3, dtype=_DTYPE) * 0.1
         state = ig.initial(pos0, vel0)
         # initial() → one force eval at pos0
-        assert len(force.rebuild_positions) == 1
-        assert torch.equal(force.rebuild_positions[0], pos0)
+        assert len(helper.rebuild_positions) == 1
+        assert torch.equal(helper.rebuild_positions[0], pos0)
 
         state = ig.step(state)
         # second force eval at the *new* positions (not pos0)
-        assert len(force.rebuild_positions) == 2
-        assert torch.equal(force.rebuild_positions[1], state.pos)
-        assert not torch.equal(force.rebuild_positions[1], pos0)
+        assert len(helper.rebuild_positions) == 2
+        assert torch.equal(helper.rebuild_positions[1], state.pos)
+        assert not torch.equal(helper.rebuild_positions[1], pos0)
 
     def test_a_disabled_switch_never_touches_the_list(self):
-        """``rebuild=False`` over a list-backed force field freezes the list:
+        """``rebuild=False`` over a list-capable provider freezes the policy:
         the policy clock must not even tick, or the compiled path would carry
         the host sync it exists to avoid."""
-        ff, pos = _lj_cut_force()
+        helper = _harmonic_potential_like(1.0, rebuilds_neighbors=True)
         ig = (
             VelocityVerletIntegrator(0.5, rebuild=False)
-            .bind_force(ff)
-            .bind_mass(39.95)
+            .bind_force(helper)
+            .bind_mass(1.0)
             .cast_state(_DTYPE)
         )
+        pos = torch.zeros(4, 3, dtype=_DTYPE)
         state = ig.initial(pos, torch.zeros_like(pos))
         for _ in range(3):
             state = ig.step(state)
-        assert ff.neighbors.rebuild_count == 0
-        assert ff.neighbors.ago == 0
+        assert helper.rebuild_positions == []
 
     def test_the_modulo_counter_is_gone(self):
         """One owner: the list. The integrator keeps no cadence state at all."""
@@ -289,5 +308,5 @@ class TestIntegratorRebuildSwitch:
 
     def test_a_conforming_subclass_derives_the_switch(self):
         """``bind_force`` derives the switch when ``rebuild`` was left open."""
-        ig = _MidpointEuler(dt=0.01).bind_force(HarmonicForceField(1.0).to(_DTYPE))
+        ig = _MidpointEuler(dt=0.01).bind_force(_harmonic_potential_like(1.0))
         assert ig.rebuild is False
