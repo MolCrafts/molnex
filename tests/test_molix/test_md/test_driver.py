@@ -43,11 +43,11 @@ def _two_atom_system(*, r: float = 1.5, dtype: torch.dtype = torch.float64) -> T
     return atoms
 
 
-def _nve(force, *, dt: float, dtype=None, hooks=None, rebuild=None) -> MD:
+def _nve(force, *, dt: float, dtype=None, hooks=None) -> MD:
     return (
         MD(dtype)
         .set_forcefield(force)
-        .set_integrator(VelocityVerletIntegrator(dt, rebuild=rebuild))
+        .set_integrator(VelocityVerletIntegrator(dt))
         .set_hooks(hooks)
     )
 
@@ -174,14 +174,14 @@ class TestMD:
             .set_neighbors(neighbors)
         )
         assert md.integrator is not None
-        assert md.integrator.rebuild is True
+        assert md.neighbors is neighbors
 
     def test_rebuild_is_false_without_set_neighbors(self):
         from molpy import ForceField as MolpyForceField
 
         md = MD().set_forcefield(MolpyForceField()).set_integrator(VelocityVerletIntegrator(0.01))
         assert md.integrator is not None
-        assert md.integrator.rebuild is False
+        assert md.neighbors is None
 
     def test_src_molix_md_has_no_molpot_import(self):
         import ast
@@ -227,18 +227,16 @@ class TestMDNeighborPolicy:
             .set_integrator(VelocityVerletIntegrator(0.01))
             .set_neighbors(neighbors)
         )
-        assert listless.integrator.rebuild is False
-        assert live.integrator.rebuild is True
+        assert listless.neighbors is None
+        assert live.neighbors is neighbors
 
-    def test_rebuild_false_never_ticks_the_list(self):
+    def test_without_set_neighbors_the_list_is_not_mounted(self):
         from molpy import ForceField as MolpyForceField
 
         pos, cell = make_cubic_lattice()
         neighbors = NeighborList(cell=cell, cutoff=3.5, positions=pos)
-        md = _nve(MolpyForceField(), dt=0.01, rebuild=False)
-        md.set_neighbors(neighbors)
-        assert md.integrator is not None
-        assert md.integrator.rebuild is False
+        md = _nve(MolpyForceField(), dt=0.01)
+        assert md.neighbors is None
         assert neighbors.rebuild_count == 0
         assert neighbors.ago == 0
 

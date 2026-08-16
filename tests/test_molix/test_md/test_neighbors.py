@@ -61,6 +61,34 @@ def nlist():
 class TestNeighborList:
     """Test the rebuilding fixed-capacity neighbour list."""
 
+    def test_build_writes_live_mic_geometry(self):
+        cell = torch.eye(3, dtype=torch.float64) * 10.0
+        pos = torch.tensor([[0.5, 5.0, 5.0], [9.5, 5.0, 5.0]], dtype=torch.float64)
+        pos.requires_grad_(True)
+        nl = NeighborList(cell=cell, cutoff=2.0, positions=pos.detach(), skin=0.0)
+        batch = TensorDict(
+            {
+                "atoms": TensorDict({"pos": pos}, batch_size=[2]),
+                "graphs": TensorDict({"cell": cell}, batch_size=[]),
+            },
+            batch_size=[],
+        )
+        nl.build(batch)
+        src = batch["edges", "edge_index"][:, 0]
+        tgt = batch["edges", "edge_index"][:, 1]
+        live = (src == 0) & (tgt == 1)
+        assert live.any()
+        d = batch["edges", "edge_diff"][live][0]
+        assert torch.allclose(d, torch.tensor([-1.0, 0.0, 0.0], dtype=torch.float64), atol=1e-12)
+        r = batch["edges", "edge_dist"][live][0]
+        assert float(r) == pytest.approx(1.0, abs=1e-12)
+        assert float(d.dot(d)) == pytest.approx(1.0, abs=1e-12)
+        energy = 0.5 * (d * d).sum()
+        (grad,) = torch.autograd.grad(energy, pos)
+        # dE/dpos_s = -d = (1,0,0); dE/dpos_t = d = (-1,0,0)
+        assert torch.allclose(grad[0], torch.tensor([1.0, 0.0, 0.0], dtype=torch.float64))
+        assert torch.allclose(grad[1], torch.tensor([-1.0, 0.0, 0.0], dtype=torch.float64))
+
     def test_renamed_symbol_is_the_md_export(self):
         """The MD list is exported as ``NeighborList``; the old name is gone.
 
@@ -699,20 +727,13 @@ class TestNeighborListMDMount:
         )
         assert md.neighbors is nl
         assert md.integrator is not None
-        assert md.integrator.rebuild is True
 
-    def test_rebuild_false_never_ticks_the_list(self):
+    def test_list_not_mounted_without_set_neighbors(self):
         from molpy import ForceField
 
         nl, _ = _policy_list(skin=0.5)
-        md = (
-            MD()
-            .set_forcefield(ForceField())
-            .set_integrator(VelocityVerletIntegrator(0.01, rebuild=False))
-            .set_neighbors(nl)
-        )
-        assert md.integrator is not None
-        assert md.integrator.rebuild is False
+        md = MD().set_forcefield(ForceField()).set_integrator(VelocityVerletIntegrator(0.01))
+        assert md.neighbors is None
         assert nl.rebuild_count == 0
         assert nl.ago == 0
 
@@ -791,13 +812,16 @@ class TestNeighborListBind:
         batch = nl.build(_batch(pos))
         assert batch["edges"].batch_size == torch.Size([nl.capacity])
 
-    def test_bound_edges_hold_exactly_the_index_and_the_shifts(self):
-        """The bind writes the two keys the periodic potentials read and nothing
-        else — a derived ``edge_diff`` / ``edge_dist`` written here would be a
-        stale straight-through value the moment an atom moves."""
+    def test_bound_edges_hold_index_shifts_and_live_geometry(self):
+        """The bind writes connectivity buffers plus live MIC geometry."""
         nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
         batch = nl.build(_batch(pos))
-        assert set(batch["edges"].keys()) == {"edge_index", "shifts"}
+        assert set(batch["edges"].keys()) == {
+            "edge_index",
+            "shifts",
+            "edge_diff",
+            "edge_dist",
+        }
 
     def test_build_is_never_counted_as_a_rebuild(self):
         """``rebuild_count`` means "rebuilds driven during the run". ``build`` is
@@ -916,7 +940,12 @@ class TestNeighborListBind:
             batch_size=[3],
         )
         nl.build(batch)
-        assert set(batch["edges"].keys()) == {"edge_index", "shifts"}
+        assert set(batch["edges"].keys()) == {
+            "edge_index",
+            "shifts",
+            "edge_diff",
+            "edge_dist",
+        }
         assert batch["edges"].batch_size == torch.Size([nl.capacity])
 
     # --- validation: the batch must describe *this* system -----------------

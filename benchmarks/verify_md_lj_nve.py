@@ -26,8 +26,10 @@ from pathlib import Path
 
 import torch
 
-from molix.md import LennardJonesForceField, VelocityVerletIntegrator
+from molix.md import MD, NeighborList, VelocityVerletIntegrator
 from molix.units import units
+from molpot.forcefield import ForceField
+from tensordict import TensorDict
 
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
 
@@ -83,10 +85,48 @@ def main() -> int:
     pos = _icosahedron13(2.0 ** (1.0 / 6.0) * _SIGMA)
     vel = _maxwell_velocities(pos.shape[0], kbt, args.seed)
 
-    ff = LennardJonesForceField(epsilon=_EPS, sigma=_SIGMA).to(_DTYPE)
-    ig = VelocityVerletIntegrator(_DT).bind_force(ff).bind_mass(_MASS)
+    n = int(pos.shape[0])
+    ff = (
+        ForceField("lj13", units="metal")
+        .def_pairstyle("lj/cut", cutoff=50.0)
+        .with_params(
+            atoms={
+                "epsilon": torch.full((n,), 0.0103, dtype=_DTYPE),
+                "sigma": torch.full((n,), _SIGMA, dtype=_DTYPE),
+            }
+        )
+    )
+    cell = torch.eye(3, dtype=_DTYPE) * 80.0
+    pos = pos + 40.0
+    nl = NeighborList(cell=cell, cutoff=50.0, positions=pos, skin=1.0)
+    system = TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": pos,
+                    "vel": vel,
+                    "mass": torch.full((n,), _MASS, dtype=_DTYPE),
+                    "batch": torch.zeros(n, dtype=torch.long),
+                },
+                batch_size=[n],
+            ),
+            "graphs": TensorDict({"cell": cell}, batch_size=[1]),
+        },
+        batch_size=[],
+    )
+    md = (
+        MD(_DTYPE)
+        .set_forcefield(ff)
+        .set_neighbors(nl)
+        .set_integrator(VelocityVerletIntegrator(_DT))
+    )
+    ig = md.integrator
+    assert ig is not None
+    md._wire()
+    nl.build(system)
+    if md._adapter is not None:
+        md._adapter.bind_work(system)
     step = ig.step if args.no_compile else torch.compile(ig.step, fullgraph=True)
-
     state = ig.initial(pos, vel)
     e0 = _total_energy(state.energy, state.vel)
     ts: list[float] = []

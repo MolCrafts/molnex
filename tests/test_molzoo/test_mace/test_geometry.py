@@ -92,13 +92,13 @@ class TestEdgeVectors:
 
     def test_shifts_are_added_to_the_displacement(self, pos, edge_index, shifts):
         """``S_ij`` enters additively — not as a minimum-image wrap."""
-        vectors = edge_vectors(pos, edge_index, shifts=shifts)
+        vectors = edge_vectors(pos, edge_index, edge_diff=edge_vectors(pos, edge_index) + shifts)
         expected = torch.tensor(EXPECTED_SHIFTED_VECTORS, dtype=torch.float64)
         assert torch.allclose(vectors, expected, atol=POSITION_ATOL, rtol=0.0)
 
     def test_shifted_result_equals_shift_free_plus_shifts(self, pos, edge_index, shifts):
         """The additive law, stated directly against the shift-free call."""
-        shifted = edge_vectors(pos, edge_index, shifts=shifts)
+        shifted = edge_vectors(pos, edge_index, edge_diff=edge_vectors(pos, edge_index) + shifts)
         assert torch.allclose(
             shifted, edge_vectors(pos, edge_index) + shifts, atol=POSITION_ATOL, rtol=0.0
         )
@@ -113,7 +113,8 @@ class TestEdgeVectors:
     def test_position_gradient_is_unchanged_by_shifts(self, pos, edge_index, shifts):
         """``S_ij`` is constant w.r.t. ``pos``, so it drops out of the gradient."""
         leaf = pos.clone().requires_grad_(True)
-        (grad,) = torch.autograd.grad(edge_vectors(leaf, edge_index, shifts=shifts).sum(), leaf)
+        imaged = edge_vectors(leaf.detach(), edge_index) + shifts
+        (grad,) = torch.autograd.grad(edge_vectors(leaf, edge_index, edge_diff=imaged).sum(), leaf)
         expected = torch.tensor(EXPECTED_VECTOR_SUM_GRAD, dtype=torch.float64)
         assert torch.allclose(grad, expected, atol=POSITION_ATOL, rtol=0.0)
 
@@ -138,7 +139,8 @@ class TestEdgeLengths:
 
     def test_shifted_lengths_are_the_minimum_image_distances(self, pos, edge_index, shifts):
         """With ``S_ij`` folded in, the length is the imaged distance."""
-        lengths = edge_lengths(edge_vectors(pos, edge_index, shifts=shifts))
+        imaged = edge_vectors(pos, edge_index) + shifts
+        lengths = edge_lengths(edge_vectors(pos, edge_index, edge_diff=imaged))
         expected = torch.tensor(EXPECTED_SHIFTED_LENGTHS, dtype=torch.float64)
         assert torch.allclose(lengths, expected, atol=POSITION_ATOL, rtol=0.0)
 

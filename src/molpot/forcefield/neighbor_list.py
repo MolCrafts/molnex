@@ -27,22 +27,86 @@ class NeighborListBuilder:
         atom_batch: torch.Tensor,
         cell: torch.Tensor | None,
         cutoff: float | None,
+        edges: object | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Return half-list ``edge_index (E,2)`` and ``distances (E,)``.
 
         Args:
-            pos: ``(N, 3)``.
+            pos: ``(N, 3)`` in Å.
             atom_batch: molecule id ``(N,)``.
             cell: optional ``(3, 3)`` periodic cell.
             cutoff: if set, only pairs with ``r < cutoff`` (periodic uses
                 molpy :class:`NeighborQuery`; open uses all-pairs filter).
+            edges: optional mapping with ``edge_index`` and ``edge_diff``
+                or ``edge_dist``. When present, those already-placed
+                distances are used and PBC is not applied again.
         """
         n = pos.shape[0]
         if n < 2:
             return None
+        placed = self._from_placed(pos, edges, cutoff)
+        if placed is not None:
+            return placed
         if cell is not None and cutoff is not None and cutoff > 0:
             return self._periodic(pos, atom_batch, cell, cutoff)
         return self._open(pos, atom_batch, cutoff)
+
+    def _from_placed(
+        self,
+        pos: torch.Tensor,
+        edges: object | None,
+        cutoff: float | None,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if edges is None:
+            return None
+        getter = edges.get if hasattr(edges, "get") else None
+        if getter is None:
+            try:
+                edge_index = edges["edge_index"]  # type: ignore[index]
+            except Exception:
+                return None
+        else:
+            edge_index = getter("edge_index")
+            if edge_index is None:
+                try:
+                    edge_index = edges["edges", "edge_index"]  # type: ignore[index]
+                except Exception:
+                    return None
+        if edge_index is None:
+            return None
+        if getter is not None:
+            edge_diff = getter("edge_diff")
+            edge_dist = getter("edge_dist")
+            num_edges = getter("num_edges")
+            shifts = getter("shifts")
+        else:
+            edge_diff = edges["edge_diff"] if "edge_diff" in edges else None  # type: ignore[operator]
+            edge_dist = edges["edge_dist"] if "edge_dist" in edges else None  # type: ignore[operator]
+            num_edges = edges["num_edges"] if "num_edges" in edges else None  # type: ignore[operator]
+            shifts = edges["shifts"] if "shifts" in edges else None  # type: ignore[operator]
+        if edge_diff is None and edge_dist is None:
+            return None
+        n_live = int(num_edges) if num_edges is not None else int(edge_index.shape[0])
+        edge_index = edge_index[:n_live]
+        src, tgt = edge_index[:, 0], edge_index[:, 1]
+        if edge_diff is not None:
+            edge_diff = edge_diff[:n_live]
+            implied = edge_diff.detach() - (pos.detach()[tgt] - pos.detach()[src])
+            vectors = pos[tgt] - pos[src] + implied
+            dist = vectors.norm(dim=-1)
+        elif shifts is not None:
+            shifts = shifts[:n_live]
+            dist = (pos[tgt] - pos[src] + shifts[:n_live]).norm(dim=-1)
+        else:
+            dist = edge_dist[:n_live]
+        keep = src < tgt
+        if cutoff is not None:
+            keep = keep & (dist < cutoff) & (dist > 0)
+        edge_index = edge_index[keep]
+        dist = dist[keep]
+        if edge_index.shape[0] == 0:
+            return None
+        return edge_index, dist
 
     def _open(
         self,

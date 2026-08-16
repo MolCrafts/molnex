@@ -6,11 +6,11 @@ must not be treated as authority for a new training submission.
 
 ## Active specifications
 
-- [md-forcefield-molpy-reexport-01-reexport](md-forcefield-molpy-reexport-01-reexport.md) — molix.md ForceField 再导出 molpy.ForceField；删除自制适配器 [approved]
-- [md-forcefield-molpy-reexport-02-nblist](md-forcefield-molpy-reexport-02-nblist.md) — NeighborList 写入 live MIC 几何；MD 调度 nblist 再求值 [approved]
-- [md-forcefield-molpy-reexport-03-potentials](md-forcefield-molpy-reexport-03-potentials.md) — molpot pair 项读 batch 位移/距离，禁止二次 PBC [approved]
-- [md-forcefield-molpy-reexport-04-mace](md-forcefield-molpy-reexport-04-mace.md) — MACE 消费 edge_diff，shifts 不再是 PBC 通道 [approved]
-- [md-forcefield-molpy-reexport-05-wire](md-forcefield-molpy-reexport-05-wire.md) — 全树调用方改走 def_pairstyle + set_forcefield/set_neighbors [approved]
+- [md-forcefield-molpy-reexport-01-reexport](md-forcefield-molpy-reexport-01-reexport.md) — molix.md ForceField 再导出 molpy.ForceField；删除自制适配器 [code-complete]
+- [md-forcefield-molpy-reexport-02-nblist](md-forcefield-molpy-reexport-02-nblist.md) — NeighborList 写入 live MIC 几何；MD 调度 nblist 再求值 [code-complete]
+- [md-forcefield-molpy-reexport-03-potentials](md-forcefield-molpy-reexport-03-potentials.md) — molpot pair 项读 batch 位移/距离，禁止二次 PBC [code-complete]
+- [md-forcefield-molpy-reexport-04-mace](md-forcefield-molpy-reexport-04-mace.md) — MACE 消费 edge_diff，shifts 不再是 PBC 通道 [code-complete]
+- [md-forcefield-molpy-reexport-05-wire](md-forcefield-molpy-reexport-05-wire.md) — 全树调用方改走 def_pairstyle + set_forcefield/set_neighbors [code-complete]
 - [pinet-quantization-thermal-noise-02-md-driver](pinet-quantization-thermal-noise-02-md-driver.md) — in-process velocity-Verlet and Langevin MD driver; approved with acceptance work pending.
 - [cuet-force-doublebackward](cuet-force-doublebackward.md) — cuet equivariant Linear double-backward repair; in progress with acceptance work pending.
 - [mace-neighbor-graph-correctness](mace-neighbor-graph-correctness.md) — independent multi-image neighbor oracle; code complete with one acceptance criterion pending.

@@ -51,7 +51,6 @@ from tensordict import TensorDict
 from molix.compile import Compiler
 from molix.md import (
     MD,
-    LennardJonesCutForceField,
     MaxwellBoltzmann,
     MDHook,
     NeighborList,
@@ -209,21 +208,24 @@ def main() -> int:
     # sit on pot_dtype. Casting the whole module to pot_dtype would drag the
     # list with it via _apply and smuggle a second free variable into the
     # "precision matrix".
-    ff = LennardJonesCutForceField(epsilon=_EPS, sigma=_SIGMA, neighbors=neighbors)
-    ff = ff.to(device=device, dtype=md_dtype)
-    if pot_dtype != md_dtype:
-        for name in ("epsilon", "sigma", "cutoff_sq", "energy_shift"):
-            ff.register_buffer(name, getattr(ff, name).detach().to(dtype=pot_dtype))
-    compiled = not args.no_compile
-    if compiled:
-        ff = Compiler(cuda_graphs=args.cuda_graphs, fullgraph=True)(ff)
+    from molpot.forcefield import ForceField
 
+    n_atoms = int(pos.shape[0])
+    ff = (
+        ForceField("ljcut", units="metal")
+        .def_pairstyle("lj/cut", cutoff=2.5 * _SIGMA)
+        .with_params(
+            atoms={
+                "epsilon": torch.full((n_atoms,), _EPS, dtype=md_dtype, device=device),
+                "sigma": torch.full((n_atoms,), _SIGMA, dtype=md_dtype, device=device),
+            }
+        )
+    )
     sampler = _EnergySampler(args.dt)
-    # No cadence kwarg: the list owns the policy and the integrator derives its
-    # switch from LennardJonesCutForceField.rebuilds_neighbors.
     md = (
         MD(md_dtype)
         .set_forcefield(ff)
+        .set_neighbors(neighbors)
         .set_integrator(VelocityVerletIntegrator(args.dt))
         .set_hooks([sampler])
         .to(device)

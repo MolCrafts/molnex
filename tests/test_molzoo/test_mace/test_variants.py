@@ -235,7 +235,6 @@ class TestMACEMatpes:
     ) -> None:
         """``run_nve.py:118`` binds this private core and calls it positionally."""
         edge_index = cluster["edges", "edge_index"]
-        shifts = torch.zeros(edge_index.shape[0], 3, dtype=torch.float64)
         with torch.no_grad():
             energy = matpes_variant._compute_energy(
                 cluster["atoms", "pos"],
@@ -243,7 +242,7 @@ class TestMACEMatpes:
                 edge_index,
                 cluster["atoms", "batch"],
                 1,
-                shifts,
+                edge_diff=cluster["edges", "edge_diff"],
             )
         assert energy.shape == (1,)
 
@@ -258,7 +257,7 @@ class TestMACEMatpes:
                 cluster["edges", "edge_index"],
                 cluster["atoms", "batch"],
                 1,
-                None,
+                edge_diff=cluster["edges", "edge_diff"],
             )
         energy = matpes_variant(cluster)["graphs", "energy"]
         assert float((energy - direct).abs().max()) == EXACT
@@ -475,8 +474,9 @@ class TestMACEMatpes:
         outs = []
         for factor in PBC_CAPACITY_FACTORS:
             nl = NeighborList(cell=cell, cutoff=PBC_CUTOFF, positions=pos, capacity_factor=factor)
+            edge_diff = pos[nl.edge_index[:, 1]] - pos[nl.edge_index[:, 0]] + nl.shifts
             out = matpes_variant.energy_forces(
-                pos, Z, nl.edge_index, batch, num_graphs=1, shifts=nl.shifts
+                pos, Z, nl.edge_index, batch, num_graphs=1, edge_diff=edge_diff
             )
             outs.append((nl, out))
 
@@ -502,12 +502,18 @@ class TestMACEMatpes:
             positions=pos,
             capacity_factor=REBUILD_CAPACITY_FACTOR,
         )
+        edge_diff = pos[nl.edge_index[:, 1]] - pos[nl.edge_index[:, 0]] + nl.shifts
         before = matpes_variant.energy_forces(
-            pos, Z, nl.edge_index, batch, num_graphs=1, shifts=nl.shifts
+            pos, Z, nl.edge_index, batch, num_graphs=1, edge_diff=edge_diff
         )["energy"].clone()
         nl.rebuild(pos)
         after = matpes_variant.energy_forces(
-            pos, Z, nl.edge_index, batch, num_graphs=1, shifts=nl.shifts
+            pos,
+            Z,
+            nl.edge_index,
+            batch,
+            num_graphs=1,
+            edge_diff=pos[nl.edge_index[:, 1]] - pos[nl.edge_index[:, 0]] + nl.shifts,
         )["energy"]
         assert torch.equal(before, after)
 

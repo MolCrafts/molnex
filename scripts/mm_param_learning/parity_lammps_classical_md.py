@@ -42,7 +42,6 @@ if str(_ROOT / "src") not in sys.path:
 from molix.ff_export import LammpsWriter  # noqa: E402
 from molix.md import (  # noqa: E402
     MD,
-    CallableForceField,
     MDHook,
     MDObservables,
     MDRunner,
@@ -137,15 +136,7 @@ def synthetic_opls_ff(dtype: torch.dtype = torch.float64) -> ForceField:
     )
 
 
-def bind_md_force(ff: ForceField, batch: TensorDict) -> CallableForceField:
-    pots = ff.to_potentials()
-    template = batch.clone()
 
-    def _fn(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        template["atoms", "pos"] = pos
-        return pots.calc_energy_forces(template, pos=pos)
-
-    return CallableForceField(_fn, energy_scale=1.0 / _KCAL_PER_MD)
 
 
 def run_molnex_nve(
@@ -158,11 +149,10 @@ def run_molnex_nve(
     n_steps: int,
     dtype: torch.dtype,
 ) -> tuple[_PosEnergyHook, float]:
-    force = bind_md_force(ff, batch)
     hook = _PosEnergyHook()
     md = (
         MD(dtype)
-        .set_forcefield(force)
+        .set_forcefield(ff)
         .set_integrator(VelocityVerletIntegrator(dt))
         .set_hooks([hook])
     )

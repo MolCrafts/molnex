@@ -60,19 +60,9 @@ from molix.md.types import ForceOutput, MDState
 class PotentialLike(Protocol):
     """Internal ``pos -> ForceOutput`` provider bound on an integrator.
 
-    Not a public type and not :class:`molpy.ForceField`. Public mounting is
-    :meth:`~molix.md.driver.MD.set_forcefield`; :meth:`Integrator.bind_force`
-    is for :class:`~molix.md.driver.MD` wiring and integrator unit tests.
-    ``molpy.optimize``'s ``PotentialLike`` eats a ``Frame`` and is not this
-    protocol.
-
-    Attributes:
-        rebuilds_neighbors: Whether :meth:`rebuild_neighbors` should run
-            before each force evaluation.
+    Not a public type and not :class:`molpy.ForceField`. Neighbour-list
+    cadence lives on :class:`~molix.md.driver.MD.compute_force`, not here.
     """
-
-    @property
-    def rebuilds_neighbors(self) -> bool: ...
 
     def __call__(self, pos: torch.Tensor) -> ForceOutput:
         """Energy and forces at ``pos`` ``(N, 3)`` Å.
@@ -83,14 +73,6 @@ class PotentialLike(Protocol):
         Returns:
             :class:`~molix.md.types.ForceOutput` in the integrator energy unit
             (amu·Å²/fs²) after any unit conversion the provider applies.
-        """
-        ...
-
-    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
-        """Refresh the neighbour list at ``pos``, or no-op if none is bound.
-
-        Args:
-            pos: Positions ``(N, 3)`` in Å being evaluated.
         """
         ...
 
@@ -128,26 +110,14 @@ class Integrator(nn.Module):
     between observations, and :attr:`removed_dof` states the
     temperature-estimator convention.
 
-    Args:
-        rebuild: Whether :meth:`eval_force` asks the bound provider's neighbour
-            policy. ``None`` (default) derives it from
-            :attr:`PotentialLike.rebuilds_neighbors` when :meth:`bind_force`
-            runs. Pass ``False`` to freeze the list for a compiled rollout,
-            ``True`` to force the question.
     """
 
-    def __init__(self, *, rebuild: bool | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
         self.force: PotentialLike | None = None
-        self._rebuild_override: bool | None = rebuild
-        self.rebuild: bool = False if rebuild is None else bool(rebuild)
 
     def bind_force(self, force: PotentialLike) -> Integrator:
         """Attach the :class:`PotentialLike` this integrator will evaluate.
-
-        Rebuild is derived from :attr:`PotentialLike.rebuilds_neighbors` only
-        when the constructor left it unspecified. A later re-bind keeps an
-        explicit ``rebuild=`` override.
 
         Args:
             force: Internal ``pos -> ForceOutput`` provider (MD adapter or an
@@ -157,8 +127,6 @@ class Integrator(nn.Module):
             ``self``.
         """
         self.force = force
-        if self._rebuild_override is None:
-            self.rebuild = bool(force.rebuilds_neighbors)
         return self
 
     def bind_mass(self, mass: float | torch.Tensor) -> Integrator:
@@ -197,27 +165,12 @@ class Integrator(nn.Module):
     def eval_force(self, pos: torch.Tensor) -> ForceOutput:
         """Evaluate the force field, casting its output to the state dtype.
 
-        The **only** neighbour-policy seam in the engine. With
-        :attr:`rebuild` set, the force field is asked once here, at ``pos``,
-        immediately before the force call — and the *list* decides, under its
-        own ``skin`` / ``every`` / ``delay`` / ``check`` gate.
-
-        Why here and nowhere else: velocity-Verlet evaluates ``F`` at the
-        *end-of-step* positions, so a refresh wired to step-start leaves the
-        connectivity one displacement behind the positions entering
-        ``F = -∇E``.
-
-        Compile invariant: :attr:`rebuild` is a Python bool, so dynamo
-        specialises this branch. ``rebuild=False`` leaves the call dead and
-        ``torch.compile(ig.rollout, fullgraph=True)`` still traces one graph.
-
-        The force field owns its own precision; energy/forces come back in
-        ``pos``'s dtype.
+        Neighbour-list cadence is :meth:`~molix.md.driver.MD.compute_force`'s
+        job. This method only calls the bound provider and casts energy/forces
+        to ``pos.dtype``.
         """
         if self.force is None:
             raise RuntimeError("bind a force field before evaluating")
-        if self.rebuild:
-            self.force.rebuild_neighbors(pos)
         out = self.force(pos)
         return ForceOutput(out.energy.to(pos.dtype), out.forces.to(pos.dtype))
 
@@ -259,11 +212,10 @@ class VelocityVerletIntegrator(Integrator):
 
     Args:
         dt: Timestep Δt in fs.
-        rebuild: Forwarded to :class:`Integrator`.
     """
 
-    def __init__(self, dt: float, *, rebuild: bool | None = None) -> None:
-        super().__init__(rebuild=rebuild)
+    def __init__(self, dt: float) -> None:
+        super().__init__()
         self.register_buffer("dt", torch.as_tensor(float(dt)))
 
     def step(self, state: MDState) -> MDState:
@@ -302,7 +254,6 @@ class LangevinVerletIntegrator(Integrator):
         kbt: Thermal energy k_B·T in the integrator's energy unit.
         seed: Seed for the eager noise generator (reproducible :meth:`advance`).
             :meth:`rollout` uses global RNG so it stays compilable.
-        rebuild: Forwarded to :class:`Integrator`.
     """
 
     def __init__(
@@ -312,9 +263,8 @@ class LangevinVerletIntegrator(Integrator):
         gamma: float,
         kbt: float,
         seed: int = 0,
-        rebuild: bool | None = None,
     ) -> None:
-        super().__init__(rebuild=rebuild)
+        super().__init__()
         if float(gamma) <= 0.0:
             raise ValueError(
                 "LangevinVerletIntegrator requires gamma > 0; use VelocityVerletIntegrator for NVE"

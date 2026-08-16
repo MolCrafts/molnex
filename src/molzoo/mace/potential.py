@@ -428,6 +428,8 @@ class MACEPotential(MACEEncoder):
         edge_index: torch.Tensor,
         batch: torch.Tensor,
         num_graphs: int,
+        *,
+        edge_diff: torch.Tensor | None = None,
         shifts: torch.Tensor | None = None,
         total_charge: torch.Tensor | None = None,
         total_spin: torch.Tensor | None = None,
@@ -465,11 +467,8 @@ class MACEPotential(MACEEncoder):
             num_graphs: Number of graphs ``B``. An argument, not
                 ``int(batch.max().item()) + 1``: that host sync would break the
                 traced graph and stall the MD hot path.
-            shifts: Optional periodic shift vectors ``(E, 3)`` in Å
-                (``unit_shifts @ cell``), added to the edge displacements so a
-                neighbour across a periodic boundary enters at its imaged
-                position. Constant w.r.t. ``positions``, so the forces stay
-                exact.
+            edge_diff: Optional already-imaged displacements ``(E, 3)`` in Å.
+            shifts: Rejected. Raises ``TypeError``.
             total_charge: Per-graph total charge ``(B,)`` in units of the
                 elementary charge ``e`` (OMOL only; defaults to neutral). Used
                 as an integer index into an embedding table, offset by the
@@ -488,7 +487,9 @@ class MACEPotential(MACEEncoder):
                 ``total_charge`` or ``total_spin`` — silently ignoring them
                 would return a plausible, wrong energy.
         """
-        vectors = edge_vectors(positions, edge_index, shifts)
+        if shifts is not None:
+            raise TypeError("energy_core no longer takes shifts; pass edge_diff=")
+        vectors = edge_vectors(positions, edge_index, edge_diff=edge_diff)
         lengths = edge_lengths(vectors)
 
         node_attrs = self.node_attrs(Z, positions.dtype)
@@ -686,13 +687,18 @@ class MACEPotential(MACEEncoder):
             # target — ``energy_core`` is, and it takes ``num_graphs`` directly.
             num_graphs = int(atom_batch.max().item()) + 1
 
+        if ("edges", "edge_diff") not in nested:
+            raise ValueError(
+                "MACEPotential.forward requires edges.edge_diff; "
+                "edges.shifts is no longer a PBC channel"
+            )
         energy = self.energy_core(
             positions,
             Z,
             edge_index,
             atom_batch,
             num_graphs,
-            shifts=batch["edges", "shifts"] if ("edges", "shifts") in nested else None,
+            edge_diff=batch["edges", "edge_diff"],
             total_charge=(
                 batch["graphs", "total_charge"] if ("graphs", "total_charge") in nested else None
             ),

@@ -28,7 +28,6 @@ if str(_ROOT / "src") not in sys.path:
 
 from molix.md import (  # noqa: E402
     MD,
-    CallableForceField,
     MDHook,
     MDObservables,
     MDRunner,
@@ -151,20 +150,6 @@ def butane_like_batch(*, dtype: torch.dtype = torch.float64) -> TensorDict:
     )
 
 
-def bind_forcefield(ff: ForceField, batch: TensorDict) -> CallableForceField:
-    """Bind a filled ForceField to pos→(E,F) in MD (amu, Å, fs) units."""
-    pots = ff.to_potentials()
-    # template batch: positions swapped each call
-    template = batch.clone()
-
-    def _fn(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        template["atoms", "pos"] = pos
-        return pots.calc_energy_forces(template, pos=pos)
-
-    scale = 1.0 / _KCAL_PER_MD
-    return CallableForceField(_fn, energy_scale=scale)
-
-
 def run_nve(
     ff: ForceField,
     batch: TensorDict,
@@ -175,11 +160,10 @@ def run_nve(
     n_steps: int,
     dtype: torch.dtype,
 ) -> tuple[list[torch.Tensor], list[float], float]:
-    force = bind_forcefield(ff, batch)
     hook = _PosHook()
     md = (
         MD(dtype)
-        .set_forcefield(force)
+        .set_forcefield(ff)
         .set_integrator(VelocityVerletIntegrator(dt))
         .set_hooks([hook])
     )

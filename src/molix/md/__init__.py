@@ -30,7 +30,7 @@ rebuilt in place into fixed-capacity buffers so the force path can stay inside
 a CUDA graph. Mount it with :meth:`~molix.md.driver.MD.set_neighbors`. There
 is exactly one caller — :meth:`~molix.md.integrators.Integrator.eval_force`
 asks once per force evaluation, at the positions being evaluated, iff a list
-is mounted. An integrator built with ``rebuild=False`` freezes the list.
+is mounted. Omit :meth:`~molix.md.driver.MD.set_neighbors` to freeze the list.
 """
 
 from molix.md.driver import MD, MaxwellBoltzmann

@@ -85,7 +85,7 @@ FD_PROBES = ((0, 0), (2, 1), (4, 2))
 FLAT_ENERGY_CORE_PARAMETERS = ("self", "positions", "Z", "edge_index", "batch", "num_graphs")
 
 #: The two per-graph conditioning tensors only the OMOL variant consumes.
-CONDITIONING_PARAMETERS = ("shifts", "total_charge", "total_spin")
+CONDITIONING_PARAMETERS = ("edge_diff", "shifts", "total_charge", "total_spin")
 
 #: A third force path in this file is forbidden (CLAUDE.md "Force derivation").
 FORBIDDEN_GRAD_CALLS = frozenset(
@@ -357,10 +357,10 @@ class TestMACEPotential:
     ) -> None:
         """``edges.shifts`` must reach the edge vectors, not be dropped."""
         pos, Z, edge_index, batch, num_graphs = raw_tensors(periodic_cluster)
-        shifts = periodic_cluster["edges", "shifts"]
+        edge_diff = periodic_cluster["edges", "edge_diff"]
         with torch.no_grad():
             expected = matpes_potential.energy_core(
-                pos, Z, edge_index, batch, num_graphs, shifts=shifts
+                pos, Z, edge_index, batch, num_graphs, edge_diff=edge_diff
             )
         out = matpes_potential(periodic_cluster)
         assert torch.allclose(out["graphs", "energy"], expected, atol=ENERGY_PARITY_ATOL, rtol=0.0)
@@ -568,9 +568,9 @@ class TestMACEPotential:
         """The ``edges.shifts`` path is the MD path — it gets its own parity check."""
         potential, variant = matpes_parity
         pos, Z, edge_index, batch, num_graphs = raw_tensors(periodic_cluster)
-        shifts = periodic_cluster["edges", "shifts"]
+        edge_diff = periodic_cluster["edges", "edge_diff"]
         reference = variant.energy_forces(
-            pos, Z, edge_index, batch, num_graphs=num_graphs, shifts=shifts
+            pos, Z, edge_index, batch, num_graphs=num_graphs, edge_diff=edge_diff
         )
         energy = potential(periodic_cluster)["graphs", "energy"]
         assert torch.allclose(energy, reference["energy"], atol=ENERGY_PARITY_ATOL, rtol=0.0), (
@@ -583,9 +583,9 @@ class TestMACEPotential:
         """``S_ij`` is constant w.r.t. ``pos``, so the forces stay exact."""
         potential, variant = matpes_parity
         pos, Z, edge_index, batch, num_graphs = raw_tensors(periodic_cluster)
-        shifts = periodic_cluster["edges", "shifts"]
+        edge_diff = periodic_cluster["edges", "edge_diff"]
         reference = variant.energy_forces(
-            pos, Z, edge_index, batch, num_graphs=num_graphs, shifts=shifts
+            pos, Z, edge_index, batch, num_graphs=num_graphs, edge_diff=edge_diff
         )
         forces = potential(periodic_cluster)["atoms", "forces"]
         assert torch.allclose(forces, reference["forces"], atol=FORCE_PARITY_ATOL, rtol=0.0), (

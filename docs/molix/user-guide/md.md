@@ -9,23 +9,24 @@ each component is constructed on its own and attached.
 import torch
 from molix.md import (
     MD,
+    ForceField,
     MaxwellBoltzmann,
-    PotentialForceField,
     TrajectoryHook,
+    VelocityInitHook,
     VelocityVerletIntegrator,
 )
 
-force = PotentialForceField(potential, template)   # bind a potential to a system
-# system["atoms"] holds pos, vel, mass (amu)
+ff = ForceField(potential, system, neighbors=nl)   # PBC is the list's job
 md = (
-    MD(torch.float64)                              # MD-side dtype only
-    .set_forcefield(force)                         # force field owns its dtype
+    MD(torch.float64)
+    .set_forcefield(ff)
     .set_integrator(VelocityVerletIntegrator(0.5))
-    .set_hooks([TrajectoryHook("traj.pt", stride=10, numbers=Z)])
+    .set_hooks([
+        VelocityInitHook(MaxwellBoltzmann(300, seed=0)),
+        TrajectoryHook("traj.pt", stride=10, numbers=Z),
+    ])
 )
-
-MaxwellBoltzmann().sample(system, 300.0, seed=0)   # reads atoms.mass, writes atoms.vel
-final = md.run(system, n_steps=100_000)            # -> MDState; writes atoms.pos / vel
+final = md.run(system, n_steps=100_000)
 ```
 
 Units are (amu, Å, fs); energy in amu·Å²/fs². Convert with pint-style
@@ -63,10 +64,8 @@ precision inside the model is the force field's job (wrap the callable /
 
 | You have | Use |
 |---|---|
-| A molpot potential + collated template (open system) | `PotentialForceField` |
-| A TensorDict potential reading `edges.shifts` + a periodic cell | `PeriodicPotentialForceField` (owns a rebuilding `NeighborList`) |
-| A bulk Lennard-Jones system (periodic, truncated-shifted, LAMMPS `lj/cut`) | `LennardJonesCutForceField` over a `NeighborList` |
-| Any `pos -> (energy, forces)` callable (AOTI `.pt2`, compiled closure, external engine) | `CallableForceField` |
+| A potential + system (open: no list; PBC: pass `neighbors=`) | `ForceField` |
+| A bulk Lennard-Jones system (periodic, truncated-shifted, LAMMPS `lj/cut`) | `ForceField().def_pairstyle("lj/cut")` + `NeighborList` |
 | An analytic test PES | `HarmonicForceField`, `LennardJonesForceField` |
 
 The **list owns the rebuild cadence**: `NeighborList(skin=, every=, delay=,
@@ -92,6 +91,7 @@ from molix.md import (
     LennardJonesCutForceField,
     MaxwellBoltzmann,
     NeighborList,
+    VelocityInitHook,
     VelocityVerletIntegrator,
 )
 
@@ -102,9 +102,9 @@ md = (
     MD(torch.float64)
     .set_forcefield(ff)
     .set_integrator(VelocityVerletIntegrator(4.0))
+    .set_hooks([VelocityInitHook(MaxwellBoltzmann(172.0, seed=1))])
     .to("cuda")
 )
-MaxwellBoltzmann().sample(system, 172.0, seed=1)
 state = md.run(system, n_steps=25_000)
 ```
 

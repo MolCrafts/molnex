@@ -25,12 +25,8 @@ def _harm_langevin(gamma: float):
     )
 
 
-def _harm_nve(*, rebuild: bool | None = None):
-    return (
-        VelocityVerletIntegrator(0.01, rebuild=rebuild)
-        .bind_force(harmonic_potential_like(1.0, rebuilds_neighbors=rebuild is not False))
-        .bind_mass(1.0)
-    )
+def _harm_nve():
+    return VelocityVerletIntegrator(0.01).bind_force(harmonic_potential_like(1.0)).bind_mass(1.0)
 
 
 def test_step_compile_matches_eager_deterministic():
@@ -48,42 +44,24 @@ def test_rollout_compile_nve_matches_eager():
     """NVE rollout: noise weight c2=0 → compiled == eager despite RNG path."""
     pos = torch.randn(5, 3, dtype=_DTYPE)
     vel = torch.randn(5, 3, dtype=_DTYPE)
-    eager = _harm_nve(rebuild=False).rollout(
-        _harm_nve(rebuild=False).initial(pos.clone(), vel.clone()), 8
-    )
-    ig = _harm_nve(rebuild=False)
+    eager = _harm_nve().rollout(_harm_nve().initial(pos.clone(), vel.clone()), 8)
+    ig = _harm_nve()
     comp = torch.compile(ig.rollout, fullgraph=True)(ig.initial(pos.clone(), vel.clone()), 8)
     assert torch.allclose(eager.pos, comp.pos, atol=1e-10)
     assert torch.allclose(eager.vel, comp.vel, atol=1e-10)
 
 
-def test_frozen_rebuild_rollout_compiles_fullgraph_and_skips_the_policy():
-    """``rebuild=False`` is the compiled-path invariant: dynamo specialises the
-    Python bool, the policy body stays dead, and ``rollout`` still traces to
-    one graph and matches eager.
-    """
-    helper = harmonic_potential_like(1.0, rebuilds_neighbors=True)
-    ig = VelocityVerletIntegrator(0.01, rebuild=False).bind_force(helper).bind_mass(1.0)
+def test_nve_rollout_compiles_fullgraph():
+    """Integrator.rollout traces one graph over an unnamed PotentialLike."""
+    helper = harmonic_potential_like(1.0)
+    ig = VelocityVerletIntegrator(0.01).bind_force(helper).bind_mass(1.0)
     pos = torch.randn(5, 3, dtype=_DTYPE)
     vel = torch.zeros_like(pos)
     eager = ig.rollout(ig.initial(pos.clone(), vel.clone()), 4)
-    helper2 = harmonic_potential_like(1.0, rebuilds_neighbors=True)
-    ig2 = VelocityVerletIntegrator(0.01, rebuild=False).bind_force(helper2).bind_mass(1.0)
+    ig2 = VelocityVerletIntegrator(0.01).bind_force(harmonic_potential_like(1.0)).bind_mass(1.0)
     comp = torch.compile(ig2.rollout, fullgraph=True, backend=_BACKEND)(
         ig2.initial(pos.clone(), vel.clone()), 4
     )
     assert torch.allclose(eager.pos, comp.pos, atol=1e-12)
     assert torch.allclose(eager.forces, comp.forces, atol=1e-12)
     assert torch.allclose(eager.energy, comp.energy, atol=1e-12)
-    assert helper.rebuild_positions == []
-    assert helper2.rebuild_positions == []
-
-
-def test_live_rebuild_advances_eagerly_and_drives_the_policy():
-    """``rebuild=True`` keeps the loop eager and the policy actually fires."""
-    helper = harmonic_potential_like(1.0, rebuilds_neighbors=True)
-    ig = VelocityVerletIntegrator(0.01, rebuild=True).bind_force(helper).bind_mass(1.0)
-    pos = torch.randn(5, 3, dtype=_DTYPE)
-    state = ig.initial(pos, torch.zeros_like(pos))
-    ig.advance_n(state, 4)
-    assert len(helper.rebuild_positions) == 5  # 1 (initial) + 4 steps

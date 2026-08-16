@@ -1,6 +1,6 @@
 ---
 title: 经典 pair 项读取 batch 已放置几何（禁止二次 PBC）
-status: approved
+status: code-complete
 created: 2026-08-16
 slug: md-forcefield-molpy-reexport-03-potentials
 chain: md-forcefield-molpy-reexport

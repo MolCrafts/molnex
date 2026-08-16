@@ -30,8 +30,8 @@ def _langevin(k: float = 1.0, *, mass=1.0, **kw):
     return ig.bind_force(_harmonic_potential_like(k)).bind_mass(mass)
 
 
-def _nve(k: float = 1.0, *, dt: float, mass=1.0, rebuild: bool | None = None):
-    ig = VelocityVerletIntegrator(dt, rebuild=rebuild)
+def _nve(k: float = 1.0, *, dt: float, mass=1.0):
+    ig = VelocityVerletIntegrator(dt)
     return ig.bind_force(_harmonic_potential_like(k)).bind_mass(mass)
 
 
@@ -210,15 +210,10 @@ class TestIntegratorRebuildSwitch:
         assert float(out.energy) == pytest.approx(5.0, abs=1e-10)
         assert torch.equal(out.forces, -2.0 * pos)
 
-    def test_rebuild_true_when_helper_reports_rebuilds_neighbors(self):
-        helper = _harmonic_potential_like(1.0, rebuilds_neighbors=True)
-        ig = Integrator().bind_force(helper)
-        assert ig.rebuild is True
-
-    def test_rebuild_false_when_helper_does_not_report_rebuilds_neighbors(self):
-        helper = _harmonic_potential_like(1.0, rebuilds_neighbors=False)
-        ig = Integrator().bind_force(helper)
-        assert ig.rebuild is False
+    def test_integrator_has_no_rebuild_switch(self):
+        ig = Integrator().bind_force(_harmonic_potential_like(1.0))
+        assert not hasattr(ig, "rebuild")
+        assert not hasattr(ig, "rebuilds_neighbors")
 
     def test_no_class_defined_in_this_file_subclasses_forcefield(self):
         import inspect
@@ -234,79 +229,9 @@ class TestIntegratorRebuildSwitch:
             assert not issubclass(obj, ForceField), name
             assert not issubclass(obj, MolpyForceField), name
 
-    def test_the_switch_is_derived_from_the_force_field(self):
-        """No kwarg ⇒ follow the force provider, so no caller has to remember."""
-        listless = Integrator().bind_force(_harmonic_potential_like(1.0))
-        live = VelocityVerletIntegrator(0.5).bind_force(
-            _harmonic_potential_like(1.0, rebuilds_neighbors=True)
-        )
-        assert listless.rebuild is False
-        assert live.rebuild is True
-
-    def test_the_kwarg_overrides_the_derivation_both_ways(self):
-        """The frozen-list run and the forced-policy run are both reachable."""
-        frozen = VelocityVerletIntegrator(0.5, rebuild=False).bind_force(
-            _harmonic_potential_like(1.0, rebuilds_neighbors=True)
-        )
-        forced = VelocityVerletIntegrator(0.01, rebuild=True).bind_force(
-            _harmonic_potential_like(1.0)
-        )
-        assert frozen.rebuild is False
-        assert forced.rebuild is True
-
-    def test_the_seam_fires_once_per_force_evaluation_at_those_positions(self):
-        """The policy must run at the positions ``F`` is evaluated at.
-
-        Velocity-Verlet evaluates ``F`` at the *end-of-step* positions, so a
-        seam wired to step-start would leave the list one displacement behind
-        the positions entering ``F = -∇E`` — a systematic NVE energy leak
-        (surviving assertion of the deleted ``rebuild_every`` test).
-        """
-        torch.manual_seed(0)
-        helper = _harmonic_potential_like(1.0, rebuilds_neighbors=True)
-        ig = (
-            VelocityVerletIntegrator(0.01, rebuild=True)
-            .bind_force(helper)
-            .bind_mass(1.0)
-            .cast_state(_DTYPE)
-        )
-        pos0 = torch.randn(4, 3, dtype=_DTYPE)
-        vel0 = torch.randn(4, 3, dtype=_DTYPE) * 0.1
-        state = ig.initial(pos0, vel0)
-        # initial() → one force eval at pos0
-        assert len(helper.rebuild_positions) == 1
-        assert torch.equal(helper.rebuild_positions[0], pos0)
-
-        state = ig.step(state)
-        # second force eval at the *new* positions (not pos0)
-        assert len(helper.rebuild_positions) == 2
-        assert torch.equal(helper.rebuild_positions[1], state.pos)
-        assert not torch.equal(helper.rebuild_positions[1], pos0)
-
-    def test_a_disabled_switch_never_touches_the_list(self):
-        """``rebuild=False`` over a list-capable provider freezes the policy:
-        the policy clock must not even tick, or the compiled path would carry
-        the host sync it exists to avoid."""
-        helper = _harmonic_potential_like(1.0, rebuilds_neighbors=True)
-        ig = (
-            VelocityVerletIntegrator(0.5, rebuild=False)
-            .bind_force(helper)
-            .bind_mass(1.0)
-            .cast_state(_DTYPE)
-        )
-        pos = torch.zeros(4, 3, dtype=_DTYPE)
-        state = ig.initial(pos, torch.zeros_like(pos))
-        for _ in range(3):
-            state = ig.step(state)
-        assert helper.rebuild_positions == []
-
     def test_the_modulo_counter_is_gone(self):
         """One owner: the list. The integrator keeps no cadence state at all."""
         ig = _nve(1.0, dt=0.01, mass=1.0)
         assert not hasattr(ig, "rebuild_every")
         assert not hasattr(ig, "_force_eval_count")
-
-    def test_a_conforming_subclass_derives_the_switch(self):
-        """``bind_force`` derives the switch when ``rebuild`` was left open."""
-        ig = _MidpointEuler(dt=0.01).bind_force(_harmonic_potential_like(1.0))
-        assert ig.rebuild is False
+        assert not hasattr(ig, "rebuild")

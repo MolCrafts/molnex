@@ -1,6 +1,6 @@
 ---
 title: MACE 消费已成像的 edge_diff，不再用 shifts 做最小镜像
-status: approved
+status: code-complete
 created: 2026-08-16
 slug: md-forcefield-molpy-reexport-04-mace
 chain: md-forcefield-molpy-reexport

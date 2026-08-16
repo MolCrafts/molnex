@@ -848,6 +848,25 @@ class NeighborList:
         self.shifts[n:] = self._dead_shift()
         self.num_edges = n
 
+    def _write_geometry(self, batch: TensorDict, pos: torch.Tensor) -> None:
+        """Write live MIC ``edge_diff`` / ``edge_dist`` from ``pos`` (Å).
+
+        ``edge_diff = pos[target] - pos[source] + shifts``. ``pos`` is not
+        detached so ``edge_diff`` stays on the position autograd graph.
+        ``shifts`` is the constant lattice remainder from the last connectivity
+        build.
+
+        Args:
+            batch: Working system TensorDict with an ``edges`` namespace.
+            pos: Live positions ``(N, 3)`` in Å — the same tensor as
+                ``batch["atoms", "pos"]``.
+        """
+        source = self.edge_index[:, 0]
+        target = self.edge_index[:, 1]
+        edge_diff = pos[target] - pos[source] + self.shifts
+        batch["edges", "edge_diff"] = edge_diff
+        batch["edges", "edge_dist"] = edge_diff.norm(dim=-1)
+
     def _hold(self, positions: torch.Tensor) -> None:
         """Adopt ``positions`` as the reference of the current build.
 
@@ -1048,6 +1067,7 @@ class NeighborList:
             {"edge_index": self.edge_index, "shifts": self.shifts},
             batch_size=[self.capacity],
         )
+        self._write_geometry(batch, positions)
         return batch
 
     def update(self, positions: TensorDict | torch.Tensor) -> bool:
@@ -1096,33 +1116,36 @@ class NeighborList:
                 under ``check=False``, which skips the displacement branch
                 entirely.
         """
-        if isinstance(positions, TensorDictBase):
-            positions = self._positions_from(positions)
+        batch = positions if isinstance(positions, TensorDictBase) else None
+        pos = self._positions_from(positions) if batch is not None else positions
+        rebuilt = False
         self.ago += 1
-        if self.ago < self.delay or self.ago % self.every:
-            return False  # not a permitted opportunity
-        if not self.check:
-            self.rebuild(positions)
-            return True
-        # Raw difference, never a minimum image: min-imaging would clamp a
-        # genuine > L/2 excursion and suppress the rebuild it should force.
-        max_d2 = float(((positions.detach() - self._x_hold) ** 2).sum(-1).max())
-        if max_d2 >= self._wrap_guard_sq:
-            raise RuntimeError(
-                f"positions are no longer unwrapped: the largest displacement since the last "
-                f"build is {math.sqrt(max_d2):.3f} A, at or beyond half the minimum "
-                f"perpendicular cell width ({math.sqrt(self._wrap_guard_sq):.3f} A). The frozen "
-                "periodic shifts and this raw displacement test hold only for continuously "
-                "drifting coordinates, so a jump this large means the positions were wrapped "
-                "mid-run, the cell changed, or the trajectory blew up. All three are fatal; "
-                "none is recoverable by rebuilding."
-            )
-        if max_d2 > self._half_skin_sq:  # strict: exactly skin/2 is still complete
-            if self.ago == self._danger_ago:
-                self.ndanger += 1
-            self.rebuild(positions)
-            return True
-        return False
+        permitted = self.ago >= self.delay and self.ago % self.every == 0
+        if permitted:
+            if not self.check:
+                self.rebuild(pos)
+                rebuilt = True
+            else:
+                # Raw difference, never a minimum image: min-imaging would clamp a
+                # genuine > L/2 excursion and suppress the rebuild it should force.
+                max_d2 = float(((pos.detach() - self._x_hold) ** 2).sum(-1).max())
+                if max_d2 >= self._wrap_guard_sq:
+                    jumped = math.sqrt(max_d2)
+                    half_w = math.sqrt(self._wrap_guard_sq)
+                    raise RuntimeError(
+                        f"positions are no longer unwrapped: displacement {jumped:.3f} A "
+                        f">= half min perpendicular cell width ({half_w:.3f} A). "
+                        "The frozen periodic shifts hold only for continuously drifting "
+                        "coordinates. Wrap, cell change, or blow-up are fatal."
+                    )
+                if max_d2 > self._half_skin_sq:  # strict: exactly skin/2 is still complete
+                    if self.ago == self._danger_ago:
+                        self.ndanger += 1
+                    self.rebuild(pos)
+                    rebuilt = True
+        if batch is not None:
+            self._write_geometry(batch, pos)
+        return rebuilt
 
     def to(
         self,

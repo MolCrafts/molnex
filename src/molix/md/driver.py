@@ -23,7 +23,7 @@ integrator is constructed with ``dt`` only.
 Neighbour-list cadence is not ``MD``'s. Configure it on
 :class:`~molix.md.neighbors.NeighborList` and mount with
 :meth:`MD.set_neighbors`. A frozen list for a compiled rollout is
-``VelocityVerletIntegrator(dt, rebuild=False)``.
+omit :meth:`MD.set_neighbors` to freeze the list.
 """
 
 from __future__ import annotations
@@ -45,26 +45,12 @@ _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin")
 
 
 class _TensorDictForce:
-    """Private :class:`~molix.md.integrators.PotentialLike` over ``to_potentials()``."""
+    """Private ``pos -> ForceOutput`` over ``to_potentials()``."""
 
-    def __init__(
-        self,
-        pots: object,
-        neighbors: NeighborList | None,
-        scale: float,
-    ) -> None:
+    def __init__(self, pots: object, scale: float) -> None:
         self._pots = pots
-        self._neighbors = neighbors
         self._scale = float(scale)
         self._work: TensorDict | None = None
-
-    @property
-    def rebuilds_neighbors(self) -> bool:
-        return self._neighbors is not None
-
-    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
-        if self._neighbors is not None:
-            self._neighbors.update(pos)
 
     def bind_work(self, work: TensorDict) -> None:
         self._work = work
@@ -98,8 +84,15 @@ class _TensorDictForce:
             )
         if "graphs" not in work.keys():
             work["graphs"] = TensorDict({}, batch_size=[])
-        work[ENERGY_KEY] = energy
-        work[FORCES_KEY] = forces
+        stored = energy.reshape(-1) if energy.ndim == 0 else energy
+        try:
+            work[ENERGY_KEY] = stored
+        except RuntimeError:
+            pass
+        try:
+            work[FORCES_KEY] = forces
+        except RuntimeError:
+            pass
         scale = self._scale
         return ForceOutput(energy.detach().sum() * scale, forces.detach() * scale)
 
@@ -191,12 +184,12 @@ class MD:
         When both a force field and an integrator are already set, the
         integrator's :attr:`~molix.md.integrators.Integrator.rebuild` switch
         turns on. :meth:`run` calls :meth:`NeighborList.build` once; each
-        :meth:`~molix.md.integrators.Integrator.eval_force` then asks
+        :meth:`~molix.md.driver.MD.compute_force` then asks
         :meth:`NeighborList.update`.
 
         Args:
-            neighbors: Fixed-capacity MD neighbour list. ``build`` still writes
-                only ``edge_index`` and ``shifts``.
+            neighbors: Fixed-capacity MD neighbour list. ``build`` writes
+                ``edge_index``, ``shifts``, live ``edge_diff`` and ``edge_dist``.
 
         Returns:
             ``self``.
@@ -240,9 +233,32 @@ class MD:
             return
         pots = self.force.to_potentials()
         scale = preset_energy_to_md(self.force.units)
-        self._adapter = _TensorDictForce(pots, self.neighbors, scale)
-        self.integrator.bind_force(self._adapter)
+        self._adapter = _TensorDictForce(pots, scale)
+        self.integrator.bind_force(self.compute_force)
         self.runner = MDRunner(self.integrator, hooks=self.hooks)
+
+    def compute_force(self, pos: torch.Tensor) -> ForceOutput:
+        """Update the neighbour list on the working batch, then evaluate.
+
+        Writes ``pos`` into the work TensorDict (Å), calls
+        :meth:`NeighborList.update` when a list is mounted, then
+        ``pots.calc_energy`` / ``calc_forces``.
+
+        Args:
+            pos: Positions ``(N, 3)`` in Å.
+
+        Returns:
+            :class:`~molix.md.types.ForceOutput` in amu·Å²/fs².
+        """
+        if self._adapter is None:
+            raise RuntimeError("set_forcefield and set_integrator before compute_force")
+        work = self._adapter._work
+        if work is None:
+            raise RuntimeError("bind the working TensorDict before evaluating forces")
+        work[POS_KEY] = pos
+        if self.neighbors is not None:
+            self.neighbors.update(work)
+        return self._adapter(pos)
 
     def run(self, system: TensorDict, n_steps: int, *, chunk: int | None = None) -> MDState:
         """Integrate ``n_steps`` on ``system``, writing ``atoms.pos`` / ``atoms.vel``.

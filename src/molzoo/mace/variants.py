@@ -268,6 +268,8 @@ class MACEMatpes(MACEPotential):
         edge_index: torch.Tensor,
         batch: torch.Tensor,
         num_graphs: int | None = None,
+        *,
+        edge_diff: torch.Tensor | None = None,
         shifts: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Energy and forces from raw tensors, off the batch schema.
@@ -315,7 +317,9 @@ class MACEMatpes(MACEPotential):
             num_graphs = int(batch.max().item()) + 1
         leaf = positions.detach().requires_grad_(True)
         with torch.enable_grad():
-            energy = self.energy_core(leaf, Z, edge_index, batch, num_graphs, shifts)
+            if shifts is not None:
+                raise TypeError("energy_forces no longer takes shifts; pass edge_diff=")
+            energy = self.energy_core(leaf, Z, edge_index, batch, num_graphs, edge_diff=edge_diff)
         return {"energy": energy.detach(), "forces": autograd_forces_from_energy(energy, leaf)}
 
 
@@ -423,6 +427,8 @@ class MACEOMol(MACEPotential):
         batch: torch.Tensor,
         total_charge: torch.Tensor,
         total_spin: torch.Tensor,
+        *,
+        edge_diff: torch.Tensor | None = None,
         shifts: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Energy and forces from raw tensors, conditioning tensors included.
@@ -459,13 +465,15 @@ class MACEOMol(MACEPotential):
         """
         leaf = positions.detach().requires_grad_(True)
         with torch.enable_grad():
+            if shifts is not None:
+                raise TypeError("energy_forces no longer takes shifts; pass edge_diff=")
             energy = self.energy_core(
                 leaf,
                 Z,
                 edge_index,
                 batch,
                 total_charge.shape[0],
-                shifts,
+                edge_diff=edge_diff,
                 total_charge=total_charge,
                 total_spin=total_spin,
             )

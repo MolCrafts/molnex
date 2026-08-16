@@ -30,25 +30,33 @@ import torch
 def edge_vectors(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
+    *,
+    edge_diff: torch.Tensor | None = None,
     shifts: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Source→target edge displacements, with optional periodic shifts.
+    """Source→target edge displacements from live ``pos``.
 
     Args:
         pos: Atom positions ``(N, 3)`` in Å.
         edge_index: Source/target pairs ``(E, 2)``; ``[:, 0]`` = source,
             ``[:, 1]`` = target (the repo-wide edge convention).
-        shifts: Optional periodic shift vectors ``(E, 3)`` in Å
-            (``unit_shifts @ cell``), added to the raw displacement.
+        edge_diff: Optional already-imaged displacements ``(E, 3)`` in Å.
+            Used as the *value*; the gradient is ``∂(pos[t]-pos[s])/∂pos``.
+        shifts: Rejected. Raises ``TypeError`` — PBC is not applied here.
 
     Returns:
-        Edge displacement ``r_ij = pos[target] - pos[source] (+ S_ij)``
-        ``(E, 3)`` in Å.
+        Edge displacement ``(E, 3)`` in Å.
+
+    Raises:
+        TypeError: If ``shifts`` is passed.
     """
-    vectors = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
     if shifts is not None:
-        vectors = vectors + shifts
-    return vectors
+        raise TypeError("edge_vectors no longer takes shifts; pass edge_diff=")
+    raw = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    if edge_diff is None:
+        return raw
+    remainder = (edge_diff - raw).detach()
+    return raw + remainder
 
 
 def edge_lengths(vectors: torch.Tensor, *, keepdim: bool = False) -> torch.Tensor:

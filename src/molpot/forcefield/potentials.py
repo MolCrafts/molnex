@@ -79,6 +79,7 @@ class Potentials(BasePotential):
         self.lj: LJCutPotential | None = None
         self.coulomb_open: CoulombOpenPotential | None = None
         self.coulomb_periodic: CoulombPeriodicPotential | None = None
+        self.mlip = getattr(forcefield, "_mlip", None)
         self._assemble_pair_potentials()
         self._assemble_bonded()
 
@@ -162,6 +163,8 @@ class Potentials(BasePotential):
         forces are written in place and the batch is returned so the module
         can sit inside :class:`~molix.md.forcefield.PotentialForceField`.
         """
+        if self.mlip is not None and isinstance(data, TensorDict) and kwargs.get("pos") is None:
+            return self.mlip(data)
         energy, forces = self.calc_energy_forces(data, pos=kwargs.get("pos"))
         if isinstance(data, TensorDict):
             if "graphs" not in data.keys():
@@ -199,6 +202,11 @@ class Potentials(BasePotential):
             a single molecule — in the ForceField's unit convention
             (``units="real"`` default: kcal/mol).
         """
+        if self.mlip is not None and isinstance(system, TensorDict):
+            if pos is not None:
+                system["atoms", "pos"] = pos
+            out = self.mlip(system)
+            return out[ENERGY_KEY]
         p = self._pos(system, pos)
         num_graphs = self._num_graphs(system)
         total = torch.zeros((num_graphs,) if num_graphs > 1 else (), device=p.device, dtype=p.dtype)
@@ -399,7 +407,10 @@ class Potentials(BasePotential):
         n = pos.shape[0]
         atom_batch = self._atom_batch(system, n, pos.device)
         cell = self._cell(system)
-        built = self._neighbors.build(pos=pos, atom_batch=atom_batch, cell=cell, cutoff=cutoff)
+        edges = self._namespace(system, "edges")
+        built = self._neighbors.build(
+            pos=pos, atom_batch=atom_batch, cell=cell, cutoff=cutoff, edges=edges
+        )
         if built is None:
             return None
         edge_index, dist = built
