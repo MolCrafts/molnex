@@ -59,6 +59,7 @@ class ForceField(MolpyForceField):
         )
         self._style_options: dict[str, dict[str, Any]] = {}
         self._params: dict[str, dict[str, torch.Tensor]] = {}
+        self._mlip: Any = None
 
     def def_atomstyle(self, name: str = "full") -> Self:
         super().def_atomstyle(name)
@@ -80,8 +81,19 @@ class ForceField(MolpyForceField):
         super().def_improperstyle(name)
         return self
 
-    def def_pairstyle(self, name: str = "lj/cut", **options: Any) -> Self:
-        """Register a pair style; extra options (cutoff, smearing, …) stay on the Potential."""
+    def def_pairstyle(self, name: str | Any = "lj/cut", **options: Any) -> Self:
+        """Register a pair style.
+
+        A string is a classical style (``lj/cut``, ``coulomb``, …). An
+        ``nn.Module`` (MACE, PiNet, …) is the MLIP pair term — same seam,
+        same ForceField. Periodicity is the neighbour list's job, not a
+        second ForceField class.
+        """
+        if not isinstance(name, str):
+            self._mlip = name
+            if options:
+                self._style_options["pair:mlip"] = dict(options)
+            return self
         super().def_pairstyle(name)
         if options:
             self._style_options[f"pair:{name}"] = dict(options)

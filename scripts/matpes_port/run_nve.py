@@ -30,11 +30,9 @@ config.set_precision("fp64")
 from molix.compile import Compiler  # noqa: E402
 from molix.md import (  # noqa: E402
     MD,
-    ForceOutput,
     LangevinVerletIntegrator,
     MaxwellBoltzmann,
     MDCheckpointHook,
-    MDRunner,
     NeighborList,
     TrajectoryHook,
     VelocityInitHook,
@@ -44,7 +42,6 @@ from molix.units import units  # noqa: E402
 
 _EV_TO_MD = (1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2").magnitude
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
-from molpot.derivation.force import autograd_forces_from_energy  # noqa: E402
 from molzoo.mace import MACEPotential  # noqa: E402
 
 
@@ -97,85 +94,99 @@ def read_poscar(path: Path) -> dict[str, torch.Tensor]:
     }
 
 
-def _matpes_energy_forces(
+def _batched_cell(cell: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """``graphs.cell`` is ``(B, 3, 3)``; a single cell is ``(1, 3, 3)``."""
+    out = cell.to(device)
+    if out.dim() == 2:
+        if tuple(out.shape) != (3, 3):
+            raise ValueError(f"cell must be (3, 3) or (1, 3, 3), got {tuple(out.shape)}")
+        return out.unsqueeze(0)
+    if out.dim() != 3 or out.shape[0] != 1 or tuple(out.shape[1:]) != (3, 3):
+        raise ValueError(f"cell must be (3, 3) or (1, 3, 3), got {tuple(out.shape)}")
+    return out
+
+
+def _system_td(
+    *,
+    pos: torch.Tensor,
+    vel: torch.Tensor,
+    mass: torch.Tensor,
+    Z: torch.Tensor,
+    cell: torch.Tensor,
+    device: torch.device,
+) -> TensorDict:
+    """Post-collate MD batch: ``atoms`` is ``[N]``, ``graphs`` is ``[1]``."""
+    n = int(pos.shape[0])
+    return TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": pos,
+                    "vel": vel,
+                    "mass": mass,
+                    "Z": Z.to(device=device, dtype=torch.long),
+                    "batch": torch.zeros(n, dtype=torch.long, device=device),
+                },
+                batch_size=[n],
+            ),
+            "graphs": TensorDict({"cell": _batched_cell(cell, device)}, batch_size=[1]),
+        },
+        batch_size=[],
+    )
+
+
+def _bind_energy_core(
     model: MACEPotential,
     *,
-    Z: torch.Tensor,
-    neighbors: NeighborList,
     potential_dtype: torch.dtype,
-    compile_energy: bool = False,
-    autocast_dtype: torch.dtype | None = None,
-):
-    """Closure ``pos -> (energy, forces)`` over MACE-MatPES' compiled energy core.
+    compile_energy: bool,
+    autocast_dtype: torch.dtype | None,
+) -> None:
+    """Install ``energy_core`` so the Molpot path matches the flat compile seam.
 
-    Only the model-specific part lives here — the compiled/autocast energy plus
-    in-place autograd forces (MACE's ``get_outputs`` shape, written out rather
-    than calling ``model.energy_forces`` so the compiled closure can substitute
-    the eager one). Neighbour rebuild stays on NeighborList; the unit
-    bridge is applied in ``_PosForce`` before the integrator.
-
-    ``compile_energy`` wraps the energy in ``Compiler(cuda_graphs=True)``
-    (inductor + ``reduce-overhead`` + CUDA graphs). Only the energy is
-    compiled; ``autograd.grad`` runs outside the graph. Valid here because the
-    fixed-capacity neighbour list keeps every shape static — 8.5x (fp64) /
-    14.6x (fp32) on GH200, see
-    ``docs/molix/explanation/throughput-and-compilation.md``.
+    ``_write_energy`` calls ``model.energy_core(..., edge_diff=)``. Casts sit
+    *outside* the compiled region: the leaf can stay in the MD dtype, the
+    model sees ``potential_dtype``. ``x.to(x.dtype)`` is the identity, so
+    same-precision arms do not clone.
     """
-    core = model.energy_core
-    if autocast_dtype is not None:
-        # The autocast region must sit INSIDE the compiled callable: wrapped
-        # outside, it invalidates the CUDA-graph capture and the "compiled"
-        # bf16 arm runs 4x slower than fp32 (measured 52 vs 12 ms/step).
-        # Inside, dynamo traces the region and inductor fuses through it.
-        def core(p, Z, ei, batch, ng, shifts, _f=model.energy_core, _d=autocast_dtype):
+    raw = model.energy_core
+
+    def _flat(positions, Z, edge_index, batch, num_graphs, edge_diff, _f=raw, _d=autocast_dtype):
+        if _d is not None:
             with torch.autocast(device_type="cuda", dtype=_d):
-                return _f(p, Z, ei, batch, ng, shifts)
+                return _f(positions, Z, edge_index, batch, num_graphs, edge_diff=edge_diff)
+        return _f(positions, Z, edge_index, batch, num_graphs, edge_diff=edge_diff)
 
-    energy_fn = Compiler(cuda_graphs=True)(core) if compile_energy else core
-    batch = torch.zeros(Z.shape[0], dtype=torch.long, device=Z.device)
+    energy_fn = Compiler(cuda_graphs=True)(_flat) if compile_energy else _flat
 
-    def energy_forces(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # The force field owns its precision: the leaf lives in the MODEL's
-        # dtype (a same-dtype .to is the identity), forces come back in it,
-        # and Integrator.eval_force casts to the state dtype at the boundary —
-        # the split-precision contract of molix.md.driver.MD.
-        leaf = pos.detach().to(potential_dtype).requires_grad_(True)
-        with torch.enable_grad():
-            # (E, 2) end to end: the list's rebuilt-in-place buffer feeds the
-            # core directly — one storage, no per-step transpose.
-            energy = energy_fn(
-                leaf, Z, neighbors.edge_index, batch, 1, neighbors.shifts.to(potential_dtype)
-            )
-        forces = autograd_forces_from_energy(energy, leaf)
-        return energy.sum().detach(), forces.detach()
+    def core(
+        positions,
+        Z,
+        edge_index,
+        batch,
+        num_graphs,
+        *,
+        edge_diff=None,
+        shifts=None,
+        **kwargs,
+    ):
+        if shifts is not None:
+            raise TypeError("energy_core no longer takes shifts; pass edge_diff=")
+        if edge_diff is None:
+            raise TypeError("energy_core requires edge_diff=")
+        energy = energy_fn(
+            positions.to(dtype=potential_dtype),
+            Z,
+            edge_index,
+            batch,
+            num_graphs,
+            edge_diff.to(dtype=potential_dtype),
+        )
+        # reduce-overhead CUDA graphs reuse the output buffer; clone so
+        # calc_energy then calc_forces (or a later print) can still read E.
+        return energy.clone()
 
-    return energy_forces
-
-
-class _PosForce:
-    """PotentialLike: pos -> ForceOutput. MD.set_forcefield is molpy-only."""
-
-    def __init__(self, energy_forces, neighbors: NeighborList, scale: float) -> None:
-        self._ef = energy_forces
-        self._nl = neighbors
-        self._scale = float(scale)
-
-    @property
-    def rebuilds_neighbors(self) -> bool:
-        return True
-
-    def rebuild_neighbors(self, pos: torch.Tensor) -> None:
-        self._nl.update(pos)
-
-    def bind_work(self, _work) -> None:
-        return None
-
-    def to_pots(self, _device) -> None:
-        return None
-
-    def __call__(self, pos: torch.Tensor) -> ForceOutput:
-        energy, forces = self._ef(pos)
-        return ForceOutput(energy * self._scale, forces * self._scale)
+    model.energy_core = core
 
 
 def _bind_md(dtype, force_field, integrator, neighbors, hooks, device) -> MD:
@@ -192,14 +203,13 @@ def _bind_md(dtype, force_field, integrator, neighbors, hooks, device) -> MD:
 
 def minimize_fire(
     force_field,
-    pos: torch.Tensor,
+    work: TensorDict,
     neighbors: NeighborList,
     *,
     fmax_eV_A: float,
     max_steps: int,
-    ev_to_md: float,
 ) -> tuple[torch.Tensor, dict]:
-    """FIRE on the live force field. ``pos`` is updated in place and returned."""
+    """FIRE on the live force field. ``work['atoms','pos']`` is updated in place."""
     dt = 0.1
     dt_max = 1.0
     n_min = 5
@@ -207,31 +217,20 @@ def minimize_fire(
     f_dec = 0.5
     alpha_start = 0.1
     alpha = alpha_start
+    pos = work["atoms", "pos"]
     vel = torch.zeros_like(pos)
     n_pos = 0
     e_eV = 0.0
     fmax = float("inf")
     step = 0
+    pots = force_field.to_potentials()
     for step in range(1, max_steps + 1):
-        neighbors.update(pos)
-        work = TensorDict(
-            {"atoms": TensorDict({"pos": pos}, batch_size=[int(pos.shape[0])])},
-            batch_size=[],
-        )
-        neighbors.build(work)
-        pots = force_field.to_potentials()
+        work["atoms", "pos"] = pos
+        neighbors.update(work)
         energy = pots.calc_energy(work)
         forces = pots.calc_forces(work)
-
-        class _Out:
-            pass
-
-        out = _Out()
-        out.energy = energy.sum()
-        out.forces = forces
-        forces = out.forces
-        e_eV = float(out.energy) / ev_to_md
-        fmax = float((forces / ev_to_md).abs().max())
+        e_eV = float(energy.sum())
+        fmax = float(forces.abs().max())
         if fmax < fmax_eV_A:
             break
         power = float((forces * vel).sum())
@@ -251,7 +250,8 @@ def minimize_fire(
             vel = (1.0 - alpha) * vel + alpha * forces * (vnorm / fnorm)
         vel = vel + dt * forces
         pos = pos + dt * vel
-    neighbors.update(pos)
+    work["atoms", "pos"] = pos
+    neighbors.update(work)
     return pos, {
         "steps": step,
         "E_eV": e_eV,
@@ -277,7 +277,12 @@ def main() -> None:
     parser.add_argument("--out", type=Path)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--dt", type=float, default=0.5, help="timestep in fs")
-    parser.add_argument("--temperature", type=float, default=300.0, help="initial / NVT target T in K")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=300.0,
+        help="initial / NVT target T in K",
+    )
     parser.add_argument(
         "--nvt-steps",
         type=int,
@@ -467,41 +472,31 @@ def main() -> None:
     )
     from molpot.forcefield import ForceField as MolpotForceField
 
-    if args.compile:
-        _matpes_energy_forces(
-            model,
-            Z=Z.to(device),
-            neighbors=neighbors,
-            potential_dtype=potential_dtype,
-            compile_energy=True,
-            autocast_dtype=torch.bfloat16 if args.autocast_bf16 else None,
-        )
+    _bind_energy_core(
+        model,
+        potential_dtype=potential_dtype,
+        compile_energy=args.compile,
+        autocast_dtype=torch.bfloat16 if args.autocast_bf16 else None,
+    )
     ff = MolpotForceField("matpes", units="metal")
     ff.def_pairstyle(model)
     force_field = ff
 
-    t0 = time.perf_counter()
-    _probe = TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "Z": Z.to(device),
-                    "batch": torch.zeros(Z.numel(), dtype=torch.long, device=device),
-                    "mass": mass,
-                },
-                batch_size=[int(Z.numel())],
-            ),
-            "graphs": TensorDict({"cell": cell.to(device)}, batch_size=[1]),
-        },
-        batch_size=[],
+    atoms = _system_td(
+        pos=pos,
+        vel=torch.zeros_like(pos),
+        mass=mass,
+        Z=Z,
+        cell=cell,
+        device=device,
     )
-    neighbors.build(_probe)
+    t0 = time.perf_counter()
+    neighbors.build(atoms)
     pots0 = force_field.to_potentials()
-    e0 = pots0.calc_energy(_probe)
-    f0 = pots0.calc_forces(_probe)
+    e0 = pots0.calc_energy(atoms)
+    f0 = pots0.calc_forces(atoms)
     print(
-        f"single point: E = {float(e0.sum()) :.6f} eV, "
+        f"single point: E = {float(e0.sum()):.6f} eV, "
         f"|F|max = {float(f0.abs().max()):.6f} eV/A "
         f"({time.perf_counter() - t0:.2f} s)"
     )
@@ -509,18 +504,16 @@ def main() -> None:
     if args.minimize_fmax > 0.0 and args.resume is None:
         if args.minimize_steps < 1:
             raise ValueError(f"--minimize-steps must be >= 1, got {args.minimize_steps}")
-        print(
-            f"FIRE minimize fmax={args.minimize_fmax:g} eV/A  max_steps={args.minimize_steps}"
-        )
+        print(f"FIRE minimize fmax={args.minimize_fmax:g} eV/A  max_steps={args.minimize_steps}")
         t_min = time.perf_counter()
         pos, min_info = minimize_fire(
             force_field,
-            pos,
+            atoms,
             neighbors,
             fmax_eV_A=args.minimize_fmax,
             max_steps=args.minimize_steps,
-            ev_to_md=_EV_TO_MD,
         )
+        atoms["atoms", "vel"] = torch.zeros_like(pos)
         print(
             f"FIRE done in {time.perf_counter() - t_min:.1f} s: conv={min_info['converged']} "
             f"steps={min_info['steps']} E={min_info['E_eV']:.6f} eV "
@@ -536,35 +529,23 @@ def main() -> None:
         resume_vel = ckpt["vel"].to(dtype=config.ftype, device=device)
         args.out = args.out.with_name(f"{args.out.stem}.from{start_step}{args.out.suffix}")
         print(f"resuming at step {start_step}; trajectory continues in {args.out}")
-        # NeighborList was built at the IC; resume positions are far away in
-        # unwrapped space. Rebuild here so the unwrap/displacement test is
-        # anchored at the resume frame, not the IC.
-        neighbors.update(pos)
+        # NeighborList was built at the IC; resume positions have drifted in
+        # unwrapped space. rebuild() re-anchors _x_hold — update() would
+        # treat the jump as a wrap and abort.
+        neighbors.rebuild(pos)
 
     if args.nvt_steps < 0:
         raise ValueError(f"--nvt-steps must be >= 0, got {args.nvt_steps}")
     if args.nvt_steps > 0:
         if args.nvt_gamma <= 0.0:
-            raise ValueError(
-                f"--nvt-gamma must be > 0 when --nvt-steps > 0, got {args.nvt_gamma}"
-            )
+            raise ValueError(f"--nvt-gamma must be > 0 when --nvt-steps > 0, got {args.nvt_gamma}")
         if args.temperature <= 0.0:
             raise ValueError(f"--temperature must be > 0 for NVT, got {args.temperature}")
 
     n_atoms = int(pos.shape[0])
-    atoms = TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "vel": torch.zeros_like(pos) if resume_vel is None else resume_vel,
-                    "mass": mass,
-                },
-                batch_size=[n_atoms],
-            )
-        },
-        batch_size=[],
-    )
+    if resume_vel is not None:
+        atoms["atoms", "pos"] = pos
+        atoms["atoms", "vel"] = resume_vel
 
     def _instant_T(*, remove_com: bool) -> float:
         vel = atoms["atoms", "vel"]
