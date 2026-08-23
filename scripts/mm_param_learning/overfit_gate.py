@@ -2,8 +2,9 @@
 
 Trains the Class-I model on a fixed tiny set (first ``N_TINY_TRAIN`` official
 ``4m`` molecules, ≤32 atoms) until each active head's own MSE drops below a
-predeclared fraction of its step-0 value. Outputs ``overfit.json``; exit 0
-iff every head passes.
+predeclared fraction of its step-0 value. Applies the production
+``clip_max_norm`` and records clip incidence plus init/final force scale.
+Outputs ``overfit.json``; exit 0 iff every head passes.
 
     python scripts/mm_param_learning/overfit_gate.py small
 """
@@ -110,10 +111,17 @@ def run(size: str, *, max_steps: int = MAX_STEPS) -> dict:
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=float(cfg["lr"]))
     loader = fit.datamodule().train_dataloader()
+    clip_max_norm = float(cfg["clip_max_norm"])
 
     initial: tuple[float, float] | None = None
     final_e = float("nan")
     final_f = float("nan")
+    first_grad = float("nan")
+    last_grad = float("nan")
+    first_pred_f_med = float("nan")
+    last_pred_f_med = float("nan")
+    ref_f_med = float("nan")
+    n_clip_fires = 0
     steps = 0
     while steps < max_steps:
         for batch in loader:
@@ -126,17 +134,37 @@ def run(size: str, *, max_steps: int = MAX_STEPS) -> dict:
             e_term, f_term = energy_force_terms(out, batch)
             e_f = float(e_term.detach())
             f_f = float(f_term.detach())
-            if initial is None:
-                initial = (e_f, f_f)
+            pred_f_med = float(out["forces"].detach().abs().median().item())
+            atoms = batch.get("atoms")
+            this_ref_f = (
+                float(atoms["forces"].detach().abs().median().item())
+                if atoms is not None and "forces" in atoms.keys()
+                else float("nan")
+            )
             loss = e_term + f_term
             if not bool(torch.isfinite(loss)):
                 raise RuntimeError(f"non-finite loss at overfit step {steps}")
             loss.backward()
+            # Same clip as ClassIFit; pre-clip norm is what clip_grad_norm_ returns.
+            grad_norm = float(
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm).detach()
+            )
+            if initial is None:
+                initial = (e_f, f_f)
+                first_grad = grad_norm
+                first_pred_f_med = pred_f_med
+                ref_f_med = this_ref_f
+            if grad_norm > clip_max_norm:
+                n_clip_fires += 1
             optimizer.step()
             final_e, final_f = e_f, f_f
+            last_grad = grad_norm
+            last_pred_f_med = pred_f_med
             if steps % 200 == 0:
                 print(
-                    f"overfit step={steps} energy_mse={final_e:.6g} force_mse={final_f:.6g}",
+                    f"overfit step={steps} energy_mse={final_e:.6g} "
+                    f"force_mse={final_f:.6g} grad={grad_norm:.4g} "
+                    f"clip_fires={n_clip_fires}",
                     flush=True,
                 )
 
@@ -157,6 +185,14 @@ def run(size: str, *, max_steps: int = MAX_STEPS) -> dict:
         "force_reduction_fraction": FORCE_REDUCTION_FRACTION,
         "energy_overfit_ok": float(energy_ok),
         "force_overfit_ok": float(force_ok),
+        "clip_max_norm": clip_max_norm,
+        "n_clip_fires": n_clip_fires,
+        "clip_fire_frac": n_clip_fires / steps if steps else 0.0,
+        "grad_norm_initial": first_grad,
+        "grad_norm_final": last_grad,
+        "pred_force_abs_med_initial": first_pred_f_med,
+        "pred_force_abs_med_final": last_pred_f_med,
+        "ref_force_abs_med": ref_f_med,
         "ok": float(energy_ok and force_ok),
     }
     (run_dir / "overfit.json").write_text(json.dumps(payload, indent=2) + "\n")
