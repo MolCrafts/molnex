@@ -3,12 +3,16 @@
 Predicted energy is Class-I plus atomic dressing
 ``E = E_MM + Σ_i ε[Z_i]``. ε is fitted by MolHub ``AtomicDress`` and looked
 up by ``molpot.heads.energy.AtomicReferenceEnergy`` (MACE
-``AtomicEnergiesBlock``). The energy loss is residualized: MSE of the
-undressed ``E_MM`` against ``E_DFT − Σ ε[Z]`` (target built in float64).
-Fitting the ~O(10) kcal/mol residual instead of the ~1e6 kcal/mol dressed
-total keeps the loss well-conditioned in float32 and removes the frozen
-dressing from the learnable gradient. Forces are Cartesian MSE (dressing is
-coordinate-free). Unit weight on the two MSEs.
+``AtomicEnergiesBlock``). The energy loss is residualized: Huber of the undressed ``E_MM`` against
+``E_DFT − Σ ε[Z]`` (target built in float64). Fitting the ~O(10) kcal/mol
+residual instead of the ~1e6 kcal/mol dressed total keeps the loss
+well-conditioned in float32 and removes the frozen dressing from the
+learnable gradient. Huber (``beta=20`` kcal/mol) saturates the
+``(σ/r)¹²`` spikes that otherwise dominate the energy gradient once the
+LJ head leaves zero-energy init. Forces are Cartesian MSE on atoms whose
+``|F_ref|`` is at most 200 kcal/mol/Å (the inspect outlier threshold);
+Class-I MM cannot represent those DFT tails, and chasing them grows σ
+into the wall. Unit weight on the two terms.
 """
 
 from __future__ import annotations
@@ -55,10 +59,25 @@ _FIT_SCHEMA = TargetSchema(
     atom_level=frozenset({"forces"}),
 )
 
+# Saturates (σ/r)^12 energy spikes; kcal/mol. Quadratic below, linear above.
+ENERGY_HUBER_BETA = 20.0
+# Same threshold as scale_audit inspect. Atoms above this |F_ref| are dropped
+# from the force term — Class-I cannot represent 200–800 kcal/mol/Å DFT tails.
+FORCE_OUTLIER_KCAL_A = 200.0
+
 
 def force_mse(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-    """MSE of Cartesian forces."""
-    return (pred - ref).square().mean()
+    """MSE of Cartesian forces, ignoring DFT force outliers.
+
+    Atoms with ``|F_ref| > FORCE_OUTLIER_KCAL_A`` do not enter the mean.
+    If every atom is an outlier the full MSE is returned so the term stays
+    finite.
+    """
+    residual = (pred - ref).square()
+    keep = ref.detach().norm(dim=-1) <= FORCE_OUTLIER_KCAL_A
+    if keep.ndim == residual.ndim - 1 and bool(keep.any()):
+        return residual[keep].mean()
+    return residual.mean()
 
 
 def force_mae(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
@@ -293,6 +312,13 @@ def energy_mse(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     return (pred.reshape(-1) - ref.reshape(-1)).square().mean()
 
 
+def energy_huber(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """Huber (smooth L1) of graph energies, ``beta=ENERGY_HUBER_BETA`` kcal/mol."""
+    return torch.nn.functional.smooth_l1_loss(
+        pred.reshape(-1), ref.reshape(-1), beta=ENERGY_HUBER_BETA
+    )
+
+
 def energy_mae(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     """MAE of graph energies (kcal/mol)."""
     return (pred.reshape(-1) - ref.reshape(-1)).abs().mean()
@@ -301,7 +327,7 @@ def energy_mae(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
 def energy_force_terms(
     predictions: Mapping[str, torch.Tensor], batch: TensorDict
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Residualized energy MSE and force MSE. Unit weights, no molecule mean.
+    """Residualized energy Huber + inlier force MSE. Unit weights, no molecule mean.
 
     When the model exposes ``energy_mm`` (undressed) and ``e0`` (the frozen
     per-element dressing), the energy target is ``E_DFT − e0`` built in
@@ -317,9 +343,9 @@ def energy_force_terms(
         e0 = predictions.get("e0")
         if energy_mm is not None and e0 is not None:
             target = (energy.reshape(-1).double() - e0.reshape(-1).double()).float()
-            energy_term = energy_mse(energy_mm, target)
+            energy_term = energy_huber(energy_mm, target)
         else:
-            energy_term = energy_mse(predictions["energy"], energy)
+            energy_term = energy_huber(predictions["energy"], energy)
     force_term = predictions["energy"].new_zeros(())
     atoms = batch.get("atoms")
     if atoms is not None and "forces" in atoms.keys() and "forces" in predictions:
@@ -328,7 +354,7 @@ def energy_force_terms(
 
 
 def train_objective(predictions: Mapping[str, torch.Tensor], batch: TensorDict) -> torch.Tensor:
-    """Residualized energy MSE + force MSE. Unit weights."""
+    """Residualized energy Huber + inlier force MSE. Unit weights."""
     energy_term, force_term = energy_force_terms(predictions, batch)
     return energy_term + force_term
 

@@ -20,6 +20,7 @@ import torch
 from scripts.mm_param_learning.align import _active_groups, _collate, _device_of
 from scripts.mm_param_learning.class_i_fit import (
     _FIT_SCHEMA,
+    FORCE_OUTLIER_KCAL_A,
     ClassIFit,
     ForceAwareModel,
     _graph_tensor,
@@ -30,7 +31,6 @@ from scripts.mm_param_learning.class_i_fit import (
 
 # Declared before inspection (checklist §2). Matches ClassIFit GradClipHook.
 CLIP_MAX_NORM = 1.0e3
-FORCE_OUTLIER_KCAL_A = 200.0
 PRED_TARGET_RATIO_MAX = 50.0
 ENERGY_TERM_WARN = 1.0e8
 

@@ -8,11 +8,15 @@ import torch
 from molpy import Block, Frame
 from scripts.mm_param_learning.class_i_fit import (
     _FIT_SCHEMA,
+    ENERGY_HUBER_BETA,
+    FORCE_OUTLIER_KCAL_A,
     ClassIFit,
     _index_omol_source,
     _require_group,
+    energy_huber,
     energy_mse,
     fit_atomic_reference,
+    force_mse,
     label_sample,
     split_records,
     val_omol_mae,
@@ -55,6 +59,33 @@ class TestEnergyMse:
         pred = torch.tensor([10.0])
         ref = torch.tensor([4.0])
         assert float(energy_mse(pred, ref)) == 36.0
+
+
+class TestEnergyHuber:
+    def test_saturates_large_residuals(self):
+        pred = torch.tensor([100.0])
+        ref = torch.tensor([0.0])
+        huber = float(energy_huber(pred, ref))
+        mse = float(energy_mse(pred, ref))
+        assert huber < mse
+        assert huber == pytest.approx(100.0 - 0.5 * ENERGY_HUBER_BETA)
+
+
+class TestForceMse:
+    def test_ignores_reference_outliers(self):
+        pred = torch.zeros(3, 3)
+        ref = torch.zeros(3, 3)
+        ref[0] = 400.0
+        ref[1] = 1.0
+        keep = ref.norm(dim=-1) <= FORCE_OUTLIER_KCAL_A
+        expected = (pred[keep] - ref[keep]).square().mean()
+        assert torch.allclose(force_mse(pred, ref), expected)
+        assert float(keep.sum()) == 2.0
+
+    def test_inliers_match_plain_mse(self):
+        pred = torch.tensor([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+        ref = torch.zeros(2, 3)
+        assert float(force_mse(pred, ref)) == pytest.approx(float((pred - ref).square().mean()))
 
 
 class TestFitAtomicReference:
