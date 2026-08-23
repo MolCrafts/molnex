@@ -107,9 +107,12 @@ def inspect_scales(
         bool(torch.isfinite(energy_term.detach()))
         and float(energy_term.detach()) < ENERGY_TERM_WARN
     )
-    force_ok = force_ratio <= ratio_max and force_ratio >= 1.0 / ratio_max
-    if pred_f_med == 0.0 and ref_f_med == 0.0:
-        force_ok = True
+    # At init a dressed-energy model starts with ~0 MM forces: the frozen
+    # per-element dressing is coordinate-free, so the force signal is learned
+    # from zero. A small pred/ref ratio is therefore expected, not a collapse.
+    # Only the upper (explosion) bound is an init gate; force collapse is
+    # caught by the overfit gate once training starts.
+    force_ok = force_ratio <= ratio_max
     required = _active_groups(samples)
     groups_ok = True
     n_nonzero = 0.0

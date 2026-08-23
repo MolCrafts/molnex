@@ -60,6 +60,22 @@ class TestLJParameterHead:
 
         assert {p.dtype for p in head.parameters()} == {torch.float64}
 
+    def test_starts_at_zero_energy(self, node_features):
+        """A fresh head predicts ~0 epsilon/sigma, so LJ contributes ~0 energy.
+
+        The default ``sigmoid(0)=0.5`` init would emit epsilon ≈ 0.5 kcal/mol
+        and sigma ≈ 2.5 Å, placing a repulsive ``(sigma/r)**12`` wall on close
+        contacts and blowing up the initial total-energy scale (calibrate
+        gate ``energy_scale_ok=0``). The zero-energy init must map both
+        outputs to their floors.
+        """
+        head = LJParameterHead(feature_dim=16)
+        out = head(node_features)
+        assert torch.all(out["epsilon"] < 5e-3), out["epsilon"]
+        assert torch.all(out["sigma"] < 1e-2), out["sigma"]
+        assert torch.all(out["epsilon"] > 0)
+        assert torch.all(out["sigma"] > 0)
+
 
 # ---------------------------------------------------------------------------
 # RepulsionParameterHead

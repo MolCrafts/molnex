@@ -48,6 +48,27 @@ class LJParameterHead(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, 2, dtype=config.ftype),
         )
+        self._init_zero_energy()
+
+    def _init_zero_energy(self) -> None:
+        """Start the head at zero LJ contribution.
+
+        A Class-I head predicts an additive MM energy on top of a frozen
+        per-element dressing, so ``E_MM`` should start at ~0. The default
+        ``sigmoid(0) = 0.5`` init (``epsilon ≈ 0.5 kcal/mol``,
+        ``sigma ≈ 2.5 Å``) places a ``(sigma/r)**12`` wall of ~1e5 kcal/mol
+        on close nonbonded contacts (``r < sigma``) and explodes the initial
+        energy/force scale and gradient norm. Zeroing the final layer and
+        biasing both outputs to their floors makes ``epsilon ≈ 0`` and
+        ``sigma ≈ 0`` at init, so the initial LJ energy and forces are ~0 and
+        the dressing alone matches the total-energy scale.
+        """
+        last = self.mlp[-1]
+        nn.init.zeros_(last.weight)
+        nn.init.zeros_(last.bias)
+        # sigmoid(-8) ≈ 3.4e-4 → epsilon ≈ min_epsilon, sigma ≈ min_sigma.
+        last.bias.data[0] = -8.0
+        last.bias.data[1] = -8.0
 
     def forward(self, node_features: torch.Tensor, **kwargs) -> dict[str, torch.Tensor]:
         """Predict LJ parameters from node features.
