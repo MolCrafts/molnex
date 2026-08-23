@@ -71,14 +71,15 @@ vs ref 4.9, 16 force outliers >200 kcal/mol/Å, `GradClipHook(1.0)` would
 fire every step. Inspected and archived; still not a production GO.
 
 Calibration gates on official 4m/val-neutral coordinates (GH200, molq
-`b5b516c9`, run `runs/calibrate-e46dec29b8b6-20260823T150652Z`):
-`align_ok=0` — small and medium buckets pass packed-vs-single parity, but
-large (18–22 atoms) fails `grad_ok` (gradient residual 1.02 vs tolerance
-`1e-5 + 1e-3·scale`); `inspect_ok=0` — dressed energy term 7.16e11 exceeds
-`ENERGY_TERM_WARN` (`energy_scale_ok=0`, pred median |E| 352819 vs ref
-217501), force scale OK, pre-clip `grad_norm` 3.52e14 so `GradClipHook(1e3)`
-fires every step, 6 force outliers. §2 parity does NOT hold on production
-coordinates yet.
+`4c2ff64a`, run `runs/calibrate-20260823T163052Z`): the Class-I energy-scale
+fix (zero-energy `LJParameterHead` init) is verified. `inspect_ok=1` —
+dressed energy term 1795 < `ENERGY_TERM_WARN` (was 7.16e11), pred median |E|
+217475 vs ref 217501, force ratio 0.027, pre-clip `grad_norm` 1139, 6 force
+outliers. `align_ok=0` remains: small and medium buckets pass packed-vs-single
+parity; large (18–22 atoms) still fails `grad_ok` (gradient residual 0.508,
+improved from 1.02, vs tolerance `1e-5 + 1e-3·scale`). §2 gradient parity
+does NOT hold on production coordinates yet (separate float32 packed-vs-single
+accumulation-order issue, not an energy-scale failure).
 
 ## 3. Learnability and hyperparameter calibration
 
@@ -89,10 +90,19 @@ coordinates yet.
   `ok=1.0` (`runs/overfit-small-5b68570efd07-20260823T152634Z/overfit.json`).
   Learnability is confirmed; it does NOT clear the §2 energy-scale mismatch
   on official coordinates.
+- [x] Class-I energy-scale root cause fixed as a network-design issue: the
+  `LJParameterHead` default `sigmoid(0)=0.5` init (ε≈0.5, σ≈2.5 Å) put a
+  `(σ/r)¹²` wall on close nonbonded contacts and exploded the initial
+  dressed energy/force scale. The head now zero-inits its final layer and
+  biases both outputs to their floors, so E_MM starts at ~0 and the frozen
+  per-element dressing alone matches the total-energy scale. Verified on
+  the calibrate gate: `energy_term` 7.16e11 → 1795, `grad_norm` 3.52e14 →
+  1139, pred/ref energy medians match (§2).
 - [x] Single-task force+energy mixture on the 256-molecule mini (Slurm
   1385961) and the 5880-molecule epoch1 (Slurm 1407684) both moved
   loss; clip raised from 1.0 to 1e3 after the scale audit showed
-  `grad_norm ~ 400–2e5`.
+  `grad_norm ~ 400–2e5`. Post-fix step-0 `grad_norm` is 1139, so
+  `clip_max_norm=1e3` is a benign ~12 % step-0 clip, not a truncation.
 - [x] Recorded operating point: Adam `lr=1e-4`, `clip_max_norm=1e3`, no
   scheduler, `hidden=64`, `n_blocks=4`, `n_torsion_terms=8` (all powers
   of two, live in `QUASI_PROD` not inside ChemEncoder).
@@ -169,7 +179,7 @@ target_hardware: "GH200"
 slurm_account: "naiss2026-1-53-gpu"
 reviewer: "operator"
 reviewed_at: "2026-08-23"
-evidence_index: "runs/calibrate-e46dec29b8b6-20260823T150652Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
+evidence_index: "runs/calibrate-20260823T163052Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
 ```
 
 ## Required sign-off record
@@ -183,8 +193,8 @@ target_hardware: "GH200"
 slurm_account: "naiss2026-1-53-gpu"
 reviewer: "operator"
 reviewed_at: "2026-08-23"
-evidence_index: "runs/calibrate-e46dec29b8b6-20260823T150652Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
-reason: "calibrate align_ok=0 (large-bucket grad parity) and inspect_ok=0 (energy_scale_ok=0, grad_norm 3.52e14, clip fires every step). Overfit learnability passes; profile passes."
+evidence_index: "runs/calibrate-20260823T163052Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
+reason: "calibrate align_ok=0 (large-bucket packed-vs-single grad parity, residual 0.508) remains; inspect_ok=1 (energy scale fixed via zero-energy LJ head init, grad_norm 1139). Overfit learnability passes; profile passes."
 ```
 
 The reviewer must change `decision` back to `NO-GO` whenever the code,
