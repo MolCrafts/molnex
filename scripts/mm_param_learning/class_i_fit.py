@@ -3,8 +3,12 @@
 Predicted energy is Class-I plus atomic dressing
 ``E = E_MM + Σ_i ε[Z_i]``. ε is fitted by MolHub ``AtomicDress`` and looked
 up by ``molpot.heads.energy.AtomicReferenceEnergy`` (MACE
-``AtomicEnergiesBlock``). Energy MSE is on that total vs DFT. Forces are
-Cartesian MSE (dressing is coordinate-free). Unit weight on the two MSEs.
+``AtomicEnergiesBlock``). The energy loss is residualized: MSE of the
+undressed ``E_MM`` against ``E_DFT − Σ ε[Z]`` (target built in float64).
+Fitting the ~O(10) kcal/mol residual instead of the ~1e6 kcal/mol dressed
+total keeps the loss well-conditioned in float32 and removes the frozen
+dressing from the learnable gradient. Forces are Cartesian MSE (dressing is
+coordinate-free). Unit weight on the two MSEs.
 """
 
 from __future__ import annotations
@@ -236,6 +240,8 @@ class ForceAwareModel(nn.Module):
         infer = not torch.is_grad_enabled()
         with torch.enable_grad():
             energy, forces = pots.calc_energy_forces(batch)
+        energy_mm = energy.reshape(-1)
+        e0 = None
         atoms = batch.get("atoms")
         if atoms is not None and "Z" in atoms.keys():
             atom_batch = atoms.get("batch")
@@ -243,11 +249,22 @@ class ForceAwareModel(nn.Module):
                 e0 = self.dressing(atoms["Z"]).sum()
             else:
                 e0 = self.dressing.pooled(atoms["Z"], atom_batch, _graph_count(batch, atom_batch))
-            energy = energy.reshape(-1) + e0.reshape(-1)
+            e0 = e0.reshape(-1)
+            energy = energy_mm + e0
+        else:
+            energy = energy_mm
         if infer:
             energy = energy.detach()
             forces = forces.detach()
-        return {"energy": energy, "forces": forces}
+            energy_mm = energy_mm.detach()
+        out: dict[str, torch.Tensor] = {
+            "energy": energy,
+            "forces": forces,
+            "energy_mm": energy_mm,
+        }
+        if e0 is not None:
+            out["e0"] = e0
+        return out
 
     def parameter_groups(self) -> dict[str, tuple[nn.Parameter, ...]]:
         groups = {
@@ -277,11 +294,25 @@ def energy_mae(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
 def energy_force_terms(
     predictions: Mapping[str, torch.Tensor], batch: TensorDict
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Dressed total-energy MSE and force MSE. Unit weights, no molecule mean."""
+    """Residualized energy MSE and force MSE. Unit weights, no molecule mean.
+
+    When the model exposes ``energy_mm`` (undressed) and ``e0`` (the frozen
+    per-element dressing), the energy target is ``E_DFT − e0`` built in
+    float64. This keeps the energy term on the ~O(10) kcal/mol MM scale
+    instead of the ~1e6 kcal/mol dressed scale, where a single float32 ULP
+    (~0.03 kcal/mol) would otherwise dominate packed-vs-single gradient
+    parity. The fallback compares dressed energy vs the raw target.
+    """
     energy_term = predictions["energy"].new_zeros(())
     energy = _graph_tensor(batch, "energy")
     if energy is not None:
-        energy_term = energy_mse(predictions["energy"], energy)
+        energy_mm = predictions.get("energy_mm")
+        e0 = predictions.get("e0")
+        if energy_mm is not None and e0 is not None:
+            target = (energy.reshape(-1).double() - e0.reshape(-1).double()).float()
+            energy_term = energy_mse(energy_mm, target)
+        else:
+            energy_term = energy_mse(predictions["energy"], energy)
     force_term = predictions["energy"].new_zeros(())
     atoms = batch.get("atoms")
     if atoms is not None and "forces" in atoms.keys() and "forces" in predictions:
@@ -290,7 +321,7 @@ def energy_force_terms(
 
 
 def train_objective(predictions: Mapping[str, torch.Tensor], batch: TensorDict) -> torch.Tensor:
-    """Dressed total-energy MSE + force MSE. Unit weights."""
+    """Residualized energy MSE + force MSE. Unit weights."""
     energy_term, force_term = energy_force_terms(predictions, batch)
     return energy_term + force_term
 
@@ -615,9 +646,7 @@ def split_coverage(train: Sequence, val: Sequence) -> dict[str, Any]:
     }
 
 
-def write_split_manifest(
-    path: Path, train: Sequence, val: Sequence
-) -> Path:
+def write_split_manifest(path: Path, train: Sequence, val: Sequence) -> Path:
     """Write molecule ids for each split. Coverage is included."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

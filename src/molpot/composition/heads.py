@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,6 +25,12 @@ class LJParameterHead(nn.Module):
         max_epsilon: Maximum epsilon ceiling.
         min_sigma: Minimum sigma floor.
         max_sigma: Maximum sigma ceiling.
+        init_epsilon: Epsilon at init. ``None`` → ``min_epsilon`` (zero well
+            depth). A near-floor well keeps ``E_LJ ≈ 0`` without being
+            degenerate.
+        init_sigma: Sigma at init (Å). A moderate value (~1 Å) keeps
+            ``dE/dε = (σ/r)¹² − 2(σ/r)⁶`` of order 1 on close contacts, so
+            the head has a gradient while ``ε(σ/r)¹²`` stays negligible.
     """
 
     def __init__(
@@ -33,6 +41,8 @@ class LJParameterHead(nn.Module):
         max_epsilon: float = 1.0,
         min_sigma: float = 1e-4,
         max_sigma: float = 5.0,
+        init_epsilon: float | None = None,
+        init_sigma: float = 1.0,
     ):
         super().__init__()
         if max_epsilon <= min_epsilon:
@@ -43,12 +53,27 @@ class LJParameterHead(nn.Module):
         self.max_epsilon = max_epsilon
         self.min_sigma = min_sigma
         self.max_sigma = max_sigma
+        self.init_epsilon = float(min_epsilon if init_epsilon is None else init_epsilon)
+        self.init_sigma = float(init_sigma)
+        if not min_epsilon <= self.init_epsilon <= max_epsilon:
+            raise ValueError(
+                f"init_epsilon {self.init_epsilon} must lie in [{min_epsilon}, {max_epsilon}]"
+            )
+        if not min_sigma <= self.init_sigma <= max_sigma:
+            raise ValueError(f"init_sigma {self.init_sigma} must lie in [{min_sigma}, {max_sigma}]")
         self.mlp = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
             nn.Linear(hidden_dim, 2, dtype=config.ftype),
         )
         self._init_zero_energy()
+
+    @staticmethod
+    def _logit(target: float, lo: float, hi: float) -> float:
+        """Pre-sigmoid value whose ``lo + (hi - lo) * sigmoid`` equals *target*."""
+        frac = (target - lo) / (hi - lo)
+        frac = min(max(frac, 1e-3), 1 - 1e-3)
+        return math.log(frac / (1.0 - frac))
 
     def _init_zero_energy(self) -> None:
         """Start the head at zero LJ contribution.
@@ -58,17 +83,20 @@ class LJParameterHead(nn.Module):
         ``sigmoid(0) = 0.5`` init (``epsilon ≈ 0.5 kcal/mol``,
         ``sigma ≈ 2.5 Å``) places a ``(sigma/r)**12`` wall of ~1e5 kcal/mol
         on close nonbonded contacts (``r < sigma``) and explodes the initial
-        energy/force scale and gradient norm. Zeroing the final layer and
-        biasing both outputs to their floors makes ``epsilon ≈ 0`` and
-        ``sigma ≈ 0`` at init, so the initial LJ energy and forces are ~0 and
-        the dressing alone matches the total-energy scale.
+        energy/force scale and gradient norm.
+
+        Zeroing the final layer and biasing epsilon to its floor removes the
+        well depth. Sigma is biased to a moderate physical value instead of
+        its floor: flooring both would leave ``dE/dε ≈ 0`` and ``dE/dσ ≈ 0``
+        (a dead head), while ``sigma ≈ 1 Å`` keeps the epsilon gradient of
+        order 1 on OMol25's ~0.8 Å contacts yet ``epsilon * (sigma/r)**12``
+        stays ~1e-4 kcal/mol.
         """
         last = self.mlp[-1]
         nn.init.zeros_(last.weight)
         nn.init.zeros_(last.bias)
-        # sigmoid(-8) ≈ 3.4e-4 → epsilon ≈ min_epsilon, sigma ≈ min_sigma.
-        last.bias.data[0] = -8.0
-        last.bias.data[1] = -8.0
+        last.bias.data[0] = self._logit(self.init_epsilon, self.min_epsilon, self.max_epsilon)
+        last.bias.data[1] = self._logit(self.init_sigma, self.min_sigma, self.max_sigma)
 
     def forward(self, node_features: torch.Tensor, **kwargs) -> dict[str, torch.Tensor]:
         """Predict LJ parameters from node features.

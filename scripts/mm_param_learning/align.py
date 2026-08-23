@@ -203,12 +203,18 @@ def align_packed(
         raise ValueError("align_packed needs at least one sample")
     device = _device_of(model)
     singles_e: list[torch.Tensor] = []
+    singles_mm: list[torch.Tensor] = []
+    singles_e0: list[torch.Tensor] = []
     singles_f: list[torch.Tensor] = []
     for sample in samples:
         out = model(_collate([sample], target_schema, device))
         singles_e.append(out["energy"].reshape(-1))
+        singles_mm.append(out["energy_mm"].reshape(-1))
+        singles_e0.append(out["e0"].reshape(-1))
         singles_f.append(out["forces"])
     energy_ref = torch.cat(singles_e)
+    energy_mm_ref = torch.cat(singles_mm)
+    e0_ref = torch.cat(singles_e0)
     forces_ref = torch.cat(singles_f, dim=0)
 
     packed = _collate(samples, target_schema, device)
@@ -219,7 +225,15 @@ def align_packed(
     force_max = _max_abs(out_p["forces"], forces_ref)
     force_scale = float(torch.maximum(out_p["forces"].abs().max(), forces_ref.abs().max()).item())
 
-    loss_ref = train_objective({"energy": energy_ref, "forces": forces_ref}, packed)
+    loss_ref = train_objective(
+        {
+            "energy": energy_ref,
+            "energy_mm": energy_mm_ref,
+            "e0": e0_ref,
+            "forces": forces_ref,
+        },
+        packed,
+    )
     loss_p = train_objective(out_p, packed)
     loss_max = float((loss_p - loss_ref).abs().item())
     loss_scale = max(abs(float(loss_p.detach())), abs(float(loss_ref.detach())))
@@ -253,13 +267,22 @@ def align_packed(
     model.load_state_dict(snap)
     model.zero_grad(set_to_none=True)
     singles_e2: list[torch.Tensor] = []
+    singles_mm2: list[torch.Tensor] = []
+    singles_e0_2: list[torch.Tensor] = []
     singles_f2: list[torch.Tensor] = []
     for sample in samples:
         out = model(_collate([sample], target_schema, device))
         singles_e2.append(out["energy"].reshape(-1))
+        singles_mm2.append(out["energy_mm"].reshape(-1))
+        singles_e0_2.append(out["e0"].reshape(-1))
         singles_f2.append(out["forces"])
     train_objective(
-        {"energy": torch.cat(singles_e2), "forces": torch.cat(singles_f2, dim=0)},
+        {
+            "energy": torch.cat(singles_e2),
+            "energy_mm": torch.cat(singles_mm2),
+            "e0": torch.cat(singles_e0_2),
+            "forces": torch.cat(singles_f2, dim=0),
+        },
         packed,
     ).backward()
     torch.optim.Adam(model.parameters(), lr=lr).step()
@@ -370,7 +393,9 @@ def align_energy_shift(
     packed = _collate(paired, target_schema, device)
     out = model(packed)
     loss0 = train_objective(out, packed)
-    shifted = {"energy": out["energy"] + 3.0, "forces": out["forces"]}
+    shifted = {
+        key: value + 3.0 if key in ("energy", "energy_mm") else value for key, value in out.items()
+    }
     loss1 = train_objective(shifted, packed)
     residual = float((loss1 - loss0).abs().item())
     return {

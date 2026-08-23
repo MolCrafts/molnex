@@ -61,20 +61,35 @@ class TestLJParameterHead:
         assert {p.dtype for p in head.parameters()} == {torch.float64}
 
     def test_starts_at_zero_energy(self, node_features):
-        """A fresh head predicts ~0 epsilon/sigma, so LJ contributes ~0 energy.
+        """A fresh head predicts floor epsilon and moderate sigma.
 
         The default ``sigmoid(0)=0.5`` init would emit epsilon ≈ 0.5 kcal/mol
         and sigma ≈ 2.5 Å, placing a repulsive ``(sigma/r)**12`` wall on close
         contacts and blowing up the initial total-energy scale (calibrate
-        gate ``energy_scale_ok=0``). The zero-energy init must map both
-        outputs to their floors.
+        gate ``energy_scale_ok=0``). Epsilon must start at its floor (no well
+        depth) while sigma stays moderate (~1 Å): flooring sigma too would
+        zero ``dE/dε`` and leave the head with no learning signal.
         """
         head = LJParameterHead(feature_dim=16)
         out = head(node_features)
         assert torch.all(out["epsilon"] < 5e-3), out["epsilon"]
-        assert torch.all(out["sigma"] < 1e-2), out["sigma"]
         assert torch.all(out["epsilon"] > 0)
-        assert torch.all(out["sigma"] > 0)
+        expected_sigma = torch.full_like(out["sigma"], head.init_sigma)
+        assert torch.allclose(out["sigma"], expected_sigma, atol=1e-3), out["sigma"]
+
+    def test_init_values_are_configurable(self, node_features):
+        head = LJParameterHead(feature_dim=16, init_epsilon=0.05, init_sigma=1.5)
+        out = head(node_features)
+        assert torch.allclose(out["epsilon"], torch.full_like(out["epsilon"], 0.05), atol=1e-3)
+        assert torch.allclose(out["sigma"], torch.full_like(out["sigma"], 1.5), atol=1e-3)
+
+    def test_init_values_must_respect_bounds(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="init_sigma"):
+            LJParameterHead(feature_dim=16, init_sigma=0.0)
+        with pytest.raises(ValueError, match="init_epsilon"):
+            LJParameterHead(feature_dim=16, init_epsilon=2.0)
 
 
 # ---------------------------------------------------------------------------
