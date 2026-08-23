@@ -244,13 +244,20 @@ class ForceAwareModel(nn.Module):
         e0 = None
         atoms = batch.get("atoms")
         if atoms is not None and "Z" in atoms.keys():
+            z = atoms["Z"]
             atom_batch = atoms.get("batch")
+            # Sum the frozen dressing in float64. Per-graph sums are ~1e5
+            # kcal/mol; float32 ``index_add`` is order-dependent on GPU, so
+            # packed vs single differ by ~1 ULP (~0.03) and that noise leaks
+            # into the residualized energy target, breaking gradient parity.
+            e0_per_atom = self.dressing.atomic_energies[z.to(torch.long)].double()
             if atom_batch is None:
-                e0 = self.dressing(atoms["Z"]).sum()
+                e0 = e0_per_atom.sum()
             else:
-                e0 = self.dressing.pooled(atoms["Z"], atom_batch, _graph_count(batch, atom_batch))
-            e0 = e0.reshape(-1)
-            energy = energy_mm + e0
+                n_graphs = _graph_count(batch, atom_batch)
+                e0 = torch.zeros(n_graphs, dtype=torch.float64, device=e0_per_atom.device)
+                e0.index_add_(0, atom_batch.to(torch.long), e0_per_atom)
+            energy = energy_mm + e0.float()
         else:
             energy = energy_mm
         if infer:
