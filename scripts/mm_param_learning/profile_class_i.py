@@ -33,12 +33,6 @@ from scripts.mm_param_learning.class_i_fit import (
     LazyOMol25,
     train_objective,
 )
-from scripts.mm_param_learning.fingerprint import (
-    QUASI_PROD,
-    attach_fingerprint,
-    fingerprint,
-    write_fingerprint,
-)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNS_ROOT = REPO_ROOT / "runs"
@@ -223,12 +217,9 @@ def run_profile() -> None:
     device = "cuda"
     print(f"device={device} name={torch.cuda.get_device_name(0)}", flush=True)
 
-    blob = fingerprint()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = RUNS_ROOT / f"profile-{blob['fingerprint'][:12]}-{stamp}"
+    run_dir = RUNS_ROOT / f"profile-{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    write_fingerprint(run_dir / "fingerprint.json", blob)
-    print(f"fingerprint={blob['fingerprint']}", flush=True)
     print(f"run_dir={run_dir}", flush=True)
 
     n_train, n_val = 2048, 256
@@ -296,9 +287,7 @@ def run_profile() -> None:
         "profiler": profiler_stats,
         "full_step": full_step,
     }
-    (run_dir / "profile.json").write_text(
-        json.dumps(attach_fingerprint(payload, blob["fingerprint"]), indent=2) + "\n"
-    )
+    (run_dir / "profile.json").write_text(json.dumps(payload, indent=2) + "\n")
     print(f"=== DONE profile {run_dir} ===", flush=True)
 
 

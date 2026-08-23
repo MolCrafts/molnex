@@ -314,28 +314,6 @@ class TestSplitCoverage:
         assert cov["n_val_molecules"] == 2
         assert path.is_file()
 
-    def test_manifest_embeds_fingerprint_when_given(self, tmp_path):
-        import json
-
-        from scripts.mm_param_learning.class_i_fit import write_split_manifest
-
-        records = []
-        for i in range(4):
-            frame = Frame()
-            atoms = Block()
-            atoms["number"] = [6]
-            atoms["x"] = [0.0]
-            atoms["y"] = [0.0]
-            atoms["z"] = [0.0]
-            frame["atoms"] = atoms
-            frame.meta["molecule_id"] = f"m{i}"
-            frame.meta["energy"] = 0.0
-            records.append((frame,))
-        train, val = split_records(records, train_frac=0.5, seed=1)
-        path = write_split_manifest(tmp_path / "split.json", train, val, fingerprint="abc123")
-        payload = json.loads(path.read_text())
-        assert payload["fingerprint"] == "abc123"
-
 
 class TestSplitRecords:
     def test_eight_two_no_overlap(self) -> None:

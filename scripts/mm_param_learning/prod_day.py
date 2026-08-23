@@ -20,13 +20,7 @@ from scripts.mm_param_learning.class_i_fit import (
     load_omol25_official,
     val_omol_mae,
 )
-from scripts.mm_param_learning.fingerprint import (
-    PROD_DAY,
-    PROD_MODELS,
-    attach_fingerprint,
-    fingerprint,
-    write_fingerprint,
-)
+from scripts.mm_param_learning.configs import PROD_DAY, PROD_MODELS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNS_ROOT = REPO_ROOT / "runs"
@@ -52,15 +46,13 @@ def config_for(size: str) -> dict:
 
 
 def run(size: str) -> None:
-    """Fingerprint → official OMol25 4m/val-neutral → ClassIFit until wall clock."""
+    """Official OMol25 4m/val-neutral → ClassIFit until wall clock."""
     _require_nobackup_molhub_home()
     cfg = config_for(size)
-    blob = fingerprint(cfg)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = RUNS_ROOT / f"prod-day1-{size}-{blob['fingerprint'][:12]}-{stamp}"
+    run_dir = RUNS_ROOT / f"prod-day1-{size}-{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    write_fingerprint(run_dir / "fingerprint.json", blob)
-    print(f"size={size} fingerprint={blob['fingerprint']}", flush=True)
+    print(f"size={size}", flush=True)
     print(f"run_dir={run_dir}", flush=True)
 
     train, val = load_omol25_official(
@@ -74,9 +66,7 @@ def run(size: str) -> None:
         "train_n_atoms_max": int(train.atom_counts.max()) if len(train) else 0,
         "val_n_atoms_max": int(val.atom_counts.max()) if len(val) else 0,
     }
-    (run_dir / "split.json").write_text(
-        json.dumps(attach_fingerprint(coverage, blob["fingerprint"]), indent=2) + "\n"
-    )
+    (run_dir / "split.json").write_text(json.dumps(coverage, indent=2) + "\n")
     print(json.dumps({"coverage": coverage, "config": cfg}, sort_keys=True), flush=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -97,9 +87,7 @@ def run(size: str) -> None:
         eval_loss=val_omol_mae,
         clip_max_norm=float(cfg["clip_max_norm"]),
     ).run()
-    (run_dir / "metrics.json").write_text(
-        json.dumps(attach_fingerprint(metrics, blob["fingerprint"]), indent=2) + "\n"
-    )
+    (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     print(metrics, flush=True)
     print(f"=== PROD-DAY1 {size} DONE {run_dir} ===", flush=True)
 

@@ -1,8 +1,8 @@
 """Quasi-production one-epoch look-see. Not a multi-epoch GO.
 
-Writes fingerprint + split manifest, exercises checkpoint resume, sweeps
-packed atom budgets for HBM, then trains one epoch. Direct ClassIFit —
-never molexp declared-run replay.
+Writes a split manifest, exercises checkpoint resume, sweeps packed atom
+budgets for HBM, then trains one epoch. Direct ClassIFit — run identity is
+owned by molexp.
 """
 
 from __future__ import annotations
@@ -25,13 +25,7 @@ from scripts.mm_param_learning.class_i_fit import (
     val_omol_mae,
     write_split_manifest,
 )
-from scripts.mm_param_learning.fingerprint import (
-    CALIBRATION,
-    QUASI_PROD,
-    attach_fingerprint,
-    fingerprint,
-    write_fingerprint,
-)
+from scripts.mm_param_learning.configs import CALIBRATION, QUASI_PROD
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNS_ROOT = REPO_ROOT / "runs"
@@ -240,13 +234,10 @@ def pack_sweep(train, val, *, device: str) -> list[dict[str, float]]:
 
 
 def main() -> None:
-    """Fingerprint → split → resume → pack sweep → one epoch."""
-    blob = fingerprint()
+    """Split → resume → pack sweep → one epoch."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = RUNS_ROOT / f"quasi-prod-{blob['fingerprint'][:12]}-{stamp}"
+    run_dir = RUNS_ROOT / f"quasi-prod-{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    write_fingerprint(run_dir / "fingerprint.json", blob)
-    print(f"fingerprint={blob['fingerprint']}", flush=True)
     print(f"run_dir={run_dir}", flush=True)
 
     cfg = QUASI_PROD
@@ -258,7 +249,7 @@ def main() -> None:
         seed=int(cfg["seed"]),
     )
     coverage = split_coverage(train, val)
-    write_split_manifest(run_dir / "split.json", train, val, fingerprint=blob["fingerprint"])
+    write_split_manifest(run_dir / "split.json", train, val)
     print(
         json.dumps({"coverage": coverage, "buckets": _bucket_counts(train)}, sort_keys=True),
         flush=True,
@@ -277,8 +268,7 @@ def main() -> None:
     pack_rows: list[dict[str, float]] = []
     if device == "cuda":
         pack_rows = pack_sweep(train, val, device=device)
-        pack_payload = attach_fingerprint({"rows": pack_rows}, blob["fingerprint"])
-        (run_dir / "pack_sweep.json").write_text(json.dumps(pack_payload, indent=2) + "\n")
+        (run_dir / "pack_sweep.json").write_text(json.dumps({"rows": pack_rows}, indent=2) + "\n")
 
     fit = ClassIFit(
         train,
@@ -298,20 +288,16 @@ def main() -> None:
         clip_max_norm=float(cfg["clip_max_norm"]),
     )
     metrics = fit.run()
-    metrics_payload = attach_fingerprint(metrics, blob["fingerprint"])
-    (run_dir / "metrics.json").write_text(json.dumps(metrics_payload, indent=2) + "\n")
+    (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     print(metrics, flush=True)
     print(f"=== QUASI-PROD DONE {run_dir} ===", flush=True)
 
 
 def smoke() -> None:
-    """Fingerprint → split → resume → 32-step term dump. Not a production run."""
-    blob = fingerprint()
+    """Split → resume → 32-step term dump. Not a production run."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = RUNS_ROOT / f"smoke-{blob['fingerprint'][:12]}-{stamp}"
+    run_dir = RUNS_ROOT / f"smoke-{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    write_fingerprint(run_dir / "fingerprint.json", blob)
-    print(f"fingerprint={blob['fingerprint']}", flush=True)
     print(f"run_dir={run_dir}", flush=True)
 
     cfg = QUASI_PROD
@@ -323,7 +309,7 @@ def smoke() -> None:
         seed=int(cfg["seed"]),
     )
     coverage = split_coverage(train, val)
-    write_split_manifest(run_dir / "split.json", train, val, fingerprint=blob["fingerprint"])
+    write_split_manifest(run_dir / "split.json", train, val)
     print(
         json.dumps({"coverage": coverage, "buckets": _bucket_counts(train)}, sort_keys=True),
         flush=True,
@@ -335,7 +321,6 @@ def smoke() -> None:
     steps = run_step_smoke(train, val, device=device, record_root=run_dir, max_steps=32)
     print(f"step_smoke={steps}", flush=True)
     payload = {
-        "fingerprint": blob["fingerprint"],
         "coverage": coverage,
         "resume": resume,
         "steps": steps,
@@ -352,12 +337,9 @@ def calibrate() -> None:
 
     _require_nobackup_molhub_home()
     cfg = CALIBRATION
-    blob = fingerprint(cfg)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = RUNS_ROOT / f"calibrate-{blob['fingerprint'][:12]}-{stamp}"
+    run_dir = RUNS_ROOT / f"calibrate-{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    write_fingerprint(run_dir / "fingerprint.json", blob)
-    print(f"fingerprint={blob['fingerprint']}", flush=True)
     print(f"run_dir={run_dir}", flush=True)
 
     train, val = load_omol25_official_tiny(n_train=48, n_val=12, max_atoms=32)
@@ -369,9 +351,7 @@ def calibrate() -> None:
         "val_n_atoms_min": int(val.atom_counts.min()) if len(val) else 0,
         "val_n_atoms_max": int(val.atom_counts.max()) if len(val) else 0,
     }
-    (run_dir / "split.json").write_text(
-        json.dumps(attach_fingerprint(coverage, blob["fingerprint"]), indent=2) + "\n"
-    )
+    (run_dir / "split.json").write_text(json.dumps(coverage, indent=2) + "\n")
     print(json.dumps({"coverage": coverage}, sort_keys=True), flush=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -388,10 +368,8 @@ def calibrate() -> None:
     pack_rows: list[dict[str, float]] = []
     if device == "cuda":
         pack_rows = pack_sweep(train, val, device=device)
-        pack_payload = attach_fingerprint({"rows": pack_rows}, blob["fingerprint"])
-        (run_dir / "pack_sweep.json").write_text(json.dumps(pack_payload, indent=2) + "\n")
+        (run_dir / "pack_sweep.json").write_text(json.dumps({"rows": pack_rows}, indent=2) + "\n")
     payload = {
-        "fingerprint": blob["fingerprint"],
         "coverage": coverage,
         "align": align,
         "inspect": inspect,

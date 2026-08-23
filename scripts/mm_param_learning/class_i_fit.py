@@ -616,13 +616,9 @@ def split_coverage(train: Sequence, val: Sequence) -> dict[str, Any]:
 
 
 def write_split_manifest(
-    path: Path, train: Sequence, val: Sequence, *, fingerprint: str | None = None
+    path: Path, train: Sequence, val: Sequence
 ) -> Path:
-    """Write molecule ids for each split. Coverage is included.
-
-    ``fingerprint``, when given, is recorded at the top level so the manifest
-    is provably part of one run identity (checklist §0).
-    """
+    """Write molecule ids for each split. Coverage is included."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
@@ -630,8 +626,6 @@ def write_split_manifest(
         "val_ids": [_require_group(rec[0]) for rec in val],
         "coverage": split_coverage(train, val),
     }
-    if fingerprint is not None:
-        payload = {"fingerprint": fingerprint, **payload}
     path.write_text(json.dumps(payload, indent=2) + "\n")
     return path
 

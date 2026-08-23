@@ -8,7 +8,7 @@ from __future__ import annotations
 import torch
 
 from scripts.mm_param_learning.class_i_fit import ClassIFit, load_omol25_split
-from scripts.mm_param_learning.fingerprint import QUASI_PROD
+from scripts.mm_param_learning.configs import QUASI_PROD
 
 
 def _state(t: torch.Tensor) -> str:

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Bounded Class-I smoke: fingerprint, split, resume, 32 dressed E/F steps.
+# Bounded Class-I smoke: split, resume, 32 dressed E/F steps.
 # Not a production train (checklist §6 stays NO-GO).
 #
 #   molq submit slurm --name class-i-smoke --partition gpu \

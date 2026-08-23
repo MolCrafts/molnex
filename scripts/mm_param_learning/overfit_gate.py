@@ -2,8 +2,8 @@
 
 Trains the Class-I model on a fixed tiny set (first ``N_TINY_TRAIN`` official
 ``4m`` molecules, ≤32 atoms) until each active head's own MSE drops below a
-predeclared fraction of its step-0 value. Outputs ``overfit.json`` (fingerprint
-embedded); exit 0 iff every head passes.
+predeclared fraction of its step-0 value. Outputs ``overfit.json``; exit 0
+iff every head passes.
 
     python scripts/mm_param_learning/overfit_gate.py small
 """
@@ -23,13 +23,7 @@ from scripts.mm_param_learning.class_i_fit import (
     energy_force_terms,
     load_omol25_official_tiny,
 )
-from scripts.mm_param_learning.fingerprint import (
-    CALIBRATION,
-    PROD_MODELS,
-    attach_fingerprint,
-    fingerprint,
-    write_fingerprint,
-)
+from scripts.mm_param_learning.configs import CALIBRATION, PROD_MODELS
 from scripts.mm_param_learning.prod_day import _require_nobackup_molhub_home
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -91,12 +85,10 @@ def run(size: str, *, max_steps: int = MAX_STEPS) -> dict:
     """Bounded overfit on a fixed official-4m tiny set. Not a production run."""
     _require_nobackup_molhub_home()
     cfg = _cfg_for(size)
-    blob = fingerprint(cfg)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = RUNS_ROOT / f"overfit-{size}-{blob['fingerprint'][:12]}-{stamp}"
+    run_dir = RUNS_ROOT / f"overfit-{size}-{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    write_fingerprint(run_dir / "fingerprint.json", blob)
-    print(f"size={size} fingerprint={blob['fingerprint']}", flush=True)
+    print(f"size={size}", flush=True)
     print(f"run_dir={run_dir}", flush=True)
 
     train, val = load_omol25_official_tiny(n_train=N_TINY_TRAIN, n_val=N_TINY_VAL, max_atoms=32)
@@ -167,9 +159,7 @@ def run(size: str, *, max_steps: int = MAX_STEPS) -> dict:
         "force_overfit_ok": float(force_ok),
         "ok": float(energy_ok and force_ok),
     }
-    (run_dir / "overfit.json").write_text(
-        json.dumps(attach_fingerprint(payload, blob["fingerprint"]), indent=2) + "\n"
-    )
+    (run_dir / "overfit.json").write_text(json.dumps(payload, indent=2) + "\n")
     print(json.dumps(payload, indent=2), flush=True)
     print(f"=== OVERFIT {size} DONE {run_dir} ===", flush=True)
     return payload

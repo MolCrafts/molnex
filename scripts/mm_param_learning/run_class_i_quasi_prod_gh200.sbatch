@@ -1,5 +1,5 @@
 #!/bin/bash
-# Quasi-production one-epoch look-see. Fail-closed on fingerprint/split.
+# Quasi-production one-epoch look-see. Fail-closed on split.
 # Not a multi-epoch production launch (checklist §6 stays NO-GO).
 #
 #   molq submit slurm --name class-i-quasi --partition gpu \
@@ -49,7 +49,7 @@ fi
 "${PY}" -m pip install --force-reinstall --no-deps "${WHEEL}"
 "${PY}" -c "import lmdb" 2>/dev/null || "${PY}" -m pip install -q lmdb
 
-echo "=== quasi-prod fingerprint + resume + pack + one epoch ==="
+echo "=== quasi-prod resume + pack + one epoch ==="
 "${PY}" scripts/mm_param_learning/quasi_prod.py
 
 echo "=== DONE $(date -Iseconds) ==="
