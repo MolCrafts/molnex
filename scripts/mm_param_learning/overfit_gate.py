@@ -98,29 +98,30 @@ def run(size: str, *, max_steps: int = MAX_STEPS) -> dict:
     final_e = float("nan")
     final_f = float("nan")
     steps = 0
-    for step, batch in enumerate(loader, start=1):
-        if step > max_steps:
-            break
-        batch = batch.to(fit.device)
-        optimizer.zero_grad(set_to_none=True)
-        out = model(batch)
-        e_term, f_term = energy_force_terms(out, batch)
-        e_f = float(e_term.detach())
-        f_f = float(f_term.detach())
-        if initial is None:
-            initial = (e_f, f_f)
-        loss = e_term + f_term
-        if not bool(torch.isfinite(loss)):
-            raise RuntimeError(f"non-finite loss at overfit step {step}")
-        loss.backward()
-        optimizer.step()
-        final_e, final_f = e_f, f_f
-        steps += 1
-        if step % 200 == 0:
-            print(
-                f"overfit step={step} energy_mse={final_e:.6g} force_mse={final_f:.6g}",
-                flush=True,
-            )
+    while steps < max_steps:
+        for batch in loader:
+            steps += 1
+            if steps > max_steps:
+                break
+            batch = batch.to(fit.device)
+            optimizer.zero_grad(set_to_none=True)
+            out = model(batch)
+            e_term, f_term = energy_force_terms(out, batch)
+            e_f = float(e_term.detach())
+            f_f = float(f_term.detach())
+            if initial is None:
+                initial = (e_f, f_f)
+            loss = e_term + f_term
+            if not bool(torch.isfinite(loss)):
+                raise RuntimeError(f"non-finite loss at overfit step {steps}")
+            loss.backward()
+            optimizer.step()
+            final_e, final_f = e_f, f_f
+            if steps % 200 == 0:
+                print(
+                    f"overfit step={steps} energy_mse={final_e:.6g} force_mse={final_f:.6g}",
+                    flush=True,
+                )
 
     assert initial is not None
     initial_e, initial_f = initial
