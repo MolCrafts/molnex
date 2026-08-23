@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -62,6 +63,30 @@ def _head_ok(final: float, initial: float, fraction: float) -> bool:
     return final <= fraction * initial and final < initial
 
 
+def _model_with_device_retry(
+    fit: ClassIFit, *, attempts: int = 6, delay_s: float = 15.0
+) -> torch.nn.Module:
+    """Build the model, retrying a transient ``cudaErrorDevicesUnavailable``.
+
+    GH200 nodes intermittently report a busy/unavailable device at the first
+    ``.to("cuda")`` even though no compute has run yet. The condition clears on
+    its own; retrying in-process avoids failing an otherwise healthy gate.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return fit.model()
+        except torch.AcceleratorError as exc:
+            if "busy or unavailable" not in str(exc) or attempt == attempts:
+                raise
+            print(
+                f"device busy at model move (attempt {attempt}/{attempts}); "
+                f"retrying in {delay_s:.0f}s",
+                flush=True,
+            )
+            time.sleep(delay_s)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def run(size: str, *, max_steps: int = MAX_STEPS) -> dict:
     """Bounded overfit on a fixed official-4m tiny set. Not a production run."""
     _require_nobackup_molhub_home()
@@ -89,7 +114,7 @@ def run(size: str, *, max_steps: int = MAX_STEPS) -> dict:
         energy_scope="full",
         clip_max_norm=float(cfg["clip_max_norm"]),
     )
-    model = fit.model()
+    model = _model_with_device_retry(fit)
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=float(cfg["lr"]))
     loader = fit.datamodule().train_dataloader()
