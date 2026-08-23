@@ -16,6 +16,10 @@ sign-off, only explicitly bounded calibration/validation jobs may run.
   collator, seeds, and target hardware
   (`scripts/mm_param_learning/fingerprint.py`, `QUASI_PROD`).
 - [ ] Every artifact below records that same fingerprint.
+  (Not yet: the three Phase-C gates ran across three HEADs — profile at
+  `d89d2701` with a dirty tree, calibrate at `5a49a78f`, overfit at
+  `920c547` — so their fingerprints differ. A clean single-HEAD re-run is
+  required for this item.)
 - [ ] The intended production configuration is byte-for-byte/config-for-config
   identical to the calibrated configuration except for explicitly enumerated
   production duration and output location.
@@ -72,11 +76,25 @@ frames: 16/16 singletons, energy term 0, `grad_norm` 386, pred |F| med 1.2
 vs ref 4.9, 16 force outliers >200 kcal/mol/Å, `GradClipHook(1.0)` would
 fire every step. Inspected and archived; still not a production GO.
 
+Calibration gates on official 4m/val-neutral coordinates (GH200, molq
+`b5b516c9`, run `runs/calibrate-e46dec29b8b6-20260823T150652Z`):
+`align_ok=0` — small and medium buckets pass packed-vs-single parity, but
+large (18–22 atoms) fails `grad_ok` (gradient residual 1.02 vs tolerance
+`1e-5 + 1e-3·scale`); `inspect_ok=0` — dressed energy term 7.16e11 exceeds
+`ENERGY_TERM_WARN` (`energy_scale_ok=0`, pred median |E| 352819 vs ref
+217501), force scale OK, pre-clip `grad_norm` 3.52e14 so `GradClipHook(1e3)`
+fires every step, 6 force outliers. §2 parity does NOT hold on production
+coordinates yet.
+
 ## 3. Learnability and hyperparameter calibration
 
-- [ ] Every active task/head independently overfits a fixed tiny set to its
-  predeclared threshold. (Not run — 10-conf theater was rejected; energy
-  head is still mostly `e0` + singleton per-atom residual.)
+- [x] Every active task/head independently overfits a fixed tiny set to its
+  predeclared threshold. Overfit gate on official 4m tiny set (8 train / 2
+  val, ≤32 atoms, 4000 steps, GH200 n517, molq `68f2064b`): energy MSE
+  5.03e12 → 4.91e4, force MSE 6.70e13 → 1.58e9, both < 0.1× step-0,
+  `ok=1.0` (`runs/overfit-small-5b68570efd07-20260823T152634Z/overfit.json`).
+  Learnability is confirmed; it does NOT clear the §2 energy-scale mismatch
+  on official coordinates.
 - [x] Single-task force+energy mixture on the 256-molecule mini (Slurm
   1385961) and the 5880-molecule epoch1 (Slurm 1407684) both moved
   loss; clip raised from 1.0 to 1e3 after the scale audit showed
@@ -92,10 +110,15 @@ fire every step. Inspected and archived; still not a production GO.
 
 - [x] Packed train path is `DataMixture` + `collate_molecules` (one
   forward per packed batch). No per-molecule Python loop in the step.
-- [ ] Full input/kernel/optimizer profile not recorded (gpu_bench exists
-  but is not the gate).
-- [ ] Per-bucket batch sizes not split — OMol25-small is capped at 32
-  atoms, one pack budget covers all three buckets.
+- [x] Full input/kernel/optimizer profile recorded
+  (`runs/profile-188d38b99288-20260823T145111Z/profile.json`): full-step
+  median 55.0 ms, profiler self-CUDA 729 679 µs total / 19 298 µs optimizer,
+  throughput 2410→4670 samples/s (num_workers 0/2/4).
+- [x] Per-bucket batch sizes not split (decision: keep one pack budget).
+  OMol25-small is capped at 32 atoms; buckets are contiguous ranges inside
+  that cap and the pack is a per-step atom budget, not a per-bucket split.
+  Splitting would add loader/collator branches with no HBM or throughput
+  benefit at this scale (16384-atom packs use 0.59 GiB).
 - [x] HBM sweep GH200 Slurm 1417874 / molq `a03ff86c`, run
   `runs/quasi-prod-d8247ba3046e-20260819T101139Z/pack_sweep.json`:
   4096→0.19 GiB (181 mols), 8192→0.33, 16384→0.59, 32768→1.10,
@@ -104,8 +127,9 @@ fire every step. Inspected and archived; still not a production GO.
 - [x] Operating pack `packed_max_atoms=16384` (power of two). Declared
   HBM margin is 16 GiB; the previous sweep at 16384 was 0.59 GiB
   (~500 mols). 131072 (4.19 GiB) still fits but collapses the
-  OMol25-small epoch to 1–2 steps. Timed sweep is part of
-  `calibrate()` (in flight / pending GH200).
+  OMol25-small epoch to 1–2 steps. Timed sweep recorded in
+  `runs/calibrate-e46dec29b8b6-20260823T150652Z/pack_sweep.json`
+  (48 mols / 758 atoms; 4096→131072 = 43.4→40.1 ms/step, no OOM).
 
 ## 5. Bounded end-to-end smoke and recovery
 
@@ -113,13 +137,17 @@ fire every step. Inspected and archived; still not a production GO.
   `val_omol_mae` path as epoch1. Unique `runs/quasi-prod-*` output.
 - [x] Epoch1 (Slurm 1407684) moved train loss 4776 → 3006; val force MAE
   24.08. Single energy task.
-- [ ] molexp metrics WAL not wired for this look-see (on-disk JSON only).
+- [x] MolRec metrics WAL wired (`MetricsWriter` → `MolRecMetricsHook`):
+  metrics.jsonl + status.json; integration-tested.
 - [x] `ClassIFit.run(resume_from=, max_steps=)` + `run_resume_smoke`
   (1 step → last.pt → resume → step 2). GH200 evidence from the
   quasi-prod job.
-- [ ] Preemption / partial-artifact restart not exercised beyond resume
-  from `last.pt`.
-- [ ] Calibration status `succeeded` waits on the quasi-prod job.
+- [x] Preemption / partial-artifact restart: atomic checkpoint write
+  (tmp + os.replace, `TorchSaveBackend`) with unit coverage
+  (`test_atomic_on_failed_write_keeps_old_file`); resume from `last.pt`
+  via `run_resume_smoke`.
+- [x] Calibration job `succeeded` (molq `b5b516c9`); its align/inspect
+  gates report FAIL on official coordinates (§2 evidence above).
 
 ## 6. Final production submission gate
 
@@ -138,32 +166,33 @@ fire every step. Inspected and archived; still not a production GO.
 ```yaml
 decision: NO-GO
 scope: "prod-day1 three sizes; not unbounded GO"
-fingerprint: ""
-code_revision: "dirty; prod-day1 launch"
+fingerprint: "e46dec29b8b66341d3ca59dfdabdf4128ad16b494a35973883ccf73fba773738"
+code_revision: "calibrate 5a49a78f (clean); overfit 920c547 (clean); profile d89d2701 (dirty)"
 molhub_collection: "dataset:molcrafts/class1-universal-2026@1"
 molexp_calibration_experiment: ""
 molexp_calibration_run: ""
 target_hardware: "GH200"
 slurm_account: "naiss2026-1-53-gpu"
 reviewer: "operator"
-reviewed_at: "2026-08-19"
-evidence_index: "runs/calibrate-653d8ec0ebe7-20260819T123919Z"
+reviewed_at: "2026-08-23"
+evidence_index: "runs/calibrate-e46dec29b8b6-20260823T150652Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
 ```
 
 ## Required sign-off record
 
 ```yaml
-decision: GO                 # GO is the only launchable value
-fingerprint: "..."
-code_revision: "..."
-molhub_collection: "<immutable MolHub collection coordinate>"
-molexp_calibration_experiment: "..."
-molexp_calibration_run: "..."
+decision: NO-GO
+fingerprint: "n/a — three HEADs (see §0); single-HEAD re-run required before GO"
+code_revision: "calibrate 5a49a78f / overfit 920c547 / profile d89d2701"
+molhub_collection: "dataset:molcrafts/class1-universal-2026@1"
+molexp_calibration_experiment: ""
+molexp_calibration_run: ""
 target_hardware: "GH200"
-slurm_account: "<calibrated scheduler account>"
-reviewer: "..."
-reviewed_at: "..."
-evidence_index: "..."
+slurm_account: "naiss2026-1-53-gpu"
+reviewer: "operator"
+reviewed_at: "2026-08-23"
+evidence_index: "runs/calibrate-e46dec29b8b6-20260823T150652Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
+reason: "calibrate align_ok=0 (large-bucket grad parity) and inspect_ok=0 (energy_scale_ok=0, grad_norm 3.52e14, clip fires every step); §0 fingerprint not single-HEAD. Overfit learnability passes; profile passes."
 ```
 
 The reviewer must change `decision` back to `NO-GO` whenever the code,
