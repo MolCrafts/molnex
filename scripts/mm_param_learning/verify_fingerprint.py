@@ -23,6 +23,8 @@ ARTIFACTS: tuple[str, ...] = (
     "pack_sweep.json",
     "smoke.json",
     "calibrate.json",
+    "overfit.json",
+    "profile.json",
 )
 
 

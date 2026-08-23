@@ -80,6 +80,17 @@ class TestVerifyFingerprint:
         (tmp_path / "metrics.json").write_text(json.dumps({"fingerprint": "f" * 64}))
         assert verify_fingerprint.main(["verify_fingerprint.py", str(tmp_path)]) == 0
 
+    def test_overfit_and_profile_artifacts_verified(self, tmp_path: Path):
+        self._write_fp(tmp_path, "f" * 64)
+        (tmp_path / "overfit.json").write_text(json.dumps({"fingerprint": "f" * 64}))
+        (tmp_path / "profile.json").write_text(json.dumps({"fingerprint": "f" * 64}))
+        assert verify_fingerprint.main(["verify_fingerprint.py", str(tmp_path)]) == 0
+
+    def test_overfit_artifact_mismatch_fails(self, tmp_path: Path):
+        self._write_fp(tmp_path, "f" * 64)
+        (tmp_path / "overfit.json").write_text(json.dumps({"fingerprint": "e" * 64}))
+        assert verify_fingerprint.main(["verify_fingerprint.py", str(tmp_path)]) == 1
+
     def test_mismatch_fails(self, tmp_path: Path):
         self._write_fp(tmp_path, "f" * 64)
         (tmp_path / "split.json").write_text(json.dumps({"fingerprint": "e" * 64}))
