@@ -70,16 +70,18 @@ frames: 16/16 singletons, energy term 0, `grad_norm` 386, pred |F| med 1.2
 vs ref 4.9, 16 force outliers >200 kcal/mol/Å, `GradClipHook(1.0)` would
 fire every step. Inspected and archived; still not a production GO.
 
-Calibration gates on official 4m/val-neutral coordinates (GH200, molq
-`4c2ff64a`, run `runs/calibrate-20260823T163052Z`): the Class-I energy-scale
-fix (zero-energy `LJParameterHead` init) is verified. `inspect_ok=1` —
-dressed energy term 1795 < `ENERGY_TERM_WARN` (was 7.16e11), pred median |E|
-217475 vs ref 217501, force ratio 0.027, pre-clip `grad_norm` 1139, 6 force
-outliers. `align_ok=0` remains: small and medium buckets pass packed-vs-single
-parity; large (18–22 atoms) still fails `grad_ok` (gradient residual 0.508,
-improved from 1.02, vs tolerance `1e-5 + 1e-3·scale`). §2 gradient parity
-does NOT hold on production coordinates yet (separate float32 packed-vs-single
-accumulation-order issue, not an energy-scale failure).
+Calibration gates on official 4m/val-neutral coordinates (GH200, Slurm
+1601466 / molq `828a7c7f`, run `runs/calibrate-20260823T174653Z`): the
+Class-I energy-scale fix (zero-energy `LJParameterHead` init + residualized
+loss) is verified. `inspect_ok=1` — residualized energy term 1812 <
+`ENERGY_TERM_WARN` (was 7.16e11), pred median |E| 217473 vs ref 217501,
+force ratio 0.023, pre-clip `grad_norm` 1182, 6 force outliers, 16/16
+singleton groups. `align_ok=1`: small/medium/large buckets all pass
+packed-vs-single parity (grad residual 3.4e-4 / 3.5e-4 / 5.6e-4 vs
+tolerance `1e-5 + 1e-3·scale`). The earlier large-bucket `grad_ok=0`
+residual was float32 `index_add` accumulation order in the dressed e0, fixed
+by summing the frozen dressing in float64 (`ed8ecf0`). §2 gradient parity
+now holds on production coordinates.
 
 ## 3. Learnability and hyperparameter calibration
 
@@ -93,16 +95,19 @@ accumulation-order issue, not an energy-scale failure).
 - [x] Class-I energy-scale root cause fixed as a network-design issue: the
   `LJParameterHead` default `sigmoid(0)=0.5` init (ε≈0.5, σ≈2.5 Å) put a
   `(σ/r)¹²` wall on close nonbonded contacts and exploded the initial
-  dressed energy/force scale. The head now zero-inits its final layer and
-  biases both outputs to their floors, so E_MM starts at ~0 and the frozen
-  per-element dressing alone matches the total-energy scale. Verified on
-  the calibrate gate: `energy_term` 7.16e11 → 1795, `grad_norm` 3.52e14 →
-  1139, pred/ref energy medians match (§2).
+  dressed energy/force scale. The head now zero-inits its final layer,
+  biases ε to its floor (zero well depth), and biases σ to a moderate 1.0 Å
+  (so `dE/dε ≈ 7` on OMol25's ~0.8 Å contacts instead of the dead-gradient
+  a double-floor would give). The energy loss is residualized — MSE of the
+  undressed `E_MM` against `E_DFT − e0` in float64 — so it trains on the
+  ~O(10) kcal/mol MM scale rather than the float32 ~1e6 kcal/mol dressed
+  total. Verified on the calibrate gate: `energy_term` 7.16e11 → 1812,
+  `grad_norm` 3.52e14 → 1182, `align_ok=1`, pred/ref energy medians match (§2).
 - [x] Single-task force+energy mixture on the 256-molecule mini (Slurm
   1385961) and the 5880-molecule epoch1 (Slurm 1407684) both moved
   loss; clip raised from 1.0 to 1e3 after the scale audit showed
-  `grad_norm ~ 400–2e5`. Post-fix step-0 `grad_norm` is 1139, so
-  `clip_max_norm=1e3` is a benign ~12 % step-0 clip, not a truncation.
+  `grad_norm ~ 400–2e5`. Post-fix step-0 `grad_norm` is 1182, so
+  `clip_max_norm=1e3` is a benign ~15 % step-0 clip, not a truncation.
 - [x] Recorded operating point: Adam `lr=1e-4`, `clip_max_norm=1e3`, no
   scheduler, `hidden=64`, `n_blocks=4`, `n_torsion_terms=8` (all powers
   of two, live in `QUASI_PROD` not inside ChemEncoder).
@@ -150,8 +155,8 @@ accumulation-order issue, not an energy-scale failure).
   (tmp + os.replace, `TorchSaveBackend`) with unit coverage
   (`test_atomic_on_failed_write_keeps_old_file`); resume from `last.pt`
   via `run_resume_smoke`.
-- [x] Calibration job `succeeded` (molq `b5b516c9`); its align/inspect
-  gates report FAIL on official coordinates (§2 evidence above).
+- [x] Calibration job `succeeded` (molq `828a7c7f`); its align/inspect
+  gates report PASS on official coordinates (§2 evidence above).
 
 ## 6. Final production submission gate
 
@@ -179,7 +184,7 @@ target_hardware: "GH200"
 slurm_account: "naiss2026-1-53-gpu"
 reviewer: "operator"
 reviewed_at: "2026-08-23"
-evidence_index: "runs/calibrate-20260823T163052Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
+evidence_index: "runs/calibrate-20260823T174653Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
 ```
 
 ## Required sign-off record
@@ -193,8 +198,8 @@ target_hardware: "GH200"
 slurm_account: "naiss2026-1-53-gpu"
 reviewer: "operator"
 reviewed_at: "2026-08-23"
-evidence_index: "runs/calibrate-20260823T163052Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
-reason: "calibrate align_ok=0 (large-bucket packed-vs-single grad parity, residual 0.508) remains; inspect_ok=1 (energy scale fixed via zero-energy LJ head init, grad_norm 1139). Overfit learnability passes; profile passes."
+evidence_index: "runs/calibrate-20260823T174653Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
+reason: "calibrate align_ok=1 and inspect_ok=1 (energy scale fixed via zero-energy LJ head init + residualized loss + float64 dressing sum; energy_term 1812, grad_norm 1182). Overfit learnability passes; profile passes."
 ```
 
 The reviewer must change `decision` back to `NO-GO` whenever the code,
