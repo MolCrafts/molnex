@@ -43,6 +43,16 @@ V0_EXPERIMENT_SLUG: str = "universal-class-i-v0-calibration-gh200"
 
 V0_RUN_ID: str = "class-i-v0-001"
 
+V0_PROD_EXPERIMENT_SLUG: str = "universal-class-i-v0-prod-day1-gh200"
+"""Bounded one-day / three-size campaign. Not unbounded production."""
+
+V0_PROD_RUN_IDS: dict[str, str] = {
+    "small": "f2dd9ed5",
+    "medium": "90e71a0d",
+    "large": "ef38fb1c",
+}
+"""Pending molexp run ids for the prod-day1 campaign, one per model size."""
+
 PROTOCOL_EXPERIMENT_SLUG: str = V0_EXPERIMENT_SLUG
 """Alias kept so older setup callers resolve to v0."""
 

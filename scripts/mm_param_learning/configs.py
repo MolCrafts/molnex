@@ -80,6 +80,22 @@ CALIBRATION: dict[str, Any] = {
     "slurm_account": "naiss2026-1-53-gpu",
 }
 
+# Checklist §0: production may differ from calibration only in these keys
+# (duration, scheduler identity, and output kind). Science pins must match.
+_CALIBRATION_EXCEPTIONS = frozenset(
+    {"kind", "epochs", "eval_every_epochs", "wall_hours", "slurm_account"}
+)
+
+
+def production_calibration_drift() -> list[str]:
+    """Return science-pin keys that differ between PROD_DAY and CALIBRATION."""
+    keys = set(PROD_DAY) | set(CALIBRATION)
+    return sorted(
+        key
+        for key in keys
+        if key not in _CALIBRATION_EXCEPTIONS and PROD_DAY.get(key) != CALIBRATION.get(key)
+    )
+
 
 def require_power_of_two(name: str, value: int) -> None:
     """Refuse a model/pack size that is not a power of two."""

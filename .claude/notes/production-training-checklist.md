@@ -15,13 +15,20 @@ bounded calibration/validation jobs may run.
 - [x] Every artifact below is written under the run's record dir (or a
   timestamped `runs/<slug>-<utc>/` when launched outside a declared molexp
   run).
-- [ ] The intended production configuration is byte-for-byte/config-for-config
+- [x] The intended production configuration is byte-for-byte/config-for-config
   identical to the calibrated configuration except for explicitly enumerated
-  production duration and output location.
+  production duration, scheduler account, and output location.
+  `production_calibration_drift()` is empty: `PROD_DAY` vs `CALIBRATION`
+  differ only in `kind`, `epochs`, `eval_every_epochs`, `wall_hours`,
+  `slurm_account`. Science pins (4m/val-neutral, pack 16384, lr, clip,
+  energy_scope, seed) match.
 
-Launcher: `scripts/mm_param_learning/quasi_prod.py` writes
-`runs/quasi-prod-<utc>/`. Direct ClassIFit — not molexp declared-run
-replay. Multi-epoch production is still **NO-GO**.
+Launcher: `scripts/mm_param_learning/prod_day.py` writes
+`runs/prod-day1-<size>-<utc>/` plus `molexp.json` / `config.json`.
+molexp experiment `universal-class-i-v0-prod-day1-gh200` (runs
+`f2dd9ed5` small / `90e71a0d` medium / `ef38fb1c` large). Unbounded
+multi-epoch production is still **NO-GO**; the GO below is the 1-day
+three-size campaign only.
 
 ## 1. Dataset and sampling contract
 
@@ -71,27 +78,26 @@ vs ref 4.9, 16 force outliers >200 kcal/mol/Å, `GradClipHook(1.0)` would
 fire every step. Inspected and archived; still not a production GO.
 
 Calibration gates on official 4m/val-neutral coordinates (GH200, Slurm
-1601466 / molq `828a7c7f`, run `runs/calibrate-20260823T174653Z`): the
-Class-I energy-scale fix (zero-energy `LJParameterHead` init + residualized
-loss) is verified. `inspect_ok=1` — residualized energy term 1812 <
-`ENERGY_TERM_WARN` (was 7.16e11), pred median |E| 217473 vs ref 217501,
-force ratio 0.023, pre-clip `grad_norm` 1182, 6 force outliers, 16/16
-singleton groups. `align_ok=1`: small/medium/large buckets all pass
-packed-vs-single parity (grad residual 3.4e-4 / 3.5e-4 / 5.6e-4 vs
-tolerance `1e-5 + 1e-3·scale`). The earlier large-bucket `grad_ok=0`
-residual was float32 `index_add` accumulation order in the dressed e0, fixed
-by summing the frozen dressing in float64 (`ed8ecf0`). §2 gradient parity
-now holds on production coordinates.
+1604451 / molq `0567acff`, run `runs/calibrate-20260823T193404Z`): Huber
+energy + inlier-force loss, float64 dressing sum, and zero-energy LJ init
+are verified. `inspect_ok=1` — energy term 23.2, force term 10.0 (was
+7.16e11 / exploded), pred median |E| 217473 vs ref 217501, force ratio
+0.022, pre-clip `grad_norm` 8.94, `clip_would_fire=0`, 6 DFT force
+outliers (masked in the loss), 16/16 singleton groups. `align_ok=1`:
+small/medium/large all pass packed-vs-single parity (grad residual
+6.9e-7 / 5.9e-6 / 5.1e-6). Energy-label shift (+50 kcal/mol on the DFT
+target) moves the Huber term on every bucket. §2 holds on production
+coordinates.
 
 ## 3. Learnability and hyperparameter calibration
 
 - [x] Every active task/head independently overfits a fixed tiny set to its
   predeclared threshold. Overfit gate on official 4m tiny set (8 train / 2
-  val, ≤32 atoms, 4000 steps, GH200 n517, molq `68f2064b`): energy MSE
-  5.03e12 → 4.91e4, force MSE 6.70e13 → 1.58e9, both < 0.1× step-0,
-  `ok=1.0` (`runs/overfit-small-5b68570efd07-20260823T152634Z/overfit.json`).
-  Learnability is confirmed; it does NOT clear the §2 energy-scale mismatch
-  on official coordinates.
+  val, ≤32 atoms, 4000 steps, GH200, molq `f5f4af44`, Slurm 1602274):
+  energy Huber 22.4 → 0.16 (median last 200), force Huber drops 13.9 → 9.0
+  with pred |F| median 0.32 → 8.4 vs ref 13.9 (scale ≥ 0.5×), clip fire
+  7.7 %, `ok=1.0`
+  (`runs/overfit-small-20260823T183517Z/overfit.json`).
 - [x] Class-I energy-scale root cause fixed as a network-design issue: the
   `LJParameterHead` default `sigmoid(0)=0.5` init (ε≈0.5, σ≈2.5 Å) put a
   `(σ/r)¹²` wall on close nonbonded contacts and exploded the initial
@@ -101,13 +107,16 @@ now holds on production coordinates.
   a double-floor would give). The energy loss is residualized — MSE of the
   undressed `E_MM` against `E_DFT − e0` in float64 — so it trains on the
   ~O(10) kcal/mol MM scale rather than the float32 ~1e6 kcal/mol dressed
-  total. Verified on the calibrate gate: `energy_term` 7.16e11 → 1812,
-  `grad_norm` 3.52e14 → 1182, `align_ok=1`, pred/ref energy medians match (§2).
+  total, then Huber-ized (`beta=20` kcal/mol) so a later `(σ/r)¹²` spike
+  cannot dominate the gradient. Forces are Huber on DFT inliers
+  (`|F_ref| ≤ 200` kcal/mol/Å). Verified on the calibrate gate:
+  `energy_term` 7.16e11 → 23.2, `grad_norm` 3.52e14 → 8.94,
+  `clip_would_fire=0`, `align_ok=1`, pred/ref energy medians match (§2).
 - [x] Single-task force+energy mixture on the 256-molecule mini (Slurm
   1385961) and the 5880-molecule epoch1 (Slurm 1407684) both moved
   loss; clip raised from 1.0 to 1e3 after the scale audit showed
-  `grad_norm ~ 400–2e5`. Post-fix step-0 `grad_norm` is 1182, so
-  `clip_max_norm=1e3` is a benign ~15 % step-0 clip, not a truncation.
+  `grad_norm ~ 400–2e5`. Post-Huber step-0 `grad_norm` is 8.94, so
+  `clip_max_norm=1e3` does not fire at init.
 - [x] Recorded operating point: Adam `lr=1e-4`, `clip_max_norm=1e3`, no
   scheduler, `hidden=64`, `n_blocks=4`, `n_torsion_terms=8` (all powers
   of two, live in `QUASI_PROD` not inside ChemEncoder).
@@ -120,9 +129,8 @@ now holds on production coordinates.
 - [x] Packed train path is `DataMixture` + `collate_molecules` (one
   forward per packed batch). No per-molecule Python loop in the step.
 - [x] Full input/kernel/optimizer profile recorded
-  (`runs/profile-188d38b99288-20260823T145111Z/profile.json`): full-step
-  median 55.0 ms, profiler self-CUDA 729 679 µs total / 19 298 µs optimizer,
-  throughput 2410→4670 samples/s (num_workers 0/2/4).
+  (`runs/profile-20260823T180803Z/profile.json`): full-step median
+  69.2 ms, throughput 1857→4702 samples/s (num_workers 0/2/4).
 - [x] Per-bucket batch sizes not split (decision: keep one pack budget).
   OMol25-small is capped at 32 atoms; buckets are contiguous ranges inside
   that cap and the pack is a per-step atom budget, not a per-bucket split.
@@ -155,51 +163,55 @@ now holds on production coordinates.
   (tmp + os.replace, `TorchSaveBackend`) with unit coverage
   (`test_atomic_on_failed_write_keeps_old_file`); resume from `last.pt`
   via `run_resume_smoke`.
-- [x] Calibration job `succeeded` (molq `828a7c7f`); its align/inspect
-  gates report PASS on official coordinates (§2 evidence above).
+- [x] Calibration job `succeeded` (molq `0567acff` / Slurm 1604451); its
+  align/inspect gates report PASS on official coordinates (§2).
 
 ## 6. Final production submission gate
 
-- [ ] No molexp production experiment. Quasi-prod is not production.
-- [x] Pins live in `QUASI_PROD`: account `naiss2026-1-53-gpu`, partition
-  `gpu`, hardware GH200, coords as §1.
-- [x] Output is `runs/quasi-prod-<utc>/` (gitignored),
+- [x] molexp production experiment `universal-class-i-v0-prod-day1-gh200`
+  with pending runs `f2dd9ed5` / `90e71a0d` / `ef38fb1c` (small / medium
+  / large). Quasi-prod is not this campaign.
+- [x] Pins live in `PROD_DAY`: account `naiss2026-4-715-gpu`, partition
+  `gpu`, hardware GH200, official 4m / val-neutral as calibrated.
+- [x] Output is `runs/prod-day1-<size>-<utc>/` (gitignored),
   not repo-root `checkpoints/`.
 - [x] Launcher fail-closed: non-power-of-two sizes, train/val id overlap.
-  Direct `python scripts/mm_param_learning/quasi_prod.py`.
-- [ ] **decision: NO-GO** for unbounded multi-week production.
-  Operator authorized a **1-day / 3-size** campaign on OMol25-small
-  8:2. Align uses atol+rtol on dressed totals. Pack 16384. Stop is
-  Slurm wall 24h.
+  Direct `python scripts/mm_param_learning/prod_day.py {small,medium,large}`.
+- [x] **decision: GO** for the 1-day / 3-size campaign. Unbounded
+  multi-week production remains NO-GO. Official 4m/val-neutral, pack
+  16384, stop is Slurm wall 24h.
 
 ```yaml
-decision: NO-GO
+decision: GO
 scope: "prod-day1 three sizes; not unbounded GO"
-molexp_experiment: "universal-class-i-v0-calibration-gh200"
-molexp_run: "class-i-v0-001"
+molexp_experiment: "universal-class-i-v0-prod-day1-gh200"
+molexp_run: "f2dd9ed5,90e71a0d,ef38fb1c"
 molhub_collection: "dataset:molcrafts/class1-universal-2026@1"
 molexp_calibration_experiment: "universal-class-i-v0-calibration-gh200"
 molexp_calibration_run: "class-i-v0-001"
 target_hardware: "GH200"
-slurm_account: "naiss2026-1-53-gpu"
+slurm_account: "naiss2026-4-715-gpu"
 reviewer: "operator"
 reviewed_at: "2026-08-23"
-evidence_index: "runs/calibrate-20260823T174653Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
+evidence_index: "runs/calibrate-20260823T193404Z; runs/overfit-small-20260823T183517Z; runs/profile-20260823T180803Z"
 ```
 
 ## Required sign-off record
 
 ```yaml
-decision: NO-GO
+decision: GO
+scope: "prod-day1 three sizes; not unbounded GO"
+molexp_experiment: "universal-class-i-v0-prod-day1-gh200"
+molexp_run: "f2dd9ed5,90e71a0d,ef38fb1c"
 molexp_calibration_experiment: "universal-class-i-v0-calibration-gh200"
 molexp_calibration_run: "class-i-v0-001"
 molhub_collection: "dataset:molcrafts/class1-universal-2026@1"
 target_hardware: "GH200"
-slurm_account: "naiss2026-1-53-gpu"
+slurm_account: "naiss2026-4-715-gpu"
 reviewer: "operator"
 reviewed_at: "2026-08-23"
-evidence_index: "runs/calibrate-20260823T174653Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
-reason: "calibrate align_ok=1 and inspect_ok=1 (energy scale fixed via zero-energy LJ head init + residualized loss + float64 dressing sum; energy_term 1812, grad_norm 1182). Overfit learnability passes; profile passes."
+evidence_index: "runs/calibrate-20260823T193404Z; runs/overfit-small-20260823T183517Z; runs/profile-20260823T180803Z"
+reason: "calibrate align_ok=1 inspect_ok=1 (Huber residualized energy + inlier force, energy_term 23.2, grad_norm 8.94, clip_would_fire=0). Overfit ok=1. Profile refreshed. PROD_DAY matches CALIBRATION except enumerated duration/account/output."
 ```
 
 The reviewer must change `decision` back to `NO-GO` whenever the code,

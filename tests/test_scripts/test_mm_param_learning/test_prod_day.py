@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from scripts.mm_param_learning.configs import production_calibration_drift
 from scripts.mm_param_learning.prod_day import config_for
 
 
@@ -22,3 +23,9 @@ class TestConfigFor:
         assert large["omol_role"] == "4m"
         assert large["val_role"] == "val-neutral"
         assert large["slurm_account"] == "naiss2026-4-715-gpu"
+
+
+class TestCalibrationIdentity:
+    def test_production_matches_calibration_except_duration_and_output(self):
+        """Checklist §0: science pins are identical; only enumerated keys differ."""
+        assert production_calibration_drift() == []

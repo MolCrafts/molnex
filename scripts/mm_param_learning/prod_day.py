@@ -21,6 +21,12 @@ from scripts.mm_param_learning.class_i_fit import (
     val_omol_mae,
 )
 from scripts.mm_param_learning.configs import PROD_DAY, PROD_MODELS
+from scripts.mm_param_learning.constants import (
+    DEFAULT_WORKSPACE_ROOT,
+    PROJECT_SLUG,
+    V0_PROD_EXPERIMENT_SLUG,
+    V0_PROD_RUN_IDS,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNS_ROOT = REPO_ROOT / "runs"
@@ -52,8 +58,20 @@ def run(size: str) -> None:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = RUNS_ROOT / f"prod-day1-{size}-{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    identity = {
+        "workspace": str(DEFAULT_WORKSPACE_ROOT),
+        "project": PROJECT_SLUG,
+        "experiment": V0_PROD_EXPERIMENT_SLUG,
+        "run": V0_PROD_RUN_IDS[size],
+        "kind": cfg["kind"],
+        "model_size": size,
+        "run_dir": str(run_dir),
+    }
+    (run_dir / "config.json").write_text(json.dumps(cfg, indent=2, default=str) + "\n")
+    (run_dir / "molexp.json").write_text(json.dumps(identity, indent=2) + "\n")
     print(f"size={size}", flush=True)
     print(f"run_dir={run_dir}", flush=True)
+    print(f"molexp={identity}", flush=True)
 
     train, val = load_omol25_official(
         train_role=str(cfg["omol_role"]),
