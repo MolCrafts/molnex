@@ -9,10 +9,10 @@ residual instead of the ~1e6 kcal/mol dressed total keeps the loss
 well-conditioned in float32 and removes the frozen dressing from the
 learnable gradient. Huber (``beta=20`` kcal/mol) saturates the
 ``(σ/r)¹²`` spikes that otherwise dominate the energy gradient once the
-LJ head leaves zero-energy init. Forces are Cartesian MSE on atoms whose
-``|F_ref|`` is at most 200 kcal/mol/Å (the inspect outlier threshold);
-Class-I MM cannot represent those DFT tails, and chasing them grows σ
-into the wall. Unit weight on the two terms.
+LJ head leaves zero-energy init. Forces are Huber (``beta=20`` kcal/mol/Å)
+on atoms whose ``|F_ref|`` is at most 200 kcal/mol/Å (the inspect outlier
+threshold); Class-I MM cannot represent those DFT tails, and chasing them
+grows σ into the wall. Unit weight on the two terms.
 """
 
 from __future__ import annotations
@@ -61,23 +61,25 @@ _FIT_SCHEMA = TargetSchema(
 
 # Saturates (σ/r)^12 energy spikes; kcal/mol. Quadratic below, linear above.
 ENERGY_HUBER_BETA = 20.0
+# Saturates exploded pred-forces when σ walks into the wall; kcal/mol/Å.
+FORCE_HUBER_BETA = 20.0
 # Same threshold as scale_audit inspect. Atoms above this |F_ref| are dropped
 # from the force term — Class-I cannot represent 200–800 kcal/mol/Å DFT tails.
 FORCE_OUTLIER_KCAL_A = 200.0
 
 
-def force_mse(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-    """MSE of Cartesian forces, ignoring DFT force outliers.
-
-    Atoms with ``|F_ref| > FORCE_OUTLIER_KCAL_A`` do not enter the mean.
-    If every atom is an outlier the full MSE is returned so the term stays
-    finite.
-    """
-    residual = (pred - ref).square()
+def _inlier_forces(pred: torch.Tensor, ref: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Drop atoms whose reference force exceeds ``FORCE_OUTLIER_KCAL_A``."""
     keep = ref.detach().norm(dim=-1) <= FORCE_OUTLIER_KCAL_A
-    if keep.ndim == residual.ndim - 1 and bool(keep.any()):
-        return residual[keep].mean()
-    return residual.mean()
+    if keep.ndim == pred.ndim - 1 and bool(keep.any()):
+        return pred[keep], ref[keep]
+    return pred, ref
+
+
+def force_mse(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """Huber of Cartesian forces on DFT inliers (``beta=FORCE_HUBER_BETA``)."""
+    pred, ref = _inlier_forces(pred, ref)
+    return torch.nn.functional.smooth_l1_loss(pred, ref, beta=FORCE_HUBER_BETA)
 
 
 def force_mae(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:

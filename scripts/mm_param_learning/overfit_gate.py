@@ -1,10 +1,12 @@
 """Checklist §3 per-head tiny-set overfit gate on official 4m coordinates.
 
 Trains the Class-I model on a fixed tiny set (first ``N_TINY_TRAIN`` official
-``4m`` molecules, ≤32 atoms) until each active head's own MSE drops below a
-predeclared fraction of its step-0 value. Applies the production
-``clip_max_norm`` and records clip incidence plus init/final force scale.
-Outputs ``overfit.json``; exit 0 iff every head passes.
+``4m`` molecules, ≤32 atoms) until each active head's own loss drops below a
+predeclared fraction of its step-0 value. Pass/fail uses the median of the
+last ``FINAL_WINDOW`` steps so a trailing ``(σ/r)¹²`` spike cannot fail a
+head that already overfit. Applies the production ``clip_max_norm`` and
+records clip incidence plus init/final force scale. Outputs
+``overfit.json``; exit 0 iff every head passes.
 
     python scripts/mm_param_learning/overfit_gate.py small
 """
@@ -12,8 +14,10 @@ Outputs ``overfit.json``; exit 0 iff every head passes.
 from __future__ import annotations
 
 import json
+import statistics
 import sys
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +42,8 @@ FORCE_REDUCTION_FRACTION = 0.1
 N_TINY_TRAIN = 8
 N_TINY_VAL = 2
 MAX_STEPS = 4000
+# Last-step (σ/r)^12 spikes must not fail a head that already overfit.
+FINAL_WINDOW = 200
 
 
 def _cfg_for(size: str) -> dict:
@@ -122,6 +128,7 @@ def run(size: str, *, max_steps: int = MAX_STEPS) -> dict:
     last_pred_f_med = float("nan")
     ref_f_med = float("nan")
     n_clip_fires = 0
+    window: deque[tuple[float, float]] = deque(maxlen=FINAL_WINDOW)
     steps = 0
     while steps < max_steps:
         for batch in loader:
@@ -158,6 +165,7 @@ def run(size: str, *, max_steps: int = MAX_STEPS) -> dict:
                 n_clip_fires += 1
             optimizer.step()
             final_e, final_f = e_f, f_f
+            window.append((e_f, f_f))
             last_grad = grad_norm
             last_pred_f_med = pred_f_med
             if steps % 200 == 0:
@@ -170,8 +178,10 @@ def run(size: str, *, max_steps: int = MAX_STEPS) -> dict:
 
     assert initial is not None
     initial_e, initial_f = initial
-    energy_ok = _head_ok(final_e, initial_e, ENERGY_REDUCTION_FRACTION)
-    force_ok = _head_ok(final_f, initial_f, FORCE_REDUCTION_FRACTION)
+    median_e = statistics.median(e for e, _ in window)
+    median_f = statistics.median(f for _, f in window)
+    energy_ok = _head_ok(median_e, initial_e, ENERGY_REDUCTION_FRACTION)
+    force_ok = _head_ok(median_f, initial_f, FORCE_REDUCTION_FRACTION)
     payload = {
         "size": size,
         "n_steps": steps,
@@ -179,8 +189,10 @@ def run(size: str, *, max_steps: int = MAX_STEPS) -> dict:
         "n_tiny_val": N_TINY_VAL,
         "energy_mse_initial": initial_e,
         "energy_mse_final": final_e,
+        "energy_mse_final_median": median_e,
         "force_mse_initial": initial_f,
         "force_mse_final": final_f,
+        "force_mse_final_median": median_f,
         "energy_reduction_fraction": ENERGY_REDUCTION_FRACTION,
         "force_reduction_fraction": FORCE_REDUCTION_FRACTION,
         "energy_overfit_ok": float(energy_ok),

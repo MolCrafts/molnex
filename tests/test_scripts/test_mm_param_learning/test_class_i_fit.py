@@ -9,7 +9,7 @@ from molpy import Block, Frame
 from scripts.mm_param_learning.class_i_fit import (
     _FIT_SCHEMA,
     ENERGY_HUBER_BETA,
-    FORCE_OUTLIER_KCAL_A,
+    FORCE_HUBER_BETA,
     ClassIFit,
     _index_omol_source,
     _require_group,
@@ -77,15 +77,14 @@ class TestForceMse:
         ref = torch.zeros(3, 3)
         ref[0] = 400.0
         ref[1] = 1.0
-        keep = ref.norm(dim=-1) <= FORCE_OUTLIER_KCAL_A
-        expected = (pred[keep] - ref[keep]).square().mean()
-        assert torch.allclose(force_mse(pred, ref), expected)
-        assert float(keep.sum()) == 2.0
+        without_outlier = force_mse(pred[1:], ref[1:])
+        assert torch.allclose(force_mse(pred, ref), without_outlier)
 
-    def test_inliers_match_plain_mse(self):
-        pred = torch.tensor([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
-        ref = torch.zeros(2, 3)
-        assert float(force_mse(pred, ref)) == pytest.approx(float((pred - ref).square().mean()))
+    def test_small_residuals_are_quadratic_huber(self):
+        pred = torch.tensor([[1.0, 0.0, 0.0]])
+        ref = torch.zeros(1, 3)
+        expected = 0.5 * (1.0**2) / FORCE_HUBER_BETA / 3.0
+        assert float(force_mse(pred, ref)) == pytest.approx(expected)
 
 
 class TestFitAtomicReference:
