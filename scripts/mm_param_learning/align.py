@@ -378,6 +378,12 @@ def align_invariants(
     }
 
 
+# Large enough that Huber even-symmetry cannot cancel a uniform offset on
+# typical O(10) kcal/mol residuals (the old +3 shift was a no-op when a
+# 2-graph pack had residuals {a, b} with {|a|,|b|} = {|a+3|,|b+3|}).
+_ENERGY_LABEL_SHIFT = 50.0
+
+
 def align_energy_shift(
     model: ForceAwareModel,
     samples: Sequence[dict[str, Any]],
@@ -385,7 +391,13 @@ def align_energy_shift(
     target_schema: TargetSchema = _FIT_SCHEMA,
     atol_loss: float = ATOL_LOSS,
 ) -> dict[str, float]:
-    """A constant energy offset must change the dressed total-energy MSE."""
+    """A constant offset on the energy labels must change the energy term.
+
+    Applied to the batch target, not the prediction: the residualized Huber
+    trains ``E_MM`` against ``E_DFT − e0``, so shifting the dressed prediction
+    is not the quantity in the loss. A 50 kcal/mol label shift sits in the
+    Huber linear region for any O(10) residual.
+    """
     if len(samples) < 2:
         raise ValueError("align_energy_shift needs at least two samples")
     device = _device_of(model)
@@ -393,10 +405,9 @@ def align_energy_shift(
     packed = _collate(paired, target_schema, device)
     out = model(packed)
     loss0 = train_objective(out, packed)
-    shifted = {
-        key: value + 3.0 if key in ("energy", "energy_mm") else value for key, value in out.items()
-    }
-    loss1 = train_objective(shifted, packed)
+    shifted = packed.clone()
+    shifted["graphs", "energy"] = packed["graphs", "energy"] + _ENERGY_LABEL_SHIFT
+    loss1 = train_objective(out, shifted)
     residual = float((loss1 - loss0).abs().item())
     return {
         "energy_shift_abs": residual,

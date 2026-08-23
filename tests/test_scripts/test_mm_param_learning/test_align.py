@@ -121,6 +121,9 @@ class TestAlignEnergyShift:
         model, samples = _two_waters()
         report = align_energy_shift(model, samples)
         assert report["energy_shift_ok"] == 1.0, report
+        # 50 kcal/mol label shift is in the Huber linear region; a real
+        # energy term must move by more than float noise.
+        assert report["energy_shift_abs"] > 1.0, report
 
 
 class TestAlignFinite:
