@@ -22,6 +22,34 @@ from scripts.mm_param_learning.espaloma_mm_protocol_train import enumerate_impro
 from molix.batch.collate import collate_molecules
 
 
+class TestOfficialSourceCache:
+    def test_same_role_reuses_loaded_instance(self, monkeypatch):
+        """A second load for one role must not construct a second LMDB env."""
+        import scripts.mm_param_learning.class_i_fit as mod
+
+        monkeypatch.setitem(mod._OFFICIAL_SOURCE_CACHE, "4m", None)
+
+        class FakeOMol25:
+            instances = 0
+
+            def __init__(self, *, role):
+                self.role = role
+
+            def load(self):
+                FakeOMol25.instances += 1
+                return f"loaded-{self.role}"
+
+        monkeypatch.setattr(
+            "molhub.dataset.omol25.OMol25",
+            lambda *, role, max_rows=None, hub=None: FakeOMol25(role=role),
+        )
+        first = mod._official_source("4m")
+        second = mod._official_source("4m")
+        assert first == second == "loaded-4m"
+        assert FakeOMol25.instances == 1
+
+
+
 class TestEnergyMse:
     def test_energy_mse_is_nonzero_for_one_geometry(self):
         pred = torch.tensor([10.0])

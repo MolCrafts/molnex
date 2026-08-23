@@ -944,16 +944,14 @@ def load_omol25_official(
     max_atoms: int = 16384,
 ) -> tuple[LazyOMol25, LazyOMol25]:
     """Official OMol25: ``4m`` train, ``val-neutral`` val. Lazy, kcal, bonds on read."""
-    from molhub.dataset.omol25 import OMol25
-
     t0 = perf_counter()
-    train_src = OMol25(role=train_role).load()
+    train_src = _official_source(train_role)
     print(
         f"omol train_role={train_role} n={len(train_src)} load_s={perf_counter() - t0:.1f}",
         flush=True,
     )
     t0 = perf_counter()
-    val_src = OMol25(role=val_role).load()
+    val_src = _official_source(val_role)
     print(
         f"omol val_role={val_role} n={len(val_src)} load_s={perf_counter() - t0:.1f}",
         flush=True,
@@ -971,6 +969,25 @@ def load_omol25_official(
     val = LazyOMol25(val_src, val_keep, val_n, dressing=dressing)
     print(f"omol kept train={len(train)} val={len(val)}", flush=True)
     return train, val
+
+
+_OFFICIAL_SOURCE_CACHE: dict[str, Any] = {}
+
+
+def _official_source(role: str) -> Any:
+    """Loaded ``OMol25`` per role, cached so one process opens each LMDB once.
+
+    ``OMol25.load`` is idempotent per instance but opens a new LMDB env per
+    instance; the calibrate gate calls the tiny loader several times in one
+    process, and LMDB refuses a second env on the same path.
+    """
+    from molhub.dataset.omol25 import OMol25
+
+    cached = _OFFICIAL_SOURCE_CACHE.get(role)
+    if cached is None:
+        cached = OMol25(role=role).load()
+        _OFFICIAL_SOURCE_CACHE[role] = cached
+    return cached
 
 
 def _official_prefix(
@@ -1012,10 +1029,8 @@ def load_omol25_official_tiny(
     per-row atom counts (no 512 hint). ε[Z] is fitted on that tiny subset.
     The molecule count is an explicitly enumerated calibration-only difference.
     """
-    from molhub.dataset.omol25 import OMol25
-
-    train_src = OMol25(role="4m").load()
-    val_src = OMol25(role="val-neutral").load()
+    train_src = _official_source("4m")
+    val_src = _official_source("val-neutral")
     train_keep, train_n = _official_prefix(train_src, n_train, max_atoms, scan_cap)
     val_keep, val_n = _official_prefix(val_src, n_val, max_atoms, scan_cap)
     if not train_keep or not val_keep:
