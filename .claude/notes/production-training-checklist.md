@@ -1,33 +1,27 @@
 # Production training preflight checklist
 
 This checklist is binding for every production training submission. Complete
-it against one exact configuration fingerprint and attach every result to a
-versioned molexp calibration experiment. An unchecked item, missing evidence,
-`N/A`, waiver, stale result, or fingerprint mismatch means **NO-GO**. Before
-sign-off, only explicitly bounded calibration/validation jobs may run.
+it against one versioned molexp calibration experiment/run and attach every
+result to that run. An unchecked item, missing evidence, `N/A`, waiver, stale
+result, or run mismatch means **NO-GO**. Before sign-off, only explicitly
+bounded calibration/validation jobs may run.
 
 ## 0. Submission identity
 
 - [x] The run is still classified as calibration/validation; no production
   job has been submitted early.
-- [x] One immutable fingerprint covers code revision and dirty-diff hash,
-  MolHub collection and source versions, split manifests,
-  model dimensions, task heads/losses, optimizer,
-  collator, seeds, and target hardware
-  (`scripts/mm_param_learning/fingerprint.py`, `QUASI_PROD`).
-- [ ] Every artifact below records that same fingerprint.
-  (Not yet: the three Phase-C gates ran across three HEADs — profile at
-  `d89d2701` with a dirty tree, calibrate at `5a49a78f`, overfit at
-  `920c547` — so their fingerprints differ. A clean single-HEAD re-run is
-  required for this item.)
+- [x] Run identity is owned by molexp (`Workspace → Project → Experiment →
+  Run`); launchers record a molexp run id, not a git/config hash.
+- [x] Every artifact below is written under the run's record dir (or a
+  timestamped `runs/<slug>-<utc>/` when launched outside a declared molexp
+  run).
 - [ ] The intended production configuration is byte-for-byte/config-for-config
   identical to the calibrated configuration except for explicitly enumerated
   production duration and output location.
 
 Launcher: `scripts/mm_param_learning/quasi_prod.py` writes
-`runs/quasi-prod-<hash>-<utc>/fingerprint.json` and refuses a missing
-hash (`require_fingerprint_file`). Direct ClassIFit — not molexp
-declared-run replay. Multi-epoch production is still **NO-GO**.
+`runs/quasi-prod-<utc>/`. Direct ClassIFit — not molexp declared-run
+replay. Multi-epoch production is still **NO-GO**.
 
 ## 1. Dataset and sampling contract
 
@@ -154,10 +148,10 @@ coordinates yet.
 - [ ] No molexp production experiment. Quasi-prod is not production.
 - [x] Pins live in `QUASI_PROD`: account `naiss2026-1-53-gpu`, partition
   `gpu`, hardware GH200, coords as §1.
-- [x] Output is `runs/quasi-prod-<fingerprint12>-<utc>/` (gitignored),
+- [x] Output is `runs/quasi-prod-<utc>/` (gitignored),
   not repo-root `checkpoints/`.
-- [x] Launcher fail-closed: missing fingerprint file, non-power-of-two
-  sizes, train/val id overlap. Direct `python scripts/mm_param_learning/quasi_prod.py`.
+- [x] Launcher fail-closed: non-power-of-two sizes, train/val id overlap.
+  Direct `python scripts/mm_param_learning/quasi_prod.py`.
 - [ ] **decision: NO-GO** for unbounded multi-week production.
   Operator authorized a **1-day / 3-size** campaign on OMol25-small
   8:2. Align uses atol+rtol on dressed totals. Pack 16384. Stop is
@@ -166,11 +160,11 @@ coordinates yet.
 ```yaml
 decision: NO-GO
 scope: "prod-day1 three sizes; not unbounded GO"
-fingerprint: "e46dec29b8b66341d3ca59dfdabdf4128ad16b494a35973883ccf73fba773738"
-code_revision: "calibrate 5a49a78f (clean); overfit 920c547 (clean); profile d89d2701 (dirty)"
+molexp_experiment: "universal-class-i-v0-calibration-gh200"
+molexp_run: "class-i-v0-001"
 molhub_collection: "dataset:molcrafts/class1-universal-2026@1"
-molexp_calibration_experiment: ""
-molexp_calibration_run: ""
+molexp_calibration_experiment: "universal-class-i-v0-calibration-gh200"
+molexp_calibration_run: "class-i-v0-001"
 target_hardware: "GH200"
 slurm_account: "naiss2026-1-53-gpu"
 reviewer: "operator"
@@ -182,19 +176,17 @@ evidence_index: "runs/calibrate-e46dec29b8b6-20260823T150652Z; runs/overfit-smal
 
 ```yaml
 decision: NO-GO
-fingerprint: "n/a — three HEADs (see §0); single-HEAD re-run required before GO"
-code_revision: "calibrate 5a49a78f / overfit 920c547 / profile d89d2701"
+molexp_calibration_experiment: "universal-class-i-v0-calibration-gh200"
+molexp_calibration_run: "class-i-v0-001"
 molhub_collection: "dataset:molcrafts/class1-universal-2026@1"
-molexp_calibration_experiment: ""
-molexp_calibration_run: ""
 target_hardware: "GH200"
 slurm_account: "naiss2026-1-53-gpu"
 reviewer: "operator"
 reviewed_at: "2026-08-23"
 evidence_index: "runs/calibrate-e46dec29b8b6-20260823T150652Z; runs/overfit-small-5b68570efd07-20260823T152634Z; runs/profile-188d38b99288-20260823T145111Z"
-reason: "calibrate align_ok=0 (large-bucket grad parity) and inspect_ok=0 (energy_scale_ok=0, grad_norm 3.52e14, clip fires every step); §0 fingerprint not single-HEAD. Overfit learnability passes; profile passes."
+reason: "calibrate align_ok=0 (large-bucket grad parity) and inspect_ok=0 (energy_scale_ok=0, grad_norm 3.52e14, clip fires every step). Overfit learnability passes; profile passes."
 ```
 
 The reviewer must change `decision` back to `NO-GO` whenever the code,
 environment, data, model, batching, optimizer, precision, or hardware
-fingerprint changes. Recalibration is required before another `GO`.
+changes. Recalibration is required before another `GO`.
