@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import cProfile
 import io
+import json
 import pstats
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -30,6 +33,15 @@ from scripts.mm_param_learning.class_i_fit import (
     LazyOMol25,
     train_objective,
 )
+from scripts.mm_param_learning.fingerprint import (
+    QUASI_PROD,
+    attach_fingerprint,
+    fingerprint,
+    write_fingerprint,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RUNS_ROOT = REPO_ROOT / "runs"
 
 
 def build_lazy_pair(
@@ -45,13 +57,10 @@ def build_lazy_pair(
     train_idx = kept[:n_train]
     val_idx = kept[n_train : n_train + n_val]
     dressing = AtomicReferenceEnergy(atomic_energies=torch.zeros(95))
-    train = LazyOMol25(
-        src, train_idx, [int(counts[i]) for i in train_idx], dressing=dressing
-    )
+    train = LazyOMol25(src, train_idx, [int(counts[i]) for i in train_idx], dressing=dressing)
     val = LazyOMol25(src, val_idx, [int(counts[i]) for i in val_idx], dressing=dressing)
     print(
-        f"built lazy {role}: rows_scanned={len(src)} "
-        f"kept_train={len(train)} kept_val={len(val)}",
+        f"built lazy {role}: rows_scanned={len(src)} kept_train={len(train)} kept_val={len(val)}",
         flush=True,
     )
     return train, val
@@ -117,18 +126,22 @@ def cprofile_sample_path(train_ds: LazyOMol25, *, n: int = 300) -> None:
     print(s.getvalue())
 
 
-def torch_profile(fit: ClassIFit, *, active: int = 12) -> None:
-    """torch.profiler over forward+backward with a worker-backed loader."""
+def torch_profile(fit: ClassIFit, *, active: int = 12) -> dict[str, float]:
+    """torch.profiler over forward+backward+optimizer with a worker-backed loader."""
     dm = fit.datamodule()
     model = fit.model()
     model.train()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     loader = dm.train_dataloader()
     it = iter(loader)
     wait, warmup = 2, 2
     schedule_ = schedule(wait=wait, warmup=warmup, active=active, repeat=1)
     n_done = 0
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                 schedule=schedule_, record_shapes=True) as prof:
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        schedule=schedule_,
+        record_shapes=True,
+    ) as prof:
         for _ in range(wait + warmup + active):
             try:
                 batch = next(it)
@@ -136,10 +149,11 @@ def torch_profile(fit: ClassIFit, *, active: int = 12) -> None:
                 print(f"loader exhausted after {n_done} profiled steps", flush=True)
                 break
             batch = batch.to(fit.device, non_blocking=True)
-            model.zero_grad(set_to_none=True)
+            optimizer.zero_grad(set_to_none=True)
             out = model(batch)
             loss = train_objective(out, batch)
             loss.backward()
+            optimizer.step()
             prof.step()
             n_done += 1
     print(f"profiler_steps={n_done}")
@@ -150,11 +164,72 @@ def torch_profile(fit: ClassIFit, *, active: int = 12) -> None:
     print("=== torch.profiler: self CUDA time by shape hint ===")
     total_cuda = sum(e.self_device_time_total for e in prof.key_averages())
     print(f"total_self_cuda_us={total_cuda:.0f}")
+    opt_events = [
+        e for e in prof.key_averages() if "adam" in e.key.lower() or "optimizer" in e.key.lower()
+    ]
+    optimizer_cuda_us = sum(e.self_device_time_total for e in opt_events)
+    print(f"optimizer_self_cuda_us={optimizer_cuda_us:.0f}")
+    return {
+        "profiler_steps": float(n_done),
+        "total_self_cuda_us": float(total_cuda),
+        "optimizer_self_cuda_us": float(optimizer_cuda_us),
+    }
+
+
+def _full_step_timing(fit: ClassIFit, *, steps: int = 50) -> dict[str, float]:
+    """CUDA-event wall-clock of zero_grad→forward→backward→optimizer.step."""
+    dm = fit.datamodule()
+    model = fit.model()
+    model.train()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    it = iter(dm.train_dataloader())
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    times_ms: list[float] = []
+    for _ in range(steps):
+        try:
+            batch = next(it)
+        except StopIteration:
+            break
+        batch = batch.to(fit.device, non_blocking=True)
+        torch.cuda.synchronize()
+        start.record()
+        optimizer.zero_grad(set_to_none=True)
+        out = model(batch)
+        loss = train_objective(out, batch)
+        loss.backward()
+        optimizer.step()
+        end.record()
+        torch.cuda.synchronize()
+        times_ms.append(start.elapsed_time(end))
+    if not times_ms:
+        return {
+            "full_step_n": 0.0,
+            "full_step_median_ms": float("nan"),
+            "full_step_min_ms": float("nan"),
+            "full_step_max_ms": float("nan"),
+        }
+    ordered = sorted(times_ms)
+    median = ordered[len(ordered) // 2]
+    return {
+        "full_step_n": float(len(ordered)),
+        "full_step_median_ms": median,
+        "full_step_min_ms": ordered[0],
+        "full_step_max_ms": ordered[-1],
+    }
 
 
 def run_profile() -> None:
     device = "cuda"
     print(f"device={device} name={torch.cuda.get_device_name(0)}", flush=True)
+
+    blob = fingerprint()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_dir = RUNS_ROOT / f"profile-{blob['fingerprint'][:12]}-{stamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_fingerprint(run_dir / "fingerprint.json", blob)
+    print(f"fingerprint={blob['fingerprint']}", flush=True)
+    print(f"run_dir={run_dir}", flush=True)
 
     n_train, n_val = 2048, 256
     t0 = time.perf_counter()
@@ -167,11 +242,21 @@ def run_profile() -> None:
     max_atoms = 512
 
     # 1) DataLoader throughput at several worker counts.
+    throughput: dict[str, dict[str, float]] = {}
     for nw in (0, 2, 4):
-        fit = ClassIFit(train, val, hidden=64, n_blocks=4, device=device, epochs=1,
-                        max_atoms=max_atoms, num_workers=nw,
-                        prefetch_factor=4 if nw else None)
+        fit = ClassIFit(
+            train,
+            val,
+            hidden=64,
+            n_blocks=4,
+            device=device,
+            epochs=1,
+            max_atoms=max_atoms,
+            num_workers=nw,
+            prefetch_factor=4 if nw else None,
+        )
         stats = _throughput(fit)
+        throughput[str(nw)] = stats
         print(
             f"throughput num_workers={nw}: "
             f"{stats['samples_per_s']:.0f} samples/s "
@@ -185,12 +270,36 @@ def run_profile() -> None:
     # 2) cProfile of the in-process sample path.
     cprofile_sample_path(train)
 
-    # 3) torch.profiler over real train steps with workers.
-    fit = ClassIFit(train, val, hidden=64, n_blocks=4, device=device, epochs=1,
-                    max_atoms=max_atoms, num_workers=4, prefetch_factor=4)
-    torch_profile(fit)
+    # 3) torch.profiler over real train steps with workers (now incl. optimizer).
+    fit = ClassIFit(
+        train,
+        val,
+        hidden=64,
+        n_blocks=4,
+        device=device,
+        epochs=1,
+        max_atoms=max_atoms,
+        num_workers=4,
+        prefetch_factor=4,
+    )
+    profiler_stats = torch_profile(fit)
 
-    print("=== DONE profile ===", flush=True)
+    # 4) CUDA-event wall-clock of the full step including optimizer.step().
+    full_step = _full_step_timing(fit)
+    print(f"full_step={full_step}", flush=True)
+
+    payload = {
+        "device": device,
+        "gpu": torch.cuda.get_device_name(0),
+        "max_atoms": max_atoms,
+        "throughput": throughput,
+        "profiler": profiler_stats,
+        "full_step": full_step,
+    }
+    (run_dir / "profile.json").write_text(
+        json.dumps(attach_fingerprint(payload, blob["fingerprint"]), indent=2) + "\n"
+    )
+    print(f"=== DONE profile {run_dir} ===", flush=True)
 
 
 if __name__ == "__main__":

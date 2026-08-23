@@ -74,6 +74,18 @@ PROD_DAY: dict[str, Any] = {
     "slurm_account": "naiss2026-4-715-gpu",
 }
 
+# Calibration gates run on the SAME official 4m/val-neutral coordinates as
+# production (§0: calibrated config ≡ production config). Only duration and
+# scheduler/output identity differ, both enumerated here.
+CALIBRATION: dict[str, Any] = {
+    **PROD_DAY,
+    "kind": "calibration-official-tiny",
+    "epochs": 1,
+    "eval_every_epochs": 1,
+    "wall_hours": 1,
+    "slurm_account": "naiss2026-1-53-gpu",
+}
+
 
 def require_power_of_two(name: str, value: int) -> None:
     """Refuse a model/pack size that is not a power of two."""
@@ -112,6 +124,16 @@ def write_fingerprint(path: Path, blob: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(blob, indent=2, sort_keys=True) + "\n")
     return path
+
+
+def attach_fingerprint(payload: dict[str, Any], fp: str) -> dict[str, Any]:
+    """Record the run fingerprint at the top level of an artifact payload.
+
+    Every evidence artifact (``split.json``, ``metrics.json``, …) must carry
+    the same hash so :mod:`scripts.mm_param_learning.verify_fingerprint` can
+    prove one artifact set belongs to one calibrated configuration (§0).
+    """
+    return {"fingerprint": fp, **payload}
 
 
 def require_fingerprint_file(path: Path) -> dict[str, Any]:

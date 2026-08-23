@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from molix import logger as _logger_mod
 from molix import logging as _logging_mod
+from molix.core.checkpoint import TorchSaveBackend
 from molix.core.hook import BaseHook
 from molix.core.state import Path, resolve
 
@@ -61,15 +62,13 @@ class CheckpointHook(BaseHook):
     ):
         import os
 
-        import torch
-
         if best_metric_mode not in ("min", "max"):
             raise ValueError(f"best_metric_mode must be 'min' or 'max', got {best_metric_mode!r}")
         if save_every_n_steps < 0:
             raise ValueError(f"save_every_n_steps must be >= 0, got {save_every_n_steps}")
 
         self.os = os
-        self.torch = torch
+        self._backend = TorchSaveBackend()
 
         self.checkpoint_dir = checkpoint_dir
         self.save_every_n_steps = save_every_n_steps
@@ -184,7 +183,7 @@ class CheckpointHook(BaseHook):
         """
         filepath = self.os.path.join(self.checkpoint_dir, filename)
         checkpoint = self._build_state_dict(trainer, state)
-        self.torch.save(checkpoint, filepath)
+        self._backend.save(checkpoint, filepath)
         logger.info(f"Refreshed checkpoint at {filepath}")
 
     def _save_checkpoint(self, trainer, state, filename, *, step: int | None = None):
@@ -206,7 +205,7 @@ class CheckpointHook(BaseHook):
 
         filepath = self.os.path.join(self.checkpoint_dir, filename)
         checkpoint = self._build_state_dict(trainer, state)
-        self.torch.save(checkpoint, filepath)
+        self._backend.save(checkpoint, filepath)
 
         logger.info(f"Saved checkpoint to {filepath}")
         message = f"ckpt: {filename} @ step={step}"

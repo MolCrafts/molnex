@@ -23,6 +23,7 @@ from scripts.mm_param_learning.class_i_fit import (
 from scripts.mm_param_learning.fingerprint import (
     PROD_DAY,
     PROD_MODELS,
+    attach_fingerprint,
     fingerprint,
     write_fingerprint,
 )
@@ -73,7 +74,9 @@ def run(size: str) -> None:
         "train_n_atoms_max": int(train.atom_counts.max()) if len(train) else 0,
         "val_n_atoms_max": int(val.atom_counts.max()) if len(val) else 0,
     }
-    (run_dir / "split.json").write_text(json.dumps(coverage, indent=2) + "\n")
+    (run_dir / "split.json").write_text(
+        json.dumps(attach_fingerprint(coverage, blob["fingerprint"]), indent=2) + "\n"
+    )
     print(json.dumps({"coverage": coverage, "config": cfg}, sort_keys=True), flush=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -94,7 +97,9 @@ def run(size: str) -> None:
         eval_loss=val_omol_mae,
         clip_max_norm=float(cfg["clip_max_norm"]),
     ).run()
-    (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    (run_dir / "metrics.json").write_text(
+        json.dumps(attach_fingerprint(metrics, blob["fingerprint"]), indent=2) + "\n"
+    )
     print(metrics, flush=True)
     print(f"=== PROD-DAY1 {size} DONE {run_dir} ===", flush=True)
 

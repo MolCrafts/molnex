@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
+from scripts.mm_param_learning import verify_fingerprint
 from scripts.mm_param_learning.fingerprint import (
     PROD_MODELS,
     QUASI_PROD,
+    attach_fingerprint,
     fingerprint,
     require_fingerprint_file,
     require_not_production_go,
@@ -60,3 +63,36 @@ class TestRequireNotProductionGo:
 
     def test_missing_is_ok(self, tmp_path: Path):
         require_not_production_go(tmp_path / "none.yaml")
+
+
+class TestAttachFingerprint:
+    def test_records_hash_first(self):
+        assert attach_fingerprint({"a": 1}, "abc") == {"fingerprint": "abc", "a": 1}
+
+
+class TestVerifyFingerprint:
+    def _write_fp(self, run_dir: Path, fp: str) -> None:
+        (run_dir / "fingerprint.json").write_text(json.dumps({"fingerprint": fp}))
+
+    def test_all_match(self, tmp_path: Path):
+        self._write_fp(tmp_path, "f" * 64)
+        (tmp_path / "split.json").write_text(json.dumps({"fingerprint": "f" * 64}))
+        (tmp_path / "metrics.json").write_text(json.dumps({"fingerprint": "f" * 64}))
+        assert verify_fingerprint.main(["verify_fingerprint.py", str(tmp_path)]) == 0
+
+    def test_mismatch_fails(self, tmp_path: Path):
+        self._write_fp(tmp_path, "f" * 64)
+        (tmp_path / "split.json").write_text(json.dumps({"fingerprint": "e" * 64}))
+        assert verify_fingerprint.main(["verify_fingerprint.py", str(tmp_path)]) == 1
+
+    def test_absent_field_fails(self, tmp_path: Path):
+        self._write_fp(tmp_path, "f" * 64)
+        (tmp_path / "split.json").write_text(json.dumps({"coverage": {}}))
+        assert verify_fingerprint.main(["verify_fingerprint.py", str(tmp_path)]) == 1
+
+    def test_missing_fingerprint_file_fails(self, tmp_path: Path):
+        assert verify_fingerprint.main(["verify_fingerprint.py", str(tmp_path)]) == 1
+
+    def test_no_artifacts_fails(self, tmp_path: Path):
+        self._write_fp(tmp_path, "f" * 64)
+        assert verify_fingerprint.main(["verify_fingerprint.py", str(tmp_path)]) == 1

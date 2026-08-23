@@ -24,7 +24,7 @@ from scripts.mm_param_learning.class_i_fit import (
     ForceAwareModel,
     _graph_tensor,
     energy_force_terms,
-    load_omol25_split,
+    load_omol25_official_tiny,
     train_objective,
 )
 
@@ -164,8 +164,11 @@ def _flatten(fit: ClassIFit) -> list[dict[str, Any]]:
 
 
 def run_inspect(*, n_keep: int = 16, device: str = "cpu") -> dict[str, Any]:
-    """Bounded OMol25 scale inspection. Not a training run."""
-    train, val = load_omol25_split(role="val-neutral", n_keep=n_keep, max_atoms=32)
+    """Bounded official-4m scale inspection. Not a training run."""
+    from scripts.mm_param_learning.prod_day import _require_nobackup_molhub_home
+
+    _require_nobackup_molhub_home()
+    train, val = load_omol25_official_tiny(n_train=n_keep, n_val=max(n_keep // 4, 2), max_atoms=32)
     fit = ClassIFit(
         train,
         val,

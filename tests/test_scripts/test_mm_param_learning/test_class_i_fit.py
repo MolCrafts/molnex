@@ -203,6 +203,51 @@ class TestForceAwareEval:
         assert float(metric) > 0.0
 
 
+class TestRunWritesMolRecWal:
+    def _water(self, molecule_id: str) -> tuple:
+        atoms = Block()
+        atoms["number"] = np.array([8, 1, 1], dtype=np.int64)
+        atoms["x"] = np.array([0.0, 0.96, -0.24], dtype=np.float64)
+        atoms["y"] = np.array([0.0, 0.0, 0.93], dtype=np.float64)
+        atoms["z"] = np.zeros(3, dtype=np.float64)
+        atoms["fx"] = np.zeros(3, dtype=np.float64)
+        atoms["fy"] = np.zeros(3, dtype=np.float64)
+        atoms["fz"] = np.zeros(3, dtype=np.float64)
+        bonds = Block()
+        bonds["atomi"] = np.array([0, 0], dtype=np.int64)
+        bonds["atomj"] = np.array([1, 2], dtype=np.int64)
+        frame = Frame()
+        frame["atoms"] = atoms
+        frame["bonds"] = bonds
+        frame.meta["energy"] = -76.0
+        frame.meta["molecule_id"] = molecule_id
+        return (frame,)
+
+    def test_run_writes_metrics_and_status(self, tmp_path):
+        import json
+
+        torch.manual_seed(0)
+        train = [self._water("w0"), self._water("w1")]
+        val = [self._water("v0")]
+        fit = ClassIFit(
+            train,
+            val,
+            hidden=16,
+            n_blocks=1,
+            n_torsion_terms=2,
+            device="cpu",
+            epochs=1,
+            energy_scope="full",
+            record_root=tmp_path,
+        )
+        fit.run(max_steps=1)
+
+        assert (tmp_path / "metrics" / "metrics.jsonl").exists()
+        assert (tmp_path / "status" / "status.json").exists()
+        status = json.loads((tmp_path / "status" / "status.json").read_text())
+        assert status["state"] == "succeeded"
+
+
 class TestSplitCoverage:
     def test_overlap_raises(self):
         frame = Frame()
@@ -240,6 +285,28 @@ class TestSplitCoverage:
         assert cov["n_train_molecules"] == 8
         assert cov["n_val_molecules"] == 2
         assert path.is_file()
+
+    def test_manifest_embeds_fingerprint_when_given(self, tmp_path):
+        import json
+
+        from scripts.mm_param_learning.class_i_fit import write_split_manifest
+
+        records = []
+        for i in range(4):
+            frame = Frame()
+            atoms = Block()
+            atoms["number"] = [6]
+            atoms["x"] = [0.0]
+            atoms["y"] = [0.0]
+            atoms["z"] = [0.0]
+            frame["atoms"] = atoms
+            frame.meta["molecule_id"] = f"m{i}"
+            frame.meta["energy"] = 0.0
+            records.append((frame,))
+        train, val = split_records(records, train_frac=0.5, seed=1)
+        path = write_split_manifest(tmp_path / "split.json", train, val, fingerprint="abc123")
+        payload = json.loads(path.read_text())
+        assert payload["fingerprint"] == "abc123"
 
 
 class TestSplitRecords:

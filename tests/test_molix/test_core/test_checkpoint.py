@@ -138,6 +138,25 @@ class TestTorchSaveBackend:
         tmp_files = list(tmp_path.glob("*.tmp"))
         assert len(tmp_files) == 0
 
+    def test_atomic_on_failed_write_keeps_old_file(self, tmp_path, monkeypatch):
+        """A killed mid-save leaves the old checkpoint intact, never a torn file."""
+        backend = TorchSaveBackend()
+        filepath = tmp_path / "ckpt.pt"
+        backend.save({"a": 1}, filepath)
+
+        def _failing_save(obj, path, *args, **kwargs):
+            with open(path, "wb") as f:
+                f.write(b"partial")
+            raise OSError("simulated kill mid-save")
+
+        monkeypatch.setattr(torch, "save", _failing_save)
+        with pytest.raises(OSError, match="simulated kill"):
+            backend.save({"a": 2}, filepath)
+
+        # Old payload is untouched and the tmp file was cleaned up.
+        assert backend.load(filepath)["a"] == 1
+        assert list(tmp_path.glob("*.tmp")) == []
+
 
 # ---------------------------------------------------------------------------
 # Checkpoint state_dict / load_state_dict
@@ -425,6 +444,14 @@ class TestCheckpointHookIntegration:
         assert "rng_states" in sd
         assert sd["epoch"] == 1
         assert sd["global_step"] == 2
+
+    def test_no_tmp_files_left_after_hook_save(self, tmp_path):
+        """The hook routes through the atomic backend: no stray tmp files."""
+        ckpt_dir = str(tmp_path / "ckpts")
+        hook = CheckpointHook(checkpoint_dir=ckpt_dir, save_last=True)
+        trainer = _make_trainer(hooks=[hook])
+        trainer.train(_MockDataModule(batches_per_epoch=2), max_epochs=1)
+        assert list(Path(ckpt_dir).glob("*.tmp")) == []
 
     def test_save_best(self, tmp_path):
         """Best checkpoint saved when metric improves."""

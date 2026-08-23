@@ -31,7 +31,7 @@ from scripts.mm_param_learning.class_i_fit import (
     _FIT_SCHEMA,
     ClassIFit,
     ForceAwareModel,
-    load_omol25_split,
+    load_omol25_official_tiny,
     train_objective,
 )
 
@@ -217,9 +217,7 @@ def align_packed(
     energy_max = _max_abs(energy_p, energy_ref)
     energy_scale = float(torch.maximum(energy_p.abs().max(), energy_ref.abs().max()).item())
     force_max = _max_abs(out_p["forces"], forces_ref)
-    force_scale = float(
-        torch.maximum(out_p["forces"].abs().max(), forces_ref.abs().max()).item()
-    )
+    force_scale = float(torch.maximum(out_p["forces"].abs().max(), forces_ref.abs().max()).item())
 
     loss_ref = train_objective({"energy": energy_ref, "forces": forces_ref}, packed)
     loss_p = train_objective(out_p, packed)
@@ -246,7 +244,6 @@ def align_packed(
         grad_max = max(grad_max, residual)
         if residual > atol_grad + rtol_grad * max(scale, 1e-12):
             grad_ok = False
-
 
     snap = {key: value.detach().clone() for key, value in model.state_dict().items()}
     model.zero_grad(set_to_none=True)
@@ -275,7 +272,6 @@ def align_packed(
         scale = max(_abs_max(after_p[key]), _abs_max(other))
         if residual > atol_update + rtol_update * max(scale, 1e-12):
             update_ok = False
-
 
     return {
         "n_mols": float(len(samples)),
@@ -554,8 +550,11 @@ def run_align(
     n_per_bucket: int = 4,
     device: str = "cpu",
 ) -> dict[str, Any]:
-    """Bounded OMol25 packed-vs-single + invariant suite. Not a training run."""
-    train, val = load_omol25_split(role="val-neutral", n_keep=n_keep, max_atoms=32)
+    """Bounded official-4m packed-vs-single + invariant suite. Not a training run."""
+    from scripts.mm_param_learning.prod_day import _require_nobackup_molhub_home
+
+    _require_nobackup_molhub_home()
+    train, val = load_omol25_official_tiny(n_train=n_keep, n_val=max(n_keep // 4, 2), max_atoms=32)
     fit = ClassIFit(
         train,
         val,

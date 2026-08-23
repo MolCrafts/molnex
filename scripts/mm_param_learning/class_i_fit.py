@@ -27,7 +27,7 @@ from molix.batch import DataMixture, DataModule, TargetSchema
 from molix.core.hook import BaseHook
 from molix.core.steps import MultiTaskEvalStep, MultiTaskTrainStep, TaskRouter, TaskSpec
 from molix.core.trainer import Trainer
-from molix.hooks import CheckpointHook, GradClipHook, Log, StepSpeedHook
+from molix.hooks import CheckpointHook, GradClipHook, Log, MolRecMetricsHook, StepSpeedHook
 from molix.store.frame_dataset import FrameDataset
 from molix.store.frame_sample import FrameSample
 from molix.units import units
@@ -453,6 +453,8 @@ class ClassIFit:
                 best_metric_mode="min",
             ),
         ]
+        if self.record_root is not None:
+            hooks.append(MolRecMetricsHook(record_root=self.record_root))
         steps_per_epoch = max(1, len(datamodule.train_dataloader()))
         eval_every_n_steps = (
             None if self.eval_every_epochs <= 1 else steps_per_epoch * self.eval_every_epochs
@@ -613,15 +615,23 @@ def split_coverage(train: Sequence, val: Sequence) -> dict[str, Any]:
     }
 
 
-def write_split_manifest(path: Path, train: Sequence, val: Sequence) -> Path:
-    """Write molecule ids for each split. Coverage is included."""
+def write_split_manifest(
+    path: Path, train: Sequence, val: Sequence, *, fingerprint: str | None = None
+) -> Path:
+    """Write molecule ids for each split. Coverage is included.
+
+    ``fingerprint``, when given, is recorded at the top level so the manifest
+    is provably part of one run identity (checklist §0).
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    payload: dict[str, Any] = {
         "train_ids": [_require_group(rec[0]) for rec in train],
         "val_ids": [_require_group(rec[0]) for rec in val],
         "coverage": split_coverage(train, val),
     }
+    if fingerprint is not None:
+        payload = {"fingerprint": fingerprint, **payload}
     path.write_text(json.dumps(payload, indent=2) + "\n")
     return path
 
@@ -701,6 +711,12 @@ class LazyOMol25:
 
     def __len__(self) -> int:
         return len(self._indices)
+
+    def subset(self, indices: Sequence[int]) -> "LazyOMol25":
+        """A lazy view over the given row indices (same source + dressing)."""
+        kept = [int(i) for i in indices]
+        counts = self.atom_counts[kept].tolist()
+        return LazyOMol25(self._source, kept, counts, dressing=self.dressing)
 
     def __getitem__(self, idx: int) -> tuple[dict[str, Any], ...]:
         src_idx = self._indices[idx]
@@ -955,6 +971,66 @@ def load_omol25_official(
     val = LazyOMol25(val_src, val_keep, val_n, dressing=dressing)
     print(f"omol kept train={len(train)} val={len(val)}", flush=True)
     return train, val
+
+
+def _official_prefix(
+    source: Any, n: int, max_atoms: int, scan_cap: int
+) -> tuple[list[int], list[int]]:
+    """First *n* row indices of *source* with real ``1 ≤ n_atoms ≤ max_atoms``.
+
+    Reads per-row ``numbers`` for a bounded prefix only, so it never runs the
+    full 4M-row index scan the 512-hint fallback exists to avoid.
+    """
+    indices: list[int] = []
+    counts: list[int] = []
+    limit = min(int(len(source)), int(scan_cap))
+    for i in range(limit):
+        if len(indices) >= n:
+            break
+        rec = _raw_omol_record(source, i)
+        numbers = np.asarray(rec.get("numbers", np.zeros(0, dtype=np.int64))).reshape(-1)
+        n_atoms = int(numbers.shape[0])
+        if 1 <= n_atoms <= int(max_atoms):
+            indices.append(i)
+            counts.append(n_atoms)
+    return indices, counts
+
+
+def load_omol25_official_tiny(
+    *,
+    n_train: int = 48,
+    n_val: int = 12,
+    max_atoms: int = 32,
+    seed: int = 2666,
+    scan_cap: int = 8192,
+) -> tuple[LazyOMol25, LazyOMol25]:
+    """Official ``4m`` / ``val-neutral`` coordinates on a bounded real subset.
+
+    For the align / inspect / overfit calibration gates: same coordinate
+    identity as production, but only the first ``n_train`` / ``n_val`` rows
+    with ``1 ≤ n_atoms ≤ max_atoms`` atoms are materialised, with real
+    per-row atom counts (no 512 hint). ε[Z] is fitted on that tiny subset.
+    The molecule count is an explicitly enumerated calibration-only difference.
+    """
+    from molhub.dataset.omol25 import OMol25
+
+    train_src = OMol25(role="4m").load()
+    val_src = OMol25(role="val-neutral").load()
+    train_keep, train_n = _official_prefix(train_src, n_train, max_atoms, scan_cap)
+    val_keep, val_n = _official_prefix(val_src, n_val, max_atoms, scan_cap)
+    if not train_keep or not val_keep:
+        raise ValueError(
+            "official tiny subset kept no frames "
+            f"(n_train={len(train_keep)}, n_val={len(val_keep)})"
+        )
+    e0 = _fit_e0_subsample(
+        train_src, train_keep, n_fit=len(train_keep), max_atoms=max_atoms, seed=seed
+    )
+    dressing = AtomicReferenceEnergy(atomic_energies=e0.tolist())
+    return (
+        LazyOMol25(train_src, train_keep, train_n, dressing=dressing),
+        LazyOMol25(val_src, val_keep, val_n, dressing=dressing),
+    )
 
 
 def load_phalkethoh_val(root: str | Path, *, n_keep: int = 0) -> list:
