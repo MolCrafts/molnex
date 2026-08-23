@@ -6,6 +6,10 @@ must not be treated as authority for a new training submission.
 
 ## Active specifications
 
+- [oplsaa-parameterizer-01-types](oplsaa-parameterizer-01-types.md) — OPLSAAForceField 类型面与 PotentialMeta improper schema [code-complete]
+- [oplsaa-parameterizer-02-heads](oplsaa-parameterizer-02-heads.md) — ProperTorsionParamHead OPLS-AA k1..k4 直接输出 [code-complete]
+- [oplsaa-parameterizer-03-parameterizer](oplsaa-parameterizer-03-parameterizer.md) — ClassicalIMM→Parameterizer；ClassIPredictions→ForceFieldPredictions [code-complete]
+- [oplsaa-parameterizer-04-cut](oplsaa-parameterizer-04-cut.md) — 公开面硬切清零与链回归 regressions/oplsaa-parameterizer.py [code-complete]
 - [md-forcefield-molpy-reexport-01-reexport](md-forcefield-molpy-reexport-01-reexport.md) — molix.md ForceField 再导出 molpy.ForceField；删除自制适配器 [code-complete]
 - [md-forcefield-molpy-reexport-02-nblist](md-forcefield-molpy-reexport-02-nblist.md) — NeighborList 写入 live MIC 几何；MD 调度 nblist 再求值 [code-complete]
 - [md-forcefield-molpy-reexport-03-potentials](md-forcefield-molpy-reexport-03-potentials.md) — molpot pair 项读 batch 位移/距离，禁止二次 PBC [code-complete]

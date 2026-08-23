@@ -113,14 +113,8 @@ class PiNet(TensorDictModuleBase):
         self.edge_output_dim = self.feature_dim * self.n_props
 
         self.n_elem = len(cfg.atom_types)
-        self.register_buffer(
-            "_atom_types",
-            torch.tensor(cfg.atom_types, dtype=torch.long),
-            persistent=False,
-        )
-        self._atom_types: torch.Tensor
 
-        z_to_idx = torch.zeros(128, dtype=torch.long)
+        z_to_idx = torch.full((max(cfg.atom_types) + 1,), -1, dtype=torch.long)
         for i, z in enumerate(cfg.atom_types):
             z_to_idx[int(z)] = i
         self.register_buffer("_z_to_idx", z_to_idx, persistent=False)

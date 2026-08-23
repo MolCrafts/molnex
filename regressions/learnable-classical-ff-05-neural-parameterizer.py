@@ -1,4 +1,4 @@
-"""Public-API regression for ClassicalIMM (encoder → ForceField → E/F).
+"""Public-API regression for Parameterizer (encoder → ForceField → E/F).
 
 ::
 
@@ -10,9 +10,7 @@ Hard-coded goldens only. Bond: k=2, r=1.5, r0=1 → E = 0.25 kcal/mol.
 
 from __future__ import annotations
 
-import ast
 import sys
-from pathlib import Path
 from typing import Mapping
 
 import torch
@@ -51,23 +49,15 @@ class _ConstBond(nn.Module):
 
 
 def main() -> int:
-    from molpot import ClassicalIMM, ForceField
+    from molpot import ForceField, Parameterizer
 
     torch.manual_seed(0)
     features = {"bonds": torch.zeros(1, 4, dtype=torch.float64)}
     encoder = FakeEncoder(features)
 
-    path = Path(__file__).resolve().parents[1] / "src/molpot/forcefield/classical_imm.py"
-    tree = ast.parse(path.read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                assert not alias.name.startswith("molzoo")
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            assert not node.module.startswith("molzoo")
-
     ff = ForceField(name="test", units="real").def_bondstyle("harmonic")
-    model = ClassicalIMM(encoder=encoder, forcefield=ff, bond_head=_ConstBond())
+    model = Parameterizer(encoder, ff, bond_head=_ConstBond())
+    assert not hasattr(model, "project")
 
     pos = torch.tensor([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], dtype=torch.float64)
     batch = TensorDict(
@@ -101,14 +91,8 @@ def main() -> int:
     assert abs(float(forces[0, 0].detach()) - 1.0) < 1e-6
     assert abs(float(forces[1, 0].detach()) + 1.0) < 1e-6
 
-    target = ForceField(name="opls-shaped", units="real")
-    target.def_bondstyle("harmonic")
-    target.def_dihedralstyle("opls")
-    projected = model.project(target)
-    assert projected.dihedral_style() == "opls"
-
     assert "bond:harmonic" in ff.to_potentials().get_schema()
-    print("learnable-classical-ff-05 ClassicalIMM OK")
+    print("learnable-classical-ff-05 Parameterizer OK")
     return 0
 
 

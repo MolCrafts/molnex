@@ -7,6 +7,10 @@ Surfaces:
   ``atom_ptr`` / ``edge_ptr`` cumsum pointers. Run-scoped scratch, not a
   persistence format; see the module docstring for the inode-budget argument
   against ``TensorDict.memmap_()``.
+* **Frame view** — a record is a :data:`~molpy.FrameCollection`
+  (``Sequence[Frame]``). :class:`FrameSample` turns one ``Frame`` into the
+  pre-collate dict; :class:`FrameDataset` is a single-task map-style view.
+  Mixing named sources is :class:`~molix.batch.mixture.DataMixture`.
 * **Readers** — :class:`MmapDataset` / :class:`CachedDataset` read a
   :class:`PackedCache` file (mmap'd or fully resident), :class:`SubsetDataset`
   is an index view over either, and :class:`BaseDataset` is the shared reader
@@ -46,6 +50,8 @@ from molix.store.dataset import (
     PackedView,
     SubsetDataset,
 )
+from molix.store.frame_dataset import CLASS_I_FRAME_SCHEMA, FrameCollection, FrameDataset
+from molix.store.frame_sample import FrameSample
 
 __all__ = [
     "BaseDataset",
@@ -56,7 +62,11 @@ __all__ = [
     "BlockSchemaMismatchError",
     "BlockSplitMismatchError",
     "BlockWriter",
+    "CLASS_I_FRAME_SCHEMA",
     "CachedDataset",
+    "FrameCollection",
+    "FrameDataset",
+    "FrameSample",
     "MmapDataset",
     "PackedCache",
     "PackedView",

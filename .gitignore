@@ -120,6 +120,7 @@ cython_debug/
 .benchmarks/
 # default --root of scripts/store/bench_block_read.py (deleted unless --keep)
 .bench-scratch/
+.scratch/
 
 # Examples (not shipped)
 /examples/
@@ -147,3 +148,11 @@ src/molix/op/build-*/
 .venv*/
 # repo-root slurm job logs
 /*.out
+
+# Quasi-production look-see artifacts
+runs/
+/checkpoints/
+
+# molq MCP runtime state + downloaded aarch64 wheels
+.molq/
+.wheels-gh200/

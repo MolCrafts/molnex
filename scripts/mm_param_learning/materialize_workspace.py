@@ -10,22 +10,23 @@ objects (OKF), not unsourced free Notes.
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 from typing import Any
 
 from scripts.mm_param_learning.constants import (
-    DEFAULT_NORMALIZED_DATA_ROOT,
+    COLLECTION_COORDINATE,
     DEFAULT_WORKSPACE_ROOT,
     EXPERIMENT_SLUGS,
     KNOWLEDGE_NOTE_NAME,
     MOLHUB_COORDINATES,
     PROGRAM,
     PROJECT_SLUG,
-    PROTOCOL_EXPERIMENT_SLUG,
+    TRAIN_COORDINATE,
+    V0_EXPERIMENT_SLUG,
+    VAL_COORDINATE,
     VALIDATION_STAGES,
 )
-from scripts.mm_param_learning.workflows import MmParamWorkflows
+from scripts.mm_param_learning.workflows import ClassIV0Workflow, MmParamWorkflows
 
 
 def _knowledge_body() -> str:
@@ -53,7 +54,9 @@ def _knowledge_body() -> str:
             "Workspace orchestration uses **molexp**; agents discover tools on the"
             " **molmcp molexp** plane.",
             "",
-            f"Default normalized PhAlkEthOH root: `{DEFAULT_NORMALIZED_DATA_ROOT}`",
+            f"Collection: `{COLLECTION_COORDINATE}`",
+            f"Train: `{TRAIN_COORDINATE}`",
+            f"Validation: `{VAL_COORDINATE}` (molecule-level 8:2 self-split)",
             "",
         ]
     )
@@ -62,14 +65,12 @@ def _knowledge_body() -> str:
     lines.extend(
         [
             "",
-            "## Protocol train entry",
+            "## v0 train entry",
             "",
             "```bash",
-            "python scripts/mm_param_learning/setup_class_i_protocol.py",
-            "python scripts/mm_param_learning/espaloma_mm_protocol_train.py \\",
-            f"  --data-root {DEFAULT_NORMALIZED_DATA_ROOT} --energy-scope full \\",
-            f"  --workspace {DEFAULT_WORKSPACE_ROOT} \\",
-            f"  --experiment {PROTOCOL_EXPERIMENT_SLUG} --run-id protocol-full-energy-mini-001",
+            "molexp run scripts/mm_param_learning/train.py --profile smoke \\",
+            "  --config scripts/mm_param_learning/molcfg.yaml \\",
+            f"  -ws {DEFAULT_WORKSPACE_ROOT}",
             "```",
             "",
         ]
@@ -101,6 +102,7 @@ class MmParamLearningWorkspace:
             ImportError: If molexp is not installed.
         """
         try:
+            import molexp  # noqa: F401 — registers the workflow executor
             from molexp import Workspace
             from molexp.workspace import SourceRef, write_knowledge_item
         except ImportError as exc:  # pragma: no cover - soft dep
@@ -124,29 +126,33 @@ class MmParamLearningWorkspace:
                     "dataset_coordinate": coord,
                     "milestone": 1,
                     "program": PROGRAM,
+                    "collection": COLLECTION_COORDINATE,
+                    "train_coordinate": TRAIN_COORDINATE,
+                    "val_coordinate": VAL_COORDINATE,
                 },
                 description=f"MM param validation experiment {slug}",
                 tags=["mm-param-learning", "milestone-1"],
             )
             exp.materialize()
-            # Seed run — fixed id for idempotency.
-            run = exp.add_run(
-                params={
-                    "dataset_coordinate": coord,
-                    "milestone": 1,
-                    "program": PROGRAM,
-                    "experiment": slug,
-                },
-                id=f"seed-{slug}",
-            )
-            run.materialize()
-            # Compile workflow for side-effect validation (not executed).
-            workflows.build(slug)
+            if slug == V0_EXPERIMENT_SLUG:
+                ClassIV0Workflow().attach(exp, params={"seed": [2666]})
+            else:
+                run = exp.add_run(
+                    params={
+                        "dataset_coordinate": coord,
+                        "milestone": 1,
+                        "program": PROGRAM,
+                        "experiment": slug,
+                    },
+                    id=f"seed-{slug}",
+                )
+                run.materialize()
+                workflows.build(slug)
             experiments.append(slug)
 
         sources = [SourceRef(kind="experiment", ref=slug) for slug in experiments]
         if not sources:
-            sources = [SourceRef(kind="experiment", ref=PROTOCOL_EXPERIMENT_SLUG)]
+            sources = [SourceRef(kind="experiment", ref=V0_EXPERIMENT_SLUG)]
         sources.extend(
             SourceRef(kind="file", ref=coord) for coord in sorted(set(MOLHUB_COORDINATES.values()))
         )
@@ -167,25 +173,3 @@ class MmParamLearningWorkspace:
             "note": KNOWLEDGE_NOTE_NAME,
             "workspace": ws,
         }
-
-
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry: materialize the operator workspace (or ``--root`` override)."""
-    parser = argparse.ArgumentParser(
-        description="Materialize mm-param-learning molexp workspace (idempotent)."
-    )
-    parser.add_argument(
-        "--root",
-        type=Path,
-        default=None,
-        help="Workspace root (default: operator DEFAULT_WORKSPACE_ROOT).",
-    )
-    args = parser.parse_args(argv)
-    summary = MmParamLearningWorkspace(root=args.root).materialize()
-    print(f"materialized project={summary['project']} root={summary['root']}")
-    print(f"experiments={summary['experiments']}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

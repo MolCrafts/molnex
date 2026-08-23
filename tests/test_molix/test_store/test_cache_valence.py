@@ -5,7 +5,6 @@ Spec: learnable-classical-ff-02-valence-topology (ac-003).
 
 from __future__ import annotations
 
-import pytest
 import torch
 
 from molix.batch.collate import collate_molecules, collate_packed
@@ -111,13 +110,21 @@ def test_packed_cache_propers_impropers_roundtrip(tmp_path):
     assert fast["impropers"]["atomi"].tolist() == [1, 6]
 
 
-def test_packed_cache_mixed_valence_all_or_none(tmp_path):
+def test_packed_cache_mixed_valence_pads_missing(tmp_path):
     samples = [
         _mol(3, angles={"atomi": [0], "atomj": [1], "atomk": [2]}),
-        _mol(2),  # missing angles
+        _mol(2),  # missing angles → zero terms
     ]
-    with pytest.raises(ValueError, match="angles"):
-        PackedCache(tmp_path / "bad.pt").save(samples)
+    sink = tmp_path / "mixed.pt"
+    PackedCache(sink).save(samples)
+    ds = MmapDataset(sink)
+
+    fast = collate_packed(ds.packed_view(), [0, 1])
+    oracle = collate_molecules([ds[0], ds[1]])
+    assert fast["angles"]["atomi"].tolist() == [0]
+    assert list(fast["angles"].batch_size) == [1]
+    for col in ("atomi", "atomj", "atomk"):
+        assert torch.equal(fast["angles"][col], oracle["angles"][col])
 
 
 def test_bonds_and_angles_together_in_cache(tmp_path):

@@ -25,9 +25,13 @@ def system():
 
 
 def _class_i_harmonic(*, k: float = 2.0, r0: float = 1.0):
-    from molpot.forcefield import ClassIForceField
+    from molpot.forcefield import ForceField
 
-    return ClassIForceField().with_params(bonds={"k": torch.tensor([k]), "r0": torch.tensor([r0])})
+    return (
+        ForceField()
+        .def_bondstyle("harmonic")
+        .with_params(bonds={"k": torch.tensor([k]), "r0": torch.tensor([r0])})
+    )
 
 
 def _two_atom_system(*, r: float = 1.5, dtype: torch.dtype = torch.float64) -> TensorDict:
@@ -114,17 +118,23 @@ class TestMD:
         assert md.force is ff
 
     def test_set_forcefield_accepts_class_i_forcefield_and_returns_self(self):
-        from molpot.forcefield import ClassIForceField
+        from molpot.forcefield import ForceField
 
-        ff = ClassIForceField()
+        ff = (
+            ForceField()
+            .def_atomstyle("full")
+            .def_bondstyle("harmonic")
+            .def_anglestyle("harmonic")
+            .def_dihedralstyle("fourier")
+        )
         md = MD()
         assert md.set_forcefield(ff) is md
         assert md.force is ff
 
     def test_set_forcefield_accepts_opls_forcefield_and_returns_self(self):
-        from molpot.forcefield import OPLSForceField
+        from molpot.forcefield import OPLSAAForceField
 
-        ff = OPLSForceField()
+        ff = OPLSAAForceField()
         md = MD()
         assert md.set_forcefield(ff) is md
         assert md.force is ff

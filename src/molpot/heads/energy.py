@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from molix import config
+from molpot.derivation.energy import EnergyAggregation
 
 
 class AtomicReferenceEnergy(nn.Module):
@@ -66,6 +67,7 @@ class AtomicReferenceEnergy(nn.Module):
 
         self.register_buffer("atomic_energies", lookup)
         self.atomic_energies: torch.Tensor
+        self._pool = EnergyAggregation(pooling="sum")
 
     def forward(self, Z: torch.Tensor) -> torch.Tensor:
         """Return per-atom reference energy ``E0[Z]``.
@@ -77,6 +79,24 @@ class AtomicReferenceEnergy(nn.Module):
             Per-atom reference energies ``(N,)``.
         """
         return self.atomic_energies[Z.to(torch.long)]
+
+    def pooled(
+        self,
+        Z: torch.Tensor,
+        batch: torch.Tensor,
+        num_graphs: int,
+    ) -> torch.Tensor:
+        """``Σ_i E0[Z_i]`` per graph (atomic dressing).
+
+        Args:
+            Z: Atomic numbers ``(N,)``.
+            batch: Graph membership ``(N,)``.
+            num_graphs: Graph count ``B``.
+
+        Returns:
+            Dressed baseline ``(B,)``.
+        """
+        return self._pool(self(Z), batch.long(), num_graphs)
 
     def extra_repr(self) -> str:
         """Render the Z-table size for ``repr(module)``."""

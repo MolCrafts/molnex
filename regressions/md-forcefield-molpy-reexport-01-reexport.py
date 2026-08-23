@@ -6,7 +6,7 @@ Hard-coded goldens only — no third-party oracle. Pins:
 
 1. ``from molix.md import ForceField`` is identically ``molpy.ForceField``
 2. Six deleted homemade names are absent from ``molix.md.__all__``
-3. Two-atom ``ClassIForceField`` harmonic bond via ``to_potentials().calc_energy``
+3. Two-atom harmonic ``ForceField`` bond via ``to_potentials().calc_energy``
        E = 0.5 * k * (r - r0)^2
        k=2, r0=1 Å, r=1.5 Å → E = 0.25 kcal/mol
    Class-I default ``units="real"``. This script checks ``pots.calc_energy``
@@ -38,7 +38,7 @@ from tensordict import TensorDict
 
 import molix.md as md
 from molix.md import MD, ForceField, NeighborList
-from molpot.forcefield import ClassIForceField
+from molpot.forcefield import ForceField as MolpotForceField
 
 _DELETED_FORCEFIELD_NAMES = (
     "CallableForceField",
@@ -87,11 +87,15 @@ def main() -> int:
         )
 
     system = _two_atom_bond()
-    ff = ClassIForceField().with_params(
-        bonds={
-            "k": torch.tensor([_K], dtype=_DTYPE),
-            "r0": torch.tensor([_R0], dtype=_DTYPE),
-        }
+    ff = (
+        MolpotForceField()
+        .def_bondstyle("harmonic")
+        .with_params(
+            bonds={
+                "k": torch.tensor([_K], dtype=_DTYPE),
+                "r0": torch.tensor([_R0], dtype=_DTYPE),
+            }
+        )
     )
     energy = float(ff.to_potentials().calc_energy(system))
     if not math.isclose(energy, _GOLDEN_ENERGY, abs_tol=_ENERGY_ATOL):

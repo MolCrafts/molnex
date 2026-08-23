@@ -5,13 +5,16 @@ Energy formula (OpenMM §19.4 / SMIRNOFF / AMBER)::
     E = Σ_torsions Σ_m (k[t,m] / s[t]) * [1 + cos(n[m] * φ − γ[t,m])]
 
 where ``t = proper_types[i]``, ``s = idivf``, ``n = periodicity``,
-``γ = phase``, and ``φ`` is the i-j-k-l dihedral angle from the standard
-atan2(n1, n2) construction (same geometry as :class:`DihedralHarmonic`).
+``γ = phase``. ``cos(nφ − γ)`` is the Chebyshev recurrence in
+``(cos φ, sin φ)`` used by LAMMPS ``dihedral_style opls`` / CHARMM; ``φ``
+is never formed. ``(cos φ, sin φ)`` come from
+:func:`~molpot.potentials.geom.dihedral_cos_sin`.
 
 References:
     OpenMM User Guide §19.4
     SMIRNOFF specification (OpenFF) — proper torsions
     Cornell et al., JACS 1995 DOI 10.1021/ja00124a002 (AMBER)
+    LAMMPS ``dihedral_opls``
 """
 
 from __future__ import annotations
@@ -21,6 +24,20 @@ from typing import Any
 import torch
 
 from molpot.potentials.base import BasePotential
+from molpot.potentials.bonded_forces import dihedral_phi_grad
+from molpot.potentials.geom import dihedral_cos_sin, fourier_cos, fourier_cos_sin
+
+
+def _dihedral_bond_vectors(
+    pos: torch.Tensor,
+    index: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``b1 = j−i``, ``b2 = k−j``, ``b3 = l−k`` for COO ``index`` ``[4, N]``."""
+    return (
+        pos[index[1]] - pos[index[0]],
+        pos[index[2]] - pos[index[1]],
+        pos[index[3]] - pos[index[2]],
+    )
 
 
 def _dihedral_phi(
@@ -36,28 +53,7 @@ def _dihedral_phi(
     Returns:
         Dihedral angles ``φ`` of shape ``[N]`` in ``[-π, π]``.
     """
-    pos_i = pos[index[0]]
-    pos_j = pos[index[1]]
-    pos_k = pos[index[2]]
-    pos_l = pos[index[3]]
-
-    b1 = pos_j - pos_i
-    b2 = pos_k - pos_j
-    b3 = pos_l - pos_k
-
-    n1 = torch.cross(b1, b2, dim=-1)
-    n2 = torch.cross(b2, b3, dim=-1)
-
-    n1_norm = n1 / (torch.norm(n1, dim=-1, keepdim=True) + 1e-8)
-    n2_norm = n2 / (torch.norm(n2, dim=-1, keepdim=True) + 1e-8)
-
-    cos_phi = torch.sum(n1_norm * n2_norm, dim=-1)
-    cos_phi = torch.clamp(cos_phi, -1.0, 1.0)
-
-    b2_norm = b2 / (torch.norm(b2, dim=-1, keepdim=True) + 1e-8)
-    cross_n1_n2 = torch.cross(n1_norm, n2_norm, dim=-1)
-    sin_phi = torch.sum(cross_n1_n2 * b2_norm, dim=-1)
-
+    cos_phi, sin_phi = dihedral_cos_sin(*_dihedral_bond_vectors(pos, index))
     return torch.atan2(sin_phi, cos_phi)
 
 
@@ -179,23 +175,78 @@ class ProperTorsionPeriodic(BasePotential):
         if proper_index.size(1) == 0:
             return torch.tensor(0.0, device=pos.device, dtype=pos.dtype)
 
-        phi = _dihedral_phi(pos, proper_index)  # [N]
-
-        # Look up per-torsion parameter rows: [N, n_terms]
+        cos_phi, sin_phi = dihedral_cos_sin(*_dihedral_bond_vectors(pos, proper_index))
         k_t = self.k[proper_types]
         phase_t = self.phase[proper_types]
-        s_t = self.idivf[proper_types]  # [N]
-        n = self.periodicity.to(dtype=pos.dtype)  # [n_terms]
-
-        # Broadcast: phi [N, 1], n [1, n_terms] → [N, n_terms]
-        arg = n.unsqueeze(0) * phi.unsqueeze(1) - phase_t
-        term = (k_t / s_t.unsqueeze(1)) * (1.0 + torch.cos(arg))
-        energy_per_proper = term.sum(dim=1)
+        s_t = self.idivf[proper_types]
+        cos_arg = fourier_cos(cos_phi, sin_phi, self.periodicity, phase_t)
+        energy_per_proper = ((k_t / s_t.unsqueeze(1)) * (1.0 + cos_arg)).sum(dim=1)
         if term_batch is not None:
             energy = energy_per_proper.new_zeros(int(num_graphs))
             energy.index_add_(0, term_batch.long(), energy_per_proper)
             return energy
         return energy_per_proper.sum()
+
+    def energy_forces(self, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        """Energy and analytic forces ``F = -∂E/∂pos`` in one pass.
+
+        With ``g = Σ_m (k[t,m]/s) · n[m] · sin(n[m]φ − γ[t,m]) = −∂E/∂φ``, the
+        force is ``g · ∂φ/∂pos`` using the Blondel–Karplus gradient
+        (:func:`dihedral_phi_grad`). ``φ`` is never formed; the sine comes from
+        the same Chebyshev recurrence as the energy.
+
+        Args:
+            **kwargs: ``pos`` ``[N, 3]``, ``proper_index`` ``[4, M]``,
+                ``proper_types`` ``[M]``, and optional ``term_batch`` /
+                ``num_graphs``.
+
+        Returns:
+            ``(energy, forces)`` — energy ``(B,)`` (or scalar) and forces
+            ``[N, 3]``.
+        """
+        pos = kwargs.get("pos")
+        proper_index = kwargs.get("proper_index")
+        proper_types = kwargs.get("proper_types")
+        term_batch = kwargs.get("term_batch")
+        num_graphs = kwargs.get("num_graphs")
+        if pos is None or proper_index is None or proper_types is None:
+            raise ValueError(
+                "ProperTorsionPeriodic.energy_forces requires pos, proper_index, proper_types."
+            )
+        _require_index_4_by_n(proper_index, "proper_index")
+
+        if proper_index.size(1) == 0:
+            energy = torch.zeros(
+                (int(num_graphs),) if term_batch is not None else (),
+                device=pos.device,
+                dtype=pos.dtype,
+            )
+            return energy, pos.new_zeros((pos.shape[0], 3))
+
+        b1, b2, b3 = _dihedral_bond_vectors(pos, proper_index)
+        cos_phi, sin_phi = dihedral_cos_sin(b1, b2, b3)
+        k_t = self.k[proper_types]
+        phase_t = self.phase[proper_types]
+        s_t = self.idivf[proper_types]
+        cos_arg, sin_arg = fourier_cos_sin(cos_phi, sin_phi, self.periodicity, phase_t)
+        scale = k_t / s_t.unsqueeze(1)
+        energy_per = (scale * (1.0 + cos_arg)).sum(dim=1)
+
+        n = self.periodicity.to(dtype=k_t.dtype)
+        g = (scale * n.unsqueeze(0) * sin_arg).sum(dim=1)
+        fi, fj, fk, fl = dihedral_phi_grad(b1, b2, b3)
+        g = g.unsqueeze(-1)
+        forces = pos.new_zeros((pos.shape[0], 3))
+        forces.index_add_(0, proper_index[0], g * fi)
+        forces.index_add_(0, proper_index[1], g * fj)
+        forces.index_add_(0, proper_index[2], g * fk)
+        forces.index_add_(0, proper_index[3], g * fl)
+
+        if term_batch is not None:
+            energy = energy_per.new_zeros(int(num_graphs))
+            energy.index_add_(0, term_batch.long(), energy_per)
+            return energy, forces
+        return energy_per.sum(), forces
 
     def __repr__(self) -> str:
         n_types, n_terms = self.k.shape

@@ -151,6 +151,48 @@ class TestProperTorsionPeriodic:
                 proper_types=torch.tensor([0], dtype=torch.long),
             )
 
+    def test_colinear_torsion_is_cos_phi_zero(self):
+        # H-C≡C-H: both planes vanish, LAMMPS rginv=0 ⇒ cos φ = 0 ⇒ E = k.
+        pot = _single_term_potential(k=1.0, n=1, gamma=0.0, s=1.0)
+        pos = torch.tensor(
+            [[-2.2, 0.0, 0.0], [-1.2, 0.0, 0.0], [0.0, 0.0, 0.0], [1.06, 0.0, 0.0]],
+            dtype=torch.float64,
+        )
+        energy = pot(
+            pos=pos,
+            proper_index=_proper_index(),
+            proper_types=torch.tensor([0], dtype=torch.long),
+        )
+        assert math.isclose(float(energy), 1.0, rel_tol=1e-10, abs_tol=1e-10)
+
+    def test_colinear_torsion_force_matching_stays_finite(self):
+        pot = ProperTorsionPeriodic(
+            k=torch.tensor([[1.0]], dtype=torch.float32),
+            periodicity=torch.tensor([1], dtype=torch.long),
+            phase=torch.tensor([[0.0]], dtype=torch.float32),
+            idivf=torch.tensor([1.0], dtype=torch.float32),
+        )
+        colinear = torch.tensor(
+            [[-2.2, 0.0, 0.0], [-1.2, 0.0, 0.0], [0.0, 0.0, 0.0], [1.06, 0.0, 0.0]],
+            dtype=torch.float32,
+        )
+        bent = _cis_pos().to(dtype=torch.float32) + torch.tensor([10.0, 0.0, 0.0])
+        pos = torch.cat([colinear, bent], dim=0).clone().requires_grad_(True)
+        index = torch.tensor([[0, 4], [1, 5], [2, 6], [3, 7]], dtype=torch.long)
+        energy = pot(
+            pos=pos,
+            proper_index=index,
+            proper_types=torch.tensor([0, 0], dtype=torch.long),
+        )
+        assert torch.isfinite(energy)
+        # colinear contributes k=1; cis contributes 2.
+        assert math.isclose(float(energy.detach()), 3.0, rel_tol=1e-5, abs_tol=1e-5)
+        (forces,) = torch.autograd.grad(energy, pos, create_graph=True)
+        assert torch.isfinite(forces).all()
+        forces.square().mean().backward()
+        assert pos.grad is not None
+        assert torch.isfinite(pos.grad).all()
+
     def test_multi_term_sums_component_energies(self):
         # Two terms at phi=0, gamma=0:
         #   term1: k=1, n=1 → (1/1)[1+cos(0)] = 2.0

@@ -1,8 +1,8 @@
-"""Public-API regression for ClassIPredictions (Class-I model → task predictions).
+"""Public-API regression for ForceFieldPredictions (model → task predictions).
 
 Spec: ``universal-class-i-08-adapter``.
 
-One :class:`~molpot.ClassicalIMM` over a two-atom bonded topology (constant
+One :class:`~molpot.Parameterizer` over a two-atom bonded topology (constant
 ``k`` / ``r0`` head plus a constant χ/η charge path) feeds two adapters built
 from the *same* model: one declaring ``("energy", "forces", "hessian")``, one
 declaring ``("q",)``. The second must return charges and **no** ``energy`` key —
@@ -25,7 +25,7 @@ Harmonic bond ``E = ½k(r − r₀)²`` with ``k = 100`` kcal mol⁻¹ Å⁻²,
                                              kcal mol⁻¹ Å⁻²
     and ``H = Hᵀ`` because it is a second derivative of one scalar energy.
 
-The ForceField declares a bond style only, so the assembled Class-I form has no
+The ForceField declares a bond style only, so the assembled form has no
 LJ and no Coulomb term: the energy stays exactly 12.5 kcal/mol even though the
 charge path wrote ``atoms.q``.
 
@@ -54,12 +54,12 @@ from tensordict import TensorDict
 
 from molpot import (
     AtomicChargeModel,
-    ClassicalIMM,
-    ClassIPredictions,
     DiagonalHardnessKernel,
     ElectronegativityEqualization,
     ForceField,
+    ForceFieldPredictions,
     HessianDerivation,
+    Parameterizer,
 )
 
 _DTYPE = torch.float64
@@ -149,15 +149,15 @@ def _two_atom_bond_batch() -> TensorDict:
     )
 
 
-def _class_i_model() -> ClassicalIMM:
-    """Bonded-only Class-I model with the constant heads and the EEM charge path."""
+def _bond_parameterizer() -> Parameterizer:
+    """Bonded-only Parameterizer with the constant heads and the EEM charge path."""
     features = {
         "bonds": torch.zeros(1, 2, dtype=_DTYPE),
         "atoms": torch.zeros(2, 2, dtype=_DTYPE),
     }
-    return ClassicalIMM(
+    return Parameterizer(
         _ConstantEncoder(features),
-        forcefield=ForceField(name="class-i-adapter", units="real").def_bondstyle("harmonic"),
+        ForceField(name="class-i-adapter", units="real").def_bondstyle("harmonic"),
         bond_head=_ConstantBondHead(),
         charge_model=AtomicChargeModel(
             _ConstantChiEtaHead(),
@@ -167,10 +167,10 @@ def _class_i_model() -> ClassicalIMM:
 
 
 def main() -> int:
-    model = _class_i_model()
+    model = _bond_parameterizer()
     batch = _two_atom_bond_batch()
 
-    derivatives = ClassIPredictions(
+    derivatives = ForceFieldPredictions(
         model,
         keys=("energy", "forces", "hessian"),
         hessian_derivation=HessianDerivation(),
@@ -201,7 +201,7 @@ def main() -> int:
     if not torch.allclose(hessian, hessian.T, atol=_ATOL, rtol=0.0):
         raise AssertionError(f"hessian is not symmetric:\n{hessian}")
 
-    charges_only = ClassIPredictions(model, keys=("q",))(batch)
+    charges_only = ForceFieldPredictions(model, keys=("q",))(batch)
     if set(charges_only) != {"q"}:
         raise AssertionError(f'keys=("q",) must return only "q"; got {sorted(charges_only)}')
     if "energy" in charges_only:

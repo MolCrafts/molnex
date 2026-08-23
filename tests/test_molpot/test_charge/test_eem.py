@@ -16,7 +16,7 @@ from molpot.charge import (
     ShieldedCoulombKernel,
 )
 from molpot.charge.problem import ChargeEquilibrationProblem
-from molpot.forcefield import ClassicalIMM, ForceField
+from molpot.forcefield import ForceField, Parameterizer
 
 
 class TestElectronegativityEqualizationDiagonal:
@@ -140,7 +140,7 @@ class TestAtomicChargeModel:
         assert (out["eta"] > 0).all()
 
 
-class TestClassicalIMMCharge:
+class TestParameterizerCharge:
     def test_forward_writes_q(self):
         class FakeEnc(nn.Module):
             def __init__(self) -> None:
@@ -161,9 +161,9 @@ class TestClassicalIMMCharge:
             ChiEtaHead(feature_dim=8, hidden_dim=16),
             ElectronegativityEqualization(DiagonalHardnessKernel()),
         )
-        model = ClassicalIMM(
+        model = Parameterizer(
             FakeEnc(),
-            forcefield=ForceField(name="mm"),
+            ForceField(name="mm"),
             charge_model=charge,
         )
         batch = TensorDict(

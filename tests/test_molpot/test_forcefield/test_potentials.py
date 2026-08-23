@@ -1,13 +1,14 @@
-"""Tests for Potentials force methods (canonical autograd delegation).
+"""Tests for Potentials force methods (analytic bonded + LJ).
 
 Mirrors ``src/molpot/forcefield/potentials.py``.
 
-``Potentials.calc_forces`` / ``calc_energy_forces`` must route through the one
-canonical force path, :func:`molpot.derivation.autograd_forces_from_energy`,
-instead of hand-rolling ``torch.autograd.grad`` (spec
-``universal-class-i-08-adapter`` §"Iron law — debt found in the touched
-surface"). Numerics are pinned here against the analytic harmonic bond so the
-generalization stays behaviour-preserving.
+``Potentials.calc_energy_forces`` evaluates bonded terms (bond / angle /
+proper / improper) and the LJ term with closed-form forces; Coulomb (open and
+periodic) falls back to the autograd backend
+(:func:`molpot.derivation.autograd_forces_from_energy`), which has no cheap
+closed form. No method hand-rolls ``torch.autograd.grad``. Numerics are
+pinned here against the analytic harmonic bond so the generalization stays
+behaviour-preserving.
 """
 
 from __future__ import annotations
@@ -121,7 +122,7 @@ def _method_source(class_name: str, method_name: str) -> str:
 
 class TestPotentials:
     def test_force_methods_delegate(self) -> None:
-        """No third force path: both methods call the canonical autograd helper."""
+        """Bonded + LJ forces are analytic; Coulomb uses the autograd backend."""
         tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
         imported = {
             f"{node.module}.{alias.name}"
@@ -134,14 +135,36 @@ class TestPotentials:
             for name in imported
         ), "potentials.py must import autograd_forces_from_energy from molpot.derivation"
 
-        for method in ("calc_forces", "calc_energy_forces"):
-            source = _method_source("Potentials", method)
-            assert "autograd_forces_from_energy" in source, (
-                f"Potentials.{method} must delegate to autograd_forces_from_energy"
+        calc_forces_src = _method_source("Potentials", "calc_forces")
+        assert "autograd_forces_from_energy" in calc_forces_src, (
+            "Potentials.calc_forces must delegate to autograd_forces_from_energy"
+        )
+        assert "torch.autograd.grad" not in calc_forces_src, (
+            "Potentials.calc_forces must not hand-roll torch.autograd.grad"
+        )
+
+        energy_forces_src = _method_source("Potentials", "calc_energy_forces")
+        assert "torch.autograd.grad" not in energy_forces_src, (
+            "Potentials.calc_energy_forces must not hand-roll torch.autograd.grad"
+        )
+        for term in ("bond", "angle", "proper", "improper"):
+            assert f"{term}.energy_forces" in energy_forces_src, (
+                f"Potentials.calc_energy_forces must call the analytic {term} forces"
             )
-            assert "torch.autograd.grad" not in source, (
-                f"Potentials.{method} must not hand-roll torch.autograd.grad"
-            )
+        assert "self._lj_energy_forces" in energy_forces_src
+        assert "self._coulomb_energy_forces" in energy_forces_src
+
+        lj_src = _method_source("Potentials", "_lj_energy_forces")
+        assert "self.lj.energy_forces" in lj_src, (
+            "Potentials._lj_energy_forces must call the analytic LJ forces"
+        )
+        coul_src = _method_source("Potentials", "_coulomb_energy_forces")
+        assert "autograd_forces_from_energy" in coul_src, (
+            "Coulomb (open and periodic) must use autograd_forces_from_energy"
+        )
+        assert "torch.autograd.grad" not in coul_src, (
+            "Potentials._coulomb_energy_forces must not hand-roll torch.autograd.grad"
+        )
 
     def test_calc_forces_analytic_golden(self) -> None:
         """F = −∂E/∂x = ∓k(r−r0) x̂ for the stretched two-atom harmonic bond."""

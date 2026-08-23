@@ -16,6 +16,7 @@ from molix.batch.collate import (
     TargetSchema,
     collate_packed,
 )
+from molix.batch.mixture import DataMixture
 from molix.batch.sampler import BatchSamplerSource, TokenBudgetBatchSampler
 from molix.batch.task import BatchTask
 from molix.config import config
@@ -91,8 +92,12 @@ class DataModule:
         trainer.train(datamodule=dm, max_epochs=100)
 
     Args:
-        train_dataset: Pre-built training dataset.
-        val_dataset: Pre-built validation dataset.
+        train_dataset: Pre-built training dataset. A
+            :class:`~molix.batch.mixture.DataMixture` is a Dataset and
+            also the train mix policy.
+        val_dataset: Pre-built validation dataset. A
+            :class:`~molix.batch.mixture.DataMixture` is iterated in
+            source order, not re-mixed.
         target_schema: Which target keys are graph-level vs atom-level.
         batch_tasks: Post-collate
             :class:`~molix.batch.task.BatchTask` instances, applied to every
@@ -161,6 +166,14 @@ class DataModule:
         multiprocessing_context: str | None = "spawn",
         train_drop_last: bool = False,
     ) -> None:
+        if isinstance(train_dataset, DataMixture):
+            if batch_sampler_source is not None:
+                raise ValueError(
+                    "DataMixture already is the train mix policy; do not also "
+                    "pass batch_sampler_source."
+                )
+            batch_sampler_source = train_dataset
+
         if batch_sampler_source is not None:
             if not callable(getattr(batch_sampler_source, "batch_sampler", None)):
                 raise ValueError(
@@ -208,6 +221,9 @@ class DataModule:
         self._train_loader: DataLoader | None = None
         self._val_loader: DataLoader | None = None
         self._shuffle_generator: torch.Generator | None = None
+        # Cached batch_sampler for the batch-sampler route; reseeded in place
+        # by on_epoch_start so a cached loader can keep persistent workers.
+        self._batch_sampler = None
 
     def _worker_context(self) -> str | None:
         """Start method passed to :class:`DataLoader`, or ``None`` for sync.
@@ -315,10 +331,20 @@ class DataModule:
                 cross-rank partitioning protocol yet. Drop the batching
                 kwarg or run single-process.
         """
+        # Cached batch-sampler fast path: on_epoch_start reseeded the stored
+        # sampler in place, so the same loader (and its persistent worker
+        # pool) is reused across epochs instead of re-spawned each epoch.
+        if (
+            self._train_loader is not None
+            and self._batch_sampler is not None
+            and not _is_distributed()
+        ):
+            return self._train_loader
+
         batch_sampler = self._epoch_batch_sampler()
         if batch_sampler is not None:
             loader_dataset, collate_fn = self._resolve_collation(self.train_dataset)
-            return DataLoader(
+            loader = DataLoader(
                 loader_dataset,
                 batch_sampler=batch_sampler,
                 num_workers=self.num_workers,
@@ -329,6 +355,10 @@ class DataModule:
                 multiprocessing_context=self._worker_context(),
                 worker_init_fn=self._worker_init_fn(),
             )
+            if callable(getattr(batch_sampler, "reseed", None)) and not _is_distributed():
+                self._batch_sampler = batch_sampler
+                self._train_loader = loader
+            return loader
 
         # Cached fast path: reuse the loader across epochs (persistent workers
         # survive; no per-epoch rebuild). Reseed the stored shuffle generator so the
@@ -490,6 +520,10 @@ class DataModule:
             epoch: The epoch index about to start.
         """
         self._epoch = epoch
+        if self._batch_sampler is not None and callable(
+            getattr(self._batch_sampler, "reseed", None)
+        ):
+            self._batch_sampler.reseed(self.seed + epoch)
         if self._train_sampler is not None:
             self._train_sampler.set_epoch(epoch)
         if self._val_sampler is not None:

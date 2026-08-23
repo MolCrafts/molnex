@@ -7,21 +7,29 @@ import torch
 from tensordict import TensorDict
 
 from molix.ff_export import LammpsWriter
-from molpot.forcefield import ForceField, OPLSForceField
+from molpot.forcefield import ForceField
 
 
 def _two_atom_system() -> tuple[ForceField, TensorDict]:
-    ff = OPLSForceField().with_params(
-        bonds={
-            "k": torch.tensor([200.0], dtype=torch.float64),
-            "r0": torch.tensor([1.53], dtype=torch.float64),
-        },
-        propers={
-            "k1": torch.tensor([1.0], dtype=torch.float64),
-            "k2": torch.tensor([2.0], dtype=torch.float64),
-            "k3": torch.tensor([0.0], dtype=torch.float64),
-            "k4": torch.tensor([0.0], dtype=torch.float64),
-        },
+    # OPLS proper table without improper/pair (LAMMPS *.ff writer: harmonic improper only)
+    ff = (
+        ForceField(name="OPLS", units="real")
+        .def_atomstyle("full")
+        .def_bondstyle("harmonic")
+        .def_anglestyle("harmonic")
+        .def_dihedralstyle("opls")
+        .with_params(
+            bonds={
+                "k": torch.tensor([200.0], dtype=torch.float64),
+                "r0": torch.tensor([1.53], dtype=torch.float64),
+            },
+            propers={
+                "k1": torch.tensor([1.0], dtype=torch.float64),
+                "k2": torch.tensor([2.0], dtype=torch.float64),
+                "k3": torch.tensor([0.0], dtype=torch.float64),
+                "k4": torch.tensor([0.0], dtype=torch.float64),
+            },
+        )
     )
     pos = torch.tensor([[0.0, 0.0, 0.0], [1.53, 0.0, 0.0]], dtype=torch.float64)
     system = TensorDict(

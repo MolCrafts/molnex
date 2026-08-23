@@ -15,6 +15,7 @@ from scripts.mm_param_learning.constants import (
     MOLHUB_COORDINATES,
     PROGRAM,
     PROJECT_SLUG,
+    V0_EXPERIMENT_SLUG,
 )
 from scripts.mm_param_learning.materialize_workspace import MmParamLearningWorkspace
 
@@ -34,13 +35,17 @@ class TestMmParamLearningWorkspace:
         # Seed run params (molexp may prefix run ids with ``run-``).
         for slug in EXPERIMENT_SLUGS:
             runs_dir = exp_dir / slug / "runs"
+            if slug == V0_EXPERIMENT_SLUG:
+                run_dirs = [p for p in runs_dir.iterdir() if p.is_dir()]
+                assert run_dirs, "v0 experiment must seed at least one workflow run"
+                continue
             run_dirs = [p for p in runs_dir.iterdir() if p.is_dir() and "seed" in p.name]
             assert len(run_dirs) == 1, run_dirs
             run_json = run_dirs[0] / "run.json"
             assert run_json.is_file()
             text = run_json.read_text()
             assert "dataset_coordinate" in text
-            assert PROGRAM in text or "mm-param-learning-baseline" in text
+            assert PROGRAM in text or "class-i-v0" in text
             assert MOLHUB_COORDINATES[slug] in text or slug in text
 
     def test_idempotent(self, tmp_path: Path):
@@ -48,7 +53,7 @@ class TestMmParamLearningWorkspace:
         MmParamLearningWorkspace(root=root).materialize()
         MmParamLearningWorkspace(root=root).materialize()
         exp_dir = root / "projects" / PROJECT_SLUG / "experiments"
-        assert len([p for p in exp_dir.iterdir() if p.is_dir()]) == 6
+        assert len([p for p in exp_dir.iterdir() if p.is_dir()]) == len(EXPERIMENT_SLUGS)
         # Knowledge note not duplicated (single slug dir)
         notes = list(root.rglob(KNOWLEDGE_NOTE_NAME))
         # at most one concept directory with that name

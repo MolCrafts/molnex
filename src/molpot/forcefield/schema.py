@@ -132,6 +132,28 @@ class PotentialMeta:
                 ParamSpec("k4", "[n]", "kcal/mol", "OPLS k4"),
             ),
         ),
+        "improper:periodic": StyleSchema(
+            category="improper",
+            name="periodic",
+            index_arity=4,
+            energy_formula="sum_m (k_m / s) * [1 + cos(n_m * chi - gamma_m)]",
+            params=(
+                ParamSpec("k", "[n, n_terms]", "kcal/mol", "barrier heights"),
+                ParamSpec("periodicity", "[n_terms]", "1", "integer periods"),
+                ParamSpec("phase", "[n, n_terms]", "rad", "phase offsets"),
+                ParamSpec("idivf", "[n]", "1", "scale"),
+            ),
+        ),
+        "improper:harmonic": StyleSchema(
+            category="improper",
+            name="harmonic",
+            index_arity=4,
+            energy_formula="0.5 * k * (chi - chi0)**2",
+            params=(
+                ParamSpec("k", "[n]", "kcal/mol/rad²", "force constant"),
+                ParamSpec("chi0", "[n]", "rad", "equilibrium improper angle"),
+            ),
+        ),
         "pair:lj/cut": StyleSchema(
             category="pair",
             name="lj/cut",

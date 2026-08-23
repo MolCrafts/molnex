@@ -9,13 +9,13 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molpot.forcefield import ClassIForceField, OPLSForceField
+from molpot.forcefield import ForceField, OPLSAAForceField
 from molpot.ir import BondBag, ProperTorsionBag
 
 
 class TestForceFieldToIR:
     def test_bonds_and_opls_propers(self):
-        ff = OPLSForceField().with_params(
+        ff = OPLSAAForceField().with_params(
             bonds={
                 "k": torch.tensor([100.0, 200.0]),
                 "r0": torch.tensor([1.5, 1.6]),
@@ -43,20 +43,34 @@ class TestForceFieldToIR:
         k = torch.tensor([[0.1, 0.2, 0.0, 0.0]])
         phase = torch.zeros(1, 4)
         phase[0, 1] = math.pi
-        ff = ClassIForceField().with_params(
-            propers={
-                "k": k,
-                "phase": phase,
-                "periodicity": torch.tensor([1, 2, 3, 4], dtype=torch.long),
-                "idivf": torch.ones(1),
-            }
+        ff = (
+            ForceField(name="class-i", units="real")
+            .def_atomstyle("full")
+            .def_bondstyle("harmonic")
+            .def_anglestyle("harmonic")
+            .def_dihedralstyle("fourier")
+            .with_params(
+                propers={
+                    "k": k,
+                    "phase": phase,
+                    "periodicity": torch.tensor([1, 2, 3, 4], dtype=torch.long),
+                    "idivf": torch.ones(1),
+                }
+            )
         )
         ir = ff.to_ir()
         assert ir.propers is not None
         assert torch.allclose(ir.propers.k, k)
 
     def test_atoms_q_becomes_charge_bag(self):
-        ff = ClassIForceField().with_params(atoms={"q": torch.tensor([0.1, -0.1])})
+        ff = (
+            ForceField(name="class-i", units="real")
+            .def_atomstyle("full")
+            .def_bondstyle("harmonic")
+            .def_anglestyle("harmonic")
+            .def_dihedralstyle("fourier")
+            .with_params(atoms={"q": torch.tensor([0.1, -0.1])})
+        )
         ir = ff.to_ir()
         assert ir.charges is not None
         assert torch.allclose(ir.charges.q, torch.tensor([0.1, -0.1]))
@@ -65,11 +79,18 @@ class TestForceFieldToIR:
         from molpy import BondType
         from molpy import ForceField as MolpyForceField
 
-        ff = ClassIForceField().with_params(
-            bonds={
-                "k": torch.tensor([200.0]),
-                "r0": torch.tensor([1.53]),
-            }
+        ff = (
+            ForceField(name="class-i", units="real")
+            .def_atomstyle("full")
+            .def_bondstyle("harmonic")
+            .def_anglestyle("harmonic")
+            .def_dihedralstyle("fourier")
+            .with_params(
+                bonds={
+                    "k": torch.tensor([200.0]),
+                    "r0": torch.tensor([1.53]),
+                }
+            )
         )
         assert isinstance(ff, MolpyForceField)
         system = TensorDict(
@@ -95,13 +116,20 @@ class TestForceFieldToIR:
     def test_cartesian_propers_to_ir_maps_to_cosine_table(self):
         a = torch.tensor([[0.6]], dtype=torch.float64)
         b = torch.tensor([[0.8]], dtype=torch.float64)
-        ff = ClassIForceField().with_params(
-            propers={
-                "a": a,
-                "b": b,
-                "periodicity": torch.tensor([1], dtype=torch.long),
-                "idivf": torch.ones(1, dtype=torch.float64),
-            }
+        ff = (
+            ForceField(name="class-i", units="real")
+            .def_atomstyle("full")
+            .def_bondstyle("harmonic")
+            .def_anglestyle("harmonic")
+            .def_dihedralstyle("fourier")
+            .with_params(
+                propers={
+                    "a": a,
+                    "b": b,
+                    "periodicity": torch.tensor([1], dtype=torch.long),
+                    "idivf": torch.ones(1, dtype=torch.float64),
+                }
+            )
         )
         ir = ff.to_ir()
         assert isinstance(ir.propers, ProperTorsionBag)
@@ -121,7 +149,9 @@ class TestForceFieldToIR:
 
     def test_mixed_cartesian_and_polar_propers_raise(self):
         with pytest.raises(ValueError):
-            ClassIForceField().with_params(
+            ForceField(name="class-i", units="real").def_atomstyle("full").def_bondstyle(
+                "harmonic"
+            ).def_anglestyle("harmonic").def_dihedralstyle("fourier").with_params(
                 propers={
                     "a": torch.tensor([[0.6]]),
                     "b": torch.tensor([[0.8]]),
@@ -138,13 +168,20 @@ class TestForceFieldToIR:
         gamma = math.pi / 4.0
         a = k * math.cos(gamma)
         b = k * math.sin(gamma)
-        ff = ClassIForceField().with_params(
-            propers={
-                "a": torch.tensor([[a]], dtype=torch.float64),
-                "b": torch.tensor([[b]], dtype=torch.float64),
-                "periodicity": torch.tensor([2], dtype=torch.long),
-                "idivf": torch.ones(1, dtype=torch.float64),
-            }
+        ff = (
+            ForceField(name="class-i", units="real")
+            .def_atomstyle("full")
+            .def_bondstyle("harmonic")
+            .def_anglestyle("harmonic")
+            .def_dihedralstyle("fourier")
+            .with_params(
+                propers={
+                    "a": torch.tensor([[a]], dtype=torch.float64),
+                    "b": torch.tensor([[b]], dtype=torch.float64),
+                    "periodicity": torch.tensor([2], dtype=torch.long),
+                    "idivf": torch.ones(1, dtype=torch.float64),
+                }
+            )
         )
         # i-j-k-l with l rotated about jk so φ = π/3 (same atan2 convention as cis/perp fixtures).
         pos = torch.tensor(

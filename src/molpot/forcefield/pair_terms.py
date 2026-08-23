@@ -59,6 +59,49 @@ class LJCutPotential:
         energy.index_add_(0, edge_batch[within].long(), pair_energy)
         return energy
 
+    def energy_forces(
+        self,
+        *,
+        positions: torch.Tensor,
+        edge_index: torch.Tensor,
+        distances: torch.Tensor,
+        epsilon: torch.Tensor,
+        sigma: torch.Tensor,
+        scales: torch.Tensor,
+        edge_batch: torch.Tensor | None = None,
+        num_graphs: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """LJ energy and analytic forces ``F = -∂E/∂pos`` for a half list.
+
+        ``dE/dr = 24 ε (σ/r)⁶ (1 - 2 (σ/r)⁶) / r``; the pair force magnitude is
+        ``dE/dr · scale`` along ``r̂``, so ``F_i = +g r̂`` and ``F_j = -g r̂``.
+        No position leaf is built.
+        """
+        within = distances < self.cutoff
+        ei = edge_index[within]
+        dist = distances[within]
+        sc = scales[within]
+        mixed = lorentz_berthelot({"epsilon": epsilon, "sigma": sigma}, ei)
+        eps = mixed["epsilon_ij"]
+        sig = mixed["sigma_ij"]
+
+        sr6 = (sig / dist.clamp(min=1e-6)).pow(6)
+        pair_energy = 4.0 * eps * (sr6.pow(2) - sr6) * sc
+        if edge_batch is None:
+            energy = pair_energy.sum()
+        else:
+            energy = pair_energy.new_zeros(int(num_graphs))
+            energy.index_add_(0, edge_batch[within].long(), pair_energy)
+
+        dedr = 24.0 * eps * sr6 * (1.0 - 2.0 * sr6) / dist
+        g = dedr * sc
+        rhat = (positions[ei[:, 1]] - positions[ei[:, 0]]) / dist.unsqueeze(-1)
+        f_i = g.unsqueeze(-1) * rhat
+        forces = positions.new_zeros((positions.shape[0], 3))
+        forces.index_add_(0, ei[:, 0], f_i)
+        forces.index_add_(0, ei[:, 1], -f_i)
+        return energy, forces
+
 
 class CoulombOpenPotential:
     """Open-boundary Coulomb using :class:`CoulombPotential`.

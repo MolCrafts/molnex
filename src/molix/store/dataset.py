@@ -110,8 +110,12 @@ class BaseDataset(Dataset[Any], ABC):
     def __len__(self) -> int: ...
 
     @abstractmethod
-    def __getitem__(self, idx: int) -> dict:
-        """Return the ``idx``-th sample as a flat ``dict`` (raw-sample shape)."""
+    def __getitem__(self, idx: int) -> Any:
+        """Return the ``idx``-th record.
+
+        Packed readers return a flat ``dict``. Frame readers return a
+        :data:`~molpy.FrameCollection`.
+        """
         ...
 
     def _compute_split_indices(

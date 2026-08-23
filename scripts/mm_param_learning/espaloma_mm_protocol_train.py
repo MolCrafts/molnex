@@ -63,19 +63,12 @@ definitions, CLI — are unchanged):
 ``artifacts/grad_balance_audit.json`` — on this single-task run that is the
 checklist §2 per-group finite/nonzero-gradient table, not a multi-task verdict.
 
-Example::
-
-    export PY=/path/to/python  # torch+molpy env
-    export PYTHONPATH=src:../molhub/src
-    $PY scripts/mm_param_learning/espaloma_mm_protocol_train.py \\
-      --data-root .../phalkethoh-mm-small-normalized \\
-      --epochs 200 --device cpu \\
-      --record-root .../experiments/espaloma-mm-protocol-mini/runs/run-001
+This module is a library of model / collate helpers. The operator entry is
+``molexp run scripts/mm_param_learning/train.py``.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import random
 import time
@@ -95,7 +88,6 @@ from molix.batch import (
     TargetSchema,
     TaskMixtureBatchSampler,
 )
-from molix.config import config
 from molix.core.audit import TaskGradientProbe
 from molix.core.hook import BaseHook
 from molix.core.metrics import MAE, RMSE
@@ -126,9 +118,10 @@ from molpot.composition.heads import LJParameterHead
 from molpot.composition.mm_heads import (
     AngleParamHead,
     BondParamHead,
+    ImproperParamHead,
     ProperTorsionParamHead,
 )
-from molpot.forcefield import ClassicalIMM, ClassIForceField
+from molpot.forcefield import OPLSAAForceField, Parameterizer
 from molrep.chem.encoder import ChemEncoder
 
 # Espaloma notebook protocol pins
@@ -226,6 +219,41 @@ def enumerate_propers(
     )
 
 
+def enumerate_impropers(
+    atomi: np.ndarray, atomj: np.ndarray, n_atoms: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Center-first impropers for every trivalent atom.
+
+    molrs / batch layout: ``atomi`` is the center, ``atomj/k/l`` the three
+    outer legs (sorted). Degree ≠ 3 contributes nothing.
+    """
+    adj: list[list[int]] = [[] for _ in range(n_atoms)]
+    for i, j in zip(atomi.tolist(), atomj.tolist(), strict=True):
+        adj[i].append(j)
+        adj[j].append(i)
+    ii: list[int] = []
+    jj: list[int] = []
+    kk: list[int] = []
+    ll: list[int] = []
+    for center, nbrs in enumerate(adj):
+        if len(nbrs) != 3:
+            continue
+        a, b, c = sorted(nbrs)
+        ii.append(center)
+        jj.append(a)
+        kk.append(b)
+        ll.append(c)
+    if not ii:
+        z = np.zeros(0, dtype=np.int64)
+        return z, z, z, z
+    return (
+        np.asarray(ii, dtype=np.int64),
+        np.asarray(jj, dtype=np.int64),
+        np.asarray(kk, dtype=np.int64),
+        np.asarray(ll, dtype=np.int64),
+    )
+
+
 def frame_to_sample(fr) -> dict:
     """Convert one MolHub frame to the pre-collate molecular schema.
 
@@ -242,8 +270,10 @@ def frame_to_sample(fr) -> dict:
     )
     atomi = np.asarray(bonds["atomi"], dtype=np.int64)
     atomj = np.asarray(bonds["atomj"], dtype=np.int64)
-    ang_i, ang_j, ang_k = enumerate_angles(atomi, atomj, int(z.shape[0]))
-    pr_i, pr_j, pr_k, pr_l = enumerate_propers(atomi, atomj, int(z.shape[0]))
+    n_atoms = int(z.shape[0])
+    ang_i, ang_j, ang_k = enumerate_angles(atomi, atomj, n_atoms)
+    pr_i, pr_j, pr_k, pr_l = enumerate_propers(atomi, atomj, n_atoms)
+    im_i, im_j, im_k, im_l = enumerate_impropers(atomi, atomj, n_atoms)
     sample = {
         "Z": z,
         "pos": pos,
@@ -252,20 +282,24 @@ def frame_to_sample(fr) -> dict:
             "mm_energy": float(fr.meta["mm_energy"]),
             "task": TASK_CODE_ENERGY,
         },
+        "angles": {
+            "atomi": torch.as_tensor(ang_i, dtype=torch.long),
+            "atomj": torch.as_tensor(ang_j, dtype=torch.long),
+            "atomk": torch.as_tensor(ang_k, dtype=torch.long),
+        },
+        "propers": {
+            "atomi": torch.as_tensor(pr_i, dtype=torch.long),
+            "atomj": torch.as_tensor(pr_j, dtype=torch.long),
+            "atomk": torch.as_tensor(pr_k, dtype=torch.long),
+            "atoml": torch.as_tensor(pr_l, dtype=torch.long),
+        },
+        "impropers": {
+            "atomi": torch.as_tensor(im_i, dtype=torch.long),
+            "atomj": torch.as_tensor(im_j, dtype=torch.long),
+            "atomk": torch.as_tensor(im_k, dtype=torch.long),
+            "atoml": torch.as_tensor(im_l, dtype=torch.long),
+        },
     }
-    if ang_i.size:
-        sample["angles"] = {
-            "atomi": torch.as_tensor(ang_i),
-            "atomj": torch.as_tensor(ang_j),
-            "atomk": torch.as_tensor(ang_k),
-        }
-    if pr_i.size:
-        sample["propers"] = {
-            "atomi": torch.as_tensor(pr_i),
-            "atomj": torch.as_tensor(pr_j),
-            "atomk": torch.as_tensor(pr_k),
-            "atoml": torch.as_tensor(pr_l),
-        }
     return sample
 
 
@@ -372,14 +406,20 @@ def build_espaloma_like_model(
     energy_scope: str = "bonded",
     hidden: int = ESPALOMA_HIDDEN,
     n_blocks: int = 5,
-) -> ClassicalIMM:
-    """ChemEncoder + Class-I heads.
+    n_torsion_terms: int = ESPALOMA_N_TORSION_TERMS,
+    dtype: torch.dtype | None = None,
+) -> Parameterizer:
+    """ChemEncoder + OPLS-AA heads on :class:`~molpot.forcefield.OPLSAAForceField`.
 
     Args:
         energy_scope:
-            * ``bonded`` — bond/angle/proper only (legacy mini baseline)
-            * ``full`` — + EEM charges + LJ + Coulomb (open Class-I NB)
+            * ``bonded`` / ``full`` — both use the OPLS-AA template (harmonic
+              bond/angle, OPLS proper, periodic improper, LJ + Coulomb). Kept
+              for CLI compatibility; ``full`` is the physical default path.
+        n_torsion_terms: Ignored (OPLS-AA emits fixed ``k1..k4``). Retained so
+            callers that still pass Espaloma's historical ``6`` do not break.
     """
+    del n_torsion_terms  # OPLS-AA proper head is fixed k1..k4
     if energy_scope not in ("bonded", "full"):
         raise ValueError(f"energy_scope must be bonded|full, got {energy_scope!r}")
 
@@ -393,51 +433,48 @@ def build_espaloma_like_model(
         n_blocks=n_blocks,
         local_attention=False,
     )
-    ff = ClassIForceField(name="class-i-learned")
-    if energy_scope == "full":
-        # Cutoff lives on the Potential (via style options), not on Potentials.
-        ff.def_pairstyle("lj/cut", cutoff=10.0)
-        ff.def_pairstyle("coulomb")
+    ff = OPLSAAForceField(name="oplsaa-learned")
 
-    atom_head = None
-    charge_model = None
-    if energy_scope == "full":
-        atom_head = LJParameterHead(feature_dim=hidden, hidden_dim=hidden)
-        charge_model = AtomicChargeModel(
-            ChiEtaHead(feature_dim=hidden, hidden_dim=hidden),
-            ElectronegativityEqualization(DiagonalHardnessKernel()),
-        )
-
-    return ClassicalIMM(
+    model = Parameterizer(
         encoder,
-        forcefield=ff,
+        ff,
         bond_head=BondParamHead(feature_dim=hidden, hidden_dim=hidden),
         angle_head=AngleParamHead(feature_dim=hidden, hidden_dim=hidden),
         proper_head=ProperTorsionParamHead(
             feature_dim=hidden,
             hidden_dim=hidden,
-            n_terms=ESPALOMA_N_TORSION_TERMS,
-            periodicity=tuple(range(1, ESPALOMA_N_TORSION_TERMS + 1)),
+            form="opls",
         ),
-        atom_head=atom_head,
-        charge_model=charge_model,
-    ).double()
+        improper_head=ImproperParamHead(
+            feature_dim=hidden,
+            hidden_dim=hidden,
+            include_periodic=True,
+            include_harmonic=False,
+        ),
+        atom_head=LJParameterHead(feature_dim=hidden, hidden_dim=hidden),
+        charge_model=AtomicChargeModel(
+            ChiEtaHead(feature_dim=hidden, hidden_dim=hidden),
+            ElectronegativityEqualization(DiagonalHardnessKernel()),
+        ),
+    )
+    return model.to(dtype=dtype) if dtype is not None else model.double()
 
 
 class MMEnergyModel(nn.Module):
-    """Class-I parameterization + Class-I energy as one ``forward``.
+    """Parameterizer + OPLS-AA energy as one ``forward``.
 
-    :class:`~molpot.forcefield.ClassicalIMM` returns a filled ``ForceField``;
-    the molix ``loss_fn(predictions, batch)`` / ``MetricsHook`` / probe
-    convention wants a prediction mapping. This two-line composition is the
-    seam — it adds no physics and owns no state beyond the wrapped module, so
-    the published checkpoint stays a bare ``ClassicalIMM`` state dict.
+    :class:`~molpot.forcefield.Parameterizer` returns a filled
+    :class:`~molpot.forcefield.ForceField`; the molix
+    ``loss_fn(predictions, batch)`` / ``MetricsHook`` / probe convention wants
+    a prediction mapping. This two-line composition is the seam — it adds no
+    physics and owns no state beyond the wrapped module, so the published
+    checkpoint stays a bare ``Parameterizer`` state dict.
 
     Args:
         imm: The parameterizing module built by :func:`build_espaloma_like_model`.
     """
 
-    def __init__(self, imm: ClassicalIMM) -> None:
+    def __init__(self, imm: Parameterizer) -> None:
         super().__init__()
         self.imm = imm
 
@@ -454,7 +491,7 @@ class MMEnergyModel(nn.Module):
         return {"energy": self.imm(batch).to_potentials().calc_energy(batch).reshape(-1)}
 
     def parameter_groups(self) -> dict[str, tuple[nn.Parameter, ...]]:
-        """Trainable parameters per Class-I component, for the gradient audit.
+        """Trainable parameters per Parameterizer component, for the gradient audit.
 
         Returns:
             Component name (``encoder`` / ``bond_head`` / … ) → its trainable
@@ -1012,380 +1049,3 @@ def _resolve_molexp_run(
             return None, Path(record_root)
 
     return None, record_root
-
-
-def main(argv: list[str] | None = None) -> int:
-    from scripts.mm_param_learning.constants import (
-        DATASET_COORDINATE_PRIMARY,
-        DEFAULT_NORMALIZED_DATA_ROOT,
-        DEFAULT_WORKSPACE_ROOT,
-        PROJECT_SLUG,
-        PROTOCOL_EXPERIMENT_SLUG,
-        PROTOCOL_RUN_ID,
-    )
-
-    p = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    p.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_NORMALIZED_DATA_ROOT,
-        help="Normalized PhAlkEthOH tree (molhub convert output)",
-    )
-    p.add_argument(
-        "--n-mols",
-        type=int,
-        default=0,
-        help="Molecule subset size; 0 = all molecules (Espaloma MM-small full = 173)",
-    )
-    p.add_argument(
-        "--max-confs",
-        type=int,
-        default=100,
-        help="Cap confs/mol (Espaloma MM-small uses 100)",
-    )
-    p.add_argument(
-        "--selection",
-        choices=("all", "smallest"),
-        default="all",
-        help="How to choose --n-mols subset (ignored when n_mols=0)",
-    )
-    p.add_argument(
-        "--use-official-splits",
-        action="store_true",
-        default=True,
-        help="Use data_root/splits.json (Espaloma seed 2666); default on",
-    )
-    p.add_argument(
-        "--no-official-splits",
-        action="store_false",
-        dest="use_official_splits",
-        help="Re-shuffle with --seed instead of splits.json",
-    )
-    p.add_argument(
-        "--epochs",
-        type=int,
-        default=1000,
-        help="Espaloma notebook budget is 10000; formal default 1000",
-    )
-    p.add_argument("--batch-size", type=int, default=ESPALOMA_BATCH_SIZE)
-    p.add_argument("--hidden", type=int, default=ESPALOMA_HIDDEN)
-    p.add_argument("--n-blocks", type=int, choices=(4, 5, 6), default=5)
-    p.add_argument("--lr", type=float, default=ESPALOMA_ADAM_LR)
-    p.add_argument("--seed", type=int, default=ESPALOMA_SPLIT_SEED)
-    p.add_argument("--eval-every", type=int, default=5, help="Full train/val MAE every N epochs")
-    p.add_argument(
-        "--early-stop-patience",
-        type=int,
-        default=50,
-        help="Stop after this many non-improving evals (0=off). Espaloma uses offline inspect.",
-    )
-    p.add_argument(
-        "--grad-audit-steps",
-        type=int,
-        default=0,
-        help=(
-            "Probe per-group gradient norms at step 0 and step N (0=off); "
-            "writes artifacts/grad_balance_audit.json"
-        ),
-    )
-    p.add_argument("--device", default="cpu")
-    p.add_argument(
-        "--run",
-        type=Path,
-        default=None,
-        help="molexp run directory (preferred; enables Run lifecycle + MetricsWriter)",
-    )
-    p.add_argument(
-        "--record-root",
-        type=Path,
-        default=None,
-        help="Alias of --run (run directory)",
-    )
-    p.add_argument("--checkpoint", type=Path, default=None)
-    p.add_argument(
-        "--energy-scope",
-        choices=("bonded", "full"),
-        default="bonded",
-        help="bonded: valence only; full: + EEM charges + LJ + Coulomb",
-    )
-    p.add_argument(
-        "--workspace",
-        type=Path,
-        default=None,
-        help="molexp workspace root (with --run-id; prefer --run)",
-    )
-    p.add_argument("--project", default=PROJECT_SLUG, help="molexp project id")
-    p.add_argument(
-        "--experiment",
-        "--experiment-slug",
-        dest="experiment",
-        default=PROTOCOL_EXPERIMENT_SLUG,
-        help="molexp experiment id",
-    )
-    p.add_argument(
-        "--run-id",
-        default=None,
-        help=f"molexp run id (default with --workspace: {PROTOCOL_RUN_ID})",
-    )
-    p.add_argument(
-        "--dataset-coordinate",
-        default=DATASET_COORDINATE_PRIMARY,
-        help="MolHub coordinate (audit; data-root is local materialization)",
-    )
-    p.add_argument(
-        "--no-harvest",
-        action="store_true",
-        help="Skip post-run harvest_run Finding KnowledgeItem",
-    )
-    args = p.parse_args(argv)
-
-    if args.run is None and args.record_root is not None:
-        args.run = args.record_root
-    if args.workspace is not None and args.run_id is None and args.run is None:
-        args.run_id = PROTOCOL_RUN_ID
-    if args.workspace is None and args.run_id is not None and args.run is None:
-        args.workspace = DEFAULT_WORKSPACE_ROOT
-
-    molexp_run, record_root = _resolve_molexp_run(
-        run_dir=args.run,
-        workspace=args.workspace,
-        project=args.project,
-        experiment=args.experiment,
-        run_id=args.run_id,
-        record_root=args.record_root,
-    )
-    if args.run is not None and molexp_run is None:
-        record_root = Path(args.run)
-
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    device = torch.device(args.device)
-    # Class-I kernels and the MM energy labels are float64; this makes the
-    # dataloader's collate cast match the model instead of silently down-casting
-    # positions to float32 (must precede DataModule construction).
-    config.set_precision("fp64")
-
-    frames_by_mol = pick_molecules(
-        args.data_root,
-        n_mols=args.n_mols,
-        max_confs=args.max_confs,
-        selection=args.selection,
-    )
-    mol_ids = list(frames_by_mol.keys())
-    if args.use_official_splits:
-        official = load_official_split(args.data_root)
-        # Intersect with loaded mols (subset runs stay consistent)
-        have = set(mol_ids)
-        split = {
-            "train": [m for m in official["train"] if m in have],
-            "val": [m for m in official["val"] if m in have],
-            "test": [m for m in official["test"] if m in have],
-            "seed": official["seed"],
-            "ratios": official["ratios"],
-            "scheme": official["scheme"],
-        }
-        # Drop molecules not in any split (should not happen)
-        keep = set(split["train"]) | set(split["val"]) | set(split["test"])
-        frames_by_mol = {m: frames_by_mol[m] for m in mol_ids if m in keep}
-        mol_ids = list(frames_by_mol.keys())
-    else:
-        split = molecule_split(mol_ids, seed=args.seed)
-    n_atoms = {mid: int(len(frames_by_mol[mid][0]["atoms"]["number"])) for mid in mol_ids}
-
-    if args.energy_scope == "full":
-        model_meta = {
-            "encoder": f"ChemEncoder dim={args.hidden}, n_blocks={args.n_blocks}",
-            "heads": "Bond+Angle+Proper(n_terms=6)+LJParameterHead+ChiEtaHead",
-            "charge": "ElectronegativityEqualization(DiagonalHardnessKernel)",
-            "energy": "ForceField.to_potentials Class-I (bonded+LJ+Coulomb open)",
-            "gap_vs_literature": [
-                "EEM not numerically audited vs espaloma ChargeEquilibrium",
-                "open Coulomb (no PME default); optional cell→Ewald/PME",
-                "ChemEncoder ≠ SAGE×3 backbone",
-            ],
-        }
-    else:
-        model_meta = {
-            "encoder": f"ChemEncoder dim={args.hidden}, n_blocks={args.n_blocks}",
-            "heads": "Bond+Angle+Proper(n_terms=6)",
-            "energy": "ForceField.to_potentials Class-I (bonded only)",
-            "omitted_vs_espaloma": [
-                "Charge equilibration (EEM)",
-                "nonbonded LJ/Coulomb",
-            ],
-        }
-
-    meta = {
-        "protocol": "espaloma-mm-small-notebook",
-        "references": ["arXiv:2010.01196", "DOI:10.1039/D2SC02739A"],
-        "split_seed": args.seed,
-        "split_ratios_parts": list(ESPALOMA_SPLIT_RATIOS),
-        "adam_lr": args.lr,
-        "batch_size": args.batch_size,
-        "energy_scope": args.energy_scope,
-        "loss": "MSE(E_pred, E_ref) graph-level absolute kcal/mol",
-        "metric_report": "MAE/RMSE kcal/mol (labels already kcal/mol)",
-        "model": model_meta,
-        "molhub": {
-            "dataset_coordinate": args.dataset_coordinate,
-            "data_root": str(args.data_root),
-        },
-        "subset": {
-            "n_mols": len(mol_ids),
-            "mol_ids": mol_ids,
-            "n_atoms": n_atoms,
-            "confs_per_mol": {mid: len(frames_by_mol[mid]) for mid in mol_ids},
-            "selection": (
-                "all molecules"
-                if args.n_mols <= 0
-                else f"{args.n_mols} molecules ({args.selection})"
-            ),
-            "max_confs": args.max_confs,
-            "hidden": args.hidden,
-            "n_blocks": args.n_blocks,
-            "n_torsion_terms": ESPALOMA_N_TORSION_TERMS,
-        },
-        "split": {k: v for k, v in split.items() if k != "seed"},
-        "batching": (
-            "molecule-grouped TaskMixtureBatchSampler "
-            f"(mixture {{{TASK_ENERGY!r}: 1.0}}, atom budget = batch_size x "
-            "max atoms/conformer); conformer count per batch ~ batch_size"
-        ),
-        "early_stop_patience": args.early_stop_patience,
-        "grad_audit_steps": args.grad_audit_steps,
-        "project": args.project,
-        "experiment": args.experiment,
-        "run_id": getattr(molexp_run, "id", args.run_id),
-    }
-    print(json.dumps({"setup": meta}, indent=2), flush=True)
-
-    def _prepare_record(root: Path | None) -> None:
-        if root is None:
-            return
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "artifacts").mkdir(exist_ok=True)
-        (root / "metrics").mkdir(exist_ok=True)
-        (root / "artifacts" / "setup.json").write_text(json.dumps(meta, indent=2) + "\n")
-
-    def _finish_artifacts(
-        root: Path | None,
-        history: list,
-        final: dict,
-        model: MMEnergyModel,
-        audit: dict | None,
-    ) -> Path | None:
-        if root is None:
-            return None
-        (root / "artifacts" / "history.json").write_text(json.dumps(history, indent=2) + "\n")
-        (root / "artifacts" / "final.json").write_text(json.dumps(final, indent=2) + "\n")
-        if audit is not None:
-            (root / "artifacts" / "grad_balance_audit.json").write_text(
-                json.dumps(audit, indent=2) + "\n"
-            )
-        ckpt = args.checkpoint or (root / "artifacts" / "model.pt")
-        # Publish the bare ClassicalIMM state dict — the script-local energy
-        # wrapper is composition, not part of the parameterization.
-        torch.save({"model": model.imm.state_dict(), "meta": meta, "final": final}, ckpt)
-        return Path(ckpt)
-
-    def _run_body(
-        metrics_writer: object | None,
-    ) -> tuple[list, dict, MMEnergyModel, dict | None]:
-        model = MMEnergyModel(
-            build_espaloma_like_model(
-                energy_scope=args.energy_scope,
-                hidden=args.hidden,
-                n_blocks=args.n_blocks,
-            )
-        ).to(device)
-        datamodule = build_datamodule(
-            frames_by_mol,
-            split,
-            batch_size=args.batch_size,
-            seed=args.seed,
-        )
-        history, audit = train(
-            model,
-            datamodule,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            lr=args.lr,
-            device=device,
-            record_root=record_root,
-            eval_every=args.eval_every,
-            metrics_writer=metrics_writer,
-            early_stop_patience=args.early_stop_patience,
-            grad_audit_steps=args.grad_audit_steps,
-        )
-        te = eval_split(model, frames_by_mol, split["test"], device, batch_size=args.batch_size)
-        val_rows = [h for h in history if "val_mae_kcal" in h]
-        final = {
-            "best_val_mae_kcal": min(h["val_mae_kcal"] for h in val_rows) if val_rows else None,
-            "best_val_epoch": min(val_rows, key=lambda h: h["val_mae_kcal"])["epoch"]
-            if val_rows
-            else None,
-            "test_mae_kcal": te["mae_kcal"],
-            "test_rmse_kcal": te["rmse_kcal"],
-            "test_n": te["n"],
-            "epochs": args.epochs,
-            "energy_scope": args.energy_scope,
-            "dataset_coordinate": args.dataset_coordinate,
-        }
-        print(json.dumps({"final": final}), flush=True)
-        return history, final, model, audit
-
-    if molexp_run is not None:
-        _prepare_record(record_root)
-        with molexp_run.start() as ctx:
-            history, final, model, audit = _run_body(ctx.metrics)
-            ckpt = _finish_artifacts(record_root, history, final, model, audit)
-            ctx.set_result("final", final)
-            ctx.set_result("setup", meta)
-            if ckpt is not None:
-                ctx.set_result("checkpoint", str(ckpt))
-            if audit is not None:
-                # E4/E5 gradient-balance evidence; the report dict is plain JSON.
-                ctx.set_result("grad_balance_audit", audit)
-            ctx.mark_succeeded()
-        if not args.no_harvest:
-            try:
-                from molexp.workspace import harvest_run
-
-                narrative = (
-                    f"Class-I MM protocol mini ({args.energy_scope}): "
-                    f"best val MAE {final.get('best_val_mae_kcal')} kcal/mol, "
-                    f"test MAE {final.get('test_mae_kcal')} kcal/mol on "
-                    f"{args.dataset_coordinate}."
-                )
-                item = harvest_run(
-                    molexp_run,
-                    kind="Finding",
-                    narrative=narrative,
-                    created_by="mm-param-learning/espaloma_mm_protocol_train",
-                    results={k: v for k, v in final.items() if v is not None},
-                )
-                print(json.dumps({"harvest": item.name, "status": molexp_run.status}), flush=True)
-            except Exception as exc:  # noqa: BLE001 — harvest is best-effort after train
-                print(json.dumps({"harvest_error": f"{type(exc).__name__}: {exc}"}), flush=True)
-        return 0
-
-    # Standalone path (no molexp Run)
-    if record_root is not None:
-        (record_root / "metrics" / "metrics.jsonl").parent.mkdir(parents=True, exist_ok=True)
-        (record_root / "metrics" / "metrics.jsonl").write_text("")
-    _prepare_record(record_root)
-    try:
-        from molexp.workspace.metrics import MetricsWriter
-
-        writer = MetricsWriter(record_root) if record_root is not None else None
-    except ImportError:
-        writer = None
-    history, final, model, audit = _run_body(writer)
-    _finish_artifacts(record_root, history, final, model, audit)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -69,7 +69,7 @@ python -c "import molrs; print('molrs', getattr(molrs,'__version__','?'), 'Neigh
 python -m pip install -q -e "${MOLCRAFTS}/molpy"
 python -m pip install -q -e "${MOLCRAFTS}/mollog" -e "${MOLCRAFTS}/molcfg" -e "${MOLCRAFTS}/molq" 2>/dev/null || true
 
-export PYTHONPATH="${MOLNEX}/src:${MOLCRAFTS}/molhub/src:${MOLCRAFTS}/molexp/src:${MOLCRAFTS}/molpy/src:${MOLCRAFTS}/molq/src:${MOLCRAFTS}/mollog/src:${MOLCRAFTS}/molcfg/src:${PYTHONPATH:-}"
+export PYTHONPATH="${MOLNEX}:${MOLNEX}/src:${MOLCRAFTS}/molhub/src:${MOLCRAFTS}/molexp/src:${MOLCRAFTS}/molpy/src:${MOLCRAFTS}/molq/src:${MOLCRAFTS}/mollog/src:${MOLCRAFTS}/molcfg/src:${PYTHONPATH:-}"
 
 # molnex pure-Python (C++ op optional)
 python -m pip install -q --no-build-isolation -e "${MOLNEX}" --no-deps 2>/dev/null || true
@@ -80,46 +80,20 @@ import torch
 print("arch", platform.machine(), "torch", torch.__version__, "cuda", torch.cuda.is_available())
 if torch.cuda.is_available():
     print("device", torch.cuda.get_device_name(0))
-from molpot.forcefield import ClassicalIMM  # noqa: F401
-from molhub.dataset import PhalkethohMMDataset  # noqa: F401
+from molpot.forcefield import Parameterizer  # noqa: F401
+from molhub.dataset import Class1Universal2026  # noqa: F401
 import molexp  # noqa: F401
-print("imports OK")
+print("imports OK", Class1Universal2026().load().source_coordinates)
 PY
 
 WS="${MOLCRAFTS}/workspaces/mm-param-learning"
-DATA="${WS}/cache/espaloma/phalkethoh-mm-small-normalized"
-RUN_ID="${RUN_ID:-protocol-full-energy-mini-003}"
-N_MOLS="${N_MOLS:-12}"
-MAX_CONFS="${MAX_CONFS:-20}"
-EPOCHS="${EPOCHS:-80}"
-BATCH_SIZE="${BATCH_SIZE:-32}"
-LR="${LR:-1e-4}"
-ENERGY_SCOPE="${ENERGY_SCOPE:-full}"
 
-echo "=== train energy_scope=${ENERGY_SCOPE} n_mols=${N_MOLS} max_confs=${MAX_CONFS} epochs=${EPOCHS} run=${RUN_ID} ==="
-
-python scripts/mm_param_learning/setup_class_i_protocol.py \
-  --root "${WS}" \
-  --run-id "${RUN_ID}" \
-  --n-mols "${N_MOLS}" \
-  --max-confs "${MAX_CONFS}" \
-  --epochs "${EPOCHS}"
+echo "=== molexp Class-I v0 profile=gh200 ==="
 
 OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-16}" \
-python -u scripts/mm_param_learning/espaloma_mm_protocol_train.py \
-  --data-root "${DATA}" \
-  --energy-scope "${ENERGY_SCOPE}" \
-  --n-mols "${N_MOLS}" \
-  --max-confs "${MAX_CONFS}" \
-  --epochs "${EPOCHS}" \
-  --batch-size "${BATCH_SIZE}" \
-  --lr "${LR}" \
-  --eval-every 5 \
-  --device cuda \
-  --workspace "${WS}" \
-  --project mm-param-learning \
-  --experiment class-i-full-energy-mini \
-  --run-id "${RUN_ID}" \
-  --dataset-coordinate dataset:espaloma/phalkethoh-mm-small@1
+python -m molexp.cli run scripts/mm_param_learning/train.py \
+  --config scripts/mm_param_learning/molcfg.yaml \
+  --profile gh200 \
+  -ws "${WS}"
 
 echo "=== DONE $(date -Iseconds) ==="

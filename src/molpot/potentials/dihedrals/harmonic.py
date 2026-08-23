@@ -3,6 +3,7 @@ from typing import Any
 import torch
 
 from molpot.potentials.base import BasePotential
+from molpot.potentials.geom import dihedral_cos_sin
 
 
 class DihedralHarmonic(BasePotential):
@@ -100,38 +101,11 @@ class DihedralHarmonic(BasePotential):
         if dihedral_index.size(1) == 0:
             return torch.tensor(0.0, device=pos.device, dtype=pos.dtype)
 
-        # Get positions for each dihedral (i-j-k-l)
-        pos_i = pos[dihedral_index[0]]  # [num_dihedrals, 3]
-        pos_j = pos[dihedral_index[1]]  # [num_dihedrals, 3]
-        pos_k = pos[dihedral_index[2]]  # [num_dihedrals, 3]
-        pos_l = pos[dihedral_index[3]]  # [num_dihedrals, 3]
-
-        # Compute bond vectors
-        b1 = pos_j - pos_i  # [num_dihedrals, 3]
-        b2 = pos_k - pos_j  # [num_dihedrals, 3]
-        b3 = pos_l - pos_k  # [num_dihedrals, 3]
-
-        # Compute normal vectors to planes
-        n1 = torch.cross(b1, b2, dim=-1)  # [num_dihedrals, 3]
-        n2 = torch.cross(b2, b3, dim=-1)  # [num_dihedrals, 3]
-
-        # Normalize normal vectors
-        n1_norm = n1 / (torch.norm(n1, dim=-1, keepdim=True) + 1e-8)
-        n2_norm = n2 / (torch.norm(n2, dim=-1, keepdim=True) + 1e-8)
-
-        # Compute dihedral angle using atan2 for proper quadrant
-        # cos(phi) = n1 · n2
-        # sin(phi) = (n1 × n2) · b2_normalized
-        cos_phi = torch.sum(n1_norm * n2_norm, dim=-1)  # [num_dihedrals]
-        cos_phi = torch.clamp(cos_phi, -1.0, 1.0)
-
-        # For proper sign, use cross product
-        b2_norm = b2 / (torch.norm(b2, dim=-1, keepdim=True) + 1e-8)
-        cross_n1_n2 = torch.cross(n1_norm, n2_norm, dim=-1)
-        sin_phi = torch.sum(cross_n1_n2 * b2_norm, dim=-1)  # [num_dihedrals]
-
-        # Compute dihedral angle
-        phi = torch.atan2(sin_phi, cos_phi)  # [num_dihedrals], range [-pi, pi]
+        b1 = pos[dihedral_index[1]] - pos[dihedral_index[0]]
+        b2 = pos[dihedral_index[2]] - pos[dihedral_index[1]]
+        b3 = pos[dihedral_index[3]] - pos[dihedral_index[2]]
+        cos_phi, sin_phi = dihedral_cos_sin(b1, b2, b3)
+        phi = torch.atan2(sin_phi, cos_phi)
 
         # Look up parameters for each dihedral
         k_dihedrals = self.k[dihedral_types]  # [num_dihedrals]

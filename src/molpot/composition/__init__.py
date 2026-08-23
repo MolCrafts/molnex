@@ -1,8 +1,9 @@
 """Modular potential composition (Sonata / generic PotentialComposer).
 
-Class-I classical force fields live under :mod:`molpot.forcefield`
-(:class:`~molpot.forcefield.ForceField`, :class:`~molpot.forcefield.ClassicalIMM`).
-Parameter heads for Class-I terms are re-exported here for convenience.
+Classical force fields live under :mod:`molpot.forcefield`
+(:class:`~molpot.forcefield.ForceField`, :class:`~molpot.forcefield.Parameterizer`,
+:class:`~molpot.forcefield.OPLSAAForceField`).
+Parameter heads for Class-I / OPLS-AA terms are re-exported here for convenience.
 """
 
 from molpot.composition.composer import PotentialComposer

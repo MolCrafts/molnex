@@ -27,15 +27,14 @@ from molpot.ir import (
 )
 from molpot.ir.scaling import NonbondedScaling
 
-__all__ = ["ForceField", "ClassIForceField", "OPLSForceField"]
+__all__ = ["ForceField", "OPLSAAForceField"]
 
 
 class ForceField(MolpyForceField):
     """Generic molpy ForceField plus torch param tables.
 
-    Concrete forms inherit this type (``ClassIForceField``,
-    ``OPLSForceField``) and register their styles in ``__init__``.
-    Evaluation::
+    Concrete forms such as :class:`OPLSAAForceField` inherit this type and
+    register their styles in ``__init__``. Evaluation::
 
         pots = ff.to_potentials()   # overrides molpy native → torch Potentials
         E = pots.calc_energy(system)
@@ -424,40 +423,39 @@ class ForceField(MolpyForceField):
         )
 
 
-class ClassIForceField(ForceField):
-    """Class-I bonded form: harmonic bond/angle + multi-term dihedral.
+class OPLSAAForceField(ForceField):
+    """OPLS-AA Class-I force-field container (LAMMPS ``units real``).
 
-    Pair / Coulomb styles are optional extras — register them with
-    :meth:`def_pairstyle` after construction. Subclasses pick the
-    dihedral form via ``_dihedral_style``.
+    Registers the OPLS-AA diagonal form on construction: harmonic bond and
+    angle, ``dihedral:opls`` proper, ``improper:periodic``, ``pair:lj/cut``,
+    and ``pair:coulomb``. When ``nonbonded_scaling`` is omitted, binds
+    OPLS-AA 1–4 scales ``f14 = 1/2`` for both Coulomb and LJ
+    (``scale_q_14=scale_lj_14=0.5``); 1–2 / 1–3 remain 0. Explicit
+    ``nonbonded_scaling`` is kept as given (not silently replaced).
+
+    Units follow LAMMPS real: energy kcal/mol, length Å, charge ``e``.
+
+    Args:
+        name: Force-field name (default ``"OPLS-AA"``).
+        units: Unit set passed to molpy (default ``"real"``).
+        nonbonded_scaling: Optional 1–2/1–3/1–4 scales; default is OPLS-AA
+            ``f14=0.5``.
     """
-
-    _dihedral_style = "fourier"
 
     def __init__(
         self,
-        name: str = "class-i",
+        name: str = "OPLS-AA",
         units: str = "real",
         *,
         nonbonded_scaling: NonbondedScaling | None = None,
     ) -> None:
+        if nonbonded_scaling is None:
+            nonbonded_scaling = NonbondedScaling(scale_q_14=0.5, scale_lj_14=0.5)
         super().__init__(name, units, nonbonded_scaling=nonbonded_scaling)
         self.def_atomstyle("full")
         self.def_bondstyle("harmonic")
         self.def_anglestyle("harmonic")
-        self.def_dihedralstyle(type(self)._dihedral_style)
-
-
-class OPLSForceField(ClassIForceField):
-    """Class-I with OPLS proper torsion (``k1..k4``)."""
-
-    _dihedral_style = "opls"
-
-    def __init__(
-        self,
-        name: str = "OPLS",
-        units: str = "real",
-        *,
-        nonbonded_scaling: NonbondedScaling | None = None,
-    ) -> None:
-        super().__init__(name, units, nonbonded_scaling=nonbonded_scaling)
+        self.def_dihedralstyle("opls")
+        self.def_improperstyle("periodic")
+        self.def_pairstyle("lj/cut")
+        self.def_pairstyle("coulomb")

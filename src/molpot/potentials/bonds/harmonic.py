@@ -142,6 +142,59 @@ class BondHarmonic(BasePotential):
 
         return total_energy
 
+    def energy_forces(self, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        """Energy and analytic forces ``F = -∂E/∂pos`` in one pass.
+
+        Closed form ``F_i = k(r − r0) r̂``, ``F_j = −F_i`` (``r̂ = (pos_j −
+        pos_i)/r``). No position leaf is built, so no double backward is paid;
+        the force still carries the ordinary gradient w.r.t. ``k`` and ``r0``.
+
+        Args:
+            **kwargs: ``pos`` ``[N, 3]``, ``bond_index`` ``[2, M]``,
+                ``bond_types`` ``[M]``, and optional ``term_batch`` /
+                ``num_graphs``.
+
+        Returns:
+            ``(energy, forces)`` — energy ``(B,)`` (or scalar) and forces
+            ``[N, 3]``.
+        """
+        pos = kwargs.get("pos")
+        bond_index = kwargs.get("bond_index")
+        bond_types = kwargs.get("bond_types")
+        term_batch = kwargs.get("term_batch")
+        num_graphs = kwargs.get("num_graphs")
+        if pos is None or bond_index is None or bond_types is None:
+            raise ValueError("BondHarmonic.energy_forces requires pos, bond_index, bond_types.")
+
+        if bond_index.size(1) == 0:
+            energy = torch.zeros(
+                (int(num_graphs),) if term_batch is not None else (),
+                device=pos.device,
+                dtype=pos.dtype,
+            )
+            return energy, pos.new_zeros((pos.shape[0], 3))
+
+        pos_i = pos[bond_index[0]]
+        pos_j = pos[bond_index[1]]
+        bond_vec = pos_j - pos_i
+        bond_lengths = torch.norm(bond_vec, dim=-1)
+        k_bonds = self.k[bond_types]
+        r0_bonds = self.r0[bond_types]
+        displacement = bond_lengths - r0_bonds
+        energy_per_bond = 0.5 * k_bonds * displacement**2
+
+        rhat = bond_vec / bond_lengths.unsqueeze(-1)
+        force_on_i = (k_bonds * displacement).unsqueeze(-1) * rhat
+        forces = pos.new_zeros((pos.shape[0], 3))
+        forces.index_add_(0, bond_index[0], force_on_i)
+        forces.index_add_(0, bond_index[1], -force_on_i)
+
+        if term_batch is not None:
+            energy = energy_per_bond.new_zeros(int(num_graphs))
+            energy.index_add_(0, term_batch.long(), energy_per_bond)
+            return energy, forces
+        return energy_per_bond.sum(), forces
+
     def __repr__(self) -> str:
         num_types = len(self.k)
         return f"BondHarmonic(num_bond_types={num_types})"

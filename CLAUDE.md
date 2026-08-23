@@ -659,7 +659,7 @@ The 10-section structure of `<encoder>.md` is **immutable** — adding / removin
 
 See `.claude/notes/learnable-classical-ff.md`. Short form:
 
-1. **Reuse first** — molnex `ForceField` **is** `molpy.ForceField` (subclass). No `to_molpy()`. Class-I is `ClassIForceField(ForceField)`, OPLS is `OPLSForceField(ClassIForceField)` — no `ForceField.class_i()` / `.opls()` façades. Override `to_potentials()` for torch; IO is `molpy.io` after `realize(system)`. Graph → SMARTS is `molpy.io.write_smarts` (molrs local-SMARTS). `Condenser` merges params inside those keys; types are registered with molpy `def_type`.
+1. **Reuse first** — molnex `ForceField` **is** `molpy.ForceField` (subclass). No `to_molpy()`. Named product template is `OPLSAAForceField(ForceField)`; trainable fill is `Parameterizer(encoder, template=…)`; task mapping is `ForceFieldPredictions` — no `ForceField.class_i()` / `.opls()` façades. Override `to_potentials()` for torch; IO is `molpy.io` after `realize(system)`. Graph → SMARTS is `molpy.io.write_smarts` (molrs local-SMARTS). `Condenser` merges params inside those keys; types are registered with molpy `def_type`.
 2. **Generalize without `Foo(method=…)`** — single-responsibility types only; no multi-backend method switches on new APIs.
 3. **Non-diff sinks to molpy/molrs** — *enumeration*, SMARTS, classical non-torch E/F, FF tables under molpy (≥0.13, with `k_B` / `openmm` preset). Imports: `molpy` only (never bare `molrs`).
 4. **Batch topology lives in molix TensorDict**, not molpy Frame. Column form under namespaces, e.g. `batch["angles"]["atomi"]` / `batch["angles", "atomj"]` / `atomk` (propers/impropers add `atoml`; improper **center = atomi**). Stack to COO only at kernel call sites if a potential still wants `[arity, N]`.

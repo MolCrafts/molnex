@@ -26,8 +26,12 @@ Surfaces:
   :class:`BlockCoverage` rows) that is planned globally and consumed
   block-windowed. :func:`group_split_indices` splits indices without splitting a
   group across sides.
+* **Mixture** — :class:`DataMixture` is a Dataset of named sources (the
+  key is the task) and the mix policy :class:`DataModule` uses when it
+  is the train dataset.
 * **Loader** — :class:`DataModule` (protocol: :class:`DataModuleProtocol`)
-  wraps prebuilt datasets in DDP-aware train / val ``DataLoader`` s.
+  wraps prebuilt datasets or a :class:`DataMixture` in DDP-aware train /
+  val ``DataLoader`` s.
 
 Storage lives in :mod:`molix.store`; nothing here reads or writes files.
 """
@@ -49,6 +53,7 @@ from molix.batch.collate import (
 )
 from molix.batch.datamodule import DataModule, DataModuleProtocol
 from molix.batch.group_split import group_split_indices
+from molix.batch.mixture import DataMixture
 from molix.batch.neighbor import NeighborList
 from molix.batch.pad import PadMolecularBatch
 from molix.batch.sampler import (
@@ -72,6 +77,7 @@ __all__ = [
     "BlockPlan",
     "BlockPlanSource",
     "DEFAULT_TARGET_SCHEMA",
+    "DataMixture",
     "DataModule",
     "DataModuleProtocol",
     "MoleculeCollator",

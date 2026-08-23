@@ -1,11 +1,22 @@
-"""Tests for continuous Class-I MM parameter heads (learnable-classical-ff-03)."""
+"""Tests for continuous Class-I MM parameter heads (learnable-classical-ff-03).
+
+Also covers OPLS-AA proper head form + reuse schema contracts
+(oplsaa-parameterizer-02-heads).
+"""
 
 from __future__ import annotations
 
 import math
 
 import torch
+import torch.nn as nn
+from tensordict import TensorDict
 
+from molpot.charge import (
+    AtomicChargeModel,
+    DiagonalHardnessKernel,
+    ElectronegativityEqualization,
+)
 from molpot.composition.heads import ChargeHead, LJParameterHead
 from molpot.composition.mm_heads import (
     AngleParamHead,
@@ -14,6 +25,7 @@ from molpot.composition.mm_heads import (
     ProperTorsionParamHead,
 )
 from molpot.composition.multihead import MultiHead
+from molpot.forcefield import ForceField
 
 # ---------------------------------------------------------------------------
 # BondParamHead (ac-001)
@@ -147,6 +159,74 @@ class TestProperTorsionParamHead:
         assert (out["a"] < 0).all()
         assert (out["b"] < 0).all()
 
+    def test_form_cartesian_explicit_matches_default_keys(self):
+        torch.manual_seed(1)
+        head = ProperTorsionParamHead(feature_dim=8, form="cartesian")
+        out = head(torch.randn(3, 8))
+        assert set(out) == {"a", "b", "periodicity", "idivf"}
+        assert out["a"].shape == (3, 6)
+        assert out["b"].shape == (3, 6)
+        assert out["periodicity"].tolist() == [1, 2, 3, 4, 5, 6]
+
+    def test_form_opls_emits_exactly_k1_to_k4(self):
+        torch.manual_seed(2)
+        head = ProperTorsionParamHead(feature_dim=8, hidden_dim=16, form="opls")
+        features = torch.randn(5, 8)
+        out = head(features)
+        assert set(out) == {"k1", "k2", "k3", "k4"}
+        for key in ("k1", "k2", "k3", "k4"):
+            assert out[key].shape == (5,)
+            assert out[key].dtype == features.dtype
+            assert out[key].device == features.device
+            assert torch.isfinite(out[key]).all()
+        for absent in ("a", "b", "k", "phase", "periodicity", "idivf"):
+            assert absent not in out
+
+    def test_form_opls_zero_init_yields_literal_zero_kn(self):
+        """Zero MLP → k1..k4 = 0: proves LAMMPS Kn, not softplus or Km/2."""
+        head = ProperTorsionParamHead(feature_dim=6, hidden_dim=12, form="opls")
+        with torch.no_grad():
+            for p in head.parameters():
+                p.zero_()
+        features = torch.tensor(
+            [[1.0, -2.0, 0.5, 3.0, -0.25, 4.0], [0.0, 1.0, -1.0, 2.0, 0.5, -3.0]]
+        )
+        out = head(features)
+        for key in ("k1", "k2", "k3", "k4"):
+            assert torch.allclose(
+                out[key],
+                torch.zeros(2, dtype=features.dtype),
+                atol=1e-12,
+            )
+
+    def test_form_opls_differentiable_wrt_features(self):
+        head = ProperTorsionParamHead(feature_dim=4, hidden_dim=8, form="opls")
+        features = torch.randn(3, 4, requires_grad=True)
+        out = head(features)
+        loss = out["k1"].sum() + out["k2"].sum() + out["k3"].sum() + out["k4"].sum()
+        loss.backward()
+        assert features.grad is not None
+        assert features.grad.shape == (3, 4)
+        assert torch.isfinite(features.grad).all()
+
+    def test_form_opls_rejects_incompatible_n_terms(self):
+        try:
+            ProperTorsionParamHead(feature_dim=4, form="opls", n_terms=3)
+        except ValueError:
+            return
+        raise AssertionError("expected ValueError for form='opls' with n_terms=3")
+
+    def test_form_opls_rejects_incompatible_periodicity(self):
+        try:
+            ProperTorsionParamHead(
+                feature_dim=4,
+                form="opls",
+                periodicity=(1, 2, 3, 4),
+            )
+        except ValueError:
+            return
+        raise AssertionError("expected ValueError for form='opls' with periodicity")
+
 
 # ---------------------------------------------------------------------------
 # ImproperParamHead — Universal-v0 default periodic n=1,2 (not Cartesian)
@@ -237,3 +317,66 @@ class TestMultiHeadChargeLJReuse:
         # Per-molecule neutrality
         assert out["charge"][:3].sum().abs() < 1e-5
         assert out["charge"][3:].sum().abs() < 1e-5
+
+
+# ---------------------------------------------------------------------------
+# OPLS-AA reuse schema contracts (oplsaa-parameterizer-02-heads, ac-005)
+# ---------------------------------------------------------------------------
+
+
+class TestOPLSAAHeadSchemaContracts:
+    def test_bond_param_head_keys(self):
+        out = BondParamHead(feature_dim=4, hidden_dim=8)(torch.randn(2, 4))
+        assert set(out) == {"k", "r0"}
+        assert out["k"].shape == (2,)
+        assert out["r0"].shape == (2,)
+
+    def test_angle_param_head_keys(self):
+        out = AngleParamHead(feature_dim=4, hidden_dim=8)(torch.randn(2, 4))
+        assert set(out) == {"k", "theta0"}
+        assert out["k"].shape == (2,)
+        assert out["theta0"].shape == (2,)
+
+    def test_improper_param_head_default_periodic_keys(self):
+        out = ImproperParamHead(feature_dim=4, hidden_dim=8)(torch.randn(2, 4))
+        assert set(out) == {"k", "phase", "periodicity", "idivf"}
+        assert out["k"].shape == (2, 2)
+        assert out["phase"].shape == (2, 2)
+        assert out["periodicity"].tolist() == [1, 2]
+        assert out["idivf"].shape == (2,)
+
+    def test_lj_parameter_head_keys(self):
+        out = LJParameterHead(feature_dim=4, hidden_dim=8)(torch.randn(3, 4))
+        assert set(out) == {"epsilon", "sigma"}
+        assert out["epsilon"].shape == (3,)
+        assert out["sigma"].shape == (3,)
+
+    def test_atomic_charge_model_write_forcefield_writes_q(self):
+        class _ConstChiEta(nn.Module):
+            def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+                n = x.shape[0]
+                return {
+                    "chi": torch.full((n,), 2.0, dtype=x.dtype),
+                    "eta": torch.full((n,), 1.0, dtype=x.dtype),
+                }
+
+        model = AtomicChargeModel(
+            _ConstChiEta(),
+            ElectronegativityEqualization(DiagonalHardnessKernel(), jitter=0.0),
+        )
+        batch = TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+                        "batch": torch.zeros(2, dtype=torch.long),
+                    },
+                    batch_size=[2],
+                )
+            },
+            batch_size=[],
+        )
+        ff = model.write_forcefield(ForceField(name="schema"), torch.zeros(2, 4), batch)
+        atoms = ff.params("atoms")
+        assert "q" in atoms
+        assert atoms["q"].shape == (2,)

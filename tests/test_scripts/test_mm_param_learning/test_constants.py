@@ -5,6 +5,8 @@ from __future__ import annotations
 from scripts.mm_param_learning.constants import (
     EXPERIMENT_SLUGS,
     MOLHUB_COORDINATES,
+    TRAIN_COORDINATE,
+    VAL_COORDINATE,
     VALIDATION_STAGES,
 )
 
@@ -18,6 +20,7 @@ class TestConstants:
             "latent-analysis",
             "espaloma-mm-protocol-mini",
             "class-i-full-energy-mini",
+            "universal-class-i-v0-calibration-gh200",
         }
         assert set(MOLHUB_COORDINATES) == set(EXPERIMENT_SLUGS)
 
@@ -37,3 +40,8 @@ class TestConstants:
         assert "latent" in titles
         assert "gate" in titles or "synthesis" in titles
         assert "protocol" in titles
+        assert "8:2" in titles or "self-split" in titles or "omol25" in titles
+
+    def test_v0_val_is_omol25_self_split(self):
+        assert VAL_COORDINATE == TRAIN_COORDINATE
+        assert VAL_COORDINATE.startswith("dataset:molcrafts/omol25-small")

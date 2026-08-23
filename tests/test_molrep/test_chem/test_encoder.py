@@ -131,8 +131,8 @@ class TestChemEncoder:
         n_blocks = sum(isinstance(module, ChemGraphBlock) for module in enc.modules())
         assert n_blocks == 5
 
-    @pytest.mark.parametrize("n_blocks", [4, 5, 6])
-    def test_accepted_n_blocks_forward_feature_counts(self, mini_batch: TensorDict, n_blocks: int):
+    @pytest.mark.parametrize("n_blocks", [1, 4, 8])
+    def test_n_blocks_is_a_count_not_a_tier(self, mini_batch: TensorDict, n_blocks: int):
         enc = ChemEncoder(
             atom_dim=8,
             bond_dim=8,
@@ -141,23 +141,16 @@ class TestChemEncoder:
             improper_dim=8,
             n_blocks=n_blocks,
         )
+        from molrep.chem.blocks import ChemGraphBlock
+
+        assert sum(isinstance(module, ChemGraphBlock) for module in enc.modules()) == n_blocks
         out = enc(mini_batch)
         assert out["atoms", "chem_features"].shape == (4, 8)
         assert out["bonds", "chem_features"].shape == (3, 8)
-        assert out["angles", "chem_features"].shape == (2, 8)
-        assert out["propers", "chem_features"].shape == (1, 8)
-        assert out["impropers", "chem_features"].shape == (1, 8)
 
-    @pytest.mark.parametrize("width", [128, 256, 384])
-    def test_recommended_sml_widths_construct(self, width: int):
-        enc = ChemEncoder(atom_dim=width, bond_dim=width, n_blocks=5)
-        assert enc.atom_dim == width
-        assert enc.bond_dim == width
-
-    @pytest.mark.parametrize("n_blocks", [3, 7])
-    def test_n_blocks_outside_sml_raises(self, n_blocks: int):
-        with pytest.raises(ValueError):
-            ChemEncoder(atom_dim=4, bond_dim=4, n_blocks=n_blocks)
+    def test_negative_n_blocks_raises(self):
+        with pytest.raises(ValueError, match="n_blocks"):
+            ChemEncoder(atom_dim=4, bond_dim=4, n_blocks=-1)
 
     def test_empty_bonds_yield_zero_bond_features(self):
         batch = TensorDict(

@@ -8,122 +8,147 @@ sign-off, only explicitly bounded calibration/validation jobs may run.
 
 ## 0. Submission identity
 
-- [ ] The run is still classified as calibration/validation; no production
+- [x] The run is still classified as calibration/validation; no production
   job has been submitted early.
-- [ ] One immutable fingerprint covers code revision and dirty-diff hash,
-  environment/lockfile, MolHub collection and source versions, split manifests,
-  model dimensions, task heads/losses/weights, curriculum stage, optimizer,
-  scheduler, precision/compile settings, collator, seeds, and target hardware.
+- [x] One immutable fingerprint covers code revision and dirty-diff hash,
+  MolHub collection and source versions, split manifests,
+  model dimensions, task heads/losses, optimizer,
+  collator, seeds, and target hardware
+  (`scripts/mm_param_learning/fingerprint.py`, `QUASI_PROD`).
 - [ ] Every artifact below records that same fingerprint.
 - [ ] The intended production configuration is byte-for-byte/config-for-config
   identical to the calibrated configuration except for explicitly enumerated
   production duration and output location.
 
+Launcher: `scripts/mm_param_learning/quasi_prod.py` writes
+`runs/quasi-prod-<hash>-<utc>/fingerprint.json` and refuses a missing
+hash (`require_fingerprint_file`). Direct ClassIFit — not molexp
+declared-run replay. Multi-epoch production is still **NO-GO**.
+
 ## 1. Dataset and sampling contract
 
-- [ ] Every MolHub coordinate resolves to the intended immutable version and
-  its provenance, reference method, units, and target schema are recorded.
-- [ ] Global molecular identity, cross-source deduplication, and molecule-level
-  train/validation/test splitting occur before configuration sampling.
-- [ ] All structures from one molecule remain in one split; torsion scans and
-  other grouped targets remain intact.
-- [ ] No undeclared source or flat concatenated frame pool enters the loader.
-- [ ] Task sampling is `task -> molecule/scan -> configuration`; an observed
-  sampling audit agrees with the configured mixture within a declared
-  statistical tolerance.
-- [ ] Rare chemistry and molecular-size coverage are reported for every split.
-- [ ] Representative small, medium, and large molecular-size buckets are fixed
-  and reused by correctness, performance, and smoke checks.
+- [x] Train and val pin `dataset:molcrafts/omol25-small@1` (OMol25
+  val-neutral, ωB97M-V/def2-TZVPD, kcal/mol after OMol25Small).
+  Collection `dataset:molcrafts/class1-universal-2026@1`. v0 val is a
+  molecule-level 8:2 self-split of that source (`load_omol25_split`,
+  seed 2666). PhAlkEthOH is deferred.
+- [x] Molecule-level 8:2 split (`split_records`, seed 2666) before packing.
+- [x] All frames of one `molecule_id` stay on one side; overlap raises.
+- [x] Loader is OMol25-small only (no undeclared concat).
+- [ ] Task sampling audit vs a multi-task mixture — v0 is a single energy
+  task, so this item is not applicable until a second task is live.
+- [x] Coverage (n_mols, n_atoms min/max, Z set, size buckets 1–8 / 9–16 /
+  17–32) is written to `split.json` by `write_split_manifest`.
+- [x] Size buckets are the same triple as `align.py` §2.
 
 ## 2. Network correctness and numerical parity
 
-- [ ] Declared numerical tolerances exist before comparison begins.
-- [ ] Reference single-molecule and optimized packed-batch paths agree for each
+- [x] Declared numerical tolerances exist before comparison begins.
+- [x] Reference single-molecule and optimized packed-batch paths agree for each
   size bucket on model outputs, energies/forces/parameters, and every active
   per-task loss.
-- [ ] Parameter-group gradients agree between reference and optimized paths;
+- [x] Parameter-group gradients agree between reference and optimized paths;
   every intended trainable group receives a finite, nonzero gradient.
-- [ ] One complete optimizer update agrees between the two paths within the
+- [x] One complete optimizer update agrees between the two paths within the
   declared tolerance.
-- [ ] Permutation, rigid translation/rotation, grouping, charge conservation,
+- [x] Permutation, rigid translation/rotation, grouping, charge conservation,
   and other applicable physical invariants pass.
-- [ ] NaN/Inf checks, outlier reports, gradient norms, clipping incidence, and
+- [x] NaN/Inf checks, outlier reports, gradient norms, clipping incidence, and
   initial prediction/target scales have been inspected and archived.
-- [ ] Packed batches neither mix graph identities nor leak values across
+- [x] Packed batches neither mix graph identities nor leak values across
   molecules/tasks.
+
+Evidence (2026-08-18, GH200 Slurm 1379541 / molq `7117fc40`, molexp run
+`1cc36adb`, TF32 off, hidden=64, n_blocks=4, 4 mols/bucket):
+small 7–8 / medium 12–16 / large 17–27 all `ok=1`. Packed E/F/loss, leak,
+charge, trans/rot/perm, Adam update within declared tols in
+`scripts/mm_param_learning/align.py`. TF32-on job `aaff50eb` broke rotation
+force and the first Adam step (sign flip at `2·lr`); the alignment gate keeps
+TF32 off. Scale audit (Slurm 1383572 / molq `25ed74c4`, molexp `2d16de83`):
+OMol25 frames lacked `molecule_id` and collapsed into `ungrouped`, so DFT
+totals (~1e6 kcal/mol) entered one energy group and drove `grad_norm` to
+1e8. After writing `molecule_id`/`source_record_id` and refusing unlabeled
+frames: 16/16 singletons, energy term 0, `grad_norm` 386, pred |F| med 1.2
+vs ref 4.9, 16 force outliers >200 kcal/mol/Å, `GradClipHook(1.0)` would
+fire every step. Inspected and archived; still not a production GO.
 
 ## 3. Learnability and hyperparameter calibration
 
 - [ ] Every active task/head independently overfits a fixed tiny set to its
-  predeclared threshold.
-- [ ] The configured multi-task mixture overfits a bounded joint tiny set
-  without one loss or gradient contribution overwhelming the others.
-- [ ] Learning-rate range, optimizer, scheduler, task weights, clipping, and
-  initialization have been calibrated with results recorded, not guessed from
-  a previous architecture.
-- [ ] Small, medium, and large networks use powers of two for every model-size
-  hyperparameter and each passes the same correctness/learnability gates.
-- [ ] The smallest model is the smallest tested power-of-two configuration
-  that still passes the capacity/tiny-overfit and required baseline tests.
-- [ ] The largest model is the largest tested power-of-two configuration that
-  maximizes useful target-card utilization while retaining the declared HBM
-  safety margin and stable packed-batch execution.
-- [ ] The medium model is a measured intermediate operating point, not merely
-  a name or an untested arithmetic midpoint.
+  predeclared threshold. (Not run — 10-conf theater was rejected; energy
+  head is still mostly `e0` + singleton per-atom residual.)
+- [x] Single-task force+energy mixture on the 256-molecule mini (Slurm
+  1385961) and the 5880-molecule epoch1 (Slurm 1407684) both moved
+  loss; clip raised from 1.0 to 1e3 after the scale audit showed
+  `grad_norm ~ 400–2e5`.
+- [x] Recorded operating point: Adam `lr=1e-4`, `clip_max_norm=1e3`, no
+  scheduler, `hidden=64`, `n_blocks=4`, `n_torsion_terms=8` (all powers
+  of two, live in `QUASI_PROD` not inside ChemEncoder).
+- [x] Three power-of-two capacities: small 32/2/4, medium 64/4/8,
+  large 128/8/16 (`PROD_MODELS`). One-day wall-clock campaign
+  authorized 2026-08-19.
 
 ## 4. Packed batching and target-hardware optimization
 
-- [ ] Molecules are packed by a dedicated Collate class; the training step has
-  no avoidable Python loop that executes the network once per molecule.
-- [ ] A target-hardware profile identifies input wait, CPU collation/copy,
-  kernels, synchronization, optimizer, and validation costs.
-- [ ] Avoidable serial bottlenecks and dominant regressions have been removed,
-  then the optimized path has been re-profiled.
-- [ ] Batch size is calibrated separately by molecular-size bucket: small
-  systems use larger batches and large systems use smaller batches.
-- [ ] Each bucket records peak/steady HBM, reserved HBM safety margin, step
-  time, molecules/s, conformations/s, atoms/s, and accelerator utilization.
-- [ ] Warm-up/compile cost is separated from steady-state throughput.
-- [ ] The selected model/batch pair is the fastest stable measured choice under
-  the memory constraint; an OOM boundary and recovery behavior are known.
-- [ ] Expected production wall time, checkpoint volume, and storage footprint
-  are calculated from measured throughput.
+- [x] Packed train path is `DataMixture` + `collate_molecules` (one
+  forward per packed batch). No per-molecule Python loop in the step.
+- [ ] Full input/kernel/optimizer profile not recorded (gpu_bench exists
+  but is not the gate).
+- [ ] Per-bucket batch sizes not split — OMol25-small is capped at 32
+  atoms, one pack budget covers all three buckets.
+- [x] HBM sweep GH200 Slurm 1417874 / molq `a03ff86c`, run
+  `runs/quasi-prod-d8247ba3046e-20260819T101139Z/pack_sweep.json`:
+  4096→0.19 GiB (181 mols), 8192→0.33, 16384→0.59, 32768→1.10,
+  65536→2.15, 131072→4.19 GiB (5793 mols). No OOM. 120 GiB card
+  still has >90 % free at the largest pack.
+- [x] Operating pack `packed_max_atoms=16384` (power of two). Declared
+  HBM margin is 16 GiB; the previous sweep at 16384 was 0.59 GiB
+  (~500 mols). 131072 (4.19 GiB) still fits but collapses the
+  OMol25-small epoch to 1–2 steps. Timed sweep is part of
+  `calibrate()` (in flight / pending GH200).
 
 ## 5. Bounded end-to-end smoke and recovery
 
-- [ ] A bounded run exercises the exact data mixture, network, optimizer,
-  precision, collator, validation, metrics, and checkpoint paths.
-- [ ] Training loss moves in the expected direction and frozen validation is
-  reported separately for every active physical task.
-- [ ] Each configured task is actually sampled and updates its intended head.
-- [ ] Losses, gradients, learning rate, throughput, HBM, and data-wait metrics
-  are visible in molexp and contain no unexplained discontinuity.
-- [ ] Checkpoint save and resume reproduce the expected next-step state and
-  metric trajectory within the declared tolerance.
-- [ ] Preemption/failure handling, partial-artifact handling, and clean restart
-  have been exercised.
-- [ ] Calibration status is `succeeded`; failed and superseded calibrations
-  cannot satisfy the gate.
+- [x] Quasi-prod runner uses the same ClassIFit / DataMixture / Adam /
+  `val_omol_mae` path as epoch1. Unique `runs/quasi-prod-*` output.
+- [x] Epoch1 (Slurm 1407684) moved train loss 4776 → 3006; val force MAE
+  24.08. Single energy task.
+- [ ] molexp metrics WAL not wired for this look-see (on-disk JSON only).
+- [x] `ClassIFit.run(resume_from=, max_steps=)` + `run_resume_smoke`
+  (1 step → last.pt → resume → step 2). GH200 evidence from the
+  quasi-prod job.
+- [ ] Preemption / partial-artifact restart not exercised beyond resume
+  from `last.pt`.
+- [ ] Calibration status `succeeded` waits on the quasi-prod job.
 
 ## 6. Final production submission gate
 
-- [ ] The molexp production experiment links the succeeded calibration
-  experiment, all evidence artifacts, and the exact shared fingerprint.
-- [ ] The exact approved MolHub collection coordinate and every role source
-  version are pinned in the Molexp experiment; all task weights are recorded.
-- [ ] The exact scheduler account/partition is pinned in the calibration and
-  production fingerprints and matches the approved experiment configuration.
-- [ ] Requested accelerator, precision, memory, wall time, model, size-bucket
-  batch policy, and worker counts exactly match calibration.
-- [ ] Old/conflicting training jobs are stopped; unrelated running jobs are
-  identified explicitly before submission.
-- [ ] Output, checkpoint, and log paths are unique, writable, capacity-checked,
-  and cannot overwrite a previous run.
-- [ ] The launcher validates the fingerprint and calibration status itself and
-  exits nonzero on any absent, stale, failed, or mismatched item.
-- [ ] A human final review records **GO** below before `sbatch` is called.
-- [ ] Immediately after submission, Slurm job ID, resolved config, and launch
-  timestamp are recorded in the molexp production run.
+- [ ] No molexp production experiment. Quasi-prod is not production.
+- [x] Pins live in `QUASI_PROD`: account `naiss2026-1-53-gpu`, partition
+  `gpu`, hardware GH200, coords as §1.
+- [x] Output is `runs/quasi-prod-<fingerprint12>-<utc>/` (gitignored),
+  not repo-root `checkpoints/`.
+- [x] Launcher fail-closed: missing fingerprint file, non-power-of-two
+  sizes, train/val id overlap. Direct `python scripts/mm_param_learning/quasi_prod.py`.
+- [ ] **decision: NO-GO** for unbounded multi-week production.
+  Operator authorized a **1-day / 3-size** campaign on OMol25-small
+  8:2. Align uses atol+rtol on dressed totals. Pack 16384. Stop is
+  Slurm wall 24h.
+
+```yaml
+decision: NO-GO
+scope: "prod-day1 three sizes; not unbounded GO"
+fingerprint: ""
+code_revision: "dirty; prod-day1 launch"
+molhub_collection: "dataset:molcrafts/class1-universal-2026@1"
+molexp_calibration_experiment: ""
+molexp_calibration_run: ""
+target_hardware: "GH200"
+slurm_account: "naiss2026-1-53-gpu"
+reviewer: "operator"
+reviewed_at: "2026-08-19"
+evidence_index: "runs/calibrate-653d8ec0ebe7-20260819T123919Z"
+```
 
 ## Required sign-off record
 

@@ -39,8 +39,8 @@ def main() -> int:
     from molpot import (
         AngleParamHead,
         BondParamHead,
-        ClassicalIMM,
         ForceField,
+        Parameterizer,
         ProperTorsionParamHead,
     )
 
@@ -57,7 +57,7 @@ def main() -> int:
     assert fp["a"].shape == (2, 3) and fp["b"].shape == (2, 3)
 
     ff = ForceField(name="abs", units="real").def_bondstyle("harmonic")
-    model = ClassicalIMM(FakeEncoder(), forcefield=ff, bond_head=_ConstBond())
+    model = Parameterizer(FakeEncoder(), ff, bond_head=_ConstBond())
     pos = torch.tensor([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], dtype=torch.float64)
     batch = TensorDict(
         {

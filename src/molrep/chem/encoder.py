@@ -107,7 +107,8 @@ class ChemEncoder(nn.Module):
             (optional).
         num_bond_types: Bond-type table size; ``0`` disables type conditioning.
         n_blocks: Number of :class:`~molrep.chem.blocks.ChemGraphBlock`
-            hops. Must be ``4``, ``5``, or ``6`` (S/M/L). Default ``5``.
+            hops. A non-negative count; tier policy lives on the experiment,
+            not here. Default ``5``.
         local_attention: If ``True``, each block softmax-normalizes over an
             atom's covalent neighborhood only. Default ``False``.
     """
@@ -139,8 +140,8 @@ class ChemEncoder(nn.Module):
     ) -> None:
         super().__init__()
         n_blocks = int(n_blocks)
-        if n_blocks not in {4, 5, 6}:
-            raise ValueError(f"n_blocks must be 4, 5, or 6, got {n_blocks}")
+        if n_blocks < 0:
+            raise ValueError(f"n_blocks must be >= 0, got {n_blocks}")
         self.atom_dim = int(atom_dim)
         self.bond_dim = int(bond_dim)
         self.angle_dim = int(angle_dim)

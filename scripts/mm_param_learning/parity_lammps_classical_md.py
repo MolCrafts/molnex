@@ -52,7 +52,7 @@ from molix.units import units  # noqa: E402
 _KCAL_PER_MD = (
     (1.0 * units.kilocalorie_per_mole).to("amu * angstrom ** 2 / femtosecond ** 2").magnitude
 )
-from molpot.forcefield import ForceField, OPLSForceField  # noqa: E402
+from molpot.forcefield import ForceField  # noqa: E402
 
 
 class _PosEnergyHook(MDHook):
@@ -118,25 +118,30 @@ def butane_batch(dtype: torch.dtype = torch.float64) -> TensorDict:
 
 
 def synthetic_opls_ff(dtype: torch.dtype = torch.float64) -> ForceField:
-    return OPLSForceField().with_params(
-        bonds={
-            "k": torch.tensor([200.0, 200.0, 200.0], dtype=dtype),
-            "r0": torch.tensor([1.53, 1.53, 1.53], dtype=dtype),
-        },
-        angles={
-            "k": torch.tensor([100.0, 100.0], dtype=dtype),
-            "theta0": torch.tensor([math.radians(112.0), math.radians(112.0)], dtype=dtype),
-        },
-        propers={
-            "k1": torch.tensor([1.5], dtype=dtype),
-            "k2": torch.tensor([3.0], dtype=dtype),
-            "k3": torch.tensor([0.5], dtype=dtype),
-            "k4": torch.tensor([0.1], dtype=dtype),
-        },
+    # Bonded OPLS form for LAMMPS *.ff (no improper:periodic — writer is harmonic-only)
+    return (
+        ForceField(name="OPLS", units="real")
+        .def_atomstyle("full")
+        .def_bondstyle("harmonic")
+        .def_anglestyle("harmonic")
+        .def_dihedralstyle("opls")
+        .with_params(
+            bonds={
+                "k": torch.tensor([200.0, 200.0, 200.0], dtype=dtype),
+                "r0": torch.tensor([1.53, 1.53, 1.53], dtype=dtype),
+            },
+            angles={
+                "k": torch.tensor([100.0, 100.0], dtype=dtype),
+                "theta0": torch.tensor([math.radians(112.0), math.radians(112.0)], dtype=dtype),
+            },
+            propers={
+                "k1": torch.tensor([1.5], dtype=dtype),
+                "k2": torch.tensor([3.0], dtype=dtype),
+                "k3": torch.tensor([0.5], dtype=dtype),
+                "k4": torch.tensor([0.1], dtype=dtype),
+            },
+        )
     )
-
-
-
 
 
 def run_molnex_nve(
@@ -150,12 +155,7 @@ def run_molnex_nve(
     dtype: torch.dtype,
 ) -> tuple[_PosEnergyHook, float]:
     hook = _PosEnergyHook()
-    md = (
-        MD(dtype)
-        .set_forcefield(ff)
-        .set_integrator(VelocityVerletIntegrator(dt))
-        .set_hooks([hook])
-    )
+    md = MD(dtype).set_forcefield(ff).set_integrator(VelocityVerletIntegrator(dt)).set_hooks([hook])
     batch["atoms", "pos"] = batch["atoms", "pos"].to(dtype).clone()
     batch["atoms", "vel"] = vel.to(dtype)
     batch["atoms", "mass"] = mass.to(dtype)

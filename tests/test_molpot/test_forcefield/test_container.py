@@ -1,42 +1,39 @@
-"""ClassIForceField / OPLSForceField inherit ForceField; no classmethod façades."""
+"""OPLSAAForceField inherits ForceField; product templates are named subclasses."""
 
 from __future__ import annotations
 
 from molpy import ForceField as MolpyForceField
 
-from molpot.forcefield import ClassIForceField, ForceField, OPLSForceField
+from molpot.forcefield import ForceField
 
 
 class TestForceField:
     def test_has_no_class_i_or_opls_classmethod(self):
         assert not hasattr(ForceField, "class_i")
         assert not hasattr(ForceField, "opls")
+        assert not hasattr(ForceField, "oplsaa")
 
 
-class TestClassIForceField:
-    def test_is_forcefield_with_class_i_styles(self):
-        ff = ClassIForceField()
+class TestOPLSAAForceField:
+    def test_default_styles_are_oplsaa_set(self):
+        from molpot.forcefield import OPLSAAForceField
+
+        ff = OPLSAAForceField()
         assert isinstance(ff, ForceField)
         assert isinstance(ff, MolpyForceField)
-        assert ff.bond_style() == "harmonic"
-        assert ff.angle_style() == "harmonic"
-        assert ff.dihedral_style() == "fourier"
+        for key in (
+            "bond:harmonic",
+            "angle:harmonic",
+            "dihedral:opls",
+            "improper:periodic",
+            "pair:lj/cut",
+            "pair:coulomb",
+        ):
+            assert ff.has_style(key), key
 
-    def test_clone_preserves_type_and_extra_styles(self):
-        ff = ClassIForceField().def_pairstyle("lj/cut", cutoff=12.0)
-        cloned = ff.clone()
-        assert type(cloned) is ClassIForceField
-        assert cloned.dihedral_style() == "fourier"
-        assert cloned.has_style("pair:lj/cut")
-        assert cloned.style_options("pair:lj/cut")["cutoff"] == 12.0
+    def test_default_nonbonded_scaling_f14_is_half(self):
+        from molpot.forcefield import OPLSAAForceField
 
-
-class TestOPLSForceField:
-    def test_is_class_i_with_opls_dihedral(self):
-        ff = OPLSForceField()
-        assert isinstance(ff, ClassIForceField)
-        assert ff.dihedral_style() == "opls"
-        assert ff.bond_style() == "harmonic"
-
-    def test_clone_preserves_type(self):
-        assert type(OPLSForceField().clone()) is OPLSForceField
+        scaling = OPLSAAForceField().nonbonded_scaling
+        assert scaling.scale_q_14 == 0.5
+        assert scaling.scale_lj_14 == 0.5

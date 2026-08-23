@@ -85,22 +85,18 @@ class EquivariantProductBasis(nn.Module):
             node_feats: ``(N, ir_dim, mul)`` multiplet features from the
                 interaction's reshape (``cue.ir_mul`` order).
             sc: Skip connection ``(N, target_irreps.dim)`` or ``None``.
-            node_attrs: One-hot atomic numbers ``(N, n_elements)``; ignored when
-                ``num_elements == 1`` (element-agnostic).
+            node_attrs: One-hot atomic numbers ``(N, n_elements)``.
 
         Returns:
             ``(N, target_irreps.dim)`` node features.
         """
-        if self.num_elements == 1:
-            n = node_feats.shape[0]
-            # Reuse a cached zeros index when N is stable (avoids per-forward alloc).
-            cache = getattr(self, "_zeros_index", None)
-            if cache is None or cache.shape[0] != n or cache.device != node_feats.device:
-                cache = torch.zeros(n, dtype=torch.int32, device=node_feats.device)
-                self._zeros_index = cache
-            index = cache
-        else:
-            index = node_attrs.argmax(dim=-1).to(torch.int32)
+        # Fold the one-hot argmax by the contraction's element count. For the
+        # element-agnostic product (``num_elements == 1``) every atom takes row
+        # 0; for the per-element product the argmax is already in
+        # ``[0, num_elements)``, so the modulo is the identity. ``num_elements``
+        # is a plain int set in ``__init__``, so torch.compile folds it into a
+        # constant and this stays a single branch-free kernel.
+        index = node_attrs.argmax(dim=-1).to(torch.int32) % self.num_elements
         out = self.symmetric_contractions(node_feats.flatten(1), index)
         out = self.linear(out)
         if self.use_sc and sc is not None:

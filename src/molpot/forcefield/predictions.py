@@ -1,4 +1,4 @@
-"""ClassIPredictions — Class-I model path → the per-task prediction mapping.
+"""ForceFieldPredictions — Class-I model path → the per-task prediction mapping.
 
 A **force field** is the set of parameters of a fixed algebraic expression for the
 potential energy of a molecule as a function of its atomic positions. **Class-I** is
@@ -9,7 +9,7 @@ between non-bonded atoms. Here the parameters are not looked up in a discrete
 atom-type table — they are *predicted* from the covalent graph (which atom is bonded
 to which) by a neural model, so the whole force field is differentiable.
 
-:class:`~molpot.forcefield.ClassicalIMM` produces a filled
+:class:`~molpot.forcefield.Parameterizer` produces a filled
 :class:`~molpot.forcefield.ForceField`; the Class-I task losses consume a plain
 mapping keyed ``energy`` / ``forces`` / ``hessian`` / ``q`` (``q`` = per-atom partial
 charges). This module is that one hop and nothing else — it evaluates no new
@@ -59,11 +59,11 @@ from typing import Protocol
 import torch
 from tensordict import TensorDict
 
-from molpot.forcefield.classical_imm import ClassicalIMM
 from molpot.forcefield.container import ForceField
+from molpot.forcefield.parameterizer import Parameterizer
 from molpot.forcefield.potentials import Potentials
 
-__all__ = ["ClassIPredictions"]
+__all__ = ["ForceFieldPredictions"]
 
 
 class _HessianDerivation(Protocol):
@@ -85,8 +85,9 @@ _EnergyStep = Callable[[TensorDict, Potentials, dict[str, torch.Tensor]], None]
 _ChargeStep = Callable[[ForceField, dict[str, torch.Tensor]], None]
 
 
-class ClassIPredictions:
-    """Map one Class-I model plus a batch onto the predictions one task declares.
+class ForceFieldPredictions:
+    """Map one :class:`~molpot.forcefield.Parameterizer` plus a batch onto
+    the predictions one task declares.
 
     ``keys`` is the task's prediction contract and is fixed at construction:
     ``__init__`` turns it into a call plan, and :meth:`__call__` walks that plan
@@ -111,8 +112,8 @@ class ClassIPredictions:
     kernels are out of scope.
 
     Args:
-        model: Class-I parameterization; ``model(batch)`` returns the filled
-            :class:`~molpot.forcefield.ForceField`.
+        model: :class:`~molpot.forcefield.Parameterizer`; ``model(batch)``
+            returns the filled :class:`~molpot.forcefield.ForceField`.
         keys: Predictions this task declares, a subset of
             :attr:`SUPPORTED_KEYS`, each declared once.
         hessian_derivation: Cartesian Hessian derivation
@@ -123,7 +124,8 @@ class ClassIPredictions:
     Attributes:
         SUPPORTED_KEYS: The four predictions a task may declare —
             ``("energy", "forces", "hessian", "q")``.
-        model: The Class-I parameterization passed at construction.
+        model: The :class:`~molpot.forcefield.Parameterizer` passed at
+            construction.
         keys: The declared keys in declaration order — exactly the keys
             :meth:`__call__` returns.
         hessian_derivation: The injected Hessian derivation, or ``None`` when
@@ -135,7 +137,7 @@ class ClassIPredictions:
             ``charge_model``; ``"hessian"`` is declared without a derivation.
 
     Example:
-        >>> predictions = ClassIPredictions(model, keys=("energy", "forces"))  # doctest: +SKIP
+        >>> predictions = ForceFieldPredictions(model, keys=("energy", "forces"))  # doctest: +SKIP
         >>> out = predictions(batch)  # doctest: +SKIP
         >>> sorted(out)  # doctest: +SKIP
         ['energy', 'forces']
@@ -145,7 +147,7 @@ class ClassIPredictions:
 
     def __init__(
         self,
-        model: ClassicalIMM,
+        model: Parameterizer,
         *,
         keys: Sequence[str],
         hessian_derivation: _HessianDerivation | None = None,
@@ -167,7 +169,7 @@ class ClassIPredictions:
         if "q" in declared and model.charge_model is None:
             raise ValueError(
                 'keys declares "q" but model.charge_model is None; '
-                "build ClassicalIMM(..., charge_model=AtomicChargeModel(...))"
+                "build Parameterizer(..., charge_model=AtomicChargeModel(...))"
             )
         if "hessian" in declared and hessian_derivation is None:
             raise ValueError(
@@ -431,4 +433,4 @@ class ClassIPredictions:
         return q
 
     def __repr__(self) -> str:
-        return f"ClassIPredictions(model={type(self.model).__name__}, keys={self.keys})"
+        return f"ForceFieldPredictions(model={type(self.model).__name__}, keys={self.keys})"

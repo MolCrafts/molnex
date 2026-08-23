@@ -13,13 +13,16 @@ class LJParameterHead(nn.Module):
     """Predict per-atom Lennard-Jones parameters from node features.
 
     Maps node-level features to positive epsilon (well depth) and
-    sigma (zero-crossing distance) via a small MLP with softplus output.
+    sigma (zero-crossing distance) via a small MLP whose outputs are
+    sigmoid-bounded to ``[min, max]`` so ``(σ/r)¹²`` can never overflow.
 
     Args:
         feature_dim: Input feature dimension.
         hidden_dim: Hidden layer dimension.
         min_epsilon: Minimum epsilon floor.
+        max_epsilon: Maximum epsilon ceiling.
         min_sigma: Minimum sigma floor.
+        max_sigma: Maximum sigma ceiling.
     """
 
     def __init__(
@@ -27,11 +30,19 @@ class LJParameterHead(nn.Module):
         feature_dim: int,
         hidden_dim: int = 64,
         min_epsilon: float = 1e-4,
+        max_epsilon: float = 1.0,
         min_sigma: float = 1e-4,
+        max_sigma: float = 5.0,
     ):
         super().__init__()
+        if max_epsilon <= min_epsilon:
+            raise ValueError(f"max_epsilon {max_epsilon} must exceed min_epsilon {min_epsilon}")
+        if max_sigma <= min_sigma:
+            raise ValueError(f"max_sigma {max_sigma} must exceed min_sigma {min_sigma}")
         self.min_epsilon = min_epsilon
+        self.max_epsilon = max_epsilon
         self.min_sigma = min_sigma
+        self.max_sigma = max_sigma
         self.mlp = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim, dtype=config.ftype),
             nn.SiLU(),
@@ -50,8 +61,10 @@ class LJParameterHead(nn.Module):
             Dict with ``"epsilon"`` ``(N,)`` and ``"sigma"`` ``(N,)``.
         """
         raw = self.mlp(node_features)
-        epsilon = F.softplus(raw[:, 0]) + self.min_epsilon
-        sigma = F.softplus(raw[:, 1]) + self.min_sigma
+        epsilon = self.min_epsilon + (self.max_epsilon - self.min_epsilon) * torch.sigmoid(
+            raw[:, 0]
+        )
+        sigma = self.min_sigma + (self.max_sigma - self.min_sigma) * torch.sigmoid(raw[:, 1])
         return {"epsilon": epsilon, "sigma": sigma}
 
 

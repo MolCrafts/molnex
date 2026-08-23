@@ -42,6 +42,23 @@ class TargetSchema:
 DEFAULT_TARGET_SCHEMA = TargetSchema()
 
 
+def _as_sample_dicts(samples: Sequence[Any]) -> list[dict]:
+    """Expand FrameCollections; pass pre-collate dicts through."""
+    from molix.store.frame_sample import FrameSample
+
+    out: list[dict] = []
+    for sample in samples:
+        if isinstance(sample, dict):
+            out.append(sample)
+            continue
+        for item in sample:
+            if isinstance(item, dict):
+                out.append(item)
+            else:
+                out.append(FrameSample(item).as_dict())
+    return out
+
+
 @dataclass(frozen=True)
 class MoleculeCollator:
     """Picklable callable that packs heterogeneous molecules into one batch.
@@ -55,8 +72,8 @@ class MoleculeCollator:
 
     target_schema: TargetSchema = DEFAULT_TARGET_SCHEMA
 
-    def __call__(self, samples: list[dict]) -> TensorDict:
-        return collate_molecules(samples, self.target_schema)
+    def __call__(self, samples: Sequence[Any]) -> TensorDict:
+        return collate_molecules(_as_sample_dicts(samples), self.target_schema)
 
 
 # ---------------------------------------------------------------------------
@@ -144,32 +161,33 @@ def _collate_valence_family(
             "atomi": Long[N], "atomj": Long[N], "atomk": Long[N], "type"?: Long[N]
         }
 
-    All-or-none: every sample must carry the family or none may. Atom-index
-    columns (``atomi``/``atomj``/``atomk``/``atoml``) are shifted by the
-    sample's atom offset; optional ``type`` is concatenated without offset.
+    Samples that do not carry the family contribute zero terms (e.g. a
+    molecule with no angle). Atom-index columns
+    (``atomi``/``atomj``/``atomk``/``atoml``) are shifted by the sample's
+    atom offset; optional ``type`` is concatenated without offset.
 
     Returns:
         Nested :class:`~tensordict.TensorDict` with ``batch_size=[N_terms]``,
         or ``None`` when no sample carries the family.
 
     Raises:
-        ValueError: mixed presence, missing required columns, or length mismatch.
+        ValueError: missing required columns or length mismatch.
         TypeError: family value is not a mapping of tensors.
     """
     present = [_sample_has_valence(s, family) for s in samples]
     if not any(present):
         return None
-    if not all(present):
-        raise ValueError(
-            f"{family!r} must be present in all samples or none (got presence={present})."
-        )
 
     cols: dict[str, list[torch.Tensor]] = {c: [] for c in required}
     optional_lists: dict[str, list[torch.Tensor]] = {c: [] for c in _VALENCE_OPTIONAL}
     have_optional = {c: True for c in _VALENCE_OPTIONAL}
 
     for sample, offset in zip(samples, atom_offsets):
-        block = sample[family]
+        block = sample.get(family)
+        if not _sample_has_valence(sample, family):
+            for col in required:
+                cols[col].append(torch.zeros(0, dtype=torch.long))
+            continue
         if not isinstance(block, Mapping):
             raise TypeError(
                 f"sample[{family!r}] must be a mapping of column tensors, "
@@ -216,12 +234,14 @@ def _collate_valence_family(
 
 
 def collate_molecules(
-    samples: list[dict],
+    samples: Sequence[Any],
     target_schema: TargetSchema = DEFAULT_TARGET_SCHEMA,
 ) -> TensorDict:
     """Collate molecule samples into a nested TensorDict.
 
-    Each sample is a plain dict with at least ``Z`` and ``pos`` keys.
+    Each item is a pre-collate dict or a :data:`~molpy.FrameCollection`.
+    FrameCollections are expanded to one dict per frame. Each dict has at
+    least ``Z`` and ``pos`` keys.
     Optional: ``edge_index``, ``edge_diff``, ``edge_dist``, ``targets``,
     flat ``bond_index`` / ``bond_types``, and nested valence blocks
     ``angles`` / ``propers`` / ``impropers`` with 1-D atom-index columns
@@ -243,13 +263,14 @@ def collate_molecules(
     for optional kernel-local stacks).
 
     Args:
-        samples: List of single-molecule sample dicts.
+        samples: FrameCollections or pre-collate sample dicts.
         target_schema: Declares which targets are graph-level vs atom-level.
 
     Returns:
         Nested ``TensorDict`` with ``atoms``, ``edges``, ``graphs`` namespaces
         and optional ``bonds`` / ``angles`` / ``propers`` / ``impropers``.
     """
+    samples = _as_sample_dicts(samples)
     if not samples:
         raise ValueError("Cannot collate an empty sample list")
 

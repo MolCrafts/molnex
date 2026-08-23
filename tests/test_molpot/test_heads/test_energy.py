@@ -64,3 +64,12 @@ class TestAtomicReferenceEnergy:
         )
 
         assert head.atomic_energies.dtype == torch.float64
+
+    def test_pooled_sums_e0_per_graph(self):
+        head = AtomicReferenceEnergy(
+            atomic_energies=[0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0],
+        )
+        z = torch.tensor([8, 1, 1, 1])
+        batch = torch.tensor([0, 0, 0, 1])
+        out = head.pooled(z, batch, num_graphs=2)
+        assert torch.allclose(out, torch.tensor([9.0, 2.0]))

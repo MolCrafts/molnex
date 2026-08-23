@@ -7,7 +7,6 @@ Hard-coded goldens (OpenMM §19.4 identity + math.atan2, 2026-08-13):
 * ``(k,γ)=(2,0) → (a,b)=(2.0, 0.0)``
 * ``(k,γ)=(1.5, π) → (a,b)=(-1.5, 0.0)``
 * ``(a,b)=(0.6, 0.8) → (k,γ)=(1.0, 0.9272952180016123)`` at atol 1e-12
-* ``project`` of ``(a,b)=(0, 0.4)`` n=1 raises ``ValueError``
 
     capture: PYTHONPATH=src python regressions/universal-class-i-02-fourier.py
     date: 2026-08-13
@@ -20,7 +19,6 @@ import sys
 
 import torch
 
-from molpot.forcefield import ClassicalIMM, ClassIForceField, OPLSForceField
 from molpot.ir.bags import ProperTorsionBag
 
 
@@ -37,26 +35,7 @@ def main() -> int:
     if not torch.allclose(bag.phase.reshape(-1), g_ref, atol=1e-12):
         raise AssertionError(f"phase mismatch: {bag.phase}")
 
-    source = ClassIForceField().with_params(
-        bonds={"k": torch.ones(1), "r0": torch.ones(1)},
-        angles={"k": torch.ones(1), "theta0": torch.ones(1)},
-        propers={
-            "a": torch.zeros(1, 1),
-            "b": torch.full((1, 1), 0.4),
-            "periodicity": torch.tensor([1], dtype=torch.long),
-            "idivf": torch.ones(1),
-        },
-    )
-    model = ClassicalIMM(torch.nn.Identity(), forcefield=ClassIForceField())
-    try:
-        model.project(OPLSForceField(), source=source)
-    except ValueError as exc:
-        msg = str(exc).lower()
-        if "sin" not in msg and "phase" not in msg:
-            raise AssertionError(f"unexpected project error: {exc}") from exc
-    else:
-        raise AssertionError("project should fail on sine residual")
-    print("universal-class-i-02-fourier: mapping goldens + sine fail-loud OK")
+    print("universal-class-i-02-fourier: mapping goldens OK")
     return 0
 
 

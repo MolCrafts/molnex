@@ -3,13 +3,21 @@ from typing import Any
 import torch
 
 from molpot.potentials.base import BasePotential
+from molpot.potentials.bonded_forces import angle_theta_grad
+from molpot.potentials.geom import bond_cos_sin
 
 
 class AngleHarmonic(BasePotential):
     """Harmonic angle bending potential.
 
-    Energy formula:
+    Energy formula (AMBER / OpenMM table convention)::
+
         E = 0.5 * k * (theta - theta0)^2
+
+    LAMMPS ``angle_style harmonic`` writes the same polynomial as
+    ``E = K (θ − θ0)²`` and states that the usual 1/2 is included in ``K``,
+    so ``K_LAMMPS = k / 2``. ``θ = atan2(sin, cos)`` with the C^infty
+    ``(cos, sin)`` of :func:`~molpot.potentials.geom.bond_cos_sin`.
 
     Parameters are stored as type-indexed vectors:
         k[angle_type]: Force constant
@@ -101,15 +109,8 @@ class AngleHarmonic(BasePotential):
         # Compute vectors from central atom
         vec_ji = pos_i - pos_j  # [num_angles, 3]
         vec_jk = pos_k - pos_j  # [num_angles, 3]
-
-        # Normalize vectors
-        vec_ji_norm = vec_ji / (torch.norm(vec_ji, dim=-1, keepdim=True) + 1e-8)
-        vec_jk_norm = vec_jk / (torch.norm(vec_jk, dim=-1, keepdim=True) + 1e-8)
-
-        # Compute angle using dot product
-        cos_theta = torch.sum(vec_ji_norm * vec_jk_norm, dim=-1)  # [num_angles]
-        cos_theta = torch.clamp(cos_theta, -1.0, 1.0)  # Avoid numerical issues
-        theta = torch.acos(cos_theta)  # [num_angles]
+        cos_theta, sin_theta = bond_cos_sin(vec_ji, vec_jk)
+        theta = torch.atan2(sin_theta, cos_theta)
 
         # Look up parameters for each angle
         k_angles = self.k[angle_types]  # [num_angles]
@@ -127,6 +128,68 @@ class AngleHarmonic(BasePotential):
             total_energy = energy_per_angle.sum()
 
         return total_energy
+
+    def energy_forces(self, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        """Energy and analytic forces ``F = -∂E/∂pos`` in one pass.
+
+        ``E = ½k(θ − θ0)²`` with the C^∞ angle of
+        :func:`~molpot.potentials.geom.bond_cos_sin`; forces use the exact
+        gradient of that angle (:func:`angle_theta_grad`) with
+        ``F_i = −g ∂θ/∂u``, ``F_k = −g ∂θ/∂v``, ``F_j = −(F_i + F_k)`` where
+        ``g = k(θ − θ0)``.
+
+        Args:
+            **kwargs: ``pos`` ``[N, 3]``, ``angle_index`` ``[3, M]``,
+                ``angle_types`` ``[M]``, and optional ``term_batch`` /
+                ``num_graphs``.
+
+        Returns:
+            ``(energy, forces)`` — energy ``(B,)`` (or scalar) and forces
+            ``[N, 3]``.
+        """
+        pos = kwargs.get("pos")
+        angle_index = kwargs.get("angle_index")
+        angle_types = kwargs.get("angle_types")
+        term_batch = kwargs.get("term_batch")
+        num_graphs = kwargs.get("num_graphs")
+        if pos is None or angle_index is None or angle_types is None:
+            raise ValueError("AngleHarmonic.energy_forces requires pos, angle_index, angle_types.")
+
+        if angle_index.size(1) == 0:
+            energy = torch.zeros(
+                (int(num_graphs),) if term_batch is not None else (),
+                device=pos.device,
+                dtype=pos.dtype,
+            )
+            return energy, pos.new_zeros((pos.shape[0], 3))
+
+        pos_i = pos[angle_index[0]]
+        pos_j = pos[angle_index[1]]
+        pos_k = pos[angle_index[2]]
+        u = pos_i - pos_j
+        v = pos_k - pos_j
+        cos_theta, sin_theta = bond_cos_sin(u, v)
+        theta = torch.atan2(sin_theta, cos_theta)
+        k_angles = self.k[angle_types]
+        theta0_angles = self.theta0[angle_types]
+        displacement = theta - theta0_angles
+        energy_per_angle = 0.5 * k_angles * displacement**2
+
+        du, dv = angle_theta_grad(u, v)
+        g = k_angles * displacement
+        force_on_i = -(g.unsqueeze(-1) * du)
+        force_on_k = -(g.unsqueeze(-1) * dv)
+        force_on_j = -(force_on_i + force_on_k)
+        forces = pos.new_zeros((pos.shape[0], 3))
+        forces.index_add_(0, angle_index[0], force_on_i)
+        forces.index_add_(0, angle_index[1], force_on_j)
+        forces.index_add_(0, angle_index[2], force_on_k)
+
+        if term_batch is not None:
+            energy = energy_per_angle.new_zeros(int(num_graphs))
+            energy.index_add_(0, term_batch.long(), energy_per_angle)
+            return energy, forces
+        return energy_per_angle.sum(), forces
 
     def __repr__(self) -> str:
         num_types = len(self.k)

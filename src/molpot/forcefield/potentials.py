@@ -253,11 +253,13 @@ class Potentials(BasePotential):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Energy and forces from one energy evaluation.
 
-        Same canonical backend as :meth:`calc_forces`
-        (:func:`~molpot.derivation.force.autograd_forces_from_energy`), reusing
-        the single energy graph instead of evaluating it twice. Positions are
-        re-attached as a fresh ``requires_grad`` leaf exactly as in
-        :meth:`calc_forces`.
+        Bonded terms (bond / angle / proper / improper) and the LJ term
+        evaluate their closed form on detached positions and return both
+        energy and analytic forces, so no position leaf — and no
+        ``create_graph`` double backward — is paid for them. Coulomb (open
+        ``1/r`` or periodic Ewald/PME/P3M) shares the molpot kernel stack and
+        has no cheap closed form, so it falls back to the autograd backend on
+        a fresh position leaf.
 
         Args:
             system: Batch / mapping carrying ``atoms.pos`` and the topology.
@@ -268,9 +270,94 @@ class Potentials(BasePotential):
             in the ForceField's unit convention (``units="real"`` default:
             kcal/mol and kcal mol⁻¹ Å⁻¹).
         """
-        p = self._pos(system, pos).detach().requires_grad_(True)
-        energy = self.calc_energy(system, pos=p)
-        return energy, autograd_forces_from_energy(energy, p)
+        p = self._pos(system, pos).detach()
+        device = p.device
+        dtype = p.dtype
+        num_graphs = self._num_graphs(system)
+        batched = num_graphs > 1
+        zero = torch.zeros((num_graphs,) if batched else (), device=device, dtype=dtype)
+        n_atoms = p.shape[0]
+        atom_batch = self._atom_batch(system, n_atoms, device)
+
+        energy = zero
+        forces = p.new_zeros((n_atoms, 3))
+        ff = self.forcefield
+
+        if ff.bond_style() is not None:
+            bond_index = self._bond_index(system)
+            if self.bond is not None and bond_index is not None and bond_index.size(1) > 0:
+                e, f = self.bond.energy_forces(
+                    pos=p,
+                    bond_index=bond_index,
+                    bond_types=self._identity_types(bond_index.size(1), device),
+                    term_batch=atom_batch[bond_index[0]] if batched else None,
+                    num_graphs=num_graphs,
+                )
+            else:
+                e, f = zero, p.new_zeros((n_atoms, 3))
+            energy = energy + e
+            forces = forces + f
+
+        if ff.angle_style() is not None:
+            angle_index = self._angle_index(system)
+            if self.angle is not None and angle_index is not None and angle_index.size(1) > 0:
+                e, f = self.angle.energy_forces(
+                    pos=p,
+                    angle_index=angle_index,
+                    angle_types=self._identity_types(angle_index.size(1), device),
+                    term_batch=atom_batch[angle_index[0]] if batched else None,
+                    num_graphs=num_graphs,
+                )
+            else:
+                e, f = zero, p.new_zeros((n_atoms, 3))
+            energy = energy + e
+            forces = forces + f
+
+        if ff.dihedral_style() is not None:
+            proper_index = self._proper_index(system)
+            if self.proper is not None and proper_index is not None and proper_index.size(1) > 0:
+                e, f = self.proper.energy_forces(
+                    pos=p,
+                    proper_index=proper_index,
+                    proper_types=self._identity_types(proper_index.size(1), device),
+                    term_batch=atom_batch[proper_index[0]] if batched else None,
+                    num_graphs=num_graphs,
+                )
+            else:
+                e, f = zero, p.new_zeros((n_atoms, 3))
+            energy = energy + e
+            forces = forces + f
+
+        if ff.improper_style() is not None:
+            improper_index = self._improper_index(system)
+            if (
+                self.improper is not None
+                and improper_index is not None
+                and improper_index.size(1) > 0
+            ):
+                e, f = self.improper.energy_forces(
+                    pos=p,
+                    improper_index=improper_index,
+                    improper_types=self._identity_types(improper_index.size(1), device),
+                    term_batch=atom_batch[improper_index[0]] if batched else None,
+                    num_graphs=num_graphs,
+                )
+            else:
+                e, f = zero, p.new_zeros((n_atoms, 3))
+            energy = energy + e
+            forces = forces + f
+
+        if self.lj is not None:
+            e, f = self._lj_energy_forces(system, p, zero, n_atoms)
+            energy = energy + e
+            forces = forces + f
+
+        if self.coulomb_open is not None or self.coulomb_periodic is not None:
+            e, f = self._coulomb_energy_forces(system, p, zero, n_atoms)
+            energy = energy + e
+            forces = forces + f
+
+        return energy, forces
 
     def term_energies(
         self,
@@ -360,6 +447,8 @@ class Potentials(BasePotential):
                     pos=p,
                     improper_index=improper_index,
                     improper_types=self._identity_types(n, device),
+                    term_batch=atom_batch[improper_index[0]] if batched else None,
+                    num_graphs=num_graphs,
                 )
             else:
                 terms["impropers"] = zero
@@ -404,8 +493,8 @@ class Potentials(BasePotential):
         cutoff: float | None,
         scale_kind: str,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        n = pos.shape[0]
-        atom_batch = self._atom_batch(system, n, pos.device)
+        """Half neighbor list ``(edge_index, dist, scales)`` for one pair term."""
+        atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
         cell = self._cell(system)
         edges = self._namespace(system, "edges")
         built = self._neighbors.build(
@@ -416,7 +505,7 @@ class Potentials(BasePotential):
         edge_index, dist = built
         scales = self._pair_scales(
             system,
-            n,
+            pos.shape[0],
             edge_index,
             pos.device,
             pos.dtype,
@@ -436,6 +525,9 @@ class Potentials(BasePotential):
         if params is None:
             return zero
         epsilon, sigma = params
+        # Keep LJ on its own cutoff list. Reusing an unlimited Coulomb half-list
+        # forced ``_pair_scales`` (and distance storage) onto all intramolecular
+        # pairs even though LJ only needs ``r < cutoff``.
         pairs = self._scaled_pairs(system, pos, cutoff=self.lj.cutoff, scale_kind="lj")
         if pairs is None:
             return zero
@@ -443,6 +535,35 @@ class Potentials(BasePotential):
         num_graphs = self._num_graphs(system)
         atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
         return self.lj.energy(
+            edge_index=edge_index,
+            distances=dist,
+            epsilon=epsilon,
+            sigma=sigma,
+            scales=scales,
+            edge_batch=atom_batch[edge_index[:, 0]] if num_graphs > 1 else None,
+            num_graphs=num_graphs,
+        )
+
+    def _lj_energy_forces(
+        self,
+        system: Any,
+        pos: torch.Tensor,
+        zero: torch.Tensor,
+        n_atoms: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.lj is not None
+        params = self._lj_params()
+        if params is None:
+            return zero, pos.new_zeros((n_atoms, 3))
+        epsilon, sigma = params
+        pairs = self._scaled_pairs(system, pos, cutoff=self.lj.cutoff, scale_kind="lj")
+        if pairs is None:
+            return zero, pos.new_zeros((n_atoms, 3))
+        edge_index, dist, scales = pairs
+        num_graphs = self._num_graphs(system)
+        atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
+        return self.lj.energy_forces(
+            positions=pos,
             edge_index=edge_index,
             distances=dist,
             epsilon=epsilon,
@@ -506,6 +627,36 @@ class Potentials(BasePotential):
             scales=scales,
         )
 
+    def _coulomb_energy_forces(
+        self,
+        system: Any,
+        pos: torch.Tensor,
+        zero: torch.Tensor,
+        n_atoms: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        q = self._charges()
+        if q is None:
+            return zero, pos.new_zeros((n_atoms, 3))
+        if q.shape[0] != pos.shape[0]:
+            raise ValueError(f"charge length {q.shape[0]} != n_atoms {pos.shape[0]}")
+
+        # Open Coulomb and Ewald/PME/P3M all share the molpot Coulomb kernel
+        # stack; neither exposes a cheap closed form for forces, so the single
+        # force path is one autograd backward on a fresh position leaf.
+        grad_enabled = torch.is_grad_enabled()
+        with torch.enable_grad():
+            p_nb = pos.detach().requires_grad_(True)
+            nb_energy = self._coulomb_energy(system, p_nb, zero)
+            create_graph = grad_enabled and q.requires_grad
+            nb_forces = (
+                autograd_forces_from_energy(nb_energy, p_nb, create_graph=create_graph)
+                if nb_energy.requires_grad
+                else pos.new_zeros((n_atoms, 3))
+            )
+        # ``create_graph=False`` freed ``nb_energy``'s graph inside the grad call;
+        # detach it so a later ``loss.backward()`` never touches the freed graph.
+        return nb_energy if create_graph else nb_energy.detach(), nb_forces
+
     def _atom_batch(self, system: Any, n: int, device: torch.device) -> torch.Tensor:
         atoms = self._namespace(system, "atoms")
         if atoms is not None:
@@ -518,11 +669,37 @@ class Potentials(BasePotential):
         graphs = self._namespace(system, "graphs")
         if isinstance(graphs, TensorDict) and graphs.batch_size:
             return int(graphs.batch_size[0])
+        if isinstance(graphs, (Mapping, TensorDict)):
+            num_atoms = self._ns_tensor(graphs, "num_atoms")
+            if num_atoms is not None and num_atoms.ndim >= 1:
+                return int(num_atoms.shape[0])
         atoms = self._namespace(system, "atoms")
         atom_batch = self._ns_tensor(atoms, "batch")
         if atom_batch is not None and atom_batch.numel():
-            return int(atom_batch.max().item()) + 1
+            return int(atom_batch[-1].detach().to("cpu")) + 1
         return 1
+
+    @staticmethod
+    def _undirected_pair_keys(index: torch.Tensor, n_atoms: int) -> torch.Tensor:
+        """Map endpoint index ``(2|3|4, M)`` → undirected key ``min*n+max``."""
+        lo = torch.minimum(index[0].long(), index[-1].long())
+        hi = torch.maximum(index[0].long(), index[-1].long())
+        return lo * n_atoms + hi
+
+    @classmethod
+    def _mask_pairs_in(
+        cls,
+        pair_keys: torch.Tensor,
+        term_index: torch.Tensor,
+        n_atoms: int,
+    ) -> torch.Tensor:
+        """Boolean mask of ``pair_keys`` that appear as undirected ``term_index`` ends."""
+        keys = torch.unique(cls._undirected_pair_keys(term_index, n_atoms))
+        if keys.numel() == 0:
+            return torch.zeros(pair_keys.shape[0], dtype=torch.bool, device=pair_keys.device)
+        keys, _ = torch.sort(keys)
+        idx = torch.searchsorted(keys, pair_keys).clamp(max=keys.numel() - 1)
+        return keys[idx] == pair_keys
 
     def _pair_scales(
         self,
@@ -535,14 +712,11 @@ class Potentials(BasePotential):
         scale_kind: str,
     ) -> torch.Tensor:
         scale = torch.ones(edge_index.shape[0], device=device, dtype=dtype)
+        if edge_index.numel() == 0:
+            return scale
         pair_lo = torch.minimum(edge_index[:, 0], edge_index[:, 1])
         pair_hi = torch.maximum(edge_index[:, 0], edge_index[:, 1])
         pair_keys = pair_lo * n + pair_hi
-
-        def matches(index: torch.Tensor) -> torch.Tensor:
-            lo = torch.minimum(index[0].long(), index[-1].long())
-            hi = torch.maximum(index[0].long(), index[-1].long())
-            return torch.isin(pair_keys, lo * n + hi)
 
         if scale_kind == "q":
             s12, s13, s14 = (
@@ -558,13 +732,13 @@ class Potentials(BasePotential):
             )
         bond_index = self._bond_index(system)
         if bond_index is not None and bond_index.numel() > 0:
-            scale[matches(bond_index)] = s12
+            scale[self._mask_pairs_in(pair_keys, bond_index, n)] = s12
         angle_index = self._angle_index(system)
         if angle_index is not None and angle_index.numel() > 0:
-            scale[matches(angle_index)] = s13
+            scale[self._mask_pairs_in(pair_keys, angle_index, n)] = s13
         proper_index = self._proper_index(system)
         if proper_index is not None and proper_index.numel() > 0:
-            proper_mask = matches(proper_index)
+            proper_mask = self._mask_pairs_in(pair_keys, proper_index, n)
             scale[proper_mask & (scale == 1.0)] = s14
         return scale
 

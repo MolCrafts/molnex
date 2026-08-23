@@ -390,6 +390,11 @@ class FrameLabelTable:
         """The bounded task dictionary; index ``c`` is the label of task code ``c``."""
         return self._task_names
 
+    @property
+    def group_names(self) -> tuple[str, ...] | None:
+        """The bounded group dictionary, or ``None`` when groups render as codes."""
+        return self._group_names
+
     def task_name(self, code: int) -> str:
         """Render one task code as its label.
 
@@ -579,13 +584,13 @@ class TaskMixtureBatchSampler:
     insertion order), each drawing one unit permutation, and the slot
     order is one final permutation of the apportioned task multiset. The
     whole plan is built eagerly in ``__init__``, so ``len()`` and
-    iteration are free and repeatable. The instance holds only the
-    dataset reference, the budgets, the mixture, the computed
-    ``list[list[int]]`` and the parallel per-batch task-name tuple — no
-    packer, no mmap-backed count vector and **no parent-space
-    (``len(dataset)``-long) label table**, which is what keeps a sampler
-    rebuilt every epoch cheap at large frame counts — so it pickles to an
-    identical plan. Reseed per epoch with
+    iteration are free and repeatable. The instance holds the dataset
+    reference, the budgets, the mixture, the computed ``list[list[int]]``,
+    the parallel per-batch task-name tuple, and (for :meth:`reseed`) the
+    split indices plus their split-space integer task/group code columns
+    and the two short bounded dictionaries — no parent-space ``(F,)``
+    label table, no packer, and no mmap-backed count vector. Reseed per
+    epoch with
     ``seed + epoch`` (the convention
     :class:`~molix.batch.datamodule.DataModule` already uses) to reshuffle
     between epochs while keeping epoch *k* re-derivable on resume.
@@ -731,7 +736,24 @@ class TaskMixtureBatchSampler:
         self._mixture = dict(mixture)
         self._batches_per_epoch = batches_per_epoch
         self._seed = seed
-        self._batches, self._batch_tasks = self._compute_batches(tuple(indices), table)
+        # Kept so :meth:`reseed` can rebuild the plan in place without the
+        # caller re-supplying the split: the split indices, their
+        # split-space integer (task, group) codes, and the two short
+        # bounded dictionaries — never the parent-space ``(F,)`` label
+        # table, which only exists here.
+        self._indices = tuple(indices)
+        split_task_codes, split_group_codes = table.codes_at(self._indices)
+        self._task_codes = tuple(split_task_codes)
+        self._group_codes = tuple(split_group_codes)
+        self._task_names = table.task_names
+        self._group_names = table.group_names
+        self._batches, self._batch_tasks = self._compute_batches(
+            self._indices,
+            self._task_codes,
+            self._group_codes,
+            self._task_names,
+            self._group_names,
+        )
 
     @staticmethod
     def _validate_sizes(
@@ -844,7 +866,11 @@ class TaskMixtureBatchSampler:
 
     @staticmethod
     def _bucket_units(
-        indices: tuple[int, ...], table: FrameLabelTable
+        indices: tuple[int, ...],
+        task_codes: Sequence[int],
+        group_codes: Sequence[int],
+        task_names: Sequence[str],
+        group_names: Sequence[str] | None,
     ) -> dict[str, list[tuple[str, list[int]]]]:
         """Bucket *indices* into sampling units keyed by ``(task, group)`` codes.
 
@@ -855,22 +881,25 @@ class TaskMixtureBatchSampler:
 
         Args:
             indices: The split's dataset indices, walked in the given order.
-            table: Per-frame ``(task, group)`` identity of the parent
-                index space.
+            task_codes: Split-space task codes, parallel to *indices*.
+            group_codes: Split-space group codes, parallel to *indices*.
+            task_names: Bounded task dictionary; ``task_names[c]`` labels
+                task code ``c``.
+            group_names: Optional bounded group dictionary; when ``None``
+                a group code renders as ``str(code)``.
 
         Returns:
             Task label → its units as ``(group label, member frame
             indices)`` pairs, both levels in first-appearance order.
         """
-        task_codes, group_codes = table.codes_at(indices)
         unit_frames: dict[tuple[int, int], list[int]] = {}
         for index, task_code, group_code in zip(indices, task_codes, group_codes, strict=True):
             unit_frames.setdefault((task_code, group_code), []).append(index)
 
         task_units: dict[str, list[tuple[str, list[int]]]] = {}
         for (task_code, group_code), frames in unit_frames.items():
-            task_units.setdefault(table.task_name(task_code), []).append(
-                (table.group_label(group_code), frames)
+            task_units.setdefault(task_names[task_code], []).append(
+                (str(group_code) if group_names is None else group_names[group_code], frames)
             )
         return task_units
 
@@ -1027,15 +1056,23 @@ class TaskMixtureBatchSampler:
         return plan, tuple(plan_tasks), shortfall
 
     def _compute_batches(
-        self, indices: tuple[int, ...], table: FrameLabelTable
+        self,
+        indices: tuple[int, ...],
+        task_codes: Sequence[int],
+        group_codes: Sequence[int],
+        task_names: Sequence[str],
+        group_names: Sequence[str] | None,
     ) -> tuple[list[list[int]], tuple[str, ...]]:
         """Build the whole epoch plan eagerly, and own the warning policy.
 
         Args:
             indices: The split's dataset indices.
-            table: Per-frame ``(task, group)`` identity of the parent
-                index space. Read here and dropped — nothing
-                ``len(dataset)``-long reaches the instance state.
+            task_codes: Split-space task codes, parallel to *indices*.
+            group_codes: Split-space group codes, parallel to *indices*.
+            task_names: Bounded task dictionary; ``task_names[c]`` labels
+                task code ``c``.
+            group_names: Optional bounded group dictionary, ``None`` to
+                render group codes as ``str(code)``.
 
         Returns:
             ``(plan, plan_tasks)`` — the epoch's batches as
@@ -1043,7 +1080,9 @@ class TaskMixtureBatchSampler:
             batch single-task by construction, and the parallel tuple of
             their task names.
         """
-        task_units = self._bucket_units(indices, table)
+        task_units = self._bucket_units(
+            indices, task_codes, group_codes, task_names, group_names
+        )
         self._validate_tasks(task_units)
 
         generator = make_generator(self._seed)
@@ -1088,6 +1127,26 @@ class TaskMixtureBatchSampler:
         shorter realized length when a forced length exhausted a task.
         """
         return len(self._batches)
+
+    def reseed(self, seed: int) -> None:
+        """Recompute the epoch plan in place for a new *seed*.
+
+        Lets a cached DataLoader keep its persistent worker pool alive
+        across epochs: the sampler is consumed in the main process, so
+        mutating ``_batches`` is visible to the next ``iter(loader)``.
+        No-op when *seed* is unchanged (e.g. the first epoch).
+        """
+        seed = int(seed)
+        if seed == self._seed:
+            return
+        self._seed = seed
+        self._batches, self._batch_tasks = self._compute_batches(
+            self._indices,
+            self._task_codes,
+            self._group_codes,
+            self._task_names,
+            self._group_names,
+        )
 
     def batches_per_task(self) -> dict[str, int]:
         """Count the planned batches carried by each task.

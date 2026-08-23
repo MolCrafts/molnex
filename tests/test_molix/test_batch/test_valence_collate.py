@@ -10,7 +10,6 @@ Packed COO ``angle_index [3, N]`` is intentionally NOT the collate schema.
 
 from __future__ import annotations
 
-import pytest
 import torch
 from tensordict import TensorDict
 
@@ -140,12 +139,15 @@ def test_propers_and_impropers_columns_with_center_first():
     assert list(batch["impropers"].batch_size) == [2]
 
 
-def test_valence_all_or_none_raises():
-    """Mixed presence of a valence family across samples raises ValueError."""
+def test_valence_mixed_presence_pads_missing():
+    """A molecule without a valence family contributes zero terms."""
     m1 = _mol(3, angles={"atomi": [0], "atomj": [1], "atomk": [2]})
     m2 = _mol(2)  # no angles
-    with pytest.raises(ValueError, match="angles"):
-        collate_molecules([m1, m2])
+    batch = collate_molecules([m1, m2])
+    assert batch["angles"]["atomi"].tolist() == [0]
+    assert batch["angles"]["atomj"].tolist() == [1]
+    assert batch["angles"]["atomk"].tolist() == [2]
+    assert list(batch["angles"].batch_size) == [1]
 
 
 def test_empty_angles_namespace():

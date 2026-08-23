@@ -472,26 +472,28 @@ def _extract_valence_family(
     Returns:
         ``(bucket, ptr)`` where *bucket* maps column name → concatenated
         tensor and *ptr* is the per-sample cumsum over ``N_terms``, or
-        ``({}, None)`` if no sample carries the family.
+        ``({}, None)`` if no sample carries the family. Samples without the
+        family contribute zero terms.
 
     Raises:
-        ValueError: mixed presence, missing required column, or length mismatch.
+        ValueError: missing required column or length mismatch.
     """
     lead_key = f"{family}.{required[0]}"
     present = [lead_key in f and f[lead_key] is not None for f in flats]
     if not any(present):
         return {}, None
-    if not all(present):
-        raise ValueError(
-            f"{family!r} must be present in all samples or none (got presence={present})."
-        )
 
     col_lists: dict[str, list[torch.Tensor]] = {c: [] for c in required}
     opt_lists: dict[str, list[torch.Tensor]] = {c: [] for c in _VALENCE_OPTIONAL}
     have_optional = {c: True for c in _VALENCE_OPTIONAL}
     n_terms: list[int] = []
 
-    for f in flats:
+    for f, has_family in zip(flats, present):
+        if not has_family:
+            for col in required:
+                col_lists[col].append(torch.zeros(0, dtype=torch.long))
+            n_terms.append(0)
+            continue
         lengths: dict[str, int] = {}
         for col in required:
             key = f"{family}.{col}"
