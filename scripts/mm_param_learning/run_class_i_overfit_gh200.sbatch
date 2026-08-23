@@ -25,7 +25,12 @@ export CARGO_TARGET_DIR="${MOLCRAFTS}/molrs/molrs-python/target-aarch64"
 export PATH="${CARGO_HOME}/bin:${PATH}"
 GCC_LIBDIR="$(dirname "$(g++ -print-file-name=libstdc++.so)")"
 export LD_LIBRARY_PATH="${GCC_LIBDIR}:${LD_LIBRARY_PATH:-}"
-export PYTHONPATH="${MOLNEX}:${MOLCRAFTS}/molhub/src:${MOLCRAFTS}/molpy/src:${PYTHONPATH:-}"
+MOLPY_SRC="${MOLCRAFTS}/.worktrees/molpy-0.13.1/src"
+if [ ! -d "${MOLPY_SRC}" ]; then
+  echo "=== create molpy-0.13.1 worktree (molpy dev checkout is stale at 0.7.0) ==="
+  git -C "${MOLCRAFTS}/molpy" worktree add --detach "${MOLCRAFTS}/.worktrees/molpy-0.13.1" master
+fi
+export PYTHONPATH="${MOLNEX}:${MOLCRAFTS}/molhub/src:${MOLPY_SRC}:${PYTHONPATH:-}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
 cd "${MOLNEX}"
@@ -46,7 +51,14 @@ if [ -z "${WHEEL}" ]; then
 else
   echo "=== reuse ${WHEEL} ==="
 fi
-"${PY}" -m pip install --force-reinstall --no-deps "${WHEEL}"
+WHEEL_VERSION="$(basename "${WHEEL}" | sed -E 's/^molcrafts_molrs-([0-9.]+)-.*/\1/')"
+INSTALLED_VERSION="$("${PY}" -c 'from importlib.metadata import version; print(version("molcrafts-molrs"))' 2>/dev/null || echo none)"
+if [ "${INSTALLED_VERSION}" != "${WHEEL_VERSION}" ]; then
+  echo "=== install molrs ${WHEEL_VERSION} (installed ${INSTALLED_VERSION}) ==="
+  "${PY}" -m pip install --force-reinstall --no-deps "${WHEEL}"
+else
+  echo "=== molrs ${WHEEL_VERSION} already installed; skip reinstall ==="
+fi
 "${PY}" -c "import lmdb" 2>/dev/null || "${PY}" -m pip install -q lmdb
 
 SIZE="${1:-small}"
