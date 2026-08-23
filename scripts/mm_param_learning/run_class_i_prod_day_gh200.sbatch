@@ -27,7 +27,12 @@ export CARGO_TARGET_DIR="${MOLCRAFTS}/molrs/molrs-python/target-aarch64"
 export PATH="${CARGO_HOME}/bin:${PATH}"
 GCC_LIBDIR="$(dirname "$(g++ -print-file-name=libstdc++.so)")"
 export LD_LIBRARY_PATH="${GCC_LIBDIR}:${LD_LIBRARY_PATH:-}"
-export PYTHONPATH="${MOLNEX}:${MOLCRAFTS}/molhub/src:${MOLCRAFTS}/molpy/src:${PYTHONPATH:-}"
+MOLPY_SRC="${MOLCRAFTS}/.worktrees/molpy-0.13.1/src"
+if [ ! -d "${MOLPY_SRC}" ]; then
+  echo "=== create molpy-0.13.1 worktree (molpy dev checkout is stale at 0.7.0) ==="
+  git -C "${MOLCRAFTS}/molpy" worktree add --detach "${MOLCRAFTS}/.worktrees/molpy-0.13.1" master
+fi
+export PYTHONPATH="${MOLNEX}:${MOLCRAFTS}/molhub/src:${MOLPY_SRC}:${PYTHONPATH:-}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 # 4m extract is ~20 GiB; home is 30 GiB. Keep the cache on nobackup.
 export MOLHUB_HOME="${MOLHUB_HOME:-${MOLCRAFTS}/workspaces/molhub-home}"
