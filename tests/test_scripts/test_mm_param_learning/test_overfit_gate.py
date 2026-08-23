@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import torch
-from scripts.mm_param_learning.overfit_gate import _model_with_device_retry
+from scripts.mm_param_learning.overfit_gate import _force_ok, _model_with_device_retry
 
 
 class _StubFit:
@@ -41,3 +41,10 @@ def test_other_accelerator_error_is_not_retried():
     else:
         raise AssertionError("expected AcceleratorError to propagate")
     assert fit.calls == 1
+
+
+def test_force_ok_requires_drop_and_scale():
+    """Force overfit needs a Huber drop and predicted |F| at least half of ref."""
+    assert _force_ok(final=9.0, initial=14.0, pred_med=8.0, ref_med=14.0)
+    assert not _force_ok(final=14.0, initial=14.0, pred_med=8.0, ref_med=14.0)
+    assert not _force_ok(final=9.0, initial=14.0, pred_med=2.0, ref_med=14.0)
