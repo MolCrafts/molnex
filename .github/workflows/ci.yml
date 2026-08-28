@@ -51,4 +51,3 @@ jobs:
         timeout-minutes: 20
       - name: Run tests
         run: pytest tests/ -q -p no:cacheprovider -n auto --dist worksteal
-        continue-on-error: true

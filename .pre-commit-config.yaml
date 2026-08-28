@@ -3,6 +3,7 @@
 # tox remains in [project.optional-dependencies] dev for optional local isolation.
 
 default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit, pre-push]
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -31,7 +32,7 @@ repos:
 
       - id: ci-test
         name: "CI test (same as ci.yml)"
-        entry: bash -c 'pytest tests/ -q -p no:cacheprovider -n auto --dist worksteal || true'
+        entry: bash -c 'pytest tests/ -q -p no:cacheprovider -n auto --dist worksteal'
         language: system
         pass_filenames: false
         always_run: true
