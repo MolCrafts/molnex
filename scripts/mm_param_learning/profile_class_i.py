@@ -24,9 +24,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from molhub.dataset.omol25 import OMol25
 from torch.profiler import ProfilerActivity, profile, schedule
 
-from molhub.dataset.omol25 import OMol25
 from molpot.heads.energy import AtomicReferenceEnergy
 from scripts.mm_param_learning.class_i_fit import (
     ClassIFit,

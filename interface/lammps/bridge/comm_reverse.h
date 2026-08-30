@@ -4,26 +4,18 @@
 // `comm->reverse_comm` protocol, expressed over a `LammpsView`.
 //
 // Two free functions, not a type: zero state, zero configuration. A class here
-// would be a function in a wrapper, and — worse — would invite the private
-// buffer that must NOT exist (see the defect note below).
+// would be a function in a wrapper, and — worse — would invite a private
+// contribution buffer nothing needs.
 //
-// KNOWN DEFECT, DELIBERATELY PRESERVED VERBATIM (routed to
-// `lammps-iface-05-pbc`). These functions pack and unpack the **shared**
-// `atom->f`, not a contribution buffer this pair style owns. Combined with the
-// pair-level `comm->reverse_comm(this)` call at `pair_molnex.cpp:351-352` (the
-// pack itself is `:359-382` in the spec's line references), that
-// double-communicates ghost contributions when `force->newton` is on:
-// `Verlet::run` issues a *global* reverse comm inside the integration step and
-// delivers the same ghost force to its owner a second time, so forces come out
-// too large by an amount that scales with the ghost count. Either half alone is
-// harmless; it is the pair of them that is the bug, which is why the decision
-// belongs to one spec (`lammps-iface-05-pbc`, whose fix is to drop the
-// pair-level self-call and let the integrator's global reverse comm do the
-// reduction) and not to this relocation. `lammps-iface-03-graph` moves the code
-// unchanged: introducing a private ghost-force buffer here would smuggle that
-// fix into a behaviour-preserving migration, and the component is therefore
-// named for what it does today (`comm_reverse`, not `CommBuf`) so the name
-// endorses no repair that has not happened.
+// These functions pack and unpack the **shared** `atom->f` — deliberately.
+// Reduction ownership (settled by `lammps-iface-05-pbc`): the integrator's
+// *global* reverse comm inside `Verlet::run` delivers ghost forces to their
+// owners, so a pair-level `comm->reverse_comm(this)` on top would double-count
+// them under `newton on`. `CutoffGraphImpl` therefore returns a constant
+// `EvalResult::needs_pair_reverse_comm = false` and the facade's call site
+// stays dormant. The seam — these two functions plus the facade forwarding —
+// is kept for a future contract family that must reduce mid-compute; such an
+// impl owns the newton bookkeeping that makes flipping the flag correct.
 //
 // Range validation is likewise absent on purpose. `n`, `first` and `list` come
 // from LAMMPS' comm layer, which owns those ranges and derives them from the

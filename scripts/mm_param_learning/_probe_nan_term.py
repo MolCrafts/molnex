@@ -49,9 +49,7 @@ def main() -> None:
         batch = batch.to(device)
         model.zero_grad(set_to_none=True)
         out = model(batch)
-        finite = bool(
-            torch.isfinite(out["energy"]).all() and torch.isfinite(out["forces"]).all()
-        )
+        finite = bool(torch.isfinite(out["energy"]).all() and torch.isfinite(out["forces"]).all())
         print(f"step={step} finite={finite}", flush=True)
         if finite:
             (out["energy"].square().mean() + out["forces"].square().mean()).backward()
@@ -74,7 +72,8 @@ def main() -> None:
             bi = pots._bond_index(batch)
             if bi is not None and bi.size(1) > 0:
                 e, f = pots.bond.energy_forces(
-                    pos=pos, bond_index=bi,
+                    pos=pos,
+                    bond_index=bi,
                     bond_types=pots._identity_types(bi.size(1), device),
                     term_batch=atom_batch[bi[0]] if batched else None,
                     num_graphs=num_graphs,
@@ -84,7 +83,8 @@ def main() -> None:
             ai = pots._angle_index(batch)
             if ai is not None and ai.size(1) > 0:
                 e, f = pots.angle.energy_forces(
-                    pos=pos, angle_index=ai,
+                    pos=pos,
+                    angle_index=ai,
                     angle_types=pots._identity_types(ai.size(1), device),
                     term_batch=atom_batch[ai[0]] if batched else None,
                     num_graphs=num_graphs,
@@ -94,7 +94,8 @@ def main() -> None:
             pi = pots._proper_index(batch)
             if pi is not None and pi.size(1) > 0:
                 e, f = pots.proper.energy_forces(
-                    pos=pos, proper_index=pi,
+                    pos=pos,
+                    proper_index=pi,
                     proper_types=pots._identity_types(pi.size(1), device),
                     term_batch=atom_batch[pi[0]] if batched else None,
                     num_graphs=num_graphs,
@@ -104,7 +105,8 @@ def main() -> None:
             ii = pots._improper_index(batch)
             if ii is not None and ii.size(1) > 0:
                 e, f = pots.improper.energy_forces(
-                    pos=pos, improper_index=ii,
+                    pos=pos,
+                    improper_index=ii,
                     improper_types=pots._identity_types(ii.size(1), device),
                     term_batch=atom_batch[ii[0]] if batched else None,
                     num_graphs=num_graphs,

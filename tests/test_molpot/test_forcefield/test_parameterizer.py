@@ -128,9 +128,7 @@ def _oplsaa_heads(feature_dim: int = 4) -> dict[str, nn.Module]:
     return {
         "bond_head": BondParamHead(feature_dim=feature_dim, hidden_dim=8),
         "angle_head": AngleParamHead(feature_dim=feature_dim, hidden_dim=8),
-        "proper_head": ProperTorsionParamHead(
-            feature_dim=feature_dim, hidden_dim=8, form="opls"
-        ),
+        "proper_head": ProperTorsionParamHead(feature_dim=feature_dim, hidden_dim=8, form="opls"),
         "improper_head": ImproperParamHead(feature_dim=feature_dim, hidden_dim=8),
         "atom_head": LJParameterHead(feature_dim=feature_dim, hidden_dim=8),
         "charge_model": _charge_model(feature_dim),

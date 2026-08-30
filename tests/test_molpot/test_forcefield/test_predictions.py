@@ -275,14 +275,14 @@ class TestForceFieldPredictions:
         derivation = _CountingHessianDerivation()
         batch = _two_atom_bond_batch()
 
-        ForceFieldPredictions(
-            model, keys=("energy", "forces"), hessian_derivation=derivation
-        )(batch)
+        ForceFieldPredictions(model, keys=("energy", "forces"), hessian_derivation=derivation)(
+            batch
+        )
         assert derivation.calls == 0
 
-        ForceFieldPredictions(
-            model, keys=("energy", "hessian"), hessian_derivation=derivation
-        )(batch)
+        ForceFieldPredictions(model, keys=("energy", "hessian"), hessian_derivation=derivation)(
+            batch
+        )
         assert derivation.calls == 1
 
     def test_q_only_skips_potentials_assembly(self, monkeypatch: pytest.MonkeyPatch) -> None:

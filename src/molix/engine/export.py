@@ -463,40 +463,29 @@ def export_for_lammps(
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
+    pt2_path = export_dir / f"{name}.pt2"
     if cuda_graph:
         if n_atoms is None or e_max is None:
             raise ValueError("cuda_graph=True requires n_atoms and e_max")
-        wrapper = StaticForward(model.to(device), n_atoms, e_max, cutoff)
-        # static example: N atoms, E_max edges (all valid here is fine for tracing).
-        gen = torch.Generator().manual_seed(0)
-        pos = (
-            (torch.rand(n_atoms, 3, generator=gen, dtype=torch.float64) - 0.5) * 0.45 * cutoff
-        ).to(dtype=resolved_dtype, device=device)
-        sp = sorted(set(species))
-        Z = torch.tensor([sp[i % len(sp)] for i in range(n_atoms)], dtype=torch.long, device=device)
-        ei = torch.randint(0, n_atoms, (e_max, 2), generator=gen, dtype=torch.long).to(device)
-        edge_mask = torch.ones(e_max, dtype=torch.bool, device=device)
-        local_mask = torch.ones(n_atoms, dtype=torch.bool, device=device)
-        _check_partitionable(wrapper, (Z, pos, ei, edge_mask), local_mask)
-        # fixed shapes → no dynamic_shapes; load run_single_threaded + CUDA graph in C++.
-        Exporter(wrapper).export_pretraced(
-            (Z, pos, ei, edge_mask, local_mask), export_dir / f"{name}.pt2", dynamic_shapes=None
+        _export_cuda_graph(
+            model,
+            pt2_path,
+            species=species,
+            cutoff=cutoff,
+            dtype=resolved_dtype,
+            device=device,
+            n_atoms=n_atoms,
+            e_max=e_max,
         )
     else:
-        wrapper = EngineForward(model.to(device), adapter)
-        Z, pos, edge_index = _example_system(sorted(set(species)), cutoff, resolved_dtype, device)
-        local_mask = torch.ones(Z.shape[0], dtype=torch.bool, device=device)
-        _check_partitionable(wrapper, (Z, pos, edge_index), local_mask)
-        # N (atoms) and E (edges) vary across MD frames → mark dynamic so one .pt2
-        # serves every step. min=2 dodges torch.export's 0/1-size specialization.
-        n_dim = torch.export.Dim("n_atoms", min=2, max=1 << 20)
-        e_dim = torch.export.Dim("n_edges", min=1, max=1 << 24)
-        # local_mask is per-atom, so it rides the same dynamic dim as Z / pos.
-        dynamic_shapes = ({0: n_dim}, {0: n_dim}, {0: e_dim}, {0: n_dim})
-        Exporter(wrapper).export_pretraced(
-            (Z, pos, edge_index, local_mask),
-            export_dir / f"{name}.pt2",
-            dynamic_shapes=dynamic_shapes,
+        _export_dynamic(
+            model,
+            pt2_path,
+            adapter=adapter,
+            species=species,
+            cutoff=cutoff,
+            dtype=resolved_dtype,
+            device=device,
         )
 
     lammps_meta = _lammps_meta_block(
@@ -522,6 +511,62 @@ def export_for_lammps(
         f"dtype={meta['lammps']['model_dtype']}, species={meta['lammps']['species']})"
     )
     return export_dir
+
+
+def _export_cuda_graph(
+    model: nn.Module,
+    pt2_path: Path,
+    *,
+    species: list[int],
+    cutoff: float,
+    dtype: torch.dtype,
+    device: str,
+    n_atoms: int,
+    e_max: int,
+) -> None:
+    """Trace the fixed-shape 5-input ``StaticForward`` wrapper to *pt2_path*."""
+    wrapper = StaticForward(model.to(device), n_atoms, e_max, cutoff)
+    # static example: N atoms, E_max edges (all valid here is fine for tracing).
+    gen = torch.Generator().manual_seed(0)
+    pos = ((torch.rand(n_atoms, 3, generator=gen, dtype=torch.float64) - 0.5) * 0.45 * cutoff).to(
+        dtype=dtype, device=device
+    )
+    sp = sorted(set(species))
+    Z = torch.tensor([sp[i % len(sp)] for i in range(n_atoms)], dtype=torch.long, device=device)
+    ei = torch.randint(0, n_atoms, (e_max, 2), generator=gen, dtype=torch.long).to(device)
+    edge_mask = torch.ones(e_max, dtype=torch.bool, device=device)
+    local_mask = torch.ones(n_atoms, dtype=torch.bool, device=device)
+    _check_partitionable(wrapper, (Z, pos, ei, edge_mask), local_mask)
+    # fixed shapes → no dynamic_shapes; load run_single_threaded + CUDA graph in C++.
+    Exporter(wrapper).export_pretraced(
+        (Z, pos, ei, edge_mask, local_mask), pt2_path, dynamic_shapes=None
+    )
+
+
+def _export_dynamic(
+    model: nn.Module,
+    pt2_path: Path,
+    *,
+    adapter: EngineAdapter | str,
+    species: list[int],
+    cutoff: float,
+    dtype: torch.dtype,
+    device: str,
+) -> None:
+    """Trace the dynamic-shape 4-input ``EngineForward`` wrapper to *pt2_path*."""
+    wrapper = EngineForward(model.to(device), adapter)
+    Z, pos, edge_index = _example_system(sorted(set(species)), cutoff, dtype, device)
+    local_mask = torch.ones(Z.shape[0], dtype=torch.bool, device=device)
+    _check_partitionable(wrapper, (Z, pos, edge_index), local_mask)
+    # N (atoms) and E (edges) vary across MD frames → mark dynamic so one .pt2
+    # serves every step. min=2 dodges torch.export's 0/1-size specialization.
+    n_dim = torch.export.Dim("n_atoms", min=2, max=1 << 20)
+    e_dim = torch.export.Dim("n_edges", min=1, max=1 << 24)
+    # local_mask is per-atom, so it rides the same dynamic dim as Z / pos.
+    dynamic_shapes = ({0: n_dim}, {0: n_dim}, {0: e_dim}, {0: n_dim})
+    Exporter(wrapper).export_pretraced(
+        (Z, pos, edge_index, local_mask), pt2_path, dynamic_shapes=dynamic_shapes
+    )
 
 
 def _infer_dtype(model: nn.Module) -> torch.dtype:

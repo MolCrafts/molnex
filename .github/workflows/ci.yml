@@ -25,9 +25,11 @@ jobs:
           export CMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
           pip install -e ".[dev]" --no-build-isolation -v
         timeout-minutes: 20
-      # format --check deferred until tree is fully formatted
-      - run: ruff check src/ tests/
+      - run: ruff check src/ tests/ scripts/ regressions/
+      - run: ruff format --check src/ tests/ scripts/ regressions/
       - name: Type check
+        # Advisory until the ~460 pre-existing ty diagnostics under src/ are
+        # burned down; do not add new ones (reviewers read this log).
         run: ty check src/
         continue-on-error: true
 

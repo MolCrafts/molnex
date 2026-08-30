@@ -1080,9 +1080,7 @@ class TaskMixtureBatchSampler:
             batch single-task by construction, and the parallel tuple of
             their task names.
         """
-        task_units = self._bucket_units(
-            indices, task_codes, group_codes, task_names, group_names
-        )
+        task_units = self._bucket_units(indices, task_codes, group_codes, task_names, group_names)
         self._validate_tasks(task_units)
 
         generator = make_generator(self._seed)

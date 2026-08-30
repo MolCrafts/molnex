@@ -1,6 +1,6 @@
 // Copyright (c) MolNex contributors. SPDX-License-Identifier: MIT
 //
-// See `comm_reverse.h` for the design notes and the preserved-defect record.
+// See `comm_reverse.h` for the design notes and reduction-ownership rationale.
 
 #include "bridge/comm_reverse.h"
 

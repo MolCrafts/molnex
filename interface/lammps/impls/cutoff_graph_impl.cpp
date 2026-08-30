@@ -156,9 +156,10 @@ void CutoffGraphImpl::coeff(const std::vector<std::string>& tokens, int ntypes) 
 }
 
 void CutoffGraphImpl::init(const LammpsRunEnv& env) {
-  // (1) Single domain. Carried over verbatim from pair_molnex.cpp:261-263,
-  // INCLUDING the fact that it only fires with newton_pair on: tightening it is
-  // a behaviour change and belongs to lammps-iface-05-pbc, not to a migration.
+  // (1) Single domain, early diagnostic. The hard guard is compute()'s
+  // zero-ghost refusal; this catches the common misconfiguration (multi-rank
+  // run of a non-periodic export) at setup, where the message can still name
+  // the remedy.
   if (!supports_pbc_ && env.newton_pair == 1 && env.nprocs > 1) {
     throw std::runtime_error(
         "pair_molnex without supports_pbc assumes a single domain; run on 1 "
@@ -198,11 +199,9 @@ void CutoffGraphImpl::init(const LammpsRunEnv& env) {
   // reduction happens only `if (force->newton)`. With newton off nothing
   // reduces them, and every ghost's contribution — the cross-term of a local
   // site energy with respect to a periodic image's coordinates — is silently
-  // discarded. The two decisions are one and must be changed together.
-  //
-  // This TIGHTENS what lammps-iface-04-facade carried over verbatim, which is
-  // what that spec deferred to this one. The non-periodic condition above is
-  // untouched: newton off on several ranks still passes there.
+  // discarded. The two decisions are one and must be changed together. The
+  // non-periodic condition above is independent: newton off on several ranks
+  // still passes there.
   if (supports_pbc_ && env.newton_pair != 1) {
     throw std::runtime_error(
         "pair_molnex with supports_pbc requires newton on: ghost forces are "
@@ -279,10 +278,9 @@ EvalResult CutoffGraphImpl::compute(const LammpsView& view) {
         "Z table arrives with pair_coeff)");
   }
 
-  // Migrated from pair_molnex.cpp:283-287, ahead of everything else: a
-  // local-only export handed ghosts would evaluate a system silently missing
-  // its periodic images, so nothing is staged and no force lands until this has
-  // passed.
+  // Ahead of everything else: a local-only export handed ghosts would evaluate
+  // a system silently missing its periodic images, so nothing is staged and no
+  // force lands until this has passed.
   if (!supports_pbc_ && view.nghost != 0) {
     throw std::runtime_error(
         "pair_molnex (supports_pbc=false) requires no ghost atoms (single "
@@ -309,8 +307,8 @@ EvalResult CutoffGraphImpl::compute(const LammpsView& view) {
   }
 
   // Graph atom count: local-only when supports_pbc is false, local + ghost
-  // otherwise (pair_molnex.cpp:292). The guard above is what makes the two
-  // agree on the local-only path — there, nall() IS nlocal.
+  // otherwise. The guard above is what makes the two agree on the local-only
+  // path — there, nall() IS nlocal.
   const int n_graph = supports_pbc_ ? view.nall() : view.nlocal;
 
   // WHICH SITES THIS RANK OWNS, as the model's `local_mask` input. LAMMPS lays
