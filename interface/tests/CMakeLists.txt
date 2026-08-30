@@ -46,12 +46,14 @@ foreach(_t IN LISTS _TESTS)
 endforeach()
 
 
-# Fixture-backed contract case: parses the schema-v2 meta emitted by
+# Fixture-backed contract case: parses the schema-v3 meta emitted by
 # generate_fixtures.py via the production _lammps_meta_block — ties the Python
-# LAMMPS_META_SCHEMA to the C++ expected version at test time (spec 01 ac-013).
-add_test(NAME contract_reads_generated_v2_fixture
-         COMMAND test_lammps_contract contract_reads_generated_v2_fixture)
-set_tests_properties(contract_reads_generated_v2_fixture PROPERTIES
+# LAMMPS_META_SCHEMA to the C++ expected version at test time (spec 01 ac-013,
+# spec 05 ac-015). The fixture FILENAME carries the version too, so a one-sided
+# bump fails to open the file rather than parsing a stale one.
+add_test(NAME contract_reads_generated_v3_fixture
+         COMMAND test_lammps_contract contract_reads_generated_v3_fixture)
+set_tests_properties(contract_reads_generated_v3_fixture PROPERTIES
   FIXTURES_REQUIRED molnex_interface_fixtures
   ENVIRONMENT "MOLNEX_INTERFACE_FIXTURE_DIR=${_FIXTURE_DIR}"
 )
@@ -101,6 +103,7 @@ set(_LAMMPS_CONTRACT_TESTS
   contract_input_arity_mismatch_throws
   contract_species_int_array
   contract_species_rejects_non_integer
+  contract_requires_receptive_field_layers
 )
 
 foreach(_t IN LISTS _LAMMPS_CONTRACT_TESTS)
@@ -192,12 +195,17 @@ if(TARGET molnex_lammps_bridge)
     bridge_graph_empty_neighbor_list
     bridge_graph_reuses_buffers_across_calls
     bridge_graph_rejects_n_graph_over_nall
+    bridge_graph_ghost_closure
+    bridge_graph_order_shuffle_invariance
+    bridge_graph_sorts_only_when_contract_requires
     bridge_comm_pack_reverse_layout
     bridge_comm_unpack_accumulates
     bridge_pad_edges
     bridge_read_model_outputs_rejects_short_virial
     bridge_read_model_outputs_absent_virial_undefined
     bridge_read_model_outputs_ignores_virial_when_unsupported
+    bridge_read_model_outputs_requires_atomic_energy
+    bridge_read_model_outputs_six_atoms_no_transpose
     bridge_graphed_exec_cpu_only_ctor_throws
   )
 
@@ -211,7 +219,7 @@ if(TARGET molnex_lammps_bridge)
   # Fixture-backed execution cases: they need the three-input graph-potential
   # package generate_fixtures.py exports, so they carry FIXTURES_REQUIRED and
   # the fixture-dir environment variable — same wiring as
-  # contract_reads_generated_v2_fixture. bridge_dynamic_exec_matches_reference
+  # contract_reads_generated_v3_fixture. bridge_dynamic_exec_matches_reference
   # is CPU-only and belongs in CI; bridge_graphed_exec_matches_dynamic needs a
   # GPU and is excluded there by an explicit -E filter rather than by a runtime
   # skip.
@@ -273,13 +281,20 @@ if(TARGET molnex_lammps_impls)
     impl_compute_n_graph_with_ghost
     impl_compute_rejects_ghost_without_pbc
     impl_virial_present_and_absent
-    impl_reports_pair_reverse_comm_condition
+    impl_reports_no_pair_reverse_comm
+    impl_energy_sums_locals_only
+    impl_e_atom_locals_only
+    impl_compute_reasserts_newton_invariant
     impl_coeff_token_count
     impl_coeff_rejects_trailing_garbage
     impl_coeff_rejects_empty_token
     impl_coeff_rejects_out_of_range
     impl_init_rejects_special_bonds_on_molecular
     impl_init_single_domain_condition
+    impl_init_rejects_newton_off_with_pbc
+    impl_init_rejects_insufficient_ghost_cutoff
+    impl_init_accepts_strictly_local_default_cutoff
+    impl_init_accepts_nonpbc_multilayer_default_cutoff
     impl_reverse_comm_forwards
   )
 
@@ -293,7 +308,7 @@ if(TARGET molnex_lammps_impls)
   # Fixture-backed dispatch cases: ContractImpl::for_contract takes a
   # ModelRunner&, so both need a real exported package — the TinyLinear CPU
   # fixture, which is only held and never run (the dispatch's job is to
-  # construct). Same wiring as contract_reads_generated_v2_fixture.
+  # construct). Same wiring as contract_reads_generated_v3_fixture.
   set(_CONTRACT_IMPL_FIXTURE_TESTS
     registry_returns_cutoff_graph_impl
     registry_rejects_fixed_graph

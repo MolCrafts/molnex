@@ -61,8 +61,15 @@ struct NeighborNeeds {
   ///
   /// Describes ONLY the neighbour-list request made to LAMMPS. It carries no
   /// statement about force reduction — that is
-  /// `EvalResult::needs_pair_reverse_comm`, and the two move in opposite
-  /// directions in lammps-iface-05-pbc, which is why they cannot be merged.
+  /// `EvalResult::needs_pair_reverse_comm`, and the two moved in OPPOSITE
+  /// directions in lammps-iface-05-pbc (this one to true for a periodic
+  /// contract, that one to a constant false), which is the demonstration of why
+  /// they could never have been merged.
+  ///
+  /// True means LAMMPS also gives ghost atoms neighbour lists of their own, and
+  /// appends them to `ilist` as `LammpsView::gnum` extra centres. Without it,
+  /// the ghost->local edges a many-body model needs at its first layer are
+  /// simply not in the list.
   bool ghost;
   /// Neighbour cutoff in angstrom, from the export meta.
   double cutoff;
@@ -88,11 +95,15 @@ struct NeighborNeeds {
 /// itself issue `comm->reverse_comm(this)`** — not "were ghost forces
 /// scattered", and not anything about `NeighborNeeds::ghost`, from which it is
 /// independent. The facade reads it as a mechanical branch on a returned value
-/// and reads no capability flag of its own. This spec's impl answers "yes when
-/// there are ghosts"; lammps-iface-05-pbc answers "never, because the
-/// integrator's own reduction owns it" — the same field and the same call site,
-/// a different answer, no surgery on the protocol layer. A future contract that
-/// scatters outside the newton-reduced integration fills it `true` again.
+/// and reads no capability flag of its own. lammps-iface-04-facade's impl
+/// answered "yes when there are ghosts"; lammps-iface-05-pbc answers "never,
+/// because the integrator's own reduction owns it" — the same field and the
+/// same call site, a different answer, and not one line of the protocol layer
+/// touched. That is the value the seam was kept for: a physically substantial
+/// change of reduction ownership cost zero facade edits. A future contract that
+/// scatters outside the newton-reduced integration fills it `true` again, and
+/// doing so is also the only thing that can re-activate
+/// `ContractImpl::pack_reverse` / `unpack_reverse`.
 ///
 /// `virial` is well-formed-or-undefined BY CONSTRUCTION: `read_model_outputs`
 /// (lammps-iface-03-graph) refuses anything that is not exactly six elements
@@ -101,14 +112,15 @@ struct NeighborNeeds {
 /// the whole presence test — there is no companion flag that could disagree
 /// with it.
 ///
-/// THERE IS ALSO NO `e_atom` OR PER-ATOM VIRIAL, and that too is a decision
-/// rather than an oversight: nothing in this spec can PRODUCE either (a model
-/// returns energy, forces and an optional global virial), and a field with no
-/// producer is as dead as one with no consumer. `compute pe/atom` and
-/// `compute stress/atom` are met by an explicit facade error instead of the
-/// silent zeros they used to get. lammps-iface-05-pbc, whose whole subject is
-/// the per-site energy sum, adds `e_atom` here WITH its producer — that arrival
-/// is the extension this design anticipates, not a reversal of this decision.
+/// `e_atom` ARRIVED WITH ITS PRODUCER, exactly as this struct's accretion rule
+/// requires. Before lammps-iface-05-pbc there was no field, because nothing
+/// could produce one: a model returned a scalar energy, and `compute pe/atom`
+/// was met with an explicit facade error rather than the silent zeros it used
+/// to get. Schema v3 makes per-site energies a mandatory model output — the
+/// partition energy is their local sum — so the producer exists and the field
+/// lands with it. That is the extension the earlier decision anticipated, not a
+/// reversal of it. A per-atom VIRIAL still has no producer and still has no
+/// field; `vflag_atom` remains an error.
 ///
 /// ACCRETION RULE (the same one `LammpsRunEnv` carries, stated on the struct
 /// most likely to be violated): every field of `EvalResult` is a per-step
@@ -121,9 +133,27 @@ struct NeighborNeeds {
 /// Every member is set on every path `CutoffGraphImpl::compute` can return
 /// through; there is no "left at whatever the default was" case.
 struct EvalResult {
-  /// Total energy of this evaluation, already converted to the active LAMMPS
-  /// unit style. The facade adds it to `eng_vdwl` and does nothing else to it.
+  /// Partition energy of this evaluation, already converted to the active
+  /// LAMMPS unit style. The facade adds it to `eng_vdwl` and does nothing else
+  /// to it.
+  ///
+  /// It is the sum of `e_atom`, i.e. of the LOCAL site energies only. Summing
+  /// over ghosts as well would add `sum_{i in G} E_i`, which is dominated by the
+  /// per-species constant offset and is therefore tens of eV per ghost — an
+  /// error that grows with the rank count and the cutoff, and that no
+  /// single-rank test can see.
   double e_total;
+  /// Per-atom energies, **length `nlocal`**, already converted.
+  ///
+  /// THE LENGTH IS THE CONTRACT, and it is `nlocal` rather than `nall`: only
+  /// atoms this rank owns get an entry, because only their site energies belong
+  /// to this rank's partition. The facade iterates THIS TENSOR'S OWN EXTENT when
+  /// `eflag_atom` is set and must not consult `atom->nlocal` for the bound — two
+  /// independent notions of "which atoms are local" would silently overrun or
+  /// under-count the moment they disagreed.
+  ///
+  /// A CPU float64 1-D tensor the caller owns, never a view of a model output.
+  at::Tensor e_atom;
   /// Global virial `(6,)` in `xx, yy, zz, xy, xz, yz` order, already converted
   /// — or an undefined tensor when this evaluation produced none.
   at::Tensor virial;
@@ -139,10 +169,17 @@ struct EvalResult {
 ///
 /// ACCRETION RULE (consumer-arrives): this struct carries only the globals some
 /// code READS TODAY. A later spec adding a field must land it in the same batch
-/// as the code that reads it — lammps-iface-05-pbc, for instance, will need the
-/// ghost cutoff for its D3.2 check, and that field arrives with that check, not
-/// before it. Written on the struct because this is exactly where a speculative
-/// "while we are here, let us also pass..." would go.
+/// as the code that reads it — `ghost_cutoff` and `skin` arrived with
+/// lammps-iface-05-pbc's fat-ghost check and not one batch earlier. Written on
+/// the struct because this is exactly where a speculative "while we are here,
+/// let us also pass..." would go.
+///
+/// EVERY FIELD IS A RAW SNAPSHOT. The facade transcribes LAMMPS' value and does
+/// not interpret it; the impl interprets and does not read LAMMPS. That split
+/// matters most for `ghost_cutoff`, whose meaning is conditional (see below):
+/// putting the interpretation in the facade would give one rule two
+/// implementations that could drift, and would grow back a semantic `if` in the
+/// layer that exists to have none.
 struct LammpsRunEnv {
   /// `force->newton_pair`: 1 when pairwise Newton's third law is on.
   int newton_pair;
@@ -156,6 +193,15 @@ struct LammpsRunEnv {
   const double* special_lj;
   /// `force->special_coul`, `(4,)`, same layout. Borrowed, never owned.
   const double* special_coul;
+  /// `comm->cutghostuser` in angstrom: the ghost cutoff the input script asked
+  /// for with `comm_modify cutoff`, RAW.
+  ///
+  /// **`0.0` means the user set none**, and LAMMPS then uses `cutoff + skin`.
+  /// That rule is applied inside `CutoffGraphImpl::init` and nowhere else —
+  /// this field is the number LAMMPS holds, not the number that is in force.
+  double ghost_cutoff;
+  /// `neighbor->skin` in angstrom: the neighbour-list skin, RAW.
+  double skin;
 };
 
 /// One runtime contract, implemented.
@@ -218,6 +264,23 @@ class ContractImpl {
 
   /// Pack the reverse-communication buffer for `[first, first + n)`.
   ///
+  /// NOT INVOKED ON THE CUTOFF-GRAPH CONTRACT, and that is a statement about
+  /// this moment rather than about the method. LAMMPS reaches these two
+  /// overrides through `Pair::pack_reverse_comm` / `unpack_reverse_comm`, and
+  /// those run only inside a `comm->reverse_comm(this)` that the pair style
+  /// itself issued. `CutoffGraphImpl` fills
+  /// `EvalResult::needs_pair_reverse_comm` with a constant false — the
+  /// integrator's own global reverse comm reduces ghost forces — so the facade's
+  /// call site never fires and neither does this.
+  ///
+  /// THE SINGLE RE-ENTRY ROUTE, and there is no second entrance: a contract that
+  /// fills `needs_pair_reverse_comm` with true re-activates the facade's
+  /// existing call site, and these overrides start being called again with no
+  /// edit to the facade at all. A fixed-graph or layer-wise-communication impl
+  /// that scatters ghost forces outside newton-reduced integration is the
+  /// expected such contract. They stay declared because a LAMMPS `Pair` must
+  /// provide them whether or not they are reached.
+  ///
   /// \param view   Borrowed LAMMPS atom arrays.
   /// \param n      Number of atoms in the range.
   /// \param first  Index of the first atom of the range.
@@ -227,6 +290,9 @@ class ContractImpl {
                            int first, double* buf) = 0;
 
   /// Accumulate a reverse-communication buffer onto the atoms named by `list`.
+  ///
+  /// Currently unexercised for the same reason, and re-enabled by the same
+  /// single route, as `pack_reverse` — see its docstring.
   ///
   /// \param view  Borrowed LAMMPS atom arrays; `f` is written in place.
   /// \param n     Number of atoms in `list`.

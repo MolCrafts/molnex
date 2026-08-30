@@ -1,9 +1,9 @@
 """Unit tests for the batch-schema helpers in molpot.derivation.protocol.
 
-Mirrors ``src/molpot/derivation/protocol.py``. Only the two helpers that own
-the ``graphs`` sub-TensorDict are covered here — :func:`ensure_graphs` (its
-shape) and :func:`write_energy` (the shape it asks for). The session
-side-channel and :func:`absorb_model_output` are exercised elsewhere.
+Mirrors ``src/molpot/derivation/protocol.py``. Three helpers are covered here:
+:func:`ensure_graphs` (its shape), :func:`write_energy` (the shape it asks for)
+and :func:`absorb_model_output` (which spelling of the per-atom energy it
+accepts). The session side-channel is exercised elsewhere.
 
 The contract under test is CLAUDE.md's post-collate schema: ``"graphs"`` is a
 ``TensorDict(batch_size=[B])`` for ``B`` graphs, the same shape the canonical
@@ -23,6 +23,7 @@ from tensordict import TensorDict
 from molpot.derivation.protocol import (
     ATOMIC_ENERGY_KEY,
     ENERGY_KEY,
+    absorb_model_output,
     ensure_graphs,
     write_energy,
 )
@@ -116,3 +117,70 @@ class TestWriteEnergyGraphShape:
             atomic_energy=atomic,
         )
         assert torch.equal(batch[ATOMIC_ENERGY_KEY], atomic)
+
+
+class TestAbsorbModelOutput:
+    """Target: :func:`molpot.derivation.protocol.absorb_model_output`.
+
+    The plain-dict branch used to read the bare string ``"atomic_energy"`` with
+    no constant behind it. A model returning a plain dict that spelled the key
+    differently had its per-atom energy dropped silently: ``.get`` returned
+    ``None`` and :func:`write_energy` skipped the write. That was a feature gap
+    while the per-atom energy was optional; from spec ``lammps-iface-05-pbc`` on
+    it is the *only* source of the LAMMPS partition energy, so a silent drop
+    becomes a silent zero energy on every rank.
+
+    The canonical flat spelling is therefore
+    :data:`molix.schema.ATOMIC_ENERGY_FLAT_KEY` — the flat alias of the nested
+    :data:`~molix.schema.ATOMIC_ENERGY_KEY`, and the only accepted one. It is
+    imported inside each test so only this class is red while it is missing.
+
+    Units: energy eV. Every expected value is a hard-coded literal.
+    """
+
+    ATOMIC = [-1.0, -2.0, -3.0]
+    TOTAL = -6.0
+
+    @classmethod
+    def _atomic(cls) -> torch.Tensor:
+        return torch.tensor(cls.ATOMIC, dtype=torch.float64)
+
+    @classmethod
+    def _total(cls) -> torch.Tensor:
+        return torch.tensor([cls.TOTAL], dtype=torch.float64)
+
+    def test_canonical_flat_key_is_written_to_the_nested_target(self):
+        from molix.schema import ATOMIC_ENERGY_FLAT_KEY
+
+        batch = _batch_with_atoms(3)
+        absorb_model_output(
+            batch, {"energy": self._total(), ATOMIC_ENERGY_FLAT_KEY: self._atomic()}
+        )
+        assert torch.equal(batch[ATOMIC_ENERGY_KEY], self._atomic())
+        assert torch.equal(batch[ENERGY_KEY], self._total())
+
+    def test_non_canonical_spelling_is_not_absorbed(self):
+        """A third spelling must not reach ``("atoms", "energy")`` — one name only."""
+        from molix.schema import ATOMIC_ENERGY_FLAT_KEY
+
+        assert "node_energies" != ATOMIC_ENERGY_FLAT_KEY
+        batch = _batch_with_atoms(3)
+        absorb_model_output(batch, {"energy": self._total(), "node_energies": self._atomic()})
+        assert "energy" not in batch["atoms"].keys()
+        assert torch.equal(batch[ENERGY_KEY], self._total())
+
+    def test_tensordict_branch_reads_the_nested_keys(self):
+        """Unchanged by v3: a TensorDict output is read at the nested keys.
+
+        Deliberately constant-free — this is the "did not regress" lock for the
+        branch the flat-alias fix does not touch, so it must stay green while
+        the two cases above are red.
+        """
+        out = TensorDict(
+            atoms=TensorDict(energy=self._atomic(), batch_size=[3]),
+            graphs=TensorDict(energy=self._total(), batch_size=[1]),
+            batch_size=[],
+        )
+        batch = absorb_model_output(_batch_with_atoms(3), out)
+        assert torch.equal(batch[ATOMIC_ENERGY_KEY], self._atomic())
+        assert torch.equal(batch[ENERGY_KEY], self._total())

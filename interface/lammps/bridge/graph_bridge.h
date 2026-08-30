@@ -13,6 +13,11 @@
 // mirror `src/molix/md/neighbors.py`, whose fixed-capacity live-range layout
 // (dead padding past `num_edges`) is a different contract that no LAMMPS
 // consumer asks for here.
+//
+// EDGE ORDER IS NOT PROMISED unconditionally. The default is the raw neighbour-
+// list order; `(source, target)` order is produced only for an export that
+// declares `requires_sorted_edges`. Anything downstream that needs an order
+// must obtain it through that declaration rather than by assuming one.
 
 #pragma once
 
@@ -29,21 +34,35 @@ namespace molnex::lammps_bridge {
 /// Builds the model's `edge_index` from a LAMMPS neighbour list, each step.
 class GraphBridge {
  public:
-  /// \param cutoff  Model cutoff in angstrom, from the export meta. Stored
-  ///                squared; every candidate pair is refiltered against it.
-  explicit GraphBridge(double cutoff);
+  /// \param cutoff                Model cutoff in angstrom, from the export
+  ///                              meta. Stored squared; every candidate pair is
+  ///                              refiltered against it.
+  /// \param requires_sorted_edges The export's declaration of whether it needs
+  ///                              rows in `(source, target)` order. Fixed at
+  ///                              construction because it is a property of the
+  ///                              model, not of a step; see `build`.
+  GraphBridge(double cutoff, bool requires_sorted_edges);
 
-  /// Collect, refilter and sort the cutoff graph over the first `n_graph` atoms.
+  /// Collect and refilter the cutoff graph over the first `n_graph` atoms.
   ///
-  /// Walks `view.ilist`, and for each centre `i` every masked neighbour
-  /// `view.neighbor(i, jj)`; drops neighbours at or past `n_graph`; keeps the
-  /// rest only when `dx^2 + dy^2 + dz^2 < cutoff^2`; sorts the survivors
-  /// lexicographically by `(source, target)`.
+  /// Walks `view.ilist` over `inum + gnum` centres, and for each centre `i`
+  /// every masked neighbour `view.neighbor(i, jj)`; drops neighbours at or past
+  /// `n_graph`; keeps the rest only when `dx^2 + dy^2 + dz^2 < cutoff^2`; sorts
+  /// the survivors lexicographically **only if** the contract asked for it.
   ///
   /// Edge Convention: column 0 is the **source**, the centre atom out of
   /// `ilist`; column 1 is the **target**, its neighbour — the same orientation
   /// as `src/molix/batch/neighbor.py`. No `edge_diff` is computed here: models
   /// recompute geometry from `pos`, so this layer only owes the column order.
+  ///
+  /// THE SOURCE DOMAIN IS `local u ghost`, not local alone, whenever the
+  /// neighbour request carried `REQ_GHOST`. That is what makes the resulting
+  /// edge set symmetrically closed over the ghost region, and symmetric closure
+  /// is why ONE builder serves both aggregation directions: a target-aggregating
+  /// model (MACE) needs every ghost->local edge at its first layer, a
+  /// source-aggregating one (PiNet) needs every ghost->ghost edge by its second,
+  /// and walking the ghost centres supplies both. No per-model branch exists
+  /// here, or is needed.
   ///
   /// \param view     Borrowed LAMMPS atom arrays and neighbour spans.
   /// \param n_graph  Number of leading atoms that are graph nodes: `nlocal` for
@@ -60,6 +79,9 @@ class GraphBridge {
 
  private:
   double cutsq_;
+  /// Whether `build` sorts. Read from the export's `requires_sorted_edges`;
+  /// see the sort site in `build` for the reasoning.
+  bool requires_sorted_edges_;
   // Reused across steps, exactly as the inlined loop this replaces did:
   // dropping the reuse would be an unmeasured performance regression smuggled
   // into a structural migration.

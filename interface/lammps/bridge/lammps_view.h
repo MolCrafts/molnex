@@ -16,9 +16,12 @@
 //
 // Field set follows the consumers that exist today: the neighbour spans
 // (`ilist` / `numneigh` / `firstneigh` / `inum` / `neigh_mask`) arrived with
-// `lammps-iface-03-graph` because `GraphBridge` — their only consumer — did.
+// `lammps-iface-03-graph` because `GraphBridge` — their only consumer — did, and
+// `gnum` arrived with `lammps-iface-05-pbc` for the same reason, when that same
+// consumer started walking the ghost centres too.
 // There is still no `tag` (the tag<->local mapping belongs to a future
-// fixed-graph contract) and no `q` (no reader).
+// fixed-graph contract; the fat-ghost single-shot scheme deliberately does no
+// index remapping, so nothing here needs one) and no `q` (no reader).
 //
 // The neighbour mask travels as **data**, applied by the `neighbor()` accessor:
 // that is what keeps the bridge from restating a LAMMPS constant. The facade
@@ -32,7 +35,7 @@ namespace molnex::lammps_bridge {
 ///
 /// A POD aggregate on purpose: no user-provided constructor, so the facade (and
 /// a test) writes `LammpsView{x, f, type, nlocal, nghost, ilist, numneigh,
-/// firstneigh, inum, neigh_mask}` at the seam and nothing downstream can
+/// firstneigh, inum, gnum, neigh_mask}` at the seam and nothing downstream can
 /// accidentally take ownership. `double**` converts to `const double* const*`
 /// as a qualification conversion, so the facade needs no `const_cast` to hand
 /// over `atom->x`. A caller with no neighbour data to offer may brace-initialise
@@ -54,10 +57,13 @@ struct LammpsView {
   /// Number of ghost atoms (periodic images and atoms owned by other ranks).
   int nghost;
 
-  /// Local indices of the atoms to evaluate, `(inum,)`: `NeighList::ilist`.
+  /// Indices of the atoms to evaluate, `(inum + gnum,)`: `NeighList::ilist`.
   ///
-  /// Under the `REQ_FULL` request this pair style makes, LAMMPS lists only
-  /// atoms in `[0, nlocal)` here, so every centre is owned by this rank.
+  /// Under `REQ_FULL` alone, LAMMPS lists only atoms in `[0, nlocal)` here.
+  /// Under `REQ_FULL | REQ_GHOST` — what a `supports_pbc` contract requests —
+  /// it appends `gnum` GHOST centres after those `inum` local ones, in the same
+  /// array. So the domain of a centre index is `[0, nall())`, and how far a
+  /// consumer walks decides which it gets.
   const int* ilist;
   /// Neighbour counts, indexed by *local atom index* (not by `ilist` position):
   /// `NeighList::numneigh`.
@@ -67,8 +73,16 @@ struct LammpsView {
   /// `const int* const*` as a qualification conversion, so the facade hands
   /// over `list->firstneigh` with no `const_cast`.
   const int* const* firstneigh;
-  /// Number of entries in `ilist`.
+  /// Number of LOCAL centres, i.e. the length of `ilist`'s first segment.
   int inum;
+  /// Number of GHOST centres following them: `NeighList::gnum`.
+  ///
+  /// Zero unless the neighbour request carried `REQ_GHOST`. It arrives with its
+  /// consumer (`GraphBridge::build`, which walks `inum + gnum`): a ghost centre
+  /// is what supplies the ghost->local edges a target-aggregating model needs at
+  /// its first layer, and the ghost->ghost ones a source-aggregating model needs
+  /// at its second.
+  int gnum;
   /// Mask stripping the high flag bits LAMMPS packs into a neighbour entry.
   ///
   /// The value is LAMMPS' own, filled in by the facade — it is deliberately
@@ -81,9 +95,10 @@ struct LammpsView {
   /// \returns `nlocal + nghost`, the exclusive upper bound of every array above.
   int nall() const { return nlocal + nghost; }
 
-  /// The `jj`-th neighbour of local atom `i`, with the flag bits stripped.
+  /// The `jj`-th neighbour of atom `i`, with the flag bits stripped.
   ///
-  /// \param i   Local atom index, as taken from `ilist`.
+  /// \param i   Atom index, as taken from `ilist` — local, or ghost when the
+  ///            request carried `REQ_GHOST`.
   /// \param jj  Position within that atom's neighbour list, in
   ///            `[0, numneigh[i])`.
   /// \returns   `firstneigh[i][jj] & neigh_mask`: a local atom index in

@@ -28,6 +28,7 @@
 #include "update.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <optional>
@@ -48,9 +49,10 @@ using namespace LAMMPS_NS;
 namespace {
 
 /* Where this export's meta.json is, from the two command-line arguments.
-   Three call sites want it: the reader in settings(), and the two per-atom
-   refusals in compute(), which name the contract by pointing at the one file
-   that declares it. */
+   Two call sites want it: the reader in settings(), and the per-atom virial
+   refusal in compute(), which names the contract by pointing at the one file
+   that declares it. (It was three until schema v3 gave per-atom ENERGY a
+   producer and turned that refusal into a tally.) */
 std::string meta_path_of(const std::string &model_dir, const std::string &model_name)
 {
   return (fs::path(model_dir) / (model_name + ".meta.json")).string();
@@ -114,8 +116,9 @@ void PairMolnex::settings(int narg, char **arg)
                       "molix.engine.export_for_lammps, not the bare Exporter",
                meta_path);
 
-  // Constructing the contract hard-validates schema_version == 2: a v1 meta is
-  // refused here rather than silently losing its cuda_graph discriminator. It
+  // Constructing the contract hard-validates schema_version == 3: an older meta
+  // is refused here rather than being read with the wrong input arity and the
+  // wrong output order (v3 moved the virial behind atomic_energy). It
   // is kept because the startup message quotes it — nothing else in this file
   // reads it, and no capability is copied out of it.
   try {
@@ -194,9 +197,9 @@ double PairMolnex::init_one(int /*i*/, int /*j*/)
 void PairMolnex::init_style()
 {
   // Two mechanical translations of the request table into LAMMPS' vocabulary.
-  // `ghost` is false for every contract that exists today; the `|=` is here so
-  // that flipping it in an impl is the whole change (lammps-iface-05-pbc), with
-  // nothing to add on this side.
+  // `ghost` now follows the export's supports_pbc, and flipping it in the impl
+  // WAS the whole change (lammps-iface-05-pbc): this `|=` was written for that
+  // moment and did not move a character when it came.
   int flags = needs_.full ? NeighConst::REQ_FULL : NeighConst::REQ_DEFAULT;
   if (needs_.ghost) flags |= NeighConst::REQ_GHOST;
   neighbor->add_request(this, flags);
@@ -206,11 +209,19 @@ void PairMolnex::init_style()
   // is LAMMPS' int (0 = atom_style atomic), copied by value; `special_lj` /
   // `special_coul` are borrowed for the duration of this call only.
   //
+  // `comm->cutghostuser` and `neighbor->skin` are transcribed RAW, with no
+  // defaulting: LAMMPS holds 0.0 in the former when no `comm_modify cutoff` ran,
+  // and what that zero MEANS (the effective ghost cutoff is the model cutoff
+  // plus the skin) is decided inside CutoffGraphImpl::init. Interpreting it here
+  // as well would give one rule two implementations, and would grow a semantic
+  // `if` back into the layer that exists to have none.
+  //
   // `impl_` is live here: LAMMPS refuses `pair_coeff` and any run before
   // `pair_style` has succeeded, and init_style() is reached only through
   // Pair::init().
   const molnex::lammps::LammpsRunEnv env{force->newton_pair, comm->nprocs, atom->molecular,
-                                         force->special_lj, force->special_coul};
+                                         force->special_lj, force->special_coul,
+                                         comm->cutghostuser, neighbor->skin};
   try {
     impl_->init(env);
   } catch (const std::exception &e) {
@@ -241,16 +252,40 @@ void PairMolnex::compute(int eflag, int vflag)
   // and are defined.
   if (eflag_global) eng_vdwl += r.e_total;
 
-  // Not a missing feature — a refusal. Before this spec these two requests were
-  // met with a silently all-zero eatom / vatom: `ev_init` allocates them, this
-  // pair style never wrote them, and the user got a legal-looking zero field.
-  // Nothing in the current contract can produce either (a model returns energy,
-  // forces and an optional global virial), so the honest answer is loud.
-  if (eflag_atom)
-    error->all(FLERR, "pair_molnex: per-atom energy requested (e.g. compute pe/atom) but the "
-                      "contract declared in {} provides none — the model returns a total "
-                      "energy only; remove the per-atom compute",
-               meta_path_of(model_dir, model_name));
+  // Per-atom energy: supported since schema v3, because the model now returns
+  // site energies and `EvalResult::e_atom` carries this rank's. Where 04-facade
+  // had to refuse `compute pe/atom` for want of a producer, the producer exists
+  // and the refusal becomes the tally it was always the placeholder for.
+  //
+  // THE BOUND IS THE RETURNED TENSOR'S OWN EXTENT, NEVER `atom->nlocal`. Both
+  // are meant to be the local count, which is exactly why reading the second
+  // one here would be a defect: the facade would then hold an independent
+  // opinion about which atoms are local, and the first time the two disagreed
+  // this loop would overrun `eatom` or leave owned atoms un-tallied — silently,
+  // in a per-atom field nobody validates. `e_atom` is documented as length
+  // nlocal (impls/contract_impl.h); trusting that number rather than
+  // re-deriving it is what keeps a single definition.
+  //
+  // The bound is safe against `eatom`'s allocation, which `ev_init` sized at
+  // `atom->nmax >= nlocal + nghost` and zeroed over at least `[0, nlocal)`
+  // (pair.cpp: the ghost range is zeroed too when newton is on). `+=` is
+  // LAMMPS' accumulation convention, and the zeroing is what makes it right.
+  //
+  // No `defined()` guard, deliberately, and the asymmetry with the virial below
+  // is the reason: an undefined virial MEANS "this evaluation produced none",
+  // while there is no contract state in which an evaluation returns without
+  // per-atom energies. A presence test here would invent one.
+  if (eflag_atom) {
+    const auto e_atom = r.e_atom.accessor<double, 1>();
+    for (int64_t i = 0; i < e_atom.size(0); i++) eatom[i] += e_atom[i];
+  }
+
+  // Not a missing feature — a refusal. Before this spec BOTH per-atom requests
+  // were met with a silently all-zero eatom / vatom: `ev_init` allocates them,
+  // this pair style never wrote them, and the user got a legal-looking zero
+  // field. Per-atom energy now has a producer; the per-atom VIRIAL still has
+  // none (a model returns at most a global one), so the honest answer there
+  // stays loud.
   if (vflag_atom)
     error->all(FLERR, "pair_molnex: per-atom virial requested (e.g. compute stress/atom) but "
                       "the contract declared in {} provides none — the model returns at most a "
@@ -297,9 +332,15 @@ molnex::lammps_bridge::LammpsView PairMolnex::current_view() const
   // `list` is live at all three call sites — compute() runs after init_list(),
   // and the two comm callbacks run only inside the reverse_comm that compute()
   // itself issues.
+  //
+  // `list->gnum` is 0 unless the impl asked for REQ_GHOST, in which case LAMMPS
+  // has appended that many ghost centres to `ilist` behind the `inum` local
+  // ones. Transcribed like every other field: how far to walk is the bridge's
+  // decision, not this file's.
   return molnex::lammps_bridge::LammpsView{
       atom->x, atom->f, atom->type, atom->nlocal, atom->nghost,
-      list->ilist, list->numneigh, list->firstneigh, list->inum, NEIGHMASK};
+      list->ilist, list->numneigh, list->firstneigh, list->inum, list->gnum,
+      NEIGHMASK};
 }
 
 /* ----------------------------------------------------------------------

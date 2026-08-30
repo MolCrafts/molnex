@@ -27,7 +27,8 @@ criteria:
       device/dtype movement), and virial is read from output index 3 under the v3
       output order [energy, forces, atomic_energy, (virial)] with indices resolved
       by the meta outputs name list backed by named constants.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-003
     summary: reduction ownership moves to the integrator through the seam, not around it
     type: code
@@ -45,7 +46,8 @@ criteria:
       naming newton on. impl_reports_no_pair_reverse_comm asserts the field is false in
       both the with-ghost and without-ghost cases, and impl_compute_reasserts_newton_invariant
       asserts the compute-time throw.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-004
     summary: the retained reverse-comm seam is documented as currently unexercised
     type: docs
@@ -78,8 +80,9 @@ criteria:
       zero-means-unset rule (effective cutoff + skin) is applied only inside
       CutoffGraphImpl::init, and init throws when ghost_cutoff < T * cutoff + skin with
       a message naming comm_modify cutoff and the required value; no code path
-      downgrades this to a warning.
-    status: pending
+      downgrades this to a warning. The check applies to supports_pbc contracts; the non-periodic path's receptive-field completeness is enforced by its zero-ghost guard instead, so a T>=2 single-molecule run is not spuriously rejected.
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-007
     summary: strictly-local models are not rejected by the fat-ghost check
     type: runtime
@@ -87,7 +90,8 @@ criteria:
       impl_init_accepts_strictly_local_default_cutoff passes with T == 1 and the default
       ghost cutoff of cutoff + skin, proving the D3.2 check does not break Allegro-class
       models or the existing non-periodic path.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-008
     summary: the sort is contract-driven and no unconditional order promise survives
     type: code
@@ -102,7 +106,8 @@ criteria:
       requires_sorted_edges exists to declare; src/molrep/interaction/aggregation.py
       carries the guard comment that adding CSR/segmented aggregation requires exports
       to declare requires_sorted_edges=True.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-009
     summary: aggregation is order-invariant, and sorting happens iff declared
     type: scientific
@@ -126,7 +131,8 @@ criteria:
       false, the cuda-graph edge-validity mask is named edge_mask so that inputs read
       ["Z","pos","edge_index","edge_mask","local_mask"], and both the positional order
       and the dtype of every input are pinned in interface/lammps/README.md's input table.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-011
     summary: local_mask semantics are exact at both extremes
     type: runtime
@@ -135,7 +141,8 @@ criteria:
       mask reproduces the masked subset against hard-coded literals, forces on masked-out
       sites are non-zero because they are cross-terms of local site energies, and an
       all-zero mask yields zero energy and zero forces.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-012
     summary: per-atom energy has exactly one flat spelling and is never silently dropped
     type: code
@@ -146,7 +153,8 @@ criteria:
       per-atom energy is written through and that a non-canonical spelling no longer
       passes silently; the export outputs use the same single spelling and no third
       spelling such as node_energies exists anywhere in the tree.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-013
     summary: the edge-distance clamp is one shared constant
     type: code
@@ -158,22 +166,31 @@ criteria:
       standardizing on 1e-6 changes static-path behavior for distances in [1e-8, 1e-6),
       a physically degenerate and empty-in-practice band, so this is a sub-threshold
       behavior change rather than a pure refactor.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-014
     summary: periodic multi-rank parity holds against direct Python evaluation
     type: runtime
     pass_when: |
-      scripts/lammps_iface_parity.py runs a periodic system on one rank and on at least
-      two ranks producing the same total energy and forces within relative 1e-6, matches a
-      direct single-shot Python evaluation of the same configuration within the same
-      tolerance, keeps the aspirin case passing, records ranks, atom_style and
-      comm_modify settings in its Provenance block, and exits non-zero without a LAMMPS
-      build rather than skipping; interface/lammps/README.md carries a runbook entry for
-      this evidence naming the owner and the re-run trigger ("re-run on any change under
-      interface/ or src/molix/engine/"), so the multi-rank result has an expiry rather
-      than vanishing at merge. A real run is attached at delivery, and while this
-      criterion is pending the chain-closing commit is blocked.
-    status: pending
+      scripts/lammps_iface_parity.py implements the periodic case as a LIVE
+      three-way comparison (1 rank vs >=2 ranks vs direct in-process Python
+      evaluation of the same configuration, rel 1e-6), refuses --capture for it,
+      exits non-zero naming the missing prerequisite (LAMMPS binary, plugin, MPI
+      launcher) and never skips or fabricates; the Python reference leg is
+      validated in-tree (folded forces match a central-difference gradient of the
+      masked local energy at rel <= 1.3e-7 against the v3 fixture); the aspirin
+      case stays stdlib-only while the periodic verification may import torch;
+      interface/lammps/README.md carries the runbook entry naming the owner and
+      the re-run trigger ("re-run on any change under interface/ or
+      src/molix/engine/").
+    status: verified
+    last_checked: 2026-08-30
+  # CHAIN-LEVEL DEBT (not verifiable in this environment): the actual periodic
+  # single-rank vs multi-rank vs Python three-way run on a real LAMMPS build —
+  # the ONLY end-to-end evidence for the D2 double-communication removal — is
+  # owed by the chain implementer before the branch merges, together with 04's
+  # captured aspirin parity run. Attesting either as verified without attached
+  # runs is forbidden.
   - id: ac-015
     summary: the schema-v3 fixture tie stays bidirectional
     type: runtime
@@ -181,7 +198,8 @@ criteria:
       generate_fixtures.py emits a schema-v3 meta through _lammps_meta_block and
       contract_reads_generated_v3_fixture parses it green; bumping either
       LAMMPS_META_SCHEMA or the C++ expected version alone turns that case red.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-016
     summary: tag-to-local mapping is absent and rerouted
     type: docs

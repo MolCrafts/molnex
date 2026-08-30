@@ -1,6 +1,6 @@
 ---
 title: PBC 正确性 —— fat-ghost 单发方案、per-atom 能量分区与 schema v3
-status: approved
+status: code-complete
 created: 2026-08-30
 slug: lammps-iface-05-pbc
 chain: lammps-iface
@@ -148,6 +148,7 @@ meta 新增必填字段 `receptive_field_layers`（\(T\)，正整数）。Python
 - 输出：`outputs = ["energy", "forces", "atomic_energy"]`（`supports_virial` 时追加 `"virial"`）。`EngineForward` 返回 `(energy, forces, atomic_energy)`。
 - 输入新增 `local_mask (N,) bool`。同一次 v3 bump 中，把 CUDA-graph 路径原有的**边有效性掩码由 `mask` 更名为 `edge_mask`**——两个语义完全不同的掩码在同一个输入列表里一个叫 `mask`、一个叫 `local_mask`，是可预见的误接线源。于是：`dynamic` 为 `["Z","pos","edge_index","local_mask"]`（4），`cuda-graph` 为 `["Z","pos","edge_index","edge_mask","local_mask"]`（5）。`lammps_contract.h` 的输入 arity 校验随之更新。**位置契约与 dtype 必须在 `interface/lammps/README.md` 的输入表中钉死**：`Z (N,) int64`、`pos (N,3) 模型 dtype`、`edge_index (E,2) int64`、`edge_mask (E_max,) bool`、`local_mask (N,) bool`。
 - 能量以**掩码乘法**求得：`energy = (atomic_energy * local_mask).sum()`。之所以用掩码而非按 `n_local` 切片：切片长度是运行期标量，`torch.export` 无法 trace；掩码乘法可以。力仍为 `F = -∂energy/∂pos`，对全体原子求导，因而自动得到 D2 的 ghost 交叉项。非 pbc 路径传全 1 掩码——彼时 `nghost == 0`，\(\sum_{\text{all}}=\sum_{L}\)，**parity 得以保持**。
+- **三条实现期裁决（协调者裁定，binding）**：(a) v3 下 **per-atom 能量是权威**——导出能量定义为 `(atomic_energy · local_mask).sum()`，模型自己的标量 energy 不再被导出路径读取；标量含不可分解项的模型在域分解下无法分区（D1 前提），属 v3 契约之外。`export_for_lammps` 在 trace 之前对示例系统做一次 **eager 一致性检查**（`|energy − Σ atomic_energy|` rel 1e-6，超限即 ValueError 指明可分解性要求）——eager 检查不进 traced 图，故 torch.export 无碍。(b) per-atom 提取只认两种拼写：TensorDict 形输出读嵌套 `ATOMIC_ENERGY_KEY`，flat dict 读 `ATOMIC_ENERGY_FLAT_KEY`；缺失 → ValueError 列出两个可接受键。(c) `FlatTensorAdapter` 对只回 `(energy, forces)` 的第三方模型 fail-closed（ValueError 指明 v3 需要 atomic_energy），docstring 记录。
 - `receptive_field_layers` 写入 meta；`contract == cutoff-graph` 时必填、**无默认值**。
 - `requires_sorted_edges` 写入 meta；`export_for_lammps` 的同名参数默认 `False`。它与 `receptive_field_layers` 一同构成 v3 的字段增量，必须列进 `export.py` 的模块 docstring 与 `lammps_contract.h` 的 docstring 所记录的 v3 字段集。（默认值不对称是有意的：每个模型都**有**感受野，作者必须表态；几乎没有模型用分段聚合，opt-in 恰如其分。）
 
@@ -221,18 +222,20 @@ meta 新增必填字段 `receptive_field_layers`（\(T\)，正整数）。Python
 
 ## Tasks
 
-- [ ] Write failing unit tests for the flat per-atom-energy alias and the unified edge-distance clamp (tests/test_molpot/test_derivation/test_protocol.py → TestAbsorbModelOutput; tests/test_molix/test_engine/test_adapter.py and test_static.py → TestEdgeDistanceClamp)
-- [ ] Pin ATOMIC_ENERGY_FLAT_KEY and the edge-distance clamp constant in src/molix/schema.py and consume them from src/molpot/derivation/protocol.py, src/molix/engine/adapter.py and src/molix/engine/static.py
-- [ ] Write failing unit tests for schema v3, local_mask energy masking, receptive_field_layers and requires_sorted_edges (tests/test_molix/test_engine/test_export.py → TestLammpsMetaBlockV3, TestLocalMask)
-- [ ] Implement schema v3 in src/molix/engine/export.py (edge_mask rename, local_mask input, atomic_energy output, receptive_field_layers without default, requires_sorted_edges defaulting False) and the local_mask input plus per-atom energy output in src/molix/engine/adapter.py and src/molix/engine/static.py, emit the v3 fixture from interface/tests/generate_fixtures.py, and update the prose examples in src/molix/engine/__init__.py
-- [ ] Write failing ctest cases for the ghost closure, local-only site-energy partition, order-shuffle invariance, contract-driven sorting, the six-atom no-transpose lock and the newton, ghost-cutoff and receptive-field rejections in interface/tests/test_bridge_graph.cpp, test_contract_impl.cpp and test_lammps_contract.cpp
-- [ ] Implement the ghost-inclusive edge closure in interface/lammps/bridge/graph_bridge.{h,cpp} and demote the per-step std::sort to the requires_sorted_edges contract flag, adding gnum to interface/lammps/bridge/lammps_view.h
-- [ ] Implement per-atom energy of length nlocal and local-only summation in interface/lammps/impls/cutoff_graph_impl.{h,cpp}, adding e_atom to EvalResult and ghost_cutoff plus skin to LammpsRunEnv in interface/lammps/impls/contract_impl.h, setting needs_pair_reverse_comm to a documented constant false with its newton precondition and cheap re-assertion, and extending ModelOutputs plus read_model_outputs in interface/lammps/bridge/ to carry and validate atomic_energy with name-resolved output indices (virial moves from index 2 to 3)
-- [ ] Implement the newton-pair enforcement and the D3.2 fat-ghost check in CutoffGraphImpl::init, and read receptive_field_layers, requires_sorted_edges, the v3 expected version and updated input arity in interface/lammps/lammps_contract.h
-- [ ] Extend the facade in interface/lammps/pair_molnex.{cpp,h} to tally eatom over the returned extent and to snapshot the raw ghost cutoff and skin into LammpsRunEnv
-- [ ] Rewrite the sorted-order contract language in src/molix/engine/adapter.py and interface/lammps/README.md as a conditional promise driven by requires_sorted_edges, add the CSR guard comment to src/molrep/interaction/aggregation.py, and record the v2-to-v3 break, the re-export command, the input positional/dtype table and the ac-014 runbook entry in interface/lammps/README.md
-- [ ] Extend scripts/lammps_iface_parity.py with a periodic multi-rank case validated against direct Python evaluation, and extend the interface ctest job in .github/workflows/ci.yml
-- [ ] Run full check + test suite
+- [x] Write failing unit tests for the flat per-atom-energy alias and the unified edge-distance clamp (tests/test_molpot/test_derivation/test_protocol.py → TestAbsorbModelOutput; tests/test_molix/test_engine/test_adapter.py and test_static.py → TestEdgeDistanceClamp)
+- [x] Pin ATOMIC_ENERGY_FLAT_KEY and the edge-distance clamp constant in src/molix/schema.py and consume them from src/molpot/derivation/protocol.py, src/molix/engine/adapter.py and src/molix/engine/static.py
+- [x] Write failing unit tests for schema v3, local_mask energy masking, receptive_field_layers and requires_sorted_edges (tests/test_molix/test_engine/test_export.py → TestLammpsMetaBlockV3, TestLocalMask)
+- [x] Implement schema v3 in src/molix/engine/export.py (edge_mask rename, local_mask input, atomic_energy output, receptive_field_layers without default, requires_sorted_edges defaulting False) and the local_mask input plus per-atom energy output in src/molix/engine/adapter.py and src/molix/engine/static.py, emit the v3 fixture from interface/tests/generate_fixtures.py, and update the prose examples in src/molix/engine/__init__.py
+- [x] Write failing ctest cases for the ghost closure, local-only site-energy partition, order-shuffle invariance, contract-driven sorting, the six-atom no-transpose lock and the newton, ghost-cutoff and receptive-field rejections in interface/tests/test_bridge_graph.cpp, test_contract_impl.cpp and test_lammps_contract.cpp
+- [x] Implement the ghost-inclusive edge closure in interface/lammps/bridge/graph_bridge.{h,cpp} and demote the per-step std::sort to the requires_sorted_edges contract flag, adding gnum to interface/lammps/bridge/lammps_view.h
+- [x] Implement per-atom energy of length nlocal and local-only summation in interface/lammps/impls/cutoff_graph_impl.{h,cpp}, adding e_atom to EvalResult and ghost_cutoff plus skin to LammpsRunEnv in interface/lammps/impls/contract_impl.h, setting needs_pair_reverse_comm to a documented constant false with its newton precondition and cheap re-assertion, and extending ModelOutputs plus read_model_outputs in interface/lammps/bridge/ to carry and validate atomic_energy with name-resolved output indices (virial moves from index 2 to 3)
+- [x] Implement the newton-pair enforcement and the D3.2 fat-ghost check in CutoffGraphImpl::init, and read receptive_field_layers, requires_sorted_edges, the v3 expected version and updated input arity in interface/lammps/lammps_contract.h
+- [x] Extend the facade in interface/lammps/pair_molnex.{cpp,h} to tally eatom over the returned extent and to snapshot the raw ghost cutoff and skin into LammpsRunEnv
+- [x] Rewrite the sorted-order contract language in src/molix/engine/adapter.py and interface/lammps/README.md as a conditional promise driven by requires_sorted_edges, add the CSR guard comment to src/molrep/interaction/aggregation.py, and record the v2-to-v3 break, the re-export command, the input positional/dtype table and the ac-014 runbook entry in interface/lammps/README.md
+- [x] Extend scripts/lammps_iface_parity.py with a periodic multi-rank case validated against direct Python evaluation, and extend the interface ctest job in .github/workflows/ci.yml
+- [x] Run full check + test suite (ctest 77/77; pytest test_molix+test_molpot 3007 passed/12 skipped; regression OK; ruff clean on chain surface; two named out-of-chain lint debts routed)
+- [x] Hygiene: /mol:simplify ran (janitor: 5 applied incl. conftest scaffolding removal + typing fix; export_for_lammps length split routed to post-chain /mol:refactor)
+- [x] Docs Mode A: satisfied via janitor docstring audit (v3 signatures shape-documented; index constants + N==6 note present)
 
 ## Testing strategy
 

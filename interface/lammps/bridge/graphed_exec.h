@@ -72,7 +72,13 @@ PaddedEdges pad_edges(const at::Tensor& edge_index, int64_t e_max);
 ///
 /// Requires the export to declare `execution = cuda-graph`, which fixes the
 /// atom count `n_fixed` and the padded edge capacity `e_max`, and to take the
-/// four inputs `(Z, pos, edge_index, mask)`.
+/// five inputs `(Z, pos, edge_index, edge_mask, local_mask)`.
+///
+/// THE TWO MASKS ARE NOT INTERCHANGEABLE and the buffer names keep them apart:
+/// `edge_mask (e_max,)` says which padded EDGE rows are real, `local_mask
+/// (n_fixed,)` says which ATOMS this rank owns. Schema v3 renamed the former
+/// from a bare `mask` for exactly this reason — two booleans of different
+/// lengths and unrelated meanings, adjacent in one input list.
 class GraphedExec : public Exec {
  public:
   /// Allocate the persistent device input buffers the capture will bind to.
@@ -103,7 +109,8 @@ class GraphedExec : public Exec {
   ///                             if `edge_index` holds more than `e_max` edges,
   ///                             or if the library was built CPU-only.
   ModelOutputs run(const at::Tensor& Z, const at::Tensor& pos_f64,
-                   const at::Tensor& edge_index) override;
+                   const at::Tensor& edge_index,
+                   const at::Tensor& local_mask) override;
 
  private:
   // The runner and the fixed shapes: the device, the model dtype and the virial
@@ -112,9 +119,13 @@ class GraphedExec : public Exec {
   molnex::interface::ModelRunner* runner_;
   int64_t n_fixed_;
   int64_t e_max_;
-  // Persistent device inputs. The captured graph reads these exact addresses
-  // every replay, so they are updated in place and never reassigned.
-  at::Tensor Zg_, posg_, edgeg_, maskg_;
+  // Persistent device inputs, DECLARED IN THE ORDER THE CAPTURE BINDS THEM:
+  // (Z, pos, edge_index, edge_mask, local_mask). The captured graph reads these
+  // exact addresses every replay, so they are updated in place and never
+  // reassigned. `edge_maskg_` is (e_max,) and `local_maskg_` is (n_fixed,);
+  // swapping them would be a shape error rather than a silent one, but the
+  // names are what keep a reader from having to work that out.
+  at::Tensor Zg_, posg_, edgeg_, edge_maskg_, local_maskg_;
 };
 
 }  // namespace molnex::lammps_bridge

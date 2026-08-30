@@ -75,18 +75,24 @@ GraphedExec::GraphedExec(molnex::interface::ModelRunner* runner,
   Zg_ = at::zeros({n_fixed_}, opts.dtype(at::kLong));
   posg_ = at::zeros({n_fixed_, 3}, opts.dtype(model_dtype_));
   edgeg_ = at::zeros({e_max_, 2}, opts.dtype(at::kLong));
-  maskg_ = at::zeros({e_max_}, opts.dtype(at::kBool));
+  // Two masks, two lengths: edge validity is per padded EDGE row, ownership is
+  // per ATOM. See the class docstring for why v3 stopped calling the first one
+  // simply `mask`.
+  edge_maskg_ = at::zeros({e_max_}, opts.dtype(at::kBool));
+  local_maskg_ = at::zeros({n_fixed_}, opts.dtype(at::kBool));
 #endif
 }
 
 ModelOutputs GraphedExec::run(const at::Tensor& Z, const at::Tensor& pos_f64,
-                              const at::Tensor& edge_index) {
+                              const at::Tensor& edge_index,
+                              const at::Tensor& local_mask) {
 #ifndef MOLNEX_INTERFACE_CUDA
   // Unreachable in practice — the constructor already refused — but the method
   // still has to exist so a CPU-only build links the class its tests name.
   (void)Z;
   (void)pos_f64;
   (void)edge_index;
+  (void)local_mask;
   throw std::runtime_error(
       "GraphedExec::run: libmolnex_interface was built CPU-only (no CUDA "
       "toolkit at build time); there is no CUDA graph to replay");
@@ -114,13 +120,19 @@ ModelOutputs GraphedExec::run(const at::Tensor& Z, const at::Tensor& pos_f64,
   Zg_.copy_(Z);
   posg_.copy_(pos_f64.to(model_dtype_));
   edgeg_.copy_(padded.edges);
-  maskg_.copy_(padded.mask);
+  edge_maskg_.copy_(padded.mask);
+  local_maskg_.copy_(local_mask);
 
-  const std::vector<at::Tensor> inputs = {Zg_, posg_, edgeg_, maskg_};
+  // THE ORDER IS THE CONTRACT: it must match the meta's `inputs` list for a
+  // cuda-graph export, ["Z", "pos", "edge_index", "edge_mask", "local_mask"],
+  // which LammpsContract validates the arity of at load.
+  const std::vector<at::Tensor> inputs = {Zg_, posg_, edgeg_, edge_maskg_,
+                                          local_maskg_};
   // `run_graphed`'s outputs live at the captured graph's fixed addresses and
   // the next replay overwrites them in place; `read_model_outputs` moves them
   // to the CPU, which is what makes the returned tensors the caller's own.
-  return read_model_outputs(runner_->run_graphed(inputs), supports_virial_);
+  return read_model_outputs(runner_->run_graphed(inputs),
+                            OutputExpectations{supports_virial_, n_fixed_});
 #endif
 }
 

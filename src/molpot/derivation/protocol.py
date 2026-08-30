@@ -34,6 +34,7 @@ from tensordict import TensorDict
 # the keys live in molix.schema (single owner) and are re-exported here for
 # potential-side code.
 from molix.schema import (
+    ATOMIC_ENERGY_FLAT_KEY,
     ATOMIC_ENERGY_KEY,
     ENERGY_KEY,
     FORCES_KEY,
@@ -43,6 +44,7 @@ from molix.schema import (
 )
 
 __all__ = [
+    "ATOMIC_ENERGY_FLAT_KEY",
     "ATOMIC_ENERGY_KEY",
     "ENERGY_KEY",
     "FORCES_KEY",
@@ -128,7 +130,11 @@ def write_energy(
         energy: Per-graph energy ``(B,)`` in eV. A 0-dim tensor is accepted and
             leaves the created ``graphs`` namespace at ``batch_size=[]``.
         atomic_energy: Optional per-atom energy ``(N,)`` in eV, written under
-            ``("atoms", "energy")``.
+            :data:`~molix.schema.ATOMIC_ENERGY_KEY` (``("atoms", "energy")``).
+            The keyword is named after
+            :data:`~molix.schema.ATOMIC_ENERGY_FLAT_KEY`, the flat alias of that
+            nested key, so a plain-dict model output can be forwarded here under
+            one spelling end to end.
 
     Returns:
         The same ``batch``.
@@ -149,7 +155,17 @@ def write_forces(batch: TensorDict, forces: torch.Tensor) -> TensorDict:
 
 
 def absorb_model_output(batch: TensorDict, out: TensorDict | dict) -> TensorDict:
-    """Merge a model return value into ``batch``."""
+    """Merge a model return value into ``batch``.
+
+    Two output shapes are understood, and each has exactly one spelling of the
+    per-atom energy: a nested ``TensorDict`` is read at
+    :data:`~molix.schema.ATOMIC_ENERGY_KEY`, a plain dict at its flat alias
+    :data:`~molix.schema.ATOMIC_ENERGY_FLAT_KEY`. A per-atom tensor arriving
+    under any other name is *not* absorbed — the write is skipped rather than
+    guessed at. Both spellings come from the constants so that the writer
+    (a model) and the reader (here) cannot drift apart the way a bare string
+    literal on this side allowed.
+    """
     if out is batch:
         return batch
     if isinstance(out, TensorDict):
@@ -163,7 +179,7 @@ def absorb_model_output(batch: TensorDict, out: TensorDict | dict) -> TensorDict
             write_energy(
                 batch,
                 out["energy"],
-                atomic_energy=out.get("atomic_energy"),
+                atomic_energy=out.get(ATOMIC_ENERGY_FLAT_KEY),
             )
         return batch
     return batch

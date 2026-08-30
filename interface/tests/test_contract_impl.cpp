@@ -39,10 +39,11 @@
 //
 //   struct NeighborNeeds { bool full; bool ghost; double cutoff;
 //                          int comm_reverse; int comm_reverse_off; };
-//   struct EvalResult    { double e_total; at::Tensor virial;
+//   struct EvalResult    { double e_total; at::Tensor e_atom; at::Tensor virial;
 //                          bool needs_pair_reverse_comm; };
 //   struct LammpsRunEnv  { int newton_pair; int nprocs; int molecular;
-//                          const double* special_lj; const double* special_coul; };
+//                          const double* special_lj; const double* special_coul;
+//                          double ghost_cutoff; double skin; };
 //
 //   class ContractImpl {
 //    public:
@@ -70,7 +71,8 @@
 // The invariants these cases exist to lock:
 //
 //   1. NeighborNeeds reproduces the pre-refactor neighbour request exactly
-//      (REQ_FULL, comm_reverse 3 / 3, cutoff from the meta).
+//      (REQ_FULL, comm_reverse 3 / 3, cutoff from the meta), with `ghost`
+//      following `supports_pbc` from lammps-iface-05-pbc on.
 //   2. compute() composes stage_nodes -> GraphBridge -> Exec -> ForceScatter and
 //      applies energy_conv ONCE, to a hand-computed literal.
 //   3. n_graph is `supports_pbc ? nall() : nlocal` — the semantics migrated out
@@ -78,17 +80,25 @@
 //      supports_pbc is false.
 //   4. EvalResult carries NO forces: the impl has already scattered them into
 //      atom->f, because that is the array comm->reverse_comm reads.
-//   5. needs_pair_reverse_comm is `supports_pbc && nghost > 0`, produced by the
-//      impl, so lammps-iface-05-pbc changes only the answer.
-//   6. pair_coeff residual tokens are parsed by FULL CONSUMPTION: "6abc" is an
+//   5. THE PARTITION ENERGY SUMS LOCAL SITES ONLY. e_total is the sum of the
+//      per-atom energies over `i < view.nlocal`, and e_atom carries exactly
+//      those nlocal entries. Summing over local + ghost instead would add
+//      Sigma_{i in G} E_i, which is dominated by the per-species constant offset
+//      and is therefore tens of eV per ghost — not a rounding error, an energy
+//      that is simply wrong and grows with the rank count.
+//   6. needs_pair_reverse_comm is a CONSTANT false: the integrator's global
+//      reverse comm owns the reduction, and CutoffGraphImpl::init's newton-pair
+//      enforcement is the precondition that makes that constant safe.
+//   7. pair_coeff residual tokens are parsed by FULL CONSUMPTION: "6abc" is an
 //      error, not the element 6 that std::stoi would silently return.
-//   7. special_bonds that excludes 1-2 / 1-3 / 1-4 neighbours is intercepted on
+//   8. special_bonds that excludes 1-2 / 1-3 / 1-4 neighbours is intercepted on
 //      a molecular system, and NOT on an atomic one. These two halves are the
 //      ONLY coverage of that fix anywhere: the aspirin parity case is
 //      molecular == 0 and exercises none of it (spec ac-008).
-//   8. The single-domain check is carried over verbatim, newton condition
-//      included — tightening it is a behaviour change owed to 05-pbc.
-//   9. The contract dispatch is a closed set: cutoff-graph builds, fixed-graph
+//   9. The fat-ghost condition (ghost cutoff >= T * cutoff + skin) FAILS CLOSED
+//      in init, with the zero-means-unset interpretation living there and
+//      nowhere else — and does not misfire on a strictly local T == 1 model.
+//  10. The contract dispatch is a closed set: cutoff-graph builds, fixed-graph
 //      is a loud refusal that lists every valid contract name.
 
 #include <array>
@@ -145,7 +155,7 @@ namespace {
 
 // ---- the export document ---------------------------------------------------
 //
-// A field-by-field schema-v2 `lammps` block, so one case can perturb exactly
+// A field-by-field schema-v3 `lammps` block, so one case can perturb exactly
 // one field of an otherwise well-formed document. Deliberately a second,
 // smaller copy of the builder in test_lammps_contract.cpp rather than a shared
 // test header: the two want different defaults (this one is an eV model with a
@@ -169,11 +179,17 @@ struct MetaFields {
   std::string energy_conv = R"({"real": 23.060549, "metal": 1.0})";
   std::string species = "[1, 6, 8]";
   std::string model_dtype = "float64";
-  std::string inputs = R"(["Z", "pos", "edge_index"])";
-  std::string outputs = R"(["energy", "forces", "virial"])";
+  std::string inputs = R"(["Z", "pos", "edge_index", "local_mask"])";
+  std::string outputs = R"(["energy", "forces", "atomic_energy", "virial"])";
   std::string adapter = "molnex-tensordict";
   std::string supports_pbc = "false";
   std::string supports_virial = "true";
+  // T == 1, i.e. a strictly local model: with the default ghost cutoff
+  // (cutoff + skin) that is exactly the fat-ghost threshold, so every case that
+  // calls init() without caring about D3.2 passes it. The deeper model lives in
+  // deep_fields() and is used only by the two cases that are about T.
+  std::string receptive_field_layers = "1";
+  std::string requires_sorted_edges = "false";
 };
 
 /// The eV -> kcal/mol factor the documents above declare; see `energy_conv`.
@@ -183,12 +199,12 @@ constexpr double kEnergyConv = 23.060549;
 /// model, which is what makes kEnergyConv != 1.
 const std::string kUnitStyle = "real";
 
-std::string v2_meta(const MetaFields& f) {
+std::string v3_meta(const MetaFields& f) {
   return std::string(R"json({
   "device": "cpu",
   "model_class": "Sonata",
   "lammps": {
-    "schema_version": 2,
+    "schema_version": 3,
     "contract": ")json") +
          f.contract + R"json(",
     "execution": ")json" + f.execution + R"json(",
@@ -203,7 +219,9 @@ std::string v2_meta(const MetaFields& f) {
     "outputs": )json" + f.outputs + R"json(,
     "adapter": ")json" + f.adapter + R"json(",
     "supports_pbc": )json" + f.supports_pbc + R"json(,
-    "supports_virial": )json" + f.supports_virial + R"json(
+    "supports_virial": )json" + f.supports_virial + R"json(,
+    "receptive_field_layers": )json" + f.receptive_field_layers + R"json(,
+    "requires_sorted_edges": )json" + f.requires_sorted_edges + R"json(
   }
 })json";
 }
@@ -211,7 +229,7 @@ std::string v2_meta(const MetaFields& f) {
 /// The typed contract for one document. The contract owns its copy of the block
 /// text, so the MetaSchema temporary dying here is deliberate.
 LammpsContract contract_of(const MetaFields& f) {
-  return LammpsContract{MetaSchema{v2_meta(f)}};
+  return LammpsContract{MetaSchema{v3_meta(f)}};
 }
 
 // ---- the synthetic system --------------------------------------------------
@@ -275,10 +293,36 @@ constexpr double kScatteredForce[kNall][3] = {
     {375.968784, -4.5302745, 12.76513725},
 };
 
-/// Total energy the stub Exec returns, in MODEL units (eV).
+/// Scalar energy the stub Exec returns, in MODEL units (eV).
+///
+/// DELIBERATELY UNRELATED to the site energies below. Under schema v3 a real
+/// model's scalar IS its masked site-energy sum, but this stub is a probe, not
+/// a model: making the two disagree is what lets these cases tell WHICH output
+/// the impl tallied. An impl that adds `out.energy` to eng_vdwl gets 184.48
+/// where the partition energy is 34.59, and every energy assertion below fails.
+/// (A real export cannot ship this inconsistency: molix.engine.export checks
+/// decomposability eagerly on the example system before tracing.)
 constexpr double kStubEnergy = 8.0;
-/// The same energy in LAMMPS `real` units: 8.0 * 23.060549, by hand.
-constexpr double kExpectedETotal = 184.484392;
+
+/// Per-site energies the stub returns, in MODEL units (eV), one per graph node.
+///
+/// Distinct rather than constant, so `e_atom` cannot pass by carrying the right
+/// length with the wrong contents, and so the local sum differs from the
+/// all-sites sum by an amount no rounding could produce.
+constexpr double kModelSiteEnergy[kNall] = {0.25, 0.5, 0.75, 1.0};
+
+/// The three LOCAL site energies in LAMMPS `real` units, by hand:
+/// 0.25 * 23.060549, 0.5 * 23.060549, 0.75 * 23.060549.
+constexpr double kExpectedEAtom[kNlocal] = {5.76513725, 11.5302745, 17.29541175};
+
+/// Partition energy: the sum of the three LOCAL site energies, converted.
+/// (0.25 + 0.5 + 0.75) * 23.060549 = 1.5 * 23.060549.
+constexpr double kExpectedETotal = 34.5908235;
+
+/// What summing over local + ghost would give — 2.5 * 23.060549. This is the
+/// D1 bug's value, written down so the assertion against it is explicit rather
+/// than implied by the absence of a number.
+constexpr double kGhostInclusiveETotal = 57.6513725;
 
 /// Virial the stub Exec returns when asked, in MODEL units, (xx yy zz xy xz yz).
 constexpr double kModelVirial[6] = {1.0, -2.0, 4.0, 0.5, -0.25, 8.0};
@@ -307,8 +351,19 @@ class SyntheticSystem {
   /// \param nghost  Ghost count the view reports. Storage is always four atoms;
   ///                nghost == 0 means the fourth is not addressable, which is
   ///                the single-domain shape a supports_pbc=false export needs.
-  explicit SyntheticSystem(int nghost)
-      : type_(kType), jlists_(full_lists()), ilist_({0, 1, 2}), nghost_(nghost) {
+  /// \param gnum    Ghost centres presented after the local ones in `ilist`.
+  ///                Zero here even when nghost is one: the ghost is a graph
+  ///                NODE and a neighbour, but this fixture does not give it a
+  ///                neighbour list of its own. That is the impl's business to
+  ///                pass through, not to invent — the ghost-closure walk itself
+  ///                is locked in test_bridge_graph.cpp, where the geometry is
+  ///                built for it.
+  explicit SyntheticSystem(int nghost, int gnum = 0)
+      : type_(kType),
+        jlists_(full_lists()),
+        ilist_({0, 1, 2}),
+        nghost_(nghost),
+        gnum_(gnum) {
     for (int i = 0; i < kNall; ++i) {
       coords_.push_back({kCoord[i][0], kCoord[i][1], kCoord[i][2]});
       forces_.push_back(
@@ -336,7 +391,8 @@ class SyntheticSystem {
                       ilist_.data(),
                       numneigh_.data(),
                       firstneigh_.data(),
-                      static_cast<int>(ilist_.size()),
+                      static_cast<int>(ilist_.size()) - gnum_,
+                      gnum_,
                       kNeighMask};
   }
 
@@ -356,6 +412,7 @@ class SyntheticSystem {
   std::vector<int> numneigh_;
   std::vector<const int*> firstneigh_;
   int nghost_;
+  int gnum_;
 };
 
 // ---- the injected stub Exec ------------------------------------------------
@@ -373,11 +430,13 @@ class StubExec : public Exec {
         emit_virial_(emit_virial) {}
 
   ModelOutputs run(const at::Tensor& Z, const at::Tensor& pos_f64,
-                   const at::Tensor& edge_index) override {
+                   const at::Tensor& edge_index,
+                   const at::Tensor& local_mask) override {
     calls += 1;
     Z_seen = Z.clone();
     pos_seen = pos_f64.clone();
     edges_seen = edge_index.clone();
+    local_mask_seen = local_mask.clone();
 
     const auto opts = at::TensorOptions().dtype(at::kDouble);
     ModelOutputs out;
@@ -392,6 +451,14 @@ class StubExec : public Exec {
       }
     }
 
+    // One per GRAPH NODE — locals and ghosts alike. Which of them belong to the
+    // partition energy is the impl's decision, and the whole subject of
+    // impl_energy_sums_locals_only; a stub that returned only the local ones
+    // would be answering that question on the impl's behalf.
+    out.atomic_energy = at::zeros({n}, opts);
+    auto ea = out.atomic_energy.accessor<double, 1>();
+    for (int64_t i = 0; i < n; ++i) ea[i] = kModelSiteEnergy[i];
+
     if (emit_virial_) {
       out.virial = at::zeros({6}, opts);
       auto va = out.virial.accessor<double, 1>();
@@ -405,6 +472,7 @@ class StubExec : public Exec {
   at::Tensor Z_seen;
   at::Tensor pos_seen;
   at::Tensor edges_seen;
+  at::Tensor local_mask_seen;
 
  private:
   bool emit_virial_;
@@ -435,17 +503,57 @@ MetaFields pbc_fields() {
   return f;
 }
 
+/// Fields for a PERIODIC three-layer model: T == 3, so a site's energy depends
+/// on everything within 3 * cutoff and the default ghost cutoff is far too
+/// small.
+///
+/// `supports_pbc` is part of the fixture rather than an accident of the default:
+/// D3.2 is scoped to periodic contracts, since only they have ghosts whose
+/// cutoff could fall short. The non-periodic T == 3 shape is a separate
+/// fixture-free case (impl_init_accepts_nonpbc_multilayer_default_cutoff), and
+/// keeping them apart is what stops one of the two from silently becoming a
+/// statement about the other.
+MetaFields deep_fields() {
+  MetaFields f;
+  f.supports_pbc = "true";
+  f.receptive_field_layers = "3";
+  return f;
+}
+
 /// LAMMPS' special-bond arrays, index 0 unused, [1..3] the 1-2 / 1-3 / 1-4
 /// scale factors. `1.0 1.0 1.0` is the only setting that leaves the neighbour
 /// list intact; LAMMPS' DEFAULT is 0.0 0.0 0.0, which deletes those pairs.
 constexpr double kSpecialKept[4] = {1.0, 1.0, 1.0, 1.0};
 constexpr double kSpecialDefault[4] = {1.0, 0.0, 0.0, 0.0};
 
+/// `neighbor->skin` as LAMMPS defaults it for real / metal units, in angstrom.
+constexpr double kSkin = 2.0;
+
+/// `comm->cutghostuser` when the input script never ran `comm_modify cutoff`.
+///
+/// LAMMPS' own value for "unset" is a literal 0.0, and it is passed through RAW:
+/// what zero MEANS — that the effective ghost cutoff is cutoff + skin — is
+/// interpreted inside CutoffGraphImpl::init and nowhere else, which is why this
+/// fixture can state the LAMMPS value without also stating the interpretation.
+constexpr double kGhostCutoffUnset = 0.0;
+
 /// A run environment with the specials that keep every bonded neighbour.
 LammpsRunEnv env_with(int newton_pair, int nprocs, int molecular,
                       const double* special_lj = kSpecialKept,
-                      const double* special_coul = kSpecialKept) {
-  return LammpsRunEnv{newton_pair, nprocs, molecular, special_lj, special_coul};
+                      const double* special_coul = kSpecialKept,
+                      double ghost_cutoff = kGhostCutoffUnset,
+                      double skin = kSkin) {
+  return LammpsRunEnv{newton_pair, nprocs,       molecular, special_lj,
+                      special_coul, ghost_cutoff, skin};
+}
+
+/// The environment a periodic run presents: newton on, several ranks.
+///
+/// Every periodic case needs it, because CutoffGraphImpl::init refuses
+/// `supports_pbc` with newton off — the integrator's global reverse comm only
+/// runs under newton, and it is the sole reducer of ghost forces now.
+LammpsRunEnv pbc_env() {
+  return env_with(/*newton_pair=*/1, /*nprocs=*/2, /*molecular=*/0);
 }
 
 /// Require the recorded edge tensor to be exactly `want`.
@@ -486,12 +594,20 @@ void test_impl_needs_matches_legacy_request() {
   // REQ_FULL (cpp:265), comm_reverse / comm_reverse_off = 3 (cpp:56-57) and the
   // cutoff init_one() reported (cpp:256).
   expect_true(needs.full, "a many-body model needs the FULL neighbour list");
-  expect_true(!needs.ghost,
-              "REQ_GHOST belongs to lammps-iface-05-pbc; this spec requests no "
-              "ghost neighbours");
   expect_near(needs.cutoff, kCutoff, 1e-12, "needs.cutoff is the meta cutoff");
   expect_int(needs.comm_reverse, 3, "reverse comm packs fx, fy, fz");
   expect_int(needs.comm_reverse_off, 3, "newton-off variant packs the same 3");
+
+  // `ghost` now FOLLOWS supports_pbc, and the two contract variants are asserted
+  // separately because that is the whole content of the field. A local-only
+  // export must not be handed ghost neighbours (there are none), while a
+  // periodic one cannot close its edge set without them — REQ_GHOST is what
+  // puts the ghost centres into ilist for GraphBridge to walk.
+  expect_true(!needs.ghost,
+              "a supports_pbc=false export requests no ghost neighbours");
+  expect_true(impl_over(pbc_fields()).impl->needs().ghost,
+              "a supports_pbc=true export requests REQ_GHOST — without it the "
+              "ghost->local edges the closure needs are never listed");
 
   // The cutoff is READ from the contract, not a constant of the impl: a second
   // export with a different cutoff must report it.
@@ -529,14 +645,19 @@ void test_impl_compute_composes_pipeline() {
   expect_near(under.exec->pos_seen.accessor<double, 2>()[1][0], kCoord[1][0],
               0.0, "pos[1][0] is LAMMPS' own coordinate");
 
-  // (2) GraphBridge ran, with the cutoff refilter and the (source, target) sort.
+  // (2) GraphBridge ran, with the cutoff refilter. The contract declares
+  // requires_sorted_edges = false, and this fixture's neighbour lists are
+  // already in (source, target) order, so the raw order and the sorted order
+  // coincide here — the two are told apart in test_bridge_graph.cpp, where the
+  // input is deliberately shuffled.
   expect_edges(under.exec->edges_seen, kEdgesLocal, "composed edge_index");
 
-  // (3) The energy is the model's, times energy_conv, ONCE: 8.0 eV in a `real`
-  // run is 8.0 * 23.060549 = 184.484392 kcal/mol. A missing conversion gives
-  // 8.0 and a doubled one 4254.3..., so neither can pass.
+  // (3) The energy is the sum of the LOCAL site energies, times energy_conv,
+  // ONCE: (0.25 + 0.5 + 0.75) eV in a `real` run is 1.5 * 23.060549 = 34.5908235
+  // kcal/mol. A missing conversion gives 1.5 and a doubled one 797.7..., so
+  // neither can pass — and neither can tallying the stub's scalar 8.0 eV.
   expect_near(result.e_total, kExpectedETotal, 1e-12,
-              "e_total is the model energy in LAMMPS units");
+              "e_total is the local site-energy sum in LAMMPS units");
 
   // (4) ForceScatter ran: atom->f ACCUMULATED the converted model forces, from
   // a non-zero starting value. This is the asymmetry EvalResult's docstring
@@ -550,10 +671,10 @@ void test_impl_compute_composes_pipeline() {
   // The fourth row is not a graph node here (nghost == 0), so nothing wrote it.
   expect_force_row(sys, 3, /*scattered=*/false, "beyond n_graph");
 
-  // (5) The reduction-ownership seam: a single-domain export never asks the
-  // pair style to reverse-communicate.
+  // (5) The reduction-ownership seam: the integrator's global reverse comm owns
+  // the reduction, so the pair style is never asked to issue one of its own.
   expect_true(!result.needs_pair_reverse_comm,
-              "supports_pbc=false must not ask the facade for a reverse comm");
+              "the cutoff-graph contract never asks the facade to reverse comm");
 }
 
 void test_impl_compute_n_graph_local_only() {
@@ -582,6 +703,7 @@ void test_impl_compute_n_graph_with_ghost() {
   SyntheticSystem sys(/*nghost=*/1);
   ImplUnderTest under = impl_over(pbc_fields());
   under.impl->coeff(kCoeffTokens, /*ntypes=*/3);
+  under.impl->init(pbc_env());
 
   const EvalResult result = under.impl->compute(sys.view());
 
@@ -591,12 +713,20 @@ void test_impl_compute_n_graph_with_ghost() {
              "the ghost's Z is mapped like any other atom");
   expect_edges(under.exec->edges_seen, kEdgesAll, "ghost-inclusive edge_index");
 
-  // Every row, ghost included, carries the converted model force.
+  // EVERY row, ghost included, carries the converted model force — and that is
+  // not an accident of the stub. The partition energy sums local sites only,
+  // but it is differentiated with respect to ALL coordinates, so a ghost's
+  // force is the cross-term of its local neighbours' site energies. Dropping
+  // it would lose a real contribution; the integrator's global reverse comm is
+  // what carries it home to the owning rank.
   for (int i = 0; i < kNall; ++i) {
     expect_force_row(sys, i, /*scattered=*/true, "ghost-inclusive scatter");
   }
+
+  // The energy, however, does NOT grow with the ghost: it stays the local
+  // three-site sum even though four sites were evaluated.
   expect_near(result.e_total, kExpectedETotal, 1e-12,
-              "energy conversion does not depend on n_graph");
+              "the partition energy is unchanged by the presence of a ghost");
 }
 
 void test_impl_compute_rejects_ghost_without_pbc() {
@@ -659,12 +789,21 @@ void test_impl_virial_present_and_absent() {
               "supports_virial=false must leave the virial undefined");
 }
 
-void test_impl_reports_pair_reverse_comm_condition() {
-  // The reduction-ownership seam, over all four combinations of supports_pbc
-  // and a non-zero ghost count. Three are reachable and assert the value; the
-  // fourth (no pbc, ghosts present) is refused before the field is ever filled,
-  // and that refusal IS its answer — the combination cannot silently produce a
-  // reverse-comm decision at all.
+void test_impl_reports_no_pair_reverse_comm() {
+  // THE ANSWER IS NOW CONSTANT, and the constant is the whole point: ghost
+  // forces are scattered into atom->f like any other, and Verlet::run's global
+  // reverse comm — which runs whenever force->newton is set — reduces them onto
+  // their owners. A pair-level comm->reverse_comm(this) on top of that would
+  // send the same contribution home TWICE.
+  //
+  // The precondition is CutoffGraphImpl::init's newton-pair enforcement: the
+  // global reduction only happens under newton, so without that refusal this
+  // constant would silently drop every ghost force instead of double-counting
+  // it. The two are one decision and must be read together.
+  //
+  // All four combinations of supports_pbc and a non-zero ghost count. Three are
+  // reachable and assert the value; the fourth (no pbc, ghosts present) is
+  // refused before the field is ever filled, and that refusal IS its answer.
   {
     SyntheticSystem sys(/*nghost=*/0);
     ImplUnderTest under = impl_over(MetaFields{});
@@ -683,18 +822,157 @@ void test_impl_reports_pair_reverse_comm_condition() {
     SyntheticSystem sys(/*nghost=*/0);
     ImplUnderTest under = impl_over(pbc_fields());
     under.impl->coeff(kCoeffTokens, /*ntypes=*/3);
+    under.impl->init(pbc_env());
     expect_true(!under.impl->compute(sys.view()).needs_pair_reverse_comm,
                 "supports_pbc=true with no ghost -> nothing to communicate");
   }
   {
+    // The case that changed: ghosts present, forces on them, and STILL no
+    // pair-level reverse comm. This is the one assertion that would catch a
+    // regression back to the double-communication bug.
     SyntheticSystem sys(/*nghost=*/1);
     ImplUnderTest under = impl_over(pbc_fields());
     under.impl->coeff(kCoeffTokens, /*ntypes=*/3);
-    expect_true(under.impl->compute(sys.view()).needs_pair_reverse_comm,
-                "supports_pbc=true with ghosts -> the facade must reverse comm");
+    under.impl->init(pbc_env());
+    const EvalResult result = under.impl->compute(sys.view());
+    expect_true(!result.needs_pair_reverse_comm,
+                "supports_pbc=true WITH ghosts -> still false; the integrator's "
+                "global reverse comm owns the reduction");
+    // And the ghost really did receive a force, so the assertion above is about
+    // reduction OWNERSHIP and not about there being nothing to reduce.
+    expect_force_row(sys, 3, /*scattered=*/true,
+                     "the ghost carries a force that the integrator must reduce");
   }
-  // lammps-iface-05-pbc keeps this field and the facade's call site and changes
-  // only the last answer above; that is the point of the seam.
+  // The field and the facade's `if (r.needs_pair_reverse_comm)` call site both
+  // survive untouched: a future contract that scatters ghost forces outside
+  // newton-reduced integration fills it true and re-activates
+  // ContractImpl::pack_reverse / unpack_reverse, which have no other entrance.
+}
+
+void test_impl_energy_sums_locals_only() {
+  // D1, locked against a hard-coded literal. One ghost is a graph node and gets
+  // a site energy like any other atom; the partition energy must nonetheless be
+  // the sum over the three LOCAL sites.
+  SyntheticSystem sys(/*nghost=*/1);
+  ImplUnderTest under = impl_over(pbc_fields());
+  under.impl->coeff(kCoeffTokens, /*ntypes=*/3);
+  under.impl->init(pbc_env());
+
+  const EvalResult result = under.impl->compute(sys.view());
+
+  // Four sites were evaluated ...
+  expect_int(under.exec->Z_seen.size(0), kNall,
+             "the model is evaluated over local + ghost");
+  // ... and three of them are summed.
+  expect_near(result.e_total, kExpectedETotal, 1e-12,
+              "e_total is 1.5 eV * 23.060549 = 34.5908235 kcal/mol, the sum "
+              "over the three LOCAL sites");
+  expect_true(result.e_total != kGhostInclusiveETotal,
+              "e_total must not be the local+ghost sum 57.6513725 — that error "
+              "is dominated by the per-species offset and grows with rank count");
+
+  // The mask the model was handed is the other half of D1: the C++ side sums
+  // the local slice, and the model is TOLD which sites are local so its own
+  // masked sum agrees. All-ones here would make a correct model return the
+  // ghost-inclusive energy.
+  expect_true(under.exec->local_mask_seen.defined(),
+              "the impl must hand the model a local_mask");
+  expect_true(under.exec->local_mask_seen.scalar_type() == at::kBool,
+              "local_mask is a bool tensor");
+  expect_int(under.exec->local_mask_seen.size(0), kNall,
+             "local_mask has one entry per graph node, not per local atom");
+  const auto ma = under.exec->local_mask_seen.accessor<bool, 1>();
+  for (int i = 0; i < kNall; ++i) {
+    expect_true(ma[i] == (i < kNlocal),
+                "local_mask[" + std::to_string(i) + "] must be " +
+                    (i < kNlocal ? "true (owned)" : "false (ghost)"));
+  }
+}
+
+void test_impl_e_atom_locals_only() {
+  // The per-atom energy the facade tallies into eatom. Its LENGTH is the
+  // contract — nlocal, never nall — because the facade iterates the returned
+  // tensor's own extent and must not consult atom->nlocal itself.
+  SyntheticSystem sys(/*nghost=*/1);
+  ImplUnderTest under = impl_over(pbc_fields());
+  under.impl->coeff(kCoeffTokens, /*ntypes=*/3);
+  under.impl->init(pbc_env());
+
+  const EvalResult result = under.impl->compute(sys.view());
+
+  expect_true(result.e_atom.defined(), "e_atom must be a defined tensor");
+  expect_true(result.e_atom.device().is_cpu(), "e_atom must be a CPU tensor");
+  expect_true(result.e_atom.scalar_type() == at::kDouble, "e_atom is float64");
+  expect_int(result.e_atom.dim(), 1, "e_atom is 1-D");
+  expect_int(result.e_atom.size(0), kNlocal,
+             "e_atom has exactly nlocal entries even though nall sites were "
+             "evaluated");
+
+  // Contents, converted once, against hand-computed literals. Distinct values,
+  // so a right-length tensor with the wrong rows cannot pass.
+  const auto ea = result.e_atom.accessor<double, 1>();
+  for (int i = 0; i < kNlocal; ++i) {
+    expect_near(ea[i], kExpectedEAtom[i], 1e-12,
+                "e_atom[" + std::to_string(i) + "] is the site energy in LAMMPS "
+                "units");
+  }
+
+  // e_total and e_atom are ONE number and its parts: the facade adds the former
+  // to eng_vdwl and the latter to eatom, and LAMMPS' own thermo compares them.
+  // They must not come from two independent computations that could drift.
+  expect_near(result.e_atom.sum().item<double>(), result.e_total, 1e-12,
+              "e_total must equal the sum of e_atom");
+}
+
+void test_impl_compute_reasserts_newton_invariant() {
+  // The cheap re-assertion. It reads the value CutoffGraphImpl::init
+  // snapshotted, so what it catches is an internal ordering fault — compute()
+  // reached on a periodic contract whose newton precondition was never
+  // validated — and NOT a LAMMPS-side change after init, which init_style
+  // re-running at every run setup already covers.
+  //
+  // (a) init never ran at all.
+  {
+    SyntheticSystem sys(/*nghost=*/1);
+    ImplUnderTest under = impl_over(pbc_fields());
+    under.impl->coeff(kCoeffTokens, /*ntypes=*/3);
+    const std::string msg = expect_throws(
+        [&] { (void)under.impl->compute(sys.view()); },
+        "periodic compute without a validated newton setting");
+    expect_contains(msg, "newton", "the diagnostic must name newton");
+    expect_int(under.exec->calls, 0,
+               "the re-assertion must precede the model call — a half-applied "
+               "step is worse than a refused one");
+    for (int i = 0; i < kNall; ++i) {
+      expect_force_row(sys, i, /*scattered=*/false, "refused compute");
+    }
+  }
+
+  // (b) init ran and REFUSED, and compute is reached anyway. The snapshot was
+  // never taken, so the same refusal fires rather than a stale "on".
+  {
+    SyntheticSystem sys(/*nghost=*/1);
+    ImplUnderTest under = impl_over(pbc_fields());
+    under.impl->coeff(kCoeffTokens, /*ntypes=*/3);
+    (void)expect_throws(
+        [&] {
+          under.impl->init(env_with(/*newton_pair=*/0, /*nprocs=*/2,
+                                    /*molecular=*/0));
+        },
+        "init refuses newton off on a periodic contract");
+    (void)expect_throws([&] { (void)under.impl->compute(sys.view()); },
+                        "compute after a refused init");
+  }
+
+  // (c) A non-periodic contract is unaffected: it has no ghost forces to
+  // reduce, so newton is not its precondition and compute proceeds.
+  {
+    SyntheticSystem sys(/*nghost=*/0);
+    ImplUnderTest under = impl_over(MetaFields{});
+    under.impl->coeff(kCoeffTokens, /*ntypes=*/3);
+    expect_near(under.impl->compute(sys.view()).e_total, kExpectedETotal, 1e-12,
+                "a local-only contract computes without a newton snapshot");
+  }
 }
 
 // ---- coeff -----------------------------------------------------------------
@@ -827,6 +1105,154 @@ void test_impl_init_single_domain_condition() {
   periodic.impl->init(env_with(/*newton_pair=*/1, /*nprocs=*/2, /*molecular=*/0));
 }
 
+void test_impl_init_rejects_newton_off_with_pbc() {
+  // THE TIGHTENING lammps-iface-04-facade deferred to this spec, and the
+  // precondition of EvalResult::needs_pair_reverse_comm's constant false.
+  // Ghost forces are left in atom->f for Verlet::run to reduce, and that
+  // reduction happens only `if (force->newton)`. With newton off, nothing
+  // reduces them: every ghost's contribution is silently discarded and the
+  // owning rank integrates forces that are missing their periodic cross-terms.
+  ImplUnderTest under = impl_over(pbc_fields());
+
+  const std::string msg = expect_throws(
+      [&] {
+        under.impl->init(env_with(/*newton_pair=*/0, /*nprocs=*/2,
+                                  /*molecular=*/0));
+      },
+      "newton off on a periodic contract");
+  expect_contains(msg, "newton on",
+                  "the diagnostic must name the setting the user must change");
+
+  // Single rank does not make it safe: a periodic box has ghosts even on one
+  // rank, and they are reduced by the same global reverse comm.
+  (void)expect_throws(
+      [&] {
+        under.impl->init(env_with(/*newton_pair=*/0, /*nprocs=*/1,
+                                  /*molecular=*/0));
+      },
+      "newton off on a periodic contract, one rank");
+
+  // With newton on it is accepted, so the case is not passing by refusing every
+  // periodic run.
+  under.impl->init(env_with(/*newton_pair=*/1, /*nprocs=*/2, /*molecular=*/0));
+
+  // And the NON-periodic contract keeps its original condition untouched:
+  // newton off with several ranks still passes there (see
+  // impl_init_single_domain_condition), so this tightening is scoped to the
+  // contract that actually has ghost forces to lose.
+  ImplUnderTest local_only = impl_over(MetaFields{});
+  local_only.impl->init(env_with(/*newton_pair=*/0, /*nprocs=*/2,
+                                 /*molecular=*/0));
+}
+
+void test_impl_init_rejects_insufficient_ghost_cutoff() {
+  // D3.2, fail-closed. A T-layer network's site energy depends on everything
+  // within T * cutoff, so a single-shot evaluation needs a copy of every atom
+  // out to that radius. LAMMPS' default ghost cutoff is cutoff + skin, which is
+  // enough only at T == 1; at T == 3 it is less than half of what is required,
+  // and the model would be evaluated on a graph whose outer sites are missing
+  // neighbours — quietly, with plausible-looking forces.
+  ImplUnderTest under = impl_over(deep_fields());
+
+  // Required: T * cutoff + skin = 3 * 2.0 + 2.0 = 8.0 A.
+  // Default effective: cutoff + skin = 4.0 A.
+  const std::string msg = expect_throws(
+      [&] { under.impl->init(env_with(1, 1, 0)); },
+      "T = 3 under the default ghost cutoff");
+  expect_contains(msg, "comm_modify cutoff",
+                  "the diagnostic must give the command that fixes it");
+  expect_contains(msg, "8", "the diagnostic must state the required value");
+  expect_contains(msg, "4", "the diagnostic must state the measured value");
+
+  // A user-set cutoff that is still too small is refused just the same: the
+  // rule is the threshold, not the presence of a comm_modify line.
+  (void)expect_throws(
+      [&] {
+        under.impl->init(env_with(1, 1, 0, kSpecialKept, kSpecialKept,
+                                  /*ghost_cutoff=*/7.9));
+      },
+      "a user ghost cutoff below the threshold");
+
+  // Exactly at the threshold passes — the condition is >=, so a model is not
+  // asked for a margin it does not need.
+  under.impl->init(env_with(1, 1, 0, kSpecialKept, kSpecialKept,
+                            /*ghost_cutoff=*/8.0));
+  // And comfortably above it, which is what the diagnostic tells the user to do.
+  under.impl->init(env_with(1, 1, 0, kSpecialKept, kSpecialKept,
+                            /*ghost_cutoff=*/12.0));
+
+  // THE INTERPRETATION OF ZERO LIVES HERE AND NOWHERE ELSE. The facade passes
+  // comm->cutghostuser raw, and LAMMPS writes 0.0 when the user never ran
+  // comm_modify; only this layer turns that into "the effective cutoff is
+  // cutoff + skin". A zero read literally would compare 0.0 against 8.0 and
+  // refuse for the wrong reason — and, worse, would refuse a T == 1 model too.
+  // Periodic, so the check is actually reached: on a non-periodic contract it
+  // does not run at all and this would assert nothing.
+  ImplUnderTest shallow = impl_over(pbc_fields());
+  shallow.impl->init(env_with(1, 1, 0, kSpecialKept, kSpecialKept,
+                              /*ghost_cutoff=*/kGhostCutoffUnset));
+}
+
+void test_impl_init_accepts_strictly_local_default_cutoff() {
+  // THE OTHER HALF of the fail-closed pair, and the one that keeps the check
+  // honest: only ac-006 tempts an implementation to loosen a threshold until a
+  // test goes green, and this case is what would catch that.
+  //
+  // T == 1 (Allegro-class, strictly local) with the default ghost cutoff:
+  // required 1 * 2.0 + 2.0 = 4.0, effective 2.0 + 2.0 = 4.0. Accepted, with no
+  // comm_modify line anywhere in the input script.
+  ImplUnderTest under = impl_over(MetaFields{});
+  under.impl->init(env_with(/*newton_pair=*/1, /*nprocs=*/1, /*molecular=*/0));
+
+  // The periodic contract at T == 1 too: the check is about the receptive
+  // field, not about ghosts existing.
+  ImplUnderTest periodic = impl_over(pbc_fields());
+  periodic.impl->init(pbc_env());
+
+  // A larger cutoff scales the threshold with it and still passes on the
+  // default: effective 5.5 + 2.0 = 7.5, required 1 * 5.5 + 2.0 = 7.5. Periodic,
+  // because that is where the threshold is evaluated at all.
+  MetaFields wide = pbc_fields();
+  wide.cutoff = "5.5";
+  impl_over(wide).impl->init(env_with(1, 1, 0));
+
+  // And T == 2 does NOT pass on the default, which is what makes the acceptance
+  // above a statement about T rather than about the check being toothless.
+  MetaFields two_layer = pbc_fields();
+  two_layer.receptive_field_layers = "2";
+  (void)expect_throws([&] { impl_over(two_layer).impl->init(env_with(1, 1, 0)); },
+                      "T = 2 under the default ghost cutoff");
+}
+
+void test_impl_init_accepts_nonpbc_multilayer_default_cutoff() {
+  // THE SCOPE OF D3.2, and the case that says where the check does NOT apply.
+  //
+  // The fat-ghost condition is about GHOSTS: it asks whether this rank holds a
+  // copy of every atom inside T * cutoff of one it owns. A supports_pbc=false
+  // export has no ghosts at all — compute() refuses outright when nghost != 0,
+  // and needs().ghost is false so LAMMPS never makes any — which means every
+  // atom of the system is already a local graph node and the receptive field is
+  // complete at any T, with any ghost cutoff. Enforcing the threshold there
+  // would refuse a perfectly correct single-molecule run of a T >= 2 model (the
+  // MACE and PiNet case, i.e. most of the zoo) for the lack of a comm_modify
+  // line that would not change one number of the result.
+  //
+  // T == 3 under the default ghost cutoff: required by the periodic rule would
+  // be 3 * 2.0 + 2.0 = 8.0 A against an effective 4.0 A, i.e. exactly the input
+  // impl_init_rejects_insufficient_ghost_cutoff feeds a periodic contract to
+  // watch it refuse. Non-periodic, it must be accepted.
+  MetaFields local_deep;
+  local_deep.receptive_field_layers = "3";
+  impl_over(local_deep).impl->init(env_with(/*newton_pair=*/1, /*nprocs=*/1,
+                                            /*molecular=*/0));
+
+  // Newton off on one rank is the other shape a single-molecule run takes, and
+  // it must not acquire a receptive-field objection either: the non-periodic
+  // path never had a newton requirement (impl_init_single_domain_condition).
+  impl_over(local_deep).impl->init(env_with(/*newton_pair=*/0, /*nprocs=*/1,
+                                            /*molecular=*/0));
+}
+
 // ---- reverse comm ----------------------------------------------------------
 
 void test_impl_reverse_comm_forwards() {
@@ -945,8 +1371,12 @@ const std::map<std::string, TestFn>& registry() {
       {"impl_compute_rejects_ghost_without_pbc",
        test_impl_compute_rejects_ghost_without_pbc},
       {"impl_virial_present_and_absent", test_impl_virial_present_and_absent},
-      {"impl_reports_pair_reverse_comm_condition",
-       test_impl_reports_pair_reverse_comm_condition},
+      {"impl_reports_no_pair_reverse_comm",
+       test_impl_reports_no_pair_reverse_comm},
+      {"impl_energy_sums_locals_only", test_impl_energy_sums_locals_only},
+      {"impl_e_atom_locals_only", test_impl_e_atom_locals_only},
+      {"impl_compute_reasserts_newton_invariant",
+       test_impl_compute_reasserts_newton_invariant},
       {"impl_coeff_token_count", test_impl_coeff_token_count},
       {"impl_coeff_rejects_trailing_garbage",
        test_impl_coeff_rejects_trailing_garbage},
@@ -956,6 +1386,14 @@ const std::map<std::string, TestFn>& registry() {
        test_impl_init_rejects_special_bonds_on_molecular},
       {"impl_init_single_domain_condition",
        test_impl_init_single_domain_condition},
+      {"impl_init_rejects_newton_off_with_pbc",
+       test_impl_init_rejects_newton_off_with_pbc},
+      {"impl_init_rejects_insufficient_ghost_cutoff",
+       test_impl_init_rejects_insufficient_ghost_cutoff},
+      {"impl_init_accepts_strictly_local_default_cutoff",
+       test_impl_init_accepts_strictly_local_default_cutoff},
+      {"impl_init_accepts_nonpbc_multilayer_default_cutoff",
+       test_impl_init_accepts_nonpbc_multilayer_default_cutoff},
       {"impl_reverse_comm_forwards", test_impl_reverse_comm_forwards},
       {"registry_returns_cutoff_graph_impl",
        test_registry_returns_cutoff_graph_impl},

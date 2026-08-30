@@ -1,6 +1,6 @@
 // Copyright (c) MolNex contributors. SPDX-License-Identifier: MIT
 //
-// LAMMPS vocabulary layer over the meta.json schema-v2 contract.
+// LAMMPS vocabulary layer over the meta.json schema-v3 contract.
 //
 // Everything LAMMPS-flavoured about a molnex export lives here: the `lammps`
 // block name, the unit styles, the pair-style contract and its execution
@@ -42,6 +42,25 @@
 //     so the identity holds only while the model's length unit equals LAMMPS'.
 //     A Bohr export would otherwise be silently mis-scaled by a0 = 0.529177 Å.
 //     Never return a UnitConversion that skipped that assertion.
+//
+// SCHEMA v3, AND v2 IS A HARD BREAK. The field increment over v2 is:
+//
+//   * input `local_mask (N,) bool` — which atoms this rank owns. The exported
+//     energy is `(atomic_energy * local_mask).sum()`, so the dynamic arity goes
+//     3 -> 4.
+//   * the cuda-graph edge-validity mask is renamed `mask` -> `edge_mask`, and
+//     `local_mask` follows it, so that arity goes 4 -> 5. Two differently
+//     shaped booleans in one list, one called `mask` and one `local_mask`, is a
+//     mis-wiring waiting to happen.
+//   * output `atomic_energy (N,)` — the per-site energies, inserted BEFORE the
+//     virial. `virial` therefore moves from output index 2 to index 3.
+//   * `receptive_field_layers` (T) — required, positive, no default.
+//   * `requires_sorted_edges` — optional, default false.
+//
+// Every export produced before v3 is invalid: its tensor count, names and
+// output order all differ, so a silent accept would feed a graph whose
+// signature no longer matches. The version check refuses it and names the
+// re-export, which is the only migration there is.
 //
 // Header-only, so the plugin links nothing beyond libmolnex_interface.
 
@@ -135,18 +154,19 @@ E parse_enum(const std::string& value, const std::map<std::string, E>& table,
 
 }  // namespace detail
 
-/// The `lammps` block of a schema-v2 meta.json, validated and typed.
+/// The `lammps` block of a schema-v3 meta.json, validated and typed.
 ///
 /// Construction hard-validates the two invariants that cannot be recovered
 /// from later:
 ///
-///  1. `schema_version == 2`. A v1 export must be refused loudly, because v1's
-///     discriminator (`cuda_graph`, a bool) no longer exists in v2 and a
-///     silent accept would run a CUDA-graph export down the dynamic path.
-///  2. Input arity against `execution` — 3 for `dynamic`, 4 for `cuda-graph`
-///     (the static wrapper's extra `mask`). A cuda-graph export whose `inputs`
-///     list lost `mask` would otherwise fail deep inside the runtime instead
-///     of at load.
+///  1. `schema_version == 3`. Older exports must be refused loudly: v1's
+///     discriminator (`cuda_graph`, a bool) no longer exists, and v2's tensor
+///     lists are a different length with a different output order, so a silent
+///     accept would run a mis-wired graph.
+///  2. Input arity against `execution` — 4 for `dynamic`, 5 for `cuda-graph`
+///     (the static wrapper's extra `edge_mask`). An export whose `inputs` list
+///     lost one would otherwise fail deep inside the runtime instead of at
+///     load.
 ///
 /// The contract keeps its **own copy** of the block text, so it does not
 /// dangle when the `MetaSchema` it was built from goes away. meta.json is a
@@ -164,7 +184,7 @@ class LammpsContract {
   /// \param doc  A whole meta.json document. Only its `lammps` block is read;
   ///             `doc` need not outlive this object.
   /// \throws std::runtime_error  If the block is absent, its `schema_version`
-  ///                             is not 2, its `execution` is unknown, or its
+  ///                             is not 3, its `execution` is unknown, or its
   ///                             input arity disagrees with that execution.
   explicit LammpsContract(const molnex::interface::MetaSchema& doc)
       : block_(doc.block("lammps")) {
@@ -286,8 +306,13 @@ class LammpsContract {
   ///
   /// For N atoms and E edges: `Z (N,)` int64 atomic numbers, `pos (N, 3)`
   /// positions in angstrom, `edge_index (E, 2)` int64 with column 0 the source
-  /// atom and column 1 the target, plus — under `Execution::cuda_graph` only —
-  /// `mask (E,)` bool marking which of the padded edge slots are real.
+  /// atom and column 1 the target, then — under `Execution::cuda_graph` only —
+  /// `edge_mask (E_max,)` bool marking which of the padded edge slots are real,
+  /// and finally `local_mask (N,)` bool marking the atoms this rank owns.
+  ///
+  /// `local_mask` is last under both strategies, so its position differs
+  /// between them; that is why the arity is validated at construction rather
+  /// than left to a positional read downstream.
   ///
   /// \returns The names as written at export; the shapes above are the contract
   ///          the caller must honour when it stages them.
@@ -297,10 +322,15 @@ class LammpsContract {
 
   /// Names of the tensors the exported model returns, in call order.
   ///
-  /// `energy ()` a scalar and `forces (N, 3)`, both in the model's own units
-  /// (see `units()`), plus `virial (6,)` ordered (xx, yy, zz, xy, xz, yz) when
-  /// `supports_virial()`. Multiply energies by `UnitConversion::energy` and
-  /// forces by `UnitConversion::force` to hand them to LAMMPS.
+  /// `energy ()` a scalar, `forces (N, 3)` and `atomic_energy (N,)`, all in the
+  /// model's own units (see `units()`), plus `virial (6,)` ordered
+  /// (xx, yy, zz, xy, xz, yz) when `supports_virial()`. Multiply energies by
+  /// `UnitConversion::energy` and forces by `UnitConversion::force` to hand
+  /// them to LAMMPS.
+  ///
+  /// THE VIRIAL IS OUTPUT THREE, not two: v3 inserted `atomic_energy` ahead of
+  /// it. A reader still using the v2 index would take an `(N,)` per-atom energy
+  /// for a `(6,)` virial, which the length guards catch at every N except 6.
   std::vector<std::string> outputs() const {
     return block_.get_string_array("outputs");
   }
@@ -361,6 +391,69 @@ class LammpsContract {
     return block_.get_bool("supports_virial", false);
   }
 
+  /// Number of message-passing layers T the model was built with (a count).
+  ///
+  /// A site's energy in a T-layer network depends on every atom within
+  /// `T * cutoff()`, so a single-shot evaluation needs a local copy of all of
+  /// them — the *fat-ghost* condition
+  /// `ghost cutoff >= T * cutoff + skin`, checked by the impl before any run.
+  ///
+  /// REQUIRED, AND WITH NO DEFAULT, which is the one design decision worth
+  /// stating here. Defaulting an absent field to 1 would declare a 3-layer MACE
+  /// strictly local; the fat-ghost check would then pass against a threshold
+  /// three times too small, and the model would be evaluated every step on a
+  /// graph whose outer sites are missing neighbours — no error, no warning,
+  /// plausible-looking forces. Refusing to guess is the whole value of the
+  /// field, so absence is a hard failure here and the export side likewise
+  /// refuses to write one without it.
+  ///
+  /// \returns T, always >= 1.
+  /// \throws std::runtime_error  If the field is absent, is not a number, is
+  ///                             not a whole number, or is less than 1; the
+  ///                             message names the field and the re-export.
+  int receptive_field_layers() const {
+    double declared = 0.0;
+    try {
+      declared = block_.get_number(kReceptiveFieldLayers);
+    } catch (const std::exception&) {
+      throw std::runtime_error(
+          std::string("meta.json: lammps block has no '") +
+          kReceptiveFieldLayers +
+          "'; it is the number of message-passing layers T, and the pair style "
+          "needs it to check that the ghost cutoff covers T * cutoff + skin "
+          "(there is deliberately no default: guessing 1 would declare a "
+          "multi-layer model strictly local and let that check pass against a "
+          "threshold several times too small). Re-export with "
+          "molix.engine.export_for_lammps(..., receptive_field_layers=T)");
+    }
+    const int layers = static_cast<int>(declared);
+    if (static_cast<double>(layers) != declared || layers < 1) {
+      throw std::runtime_error(
+          std::string("meta.json: lammps block '") + kReceptiveFieldLayers +
+          "' is " + std::to_string(declared) +
+          "; it must be a whole number of message-passing layers, at least 1 "
+          "(re-export with molix.engine.export_for_lammps(..., "
+          "receptive_field_layers=T))");
+    }
+    return layers;
+  }
+
+  /// Whether the model needs `edge_index` sorted by `(source, target)`.
+  ///
+  /// Scatter-class reductions (`index_add_` / `scatter_add_`, which is every
+  /// aggregation in this tree today) are permutation-invariant, so the builder
+  /// pays no per-step sort by default. Segmented / CSR aggregation is the
+  /// exception: it requires rows grouped by index, and a model using it is
+  /// simply WRONG on unordered edges — quietly, since the arithmetic still
+  /// completes.
+  ///
+  /// \returns False when the flag is absent — an export that never declared the
+  ///          requirement does not have it, which is true of every model in the
+  ///          tree. Opting in is the segmented-aggregation author's job.
+  bool requires_sorted_edges() const {
+    return block_.get_bool("requires_sorted_edges", false);
+  }
+
   /// Fixed atom count N the graph was captured for (a count, no units).
   ///
   /// Emitted only when `execution() == Execution::cuda_graph`.
@@ -371,7 +464,7 @@ class LammpsContract {
   /// Fixed edge capacity E the graph was captured for (a count, no units).
   ///
   /// The caller must always pass exactly this many edge rows: the real edges
-  /// first with `mask` true, the remaining slots padded and masked off (the
+  /// first with `edge_mask` true, the remaining slots padded and masked off (the
   /// export makes them inert by giving them an over-cutoff displacement), and
   /// it must fail loudly when the real edge count exceeds this capacity.
   ///
@@ -393,12 +486,15 @@ class LammpsContract {
 
   /// Must equal molix.engine.export.LAMMPS_META_SCHEMA on the writer side; the
   /// ctest that parses a generated fixture is what keeps the two in step.
-  static constexpr long long kSchemaVersion = 2;
-  /// Z (N,), pos (N, 3) in angstrom, edge_index (E, 2).
-  static constexpr std::size_t kDynamicInputs = 3;
-  /// ... plus mask (E,) bool marking the real edges among the padded slots.
-  static constexpr std::size_t kCudaGraphInputs = 4;
+  static constexpr long long kSchemaVersion = 3;
+  /// Z (N,), pos (N, 3) in angstrom, edge_index (E, 2), local_mask (N,) bool.
+  static constexpr std::size_t kDynamicInputs = 4;
+  /// ... with edge_mask (E_max,) bool, marking the real edges among the padded
+  /// slots, inserted before local_mask.
+  static constexpr std::size_t kCudaGraphInputs = 5;
   static constexpr const char* kLengthUnit = "angstrom";
+  /// Spelled once: the name appears in three diagnostics that must agree.
+  static constexpr const char* kReceptiveFieldLayers = "receptive_field_layers";
 
   molnex::interface::MetaSchema block_;
 };

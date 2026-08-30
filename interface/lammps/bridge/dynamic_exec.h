@@ -4,7 +4,7 @@
 // straight to the model.
 //
 // This is the universal path. It places no requirement on the export beyond the
-// three-input cutoff-graph contract, works on CPU and CUDA alike, and is what
+// four-input cutoff-graph contract, works on CPU and CUDA alike, and is what
 // runs whenever the meta does not ask for `execution = cuda-graph`. `GraphedExec`
 // is the specialisation; this is the baseline it has to agree with.
 
@@ -43,9 +43,12 @@ class DynamicExec : public Exec {
   ///
   /// See `Exec::run` for the parameter and ownership contracts. Any shape the
   /// export's dynamic dimensions accept is accepted here; nothing is padded and
-  /// no mask is passed, because there is no fixed shape to pad to.
+  /// no EDGE mask is passed, because there is no fixed shape to pad to. The
+  /// `local_mask` is a different object entirely — an ownership statement about
+  /// atoms, required on both execution paths.
   ModelOutputs run(const at::Tensor& Z, const at::Tensor& pos_f64,
-                   const at::Tensor& edge_index) override;
+                   const at::Tensor& edge_index,
+                   const at::Tensor& local_mask) override;
 
  private:
   // The runner alone: the device, the model dtype and the virial flag are the

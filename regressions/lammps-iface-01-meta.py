@@ -1,6 +1,6 @@
-"""Public-API regression for the LAMMPS meta schema-v2 unit contract.
+"""Public-API regression for the LAMMPS meta schema-v3 unit contract.
 
-Spec: ``lammps-iface-01-meta``.
+Spec: ``lammps-iface-01-meta`` (goldens), ``lammps-iface-05-pbc`` (schema bump).
 
 Hard-coded goldens only — no third-party oracle, no subprocess. Pins:
 
@@ -8,8 +8,14 @@ Hard-coded goldens only — no third-party oracle, no subprocess. Pins:
    1 kcal/mol in eV, and the reverse direction its reciprocal. The goldens are
    decimal literals hand-computed from 2019-SI exact constants — never derived
    from molpy at capture time (molpy-vs-molpy would pin nothing).
-2. ``LAMMPS_META_SCHEMA`` is the literal ``2`` — the value the C++
+2. ``LAMMPS_META_SCHEMA`` is the literal ``3`` — the value the C++
    ``LammpsContract`` hard-validates; drift on either side must be loud.
+   Bumped 2 → 3 by ``lammps-iface-05-pbc`` (``local_mask`` input, per-atom
+   energy output, ``receptive_field_layers`` / ``requires_sorted_edges``
+   fields). The C++ expected version is bumped inside the same spec but in a
+   later batch, so this pin is **transiently red between the Python and C++
+   batches by design** — that is the bidirectional tie doing its job, not a
+   broken regression.
 
 Provenance
 ----------
@@ -53,8 +59,8 @@ def main() -> int:
     # Auxiliary self-consistency (not a golden): the two directions invert.
     assert abs(real_to_metal * metal_to_real - 1.0) < 1e-12, "round trip broken"
 
-    assert LAMMPS_META_SCHEMA == 2, (
-        f"LAMMPS_META_SCHEMA is {LAMMPS_META_SCHEMA!r}, regression pins literal 2; "
+    assert LAMMPS_META_SCHEMA == 3, (
+        f"LAMMPS_META_SCHEMA is {LAMMPS_META_SCHEMA!r}, regression pins literal 3; "
         "a deliberate schema bump must update this regression and the C++ "
         "expected version together"
     )

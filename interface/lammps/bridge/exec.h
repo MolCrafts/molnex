@@ -34,6 +34,8 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -54,15 +56,67 @@ namespace molnex::lammps_bridge {
 /// `Exec::run`).
 struct ModelOutputs {
   /// Total model energy, a single-element float64 CPU tensor, in model units.
+  ///
+  /// Under schema v3 this is the model's own masked site-energy sum. The
+  /// cutoff-graph impl does NOT tally it: it re-sums `atomic_energy` over the
+  /// local slice instead, so that the energy it reports and the per-atom
+  /// energies it reports are one number and its parts rather than two
+  /// independent computations LAMMPS' thermo could catch disagreeing. The
+  /// output stays decoded and validated here because it is output zero of the
+  /// declared contract.
   at::Tensor energy;
   /// Per-node forces `(n, 3)`, contiguous float64 on the CPU, in model units.
   at::Tensor forces;
+  /// Per-site energies `(n,)`, contiguous float64 on the CPU, in model units.
+  ///
+  /// One entry per staged atom — locals AND ghosts — because the model is
+  /// evaluated over the whole graph. Which of them enter the partition energy is
+  /// the impl's decision, not this layer's. Mandatory under v3: it is the only
+  /// thing a domain-decomposed energy can be summed from, so
+  /// `read_model_outputs` refuses a model that does not return it rather than
+  /// leaving it undefined for the impl to trip over.
+  at::Tensor atomic_energy;
   /// Virial `(6,)` in `xx, yy, zz, xy, xz, yz` order — or **undefined** when the
   /// export declares no virial or the model emitted none. Never defined-but-
   /// malformed: `read_model_outputs` refuses anything that is not exactly six
   /// elements, so a reader may index all six without checking.
   at::Tensor virial;
 };
+
+/// What the caller already knows about the outputs it is about to decode.
+///
+/// Attribute-only, and it exists because `read_model_outputs` needed a second
+/// contract fact and the header's own shape guard said how to add one: not as
+/// another bool. `read_model_outputs(raw, true, 6)` says nothing at a call
+/// site; `expect.n_atoms` does.
+struct OutputExpectations {
+  /// Whether the export declared a virial output.
+  bool supports_virial;
+  /// How many atoms were staged, i.e. the length `atomic_energy` must have.
+  /// Checked rather than trusted: a per-atom energy of the wrong length would
+  /// be sliced to `nlocal` downstream and silently sum the wrong sites.
+  int64_t n_atoms;
+};
+
+/// Positions of the declared outputs, in `outputs()` order. THE SINGLE
+/// DEFINITION POINT — no bare index appears anywhere below.
+///
+/// v2 was `[energy, forces, (virial)]`; v3 is
+/// `[energy, forces, atomic_energy, (virial)]`, so the virial moved from 2 to
+/// 3. THIS IS THE MOST DANGEROUS LINE OF THE WHOLE SCHEMA BUMP: a reader left
+/// at the old index takes an `(N,)` per-atom energy for a `(6,)` virial. Two
+/// guards catch that — `numel == 6` on the virial and `size(0) == n_atoms` on
+/// the per-atom energy — but BOTH GO BLIND AT N == 6 SIMULTANEOUSLY, and six
+/// atoms is benzene, two waters, and most hand-written fixtures. The value-level
+/// ctest `bridge_read_model_outputs_six_atoms_no_transpose` is the only defence
+/// at that size; do not remove it, and do not inline these constants.
+constexpr std::size_t kEnergyIdx = 0;
+constexpr std::size_t kForcesIdx = 1;
+constexpr std::size_t kAtomicEnergyIdx = 2;
+constexpr std::size_t kVirialIdx = 3;
+/// Outputs every export must return, whatever its flags: the three above the
+/// virial.
+constexpr std::size_t kMandatoryOutputs = 3;
 
 /// Convert a model's raw output vector into `ModelOutputs`, validating it.
 ///
@@ -71,34 +125,34 @@ struct ModelOutputs {
 /// configuration, and it is a transformation of a value rather than the
 /// construction of some type (hence `read_*`, not `make_*` / `create_*`).
 ///
-/// `raw[0]` becomes `energy` and `raw[1]` becomes `forces`, both moved to
-/// float64 on the CPU with `forces` additionally made contiguous — the exact
-/// conversion the migrated facade did inline in each of its two execution
-/// branches.
+/// The three mandatory outputs are read positionally through the named indices
+/// above and moved to float64 on the CPU, with `forces` and `atomic_energy`
+/// additionally made contiguous.
 ///
-/// The virial is defined **if and only if** `supports_virial` is true, `raw`
-/// carries a third element, and that element holds exactly six numbers. An
-/// absent third element is tolerated (the export flag says a virial MAY be
+/// The virial is defined **if and only if** `expect.supports_virial` is true,
+/// `raw` carries a fourth element, and that element holds exactly six numbers.
+/// An absent fourth element is tolerated (the export flag says a virial MAY be
 /// tallied, not that one arrives on every call); a present but wrong-length one
 /// is refused here rather than at the facade's tally, which is what makes
 /// `ModelOutputs::virial` well-formed-or-undefined by construction.
 ///
-/// SHAPE GUARD: this function currently takes two parameters. If a third
-/// contract switch ever needs to reach it, it should arrive as a small
-/// expectation struct — not as another bool. Two booleans at a call site are
-/// already unreadable, and each one added multiplies the paths this single
-/// invariant has to hold across.
+/// SHAPE GUARD, HONOURED: this function took two parameters and needed a third
+/// contract fact, so the fact arrived inside `OutputExpectations` rather than as
+/// another positional bool. Add the next one there too.
 ///
-/// \param raw             Model outputs in declaration order: energy, forces,
-///                        and optionally virial.
-/// \param supports_virial Whether the export declared a virial output.
+/// \param raw     Model outputs in declaration order: energy, forces,
+///                atomic_energy, and optionally virial.
+/// \param expect  What the caller already knows — the virial flag and the atom
+///                count `atomic_energy` must match.
 /// \returns `ModelOutputs` whose defined members are CPU float64 tensors.
-/// \throws std::runtime_error  If `raw` holds fewer than the two mandatory
-///                             outputs, or if a virial is present and expected
-///                             but does not hold exactly six elements (the
-///                             message states the observed count).
+/// \throws std::runtime_error  If `raw` holds fewer than the three mandatory
+///                             outputs, if `atomic_energy` does not hold exactly
+///                             `expect.n_atoms` entries, or if a virial is
+///                             present and expected but does not hold exactly
+///                             six elements. Every message states what was
+///                             observed alongside what was required.
 ModelOutputs read_model_outputs(const std::vector<at::Tensor>& raw,
-                                bool supports_virial);
+                                const OutputExpectations& expect);
 
 /// How this model is executed, with the backend kept out of the signature.
 ///
@@ -128,8 +182,18 @@ class Exec {
   /// \param pos_f64     Positions `(n, 3)` float64 on the CPU in angstrom. The
   ///                    cast to the model's own dtype belongs to the
   ///                    implementation — callers never need to know it.
-  /// \param edge_index  Cutoff graph `(ne, 2)` int64 on the CPU, sorted by
-  ///                    `(source, target)`, as `GraphBridge::build` produced it.
+  /// \param edge_index  Cutoff graph `(ne, 2)` int64 on the CPU, as
+  ///                    `GraphBridge::build` produced it. Its ROW ORDER IS NOT
+  ///                    PROMISED: scatter-class reductions are permutation-
+  ///                    invariant, so the builder sorts only when the export
+  ///                    declares `requires_sorted_edges`. An implementation
+  ///                    that needs an order must say so through the contract,
+  ///                    not assume one here.
+  /// \param local_mask  Ownership `(n,)` bool on the CPU: true exactly on the
+  ///                    atoms this rank owns. The model's energy is the site
+  ///                    sum over those, so the mask is what makes a
+  ///                    domain-decomposed run add up to one total instead of
+  ///                    counting every ghost twice.
   /// \returns `ModelOutputs` whose defined tensors are CPU float64 copies the
   ///          CALLER OWNS. An implementation must not return a tensor that
   ///          aliases runtime-owned or replay-owned memory: `run_graphed`'s
@@ -141,7 +205,8 @@ class Exec {
   ///                             accept, or on a malformed output (see
   ///                             `read_model_outputs`).
   virtual ModelOutputs run(const at::Tensor& Z, const at::Tensor& pos_f64,
-                           const at::Tensor& edge_index) = 0;
+                           const at::Tensor& edge_index,
+                           const at::Tensor& local_mask) = 0;
 
   /// The model's input dtype as the export meta spells it: `"float32"` or
   /// `"float64"`.

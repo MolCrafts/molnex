@@ -89,11 +89,17 @@ CutoffGraphImpl::CutoffGraphImpl(const LammpsContract& contract,
     : cutoff_(contract.cutoff()),
       supports_pbc_(contract.supports_pbc()),
       supports_virial_(contract.supports_virial()),
+      // Read at CONSTRUCTION, so a meta that never declared T is refused while
+      // the `pair_style` line is still on screen rather than at the first run.
+      receptive_field_layers_(contract.receptive_field_layers()),
       energy_conv_(conv.energy),
       // Read whole and kept: `pair_coeff` runs after `pair_style` and needs the
       // export's species list to reject a Z the model was never built for.
       species_(contract.species()),
-      graph_bridge_(cutoff_),
+      // The sort is the export's declaration, fixed here for the same reason:
+      // it is a property of the model, and re-reading it per step would invite
+      // a per-step branch on a constant.
+      graph_bridge_(cutoff_, contract.requires_sorted_edges()),
       // The force factor lives here and nowhere else. It equals `conv.energy`
       // only because `units_for` asserted the model measures length in
       // angstrom; that assertion is the contract's, not restated here.
@@ -107,11 +113,18 @@ CutoffGraphImpl::CutoffGraphImpl(const LammpsContract& contract,
 }
 
 NeighborNeeds CutoffGraphImpl::needs() const {
-  // Value for value the request the facade used to make inline: REQ_FULL for
-  // many-body aggregation, no ghost neighbours (that is lammps-iface-05-pbc's
-  // change), the model cutoff, and fx/fy/fz in either newton mode.
+  // REQ_FULL for many-body aggregation, the model cutoff, fx/fy/fz in either
+  // newton mode — and REQ_GHOST exactly when the export accepts ghosts.
+  //
+  // The ghost request is what puts ghost centres into `ilist` (as
+  // `LammpsView::gnum` entries after the local ones) so `GraphBridge` can walk
+  // them. Without it the neighbour list carries no ghost->local edge at all,
+  // and a target-aggregating model is wrong at its very first layer. The
+  // facade's translation of this field — `if (needs.ghost) flags |=
+  // NeighConst::REQ_GHOST;` — is unchanged: flipping the answer here was the
+  // whole edit.
   return NeighborNeeds{/*full=*/true,
-                       /*ghost=*/false,
+                       /*ghost=*/supports_pbc_,
                        /*cutoff=*/cutoff_,
                        /*comm_reverse=*/kReverseCommSize,
                        /*comm_reverse_off=*/kReverseCommSize};
@@ -178,6 +191,83 @@ void CutoffGraphImpl::init(const LammpsRunEnv& env) {
       }
     }
   }
+
+  // (3) Newton pair, for a periodic contract. THIS IS THE PRECONDITION OF THE
+  // CONSTANT `needs_pair_reverse_comm = false` in compute(): ghost forces are
+  // left in atom->f for Verlet::run's global reverse comm to reduce, and that
+  // reduction happens only `if (force->newton)`. With newton off nothing
+  // reduces them, and every ghost's contribution — the cross-term of a local
+  // site energy with respect to a periodic image's coordinates — is silently
+  // discarded. The two decisions are one and must be changed together.
+  //
+  // This TIGHTENS what lammps-iface-04-facade carried over verbatim, which is
+  // what that spec deferred to this one. The non-periodic condition above is
+  // untouched: newton off on several ranks still passes there.
+  if (supports_pbc_ && env.newton_pair != 1) {
+    throw std::runtime_error(
+        "pair_molnex with supports_pbc requires newton on: ghost forces are "
+        "accumulated into atom->f and reduced onto their owning atoms by the "
+        "integrator's global reverse communication, which LAMMPS performs only "
+        "when newton is on — with it off, every ghost contribution is silently "
+        "discarded. Add 'newton on' to the input script (it is the default), or "
+        "re-export without supports_pbc for a single-domain run");
+  }
+
+  // (4) D3.2, the fat-ghost condition. A T-layer message-passing network's site
+  // energy depends on every atom within T * cutoff, so a single-shot evaluation
+  // needs this rank to hold a copy of all of them. LAMMPS' default ghost cutoff
+  // is cutoff + skin, which suffices only at T == 1; at T >= 2 the outer sites
+  // of the graph are missing neighbours and the model returns confident, wrong
+  // forces with no diagnostic anywhere.
+  //
+  // SCOPED TO `supports_pbc` CONTRACTS, because that is the scope of the
+  // problem: the condition is about whether GHOSTS reach far enough, and a
+  // non-periodic export has none. It requests no ghost neighbours (`needs()`)
+  // and compute() refuses outright when `view.nghost != 0`, so every atom of the
+  // system is a local graph node and the receptive field is complete at any T,
+  // whatever the ghost cutoff happens to be. That zero-ghost guard IS the
+  // non-periodic path's completeness enforcement — applying the ghost threshold
+  // on top of it would refuse a correct single-molecule run of any T >= 2 model
+  // (MACE, PiNet: most of the zoo) over a `comm_modify` line that could not
+  // change one number of its result.
+  //
+  // THE ZERO-MEANS-UNSET RULE LIVES HERE AND NOWHERE ELSE. The facade snapshots
+  // comm->cutghostuser raw, and LAMMPS holds 0.0 when no `comm_modify cutoff`
+  // ran; turning that into "the effective cutoff is cutoff + skin" is this
+  // layer's single responsibility. Interpreting it in the facade too would give
+  // one rule two implementations that could drift apart.
+  //
+  // FAIL CLOSED — never a warning. A warning on a condition that silently
+  // corrupts every force of a multi-day run is not a diagnostic, it is a line
+  // in a log nobody reads.
+  const double effective_ghost_cutoff =
+      env.ghost_cutoff > 0.0 ? env.ghost_cutoff : cutoff_ + env.skin;
+  const double required_ghost_cutoff =
+      receptive_field_layers_ * cutoff_ + env.skin;
+  if (supports_pbc_ && effective_ghost_cutoff < required_ghost_cutoff) {
+    throw std::runtime_error(
+        "pair_molnex: this model has " +
+        std::to_string(receptive_field_layers_) +
+        " message-passing layer(s), so each atom's energy depends on every atom "
+        "within " +
+        std::to_string(receptive_field_layers_) + " * cutoff = " +
+        std::to_string(receptive_field_layers_ * cutoff_) +
+        " A, and this rank must hold a copy of all of them. The ghost cutoff is "
+        "only " +
+        std::to_string(effective_ghost_cutoff) + " A but must be at least " +
+        std::to_string(required_ghost_cutoff) + " A (" +
+        std::to_string(receptive_field_layers_) + " * " +
+        std::to_string(cutoff_) + " + skin " + std::to_string(env.skin) +
+        "). Add 'comm_modify cutoff " + std::to_string(required_ghost_cutoff) +
+        "' to the input script; running as configured would evaluate the model "
+        "on a graph whose outer atoms are missing neighbours, with no error and "
+        "no warning");
+  }
+
+  // Snapshotted LAST, so it is recorded only on a run this method accepted:
+  // compute() reads it to re-assert the newton invariant, and a value stored
+  // before the checks could describe a configuration that was then refused.
+  newton_pair_ = env.newton_pair;
 }
 
 EvalResult CutoffGraphImpl::compute(const LammpsView& view) {
@@ -201,25 +291,70 @@ EvalResult CutoffGraphImpl::compute(const LammpsView& view) {
         ". Re-export with supports_pbc=true for periodic / multi-rank MD.");
   }
 
+  // The cheap re-assertion of the newton invariant. See `newton_pair_` for what
+  // it does and does not buy: it reads this object's own init-time snapshot, so
+  // it catches compute() being reached on a periodic contract whose newton
+  // precondition was never validated — an internal ordering fault — and not a
+  // LAMMPS-side change after init, which init_style re-running at every run
+  // setup already covers. An empty optional means init never completed, which
+  // is exactly as unsafe as newton being off.
+  if (supports_pbc_ && newton_pair_.value_or(0) != 1) {
+    throw std::runtime_error(
+        "pair_molnex with supports_pbc reached compute() without a validated "
+        "newton setting: ghost forces are reduced only by the integrator's "
+        "global reverse communication, which runs only with newton on, so "
+        "CutoffGraphImpl::init must have confirmed it first. Ensure 'newton on' "
+        "is set (it is the default); if it is, this is an ordering fault inside "
+        "the pair style rather than a configuration problem");
+  }
+
   // Graph atom count: local-only when supports_pbc is false, local + ghost
   // otherwise (pair_molnex.cpp:292). The guard above is what makes the two
   // agree on the local-only path — there, nall() IS nlocal.
   const int n_graph = supports_pbc_ ? view.nall() : view.nlocal;
 
+  // WHICH SITES THIS RANK OWNS, as the model's `local_mask` input. LAMMPS lays
+  // atoms out locals-first, so ownership is the prefix `[0, nlocal)` — the one
+  // fact that turns a graph over local + ghost into a PARTITION of the total
+  // energy. An all-ones mask here would make the model return
+  // sum_{L u G} E_i and every rank would count its ghosts' site energies as its
+  // own; a mask built from anything but the LAMMPS layout would silently select
+  // the wrong sites.
+  const at::Tensor local_mask =
+      at::zeros({n_graph}, at::TensorOptions().dtype(at::kBool));
+  if (view.nlocal > 0) local_mask.narrow(0, 0, view.nlocal).fill_(true);
+
   // Four calls, one pipeline: stage_nodes copies Z / pos (fp64; the model-dtype
-  // cast is the Exec's), GraphBridge collects, refilters against the cutoff and
-  // sorts by (source, target), the Exec runs the model and hands back CPU
-  // float64 outputs this method owns, ForceScatter accumulates them onto
-  // view.f in LAMMPS units.
+  // cast is the Exec's), GraphBridge collects and refilters against the cutoff
+  // (sorting only if the export declared it needs sorted edges), the Exec runs
+  // the model and hands back CPU float64 outputs this method owns, ForceScatter
+  // accumulates them onto view.f in LAMMPS units.
   const molnex::lammps_bridge::NodeTensors nodes =
       molnex::lammps_bridge::stage_nodes(view, *species_map_, n_graph);
   const at::Tensor edge_index = graph_bridge_.build(view, n_graph);
   const molnex::lammps_bridge::ModelOutputs out =
-      exec_->run(nodes.Z, nodes.pos, edge_index);
+      exec_->run(nodes.Z, nodes.pos, edge_index, local_mask);
+  // Forces over ALL n_graph rows, ghosts included. A ghost's force is not a
+  // by-product to be discarded: it is the derivative of LOCAL site energies with
+  // respect to that ghost's coordinates, and it belongs to the atom the ghost is
+  // a copy of. Leaving it in atom->f is precisely what lets the integrator's
+  // global reverse comm carry it to its owner.
   force_scatter_.scatter(view, out.forces, n_graph);
 
   EvalResult result;
-  result.e_total = out.energy.item<double>() * energy_conv_;
+  // D1, the partition energy. `atomic_energy` comes back for all n_graph sites;
+  // the first `nlocal` of them are this rank's, and their sum is its share of
+  // the total. Slice, convert, then sum — so `e_total` is by construction the
+  // sum of the `e_atom` the facade tallies, rather than a second number that
+  // could disagree with it (LAMMPS' own thermo compares eng_vdwl against the
+  // eatom sum, and two independent computations would eventually differ).
+  //
+  // The model's own scalar `out.energy` is NOT read here. Under v3 it is the
+  // same quantity — the mask above is what makes it so — but deriving both
+  // reported values from one tensor is what removes the possibility of a
+  // mismatch entirely.
+  result.e_atom = out.atomic_energy.slice(0, 0, view.nlocal) * energy_conv_;
+  result.e_total = result.e_atom.sum().item<double>();
   // `defined()` is the whole presence test — read_model_outputs leaves the
   // virial undefined unless it holds exactly six numbers, so a defined one is
   // readable in full. The `supports_virial_` conjunction is the contract's
@@ -228,11 +363,24 @@ EvalResult CutoffGraphImpl::compute(const LammpsView& view) {
   if (supports_virial_ && out.virial.defined()) {
     result.virial = out.virial * energy_conv_;
   }
-  // The reduction-ownership seam, over the same inputs and the same expression
-  // as pair_molnex.cpp:340 evaluated inline. See EvalResult's docstring: this
-  // spec answers "yes when there are ghosts", lammps-iface-05-pbc answers
-  // "never", and neither the field nor the facade's call site moves.
-  result.needs_pair_reverse_comm = supports_pbc_ && view.nghost > 0;
+  // D2: THE REDUCTION BELONGS TO THE INTEGRATOR, so this is a CONSTANT false
+  // and not an expression. Verlet::run issues one global comm->reverse_comm()
+  // whenever force->newton is set, and it reduces every ghost contribution any
+  // style wrote into atom->f — including the ones ForceScatter just wrote. A
+  // pair-level comm->reverse_comm(this) on top of that would send each ghost
+  // force home TWICE, which is the bug this spec exists to fix.
+  //
+  // ITS SAFETY RESTS ENTIRELY ON init()'s NEWTON ENFORCEMENT above: without
+  // newton there is no global reduction, and this constant would drop every
+  // ghost force instead of double-counting it. Any change that relaxes that
+  // enforcement must revisit this line in the same edit.
+  //
+  // Permanently false for the cutoff-graph contract. A future contract would
+  // fill it true only if it scatters ghost forces OUTSIDE newton-reduced
+  // integration — and doing so also re-activates ContractImpl::pack_reverse /
+  // unpack_reverse, which LAMMPS can reach through no other route than the
+  // facade's existing `if (r.needs_pair_reverse_comm)` call site.
+  result.needs_pair_reverse_comm = false;
   return result;
 }
 

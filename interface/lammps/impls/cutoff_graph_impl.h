@@ -80,12 +80,15 @@ class CutoffGraphImpl : public ContractImpl {
                   const std::string& lammps_unit_style,
                   std::unique_ptr<molnex::lammps_bridge::Exec> exec);
 
-  /// The pre-refactor neighbour request, value for value.
+  /// The neighbour request this contract needs LAMMPS to make.
   ///
-  /// \returns `{full = true, ghost = false, cutoff = <meta cutoff>,
-  ///           comm_reverse = 3, comm_reverse_off = 3}`. `ghost` stays false
-  ///           until lammps-iface-05-pbc; see `NeighborNeeds::ghost` for why
-  ///           that is not the same statement as the reverse-comm decision.
+  /// \returns `{full = true, ghost = <supports_pbc>, cutoff = <meta cutoff>,
+  ///           comm_reverse = 3, comm_reverse_off = 3}`. `ghost` follows the
+  ///           export's `supports_pbc`: a periodic contract needs ghost centres
+  ///           in `ilist` to close its edge set, a local-only one has no ghosts
+  ///           at all. See `NeighborNeeds::ghost` for why that is not the same
+  ///           statement as the reverse-comm decision — the two answers now
+  ///           point in opposite directions.
   NeighborNeeds needs() const override;
 
   /// Read one atomic number per LAMMPS atom type and build the species map.
@@ -105,28 +108,41 @@ class CutoffGraphImpl : public ContractImpl {
   ///                             Nothing is stored on any failing path.
   void coeff(const std::vector<std::string>& tokens, int ntypes) override;
 
-  /// Check this run against the export: single domain, and special bonds.
+  /// Check this run against the export, and snapshot what `compute` will need.
+  ///
+  /// Four predicates, all fail-closed: the single-domain rule, `special_bonds`,
+  /// newton-pair for a periodic contract, and the fat-ghost receptive-field
+  /// condition. None is ever downgraded to a warning — each of them, unmet,
+  /// produces a run that completes and reports wrong physics.
   ///
   /// \param env  Snapshot of the LAMMPS globals.
   /// \throws std::runtime_error  If a non-periodic export is being decomposed
-  ///                             over several ranks with `newton_pair` on, or
-  ///                             if a molecular system's `special_bonds`
+  ///                             over several ranks with `newton_pair` on; if a
+  ///                             molecular system's `special_bonds`
   ///                             coefficients are not all 1.0 — LAMMPS deletes
   ///                             the scaled 1-2 / 1-3 / 1-4 pairs from the
   ///                             neighbour list, and a many-body model would
   ///                             then be evaluated on a graph missing its
-  ///                             nearest neighbours.
+  ///                             nearest neighbours; if a `supports_pbc` export
+  ///                             is run with `newton_pair` off, which would
+  ///                             leave every ghost force unreduced; or if the
+  ///                             ghost cutoff is below `T * cutoff + skin`, in
+  ///                             which case the message names
+  ///                             `comm_modify cutoff` and the value to give it.
   void init(const LammpsRunEnv& env) override;
 
   /// Stage, build the graph, run the model, scatter the forces.
   ///
   /// \param view  Borrowed LAMMPS atom arrays and neighbour spans.
-  /// \returns The converted energy, the converted virial when this evaluation
-  ///          produced one, and the reverse-comm decision. Forces are already
-  ///          in `view.f`; see `EvalResult`.
+  /// \returns The partition energy and its per-atom decomposition (length
+  ///          `nlocal`), the converted virial when this evaluation produced
+  ///          one, and the reverse-comm decision. Forces are already in
+  ///          `view.f`, for local and ghost alike; see `EvalResult`.
   /// \throws std::runtime_error  If `pair_coeff` has not run, if a
   ///                             `supports_pbc = false` export is handed ghost
-  ///                             atoms, or if any staged component refuses.
+  ///                             atoms, if a `supports_pbc` export reaches
+  ///                             here without `init` having confirmed newton,
+  ///                             or if any staged component refuses.
   EvalResult compute(const molnex::lammps_bridge::LammpsView& view) override;
 
   /// Forwards to `molnex::lammps_bridge::pack_reverse_forces`.
@@ -147,11 +163,30 @@ class CutoffGraphImpl : public ContractImpl {
   /// Model cutoff in angstrom; reported through `needs()` and squared inside
   /// `graph_bridge_`.
   double cutoff_;
-  /// Whether ghosts are graph nodes: decides `n_graph` and, with the ghost
-  /// count, the reverse-comm answer.
+  /// Whether ghosts are graph nodes: decides `n_graph`, the ghost neighbour
+  /// request, and which run-configuration predicates apply.
   bool supports_pbc_;
   /// Whether the export declares a virial output at all.
   bool supports_virial_;
+  /// T, the model's message-passing depth, from the export meta. The fat-ghost
+  /// threshold is `T * cutoff_ + skin`; read once at construction because it is
+  /// a property of the model, not of a run.
+  int receptive_field_layers_;
+  /// `force->newton_pair` AS SEEN BY `init`, or empty when `init` has not run.
+  ///
+  /// Optional rather than a plain int with a default, because "init never ran"
+  /// and "init ran and saw newton off" are different faults and only the
+  /// optional can tell them apart from a default value that happens to look
+  /// safe. `compute` re-reads it to catch the first; `init` refuses the second
+  /// outright.
+  ///
+  /// EFFICACY BOUNDARY, stated so the next reader knows what this does NOT
+  /// buy: it is a snapshot taken by this object, so it catches an internal
+  /// ordering fault — `compute` reached on a periodic contract whose newton
+  /// precondition was never validated. It CANNOT catch LAMMPS changing newton
+  /// after `init`; that case is covered by `init_style` re-running at every
+  /// `run` setup, which re-enters `init` and re-checks.
+  std::optional<int> newton_pair_;
   /// One model energy unit expressed in the active LAMMPS unit style.
   double energy_conv_;
   /// Atomic numbers the export was built for; every `pair_coeff` Z is checked

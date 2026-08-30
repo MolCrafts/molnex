@@ -13,7 +13,8 @@
 
 namespace molnex::lammps_bridge {
 
-GraphBridge::GraphBridge(double cutoff) : cutsq_(cutoff * cutoff) {}
+GraphBridge::GraphBridge(double cutoff, bool requires_sorted_edges)
+    : cutsq_(cutoff * cutoff), requires_sorted_edges_(requires_sorted_edges) {}
 
 at::Tensor GraphBridge::build(const LammpsView& view, int n_graph) {
   if (n_graph < 0 || n_graph > view.nall()) {
@@ -27,17 +28,31 @@ at::Tensor GraphBridge::build(const LammpsView& view, int n_graph) {
   }
 
   edge_pairs_.clear();
-  edge_pairs_.reserve(static_cast<std::size_t>(view.inum) * 16);
-  for (int ii = 0; ii < view.inum; ++ii) {
-    // The centre index is trusted to be local: under REQ_FULL, LAMMPS
-    // guarantees ilist only lists atoms in [0, nlocal), so edge_index[:,0]
-    // satisfies source in local by construction. No runtime check here — it is
-    // the neighbour list builder's invariant, and re-verifying it in the hot
-    // loop would only buy psychological comfort. This comment exists so the
-    // next reader knows the invariant is depended upon rather than overlooked.
-    // (lammps-iface-05-pbc rewrites this sentence when ghost traversal widens
-    // the source domain to local u ghost, as its symmetric closure requires.)
+  const int centres = view.inum + view.gnum;
+  edge_pairs_.reserve(static_cast<std::size_t>(centres) * 16);
+  for (int ii = 0; ii < centres; ++ii) {
+    // THE SOURCE DOMAIN IS local u ghost. LAMMPS lays ilist out as `inum` local
+    // centres followed by `gnum` ghost ones (the latter present only when the
+    // request carried REQ_GHOST, so `gnum` is 0 on the local-only path and this
+    // loop reduces to the original one). Walking both segments is what closes
+    // the edge set symmetrically over the ghost region, which is the condition
+    // that makes this builder correct for both aggregation directions at once —
+    // ghost->local edges for a target-aggregating model's first layer,
+    // ghost->ghost for a source-aggregating model's second.
+    //
+    // The centre index itself is trusted to be in [0, nall): it is the
+    // neighbour-list builder's invariant, and re-verifying it in the hot loop
+    // would only buy psychological comfort. Every position read below IS bounded
+    // — by the n_graph check above for targets, and by that same invariant for
+    // centres. This comment exists so the next reader knows the invariant is
+    // depended upon rather than overlooked.
     const int i = view.ilist[ii];
+    // n_graph bounds BOTH endpoints, not just the target. A ghost centre cannot
+    // occur on the local-only path (no REQ_GHOST means gnum is 0), but if it
+    // ever did, an edge whose SOURCE is past n_graph would index past the staged
+    // node tensors inside the model — so the threshold is applied where it is
+    // claimed to apply.
+    if (i >= n_graph) continue;
     const double xi = view.x[i][0];
     const double yi = view.x[i][1];
     const double zi = view.x[i][2];
@@ -56,14 +71,28 @@ at::Tensor GraphBridge::build(const LammpsView& view, int n_graph) {
     }
   }
 
-  // std::pair's lexicographic ordering IS the (source, target) sort molnex
-  // aggregation requires — the same order the reference data pipeline's
-  // nonzero() yields, and one the raw neighbour-list order does not have.
-  // lammps-iface-03-graph keeps the sort unconditionally; lammps-iface-05-pbc
-  // demotes it to the requires_sorted_edges contract flag (default off, set by
-  // models that need segmented / CSR aggregation), at which point this code
-  // stays but stops running every step. Do not anticipate that here.
-  std::sort(edge_pairs_.begin(), edge_pairs_.end());
+  // SORTING IS A CONTRACT DECLARATION, NOT A UNIVERSAL PROMISE.
+  //
+  // Every aggregation in this tree is scatter-class (`index_add_` /
+  // `scatter_add_`), and those are permutation-invariant in exact arithmetic;
+  // in floating point the reassociation error is about (n-1)u, and CUDA's own
+  // `index_add_` is non-deterministic anyway, so sorting buys no reproducibility
+  // either. Paying for a std::sort every step to satisfy nobody is the cost this
+  // flag removes: the default path builds in raw neighbour-list order, exactly
+  // as pair_nequip_allegro does.
+  //
+  // The code stays because the requirement is real for a different class of
+  // model: segmented / CSR aggregation (cuEquivariance's indexed operators)
+  // needs rows grouped by index, and is simply WRONG on unordered edges — with
+  // the arithmetic still completing. Such a model exports
+  // `requires_sorted_edges = true` and gets the order it needs; a model that
+  // does not declare it can never be fed sorted-order-dependent code by
+  // accident, because there is no path here that produces one without the other.
+  //
+  // std::pair's lexicographic ordering IS the (source, target) sort.
+  if (requires_sorted_edges_) {
+    std::sort(edge_pairs_.begin(), edge_pairs_.end());
+  }
 
   const auto opt_l = at::TensorOptions().dtype(at::kLong);
   const int64_t ne = static_cast<int64_t>(edge_pairs_.size());

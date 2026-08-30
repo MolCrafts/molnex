@@ -1,5 +1,5 @@
-// C++ acceptance tests for the LAMMPS vocabulary layer of the meta.json v2
-// contract (spec lammps-iface-01-meta).
+// C++ acceptance tests for the LAMMPS vocabulary layer of the meta.json v3
+// contract (specs lammps-iface-01-meta and lammps-iface-05-pbc).
 //
 // House style follows test_model_runner.cpp: no test framework, one function
 // per case, a function-local static map dispatcher, and the [pass]/[fail]/
@@ -24,7 +24,7 @@
 //
 //   class LammpsContract {
 //    public:
-//     // reads doc.block("lammps"); hard-validates schema_version == 2 and the
+//     // reads doc.block("lammps"); hard-validates schema_version == 3 and the
 //     // input arity rule, throwing std::runtime_error otherwise.
 //     explicit LammpsContract(const MetaSchema& doc);
 //     double cutoff() const;
@@ -43,6 +43,9 @@
 //                                                   // list
 //     bool supports_pbc() const;
 //     bool supports_virial() const;
+//     int receptive_field_layers() const;           // REQUIRED, positive; throws
+//                                                   // naming the field otherwise
+//     bool requires_sorted_edges() const;           // optional, default false
 //     int n_atoms() const;                          // cuda-graph execution only
 //     long e_max() const;                           // cuda-graph execution only
 //   };
@@ -51,7 +54,17 @@
 // units_for() looks the style up in the `energy_conv` table (unknown style →
 // throw listing every table key), asserts length_unit == "angstrom" (else
 // throw), and only then sets force = energy. Input arity is validated at
-// construction: execution "dynamic" wants 3 inputs, "cuda-graph" wants 4.
+// construction: execution "dynamic" wants 4 inputs (Z, pos, edge_index,
+// local_mask), "cuda-graph" wants 5 (edge_mask inserted before local_mask).
+//
+// The two v3 fields differ deliberately in their defaulting.
+// `receptive_field_layers` (T) has NO default: every model has a receptive
+// field, and defaulting it to 1 would declare a 3-layer MACE strictly local and
+// let the impl's fat-ghost check pass against a threshold three times too
+// small — the exact fail-open the field exists to prevent.
+// `requires_sorted_edges` defaults to false: scatter-class reductions are
+// permutation-invariant, so an export that never mentions the field is saying
+// "any order", which is true of every model in the tree.
 //
 // The contract owns a copy of the block text, so the cases below deliberately
 // construct from temporary MetaSchema values that die before the accessors run.
@@ -85,10 +98,10 @@ namespace {
 
 // ---- documents ------------------------------------------------------------
 
-// The schema-v2 `lammps` block, field by field, so one negative case can
+// The schema-v3 `lammps` block, field by field, so one negative case can
 // perturb exactly one field of an otherwise well-formed document.
 struct MetaFields {
-  std::string schema_version = "2";
+  std::string schema_version = "3";
   std::string contract = "cutoff-graph";
   std::string execution = "dynamic";
   std::string cutoff = "5.0";
@@ -102,18 +115,35 @@ struct MetaFields {
   std::string energy_conv = R"({"real": 1.0, "metal": 0.0433641043})";
   std::string species = "[1, 6, 8]";
   std::string model_dtype = "float32";
-  std::string inputs = R"(["Z", "pos", "edge_index"])";
-  std::string outputs = R"(["energy", "forces", "virial"])";
+  std::string inputs = R"(["Z", "pos", "edge_index", "local_mask"])";
+  std::string outputs = R"(["energy", "forces", "atomic_energy", "virial"])";
   std::string adapter = "molnex-tensordict";
   std::string supports_pbc = "true";
   std::string supports_virial = "true";
+  // T, the message-passing depth. EMPTY omits the key entirely, which is the
+  // only way to write the "author never declared it" document — there is no
+  // default to fall back on.
+  std::string receptive_field_layers = "2";
+  // Empty omits the key, i.e. an export that predates / never mentions the
+  // flag. That document must still load, reading false.
+  std::string requires_sorted_edges = "false";
   // n_atoms / e_max, emitted only when execution == "cuda-graph".
   std::string extra = "";
 };
 
-// One well-formed v2 document: the spec's exact 15-key block, plus the
-// execution-conditional keys carried in `extra`.
-std::string v2_meta(const MetaFields& f) {
+/// Render one optional key, or nothing at all when `value` is empty.
+///
+/// The omission has to be expressible: `receptive_field_layers` is required and
+/// `requires_sorted_edges` is optional, and neither statement can be tested
+/// against a document that always carries the key.
+std::string optional_key(const std::string& name, const std::string& value) {
+  if (value.empty()) return "";
+  return ",\n    \"" + name + "\": " + value;
+}
+
+// One well-formed v3 document: the spec's block, plus the two optional keys and
+// the execution-conditional ones carried in `extra`.
+std::string v3_meta(const MetaFields& f) {
   return std::string(R"json({
   "device": "cuda",
   "model_class": "Sonata",
@@ -133,16 +163,19 @@ std::string v2_meta(const MetaFields& f) {
     "outputs": )json" + f.outputs + R"json(,
     "adapter": ")json" + f.adapter + R"json(",
     "supports_pbc": )json" + f.supports_pbc + R"json(,
-    "supports_virial": )json" + f.supports_virial + f.extra + R"json(
+    "supports_virial": )json" + f.supports_virial +
+         optional_key("receptive_field_layers", f.receptive_field_layers) +
+         optional_key("requires_sorted_edges", f.requires_sorted_edges) +
+         f.extra + R"json(
   }
 })json";
 }
 
-// The cuda-graph variant of the same document: 4 inputs and the fixed shapes.
+// The cuda-graph variant of the same document: 5 inputs and the fixed shapes.
 MetaFields cuda_graph_fields() {
   MetaFields f;
   f.execution = "cuda-graph";
-  f.inputs = R"(["Z", "pos", "edge_index", "mask"])";
+  f.inputs = R"(["Z", "pos", "edge_index", "edge_mask", "local_mask"])";
   f.supports_pbc = "false";  // ghost count varies; the pair style refuses both
   f.extra = R"json(,
     "n_atoms": 64,
@@ -155,7 +188,7 @@ MetaFields cuda_graph_fields() {
 void test_contract_schema_version_mismatch_throws() {
   // Happy path first: the canonical document constructs, and the contract
   // outlives the MetaSchema temporary it was built from.
-  const LammpsContract ok{MetaSchema{v2_meta(MetaFields{})}};
+  const LammpsContract ok{MetaSchema{v3_meta(MetaFields{})}};
   expect_near(ok.cutoff(), 5.0, 1e-12, "cutoff()");
   expect_string(ok.units(), "real", "units()");
   expect_string(ok.model_dtype(), "float32", "model_dtype()");
@@ -166,17 +199,31 @@ void test_contract_schema_version_mismatch_throws() {
   v1.schema_version = "1";
   const std::string msg = expect_throws(
       [&] {
-        const LammpsContract stale{MetaSchema{v2_meta(v1)}};
+        const LammpsContract stale{MetaSchema{v3_meta(v1)}};
         (void)stale;
       },
       "schema_version mismatch");
   expect_contains(msg, "schema", "schema_version mismatch");
-  expect_contains(msg, "2", "schema_version mismatch (expected version)");
+  expect_contains(msg, "3", "schema_version mismatch (expected version)");
   expect_contains(msg, "1", "schema_version mismatch (actual version)");
+
+  // v2 is refused just as loudly, and that is the v2 -> v3 break made
+  // executable: v3 renamed one input, added another and added an output, so a
+  // v2 artifact accepted here would be fed a graph whose tensor list no longer
+  // matches its signature. There is no migration but re-exporting.
+  MetaFields v2;
+  v2.schema_version = "2";
+  const std::string stale_v2 = expect_throws(
+      [&] {
+        const LammpsContract stale{MetaSchema{v3_meta(v2)}};
+        (void)stale;
+      },
+      "schema_version 2 is refused");
+  expect_contains(stale_v2, "re-export", "the v2 refusal must name the way out");
 }
 
 void test_contract_unknown_contract_throws() {
-  const LammpsContract ok{MetaSchema{v2_meta(MetaFields{})}};
+  const LammpsContract ok{MetaSchema{v3_meta(MetaFields{})}};
   expect_true(ok.contract() == Contract::cutoff_graph,
               "well-formed document must read contract == cutoff-graph");
 
@@ -184,7 +231,7 @@ void test_contract_unknown_contract_throws() {
   bad.contract = "banana";
   const std::string msg = expect_throws(
       [&] {
-        const LammpsContract c{MetaSchema{v2_meta(bad)}};
+        const LammpsContract c{MetaSchema{v3_meta(bad)}};
         (void)c.contract();
       },
       "unknown contract");
@@ -194,18 +241,22 @@ void test_contract_unknown_contract_throws() {
 }
 
 void test_contract_unknown_execution_throws() {
-  const LammpsContract ok{MetaSchema{v2_meta(MetaFields{})}};
+  const LammpsContract ok{MetaSchema{v3_meta(MetaFields{})}};
   expect_true(ok.execution() == Execution::dynamic,
               "well-formed document must read execution == dynamic");
   const std::vector<std::string> inputs = ok.inputs();
-  expect_int(static_cast<long long>(inputs.size()), 3, "dynamic inputs()");
+  expect_int(static_cast<long long>(inputs.size()), 4, "dynamic inputs()");
   expect_string(inputs[2], "edge_index", "dynamic inputs()[2]");
+  // local_mask is LAST and is what makes the dynamic arity 4 under v3: it marks
+  // the atoms this rank owns, and the exported energy is the site-energy sum
+  // over exactly those.
+  expect_string(inputs[3], "local_mask", "dynamic inputs()[3]");
 
   MetaFields bad;
   bad.execution = "banana";
   const std::string msg = expect_throws(
       [&] {
-        const LammpsContract c{MetaSchema{v2_meta(bad)}};
+        const LammpsContract c{MetaSchema{v3_meta(bad)}};
         (void)c.execution();
       },
       "unknown execution");
@@ -215,7 +266,7 @@ void test_contract_unknown_execution_throws() {
 }
 
 void test_contract_unsupported_unit_style_throws() {
-  const LammpsContract c{MetaSchema{v2_meta(MetaFields{})}};
+  const LammpsContract c{MetaSchema{v3_meta(MetaFields{})}};
 
   // The model is exported in `real`, so one model energy unit is 1.0 in real
   // and 0.0433641043 in metal (kcal/mol → eV, SI-exact; spec Domain basis).
@@ -238,12 +289,15 @@ void test_contract_unsupported_unit_style_throws() {
 }
 
 void test_contract_length_unit_not_angstrom_throws() {
-  const LammpsContract ok{MetaSchema{v2_meta(MetaFields{})}};
+  const LammpsContract ok{MetaSchema{v3_meta(MetaFields{})}};
   expect_true(ok.supports_pbc(), "supports_pbc()");
   expect_true(ok.supports_virial(), "supports_virial()");
   const std::vector<std::string> outputs = ok.outputs();
-  expect_int(static_cast<long long>(outputs.size()), 3, "outputs()");
-  expect_string(outputs[2], "virial", "outputs()[2]");
+  expect_int(static_cast<long long>(outputs.size()), 4, "outputs()");
+  // The v3 output order, and the reason the decoder's virial index moved from 2
+  // to 3: per-atom energy now sits between forces and virial.
+  expect_string(outputs[2], "atomic_energy", "outputs()[2]");
+  expect_string(outputs[3], "virial", "outputs()[3]");
 
   // force = energy holds only while the model's length unit matches LAMMPS'.
   // A Bohr export would otherwise be silently mis-scaled by a0 = 0.529177 Å.
@@ -251,7 +305,7 @@ void test_contract_length_unit_not_angstrom_throws() {
   bohr.length_unit = "bohr";
   const std::string msg = expect_throws(
       [&] {
-        const LammpsContract c{MetaSchema{v2_meta(bohr)}};
+        const LammpsContract c{MetaSchema{v3_meta(bohr)}};
         (void)c.units_for("metal");
       },
       "non-angstrom length unit");
@@ -259,29 +313,126 @@ void test_contract_length_unit_not_angstrom_throws() {
 }
 
 void test_contract_input_arity_mismatch_throws() {
-  // Happy path for the cuda-graph variant: 4 inputs plus the fixed shapes.
-  const LammpsContract graphed{MetaSchema{v2_meta(cuda_graph_fields())}};
+  // Happy path for the cuda-graph variant: 5 inputs plus the fixed shapes.
+  const LammpsContract graphed{MetaSchema{v3_meta(cuda_graph_fields())}};
   expect_true(graphed.execution() == Execution::cuda_graph,
               "cuda-graph document must read execution == cuda_graph");
   const std::vector<std::string> inputs = graphed.inputs();
-  expect_int(static_cast<long long>(inputs.size()), 4, "cuda-graph inputs()");
-  expect_string(inputs[3], "mask", "cuda-graph inputs()[3]");
+  expect_int(static_cast<long long>(inputs.size()), 5, "cuda-graph inputs()");
+  // The two masks are adjacent and mean entirely different things —
+  // `edge_mask (E_max,)` marks the real rows of a padded edge tensor,
+  // `local_mask (N,)` marks the atoms this rank owns. v3 renamed the former
+  // from the bare `mask` precisely because two differently-shaped booleans
+  // called `mask` and `local_mask` in one list is a mis-wiring waiting to
+  // happen; the order here is what the C++ buffer order must match.
+  expect_string(inputs[3], "edge_mask", "cuda-graph inputs()[3]");
+  expect_string(inputs[4], "local_mask", "cuda-graph inputs()[4]");
   expect_int(graphed.n_atoms(), 64, "n_atoms()");
   expect_int(graphed.e_max(), 4096, "e_max()");
 
-  // A cuda-graph export whose inputs list lost `mask` would feed the static
-  // wrapper three tensors and only fail deep inside AOTI, so reject at load.
+  // A cuda-graph export whose inputs list lost `edge_mask` would feed the
+  // static wrapper four tensors and only fail deep inside AOTI, so reject at
+  // load.
   MetaFields bad = cuda_graph_fields();
-  bad.inputs = R"(["Z", "pos", "edge_index"])";
+  bad.inputs = R"(["Z", "pos", "edge_index", "local_mask"])";
   const std::string msg = expect_throws(
       [&] {
-        const LammpsContract c{MetaSchema{v2_meta(bad)}};
+        const LammpsContract c{MetaSchema{v3_meta(bad)}};
         (void)c;
       },
       "input arity mismatch");
   expect_contains(msg, "input", "input arity mismatch");
-  expect_contains(msg, "4", "input arity mismatch (expected count)");
-  expect_contains(msg, "3", "input arity mismatch (actual count)");
+  expect_contains(msg, "5", "input arity mismatch (expected count)");
+  expect_contains(msg, "4", "input arity mismatch (actual count)");
+
+  // And the dynamic side of the same rule: a v3 dynamic export that never grew
+  // `local_mask` is a THREE-input model, which is exactly a stale v2 artifact
+  // whose schema_version was hand-edited. Refused at load, not at the first
+  // step.
+  MetaFields short_dynamic;
+  short_dynamic.inputs = R"(["Z", "pos", "edge_index"])";
+  const std::string dyn = expect_throws(
+      [&] {
+        const LammpsContract c{MetaSchema{v3_meta(short_dynamic)}};
+        (void)c;
+      },
+      "dynamic input arity mismatch");
+  expect_contains(dyn, "4", "dynamic arity mismatch (expected count)");
+  expect_contains(dyn, "3", "dynamic arity mismatch (actual count)");
+}
+
+void test_contract_requires_receptive_field_layers() {
+  // T is READ, and it is read as an int: the fat-ghost check multiplies the
+  // cutoff by it, so a document declaring 2 must not come back as 1.
+  const LammpsContract ok{MetaSchema{v3_meta(MetaFields{})}};
+  expect_int(ok.receptive_field_layers(), 2, "receptive_field_layers()");
+
+  MetaFields deep;
+  deep.receptive_field_layers = "3";
+  expect_int(LammpsContract{MetaSchema{v3_meta(deep)}}.receptive_field_layers(), 3,
+             "receptive_field_layers() follows the document");
+
+  // ABSENT IS A REFUSAL, NOT A DEFAULT. This is the whole point of the field:
+  // a 3-layer MACE whose export forgot to declare T would, under any default,
+  // be checked against a receptive field it does not have — the fat-ghost
+  // condition would pass with a threshold up to three times too small and the
+  // model would be evaluated on a truncated graph, silently.
+  MetaFields undeclared;
+  undeclared.receptive_field_layers = "";
+  const std::string missing = expect_throws(
+      [&] {
+        const LammpsContract c{MetaSchema{v3_meta(undeclared)}};
+        (void)c.receptive_field_layers();
+      },
+      "receptive_field_layers absent");
+  expect_contains(missing, "receptive_field_layers",
+                  "the diagnostic must name the field");
+
+  // Zero and negative are refused for the same reason, and by this layer rather
+  // than by the impl: T < 1 makes the required ghost cutoff SMALLER than the
+  // model cutoff, which is a threshold that can only pass by accident.
+  for (const std::string& bad : {std::string("0"), std::string("-2")}) {
+    MetaFields nonpositive;
+    nonpositive.receptive_field_layers = bad;
+    const std::string msg = expect_throws(
+        [&] {
+          const LammpsContract c{MetaSchema{v3_meta(nonpositive)}};
+          (void)c.receptive_field_layers();
+        },
+        "receptive_field_layers " + bad);
+    expect_contains(msg, "receptive_field_layers",
+                    "the diagnostic must name the field");
+    expect_contains(msg, bad, "the diagnostic must quote the value");
+  }
+
+  // A fractional T is not a layer count. Refused rather than truncated to 1.
+  MetaFields fractional;
+  fractional.receptive_field_layers = "2.5";
+  const std::string frac = expect_throws(
+      [&] {
+        const LammpsContract c{MetaSchema{v3_meta(fractional)}};
+        (void)c.receptive_field_layers();
+      },
+      "fractional receptive_field_layers");
+  expect_contains(frac, "receptive_field_layers",
+                  "the diagnostic must name the field");
+
+  // requires_sorted_edges is the OTHER half of the v3 field increment, and its
+  // defaulting is deliberately the opposite: absent means false, because
+  // scatter-class reductions are permutation-invariant and every model in the
+  // tree is one. Only a segmented / CSR-aggregating export opts in.
+  expect_true(!ok.requires_sorted_edges(),
+              "an export declaring false must read false");
+
+  MetaFields sorted;
+  sorted.requires_sorted_edges = "true";
+  expect_true(LammpsContract{MetaSchema{v3_meta(sorted)}}.requires_sorted_edges(),
+              "an export declaring true must read true");
+
+  MetaFields silent;
+  silent.requires_sorted_edges = "";
+  expect_true(!LammpsContract{MetaSchema{v3_meta(silent)}}.requires_sorted_edges(),
+              "an export that never mentions the flag must read false");
 }
 
 void test_contract_species_int_array() {
@@ -296,7 +447,7 @@ void test_contract_species_int_array() {
   // because SpeciesMap's diagnostics quote the list back to the user.
   MetaFields many;
   many.species = "[1, 6, 7, 8, 16]";
-  const LammpsContract c{MetaSchema{v2_meta(many)}};
+  const LammpsContract c{MetaSchema{v3_meta(many)}};
 
   const std::vector<int> species = c.species();
   const std::vector<int> want = {1, 6, 7, 8, 16};
@@ -318,7 +469,7 @@ void test_contract_species_rejects_non_integer() {
   fractional.species = "[1, 1.5, 8]";
   const std::string frac = expect_throws(
       [&] {
-        const LammpsContract c{MetaSchema{v2_meta(fractional)}};
+        const LammpsContract c{MetaSchema{v3_meta(fractional)}};
         (void)c.species();
       },
       "fractional species element");
@@ -329,7 +480,7 @@ void test_contract_species_rejects_non_integer() {
   alphabetic.species = R"([1, "x", 8])";
   const std::string alpha = expect_throws(
       [&] {
-        const LammpsContract c{MetaSchema{v2_meta(alphabetic)}};
+        const LammpsContract c{MetaSchema{v3_meta(alphabetic)}};
         (void)c.species();
       },
       "string species element");
@@ -341,7 +492,7 @@ void test_contract_species_rejects_non_integer() {
   negative.species = "[1, -6, 8]";
   const std::string neg = expect_throws(
       [&] {
-        const LammpsContract c{MetaSchema{v2_meta(negative)}};
+        const LammpsContract c{MetaSchema{v3_meta(negative)}};
         (void)c.species();
       },
       "negative species element");
@@ -354,7 +505,7 @@ void test_contract_species_rejects_non_integer() {
   empty.species = "[]";
   const std::string none = expect_throws(
       [&] {
-        const LammpsContract c{MetaSchema{v2_meta(empty)}};
+        const LammpsContract c{MetaSchema{v3_meta(empty)}};
         (void)c.species();
       },
       "empty species list");
@@ -363,19 +514,24 @@ void test_contract_species_rejects_non_integer() {
 
 // ---- dispatcher -----------------------------------------------------------
 //
-// Fixture-backed case: parses the schema-v2 meta that generate_fixtures.py
+// Fixture-backed case: parses the schema-v3 meta that generate_fixtures.py
 // emits through the production _lammps_meta_block, tying the Python-side
 // LAMMPS_META_SCHEMA to the C++ expected version at test time. Bumping either
 // constant alone turns this red. Requires MOLNEX_INTERFACE_FIXTURE_DIR.
-void test_contract_reads_generated_v2_fixture() {
+//
+// The tie is now doubled: the fixture FILENAME carries the schema version, so a
+// C++ side still expecting v2 fails to open `lammps_v3.meta.json` at all, and a
+// Python side still writing v2 leaves this case with no file. Only a matched
+// pair goes green.
+void test_contract_reads_generated_v3_fixture() {
   const char* env = std::getenv("MOLNEX_INTERFACE_FIXTURE_DIR");
   if (env == nullptr || *env == '\0') {
     throw std::runtime_error("MOLNEX_INTERFACE_FIXTURE_DIR not set");
   }
-  const std::string path = std::string(env) + "/lammps_v2.meta.json";
+  const std::string path = std::string(env) + "/lammps_v3.meta.json";
   const auto doc = molnex::interface::MetaSchema::from_file(path);
   expect_true(doc.device() == "cpu", "fixture device must be cpu");
-  const molnex::lammps::LammpsContract contract(doc);  // schema_version == 2 validated here
+  const molnex::lammps::LammpsContract contract(doc);  // schema_version == 3 validated here
   expect_near(contract.cutoff(), 4.5, 1e-12, "fixture cutoff");
   expect_true(contract.units() == "real", "fixture units must be real");
   expect_true(contract.contract() == molnex::lammps::Contract::cutoff_graph,
@@ -386,8 +542,21 @@ void test_contract_reads_generated_v2_fixture() {
   expect_near(conv.energy, 1.0, 1e-12, "self-conversion is exactly 1");
   expect_near(conv.force, conv.energy, 0.0, "force == energy under angstrom");
   const auto outs = contract.outputs();
-  expect_true(outs.size() == 3 && outs[2] == "virial",
-         "supports_virial fixture must list the virial output");
+  expect_true(outs.size() == 4 && outs[2] == "atomic_energy" && outs[3] == "virial",
+         "the v3 fixture must list atomic_energy before the virial");
+  const auto ins = contract.inputs();
+  expect_true(ins.size() == 4 && ins[3] == "local_mask",
+         "the v3 dynamic fixture must carry local_mask as its fourth input");
+
+  // The two v3 fields, read off the document the PRODUCTION writer emitted —
+  // which is the only place the two spellings are checked against each other.
+  // The fixture declares T = 2 on purpose: a fixture written with T = 1 would
+  // let an impl that ignores T pass the fat-ghost check anyway, leaving this
+  // tie blind to exactly the bug the field exists to prevent.
+  expect_int(contract.receptive_field_layers(), 2,
+             "fixture receptive_field_layers");
+  expect_true(!contract.requires_sorted_edges(),
+              "the fixture exports the default: no sorted-edge requirement");
 
   // The writer pretty-prints `species` one element per line, while every
   // in-test document above writes it on one. This is the only case that reads
@@ -415,8 +584,10 @@ const std::map<std::string, TestFn>& registry() {
       {"contract_species_int_array", test_contract_species_int_array},
       {"contract_species_rejects_non_integer",
        test_contract_species_rejects_non_integer},
-      {"contract_reads_generated_v2_fixture",
-       test_contract_reads_generated_v2_fixture},
+      {"contract_requires_receptive_field_layers",
+       test_contract_requires_receptive_field_layers},
+      {"contract_reads_generated_v3_fixture",
+       test_contract_reads_generated_v3_fixture},
   };
   return r;
 }

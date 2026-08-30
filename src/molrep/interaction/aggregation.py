@@ -100,7 +100,17 @@ class MessageAggregation(nn.Module):
         if n_nodes is None:
             n_nodes = int(edge_index.max().item()) + 1
 
-        # Scatter-add: sum messages to target nodes
+        # Scatter-add: sum messages to target nodes.
+        #
+        # Order guard (spec lammps-iface-05-pbc, D6): scatter-class reductions
+        # are permutation-invariant, so this accepts `edge_index` in any order —
+        # which is why the LAMMPS bridge hands over the raw neighbour list and
+        # skips a per-step sort. If you replace this with segmented / CSR
+        # aggregation (cuEquivariance's indexed ops, `segment_csr`, …), that
+        # stops being true: those require rows grouped by index, and exports of
+        # such a model MUST declare `requires_sorted_edges=True` so the C++ side
+        # sorts. Silently swapping the reduction here would produce a model that
+        # is wrong only on unsorted input, i.e. only in production.
         aggregated = torch.zeros(
             n_nodes,
             messages.shape[1],

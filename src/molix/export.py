@@ -62,16 +62,17 @@ class Exporter:
         from molix import Exporter
         from molix.engine import EngineForward
 
-        flat = EngineForward(pinet_potential)           # tensors in, (E, F) out
+        flat = EngineForward(pinet_potential)      # tensors in, (E, F, E_atom) out
         n = torch.export.Dim("n_atoms", min=2)
         e = torch.export.Dim("n_edges", min=1)
         Exporter(flat).export_pretraced(
-            (Z, pos, edge_index),
+            (Z, pos, edge_index, local_mask),
             "pinet.pt2",
-            dynamic_shapes=({0: n}, {0: n}, {0: e}),
+            dynamic_shapes=({0: n}, {0: n}, {0: e}, {0: n}),
         )
         runner = Exporter.load("pinet.pt2")
-        energy, forces = runner(Z2, pos2, edge_index2)   # any N / E
+        # any N / E; energy is the site-energy sum over local_mask (schema v3)
+        energy, forces, atomic_energy = runner(Z2, pos2, edge_index2, local_mask2)
     """
 
     def __init__(self, module: nn.Module) -> None:
