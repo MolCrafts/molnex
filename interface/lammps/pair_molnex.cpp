@@ -18,33 +18,19 @@
 #include "update.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 
 #include <ATen/ATen.h>
 
-#include "lammps_meta.h"
+#include "lammps_contract.h"
+#include "molnex/interface/meta_schema.h"
 #include "molnex/interface/model_runner.h"
 
 namespace fs = std::filesystem;
 
 using namespace LAMMPS_NS;
-
-namespace {
-
-/* Energy of one unit of the given LAMMPS unit system, expressed in eV.
-   Distance is Å in both `real` and `metal`, so a single scalar converts both
-   energy (kcal/mol or eV) and force (per-Å of the same energy). */
-double energy_unit_in_eV(const std::string &units) {
-  if (units == "metal") return 1.0;                 // eV
-  if (units == "real") return 0.0433641043;         // kcal/mol -> eV
-  throw std::runtime_error(
-      "pair_style molnex: unsupported unit system '" + units +
-      "' (only 'real' and 'metal' carry an energy<->eV conversion)");
-}
-
-}  // namespace
 
 PairMolnex::PairMolnex(LAMMPS *lmp) : Pair(lmp)
 {
@@ -90,45 +76,63 @@ void PairMolnex::settings(int narg, char **arg)
   if (narg == 2) model_name = arg[1];
 
   // --- read the model-agnostic contract from <model_dir>/<name>.meta.json ---
+  // Two dialects meet here: the reader layers below throw std::runtime_error,
+  // LAMMPS wants error->all(FLERR, ...). Every error->all stays OUTSIDE the
+  // try blocks — it raises a LAMMPSException, which our own catch would
+  // otherwise swallow and re-label as a malformed meta.
   const std::string meta_path = (fs::path(model_dir) / (model_name + ".meta.json")).string();
-  std::string meta;
+  std::optional<molnex::interface::MetaSchema> doc;
   try {
-    meta = molnex::lammps_meta::read_text(meta_path);
+    doc = molnex::interface::MetaSchema::from_file(meta_path);
   } catch (const std::exception &e) {
     error->all(FLERR, "pair_style molnex: {}", e.what());
   }
-  if (!molnex::lammps_meta::has_field(meta, "lammps"))
+  if (!doc->has_block("lammps"))
     error->all(FLERR, "pair_style molnex: {} has no 'lammps' block — export with "
                       "molix.engine.export_for_lammps, not the bare Exporter",
                meta_path);
 
+  // Which contract the export declares. Parsed inside the try (an unknown
+  // spelling throws), acted on after it (the refusal is a LAMMPS error, not a
+  // malformed meta).
+  auto model_contract = molnex::lammps::Contract::cutoff_graph;
   try {
-    cut_global = molnex::lammps_meta::get_number(meta, "cutoff");
-    model_units = molnex::lammps_meta::get_string(meta, "units");
-    const std::string model_dtype = molnex::lammps_meta::get_string(meta, "model_dtype");
-    fp64_model = (model_dtype == "float64");
+    // Constructing the contract hard-validates schema_version == 2: a v1 meta
+    // is refused here rather than silently losing its cuda_graph discriminator.
+    const molnex::lammps::LammpsContract contract(*doc);
 
-    // units: convert model-native energy/forces to LAMMPS' active unit system.
-    const std::string lmp_units = update->unit_style;
-    if (model_units == lmp_units) {
-      energy_conv = 1.0;
-    } else {
-      energy_conv = energy_unit_in_eV(model_units) / energy_unit_in_eV(lmp_units);
-    }
-    force_conv = energy_conv;   // force = energy / Å, distance unchanged
+    cut_global = contract.cutoff();
+    model_units = contract.units();
+    fp64_model = (contract.model_dtype() == "float64");
 
-    supports_pbc = molnex::lammps_meta::get_bool(meta, "supports_pbc", false);
-    supports_virial = molnex::lammps_meta::get_bool(meta, "supports_virial", false);
+    // units: the export stamped an energy-conversion table (computed with
+    // molix.units / pint) keyed by LAMMPS unit style; look up the active one.
+    // No conversion constant is restated in C++. When the model's own units are
+    // the active style the table holds exactly 1.0 by construction, and force
+    // may share the factor only because units_for asserted length_unit == Å.
+    const molnex::lammps::UnitConversion conv = contract.units_for(update->unit_style);
+    energy_conv = conv.energy;
+    force_conv = conv.force;
+
+    model_contract = contract.contract();
+
+    supports_pbc = contract.supports_pbc();
+    supports_virial = contract.supports_virial();
 
     // CUDA-graph fast path: fixed N + padded E_max, captured once & replayed.
-    use_cuda_graph = molnex::lammps_meta::get_bool(meta, "cuda_graph", false);
+    use_cuda_graph = (contract.execution() == molnex::lammps::Execution::cuda_graph);
     if (use_cuda_graph) {
-      n_fixed = static_cast<int>(molnex::lammps_meta::get_number(meta, "n_atoms"));
-      e_max = static_cast<int64_t>(molnex::lammps_meta::get_number(meta, "e_max"));
+      n_fixed = contract.n_atoms();
+      e_max = contract.e_max();
     }
   } catch (const std::exception &e) {
     error->all(FLERR, "pair_style molnex: malformed meta.json: {}", e.what());
   }
+
+  if (model_contract != molnex::lammps::Contract::cutoff_graph)
+    error->all(FLERR, "pair_style molnex: contract 'fixed-graph' has no implementation yet "
+                      "(this pair style builds its edge set from a cutoff; a fixed covalent "
+                      "topology needs an impl that does not exist)");
 
   // Load the AOTI model now (so errors surface at setup, not first step).
   // run_single_threaded (the ModelRunner default) is required for graph capture.
@@ -137,10 +141,12 @@ void PairMolnex::settings(int narg, char **arg)
 
   if (use_cuda_graph) {
     if (device != "cuda")
-      error->all(FLERR, "pair_style molnex: meta cuda_graph=true but device={} (need cuda)", device);
+      error->all(FLERR, "pair_style molnex: meta execution=cuda-graph but device={} (need cuda)",
+                 device);
     if (supports_pbc)
-      error->all(FLERR, "pair_style molnex: cuda_graph is incompatible with supports_pbc "
-                        "(ghost count varies; re-export without cuda_graph for PBC MD)");
+      error->all(FLERR, "pair_style molnex: execution=cuda-graph is incompatible with "
+                        "supports_pbc (ghost count varies; re-export with cuda_graph=False "
+                        "for PBC MD)");
     auto dev = at::Device(at::kCUDA);
     at::ScalarType mdt = fp64_model ? at::kDouble : at::kFloat;
     Zg_ = at::zeros({n_fixed}, at::TensorOptions().dtype(at::kLong).device(dev));

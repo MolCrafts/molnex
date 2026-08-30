@@ -9,9 +9,11 @@ document is the AOTI neural-potential path only.
 A single generic LAMMPS pair style that evaluates **any** molnex potential
 exported via `molix.engine.export_for_lammps`. There is no per-model C++: the
 pair style reads everything model-specific (cutoff, native units, compute dtype,
-supported species, capabilities) from the export directory's
-`<name>.meta.json` `lammps` block, and runs the AOT-Inductor `.pt2` package
-through the shared `molnex::interface::ModelRunner`.
+capabilities) from the export directory's `<name>.meta.json` `lammps` block, and
+runs the AOT-Inductor `.pt2` package through the shared
+`molnex::interface::ModelRunner`. The block also records the model's supported
+species, which today is provenance — the check of your `pair_coeff` atomic
+numbers against it lands with `lammps-iface-02-view`.
 
 ```
 pair_style molnex <model_dir> [name]
@@ -31,11 +33,19 @@ must take flat tensors and return flat tensors:
 
 | direction | tensors |
 |-----------|---------|
-| inputs  | `Z (N,)` int64 · `pos (N,3)` float · `edge_index (E,2)` int64 (sorted by `(src,tgt)`) |
-| outputs | `energy ()` scalar float · `forces (N,3)` float |
+| inputs  | `Z (N,)` int64 · `pos (N,3)` float (Å) · `edge_index (E,2)` int64 (sorted by `(src,tgt)`) |
+| outputs | `energy ()` scalar float · `forces (N,3)` float — both in the model's native units |
 
-`N` (atoms) and `E` (edges) are exported as **dynamic** dimensions, so one `.pt2`
-serves every MD frame. Units, cutoff, dtype, and species travel in `meta.json`.
+Two optional slots widen that table, and the meta `inputs` / `outputs` lists say
+which of them a given export uses: a fixed-shape (`execution: "cuda-graph"`)
+export takes a fourth input `mask (E,)` bool, and a `supports_virial=true` export
+returns a third output `virial (6,)` ordered `(xx, yy, zz, xy, xz, yz)`.
+
+On the default (`execution: "dynamic"`) path `N` (atoms) and `E` (edges) are
+exported as **dynamic** dimensions, so one `.pt2` serves every MD frame; the
+fixed-shape path pins them instead (`n_atoms` / `e_max` in the meta) because a
+CUDA graph can only be captured over static shapes. Units, cutoff, dtype, and
+species travel in `meta.json`.
 
 ## Exporting a model (Python side)
 
@@ -83,14 +93,50 @@ The adapter name is stamped into `meta.json` for provenance.
 
 ## Units
 
-`export_for_lammps(..., units=...)` records the model's native unit system. At
-run time `pair_style molnex` reads LAMMPS' active `units` and converts
-energy/forces (distance is Å in both `real` and `metal`):
+`export_for_lammps(..., units=...)` records the model's native unit system
+(`real` = kcal/mol, `metal` = eV). The export **also stamps an `energy_conv`
+table** into the meta `lammps` block: one entry per LAMMPS unit style, holding
+the value of one model energy unit expressed in that style. Those numbers are
+evaluated on the Python side by `molix.units` (pint), which is the only place
+the conversion is ever computed — `energy_conv[units]` is exactly `1.0` by
+construction.
 
-| model `units` | energy   | converted to `units real` | converted to `units metal` |
-|---------------|----------|---------------------------|----------------------------|
-| `real`        | kcal/mol | ×1                        | ×0.0433641                 |
-| `metal`       | eV       | ×23.0605                  | ×1                         |
+At run time `pair_style molnex` looks up LAMMPS' active unit style
+(`update->unit_style`) in that table, and refuses — listing every style the
+export serves — when there is no entry for it. **No conversion factor is written
+in the C++, and none is written in this README**: the numbers your model is
+actually scaled by are in your own export's `<name>.meta.json`, which is the one
+copy that cannot drift from the model it describes.
+
+Forces reuse the energy factor, and that reuse is *checked* rather than assumed.
+`[F] = [E]/[L]`, so the identity `force_conv = energy_conv` holds only while the
+model measures length the way LAMMPS does. The meta therefore also carries
+`length_unit`, and the pair style asserts it is `angstrom` (LAMMPS `real` and
+`metal` both use Å) before setting the force factor. A model exported in Bohr
+fails loudly instead of being silently mis-scaled by the Bohr/Å ratio; serving
+one would take a schema v3 with a length table, which is deliberately not
+pre-built.
+
+## Schema versions
+
+The meta `lammps` block is versioned by `schema_version`, currently **2**. The
+plugin and the exports it loads are upgraded as a pair.
+
+**v1 → v2 (breaking).** A v2 export carries `schema_version`, `contract`,
+`execution`, `energy_conv` and `length_unit`, and **drops** the `cuda_graph`
+boolean. Execution strategy is now `execution: "dynamic" | "cuda-graph"`, and
+`contract: "cutoff-graph" | "fixed-graph"` declares where the model's edge set
+comes from (`fixed-graph` has no implementation yet and is refused explicitly,
+never quietly run down the cutoff path).
+
+The two mixing directions are not symmetric:
+
+* **v2 plugin + v1 export** — refused loudly. The contract validates
+  `schema_version == 2` while loading and tells you to re-export.
+* **v1 plugin + v2 export** — *unsupported, and undetectable from inside the old
+  binary*. A v1 plugin read `get_bool(meta, "cuda_graph", false)`; with the key
+  gone it falls back to `false` and runs a CUDA-graph export down the dynamic
+  path without a word. Rebuild the plugin when you move to v2 exports.
 
 ## Building the plugin
 
@@ -129,8 +175,10 @@ export LD_LIBRARY_PATH="$(dirname $LMP_LIB):$LD_LIBRARY_PATH"
 #   pair_coeff * * 1 6 7 8
 ```
 
-A complete, runnable from-source build + benchmark (LAMMPS + plugin, arch-tagged,
-no wheel) lives in `work/lammps-iface-bench/` (`build_lammps.sh` + `build_plugin.sh`).
+A complete from-source build + benchmark workspace (LAMMPS + plugin, arch-tagged,
+no wheel — `build_lammps.sh` + `build_plugin.sh`) is kept **outside this
+repository** as developer scratch and is not shipped with molnex; the recipe
+above is the supported path.
 
 ## Scope and roadmap
 
@@ -157,8 +205,12 @@ Models that recompute `edge_diff = pos[target] - pos[source]` from positions
 need no separate `shifts` input in this cut. A future export may still add
 explicit `cell` / `edge_shift` tensors for models that require them.
 
-`cuda_graph=true` remains **incompatible** with ghosts (fixed `N`); re-export
-without `cuda_graph` for periodic / multi-rank MD.
+A fixed-shape export — `export_for_lammps(..., cuda_graph=True)` on the Python
+side, `execution: "cuda-graph"` in the meta — is **incompatible** with ghosts:
+the ghost count changes as atoms move between domains, while the captured graph
+needs a fixed `N`. The pair style refuses the combination while loading the
+model rather than at the first step. Re-export with `cuda_graph=False` (meta
+`execution: "dynamic"`) for periodic / multi-rank MD.
 
 ### Virial (`supports_virial=true`)
 

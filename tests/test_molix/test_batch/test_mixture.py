@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
-from molpy import Block, Frame, FrameCollection
+from molpy import Block, Frame
 from torch.utils.data import Dataset
 
 from molix.batch import DataMixture, DataModule
-from molix.store.frame_dataset import CLASS_I_FRAME_SCHEMA, FrameDataset
+from molix.store.frame_dataset import CLASS_I_FRAME_SCHEMA, FrameCollection, FrameDataset
 
 
 def _geom(z: list[int], *, molecule_id: str, energy: float = 0.0) -> Frame:
@@ -19,8 +19,8 @@ def _geom(z: list[int], *, molecule_id: str, energy: float = 0.0) -> Frame:
     atoms["z"] = np.zeros(n, dtype=np.float64)
     frame = Frame()
     frame["atoms"] = atoms
-    frame.meta["energy"] = energy
-    frame.meta["molecule_id"] = molecule_id
+    frame.meta = {**frame.meta, "energy": energy}
+    frame.meta = {**frame.meta, "molecule_id": molecule_id}
     return frame
 
 
@@ -70,7 +70,7 @@ class TestDataMixture:
         assert len(mix) == 2
         assert len(mix[0]) == 1
         assert len(mix[1]) == 2
-        assert [float(frame.meta["energy"]) for frame in mix[1]] == [0.0, 1.0]
+        assert [float(frame.meta["energy"].value) for frame in mix[1]] == [0.0, 1.0]
 
     def test_empty_sources_rejected(self):
         try:

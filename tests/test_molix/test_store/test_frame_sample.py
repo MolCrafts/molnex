@@ -28,8 +28,8 @@ def _water(*, energy: float | None = -1.5, forces: bool = False) -> Frame:
     frame["atoms"] = atoms
     frame["bonds"] = bonds
     if energy is not None:
-        frame.meta["energy"] = energy
-    frame.meta["molecule_id"] = "water"
+        frame.meta = {**frame.meta, "energy": energy}
+    frame.meta = {**frame.meta, "molecule_id": "water"}
     return frame
 
 

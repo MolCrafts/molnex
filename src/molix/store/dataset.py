@@ -114,7 +114,7 @@ class BaseDataset(Dataset[Any], ABC):
         """Return the ``idx``-th record.
 
         Packed readers return a flat ``dict``. Frame readers return a
-        :data:`~molpy.FrameCollection`.
+        :data:`~molix.store.frame_dataset.FrameCollection`.
         """
         ...
 

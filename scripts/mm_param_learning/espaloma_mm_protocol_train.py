@@ -279,7 +279,7 @@ def frame_to_sample(fr) -> dict:
         "pos": pos,
         "bond_index": torch.as_tensor(np.stack([atomi, atomj]), dtype=torch.long),
         "targets": {
-            "mm_energy": float(fr.meta["mm_energy"]),
+            "mm_energy": float(getattr(fr.meta["mm_energy"], "value", fr.meta["mm_energy"])),
             "task": TASK_CODE_ENERGY,
         },
         "angles": {
@@ -355,7 +355,8 @@ def load_all_frames(
         ds = PhalkethohMMDataset(data_root, download=False, split=split)
         for i in range(len(ds)):
             fr = ds[i]
-            mid = str(fr.meta["molecule_id"])
+            raw_mid = fr.meta["molecule_id"]
+            mid = str(getattr(raw_mid, "value", raw_mid))
             n_atoms[mid] = int(len(fr["atoms"]["number"]))
             if max_confs is None or len(by[mid]) < max_confs:
                 by[mid].append(fr)

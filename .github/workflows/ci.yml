@@ -51,3 +51,33 @@ jobs:
         timeout-minutes: 20
       - name: Run tests
         run: pytest tests/ -q -p no:cacheprovider -n auto --dist worksteal
+
+  interface:
+    name: Interface (C++, no LAMMPS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install build prerequisites
+        run: |
+          python -m pip install --upgrade pip
+          pip install "scikit-build-core>=0.10" "cmake>=4" ninja
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.10"
+      - name: Install project
+        run: |
+          export CMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
+          pip install -e ".[dev]" --no-build-isolation -v
+        timeout-minutes: 20
+      - name: Configure and build interface (no LAMMPS)
+        run: |
+          export CMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
+          cmake -S interface -B build-interface -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-interface -j
+      # Explicit filter, never bare ctest: the FIXTURES_SETUP entry would run a
+      # full Python AOTI export; only the no-fixture list plus the CPU-safe
+      # fixture-backed cases belong in this gate.
+      - name: Run interface ctests (no-fixture list)
+        run: |
+          ctest --test-dir build-interface -R '^meta_|^contract_' --output-on-failure

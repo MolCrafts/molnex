@@ -2,7 +2,7 @@
 
 A :class:`DataMixture` is a map-style :class:`~molix.store.dataset.BaseDataset`
 over ``sources: Mapping[str, Dataset]``. The source key **is** the task name.
-Each source index is one sampling unit (one :data:`~molpy.FrameCollection`).
+Each source index is one sampling unit (one :data:`~molix.store.frame_dataset.FrameCollection`).
 The mix policy lives on the same object so :class:`~molix.batch.datamodule.DataModule`
 can take it as ``train_dataset``.
 """
@@ -126,9 +126,7 @@ class DataMixture(BaseDataset):
             idx += len(self)
         if idx < 0 or idx >= len(self):
             raise IndexError(idx)
-        for name, start, stop in zip(
-            self._names, self._offsets, self._offsets[1:], strict=True
-        ):
+        for name, start, stop in zip(self._names, self._offsets, self._offsets[1:], strict=True):
             if start <= idx < stop:
                 return self.sources[name][idx - start]
         raise IndexError(idx)

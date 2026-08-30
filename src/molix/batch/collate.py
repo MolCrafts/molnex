@@ -239,7 +239,7 @@ def collate_molecules(
 ) -> TensorDict:
     """Collate molecule samples into a nested TensorDict.
 
-    Each item is a pre-collate dict or a :data:`~molpy.FrameCollection`.
+    Each item is a pre-collate dict or a :data:`~molix.store.frame_dataset.FrameCollection`.
     FrameCollections are expanded to one dict per frame. Each dict has at
     least ``Z`` and ``pos`` keys.
     Optional: ``edge_index``, ``edge_diff``, ``edge_dist``, ``targets``,

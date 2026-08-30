@@ -1,6 +1,6 @@
-"""Map-style dataset of :data:`~molpy.FrameCollection` records.
+"""Map-style dataset of :data:`FrameCollection` records.
 
-One record is always a :data:`~molpy.FrameCollection` (``Sequence[Frame]``).
+One record is always a :data:`FrameCollection` (``Sequence[Frame]``).
 A single geometry is a length-1 collection; a torsion scan or relaxation is a
 longer collection. This type does not fetch, split, or mix tasks — mixing
 named sources is :class:`~molix.batch.mixture.DataMixture`.
@@ -11,13 +11,18 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 import torch
-from molpy import Frame, FrameCollection
+from molpy import Frame
 
 from molix.batch.collate import TargetSchema
 from molix.store.dataset import BaseDataset
 from molix.store.frame_sample import FrameSample
 
 __all__ = ["CLASS_I_FRAME_SCHEMA", "FrameCollection", "FrameDataset"]
+
+#: One record: an ordered sequence of frames sharing one identity (a single
+#: geometry is a length-1 collection; a scan or relaxation is longer). molpy
+#: exports no such type — the alias is owned here.
+FrameCollection = Sequence[Frame]
 
 CLASS_I_FRAME_SCHEMA = TargetSchema(
     graph_level=frozenset({"energy", "mm_energy", "torsion_angle"}),
@@ -31,7 +36,9 @@ def _group_of(frame: Frame) -> str:
     meta = getattr(frame, "meta", None) or {}
     for key in _GROUP_KEYS:
         if key in meta:
-            return str(meta[key])
+            # molrs >= 0.14 wraps meta entries in MetaValue; .value unwraps.
+            raw = meta[key]
+            return str(getattr(raw, "value", raw))
     return "ungrouped"
 
 

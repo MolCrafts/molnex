@@ -6,6 +6,13 @@ must not be treated as authority for a new training submission.
 
 ## Active specifications
 
+- [mace-polar-port-01-backbone](mace-polar-port-01-backbone.md) — 泛化 MACEEncoder 残差骨干 + MACEPolarSpec，钉 Polar-1-M dump [code-complete]
+- [mace-polar-port-02-blocks](mace-polar-port-02-blocks.md) — NonLinearBiasReadout.out_mul、自旋源、层混合 [code-complete]
+- [lammps-iface-01-meta](lammps-iface-01-meta.md) — meta.json schema v2 契约与唯一读取器 MetaSchema；换算浮点复述清零 [approved]
+- [lammps-iface-02-view](lammps-iface-02-view.md) — LammpsView 隔离层与原子侧 bridge 组件；pair_coeff Z 校验补齐 [approved]
+- [lammps-iface-03-graph](lammps-iface-03-graph.md) — GraphBridge 每步重算图、reverse-comm 搬迁与 backend-neutral Exec 策略 [approved]
+- [lammps-iface-04-facade](lammps-iface-04-facade.md) — ContractImpl 契约层与闭集派发；facade 削至协议机械，静默零/special_bonds 修复 [approved]
+- [lammps-iface-05-pbc](lammps-iface-05-pbc.md) — fat-ghost 单发 PBC 修复：local-only 位点能量、ghost 闭包、感受野校验、schema v3 [approved]
 - [oplsaa-parameterizer-01-types](oplsaa-parameterizer-01-types.md) — OPLSAAForceField 类型面与 PotentialMeta improper schema [code-complete]
 - [oplsaa-parameterizer-02-heads](oplsaa-parameterizer-02-heads.md) — ProperTorsionParamHead OPLS-AA k1..k4 直接输出 [code-complete]
 - [oplsaa-parameterizer-03-parameterizer](oplsaa-parameterizer-03-parameterizer.md) — ClassicalIMM→Parameterizer；ClassIPredictions→ForceFieldPredictions [code-complete]

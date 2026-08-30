@@ -19,6 +19,8 @@ find_package(CUDAToolkit QUIET)
 
 add_library(molnex_interface STATIC
   src/model_runner.cpp
+  # Header-only; listed for IDE / install visibility only (no translation unit).
+  include/molnex/interface/meta_schema.h
 )
 
 target_include_directories(molnex_interface PUBLIC

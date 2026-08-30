@@ -53,7 +53,6 @@ class TestOfficialSourceCache:
         assert FakeOMol25.instances == 1
 
 
-
 class TestEnergyMse:
     def test_energy_mse_is_nonzero_for_one_geometry(self):
         pred = torch.tensor([10.0])
@@ -98,8 +97,8 @@ class TestFitAtomicReference:
             atoms["z"] = np.zeros(n, dtype=np.float64)
             frame = Frame()
             frame["atoms"] = atoms
-            frame.meta["energy"] = energy
-            frame.meta["molecule_id"] = name
+            frame.meta = {**frame.meta, "energy": energy}
+            frame.meta = {**frame.meta, "molecule_id": name}
             return frame
 
         # ε[H]=2, ε[O]=5 → H2 = 4, water = 9 (H counts differ, so the system is full rank)
@@ -113,14 +112,14 @@ class TestRequireGroup:
     def test_missing_identity_raises(self) -> None:
         frame = Frame()
         frame["atoms"] = Block()
-        frame.meta["energy"] = 0.0
+        frame.meta = {**frame.meta, "energy": 0.0}
         with pytest.raises(ValueError, match="molecule_id"):
             _require_group(frame)
 
     def test_reads_molecule_id(self) -> None:
         frame = Frame()
         frame["atoms"] = Block()
-        frame.meta["molecule_id"] = "mol-7"
+        frame.meta = {**frame.meta, "molecule_id": "mol-7"}
         assert _require_group(frame) == "mol-7"
 
 
@@ -147,8 +146,8 @@ class TestLabelSample:
             frame = Frame()
             frame["atoms"] = atoms
             frame["bonds"] = blk
-            frame.meta["energy"] = 0.0
-            frame.meta["molecule_id"] = name
+            frame.meta = {**frame.meta, "energy": 0.0}
+            frame.meta = {**frame.meta, "molecule_id": name}
             return frame
 
         water = _geom(
@@ -186,8 +185,8 @@ class TestLabelSample:
         bonds["atomj"] = np.array([1, 2], dtype=np.int64)
         water["atoms"] = atoms
         water["bonds"] = bonds
-        water.meta["energy"] = 0.0
-        water.meta["molecule_id"] = "w"
+        water.meta = {**water.meta, "energy": 0.0}
+        water.meta = {**water.meta, "molecule_id": "w"}
         lone = Frame()
         one = Block()
         one["element"] = np.array(["Ne"], dtype="U2")
@@ -196,8 +195,8 @@ class TestLabelSample:
         one["y"] = np.array([0.0], dtype=np.float64)
         one["z"] = np.array([0.0], dtype=np.float64)
         lone["atoms"] = one
-        lone.meta["energy"] = 0.0
-        lone.meta["molecule_id"] = "ne"
+        lone.meta = {**lone.meta, "energy": 0.0}
+        lone.meta = {**lone.meta, "molecule_id": "ne"}
         samples = [label_sample(water, group=0.0), label_sample(lone, group=1.0)]
         assert "angles" in samples[1]
         assert samples[1]["angles"]["atomi"].numel() == 0
@@ -238,8 +237,8 @@ class TestForceAwareEval:
         frame = Frame()
         frame["atoms"] = atoms
         frame["bonds"] = bonds
-        frame.meta["energy"] = -76.0
-        frame.meta["molecule_id"] = "w"
+        frame.meta = {**frame.meta, "energy": -76.0}
+        frame.meta = {**frame.meta, "molecule_id": "w"}
         fit = ClassIFit(
             [(frame,)],
             [(frame,)],
@@ -277,8 +276,8 @@ class TestRunWritesMolRecWal:
         frame = Frame()
         frame["atoms"] = atoms
         frame["bonds"] = bonds
-        frame.meta["energy"] = -76.0
-        frame.meta["molecule_id"] = molecule_id
+        frame.meta = {**frame.meta, "energy": -76.0}
+        frame.meta = {**frame.meta, "molecule_id": molecule_id}
         return (frame,)
 
     def test_run_writes_metrics_and_status(self, tmp_path):
@@ -314,7 +313,7 @@ class TestSplitCoverage:
         frame["atoms"]["x"] = [0.0]
         frame["atoms"]["y"] = [0.0]
         frame["atoms"]["z"] = [0.0]
-        frame.meta["molecule_id"] = "same"
+        frame.meta = {**frame.meta, "molecule_id": "same"}
         rec = (frame,)
         from scripts.mm_param_learning.class_i_fit import split_coverage
 
@@ -333,8 +332,8 @@ class TestSplitCoverage:
             atoms["y"] = [0.0, 0.0]
             atoms["z"] = [0.0, 0.0]
             frame["atoms"] = atoms
-            frame.meta["molecule_id"] = f"m{i}"
-            frame.meta["energy"] = 0.0
+            frame.meta = {**frame.meta, "molecule_id": f"m{i}"}
+            frame.meta = {**frame.meta, "energy": 0.0}
             records.append((frame,))
         train, val = split_records(records, train_frac=0.8, seed=2666)
         path = write_split_manifest(tmp_path / "split.json", train, val)
@@ -351,8 +350,8 @@ class TestSplitRecords:
         for i in range(10):
             frame = Frame()
             frame["atoms"] = Block()
-            frame.meta["molecule_id"] = f"m{i}"
-            frame.meta["energy"] = 0.0
+            frame.meta = {**frame.meta, "molecule_id": f"m{i}"}
+            frame.meta = {**frame.meta, "energy": 0.0}
             records.append((frame,))
         train, val = split_records(records, train_frac=0.8, seed=2666)
         assert len(train) == 8
@@ -376,7 +375,7 @@ class TestIndexOmolSource:
             atoms["element"] = np.array(["H"] * n, dtype="U2")
             frame = Frame()
             frame["atoms"] = atoms
-            frame.meta["energy"] = energy
+            frame.meta = {**frame.meta, "energy": energy}
             return (frame,)
 
         class _Src:

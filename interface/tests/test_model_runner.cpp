@@ -131,7 +131,8 @@ void test_cuda_run_matches_reference() {
 
 void test_update_weights_from_path() {
   auto dir = fixture_dir();
-  ModelRunner runner((dir / "model_cpu").string());
+  ModelRunner runner((dir / "model_cpu").string(), /*num_models=*/2, "model",
+                     /*run_single_threaded=*/false);  // hot-reload mode
   auto [input, _orig_ref] = load_reference(dir / "reference_cpu.pt");
   (void)_orig_ref;
   auto [_alt_input, alt_ref] = load_reference(dir / "reference_alt_cpu.pt");
@@ -144,7 +145,8 @@ void test_update_weights_from_path() {
 
 void test_update_weights_from_map() {
   auto dir = fixture_dir();
-  ModelRunner runner((dir / "model_cpu").string());
+  ModelRunner runner((dir / "model_cpu").string(), /*num_models=*/2, "model",
+                     /*run_single_threaded=*/false);  // hot-reload mode
   auto [input, _] = load_reference(dir / "reference_cpu.pt");
   (void)_;
   auto [_alt_input, alt_ref] = load_reference(dir / "reference_alt_cpu.pt");
@@ -158,7 +160,8 @@ void test_update_weights_from_map() {
 
 void test_parameter_info() {
   auto dir = fixture_dir();
-  ModelRunner runner((dir / "model_cpu").string());
+  ModelRunner runner((dir / "model_cpu").string(), /*num_models=*/2, "model",
+                     /*run_single_threaded=*/false);  // hot-reload mode
   auto info = runner.parameter_info();
   if (info.empty()) {
     throw std::runtime_error("parameter_info() returned empty list");
@@ -183,7 +186,8 @@ void test_parameter_info() {
 
 void test_concurrent_run_and_update() {
   auto dir = fixture_dir();
-  ModelRunner runner((dir / "model_cpu").string());
+  ModelRunner runner((dir / "model_cpu").string(), /*num_models=*/2, "model",
+                     /*run_single_threaded=*/false);  // hot-reload mode
   auto [input, _] = load_reference(dir / "reference_cpu.pt");
   (void)_;
   const std::string alt = (dir / "alt_cpu.pt").string();

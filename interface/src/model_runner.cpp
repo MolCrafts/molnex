@@ -7,11 +7,9 @@
 
 #include "molnex/interface/model_runner.h"
 
-#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
-#include <sstream>
 #include <stdexcept>
 
 #include <torch/csrc/api/include/torch/serialize.h>
@@ -22,42 +20,12 @@
 #include <torch/csrc/inductor/aoti_runner/model_container_runner_cuda.h>
 #endif
 
+#include "molnex/interface/meta_schema.h"
+
 namespace fs = std::filesystem;
 
 namespace molnex::interface {
 namespace {
-
-// Tiny "find one string field" JSON reader. Sufficient for meta.json
-// — we only need the `device` field at load time, and the rest of the
-// schema is informational. Avoids pulling in a real JSON dependency.
-std::string parse_device_field(const std::string& json_text) {
-  const std::string key = "\"device\"";
-  auto k = json_text.find(key);
-  if (k == std::string::npos) {
-    throw std::runtime_error("meta.json: missing 'device' field");
-  }
-  auto colon = json_text.find(':', k + key.size());
-  if (colon == std::string::npos) {
-    throw std::runtime_error("meta.json: malformed near 'device'");
-  }
-  auto open_q = json_text.find('"', colon + 1);
-  if (open_q == std::string::npos) {
-    throw std::runtime_error("meta.json: 'device' value not a string");
-  }
-  auto close_q = json_text.find('"', open_q + 1);
-  if (close_q == std::string::npos) {
-    throw std::runtime_error("meta.json: 'device' value not terminated");
-  }
-  return json_text.substr(open_q + 1, close_q - open_q - 1);
-}
-
-std::string read_file(const fs::path& path) {
-  std::ifstream is(path);
-  if (!is) throw std::runtime_error("cannot open " + path.string());
-  std::stringstream ss;
-  ss << is.rdbuf();
-  return ss.str();
-}
 
 std::vector<char> read_binary(const fs::path& path) {
   std::ifstream is(path, std::ios::binary);
@@ -91,8 +59,16 @@ ModelRunner::ModelRunner(const std::string& model_dir,
   if (num_models < 1) {
     throw std::runtime_error("num_models must be >= 1");
   }
+  if (num_models > 1 && run_single_threaded) {
+    // torch >= 2.12 rejects this combination inside AOTIModelPackageLoader;
+    // fail here with actionable guidance instead of its internal check text.
+    throw std::runtime_error(
+        "ModelRunner: num_models > 1 requires run_single_threaded=false "
+        "(hot-reload mode); single-threaded loading (needed for CUDA-graph "
+        "capture) supports exactly one runner");
+  }
 
-  device_ = parse_device_field(read_file(meta_path));
+  device_ = MetaSchema::from_file(meta_path.string()).device();
   if (device_ != "cpu" && device_ != "cuda") {
     throw std::runtime_error("unsupported device in meta.json: " + device_);
   }

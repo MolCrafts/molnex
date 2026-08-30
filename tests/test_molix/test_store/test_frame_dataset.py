@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import numpy as np
-from molpy import Block, Frame, FrameCollection
+from molpy import Block, Frame
 
 from molix.batch import collate_molecules
-from molix.store.frame_dataset import CLASS_I_FRAME_SCHEMA, FrameDataset
+from molix.store.frame_dataset import CLASS_I_FRAME_SCHEMA, FrameCollection, FrameDataset
 
 
 def _geom(z: list[int], *, molecule_id: str, energy: float = 0.0) -> Frame:
@@ -18,8 +18,8 @@ def _geom(z: list[int], *, molecule_id: str, energy: float = 0.0) -> Frame:
     atoms["z"] = np.zeros(n, dtype=np.float64)
     frame = Frame()
     frame["atoms"] = atoms
-    frame.meta["energy"] = energy
-    frame.meta["molecule_id"] = molecule_id
+    frame.meta = {**frame.meta, "energy": energy}
+    frame.meta = {**frame.meta, "molecule_id": molecule_id}
     return frame
 
 
@@ -45,12 +45,12 @@ class TestFrameDataset:
     def test_scan_stays_one_index(self):
         frames = [_geom([8, 1], molecule_id="scan-a", energy=float(i)) for i in range(3)]
         for frame in frames:
-            frame.meta["scan_id"] = "scan-a"
+            frame.meta = {**frame.meta, "scan_id": "scan-a"}
         ds = FrameDataset.from_records([tuple(frames)], task="torsion")
         assert len(ds) == 1
         assert ds.group_ids == ("scan-a",)
         assert ds.atom_counts.tolist() == [6]
-        assert [float(frame.meta["energy"]) for frame in ds[0]] == [0.0, 1.0, 2.0]
+        assert [float(frame.meta["energy"].value) for frame in ds[0]] == [0.0, 1.0, 2.0]
 
     def test_getitem_is_collateable(self):
         ds = FrameDataset.from_records(

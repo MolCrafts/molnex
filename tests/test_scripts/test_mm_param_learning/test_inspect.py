@@ -25,8 +25,8 @@ def _frame(name: str, *, energy: float = -76.0, shift: float = 0.0) -> Frame:
     frame = Frame()
     frame["atoms"] = atoms
     frame["bonds"] = bonds
-    frame.meta["energy"] = energy
-    frame.meta["molecule_id"] = name
+    frame.meta = {**frame.meta, "energy": energy}
+    frame.meta = {**frame.meta, "molecule_id": name}
     return frame
 
 
@@ -52,8 +52,8 @@ def _c4_close_contact(name: str = "c4") -> Frame:
     frame = Frame()
     frame["atoms"] = atoms
     frame["bonds"] = bonds
-    frame.meta["energy"] = -1500.0
-    frame.meta["molecule_id"] = name
+    frame.meta = {**frame.meta, "energy": -1500.0}
+    frame.meta = {**frame.meta, "molecule_id": name}
     return frame
 
 

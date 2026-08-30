@@ -103,6 +103,34 @@ def _emit_for_device(out_dir: Path, device: str, example: torch.Tensor) -> None:
     )
 
 
+def _emit_lammps_v2_meta(out_dir: Path) -> None:
+    """Write a real schema-v2 meta through the production block builder.
+
+    Ties the Python-side ``LAMMPS_META_SCHEMA`` to the C++ expected version at
+    test time: ``contract_reads_generated_v2_fixture`` parses this file through
+    ``LammpsContract``, so bumping either constant alone turns that case red.
+    """
+    import json
+
+    from molix.engine.export import _lammps_meta_block
+
+    meta = {
+        "device": "cpu",
+        "model_class": "MetaOnly",
+        "lammps": _lammps_meta_block(
+            species=[1, 6, 8],
+            cutoff=4.5,
+            units="real",
+            adapter_name="molnex-tensordict",
+            model_dtype="float32",
+            supports_pbc=False,
+            supports_virial=True,
+            cuda_graph=False,
+        ),
+    }
+    (out_dir / "lammps_v2.meta.json").write_text(json.dumps(meta, indent=2))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("out_dir", type=Path)
@@ -114,6 +142,7 @@ def main() -> int:
     example = torch.randn((4, 3), generator=gen)
 
     _emit_for_device(args.out_dir, "cpu", example)
+    _emit_lammps_v2_meta(args.out_dir)
     if torch.cuda.is_available():
         _emit_for_device(args.out_dir, "cuda", example)
 

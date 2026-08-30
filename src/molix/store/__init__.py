@@ -7,7 +7,7 @@ Surfaces:
   ``atom_ptr`` / ``edge_ptr`` cumsum pointers. Run-scoped scratch, not a
   persistence format; see the module docstring for the inode-budget argument
   against ``TensorDict.memmap_()``.
-* **Frame view** — a record is a :data:`~molpy.FrameCollection`
+* **Frame view** — a record is a :data:`~molix.store.frame_dataset.FrameCollection`
   (``Sequence[Frame]``). :class:`FrameSample` turns one ``Frame`` into the
   pre-collate dict; :class:`FrameDataset` is a single-task map-style view.
   Mixing named sources is :class:`~molix.batch.mixture.DataMixture`.

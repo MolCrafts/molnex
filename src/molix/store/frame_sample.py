@@ -80,7 +80,9 @@ class FrameSample:
         meta = getattr(self._frame, "meta", None) or {}
         for key in _META_SCALARS:
             if key in meta:
-                targets[key] = float(meta[key])
+                # molrs >= 0.14 wraps meta entries in MetaValue; .value unwraps.
+                raw = meta[key]
+                targets[key] = float(getattr(raw, "value", raw))
         if all(col in atoms for col in _FORCES):
             targets["forces"] = torch.stack(
                 [torch.as_tensor(_column(atoms, col), dtype=torch.float32) for col in _FORCES],

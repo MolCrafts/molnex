@@ -1,23 +1,66 @@
 """Export a molnex potential for the generic ``pair_style molnex`` LAMMPS interface.
 
-:func:`export_for_lammps` wraps a model in a flat-convention :class:`EngineForward`
-(see :mod:`molix.engine.adapter`), AOT-compiles it via :class:`molix.export.Exporter`
-into a single ``{name}.pt2`` package, then writes a sibling ``{name}.meta.json`` with a
-``lammps`` block carrying everything the C++ ``pair_style molnex`` needs to be
-model-agnostic:
+LAMMPS is the C++ molecular-dynamics (MD) engine molnex deploys trained models
+into. A *pair style* is its plug-in point for "given the atoms and their
+neighbours, return the potential energy and the force on every atom".
+``pair_style molnex`` is one such plug-in that contains no model-specific C++:
+everything it needs to drive a particular network is read from the export this
+module writes.
 
+:func:`export_for_lammps` wraps a model in a flat-convention :class:`EngineForward`
+(see :mod:`molix.engine.adapter`), compiles it ahead-of-time (AOT) via
+:class:`molix.export.Exporter` into a single ``{name}.pt2`` package (a
+self-contained AOTInductor artifact that runs without a Python interpreter),
+then writes a sibling ``{name}.meta.json`` whose ``lammps`` block carries
+everything the C++ side needs to stay model-agnostic. That block is schema v2 and
+is assembled — as a whole and nowhere else — by :func:`_lammps_meta_block`:
+
+* ``schema_version`` — contract version of this block, :data:`LAMMPS_META_SCHEMA`.
+                      The C++ ``LammpsContract`` refuses any other value while
+                      loading instead of guessing at the field set.
+* ``contract``      — where the edge set comes from: ``"cutoff-graph"`` (recomputed
+                      each step from ``cutoff``) or ``"fixed-graph"`` (edges given by a
+                      fixed covalent topology). Both export paths here produce
+                      ``"cutoff-graph"``; ``"fixed-graph"`` has no C++ implementation
+                      yet and is refused explicitly, never run down the cutoff path.
+* ``execution``     — execution strategy inside that contract: ``"dynamic"`` or
+                      ``"cuda-graph"`` (fixed shapes). Selects the C++ executor.
 * ``cutoff``        — neighbour cutoff in Å (the C++ side no longer takes it on the command line)
 * ``units``         — the model's native unit system (``"real"`` = kcal/mol, ``"metal"`` = eV);
                       ``pair_style molnex`` reads LAMMPS' active ``units`` and converts.
+* ``energy_unit`` / ``length_unit`` — labels for those native units. ``length_unit`` is
+                      currently always ``"angstrom"``; the pair style asserts it before
+                      reusing the energy factor as the force factor (``[F] = [E]/[L]``).
+* ``energy_conv``   — ``{unit style: one model energy unit measured in that style}``,
+                      evaluated by :func:`molix.units.preset_energy_ratio`, so no
+                      conversion float is spelled out in Python or C++
 * ``species``       — sorted atomic numbers ``Z`` the model supports
 * ``model_dtype``   — ``"float32"`` / ``"float64"``; the pair style casts positions to this
-* ``inputs`` / ``outputs`` — the flat tensor names/order (provenance + future schema checks)
-* ``supports_pbc`` / ``supports_virial`` — capability flags read by ``pair_style molnex``
-  (ghost graph + reverse-comm; optional 6-component virial output)
-* ``adapter``       — the registered adapter name used at export time
+* ``inputs`` / ``outputs`` — the flat tensor names, in call order (provenance + schema
+                      checks): ``Z (N,)``, ``pos (N, 3)`` in Å and ``edge_index (E, 2)``,
+                      plus ``mask (E,)`` under ``"cuda-graph"``; back come ``energy ()``
+                      and ``forces (N, 3)``, plus ``virial (6,)`` when supported — all in
+                      the model's native units.
+* ``supports_pbc`` / ``supports_virial`` — capability flags read by ``pair_style molnex``.
+  ``supports_pbc`` lets it put *ghost* atoms (LAMMPS' local copies of atoms owned by a
+  periodic image or a neighbouring MPI rank) into the graph and reverse-communicate their
+  forces back to the owning rank; ``supports_virial`` declares that the model itself
+  returns the virial, the 6-component stress-like tensor LAMMPS turns into pressure.
+* ``adapter``       — the registered adapter name used at export time (provenance only)
+* ``n_atoms`` / ``e_max`` — fixed atom count and padded edge capacity. Written **only**
+                      when ``execution == "cuda-graph"``; absent on the dynamic path.
 
-Because MD changes the edge count ``E`` (and possibly atom count ``N``) every step,
-the export marks those dimensions dynamic so a single ``.so`` serves any frame.
+The v1 ``cuda_graph`` boolean is retired in favour of ``execution``: a v1 plugin
+reading a v2 export would silently default it to ``false`` and run a fixed-shape
+model down the dynamic path, so plugin and exported artifacts must be upgraded as
+a pair — see ``interface/lammps/README.md``.
+
+Because MD changes the edge count ``E`` (and possibly the atom count ``N``) every
+step, the default (``"dynamic"``) path marks those dimensions dynamic so one
+exported package serves every frame. The ``"cuda-graph"`` path does the opposite
+on purpose: it fixes both dimensions (``n_atoms`` / ``e_max``) because a CUDA
+graph — a recorded, replayable sequence of GPU kernels — can only be captured
+over static shapes.
 """
 
 from __future__ import annotations
@@ -30,15 +73,20 @@ import torch.nn as nn
 
 from molix import logger as _logger_mod
 from molix.export import Exporter
+from molix.units import preset_energy_ratio
 
 from .adapter import EngineAdapter, EngineForward
 
 logger = _logger_mod.getLogger(__name__)
 
 #: meta.json ``lammps`` block schema version — bump on incompatible field changes.
-LAMMPS_META_SCHEMA = 1
+#: The C++ reader pins the same number (``LammpsContract::kSchemaVersion`` in
+#: ``interface/lammps/lammps_contract.h``) and refuses anything else, so the two
+#: constants move together or the plugin stops loading new exports.
+LAMMPS_META_SCHEMA = 2
 
-#: unit systems the pair style understands (LAMMPS names → energy unit label)
+#: unit systems the pair style understands (LAMMPS names → energy unit label).
+#: Also the key set of the ``energy_conv`` table: one row per style listed here.
 _UNIT_LABELS = {"real": "kcal/mol", "metal": "eV"}
 
 _DTYPE_NAMES = {torch.float32: "float32", torch.float64: "float64"}
@@ -73,6 +121,82 @@ def _example_system(species: list[int], cutoff: float, dtype: torch.dtype, devic
     return Z, pos, edge_index
 
 
+def _lammps_meta_block(
+    *,
+    species: list[int],
+    cutoff: float,
+    units: str,
+    adapter_name: str,
+    model_dtype: str,
+    supports_pbc: bool,
+    supports_virial: bool,
+    cuda_graph: bool,
+    n_atoms: int | None = None,
+    e_max: int | None = None,
+) -> dict[str, object]:
+    """Assemble the schema-v2 ``lammps`` block of ``{name}.meta.json``.
+
+    Pure dict assembly, split out from :func:`export_for_lammps` because the
+    export path around it is CPU-refused (force export, see
+    :class:`molix.export.Exporter`) and this contract must still be unit-tested
+    on a CPU box — and because the C++ test fixtures are generated from it.
+
+    ``contract`` and ``execution`` are the two orthogonal discriminators the C++
+    side dispatches on and are *derived* here, never passed in: both current
+    export paths build their edges from a cutoff, and only the fixed-shape path
+    is CUDA-graph executable.
+
+    Two fields are stamped rather than chosen. ``schema_version`` is always
+    :data:`LAMMPS_META_SCHEMA`, the constant the C++ ``LammpsContract`` validates
+    against at load. ``energy_conv`` holds one row per unit style molnex supports
+    (:data:`_UNIT_LABELS`), each the value of one model energy unit in that style,
+    so the row for the model's own ``units`` is exactly ``1.0``.
+
+    Args:
+        species: Atomic numbers the model supports; stored sorted and deduped.
+        cutoff: Neighbour cutoff in Å.
+        units: The model's native LAMMPS unit style (``"real"`` / ``"metal"``).
+        adapter_name: Name of the :class:`~molix.engine.adapter.EngineAdapter`
+            used at export time. Provenance only — must be a registered name.
+        model_dtype: ``"float32"`` / ``"float64"``.
+        supports_pbc: Capability flag; the pair style builds a ghost graph.
+        supports_virial: Capability flag; adds ``"virial"`` to ``outputs``.
+        cuda_graph: Fixed-shape export → ``execution == "cuda-graph"``, a fourth
+            ``"mask"`` input, and the ``n_atoms`` / ``e_max`` fields.
+        n_atoms: Fixed atom count ``N`` (required when ``cuda_graph``).
+        e_max: Fixed padded edge count (required when ``cuda_graph``).
+
+    Returns:
+        The ``lammps`` block, ready to be JSON-serialised.
+
+    Raises:
+        ValueError: If ``cuda_graph`` is set without ``n_atoms`` / ``e_max``.
+    """
+    block: dict[str, object] = {
+        "schema_version": LAMMPS_META_SCHEMA,
+        "contract": "cutoff-graph",
+        "execution": "cuda-graph" if cuda_graph else "dynamic",
+        "cutoff": float(cutoff),
+        "units": units,
+        "energy_unit": _UNIT_LABELS[units],
+        "length_unit": "angstrom",
+        "energy_conv": {style: preset_energy_ratio(units, style) for style in _UNIT_LABELS},
+        "species": sorted({int(z) for z in species}),
+        "model_dtype": model_dtype,
+        "inputs": ["Z", "pos", "edge_index", "mask"] if cuda_graph else ["Z", "pos", "edge_index"],
+        "outputs": ["energy", "forces", "virial"] if supports_virial else ["energy", "forces"],
+        "adapter": adapter_name,
+        "supports_pbc": bool(supports_pbc),
+        "supports_virial": bool(supports_virial),
+    }
+    if cuda_graph:
+        if n_atoms is None or e_max is None:
+            raise ValueError("execution 'cuda-graph' requires n_atoms and e_max")
+        block["n_atoms"] = int(n_atoms)
+        block["e_max"] = int(e_max)
+    return block
+
+
 def export_for_lammps(
     model: nn.Module,
     export_dir: str | Path,
@@ -97,8 +221,10 @@ def export_for_lammps(
             ``TensorDict`` and return ``{"energy", "forces"}`` (e.g. ``PiNetPotential``).
         export_dir: Output directory (created if missing); receives ``{name}.pt2``
             and ``{name}.meta.json``.
-        species: Atomic numbers the model supports. The order maps to LAMMPS atom
-            types in the user's ``pair_coeff * * <Z...>``; stored sorted in meta.
+        species: Atomic numbers the model supports. Recorded in ``meta.json``
+            sorted and deduplicated, as the model's declared species set — the
+            LAMMPS atom type → ``Z`` mapping itself comes from the user's
+            ``pair_coeff * * <Z...>`` line, not from the order of this list.
         cutoff: Neighbour cutoff in Å (typically ``model.encoder.config.r_max``).
         units: The model's native unit system — ``"real"`` (kcal/mol, kcal/mol/Å)
             or ``"metal"`` (eV, eV/Å). The pair style converts to LAMMPS' units.
@@ -110,10 +236,14 @@ def export_for_lammps(
             parameter dtype, falling back to ``float32``).
         name: Artifact basename.
         supports_pbc: If true, the pair style builds the graph over local +
-            ghost atoms and reverse-communicates ghost forces. Incompatible
-            with ``cuda_graph``.
+            ghost atoms (copies of atoms owned by a periodic image or another
+            MPI rank) and reverse-communicates ghost forces to their owners.
+            Incompatible with ``cuda_graph`` — the ghost count varies, so the
+            shapes cannot be fixed. That combination is *not* rejected here; the
+            pair style refuses it when the model is loaded.
         supports_virial: If true, the model must emit a third ``(6,)`` virial
-            tensor ``(xx, yy, zz, xy, xz, yz)`` in the model energy unit.
+            tensor ``(xx, yy, zz, xy, xz, yz)`` in the model energy unit — the
+            stress-like tensor LAMMPS accumulates into the pressure.
         cuda_graph: Export a **fixed-shape** ``.pt2`` (``dynamic_shapes=None``) that
             the C++ side loads ``run_single_threaded`` and wraps in a CUDA graph
             (PyTorch #158834; ~2.9x on small systems). Requires ``n_atoms`` and
@@ -130,11 +260,23 @@ def export_for_lammps(
     Raises:
         ValueError: If ``species`` is empty, ``units`` is not understood, or
             ``cuda_graph`` is set without ``n_atoms``/``e_max``.
+        ValueError: If ``cuda_graph`` is set together with a non-default
+            ``adapter``. The fixed-shape wrapper inlines the ``molnex-tensordict``
+            convention, so any other adapter could only be silently ignored —
+            which would then be misreported as provenance in ``meta.json``.
     """
     if not species:
         raise ValueError("species must be a non-empty list of atomic numbers")
     if units not in _UNIT_LABELS:
         raise ValueError(f"units must be one of {sorted(_UNIT_LABELS)}, got {units!r}")
+
+    adapter_name = adapter.name if isinstance(adapter, EngineAdapter) else adapter
+    if cuda_graph and adapter_name != "molnex-tensordict":
+        raise ValueError(
+            f"the adapter argument ({adapter_name!r}) is not supported with cuda_graph=True; "
+            "cuda-graph export wraps the model in StaticForward, which inlines the default "
+            "'molnex-tensordict' convention and cannot honour another adapter"
+        )
 
     resolved_dtype = dtype or _infer_dtype(model)
 
@@ -150,7 +292,6 @@ def export_for_lammps(
         from .static import StaticForward
 
         wrapper = StaticForward(model.to(device), n_atoms, e_max, cutoff)
-        adapter_name = "molnex-tensordict-static"
         # static example: N atoms, E_max edges (all valid here is fine for tracing).
         gen = torch.Generator().manual_seed(0)
         pos = (
@@ -164,10 +305,8 @@ def export_for_lammps(
         Exporter(wrapper).export_pretraced(
             (Z, pos, ei, mask), export_dir / f"{name}.pt2", dynamic_shapes=None
         )
-        inputs = ["Z", "pos", "edge_index", "mask"]
     else:
         wrapper = EngineForward(model.to(device), adapter)
-        adapter_name = wrapper.adapter.name
         Z, pos, edge_index = _example_system(sorted(set(species)), cutoff, resolved_dtype, device)
         # N (atoms) and E (edges) vary across MD frames → mark dynamic so one .pt2
         # serves every step. min=2 dodges torch.export's 0/1-size specialization.
@@ -177,25 +316,19 @@ def export_for_lammps(
         Exporter(wrapper).export_pretraced(
             (Z, pos, edge_index), export_dir / f"{name}.pt2", dynamic_shapes=dynamic_shapes
         )
-        inputs = ["Z", "pos", "edge_index"]
 
-    lammps_meta = {
-        "schema_version": LAMMPS_META_SCHEMA,
-        "cutoff": float(cutoff),
-        "units": units,
-        "energy_unit": _UNIT_LABELS[units],
-        "species": sorted(set(int(z) for z in species)),
-        "model_dtype": _DTYPE_NAMES.get(resolved_dtype, str(resolved_dtype).split(".")[-1]),
-        "inputs": inputs,
-        "outputs": ["energy", "forces"],
-        "adapter": adapter_name,
-        "supports_pbc": bool(supports_pbc),
-        "supports_virial": bool(supports_virial),
-        "cuda_graph": bool(cuda_graph),
-    }
-    if cuda_graph:
-        lammps_meta["n_atoms"] = int(n_atoms)
-        lammps_meta["e_max"] = int(e_max)
+    lammps_meta = _lammps_meta_block(
+        species=species,
+        cutoff=cutoff,
+        units=units,
+        adapter_name=adapter_name,
+        model_dtype=_DTYPE_NAMES.get(resolved_dtype, str(resolved_dtype).split(".")[-1]),
+        supports_pbc=supports_pbc,
+        supports_virial=supports_virial,
+        cuda_graph=cuda_graph,
+        n_atoms=n_atoms,
+        e_max=e_max,
+    )
     meta = {"device": device, "model_class": model.__class__.__name__, "lammps": lammps_meta}
     (export_dir / f"{name}.meta.json").write_text(json.dumps(meta, indent=2) + "\n")
 

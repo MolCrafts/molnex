@@ -56,8 +56,8 @@ message(STATUS "molnexplugin → ${MOLNEXPLUGIN_OUTPUT_DIR}/molnexplugin.so (${C
 
 target_include_directories(molnexplugin PRIVATE
   ${LAMMPS_HEADER_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}                 # lammps_meta.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/../include      # molnex/interface/model_runner.h
+  ${CMAKE_CURRENT_SOURCE_DIR}                 # lammps_contract.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include      # molnex/interface/{meta_schema,model_runner}.h
 )
 # when LAMMPS is built serial (BUILD_MPI=off) the plugin still needs the stub mpi.h
 if(LAMMPS_MPI_INCLUDE)

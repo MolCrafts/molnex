@@ -86,7 +86,7 @@ class PairMolnex : public Pair {
   bool supports_pbc = false;         // ghost-aware graph + reverse_comm
   bool supports_virial = false;      // model emits a 3rd virial output
 
-  // CUDA-graph fast path (meta `cuda_graph`): fixed N + padded E_max, captured
+  // CUDA-graph fast path (meta `execution` == "cuda-graph"): fixed N + padded E_max, captured
   // once and replayed. Persistent device buffers are updated in place each step.
   // Requires no ghosts (supports_pbc models with ghosts use the dynamic path).
   bool use_cuda_graph = false;

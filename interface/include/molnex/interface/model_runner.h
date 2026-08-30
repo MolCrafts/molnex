@@ -36,11 +36,17 @@ namespace molnex::interface {
 /// Construction loads the export directory's `<name>.pt2` package; the
 /// loader builds the right CPU/CUDA runner for the package's device
 /// (we cross-check it against the `<name>.meta.json` `device` field).
-/// After construction the runner is ready to serve `run()` calls. Pass
-/// `num_models >= 2` (the default) to enable double-buffered weight
-/// hot-reload via `update_weights()`; the active buffer keeps serving
-/// traffic while the inactive buffer is rewritten, then a single atomic
-/// swap flips them — no inference pause, no caller-visible lock.
+/// After construction the runner is ready to serve `run()` calls.
+///
+/// Two mutually exclusive modes (enforced by torch >= 2.12, which
+/// rejects `num_runners > 1` together with `run_single_threaded`):
+///  - `run_single_threaded = true` (the default) with `num_models = 1`:
+///    required for CUDA-graph capture via `run_graphed()`.
+///  - `num_models >= 2` with `run_single_threaded = false`: enables
+///    double-buffered weight hot-reload via `update_weights()`; the
+///    active buffer keeps serving traffic while the inactive buffer is
+///    rewritten, then a single atomic swap flips them — no inference
+///    pause, no caller-visible lock. Incompatible with `run_graphed()`.
 class ModelRunner {
  public:
   /// Load a model from an export directory produced by
@@ -49,9 +55,10 @@ class ModelRunner {
   /// \param model_dir  Path to the export directory. Must contain
   ///                   `<name>.pt2` and `<name>.meta.json`.
   /// \param num_models Number of constant buffers the underlying runner
-  ///                   allocates. Default 2 enables double-buffered
-  ///                   weight reload; pass 1 only when reload is
-  ///                   guaranteed unused.
+  ///                   allocates. Default 1 (single-threaded, graph-
+  ///                   capturable). Pass >= 2 together with
+  ///                   `run_single_threaded = false` to enable
+  ///                   double-buffered weight reload.
   /// \param name       Artifact basename inside `model_dir` (matches
   ///                   the `.pt2` stem written at export time).
   /// \param run_single_threaded  Load the AOTI runner in single-threaded
@@ -59,7 +66,7 @@ class ModelRunner {
   ///                   multi-threaded run does a capture-illegal alloc/sync —
   ///                   PyTorch #158834, fixed torch 2.8); harmless otherwise.
   ModelRunner(const std::string& model_dir,
-              int num_models = 2,
+              int num_models = 1,
               const std::string& name = "model",
               bool run_single_threaded = true);
 

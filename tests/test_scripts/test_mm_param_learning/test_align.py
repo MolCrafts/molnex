@@ -45,8 +45,8 @@ def _frame(name: str, *, shift: float = 0.0) -> Frame:
     frame = Frame()
     frame["atoms"] = atoms
     frame["bonds"] = bonds
-    frame.meta["energy"] = -76.0
-    frame.meta["molecule_id"] = name
+    frame.meta = {**frame.meta, "energy": -76.0}
+    frame.meta = {**frame.meta, "molecule_id": name}
     return frame
 
 
