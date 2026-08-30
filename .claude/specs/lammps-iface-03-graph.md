@@ -1,6 +1,6 @@
 ---
 title: GraphBridge 邻居图构建、reverse-comm 搬迁与 backend-neutral 执行策略
-status: approved
+status: code-complete
 created: 2026-08-30
 slug: lammps-iface-03-graph
 chain: lammps-iface
@@ -147,16 +147,18 @@ Exec 组件委托 `ModelRunner`，故 `molnex_lammps_bridge` 需 `target_link_li
 
 ## Tasks
 
-- [ ] Write failing ctest cases for GraphBridge edge collection, cutoff refilter, sort order, n_graph boundary and empty-list handling over a synthetic LammpsView in interface/tests/test_bridge_graph.cpp (new), registered in the no-fixture list of interface/tests/CMakeLists.txt
-- [ ] Extend LammpsView with ilist, numneigh, firstneigh, inum, neigh_mask and the masked neighbor() accessor in interface/lammps/bridge/lammps_view.h
-- [ ] Implement GraphBridge in interface/lammps/bridge/graph_bridge.h and graph_bridge.cpp (new), keeping the existing std::sort and cutoff refilter and validating n_graph at entry
-- [ ] Write failing ctest cases for pack_reverse_forces and unpack_reverse_forces, and implement them in interface/lammps/bridge/comm_reverse.h and comm_reverse.cpp (new)
-- [ ] Write failing ctest cases for read_model_outputs, pad_edges and DynamicExec against a new three-input graph-potential fixture in interface/tests/test_bridge_graph.cpp and interface/tests/generate_fixtures.py
-- [ ] Implement the Exec interface, ModelOutputs and the validated read_model_outputs conversion in interface/lammps/bridge/exec.h (new) and exec.cpp (new), with docstrings per google style recording the backend-neutral and owned-CPU-copy contracts
-- [ ] Implement DynamicExec, GraphedExec and pad_edges in interface/lammps/bridge/dynamic_exec.{h,cpp} and graphed_exec.{h,cpp} (new), and link molnex_interface from interface/lammps/bridge/CMakeLists.txt
-- [ ] Migrate PairMolnex::settings, PairMolnex::compute and the reverse-comm callbacks onto GraphBridge, Exec and comm_reverse in interface/lammps/pair_molnex.cpp and pair_molnex.h
-- [ ] Extend the interface ctest job in .github/workflows/ci.yml to cover the new graph, comm, pad, read-outputs and dynamic-exec cases
-- [ ] Run full check + test suite
+- [x] Write failing ctest cases for GraphBridge edge collection, cutoff refilter, sort order, n_graph boundary and empty-list handling over a synthetic LammpsView in interface/tests/test_bridge_graph.cpp (new), registered in the no-fixture list of interface/tests/CMakeLists.txt
+- [x] Extend LammpsView with ilist, numneigh, firstneigh, inum, neigh_mask and the masked neighbor() accessor in interface/lammps/bridge/lammps_view.h
+- [x] Implement GraphBridge in interface/lammps/bridge/graph_bridge.h and graph_bridge.cpp (new), keeping the existing std::sort and cutoff refilter and validating n_graph at entry
+- [x] Write failing ctest cases for pack_reverse_forces and unpack_reverse_forces, and implement them in interface/lammps/bridge/comm_reverse.h and comm_reverse.cpp (new)
+- [x] Write failing ctest cases for read_model_outputs, pad_edges and DynamicExec against a new three-input graph-potential fixture in interface/tests/test_bridge_graph.cpp and interface/tests/generate_fixtures.py
+- [x] Implement the Exec interface, ModelOutputs and the validated read_model_outputs conversion in interface/lammps/bridge/exec.h (new) and exec.cpp (new), with docstrings per google style recording the backend-neutral and owned-CPU-copy contracts
+- [x] Implement DynamicExec, GraphedExec and pad_edges in interface/lammps/bridge/dynamic_exec.{h,cpp} and graphed_exec.{h,cpp} (new), and link molnex_interface from interface/lammps/bridge/CMakeLists.txt
+- [x] Migrate PairMolnex::settings, PairMolnex::compute and the reverse-comm callbacks onto GraphBridge, Exec and comm_reverse in interface/lammps/pair_molnex.cpp and pair_molnex.h
+- [x] Extend the interface ctest job in .github/workflows/ci.yml to cover the new graph, comm, pad, read-outputs and dynamic-exec cases
+- [x] Run full check + test suite (ctest 48/48; pytest test_molix 1289 green; ruff clean on own surface — one I001 in the concurrent mace-polar file noted)
+- [x] Hygiene: /mol:simplify ran (janitor: 0 apply-able; 2 manual handoffs routed to 04-facade: settings() Exec-selection extraction lands with the dispatch layer, Exec-base member hoist folds into 04's construction work)
+- [x] Docs Mode A: satisfied via janitor docstring audit (all exec.h/pad_edges/comm_reverse/model_dtype_name contracts present)
 
 ## Testing strategy
 

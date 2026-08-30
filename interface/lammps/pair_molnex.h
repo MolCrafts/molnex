@@ -46,12 +46,11 @@ PairStyle(molnex,PairMolnex);
 #include <memory>
 #include <optional>
 #include <string>
-#include <utility>
-#include <vector>
 
-#include <ATen/core/Tensor.h>
-
+#include "bridge/exec.h"
 #include "bridge/force_scatter.h"
+#include "bridge/graph_bridge.h"
+#include "bridge/lammps_view.h"
 #include "bridge/species_map.h"
 #include "lammps_contract.h"
 
@@ -82,41 +81,43 @@ class PairMolnex : public Pair {
   std::unique_ptr<molnex::interface::ModelRunner> runner;
   std::string device;                // "cpu" or "cuda", from the export meta
   std::string model_units;           // "real" or "metal", from meta.json
-  bool fp64_model;                   // true if meta model_dtype == float64
   double energy_conv;                // model-energy-unit -> LAMMPS-energy-unit factor
 
-  // Atom-side bridge components. Each is empty until the command that
-  // configures it has run — the contract and the scatter at `pair_style`
-  // (settings), the species map at `pair_coeff` (coeff) — and `compute()`
-  // establishes that all of them hold a value with one guard at its top.
+  // Bridge components. Each is empty until the command that configures it has
+  // run — the contract, the scatter, the graph and the execution strategy at
+  // `pair_style` (settings), the species map at `pair_coeff` (coeff) — and
+  // `compute()` establishes with one guard at its top that all four hold a
+  // value, so nothing below it re-asks.
   //
-  // std::optional rather than std::unique_ptr: both components are cheap,
-  // complete types, so a heap allocation would buy nothing, and "not
-  // configured yet" is a state of the pair style, not an ownership question.
+  // std::optional for the first three: cheap, complete types, so a heap
+  // allocation would buy nothing and "not configured yet" is a state of the
+  // pair style rather than an ownership question. std::unique_ptr for `exec_`
+  // only because `Exec` is polymorphic — which of DynamicExec / GraphedExec was
+  // constructed IS the execution choice, so there is no flag beside it to
+  // consult and no branch on execution anywhere in compute().
   //
-  // There is deliberately no `force_conv` member beside these: its only reader
-  // was the force-scatter loop, which now lives in ForceScatter, and a second
-  // copy on the facade could only drift from it.
+  // Two values deliberately absent beside them, on the same rule: the last
+  // reader leaves, the value leaves. `force_conv`'s reader was the scatter
+  // loop, now ForceScatter's; the model-dtype flag's was the `pos` cast at the
+  // execution site, now each Exec's — which reports that dtype's name back for
+  // the startup message. A second copy here could only drift from the one that
+  // acts.
   std::optional<molnex::lammps::LammpsContract> contract_;    // meta, cached for coeff()
   std::optional<molnex::lammps_bridge::SpeciesMap> species_map_;      // type -> Z, validated
   std::optional<molnex::lammps_bridge::ForceScatter> force_scatter_;  // holds force_conv
+  std::optional<molnex::lammps_bridge::GraphBridge> graph_bridge_;    // holds cutoff^2
+  std::unique_ptr<molnex::lammps_bridge::Exec> exec_;                 // dynamic or graphed
 
   // capability flags from meta.json
   bool supports_pbc = false;         // ghost-aware graph + reverse_comm
   bool supports_virial = false;      // model emits a 3rd virial output
 
-  // CUDA-graph fast path (meta `execution` == "cuda-graph"): fixed N + padded E_max, captured
-  // once and replayed. Persistent device buffers are updated in place each step.
-  // Requires no ghosts (supports_pbc models with ghosts use the dynamic path).
-  bool use_cuda_graph = false;
-  int n_fixed = 0;                   // fixed atom count N (meta `n_atoms`)
-  int64_t e_max = 0;                 // fixed padded edge count (meta `e_max`)
-  at::Tensor Zg_, posg_, edgeg_, maskg_;   // persistent device input buffers
-
-  // host staging reused across steps (avoids per-step vector realloc)
-  std::vector<std::pair<int, int>> edge_pairs_;
-  std::vector<int64_t> edge_flat_;
-  std::vector<int64_t> edge_pad_flat_;
+  // The bridge's window onto LAMMPS' arrays for the current step, assembled in
+  // one place because three call sites need it: compute() reads every field,
+  // and the two reverse-comm callbacks read only x / f / type / nlocal /
+  // nghost. The view borrows and owns nothing, so it is rebuilt per call rather
+  // than cached across a reneighbouring (which moves the arrays it points at).
+  molnex::lammps_bridge::LammpsView current_view() const;
 
   virtual void allocate();
 };

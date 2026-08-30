@@ -17,7 +17,6 @@
 #include "neighbor.h"
 #include "update.h"
 
-#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <optional>
@@ -26,7 +25,12 @@
 
 #include <ATen/ATen.h>
 
+#include "bridge/comm_reverse.h"
+#include "bridge/dynamic_exec.h"
+#include "bridge/exec.h"
 #include "bridge/force_scatter.h"
+#include "bridge/graph_bridge.h"
+#include "bridge/graphed_exec.h"
 #include "bridge/lammps_view.h"
 #include "bridge/node_staging.h"
 #include "bridge/species_map.h"
@@ -46,7 +50,6 @@ PairMolnex::PairMolnex(LAMMPS *lmp) : Pair(lmp)
   manybody_flag = 1;
   cut_global = 0.0;
   model_name = "model";
-  fp64_model = false;
   energy_conv = 1.0;
   // ghost force reverse-comm size (fx,fy,fz). Needed when supports_pbc and
   // the model writes forces on ghosts; also used with newton off.
@@ -97,10 +100,17 @@ void PairMolnex::settings(int narg, char **arg)
                       "molix.engine.export_for_lammps, not the bare Exporter",
                meta_path);
 
-  // Which contract the export declares. Parsed inside the try (an unknown
-  // spelling throws), acted on after it (the refusal is a LAMMPS error, not a
-  // malformed meta).
+  // What the export declares about its own execution. Parsed inside the try
+  // (an unknown spelling, or a cuda-graph meta missing its fixed shapes,
+  // throws), acted on after it — the refusals below are LAMMPS errors, not
+  // malformed metas, and the runner they need does not exist yet. Locals, not
+  // members: their only reader is the Exec constructed at the end of this
+  // method, which then owns them.
   auto model_contract = molnex::lammps::Contract::cutoff_graph;
+  auto model_execution = molnex::lammps::Execution::dynamic;
+  at::ScalarType model_dtype = at::kFloat;
+  int64_t n_atoms = 0;
+  int64_t e_max_edges = 0;
   try {
     // Constructing the contract hard-validates schema_version == 2: a v1 meta
     // is refused here rather than silently losing its cuda_graph discriminator.
@@ -108,7 +118,7 @@ void PairMolnex::settings(int narg, char **arg)
 
     cut_global = contract.cutoff();
     model_units = contract.units();
-    fp64_model = (contract.model_dtype() == "float64");
+    model_dtype = (contract.model_dtype() == "float64") ? at::kDouble : at::kFloat;
 
     // units: the export stamped an energy-conversion table (computed with
     // molix.units / pint) keyed by LAMMPS unit style; look up the active one.
@@ -121,6 +131,11 @@ void PairMolnex::settings(int narg, char **arg)
     // scatter loop it fed moved into that component, so a `force_conv` member
     // here would be a second copy with nothing to keep it in step.
     force_scatter_.emplace(conv.force);
+    // Same for the cutoff: GraphBridge squares it once here and refilters every
+    // candidate pair against it each step, so the neighbour loop's copy is
+    // gone. `cut_global` itself stays only because init_one() still reports it
+    // to LAMMPS as this pair style's cutoff.
+    graph_bridge_.emplace(cut_global);
 
     model_contract = contract.contract();
 
@@ -128,10 +143,10 @@ void PairMolnex::settings(int narg, char **arg)
     supports_virial = contract.supports_virial();
 
     // CUDA-graph fast path: fixed N + padded E_max, captured once & replayed.
-    use_cuda_graph = (contract.execution() == molnex::lammps::Execution::cuda_graph);
-    if (use_cuda_graph) {
-      n_fixed = contract.n_atoms();
-      e_max = contract.e_max();
+    model_execution = contract.execution();
+    if (model_execution == molnex::lammps::Execution::cuda_graph) {
+      n_atoms = contract.n_atoms();
+      e_max_edges = contract.e_max();
     }
 
     // Kept, not just read: `pair_coeff` runs after `pair_style` and needs the
@@ -152,7 +167,10 @@ void PairMolnex::settings(int narg, char **arg)
   runner = std::make_unique<molnex::interface::ModelRunner>(model_dir, /*num_models=*/1, model_name);
   device = runner->device();
 
-  if (use_cuda_graph) {
+  // Two preconditions the CUDA-graph strategy cannot check for itself: they are
+  // statements about this export's meta against this machine, and they are
+  // LAMMPS errors, so they stay here and stay outside any try.
+  if (model_execution == molnex::lammps::Execution::cuda_graph) {
     if (device != "cuda")
       error->all(FLERR, "pair_style molnex: meta execution=cuda-graph but device={} (need cuda)",
                  device);
@@ -160,20 +178,39 @@ void PairMolnex::settings(int narg, char **arg)
       error->all(FLERR, "pair_style molnex: execution=cuda-graph is incompatible with "
                         "supports_pbc (ghost count varies; re-export with cuda_graph=False "
                         "for PBC MD)");
-    auto dev = at::Device(at::kCUDA);
-    at::ScalarType mdt = fp64_model ? at::kDouble : at::kFloat;
-    Zg_ = at::zeros({n_fixed}, at::TensorOptions().dtype(at::kLong).device(dev));
-    posg_ = at::zeros({n_fixed, 3}, at::TensorOptions().dtype(mdt).device(dev));
-    edgeg_ = at::zeros({e_max, 2}, at::TensorOptions().dtype(at::kLong).device(dev));
-    maskg_ = at::zeros({e_max}, at::TensorOptions().dtype(at::kBool).device(dev));
   }
+
+  // Pick the execution strategy once, here. Which object this constructs IS the
+  // choice — there is no boolean left over for compute() to re-read, and the
+  // step path calls exec_->run() without knowing which one it got. The runner is
+  // borrowed, not transferred: this pair style outlives its Exec and keeps the
+  // model alive for the whole of it.
+  //
+  // Same two dialects as above (GraphedExec refuses a CPU-only build by
+  // throwing), so the error->all is issued from the handler and never from
+  // inside the try — a LAMMPSException is a std::exception and would otherwise
+  // be caught here and re-labelled.
+  const auto dev = (device == "cuda") ? at::Device(at::kCUDA) : at::Device(at::kCPU);
+  try {
+    if (model_execution == molnex::lammps::Execution::cuda_graph)
+      exec_ = std::make_unique<molnex::lammps_bridge::GraphedExec>(
+          runner.get(), dev, model_dtype, supports_virial, n_atoms, e_max_edges);
+    else
+      exec_ = std::make_unique<molnex::lammps_bridge::DynamicExec>(runner.get(), dev, model_dtype,
+                                                                  supports_virial);
+  } catch (const std::exception &e) {
+    error->all(FLERR, "pair_style molnex: {}", e.what());
+  }
+
   if (comm->me == 0)
     utils::logmesg(lmp,
                    "pair_molnex: loaded '{}' from {} (device={}, model units={}, "
                    "LAMMPS units={}, dtype={}, cutoff={:.3f} A, energy*={:.6g}, "
                    "supports_pbc={}, supports_virial={})\n",
                    model_name, model_dir, device, model_units, update->unit_style,
-                   fp64_model ? "float64" : "float32", cut_global, energy_conv,
+                   // Transcribed from the strategy that actually casts `pos`,
+                   // rather than judged a second time here.
+                   exec_->model_dtype_name(), cut_global, energy_conv,
                    supports_pbc ? "true" : "false",
                    supports_virial ? "true" : "false");
 }
@@ -232,11 +269,11 @@ void PairMolnex::compute(int eflag, int vflag)
 {
   ev_init(eflag, vflag);
 
-  // One guard establishes the invariant for the whole method: past here both
-  // components hold a value, so every use below dereferences directly rather
-  // than re-asking. Empty means the input script reached a run without a
+  // One guard establishes the invariant for the whole method: past here all
+  // four components hold a value, so every use below dereferences directly
+  // rather than re-asking. Empty means the input script reached a run without a
   // complete pair_style / pair_coeff pair.
-  if (!species_map_ || !force_scatter_)
+  if (!species_map_ || !force_scatter_ || !graph_bridge_ || !exec_)
     error->all(FLERR, "pair_style molnex: pair_style/pair_coeff not initialized");
 
   const int nlocal = atom->nlocal;
@@ -249,142 +286,47 @@ void PairMolnex::compute(int eflag, int vflag)
                       "Re-export with supports_pbc=true for periodic / multi-rank MD.",
                nghost);
 
-  double **x = atom->x;
-
-  // The bridge's only window onto LAMMPS' atom arrays; it borrows and owns
-  // nothing, so it is rebuilt each step rather than cached across reneighbour
-  // (which moves the arrays). `double**` converts to `const double* const*` as
-  // a qualification conversion — no const_cast at the seam.
-  const molnex::lammps_bridge::LammpsView view{atom->x, atom->f, atom->type, nlocal, nghost};
-
-  const int inum = list->inum;
-  int *ilist = list->ilist;
-  int *numneigh = list->numneigh;
-  int **firstneigh = list->firstneigh;
-  const double cutsq_g = cut_global * cut_global;
+  const molnex::lammps_bridge::LammpsView view = current_view();
 
   // Graph atom count: local-only when supports_pbc is false; local+ghost otherwise.
   const int n_graph = supports_pbc ? nall : nlocal;
 
-  // --- node tensors: Z (N,), pos (N,3) ---
-  // pos comes back in fp64 and is cast to the model dtype at the execution
-  // site below, exactly as when this was an inlined loop. stage_nodes throws
-  // on an out-of-range n_graph (it would otherwise read past the end of
-  // LAMMPS' arrays) or on an atom type the species map does not cover.
-  at::Tensor Z, pos;
-  try {
-    molnex::lammps_bridge::NodeTensors nodes =
-        molnex::lammps_bridge::stage_nodes(view, *species_map_, n_graph);
-    Z = std::move(nodes.Z);
-    pos = std::move(nodes.pos);
-  } catch (const std::exception &e) {
-    error->all(FLERR, "pair_molnex: {}", e.what());
-  }
-
-  // --- edges: full bidirectional within cutoff ---
-  // molnex aggregation requires edge_index SORTED by (source,target) — exactly
-  // what the reference data pipeline's nonzero() yields. The raw neighbour-list
-  // order gives the same pairs but a different order, which silently produces
-  // wrong energy/forces. So collect then sort.
+  // --- stage, build the graph, run, scatter ---
+  // Four bridge calls, one seam. Each throws std::runtime_error where this used
+  // to either error->all inline (the CUDA-graph shape checks) or read past the
+  // end of a LAMMPS array without looking (the neighbour loop), so one handler
+  // translates the lot into LAMMPS' dialect. It is issued from the handler,
+  // never from inside the try — a LAMMPSException is a std::exception and would
+  // be self-caught.
   //
-  // With supports_pbc, j may be a ghost: its coordinates already encode the
-  // minimum-image placement, so edge_diff = pos[j]-pos[i] needs no separate
-  // shifts tensor for models that recompute geometry from positions.
-  edge_pairs_.clear();
-  edge_pairs_.reserve(static_cast<size_t>(inum) * 16);
-  for (int ii = 0; ii < inum; ii++) {
-    int i = ilist[ii];
-    double xi = x[i][0], yi = x[i][1], zi = x[i][2];
-    int *jl = firstneigh[i];
-    int jn = numneigh[i];
-    for (int jj = 0; jj < jn; jj++) {
-      int j = jl[jj] & NEIGHMASK;
-      if (!supports_pbc && j >= nlocal) continue;
-      if (j >= n_graph) continue;
-      double dx = x[j][0] - xi, dy = x[j][1] - yi, dz = x[j][2] - zi;
-      if (dx * dx + dy * dy + dz * dz < cutsq_g) edge_pairs_.emplace_back(i, j);
-    }
-  }
-  std::sort(edge_pairs_.begin(), edge_pairs_.end());
-  const int64_t ne = static_cast<int64_t>(edge_pairs_.size());
-  edge_flat_.resize(static_cast<size_t>(2 * ne));
-  for (int64_t k = 0; k < ne; k++) {
-    edge_flat_[static_cast<size_t>(2 * k)] = edge_pairs_[static_cast<size_t>(k)].first;
-    edge_flat_[static_cast<size_t>(2 * k + 1)] = edge_pairs_[static_cast<size_t>(k)].second;
-  }
-  auto opt_l = at::TensorOptions().dtype(at::kLong);   // int64 edge tensors
-  at::Tensor edge_index = at::from_blob(edge_flat_.data(), {ne, 2}, opt_l).clone();
-
-  // --- run: CUDA-graph fast path (fixed N + padded E_max) or dynamic run ---
-  at::ScalarType mdt = fp64_model ? at::kDouble : at::kFloat;   // from meta.json
-  at::Tensor e_t, f_t, v_t;
-  bool have_virial_out = false;
-#ifdef MOLNEX_INTERFACE_CUDA
-  if (use_cuda_graph) {
-    if (nghost != 0)
-      error->all(FLERR, "pair_molnex cuda_graph: nghost={} (need 0)", nghost);
-    if (nlocal != n_fixed)
-      error->all(FLERR, "pair_molnex cuda_graph: nlocal={} != fixed N={} "
-                        "(export n_atoms must match the system)", nlocal, n_fixed);
-    if (ne > e_max)
-      error->all(FLERR, "pair_molnex cuda_graph: {} edges > e_max {} "
-                        "(re-export with a larger e_max)", ne, e_max);
-    // pad edges to e_max (extra rows = (0,0), inert via mask) + valid-edge mask
-    edge_pad_flat_.assign(static_cast<size_t>(2 * e_max), 0);
-    for (int64_t k = 0; k < ne; k++) {
-      edge_pad_flat_[static_cast<size_t>(2 * k)] = edge_pairs_[static_cast<size_t>(k)].first;
-      edge_pad_flat_[static_cast<size_t>(2 * k + 1)] = edge_pairs_[static_cast<size_t>(k)].second;
-    }
-    at::Tensor mask_cpu = at::zeros({e_max}, at::TensorOptions().dtype(at::kBool));
-    auto ma = mask_cpu.accessor<bool, 1>();
-    for (int64_t k = 0; k < ne; k++) ma[k] = true;
-    at::Tensor edges_cpu = at::from_blob(edge_pad_flat_.data(), {e_max, 2}, opt_l).clone();
-    // update the persistent device buffers in place, then capture/replay
-    Zg_.copy_(Z);
-    posg_.copy_(pos.to(mdt));
-    edgeg_.copy_(edges_cpu);
-    maskg_.copy_(mask_cpu);
-    std::vector<at::Tensor> inputs = {Zg_, posg_, edgeg_, maskg_};
-    std::vector<at::Tensor> out = runner->run_graphed(inputs);   // [energy, forces(N,3), ?virial]
-    e_t = out[0].to(at::kDouble).to(at::kCPU);
-    f_t = out[1].to(at::kDouble).to(at::kCPU).contiguous();
-    if (supports_virial && out.size() >= 3) {
-      v_t = out[2].to(at::kDouble).to(at::kCPU).contiguous();
-      have_virial_out = true;
-    }
-  } else
-#endif
-  {
-    auto dev = (device == "cuda") ? at::Device(at::kCUDA) : at::Device(at::kCPU);
-    std::vector<at::Tensor> inputs = {Z.to(dev), pos.to(mdt).to(dev), edge_index.to(dev)};
-    std::vector<at::Tensor> out = runner->run(inputs);   // [energy_total, forces(N,3), ?virial]
-    e_t = out[0].to(at::kDouble).to(at::kCPU);
-    f_t = out[1].to(at::kDouble).to(at::kCPU).contiguous();
-    if (supports_virial && out.size() >= 3) {
-      v_t = out[2].to(at::kDouble).to(at::kCPU).contiguous();
-      have_virial_out = true;
-    }
-  }
-
-  // --- scatter forces + energy back to LAMMPS (converted to LAMMPS units) ---
-  // Write onto local (+ ghost when supports_pbc); reverse_comm pulls ghost
-  // force contributions onto owners for multi-rank / periodic images. The
-  // row-count check that used to stand here is now ForceScatter's, fired
-  // before it writes a single element of the LAMMPS-owned force array.
+  // What each contributes, and what this method therefore no longer knows:
+  // stage_nodes copies Z / pos (fp64; the model-dtype cast is the Exec's);
+  // GraphBridge collects, refilters against the cutoff and sorts by
+  // (source, target); the Exec moves to the device, pads and masks if it is the
+  // graphed one, and hands back CPU float64 outputs this method owns;
+  // ForceScatter accumulates them onto atom->f in LAMMPS units.
+  molnex::lammps_bridge::ModelOutputs out;
   try {
-    force_scatter_->scatter(view, f_t, n_graph);
+    const molnex::lammps_bridge::NodeTensors nodes =
+        molnex::lammps_bridge::stage_nodes(view, *species_map_, n_graph);
+    const at::Tensor edge_index = graph_bridge_->build(view, n_graph);
+    out = exec_->run(nodes.Z, nodes.pos, edge_index);
+    // Write onto local (+ ghost when supports_pbc); reverse_comm pulls ghost
+    // force contributions onto owners for multi-rank / periodic images.
+    force_scatter_->scatter(view, out.forces, n_graph);
   } catch (const std::exception &e) {
     error->all(FLERR, "pair_molnex: {}", e.what());
   }
-  double e_model = e_t.item<double>() * energy_conv;
+
+  double e_model = out.energy.item<double>() * energy_conv;
   if (eflag_global) eng_vdwl += e_model;
 
-  if (have_virial_out && vflag_global) {
+  // `defined()` is the whole presence test: read_model_outputs leaves the
+  // virial undefined unless it holds exactly six numbers, so there is nothing
+  // left to check here before indexing it.
+  if (out.virial.defined() && vflag_global) {
     // model virial: (6,) xx,yy,zz,xy,xz,yz in model energy units
-    auto va = v_t.accessor<double, 1>();
-    if (v_t.numel() < 6)
-      error->all(FLERR, "pair_molnex: supports_virial but virial output has {} elements (need 6)",
-                 v_t.numel());
+    auto va = out.virial.accessor<double, 1>();
     virial[0] += energy_conv * va[0];
     virial[1] += energy_conv * va[1];
     virial[2] += energy_conv * va[2];
@@ -400,30 +342,35 @@ void PairMolnex::compute(int eflag, int vflag)
 }
 
 /* ----------------------------------------------------------------------
+   the LAMMPS-side arrays, as the bridge sees them
+------------------------------------------------------------------------- */
+
+molnex::lammps_bridge::LammpsView PairMolnex::current_view() const
+{
+  // `double**` -> `const double* const*` and `int**` -> `const int* const*` are
+  // qualification conversions, so nothing here needs a const_cast at the seam.
+  // NEIGHMASK travels as data: it is LAMMPS' constant, applied by the view's
+  // accessor, which is what keeps every file under bridge/ free of LAMMPS
+  // vocabulary.
+  //
+  // `list` is live at all three call sites — compute() runs after init_list(),
+  // and the two comm callbacks run only inside the reverse_comm that compute()
+  // itself issues.
+  return molnex::lammps_bridge::LammpsView{
+      atom->x, atom->f, atom->type, atom->nlocal, atom->nghost,
+      list->ilist, list->numneigh, list->firstneigh, list->inum, NEIGHMASK};
+}
+
+/* ----------------------------------------------------------------------
    reverse communication of ghost forces → owned atoms
 ------------------------------------------------------------------------- */
 
 int PairMolnex::pack_reverse_comm(int n, int first, double *buf)
 {
-  int m = 0;
-  const int last = first + n;
-  double **f = atom->f;
-  for (int i = first; i < last; i++) {
-    buf[m++] = f[i][0];
-    buf[m++] = f[i][1];
-    buf[m++] = f[i][2];
-  }
-  return m;
+  return molnex::lammps_bridge::pack_reverse_forces(current_view(), n, first, buf);
 }
 
 void PairMolnex::unpack_reverse_comm(int n, int *list, double *buf)
 {
-  int m = 0;
-  double **f = atom->f;
-  for (int i = 0; i < n; i++) {
-    const int j = list[i];
-    f[j][0] += buf[m++];
-    f[j][1] += buf[m++];
-    f[j][2] += buf[m++];
-  }
+  molnex::lammps_bridge::unpack_reverse_forces(current_view(), n, list, buf);
 }

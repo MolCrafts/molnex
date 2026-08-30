@@ -78,6 +78,21 @@ jobs:
       # Explicit filter, never bare ctest: the FIXTURES_SETUP entry would run a
       # full Python AOTI export; only the no-fixture list plus the CPU-safe
       # fixture-backed cases belong in this gate.
-      - name: Run interface ctests (no-fixture list)
+      #
+      # -R selects the meta / contract / bridge families. That sweeps in
+      # bridge_dynamic_exec_matches_reference, which is wanted: it is the only
+      # numerical parity evidence for the Exec extraction, its graph-potential
+      # fixture exports on CPU, and ctest pulls fixture_setup in automatically
+      # because that case declares FIXTURES_REQUIRED.
+      #
+      # -E then removes the CUDA-gated case BY FILTER rather than letting it
+      # report a runtime [skip]. A skip that always passes is not a gate, and a
+      # green tick against a case that never ran is the failure mode this
+      # exclusion exists to prevent. (cuda_run_matches_reference needs no entry
+      # here — it does not match -R in the first place.)
+      - name: Run interface ctests (no-fixture list + CPU parity case)
         run: |
-          ctest --test-dir build-interface -R '^meta_|^contract_|^bridge_' --output-on-failure
+          ctest --test-dir build-interface \
+            -R '^meta_|^contract_|^bridge_' \
+            -E '^bridge_graphed_exec_matches_dynamic$' \
+            --output-on-failure

@@ -11,7 +11,8 @@ criteria:
       data member plus a neighbor(i, jj) accessor applying that mask; the token
       NEIGHMASK appears nowhere under interface/lammps/bridge/; no tag or charge
       member is added.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-002
     summary: GraphBridge preserves the cutoff refilter and the source-target sort
     type: code
@@ -22,7 +23,8 @@ criteria:
       supports_pbc. (Forward note: lammps-iface-05-pbc supersedes the unconditional
       sort by demoting it to the requires_sorted_edges contract flag; within this
       spec's lifetime the sort is unconditional.)
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-003
     summary: GraphBridge synthetic ctest cases pass without LAMMPS or CUDA
     type: runtime
@@ -32,7 +34,8 @@ criteria:
       bridge_graph_applies_neigh_mask, bridge_graph_empty_neighbor_list and
       bridge_graph_reuses_buffers_across_calls green from a build configured without
       LAMMPS_HEADER_DIR, none of them declaring FIXTURES_REQUIRED.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-004
     summary: empty neighbor list yields a well-formed empty edge tensor
     type: code
@@ -40,7 +43,8 @@ criteria:
       bridge_graph_empty_neighbor_list asserts build() returns a (0, 2) int64 tensor
       when no pair survives, and GraphBridge never passes a possibly-null empty
       vector data pointer to at::from_blob.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-005
     summary: reverse-comm relocation is verbatim, with no private buffer added
     type: code
@@ -49,7 +53,8 @@ criteria:
       view's f, introduce no owned buffer, and their header comment records the
       shared-atom->f defect as belonging to lammps-iface-05-pbc; PairMolnex's two
       callbacks are one-line forwards.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-006
     summary: reverse-comm ctest locks layout and accumulation
     type: runtime
@@ -57,7 +62,8 @@ criteria:
       bridge_comm_pack_reverse_layout asserts 3n doubles written in fx,fy,fz order with
       return value 3n, and bridge_comm_unpack_accumulates starts from a non-zero f and
       asserts f[list[i]] += buf against hand-computed literals.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-007
     summary: Exec interface is backend-neutral and owns its returned memory
     type: code
@@ -69,7 +75,8 @@ criteria:
       implementation without changing the interface, and that returned tensors are owned
       CPU copies which must not alias runtime-owned or replay-owned memory because
       run_graphed outputs live at fixed replay addresses overwritten by the next replay.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-008
     summary: capture state is not duplicated outside ModelRunner
     type: code
@@ -77,7 +84,8 @@ criteria:
       GraphedExec holds only the persistent input buffers, n_fixed and e_max and
       delegates to ModelRunner::run_graphed; no CUDAGraph object, graph_captured_ flag
       or captured-output vector exists under interface/lammps/bridge/.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-009
     summary: pad_edges is CPU-testable and matches the padding semantics
     type: runtime
@@ -86,7 +94,8 @@ criteria:
       MOLNEX_INTERFACE_CUDA guard), asserting the first ne rows carry the real edges,
       the remainder are (0,0), mask is true exactly on the first ne entries, and the
       ne == e_max and ne == 0 boundaries hold.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-010
     summary: DynamicExec reproduces the fixture reference outputs
     type: runtime
@@ -96,7 +105,8 @@ criteria:
       bridge_dynamic_exec_matches_reference asserts DynamicExec's outputs match the
       stored reference within 1e-12, returning CPU float64 with contiguous forces and
       an undefined virial when supports_virial is false.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-011
     summary: PairMolnex no longer owns graph, comm, execution or dtype state
     type: code
@@ -109,7 +119,8 @@ criteria:
       unchanged; a single guard at the top of compute() establishes that SpeciesMap,
       ForceScatter, GraphBridge and Exec are all present, with GraphBridge held as
       std::optional and Exec as std::unique_ptr.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-012
     summary: bridge stays schema-blind and CPU-buildable after linking molnex_interface
     type: runtime
@@ -122,7 +133,8 @@ criteria:
       and runs its ctest cases green; GraphedExec's class is declared unconditionally with
       its run body #ifdef-guarded in the .cpp, and on a CPU-only build constructing it
       throws a CPU-only-build diagnostic.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-013
     summary: graph, comm, pad and dynamic-exec cases gate in CI
     type: runtime
@@ -134,7 +146,8 @@ criteria:
       cuda_run_matches_reference and bridge_graphed_exec_matches_dynamic rather than
       relying on a runtime skip; no regressions/lammps-iface-03-graph.py exists, and no
       file under regressions/ starts a subprocess.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-014
     summary: GraphBridge validates n_graph before indexing LAMMPS-owned memory
     type: code
@@ -142,7 +155,8 @@ criteria:
       GraphBridge::build throws when n_graph < 0 or n_graph > view.nall(), and ctest case
       bridge_graph_rejects_n_graph_over_nall asserts the throw rather than an
       out-of-bounds read of view.x.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-015
     summary: the ghost-force double-communication defect is named and routed
     type: docs
@@ -164,7 +178,8 @@ criteria:
       through it rather than duplicating it; bridge_read_model_outputs_rejects_short_virial,
       _absent_virial_undefined and _ignores_virial_when_unsupported pass without fixtures
       or CUDA.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
 ---
 
 # Acceptance criteria

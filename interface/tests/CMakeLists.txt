@@ -159,6 +159,77 @@ if(TARGET molnex_lammps_bridge)
       COMMAND test_bridge_atoms ${_t}
     )
   endforeach()
+
+  # -------------------------------------------------------------------------
+  # Graph-side bridge cases (spec lammps-iface-03-graph): GraphBridge, the
+  # reverse-comm free functions and the execution strategy, over a synthetic
+  # LammpsView carrying neighbour spans. Same no-fixture, no-LAMMPS, no-CUDA
+  # footing as the atom-side cases above, and registered inside the same
+  # `if(TARGET molnex_lammps_bridge)` block because they link the same target.
+  #
+  # The two fixture-backed execution cases are registered separately below:
+  # abstracting padding and output conversion into free functions is exactly
+  # what keeps the rest of this list runnable with no GPU and no exported model.
+  # -------------------------------------------------------------------------
+
+  add_executable(test_bridge_graph test_bridge_graph.cpp)
+  # molnex_lammps_bridge carries molnex_interface (for ModelRunner) and its
+  # PUBLIC MOLNEX_INTERFACE_CUDA definition transitively, which is what lets
+  # bridge_graphed_exec_cpu_only_ctor_throws know at compile time whether the
+  # CPU-only diagnostic it asserts is reachable in this build.
+  target_link_libraries(test_bridge_graph PRIVATE molnex_lammps_bridge ${TORCH_LIBRARIES})
+  if(TORCH_CXX_FLAGS)
+    separate_arguments(_TORCH_CXX_FLAGS NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
+    target_compile_options(test_bridge_graph PRIVATE ${_TORCH_CXX_FLAGS})
+  endif()
+
+  set(_BRIDGE_GRAPH_TESTS
+    bridge_graph_edge_convention
+    bridge_graph_cutoff_refilter
+    bridge_graph_sorted_by_source_target
+    bridge_graph_drops_beyond_n_graph
+    bridge_graph_applies_neigh_mask
+    bridge_graph_empty_neighbor_list
+    bridge_graph_reuses_buffers_across_calls
+    bridge_graph_rejects_n_graph_over_nall
+    bridge_comm_pack_reverse_layout
+    bridge_comm_unpack_accumulates
+    bridge_pad_edges
+    bridge_read_model_outputs_rejects_short_virial
+    bridge_read_model_outputs_absent_virial_undefined
+    bridge_read_model_outputs_ignores_virial_when_unsupported
+    bridge_graphed_exec_cpu_only_ctor_throws
+  )
+
+  foreach(_t IN LISTS _BRIDGE_GRAPH_TESTS)
+    add_test(
+      NAME ${_t}
+      COMMAND test_bridge_graph ${_t}
+    )
+  endforeach()
+
+  # Fixture-backed execution cases: they need the three-input graph-potential
+  # package generate_fixtures.py exports, so they carry FIXTURES_REQUIRED and
+  # the fixture-dir environment variable — same wiring as
+  # contract_reads_generated_v2_fixture. bridge_dynamic_exec_matches_reference
+  # is CPU-only and belongs in CI; bridge_graphed_exec_matches_dynamic needs a
+  # GPU and is excluded there by an explicit -E filter rather than by a runtime
+  # skip.
+  set(_BRIDGE_GRAPH_FIXTURE_TESTS
+    bridge_dynamic_exec_matches_reference
+    bridge_graphed_exec_matches_dynamic
+  )
+
+  foreach(_t IN LISTS _BRIDGE_GRAPH_FIXTURE_TESTS)
+    add_test(
+      NAME ${_t}
+      COMMAND test_bridge_graph ${_t}
+    )
+    set_tests_properties(${_t} PROPERTIES
+      FIXTURES_REQUIRED molnex_interface_fixtures
+      ENVIRONMENT "MOLNEX_INTERFACE_FIXTURE_DIR=${_FIXTURE_DIR}"
+    )
+  endforeach()
 else()
   message(STATUS
     "interface/tests: molnex_lammps_bridge absent — bridge_* cases unlisted "
