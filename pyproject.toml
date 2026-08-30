@@ -108,7 +108,12 @@ ignore = [
 
 [tool.ty]
 [tool.ty.rules]
-# Downgrade false positives from torch ops stubs and third-party libraries
+# Downgrade false positives from torch ops stubs and third-party libraries.
+# Audited 2026-08-30: every bucket sampled; the real defects found (MD force
+# field contract, BatchTask dict/TensorDict, ValueStat invariance, trainer
+# hook list) were fixed in code rather than suppressed. Error severity is 0
+# and CI blocks on it (ty check src/ --exit-zero-on-warning); this warn tier
+# is the printed, rule-scoped remainder — shrink it, never silence it.
 invalid-argument-type = "warn"
 # not-subscriptable: register_buffer returns None in stubs but attr is Tensor at runtime
 not-subscriptable = "warn"

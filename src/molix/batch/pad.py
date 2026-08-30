@@ -56,7 +56,7 @@ class PadMolecularBatch(BatchTask):
     def task_id(self) -> str:
         return f"PadMolecularBatch(a={self.max_atoms},e={self.max_edges})"
 
-    def execute(self, data: dict) -> dict:
+    def execute(self, data: TensorDict | dict) -> TensorDict | dict:
         atoms = data["atoms"]
         edges = data["edges"]
         n = int(atoms.batch_size[0])

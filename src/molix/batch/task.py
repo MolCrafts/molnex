@@ -8,6 +8,8 @@ per-sample ETL task hierarchy.
 
 from __future__ import annotations
 
+from tensordict import TensorDict
+
 
 class BatchTask:
     """Post-collate batch processing. **Extension point — one built-in subclass.**
@@ -35,17 +37,18 @@ class BatchTask:
         """Deterministic identifier — the concrete class name by default."""
         return type(self).__name__
 
-    def execute(self, data: dict) -> dict:
+    def execute(self, data: TensorDict | dict) -> TensorDict | dict:
         """Transform a collated batch — abstract; subclasses must override.
 
         Input and output are both nested ``TensorDict`` batches, not raw
-        sample dicts.
+        sample dicts (the ``dict`` half of the annotation covers legacy
+        callers still passing plain mappings).
 
         Raises:
             NotImplementedError: Always, on this base class.
         """
         raise NotImplementedError
 
-    def __call__(self, data: dict) -> dict:
+    def __call__(self, data: TensorDict | dict) -> TensorDict | dict:
         """Call the task, delegating to :meth:`execute`."""
         return self.execute(data)

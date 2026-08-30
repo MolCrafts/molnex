@@ -156,7 +156,7 @@ class Trainer:
         # Hooks with priority sorting
         self.hooks: list[Hook] = []
         if hooks:
-            normalized = []
+            normalized: list[tuple[Hook, int, int]] = []
             for idx, item in enumerate(hooks):
                 if isinstance(item, tuple):
                     hook, priority = item

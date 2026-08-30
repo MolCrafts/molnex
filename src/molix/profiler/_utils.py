@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -81,7 +82,7 @@ class TimingStat:
     max_ms: float
 
     @classmethod
-    def from_list(cls, values_ms: list[float]) -> "TimingStat":
+    def from_list(cls, values_ms: Sequence[float]) -> "TimingStat":
         """Compute statistics from a list of timings (in ms).
 
         Args:
@@ -111,7 +112,7 @@ class ValueStat:
     p95: float
 
     @classmethod
-    def from_list(cls, values: list[float | int]) -> "ValueStat":
+    def from_list(cls, values: Sequence[float]) -> "ValueStat":
         """Compute statistics from a list of values.
 
         Args:

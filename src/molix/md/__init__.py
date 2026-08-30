@@ -7,15 +7,18 @@ identically :class:`molpy.ForceField`. The neighbour-list cadence belongs to
 :class:`~molix.md.neighbors.NeighborList`. The lower layers are the primitives
 the caller composes:
 
-* :class:`~molix.md.types.ForceOutput` / :class:`~molix.md.types.MDState` /
-  :class:`~molix.md.types.MDObservables` — typed pytree contracts crossing
-  component boundaries.
+* :class:`~molix.md.types.MDState` / :class:`~molix.md.types.MDObservables` —
+  typed pytree contracts for the stepped state and hook snapshot. The force
+  provider returns a plain ``dict`` (``energy`` / ``forces``, optional
+  ``virial``).
 * :class:`~molix.md.forcefield.ForceField` — ``molpy.ForceField`` re-export;
   mount with :meth:`~molix.md.driver.MD.set_forcefield`.
 * :class:`~molix.md.integrators.Integrator` /
   :class:`~molix.md.integrators.VelocityVerletIntegrator` (NVE) /
   :class:`~molix.md.integrators.LangevinVerletIntegrator` (γ>0) — constructed
   with ``dt`` (Langevin also γ / kT); mass is ``atoms.mass``, bound at run.
+* :class:`~molix.md.barostat.BerendsenBarostat` — isotropic NPT rescale,
+  mounted with :meth:`~molix.md.driver.MD.set_barostat`.
 * :class:`~molix.md.runner.MDRunner` — drives the integrator through the
   :class:`~molix.md.runner.MDHook` lifecycle;
   :class:`~molix.md.runner.TrajectoryHook` captures trajectories,
@@ -33,8 +36,9 @@ asks once per force evaluation, at the positions being evaluated, iff a list
 is mounted. Omit :meth:`~molix.md.driver.MD.set_neighbors` to freeze the list.
 """
 
+from molix.md.barostat import BerendsenBarostat, instantaneous_pressure, pressure_bar_to_md
 from molix.md.driver import MD, MaxwellBoltzmann
-from molix.md.forcefield import ForceField
+from molix.md.forcefield import ForceField, MDForceField
 from molix.md.integrators import Integrator, LangevinVerletIntegrator, VelocityVerletIntegrator
 from molix.md.neighbors import NeighborList, NeighborStrategy
 from molix.md.runner import (
@@ -44,16 +48,17 @@ from molix.md.runner import (
     TrajectoryHook,
     VelocityInitHook,
 )
-from molix.md.types import ForceOutput, MDObservables, MDState
+from molix.md.types import MDObservables, MDState
 from molix.units import units
 
 __all__ = [
+    "BerendsenBarostat",
     "ForceField",
-    "ForceOutput",
     "Integrator",
     "LangevinVerletIntegrator",
     "MD",
     "MDCheckpointHook",
+    "MDForceField",
     "MDHook",
     "MDObservables",
     "MDRunner",
@@ -64,5 +69,7 @@ __all__ = [
     "TrajectoryHook",
     "VelocityInitHook",
     "VelocityVerletIntegrator",
+    "instantaneous_pressure",
+    "pressure_bar_to_md",
     "units",
 ]

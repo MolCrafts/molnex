@@ -28,10 +28,11 @@ jobs:
       - run: ruff check src/ tests/ scripts/ regressions/
       - run: ruff format --check src/ tests/ scripts/ regressions/
       - name: Type check
-        # Advisory until the ~460 pre-existing ty diagnostics under src/ are
-        # burned down; do not add new ones (reviewers read this log).
-        run: ty check src/
-        continue-on-error: true
+        # BLOCKING at error severity (0 errors as of 2026-08-30). The warn
+        # tier is the rule-scoped debt in [tool.ty.rules] (pyproject.toml),
+        # each rule downgraded with a named third-party-stub rationale —
+        # those still print here; a new error-severity diagnostic fails CI.
+        run: ty check src/ --exit-zero-on-warning
 
   test:
     name: Test (CPU)

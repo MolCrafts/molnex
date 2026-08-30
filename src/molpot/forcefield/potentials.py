@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any
 import torch
 from tensordict import TensorDict
 
-from molpot.derivation.force import autograd_forces_from_energy
-from molpot.derivation.protocol import ENERGY_KEY, FORCES_KEY
+from molpot.derivation.force import autograd_forces_and_virial, autograd_forces_from_energy
+from molpot.derivation.protocol import ENERGY_KEY, FORCES_KEY, write_virial
 from molpot.forcefield.neighbor_list import NeighborListBuilder
 from molpot.forcefield.pair_terms import (
     CoulombOpenPotential,
@@ -43,9 +43,10 @@ __all__ = ["Potentials"]
 class Potentials(BasePotential):
     """Classical Class-I energy as a molpot :class:`BasePotential` (``nn.Module``).
 
-    Embed in a larger torch model or bind to MD via
-    :class:`~molix.md.forcefield.PotentialForceField`. ``forward`` on a
-    TensorDict writes ``graphs.energy`` and ``atoms.forces``.
+    Embed in a larger torch model, or reach MD through the owning
+    :class:`~molpot.forcefield.container.ForceField` and
+    :meth:`molix.md.MD.set_forcefield`. ``forward`` on a TensorDict
+    writes ``graphs.energy`` and ``atoms.forces``.
 
     Bonded terms use existing harmonic / torsion kernels. Nonbonded terms are
     concrete Potential objects that own their cutoffs:
@@ -161,7 +162,7 @@ class Potentials(BasePotential):
 
         A nested TensorDict is treated as an MD / composer batch: energy and
         forces are written in place and the batch is returned so the module
-        can sit inside :class:`~molix.md.forcefield.PotentialForceField`.
+        composes into the MD driver's TensorDict force adapter.
         """
         if self.mlip is not None and isinstance(data, TensorDict) and kwargs.get("pos") is None:
             return self.mlip(data)
@@ -205,6 +206,10 @@ class Potentials(BasePotential):
         if self.mlip is not None and isinstance(system, TensorDict):
             if pos is not None:
                 system["atoms", "pos"] = pos
+            write = getattr(self.mlip, "_write_energy", None)
+            if callable(write):
+                write(system)
+                return system[ENERGY_KEY]
             out = self.mlip(system)
             return out[ENERGY_KEY]
         p = self._pos(system, pos)
@@ -244,6 +249,56 @@ class Potentials(BasePotential):
         p = self._pos(system, pos).detach().requires_grad_(True)
         energy = self.calc_energy(system, pos=p)
         return autograd_forces_from_energy(energy, p)
+
+    def calc_virial(
+        self,
+        system: Any,
+        *,
+        pos: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Virial ``W = ∂E/∂ε`` at ``ε = 0``, shape ``(3, 3)``.
+
+        Requires ``graphs.cell``. Imaged ``edges.edge_diff`` is strained with
+        the cell when present so the pairwise (and ML) virial includes the
+        minimum-image shift.
+
+        Args:
+            system: Batch carrying ``atoms.pos`` and ``graphs.cell``.
+            pos: Optional positions overriding ``atoms.pos``.
+
+        Returns:
+            ``W`` in the ForceField energy unit.
+
+        Raises:
+            ValueError: If ``graphs.cell`` is missing.
+        """
+        if not isinstance(system, TensorDict):
+            raise TypeError("calc_virial requires a TensorDict system")
+        nested = system.keys(include_nested=True)
+        if ("graphs", "cell") not in nested:
+            raise ValueError("calc_virial requires graphs.cell")
+        cell = system["graphs", "cell"]
+        if cell.dim() == 3:
+            cell = cell[0]
+        p = self._pos(system, pos)
+        cartesians: tuple[torch.Tensor, ...] = ()
+        if ("edges", "edge_diff") in nested:
+            cartesians = (system["edges", "edge_diff"],)
+
+        def energy_fn(
+            pos_s: torch.Tensor, cell_s: torch.Tensor, *strained: torch.Tensor
+        ) -> torch.Tensor:
+            system["atoms", "pos"] = pos_s
+            system["graphs", "cell"] = cell_s
+            if strained:
+                system["edges", "edge_diff"] = strained[0]
+                system["edges", "edge_dist"] = strained[0].norm(dim=-1)
+            energy = self.calc_energy(system, pos=pos_s)
+            return energy if energy.ndim == 0 else energy.sum()
+
+        _, _, virial = autograd_forces_and_virial(energy_fn, p, cell, *cartesians)
+        write_virial(system, virial)
+        return virial
 
     def calc_energy_forces(
         self,

@@ -33,24 +33,37 @@ from collections.abc import Sequence
 import torch
 from tensordict import TensorDict
 
-from molix.md.forcefield import ForceField
+from molix.md.barostat import BerendsenBarostat
+from molix.md.forcefield import ForceField, MDForceField
 from molix.md.integrators import Integrator
 from molix.md.neighbors import NeighborList
 from molix.md.runner import MDHook, MDRunner
-from molix.md.types import ForceOutput, MDState
-from molix.schema import ENERGY_KEY, FORCES_KEY, MASS_KEY, POS_KEY, VEL_KEY
+from molix.md.types import MDState
+from molix.schema import ENERGY_KEY, FORCES_KEY, MASS_KEY, POS_KEY, VEL_KEY, VIRIAL_KEY, has_virial
 from molix.units import preset_energy_to_md, units
 
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
 
 
+def _cell_from(work: TensorDict) -> torch.Tensor | None:
+    if ("graphs", "cell") not in work.keys(include_nested=True):
+        return None
+    cell = work["graphs", "cell"]
+    if not isinstance(cell, torch.Tensor):
+        return None
+    if cell.dim() == 3:
+        cell = cell[0]
+    return cell
+
+
 class _TensorDictForce:
-    """Private ``pos -> ForceOutput`` over ``to_potentials()``."""
+    """Private ``pos -> dict`` over ``to_potentials()``."""
 
     def __init__(self, pots: object, scale: float) -> None:
         self._pots = pots
         self._scale = float(scale)
         self._work: TensorDict | None = None
+        self.want_virial = False
 
     def bind_work(self, work: TensorDict) -> None:
         self._work = work
@@ -62,7 +75,7 @@ class _TensorDictForce:
             if moved is not None:
                 self._pots = moved
 
-    def __call__(self, pos: torch.Tensor) -> ForceOutput:
+    def __call__(self, pos: torch.Tensor) -> dict[str, torch.Tensor]:
         work = self._work
         if work is None:
             raise RuntimeError("bind the working TensorDict before evaluating forces")
@@ -94,7 +107,26 @@ class _TensorDictForce:
         except RuntimeError:
             pass
         scale = self._scale
-        return ForceOutput(energy.detach().sum() * scale, forces.detach() * scale)
+        virial = None
+        if self.want_virial:
+            if has_virial(work):
+                virial = work[VIRIAL_KEY]
+            else:
+                calc_virial = getattr(self._pots, "calc_virial", None)
+                if calc_virial is None or _cell_from(work) is None:
+                    raise RuntimeError(
+                        "a barostat needs graphs.cell and pots.calc_virial "
+                        f"(got {type(self._pots).__name__})"
+                    )
+                virial = calc_virial(work)
+            virial = virial.detach() * scale
+        out: dict[str, torch.Tensor] = {
+            "energy": energy.detach().sum() * scale,
+            "forces": forces.detach() * scale,
+        }
+        if virial is not None:
+            out["virial"] = virial
+        return out
 
 
 class MaxwellBoltzmann:
@@ -149,14 +181,15 @@ class MD:
             )
         self.dtype = dtype
         self.device: torch.device | None = None
-        self.force: ForceField | None = None
+        self.force: MDForceField | None = None
         self.neighbors: NeighborList | None = None
         self.integrator: Integrator | None = None
         self.hooks: list[MDHook | tuple[MDHook, int]] = []
+        self.barostat: BerendsenBarostat | None = None
         self.runner: MDRunner | None = None
         self._adapter: _TensorDictForce | None = None
 
-    def set_forcefield(self, force: ForceField) -> MD:
+    def set_forcefield(self, force: MDForceField) -> MD:
         """Attach a :class:`molpy.ForceField` (including Class-I / OPLS subclasses).
 
         Energy and forces from ``force.to_potentials()`` are converted from
@@ -164,7 +197,9 @@ class MD:
         :func:`molix.units.preset_energy_to_md`.
 
         Args:
-            force: molpy ForceField container.
+            force: Force field with a nullary ``to_potentials`` and a
+                ``units`` label (:class:`~molix.md.forcefield.MDForceField`)
+                — e.g. molnex's realized ``molpot.forcefield.ForceField``.
 
         Returns:
             ``self``.
@@ -212,6 +247,22 @@ class MD:
         self._wire()
         return self
 
+    def set_barostat(self, barostat: BerendsenBarostat) -> MD:
+        """Attach an isotropic Berendsen barostat and return ``self``.
+
+        Requires ``graphs.cell`` on the system and a potential that can
+        return a virial (``calc_virial`` or ``graphs.virial``). After each
+        integrator step the cell and positions are scaled and a mounted
+        neighbour list is rebuilt against the new lattice.
+        """
+        if not isinstance(barostat, BerendsenBarostat):
+            raise TypeError(
+                f"set_barostat expects a BerendsenBarostat, got {type(barostat).__name__}"
+            )
+        self.barostat = barostat
+        self._wire()
+        return self
+
     def to(self, device: torch.device | str) -> MD:
         """Place the bound integrator, neighbour list, and pots on ``device``.
 
@@ -234,10 +285,16 @@ class MD:
         pots = self.force.to_potentials()
         scale = preset_energy_to_md(self.force.units)
         self._adapter = _TensorDictForce(pots, scale)
+        self._adapter.want_virial = self.barostat is not None
         self.integrator.bind_force(self.compute_force)
-        self.runner = MDRunner(self.integrator, hooks=self.hooks)
+        self.runner = MDRunner(
+            self.integrator,
+            hooks=self.hooks,
+            barostat=self.barostat,
+            sync_state=self._sync_cell,
+        )
 
-    def compute_force(self, pos: torch.Tensor) -> ForceOutput:
+    def compute_force(self, pos: torch.Tensor) -> dict[str, torch.Tensor]:
         """Update the neighbour list on the working batch, then evaluate.
 
         Writes ``pos`` into the work TensorDict (Å), calls
@@ -248,7 +305,8 @@ class MD:
             pos: Positions ``(N, 3)`` in Å.
 
         Returns:
-            :class:`~molix.md.types.ForceOutput` in amu·Å²/fs².
+            ``{"energy", "forces"}`` in amu·Å²/fs²; ``"virial"`` when a
+            barostat is attached.
         """
         if self._adapter is None:
             raise RuntimeError("set_forcefield and set_integrator before compute_force")
@@ -279,7 +337,7 @@ class MD:
         return self.runner.run(system, n_steps, chunk=chunk)
 
     def _cast_system(self, system: TensorDict) -> TensorDict:
-        """Bring ``atoms.pos`` / ``vel`` / ``mass`` onto the run dtype/device."""
+        """Bring ``atoms.pos`` / ``vel`` / ``mass`` (and cell) onto the run dtype/device."""
         for key in (POS_KEY, VEL_KEY, MASS_KEY):
             tensor = system[key]
             if self.dtype is not None:
@@ -287,4 +345,25 @@ class MD:
             if self.device is not None:
                 tensor = tensor.to(self.device)
             system[key] = tensor
+        if ("graphs", "cell") in system.keys(include_nested=True):
+            cell = system["graphs", "cell"]
+            if self.dtype is not None:
+                cell = cell.to(self.dtype)
+            if self.device is not None:
+                cell = cell.to(self.device)
+            system["graphs", "cell"] = cell
         return system
+
+    def _sync_cell(self, state: MDState) -> None:
+        """Write a barostat-scaled cell back onto the work batch and neighbour list."""
+        if state.cell is None or self._adapter is None:
+            return
+        work = self._adapter._work
+        if work is None:
+            return
+        if "graphs" not in work.keys():
+            work["graphs"] = TensorDict({}, batch_size=[])
+        work["graphs", "cell"] = state.cell
+        work[POS_KEY] = state.pos
+        if self.neighbors is not None:
+            self.neighbors.set_cell(state.cell, state.pos)
