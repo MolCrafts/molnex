@@ -235,3 +235,82 @@ else()
     "interface/tests: molnex_lammps_bridge absent — bridge_* cases unlisted "
     "(expected until lammps-iface-02-view lands the bridge target)")
 endif()
+
+# ---------------------------------------------------------------------------
+# Contract-implementation cases (spec lammps-iface-04-facade): the contract
+# types, CutoffGraphImpl as the composition point of every 02-view / 03-graph
+# component, and the closed-set dispatch.
+#
+# Guarded on the target for the same reason the bridge block is: before
+# interface/lammps/impls/CMakeLists.txt declares molnex_lammps_impls, this whole
+# block is skipped, `ctest -N` lists no impl_* case, and THAT ABSENCE IS THE RED
+# EVIDENCE — test_contract_impl.cpp is written against the API the impl task
+# must satisfy, while the suite stays configurable and fully runnable.
+#
+# The impl_* cases need NO fixtures: the Exec is injected, so they drive a stub
+# implementation over a synthetic LammpsView with no exported model, no CUDA and
+# no LAMMPS. The two registry_* cases are the exception and are registered
+# separately below — ContractImpl::for_contract takes a ModelRunner&, which
+# cannot exist without a real package.
+# ---------------------------------------------------------------------------
+
+if(TARGET molnex_lammps_impls)
+  add_executable(test_contract_impl test_contract_impl.cpp)
+  # The impls target carries its own PUBLIC include directory (interface/lammps)
+  # plus molnex_lammps_bridge and molnex_interface transitively, so the cases
+  # reach "impls/xxx.h", "bridge/xxx.h", "lammps_contract.h" and
+  # "molnex/interface/model_runner.h" with nothing added here.
+  target_link_libraries(test_contract_impl PRIVATE molnex_lammps_impls ${TORCH_LIBRARIES})
+  if(TORCH_CXX_FLAGS)
+    separate_arguments(_TORCH_CXX_FLAGS NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
+    target_compile_options(test_contract_impl PRIVATE ${_TORCH_CXX_FLAGS})
+  endif()
+
+  set(_CONTRACT_IMPL_TESTS
+    impl_needs_matches_legacy_request
+    impl_compute_composes_pipeline
+    impl_compute_n_graph_local_only
+    impl_compute_n_graph_with_ghost
+    impl_compute_rejects_ghost_without_pbc
+    impl_virial_present_and_absent
+    impl_reports_pair_reverse_comm_condition
+    impl_coeff_token_count
+    impl_coeff_rejects_trailing_garbage
+    impl_coeff_rejects_empty_token
+    impl_coeff_rejects_out_of_range
+    impl_init_rejects_special_bonds_on_molecular
+    impl_init_single_domain_condition
+    impl_reverse_comm_forwards
+  )
+
+  foreach(_t IN LISTS _CONTRACT_IMPL_TESTS)
+    add_test(
+      NAME ${_t}
+      COMMAND test_contract_impl ${_t}
+    )
+  endforeach()
+
+  # Fixture-backed dispatch cases: ContractImpl::for_contract takes a
+  # ModelRunner&, so both need a real exported package — the TinyLinear CPU
+  # fixture, which is only held and never run (the dispatch's job is to
+  # construct). Same wiring as contract_reads_generated_v2_fixture.
+  set(_CONTRACT_IMPL_FIXTURE_TESTS
+    registry_returns_cutoff_graph_impl
+    registry_rejects_fixed_graph
+  )
+
+  foreach(_t IN LISTS _CONTRACT_IMPL_FIXTURE_TESTS)
+    add_test(
+      NAME ${_t}
+      COMMAND test_contract_impl ${_t}
+    )
+    set_tests_properties(${_t} PROPERTIES
+      FIXTURES_REQUIRED molnex_interface_fixtures
+      ENVIRONMENT "MOLNEX_INTERFACE_FIXTURE_DIR=${_FIXTURE_DIR}"
+    )
+  endforeach()
+else()
+  message(STATUS
+    "interface/tests: molnex_lammps_impls absent — impl_* / registry_* cases "
+    "unlisted (expected until lammps-iface-04-facade lands the impls target)")
+endif()

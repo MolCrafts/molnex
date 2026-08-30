@@ -7,7 +7,6 @@
 
 #include <stdexcept>
 #include <string>
-#include <utility>
 
 #include <ATen/ATen.h>
 
@@ -35,12 +34,24 @@ std::string meta_dtype_name(at::ScalarType dtype) {
 
 }  // namespace
 
-Exec::Exec(at::ScalarType model_dtype)
-    : model_dtype_name_(meta_dtype_name(model_dtype)) {}
+Exec::Exec(at::Device device, at::ScalarType model_dtype, bool supports_virial)
+    : device_(device),
+      model_dtype_(model_dtype),
+      supports_virial_(supports_virial),
+      model_dtype_name_(meta_dtype_name(model_dtype)) {}
 
 // Out of line on purpose: an inline pure-virtual destructor would emit the
 // class's vtable in every translation unit that includes the header.
 Exec::~Exec() = default;
+
+void Exec::require_runner(const void* runner, const std::string& impl_name) {
+  if (runner == nullptr) {
+    throw std::runtime_error(
+        impl_name +
+        ": model runner is null; the pair style must load the model before it "
+        "constructs an execution strategy");
+  }
+}
 
 ModelOutputs read_model_outputs(const std::vector<at::Tensor>& raw,
                                 bool supports_virial) {

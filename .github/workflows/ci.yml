@@ -79,7 +79,7 @@ jobs:
       # full Python AOTI export; only the no-fixture list plus the CPU-safe
       # fixture-backed cases belong in this gate.
       #
-      # -R selects the meta / contract / bridge families. That sweeps in
+      # -R selects the meta / contract / bridge / impl / registry families. That sweeps in
       # bridge_dynamic_exec_matches_reference, which is wanted: it is the only
       # numerical parity evidence for the Exec extraction, its graph-potential
       # fixture exports on CPU, and ctest pulls fixture_setup in automatically
@@ -93,6 +93,6 @@ jobs:
       - name: Run interface ctests (no-fixture list + CPU parity case)
         run: |
           ctest --test-dir build-interface \
-            -R '^meta_|^contract_|^bridge_' \
+            -R '^meta_|^contract_|^bridge_|^impl_|^registry_' \
             -E '^bridge_graphed_exec_matches_dynamic$' \
             --output-on-failure

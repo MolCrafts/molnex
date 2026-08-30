@@ -7,29 +7,36 @@
    dtype, capabilities) — there is no per-model C++. Model input/output glue lives
    on the Python export side as a molix.engine.EngineAdapter.
 
+   THIS FILE IS THE PROTOCOL LAYER, AND NOTHING ELSE. It is the only file in the
+   plugin that includes a LAMMPS header, and in exchange it holds no capability
+   flag, no unit factor, no neighbour loop and no branch on what a model can do.
+   Three layers meet under it:
+
+       bridge/  LAMMPS-free primitives (SpeciesMap, stage_nodes, GraphBridge,
+                Exec, ForceScatter) that do not know meta.json exists;
+       impls/   LAMMPS-free strategy that DOES know the contract — ContractImpl
+                and, today, CutoffGraphImpl;
+       here     parameter pipe, allocate, neighbour request, forwarding, tally.
+
+   Everything this class used to decide for itself — how many atoms are graph
+   nodes, whether ghosts are allowed, which execution strategy runs, which unit
+   factor applies, whether a reverse comm is owed — is now a `ContractImpl`
+   answer, and what remains here is the mechanical execution of those answers.
+   A new capability therefore lands as a new impl, not as another `if` in this
+   file. Two dialects meet at that seam: everything below throws
+   std::runtime_error and every callback here translates into
+   `error->all(FLERR, ...)`, always from OUTSIDE the try (a LAMMPSException is a
+   std::exception and would otherwise be self-caught and re-labelled).
+
    Command:
        pair_style molnex <model_dir> [name]
        pair_coeff * * <Z_type1> <Z_type2> ... <Z_typeN>
 
    `name` is the artifact basename inside <model_dir> (default "model").
 
-   Units: the model's native unit system is declared in meta.json (`units`:
-   "real" = kcal/mol, "metal" = eV). The pair style reads LAMMPS' active `units`
-   and converts energy/forces to it (distance is Å in both real and metal).
-
-   Ghost / PBC:
-       When meta `supports_pbc` is true, the pair style builds the graph over
-       local + ghost atoms (ghost positions already carry the minimum-image
-       placement), scatters forces onto ghosts, and reverse-communicates them
-       to owners. Multi-rank domain decomposition is allowed in that mode.
-       When `supports_pbc` is false, the pair style requires a single rank
-       and no ghost atoms (open-boundary, one domain).
-
-   Virial:
-       When meta `supports_virial` is true and the model returns a third
-       output of shape (6,) (xx,yy,zz,xy,xz,yz in model energy units), it is
-       accumulated into the global virial. Otherwise `virial_fdotr_compute`
-       is used when LAMMPS requests virial via fdotr.
+   Units, ghost/PBC and virial behaviour are properties of the CONTRACT, not of
+   this class: see interface/lammps/README.md and the impl that implements the
+   contract your export declares.
 */
 
 #ifdef PAIR_CLASS
@@ -47,11 +54,8 @@ PairStyle(molnex,PairMolnex);
 #include <optional>
 #include <string>
 
-#include "bridge/exec.h"
-#include "bridge/force_scatter.h"
-#include "bridge/graph_bridge.h"
 #include "bridge/lammps_view.h"
-#include "bridge/species_map.h"
+#include "impls/contract_impl.h"
 #include "lammps_contract.h"
 
 namespace molnex::interface {
@@ -70,53 +74,45 @@ class PairMolnex : public Pair {
   double init_one(int, int) override;
   void init_style() override;
 
-  // ghost force reverse-comm (used when supports_pbc)
+  // ghost force reverse-comm; whether it runs at all is the impl's answer,
+  // returned per step as EvalResult::needs_pair_reverse_comm.
   int pack_reverse_comm(int, int, double *) override;
   void unpack_reverse_comm(int, int *, double *) override;
 
  protected:
-  double cut_global;                 // cutoff (Å), from meta.json
+  // What the input script said, kept because the diagnostics name it: the
+  // export directory and the artifact basename inside it.
   std::string model_dir;
-  std::string model_name;            // artifact basename inside model_dir
+  std::string model_name;
+
+  // The whole state of this pair style. Declaration order is destruction order
+  // reversed, and one pair depends on it: `impl_` borrows `runner`, so `runner`
+  // is declared BEFORE `impl_` and therefore destroyed AFTER it. Swapping the
+  // two would free the model out from under the strategy still holding it.
+  //
+  // The contract is kept for the startup message alone — every decision it
+  // used to feed (cutoff, units, capabilities, species) now lives inside the
+  // impl that was built from it. The impl and the cached needs are the two
+  // things every callback below reads.
+  std::optional<molnex::lammps::LammpsContract> contract_;
   std::unique_ptr<molnex::interface::ModelRunner> runner;
-  std::string device;                // "cpu" or "cuda", from the export meta
-  std::string model_units;           // "real" or "metal", from meta.json
-  double energy_conv;                // model-energy-unit -> LAMMPS-energy-unit factor
+  std::unique_ptr<molnex::lammps::ContractImpl> impl_;
 
-  // Bridge components. Each is empty until the command that configures it has
-  // run — the contract, the scatter, the graph and the execution strategy at
-  // `pair_style` (settings), the species map at `pair_coeff` (coeff) — and
-  // `compute()` establishes with one guard at its top that all four hold a
-  // value, so nothing below it re-asks.
-  //
-  // std::optional for the first three: cheap, complete types, so a heap
-  // allocation would buy nothing and "not configured yet" is a state of the
-  // pair style rather than an ownership question. std::unique_ptr for `exec_`
-  // only because `Exec` is polymorphic — which of DynamicExec / GraphedExec was
-  // constructed IS the execution choice, so there is no flag beside it to
-  // consult and no branch on execution anywhere in compute().
-  //
-  // Two values deliberately absent beside them, on the same rule: the last
-  // reader leaves, the value leaves. `force_conv`'s reader was the scatter
-  // loop, now ForceScatter's; the model-dtype flag's was the `pos` cast at the
-  // execution site, now each Exec's — which reports that dtype's name back for
-  // the startup message. A second copy here could only drift from the one that
-  // acts.
-  std::optional<molnex::lammps::LammpsContract> contract_;    // meta, cached for coeff()
-  std::optional<molnex::lammps_bridge::SpeciesMap> species_map_;      // type -> Z, validated
-  std::optional<molnex::lammps_bridge::ForceScatter> force_scatter_;  // holds force_conv
-  std::optional<molnex::lammps_bridge::GraphBridge> graph_bridge_;    // holds cutoff^2
-  std::unique_ptr<molnex::lammps_bridge::Exec> exec_;                 // dynamic or graphed
-
-  // capability flags from meta.json
-  bool supports_pbc = false;         // ghost-aware graph + reverse_comm
-  bool supports_virial = false;      // model emits a 3rd virial output
+  // The impl's request table, asked ONCE at `pair_style` time and executed
+  // verbatim afterwards: `init_style` turns `full` / `ghost` into NeighConst
+  // flags, `init_one` returns `cutoff`, and `settings` copies the two comm
+  // sizes into LAMMPS' own `comm_reverse` / `comm_reverse_off`. Cached rather
+  // than re-asked because LAMMPS reads `comm_reverse` between callbacks, so the
+  // answer must be one fixed table rather than a per-call question.
+  molnex::lammps::NeighborNeeds needs_{};
 
   // The bridge's window onto LAMMPS' arrays for the current step, assembled in
-  // one place because three call sites need it: compute() reads every field,
-  // and the two reverse-comm callbacks read only x / f / type / nlocal /
-  // nghost. The view borrows and owns nothing, so it is rebuilt per call rather
-  // than cached across a reneighbouring (which moves the arrays it points at).
+  // one place because three call sites need it: compute() passes it to the
+  // impl, and the two reverse-comm callbacks pass it to the impl's forwarders.
+  // The view borrows and owns nothing, so it is rebuilt per call rather than
+  // cached across a reneighbouring (which moves the arrays it points at).
+  // Assembling this aggregate is the whole of the facade's data handling: the
+  // pointers go over the seam untouched, and no tensor is built on this side.
   molnex::lammps_bridge::LammpsView current_view() const;
 
   virtual void allocate();

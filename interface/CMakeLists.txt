@@ -55,6 +55,13 @@ set_target_properties(molnex_interface PROPERTIES
 # guarded on `if(TARGET molnex_lammps_bridge)`.
 add_subdirectory(lammps/bridge)
 
+# The contract-implementation layer (spec lammps-iface-04-facade), added from
+# the parent for the same reason and under the same rule as lammps/bridge:
+# NEVER add_subdirectory(lammps). It must come AFTER lammps/bridge (it links
+# that target) and BEFORE tests/, whose impl_* / registry_* cases are guarded on
+# `if(TARGET molnex_lammps_impls)`.
+add_subdirectory(lammps/impls)
+
 if(MOLNEX_INTERFACE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

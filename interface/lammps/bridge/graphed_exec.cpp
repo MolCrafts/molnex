@@ -44,11 +44,8 @@ PaddedEdges pad_edges(const at::Tensor& edge_index, int64_t e_max) {
 GraphedExec::GraphedExec(molnex::interface::ModelRunner* runner,
                          at::Device device, at::ScalarType model_dtype,
                          bool supports_virial, int64_t n_fixed, int64_t e_max)
-    : Exec(model_dtype),
+    : Exec(device, model_dtype, supports_virial),
       runner_(runner),
-      device_(device),
-      model_dtype_(model_dtype),
-      supports_virial_(supports_virial),
       n_fixed_(n_fixed),
       e_max_(e_max) {
 #ifndef MOLNEX_INTERFACE_CUDA
@@ -60,11 +57,10 @@ GraphedExec::GraphedExec(molnex::interface::ModelRunner* runner,
       "libmolnex_interface was built CPU-only (no CUDA toolkit at build time); "
       "rebuild where CUDA is available, or re-export with cuda_graph=False");
 #else
-  if (runner_ == nullptr) {
-    throw std::runtime_error(
-        "GraphedExec: model runner is null; the pair style must load the model "
-        "before it constructs an execution strategy");
-  }
+  // Same order as before: the CPU-only refusal above precedes every other
+  // check, so a null runner is only reported on a build that could have used
+  // one. The refusal itself is the base's, so both strategies say it alike.
+  require_runner(runner_, "GraphedExec");
   if (n_fixed_ < 0 || e_max_ < 0) {
     throw std::runtime_error(
         "GraphedExec: n_fixed " + std::to_string(n_fixed_) + " and e_max " +

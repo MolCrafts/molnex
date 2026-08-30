@@ -38,6 +38,7 @@
 #include <vector>
 
 #include <ATen/Tensor.h>
+#include <c10/core/Device.h>
 #include <c10/core/ScalarType.h>
 
 namespace molnex::lammps_bridge {
@@ -105,6 +106,14 @@ ModelOutputs read_model_outputs(const std::vector<at::Tensor>& raw,
 /// `ModelRunner::run`) and `GraphedExec` (fixed shapes with padded edges,
 /// delegating to `ModelRunner::run_graphed`). A third, `TorchScriptExec`,
 /// is described in the header comment above and needs nothing added here.
+///
+/// The three inputs every implementation needs to do that — the device, the
+/// model dtype and the virial flag — are held HERE, once, because they are the
+/// same three facts about the same export and two copies of them could drift.
+/// The runner is deliberately NOT among them: which runtime object an
+/// implementation borrows is exactly the part this interface refuses to name,
+/// so `runner_` stays a member of each subclass and only the "borrowed still
+/// means present" refusal is shared, through `require_runner`.
 class Exec {
  public:
   virtual ~Exec();
@@ -144,11 +153,38 @@ class Exec {
   const std::string& model_dtype_name() const { return model_dtype_name_; }
 
  protected:
-  /// \param model_dtype  The dtype `pos` is cast to before the model sees it.
-  ///                     Held only as its name; the implementation keeps the
-  ///                     `at::ScalarType` it actually casts with, so the two
-  ///                     cannot disagree about anything a reader can observe.
-  explicit Exec(at::ScalarType model_dtype);
+  /// \param device          Device the model's package was built for; every
+  ///                        implementation moves its inputs there.
+  /// \param model_dtype     The dtype `pos` is cast to before the model sees
+  ///                        it. Also held as its name (see
+  ///                        `model_dtype_name`), so the string a reader sees
+  ///                        and the `at::ScalarType` the cast uses cannot
+  ///                        disagree.
+  /// \param supports_virial Whether the export declared a virial output; the
+  ///                        flag every implementation hands to
+  ///                        `read_model_outputs`.
+  Exec(at::Device device, at::ScalarType model_dtype, bool supports_virial);
+
+  /// Refuse a null borrowed runner at the line that failed to supply one.
+  ///
+  /// Takes `const void*` rather than a runner type on purpose: `runner_` stays
+  /// a member of each implementation, because the backend it points at is not
+  /// this interface's business (the recorded TorchScript route holds a scripted
+  /// module, not a `ModelRunner`). What IS shared is the refusal — "borrowed"
+  /// still means "present", and without it a null only surfaces as a segfault
+  /// inside the first timestep, far from the `pair_style` line that caused it.
+  ///
+  /// \param runner     The borrowed pointer an implementation was handed.
+  /// \param impl_name  Class name for the diagnostic, e.g. `"DynamicExec"`.
+  /// \throws std::runtime_error  If `runner` is null.
+  static void require_runner(const void* runner, const std::string& impl_name);
+
+  /// Device the implementation moves its inputs to.
+  at::Device device_;
+  /// Dtype `pos` is cast to before the model sees it.
+  at::ScalarType model_dtype_;
+  /// Whether the export declared a virial output.
+  bool supports_virial_;
 
  private:
   std::string model_dtype_name_;

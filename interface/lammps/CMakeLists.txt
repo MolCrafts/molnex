@@ -35,8 +35,9 @@ find_package(Torch REQUIRED)
 # The AOTI runner library lives one level up (interface/). Build it here as a
 # subdirectory (static, PIC) unless an enclosing build already provides the
 # `molnex_interface` target. That parent also declares `molnex_lammps_bridge`
-# (bridge/, LAMMPS-free), so one guard covers both targets on both paths:
-# standalone from here, and from an enclosing interface/ build.
+# (bridge/) and `molnex_lammps_impls` (impls/), both LAMMPS-free, so one guard
+# covers all three targets on both paths: standalone from here, and from an
+# enclosing interface/ build.
 if(NOT TARGET molnex_interface)
   set(MOLNEX_INTERFACE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/.. molnex_interface_build)
@@ -71,6 +72,10 @@ target_link_libraries(molnexplugin PRIVATE
   # PUBLIC include dir (interface/lammps), so pair_molnex.cpp reaches the
   # headers as "bridge/xxx.h" with nothing further added above.
   molnex_lammps_bridge
+  # Contract implementations (ContractImpl / CutoffGraphImpl and the closed-set
+  # dispatch). Same PUBLIC include dir, so the facade reaches them as
+  # "impls/xxx.h"; it carries molnex_lammps_bridge transitively.
+  molnex_lammps_impls
   ${TORCH_LIBRARIES}
   ${LAMMPS_LIB}
 )

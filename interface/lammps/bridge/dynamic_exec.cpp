@@ -4,7 +4,6 @@
 
 #include "bridge/dynamic_exec.h"
 
-#include <stdexcept>
 #include <vector>
 
 #include <ATen/ATen.h>
@@ -14,19 +13,10 @@ namespace molnex::lammps_bridge {
 DynamicExec::DynamicExec(molnex::interface::ModelRunner* runner,
                          at::Device device, at::ScalarType model_dtype,
                          bool supports_virial)
-    : Exec(model_dtype),
-      runner_(runner),
-      device_(device),
-      model_dtype_(model_dtype),
-      supports_virial_(supports_virial) {
-  // Borrowed, never owned — but "borrowed" still means "present". Without this
-  // the null would only surface as a segfault inside the first timestep, far
-  // from the `pair_style` line that failed to supply a runner.
-  if (runner_ == nullptr) {
-    throw std::runtime_error(
-        "DynamicExec: model runner is null; the pair style must load the model "
-        "before it constructs an execution strategy");
-  }
+    : Exec(device, model_dtype, supports_virial), runner_(runner) {
+  // Borrowed, never owned — but "borrowed" still means "present". The refusal
+  // is the base's, so both strategies fail in the same words.
+  require_runner(runner_, "DynamicExec");
 }
 
 ModelOutputs DynamicExec::run(const at::Tensor& Z, const at::Tensor& pos_f64,

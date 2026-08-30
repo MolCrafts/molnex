@@ -12,8 +12,9 @@ pair style reads everything model-specific (cutoff, native units, compute dtype,
 capabilities) from the export directory's `<name>.meta.json` `lammps` block, and
 runs the AOT-Inductor `.pt2` package through the shared
 `molnex::interface::ModelRunner`. The block also records the model's supported
-species, which today is provenance — the check of your `pair_coeff` atomic
-numbers against it lands with `lammps-iface-02-view`.
+species, and every `pair_coeff` atomic number is checked against that list at
+`pair_coeff` time — an element the model was never exported for is refused
+rather than fed forward as an embedding index the network has no row for.
 
 ```
 pair_style molnex <model_dir> [name]
@@ -116,6 +117,50 @@ model measures length the way LAMMPS does. The meta therefore also carries
 fails loudly instead of being silently mis-scaled by the Bohr/Å ratio; serving
 one would take a schema v3 with a length table, which is deliberately not
 pre-built.
+
+## `special_bonds` requirement (molecular systems)
+
+**A molecular system must set `special_bonds lj/coul 1.0 1.0 1.0`.** The pair
+style refuses anything else at `init` time, and the refusal is not pedantry:
+
+```
+# in your input script, for any system with bond topology
+special_bonds lj/coul 1.0 1.0 1.0
+```
+
+LAMMPS' default is `special_bonds lj/coul 0.0 0.0 0.0`, and a coefficient of
+`0.0` does not scale a pair down — it **deletes that pair from the neighbour
+list entirely**. Every 1-2, 1-3 and 1-4 pair, i.e. exactly the bonded nearest
+neighbours, would then be invisible to the cutoff graph this pair style builds.
+A many-body ML potential would be evaluated on a graph missing its closest
+edges: wrong energies, wrong forces, and — before this check existed — no
+diagnostic anywhere.
+
+A coefficient that is neither `0.0` nor `1.0` is refused for the same reason
+from the other direction: it says LAMMPS expects those interactions to be
+scaled, and molnex applies no special-bond scaling of its own, so the run would
+silently disagree with the input script.
+
+The check fires only when the system has bond topology (`atom->molecular != 0`).
+An `atom_style atomic` system has no special pairs at all, so it runs whatever
+its unused coefficients say.
+
+## Per-atom energy and stress are refused, not zeroed
+
+`compute pe/atom` and `compute stress/atom` (and anything that pulls them in,
+such as a per-atom dump or `fix ave/atom` over them) **error out** under
+`pair_style molnex`.
+
+The exported models return a total energy, per-atom forces and an optional
+global virial — there is no per-site decomposition to hand back. Until this
+version, LAMMPS' `ev_init` allocated `eatom` / `vatom`, this pair style never
+wrote them, and the user received a legal-looking all-zero field: a per-atom
+energy map that was silently, uniformly wrong. The pair style now says so
+instead. Global thermo output (`etotal`, `press` via the model virial or
+`virial_fdotr_compute`) is unaffected.
+
+A contract that produces per-site energies can fill them in later; the refusal
+is what a contract that cannot must do in the meantime.
 
 ## Schema versions
 
@@ -223,3 +268,35 @@ accumulated into the global virial. Otherwise LAMMPS falls back to
 > PiNet) is currently miscompiled by the torch 2.12 CPU inductor backend; use a
 > CUDA export for those models, or the eager `fix external` driver for CPU
 > prototyping. This is an upstream torch issue, independent of this interface.
+
+### Weight hot-reload (`num_models`) — the opening, on record
+
+`molnex::interface::ModelRunner`'s constructor takes a `num_models` count: the
+number of constant buffers the underlying AOTI runner allocates. That parameter
+is the designed seam for **double-buffered hot reload** (`update_weights`), in
+which the active buffer keeps serving `run()` calls while the inactive one is
+rewritten and a single atomic swap flips them — no inference pause, no
+caller-visible lock. It is what an on-line re-parameterisation loop (train a
+little, swap the weights, keep integrating) would be built on.
+
+**`pair_style molnex` passes `num_models = 1` today, and there is no keyword to
+change it.** The pair style has no hot-reload consumer, and a command-line
+grammar with nothing to drive it is syntax nobody earned: it would have to be
+parsed, validated, documented and kept compatible before a single caller
+existed. The grammar therefore ships with the spec that introduces the consumer
+(a `fix` that reloads weights during a run), not before. This paragraph exists
+so the seam is *recorded* rather than rediscovered — the C++ side needs no
+change to support it.
+
+Two version notes bind that future keyword, and are the reason it cannot be a
+free-floating option:
+
+* **torch ≥ 2.12 makes the two modes mutually exclusive.** `num_models > 1`
+  requires `run_single_threaded = false`; the runner refuses the combination
+  `num_models > 1` with `run_single_threaded = true` outright.
+* **Hot reload therefore excludes CUDA-graph capture.** Capture requires the
+  single-threaded runner (the multi-threaded `run()` does a capture-illegal
+  allocation/synchronisation, PyTorch #158834), so a hot-reloadable run is an
+  `execution: "dynamic"` run. An export with `execution: "cuda-graph"` and a
+  hot-reload request is a contradiction the future keyword must reject rather
+  than resolve.

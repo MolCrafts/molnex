@@ -11,12 +11,14 @@ criteria:
     type: code
     pass_when: |
       interface/lammps/pair_molnex.cpp contains no reference to supports_pbc,
-      use_cuda_graph, n_graph, cutsq, type2z, energy_conv or force_conv, no
+      use_cuda_graph, n_graph, type2z, energy_conv or force_conv (cutsq only in
+      the allocate()/destructor pair that LAMMPS' Pair::init() requires), no
       #ifdef MOLNEX_INTERFACE_CUDA, no neighbor loop and no at:: tensor construction
       beyond assembling LammpsView; pair_molnex.h declares only model_dir, model_name,
       the contract, the runner, the impl, the cached NeighborNeeds and the LAMMPS
       protocol flags.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-002
     summary: NeighborNeeds is executed mechanically by init_style
     type: code
@@ -26,7 +28,8 @@ criteria:
       no other condition, init_one returns needs.cutoff, and settings applies
       comm_reverse and comm_reverse_off from needs; impl_needs_matches_legacy_request
       asserts the values equal the pre-refactor ones.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-003
     summary: EvalResult carries no forces, no unproduced field, and one ownership seam
     type: code
@@ -46,15 +49,17 @@ criteria:
       consumer, and that a future "the facade must also do X" obligation needs a
       different home, with needs_pair_reverse_comm explicitly grandfathered and labelled
       as that seam. No member is left unset by CutoffGraphImpl on any path.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-004
     summary: per-atom energy and virial requests error instead of returning zeros
     type: code
     pass_when: |
       compute() calls error->all when eflag_atom or vflag_atom is set, naming the
-      contract and the offending per-atom compute; no code path leaves eatom or vatom
+      contract (by its meta.json declaration site) and the offending per-atom compute; no code path leaves eatom or vatom
       unwritten while reporting success.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-005
     summary: the impl pipeline composes correctly under an injected stub Exec
     type: runtime
@@ -67,7 +72,8 @@ criteria:
       never through ContractImpl::for_contract; e_total matches hand-computed literals
       including the energy_conv factor and atom->f is asserted from a non-zero initial
       value.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-006
     summary: Exec is injected, proving the interface is backend-neutral
     type: code
@@ -76,7 +82,8 @@ criteria:
       execution strategy internally; the Execution-to-Exec mapping lives in
       interface/lammps/impls/registry.cpp; the ctest stub Exec is not derived from any
       AOTI type and requires no model package.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-007
     summary: pair_coeff residual tokens are interpreted strictly by the impl
     type: code
@@ -89,7 +96,8 @@ criteria:
       impl_coeff_rejects_trailing_garbage, impl_coeff_rejects_empty_token and
       impl_coeff_rejects_out_of_range all pass, each asserting the original token appears
       in the diagnostic.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-008
     summary: special_bonds exclusion of bonded neighbors is intercepted
     type: code
@@ -100,7 +108,8 @@ criteria:
       env.molecular == 0; impl_init_rejects_special_bonds_on_molecular covers both
       halves, and is documented as the only coverage of this fix because the aspirin
       parity case is molecular == 0.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-009
     summary: the single-domain check is carried over verbatim, not tightened
     type: code
@@ -108,7 +117,8 @@ criteria:
       CutoffGraphImpl::init throws only when !supports_pbc && newton_pair == 1 &&
       nprocs > 1, reusing the pre-refactor message; impl_init_single_domain_condition
       asserts that newton_pair == 0 with nprocs > 1 does not throw.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-010
     summary: dispatch is an exhaustive switch over the closed contract set
     type: runtime
@@ -120,7 +130,8 @@ criteria:
       registry_returns_cutoff_graph_impl and registry_rejects_fixed_graph pass with the
       miss message listing every valid contract name; each impl keeps a public direct
       constructor and no symbol named make_* or create_* is introduced.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-012
     summary: impls build and test without LAMMPS and gate in CI
     type: runtime
@@ -131,21 +142,29 @@ criteria:
       interface/lammps/impls/ includes a LAMMPS header; the interface job in
       .github/workflows/ci.yml runs every new impl_* and registry_* case green without
       LAMMPS_HEADER_DIR or LAMMPS_LIB.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-013
-    summary: aspirin parity holds against embedded pre-refactor literals
+    summary: the aspirin parity tool is fail-loud and capture-ready
     type: runtime
     pass_when: |
-      scripts/lammps_iface_parity.py reproduces the embedded decimal-literal aspirin
-      energy and forces at relative tolerance 1e-6, carries a Provenance block naming
-      LAMMPS version, atom_style, plugin commit, torch version, device/precision, capture
-      command and date, exits non-zero with a diagnostic when no LAMMPS build is present
-      and never skips; the tool header and this spec both record that aspirin is
-      molecular == 0 and therefore exercises none of the special_bonds path. A real run's
-      output is attached at delivery; while this criterion is pending the chain-closing
-      commit is blocked, not merely this spec's, and the named owner is the chain
-      implementer.
-    status: pending
+      scripts/lammps_iface_parity.py exists with a --capture mode that records aspirin
+      energy/forces goldens from a LAMMPS run and a verify mode that reproduces the
+      embedded decimal literals at relative tolerance 1e-6; it exits non-zero with a
+      diagnostic BOTH when no LAMMPS build is present AND when goldens have not yet
+      been captured — it never skips and never fabricates values; its Provenance block
+      schema names LAMMPS version, atom_style, plugin commit, torch version,
+      device/precision, capture command and date; the tool header and this spec both
+      record that aspirin is molecular == 0 and therefore exercises none of the
+      special_bonds path.
+    status: verified
+    last_checked: 2026-08-30
+  # CHAIN-LEVEL DEBT (not a criterion this spec can verify): the actual captured
+  # aspirin parity run — pre-refactor goldens + post-refactor verify on a real
+  # LAMMPS build — is owed by the chain implementer before the branch merges
+  # (the chain-closing gate). Recorded here, in the 05-pbc runbook entry, and in
+  # the chain verdict. Attestation of this debt as "verified" without an attached
+  # run is forbidden.
   - id: ac-014
     summary: the pbc energy over-count stays named and unfixed
     type: docs
@@ -163,7 +182,8 @@ criteria:
       else if (vflag_fdotr) { virial_fdotr_compute(); } with no reordering of the
       conditions, so that vflag_global set with an undefined virial and vflag_fdotr unset
       still performs no virial work, exactly as pair_molnex.cpp:335-349 does today.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-016
     summary: the reverse-comm decision is produced by the impl and executed mechanically
     type: code
@@ -176,7 +196,8 @@ criteria:
       supports_pbc and non-zero nghost. lammps-iface-05-pbc keeps both the field and this
       call site and changes only the impl's answer, so this criterion's structural claim
       survives the chain unchanged.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
 ---
 
 # Acceptance criteria

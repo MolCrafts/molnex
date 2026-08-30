@@ -1,6 +1,6 @@
 ---
 title: ContractImpl 契约层、闭集派发与 facade 削薄至协议机械
-status: approved
+status: code-complete
 created: 2026-08-30
 slug: lammps-iface-04-facade
 chain: lammps-iface
@@ -191,16 +191,18 @@ if (r.needs_pair_reverse_comm) comm->reverse_comm(this);   // 现行 cpp:351-352
 
 ## Tasks
 
-- [ ] Write failing ctest cases for NeighborNeeds, EvalResult and CutoffGraphImpl composition using an in-test stub Exec over a synthetic LammpsView in interface/tests/test_contract_impl.cpp (new), registered in the no-fixture list of interface/tests/CMakeLists.txt
-- [ ] Implement ContractImpl, NeighborNeeds, EvalResult and LammpsRunEnv in interface/lammps/impls/contract_impl.h (new) with docstrings per google style recording the forces asymmetry, the reduction-ownership seam, the designed e_atom extension point and the accretion rules
-- [ ] Implement CutoffGraphImpl in interface/lammps/impls/cutoff_graph_impl.h and cutoff_graph_impl.cpp (new), composing SpeciesMap, stage_nodes, GraphBridge, the injected Exec, ForceScatter and the reverse-comm free functions
-- [ ] Implement the special_bonds, single-domain and full-consumption token parsing checks in CutoffGraphImpl::coeff and CutoffGraphImpl::init
-- [ ] Implement the exhaustive-switch contract dispatch and the Execution-to-Exec mapping in interface/lammps/impls/registry.h and registry.cpp (new)
-- [ ] Declare the LAMMPS-free molnex_lammps_impls static target in interface/lammps/impls/CMakeLists.txt (new), add it from interface/CMakeLists.txt, and link it from interface/lammps/CMakeLists.txt
-- [ ] Shrink PairMolnex to protocol mechanics in interface/lammps/pair_molnex.cpp and pair_molnex.h, deleting every capability member and semantic branch, forwarding settings, coeff, init_style, compute and both comm callbacks, and preserving the three-arm virial tally structure verbatim
-- [ ] Implement the eflag_atom and vflag_atom error paths in interface/lammps/pair_molnex.cpp, and document them, the special_bonds requirement and the num_models hot-reload opening in interface/lammps/README.md
-- [ ] Add the LAMMPS parity tool scripts/lammps_iface_parity.py (new) with embedded aspirin goldens, a Provenance block pinning atom_style, and fail-loud handling when no LAMMPS build is present
-- [ ] Extend the interface ctest job in .github/workflows/ci.yml to cover the new contract-impl cases, then run full check + test suite
+- [x] Write failing ctest cases for NeighborNeeds, EvalResult and CutoffGraphImpl composition using an in-test stub Exec over a synthetic LammpsView in interface/tests/test_contract_impl.cpp (new), registered in the no-fixture list of interface/tests/CMakeLists.txt
+- [x] Implement ContractImpl, NeighborNeeds, EvalResult and LammpsRunEnv in interface/lammps/impls/contract_impl.h (new) with docstrings per google style recording the forces asymmetry, the reduction-ownership seam, the designed e_atom extension point and the accretion rules
+- [x] Implement CutoffGraphImpl in interface/lammps/impls/cutoff_graph_impl.h and cutoff_graph_impl.cpp (new), composing SpeciesMap, stage_nodes, GraphBridge, the injected Exec, ForceScatter and the reverse-comm free functions
+- [x] Implement the special_bonds, single-domain and full-consumption token parsing checks in CutoffGraphImpl::coeff and CutoffGraphImpl::init
+- [x] Implement the exhaustive-switch contract dispatch and the Execution-to-Exec mapping in interface/lammps/impls/registry.h and registry.cpp (new)
+- [x] Declare the LAMMPS-free molnex_lammps_impls static target in interface/lammps/impls/CMakeLists.txt (new), add it from interface/CMakeLists.txt, and link it from interface/lammps/CMakeLists.txt
+- [x] Shrink PairMolnex to protocol mechanics in interface/lammps/pair_molnex.cpp and pair_molnex.h, deleting every capability member and semantic branch, forwarding settings, coeff, init_style, compute and both comm callbacks, and preserving the three-arm virial tally structure verbatim
+- [x] Implement the eflag_atom and vflag_atom error paths in interface/lammps/pair_molnex.cpp, and document them, the special_bonds requirement and the num_models hot-reload opening in interface/lammps/README.md
+- [x] Add the LAMMPS parity tool scripts/lammps_iface_parity.py (new) with embedded aspirin goldens, a Provenance block pinning atom_style, and fail-loud handling when no LAMMPS build is present
+- [x] Extend the interface ctest job in .github/workflows/ci.yml to cover the new contract-impl cases, then run full check + test suite (filter now ^meta_|^contract_|^bridge_|^impl_|^registry_ with the CUDA case excluded; ctest 64/64; pytest test_molix 1289; ruff clean incl. parity tool)
+- [x] Hygiene: /mol:simplify ran (janitor: 2 applied — ci.yml comment sync, dead <utility> include; 0 handoffs)
+- [x] Docs Mode A: satisfied via janitor docstring audit (ac-003 docstring load + registry rationale confirmed present)
 
 ## Testing strategy
 

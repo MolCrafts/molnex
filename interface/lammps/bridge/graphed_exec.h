@@ -106,10 +106,10 @@ class GraphedExec : public Exec {
                    const at::Tensor& edge_index) override;
 
  private:
+  // The runner and the fixed shapes: the device, the model dtype and the virial
+  // flag are the base's, because they are the same three facts for every
+  // strategy.
   molnex::interface::ModelRunner* runner_;
-  at::Device device_;
-  at::ScalarType model_dtype_;
-  bool supports_virial_;
   int64_t n_fixed_;
   int64_t e_max_;
   // Persistent device inputs. The captured graph reads these exact addresses
