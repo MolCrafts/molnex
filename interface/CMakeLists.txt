@@ -45,6 +45,16 @@ set_target_properties(molnex_interface PROPERTIES
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
+# The atom-side LAMMPS bridge (spec lammps-iface-02-view). Declared here, from
+# the parent, because interface/lammps/CMakeLists.txt is a separate
+# project(molnexplugin) that FATAL_ERRORs without -DLAMMPS_HEADER_DIR /
+# -DLAMMPS_LIB — add_subdirectory(lammps) would make this whole configure fail
+# on a machine with no LAMMPS and destroy the LAMMPS-free ctest path the bridge
+# exists to provide. lammps/bridge references no LAMMPS variable, so it is safe
+# to add unconditionally. It must come BEFORE tests/, whose bridge_* cases are
+# guarded on `if(TARGET molnex_lammps_bridge)`.
+add_subdirectory(lammps/bridge)
+
 if(MOLNEX_INTERFACE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

@@ -44,11 +44,16 @@ PairStyle(molnex,PairMolnex);
 #include "pair.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <ATen/core/Tensor.h>
+
+#include "bridge/force_scatter.h"
+#include "bridge/species_map.h"
+#include "lammps_contract.h"
 
 namespace molnex::interface {
 class ModelRunner;
@@ -74,13 +79,27 @@ class PairMolnex : public Pair {
   double cut_global;                 // cutoff (Å), from meta.json
   std::string model_dir;
   std::string model_name;            // artifact basename inside model_dir
-  std::vector<int> type2z;           // LAMMPS type (1-based) -> atomic number Z
   std::unique_ptr<molnex::interface::ModelRunner> runner;
   std::string device;                // "cpu" or "cuda", from the export meta
   std::string model_units;           // "real" or "metal", from meta.json
   bool fp64_model;                   // true if meta model_dtype == float64
   double energy_conv;                // model-energy-unit -> LAMMPS-energy-unit factor
-  double force_conv;                 // model-force-unit  -> LAMMPS-force-unit  factor
+
+  // Atom-side bridge components. Each is empty until the command that
+  // configures it has run — the contract and the scatter at `pair_style`
+  // (settings), the species map at `pair_coeff` (coeff) — and `compute()`
+  // establishes that all of them hold a value with one guard at its top.
+  //
+  // std::optional rather than std::unique_ptr: both components are cheap,
+  // complete types, so a heap allocation would buy nothing, and "not
+  // configured yet" is a state of the pair style, not an ownership question.
+  //
+  // There is deliberately no `force_conv` member beside these: its only reader
+  // was the force-scatter loop, which now lives in ForceScatter, and a second
+  // copy on the facade could only drift from it.
+  std::optional<molnex::lammps::LammpsContract> contract_;    // meta, cached for coeff()
+  std::optional<molnex::lammps_bridge::SpeciesMap> species_map_;      // type -> Z, validated
+  std::optional<molnex::lammps_bridge::ForceScatter> force_scatter_;  // holds force_conv
 
   // capability flags from meta.json
   bool supports_pbc = false;         // ghost-aware graph + reverse_comm

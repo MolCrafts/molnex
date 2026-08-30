@@ -1,6 +1,6 @@
 ---
 title: LammpsView 视图与原子侧 bridge 组件（SpeciesMap / 节点 staging / 力散射）
-status: approved
+status: code-complete
 created: 2026-08-30
 slug: lammps-iface-02-view
 chain: lammps-iface
@@ -129,16 +129,18 @@ struct LammpsView {
 
 ## Tasks
 
-- [ ] Write failing ctest case for the meta species integer-array reader in interface/tests/test_lammps_contract.cpp
-- [ ] Implement the block-scoped integer-array reader in interface/include/molnex/interface/meta_schema.h and `LammpsContract::species()` in interface/lammps/lammps_contract.h
-- [ ] Write failing ctest cases for SpeciesMap, stage_nodes and ForceScatter over a synthetic LammpsView in interface/tests/test_bridge_atoms.cpp (new) and register them in the no-fixture list of interface/tests/CMakeLists.txt
-- [ ] Implement LammpsView in interface/lammps/bridge/lammps_view.h (new) with docstrings per google style stating the borrowed-memory and no-tag/no-charge boundary
-- [ ] Implement SpeciesMap in interface/lammps/bridge/species_map.h and species_map.cpp (new) with construction-time Z-versus-meta-species validation over a 0-based dense table
-- [ ] Implement stage_nodes, NodeTensors and ForceScatter in interface/lammps/bridge/node_staging.{h,cpp} and force_scatter.{h,cpp} (new), each validating 0 <= n_graph <= view.nall() at entry
-- [ ] Declare the LAMMPS-free molnex_lammps_bridge static target in interface/lammps/bridge/CMakeLists.txt (new), add it from interface/CMakeLists.txt, and link it from interface/lammps/CMakeLists.txt
-- [ ] Migrate PairMolnex::settings, PairMolnex::coeff and PairMolnex::compute onto SpeciesMap, stage_nodes and ForceScatter in interface/lammps/pair_molnex.cpp and pair_molnex.h, holding both as std::optional and dropping the force_conv member
-- [ ] Extend the interface ctest job in .github/workflows/ci.yml to cover the new bridge cases
-- [ ] Run full check + test suite
+- [x] Write failing ctest case for the meta species integer-array reader in interface/tests/test_lammps_contract.cpp
+- [x] Implement the block-scoped integer-array reader in interface/include/molnex/interface/meta_schema.h and `LammpsContract::species()` in interface/lammps/lammps_contract.h
+- [x] Write failing ctest cases for SpeciesMap, stage_nodes and ForceScatter over a synthetic LammpsView in interface/tests/test_bridge_atoms.cpp (new) and register them in the no-fixture list of interface/tests/CMakeLists.txt
+- [x] Implement LammpsView in interface/lammps/bridge/lammps_view.h (new) with docstrings per google style stating the borrowed-memory and no-tag/no-charge boundary
+- [x] Implement SpeciesMap in interface/lammps/bridge/species_map.h and species_map.cpp (new) with construction-time Z-versus-meta-species validation over a 0-based dense table
+- [x] Implement stage_nodes, NodeTensors and ForceScatter in interface/lammps/bridge/node_staging.{h,cpp} and force_scatter.{h,cpp} (new), each validating 0 <= n_graph <= view.nall() at entry
+- [x] Declare the LAMMPS-free molnex_lammps_bridge static target in interface/lammps/bridge/CMakeLists.txt (new), add it from interface/CMakeLists.txt, and link it from interface/lammps/CMakeLists.txt
+- [x] Migrate PairMolnex::settings, PairMolnex::coeff and PairMolnex::compute onto SpeciesMap, stage_nodes and ForceScatter in interface/lammps/pair_molnex.cpp and pair_molnex.h, holding both as std::optional and dropping the force_conv member
+- [x] Extend the interface ctest job in .github/workflows/ci.yml to cover the new bridge cases
+- [x] Hygiene: /mol:simplify ran clean (janitor: 0 findings; expect.h dedup landed with task 1-3; 1 rule-capture suggestion recorded)
+- [x] Docs Mode A: satisfied via janitor docstring audit — no gaps on the new public headers; no Python public surface in this diff
+- [x] Run full check + test suite  (ruff src/tests clean; test_molix 1289 passed/4 skipped; interface ctest 31/31; CI filter covers bridge_)
 
 ## Testing strategy
 

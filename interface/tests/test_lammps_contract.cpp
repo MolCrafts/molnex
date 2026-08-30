@@ -37,6 +37,10 @@
 //     UnitConversion units_for(const std::string& lammps_unit_style) const;
 //     std::vector<std::string> inputs() const;
 //     std::vector<std::string> outputs() const;
+//     std::vector<int> species() const;             // whole array; throws on a
+//                                                   // non-integer element, on a
+//                                                   // Z <= 0, and on an empty
+//                                                   // list
 //     bool supports_pbc() const;
 //     bool supports_virial() const;
 //     int n_atoms() const;                          // cuda-graph execution only
@@ -52,7 +56,7 @@
 // The contract owns a copy of the block text, so the cases below deliberately
 // construct from temporary MetaSchema values that die before the accessors run.
 
-#include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -61,6 +65,7 @@
 #include <string>
 #include <vector>
 
+#include "expect.h"
 #include "lammps_contract.h"
 #include "molnex/interface/meta_schema.h"
 
@@ -69,53 +74,14 @@ using molnex::lammps::Contract;
 using molnex::lammps::Execution;
 using molnex::lammps::LammpsContract;
 using molnex::lammps::UnitConversion;
+using molnex::testing::expect_contains;
+using molnex::testing::expect_int;
+using molnex::testing::expect_near;
+using molnex::testing::expect_string;
+using molnex::testing::expect_throws;
+using molnex::testing::expect_true;
 
 namespace {
-
-// ---- expectations ---------------------------------------------------------
-
-void expect_true(bool cond, const std::string& tag) {
-  if (!cond) throw std::runtime_error(tag);
-}
-
-void expect_string(const std::string& got, const std::string& want,
-                   const std::string& tag) {
-  if (got != want) {
-    throw std::runtime_error(tag + ": expected '" + want + "', got '" + got + "'");
-  }
-}
-
-void expect_int(long long got, long long want, const std::string& tag) {
-  if (got != want) {
-    throw std::runtime_error(tag + ": expected " + std::to_string(want) +
-                             ", got " + std::to_string(got));
-  }
-}
-
-void expect_near(double got, double want, double tol, const std::string& tag) {
-  if (std::fabs(got - want) > tol) {
-    throw std::runtime_error(tag + ": expected " + std::to_string(want) +
-                             ", got " + std::to_string(got));
-  }
-}
-
-// Runs fn, requires it to throw std::exception, hands back what().
-std::string expect_throws(const std::function<void()>& fn, const std::string& tag) {
-  try {
-    fn();
-  } catch (const std::exception& e) {
-    return e.what();
-  }
-  throw std::runtime_error(tag + ": expected an exception, none thrown");
-}
-
-void expect_contains(const std::string& message, const std::string& needle,
-                     const std::string& tag) {
-  if (message.find(needle) == std::string::npos) {
-    throw std::runtime_error(tag + ": message \"" + message +
-                             "\" does not mention '" + needle + "'");
-  }
-}
 
 // ---- documents ------------------------------------------------------------
 
@@ -318,6 +284,83 @@ void test_contract_input_arity_mismatch_throws() {
   expect_contains(msg, "3", "input arity mismatch (actual count)");
 }
 
+void test_contract_species_int_array() {
+  // `species` is the atomic numbers the export was built for, and it is the
+  // validation source SpeciesMap checks every `pair_coeff` Z against. Reading
+  // only its first element — what get_number would do when handed an array —
+  // would silently accept every element past the first, which is the whole
+  // reason the integer-array reader waited for this consumer.
+  //
+  // Five entries, deliberately not the three-element default, so a reader that
+  // truncates cannot pass by coincidence; order is asserted element by element
+  // because SpeciesMap's diagnostics quote the list back to the user.
+  MetaFields many;
+  many.species = "[1, 6, 7, 8, 16]";
+  const LammpsContract c{MetaSchema{v2_meta(many)}};
+
+  const std::vector<int> species = c.species();
+  const std::vector<int> want = {1, 6, 7, 8, 16};
+  expect_int(static_cast<long long>(species.size()),
+             static_cast<long long>(want.size()), "species() size");
+  for (std::size_t i = 0; i < want.size(); ++i) {
+    expect_int(species[i], want[i], "species()[" + std::to_string(i) + "]");
+  }
+}
+
+void test_contract_species_rejects_non_integer() {
+  // molix writes `species` as a sorted, de-duplicated list of positive atomic
+  // numbers. Anything else is a malformed export and must be refused where it
+  // is read, rather than reaching SpeciesMap as a plausible-looking Z and from
+  // there the model as garbage. The rejection surface is split by layer: a
+  // non-integer token is the array reader's business, while "positive" and
+  // "non-empty" are properties of this contract's own field.
+  MetaFields fractional;
+  fractional.species = "[1, 1.5, 8]";
+  const std::string frac = expect_throws(
+      [&] {
+        const LammpsContract c{MetaSchema{v2_meta(fractional)}};
+        (void)c.species();
+      },
+      "fractional species element");
+  expect_contains(frac, "species", "fractional species element");
+  expect_contains(frac, "1.5", "fractional species element must quote the token");
+
+  MetaFields alphabetic;
+  alphabetic.species = R"([1, "x", 8])";
+  const std::string alpha = expect_throws(
+      [&] {
+        const LammpsContract c{MetaSchema{v2_meta(alphabetic)}};
+        (void)c.species();
+      },
+      "string species element");
+  expect_contains(alpha, "species", "string species element");
+
+  // A negative Z is syntactically an integer, so it passes the reader and is
+  // caught by the contract: there is no element 0 and no element -6.
+  MetaFields negative;
+  negative.species = "[1, -6, 8]";
+  const std::string neg = expect_throws(
+      [&] {
+        const LammpsContract c{MetaSchema{v2_meta(negative)}};
+        (void)c.species();
+      },
+      "negative species element");
+  expect_contains(neg, "species", "negative species element");
+  expect_contains(neg, "-6", "negative species element must quote the value");
+
+  // An empty list would let SpeciesMap reject every Z the user configures with
+  // a message listing no valid species at all — refuse it at the source.
+  MetaFields empty;
+  empty.species = "[]";
+  const std::string none = expect_throws(
+      [&] {
+        const LammpsContract c{MetaSchema{v2_meta(empty)}};
+        (void)c.species();
+      },
+      "empty species list");
+  expect_contains(none, "species", "empty species list");
+}
+
 // ---- dispatcher -----------------------------------------------------------
 //
 // Fixture-backed case: parses the schema-v2 meta that generate_fixtures.py
@@ -345,6 +388,15 @@ void test_contract_reads_generated_v2_fixture() {
   const auto outs = contract.outputs();
   expect_true(outs.size() == 3 && outs[2] == "virial",
          "supports_virial fixture must list the virial output");
+
+  // The writer pretty-prints `species` one element per line, while every
+  // in-test document above writes it on one. This is the only case that reads
+  // the integer array as the exporter actually formats it.
+  const std::vector<int> species = contract.species();
+  expect_int(static_cast<long long>(species.size()), 3, "fixture species size");
+  expect_int(species[0], 1, "fixture species[0]");
+  expect_int(species[1], 6, "fixture species[1]");
+  expect_int(species[2], 8, "fixture species[2]");
 }
 
 using TestFn = std::function<void()>;
@@ -360,6 +412,9 @@ const std::map<std::string, TestFn>& registry() {
        test_contract_length_unit_not_angstrom_throws},
       {"contract_input_arity_mismatch_throws",
        test_contract_input_arity_mismatch_throws},
+      {"contract_species_int_array", test_contract_species_int_array},
+      {"contract_species_rejects_non_integer",
+       test_contract_species_rejects_non_integer},
       {"contract_reads_generated_v2_fixture",
        test_contract_reads_generated_v2_fixture},
   };

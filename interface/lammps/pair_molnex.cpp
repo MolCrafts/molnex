@@ -21,9 +21,15 @@
 #include <cstring>
 #include <filesystem>
 #include <optional>
+#include <utility>
+#include <vector>
 
 #include <ATen/ATen.h>
 
+#include "bridge/force_scatter.h"
+#include "bridge/lammps_view.h"
+#include "bridge/node_staging.h"
+#include "bridge/species_map.h"
 #include "lammps_contract.h"
 #include "molnex/interface/meta_schema.h"
 #include "molnex/interface/model_runner.h"
@@ -42,7 +48,6 @@ PairMolnex::PairMolnex(LAMMPS *lmp) : Pair(lmp)
   model_name = "model";
   fp64_model = false;
   energy_conv = 1.0;
-  force_conv = 1.0;
   // ghost force reverse-comm size (fx,fy,fz). Needed when supports_pbc and
   // the model writes forces on ghosts; also used with newton off.
   comm_reverse = 3;
@@ -112,7 +117,10 @@ void PairMolnex::settings(int narg, char **arg)
     // may share the factor only because units_for asserted length_unit == Å.
     const molnex::lammps::UnitConversion conv = contract.units_for(update->unit_style);
     energy_conv = conv.energy;
-    force_conv = conv.force;
+    // The force factor is handed to ForceScatter and kept nowhere else: the
+    // scatter loop it fed moved into that component, so a `force_conv` member
+    // here would be a second copy with nothing to keep it in step.
+    force_scatter_.emplace(conv.force);
 
     model_contract = contract.contract();
 
@@ -125,6 +133,11 @@ void PairMolnex::settings(int narg, char **arg)
       n_fixed = contract.n_atoms();
       e_max = contract.e_max();
     }
+
+    // Kept, not just read: `pair_coeff` runs after `pair_style` and needs the
+    // export's species list to reject a Z the model was never built for. The
+    // contract owns its copy of the meta text, so nothing here dangles.
+    contract_ = contract;
   } catch (const std::exception &e) {
     error->all(FLERR, "pair_style molnex: malformed meta.json: {}", e.what());
   }
@@ -174,10 +187,28 @@ void PairMolnex::coeff(int narg, char **arg)
     error->all(FLERR, "pair_coeff for molnex needs: * * <Z1> ... <Zntypes> (one Z per atom type)");
   if (strcmp(arg[0], "*") != 0 || strcmp(arg[1], "*") != 0)
     error->all(FLERR, "pair_coeff for molnex must be: pair_coeff * * ...");
+  if (!contract_)
+    error->all(FLERR, "pair_coeff for molnex must come after pair_style molnex: the elements "
+                      "the model was exported for are read from its meta.json, and every Z "
+                      "here is checked against them");
 
-  type2z.assign(ntypes + 1, 0);
+  // 0-based and dense: entry t-1 is the Z of LAMMPS type t, and the length is
+  // ntypes. No placeholder slot at index 0 — that only made the table's length
+  // something a reader had to guess at.
+  std::vector<int> z_by_type(ntypes);
   for (int t = 1; t <= ntypes; t++)
-    type2z[t] = utils::inumeric(FLERR, arg[1 + t], false, lmp);
+    z_by_type[t - 1] = utils::inumeric(FLERR, arg[1 + t], false, lmp);
+
+  // The same two dialects as settings(): SpeciesMap throws (an element the
+  // model was never exported for used to reach the network as an embedding
+  // index it has no row for, and produced a confident wrong energy), LAMMPS
+  // wants error->all. It is issued from the handler, never from inside the
+  // try — a LAMMPSException is a std::exception and would be self-caught.
+  try {
+    species_map_.emplace(std::move(z_by_type), contract_->species());
+  } catch (const std::exception &e) {
+    error->all(FLERR, "pair_coeff for molnex: {}", e.what());
+  }
 
   for (int i = 1; i <= ntypes; i++)
     for (int j = i; j <= ntypes; j++) setflag[i][j] = 1;
@@ -201,6 +232,13 @@ void PairMolnex::compute(int eflag, int vflag)
 {
   ev_init(eflag, vflag);
 
+  // One guard establishes the invariant for the whole method: past here both
+  // components hold a value, so every use below dereferences directly rather
+  // than re-asking. Empty means the input script reached a run without a
+  // complete pair_style / pair_coeff pair.
+  if (!species_map_ || !force_scatter_)
+    error->all(FLERR, "pair_style molnex: pair_style/pair_coeff not initialized");
+
   const int nlocal = atom->nlocal;
   const int nghost = atom->nghost;
   const int nall = nlocal + nghost;
@@ -212,8 +250,12 @@ void PairMolnex::compute(int eflag, int vflag)
                nghost);
 
   double **x = atom->x;
-  double **f = atom->f;
-  int *type = atom->type;
+
+  // The bridge's only window onto LAMMPS' atom arrays; it borrows and owns
+  // nothing, so it is rebuilt each step rather than cached across reneighbour
+  // (which moves the arrays). `double**` converts to `const double* const*` as
+  // a qualification conversion — no const_cast at the seam.
+  const molnex::lammps_bridge::LammpsView view{atom->x, atom->f, atom->type, nlocal, nghost};
 
   const int inum = list->inum;
   int *ilist = list->ilist;
@@ -225,17 +267,18 @@ void PairMolnex::compute(int eflag, int vflag)
   const int n_graph = supports_pbc ? nall : nlocal;
 
   // --- node tensors: Z (N,), pos (N,3) ---
-  auto opt_f = at::TensorOptions().dtype(at::kDouble);     // build in fp64 then cast
-  auto opt_l = at::TensorOptions().dtype(at::kLong);
-  at::Tensor Z = at::empty({n_graph}, opt_l);
-  at::Tensor pos = at::empty({n_graph, 3}, opt_f);
-  auto Za = Z.accessor<int64_t, 1>();
-  auto pa = pos.accessor<double, 2>();
-  for (int i = 0; i < n_graph; i++) {
-    Za[i] = type2z[type[i]];
-    pa[i][0] = x[i][0];
-    pa[i][1] = x[i][1];
-    pa[i][2] = x[i][2];
+  // pos comes back in fp64 and is cast to the model dtype at the execution
+  // site below, exactly as when this was an inlined loop. stage_nodes throws
+  // on an out-of-range n_graph (it would otherwise read past the end of
+  // LAMMPS' arrays) or on an atom type the species map does not cover.
+  at::Tensor Z, pos;
+  try {
+    molnex::lammps_bridge::NodeTensors nodes =
+        molnex::lammps_bridge::stage_nodes(view, *species_map_, n_graph);
+    Z = std::move(nodes.Z);
+    pos = std::move(nodes.pos);
+  } catch (const std::exception &e) {
+    error->all(FLERR, "pair_molnex: {}", e.what());
   }
 
   // --- edges: full bidirectional within cutoff ---
@@ -269,6 +312,7 @@ void PairMolnex::compute(int eflag, int vflag)
     edge_flat_[static_cast<size_t>(2 * k)] = edge_pairs_[static_cast<size_t>(k)].first;
     edge_flat_[static_cast<size_t>(2 * k + 1)] = edge_pairs_[static_cast<size_t>(k)].second;
   }
+  auto opt_l = at::TensorOptions().dtype(at::kLong);   // int64 edge tensors
   at::Tensor edge_index = at::from_blob(edge_flat_.data(), {ne, 2}, opt_l).clone();
 
   // --- run: CUDA-graph fast path (fixed N + padded E_max) or dynamic run ---
@@ -322,18 +366,15 @@ void PairMolnex::compute(int eflag, int vflag)
     }
   }
 
-  if (f_t.size(0) != n_graph)
-    error->all(FLERR, "pair_molnex: model returned forces for {} atoms, expected {}",
-               f_t.size(0), n_graph);
-
   // --- scatter forces + energy back to LAMMPS (converted to LAMMPS units) ---
   // Write onto local (+ ghost when supports_pbc); reverse_comm pulls ghost
-  // force contributions onto owners for multi-rank / periodic images.
-  auto fa = f_t.accessor<double, 2>();
-  for (int i = 0; i < n_graph; i++) {
-    f[i][0] += force_conv * fa[i][0];
-    f[i][1] += force_conv * fa[i][1];
-    f[i][2] += force_conv * fa[i][2];
+  // force contributions onto owners for multi-rank / periodic images. The
+  // row-count check that used to stand here is now ForceScatter's, fired
+  // before it writes a single element of the LAMMPS-owned force array.
+  try {
+    force_scatter_->scatter(view, f_t, n_graph);
+  } catch (const std::exception &e) {
+    error->all(FLERR, "pair_molnex: {}", e.what());
   }
   double e_model = e_t.item<double>() * energy_conv;
   if (eflag_global) eng_vdwl += e_model;

@@ -80,4 +80,4 @@ jobs:
       # fixture-backed cases belong in this gate.
       - name: Run interface ctests (no-fixture list)
         run: |
-          ctest --test-dir build-interface -R '^meta_|^contract_' --output-on-failure
+          ctest --test-dir build-interface -R '^meta_|^contract_|^bridge_' --output-on-failure

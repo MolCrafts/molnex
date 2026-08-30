@@ -34,7 +34,9 @@ find_package(Torch REQUIRED)
 
 # The AOTI runner library lives one level up (interface/). Build it here as a
 # subdirectory (static, PIC) unless an enclosing build already provides the
-# `molnex_interface` target.
+# `molnex_interface` target. That parent also declares `molnex_lammps_bridge`
+# (bridge/, LAMMPS-free), so one guard covers both targets on both paths:
+# standalone from here, and from an enclosing interface/ build.
 if(NOT TARGET molnex_interface)
   set(MOLNEX_INTERFACE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/.. molnex_interface_build)
@@ -56,7 +58,7 @@ message(STATUS "molnexplugin → ${MOLNEXPLUGIN_OUTPUT_DIR}/molnexplugin.so (${C
 
 target_include_directories(molnexplugin PRIVATE
   ${LAMMPS_HEADER_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}                 # lammps_contract.h
+  ${CMAKE_CURRENT_SOURCE_DIR}                 # lammps_contract.h + bridge/*.h
   ${CMAKE_CURRENT_SOURCE_DIR}/../include      # molnex/interface/{meta_schema,model_runner}.h
 )
 # when LAMMPS is built serial (BUILD_MPI=off) the plugin still needs the stub mpi.h
@@ -65,6 +67,10 @@ if(LAMMPS_MPI_INCLUDE)
 endif()
 target_link_libraries(molnexplugin PRIVATE
   molnex_interface
+  # Atom-side bridge (SpeciesMap / stage_nodes / ForceScatter). Carries its own
+  # PUBLIC include dir (interface/lammps), so pair_molnex.cpp reaches the
+  # headers as "bridge/xxx.h" with nothing further added above.
+  molnex_lammps_bridge
   ${TORCH_LIBRARIES}
   ${LAMMPS_LIB}
 )

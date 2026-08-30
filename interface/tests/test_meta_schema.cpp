@@ -37,7 +37,6 @@
 // the unenforceable "key names are unique across the whole file" promise of the
 // deleted interface/lammps/lammps_meta.h.
 
-#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <map>
@@ -45,49 +44,17 @@
 #include <string>
 #include <vector>
 
+#include "expect.h"
 #include "molnex/interface/meta_schema.h"
 
 using molnex::interface::MetaSchema;
+using molnex::testing::expect_contains;
+using molnex::testing::expect_near;
+using molnex::testing::expect_string;
+using molnex::testing::expect_throws;
+using molnex::testing::expect_true;
 
 namespace {
-
-// ---- expectations ---------------------------------------------------------
-
-void expect_true(bool cond, const std::string& tag) {
-  if (!cond) throw std::runtime_error(tag);
-}
-
-void expect_string(const std::string& got, const std::string& want,
-                   const std::string& tag) {
-  if (got != want) {
-    throw std::runtime_error(tag + ": expected '" + want + "', got '" + got + "'");
-  }
-}
-
-void expect_near(double got, double want, double tol, const std::string& tag) {
-  if (std::fabs(got - want) > tol) {
-    throw std::runtime_error(tag + ": expected " + std::to_string(want) +
-                             ", got " + std::to_string(got));
-  }
-}
-
-// Runs fn, requires it to throw std::exception, hands back what().
-std::string expect_throws(const std::function<void()>& fn, const std::string& tag) {
-  try {
-    fn();
-  } catch (const std::exception& e) {
-    return e.what();
-  }
-  throw std::runtime_error(tag + ": expected an exception, none thrown");
-}
-
-void expect_contains(const std::string& message, const std::string& needle,
-                     const std::string& tag) {
-  if (message.find(needle) == std::string::npos) {
-    throw std::runtime_error(tag + ": message \"" + message +
-                             "\" does not mention '" + needle + "'");
-  }
-}
 
 // ---- tests ----------------------------------------------------------------
 

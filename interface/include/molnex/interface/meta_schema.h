@@ -35,6 +35,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -231,6 +232,51 @@ class MetaSchema {
     return out;
   }
 
+  /// Read an array-of-integers key at this document's top depth.
+  ///
+  /// Returns **every** element, in document order, and is strict about what an
+  /// element may be: `1.5`, a quoted `"x"` or a nested container is a malformed
+  /// document, not something to skip past. That is the difference from
+  /// `get_string_array`, and it is deliberate — the arrays molix writes as
+  /// integers are *identity* lists (the `species` atomic numbers being the
+  /// motivating case), where a silently dropped element is indistinguishable
+  /// from an export that never declared it, and the consumer would then reject
+  /// a perfectly legal atom type.
+  ///
+  /// Sign, magnitude and emptiness policy belong to the vocabulary layer that
+  /// knows what the field means (see `molnex::lammps::LammpsContract::species`).
+  /// This reader answers one question only: are these whole decimal integers?
+  ///
+  /// \param key  Key to read.
+  /// \returns    The array's integer elements, in document order. Empty for
+  ///             `[]`, which is a well-formed array here.
+  /// \throws std::runtime_error  If the key is absent, is not an array, is
+  ///                             unterminated, or holds an element that is not
+  ///                             a whole decimal integer representable as `int`.
+  std::vector<int> get_int_array(const std::string& key) const {
+    const std::size_t v = require_value(key);
+    if (text_[v] != '[') {
+      throw std::runtime_error("meta.json: '" + key + "' is not an array");
+    }
+    std::vector<int> out;
+    std::size_t i = skip_ws(text_, v + 1);
+    if (i < text_.size() && text_[i] == ']') return out;  // `[]`
+    while (i < text_.size()) {
+      // One element runs to the next separator. A quoted string or a nested
+      // container therefore lands in the token and is rejected by parse_int,
+      // rather than being skipped the way get_string_array skips a non-string.
+      std::size_t end = i;
+      while (end < text_.size() && text_[end] != ',' && text_[end] != ']') ++end;
+      if (end == text_.size()) break;
+      std::size_t stop = end;
+      while (stop > i && is_space(text_[stop - 1])) --stop;
+      out.push_back(parse_int(text_.substr(i, stop - i), key));
+      if (text_[end] == ']') return out;
+      i = skip_ws(text_, end + 1);
+    }
+    throw std::runtime_error("meta.json: '" + key + "' array not terminated");
+  }
+
   /// Read a numeric key at this document's top depth.
   ///
   /// The number carries whatever unit its own field is defined in (a length is
@@ -320,13 +366,46 @@ class MetaSchema {
     return std::string::npos;
   }
 
+  /// Whether `c` is one of the four characters JSON counts as whitespace.
+  static bool is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+  }
+
   /// First index at or after `i` that is not JSON whitespace.
   static std::size_t skip_ws(const std::string& s, std::size_t i) {
-    while (i < s.size() &&
-           (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) {
-      ++i;
-    }
+    while (i < s.size() && is_space(s[i])) ++i;
     return i;
+  }
+
+  /// Parse one array element as a whole decimal integer.
+  ///
+  /// "Whole" means the entire token is consumed: `1.5` fails on the `.5` it
+  /// leaves behind, and `"x"` fails on its first quote. `key` is only there to
+  /// name the offending array in the message.
+  ///
+  /// \param token  The element text, already trimmed of surrounding whitespace.
+  /// \param key    Array key, for the diagnostic.
+  /// \returns      The value.
+  /// \throws std::runtime_error  If the token is empty, is not consumed whole
+  ///                             as a decimal integer, or does not fit in `int`.
+  static int parse_int(const std::string& token, const std::string& key) {
+    if (token.empty()) {
+      throw std::runtime_error("meta.json: '" + key +
+                               "' array has an empty element");
+    }
+    const char* begin = token.c_str();
+    char* end = nullptr;
+    const long long value = std::strtoll(begin, &end, 10);
+    if (end != begin + token.size()) {
+      throw std::runtime_error("meta.json: '" + key + "' array element '" +
+                               token + "' is not an integer");
+    }
+    if (value < std::numeric_limits<int>::min() ||
+        value > std::numeric_limits<int>::max()) {
+      throw std::runtime_error("meta.json: '" + key + "' array element '" +
+                               token + "' does not fit in an int");
+    }
+    return static_cast<int>(value);
   }
 
   /// Index of the first character of `key`'s value, at this document's top

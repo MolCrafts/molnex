@@ -99,6 +99,8 @@ set(_LAMMPS_CONTRACT_TESTS
   contract_unsupported_unit_style_throws
   contract_length_unit_not_angstrom_throws
   contract_input_arity_mismatch_throws
+  contract_species_int_array
+  contract_species_rejects_non_integer
 )
 
 foreach(_t IN LISTS _LAMMPS_CONTRACT_TESTS)
@@ -107,3 +109,58 @@ foreach(_t IN LISTS _LAMMPS_CONTRACT_TESTS)
     COMMAND test_lammps_contract ${_t}
   )
 endforeach()
+
+# ---------------------------------------------------------------------------
+# Atom-side bridge cases (spec lammps-iface-02-view).
+#
+# Guarded on the target, not on a file glob: molnex_lammps_bridge does not
+# exist yet, so this whole block is skipped and `ctest -N` simply does not list
+# any bridge_* case. THAT ABSENCE IS THE RED EVIDENCE — test_bridge_atoms.cpp
+# is written against the API the components task must satisfy, and the suite
+# stays configurable and fully runnable in the meantime (registering it
+# unconditionally would break `cmake` itself and take every other case down
+# with it).
+#
+# The components task removes nothing here: declaring molnex_lammps_bridge in
+# interface/lammps/bridge/CMakeLists.txt and adding it from
+# interface/CMakeLists.txt is what makes this guard true, at which point the
+# ten cases below appear in the ctest list and must go green.
+#
+# No FIXTURES_REQUIRED: the cases drive a synthetic LammpsView out of their own
+# std::vector storage — no exported model, no Python generation, no LAMMPS.
+# ---------------------------------------------------------------------------
+
+if(TARGET molnex_lammps_bridge)
+  add_executable(test_bridge_atoms test_bridge_atoms.cpp)
+  # The bridge target carries its own PUBLIC include directory, so the cases
+  # reach the headers as "bridge/xxx.h" with nothing added here.
+  target_link_libraries(test_bridge_atoms PRIVATE molnex_lammps_bridge ${TORCH_LIBRARIES})
+  if(TORCH_CXX_FLAGS)
+    separate_arguments(_TORCH_CXX_FLAGS NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
+    target_compile_options(test_bridge_atoms PRIVATE ${_TORCH_CXX_FLAGS})
+  endif()
+
+  set(_BRIDGE_TESTS
+    bridge_species_map_maps_types
+    bridge_stage_nodes_shapes_and_values
+    bridge_force_scatter_accumulates
+    bridge_species_map_rejects_unknown_z
+    bridge_species_map_rejects_bad_table_size
+    bridge_species_map_rejects_nonpositive_z
+    bridge_species_map_z_of_rejects_out_of_range_type
+    bridge_force_scatter_rejects_wrong_row_count
+    bridge_stage_nodes_rejects_n_graph_over_nall
+    bridge_force_scatter_rejects_n_graph_over_nall
+  )
+
+  foreach(_t IN LISTS _BRIDGE_TESTS)
+    add_test(
+      NAME ${_t}
+      COMMAND test_bridge_atoms ${_t}
+    )
+  endforeach()
+else()
+  message(STATUS
+    "interface/tests: molnex_lammps_bridge absent — bridge_* cases unlisted "
+    "(expected until lammps-iface-02-view lands the bridge target)")
+endif()

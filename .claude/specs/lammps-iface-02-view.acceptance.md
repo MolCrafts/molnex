@@ -11,7 +11,8 @@ criteria:
       exactly x, f, type, nlocal, nghost and nall(); it includes no LAMMPS header,
       declares no user-provided constructor, owns no memory, and contains no tag,
       charge, ilist, numneigh, firstneigh or NEIGHMASK member.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-002
     summary: bridge target builds and tests without any LAMMPS input
     type: runtime
@@ -20,7 +21,8 @@ criteria:
       builds molnex_lammps_bridge and runs the bridge_* ctest cases green; no file
       under interface/lammps/bridge/ includes a LAMMPS header or contains the token
       NEIGHMASK.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-003
     summary: SpeciesMap validates a 0-based dense table against meta species
     type: code
@@ -30,7 +32,8 @@ criteria:
       is non-positive or absent from meta_species, naming the offending LAMMPS type, its Z
       and every valid species; z_of throws for lammps_type <= 0 and for lammps_type >
       ntypes().
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-004
     summary: bridge component ctest cases pass over a synthetic LammpsView
     type: runtime
@@ -42,7 +45,8 @@ criteria:
       bridge_species_map_z_of_rejects_out_of_range_type and
       bridge_force_scatter_rejects_wrong_row_count green, none of them declaring
       FIXTURES_REQUIRED.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-005
     summary: force scatter accumulates rather than overwrites, in LAMMPS units
     type: code
@@ -50,7 +54,8 @@ criteria:
       bridge_force_scatter_accumulates starts from a non-zero f and asserts
       f_out == f_in + force_conv * forces within 1e-12 against hand-computed
       literals; ForceScatter throws when forces.size(0) != n_graph.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-006
     summary: meta species integer array is read whole, with its consumer present
     type: code
@@ -58,7 +63,8 @@ criteria:
       LammpsContract::species() returns the full integer vector (not the first
       element), rejects non-integer and negative entries, and its only caller is the
       SpeciesMap construction site in PairMolnex::coeff.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-007
     summary: PairMolnex no longer owns the atom-side tables or loops
     type: code
@@ -69,7 +75,8 @@ criteria:
       force-accumulation loop and instead calls SpeciesMap, stage_nodes and
       ForceScatter, held as std::optional members guarded once at the top of compute();
       the nghost guard, energy and virial tally and CUDA-graph branch are unchanged.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-008
     summary: no tag-to-local mapping is introduced anywhere
     type: code
@@ -78,7 +85,8 @@ criteria:
       interface/lammps/pair_molnex.{h,cpp} returns no atom->tag access and no
       tag-keyed container; the concern remains entirely unstarted and is routed to the
       future fixed-graph contract spec.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-009
     summary: no allocation or dtype behavior is smuggled into the migration
     type: code
@@ -86,7 +94,8 @@ criteria:
       stage_nodes allocates Z and pos per call (no persistent buffer member) and
       returns pos as float64, leaving the model-dtype cast at its existing call site
       in compute(); no pinned, cached or reused host buffer is introduced.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-010
     summary: pre-existing interface ctests stay green after the migration
     type: runtime
@@ -95,7 +104,8 @@ criteria:
       update_weights_from_path, update_weights_from_map, parameter_info,
       concurrent_run_and_update, load_bad_path_throws and the meta_* / contract_* cases)
       is green after PairMolnex, MetaSchema and LammpsContract are extended.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-011
     summary: bridge ctest cases gate in CI, not only locally
     type: runtime
@@ -105,7 +115,8 @@ criteria:
       runs the no-fixture ctest list including every bridge_* case added here; no
       regressions/lammps-iface-02-view.py exists, and no file under regressions/ starts a
       subprocess.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-012
     summary: bridge boundary is documented at the type level
     type: docs
@@ -123,7 +134,8 @@ criteria:
       view.nall(), and ctest cases bridge_stage_nodes_rejects_n_graph_over_nall and
       bridge_force_scatter_rejects_n_graph_over_nall assert the throw rather than an
       out-of-bounds write into f.
-    status: pending
+    status: verified
+    last_checked: 2026-08-30
   - id: ac-014
     summary: the pbc energy over-count defect is named and routed
     type: docs

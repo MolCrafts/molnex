@@ -8,6 +8,9 @@ must not be treated as authority for a new training submission.
 
 - [mace-polar-port-01-backbone](mace-polar-port-01-backbone.md) — 泛化 MACEEncoder 残差骨干 + MACEPolarSpec，钉 Polar-1-M dump [code-complete]
 - [mace-polar-port-02-blocks](mace-polar-port-02-blocks.md) — NonLinearBiasReadout.out_mul、自旋源、层混合 [code-complete]
+- [mace-polar-port-03-field](mace-polar-port-03-field.md) — SparseUvu、单体场更新、场读出（原生 ir_mul） [code-complete]
+- [mace-polar-port-04-gto](mace-polar-port-04-gto.md) — 原生 GTO Hartree 核 erf(r/(2σ))/r 与 Fukui 约束 [code-complete]
+- [mace-polar-port-05-wire](mace-polar-port-05-wire.md) — PolarPotential + POLAR_REMAP 孤立分子前向 [code-complete]
 - [lammps-iface-02-view](lammps-iface-02-view.md) — LammpsView 隔离层与原子侧 bridge 组件；pair_coeff Z 校验补齐 [approved]
 - [lammps-iface-03-graph](lammps-iface-03-graph.md) — GraphBridge 每步重算图、reverse-comm 搬迁与 backend-neutral Exec 策略 [approved]
 - [lammps-iface-04-facade](lammps-iface-04-facade.md) — ContractImpl 契约层与闭集派发；facade 削至协议机械，静默零/special_bonds 修复 [approved]

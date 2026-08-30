@@ -305,6 +305,40 @@ class LammpsContract {
     return block_.get_string_array("outputs");
   }
 
+  /// Atomic numbers the exported model was built for (Z, dimensionless).
+  ///
+  /// The whole list, in the order molix wrote it — which is sorted and
+  /// de-duplicated on the export side, though nothing here depends on that.
+  /// Its consumer is the construction of the pair style's type-to-Z table,
+  /// which checks every `pair_coeff` element against this set: a Z outside it
+  /// is an element the model was never trained on, and feeding it forward
+  /// produces a confident, wrong energy with no diagnostic anywhere.
+  ///
+  /// Reading the array whole matters for the same reason. Truncating it to the
+  /// first element would leave the table rejecting every legal type but one.
+  ///
+  /// \returns The atomic numbers, in document order; never empty.
+  /// \throws std::runtime_error  If `species` is absent, is not an array, holds
+  ///                             an element that is not a whole integer, holds a
+  ///                             Z <= 0, or is empty.
+  std::vector<int> species() const {
+    const std::vector<int> values = block_.get_int_array("species");
+    if (values.empty()) {
+      throw std::runtime_error(
+          "meta.json: lammps block has an empty 'species' list; the export "
+          "declares no element it can be run on (re-export the model with "
+          "molix.engine.export_for_lammps)");
+    }
+    for (const int z : values) {
+      if (z <= 0) {
+        throw std::runtime_error(
+            "meta.json: lammps block 'species' contains " + std::to_string(z) +
+            ", which is not an atomic number (every entry must be > 0)");
+      }
+    }
+    return values;
+  }
+
   /// Whether the model accepts ghost atoms / periodic images.
   ///
   /// *Ghost atoms* are LAMMPS' local copies of atoms owned by a periodic image
