@@ -8,7 +8,6 @@ must not be treated as authority for a new training submission.
 
 - [mace-polar-port-01-backbone](mace-polar-port-01-backbone.md) — 泛化 MACEEncoder 残差骨干 + MACEPolarSpec，钉 Polar-1-M dump [code-complete]
 - [mace-polar-port-02-blocks](mace-polar-port-02-blocks.md) — NonLinearBiasReadout.out_mul、自旋源、层混合 [code-complete]
-- [lammps-iface-01-meta](lammps-iface-01-meta.md) — meta.json schema v2 契约与唯一读取器 MetaSchema；换算浮点复述清零 [approved]
 - [lammps-iface-02-view](lammps-iface-02-view.md) — LammpsView 隔离层与原子侧 bridge 组件；pair_coeff Z 校验补齐 [approved]
 - [lammps-iface-03-graph](lammps-iface-03-graph.md) — GraphBridge 每步重算图、reverse-comm 搬迁与 backend-neutral Exec 策略 [approved]
 - [lammps-iface-04-facade](lammps-iface-04-facade.md) — ContractImpl 契约层与闭集派发；facade 削至协议机械，静默零/special_bonds 修复 [approved]
@@ -30,6 +29,7 @@ must not be treated as authority for a new training submission.
 
 | Spec or chain | Closed | Disposition |
 |---|---|---|
+| lammps-iface-01-meta | 2026-08-30 | Completed; all 14 acceptance criteria verified (12 evidence, 2 agent-auto). Chain 02-05 active. |
 | [dynamic-batching-packed-collate-02-collate](dynamic-batching-packed-collate-02-collate.md) | 2026-08-13 | Completed; all acceptance criteria verified. |
 | [mace-omol-port-01-native-port](mace-omol-port-01-native-port.md) | 2026-08-13 | Completed; all acceptance criteria verified. |
 | [mace-omol-port-02-pipeline-integration](mace-omol-port-02-pipeline-integration.md) | 2026-08-13 | Completed; all acceptance criteria verified. |
