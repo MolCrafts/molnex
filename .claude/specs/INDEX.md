@@ -11,7 +11,6 @@ must not be treated as authority for a new training submission.
 - [mace-polar-port-03-field](mace-polar-port-03-field.md) — SparseUvu、单体场更新、场读出（原生 ir_mul） [code-complete]
 - [mace-polar-port-04-gto](mace-polar-port-04-gto.md) — 原生 GTO Hartree 核 erf(r/(2σ))/r 与 Fukui 约束 [code-complete]
 - [mace-polar-port-05-wire](mace-polar-port-05-wire.md) — PolarPotential + POLAR_REMAP 孤立分子前向 [code-complete]
-- [lammps-iface-04-facade](lammps-iface-04-facade.md) — ContractImpl 契约层与闭集派发；facade 削至协议机械，静默零/special_bonds 修复 [approved]
 - [lammps-iface-05-pbc](lammps-iface-05-pbc.md) — fat-ghost 单发 PBC 修复：local-only 位点能量、ghost 闭包、感受野校验、schema v3 [approved]
 - [oplsaa-parameterizer-01-types](oplsaa-parameterizer-01-types.md) — OPLSAAForceField 类型面与 PotentialMeta improper schema [code-complete]
 - [oplsaa-parameterizer-02-heads](oplsaa-parameterizer-02-heads.md) — ProperTorsionParamHead OPLS-AA k1..k4 直接输出 [code-complete]
@@ -30,6 +29,7 @@ must not be treated as authority for a new training submission.
 
 | Spec or chain | Closed | Disposition |
 |---|---|---|
+| lammps-iface-04-facade | 2026-08-30 | Completed; 15/16 criteria verified (1 chain debt: captured aspirin parity run owed before merge). |
 | lammps-iface-03-graph | 2026-08-30 | Completed; all 16 acceptance criteria verified (15 evidence, 1 agent-auto). |
 | lammps-iface-02-view | 2026-08-30 | Completed; all 14 acceptance criteria verified (12 evidence, 2 agent-auto). |
 | lammps-iface-01-meta | 2026-08-30 | Completed; all 14 acceptance criteria verified (12 evidence, 2 agent-auto). Chain 02-05 active. |
