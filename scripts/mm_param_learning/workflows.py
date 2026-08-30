@@ -26,11 +26,11 @@ class ClassIV0Workflow:
 
     name: str = "class-i-v0"
 
-    def compiler(self) -> Any:
-        """Return an uncompiled :class:`~molexp.workflow.WorkflowCompiler`."""
-        from molexp.workflow import RegisterMetric, WorkflowCompiler
+    def workflow(self) -> Any:
+        """Return the authored, uncompiled :class:`~molexp.workflow.Workflow`."""
+        from molexp.workflow import RegisterMetric, Workflow
 
-        wf = WorkflowCompiler(name=self.name)
+        wf = Workflow(name=self.name)
 
         @wf.task
         async def resolve_collection() -> dict[str, str]:
@@ -117,7 +117,9 @@ class ClassIV0Workflow:
 
     def compile(self) -> Any:
         """Compile the v0 workflow."""
-        return self.compiler().compile()
+        from molexp.workflow import WorkflowCompiler
+
+        return WorkflowCompiler().compile(self.workflow())
 
     def attach(self, experiment: Any, *, params: dict[str, list] | None = None) -> Any:
         """Bind this workflow onto a molexp experiment and seed runs."""
@@ -126,8 +128,8 @@ class ClassIV0Workflow:
         return experiment.define(self.compile(), params=params or {"seed": [2666]})
 
     def task_names(self) -> tuple[str, ...]:
-        """Compiled task names in graph order."""
-        return tuple(self.compile().graph.task_names)
+        """Compiled task names in declaration order."""
+        return tuple(self.compile().registration_by_name)
 
 
 class MmParamWorkflows:
@@ -150,10 +152,10 @@ class MmParamWorkflows:
         return self._legacy_resolve(experiment_slug)
 
     def _legacy_resolve(self, experiment_slug: str) -> Any:
-        from molexp.workflow import RegisterMetric, WorkflowCompiler
+        from molexp.workflow import RegisterMetric, Workflow, WorkflowCompiler
 
         coordinate = MOLHUB_COORDINATES[experiment_slug]
-        wf = WorkflowCompiler(name=f"mm-param-{experiment_slug}")
+        wf = Workflow(name=f"mm-param-{experiment_slug}")
 
         @wf.task
         async def resolve_molhub_coordinates() -> dict[str, str]:
@@ -176,9 +178,9 @@ class MmParamWorkflows:
                 "dataset_coordinate": record_run_params["dataset_coordinate"],
             }
 
-        return wf.compile()
+        return WorkflowCompiler().compile(wf)
 
     def task_names(self, experiment_slug: str) -> tuple[str, ...]:
         """Task names of the compiled workflow for *experiment_slug*."""
         compiled = self.build(experiment_slug)
-        return tuple(compiled.graph.task_names)
+        return tuple(compiled.registration_by_name)

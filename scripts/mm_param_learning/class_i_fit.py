@@ -382,7 +382,8 @@ def _require_group(frame: Any) -> str:
     meta = getattr(frame, "meta", None) or {}
     for key in _GROUP_META:
         if key in meta:
-            return str(meta[key])
+            value = meta[key]
+            return str(getattr(value, "value", value))  # molpy 0.14 MetaValue unwrap
     raise ValueError(
         "Class-I frame has no scan_id/molecule_id/source_record_id; "
         "refusing to merge distinct molecules into one split group"
@@ -847,7 +848,9 @@ class LazyOMol25:
                     "atomj": np.asarray(bonds["atomj"]),
                 }
             )
-        meta = dict(getattr(frame, "meta", None) or {})
+        raw_meta = getattr(frame, "meta", None) or {}
+        # molpy 0.14 MetaValue unwrap — str()/float() on the wrapper corrupts.
+        meta = {k: getattr(v, "value", v) for k, v in raw_meta.items()}
         meta["energy"] = float(meta["energy"]) * _EV_TO_KCAL
         meta["source_record_id"] = str(meta.get("source_record_id") or record_id)
         meta["molecule_id"] = str(meta.get("molecule_id") or record_id)
@@ -876,9 +879,10 @@ def _raw_omol_record(source: Any, idx: int) -> dict[str, Any]:
     frame = source[idx][0]
     atoms = frame["atoms"]
     meta = getattr(frame, "meta", None) or {}
+    energy = meta.get("energy", 0.0)
     return {
         "numbers": np.asarray(atoms["number"], dtype=np.int64),
-        "energy": float(meta.get("energy", 0.0)),
+        "energy": float(getattr(energy, "value", energy)),
         "energy_is_ev": True,
     }
 
