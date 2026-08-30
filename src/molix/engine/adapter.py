@@ -109,7 +109,7 @@ class EngineAdapter(ABC):
         """
 
     @abstractmethod
-    def read_outputs(self, out: object) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def read_outputs(self, out: object) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Extract ``(energy (), forces (N, 3), atomic_energy (N,))`` from the output.
 
         The per-atom energy is mandatory under schema v3: it is what the LAMMPS
@@ -118,7 +118,7 @@ class EngineAdapter(ABC):
         """
 
     @staticmethod
-    def read_energy_triple(out: object) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def read_energy_triple(out: object) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Decode the two accepted molnex output shapes into the v3 triple.
 
         Each shape has exactly one spelling of the per-atom energy
@@ -128,6 +128,17 @@ class EngineAdapter(ABC):
         * nested :class:`~tensordict.TensorDict` — ``("graphs", "energy")``,
           ``("atoms", "forces")``, ``("atoms", "energy")``;
         * plain ``dict`` — ``"energy"``, ``"forces"``, ``"atomic_energy"``.
+
+        Forces are **optional**: the export wrappers derive the deployed forces
+        from the site energies themselves, so an energy-only model (e.g.
+        ``PiNetPotential(compute_forces=False)``) is a complete v3 citizen —
+        its slot comes back ``None`` and the export's force-consistency check
+        is vacuous. When a model does emit forces they are read and checked.
+        Energy-only is also the *safe* construction for models whose force
+        pass consumes its own autograd graph in eval mode (PiNet's
+        ``method="grad"`` resolves ``create_graph=self.training``): the
+        wrapper's second differentiation of a consumed graph dies with
+        "backward through the graph a second time" at trace preparation.
 
         Lives on the base class because three call sites share it:
         :class:`MolnexTensorDictAdapter`, :class:`FlatTensorAdapter`'s dict
@@ -154,10 +165,12 @@ class EngineAdapter(ABC):
         if isinstance(out, TensorDict):
             has_atomic = "atoms" in out.keys() and "energy" in out["atoms"].keys()
             atomic = out[ATOMIC_ENERGY_KEY] if has_atomic else None
-            energy, forces = out[ENERGY_KEY], out[FORCES_KEY]
+            has_forces = "atoms" in out.keys() and "forces" in out["atoms"].keys()
+            energy = out[ENERGY_KEY]
+            forces = out[FORCES_KEY] if has_forces else None
         elif isinstance(out, dict):
             atomic = out.get(ATOMIC_ENERGY_FLAT_KEY)
-            energy, forces = out["energy"], out["forces"]
+            energy, forces = out["energy"], out.get("forces")
         else:
             raise ValueError(
                 "model output must be a nested TensorDict or a plain dict; "
@@ -219,7 +232,7 @@ class MolnexTensorDictAdapter(EngineAdapter):
             batch_size=[],
         )
 
-    def read_outputs(self, out: object) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def read_outputs(self, out: object) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         return self.read_energy_triple(out)
 
 
@@ -246,7 +259,7 @@ class FlatTensorAdapter(EngineAdapter):
     ) -> object:
         return (Z, pos, edge_index)
 
-    def read_outputs(self, out: object) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def read_outputs(self, out: object) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         if isinstance(out, dict):
             return self.read_energy_triple(out)
         # Narrow to a real sequence before counting: a bare Tensor also has a
@@ -320,7 +333,7 @@ class EngineForward(nn.Module):
 
     def model_outputs(
         self, Z: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Run the model once and read its unmasked ``(energy, forces, atomic_energy)``.
 
         The seam :func:`molix.engine.export_for_lammps` uses for its eager

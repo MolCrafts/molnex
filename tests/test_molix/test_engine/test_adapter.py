@@ -187,6 +187,28 @@ class TestMolnexTensorDictAdapter:
         with pytest.raises(ValueError):
             MolnexTensorDictAdapter().read_outputs(self.flat_output(per_atom_key="node_energies"))
 
+    def test_energy_only_flat_dict_returns_none_forces(self):
+        """Forces are optional: the wrapper derives them, so an energy-only model is valid."""
+        from molix.schema import ATOMIC_ENERGY_FLAT_KEY
+
+        out = self.flat_output(per_atom_key=ATOMIC_ENERGY_FLAT_KEY)
+        del out["forces"]
+        energy, forces, atomic = MolnexTensorDictAdapter().read_outputs(out)
+        assert forces is None
+        assert energy.item() == pytest.approx(12.0, abs=1e-10)
+        assert torch.allclose(
+            atomic, torch.tensor(self.ATOMIC, dtype=torch.float64), atol=1e-10, rtol=0.0
+        )
+
+    def test_energy_only_nested_output_returns_none_forces(self):
+        out = self.nested_output()
+        del out["atoms", "forces"]
+        _, forces, atomic = MolnexTensorDictAdapter().read_outputs(out)
+        assert forces is None
+        assert torch.allclose(
+            atomic, torch.tensor(self.ATOMIC, dtype=torch.float64), atol=1e-10, rtol=0.0
+        )
+
 
 class TestFlatTensorAdapter:
     """Target: ``FlatTensorAdapter.read_outputs`` (schema-v3 triple).
@@ -296,3 +318,42 @@ class TestLocalMask:
             Z, pos, edge_index, torch.tensor([True, True, False])
         )
         assert energy.item() == pytest.approx(7.0, abs=1e-10)
+
+
+class _EnergyOnlyTDPotential(_DummyTDPotential):
+    """The stub with its force output dropped — a ``compute_forces=False`` shape."""
+
+    def forward(self, batch):
+        out = super().forward(batch)
+        del out["forces"]
+        return out
+
+
+class TestEnergyOnlyModel:
+    """Target: ``EngineForward.forward`` with a model that emits no forces.
+
+    The deployed forces are always the wrapper's own ``-∂(masked sum)/∂pos``,
+    so dropping the model's force output must change nothing about what the
+    export produces — same energy, same forces, same per-atom energies as the
+    forceful stub on the same system.
+    """
+
+    def test_derived_outputs_match_the_forceful_stub(self):
+        Z, pos, edge_index = TestLocalMask.system()
+        mask = torch.ones(3, dtype=torch.bool)
+        e_ref, f_ref, a_ref = EngineForward(_DummyTDPotential(), "molnex-tensordict")(
+            Z, pos, edge_index, mask
+        )
+        e, f, a = EngineForward(_EnergyOnlyTDPotential(), "molnex-tensordict")(
+            Z, pos, edge_index, mask
+        )
+        assert e.item() == pytest.approx(e_ref.item(), abs=1e-12)
+        assert torch.allclose(f, f_ref, atol=1e-12, rtol=0.0)
+        assert torch.allclose(a, a_ref, atol=1e-12, rtol=0.0)
+
+    def test_model_outputs_forces_slot_is_none(self):
+        Z, pos, edge_index = TestLocalMask.system()
+        _, forces, _ = EngineForward(_EnergyOnlyTDPotential(), "molnex-tensordict").model_outputs(
+            Z, pos, edge_index
+        )
+        assert forces is None

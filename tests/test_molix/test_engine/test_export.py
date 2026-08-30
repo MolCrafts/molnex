@@ -378,3 +378,30 @@ class TestExportForLammpsValidation:
                 device="cpu",
                 receptive_field_layers=1,
             )
+
+
+class TestCheckPartitionableEnergyOnly:
+    """Target: ``molix.engine.export._check_partitionable`` — optional model forces.
+
+    An energy-only model returns ``None`` in the triple's forces slot (the
+    wrapper derives the deployed forces itself), so the eager force-consistency
+    comparison is vacuous and must be skipped rather than crash on ``None``;
+    the decomposability check and the derived-forces finiteness assertion
+    still run. Private symbol imported inside the test so only this class is
+    red if the module layout changes.
+    """
+
+    def test_energy_only_model_passes_the_eager_checks(self):
+        from molix.engine.adapter import EngineForward
+        from molix.engine.export import _check_partitionable, _example_system
+
+        class _EnergyOnlyFlat(nn.Module):
+            def forward(self, Z, pos, edge_index):
+                edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+                atomic, _ = pair_site_energies_and_forces(pos, edge_index, edge_diff)
+                return {"energy": atomic.sum().reshape(1), "atomic_energy": atomic}
+
+        Z, pos, edge_index = _example_system([1, 6, 8], 4.0, torch.float64, "cpu")
+        wrapper = EngineForward(_EnergyOnlyFlat(), "flat")
+        local_mask = torch.ones(Z.shape[0], dtype=torch.bool)
+        _check_partitionable(wrapper, (Z, pos, edge_index), local_mask)

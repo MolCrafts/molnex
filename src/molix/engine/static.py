@@ -50,9 +50,10 @@ class StaticForward(nn.Module):
 
     Args:
         model: A molnex potential taking a nested ``TensorDict`` and returning
-            ``{energy, forces, atomic_energy}`` (e.g.
-            ``PiNetPotential(compute_forces=True)``), in either of the two
-            spellings :meth:`~molix.engine.adapter.EngineAdapter.read_energy_triple`
+            ``{energy, atomic_energy}``, optionally with ``forces`` (e.g.
+            ``PiNetPotential(compute_forces=False)`` — the preferred
+            energy-only shape), in either of the two spellings
+            :meth:`~molix.engine.adapter.EngineAdapter.read_energy_triple`
             accepts.
         n_atoms: Fixed atom count ``N`` baked into the graph.
         e_max: Fixed padded edge count. The deployer must pass exactly ``e_max``
@@ -77,7 +78,7 @@ class StaticForward(nn.Module):
         pos: torch.Tensor,
         edge_index: torch.Tensor,
         edge_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Build the padded batch, run the model, read its unmasked v3 triple.
 
         Same seam as :meth:`molix.engine.adapter.EngineForward.model_outputs`,

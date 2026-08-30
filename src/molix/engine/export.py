@@ -191,7 +191,10 @@ def _check_partitionable(
        site-energy sum, so this asks whether the model's reported forces really
        are the gradient of its reported energy. For a consistent model the two
        agree to round-off; a model that fails here would have shipped forces
-       that do not conserve its own energy.
+       that do not conserve its own energy. An **energy-only** model (forces
+       slot ``None`` — e.g. ``PiNetPotential(compute_forces=False)``) has
+       nothing to compare: the deployed forces *are* the derivative, so only
+       their finiteness is asserted.
 
     Args:
         wrapper: The export wrapper — :class:`~molix.engine.adapter.EngineForward`
@@ -219,6 +222,13 @@ def _check_partitionable(
         )
 
     _, derived_forces, _ = wrapper(*model_inputs, local_mask)
+    if not bool(torch.isfinite(derived_forces).all()):
+        raise ValueError(
+            "the wrapper's derived forces -d(sum of per-atom energies)/dpos are not finite "
+            "on the example system; the export would integrate NaN/Inf forces at MD runtime"
+        )
+    if forces is None:
+        return
     reference = forces.detach()
     deviation = float((derived_forces.detach() - reference).abs().max())
     reference_scale = float(reference.abs().max())
@@ -362,10 +372,15 @@ def export_for_lammps(
 
     Args:
         model: A potential. With the default ``adapter`` it must accept a nested
-            ``TensorDict`` and return ``{energy, forces, atomic_energy}`` (e.g.
-            ``PiNetPotential``). The per-atom energy is mandatory under schema
-            v3 and must sum to the scalar energy — both are checked eagerly on
-            the example system before anything is traced.
+            ``TensorDict`` and return ``{energy, atomic_energy}``, optionally
+            with ``forces`` (e.g. ``PiNetPotential``). The per-atom energy is
+            mandatory under schema v3 and must sum to the scalar energy — both
+            are checked eagerly on the example system before anything is
+            traced. Forces, when present, are checked against the derived
+            gradient; energy-only is the preferred export shape (the wrapper
+            derives the deployed forces itself, and a model whose own force
+            pass consumes its autograd graph in eval mode — PiNet's
+            ``method="grad"`` — cannot be re-differentiated at trace time).
         export_dir: Output directory (created if missing); receives ``{name}.pt2``
             and ``{name}.meta.json``.
         species: Atomic numbers the model supports. Recorded in ``meta.json``
