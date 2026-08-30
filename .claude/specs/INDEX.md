@@ -28,8 +28,8 @@ must not be treated as authority for a new training submission.
 
 | Spec or chain | Closed | Disposition |
 |---|---|---|
-| lammps-iface-05-pbc | 2026-08-30 | Completed; all 17 criteria verified (11 evidence, 6 agent-auto). Chain debt to merge gate: captured aspirin + periodic multi-rank parity runs on a real LAMMPS build (runbook in interface/lammps/README.md). |
-| lammps-iface-04-facade | 2026-08-30 | Completed; 15/16 criteria verified (1 chain debt: captured aspirin parity run owed before merge). |
+| lammps-iface-05-pbc | 2026-08-30 | Completed; all 17 criteria verified (11 evidence, 6 agent-auto). Chain debt PAID 2026-08-30: aspirin goldens captured+verified and periodic 1/2-rank/Python three-way all ≤1.6e-15 on a GH200 source-built LAMMPS 22Jul2025 (job 1805410; runbook provenance in interface/lammps/README.md). |
+| lammps-iface-04-facade | 2026-08-30 | Completed; 16/16 — the chain-debt aspirin parity run was captured and verified 2026-08-30 (goldens block in scripts/lammps_iface_parity.py, rel 0.0 energy / 8.7e-16 forces). |
 | lammps-iface-03-graph | 2026-08-30 | Completed; all 16 acceptance criteria verified (15 evidence, 1 agent-auto). |
 | lammps-iface-02-view | 2026-08-30 | Completed; all 14 acceptance criteria verified (12 evidence, 2 agent-auto). |
 | lammps-iface-01-meta | 2026-08-30 | Completed; all 14 acceptance criteria verified (12 evidence, 2 agent-auto). Chain 02-05 active. |

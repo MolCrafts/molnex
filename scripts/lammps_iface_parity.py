@@ -1767,7 +1767,55 @@ def main(argv: list[str] | None = None) -> int:
 # running a capture on a LAMMPS build; leaving it None keeps the gate red, which
 # is the intended state until the chain implementer attaches a real run.
 # --- GOLDENS BEGIN ---
-GOLDENS: Goldens | None = None
+GOLDENS: Goldens | None = Goldens(
+    deck_sha256="6521b1a5464f2c3dcde3d59dbfa0c124565450f7bd6a330bb5c18efadd65fdc4",
+    model_sha256="6cabdf804019c1e37c5cdfb4d341d98746f89f83d7dd81a30170786fcf62fb12",
+    model_dir="/nobackup/proj/disk/teoroo/personal/jicli594/work/lammps-gh200/exports/pinet_open",
+    model_name="model",
+    units="real",
+    energy=-4.071392419652929,
+    forces=(
+        (0.001617516530299541, -0.00039194644115346543, -0.00048092655174468814),  # C1
+        (0.0005795073130391902, 0.0026888653598164418, -3.856508204858706e-05),  # C2
+        (-0.0005439981843239172, 0.001382104695150323, -0.0007116704422125822),  # C3
+        (-0.0018389857860910306, 0.00048540394915417656, -0.00011479657863502026),  # C4
+        (-0.0003093452662640833, -0.0018016195730161163, -1.8703653402518157e-05),  # C5
+        (0.000451710338197586, -0.001417854860830212, -0.00014731574496826733),  # C6
+        (-0.00031501662180477303, -0.00039267428478711444, -0.0005859439429179189),  # H3
+        (-0.00037641056298971104, 7.329077323706743e-05, -2.4676567310954035e-05),  # H4
+        (-8.166023044405479e-05, -0.0003555020785389975, 6.645064194658579e-06),  # H5
+        (-0.0008649193975827742, -0.00010822159433353153, -0.00011149364800500466),  # H6
+        (0.0006211607132034546, -0.0008879850682874705, -0.0011129938076485286),  # C7
+        (0.001156131974947077, -0.0009277201638423037, -0.0008841326450261144),  # O1
+        (0.003303322400884454, 0.0007228575003867649, 0.0028379079912723955),  # O2
+        (-0.0021204357398143104, -0.0003788848633171089, -0.0015402913139857112),  # HO
+        (-0.0029226374114664395, -0.002851489515290777, 0.0026153909776558994),  # O3
+        (-0.0006369258257633481, -0.0006590335618036039, -0.0009040269469598114),  # C8
+        (-0.0006698696530169741, -0.0005274118715940003, 0.0016031119776230205),  # O4
+        (-0.00029660401987812595, -0.0004087260505031768, -3.684440638783914e-05),  # C9
+        (0.0008060123547453404, 0.0014320442797168822, 0.0008443636330927344),  # HM1
+        (0.000702069039599166, 0.0024046902502433253, -0.0005941951418595943),  # HM2
+        (0.001739378034523734, 0.0019198131195928994, -0.0006008431707255696),  # HM3
+    ),
+    provenance={
+        "system": "aspirin (acetylsalicylic acid), C9H8O4, 21 atoms",
+        "atom_style": "atomic (molecular == 0: no bonds, so no special_bonds pairs)",
+        "boundary": "f f f",
+        "lammps_version": "22 Jul 2025",
+        "lammps_binary": "/nobackup/proj/disk/teoroo/personal/jicli594/work/lammps-gh200/build-lammps/lmp",  # noqa: E501
+        "plugin": "/nobackup/proj/disk/teoroo/personal/jicli594/work/lammps-gh200/build-plugin/aarch64/molnexplugin.so",  # noqa: E501
+        "plugin_commit": "a6b0a03143e45db195a31278980332c367246ccd-dirty",
+        "torch_version": "2.13.0",
+        "device": "cuda",
+        "precision": "float64",
+        "model_units": "real",
+        "contract": "cutoff-graph",
+        "execution": "dynamic",
+        "capture_command": "scripts/lammps_iface_parity.py --capture --write-goldens --case aspirin --model-dir /nobackup/proj/disk/teoroo/personal/jicli594/work/lammps-gh200/exports/pinet_open --lammps /nobackup/proj/disk/teoroo/personal/jicli594/work/lammps-gh200/build-lammps/lmp --plugin /nobackup/proj/disk/teoroo/personal/jicli594/work/lammps-gh200/build-plugin/aarch64/molnexplugin.so",  # noqa: E501
+        "date": "2026-08-30",
+        "tolerance": "rel 1e-06; energy |dE|/|E|, forces max_i |df_i| / max_j |f_j|",
+    },
+)
 # --- GOLDENS END ---
 
 

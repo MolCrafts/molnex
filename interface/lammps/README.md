@@ -301,7 +301,37 @@ a machine nobody has any more.
 | **tool** | `scripts/lammps_iface_parity.py` |
 | **owner** | the implementer of the `lammps-iface` chain |
 | **re-run trigger** | **any change under `interface/` or `src/molix/engine/`** |
-| **status** | **PENDING — while no run is attached, this branch must not merge.** The tool exits non-zero without a LAMMPS build; it never skips. |
+| **status** | **RECORDED 2026-08-30** — all six comparisons OK at ≤1.6e-15 (gate rel 1e-6); provenance below. The tool exits non-zero without a LAMMPS build; it never skips. |
+
+Recorded run (SLURM job 1805410, NAISS Arrhenius GH200 node):
+
+```
+system          : water box, 27 molecules, 81 atoms
+atom_style      : atomic (molecular == 0: no bonds, so no special_bonds pairs)
+boundary        : p p p                    box: 9.318 A cubic
+ranks           : 1 and 2                  mpirun: OpenMPI 5.0.8 -np 2
+comm_modify     : cutoff 10.000000 (T 2 * cutoff 4.000 + skin 2)
+receptive_field : 2                        ghost_atoms: 2160 (Python reference)
+lammps          : 22 Jul 2025 source build (-DBUILD_MPI=on -DBUILD_SHARED_LIBS=on -DPKG_PLUGIN=on)
+plugin_commit   : a6b0a03143e45db195a31278980332c367246ccd-dirty
+torch_version   : 2.13.0                   device: cuda   precision: float64
+model           : random-weight PiNet (seed 2666, hidden 16, depth 2), energy-only export,
+                  supports_pbc=true, units real, contract cutoff-graph, execution dynamic
+results         : E python/1rank/2ranks = -15.770846444542112 / same / -15.77084644454211
+                  worst E rel 1.126e-16; worst F rel 1.588e-15 (gate rel 1e-6)
+capture_command : scripts/lammps_iface_parity.py --case periodic
+                  --model-dir <ws>/exports/pinet_pbc --lammps <ws>/build-lammps/lmp
+                  --plugin <ws>/build-plugin/aarch64/molnexplugin.so
+                  --mpirun 'mpirun -np {ranks}' --ranks 2
+workspace       : /nobackup/proj/disk/teoroo/personal/jicli594/work/lammps-gh200 (<ws>);
+                  full log logs/lammps-parity-1805410.out
+date            : 2026-08-30    tolerance: rel 1e-06 (energy |dE|/|E|; forces max_i|df_i|/max_j|f_j|)
+```
+
+The aspirin goldens (`ac-013`) were captured and re-verified in the same job —
+energy rel 0.0, forces 8.707e-16 — and live as the `Goldens(...)` block inside
+`scripts/lammps_iface_parity.py`, pinned by deck and model hashes with their
+own embedded provenance.
 
 The tool's Provenance block records the LAMMPS version, rank count,
 `atom_style`, `comm_modify` settings, plugin commit, torch version,
