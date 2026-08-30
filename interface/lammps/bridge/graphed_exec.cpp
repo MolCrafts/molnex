@@ -101,9 +101,8 @@ ModelOutputs GraphedExec::run(const at::Tensor& Z, const at::Tensor& pos_f64,
   // under this component's own prefix, as every other bridge component does.
   if (Z.size(0) != n_fixed_) {
     throw std::runtime_error(
-        "GraphedExec: nlocal=" + std::to_string(Z.size(0)) +
-        " != fixed N=" + std::to_string(n_fixed_) +
-        " (export n_atoms must match the system)");
+        "GraphedExec: nlocal=" + std::to_string(Z.size(0)) + " != fixed N=" +
+        std::to_string(n_fixed_) + " (export n_atoms must match the system)");
   }
   if (edge_index.size(0) > e_max_) {
     throw std::runtime_error(
@@ -114,9 +113,10 @@ ModelOutputs GraphedExec::run(const at::Tensor& Z, const at::Tensor& pos_f64,
 
   const PaddedEdges padded = pad_edges(edge_index, e_max_);
 
-  // In-place content updates, then replay. `copy_` handles both the host->device
-  // move and any dtype narrowing; `pos` is cast first so the conversion happens
-  // once on the CPU rather than as a device-side reinterpretation.
+  // In-place content updates, then replay. `copy_` handles both the
+  // host->device move and any dtype narrowing; `pos` is cast first so the
+  // conversion happens once on the CPU rather than as a device-side
+  // reinterpretation.
   Zg_.copy_(Z);
   posg_.copy_(pos_f64.to(model_dtype_));
   edgeg_.copy_(padded.edges);

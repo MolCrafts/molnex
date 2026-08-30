@@ -16,12 +16,12 @@
 //
 // Field set follows the consumers that exist today: the neighbour spans
 // (`ilist` / `numneigh` / `firstneigh` / `inum` / `neigh_mask`) arrived with
-// `lammps-iface-03-graph` because `GraphBridge` — their only consumer — did, and
-// `gnum` arrived with `lammps-iface-05-pbc` for the same reason, when that same
-// consumer started walking the ghost centres too.
-// There is still no `tag` (the tag<->local mapping belongs to a future
-// fixed-graph contract; the fat-ghost single-shot scheme deliberately does no
-// index remapping, so nothing here needs one) and no `q` (no reader).
+// `lammps-iface-03-graph` because `GraphBridge` — their only consumer — did,
+// and `gnum` arrived with `lammps-iface-05-pbc` for the same reason, when that
+// same consumer started walking the ghost centres too. There is still no `tag`
+// (the tag<->local mapping belongs to a future fixed-graph contract; the
+// fat-ghost single-shot scheme deliberately does no index remapping, so nothing
+// here needs one) and no `q` (no reader).
 //
 // The neighbour mask travels as **data**, applied by the `neighbor()` accessor:
 // that is what keeps the bridge from restating a LAMMPS constant. The facade
@@ -38,9 +38,9 @@ namespace molnex::lammps_bridge {
 /// firstneigh, inum, gnum, neigh_mask}` at the seam and nothing downstream can
 /// accidentally take ownership. `double**` converts to `const double* const*`
 /// as a qualification conversion, so the facade needs no `const_cast` to hand
-/// over `atom->x`. A caller with no neighbour data to offer may brace-initialise
-/// the atom fields alone; the neighbour members then value-initialise, and only
-/// the graph path reads them.
+/// over `atom->x`. A caller with no neighbour data to offer may
+/// brace-initialise the atom fields alone; the neighbour members then
+/// value-initialise, and only the graph path reads them.
 ///
 /// All arrays are indexed by *local* atom index in `[0, nall())`, with the
 /// first `nlocal` entries owned by this rank and the remainder ghosts.
@@ -79,9 +79,9 @@ struct LammpsView {
   ///
   /// Zero unless the neighbour request carried `REQ_GHOST`. It arrives with its
   /// consumer (`GraphBridge::build`, which walks `inum + gnum`): a ghost centre
-  /// is what supplies the ghost->local edges a target-aggregating model needs at
-  /// its first layer, and the ghost->ghost ones a source-aggregating model needs
-  /// at its second.
+  /// is what supplies the ghost->local edges a target-aggregating model needs
+  /// at its first layer, and the ghost->ghost ones a source-aggregating model
+  /// needs at its second.
   int gnum;
   /// Mask stripping the high flag bits LAMMPS packs into a neighbour entry.
   ///
@@ -92,7 +92,8 @@ struct LammpsView {
 
   /// Total number of addressable atoms: owned plus ghosts.
   ///
-  /// \returns `nlocal + nghost`, the exclusive upper bound of every array above.
+  /// \returns `nlocal + nghost`, the exclusive upper bound of every array
+  /// above.
   int nall() const { return nlocal + nghost; }
 
   /// The `jj`-th neighbour of atom `i`, with the flag bits stripped.

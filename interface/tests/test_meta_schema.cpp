@@ -1,10 +1,12 @@
-// C++ acceptance tests for molnex::interface::MetaSchema (spec lammps-iface-01-meta).
+// C++ acceptance tests for molnex::interface::MetaSchema (spec
+// lammps-iface-01-meta).
 //
 // House style follows test_model_runner.cpp: no test framework, one function
 // per case, a function-local static map dispatcher, and the [pass]/[fail]/
 // [skip] stderr protocol. Unlike that file these cases need NO fixtures — every
 // document is an in-test raw string literal — so CMake registers them without
-// FIXTURES_REQUIRED and a LAMMPS-free, AOTI-free CI job can select them by name.
+// FIXTURES_REQUIRED and a LAMMPS-free, AOTI-free CI job can select them by
+// name.
 //
 // API contract under test. The header arrives with the next task and MUST
 // satisfy exactly this (pure std: no torch/, no ATen/, no LAMMPS headers):
@@ -16,17 +18,20 @@
 //    public:
 //     explicit MetaSchema(std::string json_text);
 //     static MetaSchema from_file(const std::string& path);
-//     std::string device() const;                // top-level-only field; throws
-//                                                // "missing 'device'" when called
+//     std::string device() const;                // top-level-only field;
+//     throws
+//                                                // "missing 'device'" when
+//                                                called
 //                                                // on a scoped sub-document
 //     bool has_block(const std::string& name) const;    // top-depth key whose
-//                                                       // value is a {...} object
+//                                                       // value is a {...}
+//                                                       object
 //     MetaSchema block(const std::string& name) const;  // scoped sub-document;
 //                                                       // throws if absent
-//     std::string get_string(const std::string& key) const;          // top depth
-//     std::vector<std::string> get_string_array(const std::string& key) const;
-//     double get_number(const std::string& key) const;
-//     bool get_bool(const std::string& key, bool fallback) const;
+//     std::string get_string(const std::string& key) const;          // top
+//     depth std::vector<std::string> get_string_array(const std::string& key)
+//     const; double get_number(const std::string& key) const; bool
+//     get_bool(const std::string& key, bool fallback) const;
 //   };
 //   }  // namespace molnex::interface
 //
@@ -69,7 +74,8 @@ void test_meta_device_from_bare_export() {
 })json";
   MetaSchema doc{json};
   expect_string(doc.device(), "cpu", "bare export device()");
-  expect_string(doc.get_string("model_class"), "TinyLinear", "bare export model_class");
+  expect_string(doc.get_string("model_class"), "TinyLinear",
+                "bare export model_class");
   expect_true(!doc.has_block("lammps"),
               "a bare Exporter meta must not report a 'lammps' block");
 }
@@ -103,8 +109,8 @@ void test_meta_scoped_block_shadowing() {
 
   // device() is a top-level-only field: on a scoped sub-document it must throw
   // rather than silently resolving to the enclosing document's "cuda".
-  const std::string msg =
-      expect_throws([&] { (void)lammps.device(); }, "device() on a sub-document");
+  const std::string msg = expect_throws([&] { (void)lammps.device(); },
+                                        "device() on a sub-document");
   expect_contains(msg, "device", "device() on a sub-document");
 }
 
@@ -121,15 +127,15 @@ void test_meta_string_array() {
   const MetaSchema lammps = MetaSchema{json}.block("lammps");
 
   const std::vector<std::string> inputs = lammps.get_string_array("inputs");
-  expect_true(inputs.size() == 3,
-              "inputs: expected 3 elements, got " + std::to_string(inputs.size()));
+  expect_true(inputs.size() == 3, "inputs: expected 3 elements, got " +
+                                      std::to_string(inputs.size()));
   expect_string(inputs[0], "Z", "inputs[0]");
   expect_string(inputs[1], "pos", "inputs[1]");
   expect_string(inputs[2], "edge_index", "inputs[2]");
 
   const std::vector<std::string> outputs = lammps.get_string_array("outputs");
-  expect_true(outputs.size() == 3,
-              "outputs: expected 3 elements, got " + std::to_string(outputs.size()));
+  expect_true(outputs.size() == 3, "outputs: expected 3 elements, got " +
+                                       std::to_string(outputs.size()));
   expect_string(outputs[0], "energy", "outputs[0]");
   expect_string(outputs[1], "forces", "outputs[1]");
   expect_string(outputs[2], "virial", "outputs[2]");
@@ -147,8 +153,8 @@ void test_meta_block_missing_returns_absent() {
   expect_true(!doc.has_block("lammps"), "missing block must report absent");
   expect_true(!doc.has_block("lammps_notes"), "a string value is not a block");
 
-  const std::string msg =
-      expect_throws([&] { (void)doc.block("lammps"); }, "block() on a missing block");
+  const std::string msg = expect_throws([&] { (void)doc.block("lammps"); },
+                                        "block() on a missing block");
   expect_contains(msg, "lammps", "block() on a missing block");
 }
 
@@ -160,7 +166,8 @@ const std::map<std::string, TestFn>& registry() {
       {"meta_device_from_bare_export", test_meta_device_from_bare_export},
       {"meta_scoped_block_shadowing", test_meta_scoped_block_shadowing},
       {"meta_string_array", test_meta_string_array},
-      {"meta_block_missing_returns_absent", test_meta_block_missing_returns_absent},
+      {"meta_block_missing_returns_absent",
+       test_meta_block_missing_returns_absent},
   };
   return r;
 }
@@ -171,7 +178,8 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr, "usage: %s <test_name>\n", argv[0]);
     std::fprintf(stderr, "available:\n");
-    for (const auto& [k, _] : registry()) std::fprintf(stderr, "  %s\n", k.c_str());
+    for (const auto& [k, _] : registry())
+      std::fprintf(stderr, "  %s\n", k.c_str());
     return 2;
   }
   std::string name = argv[1];

@@ -39,32 +39,34 @@
 //
 //   struct NeighborNeeds { bool full; bool ghost; double cutoff;
 //                          int comm_reverse; int comm_reverse_off; };
-//   struct EvalResult    { double e_total; at::Tensor e_atom; at::Tensor virial;
+//   struct EvalResult    { double e_total; at::Tensor e_atom; at::Tensor
+//   virial;
 //                          bool needs_pair_reverse_comm; };
 //   struct LammpsRunEnv  { int newton_pair; int nprocs; int molecular;
-//                          const double* special_lj; const double* special_coul;
-//                          double ghost_cutoff; double skin; };
+//                          const double* special_lj; const double*
+//                          special_coul; double ghost_cutoff; double skin; };
 //
 //   class ContractImpl {
 //    public:
 //     virtual ~ContractImpl();
 //     virtual NeighborNeeds needs() const = 0;
-//     virtual void coeff(const std::vector<std::string>& tokens, int ntypes) = 0;
-//     virtual void init(const LammpsRunEnv& env) = 0;
-//     virtual EvalResult compute(const molnex::lammps_bridge::LammpsView&) = 0;
-//     virtual int  pack_reverse(const LammpsView&, int n, int first, double* buf) = 0;
+//     virtual void coeff(const std::vector<std::string>& tokens, int ntypes) =
+//     0; virtual void init(const LammpsRunEnv& env) = 0; virtual EvalResult
+//     compute(const molnex::lammps_bridge::LammpsView&) = 0; virtual int
+//     pack_reverse(const LammpsView&, int n, int first, double* buf) = 0;
 //     virtual void unpack_reverse(const LammpsView&, int n, const int* list,
 //                                 const double* buf) = 0;
 //     static std::unique_ptr<ContractImpl> for_contract(
-//         Contract, const LammpsContract&, const std::string& lammps_unit_style,
-//         molnex::interface::ModelRunner&);
+//         Contract, const LammpsContract&, const std::string&
+//         lammps_unit_style, molnex::interface::ModelRunner&);
 //   };
 //
 //   #include "impls/cutoff_graph_impl.h"
 //
 //   class CutoffGraphImpl : public ContractImpl {
 //    public:
-//     CutoffGraphImpl(const LammpsContract&, const std::string& lammps_unit_style,
+//     CutoffGraphImpl(const LammpsContract&, const std::string&
+//     lammps_unit_style,
 //                     std::unique_ptr<molnex::lammps_bridge::Exec>);
 //   };
 //
@@ -73,7 +75,8 @@
 //   1. NeighborNeeds reproduces the pre-refactor neighbour request exactly
 //      (REQ_FULL, comm_reverse 3 / 3, cutoff from the meta), with `ghost`
 //      following `supports_pbc` from lammps-iface-05-pbc on.
-//   2. compute() composes stage_nodes -> GraphBridge -> Exec -> ForceScatter and
+//   2. compute() composes stage_nodes -> GraphBridge -> Exec -> ForceScatter
+//   and
 //      applies energy_conv ONCE, to a hand-computed literal.
 //   3. n_graph is `supports_pbc ? nall() : nlocal` — the semantics migrated out
 //      of the facade, and the ghost guard that makes the two agree when
@@ -83,9 +86,9 @@
 //   5. THE PARTITION ENERGY SUMS LOCAL SITES ONLY. e_total is the sum of the
 //      per-atom energies over `i < view.nlocal`, and e_atom carries exactly
 //      those nlocal entries. Summing over local + ghost instead would add
-//      Sigma_{i in G} E_i, which is dominated by the per-species constant offset
-//      and is therefore tens of eV per ghost — not a rounding error, an energy
-//      that is simply wrong and grows with the rank count.
+//      Sigma_{i in G} E_i, which is dominated by the per-species constant
+//      offset and is therefore tens of eV per ghost — not a rounding error, an
+//      energy that is simply wrong and grows with the rank count.
 //   6. needs_pair_reverse_comm is a CONSTANT false: the integrator's global
 //      reverse comm owns the reduction, and CutoffGraphImpl::init's newton-pair
 //      enforcement is the precondition that makes that constant safe.
@@ -207,21 +210,36 @@ std::string v3_meta(const MetaFields& f) {
     "schema_version": 3,
     "contract": ")json") +
          f.contract + R"json(",
-    "execution": ")json" + f.execution + R"json(",
-    "cutoff": )json" + f.cutoff + R"json(,
-    "units": ")json" + f.units + R"json(",
-    "energy_unit": ")json" + f.energy_unit + R"json(",
-    "length_unit": ")json" + f.length_unit + R"json(",
-    "energy_conv": )json" + f.energy_conv + R"json(,
-    "species": )json" + f.species + R"json(,
-    "model_dtype": ")json" + f.model_dtype + R"json(",
-    "inputs": )json" + f.inputs + R"json(,
-    "outputs": )json" + f.outputs + R"json(,
-    "adapter": ")json" + f.adapter + R"json(",
-    "supports_pbc": )json" + f.supports_pbc + R"json(,
-    "supports_virial": )json" + f.supports_virial + R"json(,
-    "receptive_field_layers": )json" + f.receptive_field_layers + R"json(,
-    "requires_sorted_edges": )json" + f.requires_sorted_edges + R"json(
+    "execution": ")json" +
+         f.execution + R"json(",
+    "cutoff": )json" +
+         f.cutoff + R"json(,
+    "units": ")json" +
+         f.units + R"json(",
+    "energy_unit": ")json" +
+         f.energy_unit + R"json(",
+    "length_unit": ")json" +
+         f.length_unit + R"json(",
+    "energy_conv": )json" +
+         f.energy_conv + R"json(,
+    "species": )json" +
+         f.species + R"json(,
+    "model_dtype": ")json" +
+         f.model_dtype + R"json(",
+    "inputs": )json" +
+         f.inputs + R"json(,
+    "outputs": )json" +
+         f.outputs + R"json(,
+    "adapter": ")json" +
+         f.adapter + R"json(",
+    "supports_pbc": )json" +
+         f.supports_pbc + R"json(,
+    "supports_virial": )json" +
+         f.supports_virial + R"json(,
+    "receptive_field_layers": )json" +
+         f.receptive_field_layers + R"json(,
+    "requires_sorted_edges": )json" +
+         f.requires_sorted_edges + R"json(
   }
 })json";
 }
@@ -313,7 +331,8 @@ constexpr double kModelSiteEnergy[kNall] = {0.25, 0.5, 0.75, 1.0};
 
 /// The three LOCAL site energies in LAMMPS `real` units, by hand:
 /// 0.25 * 23.060549, 0.5 * 23.060549, 0.75 * 23.060549.
-constexpr double kExpectedEAtom[kNlocal] = {5.76513725, 11.5302745, 17.29541175};
+constexpr double kExpectedEAtom[kNlocal] = {5.76513725, 11.5302745,
+                                            17.29541175};
 
 /// Partition energy: the sum of the three LOCAL site energies, converted.
 /// (0.25 + 0.5 + 0.75) * 23.060549 = 1.5 * 23.060549.
@@ -324,7 +343,8 @@ constexpr double kExpectedETotal = 34.5908235;
 /// than implied by the absence of a number.
 constexpr double kGhostInclusiveETotal = 57.6513725;
 
-/// Virial the stub Exec returns when asked, in MODEL units, (xx yy zz xy xz yz).
+/// Virial the stub Exec returns when asked, in MODEL units, (xx yy zz xy xz
+/// yz).
 constexpr double kModelVirial[6] = {1.0, -2.0, 4.0, 0.5, -0.25, 8.0};
 /// The same, times kEnergyConv, by hand (every factor is a power of two).
 constexpr double kExpectedVirial[6] = {23.060549,  -46.121098,  92.242196,
@@ -333,7 +353,8 @@ constexpr double kExpectedVirial[6] = {23.060549,  -46.121098,  92.242196,
 using EdgePair = std::pair<int, int>;
 
 /// Every surviving directed pair with n_graph == 4 (the ghost is a node).
-const std::vector<EdgePair> kEdgesAll = {{0, 1}, {1, 0}, {1, 2}, {2, 1}, {2, 3}};
+const std::vector<EdgePair> kEdgesAll = {
+    {0, 1}, {1, 0}, {1, 2}, {2, 1}, {2, 3}};
 /// The same with n_graph == 3: the ghost is not a node, so (2,3) goes.
 const std::vector<EdgePair> kEdgesLocal = {{0, 1}, {1, 0}, {1, 2}, {2, 1}};
 
@@ -343,7 +364,8 @@ std::vector<std::vector<int>> full_lists() {
   return {{1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {}};
 }
 
-/// The storage a synthetic LammpsView borrows: atom arrays plus neighbour spans.
+/// The storage a synthetic LammpsView borrows: atom arrays plus neighbour
+/// spans.
 ///
 /// Non-copyable: the pointer vectors point into this object's own storage.
 class SyntheticSystem {
@@ -478,7 +500,8 @@ class StubExec : public Exec {
   bool emit_virial_;
 };
 
-/// A CutoffGraphImpl over `fields`, with a stub Exec whose probe is handed back.
+/// A CutoffGraphImpl over `fields`, with a stub Exec whose probe is handed
+/// back.
 ///
 /// Returns the impl by value — CutoffGraphImpl's PUBLIC constructor is the only
 /// construction path any impl_* case uses (ac-005 / ac-010).
@@ -490,10 +513,9 @@ struct ImplUnderTest {
 ImplUnderTest impl_over(const MetaFields& fields, bool emit_virial = false) {
   auto stub = std::make_unique<StubExec>(emit_virial);
   StubExec* probe = stub.get();
-  return ImplUnderTest{
-      std::make_unique<CutoffGraphImpl>(contract_of(fields), kUnitStyle,
-                                        std::move(stub)),
-      probe};
+  return ImplUnderTest{std::make_unique<CutoffGraphImpl>(
+                           contract_of(fields), kUnitStyle, std::move(stub)),
+                       probe};
 }
 
 /// Fields for a periodic export: ghosts are graph nodes and n_graph is nall().
@@ -507,9 +529,9 @@ MetaFields pbc_fields() {
 /// on everything within 3 * cutoff and the default ghost cutoff is far too
 /// small.
 ///
-/// `supports_pbc` is part of the fixture rather than an accident of the default:
-/// D3.2 is scoped to periodic contracts, since only they have ghosts whose
-/// cutoff could fall short. The non-periodic T == 3 shape is a separate
+/// `supports_pbc` is part of the fixture rather than an accident of the
+/// default: D3.2 is scoped to periodic contracts, since only they have ghosts
+/// whose cutoff could fall short. The non-periodic T == 3 shape is a separate
 /// fixture-free case (impl_init_accepts_nonpbc_multilayer_default_cutoff), and
 /// keeping them apart is what stops one of the two from silently becoming a
 /// statement about the other.
@@ -531,8 +553,8 @@ constexpr double kSkin = 2.0;
 
 /// `comm->cutghostuser` when the input script never ran `comm_modify cutoff`.
 ///
-/// LAMMPS' own value for "unset" is a literal 0.0, and it is passed through RAW:
-/// what zero MEANS — that the effective ghost cutoff is cutoff + skin — is
+/// LAMMPS' own value for "unset" is a literal 0.0, and it is passed through
+/// RAW: what zero MEANS — that the effective ghost cutoff is cutoff + skin — is
 /// interpreted inside CutoffGraphImpl::init and nowhere else, which is why this
 /// fixture can state the LAMMPS value without also stating the interpretation.
 constexpr double kGhostCutoffUnset = 0.0;
@@ -543,7 +565,7 @@ LammpsRunEnv env_with(int newton_pair, int nprocs, int molecular,
                       const double* special_coul = kSpecialKept,
                       double ghost_cutoff = kGhostCutoffUnset,
                       double skin = kSkin) {
-  return LammpsRunEnv{newton_pair, nprocs,       molecular, special_lj,
+  return LammpsRunEnv{newton_pair,  nprocs,       molecular, special_lj,
                       special_coul, ghost_cutoff, skin};
 }
 
@@ -559,7 +581,8 @@ LammpsRunEnv pbc_env() {
 /// Require the recorded edge tensor to be exactly `want`.
 void expect_edges(const at::Tensor& edges, const std::vector<EdgePair>& want,
                   const std::string& tag) {
-  expect_true(edges.defined(), tag + ": the impl must have built an edge_index");
+  expect_true(edges.defined(),
+              tag + ": the impl must have built an edge_index");
   expect_int(edges.dim(), 2, tag + ": edge_index must be 2-D");
   expect_int(edges.size(0), static_cast<long long>(want.size()),
              tag + ": edge count");
@@ -598,11 +621,11 @@ void test_impl_needs_matches_legacy_request() {
   expect_int(needs.comm_reverse, 3, "reverse comm packs fx, fy, fz");
   expect_int(needs.comm_reverse_off, 3, "newton-off variant packs the same 3");
 
-  // `ghost` now FOLLOWS supports_pbc, and the two contract variants are asserted
-  // separately because that is the whole content of the field. A local-only
-  // export must not be handed ghost neighbours (there are none), while a
-  // periodic one cannot close its edge set without them — REQ_GHOST is what
-  // puts the ghost centres into ilist for GraphBridge to walk.
+  // `ghost` now FOLLOWS supports_pbc, and the two contract variants are
+  // asserted separately because that is the whole content of the field. A
+  // local-only export must not be handed ghost neighbours (there are none),
+  // while a periodic one cannot close its edge set without them — REQ_GHOST is
+  // what puts the ghost centres into ilist for GraphBridge to walk.
   expect_true(!needs.ghost,
               "a supports_pbc=false export requests no ghost neighbours");
   expect_true(impl_over(pbc_fields()).impl->needs().ghost,
@@ -653,9 +676,10 @@ void test_impl_compute_composes_pipeline() {
   expect_edges(under.exec->edges_seen, kEdgesLocal, "composed edge_index");
 
   // (3) The energy is the sum of the LOCAL site energies, times energy_conv,
-  // ONCE: (0.25 + 0.5 + 0.75) eV in a `real` run is 1.5 * 23.060549 = 34.5908235
-  // kcal/mol. A missing conversion gives 1.5 and a doubled one 797.7..., so
-  // neither can pass — and neither can tallying the stub's scalar 8.0 eV.
+  // ONCE: (0.25 + 0.5 + 0.75) eV in a `real` run is 1.5 * 23.060549
+  // = 34.5908235 kcal/mol. A missing conversion gives 1.5 and a doubled one
+  // 797.7..., so neither can pass — and neither can tallying the stub's
+  // scalar 8.0 eV.
   expect_near(result.e_total, kExpectedETotal, 1e-12,
               "e_total is the local site-energy sum in LAMMPS units");
 
@@ -673,8 +697,9 @@ void test_impl_compute_composes_pipeline() {
 
   // (5) The reduction-ownership seam: the integrator's global reverse comm owns
   // the reduction, so the pair style is never asked to issue one of its own.
-  expect_true(!result.needs_pair_reverse_comm,
-              "the cutoff-graph contract never asks the facade to reverse comm");
+  expect_true(
+      !result.needs_pair_reverse_comm,
+      "the cutoff-graph contract never asks the facade to reverse comm");
 }
 
 void test_impl_compute_n_graph_local_only() {
@@ -772,8 +797,9 @@ void test_impl_virial_present_and_absent() {
   ImplUnderTest without = impl_over(MetaFields{}, /*emit_virial=*/false);
   without.impl->coeff(kCoeffTokens, /*ntypes=*/3);
   const EvalResult absent = without.impl->compute(plain.view());
-  expect_true(!absent.virial.defined(),
-              "an absent virial must stay undefined, not become an empty tensor");
+  expect_true(
+      !absent.virial.defined(),
+      "an absent virial must stay undefined, not become an empty tensor");
   expect_near(absent.e_total, kExpectedETotal, 1e-12,
               "energy is unaffected by the virial's absence");
 
@@ -835,13 +861,15 @@ void test_impl_reports_no_pair_reverse_comm() {
     under.impl->coeff(kCoeffTokens, /*ntypes=*/3);
     under.impl->init(pbc_env());
     const EvalResult result = under.impl->compute(sys.view());
-    expect_true(!result.needs_pair_reverse_comm,
-                "supports_pbc=true WITH ghosts -> still false; the integrator's "
-                "global reverse comm owns the reduction");
+    expect_true(
+        !result.needs_pair_reverse_comm,
+        "supports_pbc=true WITH ghosts -> still false; the integrator's "
+        "global reverse comm owns the reduction");
     // And the ghost really did receive a force, so the assertion above is about
     // reduction OWNERSHIP and not about there being nothing to reduce.
-    expect_force_row(sys, 3, /*scattered=*/true,
-                     "the ghost carries a force that the integrator must reduce");
+    expect_force_row(
+        sys, 3, /*scattered=*/true,
+        "the ghost carries a force that the integrator must reduce");
   }
   // The field and the facade's `if (r.needs_pair_reverse_comm)` call site both
   // survive untouched: a future contract that scatters ghost forces outside
@@ -867,9 +895,10 @@ void test_impl_energy_sums_locals_only() {
   expect_near(result.e_total, kExpectedETotal, 1e-12,
               "e_total is 1.5 eV * 23.060549 = 34.5908235 kcal/mol, the sum "
               "over the three LOCAL sites");
-  expect_true(result.e_total != kGhostInclusiveETotal,
-              "e_total must not be the local+ghost sum 57.6513725 — that error "
-              "is dominated by the per-species offset and grows with rank count");
+  expect_true(
+      result.e_total != kGhostInclusiveETotal,
+      "e_total must not be the local+ghost sum 57.6513725 — that error "
+      "is dominated by the per-species offset and grows with rank count");
 
   // The mask the model was handed is the other half of D1: the C++ side sums
   // the local slice, and the model is TOLD which sites are local so its own
@@ -913,8 +942,9 @@ void test_impl_e_atom_locals_only() {
   const auto ea = result.e_atom.accessor<double, 1>();
   for (int i = 0; i < kNlocal; ++i) {
     expect_near(ea[i], kExpectedEAtom[i], 1e-12,
-                "e_atom[" + std::to_string(i) + "] is the site energy in LAMMPS "
-                "units");
+                "e_atom[" + std::to_string(i) +
+                    "] is the site energy in LAMMPS "
+                    "units");
   }
 
   // e_total and e_atom are ONE number and its parts: the facade adds the former
@@ -936,9 +966,9 @@ void test_impl_compute_reasserts_newton_invariant() {
     SyntheticSystem sys(/*nghost=*/1);
     ImplUnderTest under = impl_over(pbc_fields());
     under.impl->coeff(kCoeffTokens, /*ntypes=*/3);
-    const std::string msg = expect_throws(
-        [&] { (void)under.impl->compute(sys.view()); },
-        "periodic compute without a validated newton setting");
+    const std::string msg =
+        expect_throws([&] { (void)under.impl->compute(sys.view()); },
+                      "periodic compute without a validated newton setting");
     expect_contains(msg, "newton", "the diagnostic must name newton");
     expect_int(under.exec->calls, 0,
                "the re-assertion must precede the model call — a half-applied "
@@ -1102,7 +1132,8 @@ void test_impl_init_single_domain_condition() {
 
   // And a periodic export may be decomposed.
   ImplUnderTest periodic = impl_over(pbc_fields());
-  periodic.impl->init(env_with(/*newton_pair=*/1, /*nprocs=*/2, /*molecular=*/0));
+  periodic.impl->init(
+      env_with(/*newton_pair=*/1, /*nprocs=*/2, /*molecular=*/0));
 }
 
 void test_impl_init_rejects_newton_off_with_pbc() {
@@ -1156,9 +1187,9 @@ void test_impl_init_rejects_insufficient_ghost_cutoff() {
 
   // Required: T * cutoff + skin = 3 * 2.0 + 2.0 = 8.0 A.
   // Default effective: cutoff + skin = 4.0 A.
-  const std::string msg = expect_throws(
-      [&] { under.impl->init(env_with(1, 1, 0)); },
-      "T = 3 under the default ghost cutoff");
+  const std::string msg =
+      expect_throws([&] { under.impl->init(env_with(1, 1, 0)); },
+                    "T = 3 under the default ghost cutoff");
   expect_contains(msg, "comm_modify cutoff",
                   "the diagnostic must give the command that fixes it");
   expect_contains(msg, "8", "the diagnostic must state the required value");
@@ -1177,7 +1208,8 @@ void test_impl_init_rejects_insufficient_ghost_cutoff() {
   // asked for a margin it does not need.
   under.impl->init(env_with(1, 1, 0, kSpecialKept, kSpecialKept,
                             /*ghost_cutoff=*/8.0));
-  // And comfortably above it, which is what the diagnostic tells the user to do.
+  // And comfortably above it, which is what the diagnostic tells the user to
+  // do.
   under.impl->init(env_with(1, 1, 0, kSpecialKept, kSpecialKept,
                             /*ghost_cutoff=*/12.0));
 
@@ -1220,8 +1252,9 @@ void test_impl_init_accepts_strictly_local_default_cutoff() {
   // above a statement about T rather than about the check being toothless.
   MetaFields two_layer = pbc_fields();
   two_layer.receptive_field_layers = "2";
-  (void)expect_throws([&] { impl_over(two_layer).impl->init(env_with(1, 1, 0)); },
-                      "T = 2 under the default ghost cutoff");
+  (void)expect_throws(
+      [&] { impl_over(two_layer).impl->init(env_with(1, 1, 0)); },
+      "T = 2 under the default ghost cutoff");
 }
 
 void test_impl_init_accepts_nonpbc_multilayer_default_cutoff() {
@@ -1243,14 +1276,16 @@ void test_impl_init_accepts_nonpbc_multilayer_default_cutoff() {
   // watch it refuse. Non-periodic, it must be accepted.
   MetaFields local_deep;
   local_deep.receptive_field_layers = "3";
-  impl_over(local_deep).impl->init(env_with(/*newton_pair=*/1, /*nprocs=*/1,
-                                            /*molecular=*/0));
+  impl_over(local_deep)
+      .impl->init(env_with(/*newton_pair=*/1, /*nprocs=*/1,
+                           /*molecular=*/0));
 
   // Newton off on one rank is the other shape a single-molecule run takes, and
   // it must not acquire a receptive-field objection either: the non-periodic
   // path never had a newton requirement (impl_init_single_domain_condition).
-  impl_over(local_deep).impl->init(env_with(/*newton_pair=*/0, /*nprocs=*/1,
-                                            /*molecular=*/0));
+  impl_over(local_deep)
+      .impl->init(env_with(/*newton_pair=*/0, /*nprocs=*/1,
+                           /*molecular=*/0));
 }
 
 // ---- reverse comm ----------------------------------------------------------
@@ -1270,10 +1305,10 @@ void test_impl_reverse_comm_forwards() {
 
   const int m_impl =
       under.impl->pack_reverse(through_impl.view(), 2, 1, via_impl.data());
-  const int m_free =
-      pack_reverse_forces(direct.view(), 2, 1, via_free.data());
+  const int m_free = pack_reverse_forces(direct.view(), 2, 1, via_free.data());
 
-  expect_int(m_impl, m_free, "pack_reverse returns what the free function does");
+  expect_int(m_impl, m_free,
+             "pack_reverse returns what the free function does");
   for (std::size_t k = 0; k < via_impl.size(); ++k) {
     expect_near(via_impl[k], via_free[k], 0.0,
                 "pack buffer entry " + std::to_string(k) + " is bit-identical");
@@ -1288,7 +1323,8 @@ void test_impl_reverse_comm_forwards() {
     for (int k = 0; k < 3; ++k) {
       expect_near(through_impl.force(i, k), direct.force(i, k), 0.0,
                   "unpack_reverse leaves f[" + std::to_string(i) + "][" +
-                      std::to_string(k) + "] bit-identical to the free function");
+                      std::to_string(k) +
+                      "] bit-identical to the free function");
     }
   }
   // Accumulation, not assignment, on both sides — asserted from the non-zero
@@ -1302,8 +1338,9 @@ void test_impl_reverse_comm_forwards() {
 // The only two fixture-backed cases in this file: ContractImpl::for_contract
 // takes a ModelRunner&, and a ModelRunner cannot be constructed without a real
 // exported package. They therefore carry FIXTURES_REQUIRED and the fixture-dir
-// environment variable — the same wiring as contract_reads_generated_v2_fixture.
-// The package is only held, never run: the dispatch's job is to CONSTRUCT.
+// environment variable — the same wiring as
+// contract_reads_generated_v2_fixture. The package is only held, never run: the
+// dispatch's job is to CONSTRUCT.
 
 fs::path fixture_dir() {
   const char* env = std::getenv("MOLNEX_INTERFACE_FIXTURE_DIR");
@@ -1328,8 +1365,9 @@ void test_registry_returns_cutoff_graph_impl() {
   // The dispatched impl is configured from the same contract a directly
   // constructed one would be — the dispatch adds no policy of its own.
   const NeighborNeeds needs = impl->needs();
-  expect_near(needs.cutoff, kCutoff, 1e-12, "the dispatched impl carries the "
-                                            "contract cutoff");
+  expect_near(needs.cutoff, kCutoff, 1e-12,
+              "the dispatched impl carries the "
+              "contract cutoff");
   expect_true(needs.full, "the dispatched impl requests a full neighbour list");
   expect_int(needs.comm_reverse, 3, "the dispatched impl packs 3 doubles");
 }
@@ -1408,7 +1446,8 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr, "usage: %s <test_name>\n", argv[0]);
     std::fprintf(stderr, "available:\n");
-    for (const auto& [k, _] : registry()) std::fprintf(stderr, "  %s\n", k.c_str());
+    for (const auto& [k, _] : registry())
+      std::fprintf(stderr, "  %s\n", k.c_str());
     return 2;
   }
   std::string name = argv[1];

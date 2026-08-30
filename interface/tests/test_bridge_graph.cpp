@@ -30,8 +30,8 @@
 //     const int* numneigh;         // indexed by local i
 //     const int* const* firstneigh;// firstneigh[i] -> (numneigh[i],)
 //     int inum;
-//     int gnum;                    // ghost centres, listed after the inum local
-//     int neigh_mask;              // the facade fills this from LAMMPS
+//     int gnum;                    // ghost centres, listed after the inum
+//     local int neigh_mask;              // the facade fills this from LAMMPS
 //     int nall() const;
 //     int neighbor(int i, int jj) const;   // firstneigh[i][jj] & neigh_mask
 //   };
@@ -85,11 +85,12 @@
 //      with no diagnostic. bridge_graph_cutoff_refilter is the case that would
 //      catch that "optimisation".
 //   2. Edge order is a CONTRACT DECLARATION, not a universal promise. Scatter-
-//      class reductions are permutation-invariant, so the default path builds in
-//      raw neighbour-list order and pays nothing; a model that needs segmented /
-//      CSR aggregation exports `requires_sorted_edges = true` and only then does
-//      the builder sort by (source, target). bridge_graph_order_shuffle_invariance
-//      and bridge_graph_sorts_only_when_contract_requires are the two halves.
+//      class reductions are permutation-invariant, so the default path builds
+//      in raw neighbour-list order and pays nothing; a model that needs
+//      segmented / CSR aggregation exports `requires_sorted_edges = true` and
+//      only then does the builder sort by (source, target).
+//      bridge_graph_order_shuffle_invariance and
+//      bridge_graph_sorts_only_when_contract_requires are the two halves.
 //   3. Column 0 is the source (the centre atom out of ilist) and column 1 the
 //      target (its neighbour), per the repo-wide Edge Convention. Under a ghost
 //      request the source domain is local u ghost, not local alone — that is
@@ -99,20 +100,22 @@
 //   4. n_graph is validated before anything indexes view.x. That array belongs
 //      to LAMMPS; an unchecked n_graph > nall() reads another object's memory.
 //   5. ne == 0 must yield a well-formed (0, 2) int64 tensor. The migrated code
-//      handed a possibly-null empty-vector data() to at::from_blob on that path.
+//      handed a possibly-null empty-vector data() to at::from_blob on that
+//      path.
 //   6. unpack_reverse_forces ACCUMULATES (`+=`). Asserted from a non-zero
 //      starting f, because a zero start cannot tell accumulate from overwrite.
 //   7. `virial` is well-formed OR undefined, decided inside read_model_outputs.
 //      A defined-but-short virial reaching the facade is exactly what the
-//      migrated `numel() < 6` check in the tally existed to catch, and the point
-//      of moving it is that it can no longer be reached.
-//   8. pad_edges is CPU-testable. GraphedExec's end-to-end path needs CUDA and a
+//      migrated `numel() < 6` check in the tally existed to catch, and the
+//      point of moving it is that it can no longer be reached.
+//   8. pad_edges is CPU-testable. GraphedExec's end-to-end path needs CUDA and
+//   a
 //      fixed-shape export; the padding/mask arithmetic must not.
 //   9. The v3 output ORDER is [energy, forces, atomic_energy, (virial)] — the
 //      virial moved from index 2 to index 3. The two size guards
 //      (`numel == 6` for the virial, `size(0) == n_atoms` for the per-atom
-//      energy) are SIMULTANEOUSLY BLIND at N == 6, which is the size of benzene,
-//      two waters and most hand-written fixtures, so
+//      energy) are SIMULTANEOUSLY BLIND at N == 6, which is the size of
+//      benzene, two waters and most hand-written fixtures, so
 //      bridge_read_model_outputs_six_atoms_no_transpose asserts at the VALUE
 //      level. It is the only defence against a swap at that size.
 
@@ -178,7 +181,7 @@ constexpr int kNall = kNlocal + kNghost;
 
 // Model cutoff. The neighbour lists below are deliberately built as if by
 // LAMMPS at cutoff + skin, i.e. every atom sees every other one.
-constexpr double kCutoff = 2.0;   // cutsq = 4.0
+constexpr double kCutoff = 2.0;  // cutsq = 4.0
 
 // LAMMPS' own NEIGHMASK value, travelling as DATA through LammpsView. The token
 // NEIGHMASK itself must never appear under bridge/ — the bridge applies the
@@ -229,7 +232,8 @@ using EdgePair = std::pair<int, int>;
 //   centre 0: 1 in, 2 and 3 out          -> (0,1)
 //   centre 1: 0 and 2 in, 3 out          -> (1,0) (1,2)
 //   centre 2: 1 and 3 in, 0 out          -> (2,1) (2,3)
-const std::vector<EdgePair> kEdgesAll = {{0, 1}, {1, 0}, {1, 2}, {2, 1}, {2, 3}};
+const std::vector<EdgePair> kEdgesAll = {
+    {0, 1}, {1, 0}, {1, 2}, {2, 1}, {2, 3}};
 
 // The same with n_graph == nlocal: the ghost is not a graph node, so (2,3) is
 // the one row that goes — centre 2 keeps its local neighbour 1.
@@ -251,12 +255,13 @@ std::vector<std::vector<int>> full_lists() {
   return {{1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {}};
 }
 
-/// The storage a synthetic LammpsView borrows: atom arrays plus neighbour spans.
+/// The storage a synthetic LammpsView borrows: atom arrays plus neighbour
+/// spans.
 ///
 /// LAMMPS owns `atom->x` / `atom->f` as `double**` (an array of row pointers)
 /// and `NeighList::firstneigh` as `int**` (one jlist per local atom). This
-/// fixture reproduces exactly those shapes out of its own vectors, which is what
-/// makes the bridge drivable with no LAMMPS build.
+/// fixture reproduces exactly those shapes out of its own vectors, which is
+/// what makes the bridge drivable with no LAMMPS build.
 ///
 /// Non-copyable: the pointer vectors point into this object's own storage, so a
 /// copy would hand out pointers into the source object.
@@ -287,7 +292,8 @@ class SyntheticSystem {
     for (int i = 0; i < kNall; ++i) {
       x_rows_.push_back(coords_[static_cast<std::size_t>(i)].data());
       f_rows_.push_back(forces_[static_cast<std::size_t>(i)].data());
-      numneigh_.push_back(static_cast<int>(jlists_[static_cast<std::size_t>(i)].size()));
+      numneigh_.push_back(
+          static_cast<int>(jlists_[static_cast<std::size_t>(i)].size()));
       firstneigh_.push_back(jlists_[static_cast<std::size_t>(i)].data());
     }
   }
@@ -318,7 +324,8 @@ class SyntheticSystem {
     return forces_[static_cast<std::size_t>(i)][static_cast<std::size_t>(k)];
   }
 
-  /// The raw, still-flagged neighbour entry, for asserting the test's own input.
+  /// The raw, still-flagged neighbour entry, for asserting the test's own
+  /// input.
   int raw_neighbor(int i, int jj) const {
     return jlists_[static_cast<std::size_t>(i)][static_cast<std::size_t>(jj)];
   }
@@ -346,8 +353,9 @@ void expect_edges(const at::Tensor& edges, const std::vector<EdgePair>& want,
   expect_true(edges.scalar_type() == at::kLong,
               tag + ": edge_index must be int64");
   expect_true(edges.device().is_cpu(),
-              tag + ": edge_index must stay on the CPU — the device transfer "
-                    "belongs to the execution site");
+              tag +
+                  ": edge_index must stay on the CPU — the device transfer "
+                  "belongs to the execution site");
   expect_int(edges.dim(), 2, tag + ": edge_index must be 2-D");
   expect_int(edges.size(0), static_cast<long long>(want.size()),
              tag + ": edge count");
@@ -372,12 +380,12 @@ void test_bridge_graph_edge_convention() {
 
   // Column 0 is the SOURCE: the centre atom out of ilist. This fixture declares
   // gnum == 0, so every centre it offers is local and the bound below is
-  // nlocal; under a ghost request (bridge_graph_ghost_closure) the source domain
-  // widens to local u ghost, which is what closes the edge set symmetrically.
-  // Column 1 is the TARGET, which may be a ghost either way. The last row is
-  // what makes this more than a shape check — (2, 3) is the local centre 2 with
-  // the ghost 3 as its neighbour, and a transposed convention would produce
-  // (3, 2), a source that is not even in ilist here.
+  // nlocal; under a ghost request (bridge_graph_ghost_closure) the source
+  // domain widens to local u ghost, which is what closes the edge set
+  // symmetrically. Column 1 is the TARGET, which may be a ghost either way. The
+  // last row is what makes this more than a shape check — (2, 3) is the local
+  // centre 2 with the ghost 3 as its neighbour, and a transposed convention
+  // would produce (3, 2), a source that is not even in ilist here.
   const auto ea = edges.accessor<int64_t, 2>();
   for (int64_t k = 0; k < edges.size(0); ++k) {
     expect_true(ea[k][0] >= 0 && ea[k][0] < kNlocal,
@@ -449,7 +457,8 @@ void test_bridge_graph_drops_beyond_n_graph() {
 
   const auto ea = edges.accessor<int64_t, 2>();
   for (int64_t k = 0; k < edges.size(0); ++k) {
-    expect_true(ea[k][1] < kNlocal, "no target may be a ghost when n_graph == nlocal");
+    expect_true(ea[k][1] < kNlocal,
+                "no target may be a ghost when n_graph == nlocal");
   }
 
   // The same view with n_graph == nall keeps it: the pair is real, and it is
@@ -691,7 +700,8 @@ std::vector<EdgePair> edge_set(const at::Tensor& edges) {
 }
 
 /// Require two edge collections to hold the same pairs, whatever their order.
-void expect_same_edge_set(const at::Tensor& got, const std::vector<EdgePair>& want,
+void expect_same_edge_set(const at::Tensor& got,
+                          const std::vector<EdgePair>& want,
                           const std::string& tag) {
   std::vector<EdgePair> canonical = want;
   std::sort(canonical.begin(), canonical.end());
@@ -726,14 +736,18 @@ std::vector<double> two_layer_aggregate(const std::vector<EdgePair>& edges,
   const std::size_t n = h0.size();
   std::vector<double> h1(n, 0.0);
   for (const EdgePair& e : edges) {
-    const std::size_t sink = static_cast<std::size_t>(to_target ? e.second : e.first);
-    const std::size_t src = static_cast<std::size_t>(to_target ? e.first : e.second);
+    const std::size_t sink =
+        static_cast<std::size_t>(to_target ? e.second : e.first);
+    const std::size_t src =
+        static_cast<std::size_t>(to_target ? e.first : e.second);
     h1[sink] += h0[src];
   }
   std::vector<double> h2(n, 0.0);
   for (const EdgePair& e : edges) {
-    const std::size_t sink = static_cast<std::size_t>(to_target ? e.second : e.first);
-    const std::size_t src = static_cast<std::size_t>(to_target ? e.first : e.second);
+    const std::size_t sink =
+        static_cast<std::size_t>(to_target ? e.second : e.first);
+    const std::size_t src =
+        static_cast<std::size_t>(to_target ? e.first : e.second);
     h2[sink] += h1[src];
   }
   return h2;
@@ -741,8 +755,8 @@ std::vector<double> two_layer_aggregate(const std::vector<EdgePair>& edges,
 
 void test_bridge_graph_ghost_closure() {
   // All five atoms are centres: two local, then three ghosts. This is the
-  // `REQ_FULL | REQ_GHOST` list a supports_pbc export gets, and walking it whole
-  // is the entire content of D4.2.
+  // `REQ_FULL | REQ_GHOST` list a supports_pbc export gets, and walking it
+  // whole is the entire content of D4.2.
   ClosureSystem sys({0, 1, 2, 3, 4}, /*gnum=*/3);
   GraphBridge graph(kClosureCutoff, /*requires_sorted_edges=*/false);
 
@@ -761,7 +775,8 @@ void test_bridge_graph_ghost_closure() {
     if (want.second >= kClosureNlocal) continue;  // incoming to a local only
     expect_true(std::find(built.begin(), built.end(), want) != built.end(),
                 "incoming edge (" + std::to_string(want.first) + "," +
-                    std::to_string(want.second) + ") of a local atom is missing");
+                    std::to_string(want.second) +
+                    ") of a local atom is missing");
   }
 
   // (2) The direction-independence claim, executed. Seeds are powers of two, so
@@ -769,10 +784,11 @@ void test_bridge_graph_ghost_closure() {
   // exactly — there is no coincidental agreement available.
   const std::vector<double> h0 = {1.0, 2.0, 4.0, 8.0, 16.0};
   for (const bool to_target : {true, false}) {
-    const std::string dir = to_target ? "target-aggregating (MACE)"
-                                      : "source-aggregating (PiNet)";
+    const std::string dir =
+        to_target ? "target-aggregating (MACE)" : "source-aggregating (PiNet)";
     const std::vector<double> got = two_layer_aggregate(built, h0, to_target);
-    const std::vector<double> want = two_layer_aggregate(reference, h0, to_target);
+    const std::vector<double> want =
+        two_layer_aggregate(reference, h0, to_target);
     for (int i = 0; i < kClosureNlocal; ++i) {
       expect_near(got[static_cast<std::size_t>(i)],
                   want[static_cast<std::size_t>(i)], 0.0,
@@ -783,10 +799,10 @@ void test_bridge_graph_ghost_closure() {
 
   // (3) The negative control, and the reason this case is evidence rather than
   // decoration: the SAME builder over the SAME atoms with only the local
-  // centres walked (gnum == 0, ilist truncated to the locals) disagrees with the
-  // reference in BOTH directions. Without it, (2) would pass against a builder
-  // that never looked at a ghost, since two identical computations over one
-  // edge list always agree.
+  // centres walked (gnum == 0, ilist truncated to the locals) disagrees with
+  // the reference in BOTH directions. Without it, (2) would pass against a
+  // builder that never looked at a ghost, since two identical computations over
+  // one edge list always agree.
   ClosureSystem locals_only({0, 1}, /*gnum=*/0);
   const std::vector<EdgePair> narrow =
       edge_set(graph.build(locals_only.view(), kClosureNall));
@@ -794,7 +810,8 @@ void test_bridge_graph_ghost_closure() {
               "a local-only walk must produce strictly fewer edges");
   for (const bool to_target : {true, false}) {
     const std::vector<double> got = two_layer_aggregate(narrow, h0, to_target);
-    const std::vector<double> want = two_layer_aggregate(reference, h0, to_target);
+    const std::vector<double> want =
+        two_layer_aggregate(reference, h0, to_target);
     bool differs = false;
     for (int i = 0; i < kClosureNlocal; ++i) {
       differs = differs || got[static_cast<std::size_t>(i)] !=
@@ -878,17 +895,17 @@ void test_bridge_graph_sorts_only_when_contract_requires() {
       {2, 3, 1}, {4, 2, 3, 0}, {1, 0}, {0, 4, 1}, {1, 3}};
 
   // (a) The default contract: raw neighbour-list order, hand-derived from the
-  // walk above. Centre 3 first (its list is {0, 4, 1}: 0 is 2.0 A away and goes,
-  // 4 and 1 stay, in that order), then centre 1, and so on.
+  // walk above. Centre 3 first (its list is {0, 4, 1}: 0 is 2.0 A away and
+  // goes, 4 and 1 stay, in that order), then centre 1, and so on.
   ClosureSystem raw(ilist, /*gnum=*/3, jlists);
   GraphBridge unsorted(kClosureCutoff, /*requires_sorted_edges=*/false);
   const at::Tensor as_listed = unsorted.build(raw.view(), kClosureNall);
   const std::vector<EdgePair> want_raw = {
-      {3, 4}, {3, 1},          // centre 3: {0 out, 4 in, 1 in}
-      {1, 3}, {1, 0},          // centre 1: {4 out, 2 out, 3 in, 0 in}
-      {4, 3},                  // centre 4: {1 out, 3 in}
-      {0, 2}, {0, 1},          // centre 0: {2 in, 3 out, 1 in}
-      {2, 0},                  // centre 2: {1 out, 0 in}
+      {3, 4}, {3, 1},  // centre 3: {0 out, 4 in, 1 in}
+      {1, 3}, {1, 0},  // centre 1: {4 out, 2 out, 3 in, 0 in}
+      {4, 3},          // centre 4: {1 out, 3 in}
+      {0, 2}, {0, 1},  // centre 0: {2 in, 3 out, 1 in}
+      {2, 0},          // centre 2: {1 out, 0 in}
   };
   expect_edges(as_listed, want_raw, "raw neighbour order is preserved");
 
@@ -907,12 +924,14 @@ void test_bridge_graph_sorts_only_when_contract_requires() {
 
   // (c) And the two differ ONLY in order: the edge set is identical, so the
   // flag buys ordering and never changes the physics.
-  expect_same_edge_set(as_listed, closure_reference_edges(), "unsorted edge set");
+  expect_same_edge_set(as_listed, closure_reference_edges(),
+                       "unsorted edge set");
   expect_same_edge_set(as_sorted, closure_reference_edges(), "sorted edge set");
   bool row_order_differs = false;
   const auto ua = as_listed.accessor<int64_t, 2>();
   for (int64_t k = 0; k < as_listed.size(0); ++k) {
-    row_order_differs = row_order_differs || ua[k][0] != sa[k][0] || ua[k][1] != sa[k][1];
+    row_order_differs =
+        row_order_differs || ua[k][0] != sa[k][0] || ua[k][1] != sa[k][1];
   }
   expect_true(row_order_differs,
               "the sorted and unsorted results must actually differ in row "
@@ -1006,7 +1025,8 @@ void expect_padded(const PaddedEdges& p, const std::vector<EdgePair>& rows,
 
   expect_true(p.edges.defined(), tag + ": edges must be defined");
   expect_true(p.mask.defined(), tag + ": mask must be defined");
-  expect_true(p.edges.scalar_type() == at::kLong, tag + ": edges must be int64");
+  expect_true(p.edges.scalar_type() == at::kLong,
+              tag + ": edges must be int64");
   expect_true(p.mask.scalar_type() == at::kBool, tag + ": mask must be bool");
   expect_true(p.edges.device().is_cpu(), tag + ": edges must stay on the CPU");
   expect_true(p.mask.device().is_cpu(), tag + ": mask must stay on the CPU");
@@ -1021,8 +1041,10 @@ void expect_padded(const PaddedEdges& p, const std::vector<EdgePair>& rows,
   for (int64_t k = 0; k < e_max; ++k) {
     const std::string row = tag + ": row " + std::to_string(k);
     if (k < ne) {
-      expect_int(ea[k][0], rows[static_cast<std::size_t>(k)].first, row + " source");
-      expect_int(ea[k][1], rows[static_cast<std::size_t>(k)].second, row + " target");
+      expect_int(ea[k][0], rows[static_cast<std::size_t>(k)].first,
+                 row + " source");
+      expect_int(ea[k][1], rows[static_cast<std::size_t>(k)].second,
+                 row + " target");
       expect_true(ma[k], row + " must be masked in");
     } else {
       // The inert tail is (0, 0): a self-loop on atom 0, which the model must
@@ -1041,7 +1063,8 @@ void test_bridge_pad_edges() {
 
   // (b) ne == e_max — the boundary the CUDA-graph export was sized for. An
   // off-by-one in the guard shows up here and nowhere else.
-  expect_padded(pad_edges(make_edges(kEdgesAll), 5), kEdgesAll, 5, "ne == e_max");
+  expect_padded(pad_edges(make_edges(kEdgesAll), 5), kEdgesAll, 5,
+                "ne == e_max");
 
   // (c) ne == 0 — no pair within cutoff. Every row is padding and the mask is
   // all false, so the replayed graph contributes nothing rather than folding in
@@ -1056,7 +1079,8 @@ void test_bridge_pad_edges() {
   // fixed-shape path carries an explicit bound.
   const std::string msg = expect_throws(
       [] { (void)pad_edges(make_edges(kEdgesAll), 2); }, "ne > e_max");
-  expect_contains(msg, "5", "overflow message must state the observed edge count");
+  expect_contains(msg, "5",
+                  "overflow message must state the observed edge count");
   expect_contains(msg, "2", "overflow message must state e_max");
 
   // (f) The input is not consumed or aliased: padding a tensor must leave it
@@ -1066,8 +1090,10 @@ void test_bridge_pad_edges() {
   expect_int(src.size(0), 3, "the source edge tensor keeps its own row count");
   p.edges.zero_();
   const auto sa = src.accessor<int64_t, 2>();
-  expect_int(sa[0][0], kEdgesSparse[0].first, "source rows survive a write to the padded copy");
-  expect_int(sa[0][1], kEdgesSparse[0].second, "source rows survive a write to the padded copy");
+  expect_int(sa[0][0], kEdgesSparse[0].first,
+             "source rows survive a write to the padded copy");
+  expect_int(sa[0][1], kEdgesSparse[0].second,
+             "source rows survive a write to the padded copy");
 }
 
 /// A `(n,)` float64 CPU tensor of `value`, standing in for a model output.
@@ -1108,16 +1134,17 @@ void test_bridge_read_model_outputs_rejects_short_virial() {
       f64_of(3, 1.0),
   };
 
-  const std::string msg = expect_throws(
-      [&] { (void)read_model_outputs(raw, expect_of(true, 4)); },
-      "virial with numel 3");
+  const std::string msg =
+      expect_throws([&] { (void)read_model_outputs(raw, expect_of(true, 4)); },
+                    "virial with numel 3");
   expect_contains(msg, "3", "the diagnostic must state the observed numel");
   expect_contains(msg, "6", "the diagnostic must state the required numel");
 
   // A seven-element virial is just as wrong as a three-element one: the check
   // is an equality, not a lower bound (`>= 6` would let an off-by-one layout
   // through and silently read the wrong six components).
-  const std::vector<at::Tensor> too_long = {raw[0], raw[1], raw[2], f64_of(7, 1.0)};
+  const std::vector<at::Tensor> too_long = {raw[0], raw[1], raw[2],
+                                            f64_of(7, 1.0)};
   (void)expect_throws(
       [&] { (void)read_model_outputs(too_long, expect_of(true, 4)); },
       "virial with numel 7");
@@ -1127,8 +1154,10 @@ void test_bridge_read_model_outputs_rejects_short_virial() {
   const std::vector<at::Tensor> good = {raw[0], raw[1], raw[2], f64_of(6, 2.0)};
   const ModelOutputs out = read_model_outputs(good, expect_of(true, 4));
   expect_true(out.virial.defined(), "a six-element virial must be accepted");
-  expect_int(out.virial.numel(), 6, "the accepted virial keeps its six elements");
-  expect_true(out.virial.scalar_type() == at::kDouble, "virial must be float64");
+  expect_int(out.virial.numel(), 6,
+             "the accepted virial keeps its six elements");
+  expect_true(out.virial.scalar_type() == at::kDouble,
+              "virial must be float64");
   expect_true(out.virial.device().is_cpu(), "virial must be a CPU tensor");
 }
 
@@ -1144,8 +1173,9 @@ void test_bridge_read_model_outputs_absent_virial_undefined() {
   };
 
   const ModelOutputs out = read_model_outputs(raw, expect_of(true, 3));
-  expect_true(!out.virial.defined(),
-              "an absent virial must stay undefined, not become an empty tensor");
+  expect_true(
+      !out.virial.defined(),
+      "an absent virial must stay undefined, not become an empty tensor");
   expect_true(out.energy.defined(), "energy must still be read");
   expect_true(out.forces.defined(), "forces must still be read");
   expect_true(out.atomic_energy.defined(), "atomic_energy must still be read");
@@ -1175,9 +1205,9 @@ void test_bridge_read_model_outputs_ignores_virial_when_unsupported() {
 }
 
 void test_bridge_read_model_outputs_requires_atomic_energy() {
-  // Per-atom energy is NOT optional under v3: it is the only thing the partition
-  // sum can be computed from, so a model returning the v2 pair would produce a
-  // zero eng_vdwl rather than an error. Two outputs is refused.
+  // Per-atom energy is NOT optional under v3: it is the only thing the
+  // partition sum can be computed from, so a model returning the v2 pair would
+  // produce a zero eng_vdwl rather than an error. Two outputs is refused.
   const std::vector<at::Tensor> v2_shaped = {
       f64_of(1, 1.0),
       at::zeros({3, 3}, at::TensorOptions().dtype(at::kDouble)),
@@ -1202,7 +1232,8 @@ void test_bridge_read_model_outputs_requires_atomic_energy() {
       [&] { (void)read_model_outputs(wrong_length, expect_of(false, 5)); },
       "atomic_energy with the wrong length");
   expect_contains(msg, "4", "the diagnostic must state the observed length");
-  expect_contains(msg, "5", "the diagnostic must state the expected atom count");
+  expect_contains(msg, "5",
+                  "the diagnostic must state the expected atom count");
 }
 
 void test_bridge_read_model_outputs_six_atoms_no_transpose() {
@@ -1213,8 +1244,10 @@ void test_bridge_read_model_outputs_six_atoms_no_transpose() {
   // hand-written fixtures. This is therefore a VALUE-level assertion, and it is
   // the only defence there is at N == 6.
   constexpr int64_t kSixAtoms = 6;
-  const std::vector<double> site_energies = {-1.5, -2.5, -3.5, -4.5, -5.5, -6.5};
-  const std::vector<double> virial_components = {10.0, 20.0, 30.0, 40.0, 50.0, 60.0};
+  const std::vector<double> site_energies = {-1.5, -2.5, -3.5,
+                                             -4.5, -5.5, -6.5};
+  const std::vector<double> virial_components = {10.0, 20.0, 30.0,
+                                                 40.0, 50.0, 60.0};
 
   const std::vector<at::Tensor> raw = {
       f64_of(1, -21.0),
@@ -1268,7 +1301,8 @@ void test_bridge_graphed_exec_cpu_only_ctor_throws() {
         (void)exec;
       },
       "GraphedExec on a CPU-only build");
-  expect_contains(msg, "CPU-only", "the diagnostic must name the CPU-only build");
+  expect_contains(msg, "CPU-only",
+                  "the diagnostic must name the CPU-only build");
 #endif
 }
 
@@ -1306,7 +1340,8 @@ at::Tensor reference_entry(const std::map<std::string, at::Tensor>& ref,
                            const std::string& key, const fs::path& from) {
   auto it = ref.find(key);
   if (it == ref.end()) {
-    throw std::runtime_error("reference " + from.string() + " has no '" + key + "'");
+    throw std::runtime_error("reference " + from.string() + " has no '" + key +
+                             "'");
   }
   return it->second;
 }
@@ -1357,10 +1392,10 @@ void test_bridge_dynamic_exec_matches_reference() {
   // fp64 in, fp64 through, fp64 out: the fixture's outputs are a closed-form
   // expression of its inputs, so 1e-12 is a real parity claim and not a
   // tolerance chosen to make a mismatch fit.
-  expect_allclose_f64(out.energy, reference_entry(ref, "energy", ref_path), 1e-12,
-                      "dynamic exec energy");
-  expect_allclose_f64(out.forces, reference_entry(ref, "forces", ref_path), 1e-12,
-                      "dynamic exec forces");
+  expect_allclose_f64(out.energy, reference_entry(ref, "energy", ref_path),
+                      1e-12, "dynamic exec energy");
+  expect_allclose_f64(out.forces, reference_entry(ref, "forces", ref_path),
+                      1e-12, "dynamic exec forces");
   // The third output, asserted at the same tolerance as the other two: under v3
   // it is the one the impl actually partitions and tallies, so it cannot be the
   // one output nobody checks.
@@ -1373,11 +1408,13 @@ void test_bridge_dynamic_exec_matches_reference() {
   // both of which are undefined on a non-CPU or non-float64 tensor.
   expect_true(out.energy.defined(), "energy must be defined");
   expect_true(out.energy.device().is_cpu(), "energy must come back on the CPU");
-  expect_true(out.energy.scalar_type() == at::kDouble, "energy must be float64");
+  expect_true(out.energy.scalar_type() == at::kDouble,
+              "energy must be float64");
   expect_int(out.energy.numel(), 1, "energy must be a single scalar");
   expect_true(out.forces.defined(), "forces must be defined");
   expect_true(out.forces.device().is_cpu(), "forces must come back on the CPU");
-  expect_true(out.forces.scalar_type() == at::kDouble, "forces must be float64");
+  expect_true(out.forces.scalar_type() == at::kDouble,
+              "forces must be float64");
   expect_true(out.forces.is_contiguous(), "forces must be contiguous");
   expect_int(out.forces.dim(), 2, "forces must be (N, 3)");
   expect_int(out.forces.size(0), Z.size(0), "one force row per atom");
@@ -1418,7 +1455,8 @@ void test_bridge_graphed_exec_matches_dynamic() {
   const auto ref = load_tensor_dict(ref_path);
   const at::Tensor Z = reference_entry(ref, "Z", ref_path).to(at::kCPU);
   const at::Tensor pos = reference_entry(ref, "pos", ref_path).to(at::kCPU);
-  const at::Tensor edge_index = reference_entry(ref, "edge_index", ref_path).to(at::kCPU);
+  const at::Tensor edge_index =
+      reference_entry(ref, "edge_index", ref_path).to(at::kCPU);
   const at::Tensor local_mask =
       reference_entry(ref, "local_mask", ref_path).to(at::kCPU);
 
@@ -1428,8 +1466,7 @@ void test_bridge_graphed_exec_matches_dynamic() {
   // generate_fixtures.py can decide. It is deliberately larger than the edge
   // count — the padded tail is the part of the fixed-shape path a same-sized
   // export would never exercise.
-  const int64_t e_max =
-      reference_entry(ref, "e_max", ref_path).item<int64_t>();
+  const int64_t e_max = reference_entry(ref, "e_max", ref_path).item<int64_t>();
 
   ModelRunner dyn_runner((dir / "model_graph_v3_cuda").string());
   DynamicExec dynamic(&dyn_runner, at::Device(at::kCUDA), at::kDouble,
@@ -1443,17 +1480,22 @@ void test_bridge_graphed_exec_matches_dynamic() {
 
   // rel 1e-6 is this chain's parity judgement; energies here are O(1), so an
   // absolute tolerance of the same size is the stricter reading of it.
-  expect_allclose_f64(got.energy, want.energy, 1e-6, "graphed vs dynamic energy");
-  expect_allclose_f64(got.forces, want.forces, 1e-6, "graphed vs dynamic forces");
+  expect_allclose_f64(got.energy, want.energy, 1e-6,
+                      "graphed vs dynamic energy");
+  expect_allclose_f64(got.forces, want.forces, 1e-6,
+                      "graphed vs dynamic forces");
   // The per-atom energy travels the fixed-shape path too — and it is the output
   // whose index moved under v3, so an unpadded-vs-padded disagreement here is
   // exactly the class of bug the five-input replay could introduce.
   expect_allclose_f64(got.atomic_energy, want.atomic_energy, 1e-6,
                       "graphed vs dynamic atomic_energy");
-  expect_true(got.forces.device().is_cpu(), "graphed forces must come back on the CPU");
-  expect_true(got.forces.scalar_type() == at::kDouble, "graphed forces must be float64");
+  expect_true(got.forces.device().is_cpu(),
+              "graphed forces must come back on the CPU");
+  expect_true(got.forces.scalar_type() == at::kDouble,
+              "graphed forces must be float64");
   expect_true(got.forces.is_contiguous(), "graphed forces must be contiguous");
-  expect_true(!got.virial.defined(), "supports_virial=false leaves virial undefined");
+  expect_true(!got.virial.defined(),
+              "supports_virial=false leaves virial undefined");
 
   // The replay-aliasing hazard, stated as an assertion: run_graphed hands back
   // tensors at FIXED addresses that the next replay overwrites in place. A
@@ -1535,7 +1577,8 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr, "usage: %s <test_name>\n", argv[0]);
     std::fprintf(stderr, "available:\n");
-    for (const auto& [k, _] : registry()) std::fprintf(stderr, "  %s\n", k.c_str());
+    for (const auto& [k, _] : registry())
+      std::fprintf(stderr, "  %s\n", k.c_str());
     return 2;
   }
   std::string name = argv[1];

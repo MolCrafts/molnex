@@ -53,18 +53,17 @@ namespace {
    refusal in compute(), which names the contract by pointing at the one file
    that declares it. (It was three until schema v3 gave per-atom ENERGY a
    producer and turned that refusal into a tally.) */
-std::string meta_path_of(const std::string &model_dir, const std::string &model_name)
-{
+std::string meta_path_of(const std::string& model_dir,
+                         const std::string& model_name) {
   return (fs::path(model_dir) / (model_name + ".meta.json")).string();
 }
 
-}    // namespace
+}  // namespace
 
-PairMolnex::PairMolnex(LAMMPS *lmp) : Pair(lmp)
-{
-  single_enable = 0;        // no pairwise single() — this is a many-body model
+PairMolnex::PairMolnex(LAMMPS* lmp) : Pair(lmp) {
+  single_enable = 0;  // no pairwise single() — this is a many-body model
   restartinfo = 0;
-  one_coeff = 1;            // requires a single `pair_coeff * *`
+  one_coeff = 1;  // requires a single `pair_coeff * *`
   manybody_flag = 1;
   model_name = "model";
   // Placeholder sizes only. The real ones arrive with the impl's NeighborNeeds
@@ -74,16 +73,14 @@ PairMolnex::PairMolnex(LAMMPS *lmp) : Pair(lmp)
   comm_reverse_off = 3;
 }
 
-PairMolnex::~PairMolnex()
-{
+PairMolnex::~PairMolnex() {
   if (allocated) {
     memory->destroy(setflag);
     memory->destroy(cutsq);
   }
 }
 
-void PairMolnex::allocate()
-{
+void PairMolnex::allocate() {
   allocated = 1;
   int n = atom->ntypes;
   memory->create(setflag, n + 1, n + 1, "pair:setflag");
@@ -96,10 +93,11 @@ void PairMolnex::allocate()
 }
 
 /* pair_style molnex <model_dir> [name] */
-void PairMolnex::settings(int narg, char **arg)
-{
+void PairMolnex::settings(int narg, char** arg) {
   if (narg < 1 || narg > 2)
-    error->all(FLERR, "Illegal pair_style molnex command: pair_style molnex <model_dir> [name]");
+    error->all(FLERR,
+               "Illegal pair_style molnex command: pair_style molnex "
+               "<model_dir> [name]");
   model_dir = arg[0];
   if (narg == 2) model_name = arg[1];
 
@@ -108,12 +106,13 @@ void PairMolnex::settings(int narg, char **arg)
   std::optional<molnex::interface::MetaSchema> doc;
   try {
     doc = molnex::interface::MetaSchema::from_file(meta_path);
-  } catch (const std::exception &e) {
+  } catch (const std::exception& e) {
     error->all(FLERR, "pair_style molnex: {}", e.what());
   }
   if (!doc->has_block("lammps"))
-    error->all(FLERR, "pair_style molnex: {} has no 'lammps' block — export with "
-                      "molix.engine.export_for_lammps, not the bare Exporter",
+    error->all(FLERR,
+               "pair_style molnex: {} has no 'lammps' block — export with "
+               "molix.engine.export_for_lammps, not the bare Exporter",
                meta_path);
 
   // Constructing the contract hard-validates schema_version == 3: an older meta
@@ -123,7 +122,7 @@ void PairMolnex::settings(int narg, char **arg)
   // reads it, and no capability is copied out of it.
   try {
     contract_.emplace(*doc);
-  } catch (const std::exception &e) {
+  } catch (const std::exception& e) {
     error->all(FLERR, "pair_style molnex: malformed meta.json: {}", e.what());
   }
 
@@ -131,7 +130,8 @@ void PairMolnex::settings(int narg, char **arg)
   // num_models = 1: the runner's multi-slot constructor is the seam a future
   // hot-reload consumer will use (README, "Weight hot-reload"), and until such
   // a consumer exists there is no pair_style grammar for it to reach.
-  runner = std::make_unique<molnex::interface::ModelRunner>(model_dir, /*num_models=*/1, model_name);
+  runner = std::make_unique<molnex::interface::ModelRunner>(
+      model_dir, /*num_models=*/1, model_name);
 
   // The dispatch does the rest: it reads the contract's own key, builds the
   // execution strategy the meta asks for, and returns the implementation of
@@ -139,9 +139,9 @@ void PairMolnex::settings(int narg, char **arg)
   // runner is borrowed, not transferred: this pair style outlives the impl and
   // keeps the model alive for the whole of it.
   try {
-    impl_ = molnex::lammps::ContractImpl::for_contract(contract_->contract(), *contract_,
-                                                       update->unit_style, *runner);
-  } catch (const std::exception &e) {
+    impl_ = molnex::lammps::ContractImpl::for_contract(
+        contract_->contract(), *contract_, update->unit_style, *runner);
+  } catch (const std::exception& e) {
     error->all(FLERR, "{}", e.what());
   }
 
@@ -151,23 +151,25 @@ void PairMolnex::settings(int narg, char **arg)
   comm_reverse_off = needs_.comm_reverse_off;
 
   if (comm->me == 0)
-    utils::logmesg(lmp,
-                   "pair_molnex: loaded '{}' from {} (device={}, model units={}, "
-                   "LAMMPS units={}, dtype={}, cutoff={:.3f} A)\n",
-                   model_name, model_dir, runner->device(), contract_->units(),
-                   update->unit_style, contract_->model_dtype(), needs_.cutoff);
+    utils::logmesg(
+        lmp,
+        "pair_molnex: loaded '{}' from {} (device={}, model units={}, "
+        "LAMMPS units={}, dtype={}, cutoff={:.3f} A)\n",
+        model_name, model_dir, runner->device(), contract_->units(),
+        update->unit_style, contract_->model_dtype(), needs_.cutoff);
 }
 
 /* pair_coeff * * <Z_type1> <Z_type2> ... <Z_typeN> */
-void PairMolnex::coeff(int narg, char **arg)
-{
+void PairMolnex::coeff(int narg, char** arg) {
   if (!allocated) allocate();
   if (narg < 2 || strcmp(arg[0], "*") != 0 || strcmp(arg[1], "*") != 0)
     error->all(FLERR, "pair_coeff for molnex must be: pair_coeff * * ...");
   if (!impl_)
-    error->all(FLERR, "pair_coeff for molnex must come after pair_style molnex: the elements "
-                      "the model was exported for are read from its meta.json, and every Z "
-                      "here is checked against them");
+    error->all(
+        FLERR,
+        "pair_coeff for molnex must come after pair_style molnex: the elements "
+        "the model was exported for are read from its meta.json, and every Z "
+        "here is checked against them");
 
   // The two literal `*` are the whole of what this file understands about a
   // pair_coeff line. What the rest of the tokens MEAN — how many there must be,
@@ -180,7 +182,7 @@ void PairMolnex::coeff(int narg, char **arg)
 
   try {
     impl_->coeff(tokens, atom->ntypes);
-  } catch (const std::exception &e) {
+  } catch (const std::exception& e) {
     error->all(FLERR, "{}", e.what());
   }
 
@@ -189,13 +191,9 @@ void PairMolnex::coeff(int narg, char **arg)
     for (int j = i; j <= ntypes; j++) setflag[i][j] = 1;
 }
 
-double PairMolnex::init_one(int /*i*/, int /*j*/)
-{
-  return needs_.cutoff;
-}
+double PairMolnex::init_one(int /*i*/, int /*j*/) { return needs_.cutoff; }
 
-void PairMolnex::init_style()
-{
+void PairMolnex::init_style() {
   // Two mechanical translations of the request table into LAMMPS' vocabulary.
   // `ghost` now follows the export's supports_pbc, and flipping it in the impl
   // WAS the whole change (lammps-iface-05-pbc): this `|=` was written for that
@@ -210,39 +208,40 @@ void PairMolnex::init_style()
   // `special_coul` are borrowed for the duration of this call only.
   //
   // `comm->cutghostuser` and `neighbor->skin` are transcribed RAW, with no
-  // defaulting: LAMMPS holds 0.0 in the former when no `comm_modify cutoff` ran,
-  // and what that zero MEANS (the effective ghost cutoff is the model cutoff
-  // plus the skin) is decided inside CutoffGraphImpl::init. Interpreting it here
-  // as well would give one rule two implementations, and would grow a semantic
-  // `if` back into the layer that exists to have none.
+  // defaulting: LAMMPS holds 0.0 in the former when no `comm_modify cutoff`
+  // ran, and what that zero MEANS (the effective ghost cutoff is the model
+  // cutoff plus the skin) is decided inside CutoffGraphImpl::init. Interpreting
+  // it here as well would give one rule two implementations, and would grow a
+  // semantic `if` back into the layer that exists to have none.
   //
   // `impl_` is live here: LAMMPS refuses `pair_coeff` and any run before
   // `pair_style` has succeeded, and init_style() is reached only through
   // Pair::init().
-  const molnex::lammps::LammpsRunEnv env{force->newton_pair, comm->nprocs, atom->molecular,
-                                         force->special_lj, force->special_coul,
-                                         comm->cutghostuser, neighbor->skin};
+  const molnex::lammps::LammpsRunEnv env{
+      force->newton_pair, comm->nprocs,        atom->molecular,
+      force->special_lj,  force->special_coul, comm->cutghostuser,
+      neighbor->skin};
   try {
     impl_->init(env);
-  } catch (const std::exception &e) {
+  } catch (const std::exception& e) {
     error->all(FLERR, "{}", e.what());
   }
 }
 
-void PairMolnex::compute(int eflag, int vflag)
-{
+void PairMolnex::compute(int eflag, int vflag) {
   ev_init(eflag, vflag);
 
   // One guard for the whole method: empty means the input script reached a run
   // without a pair_style that loaded. (A pair_style without its pair_coeff is
   // the impl's own guard — the type -> Z table is its state, not this one's.)
   if (!impl_)
-    error->all(FLERR, "pair_style molnex: pair_style/pair_coeff not initialized");
+    error->all(FLERR,
+               "pair_style molnex: pair_style/pair_coeff not initialized");
 
   molnex::lammps::EvalResult r{};
   try {
     r = impl_->compute(current_view());
-  } catch (const std::exception &e) {
+  } catch (const std::exception& e) {
     error->all(FLERR, "{}", e.what());
   }
 
@@ -287,10 +286,13 @@ void PairMolnex::compute(int eflag, int vflag)
   // none (a model returns at most a global one), so the honest answer there
   // stays loud.
   if (vflag_atom)
-    error->all(FLERR, "pair_molnex: per-atom virial requested (e.g. compute stress/atom) but "
-                      "the contract declared in {} provides none — the model returns at most a "
-                      "global virial; remove the per-atom compute",
-               meta_path_of(model_dir, model_name));
+    error->all(
+        FLERR,
+        "pair_molnex: per-atom virial requested (e.g. compute stress/atom) but "
+        "the contract declared in {} provides none — the model returns at most "
+        "a "
+        "global virial; remove the per-atom compute",
+        meta_path_of(model_dir, model_name));
 
   // DO NOT REORDER THESE TWO CONDITIONS. Written the other way round —
   // `vflag_global` first, then presence — the third case changes behaviour:
@@ -321,8 +323,7 @@ void PairMolnex::compute(int eflag, int vflag)
    the LAMMPS-side arrays, as the bridge sees them
 ------------------------------------------------------------------------- */
 
-molnex::lammps_bridge::LammpsView PairMolnex::current_view() const
-{
+molnex::lammps_bridge::LammpsView PairMolnex::current_view() const {
   // `double**` -> `const double* const*` and `int**` -> `const int* const*` are
   // qualification conversions, so nothing here needs a const_cast at the seam.
   // NEIGHMASK travels as data: it is LAMMPS' constant, applied by the view's
@@ -338,21 +339,19 @@ molnex::lammps_bridge::LammpsView PairMolnex::current_view() const
   // ones. Transcribed like every other field: how far to walk is the bridge's
   // decision, not this file's.
   return molnex::lammps_bridge::LammpsView{
-      atom->x, atom->f, atom->type, atom->nlocal, atom->nghost,
-      list->ilist, list->numneigh, list->firstneigh, list->inum, list->gnum,
-      NEIGHMASK};
+      atom->x,      atom->f,     atom->type,     atom->nlocal,
+      atom->nghost, list->ilist, list->numneigh, list->firstneigh,
+      list->inum,   list->gnum,  NEIGHMASK};
 }
 
 /* ----------------------------------------------------------------------
    reverse communication of ghost forces → owned atoms
 ------------------------------------------------------------------------- */
 
-int PairMolnex::pack_reverse_comm(int n, int first, double *buf)
-{
+int PairMolnex::pack_reverse_comm(int n, int first, double* buf) {
   return impl_->pack_reverse(current_view(), n, first, buf);
 }
 
-void PairMolnex::unpack_reverse_comm(int n, int *list, double *buf)
-{
+void PairMolnex::unpack_reverse_comm(int n, int* list, double* buf) {
   impl_->unpack_reverse(current_view(), n, list, buf);
 }

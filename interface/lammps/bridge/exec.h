@@ -12,8 +12,8 @@
 // know which one is in play.
 //
 // BACKEND-NEUTRAL, AND THAT IS LOAD-BEARING. No `.pt2`, no
-// AOTIModelPackageLoader, no "the weights were baked in at export time" anywhere
-// in this header's signatures. The closed spec
+// AOTIModelPackageLoader, no "the weights were baked in at export time"
+// anywhere in this header's signatures. The closed spec
 // `lammps-pair-molnex-01-aoti-force-export-wall` records a TorchScript route in
 // which the C++ side holds a scripted module and calls `.backward()` at RUNTIME
 // to obtain forces; a `TorchScriptExec` implementing that attaches here as a
@@ -70,16 +70,16 @@ struct ModelOutputs {
   /// Per-site energies `(n,)`, contiguous float64 on the CPU, in model units.
   ///
   /// One entry per staged atom — locals AND ghosts — because the model is
-  /// evaluated over the whole graph. Which of them enter the partition energy is
-  /// the impl's decision, not this layer's. Mandatory under v3: it is the only
-  /// thing a domain-decomposed energy can be summed from, so
+  /// evaluated over the whole graph. Which of them enter the partition energy
+  /// is the impl's decision, not this layer's. Mandatory under v3: it is the
+  /// only thing a domain-decomposed energy can be summed from, so
   /// `read_model_outputs` refuses a model that does not return it rather than
   /// leaving it undefined for the impl to trip over.
   at::Tensor atomic_energy;
-  /// Virial `(6,)` in `xx, yy, zz, xy, xz, yz` order — or **undefined** when the
-  /// export declares no virial or the model emitted none. Never defined-but-
-  /// malformed: `read_model_outputs` refuses anything that is not exactly six
-  /// elements, so a reader may index all six without checking.
+  /// Virial `(6,)` in `xx, yy, zz, xy, xz, yz` order — or **undefined** when
+  /// the export declares no virial or the model emitted none. Never
+  /// defined-but- malformed: `read_model_outputs` refuses anything that is not
+  /// exactly six elements, so a reader may index all six without checking.
   at::Tensor virial;
 };
 
@@ -107,9 +107,10 @@ struct OutputExpectations {
 /// at the old index takes an `(N,)` per-atom energy for a `(6,)` virial. Two
 /// guards catch that — `numel == 6` on the virial and `size(0) == n_atoms` on
 /// the per-atom energy — but BOTH GO BLIND AT N == 6 SIMULTANEOUSLY, and six
-/// atoms is benzene, two waters, and most hand-written fixtures. The value-level
-/// ctest `bridge_read_model_outputs_six_atoms_no_transpose` is the only defence
-/// at that size; do not remove it, and do not inline these constants.
+/// atoms is benzene, two waters, and most hand-written fixtures. The
+/// value-level ctest `bridge_read_model_outputs_six_atoms_no_transpose` is the
+/// only defence at that size; do not remove it, and do not inline these
+/// constants.
 constexpr std::size_t kEnergyIdx = 0;
 constexpr std::size_t kForcesIdx = 1;
 constexpr std::size_t kAtomicEnergyIdx = 2;
@@ -137,8 +138,8 @@ constexpr std::size_t kMandatoryOutputs = 3;
 /// `ModelOutputs::virial` well-formed-or-undefined by construction.
 ///
 /// SHAPE GUARD, HONOURED: this function took two parameters and needed a third
-/// contract fact, so the fact arrived inside `OutputExpectations` rather than as
-/// another positional bool. Add the next one there too.
+/// contract fact, so the fact arrived inside `OutputExpectations` rather than
+/// as another positional bool. Add the next one there too.
 ///
 /// \param raw     Model outputs in declaration order: energy, forces,
 ///                atomic_energy, and optionally virial.
@@ -146,11 +147,11 @@ constexpr std::size_t kMandatoryOutputs = 3;
 ///                count `atomic_energy` must match.
 /// \returns `ModelOutputs` whose defined members are CPU float64 tensors.
 /// \throws std::runtime_error  If `raw` holds fewer than the three mandatory
-///                             outputs, if `atomic_energy` does not hold exactly
-///                             `expect.n_atoms` entries, or if a virial is
-///                             present and expected but does not hold exactly
-///                             six elements. Every message states what was
-///                             observed alongside what was required.
+///                             outputs, if `atomic_energy` does not hold
+///                             exactly `expect.n_atoms` entries, or if a virial
+///                             is present and expected but does not hold
+///                             exactly six elements. Every message states what
+///                             was observed alongside what was required.
 ModelOutputs read_model_outputs(const std::vector<at::Tensor>& raw,
                                 const OutputExpectations& expect);
 

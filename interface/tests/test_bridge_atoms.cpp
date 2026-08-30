@@ -33,10 +33,11 @@
 //    public:
 //     // z_by_type is 0-BASED and dense, length == ntypes, NO placeholder slot.
 //     // Construction validates every entry: > 0 and present in meta_species,
-//     // else std::runtime_error naming the type, its Z and every valid species.
-//     SpeciesMap(std::vector<int> z_by_type, const std::vector<int>& meta_species);
-//     int z_of(int lammps_type) const;   // 1-based in; throws outside [1, ntypes]
-//     int ntypes() const;                // == z_by_type.size()
+//     // else std::runtime_error naming the type, its Z and every valid
+//     species. SpeciesMap(std::vector<int> z_by_type, const std::vector<int>&
+//     meta_species); int z_of(int lammps_type) const;   // 1-based in; throws
+//     outside [1, ntypes] int ntypes() const;                // ==
+//     z_by_type.size()
 //   };
 //
 //   #include "bridge/node_staging.h"
@@ -49,7 +50,8 @@
 //   class ForceScatter {
 //    public:
 //     explicit ForceScatter(double force_conv);
-//     void scatter(const LammpsView&, const at::Tensor& forces, int n_graph) const;
+//     void scatter(const LammpsView&, const at::Tensor& forces, int n_graph)
+//     const;
 //   };
 //
 // The three invariants these cases exist to lock:
@@ -216,7 +218,8 @@ at::Tensor model_forces(int n) {
 }
 
 /// Require every f row — ghost included — to still hold its starting value.
-void expect_forces_untouched(const SyntheticAtoms& atoms, const std::string& tag) {
+void expect_forces_untouched(const SyntheticAtoms& atoms,
+                             const std::string& tag) {
   for (int i = 0; i < kNall; ++i) {
     for (int k = 0; k < 3; ++k) {
       expect_near(atoms.force(i, k), kInitialForce[i][k], 0.0,
@@ -258,8 +261,9 @@ void test_bridge_stage_nodes_shapes_and_values() {
               "Z must stay on the CPU: the device transfer belongs to the call "
               "site, not to staging");
 
-  expect_true(nodes.pos.scalar_type() == at::kDouble,
-              "pos must be float64: the model-dtype cast stays at the call site");
+  expect_true(
+      nodes.pos.scalar_type() == at::kDouble,
+      "pos must be float64: the model-dtype cast stays at the call site");
   expect_int(nodes.pos.dim(), 2, "pos must be 2-D");
   expect_int(nodes.pos.size(0), kNlocal, "pos must be (n_graph, 3)");
   expect_int(nodes.pos.size(1), 3, "pos must be (n_graph, 3)");
@@ -335,7 +339,8 @@ void test_bridge_species_map_rejects_bad_table_size() {
 
 void test_bridge_species_map_rejects_nonpositive_z() {
   // -7 is not an atomic number. Caught at construction, where the LAMMPS type
-  // that produced it is still known — by z_of time the caller only has an index.
+  // that produced it is still known — by z_of time the caller only has an
+  // index.
   const std::vector<int> nonpositive = {1, -7, 8};
   const std::string msg = expect_throws(
       [&] {
@@ -343,9 +348,11 @@ void test_bridge_species_map_rejects_nonpositive_z() {
         (void)map;
       },
       "non-positive Z");
-  expect_contains(msg, "2", "non-positive Z must name the offending LAMMPS type");
+  expect_contains(msg, "2",
+                  "non-positive Z must name the offending LAMMPS type");
   expect_contains(msg, "-7", "non-positive Z must name the offending Z");
-  expect_contains(msg, "1, 6, 8", "non-positive Z must list every valid species");
+  expect_contains(msg, "1, 6, 8",
+                  "non-positive Z must list every valid species");
 }
 
 void test_bridge_species_map_z_of_rejects_out_of_range_type() {
@@ -356,8 +363,7 @@ void test_bridge_species_map_z_of_rejects_out_of_range_type() {
   // walk off the front of a 0-based dense table.
   (void)expect_throws([&] { (void)map.z_of(0); }, "z_of(0)");
   (void)expect_throws([&] { (void)map.z_of(-1); }, "z_of(-1)");
-  (void)expect_throws([&] { (void)map.z_of(ntypes + 1); },
-                      "z_of(ntypes + 1)");
+  (void)expect_throws([&] { (void)map.z_of(ntypes + 1); }, "z_of(ntypes + 1)");
 
   // The boundary itself is valid: ntypes is the last type, not one past it.
   expect_int(map.z_of(ntypes), kZByType[static_cast<std::size_t>(ntypes) - 1],
@@ -372,12 +378,16 @@ void test_bridge_force_scatter_rejects_wrong_row_count() {
   // something to scatter as far as it goes: the check must fire before any
   // write, so f is still untouched afterwards.
   (void)expect_throws(
-      [&] { scatter.scatter(atoms.view(), model_forces(kNlocal - 1), kNlocal); },
+      [&] {
+        scatter.scatter(atoms.view(), model_forces(kNlocal - 1), kNlocal);
+      },
       "forces with too few rows");
   expect_forces_untouched(atoms, "too few rows");
 
   (void)expect_throws(
-      [&] { scatter.scatter(atoms.view(), model_forces(kNlocal + 1), kNlocal); },
+      [&] {
+        scatter.scatter(atoms.view(), model_forces(kNlocal + 1), kNlocal);
+      },
       "forces with too many rows");
   expect_forces_untouched(atoms, "too many rows");
 }
@@ -389,9 +399,8 @@ void test_bridge_stage_nodes_rejects_n_graph_over_nall() {
   // x belongs to LAMMPS. Reading past nall() is an out-of-bounds read of
   // another object's memory, which is why this throws rather than staging
   // whatever happens to follow the array.
-  (void)expect_throws(
-      [&] { (void)stage_nodes(atoms.view(), map, kNall + 1); },
-      "stage_nodes with n_graph > nall");
+  (void)expect_throws([&] { (void)stage_nodes(atoms.view(), map, kNall + 1); },
+                      "stage_nodes with n_graph > nall");
   (void)expect_throws([&] { (void)stage_nodes(atoms.view(), map, -1); },
                       "stage_nodes with negative n_graph");
 
@@ -411,7 +420,9 @@ void test_bridge_force_scatter_rejects_n_graph_over_nall() {
   // count matches n_graph here, so it is unambiguously the n_graph check that
   // must fire.
   (void)expect_throws(
-      [&] { scatter.scatter(atoms.view(), model_forces(kNall + 1), kNall + 1); },
+      [&] {
+        scatter.scatter(atoms.view(), model_forces(kNall + 1), kNall + 1);
+      },
       "scatter with n_graph > nall");
   expect_forces_untouched(atoms, "n_graph > nall");
 
@@ -432,7 +443,8 @@ const std::map<std::string, TestFn>& registry() {
       {"bridge_species_map_maps_types", test_bridge_species_map_maps_types},
       {"bridge_stage_nodes_shapes_and_values",
        test_bridge_stage_nodes_shapes_and_values},
-      {"bridge_force_scatter_accumulates", test_bridge_force_scatter_accumulates},
+      {"bridge_force_scatter_accumulates",
+       test_bridge_force_scatter_accumulates},
       {"bridge_species_map_rejects_unknown_z",
        test_bridge_species_map_rejects_unknown_z},
       {"bridge_species_map_rejects_bad_table_size",
@@ -457,7 +469,8 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr, "usage: %s <test_name>\n", argv[0]);
     std::fprintf(stderr, "available:\n");
-    for (const auto& [k, _] : registry()) std::fprintf(stderr, "  %s\n", k.c_str());
+    for (const auto& [k, _] : registry())
+      std::fprintf(stderr, "  %s\n", k.c_str());
     return 2;
   }
   std::string name = argv[1];

@@ -161,7 +161,8 @@ class MetaSchema {
     }
     const std::size_t close = match_brace(text_, v);
     if (close == std::string::npos) {
-      throw std::runtime_error("meta.json: block '" + name + "' not terminated");
+      throw std::runtime_error("meta.json: block '" + name +
+                               "' not terminated");
     }
     return MetaSchema(text_.substr(v, close - v + 1));
   }
@@ -182,7 +183,8 @@ class MetaSchema {
     }
     const std::size_t end = scan_string(text_, v);
     if (end == std::string::npos) {
-      throw std::runtime_error("meta.json: '" + key + "' string not terminated");
+      throw std::runtime_error("meta.json: '" + key +
+                               "' string not terminated");
     }
     return text_.substr(v + 1, end - v - 1);
   }
@@ -212,7 +214,8 @@ class MetaSchema {
       if (c == '"') {
         const std::size_t end = scan_string(text_, i);
         if (end == std::string::npos) {
-          throw std::runtime_error("meta.json: '" + key + "' array not terminated");
+          throw std::runtime_error("meta.json: '" + key +
+                                   "' array not terminated");
         }
         if (depth == 1) out.push_back(text_.substr(i + 1, end - i - 1));
         i = end + 1;
@@ -244,15 +247,17 @@ class MetaSchema {
   /// a perfectly legal atom type.
   ///
   /// Sign, magnitude and emptiness policy belong to the vocabulary layer that
-  /// knows what the field means (see `molnex::lammps::LammpsContract::species`).
-  /// This reader answers one question only: are these whole decimal integers?
+  /// knows what the field means (see
+  /// `molnex::lammps::LammpsContract::species`). This reader answers one
+  /// question only: are these whole decimal integers?
   ///
   /// \param key  Key to read.
   /// \returns    The array's integer elements, in document order. Empty for
   ///             `[]`, which is a well-formed array here.
   /// \throws std::runtime_error  If the key is absent, is not an array, is
   ///                             unterminated, or holds an element that is not
-  ///                             a whole decimal integer representable as `int`.
+  ///                             a whole decimal integer representable as
+  ///                             `int`.
   std::vector<int> get_int_array(const std::string& key) const {
     const std::size_t v = require_value(key);
     if (text_[v] != '[') {
@@ -266,7 +271,8 @@ class MetaSchema {
       // container therefore lands in the token and is rejected by parse_int,
       // rather than being skipped the way get_string_array skips a non-string.
       std::size_t end = i;
-      while (end < text_.size() && text_[end] != ',' && text_[end] != ']') ++end;
+      while (end < text_.size() && text_[end] != ',' && text_[end] != ']')
+        ++end;
       if (end == text_.size()) break;
       std::size_t stop = end;
       while (stop > i && is_space(text_[stop - 1])) --stop;
@@ -387,7 +393,8 @@ class MetaSchema {
   /// \param key    Array key, for the diagnostic.
   /// \returns      The value.
   /// \throws std::runtime_error  If the token is empty, is not consumed whole
-  ///                             as a decimal integer, or does not fit in `int`.
+  ///                             as a decimal integer, or does not fit in
+  ///                             `int`.
   static int parse_int(const std::string& token, const std::string& key) {
     if (token.empty()) {
       throw std::runtime_error("meta.json: '" + key +

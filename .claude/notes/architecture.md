@@ -154,3 +154,37 @@ batching lives in `molix.batch`, storage in `molix.store`, dataset acquisition i
 6. Dataset acquisition / ETL / dataset adapters belong to **MolHub** — do not spec them into molnex.
 
 <!-- mol:map:managed end -->
+
+## Custom annotation — `interface/` (LAMMPS plugin), pending next /mol:map regen
+
+_Added 2026-08-30 after the `lammps-iface` chain (01-meta … 05-pbc) closed; the
+managed block above predates it. Fold into the inventory on the next `/mol:map`
+run (do not run it against a tree carrying another workstream's WIP)._
+
+**`interface/` — C++ engine bridge, three layers (repo root, not `src/`):**
+
+- **Facade** — `interface/lammps/pair_molnex.{h,cpp}`: `pair_style molnex`
+  protocol mechanics only (settings/coeff token piping, neighbor request,
+  compute forwarding, ev tally, comm pack/unpack forwarding). Zero semantic
+  branches; written once, generally never changed.
+- **Bridge** — `interface/lammps/bridge/`: LAMMPS-free, unit-testable
+  components. `lammps_view.h` (POD span view, the only LAMMPS-type seam),
+  `species_map`, `node_staging`, `graph_bridge` (neighbor list → edge tensors;
+  walks `inum+gnum`; sorts iff `requires_sorted_edges`), `force_scatter`,
+  `comm_reverse` (dormant seam — reduction ownership is the integrator's global
+  reverse comm), `exec.h` (`Exec` base + `ModelOutputs`), `dynamic_exec`,
+  `graphed_exec` (CUDA-graph 5-input path). Static lib `molnex_lammps_bridge`.
+- **Impls** — `interface/lammps/impls/`: one impl per **runtime-contract
+  family**, never per network. `cutoff_graph_impl` serves PiNet/MACE/Allegro
+  alike; `registry.cpp` dispatches on `Contract` with an exhaustive switch
+  (`fixed_graph` declared, rejected until its consumer spec lands — see
+  notes.md topic `lammps-iface-post-chain`).
+- **Engine-neutral core** — `interface/include/molnex/interface/`
+  (`meta_schema.h`, `model_runner.h`) + `interface/src/model_runner.cpp`:
+  meta.json schema-v3 reader and AOTI runner, no LAMMPS types.
+- **Python counterpart** — `src/molix/engine/` (`export_for_lammps`,
+  `EngineForward` 4-input / `StaticForward` 5-input, `LAMMPS_META_SCHEMA = 3`).
+  The schema version is pinned on both sides and must bump together
+  (`regressions/lammps-iface-01-meta.py`).
+- **Tests** — `interface/tests/` (ctest; fixture generation needs an absolute
+  `PYTHONPATH` to `src/`). Toolchain: `interface/.clang-format`, gated in CI.

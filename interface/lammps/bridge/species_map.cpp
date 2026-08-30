@@ -46,14 +46,17 @@ SpeciesMap::SpeciesMap(std::vector<int> z_by_type,
     const std::string type = std::to_string(i + 1);
     if (z <= 0) {
       throw std::runtime_error(
-          "SpeciesMap: LAMMPS type " + type + " maps to Z " + std::to_string(z) +
+          "SpeciesMap: LAMMPS type " + type + " maps to Z " +
+          std::to_string(z) +
           ", which is not an atomic number (every Z must be > 0); valid "
-          "species: " + join(meta_species));
+          "species: " +
+          join(meta_species));
     }
     if (std::find(meta_species.begin(), meta_species.end(), z) ==
         meta_species.end()) {
       throw std::runtime_error(
-          "SpeciesMap: LAMMPS type " + type + " maps to Z " + std::to_string(z) +
+          "SpeciesMap: LAMMPS type " + type + " maps to Z " +
+          std::to_string(z) +
           ", which the model was not exported for; valid species: " +
           join(meta_species));
     }

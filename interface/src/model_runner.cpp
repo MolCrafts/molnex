@@ -34,16 +34,12 @@ std::vector<char> read_binary(const fs::path& path) {
                            std::istreambuf_iterator<char>());
 }
 
-const char* scalar_type_name(c10::ScalarType st) {
-  return c10::toString(st);
-}
+const char* scalar_type_name(c10::ScalarType st) { return c10::toString(st); }
 
 }  // namespace
 
-ModelRunner::ModelRunner(const std::string& model_dir,
-                         int num_models,
-                         const std::string& name,
-                         bool run_single_threaded) {
+ModelRunner::ModelRunner(const std::string& model_dir, int num_models,
+                         const std::string& name, bool run_single_threaded) {
   fs::path dir(model_dir);
   if (!fs::exists(dir) || !fs::is_directory(dir)) {
     throw std::runtime_error("model_dir does not exist: " + model_dir);
@@ -75,7 +71,8 @@ ModelRunner::ModelRunner(const std::string& model_dir,
 #ifndef MOLNEX_INTERFACE_CUDA
   if (device_ == "cuda") {
     throw std::runtime_error(
-        "model meta.json device=cuda, but libmolnex_interface was built CPU-only "
+        "model meta.json device=cuda, but libmolnex_interface was built "
+        "CPU-only "
         "(no CUDA toolkit at build time); rebuild where CUDA is available");
   }
 #endif
@@ -92,8 +89,7 @@ ModelRunner::ModelRunner(const std::string& model_dir,
   // .../aotinductor/model/); our `name` only selects the `<name>.pt2` file.
   loader_ = std::make_unique<torch::inductor::AOTIModelPackageLoader>(
       pt2_path.string(),
-      /*model_name=*/"model",
-      run_single_threaded,
+      /*model_name=*/"model", run_single_threaded,
       /*num_runners=*/static_cast<size_t>(num_models),
       /*device_index=*/-1);
   runner_ = loader_->get_runner();
@@ -101,14 +97,14 @@ ModelRunner::ModelRunner(const std::string& model_dir,
 
 ModelRunner::~ModelRunner() = default;
 
-std::vector<at::Tensor> ModelRunner::run(const std::vector<at::Tensor>& inputs) {
+std::vector<at::Tensor> ModelRunner::run(
+    const std::vector<at::Tensor>& inputs) {
   return runner_->run(inputs);
 }
 
 #ifdef MOLNEX_INTERFACE_CUDA
 std::vector<at::Tensor> ModelRunner::run_async(
-    const std::vector<at::Tensor>& inputs,
-    at::cuda::CUDAStream stream) {
+    const std::vector<at::Tensor>& inputs, at::cuda::CUDAStream stream) {
   if (device_ != "cuda") {
     throw std::runtime_error("run_async only supported on CUDA runners");
   }
@@ -151,7 +147,8 @@ std::vector<at::Tensor> ModelRunner::run_graphed(
       capture_stream.synchronize();
       graph_ = std::make_unique<at::cuda::CUDAGraph>();
       graph_->capture_begin();
-      graph_outputs_ = cuda_runner->run_with_cuda_stream(inputs, capture_stream);
+      graph_outputs_ =
+          cuda_runner->run_with_cuda_stream(inputs, capture_stream);
       graph_->capture_end();
     }
     graph_captured_ = true;
@@ -175,8 +172,8 @@ void ModelRunner::update_weights(const std::string& weight_path) {
   std::unordered_map<std::string, at::Tensor> params;
   for (const auto& kv : iv.toGenericDict()) {
     if (!kv.key().isString() || !kv.value().isTensor()) {
-      throw std::runtime_error(
-          "weight file entries must be (str -> Tensor): " + weight_path);
+      throw std::runtime_error("weight file entries must be (str -> Tensor): " +
+                               weight_path);
     }
     params.emplace(kv.key().toStringRef(), kv.value().toTensor());
   }
@@ -213,9 +210,8 @@ void ModelRunner::update_weights(
       // Fall back to assuming the user already passed the internal
       // name — covers callers that read parameter_info() directly.
       if (fqn_map.find(user_key) == fqn_map.end()) {
-        throw std::runtime_error(
-            "update_weights: unknown parameter '" + user_key +
-            "' (not in model's constants)");
+        throw std::runtime_error("update_weights: unknown parameter '" +
+                                 user_key + "' (not in model's constants)");
       }
       // user_key is already an internal name
       auto& placed = owned.emplace_back(tensor.to(target_device));
@@ -232,8 +228,8 @@ void ModelRunner::update_weights(
   runner_->swap_constant_buffer();
 }
 
-std::vector<std::pair<std::string, std::string>>
-ModelRunner::parameter_info() const {
+std::vector<std::pair<std::string, std::string>> ModelRunner::parameter_info()
+    const {
   auto dtypes = runner_->getConstantNamesToDtypes();
   auto fqn_map = runner_->getConstantNamesToOriginalFQNs();
   std::vector<std::pair<std::string, std::string>> out;
@@ -244,9 +240,8 @@ ModelRunner::parameter_info() const {
     if (it != fqn_map.end() && !it->second.empty()) {
       name = it->second;
     }
-    out.emplace_back(
-        std::move(name),
-        scalar_type_name(static_cast<c10::ScalarType>(dtype_int)));
+    out.emplace_back(std::move(name),
+                     scalar_type_name(static_cast<c10::ScalarType>(dtype_int)));
   }
   return out;
 }

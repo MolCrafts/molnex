@@ -19,7 +19,8 @@ NodeTensors stage_nodes(const LammpsView& view, const SpeciesMap& species,
         "stage_nodes: n_graph " + std::to_string(n_graph) +
         " is outside [0, nall] with nall = " + std::to_string(view.nall()) +
         " (nlocal " + std::to_string(view.nlocal) + " + nghost " +
-        std::to_string(view.nghost) + "); staging beyond nall would read past "
+        std::to_string(view.nghost) +
+        "); staging beyond nall would read past "
         "the end of the LAMMPS atom arrays");
   }
 

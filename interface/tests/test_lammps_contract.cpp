@@ -38,16 +38,20 @@
 //     std::vector<std::string> inputs() const;
 //     std::vector<std::string> outputs() const;
 //     std::vector<int> species() const;             // whole array; throws on a
-//                                                   // non-integer element, on a
+//                                                   // non-integer element, on
+//                                                   a
 //                                                   // Z <= 0, and on an empty
 //                                                   // list
 //     bool supports_pbc() const;
 //     bool supports_virial() const;
-//     int receptive_field_layers() const;           // REQUIRED, positive; throws
-//                                                   // naming the field otherwise
+//     int receptive_field_layers() const;           // REQUIRED, positive;
+//     throws
+//                                                   // naming the field
+//                                                   otherwise
 //     bool requires_sorted_edges() const;           // optional, default false
-//     int n_atoms() const;                          // cuda-graph execution only
-//     long e_max() const;                           // cuda-graph execution only
+//     int n_atoms() const;                          // cuda-graph execution
+//     only long e_max() const;                           // cuda-graph
+//     execution only
 //   };
 //   }  // namespace molnex::lammps
 //
@@ -150,20 +154,34 @@ std::string v3_meta(const MetaFields& f) {
   "lammps": {
     "schema_version": )json") +
          f.schema_version + R"json(,
-    "contract": ")json" + f.contract + R"json(",
-    "execution": ")json" + f.execution + R"json(",
-    "cutoff": )json" + f.cutoff + R"json(,
-    "units": ")json" + f.units + R"json(",
-    "energy_unit": ")json" + f.energy_unit + R"json(",
-    "length_unit": ")json" + f.length_unit + R"json(",
-    "energy_conv": )json" + f.energy_conv + R"json(,
-    "species": )json" + f.species + R"json(,
-    "model_dtype": ")json" + f.model_dtype + R"json(",
-    "inputs": )json" + f.inputs + R"json(,
-    "outputs": )json" + f.outputs + R"json(,
-    "adapter": ")json" + f.adapter + R"json(",
-    "supports_pbc": )json" + f.supports_pbc + R"json(,
-    "supports_virial": )json" + f.supports_virial +
+    "contract": ")json" +
+         f.contract + R"json(",
+    "execution": ")json" +
+         f.execution + R"json(",
+    "cutoff": )json" +
+         f.cutoff + R"json(,
+    "units": ")json" +
+         f.units + R"json(",
+    "energy_unit": ")json" +
+         f.energy_unit + R"json(",
+    "length_unit": ")json" +
+         f.length_unit + R"json(",
+    "energy_conv": )json" +
+         f.energy_conv + R"json(,
+    "species": )json" +
+         f.species + R"json(,
+    "model_dtype": ")json" +
+         f.model_dtype + R"json(",
+    "inputs": )json" +
+         f.inputs + R"json(,
+    "outputs": )json" +
+         f.outputs + R"json(,
+    "adapter": ")json" +
+         f.adapter + R"json(",
+    "supports_pbc": )json" +
+         f.supports_pbc + R"json(,
+    "supports_virial": )json" +
+         f.supports_virial +
          optional_key("receptive_field_layers", f.receptive_field_layers) +
          optional_key("requires_sorted_edges", f.requires_sorted_edges) +
          f.extra + R"json(
@@ -219,7 +237,8 @@ void test_contract_schema_version_mismatch_throws() {
         (void)stale;
       },
       "schema_version 2 is refused");
-  expect_contains(stale_v2, "re-export", "the v2 refusal must name the way out");
+  expect_contains(stale_v2, "re-export",
+                  "the v2 refusal must name the way out");
 }
 
 void test_contract_unknown_contract_throws() {
@@ -236,8 +255,10 @@ void test_contract_unknown_contract_throws() {
       },
       "unknown contract");
   expect_contains(msg, "banana", "unknown contract");
-  expect_contains(msg, "cutoff-graph", "unknown contract must list every valid name");
-  expect_contains(msg, "fixed-graph", "unknown contract must list every valid name");
+  expect_contains(msg, "cutoff-graph",
+                  "unknown contract must list every valid name");
+  expect_contains(msg, "fixed-graph",
+                  "unknown contract must list every valid name");
 }
 
 void test_contract_unknown_execution_throws() {
@@ -261,8 +282,10 @@ void test_contract_unknown_execution_throws() {
       },
       "unknown execution");
   expect_contains(msg, "banana", "unknown execution");
-  expect_contains(msg, "dynamic", "unknown execution must list every valid name");
-  expect_contains(msg, "cuda-graph", "unknown execution must list every valid name");
+  expect_contains(msg, "dynamic",
+                  "unknown execution must list every valid name");
+  expect_contains(msg, "cuda-graph",
+                  "unknown execution must list every valid name");
 }
 
 void test_contract_unsupported_unit_style_throws() {
@@ -284,8 +307,10 @@ void test_contract_unsupported_unit_style_throws() {
   const std::string msg =
       expect_throws([&] { (void)c.units_for("lj"); }, "unsupported unit style");
   expect_contains(msg, "lj", "unsupported unit style");
-  expect_contains(msg, "real", "unsupported unit style must list every table key");
-  expect_contains(msg, "metal", "unsupported unit style must list every table key");
+  expect_contains(msg, "real",
+                  "unsupported unit style must list every table key");
+  expect_contains(msg, "metal",
+                  "unsupported unit style must list every table key");
 }
 
 void test_contract_length_unit_not_angstrom_throws() {
@@ -369,8 +394,8 @@ void test_contract_requires_receptive_field_layers() {
 
   MetaFields deep;
   deep.receptive_field_layers = "3";
-  expect_int(LammpsContract{MetaSchema{v3_meta(deep)}}.receptive_field_layers(), 3,
-             "receptive_field_layers() follows the document");
+  expect_int(LammpsContract{MetaSchema{v3_meta(deep)}}.receptive_field_layers(),
+             3, "receptive_field_layers() follows the document");
 
   // ABSENT IS A REFUSAL, NOT A DEFAULT. This is the whole point of the field:
   // a 3-layer MACE whose export forgot to declare T would, under any default,
@@ -426,13 +451,15 @@ void test_contract_requires_receptive_field_layers() {
 
   MetaFields sorted;
   sorted.requires_sorted_edges = "true";
-  expect_true(LammpsContract{MetaSchema{v3_meta(sorted)}}.requires_sorted_edges(),
-              "an export declaring true must read true");
+  expect_true(
+      LammpsContract{MetaSchema{v3_meta(sorted)}}.requires_sorted_edges(),
+      "an export declaring true must read true");
 
   MetaFields silent;
   silent.requires_sorted_edges = "";
-  expect_true(!LammpsContract{MetaSchema{v3_meta(silent)}}.requires_sorted_edges(),
-              "an export that never mentions the flag must read false");
+  expect_true(
+      !LammpsContract{MetaSchema{v3_meta(silent)}}.requires_sorted_edges(),
+      "an export that never mentions the flag must read false");
 }
 
 void test_contract_species_int_array() {
@@ -474,7 +501,8 @@ void test_contract_species_rejects_non_integer() {
       },
       "fractional species element");
   expect_contains(frac, "species", "fractional species element");
-  expect_contains(frac, "1.5", "fractional species element must quote the token");
+  expect_contains(frac, "1.5",
+                  "fractional species element must quote the token");
 
   MetaFields alphabetic;
   alphabetic.species = R"([1, "x", 8])";
@@ -531,22 +559,25 @@ void test_contract_reads_generated_v3_fixture() {
   const std::string path = std::string(env) + "/lammps_v3.meta.json";
   const auto doc = molnex::interface::MetaSchema::from_file(path);
   expect_true(doc.device() == "cpu", "fixture device must be cpu");
-  const molnex::lammps::LammpsContract contract(doc);  // schema_version == 3 validated here
+  const molnex::lammps::LammpsContract contract(
+      doc);  // schema_version == 3 validated here
   expect_near(contract.cutoff(), 4.5, 1e-12, "fixture cutoff");
   expect_true(contract.units() == "real", "fixture units must be real");
   expect_true(contract.contract() == molnex::lammps::Contract::cutoff_graph,
-         "fixture contract must be cutoff-graph");
+              "fixture contract must be cutoff-graph");
   expect_true(contract.execution() == molnex::lammps::Execution::dynamic,
-         "fixture execution must be dynamic");
+              "fixture execution must be dynamic");
   const auto conv = contract.units_for("real");
   expect_near(conv.energy, 1.0, 1e-12, "self-conversion is exactly 1");
   expect_near(conv.force, conv.energy, 0.0, "force == energy under angstrom");
   const auto outs = contract.outputs();
-  expect_true(outs.size() == 4 && outs[2] == "atomic_energy" && outs[3] == "virial",
-         "the v3 fixture must list atomic_energy before the virial");
+  expect_true(
+      outs.size() == 4 && outs[2] == "atomic_energy" && outs[3] == "virial",
+      "the v3 fixture must list atomic_energy before the virial");
   const auto ins = contract.inputs();
-  expect_true(ins.size() == 4 && ins[3] == "local_mask",
-         "the v3 dynamic fixture must carry local_mask as its fourth input");
+  expect_true(
+      ins.size() == 4 && ins[3] == "local_mask",
+      "the v3 dynamic fixture must carry local_mask as its fourth input");
 
   // The two v3 fields, read off the document the PRODUCTION writer emitted —
   // which is the only place the two spellings are checked against each other.
@@ -573,8 +604,10 @@ const std::map<std::string, TestFn>& registry() {
   static const std::map<std::string, TestFn> r = {
       {"contract_schema_version_mismatch_throws",
        test_contract_schema_version_mismatch_throws},
-      {"contract_unknown_contract_throws", test_contract_unknown_contract_throws},
-      {"contract_unknown_execution_throws", test_contract_unknown_execution_throws},
+      {"contract_unknown_contract_throws",
+       test_contract_unknown_contract_throws},
+      {"contract_unknown_execution_throws",
+       test_contract_unknown_execution_throws},
       {"contract_unsupported_unit_style_throws",
        test_contract_unsupported_unit_style_throws},
       {"contract_length_unit_not_angstrom_throws",
@@ -598,7 +631,8 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr, "usage: %s <test_name>\n", argv[0]);
     std::fprintf(stderr, "available:\n");
-    for (const auto& [k, _] : registry()) std::fprintf(stderr, "  %s\n", k.c_str());
+    for (const auto& [k, _] : registry())
+      std::fprintf(stderr, "  %s\n", k.c_str());
     return 2;
   }
   std::string name = argv[1];

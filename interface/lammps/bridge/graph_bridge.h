@@ -58,11 +58,11 @@ class GraphBridge {
   /// THE SOURCE DOMAIN IS `local u ghost`, not local alone, whenever the
   /// neighbour request carried `REQ_GHOST`. That is what makes the resulting
   /// edge set symmetrically closed over the ghost region, and symmetric closure
-  /// is why ONE builder serves both aggregation directions: a target-aggregating
-  /// model (MACE) needs every ghost->local edge at its first layer, a
-  /// source-aggregating one (PiNet) needs every ghost->ghost edge by its second,
-  /// and walking the ghost centres supplies both. No per-model branch exists
-  /// here, or is needed.
+  /// is why ONE builder serves both aggregation directions: a
+  /// target-aggregating model (MACE) needs every ghost->local edge at its first
+  /// layer, a source-aggregating one (PiNet) needs every ghost->ghost edge by
+  /// its second, and walking the ghost centres supplies both. No per-model
+  /// branch exists here, or is needed.
   ///
   /// \param view     Borrowed LAMMPS atom arrays and neighbour spans.
   /// \param n_graph  Number of leading atoms that are graph nodes: `nlocal` for

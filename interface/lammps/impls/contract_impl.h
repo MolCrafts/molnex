@@ -138,8 +138,8 @@ struct EvalResult {
   /// to it.
   ///
   /// It is the sum of `e_atom`, i.e. of the LOCAL site energies only. Summing
-  /// over ghosts as well would add `sum_{i in G} E_i`, which is dominated by the
-  /// per-species constant offset and is therefore tens of eV per ghost — an
+  /// over ghosts as well would add `sum_{i in G} E_i`, which is dominated by
+  /// the per-species constant offset and is therefore tens of eV per ghost — an
   /// error that grows with the rank count and the cutoff, and that no
   /// single-rank test can see.
   double e_total;
@@ -147,10 +147,10 @@ struct EvalResult {
   ///
   /// THE LENGTH IS THE CONTRACT, and it is `nlocal` rather than `nall`: only
   /// atoms this rank owns get an entry, because only their site energies belong
-  /// to this rank's partition. The facade iterates THIS TENSOR'S OWN EXTENT when
-  /// `eflag_atom` is set and must not consult `atom->nlocal` for the bound — two
-  /// independent notions of "which atoms are local" would silently overrun or
-  /// under-count the moment they disagreed.
+  /// to this rank's partition. The facade iterates THIS TENSOR'S OWN EXTENT
+  /// when `eflag_atom` is set and must not consult `atom->nlocal` for the bound
+  /// — two independent notions of "which atoms are local" would silently
+  /// overrun or under-count the moment they disagreed.
   ///
   /// A CPU float64 1-D tensor the caller owns, never a view of a model output.
   at::Tensor e_atom;
@@ -270,11 +270,11 @@ class ContractImpl {
   /// those run only inside a `comm->reverse_comm(this)` that the pair style
   /// itself issued. `CutoffGraphImpl` fills
   /// `EvalResult::needs_pair_reverse_comm` with a constant false — the
-  /// integrator's own global reverse comm reduces ghost forces — so the facade's
-  /// call site never fires and neither does this.
+  /// integrator's own global reverse comm reduces ghost forces — so the
+  /// facade's call site never fires and neither does this.
   ///
-  /// THE SINGLE RE-ENTRY ROUTE, and there is no second entrance: a contract that
-  /// fills `needs_pair_reverse_comm` with true re-activates the facade's
+  /// THE SINGLE RE-ENTRY ROUTE, and there is no second entrance: a contract
+  /// that fills `needs_pair_reverse_comm` with true re-activates the facade's
   /// existing call site, and these overrides start being called again with no
   /// edit to the facade at all. A fixed-graph or layer-wise-communication impl
   /// that scatters ghost forces outside newton-reduced integration is the

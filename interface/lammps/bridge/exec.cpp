@@ -85,18 +85,19 @@ ModelOutputs read_model_outputs(const std::vector<at::Tensor>& raw,
       raw[kAtomicEnergyIdx].to(at::kDouble).to(at::kCPU).contiguous();
 
   // One entry per staged atom. The impl slices the first `nlocal` of these and
-  // hands them to LAMMPS as the per-atom energy, so a length that does not match
-  // what was staged would sum the wrong sites — with a plausible number coming
-  // out the other end. Checked HERE, in the single decoder, rather than in each
-  // Exec: the two implementations do device and dtype movement, not contract
-  // validation.
+  // hands them to LAMMPS as the per-atom energy, so a length that does not
+  // match what was staged would sum the wrong sites — with a plausible number
+  // coming out the other end. Checked HERE, in the single decoder, rather than
+  // in each Exec: the two implementations do device and dtype movement, not
+  // contract validation.
   const int64_t site_count = out.atomic_energy.size(0);
   if (out.atomic_energy.dim() != 1 || site_count != expect.n_atoms) {
     throw std::runtime_error(
         "read_model_outputs: atomic_energy has " + std::to_string(site_count) +
         " entries for " + std::to_string(expect.n_atoms) +
         " staged atom(s); the per-atom energy must carry exactly one value per "
-        "atom the model was given, because the partition energy is its sum over "
+        "atom the model was given, because the partition energy is its sum "
+        "over "
         "the locally owned ones");
   }
 

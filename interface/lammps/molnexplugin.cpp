@@ -9,22 +9,18 @@
 
 using namespace LAMMPS_NS;
 
-static Pair *molnexcreator(LAMMPS *lmp)
-{
-  return new PairMolnex(lmp);
-}
+static Pair* molnexcreator(LAMMPS* lmp) { return new PairMolnex(lmp); }
 
-extern "C" void lammpsplugin_init(void *lmp, void *handle, void *regfunc)
-{
+extern "C" void lammpsplugin_init(void* lmp, void* handle, void* regfunc) {
   lammpsplugin_t plugin;
-  lammpsplugin_regfunc register_plugin = (lammpsplugin_regfunc) regfunc;
+  lammpsplugin_regfunc register_plugin = (lammpsplugin_regfunc)regfunc;
 
   plugin.version = LAMMPS_VERSION;
   plugin.style = "pair";
   plugin.name = "molnex";
   plugin.info = "Generic molnex AOTInductor pair style (molix.engine)";
   plugin.author = "molnex";
-  plugin.creator.v1 = (lammpsplugin_factory1 *) &molnexcreator;
+  plugin.creator.v1 = (lammpsplugin_factory1*)&molnexcreator;
   plugin.handle = handle;
   (*register_plugin)(&plugin, lmp);
 }

@@ -65,8 +65,7 @@ class ModelRunner {
   ///                   mode. Required for CUDA-graph capture (the default
   ///                   multi-threaded run does a capture-illegal alloc/sync —
   ///                   PyTorch #158834, fixed torch 2.8); harmless otherwise.
-  ModelRunner(const std::string& model_dir,
-              int num_models = 1,
+  ModelRunner(const std::string& model_dir, int num_models = 1,
               const std::string& name = "model",
               bool run_single_threaded = true);
 
@@ -113,7 +112,8 @@ class ModelRunner {
 
   /// Reload constants from an in-memory tensor map (parameter FQN →
   /// tensor). Semantics identical to the file-path overload.
-  void update_weights(const std::unordered_map<std::string, at::Tensor>& params);
+  void update_weights(
+      const std::unordered_map<std::string, at::Tensor>& params);
 
   /// (name, scalar-type-string) pairs for every constant the model
   /// container knows about. Useful for sanity-checking a reload map

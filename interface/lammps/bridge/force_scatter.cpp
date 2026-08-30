@@ -20,14 +20,14 @@ void ForceScatter::scatter(const LammpsView& view, const at::Tensor& forces,
         "ForceScatter: n_graph " + std::to_string(n_graph) +
         " is outside [0, nall] with nall = " + std::to_string(view.nall()) +
         " (nlocal " + std::to_string(view.nlocal) + " + nghost " +
-        std::to_string(view.nghost) + "); scattering beyond nall would write "
+        std::to_string(view.nghost) +
+        "); scattering beyond nall would write "
         "past the end of the LAMMPS force array");
   }
   if (forces.size(0) != n_graph) {
-    throw std::runtime_error(
-        "ForceScatter: model returned forces for " +
-        std::to_string(forces.size(0)) + " atoms, expected " +
-        std::to_string(n_graph));
+    throw std::runtime_error("ForceScatter: model returned forces for " +
+                             std::to_string(forces.size(0)) +
+                             " atoms, expected " + std::to_string(n_graph));
   }
 
   auto fa = forces.accessor<double, 2>();

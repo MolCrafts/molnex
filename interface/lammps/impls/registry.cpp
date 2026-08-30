@@ -131,7 +131,8 @@ std::unique_ptr<ContractImpl> ContractImpl::for_contract(
       // neighbour graph — and so different physics, with no diagnostic.
       throw std::runtime_error(
           "pair_style molnex: contract 'fixed-graph' has no implementation yet "
-          "(this pair style builds its edge set from a cutoff; a fixed covalent "
+          "(this pair style builds its edge set from a cutoff; a fixed "
+          "covalent "
           "topology needs an impl that does not exist); valid contracts: "
           "cutoff-graph");
   }

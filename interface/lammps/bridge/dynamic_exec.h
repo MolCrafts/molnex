@@ -5,8 +5,9 @@
 //
 // This is the universal path. It places no requirement on the export beyond the
 // four-input cutoff-graph contract, works on CPU and CUDA alike, and is what
-// runs whenever the meta does not ask for `execution = cuda-graph`. `GraphedExec`
-// is the specialisation; this is the baseline it has to agree with.
+// runs whenever the meta does not ask for `execution = cuda-graph`.
+// `GraphedExec` is the specialisation; this is the baseline it has to agree
+// with.
 
 #pragma once
 

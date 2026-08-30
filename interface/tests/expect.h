@@ -44,7 +44,8 @@ inline void expect_true(bool cond, const std::string& tag) {
 inline void expect_string(const std::string& got, const std::string& want,
                           const std::string& tag) {
   if (got != want) {
-    throw std::runtime_error(tag + ": expected '" + want + "', got '" + got + "'");
+    throw std::runtime_error(tag + ": expected '" + want + "', got '" + got +
+                             "'");
   }
 }
 
@@ -105,8 +106,8 @@ inline std::string expect_throws(const std::function<void()>& fn,
 /// \param needle   Substring the diagnostic must contain.
 /// \param tag      Message identifying the expectation.
 /// \throws std::runtime_error  If `needle` does not occur in `message`.
-inline void expect_contains(const std::string& message, const std::string& needle,
-                            const std::string& tag) {
+inline void expect_contains(const std::string& message,
+                            const std::string& needle, const std::string& tag) {
   if (message.find(needle) == std::string::npos) {
     throw std::runtime_error(tag + ": message \"" + message +
                              "\" does not mention '" + needle + "'");

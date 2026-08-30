@@ -397,3 +397,29 @@ sampler generalization + R1 bench: no crossover below 1e8, code-form chosen,
 unit-granularity planning is the real lever), digest-core revision 180332f
 (task_names covered), 02-view bc75a9d (BlockDataset), 03-plan eb39d8d
 (BlockPlanSource + block collate + visit-order handoff).
+
+## [2026-08-30] LAMMPS interface — fixed_graph kept, C++ toolchain fixed
+
+<!-- mol:note:topic:lammps-iface-post-chain -->
+
+**`Contract::fixed_graph` stays declared-but-unimplemented.** The 01-meta rule
+was "implement or remove by schema bump before merge". Resolution: **KEEP**.
+The binding consumer is the operator's espaloma-style learnable-classical-FF
+roadmap (`.claude/notes/learnable-classical-ff.md`): a parameterized Class-I
+force field runs on the **fixed covalent topology**, not a per-step cutoff
+graph, so its LAMMPS impl consumes `bond_index`-shaped inputs with no neighbor
+rebuild — a different runtime-contract family by construction. Until that impl
+lands, `registry.cpp`'s exhaustive switch rejects `fixed_graph` loudly (tested:
+`registry_rejects_fixed_graph`); removing the enum value would force a schema
+round-trip for a consumer already on the roadmap. Implementation arrives as its
+own spec chain (`lammps-iface-fixed-graph`), not as a side effect.
+
+**C++ toolchain for `interface/`.** `interface/.clang-format` = Google base at
+its native 80 columns, `SortIncludes: Never` (include order is deliberate:
+LAMMPS protocol-role grouping, torch/ATen below molnex). Tree formatted
+one-shot with clang-format **22.1.5** (the PyPI `clang-format` wheel; local
+install is the same package); CI's interface job gates `--dry-run --Werror`
+pinned to `22.1.*` because wrap decisions drift across clang-format majors.
+Non-ASCII (em-dash) comment lines wrap by byte count — accept clang-format's
+choice, do not hand-wrap. `mol_project.language` stays `python`: `build.check`
+is the Python gate; C++ hygiene rides the interface CI job + this file.

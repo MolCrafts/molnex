@@ -1,0 +1,7 @@
+# C++ toolchain for interface/ (the LAMMPS plugin + engine bridge).
+# Google base at its native 80-column limit — the tree was written to it.
+# SortIncludes is off because include order here is deliberate: LAMMPS
+# headers group by protocol role (pair.h first, then the subsystem headers
+# a callback touches), and torch/ATen headers stay below the molnex ones.
+BasedOnStyle: Google
+SortIncludes: Never

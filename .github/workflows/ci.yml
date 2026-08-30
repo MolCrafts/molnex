@@ -72,6 +72,13 @@ jobs:
           export CMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
           pip install -e ".[dev]" --no-build-isolation -v
         timeout-minutes: 20
+      - name: Check C++ formatting (interface/.clang-format)
+        # Pinned to the version the tree was formatted with — wrap decisions
+        # drift across clang-format majors and would false-fail this gate.
+        run: |
+          pip install "clang-format==22.1.*"
+          find interface \( -name '*.cpp' -o -name '*.h' \) \
+            | xargs clang-format --dry-run --Werror
       - name: Configure and build interface (no LAMMPS)
         run: |
           export CMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"

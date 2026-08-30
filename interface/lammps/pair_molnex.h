@@ -4,8 +4,8 @@
 
    One pair style, any model. Everything model-specific is read from the export
    directory's `<name>.meta.json` `lammps` block (cutoff, native units, compute
-   dtype, capabilities) — there is no per-model C++. Model input/output glue lives
-   on the Python export side as a molix.engine.EngineAdapter.
+   dtype, capabilities) — there is no per-model C++. Model input/output glue
+   lives on the Python export side as a molix.engine.EngineAdapter.
 
    THIS FILE IS THE PROTOCOL LAYER, AND NOTHING ELSE. It is the only file in the
    plugin that includes a LAMMPS header, and in exchange it holds no capability
@@ -66,18 +66,18 @@ namespace LAMMPS_NS {
 
 class PairMolnex : public Pair {
  public:
-  PairMolnex(class LAMMPS *);
+  PairMolnex(class LAMMPS*);
   ~PairMolnex() override;
   void compute(int, int) override;
-  void settings(int, char **) override;
-  void coeff(int, char **) override;
+  void settings(int, char**) override;
+  void coeff(int, char**) override;
   double init_one(int, int) override;
   void init_style() override;
 
   // ghost force reverse-comm; whether it runs at all is the impl's answer,
   // returned per step as EvalResult::needs_pair_reverse_comm.
-  int pack_reverse_comm(int, int, double *) override;
-  void unpack_reverse_comm(int, int *, double *) override;
+  int pack_reverse_comm(int, int, double*) override;
+  void unpack_reverse_comm(int, int*, double*) override;
 
  protected:
   // What the input script said, kept because the diagnostics name it: the
@@ -118,7 +118,7 @@ class PairMolnex : public Pair {
   virtual void allocate();
 };
 
-}    // namespace LAMMPS_NS
+}  // namespace LAMMPS_NS
 
 #endif
 #endif

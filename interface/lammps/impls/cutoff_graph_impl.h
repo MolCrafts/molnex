@@ -8,7 +8,8 @@
 // `ForceScatter`, `pack_reverse_forces` / `unpack_reverse_forces` — and it adds
 // no numerics of its own: what lives here is the ORDER those components run in
 // and the handful of decisions that order needs (how many atoms are graph
-// nodes, whether the pair style owes a reverse comm, which unit factor applies).
+// nodes, whether the pair style owes a reverse comm, which unit factor
+// applies).
 //
 // It is a CONTRACT-FAMILY implementation, not a model implementation. PiNet,
 // MACE and Allegro all export `contract = "cutoff-graph"` and all run through
@@ -62,8 +63,8 @@ class CutoffGraphImpl : public ContractImpl {
   /// Fix everything this contract can know before the input script continues.
   ///
   /// \param contract           Validated export contract; its cutoff, species,
-  ///                           `supports_pbc` / `supports_virial` flags and unit
-  ///                           table are copied out here, so it need not
+  ///                           `supports_pbc` / `supports_virial` flags and
+  ///                           unit table are copied out here, so it need not
   ///                           outlive this object.
   /// \param lammps_unit_style  `update->unit_style`, the unit style the running
   ///                           simulation asked for. The one input the meta

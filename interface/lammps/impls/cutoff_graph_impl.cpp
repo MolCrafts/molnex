@@ -74,18 +74,18 @@ int parse_atomic_number(const std::string& token, int lammps_type) {
 
 }  // namespace
 
-CutoffGraphImpl::CutoffGraphImpl(const LammpsContract& contract,
-                                 const std::string& lammps_unit_style,
-                                 std::unique_ptr<molnex::lammps_bridge::Exec> exec)
+CutoffGraphImpl::CutoffGraphImpl(
+    const LammpsContract& contract, const std::string& lammps_unit_style,
+    std::unique_ptr<molnex::lammps_bridge::Exec> exec)
     // units_for() is called exactly once, here, and its result is handed to the
     // delegated constructor: energy and force must not come from two separate
     // lookups that a later edit could let diverge.
     : CutoffGraphImpl(contract, contract.units_for(lammps_unit_style),
                       std::move(exec)) {}
 
-CutoffGraphImpl::CutoffGraphImpl(const LammpsContract& contract,
-                                 UnitConversion conv,
-                                 std::unique_ptr<molnex::lammps_bridge::Exec> exec)
+CutoffGraphImpl::CutoffGraphImpl(
+    const LammpsContract& contract, UnitConversion conv,
+    std::unique_ptr<molnex::lammps_bridge::Exec> exec)
     : cutoff_(contract.cutoff()),
       supports_pbc_(contract.supports_pbc()),
       supports_virial_(contract.supports_virial()),
@@ -130,7 +130,8 @@ NeighborNeeds CutoffGraphImpl::needs() const {
                        /*comm_reverse_off=*/kReverseCommSize};
 }
 
-void CutoffGraphImpl::coeff(const std::vector<std::string>& tokens, int ntypes) {
+void CutoffGraphImpl::coeff(const std::vector<std::string>& tokens,
+                            int ntypes) {
   if (static_cast<int>(tokens.size()) != ntypes) {
     throw std::runtime_error(
         "pair_coeff for molnex needs: * * <Z1> ... <Zntypes> (one Z per atom "
@@ -185,8 +186,10 @@ void CutoffGraphImpl::init(const LammpsRunEnv& env) {
             "pair_molnex on a molecular system requires 'special_bonds lj/coul "
             "1.0 1.0 1.0'; LAMMPS removes 1-2 / 1-3 / 1-4 pairs from the "
             "neighbour list wherever the coefficient is 0.0 (its default) and "
-            "scales the rest, so this pair style would be handed a cutoff graph "
-            "missing its nearest neighbours — molnex applies no special scaling "
+            "scales the rest, so this pair style would be handed a cutoff "
+            "graph "
+            "missing its nearest neighbours — molnex applies no special "
+            "scaling "
             "of its own, and a coefficient other than 1.0 says LAMMPS expects "
             "one");
       }
@@ -208,7 +211,8 @@ void CutoffGraphImpl::init(const LammpsRunEnv& env) {
         "accumulated into atom->f and reduced onto their owning atoms by the "
         "integrator's global reverse communication, which LAMMPS performs only "
         "when newton is on — with it off, every ghost contribution is silently "
-        "discarded. Add 'newton on' to the input script (it is the default), or "
+        "discarded. Add 'newton on' to the input script (it is the default), "
+        "or "
         "re-export without supports_pbc for a single-domain run");
   }
 
@@ -222,9 +226,9 @@ void CutoffGraphImpl::init(const LammpsRunEnv& env) {
   // SCOPED TO `supports_pbc` CONTRACTS, because that is the scope of the
   // problem: the condition is about whether GHOSTS reach far enough, and a
   // non-periodic export has none. It requests no ghost neighbours (`needs()`)
-  // and compute() refuses outright when `view.nghost != 0`, so every atom of the
-  // system is a local graph node and the receptive field is complete at any T,
-  // whatever the ghost cutoff happens to be. That zero-ghost guard IS the
+  // and compute() refuses outright when `view.nghost != 0`, so every atom of
+  // the system is a local graph node and the receptive field is complete at any
+  // T, whatever the ghost cutoff happens to be. That zero-ghost guard IS the
   // non-periodic path's completeness enforcement — applying the ghost threshold
   // on top of it would refuse a correct single-molecule run of any T >= 2 model
   // (MACE, PiNet: most of the zoo) over a `comm_modify` line that could not
@@ -247,11 +251,13 @@ void CutoffGraphImpl::init(const LammpsRunEnv& env) {
     throw std::runtime_error(
         "pair_molnex: this model has " +
         std::to_string(receptive_field_layers_) +
-        " message-passing layer(s), so each atom's energy depends on every atom "
+        " message-passing layer(s), so each atom's energy depends on every "
+        "atom "
         "within " +
-        std::to_string(receptive_field_layers_) + " * cutoff = " +
-        std::to_string(receptive_field_layers_ * cutoff_) +
-        " A, and this rank must hold a copy of all of them. The ghost cutoff is "
+        std::to_string(receptive_field_layers_) +
+        " * cutoff = " + std::to_string(receptive_field_layers_ * cutoff_) +
+        " A, and this rank must hold a copy of all of them. The ghost cutoff "
+        "is "
         "only " +
         std::to_string(effective_ghost_cutoff) + " A but must be at least " +
         std::to_string(required_ghost_cutoff) + " A (" +
@@ -259,7 +265,8 @@ void CutoffGraphImpl::init(const LammpsRunEnv& env) {
         std::to_string(cutoff_) + " + skin " + std::to_string(env.skin) +
         "). Add 'comm_modify cutoff " + std::to_string(required_ghost_cutoff) +
         "' to the input script; running as configured would evaluate the model "
-        "on a graph whose outer atoms are missing neighbours, with no error and "
+        "on a graph whose outer atoms are missing neighbours, with no error "
+        "and "
         "no warning");
   }
 
@@ -301,8 +308,10 @@ EvalResult CutoffGraphImpl::compute(const LammpsView& view) {
         "pair_molnex with supports_pbc reached compute() without a validated "
         "newton setting: ghost forces are reduced only by the integrator's "
         "global reverse communication, which runs only with newton on, so "
-        "CutoffGraphImpl::init must have confirmed it first. Ensure 'newton on' "
-        "is set (it is the default); if it is, this is an ordering fault inside "
+        "CutoffGraphImpl::init must have confirmed it first. Ensure 'newton "
+        "on' "
+        "is set (it is the default); if it is, this is an ordering fault "
+        "inside "
         "the pair style rather than a configuration problem");
   }
 
@@ -333,10 +342,10 @@ EvalResult CutoffGraphImpl::compute(const LammpsView& view) {
   const molnex::lammps_bridge::ModelOutputs out =
       exec_->run(nodes.Z, nodes.pos, edge_index, local_mask);
   // Forces over ALL n_graph rows, ghosts included. A ghost's force is not a
-  // by-product to be discarded: it is the derivative of LOCAL site energies with
-  // respect to that ghost's coordinates, and it belongs to the atom the ghost is
-  // a copy of. Leaving it in atom->f is precisely what lets the integrator's
-  // global reverse comm carry it to its owner.
+  // by-product to be discarded: it is the derivative of LOCAL site energies
+  // with respect to that ghost's coordinates, and it belongs to the atom the
+  // ghost is a copy of. Leaving it in atom->f is precisely what lets the
+  // integrator's global reverse comm carry it to its owner.
   force_scatter_.scatter(view, out.forces, n_graph);
 
   EvalResult result;

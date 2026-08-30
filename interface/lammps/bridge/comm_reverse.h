@@ -28,7 +28,8 @@
 
 namespace molnex::lammps_bridge {
 
-/// Pack the forces of the contiguous atom range `[first, first + n)` into `buf`.
+/// Pack the forces of the contiguous atom range `[first, first + n)` into
+/// `buf`.
 ///
 /// Writes `fx, fy, fz` per atom, atoms in ascending index order, and reports
 /// how many doubles that was — the return value LAMMPS' comm layer uses to

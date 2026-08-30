@@ -55,8 +55,10 @@ std::pair<at::Tensor, at::Tensor> load_reference(const fs::path& pt_path) {
   at::Tensor input, output;
   for (const auto& kv : dict) {
     const auto& k = kv.key().toStringRef();
-    if (k == "input") input = kv.value().toTensor();
-    else if (k == "output") output = kv.value().toTensor();
+    if (k == "input")
+      input = kv.value().toTensor();
+    else if (k == "output")
+      output = kv.value().toTensor();
   }
   if (!input.defined() || !output.defined()) {
     throw std::runtime_error("reference .pt missing 'input' or 'output'");
@@ -64,8 +66,8 @@ std::pair<at::Tensor, at::Tensor> load_reference(const fs::path& pt_path) {
   return {input, output};
 }
 
-std::unordered_map<std::string, at::Tensor>
-load_state_dict(const fs::path& pt_path) {
+std::unordered_map<std::string, at::Tensor> load_state_dict(
+    const fs::path& pt_path) {
   std::ifstream is(pt_path, std::ios::binary);
   if (!is) throw std::runtime_error("cannot open " + pt_path.string());
   std::vector<char> bytes((std::istreambuf_iterator<char>(is)),
@@ -79,13 +81,13 @@ load_state_dict(const fs::path& pt_path) {
   return out;
 }
 
-void expect_allclose(const at::Tensor& got, const at::Tensor& ref,
-                     double atol, const std::string& tag) {
+void expect_allclose(const at::Tensor& got, const at::Tensor& ref, double atol,
+                     const std::string& tag) {
   auto a = got.detach().to(at::kCPU).to(at::kFloat).contiguous();
   auto b = ref.detach().to(at::kCPU).to(at::kFloat).contiguous();
   if (!a.sizes().equals(b.sizes())) {
-    throw std::runtime_error(tag + ": shape mismatch " +
-                             c10::str(a.sizes()) + " vs " + c10::str(b.sizes()));
+    throw std::runtime_error(tag + ": shape mismatch " + c10::str(a.sizes()) +
+                             " vs " + c10::str(b.sizes()));
   }
   auto diff = (a - b).abs().max().item<double>();
   if (diff > atol) {
@@ -105,7 +107,8 @@ void test_cpu_run_matches_reference() {
   auto [input, ref] = load_reference(dir / "reference_cpu.pt");
   auto out = runner.run({input});
   if (out.size() != 1) {
-    throw std::runtime_error("expected 1 output, got " + std::to_string(out.size()));
+    throw std::runtime_error("expected 1 output, got " +
+                             std::to_string(out.size()));
   }
   expect_allclose(out[0], ref, 1e-5, "cpu_run");
 }
@@ -166,7 +169,8 @@ void test_parameter_info() {
   if (info.empty()) {
     throw std::runtime_error("parameter_info() returned empty list");
   }
-  // expect at least the linear.weight and linear.bias from the TinyLinear fixture
+  // expect at least the linear.weight and linear.bias from the TinyLinear
+  // fixture
   std::set<std::string> names;
   for (const auto& [name, _dtype] : info) names.insert(name);
   bool has_w = false, has_b = false;
@@ -180,7 +184,8 @@ void test_parameter_info() {
       if (!joined.empty()) joined += ", ";
       joined += n;
     }
-    throw std::runtime_error("parameter_info missing weight/bias; got: " + joined);
+    throw std::runtime_error("parameter_info missing weight/bias; got: " +
+                             joined);
   }
 }
 
@@ -264,7 +269,8 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr, "usage: %s <test_name>\n", argv[0]);
     std::fprintf(stderr, "available:\n");
-    for (const auto& [k, _] : registry()) std::fprintf(stderr, "  %s\n", k.c_str());
+    for (const auto& [k, _] : registry())
+      std::fprintf(stderr, "  %s\n", k.c_str());
     return 2;
   }
   std::string name = argv[1];

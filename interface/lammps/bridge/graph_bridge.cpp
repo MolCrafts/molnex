@@ -22,7 +22,8 @@ at::Tensor GraphBridge::build(const LammpsView& view, int n_graph) {
         "GraphBridge: n_graph " + std::to_string(n_graph) +
         " is outside [0, nall] with nall = " + std::to_string(view.nall()) +
         " (nlocal " + std::to_string(view.nlocal) + " + nghost " +
-        std::to_string(view.nghost) + "); n_graph is both the neighbour filter "
+        std::to_string(view.nghost) +
+        "); n_graph is both the neighbour filter "
         "threshold and the upper bound of every position read, so a value past "
         "nall would read past the end of the LAMMPS atom arrays");
   }
@@ -42,16 +43,16 @@ at::Tensor GraphBridge::build(const LammpsView& view, int n_graph) {
     //
     // The centre index itself is trusted to be in [0, nall): it is the
     // neighbour-list builder's invariant, and re-verifying it in the hot loop
-    // would only buy psychological comfort. Every position read below IS bounded
-    // — by the n_graph check above for targets, and by that same invariant for
-    // centres. This comment exists so the next reader knows the invariant is
-    // depended upon rather than overlooked.
+    // would only buy psychological comfort. Every position read below IS
+    // bounded — by the n_graph check above for targets, and by that same
+    // invariant for centres. This comment exists so the next reader knows the
+    // invariant is depended upon rather than overlooked.
     const int i = view.ilist[ii];
     // n_graph bounds BOTH endpoints, not just the target. A ghost centre cannot
     // occur on the local-only path (no REQ_GHOST means gnum is 0), but if it
-    // ever did, an edge whose SOURCE is past n_graph would index past the staged
-    // node tensors inside the model — so the threshold is applied where it is
-    // claimed to apply.
+    // ever did, an edge whose SOURCE is past n_graph would index past the
+    // staged node tensors inside the model — so the threshold is applied where
+    // it is claimed to apply.
     if (i >= n_graph) continue;
     const double xi = view.x[i][0];
     const double yi = view.x[i][1];
@@ -76,10 +77,10 @@ at::Tensor GraphBridge::build(const LammpsView& view, int n_graph) {
   // Every aggregation in this tree is scatter-class (`index_add_` /
   // `scatter_add_`), and those are permutation-invariant in exact arithmetic;
   // in floating point the reassociation error is about (n-1)u, and CUDA's own
-  // `index_add_` is non-deterministic anyway, so sorting buys no reproducibility
-  // either. Paying for a std::sort every step to satisfy nobody is the cost this
-  // flag removes: the default path builds in raw neighbour-list order, exactly
-  // as pair_nequip_allegro does.
+  // `index_add_` is non-deterministic anyway, so sorting buys no
+  // reproducibility either. Paying for a std::sort every step to satisfy nobody
+  // is the cost this flag removes: the default path builds in raw
+  // neighbour-list order, exactly as pair_nequip_allegro does.
   //
   // The code stays because the requirement is real for a different class of
   // model: segmented / CSR aggregation (cuEquivariance's indexed operators)
@@ -87,7 +88,8 @@ at::Tensor GraphBridge::build(const LammpsView& view, int n_graph) {
   // the arithmetic still completing. Such a model exports
   // `requires_sorted_edges = true` and gets the order it needs; a model that
   // does not declare it can never be fed sorted-order-dependent code by
-  // accident, because there is no path here that produces one without the other.
+  // accident, because there is no path here that produces one without the
+  // other.
   //
   // std::pair's lexicographic ordering IS the (source, target) sort.
   if (requires_sorted_edges_) {

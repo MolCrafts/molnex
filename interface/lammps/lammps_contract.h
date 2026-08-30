@@ -199,8 +199,9 @@ class LammpsContract {
     }
 
     const std::size_t declared = inputs().size();
-    const std::size_t required =
-        execution() == Execution::cuda_graph ? kCudaGraphInputs : kDynamicInputs;
+    const std::size_t required = execution() == Execution::cuda_graph
+                                     ? kCudaGraphInputs
+                                     : kDynamicInputs;
     if (declared != required) {
       throw std::runtime_error(
           "meta.json: lammps block lists " + std::to_string(declared) +
@@ -274,7 +275,8 @@ class LammpsContract {
   /// by a0 = 0.529177 Å. A non-Å export needs schema v3 and a length table,
   /// which is deliberately not pre-built here.
   ///
-  /// \param lammps_unit_style  LAMMPS' active unit style (`update->unit_style`).
+  /// \param lammps_unit_style  LAMMPS' active unit style
+  /// (`update->unit_style`).
   /// \returns Energy and force factors for that style.
   /// \throws std::runtime_error  If the style has no usable entry in the
   ///                             `energy_conv` table (the message lists every
@@ -295,7 +297,8 @@ class LammpsContract {
     if (length_unit != kLengthUnit) {
       throw std::runtime_error(
           "meta.json: model length_unit '" + length_unit + "' is not '" +
-          kLengthUnit + "'; force and energy share a conversion factor only "
+          kLengthUnit +
+          "'; force and energy share a conversion factor only "
           "while the model measures length in angstrom (LAMMPS 'real' and "
           "'metal' both do), so this export cannot be run safely");
     }
@@ -349,8 +352,8 @@ class LammpsContract {
   ///
   /// \returns The atomic numbers, in document order; never empty.
   /// \throws std::runtime_error  If `species` is absent, is not an array, holds
-  ///                             an element that is not a whole integer, holds a
-  ///                             Z <= 0, or is empty.
+  ///                             an element that is not a whole integer, holds
+  ///                             a Z <= 0, or is empty.
   std::vector<int> species() const {
     const std::vector<int> values = block_.get_int_array("species");
     if (values.empty()) {
@@ -464,9 +467,9 @@ class LammpsContract {
   /// Fixed edge capacity E the graph was captured for (a count, no units).
   ///
   /// The caller must always pass exactly this many edge rows: the real edges
-  /// first with `edge_mask` true, the remaining slots padded and masked off (the
-  /// export makes them inert by giving them an over-cutoff displacement), and
-  /// it must fail loudly when the real edge count exceeds this capacity.
+  /// first with `edge_mask` true, the remaining slots padded and masked off
+  /// (the export makes them inert by giving them an over-cutoff displacement),
+  /// and it must fail loudly when the real edge count exceeds this capacity.
   ///
   /// Emitted only when `execution() == Execution::cuda_graph`.
   ///
