@@ -10,6 +10,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 
 #include <torch/csrc/api/include/torch/serialize.h>
@@ -99,6 +101,7 @@ ModelRunner::~ModelRunner() = default;
 
 std::vector<at::Tensor> ModelRunner::run(
     const std::vector<at::Tensor>& inputs) {
+  std::shared_lock<std::shared_mutex> guard(reload_mutex_);
   return runner_->run(inputs);
 }
 
@@ -115,6 +118,7 @@ std::vector<at::Tensor> ModelRunner::run_async(
     // invariant honest.
     throw std::runtime_error("internal: CUDA device but non-CUDA runner");
   }
+  std::shared_lock<std::shared_mutex> guard(reload_mutex_);
   return cuda_runner->run_with_cuda_stream(inputs, stream);
 }
 
@@ -128,6 +132,7 @@ std::vector<at::Tensor> ModelRunner::run_graphed(
   if (cuda_runner == nullptr) {
     throw std::runtime_error("internal: CUDA device but non-CUDA runner");
   }
+  std::shared_lock<std::shared_mutex> guard(reload_mutex_);
 
   if (!graph_captured_) {
     // The caller just populated the input buffers on the current stream;
@@ -182,7 +187,9 @@ void ModelRunner::update_weights(const std::string& weight_path) {
 
 void ModelRunner::update_weights(
     const std::unordered_map<std::string, at::Tensor>& params) {
-  std::lock_guard<std::mutex> guard(reload_mutex_);
+  // Exclusive: drains in-flight run() shared holders before the inactive
+  // buffer is rewritten, and blocks new runs until the swap lands.
+  std::unique_lock<std::shared_mutex> guard(reload_mutex_);
 
   // Translate FQN-keyed user map into the internal-name-keyed map the
   // AOTI runner expects. getConstantNamesToOriginalFQNs() returns

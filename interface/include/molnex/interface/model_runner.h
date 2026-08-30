@@ -15,7 +15,7 @@
 #pragma once
 
 #include <memory>
-#include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -101,8 +101,9 @@ class ModelRunner {
   /// ``{param_fqn: tensor}`` pickle, e.g. one saved with
   /// ``torch.save(model.state_dict(), ...)``). Performs a
   /// double-buffered swap: the inactive buffer is rewritten, then
-  /// swapped atomically with the active one. The active buffer keeps
-  /// serving `run()` calls until the swap point.
+  /// swapped with the active one. Concurrent `run()` calls are safe:
+  /// they briefly block for the duration of the rewrite + swap (see
+  /// `reload_mutex_` for why the grace period must live here).
   ///
   /// The model must have been exported with
   /// ``inductor_configs={"aot_inductor.use_runtime_constant_folding":
@@ -136,10 +137,16 @@ class ModelRunner {
   std::vector<at::Tensor> graph_outputs_;
   bool graph_captured_ = false;
 #endif
-  // Serializes update_weights() callers so two reloads can't race on
-  // the inactive buffer. run() is *not* serialized — the underlying
-  // runner exposes the active buffer lock-free.
-  std::mutex reload_mutex_;
+  // Reader-writer shield around the AOTI constant buffers. run() /
+  // run_async() / run_graphed() hold it shared (uncontended rdlock, ~ns);
+  // update_weights() holds it exclusive across rewrite + swap. The
+  // exclusivity is a grace period the AOTI container itself does not
+  // provide: without it, reload N+1's update_inactive_constant_buffer()
+  // rewrites the buffer a run checked out before reload N's swap may
+  // still be reading — an intermittent SIGSEGV (~1/10 under the
+  // concurrent_run_and_update stress loop). Exclusive-vs-exclusive also
+  // keeps two reloads off the inactive buffer, the old reload_mutex_ job.
+  std::shared_mutex reload_mutex_;
 };
 
 }  // namespace molnex::interface
