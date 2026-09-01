@@ -9,7 +9,6 @@ import pytest
 import torch
 
 from molix.md import (
-    ForceOutput,
     Integrator,
     LangevinVerletIntegrator,
     MDState,
@@ -118,7 +117,7 @@ class _MidpointEuler(Integrator):
         vel = state.vel + self.dt * state.forces
         pos = state.pos + self.dt * vel
         out = self.eval_force(pos)
-        return MDState(pos, vel, out.forces, out.energy)
+        return MDState(pos, vel, out["forces"], out["energy"])
 
     def rollout(self, state: MDState, n_steps: int) -> MDState:
         return self.advance_n(state, n_steps)
@@ -144,9 +143,9 @@ def test_eval_force_casts_into_the_state_dtype():
     class _Fp32Well:
         rebuilds_neighbors = False
 
-        def __call__(self, pos: torch.Tensor) -> ForceOutput:
+        def __call__(self, pos: torch.Tensor) -> dict[str, torch.Tensor]:
             energy = (pos.float() ** 2).sum()
-            return ForceOutput(energy, -2.0 * pos.float())
+            return {"energy": energy, "forces": -2.0 * pos.float()}
 
         def rebuild_neighbors(self, pos: torch.Tensor) -> None:
             return None
@@ -207,8 +206,8 @@ class TestIntegratorRebuildSwitch:
         pos = torch.tensor([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]], dtype=_DTYPE)
         out = ig.eval_force(pos)
         # ‖x‖² = 1 + 4 = 5 → E = ½·2·5 = 5; F = −2x
-        assert float(out.energy) == pytest.approx(5.0, abs=1e-10)
-        assert torch.equal(out.forces, -2.0 * pos)
+        assert float(out["energy"]) == pytest.approx(5.0, abs=1e-10)
+        assert torch.equal(out["forces"], -2.0 * pos)
 
     def test_integrator_has_no_rebuild_switch(self):
         ig = Integrator().bind_force(_harmonic_potential_like(1.0))

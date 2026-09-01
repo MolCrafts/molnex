@@ -193,6 +193,69 @@ class TestPotentials:
         # d/dk mean(F²) with F = ±k(r−r0): mean over 6 components = k²·0.5²·2/6
         assert float(parameter.grad) == pytest.approx(2.0 * BOND_K * 0.25 * 2.0 / 6.0, abs=1e-10)
 
+    def test_virial_forces_match_calc_forces_when_energy_uses_edge_diff(self) -> None:
+        """NPT strain must keep ∂E/∂pos through imaged edge geometry.
+
+        Polar / MACE read ``edges.edge_diff``. If that tensor is strained as an
+        independent cartesian, local graph energy drops off ``pos`` and MD
+        integrates electrostatics-only forces.
+        """
+        from molix.schema import ENERGY_KEY
+
+        pos = torch.tensor([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], dtype=DTYPE)
+        edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+        src, tgt = edge_index[:, 0], edge_index[:, 1]
+        raw = pos[tgt] - pos[src]
+        shifts = torch.zeros(2, 3, dtype=DTYPE)
+        edge_diff = raw + shifts
+        batch = TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": pos.clone(),
+                        "Z": torch.tensor([1, 1], dtype=torch.long),
+                        "batch": torch.zeros(2, dtype=torch.long),
+                    },
+                    batch_size=[2],
+                ),
+                "edges": TensorDict(
+                    {
+                        "edge_index": edge_index,
+                        "edge_diff": edge_diff.clone(),
+                        "edge_dist": edge_diff.norm(dim=-1),
+                        "shifts": shifts.clone(),
+                    },
+                    batch_size=[2],
+                ),
+                "graphs": TensorDict(
+                    {"cell": torch.eye(3, dtype=DTYPE).unsqueeze(0)},
+                    batch_size=[1],
+                ),
+            },
+            batch_size=[],
+        )
+
+        class _EdgeSpring(nn.Module):
+            def _write_energy(self, system: TensorDict) -> TensorDict:
+                pos = system["atoms", "pos"]
+                index = system["edges", "edge_index"]
+                imaged = system["edges", "edge_diff"]
+                raw = pos[index[:, 1]] - pos[index[:, 0]]
+                # Same STE Polar/MACE use: frozen buffer supplies the MIC
+                # value, live pos supplies ∂/∂pos. A requires_grad edge_diff
+                # is trusted as the live geometry.
+                vectors = imaged if imaged.requires_grad else imaged + (raw - raw.detach())
+                energy = 0.5 * vectors.pow(2).sum()
+                system[ENERGY_KEY] = energy.reshape(1)
+                return system
+
+        pots = ForceField().def_pairstyle(_EdgeSpring()).to_potentials()
+        reference = pots.calc_forces(batch)
+        _, virial_forces, virial = pots.calc_energy_forces_virial(batch)
+        assert torch.allclose(virial_forces, reference, atol=1e-10, rtol=0.0)
+        assert virial.shape == (3, 3)
+        assert virial.abs().sum().item() > 0.0
+
     def test_calc_forces_on_multi_graph_batch(self) -> None:
         """Per-graph energies ``(B,)`` reduce to one scalar before differentiating."""
         forces = _bond_potentials(n_bonds=2).calc_forces(_two_molecule_bond_batch())

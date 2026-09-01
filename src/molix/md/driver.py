@@ -39,34 +39,44 @@ from molix.md.integrators import Integrator
 from molix.md.neighbors import NeighborList
 from molix.md.runner import MDHook, MDRunner
 from molix.md.types import MDState
-from molix.schema import ENERGY_KEY, FORCES_KEY, MASS_KEY, POS_KEY, VEL_KEY, VIRIAL_KEY, has_virial
+from molix.schema import ENERGY_KEY, MASS_KEY, POS_KEY, VEL_KEY
 from molix.units import preset_energy_to_md, units
 
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
 
 
-def _cell_from(work: TensorDict) -> torch.Tensor | None:
-    if ("graphs", "cell") not in work.keys(include_nested=True):
-        return None
-    cell = work["graphs", "cell"]
-    if not isinstance(cell, torch.Tensor):
-        return None
-    if cell.dim() == 3:
-        cell = cell[0]
-    return cell
-
-
 class _TensorDictForce:
-    """Private ``pos -> dict`` over ``to_potentials()``."""
+    """Private ``pos -> dict`` over ``to_potentials()``.
+
+    MD never owns an energy graph: the trajectory is stepped under
+    ``torch.no_grad()``, and the one ``energy.detach()`` at this seam
+    drops the autograd tape so the next step does not keep Polar's
+    saved tensors alive. Forces and virial come from a single
+    ``autograd.grad(..., create_graph=False)`` inside the pots.
+    """
 
     def __init__(self, pots: object, scale: float) -> None:
         self._pots = pots
         self._scale = float(scale)
         self._work: TensorDict | None = None
+        self._cell_view: torch.Tensor | None = None
+        self._edges_full: TensorDict | None = None
+        self.n_live: int | None = None
         self.want_virial = False
+        self._eval = self._eval_classical
 
     def bind_work(self, work: TensorDict) -> None:
         self._work = work
+        self._cell_view = None
+        if ("graphs", "cell") in work.keys(include_nested=True):
+            cell = work["graphs", "cell"]
+            self._cell_view = cell[0] if cell.dim() == 3 else cell
+        if self.want_virial:
+            self._eval = self._eval_npt
+        elif getattr(self._pots, "mlip", None) is not None:
+            self._eval = self._eval_mlip
+        else:
+            self._eval = self._eval_classical
 
     def to_pots(self, device: torch.device) -> None:
         to_fn = getattr(self._pots, "to", None)
@@ -80,53 +90,63 @@ class _TensorDictForce:
         if work is None:
             raise RuntimeError("bind the working TensorDict before evaluating forces")
         work[POS_KEY] = pos
-        calc_energy = getattr(self._pots, "calc_energy")
-        calc_forces = getattr(self._pots, "calc_forces")
+        self._expose_live_edges(work)
         try:
-            energy = calc_energy(work)
-        except TypeError as exc:
-            raise TypeError(
-                "calc_energy must accept a TensorDict; "
-                f"{type(self._pots).__name__}.calc_energy does not take TensorDict"
-            ) from exc
-        forces = calc_forces(work)
-        if not isinstance(energy, torch.Tensor) or not isinstance(forces, torch.Tensor):
-            raise TypeError(
-                "calc_energy must accept a TensorDict; "
-                f"{type(self._pots).__name__}.calc_energy does not take TensorDict"
-            )
-        if "graphs" not in work.keys():
-            work["graphs"] = TensorDict({}, batch_size=[])
-        stored = energy.reshape(-1) if energy.ndim == 0 else energy
-        try:
-            work[ENERGY_KEY] = stored
-        except RuntimeError:
-            pass
-        try:
-            work[FORCES_KEY] = forces
-        except RuntimeError:
-            pass
+            return self._eval(work)
+        finally:
+            self._restore_edges(work)
+
+    def _expose_live_edges(self, work: TensorDict) -> None:
+        """Hand the potential ``[0, n_live)`` only; padding stays on the list.
+
+        NeighborList buffers are capacity-sized (CUDA-graph contract). Dead
+        rows sit at ``DEAD_EDGE_CUTOFF_FACTOR * cutoff`` so the envelope is
+        zero, but a fallback tensor product still materialises them. Polar
+        MD is eager: a live view is correct and cheaper.
+        """
+        n = self.n_live
+        if n is None or "edges" not in work.keys():
+            return
+        full = work["edges"]
+        cap = int(full.batch_size[0]) if full.batch_size else 0
+        if n <= 0 or n >= cap:
+            return
+        self._edges_full = full
+        work["edges"] = TensorDict({key: full[key][:n] for key in full.keys()}, batch_size=[n])
+
+    def _restore_edges(self, work: TensorDict) -> None:
+        full = self._edges_full
+        if full is None:
+            return
+        work["edges"] = full
+        self._edges_full = None
+
+    def _pack(self, energy: torch.Tensor, forces: torch.Tensor) -> dict[str, torch.Tensor]:
         scale = self._scale
-        virial = None
-        if self.want_virial:
-            if has_virial(work):
-                virial = work[VIRIAL_KEY]
-            else:
-                calc_virial = getattr(self._pots, "calc_virial", None)
-                if calc_virial is None or _cell_from(work) is None:
-                    raise RuntimeError(
-                        "a barostat needs graphs.cell and pots.calc_virial "
-                        f"(got {type(self._pots).__name__})"
-                    )
-                virial = calc_virial(work)
-            virial = virial.detach() * scale
-        out: dict[str, torch.Tensor] = {
+        return {
+            # Detach is the MD/training seam: MDState must not keep the tape.
             "energy": energy.detach().sum() * scale,
-            "forces": forces.detach() * scale,
+            "forces": forces * scale,
         }
-        if virial is not None:
-            out["virial"] = virial
+
+    def _eval_npt(self, work: TensorDict) -> dict[str, torch.Tensor]:
+        calc = getattr(self._pots, "calc_energy_forces_virial", None)
+        if calc is None:
+            raise RuntimeError(
+                f"a barostat needs pots.calc_energy_forces_virial (got {type(self._pots).__name__})"
+            )
+        energy, forces, virial = calc(work)
+        out = self._pack(energy, forces)
+        out["virial"] = virial * self._scale
         return out
+
+    def _eval_mlip(self, work: TensorDict) -> dict[str, torch.Tensor]:
+        forces = self._pots.calc_forces(work)
+        return self._pack(work[ENERGY_KEY], forces)
+
+    def _eval_classical(self, work: TensorDict) -> dict[str, torch.Tensor]:
+        energy, forces = self._pots.calc_energy_forces(work)
+        return self._pack(energy, forces)
 
 
 class MaxwellBoltzmann:
@@ -283,6 +303,9 @@ class MD:
             self._adapter = None
             return
         pots = self.force.to_potentials()
+        if isinstance(pots, torch.nn.Module):
+            pots.eval()
+            pots.requires_grad_(False)
         scale = preset_energy_to_md(self.force.units)
         self._adapter = _TensorDictForce(pots, scale)
         self._adapter.want_virial = self.barostat is not None
@@ -316,6 +339,7 @@ class MD:
         work[POS_KEY] = pos
         if self.neighbors is not None:
             self.neighbors.update(work)
+            self._adapter.n_live = self.neighbors.num_edges
         return self._adapter(pos)
 
     def run(self, system: TensorDict, n_steps: int, *, chunk: int | None = None) -> MDState:
@@ -330,11 +354,12 @@ class MD:
             raise RuntimeError("set_forcefield and set_integrator before run")
         if chunk is None:
             chunk = 1
-        system = self._cast_system(system)
-        if self.neighbors is not None:
-            self.neighbors.build(system)
-        self._adapter.bind_work(system)
-        return self.runner.run(system, n_steps, chunk=chunk)
+        with torch.no_grad():
+            system = self._cast_system(system)
+            if self.neighbors is not None:
+                self.neighbors.build(system)
+            self._adapter.bind_work(system)
+            return self.runner.run(system, n_steps, chunk=chunk)
 
     def _cast_system(self, system: TensorDict) -> TensorDict:
         """Bring ``atoms.pos`` / ``vel`` / ``mass`` (and cell) onto the run dtype/device."""
@@ -355,15 +380,21 @@ class MD:
         return system
 
     def _sync_cell(self, state: MDState) -> None:
-        """Write a barostat-scaled cell back onto the work batch and neighbour list."""
+        """Write a barostat-scaled cell back onto the work batch and neighbour list.
+
+        Always copy into the tensor currently stored at ``graphs.cell``. A
+        virial strain pass must not leave a replacement tensor here; if it
+        did, a cached view would copy into orphaned storage and Polar
+        k-space would keep the pre-barostat lattice.
+        """
         if state.cell is None or self._adapter is None:
             return
         work = self._adapter._work
         if work is None:
             return
-        if "graphs" not in work.keys():
-            work["graphs"] = TensorDict({}, batch_size=[])
-        work["graphs", "cell"] = state.cell
+        if ("graphs", "cell") in work.keys(include_nested=True):
+            cell = work["graphs", "cell"]
+            (cell[0] if cell.dim() == 3 else cell).copy_(state.cell)
         work[POS_KEY] = state.pos
         if self.neighbors is not None:
-            self.neighbors.set_cell(state.cell, state.pos)
+            self.neighbors.scale_isotropic(state.cell, state.pos)

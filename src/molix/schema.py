@@ -59,6 +59,9 @@ ATOMIC_ENERGY_FLAT_KEY: str = "atomic_energy"
 EDGE_DIST_CLAMP_MIN: float = 1e-6
 #: Per-atom forces ``= -∂E/∂pos`` (``batch["atoms", "forces"]``).
 FORCES_KEY: tuple[str, str] = ("atoms", "forces")
+#: Graph-level virial ``W = ∂E/∂ε`` (``batch["graphs", "virial"]``), ``(3, 3)``
+#: or ``(B, 3, 3)`` in the energy unit. Stress is ``W / V``.
+VIRIAL_KEY: tuple[str, str] = ("graphs", "virial")
 #: Per-atom positions (``batch["atoms", "pos"]``).
 POS_KEY: tuple[str, str] = ("atoms", "pos")
 #: Per-atom velocities (``batch["atoms", "vel"]``) in Å/fs — MD trajectory.
@@ -75,3 +78,8 @@ def has_energy(batch: TensorDict) -> bool:
 def has_forces(batch: TensorDict) -> bool:
     """Whether ``batch`` carries per-atom forces at :data:`FORCES_KEY`."""
     return "atoms" in batch.keys() and "forces" in batch["atoms"].keys()
+
+
+def has_virial(batch: TensorDict) -> bool:
+    """Whether ``batch`` carries a graph-level virial at :data:`VIRIAL_KEY`."""
+    return "graphs" in batch.keys() and "virial" in batch["graphs"].keys()

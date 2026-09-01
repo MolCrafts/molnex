@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from molix.io.metrics import MetricsWriter, read_metrics, rebuild_metrics_index
-from molix.io.run_record import ensure_run_package, meta_path, status_path
+from molix.io.run_record import ensure_run_package, read_meta, read_status
 
 
 class TestMetricsWriter:
@@ -61,22 +61,25 @@ class TestMetricsWriter:
 class TestRunPackage:
     def test_ensure_run_package_writes_meta_status(self, tmp_path: Path) -> None:
         root = ensure_run_package(tmp_path / "pkg", state="running", stage="train")
-        meta = json.loads(meta_path(root).read_text())
-        status = json.loads(status_path(root).read_text())
-        assert meta["record_schema_version"] == 1
-        assert meta["format_name"] == "molrec"
+        assert json.loads((root / "zarr.json").read_text())["node_type"] == "group"
+        meta = read_meta(root)
+        status = read_status(root)
+        assert meta["molrec_version"] == 1
+        assert "format_name" not in meta
         assert status["state"] == "running"
         assert status["stage"] == "train"
 
-    def test_round_trip_matches_fixture_shape(self, tmp_path: Path) -> None:
-        """Same relative paths as molrec fixtures/run-minimal."""
+    def test_round_trip_matches_reference_binding_shape(self, tmp_path: Path) -> None:
+        """One Zarr V3 root: documents as group attributes, WAL beside them."""
         root = ensure_run_package(tmp_path / "pkg")
         writer = MetricsWriter(root)
         writer.scalar("train/loss", 0.5, step=1)
         writer.flush()
         rebuild_metrics_index(root)
 
-        assert (root / "meta" / "meta.json").is_file()
-        assert (root / "status" / "status.json").is_file()
+        assert (root / "zarr.json").is_file()
+        assert (root / "meta" / "zarr.json").is_file()
+        assert (root / "status" / "zarr.json").is_file()
         assert (root / "metrics" / "metrics.jsonl").is_file()
+        # molnex-local derived cache; rebuildable, never authoritative.
         assert (root / "metrics" / "index.json").is_file()

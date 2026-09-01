@@ -1,9 +1,9 @@
 """Tests for molzoo.mace.potential — the unified MACE energy/force potential.
 
-:class:`~molzoo.mace.potential.MACEPotential` merges the two pre-cutover flat
+:class:`~molzoo.mace.potential.MacePotential` merges the two pre-cutover flat
 foundation models — now the keyword aliases
-:class:`molzoo.mace.variants.MACEMatpes` /
-:class:`~molzoo.mace.variants.MACEOMol` — into one spec-driven class with two
+:class:`molzoo.mace.potential.MaceMatpes` /
+:class:`~molzoo.mace.potential.MaceOmol` — into one spec-driven class with two
 seams:
 
 * ``energy_core(...) -> (B,)`` — flat, public, compilable (1 dynamo graph);
@@ -18,9 +18,9 @@ The two keyword variants are imported here as **parity oracles**: the numbers
 must not move when the code moves house. Since the cutover
 (``mace-subpackage-restructure-06-wire``) they are subclasses of the class under
 test, so the parity is no longer "old module vs new module" but the two seams a
-caller actually has — ``MACEPotential.forward`` (batch schema, shared force
-kernel, own position leaf policy) against ``MACEMatpes.energy_forces`` /
-``MACEOMol.energy_forces`` (raw tensors, the variants' own leaf). Those are two
+caller actually has — ``MacePotential.forward`` (batch schema, shared force
+kernel, own position leaf policy) against ``MaceMatpes.energy_forces`` /
+``MaceOmol.energy_forces`` (raw tensors, the variants' own leaf). Those are two
 genuinely different code paths on one energy, and
 ``regressions/mace-subpackage-restructure-04-potential.py`` freezes the same
 numbers as hard-coded literals with no import of either.
@@ -44,9 +44,8 @@ from tensordict import TensorDict
 
 from molpot.derivation.protocol import call_energy
 from molzoo.mace.encoder import MACEEncoder
-from molzoo.mace.potential import MACEPotential
+from molzoo.mace.potential import MaceMatpes, MaceOmol, MacePotential
 from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec
-from molzoo.mace.variants import MACEMatpes, MACEOMol
 from tests.conftest import make_graph_batch, translate_graph
 from tests.test_molzoo.test_mace.conftest import (
     CLUSTER_POS,
@@ -80,7 +79,7 @@ FD_ATOL = 1e-6  # eV/Å
 FD_PROBES = ((0, 0), (2, 1), (4, 2))
 
 #: Hard-coded golden: the parameter names of the pre-cutover flat energy core
-#: (``MACEMatpes._compute_energy``, ``mace_matpes.py:229-237`` at 0e05959).
+#: (``MaceMatpes._compute_energy``, ``mace_matpes.py:229-237`` at 0e05959).
 #: ``energy_core`` must keep them so 07's call-site re-point is a pure rename.
 FLAT_ENERGY_CORE_PARAMETERS = ("self", "positions", "Z", "edge_index", "batch", "num_graphs")
 
@@ -116,7 +115,7 @@ def test_no_module_shadows_the_mace_test_package() -> None:
 # --------------------------------------------------------------------------
 
 
-def _transfer(potential: MACEPotential, variant: torch.nn.Module) -> MACEPotential:
+def _transfer(potential: MacePotential, variant: torch.nn.Module) -> MacePotential:
     """Move the oracle's weights into the potential by a strict key match."""
     potential.load_state_dict(variant.state_dict(), strict=True)
     return potential
@@ -140,7 +139,7 @@ def _called_names(tree: ast.AST) -> set[str]:
 
 def _potential_module_tree() -> ast.Module:
     """Parse ``src/molzoo/mace/potential.py``."""
-    source = Path(inspect.getsourcefile(MACEPotential) or "").read_text(encoding="utf-8")
+    source = Path(inspect.getsourcefile(MacePotential) or "").read_text(encoding="utf-8")
     return ast.parse(source)
 
 
@@ -185,54 +184,54 @@ def branch_cluster() -> TensorDict:
 
 
 @pytest.fixture
-def matpes_potential(tiny_matpes_spec: MACEMatpesSpec) -> MACEPotential:
+def matpes_potential(tiny_matpes_spec: MACEMatpesSpec) -> MacePotential:
     """Energy + force MatPES potential on the tiny spec."""
     torch.manual_seed(0)
-    return MACEPotential(tiny_matpes_spec).eval()
+    return MacePotential(tiny_matpes_spec).eval()
 
 
 @pytest.fixture
-def energy_only_potential(tiny_matpes_spec: MACEMatpesSpec) -> MACEPotential:
+def energy_only_potential(tiny_matpes_spec: MACEMatpesSpec) -> MacePotential:
     """Energy-only MatPES potential — ``compute_forces=False`` is a *construction*."""
     torch.manual_seed(0)
-    return MACEPotential(tiny_matpes_spec, compute_forces=False).eval()
+    return MacePotential(tiny_matpes_spec, compute_forces=False).eval()
 
 
 @pytest.fixture
-def omol_potential(tiny_omol_spec: MACEOMolSpec) -> MACEPotential:
+def omol_potential(tiny_omol_spec: MACEOMolSpec) -> MacePotential:
     """Energy + force OMOL potential on the tiny spec."""
     torch.manual_seed(0)
-    return MACEPotential(tiny_omol_spec).eval()
+    return MacePotential(tiny_omol_spec).eval()
 
 
 @pytest.fixture
 def matpes_parity(
-    tiny_matpes_spec: MACEMatpesSpec, matpes_variant: MACEMatpes
-) -> tuple[MACEPotential, MACEMatpes]:
+    tiny_matpes_spec: MACEMatpesSpec, matpes_variant: MaceMatpes
+) -> tuple[MacePotential, MaceMatpes]:
     """MatPES potential holding the oracle variant's weights, plus the oracle."""
-    return _transfer(MACEPotential(tiny_matpes_spec).eval(), matpes_variant), matpes_variant
+    return _transfer(MacePotential(tiny_matpes_spec).eval(), matpes_variant), matpes_variant
 
 
 @pytest.fixture
 def omol_parity(
-    tiny_omol_spec: MACEOMolSpec, omol_variant: MACEOMol
-) -> tuple[MACEPotential, MACEOMol]:
+    tiny_omol_spec: MACEOMolSpec, omol_variant: MaceOmol
+) -> tuple[MacePotential, MaceOmol]:
     """OMOL potential holding the oracle variant's weights, plus the oracle."""
-    return _transfer(MACEPotential(tiny_omol_spec).eval(), omol_variant), omol_variant
+    return _transfer(MacePotential(tiny_omol_spec).eval(), omol_variant), omol_variant
 
 
-class TestMACEPotential:
+class TestMacePotential:
     """Test the unified MACE energy/force potential."""
 
     # -- construction ---------------------------------------------------------
 
     def test_inherits_the_encoder_so_state_dict_keys_stay_flat(self) -> None:
         """Holding an encoder would prefix every key with ``encoder.`` (ac-007)."""
-        assert issubclass(MACEPotential, MACEEncoder)
+        assert issubclass(MacePotential, MACEEncoder)
 
     def test_constructor_takes_a_spec_and_two_keyword_switches(self) -> None:
-        """``MACEPotential(spec, *, compute_forces=True, use_fallback=False)``."""
-        parameters = inspect.signature(MACEPotential.__init__).parameters
+        """``MacePotential(spec, *, compute_forces=True, use_fallback=False)``."""
+        parameters = inspect.signature(MacePotential.__init__).parameters
         assert list(parameters) == ["self", "spec", "compute_forces", "use_fallback"]
         assert parameters["spec"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
         assert parameters["compute_forces"].kind is inspect.Parameter.KEYWORD_ONLY
@@ -240,12 +239,12 @@ class TestMACEPotential:
 
     def test_forces_are_computed_by_default(self) -> None:
         """MD / evaluation is the main use — unlike ``PiNetPotential``."""
-        parameters = inspect.signature(MACEPotential.__init__).parameters
+        parameters = inspect.signature(MacePotential.__init__).parameters
         assert parameters["compute_forces"].default is True
         assert parameters["use_fallback"].default is False
 
     def test_the_spec_decides_the_cuequivariance_path(
-        self, matpes_potential: MACEPotential
+        self, matpes_potential: MacePotential
     ) -> None:
         """``spec.use_fallback=True`` (the tiny CPU spec) builds pure-torch blocks."""
         assert matpes_potential.interactions[0].use_fallback is True
@@ -261,20 +260,20 @@ class TestMACEPotential:
         "not given"), while a CPU / test call site can always force it on.
         """
         assert tiny_omol_spec.use_fallback is False
-        potential = MACEPotential(tiny_omol_spec, use_fallback=True)
+        potential = MacePotential(tiny_omol_spec, use_fallback=True)
         assert potential.interactions[0].use_fallback is True
         assert potential.products[0].use_fallback is True
 
     # -- state_dict parity: the chain gate ------------------------------------
 
     def test_state_dict_keys_match_the_matpes_variant(
-        self, matpes_potential: MACEPotential, matpes_variant: MACEMatpes
+        self, matpes_potential: MacePotential, matpes_variant: MaceMatpes
     ) -> None:
         """An official MatPES checkpoint must keep loading without a key rewrite."""
         assert set(matpes_potential.state_dict()) == set(matpes_variant.state_dict())
 
     def test_state_dict_shapes_match_the_matpes_variant(
-        self, matpes_potential: MACEPotential, matpes_variant: MACEMatpes
+        self, matpes_potential: MacePotential, matpes_variant: MaceMatpes
     ) -> None:
         """Same names *and* same shapes, or ``strict=True`` transfer is a lie."""
         oracle = {k: tuple(v.shape) for k, v in matpes_variant.state_dict().items()}
@@ -282,13 +281,13 @@ class TestMACEPotential:
         assert own == oracle
 
     def test_state_dict_keys_match_the_omol_variant(
-        self, omol_potential: MACEPotential, omol_variant: MACEOMol
+        self, omol_potential: MacePotential, omol_variant: MaceOmol
     ) -> None:
         """The OMOL arm of the same gate."""
         assert set(omol_potential.state_dict()) == set(omol_variant.state_dict())
 
     def test_state_dict_shapes_match_the_omol_variant(
-        self, omol_potential: MACEPotential, omol_variant: MACEOMol
+        self, omol_potential: MacePotential, omol_variant: MaceOmol
     ) -> None:
         """The OMOL arm of the same gate, shapes."""
         oracle = {k: tuple(v.shape) for k, v in omol_variant.state_dict().items()}
@@ -296,14 +295,14 @@ class TestMACEPotential:
         assert own == oracle
 
     def test_loads_the_matpes_variant_state_dict_strictly(
-        self, matpes_potential: MACEPotential, matpes_variant: MACEMatpes
+        self, matpes_potential: MacePotential, matpes_variant: MaceMatpes
     ) -> None:
         """No missing, no unexpected: a direct hand-over, not a fuzzy remap."""
         report = matpes_potential.load_state_dict(matpes_variant.state_dict(), strict=True)
         assert (list(report.missing_keys), list(report.unexpected_keys)) == ([], [])
 
     def test_loads_the_omol_variant_state_dict_strictly(
-        self, omol_potential: MACEPotential, omol_variant: MACEOMol
+        self, omol_potential: MacePotential, omol_variant: MaceOmol
     ) -> None:
         """The OMOL arm of the strict hand-over."""
         report = omol_potential.load_state_dict(omol_variant.state_dict(), strict=True)
@@ -312,27 +311,27 @@ class TestMACEPotential:
     # -- forward: the molix.md.forcefield contract ----------------------------
 
     def test_forward_returns_the_same_batch_object(
-        self, matpes_potential: MACEPotential, cluster: TensorDict
+        self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
         """Writes are in place — ``PotentialForceField`` keeps its own handle."""
         assert matpes_potential(cluster) is cluster
 
     def test_forward_writes_one_energy_per_graph(
-        self, matpes_potential: MACEPotential, pair_batch: TensorDict
+        self, matpes_potential: MacePotential, pair_batch: TensorDict
     ) -> None:
         """``graphs.energy`` is ``(B,)`` in eV."""
         out = matpes_potential(pair_batch)
         assert out["graphs", "energy"].shape == (2,)
 
     def test_forward_writes_one_force_vector_per_atom(
-        self, matpes_potential: MACEPotential, pair_batch: TensorDict
+        self, matpes_potential: MacePotential, pair_batch: TensorDict
     ) -> None:
         """``atoms.forces`` is ``(N, 3)`` in eV/Å."""
         out = matpes_potential(pair_batch)
         assert out["atoms", "forces"].shape == (len(PAIR_Z), 3)
 
     def test_forward_builds_the_graphs_namespace_with_the_batch_size(
-        self, matpes_potential: MACEPotential, pair_batch: TensorDict
+        self, matpes_potential: MacePotential, pair_batch: TensorDict
     ) -> None:
         """A missing ``graphs`` must come back as ``batch_size=[B]``, never ``[]``.
 
@@ -345,7 +344,7 @@ class TestMACEPotential:
         assert out["graphs"].batch_size == torch.Size([2])
 
     def test_energy_only_forward_also_builds_graphs_with_the_batch_size(
-        self, energy_only_potential: MACEPotential, pair_batch: TensorDict
+        self, energy_only_potential: MacePotential, pair_batch: TensorDict
     ) -> None:
         """The energy-only pipeline is ``_write_energy`` — same schema duty."""
         del pair_batch["graphs"]
@@ -353,7 +352,7 @@ class TestMACEPotential:
         assert out["graphs"].batch_size == torch.Size([2])
 
     def test_forward_consumes_the_periodic_shifts(
-        self, matpes_potential: MACEPotential, periodic_cluster: TensorDict
+        self, matpes_potential: MacePotential, periodic_cluster: TensorDict
     ) -> None:
         """``edges.shifts`` must reach the edge vectors, not be dropped."""
         pos, Z, edge_index, batch, num_graphs = raw_tensors(periodic_cluster)
@@ -366,14 +365,14 @@ class TestMACEPotential:
         assert torch.allclose(out["graphs", "energy"], expected, atol=ENERGY_PARITY_ATOL, rtol=0.0)
 
     def test_energy_only_instance_writes_no_forces(
-        self, energy_only_potential: MACEPotential, cluster: TensorDict
+        self, energy_only_potential: MacePotential, cluster: TensorDict
     ) -> None:
         """ "Energy only" is a constructed object, and it must not pay for forces."""
         out = energy_only_potential(cluster)
         assert ("atoms", "forces") not in out.keys(include_nested=True)
 
     def test_energy_only_instance_still_writes_the_energy(
-        self, energy_only_potential: MACEPotential, cluster: TensorDict
+        self, energy_only_potential: MacePotential, cluster: TensorDict
     ) -> None:
         """The energy-only pipeline is still a full energy pipeline."""
         out = energy_only_potential(cluster)
@@ -382,28 +381,28 @@ class TestMACEPotential:
     # -- needs_leaf policy ----------------------------------------------------
 
     def test_detached_positions_yield_a_detached_energy(
-        self, matpes_potential: MACEPotential, cluster: TensorDict
+        self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
         """The potential owns the leaf, so nobody downstream can lose a graph."""
         out = matpes_potential(cluster)
         assert out["graphs", "energy"].requires_grad is False
 
     def test_non_leaf_positions_yield_a_detached_energy(
-        self, matpes_potential: MACEPotential, branch_cluster: TensorDict
+        self, matpes_potential: MacePotential, branch_cluster: TensorDict
     ) -> None:
         """``needs_leaf = not (requires_grad and is_leaf)`` — a branch is not a leaf."""
         out = matpes_potential(branch_cluster)
         assert out["graphs", "energy"].requires_grad is False
 
     def test_grad_leaf_positions_keep_the_energy_attached(
-        self, matpes_potential: MACEPotential, leaf_cluster: TensorDict
+        self, matpes_potential: MacePotential, leaf_cluster: TensorDict
     ) -> None:
         """Detaching here would cut the training path at the first potential."""
         out = matpes_potential(leaf_cluster)
         assert out["graphs", "energy"].requires_grad is True
 
     def test_grad_leaf_energy_loss_reaches_the_parameters(
-        self, matpes_potential: MACEPotential, leaf_cluster: TensorDict
+        self, matpes_potential: MacePotential, leaf_cluster: TensorDict
     ) -> None:
         """The whole point of not detaching: ``loss.backward()`` trains the model."""
         out = matpes_potential(leaf_cluster)
@@ -415,25 +414,25 @@ class TestMACEPotential:
 
     def test_energy_core_keeps_the_flat_parameter_names(self) -> None:
         """07's call-site re-point must be a pure rename of ``_compute_energy``."""
-        parameters = tuple(inspect.signature(MACEPotential.energy_core).parameters)
+        parameters = tuple(inspect.signature(MacePotential.energy_core).parameters)
         assert parameters[: len(FLAT_ENERGY_CORE_PARAMETERS)] == FLAT_ENERGY_CORE_PARAMETERS
 
     def test_energy_core_takes_the_conditioning_tensors_last(self) -> None:
         """``shifts`` then the two per-graph OMOL tensors, all optional."""
-        parameters = inspect.signature(MACEPotential.energy_core).parameters
+        parameters = inspect.signature(MacePotential.energy_core).parameters
         assert tuple(parameters)[len(FLAT_ENERGY_CORE_PARAMETERS) :] == CONDITIONING_PARAMETERS
         assert all(parameters[name].default is None for name in CONDITIONING_PARAMETERS)
 
     def test_energy_core_first_six_parameters_are_positional(self) -> None:
         """``run_nve.py`` calls it positionally on the MD hot path."""
-        parameters = inspect.signature(MACEPotential.energy_core).parameters
+        parameters = inspect.signature(MacePotential.energy_core).parameters
         assert all(
             parameters[name].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
             for name in FLAT_ENERGY_CORE_PARAMETERS[1:]
         )
 
     def test_energy_core_returns_one_energy_per_graph(
-        self, matpes_potential: MACEPotential, pair_batch: TensorDict
+        self, matpes_potential: MacePotential, pair_batch: TensorDict
     ) -> None:
         """Flat tensors in, ``(B,)`` eV out — no TensorDict on this seam."""
         with torch.no_grad():
@@ -441,7 +440,7 @@ class TestMACEPotential:
         assert energy.shape == (2,)
 
     def test_energy_core_agrees_with_the_forward_energy(
-        self, matpes_potential: MACEPotential, cluster: TensorDict
+        self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
         """One energy, two seams: the TensorDict path must add nothing."""
         with torch.no_grad():
@@ -450,7 +449,7 @@ class TestMACEPotential:
         assert torch.allclose(out["graphs", "energy"], direct, atol=ENERGY_PARITY_ATOL, rtol=0.0)
 
     def test_matpes_energy_core_rejects_a_total_charge(
-        self, matpes_potential: MACEPotential, cluster: TensorDict
+        self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
         """Silently ignoring the conditioning would return a wrong energy."""
         with pytest.raises(ValueError):
@@ -459,7 +458,7 @@ class TestMACEPotential:
             )
 
     def test_matpes_energy_core_rejects_a_total_spin(
-        self, matpes_potential: MACEPotential, cluster: TensorDict
+        self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
         """Same for the spin channel — this variant has no joint embedding."""
         with pytest.raises(ValueError):
@@ -468,7 +467,7 @@ class TestMACEPotential:
             )
 
     def test_omol_energy_core_consumes_the_total_charge(
-        self, omol_parity: tuple[MACEPotential, MACEOMol], omol_cluster: TensorDict
+        self, omol_parity: tuple[MacePotential, MaceOmol], omol_cluster: TensorDict
     ) -> None:
         """A different charge must reach the joint embedding and move the energy."""
         potential, _ = omol_parity
@@ -498,7 +497,7 @@ class TestMACEPotential:
     # -- _write_energy: the protocol hook -------------------------------------
 
     def test_call_energy_dispatches_to_the_energy_core(
-        self, matpes_potential: MACEPotential, cluster: TensorDict
+        self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
         """``EnergyReadout`` must reach the core, not the force pipeline."""
         out = call_energy(matpes_potential, cluster)
@@ -506,7 +505,7 @@ class TestMACEPotential:
         assert ("atoms", "forces") not in out.keys(include_nested=True)
 
     def test_call_energy_keeps_the_energy_on_the_callers_leaf(
-        self, matpes_potential: MACEPotential, leaf_cluster: TensorDict
+        self, matpes_potential: MacePotential, leaf_cluster: TensorDict
     ) -> None:
         """``_write_energy`` must not detach — ``ForceReadout`` differentiates it."""
         out = call_energy(matpes_potential, leaf_cluster)
@@ -517,12 +516,12 @@ class TestMACEPotential:
     @pytest.mark.parametrize("method", ["forward", "energy_core", "_write_energy"])
     def test_no_compute_forces_on_the_public_surface(self, method: str) -> None:
         """ "Energy only" is a construction, never a per-call flag."""
-        parameters = inspect.signature(getattr(MACEPotential, method)).parameters
+        parameters = inspect.signature(getattr(MacePotential, method)).parameters
         assert "compute_forces" not in parameters
 
     def test_forward_is_a_single_pipeline_dispatch(self) -> None:
         """``return self._pipeline(batch)`` — every branch resolved in ``__init__``."""
-        body = _function_body(MACEPotential.forward)
+        body = _function_body(MacePotential.forward)
         assert len(body) == 1
         statement = body[0]
         assert isinstance(statement, ast.Return)
@@ -539,7 +538,7 @@ class TestMACEPotential:
     # -- numerical parity with the keyword variants (fp64, hard tolerance) ----
 
     def test_matpes_energy_matches_the_variant_energy_forces(
-        self, matpes_parity: tuple[MACEPotential, MACEMatpes], cluster: TensorDict
+        self, matpes_parity: tuple[MacePotential, MaceMatpes], cluster: TensorDict
     ) -> None:
         """Moving house must not move a bit (1e-12 eV on a −3.1 keV total)."""
         potential, variant = matpes_parity
@@ -551,7 +550,7 @@ class TestMACEPotential:
         )
 
     def test_matpes_forces_match_the_variant_energy_forces(
-        self, matpes_parity: tuple[MACEPotential, MACEMatpes], cluster: TensorDict
+        self, matpes_parity: tuple[MacePotential, MaceMatpes], cluster: TensorDict
     ) -> None:
         """Same for ``F = -dE/dx`` (1e-12 eV/Å)."""
         potential, variant = matpes_parity
@@ -563,7 +562,7 @@ class TestMACEPotential:
         )
 
     def test_matpes_periodic_energy_matches_the_variant_energy_forces(
-        self, matpes_parity: tuple[MACEPotential, MACEMatpes], periodic_cluster: TensorDict
+        self, matpes_parity: tuple[MacePotential, MaceMatpes], periodic_cluster: TensorDict
     ) -> None:
         """The ``edges.shifts`` path is the MD path — it gets its own parity check."""
         potential, variant = matpes_parity
@@ -578,7 +577,7 @@ class TestMACEPotential:
         )
 
     def test_matpes_periodic_forces_match_the_variant_energy_forces(
-        self, matpes_parity: tuple[MACEPotential, MACEMatpes], periodic_cluster: TensorDict
+        self, matpes_parity: tuple[MacePotential, MaceMatpes], periodic_cluster: TensorDict
     ) -> None:
         """``S_ij`` is constant w.r.t. ``pos``, so the forces stay exact."""
         potential, variant = matpes_parity
@@ -593,7 +592,7 @@ class TestMACEPotential:
         )
 
     def test_omol_energy_matches_the_variant_energy_forces(
-        self, omol_parity: tuple[MACEPotential, MACEOMol], omol_cluster: TensorDict
+        self, omol_parity: tuple[MacePotential, MaceOmol], omol_cluster: TensorDict
     ) -> None:
         """The conditioned arm: charge 0 / spin 1, the flat model's own defaults."""
         potential, variant = omol_parity
@@ -603,8 +602,8 @@ class TestMACEPotential:
             Z,
             edge_index,
             batch,
-            omol_cluster["graphs", "total_charge"],
-            omol_cluster["graphs", "total_spin"],
+            total_charge=omol_cluster["graphs", "total_charge"],
+            total_spin=omol_cluster["graphs", "total_spin"],
         )
         energy = potential(omol_cluster)["graphs", "energy"]
         assert torch.allclose(energy, reference["energy"], atol=ENERGY_PARITY_ATOL, rtol=0.0), (
@@ -612,7 +611,7 @@ class TestMACEPotential:
         )
 
     def test_omol_forces_match_the_variant_energy_forces(
-        self, omol_parity: tuple[MACEPotential, MACEOMol], omol_cluster: TensorDict
+        self, omol_parity: tuple[MacePotential, MaceOmol], omol_cluster: TensorDict
     ) -> None:
         """Non-vacuous by construction — see :func:`.conftest.wake_zero_init_readout`."""
         potential, variant = omol_parity
@@ -622,8 +621,8 @@ class TestMACEPotential:
             Z,
             edge_index,
             batch,
-            omol_cluster["graphs", "total_charge"],
-            omol_cluster["graphs", "total_spin"],
+            total_charge=omol_cluster["graphs", "total_charge"],
+            total_spin=omol_cluster["graphs", "total_spin"],
         )
         largest = float(reference["forces"].detach().abs().max())
         assert largest > 0.0, "vacuous oracle: every reference force is exactly zero"
@@ -633,7 +632,7 @@ class TestMACEPotential:
         )
 
     def test_omol_defaults_to_a_neutral_closed_shell_singlet(
-        self, omol_parity: tuple[MACEPotential, MACEOMol], omol_cluster: TensorDict
+        self, omol_parity: tuple[MacePotential, MaceOmol], omol_cluster: TensorDict
     ) -> None:
         """Unconditioned batch → charge 0 / spin 1, as the flat model defaults.
 
@@ -657,13 +656,13 @@ class TestMACEPotential:
 
     # -- physics --------------------------------------------------------------
 
-    def test_net_force_vanishes(self, matpes_potential: MACEPotential, cluster: TensorDict) -> None:
+    def test_net_force_vanishes(self, matpes_potential: MacePotential, cluster: TensorDict) -> None:
         """Newton's third law: the energy depends on ``pos`` only through ``r_ij``."""
         forces = matpes_potential(cluster)["atoms", "forces"]
         assert float(forces.detach().sum(0).abs().max()) <= NET_FORCE_ATOL
 
     def test_energy_is_translation_invariant(
-        self, matpes_potential: MACEPotential, cluster: TensorDict
+        self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
         """A rigid 1 Å shift cannot change a physical energy."""
         moved = translate_graph(cluster, torch.tensor(TRANSLATION, dtype=torch.float64))
@@ -672,7 +671,7 @@ class TestMACEPotential:
         assert float((after - before).abs().max()) <= ENERGY_PARITY_ATOL
 
     def test_forces_match_central_differences(
-        self, matpes_potential: MACEPotential, cluster: TensorDict
+        self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
         """``F = -dE/dx`` against a numerical derivative of ``energy_core``."""
         forces = matpes_potential(cluster)["atoms", "forces"]
@@ -696,7 +695,7 @@ class TestMACEPotential:
     # -- element table gate ---------------------------------------------------
 
     def test_rejects_atomic_numbers_outside_the_table(
-        self, matpes_potential: MACEPotential
+        self, matpes_potential: MacePotential
     ) -> None:
         """``searchsorted`` would snap Fe onto a neighbour and be quietly wrong."""
         off_table = make_graph_batch(
@@ -710,7 +709,7 @@ class TestMACEPotential:
 
     def test_the_element_gate_runs_once_per_instance(
         self,
-        matpes_potential: MACEPotential,
+        matpes_potential: MacePotential,
         cluster: TensorDict,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -738,7 +737,7 @@ class TestMACEPotential:
 
     @pytest.mark.slow
     def test_energy_core_compiles_to_one_graph(
-        self, matpes_potential: MACEPotential, cluster: TensorDict
+        self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
         """The flat seam exists to be compiled: 1 dynamo graph, 0 breaks."""
         torch._dynamo.reset()

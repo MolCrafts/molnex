@@ -22,8 +22,9 @@ writes one ``.pt`` (+ optional extended-XYZ via
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 from tensordict import TensorDict
@@ -31,6 +32,9 @@ from tensordict import TensorDict
 from molix.md.integrators import Integrator, _as_mass_col
 from molix.md.types import MDObservables, MDState
 from molix.schema import MASS_KEY, POS_KEY, VEL_KEY
+
+if TYPE_CHECKING:
+    from molix.md.barostat import BerendsenBarostat
 from molix.units import units
 
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
@@ -142,11 +146,15 @@ class MDRunner:
         hooks: Sequence[MDHook | tuple[MDHook, int]] | None = None,
         kb: float = _KB_MD,
         dof: int | None = None,
+        barostat: BerendsenBarostat | None = None,
+        sync_state: Callable[[MDState], None] | None = None,
     ) -> None:
         self.integrator = integrator
         self.hooks: list[MDHook] = _normalize_hooks(hooks)
         self._kb = float(kb)
         self._dof = dof
+        self.barostat = barostat
+        self.sync_state = sync_state
 
     def run(self, system: TensorDict, n_steps: int, *, chunk: int = 1) -> MDState:
         """Integrate ``n_steps`` on ``system``, firing hooks per chunk.
@@ -166,6 +174,11 @@ class MDRunner:
         vel = system[VEL_KEY]
         self.integrator.bind_mass(system[MASS_KEY])
         mass = _as_mass_col(system[MASS_KEY], pos)
+        cell = None
+        if ("graphs", "cell") in system.keys(include_nested=True):
+            cell = system["graphs", "cell"]
+            if cell.dim() == 3:
+                cell = cell[0]
         if self._dof is not None:
             dof = self._dof
         else:
@@ -178,7 +191,7 @@ class MDRunner:
                     f"{type(hook).__name__} fires every {hook.cadence} steps, which chunk="
                     f"{chunk} would silently skip; make it a multiple of chunk"
                 )
-        md = self.integrator.initial(pos, vel)
+        md = self.integrator.initial(pos, vel, cell=cell)
         for hook in self.hooks:
             hook.on_init(self, md)
         for hook in self.hooks:
@@ -192,10 +205,20 @@ class MDRunner:
             for hook in self.hooks:
                 hook.on_step_start(self, done, md)
             md = self.integrator.advance_n(md, n)
+            if self.barostat is not None:
+                md = self.barostat.scale(md, mass=system[MASS_KEY], dt=float(self.integrator.dt))
+                if self.sync_state is not None:
+                    self.sync_state(md)
             done += n
             kinetic = 0.5 * (mass * md.vel * md.vel).sum()
             potential = md.energy.reshape(())
             temperature = 2.0 * kinetic / (dof * self._kb)
+            volume = None
+            pressure = None
+            if md.cell is not None:
+                volume = torch.linalg.det(md.cell).abs()
+                if md.virial is not None:
+                    pressure = (2.0 * kinetic - md.virial.trace()) / (3.0 * volume)
             obs = MDObservables(
                 pos=md.pos,
                 vel=md.vel,
@@ -204,6 +227,10 @@ class MDRunner:
                 kinetic=kinetic,
                 total=potential + kinetic,
                 temperature=temperature,
+                cell=md.cell,
+                virial=md.virial,
+                volume=volume,
+                pressure=pressure,
             )
             for hook in self.hooks:
                 hook.on_step_end(self, done, obs)
@@ -211,6 +238,9 @@ class MDRunner:
             hook.on_run_end(self)
         system[POS_KEY] = md.pos
         system[VEL_KEY] = md.vel
+        if md.cell is not None and "graphs" in system.keys() and "cell" in system["graphs"].keys():
+            dst = system["graphs", "cell"]
+            (dst[0] if dst.dim() == 3 else dst).copy_(md.cell)
         return md
 
 

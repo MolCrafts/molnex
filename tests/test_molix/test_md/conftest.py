@@ -7,8 +7,6 @@ per the repo test-layout rule — no free-floating helper modules.
 import torch
 from tensordict import TensorDict
 
-from molix.md.types import ForceOutput
-
 _DEVICE = torch.device("cpu")
 
 
@@ -31,10 +29,10 @@ def harmonic_potential_like(
             self.calls = 0
             self.neighbors = neighbors
 
-        def __call__(self, pos: torch.Tensor) -> ForceOutput:
+        def __call__(self, pos: torch.Tensor) -> dict[str, torch.Tensor]:
             self.calls += 1
             energy = 0.5 * k * (pos * pos).sum()
-            return ForceOutput(energy, -float(k) * pos)
+            return {"energy": energy, "forces": -float(k) * pos}
 
         def rebuild_neighbors(self, pos: torch.Tensor) -> None:
             self.rebuild_positions.append(pos.detach().clone())

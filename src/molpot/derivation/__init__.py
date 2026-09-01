@@ -38,6 +38,7 @@ from molpot.derivation.energy_readout import EnergyReadout
 from molpot.derivation.force import (
     ForceDerivation,
     autograd_forces,
+    autograd_forces_and_virial,
     autograd_forces_from_energy,
     functorch_forces,
     functorch_forces_with_aux,
@@ -55,6 +56,7 @@ __all__ = [
     "HessianDerivation",
     "StressDerivation",
     "autograd_forces",
+    "autograd_forces_and_virial",
     "autograd_forces_from_energy",
     "func_force_pass",
     "functorch_forces",

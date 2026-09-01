@@ -877,14 +877,14 @@ class NeighborList:
         self.ago = 0
         self._x_hold.copy_(positions.detach().to(self._x_hold.dtype))
 
-    def _positions_from(self, batch: TensorDictBase) -> torch.Tensor:
+    def _positions_from(self, batch: TensorDictBase, *, check_cell: bool = True) -> torch.Tensor:
         """Validate that ``batch`` describes *this* system; return its positions.
 
-        Shared by :meth:`build` and the batch arm of :meth:`update`, so the
-        per-step path cannot drift from the bind-time path. The checks are
-        metadata compares — key presence, shape, ``device``, ``dtype`` — and so
-        cost the hot loop nothing measurable; the single value read is the
-        optional cell comparison, and an MD working batch carries no cell.
+        Shared by :meth:`build` and the batch arm of :meth:`update`. Shape /
+        device / dtype are metadata compares. The cell ``allclose`` is a GPU
+        host-sync, so :meth:`update` skips it (``check_cell=False``): NPT
+        adopts a new lattice through :meth:`scale_isotropic` / :meth:`set_cell`,
+        and :meth:`build` still refuses a disagreeing cell at bind time.
 
         Args:
             batch: Batch ``TensorDict`` with positions at ``("atoms", "pos")``
@@ -944,7 +944,7 @@ class NeighborList:
                 "comparison nobody asked for, and a cross-device index is worse. The owner "
                 "casts — call NeighborList.to(device, dtype) first."
             )
-        if ("graphs", "cell") not in batch.keys(include_nested=True):
+        if not check_cell or ("graphs", "cell") not in batch.keys(include_nested=True):
             return pos
         cell = batch["graphs", "cell"]
         if not isinstance(cell, torch.Tensor):
@@ -1008,6 +1008,74 @@ class NeighborList:
         """
         self._build_at(positions)
         self.rebuild_count += 1
+
+    def scale_isotropic(self, cell: torch.Tensor, positions: torch.Tensor) -> None:
+        """Adopt an isotropically scaled lattice without rebuilding pairs.
+
+        Berendsen NPT multiplies ``pos`` and ``cell`` by the same ``μ``.
+        Integer lattice translations stay put, so Cartesian ``shifts`` and
+        the displacement hold scale by ``μ`` and pair identity is unchanged.
+        The ``every`` / ``delay`` clock is not reset.
+
+        Args:
+            cell: New lattice ``(3, 3)`` Å, one vector per row.
+            positions: Positions already scaled with the cell ``(N, 3)`` Å.
+
+        Raises:
+            ValueError: If the scaled box is too small for ``r_build``.
+        """
+        cell = cell.to(device=self._device, dtype=self._dtype)
+        mu = (
+            (torch.linalg.det(cell).abs() / torch.linalg.det(self.cell).abs())
+            .clamp(min=1.0e-12)
+            .pow(1.0 / 3.0)
+        )
+        half = 0.5 * float(_perpendicular_widths(cell).min())
+        if self._r_build > half:
+            raise ValueError(
+                f"r_build {self._r_build} A exceeds half the new perpendicular "
+                f"cell width ({half:.3f} A); the barostat scaled the box "
+                "below the neighbour-list cutoff. Use a larger starting cell "
+                "or a shorter cutoff."
+            )
+        self.shifts[: self.num_edges].mul_(mu)
+        self._x_hold.mul_(mu)
+        self.cell = cell
+        self._wrap_guard_sq = half**2
+        if self.bin is not None:
+            self._configure_bins(self.bin)
+
+    def set_cell(self, cell: torch.Tensor, positions: torch.Tensor) -> None:
+        """Adopt a new lattice and rebuild. Used after a barostat scale.
+
+        Re-checks ``r_build`` against half the new perpendicular width and
+        re-derives the bin grid when the binned backend is on.
+
+        Args:
+            cell: Lattice vectors ``(3, 3)`` Å, one vector per row.
+            positions: Positions ``(N, 3)`` Å at the new cell (already scaled).
+
+        Raises:
+            ValueError: If the new cell is degenerate or too small for
+                ``r_build``.
+        """
+        if cell.dim() == 3:
+            cell = cell[0]
+        cell = cell.to(device=self._device, dtype=self._dtype)
+        min_width = float(_perpendicular_widths(cell).min())
+        half_width = 0.5 * min_width
+        if self._r_build > half_width:
+            raise ValueError(
+                f"r_build {self._r_build} A exceeds half the new perpendicular "
+                f"cell width ({half_width:.3f} A); the barostat scaled the box "
+                "below the neighbour-list cutoff. Use a larger starting cell "
+                "or a shorter cutoff."
+            )
+        self.cell = cell
+        self._wrap_guard_sq = half_width**2
+        if self.bin is not None:
+            self._configure_bins(self.bin)
+        self.rebuild(positions)
 
     def build(self, batch: TensorDict) -> TensorDict:
         """Rebuild at the batch's positions and bind the live buffers into it.
@@ -1117,7 +1185,7 @@ class NeighborList:
                 entirely.
         """
         batch = positions if isinstance(positions, TensorDictBase) else None
-        pos = self._positions_from(positions) if batch is not None else positions
+        pos = self._positions_from(positions, check_cell=False) if batch is not None else positions
         rebuilt = False
         self.ago += 1
         permitted = self.ago >= self.delay and self.ago % self.every == 0

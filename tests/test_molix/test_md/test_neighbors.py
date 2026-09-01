@@ -89,6 +89,22 @@ class TestNeighborList:
         assert torch.allclose(grad[0], torch.tensor([1.0, 0.0, 0.0], dtype=torch.float64))
         assert torch.allclose(grad[1], torch.tensor([-1.0, 0.0, 0.0], dtype=torch.float64))
 
+    def test_scale_isotropic_scales_shifts_without_rebuild(self):
+        """Berendsen μ scales Cartesian shifts in place; pair identity stays."""
+        cell = torch.eye(3, dtype=torch.float64) * 10.0
+        pos = torch.tensor([[0.5, 5.0, 5.0], [9.5, 5.0, 5.0]], dtype=torch.float64)
+        nl = NeighborList(cell=cell, cutoff=2.0, positions=pos, skin=0.5, bin=0.0)
+        n_edges = nl.num_edges
+        n_rebuilds = nl.rebuild_count
+        index = nl.edge_index.clone()
+        mu = 1.01
+        nl.scale_isotropic(cell * mu, pos * mu)
+        assert nl.rebuild_count == n_rebuilds
+        assert nl.num_edges == n_edges
+        assert torch.equal(nl.edge_index, index)
+        assert torch.allclose(nl.cell, cell * mu)
+        assert torch.allclose(nl._x_hold, pos * mu)
+
     def test_renamed_symbol_is_the_md_export(self):
         """The MD list is exported as ``NeighborList``; the old name is gone.
 

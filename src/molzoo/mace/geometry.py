@@ -55,8 +55,12 @@ def edge_vectors(
     raw = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
     if edge_diff is None:
         return raw
-    remainder = (edge_diff - raw).detach()
-    return raw + remainder
+    if edge_diff.requires_grad:
+        # Live imaged geometry (strained ``edge_diff`` for the virial). Trust
+        # the caller; STE would add a second unimaged ``∂/∂ε`` and double it.
+        return edge_diff
+    # Frozen neighbour-list buffer: value from the image, ``∂/∂pos`` from raw.
+    return edge_diff + (raw - raw.detach())
 
 
 def edge_lengths(vectors: torch.Tensor, *, keepdim: bool = False) -> torch.Tensor:

@@ -2,8 +2,8 @@
 
 :class:`~molzoo.mace.checkpoint.CheckpointRemap` replaces the two hand-copied
 loaders of the pre-cutover flat modules (now the thin compatibility aliases
-:func:`molzoo.mace.variants.load_matpes_state_dict` /
-:func:`~molzoo.mace.variants.load_omol_state_dict`) with a single type whose only
+:func:`molzoo.mace.potential.matpes_remap.load` /
+:func:`~molzoo.mace.potential.omol_remap.load`) with a single type whose only
 family-dependent behaviour is the ``on_unexpected`` knob: MatPES raises on a
 checkpoint key with no home, OMol returns it (that family ships auxiliary
 heads this port deliberately does not model). Everything else — the
@@ -53,15 +53,13 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molzoo.mace.checkpoint import (
-    MATPES_KEY_REMAP,
-    MATPES_REMAP,
-    OMOL_REMAP,
-    CheckpointRemap,
-)
-from molzoo.mace.potential import MACEPotential
+from molzoo.mace.checkpoint import CheckpointRemap, matpes_keys, omol_keys
+from molzoo.mace.potential import MaceMatpes, MacePotential
 from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec
-from molzoo.mace.variants import MACEMatpes, load_matpes_state_dict
+
+matpes_remap = CheckpointRemap(matpes_keys)
+omol_remap = CheckpointRemap(omol_keys, on_unexpected="return")
+
 from tests.test_molzoo.test_mace.conftest import (
     ATOMIC_ENERGIES,
     ATOMIC_NUMBERS,
@@ -69,7 +67,7 @@ from tests.test_molzoo.test_mace.conftest import (
 )
 
 #: Model name → official cueq name: the hand-written inverse of
-#: ``MATPES_KEY_REMAP``, longest prefix first (see the module docstring for why
+#: ``matpes_keys``, longest prefix first (see the module docstring for why
 #: it is not derived from the table under test).
 MATPES_OFFICIAL_NAMES: dict[str, str] = {
     "node_embedding.": "node_embedding.linear.",
@@ -80,7 +78,7 @@ MATPES_OFFICIAL_NAMES: dict[str, str] = {
 }
 
 #: Model name → official cueq name for the OMol family (inverse of
-#: ``OMOL_KEY_REMAP``). ``readout.`` is the single final readout molnex holds
+#: ``omol_keys``). ``readout.`` is the single final readout molnex holds
 #: where the official checkpoint numbers a one-entry ``readouts`` list.
 OMOL_OFFICIAL_NAMES: dict[str, str] = {
     "node_embedding.": "node_embedding.linear.",
@@ -142,7 +140,7 @@ OMOL_WEIGHTS_FILE = "omol_cueq_state.pt"
 OMOL_PARAMETER_COUNT = 104
 
 #: Hard-coded golden: the checkpoint keys with no home in molnex's OMol model.
-#: ``OMOL_REMAP`` exists with ``on_unexpected="return"`` because the OMol family
+#: ``omol_remap`` exists with ``on_unexpected="return"`` because the OMol family
 #: *can* ship auxiliary heads this port does not model; the single-head
 #: ``omol`` checkpoint actually shipped has none, so the snapshot is empty —
 #: and any future key growing into this list is a deliberate decision, not a
@@ -222,7 +220,7 @@ def _official_state(model: torch.nn.Module, names: Mapping[str, str]) -> dict[st
     return out
 
 
-def _filled(spec: MACEMatpesSpec | MACEOMolSpec, seed: int) -> MACEPotential:
+def _filled(spec: MACEMatpesSpec | MACEOMolSpec, seed: int) -> MacePotential:
     """A tiny CPU potential whose every parameter is non-zero and seed-specific.
 
     Two models built from the same spec with different seeds must disagree in
@@ -236,10 +234,10 @@ def _filled(spec: MACEMatpesSpec | MACEOMolSpec, seed: int) -> MACEPotential:
         seed: Seed of both the construction RNG and the fill generator.
 
     Returns:
-        A ``MACEPotential`` on the pure-torch cuEquivariance path.
+        A ``MacePotential`` on the pure-torch cuEquivariance path.
     """
     torch.manual_seed(seed)
-    model = MACEPotential(spec, use_fallback=True)
+    model = MacePotential(spec, use_fallback=True)
     generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for parameter in model.parameters():
@@ -250,7 +248,7 @@ def _filled(spec: MACEMatpesSpec | MACEOMolSpec, seed: int) -> MACEPotential:
 def _write_checkpoint(
     directory: Path,
     spec: MACEMatpesSpec,
-    model: MACEPotential,
+    model: MacePotential,
     *,
     hidden_irreps: str,
     mlp_irreps: str,
@@ -315,7 +313,7 @@ class TestCheckpointRemap:
         }
         snapshot = dict(official)
 
-        renamed = MATPES_REMAP.rename(official)
+        renamed = matpes_remap.rename(official)
 
         assert renamed is not official
         assert list(official) == list(snapshot)
@@ -334,7 +332,7 @@ class TestCheckpointRemap:
         source = _filled(tiny_matpes_spec, seed=0)
         target = _filled(tiny_matpes_spec, seed=1)
 
-        MATPES_REMAP.load(target, _official_state(source, MATPES_OFFICIAL_NAMES))
+        matpes_remap.load(target, _official_state(source, MATPES_OFFICIAL_NAMES))
 
         for (name, want), (_, got) in zip(
             source.named_parameters(), target.named_parameters(), strict=True
@@ -346,7 +344,7 @@ class TestCheckpointRemap:
         source = _filled(tiny_omol_spec, seed=0)
         target = _filled(tiny_omol_spec, seed=1)
 
-        OMOL_REMAP.load(target, _official_state(source, OMOL_OFFICIAL_NAMES))
+        omol_remap.load(target, _official_state(source, OMOL_OFFICIAL_NAMES))
 
         for (name, want), (_, got) in zip(
             source.named_parameters(), target.named_parameters(), strict=True
@@ -362,7 +360,7 @@ class TestCheckpointRemap:
         before = {name: parameter.detach().clone() for name, parameter in target.named_parameters()}
 
         with pytest.raises(RuntimeError, match="no home"):
-            MATPES_REMAP.load(target, state)
+            matpes_remap.load(target, state)
 
         for name, parameter in target.named_parameters():
             assert torch.equal(parameter, before[name]), name
@@ -373,7 +371,7 @@ class TestCheckpointRemap:
         target = _filled(tiny_matpes_spec, seed=1)
         state = _official_state(source, MATPES_OFFICIAL_NAMES)
         state[MYSTERY_KEY] = torch.zeros(3, dtype=torch.float64)
-        lenient = CheckpointRemap(MATPES_KEY_REMAP, on_unexpected="return")
+        lenient = CheckpointRemap(matpes_keys, on_unexpected="return")
 
         _, unexpected = lenient.load(target, state)
 
@@ -388,7 +386,7 @@ class TestCheckpointRemap:
         del state[COVERED_PARAMETER]
 
         with pytest.raises(RuntimeError, match="not covered") as raised:
-            CheckpointRemap(MATPES_KEY_REMAP, on_unexpected=policy).load(target, state)
+            CheckpointRemap(matpes_keys, on_unexpected=policy).load(target, state)
 
         assert COVERED_PARAMETER in str(raised.value)
 
@@ -408,7 +406,7 @@ class TestCheckpointRemap:
         del state[BESSEL_OFFICIAL_KEY]
 
         with pytest.raises(RuntimeError, match="not covered") as raised:
-            CheckpointRemap(MATPES_KEY_REMAP, on_unexpected=policy).load(target, state)
+            CheckpointRemap(matpes_keys, on_unexpected=policy).load(target, state)
 
         assert "bessel.freqs" in str(raised.value)
 
@@ -421,7 +419,7 @@ class TestCheckpointRemap:
         state[COVERED_PARAMETER] = torch.zeros(1, 7, dtype=torch.float64)
 
         with pytest.raises(RuntimeError, match="shape mismatch"):
-            CheckpointRemap(MATPES_KEY_REMAP, on_unexpected=policy).load(target, state)
+            CheckpointRemap(matpes_keys, on_unexpected=policy).load(target, state)
 
     @pytest.mark.parametrize("policy", ["raise", "return"])
     def test_accepts_rank_difference_on_frozen_scalars(
@@ -433,7 +431,7 @@ class TestCheckpointRemap:
         state = _official_state(source, MATPES_OFFICIAL_NAMES)
         state["scale_shift.scale"] = torch.tensor([FROZEN_SCALAR_VALUE], dtype=torch.float64)
 
-        CheckpointRemap(MATPES_KEY_REMAP, on_unexpected=policy).load(target, state)
+        CheckpointRemap(matpes_keys, on_unexpected=policy).load(target, state)
 
         assert target.scale_shift.scale.shape == ()
         assert float(target.scale_shift.scale) == pytest.approx(FROZEN_SCALAR_VALUE)
@@ -450,7 +448,7 @@ class TestCheckpointRemap:
         state = _official_state(source, MATPES_OFFICIAL_NAMES)
         state["interactions.9.zeta.weight"] = torch.zeros(3, dtype=torch.float64)
         state["interactions.0.alpha.weight"] = torch.zeros(3, dtype=torch.float64)
-        lenient = CheckpointRemap(MATPES_KEY_REMAP, on_unexpected="return")
+        lenient = CheckpointRemap(matpes_keys, on_unexpected="return")
 
         missing, unexpected = lenient.load(target, state)
 
@@ -463,7 +461,7 @@ class TestCheckpointRemap:
 
 
 class TestFromCheckpoint:
-    """Test ``MACEPotential.from_checkpoint`` — json + weights in one call."""
+    """Test ``MaceMatpes.load`` — json + weights in one call."""
 
     def test_builds_from_config_and_weights(
         self, tmp_path: Path, tiny_matpes_spec: MACEMatpesSpec
@@ -478,7 +476,7 @@ class TestFromCheckpoint:
             mlp_irreps="8x0e",
         )
 
-        built = MACEPotential.from_checkpoint(config_path, weights_path, use_fallback=True)
+        built = MaceMatpes.load(config_path, use_fallback=True)
 
         for (name, want), (_, got) in zip(
             source.named_parameters(), built.named_parameters(), strict=True
@@ -506,7 +504,7 @@ class TestFromCheckpoint:
             mlp_irreps="8x0e",
         )
 
-        built = MACEPotential.from_checkpoint(config_path, weights_path, use_fallback=True)
+        built = MaceMatpes.load(config_path, use_fallback=True)
 
         derived = built._spec
         assert isinstance(derived, MACEMatpesSpec)
@@ -531,7 +529,7 @@ class TestFromCheckpoint:
         )
 
         with pytest.raises((KeyError, ValueError), match=absent):
-            MACEPotential.from_checkpoint(config_path, weights_path, use_fallback=True)
+            MaceMatpes.load(config_path, use_fallback=True)
 
     def test_tolerates_a_config_without_the_architecture_switches(
         self, tmp_path: Path, tiny_matpes_spec: MACEMatpesSpec
@@ -553,7 +551,7 @@ class TestFromCheckpoint:
         )
         assert set(json.loads(config_path.read_text())).isdisjoint(OFFICIAL_SWITCHES)
 
-        built = MACEPotential.from_checkpoint(config_path, weights_path, use_fallback=True)
+        built = MaceMatpes.load(config_path, use_fallback=True)
 
         assert built._spec.pair_repulsion == "zbl"
         assert built._spec.distance_transform == "agnesi"
@@ -580,7 +578,7 @@ class TestFromCheckpoint:
             switches=OFFICIAL_SWITCHES,
         )
 
-        built = MACEPotential.from_checkpoint(config_path, weights_path, use_fallback=True)
+        built = MaceMatpes.load(config_path, use_fallback=True)
 
         for (name, want), (_, got) in zip(
             source.named_parameters(), built.named_parameters(), strict=True
@@ -636,7 +634,7 @@ class TestFromCheckpoint:
         )
 
         with pytest.raises(ValueError, match=offender) as raised:
-            MACEPotential.from_checkpoint(config_path, weights_path, use_fallback=True)
+            MaceMatpes.load(config_path, use_fallback=True)
 
         message = str(raised.value)
         assert hard_wired in message, message
@@ -644,23 +642,23 @@ class TestFromCheckpoint:
 
 
 class TestLoadMatpesStateDict:
-    """Test the compatibility alias ``variants.load_matpes_state_dict``.
+    """Test the compatibility alias ``variants.matpes_remap.load``.
 
     Migrated verbatim (criteria and messages) from
     ``tests/test_molzoo/test_mace_matpes.py::TestLoadMatpesStateDict`` by
     ``mace-subpackage-restructure-06-wire``. The function lives in
-    :mod:`molzoo.mace.variants`, but everything it promises — the key dialect
+    :mod:`molzoo.mace.potential`, but everything it promises — the key dialect
     and the three refusals — is :mod:`molzoo.mace.checkpoint`'s doctrine, so
     the cases sit next to :class:`TestCheckpointRemap` (spec §5). What they add
     over that class is the *forwarding*: an alias that quietly called
     ``load_state_dict`` instead would pass none of the three refusals.
     """
 
-    def test_roundtrip_restores_every_parameter(self, matpes_variant: MACEMatpes) -> None:
+    def test_roundtrip_restores_every_parameter(self, matpes_variant: MaceMatpes) -> None:
         """A checkpoint written in official names loads back bit-for-bit."""
         state = _official_state(matpes_variant, MATPES_OFFICIAL_NAMES)
         torch.manual_seed(1)
-        fresh = MACEMatpes(
+        fresh = MaceMatpes(
             atomic_numbers=list(ATOMIC_NUMBERS),
             atomic_energies=torch.tensor(ATOMIC_ENERGIES),
             **{**TINY_MATPES_KWARGS, "use_fallback": False},
@@ -672,40 +670,40 @@ class TestLoadMatpesStateDict:
             )
         ), "the two models start out identical — the round trip would be vacuous"
 
-        load_matpes_state_dict(fresh, state)
+        matpes_remap.load(fresh, state)
 
         for (name, want), (_, got) in zip(
             matpes_variant.named_parameters(), fresh.named_parameters(), strict=True
         ):
             assert torch.equal(want, got), name
 
-    def test_rejects_unknown_checkpoint_key(self, matpes_variant: MACEMatpes) -> None:
+    def test_rejects_unknown_checkpoint_key(self, matpes_variant: MaceMatpes) -> None:
         """A key with no home means the mapping is stale — do not load silently."""
         state = _official_state(matpes_variant, MATPES_OFFICIAL_NAMES)
         state[MYSTERY_KEY] = torch.zeros(3)
         with pytest.raises(RuntimeError, match="no home"):
-            load_matpes_state_dict(matpes_variant, state)
+            matpes_remap.load(matpes_variant, state)
 
-    def test_rejects_missing_parameter(self, matpes_variant: MACEMatpes) -> None:
+    def test_rejects_missing_parameter(self, matpes_variant: MaceMatpes) -> None:
         """A parameter the checkpoint never fills would keep its random init."""
         state = _official_state(matpes_variant, MATPES_OFFICIAL_NAMES)
         del state[COVERED_PARAMETER]
         with pytest.raises(RuntimeError, match="not covered"):
-            load_matpes_state_dict(matpes_variant, state)
+            matpes_remap.load(matpes_variant, state)
 
-    def test_rejects_shape_mismatch(self, matpes_variant: MACEMatpes) -> None:
+    def test_rejects_shape_mismatch(self, matpes_variant: MaceMatpes) -> None:
         """Wrong shapes mean the model was built with the wrong config."""
         state = _official_state(matpes_variant, MATPES_OFFICIAL_NAMES)
         state[COVERED_PARAMETER] = torch.zeros(1, 7, dtype=torch.float64)
         with pytest.raises(RuntimeError, match="shape mismatch"):
-            load_matpes_state_dict(matpes_variant, state)
+            matpes_remap.load(matpes_variant, state)
 
-    def test_accepts_rank_difference_on_frozen_scalars(self, matpes_variant: MACEMatpes) -> None:
+    def test_accepts_rank_difference_on_frozen_scalars(self, matpes_variant: MaceMatpes) -> None:
         """MACE stores scale/shift as ``(1,)``; molnex holds a 0-d buffer."""
         state = _official_state(matpes_variant, MATPES_OFFICIAL_NAMES)
         state["scale_shift.scale"] = torch.tensor([FROZEN_SCALAR_VALUE], dtype=torch.float64)
 
-        load_matpes_state_dict(matpes_variant, state)
+        matpes_remap.load(matpes_variant, state)
 
         assert float(matpes_variant.scale_shift.scale) == pytest.approx(FROZEN_SCALAR_VALUE)
 
@@ -717,7 +715,7 @@ class TestLoadMatpesStateDict:
 def test_official_checkpoint_bit_parity() -> None:
     """The real MatPES checkpoint loads identically both ways (``science``).
 
-    ``from_checkpoint`` against the hand-written "construct + ``MATPES_REMAP``"
+    ``from_checkpoint`` against the hand-written "construct + ``matpes_remap``"
     path on ``MACE-matpes-r2scan-omat-ft`` (converted offline with
     ``mace.cli.convert_e3nn_cueq``; that tool is never imported here). Bit
     parity, not a tolerance: the two paths must place the very same tensors.
@@ -730,7 +728,7 @@ def test_official_checkpoint_bit_parity() -> None:
     weights_path = directory / "matpes_r2scan_cueq_state.pt"
     official = json.loads(config_path.read_text())
 
-    manual = MACEPotential(
+    manual = MacePotential(
         MACEMatpesSpec(
             atomic_numbers=official["atomic_numbers"],
             atomic_energies=official["atomic_energies"],
@@ -749,9 +747,9 @@ def test_official_checkpoint_bit_parity() -> None:
         ),
         use_fallback=True,
     )
-    MATPES_REMAP.load(manual, torch.load(weights_path, map_location="cpu", weights_only=True))
+    matpes_remap.load(manual, torch.load(weights_path, map_location="cpu", weights_only=True))
 
-    built = MACEPotential.from_checkpoint(config_path, weights_path, use_fallback=True)
+    built = MaceMatpes.load(config_path, use_fallback=True)
 
     reference = manual.state_dict()
     produced = built.state_dict()
@@ -760,7 +758,7 @@ def test_official_checkpoint_bit_parity() -> None:
         assert torch.equal(produced[name], want), name
 
 
-def _official_omol() -> tuple[MACEPotential, dict[str, torch.Tensor]]:
+def _official_omol() -> tuple[MacePotential, dict[str, torch.Tensor]]:
     """The full-size OMol model with the official weights, and that state.
 
     Hyper-parameters are **not** guessed: the four that vary per checkpoint —
@@ -768,7 +766,7 @@ def _official_omol() -> tuple[MACEPotential, dict[str, torch.Tensor]]:
     checkpoint itself, and every other field is the
     :class:`~molzoo.mace.spec.MACEOMolSpec` default, which is exactly what the
     deleted ``scripts/omol_port/verify_e2e.py`` did (commit ``b85d12f^``:
-    ``MACEOMol(atomic_numbers=ztab, atomic_energies=ae, scale=…, shift=…)``).
+    ``MaceOmol(atomic_numbers=ztab, atomic_energies=ae, scale=…, shift=…)``).
     The checkpoint corroborates every default it can: ``r_max`` 6.0,
     ``num_interactions`` 3, ``num_bessel`` 8 (``bessel_weights``),
     ``num_polynomial_cutoff`` 5 (``cutoff_fn.p``), ``num_features`` 1024 and
@@ -776,11 +774,11 @@ def _official_omol() -> tuple[MACEPotential, dict[str, torch.Tensor]]:
     tables), ``mlp_dim`` 16 (``readouts.0.linear_1.weight`` = 1024 × 16).
 
     ``use_fallback=True`` because the fused cuEquivariance kernels need a GPU
-    and the ops wheel; :class:`~molzoo.mace.variants.MACEOMol` has no such
+    and the ops wheel; :class:`~molzoo.mace.potential.MaceOmol` has no such
     keyword (it hard-codes the fused path), so the spec is built directly.
 
     Returns:
-        The loaded ``MACEPotential`` in eval mode and the official state.
+        The loaded ``MacePotential`` in eval mode and the official state.
     """
     weights_path = Path(os.environ[WEIGHTS_DIR_ENV]) / OMOL_WEIGHTS_FILE
     state = torch.load(weights_path, map_location="cpu", weights_only=True)
@@ -791,8 +789,8 @@ def _official_omol() -> tuple[MACEPotential, dict[str, torch.Tensor]]:
         shift=float(state["scale_shift.shift"]),
         use_fallback=True,
     )
-    model = MACEPotential(spec, use_fallback=True)
-    OMOL_REMAP.load(model, state)
+    model = MacePotential(spec, use_fallback=True)
+    omol_remap.load(model, state)
     return model.eval(), state
 
 
@@ -849,7 +847,7 @@ class TestOfficialOMolWeights:
         """
         model, state = _official_omol()
 
-        renamed = OMOL_REMAP.rename(state)
+        renamed = omol_remap.rename(state)
         parameters = {name for name, _ in model.named_parameters()}
 
         assert len(parameters) == OMOL_PARAMETER_COUNT

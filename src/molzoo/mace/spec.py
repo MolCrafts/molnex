@@ -199,3 +199,58 @@ class MACEOMolSpec(MACESpec):
         if self.l_max < 1:
             raise ValueError(f"l_max must be at least 1, got {self.l_max}")
         return self
+
+
+class MACEPolarSpec(MACESpec):
+    """Configuration of the MACE-POLAR-1-M foundation backbone.
+
+    Defaults pin the official ``MACE-POLAR-1-M.model`` dump of 2026-08-30,
+    not PolarMACE constructor defaults.
+
+    Attributes:
+        max_hidden_l: Highest ``l`` in the node state and mid-layer edge
+            irreps. Dump is ``512x0e+512x1o`` at ``l_max=3``, so this is 1,
+            not the OMOL ``l_max - 1``.
+        keep_last_layer_irreps: Last product keeps full ``hidden`` irreps
+            (dump ``True``).
+        last_readout_bias: Last per-layer readout is
+            :class:`~molrep.readout.mace.NonLinearBiasReadout`.
+    """
+
+    max_hidden_l: int = Field(1, ge=0)
+    keep_last_layer_irreps: bool = True
+    last_readout_bias: bool = True
+    num_recursion_steps: int = Field(2, ge=1)
+    multipole_lmax: int = Field(1, ge=0, le=1)
+    multipole_sigma: float = Field(1.5, gt=0.0)
+    field_lmax: int = Field(1, ge=0, le=1)
+    field_widths: list[float] = Field(default_factory=lambda: [1.5, 3.0])
+    field_norms: list[float] = Field(default_factory=lambda: [20.0, 20.0, 0.5, 0.5])
+    add_local_electron_energy: bool = True
+    kspace_cutoff_factor: float = Field(1.0, gt=0.0)
+    edge_channels: int = Field(128, gt=0)
+    radial_mlp: list[int] = Field(default_factory=lambda: [64, 64, 64], min_length=1)
+
+    num_bessel: int = Field(8, gt=0)
+    num_features: int = Field(512, gt=0)
+    num_interactions: int = Field(2, gt=0)
+    correlation: int = Field(3, ge=1)
+
+    interaction: Literal["density", "residual"] = "residual"
+    readout: Literal["per_layer", "final"] = "per_layer"
+    distance_transform: Literal["none", "agnesi"] = "none"
+    pair_repulsion: Literal["none", "zbl"] = "none"
+    conditioning: Literal["none", "charge_spin"] = "none"
+
+    @model_validator(mode="after")
+    def _check_two_layers(self) -> MACEPolarSpec:
+        """Polar-1-M dump is Linear then NonLinearBias — two layers minimum.
+
+        Raises:
+            ValueError: If ``num_interactions`` is below 2.
+        """
+        if self.num_interactions < 2:
+            raise ValueError(f"num_interactions must be at least 2, got {self.num_interactions}")
+        if self.l_max < 1:
+            raise ValueError(f"l_max must be at least 1, got {self.l_max}")
+        return self

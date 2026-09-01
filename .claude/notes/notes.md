@@ -138,19 +138,42 @@ may still *mention* molrs as a dependency of molpy.
 
 ---
 
-## Native op lib — arch tag + torch_python (2026-07-29)
+<!-- mol:note:topic:native-op-rebuild -->
+## Native op lib — arch tag + always rebuild (2026-08-31)
 
 **Context.** Custom autograd Functions need `torch::autograd::_wrap_outputs` from
-`libtorch_python`, which is not in `${TORCH_LIBRARIES}`. Also multi-arch HPC
-nodes need both x86_64 and aarch64 builds in the same tree.
+`libtorch_python`, which is not in `${TORCH_LIBRARIES}`. Multi-arch HPC needs
+both `x86_64` and `aarch64` artifacts in the same tree. A stale
+`libmolnex_opLib.aarch64.so` (wrong torch ABI) silently disabled native
+neighbor ops and MD fell back to `bin=0.0`. Login-node `maturin` then overwrote
+in-tree `molrs/_lib.abi3.so` with x86-64, so GH200 `import molix` died even
+after the molnex op rebuilt. Probe without GCC 14 `libstdc++` on
+`LD_LIBRARY_PATH` failed with `CXXABI_1.3.15`.
 
-**Decision.**
-- CMake `OUTPUT_NAME = molnex_opLib.${CMAKE_SYSTEM_PROCESSOR}`; loader loads only
-  the arch-tagged path (no untagged fallback).
-- Always link `torch_python`; on Linux wrap with GNU-ld `--no-as-needed` /
-  `--as-needed` so the DSO is kept at load time. Non-Linux: plain link only.
+**Rule**: CMake `OUTPUT_NAME = molnex_opLib.${CMAKE_SYSTEM_PROCESSOR}`; loader
+loads only the arch-tagged path (no untagged fallback). Always link
+`torch_python` (`--no-as-needed` on Linux). **Every `.aarch64` env/torch
+change rebuilds ALL native libs together on GH200 — never reuse a stale
+`.so`, never rebuild molnex op without also re-asserting molrs aarch64.**
 
-**Status.** active.
+1. `molrs/_lib.abi3.so` via `maturin develop --release` with
+   `RUSTUP_TOOLCHAIN=stable-aarch64-unknown-linux-gnu` and
+   `CARGO_TARGET_DIR=molrs-python/target-aarch64`. The in-tree file is
+   untagged: login rustc emits x86-64 into the same path. Keep
+   `_lib.abi3.so.aarch64` / `_lib.abi3.so.x86_64` copies. Never run
+   molrs maturin on the login node if GH200 still needs that tree.
+2. `src/molix/op/libmolnex_opLib.aarch64.so` against **this** interpreter's
+   torch. Export `TORCH_CUDA_ARCH_LIST=9.0` (PyTorch cmake ignores
+   `CMAKE_CUDA_ARCHITECTURES`). GH200 CUDA arch is `90`, not the cache's `75`.
+3. Runtime `LD_LIBRARY_PATH` = GCC 14.3 `lib64` + `torch/lib` + CUDA `lib64`
+   **before** `python` starts (uv CPython is linked to system libstdc++).
+
+Recipe: `.scratch/polar_npt/rebuild_op.sbatch` (molrs + op) and step 4b of
+`upgrade_aarch64.sbatch`. Missing/ABI-mismatched `.so` is an environment
+error for MD, not a reason to skip the rebuild.
+
+**Supersedes**: "warn and continue with pure-Python NeighborList" as the GH200
+workflow; "rebuild only molnex op, leave molrs".
 
 ---
 

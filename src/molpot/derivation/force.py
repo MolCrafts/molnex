@@ -124,6 +124,69 @@ def autograd_forces_from_energy(
     return -grad
 
 
+def _symmetrize_strain_grad(grad: torch.Tensor) -> torch.Tensor:
+    """``∂E/∂ε`` for a symmetric strain: double off-diagonal, leave diagonal.
+
+    Matches :class:`~molpot.composition.sonata.Sonata` / the finite-difference
+    convention ``ε[α,β] = ε[β,α] = dh``.
+    """
+    return grad + grad.transpose(-1, -2) - torch.diag_embed(torch.diagonal(grad, dim1=-2, dim2=-1))
+
+
+def autograd_forces_and_virial(
+    energy_fn: Callable[..., torch.Tensor],
+    pos: torch.Tensor,
+    cell: torch.Tensor,
+    *cartesians: torch.Tensor,
+    create_graph: bool | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``F = -∂E/∂pos`` and ``W = ∂E/∂ε`` from one autograd backward (MACE/cuEq).
+
+    ``energy_fn(pos_s, cell_s, *cartesians_s)`` is evaluated on symmetrically
+    strained Cartesian tensors ``v @ (I + ε_sym)ᵀ`` at ``ε = 0``. Extra
+    ``cartesians`` are imaged edge displacements (or any other row-vectors in
+    Å) that must strain with the cell.
+
+    Args:
+        energy_fn: Maps strained ``(pos, cell, *cartesians)`` to a scalar
+            energy. Must recompute geometry from those tensors.
+        pos: Positions ``(N, 3)`` Å.
+        cell: Lattice vectors ``(3, 3)`` Å, one vector per row.
+        *cartesians: Extra ``(..., 3)`` Cartesian tensors to strain.
+        create_graph: Keep the graph for a force-supervised backward.
+            Defaults to ambient ``torch.is_grad_enabled()``.
+
+    Returns:
+        ``(energy, forces, virial)`` with virial ``W = ∂E/∂ε`` shape ``(3, 3)``
+        in the energy unit (stress is ``W / V``).
+    """
+    if create_graph is None:
+        create_graph = torch.is_grad_enabled()
+    if tuple(cell.shape) != (3, 3):
+        raise ValueError(f"cell must be (3, 3), got {tuple(cell.shape)}")
+    pos_leaf = pos.detach().requires_grad_(True)
+    strain = torch.zeros(3, 3, dtype=pos.dtype, device=pos.device, requires_grad=True)
+    with torch.enable_grad():
+        sym = 0.5 * (strain + strain.T)
+        ft = (torch.eye(3, dtype=pos.dtype, device=pos.device) + sym).T
+        pos_s = pos_leaf @ ft
+        cell_s = cell.to(dtype=pos.dtype, device=pos.device) @ ft
+        extra_s = tuple(tensor.to(dtype=pos.dtype, device=pos.device) @ ft for tensor in cartesians)
+        energy = energy_fn(pos_s, cell_s, *extra_s)
+        scalar = energy if energy.ndim == 0 else energy.sum()
+        g_pos, g_strain = torch.autograd.grad(
+            scalar,
+            (pos_leaf, strain),
+            create_graph=create_graph,
+            allow_unused=True,
+        )
+    if g_pos is None:
+        g_pos = torch.zeros_like(pos_leaf)
+    if g_strain is None:
+        g_strain = torch.zeros_like(strain)
+    return energy, -g_pos, _symmetrize_strain_grad(g_strain)
+
+
 _BACKENDS: dict[str, Callable] = {
     "functorch": functorch_forces,
     "autograd": autograd_forces,

@@ -14,7 +14,7 @@
 
 ::: molzoo.mace.checkpoint
 
-::: molzoo.mace.variants
+::: molzoo.mace.utils
 
 ::: molzoo.mace.research
 

@@ -239,6 +239,8 @@ python -m pytest tests/ --cov=src --cov-report=term-missing
 
 Python >=3.12 required (pyproject pins >=3.12; the BlockFrameView protocol's raising-property isinstance safety needs 3.12+). Requires `torch>=2.10` (always use latest stable PyTorch).
 
+GH200 / `.aarch64`: on every env/torch change rebuild **all** native libs together on GH200 — `molrs/_lib.abi3.so` (`maturin develop --release`, aarch64 toolchain) **and** `src/molix/op/libmolnex_opLib.aarch64.so` against **this** interpreter's torch (`TORCH_CUDA_ARCH_LIST=9.0`). Login-node rustc overwrites the untagged molrs `.so` with x86-64; do not reuse a stale `.so`. Runtime `LD_LIBRARY_PATH` must include GCC 14 `lib64` + `torch/lib` + CUDA `lib64`. See `.claude/notes/notes.md` native-op-rebuild.
+
 ### Test layout rules
 
 - `tests/` contains **only** `test_*.py`, `conftest.py`, `__init__.py`, and data

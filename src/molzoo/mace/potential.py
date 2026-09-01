@@ -37,7 +37,7 @@ its charge/spin embedding next to ``E0`` — that is, *outside* the
 ``scale``/``shift`` normalisation. The forces are never hand-coded: they are
 the autograd derivative of this same ``E_g``.
 
-:class:`MACEPotential` is the one energy + force host for every MACE
+:class:`MacePotential` is the one energy + force host for every MACE
 foundation variant. Which variant it is comes entirely from the
 :class:`~molzoo.mace.spec.MACESpec` it is built from — the MatPES density
 stack (arXiv:2503.04070) or the OMOL charge/spin-conditioned residual stack —
@@ -69,7 +69,7 @@ Two seams, deliberately coexisting:
     ``molpot.derivation.protocol.call_energy`` prefers ``model._write_energy``,
     so implementing it wires MACE into ``EnergyReadout`` / ``ForceReadout`` for
     free. It reads the tensors off the post-collate batch, calls
-    :meth:`MACEPotential.energy_core`, and writes the result back through
+    :meth:`MacePotential.energy_core`, and writes the result back through
     ``protocol.write_energy`` — **without** detaching either the positions or
     the energy. Detaching a tensor cuts it out of the autograd graph; an outer
     readout session may have created the position *leaf* (the tensor autograd
@@ -83,7 +83,7 @@ Every branch — forces on/off, charge/spin conditioning, per-layer vs final
 readout — is resolved once in ``__init__`` into a bound attribute, and
 ``forward`` is a single dispatch through ``self._pipeline``. There is no
 ``compute_forces`` flag on any public signature: "energy only" is a
-*construction* (``MACEPotential(spec, compute_forces=False)``), which is also
+*construction* (``MacePotential(spec, compute_forces=False)``), which is also
 what ``molix.md.forcefield.PotentialForceField.calc_energy`` already assumes.
 
 Units: ``graphs.energy`` in eV ``(B,)``, ``atoms.forces`` in eV/Å ``(N, 3)``,
@@ -105,19 +105,23 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any, ClassVar
 
 import torch
 from tensordict import TensorDict
 
 from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
 from molix.schema import POS_KEY
+from molpot.derivation.force import autograd_forces_from_energy
 from molpot.derivation.kernels import grad_force_pass
 from molpot.derivation.protocol import write_energy
-from molzoo.mace.checkpoint import MATPES_REMAP, CheckpointRemap
+from molzoo.mace.checkpoint import CheckpointRemap, matpes_keys, omol_keys
 from molzoo.mace.encoder import MACEEncoder
 from molzoo.mace.geometry import edge_lengths, edge_vectors
-from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec
+from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACESpec
+from molzoo.mace.utils import e3nn2cueq
 
 #: One term of an official irreps string, e.g. ``"128x1o"`` — multiplicity,
 #: angular order ``l``, parity. Parity is fixed by ``l`` in every MACE
@@ -161,7 +165,7 @@ def _parse_irreps(text: str, key: str) -> tuple[int, int]:
     return scalars[0], max(order for _, order in terms)
 
 
-class MACEPotential(MACEEncoder):
+class MacePotential(MACEEncoder):
     """MACE foundation-model energy (and forces) on the molnex batch schema.
 
     Given a batch of atomic systems it writes the per-graph potential energy
@@ -172,9 +176,9 @@ class MACEPotential(MACEEncoder):
     here decide *how much* is computed and *which cuEquivariance path* the
     blocks take::
 
-        potential = MACEPotential(MACEMatpesSpec(...))          # E + F
-        potential = MACEPotential(spec, compute_forces=False)   # E only
-        potential = MACEPotential(spec, use_fallback=True)      # CPU / no ops wheel
+        potential = MaceMatpes(atomic_numbers=..., atomic_energies=...)
+        potential = MaceOmol(..., compute_forces=False)
+        potential = MacePolar(..., use_fallback=True)
 
     A complete, runnable use of this public surface (both variants, free and
     periodic, energy-only and energy+forces, with hard-coded fp64 goldens) is
@@ -207,9 +211,12 @@ class MACEPotential(MACEEncoder):
             which have no fused kernels available, pass ``True`` explicitly.
     """
 
+    _keys: ClassVar[dict[str, str | None]] = {}
+    _unexpected: ClassVar[str] = "raise"
+
     def __init__(
         self,
-        spec: MACEMatpesSpec | MACEOMolSpec,
+        spec: MACESpec,
         *,
         compute_forces: bool = True,
         use_fallback: bool = False,
@@ -233,166 +240,84 @@ class MACEPotential(MACEEncoder):
         self._elements_validated = False
 
     @classmethod
-    def from_checkpoint(
+    def load(
         cls,
-        config_path: str | Path,
-        weights_path: str | Path,
+        path: str | Path,
         *,
-        remap: CheckpointRemap = MATPES_REMAP,
+        format: str = "official",
+        config: str | Path | None = None,
         map_location: str | torch.device = "cpu",
-        **ctor_kwargs,
-    ) -> MACEPotential:
-        """Build a MatPES potential from an official config json + cueq weights.
+        **kwargs: Any,
+    ) -> MacePotential:
+        """Construct from an official archive and load its weights.
 
-        Three steps, nothing hidden: read the config and translate it into a
-        :class:`~molzoo.mace.spec.MACEMatpesSpec`, construct the model, load the
-        weights through ``remap``. It replaced the hand-written construction in
-        ``run_nve.py``'s ``build_model`` (removed in
-        ``mace-subpackage-restructure-07-cleanup``, which re-pointed the script
-        here)::
-
-            potential = MACEPotential.from_checkpoint(
-                weights_dir / "matpes_r2scan_config.json",
-                weights_dir / "matpes_r2scan_cueq_state.pt",
-            )
-            potential.eval()   # the caller's step, deliberately not done here
-
-        A runnable end-to-end use — a synthetic official-dialect checkpoint
-        written to a temporary directory, read back through this classmethod,
-        and checked against hard-coded energy / force goldens — is
-        ``regressions/mace-subpackage-restructure-05-checkpoint.py``.
-
-        ``num_features`` / ``max_hidden_l`` / ``mlp_dim`` are **derived** from
-        the config's ``hidden_irreps`` / ``MLP_irreps`` (see
-        :func:`_parse_irreps`); a missing key raises instead of falling back to
-        the shipped ``128 / 1 / 16``, which would load a differently sized
-        checkpoint into the wrong model. The config keys translate as
-        ``max_ell → l_max``, ``radial_MLP → radial_mlp``, ``atomic_inter_scale
-        → scale``, ``atomic_inter_shift → shift``; ``r_max``, ``num_bessel``,
-        ``num_polynomial_cutoff``, ``num_interactions``, ``correlation``,
-        ``atomic_numbers`` and ``atomic_energies`` keep their names. Nothing on
-        this path converts units: ``r_max`` is read in Å, ``atomic_energies`` in
-        eV/atom, ``atomic_inter_shift`` in eV, and the checkpoint's weights are
-        already in that same system (see :mod:`molzoo.mace.checkpoint`).
-
-        **Validated when present: the two architecture switches the config
-        spells.** :class:`~molzoo.mace.spec.MACEMatpesSpec` hard-wires
-        ``pair_repulsion="zbl"`` and ``distance_transform="agnesi"``, so a
-        config that names either key with a contradicting value is refused here,
-        before the model is built. It has to be refused at *this* seam because
-        the load cannot see it: the fitted constants of both blocks are
-        registered as buffers, not ``nn.Parameter`` (``ZBLRepulsion`` and
-        ``AgnesiTransform`` are both built with ``trainable=False``), so the
-        unfilled-parameter guard of
-        :meth:`~molzoo.mace.checkpoint.CheckpointRemap.load` never fires — the
-        surplus term would keep its default constants and the model would run,
-        look sane, and compute a short-range repulsion (or transform every
-        distance) the checkpoint was never fitted with. ``distance_transform``
-        is compared case-insensitively: the stock dump spells it ``"Agnesi"``.
-
-        **Absence is the documented boundary.** A config naming neither key is
-        accepted on the spec's defaults — older dumps predate the two entries,
-        and ZBL + Agnesi is what a stock MatPES checkpoint was fitted with
-        anyway. The remaining variant flags (density interactions, per-layer
-        readout, conditioning) are likewise taken from the spec and compared
-        against nothing. For anything but a stock MatPES checkpoint, build the
-        spec explicitly and call ``MATPES_REMAP.load`` yourself.
-
-        The ``(missing_buffers, unexpected)`` report of
-        :meth:`~molzoo.mace.checkpoint.CheckpointRemap.load` is dropped here:
-        under the default policy ``unexpected`` is empty by construction (an
-        unhoused key raises instead), and ``missing_buffers`` holds only entries
-        cuEquivariance rebuilds. Pass a ``remap`` with ``on_unexpected="return"``
-        and that list is lost — load by hand if you need to inspect it.
-
-        This constructor covers the **MatPES** family only. An OMol checkpoint
-        is loaded by constructing a :class:`~molzoo.mace.spec.MACEOMolSpec`
-        explicitly and calling
-        ``molzoo.mace.checkpoint.OMOL_REMAP.load(potential, state)`` — its
-        config carries charge/spin fields with no counterpart here.
+        ``format="official"`` is the only format: a cueq ``state_dict``, a
+        pickled MACE module, or a directory / json config that sits next to
+        the weights. Key dialect translation lives here, not as a public
+        ``*_REMAP`` constant.
 
         Args:
-            config_path: Official config json (the ``model.config`` dumped
-                beside the converted weights).
-            weights_path: ``state_dict`` of the cueq-converted official model,
-                saved by ``torch.save`` and read back with
-                ``weights_only=True``.
-            remap: Key-dialect translation and unexpected-key policy. Defaults
-                to :data:`~molzoo.mace.checkpoint.MATPES_REMAP`, which refuses
-                a checkpoint key with no home.
-            map_location: Device the weights are read onto, forwarded to
-                ``torch.load``. Defaults to CPU: the model is built on the
-                ambient device and moved by the caller.
-            **ctor_kwargs: Passed straight to ``cls`` — ``compute_forces`` /
-                ``use_fallback`` are runtime-environment switches, not
-                scientific content of the checkpoint, so they stay out of the
-                config translation.
+            path: Weights file, pickled ``.model``, config json, or a directory.
+            format: Must be ``"official"``.
+            config: Optional sidecar json when ``path`` is a plain state dict.
+            map_location: Forwarded to ``torch.load``.
+            **kwargs: Constructor overrides (``use_fallback``, ``compute_forces``,
+                architecture fields).
 
         Returns:
-            A ``MACEPotential`` holding the checkpoint's weights, in training
-            mode (call ``.eval()`` yourself).
-
-        Raises:
-            KeyError: If the config lacks a key the spec needs — including
-                ``hidden_irreps`` / ``MLP_irreps``, which are named explicitly
-                because no width default is acceptable.
-            ValueError: If the config contradicts one of the two hard-wired
-                architecture switches, if an irreps string cannot be parsed, or
-                if the spec rejects the translated configuration.
-            RuntimeError: From ``remap`` — an unhoused checkpoint key, a shape
-                disagreement, or an unfilled parameter.
+            A model of ``cls`` holding the archive's weights.
         """
-        official = json.loads(Path(config_path).read_text())
-        absent = [key for key in ("hidden_irreps", "MLP_irreps") if key not in official]
-        if absent:
-            raise KeyError(
-                f"official config {Path(config_path).name} is missing {absent}: "
-                "num_features / max_hidden_l / mlp_dim are derived from the irreps "
-                "strings and have no default"
-            )
-        if "pair_repulsion" in official and not official["pair_repulsion"]:
-            raise ValueError(
-                f"official config {Path(config_path).name} sets pair_repulsion="
-                f"{official['pair_repulsion']!r}, but MACEMatpesSpec hard-wires "
-                "pair_repulsion='zbl' and the ZBL constants are buffers, so the load "
-                "would not object to the surplus term: build the spec explicitly and "
-                "call MATPES_REMAP.load yourself"
-            )
-        if (
-            "distance_transform" in official
-            and str(official["distance_transform"]).lower() != "agnesi"
-        ):
-            raise ValueError(
-                f"official config {Path(config_path).name} sets distance_transform="
-                f"{official['distance_transform']!r}, but MACEMatpesSpec hard-wires "
-                "distance_transform='agnesi' and the Agnesi constants are buffers, so "
-                "the load would not object to the surplus transform: build the spec "
-                "explicitly and call MATPES_REMAP.load yourself"
-            )
-
-        num_features, max_hidden_l = _parse_irreps(official["hidden_irreps"], "hidden_irreps")
-        mlp_dim, _ = _parse_irreps(official["MLP_irreps"], "MLP_irreps")
-
-        spec = MACEMatpesSpec(
-            atomic_numbers=official["atomic_numbers"],
-            atomic_energies=official["atomic_energies"],
-            r_max=official["r_max"],
-            num_bessel=official["num_bessel"],
-            num_polynomial_cutoff=official["num_polynomial_cutoff"],
-            l_max=official["max_ell"],
-            num_features=num_features,
-            max_hidden_l=max_hidden_l,
-            num_interactions=official["num_interactions"],
-            correlation=official["correlation"],
-            mlp_dim=mlp_dim,
-            radial_mlp=official["radial_MLP"],
-            scale=official["atomic_inter_scale"],
-            shift=official["atomic_inter_shift"],
-        )
-
-        model = cls(spec, **ctor_kwargs)
-        remap.load(model, torch.load(weights_path, map_location=map_location, weights_only=True))
+        if format != "official":
+            raise ValueError(f"format must be 'official', got {format!r}")
+        weights, official = _resolve_official(Path(path), config)
+        archive = e3nn2cueq(weights, map_location=map_location)
+        merged = {**official, **archive.get("config", {})}
+        model = cls._from_official(merged, **kwargs)
+        CheckpointRemap(cls._keys, on_unexpected=cls._unexpected).load(model, archive["state"])
         return model
+
+    @classmethod
+    def _from_official(cls, official: dict[str, Any], **kwargs: Any) -> MacePotential:
+        raise NotImplementedError(f"{cls.__name__} does not implement official construction")
+
+    def energy_forces(
+        self,
+        positions: torch.Tensor,
+        Z: torch.Tensor,
+        edge_index: torch.Tensor,
+        batch: torch.Tensor,
+        num_graphs: int | None = None,
+        *,
+        edge_diff: torch.Tensor | None = None,
+        total_charge: torch.Tensor | None = None,
+        total_spin: torch.Tensor | None = None,
+        cell: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Energy and forces from raw tensors.
+
+        Returns:
+            ``{"energy": (B,) eV, "forces": (N, 3) eV/Å}``.
+        """
+        if num_graphs is None:
+            num_graphs = (
+                int(total_charge.shape[0])
+                if total_charge is not None
+                else int(batch.max().item()) + 1
+            )
+        leaf = positions.detach().requires_grad_(True)
+        with torch.enable_grad():
+            energy = self.energy_core(
+                leaf,
+                Z,
+                edge_index,
+                batch,
+                num_graphs,
+                edge_diff=edge_diff,
+                total_charge=total_charge,
+                total_spin=total_spin,
+                cell=cell,
+            )
+        return {"energy": energy.detach(), "forces": autograd_forces_from_energy(energy, leaf)}
 
     def forward(self, batch: TensorDict) -> TensorDict:
         """Run the construction-fixed pipeline, mutating ``batch`` in place.
@@ -433,6 +358,7 @@ class MACEPotential(MACEEncoder):
         shifts: torch.Tensor | None = None,
         total_charge: torch.Tensor | None = None,
         total_spin: torch.Tensor | None = None,
+        cell: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Per-graph total energy ``(B,)`` as a pure function of ``positions``.
 
@@ -489,6 +415,7 @@ class MACEPotential(MACEEncoder):
         """
         if shifts is not None:
             raise TypeError("energy_core no longer takes shifts; pass edge_diff=")
+        del cell  # local MACE has no explicit cell; Polar overrides this path.
         vectors = edge_vectors(positions, edge_index, edge_diff=edge_diff)
         lengths = edge_lengths(vectors)
 
@@ -689,9 +616,12 @@ class MACEPotential(MACEEncoder):
 
         if ("edges", "edge_diff") not in nested:
             raise ValueError(
-                "MACEPotential.forward requires edges.edge_diff; "
+                "MacePotential.forward requires edges.edge_diff; "
                 "edges.shifts is no longer a PBC channel"
             )
+        cell = None
+        if ("graphs", "cell") in nested:
+            cell = batch["graphs", "cell"]
         energy = self.energy_core(
             positions,
             Z,
@@ -705,6 +635,7 @@ class MACEPotential(MACEEncoder):
             total_spin=(
                 batch["graphs", "total_spin"] if ("graphs", "total_spin") in nested else None
             ),
+            cell=cell,
         )
 
         if not has_graphs:
@@ -735,3 +666,199 @@ class MACEPotential(MACEEncoder):
             ``atoms.forces`` ``(N, 3)`` in eV/Å.
         """
         return grad_force_pass(self._write_energy, batch, detach_energy=None)
+
+
+def _energy_table(atomic_energies: Sequence[float] | torch.Tensor) -> list[float]:
+    return [float(energy) for energy in atomic_energies]
+
+
+def _resolve_official(path: Path, config: str | Path | None) -> tuple[Path, dict[str, Any]]:
+    official: dict[str, Any] = {}
+    if config is not None:
+        official = json.loads(Path(config).read_text())
+        return path, official
+    if path.is_dir():
+        jsons = sorted(path.glob("*config.json"))
+        weights = sorted(path.glob("*cueq_state.pt")) or sorted(path.glob("*.pt"))
+        if jsons:
+            official = json.loads(jsons[0].read_text())
+        if not weights:
+            raise FileNotFoundError(f"no official weights under {path}")
+        return weights[0], official
+    if path.suffix == ".json":
+        official = json.loads(path.read_text())
+        stem = path.stem.replace("_config", "")
+        for candidate in (path.with_name(stem + "_cueq_state.pt"), path.with_suffix(".pt")):
+            if candidate.exists():
+                return candidate, official
+        raise FileNotFoundError(f"no weights next to {path}")
+    return path, official
+
+
+def _require_irreps(official: dict[str, Any]) -> tuple[int, int, int]:
+    absent = [key for key in ("hidden_irreps", "MLP_irreps") if key not in official]
+    if absent:
+        raise KeyError(
+            f"official config is missing {absent}: "
+            "num_features / max_hidden_l / mlp_dim are derived from the irreps "
+            "strings and have no default"
+        )
+    num_features, max_hidden_l = _parse_irreps(official["hidden_irreps"], "hidden_irreps")
+    mlp_dim, _ = _parse_irreps(official["MLP_irreps"], "MLP_irreps")
+    return num_features, max_hidden_l, mlp_dim
+
+
+class MaceMatpes(MacePotential):
+    """MACE-MatPES. Flat constructor; spec is assembled and validated inside."""
+
+    _keys = matpes_keys
+    _unexpected = "raise"
+
+    def __init__(
+        self,
+        *,
+        atomic_numbers: Sequence[int],
+        atomic_energies: Sequence[float] | torch.Tensor,
+        r_max: float = 6.0,
+        num_bessel: int = 10,
+        num_polynomial_cutoff: int = 5,
+        l_max: int = 3,
+        num_features: int = 128,
+        max_hidden_l: int = 1,
+        num_interactions: int = 2,
+        correlation: int = 3,
+        mlp_dim: int = 16,
+        radial_mlp: Sequence[int] = (64, 64, 64),
+        scale: float = 1.0,
+        shift: float = 0.0,
+        compute_forces: bool = True,
+        use_fallback: bool = False,
+    ) -> None:
+        spec = MACEMatpesSpec(
+            atomic_numbers=list(atomic_numbers),
+            atomic_energies=_energy_table(atomic_energies),
+            r_max=r_max,
+            num_bessel=num_bessel,
+            num_polynomial_cutoff=num_polynomial_cutoff,
+            l_max=l_max,
+            num_features=num_features,
+            max_hidden_l=max_hidden_l,
+            num_interactions=num_interactions,
+            correlation=correlation,
+            mlp_dim=mlp_dim,
+            radial_mlp=list(radial_mlp),
+            scale=scale,
+            shift=shift,
+            use_fallback=use_fallback,
+        )
+        super().__init__(spec, compute_forces=compute_forces, use_fallback=use_fallback)
+
+    @classmethod
+    def _from_official(cls, official: dict[str, Any], **kwargs: Any) -> MaceMatpes:
+        if "pair_repulsion" in official and not official["pair_repulsion"]:
+            raise ValueError(
+                f"official config sets pair_repulsion={official['pair_repulsion']!r}, "
+                "but MACEMatpesSpec hard-wires pair_repulsion='zbl' and the ZBL "
+                "constants are buffers, so the load would not object to the surplus "
+                "term"
+            )
+        if (
+            "distance_transform" in official
+            and str(official["distance_transform"]).lower() != "agnesi"
+        ):
+            raise ValueError(
+                f"official config sets distance_transform="
+                f"{official['distance_transform']!r}, but MACEMatpesSpec hard-wires "
+                "distance_transform='agnesi' and the Agnesi constants are buffers, "
+                "so the load would not object to the surplus transform"
+            )
+        num_features, max_hidden_l, mlp_dim = _require_irreps(official)
+        ctor = dict(
+            atomic_numbers=official["atomic_numbers"],
+            atomic_energies=official["atomic_energies"],
+            r_max=official.get("r_max"),
+            num_bessel=official.get("num_bessel"),
+            num_polynomial_cutoff=official.get("num_polynomial_cutoff"),
+            l_max=official.get("max_ell", official.get("l_max")),
+            num_features=num_features,
+            max_hidden_l=max_hidden_l,
+            num_interactions=official.get("num_interactions"),
+            correlation=official.get("correlation"),
+            mlp_dim=mlp_dim,
+            radial_mlp=official.get("radial_MLP", official.get("radial_mlp")),
+            scale=official.get("atomic_inter_scale", official.get("scale")),
+            shift=official.get("atomic_inter_shift", official.get("shift")),
+        )
+        ctor.update(kwargs)
+        return cls(**{k: v for k, v in ctor.items() if v is not None})
+
+
+class MaceOmol(MacePotential):
+    """MACE-OMol. Flat constructor; spec is assembled and validated inside."""
+
+    _keys = omol_keys
+    _unexpected = "return"
+
+    def __init__(
+        self,
+        *,
+        atomic_numbers: Sequence[int],
+        atomic_energies: Sequence[float] | torch.Tensor,
+        r_max: float = 6.0,
+        num_bessel: int = 8,
+        num_polynomial_cutoff: int = 5,
+        l_max: int = 3,
+        num_features: int = 1024,
+        num_interactions: int = 3,
+        correlation: int = 2,
+        mlp_dim: int = 16,
+        edge_channels: int = 128,
+        charge_classes: int = 201,
+        charge_offset: int = 100,
+        spin_classes: int = 101,
+        spin_offset: int = 0,
+        scale: float = 1.0,
+        shift: float = 0.0,
+        compute_forces: bool = True,
+        use_fallback: bool = False,
+    ) -> None:
+        spec = MACEOMolSpec(
+            atomic_numbers=list(atomic_numbers),
+            atomic_energies=_energy_table(atomic_energies),
+            r_max=r_max,
+            num_bessel=num_bessel,
+            num_polynomial_cutoff=num_polynomial_cutoff,
+            l_max=l_max,
+            num_features=num_features,
+            num_interactions=num_interactions,
+            correlation=correlation,
+            mlp_dim=mlp_dim,
+            edge_channels=edge_channels,
+            charge_classes=charge_classes,
+            charge_offset=charge_offset,
+            spin_classes=spin_classes,
+            spin_offset=spin_offset,
+            scale=scale,
+            shift=shift,
+            use_fallback=use_fallback,
+        )
+        super().__init__(spec, compute_forces=compute_forces, use_fallback=use_fallback)
+
+    @classmethod
+    def _from_official(cls, official: dict[str, Any], **kwargs: Any) -> MaceOmol:
+        ctor = dict(
+            atomic_numbers=official["atomic_numbers"],
+            atomic_energies=official["atomic_energies"],
+            r_max=official.get("r_max"),
+            num_bessel=official.get("num_bessel"),
+            num_interactions=official.get("num_interactions"),
+            l_max=official.get("max_ell", official.get("l_max")),
+            num_features=official.get("num_features"),
+            correlation=official.get("correlation"),
+            mlp_dim=official.get("mlp_dim"),
+            edge_channels=official.get("edge_channels"),
+            scale=official.get("atomic_inter_scale", official.get("scale")),
+            shift=official.get("atomic_inter_shift", official.get("shift")),
+        )
+        ctor.update(kwargs)
+        return cls(**{k: v for k, v in ctor.items() if v is not None})

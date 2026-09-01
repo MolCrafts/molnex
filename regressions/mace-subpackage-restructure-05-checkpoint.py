@@ -1,10 +1,10 @@
 """Public-API checkpoint round trip for chain step mace-subpackage-restructure-05.
 
 Chain step 05 merges the two hand-copied official-checkpoint loaders
-(``molzoo.mace_matpes.load_matpes_state_dict`` /
-``molzoo.mace_omol.load_omol_state_dict``) into the one
+(``molzoo.mace_matpes.matpes_remap.load`` /
+``molzoo.mace_omol.omol_remap.load``) into the one
 :class:`molzoo.mace.CheckpointRemap`, and gives step 04's
-:class:`molzoo.mace.MACEPotential` a ``from_checkpoint`` classmethod. Step 06
+:class:`molzoo.mace.MacePotential` a ``from_checkpoint`` classmethod. Step 06
 then **deleted** the flat modules, so this file must never import them — it
 uses ``molzoo.mace`` only and is expected to keep running unchanged afterwards.
 
@@ -20,15 +20,15 @@ Scenario (public API only), start to finish inside one ``tempfile`` directory:
    ``MLP_irreps`` are the *only* statement of the channel widths — a
    ``from_checkpoint`` that hard-coded ``128 / 1 / 16`` would raise on shapes
    here;
-3. read it back with ``MACEPotential.from_checkpoint(config, weights)`` and
+3. read it back with ``MaceMatpes.load(config, weights)`` and
    assert the reconstruction is exact: every ``state_dict`` tensor
    ``torch.equal`` to the source model's;
 4. evaluate energy and forces on a fixed 5-atom cluster (fp64, CPU,
    ``use_fallback=True``) against the hard-coded goldens below;
 5. exercise the strictness doctrine on the cheap: a checkpoint key with no home
-   raises ``RuntimeError`` under :data:`molzoo.mace.MATPES_REMAP` and leaves the
+   raises ``RuntimeError`` under :data:`molzoo.mace.matpes_remap` and leaves the
    model untouched, while the same key is merely *reported* by a
-   ``CheckpointRemap(MATPES_KEY_REMAP, on_unexpected="return")``.
+   ``CheckpointRemap(matpes_keys, on_unexpected="return")``.
 
 The synthetic checkpoint is written in the real dialect, not a convenient one:
 it carries the graph constants and an ``output_mask`` (both skipped on load),
@@ -50,7 +50,7 @@ point of the file is that the checkpoint round trip does not move them.
     commit          : cf50d3a (cf50d3ac6af1caa151669cc36d5baba8bfc5a988) plus
                       the uncommitted step-05 working tree
                       (``src/molzoo/mace/checkpoint.py`` and
-                      ``MACEPotential.from_checkpoint``)
+                      ``MaceMatpes.load``)
     torch           : 2.12.1+cpu   (python 3.14.5)
     date            : 2026-08-08
     device / dtype  : CPU, float64 (``config.set_precision("fp64")``)
@@ -84,13 +84,11 @@ config.set_precision("fp64")  # before any module construction: cuEq bakes in dt
 
 from tensordict import TensorDict  # noqa: E402
 
-from molzoo.mace import (  # noqa: E402
-    MATPES_KEY_REMAP,
-    MATPES_REMAP,
-    CheckpointRemap,
-    MACEMatpesSpec,
-    MACEPotential,
-)
+from molzoo.mace.checkpoint import CheckpointRemap, matpes_keys  # noqa: E402
+from molzoo.mace.potential import MaceMatpes, MacePotential  # noqa: E402
+from molzoo.mace.spec import MACEMatpesSpec  # noqa: E402
+
+matpes_remap = CheckpointRemap(matpes_keys)
 
 #: Energy band in eV and force band in eV/Å — the fp64 tolerances of
 #: ``tests/test_molzoo/test_mace_matpes.py:96-97``.
@@ -198,7 +196,7 @@ BUFFER_FILL_SCALE = 0.01
 
 #: molnex prefix → official cueq prefix for the entries an official MatPES
 #: checkpoint **carries into the model**. Hand-written rather than derived from
-#: :data:`molzoo.mace.MATPES_KEY_REMAP`, so a wrong entry in the shipped table
+#: :data:`molzoo.mace.matpes_keys`, so a wrong entry in the shipped table
 #: cannot cancel itself out in this round trip;
 #: :func:`check_official_dialect` asserts the two still agree.
 CARRIED_OFFICIAL_NAMES: dict[str, str] = {
@@ -293,7 +291,7 @@ def fill_ramp(name: str, count: int) -> torch.Tensor:
     return torch.linspace(-FILL_SPAN, FILL_SPAN, count, dtype=torch.float64) + phase
 
 
-def fill_potential(potential: MACEPotential) -> None:
+def fill_potential(potential: MacePotential) -> None:
     """Overwrite every parameter, and the fitted buffers, in place.
 
     Every ``nn.Parameter`` is *replaced* by :func:`fill_ramp`, so nothing the
@@ -324,17 +322,17 @@ def fill_potential(potential: MACEPotential) -> None:
             buffer.copy_(moved)
 
 
-def source_potential() -> MACEPotential:
+def source_potential() -> MacePotential:
     """The tiny MatPES potential the synthetic checkpoint is dumped from."""
     spec = MACEMatpesSpec(
         atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **SPEC_KWARGS
     )
-    potential = MACEPotential(spec, use_fallback=True)
+    potential = MacePotential(spec, use_fallback=True)
     fill_potential(potential)
     return potential.eval()
 
 
-def official_state(potential: MACEPotential) -> dict[str, torch.Tensor]:
+def official_state(potential: MacePotential) -> dict[str, torch.Tensor]:
     """Dump ``potential``'s weights under the official cueq key names.
 
     The inverse of the shipped remap, plus the entries a real converted
@@ -434,7 +432,7 @@ def make_batch() -> TensorDict:
     )
 
 
-def energy_forces(potential: MACEPotential) -> tuple[torch.Tensor, torch.Tensor]:
+def energy_forces(potential: MacePotential) -> tuple[torch.Tensor, torch.Tensor]:
     """Energy ``(B,)`` in eV and forces ``(N, 3)`` in eV/Å for the cluster."""
     out = potential(make_batch())
     return out["graphs", "energy"].detach(), out["atoms", "forces"].detach()
@@ -485,12 +483,12 @@ class Checker:
 
 
 def check_official_dialect(
-    checker: Checker, source: MACEPotential, state: dict[str, torch.Tensor]
+    checker: Checker, source: MacePotential, state: dict[str, torch.Tensor]
 ) -> None:
     """The synthetic checkpoint really is written in the official dialect.
 
     Two table-level legs against the shipped
-    :data:`molzoo.mace.MATPES_KEY_REMAP` (so a wrong entry there cannot cancel
+    :data:`molzoo.mace.matpes_keys` (so a wrong entry there cannot cancel
     itself out in the round trip), then two behavioural ones through the pure
     :meth:`molzoo.mace.CheckpointRemap.rename`: everything this file wrote as
     droppable leaves no trace, and everything that survives has a home.
@@ -500,16 +498,16 @@ def check_official_dialect(
         source: The model the checkpoint was dumped from.
         state: The officially named checkpoint contents.
     """
-    print("Official key dialect (hand-written inverse vs molzoo.mace.MATPES_KEY_REMAP)")
+    print("Official key dialect (hand-written inverse vs molzoo.mace.matpes_keys)")
 
     wrong = [
-        f"{official} → {MATPES_KEY_REMAP.get(official)!r}, want {molnex!r}"
+        f"{official} → {matpes_keys.get(official)!r}, want {molnex!r}"
         for molnex, official in CARRIED_OFFICIAL_NAMES.items()
-        if MATPES_KEY_REMAP.get(official) != molnex
+        if matpes_keys.get(official) != molnex
     ]
     checker.truth("dialect.carried_entries_agree", not wrong, f"shipped table disagrees: {wrong}")
 
-    carried = {value for value in MATPES_KEY_REMAP.values() if value is not None}
+    carried = {value for value in matpes_keys.values() if value is not None}
     checker.truth(
         "dialect.covers_every_carried_family",
         carried == set(CARRIED_OFFICIAL_NAMES),
@@ -517,7 +515,7 @@ def check_official_dialect(
         f"{sorted(CARRIED_OFFICIAL_NAMES)} — a new family needs a golden",
     )
 
-    renamed = set(MATPES_REMAP.rename(state))
+    renamed = set(matpes_remap.rename(state))
     droppable = {
         *OFFICIAL_ONLY_SCALARS,
         OUTPUT_MASK_KEY,
@@ -536,7 +534,7 @@ def check_official_dialect(
     )
 
 
-def check_roundtrip(checker: Checker, source: MACEPotential, built: MACEPotential) -> None:
+def check_roundtrip(checker: Checker, source: MacePotential, built: MacePotential) -> None:
     """``from_checkpoint`` reconstructs the source model tensor for tensor."""
     print("\nCheckpoint round trip (from_checkpoint vs the model it was dumped from)")
     reference = source.state_dict()
@@ -576,7 +574,7 @@ def check_roundtrip(checker: Checker, source: MACEPotential, built: MACEPotentia
     )
 
 
-def check_energy_forces(checker: Checker, source: MACEPotential, built: MACEPotential) -> None:
+def check_energy_forces(checker: Checker, source: MacePotential, built: MacePotential) -> None:
     """Energy and forces of the loaded model, against the goldens and the source."""
     print("\nEnergy / forces of the loaded model (fp64, CPU, use_fallback=True)")
     energy, forces = energy_forces(built)
@@ -602,7 +600,7 @@ def check_energy_forces(checker: Checker, source: MACEPotential, built: MACEPote
 
 
 def check_unhoused_key(
-    checker: Checker, built: MACEPotential, state: dict[str, torch.Tensor]
+    checker: Checker, built: MacePotential, state: dict[str, torch.Tensor]
 ) -> None:
     """The ``on_unexpected`` knob: MatPES refuses, the lenient policy reports.
 
@@ -624,7 +622,7 @@ def check_unhoused_key(
 
     message = ""
     try:
-        MATPES_REMAP.load(built, tampered)
+        matpes_remap.load(built, tampered)
     except RuntimeError as error:
         message = str(error)
     checker.truth(
@@ -633,7 +631,7 @@ def check_unhoused_key(
         f"expected a RuntimeError naming the key, got {message!r}",
     )
 
-    _, unexpected = CheckpointRemap(MATPES_KEY_REMAP, on_unexpected="return").load(built, tampered)
+    _, unexpected = CheckpointRemap(matpes_keys, on_unexpected="return").load(built, tampered)
     checker.truth(
         "unhoused.returned_under_lenient_policy",
         unexpected == [MYSTERY_KEY],
@@ -656,7 +654,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="molnex-mace-checkpoint-") as directory:
         config_path, weights_path = write_checkpoint(Path(directory), state)
-        built = MACEPotential.from_checkpoint(config_path, weights_path, use_fallback=True).eval()
+        built = MaceMatpes.load(config_path, use_fallback=True).eval()
 
     check_roundtrip(checker, source, built)
     check_energy_forces(checker, source, built)

@@ -52,29 +52,43 @@ from typing import Protocol, runtime_checkable
 
 import torch
 from torch import nn
+from torch.utils._pytree import tree_map
 
-from molix.md.types import ForceOutput, MDState
+from molix.md.types import MDState
+
+#: Force-provider return: ``energy`` and ``forces`` required, ``virial`` optional.
+ForceDict = dict[str, torch.Tensor]
 
 
 @runtime_checkable
 class PotentialLike(Protocol):
-    """Internal ``pos -> ForceOutput`` provider bound on an integrator.
+    """Internal ``pos -> dict`` provider bound on an integrator.
 
     Not a public type and not :class:`molpy.ForceField`. Neighbour-list
     cadence lives on :class:`~molix.md.driver.MD.compute_force`, not here.
     """
 
-    def __call__(self, pos: torch.Tensor) -> ForceOutput:
+    def __call__(self, pos: torch.Tensor) -> ForceDict:
         """Energy and forces at ``pos`` ``(N, 3)`` Å.
 
         Args:
             pos: Positions ``(N, 3)`` in Å.
 
         Returns:
-            :class:`~molix.md.types.ForceOutput` in the integrator energy unit
-            (amu·Å²/fs²) after any unit conversion the provider applies.
+            ``{"energy": (), "forces": (N, 3)}`` in amu·Å²/fs²; optional
+            ``"virial": (3, 3)``. Extra keys are ignored by the integrator.
         """
         ...
+
+
+def _state_from(
+    pos: torch.Tensor,
+    vel: torch.Tensor,
+    out: ForceDict,
+    cell: torch.Tensor | None,
+) -> MDState:
+    """Pack energy / forces / virial from the force dict onto the state."""
+    return MDState(pos, vel, out["forces"], out["energy"], cell, out.get("virial"))
 
 
 def _as_mass_col(mass: float | torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
@@ -120,7 +134,7 @@ class Integrator(nn.Module):
         """Attach the :class:`PotentialLike` this integrator will evaluate.
 
         Args:
-            force: Internal ``pos -> ForceOutput`` provider (MD adapter or an
+            force: Internal ``pos -> dict`` provider (MD adapter or an
                 unnamed test helper). Not a :class:`molpy.ForceField`.
 
         Returns:
@@ -162,22 +176,35 @@ class Integrator(nn.Module):
         """
         return 3
 
-    def eval_force(self, pos: torch.Tensor) -> ForceOutput:
-        """Evaluate the force field, casting its output to the state dtype.
+    def eval_force(self, pos: torch.Tensor) -> ForceDict:
+        """Evaluate the force field, casting every floating tensor to ``pos.dtype``.
 
         Neighbour-list cadence is :meth:`~molix.md.driver.MD.compute_force`'s
-        job. This method only calls the bound provider and casts energy/forces
-        to ``pos.dtype``.
+        job. Tree-maps the bound provider's dict so ``virial`` (and any extra
+        keys) keep the state dtype; the integrator only reads ``energy``,
+        ``forces``, and ``virial``.
         """
         if self.force is None:
             raise RuntimeError("bind a force field before evaluating")
         out = self.force(pos)
-        return ForceOutput(out.energy.to(pos.dtype), out.forces.to(pos.dtype))
+        dtype = pos.dtype
 
-    def initial(self, pos: torch.Tensor, vel: torch.Tensor) -> MDState:
+        def _cast(value: object) -> object:
+            if isinstance(value, torch.Tensor) and value.is_floating_point():
+                return value.to(dtype)
+            return value
+
+        return tree_map(_cast, out)
+
+    def initial(
+        self,
+        pos: torch.Tensor,
+        vel: torch.Tensor,
+        cell: torch.Tensor | None = None,
+    ) -> MDState:
         """Seed an :class:`~molix.md.types.MDState`, evaluating the entry force."""
         out = self.eval_force(pos)
-        return MDState(pos, vel, out.forces, out.energy)
+        return _state_from(pos, vel, out, cell)
 
     def advance(self, state: MDState) -> MDState:
         """One eager step."""
@@ -230,8 +257,8 @@ class VelocityVerletIntegrator(Integrator):
         pos = state.pos + half_dt * vel  # A
         pos = pos + half_dt * vel  # A
         out = self.eval_force(pos)
-        vel = vel + half_dt * out.forces * self.inv_mass  # B
-        return MDState(pos, vel, out.forces, out.energy)
+        vel = vel + half_dt * out["forces"] * self.inv_mass  # B
+        return _state_from(pos, vel, out, state.cell)
 
     def advance(self, state: MDState) -> MDState:
         return self.step(state)
@@ -300,8 +327,8 @@ class LangevinVerletIntegrator(Integrator):
         vel = self.c1 * vel + self.c2 * self.sigma * noise  # O
         pos = pos + half_dt * vel  # A
         out = self.eval_force(pos)
-        vel = vel + half_dt * out.forces * self.inv_mass  # B
-        return MDState(pos, vel, out.forces, out.energy)
+        vel = vel + half_dt * out["forces"] * self.inv_mass  # B
+        return _state_from(pos, vel, out, state.cell)
 
     def advance_n(self, state: MDState, n_steps: int) -> MDState:
         for _ in range(n_steps):

@@ -39,8 +39,10 @@ from molix.schema import (
     ENERGY_KEY,
     FORCES_KEY,
     POS_KEY,
+    VIRIAL_KEY,
     has_energy,
     has_forces,
+    has_virial,
 )
 
 __all__ = [
@@ -49,6 +51,7 @@ __all__ = [
     "ENERGY_KEY",
     "FORCES_KEY",
     "POS_KEY",
+    "VIRIAL_KEY",
     "PotentialModule",
     "absorb_model_output",
     "attach_session",
@@ -58,8 +61,10 @@ __all__ = [
     "get_session",
     "has_energy",
     "has_forces",
+    "has_virial",
     "write_energy",
     "write_forces",
+    "write_virial",
 ]
 
 # Session side-channel: never batch.set_non_tensor (breaks torch.compile / Dynamo).
@@ -151,6 +156,16 @@ def write_energy(
 def write_forces(batch: TensorDict, forces: torch.Tensor) -> TensorDict:
     """Write peer forces onto ``batch`` (in-place)."""
     batch[FORCES_KEY] = forces
+    return batch
+
+
+def write_virial(batch: TensorDict, virial: torch.Tensor) -> TensorDict:
+    """Write ``W = ∂E/∂ε`` onto ``batch['graphs','virial']`` (in-place)."""
+    graphs = batch["graphs"] if "graphs" in batch.keys() else None
+    if virial.dim() == 2 and graphs is not None and graphs.batch_size == torch.Size([1]):
+        virial = virial.unsqueeze(0)
+    ensure_graphs(batch, virial.shape[0] if virial.dim() == 3 else None)
+    batch[VIRIAL_KEY] = virial
     return batch
 
 

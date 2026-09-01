@@ -5,14 +5,14 @@ Builds both MACE foundation variants through the **new** core layer only —
 ``molzoo.mace.geometry`` → the encoder's primitives — and composes the total
 energy in this script, the way a caller has to (the library exposes primitives;
 there is no ``compute_all`` façade). Every number is then checked against
-literals captured from the flat ``MACEMatpes`` / ``MACEOMol`` models before the
+literals captured from the flat ``MaceMatpes`` / ``MaceOmol`` models before the
 restructure. Any deviation means the spec-driven backbone is not the same model
 the flat variants were.
 
 Goldens
 -------
 All literals in ``MATPES`` / ``OMOL`` below were captured from the **flat**
-``molzoo.mace_matpes.MACEMatpes`` and ``molzoo.mace_omol.MACEOMol`` — the
+``molzoo.mace_matpes.MaceMatpes`` and ``molzoo.mace_omol.MaceOmol`` — the
 in-repo self-oracle, deleted in chain step 07, hence hard-coded here and never
 imported at run time. The capture script re-implemented each flat model's
 ``_compute_energy`` line by line to expose the intermediate scalars, and
@@ -21,7 +21,7 @@ asserted the recomposed total against the flat model's own public
 emitting the table. No third-party oracle, no network, no RNG-derived weights.
 
 To re-capture while the flat variants still exist: copy this file, construct
-``MACEMatpes`` / ``MACEOMol`` with the same kwargs (passing ``atomic_energies``
+``MaceMatpes`` / ``MaceOmol`` with the same kwargs (passing ``atomic_energies``
 as a **float64** tensor — a float32 one shifts ``E0`` by ~1e-6 eV), apply
 :func:`deterministic_weights`, inline each flat ``_compute_energy`` in place of
 the ``MACEEncoder`` composition below, and print the scalars instead of
@@ -33,7 +33,7 @@ asserting.
     torch          : 2.12.1+cpu
     date           : 2026-08-08
     device / dtype : CPU, float64 (``config.set_precision("fp64")``)
-    oracle         : molzoo.mace_matpes.MACEMatpes / molzoo.mace_omol.MACEOMol
+    oracle         : molzoo.mace_matpes.MaceMatpes / molzoo.mace_omol.MaceOmol
                      at 1ddd5ff — in-repo self-oracle, no third party
     observed       : new-vs-flat deviation 0.0 (bit-identical) on every entry,
                      and ``sorted(state_dict())`` equal for both variants
@@ -133,7 +133,7 @@ MATPES_KWARGS = dict(
     radial_mlp=[8],
     use_fallback=True,  # CPU: the fused kernels need a GPU + the ops wheel
 )
-#: Tiny OMOL hyper-parameters. The flat ``MACEOMol`` had no ``use_fallback``
+#: Tiny OMOL hyper-parameters. The flat ``MaceOmol`` had no ``use_fallback``
 #: argument and hard-coded the fused path; on CPU without
 #: ``cuequivariance-ops-torch`` that degrades to the same naive contraction, so
 #: ``use_fallback=True`` here reproduces the flat oracle bit-for-bit (verified
@@ -157,7 +157,7 @@ OMOL_KWARGS = dict(
 
 
 class MatpesGolden(NamedTuple):
-    """Flat ``MACEMatpes`` reference scalars for the system above."""
+    """Flat ``MaceMatpes`` reference scalars for the system above."""
 
     energy: float  # eV, total
     e0: float  # eV, Σ E0[Z]
@@ -167,7 +167,7 @@ class MatpesGolden(NamedTuple):
 
 
 class OMolGolden(NamedTuple):
-    """Flat ``MACEOMol`` reference scalars for the system above."""
+    """Flat ``MaceOmol`` reference scalars for the system above."""
 
     energy: float  # eV, total
     e0: float  # eV, Σ E0[Z]
@@ -242,10 +242,10 @@ class Checker:
 def check_matpes(checker: Checker) -> None:
     """Compose the MatPES total energy from primitives and verify it.
 
-    Mirrors ``MACEMatpes._compute_energy``:
+    Mirrors ``MaceMatpes._compute_energy``:
     ``E0 + scale_shift(ZBL + Σ_layers readout_l(h_l))``, scattered per graph.
     """
-    print("MACEMatpes (density interactions, Agnesi transform, ZBL, per-layer readouts)")
+    print("MaceMatpes (density interactions, Agnesi transform, ZBL, per-layer readouts)")
     spec = MACEMatpesSpec(
         atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **MATPES_KWARGS
     )
@@ -295,10 +295,10 @@ def check_matpes(checker: Checker) -> None:
 def check_omol(checker: Checker) -> None:
     """Compose the OMOL total energy from primitives and verify it.
 
-    Mirrors ``MACEOMol._compute_energy``: ``E0 + Σ embedding_readout(h_0 +
+    Mirrors ``MaceOmol._compute_energy``: ``E0 + Σ embedding_readout(h_0 +
     conditioning) + scale_shift(readout(h_last))``, scattered per graph.
     """
-    print("\nMACEOMol (residual interactions, charge/spin conditioning, final readout)")
+    print("\nMaceOmol (residual interactions, charge/spin conditioning, final readout)")
     spec = MACEOMolSpec(
         atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **OMOL_KWARGS
     )

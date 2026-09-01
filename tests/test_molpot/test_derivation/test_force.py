@@ -6,10 +6,12 @@ autograd helpers never run under method=functorch.
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from molpot.derivation.force import (
     ForceDerivation,
+    autograd_forces_and_virial,
     autograd_forces_from_energy,
 )
 
@@ -45,6 +47,25 @@ def test_forces_from_energy_rejected_on_functorch_instance():
         raise AssertionError("expected ValueError")
     except ValueError as e:
         assert "autograd-only" in str(e)
+
+
+def test_autograd_forces_and_virial_matches_fd_strain():
+    """Isotropic pair ``½k‖r‖²``: W_αα = k r_α², forces = −k r."""
+    pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float64)
+    cell = torch.eye(3, dtype=torch.float64) * 8.0
+    edge = pos[1] - pos[0]
+    k = 2.0
+
+    def energy_fn(p: torch.Tensor, c: torch.Tensor, diff: torch.Tensor) -> torch.Tensor:
+        del p, c
+        return 0.5 * k * (diff * diff).sum()
+
+    energy, forces, virial = autograd_forces_and_virial(energy_fn, pos, cell, edge)
+    assert energy.item() == pytest.approx(0.5 * k)
+    assert torch.allclose(forces[1], torch.tensor([0.0, 0.0, 0.0], dtype=torch.float64), atol=1e-12)
+    # Straining the displacement: E = ½ k ‖r @ (I+ε)ᵀ‖² → W_xx = k r_x².
+    assert virial[0, 0].item() == pytest.approx(k)
+    assert virial[1, 1].item() == pytest.approx(0.0)
 
 
 def test_has_aux_rejected_on_autograd_instance():

@@ -1,13 +1,13 @@
 """Public-API energy/force scenario for chain step mace-subpackage-restructure-04.
 
 Chain step 04 merges the two flat foundation models
-(``molzoo.mace_matpes.MACEMatpes`` / ``molzoo.mace_omol.MACEOMol``) into the one
-spec-driven :class:`molzoo.mace.MACEPotential`. Step 07 then **deletes** the flat
+(``molzoo.mace_matpes.MaceMatpes`` / ``molzoo.mace_omol.MaceOmol``) into the one
+spec-driven :class:`molzoo.mace.MacePotential`. Step 07 then **deletes** the flat
 modules, at which point this file becomes the only frozen memory of what those
 models computed — so it must land before 07 and it must never import them.
 
 Scenario (public API only): ``MACEMatpesSpec`` / ``MACEOMolSpec`` →
-``MACEPotential`` → the four public seams a caller actually has, on one fixed
+``MacePotential`` → the four public seams a caller actually has, on one fixed
 5-atom cluster at fp64 on CPU:
 
 1. ``potential(batch)`` — energy ``(B,)`` eV + forces ``(N, 3)`` eV/Å;
@@ -15,7 +15,7 @@ Scenario (public API only): ``MACEMatpesSpec`` / ``MACEOMolSpec`` →
 3. ``potential.energy_core(...)`` — the flat, compilable seam (raw tensors in,
    ``(B,)`` out), including the OMOL ``total_charge`` / ``total_spin``
    conditioning and the MatPES refusal of it;
-4. ``MACEPotential(spec, compute_forces=False)`` and
+4. ``MacePotential(spec, compute_forces=False)`` and
    ``molpot.derivation.protocol.call_energy`` — the two energy-only entries;
    "energy only" is a *construction*, never a per-call flag.
 
@@ -27,7 +27,7 @@ Goldens
 Every literal in :data:`MATPES` / :data:`OMOL` was captured by running this
 file's own builders at the commit below and printing ``.tolist()``. At capture
 time each number was **also** cross-checked against the flat model it replaces:
-a fresh ``MACEMatpes`` / ``MACEOMol`` built with the same hyper-parameters,
+a fresh ``MaceMatpes`` / ``MaceOmol`` built with the same hyper-parameters,
 handed the potential's ``state_dict()`` under ``load_state_dict(strict=True)``
 ("All keys matched successfully" for both), then called through its public
 ``energy_forces(...)``. The flat modules are deliberately **not** imported here
@@ -41,7 +41,7 @@ lives in this comment only:
     torch           : 2.12.1+cpu
     date            : 2026-08-08
     device / dtype  : CPU, float64 (``config.set_precision("fp64")``)
-    oracle          : molzoo.mace_matpes.MACEMatpes / molzoo.mace_omol.MACEOMol
+    oracle          : molzoo.mace_matpes.MaceMatpes / molzoo.mace_omol.MaceOmol
                       at c2ccd6e — in-repo self-oracle. No ASE / e3nn /
                       mace-torch, no network, no subprocess, no RNG beyond the
                       two fixed seeds below.
@@ -98,7 +98,7 @@ config.set_precision("fp64")  # before any module construction: cuEq bakes in dt
 from tensordict import TensorDict  # noqa: E402
 
 from molpot.derivation.protocol import call_energy  # noqa: E402
-from molzoo.mace import MACEMatpesSpec, MACEOMolSpec, MACEPotential  # noqa: E402
+from molzoo.mace import MACEMatpesSpec, MACEOMolSpec, MacePotential  # noqa: E402
 
 #: Golden band on energies (eV) and forces (eV/Å). The spec's numerical
 #: invariant for the move is ``max|Δ| ≤ 1e-12``; measured deviations at capture
@@ -165,7 +165,7 @@ MATPES_KWARGS = dict(
     radial_mlp=[8],
 )
 #: Tiny OMOL hyper-parameters. ``use_fallback`` is passed to the *constructor*
-#: rather than the spec (the flat ``MACEOMol`` hard-coded the fused path; on CPU
+#: rather than the spec (the flat ``MaceOmol`` hard-coded the fused path; on CPU
 #: without ``cuequivariance-ops-torch`` that degrades to the same naive
 #: contraction, so the two agree bit-for-bit).
 OMOL_KWARGS = dict(
@@ -251,7 +251,7 @@ OMOL_CATION_ENERGY: list[float] = [-3110.6811189024315]
 # ---------------------------------------------------------------------------
 
 
-def wake_readout(potential: MACEPotential) -> None:
+def wake_readout(potential: MacePotential) -> None:
     """Pin the OMOL readout to a private generator, off the global RNG.
 
     ``_ScalarO3Linear`` draws its weight from ``N(0, 1)`` on the global RNG and
@@ -292,22 +292,22 @@ def wake_readout(potential: MACEPotential) -> None:
     potential.load_state_dict(state, strict=True)
 
 
-def matpes_potential(*, compute_forces: bool = True) -> MACEPotential:
+def matpes_potential(*, compute_forces: bool = True) -> MacePotential:
     """Seed-0 MatPES potential (``use_fallback=True``: CPU has no ops wheel)."""
     spec = MACEMatpesSpec(
         atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **MATPES_KWARGS
     )
     torch.manual_seed(0)
-    return MACEPotential(spec, compute_forces=compute_forces, use_fallback=True).eval()
+    return MacePotential(spec, compute_forces=compute_forces, use_fallback=True).eval()
 
 
-def omol_potential(*, compute_forces: bool = True) -> MACEPotential:
+def omol_potential(*, compute_forces: bool = True) -> MacePotential:
     """Seed-0 OMOL potential, with the readout pinned to its private generator."""
     spec = MACEOMolSpec(
         atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **OMOL_KWARGS
     )
     torch.manual_seed(0)
-    potential = MACEPotential(spec, compute_forces=compute_forces, use_fallback=True).eval()
+    potential = MacePotential(spec, compute_forces=compute_forces, use_fallback=True).eval()
     wake_readout(potential)
     return potential
 
@@ -396,7 +396,7 @@ class Checker:
 
 def check_matpes(checker: Checker) -> None:
     """MatPES: energy + forces, the periodic seam, and Newton's third law."""
-    print("MACEMatpes variant (density interactions, ZBL, per-layer readouts)")
+    print("MaceMatpes variant (density interactions, ZBL, per-layer readouts)")
     potential = matpes_potential()
 
     out = potential(make_batch())
@@ -473,7 +473,7 @@ def check_matpes_energy_seams(checker: Checker) -> None:
 
 def check_omol(checker: Checker) -> None:
     """OMOL: energy + forces under charge/spin conditioning, and the cation shift."""
-    print("\nMACEOMol variant (residual interactions, charge/spin conditioning)")
+    print("\nMaceOmol variant (residual interactions, charge/spin conditioning)")
     potential = omol_potential()
     conditioning = {"total_charge": TOTAL_CHARGE, "total_spin": TOTAL_SPIN}
 
@@ -511,7 +511,7 @@ def main() -> int:
     check_omol(checker)
 
     if checker.failures:
-        print("\nFAILED — MACEPotential no longer reproduces the pre-restructure numbers:")
+        print("\nFAILED — MacePotential no longer reproduces the pre-restructure numbers:")
         for failure in checker.failures:
             print(f"  {failure}")
         return 1

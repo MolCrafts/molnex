@@ -1,12 +1,16 @@
-"""Minimal MolRec Run-shaped package helpers (filesystem / hybrid).
+"""Minimal MolRec Run-shaped package helpers (Zarr V3 group attributes).
 
-Writes the small JSON side of a Run package so tools can discover a training
-output without a Zarr reader::
+The record root *is* a Zarr V3 hierarchy, written with plain JSON files so
+tools can discover a training output without a Zarr library::
 
     <record_root>/
-      meta/meta.json
-      status/status.json
-      metrics/…   # via :class:`molix.io.metrics.MetricsWriter`
+      zarr.json                # the root group
+      meta/zarr.json           # group whose attributes are the meta document
+      status/zarr.json         # group whose attributes are the status document
+      metrics/…                # via :class:`molix.io.metrics.MetricsWriter`
+
+Document sections are **group attributes** per molrec ``docs/spec/storage.md``
+(a pure-JSON filesystem package is not part of the reference binding).
 
 Provisional: layout follows molrec ``docs/spec/run.md``; I/O may later move
 to molpy alongside the metrics JSONL binding.
@@ -19,13 +23,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-RECORD_SCHEMA_VERSION = 1
-FORMAT_NAME = "molrec"
+# Sole version key of a MolRec record (`meta["molrec_version"]`); identity is
+# this key plus the record path. There is no brand key.
+MOLREC_VERSION = 1
 
 META_DIR = "meta"
-META_FILENAME = "meta.json"
 STATUS_DIR = "status"
-STATUS_FILENAME = "status.json"
+GROUP_FILENAME = "zarr.json"
 
 JSONObject = dict[str, Any]
 
@@ -41,12 +45,46 @@ def _atomic_write_json(path: Path, payload: JSONObject) -> None:
     tmp.replace(path)
 
 
+def _write_group(path: Path, attributes: JSONObject | None = None) -> None:
+    payload: JSONObject = {"zarr_format": 3, "node_type": "group"}
+    if attributes:
+        payload["attributes"] = attributes
+    _atomic_write_json(path, payload)
+
+
+def _read_group_attrs(path: Path) -> JSONObject:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    attrs = loaded.get("attributes")
+    return attrs if isinstance(attrs, dict) else {}
+
+
+def _ensure_root_group(record_root: Path) -> None:
+    root_marker = record_root / GROUP_FILENAME
+    if not root_marker.exists():
+        _write_group(root_marker)
+
+
 def meta_path(record_root: Path) -> Path:
-    return Path(record_root) / META_DIR / META_FILENAME
+    return Path(record_root) / META_DIR / GROUP_FILENAME
 
 
 def status_path(record_root: Path) -> Path:
-    return Path(record_root) / STATUS_DIR / STATUS_FILENAME
+    return Path(record_root) / STATUS_DIR / GROUP_FILENAME
+
+
+def read_meta(record_root: Path | str) -> JSONObject:
+    """The ``meta`` document: attributes of the ``meta/`` group."""
+    return _read_group_attrs(meta_path(Path(record_root)))
+
+
+def read_status(record_root: Path | str) -> JSONObject:
+    """The ``status`` document: attributes of the ``status/`` group."""
+    return _read_group_attrs(status_path(Path(record_root)))
 
 
 def write_meta(
@@ -56,11 +94,10 @@ def write_meta(
     creator_version: str | None = None,
     extra: JSONObject | None = None,
 ) -> Path:
-    """Write / overwrite ``meta/meta.json`` with required schema keys."""
+    """Write / overwrite the ``meta/`` group attributes with the required keys."""
     root = Path(record_root)
     payload: JSONObject = {
-        "record_schema_version": RECORD_SCHEMA_VERSION,
-        "format_name": FORMAT_NAME,
+        "molrec_version": MOLREC_VERSION,
         "creator": {
             "name": creator_name,
             **({"version": creator_version} if creator_version else {}),
@@ -69,8 +106,9 @@ def write_meta(
     }
     if extra:
         payload.update(extra)
+    _ensure_root_group(root)
     path = meta_path(root)
-    _atomic_write_json(path, payload)
+    _write_group(path, payload)
     return path
 
 
@@ -83,20 +121,13 @@ def write_status(
     message: str | None = None,
     extra: JSONObject | None = None,
 ) -> Path:
-    """Write / overwrite ``status/status.json`` (``state`` is required)."""
+    """Write / overwrite the ``status/`` group attributes (``state`` required)."""
     if not state or not str(state).strip():
         raise ValueError("status.state must be a non-empty string")
     root = Path(record_root)
     now = _utc_now()
     path = status_path(root)
-    existing: JSONObject = {}
-    if path.exists():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                existing = loaded
-        except (json.JSONDecodeError, OSError):
-            existing = {}
+    existing = _read_group_attrs(path)
 
     payload: JSONObject = {**existing}
     payload["state"] = state
@@ -113,7 +144,8 @@ def write_status(
         payload["finished_at"] = now
     if extra:
         payload.update(extra)
-    _atomic_write_json(path, payload)
+    _ensure_root_group(root)
+    _write_group(path, payload)
     return path
 
 
@@ -135,14 +167,14 @@ def ensure_run_package(
 
 
 __all__ = [
-    "FORMAT_NAME",
+    "GROUP_FILENAME",
     "META_DIR",
-    "META_FILENAME",
-    "RECORD_SCHEMA_VERSION",
+    "MOLREC_VERSION",
     "STATUS_DIR",
-    "STATUS_FILENAME",
     "ensure_run_package",
     "meta_path",
+    "read_meta",
+    "read_status",
     "status_path",
     "write_meta",
     "write_status",

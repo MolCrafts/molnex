@@ -14,7 +14,13 @@ import torch
 from tensordict import TensorDict
 
 from molpot.derivation.force import autograd_forces_and_virial, autograd_forces_from_energy
-from molpot.derivation.protocol import ENERGY_KEY, FORCES_KEY, write_virial
+from molpot.derivation.protocol import (
+    ENERGY_KEY,
+    FORCES_KEY,
+    write_energy,
+    write_forces,
+    write_virial,
+)
 from molpot.forcefield.neighbor_list import NeighborListBuilder
 from molpot.forcefield.pair_terms import (
     CoulombOpenPotential,
@@ -250,6 +256,86 @@ class Potentials(BasePotential):
         energy = self.calc_energy(system, pos=p)
         return autograd_forces_from_energy(energy, p)
 
+    def calc_energy_forces_virial(
+        self,
+        system: Any,
+        *,
+        pos: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Energy, forces and virial from one strained autograd backward.
+
+        MD NPT calls this once per step. ``create_graph`` follows the ambient
+        grad mode — wrap the run in ``torch.no_grad()`` so the tape is not
+        kept for parameter derivatives.
+
+        Args:
+            system: Batch carrying ``atoms.pos`` and ``graphs.cell``.
+            pos: Optional positions overriding ``atoms.pos``.
+
+        Returns:
+            ``(energy, forces, virial)`` with virial ``W = ∂E/∂ε`` shape
+            ``(3, 3)`` in the ForceField energy unit.
+
+        Raises:
+            TypeError: If ``system`` is not a TensorDict.
+            ValueError: If ``graphs.cell`` is missing.
+        """
+        if not isinstance(system, TensorDict):
+            raise TypeError("calc_energy_forces_virial requires a TensorDict system")
+        nested = system.keys(include_nested=True)
+        if ("graphs", "cell") not in nested:
+            raise ValueError("calc_energy_forces_virial requires graphs.cell")
+        cell_buf = system["graphs", "cell"]
+        batched_cell = cell_buf.dim() == 3
+        cell_3 = cell_buf[0] if batched_cell else cell_buf
+        pos_buf = self._pos(system, pos)
+        edge_index = system["edges", "edge_index"] if ("edges", "edge_index") in nested else None
+        edge_diff_buf = system["edges", "edge_diff"] if ("edges", "edge_diff") in nested else None
+        # Strain the Cartesian periodic remainder, not a copy of edge_diff.
+        # Passing frozen edge_diff as an independent cartesian makes local
+        # graph energy (MACE / Polar) a function of strain only, so
+        # ∂E/∂pos drops the short-range forces and NPT heats.
+        shifts_buf = None
+        if ("edges", "shifts") in nested:
+            shifts_buf = system["edges", "shifts"]
+        elif edge_diff_buf is not None and edge_index is not None:
+            src0 = edge_index[:, 0]
+            tgt0 = edge_index[:, 1]
+            shifts_buf = edge_diff_buf - (pos_buf[tgt0] - pos_buf[src0])
+        cartesians: tuple[torch.Tensor, ...] = (shifts_buf,) if shifts_buf is not None else ()
+
+        def energy_fn(
+            pos_s: torch.Tensor, cell_s: torch.Tensor, *strained: torch.Tensor
+        ) -> torch.Tensor:
+            system["atoms", "pos"] = pos_s
+            system["graphs", "cell"] = cell_s.unsqueeze(0) if batched_cell else cell_s
+            if edge_index is not None:
+                src = edge_index[:, 0]
+                tgt = edge_index[:, 1]
+                diff = pos_s[tgt] - pos_s[src]
+                if strained:
+                    diff = diff + strained[0]
+                system["edges", "edge_diff"] = diff
+                system["edges", "edge_dist"] = diff.norm(dim=-1)
+            energy = self.calc_energy(system, pos=pos_s)
+            return energy if energy.ndim == 0 else energy.sum()
+
+        energy, forces, virial = autograd_forces_and_virial(energy_fn, pos_buf, cell_3, *cartesians)
+        # Strain writes replace graphs.cell / pos / edge_diff with graph
+        # tensors. Put the MD buffers back so the barostat copy_ and the
+        # next neighbour update still see the same storage.
+        system["atoms", "pos"] = pos_buf
+        system["graphs", "cell"] = cell_buf
+        if edge_diff_buf is not None:
+            system["edges", "edge_diff"] = edge_diff_buf
+            system["edges", "edge_dist"] = edge_diff_buf.norm(dim=-1)
+        graphs_bs = system["graphs"].batch_size
+        stored = energy.detach().reshape(*graphs_bs) if graphs_bs else energy.detach().reshape(())
+        write_energy(system, stored)
+        write_forces(system, forces)
+        write_virial(system, virial)
+        return energy, forces, virial
+
     def calc_virial(
         self,
         system: Any,
@@ -258,46 +344,10 @@ class Potentials(BasePotential):
     ) -> torch.Tensor:
         """Virial ``W = ∂E/∂ε`` at ``ε = 0``, shape ``(3, 3)``.
 
-        Requires ``graphs.cell``. Imaged ``edges.edge_diff`` is strained with
-        the cell when present so the pairwise (and ML) virial includes the
-        minimum-image shift.
-
-        Args:
-            system: Batch carrying ``atoms.pos`` and ``graphs.cell``.
-            pos: Optional positions overriding ``atoms.pos``.
-
-        Returns:
-            ``W`` in the ForceField energy unit.
-
-        Raises:
-            ValueError: If ``graphs.cell`` is missing.
+        Thin wrapper over :meth:`calc_energy_forces_virial`. Prefer that
+        method when forces are needed in the same step.
         """
-        if not isinstance(system, TensorDict):
-            raise TypeError("calc_virial requires a TensorDict system")
-        nested = system.keys(include_nested=True)
-        if ("graphs", "cell") not in nested:
-            raise ValueError("calc_virial requires graphs.cell")
-        cell = system["graphs", "cell"]
-        if cell.dim() == 3:
-            cell = cell[0]
-        p = self._pos(system, pos)
-        cartesians: tuple[torch.Tensor, ...] = ()
-        if ("edges", "edge_diff") in nested:
-            cartesians = (system["edges", "edge_diff"],)
-
-        def energy_fn(
-            pos_s: torch.Tensor, cell_s: torch.Tensor, *strained: torch.Tensor
-        ) -> torch.Tensor:
-            system["atoms", "pos"] = pos_s
-            system["graphs", "cell"] = cell_s
-            if strained:
-                system["edges", "edge_diff"] = strained[0]
-                system["edges", "edge_dist"] = strained[0].norm(dim=-1)
-            energy = self.calc_energy(system, pos=pos_s)
-            return energy if energy.ndim == 0 else energy.sum()
-
-        _, _, virial = autograd_forces_and_virial(energy_fn, p, cell, *cartesians)
-        write_virial(system, virial)
+        _, _, virial = self.calc_energy_forces_virial(system, pos=pos)
         return virial
 
     def calc_energy_forces(

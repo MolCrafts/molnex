@@ -31,8 +31,8 @@ Verification performed at first conversion (2026-08-09):
 
 * key dialect matches ``matpes_r2scan_cueq_state.pt`` (cueq 0.10.0: flat
   ``.f.m.graphs.*.graph.c*`` constants, ``(1, numel)`` linear weights);
-* every one of the 104 ``nn.Parameter`` tensors of the molnex ``MACEOMol``
-  finds a home through ``molzoo.mace.checkpoint.OMOL_REMAP`` (which raises
+* every one of the 104 ``nn.Parameter`` tensors of the molnex ``MaceOmol``
+  finds a home through ``molzoo.mace.checkpoint.omol_remap`` (which raises
   on an unfilled learnable), with zero unexpected keys;
 * ``radial_embedding.bessel_fn.bessel_weights`` sits 2.2120e-07 from the
   analytic ``n*pi/r_max`` init — the fingerprint recorded independently in

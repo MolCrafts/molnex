@@ -106,7 +106,7 @@ from torch import nn
 #: is a non-persistent constant. Longest prefix wins, so an exact key overrides
 #: its enclosing prefix. Anything unlisted maps through unchanged
 #: (``interactions.*``, ``products.*``, ``readouts.*``, ``scale_shift.*``).
-MATPES_KEY_REMAP: dict[str, str | None] = {
+matpes_keys: dict[str, str | None] = {
     "node_embedding.linear.": "node_embedding.",
     "radial_embedding.bessel_fn.bessel_weights": "bessel.freqs",
     "radial_embedding.bessel_fn.": None,
@@ -121,11 +121,11 @@ MATPES_KEY_REMAP: dict[str, str | None] = {
 }
 
 #: Official cueq key (or key prefix) → molnex name for the MACE-OMOL family,
-#: mirroring :data:`MATPES_KEY_REMAP`. ``None`` drops the entry (rebuilt from
+#: mirroring :data:`matpes_keys`. ``None`` drops the entry (rebuilt from
 #: the constructor arguments or a non-persistent constant). Longest prefix
 #: wins; anything unlisted maps through unchanged (``interactions.*``,
 #: ``products.*``, ``joint_embedding.*``, ``scale_shift.*``).
-OMOL_KEY_REMAP: dict[str, str | None] = {
+omol_keys: dict[str, str | None] = {
     "node_embedding.linear.": "node_embedding.",
     "embedding_readout.linear.": "embedding_readout.",
     "readouts.0.": "readout.",
@@ -146,11 +146,8 @@ OMOL_KEY_REMAP: dict[str, str | None] = {
 class CheckpointRemap:
     """Translate official MACE checkpoint keys into molnex ``state_dict`` keys.
 
-    Construct one per checkpoint family (the two shipped ones are the module
-    constants :data:`MATPES_REMAP` and :data:`OMOL_REMAP`), then either inspect
-    the translation with :meth:`rename` or apply it with :meth:`load`::
-
-        MATPES_REMAP.load(model, torch.load(path, weights_only=True))
+    Product classes hold a table as ``_keys`` and call this from
+    :meth:`MaceMatpes.load` / :meth:`MaceOmol.load` / :meth:`MacePolar.load`.
 
     The prefix search order — longest first, so an exact key wins over the
     prefix that encloses it — is computed once here rather than kept as a
@@ -303,11 +300,24 @@ class CheckpointRemap:
         return sorted(set(missing) - parameters), unexpected
 
 
-#: The MACE-MatPES loading policy: a checkpoint key with no home means the
-#: mapping is stale, so refuse rather than load part of the surface.
-MATPES_REMAP = CheckpointRemap(MATPES_KEY_REMAP)
-
-#: The MACE-OMOL loading policy: unhoused keys are *returned*, because the OMol
-#: checkpoints carry auxiliary heads this port deliberately does not model.
-#: Everything else (unfilled parameters, shape disagreements) still raises.
-OMOL_REMAP = CheckpointRemap(OMOL_KEY_REMAP, on_unexpected="return")
+polar_keys: dict[str, str | None] = {
+    "node_embedding.linear.": "node_embedding.",
+    "radial_embedding.bessel_fn.bessel_weights": "bessel.freqs",
+    "radial_embedding.bessel_fn.": None,
+    "radial_embedding.cutoff_fn.": None,
+    "atomic_energies_fn.": None,
+    "atomic_numbers": "z_table",
+    "r_max": None,
+    "num_interactions": None,
+    "kspace_cutoff": None,
+    "field_feature_norms": None,
+    "electric_potential_descriptor.": None,
+    "coulomb_energy.": None,
+    "external_field_contribution.": None,
+    "local_electron_energy.linear_up_q.weight": "local_electron_energy.linear_up_q.linear.weight",
+    "local_electron_energy.linear_up_v.weight": "local_electron_energy.linear_up_v.linear.weight",
+}
+for _i in range(4):
+    _p = f"field_dependent_charges_maps.{_i}.readout"
+    polar_keys[f"{_p}.linear_mid.weight"] = f"{_p}.linear_mid.linear.weight"
+    polar_keys[f"{_p}.linear_2.weight"] = f"{_p}.linear_2.linear.weight"

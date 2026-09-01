@@ -2,8 +2,8 @@
 
 Chain step 06 flips `molzoo` over to the `molzoo.mace` sub-package: it deletes
 the flat `molzoo/mace_matpes.py` and `molzoo/mace_omol.py`, turns
-`MACEMatpes` / `MACEOMol` / `load_matpes_state_dict` / `load_omol_state_dict`
-into thin aliases over `molzoo.mace.variants`, and puts the top level on **one**
+`MaceMatpes` / `MaceOmol` / `matpes_remap.load` / `omol_remap.load`
+into thin aliases over `molzoo.mace.potential`, and puts the top level on **one**
 PEP 562 lazy policy so that `import molzoo` no longer drags in the
 cuEquivariance stack. Everything a user can see is supposed to be unchanged
 except that one import cost. This file is the standalone check of that claim
@@ -34,7 +34,7 @@ of the test:
 3. **Parameter inventory.** Tiny MatPES and OMol variants are built through the
    keyword surface the scripts bind and their parameter tensor count and element
    total are compared to the hard-coded pre-cutover baselines below. The same
-   two models are then built through the `MACEPotential(spec)` form and required
+   two models are then built through the `MacePotential(spec)` form and required
    to agree name-for-name and shape-for-shape with the keyword form.
 
 Why a parameter inventory and not an energy. Energies are the natural golden but
@@ -58,15 +58,15 @@ comparison below is exact equality.
                         import torch
                         from molix import config
                         config.set_precision("fp64")
-                        from molzoo.mace_matpes import MACEMatpes
-                        from molzoo.mace_omol import MACEOMol
+                        from molzoo.mace_matpes import MaceMatpes
+                        from molzoo.mace_omol import MaceOmol
                         torch.manual_seed(0)
-                        m = MACEMatpes(atomic_numbers=[1, 6, 8],
+                        m = MaceMatpes(atomic_numbers=[1, 6, 8],
                                        atomic_energies=torch.tensor([-13.6, -1029.0, -2041.0]),
                                        **TINY_MATPES_KWARGS)
                         print(len(list(m.parameters())),
                               sum(p.numel() for p in m.parameters()))'
-                      (and the same for MACEOMol / TINY_OMOL_KWARGS)
+                      (and the same for MaceOmol / TINY_OMOL_KWARGS)
     commit          : 0e05959 (0e059591b923833986344a936e60941588588de7) — the
                       last commit at which the flat `molzoo/mace_matpes.py` and
                       `molzoo/mace_omol.py` still existed. The 06-wire working
@@ -74,7 +74,7 @@ comparison below is exact equality.
     torch           : 2.12.1+cpu   (python 3.14.5)
     date            : 2026-08-09
     device / dtype  : CPU, float64 (`config.set_precision("fp64")`),
-                      `use_fallback=True` for MatPES; MACEOMol takes no such
+                      `use_fallback=True` for MatPES; MaceOmol takes no such
                       keyword and its spec defaults to the fused path.
     oracle          : this repository at the pre-cutover commit. No mace-torch,
                       no e3nn, no ASE, no network, no subprocess. The dtype and
@@ -82,10 +82,10 @@ comparison below is exact equality.
                       pinned so the capture is reproducible, not because the
                       numbers depend on them.
     observed        : the flat pre-cutover classes and the post-cutover
-                      `molzoo.mace.variants` classes produce not merely the same
+                      `molzoo.mace.potential` classes produce not merely the same
                       two totals but the identical `named_parameters()` list —
                       same names, same shapes, same order — for both variants,
-                      and the `MACEPotential(spec)` form matches both. Only the
+                      and the `MacePotential(spec)` form matches both. Only the
                       two totals are pinned as literals here; the keyword-vs-spec
                       list equality is re-checked live (`check_construction_paths`)
                       since it needs no golden.
@@ -150,20 +150,18 @@ from molzoo import (  # noqa: E402
     MACE,
     Allegro,
     AllegroSpec,
-    MACEMatpes,
-    MACEOMol,
+    MaceMatpes,
+    MaceOmol,
     MACESpec,
     PiNet,
     PiNetSpec,
-    load_matpes_state_dict,
-    load_omol_state_dict,
 )
 from molzoo.mace import MACE as MACE_FROM_SUBPACKAGE  # noqa: E402
 from molzoo.mace import (  # noqa: E402
     CheckpointRemap,
     MACEMatpesSpec,
     MACEOMolSpec,
-    MACEPotential,
+    MacePotential,
 )
 
 # ---------------------------------------------------------------------------
@@ -196,7 +194,7 @@ TINY_MATPES_KWARGS: dict[str, object] = {
 }
 
 #: Tiny MACE-OMol hyper-parameters (l_max=1, 16 channels). `use_fallback` is
-#: absent on purpose: `MACEOMol` takes no such keyword, so the spec's default
+#: absent on purpose: `MaceOmol` takes no such keyword, so the spec's default
 #: (`False`, the fused path) is what both construction paths must agree on.
 TINY_OMOL_KWARGS: dict[str, object] = {
     "r_max": 5.0,
@@ -220,12 +218,12 @@ SEED = 0
 # ---------------------------------------------------------------------------
 
 #: `len(list(m.parameters()))` and `sum(p.numel() for p in m.parameters())` for
-#: `MACEMatpes(**TINY_MATPES_KWARGS)`, captured from the flat pre-cutover
+#: `MaceMatpes(**TINY_MATPES_KWARGS)`, captured from the flat pre-cutover
 #: `molzoo.mace_matpes` at commit 0e05959.
 MATPES_PARAM_TENSORS = 21
 MATPES_PARAM_ELEMENTS = 6852
 
-#: The same two totals for `MACEOMol(**TINY_OMOL_KWARGS)`, captured from the
+#: The same two totals for `MaceOmol(**TINY_OMOL_KWARGS)`, captured from the
 #: flat pre-cutover `molzoo.mace_omol` at the same commit. Larger than MatPES
 #: because of the charge/spin conditioning and the per-l edge channels.
 OMOL_PARAM_TENSORS = 73
@@ -241,14 +239,16 @@ EXPECTED_TOP_LEVEL: frozenset[str] = frozenset(
     {
         "Allegro",
         "AllegroSpec",
+        "ChemPerception",
+        "ChemPerceptionSpec",
         "MACE",
-        "MACEMatpes",
-        "MACEOMol",
+        "MaceMatpes",
+        "MaceOmol",
+        "MacePolar",
+        "MacePotential",
         "MACESpec",
         "PiNet",
         "PiNetSpec",
-        "load_matpes_state_dict",
-        "load_omol_state_dict",
     }
 )
 
@@ -259,10 +259,11 @@ REQUIRED_SUBPACKAGE_NAMES: frozenset[str] = frozenset(
     {
         "MACE",
         "MACESpec",
-        "MACEMatpes",
-        "MACEOMol",
-        "load_matpes_state_dict",
-        "load_omol_state_dict",
+        "MaceMatpes",
+        "MaceOmol",
+        "MacePolar",
+        "MacePotential",
+        "e3nn2cueq",
     }
 )
 
@@ -379,10 +380,8 @@ def check_import_surface(checker: Checker) -> None:
             for symbol in (
                 MACE,
                 MACESpec,
-                MACEMatpes,
-                MACEOMol,
-                load_matpes_state_dict,
-                load_omol_state_dict,
+                MaceMatpes,
+                MaceOmol,
                 Allegro,
                 AllegroSpec,
                 PiNet,
@@ -408,11 +407,11 @@ def check_import_surface(checker: Checker) -> None:
     checker.truth(
         "surface.subpackage_classes_are_bound",
         isinstance(MACE_FROM_SUBPACKAGE, type)
-        and isinstance(MACEPotential, type)
+        and isinstance(MacePotential, type)
         and isinstance(CheckpointRemap, type)
         and isinstance(MACEMatpesSpec, type)
         and isinstance(MACEOMolSpec, type),
-        "`from molzoo.mace import MACE, MACEPotential, CheckpointRemap, "
+        "`from molzoo.mace import MACE, MacePotential, CheckpointRemap, "
         "MACEMatpesSpec, MACEOMolSpec` did not all bind classes",
     )
 
@@ -464,10 +463,8 @@ def check_alias_identity(checker: Checker) -> None:
     for name, top_level in (
         ("MACE", MACE),
         ("MACESpec", MACESpec),
-        ("MACEMatpes", MACEMatpes),
-        ("MACEOMol", MACEOMol),
-        ("load_matpes_state_dict", load_matpes_state_dict),
-        ("load_omol_state_dict", load_omol_state_dict),
+        ("MaceMatpes", MaceMatpes),
+        ("MaceOmol", MaceOmol),
     ):
         checker.truth(
             f"alias.{name}",
@@ -482,8 +479,8 @@ def check_alias_identity(checker: Checker) -> None:
     )
     checker.truth(
         "alias.variants_are_potentials",
-        issubclass(MACEMatpes, MACEPotential) and issubclass(MACEOMol, MACEPotential),
-        "the named variants no longer specialise MACEPotential",
+        issubclass(MaceMatpes, MacePotential) and issubclass(MaceOmol, MacePotential),
+        "the named variants no longer specialise MacePotential",
     )
     checker.truth(
         "alias.variant_specs_share_the_base",
@@ -492,7 +489,7 @@ def check_alias_identity(checker: Checker) -> None:
     )
 
 
-def build_variants() -> tuple[MACEMatpes, MACEOMol]:
+def build_variants() -> tuple[MaceMatpes, MaceOmol]:
     """The two tiny foundation models, built through the keyword surface.
 
     `atomic_energies` is passed as a `torch.Tensor`, the way
@@ -504,34 +501,34 @@ def build_variants() -> tuple[MACEMatpes, MACEOMol]:
     """
     energies = torch.tensor(ATOMIC_ENERGIES)
     torch.manual_seed(SEED)
-    matpes = MACEMatpes(
+    matpes = MaceMatpes(
         atomic_numbers=list(ATOMIC_NUMBERS), atomic_energies=energies, **TINY_MATPES_KWARGS
     )
     torch.manual_seed(SEED)
-    omol = MACEOMol(
+    omol = MaceOmol(
         atomic_numbers=list(ATOMIC_NUMBERS), atomic_energies=energies, **TINY_OMOL_KWARGS
     )
     return matpes, omol
 
 
-def build_from_specs() -> tuple[MACEPotential, MACEPotential]:
+def build_from_specs() -> tuple[MacePotential, MacePotential]:
     """The same two models, built the way new code is told to build them.
 
     Returns:
-        `(matpes, omol)` as plain `MACEPotential`s over the two variant specs.
+        `(matpes, omol)` as plain `MacePotential`s over the two variant specs.
     """
     torch.manual_seed(SEED)
-    matpes = MACEPotential(
+    matpes = MacePotential(
         MACEMatpesSpec(
             atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **TINY_MATPES_KWARGS
         )
     )
     torch.manual_seed(SEED)
-    omol = MACEPotential(
+    omol = MacePotential(
         MACEOMolSpec(
             atomic_numbers=ATOMIC_NUMBERS,
             atomic_energies=ATOMIC_ENERGIES,
-            use_fallback=False,  # MACEOMol takes no such keyword; the spec defaults
+            use_fallback=False,  # MaceOmol takes no such keyword; the spec defaults
             **TINY_OMOL_KWARGS,
         )
     )
@@ -569,7 +566,7 @@ def check_construction_paths(
         checker: Failure collector.
         name: Label for the printed rows.
         keyword: Model from the keyword constructor.
-        spec: Model from `MACEPotential(spec)`.
+        spec: Model from `MacePotential(spec)`.
     """
     from_keyword = [(key, tuple(value.shape)) for key, value in keyword.named_parameters()]
     from_spec = [(key, tuple(value.shape)) for key, value in spec.named_parameters()]
@@ -600,7 +597,7 @@ def main() -> int:
         checker, "omol", keyword_omol, OMOL_PARAM_TENSORS, OMOL_PARAM_ELEMENTS
     )
 
-    print("\nConstruction paths (keyword adapter vs MACEPotential(spec))")
+    print("\nConstruction paths (keyword adapter vs MacePotential(spec))")
     spec_matpes, spec_omol = build_from_specs()
     check_construction_paths(checker, "matpes", keyword_matpes, spec_matpes)
     check_construction_paths(checker, "omol", keyword_omol, spec_omol)

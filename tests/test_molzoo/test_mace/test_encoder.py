@@ -2,7 +2,7 @@
 
 The chain gate is ``state_dict`` parity: :class:`~molzoo.mace.encoder.MACEEncoder`
 must register exactly the modules the keyword-constructed
-:class:`molzoo.mace.variants.MACEMatpes` / :class:`~molzoo.mace.variants.MACEOMol`
+:class:`molzoo.mace.potential.MaceMatpes` / :class:`~molzoo.mace.potential.MaceOmol`
 register, under exactly the same names, so an official checkpoint keeps loading
 without a key rewrite (05-checkpoint) and the variant classes can simply inherit
 the backbone.
@@ -123,7 +123,7 @@ class TestMACEEncoder:
     # -- state_dict parity: the chain gate -----------------------------------
 
     def test_state_dict_keys_match_the_matpes_variant(self, matpes_encoder, matpes_variant):
-        """Same module names as ``MACEMatpes`` — checkpoints load without a rewrite."""
+        """Same module names as ``MaceMatpes`` — checkpoints load without a rewrite."""
         assert set(matpes_encoder.state_dict()) == set(matpes_variant.state_dict())
 
     def test_state_dict_shapes_and_dtypes_match_the_matpes_variant(
@@ -137,7 +137,7 @@ class TestMACEEncoder:
         assert mine == theirs
 
     def test_state_dict_keys_match_the_omol_variant(self, omol_encoder, omol_variant):
-        """Same module names as ``MACEOMol`` — the second variant of one backbone."""
+        """Same module names as ``MaceOmol`` — the second variant of one backbone."""
         assert set(omol_encoder.state_dict()) == set(omol_variant.state_dict())
 
     def test_state_dict_shapes_and_dtypes_match_the_omol_variant(self, omol_encoder, omol_variant):

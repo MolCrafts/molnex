@@ -55,10 +55,10 @@ def _min_n_atoms() -> int:
 
 
 def _build_model(use_fallback: bool):
-    from molzoo import MACEMatpes
+    from molzoo import MaceMatpes
 
     torch.manual_seed(0)
-    return MACEMatpes(
+    return MaceMatpes(
         atomic_numbers=_Z_TABLE,
         atomic_energies=torch.zeros(len(_Z_TABLE), dtype=config.ftype),
         r_max=CUTOFF,

@@ -13,7 +13,7 @@ standalone check of that claim (spec
 Scenario (public API only), two sections:
 
 1. **Energy and forces through the public core.** A hard-coded 6-atom water
-   dimer is pushed through `MACEMatpes.energy_core` inside a literal copy of
+   dimer is pushed through `MaceMatpes.energy_core` inside a literal copy of
    `run_nve._matpes_energy_forces`' closure shape — position leaf with
    `requires_grad_(True)`, energy under `torch.enable_grad()`, and
    `autograd_forces_from_energy` **outside** any compile region (no `Compiler`
@@ -45,8 +45,8 @@ Goldens
                public `energy_core` was run on the identical inputs and came
                out bit-equal (`|dE| = 0.0`, `max|dF| = 0.0`,
                `torch.equal` True for both), which is expected rather than
-               lucky: `MACEMatpes._compute_energy.__func__ is
-               MACEPotential.energy_core` was also asserted True at capture
+               lucky: `MaceMatpes._compute_energy.__func__ is
+               MacePotential.energy_core` was also asserted True at capture
                time. The private name is deliberately *not* touched by this
                script — public API only.
     commit   : e825a51 (e825a515342a5f5f41b70d6443bab5f5ee957299), chain tip 06
@@ -96,7 +96,7 @@ from tensordict import TensorDict  # noqa: E402
 
 from molpot.derivation.force import autograd_forces_from_energy  # noqa: E402
 from molpot.derivation.protocol import ensure_graphs  # noqa: E402
-from molzoo.mace import MACEMatpes  # noqa: E402
+from molzoo.mace import MaceMatpes  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # The system. A 6-atom non-periodic water dimer (A), O-O 3.2 A, so that both
@@ -214,7 +214,7 @@ def build_edges(pos: torch.Tensor, r_max: float) -> torch.Tensor:
     return torch.nonzero(mask, as_tuple=False)
 
 
-def build_model() -> MACEMatpes:
+def build_model() -> MaceMatpes:
     """Small MACE-MatPES with seeded random weights, through the public kwargs.
 
     The unpassed spec defaults are part of the golden as much as the passed
@@ -228,7 +228,7 @@ def build_model() -> MACEMatpes:
         The model in `eval()` mode.
     """
     torch.manual_seed(0)
-    return MACEMatpes(
+    return MaceMatpes(
         atomic_numbers=Z_TABLE,
         atomic_energies=ATOMIC_ENERGIES,
         r_max=R_MAX,

@@ -82,9 +82,11 @@ class NonLinearBiasReadout(nn.Module):
     Args:
         irreps_in: Input node feature irreps (last-layer product output).
         mlp_dim: Hidden scalar width (``MLP_irreps`` count), e.g. 16.
+        out_mul: Output scalar multiplicity. Energy heads use 1; Polar's
+            Fukui source map uses 2.
     """
 
-    def __init__(self, *, irreps_in: str, mlp_dim: int = 16) -> None:
+    def __init__(self, *, irreps_in: str, mlp_dim: int = 16, out_mul: int = 1) -> None:
         super().__init__()
         self.linear_1 = cuet.Linear(
             cue.Irreps("O3", irreps_in),
@@ -94,7 +96,7 @@ class NonLinearBiasReadout(nn.Module):
         )
         self._act_cst = normalize2mom(F.silu)
         self.linear_mid = _ScalarO3Linear(mlp_dim, mlp_dim)
-        self.linear_2 = _ScalarO3Linear(mlp_dim, 1)
+        self.linear_2 = _ScalarO3Linear(mlp_dim, out_mul)
 
     def _act(self, x: torch.Tensor) -> torch.Tensor:
         return F.silu(x) * self._act_cst

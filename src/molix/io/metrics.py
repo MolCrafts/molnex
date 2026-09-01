@@ -1,5 +1,9 @@
 """MolRec metrics JSONL binding — provisional implementation in molnex.
 
+``metrics/index.json`` is a molnex-local derived cache, rebuildable from the
+WAL and never authoritative — the record contract names no first-class
+metrics index (molrec ``docs/spec/metrics-wal.md``).
+
 On-disk layout (authoritative stream under a MolRec record root)::
 
     <record_root>/

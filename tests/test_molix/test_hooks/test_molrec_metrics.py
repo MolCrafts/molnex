@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from molix.hooks.molrec_metrics import MolRecMetricsHook
 from molix.io.metrics import read_metrics
+from molix.io.run_record import read_meta, read_status
 
 
 class _FakeState:
@@ -48,10 +48,10 @@ def test_hook_writes_jsonl_and_status(tmp_path: Path) -> None:
     assert "performance/step_per_second" in keys
     assert "eval/MAE" in keys
 
-    status = json.loads((root / "status" / "status.json").read_text())
+    status = read_status(root)
     assert status["state"] == "succeeded"
-    meta = json.loads((root / "meta" / "meta.json").read_text())
-    assert meta["record_schema_version"] == 1
+    meta = read_meta(root)
+    assert meta["molrec_version"] == 1
 
 
 def test_hook_respects_every_n_steps(tmp_path: Path) -> None:

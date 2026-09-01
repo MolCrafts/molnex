@@ -47,7 +47,7 @@ from molrep.interaction.mace.density import DensityInteraction, DensityResidualI
 from molrep.interaction.product_basis import EquivariantProductBasis
 from molrep.interaction.residual import ResidualInteraction
 from molrep.readout.mace import LinearReadout, NonLinearBiasReadout, NonLinearReadout
-from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACESpec
+from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACEPolarSpec, MACESpec
 
 
 def _irreps(l_max: int, mul: int) -> str:
@@ -68,8 +68,9 @@ class MACEEncoder(nn.Module):
 
     Args:
         spec: A validated :class:`~molzoo.mace.spec.MACESpec` — in practice a
-            :class:`~molzoo.mace.spec.MACEMatpesSpec` or
-            :class:`~molzoo.mace.spec.MACEOMolSpec`, which carry the
+            :class:`~molzoo.mace.spec.MACEMatpesSpec`,
+            :class:`~molzoo.mace.spec.MACEOMolSpec`, or
+            :class:`~molzoo.mace.spec.MACEPolarSpec`, which carry the
             variant-only fields the corresponding stack needs.
 
     Raises:
@@ -114,19 +115,27 @@ class MACEEncoder(nn.Module):
             edge_irr = [feat0] + [hidden] * (num_interactions - 1)
             radial_mlp = list(spec.radial_mlp)
         else:
-            if not isinstance(spec, MACEOMolSpec):
+            if not isinstance(spec, MACEOMolSpec | MACEPolarSpec):
                 raise TypeError(
-                    'interaction="residual" needs a MACEOMolSpec '
+                    'interaction="residual" needs a MACEOMolSpec or MACEPolarSpec '
                     "(edge_channels is not on the base spec)"
                 )
-            # OMOL drops the top order from the node state and squeezes the
-            # mid-layer edge irreps through the edge_channels bottleneck.
-            hidden = _irreps(l_max - 1, num_features)
-            edge_irr = [feat0] + [_irreps(l_max - 1, spec.edge_channels)] * (num_interactions - 1)
-            radial_mlp = [spec.edge_channels] * 3
+            # Polar keeps ``max_hidden_l`` (dump ``512x0e+512x1o`` at l_max=3).
+            # OMOL drops the top order: hidden = l_max - 1.
+            hidden_l = spec.max_hidden_l if isinstance(spec, MACEPolarSpec) else l_max - 1
+            hidden = _irreps(hidden_l, num_features)
+            edge_irr = [feat0] + [_irreps(hidden_l, spec.edge_channels)] * (num_interactions - 1)
+            if isinstance(spec, MACEPolarSpec):
+                radial_mlp = list(spec.radial_mlp)
+            else:
+                radial_mlp = [spec.edge_channels] * 3
         node_in = [feat0] + [hidden] * (num_interactions - 1)
-        # The last layer keeps scalars only; every earlier layer keeps `hidden`.
-        hidden_sched = [hidden] * (num_interactions - 1) + [feat0]
+        keep_last = isinstance(spec, MACEPolarSpec) and spec.keep_last_layer_irreps
+        hidden_sched = (
+            [hidden] * num_interactions
+            if keep_last
+            else [hidden] * (num_interactions - 1) + [feat0]
+        )
 
         # ---- embeddings ----
         self.node_embedding = cuet.Linear(
@@ -258,9 +267,14 @@ class MACEEncoder(nn.Module):
         self.readouts: nn.ModuleList | None = None
         self.readout: NonLinearBiasReadout | None = None
         if spec.readout == "per_layer":
+            last_cls = (
+                NonLinearBiasReadout
+                if isinstance(spec, MACEPolarSpec) and spec.last_readout_bias
+                else NonLinearReadout
+            )
             self.readouts = nn.ModuleList(
                 [
-                    NonLinearReadout(irreps_in=hidden_sched[i], mlp_dim=spec.mlp_dim)
+                    last_cls(irreps_in=hidden_sched[i], mlp_dim=spec.mlp_dim)
                     if i == num_interactions - 1
                     else LinearReadout(irreps_in=hidden_sched[i])
                     for i in range(num_interactions)

@@ -23,10 +23,10 @@ imports here.
   419 MB dump itself is deliberately **not** kept: the source checkpoint is
   downloadable, only the code is preserved. While the dump is absent, the
   `MOLNEX_MACE_WEIGHTS_DIR`-gated `TestOfficialOMolWeights` cases skip.
-- `src/molzoo/mace/variants.py` — `MACEOMol` (thin alias over
-  `molzoo.mace.potential.MACEPotential`) + the `load_omol_state_dict`
+- `src/molzoo/mace/variants.py` — `MaceOmol` (thin alias over
+  `molzoo.mace.potential.MacePotential`) + the `omol_remap.load`
   back-compat loader
-- `src/molzoo/mace/checkpoint.py` — `OMOL_REMAP`, the official-weight key
-  remap consumed by `MACEPotential.from_checkpoint`
+- `src/molzoo/mace/checkpoint.py` — `omol_remap`, the official-weight key
+  remap consumed by `MaceMatpes.load`
 - `src/molzoo/specs/mace_omol.md` — paper↔code contract and run log
   (mirrored byte-for-byte at `docs/molzoo/specs/mace_omol.md`)

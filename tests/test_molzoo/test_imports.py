@@ -118,20 +118,18 @@ class TestPublicImportSurface:
         """The six names ``run_nve.py`` / ``bench_mace_matpes.py`` import."""
         from molzoo import (
             MACE,
-            MACEMatpes,
-            MACEOMol,
+            MaceMatpes,
+            MaceOmol,
+            MacePolar,
             MACESpec,
-            load_matpes_state_dict,
-            load_omol_state_dict,
         )
 
         resolved = (
             MACE,
             MACESpec,
-            MACEMatpes,
-            MACEOMol,
-            load_matpes_state_dict,
-            load_omol_state_dict,
+            MaceMatpes,
+            MaceOmol,
+            MacePolar,
         )
         assert all(symbol is not None for symbol in resolved)
 

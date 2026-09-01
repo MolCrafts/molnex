@@ -42,7 +42,7 @@ from molix.units import units  # noqa: E402
 
 _EV_TO_MD = (1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2").magnitude
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
-from molzoo.mace import MACEPotential  # noqa: E402
+from molzoo.mace import MaceMatpes  # noqa: E402
 
 
 def read_poscar(path: Path) -> dict[str, torch.Tensor]:
@@ -136,7 +136,7 @@ def _system_td(
 
 
 def _bind_energy_core(
-    model: MACEPotential,
+    model: MacePotential,
     *,
     potential_dtype: torch.dtype,
     compile_energy: bool,
@@ -430,9 +430,8 @@ def main() -> None:
 
     # from_checkpoint leaves the model in training mode by contract; .eval() is
     # the caller's step, as the collapsed build_model used to do.
-    model = MACEPotential.from_checkpoint(
+    model = MaceMatpes.load(
         args.weights_dir / "matpes_r2scan_config.json",
-        args.weights_dir / "matpes_r2scan_cueq_state.pt",
         use_fallback=use_fallback,
     ).eval()
     r_max = float(model.cutoff_fn.r_cut)

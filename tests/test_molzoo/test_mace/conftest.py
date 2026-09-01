@@ -7,7 +7,7 @@ builders of the pre-cutover flat test files were folded into it by
 ``mace-subpackage-restructure-06-wire``, and none may come back).
 
 The tiny configurations below are the ones the pre-cutover flat variant tests
-used, so ``MACEEncoder`` / ``MACEPotential`` can be diffed against the keyword
+used, so ``MACEEncoder`` / ``MacePotential`` can be diffed against the keyword
 variants key-for-key.
 
 Everything a second module in this package needs is defined here exactly once:
@@ -34,8 +34,8 @@ import torch
 from tensordict import TensorDict
 
 from molix import config
-from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec
-from molzoo.mace.variants import MACEMatpes, MACEOMol
+from molzoo.mace.potential import MaceMatpes, MaceOmol
+from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACEPolarSpec
 from tests.conftest import make_graph_batch
 
 #: Element table (z-table) shared by every model built in this package.
@@ -48,7 +48,7 @@ ATOMIC_ENERGIES: list[float] = [-13.6, -1029.0, -2041.0]
 
 #: Tiny MACE-MatPES hyper-parameters (l_max=1, 16 channels): fast on CPU and
 #: structurally identical to the shipped model. Passed verbatim to both
-#: ``MACEMatpesSpec`` and the keyword ``MACEMatpes`` constructor, which is what
+#: ``MACEMatpesSpec`` and the keyword ``MaceMatpes`` constructor, which is what
 #: makes the ``state_dict`` parity assertion meaningful.
 TINY_MATPES_KWARGS: dict[str, Any] = {
     "r_max": 5.0,
@@ -65,7 +65,7 @@ TINY_MATPES_KWARGS: dict[str, Any] = {
 }
 
 #: Tiny MACE-OMOL hyper-parameters (l_max=1, 16 channels). ``use_fallback`` is
-#: absent: :class:`~molzoo.mace.variants.MACEOMol` takes no such keyword, so the
+#: absent: :class:`~molzoo.mace.potential.MaceOmol` takes no such keyword, so the
 #: spec must default/carry ``use_fallback=False`` for the two stacks to agree
 #: key-wise.
 TINY_OMOL_KWARGS: dict[str, Any] = {
@@ -79,6 +79,54 @@ TINY_OMOL_KWARGS: dict[str, Any] = {
     "mlp_dim": 8,
     "edge_channels": 8,
 }
+
+#: Tiny Polar backbone: ``l_max=3`` so a wrong ``hidden_l = l_max-1`` schedule
+#: would emit last-layer width 144 instead of 64.
+TINY_POLAR_KWARGS: dict[str, Any] = {
+    "r_max": 5.0,
+    "num_bessel": 4,
+    "num_polynomial_cutoff": 5,
+    "l_max": 3,
+    "num_features": 16,
+    "max_hidden_l": 1,
+    "num_interactions": 2,
+    "correlation": 2,
+    "mlp_dim": 8,
+    "edge_channels": 8,
+    "use_fallback": True,
+}
+
+
+def polar_kwargs(spec: MACEPolarSpec, **overrides: Any) -> dict[str, Any]:
+    """Flat constructor kwargs for :class:`~molzoo.mace.polar.MacePolar`."""
+    payload = {
+        "atomic_numbers": spec.atomic_numbers,
+        "atomic_energies": spec.atomic_energies,
+        "r_max": spec.r_max,
+        "num_bessel": spec.num_bessel,
+        "num_polynomial_cutoff": spec.num_polynomial_cutoff,
+        "l_max": spec.l_max,
+        "num_features": spec.num_features,
+        "max_hidden_l": spec.max_hidden_l,
+        "num_interactions": spec.num_interactions,
+        "correlation": spec.correlation,
+        "mlp_dim": spec.mlp_dim,
+        "edge_channels": spec.edge_channels,
+        "radial_mlp": spec.radial_mlp,
+        "scale": spec.scale,
+        "shift": spec.shift,
+        "num_recursion_steps": spec.num_recursion_steps,
+        "multipole_lmax": spec.multipole_lmax,
+        "multipole_sigma": spec.multipole_sigma,
+        "field_lmax": spec.field_lmax,
+        "field_widths": spec.field_widths,
+        "field_norms": spec.field_norms,
+        "add_local_electron_energy": spec.add_local_electron_energy,
+        "use_fallback": spec.use_fallback,
+    }
+    payload.update(overrides)
+    return payload
+
 
 #: A five-atom cluster at literal coordinates (Å) — no RNG anywhere.
 CLUSTER_POS: list[list[float]] = [
@@ -211,8 +259,18 @@ def tiny_omol_spec() -> MACEOMolSpec:
     return MACEOMolSpec(
         atomic_numbers=ATOMIC_NUMBERS,
         atomic_energies=ATOMIC_ENERGIES,
-        use_fallback=False,  # MACEOMol takes no such keyword; the spec defaults
+        use_fallback=False,
         **TINY_OMOL_KWARGS,
+    )
+
+
+@pytest.fixture
+def tiny_polar_spec() -> MACEPolarSpec:
+    """Tiny :class:`molzoo.mace.spec.MACEPolarSpec`."""
+    return MACEPolarSpec(
+        atomic_numbers=ATOMIC_NUMBERS,
+        atomic_energies=ATOMIC_ENERGIES,
+        **TINY_POLAR_KWARGS,
     )
 
 
@@ -270,15 +328,15 @@ def omol_cluster() -> TensorDict:
 
 
 @pytest.fixture
-def matpes_variant() -> MACEMatpes:
-    """Tiny :class:`~molzoo.mace.variants.MACEMatpes` in the keyword shape.
+def matpes_variant() -> MaceMatpes:
+    """Tiny :class:`~molzoo.mace.potential.MaceMatpes` in the keyword shape.
 
     ``atomic_energies`` is a **tensor**, as ``scripts/matpes_port/run_nve.py``
     passes it (``torch.tensor(cfg["atomic_energies"], dtype=config.ftype)``),
     even though :class:`~molzoo.mace.spec.MACEMatpesSpec` holds a list.
     """
     torch.manual_seed(0)
-    return MACEMatpes(
+    return MaceMatpes(
         atomic_numbers=list(ATOMIC_NUMBERS),
         atomic_energies=torch.tensor(ATOMIC_ENERGIES),
         **TINY_MATPES_KWARGS,
@@ -286,13 +344,13 @@ def matpes_variant() -> MACEMatpes:
 
 
 @pytest.fixture
-def omol_variant() -> MACEOMol:
-    """Tiny :class:`~molzoo.mace.variants.MACEOMol` with a woken readout.
+def omol_variant() -> MaceOmol:
+    """Tiny :class:`~molzoo.mace.potential.MaceOmol` with a woken readout.
 
     See :func:`wake_zero_init_readout` for why the readout is filled.
     """
     torch.manual_seed(0)
-    model = MACEOMol(
+    model = MaceOmol(
         atomic_numbers=list(ATOMIC_NUMBERS),
         atomic_energies=torch.tensor(ATOMIC_ENERGIES),
         **TINY_OMOL_KWARGS,

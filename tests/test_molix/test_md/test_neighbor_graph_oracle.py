@@ -223,13 +223,12 @@ class TestWrapInvarianceEnergyForces:
             pytest.skip("MatPES weights not available")
         from molix import config
         from molpot.derivation.force import autograd_forces_from_energy
-        from molzoo.mace import MACEPotential
+        from molzoo.mace import MaceMatpes
 
         config.set_precision("fp64")
         model = (
-            MACEPotential.from_checkpoint(
+            MaceMatpes.load(
                 weights / "matpes_r2scan_config.json",
-                weights / "matpes_r2scan_cueq_state.pt",
                 use_fallback=True,
             )
             .eval()

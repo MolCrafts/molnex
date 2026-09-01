@@ -6,8 +6,8 @@ it may *not* do: no heavy imports, no tensors in ``model_dump()``, and no
 transitive load of ``molzoo.mace.encoder`` when the shim hands out a spec class.
 
 The expected defaults are hard-coded from the flat constructors they replace
-(``src/molzoo/mace_matpes.py`` ``MACEMatpes.__init__`` and
-``src/molzoo/mace_omol.py`` ``MACEOMol.__init__``) — that parity is the whole
+(``src/molzoo/mace_matpes.py`` ``MaceMatpes.__init__`` and
+``src/molzoo/mace_omol.py`` ``MaceOmol.__init__``) — that parity is the whole
 point of the field table.
 """
 
@@ -38,7 +38,7 @@ BASE_SWITCHES: dict[str, str] = {
     "conditioning": "none",
 }
 
-#: ``MACEMatpes.__init__`` defaults, read from src/molzoo/mace_matpes.py:89-107.
+#: ``MaceMatpes.__init__`` defaults, read from src/molzoo/mace_matpes.py:89-107.
 #: ``radial_mlp`` is ``None`` there and materialises as ``[64, 64, 64]`` at
 #: mace_matpes.py:112; the spec carries the materialised list.
 MATPES_DEFAULTS: dict[str, Any] = {
@@ -62,7 +62,7 @@ MATPES_DEFAULTS: dict[str, Any] = {
     "conditioning": "none",
 }
 
-#: ``MACEOMol.__init__`` defaults, read from src/molzoo/mace_omol.py:65-85.
+#: ``MaceOmol.__init__`` defaults, read from src/molzoo/mace_omol.py:65-85.
 #: ``use_fallback`` is not a constructor argument there — the flat model
 #: hard-codes the fused cuEq path (mace_omol.py:172, 182), i.e. ``False``.
 OMOL_DEFAULTS: dict[str, Any] = {
@@ -222,7 +222,7 @@ class TestMACEMatpesSpec:
 
     @pytest.mark.parametrize(("field", "expected"), sorted(MATPES_DEFAULTS.items()))
     def test_field_default_matches_the_flat_constructor(self, field: str, expected: Any):
-        """Every default equals the ``MACEMatpes.__init__`` default it replaces."""
+        """Every default equals the ``MaceMatpes.__init__`` default it replaces."""
         spec = MACEMatpesSpec(
             atomic_numbers=list(ATOMIC_NUMBERS),
             atomic_energies=list(ATOMIC_ENERGIES),
@@ -250,7 +250,7 @@ class TestMACEOMolSpec:
 
     @pytest.mark.parametrize(("field", "expected"), sorted(OMOL_DEFAULTS.items()))
     def test_field_default_matches_the_flat_constructor(self, field: str, expected: Any):
-        """Every default equals the ``MACEOMol.__init__`` default it replaces."""
+        """Every default equals the ``MaceOmol.__init__`` default it replaces."""
         spec = MACEOMolSpec(
             atomic_numbers=list(ATOMIC_NUMBERS),
             atomic_energies=list(ATOMIC_ENERGIES),
