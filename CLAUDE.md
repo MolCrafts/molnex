@@ -134,6 +134,25 @@ For non-trivial work, prefer:
 <!-- Free-form additions below this line are preserved across re-runs.
      If a section grows past a screen, promote to .claude/notes/<topic>.md. -->
 
+## Iron law — everything compiles, no graph breaks
+
+**Every hot path in molnex must run under `torch.compile` with zero graph
+breaks** (`torch._dynamo.explain(...).graph_break_count == 0`, i.e.
+`fullgraph=True`-clean): encoders, potentials, the energy/force/virial
+kernels, neighbour-list update, integrators. Where a region truly cannot
+compile (a third-party op without a compile-safe registration), the
+uncompilable part is isolated behind the narrowest seam and **the compiled
+region is made as large as possible**; the break is named in the module
+docstring and in `.claude/notes/notes.md` topic `compile-no-graph-breaks`
+with the reason and the owner. Known break sources that are forbidden on a
+hot path: `.item()` / `int(tensor)` host syncs, data-dependent shapes
+(boolean-mask indexing, `nonzero`, per-call `arange` of a tensor-derived
+length), Python branches on tensor values, per-call `.to(device)` of freshly
+built CPU tensors, pydantic / config attribute reads, dict-of-tensor keys
+built per call. Dynamic sizes are handled by fixed capacity + mask (the
+`NeighborList` pattern), never by data-dependent shapes. A compile test
+(explain → 0 breaks) accompanies every new hot-path module.
+
 ## Iron law — no training before verified optimization
 
 **Starting a training run is forbidden until the exact network, data-task
@@ -525,7 +544,7 @@ hooks (`MetricsHook`, `TensorBoardHook`) should write their
 
 - **Encoder-only molzoo**: Encoders take a batch `TensorDict` and write per-layer features `(N, layers, features)` under `atoms.node_features`; readout/potentials handled by molpot
 - **Pydantic configs**: All block configs use `BaseModel` with `ConfigDict(arbitrary_types_allowed=True)`
-- **cuEquivariance**: Tensor products use `cuequivariance` / `cuequivariance_torch` for GPU-accelerated equivariant operations
+- **cuEquivariance**: Tensor products use `cuequivariance` / `cuequivariance_torch` for GPU-accelerated equivariant operations. Edge convolutions pass `indices_1=source, indices_out=target, size_out=N` into the cueq TP (conv fusion) — never `conv_tp(x[source], …)` + `scatter_sum`, which materialises an `(E, target.dim)` message and OOMs at ~10⁵ edges (`.claude/notes/notes.md` topic `cueq-conv-fusion`)
 - **Force derivation (dual backends)**: `molpot.derivation.ForceDerivation` is the single entry for `F = -dE/dpos`. Default `method="autograd"` (`torch.autograd.grad`) works for every model, including cuEquivariance fused ops. Use `method="functorch"` (`torch.func.grad`) only for pure-PyTorch energy graphs (e.g. PiNet) when you want a single backward + `torch.compile(fullgraph=True)`. `BasePotential.calc_forces` uses the autograd backend so the molpy protocol path stays universal. Do not hand-roll a third force path inside encoders.
 - **Functional composition**: `PotentialComposer` chains pooling → parameter heads → potential terms → aggregation
 - **Hook protocol**: Lifecycle callbacks (`on_train_start`, `on_epoch_end`, etc.) via `Hook` protocol

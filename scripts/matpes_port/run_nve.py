@@ -42,7 +42,7 @@ from molix.units import units  # noqa: E402
 
 _EV_TO_MD = (1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2").magnitude
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
-from molzoo.mace import MaceMatpes  # noqa: E402
+from molzoo.mace import MaceMatpes, MacePotential  # noqa: E402
 
 
 def read_poscar(path: Path) -> dict[str, torch.Tensor]:

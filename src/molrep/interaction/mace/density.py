@@ -4,7 +4,8 @@ Faithful port of MACE's ``RealAgnosticDensityInteractionBlock`` and
 ``RealAgnosticDensityResidualInteractionBlock`` on the cuEquivariance backend.
 One edge→node message-passing layer with:
 
-* a channel-wise tensor product ``node ⊗ Y_l(r̂)`` with neighbour scatter,
+* a channel-wise tensor product ``node ⊗ Y_l(r̂)`` with the neighbour
+  gather/scatter fused into the kernel (no per-edge message tensor),
 * a **learned density** normalisation ``message / (ρ + 1)`` where
   ``ρ_i = Σ_j tanh(MLP(edge_feats_ij)²)·u(r_ij)`` — this replaces the fixed
   ``avg_num_neighbors`` divisor and is what lets one model span the
@@ -175,8 +176,17 @@ class _DensityInteractionBase(nn.Module):
             edge_density = edge_density * cutoff
         density = _scatter_sum(edge_density, target, num_nodes)
 
-        mji = self.conv_tp(node_feats[source], edge_attrs, tp_weights)
-        message = _scatter_sum(mji, target, num_nodes)
+        # Gather/scatter fused into the tensor-product kernel: no ``(E,
+        # target.dim)`` per-edge message in the forward or the backward
+        # (``.claude/notes/notes.md`` topic ``cueq-conv-fusion``).
+        message = self.conv_tp(
+            node_feats,
+            edge_attrs,
+            tp_weights,
+            indices_1=source,
+            indices_out=target,
+            size_out=num_nodes,
+        )
         return self.linear(message) / (density + 1.0)
 
 

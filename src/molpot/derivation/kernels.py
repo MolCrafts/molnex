@@ -87,7 +87,11 @@ def grad_force_pass(
     ``requires_grad`` **leaf**, this kernel makes one
     (``pos.detach().requires_grad_(True)``) and writes it back to the batch, so
     the energy the core computes is differentiable w.r.t. it. A leaf supplied by
-    the caller is reused as is — no second leaf, no lost graph.
+    the caller is reused as is — no second leaf, no lost graph. When the kernel
+    does create the leaf it also freezes the batch's cached ``edges.edge_diff``
+    / ``edges.edge_dist`` to plain values, so a core that images its edges
+    re-derives ``∂/∂pos`` from the new leaf instead of from the graph those
+    tensors were built on.
 
     Args:
         energy_core: Energy core ``energy_core(batch)`` writing ``graphs.energy``.
@@ -144,6 +148,16 @@ def grad_force_pass(
     if owns_leaf:
         pos = pos.detach().requires_grad_(True)
         batch[POS_KEY] = pos
+        # Cached geometry was derived from the positions just replaced. Freeze
+        # it to a value: a core that images its edges (``molzoo.mace.geometry
+        # .edge_vectors``) then re-derives ``∂/∂pos`` from this leaf through
+        # its straight-through path, instead of trusting a graph that hangs
+        # off a tensor this kernel no longer differentiates — which is an
+        # autograd "tensor not used in the graph" error at best, and a force
+        # missing its short-range part at worst.
+        for key in (("edges", "edge_diff"), ("edges", "edge_dist")):
+            if key in batch.keys(include_nested=True):
+                batch[key] = batch[key].detach()
 
     with torch.enable_grad():
         if energy_core is not None:

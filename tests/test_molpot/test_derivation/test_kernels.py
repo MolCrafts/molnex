@@ -113,6 +113,41 @@ class TestGradForcePass:
         batch = grad_force_pass(toy, batch, detach_energy=None)
 
         assert batch[POS_KEY] is leaf  # kernel must not create a second leaf
+
+    def test_cached_edge_geometry_is_frozen_when_kernel_creates_leaf(self) -> None:
+        """Edge tensors built on the replaced positions must come out as values."""
+        toy = KernelToyPotential()
+        batch = kernel_toy_batch()
+        branch = batch[POS_KEY].detach().clone().requires_grad_(True) * 1.0
+        batch[POS_KEY] = branch
+        edge_index = torch.tensor([[0, 1], [1, 2], [2, 3]])
+        diff = branch[edge_index[:, 1]] - branch[edge_index[:, 0]]
+        batch["edges"] = TensorDict(
+            {"edge_index": edge_index, "edge_diff": diff, "edge_dist": diff.norm(dim=-1)},
+            batch_size=[edge_index.shape[0]],
+        )
+        assert batch["edges", "edge_diff"].requires_grad  # hangs off ``branch``
+
+        batch = grad_force_pass(toy, batch)
+
+        assert batch["edges", "edge_diff"].requires_grad is False
+        assert batch["edges", "edge_dist"].requires_grad is False
+        torch.testing.assert_close(batch[FORCES_KEY], _expected(), atol=EXACT_FORCE_ATOL, rtol=0.0)
+
+    def test_cached_edge_geometry_is_kept_when_caller_supplies_leaf(self) -> None:
+        """A caller-owned leaf keeps its live geometry graph (the strained virial path)."""
+        toy = KernelToyPotential()
+        batch = kernel_toy_batch()
+        leaf = _with_position_leaf(batch)
+        edge_index = torch.tensor([[0, 1], [1, 2], [2, 3]])
+        diff = leaf[edge_index[:, 1]] - leaf[edge_index[:, 0]]
+        batch["edges"] = TensorDict(
+            {"edge_index": edge_index, "edge_diff": diff}, batch_size=[edge_index.shape[0]]
+        )
+
+        batch = grad_force_pass(toy, batch)
+
+        assert batch["edges", "edge_diff"] is diff
         assert batch[ENERGY_KEY].requires_grad is True
 
     def test_create_graph_true_force_loss_reaches_parameters(self) -> None:

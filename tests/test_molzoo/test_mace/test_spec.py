@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACESpec
+from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACEPolarSpec, MACESpec
 from tests.test_molzoo.test_mace.conftest import ATOMIC_ENERGIES, ATOMIC_NUMBERS
 
 #: The five variant switches are required on the base and defaulted on the
@@ -271,3 +271,22 @@ class TestMACEOMolSpec:
         assert tiny_omol_spec.num_features == 16
         assert tiny_omol_spec.edge_channels == 8
         assert tiny_omol_spec.conditioning == "charge_spin"
+
+
+class TestMACEPolarSpec:
+    """Test the MACE-POLAR configuration."""
+
+    def test_self_interaction_defaults_are_opposite(self):
+        """Dump ``include_electrostatic_self_interaction`` True, ``field_si`` False.
+
+        Two independent switches with opposite defaults: the Hartree energy
+        counts the on-site GTO overlap, the field features do not let an atom
+        see its own multipole. A single shared flag would be wrong on one of
+        the two sides.
+        """
+        spec = MACEPolarSpec(
+            atomic_numbers=list(ATOMIC_NUMBERS),
+            atomic_energies=list(ATOMIC_ENERGIES),
+        )
+        assert spec.electrostatic_self_interaction is True
+        assert spec.field_self_interaction is False

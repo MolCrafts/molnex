@@ -55,7 +55,9 @@ class _Beat(MDHook):
     def on_step_end(self, runner, step, obs) -> None:  # noqa: ANN001
         if step % 10 == 0:
             vol = float(obs.volume) if obs.volume is not None else float("nan")
-            fmax = float(obs.forces.detach().abs().max()) if obs.forces is not None else float("nan")
+            fmax = (
+                float(obs.forces.detach().abs().max()) if obs.forces is not None else float("nan")
+            )
             print(
                 f"step {step:4d}  E={float(obs.total):.4f}  "
                 f"T={float(obs.temperature):.1f} K  V={vol:.1f} Å³  "

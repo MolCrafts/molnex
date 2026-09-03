@@ -12,7 +12,23 @@ from molix import config
 from molzoo.mace.checkpoint import CheckpointRemap, polar_keys
 from molzoo.mace.polar import MacePolar
 from molzoo.mace.spec import MACEPolarSpec
-from tests.test_molzoo.test_mace.conftest import polar_kwargs
+from tests.test_molzoo.test_mace.conftest import (
+    CLUSTER_POS,
+    CLUSTER_Z,
+    SINGLE_GRAPH,
+    full_edge_index,
+    polar_kwargs,
+)
+
+#: Seeded tiny-Polar ``energy_core`` energies (eV) — hard-coded fp64 literals
+#: captured from *this* tree before the fixed-capacity k-grid rewrite (molnex @
+#: ``feat/oplsaa-parameterizer``, ``PYTHONPATH=src python
+#: capture_kgrid_goldens.py``, 2026-09-03). Construction is
+#: ``torch.manual_seed(0)`` → ``MacePolar(**polar_kwargs(tiny_polar_spec,
+#: compute_forces=False)).eval()`` on :data:`CLUSTER_POS` / :data:`CLUSTER_Z`.
+#: No live oracle.
+TINY_POLAR_PERIODIC10_ENERGY_SEED0 = -2860.720879072809
+TINY_POLAR_ISOLATED_ENERGY_SEED0 = -2829.8252847964013
 
 
 @pytest.fixture(autouse=True)
@@ -62,6 +78,29 @@ class TestMacePolar:
         e1 = model(shifted)["graphs", "energy"]
         assert torch.allclose(e0, e1, atol=1e-8)
 
+    def test_self_interaction_flags_reach_both_electrostatic_blocks(
+        self, tiny_polar_spec: MACEPolarSpec
+    ):
+        """Hartree keeps the on-site term by default, field features drop it.
+
+        The two blocks answer different questions (energy vs per-atom
+        potential) and the dump sets them independently, so one flag each —
+        wired straight through :class:`~molzoo.mace.spec.MACEPolarSpec`.
+        """
+        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False))
+        assert model.coulomb_energy.include_self_interaction is True
+        assert model.electric_potential_descriptor.include_self_interaction is False
+        flipped = MacePolar(
+            **polar_kwargs(
+                tiny_polar_spec,
+                compute_forces=False,
+                electrostatic_self_interaction=False,
+                field_self_interaction=True,
+            )
+        )
+        assert flipped.coulomb_energy.include_self_interaction is False
+        assert flipped.electric_potential_descriptor.include_self_interaction is True
+
     def test_defaults_total_charge_and_spin(self, tiny_polar_spec: MACEPolarSpec, cluster):
         """Missing graphs.total_* → Q=0, M=1."""
         model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False))
@@ -94,6 +133,119 @@ class TestPOLARRemap:
         missing, unexpected = polar_remap.load(model, official)
         assert not any(k in dict(model.named_parameters()) for k in missing)
         assert "aux_head.weight" in unexpected
+
+
+class TestMacePolarKspaceCompile:
+    """``energy_core`` threads ``num_graphs`` / ``cell`` into both GTO blocks."""
+
+    def test_energy_core_forwards_num_graphs_to_both_gto_blocks(
+        self, tiny_polar_spec: MACEPolarSpec, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ac-012: one coulomb call and two descriptor calls per recursion step.
+
+        No call may fall back to ``int(batch.max().item())`` — the pipeline is
+        broken today at ``polar.py:241-246`` / ``:266``, which pass ``cell``
+        only.
+        """
+        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        coulomb_calls: list[dict[str, object]] = []
+        descriptor_calls: list[dict[str, object]] = []
+        coulomb_forward = model.coulomb_energy.forward
+        descriptor_forward = model.electric_potential_descriptor.forward
+
+        def record_coulomb(*args: torch.Tensor, **kwargs: object) -> torch.Tensor:
+            coulomb_calls.append(dict(kwargs))
+            return coulomb_forward(*args, **kwargs)
+
+        def record_descriptor(*args: torch.Tensor, **kwargs: object) -> torch.Tensor:
+            descriptor_calls.append(dict(kwargs))
+            return descriptor_forward(*args, **kwargs)
+
+        monkeypatch.setattr(model.coulomb_energy, "forward", record_coulomb)
+        monkeypatch.setattr(model.electric_potential_descriptor, "forward", record_descriptor)
+
+        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
+        atomic_numbers = torch.tensor(CLUSTER_Z, dtype=torch.long)
+        edge_index = full_edge_index(SINGLE_GRAPH)
+        batch = torch.zeros(len(CLUSTER_Z), dtype=torch.long)
+        cell = torch.eye(3, dtype=torch.float64) * 10.0
+        with torch.no_grad():
+            model.energy_core(pos, atomic_numbers, edge_index, batch, 1, cell=cell)
+
+        assert len(coulomb_calls) == 1
+        assert len(descriptor_calls) == 2 * tiny_polar_spec.num_recursion_steps
+        for kwargs in coulomb_calls + descriptor_calls:
+            assert kwargs.get("num_graphs") == 1
+            assert kwargs.get("cell") is not None
+
+    @pytest.mark.slow
+    def test_periodic_energy_core_compiles_to_one_graph(
+        self, tiny_polar_spec: MACEPolarSpec
+    ) -> None:
+        """ac-012: bound grids + explicit ``num_graphs`` → 1 graph, 0 breaks."""
+        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
+        atomic_numbers = torch.tensor(CLUSTER_Z, dtype=torch.long)
+        edge_index = full_edge_index(SINGLE_GRAPH)
+        batch = torch.zeros(len(CLUSTER_Z), dtype=torch.long)
+        cell = torch.eye(3, dtype=torch.float64) * 10.0
+        model.coulomb_energy.bind_cell(cell)
+        model.electric_potential_descriptor.bind_cell(cell)
+        torch._dynamo.reset()
+        explanation = torch._dynamo.explain(model.energy_core)(
+            pos, atomic_numbers, edge_index, batch, 1, cell=cell
+        )
+        assert explanation.graph_count == 1
+        assert explanation.graph_break_count == 0
+
+    @pytest.mark.slow
+    def test_isolated_energy_core_still_breaks_by_design(
+        self, tiny_polar_spec: MACEPolarSpec
+    ) -> None:
+        """The isolated all-pairs enumeration keeps its named break."""
+        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
+        atomic_numbers = torch.tensor(CLUSTER_Z, dtype=torch.long)
+        edge_index = full_edge_index(SINGLE_GRAPH)
+        batch = torch.zeros(len(CLUSTER_Z), dtype=torch.long)
+        torch._dynamo.reset()
+        explanation = torch._dynamo.explain(model.energy_core)(
+            pos, atomic_numbers, edge_index, batch, 1
+        )
+        assert explanation.graph_break_count > 0, (
+            "the isolated all-pairs enumeration is retained on purpose (D6); "
+            "its break is owned by spec polar-compile-clean-04-pairs and must "
+            "not become an accidental silent contract."
+        )
+
+    def test_periodic_energy_matches_pre_change_literal(
+        self, tiny_polar_spec: MACEPolarSpec
+    ) -> None:
+        """fp64 tiny-Polar energy in a 10 Å cubic cell is unchanged."""
+        torch.manual_seed(0)
+        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
+        atomic_numbers = torch.tensor(CLUSTER_Z, dtype=torch.long)
+        edge_index = full_edge_index(SINGLE_GRAPH)
+        batch = torch.zeros(len(CLUSTER_Z), dtype=torch.long)
+        cell = torch.eye(3, dtype=torch.float64) * 10.0
+        with torch.no_grad():
+            energy = model.energy_core(pos, atomic_numbers, edge_index, batch, 1, cell=cell)
+        assert energy.item() == pytest.approx(TINY_POLAR_PERIODIC10_ENERGY_SEED0, abs=1e-10)
+
+    def test_isolated_energy_matches_pre_change_literal(
+        self, tiny_polar_spec: MACEPolarSpec
+    ) -> None:
+        """fp64 tiny-Polar isolated energy is unchanged by the k-grid work."""
+        torch.manual_seed(0)
+        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
+        atomic_numbers = torch.tensor(CLUSTER_Z, dtype=torch.long)
+        edge_index = full_edge_index(SINGLE_GRAPH)
+        batch = torch.zeros(len(CLUSTER_Z), dtype=torch.long)
+        with torch.no_grad():
+            energy = model.energy_core(pos, atomic_numbers, edge_index, batch, 1)
+        assert energy.item() == pytest.approx(TINY_POLAR_ISOLATED_ENERGY_SEED0, abs=1e-10)
 
 
 class TestPolarPackageImports:

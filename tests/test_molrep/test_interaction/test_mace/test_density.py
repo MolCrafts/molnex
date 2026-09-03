@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+from molix.F.scatter import scatter_sum
 from molrep.interaction.mace.density import DensityInteraction, DensityResidualInteraction
 
 N_ELEMENTS = 3
@@ -57,6 +58,24 @@ def residual_layer():
     ).double()
 
 
+def _explicit_message(layer, graph):
+    """The pre-fusion formulation: gather ``x[source]`` → per-edge TP → scatter on ``target``.
+
+    Spelled out with the block's own sub-layers so the only thing the block
+    can differ in is how the gather/scatter reaches the kernel.
+    """
+    source, target = graph["edge_index"][:, 0], graph["edge_index"][:, 1]
+    n = graph["node_feats"].shape[0]
+    up = layer.linear_up(graph["node_feats"])
+    tp_weights = layer.conv_tp_weights(graph["edge_feats"])
+    density = scatter_sum(
+        torch.tanh(layer.density_fn(graph["edge_feats"]) ** 2), target, dim=0, dim_size=n
+    )
+    mji = layer.conv_tp(up[source], graph["edge_attrs"], tp_weights)
+    message = scatter_sum(mji, target, dim=0, dim_size=n)
+    return layer.linear(message) / (density + 1.0)
+
+
 class TestDensityInteraction:
     """Test the first-layer density-normalised interaction."""
 
@@ -64,6 +83,18 @@ class TestDensityInteraction:
         """reshape_irreps emits ``(N, ir_dim, mul)`` for the product block."""
         out, _ = first_layer(**graph)
         assert out.shape == (N_NODES, 4, FEATURES)
+
+    def test_message_matches_explicit_gather_scatter(self, first_layer, graph):
+        """Kernel-fused gather/scatter equals the explicit ``x[source]`` → TP → scatter route.
+
+        Pins both the fusion and the edge convention: the message on node
+        ``i`` sums the tensor products over edges whose ``target`` is ``i``.
+        """
+        out, _ = first_layer(**graph)
+        expected = first_layer._reshape(
+            first_layer.skip_tp(_explicit_message(first_layer, graph), graph["node_attrs"])
+        )
+        assert torch.allclose(out, expected, atol=1e-12)
 
     def test_returns_no_skip_connection(self, first_layer, graph):
         """The first layer has no residual to carry — MACE returns ``None``."""

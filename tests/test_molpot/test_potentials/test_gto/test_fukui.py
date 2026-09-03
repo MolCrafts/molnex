@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -83,3 +85,26 @@ class TestFukuiEquilibration:
         )
         assert out[:2, 0, 0].sum().item() == pytest.approx(0.5)
         assert out[2, 0, 0].item() == pytest.approx(0.0)
+
+    def test_scatter_import_is_compile_safe(self) -> None:
+        """``scatter_sum`` hides an ``.item()`` on its ``dim_size=None`` path.
+
+        The equilibration runs inside the compiled charge path, so it must use
+        the compile-safe reduction its GTO siblings already use — the same
+        assertion as ``test_scatter_import_is_compile_safe`` on
+        ``hartree.py`` / ``features.py``.
+        """
+        path = (
+            Path(__file__).resolve().parents[4]
+            / "src"
+            / "molpot"
+            / "potentials"
+            / "gto"
+            / "fukui.py"
+        )
+        lines = [
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("from molix.F.scatter import")
+        ]
+        assert lines == ["from molix.F.scatter import scatter_sum_compile_safe"]

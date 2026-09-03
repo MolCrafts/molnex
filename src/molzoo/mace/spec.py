@@ -215,6 +215,14 @@ class MACEPolarSpec(MACESpec):
             (dump ``True``).
         last_readout_bias: Last per-layer readout is
             :class:`~molrep.readout.mace.NonLinearBiasReadout`.
+        electrostatic_self_interaction: Whether the on-site GTO overlap counts
+            towards the Hartree energy (dump
+            ``include_electrostatic_self_interaction``: True).
+        field_self_interaction: Whether an atom sees its own multipole in its
+            own field features (dump ``field_si``: False). The two flags are
+            independent and have opposite dump defaults — see
+            :class:`~molpot.potentials.gto.hartree.GTOHartreeEnergy` and
+            :class:`~molpot.potentials.gto.features.GTOFieldFeatures`.
     """
 
     max_hidden_l: int = Field(1, ge=0)
@@ -228,6 +236,8 @@ class MACEPolarSpec(MACESpec):
     field_norms: list[float] = Field(default_factory=lambda: [20.0, 20.0, 0.5, 0.5])
     add_local_electron_energy: bool = True
     kspace_cutoff_factor: float = Field(1.0, gt=0.0)
+    electrostatic_self_interaction: bool = True
+    field_self_interaction: bool = False
     edge_channels: int = Field(128, gt=0)
     radial_mlp: list[int] = Field(default_factory=lambda: [64, 64, 64], min_length=1)
 

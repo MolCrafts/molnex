@@ -122,6 +122,8 @@ def polar_kwargs(spec: MACEPolarSpec, **overrides: Any) -> dict[str, Any]:
         "field_widths": spec.field_widths,
         "field_norms": spec.field_norms,
         "add_local_electron_energy": spec.add_local_electron_energy,
+        "electrostatic_self_interaction": spec.electrostatic_self_interaction,
+        "field_self_interaction": spec.field_self_interaction,
         "use_fallback": spec.use_fallback,
     }
     payload.update(overrides)

@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from molix.F.scatter import scatter_sum
+from molix.F.scatter import scatter_sum_compile_safe
 
 
 class FukuiEquilibration(nn.Module):
@@ -39,13 +39,13 @@ class FukuiEquilibration(nn.Module):
         total_spin: torch.Tensor,
     ) -> torch.Tensor:
         n_graphs = int(total_charge.shape[0])
-        fukui_norm = scatter_sum(fukui_sources, batch, dim=0, dim_size=n_graphs)[batch]
+        fukui_norm = scatter_sum_compile_safe(fukui_sources, batch, n_graphs)[batch]
         fukui_norm = torch.where(fukui_norm == 0, torch.ones_like(fukui_norm), fukui_norm)
         fukui = fukui_sources / fukui_norm
         unpaired = total_spin - 1.0
         target_up = (total_charge + unpaired)[batch] / 2.0
         target_down = (total_charge - unpaired)[batch] / 2.0
-        pred = scatter_sum(spin_density[:, :, 0], batch, dim=0, dim_size=n_graphs)[batch]
+        pred = scatter_sum_compile_safe(spin_density[:, :, 0], batch, n_graphs)[batch]
         out = spin_density.clone()
         out[:, 0, 0] = out[:, 0, 0] + fukui[:, 0] * (target_up - pred[:, 0])
         out[:, 1, 0] = out[:, 1, 0] + fukui[:, 1] * (target_down - pred[:, 1])

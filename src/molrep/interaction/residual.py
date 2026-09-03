@@ -5,7 +5,8 @@ the cuEquivariance backend. One edge→node message-passing layer with:
 
 * node-attribute source/target embeddings concatenated onto the radial edge
   features that drive the tensor-product weights,
-* a channel-wise tensor product ``node ⊗ Y_l(r̂)`` with neighbour scatter,
+* a channel-wise tensor product ``node ⊗ Y_l(r̂)`` with the neighbour
+  gather/scatter fused into the kernel (no per-edge message tensor),
 * a learnable density normalisation ``message / (ρ·β + α)``,
 * a residual (``linear_res``) path and an equivariant gated nonlinearity,
 * a separate ``skip_tp`` (Linear) carried out for the downstream product block.
@@ -186,8 +187,20 @@ class ResidualInteraction(nn.Module):
             edge_density = edge_density * cutoff
         density = _scatter_sum(edge_density, target, num_nodes)
 
-        mji = self.conv_tp(node_feats[source], edge_attrs, tp_weights)
-        message = _scatter_sum(mji, target, num_nodes)
+        # Gather (``node_feats[source]``) and scatter (sum onto ``target``) run
+        # inside the tensor-product kernel. The per-edge message ``m_ji``
+        # ``(E, target.dim)`` is never materialised — on the fused path neither
+        # in the forward nor as ``∂E/∂m_ji`` in the backward — which is what
+        # keeps a 512-channel, l_max=3 model inside HBM at ~3·10⁵ edges
+        # (``.claude/notes/notes.md`` topic ``cueq-conv-fusion``).
+        message = self.conv_tp(
+            node_feats,
+            edge_attrs,
+            tp_weights,
+            indices_1=source,
+            indices_out=target,
+            size_out=num_nodes,
+        )
 
         message = self.linear_1(message) / (density * self.beta + self.alpha)
         message = message + node_feats_res

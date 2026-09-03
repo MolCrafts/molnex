@@ -198,6 +198,157 @@ default and MACE with no knob at all).
 
 ---
 
+<!-- mol:note:topic:cueq-conv-fusion -->
+## [2026-09-02] cuEq conv fusion: gather/scatter live inside the TP kernel
+
+**Context.** `ResidualInteraction` and `_DensityInteractionBase` gathered
+`node_feats[source]`, ran `conv_tp` per edge and `scatter_sum`'d the
+`(E, target.dim)` message. MACE-POLAR-1-M (512 channels, l_max=3, target
+dim 8192) on the 4995-atom PEO box (E = 2.86·10⁵ directed edges at 6 Å)
+makes that tensor 9.4 GB per layer in fp32 — plus its layout-transpose copy
+and, in the backward, `∂E/∂m_ji` of the same size again. The bench OOM'd
+at 93 GiB on a GH200 (`bench5k/slurm-molnex-1916374.err`, 2026-09-02).
+
+**Rule.** Every cuEq channel-wise convolution passes
+`indices_1=source, indices_out=target, size_out=N` to
+`cuet.ChannelWiseTensorProduct` — the `SegmentedPolynomial` indexed path
+(`uniform_1d` fuses gather + scatter on GPU; `naive` does
+`index_select` / `scatter_add_` on CPU, so the fallback keeps working).
+Never `conv_tp(x[source], …)` followed by `scatter_sum`. This is the
+execution path official mace-torch takes with `conv_fusion=True` (its
+CUDA default), so parity checks stay on the reference's route. Pinned by
+`test_message_matches_explicit_gather_scatter` in
+`tests/test_molrep/test_interaction/test_residual.py` and
+`tests/test_molrep/test_interaction/test_mace/test_density.py`.
+
+**Inference grad mode.** `calc_energy_forces_virial` / `calc_forces` /
+`grad_force_pass` resolve `create_graph` from the *ambient* grad mode
+(training needs it). Outside `torch.no_grad()` that is `retain_graph=True`:
+the forward tape and every backward intermediate stay alive until the
+gradient is dropped. `molix.md.MD.run` wraps in `no_grad`; any hand-rolled
+eval loop (bench scripts, parity checks) must do the same.
+
+**Measured (GH200, PEO 4995 atoms / 2.86·10⁵ edges, MACE-POLAR-1-M,
+`calc_energy_forces_virial` under `no_grad`, 2026-09-02).** Before: OOM at
+93 GiB. After: fp32 peak 28.3 GiB (forward-only 15.0), 0.38 s/step; fp64
+peak 56.5 GiB, 0.59 s/step. Official mace-torch (cueq, conv fusion) on the
+same box: 25.2 GiB / 0.5–1.0 s at fp32. Records:
+`peo-tg/experiments/size-convergence-mace-polar/bench5k/verify_molnex*.json`.
+
+**Periodic Polar parity (found 2026-09-02, fixed 2026-09-03).** fp64 term
+split on the same box (`bench5k/diag_components_float64.json`): E0 + local
+interaction agreed to 2.7·10⁻⁵ eV with identical edge counts (285 546), but
+k-space Hartree was +13.5 eV and the local electron energy +2.5 eV vs
+official. A fixed-charge reproduction (`bench5k/repro_kspace.json`) showed
+the reciprocal sum itself exact to 3·10⁻⁷ eV: both defects were the on-site
+``i = j`` term, which the reciprocal sum already contains, being handled as
+if the evaluator were the real-space one. (1) `GTOHartreeEnergy.forward`
+added ``½Σωq²`` unconditionally after the `cell` branch — official adds it
+only on the real-space path and *subtracts* it on the k-space path when the
+flag is off. (2) `GTOFieldFeatures._kspace_features` never removed the
+atom's own potential/field (official does when `field_si=False`, the dump's
+setting). Fix: branch-aware self term in `hartree.py`; `GTOFieldFeatures(
+include_self_interaction=False)` subtracting the closed-form ``r → 0``
+limits `self_overlap_l0 = l0·eV_A/(σ_c√π)`, `self_overlap_l1 =
+l1·δ·eV_A/(6√π σ_c³)` (dump: `[19.1995, 12.1428]`, `[2.3155, 1.1715]`);
+`MACEPolarSpec.electrostatic_self_interaction=True` /
+`field_self_interaction=False` wired through `MacePolar`. Pinned by
+`tests/test_molpot/test_potentials/test_gto/test_{hartree,features}.py`
+(large-cell k-space == isolated, lone-charge Madelung golden, flag
+polarity) and `regressions/mace-polar-periodic-gto.py` (official fp64
+goldens on the PEO box). Isolated path unchanged (water regression).
+
+**Status.** active.
+
+---
+
+<!-- mol:note:topic:compile-no-graph-breaks -->
+## [2026-09-03] Everything compiles, zero graph breaks (user rule)
+
+**Rule.** Every hot path runs under `torch.compile` with
+`torch._dynamo.explain(...).graph_break_count == 0`. Where a region truly
+cannot compile, isolate it behind the narrowest seam and maximise the
+compiled region; name the break here with reason + owner. Forbidden on a
+hot path: `.item()` / `int(tensor)`, data-dependent shapes (boolean-mask
+indexing, `nonzero`, tensor-derived `arange`), Python branches on tensor
+values, per-call CPU→device tensor creation, pydantic reads. Dynamic sizes
+= fixed capacity + mask (the `NeighborList` pattern). Every new hot-path
+module ships an explain→0 test (pattern:
+`tests/test_molzoo/test_mace/test_potential.py::test_energy_core_compiles_to_one_graph`).
+
+**Baseline inventory (2026-09-03, CPU tiny Polar, naive cueq).** MACE local
+backbone: 1 graph / 0 breaks. Polar MD step
+(`molpot.forcefield.potentials.Potentials.calc_energy_forces_virial`, cell given): 51 graphs /
+50 breaks from five sites — `gto/kspace.py:101-127 half_sphere_kvectors`
+(`.item()` ×4 in a comprehension, 5 boolean-mask shapes),
+`gto/features.py:204,214` and `gto/hartree.py:281` (`int(batch.max().item())`
+for `num_graphs`), `molzoo/mace/encoder.py:303 validate_elements`
+(`torch.unique` on a mask, traced on the first call),
+`derivation/force.py:167-168` (leaf creation + `requires_grad=True` tensor
+inside the traced region). Isolated path adds `gto/hartree.py:111-145`
+(pair enumeration: `.item()` ×5, data-dependent mask). The fused cueq
+kernels are `torch.library.custom_op` + `register_fake`, i.e. compile-safe.
+Compile seam: `energy_core` (flat tensors) — `autograd.grad` stays outside
+and gets its backward from AOTAutograd. Fix tracked by spec
+`polar-compile-clean`.
+
+**01-kgrid (2026-09-03) — fixed-capacity reciprocal grid.** Sites (1) and
+(2) above are closed: `gto/kspace.py` now owns `KSpaceGrid` (plain class,
+not a module, sized **once** on the first `bind`; later binds only
+`check_capacity`, never resize — resize = build a new grid), and both GTO
+modules take an explicit `num_graphs` (the `.item()` survives only on the
+`None` branch, eager-only). The grid is an integer **half-box**
+`n ∈ [-N_c, N_c]³`, first-nonzero > 0, with `N_c,i = ceil(f·‖a_i‖k_cut/2π)`;
+`|k| < k_cut`, `k ≠ 0` are 0/2 multiplicative weights recomputed from the
+live cell, guarded denominator before the division. Over capacity: eager
+raises a `RuntimeError` naming `KSpaceGrid` + `capacity_factor`; in-graph
+the weights become NaN (never truncation), both from the same
+`floor(x) > N_c` predicate. Cost of the box vs the old data-dependent
+half-sphere (`k_cut = 1.8467 Å⁻¹`): PEO box 46.36 Å cubic, M = 5318 →
+**21437** at `capacity_factor=1.2` (N_c = 17), 12194 at 1.0 (N_c = 14);
+10 Å cube 46 → 364. At N = 4995 one `(N, M)` fp32 tensor grows from
+101.3 MiB to **408.5 MiB**, and `structure_factor` holds three of them
+(`kr` / `cos_kr` / `sin_kr`, ≈ +0.9 GiB fp32). NVT callers may pass
+`capacity_factor=1.0`; step time / peak memory are measured by 03-wire.
+Same three defects (`.item()` sizing, boolean-mask slicing, half-sphere
+mask) still live in `elec/kernels/multipole_ewald.py:221-245` /
+`:352-370` — owner **molpot elec**, deliberately not migrated (its
+FD-stress keep-set `enumerate_kvec_indices:247-255` is frozen to that
+layout). **Two-way promotion trigger:** when `multipole_ewald` becomes a
+consumer of the grid, *or* when `KSpaceGrid` gains any consumer **outside
+`src/molpot/potentials/gto/`** first (its two in-package holders,
+`GTOHartreeEnergy` / `GTOFieldFeatures`, do not count), `KSpaceGrid` moves
+to `src/molpot/potentials/elec/lib/kvectors.py` and the keep-set is
+re-derived — neither side may sit on it silently. Eager cost to measure in
+03-wire, not assume: `check_capacity` reads three lattice norms back to the
+host per call and eager `forward` calls it every step (≈ 5 calls per Polar
+step at `num_recursion_steps=2`, ≈ 15 device→host syncs); the compiled
+route pays none. The MacePolar-level `bind_cell` fan-out (one call instead
+of `coulomb_energy.bind_cell` + `electric_potential_descriptor.bind_cell`)
+is 02-seam's `CellBound` / 03-wire's wiring, not 01's.
+Post-impl review adjustments (2026-09-03): the head-room knob is a
+constructor keyword `kspace_capacity_factor` on both holders (the earlier
+"swap `mod.kgrid`" advice was a leaked lifecycle; plumbing it up to
+`MacePolar` / `MACEPolarSpec` is 03-wire's NPT surface); `k_cutoff` has one
+home (`kgrid.k_cutoff`, the holders' properties delegate); the holder glue
+(`bind_cell` + `_apply`) lives once in a private mixin in `hartree.py`
+because it had exactly two call sites; holders import only public names
+from `kspace.py`.
+**Retained break (named, asserted):** the isolated-molecule batched
+all-pairs enumeration `gto/hartree.py:96-151` (`_complete_directed_pairs`
+/ `cached_complete_directed_pairs`: `.item()` ×5, `torch.equal`, boolean
+masks) is untouched — a whole-batch mask would inflate the training-path
+pair count from `16·N(N−1)` to `(4Bn)²` (B = 128, n = 20: 128×). Owner:
+spec `polar-compile-clean-04-pairs`. Sketch: block-diagonal per-graph
+enumeration at a construct-time `max_atoms_per_graph` capacity,
+`O(B·n²·copies²)`, all indices from `arange` arithmetic, overflow raised at
+bind — the `NeighborList` fixed-capacity idiom. Unit tests assert this
+branch *still* breaks so it cannot silently become a contract.
+
+**Status.** active.
+
+---
+
 <!-- mol:note:topic:cueq-ops-capability -->
 ## [2026-08-08] cuEq fused-kernel capability is probed, never assumed
 

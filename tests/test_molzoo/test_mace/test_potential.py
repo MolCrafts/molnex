@@ -83,8 +83,10 @@ FD_PROBES = ((0, 0), (2, 1), (4, 2))
 #: ``energy_core`` must keep them so 07's call-site re-point is a pure rename.
 FLAT_ENERGY_CORE_PARAMETERS = ("self", "positions", "Z", "edge_index", "batch", "num_graphs")
 
-#: The two per-graph conditioning tensors only the OMOL variant consumes.
-CONDITIONING_PARAMETERS = ("edge_diff", "shifts", "total_charge", "total_spin")
+#: The keyword tail after the flat six: imaged geometry, the rejected legacy
+#: ``shifts``, the two per-graph conditioning tensors only the OMOL variant
+#: consumes, and the ``cell`` only the Polar k-space path reads.
+CONDITIONING_PARAMETERS = ("edge_diff", "shifts", "total_charge", "total_spin", "cell")
 
 #: A third force path in this file is forbidden (CLAUDE.md "Force derivation").
 FORBIDDEN_GRAD_CALLS = frozenset(
