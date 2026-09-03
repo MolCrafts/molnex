@@ -139,12 +139,14 @@ class TestPublicImportSurface:
 
         assert isinstance(MACE, type)
 
+    @pytest.mark.slow
     def test_importing_molzoo_does_not_import_cuequivariance(
         self, lazy_probe: dict[str, bool]
     ) -> None:
         """``import molzoo`` must not pay for the equivariance stack."""
         assert lazy_probe["at_import"] is False
 
+    @pytest.mark.slow
     def test_touching_a_model_symbol_imports_cuequivariance(
         self, lazy_probe: dict[str, bool]
     ) -> None:

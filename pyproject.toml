@@ -78,12 +78,13 @@ pythonpath = [".", "src"]
 python_files = ["test_*", "bm_*"]
 python_classes = ["Test*", "BM*"]
 markers = [
-  "slow: marks tests that compile/AOT-export models (deselect with '-m \"not slow\"')",
-  "regression: numerical reference-value parity suites under tests/regression/ (excluded by default; run with '-m regression')",
+  "slow: compiles / dynamo-traces / AOT-exports a model, spawns DataLoader workers or rolls out MD — excluded from the default run; run on demand with '-m slow' (CI runs it as its own step)",
 ]
-# Unit runs stay fast: tests/regression/ is auto-marked and skipped by default.
-# A CLI -m overrides this (e.g. `pytest -m regression`, `pytest -m ""` for everything).
-addopts = ["-m", "not regression"]
+# Test tiers: the default `pytest` run is the fast unit tier (a couple of
+# minutes on 12 workers); `-m slow` is the on-demand tier;
+# `scripts/affected_tests.py` runs only the tests mirrored by a git diff.
+# A CLI -m overrides this (`pytest -m slow` for the slow tier, `pytest -m ""` for everything).
+addopts = ["-m", "not slow", "--durations=10"]
 
 [tool.scikit-build]
 wheel.packages = ["src/molix", "src/molrep", "src/molpot", "src/molzoo"]

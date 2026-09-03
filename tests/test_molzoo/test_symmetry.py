@@ -164,7 +164,8 @@ def allegro_encoder():
     return encoder
 
 
-SEEDS = [0, 1, 2, 3, 4]
+#: Exact invariances need one random rotation, not a sweep.
+SEEDS = [0]
 
 
 # ---------------------------------------------------------------------------

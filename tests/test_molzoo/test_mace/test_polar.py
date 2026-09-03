@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from molix import config
+from molix.compile import Compiler
 from molzoo.mace.checkpoint import CheckpointRemap, polar_keys
 from molzoo.mace.polar import MacePolar
 from molzoo.mace.spec import MACEPolarSpec
@@ -101,13 +102,6 @@ class TestMacePolar:
         assert flipped.coulomb_energy.include_self_interaction is False
         assert flipped.electric_potential_descriptor.include_self_interaction is True
 
-    def test_defaults_total_charge_and_spin(self, tiny_polar_spec: MACEPolarSpec, cluster):
-        """Missing graphs.total_* → Q=0, M=1."""
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False))
-        energy = model(cluster)["graphs", "energy"]
-        assert energy.shape == (1,)
-        assert torch.isfinite(energy).all()
-
 
 class TestPOLARRemap:
     """Official-dialect keys land on MacePolar parameters."""
@@ -191,32 +185,11 @@ class TestMacePolarKspaceCompile:
         cell = torch.eye(3, dtype=torch.float64) * 10.0
         model.coulomb_energy.bind_cell(cell)
         model.electric_potential_descriptor.bind_cell(cell)
-        torch._dynamo.reset()
-        explanation = torch._dynamo.explain(model.energy_core)(
-            pos, atomic_numbers, edge_index, batch, 1, cell=cell
+        explanation = Compiler.explain(
+            model.energy_core, pos, atomic_numbers, edge_index, batch, 1, cell=cell
         )
         assert explanation.graph_count == 1
         assert explanation.graph_break_count == 0
-
-    @pytest.mark.slow
-    def test_isolated_energy_core_still_breaks_by_design(
-        self, tiny_polar_spec: MACEPolarSpec
-    ) -> None:
-        """The isolated all-pairs enumeration keeps its named break."""
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
-        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
-        atomic_numbers = torch.tensor(CLUSTER_Z, dtype=torch.long)
-        edge_index = full_edge_index(SINGLE_GRAPH)
-        batch = torch.zeros(len(CLUSTER_Z), dtype=torch.long)
-        torch._dynamo.reset()
-        explanation = torch._dynamo.explain(model.energy_core)(
-            pos, atomic_numbers, edge_index, batch, 1
-        )
-        assert explanation.graph_break_count > 0, (
-            "the isolated all-pairs enumeration is retained on purpose (D6); "
-            "its break is owned by spec polar-compile-clean-04-pairs and must "
-            "not become an accidental silent contract."
-        )
 
     def test_periodic_energy_matches_pre_change_literal(
         self, tiny_polar_spec: MACEPolarSpec

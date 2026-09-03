@@ -150,24 +150,35 @@ candidates and fails. **Use `reduce-overhead`, not `max-autotune`, here.**
 
 ## Production configuration
 
-`pqtn.training.train_pinet` compiles the model in place:
+A training entry point such as `pqtn.training.train_pinet` builds the compiled
+model with `molix.compile.Compiler`, which returns a *new* compiled object of
+the same type it was handed:
 
 ```python
-if cfg.cuda_graphs:                       # fixed-length padding path
-    model.compile(mode="reduce-overhead", fullgraph=True, dynamic=False)
-else:                                      # variable-shape path
-    model.compile(dynamic=True, fullgraph=True)
+from molix.compile import Compiler
+
+if cfg.cuda_graphs:                                  # fixed-length padding path
+    model = Compiler(cuda_graphs=True)(model)
+else:                                                # variable-shape path
+    model = Compiler(dynamic=True, fullgraph=True)(model)
 ```
 
 Inside MolNex, the winning combo is the named `cuda_graphs` preset — use
 `trainer.compile(cuda_graphs=True)` (or `molix.compile.Compiler.CUDA_GRAPH_PRESET`)
 instead of spelling out the four flags, so the config can't drift.
 
+**Migration note.** `PiNetPotential.compile(...)` has been removed. It shadowed
+`nn.Module.compile`, whose contract is different: the base method compiles
+**in place** and returns `None`, so `model.compile(...)` without rebinding the
+result silently kept running eager. Use `molix.compile.Compiler` whenever you
+need a new compiled object (`model = Compiler(...)(model)`), and
+`nn.Module.compile` only for its in-place effect.
+
 `cuda_graphs=True` additionally: registers `PadMolecularBatch` (pads atoms→
-`pad_max_atoms`, edges→`pad_max_edges`, with a masked ghost region so energy and
+`max_atoms`, edges→`max_edges`, with a masked ghost region so energy and
 real-atom forces are numerically identical to the unpadded batch — see
-`tests/test_molzoo/test_pinet_padding.py`), and sets `train_drop_last=True` so the
-graph count is fixed too. Set `pad_max_atoms` / `pad_max_edges` above the largest
+`tests/test_molix/test_batch/test_pad.py`), and sets `train_drop_last=True` so the
+graph count is fixed too. Set `max_atoms` / `max_edges` above the largest
 per-batch counts; overflow raises rather than truncating.
 
 ## Real Trainer run of the winning combo

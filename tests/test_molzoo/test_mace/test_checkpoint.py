@@ -801,6 +801,7 @@ def _official_omol() -> tuple[MacePotential, dict[str, torch.Tensor]]:
         "the converted official OMol weights are an offline asset"
     ),
 )
+@pytest.mark.slow
 class TestOfficialOMolWeights:
     """The official OMol checkpoint, loaded and evaluated in tree (``science``).
 

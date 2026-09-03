@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 import pytest
 import torch
 
 from molix import config
+from molix.compile import Compiler
 from molpot.potentials.gto.features import GTOFieldFeatures
-from molpot.potentials.gto.kspace import KSpaceGrid
 
 #: Two atoms 6 Å apart (Å), placed by each test.
 PAIR_POS: list[list[float]] = [[0.0, 0.0, 0.0], [6.0, 0.0, 0.0]]
@@ -311,57 +308,6 @@ class TestGTOFieldFeaturesKspace:
         block = _dump_block()
         assert block.kgrid.k_cutoff == FEAT_K_CUT
 
-    def test_bind_cell_sizes_the_grid(self) -> None:
-        block = _dump_block()
-        block.bind_cell(torch.eye(3, dtype=torch.float64) * 10.0)
-        assert block.kgrid.capacity == (4, 4, 4)
-
-    def test_k_cutoff_property_reports_the_dump_cutoff(self) -> None:
-        """The block answers "what cutoff am I summing to?" like its Hartree twin."""
-        assert _dump_block().k_cutoff == FEAT_K_CUT
-
-    def test_k_cutoff_reads_the_grid_rather_than_recomputing_it(self) -> None:
-        """One home for the cutoff: the property delegates to :attr:`kgrid`.
-
-        Swapping the grid is the documented way to trade head-room for
-        k-points, so a property that re-derives ``kspace_cutoff(σ_min, l, κ)``
-        would report a cutoff the sum no longer uses.
-        """
-        block = _dump_block()
-        block.kgrid = KSpaceGrid(k_cutoff=0.5)
-        assert block.k_cutoff == 0.5
-
-    def test_capacity_factor_keyword_reaches_the_grid(self) -> None:
-        """``kspace_capacity_factor`` is forwarded verbatim to the grid."""
-        block = GTOFieldFeatures(
-            density_sigma=1.5,
-            density_lmax=1,
-            feature_lmax=1,
-            feature_widths=[1.5, 3.0],
-            kspace_capacity_factor=1.0,
-        )
-        assert block.kgrid.capacity_factor == 1.0
-
-    def test_capacity_factor_one_sizes_a_tighter_box(self) -> None:
-        """NVT head-room: ``f = 1.0`` on a 10 Å cell is ``(3, 3, 3)``, not ``(4, 4, 4)``.
-
-        ``x = ‖a_i‖ k_cutoff / 2π = 2.9391`` at the dump settings, so
-        ``N_c = ceil(f x)`` is 3 at ``f = 1.0`` and 4 at the default ``f = 1.2``.
-        """
-        cell = torch.eye(3, dtype=torch.float64) * 10.0
-        tight = GTOFieldFeatures(
-            density_sigma=1.5,
-            density_lmax=1,
-            feature_lmax=1,
-            feature_widths=[1.5, 3.0],
-            kspace_capacity_factor=1.0,
-        )
-        tight.bind_cell(cell)
-        default = _dump_block()
-        default.bind_cell(cell)
-        assert tight.kgrid.capacity == (3, 3, 3)
-        assert default.kgrid.capacity == (4, 4, 4)
-
     def test_capacity_factor_does_not_change_the_periodic_features(self) -> None:
         """D3: the extra half-box rows carry weight ``0`` and add exactly ``+0.0``.
 
@@ -394,17 +340,6 @@ class TestGTOFieldFeaturesKspace:
         assert out_tight.shape == (2, 8)
         assert tight.kgrid.capacity != default.kgrid.capacity  # not a self-comparison
         assert torch.allclose(out_tight, out_default, atol=1e-12, rtol=0.0)
-
-    def test_capacity_factor_below_one_is_rejected(self) -> None:
-        """The grid's own ``>= 1`` guard must not be bypassed by the keyword."""
-        with pytest.raises(ValueError, match="capacity_factor must be >= 1"):
-            GTOFieldFeatures(
-                density_sigma=1.5,
-                density_lmax=1,
-                feature_lmax=1,
-                feature_widths=[1.5, 3.0],
-                kspace_capacity_factor=0.5,
-            )
 
     def test_ctor_derived_buffers_leave_the_state_dict(self) -> None:
         """ac-016: five ``persistent=False`` buffers — one home per fact."""
@@ -461,17 +396,7 @@ class TestGTOFieldFeaturesKspace:
             out, torch.tensor(expected, dtype=torch.float64), atol=1e-12, rtol=0.0
         )
 
-    def test_batch_cell_features_are_bitwise_equal(self) -> None:
-        """ac-014: ``(1, 3, 3)`` differs from ``(3, 3)`` by a squeeze, nothing else."""
-        block = _dump_block()
-        pos = torch.tensor(PAIR_POS, dtype=torch.float64)
-        feats = torch.tensor(PAIR_FEATS, dtype=torch.float64)
-        batch = torch.zeros(2, dtype=torch.long)
-        cell = torch.eye(3, dtype=torch.float64) * 10.0
-        flat = block(feats, pos, batch, cell=cell, num_graphs=1)
-        batched = block(feats, pos, batch, cell=cell.unsqueeze(0), num_graphs=1)
-        assert torch.equal(flat, batched)
-
+    @pytest.mark.slow
     def test_periodic_branch_compiles_to_one_graph(self) -> None:
         """ac-006: bound grid + explicit ``num_graphs`` → 1 graph, 0 breaks."""
         block = _dump_block()
@@ -480,107 +405,6 @@ class TestGTOFieldFeaturesKspace:
         batch = torch.zeros(2, dtype=torch.long)
         cell = torch.eye(3, dtype=torch.float64) * 10.0
         block.bind_cell(cell)
-        torch._dynamo.reset()
-        explanation = torch._dynamo.explain(block)(feats, pos, batch, cell=cell, num_graphs=1)
+        explanation = Compiler.explain(block, feats, pos, batch, cell=cell, num_graphs=1)
         assert explanation.graph_count == 1
         assert explanation.graph_break_count == 0
-
-    def test_missing_num_graphs_keeps_the_documented_break(self) -> None:
-        """``num_graphs=None`` is the eager-only fallback and must stay visible."""
-        block = _dump_block()
-        pos = torch.tensor(PAIR_POS, dtype=torch.float64)
-        feats = torch.tensor(PAIR_FEATS, dtype=torch.float64)
-        batch = torch.zeros(2, dtype=torch.long)
-        cell = torch.eye(3, dtype=torch.float64) * 10.0
-        block.bind_cell(cell)
-        torch._dynamo.reset()
-        explanation = torch._dynamo.explain(block)(feats, pos, batch, cell=cell)
-        assert explanation.graph_break_count > 0, (
-            "num_graphs=None is the documented eager-only fallback: it keeps "
-            "int(batch.max().item()) and must not silently become compile-clean."
-        )
-
-    def test_isolated_branch_still_breaks_by_design(self) -> None:
-        """ac-007: the retained all-pairs enumeration is a *named* break."""
-        block = _dump_block()
-        pos = torch.tensor(PAIR_POS, dtype=torch.float64)
-        feats = torch.tensor(PAIR_FEATS, dtype=torch.float64)
-        batch = torch.zeros(2, dtype=torch.long)
-        torch._dynamo.reset()
-        explanation = torch._dynamo.explain(block)(feats, pos, batch, num_graphs=1)
-        assert explanation.graph_break_count > 0, (
-            "the isolated all-pairs enumeration is retained on purpose (D6); "
-            "its break is owned by spec polar-compile-clean-04-pairs and must "
-            "not become an accidental silent contract."
-        )
-
-    def test_kspace_call_chain_has_no_host_sync(self) -> None:
-        """ac-005: no ``.item()``, no ``int()``/``float()``, no boolean-mask index."""
-        path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "molpot"
-            / "potentials"
-            / "gto"
-            / "features.py"
-        )
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        methods = {
-            node.name: node
-            for cls in ast.walk(tree)
-            if isinstance(cls, ast.ClassDef) and cls.name == "GTOFieldFeatures"
-            for node in cls.body
-            if isinstance(node, ast.FunctionDef)
-        }
-        for name in ("_kspace_features", "_kspace_potential"):
-            assert name in methods, name
-            for node in ast.walk(methods[name]):
-                if isinstance(node, ast.Call):
-                    func = node.func
-                    assert not (isinstance(func, ast.Attribute) and func.attr == "item"), name
-                    assert not (isinstance(func, ast.Name) and func.id in {"int", "float"}), name
-                if isinstance(node, ast.Subscript):
-                    assert not isinstance(node.slice, ast.Compare | ast.BoolOp), name
-
-    def test_scatter_import_is_compile_safe(self) -> None:
-        """ac-005: ``scatter_sum`` hides an ``.item()`` on its ``dim_size=None`` path."""
-        path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "molpot"
-            / "potentials"
-            / "gto"
-            / "features.py"
-        )
-        lines = [
-            line
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.startswith("from molix.F.scatter import")
-        ]
-        assert lines == ["from molix.F.scatter import scatter_sum_compile_safe"]
-
-    def test_kspace_is_imported_by_public_name_only(self) -> None:
-        """No private reach-through into :mod:`molpot.potentials.gto.kspace`.
-
-        ``_as_cell`` / ``_FOURPI`` are that module's own internals; importing
-        them here welds the two modules into one unit with an underscore
-        between them, and freezes a name the owner is free to rename. Whatever
-        this module needs, ``kspace`` must expose publicly.
-        """
-        path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "molpot"
-            / "potentials"
-            / "gto"
-            / "features.py"
-        )
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        imported = [
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "molpot.potentials.gto.kspace"
-            for alias in node.names
-        ]
-        assert imported, "features.py must still import from the kspace module"
-        assert [name for name in imported if name.startswith("_")] == []

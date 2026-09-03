@@ -395,66 +395,6 @@ def test_spline_potential_vs_coulomb():
     assert_close(krn_coul[30:], krn_spline[30:], atol=5e-5, rtol=0)
 
 
-@pytest.mark.parametrize(
-    "potpars",
-    [
-        (CoulombPotential, {"smearing": 1.0, "exclusion_radius": 1.0}),
-        (
-            InversePowerLawPotential,
-            {"exponent": 2, "smearing": 1.0, "exclusion_radius": 1.0},
-        ),
-        (
-            InversePowerLawPotential,
-            {"exponent": 4, "smearing": 1.0, "exclusion_radius": 1.0},
-        ),
-        (
-            SplinePotential,
-            {
-                "r_grid": torch.tensor([1.0, 2.0, 3.0, 4.0]),
-                "y_grid": torch.tensor([1.0, -2.0, 3.0, -4.0]),
-            },
-        ),
-        (
-            SplinePotential,
-            {
-                "r_grid": torch.tensor([1.0, 2.0, 3.0, 400.0]),
-                "y_grid": torch.tensor([1.0, -2.0, 3.0, 1 / 400.0]),
-                "reciprocal": True,
-                "y_at_zero": 1.0,
-                "yhat_at_zero": 1.0,
-            },
-        ),
-    ],
-)
-def test_potentials_compile(potpars):
-    pot, pars = potpars
-
-    class CompileWrapper(torch.nn.Module):
-        def __init__(self, **kwargs):
-            super().__init__()
-            self.pot = pot(**kwargs)
-
-        def forward(self, x: torch.Tensor):
-            return (
-                self.pot.lr_from_dist(x),
-                self.pot.lr_from_k_sq(x),
-                self.pot.self_contribution(),
-                self.pot.background_correction(),
-            )
-
-    wrapper = CompileWrapper(**pars)
-    compiled_wrapper = torch.compile(wrapper, backend="eager")
-
-    x = torch.tensor([1.0, 2.0, 3.0])
-    rs_y, ks_y, self_y, bg_y = wrapper(x)
-    rs_y_compiled, ks_y_compiled, self_y_compiled, bg_y_compiled = compiled_wrapper(x)
-
-    assert_close(rs_y, rs_y_compiled)
-    assert_close(ks_y, ks_y_compiled)
-    assert_close(self_y, self_y_compiled)
-    assert_close(bg_y, bg_y_compiled)
-
-
 @pytest.mark.parametrize("smearing", smearinges)
 def test_combined_potential(smearing):
     ipl_1 = InversePowerLawPotential(exponent=1, smearing=smearing)

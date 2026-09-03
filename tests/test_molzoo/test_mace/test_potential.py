@@ -42,6 +42,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from molix.compile import Compiler
 from molpot.derivation.protocol import call_energy
 from molzoo.mace.encoder import MACEEncoder
 from molzoo.mace.potential import MaceMatpes, MaceOmol, MacePotential
@@ -742,7 +743,6 @@ class TestMacePotential:
         self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
         """The flat seam exists to be compiled: 1 dynamo graph, 0 breaks."""
-        torch._dynamo.reset()
-        explanation = torch._dynamo.explain(matpes_potential.energy_core)(*raw_tensors(cluster))
+        explanation = Compiler.explain(matpes_potential.energy_core, *raw_tensors(cluster))
         assert explanation.graph_count == 1
         assert explanation.graph_break_count == 0

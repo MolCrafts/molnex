@@ -99,7 +99,7 @@ def ensure_op_registered(op_name: str) -> None:
 _load_ops_library()
 
 from molix import logger, logging
-from molix.compile import Compiler
+from molix.compile import Compiler, ExplainSummary
 from molix.config import config
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
 from molix.core.losses import MAELoss, MSELoss, WeightedLoss
@@ -109,21 +109,22 @@ from molix.export import Exporter
 from molix.hooks import JournalHook, ProfilerHook
 
 __all__ = [
-    "Stage",
-    "TrainState",
     "Checkpoint",
-    "StepResult",
-    "Trainer",
     "CheckpointBackend",
-    "TorchSaveBackend",
-    "MSELoss",
+    "Compiler",
+    "ExplainSummary",
+    "Exporter",
+    "JournalHook",
     "MAELoss",
+    "MSELoss",
+    "ProfilerHook",
+    "Stage",
+    "StepResult",
+    "TorchSaveBackend",
+    "TrainState",
+    "Trainer",
     "WeightedLoss",
     "config",
     "logger",
     "logging",
-    "Exporter",
-    "Compiler",
-    "ProfilerHook",
-    "JournalHook",
 ]

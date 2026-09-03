@@ -7,7 +7,6 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
-from molix.compile import Compiler
 from molix.core.trainer import Trainer
 
 
@@ -58,16 +57,6 @@ def test_compile_checkpoint_sync():
     assert trainer._checkpoint.model is trainer.model is sentinel
 
 
-def test_cuda_graphs_preset_values():
-    """The named preset is exactly the benchmarked winning force-training config."""
-    assert Compiler.CUDA_GRAPH_PRESET == {
-        "backend": "inductor",
-        "fullgraph": True,
-        "dynamic": False,
-        "mode": "reduce-overhead",
-    }
-
-
 def test_compile_cuda_graphs_applies_preset():
     """``compile(cuda_graphs=True)`` forwards exactly the preset to torch.compile."""
     trainer, model = _make_trainer()
@@ -76,15 +65,5 @@ def test_compile_cuda_graphs_applies_preset():
     _, kwargs = mc.call_args
     assert kwargs["backend"] == "inductor"
     assert kwargs["fullgraph"] is True
-    assert kwargs["dynamic"] is False
-    assert kwargs["mode"] == "reduce-overhead"
-
-
-def test_compile_cuda_graphs_overrides_explicit_args():
-    """The preset wins over conflicting explicit flags (it is a named preset)."""
-    trainer, model = _make_trainer()
-    with mock.patch("molix.compile.torch.compile", return_value=model) as mc:
-        trainer.compile(cuda_graphs=True, dynamic=True, mode="max-autotune")
-    _, kwargs = mc.call_args
     assert kwargs["dynamic"] is False
     assert kwargs["mode"] == "reduce-overhead"

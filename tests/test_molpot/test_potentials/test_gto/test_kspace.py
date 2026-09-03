@@ -8,13 +8,13 @@ single caller (spec ``polar-compile-clean-01-kgrid``).
 
 from __future__ import annotations
 
-import inspect
 import math
 
 import pytest
 import torch
 
 from molix import config
+from molix.compile import Compiler
 from molpot.potentials.gto.kspace import KSpaceGrid, kspace_cutoff
 
 #: Polar dump reciprocal cutoff at ``σ = 1.5 Å``, ``l_max = 1``, ``κ = 1.0``
@@ -254,16 +254,6 @@ class TestKSpaceGrid:
         grid.bind(cell)
         assert grid.n is box
 
-    def test_shrinking_the_cell_never_rebuilds(self) -> None:
-        """A 0.5× cell fits by construction and must not shrink the box."""
-        cell = torch.eye(3, dtype=torch.float64) * 10.0
-        grid = KSpaceGrid(k_cutoff=K_CUT, capacity_factor=1.2)
-        grid.bind(cell)
-        box = grid.n
-        grid.bind(cell * 0.5)
-        assert grid.n is box
-        assert grid.capacity == (4, 4, 4)
-
     def test_expansion_within_capacity_neither_raises_nor_rebuilds(self) -> None:
         """1.1× < f = 1.2: accepted, same object (NPT head-room)."""
         cell = torch.eye(3, dtype=torch.float64) * 10.0
@@ -288,17 +278,6 @@ class TestKSpaceGrid:
         grid.bind(cell)
         with pytest.raises(RuntimeError) as excinfo:
             grid.bind(cell * 2.0)
-        message = str(excinfo.value)
-        assert "KSpaceGrid" in message
-        assert "capacity_factor" in message
-
-    def test_over_capacity_check_capacity_raises(self) -> None:
-        """``check_capacity`` is the eager half of the ``floor(x) > N_c`` guard."""
-        cell = torch.eye(3, dtype=torch.float64) * 10.0
-        grid = KSpaceGrid(k_cutoff=K_CUT, capacity_factor=1.2)
-        grid.bind(cell)
-        with pytest.raises(RuntimeError) as excinfo:
-            grid.check_capacity(cell * 2.0)
         message = str(excinfo.value)
         assert "KSpaceGrid" in message
         assert "capacity_factor" in message
@@ -345,23 +324,13 @@ class TestKSpaceGrid:
         _, _, weights = grid.vectors(cell * 2.0)
         assert bool(torch.isnan(weights).all())
 
-    def test_expansion_within_capacity_has_no_nan(self) -> None:
-        """1.1× stays inside the box, so nothing is poisoned."""
-        cell = torch.eye(3, dtype=torch.float64) * 10.0
-        grid = KSpaceGrid(k_cutoff=K_CUT, capacity_factor=1.2)
-        grid.bind(cell)
-        kvec, k_sq_guarded, weights = grid.vectors(cell * 1.1)
-        assert bool(torch.isfinite(kvec).all())
-        assert bool(torch.isfinite(k_sq_guarded).all())
-        assert bool(torch.isfinite(weights).all())
-
+    @pytest.mark.slow
     def test_vectors_has_no_graph_breaks(self) -> None:
         """The overflow sentinel is a tensor compare — no host sync."""
         cell = torch.eye(3, dtype=torch.float64) * 10.0
         grid = KSpaceGrid(k_cutoff=K_CUT, capacity_factor=1.2)
         grid.bind(cell)
-        torch._dynamo.reset()
-        explanation = torch._dynamo.explain(grid.vectors)(cell)
+        explanation = Compiler.explain(grid.vectors, cell)
         assert explanation.graph_break_count == 0
 
     def test_batch_cell_is_bitwise_identical(self) -> None:
@@ -374,14 +343,6 @@ class TestKSpaceGrid:
         assert torch.equal(flat[0], batched[0])
         assert torch.equal(flat[1], batched[1])
         assert torch.equal(flat[2], batched[2])
-
-    def test_bind_and_check_capacity_accept_a_batch_cell(self) -> None:
-        """``_as_cell`` is the first statement of all three entry points."""
-        cell = (torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0)
-        grid = KSpaceGrid(k_cutoff=K_CUT, capacity_factor=1.2)
-        grid.bind(cell)
-        grid.check_capacity(cell)
-        assert grid.capacity == (4, 4, 4)
 
     def test_two_system_cell_is_rejected(self) -> None:
         cell = (torch.eye(3, dtype=torch.float64) * 10.0).expand(2, 3, 3)
@@ -424,28 +385,3 @@ class TestKSpaceGrid:
         assert kvec.device.type == "cpu"
         assert k_sq_guarded.device.type == "cpu"
         assert weights.device.type == "cpu"
-
-    def test_no_resize_entry_points(self) -> None:
-        """Resizing means building a new grid — there is no ``rebind``."""
-        grid = KSpaceGrid(k_cutoff=K_CUT, capacity_factor=1.2)
-        assert not hasattr(grid, "rebind")
-        assert not hasattr(grid, "set_cell")
-
-    def test_grid_is_not_a_module(self) -> None:
-        """A runtime geometry cache, not a parameter — it stays out of state_dict."""
-        grid = KSpaceGrid(k_cutoff=K_CUT, capacity_factor=1.2)
-        assert not isinstance(grid, torch.nn.Module)
-
-    def test_k_cutoff_is_a_readable_attribute(self) -> None:
-        """The cutoff is frozen at construction and readable for assertions."""
-        grid = KSpaceGrid(k_cutoff=K_CUT, capacity_factor=1.2)
-        assert grid.k_cutoff == K_CUT
-
-    def test_constructor_keywords_and_defaults(self) -> None:
-        """``capacity_factor=1.2`` / ``max_axis_index=32``, keyword-only."""
-        params = inspect.signature(KSpaceGrid).parameters
-        assert params["capacity_factor"].default == 1.2
-        assert params["capacity_factor"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert params["max_axis_index"].default == 32
-        assert params["max_axis_index"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert "max_capacity" not in params

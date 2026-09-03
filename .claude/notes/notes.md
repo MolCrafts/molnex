@@ -198,6 +198,58 @@ default and MACE with no knob at all).
 
 ---
 
+<!-- mol:note:topic:test-tiers-orthogonal -->
+## [2026-09-03] Test suite: two tiers, orthogonal unit tests only (user rule)
+
+**Rule (operator, 2026-09-03).** `tests/` holds unit tests only — one
+function or module per test, each behaviour asserted once at the lowest
+layer that owns it. No e2e runs (training loops, MD rollouts,
+export→load→run round trips, spawned DataLoader workers), no
+reference-value parity / regression suites, no benchmark or profiling
+runs. Deleted on 2026-09-03: `tests/regression/` (torch-pme parity),
+`tests/test_scripts/`, `tests/test_molpot/test_les_parity/`,
+`test_composition/test_potential_parity.py`,
+`test_elec/calculators/test_workflow.py`, `test_molix/test_export.py`,
+`test_molix/test_engine/test_export.py`, `test_core/test_trainer_smoke.py`,
+the two profiler e2e files, the spawn-worker DataModule cases, Ewald's
+`TestTorchCompile`, `test_potentials_compile`, and the Allegro /
+typing-probe overfit runs. Public-API scenarios with hard-coded goldens
+live in `regressions/` (plain scripts). Known losses to carry: no unit
+test now covers `molix/export.py` / `molix/engine/export.py`, the
+LAMMPS meta-block schema (was inside the deleted export file), or an
+explain-level compile guard for `EwaldMultipoleEnergy`; the "bounded
+overfit test per head" clause of the training-readiness law has no
+in-tree test any more.
+
+**Tiers.** Default `pytest` = fast unit tier, `addopts = -m "not slow"
+--durations=10`, measured 3210 tests / 96 s wall on 12 x86 workers
+(was 3938 / 192 s uncontended, ~10 min when other pytest runs competed).
+`-m slow` = on-demand tier: anything that compiles, dynamo-traces
+(`Compiler.explain`), AOT-exports, spawns workers, loads external
+weights (`TestOfficialOMolWeights`) or probes imports in a subprocess —
+one dynamo trace per compile seam, nothing duplicated across layers.
+`python scripts/affected_tests.py --run` runs only the tests mirrored
+by the git diff (mirror rule of `scripts/check_test_mirror.py`) plus
+`tests/test_repository_boundaries.py`. CI config is the operator's —
+not edited.
+
+**Orthogonality decisions applied.** The 2026-09-03 polar-compile-clean
+tests were cut from 117 to ~80: the "isolated branch still breaks"
+guard lives once in `test_hartree.py` (the 35 s MacePolar copy and the
+features copy are gone); `_KSpaceGridHolder` facts (bind_cell, k_cutoff
+delegation, capacity knob) are tested once in `test_hartree.py`, the
+grid itself in `test_kspace.py`; the (1,3,3)-vs-(3,3) squeeze once in
+`test_kspace.py` plus one consumer check; static grep / AST invariants
+once (hartree); the byte-identity source snapshot and the
+signature-default / `hasattr` tests were deleted; the SI/NOSI gradient
+twins collapsed into one parametrized fact; `test_symmetry.py` runs one
+seed (exact invariances need no sweep); the integrator compile test
+uses `aot_eager` as its own comment intended (57 s → seconds).
+
+**Status.** active.
+
+---
+
 <!-- mol:note:topic:cueq-conv-fusion -->
 ## [2026-09-02] cuEq conv fusion: gather/scatter live inside the TP kernel
 

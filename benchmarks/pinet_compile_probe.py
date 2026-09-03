@@ -153,12 +153,11 @@ def main() -> None:
     def e():
         pot = make_pot(forces=False).eval()
         batch = factory()()
-        expl = torch._dynamo.explain(pot)(batch)
+        expl = Compiler.explain(pot, batch)
         print("graph_count", expl.graph_count, flush=True)
         print("graph_break_count", expl.graph_break_count, flush=True)
-        if expl.break_reasons:
-            for i, r in enumerate(expl.break_reasons[:8]):
-                print(f"  break[{i}] {str(r)[:240]}", flush=True)
+        for i, reason in enumerate(expl.break_reasons[:8]):
+            print(f"  break[{i}] at {expl.break_sites[i]}: {reason[:240]}", flush=True)
         return ("breaks", expl.graph_break_count)
 
     try_call("E dynamo.explain energy-only", e)

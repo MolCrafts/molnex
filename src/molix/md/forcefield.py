@@ -14,13 +14,20 @@ annotating the molpy base) is what keeps ``MD.set_forcefield`` from admitting
 an object whose ``to_potentials()`` call would fail at wire time; the one-way
 package rule (``molix`` must not import ``molpot``) rules out naming the
 subclass here directly.
+
+:class:`~molix.schema.CellBound` and :class:`~molix.schema.CoreCompilable` are
+re-exported here for MD-side readers; both are declared in
+:mod:`molix.schema` (which molpot already imports), and that module's class
+docstrings are the sole home of their contracts.
 """
 
 from typing import Protocol, runtime_checkable
 
 from molpy import ForceField
 
-__all__ = ["ForceField", "MDForceField"]
+from molix.schema import CellBound, CoreCompilable
+
+__all__ = ["CellBound", "CoreCompilable", "ForceField", "MDForceField"]
 
 
 @runtime_checkable

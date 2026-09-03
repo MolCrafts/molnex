@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import Literal
 
-import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
@@ -124,33 +123,4 @@ class PiNetPotential(nn.Module):
             batch,
             create_graph=bool(self.training),
             detach_energy=False,
-        )
-
-    # ---------------------------------------------------------------- compile
-    def compile(
-        self,
-        *,
-        backend: str = "inductor",
-        fullgraph: bool = False,
-        dynamic: bool | None = None,
-        mode: str | None = None,
-    ) -> nn.Module:
-        """Return ``torch.compile(self, ...)`` of this monomorphic module.
-
-        Energy-only and ``method='func'`` force paths are the intended targets.
-        Prefer fixed shapes (``PadMolecularBatch``) for ``fullgraph=True`` /
-        ``mode='reduce-overhead'`` (CUDA graphs)::
-
-            model = PiNetPotential(..., compute_forces=True, method="func")
-            model = model.compile(fullgraph=True)  # OptimizedModule
-
-        Also works via :class:`molix.compile.Compiler` /
-        ``Trainer.compile(...)``.
-        """
-        return torch.compile(
-            self,
-            backend=backend,
-            fullgraph=fullgraph,
-            dynamic=dynamic,
-            mode=mode,
         )

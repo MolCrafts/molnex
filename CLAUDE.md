@@ -8,6 +8,8 @@ mol_project:
     check: "ruff check src/ tests/ scripts/ regressions/ && ruff format --check src/ tests/ scripts/ regressions/ && ty check src/ --exit-zero-on-warning"
     test: "python -m pytest tests/ -q -n 12 --dist worksteal"
     test_single: "python -m pytest {path} -v"
+    test_affected: "python scripts/affected_tests.py --run"
+    test_slow: "python -m pytest tests/ -q -n 12 --dist worksteal -m slow"
     coverage: "python -m pytest tests/ --cov=src --cov-report=term-missing"
   arch:
     style: package-tree
@@ -240,11 +242,8 @@ src/molzoo/pinet/               # spec, geometry, encoder, potential, properties
 # Install (editable, with C++ extensions via scikit-build-core + CMake >=4.0)
 pip install -e ".[dev]"
 
-# Run unit tests (default; tests/regression/ is auto-excluded via addopts)
+# Run unit tests (default fast tier; slow-marked compile tests: -m slow)
 python -m pytest tests/ -v
-
-# Run the numerical regression suite (reference-value parity; slow, ~minutes)
-python -m pytest -m regression
 
 # Run single test file
 python -m pytest tests/test_molzoo/test_mace.py -v
@@ -266,13 +265,25 @@ GH200 / `.aarch64`: on every env/torch change rebuild **all** native libs togeth
   files — no `helpers.py` / free-floating utility modules. Shared test code
   lives in the nearest `conftest.py` and is imported by package path
   (e.g. `from tests.conftest import make_graph_batch`).
-- **Unit tests** (everything outside `tests/regression/`) test one function or
-  module and must finish in seconds.
-- **`tests/regression/`** holds numerical reference-value parity suites
-  (Ewald/PME/P3M vs Madelung constants, GROMACS, espressomd — vendored from
-  torch-pme). Auto-marked `regression` by its `conftest.py` and excluded from
-  the default run; CI / pre-push should run `pytest -m regression` separately.
-- `slow` marker: AOT-export / compile tests (deselect with `-m "not slow"`).
+- **Unit tests only.** Every test under `tests/` tests one function or
+  module and finishes in seconds. No e2e runs (training loops, MD rollouts,
+  export→load→run round trips, spawned DataLoader workers), no
+  reference-value parity / regression suites, no benchmark or profiling
+  runs under `tests/` — those categories were deleted on 2026-09-03 and must
+  not come back. Public-API scenarios with hard-coded goldens live in
+  `regressions/` (plain scripts, not collected by pytest).
+- **Two tiers, orthogonal tests (hard rule).** The default `pytest` run is
+  the fast unit tier (`addopts = -m "not slow"`) and must finish in a couple
+  of minutes on 12 workers. Anything that compiles,
+  dynamo-traces (`Compiler.explain`), AOT-exports, spawns DataLoader workers,
+  overfits an ML fixture or rolls out MD is marked `slow` and runs on demand
+  (`-m slow`). Before a push, run the mirrored
+  tests of the diff first: `python scripts/affected_tests.py --run`. Every
+  behaviour is asserted **once**, at the lowest layer that owns it: one
+  dynamo trace per compile seam, one static (grep / AST) check per invariant,
+  no tests of signature defaults or `hasattr`, and the same fact is never
+  re-asserted through a higher layer (encoder → potential → regression).
+  A test that duplicates an existing assertion is deleted, not kept "for safety".
 
 ## Architecture
 

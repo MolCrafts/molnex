@@ -56,6 +56,81 @@ def _nve(force, *, dt: float, dtype=None, hooks=None) -> MD:
     )
 
 
+class _CellRecordingPots:
+    """``CellBound`` stub: records every ``bind_cell`` and evaluates to zero forces.
+
+    Each record is ``(data_ptr, cell.clone())`` — the pointer proves the pots
+    was handed the *live* storage MD copies into, and the clone freezes the
+    value at call time, which a shared view would otherwise overwrite.
+
+    Args:
+        raise_after: Number of successful calls before ``bind_cell`` raises
+            ``RuntimeError`` (the capacity-overflow contract). ``None`` never
+            raises.
+    """
+
+    def __init__(self, *, raise_after: int | None = None) -> None:
+        self.calls: list[tuple[int, torch.Tensor]] = []
+        self._raise_after = raise_after
+
+    def bind_cell(self, cell: torch.Tensor) -> None:
+        self.calls.append((cell.data_ptr(), cell.detach().clone()))
+        if self._raise_after is not None and len(self.calls) > self._raise_after:
+            raise RuntimeError("KSpaceGrid overflow")
+
+    def calc_energy_forces(self, work: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
+        pos = work["atoms", "pos"]
+        return torch.zeros((), dtype=pos.dtype), torch.zeros_like(pos)
+
+    def calc_energy_forces_virial(
+        self, work: TensorDict
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        pos = work["atoms", "pos"]
+        return (
+            torch.zeros((), dtype=pos.dtype),
+            torch.zeros_like(pos),
+            torch.zeros(3, 3, dtype=pos.dtype),
+        )
+
+
+def _stub_forcefield(pots: object):
+    """A minimal ``MDForceField``: molpy container with a nullary ``to_potentials``."""
+    from molpy import ForceField as MolpyForceField
+
+    class _StubForceField(MolpyForceField):
+        def __new__(cls) -> "_StubForceField":
+            # molrs __new__ only accepts (name, units).
+            return super().__new__(cls, "stub", "metal")
+
+        def __init__(self) -> None:
+            super().__init__("stub", "metal")
+
+        def to_potentials(self) -> object:
+            return pots
+
+    return _StubForceField()
+
+
+def _expanding_barostat(factor: float = 1.01):
+    """A ``BerendsenBarostat`` whose scale is a fixed expansion — no pressure physics."""
+    from molix.md import BerendsenBarostat
+    from molix.md.types import MDState
+
+    class _ExpandingBarostat(BerendsenBarostat):
+        def scale(self, state: MDState, *, mass: object, dt: float) -> MDState:
+            return state._replace(cell=state.cell * factor)
+
+    return _ExpandingBarostat(pressure=1.0, tau=100.0)
+
+
+def _cell_system(cell: torch.Tensor) -> TensorDict:
+    """Two static atoms plus ``graphs.cell`` in whichever layout is handed in."""
+    pos = torch.zeros(2, 3, dtype=torch.float64)
+    system = md_system(pos, torch.zeros_like(pos), 1.0)
+    system["graphs"] = TensorDict({"cell": cell}, batch_size=[1] if cell.dim() == 3 else [])
+    return system
+
+
 class TestMD:
     """Test the MD composer."""
 
@@ -194,12 +269,22 @@ class TestMD:
         assert md.neighbors is None
 
     def test_src_molix_md_has_no_molpot_import(self):
+        """ac-005: the one-way rule, asserted on *imports*.
+
+        ``molix.compile`` and ``molix.schema`` are audited here too: spec
+        ``polar-compile-clean-02-seam`` moved the cross-layer protocols into
+        ``schema.py`` precisely so molpot could import downward, and the guard
+        has to cover the files that gained the contract. A grep for the string
+        ``molpot`` would misfire — ``driver.py``, ``forcefield.py`` and
+        ``schema.py`` all name it legitimately in prose.
+        """
         import ast
         from pathlib import Path
 
-        root = Path(__file__).resolve().parents[3] / "src" / "molix" / "md"
+        src = Path(__file__).resolve().parents[3] / "src" / "molix"
+        audited = sorted((src / "md").rglob("*.py")) + [src / "compile.py", src / "schema.py"]
         offenders: list[str] = []
-        for path in sorted(root.rglob("*.py")):
+        for path in audited:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
@@ -316,3 +401,173 @@ class TestMaxwellBoltzmann:
         assert cap.vel is not None
         assert float(cap.vel.abs().sum()) > 0.0
         assert float((atoms["atoms", "mass"].reshape(-1, 1) * cap.vel).sum(0).abs().max()) < 1e-12
+
+
+class TestRebindCell:
+    """``_TensorDictForce.rebind_cell`` — the one owner of cell resolution on the pots path."""
+
+    def test_bind_work_dispatches_once_on_the_live_cell_storage(self):
+        """In-place ``copy_`` only reaches the pots if the view shares that storage.
+
+        Both stored layouts are checked here: ``(1, 3, 3)`` (what ``graphs.cell``
+        actually carries) is sliced to ``(3, 3)`` by the caller, ``(3, 3)`` is
+        passed through.
+        """
+        from molix.md.driver import _TensorDictForce
+
+        batched = _cell_system((torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0))
+        batched_pots = _CellRecordingPots()
+        _TensorDictForce(batched_pots, 1.0).bind_work(batched)
+        assert len(batched_pots.calls) == 1
+        ptr, cell = batched_pots.calls[0]
+        assert tuple(cell.shape) == (3, 3)
+        assert ptr == batched["graphs", "cell"][0].data_ptr()
+
+        flat = _cell_system(torch.eye(3, dtype=torch.float64) * 8.0)
+        flat_pots = _CellRecordingPots()
+        _TensorDictForce(flat_pots, 1.0).bind_work(flat)
+        assert len(flat_pots.calls) == 1
+        assert flat_pots.calls[0][0] == flat["graphs", "cell"].data_ptr()
+
+    def test_rebind_cell_re_reads_a_replaced_graphs_cell(self):
+        """The virial strain closure swaps this tensor; a cached view copies nowhere."""
+        from molix.md.driver import _TensorDictForce
+
+        work = _cell_system((torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0))
+        pots = _CellRecordingPots()
+        adapter = _TensorDictForce(pots, 1.0)
+        adapter.bind_work(work)
+
+        replacement = (torch.eye(3, dtype=torch.float64) * 4.0).unsqueeze(0)
+        work["graphs", "cell"] = replacement
+        new_cell = torch.eye(3, dtype=torch.float64) * 9.0
+        adapter.rebind_cell(new_cell)
+
+        assert work["graphs", "cell"] is replacement
+        assert torch.allclose(replacement[0], new_cell)
+        assert len(pots.calls) == 2
+        assert pots.calls[1][0] == replacement[0].data_ptr()
+
+    def test_a_non_cellbound_pots_never_dispatches_and_keeps_the_eval_resolution(self):
+        """Classical fields have no ``bind_cell``; the dispatch step is a silent no-op."""
+        from molix.md.driver import _TensorDictForce
+
+        work = _cell_system((torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0))
+
+        classical = _TensorDictForce(object(), 1.0)
+        classical.bind_work(work)
+        assert classical._cell_view is not None
+        assert classical._eval.__func__ is _TensorDictForce._eval_classical
+
+        class _Mlip:
+            mlip = object()
+
+        mlip = _TensorDictForce(_Mlip(), 1.0)
+        mlip.bind_work(work)
+        assert mlip._eval.__func__ is _TensorDictForce._eval_mlip
+
+        npt = _TensorDictForce(object(), 1.0)
+        npt.want_virial = True
+        npt.bind_work(work)
+        assert npt._eval.__func__ is _TensorDictForce._eval_npt
+
+    def test_a_missing_graphs_cell_is_a_no_op_on_both_call_paths(self):
+        """No cell means no view — never hand ``None`` to a ``Tensor`` signature."""
+        from molix.md.driver import _TensorDictForce
+
+        pos = torch.zeros(2, 3, dtype=torch.float64)
+        work = md_system(pos, torch.zeros_like(pos), 1.0)
+        pots = _CellRecordingPots()
+        adapter = _TensorDictForce(pots, 1.0)
+        adapter.bind_work(work)
+        adapter.rebind_cell()
+        adapter.rebind_cell(torch.eye(3, dtype=torch.float64))
+        assert adapter._cell_view is None
+        assert pots.calls == []
+
+    def test_bind_cell_fires_once_per_barostat_update_not_once_per_step(self):
+        """``MDRunner`` syncs per chunk (runner.py:208-211) — 1 + one per chunk.
+
+        Under NVT there is no barostat and no ``sync_state``, so the single
+        ``bind_work`` call is the only one, whatever the step count.
+        """
+        cell = (torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0)
+
+        for n_steps, chunk in ((6, 2), (3, 1)):
+            system = _cell_system(cell.clone())
+            pots = _CellRecordingPots()
+            md = (
+                MD(torch.float64)
+                .set_forcefield(_stub_forcefield(pots))
+                .set_integrator(VelocityVerletIntegrator(0.5))
+                .set_barostat(_expanding_barostat())
+            )
+            md.run(system, n_steps, chunk=chunk)
+            live_ptr = system["graphs", "cell"][0].data_ptr()
+            assert [ptr for ptr, _ in pots.calls] == [live_ptr] * 4
+            expected = cell[0].clone()
+            assert torch.allclose(pots.calls[0][1], expected, atol=1e-12, rtol=0.0)
+            for _, recorded in pots.calls[1:]:
+                expected = expected * 1.01
+                assert torch.allclose(recorded, expected, atol=1e-12, rtol=0.0)
+
+        nvt_system = _cell_system(cell.clone())
+        nvt_pots = _CellRecordingPots()
+        (
+            MD(torch.float64)
+            .set_forcefield(_stub_forcefield(nvt_pots))
+            .set_integrator(VelocityVerletIntegrator(0.5))
+        ).run(nvt_system, 6, chunk=2)
+        assert len(nvt_pots.calls) == 1
+
+    def test_a_bind_cell_runtimeerror_propagates_out_of_md_run(self):
+        """Capacity overflow is refused loudly on both binding paths — never truncated."""
+        cell = (torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0)
+
+        at_bind_work = _CellRecordingPots(raise_after=0)
+        with pytest.raises(RuntimeError, match="KSpaceGrid overflow"):
+            (
+                MD(torch.float64)
+                .set_forcefield(_stub_forcefield(at_bind_work))
+                .set_integrator(VelocityVerletIntegrator(0.5))
+                .set_barostat(_expanding_barostat())
+            ).run(_cell_system(cell.clone()), 2, chunk=1)
+        assert len(at_bind_work.calls) == 1
+
+        at_sync_cell = _CellRecordingPots(raise_after=1)
+        with pytest.raises(RuntimeError, match="KSpaceGrid overflow"):
+            (
+                MD(torch.float64)
+                .set_forcefield(_stub_forcefield(at_sync_cell))
+                .set_integrator(VelocityVerletIntegrator(0.5))
+                .set_barostat(_expanding_barostat())
+            ).run(_cell_system(cell.clone()), 2, chunk=1)
+        assert len(at_sync_cell.calls) == 2
+
+    def test_cell_layout_resolution_lives_only_in_rebind_cell(self):
+        """ac-004: no second ``cell.dim() == 3`` branch survives in driver.py."""
+        import ast
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parents[3] / "src" / "molix" / "md" / "driver.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        owners = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "rebind_cell"
+        ]
+        assert len(owners) == 1
+        owner = owners[0]
+        sites = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Call)
+            and isinstance(node.left.func, ast.Attribute)
+            and node.left.func.attr == "dim"
+            and len(node.ops) == 1
+            and isinstance(node.ops[0], ast.Eq)
+            and [getattr(c, "value", None) for c in node.comparators] == [3]
+        ]
+        assert sites, "the (1, 3, 3) vs (3, 3) branch must still exist, in its one home"
+        assert [line for line in sites if not owner.lineno <= line <= owner.end_lineno] == []

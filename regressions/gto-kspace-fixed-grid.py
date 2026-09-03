@@ -31,6 +31,7 @@ from __future__ import annotations
 import torch
 
 from molix import config
+from molix.compile import Compiler
 from molpot.potentials.gto import GTOFieldFeatures, GTOHartreeEnergy, KSpaceGrid, kspace_cutoff
 
 config.set_precision("fp64")
@@ -124,12 +125,9 @@ def main() -> None:
     assert torch.equal(f_flat, f_batched)
 
     # (e) the periodic branch of both modules is one graph with zero breaks.
-    # Raw ``torch._dynamo.explain`` on purpose — ``Compiler.explain`` arrives in
-    # a later spec of this chain and migrates these sites.
     for module in (hartree, features):
         module.bind_cell(_CELL)
-        torch._dynamo.reset()
-        explanation = torch._dynamo.explain(module)(_FEATS, _POS, _BATCH, cell=_CELL, num_graphs=1)
+        explanation = Compiler.explain(module, _FEATS, _POS, _BATCH, cell=_CELL, num_graphs=1)
         name = type(module).__name__
         assert explanation.graph_count == 1, f"{name}: {explanation.graph_count} graphs"
         assert explanation.graph_break_count == 0, f"{name}: {explanation.graph_break_count} breaks"

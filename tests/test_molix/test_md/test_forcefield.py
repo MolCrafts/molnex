@@ -48,3 +48,24 @@ class TestForceFieldReexport:
                         f"cannot import name {name!r} from 'molix.md.forcefield'"
                     ) from exc
                 raise AssertionError(f"{name} is still importable from molix.md.forcefield")
+
+
+class TestProtocolReexports:
+    """``CellBound`` / ``CoreCompilable`` are re-exported here, declared in schema."""
+
+    def test_protocols_are_aliased_beside_mdforcefield_without_restating_them(self):
+        """Same objects, listed in ``__all__``; a restated contract is two contracts."""
+        import inspect
+
+        import molix.schema
+        from molix.md import forcefield
+
+        assert forcefield.CellBound is molix.schema.CellBound
+        assert forcefield.CoreCompilable is molix.schema.CoreCompilable
+        assert "CellBound" in forcefield.__all__
+        assert "CoreCompilable" in forcefield.__all__
+        assert "MDForceField" in forcefield.__all__
+        source = inspect.getsource(forcefield).lower()
+        assert "idempotent" not in source
+        assert "never retain" not in source
+        assert "never truncate" not in source

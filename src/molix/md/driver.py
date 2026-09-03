@@ -22,8 +22,10 @@ integrator is constructed with ``dt`` only.
 
 Neighbour-list cadence is not ``MD``'s. Configure it on
 :class:`~molix.md.neighbors.NeighborList` and mount with
-:meth:`MD.set_neighbors`. A frozen list for a compiled rollout is
-omit :meth:`MD.set_neighbors` to freeze the list.
+:meth:`MD.set_neighbors`. For a compiled rollout with a frozen edge set,
+omit :meth:`MD.set_neighbors` entirely — with no list mounted, ``edges``
+is never rebuilt and stays whatever was bound into ``system`` for the
+whole run.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ from molix.md.integrators import Integrator
 from molix.md.neighbors import NeighborList
 from molix.md.runner import MDHook, MDRunner
 from molix.md.types import MDState
-from molix.schema import ENERGY_KEY, MASS_KEY, POS_KEY, VEL_KEY
+from molix.schema import ENERGY_KEY, MASS_KEY, POS_KEY, VEL_KEY, CellBound
 from molix.units import preset_energy_to_md, units
 
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
@@ -66,17 +68,60 @@ class _TensorDictForce:
         self._eval = self._eval_classical
 
     def bind_work(self, work: TensorDict) -> None:
+        """Bind the working ``TensorDict`` for the run and pick the eval kernel.
+
+        Called once per :meth:`MD.run`, never once per step. Stores ``work``,
+        re-resolves the live cell via :meth:`rebind_cell`, then selects the
+        potential-call path for the rest of the run: :meth:`_eval_npt` when a
+        barostat wants the virial (``want_virial``), else :meth:`_eval_mlip`
+        when the pots expose an ``mlip`` attribute, else :meth:`_eval_classical`.
+
+        Args:
+            work: The system ``TensorDict`` that positions are written into
+                and potentials are evaluated on for the remainder of the run.
+        """
         self._work = work
-        self._cell_view = None
-        if ("graphs", "cell") in work.keys(include_nested=True):
-            cell = work["graphs", "cell"]
-            self._cell_view = cell[0] if cell.dim() == 3 else cell
+        self.rebind_cell()
         if self.want_virial:
             self._eval = self._eval_npt
         elif getattr(self._pots, "mlip", None) is not None:
             self._eval = self._eval_mlip
         else:
             self._eval = self._eval_classical
+
+    def rebind_cell(self, new_cell: torch.Tensor | None = None) -> None:
+        """Re-resolve ``graphs.cell``, optionally write into it, then hand it to the pots.
+
+        The **single owner of cell-layout resolution on the path to the
+        potential**: both :meth:`bind_work` (once, from :meth:`MD.run`) and
+        :meth:`MD._sync_cell` (once per barostat update) go through here, so
+        the ``(1, 3, 3)`` vs ``(3, 3)`` decision and the
+        :class:`~molix.schema.CellBound` dispatch exist in exactly one place.
+        (``MDRunner.run`` resolves the same layout for the integrator's
+        :class:`~molix.md.types.MDState`; that path does not reach the pots and
+        is deliberately left alone.)
+
+        The lookup is redone on **every** call and the previous view is never
+        reused. ``molpot.forcefield.potentials``' virial strain closure
+        replaces ``graphs.cell`` with a graph tensor for the duration of the
+        pass and restores the buffer only on the no-exception path, so a cached
+        view can point at orphaned storage — copying a barostat update into it
+        would land nowhere and leave the potential on the stale lattice.
+
+        Args:
+            new_cell: ``(3, 3)`` cell to copy *into* the live storage, or
+                ``None`` to only re-resolve and re-dispatch.
+        """
+        self._cell_view = None
+        work = self._work
+        if work is not None and ("graphs", "cell") in work.keys(include_nested=True):
+            cell = work["graphs", "cell"]
+            self._cell_view = cell[0] if cell.dim() == 3 else cell
+        cell_view = self._cell_view
+        if new_cell is not None and cell_view is not None:
+            cell_view.copy_(new_cell)
+        if cell_view is not None and isinstance(self._pots, CellBound):
+            self._pots.bind_cell(cell_view)
 
     def to_pots(self, device: torch.device) -> None:
         to_fn = getattr(self._pots, "to", None)
@@ -382,19 +427,20 @@ class MD:
     def _sync_cell(self, state: MDState) -> None:
         """Write a barostat-scaled cell back onto the work batch and neighbour list.
 
-        Always copy into the tensor currently stored at ``graphs.cell``. A
+        The copy is delegated to
+        :meth:`_TensorDictForce.rebind_cell`, which re-reads ``graphs.cell``
+        first, so it always lands in the tensor *currently* stored there. A
         virial strain pass must not leave a replacement tensor here; if it
         did, a cached view would copy into orphaned storage and Polar
-        k-space would keep the pre-barostat lattice.
+        k-space would keep the pre-barostat lattice. ``MDRunner`` calls this
+        once per chunk while a barostat is attached, not once per step.
         """
         if state.cell is None or self._adapter is None:
             return
         work = self._adapter._work
         if work is None:
             return
-        if ("graphs", "cell") in work.keys(include_nested=True):
-            cell = work["graphs", "cell"]
-            (cell[0] if cell.dim() == 3 else cell).copy_(state.cell)
+        self._adapter.rebind_cell(state.cell)
         work[POS_KEY] = state.pos
         if self.neighbors is not None:
             self.neighbors.scale_isotropic(state.cell, state.pos)

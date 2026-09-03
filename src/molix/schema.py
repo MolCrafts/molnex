@@ -1,4 +1,4 @@
-"""Post-collate batch-schema keys shared across the molix stack.
+"""Post-collate batch-schema keys, shared constants, and cross-layer protocols.
 
 The nested ``atoms / edges / graphs`` TensorDict layout produced by
 :func:`molix.batch.collate.collate_molecules` is a molix contract (see
@@ -16,10 +16,23 @@ schema consumers must agree on exactly — currently
 :data:`EDGE_DIST_CLAMP_MIN`. They live here for the same reason the keys do:
 a constant duplicated at each use site is a contract only until the copies
 drift.
+
+For the same one-way-dependency reason it also owns the **structural protocols
+that cross the package boundary** — :class:`CellBound` and
+:class:`CoreCompilable`. Their implementers live in molpot/molzoo and their
+callers in molix, so neither end can name the other's class: molpot already
+imports this module and must never import :mod:`molix.md`, which is why the
+contracts are declared at the base layer rather than beside the MD driver that
+invokes them. :mod:`molix.md.forcefield` re-exports both for MD-side readers;
+the contract text stays here.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any, Protocol, runtime_checkable
+
+import torch
 from tensordict import TensorDict
 
 #: Graph-level total energy written by a potential (``batch["graphs", "energy"]``).
@@ -83,3 +96,61 @@ def has_forces(batch: TensorDict) -> bool:
 def has_virial(batch: TensorDict) -> bool:
     """Whether ``batch`` carries a graph-level virial at :data:`VIRIAL_KEY`."""
     return "graphs" in batch.keys() and "virial" in batch["graphs"].keys()
+
+
+@runtime_checkable
+class CellBound(Protocol):
+    """A potential that keeps cell-derived state and is told when the cell moves.
+
+    MD hands the live simulation cell to the implementer once when the working
+    batch is bound and again after every barostat update — both through
+    ``molix.md.driver._TensorDictForce.rebind_cell``, the single owner of cell
+    resolution on the path to the potential. A reciprocal-space grid sizing
+    itself from the lattice is the motivating implementer.
+
+    Four clauses bind every implementer. This docstring is their only home;
+    re-exports must not restate them.
+
+    1. ``bind_cell`` is **idempotent**: calling it twice with the same cell
+       leaves the implementer in exactly the state one call produces. MD calls
+       it once per barostat update whether or not the lattice actually changed.
+    2. It does **O(1)** host work — no device synchronisation, no allocation
+       that scales with the number of atoms or edges. It runs outside the
+       compiled region, on a path that may fire every chunk.
+    3. It must **re-read** the handed live ``(3, 3)`` tensor on every use and
+       **never retain** a copy of its values: molix mutates that exact storage
+       in place with ``copy_`` on each barostat update, so a cached clone
+       silently freezes the pre-barostat lattice.
+    4. On capacity overflow it *may* raise ``RuntimeError`` — the caller lets
+       that propagate out of ``MD.run`` — and it must **never truncate**
+       silently. A quietly clipped grid or neighbour set is a wrong energy
+       reported as a converged one.
+
+    ``bind_cell`` takes the live ``(3, 3)`` cell matrix in Å, rows being the
+    lattice vectors. A batched ``(1, 3, 3)`` cell is sliced by the caller, not
+    by the implementer.
+    """
+
+    def bind_cell(self, cell: torch.Tensor) -> None: ...
+
+
+@runtime_checkable
+class CoreCompilable(Protocol):
+    """A potential that can install a compiled build of its own hot core.
+
+    ``compiler`` is **structural**, not nominal: any ``callable -> callable``
+    of that shape satisfies it, and :meth:`molix.compile.Compiler.__call__`'s
+    PEP 695 generic signature does so without this module importing
+    :mod:`molix.compile`.
+
+    The implementer decides *what* to compile — typically one flat bound method
+    such as an energy core — and *where* to install the result: an attribute
+    the per-step evaluation path already calls, so the caller needs no "is it
+    compiled?" branch and pays no per-step dispatch. Repeated calls must not
+    recompile; a second call is a no-op unless the implementer is genuinely
+    handed a different compiler.
+    """
+
+    def compile_core(
+        self, compiler: Callable[[Callable[..., Any]], Callable[..., Any]]
+    ) -> None: ...

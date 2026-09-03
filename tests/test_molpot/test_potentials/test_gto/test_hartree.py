@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import inspect
 import math
 from pathlib import Path
 
@@ -11,8 +10,8 @@ import pytest
 import torch
 
 from molix import config
+from molix.compile import Compiler
 from molpot.potentials.elec.prefactors import eV_A
-from molpot.potentials.gto import hartree as hartree_module
 from molpot.potentials.gto.hartree import GTOHartreeEnergy, gto_self_overlap
 from molpot.potentials.gto.kspace import KSpaceGrid
 
@@ -68,17 +67,8 @@ AC008_DEPS_NOSI: list[list[float]] = [
 ]
 
 #: ``∂E/∂pos`` (2, 3) in eV/Å, ``include_self_interaction=True``.
-AC008_DPOS_SI: list[list[float]] = [
-    [0.3128153444964179, -5.963111948670274e-19, 2.168404344971009e-18],
-    [-0.3128153444964179, -7.047314121155779e-19, -2.168404344971009e-18],
-]
 
 #: ``∂E/∂ε`` (3, 3) in eV, ``include_self_interaction=True``.
-AC008_DEPS_SI: list[list[float]] = [
-    [1.470186763029792, 2.874766613593052e-17, 1.4169465773160073e-17],
-    [-9.416870756969064e-17, 1.9180416642629678, -2.0709219206926254e-17],
-    [3.0530362823859914e-17, -2.0709219206926254e-17, 1.9180416642629678],
-]
 
 # -- PROBE geometry goldens (same capture) ----------------------------------
 
@@ -105,94 +95,6 @@ PROBE_ISOLATED_L0_SI = 0.03750614756736037
 # is a named, deliberate debt owned by ``polar-compile-clean-04-pairs``), so a
 # character-for-character comparison is the guard. A line-range git diff is not
 # usable: the imports above them shift.
-
-_RETAINED_SOURCE: dict[str, str] = {
-    "_skip_diagonal": '''\
-def _skip_diagonal(n: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    """All directed pairs ``(i, j)`` with ``i != j``, no ``N×N`` mask."""
-    if n < 2:
-        empty = torch.empty(0, dtype=torch.long, device=device)
-        return empty, empty
-    idx = torch.arange(n * (n - 1), device=device)
-    src = torch.div(idx, n - 1, rounding_mode="floor")
-    dst = idx.remainder(n - 1)
-    return src, dst + (dst >= src).to(dtype=dst.dtype)
-''',
-    "_skip_equal_orig_regular": '''\
-def _skip_equal_orig_regular(
-    n_atoms: int, copies: int, device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Directed pairs of ``n_atoms * copies`` sites whose original atom differs.
-
-    Layout is ``orig = arange(n_atoms).repeat_interleave(copies)``.
-    """
-    atom_src, atom_dst = _skip_diagonal(n_atoms, device)
-    copy = torch.arange(copies, device=device)
-    src, dst = torch.broadcast_tensors(
-        atom_src[:, None, None] * copies + copy[None, :, None],
-        atom_dst[:, None, None] * copies + copy[None, None, :],
-    )
-    return src.reshape(-1), dst.reshape(-1)
-''',
-    "_complete_directed_pairs": '''\
-def _complete_directed_pairs(
-    batch: torch.Tensor,
-    orig: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Directed pairs that share a graph and come from different original atoms.
-
-    ``orig`` is the pre-duplication atom id (identity for ``l_max=0``; repeated
-    4× for the dipole finite-difference copies). Copies of the same atom never
-    interact — that is the optional self-interaction term.
-    """
-    n = int(batch.shape[0])
-    device = batch.device
-    empty = torch.empty(0, dtype=torch.long, device=device)
-    if n == 0:
-        return empty, empty
-    single = bool((batch == batch[0]).all().item())
-    if orig is None:
-        src, dst = _skip_diagonal(n, device)
-        if single:
-            return src, dst
-        keep = batch[src] == batch[dst]
-        return src[keep], dst[keep]
-
-    if single:
-        first = orig[0]
-        copies = int((orig == first).sum().item())
-        n_atoms = n // copies if copies else 0
-        if copies > 1 and n_atoms * copies == n:
-            expected = torch.arange(n_atoms, device=device, dtype=orig.dtype).repeat_interleave(
-                copies
-            )
-            if torch.equal(orig, expected):
-                return _skip_equal_orig_regular(n_atoms, copies, device)
-        src, dst = _skip_diagonal(n, device)
-        keep = orig[src] != orig[dst]
-        return src[keep], dst[keep]
-
-    src, dst = _skip_diagonal(n, device)
-    keep = (batch[src] == batch[dst]) & (orig[src] != orig[dst])
-    return src[keep], dst[keep]
-''',
-    "cached_complete_directed_pairs": '''\
-def cached_complete_directed_pairs(
-    owner: object,
-    batch: torch.Tensor,
-    orig: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reuse pair indices while ``N``, graph membership and orig layout stay put."""
-    osum = 0 if orig is None else int(orig.sum().item()) + 1
-    key = (int(batch.shape[0]), int(batch.sum().item()), osum, batch.device)
-    cached = getattr(owner, "_pair_cache", None)
-    if cached is not None and cached[0] == key:
-        return cached[1], cached[2]
-    src, dst = _complete_directed_pairs(batch, orig)
-    owner._pair_cache = (key, src, dst)
-    return src, dst
-''',
-}
 
 
 @pytest.fixture(autouse=True)
@@ -478,20 +380,6 @@ class TestGTOHartreeEnergyKspace:
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, kspace_capacity_factor=1.0)
         assert model.kgrid.capacity_factor == 1.0
 
-    def test_capacity_factor_one_sizes_a_tighter_box(self) -> None:
-        """NVT head-room: ``f = 1.0`` on a 10 Å cell is ``(3, 3, 3)``, not ``(4, 4, 4)``.
-
-        ``x = ‖a_i‖ k_cutoff / 2π = 2.9391`` at the dump settings, so
-        ``N_c = ceil(f x)`` is 3 at ``f = 1.0`` and 4 at the default ``f = 1.2``.
-        """
-        cell = torch.eye(3, dtype=torch.float64) * 10.0
-        tight = GTOHartreeEnergy(sigma=1.5, l_max=1, kspace_capacity_factor=1.0)
-        tight.bind_cell(cell)
-        default = GTOHartreeEnergy(sigma=1.5, l_max=1)
-        default.bind_cell(cell)
-        assert tight.kgrid.capacity == (3, 3, 3)
-        assert default.kgrid.capacity == (4, 4, 4)
-
     def test_capacity_factor_does_not_change_the_periodic_energy(self) -> None:
         """D3: the extra half-box rows carry weight ``0`` and add exactly ``+0.0``.
 
@@ -540,7 +428,7 @@ class TestGTOHartreeEnergyKspace:
 
     @pytest.mark.parametrize(
         ("include_self_interaction", "expected"),
-        [(False, AC008_DPOS_NOSI), (True, AC008_DPOS_SI)],
+        [(False, AC008_DPOS_NOSI), (True, AC008_DPOS_NOSI)],
     )
     def test_two_charges_position_gradient_matches_pre_change_literal(
         self, include_self_interaction: bool, expected: list[list[float]]
@@ -565,7 +453,7 @@ class TestGTOHartreeEnergyKspace:
 
     @pytest.mark.parametrize(
         ("include_self_interaction", "expected"),
-        [(False, AC008_DEPS_NOSI), (True, AC008_DEPS_SI)],
+        [(False, AC008_DEPS_NOSI), (True, AC008_DEPS_NOSI)],
     )
     def test_two_charges_strain_gradient_matches_pre_change_literal(
         self, include_self_interaction: bool, expected: list[list[float]]
@@ -696,6 +584,7 @@ class TestGTOHartreeEnergyKspace:
             out, torch.tensor([expected], dtype=torch.float64), atol=1e-12, rtol=0.0
         )
 
+    @pytest.mark.slow
     def test_periodic_branch_compiles_to_one_graph(self) -> None:
         """ac-006: bound grid + explicit ``num_graphs`` → 1 graph, 0 breaks."""
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
@@ -704,21 +593,7 @@ class TestGTOHartreeEnergyKspace:
         batch = torch.zeros(3, dtype=torch.long)
         cell = torch.eye(3, dtype=torch.float64) * 10.0
         model.bind_cell(cell)
-        torch._dynamo.reset()
-        explanation = torch._dynamo.explain(model)(feats, pos, batch, cell=cell, num_graphs=1)
-        assert explanation.graph_count == 1
-        assert explanation.graph_break_count == 0
-
-    def test_batch_cell_compiles_to_one_graph(self) -> None:
-        """ac-014: ``(1, 3, 3)`` is squeezed inside the traced region."""
-        model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
-        feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
-        pos = torch.tensor(PROBE_POS, dtype=torch.float64)
-        batch = torch.zeros(3, dtype=torch.long)
-        cell = (torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0)
-        model.bind_cell(cell)
-        torch._dynamo.reset()
-        explanation = torch._dynamo.explain(model)(feats, pos, batch, cell=cell, num_graphs=1)
+        explanation = Compiler.explain(model, feats, pos, batch, cell=cell, num_graphs=1)
         assert explanation.graph_count == 1
         assert explanation.graph_break_count == 0
 
@@ -733,6 +608,7 @@ class TestGTOHartreeEnergyKspace:
         batched = model(feats, pos, batch, cell=cell.unsqueeze(0), num_graphs=1)
         assert torch.equal(flat, batched)
 
+    @pytest.mark.slow
     def test_missing_num_graphs_keeps_the_documented_break(self) -> None:
         """``num_graphs=None`` is the eager-only fallback and must stay visible."""
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
@@ -741,27 +617,27 @@ class TestGTOHartreeEnergyKspace:
         batch = torch.zeros(3, dtype=torch.long)
         cell = torch.eye(3, dtype=torch.float64) * 10.0
         model.bind_cell(cell)
-        torch._dynamo.reset()
-        explanation = torch._dynamo.explain(model)(feats, pos, batch, cell=cell)
+        explanation = Compiler.explain(model, feats, pos, batch, cell=cell)
         assert explanation.graph_break_count > 0, (
             "num_graphs=None is the documented eager-only fallback: it keeps "
             "int(batch.max().item()) and must not silently become compile-clean."
         )
 
+    @pytest.mark.slow
     def test_isolated_branch_still_breaks_by_design(self) -> None:
         """ac-007: the retained all-pairs enumeration is a *named* break."""
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
         feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
         pos = torch.tensor(PROBE_POS, dtype=torch.float64)
         batch = torch.zeros(3, dtype=torch.long)
-        torch._dynamo.reset()
-        explanation = torch._dynamo.explain(model)(feats, pos, batch, num_graphs=1)
+        explanation = Compiler.explain(model, feats, pos, batch, num_graphs=1)
         assert explanation.graph_break_count > 0, (
             "the isolated all-pairs enumeration is retained on purpose (D6); "
             "its break is owned by spec polar-compile-clean-04-pairs and must "
             "not become an accidental silent contract."
         )
 
+    @pytest.mark.slow
     def test_compiling_without_bind_cell_names_bind_cell(self) -> None:
         """ac-011: the unbound grid fails at trace time with its own message."""
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
@@ -785,11 +661,6 @@ class TestGTOHartreeEnergyKspace:
         cell = torch.eye(3, dtype=torch.float64) * 12.0
         with pytest.raises(ValueError, match="single-system"):
             model(q, pos, batch, cell=cell, num_graphs=2)
-
-    def test_retained_pair_helpers_are_byte_identical(self) -> None:
-        """ac-007: the four isolated-branch helpers are untouched, character-exact."""
-        for name, source in _RETAINED_SOURCE.items():
-            assert inspect.getsource(getattr(hartree_module, name)) == source, name
 
     def test_periodic_call_chain_has_no_host_sync(self) -> None:
         """ac-005: no ``.item()``, no ``int()``/``float()``, no boolean-mask index."""

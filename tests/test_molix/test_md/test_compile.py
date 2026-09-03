@@ -5,10 +5,14 @@ graph breaks over an unnamed harmonic ``PotentialLike`` and match eager where
 the result is deterministic (step with fixed noise; NVE rollout).
 """
 
+import pytest
 import torch
 
 from molix.md import LangevinVerletIntegrator, VelocityVerletIntegrator
 from tests.test_molix.test_md.conftest import harmonic_potential_like
+
+#: Compiles the integrator step end to end — on-demand tier.
+pytestmark = pytest.mark.slow
 
 _DTYPE = torch.float64
 
@@ -35,7 +39,7 @@ def test_step_compile_matches_eager_deterministic():
     st = ig.initial(torch.randn(5, 3, dtype=_DTYPE), torch.randn(5, 3, dtype=_DTYPE))
     noise = torch.randn(5, 3, dtype=_DTYPE)
     eager = ig.step(st, noise)
-    comp = torch.compile(ig.step, fullgraph=True)(st, noise)
+    comp = torch.compile(ig.step, fullgraph=True, backend=_BACKEND)(st, noise)
     assert torch.allclose(eager.pos, comp.pos, atol=1e-12)
     assert torch.allclose(eager.vel, comp.vel, atol=1e-12)
 
@@ -46,7 +50,9 @@ def test_rollout_compile_nve_matches_eager():
     vel = torch.randn(5, 3, dtype=_DTYPE)
     eager = _harm_nve().rollout(_harm_nve().initial(pos.clone(), vel.clone()), 8)
     ig = _harm_nve()
-    comp = torch.compile(ig.rollout, fullgraph=True)(ig.initial(pos.clone(), vel.clone()), 8)
+    comp = torch.compile(ig.rollout, fullgraph=True, backend=_BACKEND)(
+        ig.initial(pos.clone(), vel.clone()), 8
+    )
     assert torch.allclose(eager.pos, comp.pos, atol=1e-10)
     assert torch.allclose(eager.vel, comp.vel, atol=1e-10)
 

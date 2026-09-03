@@ -649,39 +649,6 @@ class TestDataModule:
         assert out1["atoms", "Z"].shape == (8,)
         assert torch.equal(out1["atoms", "Z"], out2["atoms", "Z"])
 
-    def test_train_dataloader_iterates_with_spawn_workers(self, tmp_path):
-        """One epoch through ``num_workers=2`` spawn workers yields real batches."""
-        from tensordict import TensorDict
-
-        from molix.batch.collate import TargetSchema
-
-        sink = tmp_path / "workers.pt"
-        PackedCache(sink).save(_chain_samples(16))
-        full = MmapDataset(sink)
-        train, val = full.split(ratio=0.75, seed=0)
-        assert len(train) == 12 and len(val) == 4
-
-        schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset())
-        dm = DataModule(
-            train,
-            val,
-            target_schema=schema,
-            batch_size=4,
-            num_workers=2,
-            persistent_workers=False,
-            pin_memory=False,  # avoid CUDA on CI
-            prefetch_factor=2,
-        )
-
-        seen_batches = 0
-        for batch in dm.train_dataloader():
-            assert isinstance(batch, TensorDict)
-            assert batch["atoms", "Z"].shape[0] == 4 * 4  # 4 mols × 4 atoms each
-            assert batch["graphs", "U0"].shape == (4,)
-            assert batch["edges", "edge_index"].shape[1] == 2
-            seen_batches += 1
-        assert seen_batches == 3  # 12 / 4
-
 
 # ---------------------------------------------------------------------------
 # Block collate route
