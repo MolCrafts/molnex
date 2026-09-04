@@ -447,6 +447,15 @@ device, not only `aot_eager`. Upstream reproducer = the probe above
 (torch 2.12.0+cu130, sm_90).
 **03-wire GH200 (2026-09-04, job 1976727, n186, 4995-atom 46.36 Å PEO, fused cueq, `Compiler(dynamic=True)`).**
 fp64 compiled vs eager: `dE = 0.0`, `max_dF = 4.97e-14`, `max_dW = 6.29e-11`, `n_edges = 285546` (job 1974822 had `max_dW = 1.087e-10` against the same 1e-9 virial contract; |W| ~ 5200 eV, ~2e-14 relative). fp32 compiled: mean step **0.190 s** (eager baseline 0.38 s), peak **25.87 GiB** (eager 28.3 GiB; the larger k-grid did not OOM), recompiles after warm-up **0** (live E 285546 → 285446). Official goldens unchanged: `regressions/mace-polar-periodic-gto.py` diffs ~1e-5 eV (`atol` 1e-3), `mace-polar-official-water.py` `dE = 1.3e-7 eV`.
+**Same-job eager vs compiled vs official (2026-09-04, job 1984979, n95).** Script: `regressions/polar-peo-compile-compare.py` (molnex, live edge list, `calc_energy_forces_virial` under `no_grad`) plus out-of-tree `assets/bench5k/bench_polar_step.py` (official mace-torch Polar ASE calculator, neighbor rebuild every jittered eval). fp64 compiled vs eager still `dE = 0.0`, `max_dF = 5.7e-14`, `max_dW = 1.08e-10`. fp32:
+
+| path | mean step | peak HBM | notes |
+|---|---|---|---|
+| molnex eager | 0.395 s | 39.24 GiB | same job, same box |
+| molnex compiled | **0.142 s** (2.78× eager) | **25.87 GiB** | 0 recompiles after warm-up |
+| official mace-torch Polar, fp32 | 1.064 s mean / 0.843 s median | — | includes ASE neighbor rebuild |
+
+Official fp64 energy goldens unchanged on the same job (periodic-gto `denergy = +3.0e-5` eV). Do not quote the 7× vs official as a like-for-like kernel speedup — official pays ASE rebuild; molnex times the potential with the list already built.
 Post-impl review adjustments (2026-09-03): the head-room knob is a
 constructor keyword `kspace_capacity_factor` on both holders (the earlier
 "swap `mod.kgrid`" advice was a leaked lifecycle; plumbing it up to
