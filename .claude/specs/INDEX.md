@@ -6,7 +6,6 @@ must not be treated as authority for a new training submission.
 
 ## Active specifications
 
-- [polar-compile-clean-03-wire](polar-compile-clean-03-wire.md) — compiled core installed on the mlip (MacePotential.compile_core), eager-only element gate, whole Polar MD step = compiled core + the named force.py autograd seam (merge unit with 02) [code-complete]
 - [mace-polar-port-01-backbone](mace-polar-port-01-backbone.md) — 泛化 MACEEncoder 残差骨干 + MACEPolarSpec，钉 Polar-1-M dump [code-complete]
 - [mace-polar-port-02-blocks](mace-polar-port-02-blocks.md) — NonLinearBiasReadout.out_mul、自旋源、层混合 [code-complete]
 - [mace-polar-port-03-field](mace-polar-port-03-field.md) — SparseUvu、单体场更新、场读出（原生 ir_mul） [code-complete]
@@ -29,7 +28,8 @@ must not be treated as authority for a new training submission.
 
 | Spec or chain | Closed | Disposition |
 |---|---|---|
-| polar-compile-clean-02-seam | 2026-09-03 | Completed; all 9 (code) criteria verified. Generic Compiler + ExplainSummary(break_sites), CellBound / CoreCompilable in molix.schema, rebind_cell single owner, PiNetPotential.compile deleted, raw explain sites migrated. Merge unit with 03-wire (active). |
+| polar-compile-clean-03-wire | 2026-09-04 | Completed; all 14 criteria verified. Compiled Polar energy_core installed on the mlip; inductor aten.index_add fallback; GH200 job 1976727 fp32 0.190 s / 25.87 GiB / 0 recompiles. Merge unit with 02-seam. |
+| polar-compile-clean-02-seam | 2026-09-03 | Completed; all 9 (code) criteria verified. Generic Compiler + ExplainSummary(break_sites), CellBound / CoreCompilable in molix.schema, rebind_cell single owner, PiNetPotential.compile deleted, raw explain sites migrated. Merge unit with 03-wire (closed 2026-09-04). |
 | polar-compile-clean-01-kgrid | 2026-09-03 | Completed; all 16 criteria verified (12 evidence, 4 agent-auto). Fixed-capacity KSpaceGrid + explicit num_graphs; periodic GTO branch and MacePolar.energy_core at 1 graph / 0 breaks (commit eabfc6d7). Chain 02-03 active. |
 | lammps-iface-05-pbc | 2026-08-30 | Completed; all 17 criteria verified (11 evidence, 6 agent-auto). Chain debt PAID 2026-08-30: aspirin goldens captured+verified and periodic 1/2-rank/Python three-way all ≤1.6e-15 on a GH200 source-built LAMMPS 22Jul2025 (job 1805410; runbook provenance in interface/lammps/README.md). |
 | lammps-iface-04-facade | 2026-08-30 | Completed; 16/16 — the chain-debt aspirin parity run was captured and verified 2026-08-30 (goldens block in scripts/lammps_iface_parity.py, rel 0.0 energy / 8.7e-16 forces). |
