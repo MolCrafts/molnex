@@ -6,7 +6,6 @@ must not be treated as authority for a new training submission.
 
 ## Active specifications
 
-- [mace-polar-port-02-blocks](mace-polar-port-02-blocks.md) — NonLinearBiasReadout.out_mul、自旋源、层混合 [code-complete]
 - [pinet-quantization-thermal-noise-02-md-driver](pinet-quantization-thermal-noise-02-md-driver.md) — in-process velocity-Verlet and Langevin MD driver; approved with acceptance work pending.
 - [cuet-force-doublebackward](cuet-force-doublebackward.md) — cuet equivariant Linear double-backward repair; in progress with acceptance work pending.
 
@@ -24,6 +23,7 @@ must not be treated as authority for a new training submission.
 | oplsaa-parameterizer-04-cut | 2026-09-04 | Completed; all acceptance criteria verified. public-surface cut + chain regression. |
 | md-forcefield-molpy-reexport-01-reexport | 2026-09-04 | Completed; all acceptance criteria verified. molix.md ForceField re-exports molpy.ForceField. |
 | mace-neighbor-graph-correctness | 2026-09-04 | Completed; all acceptance criteria verified. independent multi-image neighbor oracle. |
+| mace-polar-port-02-blocks | 2026-09-04 | Completed; 3/3 criteria verified via regressions/mace-polar-port-02-blocks.py. |
 | mace-polar-port-01-backbone | 2026-09-04 | Completed; 7/7 criteria verified (ledger flipped 2026-09-04: backbone regression + unit tests). |
 | mace-polar-port-03-field | 2026-09-04 | Completed; all criteria verified. SparseUvu / field readout. |
 | mace-polar-port-04-gto | 2026-09-04 | Completed; all criteria verified. Native GTO Hartree. |
