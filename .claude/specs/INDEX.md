@@ -7,10 +7,6 @@ must not be treated as authority for a new training submission.
 ## Active specifications
 
 - [mace-polar-port-02-blocks](mace-polar-port-02-blocks.md) — NonLinearBiasReadout.out_mul、自旋源、层混合 [code-complete]
-- [md-forcefield-molpy-reexport-02-nblist](md-forcefield-molpy-reexport-02-nblist.md) — NeighborList 写入 live MIC 几何；MD 调度 nblist 再求值 [code-complete]
-- [md-forcefield-molpy-reexport-03-potentials](md-forcefield-molpy-reexport-03-potentials.md) — molpot pair 项读 batch 位移/距离，禁止二次 PBC [code-complete]
-- [md-forcefield-molpy-reexport-04-mace](md-forcefield-molpy-reexport-04-mace.md) — MACE 消费 edge_diff，shifts 不再是 PBC 通道 [code-complete]
-- [md-forcefield-molpy-reexport-05-wire](md-forcefield-molpy-reexport-05-wire.md) — 全树调用方改走 def_pairstyle + set_forcefield/set_neighbors [code-complete]
 - [pinet-quantization-thermal-noise-02-md-driver](pinet-quantization-thermal-noise-02-md-driver.md) — in-process velocity-Verlet and Langevin MD driver; approved with acceptance work pending.
 - [cuet-force-doublebackward](cuet-force-doublebackward.md) — cuet equivariant Linear double-backward repair; in progress with acceptance work pending.
 
@@ -18,6 +14,10 @@ must not be treated as authority for a new training submission.
 
 | Spec or chain | Closed | Disposition |
 |---|---|---|
+| md-forcefield-molpy-reexport-02-nblist | 2026-09-04 | Completed; remaining ledger flipped after regressions/md-forcefield-molpy-reexport-02-nblist.py exited 0. NeighborList live MIC geometry. |
+| md-forcefield-molpy-reexport-03-potentials | 2026-09-04 | Completed; remaining ledger flipped after regressions/md-forcefield-molpy-reexport-03-potentials.py exited 0. pair terms consume placed distances. |
+| md-forcefield-molpy-reexport-04-mace | 2026-09-04 | Completed; remaining ledger flipped after regressions/md-forcefield-molpy-reexport-04-mace.py exited 0. MACE consumes edge_diff not shifts. |
+| md-forcefield-molpy-reexport-05-wire | 2026-09-04 | Completed; remaining ledger flipped after regressions/md-forcefield-molpy-reexport-05-wire.py exited 0. def_pairstyle + set_forcefield/set_neighbors. |
 | oplsaa-parameterizer-01-types | 2026-09-04 | Completed; all acceptance criteria verified. OPLS-AA types + improper schema. |
 | oplsaa-parameterizer-02-heads | 2026-09-04 | Completed; all acceptance criteria verified. ProperTorsionParamHead k1..k4. |
 | oplsaa-parameterizer-03-parameterizer | 2026-09-04 | Completed; all acceptance criteria verified. Parameterizer + ForceFieldPredictions. |
