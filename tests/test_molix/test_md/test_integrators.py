@@ -76,6 +76,33 @@ def test_draw_noise_is_seed_reproducible():
     assert not torch.equal(a.draw_noise(ref), c.draw_noise(ref))  # different seed
 
 
+def test_o_step_kick_matches_fluctuation_dissipation():
+    """O-step velocity kick is the exact OU FDT; small-dt limit is 2 γ kT Δt / m.
+
+    The integrator applies ``v ← c1 v + c2 σ ξ`` with ``ξ ~ N(0,1)``,
+    ``c1 = e^{-γΔt}``, ``c2 = √(1-c1²)``, ``σ = √(kT/m)``. The kick
+    ``c2 σ ξ`` therefore has per-DoF variance ``(1-e^{-2γΔt}) kT/m``.
+    For ``γΔt ≪ 1`` that is ``2 γ Δt kT/m``, the integrated white-noise
+    FDT of Langevin dynamics. The force-noise form ``2 γ m kT / Δt`` is
+    the continuous ``ξ`` in ``F = -γ m v + ξ``, not the velocity kick
+    this integrator writes — the test asserts the velocity form.
+    """
+    import math
+
+    dt, gamma, kbt, mass = 0.001, 2.0, 1.5, 2.0
+    ig = LangevinVerletIntegrator(dt, gamma=gamma, kbt=kbt, seed=0).bind_mass(mass)
+    ref = torch.zeros(16, 3, dtype=_DTYPE)
+    samples = 4000
+    kicks = torch.empty(samples, *ref.shape, dtype=_DTYPE)
+    for i in range(samples):
+        kicks[i] = ig.c2 * ig.sigma * ig.draw_noise(ref)
+    measured = float(kicks.var(unbiased=True))
+    exact = (1.0 - math.exp(-2.0 * gamma * dt)) * kbt / mass
+    fdt_small_dt = 2.0 * gamma * dt * kbt / mass
+    assert measured == pytest.approx(exact, rel=0.08)
+    assert exact == pytest.approx(fdt_small_dt, rel=0.05)
+
+
 def test_langevin_rejects_gamma_zero():
     """NVE is VelocityVerletIntegrator — Langevin is not a gamma switch."""
     with pytest.raises(ValueError, match="VelocityVerletIntegrator"):

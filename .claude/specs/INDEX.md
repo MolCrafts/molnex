@@ -6,13 +6,14 @@ must not be treated as authority for a new training submission.
 
 ## Active specifications
 
-- [pinet-quantization-thermal-noise-02-md-driver](pinet-quantization-thermal-noise-02-md-driver.md) — in-process velocity-Verlet and Langevin MD driver; approved with acceptance work pending.
-- [cuet-force-doublebackward](cuet-force-doublebackward.md) — cuet equivariant Linear double-backward repair; in progress with acceptance work pending.
+_(none)_
 
 ## Closed specifications and chains
 
 | Spec or chain | Closed | Disposition |
 |---|---|---|
+| pinet-quantization-thermal-noise-02-md-driver | 2026-09-04 | Completed; FDT O-step kick variance test + functorch force-loss path. |
+| cuet-force-doublebackward | 2026-09-04 | Completed; force-supervised double-backward (create_graph + pure-torch SH). |
 | md-forcefield-molpy-reexport-02-nblist | 2026-09-04 | Completed; remaining ledger flipped after regressions/md-forcefield-molpy-reexport-02-nblist.py exited 0. NeighborList live MIC geometry. |
 | md-forcefield-molpy-reexport-03-potentials | 2026-09-04 | Completed; remaining ledger flipped after regressions/md-forcefield-molpy-reexport-03-potentials.py exited 0. pair terms consume placed distances. |
 | md-forcefield-molpy-reexport-04-mace | 2026-09-04 | Completed; remaining ledger flipped after regressions/md-forcefield-molpy-reexport-04-mace.py exited 0. MACE consumes edge_diff not shifts. |

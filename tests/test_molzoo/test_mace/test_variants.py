@@ -711,6 +711,27 @@ class TestMaceOmol:
             f"force loss through forward reached only {with_grad}/{total} parameters"
         )
 
+    def test_force_supervised_sgd_lowers_the_loss(
+        self, omol_variant: MaceOmol, charged_omol_cluster: TensorDict
+    ) -> None:
+        """A few SGD steps on ‖F‖² strictly decrease the force loss.
+
+        Spec ``cuet-force-doublebackward`` ac-006: forces actually train.
+        Energy-only training is untouched — this loss never sees energy.
+        """
+        _perturb(omol_variant)
+        omol_variant.train()
+        optimizer = torch.optim.SGD(omol_variant.parameters(), lr=1e-3)
+        losses: list[float] = []
+        for _ in range(4):
+            optimizer.zero_grad()
+            forces = omol_variant.forward(charged_omol_cluster.clone())["atoms", "forces"]
+            loss = (forces**2).mean()
+            loss.backward()
+            optimizer.step()
+            losses.append(float(loss.detach()))
+        assert losses[-1] < losses[0], losses
+
     def test_batched_graphs(self, omol_variant: MaceOmol, omol_pair_batch: TensorDict) -> None:
         """Two molecules in one batch: per-graph energies, correct atom routing."""
         pos, Z, edge_index, batch, _ = raw_tensors(omol_pair_batch)
