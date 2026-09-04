@@ -1,6 +1,7 @@
 ---
 title: MACE neighbor-graph correctness vs independent brute-force oracle
-status: code-complete
+status: done
+last-updated: 2026-09-04
 slug: mace-neighbor-graph-correctness
 created: 2026-08-10
 revised: 2026-08-10

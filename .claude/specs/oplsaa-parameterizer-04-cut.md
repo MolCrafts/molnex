@@ -1,6 +1,7 @@
 ---
 title: oplsaa-parameterizer-04-cut — 公开面硬切清零与链回归
-status: code-complete
+status: done
+last-updated: 2026-09-04
 grilled: true
 slug: oplsaa-parameterizer-04-cut
 chain: oplsaa-parameterizer

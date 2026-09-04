@@ -6,28 +6,28 @@ must not be treated as authority for a new training submission.
 
 ## Active specifications
 
-- [mace-polar-port-01-backbone](mace-polar-port-01-backbone.md) — 泛化 MACEEncoder 残差骨干 + MACEPolarSpec，钉 Polar-1-M dump [code-complete]
 - [mace-polar-port-02-blocks](mace-polar-port-02-blocks.md) — NonLinearBiasReadout.out_mul、自旋源、层混合 [code-complete]
-- [mace-polar-port-03-field](mace-polar-port-03-field.md) — SparseUvu、单体场更新、场读出（原生 ir_mul） [code-complete]
-- [mace-polar-port-04-gto](mace-polar-port-04-gto.md) — 原生 GTO Hartree 核 erf(r/(2σ))/r 与 Fukui 约束 [code-complete]
-- [mace-polar-port-05-wire](mace-polar-port-05-wire.md) — PolarPotential + POLAR_REMAP 孤立分子前向 [code-complete]
-- [oplsaa-parameterizer-01-types](oplsaa-parameterizer-01-types.md) — OPLSAAForceField 类型面与 PotentialMeta improper schema [code-complete]
-- [oplsaa-parameterizer-02-heads](oplsaa-parameterizer-02-heads.md) — ProperTorsionParamHead OPLS-AA k1..k4 直接输出 [code-complete]
-- [oplsaa-parameterizer-03-parameterizer](oplsaa-parameterizer-03-parameterizer.md) — ClassicalIMM→Parameterizer；ClassIPredictions→ForceFieldPredictions [code-complete]
-- [oplsaa-parameterizer-04-cut](oplsaa-parameterizer-04-cut.md) — 公开面硬切清零与链回归 regressions/oplsaa-parameterizer.py [code-complete]
-- [md-forcefield-molpy-reexport-01-reexport](md-forcefield-molpy-reexport-01-reexport.md) — molix.md ForceField 再导出 molpy.ForceField；删除自制适配器 [code-complete]
 - [md-forcefield-molpy-reexport-02-nblist](md-forcefield-molpy-reexport-02-nblist.md) — NeighborList 写入 live MIC 几何；MD 调度 nblist 再求值 [code-complete]
 - [md-forcefield-molpy-reexport-03-potentials](md-forcefield-molpy-reexport-03-potentials.md) — molpot pair 项读 batch 位移/距离，禁止二次 PBC [code-complete]
 - [md-forcefield-molpy-reexport-04-mace](md-forcefield-molpy-reexport-04-mace.md) — MACE 消费 edge_diff，shifts 不再是 PBC 通道 [code-complete]
 - [md-forcefield-molpy-reexport-05-wire](md-forcefield-molpy-reexport-05-wire.md) — 全树调用方改走 def_pairstyle + set_forcefield/set_neighbors [code-complete]
 - [pinet-quantization-thermal-noise-02-md-driver](pinet-quantization-thermal-noise-02-md-driver.md) — in-process velocity-Verlet and Langevin MD driver; approved with acceptance work pending.
 - [cuet-force-doublebackward](cuet-force-doublebackward.md) — cuet equivariant Linear double-backward repair; in progress with acceptance work pending.
-- [mace-neighbor-graph-correctness](mace-neighbor-graph-correctness.md) — independent multi-image neighbor oracle; code complete with one acceptance criterion pending.
 
 ## Closed specifications and chains
 
 | Spec or chain | Closed | Disposition |
 |---|---|---|
+| oplsaa-parameterizer-01-types | 2026-09-04 | Completed; all acceptance criteria verified. OPLS-AA types + improper schema. |
+| oplsaa-parameterizer-02-heads | 2026-09-04 | Completed; all acceptance criteria verified. ProperTorsionParamHead k1..k4. |
+| oplsaa-parameterizer-03-parameterizer | 2026-09-04 | Completed; all acceptance criteria verified. Parameterizer + ForceFieldPredictions. |
+| oplsaa-parameterizer-04-cut | 2026-09-04 | Completed; all acceptance criteria verified. public-surface cut + chain regression. |
+| md-forcefield-molpy-reexport-01-reexport | 2026-09-04 | Completed; all acceptance criteria verified. molix.md ForceField re-exports molpy.ForceField. |
+| mace-neighbor-graph-correctness | 2026-09-04 | Completed; all acceptance criteria verified. independent multi-image neighbor oracle. |
+| mace-polar-port-01-backbone | 2026-09-04 | Completed; 7/7 criteria verified (ledger flipped 2026-09-04: backbone regression + unit tests). |
+| mace-polar-port-03-field | 2026-09-04 | Completed; all criteria verified. SparseUvu / field readout. |
+| mace-polar-port-04-gto | 2026-09-04 | Completed; all criteria verified. Native GTO Hartree. |
+| mace-polar-port-05-wire | 2026-09-04 | Completed; all criteria verified. MacePolar + POLAR_REMAP isolated forward. |
 | polar-compile-clean-03-wire | 2026-09-04 | Completed; all 14 criteria verified. Compiled Polar energy_core installed on the mlip; inductor aten.index_add fallback; GH200 job 1976727 fp32 0.190 s / 25.87 GiB / 0 recompiles. Merge unit with 02-seam. |
 | polar-compile-clean-02-seam | 2026-09-03 | Completed; all 9 (code) criteria verified. Generic Compiler + ExplainSummary(break_sites), CellBound / CoreCompilable in molix.schema, rebind_cell single owner, PiNetPotential.compile deleted, raw explain sites migrated. Merge unit with 03-wire (closed 2026-09-04). |
 | polar-compile-clean-01-kgrid | 2026-09-03 | Completed; all 16 criteria verified (12 evidence, 4 agent-auto). Fixed-capacity KSpaceGrid + explicit num_graphs; periodic GTO branch and MacePolar.energy_core at 1 graph / 0 breaks (commit eabfc6d7). Chain 02-03 active. |

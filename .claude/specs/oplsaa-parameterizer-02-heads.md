@@ -1,6 +1,7 @@
 ---
 title: ProperTorsionParamHead 支持 OPLS-AA k1..k4 直接输出
-status: code-complete
+status: done
+last-updated: 2026-09-04
 grilled: true
 created: 2026-08-20
 slug: oplsaa-parameterizer-02-heads

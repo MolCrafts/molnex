@@ -1,6 +1,7 @@
 ---
 title: Parameterizer 硬改名与 ForceFieldPredictions
-status: code-complete
+status: done
+last-updated: 2026-09-04
 grilled: true
 slug: oplsaa-parameterizer-03-parameterizer
 chain: oplsaa-parameterizer

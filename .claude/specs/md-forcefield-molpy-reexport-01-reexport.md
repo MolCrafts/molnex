@@ -1,6 +1,7 @@
 ---
 title: molix.md ForceField 再导出 molpy.ForceField
-status: code-complete
+status: done
+last-updated: 2026-09-04
 created: 2026-08-16
 slug: md-forcefield-molpy-reexport-01-reexport
 chain: md-forcefield-molpy-reexport

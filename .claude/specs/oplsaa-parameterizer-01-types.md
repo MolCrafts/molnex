@@ -1,6 +1,7 @@
 ---
 title: OPLSAAForceField 类型面与 PotentialMeta improper schema
-status: code-complete
+status: done
+last-updated: 2026-09-04
 created: 2026-08-20
 revised: 2026-08-20
 grilled: true
