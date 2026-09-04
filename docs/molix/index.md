@@ -28,8 +28,8 @@ plain-`TensorDict` batch contract used by models and losses (namespaces
   precision model.
 - [Units](user-guide/units.md): pint-style `molix.units.units`
   (`molpy.UnitSystem`).
-- [Force-field export](user-guide/ff-export.md): `ClassIForceField` /
-  `OPLSForceField` (molpy `ForceField` subclasses) → `realize` +
+- [Force-field export](user-guide/ff-export.md): `molpot.forcefield.ForceField` /
+  `OPLSAAForceField` (molpy `ForceField` subclasses) → `realize` +
   `molpy.io`, or a JSON `ForceSpec`.
 
 ## Explanation

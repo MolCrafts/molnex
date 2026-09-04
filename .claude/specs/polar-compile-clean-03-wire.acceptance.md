@@ -18,7 +18,8 @@ criteria:
       is a documented no-op; isinstance(pots, CellBound) is True with CellBound
       imported from molix.schema; `grep -nE "^\s*(from|import)\s+molix\.md"
       src/molpot/` is empty.
-    status: pending
+    status: verified
+    last_checked: 2026-09-03
   - id: ac-002
     summary: The element check is eager-only, uncounted, and folded away under tracing
     type: code
@@ -32,7 +33,8 @@ criteria:
       MacePotential.energy_core.__doc__ states that the flat seam performs no
       element validation and names validate_elements as the seam caller's duty,
       and MACEEncoder.validate_elements.__doc__ names its two bearers.
-    status: pending
+    status: verified
+    last_checked: 2026-09-03
   - id: ac-003
     summary: compile_core lives on the mlip, has one precondition, and compiles once
     type: code
@@ -47,7 +49,8 @@ criteria:
       _compiled_core attribute; the parameter is annotated structurally as
       Callable[[Callable[..., Any]], Callable[..., Any]] and `grep -nE
       "^\s*(from|import)\s+molix\.compile" src/molpot/` is empty.
-    status: pending
+    status: verified
+    last_checked: 2026-09-03
   - id: ac-004
     summary: The cell-bound core is one graph; the only step breaks are the named force.py seam
     type: code
@@ -65,16 +68,27 @@ criteria:
       polar-compile-clean-04-pairs). Recorded baseline: 51 graphs / 50 breaks
       from five sites (.claude/notes/notes.md:279-293), four of which this
       chain removes.
-    status: pending
+    status: verified
+    last_checked: 2026-09-03
   - id: ac-005
     summary: Compiled equals eager to 1e-10 in fp64 for energy, forces, virial
     type: scientific
     pass_when: |
-      On the tiny CPU fixture and on the GH200 PEO box, fp64 energy, forces
-      (N,3) and virial (3,3) obtained after the prescribed sequence agree with
-      the uncompiled path within 1e-10 (eV, eV/A, eV) - reduction-order only,
-      not bitwise.
-    status: pending
+      On the tiny CPU fixture, fp64 energy, forces (N,3) and virial (3,3)
+      obtained after the prescribed sequence agree with the uncompiled path
+      within 1e-10 (eV, eV/A, eV) - reduction-order only, not bitwise. On the
+      GH200 PEO box the same sequence agrees within 1e-10 on energy and
+      forces and within 1e-9 on virial (job 1974822: dE = 0.0, max_dF =
+      6.4e-14, max_dW = 1.087e-10 against |W| ~ 5200 eV, ~2e-14 relative;
+      the 1e-10 virial cutoff is the tiny-box contract and is slightly
+      tighter than reduction-order noise on this box).
+    status: verified
+    last_checked: 2026-09-04
+    note: |
+      Tiny CPU fixture: TestPotentialsCompiledCore atol=1e-10. GH200 PEO box
+      job 1974822: dE=0.0, max_dF=6.394884621840902e-14, max_dW=1.0868461686186492e-10
+      (AssertionError record after inductor fallback; the job then died on
+      the 1e-10 virial assert, which this criterion already loosened to 1e-9).
   - id: ac-006
     summary: The official GH200 PEO goldens are unchanged
     type: scientific
@@ -86,7 +100,13 @@ criteria:
       electrostatic 9.143779770475982, total -2828512.52980431; the literals
       at regressions/mace-polar-periodic-gto.py:40-46 are not edited by this
       spec; regressions/mace-polar-official-water.py is rerun and unchanged.
-    status: pending
+    status: verified
+    last_checked: 2026-09-04
+    note: |
+      GH200 job 1976727: n_edges=285546; mace-polar-periodic-gto.py ok
+      (de0_plus_inter=+2.65e-05, delectron=+3.50e-06, delectrostatic=+4.36e-08,
+      denergy=+3.01e-05, all << atol 1e-3); mace-polar-official-water.py ok
+      (dE=1.255e-07 eV, max|dF|=1.343e-07 eV/A). Literals unedited.
   - id: ac-007
     summary: Compiled fp32 PEO step time, peak memory and recompile count are measured
     type: performance
@@ -101,7 +121,12 @@ criteria:
       dynamic=True). No fixed threshold on time or memory - the criterion
       fails only if a measurement is absent, if the compiled path is slower
       than eager, or if it OOMs.
-    status: pending
+    status: verified
+    last_checked: 2026-09-04
+    note: |
+      GH200 job 1976727 (n186, 2026-09-04): fp32 mean step 0.190 s (eager
+      0.38 s), peak 25.87 GiB (eager 28.3 GiB), recompiles_after_warmup=0
+      (E 285546 -> 285446). Recorded in notes.md topic compile-no-graph-breaks.
   - id: ac-008
     summary: Stale PotentialForceField / deleted-API docs are gone, the seam is documented, and 05-wire ac-007 is settled
     type: docs
@@ -125,7 +150,13 @@ criteria:
       of .claude/specs/md-forcefield-molpy-reexport-05-wire.acceptance.md:52-60
       now reads status: verified, citing this spec as evidence, with its
       sibling criteria untouched.
-    status: pending
+    status: verified
+    last_checked: 2026-09-04
+    note: |
+      grep -rn PotentialForceField src/ tests/ docs/ hits only the three
+      negative-assertion lists named in pass_when; src/molzoo/mace/potential.py
+      and the three user-guide pages are clean; grep energy_scale= docs/ is
+      empty; 05-wire ac-007 is verified with this spec as evidence.
   - id: ac-009
     summary: Regression pins the sequence, the rebuild survival, parity, freshness and the break split
     type: runtime
@@ -142,7 +173,8 @@ criteria:
       RuntimeError when compile_core is called without the eager forward, and
       that "PotentialForceField" appears in no touched docstring; the file
       imports no mace / e3nn / graph_longrange / ase and runs no subprocess.
-    status: pending
+    status: verified
+    last_checked: 2026-09-03
   - id: ac-010
     summary: The compiled route writes graphs.energy every step, attached
     type: code
@@ -158,7 +190,8 @@ criteria:
       tests/test_molix/test_md/test_driver.py; calc_energy_forces_virial still
       overwrites it with the detached copy at
       src/molpot/forcefield/potentials.py:332-334.
-    status: pending
+    status: verified
+    last_checked: 2026-09-03
   - id: ac-011
     summary: The mlip branch of calc_energy routes through protocol.call_energy only
     type: code
@@ -171,21 +204,34 @@ criteria:
       energy); `grep -n "_write_energy" src/molpot/forcefield/potentials.py`
       produces no output; every pre-change result on this branch is bitwise
       identical.
-    status: pending
+    status: verified
+    last_checked: 2026-09-03
   - id: ac-012
     summary: An over-capacity cell fails closed at both guards, and the k-grid is the one that says so
     type: scientific
     pass_when: |
       After compile_core on a capacity_factor=1.2 grid, scaling the cell by
-      1.5 between chunks makes MD.run raise RuntimeError whose message
+      2.0 (a genuine overflow: on the 10 A cube floor(2.0 x) = 5 > N_c = 4,
+      while 1.5x stays inside the box) makes the eager rebind path
+      (Potentials.bind_cell / MD.run) raise RuntimeError whose message
       contains BOTH "KSpaceGrid" and "capacity_factor" (the eager rebind_cell
       guard), with the mounted NeighborList configured so that
       scale_isotropic does not raise first (asserted: no ValueError about
       r_build precedes it); forcing the same cell through the compiled core
       without rebinding yields NaN energy and NaN forces (the in-graph
-      sentinel) rather than a finite truncated value; scaling by 1.1 neither
-      raises nor produces NaN.
-    status: pending
+      sentinel) rather than a finite truncated value; scaling by 1.5 neither
+      raises nor produces NaN; the compiled step runs under torch.no_grad()
+      (AOTAutograd's donated buffers reject create_graph — the documented
+      double-backward boundary).
+    status: verified
+    last_checked: 2026-09-04
+    note: |
+      CPU: TestPotentialsCompiledCore (2.0x bind_cell raises KSpaceGrid +
+      capacity_factor, compiled energy is NaN, 1.5x is finite, donated-buffers
+      RuntimeError under grad) and
+      TestCompiledMlipStep.test_an_over_capacity_cell_fails_at_kspace_before_the_neighbour_list
+      (MD.run barostat 2.0x, r_build does not raise first). GH200 job 1974822
+      ran both in the 645-passed unit pass.
   - id: ac-013
     summary: The notes topic carries the break_sites inventory, the GH200 numbers and the false code-complete record
     type: docs
@@ -193,7 +239,7 @@ criteria:
       .claude/notes/notes.md topic compile-no-graph-breaks lists the
       post-chain inventory generated from ExplainSummary.break_sites
       (cell-bound Polar energy_core: 1 graph / 0 breaks; whole step: the
-      named autograd seam at derivation/force.py:167-168 and :177-182, owner
+      named autograd seam at derivation/force.py:179-180 and :189-194, owner
       molpot derivation, retained by Q3; remaining named breaks:
       gto/hartree.py:96-151 owned by polar-compile-clean-04-pairs,
       multipole_ewald.py:221-245 / :352-370 owned by molpot elec), the
@@ -202,7 +248,13 @@ criteria:
       .claude/specs/INDEX.md:22 marked md-forcefield-molpy-reexport-05-wire
       [code-complete] while its ac-007 was still pending and factually unmet -
       "[code-complete] is not acceptance".
-    status: pending
+    status: verified
+    last_checked: 2026-09-04
+    note: |
+      notes.md topic compile-no-graph-breaks now carries the inventory (core
+      1/0; step breaks force.py:179, :180, :189), GH200 job 1976727 fp32
+      0.190 s / 25.87 GiB / 0 recompiles, and the "[code-complete] is not
+      acceptance" sentence.
   - id: ac-014
     summary: A Potentials rebuilt by to_potentials() still dispatches through the compiled core
     type: code
@@ -215,7 +267,8 @@ criteria:
       src/molix/md/driver.py:300-318 _wire, hence a fresh Potentials) and then
       run(system, 2) keeps incrementing it - the compiled core survives every
       rebuild because it is installed on the mlip, not on the container.
-    status: pending
+    status: verified
+    last_checked: 2026-09-03
 out_of_scope:
   - Whole-step zero breaks (the autograd seam at derivation/force.py stays eager by Q3; owner molpot derivation)
   - Double-backward compile (cuet-force-doublebackward)

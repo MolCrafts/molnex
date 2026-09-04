@@ -316,7 +316,7 @@ class TestMacePotential:
     def test_forward_returns_the_same_batch_object(
         self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
-        """Writes are in place — ``PotentialForceField`` keeps its own handle."""
+        """Writes are in place — ``Potentials`` keeps its own handle."""
         assert matpes_potential(cluster) is cluster
 
     def test_forward_writes_one_energy_per_graph(
@@ -746,3 +746,126 @@ class TestMacePotential:
         explanation = Compiler.explain(matpes_potential.energy_core, *raw_tensors(cluster))
         assert explanation.graph_count == 1
         assert explanation.graph_break_count == 0
+
+
+class TestMacePotentialCompileCore:
+    """``compile_core`` — one precondition, one action, installed on the mlip.
+
+    The compiled build lives on the potential (``self._core``) and not on the
+    ``Potentials`` container, so it survives every ``to_potentials()`` rebuild;
+    what that buys the MD path is asserted in
+    ``tests/test_molix/test_md/test_driver.py``. Here only the local contract:
+    when installation is legal, that it happens exactly once, and that
+    ``_write_energy`` keeps doing all of its unpacking around the installed
+    core.
+    """
+
+    def test_compile_core_requires_one_eager_forward_then_installs_once(
+        self, matpes_variant: MaceMatpes, cluster: TensorDict
+    ) -> None:
+        """Fresh instance refuses; after one eager forward it compiles once.
+
+        The single precondition is ``_elements_validated`` — the element table
+        is checked eagerly and never inside the trace, and on the polarisable
+        variant the same eager forward is what sizes the k-space grids.
+        Installation is idempotent: a second call must not re-invoke the
+        compiler, because the mlip is shared by every ``Potentials`` built
+        from the same ForceField.
+        """
+        compiled: list[object] = []
+        replacement = matpes_variant.energy_core  # a bound method: one object
+
+        def stub(core: object) -> object:
+            compiled.append(core)
+            return replacement
+
+        with pytest.raises(RuntimeError, match="compile_core") as excinfo:
+            matpes_variant.compile_core(stub)
+        assert "eager" in str(excinfo.value)
+        assert compiled == []
+        assert matpes_variant._core is None
+
+        matpes_variant._write_energy(cluster)
+        matpes_variant.compile_core(stub)
+        assert len(compiled) == 1
+        assert matpes_variant._core is replacement
+
+        matpes_variant.compile_core(stub)
+        assert len(compiled) == 1
+
+    def test_write_energy_dispatches_through_the_core_and_keeps_its_unpacking(
+        self,
+        matpes_variant: MaceMatpes,
+        cluster: TensorDict,
+        leaf_cluster: TensorDict,
+    ) -> None:
+        """Installing a core moves the call site only — never the unpacking.
+
+        ``_write_energy`` still resolves ``num_graphs``, still creates a missing
+        ``graphs`` namespace at ``batch_size=[B]`` through its one documented
+        host sync, still rejects a batch without ``edges.edge_diff``, and still
+        writes the energy back **undetached** so an outer force session can
+        differentiate it.
+        """
+        hits: list[int] = []
+        eager_core = matpes_variant.energy_core
+
+        def counting(*args: object, **kwargs: object) -> torch.Tensor:
+            hits.append(1)
+            return eager_core(*args, **kwargs)
+
+        matpes_variant._write_energy(cluster)  # spends the eager element gate
+        matpes_variant.compile_core(lambda _: counting)
+
+        with torch.enable_grad():
+            out = matpes_variant._write_energy(leaf_cluster)
+        assert hits == [1]
+        assert out["graphs", "energy"].grad_fn is not None
+
+        no_graphs = cluster.clone()
+        del no_graphs["graphs"]
+        rebuilt = matpes_variant._write_energy(no_graphs)
+        assert len(hits) == 2
+        assert rebuilt["graphs"].batch_size == torch.Size([1])
+
+        no_diff = cluster.clone()
+        no_diff["edges"] = no_diff["edges"].exclude("edge_diff")
+        with pytest.raises(ValueError, match="requires edges.edge_diff"):
+            matpes_variant._write_energy(no_diff)
+
+    def test_the_element_gate_is_eager_only_and_uncounted(
+        self,
+        matpes_variant: MaceMatpes,
+        cluster: TensorDict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Under tracing the gate folds away and stays unspent.
+
+        ``torch.compiler.is_compiling()`` is a tracing-time constant, so dynamo
+        deletes this branch and the host-syncing element check never enters the
+        graph. It must also leave ``_elements_validated`` alone: a traced call
+        validated nothing, so it must not claim the gate was spent — that is
+        exactly why the fact is a single flag and not a call counter, which
+        dynamo would replay and advance. Whether the check *itself* rejects an
+        off-table ``Z``, and that it runs once per eager instance, are owned by
+        ``TestMacePotential`` and ``test_encoder.py``.
+        """
+        compiling = [True]
+        checks: list[torch.Tensor] = []
+        validate = matpes_variant.validate_elements
+        monkeypatch.setattr(torch.compiler, "is_compiling", lambda: compiling[0])
+        monkeypatch.setattr(matpes_variant, "validate_elements", lambda Z: checks.append(Z))
+
+        matpes_variant._write_energy(cluster)
+        assert checks == []
+        assert matpes_variant._elements_validated is False
+
+        compiling[0] = False
+        matpes_variant._write_energy(cluster)
+        assert len(checks) == 1
+        assert matpes_variant._elements_validated is True
+        validate(cluster["atoms", "Z"])  # the real check still passes this batch
+
+        assert not hasattr(matpes_variant, "_eager_calls")
+        assert "no element validation" in (MacePotential.energy_core.__doc__ or "")
+        assert "eager" in (MACEEncoder.validate_elements.__doc__ or "")

@@ -221,6 +221,49 @@ class TestMacePolarKspaceCompile:
         assert energy.item() == pytest.approx(TINY_POLAR_ISOLATED_ENERGY_SEED0, abs=1e-10)
 
 
+class TestMacePolarBindCell:
+    """The override that gives the base class's no-op something to do."""
+
+    def test_bind_cell_reaches_both_grids_and_refuses_an_over_capacity_cell(
+        self, tiny_polar_spec: MACEPolarSpec, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both GTO grids, the caller's storage, and a loud capacity overflow.
+
+        The two grids are independent objects (``polar.py`` builds the field
+        descriptor and the Hartree energy separately), so binding one and
+        forgetting the other would leave half the reciprocal path unsized and
+        fail only at trace time. The cell must arrive as the *same storage* the
+        caller holds — MD copies barostat updates into it in place — and the
+        ``(1, 3, 3)`` batched layout must take the identical route as ``(3, 3)``.
+        An over-capacity cell fails closed and the message names the grid, so
+        the k-space overflow is never mistaken for the neighbour list's.
+        """
+        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        field: list[int] = []
+        hartree: list[int] = []
+        monkeypatch.setattr(
+            model.electric_potential_descriptor,
+            "bind_cell",
+            lambda cell: field.append(cell.data_ptr()),
+        )
+        monkeypatch.setattr(
+            model.coulomb_energy, "bind_cell", lambda cell: hartree.append(cell.data_ptr())
+        )
+
+        cell = torch.eye(3, dtype=torch.float64) * 10.0
+        model.bind_cell(cell)
+        model.bind_cell(cell.unsqueeze(0))
+        assert field == [cell.data_ptr(), cell.data_ptr()]
+        assert hartree == field
+
+        monkeypatch.undo()
+        model.bind_cell(cell)
+        with pytest.raises(RuntimeError) as excinfo:
+            model.bind_cell(cell * 2.0)
+        assert "KSpaceGrid" in str(excinfo.value)
+        assert "capacity_factor" in str(excinfo.value)
+
+
 class TestPolarPackageImports:
     def test_polar_potential_does_not_import_forbidden_stacks(self):
         path = Path(__file__).resolve().parents[3] / "src" / "molzoo" / "mace" / "polar.py"

@@ -7,16 +7,18 @@ terms** (see :mod:`molpot.forcefield.pair_terms`), not on this container.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 import torch
 from tensordict import TensorDict
 
+from molix.schema import CellBound, CoreCompilable
 from molpot.derivation.force import autograd_forces_and_virial, autograd_forces_from_energy
 from molpot.derivation.protocol import (
     ENERGY_KEY,
     FORCES_KEY,
+    call_energy,
     write_energy,
     write_forces,
     write_virial,
@@ -181,6 +183,61 @@ class Potentials(BasePotential):
             return data
         return energy
 
+    def bind_cell(self, cell: torch.Tensor) -> None:
+        """Hand the live simulation cell to the mlip, if it keeps cell state.
+
+        One layer of delegation, guarded by :class:`molix.schema.CellBound`.
+        The guard is not decoration: ``def_pairstyle`` accepts *any*
+        ``nn.Module`` as the mlip, so an mlip with no ``bind_cell`` at all is a
+        supported shape and an unconditional call would break every such model.
+
+        A **documented no-op** when there is no mlip — the classical Class-I
+        terms hold nothing sized by the lattice, and the neighbour list owns its
+        own rebinding — and equally when the mlip does not satisfy
+        ``CellBound``. Neither case raises.
+
+        Args:
+            cell: Lattice vectors ``(3, 3)`` — or ``(1, 3, 3)`` — in Å, rows
+                being the lattice vectors. Passed through untouched, storage
+                included, so an implementer that re-reads it sees the barostat's
+                in-place updates.
+        """
+        if isinstance(self.mlip, CellBound):
+            self.mlip.bind_cell(cell)
+
+    def compile_core(self, compiler: Callable[[Callable[..., Any]], Callable[..., Any]]) -> None:
+        """Ask the mlip to install a compiled build of its own hot core.
+
+        One layer of delegation, guarded by
+        :class:`molix.schema.CoreCompilable`. The compiled core is installed on
+        the **mlip**, never on this container: ``to_potentials()`` builds a
+        fresh ``Potentials`` on every ``MD`` setter call, while the mlip is the
+        one ``nn.Module`` the ForceField holds throughout — so a core installed
+        here would be silently discarded by the next ``set_*``, and one
+        installed on the mlip survives every rebuild. This class therefore
+        keeps no ``_compiled_core`` and has no second evaluation path;
+        :meth:`calc_energy` cannot tell whether a core is installed.
+
+        ``compiler`` is structural — any ``callable -> callable``, such as
+        :class:`molix.compile.Compiler`, which molpot must not import.
+
+        Args:
+            compiler: Applied by the mlip to whichever flat method it nominates
+                as its core.
+
+        Raises:
+            RuntimeError: If there is no mlip, or the mlip does not satisfy
+                ``CoreCompilable``. Failing loudly beats compiling nothing and
+                reporting success.
+        """
+        if not isinstance(self.mlip, CoreCompilable):
+            raise RuntimeError(
+                "compile_core: this mlip has no compilable core "
+                f"({type(self.mlip).__name__} does not implement compile_core); "
+                "only an mlip satisfying molix.schema.CoreCompilable can be compiled"
+            )
+        self.mlip.compile_core(compiler)
+
     def get_schema(self) -> ForceFieldSchemaView:
         """Metadata of the declared styles: parameter names, units, energy formulas."""
         return PotentialMeta.schema_for(self.forcefield.style_names(), units=self.forcefield.units)
@@ -198,25 +255,48 @@ class Potentials(BasePotential):
         autograd graph, because :meth:`calc_forces` and the Hessian path
         differentiate it.
 
+        **The mlip branch.** When :attr:`mlip` is not ``None`` (``def_pairstyle``
+        was given an ``nn.Module`` instead of a classical style name) and
+        ``system`` is a ``TensorDict``, this method never sums the classical
+        term energies below — it hands the whole batch to
+        :func:`molpot.derivation.protocol.call_energy`, which is the single
+        place that decides whether the mlip's ``_write_energy`` protocol hook or
+        a plain ``model(batch)`` forward runs. Whether the mlip has an installed
+        compiled core (see :meth:`compile_core`) is invisible here too — the
+        mlip decides, not this branch. A ``pos`` override is written onto
+        ``system["atoms", "pos"]`` *before* that call, since the mlip only ever
+        reads positions off the batch — writing it after would be ignored. With
+        an mlip but a non-``TensorDict`` ``system``, this falls through to the
+        classical path below instead (which, with no classical styles
+        declared, contributes an empty sum).
+
         Args:
             system: Batch / mapping carrying ``atoms.pos`` ``(N, 3)`` Å and the
                 topology namespaces (``bonds`` / ``angles`` / ``propers`` /
-                ``impropers``).
+                ``impropers``). Must be a ``TensorDict`` to take the mlip
+                branch above.
             pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``.
 
         Returns:
             Energy ``(B,)`` over the ``B`` molecules of the batch — shape ``()`` for
-            a single molecule — in the ForceField's unit convention
-            (``units="real"`` default: kcal/mol).
+            a single molecule. Classical path: the ForceField's unit convention
+            (``units="real"`` default: kcal/mol). mlip path: whatever
+            :func:`~molpot.derivation.protocol.call_energy` wrote under
+            ``ENERGY_KEY`` — the mlip's native energy unit (eV for the MACE
+            family) — which the ForceField's declared ``units`` (``"metal"``
+            for an MLIP pair style) is expected to already match; neither
+            branch performs a unit conversion here.
         """
         if self.mlip is not None and isinstance(system, TensorDict):
+            # The pos override lands on the batch first: the mlip reads its
+            # positions off ``atoms.pos``, so writing after the call would be
+            # ignored. Which entry of the mlip evaluates the energy is
+            # ``call_energy``'s policy alone — this branch must not reimplement
+            # it by probing the mlip. Whether a compiled core is installed is
+            # likewise the mlip's own business and invisible here.
             if pos is not None:
                 system["atoms", "pos"] = pos
-            write = getattr(self.mlip, "_write_energy", None)
-            if callable(write):
-                write(system)
-                return system[ENERGY_KEY]
-            out = self.mlip(system)
+            out = call_energy(self.mlip, system)
             return out[ENERGY_KEY]
         p = self._pos(system, pos)
         num_graphs = self._num_graphs(system)
@@ -244,6 +324,13 @@ class Potentials(BasePotential):
         parameters ``θ`` (the mixed second derivative ``∂²E/∂pos∂θ`` is kept)
         whenever grad is enabled, so a force loss can reach the parameter heads.
 
+        The ambient ``torch.no_grad()`` an MD loop installs is expected: the
+        energy evaluation is re-enabled locally so it builds the graph the force
+        needs. ``create_graph`` is deliberately left to resolve from the
+        *ambient* mode inside the backend — under an MD ``no_grad`` it stays
+        ``False``, which is what keeps AOTAutograd's donated buffers valid on a
+        compiled core.
+
         Args:
             system: Batch / mapping carrying ``atoms.pos`` and the topology.
             pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``.
@@ -253,7 +340,8 @@ class Potentials(BasePotential):
             (``units="real"`` default: kcal mol⁻¹ Å⁻¹).
         """
         p = self._pos(system, pos).detach().requires_grad_(True)
-        energy = self.calc_energy(system, pos=p)
+        with torch.enable_grad():
+            energy = self.calc_energy(system, pos=p)
         return autograd_forces_from_energy(energy, p)
 
     def calc_energy_forces_virial(

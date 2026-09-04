@@ -38,6 +38,7 @@ from torch._decomp import core_aten_decompositions
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from molix import logger as _logger_mod
+from molix.compile import register_inductor_fallbacks
 
 logger = _logger_mod.getLogger(__name__)
 
@@ -188,6 +189,10 @@ class Exporter:
     ) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # AOTInductor lowers through the same tables as torch.compile, so the
+        # fused-atomic-scatter leak on ``index_add`` is baked into the package
+        # unless the ATen fallback is in place before this compile.
+        register_inductor_fallbacks()
         with self._cpu_codegen_workaround():
             torch._inductor.aoti_compile_and_package(
                 exported, package_path=str(path), inductor_configs=inductor_configs

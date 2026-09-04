@@ -3,7 +3,7 @@
 MolPot provides potential terms, parameter heads, pooling layers, derivation
 operators, and composition utilities.
 
-For the learnable Class-I path (`ClassIForceField` **is** a
+For the learnable Class-I path (`OPLSAAForceField` **is** a
 `molpy.ForceField`, `to_potentials()` is the torch override), use
 [ForceField](forcefield.md) and the
 [Class-I tutorial](../tutorials/class-i-forcefield.md). The

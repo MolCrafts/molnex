@@ -194,6 +194,38 @@ class MacePolar(MacePotential):
         self.num_recursion_steps = spec.num_recursion_steps
         self._y_dim = (spec.multipole_lmax + 1) ** 2
 
+    def bind_cell(self, cell: torch.Tensor) -> None:
+        """Size (first call) or capacity-check (later calls) both k-space grids.
+
+        Overrides the base class's documented no-op: the polarisable variant
+        *does* keep cell-derived state — one fixed-capacity reciprocal grid in
+        each of the two GTO blocks, the field descriptor and the Hartree
+        energy. Both grids must be sized eagerly, because sizing reads the
+        three lattice-vector norms back to the host, which a traced call cannot
+        do. This is therefore the call that has to precede
+        :meth:`~molzoo.mace.potential.MacePotential.compile_core`.
+
+        Idempotent and O(1): the first call fixes each grid's integer box, and
+        every later call only re-checks that the current lattice still fits
+        inside the capacity that first call bought — so MD may call it after
+        every barostat update. It never truncates a grid silently.
+
+        Args:
+            cell: Lattice vectors ``(3, 3)`` or ``(1, 3, 3)`` in Å, rows being
+                the lattice vectors. Both shapes reach the grids unchanged.
+
+        Raises:
+            RuntimeError: Propagated from
+                :class:`~molpot.potentials.gto.kspace.KSpaceGrid` — on the
+                first call when the mesh would exceed ``max_axis_index``, on a
+                later call when the cell has outgrown the capacity fixed by the
+                first (raise ``kspace_capacity_factor`` or build a new model).
+            ValueError: Propagated likewise, if ``cell`` is neither ``(3, 3)``
+                nor ``(1, 3, 3)``.
+        """
+        self.electric_potential_descriptor.bind_cell(cell)
+        self.coulomb_energy.bind_cell(cell)
+
     def energy_core(
         self,
         positions: torch.Tensor,

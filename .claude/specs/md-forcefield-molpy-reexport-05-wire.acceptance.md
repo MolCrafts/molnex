@@ -57,7 +57,15 @@ criteria:
       shows def_pairstyle + set_forcefield.set_neighbors; ff-export.md and
       class-i-forcefield.md contain neither PotentialForceField nor
       energy_scale=.
-    status: pending
+    status: verified
+    last_checked: 2026-09-03
+    note: |
+      verified by polar-compile-clean-03-wire docs rewrite — md.md's quick
+      start and compiled-core section now show def_pairstyle +
+      set_forcefield/set_neighbors, and `grep -rn "PotentialForceField|
+      energy_scale=" docs/` is empty across all three pages. The same rewrite
+      also removed the deleted LennardJonesCutForceField / HarmonicForceField /
+      LennardJonesForceField / OPLSForceField names those pages still taught.
   - id: ac-008
     summary: Skin-07 regression keeps goldens after the rename
     type: runtime

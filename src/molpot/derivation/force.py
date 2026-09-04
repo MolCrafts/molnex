@@ -107,6 +107,12 @@ def autograd_forces_from_energy(
     Autograd-backend only. Pair with one ``energy_forward`` that used
     ``pos`` as a ``requires_grad`` leaf — no second energy evaluation.
 
+    The ambient ``torch.no_grad()`` an MD loop installs is expected and
+    supported: both the per-graph reduction and the backward run inside a local
+    ``torch.enable_grad()``, so the energy graph is re-enabled here rather than
+    required from the caller. ``create_graph`` still defaults to the *ambient*
+    mode, so that no_grad loop pays no tape.
+
     Args:
         energy: Per-graph energies ``(B,)`` or a scalar total.
         pos: Position leaf that ``energy`` depends on; must require grad.
@@ -118,8 +124,14 @@ def autograd_forces_from_energy(
     """
     if create_graph is None:
         create_graph = torch.is_grad_enabled()
-    scalar = energy if energy.ndim == 0 else energy.sum()
+    # The per-graph reduction happens *inside* enable_grad: an MD loop calls
+    # this under an ambient ``torch.no_grad()`` (expected — the force is not
+    # part of any training tape there), and a ``.sum()`` taken outside would be
+    # graphless, so ``autograd.grad`` would reject it with "element 0 of tensors
+    # does not require grad". Re-enabling grad locally keeps the reduction
+    # attached to the energy that ``pos`` already feeds.
     with torch.enable_grad():
+        scalar = energy if energy.ndim == 0 else energy.sum()
         (grad,) = torch.autograd.grad(scalar, pos, create_graph=create_graph)
     return -grad
 

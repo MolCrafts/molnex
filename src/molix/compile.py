@@ -18,6 +18,12 @@ Two regimes (see ``docs/molix/explanation/throughput-and-compilation.md``):
   :class:`molix.batch.PadMolecularBatch` and set the train loader's
   ``drop_last=True``. Without static shapes inductor recompiles every step and
   ``reduce-overhead`` is *slower* than eager.
+* **both regimes, and AOTInductor** — :func:`register_inductor_fallbacks` keeps
+  ``aten.index_add`` an extern ATen kernel, without which inductor's fused
+  atomic scatter silently adds a padded-lane contribution to every scatter
+  target (14.24 eV on the Polar PEO box). :class:`Compiler` and
+  :class:`molix.export.Exporter` call it for you; a direct ``torch.compile``
+  caller must call it first.
 """
 
 from __future__ import annotations
@@ -30,6 +36,77 @@ import torch
 from molix import logger as _logger_mod
 
 logger = _logger_mod.getLogger(__name__)
+
+#: Process-global latch for :func:`register_inductor_fallbacks` — the ATen
+#: fallback is registered on inductor's global lowering table, so once is enough
+#: and a second registration would trip inductor's duplicate-lowering assert.
+_INDUCTOR_FALLBACKS_REGISTERED = False
+
+
+def register_inductor_fallbacks() -> None:
+    """Keep ``aten.index_add`` an extern ATen kernel under inductor.
+
+    **The bug** (torch 2.12.0+cu130, GH200 sm_90; notes topic
+    ``compile-no-graph-breaks``, paragraph "Inductor fused-scatter leak").
+    Inductor decomposes ``index_add_`` to ``index_put_(accumulate=True)`` and
+    lowers that to a Triton atomic ``ir.Scatter``, inlining the pointwise
+    producer into the scatter's loader. The load is masked — padded lanes read
+    ``0`` — but the fused epilogue is still evaluated and atomically added on
+    those lanes, so every scatter target picks up
+    ``(roundup(N, 32) - N) * f(0)``, where ``f`` is the fused producer. Any
+    molnex scatter whose producer has ``f(0) != 0`` is affected: in Polar the
+    producer is ``scale * node_es + shift``, giving ``29 padded lanes * shift =
+    14.24 eV`` on the 4995-atom PEO box (forces stay exact — AOTAutograd's
+    backward is a separate gather kernel). ``aot_eager`` and eager never see it,
+    which is why break-count and ``aot_eager`` parity tests pass regardless.
+
+    **Why a fallback.** Removing the ``index_add`` decompositions makes inductor
+    emit the op as an extern ATen kernel: the source buffer is realised and the
+    correct, unfused ``at::index_add`` runs, so no padded lane is ever
+    evaluated. (Realising the source buffer *without* the fallback does not fix
+    it — measured, GH200 job 1974354.) The extern call is an inductor lowering,
+    not a Python callback, so it costs no graph break and works identically
+    under AOTInductor, whose lowering path is the same. Validated on GH200 job
+    1974355: PEO-box compiled-core ``dE = 0.0`` and the minimal probe down to
+    round-off.
+
+    **When to call it.** Before the first inductor lowering in the process:
+    inductor caches its decomposition table behind ``lru_cache``, so the entries
+    must be dropped *and* those caches cleared before a compile fills them in.
+    :meth:`Compiler.__call__` and :meth:`molix.export.Exporter._package` call
+    this, so molnex's own compile and AOTI-package seams are covered; code that
+    calls ``torch.compile`` / ``torch._inductor.aoti_compile_and_package``
+    directly must call it itself, first.
+
+    The mutation is process-global (it edits torch's own decomposition and
+    lowering tables) and this function is idempotent — repeat calls after the
+    first return immediately, so calling it on every compile is cheap.
+    """
+    global _INDUCTOR_FALLBACKS_REGISTERED
+    if _INDUCTOR_FALLBACKS_REGISTERED:
+        return
+
+    # Imported here, not at module scope: ``torch._inductor`` pulls in the whole
+    # codegen stack, and ``import molix`` must stay cheap for non-compiled paths.
+    from torch._decomp import decomposition_table
+    from torch._inductor import decomposition as inductor_decomposition
+    from torch._inductor import lowering as inductor_lowering
+
+    aten = torch.ops.aten
+    for op in (aten.index_add.default, aten.index_add_.default, aten.index_add.out):
+        inductor_decomposition.decompositions.pop(op, None)
+        decomposition_table.pop(op, None)
+    # Both build the effective decomposition table under ``lru_cache``; a cached
+    # table from an earlier compile in this process still holds the entries.
+    for name in ("fast_random_decomps", "select_decomp_table"):
+        fn = getattr(inductor_decomposition, name, None)
+        if fn is not None and hasattr(fn, "cache_clear"):
+            fn.cache_clear()
+    for op in (aten.index_add.default, aten.index_add_.default):
+        inductor_lowering.make_fallback(op)
+
+    _INDUCTOR_FALLBACKS_REGISTERED = True
+    logger.debug("Registered inductor ATen fallback for aten.index_add / aten.index_add_")
 
 
 class ExplainSummary(NamedTuple):
@@ -73,6 +150,10 @@ class Compiler:
 
     :meth:`explain` is the measurement counterpart and is a ``@staticmethod``:
     it reports on dynamo's default configuration, independent of any instance.
+
+    Every :meth:`__call__` first runs :func:`register_inductor_fallbacks`, so a
+    model compiled through this class never hits inductor's fused-atomic-scatter
+    leak on ``index_add``.
     """
 
     #: Benchmarked winning config for force training on padded fixed shapes.
@@ -127,6 +208,10 @@ class Compiler:
             The compiled wrapper, typed as the same callable type as ``target``
             so a compiled module is still usable where a module is required.
         """
+        # Unconditional (cheap after the first call): a non-inductor backend can
+        # still hand a later graph to inductor, and the tables must be patched
+        # before the process' first lowering, not after.
+        register_inductor_fallbacks()
         logger.info(
             f"Compiling {getattr(target, '__qualname__', type(target).__name__)} with "
             f"backend={self.backend}, fullgraph={self.fullgraph}, "

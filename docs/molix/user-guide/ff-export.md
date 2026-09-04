@@ -1,33 +1,37 @@
 # Force-field export
 
-`ClassIForceField` / `OPLSForceField` inherit `molpot.forcefield.ForceField`,
-which **is** a `molpy.ForceField`. Styles and native types are molpy's;
-`to_potentials()` is overridden to return a torch `Potentials` module.
-File export is `molpy.io`.
+`OPLSAAForceField` inherits `molpot.forcefield.ForceField`, which **is** a
+`molpy.ForceField`. Styles and native types are molpy's; `to_potentials()` is
+overridden to return a torch `Potentials` module. File export is `molpy.io`.
 
 Units are pint-style via `molix.units.units` (a `molpy.UnitSystem`).
 
 ## Embed as a PyTorch model
 
 ```python
-from molix.md import MD, PotentialForceField, VelocityVerletIntegrator
-from molix.units import units
-from molpot.forcefield import OPLSForceField
+import torch
+from molix.md import MD, VelocityVerletIntegrator
+from molpot.forcefield import OPLSAAForceField
 
-ff = OPLSForceField().with_params(bonds={"k": k, "r0": r0}, ...)
+ff = OPLSAAForceField().with_params(bonds={"k": k, "r0": r0}, ...)
 pots = ff.to_potentials()          # BasePotential / nn.Module
 out = pots(batch)                  # writes graphs.energy, atoms.forces
 E = pots.calc_energy(batch)
 
-kcal_to_md = (1.0 * units.kilocalorie_per_mole).to(
-    "amu * angstrom ** 2 / femtosecond ** 2"
-).magnitude
 md = (
-    MD()
-    .set_forcefield(PotentialForceField(pots, batch, energy_scale=1 / kcal_to_md))
+    MD(torch.float64)
+    .set_forcefield(ff)            # the ForceField itself — it is an MDForceField
+    .set_neighbors(nl)
     .set_integrator(VelocityVerletIntegrator(0.5))
 )
 ```
+
+`set_forcefield` takes the **ForceField**, not a wrapper around `pots`: `MD`
+calls `ff.to_potentials()` itself on every setter. The energy scale is not a
+keyword either — it is resolved from `ff.units` (`"real"` → kcal/mol,
+`"metal"` → eV) by `molix.units.preset_energy_to_md`, so an energy counted in
+the ForceField's own unit system reaches the integrator in amu·Å²/fs² without
+anyone writing a conversion factor.
 
 ## LAMMPS files (molpy.io)
 

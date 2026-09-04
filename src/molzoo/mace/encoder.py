@@ -294,6 +294,19 @@ class MACEEncoder(nn.Module):
         once per (model, system) pair — ``Z`` is constant over a trajectory,
         and a wrongly wired model/dataset pair fails on the first batch.
 
+        **Eager only.** The host sync it costs cannot happen inside a traced
+        region, so the flat ``energy_core`` seam does not call this at all and
+        a compiled or exported model never validates. The contract has exactly
+        two bearers, and one of them must run before any traced call:
+
+        1. :meth:`molzoo.mace.potential.MacePotential._write_energy`, on its
+           first **eager** call — the batch path gets this for free.
+        2. Whoever drives the flat seam directly (``torch.compile`` /
+           ``torch.export`` / ``molix.engine.export_for_lammps``), before
+           tracing. On the MD path that is the eager forward
+           :meth:`molzoo.mace.potential.MacePotential.compile_core` requires as
+           its precondition.
+
         Args:
             Z: Atomic numbers ``(N,)``.
 

@@ -8,10 +8,10 @@ write a LAMMPS deck through molpy.
 ```python
 import torch
 from tensordict import TensorDict
-from molpot.forcefield import OPLSForceField
+from molpot.forcefield import OPLSAAForceField
 
 ff = (
-    OPLSForceField()
+    OPLSAAForceField()
     .def_pairstyle("lj/cut", cutoff=12.0)
     .with_params(
         bonds={
@@ -45,9 +45,9 @@ batch = TensorDict(
 )
 ```
 
-`OPLSForceField` **is** a `molpy.ForceField` (`ClassIForceField` →
-`ForceField`). Training heads (`ClassicalIMM`) return the same type via
-`with_params`.
+`OPLSAAForceField` **is** a `molpy.ForceField` (it subclasses
+`molpot.forcefield.ForceField`, which subclasses molpy's). Training heads
+return the same type via `with_params`.
 
 ## 2. Evaluate as a torch module
 
@@ -93,18 +93,23 @@ the merge budget, the condenser raises — the environment is too coarse.
 Bind to in-process MD:
 
 ```python
-from molix.md import MD, PotentialForceField
-from molix.units import units
+import torch
+from molix.md import MD, VelocityVerletIntegrator
 
-kcal_to_md = (1.0 * units.kilocalorie_per_mole).to(
-    "amu * angstrom ** 2 / femtosecond ** 2"
-).magnitude
-md = MD(
-    PotentialForceField(pots, batch, energy_scale=kcal_to_md),
-    mass=torch.tensor([12.011, 12.011]),
-    dt=0.5,
+md = (
+    MD(torch.float64)
+    .set_forcefield(ff)          # the ForceField itself, not a wrapper
+    .set_neighbors(nl)
+    .set_integrator(VelocityVerletIntegrator(0.5))
 )
 ```
+
+`MD` is a composer: each component is constructed on its own and attached, and
+every setter re-runs `ff.to_potentials()`. Masses come from the system
+(`atoms.mass`), bound at `run`, and the conversion into integrator units
+(amu, Å, fs) is read off `ff.units` by `molix.units.preset_energy_to_md` — a
+Class-I ForceField at the default `units="real"` reports kcal/mol, and nothing
+in the example spells out a conversion factor.
 
 ## 3. Write LAMMPS files
 

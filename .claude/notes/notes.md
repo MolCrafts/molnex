@@ -378,6 +378,75 @@ step at `num_recursion_steps=2`, ≈ 15 device→host syncs); the compiled
 route pays none. The MacePolar-level `bind_cell` fan-out (one call instead
 of `coulomb_energy.bind_cell` + `electric_potential_descriptor.bind_cell`)
 is 02-seam's `CellBound` / 03-wire's wiring, not 01's.
+**Post-chain inventory (03-wire, 2026-09-03, from `ExplainSummary.break_sites`).**
+Cell-bound Polar `MacePolar.energy_core` (periodic, B = 1, first order):
+**1 graph / 0 breaks** — the compiled core, installed on the mlip by
+`MacePotential.compile_core` and dispatched by `_write_energy`; it survives
+every `ForceField.to_potentials()` rebuild because it lives on the shared
+`nn.Module`, not on the `Potentials` container. Whole MD step
+(`Potentials.calc_energy_forces_virial`): breaks **only** at the named
+autograd seam `src/molpot/derivation/force.py` — `autograd_forces_and_virial`
+leaf creation at `:179-180` (`pos.detach().requires_grad_`, the strain
+`zeros(..., requires_grad=True)`) and `torch.autograd.grad` at `:189-194`
+(CPU and GH200 regression `regressions/polar-compile-clean-03-wire.py`
+report three sites, all in that file: `:179`, `:180`, `:189`; the count
+`graph_break_count` is `graph_count − 1`, not `len(break_sites)`). Retained
+by Q3: the seam is the *caller* of the compiled core; AOTAutograd supplies
+the backward. Owner: molpot derivation. The compiled route is first-order only — with grad
+enabled AOTAutograd raises "compiled with non-empty donated buffers which
+requires create_graph=False" (spec `cuet-force-doublebackward`); MD runs
+under `no_grad` as documented. Baseline 51 graphs / 50 breaks → sites (1)
+`kspace.py`, (2) `features.py` / `hartree.py` `num_graphs`, (4)
+`encoder.py:303` element gate (now eager-only behind
+`torch.compiler.is_compiling()`) are closed; (3) the isolated all-pairs
+enumeration `gto/hartree.py:96-151` stays (owner `polar-compile-clean-04-pairs`),
+`multipole_ewald.py:221-245` / `:352-370` stays (owner molpot elec), (5)
+`force.py` is the design seam above. Fixed on the way: the eager NVT-MLIP
+MD path was dead under `MD.run`'s `no_grad` (`autograd_forces_from_energy`
+summed the energy outside `enable_grad`; `Potentials.calc_forces` never
+re-enabled it) — only the NPT path had worked. Process note: `.claude/specs/INDEX.md`
+marked `md-forcefield-molpy-reexport-05-wire` `[code-complete]` while its
+ac-007 (no `PotentialForceField` / `energy_scale=` in the user docs) was
+still pending and factually unmet; 03-wire paid that debt and flipped it —
+**`[code-complete]` is not acceptance.**
+
+**Inductor fused-scatter leak (found 2026-09-04, GH200, torch 2.12.0+cu130).**
+The first GH200 parity run of the compiled Polar core (job 1971898, inductor,
+fp64, PEO box) gave `dE = 14.238975 eV` with forces exact to 6e-14 and virial
+to 9e-11; `aot_eager` was exact (dE = 0.0, jobs 1972031), every submodule
+compiled alone with inductor was exact (job 1972127, 33 modules, worst 2e-14),
+E0 alone was exact. Minimal reproducer (job 1973858): `out[0] += v*0.7 + 1.3`
+over N rows via `index_add_` (= `scatter_sum_compile_safe`), inductor vs
+eager — error = `(roundup(N, 32) − N) × 1.3` for both fp32 and fp64
+(N=21 → 14.3, 129 → 40.3, 4097 → 40.3, 4995 → 37.7; N a multiple of 32 → 0).
+Mechanism: inductor lowers `index_add_` → `index_put_(accumulate=True)` →
+`ir.Scatter(atomic_add)` and inlines the pointwise producer into the scatter
+loader; the load is masked (padded lanes read 0) but the fused epilogue
+`f(0) = 1.3` is still atomically added for the padded lanes. In Polar the
+producer is `scale·node_es + shift` (f(0) = shift): 29 padded lanes × shift
+= 14.24 eV. Any per-graph / per-node scatter whose fused producer has
+f(0) ≠ 0 is affected under `torch.compile(backend="inductor")` and under
+AOTInductor (same lowering); `aot_eager`, eager and the CPU tests never
+see it, which is why the chain's explain/aot_eager tests passed. Forces are
+exact because AOTAutograd's backward is a separate gather kernel.
+**Fix (validated, jobs 1974354 / 1974355):** realising the scatter source
+before the atomic `index_put` does *not* help (job 1974354: unchanged
+37.7 / 14.24); what works is keeping `aten.index_add` an **extern ATen
+kernel** under inductor — `molix.compile.register_inductor_fallbacks()`
+removes the `index_add` decompositions from `torch._inductor.decomposition`
+and `torch._decomp` (clearing the lru caches so it also holds after an
+earlier compile in the process) and registers `make_fallback` for
+`index_add` / `index_add_`. With it: probe error at round-off (fp64 N=4995
+9.8e-11, N=21 0.0; fp32 3.9e-3), PEO-box compiled core dE **0.0**, dF 5.7e-14,
+dW 1.9e-10. It runs from `Compiler.__call__` and from the AOTI packager
+(`Exporter._package`), is process-global and idempotent; a direct
+`torch.compile` caller must call it first. Rule: **never lower a
+molnex scatter to inductor's fused atomic Scatter** — every compiled
+numerical parity check must run under `backend="inductor"` on the target
+device, not only `aot_eager`. Upstream reproducer = the probe above
+(torch 2.12.0+cu130, sm_90).
+**03-wire GH200 (2026-09-04, job 1976727, n186, 4995-atom 46.36 Å PEO, fused cueq, `Compiler(dynamic=True)`).**
+fp64 compiled vs eager: `dE = 0.0`, `max_dF = 4.97e-14`, `max_dW = 6.29e-11`, `n_edges = 285546` (job 1974822 had `max_dW = 1.087e-10` against the same 1e-9 virial contract; |W| ~ 5200 eV, ~2e-14 relative). fp32 compiled: mean step **0.190 s** (eager baseline 0.38 s), peak **25.87 GiB** (eager 28.3 GiB; the larger k-grid did not OOM), recompiles after warm-up **0** (live E 285546 → 285446). Official goldens unchanged: `regressions/mace-polar-periodic-gto.py` diffs ~1e-5 eV (`atol` 1e-3), `mace-polar-official-water.py` `dE = 1.3e-7 eV`.
 Post-impl review adjustments (2026-09-03): the head-room knob is a
 constructor keyword `kspace_capacity_factor` on both holders (the earlier
 "swap `mod.kgrid`" advice was a leaked lifecycle; plumbing it up to

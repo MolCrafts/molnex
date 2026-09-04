@@ -99,7 +99,7 @@ def ensure_op_registered(op_name: str) -> None:
 _load_ops_library()
 
 from molix import logger, logging
-from molix.compile import Compiler, ExplainSummary
+from molix.compile import Compiler, ExplainSummary, register_inductor_fallbacks
 from molix.config import config
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
 from molix.core.losses import MAELoss, MSELoss, WeightedLoss
@@ -127,4 +127,5 @@ __all__ = [
     "config",
     "logger",
     "logging",
+    "register_inductor_fallbacks",
 ]

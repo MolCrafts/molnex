@@ -103,6 +103,48 @@ class TestCompiler:
         assert any(obj.apply.__qualname__ in message for message in capture.messages)
 
 
+class TestInductorFallbacks:
+    """Tests for the ATen ``index_add`` fallback registration (``register_inductor_fallbacks``)."""
+
+    @pytest.mark.slow
+    def test_index_add_is_an_extern_kernel_under_inductor(self):
+        """A pointwise producer fused into ``index_add_`` must not leak ``f(0)`` per padded lane.
+
+        Inductor lowers ``index_add_`` → ``index_put_(accumulate=True)`` →
+        ``ir.Scatter(atomic_add)`` and inlines the pointwise producer into the
+        scatter loader. The load is masked (padded lanes read 0) but the fused
+        epilogue ``f(0)`` is still atomically added for those lanes, so the
+        scatter target gains ``(roundup(N, 32) - N) * f(0)``. Here
+        ``f(v) = 0.7 * v + 1.3`` and ``N = 4995`` → ``(5024 - 4995) * 1.3 =
+        37.7`` of pure fiction. Removing the ``aten.index_add`` decomposition
+        and registering the ATen fallback makes inductor emit an extern
+        ``index_add`` kernel, which has no fused epilogue and therefore no leak.
+
+        Evidence: GH200 job 1974355 measured PEO-box ``dE = 0.0`` with the
+        fallback registered, versus ``dE = 14.24 eV`` without it (29 padded
+        lanes x the Polar readout shift).
+
+        Both halves are asserted here because they are one fact: the numbers
+        agree *because* the op is extern, and an extern op that silently
+        regained a decomposition would put the leak back.
+        """
+        import torch._inductor.decomposition
+        import torch._inductor.lowering
+
+        def f(v: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            return torch.zeros(1, dtype=v.dtype).index_add_(0, b, v * 0.7 + 1.3)
+
+        v = torch.randn(4995, dtype=torch.float64, generator=torch.Generator().manual_seed(0))
+        v = v * 500.0
+        b = torch.zeros(4995, dtype=torch.long)
+
+        compiled = Compiler(backend="inductor")(f)
+        assert torch.allclose(compiled(v, b), f(v, b), atol=1e-9, rtol=0.0)
+
+        assert torch.ops.aten.index_add.default in torch._inductor.lowering.fallbacks
+        assert torch.ops.aten.index_add.default not in torch._inductor.decomposition.decompositions
+
+
 class TestExplainSummary:
     """Tests for Compiler.explain() and the molnex-owned ExplainSummary."""
 

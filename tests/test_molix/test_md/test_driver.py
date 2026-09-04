@@ -571,3 +571,172 @@ class TestRebindCell:
         ]
         assert sites, "the (1, 3, 3) vs (3, 3) branch must still exist, in its one home"
         assert [line for line in sites if not owner.lineno <= line <= owner.end_lineno] == []
+
+
+class TestCompiledMlipStep:
+    """A compiled mlip core across ``_wire``'s rebuilds and the per-step energy."""
+
+    @pytest.fixture
+    def fp64(self):
+        """Build the Polar mlip at fp64, then put the global precision back.
+
+        ``molix.config`` is a process-wide singleton and cuEquivariance freezes
+        its working precision at **construction**, so this test has to raise the
+        global default rather than ``.double()`` the model afterwards. Leaving it
+        raised would be a cross-file side effect: every module built later in the
+        same session would be fp64 while its fixtures still feed fp32 tensors.
+        Same save/restore as ``tests/test_molzoo/test_mace/conftest.py``.
+        """
+        from molix import config
+
+        previous = config["ftype"]
+        config.set_precision("fp64")
+        yield
+        config.set_precision("fp64" if previous == torch.float64 else "fp32")
+
+    @pytest.mark.slow
+    def test_compiled_core_survives_rebuilds_and_updates_energy_per_step(self, fp64) -> None:
+        """Every ``set_*`` rebuilds ``Potentials``; the compiled core must not care.
+
+        ``MD._wire`` calls ``force.to_potentials()`` afresh in each setter, so a
+        core installed on the *container* would be silently discarded by the
+        next one and the run would quietly fall back to eager. Installing it on
+        the mlip — the single ``nn.Module`` the ForceField holds — is what makes
+        the prescribed ``bind_cell -> one eager call -> compile_core`` sequence
+        survive being handed to ``MD`` afterwards.
+
+        The second assertion is that the step is live: ``_eval_mlip`` reads
+        ``graphs.energy`` back off the work batch, so a stale value from the
+        warm-up would integrate a frozen potential without any error. Two steps
+        at two different geometries must give two different energies.
+        """
+        from molix.compile import Compiler
+        from molpot.forcefield import ForceField
+        from molzoo.mace.polar import MacePolar
+        from molzoo.mace.spec import MACEPolarSpec
+        from tests.test_molzoo.test_mace.conftest import (
+            ATOMIC_ENERGIES,
+            ATOMIC_NUMBERS,
+            CLUSTER_POS,
+            CLUSTER_Z,
+            TINY_POLAR_KWARGS,
+            polar_kwargs,
+        )
+
+        spec = MACEPolarSpec(
+            atomic_numbers=ATOMIC_NUMBERS,
+            atomic_energies=ATOMIC_ENERGIES,
+            **TINY_POLAR_KWARGS,
+        )
+        torch.manual_seed(0)
+        mlip = MacePolar(**polar_kwargs(spec, compute_forces=False)).eval()
+
+        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
+        n_atoms = len(CLUSTER_Z)
+        cell = torch.eye(3, dtype=torch.float64) * 10.0
+        system = md_system(pos.clone(), torch.full((n_atoms, 3), 0.02, dtype=torch.float64), 12.0)
+        system["atoms", "Z"] = torch.tensor(CLUSTER_Z, dtype=torch.long)
+        system["atoms", "batch"] = torch.zeros(n_atoms, dtype=torch.long)
+        system["graphs"] = TensorDict({"cell": cell.unsqueeze(0)}, batch_size=[1])
+
+        forcefield = ForceField("mace-polar", units="metal")
+        forcefield.def_pairstyle(mlip)
+        neighbors = NeighborList(cell=cell, cutoff=3.0, positions=pos, skin=0.5)
+        pots = forcefield.to_potentials()
+        pots.bind_cell(cell)
+        warm_up = system.clone()
+        neighbors.build(warm_up)
+        with torch.no_grad():
+            pots.calc_energy(warm_up)
+            pots.compile_core(Compiler(backend="aot_eager", dynamic=True))
+
+        energies: list[float] = []
+        installed = mlip._core
+
+        def counting(*args: object, **kwargs: object) -> torch.Tensor:
+            energy = installed(*args, **kwargs)
+            energies.append(float(energy.detach().sum()))
+            return energy
+
+        mlip._core = counting
+
+        md = (
+            MD(torch.float64)
+            .set_forcefield(forcefield)
+            .set_neighbors(neighbors)
+            .set_integrator(VelocityVerletIntegrator(0.5))
+        )
+        state = md.run(system, 2)
+
+        assert len(energies) >= 2
+        assert energies[0] != energies[-1]
+        assert torch.isfinite(state.energy).all()
+
+    @pytest.mark.slow
+    def test_an_over_capacity_cell_fails_at_kspace_before_the_neighbour_list(self, fp64) -> None:
+        """ac-012: MD.run's barostat path names KSpaceGrid, not r_build.
+
+        ``_sync_cell`` rebinds the k-grid *before* it scales the neighbour
+        list, so an isotropic 2x expansion of the 10 Å Polar cube
+        (``floor(2·2.94) = 5 > N_c = 4``) must raise ``RuntimeError`` naming
+        both ``KSpaceGrid`` and ``capacity_factor``. The list is built with
+        ``r_build`` well under half the *expanded* perpendicular width, so
+        ``scale_isotropic`` would not have raised first.
+        """
+        from molix.compile import Compiler
+        from molpot.forcefield import ForceField
+        from molzoo.mace.polar import MacePolar
+        from molzoo.mace.spec import MACEPolarSpec
+        from tests.test_molzoo.test_mace.conftest import (
+            ATOMIC_ENERGIES,
+            ATOMIC_NUMBERS,
+            CLUSTER_POS,
+            CLUSTER_Z,
+            TINY_POLAR_KWARGS,
+            polar_kwargs,
+        )
+
+        spec = MACEPolarSpec(
+            atomic_numbers=ATOMIC_NUMBERS,
+            atomic_energies=ATOMIC_ENERGIES,
+            **TINY_POLAR_KWARGS,
+        )
+        torch.manual_seed(0)
+        mlip = MacePolar(**polar_kwargs(spec, compute_forces=False)).eval()
+        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
+        n_atoms = len(CLUSTER_Z)
+        cell = torch.eye(3, dtype=torch.float64) * 10.0
+        system = md_system(pos.clone(), torch.zeros(n_atoms, 3, dtype=torch.float64), 12.0)
+        system["atoms", "Z"] = torch.tensor(CLUSTER_Z, dtype=torch.long)
+        system["atoms", "batch"] = torch.zeros(n_atoms, dtype=torch.long)
+        system["graphs"] = TensorDict({"cell": cell.unsqueeze(0)}, batch_size=[1])
+
+        forcefield = ForceField("mace-polar", units="metal")
+        forcefield.def_pairstyle(mlip)
+        # r_build = 1.0 Å; half-width of the 2x cell is 10 Å, so the list
+        # cannot raise ValueError about r_build on this expansion.
+        neighbors = NeighborList(
+            cell=cell, cutoff=1.0, positions=pos, skin=0.0, every=1, delay=0, check=False
+        )
+        pots = forcefield.to_potentials()
+        pots.bind_cell(cell)
+        warm_up = system.clone()
+        neighbors.build(warm_up)
+        with torch.no_grad():
+            pots.calc_energy(warm_up)
+            pots.compile_core(Compiler(backend="aot_eager", dynamic=True))
+
+        md = (
+            MD(torch.float64)
+            .set_forcefield(forcefield)
+            .set_neighbors(neighbors)
+            .set_integrator(VelocityVerletIntegrator(0.5))
+            .set_barostat(_expanding_barostat(2.0))
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            md.run(system, 1, chunk=1)
+        message = str(excinfo.value)
+        assert "KSpaceGrid" in message
+        assert "capacity_factor" in message
+        assert "r_build" not in message
+        assert "ValueError" not in message

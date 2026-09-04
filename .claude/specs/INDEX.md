@@ -6,7 +6,7 @@ must not be treated as authority for a new training submission.
 
 ## Active specifications
 
-- [polar-compile-clean-03-wire](polar-compile-clean-03-wire.md) — compiled core installed on the mlip (MacePotential.compile_core), eager-only element gate, whole Polar MD step = compiled core + the named force.py autograd seam (merge unit with 02) [approved]
+- [polar-compile-clean-03-wire](polar-compile-clean-03-wire.md) — compiled core installed on the mlip (MacePotential.compile_core), eager-only element gate, whole Polar MD step = compiled core + the named force.py autograd seam (merge unit with 02) [code-complete]
 - [mace-polar-port-01-backbone](mace-polar-port-01-backbone.md) — 泛化 MACEEncoder 残差骨干 + MACEPolarSpec，钉 Polar-1-M dump [code-complete]
 - [mace-polar-port-02-blocks](mace-polar-port-02-blocks.md) — NonLinearBiasReadout.out_mul、自旋源、层混合 [code-complete]
 - [mace-polar-port-03-field](mace-polar-port-03-field.md) — SparseUvu、单体场更新、场读出（原生 ir_mul） [code-complete]

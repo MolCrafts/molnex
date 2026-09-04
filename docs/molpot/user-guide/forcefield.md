@@ -5,17 +5,25 @@ param tables. Concrete forms inherit it — there is no
 `ForceField.class_i()` façade.
 
 ```python
-from molpot.forcefield import ClassicalIMM, ClassIForceField, OPLSForceField
+from molpot.forcefield import OPLSAAForceField, Parameterizer
 
-ff = ClassIForceField()
-model = ClassicalIMM(encoder, forcefield=ff, bond_head=..., angle_head=...)
-ff_t = model(batch)                          # ClassIForceField
-pots = ff_t.to_potentials()                  # overrides molpy native → torch
+template = OPLSAAForceField()
+model = Parameterizer(
+    encoder,
+    template,
+    bond_head=...,
+    angle_head=...,
+    proper_head=...,      # form="opls" → k1..k4
+    improper_head=...,
+    atom_head=...,
+    charge_model=...,
+)
+ff = model(batch)                # filled OPLSAAForceField copy; template untouched
+pots = ff.to_potentials()        # overrides molpy native → torch
 E = pots.calc_energy(batch)
-out = pots(batch)                            # writes graphs.energy, atoms.forces
-ff_opls = model.project(OPLSForceField())    # general → OPLS form
-ir = ff_t.to_ir()                            # Class-I PotentialIR bags
-# ff_t is a molpy.ForceField — pass it to molpy.io after realize()
+out = pots(batch)                # writes graphs.energy, atoms.forces
+ir = ff.to_ir()                  # Class-I PotentialIR bags
+# ff is a molpy.ForceField — pass it to molpy.io after realize()
 ```
 
 ## Styles
@@ -24,7 +32,7 @@ Register extra styles, then fill tables with `with_params` (copy-on-write):
 
 ```python
 ff = (
-    OPLSForceField()
+    OPLSAAForceField()
     .def_pairstyle("lj/cut", cutoff=12.0)
     .with_params(
         bonds={"k": k, "r0": r0},
