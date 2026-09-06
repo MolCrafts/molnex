@@ -462,8 +462,19 @@ class Potentials(BasePotential):
         Returns:
             Energy ``(B,)`` — ``()`` for a single molecule — and forces ``(N, 3)``,
             in the ForceField's unit convention (``units="real"`` default:
-            kcal/mol and kcal mol⁻¹ Å⁻¹).
+            kcal/mol and kcal mol⁻¹ Å⁻¹). mlip path: the mlip's own energy
+            unit (eV for the MACE family), never a sum with classical terms.
         """
+        if self.mlip is not None and isinstance(system, TensorDict):
+            # Same branch policy as ``calc_energy``: the mlip owns the whole
+            # energy. Without this, an mlip ForceField — which declares no
+            # classical style — falls through the term loop below and returns a
+            # silent ``(0, zeros)`` instead of its energy and forces.
+            leaf = self._pos(system, pos).detach().requires_grad_(True)
+            with torch.enable_grad():
+                energy = self.calc_energy(system, pos=leaf)
+            return energy, autograd_forces_from_energy(energy, leaf)
+
         p = self._pos(system, pos).detach()
         device = p.device
         dtype = p.dtype

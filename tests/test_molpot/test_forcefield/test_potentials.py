@@ -258,6 +258,22 @@ class TestPotentials:
         assert float(energy.detach()) == pytest.approx(GOLDEN_ENERGY, abs=1e-10)
         assert torch.allclose(forces.detach(), pots.calc_forces(batch).detach(), atol=1e-10)
 
+    def test_calc_energy_forces_uses_the_mlip_branch(self) -> None:
+        """An mlip ForceField declares no classical style, so the term loop is empty.
+
+        Falling through it returns ``(0, zeros)`` — a silent wrong answer, not a
+        missing feature. ``calc_energy`` and ``calc_forces`` both branch on the
+        mlip; this third entry must agree with them.
+        """
+        batch = _edge_batch()
+        pots = ForceField().def_pairstyle(_EdgeSpring()).to_potentials()
+        energy, forces = pots.calc_energy_forces(batch)
+        assert float(energy.detach().reshape(())) == pytest.approx(
+            float(pots.calc_energy(batch).detach().reshape(())), abs=1e-10
+        )
+        assert torch.allclose(forces.detach(), pots.calc_forces(batch).detach(), atol=1e-10)
+        assert float(forces.detach().abs().max()) > 0.0
+
     def test_calc_forces_double_backward_reaches_parameters(self) -> None:
         """``create_graph`` keeps ∂²E/∂x∂θ alive so a force loss reaches θ."""
         parameter = nn.Parameter(torch.tensor([BOND_K], dtype=DTYPE))
