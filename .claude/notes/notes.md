@@ -292,16 +292,32 @@ peak 56.5 GiB, 0.59 s/step. Official mace-torch (cueq, conv fusion) on the
 same box: 25.2 GiB / 0.5–1.0 s at fp32. Records:
 `peo-tg/experiments/size-convergence-mace-polar/bench5k/verify_molnex*.json`.
 
-**Compiled + receiver-blocked breaks above 21 400 atoms (2026-09-06).**
+**Receiver blocking saves memory only in eager (measured 2026-09-06).**
+On a 21 400-atom cooled PEO melt, blocking cuts the eager peak from 86.8 to
+19.1 GiB (−78 %) but the compiled peak only from 71.1 to 67.1 GiB (−6 %): the
+compiled backward recomputes the blocks — AOT graphs show the block bodies
+re-emitted in the backward — but does not serialise them, so several blocks'
+`(E_block, weight_numel)` radial weights are live at once and the peak lands
+back at the full convolution's. Two ways of asking the compiler to serialise
+did not work: writing each block into its own rows of one buffer instead of
+`cat` (Inductor proves the rows disjoint and reorders anyway; measured
+identical 67.06 GiB, reverted) and `activation_memory_budget < 1` (crashes the
+partitioner: `Node _assert_async didn't have 'val' metadata`). Consequence:
+the only configuration that reaches 35 400 atoms on a 95 GiB GH200 is
+**eager** blocked (1.95 s, 33.2 GiB); compiled blocked OOMs there. Do not
+assume `torch.compile` preserves a checkpoint's memory intent.
+Records: `lab-v3` experiment `peo-tg/polar-inference-bench`.
+
+**Compiled + receiver-blocked breaks above 21 400 atoms (2026-09-06, fixed).**
 `Compiler(fullgraph=True, dynamic=False, donated_buffer=True)` on the blocked
 Polar core fails in Inductor codegen at 2.1 M edges and above:
 `ValueError: Scalar -2536860480 is out of range for type int32` inside
 `triton_per_fused_add_cos_div_linalg_vector_norm_mul_neg_slice_slice_backward_...`
 — a fused kernel over the GTO k-space path. The *same* sizes compile fine with
 the full indexed convolution, so it is fusion-dependent, not a plain size wall.
-Eager blocked runs to 35 400 atoms (E+F 2.283 s / 33.4 GiB). Until this is
-diagnosed, the blocked path's compiled numbers stop at 17 700 atoms; measured
-in `lab-v3` experiment `peo-tg/polar-inference-bench` (§9 F6 of its plan book).
+Fixed by `d1e0b243`: the radial MLPs' first layer is evaluated from split
+inputs, so the `(E, 1056)` concatenation that produced the index constant is
+never built. Compiled blocked now builds at 21 400 atoms (0.64 s / 67.1 GiB).
 
 **Receiver-block scale check (GH200, Polar fp32, 8850 atoms, skin graph,
 2026-09-05).** The ordinary official cuEq convolution was 1.382 s/MD step at
