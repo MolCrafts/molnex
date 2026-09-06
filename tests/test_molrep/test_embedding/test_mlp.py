@@ -45,8 +45,10 @@ class TestMomentNormalizedMLP:
 
     def test_layer_names_mirror_the_reference(self):
         """Official weights transfer by direct copy, so names must match."""
-        names = {n for n, _ in MomentNormalizedMLP([10, 64, 64, 512]).named_parameters()}
+        mlp = MomentNormalizedMLP([10, 64, 64, 512])
+        names = {n for n, _ in mlp.named_parameters()}
         assert names == {f"layer{i}.weight" for i in range(3)}
+        assert set(mlp.state_dict()) == names
 
     def test_has_no_biases(self):
         """e3nn's FullyConnectedNet is bias-free; a bias would break transfer."""

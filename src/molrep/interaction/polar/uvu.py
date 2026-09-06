@@ -22,6 +22,7 @@ import math
 import cuequivariance as cue
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from molix import config
 
@@ -134,8 +135,14 @@ class SparseUvuTensorProduct(nn.Module):
             if mode == 0:
                 a = x1[:, s1:e1].reshape(batch, d1, mul1).transpose(1, 2)
                 b = x2[:, s2:e2].reshape(batch, d1, mul2).transpose(1, 2)
-                pair = torch.einsum("bud,bvd->buv", a, b) * scale
-                mixed = torch.einsum("buv,uv->bu", pair, w)
+                # Reassociate the same uvu contraction before materialising
+                # it: sum_v b[b,v,d] * w[u,v] first, then dot with a over d.
+                # The literal pair tensor is (N, mul1, mul2); Polar-1-M would
+                # allocate (N, 512, 512), or 34.57 GiB at N=35400 in fp32.
+                # F.linear uses the shared (u,v) weights as one GEMM and keeps
+                # the transient at (N, d, mul1), where d <= 2*l_max+1.
+                projected = F.linear(b.transpose(1, 2), w).transpose(1, 2)
+                mixed = (a * projected).sum(dim=-1) * scale
                 out[:, so:eo] = out[:, so:eo] + mixed
             else:
                 a = x1[:, s1:e1].reshape(batch, d1, mul1).transpose(1, 2)

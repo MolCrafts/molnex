@@ -7,16 +7,21 @@ production trajectory needs. This module rebuilds it under the LAMMPS
 tensor shape constant**, which is what lets the force evaluation stay inside a
 CUDA graph across the whole run.
 
-The trick is the *capacity*: edge tensors are allocated once at
-``capacity = ceil(factor * E_initial)`` and only their contents change. Unused
-rows carry a **dead edge** — source and target both atom 0, displaced by a shift
-longer than the cutoff. Such an edge contributes exactly zero:
+The trick is the *capacity*: edge tensors are allocated once and only their
+contents change. The default layout uses
+``capacity = ceil(factor * E_initial)``. The optional cuEq receiver-block
+layout treats its configured size as a maximum, divides the receivers into the
+most even intervals under that maximum, then gives every target block the same
+fixed edge slice sized from the busiest initial block. Unused rows carry a
+**dead edge** — a self-loop on atom 0 in the default layout, or on an atom
+inside the receiver block — displaced by a shift longer than the cutoff. Such
+an edge contributes exactly zero:
 
 * ``r = |shift| > r_cut`` so the polynomial cutoff envelope is 0, and the radial
   features it multiplies are 0, so the message and the learned density are 0;
 * pair-repulsion envelopes cut off at the pair's covalent radii, well inside
   ``r_cut``, so they are 0 too;
-* ``pos[0] - pos[0]`` cancels exactly, so no spurious force reaches atom 0.
+* ``pos[i] - pos[i]`` cancels exactly, so no spurious force reaches its anchor.
 
 Periodicity is handled by the minimum-image convention of the compiled
 neighbour kernel, whose sequential reduction is complete only up to half the
@@ -337,8 +342,10 @@ class NeighborStrategy(Protocol):
         edge_index: Edge buffer ``(capacity, 2)`` — ``[:, 0]`` source,
             ``[:, 1]`` target, per the repo edge convention.
         shifts: Periodic shift vectors ``(capacity, 3)``.
-        num_edges: Live edges occupy ``[0, num_edges)``; the rest are dead.
+        num_edges: Number of live edges. They occupy ``[0, num_edges)`` in the
+            default layout; target-blocked layouts interleave dead padding.
         capacity: Fixed buffer length.
+        live_edges_are_prefix: Whether slicing ``[0, num_edges)`` is valid.
         cutoff: Interaction cutoff ``r_cut`` in Angstrom — the radius the list
             guarantees *complete* between rebuilds, and the horizon a force
             field's own cutoff must not exceed. A strategy may build at a
@@ -352,6 +359,7 @@ class NeighborStrategy(Protocol):
     shifts: torch.Tensor
     num_edges: int
     capacity: int
+    live_edges_are_prefix: bool
     cutoff: float
     skin: float
 
@@ -434,6 +442,16 @@ class NeighborList:
             pulled in by thermal motion (the LJ-lattice test harness needed
             ``2.5`` where the default would have allocated 519 rows against 600
             live edges). Raise it when starting from a lattice.
+        target_block_size: Optional maximum number of receiver atoms per block.
+            When set, ``ceil(N / target_block_size)`` receiver intervals are
+            spread as evenly as possible, then edges are sorted and padded
+            into equal-capacity slices, each containing only targets from its
+            interval. The derived interval width is exposed as
+            :attr:`target_block_span`.
+            This is the layout consumed by
+            ``MACEEncoder.configure_cueq_target_blocks`` to bound the official
+            cuEquivariance convolution workspace. Dead rows are interleaved,
+            so :attr:`live_edges_are_prefix` is ``False``.
         bin: Selects the **build backend** (never the physics — see the module
             docstring). ``None`` (default) keeps the compiled O(N^2) pair
             kernel. A float switches to the pure-torch binned (cell-list)
@@ -478,6 +496,7 @@ class NeighborList:
         check: bool = True,
         capacity_factor: float = 1.35,
         bin: float | None = None,
+        target_block_size: int | None = None,
         device: torch.device | None = None,
     ) -> None:
         cutoff_f, skin_f = float(cutoff), float(skin)
@@ -529,6 +548,30 @@ class NeighborList:
         self._dtype = positions.dtype
         self.cell = cell.to(device=self._device, dtype=self._dtype)
         n_atoms = int(positions.shape[0])
+        if target_block_size is not None:
+            target_block_size_i = int(target_block_size)
+            if target_block_size_i != target_block_size or target_block_size_i < 1:
+                raise ValueError(
+                    f"target_block_size must be an integer >= 1, got {target_block_size!r}"
+                )
+        else:
+            target_block_size_i = None
+        self.target_block_size = target_block_size_i
+        self._n_atoms = n_atoms
+        if target_block_size_i is not None and n_atoms < 1:
+            raise ValueError("target-blocked neighbour lists need at least one atom")
+        self.num_target_blocks = (
+            None
+            if target_block_size_i is None
+            else (n_atoms + target_block_size_i - 1) // target_block_size_i
+        )
+        self.target_block_span = (
+            None
+            if self.num_target_blocks is None
+            else (n_atoms + self.num_target_blocks - 1) // self.num_target_blocks
+        )
+        self.edges_per_target_block: int | None = None
+        self.live_edges_are_prefix = target_block_size_i is None
         # Built at r_build, not cutoff — and with an explicit half-pair bound, so
         # the task's stale 512 default can never truncate the enlarged radius.
         self._nl = NeighborListTask(
@@ -549,12 +592,23 @@ class NeighborList:
         # Through the dispatch, so the capacity is sized by the backend that
         # will keep refilling the buffers (the two agree, by the equivalence).
         source, target, shifts = self._build_pairs(positions)
-        self.capacity = max(1, int(math.ceil(self.capacity_factor * source.numel())))
+        if target_block_size_i is None:
+            self.capacity = max(1, int(math.ceil(self.capacity_factor * source.numel())))
+        else:
+            assert self.num_target_blocks is not None
+            assert self.target_block_span is not None
+            block = torch.div(target, self.target_block_span, rounding_mode="floor")
+            counts = torch.bincount(block, minlength=self.num_target_blocks)
+            busiest = int(counts.max().item()) if counts.numel() else 0
+            self.edges_per_target_block = max(1, int(math.ceil(self.capacity_factor * busiest)))
+            self.capacity = self.num_target_blocks * self.edges_per_target_block
         self.edge_index = torch.zeros(self.capacity, 2, dtype=torch.long, device=self._device)
         self.shifts = torch.zeros(self.capacity, 3, dtype=self._dtype, device=self._device)
-        #: Edges live in ``[0, num_edges)``; the rest are dead. Kept for
-        #: diagnostics — the model needs no mask, dead edges self-annihilate.
+        #: Number of live edges. In target-blocked layout the dead rows are
+        #: interleaved, rather than one tail; ``live_edges_are_prefix`` names
+        #: that distinction for the MD adapter.
         self.num_edges = 0
+        self._target_block_counts: tuple[int, ...] = ()
         #: Rebuilds since construction; the initial build is not one of them.
         self.rebuild_count = 0
         #: Steps since the last build (LAMMPS ``ago``); 0 on a fresh list.
@@ -833,7 +887,10 @@ class NeighborList:
         )
 
     def _write(self, source: torch.Tensor, target: torch.Tensor, shifts: torch.Tensor) -> None:
-        """Fill the buffers in place; pad the tail with dead edges."""
+        """Fill buffers in place; dispatch to tail or receiver-block padding."""
+        if self.target_block_size is not None:
+            self._write_target_blocks(source, target, shifts)
+            return
         n = int(source.numel())
         if n > self.capacity:
             raise RuntimeError(
@@ -846,6 +903,70 @@ class NeighborList:
         self.shifts[:n] = shifts.to(self._dtype)
         self.edge_index[n:] = 0
         self.shifts[n:] = self._dead_shift()
+        self.num_edges = n
+
+    def _write_target_blocks(
+        self,
+        source: torch.Tensor,
+        target: torch.Tensor,
+        shifts: torch.Tensor,
+    ) -> None:
+        """Pack live edges into equal-capacity contiguous receiver blocks.
+
+        Rebuilds happen outside the compiled potential. Sorting and the single
+        device-to-host count transfer therefore do not enter its Dynamo graph;
+        the model sees only fixed slices whose shapes never change.
+        """
+        block_span = self.target_block_span
+        num_blocks = self.num_target_blocks
+        edges_per_block = self.edges_per_target_block
+        assert block_span is not None
+        assert num_blocks is not None
+        assert edges_per_block is not None
+
+        n = int(source.numel())
+        block_index = torch.div(target, block_span, rounding_mode="floor")
+        block_counts = torch.bincount(block_index, minlength=num_blocks)
+        counts = tuple(int(count) for count in block_counts.tolist())
+        for block, count in enumerate(counts):
+            if count > edges_per_block:
+                start = block * block_span
+                stop = min(start + block_span, self._n_atoms)
+                raise RuntimeError(
+                    "neighbour-list target-block overflow: receiver block "
+                    f"{block} (atoms [{start}, {stop})) has {count} edges > "
+                    f"edges_per_target_block {edges_per_block}. Raise "
+                    f"capacity_factor (currently {self.capacity_factor})."
+                )
+
+        # A target sort makes every block contiguous. Stable ordering preserves
+        # the producer's order within one receiver, which minimises fp roundoff
+        # drift relative to the ordinary full convolution.
+        order = torch.argsort(target, stable=True)
+        source = source[order]
+        target = target[order]
+        shifts = shifts[order]
+
+        dead_shift = self._dead_shift()
+        offset = 0
+        for block, count in enumerate(counts):
+            slot_start = block * edges_per_block
+            slot_stop = slot_start + edges_per_block
+            anchor = min(block * block_span, self._n_atoms - 1)
+            # Dead edges must self-loop on an in-block atom. Using source 0 for
+            # later blocks would make ``pos[target] - pos[source]`` capable of
+            # cancelling the dead shift and reactivating a padding edge.
+            self.edge_index[slot_start:slot_stop] = anchor
+            self.shifts[slot_start:slot_stop] = dead_shift
+            if count:
+                live_stop = slot_start + count
+                source_stop = offset + count
+                self.edge_index[slot_start:live_stop, 0] = source[offset:source_stop]
+                self.edge_index[slot_start:live_stop, 1] = target[offset:source_stop]
+                self.shifts[slot_start:live_stop] = shifts[offset:source_stop].to(self._dtype)
+                offset = source_stop
+
+        self._target_block_counts = counts
         self.num_edges = n
 
     def _write_geometry(self, batch: TensorDict, pos: torch.Tensor) -> None:
@@ -1038,7 +1159,13 @@ class NeighborList:
                 "below the neighbour-list cutoff. Use a larger starting cell "
                 "or a shorter cutoff."
             )
-        self.shifts[: self.num_edges].mul_(mu)
+        if self.live_edges_are_prefix:
+            self.shifts[: self.num_edges].mul_(mu)
+        else:
+            assert self.edges_per_target_block is not None
+            for block, count in enumerate(self._target_block_counts):
+                start = block * self.edges_per_target_block
+                self.shifts[start : start + count].mul_(mu)
         self._x_hold.mul_(mu)
         self.cell = cell
         self._wrap_guard_sq = half**2

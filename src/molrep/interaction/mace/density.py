@@ -4,8 +4,8 @@ Faithful port of MACE's ``RealAgnosticDensityInteractionBlock`` and
 ``RealAgnosticDensityResidualInteractionBlock`` on the cuEquivariance backend.
 One edge→node message-passing layer with:
 
-* a channel-wise tensor product ``node ⊗ Y_l(r̂)`` with the neighbour
-  gather/scatter fused into the kernel (no per-edge message tensor),
+* an official cuEquivariance channel-wise convolution ``node ⊗ Y_l(r̂)``;
+  large systems may execute it in fixed receiver blocks,
 * a **learned density** normalisation ``message / (ρ + 1)`` where
   ``ρ_i = Σ_j tanh(MLP(edge_feats_ij)²)·u(r_ij)`` — this replaces the fixed
   ``avg_num_neighbors`` divisor and is what lets one model span the
@@ -37,8 +37,8 @@ import torch
 import torch.nn as nn
 
 from molix import config
-from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
 from molrep.embedding.mlp import MomentNormalizedMLP
+from molrep.interaction.mace.conv import _CueqChannelwiseBlockMixin
 
 #: cuEquivariance execution method for ``skip_tp``.
 #:
@@ -51,7 +51,7 @@ from molrep.embedding.mlp import MomentNormalizedMLP
 SKIP_TP_METHOD = "naive"
 
 
-class _DensityInteractionBase(nn.Module):
+class _DensityInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
     """Shared wiring of the two density-normalised interaction blocks.
 
     Subclasses own only ``skip_tp``'s irreps and the placement of the skip
@@ -107,8 +107,10 @@ class _DensityInteractionBase(nn.Module):
             shared_weights=False,
             internal_weights=False,
             dtype=ftype,
+            method="naive" if use_fallback else "uniform_1d",
             use_fallback=use_fallback,
         )
+        self.target_block_size: int | None = None
 
         num_radial = edge_feats.dim
         self.conv_tp_weights = MomentNormalizedMLP(
@@ -156,6 +158,12 @@ class _DensityInteractionBase(nn.Module):
             out.append(field)
         return torch.cat(out, dim=-2)
 
+    def configure_target_blocks(self, block_size: int | None) -> None:
+        """Use full cuEq convolution or a maximum receiver-block size."""
+        if block_size is not None and (int(block_size) != block_size or block_size < 1):
+            raise ValueError(f"target block size must be an integer >= 1, got {block_size!r}")
+        self.target_block_size = None if block_size is None else int(block_size)
+
     def _message(
         self,
         node_feats: torch.Tensor,
@@ -165,27 +173,14 @@ class _DensityInteractionBase(nn.Module):
         cutoff: torch.Tensor | None,
     ) -> torch.Tensor:
         """Density-normalised aggregated message ``(N, target.dim)``."""
-        num_nodes = node_feats.shape[0]
-        source, target = edge_index[:, 0], edge_index[:, 1]
-        node_feats = self.linear_up(node_feats)
-
-        tp_weights = self.conv_tp_weights(edge_feats)
-        edge_density = torch.tanh(self.density_fn(edge_feats) ** 2)
-        if cutoff is not None:
-            tp_weights = tp_weights * cutoff
-            edge_density = edge_density * cutoff
-        density = _scatter_sum(edge_density, target, num_nodes)
-
-        # Gather/scatter fused into the tensor-product kernel: no ``(E,
-        # target.dim)`` per-edge message in the forward or the backward
-        # (``.claude/notes/notes.md`` topic ``cueq-conv-fusion``).
-        message = self.conv_tp(
-            node_feats,
+        node_up = self.linear_up(node_feats)
+        message, density = self._cueq_channelwise_conv(
+            node_up,
             edge_attrs,
-            tp_weights,
-            indices_1=source,
-            indices_out=target,
-            size_out=num_nodes,
+            edge_feats,
+            edge_index,
+            cutoff,
+            target_block_size=self.target_block_size,
         )
         return self.linear(message) / (density + 1.0)
 

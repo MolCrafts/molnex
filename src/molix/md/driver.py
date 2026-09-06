@@ -64,6 +64,7 @@ class _TensorDictForce:
         self._cell_view: torch.Tensor | None = None
         self._edges_full: TensorDict | None = None
         self.n_live: int | None = None
+        self.live_edges_are_prefix = True
         self.want_virial = False
         self._eval = self._eval_classical
 
@@ -142,15 +143,16 @@ class _TensorDictForce:
             self._restore_edges(work)
 
     def _expose_live_edges(self, work: TensorDict) -> None:
-        """Hand the potential ``[0, n_live)`` only; padding stays on the list.
+        """Hand the potential ``[0, n_live)`` only for a prefix layout.
 
         NeighborList buffers are capacity-sized (CUDA-graph contract). Dead
         rows sit at ``DEAD_EDGE_CUTOFF_FACTOR * cutoff`` so the envelope is
-        zero, but a fallback tensor product still materialises them. Polar
-        MD is eager: a live view is correct and cheaper.
+        zero, but a fallback tensor product still materialises them. A
+        target-blocked cuEq layout must retain its interleaved padding because
+        each receiver block has a fixed edge slice.
         """
         n = self.n_live
-        if n is None or "edges" not in work.keys():
+        if n is None or not self.live_edges_are_prefix or "edges" not in work.keys():
             return
         full = work["edges"]
         cap = int(full.batch_size[0]) if full.batch_size else 0
@@ -385,6 +387,7 @@ class MD:
         if self.neighbors is not None:
             self.neighbors.update(work)
             self._adapter.n_live = self.neighbors.num_edges
+            self._adapter.live_edges_are_prefix = self.neighbors.live_edges_are_prefix
         return self._adapter(pos)
 
     def run(self, system: TensorDict, n_steps: int, *, chunk: int | None = None) -> MDState:
@@ -403,6 +406,8 @@ class MD:
             system = self._cast_system(system)
             if self.neighbors is not None:
                 self.neighbors.build(system)
+                self._adapter.n_live = self.neighbors.num_edges
+                self._adapter.live_edges_are_prefix = self.neighbors.live_edges_are_prefix
             self._adapter.bind_work(system)
             return self.runner.run(system, n_steps, chunk=chunk)
 

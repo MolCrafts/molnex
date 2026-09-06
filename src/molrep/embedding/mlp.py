@@ -178,7 +178,22 @@ class MomentNormalizedMLP(nn.Module):
         def __init__(self, in_features: int, out_features: int) -> None:
             super().__init__()
             self.weight = nn.Parameter(torch.randn(in_features, out_features, dtype=config.ftype))
-            self.alpha = 1.0 / math.sqrt(in_features)
+            # A tensor buffer is visible to Dynamo's checkpoint higher-order
+            # op as an explicit module input.  Keeping this as a Python float
+            # makes ``self.weight * self.alpha`` a tracked free variable in a
+            # checkpointed interaction and breaks ``fullgraph=True`` tracing.
+            # It is derived metadata, not checkpoint state, just like
+            # :class:`MLP`'s per-layer scaling above.
+            self.register_buffer(
+                "alpha",
+                # Store the derived value before any precision cast.  A
+                # zero-dimensional float64 buffer follows PyTorch's scalar
+                # promotion rules for float32 inputs and preserves the old
+                # Python-float accuracy when the module is converted to
+                # float64.
+                torch.tensor(1.0 / math.sqrt(in_features), dtype=torch.float64),
+                persistent=False,
+            )
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             return x @ (self.weight * self.alpha)
@@ -188,7 +203,13 @@ class MomentNormalizedMLP(nn.Module):
         if len(channels) < 2:
             raise ValueError(f"channels must have at least [in, out], got {channels}")
         self.channels = list(channels)
-        self._act_cst = normalize2mom(F.silu)
+        # See ``_Layer.alpha``: checkpoint tracing needs this derived scalar as
+        # an explicit, non-persistent module tensor too.
+        self.register_buffer(
+            "_act_cst",
+            torch.tensor(normalize2mom(F.silu), dtype=torch.float64),
+            persistent=False,
+        )
         for i, (h_in, h_out) in enumerate(zip(channels, channels[1:])):
             self.add_module(f"layer{i}", self._Layer(h_in, h_out))
         self._num_layers = len(channels) - 1

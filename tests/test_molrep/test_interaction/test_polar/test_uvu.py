@@ -73,6 +73,53 @@ class TestSparseUvuTensorProduct:
         )
         assert torch.allclose(out, out_rot, atol=1e-10)
 
+    def test_reassociated_dot_matches_literal_pair_and_its_gradients(self):
+        """GEMM-first uvu is the literal ``(N,u,v)`` contraction algebraically."""
+        torch.manual_seed(4)
+        tp = SparseUvuTensorProduct("3x0e+3x1o", "3x0e+3x1o", "3x0e")
+        x1 = torch.randn(7, 12, dtype=torch.float64, requires_grad=True)
+        x2 = torch.randn(7, 12, dtype=torch.float64, requires_grad=True)
+        actual = tp(x1, x2)
+
+        reference = actual.new_zeros(actual.shape)
+        for path in tp._paths:
+            s1, e1, s2, e2, so, eo, ws, we, mode, mul1, mul2, d1, path_weight = path
+            assert mode == 0
+            a = x1[:, s1:e1].reshape(7, d1, mul1).transpose(1, 2)
+            b = x2[:, s2:e2].reshape(7, d1, mul2).transpose(1, 2)
+            pair = torch.einsum("bud,bvd->buv", a, b)
+            weight = tp.weight[ws:we].reshape(mul1, mul2)
+            mixed = torch.einsum("buv,uv->bu", pair, weight)
+            reference[:, so:eo] += mixed * (path_weight / math.sqrt(float(d1)))
+        reference = reference * tp.output_mask
+
+        assert torch.allclose(actual, reference, atol=1e-12, rtol=1e-12)
+        actual_grads = torch.autograd.grad(
+            actual.square().sum(), (x1, x2, tp.weight), retain_graph=True
+        )
+        reference_grads = torch.autograd.grad(reference.square().sum(), (x1, x2, tp.weight))
+        for observed, expected in zip(actual_grads, reference_grads):
+            assert torch.allclose(observed, expected, atol=1e-11, rtol=1e-11)
+
+    def test_dot_mixed_second_derivatives(self):
+        """Force training differentiates through feature and parameter gradients."""
+        tp = SparseUvuTensorProduct("2x0e+2x1o", "2x0e+2x1o", "2x0e")
+        x1 = torch.randn(2, 8, dtype=torch.float64, requires_grad=True)
+        x2 = torch.randn(2, 8, dtype=torch.float64, requires_grad=True)
+
+        def with_weight(a, b, weight):
+            return torch.func.functional_call(tp, {"weight": weight}, (a, b))
+
+        assert torch.autograd.gradgradcheck(with_weight, (x1, x2, tp.weight))
+
+    @pytest.mark.slow
+    def test_dot_compiles_fullgraph(self):
+        tp = SparseUvuTensorProduct("2x0e+2x1o", "2x0e+2x1o", "2x0e")
+        x1 = torch.randn(2, 8, dtype=torch.float64, requires_grad=True)
+        x2 = torch.randn(2, 8, dtype=torch.float64, requires_grad=True)
+        compiled = torch.compile(tp, backend="aot_eager", fullgraph=True)
+        assert torch.allclose(compiled(x1, x2), tp(x1, x2), atol=1e-12, rtol=1e-12)
+
     def test_scalar_modulation_scales_vector(self):
         """(1o × 0e → 1o): path_weight √3 cancels the √(2ℓ+1) kernel factor."""
         tp = SparseUvuTensorProduct("1x1o", "1x0e", "1x1o")

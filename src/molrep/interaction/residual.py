@@ -5,8 +5,8 @@ the cuEquivariance backend. One edge→node message-passing layer with:
 
 * node-attribute source/target embeddings concatenated onto the radial edge
   features that drive the tensor-product weights,
-* a channel-wise tensor product ``node ⊗ Y_l(r̂)`` with the neighbour
-  gather/scatter fused into the kernel (no per-edge message tensor),
+* an official cuEquivariance channel-wise convolution ``node ⊗ Y_l(r̂)``;
+  large systems may execute it in fixed receiver blocks,
 * a learnable density normalisation ``message / (ρ·β + α)``,
 * a residual (``linear_res``) path and an equivariant gated nonlinearity,
 * a separate ``skip_tp`` (Linear) carried out for the downstream product block.
@@ -29,7 +29,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from molix import config
-from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
+from molrep.interaction.mace.conv import _CueqChannelwiseBlockMixin
 
 from .gate import GatedNonlinearity
 from .radial import RadialMLP
@@ -48,7 +48,7 @@ def _partition_gate(irreps_out: cue.Irreps) -> tuple[cue.Irreps, cue.Irreps, cue
     )
 
 
-class ResidualInteraction(nn.Module):
+class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
     """MACE residual non-linear interaction layer (cuEquivariance).
 
     Args:
@@ -107,8 +107,10 @@ class ResidualInteraction(nn.Module):
             shared_weights=False,
             internal_weights=False,
             dtype=ftype,
+            method="naive" if use_fallback else "uniform_1d",
             use_fallback=use_fallback,
         )
+        self.target_block_size: int | None = None
         irreps_mid = self.conv_tp.irreps_out
 
         input_dim = edge_feats.dim + 2 * node_scalar.dim
@@ -148,6 +150,12 @@ class ResidualInteraction(nn.Module):
             out.append(field)
         return torch.cat(out, dim=-2)
 
+    def configure_target_blocks(self, block_size: int | None) -> None:
+        """Use full cuEq convolution or a maximum receiver-block size."""
+        if block_size is not None and (int(block_size) != block_size or block_size < 1):
+            raise ValueError(f"target block size must be an integer >= 1, got {block_size!r}")
+        self.target_block_size = None if block_size is None else int(block_size)
+
     def forward(
         self,
         node_attrs: torch.Tensor,
@@ -171,37 +179,22 @@ class ResidualInteraction(nn.Module):
         Returns:
             ``(reshaped_message (N, ir_dim, mul), skip (N, hidden_dim))``.
         """
-        num_nodes = node_feats.shape[0]
-        source, target = edge_index[:, 0], edge_index[:, 1]
         sc = self.skip_tp(node_feats)
-        node_feats = self.linear_up(node_feats)
-        node_feats_res = self.linear_res(node_feats)
+        node_up = self.linear_up(node_feats)
+        node_feats_res = self.linear_res(node_up)
 
         source_emb = self.source_embedding(node_attrs)
         target_emb = self.target_embedding(node_attrs)
-        edge_feats = torch.cat([edge_feats, source_emb[source], target_emb[target]], dim=-1)
-        tp_weights = self.conv_tp_weights(edge_feats)
-        edge_density = torch.tanh(self.density_fn(edge_feats) ** 2)
-        if cutoff is not None:
-            tp_weights = tp_weights * cutoff
-            edge_density = edge_density * cutoff
-        density = _scatter_sum(edge_density, target, num_nodes)
-
-        # Gather (``node_feats[source]``) and scatter (sum onto ``target``) run
-        # inside the tensor-product kernel. The per-edge message ``m_ji``
-        # ``(E, target.dim)`` is never materialised — on the fused path neither
-        # in the forward nor as ``∂E/∂m_ji`` in the backward — which is what
-        # keeps a 512-channel, l_max=3 model inside HBM at ~3·10⁵ edges
-        # (``.claude/notes/notes.md`` topic ``cueq-conv-fusion``).
-        message = self.conv_tp(
-            node_feats,
+        message, density = self._cueq_channelwise_conv(
+            node_up,
             edge_attrs,
-            tp_weights,
-            indices_1=source,
-            indices_out=target,
-            size_out=num_nodes,
+            edge_feats,
+            edge_index,
+            cutoff,
+            target_block_size=self.target_block_size,
+            source_features=source_emb,
+            target_features=target_emb,
         )
-
         message = self.linear_1(message) / (density * self.beta + self.alpha)
         message = message + node_feats_res
         message = self.equivariant_nonlin(message)

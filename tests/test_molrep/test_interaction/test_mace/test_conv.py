@@ -2,6 +2,7 @@
 
 import math
 
+import pytest
 import torch
 
 from molrep.interaction.mace.conv import ConvTP, ConvTPSpec
@@ -167,30 +168,93 @@ class TestConvTP:
         # Check equivariance
         assert check_equivariance(output1_rot, output2, rtol=1e-3, atol=1e-3)
 
-    def test_differentiable(self):
-        """Test that gradients flow through ConvTP."""
-        tp = ConvTP(
-            in_irreps="8x0e",
-            out_irreps="8x0e",
-            sh_irreps="1x0e + 1x1o",
+
+def _pack_target_blocks(
+    edge_index: torch.Tensor,
+    edge_angular: torch.Tensor,
+    weights: torch.Tensor,
+    *,
+    num_nodes: int,
+    block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Small oracle: ``block_size`` is a maximum and intervals are balanced."""
+    num_blocks = math.ceil(num_nodes / block_size)
+    block_span = math.ceil(num_nodes / num_blocks)
+    counts = torch.bincount(edge_index[:, 1] // block_span, minlength=num_blocks)
+    edges_per_block = int(counts.max()) + 2
+    packed_index, packed_angular, packed_weights = [], [], []
+    for block in range(num_blocks):
+        selected = torch.where(edge_index[:, 1] // block_span == block)[0]
+        count = int(selected.numel())
+        anchor = block * block_span
+        pad = edges_per_block - count
+        packed_index.append(
+            torch.cat([edge_index[selected], torch.full((pad, 2), anchor, dtype=torch.long)])
         )
+        packed_angular.append(
+            torch.cat([edge_angular[selected], edge_angular.new_zeros(pad, edge_angular.shape[1])])
+        )
+        packed_weights.append(
+            torch.cat([weights[selected], weights.new_zeros(pad, weights.shape[1])])
+        )
+    return (
+        torch.cat(packed_index),
+        torch.cat(packed_angular),
+        torch.cat(packed_weights),
+    )
 
-        n_nodes = 5
-        n_edges = 10
-        node_features = torch.randn(n_nodes, 8, requires_grad=True)
-        edge_angular = torch.randn(n_edges, 4, requires_grad=True)
-        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
 
-        weight_dim = tp.weight_numel
-        tp_weights = torch.randn(n_edges, weight_dim, requires_grad=True)
+class TestTargetBlockedConvTP:
+    """Receiver blocking changes cuEq's working set, not its mathematics."""
 
-        output = tp(node_features, edge_angular, edge_index, tp_weights)
-        loss = output.sum()
-        loss.backward()
+    @staticmethod
+    def _case():
+        torch.manual_seed(0)
+        tp = ConvTP(
+            in_irreps="8x0e + 8x1o",
+            out_irreps="8x0e + 8x1o",
+            sh_irreps="1x0e + 1x1o",
+        ).double()
+        node = torch.randn(5, 32, dtype=torch.float64, requires_grad=True)
+        angular = torch.randn(17, 4, dtype=torch.float64, requires_grad=True)
+        edge_index = torch.randint(0, 5, (17, 2))
+        weights = torch.randn(17, tp.weight_numel, dtype=torch.float64, requires_grad=True)
+        return tp, node, angular, edge_index, weights
 
-        assert node_features.grad is not None
-        assert edge_angular.grad is not None
-        assert tp_weights.grad is not None
-        assert not torch.isnan(node_features.grad).any()
-        assert not torch.isnan(edge_angular.grad).any()
-        assert not torch.isnan(tp_weights.grad).any()
+    def test_matches_full_official_convolution(self) -> None:
+        tp, node, angular, edge_index, weights = self._case()
+        expected = tp(node, angular, edge_index, weights)
+        packed = _pack_target_blocks(
+            edge_index, angular, weights, num_nodes=node.shape[0], block_size=4
+        )
+        tp.configure_target_blocks(4)
+        actual = tp(node, packed[1], packed[0], packed[2])
+        assert torch.allclose(actual, expected, atol=1e-12, rtol=1e-12)
+
+    def test_backward_reaches_all_three_inputs(self) -> None:
+        tp, node, angular, edge_index, weights = self._case()
+        packed = _pack_target_blocks(
+            edge_index, angular, weights, num_nodes=node.shape[0], block_size=4
+        )
+        tp.configure_target_blocks(4)
+        tp(node, packed[1], packed[0], packed[2]).square().sum().backward()
+        assert node.grad is not None and torch.isfinite(node.grad).all()
+        assert angular.grad is not None and torch.isfinite(angular.grad).all()
+        assert weights.grad is not None and torch.isfinite(weights.grad).all()
+
+    @pytest.mark.slow
+    def test_compiles_fullgraph_with_static_block_slices(self) -> None:
+        tp, node, angular, edge_index, weights = self._case()
+        packed = _pack_target_blocks(
+            edge_index, angular, weights, num_nodes=node.shape[0], block_size=4
+        )
+        tp.configure_target_blocks(4)
+
+        def fn(n: torch.Tensor, a: torch.Tensor, ei: torch.Tensor, w: torch.Tensor):
+            return tp(n, a, ei, w)
+
+        compiled = torch.compile(fn, backend="aot_eager", fullgraph=True, dynamic=True)
+        expected = fn(node, packed[1], packed[0], packed[2])
+        assert torch.allclose(
+            compiled(node, packed[1], packed[0], packed[2]), expected, atol=1e-12, rtol=1e-12
+        )

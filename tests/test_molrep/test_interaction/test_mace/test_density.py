@@ -1,5 +1,7 @@
 """Tests for molrep.interaction.mace.density module."""
 
+import math
+
 import pytest
 import torch
 
@@ -76,6 +78,41 @@ def _explicit_message(layer, graph):
     return layer.linear(message) / (density + 1.0)
 
 
+def _pack_target_blocks(graph: dict, block_size: int = 3) -> dict:
+    """Pack balanced receiver blocks; ``block_size`` is their maximum."""
+    edge_index = graph["edge_index"]
+    num_blocks = math.ceil(graph["node_feats"].shape[0] / block_size)
+    block_span = math.ceil(graph["node_feats"].shape[0] / num_blocks)
+    counts = torch.bincount(edge_index[:, 1] // block_span, minlength=num_blocks)
+    edges_per_block = int(counts.max()) + 1
+    packed = {key: value for key, value in graph.items() if not key.startswith("edge_")}
+    indices, angular, features = [], [], []
+    for block in range(num_blocks):
+        selected = torch.where(edge_index[:, 1] // block_span == block)[0]
+        pad = edges_per_block - int(selected.numel())
+        anchor = block * block_span
+        indices.append(
+            torch.cat([edge_index[selected], torch.full((pad, 2), anchor, dtype=torch.long)])
+        )
+        angular.append(
+            torch.cat([graph["edge_attrs"][selected], graph["edge_attrs"].new_zeros(pad, 4)])
+        )
+        features.append(
+            torch.cat(
+                [
+                    graph["edge_feats"][selected],
+                    graph["edge_feats"].new_zeros(pad, NUM_RADIAL),
+                ]
+            )
+        )
+    packed.update(
+        edge_index=torch.cat(indices),
+        edge_attrs=torch.cat(angular),
+        edge_feats=torch.cat(features),
+    )
+    return packed
+
+
 class TestDensityInteraction:
     """Test the first-layer density-normalised interaction."""
 
@@ -95,6 +132,39 @@ class TestDensityInteraction:
             first_layer.skip_tp(_explicit_message(first_layer, graph), graph["node_attrs"])
         )
         assert torch.allclose(out, expected, atol=1e-12)
+
+    def test_target_blocks_match_full_official_convolution(self, first_layer, graph):
+        """Per-block radial heads leave the density interaction unchanged."""
+        expected, _ = first_layer(**graph)
+        first_layer.configure_target_blocks(3)
+        actual, _ = first_layer(**_pack_target_blocks(graph))
+        assert torch.allclose(actual, expected, atol=1e-12, rtol=1e-12)
+
+    @pytest.mark.slow
+    def test_target_blocks_compile_with_checkpoint_fullgraph(self, first_layer, graph):
+        """Checkpointed radial+cuEq forward and backward stay in one graph."""
+        first_layer.configure_target_blocks(3)
+        packed = _pack_target_blocks(graph)
+        packed["edge_attrs"].requires_grad_(True)
+        packed["edge_feats"].requires_grad_(True)
+
+        args = (
+            packed["node_attrs"],
+            packed["node_feats"],
+            packed["edge_attrs"],
+            packed["edge_feats"],
+            packed["edge_index"],
+        )
+        expected = first_layer(*args)[0]
+        compiled = torch.compile(first_layer, backend="aot_eager", fullgraph=True, dynamic=True)
+        actual = compiled(*args)[0]
+        assert torch.allclose(actual, expected, atol=1e-12, rtol=1e-12)
+        actual.square().sum().backward()
+        assert packed["edge_attrs"].grad is not None
+        assert packed["edge_feats"].grad is not None
+        assert first_layer.conv_tp_weights.layer0.weight.grad is not None
+        assert torch.isfinite(packed["edge_attrs"].grad).all()
+        assert torch.isfinite(packed["edge_feats"].grad).all()
 
     def test_returns_no_skip_connection(self, first_layer, graph):
         """The first layer has no residual to carry — MACE returns ``None``."""

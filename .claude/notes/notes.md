@@ -261,17 +261,22 @@ makes that tensor 9.4 GB per layer in fp32 — plus its layout-transpose copy
 and, in the backward, `∂E/∂m_ji` of the same size again. The bench OOM'd
 at 93 GiB on a GH200 (`bench5k/slurm-molnex-1916374.err`, 2026-09-02).
 
-**Rule.** Every cuEq channel-wise convolution passes
-`indices_1=source, indices_out=target, size_out=N` to
-`cuet.ChannelWiseTensorProduct` — the `SegmentedPolynomial` indexed path
-(`uniform_1d` fuses gather + scatter on GPU; `naive` does
-`index_select` / `scatter_add_` on CPU, so the fallback keeps working).
-Never `conv_tp(x[source], …)` followed by `scatter_sum`. This is the
-execution path official mace-torch takes with `conv_fusion=True` (its
-CUDA default), so parity checks stay on the reference's route. Pinned by
+**Rule.** Every cuEq channel-wise convolution uses the indexed
+`cuet.ChannelWiseTensorProduct` path. The ordinary layout passes
+`indices_1=source, indices_out=target, size_out=N`; the memory-bounded layout
+interprets its configured size as a maximum, balances
+`ceil(N / max_block_size)` receiver intervals, then passes one interval's
+global sources, block-local targets and `size_out=actual_span`. In both cases
+`uniform_1d` owns the fused gather, contraction and scatter on GPU (`naive`
+keeps the CPU fallback working). Never
+`conv_tp(x[source], …)` followed by a Python scatter, and never maintain a
+local TP/CG kernel. This is the same cuEq execution primitive used by official
+mace-torch with `conv_fusion=True`; receiver blocking changes only the fixed
+work partition. Pinned by
 `test_message_matches_explicit_gather_scatter` in
 `tests/test_molrep/test_interaction/test_residual.py` and
-`tests/test_molrep/test_interaction/test_mace/test_density.py`.
+`tests/test_molrep/test_interaction/test_mace/test_density.py`, plus the
+blocked/full equivalence tests in those files and `test_conv.py`.
 
 **Inference grad mode.** `calc_energy_forces_virial` / `calc_forces` /
 `grad_force_pass` resolve `create_graph` from the *ambient* grad mode
@@ -286,6 +291,20 @@ eval loop (bench scripts, parity checks) must do the same.
 peak 56.5 GiB, 0.59 s/step. Official mace-torch (cueq, conv fusion) on the
 same box: 25.2 GiB / 0.5–1.0 s at fp32. Records:
 `peo-tg/experiments/size-convergence-mace-polar/bench5k/verify_molnex*.json`.
+
+**Receiver-block scale check (GH200, Polar fp32, 8850 atoms, skin graph,
+2026-09-05).** The ordinary official cuEq convolution was 1.382 s/MD step at
+63.90 GiB (`npt-2051047.out`). Checkpointed official receiver blocks reduced
+that to 32.80 / 32.77 / 32.74 GiB for configured maxima 1024 / 2048 / 4096;
+balanced spans were 984 / 1770 / 2950, fixed capacities 1.433 M / 1.390 M /
+1.364 M edges, and one-step times 1.786 / 1.783 / 1.778 s
+(`npt-2051210..12.out`). These include initialization and are **not** a
+steady-state comparison with the historical Python-loop 1.83 s/step.
+Maximum 4096 is the runner default. The radial MLP + official
+TP block is non-reentrant-checkpointed; its derived MLP scalars are
+non-persistent tensor buffers so the tiny CPU naive-cuEq trainable
+forward/backward graphs pass `torch.compile(fullgraph=True)` (slow tests in
+`test_conv.py` / `test_density.py`).
 
 **Periodic Polar parity (found 2026-09-02, fixed 2026-09-03).** fp64 term
 split on the same box (`bench5k/diag_components_float64.json`): E0 + local
@@ -366,7 +385,19 @@ and a separable sum onto that Miller grid. Workspace is `O(N N_c²)`,
 not `(N, M)` and not an arbitrary k-tile. Same SI V.6 sum; not PME.
 Ordinary autograd through the einsums — no `custom_op`. MD compile warmup is `calc_forces`, not
 virial (`calc_energy_forces_virial` strains `graphs.cell` and OOMs).
-`multipole_ewald.py` still builds a
+The Polar convolution stays on the official cuEq indexed
+`ChannelWiseTensorProduct(method="uniform_1d")`; there is no local TP/CG
+kernel. Large systems use fixed receiver blocks: the configured
+`target_block_size` is an upper bound, and
+`ceil(N / target_block_size)` receiver intervals are spread evenly to avoid a
+tiny, heavily padded last block. The neighbour list packs equal-capacity edge
+slices whose targets belong to one such interval, and cuEq runs each slice
+with local `indices_out` / `size_out=actual_span`. This bounds
+both cuEq's output workspace and the transient `(E_block, weight_numel)` radial
+weights. The block's radial MLP + cuEq TP is checkpointed so backward
+recomputes rather than retains every block's weight table. Configure model and
+neighbour list with the same maximum `target_block_size` before compilation; `None`
+keeps the ordinary full indexed convolution. `multipole_ewald.py` still builds a
 dense `(N, M)` — owner **molpot elec**, not this seam. NVT callers may pass
 `capacity_factor=1.0`; step time / peak memory are measured by 03-wire.
 Same three defects (`.item()` sizing, boolean-mask slicing, half-sphere
