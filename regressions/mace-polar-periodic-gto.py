@@ -27,7 +27,6 @@ from tensordict import TensorDict
 from molix import config
 from molix.md import NeighborList
 from molpot.forcefield import ForceField as MolpotForceField
-from molzoo.mace.checkpoint import CheckpointRemap, polar_keys
 from molzoo.mace.polar import MacePolar
 
 config.set_precision("fp64")
@@ -61,9 +60,9 @@ def main() -> None:
     cell = blob["cell"].to(device=device, dtype=dtype)
     n = int(pos.shape[0])
 
-    model = MacePolar.load(_DUMP, format="official", use_fallback=False, compute_forces=False)
-    cueq_sd = torch.load(_CUEQ, map_location="cpu", weights_only=True)
-    CheckpointRemap(polar_keys, on_unexpected="return").load(model, cueq_sd)
+    model = MacePolar.load(
+        _DUMP, converted_weights=_CUEQ, trusted=True, use_fallback=False, compute_forces=False
+    )
     model = model.to(device=device, dtype=dtype).eval()
     model.requires_grad_(False)
 

@@ -236,6 +236,7 @@ class MACEPolarSpec(MACESpec):
     field_norms: list[float] = Field(default_factory=lambda: [20.0, 20.0, 0.5, 0.5])
     add_local_electron_energy: bool = True
     kspace_cutoff_factor: float = Field(1.0, gt=0.0)
+    kspace_cutoff: float | None = Field(None, gt=0.0)
     electrostatic_self_interaction: bool = True
     field_self_interaction: bool = False
     edge_channels: int = Field(128, gt=0)

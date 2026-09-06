@@ -266,6 +266,10 @@ class TrajectoryHook(MDHook):
         write_xyz: Whether to also emit an extended-XYZ trajectory.
         with_forces: Whether to also capture per-frame forces ``(T, N, 3)``.
         flush_every: Kept-frame budget before spilling a shard to disk. Default 10000.
+        dtype: Optional fp32/fp64 storage dtype for positions, velocities and
+            forces. ``None`` preserves their input dtype. Energy/temperature
+            precision is always preserved. The final shard merge materializes
+            the complete trajectory; ``flush_every`` bounds only capture buffers.
     """
 
     _FIELDS = ("pos", "vel", "f", "pe", "ke", "etot", "temp")
@@ -279,13 +283,17 @@ class TrajectoryHook(MDHook):
         write_xyz: bool = True,
         with_forces: bool = True,
         flush_every: int = 10000,
+        dtype: torch.dtype | None = None,
     ) -> None:
+        if dtype not in (None, torch.float32, torch.float64):
+            raise ValueError("trajectory dtype must be torch.float32, torch.float64 or None")
         self._out = Path(out)
         self._stride = max(1, int(stride))
         self._numbers = numbers
         self._write_xyz = write_xyz
         self._with_forces = with_forces
         self._flush_every = max(1, int(flush_every))
+        self._dtype = dtype
         self.cadence = self._stride
         self._buf: dict[str, list[torch.Tensor]] = {k: [] for k in self._FIELDS}
         self._n_buffered = 0
@@ -295,14 +303,16 @@ class TrajectoryHook(MDHook):
         if step % self._stride:
             return
         b = self._buf
-        b["pos"].append(obs.pos.detach().to("cpu"))
-        b["vel"].append(obs.vel.detach().to("cpu"))
+        # CPU .to('cpu') can alias the live MD buffer. Every frame must be a
+        # snapshot, on CPU as well as CUDA. Choose storage precision once.
+        b["pos"].append(obs.pos.detach().to("cpu", dtype=self._dtype, copy=True))
+        b["vel"].append(obs.vel.detach().to("cpu", dtype=self._dtype, copy=True))
         if self._with_forces:
-            b["f"].append(obs.forces.detach().to("cpu"))
-        b["pe"].append(obs.potential.detach().to("cpu"))
-        b["ke"].append(obs.kinetic.detach().to("cpu"))
-        b["etot"].append(obs.total.detach().to("cpu"))
-        b["temp"].append(obs.temperature.detach().to("cpu"))
+            b["f"].append(obs.forces.detach().to("cpu", dtype=self._dtype, copy=True))
+        b["pe"].append(obs.potential.detach().to("cpu", copy=True))
+        b["ke"].append(obs.kinetic.detach().to("cpu", copy=True))
+        b["etot"].append(obs.total.detach().to("cpu", copy=True))
+        b["temp"].append(obs.temperature.detach().to("cpu", copy=True))
         self._n_buffered += 1
         if self._n_buffered >= self._flush_every:
             self._flush_shard()
@@ -347,8 +357,8 @@ class TrajectoryHook(MDHook):
                 f"trajectory {self._out} has no frames (stride={self._stride}); nothing to write"
             )
         payload: dict[str, torch.Tensor | int] = {
-            "pos": fields["pos"].to(torch.float32),
-            "vel": fields["vel"].to(torch.float32),
+            "pos": fields["pos"],
+            "vel": fields["vel"],
             "pe": fields["pe"],
             "ke": fields["ke"],
             "etot": fields["etot"],
@@ -356,7 +366,7 @@ class TrajectoryHook(MDHook):
             "stride": self._stride,
         }
         if "f" in fields:
-            payload["forces"] = fields["f"].to(torch.float32)
+            payload["forces"] = fields["f"]
         if self._numbers is not None:
             payload["Z"] = self._numbers.detach().cpu()
         self._out.parent.mkdir(parents=True, exist_ok=True)

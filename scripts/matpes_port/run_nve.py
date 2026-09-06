@@ -15,6 +15,8 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
+import json
 import math
 import time
 from pathlib import Path
@@ -23,12 +25,8 @@ import torch
 from tensordict import TensorDict
 
 from molix import config
-
-# Default; overridden by --precision before any model construction.
-config.set_precision("fp64")
-
-from molix.compile import Compiler  # noqa: E402
-from molix.md import (  # noqa: E402
+from molix.compile import Compiler
+from molix.md import (
     MD,
     LangevinVerletIntegrator,
     MaxwellBoltzmann,
@@ -38,11 +36,11 @@ from molix.md import (  # noqa: E402
     VelocityInitHook,
     VelocityVerletIntegrator,
 )
-from molix.units import units  # noqa: E402
+from molix.units import units
+from molzoo.mace import MaceMatpes, MacePotential
 
 _EV_TO_MD = (1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2").magnitude
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
-from molzoo.mace import MaceMatpes, MacePotential  # noqa: E402
 
 
 def read_poscar(path: Path) -> dict[str, torch.Tensor]:
@@ -138,55 +136,20 @@ def _system_td(
 def _bind_energy_core(
     model: MacePotential,
     *,
-    potential_dtype: torch.dtype,
     compile_energy: bool,
     autocast_dtype: torch.dtype | None,
 ) -> None:
-    """Install ``energy_core`` so the Molpot path matches the flat compile seam.
+    """Compose execution policy through the shared, validated energy seam."""
 
-    ``_write_energy`` calls ``model.energy_core(..., edge_diff=)``. Casts sit
-    *outside* the compiled region: the leaf can stay in the MD dtype, the
-    model sees ``potential_dtype``. ``x.to(x.dtype)`` is the identity, so
-    same-precision arms do not clone.
-    """
-    raw = model.energy_core
+    def transform(core):
+        if autocast_dtype is not None:
+            core = torch.autocast(device_type="cuda", dtype=autocast_dtype)(core)
+        # The MD adapter trims live-prefix edges. Their count changes across
+        # rebuilds, so this runner cannot promise static CUDA graph replay.
+        return Compiler(fullgraph=True, dynamic=True)(core) if compile_energy else core
 
-    def _flat(positions, Z, edge_index, batch, num_graphs, edge_diff, _f=raw, _d=autocast_dtype):
-        if _d is not None:
-            with torch.autocast(device_type="cuda", dtype=_d):
-                return _f(positions, Z, edge_index, batch, num_graphs, edge_diff=edge_diff)
-        return _f(positions, Z, edge_index, batch, num_graphs, edge_diff=edge_diff)
-
-    energy_fn = Compiler(cuda_graphs=True)(_flat) if compile_energy else _flat
-
-    def core(
-        positions,
-        Z,
-        edge_index,
-        batch,
-        num_graphs,
-        *,
-        edge_diff=None,
-        shifts=None,
-        **kwargs,
-    ):
-        if shifts is not None:
-            raise TypeError("energy_core no longer takes shifts; pass edge_diff=")
-        if edge_diff is None:
-            raise TypeError("energy_core requires edge_diff=")
-        energy = energy_fn(
-            positions.to(dtype=potential_dtype),
-            Z,
-            edge_index,
-            batch,
-            num_graphs,
-            edge_diff.to(dtype=potential_dtype),
-        )
-        # reduce-overhead CUDA graphs reuse the output buffer; clone so
-        # calc_energy then calc_forces (or a later print) can still read E.
-        return energy.clone()
-
-    model.energy_core = core
+    if compile_energy or autocast_dtype is not None:
+        model.compile_core(transform)
 
 
 def _bind_md(dtype, force_field, integrator, neighbors, hooks, device) -> MD:
@@ -201,6 +164,7 @@ def _bind_md(dtype, force_field, integrator, neighbors, hooks, device) -> MD:
     )
 
 
+@torch.no_grad()
 def minimize_fire(
     force_field,
     work: TensorDict,
@@ -231,7 +195,7 @@ def minimize_fire(
         forces = pots.calc_forces(work)
         e_eV = float(energy.sum())
         fmax = float(forces.abs().max())
-        if fmax < fmax_eV_A:
+        if fmax < fmax_eV_A or step == max_steps:
             break
         power = float((forces * vel).sum())
         if power > 0.0:
@@ -322,6 +286,14 @@ def main() -> None:
         default="fp64",
         help="parameter/state precision (bf16 is --autocast-bf16 on top of fp32)",
     )
+    parser.add_argument("--matmul-precision", choices=("highest", "high"), default="highest")
+    parser.add_argument("--energy-precision", choices=("model", "fp32", "fp64"), default="fp64")
+    parser.add_argument(
+        "--trajectory-precision",
+        choices=("state", "fp32", "fp64"),
+        default="state",
+        help="position/velocity/force storage precision; state preserves MD precision",
+    )
     parser.add_argument(
         "--checkpoint-every",
         type=int,
@@ -382,15 +354,22 @@ def main() -> None:
     parser.add_argument(
         "--compile",
         action="store_true",
-        help="compile the energy with Compiler(cuda_graphs=True); needs static shapes, "
-        "which the neighbour list's fixed-capacity buffers provide across rebuilds "
-        "(the list is refreshed in place, never reallocated)",
+        help="compile the energy fullgraph with dynamic edge counts (no CUDA graph replay)",
     )
     args = parser.parse_args()
 
     if args.threads:
         torch.set_num_threads(args.threads)
-    config.set_precision(args.precision)
+    potential_precision = args.potential_precision or args.precision
+    config.set_precision(potential_precision, matmul_precision=args.matmul_precision)
+    md_dtype = {"fp64": torch.float64, "fp32": torch.float32}[args.precision]
+    potential_dtype = config.ftype
+    trajectory_dtype = {"state": None, "fp32": torch.float32, "fp64": torch.float64}[
+        args.trajectory_precision
+    ]
+    energy_dtype = {"model": None, "fp32": torch.float32, "fp64": torch.float64}[
+        args.energy_precision
+    ]
 
     device = torch.device(args.device)
     # The fused cuEquivariance kernels need cuequivariance_ops_torch and a GPU;
@@ -409,10 +388,13 @@ def main() -> None:
         f"available={fused_available})"
     )
     if not use_fallback and not fused_available:
-        print(
-            "WARNING: fused kernels requested but cuequivariance-ops-torch is not "
-            "installed (pip install 'molnex[cueq-cu13]'); cuEq degrades to its "
-            "pure-torch path, ~30x slower on this model"
+        raise RuntimeError(
+            "fused kernels requested but cuequivariance-ops-torch is missing; "
+            "install the matching ops wheel or explicitly select --fallback on"
+        )
+    if args.autocast_bf16 and (device.type != "cuda" or potential_dtype != torch.float32):
+        parser.error(
+            "--autocast-bf16 requires CUDA and an fp32 potential; validate drift before use"
         )
 
     if args.structure is not None:
@@ -426,19 +408,23 @@ def main() -> None:
         system = torch.load(args.system, map_location="cpu", weights_only=True)
     if args.weights_dir is None or args.out is None:
         parser.error("--weights-dir and --out are required unless --dump-system is given")
-    Z, pos, cell = system["Z"], system["pos"].to(config.ftype), system["cell"].to(config.ftype)
+    Z, pos, cell = system["Z"], system["pos"].to(md_dtype), system["cell"].to(md_dtype)
 
     # from_checkpoint leaves the model in training mode by contract; .eval() is
     # the caller's step, as the collapsed build_model used to do.
     model = MaceMatpes.load(
         args.weights_dir / "matpes_r2scan_config.json",
         use_fallback=use_fallback,
+        compute_forces=False,
+        energy_dtype=energy_dtype,
     ).eval()
+    model.configure_input_dtype(potential_dtype)
+    model.requires_grad_(False)
     r_max = float(model.cutoff_fn.r_cut)
     print(f"system: {Z.numel()} atoms, cell diag {torch.diagonal(cell).tolist()}, r_max {r_max}")
 
     pos = pos.to(device)
-    mass = system["mass"].to(dtype=config.ftype, device=device)
+    mass = system["mass"].to(dtype=md_dtype, device=device)
     # NeighborList validates r_build <= L/2 itself, sizes its buffers from this
     # configuration, and owns the refresh policy (skin / every / delay / check);
     # Integrator.eval_force asks it once per force evaluation.
@@ -461,22 +447,14 @@ def main() -> None:
         f"delay={neighbors.delay}, check={neighbors.check}, r_build={neighbors.r_build:.2f} A"
     )
 
-    potential_dtype = {"fp64": torch.float64, "fp32": torch.float32}[
-        args.potential_precision or args.precision
-    ]
     model = model.to(device=device, dtype=potential_dtype)
     print(
         f"precision: MD state {args.precision}, "
-        f"potential {args.potential_precision or args.precision}"
+        f"potential {potential_precision}, energy {args.energy_precision}, "
+        f"matmul {args.matmul_precision}"
     )
     from molpot.forcefield import ForceField as MolpotForceField
 
-    _bind_energy_core(
-        model,
-        potential_dtype=potential_dtype,
-        compile_energy=args.compile,
-        autocast_dtype=torch.bfloat16 if args.autocast_bf16 else None,
-    )
     ff = MolpotForceField("matpes", units="metal")
     ff.def_pairstyle(model)
     force_field = ff
@@ -492,8 +470,14 @@ def main() -> None:
     t0 = time.perf_counter()
     neighbors.build(atoms)
     pots0 = force_field.to_potentials()
-    e0 = pots0.calc_energy(atoms)
-    f0 = pots0.calc_forces(atoms)
+    with torch.no_grad():
+        e0 = pots0.calc_energy(atoms)
+        f0 = pots0.calc_forces(atoms)
+    _bind_energy_core(
+        model,
+        compile_energy=args.compile,
+        autocast_dtype=torch.bfloat16 if args.autocast_bf16 else None,
+    )
     print(
         f"single point: E = {float(e0.sum()):.6f} eV, "
         f"|F|max = {float(f0.abs().max()):.6f} eV/A "
@@ -524,14 +508,31 @@ def main() -> None:
     if args.resume is not None:
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=True)
         start_step = int(ckpt["step"])
-        pos = ckpt["pos"].to(dtype=config.ftype, device=device)
-        resume_vel = ckpt["vel"].to(dtype=config.ftype, device=device)
+        pos = ckpt["pos"].to(dtype=md_dtype, device=device)
+        resume_vel = ckpt["vel"].to(dtype=md_dtype, device=device)
         args.out = args.out.with_name(f"{args.out.stem}.from{start_step}{args.out.suffix}")
         print(f"resuming at step {start_step}; trajectory continues in {args.out}")
         # NeighborList was built at the IC; resume positions have drifted in
         # unwrapped space. rebuild() re-anchors _x_hold — update() would
         # treat the jump as a wrap and abort.
         neighbors.rebuild(pos)
+
+    # Write after resolving the resume segment's name, preserving the original
+    # segment's numerical contract. Keep this beside trajectory/checkpoint.
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.with_suffix(".run.json").write_text(
+        json.dumps(
+            {
+                "arguments": vars(args),
+                "torch": torch.__version__,
+                "cueq": importlib.metadata.version("cuequivariance"),
+                "potential_precision": potential_precision,
+            },
+            default=str,
+            indent=2,
+        )
+        + "\n"
+    )
 
     if args.nvt_steps < 0:
         raise ValueError(f"--nvt-steps must be >= 0, got {args.nvt_steps}")
@@ -559,8 +560,8 @@ def main() -> None:
         nvt_out = args.out.with_name("nvt.pt")
         if nvt_out.is_file():
             nvt_traj = torch.load(nvt_out, map_location="cpu", weights_only=True)
-            atoms["atoms", "pos"] = nvt_traj["pos"][-1].to(dtype=config.ftype, device=device)
-            vel = nvt_traj["vel"][-1].to(dtype=config.ftype, device=device)
+            atoms["atoms", "pos"] = nvt_traj["pos"][-1].to(dtype=md_dtype, device=device)
+            vel = nvt_traj["vel"][-1].to(dtype=md_dtype, device=device)
             mass_col = atoms["atoms", "mass"].reshape(-1, 1)
             atoms["atoms", "vel"] = vel - (mass_col * vel).sum(0) / mass_col.sum()
             neighbors.rebuild(atoms["atoms", "pos"])
@@ -577,7 +578,7 @@ def main() -> None:
                 f"gamma={args.nvt_gamma:g} /fs, dt={args.dt:g} fs"
             )
             nvt = _bind_md(
-                config.ftype,
+                md_dtype,
                 force_field,
                 LangevinVerletIntegrator(
                     args.dt,
@@ -595,6 +596,7 @@ def main() -> None:
                         write_xyz=False,
                         with_forces=True,
                         flush_every=args.flush_every,
+                        dtype=trajectory_dtype,
                     ),
                 ],
                 device,
@@ -636,6 +638,7 @@ def main() -> None:
             write_xyz=False,
             with_forces=True,
             flush_every=args.flush_every,
+            dtype=trajectory_dtype,
         )
     )
     if args.checkpoint_every:
@@ -647,7 +650,7 @@ def main() -> None:
             )
         )
     md = _bind_md(
-        config.ftype,
+        md_dtype,
         force_field,
         VelocityVerletIntegrator(args.dt),
         neighbors,
@@ -689,8 +692,8 @@ def main() -> None:
             f"trajectory has {n_frames} frame(s); need >= 2 "
             f"(steps={args.steps}, stride={args.stride})"
         )
-    # Frames are kept at step stride, 2*stride, ...; span ≈ (n_frames)*stride*dt
-    t_ps = n_frames * args.stride * args.dt * 1e-3
+    # The drift spans the first to last kept frame: (n_frames - 1) intervals.
+    t_ps = (n_frames - 1) * args.stride * args.dt * 1e-3
     dE_meV_atom = float(etot[-1] - etot[0]) / Z.numel() * 1e3
     rate = dE_meV_atom / t_ps if t_ps > 0 else float("nan")
     print(
@@ -719,6 +722,12 @@ def main() -> None:
             "num_edges": neighbors.num_edges,
             "rebuild_count": neighbors.rebuild_count,
             "energy_scale": 1.0 / _EV_TO_MD,
+            "precision": args.precision,
+            "potential_precision": potential_precision,
+            "energy_precision": args.energy_precision,
+            "trajectory_precision": args.trajectory_precision,
+            "matmul_precision": args.matmul_precision,
+            "autocast_bf16": args.autocast_bf16,
         },
         args.out.with_suffix(".graph.pt"),
     )

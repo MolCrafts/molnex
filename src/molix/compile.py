@@ -105,6 +105,10 @@ def register_inductor_fallbacks() -> None:
     for op in (aten.index_add.default, aten.index_add_.default):
         inductor_lowering.make_fallback(op)
 
+    # Compiled energy is differentiated with ``autograd.grad(create_graph=…)``
+    # for forces. Donated buffers require create_graph=False.
+    torch._functorch.config.donated_buffer = False
+
     _INDUCTOR_FALLBACKS_REGISTERED = True
     logger.debug("Registered inductor ATen fallback for aten.index_add / aten.index_add_")
 
@@ -172,6 +176,7 @@ class Compiler:
         fullgraph: bool = False,
         dynamic: bool | None = None,
         mode: str | None = None,
+        donated_buffer: bool | None = None,
     ) -> None:
         """Capture a ``torch.compile`` configuration.
 
@@ -184,6 +189,12 @@ class Compiler:
             dynamic: Enable dynamic-shape tracing.
             mode: Compile mode (``"default"`` / ``"reduce-overhead"`` /
                 ``"max-autotune"``).
+            donated_buffer: AOTAutograd buffer donation. ``True`` reuses dead
+                saved tensors during a ``create_graph=False`` backward (MD
+                forces / virial) and cuts peak HBM. ``None`` (default) leaves
+                the process default that :func:`register_inductor_fallbacks`
+                sets to ``False``, which is required for force-supervised
+                ``create_graph=True`` training.
         """
         if cuda_graphs:
             p = self.CUDA_GRAPH_PRESET
@@ -195,6 +206,7 @@ class Compiler:
         self.fullgraph = fullgraph
         self.dynamic = dynamic
         self.mode = mode
+        self.donated_buffer = donated_buffer
 
     def __call__[T: Callable[..., Any]](self, target: T) -> T:
         """Return ``target`` compiled with this instance's configuration.
@@ -212,10 +224,13 @@ class Compiler:
         # still hand a later graph to inductor, and the tables must be patched
         # before the process' first lowering, not after.
         register_inductor_fallbacks()
+        if self.donated_buffer is not None:
+            torch._functorch.config.donated_buffer = self.donated_buffer
         logger.info(
             f"Compiling {getattr(target, '__qualname__', type(target).__name__)} with "
             f"backend={self.backend}, fullgraph={self.fullgraph}, "
-            f"dynamic={self.dynamic}, mode={self.mode}"
+            f"dynamic={self.dynamic}, mode={self.mode}, "
+            f"donated_buffer={self.donated_buffer}"
         )
         return cast(
             T,

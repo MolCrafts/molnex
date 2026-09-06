@@ -46,6 +46,29 @@ polar_remap = CheckpointRemap(polar_keys, on_unexpected="return")
 class TestMacePolar:
     """Isolated-molecule Polar energy on the tiny Polar backbone."""
 
+    def test_official_runtime_cutoff_overrides_constructor_heuristic(self, tiny_polar_spec):
+        model = MacePolar(
+            **polar_kwargs(tiny_polar_spec, kspace_cutoff=1.234, kspace_cutoff_factor=1.5)
+        )
+        assert model.electric_potential_descriptor.k_cutoff == 1.234
+        assert model.coulomb_energy.k_cutoff == 1.234
+
+    @pytest.mark.parametrize("dtype", [None, torch.float32, torch.float64])
+    def test_energy_precision_covers_hartree(self, tiny_polar_spec, omol_cluster, dtype):
+        model = MacePolar(**polar_kwargs(tiny_polar_spec, energy_dtype=dtype, compute_forces=False))
+        energy = model(omol_cluster)["graphs", "energy"]
+        assert energy.dtype == (dtype or torch.float64)
+
+    def test_split_precision_keeps_md_geometry_and_force_dtype(self, tiny_polar_spec, omol_cluster):
+        model = MacePolar(**polar_kwargs(tiny_polar_spec)).float().eval()
+        model.configure_input_dtype(torch.float32)
+        pos = omol_cluster["atoms", "pos"]
+        before = pos.clone()
+        output = model(omol_cluster)
+        assert output["atoms", "forces"].dtype == torch.float64
+        assert torch.isfinite(output["atoms", "forces"]).all()
+        torch.testing.assert_close(pos, before, atol=0, rtol=0)
+
     def test_official_submodule_names(self, tiny_polar_spec: MACEPolarSpec):
         """Keys polar_remap copies by name."""
         model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False))
@@ -78,6 +101,27 @@ class TestMacePolar:
         shifted["atoms", "pos"] = shifted["atoms", "pos"] + 2.5
         e1 = model(shifted)["graphs", "energy"]
         assert torch.allclose(e0, e1, atol=1e-8)
+
+    def test_fp32_energy_keeps_interaction_below_large_atomic_baseline(
+        self, tiny_polar_spec: MACEPolarSpec
+    ):
+        """Adding a large constant E0 cannot round away the learned energy."""
+        config.set_precision("fp32")
+        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        pos = torch.tensor(CLUSTER_POS, dtype=torch.float32, requires_grad=True)
+        z = torch.tensor(CLUSTER_Z, dtype=torch.long)
+        edges = full_edge_index(SINGLE_GRAPH)
+        batch = torch.zeros(len(CLUSTER_Z), dtype=torch.long)
+        with torch.no_grad():
+            model.atomic_energies.atomic_energies.zero_()
+        base = model.energy_core(pos, z, edges, batch, num_graphs=1)
+        force0 = torch.autograd.grad(base.sum(), pos)[0]
+        with torch.no_grad():
+            model.atomic_energies.atomic_energies.fill_(2**24)
+        shifted = model.energy_core(pos, z, edges, batch, num_graphs=1)
+        force1 = torch.autograd.grad(shifted.sum(), pos)[0]
+        torch.testing.assert_close(shifted - len(CLUSTER_Z) * 2**24, base, rtol=0.0, atol=1e-7)
+        torch.testing.assert_close(force1, force0, rtol=0.0, atol=0.0)
 
     def test_self_interaction_flags_reach_both_electrostatic_blocks(
         self, tiny_polar_spec: MACEPolarSpec

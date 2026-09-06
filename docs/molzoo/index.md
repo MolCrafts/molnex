@@ -20,6 +20,8 @@ physics heads, derivation, and composition stay in `molpot`.
   encoder is connected to data, readout, losses, and training.
 - [Allegro User Guide](user-guide/allegro.md): theory, formulas, implementation
   contract, hands-on tutorial, and spec crosswalk for `molzoo.Allegro`.
+- [MACE precision and checkpoints](user-guide/mace.md): MatPES/Polar precision
+  controls, official weight loading and current large-system validation limits.
 - Specs under `Spec` in the MolZoo navigation (Allegro, MACE-OMOL today).
 
 There is no separate "Explanation" section for MolZoo. Model theory belongs in

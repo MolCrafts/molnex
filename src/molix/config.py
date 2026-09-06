@@ -71,7 +71,7 @@ class MolnexConfig(Config):
 
     __slots__ = ()
 
-    def set_precision(self, mode: str) -> None:
+    def set_precision(self, mode: str, *, matmul_precision: str | None = None) -> None:
         """Set the global precision for the entire project.
 
         Writes ``ftype``, ``use_amp``, and ``amp_dtype`` into this config.
@@ -98,6 +98,11 @@ class MolnexConfig(Config):
                   with ``GradScaler``. Batches stay float32; autocast handles
                   the per-op down-cast inside the forward pass.
                 - ``"bf16-mixed"``: parameters in float32, autocast to bfloat16.
+            matmul_precision: Explicit PyTorch fp32 matmul policy, ``highest``,
+                ``high`` or ``medium``. ``None`` keeps the preset's policy.
+                Use ``highest`` for strict fp32 MD; ``high`` can enable TF32.
+                This is process-wide, so choose it before compiling. Changing
+                it does not recover precision already lost in stored data.
 
         Raises:
             ValueError: If ``mode`` is not one of the supported presets.
@@ -107,12 +112,15 @@ class MolnexConfig(Config):
         if mode not in _PRECISION_PRESETS:
             supported = ", ".join(sorted(_PRECISION_PRESETS))
             raise ValueError(f"Unsupported precision mode {mode!r}. Supported modes: {supported}.")
+        if matmul_precision not in (None, "highest", "high", "medium"):
+            raise ValueError(f"Unsupported matmul_precision: {matmul_precision!r}")
         preset = _PRECISION_PRESETS[mode]
         for key, value in preset.items():
             if key == "matmul_precision":
                 continue
             self[key] = value
-        torch.set_float32_matmul_precision(preset["matmul_precision"])
+        selected = str(preset["matmul_precision"]) if matmul_precision is None else matmul_precision
+        torch.set_float32_matmul_precision(selected)
 
 
 # Global singleton instance. ``ftype`` / ``itype`` control tensor creation

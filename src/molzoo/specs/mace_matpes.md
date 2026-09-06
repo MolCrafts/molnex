@@ -1,13 +1,13 @@
 # MACE-MatPES Specification
 
-This page is the implementation contract for `molzoo.MACEMatpes` — a native
+This page is the implementation contract for `molzoo.MaceMatpes` — a native
 reimplementation of the official `MACE-matpes-*-0` foundation models. It is not a
 tutorial; use the MolZoo user guide for narrative and worked examples.
 
 | Field | Value |
 |-------|-------|
-| Module | `molzoo.mace.variants` (in the `molzoo.mace` package) |
-| Entry point | `MACEMatpes` — a thin, keyword-compatible alias over `molzoo.mace.potential.MACEPotential` configured by `molzoo.mace.spec.MACEMatpesSpec`. Weights: `MACEPotential.from_checkpoint` with the `molzoo.mace.checkpoint.MATPES_REMAP` preset; `load_matpes_state_dict` stays as a back-compat free function in `molzoo.mace.variants`. |
+| Module | `molzoo.mace.potential` |
+| Entry point | `MaceMatpes`, a flat constructor over `MacePotential`; `MaceMatpes.load(weights, config=...)` accepts official cuEq-converted state. No `variants` shim or in-tree basis converter. |
 | Paper | Batatia et al., *MACE*, NeurIPS 2022; Batatia et al., *A foundation model for atomistic materials chemistry* (MACE-MP-0) |
 | arXiv | https://arxiv.org/abs/2206.07697 · https://arxiv.org/abs/2401.00096 |
 | Dataset paper | Kaplan et al., *MatPES* — https://arxiv.org/abs/2503.04070 |
@@ -17,16 +17,16 @@ tutorial; use the MolZoo user guide for narrative and worked examples.
 
 **Related modules (out of scope for this file):**
 
-| Module | Role |
+| Module | `molzoo.mace.potential` |
 |--------|------|
 | `molzoo.mace.research.MACE` | Encoder-only trainable MACE; see `mace.md` |
-| `molzoo.mace.variants.MACEOMol` | OMOL foundation model (charge/spin conditioned); see `mace_omol.md` |
-| `molzoo.mace.encoder.MACEEncoder` | Shared block graph both variants inherit (`MACEPotential` subclasses it) |
+| `molzoo.mace.potential.MaceOmol` | OMOL foundation model (charge/spin conditioned); see `mace_omol.md` |
+| `molzoo.mace.encoder.MACEEncoder` | Shared block graph both variants inherit (`MacePotential` subclasses it) |
 | `molix.batch.NeighborList` | Cutoff graph construction (PBC minimum image) |
 
 ## 1. Scope
 
-`molzoo.MACEMatpes` is a **full energy/force model**. It owns:
+`molzoo.MaceMatpes` is a **full energy/force model**. It owns:
 
 - the embedding → interaction → product → readout stack of `ScaleShiftMACE`
   with density-normalised interactions,
@@ -71,7 +71,7 @@ It does **not** own:
 | \(\ell_{\max}\) | `l_max` = 3 | spherical harmonics / TP |
 | \(\nu\) | `correlation` = 3 | symmetric-contraction degree |
 | \(\rho_i\) | learned edge density | `molrep.interaction.mace.density.DensityInteraction._message` |
-| \(E(\mathbf r)\) | per-graph energy `(B,)`, eV | `molzoo.mace.potential.MACEPotential.energy_core` |
+| \(E(\mathbf r)\) | per-graph energy `(B,)`, eV | `molzoo.mace.potential.MacePotential.energy_core` |
 | \(\mathbf v_e\) | edge displacement (with PBC shifts) | `molzoo.mace.geometry.edge_vectors` / `edge_lengths` |
 
 ### 3.2 Pipeline
@@ -125,6 +125,7 @@ changes every edge feature.
 | `radial_mlp` | `[64, 64, 64]` | conv-weight MLP widths |
 | `scale` / `shift` | 0.7735790334431056 / 0.0 | `atomic_inter_scale/shift` |
 | `use_fallback` | `False` (default; fused kernels) — pass `True` on CPU / without the `cuequivariance-ops-torch` wheel | forces are always autograd here, so the functorch reason for the fallback never applies; fused is ~36x faster per MD step |
+| `energy_dtype` | `torch.float64` | graph accumulation dtype; `torch.float32` or `None` (model dtype) are explicit alternatives; does not change parameter keys |
 
 ## 5. Reference Crosswalk
 
@@ -143,7 +144,7 @@ changes every edge feature.
 | `NonLinearReadoutBlock` | `molrep.readout.mace.NonLinearReadout` | matched |
 | `e3nn.nn.FullyConnectedNet` | `molrep.embedding.mlp.MomentNormalizedMLP` (generic; not moved) | matched |
 | `ScaleShiftBlock` | `molpot.heads.rescale.GlobalRescale` | matched |
-| `get_outputs` force path | autograd, two entries: `molpot.derivation.kernels.grad_force_pass` on the batch path (`MACEPotential.forward`) and `molpot.derivation.force.autograd_forces_from_energy` on the raw path (`MACEMatpes.energy_forces`) | matched |
+| `get_outputs` force path | autograd, two entries: `molpot.derivation.kernels.grad_force_pass` on the batch path (`MacePotential.forward`) and `molpot.derivation.force.autograd_forces_from_energy` on the raw path (`MaceMatpes.energy_forces`) | matched |
 
 `molrep.interaction.density` and `molrep.readout.scalar` still exist as
 deprecated re-export shims (`molrep.readout.product` likewise). New code must
@@ -160,6 +161,14 @@ import from the `mace` namespaces above; the shims are scheduled for removal.
 | A5 | `skip_tp` is rebuilt when the module dtype changes | `cuet.FullyConnectedTensorProduct` bakes its precision in at construction, so `.double()` otherwise raises | low | `tests/test_molrep/test_interaction/test_mace/test_density.py::TestDensityInteraction::test_skip_tp_weight_survives_dtype_change` |
 | A6 | `skip_tp` pinned to cuEq `method="naive"` (`molrep.interaction.mace.density.SKIP_TP_METHOD`) | cuEq's default `fused_tp` is 19x slower on a one-hot `89x0e` second operand (31.9 vs 1.8 ms); `naive` is also what MACE's own converted cueq model runs | low | output identical to `fused_tp` at 1.1e-15; §7.1 |
 | A7 | Energy and forces come from one forward differentiated in place, not a re-run closure | MACE's `get_outputs` shape; the closure form cost two full forwards per step | none (same math) | §7.2 forward↔energy_forces tests |
+| A8 | Shared configurable graph accumulation and differentiable model-input dtype boundary | fp64 MD state may use strict fp32 model calculation without fp32 baseline summation | numerical policy is not a long-time drift guarantee | mirrored precision/force-chain-rule tests; official-weight 193-atom CPU/GPU three-step smoke, job 2063791 |
+
+Precision/loading controls and current acceptance limits are documented in
+`docs/molzoo/user-guide/mace.md`. Matrix precision must be selected before
+construction/compilation (`config.set_precision(..., matmul_precision="highest")`
+for strict fp32). Official loading accepts converted cuEq weights, not a raw
+e3nn contraction concatenation. Shared scalar/Linear singleton ranks are the
+only checkpoint reshapes; no in-tree basis conversion is implemented.
 
 **Known limitation.** cuEquivariance freezes `math_dtype` at construction, and
 `EquivariantProductBasis` (shared with `MACEOMol`) is not rebuilt on `.double()`.
@@ -216,23 +225,23 @@ as e3nn-vs-cueq contraction order rather than a modelling difference:
 ### 7.2 Symmetry and Shape Tests
 
 Variant-level claims live in
-`tests/test_molzoo/test_mace/test_variants.py::TestMACEMatpes` (the `::…` rows
+`tests/test_molzoo/test_mace/test_variants.py::TestMaceMatpes` (the `::…` rows
 below are relative to it); the shared pipeline they alias is covered by
-`tests/test_molzoo/test_mace/test_potential.py::TestMACEPotential`.
+`tests/test_molzoo/test_mace/test_potential.py::TestMacePotential`.
 
 | Claim | Test path | Tolerance |
 |-------|-----------|-----------|
-| `forward(td)` == `energy_forces` | `tests/test_molzoo/test_mace/test_variants.py::TestMACEMatpes::test_forward_matches_energy_forces` | 1e-9 eV / 1e-8 eV/Å |
+| `forward(td)` == `energy_forces` | `tests/test_molzoo/test_mace/test_variants.py::TestMaceMatpes::test_forward_matches_energy_forces` | 1e-9 eV / 1e-8 eV/Å |
 | energy rotation invariance | `::test_energy_is_rotation_invariant` | 1e-9 eV |
 | force equivariance `F(Rx) = R F(x)` | `::test_forces_rotate_with_the_system` | 1e-8 |
 | `F = -dE/dpos` vs finite differences | `::test_forces_match_finite_differences` | 1e-5 |
 | net force ≈ 0 | `::test_net_force_vanishes_on_an_isolated_cluster` | 1e-8 |
 | energy extensive over separated graphs | `::test_energy_is_extensive_over_separated_graphs` | 1e-9 |
 | out-of-table `Z` rejected | `::test_rejects_atomic_numbers_outside_the_table`, `::test_forward_rejects_an_element_outside_the_table` | raises |
-| alien checkpoint rejected | `::test_load_matpes_state_dict_refuses_an_alien_checkpoint` | raises |
-| `energy_core` == `forward` energy | `tests/test_molzoo/test_mace/test_potential.py::TestMACEPotential::test_energy_core_agrees_with_the_forward_energy` | exact |
+| alien checkpoint rejected | `::test_remap_refuses_an_alien_checkpoint` | raises |
+| `energy_core` == `forward` energy | `tests/test_molzoo/test_mace/test_potential.py::TestMacePotential::test_energy_core_agrees_with_the_forward_energy` | exact |
 | loader is strict (unknown / missing / mis-shaped) | `tests/test_molzoo/test_mace/test_checkpoint.py::TestLoadMatpesStateDict`, `::TestCheckpointRemap` | raises |
-| `from_checkpoint` builds from config + weights | `tests/test_molzoo/test_mace/test_checkpoint.py::TestFromCheckpoint` | exact |
+| `load` builds from config + weights | `tests/test_molzoo/test_mace/test_checkpoint.py::TestFromCheckpoint` | exact |
 | density normalisation, skip placement | `tests/test_molrep/test_interaction/test_mace/test_density.py` | exact |
 | ZBL sign, decay, envelope, halving | `tests/test_molpot/test_potentials/test_repulsion.py` | exact |
 | Agnesi monotonicity, pair symmetry | `tests/test_molrep/test_embedding/test_radial.py::TestAgnesiTransform` | exact |
@@ -261,9 +270,9 @@ constant.
 #### `torch.compile` strategy
 
 Eager is launch-bound at this size, so collapsing the launches is the remaining
-lever. Compiling `MACEPotential.energy_core` (the pure ``positions -> energy``
+lever. Compiling `MacePotential.energy_core` (the pure ``positions -> energy``
 function; measured under its former private name `_compute_energy`, which
-survives as a name alias on `MACEMatpes`) and taking ``autograd.grad``
+is inherited by `MaceMatpes`) and taking ``autograd.grad``
 **outside** the compiled region:
 
 | | fp64 ms (step/s) | fp32 ms (step/s) |
@@ -316,10 +325,10 @@ Two facts worth keeping:
 | Edge displacements | `molzoo.mace.geometry` | `edge_vectors` / `edge_lengths`; differentiable w.r.t. `pos` |
 | Building blocks | `molrep.interaction.mace` / `molrep.readout.mace` / `molrep.embedding.mace` (+ generic `molrep` / `molpot`) | reused; not owned here |
 | Model graph | `molzoo.mace.encoder.MACEEncoder` | blocks + wiring; no energy, no forces |
-| Energy / forces | `molzoo.mace.potential.MACEPotential` | `energy_core` (public, compile seam) + `molpot.derivation.kernels.grad_force_pass` |
+| Energy / forces | `molzoo.mace.potential.MacePotential` | `energy_core` (public, compile seam) + `molpot.derivation.kernels.grad_force_pass` |
 | Configuration | `molzoo.mace.spec.MACEMatpesSpec` | torch-free pydantic preset |
 | Weight conversion | `mace.cli.convert_e3nn_cueq` (out of tree) | e3nn `.model` → cueq `state_dict` |
-| Weight import | `molzoo.mace.checkpoint.CheckpointRemap` (`MATPES_REMAP`) via `MACEPotential.from_checkpoint`; `load_matpes_state_dict` back-compat wrapper | strict; raises on any unmapped or unfilled tensor |
+| Weight import | `MaceMatpes.load` via `molzoo.mace.checkpoint.CheckpointRemap` | preflights names, shapes and parameter coverage; official cuEq-converted weights required |
 | MD | `molix.md` | frozen neighbour list, `gamma=0` → NVE |
 | Compile seam | `molix.compile.Compiler` | wraps `energy_core`; `autograd.grad` stays outside |
 | Lazy export | `molzoo/__init__` + `molzoo/mace/__init__` | PEP 562 `__getattr__`; no eager cueq import |
@@ -333,7 +342,7 @@ Two facts worth keeping:
 | Checkpoint config | `correlation=3`, `use_reduced_cg=False`, `use_agnostic_product=False`, `apply_cutoff=True`, `pair_repulsion=True`, `distance_transform=Agnesi`, `heads=['default']` |
 | Dependencies | `cuequivariance` 0.10.0, `cuequivariance_torch`, `torch>=2.10` |
 | Conversion oracle | e3nn 0.4.4 + mace-torch 0.3.16 in an out-of-tree venv |
-| Module relocation | `mace-subpackage-restructure` chain, commits `1ddd5ff..e825a51` (merged 2026-08-09): `src/molzoo/mace_matpes.py` was retired into the `src/molzoo/mace/` package — config in `spec.py`, blocks in `encoder.py`, energy/forces in `potential.py`, key remap in `checkpoint.py`, the `MACEMatpes` alias in `variants.py`. MACE-only `molrep` blocks moved to `molrep/interaction/mace/{conv,block,density}.py`, `molrep/readout/mace.py`, `molrep/embedding/mace.py`; `molrep.interaction.density` / `molrep.readout.scalar` / `molrep.readout.product` remain as deprecated shims. Tests moved to `tests/test_molzoo/test_mace/`. Weights, hyper-parameters and numerics unchanged (§7.1 not re-run). |
+| Module relocation | `mace-subpackage-restructure` chain, commits `1ddd5ff..e825a51` (merged 2026-08-09): `src/molzoo/mace_matpes.py` was retired into the `src/molzoo/mace/` package — config in `spec.py`, blocks in `encoder.py`, energy/forces in `potential.py`, key remap in `checkpoint.py`, the `MaceMatpes` alias in `variants.py`. MACE-only `molrep` blocks moved to `molrep/interaction/mace/{conv,block,density}.py`, `molrep/readout/mace.py`, `molrep/embedding/mace.py`; `molrep.interaction.density` / `molrep.readout.scalar` / `molrep.readout.product` remain as deprecated shims. Tests moved to `tests/test_molzoo/test_mace/`. Weights, hyper-parameters and numerics unchanged (§7.1 not re-run). |
 
 ## 10. Drift Policy
 

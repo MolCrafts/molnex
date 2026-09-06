@@ -232,13 +232,48 @@ class TestMacePotential:
         """Holding an encoder would prefix every key with ``encoder.`` (ac-007)."""
         assert issubclass(MacePotential, MACEEncoder)
 
-    def test_constructor_takes_a_spec_and_two_keyword_switches(self) -> None:
-        """``MacePotential(spec, *, compute_forces=True, use_fallback=False)``."""
-        parameters = inspect.signature(MacePotential.__init__).parameters
-        assert list(parameters) == ["self", "spec", "compute_forces", "use_fallback"]
-        assert parameters["spec"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-        assert parameters["compute_forces"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert parameters["use_fallback"].kind is inspect.Parameter.KEYWORD_ONLY
+    @pytest.mark.parametrize("dtype", [None, torch.float32, torch.float64])
+    def test_user_selected_energy_accumulation(self, matpes_variant: MaceMatpes, dtype) -> None:
+        matpes_variant.energy_dtype = dtype
+        values = torch.tensor([1e8, 1.0, -1e8], dtype=torch.float32, requires_grad=True)
+        result = matpes_variant._sum_energy(values, torch.zeros(3, dtype=torch.long), 1)
+        assert result.dtype == (dtype or values.dtype)
+        assert result.item() == (1.0 if dtype == torch.float64 else 0.0)
+        assert torch.equal(torch.autograd.grad(result.sum(), values)[0], torch.ones_like(values))
+
+    def test_invalid_energy_dtype_is_rejected(self, tiny_matpes_spec: MACEMatpesSpec) -> None:
+        with pytest.raises(ValueError, match="energy_dtype"):
+            MacePotential(tiny_matpes_spec, energy_dtype=torch.float16)
+
+    def test_input_cast_keeps_force_chain_rule(self, matpes_variant: MaceMatpes) -> None:
+        model = matpes_variant.float().eval()
+        original_keys = set(model.state_dict())
+        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
+        z = torch.tensor(CLUSTER_Z)
+        edges = full_edge_index(SINGLE_GRAPH)
+        batch = torch.zeros(len(z), dtype=torch.long)
+        expected = model.energy_forces(pos.float(), z, edges, batch, 1)
+        model.configure_input_dtype(torch.float32)
+        actual = model.energy_forces(pos, z, edges, batch, 1)
+        assert actual["forces"].dtype == torch.float64
+        torch.testing.assert_close(actual["forces"], expected["forces"].double(), atol=0, rtol=0)
+        torch.testing.assert_close(actual["energy"], expected["energy"], atol=0, rtol=0)
+        assert set(model.state_dict()) == original_keys
+
+    def test_input_precision_cannot_change_after_compile(self, matpes_variant: MaceMatpes) -> None:
+        matpes_variant._core = matpes_variant.energy_core
+        with pytest.raises(RuntimeError, match="before compile_core"):
+            matpes_variant.configure_input_dtype(torch.float32)
+
+    def test_energy_forces_rebinds_live_edges_to_its_position_leaf(self, matpes_variant):
+        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64, requires_grad=True)
+        z = torch.tensor(CLUSTER_Z)
+        edges = full_edge_index(SINGLE_GRAPH)
+        batch = torch.zeros(len(z), dtype=torch.long)
+        live = pos[edges[:, 1]] - pos[edges[:, 0]]
+        expected = matpes_variant.energy_forces(pos, z, edges, batch, 1, edge_diff=live.detach())
+        actual = matpes_variant.energy_forces(pos, z, edges, batch, 1, edge_diff=live)
+        torch.testing.assert_close(actual["forces"], expected["forces"], atol=0, rtol=0)
 
     def test_forces_are_computed_by_default(self) -> None:
         """MD / evaluation is the main use — unlike ``PiNetPotential``."""

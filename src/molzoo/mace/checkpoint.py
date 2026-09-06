@@ -30,9 +30,8 @@ had drifted into two byte-identical implementations of three ideas:
    cuEquivariance derives it from the operation's own definition;
 2. rename by **longest matching prefix**, with ``None`` meaning "drop" (the
    value is rebuilt from a constructor argument, or is not persistent);
-3. reshape a checkpoint tensor whose ``numel`` matches but whose rank does not
-   — MACE stores some frozen scalars as ``(1,)`` where molnex holds a 0-d
-   buffer.
+3. normalize scalar ranks and cuEq Linear's optional singleton shared-weight
+   axis. No arbitrary equal-numel reshape and no CG basis conversion.
 
 The **only** genuine difference between the two shipped families — MatPES,
 fitted on periodic materials, and OMol, fitted on molecules — is what an
@@ -220,6 +219,8 @@ class CheckpointRemap:
                     new_key = None if replacement is None else replacement + key[len(prefix) :]
                     break
             if new_key is not None:
+                if new_key in renamed:
+                    raise RuntimeError(f"checkpoint key collision at {new_key!r} (from {key!r})")
                 renamed[new_key] = value
         return renamed
 
@@ -228,14 +229,9 @@ class CheckpointRemap:
     ) -> tuple[list[str], list[str]]:
         """Load an official checkpoint into ``model``, strictly.
 
-        One named action: :meth:`rename`, then the unexpected-key policy, then
-        the numel-conserving reshape, then ``load_state_dict(strict=False)``,
-        then the strictness check. The policy branch and the shape check both
-        run *before* any tensor reaches the model, so those two rejections
-        never leave a half-loaded model behind. The parameter-coverage check is
-        the one that cannot: it can only ask what ``load_state_dict`` failed to
-        fill, so that failure does leave the model written to. It is fatal by
-        design — construct a fresh model rather than retrying on this one.
+        Preflight names, shapes and parameter coverage before writing tensors.
+        Only scalar rank differences and cuEq Linear's singleton shared-weight
+        axis may be reshaped; equal numel alone does not establish a layout.
 
         "Learnable" is defined as membership in ``model.named_parameters()``.
         Never a ``.weight`` / ``.bias`` name heuristic — that shortcut once
@@ -258,7 +254,7 @@ class CheckpointRemap:
         Raises:
             RuntimeError: If a renamed key has no home in ``model`` and the
                 policy is ``"raise"``; if a checkpoint tensor disagrees in
-                ``numel`` with the model's (the model was built from the wrong
+                shape/layout with the model's (the model was built from the wrong
                 config); or — under **either** policy — if any
                 ``nn.Parameter`` of ``model`` is left unfilled, which would
                 silently keep whatever the constructor gave it (random for a
@@ -274,6 +270,9 @@ class CheckpointRemap:
             )
 
         mismatched: list[str] = []
+        import cuequivariance_torch as cuet
+
+        modules = dict(model.named_modules())
         for key, value in renamed.items():
             if key not in own:
                 continue  # reported through ``unexpected``
@@ -282,7 +281,16 @@ class CheckpointRemap:
                 continue
             # MACE stores some frozen scalars as (1,) where molnex holds a 0-d
             # buffer; identical content, different rank.
-            if value.numel() == own[key].numel():
+            owner, _, leaf = key.rpartition(".")
+            shared_linear_axis = (
+                leaf == "weight"
+                and isinstance(modules.get(owner), cuet.Linear)
+                and (
+                    (value.ndim == 1 and tuple(want) == (1, value.numel()))
+                    or (len(want) == 1 and tuple(value.shape) == (1, own[key].numel()))
+                )
+            )
+            if value.numel() == own[key].numel() == 1 or shared_linear_axis:
                 renamed[key] = value.reshape(want)
             else:
                 mismatched.append(f"{key}: checkpoint {tuple(value.shape)} vs model {tuple(want)}")
@@ -292,11 +300,11 @@ class CheckpointRemap:
                 + ", ".join(sorted(mismatched))
             )
 
-        missing, _ = model.load_state_dict(renamed, strict=False)
         parameters = {name for name, _ in model.named_parameters()}
-        unfilled = sorted(name for name in missing if name in parameters)
+        unfilled = sorted(parameters - set(renamed))
         if unfilled:
             raise RuntimeError(f"parameters not covered by the checkpoint: {unfilled}")
+        missing, _ = model.load_state_dict(renamed, strict=False)
         return sorted(set(missing) - parameters), unexpected
 
 

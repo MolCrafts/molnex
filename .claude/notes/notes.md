@@ -306,6 +306,26 @@ non-persistent tensor buffers so the tiny CPU naive-cuEq trainable
 forward/backward graphs pass `torch.compile(fullgraph=True)` (slow tests in
 `test_conv.py` / `test_density.py`).
 
+**10k re-review (2026-09-05).** See
+[MACE-POLAR 10k review and multi-GPU design](mace-polar-10k-review.md).
+The large observed `(N,512,512)` OOM was in Polar field `uvu.py`, not the
+cuEq symmetric product. GEMM reassociation removes it without a new op.
+The actually loaded conv `weight_numel` values are 2048 / 1280, not an
+assumed 86-path width. Fixed-coordinate 8850-atom strict-fp32 E/F/virial:
+full cuEq 0.410 s / 44.55 GiB, receiver-blocked 0.637 s / 16.49 GiB (before
+fp64 energy pooling; jobs 2057105 / 2057021). Matmul `high` failed the
+precision check; the runner now uses `highest`. Model graph-energy pooling
+is float64 to avoid large-baseline fp32 scatter error. Single-system
+multi-GPU must include global Fukui and GTO structure-factor reductions;
+DDP alone does not split one periodic graph. The linked design is not an
+implemented or validated distributed training backend.
+After fp64 pooling, fullgraph GH200 E/F/virial is 0.258 s / 36.49 GiB full
+cuEq (2057314) or 0.416 s / 28.45 GiB receiver-blocked (2057313); eager
+blocked stays 0.636 s / 16.49 GiB (2057185). Full compiled versus fp64:
+energy error 0.000369 eV, force RMSE 6.08e-5 eV/Å. These are warmed fixed-
+coordinate measurements, not long-MD/force-training acceptance. At 0.5 fs,
+the fastest kernel rate is only about 0.167 ns/day before MD overhead.
+
 **Periodic Polar parity (found 2026-09-02, fixed 2026-09-03).** fp64 term
 split on the same box (`bench5k/diag_components_float64.json`): E0 + local
 interaction agreed to 2.7·10⁻⁵ eV with identical edge counts (285 546), but

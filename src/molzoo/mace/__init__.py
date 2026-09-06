@@ -9,8 +9,8 @@ Public construction is the product class with a flat ``__init__``::
 
 The spec objects stay as internal validators assembled inside those
 constructors. Official archives are remapped by ``MaceXX.load``; there is no
-public ``*_REMAP`` constant and no convert CLI. ``e3nn2cueq`` lives in
-:mod:`molzoo.mace.utils`.
+public ``*_REMAP`` constant and no convert CLI. ``e3nn2cueq`` is a deprecated
+archive-reader alias, not a basis converter; use official cuEq-converted weights.
 
 Reference:
     Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural

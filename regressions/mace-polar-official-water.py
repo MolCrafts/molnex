@@ -15,7 +15,6 @@ from pathlib import Path
 import torch
 
 from molix import config
-from molzoo.mace.checkpoint import CheckpointRemap, polar_keys
 from molzoo.mace.polar import MacePolar
 
 config.set_precision("fp64")
@@ -51,9 +50,9 @@ def main() -> None:
     edge_index = torch.tensor(pairs, dtype=torch.long)
     edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
     batch = torch.zeros(n, dtype=torch.long)
-    model = MacePolar.load(_DUMP, format="official", use_fallback=True, compute_forces=True)
-    cueq_sd = torch.load(_CUEQ, map_location="cpu", weights_only=True)
-    CheckpointRemap(polar_keys, on_unexpected="return").load(model, cueq_sd)
+    model = MacePolar.load(
+        _DUMP, converted_weights=_CUEQ, trusted=True, use_fallback=True, compute_forces=True
+    )
     model.eval()
     out = model.energy_forces(
         pos,

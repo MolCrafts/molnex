@@ -255,6 +255,8 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
             periodic path would double-count it.
         offset: Finite-difference displacement in Å for isolated ``l_max=1``.
         kspace_cutoff_factor: Polar ``κ``. Training default ``1.0``.
+        k_cutoff: Explicit reciprocal cutoff in Å⁻¹, overriding the heuristic
+            factor. Use the serialized runtime value when loading official weights.
         kspace_capacity_factor: Dimensionless head-room on the per-axis
             reciprocal index the k-grid sizes itself to,
             ``N_c = ceil(f · ‖a_i‖ k_cutoff / 2π)``, where ``a_i`` is lattice
@@ -285,6 +287,7 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
         include_self_interaction: bool = False,
         offset: float = 0.02,
         kspace_cutoff_factor: float = 1.0,
+        k_cutoff: float | None = None,
         kspace_capacity_factor: float = 1.2,
     ) -> None:
         super().__init__()
@@ -300,7 +303,9 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
         # One home for the cutoff: a Python float of the ctor arguments, read
         # once here and frozen on the grid, never re-derived per forward.
         self.kgrid = KSpaceGrid(
-            k_cutoff=kspace_cutoff(self.sigma, self.l_max, self.kspace_cutoff_factor),
+            k_cutoff=k_cutoff
+            if k_cutoff is not None
+            else kspace_cutoff(self.sigma, self.l_max, self.kspace_cutoff_factor),
             capacity_factor=kspace_capacity_factor,
         )
 

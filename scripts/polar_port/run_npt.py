@@ -1,35 +1,27 @@
 """100-step (default) Polar NPT on a packed PEO box through molix.md.
 
-Loads the official Polar dump plus the out-of-tree convert_e3nn_cueq overlay.
+Loads official cuEq-converted weights once, with JSON or trusted dump metadata.
 No ASE / e3nn / mace-torch. GPU by default when CUDA is visible.
 
     PYTHONPATH=src python scripts/polar_port/run_npt.py \\
-        --system /tmp/peo_box.pt --steps 100 --device cuda
+        --system /tmp/peo_box.pt --cueq-state /path/polar_cueq_state.pt \\
+        --config /path/polar_config.json --steps 100 --device cuda
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib.metadata as _metadata
+import json
+import statistics
 import time
 from pathlib import Path
-
-# L40 venv ships molrs 0.13 metadata against an editable molpy 0.14 tree.
-_real_version = _metadata.version
-
-
-def _compat_version(name: str) -> str:
-    if name == "molcrafts-molrs":
-        return "0.14.0"
-    return _real_version(name)
-
-
-_metadata.version = _compat_version  # type: ignore[method-assign]
 
 import torch
 from tensordict import TensorDict
 
 from molix import config
+from molix.compile import Compiler
 from molix.md import (
     MD,
     BerendsenBarostat,
@@ -39,9 +31,8 @@ from molix.md import (
     NeighborList,
     VelocityInitHook,
 )
-from molix.units import units
+from molix.units import preset_energy_to_md, units
 from molpot.forcefield import ForceField as MolpotForceField
-from molzoo.mace.checkpoint import CheckpointRemap, polar_keys
 from molzoo.mace.polar import MacePolar
 
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
@@ -54,14 +45,17 @@ class _Beat(MDHook):
 
     def on_step_end(self, runner, step, obs) -> None:  # noqa: ANN001
         if step % 10 == 0:
+            scale = preset_energy_to_md("metal")
             vol = float(obs.volume) if obs.volume is not None else float("nan")
             fmax = (
-                float(obs.forces.detach().abs().max()) if obs.forces is not None else float("nan")
+                float(obs.forces.detach().abs().max()) / scale
+                if obs.forces is not None
+                else float("nan")
             )
             print(
-                f"step {step:4d}  E={float(obs.total):.4f}  "
+                f"step {step:4d}  E_total={float(obs.total) / scale:.4f} eV  "
                 f"T={float(obs.temperature):.1f} K  V={vol:.1f} Å³  "
-                f"|F|max={fmax:.4f}",
+                f"|F|max={fmax:.4f} eV/Å",
                 flush=True,
             )
 
@@ -114,13 +108,59 @@ def main() -> None:
     parser.add_argument("--gamma", type=float, default=0.01, help="Langevin γ in 1/fs")
     parser.add_argument("--tau", type=float, default=200.0, help="Berendsen τ_p in fs")
     parser.add_argument("--skin", type=float, default=1.0)
+    parser.add_argument(
+        "--neighbor-bin",
+        type=float,
+        default=None,
+        help="cell-list bin width in Å (0 selects automatic); omitted uses pair kernel",
+    )
+    parser.add_argument(
+        "--benchmark-repeats",
+        type=int,
+        default=0,
+        help="benchmark fixed-coordinate E/F/virial then exit without MD (0 disables)",
+    )
+    parser.add_argument("--benchmark-warmup", type=int, default=2)
+    parser.add_argument("--benchmark-output", type=Path, default=None)
+    parser.add_argument(
+        "--compile-core", action="store_true", help="benchmark fullgraph Inductor core"
+    )
+    parser.add_argument(
+        "--cueq-target-block-size",
+        type=int,
+        default=4096,
+        help="maximum receiver atoms per official cuEq convolution block (0 disables)",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--precision", choices=("fp32", "fp64"), default="fp32")
+    parser.add_argument("--potential-precision", choices=("fp32", "fp64"))
+    parser.add_argument("--energy-precision", choices=("model", "fp32", "fp64"), default="fp64")
+    parser.add_argument(
+        "--config", type=Path, help="JSON config; avoids loading the original pickle"
+    )
+    parser.add_argument(
+        "--trust-checkpoint", action="store_true", help="allow verified local dump pickle"
+    )
+    parser.add_argument(
+        "--matmul-precision",
+        choices=("highest", "high"),
+        default="highest",
+        help="highest forbids TF32 GEMMs; validate high against fp64 before MD",
+    )
     args = parser.parse_args()
+    if args.steps < 1 or args.benchmark_repeats < 0 or args.benchmark_warmup < 1:
+        parser.error("steps/warmup must be positive and benchmark-repeats nonnegative")
+    if args.compile_core and not args.benchmark_repeats:
+        parser.error("--compile-core requires --benchmark-repeats until MD parity is validated")
 
-    config.set_precision(args.precision)
+    potential_precision = args.potential_precision or args.precision
+    config.set_precision(potential_precision, matmul_precision=args.matmul_precision)
     dtype = torch.float64 if args.precision == "fp64" else torch.float32
+    potential_dtype = torch.float64 if potential_precision == "fp64" else torch.float32
+    energy_dtype = {"model": None, "fp32": torch.float32, "fp64": torch.float64}[
+        args.energy_precision
+    ]
     device = torch.device(args.device)
     print(f"device: {device}  precision: {args.precision}  cuda: {torch.cuda.is_available()}")
     print(f"inference: grad_enabled={torch.is_grad_enabled()}  (MD.run uses no_grad)")
@@ -145,22 +185,33 @@ def main() -> None:
         ) from exc
     print("cuEq fused kernels: True")
     model = MacePolar.load(
-        args.dump,
+        args.cueq_state if args.config else args.dump,
         format="official",
+        config=args.config,
+        converted_weights=None if args.config else args.cueq_state,
+        trusted=args.trust_checkpoint,
         use_fallback=False,
         compute_forces=False,
+        energy_dtype=energy_dtype,
     )
-    cueq_sd = torch.load(args.cueq_state, map_location="cpu", weights_only=True)
-    CheckpointRemap(polar_keys, on_unexpected="return").load(model, cueq_sd)
-    model = model.to(device=device, dtype=dtype).eval()
+    model = model.to(device=device, dtype=potential_dtype).eval()
+    model.configure_input_dtype(potential_dtype)
     model.requires_grad_(False)
+    print(
+        f"precision: state={args.precision} model={potential_precision} "
+        f"energy={args.energy_precision} matmul={args.matmul_precision}"
+    )
+    target_block_size = args.cueq_target_block_size or None
+    model.configure_cueq_target_blocks(target_block_size)
     r_max = float(model._spec.r_max)
     energy_only = model._pipeline.__func__ is model._write_energy.__func__
     print(
         f"Polar r_max={r_max} Å  params={sum(p.numel() for p in model.parameters())}  "
         f"use_fallback={model._spec.use_fallback}  torch.compile=False  "
+        f"cueq_target_block_size={target_block_size}  "
         f"pipeline={'energy' if energy_only else 'ef'}"
     )
+    print(f"conv weight_numel: {[layer.conv_tp.weight_numel for layer in model.interactions]}")
 
     neighbors = NeighborList(
         cell=cell,
@@ -169,14 +220,19 @@ def main() -> None:
         skin=args.skin,
         every=1,
         delay=0,
-        # ASE's MACE calculator rebuilds every force call. Verlet check=True
-        # skipped rebuilds until skin/2 (~20 fs for H at 300 K) — the same
-        # step where T exploded.
+        # Rebuild every MD step for this bounded validation runner. This is
+        # not evidence against displacement-gated Verlet rebuilding.
         check=False,
+        bin=args.neighbor_bin,
         capacity_factor=1.2,
+        target_block_size=target_block_size,
         device=device,
     )
-    print(f"neighbors: r_build={neighbors.r_build:.2f} Å  capacity={neighbors.capacity}")
+    print(
+        f"neighbors: r_build={neighbors.r_build:.2f} Å  capacity={neighbors.capacity}  "
+        f"target_block_span={neighbors.target_block_span}  "
+        f"edges_per_target_block={neighbors.edges_per_target_block}"
+    )
 
     ff = MolpotForceField("polar", units="metal")
     ff.def_pairstyle(model)
@@ -210,13 +266,120 @@ def main() -> None:
     neighbors.build(work)
     n_live = neighbors.num_edges
     full_edges = work["edges"]
-    work["edges"] = TensorDict(
-        {key: full_edges[key][:n_live] for key in full_edges.keys()},
-        batch_size=[n_live],
-    )
+    if neighbors.live_edges_are_prefix:
+        work["edges"] = TensorDict(
+            {key: full_edges[key][:n_live] for key in full_edges.keys()},
+            batch_size=[n_live],
+        )
     pots = ff.to_potentials()
-    e0 = pots.calc_energy(work)
-    f0 = pots.calc_forces(work)
+    if args.benchmark_repeats:
+        # Fixed geometry: do not compare timings from evolving NPT states or
+        # include cuEq JIT/cache construction in the steady-state samples.
+        cold_start = time.perf_counter()
+        with torch.no_grad():
+            eager_reference = None
+            if args.compile_core:
+                eager_reference = tuple(
+                    t.detach().clone() for t in pots.calc_energy_forces_virial(work)
+                )
+                model.compile_core(Compiler(fullgraph=True, dynamic=False, donated_buffer=True))
+            for _ in range(args.benchmark_warmup):
+                energy, forces, virial = pots.calc_energy_forces_virial(work)
+            torch.cuda.synchronize()
+            cold_seconds = time.perf_counter() - cold_start
+            reference = tuple(t.detach().clone() for t in (energy, forces, virial))
+            compiled_deltas = (
+                [float((a - b).abs().max()) for a, b in zip(reference, eager_reference)]
+                if eager_reference is not None
+                else None
+            )
+            torch.cuda.reset_peak_memory_stats()
+            samples = []
+            max_deltas = [0.0, 0.0, 0.0]
+            for _ in range(args.benchmark_repeats):
+                torch.cuda.synchronize()
+                start = time.perf_counter()
+                energy, forces, virial = pots.calc_energy_forces_virial(work)
+                torch.cuda.synchronize()
+                samples.append(time.perf_counter() - start)
+                for i, (observed, expected) in enumerate(zip((energy, forces, virial), reference)):
+                    if not torch.isfinite(observed).all():
+                        raise RuntimeError("nonfinite fixed-coordinate E/F/virial")
+                    max_deltas[i] = max(max_deltas[i], float((observed - expected).abs().max()))
+            model_peak = torch.cuda.max_memory_allocated() / 1024**3
+            model_reserved = torch.cuda.max_memory_reserved() / 1024**3
+            force_only = pots.calc_forces(work)
+            force_route_delta = float((force_only - forces).abs().max())
+            work["atoms", "pos"] = pos
+            # Report neighbor rebuilding separately; no topology change is
+            # allowed to contaminate the fixed-edge model samples above.
+            work["edges"] = full_edges
+            neighbor_samples = []
+            torch.cuda.reset_peak_memory_stats()
+            for _ in range(args.benchmark_repeats):
+                torch.cuda.synchronize()
+                start = time.perf_counter()
+                neighbors.rebuild(pos)
+                torch.cuda.synchronize()
+                neighbor_samples.append(time.perf_counter() - start)
+        if args.benchmark_output is not None:
+            torch.save(
+                {
+                    "energy": energy.detach().cpu(),
+                    "forces": forces.detach().cpu(),
+                    "virial": virial.detach().cpu(),
+                },
+                args.benchmark_output,
+            )
+        print(
+            "BENCHMARK "
+            + json.dumps(
+                {
+                    "atoms": int(z.numel()),
+                    "system": str(args.system),
+                    "precision": args.precision,
+                    "potential_precision": potential_precision,
+                    "energy_precision": args.energy_precision,
+                    "compiled": args.compile_core,
+                    "compiled_vs_eager_max_delta_efv": compiled_deltas,
+                    "matmul_precision": torch.get_float32_matmul_precision(),
+                    "gpu": torch.cuda.get_device_name(device),
+                    "gpu_total_gib": torch.cuda.get_device_properties(device).total_memory
+                    / 1024**3,
+                    "torch": torch.__version__,
+                    "cueq": _metadata.version("cuequivariance"),
+                    "target_block_size": target_block_size,
+                    "target_block_span": neighbors.target_block_span,
+                    "edge_capacity": neighbors.capacity,
+                    "live_edges": n_live,
+                    "neighbor_bin": args.neighbor_bin,
+                    "warmup_seconds": cold_seconds,
+                    "warmup_calls": args.benchmark_warmup,
+                    "observable": "energy_forces_virial",
+                    "seconds": samples,
+                    "median_seconds": statistics.median(samples),
+                    "model_peak_allocated_gib": model_peak,
+                    "model_peak_reserved_gib": model_reserved,
+                    "neighbor_seconds": neighbor_samples,
+                    "neighbor_median_seconds": statistics.median(neighbor_samples),
+                    "neighbor_peak_allocated_gib": torch.cuda.max_memory_allocated() / 1024**3,
+                    "energy_ev": float(energy.detach().sum()),
+                    "force_max_ev_per_a": float(forces.abs().max()),
+                    "net_force_ev_per_a": forces.sum(0).tolist(),
+                    "virial_ev": virial.tolist(),
+                    "repeat_max_delta_efv": max_deltas,
+                    "force_only_vs_virial_max_delta": force_route_delta,
+                }
+            ),
+            flush=True,
+        )
+        return
+    # Evaluation must inherit no-grad so force derivation uses
+    # create_graph=False. Otherwise this one-off probe retains every backward
+    # intermediate and can consume the entire GH200 before MD even starts.
+    with torch.no_grad():
+        e0 = pots.calc_energy(work)
+        f0 = pots.calc_forces(work)
     work["edges"] = full_edges
     if device.type == "cuda":
         torch.cuda.synchronize()
@@ -229,12 +392,12 @@ def main() -> None:
     if device.type == "cuda":
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
+    vol0 = float(torch.linalg.det(cell).abs())
     t0 = time.perf_counter()
     state = md.run(work, args.steps)
     if device.type == "cuda":
         torch.cuda.synchronize()
     elapsed = time.perf_counter() - t0
-    vol0 = float(torch.linalg.det(cell).abs())
     vol1 = float(torch.linalg.det(state.cell).abs()) if state.cell is not None else vol0
     peak = torch.cuda.max_memory_allocated() / (1024**3) if device.type == "cuda" else float("nan")
     print(

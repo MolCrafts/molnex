@@ -69,7 +69,8 @@ nav = [
         { "Overview" = "molzoo/index.md" },
         { "Tutorial" = "molzoo/tutorials/index.md" },
         { "User Guide" = [
-            { "Allegro" = "molzoo/user-guide/allegro.md" }
+            { "Allegro" = "molzoo/user-guide/allegro.md" },
+            { "MACE Precision and Checkpoints" = "molzoo/user-guide/mace.md" }
         ]},
         { "Spec" = [
             { "Allegro Spec" = "molzoo/specs/allegro.md" },

@@ -123,7 +123,7 @@ import json
 import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import torch
 from tensordict import TensorDict
@@ -137,7 +137,7 @@ from molzoo.mace.checkpoint import CheckpointRemap, matpes_keys, omol_keys
 from molzoo.mace.encoder import MACEEncoder
 from molzoo.mace.geometry import edge_lengths, edge_vectors
 from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACESpec
-from molzoo.mace.utils import e3nn2cueq
+from molzoo.mace.utils import read_archive
 
 #: One term of an official irreps string, e.g. ``"128x1o"`` — multiplicity,
 #: angular order ``l``, parity. Parity is fixed by ``l`` in every MACE
@@ -225,10 +225,14 @@ class MacePotential(MACEEncoder):
             the guard that keeps it honest is
             ``benchmarks/bench_mace_matpes.py``). CPU and test call sites,
             which have no fused kernels available, pass ``True`` explicitly.
+        energy_dtype: Accumulation dtype for graph energies, float64 by
+            default even with fp32 model weights. ``None`` uses model dtype.
+            This does not promote the learned calculation or recover digits
+            lost when loading weights into a lower-precision model.
     """
 
     _keys: ClassVar[dict[str, str | None]] = {}
-    _unexpected: ClassVar[str] = "raise"
+    _unexpected: ClassVar[Literal["raise", "return"]] = "raise"
 
     def __init__(
         self,
@@ -236,8 +240,15 @@ class MacePotential(MACEEncoder):
         *,
         compute_forces: bool = True,
         use_fallback: bool = False,
+        energy_dtype: torch.dtype | None = torch.float64,
     ) -> None:
         super().__init__(spec.model_copy(update={"use_fallback": True}) if use_fallback else spec)
+        if energy_dtype not in (None, torch.float32, torch.float64):
+            raise ValueError(
+                "energy_dtype must be torch.float32, torch.float64 or None (model dtype)"
+            )
+        self.energy_dtype = energy_dtype
+        self._input_dtype: torch.dtype | None = None
 
         # ---- frozen switches: no pydantic attribute reads on the hot path ----
         self._conditioning = (
@@ -268,6 +279,8 @@ class MacePotential(MACEEncoder):
         format: str = "official",
         config: str | Path | None = None,
         map_location: str | torch.device = "cpu",
+        trusted: bool = False,
+        converted_weights: str | Path | None = None,
         **kwargs: Any,
     ) -> MacePotential:
         """Construct from an official archive and load its weights.
@@ -282,6 +295,10 @@ class MacePotential(MACEEncoder):
             format: Must be ``"official"``.
             config: Optional sidecar json when ``path`` is a plain state dict.
             map_location: Forwarded to ``torch.load``.
+            trusted: Explicitly permit pickle loading of verified local modules.
+                Tensor state plus JSON config does not need this.
+            converted_weights: Official cuEq-converted tensor state; ``path``
+                then supplies metadata only, never an intermediate weight load.
             **kwargs: Constructor overrides (``use_fallback``, ``compute_forces``,
                 architecture fields).
 
@@ -291,9 +308,16 @@ class MacePotential(MACEEncoder):
         if format != "official":
             raise ValueError(f"format must be 'official', got {format!r}")
         weights, official = _resolve_official(Path(path), config)
-        archive = e3nn2cueq(weights, map_location=map_location)
-        merged = {**official, **archive.get("config", {})}
+        archive = read_archive(
+            weights, map_location=map_location, trusted=trusted, converted_weights=converted_weights
+        )
+        merged = {**archive["config"], **official}
         model = cls._from_official(merged, **kwargs)
+        numbers = archive["state"].get("atomic_numbers")
+        if numbers is not None and not torch.equal(numbers.cpu().reshape(-1), model.z_table.cpu()):
+            raise ValueError(
+                "checkpoint atomic_numbers disagree with the configuration element table"
+            )
         CheckpointRemap(cls._keys, on_unexpected=cls._unexpected).load(model, archive["state"])
         return model
 
@@ -327,18 +351,77 @@ class MacePotential(MACEEncoder):
             )
         leaf = positions.detach().requires_grad_(True)
         with torch.enable_grad():
-            energy = self.energy_core(
+            energy = self._evaluate_core(
                 leaf,
                 Z,
                 edge_index,
                 batch,
                 num_graphs,
-                edge_diff=edge_diff,
+                # A new position leaf owns this inference derivative. An
+                # incoming live edge graph belongs to the caller's old leaf.
+                edge_diff=None if edge_diff is None else edge_diff.detach(),
                 total_charge=total_charge,
                 total_spin=total_spin,
                 cell=cell,
             )
         return {"energy": energy.detach(), "forces": autograd_forces_from_energy(energy, leaf)}
+
+    def configure_input_dtype(self, dtype: torch.dtype | None) -> None:
+        """Cast geometry at the model boundary, preserving the caller's MD state.
+
+        Set to the model parameter dtype to run, for example, fp64 MD state
+        with an fp32 potential. Casts remain differentiable: forces still
+        refer to the original position leaf. ``None`` (default) leaves inputs
+        untouched. Configure before compilation; no checkpoint keys change.
+        This does not cast parameters or select the process-wide GEMM policy.
+        """
+        if dtype not in (None, torch.float32, torch.float64):
+            raise ValueError("input dtype must be torch.float32, torch.float64 or None")
+        if self._core is not None:
+            raise RuntimeError("configure input dtype before compile_core")
+        self._input_dtype = dtype
+
+    def _evaluate_core(
+        self,
+        positions: torch.Tensor,
+        Z: torch.Tensor,
+        edge_index: torch.Tensor,
+        batch: torch.Tensor,
+        num_graphs: int,
+        *,
+        edge_diff: torch.Tensor | None = None,
+        total_charge: torch.Tensor | None = None,
+        total_spin: torch.Tensor | None = None,
+        cell: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """One dispatch/precision boundary for flat and TensorDict callers."""
+        dtype = self._input_dtype
+        if dtype is not None:
+            positions = positions.to(dtype=dtype)
+            edge_diff = None if edge_diff is None else edge_diff.to(dtype=dtype)
+            cell = None if cell is None else cell.to(dtype=dtype)
+            total_charge = None if total_charge is None else total_charge.to(dtype=dtype)
+            total_spin = None if total_spin is None else total_spin.to(dtype=dtype)
+        core = self._core if self._core is not None else self.energy_core
+        return core(
+            positions,
+            Z,
+            edge_index,
+            batch,
+            num_graphs,
+            edge_diff=edge_diff,
+            total_charge=total_charge,
+            total_spin=total_spin,
+            cell=cell,
+        )
+
+    def _sum_energy(
+        self, values: torch.Tensor, batch: torch.Tensor, num_graphs: int
+    ) -> torch.Tensor:
+        """Per-graph energy reduction with the user's accumulation precision."""
+        if self.energy_dtype is not None:
+            values = values.to(dtype=self.energy_dtype)
+        return _scatter_sum(values, batch, num_graphs)
 
     def forward(self, batch: TensorDict) -> TensorDict:
         """Run the construction-fixed pipeline, mutating ``batch`` in place.
@@ -551,7 +634,7 @@ class MacePotential(MACEEncoder):
         edge_attrs = self.angular_features(vectors)
 
         node_feats = self.initial_node_features(node_attrs)
-        e0 = _scatter_sum(self.atomic_energies(Z), batch, num_graphs)
+        e0 = self._sum_energy(self.atomic_energies(Z), batch, num_graphs)
         node_feats, e0 = self._conditioning(
             node_feats, e0, batch, num_graphs, total_charge, total_spin
         )
@@ -572,7 +655,7 @@ class MacePotential(MACEEncoder):
             else node_feats.new_zeros(node_feats.shape[0])
         )
         node_es = self._readout_energy(per_layer, node_es)
-        return e0 + _scatter_sum(self.scale_shift(node_es), batch, num_graphs)
+        return e0 + self._sum_energy(self.scale_shift(node_es), batch, num_graphs)
 
     # -------------------------------------------------------------- variants
     def _reject_conditioning(
@@ -648,7 +731,7 @@ class MacePotential(MACEEncoder):
             batch, total_spin=total_spin, total_charge=total_charge
         )
         embedded = self.embedding_readout(node_feats).squeeze(-1)
-        return node_feats, e0 + _scatter_sum(embedded, batch, num_graphs)
+        return node_feats, e0 + self._sum_energy(embedded, batch, num_graphs)
 
     def _per_layer_readout_energy(
         self, per_layer: list[torch.Tensor], node_es: torch.Tensor
@@ -758,8 +841,7 @@ class MacePotential(MACEEncoder):
             cell = batch["graphs", "cell"]
         # One evaluation path: the compiled build when compile_core installed
         # one, the eager bound method otherwise. No caller branches on this.
-        core = self._core if self._core is not None else self.energy_core
-        energy = core(
+        energy = self._evaluate_core(
             positions,
             Z,
             edge_index,
@@ -813,10 +895,11 @@ def _resolve_official(path: Path, config: str | Path | None) -> tuple[Path, dict
     official: dict[str, Any] = {}
     if config is not None:
         official = json.loads(Path(config).read_text())
-        return path, official
     if path.is_dir():
-        jsons = sorted(path.glob("*config.json"))
+        jsons = sorted(path.glob("*config.json")) if config is None else []
         weights = sorted(path.glob("*cueq_state.pt")) or sorted(path.glob("*.pt"))
+        if len(jsons) > 1 or len(weights) > 1:
+            raise ValueError(f"ambiguous official archive under {path}; specify weights and config")
         if jsons:
             official = json.loads(jsons[0].read_text())
         if not weights:
@@ -870,6 +953,7 @@ class MaceMatpes(MacePotential):
         shift: float = 0.0,
         compute_forces: bool = True,
         use_fallback: bool = False,
+        energy_dtype: torch.dtype | None = torch.float64,
     ) -> None:
         spec = MACEMatpesSpec(
             atomic_numbers=list(atomic_numbers),
@@ -888,7 +972,12 @@ class MaceMatpes(MacePotential):
             shift=shift,
             use_fallback=use_fallback,
         )
-        super().__init__(spec, compute_forces=compute_forces, use_fallback=use_fallback)
+        super().__init__(
+            spec,
+            compute_forces=compute_forces,
+            use_fallback=use_fallback,
+            energy_dtype=energy_dtype,
+        )
 
     @classmethod
     def _from_official(cls, official: dict[str, Any], **kwargs: Any) -> MaceMatpes:
@@ -910,7 +999,7 @@ class MaceMatpes(MacePotential):
                 "so the load would not object to the surplus transform"
             )
         num_features, max_hidden_l, mlp_dim = _require_irreps(official)
-        ctor = dict(
+        ctor: dict[str, Any] = dict(
             atomic_numbers=official["atomic_numbers"],
             atomic_energies=official["atomic_energies"],
             r_max=official.get("r_max"),
@@ -926,8 +1015,9 @@ class MaceMatpes(MacePotential):
             scale=official.get("atomic_inter_scale", official.get("scale")),
             shift=official.get("atomic_inter_shift", official.get("shift")),
         )
+        ctor = {k: v for k, v in ctor.items() if v is not None}
         ctor.update(kwargs)
-        return cls(**{k: v for k, v in ctor.items() if v is not None})
+        return cls(**ctor)
 
 
 class MaceOmol(MacePotential):
@@ -958,6 +1048,7 @@ class MaceOmol(MacePotential):
         shift: float = 0.0,
         compute_forces: bool = True,
         use_fallback: bool = False,
+        energy_dtype: torch.dtype | None = torch.float64,
     ) -> None:
         spec = MACEOMolSpec(
             atomic_numbers=list(atomic_numbers),
@@ -979,11 +1070,16 @@ class MaceOmol(MacePotential):
             shift=shift,
             use_fallback=use_fallback,
         )
-        super().__init__(spec, compute_forces=compute_forces, use_fallback=use_fallback)
+        super().__init__(
+            spec,
+            compute_forces=compute_forces,
+            use_fallback=use_fallback,
+            energy_dtype=energy_dtype,
+        )
 
     @classmethod
     def _from_official(cls, official: dict[str, Any], **kwargs: Any) -> MaceOmol:
-        ctor = dict(
+        ctor: dict[str, Any] = dict(
             atomic_numbers=official["atomic_numbers"],
             atomic_energies=official["atomic_energies"],
             r_max=official.get("r_max"),
@@ -997,5 +1093,6 @@ class MaceOmol(MacePotential):
             scale=official.get("atomic_inter_scale", official.get("scale")),
             shift=official.get("atomic_inter_shift", official.get("shift")),
         )
+        ctor = {k: v for k, v in ctor.items() if v is not None}
         ctor.update(kwargs)
-        return cls(**{k: v for k, v in ctor.items() if v is not None})
+        return cls(**ctor)

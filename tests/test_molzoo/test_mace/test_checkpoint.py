@@ -297,6 +297,24 @@ def _write_checkpoint(
 
 
 class TestCheckpointRemap:
+    def test_rejects_alias_collision(self) -> None:
+        remap = CheckpointRemap({"old.": "new."})
+        with pytest.raises(RuntimeError, match="collision"):
+            remap.rename({"old.weight": torch.ones(1), "new.weight": torch.zeros(1)})
+
+    def test_preflight_rejection_does_not_write_parameters(self) -> None:
+        target = torch.nn.Linear(2, 3)
+        before = {k: v.clone() for k, v in target.state_dict().items()}
+        with pytest.raises(RuntimeError, match="not covered"):
+            CheckpointRemap({}).load(target, {"weight": torch.zeros(3, 2)})
+        for key, value in target.state_dict().items():
+            torch.testing.assert_close(value, before[key], atol=0, rtol=0)
+
+    def test_equal_numel_does_not_prove_layout(self) -> None:
+        target = torch.nn.Linear(2, 3, bias=False)
+        with pytest.raises(RuntimeError, match="shape mismatch"):
+            CheckpointRemap({}).load(target, {"weight": torch.zeros(2, 3)})
+
     """Test the one remap that both foundation families now share."""
 
     def test_rename_is_pure(self) -> None:
@@ -476,7 +494,8 @@ class TestFromCheckpoint:
             mlp_irreps="8x0e",
         )
 
-        built = MaceMatpes.load(config_path, use_fallback=True)
+        built = MaceMatpes.load(config_path, use_fallback=True, energy_dtype=None)
+        assert built.energy_dtype is None
 
         for (name, want), (_, got) in zip(
             source.named_parameters(), built.named_parameters(), strict=True

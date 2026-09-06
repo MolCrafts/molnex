@@ -7,6 +7,7 @@ dispatch order, step accounting, typed return); every hook class is driven
 trajectory loop stands between a hook test and the method it tests.
 """
 
+import pytest
 import torch
 
 import molix.md
@@ -152,6 +153,38 @@ class TestMDRunner:
 
 class TestTrajectoryHook:
     """Driven directly: synthetic observables in, files out."""
+
+    @pytest.mark.parametrize("dtype", [None, torch.float32, torch.float64])
+    def test_storage_precision_is_explicit(self, tmp_path, dtype):
+        out = tmp_path / "precision.pt"
+        obs = _obs(fill=1.0 + 1e-10)
+        hook = TrajectoryHook(out, dtype=dtype, write_xyz=False)
+        hook.on_step_end(None, 1, obs)
+        hook.on_run_end(None)
+        saved = torch.load(out, weights_only=True)
+        for key, source in (("pos", obs.pos), ("vel", obs.vel), ("forces", obs.forces)):
+            expected = source.to(dtype=dtype or source.dtype)
+            torch.testing.assert_close(saved[key][0], expected, atol=0, rtol=0)
+        torch.testing.assert_close(saved["etot"][0], obs.total, atol=0, rtol=0)
+
+    def test_cpu_frames_do_not_alias_live_state(self, tmp_path):
+        out = tmp_path / "snapshot.pt"
+        obs = _obs()
+        hook = TrajectoryHook(out, write_xyz=False)
+        hook.on_step_end(None, 1, obs)
+        for field in (obs.pos, obs.vel, obs.forces, obs.total, obs.temperature):
+            field.add_(10.0)
+        hook.on_run_end(None)
+        saved = torch.load(out, weights_only=True)
+        assert saved["pos"][0, 0, 0].item() == 1.0
+        assert saved["vel"][0, 0, 0].item() == 2.0
+        assert saved["forces"][0, 0, 0].item() == -1.0
+        assert saved["etot"][0].item() == 3.0
+        assert saved["temp"][0].item() == 300.0
+
+    def test_rejects_half_precision_storage(self, tmp_path):
+        with pytest.raises(ValueError, match="trajectory dtype"):
+            TrajectoryHook(tmp_path / "bad.pt", dtype=torch.float16)
 
     def _drive(self, hook: TrajectoryHook, n_steps: int) -> None:
         for step in range(1, n_steps + 1):

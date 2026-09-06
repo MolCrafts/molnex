@@ -27,7 +27,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
 from molpot.potentials.gto.features import GTOFieldFeatures
 from molpot.potentials.gto.fukui import FukuiEquilibration
 from molpot.potentials.gto.hartree import GTOHartreeEnergy
@@ -95,10 +94,12 @@ class MacePolar(MacePotential):
         field_norms: Sequence[float] = (20.0, 20.0, 0.5, 0.5),
         add_local_electron_energy: bool = True,
         kspace_cutoff_factor: float = 1.0,
+        kspace_cutoff: float | None = None,
         electrostatic_self_interaction: bool = True,
         field_self_interaction: bool = False,
         compute_forces: bool = True,
         use_fallback: bool = False,
+        energy_dtype: torch.dtype | None = torch.float64,
     ) -> None:
         spec = MACEPolarSpec(
             atomic_numbers=list(atomic_numbers),
@@ -124,11 +125,17 @@ class MacePolar(MacePotential):
             field_norms=list(field_norms),
             add_local_electron_energy=add_local_electron_energy,
             kspace_cutoff_factor=kspace_cutoff_factor,
+            kspace_cutoff=kspace_cutoff,
             electrostatic_self_interaction=electrostatic_self_interaction,
             field_self_interaction=field_self_interaction,
             use_fallback=use_fallback,
         )
-        super().__init__(spec, compute_forces=compute_forces, use_fallback=use_fallback)
+        super().__init__(
+            spec,
+            compute_forces=compute_forces,
+            use_fallback=use_fallback,
+            energy_dtype=energy_dtype,
+        )
         hidden = _irreps(spec.max_hidden_l, spec.num_features)
         n_el = len(spec.atomic_numbers)
         y = sh_irreps_from_l_max(spec.multipole_lmax).replace(" ", "")
@@ -176,6 +183,7 @@ class MacePolar(MacePotential):
             feature_lmax=spec.field_lmax,
             feature_widths=list(spec.field_widths),
             kspace_cutoff_factor=spec.kspace_cutoff_factor,
+            k_cutoff=spec.kspace_cutoff,
             include_self_interaction=spec.field_self_interaction,
         )
         self.coulomb_energy = GTOHartreeEnergy(
@@ -183,6 +191,7 @@ class MacePolar(MacePotential):
             l_max=spec.multipole_lmax,
             include_self_interaction=spec.electrostatic_self_interaction,
             kspace_cutoff_factor=spec.kspace_cutoff_factor,
+            k_cutoff=spec.kspace_cutoff,
         )
         expanded = _expand_field_norms(list(spec.field_norms), n_w, spec.field_lmax)
         self.register_buffer(
@@ -235,6 +244,7 @@ class MacePolar(MacePotential):
         num_graphs: int,
         *,
         edge_diff: torch.Tensor | None = None,
+        shifts: torch.Tensor | None = None,
         total_charge: torch.Tensor | None = None,
         total_spin: torch.Tensor | None = None,
         cell: torch.Tensor | None = None,
@@ -288,7 +298,9 @@ class MacePolar(MacePotential):
                 (``B = 1``) — the reciprocal sum knows one cell.
 
         Returns:
-            Total energy per graph ``(B,)`` in eV.
+            Total energy per graph ``(B,)`` in eV. ``energy_dtype`` selects
+            accumulation precision (float64 by default, independent of the
+            backbone dtype).
 
         Raises:
             RuntimeError: If the model was built without per-layer readouts; on
@@ -297,6 +309,8 @@ class MacePolar(MacePotential):
             ValueError: If ``cell`` is given with more than one graph, or is
                 neither ``(3, 3)`` nor ``(1, 3, 3)``.
         """
+        if shifts is not None:
+            raise TypeError("energy_core no longer takes shifts; pass edge_diff=")
         vectors = edge_vectors(positions, edge_index, edge_diff=edge_diff)
         lengths = edge_lengths(vectors)
         node_attrs = self.node_attrs(Z, positions.dtype)
@@ -306,7 +320,7 @@ class MacePolar(MacePotential):
         # energy is invariant; GTO dipoles are not.
         edge_attrs = self.angular_features(vectors[:, [1, 2, 0]])
         node_feats = self.initial_node_features(node_attrs)
-        e0 = _scatter_sum(self.atomic_energies(Z), batch, num_graphs)
+        e0 = self._sum_energy(self.atomic_energies(Z), batch, num_graphs)
 
         per_layer = self.layer_features(
             node_feats=node_feats,
@@ -321,7 +335,7 @@ class MacePolar(MacePotential):
             raise RuntimeError("MacePolar requires per-layer readouts")
         for readout, layer in zip(self.readouts, per_layer, strict=True):
             node_es = node_es + readout(layer).squeeze(-1)
-        inter_e = _scatter_sum(self.scale_shift(node_es), batch, num_graphs)
+        inter_e = self._sum_energy(self.scale_shift(node_es), batch, num_graphs)
 
         density = per_layer[0].new_zeros(per_layer[0].shape[0], 2, self._y_dim)
         for src, layer in zip(self.lr_source_maps, per_layer, strict=True):
@@ -336,8 +350,8 @@ class MacePolar(MacePotential):
             density, self.fukui_source_map(per_layer[-1]), batch, total_charge, total_spin
         )
         field_independent = density.clone()
-        norms = self.field_feature_norms.to(dtype=density.dtype, device=density.device)
-        potential_features = density.new_zeros(density.shape[0], 2 * int(norms.numel()))
+        norms = self.field_feature_norms.to(dtype=density.dtype)
+        potential_features = density.new_zeros(density.shape[0], 2 * norms.shape[0])
         for update in self.field_dependent_charges_maps:
             feat_a = self.electric_potential_descriptor(
                 density[:, 0, :], positions, batch, cell=cell, num_graphs=num_graphs
@@ -361,16 +375,24 @@ class MacePolar(MacePotential):
             field_independent.reshape(density.shape[0], -1),
             density.reshape(density.shape[0], -1),
         )
-        le_total = _scatter_sum(le, batch, num_graphs)
+        le_total = self._sum_energy(le, batch, num_graphs)
         if not self.add_local_electron_energy:
             le_total = torch.zeros_like(le_total)
         hartree = self.coulomb_energy(
             density.sum(dim=1), positions, batch, cell=cell, num_graphs=num_graphs
         )
-        return e0 + inter_e + le_total + hartree
+        return e0 + inter_e + le_total + hartree.to(dtype=e0.dtype)
 
     @classmethod
     def _from_official(cls, official: dict[str, Any], **kwargs: Any) -> MacePolar:
+        for name, supported in (
+            ("keep_last_layer_irreps", True),
+            ("quadrupole_feature_corrections", False),
+            ("use_so3", False),
+            ("use_agnostic_product", True),
+        ):
+            if name in official and official[name] != supported:
+                raise ValueError(f"unsupported Polar configuration: {name}={official[name]!r}")
         hidden = official.get("hidden_irreps")
         mlp = official.get("MLP_irreps")
         num_features = official.get("num_features")
@@ -380,7 +402,11 @@ class MacePolar(MacePotential):
             num_features, max_hidden_l = _parse_irreps(str(hidden), "hidden_irreps")
         if mlp is not None:
             mlp_dim, _ = _parse_irreps(str(mlp), "MLP_irreps")
-        ctor = dict(
+        if any(value is None for value in (num_features, max_hidden_l, mlp_dim)):
+            raise KeyError(
+                "official Polar config requires hidden_irreps and MLP_irreps (or explicit widths)"
+            )
+        ctor: dict[str, Any] = dict(
             atomic_numbers=official["atomic_numbers"],
             atomic_energies=official["atomic_energies"],
             r_max=official.get("r_max"),
@@ -404,8 +430,10 @@ class MacePolar(MacePotential):
             field_norms=official.get("field_norms"),
             add_local_electron_energy=official.get("add_local_electron_energy"),
             kspace_cutoff_factor=official.get("kspace_cutoff_factor"),
+            kspace_cutoff=official.get("kspace_cutoff"),
             electrostatic_self_interaction=official.get("include_electrostatic_self_interaction"),
             field_self_interaction=official.get("field_si"),
         )
+        ctor = {k: v for k, v in ctor.items() if v is not None}
         ctor.update(kwargs)
-        return cls(**{k: v for k, v in ctor.items() if v is not None})
+        return cls(**ctor)

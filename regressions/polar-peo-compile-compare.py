@@ -24,7 +24,6 @@ from molix import config
 from molix.compile import Compiler
 from molix.md import NeighborList
 from molpot.forcefield import ForceField
-from molzoo.mace.checkpoint import CheckpointRemap, polar_keys
 from molzoo.mace.polar import MacePolar
 
 _BOX = Path(os.environ.get("MOLNEX_POLAR_BOX", "/tmp/mace-polar/peo_box.pt"))
@@ -35,15 +34,14 @@ _STEPS = int(os.environ.get("MOLNEX_MEASURE_STEPS", "20"))
 
 
 def build(dtype: torch.dtype, device: torch.device):
-    config.set_precision("fp64" if dtype == torch.float64 else "fp32")
+    config.set_precision("fp64" if dtype == torch.float64 else "fp32", matmul_precision="highest")
     blob = torch.load(_BOX, map_location="cpu", weights_only=True)
     z = blob["Z"].to(device=device, dtype=torch.long)
     pos = blob["pos"].to(device=device, dtype=dtype)
     cell = blob["cell"].to(device=device, dtype=dtype)
     n = int(pos.shape[0])
-    model = MacePolar.load(_DUMP, format="official", use_fallback=False, compute_forces=False)
-    CheckpointRemap(polar_keys, on_unexpected="return").load(
-        model, torch.load(_CUEQ, map_location="cpu", weights_only=True)
+    model = MacePolar.load(
+        _DUMP, converted_weights=_CUEQ, trusted=True, use_fallback=False, compute_forces=False
     )
     model = model.to(device=device, dtype=dtype).eval()
     model.requires_grad_(False)

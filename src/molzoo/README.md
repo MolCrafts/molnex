@@ -26,7 +26,7 @@ mace-subpackage-restructure-02-core:
 | `potential` | `MacePotential` plus product classes `MaceMatpes` / `MaceOmol` |
 | `polar` | `MacePolar` |
 | `checkpoint` | `CheckpointRemap` plus internal key tables |
-| `utils` | `e3nn2cueq` — official archive helper, no convert CLI |
+| `utils` | strict official archive reader; `e3nn2cueq` is a deprecated reader alias, not a basis converter |
 | `research` | freely-configurable research `MACE` encoder |
 
 Public construction is flat and product-owned::
@@ -34,6 +34,10 @@ Public construction is flat and product-owned::
     from molzoo import MaceMatpes, MaceOmol, MacePolar
     model = MaceMatpes(atomic_numbers=..., atomic_energies=...)
     model = MaceMatpes.load(path, format="official")
+
+See [MACE precision and official checkpoints](../../docs/molzoo/user-guide/mace.md)
+for precision-sensitive MD, safe weight loading, cuEq receiver blocking and
+the current validation limits.
 
 ## Model Specifications
 

@@ -96,6 +96,8 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
         offset: Finite-difference displacement in Å (official features: 0.1).
         kspace_cutoff_factor: Polar ``κ`` for the PBC path. Training default
             ``1.0``.
+        k_cutoff: Explicit reciprocal cutoff in Å⁻¹, overriding the heuristic
+            factor. Use the serialized runtime value when loading official weights.
         kspace_capacity_factor: Dimensionless head-room on the per-axis
             reciprocal index the k-grid sizes itself to,
             ``N_c = ceil(f · ‖a_i‖ k_cutoff / 2π)``, where ``a_i`` is lattice
@@ -135,6 +137,7 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
         feature_widths: list[float],
         offset: float = 0.1,
         kspace_cutoff_factor: float = 1.0,
+        k_cutoff: float | None = None,
         kspace_capacity_factor: float = 1.2,
         include_self_interaction: bool = False,
     ) -> None:
@@ -190,7 +193,9 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
         # arguments (``min(comb)`` is the same number ``combined_sigma`` holds),
         # read once here and frozen on the grid — never per forward.
         self.kgrid = KSpaceGrid(
-            k_cutoff=kspace_cutoff(
+            k_cutoff=k_cutoff
+            if k_cutoff is not None
+            else kspace_cutoff(
                 min(self.density_sigma, min(comb)),
                 max(density_lmax, feature_lmax),
                 self.kspace_cutoff_factor,
