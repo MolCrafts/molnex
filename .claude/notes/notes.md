@@ -450,10 +450,13 @@ leaf creation at `:179-180` (`pos.detach().requires_grad_`, the strain
 report three sites, all in that file: `:179`, `:180`, `:189`; the count
 `graph_break_count` is `graph_count − 1`, not `len(break_sites)`). Retained
 by Q3: the seam is the *caller* of the compiled core; AOTAutograd supplies
-the backward. Owner: molpot derivation. The compiled route is first-order only — with grad
-enabled AOTAutograd raises "compiled with non-empty donated buffers which
-requires create_graph=False" (spec `cuet-force-doublebackward`); MD runs
-under `no_grad` as documented. Baseline 51 graphs / 50 breaks → sites (1)
+the backward. Owner: molpot derivation. Buffer donation is off process-wide
+(`register_inductor_fallbacks` pins `torch._functorch.config.donated_buffer =
+False`), so the compiled core also answers the `create_graph=True` backward a
+force loss needs; `Compiler(donated_buffer=True)` opts back into donation and
+with it `create_graph=False` (MD only). Before that pin, grad-enabled use
+raised "compiled with non-empty donated buffers which requires
+create_graph=False" (spec `cuet-force-doublebackward`). Baseline 51 graphs / 50 breaks → sites (1)
 `kspace.py`, (2) `features.py` / `hartree.py` `num_graphs`, (4)
 `encoder.py:303` element gate (now eager-only behind
 `torch.compiler.is_compiling()`) are closed; (3) the isolated all-pairs

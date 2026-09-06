@@ -328,8 +328,9 @@ class Potentials(BasePotential):
         energy evaluation is re-enabled locally so it builds the graph the force
         needs. ``create_graph`` is deliberately left to resolve from the
         *ambient* mode inside the backend — under an MD ``no_grad`` it stays
-        ``False``, which is what keeps AOTAutograd's donated buffers valid on a
-        compiled core.
+        ``False``. A compiled core serves both modes because buffer donation is
+        off process-wide (:func:`molix.compile.register_inductor_fallbacks`);
+        ``Compiler(donated_buffer=True)`` trades that back for MD-only reuse.
 
         Args:
             system: Batch / mapping carrying ``atoms.pos`` and the topology.

@@ -519,13 +519,14 @@ class TestPotentialsCompiledCore:
         in-graph NaN if the rebind is skipped — never as a truncated finite
         energy.
 
-        The whole route is first-order **inference**: every evaluation runs
-        under ``torch.no_grad()``. With grad enabled AOTAutograd refuses
-        outright (donated buffers require ``create_graph=False``), which is the
-        documented double-backward boundary — pinned here rather than left as
-        folklore, because it is the difference between "MD" and "force-loss
-        training", and the latter keeps the eager core (spec
-        ``cuet-force-doublebackward``).
+        The MD route is first-order **inference**: those evaluations run under
+        ``torch.no_grad()``. Outside it the ambient grad mode asks for
+        ``create_graph=True``, which AOTAutograd serves only while buffer
+        donation is off — ``register_inductor_fallbacks`` pins
+        ``torch._functorch.config.donated_buffer = False`` for exactly that
+        reason. Pinned here rather than left as folklore: it is the difference
+        between "MD" and "force-loss training" reaching the same compiled core
+        (spec ``cuet-force-doublebackward``).
         """
         from tests.test_molzoo.test_mace.conftest import CLUSTER_POS
 
@@ -538,10 +539,8 @@ class TestPotentialsCompiledCore:
 
         pots.bind_cell(cell)
         pots.calc_energy(_polar_batch(pos, cell))
-        # First-order MD inference is the whole scope of the compiled core:
-        # AOTAutograd cannot double-backward through it (spec
-        # cuet-force-doublebackward), and its donated buffers refuse the
-        # create_graph=True the ambient grad mode would otherwise ask for.
+        # MD inference is measured under no_grad; the grad-enabled route is
+        # asserted after this block, once buffer donation is known to be off.
         with torch.no_grad():
             eager = tuple(
                 tensor.detach().clone()
@@ -591,8 +590,13 @@ class TestPotentialsCompiledCore:
             pots.bind_cell(within)
             assert bool(torch.isfinite(pots.calc_energy(_polar_batch(pos, within))).all())
 
-        with pytest.raises(RuntimeError, match="donated buffers"):
-            pots.calc_energy_forces_virial(_polar_batch(pos, cell))
+        # Grad enabled: the same compiled core now answers a create_graph=True
+        # backward instead of refusing on donated buffers, and returns the
+        # inference values.
+        assert torch._functorch.config.donated_buffer is False
+        with_grad = pots.calc_energy_forces_virial(_polar_batch(pos, cell))
+        for got, want in zip(with_grad, eager, strict=True):
+            assert torch.allclose(got.detach(), want, atol=1e-10, rtol=0.0)
 
         probe = _polar_batch(pos, cell)
         flat = Compiler.explain(

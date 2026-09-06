@@ -24,10 +24,12 @@ e. a ``Potentials`` rebuilt by ``to_potentials()`` still dispatches through the
 f. ``compile_core`` without the eager forward raises;
 g. the stale ``PotentialForceField`` name is gone from the touched docstrings.
 
-Everything runs under ``torch.no_grad()``: the compiled core covers first-order,
-cell-bound, B=1 MD **inference** only. With grad enabled AOTAutograd refuses
-(donated buffers require ``create_graph=False``) — force-supervised training
-keeps the eager core (spec ``cuet-force-doublebackward``).
+Everything here runs under ``torch.no_grad()``: this script measures the
+first-order, cell-bound, B=1 MD **inference** route. Buffer donation is off by
+default (``molix.compile.register_inductor_fallbacks``), so a grad-enabled
+``create_graph=True`` force loss is no longer refused by AOTAutograd; that path
+is asserted in ``tests/test_molpot/test_forcefield/test_potentials.py``, not
+here. ``Compiler(donated_buffer=True)`` re-imposes ``create_graph=False``.
 
 Goldens: captured 2026-09-03 on the pre-change eager path of this tree
 (molnex @ ``feat/oplsaa-parameterizer``), CPU, fp64, with
