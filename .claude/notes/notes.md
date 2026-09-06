@@ -358,9 +358,16 @@ the weights become NaN (never truncation), both from the same
 `floor(x) > N_c` predicate. Cost of the box vs the old data-dependent
 half-sphere (`k_cut = 1.8467 Å⁻¹`): PEO box 46.36 Å cubic, M = 5318 →
 **21437** at `capacity_factor=1.2` (N_c = 17), 12194 at 1.0 (N_c = 14);
-10 Å cube 46 → 364. At N = 4995 one `(N, M)` fp32 tensor grows from
-101.3 MiB to **408.5 MiB**, and `structure_factor` holds three of them
-(`kr` / `cos_kr` / `sin_kr`, ≈ +0.9 GiB fp32). NVT callers may pass
+10 Å cube 46 → 364. The half-box is still that size; the `(N, M)` plane-wave
+matrix is **not** materialised. `structure_factor` and `kspace_phi_field`
+use LAMMPS `ewald` / `eik_dot_r`: 1-D `exp(i n_d b_d · r)` tables of
+length `2 N_c,d + 1` (the integer box already frozen on `KSpaceGrid`)
+and a separable sum onto that Miller grid. Workspace is `O(N N_c²)`,
+not `(N, M)` and not an arbitrary k-tile. Same SI V.6 sum; not PME.
+Ordinary autograd through the einsums — no `custom_op`. MD compile warmup is `calc_forces`, not
+virial (`calc_energy_forces_virial` strains `graphs.cell` and OOMs).
+`multipole_ewald.py` still builds a
+dense `(N, M)` — owner **molpot elec**, not this seam. NVT callers may pass
 `capacity_factor=1.0`; step time / peak memory are measured by 03-wire.
 Same three defects (`.item()` sizing, boolean-mask slicing, half-sphere
 mask) still live in `elec/kernels/multipole_ewald.py:221-245` /

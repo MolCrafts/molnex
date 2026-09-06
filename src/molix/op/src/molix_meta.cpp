@@ -8,6 +8,7 @@
 //
 // Keep this file in sync with the schema in `molix_library.cpp`.
 
+#include <ATen/ATen.h>
 #include <torch/extension.h>
 #include <tuple>
 
@@ -61,10 +62,27 @@ Tensor pme_reciprocal_meta(
     return torch::empty({}, positions.options());
 }
 
+Tensor scatter_sum_meta(
+    const Tensor& src,
+    const Tensor& /*index*/,
+    int64_t dim_size
+) {
+    // FakeTensor / dynamo traces with symbolic sizes and strides.
+    // ``src.sizes()`` / ``numel()`` throw on those tensors; use SymInt.
+    auto sizes = src.sym_sizes().vec();
+    if (sizes.empty()) {
+        sizes.emplace_back(dim_size);
+    } else {
+        sizes[0] = dim_size;
+    }
+    return at::empty_symint(sizes, src.options());
+}
+
 }  // namespace
 
 TORCH_LIBRARY_IMPL(molix, Meta, m) {
     m.impl("get_neighbor_pairs", &get_neighbor_pairs_meta);
     m.impl("pme_direct", &pme_direct_meta);
     m.impl("pme_reciprocal", &pme_reciprocal_meta);
+    m.impl("scatter_sum", &scatter_sum_meta);
 }

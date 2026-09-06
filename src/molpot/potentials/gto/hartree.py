@@ -35,6 +35,7 @@ from molpot.potentials.gto.kspace import (
     KSpaceGrid,
     cartesian_dipole,
     kspace_cutoff,
+    reciprocal_basis,
     structure_factor,
 )
 
@@ -333,7 +334,7 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
     def _self_energy(
         self, feats: torch.Tensor, batch: torch.Tensor, num_graphs: int
     ) -> torch.Tensor:
-        overlap = self.self_overlap.to(dtype=feats.dtype, device=feats.device)
+        overlap = self.self_overlap.to(dtype=feats.dtype)
         width = min(overlap.shape[0], feats.shape[-1])
         node = 0.5 * (feats[:, :width] * overlap[:width] * feats[:, :width]).sum(dim=-1)
         return scatter_sum_compile_safe(node, batch, num_graphs)
@@ -453,9 +454,16 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
         # ``vectors`` validates the cell shape first, so a bad cell raises the
         # grid's own named ValueError rather than a determinant of the wrong
         # thing; ``det`` then covers ``(3, 3)`` and ``(1, 3, 3)`` statically.
-        kvec, k_sq_guarded, weights = self.kgrid.vectors(cell)
+        _, k_sq_guarded, weights = self.kgrid.vectors(cell)
         volume = torch.linalg.det(cell).abs().reshape(())
-        s_real, s_imag = structure_factor(positions, feats[:, 0], kvec, dipoles)
+        s_real, s_imag = structure_factor(
+            positions,
+            feats[:, 0],
+            self.kgrid.n,
+            reciprocal_basis(cell),
+            self.kgrid.capacity,
+            dipoles,
+        )
         s_sq = s_real * s_real + s_imag * s_imag
         kfac = torch.exp(-(self.sigma * self.sigma) * k_sq_guarded) / k_sq_guarded
         energy = eV_A * _TWOPI / volume * (weights * kfac * s_sq).sum()

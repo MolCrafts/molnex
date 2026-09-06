@@ -7,8 +7,10 @@
 //
 // Contract for new ops:
 //   1. Add the schema in this file.
-//   2. Provide AutogradCPU + AutogradCUDA + Meta impls in src/<domain>/.
-//   3. Add a thin Python wrapper in src/molix/F/<domain>.py that handles
+//   2. Provide CPU + CUDA + Meta impls in src/<domain>/.
+//   3. Register autograd in the Python wrapper (``torch.library.register_autograd``)
+//      so dynamo does not trace into CUDA ``data_ptr()``.
+//   4. Add a thin Python wrapper in src/molix/F/<domain>.py that handles
 //      dtype / shape assertions before calling torch.ops.molix.<name>.
 
 #include <torch/extension.h>
@@ -40,4 +42,12 @@ TORCH_LIBRARY(molix, m) {
         "Tensor xmoduli, Tensor ymoduli, Tensor zmoduli"
         ") -> Tensor"
     );
+
+    // ── Scatter ────────────────────────────────────────────────────────
+    // Streaming scatter-add along dim 0: ``out[index[e]] += src[e]``.
+    // Workspace is the output ``(dim_size, *src.shape[1:])`` only — no
+    // ``(N, tile)`` scratch. Same primitive as pytorch_scatter ``scatter_add``
+    // (unsorted COO); backward is gather ``grad_out[index]``.
+    m.def("scatter_sum(Tensor src, Tensor index, int dim_size) -> Tensor");
+
 }

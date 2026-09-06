@@ -9,10 +9,15 @@ whose plane waves ``exp(i k · r)`` carry the periodicity of the simulation cell
 
 Not PME (particle-mesh Ewald, the FFT-based charge splitting most molecular
 dynamics codes use). Polar SI V.6 is the analytic GTO Fourier transform plus a
-**direct reciprocal-lattice sum** (half-box, conjugate symmetry). This module is
-PyTorch on purpose: ``E`` depends on ``cell`` through the k-vectors, so
-``∂E/∂pos`` and the virial ``∂E/∂ε`` are ordinary autograd. A fused CUDA
-kernel would need a custom ``autograd.Function`` for both.
+**direct reciprocal-lattice sum** (half-box, conjugate symmetry). The
+contraction is LAMMPS ``ewald`` / ``eik_dot_r``: one-dimensional
+``(cos, sin)`` tables of length ``2 N_c,d + 1`` (the integer box frozen on
+:class:`KSpaceGrid`), then a separable sum onto that Miller grid. Tables stay
+real so inductor can codegen them — ``torch.complex`` is an ATen fallback.
+Workspace is ``O(N N_c²)``, never the plane-wave matrix ``(N, M)`` with
+``M ~ N_c³``, and there is no arbitrary k-tile. ``E`` depends on ``cell``
+through the reciprocal basis, so ``∂E/∂pos`` and the virial ``∂E/∂ε`` are
+ordinary autograd.
 
 The released MACE-POLAR-1 checkpoint — "the dump" throughout this package —
 uses the Gaussian convention ``erf(r/(2σ))/r`` (not paper Eq. 37). Two
@@ -122,6 +127,14 @@ def _as_cell(cell: torch.Tensor) -> torch.Tensor:
     if tuple(cell.shape) != (3, 3):
         raise ValueError(f"cell must be (3, 3), got {tuple(cell.shape)}")
     return cell
+
+
+def reciprocal_basis(cell: torch.Tensor) -> torch.Tensor:
+    """Rows ``b_i`` of ``2π cell^{-T}`` in Å⁻¹.
+
+    Same ``g`` :meth:`KSpaceGrid.vectors` uses: ``k(n) = n · g``.
+    """
+    return _TWOPI * torch.linalg.inv(_as_cell(cell)).T
 
 
 class KSpaceGrid:
@@ -379,7 +392,7 @@ class KSpaceGrid:
                 f"new KSpaceGrid on that device."
             )
         dtype = cell.dtype
-        g = _TWOPI * torch.linalg.inv(cell).T
+        g = reciprocal_basis(cell)
         kvec = box.to(dtype) @ g
         k_sq = (kvec * kvec).sum(dim=-1)
         live = (k_sq > 0.0) & (k_sq < self.k_cutoff * self.k_cutoff)
@@ -420,10 +433,121 @@ class KSpaceGrid:
         return self
 
 
+def _miller_tables(
+    pos: torch.Tensor,
+    recip: torch.Tensor,
+    capacity: tuple[int, int, int],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """LAMMPS ``eik_dot_r`` 1-D tables as ``(cos, sin)`` pairs.
+
+    ``n_d`` runs over ``[-N_c,d, N_c,d]`` — the integer box already frozen on
+    :class:`KSpaceGrid`, not an arbitrary tile. Each table is ``(N, 2 N_c + 1)``
+    real; three axes, never ``(N, M)``. Cos/sin stay real so inductor can
+    codegen (``torch.complex`` is an ATen fallback).
+    """
+    theta = pos @ recip.transpose(0, 1)
+    tables: list[torch.Tensor] = []
+    for dim, n_cap in enumerate(capacity):
+        n1d = torch.arange(-n_cap, n_cap + 1, device=pos.device, dtype=pos.dtype)
+        phase = theta[:, dim].unsqueeze(-1) * n1d
+        tables.append(torch.cos(phase))
+        tables.append(torch.sin(phase))
+    return tables[0], tables[1], tables[2], tables[3], tables[4], tables[5]
+
+
+def _cmul(
+    ar: torch.Tensor,
+    ai: torch.Tensor,
+    br: torch.Tensor,
+    bi: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(ar + i ai)(br + i bi)`` as a real pair."""
+    return ar * br - ai * bi, ar * bi + ai * br
+
+
+def _separable_sum(
+    cx: torch.Tensor,
+    sx: torch.Tensor,
+    cy: torch.Tensor,
+    sy: torch.Tensor,
+    cz: torch.Tensor,
+    sz: torch.Tensor,
+    amp: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``S[nx, ny, nz] = Σ_i amp_i exp(i n · θ_i)`` as ``(real, imag)``.
+
+    Intermediate ``(N, N_c,x, N_c,y)`` from the two in-plane tables, then one
+    GEMM over atoms onto the third axis. ``N_c`` is the Miller box, not ``M``.
+    """
+    plane_r, plane_i = _cmul(cx.unsqueeze(2), sx.unsqueeze(2), cy.unsqueeze(1), sy.unsqueeze(1))
+    az_r = amp.unsqueeze(-1) * cz
+    az_i = amp.unsqueeze(-1) * sz
+    sr = torch.einsum("nab,nc->abc", plane_r, az_r) - torch.einsum("nab,nc->abc", plane_i, az_i)
+    si = torch.einsum("nab,nc->abc", plane_r, az_i) + torch.einsum("nab,nc->abc", plane_i, az_r)
+    return sr, si
+
+
+def _structure_factor_grid(
+    cx: torch.Tensor,
+    sx: torch.Tensor,
+    cy: torch.Tensor,
+    sy: torch.Tensor,
+    cz: torch.Tensor,
+    sz: torch.Tensor,
+    charges: torch.Tensor,
+    recip: torch.Tensor,
+    capacity: tuple[int, int, int],
+    dipoles: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Full Miller-box ``S(n)`` as ``(real, imag)`` cubes."""
+    dtype = charges.dtype
+    sr, si = _separable_sum(cx, sx, cy, sy, cz, sz, charges)
+    if dipoles is None:
+        return sr, si
+    alpha = (dipoles @ recip.transpose(0, 1)).to(dtype=dtype)
+    nx = torch.arange(-capacity[0], capacity[0] + 1, device=charges.device, dtype=dtype)
+    ny = torch.arange(-capacity[1], capacity[1] + 1, device=charges.device, dtype=dtype)
+    nz = torch.arange(-capacity[2], capacity[2] + 1, device=charges.device, dtype=dtype)
+    d0r, d0i = _separable_sum(cx, sx, cy, sy, cz, sz, alpha[:, 0])
+    d1r, d1i = _separable_sum(cx, sx, cy, sy, cz, sz, alpha[:, 1])
+    d2r, d2i = _separable_sum(cx, sx, cy, sy, cz, sz, alpha[:, 2])
+    dip_r = nx.reshape(-1, 1, 1) * d0r + ny.reshape(1, -1, 1) * d1r + nz.reshape(1, 1, -1) * d2r
+    dip_i = nx.reshape(-1, 1, 1) * d0i + ny.reshape(1, -1, 1) * d1i + nz.reshape(1, 1, -1) * d2i
+    # ``S += i · dip``: ``(sr - dip_i, si + dip_r)``.
+    return sr - dip_i, si + dip_r
+
+
+def _gather_half_box(
+    grid: torch.Tensor,
+    n: torch.Tensor,
+    capacity: tuple[int, int, int],
+) -> torch.Tensor:
+    """Pull half-box rows ``n`` out of a full Miller cube."""
+    return grid[n[:, 0] + capacity[0], n[:, 1] + capacity[1], n[:, 2] + capacity[2]]
+
+
+def _scatter_half_box(
+    n: torch.Tensor,
+    capacity: tuple[int, int, int],
+    values: torch.Tensor,
+) -> torch.Tensor:
+    """Scatter half-box rows into a zero Miller cube. Other hemisphere stays 0."""
+    kx = 2 * capacity[0] + 1
+    ky = 2 * capacity[1] + 1
+    kz = 2 * capacity[2] + 1
+    out = values.new_zeros((kx, ky, kz, *values.shape[1:]))
+    ix = n[:, 0] + capacity[0]
+    iy = n[:, 1] + capacity[1]
+    iz = n[:, 2] + capacity[2]
+    return out.index_put((ix, iy, iz), values)
+
+
 def structure_factor(
     pos: torch.Tensor,
     charges: torch.Tensor,
-    kvec: torch.Tensor,
+    n: torch.Tensor,
+    recip: torch.Tensor,
+    capacity: tuple[int, int, int],
     dipoles: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Structure factor ``S(k) = Σ_i (q_i + i k·μ_i) exp(i k · r_i)``.
@@ -433,23 +557,97 @@ def structure_factor(
     It is returned as separate real and imaginary parts because the callers
     only ever need ``|S|²`` and products of it with real weights.
 
+    Evaluated with LAMMPS ``eik_dot_r`` on the integer box ``capacity``, then
+    gathered onto the half-box rows ``n``. Same SI V.6 sum as
+    ``Σ_i (q_i + i k·μ_i) exp(i k·r_i)`` with ``k = n · recip``; the plane-wave
+    matrix ``(N, M)`` is never built.
+
     Args:
         pos: Positions ``(N, 3)`` in Å.
         charges: Monopoles ``(N,)`` in e.
-        kvec: Reciprocal vectors ``(M, 3)`` in Å⁻¹.
+        n: Integer Miller indices ``(M, 3)`` from :attr:`KSpaceGrid.n`.
+        recip: Reciprocal basis ``(3, 3)`` Å⁻¹ from :func:`reciprocal_basis`.
+        capacity: Per-axis ``N_c`` from :attr:`KSpaceGrid.capacity`.
         dipoles: Optional Cartesian dipoles ``(N, 3)`` in e·Å. ``k·μ`` is then
             in e, so it adds to ``q`` with no unit conversion.
 
     Returns:
         ``S_real (M,)``, ``S_imag (M,)``, both in e.
     """
-    kr = pos @ kvec.T
-    cos_kr = torch.cos(kr)
-    sin_kr = torch.sin(kr)
-    s_real = charges @ cos_kr
-    s_imag = charges @ sin_kr
-    if dipoles is not None:
-        uk = dipoles @ kvec.T
-        s_real = s_real - (uk * sin_kr).sum(dim=0)
-        s_imag = s_imag + (uk * cos_kr).sum(dim=0)
-    return s_real, s_imag
+    cx, sx, cy, sy, cz, sz = _miller_tables(pos, recip, capacity)
+    sr, si = _structure_factor_grid(cx, sx, cy, sy, cz, sz, charges, recip, capacity, dipoles)
+    return _gather_half_box(sr, n, capacity), _gather_half_box(si, n, capacity)
+
+
+def kspace_phi_field(
+    charges: torch.Tensor,
+    positions: torch.Tensor,
+    n: torch.Tensor,
+    recip: torch.Tensor,
+    capacity: tuple[int, int, int],
+    k_sq_guarded: torch.Tensor,
+    weights: torch.Tensor,
+    sigma: torch.Tensor,
+    pre: torch.Tensor,
+    dipoles: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """K-space potential ``φ`` and Cartesian ``+∇φ`` at each atom.
+
+    Same GTO reciprocal sum as :func:`structure_factor` followed by the
+    per-width form factor. Inverse transform is the separable conjugate of
+    ``eik_dot_r`` — ``φ_i = Σ_n W(n) Re[S(n) exp(-i k·r_i)]`` — so ``(N, M)``
+    is never materialised.
+
+    Args:
+        charges: Monopoles ``(N,)`` e.
+        positions: ``(N, 3)`` Å.
+        n: Integer Miller indices ``(M, 3)`` from :attr:`KSpaceGrid.n`.
+        recip: Reciprocal basis ``(3, 3)`` Å⁻¹ from :func:`reciprocal_basis`.
+        capacity: Per-axis ``N_c`` from :attr:`KSpaceGrid.capacity`.
+        k_sq_guarded: Guarded ``|k|²`` ``(M,)`` Å⁻² from :meth:`KSpaceGrid.vectors`.
+        weights: Half-box 0/2 weights ``(M,)``.
+        sigma: Combined GTO widths ``(R,)`` or ``(1, R)`` Å.
+        pre: Scalar ``eV_A · 4π / Ω``.
+        dipoles: Optional Cartesian dipoles ``(N, 3)`` e·Å.
+
+    Returns:
+        ``phi (N, R)`` eV/e, ``field (N, 3, R)`` eV/(e·Å) as ``+∇φ``.
+    """
+    cx, sx, cy, sy, cz, sz = _miller_tables(positions, recip, capacity)
+    sr, si = _structure_factor_grid(cx, sx, cy, sy, cz, sz, charges, recip, capacity, dipoles)
+    guarded = k_sq_guarded.unsqueeze(-1)
+    width = sigma.reshape(1, -1)
+    kfac = torch.exp(-(width * width) * guarded) / guarded
+    kernel = _scatter_half_box(n, capacity, weights.unsqueeze(-1) * kfac)
+    pot_r = kernel * sr.unsqueeze(-1)
+    pot_i = kernel * si.unsqueeze(-1)
+    plane_r, plane_i = _cmul(cx.unsqueeze(2), -sx.unsqueeze(2), cy.unsqueeze(1), -sy.unsqueeze(1))
+    inner_r = torch.einsum("nab,abcr->ncr", plane_r, pot_r) - torch.einsum(
+        "nab,abcr->ncr", plane_i, pot_i
+    )
+    inner_i = torch.einsum("nab,abcr->ncr", plane_r, pot_i) + torch.einsum(
+        "nab,abcr->ncr", plane_i, pot_r
+    )
+    cz_e = cz.unsqueeze(-1)
+    sz_e = sz.unsqueeze(-1)
+    phi = pre * (inner_r * cz_e + inner_i * sz_e).sum(dim=1)
+    nx = torch.arange(-capacity[0], capacity[0] + 1, device=positions.device, dtype=positions.dtype)
+    ny = torch.arange(-capacity[1], capacity[1] + 1, device=positions.device, dtype=positions.dtype)
+    nz = torch.arange(-capacity[2], capacity[2] + 1, device=positions.device, dtype=positions.dtype)
+    kvec = (
+        nx.reshape(-1, 1, 1, 1) * recip[0]
+        + ny.reshape(1, -1, 1, 1) * recip[1]
+        + nz.reshape(1, 1, -1, 1) * recip[2]
+    )
+    wk_r = pot_r.unsqueeze(-2) * kvec.unsqueeze(-1)
+    wk_i = pot_i.unsqueeze(-2) * kvec.unsqueeze(-1)
+    inner_fr = torch.einsum("nab,abcdr->ncdr", plane_r, wk_r) - torch.einsum(
+        "nab,abcdr->ncdr", plane_i, wk_i
+    )
+    inner_fi = torch.einsum("nab,abcdr->ncdr", plane_r, wk_i) + torch.einsum(
+        "nab,abcdr->ncdr", plane_i, wk_r
+    )
+    cz_f = cz[:, :, None, None]
+    sz_f = sz[:, :, None, None]
+    field = pre * (inner_fi * cz_f - inner_fr * sz_f).sum(dim=1)
+    return phi, field

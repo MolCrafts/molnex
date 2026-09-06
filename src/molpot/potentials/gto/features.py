@@ -42,7 +42,8 @@ from molpot.potentials.gto.kspace import (
     KSpaceGrid,
     cartesian_dipole,
     kspace_cutoff,
-    structure_factor,
+    kspace_phi_field,
+    reciprocal_basis,
 )
 
 #: Local on purpose: ``kspace`` owns its own constants and is free to rename
@@ -227,7 +228,7 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
         if src.numel() == 0:
             return out
         r = (positions[src] - positions[dst]).norm(dim=-1, keepdim=True)
-        sigma = self.combined_sigma.to(dtype=charges.dtype, device=charges.device)
+        sigma = self.combined_sigma.to(dtype=charges.dtype)
         kernel = torch.erf(r / (2.0 * sigma)) / r.clamp(min=1e-6)
         contrib = charges[src].unsqueeze(-1) * kernel * eV_A
         return scatter_sum_compile_safe(contrib, dst, n_out)
@@ -290,7 +291,7 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
         need_fd = self.density_lmax == 1 or self.feature_lmax == 1
         if not need_fd:
             scalars = self._pair_features(feats[:, 0], positions, batch, None, n)
-            return scalars * self.l0_factors.to(dtype=feats.dtype, device=feats.device)
+            return scalars * self.l0_factors.to(dtype=feats.dtype)
 
         offset = self.offset
         ext_pos = positions.repeat_interleave(4, dim=0)
@@ -308,10 +309,10 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
         ext_batch = batch.repeat_interleave(4)
         orig = torch.arange(n, device=batch.device).repeat_interleave(4)
         scalar = self._pair_features(charges, ext_pos, ext_batch, orig, n * 4)
-        l0 = self.l0_factors.to(dtype=feats.dtype, device=feats.device)
+        l0 = self.l0_factors.to(dtype=feats.dtype)
         if self.feature_lmax == 0:
             return scalar[0::4] * l0
-        l1 = self.l1_factors.to(dtype=feats.dtype, device=feats.device)
+        l1 = self.l1_factors.to(dtype=feats.dtype)
         # mul_ir  n x 0e + n x 1o (y, z, x per radial) → ir_mul
         scalars = scalar[0::4] * l0
         vec_y = l1 * (scalar[2::4] - scalar[0::4])
@@ -349,22 +350,22 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
         # ``vectors`` validates the cell shape first, so a bad cell raises the
         # grid's own named ValueError rather than a determinant of the wrong
         # thing; ``det`` then covers ``(3, 3)`` and ``(1, 3, 3)`` statically.
-        kvec, k_sq_guarded, weights = self.kgrid.vectors(cell)
+        _, k_sq_guarded, weights = self.kgrid.vectors(cell)
         volume = torch.linalg.det(cell).abs().reshape(())
-        s_real, s_imag = structure_factor(positions, charges, kvec, dipoles)
-        kr = positions @ kvec.T
-        cos_kr = torch.cos(kr)
-        sin_kr = torch.sin(kr)
-        term = s_real.unsqueeze(0) * cos_kr + s_imag.unsqueeze(0) * sin_kr
-        grad_term = -s_real.unsqueeze(0) * sin_kr + s_imag.unsqueeze(0) * cos_kr
-        sigma = self.combined_sigma.to(dtype=charges.dtype, device=charges.device).reshape(1, -1)
-        guarded = k_sq_guarded.unsqueeze(-1)
-        kfac = torch.exp(-(sigma * sigma) * guarded) / guarded
-        weight = weights.unsqueeze(-1) * kfac
+        sigma = self.combined_sigma.to(dtype=charges.dtype)
         pre = eV_A * _FOURPI / volume
-        phi = pre * (term @ weight)
-        field = pre * torch.einsum("im,mr,mc->icr", grad_term, weight, kvec)
-        return phi, field
+        return kspace_phi_field(
+            charges,
+            positions,
+            self.kgrid.n,
+            reciprocal_basis(cell),
+            self.kgrid.capacity,
+            k_sq_guarded,
+            weights,
+            sigma,
+            pre,
+            dipoles,
+        )
 
     def _kspace_features(
         self,
@@ -399,24 +400,24 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
             cartesian_dipole(feats) if self.density_lmax == 1 and feats.shape[-1] >= 4 else None
         )
         phi, grad = self._kspace_potential(feats[:, 0], positions, cell, dipoles)
-        l0 = self.l0_factors.to(dtype=feats.dtype, device=feats.device)
+        l0 = self.l0_factors.to(dtype=feats.dtype)
         scalars = phi * l0
         if not self.include_self_interaction:
             # ``φ`` above is the k-space sum over *all* sources, this atom
             # included; the real-space path never pairs an atom with itself.
-            self_l0 = self.self_overlap_l0.to(dtype=feats.dtype, device=feats.device)
+            self_l0 = self.self_overlap_l0.to(dtype=feats.dtype)
             scalars = scalars - self_l0 * feats[:, 0:1]
         if self.feature_lmax == 0:
             return scalars
         # Real-space l1 multiplies the FD difference ``φ(r+δ)-φ(r) ≈ δ ∂φ``.
-        l1 = self.l1_factors.to(dtype=feats.dtype, device=feats.device) * self.offset
+        l1 = self.l1_factors.to(dtype=feats.dtype) * self.offset
         vec_y = l1 * grad[:, 1, :]
         vec_z = l1 * grad[:, 2, :]
         vec_x = l1 * grad[:, 0, :]
         if not self.include_self_interaction and dipoles is not None:
             # Source multipoles are ``(q, μ_y, μ_z, μ_x)``; a monopole's own
             # field vanishes at its centre, so only the dipole is removed.
-            self_l1 = self.self_overlap_l1.to(dtype=feats.dtype, device=feats.device)
+            self_l1 = self.self_overlap_l1.to(dtype=feats.dtype)
             vec_y = vec_y - self_l1 * feats[:, 1:2]
             vec_z = vec_z - self_l1 * feats[:, 2:3]
             vec_x = vec_x - self_l1 * feats[:, 3:4]

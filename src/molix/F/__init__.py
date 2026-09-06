@@ -10,7 +10,7 @@ __all__ = [
     # electrostatics
     "pme_direct",
     "pme_reciprocal",
-    # scatter (torch-native)
+    # scatter (molix::scatter_sum when the op lib is loaded)
     "scatter_sum",
     "batch_add",
 ]

@@ -1,9 +1,8 @@
 """Tests for the GTO reciprocal-space surface (``molpot.potentials.gto.kspace``).
 
-Only ``kspace.py``'s own public face lives here: :func:`kspace_cutoff` and
-:class:`KSpaceGrid`. The ``GTOHartreeEnergy`` cases that used to sit in this
-file moved to ``test_hartree.py`` when ``hartree_energy`` was folded into its
-single caller (spec ``polar-compile-clean-01-kgrid``).
+Public face: :func:`kspace_cutoff`, :class:`KSpaceGrid`,
+:func:`structure_factor`, :func:`kspace_phi_field`. Hartree / field-feature
+consumers live in ``test_hartree.py`` / ``test_features.py``.
 """
 
 from __future__ import annotations
@@ -15,7 +14,13 @@ import torch
 
 from molix import config
 from molix.compile import Compiler
-from molpot.potentials.gto.kspace import KSpaceGrid, kspace_cutoff
+from molpot.potentials.gto.kspace import (
+    KSpaceGrid,
+    kspace_cutoff,
+    kspace_phi_field,
+    reciprocal_basis,
+    structure_factor,
+)
 
 #: Polar dump reciprocal cutoff at ``σ = 1.5 Å``, ``l_max = 1``, ``κ = 1.0``
 #: in Å⁻¹ — hard-coded golden, equal to the official checkpoint's
@@ -385,3 +390,177 @@ class TestKSpaceGrid:
         assert kvec.device.type == "cpu"
         assert k_sq_guarded.device.type == "cpu"
         assert weights.device.type == "cpu"
+
+
+def _bound_cubic_grid() -> tuple[
+    KSpaceGrid, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
+    """10 Å cube at the Polar dump cutoff — small enough for a dense ``(N, M)`` oracle."""
+    cell = torch.eye(3, dtype=torch.float64) * 10.0
+    grid = KSpaceGrid(k_cutoff=K_CUT, capacity_factor=1.0)
+    grid.bind(cell)
+    kvec, k_sq, weights = grid.vectors(cell)
+    return grid, reciprocal_basis(cell), kvec, k_sq, weights
+
+
+def _dense_structure_factor(
+    pos: torch.Tensor,
+    charges: torch.Tensor,
+    kvec: torch.Tensor,
+    dipoles: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Paper SI V.6 ``S(k)`` as a single ``(N, M)`` contraction — the algorithm."""
+    kr = pos @ kvec.T
+    cos_kr = torch.cos(kr)
+    sin_kr = torch.sin(kr)
+    s_real = charges @ cos_kr
+    s_imag = charges @ sin_kr
+    if dipoles is not None:
+        uk = dipoles @ kvec.T
+        s_real = s_real - (uk * sin_kr).sum(dim=0)
+        s_imag = s_imag + (uk * cos_kr).sum(dim=0)
+    return s_real, s_imag
+
+
+def _dense_phi_field(
+    charges: torch.Tensor,
+    positions: torch.Tensor,
+    kvec: torch.Tensor,
+    k_sq_guarded: torch.Tensor,
+    weights: torch.Tensor,
+    sigma: torch.Tensor,
+    pre: torch.Tensor,
+    dipoles: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``φ`` / ``+∇φ`` as a single ``(N, M)`` contraction — the algorithm."""
+    s_real, s_imag = _dense_structure_factor(positions, charges, kvec, dipoles)
+    kr = positions @ kvec.T
+    cos_kr = torch.cos(kr)
+    sin_kr = torch.sin(kr)
+    term = s_real.unsqueeze(0) * cos_kr + s_imag.unsqueeze(0) * sin_kr
+    grad_term = -s_real.unsqueeze(0) * sin_kr + s_imag.unsqueeze(0) * cos_kr
+    guarded = k_sq_guarded.unsqueeze(-1)
+    width = sigma.reshape(1, -1)
+    kfac = torch.exp(-(width * width) * guarded) / guarded
+    weight = weights.unsqueeze(-1) * kfac
+    phi = pre * (term @ weight)
+    field = pre * torch.einsum("im,mr,mc->icr", grad_term, weight, kvec)
+    return phi, field
+
+
+class TestStructureFactor:
+    """LAMMPS ``eik_dot_r`` ``S(k)`` matches the dense SI V.6 contraction."""
+
+    def test_monopole_matches_dense_formula(self) -> None:
+        torch.manual_seed(0)
+        grid, recip, kvec, _, _ = _bound_cubic_grid()
+        pos = torch.rand(5, 3, dtype=torch.float64) * 10.0
+        charges = torch.randn(5, dtype=torch.float64)
+        got_r, got_i = structure_factor(pos, charges, grid.n, recip, grid.capacity)
+        exp_r, exp_i = _dense_structure_factor(pos, charges, kvec)
+        assert torch.allclose(got_r, exp_r, atol=1e-12, rtol=0.0)
+        assert torch.allclose(got_i, exp_i, atol=1e-12, rtol=0.0)
+
+    def test_dipole_matches_dense_formula(self) -> None:
+        torch.manual_seed(1)
+        grid, recip, kvec, _, _ = _bound_cubic_grid()
+        pos = torch.rand(4, 3, dtype=torch.float64) * 10.0
+        charges = torch.randn(4, dtype=torch.float64)
+        dipoles = torch.randn(4, 3, dtype=torch.float64)
+        got_r, got_i = structure_factor(pos, charges, grid.n, recip, grid.capacity, dipoles)
+        exp_r, exp_i = _dense_structure_factor(pos, charges, kvec, dipoles)
+        assert torch.allclose(got_r, exp_r, atol=1e-12, rtol=0.0)
+        assert torch.allclose(got_i, exp_i, atol=1e-12, rtol=0.0)
+
+    def test_triclinic_matches_dense_formula(self) -> None:
+        torch.manual_seed(2)
+        cell = torch.tensor(TRICLINIC_CELL, dtype=torch.float64)
+        grid = KSpaceGrid(k_cutoff=K_CUT, capacity_factor=1.0)
+        grid.bind(cell)
+        kvec, _, _ = grid.vectors(cell)
+        recip = reciprocal_basis(cell)
+        pos = torch.rand(6, 3, dtype=torch.float64)
+        charges = torch.randn(6, dtype=torch.float64)
+        dipoles = torch.randn(6, 3, dtype=torch.float64)
+        got_r, got_i = structure_factor(pos, charges, grid.n, recip, grid.capacity, dipoles)
+        exp_r, exp_i = _dense_structure_factor(pos, charges, kvec, dipoles)
+        assert torch.allclose(got_r, exp_r, atol=1e-12, rtol=0.0)
+        assert torch.allclose(got_i, exp_i, atol=1e-12, rtol=0.0)
+
+    def test_position_and_recip_gradients_match_dense(self) -> None:
+        torch.manual_seed(3)
+        grid, recip0, _, _, _ = _bound_cubic_grid()
+        pos = torch.rand(5, 3, dtype=torch.float64, requires_grad=True)
+        charges = torch.randn(5, dtype=torch.float64, requires_grad=True)
+        dipoles = torch.randn(5, 3, dtype=torch.float64, requires_grad=True)
+        recip = recip0.detach().requires_grad_(True)
+        got_r, got_i = structure_factor(pos, charges, grid.n, recip, grid.capacity, dipoles)
+        (got_r.square().sum() + got_i.square().sum()).backward()
+        pos2 = pos.detach().requires_grad_(True)
+        charges2 = charges.detach().requires_grad_(True)
+        dipoles2 = dipoles.detach().requires_grad_(True)
+        recip2 = recip0.detach().requires_grad_(True)
+        kvec2 = grid.n.to(dtype=recip2.dtype) @ recip2
+        exp_r, exp_i = _dense_structure_factor(pos2, charges2, kvec2, dipoles2)
+        (exp_r.square().sum() + exp_i.square().sum()).backward()
+        assert torch.allclose(pos.grad, pos2.grad, atol=1e-10, rtol=0.0)
+        assert torch.allclose(charges.grad, charges2.grad, atol=1e-10, rtol=0.0)
+        assert torch.allclose(dipoles.grad, dipoles2.grad, atol=1e-10, rtol=0.0)
+        assert torch.allclose(recip.grad, recip2.grad, atol=1e-10, rtol=0.0)
+
+
+class TestKspacePhiField:
+    """LAMMPS ``eik_dot_r`` ``φ`` / ``+∇φ`` match the dense contraction."""
+
+    def test_matches_dense_formula(self) -> None:
+        torch.manual_seed(4)
+        grid, recip, kvec, k_sq, weights = _bound_cubic_grid()
+        charges = torch.randn(5, dtype=torch.float64)
+        positions = torch.rand(5, 3, dtype=torch.float64) * 10.0
+        sigma = torch.tensor([1.5, 3.0], dtype=torch.float64)
+        pre = torch.tensor(1.25, dtype=torch.float64)
+        dipoles = torch.randn(5, 3, dtype=torch.float64)
+        got_phi, got_field = kspace_phi_field(
+            charges, positions, grid.n, recip, grid.capacity, k_sq, weights, sigma, pre, dipoles
+        )
+        exp_phi, exp_field = _dense_phi_field(
+            charges, positions, kvec, k_sq, weights, sigma, pre, dipoles
+        )
+        assert torch.allclose(got_phi, exp_phi, atol=1e-12, rtol=0.0)
+        assert torch.allclose(got_field, exp_field, atol=1e-12, rtol=0.0)
+
+    def test_position_gradient_matches_dense(self) -> None:
+        torch.manual_seed(5)
+        grid, recip0, _, _, _ = _bound_cubic_grid()
+        charges = torch.randn(4, dtype=torch.float64, requires_grad=True)
+        positions = torch.rand(4, 3, dtype=torch.float64, requires_grad=True)
+        recip = recip0.detach().requires_grad_(True)
+        kvec = grid.n.to(dtype=recip.dtype) @ recip
+        k_sq = (kvec * kvec).sum(-1)
+        k_sq = torch.where(k_sq > 0.0, k_sq, torch.ones_like(k_sq))
+        live = (kvec * kvec).sum(-1) > 0.0
+        weights = 2.0 * live.to(dtype=recip.dtype)
+        sigma = torch.tensor([1.5, 3.0], dtype=torch.float64)
+        pre = torch.tensor(0.8, dtype=torch.float64, requires_grad=True)
+        dipoles = torch.randn(4, 3, dtype=torch.float64, requires_grad=True)
+        phi, field = kspace_phi_field(
+            charges, positions, grid.n, recip, grid.capacity, k_sq, weights, sigma, pre, dipoles
+        )
+        (phi.square().sum() + field.square().sum()).backward()
+        c2 = charges.detach().requires_grad_(True)
+        p2 = positions.detach().requires_grad_(True)
+        r2 = recip0.detach().requires_grad_(True)
+        k2 = grid.n.to(dtype=r2.dtype) @ r2
+        ks2 = (k2 * k2).sum(-1)
+        ks2 = torch.where(ks2 > 0.0, ks2, torch.ones_like(ks2))
+        live2 = (k2 * k2).sum(-1) > 0.0
+        w2 = 2.0 * live2.to(dtype=r2.dtype)
+        pre2 = pre.detach().requires_grad_(True)
+        d2 = dipoles.detach().requires_grad_(True)
+        e_phi, e_field = _dense_phi_field(c2, p2, k2, ks2, w2, sigma, pre2, d2)
+        (e_phi.square().sum() + e_field.square().sum()).backward()
+        assert torch.allclose(positions.grad, p2.grad, atol=1e-10, rtol=0.0)
+        assert torch.allclose(charges.grad, c2.grad, atol=1e-10, rtol=0.0)
+        assert torch.allclose(recip.grad, r2.grad, atol=1e-10, rtol=0.0)
+        assert torch.allclose(dipoles.grad, d2.grad, atol=1e-10, rtol=0.0)
+        assert torch.allclose(pre.grad, pre2.grad, atol=1e-10, rtol=0.0)
