@@ -10,10 +10,36 @@ the reverse edge carries the exact negation (spherical-harmonic parity
 class (spec molix-data-dissolution-03-transforms).
 """
 
+import re
+from pathlib import Path
+
 import pytest
 import torch
 
 from molix.batch.neighbor import NeighborList
+
+#: The two backends of ``torch.ops.molix.get_neighbor_pairs``.
+_KERNELS = Path(__file__).resolve().parents[3] / "src/molix/op/src/neighbors"
+
+
+def test_pair_enumeration_indexes_in_64_bit():
+    """The triangular pair index must not be int32 in either backend.
+
+    ``row = floor((sqrt(8*index + 1) + 1) / 2)`` computed in int32 wraps
+    negative once ``8*index`` passes 2^31 — from N(N-1)/2 > 2.68e8, i.e. about
+    23 200 atoms. On CUDA that was an illegal memory access (found on a
+    35 400-atom PEO melt, 6.3e8 candidate pairs); on CPU it silently produced
+    wrong rows. A 2.7e8-pair regression test would need tens of GB, so the
+    invariant is pinned statically, at the two lines that own it.
+    """
+    cuda = (_KERNELS / "get_neighbor_pairs.cu").read_text()
+    assert re.search(r"const int64_t index = static_cast<int64_t>\(blockIdx\.x\)", cuda)
+    assert "int64_t row" in cuda and "int64_t column" in cuda
+    assert "sqrtf(8 * index" not in cuda
+
+    cpu = (_KERNELS / "get_neighbor_pairs.cpp").read_text()
+    assert "arange(0, num_all_pairs, positions.options().dtype(kInt64))" in cpu
+    assert "dtype(kInt32))" not in cpu.split("Tensor neighbors")[0]
 
 
 def _triangle():

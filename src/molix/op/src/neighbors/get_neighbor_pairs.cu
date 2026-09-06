@@ -3,6 +3,7 @@
 #include <c10/cuda/CUDAStream.h>
 #include <torch/extension.h>
 #include <algorithm>
+#include <climits>
 #include <tuple>
 
 #include "molix/accessor.cuh"
@@ -27,7 +28,7 @@ template<> __device__ __forceinline__ float sqrt_(float x) { return ::sqrtf(x); 
 template<> __device__ __forceinline__ double sqrt_(double x) { return ::sqrt(x); };
 
 template <typename scalar_t> __global__ void forward_kernel(
-    const int32_t num_all_pairs,
+    const int64_t num_all_pairs,
     const Accessor<scalar_t, 2> positions,
     const scalar_t cutoff2,
     const bool store_all_pairs,
@@ -38,12 +39,18 @@ template <typename scalar_t> __global__ void forward_kernel(
     Accessor<scalar_t, 1> distances,
     Accessor<scalar_t, 2> box_vectors
 ) {
-    const int32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= num_all_pairs) return;
 
-    int32_t row = floor((sqrtf(8 * index + 1) + 1) / 2);
+    // Triangular index -> (row, column), in 64-bit. `8 * index` overflows
+    // int32 once index > 2^31/8, i.e. from ~23 200 atoms
+    // (N(N-1)/2 > 2.68e8): the product wrapped negative, sqrt returned NaN,
+    // and the resulting row indexed out of bounds — an illegal memory access
+    // rather than a wrong answer. `sqrtf` is also too coarse there: float's
+    // 24-bit mantissa cannot resolve 8*index beyond 2^24, so this is double.
+    int64_t row = static_cast<int64_t>(floor((::sqrt(8.0 * static_cast<double>(index) + 1.0) + 1.0) / 2.0));
     if (row * (row - 1) > 2 * index) row--;
-    const int32_t column = index - row * (row - 1) / 2;
+    const int64_t column = index - row * (row - 1) / 2;
 
     scalar_t delta_x = positions[row][0] - positions[column][0];
     scalar_t delta_y = positions[row][1] - positions[column][1];
@@ -66,11 +73,12 @@ template <typename scalar_t> __global__ void forward_kernel(
     // set physically meaningful.
     if (distance2 > cutoff2 || distance2 == scalar_t(0)) return;
 
-    const int32_t i_pair = store_all_pairs ? index : atomicAdd(&i_curr_pair[0], 1);
+    const int64_t i_pair = store_all_pairs ? index : static_cast<int64_t>(atomicAdd(&i_curr_pair[0], 1));
     //We handle too many neighbors outside of the kernel
     if (i_pair < neighbors.size(1)) {
-        neighbors[0][i_pair] = row;
-        neighbors[1][i_pair] = column;
+        // Atom indices, not pair indices: they stay int32 by contract.
+        neighbors[0][i_pair] = static_cast<int32_t>(row);
+        neighbors[1][i_pair] = static_cast<int32_t>(column);
         deltas[i_pair][0] = delta_x;
         deltas[i_pair][1] = delta_y;
         deltas[i_pair][2] = delta_z;
@@ -116,10 +124,20 @@ public:
         const bool store_all_pairs = max_num_pairs.toInt() == -1;
         const int num_atoms = positions.size(0);
         const int64_t num_all_pairs = static_cast<int64_t>(num_atoms) * (num_atoms - 1) / 2;
-        const int max_num_pairs_ = store_all_pairs ? static_cast<int>(num_all_pairs) : max_num_pairs.toInt();
+        const int64_t max_num_pairs_ = store_all_pairs ? num_all_pairs : max_num_pairs.toLong();
+        // ``neighbors`` holds int32 atom indices and ``i_curr_pair`` is an
+        // int32 atomic, so the *buffer* must stay addressable in int32 even
+        // though the pair enumeration below is 64-bit.
+        TORCH_CHECK(max_num_pairs_ <= static_cast<int64_t>(INT32_MAX),
+                    "get_neighbor_pairs: max_num_pairs ", max_num_pairs_,
+                    " exceeds the int32 pair buffer; use a cell-list neighbour build");
 
-        const int num_threads = 128;
-        const int num_blocks = max(static_cast<int>((num_all_pairs + num_threads - 1) / num_threads), 1);
+        const unsigned int num_threads = 128;
+        const int64_t blocks = max((num_all_pairs + num_threads - 1) / num_threads, int64_t(1));
+        TORCH_CHECK(blocks <= static_cast<int64_t>(INT32_MAX),
+                    "get_neighbor_pairs: ", num_all_pairs,
+                    " candidate pairs need ", blocks, " blocks, over the grid limit");
+        const unsigned int num_blocks = static_cast<unsigned int>(blocks);
 
         const TensorOptions options = positions.options();
         const Tensor i_curr_pair = zeros(1, options.dtype(kInt32));

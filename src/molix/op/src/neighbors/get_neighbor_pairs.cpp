@@ -17,7 +17,9 @@ using torch::full;
 using torch::hstack;
 using torch::index_select;
 using torch::indexing::Slice;
+using torch::kDouble;
 using torch::kInt32;
+using torch::kInt64;
 using torch::linalg_vector_norm;
 using torch::outer;
 using torch::round;
@@ -35,13 +37,17 @@ static tuple<Tensor, Tensor, Tensor, Tensor> forward(
     const int num_atoms = positions.size(0);
     const int64_t num_all_pairs = static_cast<int64_t>(num_atoms) * (num_atoms - 1) / 2;
 
-    const Tensor indices = arange(0, num_all_pairs, positions.options().dtype(kInt32));
-    Tensor rows = (((8 * indices + 1).sqrt() + 1) / 2).floor().to(kInt32);
-    rows -= (rows * (rows - 1) > 2 * indices).to(kInt32);
-    const Tensor columns = indices - div(rows * (rows - 1), 2, "floor");
+    // 64-bit for the same reason as the CUDA kernel: `8 * index` leaves int32
+    // from ~23 200 atoms on, and the float sqrt cannot resolve it either.
+    const Tensor indices = arange(0, num_all_pairs, positions.options().dtype(kInt64));
+    Tensor rows64 = (((8 * indices + 1).to(kDouble).sqrt() + 1) / 2).floor().to(kInt64);
+    rows64 -= (rows64 * (rows64 - 1) > 2 * indices).to(kInt64);
+    const Tensor columns64 = indices - div(rows64 * (rows64 - 1), 2, "floor");
+    const Tensor rows = rows64.to(kInt32);
+    const Tensor columns = columns64.to(kInt32);
 
     Tensor neighbors = vstack({rows, columns});
-    Tensor deltas = index_select(positions, 0, rows) - index_select(positions, 0, columns);
+    Tensor deltas = index_select(positions, 0, rows64) - index_select(positions, 0, columns64);
     if (box_vectors.size(0) != 0) {
         deltas -= outer(round(deltas.index({Slice(), 2}) / box_vectors.index({2, 2})), box_vectors.index({2}));
         deltas -= outer(round(deltas.index({Slice(), 1}) / box_vectors.index({1, 1})), box_vectors.index({1}));
