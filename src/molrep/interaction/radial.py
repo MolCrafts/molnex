@@ -12,6 +12,8 @@ Example:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch
 import torch.nn as nn
 from pydantic import BaseModel, ConfigDict, Field
@@ -145,3 +147,42 @@ class RadialMLP(nn.Module):
             ``(n_edges, channels_list[-1])``.
         """
         return self.net(inputs)
+
+    def first_layer_parts(self, widths: Sequence[int]) -> tuple[torch.Tensor, ...]:
+        """The first ``Linear``'s weight, split by a partition of its inputs.
+
+        A caller that would otherwise concatenate several per-edge blocks into
+        one wide input can instead multiply each block by its own slice and sum
+        — the same value, without ever building the concatenation. The bias is
+        :meth:`first_layer_bias` and must be added exactly once.
+
+        Args:
+            widths: Input-channel widths, summing to ``channels_list[0]``.
+
+        Returns:
+            One ``(width_i, channels_list[1])`` weight per part, transposed
+            from ``nn.Linear``'s ``(out, in)`` so ``part_i @ w_i`` is that
+            part's contribution.
+        """
+        if sum(widths) != self.hs[0]:
+            raise ValueError(f"widths {list(widths)} do not partition {self.hs[0]} inputs")
+        weight = self.net[0].weight
+        return tuple(chunk.t() for chunk in weight.split(list(widths), dim=1))
+
+    def first_layer_bias(self) -> torch.Tensor | None:
+        """The first ``Linear``'s bias, to be added once to the split sum."""
+        return self.net[0].bias
+
+    def forward_from_first(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Continue after the first ``Linear``, given its output.
+
+        Args:
+            hidden: First-layer output ``(n_edges, channels_list[1])``.
+
+        Returns:
+            ``(n_edges, channels_list[-1])`` — identical to :meth:`forward` on
+            the input that produced ``hidden``.
+        """
+        for module in list(self.net)[1:]:
+            hidden = module(hidden)
+        return hidden

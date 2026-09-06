@@ -36,6 +36,21 @@ class TestNormalize2Mom:
 
 
 class TestMomentNormalizedMLP:
+    def test_first_layer_split_reproduces_forward(self):
+        """Layer 0 evaluated from a partition of its inputs is the same function.
+
+        The bias-free counterpart of ``RadialMLP.first_layer_parts``; the MACE
+        interactions use whichever of the two their radial MLP is.
+        """
+        torch.manual_seed(0)
+        mlp = MomentNormalizedMLP([12, 8, 5]).double()
+        x = torch.randn(6, 12, dtype=torch.float64)
+        widths = [4, 5, 3]
+        parts = mlp.first_layer_parts(widths)
+        hidden = sum(p @ w for p, w in zip(x.split(widths, dim=-1), parts, strict=True))
+        assert mlp.first_layer_bias() is None
+        torch.testing.assert_close(mlp.forward_from_first(hidden), mlp(x), atol=1e-12, rtol=0)
+
     """Test the e3nn-compatible scalar MLP."""
 
     def test_output_shape(self):

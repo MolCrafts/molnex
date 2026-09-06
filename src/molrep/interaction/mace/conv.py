@@ -76,6 +76,71 @@ class _CueqChannelwiseBlockMixin:
     conv_tp_weights: nn.Module
     density_fn: nn.Module
 
+    def _radial_heads(
+        self,
+        features: torch.Tensor,
+        source_index: torch.Tensor,
+        target_index: torch.Tensor,
+        projected: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Tensor-product weights and edge density from the radial features.
+
+        With node embeddings, the radial MLPs read
+        ``cat([edge_feats, source_emb[src], target_emb[tgt]])``. That
+        concatenation is never built: ``projected`` carries layer 0 split by
+        those three blocks, with the two node halves already multiplied
+        per *node*, so only ``(E, hidden)`` is gathered per edge instead of
+        ``(E, edge_dim + 2·n_scalar)``.
+
+        Beyond the memory — 1056 channels per edge at Polar-1-M widths — the
+        wide form is what made Inductor emit a ``1056 * edge`` index constant
+        that leaves int32 above ~2·10⁶ edges and fails to compile.
+        """
+        if not projected:
+            return (
+                self.conv_tp_weights(features),
+                torch.tanh(self.density_fn(features) ** 2),
+            )
+        w_conv, src_conv, tgt_conv, b_conv, w_dens, src_dens, tgt_dens, b_dens = projected
+        hidden_conv = features @ w_conv + src_conv[source_index] + tgt_conv[target_index]
+        hidden_dens = features @ w_dens + src_dens[source_index] + tgt_dens[target_index]
+        # The first layer's bias belongs to the sum as a whole, once.
+        if b_conv.numel() != 0:
+            hidden_conv = hidden_conv + b_conv
+        if b_dens.numel() != 0:
+            hidden_dens = hidden_dens + b_dens
+        return (
+            self.conv_tp_weights.forward_from_first(hidden_conv),
+            torch.tanh(self.density_fn.forward_from_first(hidden_dens) ** 2),
+        )
+
+    def _project_node_features(
+        self,
+        edge_dim: int,
+        source_features: torch.Tensor | None,
+        target_features: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, ...]:
+        """Split each radial MLP's layer 0 and pre-multiply the node halves."""
+        if source_features is None or target_features is None:
+            return ()
+        n_scalar = source_features.shape[-1]
+        widths = [edge_dim, n_scalar, n_scalar]
+        empty = source_features.new_empty(0)
+        w_conv, ws_conv, wt_conv = self.conv_tp_weights.first_layer_parts(widths)
+        w_dens, ws_dens, wt_dens = self.density_fn.first_layer_parts(widths)
+        b_conv = self.conv_tp_weights.first_layer_bias()
+        b_dens = self.density_fn.first_layer_bias()
+        return (
+            w_conv,
+            source_features @ ws_conv,
+            target_features @ wt_conv,
+            empty if b_conv is None else b_conv,
+            w_dens,
+            source_features @ ws_dens,
+            target_features @ wt_dens,
+            empty if b_dens is None else b_dens,
+        )
+
     def _cueq_block_forward(
         self,
         nodes: torch.Tensor,
@@ -85,23 +150,11 @@ class _CueqChannelwiseBlockMixin:
         local_target: torch.Tensor,
         global_target: torch.Tensor,
         envelope: torch.Tensor,
-        source_features: torch.Tensor,
-        target_features: torch.Tensor,
         output_shape: torch.Tensor,
+        *projected: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Generate radial weights and run one official indexed cuEq TP."""
-        radial = features
-        if source_features.numel() != 0:
-            radial = torch.cat(
-                [
-                    radial,
-                    source_features[source_index],
-                    target_features[global_target],
-                ],
-                dim=-1,
-            )
-        weights = self.conv_tp_weights(radial)
-        edge_density = torch.tanh(self.density_fn(radial) ** 2)
+        weights, edge_density = self._radial_heads(features, source_index, global_target, projected)
         if envelope.numel() != 0:
             weights = weights * envelope
             edge_density = edge_density * envelope
@@ -151,19 +204,12 @@ class _CueqChannelwiseBlockMixin:
         source = edge_index[:, 0]
         target = edge_index[:, 1]
 
+        projected = self._project_node_features(
+            edge_features.shape[-1], source_features, target_features
+        )
+
         if target_block_size is None:
-            radial = edge_features
-            if source_features is not None:
-                radial = torch.cat(
-                    [
-                        radial,
-                        source_features[source],
-                        target_features[target],
-                    ],
-                    dim=-1,
-                )
-            weights = self.conv_tp_weights(radial)
-            edge_density = torch.tanh(self.density_fn(radial) ** 2)
+            weights, edge_density = self._radial_heads(edge_features, source, target, projected)
             if cutoff is not None:
                 weights = weights * cutoff
                 edge_density = edge_density * cutoff
@@ -184,8 +230,6 @@ class _CueqChannelwiseBlockMixin:
         )
 
         empty = edge_features.new_empty(0, 0)
-        checkpoint_source = empty if source_features is None else source_features
-        checkpoint_target = empty if target_features is None else target_features
         output_shape = edge_features.new_empty(block_span, 0)
         messages: list[torch.Tensor] = []
         densities: list[torch.Tensor] = []
@@ -206,9 +250,8 @@ class _CueqChannelwiseBlockMixin:
                 block_target - node_start,
                 block_target,
                 block_cutoff,
-                checkpoint_source,
-                checkpoint_target,
                 output_shape,
+                *projected,
                 use_reentrant=False,
                 # No stochastic radial layers: RNG save/restore is wasted.
                 preserve_rng_state=False,

@@ -16,7 +16,7 @@ Reference:
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Optional
 
 import torch
@@ -227,4 +227,45 @@ class MomentNormalizedMLP(nn.Module):
             x = getattr(self, f"layer{i}")(x)
             if i < self._num_layers - 1:
                 x = F.silu(x) * self._act_cst
+        return x
+
+    def first_layer_parts(self, widths: Sequence[int]) -> tuple[torch.Tensor, ...]:
+        """Layer 0's weight, split by a partition of its input channels.
+
+        Lets a caller evaluate ``layer0`` in pieces instead of handing this
+        module one wide tensor: ``cat(parts, -1) @ W`` and ``Σ part_i @ W_i``
+        are the same sum. That is what keeps a concatenated ``(E, in)`` edge
+        tensor from being materialised at all.
+
+        Args:
+            widths: Input-channel widths, summing to ``channels[0]``.
+
+        Returns:
+            One ``(width_i, channels[1])`` weight per part, each with the
+            ``1/√fan_in`` scaling already folded in, so ``part_i @ w_i`` is
+            that part's contribution.
+        """
+        layer = self.layer0
+        if sum(widths) != self.channels[0]:
+            raise ValueError(f"widths {list(widths)} do not partition {self.channels[0]} inputs")
+        return tuple((layer.weight * layer.alpha).split(list(widths), dim=0))
+
+    def first_layer_bias(self) -> torch.Tensor | None:
+        """``None`` — this MLP is bias-free, as e3nn's FullyConnectedNet is."""
+        return None
+
+    def forward_from_first(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Continue after layer 0, given its output.
+
+        Args:
+            hidden: ``layer0``'s pre-activation output ``(..., channels[1])``.
+
+        Returns:
+            ``(..., channels[-1])`` — identical to :meth:`forward` on the input
+            that produced ``hidden``.
+        """
+        x = hidden
+        for i in range(1, self._num_layers):
+            x = F.silu(x) * self._act_cst
+            x = getattr(self, f"layer{i}")(x)
         return x
