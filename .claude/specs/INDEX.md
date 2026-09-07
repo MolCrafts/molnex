@@ -8,7 +8,6 @@ must not be treated as authority for a new training submission.
 
 | Spec | Chain | Opened | Scope |
 |---|---|---|---|
-| [composable-a0-01-contracts](composable-a0-01-contracts.md) | composable-a0 | 2026-09-07 | Interaction contract + S-decomposition labels; LJ split; absent-table / unregistered-style raise (F2, F6). |
 | [composable-a0-02-exclusions-switching](composable-a0-02-exclusions-switching.md) | composable-a0 | 2026-09-07 | Per-class `ExclusionTable`, quintic LJ switch, capacity-shaped list, fail-closed total charge (F3 FF path). |
 | [composable-a0-03-periodic-coulomb](composable-a0-03-periodic-coulomb.md) | composable-a0 | 2026-09-07 | Exact excluded-pair correction under Ewald/PME (**F1**), `bind_cell` frozen k-space, FD force + strain on the assembled `Potentials`. |
 | [composable-a0-04-manifest](composable-a0-04-manifest.md) | composable-a0 | 2026-09-07 | `ModelManifest` records, `ForceField.manifest()`, `PotentialIR.nonbonded_method` (F7). |
@@ -22,6 +21,7 @@ Design source for the chain: `.claude/notes/composable-potentials.md`
 
 | Spec or chain | Closed | Disposition |
 |---|---|---|
+| composable-a0-01-contracts | 2026-09-07 | Completed; 4/4 criteria verified (3 impl, 1 agent-auto from the mirrored unit tests). Commit b87e3268: InteractionContract + registry labels, contribution_energies, LJ split, absent-table raise, composition check, ParamFrame. |
 | pinet-quantization-thermal-noise-02-md-driver | 2026-09-04 | Completed; FDT O-step kick variance test + functorch force-loss path. |
 | cuet-force-doublebackward | 2026-09-04 | Completed; force-supervised double-backward (create_graph + pure-torch SH). |
 | md-forcefield-molpy-reexport-02-nblist | 2026-09-04 | Completed; remaining ledger flipped after regressions/md-forcefield-molpy-reexport-02-nblist.py exited 0. NeighborList live MIC geometry. |
