@@ -5,7 +5,7 @@ mol_project:
   stage: experimental
   build:
     install: "pip install -e '.[dev]'"
-    check: "ruff check src/ tests/ scripts/ regressions/ && ruff format --check src/ tests/ scripts/ regressions/ && ty check src/ --exit-zero-on-warning"
+    check: "ruff check src/ tests/ scripts/ && ruff format --check src/ tests/ scripts/ && ty check src/ --exit-zero-on-warning"
     test: "python -m pytest tests/ -q -n 12 --dist worksteal"
     test_single: "python -m pytest {path} -v"
     test_affected: "python scripts/affected_tests.py --run"
@@ -95,7 +95,7 @@ leaving rot you already saw.
   than one coherent responsibility.
 - **All-in-one façade APIs.** No public `run_everything` /
   `compute_all` / `pipeline` that hides multi-step work. Composition
-  is the **caller's** job (scripts, docs examples, `regressions/`).
+  is the **caller's** job (scripts and docs examples).
   The library exposes primitives only.
 
 ### Shape check (before adding a public symbol)
@@ -111,8 +111,9 @@ leaving rot you already saw.
 - Unit tests **only** under `tests/`, path mirrors source
   (`src/foo/boo.py` → `tests/test_foo/test_boo.py`), types mirror
   (`FooClass` → `TestFooClass`). Single-function tests — no e2e under
-  `tests/`. Public-API scenarios → `regressions/` with **hard-coded**
-  goldens (no live third-party oracles). Details: `tester` agent.
+  `tests/`. There is no separate regression tier: `regressions/` was
+  deleted on 2026-09-07 because nothing in this repo is finished enough to
+  regress against. Details: `tester` agent.
 
 ## Default workflow
 
@@ -129,7 +130,7 @@ For non-trivial work, prefer:
 - One-way package dependency: `molix` ← `molrep` ← `molzoo` / `molpot`
 - molpy-only imports under `src/` and `tests/` (never bare `molrs`)
 - `TrainState` nested-namespace write contract (no slash-key writes)
-- `PackedCache` single-file layout (do not migrate to `TensorDict.memmap_`)
+- `molix.block/1` column layout (manifest, commit log, per-column sha256)
 
 <!-- mol:bootstrap:managed end -->
 
@@ -270,8 +271,8 @@ GH200 / `.aarch64`: on every env/torch change rebuild **all** native libs togeth
   export→load→run round trips, spawned DataLoader workers), no
   reference-value parity / regression suites, no benchmark or profiling
   runs under `tests/` — those categories were deleted on 2026-09-03 and must
-  not come back. Public-API scenarios with hard-coded goldens live in
-  `regressions/` (plain scripts, not collected by pytest).
+  not come back. The `regressions/` tier that used to hold public-API
+  scenarios with hard-coded goldens was deleted on 2026-09-07.
 - **Two tiers, orthogonal tests (hard rule).** The default `pytest` run is
   the fast unit tier (`addopts = -m "not slow"`) and must finish in a couple
   of minutes on 12 workers. Anything that compiles,
@@ -294,7 +295,7 @@ this wrong and `KeyError(('edges','edge_index'))` is the first thing you see.
 
 | Stage | Container | Example access |
 |---|---|---|
-| MolHub-side sample production / preprocessing I/O, `MmapDataset[i]` | **flat `dict`** | `sample["Z"]`, `sample["edge_index"]`, `sample["targets"]["U0"]` |
+| MolHub-side sample production / preprocessing I/O, `BlockDataset[i]` | **flat `dict`** | `sample["Z"]`, `sample["edge_index"]`, `sample["targets"]["U0"]` |
 | Post-`collate_molecules` (what encoders / losses receive) | **nested `TensorDict`** (plain, no subclass) | `batch["atoms", "Z"]`, `batch["edges", "edge_index"]`, `batch["graphs", "energy"]` |
 
 The single conversion point is `molix.batch.collate.collate_molecules`
@@ -333,20 +334,29 @@ Access: `batch["atoms", "Z"]`, `batch["edges", "edge_dist"]`. Encoders
 mutate the batch in place, writing `node_features` under `atoms` and
 `edge_features` under `edges` — no subclass swap.
 
-### Cache format
+### On-disk format
 
-The on-disk cache is `molix.store.cache.PackedCache` — **one** `.pt` file
-per cache with concatenated per-atom / per-edge / per-graph tensors and
-`atom_ptr` / `edge_ptr` cumsum pointers. Loaded via `torch.load(mmap=True)`
-for zero-copy reads; each DataLoader worker shares the OS page cache.
+`molix.block/1` (`molix.store.block`) is molnex's **one** on-disk format:
+a directory of raw little-endian column files plus `manifest.json`, written
+by `BlockWriter` one `SamplingUnit` at a time, committed through a crc32
+commit log and sealed with per-column sha256. `BlockReader` mmaps a sealed
+block; `BlockDataset` indexes an ordered sequence of them as one frame space.
+MolHub writes these; molnex only reads them.
 
-**Do not migrate to `TensorDict.memmap_()`.**
-`LazyStackedTensorDict.memmap_(prefix)` writes one subdirectory per
-sample (~1M files + ~260k dirs for QM9 130k molecules) — blows past HPC
-shared-fs inode budgets and destroys `rsync` / `tar` / `rm` performance.
-`PackedCache`'s single-file packed-bucket layout is strictly better for
-fixed-schema molecular datasets. See `src/molix/store/cache.py` module
-docstring for full rationale.
+Its column vocabulary is a **closed registry** (`_COLUMN_ROUTES`): a name is
+either a registered row or a `ValueError`. Adding a target is a deliberate
+format revision, never an incidental producer detail. Blocks carry **no
+neighbour graph** — the cutoff graph is a function of positions and a cutoff,
+so it is built downstream by `molix.batch.NeighborList`, not stored.
+
+Reading a block yields a **packed payload** — `atoms` / `edges` / `graphs` /
+`scalars` buckets of concat tensors plus `atom_ptr` / `edge_ptr` cumsum
+pointers — which `PackedView` wraps and `collate_packed` turns into a batch
+without ever materialising per-sample dicts.
+
+The single-`.pt` `PackedCache` that preceded this (one file, schema inferred
+across samples, run-scoped) was deleted on 2026-09-07: MolHub had already
+moved to blocks, so it had no producer left.
 
 ### Edge Convention (MUST follow everywhere)
 
@@ -399,7 +409,7 @@ collate intentionally implements only the lazy subset of PyG's batching:
 | `__inc__` / `__cat_dim__` (per-key offset on batching) | **implemented** as the declarative `INDEX_KEYS` registry + `rebase()` in `collate.py` | the one piece worth having — also fixes the latent un-offset `bond_index` bug |
 | `follow_batch` (per-attribute batch vectors) | **skip** | no consumer |
 | `ptr` (cumsum boundaries) | **skip** — derive on demand from `graphs.num_atoms` / `atom_ptr` | redundant to materialise |
-| `to_data_list()` / unbatch | **skip** | `PackedCache` covers persistence/unpack |
+| `to_data_list()` / unbatch | **skip** | `molix.block/1` covers persistence/unpack |
 | `exclude_keys` | **skip** | no consumer |
 | arbitrary `HeteroData` node/edge types | **skip** | fixed `atoms`/`edges`/`graphs`/`bonds` namespaces are the contract |
 
@@ -423,7 +433,7 @@ molpot.composition (PotentialComposer,    molpot.potentials
     ↓                              molpot.derivation (EnergyAggregation,
 molix.core (Trainer, TrainState, Step, Hook)    ForceDerivation)
     ↓
-molix.batch (collate, NeighborList, DataModule, BatchTask) · molix.store (PackedCache, MmapDataset)
+molix.batch (collate, NeighborList, DataModule, BatchTask) · molix.store (BlockWriter/Reader, BlockDataset)
     ↑ dataset acquisition (download / parse / preprocess / cache write) is MolHub's, not molnex's
 molix.md (Langevin velocity-Verlet) ─→ molix.quant (T_eff / quantization scalars)
 molix.export (Exporter, AOTInductor .pt2) · molix.compile (Compiler, torch.compile / CUDA graphs)   [leaf execution utils]

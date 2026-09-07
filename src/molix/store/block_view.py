@@ -54,7 +54,7 @@ block of the plan while its author meant "frame −1 of this block". Both
 range-check ``[0, len(view))`` and refuse anything outside it, and
 :meth:`BlockDataset.__getitem__` inherits that refusal by routing through
 ``frame_payload``, rather than deferring to the wrap-around
-:meth:`~molix.store.cache.PackedCache.unpack_sample` performs on a packed payload.
+:func:`_unpack_packed_sample` performs on a packed payload.
 
 Scope of the not-ready guard
 ----------------------------
@@ -126,7 +126,6 @@ from molix.store.block import (
     BlockReader,
     _exclusive_cumsum,
 )
-from molix.store.cache import _VALENCE_PTR_KEY, PackedCache
 from molix.store.dataset import BaseDataset
 
 __all__ = [
@@ -136,11 +135,100 @@ __all__ = [
     "BlockSplitMismatchError",
 ]
 
-#: Valence buckets :meth:`~molix.store.cache.PackedCache.unpack_sample` can route —
-#: derived from the unpacker's own tables (``bond_ptr`` plus ``_VALENCE_PTR_KEY``)
-#: rather than restated, so wiring a further family downstream relaxes this guard
+#: Covalent-bond keys, handled outside the per-atom / per-frame row model.
+_BOND_INDEX_KEY: Final[str] = "bond_index"
+_BOND_TYPES_KEY: Final[str] = "bond_types"
+
+#: Valence family -> its cumsum pointer key in a packed payload. Impropers keep
+#: molpy's center-first ``atomi``.
+_VALENCE_PTR_KEY: Final[dict[str, str]] = {
+    "angles": "angle_ptr",
+    "propers": "proper_ptr",
+    "impropers": "improper_ptr",
+}
+
+#: Valence buckets :func:`_unpack_packed_sample` can route — derived from the
+#: unpacker's own tables (``bond_ptr`` plus :data:`_VALENCE_PTR_KEY`) rather
+#: than restated, so wiring a further family downstream relaxes this guard
 #: automatically instead of leaving a stale copy behind.
 _ROUTABLE_BUCKETS: Final[frozenset[str]] = frozenset({"bonds", *_VALENCE_PTR_KEY})
+
+
+def _unflatten(flat: Mapping[str, Any]) -> dict[str, Any]:
+    """Rebuild a nested sample dict from dotted keys."""
+    out: dict[str, Any] = {}
+    for key, val in flat.items():
+        parts = key.split(".")
+        cur = out
+        for part in parts[:-1]:
+            cur = cur.setdefault(part, {})
+        cur[parts[-1]] = val
+    return out
+
+
+def _unpack_packed_sample(payload: Mapping[str, Any], idx: int) -> dict[str, Any]:
+    """Reconstruct the ``idx``-th sample dict from a packed payload.
+
+    Slices into the shared concat tensors — no storage copy when the payload
+    came from a memory-mapped read. The payload shape is the one
+    :func:`~molix.batch.collate.collate_packed` consumes: ``atoms`` / ``edges``
+    / ``graphs`` / ``scalars`` buckets plus the cumsum pointers that locate
+    each sample's rows.
+
+    Args:
+        payload: Packed payload mapping.
+        idx: Sample index; negative indices count from the end.
+
+    Returns:
+        The flat (nested-dict) sample.
+
+    Raises:
+        IndexError: *idx* is outside ``[-n_samples, n_samples)``.
+    """
+    n = payload["n_samples"]
+    if idx < 0:
+        idx += n
+    if not 0 <= idx < n:
+        raise IndexError(f"sample index {idx} out of range for n_samples={n}")
+
+    flat: dict[str, Any] = {}
+
+    atom_ptr = payload.get("atom_ptr")
+    if atom_ptr is not None:
+        a0, a1 = int(atom_ptr[idx]), int(atom_ptr[idx + 1])
+        for key, tensor in payload["atoms"].items():
+            flat[key] = tensor[a0:a1]
+
+    edge_ptr = payload.get("edge_ptr")
+    if edge_ptr is not None:
+        e0, e1 = int(edge_ptr[idx]), int(edge_ptr[idx + 1])
+        for key, tensor in payload["edges"].items():
+            flat[key] = tensor[e0:e1]
+
+    bond_ptr = payload.get("bond_ptr")
+    if bond_ptr is not None:
+        b0, b1 = int(bond_ptr[idx]), int(bond_ptr[idx + 1])
+        bonds = payload.get("bonds", {})
+        if _BOND_INDEX_KEY in bonds:
+            flat[_BOND_INDEX_KEY] = bonds[_BOND_INDEX_KEY][:, b0:b1]  # COO dim 1
+        if _BOND_TYPES_KEY in bonds:
+            flat[_BOND_TYPES_KEY] = bonds[_BOND_TYPES_KEY][b0:b1]
+
+    for family, ptr_key in _VALENCE_PTR_KEY.items():
+        v_ptr = payload.get(ptr_key)
+        if v_ptr is None:
+            continue
+        v0, v1 = int(v_ptr[idx]), int(v_ptr[idx + 1])
+        for col, tensor in payload.get(family, {}).items():
+            flat[f"{family}.{col}"] = tensor[v0:v1]
+
+    for key, tensor in payload["graphs"].items():
+        flat[key] = tensor[idx]
+
+    for key, values in payload["scalars"].items():
+        flat[key] = values[idx]
+
+    return _unflatten(flat)
 
 
 class BlockNotReadyError(ValueError):
@@ -411,7 +499,7 @@ class BlockDataset(BaseDataset):
                     f"block row {row} at {self._blocks[row]} declares the valence "
                     f"{'families' if len(unroutable) > 1 else 'family'} "
                     f"{unroutable}, which has no downstream route: "
-                    "PackedCache.unpack_sample and collate_molecules route only "
+                    "the packed unpacker and collate_molecules route only "
                     f"{sorted(_ROUTABLE_BUCKETS)}, so a view that accepted this block "
                     "would drop that family silently. Refusing is the honest behaviour; "
                     "routing the family is a collate-side change."
@@ -825,7 +913,7 @@ class BlockDataset(BaseDataset):
         """Return one frame as a flat pre-collate sample ``dict``.
 
         The one-frame payload run through
-        :meth:`~molix.store.cache.PackedCache.unpack_sample` — there is no second
+        :func:`_unpack_packed_sample` — there is no second
         route into the data. The ``"scalars"`` adapter is empty because the block
         column registry has no Python-scalar space while the unpacker indexes that
         bucket unconditionally.
@@ -847,4 +935,4 @@ class BlockDataset(BaseDataset):
         Raises:
             ValueError: *idx* is outside ``[0, len(self))``.
         """
-        return PackedCache.unpack_sample({**self.frame_payload([idx]), "scalars": {}}, 0)
+        return _unpack_packed_sample({**self.frame_payload([idx]), "scalars": {}}, 0)

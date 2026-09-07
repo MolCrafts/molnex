@@ -7,7 +7,7 @@ Two concerns, one class each:
   ``execute``. No DataLoader involved.
 * ``TestDataModuleBatchTasks`` — ``DataModule(batch_tasks=[...])`` runs the
   tasks, in declaration order, on **both** collate paths (per-sample
-  ``_CollateFn`` and packed ``_PackedCollateFn``), and its ``__init__``
+  ``_CollateFn`` and block ``_BlockCollateFn``), and its ``__init__``
   exposes ``batch_tasks`` and no longer ``batch_nodes`` (the ETL ``Node``
   coupling this phase severs).
 
@@ -28,13 +28,13 @@ from torch.utils.data import Dataset
 
 from molix.batch import PadMolecularBatch
 from molix.batch.collate import TargetSchema
-from molix.batch.datamodule import DataModule, _CollateFn, _PackedCollateFn
+from molix.batch.datamodule import DataModule, _BlockCollateFn, _CollateFn
 from molix.batch.task import BatchTask
-from molix.store.cache import PackedCache
-from molix.store.dataset import CachedDataset
+from molix.store import BlockDataset
+from tests.test_molix.conftest import unit_a, unit_b, write_block
 
 #: Graph-level ``U0`` only — the fixture carries no atom-level target.
-SCHEMA = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset())
+SCHEMA = TargetSchema(graph_level=frozenset({"energy"}), atom_level=frozenset({"forces"}))
 
 
 # ---------------------------------------------------------------------------
@@ -172,17 +172,18 @@ class TestBatchTask:
 
 
 def _packed_dm(tmp_path: Path, tag: str, **kwargs) -> DataModule:
-    """DataModule over a packed cache — routes through ``_PackedCollateFn``."""
-    train_sink = tmp_path / f"{tag}_train.pt"
-    val_sink = tmp_path / f"{tag}_val.pt"
-    samples = _samples(6)
-    PackedCache(train_sink).save(samples[:4])
-    PackedCache(val_sink).save(samples[4:])
+    """DataModule over sealed blocks — routes through ``_BlockCollateFn``."""
+    train = BlockDataset.load_from_disk(
+        write_block(tmp_path / f"{tag}_train" / "b", [unit_a()]).parent
+    )
+    val = BlockDataset.load_from_disk(
+        write_block(tmp_path / f"{tag}_val" / "b", [unit_b()], split="val").parent
+    )
     kwargs.setdefault("target_schema", SCHEMA)
     kwargs.setdefault("batch_size", 2)
     kwargs.setdefault("num_workers", 0)
     kwargs.setdefault("pin_memory", False)
-    return DataModule(CachedDataset(train_sink), CachedDataset(val_sink), **kwargs)
+    return DataModule(train, val, **kwargs)
 
 
 def _unpacked_dm(**kwargs) -> DataModule:
@@ -236,10 +237,10 @@ class TestDataModuleBatchTasks:
         assert torch.equal(batch["graphs", "stamp"], torch.tensor([21, 21]))
 
     def test_tasks_run_on_packed_path(self, tmp_path):
-        """The packed ``_PackedCollateFn`` applies the same tasks."""
+        """The block ``_BlockCollateFn`` applies the same tasks."""
         dm = _packed_dm(tmp_path, "stamp", batch_tasks=[_StampTask(1)])
         loader = dm.val_dataloader()
-        assert isinstance(loader.collate_fn, _PackedCollateFn)
+        assert isinstance(loader.collate_fn, _BlockCollateFn)
         batch = next(iter(loader))
         assert torch.equal(batch["graphs", "stamp"], torch.tensor([1, 1]))
 
@@ -258,9 +259,9 @@ class TestDataModuleBatchTasks:
         assert int(batch["atoms", "mask"].sum()) == 4  # 2 mols x 2 atoms
 
     def test_pad_task_applies_on_packed_path(self, tmp_path):
-        """Same task, packed fast path — identical fixed shapes."""
-        dm = _packed_dm(tmp_path, "pad", batch_tasks=[PadMolecularBatch(max_atoms=8, max_edges=8)])
+        """Same task, block fast path — identical fixed shapes."""
+        dm = _packed_dm(tmp_path, "pad", batch_tasks=[PadMolecularBatch(max_atoms=16, max_edges=8)])
         batch = next(iter(dm.val_dataloader()))
-        assert batch["atoms"].batch_size[0] == 8
+        assert batch["atoms"].batch_size[0] == 16
         assert batch["edges"].batch_size[0] == 8
-        assert int(batch["atoms", "mask"].sum()) == 4
+        assert int(batch["atoms", "mask"].sum()) == 8  # 2 frames x 4 atoms

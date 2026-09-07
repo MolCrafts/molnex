@@ -199,6 +199,50 @@ default and MACE with no knob at all).
 ---
 
 <!-- mol:note:topic:test-tiers-orthogonal -->
+## [2026-09-07] One on-disk format (molix.block/1); `regressions/` deleted (user rule)
+
+**Decision (user).** molnex keeps **one** on-disk format: `molix.block/1`.
+`molix.store.cache.PackedCache` — the single-`.pt`, schema-inferred, run-scoped
+packed cache — is gone, along with `MmapDataset` / `CachedDataset` and the
+`_PackedCollateFn` route in `DataModule`.
+
+**Why it could go.** MolHub owns dataset production and already writes only
+`molix.block/1` (`molhub/loader/materialize.py`: `_BLOCK_FORMAT`,
+`_WRITER_MODULES = ("molix.store.block", "torch")`); it never imported
+`PackedCache`. Inside molnex `src/`, the only production writer left was a
+profiler helper that round-tripped samples through a temp file purely to
+"exercise the same code path real workflows do". Everything else that wrote
+one was a test or a `regressions/` script.
+
+**What survived, and why.** The *packed payload* is the real contract and it
+stays: `BlockReader.frame_payload` produces it, `PackedView` wraps it, and
+`collate_packed` turns it into a batch without materialising per-sample dicts.
+`PackedCache` was only one on-disk spelling of that payload, and the worse one
+(no manifest, no seal, no digests, no resume, no splits). The unpacker moved to
+`molix.store.block_view._unpack_packed_sample`; `SubsetDataset.packed_view()`
+is defined explicitly rather than inherited, because `__getattr__` forwarding
+would silently hand back an **unmapped** view.
+
+**Consequences that are features, not losses.** Blocks carry no neighbour
+graph by design, so the cutoff graph is built downstream by
+`molix.batch.NeighborList` — the cache's `edges` bucket, the sampler's
+`max_edges` budget and `avg_num_neighbors` had no producer left. The
+`TensorDict.memmap_` argument in the old docstring was answering the wrong
+question: it argued against `LazyStackedTensorDict.memmap_` (one directory per
+sample, ~1M files for QM9), which nobody proposed. Packing first and memmapping
+the packed TensorDict would have been ~15 files. The real reason to keep one
+format is that two formats for the same job is one too many.
+
+**`regressions/` deleted (user rule, same day).** All 69 scripts, 1.1 MB. The
+operator's reason: *nothing in this repo is finished enough to regress against*
+— a golden captured from unfinished code pins today's behaviour, not a
+contract. `tests/` is the only test tier now; CLAUDE.md's "Public-API scenarios
+→ `regressions/`" routing and the `build.check` command were updated with it.
+
+**Status.** active.
+
+---
+
 ## [2026-09-07] Tests assert behaviour, not surface (user rule)
 
 **Rule (operator, 2026-09-07).** `tests/` holds correctness tests. Beyond the
@@ -264,7 +308,7 @@ cost 12 s to assert a grep result.
 **What replaces them.** Nothing in `tests/`. Import-direction and
 banned-dependency rules are stated in CLAUDE.md and enforced by review and by
 `ruff` / `ty`; if a boundary is worth machine-checking it belongs in a lint
-rule or a `regressions/` script, not in a unit test. The two behavioural
+rule, not in a unit test. The two behavioural
 survivors of the sweep kept their real assertions and lost only their static
 tails (`Potentials.bind_cell` / `compile_core` guards; provenance
 `decode_with_confidence`). `test_repository_boundaries.py` keeps exactly one
@@ -314,9 +358,10 @@ strain-symmetric energy only removes finite-precision asymmetry. Consumers:
   values; diagonals (and therefore `BerendsenBarostat`, which reads only
   `virial.trace()`) are unchanged.
 - `regressions/polar-compile-clean-03-wire.py`'s `GOLDEN_VIRIAL` shear entries
-  were recaptured; the ratio old/new was exactly 2.000 off-diagonal, 1.000 on
-  the diagonal — the cleanest possible confirmation that only the convention
-  moved.
+  were recaptured before that script was deleted with the rest of
+  `regressions/` on 2026-09-07; the ratio old/new was exactly 2.000
+  off-diagonal, 1.000 on the diagonal — the cleanest possible confirmation
+  that only the convention moved.
 - FD tests that perturb `ε_ab` and `ε_ba` together must divide the off-diagonal
   difference by 2; that halving is now written out in `test_ewald.py`,
   `test_sonata_periodic.py` and the MACE FD-virial test.
@@ -342,7 +387,8 @@ runs. Deleted on 2026-09-03: `tests/regression/` (torch-pme parity),
 the two profiler e2e files, the spawn-worker DataModule cases, Ewald's
 `TestTorchCompile`, `test_potentials_compile`, and the Allegro /
 typing-probe overfit runs. Public-API scenarios with hard-coded goldens
-live in `regressions/` (plain scripts). Known losses to carry: no unit
+lived in `regressions/` (plain scripts) until that tier was deleted on
+2026-09-07. Known losses to carry: no unit
 test now covers `molix/export.py` / `molix/engine/export.py`, the
 LAMMPS meta-block schema (was inside the deleted export file), or an
 explain-level compile guard for `EwaldMultipoleEnergy`; the "bounded

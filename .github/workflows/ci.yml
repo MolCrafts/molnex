@@ -25,8 +25,8 @@ jobs:
           export CMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
           pip install -e ".[dev]" --no-build-isolation -v
         timeout-minutes: 20
-      - run: ruff check src/ tests/ scripts/ regressions/
-      - run: ruff format --check src/ tests/ scripts/ regressions/
+      - run: ruff check src/ tests/ scripts/
+      - run: ruff format --check src/ tests/ scripts/
       - name: Type check
         # BLOCKING at error severity (0 errors as of 2026-08-30). The warn
         # tier is the rule-scoped debt in [tool.ty.rules] (pyproject.toml),

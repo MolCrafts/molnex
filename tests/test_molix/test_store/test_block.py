@@ -22,7 +22,6 @@ import stat
 import struct
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pytest
@@ -32,8 +31,19 @@ from tensordict import TensorDict
 from molix.batch.collate import collate_molecules, collate_packed
 from molix.batch.sampler import TaskMixtureBatchSampler
 from molix.store.block import BlockManifest, BlockReader, BlockWriter, SamplingUnit
-from molix.store.cache import PackedCache
 from molix.store.dataset import PackedView
+from tests.test_molix.conftest import (
+    BLOCK_PROVENANCE,
+    frame_columns,
+    halves,
+    sampling_unit,
+    unit_a,
+    unit_b,
+    unit_c,
+    unit_samples,
+    valence_columns,
+    write_block,
+)
 
 # ---------------------------------------------------------------------------
 # Fixture data — two-level ragged units (spec § Domain basis)
@@ -45,17 +55,6 @@ from molix.store.dataset import PackedView
 # Units 0+1 alone reproduce the spec's hand-computed arithmetic fixture
 # N = (3, 4), n_frames = (2, 3).
 # ---------------------------------------------------------------------------
-
-_PROVENANCE: dict[str, Any] = {
-    "source": {"name": "molnex-unit-test", "coordinate": "n/a"},
-    "generator": {"tool": "test_block.py", "version": "1", "commit": "0"},
-    "created_at": "2026-08-14T00:00:00+00:00",
-    "units": {
-        "pos": "angstrom",
-        "energy": "kcal/mol",
-        "forces": "kcal/mol/angstrom",
-    },
-}
 
 # The 24 columns frozen from unit "mol-a": 5 required metadata + Z + pos +
 # 2 frame targets + 3 valence families (columns + derived ``_n``).
@@ -102,120 +101,6 @@ _POINTER_NAMES = (
     "angle_ptr",
     "proper_ptr",
 )
-
-
-def _halves(count: int, start: int) -> torch.Tensor:
-    """``count`` distinct multiples of 0.5 — exactly representable in float32."""
-    return (torch.arange(count, dtype=torch.float32) + float(start)) * 0.5
-
-
-def _frame_columns(n_frames: int, n_atoms: int, offset: int) -> dict[str, torch.Tensor]:
-    rows = n_frames * n_atoms
-    return {
-        "pos": _halves(rows * 3, offset).reshape(rows, 3),
-        "forces": -_halves(rows * 3, offset + 7).reshape(rows, 3),
-        "energy": _halves(n_frames, offset + 3),
-    }
-
-
-def _valence(n_atoms: int) -> dict[str, torch.Tensor]:
-    """Covalent topology of a linear chain over ``n_atoms`` atoms (int32 columns)."""
-    if n_atoms == 3:
-        bonds = ([0, 0], [1, 2], [1, 1])
-        angles = ([1], [0], [2], [1])
-        propers: tuple[list[int], ...] = ([], [], [], [], [])
-    else:
-        bonds = ([0, 1, 2], [1, 2, 3], [1, 1, 1])
-        angles = ([0, 1], [1, 2], [2, 3], [2, 2])
-        propers = ([0], [1], [2], [3], [3])
-
-    def i32(values: list[int]) -> torch.Tensor:
-        return torch.tensor(values, dtype=torch.int32)
-
-    return {
-        "bond_atomi": i32(bonds[0]),
-        "bond_atomj": i32(bonds[1]),
-        "bond_type": i32(bonds[2]),
-        "angle_atomi": i32(angles[0]),
-        "angle_atomj": i32(angles[1]),
-        "angle_atomk": i32(angles[2]),
-        "angle_type": i32(angles[3]),
-        "proper_atomi": i32(propers[0]),
-        "proper_atomj": i32(propers[1]),
-        "proper_atomk": i32(propers[2]),
-        "proper_atoml": i32(propers[3]),
-        "proper_type": i32(propers[4]),
-    }
-
-
-def _unit(key: str, task: str, z: list[int], n_frames: int, offset: int) -> SamplingUnit:
-    n_atoms = len(z)
-    topology = {"Z": torch.tensor(z, dtype=torch.int16), **_valence(n_atoms)}
-    return SamplingUnit(
-        key=key,
-        task=task,
-        topology=topology,
-        frames=_frame_columns(n_frames, n_atoms, offset),
-    )
-
-
-def _unit_a() -> SamplingUnit:
-    return _unit("mol-a", "equilibrium", [8, 1, 1], 2, 0)
-
-
-def _unit_b() -> SamplingUnit:
-    return _unit("mol-b", "relax", [6, 6, 1, 1], 3, 40)
-
-
-def _unit_c() -> SamplingUnit:
-    return _unit("scan-c", "torsion", [6, 6, 8, 1], 5, 100)
-
-
-def _write_block(root: Path, units: list[SamplingUnit], *, split: str = "train") -> Path:
-    """Write and seal a block holding *units* — the uninterrupted reference write."""
-    writer = BlockWriter(root, split=split, provenance=_PROVENANCE)
-    for unit in units:
-        writer.append_unit(unit)
-    writer.seal()
-    return root
-
-
-def _samples(units: list[SamplingUnit]) -> list[dict]:
-    """The same data as flat per-frame sample dicts (the v1 / oracle shape)."""
-    out: list[dict] = []
-    for unit in units:
-        n_atoms = unit.n_atoms
-        topology = unit.topology
-        for k in range(unit.n_frames):
-            rows = slice(k * n_atoms, (k + 1) * n_atoms)
-            out.append(
-                {
-                    "Z": topology["Z"].long(),
-                    "pos": unit.frames["pos"][rows].clone(),
-                    "targets": {
-                        "energy": unit.frames["energy"][k : k + 1].clone(),
-                        "forces": unit.frames["forces"][rows].clone(),
-                    },
-                    "bond_index": torch.stack(
-                        [topology["bond_atomi"], topology["bond_atomj"]]
-                    ).long(),
-                    "bond_types": topology["bond_type"].long(),
-                    "angles": {
-                        "atomi": topology["angle_atomi"].long(),
-                        "atomj": topology["angle_atomj"].long(),
-                        "atomk": topology["angle_atomk"].long(),
-                        "type": topology["angle_type"].long(),
-                    },
-                    "propers": {
-                        "atomi": topology["proper_atomi"].long(),
-                        "atomj": topology["proper_atomj"].long(),
-                        "atomk": topology["proper_atomk"].long(),
-                        "atoml": topology["proper_atoml"].long(),
-                        "type": topology["proper_type"].long(),
-                    },
-                }
-            )
-    return out
 
 
 def _column_sha256(root: Path) -> dict[str, str]:
@@ -293,12 +178,12 @@ def _assert_td_equal(actual: TensorDict, expected: TensorDict, path: str = "") -
 
 @pytest.fixture
 def units() -> list[SamplingUnit]:
-    return [_unit_a(), _unit_b(), _unit_c()]
+    return [unit_a(), unit_b(), unit_c()]
 
 
 @pytest.fixture
 def sealed_block(tmp_path: Path, units: list[SamplingUnit]) -> Path:
-    return _write_block(tmp_path / "block", units)
+    return write_block(tmp_path / "block", units)
 
 
 @pytest.fixture
@@ -309,7 +194,7 @@ def reader(sealed_block: Path) -> BlockReader:
 @pytest.fixture
 def two_unit_block(tmp_path: Path) -> Path:
     """Spec § Testing-strategy arithmetic fixture: N = (3, 4), n_frames = (2, 3)."""
-    return _write_block(tmp_path / "two", [_unit_a(), _unit_b()])
+    return write_block(tmp_path / "two", [unit_a(), unit_b()])
 
 
 # ---------------------------------------------------------------------------
@@ -319,12 +204,12 @@ def two_unit_block(tmp_path: Path) -> Path:
 
 class TestSamplingUnit:
     def test_derives_n_atoms_and_n_frames(self):
-        unit = _unit_b()
+        unit = unit_b()
         assert unit.n_atoms == 4
         assert unit.n_frames == 3
 
     def test_is_frozen(self):
-        unit = _unit_a()
+        unit = unit_a()
         with pytest.raises(AttributeError):
             unit.key = "other"  # type: ignore[misc]
 
@@ -334,7 +219,7 @@ class TestSamplingUnit:
                 key="mol-a",
                 task="equilibrium",
                 topology={"Z": torch.tensor([1, 1], dtype=torch.int16)},
-                frames={"energy": _halves(2, 0)},
+                frames={"energy": halves(2, 0)},
             )
 
     def test_rejects_pos_rows_not_multiple_of_n_atoms(self):
@@ -343,7 +228,7 @@ class TestSamplingUnit:
                 key="mol-a",
                 task="equilibrium",
                 topology={"Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
-                frames={"pos": _halves(7 * 3, 0).reshape(7, 3)},
+                frames={"pos": halves(7 * 3, 0).reshape(7, 3)},
             )
 
     def test_rejects_frame_space_row_count_mismatch(self):
@@ -353,8 +238,8 @@ class TestSamplingUnit:
                 task="equilibrium",
                 topology={"Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
                 frames={
-                    "pos": _halves(6 * 3, 0).reshape(6, 3),
-                    "energy": _halves(3, 0),
+                    "pos": halves(6 * 3, 0).reshape(6, 3),
+                    "energy": halves(3, 0),
                 },
             )
 
@@ -365,8 +250,8 @@ class TestSamplingUnit:
                 task="equilibrium",
                 topology={"Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
                 frames={
-                    "pos": _halves(6 * 3, 0).reshape(6, 3),
-                    "forces": _halves(5 * 3, 0).reshape(5, 3),
+                    "pos": halves(6 * 3, 0).reshape(6, 3),
+                    "forces": halves(5 * 3, 0).reshape(5, 3),
                 },
             )
 
@@ -381,7 +266,7 @@ class TestSamplingUnit:
                 key="mol-a",
                 task="equilibrium",
                 topology=topology,
-                frames={"pos": _halves(6 * 3, 0).reshape(6, 3)},
+                frames={"pos": halves(6 * 3, 0).reshape(6, 3)},
             )
 
     def test_rejects_unroutable_column_name(self):
@@ -393,7 +278,7 @@ class TestSamplingUnit:
                     "Z": torch.tensor([8, 1, 1], dtype=torch.int16),
                     "mystery": torch.tensor([1, 2, 3], dtype=torch.int32),
                 },
-                frames={"pos": _halves(6 * 3, 0).reshape(6, 3)},
+                frames={"pos": halves(6 * 3, 0).reshape(6, 3)},
             )
 
 
@@ -407,8 +292,8 @@ class TestBlockManifest:
         assert BlockManifest.read(sealed_block).schema_version == 1
 
     def test_unsealed_before_seal(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="train", provenance=_PROVENANCE)
-        writer.append_unit(_unit_a())
+        writer = BlockWriter(tmp_path / "b", split="train", provenance=BLOCK_PROVENANCE)
+        writer.append_unit(unit_a())
         assert BlockManifest.read(tmp_path / "b").sealed is False
 
     def test_sealed_after_seal(self, sealed_block: Path):
@@ -494,11 +379,11 @@ class TestBlockManifest:
     def test_block_digest_ignores_provenance_and_location(
         self, tmp_path: Path, units: list[SamplingUnit]
     ):
-        first = _write_block(tmp_path / "one", units)
+        first = write_block(tmp_path / "one", units)
         writer = BlockWriter(
             tmp_path / "two",
             split="train",
-            provenance={**_PROVENANCE, "created_at": "2027-01-01T00:00:00+00:00"},
+            provenance={**BLOCK_PROVENANCE, "created_at": "2027-01-01T00:00:00+00:00"},
         )
         for unit in units:
             writer.append_unit(unit)
@@ -574,9 +459,9 @@ class TestBlockManifest:
             key="bare",
             task="equilibrium",
             topology={"Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
-            frames={"pos": _halves(6 * 3, 0).reshape(6, 3)},
+            frames={"pos": halves(6 * 3, 0).reshape(6, 3)},
         )
-        rows = BlockManifest.read(_write_block(tmp_path / "frameless", [unit])).rows
+        rows = BlockManifest.read(write_block(tmp_path / "frameless", [unit])).rows
         assert "frame" not in rows
         assert rows["frame_atom"] == 6
         assert not [name for name in rows if name.startswith("molecule_term:")]
@@ -589,9 +474,9 @@ class TestBlockManifest:
         reports the pre-append counts while the writer holds two.
         """
         root = tmp_path / "unsealed"
-        writer = BlockWriter(root, split="train", provenance=_PROVENANCE)
-        writer.append_unit(_unit("mol-a", "equilibrium", [8, 1, 1], 2, 0))
-        writer.append_unit(_unit("mol-a2", "equilibrium", [8, 1, 1], 2, 10))
+        writer = BlockWriter(root, split="train", provenance=BLOCK_PROVENANCE)
+        writer.append_unit(sampling_unit("mol-a", "equilibrium", [8, 1, 1], 2, 0))
+        writer.append_unit(sampling_unit("mol-a2", "equilibrium", [8, 1, 1], 2, 10))
         manifest = BlockManifest.read(root)
         assert manifest.sealed is False
         assert writer.unit_count == 2
@@ -618,94 +503,94 @@ class TestBlockManifest:
 
 class TestBlockWriter:
     def test_append_unit_returns_sequential_indices(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="train", provenance=_PROVENANCE)
-        assert writer.append_unit(_unit_a()) == 0
-        assert writer.append_unit(_unit_b()) == 1
+        writer = BlockWriter(tmp_path / "b", split="train", provenance=BLOCK_PROVENANCE)
+        assert writer.append_unit(unit_a()) == 0
+        assert writer.append_unit(unit_b()) == 1
 
     def test_unit_count_tracks_appends(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="train", provenance=_PROVENANCE)
+        writer = BlockWriter(tmp_path / "b", split="train", provenance=BLOCK_PROVENANCE)
         assert writer.unit_count == 0
-        writer.append_unit(_unit_a())
+        writer.append_unit(unit_a())
         assert writer.unit_count == 1
 
-    def test_schema_is_frozen_from_the_first_unit(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="train", provenance=_PROVENANCE)
-        writer.append_unit(_unit_a())
+    def test_schema_is_frozen_from_the_firstsampling_unit(self, tmp_path: Path):
+        writer = BlockWriter(tmp_path / "b", split="train", provenance=BLOCK_PROVENANCE)
+        writer.append_unit(unit_a())
         columns = json.loads((tmp_path / "b" / "manifest.json").read_text())["columns"]
         assert set(columns) == _EXPECTED_COLUMNS
 
     def test_directory_holds_one_bin_per_column_plus_manifest_and_log(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="train", provenance=_PROVENANCE)
-        writer.append_unit(_unit_a())
+        writer = BlockWriter(tmp_path / "b", split="train", provenance=BLOCK_PROVENANCE)
+        writer.append_unit(unit_a())
         names = {path.name for path in (tmp_path / "b").iterdir()}
         assert names == {"manifest.json", "commit.log"} | {f"{c}.bin" for c in _EXPECTED_COLUMNS}
 
-    def test_commit_log_grows_one_fixed_size_record_per_unit(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="train", provenance=_PROVENANCE)
-        writer.append_unit(_unit_a())
+    def test_commit_log_grows_one_fixed_size_record_persampling_unit(self, tmp_path: Path):
+        writer = BlockWriter(tmp_path / "b", split="train", provenance=BLOCK_PROVENANCE)
+        writer.append_unit(unit_a())
         assert (tmp_path / "b" / "commit.log").stat().st_size == _RECORD_SIZE
-        writer.append_unit(_unit_b())
+        writer.append_unit(unit_b())
         assert (tmp_path / "b" / "commit.log").stat().st_size == 2 * _RECORD_SIZE
 
     def test_committed_bytes_equals_the_column_payload_size(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="train", provenance=_PROVENANCE)
-        writer.append_unit(_unit_a())
-        writer.append_unit(_unit_b())
+        writer = BlockWriter(tmp_path / "b", split="train", provenance=BLOCK_PROVENANCE)
+        writer.append_unit(unit_a())
+        writer.append_unit(unit_b())
         on_disk = sum(path.stat().st_size for path in (tmp_path / "b").glob("*.bin"))
         assert writer.committed_bytes == on_disk
 
     def test_append_after_seal_raises(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="train", provenance=_PROVENANCE)
-        writer.append_unit(_unit_a())
+        writer = BlockWriter(tmp_path / "b", split="train", provenance=BLOCK_PROVENANCE)
+        writer.append_unit(unit_a())
         writer.seal()
         with pytest.raises(ValueError):
-            writer.append_unit(_unit_b())
+            writer.append_unit(unit_b())
 
     def test_second_unit_missing_a_declared_column_raises(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="train", provenance=_PROVENANCE)
-        writer.append_unit(_unit_a())
+        writer = BlockWriter(tmp_path / "b", split="train", provenance=BLOCK_PROVENANCE)
+        writer.append_unit(unit_a())
         bare = SamplingUnit(
             key="mol-d",
             task="equilibrium",
             topology={"Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
-            frames=_frame_columns(2, 3, 0),
+            frames=frame_columns(2, 3, 0),
         )
         with pytest.raises(ValueError, match="bond_atomi"):
             writer.append_unit(bare)
 
     def test_second_unit_dtype_mismatch_raises(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="train", provenance=_PROVENANCE)
-        writer.append_unit(_unit_a())
+        writer = BlockWriter(tmp_path / "b", split="train", provenance=BLOCK_PROVENANCE)
+        writer.append_unit(unit_a())
         widened = SamplingUnit(
             key="mol-e",
             task="equilibrium",
             topology={
-                **_valence(3),
+                **valence_columns(3),
                 "Z": torch.tensor([8, 1, 1], dtype=torch.int64),  # frozen as <i2
             },
-            frames=_frame_columns(2, 3, 0),
+            frames=frame_columns(2, 3, 0),
         )
         with pytest.raises(ValueError, match="'Z'"):
             writer.append_unit(widened)
 
     def test_append_unit_takes_no_split_parameter(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="valid", provenance=_PROVENANCE)
+        writer = BlockWriter(tmp_path / "b", split="valid", provenance=BLOCK_PROVENANCE)
         with pytest.raises(TypeError):
-            writer.append_unit(_unit_a(), split="train")  # type: ignore[call-arg]
+            writer.append_unit(unit_a(), split="train")  # type: ignore[call-arg]
 
     def test_split_is_recorded_once_and_is_not_a_column(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="valid", provenance=_PROVENANCE)
-        writer.append_unit(_unit_a())
-        writer.append_unit(_unit_b())
+        writer = BlockWriter(tmp_path / "b", split="valid", provenance=BLOCK_PROVENANCE)
+        writer.append_unit(unit_a())
+        writer.append_unit(unit_b())
         raw = json.loads((tmp_path / "b" / "manifest.json").read_text())
         assert raw["split"] == "valid"
         assert not [name for name in raw["columns"] if "split" in name]
 
     def test_resume_truncates_a_torn_column_tail(self, tmp_path: Path, units: list[SamplingUnit]):
-        reference = _column_sha256(_write_block(tmp_path / "clean", units))
+        reference = _column_sha256(write_block(tmp_path / "clean", units))
 
         root = tmp_path / "torn"
-        writer = BlockWriter(root, split="train", provenance=_PROVENANCE)
+        writer = BlockWriter(root, split="train", provenance=BLOCK_PROVENANCE)
         writer.append_unit(units[0])
         writer.append_unit(units[1])
         del writer  # simulate the crash: no seal, handles dropped
@@ -720,10 +605,10 @@ class TestBlockWriter:
     def test_resume_discards_a_truncated_commit_record(
         self, tmp_path: Path, units: list[SamplingUnit]
     ):
-        reference = _column_sha256(_write_block(tmp_path / "clean", units))
+        reference = _column_sha256(write_block(tmp_path / "clean", units))
 
         root = tmp_path / "torn"
-        writer = BlockWriter(root, split="train", provenance=_PROVENANCE)
+        writer = BlockWriter(root, split="train", provenance=BLOCK_PROVENANCE)
         writer.append_unit(units[0])
         writer.append_unit(units[1])
         del writer
@@ -741,7 +626,7 @@ class TestBlockWriter:
         self, tmp_path: Path, units: list[SamplingUnit]
     ):
         root = tmp_path / "torn"
-        writer = BlockWriter(root, split="train", provenance=_PROVENANCE)
+        writer = BlockWriter(root, split="train", provenance=BLOCK_PROVENANCE)
         writer.append_unit(units[0])
         writer.append_unit(units[1])
         del writer
@@ -764,8 +649,8 @@ class TestBlockWriter:
 
 class TestBlockReader:
     def test_refuses_an_unsealed_block(self, tmp_path: Path):
-        writer = BlockWriter(tmp_path / "b", split="train", provenance=_PROVENANCE)
-        writer.append_unit(_unit_a())
+        writer = BlockWriter(tmp_path / "b", split="train", provenance=BLOCK_PROVENANCE)
+        writer.append_unit(unit_a())
         with pytest.raises(ValueError):
             BlockReader(tmp_path / "b")
 
@@ -881,15 +766,15 @@ class TestBlockReader:
     # -- edge cases --------------------------------------------------------
 
     def test_single_unit_block_reads_back(self, tmp_path: Path):
-        root = _write_block(tmp_path / "single", [_unit_a()])
+        root = write_block(tmp_path / "single", [unit_a()])
         block = BlockReader(root)
         assert block.unit_count == 1
         assert block.frame_count == 2
-        assert torch.equal(block.column("pos"), _unit_a().frames["pos"])
+        assert torch.equal(block.column("pos"), unit_a().frames["pos"])
 
     def test_single_frame_unit_reads_back(self, tmp_path: Path):
-        unit = _unit("mol-single", "equilibrium", [8, 1, 1], 1, 0)
-        root = _write_block(tmp_path / "one-frame", [unit])
+        unit = sampling_unit("mol-single", "equilibrium", [8, 1, 1], 1, 0)
+        root = write_block(tmp_path / "one-frame", [unit])
         block = BlockReader(root)
         assert block.frame_count == 1
         assert block.unit_frames(0).tolist() == [0]
@@ -900,9 +785,9 @@ class TestBlockReader:
             key="bare",
             task="equilibrium",
             topology={"Z": torch.tensor([8, 1, 1], dtype=torch.int16)},
-            frames={"pos": _halves(6 * 3, 0).reshape(6, 3)},
+            frames={"pos": halves(6 * 3, 0).reshape(6, 3)},
         )
-        root = _write_block(tmp_path / "bare", [unit])
+        root = write_block(tmp_path / "bare", [unit])
         block = BlockReader(root)
         columns = json.loads((root / "manifest.json").read_text())["columns"]
         assert not [name for name in columns if name.startswith(("bond_", "angle_", "proper_"))]
@@ -912,21 +797,11 @@ class TestBlockReader:
 
     # -- equivalence oracle ------------------------------------------------
 
-    def test_frame_payload_collate_equals_packed_v1(
-        self, tmp_path: Path, reader: BlockReader, units: list[SamplingUnit]
-    ):
-        frames = [7, 0, 3]
-        cache = PackedCache(tmp_path / "v1.pt")
-        cache.save(_samples(units))
-        expected = collate_packed(PackedView(cache.load(mmap=False)), frames)
-        actual = collate_packed(PackedView(reader.frame_payload(frames)), range(len(frames)))
-        _assert_td_equal(actual, expected)
-
     def test_frame_payload_collate_equals_collate_molecules(
         self, reader: BlockReader, units: list[SamplingUnit]
     ):
         frames = [7, 0, 3]
-        samples = _samples(units)
+        samples = unit_samples(units)
         expected = collate_molecules([samples[f] for f in frames])
         actual = collate_packed(PackedView(reader.frame_payload(frames)), range(len(frames)))
         _assert_td_equal(actual, expected)

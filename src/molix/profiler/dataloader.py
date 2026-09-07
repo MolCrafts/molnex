@@ -3,7 +3,7 @@
 Measures how much time a training loop spends blocked waiting for the next
 batch — the DataLoader stall time.  Accepts either a
 :class:`~molix.profiler.mock.MockSource` or a real
-:class:`~molix.store.dataset.MmapDataset` / :class:`torch.utils.data.Dataset`.
+:class:`~molix.store.block_view.BlockDataset` / :class:`torch.utils.data.Dataset`.
 
 The stall time is measured via the **inter-batch gap technique**: the
 wall-clock elapsed from ``next(iter)`` returning batch *i* to the point
@@ -26,14 +26,12 @@ from __future__ import annotations
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
 
 from torch.utils.data import DataLoader, Dataset
 
 from molix.batch.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
 from molix.batch.task import BatchTask
 from molix.profiler._utils import TimingStat, ValueStat, _fmt_table, batch_counts
-from molix.store.dataset import CachedDataset
 
 # ---------------------------------------------------------------------------
 # Result
@@ -155,6 +153,19 @@ class _ProfilerCollate:
 # ---------------------------------------------------------------------------
 
 
+class _ListDataset(Dataset):
+    """Map-style dataset over an already-materialised list of samples."""
+
+    def __init__(self, samples: list) -> None:
+        self._samples = samples
+
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    def __getitem__(self, idx: int):
+        return self._samples[idx]
+
+
 class DataLoaderProfiler:
     """Profile DataLoader batch-production throughput.
 
@@ -179,8 +190,8 @@ class DataLoaderProfiler:
         result = profiler.run(MockSource(n_samples=2000, n_atoms=(5, 20)))
         result.print_report()
 
-        # Real CachedDataset
-        result = profiler.run(cached_dataset, n_batches=200)
+        # Real dataset
+        result = profiler.run(dataset, n_batches=200)
         result.print_report()
     """
 
@@ -214,7 +225,7 @@ class DataLoaderProfiler:
                 - :class:`~molix.profiler.mock.MockSource` or any indexable
                   sample source (``__len__`` / ``__getitem__``) — samples are
                   prepared and wrapped in a
-                  :class:`~molix.store.dataset.CachedDataset` automatically.
+                  held in memory as a dataset automatically.
                 - A :class:`torch.utils.data.Dataset` — used directly.
                 - An existing :class:`torch.utils.data.DataLoader` — used as-is,
                   no new DataLoader is constructed.
@@ -283,21 +294,13 @@ class DataLoaderProfiler:
     # -- Helpers ----------------------------------------------------------------
 
     def _source_to_dataset(self, source: object) -> Dataset:
-        """Convert an indexable sample source to a CachedDataset of sample dicts.
+        """Materialise an indexable sample source as an in-memory dataset.
 
-        Writes the samples to a process-temp file so that the profiler
-        exercises the same code path real workflows do (cache file →
-        CachedDataset).
+        The DataLoader is what this profiler measures, so the samples are drawn
+        once and held in a list: no on-disk round trip stands between the
+        source and the loader under test.
         """
-        import tempfile
-
-        from molix.store.cache import PackedCache
-
-        n = len(source)
-        samples = [source[i] for i in range(n)]
-        tmp_file = Path(tempfile.mkdtemp(prefix="molix_profiler_")) / "samples.pt"
-        PackedCache(tmp_file).save(samples)
-        return CachedDataset(tmp_file)
+        return _ListDataset([source[i] for i in range(len(source))])
 
     def _make_dataloader(self, dataset: Dataset) -> DataLoader:
         # A picklable top-level collate (not a closure) so num_workers > 0

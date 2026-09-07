@@ -38,7 +38,7 @@ already discovered is ever skipped, so every construction refusal still applies
 One directory is one split: `prepare` exports a single split per call and blocks
 are split-pure (`ds.split` is that one manifest split), so build one
 `BlockDataset` per split rather than pointing one view at both. `ds[i]` returns
-the same flat sample dict `MmapDataset[i]` does, so it feeds the collation below
+a flat sample dict, so it feeds the collation below
 unchanged. The producing side is documented in MolHub's
 [`docs/reference/python.md`](https://github.com/molcrafts/molhub/blob/main/docs/reference/python.md).
 
@@ -64,7 +64,7 @@ Read it with tuple keys: `batch["atoms", "Z"]`, `batch["edges", "edge_index"]`,
 
 Two collate paths exist and are required to agree leaf for leaf.
 `collate_molecules` walks a list of per-sample dicts; `collate_packed` builds
-the same batch directly out of the packed `PackedCache` tensors by gathering
+the same batch directly out of the block's packed tensors by gathering
 rows, skipping the unpack-then-repack round trip. `collate_molecules` is the
 equivalence oracle for `collate_packed`.
 
@@ -79,6 +79,6 @@ writes is a molnex contract:
 
 Dataset-level steps (an atomic-dress baseline fitted over the training split,
 unit conversion, constant labels) are MolHub's. molnex reads back whatever fit
-they recorded through `MmapDataset.stats()`.
+the producer recorded in the block manifest.
 
 For the full batch structure, see [Batch Schema](../explanation/batch-schema.md).

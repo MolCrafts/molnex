@@ -64,9 +64,9 @@ MolHub's; the tutorial starts from the cache:
 
 ```python
 from molix.batch import DataModule
-from molix.store import MmapDataset
+from molix.store import BlockDataset
 
-train_ds, val_ds = MmapDataset("./cache/allegro-run.pt").split(ratio=0.9, seed=42)
+train_ds, val_ds = BlockDataset.load_from_disk("./blocks/allegro-run").split(ratio=0.9, seed=42)
 
 dm = DataModule(
     train_ds,

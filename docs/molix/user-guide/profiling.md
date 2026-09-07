@@ -53,7 +53,7 @@ blocks for 200 ms will show a mean close to zero and a large `p95`.
 
 **The `Data:` line.** Reports name their input by calling `describe()` on it if
 it has one (`MockSource` and `MockBatch` do), and otherwise fall back to the
-class name — a `CachedDataset` simply prints as `CachedDataset`.
+class name — a `BlockDataset` simply prints as `BlockDataset`.
 
 **`[WARN]` lines.** Diagnostics are printed, never raised. A profiler that
 notices something suspicious — a skewed size distribution, a missing pointer, a
@@ -256,11 +256,10 @@ routed during collation, defaulting to `DEFAULT_TARGET_SCHEMA`), and optional
 `run()` resolves its argument in three ways. An existing `DataLoader` is used
 as-is and your constructor settings only affect what the report *says*. A
 `torch.utils.data.Dataset` is wrapped in a new DataLoader built from those
-settings. Anything else is treated as an indexable sample source: every sample is
-materialised, written to a `PackedCache` file in a fresh temporary directory,
-and reopened as a `CachedDataset`, so the measurement exercises the same
-cache-file path a real workflow uses. Be aware that this last route writes to
-disk and holds the whole source in memory while packing.
+settings. Anything else is treated as an indexable sample source: every sample is drawn
+once and held in a list, so the DataLoader under test — not a storage layer —
+is what gets measured. Be aware that this last route holds the whole source in
+memory.
 
 With `num_workers > 0` the loader is built with the `spawn` start method and a
 top-level picklable collate object, so the profiler works under `spawn` and
@@ -365,8 +364,6 @@ the fields laid out, and what do the labels look like.
 ```python
 import torch
 
-from molix.store.cache import PackedCache
-from molix.store.dataset import CachedDataset
 from molix.profiler import DatasetProfiler
 
 
@@ -386,11 +383,7 @@ def ring(i: int) -> dict:
     }
 
 
-sink = "/tmp/ring-cache.pt"
-PackedCache(sink).save([ring(i) for i in range(100)], overwrite=True)
-dataset = CachedDataset(sink)
-
-result = DatasetProfiler(n_samples=20).run(dataset)
+result = DatasetProfiler(n_samples=20).run([ring(i) for i in range(100)])
 result.print_report()
 
 assert result.counts_exact          # size stats cover all 100 records
@@ -417,8 +410,8 @@ counts are then just `ptr[i+1] - ptr[i]`, one vectorised subtraction over the
 whole file with no sample unpacked.
 
 So when the object exposes `atom_counts`, `edge_counts`, `avg_num_neighbors`,
-`max_atoms` and `max_edges` — `CachedDataset`, `MmapDataset`, and `SubsetDataset`
-which remaps them to its own indices — the profiler reads those properties
+`max_atoms` and `max_edges` — `BlockDataset`, and `SubsetDataset` which remaps
+them to its own indices — the profiler reads those properties
 directly. Size statistics then describe **every** record in the dataset, not the
 sampled subset, and the result reports `counts_exact=True`. The report prints
 the flag next to the neighbour count so you always know which regime produced
@@ -455,7 +448,8 @@ Some things cannot be read off a pointer vector and genuinely require touching
 records one at a time:
 
 - `cold_access_ms` — the very first `data[i]`, including memory-map page-in from
-  disk. On an `MmapDataset` this is usually much larger than the steady state.
+  disk. On a memory-mapped `BlockDataset` this is usually much larger than the
+  steady state.
 - `access_ms` — steady-state `__getitem__` latency after `n_warmup` discarded
   accesses, as a full `TimingStat`.
 - `sample_bytes` — the leaf-tensor footprint of one record: the sum of

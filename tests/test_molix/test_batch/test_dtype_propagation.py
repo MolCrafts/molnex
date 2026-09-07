@@ -27,8 +27,8 @@ import torch
 from molix.batch.datamodule import DataModule
 from molix.config import config
 from molix.core.steps import batch_to
-from molix.store.cache import PackedCache
-from molix.store.dataset import CachedDataset
+from molix.store import BlockDataset
+from tests.test_molix.conftest import unit_a, unit_b, write_block
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -51,21 +51,18 @@ def _make_samples(n: int = 6) -> list[dict]:
             "edge_index": torch.tensor([[0, 1]], dtype=torch.long),
             "edge_diff": torch.randn(1, 3, dtype=torch.float32),
             "edge_dist": torch.tensor([1.5], dtype=torch.float32),
-            "targets": {"U0": torch.tensor([float(i)], dtype=torch.float32)},
+            "targets": {"energy": torch.tensor([float(i)], dtype=torch.float32)},
         }
         for i in range(n)
     ]
 
 
 def _build_dm(tmp_path: Path, *, batch_size: int = 2) -> DataModule:
-    samples = _make_samples(8)
-    train_sink = tmp_path / "train.pt"
-    val_sink = tmp_path / "val.pt"
-    PackedCache(train_sink).save(samples[:6])
-    PackedCache(val_sink).save(samples[6:])
     return DataModule(
-        CachedDataset(train_sink),
-        CachedDataset(val_sink),
+        BlockDataset.load_from_disk(write_block(tmp_path / "train" / "b", [unit_a()]).parent),
+        BlockDataset.load_from_disk(
+            write_block(tmp_path / "val" / "b", [unit_b()], split="val").parent
+        ),
         batch_size=batch_size,
         num_workers=0,
         pin_memory=False,
@@ -165,7 +162,7 @@ class TestPrecisionFlowsToBatch:
         assert batch["atoms", "pos"].dtype is expected
         assert batch["edges", "edge_diff"].dtype is expected
         assert batch["edges", "edge_dist"].dtype is expected
-        assert batch["graphs", "U0"].dtype is expected
+        assert batch["graphs", "energy"].dtype is expected
         # Integers untouched
         assert batch["atoms", "Z"].dtype is torch.long
         assert batch["edges", "edge_index"].dtype is torch.long
@@ -190,14 +187,11 @@ class TestPrecisionFlowsToBatch:
         assert out["atoms", "pos"].dtype is torch.float64
 
     def test_dataset_loader_canonical_fp32_preserved(self, tmp_path: Path):
-        """Cache stays fp32 regardless of set_precision — the up-cast
-        happens at collate, not at load. This keeps a single cache
-        reusable across precisions."""
+        """A block stays fp32 regardless of set_precision — the up-cast
+        happens at collate, not at load. This keeps one block reusable
+        across precisions."""
         config.set_precision("fp64")
-        samples = _make_samples(4)
-        sink = tmp_path / "cache.pt"
-        PackedCache(sink).save(samples)
-        ds = CachedDataset(sink)
+        ds = BlockDataset.load_from_disk(write_block(tmp_path / "b" / "x", [unit_a()]).parent)
         raw = ds[0]
         assert raw["pos"].dtype is torch.float32
         assert config["ftype"] is torch.float64

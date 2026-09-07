@@ -53,7 +53,7 @@ class EdgeEnergyHead(nn.Module):
         avg_num_neighbors: Dataset-wide ⟨|N(i)|⟩ for aggregate normalization.
             **Required** (no per-source fallback); read it once from the
             dataset that supplies the batches —
-            :attr:`molix.store.dataset.MmapDataset.avg_num_neighbors`, which
+            the dataset-wide ⟨|N(i)|⟩ the caller measures, which
             derives it from the packed cache pointers without a fit pass.
         out_key: TensorDict key under which to write the per-graph energy.
 

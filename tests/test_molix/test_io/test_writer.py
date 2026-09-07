@@ -101,7 +101,7 @@ def test_zarr_layout_chunks_and_shards(tmp_path: Path) -> None:
     """ac-006: ``chunks=(1024,)``, ``shards=(1_048_576,)`` preserved verbatim.
 
     HPC-inode discipline relies on these exact values per the original
-    ``recorder/__init__.py`` rationale (mirrors ``PackedCache``).
+    ``recorder/__init__.py`` rationale (mirrors the block writer).
     """
     from molix.io import JournalWriter
 
@@ -120,7 +120,7 @@ def test_zarr_layout_chunks_and_shards(tmp_path: Path) -> None:
 
 
 def test_sharding_keeps_file_count_small(tmp_path: Path) -> None:
-    """ac-006: 100k records produce O(50) files (PackedCache-equivalent inode discipline)."""
+    """ac-006: 100k records produce O(50) files (block-equivalent inode discipline)."""
     from molix.io import JournalWriter
 
     keys = [f"train/m{i}" for i in range(5)]

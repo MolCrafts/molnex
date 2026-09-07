@@ -770,7 +770,7 @@ class BlockManifest:
 
         Writes ``manifest.json.tmp``, fsyncs it, then ``os.replace``\\ s it onto
         ``manifest.json`` — the POSIX-atomic discipline
-        :meth:`molix.store.cache.PackedCache.save` already uses, so a reader never
+        the column writes already use, so a reader never
         observes a partial manifest and no temporary file survives the call.
 
         Args:
@@ -1482,7 +1482,7 @@ class BlockReader:
         """Atoms per frame ``(F,)`` ``torch.long`` — ``n_atoms[frame_mol]``.
 
         Pointer arithmetic only: mirrors
-        :attr:`molix.store.dataset.MmapDataset.atom_counts` so a token-budget
+        :attr:`molix.store.block_view.BlockDataset.atom_counts` so a token-budget
         sampler consumes a block without unpacking any frame.
         """
         return self._n_atoms[self._frame_mol]

@@ -82,7 +82,7 @@ class DataModule:
 
     Usage::
 
-        full = MmapDataset(cache_file)
+        full = BlockDataset.load_from_disk(blocks_dir)
         train_ds, val_ds = full.split(sizes=(n_train, n_val), seed=42)
         dm = DataModule(train_ds, val_ds,
                         target_schema=QM9Source.TARGET_SCHEMA,
@@ -471,12 +471,7 @@ class DataModule:
            payload: the per-sample fallback is unavailable for it, and silently
            taking it would raise ``KeyError`` deep in the collate instead of an
            actionable message here.
-        2. **Packed cache** — a packed-cache-backed dataset gets an
-           :class:`_IndexDataset` (returning bare indices) plus a
-           :class:`_PackedCollateFn` that slices the packed tensors directly via
-           :func:`~molix.batch.collate.collate_packed`, skipping per-sample
-           unpack→repack.
-        3. **Fallback** — the dataset is used as-is with the per-sample
+        2. **Fallback** — the dataset is used as-is with the per-sample
            :class:`_CollateFn`.
 
         Args:
@@ -487,10 +482,6 @@ class DataModule:
         """
         if not _is_distributed() and _block_capable(dataset):
             return _IndexDataset(len(dataset)), _BlockCollateFn(
-                dataset, self.target_schema, self.batch_tasks
-            )
-        if not _is_distributed() and _packed_capable(dataset):
-            return _IndexDataset(len(dataset)), _PackedCollateFn(
                 dataset, self.target_schema, self.batch_tasks
             )
         return dataset, self._make_collate_fn()
@@ -592,32 +583,12 @@ def _block_capable(dataset: BaseDataset) -> TypeGuard[BlockFrameView]:
     return isinstance(dataset, BlockFrameView)
 
 
-def _packed_capable(dataset: BaseDataset) -> bool:
-    """Whether *dataset* can serve the packed-aware collate fast path.
-
-    True when the dataset exposes a working ``packed_view()`` — i.e. it is
-    (or wraps) a :class:`~molix.store.cache.PackedCache`-backed dataset. A
-    :class:`~molix.store.dataset.SubsetDataset` over a non-packed dataset
-    has the method but raises :class:`AttributeError` when called, so we
-    probe by calling it (cheap — wraps a payload reference, copies no
-    tensors).
-    """
-    view_fn = getattr(dataset, "packed_view", None)
-    if not callable(view_fn):
-        return False
-    try:
-        view_fn()
-    except AttributeError:
-        return False
-    return True
-
-
 class _IndexDataset(Dataset):
     """Identity dataset returning the bare index for each position.
 
     Lets the DataLoader's sampler / ``batch_sampler`` drive batch
     composition while the real per-sample data is sliced from the packed
-    cache by :class:`_PackedCollateFn`. Transparent to shuffling and the
+    block by :class:`_BlockCollateFn`. Transparent to shuffling and the
     token-budget sampler, which depend only on ``__len__``.
     """
 
@@ -631,48 +602,6 @@ class _IndexDataset(Dataset):
         return idx
 
 
-class _PackedCollateFn:
-    """Picklable fast-path collate: slice packed tensors for a list of indices.
-
-    Receives a ``list[int]`` of sample indices (from :class:`_IndexDataset`
-    via the sampler), builds the batch with
-    :func:`~molix.batch.collate.collate_packed`, then applies the same
-    post-collate contract as :class:`_CollateFn` — ``batch_tasks`` followed
-    by :func:`~molix.core.steps.batch_to` with the captured ``ftype``.
-
-    The :class:`~molix.store.dataset.PackedView` is built lazily on first
-    call and excluded from the pickled state (see :meth:`__getstate__`), so
-    the mmap'd payload is re-opened per worker through the dataset
-    reference rather than shipped as tensors across the process boundary.
-    """
-
-    def __init__(
-        self, dataset: BaseDataset, schema: TargetSchema, batch_tasks: Sequence[BatchTask]
-    ) -> None:
-        self._dataset = dataset
-        self.schema = schema
-        self.batch_tasks = batch_tasks
-        self.ftype = config["ftype"]
-        self._view = None
-
-    def _packed_view(self):
-        if self._view is None:
-            self._view = self._dataset.packed_view()
-        return self._view
-
-    def __call__(self, indices: list[int]) -> dict:
-        batch = collate_packed(self._packed_view(), indices, self.schema)
-        for task in self.batch_tasks:
-            batch = task.execute(batch)
-        return batch_to(batch, dtype=self.ftype)
-
-    def __getstate__(self) -> dict:
-        """Drop the lazily built view so pickling never captures payload tensors."""
-        state = self.__dict__.copy()
-        state["_view"] = None
-        return state
-
-
 class _BlockCollateFn:
     """Picklable block-route collate: one block's frames per batch, task stamped.
 
@@ -682,7 +611,7 @@ class _BlockCollateFn:
 
         collate_packed(PackedView(reader.frame_payload(frames)), range(B), schema)
 
-    then applies the same post-collate contract as :class:`_PackedCollateFn` —
+    then applies the same post-collate contract as :class:`_CollateFn` —
     ``batch_tasks`` in order, followed by
     :func:`~molix.core.steps.batch_to` with the captured ``ftype``, which casts
     floating leaves only, so the int64 task label survives untouched. Blocks carry
@@ -709,7 +638,7 @@ class _BlockCollateFn:
     Residency is the view's: this callable keeps no reader of its own — holding one
     past the view's bounded LRU pool would make ``K + 1`` blocks resident — so
     there is no lazily built per-block state to clear, and :meth:`__getstate__`
-    (mirroring :class:`_PackedCollateFn`) hands out a snapshot carrying the view
+    hands out a snapshot carrying the view
     reference, the schema, the tasks and the dtype, never a payload tensor.
 
     Args:
@@ -794,7 +723,7 @@ class _BlockCollateFn:
     def __getstate__(self) -> dict:
         """Snapshot the picklable state — a view reference, never payload tensors.
 
-        Mirrors :meth:`_PackedCollateFn.__getstate__`: there is no lazily built
+        There is no lazily built
         per-block state to clear here (readers stay in the view's bounded pool), so
         the snapshot is the whole state, copied rather than aliased.
         """

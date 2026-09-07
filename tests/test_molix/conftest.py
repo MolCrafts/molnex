@@ -8,6 +8,12 @@ ancestor rather than being copied (and drifting) in each leaf conftest.
   geometry used by ``test_store/test_cache.py``,
   ``test_store/test_dataset.py`` and ``test_batch/test_collate_packed.py``
   to pin the packed-cache bucket-identity contract.
+- :func:`write_block` / :func:`sampling_unit` / :func:`unit_samples` — the
+  ``molix.block/1`` fixture builders. Every dataset fixture in these tests
+  writes a real sealed block, because a block is molnex's only on-disk format
+  since the single-``.pt`` packed cache was retired on 2026-09-07.
+  :func:`unit_samples` returns the same data as flat per-frame sample dicts,
+  which is the oracle the packed-collate path is checked against.
 - :func:`water_les_root` — the synthetic extended-XYZ water trajectory,
   read by ``test_io/test_extxyz.py``. It moved up here when the codec moved
   to ``molix.io`` and its second consumer, the dataset loader, left the
@@ -20,9 +26,12 @@ import math
 import random
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
+
+from molix.store.block import BlockWriter, SamplingUnit
 
 
 def equal_count_samples(n: int = 3) -> list[dict]:
@@ -180,3 +189,134 @@ def water_les_root(tmp_path: Path) -> Path:
     _write_water_extxyz(train_path, n_frames=40, n_water=2, edge=12.0)
     _write_water_extxyz(test_path, n_frames=2, n_water=2, edge=12.0)
     return root
+
+
+# ---------------------------------------------------------------------------
+# molix.block/1 fixture builders
+# ---------------------------------------------------------------------------
+
+
+BLOCK_PROVENANCE: dict[str, Any] = {
+    "source": {"name": "molnex-unit-test", "coordinate": "n/a"},
+    "generator": {"tool": "test_block.py", "version": "1", "commit": "0"},
+    "created_at": "2026-08-14T00:00:00+00:00",
+    "units": {
+        "pos": "angstrom",
+        "energy": "kcal/mol",
+        "forces": "kcal/mol/angstrom",
+    },
+}
+
+
+def halves(count: int, start: int) -> torch.Tensor:
+    """``count`` distinct multiples of 0.5 — exactly representable in float32."""
+    return (torch.arange(count, dtype=torch.float32) + float(start)) * 0.5
+
+
+def frame_columns(n_frames: int, n_atoms: int, offset: int) -> dict[str, torch.Tensor]:
+    rows = n_frames * n_atoms
+    return {
+        "pos": halves(rows * 3, offset).reshape(rows, 3),
+        "forces": -halves(rows * 3, offset + 7).reshape(rows, 3),
+        "energy": halves(n_frames, offset + 3),
+    }
+
+
+def valence_columns(n_atoms: int) -> dict[str, torch.Tensor]:
+    """Covalent topology of a linear chain over ``n_atoms`` atoms (int32 columns)."""
+    if n_atoms == 3:
+        bonds = ([0, 0], [1, 2], [1, 1])
+        angles = ([1], [0], [2], [1])
+        propers: tuple[list[int], ...] = ([], [], [], [], [])
+    else:
+        bonds = ([0, 1, 2], [1, 2, 3], [1, 1, 1])
+        angles = ([0, 1], [1, 2], [2, 3], [2, 2])
+        propers = ([0], [1], [2], [3], [3])
+
+    def i32(values: list[int]) -> torch.Tensor:
+        return torch.tensor(values, dtype=torch.int32)
+
+    return {
+        "bond_atomi": i32(bonds[0]),
+        "bond_atomj": i32(bonds[1]),
+        "bond_type": i32(bonds[2]),
+        "angle_atomi": i32(angles[0]),
+        "angle_atomj": i32(angles[1]),
+        "angle_atomk": i32(angles[2]),
+        "angle_type": i32(angles[3]),
+        "proper_atomi": i32(propers[0]),
+        "proper_atomj": i32(propers[1]),
+        "proper_atomk": i32(propers[2]),
+        "proper_atoml": i32(propers[3]),
+        "proper_type": i32(propers[4]),
+    }
+
+
+def sampling_unit(key: str, task: str, z: list[int], n_frames: int, offset: int) -> SamplingUnit:
+    n_atoms = len(z)
+    topology = {"Z": torch.tensor(z, dtype=torch.int16), **valence_columns(n_atoms)}
+    return SamplingUnit(
+        key=key,
+        task=task,
+        topology=topology,
+        frames=frame_columns(n_frames, n_atoms, offset),
+    )
+
+
+def unit_a() -> SamplingUnit:
+    return sampling_unit("mol-a", "equilibrium", [8, 1, 1], 2, 0)
+
+
+def unit_b() -> SamplingUnit:
+    return sampling_unit("mol-b", "relax", [6, 6, 1, 1], 3, 40)
+
+
+def unit_c() -> SamplingUnit:
+    return sampling_unit("scan-c", "torsion", [6, 6, 8, 1], 5, 100)
+
+
+def write_block(root: Path, units: list[SamplingUnit], *, split: str = "train") -> Path:
+    """Write and seal a block holding *units* — the uninterrupted reference write."""
+    writer = BlockWriter(root, split=split, provenance=BLOCK_PROVENANCE)
+    for unit in units:
+        writer.append_unit(unit)
+    writer.seal()
+    return root
+
+
+def unit_samples(units: list[SamplingUnit]) -> list[dict]:
+    """The same data as flat per-frame sample dicts (the v1 / oracle shape)."""
+    out: list[dict] = []
+    for unit in units:
+        n_atoms = unit.n_atoms
+        topology = unit.topology
+        for k in range(unit.n_frames):
+            rows = slice(k * n_atoms, (k + 1) * n_atoms)
+            out.append(
+                {
+                    "Z": topology["Z"].long(),
+                    "pos": unit.frames["pos"][rows].clone(),
+                    "targets": {
+                        "energy": unit.frames["energy"][k : k + 1].clone(),
+                        "forces": unit.frames["forces"][rows].clone(),
+                    },
+                    "bond_index": torch.stack(
+                        [topology["bond_atomi"], topology["bond_atomj"]]
+                    ).long(),
+                    "bond_types": topology["bond_type"].long(),
+                    "angles": {
+                        "atomi": topology["angle_atomi"].long(),
+                        "atomj": topology["angle_atomj"].long(),
+                        "atomk": topology["angle_atomk"].long(),
+                        "type": topology["angle_type"].long(),
+                    },
+                    "propers": {
+                        "atomi": topology["proper_atomi"].long(),
+                        "atomj": topology["proper_atomj"].long(),
+                        "atomk": topology["proper_atomk"].long(),
+                        "atoml": topology["proper_atoml"].long(),
+                        "type": topology["proper_type"].long(),
+                    },
+                }
+            )
+    return out

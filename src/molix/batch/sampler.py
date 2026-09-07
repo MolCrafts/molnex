@@ -1,4 +1,4 @@
-"""Token-budget batch sampling over :class:`~molix.store.cache.PackedCache` pointers.
+"""Token-budget batch sampling over packed cumsum pointers.
 
 Molecular samples vary widely in size (QM9 spans 3–29 atoms), so a fixed
 ``batch_size`` makes per-batch compute and memory swing with batch
@@ -14,7 +14,7 @@ Four layers, deliberately separated:
 * :class:`TokenBudgetPacker` — the packing rule alone (visit order in,
   batch plan out); no dataset, no RNG, no warning policy.
 * :class:`TokenBudgetBatchSampler` — seeded shuffle + oversize warning on
-  top of the packer, over a packed-cache-backed dataset.
+  top of the packer, over a count-bearing dataset.
 * :class:`FrameLabelTable` — the per-frame ``(task, group)`` identity of one
   parent index space in bounded integer-code form, built either from the
   legacy Python label sequences or from a block's ``(F,)`` code columns.
@@ -169,10 +169,9 @@ class TokenBudgetBatchSampler:
     process boundary unless the whole DataModule is shipped.
 
     Args:
-        dataset: A packed-cache-backed dataset exposing ``atom_counts`` /
+        dataset: A count-bearing dataset exposing ``atom_counts`` /
             ``edge_counts`` ``(n_samples,)`` count vectors —
-            :class:`~molix.store.dataset.MmapDataset`,
-            :class:`~molix.store.dataset.CachedDataset`, or a
+            :class:`~molix.store.block_view.BlockDataset` or a
             :class:`~molix.store.dataset.SubsetDataset` wrapping either.
         max_atoms: Maximum total atom count per batch, or ``None``.
         max_edges: Maximum total edge count per batch, or ``None``.
@@ -221,9 +220,9 @@ class TokenBudgetBatchSampler:
                 pairs.append((self._max_edges, self._dataset.edge_counts))
         except AttributeError as e:
             raise ValueError(
-                "TokenBudgetBatchSampler requires a packed-cache-backed "
-                "dataset exposing atom_counts/edge_counts — use MmapDataset, "
-                "CachedDataset, or a SubsetDataset wrapping one of them; got "
+                "TokenBudgetBatchSampler requires a count-bearing "
+                "dataset exposing atom_counts/edge_counts — use BlockDataset "
+                "or a SubsetDataset wrapping one; got "
                 f"{type(self._dataset).__name__}."
             ) from e
         return pairs
@@ -596,10 +595,9 @@ class TaskMixtureBatchSampler:
     between epochs while keeping epoch *k* re-derivable on resume.
 
     Args:
-        dataset: A packed-cache-backed dataset exposing ``atom_counts`` /
+        dataset: A count-bearing dataset exposing ``atom_counts`` /
             ``edge_counts`` ``(n_samples,)`` count vectors —
-            :class:`~molix.store.dataset.MmapDataset`,
-            :class:`~molix.store.dataset.CachedDataset`, or a
+            :class:`~molix.store.block_view.BlockDataset` or a
             :class:`~molix.store.dataset.SubsetDataset` wrapping either.
             Unit costs are pointer arithmetic over those vectors; no
             sample is ever unpacked.
@@ -857,9 +855,9 @@ class TaskMixtureBatchSampler:
                 pairs.append((self._max_edges, self._dataset.edge_counts))
         except AttributeError as e:
             raise ValueError(
-                "TaskMixtureBatchSampler requires a packed-cache-backed "
-                "dataset exposing atom_counts/edge_counts — use MmapDataset, "
-                "CachedDataset, or a SubsetDataset wrapping one of them; got "
+                "TaskMixtureBatchSampler requires a count-bearing "
+                "dataset exposing atom_counts/edge_counts — use BlockDataset "
+                "or a SubsetDataset wrapping one; got "
                 f"{type(self._dataset).__name__}."
             ) from e
         return pairs

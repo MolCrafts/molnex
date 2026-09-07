@@ -8,20 +8,16 @@ magnitude is pinned.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import torch
 
 from molix.profiler.dataset import (
     DatasetProfiler,
     DatasetResult,
-    FieldSpec,
     TargetStat,
     _flatten_leaves,
 )
-from molix.store.cache import PackedCache, _flatten
-from molix.store.dataset import CachedDataset
+from molix.store.dataset import BaseDataset
 
 # ---------------------------------------------------------------------------
 # Literal fixtures — no RNG, so every expectation below is analytic
@@ -47,7 +43,7 @@ def _record(i: int, n: int | None = None) -> dict:
         n: Fixed atom count, overriding the ``2 + i % 4`` cycle.
 
     Returns:
-        A flat sample dict suitable for :meth:`PackedCache.save`.
+        A flat pre-collate sample dict.
     """
     n_atoms = 2 + i % 4 if n is None else n
     src = torch.arange(n_atoms, dtype=torch.long)
@@ -62,34 +58,55 @@ def _record(i: int, n: int | None = None) -> dict:
     }
 
 
-def _write_cache(tmp_path: Path, samples: list[dict]) -> Path:
-    """Pack *samples* into a cache file under *tmp_path* and return the sink path."""
-    sink = tmp_path / "cache.pt"
-    PackedCache(sink).save(samples)
-    return sink
+class _CountingDataset(BaseDataset):
+    """List-backed dataset with exact counts, counting ``__getitem__`` calls.
 
-
-class _CountingCachedDataset(CachedDataset):
-    """:class:`CachedDataset` that counts ``__getitem__`` calls.
-
-    Subclassing keeps the packed-pointer fast path (``atom_counts`` /
-    ``max_atoms`` / ``packed_view``) intact, so the counter observes only
-    the profiler's sampled slow path.
+    The count accessors are what makes the profiler's exact path exact, so they
+    are provided here directly; the counter then observes only the profiler's
+    sampled slow path.
     """
 
-    def __init__(self, sink: Path) -> None:
-        super().__init__(sink)
+    def __init__(self, samples: list[dict]) -> None:
+        self._samples = samples
         self.n_getitem = 0
+
+    def __len__(self) -> int:
+        return len(self._samples)
 
     def __getitem__(self, idx: int) -> dict:
         self.n_getitem += 1
-        return super().__getitem__(idx)
+        return self._samples[idx]
+
+    @property
+    def atom_counts(self) -> torch.Tensor:
+        return torch.tensor([len(s["Z"]) for s in self._samples], dtype=torch.long)
+
+    @property
+    def edge_counts(self) -> torch.Tensor:
+        if "edge_index" not in self._samples[0]:
+            raise ValueError("dataset carries no neighbour graph — no edge counts")
+        return torch.tensor([len(s["edge_index"]) for s in self._samples], dtype=torch.long)
+
+    @property
+    def max_atoms(self) -> int:
+        return int(self.atom_counts.max())
+
+    @property
+    def max_edges(self) -> int:
+        return int(self.edge_counts.max())
+
+    @property
+    def avg_num_neighbors(self) -> float:
+        """``0.0`` without a neighbour graph — zero neighbours is the honest answer."""
+        if "edge_index" not in self._samples[0]:
+            return 0.0
+        return float(self.edge_counts.sum()) / float(self.atom_counts.sum())
 
 
 @pytest.fixture
-def ring_dataset(tmp_path: Path) -> CachedDataset:
-    """Cache-backed dataset over the 100 literal ring records."""
-    return CachedDataset(_write_cache(tmp_path, [_record(i) for i in range(_N_RECORDS)]))
+def ring_dataset() -> _CountingDataset:
+    """Dataset over the 100 literal ring records."""
+    return _CountingDataset([_record(i) for i in range(_N_RECORDS)])
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +135,7 @@ class TestDatasetProfiler:
 
     def test_run_samples_only_n_samples_for_access(self, tmp_path):
         """The access loop is bounded by ``n_samples`` (+ warmup), never ``n_total``."""
-        ds = _CountingCachedDataset(_write_cache(tmp_path, [_record(i) for i in range(_N_RECORDS)]))
+        ds = _CountingDataset([_record(i) for i in range(_N_RECORDS)])
 
         result = DatasetProfiler(n_samples=5, n_warmup=3).run(ds)
 
@@ -127,17 +144,6 @@ class TestDatasetProfiler:
         assert result.access_ms.mean_ms > 0.0
         # at most one cold access + 3 discarded warmups + 5 measured accesses
         assert 5 <= ds.n_getitem <= 1 + 3 + 5
-
-    def test_run_fields_come_from_packed_schema(self, ring_dataset):
-        """Field layout is read off ``payload["schema"]`` verbatim, hence exact."""
-        result = DatasetProfiler(n_samples=5).run(ring_dataset)
-        schema = ring_dataset.packed_view().payload["schema"]
-
-        assert result.fields_exact is True
-        assert all(isinstance(f, FieldSpec) for f in result.fields)
-        assert {(f.key, f.axis, f.dtype, f.extra_shape) for f in result.fields} == {
-            (key, *spec) for key, spec in schema.items()
-        }
 
     def test_run_on_plain_sequence_falls_back(self):
         """A ``list[dict]`` has no packed pointers: degrade audibly, never raise."""
@@ -154,7 +160,7 @@ class TestDatasetProfiler:
         assert result.fields  # inferred from the sampled records
 
     def test_run_without_edge_ptr_warns_not_raises(self, tmp_path):
-        """A cache built without per-edge keys degrades to ``edge_stats=None`` + [WARN]."""
+        """A dataset without a neighbour graph degrades to ``edge_stats=None`` + [WARN]."""
         samples = [
             {
                 "Z": torch.full((4,), 8, dtype=torch.long),
@@ -162,7 +168,7 @@ class TestDatasetProfiler:
             }
             for _ in range(6)
         ]
-        ds = CachedDataset(_write_cache(tmp_path, samples))
+        ds = _CountingDataset(samples)
         with pytest.raises(ValueError):
             _ = ds.edge_counts  # precondition: the exact fast path really does raise
 
@@ -173,7 +179,7 @@ class TestDatasetProfiler:
 
     def test_run_rejects_empty_dataset(self):
         """Empty input is a user error, and the message must say what to pass instead."""
-        with pytest.raises(ValueError, match="CachedDataset"):
+        with pytest.raises(ValueError, match="BlockDataset"):
             DatasetProfiler().run([])
 
     def test_init_rejects_degenerate_config(self):
@@ -205,7 +211,7 @@ class TestDatasetResult:
         """A NaN target column is counted and warned about, not raised on."""
         samples = [_record(i, n=4) for i in range(8)]
         samples[3]["targets"]["U0"] = torch.tensor([float("nan")], dtype=torch.float32)
-        ds = CachedDataset(_write_cache(tmp_path, samples))
+        ds = _CountingDataset(samples)
 
         result = DatasetProfiler(n_samples=8).run(ds)
         result.print_report()
@@ -221,21 +227,17 @@ class TestDatasetResult:
 # ---------------------------------------------------------------------------
 
 
-def test_flatten_leaves_does_not_raise_on_reserved_key():
-    """Deliberate divergence from :func:`molix.store.cache._flatten`, which validates.
+def test_flatten_leaves_does_not_raise_on_odd_key():
+    """The profiler's read-only walker must survive any malformed sample.
 
-    The packing-time flattener rejects a sample key colliding with a reserved
-    packed-cache key; the profiler's read-only walker must survive any malformed
-    sample, because diagnostics never raise.
+    Diagnostics never raise, so a key that a stricter writer would reject still
+    has to come back as a leaf here.
     """
     sample = {
-        "schema": torch.zeros(2),  # collides with a reserved packed-cache key
+        "schema": torch.zeros(2),  # a name a writer would reject
         "Z": torch.ones(2, dtype=torch.long),
         "targets": {"U0": torch.tensor([1.0])},
     }
-
-    with pytest.raises(ValueError):
-        _flatten(sample)
 
     leaves = _flatten_leaves(sample)
 

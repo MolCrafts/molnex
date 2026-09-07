@@ -34,17 +34,14 @@ must still see the edges the oracle sees.
 
 from __future__ import annotations
 
-import pickle
-from pathlib import Path
-
 import pytest
 import torch
 from tensordict import TensorDict
 
 from molix.batch.collate import TargetSchema, collate_molecules
 from molix.batch.task import BatchTask
-from molix.store.cache import PackedCache
-from molix.store.dataset import CachedDataset, MmapDataset, SubsetDataset
+from molix.store.block_view import _unpack_packed_sample
+from molix.store.dataset import BaseDataset, PackedView, SubsetDataset
 from tests.test_molix.conftest import equal_count_samples
 
 # ---------------------------------------------------------------------------
@@ -144,11 +141,75 @@ def _make_edgeless_samples(n: int) -> list[dict]:
     return samples
 
 
-def _save(tmp_path: Path, tag: str, samples: list[dict]) -> Path:
-    """Save *samples* to a packed cache under *tmp_path* and return the sink."""
-    sink = tmp_path / f"{tag}.pt"
-    PackedCache(sink).save(samples)
-    return sink
+# ---------------------------------------------------------------------------
+# Local packed-payload scaffolding
+# ---------------------------------------------------------------------------
+#
+# ``collate_packed`` takes a :class:`PackedView` over a packed payload. Blocks
+# (molnex's one on-disk format) carry no edges by design, so the edge branches
+# below are driven from payloads built here, in the test that owns them, rather
+# than through any storage layer.
+
+
+def _packed_payload(samples: list[dict]) -> dict:
+    """Concatenate *samples* into the payload ``collate_packed`` consumes.
+
+    Routing is explicit rather than inferred: ``Z`` / ``pos`` /
+    ``targets.forces`` are per-atom, ``edge_*`` per-edge, ``targets.U0``
+    per-graph and ``targets.n_heavy`` a python scalar.
+    """
+    atom_keys = ("Z", "pos", "targets.forces")
+    edge_keys = ("edge_index", "edge_diff", "edge_dist")
+    atoms: dict[str, list] = {}
+    edges: dict[str, list] = {}
+    graphs: dict[str, list] = {}
+    scalars: dict[str, list] = {}
+    atom_ptr, edge_ptr = [0], [0]
+
+    for sample in samples:
+        flat = {
+            **{k: v for k, v in sample.items() if k != "targets"},
+            **{f"targets.{k}": v for k, v in sample.get("targets", {}).items()},
+        }
+        ref = sample.get("Z", sample.get("pos"))
+        atom_ptr.append(atom_ptr[-1] + (0 if ref is None else len(ref)))
+        edge_ptr.append(edge_ptr[-1] + len(sample.get("edge_index", ())))
+        for key, value in flat.items():
+            if key in atom_keys or key in edge_keys:
+                bucket = atoms if key in atom_keys else edges
+                bucket.setdefault(key, []).append(value)
+            elif isinstance(value, torch.Tensor):
+                graphs.setdefault(key, []).append(value)
+            else:
+                scalars.setdefault(key, []).append(value)
+
+    payload: dict = {
+        "n_samples": len(samples),
+        "atoms": {k: torch.cat(v) for k, v in atoms.items()},
+        "edges": {k: torch.cat(v) for k, v in edges.items()},
+        "graphs": {k: torch.stack(v) for k, v in graphs.items()},
+        "scalars": scalars,
+        "atom_ptr": torch.tensor(atom_ptr, dtype=torch.long),
+    }
+    if edges:
+        payload["edge_ptr"] = torch.tensor(edge_ptr, dtype=torch.long)
+    return payload
+
+
+class _PackedDataset(BaseDataset):
+    """Minimal map-style dataset over a packed payload."""
+
+    def __init__(self, samples: list[dict]) -> None:
+        self._payload = _packed_payload(samples)
+
+    def __len__(self) -> int:
+        return self._payload["n_samples"]
+
+    def __getitem__(self, idx: int) -> dict:
+        return _unpack_packed_sample(self._payload, idx)
+
+    def packed_view(self) -> PackedView:
+        return PackedView(self._payload)
 
 
 # ---------------------------------------------------------------------------
@@ -245,19 +306,19 @@ class TestEquivalenceWithEdges:
 
     def test_multi_sample_with_edges(self, tmp_path):
         """A >=2-sample batch with varied atom/edge counts equals the oracle."""
-        ds = MmapDataset(_save(tmp_path, "edged", _make_varied_samples(8)))
+        ds = _PackedDataset(_make_varied_samples(8))
         indices = [0, 3, 5]
         _assert_td_equal(_packed_collate(ds, indices, SCHEMA), _oracle(ds, indices, SCHEMA))
 
     def test_cached_dataset_backing(self, tmp_path):
-        """CachedDataset (mmap=False) packed view collates identically."""
-        ds = CachedDataset(_save(tmp_path, "edged_cached", _make_varied_samples(8)))
+        """A second payload over the same samples collates identically."""
+        ds = _PackedDataset(_make_varied_samples(8))
         indices = [1, 2, 6, 7]
         _assert_td_equal(_packed_collate(ds, indices, SCHEMA), _oracle(ds, indices, SCHEMA))
 
     def test_singleton_batch(self, tmp_path):
         """A length-1 index list collates equivalently (ac-004)."""
-        ds = MmapDataset(_save(tmp_path, "single", _make_varied_samples(8)))
+        ds = _PackedDataset(_make_varied_samples(8))
         indices = [4]
         _assert_td_equal(_packed_collate(ds, indices, SCHEMA), _oracle(ds, indices, SCHEMA))
 
@@ -267,7 +328,7 @@ class TestEquivalenceEdgeless:
 
     def test_mixed_zero_and_edged_samples(self, tmp_path):
         """A batch mixing zero-edge and edged samples equals the oracle."""
-        ds = MmapDataset(_save(tmp_path, "mixed", _make_mixed_edge_samples(8)))
+        ds = _PackedDataset(_make_mixed_edge_samples(8))
         # indices 0,2 have edges; 1,3 have zero edges.
         indices = [0, 1, 2, 3]
         schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset())
@@ -275,14 +336,14 @@ class TestEquivalenceEdgeless:
 
     def test_all_edgeless_fallback_matches_oracle(self, tmp_path):
         """All-edge-less schema → fast-path edges equals the oracle fallback."""
-        ds = MmapDataset(_save(tmp_path, "edgeless", _make_edgeless_samples(8)))
+        ds = _PackedDataset(_make_edgeless_samples(8))
         indices = [0, 1, 2]
         schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset())
         _assert_td_equal(_packed_collate(ds, indices, schema), _oracle(ds, indices, schema))
 
     def test_all_edgeless_fallback_exact_fields(self, tmp_path):
         """Fast-path empty-edge TensorDict is byte-identical to collate.py:149-156."""
-        ds = MmapDataset(_save(tmp_path, "edgeless2", _make_edgeless_samples(8)))
+        ds = _PackedDataset(_make_edgeless_samples(8))
         schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset())
         batch = _packed_collate(ds, [0, 1, 2], schema)
         edges = batch["edges"]
@@ -307,7 +368,7 @@ class TestEqualAtomAndEdgeCounts:
 
     def test_edges_namespace_matches_oracle(self, tmp_path):
         """Every ``edges`` leaf equals the oracle's for an ``E == N`` cache."""
-        ds = MmapDataset(_save(tmp_path, "eqcount", equal_count_samples(3)))
+        ds = _PackedDataset(equal_count_samples(3))
         indices = [0, 2]
         got = _packed_collate(ds, indices, self.SCHEMA_EQ)
         want = _oracle(ds, indices, self.SCHEMA_EQ)
@@ -315,7 +376,7 @@ class TestEqualAtomAndEdgeCounts:
 
     def test_edge_index_shape_is_not_empty(self, tmp_path):
         """2 samples x 2 edges → ``edge_index`` ``(4, 2)`` on both paths."""
-        ds = MmapDataset(_save(tmp_path, "eqcount_shape", equal_count_samples(3)))
+        ds = _PackedDataset(equal_count_samples(3))
         indices = [0, 2]
         got = _packed_collate(ds, indices, self.SCHEMA_EQ)
         want = _oracle(ds, indices, self.SCHEMA_EQ)
@@ -324,7 +385,7 @@ class TestEqualAtomAndEdgeCounts:
 
     def test_full_batch_matches_oracle(self, tmp_path):
         """The whole nested batch — not just edges — equals the oracle."""
-        ds = MmapDataset(_save(tmp_path, "eqcount_full", equal_count_samples(3)))
+        ds = _PackedDataset(equal_count_samples(3))
         indices = [0, 1]
         _assert_td_equal(
             _packed_collate(ds, indices, self.SCHEMA_EQ),
@@ -337,7 +398,7 @@ class TestTargetSchemaRouting:
 
     def test_atom_and_graph_targets(self, tmp_path):
         """forces under atoms, U0 reshape(-1) under graphs, equal to oracle."""
-        ds = MmapDataset(_save(tmp_path, "routing", _make_varied_samples(8, with_scalar=False)))
+        ds = _PackedDataset(_make_varied_samples(8, with_scalar=False))
         indices = [0, 2, 4]
         schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset({"forces"}))
         got = _packed_collate(ds, indices, schema)
@@ -350,7 +411,7 @@ class TestTargetSchemaRouting:
 
     def test_scalar_target_routed(self, tmp_path):
         """A python-scalar target (n_heavy) routes per the oracle conversion path."""
-        ds = MmapDataset(_save(tmp_path, "scalar", _make_varied_samples(8, with_scalar=True)))
+        ds = _PackedDataset(_make_varied_samples(8, with_scalar=True))
         indices = [1, 3, 6]
         schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset({"forces"}))
         _assert_td_equal(_packed_collate(ds, indices, schema), _oracle(ds, indices, schema))
@@ -361,7 +422,7 @@ class TestSubsetViews:
 
     def test_subset_explicit_indices(self, tmp_path):
         """Explicit shuffled SubsetDataset view equals the oracle over global samples."""
-        ds = MmapDataset(_save(tmp_path, "subset", _make_varied_samples(16)))
+        ds = _PackedDataset(_make_varied_samples(16))
         subset = SubsetDataset(ds, [9, 2, 14, 5])
         # Local indices into the subset → packed indices [9, 2, 14, 5].
         local = [0, 1, 2, 3]
@@ -371,7 +432,7 @@ class TestSubsetViews:
 
     def test_split_shuffled_view(self, tmp_path):
         """A split()-produced shuffled view collates equivalently."""
-        ds = MmapDataset(_save(tmp_path, "split", _make_varied_samples(16)))
+        ds = _PackedDataset(_make_varied_samples(16))
         train, _val = ds.split(sizes=(12, 4), seed=7)
         local = [0, 5, 11, 3]
         _assert_td_equal(_packed_collate(train, local, SCHEMA), _oracle(train, local, SCHEMA))
@@ -389,7 +450,7 @@ class TestEagerErrors:
         """Empty index list → ValueError, matching the oracle's 'empty' wording."""
         from molix.batch.collate import collate_packed
 
-        ds = MmapDataset(_save(tmp_path, "empty", _make_varied_samples(8)))
+        ds = _PackedDataset(_make_varied_samples(8))
         with pytest.raises(ValueError, match="(?i)empty"):
             collate_packed(ds.packed_view(), [], SCHEMA)
 
@@ -397,9 +458,9 @@ class TestEagerErrors:
         """A view whose schema lacks pos → ValueError naming the missing key."""
         from molix.batch.collate import collate_packed
 
-        # Cache with Z only (no pos) — PackedCache accepts this layout.
+        # Payload with Z only (no pos).
         samples = [{"Z": torch.ones(_atom_count(i), dtype=torch.long)} for i in range(4)]
-        ds = MmapDataset(_save(tmp_path, "nopos", samples))
+        ds = _PackedDataset(samples)
         with pytest.raises(ValueError, match="pos"):
             collate_packed(ds.packed_view(), [0, 1], SCHEMA)
 
@@ -412,7 +473,7 @@ class TestEagerErrors:
         # classified); collate_packed must still reject the missing Z.
         torch.manual_seed(3)
         samples = [{"pos": torch.randn(5, 3)} for _ in range(4)]
-        ds = MmapDataset(_save(tmp_path, "noz", samples))
+        ds = _PackedDataset(samples)
         with pytest.raises(ValueError, match="Z"):
             collate_packed(ds.packed_view(), [0, 1], SCHEMA)
 
@@ -420,22 +481,6 @@ class TestEagerErrors:
 # ===========================================================================
 # GROUP 3 — layering guard (ac-005)
 # ===========================================================================
-
-
-class TestCacheLayering:
-    """cache.py stays IO-only — no tensordict / TargetSchema import (ac-005)."""
-
-    def test_cache_has_no_collate_imports(self):
-        """No import line in cache.py references tensordict or TargetSchema."""
-        import molix.store.cache as cache_mod
-
-        source = Path(cache_mod.__file__).read_text()
-        import_lines = [
-            line for line in source.splitlines() if line.lstrip().startswith(("import ", "from "))
-        ]
-        joined = "\n".join(import_lines)
-        assert "tensordict" not in joined
-        assert "TargetSchema" not in joined
 
 
 # ===========================================================================
@@ -464,196 +509,3 @@ class _NonPackedDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         return self._samples[idx]
-
-
-def _make_dm(tmp_path: Path, tag: str, *, samples=None, **kwargs):
-    """Build a DataModule over a packed varied-count cache (num_workers=0).
-
-    Args:
-        tmp_path: Pytest temp directory for the packed caches.
-        tag: Unique filename tag.
-        samples: Override sample list (defaults to varied edged samples).
-        **kwargs: Extra DataModule kwargs.
-
-    Returns:
-        A non-DDP DataModule whose train/val splits back the fast path.
-    """
-    from molix.batch.datamodule import DataModule
-
-    if samples is None:
-        samples = _make_varied_samples(12)
-    train_sink = _save(tmp_path, f"{tag}_train", samples[:8])
-    val_sink = _save(tmp_path, f"{tag}_val", samples[8:])
-    kwargs.setdefault("target_schema", SCHEMA)
-    kwargs.setdefault("batch_size", 4)
-    kwargs.setdefault("num_workers", 0)
-    kwargs.setdefault("pin_memory", False)
-    return DataModule(MmapDataset(train_sink), MmapDataset(val_sink), **kwargs)
-
-
-def _batch_order(loader) -> list[float]:
-    """Per-sample ``U0`` identities across an entire loader, in yield order."""
-    return [float(u) for batch in loader for u in batch["graphs", "U0"]]
-
-
-def _assert_no_unpack(monkeypatch, body) -> None:
-    """Run *body* with PackedCache.unpack_sample counted; assert zero calls.
-
-    This is the code-level proof the fast path is engaged: the slow path
-    reconstructs each sample via ``unpack_sample``, so a fast-path epoch
-    must register zero calls. Used to keep the integration tests honestly
-    RED until the fast path is wired (without it they pass vacuously over
-    the existing slow path).
-
-    Args:
-        monkeypatch: pytest monkeypatch fixture.
-        body: Zero-arg callable that drives one or more loader epochs.
-    """
-    calls = {"n": 0}
-    orig = PackedCache.unpack_sample
-
-    def _counting(payload, idx):
-        calls["n"] += 1
-        return orig(payload, idx)
-
-    monkeypatch.setattr(PackedCache, "unpack_sample", staticmethod(_counting))
-    body()
-    assert calls["n"] == 0, f"fast path expected, but unpack_sample ran {calls['n']}x"
-
-
-class TestDataModuleFastPathRouting:
-    """Packed datasets route through the fast path; non-packed fall back (ac-006)."""
-
-    def test_packed_uses_packed_collate_fn(self, tmp_path):
-        """With a packed dataset, the train collate_fn is the packed fast-path type."""
-        from molix.batch.datamodule import _PackedCollateFn
-
-        dm = _make_dm(tmp_path, "route")
-        loader = dm.train_dataloader()
-        assert isinstance(loader.collate_fn, _PackedCollateFn)
-
-    def test_fast_path_does_not_unpack(self, tmp_path, monkeypatch):
-        """PackedCache.unpack_sample is never called during a fast-path epoch."""
-        calls = {"n": 0}
-        orig = PackedCache.unpack_sample
-
-        def _counting(payload, idx):
-            calls["n"] += 1
-            return orig(payload, idx)
-
-        monkeypatch.setattr(PackedCache, "unpack_sample", staticmethod(_counting))
-
-        dm = _make_dm(tmp_path, "nounpack")
-        for _ in dm.train_dataloader():
-            pass
-        assert calls["n"] == 0
-
-    def test_fast_path_batches_equal_slow_path(self, tmp_path, monkeypatch):
-        """Fast-path batches equal collate_molecules for the same index order."""
-        dm = _make_dm(tmp_path, "equal", batch_size=4)
-        # Deterministic order: iterate the val loader (never shuffled).
-        want = _oracle(dm.val_dataset, list(range(len(dm.val_dataset))), SCHEMA)
-        captured: dict = {}
-
-        def _run():
-            captured["batch"] = next(iter(dm.val_dataloader()))
-
-        # Engaging the fast path is part of the contract — zero unpack calls.
-        _assert_no_unpack(monkeypatch, _run)
-        batch = captured["batch"]
-        # ftype cast is the only intended transform on the fast path with no
-        # batch tasks; default ftype is float32 so leaves stay identical.
-        _assert_td_equal(batch.to(torch.float32), want.to(torch.float32))
-
-    def test_non_packed_dataset_falls_back(self, tmp_path):
-        """A non-packed dataset uses _CollateFn + collate_molecules."""
-        from molix.batch.datamodule import DataModule, _CollateFn
-
-        samples = _make_varied_samples(6)
-        ds = _NonPackedDataset(samples)
-        dm = DataModule(
-            ds,
-            ds,
-            target_schema=SCHEMA,
-            batch_size=2,
-            num_workers=0,
-            pin_memory=False,
-        )
-        loader = dm.train_dataloader()
-        assert isinstance(loader.collate_fn, _CollateFn)
-        batch = next(iter(loader))
-        assert isinstance(batch, TensorDict)
-        assert "U0" in batch["graphs"].keys()
-
-
-class TestDataModulePostSteps:
-    """batch_tasks and batch_to(ftype) apply on the fast path (ac-008)."""
-
-    def test_batch_task_applied_on_fast_path(self, tmp_path, monkeypatch):
-        """A registered marker batch task stamps its leaf on fast-path batches."""
-        dm = _make_dm(tmp_path, "marker", batch_tasks=[_MarkerTask()])
-        captured: dict = {}
-
-        def _run():
-            captured["batch"] = next(iter(dm.val_dataloader()))
-
-        _assert_no_unpack(monkeypatch, _run)
-        batch = captured["batch"]
-        assert "marker" in batch["graphs"].keys()
-        assert torch.all(batch["graphs", "marker"] == 1)
-
-    def test_ftype_cast_applied_on_fast_path(self, tmp_path, monkeypatch):
-        """Float leaves cast to the captured non-default ftype on the fast path."""
-        from molix.config import config
-
-        prev = config["ftype"]
-        try:
-            config["ftype"] = torch.float64
-            dm = _make_dm(tmp_path, "ftype")
-            captured: dict = {}
-
-            def _run():
-                captured["batch"] = next(iter(dm.val_dataloader()))
-
-            _assert_no_unpack(monkeypatch, _run)
-            batch = captured["batch"]
-            assert batch["atoms", "pos"].dtype == torch.float64
-            assert batch["graphs", "U0"].dtype == torch.float64
-            # Integer leaves are untouched by batch_to.
-            assert batch["atoms", "Z"].dtype == torch.long
-        finally:
-            config["ftype"] = prev
-
-
-class TestDataModulePickle:
-    """The packed collate callable pickles without capturing payload tensors (ac-009)."""
-
-    def test_packed_collate_fn_pickles_and_collates(self, tmp_path):
-        """pickle round-trip of _PackedCollateFn still produces correct batches."""
-        from molix.batch.datamodule import _PackedCollateFn
-
-        dm = _make_dm(tmp_path, "pickle")
-        loader = dm.train_dataloader()
-        fn = loader.collate_fn
-        assert isinstance(fn, _PackedCollateFn)
-        restored = pickle.loads(pickle.dumps(fn))
-        # _IndexDataset hands the collate fn a list of int indices.
-        indices = [0, 1, 2]
-        out1 = fn(indices)
-        out2 = restored(indices)
-        _assert_td_equal(out2, out1)
-
-    def test_pickled_state_excludes_lazy_view(self, tmp_path):
-        """__getstate__ of _PackedCollateFn omits the lazily built PackedView field."""
-        from molix.batch.datamodule import _PackedCollateFn
-
-        dm = _make_dm(tmp_path, "state")
-        fn = dm.train_dataloader().collate_fn
-        assert isinstance(fn, _PackedCollateFn)
-        # Force lazy view construction so the exclusion is meaningful.
-        fn([0, 1])
-        state = fn.__getstate__()
-        # No state entry may hold a PackedView (the lazy field is dropped).
-        from molix.store.dataset import PackedView
-
-        assert not any(isinstance(v, PackedView) for v in state.values())

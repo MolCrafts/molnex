@@ -1,24 +1,14 @@
-"""Dataset readers over :class:`~molix.store.cache.PackedCache` files.
+"""Map-style datasets over a **packed payload**.
 
-Two concrete implementations, differing only in how the underlying
-``torch.save`` file is loaded:
+A packed payload is the shape :func:`~molix.batch.collate.collate_packed`
+consumes: ``atoms`` / ``edges`` / ``graphs`` / ``scalars`` buckets of concat
+tensors plus the ``atom_ptr`` / ``edge_ptr`` cumsum pointers locating each
+sample's rows. :class:`~molix.store.block.BlockReader` produces one from a
+``molix.block/1`` block; a caller can build one in memory.
 
-+------------------+---------+---------------------------------------------+
-| Class            | mmap?   | When to use                                 |
-+==================+=========+=============================================+
-| :class:`MmapDataset`     | yes     | Large caches (10k+ samples) or             |
-|                          |         | num_workers > 0 — tensor storages are      |
-|                          |         | mmap'd, OS page cache is shared across     |
-|                          |         | worker processes.                          |
-+------------------+---------+---------------------------------------------+
-| :class:`CachedDataset`   | no      | Small caches (<10k) or when the cache      |
-|                          |         | fits in RAM and you want to avoid the      |
-|                          |         | per-access mmap page-fault overhead.       |
-+------------------+---------+---------------------------------------------+
-
-:class:`SubsetDataset` wraps either with an index list for split views —
-produced by :meth:`BaseDataset.split` or built explicitly from pre-computed
-indices (as the workflow pattern recommends).
+:class:`~molix.store.block_view.BlockDataset` is the map-style reader over a
+sealed block's payload; :class:`SubsetDataset` is an index view into any
+:class:`BaseDataset`.
 """
 
 from __future__ import annotations
@@ -33,12 +23,8 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 
-from molix.store.cache import PackedCache
-
 __all__ = [
     "BaseDataset",
-    "CachedDataset",
-    "MmapDataset",
     "PackedView",
     "SubsetDataset",
 ]
@@ -46,7 +32,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class PackedView:
-    """Read-only handle onto a :class:`~molix.store.cache.PackedCache` payload.
+    """Read-only handle onto a packed payload.
 
     Exposes exactly what the packed-aware collate fast path
     (:func:`molix.batch.collate.collate_packed`) needs — the packed payload
@@ -204,197 +190,6 @@ def _reject_misfiled_edges(payload: Mapping[str, Any], sink: Path | str) -> None
 # ---------------------------------------------------------------------------
 
 
-class _CacheBacked(BaseDataset):
-    """Shared implementation: load a cache file, expose samples + task_states.
-
-    The cache is in packed layout (see :func:`molix.store.cache._pack_samples`)
-    — a fixed number of big concat tensors plus cumsum pointers. ``__getitem__``
-    reconstructs a sample dict on the fly by slicing into those tensors, so the
-    per-item cost is O(n_keys) and uses views (no storage copy when ``mmap=True``).
-    """
-
-    def __init__(self, sink: str | Path | PackedCache, *, mmap: bool) -> None:
-        self._cache = sink if isinstance(sink, PackedCache) else PackedCache(sink)
-        payload = self._cache.load(mmap=mmap)
-        self._payload: dict[str, Any] = payload
-        self._n_samples: int = int(payload["n_samples"])
-        self._task_states: dict[str, Any] = payload.get("task_states", {}) or {}
-
-    def __len__(self) -> int:
-        return self._n_samples
-
-    def __getitem__(self, idx: int) -> dict:
-        return PackedCache.unpack_sample(self._payload, idx)
-
-    def packed_view(self) -> PackedView:
-        """Return a read-only :class:`PackedView` over this cache's payload.
-
-        Identity-mapped (local index == packed row). Consumed by
-        :func:`molix.batch.collate.collate_packed` to build batches by
-        slicing the packed tensors directly.
-        """
-        return PackedView(self._payload)
-
-    @property
-    def sink(self) -> Path:
-        """Path to the cache file backing this dataset."""
-        return self._cache.sink
-
-    @property
-    def task_states(self) -> Mapping[str, Any]:
-        """Mapping ``{task_name: state_dict}`` restored from the cache."""
-        return self._task_states
-
-    def get_task_state(self, name: str) -> Any:
-        """Return the fitted state for ``name`` (raises :class:`KeyError`)."""
-        return self._task_states[name]
-
-    def stats(self) -> dict[str, Any]:
-        """Fitted dataset-level preprocessing state keyed by task name.
-
-        Returns a shallow copy of ``{task_name: state_dict}`` for every
-        dataset-level step that was fitted while producing this cache (e.g.
-        an atomic-dress regression). Those steps are MolHub's; molnex only
-        reads back what the writer recorded. The inner dict is the step's own
-        ``state_dict`` payload.
-
-        For dataset-wide connectivity statistics (``avg_num_neighbors``,
-        ``max_atoms``, ``max_edges``) use the dedicated properties on this
-        class — those are derived directly from the packed cache pointers
-        and don't need a dataset task to compute.
-
-        Also callable on :class:`SubsetDataset`: its ``__getattr__``
-        forwards unknown attributes to the wrapped dataset, so
-        ``subset.stats()`` returns the same mapping as the full dataset's.
-        """
-        return dict(self._task_states)
-
-    @cached_property
-    def avg_num_neighbors(self) -> float:
-        """Dataset-wide ⟨|N(i)|⟩ = total_edges / total_atoms.
-
-        Derived from packed cache pointers — no fit pass needed. With
-        ``NeighborList(symmetry=True)`` this equals the mean number of
-        neighbours per atom (Allegro/MACE normalisation constant).
-
-        Returns ``0.0`` when the cache genuinely holds no edges (no
-        :class:`~molix.batch.NeighborList` in the pipeline) or no
-        atoms — zero neighbours per atom is the honest answer there, and
-        profiling an edge-free cache must stay non-fatal.
-
-        Raises:
-            ValueError: The cache packs ``edge_index`` as a per-atom key
-                and therefore carries no ``edge_ptr`` — a stale cache
-                written before edge keys were routed by identity. Its
-                edges are unreadable, so ``0.0`` would hand Allegro/MACE a
-                silently wrong normalisation constant.
-        """
-        atom_ptr = self._payload.get("atom_ptr")
-        edge_ptr = self._payload.get("edge_ptr")
-        if edge_ptr is None:
-            _reject_misfiled_edges(self._payload, self.sink)
-            return 0.0
-        if atom_ptr is None:
-            return 0.0
-        total_atoms = int(atom_ptr[-1].item())
-        if total_atoms <= 0:
-            return 0.0
-        total_edges = int(edge_ptr[-1].item())
-        return total_edges / total_atoms
-
-    def _ptr_counts(self, ptr_key: str) -> torch.Tensor:
-        """Per-sample counts ``(n_samples,)`` from the ``ptr_key`` cumsum pointer."""
-        ptr = self._payload.get(ptr_key)
-        if ptr is None:
-            kind = "per-atom" if ptr_key == "atom_ptr" else "per-edge"
-            raise ValueError(
-                f"cache at {self.sink} has no '{ptr_key}' pointer — it was "
-                f"built without {kind} keys. Re-run the pipeline with a task "
-                f"that emits {kind} tensors (e.g. NeighborList for edges) to "
-                "make these counts available."
-            )
-        return (ptr[1:] - ptr[:-1]).long()
-
-    @cached_property
-    def atom_counts(self) -> torch.Tensor:
-        """Per-sample atom counts, shape ``(n_samples,)``, dtype ``long``.
-
-        Derived from the packed ``atom_ptr`` cumsum pointer
-        (``ptr[idx+1] - ptr[idx]``) in one vectorized pass — no sample is
-        unpacked. Used by
-        :class:`~molix.batch.sampler.TokenBudgetBatchSampler` to enforce
-        per-batch atom budgets.
-
-        Raises:
-            ValueError: The cache was built without per-atom keys.
-        """
-        return self._ptr_counts("atom_ptr")
-
-    @cached_property
-    def edge_counts(self) -> torch.Tensor:
-        """Per-sample edge counts, shape ``(n_samples,)``, dtype ``long``.
-
-        Derived from the packed ``edge_ptr`` cumsum pointer
-        (``ptr[idx+1] - ptr[idx]``) in one vectorized pass — no sample is
-        unpacked.
-
-        Raises:
-            ValueError: The cache was built without per-edge keys.
-        """
-        return self._ptr_counts("edge_ptr")
-
-    @cached_property
-    def max_atoms(self) -> int:
-        """Largest single-sample atom count. ``0`` if no per-atom keys."""
-        atom_ptr = self._payload.get("atom_ptr")
-        if atom_ptr is None or atom_ptr.numel() < 2:
-            return 0
-        return int((atom_ptr[1:] - atom_ptr[:-1]).max().item())
-
-    @cached_property
-    def max_edges(self) -> int:
-        """Largest single-sample edge count. ``0`` if no per-edge keys."""
-        edge_ptr = self._payload.get("edge_ptr")
-        if edge_ptr is None or edge_ptr.numel() < 2:
-            return 0
-        return int((edge_ptr[1:] - edge_ptr[:-1]).max().item())
-
-
-class MmapDataset(_CacheBacked):
-    """Memory-mapped cache reader.
-
-    Tensor storages are mmap'd via ``torch.load(mmap=True)`` — page-in on
-    demand, shared OS page cache across DataLoader workers, no pickle of
-    tensor data after the initial load.
-
-    Args:
-        sink: Cache path, or an existing
-            :class:`~molix.store.cache.PackedCache`, normally written by the
-            MolHub-side preprocessing driver via
-            :meth:`~molix.store.cache.PackedCache.save`.
-    """
-
-    def __init__(self, sink: str | Path | PackedCache) -> None:
-        super().__init__(sink, mmap=True)
-
-
-class CachedDataset(_CacheBacked):
-    """In-memory cache reader — full copy resident in RAM.
-
-    Fine for small datasets (≲10k samples). For larger ones, prefer
-    :class:`MmapDataset`.
-
-    Args:
-        sink: Cache path, or an existing
-            :class:`~molix.store.cache.PackedCache`, normally written by the
-            MolHub-side preprocessing driver via
-            :meth:`~molix.store.cache.PackedCache.save`.
-    """
-
-    def __init__(self, sink: str | Path | PackedCache) -> None:
-        super().__init__(sink, mmap=False)
-
-
 # ---------------------------------------------------------------------------
 # SubsetDataset
 # ---------------------------------------------------------------------------
@@ -450,38 +245,18 @@ class SubsetDataset(BaseDataset):
         return self._dataset[self._indices[idx]]
 
     def packed_view(self) -> PackedView:
-        """Return a :class:`PackedView` remapped to this subset's indices.
+        """Return a :class:`PackedView` whose rows are this subset's rows.
 
-        Delegates to the wrapped dataset's view and composes the index
-        maps, so a (possibly nested) subset's local indices resolve to
-        packed rows in one hop.
+        Delegates to the wrapped dataset's view and composes the index maps, so
+        a (possibly nested) subset's local indices resolve to packed rows in one
+        hop. Defined explicitly rather than left to :meth:`__getattr__`, which
+        would forward to the parent and hand back an **unmapped** view.
 
         Raises:
-            AttributeError: The wrapped dataset is not packed-cache-backed
-                (has no ``packed_view``); the caller treats this as
-                "no fast path" and falls back to per-sample collation.
+            AttributeError: The wrapped dataset serves no packed view; the
+                caller treats that as "no fast path".
         """
         return self._dataset.packed_view().remap(self._indices)
-
-    @cached_property
-    def avg_num_neighbors(self) -> float:
-        """Split-local ⟨|N(i)|⟩ = Σ_{i∈subset} n_edges_i / Σ_{i∈subset} n_atoms_i."""
-        payload = getattr(self._dataset, "_payload", None)
-        if payload is None:
-            return getattr(self._dataset, "avg_num_neighbors", 0.0)
-        atom_ptr = payload.get("atom_ptr")
-        edge_ptr = payload.get("edge_ptr")
-        if edge_ptr is None:
-            _reject_misfiled_edges(payload, getattr(self._dataset, "sink", "<unknown>"))
-            return 0.0
-        if atom_ptr is None:
-            return 0.0
-        idx = torch.as_tensor(self._indices, dtype=torch.long)
-        n_atoms = (atom_ptr[idx + 1] - atom_ptr[idx]).sum()
-        if int(n_atoms.item()) <= 0:
-            return 0.0
-        n_edges = (edge_ptr[idx + 1] - edge_ptr[idx]).sum()
-        return float(n_edges.item()) / float(n_atoms.item())
 
     @cached_property
     def atom_counts(self) -> torch.Tensor:

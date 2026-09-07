@@ -33,9 +33,9 @@ the val split leaks into the baseline:
 
 ```python
 from molix.batch import DataModule, PadMolecularBatch, TargetSchema
-from molix.store import MmapDataset, SubsetDataset
+from molix.store import BlockDataset, SubsetDataset
 
-full = MmapDataset("./cache/qm9.pt")  # written by MolHub
+full = BlockDataset.load_from_disk("./blocks/qm9")  # written by MolHub
 
 train_idx = list(range(800))
 val_idx = list(range(800, 1000))

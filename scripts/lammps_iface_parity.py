@@ -45,12 +45,10 @@ reference is an actual forward pass of the exported model. That import happens
 inside the periodic path and nowhere else, so ``--case aspirin`` still runs on a
 machine with no torch.
 
-Why ``scripts/`` and not ``regressions/``
------------------------------------------
-``regressions/README.md`` defines that directory as pure-Python public-API
-scenario scripts and **forbids subprocess**. This gate must drive an external
-LAMMPS binary — driving that binary *is* its job — so it cannot live there. It
-also cannot live in CI: no CI runner has LAMMPS or the arch-specific
+Why ``scripts/`` and not ``tests/``
+-----------------------------------
+This gate drives an external LAMMPS binary in a subprocess — driving that
+binary *is* its job — so it is not a unit test. It also cannot live in CI: no CI runner has LAMMPS or the arch-specific
 ``molnexplugin.so``. It is therefore a *recorded local debt*: the chain
 implementer owes one real run at delivery, and ``ac-013`` / ``ac-014`` may not be
 marked passing without the attached output. This file never skips and never

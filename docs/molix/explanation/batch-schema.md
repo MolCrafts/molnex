@@ -5,7 +5,7 @@ shapes are intentionally different — you must know which side you're on:
 
 | Stage | Container | Example access |
 |---|---|---|
-| Pre-collate (source, pipeline task I/O, `MmapDataset[i]`) | **flat `dict`** | `sample["Z"]`, `sample["edge_index"]` |
+| Pre-collate (source, pipeline task I/O, `BlockDataset[i]`) | **flat `dict`** | `sample["Z"]`, `sample["edge_index"]` |
 | Post-collate (output of `collate_molecules`) | **nested `TensorDict`** | `batch["atoms", "Z"]`, `batch["edges", "edge_index"]` |
 
 The single conversion point is `collate_molecules` (invoked by
@@ -23,7 +23,7 @@ per-graph tensors of different lengths live in one container.
 ## Sample Schema (pre-collate, single molecule, plain flat dict)
 
 Individual samples from `DataSource.__getitem__`, pipeline task I/O, and
-`MmapDataset[i]` / `CachedDataset[i]` are plain Python dicts with **flat
+`BlockDataset[i]` is a plain Python dict with **flat
 top-level keys** (no `"atoms"` / `"edges"` nesting):
 
 - `Z`: `LongTensor[N]` - Atomic numbers

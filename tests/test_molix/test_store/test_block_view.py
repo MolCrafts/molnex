@@ -173,7 +173,7 @@ def _bare_unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) ->
 def _internal_unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) -> SamplingUnit:
     """A unit declaring the ``internal`` valence family — unroutable downstream.
 
-    ``PackedCache.unpack_sample`` has no ``internals`` route (``_VALENCE_PTR_KEY``
+    ``_unpack_packed_sample`` has no ``internals`` route (``_VALENCE_PTR_KEY``
     covers angles / propers / impropers only) and neither has ``collate_molecules``,
     so a view that accepted such a block would drop the family silently.
     """
@@ -539,7 +539,7 @@ class TestBlockDataset:
 
     def test_token_budget_sampler_propagates_the_edge_counts_refusal(self, view: BlockDataset):
         # The block store's ValueError must reach the caller verbatim, not be
-        # reworded into the AttributeError-derived "use MmapDataset" message.
+        # reworded into the AttributeError-derived "use BlockDataset" message.
         with pytest.raises(ValueError, match="NeighborList"):
             TokenBudgetBatchSampler(view, max_edges=32)
 

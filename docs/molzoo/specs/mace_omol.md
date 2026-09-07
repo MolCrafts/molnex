@@ -323,7 +323,7 @@ rows.
   (7.0e-7 eV / 4.3e-6 eV/Å, the 0–7e-15 block-level residuals) are therefore
   no longer reproducible in-tree, and §10's drift trigger (b) — "`verify_e2e.py`
   E/F residual regresses > 10×" — cannot fire. Restoring the oracles (or
-  re-homing them under `regressions/` with hard-coded goldens) is out of scope
+  re-homing them with hard-coded goldens) is out of scope
   for `mace-subpackage-restructure-07-cleanup`, which is anchor-refresh only.
   Route: `/mol:fix` or a follow-up spec. Combined with the 2026-08-07 caveat
   in §7.1 (the parity run predates the trainable-Bessel loader fix), §7.1

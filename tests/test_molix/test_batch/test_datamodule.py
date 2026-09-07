@@ -17,8 +17,7 @@ from molix.batch.task import BatchTask
 from molix.config import config
 from molix.store.block import BlockReader, BlockWriter, SamplingUnit
 from molix.store.block_view import BlockDataset, BlockNotReadyError
-from molix.store.cache import PackedCache
-from molix.store.dataset import BaseDataset, CachedDataset, MmapDataset
+from molix.store.dataset import BaseDataset
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -75,13 +74,27 @@ def _make_samples(n: int = 10) -> list[dict]:
     return samples
 
 
-def _write_and_load_split(tmp_path: Path, train_n: int, val_n: int, dataset_cls=CachedDataset):
+class _SampleDataset(BaseDataset):
+    """List-backed dataset — the per-sample collate route's fixture.
+
+    Blocks are molnex's one on-disk format and carry no neighbour graph, so
+    edged samples like these come from an in-memory list rather than a store.
+    """
+
+    def __init__(self, samples: list[dict]) -> None:
+        self._samples = samples
+
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    def __getitem__(self, idx: int) -> dict:
+        return self._samples[idx]
+
+
+def _write_and_load_split(tmp_path: Path, train_n: int, val_n: int, dataset_cls=None):
+    cls = dataset_cls or _SampleDataset
     samples = _make_samples(train_n + val_n)
-    train_sink = tmp_path / "train.pt"
-    val_sink = tmp_path / "val.pt"
-    PackedCache(train_sink).save(samples[:train_n])
-    PackedCache(val_sink).save(samples[train_n:])
-    return dataset_cls(train_sink), dataset_cls(val_sink)
+    return cls(samples[:train_n]), cls(samples[train_n:])
 
 
 @pytest.fixture
@@ -185,30 +198,26 @@ class TestCollation:
     def test_target_schema_auto_discovered_from_dataset(self, tmp_path):
         from molix.batch.collate import TargetSchema
 
-        class SchemaCarrier(CachedDataset):
+        class SchemaCarrier(_SampleDataset):
             target_schema = TargetSchema(graph_level={"U0"}, atom_level=frozenset())
 
         samples = _make_samples(6)
-        tsink, vsink = tmp_path / "t.pt", tmp_path / "v.pt"
-        PackedCache(tsink).save(samples[:4])
-        PackedCache(vsink).save(samples[4:])
-        dm = DataModule(SchemaCarrier(tsink), SchemaCarrier(vsink), batch_size=2, pin_memory=False)
+        dm = DataModule(
+            SchemaCarrier(samples[:4]), SchemaCarrier(samples[4:]), batch_size=2, pin_memory=False
+        )
         assert dm.target_schema.graph_level == frozenset({"U0"})
 
     def test_explicit_target_schema_overrides_dataset(self, tmp_path):
         from molix.batch.collate import TargetSchema
 
-        class SchemaCarrier(CachedDataset):
+        class SchemaCarrier(_SampleDataset):
             target_schema = TargetSchema(graph_level={"foo"}, atom_level=frozenset())
 
         samples = _make_samples(6)
-        tsink, vsink = tmp_path / "t.pt", tmp_path / "v.pt"
-        PackedCache(tsink).save(samples[:4])
-        PackedCache(vsink).save(samples[4:])
         explicit = TargetSchema(graph_level={"U0"}, atom_level=frozenset())
         dm = DataModule(
-            SchemaCarrier(tsink),
-            SchemaCarrier(vsink),
+            SchemaCarrier(samples[:4]),
+            SchemaCarrier(samples[4:]),
             target_schema=explicit,
             batch_size=2,
             pin_memory=False,
@@ -297,7 +306,6 @@ def _make_shuffle_dm(tmp_path: Path, tag: str, *, seed: int = 123, n_train: int 
     """Build a DataModule whose samples carry a unique ``U0`` identity.
 
     Args:
-        tmp_path: Pytest temp directory for the packed caches.
         tag: Unique filename tag so multiple modules can share ``tmp_path``.
         seed: DataModule shuffle seed.
         n_train: Number of training samples (``U0`` runs ``0..n_train-1``).
@@ -306,13 +314,9 @@ def _make_shuffle_dm(tmp_path: Path, tag: str, *, seed: int = 123, n_train: int 
         A non-DDP DataModule with ``num_workers=0``.
     """
     samples = _make_samples(n_train + 2)
-    train_sink = tmp_path / f"shuffle_train_{tag}.pt"
-    val_sink = tmp_path / f"shuffle_val_{tag}.pt"
-    PackedCache(train_sink).save(samples[:n_train])
-    PackedCache(val_sink).save(samples[n_train:])
     return DataModule(
-        CachedDataset(train_sink),
-        CachedDataset(val_sink),
+        _SampleDataset(samples[:n_train]),
+        _SampleDataset(samples[n_train:]),
         batch_size=8,
         num_workers=0,
         pin_memory=False,
@@ -395,10 +399,7 @@ class TestExplicitCachedPipeline:
         """Explicit 3-step: cache, split, DataModule — yields TensorDict."""
         from tensordict import TensorDict
 
-        samples = _make_samples(10)
-        sink = tmp_path / "smoke.pt"
-        PackedCache(sink).save(samples)
-        full = MmapDataset(sink)
+        full = _SampleDataset(_make_samples(10))
         train_ds, val_ds, test_ds = full.split(sizes=(6, 2, 2), seed=7)
 
         dm = DataModule(train_ds, val_ds, batch_size=2, num_workers=0, pin_memory=False)
@@ -408,22 +409,13 @@ class TestExplicitCachedPipeline:
         assert len(train_ds) == 6
         assert len(test_ds) == 2
 
-        # Stats
-        assert full.avg_num_neighbors > 0.0
-        assert full.max_atoms > 0
-        assert train_ds.avg_num_neighbors > 0.0
-        assert train_ds.max_atoms <= full.max_atoms
-
         # DataLoader produces TensorDict
         batch = next(iter(dm.train_dataloader()))
         assert isinstance(batch, TensorDict)
         assert batch["atoms", "Z"].shape[0] == 4  # 2 mols × 2 atoms
 
     def test_two_way_split(self, tmp_path):
-        samples = _make_samples(8)
-        sink = tmp_path / "two-way.pt"
-        PackedCache(sink).save(samples)
-        full = MmapDataset(sink)
+        full = _SampleDataset(_make_samples(8))
         train_ds, val_ds = full.split(sizes=(5, 3))
 
         dm = DataModule(train_ds, val_ds, batch_size=2, num_workers=0, pin_memory=False)
@@ -431,9 +423,7 @@ class TestExplicitCachedPipeline:
         assert len(dm.val_dataset) == 3
 
     def test_rejects_mismatched_split(self, tmp_path):
-        sink = PackedCache(tmp_path / "x.pt")
-        sink.save(_make_samples(5))
-        full = CachedDataset(sink)
+        full = _SampleDataset(_make_samples(5))
         with pytest.raises(ValueError, match="sizes must sum to"):
             full.split(sizes=(4, 3))  # sum=7 != 5
 
@@ -476,7 +466,6 @@ def _make_injection_dm(tmp_path: Path, tag: str, *, seed: int = 42, **dm_kwargs)
     """Build a DataModule over an 8-sample train split with ``U0`` identities.
 
     Args:
-        tmp_path: Pytest temp directory for the packed caches.
         tag: Unique filename tag so multiple modules can share ``tmp_path``.
         seed: DataModule shuffle seed.
         **dm_kwargs: Extra DataModule kwargs (e.g. ``batch_sampler_source``).
@@ -485,14 +474,12 @@ def _make_injection_dm(tmp_path: Path, tag: str, *, seed: int = 42, **dm_kwargs)
         A non-DDP DataModule whose train samples carry ``U0 == float(index)``.
     """
     samples = _make_samples(10)
-    train_sink = tmp_path / f"inject_train_{tag}.pt"
-    val_sink = tmp_path / f"inject_val_{tag}.pt"
-    PackedCache(train_sink).save(samples[:8])
-    PackedCache(val_sink).save(samples[8:])
     dm_kwargs.setdefault("batch_size", 2)
     dm_kwargs.setdefault("num_workers", 0)
     dm_kwargs.setdefault("pin_memory", False)
-    return DataModule(CachedDataset(train_sink), CachedDataset(val_sink), seed=seed, **dm_kwargs)
+    return DataModule(
+        _SampleDataset(samples[:8]), _SampleDataset(samples[8:]), seed=seed, **dm_kwargs
+    )
 
 
 class TestBatchSamplerInjection:
@@ -559,7 +546,7 @@ class TestBatchSamplerInjection:
 
 # ---------------------------------------------------------------------------
 # Worker start-method regression (preserved from the deleted
-# tests/test_molix/test_data/test_e2e_workers.py, rebuilt on PackedCache)
+# tests/test_molix/test_data/test_e2e_workers.py)
 # ---------------------------------------------------------------------------
 
 
@@ -882,16 +869,6 @@ class TestBlockCollation:
         assert isinstance(loader_dataset, _datamodule._IndexDataset)
         assert len(loader_dataset) == len(block_view)
         assert isinstance(collate_fn, _datamodule._BlockCollateFn)
-
-    def test_resolve_collation_still_routes_a_packed_dataset_to_the_packed_collate(
-        self, _dm_factory
-    ):
-        dm = _dm_factory(batch_size=2)
-
-        loader_dataset, collate_fn = dm._resolve_collation(dm.train_dataset)
-
-        assert isinstance(loader_dataset, _datamodule._IndexDataset)
-        assert isinstance(collate_fn, _datamodule._PackedCollateFn)
 
     def test_resolve_collation_still_routes_a_plain_dataset_to_the_per_sample_collate(
         self, _dm_factory

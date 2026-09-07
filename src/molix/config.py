@@ -14,7 +14,7 @@ floating-point dtype, consumed in two places and only two places:
 
 Dataset loaders (``QM9Source``, ``RevMD17Source``, ``molix.io.extxyz``, …) keep a
 canonical fp32 representation on disk — the per-batch up-cast happens
-at the collate boundary, so the :class:`~molix.store.cache.PackedCache`
+at the collate boundary, so the packed payload
 stays compact and is reusable across precisions without re-baking.
 
 Precision is set via :meth:`MolnexConfig.set_precision`, e.g.

@@ -46,8 +46,7 @@ from molix.batch import TokenBudgetPacker
 from molix.batch.datamodule import DataModule
 from molix.batch.sampler import TaskMixtureBatchSampler, TokenBudgetBatchSampler
 from molix.core.seed import make_generator
-from molix.store.cache import PackedCache
-from molix.store.dataset import CachedDataset, MmapDataset, SubsetDataset
+from molix.store.dataset import BaseDataset, SubsetDataset
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -105,17 +104,45 @@ def _make_edgeless_samples(n: int) -> list[dict]:
     return samples
 
 
-def _write_varied_cache(tmp_path: Path, tag: str, n: int = N_SAMPLES) -> Path:
-    """Save a varied-count packed cache under *tmp_path* and return its sink."""
-    sink = tmp_path / f"varied_{tag}.pt"
-    PackedCache(sink).save(_make_varied_samples(n))
-    return sink
+class _CountsDataset(BaseDataset):
+    """Samples plus the two count accessors a token-budget sampler reads.
+
+    The sampler is storage-agnostic: it consumes ``atom_counts`` /
+    ``edge_counts`` and never unpacks a sample, so its fixture is these counts
+    rather than any on-disk format. ``edge_counts`` refuses when the samples
+    carry no neighbour graph, which is what a block-backed dataset does too.
+    """
+
+    def __init__(self, samples: list[dict]) -> None:
+        self._samples = samples
+        self.getitem_calls = 0
+
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    def __getitem__(self, idx: int) -> dict:
+        self.getitem_calls += 1
+        return self._samples[idx]
+
+    @property
+    def atom_counts(self) -> torch.Tensor:
+        return torch.tensor([len(s["Z"]) for s in self._samples], dtype=torch.long)
+
+    @property
+    def edge_counts(self) -> torch.Tensor:
+        if "edge_index" not in self._samples[0]:
+            raise ValueError(
+                "dataset carries no neighbour graph, so it has no edge counts — "
+                "budget on atom_counts and build the cutoff graph downstream "
+                "with molix.batch.NeighborList"
+            )
+        return torch.tensor([len(s["edge_index"]) for s in self._samples], dtype=torch.long)
 
 
 @pytest.fixture
-def varied_ds(tmp_path) -> MmapDataset:
-    """An mmap-backed dataset with the hand-checkable count distribution."""
-    return MmapDataset(_write_varied_cache(tmp_path, "main"))
+def varied_ds() -> _CountsDataset:
+    """A dataset with the hand-checkable count distribution."""
+    return _CountsDataset(_make_varied_samples(N_SAMPLES))
 
 
 def _make_budget_dm(tmp_path: Path, tag: str, *, seed: int = 42, **dm_kwargs) -> DataModule:
@@ -132,14 +159,12 @@ def _make_budget_dm(tmp_path: Path, tag: str, *, seed: int = 42, **dm_kwargs) ->
         varied-count dataset.
     """
     samples = _make_varied_samples(N_SAMPLES + 4)
-    train_sink = tmp_path / f"budget_train_{tag}.pt"
-    val_sink = tmp_path / f"budget_val_{tag}.pt"
-    PackedCache(train_sink).save(samples[:N_SAMPLES])
-    PackedCache(val_sink).save(samples[N_SAMPLES:])
+    train = _CountsDataset(samples[:N_SAMPLES])
+    val = _CountsDataset(samples[N_SAMPLES:])
     dm_kwargs.setdefault("batch_size", 4)
     dm_kwargs.setdefault("num_workers", 0)
     dm_kwargs.setdefault("pin_memory", False)
-    return DataModule(MmapDataset(train_sink), MmapDataset(val_sink), seed=seed, **dm_kwargs)
+    return DataModule(train, val, seed=seed, **dm_kwargs)
 
 
 class _NonPackedDataset(Dataset):
@@ -152,55 +177,9 @@ class _NonPackedDataset(Dataset):
         return {"Z": torch.ones(2, dtype=torch.long), "pos": torch.zeros(2, 3)}
 
 
-class _CountingDataset(MmapDataset):
-    """MmapDataset that counts ``__getitem__`` calls (no-unpack constraint)."""
-
-    def __init__(self, sink: Path) -> None:
-        super().__init__(sink)
-        self.getitem_calls = 0
-
-    def __getitem__(self, idx: int) -> dict:
-        self.getitem_calls += 1
-        return super().__getitem__(idx)
-
-
 # ---------------------------------------------------------------------------
 # GROUP A — pointer-derived count accessors
 # ---------------------------------------------------------------------------
-
-
-class TestCountAccessors:
-    """``atom_counts`` / ``edge_counts`` on ``_CacheBacked`` datasets."""
-
-    def test_atom_counts_values_shape_dtype(self, varied_ds):
-        """atom_counts == atom_ptr[1:] - atom_ptr[:-1], long dtype, shape (n,)."""
-        counts = varied_ds.atom_counts
-        assert isinstance(counts, torch.Tensor)
-        assert counts.dtype == torch.long
-        assert counts.shape == (N_SAMPLES,)
-        assert counts.tolist() == ATOM_COUNTS
-
-    def test_edge_counts_values_shape_dtype(self, varied_ds):
-        """edge_counts == edge_ptr[1:] - edge_ptr[:-1], long dtype, shape (n,)."""
-        counts = varied_ds.edge_counts
-        assert isinstance(counts, torch.Tensor)
-        assert counts.dtype == torch.long
-        assert counts.shape == (N_SAMPLES,)
-        assert counts.tolist() == EDGE_COUNTS
-
-    def test_counts_match_pointer_diff(self, varied_ds):
-        """Accessors agree with the raw cumsum pointers in the payload."""
-        atom_ptr = varied_ds._payload["atom_ptr"]
-        edge_ptr = varied_ds._payload["edge_ptr"]
-        assert torch.equal(varied_ds.atom_counts, atom_ptr[1:] - atom_ptr[:-1])
-        assert torch.equal(varied_ds.edge_counts, edge_ptr[1:] - edge_ptr[:-1])
-
-    def test_cached_dataset_counts_match(self, tmp_path):
-        """CachedDataset (mmap=False) exposes the same counts as MmapDataset."""
-        sink = _write_varied_cache(tmp_path, "cached")
-        ds = CachedDataset(sink)
-        assert ds.atom_counts.tolist() == ATOM_COUNTS
-        assert ds.edge_counts.tolist() == EDGE_COUNTS
 
 
 class TestSubsetCounts:
@@ -235,25 +214,6 @@ class TestSubsetCounts:
         expected = [ATOM_COUNTS[i] for i in train._indices]
         assert train.atom_counts.tolist() == expected
         assert rest.atom_counts.shape == (16,)
-
-
-class TestMissingPointer:
-    """Caches without per-edge keys have no ``edge_ptr`` — actionable error."""
-
-    def test_edge_counts_missing_edge_ptr_raises(self, tmp_path):
-        """edge_counts on an edge-less cache raises ValueError naming the pointer."""
-        sink = tmp_path / "edgeless.pt"
-        PackedCache(sink).save(_make_edgeless_samples(8))
-        ds = MmapDataset(sink)
-        with pytest.raises(ValueError, match="edge_ptr"):
-            _ = ds.edge_counts
-
-    def test_atom_counts_still_work_on_edgeless_cache(self, tmp_path):
-        """atom_counts is independent of edge keys."""
-        sink = tmp_path / "edgeless2.pt"
-        PackedCache(sink).save(_make_edgeless_samples(8))
-        ds = MmapDataset(sink)
-        assert ds.atom_counts.tolist() == ATOM_COUNTS[:8]
 
 
 # ---------------------------------------------------------------------------
@@ -376,8 +336,7 @@ class TestSamplerValidation:
         with pytest.raises(ValueError) as excinfo:
             TokenBudgetBatchSampler(_NonPackedDataset(), max_atoms=16, seed=0)
         message = str(excinfo.value)
-        assert "MmapDataset" in message
-        assert "CachedDataset" in message
+        assert "BlockDataset" in message
         assert "SubsetDataset" in message
 
 
@@ -386,7 +345,7 @@ class TestSamplerNoUnpack:
 
     def test_zero_getitem_calls_during_construction_and_iteration(self, tmp_path):
         """__getitem__ is called 0 times by __init__ + one full epoch."""
-        ds = _CountingDataset(_write_varied_cache(tmp_path, "counting"))
+        ds = _CountsDataset(_make_varied_samples(N_SAMPLES))
         sampler = TokenBudgetBatchSampler(ds, max_atoms=16, max_edges=24, seed=0)
         list(sampler)
         assert ds.getitem_calls == 0
@@ -397,7 +356,7 @@ class TestSamplerPickle:
 
     def test_pickle_round_trip_same_batches(self, tmp_path):
         """pickle.loads(pickle.dumps(s)) yields the identical batch list."""
-        ds = CachedDataset(_write_varied_cache(tmp_path, "pickle"))
+        ds = _CountsDataset(_make_varied_samples(N_SAMPLES))
         sampler = TokenBudgetBatchSampler(ds, max_atoms=16, seed=11)
         restored = pickle.loads(pickle.dumps(sampler))
         assert list(restored) == list(sampler)
@@ -508,11 +467,10 @@ GOLDEN_SEED = 42
 #   sys.path.insert(0, '.')
 #   from tests.test_molix.test_data.test_sampler import _write_varied_cache
 #   from molix.core.seed import make_generator
-#   from molix.store.dataset import MmapDataset
 #   from molix.batch.sampler import TokenBudgetBatchSampler as S
 #   print(torch.randperm(16, generator=make_generator(42)).tolist())
 #   with tempfile.TemporaryDirectory() as td:
-#       ds = MmapDataset(_write_varied_cache(Path(td), 'golden', n=16))
+#       ds = _CountsDataset(_make_varied_samples(16))
 #       print(list(S(ds, max_atoms=16)))
 #       print(list(S(ds, max_atoms=16, max_edges=20)))
 #       warnings.simplefilter('ignore'); print(list(S(ds, max_atoms=8)))
@@ -562,14 +520,14 @@ GOLDEN_SAMPLER_FIELDS = ["_batches", "_dataset", "_max_atoms", "_max_edges", "_s
 
 
 @pytest.fixture
-def golden_ds(tmp_path) -> MmapDataset:
+def golden_ds() -> _CountsDataset:
     """16-sample varied-count dataset backing the characterization goldens.
 
     Counts are a pure function of the sample index (``3 + i % 8`` atoms,
-    ``atoms + 2`` edges), so rebuilding the cache per test in ``tmp_path``
-    reproduces the captured plans exactly.
+    ``atoms + 2`` edges), so rebuilding it per test reproduces the captured
+    plans exactly.
     """
-    return MmapDataset(_write_varied_cache(tmp_path, "golden", n=GOLDEN_N))
+    return _CountsDataset(_make_varied_samples(GOLDEN_N))
 
 
 class TestSamplerGoldenPlan:
@@ -862,11 +820,9 @@ def _make_sized_samples(atom_counts: list[int]) -> list[dict]:
     return samples
 
 
-def _write_task_cache(tmp_path: Path, tag: str) -> Path:
-    """Save the 24-sample task fixture cache under *tmp_path*."""
-    sink = tmp_path / f"task_{tag}.pt"
-    PackedCache(sink).save(_make_sized_samples(TASK_ATOM_COUNTS))
-    return sink
+def _task_ds() -> "_CountsDataset":
+    """The 24-sample task fixture dataset."""
+    return _CountsDataset(_make_sized_samples(TASK_ATOM_COUNTS))
 
 
 def _big_task_tables() -> tuple[list[int], list[str], list[str]]:
@@ -903,18 +859,16 @@ def _big_task_tables() -> tuple[list[int], list[str], list[str]]:
 
 
 @pytest.fixture
-def task_ds(tmp_path) -> MmapDataset:
+def task_ds() -> _CountsDataset:
     """The 24-sample hand-checkable task/group fixture."""
-    return MmapDataset(_write_task_cache(tmp_path, "main"))
+    return _task_ds()
 
 
 @pytest.fixture(scope="session")
-def big_task_fixture(tmp_path_factory) -> tuple[MmapDataset, list[str], list[str]]:
+def big_task_fixture() -> tuple[_CountsDataset, list[str], list[str]]:
     """Wide read-only fixture: 4 tasks × 96 units → ≥ 200 batches available."""
     atoms, labels, groups = _big_task_tables()
-    sink = tmp_path_factory.mktemp("big_task") / "big_task.pt"
-    PackedCache(sink).save(_make_sized_samples(atoms))
-    return MmapDataset(sink), labels, groups
+    return _CountsDataset(_make_sized_samples(atoms)), labels, groups
 
 
 def _units_in(indices: list[int]) -> dict[tuple[str, str], list[int]]:
@@ -1135,7 +1089,7 @@ class TestTaskMixtureIntegrity:
     def test_zero_getitem_calls_during_construction_and_iteration(self, tmp_path):
         """ac-006: unit costs come from pointers only — no sample is unpacked."""
 
-        ds = _CountingDataset(_write_task_cache(tmp_path, "counting"))
+        ds = _task_ds()
         sampler = TaskMixtureBatchSampler(
             ds,
             indices=TASK_INDICES_ALL,
@@ -1278,8 +1232,8 @@ class TestTaskMixtureDeterminism:
         assert list(sampler) == list(sampler)
 
     def test_pickle_round_trip_gives_an_identical_plan(self, tmp_path):
-        """ac-008(d): no mmap-backed count tensor is stored on the instance."""
-        ds = CachedDataset(_write_task_cache(tmp_path, "pickle"))
+        """ac-008(d): no dataset-sized count tensor is stored on the instance."""
+        ds = _task_ds()
         sampler = self._build(ds, TASK_SEED)
         restored = pickle.loads(pickle.dumps(sampler))
         assert list(restored) == list(sampler)

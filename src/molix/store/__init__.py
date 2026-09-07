@@ -2,20 +2,13 @@
 
 Surfaces:
 
-* **Packed cache** — :class:`PackedCache` writes one atomic ``.pt`` file per
-  cache holding concatenated per-atom / per-edge / per-graph tensors plus
-  ``atom_ptr`` / ``edge_ptr`` cumsum pointers. Run-scoped scratch, not a
-  persistence format; see the module docstring for the inode-budget argument
-  against ``TensorDict.memmap_()``.
 * **Frame view** — a record is a :data:`~molix.store.frame_dataset.FrameCollection`
   (``Sequence[Frame]``). :class:`FrameSample` turns one ``Frame`` into the
   pre-collate dict; :class:`FrameDataset` is a single-task map-style view.
   Mixing named sources is :class:`~molix.batch.mixture.DataMixture`.
-* **Readers** — :class:`MmapDataset` / :class:`CachedDataset` read a
-  :class:`PackedCache` file (mmap'd or fully resident), :class:`SubsetDataset`
-  is an index view over either, and :class:`BaseDataset` is the shared reader
-  protocol. :class:`PackedView` is the read-only handle the packed collate fast
-  path consumes.
+* **Readers** — :class:`SubsetDataset` is an index view over any dataset and
+  :class:`BaseDataset` is the shared reader protocol. :class:`PackedView` is the
+  read-only handle the packed collate fast path consumes.
 * **READY-tier blocks** — :class:`BlockWriter` appends :class:`SamplingUnit`\\ s
   to one directory of raw little-endian column files, commits each with a crc32
   record and seals it with per-column sha256; :class:`BlockReader` mmaps a sealed
@@ -42,11 +35,8 @@ from molix.store.block_view import (
     BlockSchemaMismatchError,
     BlockSplitMismatchError,
 )
-from molix.store.cache import PackedCache
 from molix.store.dataset import (
     BaseDataset,
-    CachedDataset,
-    MmapDataset,
     PackedView,
     SubsetDataset,
 )
@@ -63,12 +53,9 @@ __all__ = [
     "BlockSplitMismatchError",
     "BlockWriter",
     "CLASS_I_FRAME_SCHEMA",
-    "CachedDataset",
     "FrameCollection",
     "FrameDataset",
     "FrameSample",
-    "MmapDataset",
-    "PackedCache",
     "PackedView",
     "SamplingUnit",
     "SubsetDataset",

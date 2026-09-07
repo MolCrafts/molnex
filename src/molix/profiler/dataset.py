@@ -2,8 +2,7 @@
 
 Answers *"what is in my data, and what does one sample cost?"* for any object
 yielding **flat sample dicts** (the raw-sample tier of the two-tier data
-contract): :class:`~molix.store.dataset.CachedDataset` /
-:class:`~molix.store.dataset.MmapDataset` /
+contract): :class:`~molix.store.block_view.BlockDataset` /
 :class:`~molix.store.dataset.SubsetDataset`, a
 :class:`~molix.profiler.mock.MockSource`, or a plain ``Sequence[dict]``.
 Complements :class:`~molix.profiler.dataloader.DataLoaderProfiler`, which
@@ -464,6 +463,19 @@ class _SizeStats:
     avg_num_neighbors: float
 
 
+def _or_default(data: object, attr: str, default: float) -> float:
+    """Read *attr* off *data*, falling back to *default* on absence **or refusal**.
+
+    ``getattr``'s own default only covers ``AttributeError``; a dataset that
+    refuses a derived count (an edge statistic with no neighbour graph, say)
+    raises ``ValueError`` instead, and diagnostics never raise.
+    """
+    try:
+        return getattr(data, attr, default)
+    except ValueError:
+        return default
+
+
 class DatasetProfiler:
     """Profile a dataset's sizes, access cost, field layout and labels.
 
@@ -638,9 +650,9 @@ class DatasetProfiler:
         if atom_counts is not None:
             atom_stats = ValueStat.from_list(atom_counts.tolist())
             edge_stats = None if edge_counts is None else ValueStat.from_list(edge_counts.tolist())
-            max_atoms = int(getattr(data, "max_atoms", 0))
-            max_edges = int(getattr(data, "max_edges", 0)) if edge_counts is not None else 0
-            avg_num_neighbors = float(getattr(data, "avg_num_neighbors", 0.0))
+            max_atoms = int(_or_default(data, "max_atoms", 0))
+            max_edges = int(_or_default(data, "max_edges", 0)) if edge_counts is not None else 0
+            avg_num_neighbors = float(_or_default(data, "avg_num_neighbors", 0.0))
         else:
             atom_stats = ValueStat.from_list(sampled_atoms)
             edge_stats = ValueStat.from_list(sampled_edges) if any(sampled_edges) else None
@@ -670,18 +682,12 @@ class DatasetProfiler:
 
         Args:
             data: The dataset being profiled.
-            sampled_fields: Layout inferred during the sampled pass, used only
-                when *data* exposes no packed ``payload["schema"]``.
+            sampled_fields: Layout inferred during the sampled pass.
 
         Returns:
             ``(fields, fields_exact, warnings)``. ``warnings`` carries the
             inference notice when the packed schema was unreachable.
         """
-        schema = self._packed_schema(data)
-        if schema is not None:
-            fields = [FieldSpec.from_packed(key, spec) for key, spec in schema.items()]
-            return fields, True, []
-
         fields = [sampled_fields[key] for key in sorted(sampled_fields)]
         warning = (
             "field layout inferred from the sampled records (fields_exact=False)"
@@ -733,10 +739,7 @@ class DatasetProfiler:
         Raises:
             ValueError: *data* is not a non-empty indexable sequence.
         """
-        remedy = (
-            "Point it at a prepared cache (PackedCache → CachedDataset) "
-            "or a non-empty Sequence[dict]."
-        )
+        remedy = "Point it at a sealed block (BlockDataset) or a non-empty Sequence[dict]."
         if not hasattr(data, "__len__") or not hasattr(data, "__getitem__"):
             raise ValueError(
                 f"{type(data).__name__} exposes no __len__ / __getitem__, so no sample "
@@ -770,21 +773,3 @@ class DatasetProfiler:
         if not isinstance(counts, torch.Tensor):
             return None, None
         return counts, None
-
-    def _packed_schema(self, data: object) -> Mapping[str, tuple] | None:
-        """Return the packed ``payload["schema"]`` mapping, or ``None``.
-
-        Args:
-            data: The dataset being profiled.
-
-        Returns:
-            The exact per-key ``(axis, dtype, extra_shape)`` mapping inferred
-            when the cache was packed, or ``None`` when *data* has no packed
-            view (``SubsetDataset`` over a non-cache dataset raises
-            :class:`AttributeError` here, which is the documented "no fast
-            path" signal).
-        """
-        try:
-            return data.packed_view().payload["schema"]
-        except (AttributeError, KeyError, TypeError):
-            return None

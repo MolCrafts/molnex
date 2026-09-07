@@ -9,9 +9,9 @@ import torch
 
 from molix.batch.bond_adapter import bond_index_from_columns
 from molix.batch.collate import collate_molecules, collate_packed
-from molix.store.cache import PackedCache
-from molix.store.dataset import MmapDataset
+from molix.store import BlockDataset, PackedView
 from molpot.potentials.bonds import BondHarmonic
+from tests.test_molix.conftest import unit_a, unit_b, unit_samples, write_block
 
 
 def _mol(pos, bonds, types):
@@ -78,30 +78,22 @@ def test_bond_index_from_columns_roundtrip():
     assert torch.equal(batch["bonds", "bond_index"], bi)
 
 
-def test_packed_cache_bonds_roundtrip_equals_molecules(tmp_path):
-    # bond_index survives PackedCache save/load and collate_packed equals the
-    # collate_molecules oracle on the bonds namespace (ac-004 packed path).
-    samples = [
-        _mol([[0.0, 0.0, 0.0], [1.2, 0.0, 0.0]], [[0], [1]], [0]),
-        _mol(
-            [[0.0, 0.0, 0.0], [0.9, 0.0, 0.0], [0.9, 0.9, 0.0]],
-            [[0, 1], [1, 2]],
-            [0, 1],
-        ),
-    ]
-    # add edges-free Z/pos only; cache requires consistent schema
-    sink = tmp_path / "bonded.pt"
-    PackedCache(sink).save(samples)
-    ds = MmapDataset(sink)
+def test_block_bonds_roundtrip_equals_molecules(tmp_path):
+    """Bonds survive a sealed block and ``collate_packed`` equals the oracle.
 
-    # per-sample unpack restores bond_index/bond_types
+    ``collate_molecules`` over the per-frame sample dicts is the equivalence
+    oracle for the packed path on the ``bonds`` namespace (ac-004).
+    """
+    units = [unit_a(), unit_b()]
+    ds = BlockDataset.load_from_disk(write_block(tmp_path / "b", units).parent)
+    samples = unit_samples(units)
+
+    # per-sample unpack restores bond_index / bond_types
     assert torch.equal(ds[1]["bond_index"], samples[1]["bond_index"])
     assert torch.equal(ds[1]["bond_types"], samples[1]["bond_types"])
 
-    indices = [0, 1]
-    fast = collate_packed(ds.packed_view(), indices)
-    oracle = collate_molecules([ds[i] for i in indices])
+    frames = [0, 2]
+    fast = collate_packed(PackedView(ds.frame_payload(frames)), range(len(frames)))
+    oracle = collate_molecules([samples[f] for f in frames])
     assert torch.equal(fast["bonds", "bond_index"], oracle["bonds", "bond_index"])
     assert torch.equal(fast["bonds", "bond_types"], oracle["bonds", "bond_types"])
-    # offset applied: m2's bonds rebased by +2 atoms
-    assert fast["bonds", "bond_index"].tolist() == [[0, 2, 3], [1, 3, 4]]
