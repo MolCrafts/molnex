@@ -9,9 +9,7 @@ constant-output heads in fp64, so every expected value below is analytic
 
 from __future__ import annotations
 
-import ast
 from collections.abc import Callable, Sequence
-from pathlib import Path
 
 import pytest
 import torch
@@ -216,33 +214,6 @@ def _charge_model(head: nn.Module | None = None) -> AtomicChargeModel:
         _ConstantChiEtaHead() if head is None else head,
         ElectronegativityEqualization(DiagonalHardnessKernel(), jitter=0.0),
     )
-
-
-def _dotted_names(tree: ast.Module) -> set[str]:
-    """Every dotted attribute chain / imported name in a parsed module."""
-    names: set[str] = set()
-
-    def chain(node: ast.expr) -> str | None:
-        parts: list[str] = []
-        current: ast.expr = node
-        while isinstance(current, ast.Attribute):
-            parts.append(current.attr)
-            current = current.value
-        if not isinstance(current, ast.Name):
-            return None
-        parts.append(current.id)
-        return ".".join(reversed(parts))
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute):
-            dotted = chain(node)
-            if dotted is not None:
-                names.add(dotted)
-        elif isinstance(node, ast.Import):
-            names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            names.update(f"{node.module}.{alias.name}" for alias in node.names)
-    return names
 
 
 class TestForceFieldPredictions:
@@ -460,12 +431,3 @@ class TestForceFieldPredictions:
         adapter = ForceFieldPredictions(model, keys=("q",))
         with pytest.raises(RuntimeError, match="q"):
             adapter.charges(_two_atom_bond_batch())
-
-    def test_no_own_derivative_path(self) -> None:
-        """Derivatives are delegated: no hand-rolled autograd in predictions.py."""
-        source = Path(__file__).resolve().parents[3] / "src/molpot/forcefield/predictions.py"
-        assert source.exists(), f"missing production module {source}"
-        names = _dotted_names(ast.parse(source.read_text(encoding="utf-8")))
-        assert "torch.autograd.grad" not in names
-        assert not [n for n in names if n.startswith("torch.func.")]
-        assert not [n for n in names if n.endswith("autograd.functional.hessian")]

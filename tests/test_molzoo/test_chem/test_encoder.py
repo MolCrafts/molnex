@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 import torch
 from tensordict import TensorDict
 
@@ -86,17 +83,3 @@ class TestChemPerception:
         # Attribute access resolves via lazy table
         assert molzoo.ChemPerception is ChemPerception
         assert molzoo.ChemPerceptionSpec is ChemPerceptionSpec
-
-
-class TestNoMolpotImport:
-    def test_source_tree_has_no_molpot(self):
-        root = Path(__file__).resolve().parents[3] / "src" / "molzoo" / "chem"
-        assert root.is_dir()
-        for path in root.rglob("*.py"):
-            tree = ast.parse(path.read_text())
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        assert not alias.name.startswith("molpot"), path
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    assert not node.module.startswith("molpot"), path

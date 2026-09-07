@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import ast
 import inspect
-from pathlib import Path
 
 import pytest
 import torch
@@ -219,16 +217,3 @@ class TestChemEncoder:
 
 class TestNoMolpotImport:
     """molrep.chem must not import molpot or pinet."""
-
-    def test_source_tree_has_no_molpot(self):
-        root = Path(__file__).resolve().parents[3] / "src" / "molrep" / "chem"
-        assert root.is_dir()
-        banned = ("molpot", "molrep.interaction.pinet")
-        for path in root.rglob("*.py"):
-            tree = ast.parse(path.read_text())
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        assert not any(alias.name.startswith(p) for p in banned), path
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    assert not any(node.module.startswith(p) for p in banned), path

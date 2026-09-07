@@ -5,9 +5,6 @@ Spec: learnable-classical-ff-09-provenance.
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -119,14 +116,3 @@ class TestChemicalSupportIndex:
     def test_rejects_bad_bank_rank(self):
         with pytest.raises(ValueError, match="2-D"):
             ChemicalSupportIndex(torch.tensor([1.0, 2.0]), radius=1.0)
-
-    def test_no_molpot_import_in_support_module(self):
-        """molrep embedding support must not depend on molpot (ac-006 spirit)."""
-        path = Path(__file__).resolve().parents[3] / "src" / "molrep" / "embedding" / "support.py"
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    assert not alias.name.startswith("molpot"), alias.name
-            if isinstance(node, ast.ImportFrom) and node.module:
-                assert not node.module.startswith("molpot"), node.module

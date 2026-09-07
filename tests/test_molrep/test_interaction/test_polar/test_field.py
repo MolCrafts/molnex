@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 import cuequivariance as cue
 import pytest
 import torch
@@ -167,14 +164,3 @@ class TestOneBodyMLPFieldReadout:
 
 class TestPolarFieldPackage:
     """Package-level constraints for the field modules."""
-
-    def test_package_does_not_import_molpot(self):
-        """molrep polar stays representation-only."""
-        polar_dir = Path(__file__).resolve().parents[4] / "src" / "molrep" / "interaction" / "polar"
-        for path in polar_dir.glob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    assert all(alias.name.split(".")[0] != "molpot" for alias in node.names)
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    assert node.module.split(".")[0] != "molpot"

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 import cuequivariance as cue
 import cuequivariance_torch as cuet
 import pytest
@@ -67,14 +64,3 @@ class TestEnvironmentDependentSpinSourceBlock:
             out = block(x)
             assert out.shape[-1] == y_dim
             assert block.linear(x).shape[-1] == flat
-
-    def test_package_does_not_import_molpot(self):
-        """molrep polar blocks stay representation-only."""
-        polar_dir = Path(__file__).resolve().parents[4] / "src" / "molrep" / "interaction" / "polar"
-        for path in polar_dir.glob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    assert all(alias.name.split(".")[0] != "molpot" for alias in node.names)
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    assert node.module.split(".")[0] != "molpot"

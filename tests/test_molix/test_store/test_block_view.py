@@ -842,4 +842,3 @@ def test_block_view_symbols_are_exported_from_molix_store():
         "BlockSchemaMismatchError",
         "BlockSplitMismatchError",
     } <= exported
-    assert "BlockDataset" in (store.__doc__ or "")

@@ -14,6 +14,7 @@ from molix.compile import logger as compile_logger
 class TestCompiler:
     """Tests for Compiler configuration + application."""
 
+    @pytest.mark.slow
     def test_compiled_module_produces_same_output(self):
         module = nn.Linear(10, 5)
         x = torch.randn(3, 10)

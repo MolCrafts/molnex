@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import ast
 import math
-from pathlib import Path
 
 import pytest
 import torch
@@ -661,74 +659,3 @@ class TestGTOHartreeEnergyKspace:
         cell = torch.eye(3, dtype=torch.float64) * 12.0
         with pytest.raises(ValueError, match="single-system"):
             model(q, pos, batch, cell=cell, num_graphs=2)
-
-    def test_periodic_call_chain_has_no_host_sync(self) -> None:
-        """ac-005: no ``.item()``, no ``int()``/``float()``, no boolean-mask index."""
-        path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "molpot"
-            / "potentials"
-            / "gto"
-            / "hartree.py"
-        )
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        methods = {
-            node.name: node
-            for cls in ast.walk(tree)
-            if isinstance(cls, ast.ClassDef) and cls.name == "GTOHartreeEnergy"
-            for node in cls.body
-            if isinstance(node, ast.FunctionDef)
-        }
-        for name in ("_kspace_energy", "_self_energy"):
-            assert name in methods, name
-            for node in ast.walk(methods[name]):
-                if isinstance(node, ast.Call):
-                    func = node.func
-                    assert not (isinstance(func, ast.Attribute) and func.attr == "item"), name
-                    assert not (isinstance(func, ast.Name) and func.id in {"int", "float"}), name
-                if isinstance(node, ast.Subscript):
-                    assert not isinstance(node.slice, ast.Compare | ast.BoolOp), name
-
-    def test_scatter_import_is_compile_safe(self) -> None:
-        """ac-005: ``scatter_sum`` hides an ``.item()`` on its ``dim_size=None`` path."""
-        path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "molpot"
-            / "potentials"
-            / "gto"
-            / "hartree.py"
-        )
-        lines = [
-            line
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.startswith("from molix.F.scatter import")
-        ]
-        assert lines == ["from molix.F.scatter import scatter_sum_compile_safe"]
-
-    def test_kspace_is_imported_by_public_name_only(self) -> None:
-        """No private reach-through into :mod:`molpot.potentials.gto.kspace`.
-
-        ``_as_cell`` / ``_TWOPI`` are that module's own internals; importing
-        them here welds the two modules into one unit with an underscore
-        between them, and freezes a name the owner is free to rename. Whatever
-        this module needs, ``kspace`` must expose publicly.
-        """
-        path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "molpot"
-            / "potentials"
-            / "gto"
-            / "hartree.py"
-        )
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        imported = [
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "molpot.potentials.gto.kspace"
-            for alias in node.names
-        ]
-        assert imported, "hartree.py must still import from the kspace module"
-        assert [name for name in imported if name.startswith("_")] == []

@@ -199,6 +199,7 @@ class TestMACESpec:
 
         assert not (_imported_roots(spec_module) & FORBIDDEN_IMPORT_ROOTS)
 
+    @pytest.mark.slow
     def test_reaching_a_spec_class_does_not_import_the_encoder(self):
         """``molzoo.mace.MACEMatpesSpec`` must not trigger the encoder module."""
         molzoo_root = Path(inspect.getsourcefile(sys.modules["molzoo"]) or "").parents[1]

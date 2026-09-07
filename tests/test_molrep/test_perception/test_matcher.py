@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -14,8 +11,6 @@ from molrep.perception import (
     SmartsMatcher,
     SymbolicPattern,
 )
-
-PERCEPTION_ROOT = Path(__file__).resolve().parents[3] / "src" / "molrep" / "perception"
 
 
 class TestFakeSmartsMatcher:
@@ -54,19 +49,6 @@ class TestMolpySmartsMatcher:
             pytest.skip("molpy.SmartsPattern unavailable")
         assert isinstance(matcher, SmartsMatcher)
 
-    def test_import_path_is_molpy_only(self):
-        """Source of matcher.py must not reference bare molrs imports."""
-        src = (PERCEPTION_ROOT / "matcher.py").read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    assert not alias.name.startswith("molrs"), alias.name
-            elif isinstance(node, ast.ImportFrom):
-                mod = node.module or ""
-                assert not mod.startswith("molrs"), mod
-        assert "from molpy" in src or "import molpy" in src
-
     def test_functional_match_if_available(self):
         """Optional smoke: match carbon atoms in ethanol when molpy works."""
         try:
@@ -84,20 +66,3 @@ class TestMolpySmartsMatcher:
         assert out.shape[0] == 1
         assert out.shape[1] >= 1  # ethanol has ≥1 carbon (heavy-only graph)
         assert out.dtype == torch.long
-
-
-class TestPerceptionMolrsForbidden:
-    def test_no_molrs_imports_in_package(self):
-        py_files = sorted(PERCEPTION_ROOT.glob("*.py"))
-        assert py_files, "perception package missing"
-        for path in py_files:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        assert not alias.name.startswith("molrs"), (
-                            f"{path.name} imports {alias.name}"
-                        )
-                elif isinstance(node, ast.ImportFrom):
-                    mod = node.module or ""
-                    assert not mod.startswith("molrs"), f"{path.name} imports from {mod}"

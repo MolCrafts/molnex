@@ -268,34 +268,6 @@ class TestMD:
         assert md.integrator is not None
         assert md.neighbors is None
 
-    def test_src_molix_md_has_no_molpot_import(self):
-        """ac-005: the one-way rule, asserted on *imports*.
-
-        ``molix.compile`` and ``molix.schema`` are audited here too: spec
-        ``polar-compile-clean-02-seam`` moved the cross-layer protocols into
-        ``schema.py`` precisely so molpot could import downward, and the guard
-        has to cover the files that gained the contract. A grep for the string
-        ``molpot`` would misfire — ``driver.py``, ``forcefield.py`` and
-        ``schema.py`` all name it legitimately in prose.
-        """
-        import ast
-        from pathlib import Path
-
-        src = Path(__file__).resolve().parents[3] / "src" / "molix"
-        audited = sorted((src / "md").rglob("*.py")) + [src / "compile.py", src / "schema.py"]
-        offenders: list[str] = []
-        for path in audited:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name == "molpot" or alias.name.startswith("molpot."):
-                            offenders.append(f"{path}:{node.lineno}: import {alias.name}")
-                elif isinstance(node, ast.ImportFrom) and node.module is not None:
-                    if node.module == "molpot" or node.module.startswith("molpot."):
-                        offenders.append(f"{path}:{node.lineno}: from {node.module}")
-        assert offenders == []
-
 
 class TestMDNeighborPolicy:
     """The integrator derives the rebuild switch; MD never owns a cadence."""
@@ -543,34 +515,6 @@ class TestRebindCell:
                 .set_barostat(_expanding_barostat())
             ).run(_cell_system(cell.clone()), 2, chunk=1)
         assert len(at_sync_cell.calls) == 2
-
-    def test_cell_layout_resolution_lives_only_in_rebind_cell(self):
-        """ac-004: no second ``cell.dim() == 3`` branch survives in driver.py."""
-        import ast
-        from pathlib import Path
-
-        path = Path(__file__).resolve().parents[3] / "src" / "molix" / "md" / "driver.py"
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        owners = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef) and node.name == "rebind_cell"
-        ]
-        assert len(owners) == 1
-        owner = owners[0]
-        sites = [
-            node.lineno
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Compare)
-            and isinstance(node.left, ast.Call)
-            and isinstance(node.left.func, ast.Attribute)
-            and node.left.func.attr == "dim"
-            and len(node.ops) == 1
-            and isinstance(node.ops[0], ast.Eq)
-            and [getattr(c, "value", None) for c in node.comparators] == [3]
-        ]
-        assert sites, "the (1, 3, 3) vs (3, 3) branch must still exist, in its one home"
-        assert [line for line in sites if not owner.lineno <= line <= owner.end_lineno] == []
 
 
 class TestCompiledMlipStep:

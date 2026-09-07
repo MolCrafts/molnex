@@ -57,9 +57,6 @@ from tests.test_molzoo.test_mace.conftest import (
     raw_tensors,
 )
 
-#: Iron (26) is outside the ``[1, 6, 8]`` table — ``searchsorted`` would snap it.
-OFF_TABLE_Z = [8, 1, 1, 6, 26]
-
 #: Rigid translation of the whole system (Å); the energy must not notice.
 TRANSLATION = [1.0, 0.0, 0.0]
 
@@ -900,5 +897,3 @@ class TestMacePotentialCompileCore:
         validate(cluster["atoms", "Z"])  # the real check still passes this batch
 
         assert not hasattr(matpes_variant, "_eager_calls")
-        assert "no element validation" in (MacePotential.energy_core.__doc__ or "")
-        assert "eager" in (MACEEncoder.validate_elements.__doc__ or "")

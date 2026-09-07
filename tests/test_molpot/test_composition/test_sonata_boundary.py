@@ -154,16 +154,3 @@ def test_anti_double_counting_warning(sonata_and_batch) -> None:
             batch=atom_batch,
             edge_index=edge_index,
         )
-
-
-def test_polarization_docstring_cross_references_sonata() -> None:
-    """``Polarization``'s class docstring must mention ``Sonata`` so the
-    user discovers the LES α-mode composer line as an alternative."""
-    assert Polarization.__doc__ is not None
-    assert "Sonata" in Polarization.__doc__, (
-        "Polarization.__doc__ does not reference Sonata. "
-        "The sub-spec requires the cross-reference so a user landing on "
-        "Polarization discovers the LES α-mode composer line. Add a "
-        "`See also: :class:`molpot.composition.Sonata`` (or equivalent) "
-        "to Polarization's class docstring."
-    )

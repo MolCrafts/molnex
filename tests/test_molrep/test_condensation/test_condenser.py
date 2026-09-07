@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -155,19 +152,3 @@ class TestCondenser:
             aj = astyle.get_type_by_name(sj) or astyle.def_type(sj)
             bstyle.def_type(ai, aj, name=rec.label, k=rec.prototype["k"], r0=rec.prototype["r0"])
         assert len(list(ff.get_types(BondType))) == 2
-
-    def test_no_smarts_emitters_in_package(self):
-        root = Path(__file__).resolve().parents[3] / "src/molrep/condensation"
-        for path in root.glob("*.py"):
-            tree = ast.parse(path.read_text())
-            for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef):
-                    name = node.name.lower()
-                    assert "smarts" not in name and "smirks" not in name
-                if isinstance(node, ast.ClassDef):
-                    name = node.name.lower()
-                    assert "smarts" not in name and "smirks" not in name
-            text = path.read_text().lower()
-            assert "def to_smarts" not in text
-            assert "def emit_smarts" not in text
-            assert "def to_smirks" not in text

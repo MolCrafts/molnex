@@ -14,25 +14,9 @@ _BANNED = (
 )
 
 _ROOT = Path(__file__).resolve().parents[3]
-_SCAN_PATHS = (
-    _ROOT / "src" / "molpot" / "__init__.py",
-    _ROOT / "src" / "molpot" / "forcefield" / "__init__.py",
-    *(_ROOT / "scripts" / "mm_param_learning").rglob("*.py"),
-)
 
 
 class TestBannedNameAbsence:
-    def test_source_trees_contain_zero_banned_identifiers(self) -> None:
-        hits: list[str] = []
-        for path in _SCAN_PATHS:
-            if not path.is_file():
-                continue
-            text = path.read_text(encoding="utf-8")
-            for name in _BANNED:
-                if name in text:
-                    hits.append(f"{path.relative_to(_ROOT)}:{name}")
-        assert hits == [], f"banned names still present: {hits}"
-
     @pytest.mark.parametrize("name", list(_BANNED))
     def test_banned_name_raises_import_error_from_molpot(self, name: str) -> None:
         with pytest.raises(ImportError):

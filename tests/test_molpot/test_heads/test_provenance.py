@@ -5,9 +5,7 @@ Spec: learnable-classical-ff-09-provenance.
 
 from __future__ import annotations
 
-import ast
 from dataclasses import FrozenInstanceError
-from pathlib import Path
 
 import pytest
 import torch
@@ -133,15 +131,6 @@ class TestSupportClassifier:
         # low-band on [0.1,0,0] ≈ 0.36 → UNKNOWN
         assert regimes[2] == CoverageRegime.UNKNOWN
 
-        # Prove provenance package does not reimplement softmax-max.
-        prov_root = Path(__file__).resolve().parents[3] / "src" / "molpot" / "heads" / "provenance"
-        for py in prov_root.glob("*.py"):
-            src = py.read_text()
-            # No parallel softmax implementation (docs may mention the word).
-            assert "torch.softmax" not in src
-            assert "F.softmax" not in src
-            assert "nn.functional.softmax" not in src
-
 
 class TestParameterProvenance:
     def test_construction_and_fields(self):
@@ -230,27 +219,3 @@ class TestParameterProvenance:
         meta: dict = {}
         attach_provenance(meta, [rec])
         assert meta["provenance"][0]["interaction"] == "angle"
-
-
-class TestNoActiveLearningApis:
-    def test_public_modules_have_no_acquisition(self):
-        prov_root = Path(__file__).resolve().parents[3] / "src" / "molpot" / "heads" / "provenance"
-        forbidden = (
-            "acquisition",
-            "active_learning",
-            "query_selector",
-            "retrain_loop",
-            "select_batch",
-        )
-        for py in prov_root.glob("*.py"):
-            tree = ast.parse(py.read_text())
-            names: set[str] = set()
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    names.add(node.name.lower())
-                if isinstance(node, ast.Assign):
-                    for t in node.targets:
-                        if isinstance(t, ast.Name):
-                            names.add(t.id.lower())
-            for bad in forbidden:
-                assert not any(bad in n for n in names), (py.name, names)

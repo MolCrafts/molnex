@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -306,15 +303,3 @@ class TestMacePolarBindCell:
             model.bind_cell(cell * 2.0)
         assert "KSpaceGrid" in str(excinfo.value)
         assert "capacity_factor" in str(excinfo.value)
-
-
-class TestPolarPackageImports:
-    def test_polar_potential_does_not_import_forbidden_stacks(self):
-        path = Path(__file__).resolve().parents[3] / "src" / "molzoo" / "mace" / "polar.py"
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        banned = {"e3nn", "mace", "ase", "graph_longrange"}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                assert all(alias.name.split(".")[0] not in banned for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                assert node.module.split(".")[0] not in banned

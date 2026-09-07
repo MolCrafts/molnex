@@ -13,7 +13,6 @@ behaviour-preserving.
 
 from __future__ import annotations
 
-import ast
 import re
 from pathlib import Path
 
@@ -36,7 +35,6 @@ GOLDEN_ENERGY = 12.5
 GOLDEN_FORCE_X = 50.0
 
 SOURCE = Path(__file__).resolve().parents[3] / "src/molpot/forcefield/potentials.py"
-MOLPOT_ROOT = SOURCE.parents[1]
 FORCE_SEAM = "src/molpot/derivation/force.py"
 
 #: Cubic edge (Å) of the tiny periodic Polar fixture. Its ``capacity_factor =
@@ -184,63 +182,7 @@ def _edge_batch(*, r: float = 1.5) -> TensorDict:
     )
 
 
-def _method_source(class_name: str, method_name: str) -> str:
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef) or node.name != class_name:
-            continue
-        for item in node.body:
-            if isinstance(item, ast.FunctionDef) and item.name == method_name:
-                return ast.unparse(item)
-    raise AssertionError(f"{class_name}.{method_name} not found in {SOURCE}")
-
-
 class TestPotentials:
-    def test_force_methods_delegate(self) -> None:
-        """Bonded + LJ forces are analytic; Coulomb uses the autograd backend."""
-        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
-        imported = {
-            f"{node.module}.{alias.name}"
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module
-            for alias in node.names
-        }
-        assert any(
-            name.startswith("molpot.derivation") and name.endswith(".autograd_forces_from_energy")
-            for name in imported
-        ), "potentials.py must import autograd_forces_from_energy from molpot.derivation"
-
-        calc_forces_src = _method_source("Potentials", "calc_forces")
-        assert "autograd_forces_from_energy" in calc_forces_src, (
-            "Potentials.calc_forces must delegate to autograd_forces_from_energy"
-        )
-        assert "torch.autograd.grad" not in calc_forces_src, (
-            "Potentials.calc_forces must not hand-roll torch.autograd.grad"
-        )
-
-        energy_forces_src = _method_source("Potentials", "calc_energy_forces")
-        assert "torch.autograd.grad" not in energy_forces_src, (
-            "Potentials.calc_energy_forces must not hand-roll torch.autograd.grad"
-        )
-        for term in ("bond", "angle", "proper", "improper"):
-            assert f"{term}.energy_forces" in energy_forces_src, (
-                f"Potentials.calc_energy_forces must call the analytic {term} forces"
-            )
-        assert "self._lj_energy_forces" in energy_forces_src
-        assert "self._coulomb_energy_forces" in energy_forces_src
-
-        lj_src = _method_source("Potentials", "_lj_energy_forces")
-        assert "self.lj.energy_forces" in lj_src, (
-            "Potentials._lj_energy_forces must call the analytic LJ forces"
-        )
-        coul_src = _method_source("Potentials", "_coulomb_energy_forces")
-        assert "autograd_forces_from_energy" in coul_src, (
-            "Coulomb (open and periodic) must use autograd_forces_from_energy"
-        )
-        assert "torch.autograd.grad" not in coul_src, (
-            "Potentials._coulomb_energy_forces must not hand-roll torch.autograd.grad"
-        )
-
     def test_calc_forces_analytic_golden(self) -> None:
         """F = −∂E/∂x = ∓k(r−r0) x̂ for the stretched two-atom harmonic bond."""
         forces = _bond_potentials().calc_forces(_two_atom_bond_batch())
@@ -453,24 +395,6 @@ class TestPotentialsCompiledCore:
         assert compilers == [compiler]
         assert not hasattr(pots, "_compiled_core")
         assert isinstance(pots, CellBound)
-
-        # The duck-typed ``getattr(mlip, "_write_energy")`` probe is gone from
-        # the *code* — prose may still name the hook it delegates to.
-        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            body = getattr(node, "body", None)
-            if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef):
-                continue
-            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-                node.body = body[1:]
-        assert "_write_energy" not in ast.unparse(tree)
-        upward = [
-            f"{path}:{number}"
-            for path in sorted(MOLPOT_ROOT.rglob("*.py"))
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-            if re.match(r"\s*(from|import)\s+molix\.(md|compile)\b", line)
-        ]
-        assert upward == []
 
     def test_calc_energy_routes_through_call_energy_and_the_pos_override_lands_first(
         self, monkeypatch: pytest.MonkeyPatch

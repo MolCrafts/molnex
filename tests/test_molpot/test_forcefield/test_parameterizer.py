@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import ast
 import math
-from pathlib import Path
 
 import pytest
 import torch
@@ -66,23 +64,6 @@ class _ConstantBondHead(nn.Module):
         return {
             "k": torch.full((n,), self.k, dtype=features.dtype, device=features.device),
             "r0": torch.full((n,), self.r0, dtype=features.dtype, device=features.device),
-        }
-
-
-class _ConstantOplsProperHead(nn.Module):
-    def __init__(self, K: tuple[float, float, float, float] = (1.0, 2.0, 0.5, 0.25)):
-        super().__init__()
-        self.K = K
-        self.form = "opls"
-
-    def forward(self, features: torch.Tensor) -> dict[str, torch.Tensor]:
-        n = features.shape[0]
-        device, dtype = features.device, features.dtype
-        return {
-            "k1": torch.full((n,), self.K[0], dtype=dtype, device=device),
-            "k2": torch.full((n,), self.K[1], dtype=dtype, device=device),
-            "k3": torch.full((n,), self.K[2], dtype=dtype, device=device),
-            "k4": torch.full((n,), self.K[3], dtype=dtype, device=device),
         }
 
 
@@ -480,35 +461,3 @@ class TestForces:
         assert forces.shape == (2, 3)
         assert math.isclose(float(forces[0, 0].detach()), 2.0 * 0.5, abs_tol=1e-5)
         assert math.isclose(float(forces[1, 0].detach()), -2.0 * 0.5, abs_tol=1e-5)
-
-
-class TestImportBoundary:
-    def test_forcefield_modules_have_no_molzoo(self):
-        root = Path(__file__).resolve().parents[3] / "src/molpot/forcefield"
-        for path in root.glob("*.py"):
-            tree = ast.parse(path.read_text())
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        assert not alias.name.startswith("molzoo")
-                        assert not alias.name.startswith("molrep.chem")
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    assert not node.module.startswith("molzoo")
-                    assert not node.module.startswith("molrep.chem")
-
-
-class TestDocstrings:
-    def test_public_symbols_have_docstrings(self):
-        for cls in (
-            ForceField,
-            Parameterizer,
-            BondParamHead,
-            AngleParamHead,
-            ProperTorsionParamHead,
-            ImproperParamHead,
-        ):
-            doc = cls.__doc__ or ""
-            assert len(doc.strip()) > 20, f"{cls.__name__} missing docstring"
-            if cls is Parameterizer:
-                assert "kcal/mol" in doc
-                assert "Å" in doc or "A" in doc

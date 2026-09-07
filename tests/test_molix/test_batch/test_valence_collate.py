@@ -193,18 +193,3 @@ def test_bonds_still_work_alongside_angles():
     assert batch["bonds", "bond_index"].tolist() == [[0, 1, 3], [1, 2, 4]]
     assert batch["bonds", "bond_types"].tolist() == [0, 1, 0]
     assert batch["angles"]["atomi"].tolist() == [0, 3]
-
-
-def test_collate_does_not_import_molpy_as_batch_store():
-    """Topology leaves are plain torch tensors inside TensorDict (ac-004)."""
-    from pathlib import Path
-
-    import molix.batch.collate as collate_mod
-    import molix.store.cache as cache_mod
-
-    for mod in (collate_mod, cache_mod):
-        src = Path(mod.__file__).read_text()
-        assert "from molpy" not in src
-        assert "import molpy" not in src
-        assert "ForceField" not in src
-        assert "import molrs" not in src

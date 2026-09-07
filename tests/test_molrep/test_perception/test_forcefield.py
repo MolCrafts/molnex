@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 import pytest
@@ -140,28 +139,6 @@ class TestSymbolicForceFieldMatchMolecule:
         matcher = FakeSmartsMatcher()  # all empty
         assigned = ff.match_molecule(mol=None, matcher=matcher)
         assert assigned == {}
-
-    def test_forcefield_module_has_no_molpot_imports(self):
-        src = FORCEFIELD_PATH.read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    assert not alias.name.startswith("molpot"), alias.name
-            elif isinstance(node, ast.ImportFrom):
-                mod = node.module or ""
-                assert not mod.startswith("molpot"), mod
-
-    def test_perception_package_has_no_molpot_energy_imports(self):
-        for path in PERCEPTION_ROOT.glob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom):
-                    mod = node.module or ""
-                    assert not mod.startswith("molpot"), f"{path.name}: {mod}"
-                elif isinstance(node, ast.Import):
-                    for alias in node.names:
-                        assert not alias.name.startswith("molpot"), f"{path.name}: {alias.name}"
 
     def test_type_system_interaction_mismatch_raises(self):
         ts = TypeSystem(

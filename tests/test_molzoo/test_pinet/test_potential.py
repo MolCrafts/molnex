@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import torch
 from tensordict import TensorDict
 
@@ -184,33 +182,3 @@ class TestPiNetPotentialCompile:
         assert PiNetPotential.compile is torch.nn.Module.compile
         assert "compile" not in PiNetPotential.__dict__
         assert not hasattr(PiNetPotential, "compiled")
-
-    def test_no_compiled_alias_survives_in_the_tree(self):
-        """Renaming the trap to a ``compiled`` method would only relocate it.
-
-        The needle is assembled at runtime so this file is not its own offender.
-        """
-        needle = "." + "compiled("
-        root = Path(__file__).resolve().parents[3]
-        offenders = [
-            f"{path}:{lineno}"
-            for folder in ("src", "tests", "benchmarks", "docs")
-            for path in sorted((root / folder).rglob("*"))
-            if path.suffix in {".py", ".md"}
-            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-            if needle in line
-        ]
-        assert offenders == []
-
-    def test_docs_point_at_the_compiler_with_a_migration_note(self):
-        """The one in-tree mention of the deleted method must say what replaces it."""
-        doc = (
-            Path(__file__).resolve().parents[3]
-            / "docs"
-            / "molix"
-            / "explanation"
-            / "throughput-and-compilation.md"
-        ).read_text(encoding="utf-8")
-        assert "Compiler(cuda_graphs=True)(model)" in doc
-        assert "trainer.compile(cuda_graphs=True)" in doc
-        assert "PiNetPotential.compile" in doc

@@ -15,13 +15,8 @@ import pin below is expressed as an allowlist rather than a named module.
 
 from __future__ import annotations
 
-import ast
-import inspect
-from pathlib import Path
-
 import pytest
 
-import molix.profiler.task as task_module
 from molix.profiler.task import TaskProfiler
 
 # ---------------------------------------------------------------------------
@@ -162,43 +157,3 @@ class TestTaskProfiler:
         result = TaskProfiler(_CallableTask()).run(_Source(n=2), n_samples=1, n_warmup=0)
 
         assert result.task_id == "_CallableTask"
-
-
-#: Every in-repo module ``molix.profiler.task`` is allowed to import. The
-#: dispatch is structural, so the profiler needs nothing beyond its own
-#: formatting helpers — it must not reach into a data layer to type-check a
-#: task. Extending this list is a deliberate coupling decision, not a fixup.
-_ALLOWED_MOLNEX_IMPORTS = frozenset({"molix.profiler._utils"})
-
-
-def test_module_imports_no_molnex_module_outside_the_allowlist() -> None:
-    """``molix.profiler.task`` stays structurally decoupled from the data layers.
-
-    Originally this pinned the absence of the acquisition DSL specifically;
-    that package is deleted now (and
-    ``tests/test_repository_boundaries.py`` enforces its absence tree-wide),
-    so the pin is retargeted at the property that made the DSL import wrong in
-    the first place: the profiler dispatches on duck-typed ``execute`` / ``fit``
-    and therefore imports no molnex module beyond its own helpers.
-    """
-    source_file = inspect.getsourcefile(task_module)
-    assert source_file is not None
-    tree = ast.parse(Path(source_file).read_text(encoding="utf-8"))
-
-    imported: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            imported.append(node.module)
-
-    molnex_roots = ("molix", "molrep", "molpot", "molzoo")
-    offenders = [
-        module
-        for module in imported
-        if module.split(".")[0] in molnex_roots and module not in _ALLOWED_MOLNEX_IMPORTS
-    ]
-    assert offenders == [], (
-        "profiler.task dispatches structurally; it must not import a molnex "
-        f"data/model module: {offenders}"
-    )

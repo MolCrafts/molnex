@@ -102,25 +102,3 @@ def test_module_does_not_import_concrete_layers() -> None:
                     offenders.append(alias.name)
 
     assert not offenders, f"core/hook.py must not import {forbidden}; got {offenders}"
-
-
-def test_trainer_imports_hook_from_core_hook_module() -> None:
-    """Trainer pulls the ``Hook`` Protocol from ``molix.core.hook``.
-
-    The concrete-hook split is long done (``molix.core.hooks`` no longer
-    exists anywhere under ``src/``); this asserts the Hook contract lives
-    at its canonical home.
-    """
-    import molix.core.trainer as trainer_mod
-
-    source_path = pathlib.Path(inspect.getfile(trainer_mod))
-    tree = ast.parse(source_path.read_text())
-
-    found = False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "molix.core.hook":
-            for alias in node.names:
-                if alias.name == "Hook":
-                    found = True
-                    break
-    assert found, "trainer.py must `from molix.core.hook import Hook`"

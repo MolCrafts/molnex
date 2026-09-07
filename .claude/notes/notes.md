@@ -199,6 +199,50 @@ default and MACE with no knob at all).
 ---
 
 <!-- mol:note:topic:test-tiers-orthogonal -->
+## [2026-09-07] No static source-scanning tests (user rule)
+
+**Rule (operator, 2026-09-07).** `tests/` must not contain tests that assert on
+the **text or AST of source code, docstrings, or docs files**. A test asserts
+runtime behaviour or it does not exist. Deleted outright: every
+"package X does not import Y" AST scan, every "this method delegates to that
+helper" `inspect.getsource` / `ast.unparse` check, every banned-identifier grep
+over `src/`, every "no `.item()` on this call chain" AST walk, and every
+docstring-presence / docstring-content assertion
+(`tests/test_molix/test_io/test_docstring.py` went as a whole file). 31 tests
+across 22 files, ~800 lines.
+
+**Why they were also slow.** Five of the fast tier's six slowest tests were
+these scans, because `rglob("*")` over `src/` walks
+`src/molix/op/build*/` — thousands of CMake artifacts on a shared HPC
+filesystem. The single worst (`test_no_compiled_alias_survives_in_the_tree`)
+cost 12 s to assert a grep result.
+
+**What replaces them.** Nothing in `tests/`. Import-direction and
+banned-dependency rules are stated in CLAUDE.md and enforced by review and by
+`ruff` / `ty`; if a boundary is worth machine-checking it belongs in a lint
+rule or a `regressions/` script, not in a unit test. The two behavioural
+survivors of the sweep kept their real assertions and lost only their static
+tails (`Potentials.bind_cell` / `compile_core` guards; provenance
+`decode_with_confidence`). `test_repository_boundaries.py` keeps exactly one
+test — `find_spec("molix.data") is None` — which probes the interpreter, not a
+file.
+
+**Also moved to `slow`** (they matched the existing slow-tier definition and
+were in the fast tier by oversight): the subprocess lazy-import probe
+`test_reaching_a_spec_class_does_not_import_the_encoder` (10.6 s) and the one
+fast-tier test that actually dynamo-traces,
+`TestCompiler::test_compiled_module_produces_same_output` (6.5 s).
+
+**Measurement note.** The fast tier is 3212 tests / 181 s on **4** cores
+(`-n 4`, `OMP_NUM_THREADS=1`). The "couple of minutes on 12 workers" budget in
+the 2026-09-03 entry assumed a 12-core box; on the 4-core login node the same
+suite is ~3 min, and `-n 12` there is a 3× oversubscription that makes it
+*slower*, not faster.
+
+**Status.** active.
+
+---
+
 ## [2026-09-07] Virial / stress convention: Cauchy `σ = W/V`, shear not doubled (user rule)
 
 **Context.** Every strain path in the repo built a full 3×3 strain leaf, applied

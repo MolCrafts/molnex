@@ -13,8 +13,6 @@ narrower class was retired rather than rewritten.
 
 from __future__ import annotations
 
-import re
-import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -111,38 +109,3 @@ class TestParseFixture:
         )
         frames = parse_extxyz_frames(f)
         assert frames[0].pbc == (True, True, True)
-
-
-class TestNoASE:
-    def test_no_ase_imports_in_src(self) -> None:
-        """Package code under ``src/`` must not import ASE (or e3nn).
-
-        Extxyz I/O uses the in-tree ``molix.io.extxyz.parse_extxyz_frames`` parser.
-        Grep is the binding rule — no soft optional ASE shims either.
-        """
-        repo_root = Path(__file__).resolve().parents[3]
-        src_dir = repo_root / "src"
-        for pattern in (
-            r"^\s*(import ase|from ase)\b",
-            r"^\s*(import e3nn|from e3nn)\b",
-        ):
-            # --include=*.py: src/ also holds C++ sources and CMake build
-            # trees (src/molix/op/build*) — grepping those thousands of
-            # files made this test take ~9 s for a rule about Python imports.
-            result = subprocess.run(
-                ["grep", "-rnE", "--include=*.py", pattern, str(src_dir)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            assert result.returncode == 1, (  # grep returns 1 when no matches
-                f"Forbidden import under src/ (pattern {pattern!r}):\n{result.stdout}"
-            )
-
-
-def test_acceptance_trace_summary() -> None:
-    """Self-check: this module covers the criteria its docstring claims."""
-    expected = {"ac-006"}
-    doc = __doc__ or ""
-    found = set(re.findall(r"ac-\d{3}", doc))
-    assert expected <= found, f"missing trace: {expected - found}"
