@@ -8,7 +8,6 @@ must not be treated as authority for a new training submission.
 
 | Spec | Chain | Opened | Scope |
 |---|---|---|---|
-| [composable-a0-02-exclusions-switching](composable-a0-02-exclusions-switching.md) | composable-a0 | 2026-09-07 | Per-class `ExclusionTable`, quintic LJ switch, capacity-shaped list, fail-closed total charge (F3 FF path). |
 | [composable-a0-03-periodic-coulomb](composable-a0-03-periodic-coulomb.md) | composable-a0 | 2026-09-07 | Exact excluded-pair correction under Ewald/PME (**F1**), `bind_cell` frozen k-space, FD force + strain on the assembled `Potentials`. |
 | [composable-a0-04-manifest](composable-a0-04-manifest.md) | composable-a0 | 2026-09-07 | `ModelManifest` records, `ForceField.manifest()`, `PotentialIR.nonbonded_method` (F7). |
 | [composable-a0-05-export](composable-a0-05-export.md) | composable-a0 | 2026-09-07 | LAMMPS `hybrid/overlay lj/mdf coul/long` + `pppm` + `special_bonds`; OpenMM PME text; manifest sibling; classical parity moved under `interface/tests/` (F5). |
@@ -21,6 +20,7 @@ Design source for the chain: `.claude/notes/composable-potentials.md`
 
 | Spec or chain | Closed | Disposition |
 |---|---|---|
+| composable-a0-02-exclusions-switching | 2026-09-07 | Completed; 5/5 criteria verified (ac-001/005 impl; ac-002/004 scientific + ac-003 performance agent-auto — butane golden equality, LJ switch continuity/analytic-vs-autograd, two slow explains at 0 breaks; no bench.repo). Commit 5eacaa67: keyed NonbondedScaling + ExclusionTable (1-2 > 1-3 > 1-4, F11 fixed), quintic LJ switch, capacity-shaped pair lists, fail-closed total charge, staleness fingerprint. |
 | composable-a0-01-contracts | 2026-09-07 | Completed; 4/4 criteria verified (3 impl, 1 agent-auto from the mirrored unit tests). Commit b87e3268: InteractionContract + registry labels, contribution_energies, LJ split, absent-table raise, composition check, ParamFrame. |
 | pinet-quantization-thermal-noise-02-md-driver | 2026-09-04 | Completed; FDT O-step kick variance test + functorch force-loss path. |
 | cuet-force-doublebackward | 2026-09-04 | Completed; force-supervised double-backward (create_graph + pure-torch SH). |
