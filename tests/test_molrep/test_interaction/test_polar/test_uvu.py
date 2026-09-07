@@ -21,6 +21,27 @@ def fp64():
 
 
 class TestSparseUvuTensorProduct:
+    def test_mixed_precision_inputs_promote(self):
+        """fp32 features against an fp64 weight must widen, not raise.
+
+        The reassociated contraction uses ``F.linear`` / ``matmul``, which
+        refuse mismatched dtypes where the original ``einsum`` promoted them.
+        Polar runs an fp32 backbone with fp64 pieces, so the promotion is
+        load-bearing, not a convenience.
+        """
+        import cuequivariance as cue
+
+        tp = SparseUvuTensorProduct(
+            cue.Irreps("O3", "2x0e+2x1o"),
+            cue.Irreps("O3", "2x0e+2x1o"),
+            cue.Irreps("O3", "2x0e+2x1o"),
+        ).double()
+        x1 = torch.randn(3, tp.irreps_in1.dim, dtype=torch.float32)
+        x2 = torch.randn(3, tp.irreps_in2.dim, dtype=torch.float32)
+        out = tp(x1.double(), x2)
+        assert out.dtype == torch.float64
+        torch.testing.assert_close(out, tp(x1.double(), x2.double()), atol=1e-12, rtol=0)
+
     """Test the Polar sparse uvu product (l×l→0 and l×0→l)."""
 
     def test_l0_contraction_is_product_times_weight(self):

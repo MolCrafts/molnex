@@ -129,6 +129,13 @@ class SparseUvuTensorProduct(nn.Module):
         batch = x1.shape[0]
         out = x1.new_zeros((batch, self.irreps_out.dim))
         weight = self.weight
+        # ``einsum`` promoted a mixed-precision pair for us; ``F.linear`` and
+        # ``matmul`` below refuse one. Promote once per call, not per path.
+        common = torch.promote_types(x2.dtype, weight.dtype)
+        if weight.dtype != common:
+            weight = weight.to(common)
+        if x2.dtype != common:
+            x2 = x2.to(common)
         for s1, e1, s2, e2, so, eo, ws, we, mode, mul1, mul2, d1, path_weight in self._paths:
             scale = path_weight / math.sqrt(float(d1))
             w = weight[ws:we].reshape(mul1, mul2)
@@ -147,7 +154,7 @@ class SparseUvuTensorProduct(nn.Module):
             else:
                 a = x1[:, s1:e1].reshape(batch, d1, mul1).transpose(1, 2)
                 scalars = x2[:, s2:e2].reshape(batch, mul2)
-                mixed = torch.einsum("bv,uv->bu", scalars, w)
+                mixed = scalars @ w.transpose(0, 1)
                 contrib = (a * mixed.unsqueeze(-1) * scale).transpose(1, 2).reshape(batch, -1)
                 out[:, so:eo] = out[:, so:eo] + contrib
         return out * self.output_mask

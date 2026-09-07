@@ -257,9 +257,10 @@ def energy_forces(
     Reproduced rather than imported: the script under `scripts/` is not a
     public API, and the point is to pin the *shape* of the call the re-point
     left behind -- leaf `requires_grad_`, energy under `torch.enable_grad()`,
-    `autograd.grad` outside any compile region, and the positional order
-    `(pos, Z, edge_index, batch, num_graphs, shifts)` with `shifts=None` for a
-    non-periodic cell.
+    `autograd.grad` outside any compile region. The trailing geometry argument
+    is keyword-only (`edge_diff=`); it is left unset here, so the core derives
+    the edge vectors from `pos` itself — the non-periodic case this scenario
+    pins.
 
     Args:
         core: The public `energy_core`, per-graph energy `(B,)` out.
@@ -273,7 +274,7 @@ def energy_forces(
     """
     leaf = pos.detach().requires_grad_(True)
     with torch.enable_grad():
-        energy = core(leaf, Z, edge_index, batch, NUM_GRAPHS, None)
+        energy = core(leaf, Z, edge_index, batch, NUM_GRAPHS)
     forces = autograd_forces_from_energy(energy, leaf)
     return energy.detach(), forces.detach()
 
