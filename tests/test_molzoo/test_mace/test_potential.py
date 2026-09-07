@@ -675,6 +675,53 @@ class TestMacePotential:
         after = matpes_potential(moved)["graphs", "energy"]
         assert float((after - before).abs().max()) <= ENERGY_PARITY_ATOL
 
+    def test_virial_matches_central_differences_of_the_strained_energy(
+        self, matpes_variant: MaceMatpes, cluster: TensorDict
+    ) -> None:
+        """``W = ∂E/∂ε`` against a finite difference of this model's own energy.
+
+        The virial rides the same backward as the forces, so it costs almost
+        nothing next to the convolution — which is exactly why it needs an
+        independent oracle rather than a plausibility check. The reference
+        strains the same tensors the derivation strains, ``v @ (I + ε_sym)ᵀ``,
+        and differences the energy centrally in fp64.
+        """
+        from molpot.forcefield import ForceField
+
+        pots = ForceField("mace", units="metal").def_pairstyle(matpes_variant).to_potentials()
+        cell = torch.eye(3, dtype=torch.float64) * 12.0
+        cluster["graphs", "cell"] = cell.unsqueeze(0)
+        with torch.no_grad():
+            _, _, virial = pots.calc_energy_forces_virial(cluster.clone())
+
+        pos = cluster["atoms", "pos"].detach()
+        edge_diff = cluster["edges", "edge_diff"].detach()
+        eps = 2.0e-4
+
+        def strained_energy(delta: torch.Tensor) -> float:
+            frame = cluster.clone()
+            transform = (torch.eye(3, dtype=torch.float64) + 0.5 * (delta + delta.T)).T
+            frame["atoms", "pos"] = pos @ transform
+            frame["graphs", "cell"] = (cell @ transform).unsqueeze(0)
+            # The energy reads its geometry from the imaged edge displacements,
+            # so the reference has to strain exactly what the derivation
+            # strains — positions alone leave the energy unchanged.
+            frame["edges", "edge_diff"] = edge_diff @ transform
+            with torch.no_grad():
+                return float(pots.calc_energy(frame).sum())
+
+        # `_symmetrize_strain_grad` reports shear under the convention that
+        # perturbing ε_αβ moves ε_βα with it (matching Sonata's finite
+        # difference), so an off-diagonal is twice ∂E/∂ε_αβ. The diagonal is
+        # untouched. Both halves are pinned here: the doubling is the part
+        # that silently disagrees with anyone applying σ = W/V from a paper.
+        for i, j in ((0, 0), (1, 1), (2, 2), (0, 1), (0, 2)):
+            delta = torch.zeros(3, 3, dtype=torch.float64)
+            delta[i, j] = eps
+            fd = (strained_energy(delta) - strained_energy(-delta)) / (2 * eps)
+            expected = fd if i == j else 2.0 * fd
+            assert virial[i, j].item() == pytest.approx(expected, abs=2e-4, rel=1e-3)
+
     def test_forces_match_central_differences(
         self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
