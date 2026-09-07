@@ -1,111 +1,51 @@
 """Unified MACE energy/force potential for the foundation-model variants.
 
-An *interatomic potential* is a function from an arrangement of atoms — their
-chemical element numbers ``Z_i`` and Cartesian positions ``r_i``, in ångström
-(Å) — to the potential energy ``E`` of that arrangement, in electronvolt (eV),
-and from there to the force on each atom, which is the negative gradient of
-that energy::
+One host class for every MACE foundation variant; which variant it is comes
+entirely from the :class:`~molzoo.mace.spec.MACESpec` it is built from — the
+MatPES density stack or the OMOL charge/spin-conditioned residual stack.
 
-    F_i = -∂E/∂r_i          [eV/Å]
-
-That sign is the repo-wide convention (``molix.schema.FORCES_KEY``). MACE
-*learns* such a function: it describes each atom's neighbourhood by the
-displacement vectors to the neighbours inside a cutoff radius ``r_max`` and
-turns that description into a per-atom energy through several rounds of
-*message passing* — each round lets an atom mix in features of its neighbours.
-A *foundation* variant is one whose weights were fitted once on a large,
-chemically broad dataset and are then used unchanged; molnex ships two, MatPES
-(periodic materials, arXiv:2503.04070) and OMol (molecules, additionally
-conditioned on the total charge and total spin of the system).
-
-Per *graph* ``g`` — one graph is one molecule, or one periodic cell, inside a
-batch of ``B`` of them — this class evaluates exactly::
+Per graph ``g`` (one molecule or one periodic cell)::
 
     E_g = Σ_{i∈g} E0(Z_i)  +  Σ_{i∈g} (scale · ε_i + shift)     [eV]
     ε_i = ZBL_i + Σ_layer readout_layer(h_i^layer)              [eV]
 
-``E0(Z)`` is the frozen isolated-atom reference energy of element ``Z``,
-``h_i^layer`` is atom ``i``'s feature vector after each message-passing layer,
-``ZBL_i`` is the short-range Ziegler–Biersack–Littmark nuclear repulsion —
-present only when the spec asks for it (``pair_repulsion="zbl"``, the MatPES
-default; identically zero otherwise) — and ``scale`` / ``shift`` are the fitted
-affine normalisation of the learned part, applied *per atom*
-(:class:`molpot.heads.rescale.GlobalRescale`). MatPES reads out every layer, so
-the inner sum runs over all of them; OMol reads out the last layer only, so its
-inner sum has a single term, and it adds one further per-atom contribution from
-its charge/spin embedding next to ``E0`` — that is, *outside* the
-``scale``/``shift`` normalisation. The forces are never hand-coded: they are
-the autograd derivative of this same ``E_g``.
-
-:class:`MacePotential` is the one energy + force host for every MACE
-foundation variant. Which variant it is comes entirely from the
-:class:`~molzoo.mace.spec.MACESpec` it is built from — the MatPES density
-stack (arXiv:2503.04070) or the OMOL charge/spin-conditioned residual stack —
-so the two pre-cutover flat modules that each duplicated this forward
-(deleted in the restructure's wiring step, 06-wire; see git history) collapse
-into this single class.
+``E0`` is the frozen isolated-atom reference, ``ZBL`` the short-range nuclear
+repulsion (only with ``pair_repulsion="zbl"``, zero otherwise), and
+``scale`` / ``shift`` the fitted per-atom normalisation. MatPES reads out every
+layer; OMol reads out the last one and adds its charge/spin embedding next to
+``E0``, outside the normalisation. Forces are the autograd derivative of this
+same energy, ``F_i = -∂E/∂r_i`` (eV/Å, the repo-wide sign).
 
 It **inherits** :class:`~molzoo.mace.encoder.MACEEncoder` rather than holding
 one, mirroring upstream's ``ScaleShiftMACE(MACE)``: holding an encoder would
-prefix every key of the ``state_dict`` (PyTorch's flat ``name -> tensor`` dump
-of a model's weights) with ``encoder.``, and an official checkpoint would stop
-loading without a key rewrite.
+prefix every ``state_dict`` key with ``encoder.`` and official checkpoints
+would stop loading.
 
 Two seams, deliberately coexisting:
 
 ``energy_core(positions, Z, edge_index, batch, num_graphs, …) -> (B,)``
-    The **flat, public, compilable** one. Raw tensors in, per-graph energy in
-    eV out; no ``TensorDict`` (the nested batch container of the post-collate
-    schema, see CLAUDE.md) and no ``.item()`` *host sync* — reading a tensor
-    value back into Python makes the CPU wait for the GPU and forces
-    TorchDynamo, the tracer behind ``torch.compile``, to cut the traced region
-    in two (a *graph break*, which costs back the launch overhead compilation
-    was meant to remove). ``num_graphs`` is an argument for exactly that
-    reason: one traced graph, no break. This is the entry a molecular-dynamics
-    (MD) driver or an engine export binds to.
-
-    The seam performs **no element validation**. The check host-syncs (see
-    :meth:`~molzoo.mace.encoder.MACEEncoder.validate_elements`), so it cannot
-    live inside a traced region; whoever drives the flat seam directly —
-    ``torch.compile``, ``torch.export``, ``molix.engine.export_for_lammps`` —
-    calls ``validate_elements`` once itself beforehand. On the batch path
-    :meth:`MacePotential._write_energy` is that caller, on its first *eager*
-    call.
-
-    :meth:`MacePotential.compile_core` installs a compiled build of this same
-    method, which is what makes the compiled path exist at all. That build
-    covers **first-order, cell-bound, B = 1 MD inference only**: forces come
-    from one ``torch.autograd.grad`` *outside* the compiled region, and the
-    second backward a force-supervised training loss needs is not compilable
-    under AOTAutograd (spec ``cuet-force-doublebackward``) — training keeps
-    running the eager core.
+    Flat, public, compilable. Raw tensors in, per-graph energy out; no
+    ``TensorDict`` and no ``.item()``, so a traced region stays in one graph —
+    hence ``num_graphs`` as an argument. It performs **no element validation**:
+    that check host-syncs, so whoever drives this seam calls
+    :meth:`~molzoo.mace.encoder.MACEEncoder.validate_elements` once beforehand.
+    :meth:`MacePotential.compile_core` installs a compiled build of it, scoped
+    to first-order, cell-bound, B=1 inference — the force derivative stays
+    outside the compiled region.
 
 ``_write_energy(batch) -> batch``
-    The **protocol hook**, one level up, on the batch schema.
-    ``molpot.derivation.protocol.call_energy`` prefers ``model._write_energy``,
-    so implementing it wires MACE into ``EnergyReadout`` / ``ForceReadout`` for
-    free. It reads the tensors off the post-collate batch, calls
-    :meth:`MacePotential.energy_core`, and writes the result back through
-    ``protocol.write_energy`` — **without** detaching either the positions or
-    the energy. Detaching a tensor cuts it out of the autograd graph; an outer
-    readout session may have created the position *leaf* (the tensor autograd
-    differentiates with respect to) itself, so a detach here would sever
-    ``F = -∂E/∂r`` before anyone takes the derivative. (The flat models
-    detached inside their ``energy_forces(compute_forces=False)``; that duty
-    belongs to :class:`molpot.forcefield.potentials.Potentials`, not to the
-    potential.)
+    The protocol hook on the batch schema, preferred by
+    ``molpot.derivation.protocol.call_energy``. It detaches neither positions
+    nor energy: an outer readout may own the position leaf, and a detach here
+    would sever ``F = -∂E/∂r`` before anyone differentiates.
 
-Every branch — forces on/off, charge/spin conditioning, per-layer vs final
-readout — is resolved once in ``__init__`` into a bound attribute, and
-``forward`` is a single dispatch through ``self._pipeline``. There is no
-``compute_forces`` flag on any public signature: "energy only" is a
-*construction* (``MacePotential(spec, compute_forces=False)``), which is also
-what ``molpot.forcefield.potentials.Potentials.calc_energy`` already assumes.
+Every branch — forces on/off, conditioning, per-layer vs final readout — is
+resolved once in ``__init__`` into a bound attribute, and ``forward`` is a
+single dispatch through ``self._pipeline``. There is no ``compute_forces``
+flag on any public signature: energy-only is a *construction*.
 
-Units: ``graphs.energy`` in eV ``(B,)``, ``atoms.forces`` in eV/Å ``(N, 3)``,
-positions and ``r_max`` in Å. The bridge to the MD integrator's unit system
-(mass in atomic mass units, length in Å, time in fs, hence energy in
-amu·Å²/fs²) lives in ``molix.md.forcefield``; nothing here converts units.
+Units: ``graphs.energy`` eV ``(B,)``, ``atoms.forces`` eV/Å ``(N, 3)``,
+positions and ``r_max`` in Å. Nothing here converts units.
 
 Reference:
     Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
@@ -577,14 +517,6 @@ class MacePotential(MACEEncoder):
         training) is not compilable under AOTAutograd, spec
         ``cuet-force-doublebackward``.
 
-        The first six parameters keep the names and positions of the flat
-        MatPES model's ``_compute_energy``
-        (``src/molzoo/mace_matpes.py:229-237`` at 0e05959, before deletion) so
-        those call sites move over by a pure rename. The flat OMOL model's core
-        (``src/molzoo/mace_omol.py:228-237`` at 0e05959) took ``total_charge`` /
-        ``total_spin`` positionally instead of ``num_graphs`` and does **not**
-        line up.
-
         Args:
             positions: Atom positions ``(N, 3)`` in Å.
             Z: Atomic numbers ``(N,)``; must lie inside the element table (see
@@ -915,6 +847,46 @@ def _resolve_official(path: Path, config: str | Path | None) -> tuple[Path, dict
     return path, official
 
 
+#: Fields every variant reads from an official config, with the upstream
+#: spellings seen for each. The first alias present wins; a field the config
+#: does not carry is dropped rather than passed as ``None``, so the spec's own
+#: default stands.
+_OFFICIAL_ALIASES: dict[str, tuple[str, ...]] = {
+    "r_max": ("r_max",),
+    "num_bessel": ("num_bessel",),
+    "num_interactions": ("num_interactions",),
+    "correlation": ("correlation",),
+    "l_max": ("max_ell", "l_max"),
+    "scale": ("atomic_inter_scale", "scale"),
+    "shift": ("atomic_inter_shift", "shift"),
+}
+
+
+def official_ctor(official: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """Constructor arguments shared by every MACE variant, plus the caller's.
+
+    Args:
+        official: The archive's config mapping.
+        extra: Variant-specific arguments; ``None`` values are dropped, the
+            same way an absent common field is.
+
+    Returns:
+        Keyword arguments for the product class. Caller overrides are applied
+        by the caller *after* this, so an explicit ``None`` from a user (say
+        ``energy_dtype=None``) still reaches the constructor.
+    """
+    ctor: dict[str, Any] = {
+        "atomic_numbers": official["atomic_numbers"],
+        "atomic_energies": official["atomic_energies"],
+    }
+    for name, aliases in _OFFICIAL_ALIASES.items():
+        value = next((official[a] for a in aliases if official.get(a) is not None), None)
+        if value is not None:
+            ctor[name] = value
+    ctor.update({key: value for key, value in extra.items() if value is not None})
+    return ctor
+
+
 def _require_irreps(official: dict[str, Any]) -> tuple[int, int, int]:
     absent = [key for key in ("hidden_irreps", "MLP_irreps") if key not in official]
     if absent:
@@ -999,23 +971,14 @@ class MaceMatpes(MacePotential):
                 "so the load would not object to the surplus transform"
             )
         num_features, max_hidden_l, mlp_dim = _require_irreps(official)
-        ctor: dict[str, Any] = dict(
-            atomic_numbers=official["atomic_numbers"],
-            atomic_energies=official["atomic_energies"],
-            r_max=official.get("r_max"),
-            num_bessel=official.get("num_bessel"),
-            num_polynomial_cutoff=official.get("num_polynomial_cutoff"),
-            l_max=official.get("max_ell", official.get("l_max")),
+        ctor = official_ctor(
+            official,
             num_features=num_features,
             max_hidden_l=max_hidden_l,
-            num_interactions=official.get("num_interactions"),
-            correlation=official.get("correlation"),
             mlp_dim=mlp_dim,
+            num_polynomial_cutoff=official.get("num_polynomial_cutoff"),
             radial_mlp=official.get("radial_MLP", official.get("radial_mlp")),
-            scale=official.get("atomic_inter_scale", official.get("scale")),
-            shift=official.get("atomic_inter_shift", official.get("shift")),
         )
-        ctor = {k: v for k, v in ctor.items() if v is not None}
         ctor.update(kwargs)
         return cls(**ctor)
 
@@ -1079,20 +1042,11 @@ class MaceOmol(MacePotential):
 
     @classmethod
     def _from_official(cls, official: dict[str, Any], **kwargs: Any) -> MaceOmol:
-        ctor: dict[str, Any] = dict(
-            atomic_numbers=official["atomic_numbers"],
-            atomic_energies=official["atomic_energies"],
-            r_max=official.get("r_max"),
-            num_bessel=official.get("num_bessel"),
-            num_interactions=official.get("num_interactions"),
-            l_max=official.get("max_ell", official.get("l_max")),
+        ctor = official_ctor(
+            official,
             num_features=official.get("num_features"),
-            correlation=official.get("correlation"),
             mlp_dim=official.get("mlp_dim"),
             edge_channels=official.get("edge_channels"),
-            scale=official.get("atomic_inter_scale", official.get("scale")),
-            shift=official.get("atomic_inter_shift", official.get("shift")),
         )
-        ctor = {k: v for k, v in ctor.items() if v is not None}
         ctor.update(kwargs)
         return cls(**ctor)

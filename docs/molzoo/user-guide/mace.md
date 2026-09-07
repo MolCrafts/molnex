@@ -99,8 +99,8 @@ model = MacePolar.load(
 ```
 
 Only converted weights are installed. Raw e3nn contraction weights are rejected:
-concatenating them is not the required CG basis projection. The legacy
-`e3nn2cueq` name is deprecated and no longer pretends to perform a conversion.
+concatenating them is not the required CG basis projection. Nothing in molnex
+converts an e3nn basis — run the version-pinned official converter out of tree.
 Pickle loading requires `trusted=True`; import stubs are not a security sandbox.
 Use tensor-only state plus JSON for deployment from untrusted sources.
 

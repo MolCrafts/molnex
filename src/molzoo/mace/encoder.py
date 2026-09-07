@@ -15,8 +15,7 @@ into an energy — and differentiating it — is the caller's job.
 Hot-path discipline: every branch is frozen into a plain attribute (or the
 presence of an optional submodule) by ``__init__``. The configuration object
 survives only as ``self._spec``, for provenance; reading a pydantic attribute
-inside a layer loop is a dynamo graph break (cf. ``src/molzoo/mace_matpes.py:118``
-at 0e05959, before deletion).
+inside a layer loop is a dynamo graph break.
 
 Reference:
     Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
@@ -209,7 +208,7 @@ class MACEEncoder(nn.Module):
         # ---- interaction / product stack ----
         # The density family carries per-element symmetric-contraction weights;
         # the OMOL residual family shares one set across elements
-        # (``num_elements=1``, mace_omol.py:179).
+        # (``num_elements=1``).
         product_elements = 1 if is_residual else n_el
         self.interactions = nn.ModuleList()
         self.products = nn.ModuleList()

@@ -263,7 +263,6 @@ REQUIRED_SUBPACKAGE_NAMES: frozenset[str] = frozenset(
         "MaceOmol",
         "MacePolar",
         "MacePotential",
-        "e3nn2cueq",
     }
 )
 

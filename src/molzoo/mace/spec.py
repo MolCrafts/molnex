@@ -122,8 +122,7 @@ class MACESpec(BaseModel):
 class MACEMatpesSpec(MACESpec):
     """Configuration of the MACE-MatPES foundation model.
 
-    Defaults reproduce ``MACEMatpes.__init__`` of the pre-cutover flat module
-    (``src/molzoo/mace_matpes.py``, deleted in 06-wire; see git history),
+    Defaults reproduce the released MatPES architecture,
     including its materialised ``radial_mlp`` of ``[64, 64, 64]``.
 
     Attributes:
@@ -159,8 +158,7 @@ class MACEMatpesSpec(MACESpec):
 class MACEOMolSpec(MACESpec):
     """Configuration of the MACE-OMOL foundation model.
 
-    Defaults reproduce ``MACEOMol.__init__`` of the pre-cutover flat module
-    (``src/molzoo/mace_omol.py``, deleted in 06-wire; see git history).
+    Defaults reproduce the released OMOL architecture.
     ``use_fallback`` is not a constructor argument there — the flat model
     hard-codes the fused cuEquivariance path, i.e. ``False``.
 

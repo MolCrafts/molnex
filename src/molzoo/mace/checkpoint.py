@@ -1,85 +1,39 @@
 """Official MACE checkpoint → molnex ``state_dict``: one key remap for both families.
 
-MACE is a message-passing neural network for the potential energy of a set of
-atoms (arXiv:2206.07697; the energy expression molnex evaluates is written out
-in :mod:`molzoo.mace.potential`). An official MACE checkpoint is a *fitted
-potential energy surface*: a ``state_dict`` — PyTorch's flat ``name -> tensor``
-dump of a model's weights — trained once, on a large dataset, and then used
-unchanged. Loading one into molnex is a **dialect translation**: the same
-numbers, under the names the upstream module tree happened to give them. This
-module owns that translation and nothing else — no unit conversion (both sides
-use eV for energies, eV/Å for forces, Å for ``r_max`` and positions, and eV/atom
-for the isolated-atom reference energies), no architecture inference, no saving
-direction.
+Loading an official checkpoint is a **dialect translation**: the same numbers
+under the names upstream's module tree gave them. This module owns that and
+nothing else — no unit conversion (both sides use eV, eV/Å, Å), no
+architecture inference, no saving direction.
 
-The checkpoints it reads have already been converted, out of tree, into the
-layout of *cuEquivariance* — NVIDIA's GPU library for the equivariant tensor
-algebra MACE is built from, abbreviated ``cueq`` in key names and throughout
-this module. That conversion (``mace.cli.convert_e3nn_cueq``) is an offline
-step; molnex never imports ``mace-torch``.
+The checkpoints it reads are already in *cuEquivariance* layout (``cueq`` in
+key names). That conversion (``mace.cli.convert_e3nn_cueq``) is an offline step
+run out of tree; molnex never imports ``mace-torch``.
 
-:class:`CheckpointRemap` replaces the two hand-copied loaders that the
-pre-cutover flat modules carried (deleted in 06-wire; see git history), which
-had drifted into two byte-identical implementations of three ideas:
+:class:`CheckpointRemap` is three ideas:
 
 1. skip the entries cuEquivariance rebuilds anyway — symbolic graph constants
-   (``".graph.c" in key``) and *irrep* masks (``key.endswith("output_mask")``).
-   An irrep, short for irreducible representation, labels how a feature
-   transforms when the molecule is rotated (a scalar stays put, a vector turns
-   with it, and so on); the mask records which of those an operation emits, and
-   cuEquivariance derives it from the operation's own definition;
+   (``".graph.c" in key``) and irrep masks (``key.endswith("output_mask")``);
 2. rename by **longest matching prefix**, with ``None`` meaning "drop" (the
    value is rebuilt from a constructor argument, or is not persistent);
 3. normalize scalar ranks and cuEq Linear's optional singleton shared-weight
-   axis. No arbitrary equal-numel reshape and no CG basis conversion.
+   axis — never an arbitrary equal-numel reshape, never a CG basis conversion.
 
-The **only** genuine difference between the two shipped families — MatPES,
-fitted on periodic materials, and OMol, fitted on molecules — is what an
-unhoused checkpoint key means, and that is the single knob ``on_unexpected``:
-MatPES raises (a key with no home means the mapping is stale), OMol returns the
-list (that family ships auxiliary heads this port deliberately does not model).
+The only genuine difference between the two shipped families is what an
+unhoused key means, and that is the single knob ``on_unexpected``: MatPES
+raises (a homeless key means the mapping is stale), OMol returns the list (that
+family ships auxiliary heads this port does not model).
 
-Strictness is *not* on the knob
-------------------------------
+**Strictness is not on that knob.** Under both policies an ``nn.Parameter``
+the checkpoint does not fill, or a genuine shape disagreement, raises: a
+silently dropped tensor produces a model that runs, looks sane and is quietly
+wrong. "Learnable" therefore means membership in ``model.named_parameters()``
+and never a ``.weight`` / ``.bias`` name pattern — that shortcut once excused
+``bessel.freqs``, kept molnex's analytic values over the checkpoint's, and put
+a 2.2e-7 Å⁻¹ offset straight into the energy parity residual
+(``src/molzoo/specs/mace_omol.md`` §7.1).
 
-Under both policies, an ``nn.Parameter`` the checkpoint does not fill, or a
-genuine shape disagreement, raises. Two incidents in this repo are why. Both
-predate this module and their original line numbers no longer resolve (the same
-step that created this file trimmed those two loaders to wrappers), so they are
-quoted here rather than cited by anchor:
-
-* The doctrine, stated by ``load_matpes_state_dict``
-  (``src/molzoo/mace_matpes.py``, lines 405-410 before the trim; the sentence
-  still stands in that function's docstring today): "a silently dropped tensor
-  is the failure mode that produces a model which runs, looks sane, and is
-  quietly wrong". Such a model does not crash; it reports plausible energies
-  and forces that are simply not the fitted surface.
-* The ``bessel.freqs`` incident in ``load_omol_state_dict``
-  (``src/molzoo/mace_omol.py``, lines 437-439 before the trim; written up in
-  ``src/molzoo/specs/mace_omol.md`` §7.1) is that doctrine defeated by a
-  shortcut. MACE expands every interatomic distance ``r`` in a *Bessel* radial
-  basis — the functions ``sin(ω_n r) / r``, whose frequencies ``ω_n`` start
-  from the analytic values ``nπ/r_max`` (units Å⁻¹) and are declared trainable
-  (an ``nn.Parameter``); molnex holds them as ``bessel.freqs``. The official
-  OMOL checkpoint stores them as the fp32 evaluation of that analytic init
-  (bit-for-bit; ≤1 fp32 ulp, max 2.2e-7 Å⁻¹, from molnex's fp64 re-derivation
-  — measured 2026-08-09, see ``src/molzoo/specs/mace_omol.md`` §7.1). The
-  check for "was every learnable tensor filled?" used a ``.weight`` /
-  ``.bias`` **name suffix** heuristic, which silently excused that parameter,
-  since it ends in neither, so the checkpoint's values were dropped and the
-  fp64 analytic ones stayed — a ~2.2e-7 Å⁻¹ offset that went straight into
-  the reported energy parity residual (7.0e-7 eV). Bit-exactness against the
-  official surface requires the checkpoint's values regardless of their
-  provenance. Hence: *learnable* means exactly ``nn.Parameter``, i.e.
-  membership in ``model.named_parameters()``, and never a name pattern.
-
-Both lists returned by :meth:`CheckpointRemap.load` are **sorted**. The flat
-OMol loader handed back torch's ``unexpected_keys`` in checkpoint-iteration
-order; sorting is a deliberate determinism normalisation, so a diff of two
-loader reports cannot move on dict ordering alone. The remap tables themselves
-(:data:`MATPES_KEY_REMAP`, :data:`OMOL_KEY_REMAP`) are carried over key-for-key
-from those two modules — their content is a chain invariant of the
-``mace-subpackage-restructure`` spec chain and is not edited here.
+Both lists returned by :meth:`CheckpointRemap.load` are sorted, so a diff of
+two loader reports cannot move on dict ordering alone.
 
 Reference:
     Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural

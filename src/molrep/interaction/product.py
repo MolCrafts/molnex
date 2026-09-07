@@ -10,9 +10,8 @@ Exposed here:
 - ``irreps_from_l_max`` / ``sh_irreps_from_l_max``: irreps-string builders
   shared by MACE, Allegro and the MACE readouts.
 
-The MACE-specific :class:`~molrep.interaction.mace.conv.ConvTP` wrapper moved to
-:mod:`molrep.interaction.mace.conv`; it is re-exported at the bottom of this
-module so ``from molrep.interaction.product import ConvTP`` keeps working.
+The MACE-specific :class:`~molrep.interaction.mace.conv.ConvTP` wrapper lives in
+:mod:`molrep.interaction.mace.conv`.
 
 Model-specific descriptor builders (e.g. Allegro's per-channel ``"u,iu,ju,ku+ijk"``
 kernel) live in the corresponding ``molzoo`` module, not here.
@@ -192,11 +191,3 @@ class EquivariantPolynomialTP(nn.Module):
             output_shapes=sizes_out,
             output_indices=output_indices,
         )[0]
-
-
-# Back-compat re-export of the MACE convolution, moved to
-# ``molrep.interaction.mace.conv`` by mace-subpackage-restructure-01. Kept at the
-# module tail on purpose: ``mace.block`` imports the irreps helpers above from
-# here, so this module must be fully populated before the mace package is pulled
-# in. Removed in 06-wire.
-from molrep.interaction.mace.conv import ConvTP, ConvTPSpec  # noqa: E402,F401

@@ -8,7 +8,6 @@ require explicit trust; the stubs are an import aid, NOT a security sandbox.
 from __future__ import annotations
 
 import pickle
-import warnings
 from pathlib import Path
 from typing import Any, Mapping, cast
 
@@ -228,14 +227,3 @@ def read_archive(
             "state_dict plus config; concatenation does not convert the CG basis"
         )
     return {"state": dict(state), "config": dict(config)}
-
-
-def e3nn2cueq(source: Any, **kwargs: Any) -> dict[str, Any]:
-    """Deprecated archive-reader alias; this function does NOT convert bases."""
-    warnings.warn(
-        "e3nn2cueq is an archive reader, not a converter; use MacePotential.load "
-        "with official cuEq-converted weights",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return read_archive(source, **kwargs)

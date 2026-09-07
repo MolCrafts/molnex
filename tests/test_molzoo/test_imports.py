@@ -32,8 +32,6 @@ from pathlib import Path
 
 import pytest
 
-import molrep.embedding.mace
-import molrep.interaction.mace.block
 import molzoo
 import molzoo.mace
 
@@ -178,23 +176,3 @@ class TestPublicImportSurface:
         catches a ``dir()`` that grew a name ``__all__`` does not export.
         """
         assert set(dir(molzoo.mace)) == set(molzoo.mace.__all__)
-
-
-class TestMolzooMaceReexports:
-    """``molzoo.mace`` re-exports the promoted embedding / interaction blocks."""
-
-    def test_embedding_block_is_same_object(self) -> None:
-        """``molzoo.mace.EmbeddingBlock`` must be the promoted molrep class."""
-        assert molzoo.mace.EmbeddingBlock is molrep.embedding.mace.EmbeddingBlock
-
-    def test_embedding_spec_is_same_object(self) -> None:
-        """``molzoo.mace.EmbeddingSpec`` must be the promoted molrep class."""
-        assert molzoo.mace.EmbeddingSpec is molrep.embedding.mace.EmbeddingSpec
-
-    def test_interaction_block_is_same_object(self) -> None:
-        """``molzoo.mace.InteractionBlock`` must be the promoted molrep class."""
-        assert molzoo.mace.InteractionBlock is molrep.interaction.mace.block.InteractionBlock
-
-    def test_interaction_spec_is_same_object(self) -> None:
-        """``molzoo.mace.InteractionSpec`` must be the promoted molrep class."""
-        assert molzoo.mace.InteractionSpec is molrep.interaction.mace.block.InteractionSpec

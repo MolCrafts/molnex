@@ -26,7 +26,7 @@ mace-subpackage-restructure-02-core:
 | `potential` | `MacePotential` plus product classes `MaceMatpes` / `MaceOmol` |
 | `polar` | `MacePolar` |
 | `checkpoint` | `CheckpointRemap` plus internal key tables |
-| `utils` | strict official archive reader; `e3nn2cueq` is a deprecated reader alias, not a basis converter |
+| `utils` | strict official archive reader — it never converts an e3nn basis |
 | `research` | freely-configurable research `MACE` encoder |
 
 Public construction is flat and product-owned::

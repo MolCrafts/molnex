@@ -9,8 +9,8 @@ Public construction is the product class with a flat ``__init__``::
 
 The spec objects stay as internal validators assembled inside those
 constructors. Official archives are remapped by ``MaceXX.load``; there is no
-public ``*_REMAP`` constant and no convert CLI. ``e3nn2cueq`` is a deprecated
-archive-reader alias, not a basis converter; use official cuEq-converted weights.
+public ``*_REMAP`` constant and no convert CLI. Weights must already be the
+official cuEq-converted ones — nothing here converts an e3nn basis.
 
 Reference:
     Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
@@ -23,13 +23,10 @@ from typing import TYPE_CHECKING
 from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACEPolarSpec, MACESpec
 
 if TYPE_CHECKING:
-    from molrep.embedding.mace import EmbeddingBlock, EmbeddingSpec
-    from molrep.interaction.mace.block import InteractionBlock, InteractionSpec
     from molzoo.mace.checkpoint import CheckpointRemap
     from molzoo.mace.polar import MacePolar
     from molzoo.mace.potential import MaceMatpes, MaceOmol, MacePotential
     from molzoo.mace.research import MACE, MACEResearchSpec
-    from molzoo.mace.utils import e3nn2cueq
 
 _LAZY = {
     "MACE": "molzoo.mace.research",
@@ -39,19 +36,10 @@ _LAZY = {
     "MaceOmol": "molzoo.mace.potential",
     "MacePolar": "molzoo.mace.polar",
     "CheckpointRemap": "molzoo.mace.checkpoint",
-    "e3nn2cueq": "molzoo.mace.utils",
-    "EmbeddingBlock": "molrep.embedding.mace",
-    "EmbeddingSpec": "molrep.embedding.mace",
-    "InteractionBlock": "molrep.interaction.mace.block",
-    "InteractionSpec": "molrep.interaction.mace.block",
 }
 
 __all__ = [
     "CheckpointRemap",
-    "EmbeddingBlock",
-    "EmbeddingSpec",
-    "InteractionBlock",
-    "InteractionSpec",
     "MACE",
     "MACEMatpesSpec",
     "MACEOMolSpec",
@@ -62,7 +50,6 @@ __all__ = [
     "MaceOmol",
     "MacePolar",
     "MacePotential",
-    "e3nn2cueq",
 ]
 
 

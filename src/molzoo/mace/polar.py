@@ -41,7 +41,7 @@ from molrep.readout.mace import NonLinearBiasReadout
 from molzoo.mace.checkpoint import polar_keys
 from molzoo.mace.encoder import _irreps
 from molzoo.mace.geometry import edge_lengths, edge_vectors
-from molzoo.mace.potential import MacePotential, _energy_table, _parse_irreps
+from molzoo.mace.potential import MacePotential, _energy_table, _parse_irreps, official_ctor
 from molzoo.mace.spec import MACEPolarSpec
 
 
@@ -406,22 +406,14 @@ class MacePolar(MacePotential):
             raise KeyError(
                 "official Polar config requires hidden_irreps and MLP_irreps (or explicit widths)"
             )
-        ctor: dict[str, Any] = dict(
-            atomic_numbers=official["atomic_numbers"],
-            atomic_energies=official["atomic_energies"],
-            r_max=official.get("r_max"),
-            num_bessel=official.get("num_bessel"),
+        ctor = official_ctor(
+            official,
             num_polynomial_cutoff=official.get("num_polynomial_cutoff"),
-            l_max=official.get("max_ell", official.get("l_max")),
             num_features=num_features,
             max_hidden_l=max_hidden_l,
-            num_interactions=official.get("num_interactions"),
-            correlation=official.get("correlation"),
             mlp_dim=mlp_dim,
             edge_channels=official.get("edge_channels"),
             radial_mlp=official.get("radial_MLP", official.get("radial_mlp")),
-            scale=official.get("atomic_inter_scale", official.get("scale")),
-            shift=official.get("atomic_inter_shift", official.get("shift")),
             num_recursion_steps=official.get("num_recursion_steps"),
             multipole_lmax=official.get("multipole_lmax"),
             multipole_sigma=official.get("multipole_sigma"),
@@ -434,6 +426,5 @@ class MacePolar(MacePotential):
             electrostatic_self_interaction=official.get("include_electrostatic_self_interaction"),
             field_self_interaction=official.get("field_si"),
         )
-        ctor = {k: v for k, v in ctor.items() if v is not None}
         ctor.update(kwargs)
         return cls(**ctor)

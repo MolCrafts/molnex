@@ -143,8 +143,7 @@ class MACE(TensorDictModuleBase):
 
         # Frozen on the hot path: reading ``self.config.num_interactions`` in
         # ``forward`` is a pydantic attribute lookup inside the layer loop, i.e.
-        # a dynamo graph break (cf. ``src/molzoo/mace_matpes.py:118`` at
-        # 0e05959, before deletion). ``self.config`` is kept for provenance
+        # a dynamo graph break. ``self.config`` is kept for provenance
         # only and must not be read by ``forward``.
         self.num_interactions = num_interactions
 
