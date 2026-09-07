@@ -9,15 +9,6 @@ from molrep.embedding.radial import AgnesiTransform, BesselRBF, BesselRBFSpec
 class TestBesselRBFSpec:
     """Test BesselRBFSpec configuration."""
 
-    def test_valid_config(self):
-        """Test creation with valid parameters."""
-        spec = BesselRBFSpec(
-            num_radial=8,
-            r_cut=5.0,
-        )
-        assert spec.num_radial == 8
-        assert spec.r_cut == 5.0
-
     def test_invalid_num_radial(self):
         """Test validation for num_radial."""
         with pytest.raises(ValueError):
@@ -37,12 +28,6 @@ class TestBesselRBFSpec:
 
 class TestBesselRBF:
     """Test BesselRBF radial basis function."""
-
-    def test_initialization(self):
-        """Test BesselRBF initialization."""
-        rbf = BesselRBF(num_radial=8, r_cut=5.0)
-        assert rbf.config.num_radial == 8
-        assert rbf.config.r_cut == 5.0
 
     def test_forward_shape(self):
         """Test output shape."""

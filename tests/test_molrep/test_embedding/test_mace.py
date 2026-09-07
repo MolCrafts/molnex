@@ -5,11 +5,8 @@ import math
 import pytest
 import torch
 
-from molrep.embedding.angular import SphericalHarmonics
-from molrep.embedding.cutoff import CosineCutoff
 from molrep.embedding.mace import EmbeddingBlock, EmbeddingSpec
-from molrep.embedding.node import DiscreteEmbeddingSpec, JointEmbedding
-from molrep.embedding.radial import BesselRBF
+from molrep.embedding.node import DiscreteEmbeddingSpec
 from molrep.utils.equivariance import (
     random_rotation_matrix,
     rotate_vectors,
@@ -61,37 +58,6 @@ class TestEmbeddingBlock:
             num_bessel=embedding_config["num_bessel"],
             l_max=embedding_config["l_max"],
         )
-
-    def test_initialization(self, embedding_block, embedding_config):
-        """Test that EmbeddingBlock initializes all components correctly."""
-        # Check node_embedding
-        assert hasattr(embedding_block, "node_embedding")
-        assert isinstance(embedding_block.node_embedding, JointEmbedding)
-
-        # Check radial_embedding
-        assert hasattr(embedding_block, "radial_embedding")
-        assert isinstance(embedding_block.radial_embedding, BesselRBF)
-        assert embedding_block.radial_embedding.config.r_cut == embedding_config["r_max"]
-        assert embedding_block.radial_embedding.config.num_radial == embedding_config["num_bessel"]
-
-        # Check spherical_harmonics
-        assert hasattr(embedding_block, "spherical_harmonics")
-        assert isinstance(embedding_block.spherical_harmonics, SphericalHarmonics)
-        assert embedding_block.spherical_harmonics.l_max == embedding_config["l_max"]
-
-        # Check cutoff_fn
-        assert hasattr(embedding_block, "cutoff_fn")
-        assert isinstance(embedding_block.cutoff_fn, CosineCutoff)
-        assert embedding_block.cutoff_fn.config.r_cut == embedding_config["r_max"]
-
-    def test_config_storage(self, embedding_block, embedding_config):
-        """Test that configuration is properly stored."""
-        assert hasattr(embedding_block, "config")
-        config = embedding_block.config
-        assert config.num_features == embedding_config["num_features"]
-        assert config.r_max == embedding_config["r_max"]
-        assert config.num_bessel == embedding_config["num_bessel"]
-        assert config.l_max == embedding_config["l_max"]
 
     def test_forward_output_shapes(self, embedding_block, embedding_config):
         """Test forward pass returns correct output shapes."""

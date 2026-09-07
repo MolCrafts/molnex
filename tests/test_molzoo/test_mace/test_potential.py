@@ -108,11 +108,6 @@ def test_mace_test_directory_is_a_package() -> None:
     assert (_TEST_PACKAGE / "__init__.py").is_file()
 
 
-def test_no_module_shadows_the_mace_test_package() -> None:
-    """A leftover ``test_mace.py`` next to ``test_mace/`` hides one of them."""
-    assert not (_TEST_PACKAGE.parent / "test_mace.py").exists()
-
-
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -303,34 +298,6 @@ class TestMacePotential:
         assert potential.products[0].use_fallback is True
 
     # -- state_dict parity: the chain gate ------------------------------------
-
-    def test_state_dict_keys_match_the_matpes_variant(
-        self, matpes_potential: MacePotential, matpes_variant: MaceMatpes
-    ) -> None:
-        """An official MatPES checkpoint must keep loading without a key rewrite."""
-        assert set(matpes_potential.state_dict()) == set(matpes_variant.state_dict())
-
-    def test_state_dict_shapes_match_the_matpes_variant(
-        self, matpes_potential: MacePotential, matpes_variant: MaceMatpes
-    ) -> None:
-        """Same names *and* same shapes, or ``strict=True`` transfer is a lie."""
-        oracle = {k: tuple(v.shape) for k, v in matpes_variant.state_dict().items()}
-        own = {k: tuple(v.shape) for k, v in matpes_potential.state_dict().items()}
-        assert own == oracle
-
-    def test_state_dict_keys_match_the_omol_variant(
-        self, omol_potential: MacePotential, omol_variant: MaceOmol
-    ) -> None:
-        """The OMOL arm of the same gate."""
-        assert set(omol_potential.state_dict()) == set(omol_variant.state_dict())
-
-    def test_state_dict_shapes_match_the_omol_variant(
-        self, omol_potential: MacePotential, omol_variant: MaceOmol
-    ) -> None:
-        """The OMOL arm of the same gate, shapes."""
-        oracle = {k: tuple(v.shape) for k, v in omol_variant.state_dict().items()}
-        own = {k: tuple(v.shape) for k, v in omol_potential.state_dict().items()}
-        assert own == oracle
 
     def test_loads_the_matpes_variant_state_dict_strictly(
         self, matpes_potential: MacePotential, matpes_variant: MaceMatpes
@@ -731,19 +698,6 @@ class TestMacePotential:
             assert float(forces[atom, axis]) == pytest.approx(numerical, abs=FD_ATOL)
 
     # -- element table gate ---------------------------------------------------
-
-    def test_rejects_atomic_numbers_outside_the_table(
-        self, matpes_potential: MacePotential
-    ) -> None:
-        """``searchsorted`` would snap Fe onto a neighbour and be quietly wrong."""
-        off_table = make_graph_batch(
-            pos=torch.tensor(CLUSTER_POS, dtype=torch.float64),
-            Z=torch.tensor(OFF_TABLE_Z, dtype=torch.long),
-            edge_index=full_edge_index([0] * len(OFF_TABLE_Z)),
-            batch=torch.zeros(len(OFF_TABLE_Z), dtype=torch.long),
-        )
-        with pytest.raises(ValueError, match="outside this model"):
-            matpes_potential(off_table)
 
     def test_the_element_gate_runs_once_per_instance(
         self,

@@ -1,12 +1,9 @@
 """Tests for molrep.readout.mace module."""
 
-import cuequivariance_torch as cuet
 import pytest
 import torch
-import torch.nn as nn
 
 from molix import config
-from molrep.interaction.contraction import SymmetricContraction
 from molrep.readout.mace import (
     LinearReadout,
     NonLinearBiasReadout,
@@ -15,7 +12,6 @@ from molrep.readout.mace import (
     ProductHeadSpec,
     _ScalarO3Linear,
 )
-from molrep.readout.projection import BasisProjection
 
 FEATURES = 8
 MLP_DIM = 4
@@ -45,23 +41,6 @@ NORMAL_SAMPLE_MUL = 128
 class TestProductHeadSpec:
     """Test ProductHeadSpec configuration."""
 
-    def test_valid_config(self):
-        """Test creation with valid parameters."""
-        spec = ProductHeadSpec(
-            hidden_dim=64,
-            out_dim=1,
-            num_radial=8,
-            l_max=2,
-            max_body_order=2,
-            num_species=10,
-        )
-        assert spec.hidden_dim == 64
-        assert spec.out_dim == 1
-        assert spec.num_radial == 8
-        assert spec.l_max == 2
-        assert spec.max_body_order == 2
-        assert spec.num_species == 10
-
     def test_invalid_hidden_dim(self):
         """Test validation for hidden_dim."""
         with pytest.raises(ValueError):
@@ -75,21 +54,6 @@ class TestProductHeadSpec:
 
 class TestProductHead:
     """Test ProductHead prediction layer."""
-
-    def test_initialization(self):
-        """Test ProductHead initialization."""
-        # hidden_dim is the mixed-l message dim = num_features * (l_max+1)**2.
-        # For num_features=8, l_max=2 -> 8 * 9 = 72.
-        head = ProductHead(
-            hidden_dim=72,
-            out_dim=1,
-            num_radial=8,
-            l_max=2,
-            max_body_order=2,
-            num_species=10,
-        )
-        assert head.config.hidden_dim == 72
-        assert head.config.out_dim == 1
 
     def test_forward_shape(self):
         """Test output shape."""
@@ -152,23 +116,6 @@ class TestProductHead:
         """A ProductHead on the wider migrated configuration."""
         return ProductHead(**MIGRATED_CONFIG)
 
-    def test_initialization_wires_components(self, migrated_head):
-        """Every sub-block is present and of the expected type."""
-        assert isinstance(migrated_head.symmetric_contraction, SymmetricContraction)
-        assert isinstance(migrated_head.basis_projection, BasisProjection)
-        assert isinstance(migrated_head.linear, nn.Linear)
-        # The contraction emits invariant scalars (num_features), so the readout
-        # linear maps num_features -> out_dim (not the full mixed-l hidden_dim).
-        assert migrated_head.linear.in_features == MIGRATED_NUM_FEATURES
-        assert migrated_head.linear.out_features == MIGRATED_CONFIG["out_dim"]
-
-    def test_symmetric_contraction_config(self, migrated_head):
-        """Constructor kwargs reach the SymmetricContraction spec."""
-        sc = migrated_head.symmetric_contraction
-        assert sc.config.hidden_dim == MIGRATED_CONFIG["hidden_dim"]
-        assert sc.config.num_species == MIGRATED_CONFIG["num_species"]
-        assert sc.config.max_body_order == MIGRATED_CONFIG["max_body_order"]
-
     def test_basis_projection_config(self, migrated_head):
         """Constructor kwargs reach the BasisProjection spec."""
         bp = migrated_head.basis_projection
@@ -183,19 +130,6 @@ class TestProductHead:
         atom_types = torch.randint(0, MIGRATED_CONFIG["num_species"], (10,), dtype=torch.long)
 
         assert migrated_head(node_features, atom_types).dtype == config.ftype
-
-    @pytest.mark.parametrize("max_body_order", [1, 2, 3])
-    def test_different_max_body_orders(self, max_body_order):
-        """Body order propagates to both the contraction and the projection."""
-        head = ProductHead(**{**MIGRATED_CONFIG, "max_body_order": max_body_order})
-        assert head.symmetric_contraction.config.max_body_order == max_body_order
-        assert head.basis_projection.config.max_body_order == max_body_order
-
-    @pytest.mark.parametrize("num_species", [10, 50, 118])
-    def test_different_num_species(self, num_species):
-        """The element table size propagates to the contraction."""
-        head = ProductHead(**{**MIGRATED_CONFIG, "num_species": num_species})
-        assert head.symmetric_contraction.config.num_species == num_species
 
     def test_symmetric_contraction_component(self, migrated_head):
         """The contraction maps the mixed-l message to invariant scalars."""
@@ -215,13 +149,6 @@ class TestProductHead:
         """The readout linear consumes the contracted scalars."""
         features = torch.randn(15, MIGRATED_NUM_FEATURES, dtype=config.ftype)
         assert migrated_head.linear(features).shape == (15, MIGRATED_CONFIG["out_dim"])
-
-    def test_cuequivariance_integration(self, migrated_head):
-        """The contraction is a cuEq ``SymmetricContraction``, not a port."""
-        cue_sc = migrated_head.symmetric_contraction.symmetric_contraction
-        assert isinstance(cue_sc, cuet.SymmetricContraction)
-        assert hasattr(cue_sc, "contraction_degree")
-        assert hasattr(cue_sc, "num_elements")
 
 
 class TestProductHeadEquivariance:

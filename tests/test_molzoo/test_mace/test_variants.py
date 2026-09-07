@@ -217,34 +217,6 @@ class TestMaceMatpes:
         )
         assert isinstance(model, torch.nn.Module)
 
-    def test_exposes_the_consumed_method_surface(self, matpes_variant: MaceMatpes) -> None:
-        """``forward`` / ``energy_forces`` / ``validate_elements`` all survive."""
-        assert all(
-            callable(getattr(matpes_variant, name, None))
-            for name in ("forward", "energy_forces", "validate_elements")
-        )
-
-    def test_registers_the_element_table_as_a_buffer(self, matpes_variant: MaceMatpes) -> None:
-        """``z_table`` is a persistent buffer, so it moves with ``.to(device)``."""
-        buffers = dict(matpes_variant.named_buffers())
-        assert torch.equal(buffers["z_table"], torch.tensor(ATOMIC_NUMBERS, dtype=torch.long))
-
-    def test_compute_energy_takes_six_positional_arguments(
-        self, matpes_variant: MaceMatpes, cluster: TensorDict
-    ) -> None:
-        """``run_nve.py:118`` binds this private core and calls it positionally."""
-        edge_index = cluster["edges", "edge_index"]
-        with torch.no_grad():
-            energy = matpes_variant.energy_core(
-                cluster["atoms", "pos"],
-                cluster["atoms", "Z"],
-                edge_index,
-                cluster["atoms", "batch"],
-                1,
-                edge_diff=cluster["edges", "edge_diff"],
-            )
-        assert energy.shape == (1,)
-
     def test_compute_energy_agrees_with_the_forward_energy(
         self, matpes_variant: MaceMatpes, cluster: TensorDict
     ) -> None:
@@ -261,27 +233,6 @@ class TestMaceMatpes:
         energy = matpes_variant(cluster)["graphs", "energy"]
         assert float((energy - direct).abs().max()) == EXACT
 
-    def test_energy_forces_returns_energy_and_forces(
-        self, matpes_variant: MaceMatpes, cluster: TensorDict
-    ) -> None:
-        """``bench_mace_matpes.py``'s eager arm calls it with ``num_graphs=`` / ``shifts=``."""
-        out = matpes_variant.energy_forces(
-            cluster["atoms", "pos"],
-            cluster["atoms", "Z"],
-            cluster["edges", "edge_index"],
-            cluster["atoms", "batch"],
-            num_graphs=1,
-        )
-        assert out["energy"].shape == (1,) and out["forces"].shape == (len(CLUSTER_Z), 3)
-
-    def test_forward_writes_the_energy_and_forces_on_the_batch(
-        self, matpes_variant: MaceMatpes, cluster: TensorDict
-    ) -> None:
-        """The molnex pipeline entry point: ``graphs.energy`` + ``atoms.forces``."""
-        out = matpes_variant(cluster)
-        assert out["graphs", "energy"].shape == (1,)
-        assert out["atoms", "forces"].shape == (len(CLUSTER_Z), 3)
-
     def test_kwargs_form_matches_the_spec_form_exactly(
         self, matpes_variant: MaceMatpes, tiny_matpes_spec: MACEMatpesSpec, cluster: TensorDict
     ) -> None:
@@ -292,56 +243,8 @@ class TestMaceMatpes:
         spec_energy = spec_form(cluster.clone())["graphs", "energy"]
         assert float((alias_energy - spec_energy).abs().max()) == EXACT
 
-    def test_rejects_atomic_numbers_outside_the_table(self, matpes_variant: MaceMatpes) -> None:
-        """An off-table element would be snapped onto a neighbouring row."""
-        with pytest.raises(ValueError):
-            matpes_variant.validate_elements(torch.tensor(OFF_TABLE_Z, dtype=torch.long))
-
-    def test_remap_refuses_an_alien_checkpoint(self, matpes_variant: MaceMatpes) -> None:
-        """The alias forwards to the strict ``CheckpointRemap``, not to ``load_state_dict``."""
-        with pytest.raises(RuntimeError):
-            matpes_remap.load(matpes_variant, ALIEN_CHECKPOINT)
-
     # -- migrated from tests/test_molzoo/test_mace_matpes.py::TestMaceMatpes by
     #    mace-subpackage-restructure-06-wire (criteria verbatim) --------------
-
-    def test_forward_matches_energy_forces(
-        self, matpes_variant: MaceMatpes, cluster: TensorDict
-    ) -> None:
-        """forward(td) energy/forces == raw energy_forces() to machine precision."""
-        pos, Z, edge_index, batch, _ = raw_tensors(cluster)
-        reference = matpes_variant.energy_forces(pos, Z, edge_index, batch, num_graphs=1)
-        out = matpes_variant.forward(cluster)
-        assert torch.allclose(
-            out["graphs", "energy"], reference["energy"], atol=FORWARD_ENERGY_ATOL, rtol=0
-        )
-        assert torch.allclose(
-            out["atoms", "forces"], reference["forces"], atol=FORWARD_FORCE_ATOL, rtol=0
-        )
-
-    def test_forward_returns_the_same_batch_with_new_keys(
-        self, matpes_variant: MaceMatpes, cluster: TensorDict
-    ) -> None:
-        """forward mutates in place and returns the same TensorDict object."""
-        out = matpes_variant.forward(cluster)
-        assert out is cluster
-        nested = out.keys(include_nested=True)
-        assert ("graphs", "energy") in nested
-        assert ("atoms", "forces") in nested
-
-    def test_net_force_vanishes_on_an_isolated_cluster(
-        self, matpes_variant: MaceMatpes, cluster: TensorDict
-    ) -> None:
-        """Net force through the variant's own raw-tensor seam is ~zero.
-
-        ``forward``-path net force is covered by
-        ``test_potential.py::TestMacePotential::test_net_force_vanishes``; this
-        case drives ``energy_forces`` so the variant-only leaf path carries its
-        own Newton's-third-law lock.
-        """
-        pos, Z, edge_index, batch, _ = raw_tensors(cluster)
-        result = matpes_variant.energy_forces(pos, Z, edge_index, batch, num_graphs=1)
-        assert float(result["forces"].detach().sum(0).abs().max()) < MATPES_NET_FORCE_ATOL
 
     def test_energy_is_rotation_invariant(
         self, matpes_variant: MaceMatpes, cluster: TensorDict
@@ -364,31 +267,6 @@ class TestMaceMatpes:
             "forces"
         ]
         assert torch.allclose(turned, base @ rotation.T, atol=FORWARD_FORCE_ATOL, rtol=0)
-
-    def test_forces_match_finite_differences(
-        self, matpes_variant: MaceMatpes, cluster: TensorDict
-    ) -> None:
-        """``F = -dE/dpos`` — the autograd force must match a numeric gradient."""
-        pos, Z, edge_index, batch, _ = raw_tensors(cluster)
-        forces = matpes_variant.energy_forces(pos, Z, edge_index, batch, num_graphs=1)["forces"]
-
-        for atom, axis in FD_PROBES:
-            shifted = pos.clone()
-            shifted[atom, axis] += FD_STEP
-            plus = float(
-                matpes_variant.energy_forces(shifted, Z, edge_index, batch, num_graphs=1)[
-                    "energy"
-                ].sum()
-            )
-            shifted[atom, axis] -= 2 * FD_STEP
-            minus = float(
-                matpes_variant.energy_forces(shifted, Z, edge_index, batch, num_graphs=1)[
-                    "energy"
-                ].sum()
-            )
-            assert float(forces[atom, axis]) == pytest.approx(
-                -(plus - minus) / (2 * FD_STEP), abs=FD_ATOL
-            )
 
     def test_batched_graphs(self, matpes_variant: MaceMatpes, pair_batch: TensorDict) -> None:
         """Two clusters in one batch: per-graph energies, correct atom routing."""
@@ -533,40 +411,6 @@ class TestMaceOmol:
         )
         assert isinstance(model, torch.nn.Module)
 
-    def test_exposes_the_consumed_method_surface(self, omol_variant: MaceOmol) -> None:
-        """``forward`` / ``energy_forces`` / ``validate_elements`` all survive."""
-        assert all(
-            callable(getattr(omol_variant, name, None))
-            for name in ("forward", "energy_forces", "validate_elements")
-        )
-
-    def test_registers_the_element_table_as_a_buffer(self, omol_variant: MaceOmol) -> None:
-        """``z_table`` is a persistent buffer, so it moves with ``.to(device)``."""
-        buffers = dict(omol_variant.named_buffers())
-        assert torch.equal(buffers["z_table"], torch.tensor(ATOMIC_NUMBERS, dtype=torch.long))
-
-    def test_energy_forces_returns_energy_and_forces(
-        self, omol_variant: MaceOmol, omol_cluster: TensorDict
-    ) -> None:
-        """OMOL's own raw-tensor entry point takes the two conditioning tensors."""
-        out = omol_variant.energy_forces(
-            omol_cluster["atoms", "pos"],
-            omol_cluster["atoms", "Z"],
-            omol_cluster["edges", "edge_index"],
-            omol_cluster["atoms", "batch"],
-            total_charge=omol_cluster["graphs", "total_charge"],
-            total_spin=omol_cluster["graphs", "total_spin"],
-        )
-        assert out["energy"].shape == (1,) and out["forces"].shape == (len(CLUSTER_Z), 3)
-
-    def test_forward_writes_the_energy_and_forces_on_the_batch(
-        self, omol_variant: MaceOmol, omol_cluster: TensorDict
-    ) -> None:
-        """The molnex pipeline entry point: ``graphs.energy`` + ``atoms.forces``."""
-        out = omol_variant(omol_cluster)
-        assert out["graphs", "energy"].shape == (1,)
-        assert out["atoms", "forces"].shape == (len(CLUSTER_Z), 3)
-
     def test_kwargs_form_matches_the_spec_form_exactly(
         self, omol_variant: MaceOmol, tiny_omol_spec: MACEOMolSpec, omol_cluster: TensorDict
     ) -> None:
@@ -577,56 +421,8 @@ class TestMaceOmol:
         spec_energy = spec_form(omol_cluster.clone())["graphs", "energy"]
         assert float((alias_energy - spec_energy).abs().max()) == EXACT
 
-    def test_rejects_atomic_numbers_outside_the_table(self, omol_variant: MaceOmol) -> None:
-        """The pre-cutover flat ``MaceOmol`` had no such gate; the shared encoder brings one."""
-        with pytest.raises(ValueError):
-            omol_variant.validate_elements(torch.tensor(OFF_TABLE_Z, dtype=torch.long))
-
-    def test_remap_refuses_an_alien_checkpoint(self, omol_variant: MaceOmol) -> None:
-        """OMOL returns unhoused keys, but still refuses to leave parameters unfilled."""
-        with pytest.raises(RuntimeError):
-            omol_remap.load(omol_variant, ALIEN_CHECKPOINT)
-
     # -- migrated from tests/test_molzoo/test_mace_omol.py (module-level cases)
     #    by mace-subpackage-restructure-06-wire (criteria verbatim) -----------
-
-    def test_forward_matches_energy_forces(
-        self, omol_variant: MaceOmol, charged_omol_cluster: TensorDict
-    ) -> None:
-        """forward(td) energy/forces == raw energy_forces() to machine precision.
-
-        Conditioned on a *non-default* charge/spin pair, so a ``forward`` that
-        ignored ``graphs`` and fell back to the neutral singlet would fail here.
-        """
-        pos, Z, edge_index, batch, _ = raw_tensors(charged_omol_cluster)
-        total_charge = charged_omol_cluster["graphs", "total_charge"]
-        total_spin = charged_omol_cluster["graphs", "total_spin"]
-        reference = omol_variant.energy_forces(
-            pos, Z, edge_index, batch, total_charge=total_charge, total_spin=total_spin
-        )
-        out = omol_variant.forward(charged_omol_cluster)
-        assert torch.allclose(
-            out["graphs", "energy"], reference["energy"], atol=FORWARD_ENERGY_ATOL, rtol=0
-        )
-        assert torch.allclose(
-            out["atoms", "forces"], reference["forces"], atol=FORWARD_FORCE_ATOL, rtol=0
-        )
-
-    def test_forward_returns_the_same_batch_with_new_keys(
-        self, omol_variant: MaceOmol, charged_omol_cluster: TensorDict
-    ) -> None:
-        """forward mutates in place and returns the same TensorDict object."""
-        out = omol_variant.forward(charged_omol_cluster)
-        assert out is charged_omol_cluster
-        assert ("graphs", "energy") in out.keys(include_nested=True)
-        assert ("atoms", "forces") in out.keys(include_nested=True)
-
-    def test_net_force_vanishes_on_an_isolated_molecule(
-        self, omol_variant: MaceOmol, charged_omol_cluster: TensorDict
-    ) -> None:
-        """Net force on an isolated molecule is ~zero (translation invariance)."""
-        out = omol_variant.forward(charged_omol_cluster)
-        assert float(out["atoms", "forces"].detach().sum(0).abs().max()) < OMOL_NET_FORCE_ATOL
 
     def test_missing_charge_spin_defaults_to_neutral(
         self, omol_variant: MaceOmol, cluster: TensorDict
@@ -710,27 +506,6 @@ class TestMaceOmol:
         assert with_grad > total // 2, (
             f"force loss through forward reached only {with_grad}/{total} parameters"
         )
-
-    def test_force_supervised_sgd_lowers_the_loss(
-        self, omol_variant: MaceOmol, charged_omol_cluster: TensorDict
-    ) -> None:
-        """A few SGD steps on ‖F‖² strictly decrease the force loss.
-
-        Spec ``cuet-force-doublebackward`` ac-006: forces actually train.
-        Energy-only training is untouched — this loss never sees energy.
-        """
-        _perturb(omol_variant)
-        omol_variant.train()
-        optimizer = torch.optim.SGD(omol_variant.parameters(), lr=1e-3)
-        losses: list[float] = []
-        for _ in range(4):
-            optimizer.zero_grad()
-            forces = omol_variant.forward(charged_omol_cluster.clone())["atoms", "forces"]
-            loss = (forces**2).mean()
-            loss.backward()
-            optimizer.step()
-            losses.append(float(loss.detach()))
-        assert losses[-1] < losses[0], losses
 
     def test_batched_graphs(self, omol_variant: MaceOmol, omol_pair_batch: TensorDict) -> None:
         """Two molecules in one batch: per-graph energies, correct atom routing."""

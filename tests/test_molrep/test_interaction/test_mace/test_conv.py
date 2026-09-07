@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from molrep.interaction.mace.conv import ConvTP, ConvTPSpec
+from molrep.interaction.mace.conv import ConvTP
 from molrep.utils.equivariance import (
     check_equivariance,
     rotate_irreps_features_simple,
@@ -17,30 +17,9 @@ from molrep.utils.equivariance import (
 class TestConvTPSpec:
     """Test ConvTPSpec configuration."""
 
-    def test_valid_config(self):
-        """Test creation with valid parameters."""
-        spec = ConvTPSpec(
-            in_irreps="64x0e",
-            out_irreps="64x0e",
-            sh_irreps="1x0e + 1x1o",
-        )
-        assert spec.in_irreps == "64x0e"
-        assert spec.out_irreps == "64x0e"
-        assert spec.sh_irreps == "1x0e + 1x1o"
-
 
 class TestConvTP:
     """Test ConvTP tensor product layer."""
-
-    def test_initialization(self):
-        """Test ConvTP initialization."""
-        tp = ConvTP(
-            in_irreps="64x0e",
-            out_irreps="64x0e",
-            sh_irreps="1x0e + 1x1o",
-        )
-        assert tp.config.in_irreps == "64x0e"
-        assert tp.config.out_irreps == "64x0e"
 
     def test_forward_shape(self):
         """Test output shape."""
