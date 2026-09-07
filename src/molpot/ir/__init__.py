@@ -15,19 +15,20 @@ from molpot.ir.bags import (
     ProperTorsionBag,
 )
 from molpot.ir.potential_ir import PotentialIR
-from molpot.ir.scaling import NonbondedScaling
+from molpot.ir.scaling import ExclusionScales, NonbondedScaling
 from molpot.ir.units import CLASS_I_CANONICAL, UnitTag
 
 __all__ = [
-    "UnitTag",
-    "CLASS_I_CANONICAL",
-    "BondBag",
     "AngleBag",
-    "ProperTorsionBag",
-    "ImproperPeriodicBag",
-    "ImproperHarmonicBag",
-    "LJBag",
+    "BondBag",
+    "CLASS_I_CANONICAL",
     "ChargeBag",
+    "ExclusionScales",
+    "ImproperHarmonicBag",
+    "ImproperPeriodicBag",
+    "LJBag",
     "NonbondedScaling",
     "PotentialIR",
+    "ProperTorsionBag",
+    "UnitTag",
 ]

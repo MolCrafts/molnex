@@ -28,5 +28,5 @@ class TestOPLSAAForceField:
         from molpot.forcefield import OPLSAAForceField
 
         scaling = OPLSAAForceField().nonbonded_scaling
-        assert scaling.scale_q_14 == 0.5
-        assert scaling.scale_lj_14 == 0.5
+        assert scaling.q.s14 == 0.5
+        assert scaling.lj.s14 == 0.5

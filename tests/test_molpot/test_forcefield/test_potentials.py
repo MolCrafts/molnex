@@ -24,6 +24,7 @@ from tensordict import TensorDict
 from molix.schema import ENERGY_KEY, CellBound
 from molpot.forcefield import ForceField, Potentials
 from molpot.forcefield.schema import PotentialMeta
+from molpot.potentials.elec.prefactors import kcalmol_A
 
 DTYPE = torch.float64
 
@@ -202,6 +203,55 @@ EPSILON = 0.2
 SIGMA = 3.0
 LJ_CUTOFF = 10.0
 
+#: Switching window of the LJ style: the taper starts at ``r_s`` and reaches
+#: zero at ``LJ_CUTOFF``. ``SWITCH_R`` is the window midpoint, where
+#: ``x = (r − r_s)/(r_c − r_s) = ½`` and the quintic switch takes the exact
+#: value ``S = 1 − ⅛(10 − 7.5 + 1.5) = ½`` — an analytic golden, not a value
+#: read back out of :meth:`LJCutPotential._switch`.
+SWITCH_START = 9.0
+SWITCH_R = 9.5
+SWITCH_AT_MIDPOINT = 0.5
+
+
+def _lj_pair_forcefield(*, switch_start: float | None = None) -> ForceField:
+    """Two-atom ``lj/cut`` field, optionally tapered, declared through ``def_pairstyle``.
+
+    No bond / angle / proper namespace goes with it, so the single pair is in
+    no exclusion relation and reads the unscaled ``1.0``: the only thing that
+    can change its energy is the switching window.
+    """
+    options: dict[str, float] = {"cutoff": LJ_CUTOFF}
+    if switch_start is not None:
+        options["switch_start"] = switch_start
+    return (
+        ForceField(name="lj-pair")
+        .def_pairstyle("lj/cut", **options)
+        .with_params(
+            atoms={
+                "epsilon": torch.full((2,), EPSILON, dtype=DTYPE),
+                "sigma": torch.full((2,), SIGMA, dtype=DTYPE),
+            }
+        )
+    )
+
+
+def _lj_pair_batch(*, r: float) -> TensorDict:
+    """Two unbonded atoms ``r`` Å apart along x̂ — one nonbonded pair, nothing else."""
+    pos = torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=DTYPE)
+    return TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": pos,
+                    "Z": torch.tensor([18, 18], dtype=torch.long),
+                    "batch": torch.zeros(2, dtype=torch.long),
+                },
+                batch_size=[2],
+            )
+        },
+        batch_size=[],
+    )
+
 
 def _class_i_forcefield() -> ForceField:
     """Harmonic bond + ``lj/cut`` + ``coulomb``, every parameter table filled."""
@@ -249,6 +299,52 @@ def _class_i_batch() -> TensorDict:
             ),
         },
         batch_size=[],
+    )
+
+
+#: OPLS-AA all-atom alkane charges (e), well depths (kcal/mol) and sizes (Å) for
+#: the butane fixture in ``conftest.py``: CH3 carbon −0.18, CH2 carbon −0.12,
+#: every hydrogen +0.06 — a neutral molecule.
+BUTANE_Q = (-0.18, -0.12, -0.12, -0.18) + (0.06,) * 10
+BUTANE_EPSILON = (0.066,) * 4 + (0.030,) * 10
+BUTANE_SIGMA = (3.50,) * 4 + (2.50,) * 10
+BUTANE_CUTOFF = 10.0
+
+
+def _charged_batch(*, total_charge: float | None) -> TensorDict:
+    """Two atoms carrying +0.5 e each; ``graphs.total_charge`` optional."""
+    graphs: dict[str, torch.Tensor] = {"num_atoms": torch.tensor([2], dtype=torch.long)}
+    if total_charge is not None:
+        graphs["total_charge"] = torch.tensor([total_charge], dtype=DTYPE)
+    return TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": torch.tensor([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=DTYPE),
+                    "Z": torch.tensor([11, 11], dtype=torch.long),
+                    "batch": torch.zeros(2, dtype=torch.long),
+                },
+                batch_size=[2],
+            ),
+            "graphs": TensorDict(graphs, batch_size=[1]),
+        },
+        batch_size=[],
+    )
+
+
+def _butane_forcefield() -> ForceField:
+    """``lj/cut`` + ``coulomb`` on the butane fixture, Class-I default scaling."""
+    return (
+        ForceField(name="butane")
+        .def_pairstyle("lj/cut", cutoff=BUTANE_CUTOFF)
+        .def_pairstyle("coulomb")
+        .with_params(
+            atoms={
+                "q": torch.tensor(BUTANE_Q, dtype=DTYPE),
+                "epsilon": torch.tensor(BUTANE_EPSILON, dtype=DTYPE),
+                "sigma": torch.tensor(BUTANE_SIGMA, dtype=DTYPE),
+            }
+        )
     )
 
 
@@ -504,6 +600,167 @@ class TestPotentials:
         )
         energy = forcefield.to_potentials().calc_energy(far_apart)
         assert float(energy) == pytest.approx(0.0, abs=1e-12)
+
+    def test_the_exclusion_table_reaches_both_pair_terms(
+        self,
+        butane_batch: TensorDict,
+        butane_scales: torch.Tensor,
+    ) -> None:
+        """Hard-coded golden: the butane scale vector, read through ``term_energies``.
+
+        Not a second copy of the ``ExclusionTable`` unit test — what is pinned
+        here is the *wiring*: an unbound ``Potentials`` builds the table lazily
+        on the first energy call, hands ``"q"`` to Coulomb and ``"lj"`` to LJ,
+        and its neighbour list enumerates the 91 half-pairs in the same
+        ``triu`` order the golden was captured in (every butane pair is inside
+        the 10 Å cutoff). ``BUTANE_OPLS_SCALES`` holds the 1-4 entries at 0.5;
+        under the Class-I defaults used here Coulomb rescales those to 5/6
+        while LJ keeps 0.5, so a term reading the wrong kind is visible.
+        """
+        pairs = torch.triu_indices(14, 14, offset=1).t()
+        positions = butane_batch["atoms", "pos"]
+        distances = (positions[pairs[:, 1]] - positions[pairs[:, 0]]).norm(dim=-1)
+        lj_scales = butane_scales
+        q_scales = torch.where(
+            butane_scales == 0.5,
+            torch.full_like(butane_scales, 5.0 / 6.0),
+            butane_scales,
+        )
+
+        charges = torch.tensor(BUTANE_Q, dtype=DTYPE)
+        epsilon = torch.tensor(BUTANE_EPSILON, dtype=DTYPE)
+        sigma = torch.tensor(BUTANE_SIGMA, dtype=DTYPE)
+        epsilon_ij = (epsilon[pairs[:, 0]] * epsilon[pairs[:, 1]]).sqrt()
+        sigma_ij = 0.5 * (sigma[pairs[:, 0]] + sigma[pairs[:, 1]])
+        sr6 = (sigma_ij / distances).pow(6)
+        expected_repulsion = float((lj_scales * 4.0 * epsilon_ij * sr6.pow(2)).sum())
+        expected_dispersion = float((-lj_scales * 4.0 * epsilon_ij * sr6).sum())
+        expected_coulomb = float(
+            (q_scales * kcalmol_A * charges[pairs[:, 0]] * charges[pairs[:, 1]] / distances).sum()
+        )
+
+        terms = _butane_forcefield().to_potentials().term_energies(butane_batch)
+        assert float(terms["coulomb"]) == pytest.approx(expected_coulomb, rel=1e-12)
+        assert float(terms["lj_repulsion"]) == pytest.approx(expected_repulsion, rel=1e-12)
+        assert float(terms["lj_dispersion"]) == pytest.approx(expected_dispersion, rel=1e-12)
+
+    def test_switch_start_declared_on_the_style_reaches_the_pair_term(self) -> None:
+        """``def_pairstyle`` is the only route to the LJ taper, so it must carry it.
+
+        :meth:`Potentials._assemble_pair_potentials` reads ``cutoff`` off the
+        style options and builds the :class:`LJCutPotential` with it;
+        ``switch_start`` is the second half of the same option. Dropped there,
+        the quintic switch a0-02 put on the term is unreachable from any
+        ForceField — the S8 cutoff-continuity gate would then be closed only in
+        the term's own unit test and open on every assembled Class-I model.
+
+        The un-tapered field is checked in the same test because "reaches the
+        term" and "is not invented when absent" are one contract: the default
+        stays a hard truncation (``switch_start is None``).
+        """
+        tapered = _lj_pair_forcefield(switch_start=SWITCH_START).to_potentials()
+        assert tapered.lj is not None
+        assert tapered.lj.cutoff == LJ_CUTOFF
+        assert tapered.lj.switch_start == SWITCH_START
+
+        truncated = _lj_pair_forcefield().to_potentials()
+        assert truncated.lj is not None
+        assert truncated.lj.cutoff == LJ_CUTOFF
+        assert truncated.lj.switch_start is None
+
+    def test_switched_lj_energy_is_the_analytic_taper_inside_the_window(self) -> None:
+        """Domain golden: ``E = S(r)·E_LJ(r)`` at the midpoint of ``[r_s, r_c]``.
+
+        Two argon-sized atoms sit at ``r = 9.5 Å`` — inside the ``9–10 Å``
+        window, so the taper is neither ``1`` nor ``0`` and a field that ignored
+        ``switch_start`` is visible as a *value*, not just as a dropped
+        attribute. With ``x = (r − r_s)/(r_c − r_s) = ½`` the quintic switch
+        ``S(x) = 1 − x³(10 − 15x + 6x²)`` is exactly ``½``, so the tapered
+        energy must be half the truncated one, both computed here from
+        ``4ε[(σ/r)¹² − (σ/r)⁶]`` in fp64 rather than read back out of the term.
+
+        Reference:
+            OpenMM ``useSwitchingFunction`` taper (algebraically the LAMMPS
+            ``lj/mdf`` form), spec ``composable-a0-02`` §Domain basis;
+            Lennard-Jones, J. E. *Proc. Phys. Soc.* **43**, 461 (1931).
+        """
+        batch = _lj_pair_batch(r=SWITCH_R)
+        sr6 = (SIGMA / SWITCH_R) ** 6
+        lj = 4.0 * EPSILON * (sr6 * sr6 - sr6)
+
+        truncated = float(_lj_pair_forcefield().to_potentials().calc_energy(batch))
+        tapered = float(
+            _lj_pair_forcefield(switch_start=SWITCH_START).to_potentials().calc_energy(batch)
+        )
+        assert truncated == pytest.approx(lj, abs=1e-10)
+        assert tapered == pytest.approx(SWITCH_AT_MIDPOINT * lj, abs=1e-10)
+        # The whole point of the window: inside it the two fields disagree, by
+        # exactly the part the switch removed.
+        assert tapered - truncated == pytest.approx((SWITCH_AT_MIDPOINT - 1.0) * lj, abs=1e-10)
+
+    def test_a_bound_topology_is_refused_for_a_batch_of_another_shape(self) -> None:
+        """Rebinding is the caller's job, so a stale table must be caught, not used.
+
+        :meth:`bind_topology` builds the exclusion table once per topology and
+        every later energy call reuses it. Handed a batch whose topology has a
+        *different shape*, the table answers with the previous molecule's
+        relations: here the extra ``angles`` column makes ``(0, 2)`` a 1-3 pair,
+        which the stale table still reads as unexcluded, and the total energy
+        comes out 4.65 instead of 18.49 kcal/mol — silently, with no shape
+        error anywhere. Fail closed instead, naming ``bind_topology`` so the
+        message says what to call.
+
+        The fingerprint is deliberately **shape-level only**: positions change
+        every MD step and must stay free, and a fresh batch of the same
+        topology (new tensors, same shapes — the ordinary DataLoader case) must
+        keep reusing the bound table. That is the second leg below, pinned
+        against a freshly assembled ``Potentials`` so "does not raise" also
+        means "still right".
+        """
+        potentials = _class_i_forcefield().to_potentials()
+        bound = _class_i_batch()
+        potentials.bind_topology(bound)
+
+        restated = _class_i_batch()
+        restated["atoms", "pos"] = restated["atoms", "pos"] + torch.tensor(
+            [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.0, -0.2, 0.0]], dtype=DTYPE
+        )
+        reference = _class_i_forcefield().to_potentials()
+        assert float(potentials.calc_energy(restated)) == pytest.approx(
+            float(reference.calc_energy(restated)), abs=1e-10
+        )
+
+        with_angle = _class_i_batch()
+        with_angle["angles"] = TensorDict(
+            {
+                "atomi": torch.tensor([0], dtype=torch.long),
+                "atomj": torch.tensor([1], dtype=torch.long),
+                "atomk": torch.tensor([2], dtype=torch.long),
+            },
+            batch_size=[1],
+        )
+        with pytest.raises(ValueError, match="bind_topology"):
+            potentials.calc_energy(with_angle)
+
+    def test_bind_topology_rejects_charges_that_miss_the_declared_total(self) -> None:
+        """S5 fail-closed: ``Σ_g q`` must equal ``graphs.total_charge`` to 1e-6 e.
+
+        A learned charge head that drifts off the constraint changes the
+        molecule's net charge, and under PBC that is an infinite-energy system
+        silently regularised by the Ewald background term. The check is eager
+        and per graph, so it fires at bind time rather than as a wrong number.
+        """
+        potentials = (
+            ForceField(name="anion")
+            .def_pairstyle("coulomb")
+            .with_params(atoms={"q": torch.tensor([0.5, 0.5], dtype=DTYPE)})
+            .to_potentials()
+        )
+        with pytest.raises(ValueError, match="total_charge"):
+            potentials.bind_topology(_charged_batch(total_charge=0.0))
+
+        potentials.bind_topology(_charged_batch(total_charge=1.0))
+        potentials.bind_topology(_charged_batch(total_charge=None))
 
     def test_two_polarization_styles_are_refused_at_construction(
         self, fake_pol_styles: tuple[str, str]

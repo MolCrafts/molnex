@@ -14,7 +14,7 @@ from molpot.charge import (
     ElectronegativityEqualization,
 )
 from molpot.forcefield import ForceField
-from molpot.ir.scaling import NonbondedScaling
+from molpot.ir.scaling import ExclusionScales, NonbondedScaling
 from molpot.potentials.elec.prefactors import kcalmol_A
 
 
@@ -48,11 +48,11 @@ class TestCoulombEnergy:
         assert math.isclose(float(e), -kcalmol_A, rel_tol=1e-10)
 
     def test_bond_exclusion_scale_zero(self):
-        """1–2 pair with scale_q_12=0 contributes nothing."""
+        """1–2 pair with the Class-I default ``q.s12 = 0`` contributes nothing."""
         ff = (
             ForceField(
                 name="es",
-                nonbonded_scaling=NonbondedScaling(scale_q_12=0.0),
+                nonbonded_scaling=NonbondedScaling(),
             )
             .def_pairstyle("coulomb")
             .with_params(atoms={"q": torch.tensor([1.0, -1.0], dtype=torch.float64)})
@@ -83,7 +83,7 @@ class TestCoulombEnergy:
 
     def test_scale_14(self):
         """Four atoms; only i–l is 1–4 with scale 0.5."""
-        scaling = NonbondedScaling(scale_q_12=0.0, scale_q_13=0.0, scale_q_14=0.5)
+        scaling = NonbondedScaling(q=ExclusionScales(0.0, 0.0, 0.5))
         q = torch.tensor([1.0, 0.0, 0.0, -1.0], dtype=torch.float64)
         # place 0 and 3 at r=2 so E_full = ke*(1)*(-1)/2 = -ke/2; with s14=0.5 → -ke/4
         pos = torch.tensor(

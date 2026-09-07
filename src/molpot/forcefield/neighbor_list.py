@@ -2,6 +2,22 @@
 
 Uses molpy :class:`NeighborQuery` when a cell is available; otherwise
 all intramolecular half-pairs (open boundary).
+
+Lists are **capacity-shaped**: a list is described by ``(edge_index, dist,
+live_mask)`` and never compacted. Selecting rows with a boolean mask makes the
+output shape depend on the data, which is a graph break on the compiled force
+path; the pair terms multiply by ``live_mask`` instead. Only the open /
+periodic constructions filter while they enumerate — they hand back an all-true
+mask over a row count that depends on the geometry.
+
+Which is why they are eager-only. :meth:`NeighborListBuilder.build` runs them
+inline on **every** call that arrives without a placed list, not once per
+rebuild, and both are data-dependent throughout (a host sync on the atom
+counts, boolean-mask selection, and molpy ``NeighborQuery`` on numpy under
+PBC). A compiled force path must therefore supply a placed, capacity-shaped
+list in the batch ``edges`` namespace — what :class:`molix.md.NeighborList`
+writes — which ``_from_placed`` reuses at its own capacity with no
+data-dependent shape anywhere.
 """
 
 from __future__ import annotations
@@ -15,7 +31,7 @@ __all__ = ["NeighborListBuilder"]
 class NeighborListBuilder:
     """Build half-pair lists for nonbonded evaluation.
 
-    Single responsibility: geometry → ``(edge_index, distances)``.
+    Single responsibility: geometry → ``(edge_index, distances, live_mask)``.
     Does not own cutoff semantics beyond what the caller requests
     (cutoff is still a property of the Potential that consumes the list).
     """
@@ -28,18 +44,36 @@ class NeighborListBuilder:
         cell: torch.Tensor | None,
         cutoff: float | None,
         edges: object | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Return half-list ``edge_index (E,2)`` and ``distances (E,)``.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """Return ``edge_index (E,2)``, ``distances (E,)`` and ``live_mask (E,)``.
 
         Args:
             pos: ``(N, 3)`` in Å.
             atom_batch: molecule id ``(N,)``.
             cell: optional ``(3, 3)`` periodic cell.
-            cutoff: if set, only pairs with ``r < cutoff`` (periodic uses
+            cutoff: if set, only pairs with ``r < cutoff`` count (periodic uses
                 molpy :class:`NeighborQuery`; open uses all-pairs filter).
             edges: optional mapping with ``edge_index`` and ``edge_diff``
                 or ``edge_dist``. When present, those already-placed
-                distances are used and PBC is not applied again.
+                distances are used at their own capacity and PBC is not
+                applied again.
+
+        Returns:
+            ``(edge_index, distances, live_mask)`` — pair endpoints
+            ``(E, 2)``, separations ``(E,)`` in Å and a boolean ``(E,)``.
+            ``E`` is the capacity of the placed list, or the number of pairs
+            the open / periodic construction enumerated. ``live_mask`` is
+            ``True`` exactly on the rows that contribute; dead rows keep their
+            stored endpoints and distance. Wherever a distance is *computed*
+            here it is floored at ``1e-12`` Å, so a padding row whose two ends
+            coincide reads a tiny positive separation instead of an exact
+            zero — a zero would make the ``1/r`` kernels infinite and the
+            gradient of ``√`` at a zero vector ``NaN``, neither of which the
+            later multiply-by-zero can undo. The one exception is the
+            ``edge_dist`` passthrough of :meth:`_from_placed`, which forwards
+            the caller's stored distances untouched. ``None`` when no list
+            exists at all: fewer than two atoms, or a construction that
+            produced no pair.
         """
         n = pos.shape[0]
         if n < 2:
@@ -56,7 +90,26 @@ class NeighborListBuilder:
         pos: torch.Tensor,
         edges: object | None,
         cutoff: float | None,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """Reuse an already-placed edge list at the capacity it was written at.
+
+        Args:
+            pos: Atom positions ``(N, 3)`` in Å.
+            edges: The batch ``edges`` namespace, or ``None``.
+            cutoff: Real-space cutoff in Å, or ``None`` to keep every pair.
+
+        Returns:
+            ``(edge_index, dist, live)`` at the list's capacity — ``(E, 2)``,
+            ``(E,)`` in Å and a boolean ``(E,)`` — or ``None`` when ``edges``
+            carries no usable list. ``live`` is ``source < target`` (the half
+            list) ∧ ``row < num_edges`` ∧ ``0 < r < cutoff``. Dead rows keep
+            their stored endpoints — a padding row is an in-range self-loop,
+            so every downstream gather and ``index_add_`` stays valid and
+            contributes exactly zero once multiplied by the mask. Distances
+            recomputed here (from ``edge_diff`` or from ``shifts``) are
+            floored at ``1e-12`` Å; a stored ``edge_dist`` is forwarded as
+            given.
+        """
         if edges is None:
             return None
         getter = edges.get if hasattr(edges, "get") else None
@@ -86,34 +139,51 @@ class NeighborListBuilder:
             shifts = edges["shifts"] if "shifts" in edges else None  # type: ignore[operator]
         if edge_diff is None and edge_dist is None:
             return None
-        n_live = int(num_edges) if num_edges is not None else int(edge_index.shape[0])
-        edge_index = edge_index[:n_live]
-        src, tgt = edge_index[:, 0], edge_index[:, 1]
-        if edge_diff is not None:
-            edge_diff = edge_diff[:n_live]
-            implied = edge_diff.detach() - (pos.detach()[tgt] - pos.detach()[src])
-            vectors = pos[tgt] - pos[src] + implied
-            dist = vectors.norm(dim=-1)
-        elif shifts is not None:
-            shifts = shifts[:n_live]
-            dist = (pos[tgt] - pos[src] + shifts[:n_live]).norm(dim=-1)
-        else:
-            dist = edge_dist[:n_live]
-        keep = src < tgt
-        if cutoff is not None:
-            keep = keep & (dist < cutoff) & (dist > 0)
-        edge_index = edge_index[keep]
-        dist = dist[keep]
+        # A list with no rows at all is structurally absent, not empty-by-data:
+        # fall back to enumeration. Every other row stays where it was written.
         if edge_index.shape[0] == 0:
             return None
-        return edge_index, dist
+        src, tgt = edge_index[:, 0], edge_index[:, 1]
+        if edge_diff is not None:
+            implied = edge_diff.detach() - (pos.detach()[tgt] - pos.detach()[src])
+            vectors = pos[tgt] - pos[src] + implied
+            # Clamped before the sqrt, not after: a padded row whose two ends
+            # coincide is a zero vector, and ``norm``'s gradient there is NaN,
+            # which the ``0 * scale`` masking downstream would propagate into
+            # the autograd Coulomb forces. Value-identical on every live row
+            # (and the same form ``_periodic`` already uses).
+            dist = (vectors * vectors).sum(-1).clamp_min(1e-24).sqrt()
+        elif shifts is not None:
+            # Same clamp, same reason as the branch above: a padding row whose
+            # ends coincide under a zero shift is a zero vector.
+            shifted = pos[tgt] - pos[src] + shifts
+            dist = (shifted * shifted).sum(-1).clamp_min(1e-24).sqrt()
+        elif edge_dist is not None:
+            dist = edge_dist
+        else:  # unreachable — the guard above requires a diff or a distance
+            return None
+        live = src < tgt
+        if num_edges is not None:
+            # Compared as tensors: reading the live count out to Python would
+            # be a host sync, and slicing by it a data-dependent shape.
+            rows = torch.arange(edge_index.shape[0], device=edge_index.device)
+            live = live & (rows < num_edges)
+        if cutoff is not None:
+            live = live & (dist < cutoff) & (dist > 0)
+        return edge_index, dist, live
 
     def _open(
         self,
         pos: torch.Tensor,
         atom_batch: torch.Tensor,
         cutoff: float | None,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """All intramolecular half-pairs within ``cutoff`` (Å), open boundary.
+
+        Enumerates the upper triangle per molecule, filters by distance, and
+        returns an all-true ``live_mask`` — the row count therefore depends on
+        the geometry, which is why this path is eager-only.
+        """
         device = pos.device
         num_graphs = int(atom_batch[-1].item()) + 1
         counts = torch.bincount(atom_batch, minlength=num_graphs)
@@ -133,7 +203,7 @@ class NeighborListBuilder:
             within = (dist < cutoff) & (dist > 0)
             edge_index = edge_index[within]
             dist = dist[within]
-        return edge_index, dist
+        return edge_index, dist, torch.ones_like(dist, dtype=torch.bool)
 
     def _periodic(
         self,
@@ -141,7 +211,7 @@ class NeighborListBuilder:
         atom_batch: torch.Tensor,
         cell: torch.Tensor,
         cutoff: float,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         """molpy NeighborQuery (self) under PBC; keep intramolecular pairs only."""
         from molpy import Box, NeighborQuery
 
@@ -165,4 +235,4 @@ class NeighborListBuilder:
             return None
         edge_index = torch.stack([i, j], dim=1)
         dist = dist_sq.clamp(min=1e-24).sqrt()
-        return edge_index, dist
+        return edge_index, dist, torch.ones_like(dist, dtype=torch.bool)

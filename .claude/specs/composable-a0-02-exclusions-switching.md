@@ -1,6 +1,6 @@
 ---
 title: Per-class exclusion table, quintic LJ switch, fail-closed total charge (composable-a0-02)
-status: approved
+status: code-complete
 created: 2026-09-07
 chain: composable-a0
 ---
@@ -61,12 +61,12 @@ law: `.claude/notes/notes.md` topic `compile-no-graph-breaks`.
 
 ## Tasks
 
-- [ ] `ExclusionScales` / keyed `NonbondedScaling`; update all construction sites
-- [ ] `ExclusionTable` + `Potentials.bind_topology`; delete `_pair_scales` / `_mask_pairs_in`
-- [ ] quintic switch on `LJCutPotential` (energy + analytic force), mask-based
-- [ ] capacity-shaped `_from_placed`
-- [ ] fail-closed `graphs.total_charge` + eager Σq check
-- [ ] slow explain tests; regression script with capture header
+- [x] `ExclusionScales` / keyed `NonbondedScaling`; update all construction sites
+- [x] `ExclusionTable` + `Potentials.bind_topology`; delete `_pair_scales` / `_mask_pairs_in`
+- [x] quintic switch on `LJCutPotential` (energy + analytic force), mask-based
+- [x] capacity-shaped `_from_placed`
+- [x] fail-closed `graphs.total_charge` + eager Σq check
+- [x] slow explain tests (`-m slow`, in the mirrored unit modules; the regressions tier was deleted 2026-09-07)
 
 ## Testing
 

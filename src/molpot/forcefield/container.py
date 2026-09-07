@@ -25,7 +25,7 @@ from molpot.ir import (
     PotentialIR,
     ProperTorsionBag,
 )
-from molpot.ir.scaling import NonbondedScaling
+from molpot.ir.scaling import ExclusionScales, NonbondedScaling
 
 __all__ = ["ForceField", "OPLSAAForceField"]
 
@@ -38,6 +38,26 @@ class ForceField(MolpyForceField):
 
         pots = ff.to_potentials()   # overrides molpy native → torch Potentials
         E = pots.calc_energy(system)
+
+    Args:
+        name: Force-field name carried into molpy.
+        units: Unit set passed to molpy. ``"real"`` (the default) is the
+            LAMMPS convention: energy kcal/mol, length Å, charge ``e``.
+        nonbonded_scaling: Dimensionless 1–2 / 1–3 / 1–4 factors the nonbonded
+            terms apply to pairs one, two or three covalent bonds apart (see
+            :class:`~molpot.ir.NonbondedScaling`). Defaults to
+            ``NonbondedScaling()`` — the AMBER-style ``q`` 0 / 0 / 5⁄6 and
+            ``lj`` 0 / 0 / 0.5 — **not** to "no scaling"; a product form with
+            different conventions passes its own, as
+            :class:`OPLSAAForceField` does.
+
+    Attributes:
+        nonbonded_scaling: The scales above.
+            :meth:`~molpot.forcefield.Potentials.bind_topology` reads them
+            once per topology to build its
+            :class:`~molpot.forcefield.ExclusionTable`, so replacing this
+            attribute after a ``Potentials`` was bound does not reach the
+            table already in use.
     """
 
     def __new__(cls, name: str = "forcefield", units: str = "real", **_kwargs: Any):
@@ -428,18 +448,23 @@ class OPLSAAForceField(ForceField):
 
     Registers the OPLS-AA diagonal form on construction: harmonic bond and
     angle, ``dihedral:opls`` proper, ``improper:periodic``, ``pair:lj/cut``,
-    and ``pair:coulomb``. When ``nonbonded_scaling`` is omitted, binds
+    and ``pair:coulomb``. When ``nonbonded_scaling`` is omitted, binds the
     OPLS-AA 1–4 scales ``f14 = 1/2`` for both Coulomb and LJ
-    (``scale_q_14=scale_lj_14=0.5``); 1–2 / 1–3 remain 0. Explicit
-    ``nonbonded_scaling`` is kept as given (not silently replaced).
+    (``q.s14 == lj.s14 == 0.5``); the 1–2 and 1–3 scales remain ``0``, i.e.
+    directly bonded pairs and the two ends of a bond angle are excluded from
+    the nonbonded terms entirely. This differs from the
+    :class:`~molpot.ir.NonbondedScaling` default, whose 1–4 Coulomb factor is
+    the AMBER ``5⁄6``. An explicit ``nonbonded_scaling`` is kept as given (not
+    silently replaced).
 
-    Units follow LAMMPS real: energy kcal/mol, length Å, charge ``e``.
+    Units follow LAMMPS real: energy kcal/mol, length Å, charge ``e``. The
+    scale factors themselves are dimensionless.
 
     Args:
         name: Force-field name (default ``"OPLS-AA"``).
         units: Unit set passed to molpy (default ``"real"``).
-        nonbonded_scaling: Optional 1–2/1–3/1–4 scales; default is OPLS-AA
-            ``f14=0.5``.
+        nonbonded_scaling: Optional dimensionless 1–2 / 1–3 / 1–4 scales; the
+            default is the OPLS-AA ``f14 = 0.5`` pair above.
     """
 
     def __init__(
@@ -450,7 +475,10 @@ class OPLSAAForceField(ForceField):
         nonbonded_scaling: NonbondedScaling | None = None,
     ) -> None:
         if nonbonded_scaling is None:
-            nonbonded_scaling = NonbondedScaling(scale_q_14=0.5, scale_lj_14=0.5)
+            nonbonded_scaling = NonbondedScaling(
+                q=ExclusionScales(0.0, 0.0, 0.5),
+                lj=ExclusionScales(0.0, 0.0, 0.5),
+            )
         super().__init__(name, units, nonbonded_scaling=nonbonded_scaling)
         self.def_atomstyle("full")
         self.def_bondstyle("harmonic")

@@ -1,6 +1,6 @@
 ---
 slug: composable-a0-02-exclusions-switching
-status: approved
+status: code-complete
 criteria:
   - id: ac-001
     summary: exclusion scaling is keyed per interaction class
@@ -10,8 +10,10 @@ criteria:
       and triple("lj") == (0, 0, 0.5) by default; ExclusionTable.lookup(edge_index,
       "induced") raises KeyError whose message lists the declared kinds
       (tests/test_molpot/test_ir/test_scaling.py, test_forcefield/test_exclusions.py).
-    status: pending
-    last_checked: null
+    status: verified
+    last_checked: 2026-09-07
+    verified_by: impl
+    evidence: tests/test_molpot/test_ir/test_scaling.py (kinds/triple defaults, unknown kind KeyError) + test_forcefield/test_exclusions.py (lookup KeyError lists kinds)
   - id: ac-002
     summary: the table reproduces the pre-step pair scales exactly
     type: scientific
@@ -50,6 +52,8 @@ criteria:
       graphs.total_charge raises ValueError; Potentials.bind_topology raises
       ValueError when |sum_g q - total_charge_g| > 1e-6 e for any graph
       (test_parameterizer.py, test_potentials.py).
-    status: pending
-    last_checked: null
+    status: verified
+    last_checked: 2026-09-07
+    verified_by: impl
+    evidence: tests/test_molpot/test_forcefield/test_parameterizer.py (missing graphs.total_charge raises; total charge reaches the charge model) + test_potentials.py (bind_topology rejects Σq ≠ total_charge)
 ---

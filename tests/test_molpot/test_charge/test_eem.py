@@ -175,7 +175,16 @@ class TestParameterizerCharge:
                         "Z": torch.tensor([6, 8]),
                     },
                     batch_size=[2],
-                )
+                ),
+                # Neutral CO fragment, spelled out: a Parameterizer with a
+                # charge model refuses to assume ``Q = 0``.
+                "graphs": TensorDict(
+                    {
+                        "num_atoms": torch.tensor([2], dtype=torch.long),
+                        "total_charge": torch.zeros(1),
+                    },
+                    batch_size=[1],
+                ),
             },
             batch_size=[],
         )

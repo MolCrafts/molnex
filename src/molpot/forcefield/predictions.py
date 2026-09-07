@@ -240,7 +240,7 @@ class ForceFieldPredictions:
             shape ``()`` for a single graph (one molecule).
         """
         forcefield: ForceField = self.model(batch)
-        return forcefield.to_potentials().calc_energy(batch)
+        return self._bound_potentials(forcefield, batch).calc_energy(batch)
 
     def forces(self, batch: TensorDict) -> torch.Tensor:
         """Atomic forces ``F = −∂E/∂x`` at fixed graph-derived parameters.
@@ -272,7 +272,7 @@ class ForceFieldPredictions:
             ``(N, 3)`` in kcal mol⁻¹ Å⁻¹.
         """
         forcefield: ForceField = self.model(batch)
-        return forcefield.to_potentials().calc_energy_forces(batch)
+        return self._bound_potentials(forcefield, batch).calc_energy_forces(batch)
 
     def hessian(self, batch: TensorDict) -> torch.Tensor:
         """Dense Cartesian Hessian ``H_ij = ∂²E/∂x_i∂x_j`` via the injected derivation.
@@ -307,7 +307,7 @@ class ForceFieldPredictions:
             https://doi.org/10.1063/1.1750829
         """
         forcefield: ForceField = self.model(batch)
-        return self._hessian(batch, forcefield.to_potentials())
+        return self._hessian(batch, self._bound_potentials(forcefield, batch))
 
     def charges(self, batch: TensorDict) -> torch.Tensor:
         """Partial charges the model's charge equilibration wrote on the ForceField.
@@ -357,7 +357,7 @@ class ForceFieldPredictions:
         predictions: dict[str, torch.Tensor],
     ) -> None:
         """Assemble the declared Class-I terms once, then run the energy steps."""
-        potentials = forcefield.to_potentials()
+        potentials = self._bound_potentials(forcefield, batch)
         for step in self._energy_plan:
             step(batch, potentials, predictions)
 
@@ -369,6 +369,33 @@ class ForceFieldPredictions:
     ) -> None:
         """No declared prediction needs an energy — assemble no Potentials."""
         del batch, forcefield, predictions
+
+    def _bound_potentials(self, forcefield: ForceField, batch: TensorDict) -> Potentials:
+        """Assemble the declared terms and bind them to this batch's topology.
+
+        Every energy route here goes through this one call, so the bind is the
+        adapter's and never the energy path's. :meth:`~molpot.forcefield.Potentials.bind_topology`
+        builds the exclusion table and runs the eager, host-side
+        ``Σ_g q == graphs.total_charge`` check (S5); left to the lazy bind inside
+        the pair path, a bonded-only ForceField would never bind and never check
+        its charges, and a compiled energy path would trace the build as a graph
+        break on its first step.
+
+        Once **per batch**, which here is once per topology: a fresh
+        ``Potentials`` is assembled for every call, so the bound table never
+        outlives the batch it was built from.
+
+        Args:
+            forcefield: The ForceField ``model(batch)`` just filled.
+            batch: The batch about to be evaluated; its topology namespaces are
+                what the table is built from.
+
+        Returns:
+            The assembled :class:`~molpot.forcefield.Potentials`, already bound.
+        """
+        potentials = forcefield.to_potentials()
+        potentials.bind_topology(batch)
+        return potentials
 
     def _put_energy(
         self,

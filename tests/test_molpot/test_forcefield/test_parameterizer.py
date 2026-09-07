@@ -53,6 +53,27 @@ def _two_atom_bond_batch(
     )
 
 
+def _ion_batch(*, total_charge: float | None = None) -> TensorDict:
+    """Two atoms in one graph; ``graphs.total_charge`` present only when asked."""
+    graphs: dict[str, torch.Tensor] = {"num_atoms": torch.tensor([2], dtype=torch.long)}
+    if total_charge is not None:
+        graphs["total_charge"] = torch.tensor([total_charge])
+    return TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": torch.tensor([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]]),
+                    "Z": torch.tensor([8, 1], dtype=torch.long),
+                    "batch": torch.zeros(2, dtype=torch.long),
+                },
+                batch_size=[2],
+            ),
+            "graphs": TensorDict(graphs, batch_size=[1]),
+        },
+        batch_size=[],
+    )
+
+
 class _ConstantBondHead(nn.Module):
     def __init__(self, k: float, r0: float):
         super().__init__()
@@ -236,6 +257,15 @@ class TestParameterizer:
                     },
                     batch_size=[1],
                 ),
+                # Neutral molecule, spelled out: the charge model in
+                # ``_oplsaa_heads`` makes ``graphs.total_charge`` mandatory.
+                "graphs": TensorDict(
+                    {
+                        "num_atoms": torch.tensor([4], dtype=torch.long),
+                        "total_charge": torch.zeros(1),
+                    },
+                    batch_size=[1],
+                ),
             },
             batch_size=[],
         )
@@ -370,6 +400,33 @@ class TestParameterizer:
         )
         with pytest.raises(ValueError, match="atom features"):
             model(batch)
+
+    def test_charge_model_without_graphs_total_charge_raises(self):
+        """Fail-closed (S5): the silent neutral default is unreachable from here.
+
+        ``AtomicChargeModel.total_charge`` defaults to ``0.0``. Reaching that
+        default from a Parameterizer means an anion is equilibrated as a
+        neutral molecule and every downstream charge is wrong by a constant —
+        with nothing in the run record to say so.
+        """
+        model = Parameterizer(
+            _FakeEncoder({"atoms": torch.zeros(2, 4)}),
+            ForceField().def_pairstyle("coulomb"),
+            charge_model=_charge_model(),
+        )
+        with pytest.raises(ValueError, match="total_charge"):
+            model(_ion_batch())
+
+    def test_graphs_total_charge_reaches_the_charge_model(self):
+        """``Q = −1 e`` is forwarded, so the equilibrated charges sum to it."""
+        model = Parameterizer(
+            _FakeEncoder({"atoms": torch.zeros(2, 4)}),
+            ForceField().def_pairstyle("coulomb"),
+            charge_model=_charge_model(),
+        )
+        filled = model(_ion_batch(total_charge=-1.0))
+        charges = filled.params("atoms")["q"]
+        assert float(charges.sum()) == pytest.approx(-1.0, abs=1e-6)
 
     def test_polarizability_head_is_refused_until_composable_a1(self):
         """No induced-response style exists yet, so the head has nothing to fill."""

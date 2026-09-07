@@ -79,7 +79,10 @@ class Parameterizer(nn.Module):
             ``pair:lj/cut`` is registered.
         charge_model: :class:`~molpot.charge.AtomicChargeModel` that writes
             partial charges ``atoms.q`` (``e``) via EEM / QEq. Required when
-            ``pair:coulomb`` is registered.
+            ``pair:coulomb`` is registered. Setting it makes
+            ``graphs.total_charge`` a required batch field: :meth:`forward`
+            forwards it as ``write_forcefield(..., total_charge=...)`` and
+            never falls back to the charge model's neutral default.
         polarizability_head: Rejected — named in the signature only so a call
             written against the future polarizable profile fails with an
             explanation instead of a bare ``TypeError``. Polarizability is the
@@ -169,6 +172,9 @@ class Parameterizer(nn.Module):
             batch: Post-collate batch carrying ``atoms.Z`` and the topology
                 namespaces (``bonds`` / ``angles`` / ``propers`` /
                 ``impropers``) that the encoder and the parameter heads read.
+                When ``charge_model`` is set, ``graphs.total_charge`` ``(B,)``
+                in ``e`` is required as well and is forwarded to the charge
+                model.
 
         Returns:
             Filled :class:`ForceField` (copy-on-write). The stored
@@ -177,10 +183,13 @@ class Parameterizer(nn.Module):
 
         Raises:
             ValueError: A ``charge_model`` is configured but the encoder
-                produced no ``features["atoms"]``; or ``dihedral:opls``
-                proper output lacks ``k1..k4``.
+                produced no ``features["atoms"]``, or the batch carries no
+                ``graphs.total_charge`` — or carries it as something other
+                than a ``(B,)`` tensor of charges in ``e`` (fail-closed:
+                neutrality is never assumed); or ``dihedral:opls`` proper
+                output lacks ``k1..k4``.
             TypeError: The ``charge_model`` exposes no
-                ``write_forcefield(ff, atom_features, batch)``.
+                ``write_forcefield(ff, atom_features, batch, total_charge=…)``.
         """
         features = self._encode(batch)
         propers = self._proper_params(features)
@@ -198,9 +207,10 @@ class Parameterizer(nn.Module):
             write = getattr(self.charge_model, "write_forcefield", None)
             if not callable(write):
                 raise TypeError(
-                    "charge_model must provide write_forcefield(ff, atom_features, batch)"
+                    "charge_model must provide "
+                    "write_forcefield(ff, atom_features, batch, total_charge=…)"
                 )
-            filled = write(filled, atom_feats, batch)
+            filled = write(filled, atom_feats, batch, total_charge=self._total_charge(batch))
         return filled
 
     # --- private: encode & heads ---
@@ -280,6 +290,56 @@ class Parameterizer(nn.Module):
             except Exception:  # noqa: BLE001
                 continue
         return out or None
+
+    def _total_charge(self, batch: TensorDict | Mapping[str, Any]) -> torch.Tensor:
+        """Read the per-graph total charge ``(B,)`` required by ``charge_model``.
+
+        The *total charge* of a graph is the net charge of that molecule or
+        ion, the number the charge model constrains its per-atom partial
+        charges to sum to. Nothing here defaults it: a neutral molecule
+        declares an explicit ``0.0``.
+
+        Args:
+            batch: Post-collate batch expected to carry ``graphs.total_charge``
+                ``(B,)`` in elementary charges ``e`` — ``0.0`` entries for
+                neutral graphs, spelled out.
+
+        Returns:
+            Per-graph total charge ``(B,)`` in ``e``, forwarded to the charge
+            model untouched.
+
+        Raises:
+            ValueError: ``graphs.total_charge`` is absent, or is present as
+                something other than a tensor.
+        """
+        graphs_ns: object = (
+            batch["graphs"]
+            if isinstance(batch, (Mapping, TensorDict)) and "graphs" in batch
+            else None
+        )
+        total_charge: object = None
+        if isinstance(graphs_ns, TensorDict):
+            if "total_charge" in graphs_ns:
+                total_charge = graphs_ns["total_charge"]
+        elif isinstance(graphs_ns, Mapping):
+            total_charge = graphs_ns.get("total_charge")
+
+        if total_charge is None:
+            raise ValueError(
+                "charge_model is configured but the batch carries no "
+                "graphs.total_charge: a Parameterizer with a charge model "
+                "never assumes neutrality, because equilibrating an ion as a "
+                "neutral molecule shifts every partial charge by a constant "
+                "with nothing in the run record to say so. Provide "
+                "graphs.total_charge (B,) in e — write explicit zeros for "
+                "neutral graphs."
+            )
+        if not isinstance(total_charge, torch.Tensor):
+            raise ValueError(
+                "graphs.total_charge must be a (B,) tensor of charges in e, "
+                f"got {type(total_charge).__name__}"
+            )
+        return total_charge
 
     def _bond_params(self, features: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor] | None:
         if self.bond_head is None or "bonds" not in features:

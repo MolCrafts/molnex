@@ -42,6 +42,7 @@ from molpot.derivation import (
     StressDerivation,
 )
 from molpot.forcefield import (
+    ExclusionTable,
     ForceField,
     ForceFieldPredictions,
     ForceFieldSchemaView,
@@ -57,6 +58,7 @@ from molpot.ir import (
     AngleBag,
     BondBag,
     ChargeBag,
+    ExclusionScales,
     ImproperHarmonicBag,
     ImproperPeriodicBag,
     LJBag,
@@ -117,6 +119,8 @@ __all__ = [
     "EnergyAggregation",
     "EnergyHead",
     "ExclusionClass",
+    "ExclusionScales",
+    "ExclusionTable",
     "ForceDerivation",
     "ForceField",
     "ForceFieldPredictions",

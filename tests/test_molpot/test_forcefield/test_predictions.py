@@ -46,7 +46,13 @@ GOLDEN_Q = (0.25, -0.25)
 
 
 def _two_atom_bond_batch(*, r: float = BOND_R) -> TensorDict:
-    """One molecule: two bonded atoms separated by ``r`` Å along x̂."""
+    """One neutral molecule: two bonded atoms separated by ``r`` Å along x̂.
+
+    ``graphs.total_charge`` is an explicit ``0 e``: a :class:`Parameterizer`
+    carrying a ``charge_model`` is fail-closed on the field (spec
+    ``composable-a0-02`` §S5) and never assumes neutrality on the fixture's
+    behalf.
+    """
     pos = torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=DTYPE)
     return TensorDict(
         {
@@ -65,13 +71,20 @@ def _two_atom_bond_batch(*, r: float = BOND_R) -> TensorDict:
                 },
                 batch_size=[1],
             ),
+            "graphs": TensorDict(
+                {
+                    "num_atoms": torch.tensor([2], dtype=torch.long),
+                    "total_charge": torch.zeros(1, dtype=DTYPE),
+                },
+                batch_size=[1],
+            ),
         },
         batch_size=[],
     )
 
 
 def _two_molecule_bond_batch() -> TensorDict:
-    """Two copies of the two-atom molecule packed into one batch (B = 2)."""
+    """Two copies of the neutral two-atom molecule in one batch (B = 2)."""
     pos = torch.tensor(
         [
             [0.0, 0.0, 0.0],
@@ -95,6 +108,13 @@ def _two_molecule_bond_batch() -> TensorDict:
                 {
                     "atomi": torch.tensor([0, 2], dtype=torch.long),
                     "atomj": torch.tensor([1, 3], dtype=torch.long),
+                },
+                batch_size=[2],
+            ),
+            "graphs": TensorDict(
+                {
+                    "num_atoms": torch.tensor([2, 2], dtype=torch.long),
+                    "total_charge": torch.zeros(2, dtype=DTYPE),
                 },
                 batch_size=[2],
             ),
@@ -175,8 +195,10 @@ class _NoQChargeModel(nn.Module):
         forcefield: ForceField,
         atom_features: torch.Tensor,
         batch: TensorDict,
+        *,
+        total_charge: torch.Tensor | None = None,
     ) -> ForceField:
-        del atom_features, batch
+        del atom_features, batch, total_charge
         return forcefield
 
     def forward(self, *_: object, **__: object) -> torch.Tensor:
@@ -263,6 +285,54 @@ class TestForceFieldPredictions:
         out = ForceFieldPredictions(model, keys=("q",))(_two_atom_bond_batch())
         assert set(out) == {"q"}
         assert assembled == []
+
+    def test_potentials_are_bound_before_their_first_energy_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The adapter owns the bind; the energy path must never trigger it.
+
+        :meth:`Potentials.bind_topology` builds the exclusion table and runs the
+        eager, host-side ``Σ_g q == graphs.total_charge`` check (S5). Left to the
+        lazy call inside ``_scaled_pairs``, both happen on the *first nonbonded*
+        evaluation: a bonded-only ForceField — the shape this fixture uses —
+        never binds at all and never checks its charges, and a compiled energy
+        path traces the build as a graph break on its first step. The adapter
+        assembles the ``Potentials``, so the adapter binds it.
+
+        Observed through two class-level wrappers rather than
+        :func:`inspect.stack`: a stack probe pins the *call chain* (which
+        private method invoked the bind) and would break on any refactor that
+        renames or inlines ``_scaled_pairs``, while what this test actually
+        cares about is the **order** — one bind per assembly, and the table
+        already present when the energy call is entered. Reading
+        ``_exclusions`` at that entry states exactly that, and stays true
+        however the bind is routed.
+        """
+        binds: list[str] = []
+        bound_on_entry: list[bool] = []
+        bind_topology = Potentials.bind_topology
+        calc_energy_forces = Potentials.calc_energy_forces
+
+        def recording_bind(
+            self: Potentials, system: TensorDict, *, pos: torch.Tensor | None = None
+        ) -> None:
+            binds.append(repr(self.forcefield.style_names()))
+            bind_topology(self, system, pos=pos)
+
+        def recording_energy_forces(
+            self: Potentials, system: TensorDict, *, pos: torch.Tensor | None = None
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            bound_on_entry.append(self._exclusions is not None)
+            return calc_energy_forces(self, system, pos=pos)
+
+        monkeypatch.setattr(Potentials, "bind_topology", recording_bind)
+        monkeypatch.setattr(Potentials, "calc_energy_forces", recording_energy_forces)
+
+        adapter = ForceFieldPredictions(_bond_model(), keys=("energy", "forces"))
+        adapter(_two_atom_bond_batch())
+
+        assert len(binds) == 1
+        assert bound_on_entry == [True]
 
     def test_charge_solve_runs_once_per_call(self) -> None:
         """One model forward per call: ``q`` is read, never re-solved."""

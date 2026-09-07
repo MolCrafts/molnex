@@ -12,9 +12,11 @@ label each style declares in its
 :class:`~molpot.contract.InteractionContract`. Grouping, never a second energy
 path, so the parts always sum back to the total.
 
-The labels ``S1`` / ``S3`` (the two spec requirements this contract layer
-implements) and ``F2`` / ``F6`` (the two silent-zero findings the raises below
-close) are defined in ``.claude/notes/composable-potentials.md``.
+The labels ``S1`` / ``S3`` / ``S5`` (the spec requirements this layer
+implements: module contracts, no double counting, and the constraints — among
+them the explicitly enforced total charge of :meth:`Potentials.bind_topology`)
+and ``F2`` / ``F6`` (the two silent-zero findings the raises below close) are
+defined in ``.claude/notes/composable-potentials.md``.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from molpot.derivation.protocol import (
     write_forces,
     write_virial,
 )
+from molpot.forcefield.exclusions import ExclusionTable
 from molpot.forcefield.neighbor_list import NeighborListBuilder
 from molpot.forcefield.pair_terms import (
     CoulombOpenPotential,
@@ -45,7 +48,6 @@ from molpot.forcefield.pair_terms import (
 )
 from molpot.forcefield.schema import ForceFieldSchemaView, PotentialMeta
 from molpot.ir import ProperTorsionBag
-from molpot.ir.scaling import NonbondedScaling
 from molpot.potentials import (
     AngleHarmonic,
     BondHarmonic,
@@ -61,6 +63,12 @@ if TYPE_CHECKING:
 
 __all__ = ["Potentials"]
 
+#: Largest per-graph deviation of ``Σ_g q`` from the declared
+#: ``graphs.total_charge`` that :meth:`Potentials.bind_topology` accepts (e).
+#: Sized for fp32 accumulation over a few thousand atoms, far below the
+#: 0.01 e a drifting learned charge head produces.
+_TOTAL_CHARGE_TOL = 1e-6
+
 
 class Potentials(BasePotential):
     """Classical Class-I energy as a molpot :class:`BasePotential` (``nn.Module``).
@@ -73,14 +81,21 @@ class Potentials(BasePotential):
     Bonded terms use existing harmonic / torsion kernels. Nonbonded terms are
     concrete Potential objects that own their cutoffs:
 
-    * ``pair:lj/cut`` → :class:`LJCutPotential` (``cutoff`` on the Potential)
-    * ``pair:coulomb`` open → :class:`CoulombOpenPotential`
+    * ``pair:lj/cut`` → :class:`LJCutPotential`. Style options, both in Å and
+      both owned by the Potential: ``cutoff`` — the radius ``r_c`` beyond
+      which a pair contributes nothing (default ``10.0``) — and the optional
+      ``switch_start`` ``r_s`` with ``0 < r_s < r_c``, which tapers the energy
+      smoothly to zero over ``[r_s, r_c]`` with the quintic switch instead of
+      truncating it at ``r_c``. Omitting ``switch_start`` keeps the hard
+      truncation.
+    * ``pair:coulomb`` open → :class:`CoulombOpenPotential` (optional
+      ``cutoff`` in Å; ``prefactor`` in kcal Å mol⁻¹ e⁻²)
     * ``pair:coulomb`` + cell → :class:`CoulombPeriodicPotential`
-      (``calculator=ewald|pme|p3m`` on the Potential)
+      (``calculator=ewald|pme|p3m``, ``smearing`` in Å, on the Potential)
 
     ::
 
-        ff.def_pairstyle("lj/cut", cutoff=12.0)
+        ff.def_pairstyle("lj/cut", cutoff=12.0, switch_start=10.0)
         ff.def_pairstyle("coulomb", calculator="pme", smearing=5.0)
         pots = ff.to_potentials()
         E = pots.calc_energy(system)
@@ -113,6 +128,8 @@ class Potentials(BasePotential):
         self.coulomb_open: CoulombOpenPotential | None = None
         self.coulomb_periodic: CoulombPeriodicPotential | None = None
         self.mlip = getattr(forcefield, "_mlip", None)
+        self._exclusions: ExclusionTable | None = None
+        self._bound_topology: tuple[int, ...] | None = None
         self._check_composition()
         self._assemble_pair_potentials()
         self._assemble_bonded()
@@ -155,7 +172,17 @@ class Potentials(BasePotential):
         ff = self.forcefield
         if "lj/cut" in ff.pair_styles():
             opts = ff.style_options("pair:lj/cut")
-            self.lj = LJCutPotential(cutoff=float(opts.get("cutoff", 10.0)))
+            # ``switch_start`` is the second half of the ``lj/cut`` cutoff option
+            # and travels with it: dropped here, the quintic taper on
+            # :class:`LJCutPotential` would be unreachable from any ForceField and
+            # every assembled Class-I model would keep the hard truncation.
+            # ``None`` (no window) stays ``None``; the ``0 < r_s < r_c`` check is
+            # the term's, so a bad window raises there rather than twice.
+            switch_start = opts.get("switch_start")
+            self.lj = LJCutPotential(
+                cutoff=float(opts.get("cutoff", 10.0)),
+                switch_start=None if switch_start is None else float(switch_start),
+            )
         if "coulomb" in ff.pair_styles() or ff.has_coulomb():
             opts = ff.style_options("pair:coulomb")
             # Periodic calculator is chosen when cell is present at energy time;
@@ -289,6 +316,81 @@ class Potentials(BasePotential):
             data[FORCES_KEY] = forces
             return data
         return energy
+
+    def bind_topology(self, system: Any, *, pos: torch.Tensor | None = None) -> None:
+        """Build this topology's exclusion table, and check the declared net charge.
+
+        Called **once per topology** — the connectivity analogue of
+        :meth:`molix.schema.CellBound.bind_cell`, which is called once per
+        cell. :meth:`_scaled_pairs` calls it lazily on the first nonbonded
+        evaluation, so MD and a single-batch score need no explicit call; a
+        caller that reuses one ``Potentials`` over a **different** topology
+        must call it again, because positions may change freely between energy
+        calls but the bond / angle / torsion columns may not. Repeated calls
+        are harmless: the table is rebuilt from scratch each time.
+
+        The bind records a **shape-level** fingerprint of what it read — the
+        atom count and the column counts of ``bonds`` / ``angles`` /
+        ``propers``, Python ints off ``.shape``, no tensor content and no host
+        sync — and every later energy call compares it (:meth:`_scaled_pairs`)
+        and raises rather than answering out of a stale table. Its limit is the
+        one that keeps positions free: a different topology of the *same*
+        shape (a re-indexed molecule, another conformer's neighbour of equal
+        column counts) is indistinguishable here and remains the caller's
+        contract. Never silently rebinding is the point — a rebuilt table
+        would be one more quietly wrong energy.
+
+        Compiling the energy path? Bind before entering the compiled region —
+        the lazy call inside would trace the build (and the host-side check
+        below) as a graph break on the first step.
+
+        The total-charge check lives here rather than in the force loop
+        precisely because here it is affordable: eager, per graph and
+        host-side, once per topology instead of once per step.
+
+        Args:
+            system: Batch / mapping carrying ``atoms.pos`` ``(N, 3)`` Å and the
+                topology namespaces (``bonds`` / ``angles`` / ``propers``).
+                ``graphs.total_charge`` ``(B,)`` in e is checked when present.
+            pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``. Only
+                their count and device are read.
+
+        Raises:
+            ValueError: The ForceField carries a ``q`` table and the batch
+                declares ``graphs.total_charge``, but some graph's ``Σ_g q``
+                misses its declared total by more than
+                :data:`_TOTAL_CHARGE_TOL` (S5, fail-closed). A charge head that
+                drifts off the constraint changes the molecule's net charge,
+                and under PBC an Ewald background term absorbs that silently
+                instead of reporting it.
+        """
+        p = self._pos(system, pos)
+        self._bound_topology = self._topology_fingerprint(system, p.shape[0])
+        self._exclusions = ExclusionTable(
+            n_atoms=p.shape[0],
+            scaling=self.forcefield.nonbonded_scaling,
+            bond_index=self._bond_index(system),
+            angle_index=self._angle_index(system),
+            proper_index=self._proper_index(system),
+            device=p.device,
+        )
+        charges = (self.forcefield.params("atoms") or {}).get("q")
+        declared = self._ns_tensor(self._namespace(system, "graphs"), "total_charge")
+        if charges is None or declared is None or declared.numel() == 0:
+            return
+        q = charges.detach()
+        atom_batch = self._atom_batch(system, p.shape[0], p.device)
+        summed = torch.zeros(declared.shape[0], dtype=q.dtype, device=q.device).index_add_(
+            0, atom_batch, q
+        )
+        drift = (summed - declared.detach().to(summed)).abs()
+        graph = int(torch.argmax(drift))
+        if float(drift[graph]) > _TOTAL_CHARGE_TOL:
+            raise ValueError(
+                f"graph {graph}: sum of atoms.q is {float(summed[graph]):.8g} e but "
+                f"graphs.total_charge declares {float(declared[graph]):.8g} e "
+                f"(tolerance {_TOTAL_CHARGE_TOL:g} e)"
+            )
 
     def bind_cell(self, cell: torch.Tensor) -> None:
         """Hand the live simulation cell to the mlip, if it keeps cell state.
@@ -888,8 +990,59 @@ class Potentials(BasePotential):
         *,
         cutoff: float | None,
         scale_kind: str,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        """Half neighbor list ``(edge_index, dist, scales)`` for one pair term."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """Half neighbor list ``(edge_index, dist, scales, live)`` for one pair term.
+
+        The list keeps the capacity the builder returned it at — ``live`` is the
+        boolean mask of the rows that contribute, not a selection to apply.
+        ``None`` when there is no list at all (fewer than two atoms, or an
+        enumeration that produced no pair). ``scales`` is the exclusion factor
+        of every row including the dead ones (which read ``1.0``), so the term
+        multiplies instead of slicing.
+
+        The one seam every pair term reaches for, so it is where the bound
+        table is checked against the batch. Binds the topology on first use
+        (:meth:`bind_topology`) — eager convenience, not a rebind — and from
+        then on compares the batch's shape-level fingerprint against the bound
+        one, raising when they differ instead of scaling this batch's pairs by
+        the previous topology's relations. A ``Potentials`` reused over a
+        different topology must be rebound explicitly.
+
+        Args:
+            system: Batch / mapping carrying ``atoms.pos`` and the topology
+                namespaces, as :meth:`bind_topology` reads them.
+            pos: Positions ``(N, 3)`` in Å the list is enumerated from.
+            cutoff: Real-space cutoff ``r_c`` in Å of the asking term, or
+                ``None`` to keep every pair the builder produced.
+            scale_kind: Interaction class of the asking term — one of the
+                ForceField's :meth:`~molpot.ir.NonbondedScaling.kinds`
+                (``"q"`` for Coulomb, ``"lj"`` for Lennard-Jones).
+
+        Returns:
+            ``(edge_index, dist, scales, live)`` — pairs ``(E, 2)``,
+            separations ``(E,)`` in Å, dimensionless scale factors ``(E,)``
+            and the boolean liveness mask ``(E,)`` — or ``None`` when the
+            builder produced no list.
+
+        Raises:
+            ValueError: The batch's topology has a different shape than the
+                bound one (atom count, or the ``bonds`` / ``angles`` /
+                ``propers`` column counts). The message names
+                :meth:`bind_topology`, which is the fix.
+        """
+        if self._exclusions is None:
+            self.bind_topology(system, pos=pos)
+        else:
+            current = self._topology_fingerprint(system, pos.shape[0])
+            if current != self._bound_topology:
+                raise ValueError(
+                    "this Potentials is bound to a topology with fingerprint "
+                    f"{self._bound_topology} but the batch has {current} "
+                    "(n_atoms, bonds, angles, propers; -1 = namespace absent); its "
+                    "exclusion table is never rebuilt implicitly — call "
+                    "bind_topology(system) for the new topology"
+                )
+        assert self._exclusions is not None
         atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
         cell = self._cell(system)
         edges = self._namespace(system, "edges")
@@ -898,17 +1051,9 @@ class Potentials(BasePotential):
         )
         if built is None:
             return None
-        edge_index, dist = built
-        scales = self._pair_scales(
-            system,
-            pos.shape[0],
-            edge_index,
-            pos.device,
-            pos.dtype,
-            self.forcefield.nonbonded_scaling,
-            scale_kind,
-        )
-        return edge_index, dist, scales
+        edge_index, dist, live = built
+        scales = self._exclusions.lookup(edge_index, scale_kind, dtype=pos.dtype)
+        return edge_index, dist, scales, live
 
     def _lj_energy(
         self,
@@ -920,12 +1065,12 @@ class Potentials(BasePotential):
         assert self.lj is not None
         epsilon, sigma = self._lj_params()
         # Keep LJ on its own cutoff list. Reusing an unlimited Coulomb half-list
-        # forced ``_pair_scales`` (and distance storage) onto all intramolecular
-        # pairs even though LJ only needs ``r < cutoff``.
+        # forced the exclusion lookup (and distance storage) onto all
+        # intramolecular pairs even though LJ only needs ``r < cutoff``.
         pairs = self._scaled_pairs(system, pos, cutoff=self.lj.cutoff, scale_kind="lj")
         if pairs is None:
             return zero, zero
-        edge_index, dist, scales = pairs
+        edge_index, dist, scales, live = pairs
         num_graphs = self._num_graphs(system)
         atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
         return self.lj.energy(
@@ -936,6 +1081,7 @@ class Potentials(BasePotential):
             scales=scales,
             edge_batch=atom_batch[edge_index[:, 0]] if num_graphs > 1 else None,
             num_graphs=num_graphs,
+            edge_mask=live,
         )
 
     def _lj_energy_forces(
@@ -951,7 +1097,7 @@ class Potentials(BasePotential):
         pairs = self._scaled_pairs(system, pos, cutoff=self.lj.cutoff, scale_kind="lj")
         if pairs is None:
             return (zero, zero), pos.new_zeros((n_atoms, 3))
-        edge_index, dist, scales = pairs
+        edge_index, dist, scales, live = pairs
         num_graphs = self._num_graphs(system)
         atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
         return self.lj.energy_forces(
@@ -963,6 +1109,7 @@ class Potentials(BasePotential):
             scales=scales,
             edge_batch=atom_batch[edge_index[:, 0]] if num_graphs > 1 else None,
             num_graphs=num_graphs,
+            edge_mask=live,
         )
 
     def _coulomb_energy(
@@ -982,7 +1129,7 @@ class Potentials(BasePotential):
             pairs = self._scaled_pairs(system, pos, cutoff=cut, scale_kind="q")
             if pairs is None:
                 return zero
-            edge_index, dist, scales = pairs
+            edge_index, dist, scales, live = pairs
             num_graphs = self._num_graphs(system)
             atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
             return self.coulomb_open.energy(
@@ -992,6 +1139,7 @@ class Potentials(BasePotential):
                 scales=scales,
                 edge_batch=atom_batch[edge_index[:, 0]] if num_graphs > 1 else None,
                 num_graphs=num_graphs,
+                edge_mask=live,
             )
 
         assert self.coulomb_periodic is not None
@@ -1007,7 +1155,11 @@ class Potentials(BasePotential):
             dist = torch.zeros(0, dtype=pos.dtype, device=pos.device)
             scales = torch.zeros(0, dtype=pos.dtype, device=pos.device)
         else:
-            edge_index, dist, scales = pairs
+            edge_index, dist, scales, live = pairs
+            # The periodic term still selects its real-space rows by
+            # ``scales > 0``; folding liveness into the scale drops the dead
+            # rows through that same test (a0-03 rewrites the term itself).
+            scales = scales * live.to(scales.dtype)
         return self.coulomb_periodic.energy(
             positions=pos,
             charges=q,
@@ -1067,69 +1219,6 @@ class Potentials(BasePotential):
             return int(atom_batch[-1].detach().to("cpu")) + 1
         return 1
 
-    @staticmethod
-    def _undirected_pair_keys(index: torch.Tensor, n_atoms: int) -> torch.Tensor:
-        """Map endpoint index ``(2|3|4, M)`` → undirected key ``min*n+max``."""
-        lo = torch.minimum(index[0].long(), index[-1].long())
-        hi = torch.maximum(index[0].long(), index[-1].long())
-        return lo * n_atoms + hi
-
-    @classmethod
-    def _mask_pairs_in(
-        cls,
-        pair_keys: torch.Tensor,
-        term_index: torch.Tensor,
-        n_atoms: int,
-    ) -> torch.Tensor:
-        """Boolean mask of ``pair_keys`` that appear as undirected ``term_index`` ends."""
-        keys = torch.unique(cls._undirected_pair_keys(term_index, n_atoms))
-        if keys.numel() == 0:
-            return torch.zeros(pair_keys.shape[0], dtype=torch.bool, device=pair_keys.device)
-        keys, _ = torch.sort(keys)
-        idx = torch.searchsorted(keys, pair_keys).clamp(max=keys.numel() - 1)
-        return keys[idx] == pair_keys
-
-    def _pair_scales(
-        self,
-        system: Any,
-        n: int,
-        edge_index: torch.Tensor,
-        device: torch.device,
-        dtype: torch.dtype,
-        scaling: NonbondedScaling,
-        scale_kind: str,
-    ) -> torch.Tensor:
-        scale = torch.ones(edge_index.shape[0], device=device, dtype=dtype)
-        if edge_index.numel() == 0:
-            return scale
-        pair_lo = torch.minimum(edge_index[:, 0], edge_index[:, 1])
-        pair_hi = torch.maximum(edge_index[:, 0], edge_index[:, 1])
-        pair_keys = pair_lo * n + pair_hi
-
-        if scale_kind == "q":
-            s12, s13, s14 = (
-                float(scaling.scale_q_12),
-                float(scaling.scale_q_13),
-                float(scaling.scale_q_14),
-            )
-        else:
-            s12, s13, s14 = (
-                float(scaling.scale_lj_12),
-                float(scaling.scale_lj_13),
-                float(scaling.scale_lj_14),
-            )
-        bond_index = self._bond_index(system)
-        if bond_index is not None and bond_index.numel() > 0:
-            scale[self._mask_pairs_in(pair_keys, bond_index, n)] = s12
-        angle_index = self._angle_index(system)
-        if angle_index is not None and angle_index.numel() > 0:
-            scale[self._mask_pairs_in(pair_keys, angle_index, n)] = s13
-        proper_index = self._proper_index(system)
-        if proper_index is not None and proper_index.numel() > 0:
-            proper_mask = self._mask_pairs_in(pair_keys, proper_index, n)
-            scale[proper_mask & (scale == 1.0)] = s14
-        return scale
-
     # --- topology readers ---
 
     def _namespace(self, system: Any, name: str) -> Any | None:
@@ -1165,6 +1254,37 @@ class Potentials(BasePotential):
         if isinstance(system, Mapping) and "pos" in system:
             return system["pos"]
         raise ValueError("calc_energy requires pos or system atoms.pos")
+
+    def _topology_fingerprint(self, system: Any, n_atoms: int) -> tuple[int, ...]:
+        """Shape-level identity of a batch's topology: ``(N, n_b, n_a, n_p)``.
+
+        Column *counts* only — the last dimension of each index block, or
+        ``-1`` when the namespace is absent — read off ``.shape``, so nothing
+        here touches a tensor value: positions move every MD step and a fresh
+        batch of the same molecule brings new tensors, and both must keep the
+        bound table. It is what :meth:`_scaled_pairs` compares, and it cannot
+        distinguish two topologies of equal shape (see :meth:`bind_topology`).
+
+        Built through the same readers :meth:`bind_topology` hands the table,
+        so the guard can never disagree with the table it guards about what a
+        bond / angle / proper column is. They stack their columns; only the
+        shape of the result is read here, which a compiled trace folds to a
+        constant and drops.
+
+        Args:
+            system: The batch whose ``bonds`` / ``angles`` / ``propers``
+                namespaces are read, exactly as :meth:`bind_topology` reads them.
+            n_atoms: Atom count ``N`` the table would be keyed against.
+
+        Returns:
+            ``(n_atoms, n_bonds, n_angles, n_propers)``, each ``-1`` when that
+            namespace carries no usable index block.
+        """
+        counts = [int(n_atoms)]
+        for reader in (self._bond_index, self._angle_index, self._proper_index):
+            index = reader(system)
+            counts.append(-1 if index is None else int(index.shape[-1]))
+        return tuple(counts)
 
     def _bond_index(self, system: Any) -> torch.Tensor | None:
         bonds = self._namespace(system, "bonds")

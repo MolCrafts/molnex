@@ -41,7 +41,7 @@ invisible to it.
 - `src/molix/ff_export/openmm_adapter.py`: `NonbondedForce` record gains
   `nonbondedMethod: PME`, `cutoffDistance`, `ewaldErrorTolerance`,
   `useSwitchingFunction`, `switchingDistance` — text goldens only.
-- `adapter.py` / `force_spec.py`: scaling via `NonbondedScaling.as_dict()`.
+- `adapter.py` / `force_spec.py`: scaling via `NonbondedScaling.as_dict()` — iterate `kinds()` instead of the hard-coded `q`/`lj` pair at `adapter.py:95-96`, so an `induced` kind cannot be silently dropped.
 - `src/molix/ff_export/lammps_writer.py`: `write_settings(..., skip_pair_style=True)`
   (molpy `write_lammps_forcefield(skip_pair_style=)`), `write_pair_block(path,
   spec: ForceSpec)`, `write_manifest(path, manifest: ModelManifest)`.

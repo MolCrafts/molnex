@@ -74,7 +74,7 @@ class TestLJEnergy:
         from molpot.ir.scaling import NonbondedScaling
 
         ff = (
-            ForceField(name="lj", nonbonded_scaling=NonbondedScaling(scale_lj_12=0.0))
+            ForceField(name="lj", nonbonded_scaling=NonbondedScaling())
             .def_pairstyle("lj/cut", cutoff=10.0)
             .with_params(
                 atoms={

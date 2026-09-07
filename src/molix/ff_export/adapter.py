@@ -63,16 +63,44 @@ class BackendAdapter(ABC):
 
     @staticmethod
     def scaling_dict(scaling: NonbondedScaling | None) -> dict[str, float] | None:
-        """Serialize 1–2 / 1–3 / 1–4 nonbonded scales, or ``None``."""
+        """Flatten the 1–2 / 1–3 / 1–4 nonbonded scales for serialization.
+
+        A pair of atoms is *1–2* when one covalent bond separates them, *1–3*
+        when two do and *1–4* when three do; a force field damps or removes
+        those nonbonded pairs because its bonded terms already describe them
+        (see :class:`~molpot.ir.NonbondedScaling`). Every backend spells the
+        six resulting factors differently, so the flat spelling lives here in
+        the export layer rather than on the physics type: the values are read
+        through :meth:`~molpot.ir.NonbondedScaling.triple`, which is the same
+        per-class ``(s12, s13, s14)`` accessor
+        :meth:`~molpot.ir.NonbondedScaling.as_dict` reports nested. Only the
+        ``q`` (Coulomb) and ``lj`` (Lennard-Jones) classes are flattened: an
+        interaction class a later model declares — ``induced`` for a
+        polarizable force field — needs its own key spelling added here and is
+        otherwise absent from the exported spec.
+
+        Args:
+            scaling: The force field's per-interaction-class scales, or
+                ``None`` when the IR carries none.
+
+        Returns:
+            ``{"scale_q_12", "scale_q_13", "scale_q_14", "scale_lj_12",
+            "scale_lj_13", "scale_lj_14"}`` → dimensionless factor, where
+            ``0`` removes the pair and ``1`` keeps it in full. ``None`` when
+            ``scaling`` is ``None``, which a backend must treat as "no
+            exclusion policy declared", not as "no exclusions".
+        """
         if scaling is None:
             return None
+        q12, q13, q14 = scaling.triple("q")
+        lj12, lj13, lj14 = scaling.triple("lj")
         return {
-            "scale_q_12": float(scaling.scale_q_12),
-            "scale_q_13": float(scaling.scale_q_13),
-            "scale_q_14": float(scaling.scale_q_14),
-            "scale_lj_12": float(scaling.scale_lj_12),
-            "scale_lj_13": float(scaling.scale_lj_13),
-            "scale_lj_14": float(scaling.scale_lj_14),
+            "scale_q_12": q12,
+            "scale_q_13": q13,
+            "scale_q_14": q14,
+            "scale_lj_12": lj12,
+            "scale_lj_13": lj13,
+            "scale_lj_14": lj14,
         }
 
     @abstractmethod

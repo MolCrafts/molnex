@@ -445,6 +445,11 @@ molix.export (Exporter, AOTInductor .pt2) · molix.compile (Compiler, torch.comp
 molix.engine (EngineAdapter/EngineForward/StaticForward, export_for_lammps) ─→ interface/ (C++ pair_style molnex)
 ```
 
+One documented exception to the one-way rule: `molix.ff_export` imports
+`molpot.ir` (`PotentialIR`, `NonbondedScaling.triple`) and
+`molpot.forcefield.container.ForceField` to write LAMMPS / OpenMM files —
+the only `molix → molpot` edge, recorded in `.claude/notes/architecture.md`.
+
 Notes on cross-package edges (verified against imports):
 - `molzoo` consumes `molrep.readout`/`molrep.interaction` and `molpot.derivation`
   (PiNet's energy/force head is co-located with the encoder by design;
