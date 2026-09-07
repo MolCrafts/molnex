@@ -41,6 +41,8 @@ from typing import Any, Literal, overload
 import torch
 import torch.nn as nn
 
+from molpot.derivation.stress import symmetrize_strain_grad
+
 # ---------------------------------------------------------------------------
 # functorch backend (only)
 # ---------------------------------------------------------------------------
@@ -136,15 +138,6 @@ def autograd_forces_from_energy(
     return -grad
 
 
-def _symmetrize_strain_grad(grad: torch.Tensor) -> torch.Tensor:
-    """``∂E/∂ε`` for a symmetric strain: double off-diagonal, leave diagonal.
-
-    Matches :class:`~molpot.composition.sonata.Sonata` / the finite-difference
-    convention ``ε[α,β] = ε[β,α] = dh``.
-    """
-    return grad + grad.transpose(-1, -2) - torch.diag_embed(torch.diagonal(grad, dim1=-2, dim2=-1))
-
-
 def autograd_forces_and_virial(
     energy_fn: Callable[..., torch.Tensor],
     pos: torch.Tensor,
@@ -196,7 +189,7 @@ def autograd_forces_and_virial(
         g_pos = torch.zeros_like(pos_leaf)
     if g_strain is None:
         g_strain = torch.zeros_like(strain)
-    return energy, -g_pos, _symmetrize_strain_grad(g_strain)
+    return energy, -g_pos, symmetrize_strain_grad(g_strain)
 
 
 _BACKENDS: dict[str, Callable] = {

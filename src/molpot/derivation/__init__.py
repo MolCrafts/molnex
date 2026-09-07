@@ -46,7 +46,7 @@ from molpot.derivation.force import (
 from molpot.derivation.force_readout import ForceReadout
 from molpot.derivation.hessian import HessianDerivation
 from molpot.derivation.kernels import func_force_pass, grad_force_pass
-from molpot.derivation.stress import StressDerivation
+from molpot.derivation.stress import StressDerivation, symmetrize_strain_grad
 
 __all__ = [
     "EnergyAggregation",
@@ -62,4 +62,5 @@ __all__ = [
     "functorch_forces",
     "functorch_forces_with_aux",
     "grad_force_pass",
+    "symmetrize_strain_grad",
 ]

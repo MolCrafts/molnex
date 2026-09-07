@@ -73,7 +73,10 @@ EDGE_DIST_CLAMP_MIN: float = 1e-6
 #: Per-atom forces ``= -∂E/∂pos`` (``batch["atoms", "forces"]``).
 FORCES_KEY: tuple[str, str] = ("atoms", "forces")
 #: Graph-level virial ``W = ∂E/∂ε`` (``batch["graphs", "virial"]``), ``(3, 3)``
-#: or ``(B, 3, 3)`` in the energy unit. Stress is ``W / V``.
+#: or ``(B, 3, 3)`` in the energy unit. Cauchy stress is ``σ = W / V``: ``ε`` is
+#: the symmetric strain and a shear component is **not** doubled. Producers
+#: route their raw strain gradient through
+#: ``molpot.derivation.symmetrize_strain_grad``.
 VIRIAL_KEY: tuple[str, str] = ("graphs", "virial")
 #: Per-atom positions (``batch["atoms", "pos"]``).
 POS_KEY: tuple[str, str] = ("atoms", "pos")

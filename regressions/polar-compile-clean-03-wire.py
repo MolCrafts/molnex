@@ -31,7 +31,12 @@ default (``molix.compile.register_inductor_fallbacks``), so a grad-enabled
 is asserted in ``tests/test_molpot/test_forcefield/test_potentials.py``, not
 here. ``Compiler(donated_buffer=True)`` re-imposes ``create_graph=False``.
 
-Goldens: captured 2026-09-03 on the pre-change eager path of this tree
+The virial follows ``molpot.derivation.symmetrize_strain_grad``:
+``W = ∂E/∂ε`` over the symmetric strain, ``σ = W / V``, shear **not** doubled.
+The shear goldens were halved on 2026-09-07 when that convention replaced the
+engineering-shear one; the diagonal is unchanged.
+
+Goldens: shear recaptured 2026-09-07, the rest 2026-09-03, on the eager path of this tree
 (molnex @ ``feat/oplsaa-parameterizer``), CPU, fp64, with
 ``PYTHONPATH=src python regressions/polar-compile-clean-03-wire.py``. They are
 literals, not a live oracle: nothing here imports or shells out to ``mace`` /
@@ -104,10 +109,10 @@ GOLDEN_FORCES = [  # eV/Å
     [72.631961477376, 80.7912241007415, -74.29444344148871],
     [-47.03645134705394, -22.772675139309783, 46.469172908408986],
 ]
-GOLDEN_VIRIAL = [  # eV
-    [92.69162173838573, 185.17057416977644, -122.42540937615657],
-    [185.17057416977644, 92.24134246717855, -168.7560303841212],
-    [-122.42540937615657, -168.7560303841212, 130.59631884206516],
+GOLDEN_VIRIAL = [  # eV, Cauchy convention (see the module docstring)
+    [92.69162173838515, 92.58528708488821, -61.21270468807831],
+    [92.58528708488821, 92.24134246717816, -84.37801519206066],
+    [-61.21270468807831, -84.37801519206066, 130.59631884206496],
 ]
 ATOL = 1e-10
 

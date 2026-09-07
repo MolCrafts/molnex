@@ -199,6 +199,46 @@ default and MACE with no knob at all).
 ---
 
 <!-- mol:note:topic:test-tiers-orthogonal -->
+## [2026-09-07] Virial / stress convention: Cauchy `σ = W/V`, shear not doubled (user rule)
+
+**Context.** Every strain path in the repo built a full 3×3 strain leaf, applied
+`ε_sym = (s + sᵀ)/2` inside the graph, then post-processed the gradient with
+`g + gᵀ − diag(g)` — the *engineering-shear* convention (`γ_αβ = 2ε_αβ`, the
+`(α,β)`/`(β,α)` pair counted as one variable). That doubles every off-diagonal
+component relative to the Cauchy stress. It reached the LAMMPS virial, the
+MACE-Polar benchmark's "ours vs mace-torch" comparison (where it showed up as a
+~2× shear disagreement I first misread as a sign error), and the FD tests, which
+were self-consistently doubled on *both* sides and therefore never caught it.
+
+**Decision (user).** molnex maintains **one** convention and everything adapts
+to it: `W = ∂E/∂ε` over the symmetric strain tensor, so `dE = Σ_αβ W_αβ dε_αβ`
+runs over all nine entries and a shear `W_αβ` is **not** doubled;
+`σ = W / V`. This is the `Σ r ⊗ f` virial and what LAMMPS / mace-torch report.
+
+**Where it lives.** `molpot.derivation.symmetrize_strain_grad` (defined in
+`derivation/stress.py`) is the single definition — `0.5 * (g + gᵀ)`, which for a
+strain-symmetric energy only removes finite-precision asymmetry. Consumers:
+`autograd_forces_and_virial` (MACE/cuEq virial), `StressDerivation`,
+`Sonata` (inline, same expression). Any new strain path routes through it.
+
+**Consequences.**
+- Off-diagonal virial/stress components are now half their pre-2026-09-07
+  values; diagonals (and therefore `BerendsenBarostat`, which reads only
+  `virial.trace()`) are unchanged.
+- `regressions/polar-compile-clean-03-wire.py`'s `GOLDEN_VIRIAL` shear entries
+  were recaptured; the ratio old/new was exactly 2.000 off-diagonal, 1.000 on
+  the diagonal — the cleanest possible confirmation that only the convention
+  moved.
+- FD tests that perturb `ε_ab` and `ε_ba` together must divide the off-diagonal
+  difference by 2; that halving is now written out in `test_ewald.py`,
+  `test_sonata_periodic.py` and the MACE FD-virial test.
+- Debt found and fixed on the way: `StressDerivation` had no mirror test at all
+  and divided by `volume.view(-1, 1, 1)`, silently adding a leading axis for an
+  unbatched `(3, 3)` cell. Now `unsqueeze(-1).unsqueeze(-1)`, with
+  `tests/test_molpot/test_derivation/test_stress.py`.
+
+---
+
 ## [2026-09-03] Test suite: two tiers, orthogonal unit tests only (user rule)
 
 **Rule (operator, 2026-09-03).** `tests/` holds unit tests only — one

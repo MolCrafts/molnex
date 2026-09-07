@@ -515,23 +515,11 @@ class Sonata(nn.Module):
             stress_eps = torch.func.grad(energy_of_strain)(strain0)
             cell_orig = cell0
             # ``stress_eps`` is ``∂E/∂strain[a, b] = ∂E/∂sym_eps[a, b]``
-            # (chain rule through ``sym_eps = (strain + strainᵀ)/2``).
-            # The standard physics convention treats ε as a *symmetric*
-            # tensor with ``ε_αβ = ε_βα`` as a single variable, so
-            # ``σ_αβ = (1/V) ∂E/∂ε_αβ`` counts the (α, β) and (β, α)
-            # components together for off-diagonal: ``σ_αβ = (1/V) ·
-            # 2 · ∂E/∂sym_eps[a, b]`` for ``α ≠ β`` and unchanged for
-            # ``α = β``. Since ``stress_eps`` is symmetric (it inherits
-            # the ``sym_eps`` symmetry through the chain rule),
-            # ``stress_eps + stress_epsᵀ - diag(stress_eps)`` realizes
-            # this convention exactly: doubles off-diagonal, leaves
-            # diagonal unchanged. This matches the FD strain-perturbation
-            # convention ``ε[a, b] = ε[b, a] = dh``.
-            stress_eps_sym = (
-                stress_eps
-                + stress_eps.transpose(-1, -2)
-                - torch.diag_embed(torch.diagonal(stress_eps, dim1=-2, dim2=-1))
-            )
+            # (chain rule through ``sym_eps = (strain + strainᵀ)/2``), which is
+            # the Cauchy stress numerator: ``σ_αβ = (1/V) ∂E/∂ε_αβ``, no
+            # doubling of the shear. Symmetrising only removes the asymmetry a
+            # finite-precision backward can leave behind.
+            stress_eps_sym = 0.5 * (stress_eps + stress_eps.transpose(-1, -2))
             volume = torch.linalg.det(cell_orig).abs()
             out["stress"] = stress_eps_sym / volume.unsqueeze(-1).unsqueeze(-1)
 

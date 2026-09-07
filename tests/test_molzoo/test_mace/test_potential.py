@@ -710,17 +710,14 @@ class TestMacePotential:
             with torch.no_grad():
                 return float(pots.calc_energy(frame).sum())
 
-        # `_symmetrize_strain_grad` reports shear under the convention that
-        # perturbing ε_αβ moves ε_βα with it (matching Sonata's finite
-        # difference), so an off-diagonal is twice ∂E/∂ε_αβ. The diagonal is
-        # untouched. Both halves are pinned here: the doubling is the part
-        # that silently disagrees with anyone applying σ = W/V from a paper.
+        # Cauchy convention throughout: ``W_αβ = ∂E/∂ε_αβ`` with no doubled
+        # shear, so ``σ = W / V`` is the stress a paper or LAMMPS means. The
+        # off-diagonals are the half that used to be twice this.
         for i, j in ((0, 0), (1, 1), (2, 2), (0, 1), (0, 2)):
             delta = torch.zeros(3, 3, dtype=torch.float64)
             delta[i, j] = eps
             fd = (strained_energy(delta) - strained_energy(-delta)) / (2 * eps)
-            expected = fd if i == j else 2.0 * fd
-            assert virial[i, j].item() == pytest.approx(expected, abs=2e-4, rel=1e-3)
+            assert virial[i, j].item() == pytest.approx(fd, abs=2e-4, rel=1e-3)
 
     def test_forces_match_central_differences(
         self, matpes_potential: MacePotential, cluster: TensorDict

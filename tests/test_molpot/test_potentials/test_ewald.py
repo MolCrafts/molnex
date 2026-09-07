@@ -307,9 +307,10 @@ def test_periodic_stress_fd_synthetic_multipoles_frozen_grid() -> None:
     energy = out["pot"]
     V = float(torch.linalg.det(cell).abs())
     (stress_eps,) = torch.autograd.grad(energy, strain, create_graph=False)
-    # Symmetric strain convention (off-diagonal counts ε_αβ = ε_βα as one
-    # variable): doubles off-diagonal autograd, leaves diagonal alone.
-    stress_eps_sym = stress_eps + stress_eps.T - torch.diag_embed(torch.diagonal(stress_eps))
+    # molnex protocol: Cauchy stress σ = W / V, W = ∂E/∂ε over the
+    # *symmetric* strain — no off-diagonal doubling. See
+    # ``molpot.derivation.symmetrize_strain_grad``.
+    stress_eps_sym = 0.5 * (stress_eps + stress_eps.T)
     sigma_auto = stress_eps_sym / V
 
     # Central FD over each independent symmetric component (a ≤ b).
@@ -339,7 +340,10 @@ def test_periodic_stress_fd_synthetic_multipoles_frozen_grid() -> None:
                 Q=Q,
                 kvec_indices=nvec,
             )["pot"].item()
-            sigma_fd[a, b] = (E_plus - E_minus) / (2.0 * dh) / V
+            # The deformation moves ε_ab and ε_ba together, so an
+            # off-diagonal difference counts the (a,b)/(b,a) pair twice.
+            pair = 1.0 if a == b else 2.0
+            sigma_fd[a, b] = (E_plus - E_minus) / (2.0 * dh) / V / pair
             sigma_fd[b, a] = sigma_fd[a, b]
 
     # Relative error on components meaningfully above noise.
@@ -376,7 +380,7 @@ def test_periodic_stress_dynamic_grid_fails_without_freeze() -> None:
     energy = out["pot"]
     V = float(torch.linalg.det(cell).abs())
     (stress_eps,) = torch.autograd.grad(energy, strain, create_graph=False)
-    stress_eps_sym = stress_eps + stress_eps.T - torch.diag_embed(torch.diagonal(stress_eps))
+    stress_eps_sym = 0.5 * (stress_eps + stress_eps.T)
     sigma_auto = stress_eps_sym / V
 
     dh = 1e-4
@@ -390,7 +394,10 @@ def test_periodic_stress_dynamic_grid_fails_without_freeze() -> None:
             I_m = eye3 - eps_p
             E_plus = pot.forward(q=q, pos=pos @ I_p.T, cell=I_p @ cell, mu=mu, Q=Q)["pot"].item()
             E_minus = pot.forward(q=q, pos=pos @ I_m.T, cell=I_m @ cell, mu=mu, Q=Q)["pot"].item()
-            sigma_fd[a, b] = (E_plus - E_minus) / (2.0 * dh) / V
+            # The deformation moves ε_ab and ε_ba together, so an
+            # off-diagonal difference counts the (a,b)/(b,a) pair twice.
+            pair = 1.0 if a == b else 2.0
+            sigma_fd[a, b] = (E_plus - E_minus) / (2.0 * dh) / V / pair
             sigma_fd[b, a] = sigma_fd[a, b]
 
     mask = sigma_fd.abs() > 1e-6

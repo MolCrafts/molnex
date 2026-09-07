@@ -466,7 +466,13 @@ class TestStressFD:
                     E_minus = sonata(batch_minus, kvec_indices=nvec)["energy"].sum()
 
                 deriv = (E_plus - E_minus) / (2.0 * dh)
-                sigma_fd[a, b] = deriv / V
+                # The deformation moves ε_ab *and* ε_ba by dh, so for a shear
+                # the difference counts the pair twice. Cauchy stress is
+                # σ_ab = (1/V) ∂E/∂ε_ab with ε the symmetric tensor, so the
+                # off-diagonal difference is halved. (molnex reported the
+                # doubled form until 2026-09-07; σ = W/V now needs no fixup.)
+                pair = 1.0 if a == b else 2.0
+                sigma_fd[a, b] = deriv / V / pair
                 sigma_fd[b, a] = sigma_fd[a, b]
 
         ref = sigma_fd
