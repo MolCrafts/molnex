@@ -14,19 +14,16 @@ contract vocabulary are defined in ``.claude/notes/composable-potentials.md``
 and :mod:`molpot.contract`.
 
 Neighbour lists reaching these terms are **fixed-capacity**: they carry dead
-padding rows past their live prefix. In :class:`LJCutPotential` and
-:class:`CoulombOpenPotential` those rows, and live rows beyond the cutoff, are
-removed by multiplying their contribution by zero, never by ``tensor[mask]``
-indexing — the output shape of a boolean index depends on the data, which
-forces a dynamo graph break on the force path (a point where ``torch.compile``
-must fall back to the eager interpreter; ``.claude/notes/notes.md`` topic
-``compile-no-graph-breaks``). Those two therefore take an ``edge_mask``.
-
-:class:`CoulombPeriodicPotential` is the one **documented exception**: it
-still selects its real-space rows with ``tensor[mask]``, so it is eager-only
-and takes no ``edge_mask`` — its caller folds liveness into the ``scales`` it
-passes. Making the periodic term capacity-shaped belongs to the periodic
-Coulomb step (``composable-a0-03``).
+padding rows past their live prefix. Those rows, and live rows beyond the
+cutoff, are removed by multiplying their contribution by zero, never by
+``tensor[mask]`` indexing — the output shape of a boolean index depends on the
+data, which forces a dynamo graph break on the force path (a point where
+``torch.compile`` must fall back to the eager interpreter;
+``.claude/notes/notes.md`` topic ``compile-no-graph-breaks``). Every term here
+therefore takes an ``edge_mask``: :class:`LJCutPotential` and
+:class:`CoulombOpenPotential` turn it into a multiplicative weight,
+:class:`CoulombPeriodicPotential` hands it to its calculator as a
+``pair_mask``.
 """
 
 from __future__ import annotations
@@ -37,6 +34,11 @@ import torch
 
 from molpot.potentials.elec.calculators import EwaldCalculator, P3MCalculator, PMECalculator
 from molpot.potentials.elec.calculators.calculator import Calculator
+from molpot.potentials.elec.lib.kvectors import (
+    generate_kvectors_for_ewald,
+    get_ns_ewald,
+    get_ns_mesh,
+)
 from molpot.potentials.elec.potentials import CoulombPotential
 from molpot.potentials.elec.prefactors import kcalmol_A
 from molpot.potentials.vdw.lj126 import lj126_pair_energy_split, lorentz_berthelot
@@ -427,23 +429,54 @@ class CoulombPeriodicPotential:
     The pair potential owns smearing / mesh parameters; the calculator is
     selected by algorithm name (not a product brand).
 
+    **The reciprocal shape is frozen, the vectors are not.** How many
+    k-vectors (or mesh points) the sum runs over is fixed once by
+    :meth:`bind_cell` and never moves again; the vectors themselves are
+    rebuilt from the live lattice on every :meth:`energy` call, so a barostat
+    step sums the box it is actually in. A shape sized off the live cell would
+    read three lattice norms back to the host each step — a graph break on the
+    force path — and would make the sum's own strain derivative discontinuous
+    wherever the grid gained a point.
+
     Args:
         smearing: Gaussian splitting width in Å. Larger values move work from
             the real-space sum into the reciprocal one.
-        calculator: Which reciprocal-space algorithm runs — ``"ewald"``,
-            ``"pme"`` or ``"p3m"``.
+        calculator: Which reciprocal-space algorithm runs — ``"ewald"`` (every
+            k-vector summed explicitly, the small-box reference), ``"pme"`` or
+            ``"p3m"`` (both on an FFT mesh). Constructed directly, this term
+            defaults to ``"ewald"``; assembled from a ``pair:coulomb`` style it
+            gets ``"pme"`` instead, which is the default
+            :class:`~molpot.forcefield.potentials.Potentials` applies under a
+            cell.
         lr_wavelength: Shortest reciprocal-space wavelength resolved by the
-            ``"ewald"`` sum, in Å.
+            ``"ewald"`` sum, in Å. Ignored by ``"pme"`` / ``"p3m"``.
         mesh_spacing: Grid spacing of the ``"pme"`` / ``"p3m"`` mesh, in Å.
+            Ignored by ``"ewald"``.
         prefactor: Coulomb constant ``k_e``; defaults to ``kcalmol_A``
             ``≈ 332.0637`` kcal Å mol⁻¹ e⁻².
         real_space_cutoff: Cutoff of the real-space part in Å. Defaults to
             ``3 × smearing``, beyond which the short-ranged remainder is
             negligible.
+        capacity_factor: Dimensionless head-room on the frozen shape: the grid
+            is sized for a cell expanded isotropically by this factor, so an
+            NPT run that swells by up to it never has to rebuild anything.
+            The default ``1.0`` sizes for the bound box exactly — the NVT
+            contract, and the smallest sum that resolves it. It is **not**
+            free head-room: a larger factor freezes a larger shape, which adds
+            k-vectors to the ``"ewald"`` sum and refines the ``"pme"`` /
+            ``"p3m"`` mesh, so the *same* cell is summed more finely and its
+            energy moves — an accuracy knob as much as a capacity one, and a
+            number to hold fixed between two runs that are compared. Nothing
+            bounds it per axis yet (the ``max_axis_index`` ceiling
+            :class:`~molpot.potentials.gto.kspace.KSpaceGrid` carries — finding
+            F19, which routes the ceiling to the k-space unification), so an
+            oversized factor is discovered only as the memory it takes.
 
     Raises:
-        ValueError: ``smearing`` is not positive, or ``calculator`` is not one
-            of ``ewald`` / ``pme`` / ``p3m``.
+        ValueError: ``smearing`` is not positive, ``calculator`` is not one
+            of ``ewald`` / ``pme`` / ``p3m``, or ``capacity_factor`` is below
+            ``1`` (a grid coarser than the bound cell asks for would drop
+            k-vectors that lie inside the cutoff).
     """
 
     def __init__(
@@ -455,19 +488,24 @@ class CoulombPeriodicPotential:
         mesh_spacing: float = 1.0,
         prefactor: float = kcalmol_A,
         real_space_cutoff: float | None = None,
+        capacity_factor: float = 1.0,
     ) -> None:
         if smearing <= 0:
             raise ValueError("smearing must be positive")
+        if capacity_factor < 1.0:
+            raise ValueError(f"capacity_factor must be >= 1, got {capacity_factor}")
         self.smearing = float(smearing)
         self.calculator_name = calculator
         self.lr_wavelength = float(lr_wavelength)
         self.mesh_spacing = float(mesh_spacing)
+        self.capacity_factor = float(capacity_factor)
         # real-space neighbor cutoff; default ~3*smearing when unset
         self.real_space_cutoff = (
             float(real_space_cutoff) if real_space_cutoff is not None else 3.0 * self.smearing
         )
         self.potential = CoulombPotential(smearing=self.smearing, prefactor=prefactor)
         self._calc: Calculator = self._build_calculator()
+        self._bound_ns: tuple[int, int, int] | None = None
 
     def _build_calculator(self) -> Calculator:
         name = self.calculator_name
@@ -479,6 +517,94 @@ class CoulombPeriodicPotential:
             return P3MCalculator(self.potential, mesh_spacing=self.mesh_spacing)
         raise ValueError(f"unknown electrostatics calculator {name!r}; expected ewald|pme|p3m")
 
+    def _reciprocal_shape(self, cell: torch.Tensor) -> torch.Tensor:
+        """Per-axis grid counts ``(3,)`` the lattice ``cell`` asks for.
+
+        The rule itself lives with the k-vectors it sizes —
+        :func:`~molpot.potentials.elec.lib.kvectors.get_ns_ewald` and
+        :func:`~molpot.potentials.elec.lib.kvectors.get_ns_mesh`, which are
+        also what an *unbound* calculator sizes itself at, so a grid frozen at
+        ``capacity_factor = 1`` is exactly the grid that was there before any
+        binding. This method only picks the one the named algorithm uses, and
+        it stays a tensor expression so the eager half (:meth:`bind_cell`,
+        which reads the result back to fix the frozen shape) and the in-graph
+        half (:meth:`energy`, which compares against that shape without ever
+        touching the host) can never disagree about which cells a grid serves.
+
+        Args:
+            cell: Lattice vectors ``(3, 3)`` in Å, rows being the vectors.
+
+        Returns:
+            The three counts ``(3,)`` as a long tensor on ``cell``'s device.
+            :meth:`bind_cell` is the one site that reads them back as Python
+            ints; :meth:`energy` compares them as tensors.
+        """
+        if self.calculator_name == "ewald":
+            return get_ns_ewald(cell, self.lr_wavelength)
+        return get_ns_mesh(cell, self.mesh_spacing)
+
+    def bind_cell(self, cell: torch.Tensor) -> None:
+        """Freeze the reciprocal shape on the first call; capacity-check on every later one.
+
+        Implements :class:`molix.schema.CellBound`, whose four clauses — the
+        idempotence, the host-work budget, the never-retain rule and the
+        never-truncate rule — are stated there and have their only home there.
+
+        What is specific to this term: the first call reads the three lattice
+        norms back to the host (the one-time sizing sync clause 2 allows) and
+        sizes the grid for a cell expanded by ``capacity_factor``. Every later
+        call only re-checks that the lattice it is handed still fits, and pays
+        exactly **one** scalar host read to do it — the per-axis comparison
+        stays the tensor expression :meth:`energy` uses, and only the single
+        ``bool`` of its reduction crosses to the host, which is the whole
+        budget clause 2 allows a later bind. The shape is never resized,
+        neither up (that is what ``capacity_factor`` was for) nor down (a
+        contracted cell is served by a finer grid than it asked for, at no cost
+        but time). Only the integer counts are kept; :meth:`energy` re-reads
+        the live ``(3, 3)`` tensor it is handed and re-checks the same
+        predicate in-graph, with no host read at all.
+
+        Args:
+            cell: Lattice vectors ``(3, 3)`` in Å, rows being the vectors. A
+                batched ``(1, 3, 3)`` cell is sliced by the caller.
+
+        Raises:
+            ValueError: ``cell`` is not ``(3, 3)``.
+            RuntimeError: The cell needs a finer grid than the frozen shape
+                provides — raise ``capacity_factor`` (or build a new term) and
+                bind again.
+        """
+        if cell.shape != (3, 3):
+            raise ValueError(f"cell must be (3, 3), got {tuple(cell.shape)}")
+        # ``detach``: a virial pass binds with a strain-tracking cell, and the
+        # grid shape is metadata about the lattice, never part of the graph.
+        lattice = cell.detach()
+        frozen = self._bound_ns
+        if frozen is None:
+            expanded = self._reciprocal_shape(lattice * self.capacity_factor)
+            self._bound_ns = (int(expanded[0]), int(expanded[1]), int(expanded[2]))
+            if isinstance(self._calc, PMECalculator):
+                self._calc.bind(self._bound_ns)
+            return
+        needed = self._reciprocal_shape(lattice)
+        # One scalar read, not three: the per-axis comparison is the same
+        # tensor expression the in-graph guard at the end of ``energy`` uses,
+        # and only the single ``bool`` of its reduction crosses to the host.
+        # A later bind fires once per barostat update, so three ``int()``
+        # syncs there were three more than the budget.
+        overflow = (needed[0] > frozen[0]) | (needed[1] > frozen[1]) | (needed[2] > frozen[2])
+        if bool(overflow):
+            # Already raising: the detail may sync, in one read rather than
+            # per axis, to name the shape asked for and the axes over it.
+            asked = tuple(needed.tolist())
+            over = [axis for axis in range(3) if asked[axis] > frozen[axis]]
+            raise RuntimeError(
+                f"periodic Coulomb k-space overflow: this cell asks for {asked} grid points "
+                f"but the shape frozen at bind is {frozen} (axes {over}). Raise "
+                f"capacity_factor (currently {self.capacity_factor}) and bind again, or "
+                f"build a new CoulombPeriodicPotential."
+            )
+
     def energy(
         self,
         *,
@@ -487,86 +613,174 @@ class CoulombPeriodicPotential:
         cell: torch.Tensor,
         edge_index: torch.Tensor,
         distances: torch.Tensor,
-        scales: torch.Tensor,
+        edge_mask: torch.Tensor,
+        excluded_pairs: torch.Tensor,
+        excluded_scales: torch.Tensor,
     ) -> torch.Tensor:
-        """Total electrostatic energy (real + reciprocal).
+        """Total electrostatic energy — real + reciprocal, less the exclusion correction.
 
-        Fully excluded pairs (``scale == 0``) are dropped from the real-space
-        list before the sum, and the remaining scale factors are applied as a
-        correction after it: the calculator's unscaled short-range pair
-        energies are subtracted and the scaled ones added back. The
-        reciprocal-space part stays unscaled.
+        **Symbols.** ``r`` is a pair separation in Å, ``q_i`` a partial charge
+        in elementary charges ``e``, ``k_e`` the Coulomb constant
+        (``prefactor``, kcal Å mol⁻¹ e⁻²) and ``σ`` the Gaussian splitting
+        width ``smearing`` in Å — *not* the Lennard-Jones diameter that
+        :class:`LJCutPotential` calls ``σ``. ``erf`` is the error function and
+        ``erfc = 1 − erf`` its complement; ``erfc`` decays to zero over a few
+        ``σ``, which is what makes the first half of the split below
+        short-ranged. ``r_c`` is ``real_space_cutoff``, and the subscript ``p``
+        indexes the rows of ``excluded_pairs`` — one scaled pair each, with
+        endpoints ``i``, ``j``, separation ``r_p`` and scale ``s_p``.
 
-        Unlike :meth:`LJCutPotential.energy` and
-        :meth:`CoulombOpenPotential.energy`, this method takes no ``edge_mask``
-        and selects rows with ``tensor[mask]``, so it is **eager-only**: a
-        boolean selection has a data-dependent output shape and breaks a
-        compiled graph. A caller handing it a fixed-capacity list must
-        therefore zero the ``scales`` of the dead rows first (multiply by the
-        liveness mask), which is how the ``scale > 0`` selection below drops
-        them. Making this term capacity-shaped belongs to
-        ``composable-a0-03``.
+        **The identity.** The Ewald split ``1/r = erfc(r/σ√2)/r + erf(r/σ√2)/r``
+        sends the second half to the reciprocal sum, which runs over *every*
+        pair of the cell: an atom's Gaussian charge cloud is felt by its bonded
+        partner exactly as by any other neighbour. Removing a bonded pair — or
+        attenuating it to its declared scale ``s`` — therefore costs the
+        **whole** Coulomb term, not only the real-space ``erfc`` share::
+
+            E(excluded) = E(unexcluded) − Σ_p (1 − s_p) k_e q_i q_j / r_p
+
+        for a pair inside the real-space cutoff, and only its reciprocal share
+        ``(1 − s_p) k_e q_i q_j erf(r_p/σ√2) / r_p`` for one beyond it: past
+        ``r_c`` the real-space sum never added the ``erfc`` half, so subtracting
+        it would over-correct. That is exactly LAMMPS ``special_bonds`` under
+        ``coul/long`` — which subtracts the full ``1/r`` of an excluded pair
+        from the k-space-inclusive total — and OpenMM's ``NonbondedForce``
+        exceptions.
+
+        The correction runs over the **topology's** pair table, never over the
+        neighbour list. An excluded pair that has drifted past ``r_c`` is absent
+        from the list yet still fully present in the reciprocal sum, so a
+        list-driven correction would silently stop correcting it; and the pair
+        count is a property of the molecule, so it is fixed for the whole run.
+
+        **Boundary — one image per excluded pair.** Each row of
+        ``excluded_pairs`` is corrected at its *minimum image*: the single
+        nearest periodic copy of the partner, taken from the live lattice
+        below. LAMMPS ``special_bonds`` under ``coul/long`` instead excludes
+        **every** image of the pair, keyed by atom tag. The two agree as long
+        as the shortest box dimension stays at or above ``2 r_c``, which is
+        where the real-space sum can hold at most one image of a given pair.
+        In a smaller box the same excluded pair enters the real-space sum at
+        more than one image and only the nearest is corrected here — that
+        regime is outside this term's contract (finding F15 in
+        ``.claude/notes/composable-potentials.md``), not a case it detects.
+
+        Every tensor keeps the shape it arrived with. Dead padding rows and rows
+        beyond ``r_c`` are removed by the boolean ``pair_mask`` handed to the
+        calculator, never by ``tensor[mask]`` — a boolean selection's output
+        shape depends on the data, which breaks a compiled graph. Pairs at
+        ``s = 0`` stay in the real-space sum; the correction below is what takes
+        them out again.
+
+        **The reciprocal sum.** Its k-vectors are regenerated here from the
+        ``cell`` that arrived, at the shape :meth:`bind_cell` froze — so the
+        lattice may move under a barostat while the number of terms, and hence
+        the traced graph, does not. An unbound term binds itself on this first
+        call, which is a host read and therefore an eager convenience: bind
+        before entering a compiled region. A cell needing a finer grid than the
+        frozen one returns ``NaN`` instead of a truncated sum.
 
         Args:
             positions: Atom positions ``(N, 3)`` in Å.
             charges: Per-atom partial charges ``(N,)`` in elementary charges
                 ``e``.
             cell: Lattice vectors ``(3, 3)`` in Å, rows being the vectors.
-            edge_index: Half-list pairs ``(E, 2)`` within the real-space cutoff.
-            distances: Pair separations ``(E,)`` in Å.
-            scales: Per-pair scale factors ``(E,)``, dimensionless, with the
-                liveness of a fixed-capacity list already folded in — a dead
-                row must arrive at ``0`` so the ``scale > 0`` selection drops
-                it.
+            edge_index: Half-list pairs ``(E, 2)`` at the capacity the list was
+                written at — dead padding rows included.
+            distances: Pair separations ``(E,)`` in Å, padding rows included.
+            edge_mask: Live-row mask ``(E,)`` of that capacity-shaped list.
+                Combined with ``r < r_c`` into the calculator's ``pair_mask``.
+            excluded_pairs: Endpoints ``(P, 2)`` of every scaled pair of the
+                topology — :attr:`ExclusionTable.pairs
+                <molpot.forcefield.exclusions.ExclusionTable.pairs>`. A topology
+                that excludes nothing passes ``(0, 2)``, which sums to zero: a
+                static no-op, not a Python branch.
+            excluded_scales: The matching factors ``s_p`` ``(P,)``,
+                dimensionless — ``0`` for a fully excluded 1-2 / 1-3 pair
+                (two atoms sharing a bond, or the two ends of a bond angle),
+                and for a 1-4 pair (the ends of a torsion) the force field's
+                own 1-4 electrostatic scale: ``5/6`` with the AMBER default of
+                :class:`~molpot.ir.NonbondedScaling`, ``1/2`` under
+                :class:`~molpot.forcefield.container.OPLSAAForceField`.
 
         Returns:
             Scalar total electrostatic energy ``()``, in kcal/mol for the
-            default prefactor.
+            default prefactor — or ``NaN`` when ``cell`` has outgrown the
+            frozen reciprocal shape. One cell, one number: the reciprocal sum
+            takes no ``edge_batch``, and
+            :meth:`~molpot.forcefield.potentials.Potentials.calc_energy`
+            refuses a batch of more than one graph rather than charging each of
+            them this box's energy.
+
+        Raises:
+            ValueError: On the lazy first bind only, when ``cell`` is not
+                ``(3, 3)``.
         """
-        # Drop fully excluded pairs from real-space list
-        keep = scales > 0
-        edge_index = edge_index[keep]
-        distances = distances[keep]
-        scales = scales[keep]
-
-        # Restrict to real-space cutoff on the Potential
-        within = distances < self.real_space_cutoff
-        edge_index = edge_index[within]
-        distances = distances[within]
-        scales = scales[within]
-
-        q = charges
-        charges_c = q.unsqueeze(-1)
+        pair_mask, _ = _live_pairs(distances, self.real_space_cutoff, edge_mask)
         cell = cell.to(dtype=positions.dtype, device=positions.device)
-        periodic = torch.tensor([True, True, True], device=positions.device)
-
-        if edge_index.numel() == 0:
-            # k-space only path: pass empty neighbors
-            empty_idx = torch.zeros(0, 2, dtype=torch.long, device=positions.device)
-            empty_d = torch.zeros(0, dtype=positions.dtype, device=positions.device)
-            phi = self._calc(
-                charges=charges_c,
-                cell=cell,
-                positions=positions,
-                neighbor_indices=empty_idx,
-                neighbor_distances=empty_d,
-                periodic=periodic,
-            )
-            return (charges_c * phi).sum()
-
+        frozen = self._bound_ns
+        if frozen is None:
+            # Eager convenience for a caller that never bound one: the shape
+            # has to be frozen off *some* lattice and the first one seen is the
+            # only candidate. It reads the host, so bind before compiling.
+            self.bind_cell(cell)
+            frozen = self._bound_ns
+            assert frozen is not None  # bind_cell either sets it or raises
+        charge_column = charges.unsqueeze(-1)
         phi = self._calc(
-            charges=charges_c,
+            charges=charge_column,
             cell=cell,
             positions=positions,
             neighbor_indices=edge_index,
             neighbor_distances=distances,
-            periodic=periodic,
+            periodic=torch.ones(3, dtype=torch.bool, device=positions.device),
+            pair_mask=pair_mask,
+            kvectors=(
+                generate_kvectors_for_ewald(cell=cell, ns=frozen)
+                if self.calculator_name == "ewald"
+                else None
+            ),
         )
-        e_full = (charges_c * phi).sum()
-        if torch.allclose(scales, torch.ones_like(scales)):
-            return e_full
-        # Adjust SR for 1–4 scales (k-space remains unscaled)
-        v_sr = self.potential.sr_from_dist(distances)
-        e_sr_calc = (q[edge_index[:, 0]] * q[edge_index[:, 1]] * v_sr).sum()
-        e_sr_scaled = (scales * q[edge_index[:, 0]] * q[edge_index[:, 1]] * v_sr).sum()
-        return e_full - e_sr_calc + e_sr_scaled
+        total = (charge_column * phi).sum()
+
+        # Minimum image of every scaled pair, from the *live* cell. The pairs
+        # are intramolecular, so the nearest image is the one the neighbour list
+        # would have enumerated. Taken by fractional round-trip rather than from
+        # a stored shift: ``round`` has zero derivative, so ``r_p`` reduces to
+        # the plain displacement under ``∂/∂pos`` and still carries the lattice
+        # under ``∂/∂ε`` — which is what keeps this correction inside both the
+        # force and the virial.
+        source, target = excluded_pairs[:, 0], excluded_pairs[:, 1]
+        # ``inv_ex`` on CUDA — the same convention as
+        # :func:`~molpot.potentials.elec.lib.kvectors._generate_kvectors`:
+        # ``inv`` checks its info tensor on the host, which is a sync on the
+        # force path; ``inv_ex`` leaves the check to the caller (a singular
+        # cell is not a lattice, and the NaN it produces poisons the energy).
+        inverse_cell = torch.linalg.inv_ex(cell)[0] if cell.is_cuda else torch.linalg.inv(cell)
+        fractional = (positions[target] - positions[source]) @ inverse_cell
+        imaged = (fractional - fractional.round()) @ cell
+        # Clamped before the sqrt: ``norm``'s gradient at a zero vector is NaN,
+        # and no later multiply can undo one.
+        separation = (imaged * imaged).sum(-1).clamp_min(1e-24).sqrt()
+        # A weight, not a selection — how many pairs are inside the cutoff is
+        # data, and indexing by it would be a data-dependent shape.
+        short_range = torch.where(
+            separation < self.real_space_cutoff,
+            self.potential.sr_from_dist(separation),
+            separation.new_zeros(()),
+        )
+        removed = (
+            (1.0 - excluded_scales)
+            * charges[source]
+            * charges[target]
+            * (self.potential.lr_from_dist(separation) + short_range)
+        )
+        energy = total - removed.sum()
+        # In-graph half of the capacity guard, on the same predicate
+        # ``bind_cell`` raises on. Three scalar comparisons against Python
+        # ints: no host read, no branch, nothing to trace around — and an
+        # over-capacity cell poisons energy, forces and virial together rather
+        # than reporting the truncated sum of a box this grid cannot resolve.
+        needed = self._reciprocal_shape(cell)
+        overflow = (needed[0] > frozen[0]) | (needed[1] > frozen[1]) | (needed[2] > frozen[2])
+        return torch.where(overflow, energy.new_full((), float("nan")), energy)

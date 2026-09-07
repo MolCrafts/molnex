@@ -4,6 +4,8 @@ from typing import Optional
 
 import torch
 
+from molpot.potentials.elec.lib.kvectors import MeshShape
+
 
 class MeshInterpolator(torch.nn.Module):
     """Interpolation between particles and a regular 3D mesh.
@@ -12,17 +14,36 @@ class MeshInterpolator(torch.nn.Module):
     interpolation (mesh → particles) using either Lagrange or P3M
     cardinal B-spline assignment functions.
 
+    The mesh shape arrives in one of two modes, and they trace differently:
+
+    * **frozen** — ``ns_mesh`` given as ``tuple[int, int, int]``, the shape a
+      caller fixed ahead of time
+      (:meth:`molpot.potentials.elec.calculators.pme.PMECalculator.bind`).
+      The grid counts are host-side ints, so :meth:`get_mesh_xyz` and
+      :meth:`points_to_mesh` size their tensors without reading anything back
+      from the device and the interpolation traces as a single graph.
+    * **live** — ``ns_mesh`` given as a ``(3,)`` tensor, sized off the cell.
+      The same two methods then read the counts back to the host, which is a
+      synchronisation and breaks a compiled graph. This mode is for eager
+      callers that resize their mesh per cell.
+
+    :attr:`ns_mesh` is the ``(3,)`` tensor form in both modes.
+
     Args:
-        cell: Unit cell matrix ``(3, 3)``.
-        ns_mesh: Mesh dimensions ``(3,)``.
-        interpolation_nodes: Number of nodes per axis (3-7 for Lagrange, 1-5 for P3M).
-        method: ``"Lagrange"`` or ``"P3M"``.
+        cell: Unit cell matrix ``(3, 3)`` in Å, rows being the lattice vectors.
+        ns_mesh: Mesh dimensions ``(3,)`` as a tensor, or three Python ints —
+            see the two modes above.
+        interpolation_nodes: Number of mesh points per axis each particle is
+            spread over (3-7 for Lagrange, 1-5 for P3M). More nodes mean a
+            smoother, more accurate spread at a higher cost.
+        method: ``"Lagrange"`` or ``"P3M"`` — which family of assignment
+            functions weights those nodes.
     """
 
     def __init__(
         self,
         cell: torch.Tensor,
-        ns_mesh: torch.Tensor,
+        ns_mesh: torch.Tensor | tuple[int, int, int],
         interpolation_nodes: int,
         method: str,
     ):
@@ -46,6 +67,7 @@ class MeshInterpolator(torch.nn.Module):
         self.method: str = method
         self.interpolation_nodes: int = interpolation_nodes
 
+        self._ns_shape: MeshShape = MeshShape(ns_mesh, cell.device)
         self.update(cell, ns_mesh)
 
         self.interpolation_weights: torch.Tensor = torch.zeros(
@@ -58,16 +80,33 @@ class MeshInterpolator(torch.nn.Module):
         self.y_indices: torch.Tensor = torch.zeros(1, device=self._device)
         self.z_indices: torch.Tensor = torch.zeros(1, device=self._device)
 
+    @property
+    def ns_mesh(self) -> torch.Tensor:
+        """Mesh dimensions ``(3,)`` as a long tensor, in either mode.
+
+        In frozen mode this is built once from the ints and reused; the ints
+        themselves are what the grid-sizing code reads.
+        """
+        return self._ns_shape.tensor
+
     def update(
         self,
         cell: Optional[torch.Tensor] = None,
-        ns_mesh: Optional[torch.Tensor] = None,
+        ns_mesh: Optional[torch.Tensor | tuple[int, int, int]] = None,
     ) -> None:
         """Update buffers when cell or mesh resolution changes.
 
         Args:
-            cell: Unit cell matrix ``(3, 3)``.
-            ns_mesh: Mesh dimensions ``(3,)``.
+            cell: Unit cell matrix ``(3, 3)`` in Å, rows being the lattice
+                vectors.
+            ns_mesh: Mesh dimensions ``(3,)`` as a tensor (live mode), or three
+                Python ints (frozen mode) — see the class docstring. The mode
+                is whichever this call was given; a frozen shape repeated
+                unchanged reuses the tensor form it already built.
+
+        Raises:
+            ValueError: ``cell`` is not ``(3, 3)``, or ``cell`` and the mesh
+                shape live on different devices.
         """
         if cell is not None:
             if cell.shape != (3, 3):
@@ -83,9 +122,7 @@ class MeshInterpolator(torch.nn.Module):
                 self.inverse_cell = torch.linalg.inv(cell)
 
         if ns_mesh is not None:
-            if ns_mesh.shape != (3,):
-                raise ValueError(f"shape {list(ns_mesh.shape)} of `ns_mesh` has to be (3,)")
-            self.ns_mesh = ns_mesh
+            self._ns_shape.update(ns_mesh, self.cell.device)
 
         if self.cell.device != self.ns_mesh.device:
             raise ValueError(
@@ -97,11 +134,9 @@ class MeshInterpolator(torch.nn.Module):
         """Return Cartesian positions of all mesh points.
 
         Returns:
-            Mesh positions ``(nx, ny, nz, 3)``.
+            Mesh positions ``(nx, ny, nz, 3)`` in Å.
         """
-        nx = int(self.ns_mesh[0])
-        ny = int(self.ns_mesh[1])
-        nz = int(self.ns_mesh[2])
+        nx, ny, nz = self._ns_shape.counts
 
         grid_scaled = torch.stack(
             torch.meshgrid(
@@ -244,7 +279,11 @@ class MeshInterpolator(torch.nn.Module):
         Must be called before :meth:`points_to_mesh` or :meth:`mesh_to_points`.
 
         Args:
-            positions: Cartesian coordinates ``(n_atoms, 3)``.
+            positions: Cartesian coordinates ``(n_atoms, 3)`` in Å.
+
+        Raises:
+            ValueError: ``positions`` is on another device than this
+                interpolator, or is not ``(n_atoms, 3)``.
         """
         if positions.device != self._device:
             raise ValueError(
@@ -301,10 +340,14 @@ class MeshInterpolator(torch.nn.Module):
         """Interpolate particle weights onto the mesh.
 
         Args:
-            particle_weights: Per-particle weights ``(n_atoms, n_channels)``.
+            particle_weights: Per-particle weights ``(n_atoms, n_channels)`` —
+                the partial charges in ``e`` on the electrostatic path.
 
         Returns:
-            Mesh density ``(n_channels, nx, ny, nz)``.
+            Mesh density ``(n_channels, nx, ny, nz)`` in the weights' own unit
+            accumulated *per mesh point*, not per volume: the division by the
+            cell volume happens later, in the calculator
+            (:meth:`~molpot.potentials.elec.calculators.pme.PMECalculator._compute_kspace`).
         """
         if particle_weights.device != self._device:
             raise ValueError(
@@ -318,9 +361,7 @@ class MeshInterpolator(torch.nn.Module):
             )
 
         n_channels = particle_weights.shape[1]
-        nx = int(self.ns_mesh[0])
-        ny = int(self.ns_mesh[1])
-        nz = int(self.ns_mesh[2])
+        nx, ny, nz = self._ns_shape.counts
         rho_mesh = torch.zeros((n_channels, nx, ny, nz), dtype=self._dtype, device=self._device)
         # Spatial interpolation weights are channel-independent — compute once.
         spatial = (

@@ -1,6 +1,6 @@
 ---
 title: Periodic Coulomb — exact exclusions under Ewald/PME, frozen k-space shape, virial (composable-a0-03)
-status: approved
+status: code-complete
 created: 2026-09-07
 chain: composable-a0
 ---
@@ -61,11 +61,11 @@ the live cell, never truncates silently. Fixed-capacity k-space policy:
 
 ## Tasks
 
-- [ ] exclusion correction over `ExclusionTable.pairs` + analytic pin test
-- [ ] `pair_mask` path; delete slicing/branches
-- [ ] `bind_cell` with frozen shape + capacity policy; PME default under a cell
-- [ ] FD force + FD strain tests on the assembled `Potentials` (PME, 4-ion box)
-- [ ] slow explain test; Madelung regression with capture header
+- [x] exclusion correction over `ExclusionTable.pairs` + analytic pin test
+- [x] `pair_mask` path; delete slicing/branches
+- [x] `bind_cell` with frozen shape + capacity policy; PME default under a cell
+- [x] FD force + FD strain tests on the assembled `Potentials` (PME, 4-ion box)
+- [x] slow explain test; Madelung closed-form golden in `test_coulomb.py` (regressions tier deleted 2026-09-07)
 
 ## Testing
 

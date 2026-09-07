@@ -5,6 +5,7 @@ param tables. Concrete forms inherit it — there is no
 `ForceField.class_i()` façade.
 
 ```python
+from molix.batch import NeighborList
 from molpot.forcefield import OPLSAAForceField, Parameterizer
 
 template = OPLSAAForceField()
@@ -20,11 +21,18 @@ model = Parameterizer(
 )
 ff = model(batch)                # filled OPLSAAForceField copy; template untouched
 pots = ff.to_potentials()        # overrides molpy native → torch
+batch = NeighborList(cutoff=10.0).execute(batch)   # molix builds the pair list
 E = pots.calc_energy(batch)
 out = pots(batch)                # writes graphs.energy, atoms.forces
 ir = ff.to_ir()                  # Class-I PotentialIR bags
 # ff is a molpy.ForceField — pass it to molpy.io after realize()
 ```
+
+`Potentials` only *prices* the `edges` neighbour list molix put on the
+batch — it never enumerates pairs itself — so with any pair style declared
+(`OPLSAAForceField` declares `lj/cut` and `coulomb`) a batch without an
+`edges` namespace raises. Give `NeighborList` the largest pair cutoff in the
+force field and keep its `symmetry=True` default.
 
 ## Styles
 

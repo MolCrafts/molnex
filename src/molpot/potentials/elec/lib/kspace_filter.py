@@ -5,7 +5,7 @@ from typing import Optional
 
 import torch
 
-from molpot.potentials.elec.lib.kvectors import generate_kvectors_for_mesh
+from molpot.potentials.elec.lib.kvectors import MeshShape, generate_kvectors_for_mesh
 
 #: Default for :attr:`KSpaceFilter.check_nan`, read once at import.
 #: The guard is a full-mesh reduction — a device sync barrier on the PME hot
@@ -29,13 +29,22 @@ class KSpaceKernel(torch.nn.Module):
         super().__init__()
 
     def kernel_from_k_sq(self, kvectors: torch.Tensor) -> torch.Tensor:
-        """Compute the kernel on a k-vector grid.
+        """Compute the kernel on a grid of **squared** k-vector norms.
+
+        Despite the parameter name, every caller passes ``|k|²`` — one scalar
+        per k-point, built by :meth:`KSpaceFilter._prep_kvectors` as the squared
+        norm of its k-vector grid — never the ``(nx, ny, nz, 3)`` vectors
+        themselves. The implementation that actually runs in this repo,
+        :meth:`~molpot.potentials.elec.potentials.Potential.kernel_from_k_sq`,
+        names the same argument ``k_sq``.
 
         Args:
-            kvectors: K-vectors ``(nx, ny, nz, 3)``.
+            kvectors: Squared k-vector norms ``|k|²`` ``(nx, ny, nz)`` in Å⁻².
 
         Returns:
-            Kernel values at each k-point.
+            Kernel values ``(nx, ny, nz)``, one per k-point — for the smeared
+            Coulomb kernel ``4π e^{−σ²k²/2} / k²`` times the electrostatics
+            prefactor, i.e. kcal Å³ mol⁻¹ e⁻².
         """
         raise NotImplementedError(
             f"kernel_from_k_sq is not implemented for '{self.__class__.__name__}'"
@@ -48,9 +57,24 @@ class KSpaceFilter(torch.nn.Module):
     Computes :math:`f \\to \\hat{f} \\to \\hat{f} \\cdot \\phi \\to \\tilde{f}`
     via FFT → multiply kernel → IFFT.
 
+    The mesh shape arrives in one of two modes, and they trace differently:
+
+    * **frozen** — ``ns_mesh`` given as ``tuple[int, int, int]``, the shape a
+      caller fixed ahead of time
+      (:meth:`molpot.potentials.elec.calculators.pme.PMECalculator.bind`). The
+      k-vector grid is then built from host-side ints and :meth:`update`
+      traces as part of a single graph.
+    * **live** — ``ns_mesh`` given as a ``(3,)`` tensor sized off the cell.
+      Building the grid reads those counts back to the host, a
+      synchronisation that breaks a compiled graph; the mode is for eager
+      callers that resize their mesh per cell.
+
+    :attr:`ns_mesh` is the ``(3,)`` tensor form in both modes.
+
     Args:
-        cell: Unit cell matrix ``(3, 3)``.
-        ns_mesh: Mesh dimensions ``(3,)``.
+        cell: Unit cell matrix ``(3, 3)`` in Å, rows being the lattice vectors.
+        ns_mesh: Mesh dimensions ``(3,)`` as a tensor, or three Python ints —
+            see the two modes above.
         kernel: :class:`KSpaceKernel` providing ``kernel_from_k_sq``.
         fft_norm: Normalization for forward FFT (``"forward"``, ``"backward"``,
             ``"ortho"``).
@@ -67,7 +91,7 @@ class KSpaceFilter(torch.nn.Module):
     def __init__(
         self,
         cell: torch.Tensor,
-        ns_mesh: torch.Tensor,
+        ns_mesh: torch.Tensor | tuple[int, int, int],
         kernel: KSpaceKernel,
         fft_norm: str = "ortho",
         ifft_norm: str = "ortho",
@@ -84,18 +108,30 @@ class KSpaceFilter(torch.nn.Module):
             raise ValueError(f"Invalid option '{ifft_norm}' for the `ifft_norm` parameter.")
 
         self.kernel = kernel
+        self._ns_shape: MeshShape = MeshShape(ns_mesh, cell.device)
         self.update(cell, ns_mesh)
+
+    @property
+    def ns_mesh(self) -> torch.Tensor:
+        """Mesh dimensions ``(3,)`` as a long tensor, in either mode."""
+        return self._ns_shape.tensor
 
     def update(
         self,
         cell: Optional[torch.Tensor] = None,
-        ns_mesh: Optional[torch.Tensor] = None,
+        ns_mesh: Optional[torch.Tensor | tuple[int, int, int]] = None,
     ) -> None:
         """Update buffers when cell, mesh, or kernel parameters change.
 
         Args:
-            cell: Unit cell matrix ``(3, 3)``.
-            ns_mesh: Mesh dimensions ``(3,)``.
+            cell: Unit cell matrix ``(3, 3)`` in Å, rows being the lattice
+                vectors.
+            ns_mesh: Mesh dimensions ``(3,)`` as a tensor (live mode), or three
+                Python ints (frozen mode) — see the class docstring.
+
+        Raises:
+            ValueError: ``cell`` is not ``(3, 3)``, or ``cell`` and the mesh
+                shape live on different devices.
         """
         self._prep_kvectors(cell, ns_mesh)
         self._kfilter = self.kernel.kernel_from_k_sq(self._k_sq)
@@ -147,16 +183,18 @@ class KSpaceFilter(torch.nn.Module):
 
         return result
 
-    def _prep_kvectors(self, cell: Optional[torch.Tensor], ns_mesh: Optional[torch.Tensor]):
+    def _prep_kvectors(
+        self,
+        cell: Optional[torch.Tensor],
+        ns_mesh: Optional[torch.Tensor | tuple[int, int, int]],
+    ):
         if cell is not None:
             if cell.shape != (3, 3):
                 raise ValueError(f"cell of shape {list(cell.shape)} should be of shape (3, 3)")
             self.cell = cell
 
         if ns_mesh is not None:
-            if ns_mesh.shape != (3,):
-                raise ValueError(f"shape {list(ns_mesh.shape)} of `ns_mesh` has to be (3,)")
-            self.ns_mesh = ns_mesh
+            self._ns_shape.update(ns_mesh, self.cell.device)
 
         if self.cell.device != self.ns_mesh.device:
             raise ValueError(
@@ -165,7 +203,11 @@ class KSpaceFilter(torch.nn.Module):
             )
 
         if cell is not None or ns_mesh is not None:
-            self._kvectors = generate_kvectors_for_mesh(ns=self.ns_mesh, cell=self.cell)
+            # Frozen counts go down as ints; only the live mode hands over a
+            # tensor the generator has to read back.
+            frozen = self._ns_shape.frozen
+            ns = self._ns_shape.tensor if frozen is None else frozen
+            self._kvectors = generate_kvectors_for_mesh(ns=ns, cell=self.cell)
             self._k_sq = torch.linalg.norm(self._kvectors, dim=3) ** 2
 
 
@@ -176,8 +218,9 @@ class P3MKSpaceFilter(KSpaceFilter):
     and differential operator discretization.
 
     Args:
-        cell: Unit cell matrix ``(3, 3)``.
-        ns_mesh: Mesh dimensions ``(3,)``.
+        cell: Unit cell matrix ``(3, 3)`` in Å, rows being the lattice vectors.
+        ns_mesh: Mesh dimensions ``(3,)`` as a tensor, or three Python ints —
+            see :class:`KSpaceFilter` for the two modes.
         interpolation_nodes: Order of charge assignment (1-5).
         kernel: :class:`KSpaceKernel` for the base potential.
         fft_norm: Forward FFT normalization.
@@ -193,7 +236,7 @@ class P3MKSpaceFilter(KSpaceFilter):
     def __init__(
         self,
         cell: torch.Tensor,
-        ns_mesh: torch.Tensor,
+        ns_mesh: torch.Tensor | tuple[int, int, int],
         interpolation_nodes: int,
         kernel: KSpaceKernel,
         fft_norm: str = "ortho",
@@ -230,13 +273,15 @@ class P3MKSpaceFilter(KSpaceFilter):
     def update(
         self,
         cell: Optional[torch.Tensor] = None,
-        ns_mesh: Optional[torch.Tensor] = None,
+        ns_mesh: Optional[torch.Tensor | tuple[int, int, int]] = None,
     ) -> None:
         """Update buffers with P3M-specific influence function.
 
         Args:
-            cell: Unit cell matrix ``(3, 3)``.
-            ns_mesh: Mesh dimensions ``(3,)``.
+            cell: Unit cell matrix ``(3, 3)`` in Å, rows being the lattice
+                vectors.
+            ns_mesh: Mesh dimensions ``(3,)`` as a tensor (live mode), or three
+                Python ints (frozen mode) — see :class:`KSpaceFilter`.
         """
         self._prep_kvectors(cell, ns_mesh)
         self._kfilter = self._compute_influence(self._kvectors) * self.kernel.kernel_from_k_sq(

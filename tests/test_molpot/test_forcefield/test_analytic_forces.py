@@ -14,9 +14,18 @@ from tensordict import TensorDict
 
 from molpot.forcefield import ForceField
 from molpot.potentials import AngleHarmonic, BondHarmonic, ImproperPeriodic, ProperTorsionPeriodic
+from tests.test_molpot.test_forcefield.conftest import place_edges
 
 DTYPE = torch.float64
 _TOL = 1e-8
+
+#: Cutoff (Å) of the ``lj/cut`` and open ``pair:coulomb`` styles declared
+#: below, and the build radius of every placed ``edges`` namespace here. Past
+#: the largest intramolecular separation of any nonbonded fixture in this file
+#: (0.95 Å for the four-atom chain, 1.9 Å for the triangle), so the list holds
+#: every pair the deleted molpot enumerator produced (``composable-a0-03b``).
+#: Bonded-only fixtures declare no pair style and carry no ``edges``.
+NONBONDED_CUTOFF = 10.0
 
 
 def _autograd_forces(pot: torch.nn.Module, pos: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -216,10 +225,10 @@ def _bonded_potentials() -> ForceField:
 
 
 def _full_batch() -> TensorDict:
-    """Four-atom chain plus LJ/Coulomb atom params (nonbonded frozen)."""
+    """Four-atom chain plus LJ/Coulomb atom params (nonbonded frozen), with ``edges``."""
     batch = _bonded_batch()
     batch["atoms", "Z"] = torch.tensor([6, 1, 1, 1], dtype=torch.long)
-    return batch
+    return place_edges(batch, cutoff=NONBONDED_CUTOFF)
 
 
 def _full_potentials(*, charge: float = 0.0) -> ForceField:
@@ -230,8 +239,8 @@ def _full_potentials(*, charge: float = 0.0) -> ForceField:
         .def_anglestyle("harmonic")
         .def_dihedralstyle("periodic")
         .def_improperstyle("periodic")
-        .def_pairstyle("lj/cut", cutoff=10.0)
-        .def_pairstyle("coulomb", cutoff=10.0)
+        .def_pairstyle("lj/cut", cutoff=NONBONDED_CUTOFF)
+        .def_pairstyle("coulomb", cutoff=NONBONDED_CUTOFF)
         .with_params(
             bonds={
                 "k": torch.full((3,), 120.0, dtype=DTYPE, requires_grad=True),
@@ -397,8 +406,8 @@ def _three_atom_positions() -> torch.Tensor:
 
 
 def _nonbonded_batch() -> TensorDict:
-    """Three-atom molecule (one graph) with no bonded topology."""
-    return TensorDict(
+    """Three-atom molecule (one graph) with no bonded topology, carrying ``edges``."""
+    batch = TensorDict(
         {
             "atoms": TensorDict(
                 {
@@ -410,13 +419,21 @@ def _nonbonded_batch() -> TensorDict:
         },
         batch_size=[],
     )
+    return place_edges(batch, cutoff=NONBONDED_CUTOFF)
 
 
 def _nonbonded_pair_batch() -> TensorDict:
-    """Two separated three-atom molecules packed into one batch (B = 2)."""
+    """Two separated three-atom molecules packed into one batch (B = 2).
+
+    The list is built per graph and rebased, so it holds the two molecules'
+    intramolecular pairs and never bridges them — the same set the deleted
+    ``_open`` enumerator produced, and the reason the 8.7 Å intermolecular
+    separations never appear even though they are inside
+    :data:`NONBONDED_CUTOFF`.
+    """
     single = _three_atom_positions()
     pos = torch.cat([single, single + 5.0], dim=0)
-    return TensorDict(
+    batch = TensorDict(
         {
             "atoms": TensorDict(
                 {
@@ -428,6 +445,7 @@ def _nonbonded_pair_batch() -> TensorDict:
         },
         batch_size=[],
     )
+    return place_edges(batch, cutoff=NONBONDED_CUTOFF)
 
 
 def _nonbonded_potentials(
@@ -443,9 +461,9 @@ def _nonbonded_potentials(
         charge = torch.cat([charge, charge])
     ff = ForceField(name="test", units="real")
     if lj:
-        ff = ff.def_pairstyle("lj/cut", cutoff=10.0)
+        ff = ff.def_pairstyle("lj/cut", cutoff=NONBONDED_CUTOFF)
     if coulomb:
-        ff = ff.def_pairstyle("coulomb", cutoff=10.0)
+        ff = ff.def_pairstyle("coulomb", cutoff=NONBONDED_CUTOFF)
     params: dict[str, torch.Tensor] = {}
     if lj:
         params["epsilon"] = epsilon

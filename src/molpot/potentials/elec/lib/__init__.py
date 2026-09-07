@@ -7,6 +7,7 @@ from molpot.potentials.elec.lib.kvectors import (
     compute_batched_kvectors,
     generate_kvectors_for_ewald,
     generate_kvectors_for_mesh,
+    get_ns_ewald,
     get_ns_mesh,
 )
 from molpot.potentials.elec.lib.math import exp1, gamma, gammaincc_over_powerlaw
@@ -33,5 +34,6 @@ __all__ = [
     "generate_kvectors_for_mesh",
     "generate_kvectors_for_ewald",
     "compute_batched_kvectors",
+    "get_ns_ewald",
     "get_ns_mesh",
 ]

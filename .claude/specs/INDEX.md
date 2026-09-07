@@ -9,6 +9,7 @@ must not be treated as authority for a new training submission.
 | Spec | Chain | Opened | Scope |
 |---|---|---|---|
 | [composable-a0-03-periodic-coulomb](composable-a0-03-periodic-coulomb.md) | composable-a0 | 2026-09-07 | Exact excluded-pair correction under Ewald/PME (**F1**), `bind_cell` frozen k-space, FD force + strain on the assembled `Potentials`. |
+| [composable-a0-03b-neighbor-list-to-molix](composable-a0-03b-neighbor-list-to-molix.md) | composable-a0 | 2026-09-07 | Delete `molpot/forcefield/neighbor_list.py`: enumeration is molix's; `Potentials` consumes the placed list, fails closed without one; closes F4. |
 | [composable-a0-04-manifest](composable-a0-04-manifest.md) | composable-a0 | 2026-09-07 | `ModelManifest` records, `ForceField.manifest()`, `PotentialIR.nonbonded_method` (F7). |
 | [composable-a0-05-export](composable-a0-05-export.md) | composable-a0 | 2026-09-07 | LAMMPS `hybrid/overlay lj/mdf coul/long` + `pppm` + `special_bonds`; OpenMM PME text; manifest sibling; classical parity moved under `interface/tests/` (F5). |
 | [composable-a0-06-gates](composable-a0-06-gates.md) | composable-a0 | 2026-09-07 | Reflection gate, `EnergyDriftHook`, gate tests (NVE drift `slow`); closes the chain. |

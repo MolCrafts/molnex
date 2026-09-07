@@ -117,9 +117,18 @@ class CellBound(Protocol):
     1. ``bind_cell`` is **idempotent**: calling it twice with the same cell
        leaves the implementer in exactly the state one call produces. MD calls
        it once per barostat update whether or not the lattice actually changed.
-    2. It does **O(1)** host work — no device synchronisation, no allocation
-       that scales with the number of atoms or edges. It runs outside the
-       compiled region, on a path that may fire every chunk.
+    2. It does **O(1)** host work — no allocation, and no host read, that
+       scales with the number of atoms or edges. The **first** bind may
+       synchronise once to size that state off the lattice (a handful of
+       lattice-derived integers — grid counts per axis — read back to Python,
+       as ``KSpaceGrid.bind`` and ``CoulombPeriodicPotential.bind_cell`` both
+       do); that read is why the shape is fixed here instead of inside the
+       traced energy. Every **later**
+       bind may read back **at most one scalar** — the single ``bool`` that
+       decides clause 4's overflow, computed as a tensor expression so the
+       per-axis comparison never leaves the device. Nothing beyond that: a
+       later bind runs outside the compiled region, on a path that may fire
+       every chunk, and no bind ever happens on an energy call.
     3. It must **re-read** the handed live ``(3, 3)`` tensor on every use and
        **never retain** a copy of its values: molix mutates that exact storage
        in place with ``copy_`` on each barostat update, so a cached clone

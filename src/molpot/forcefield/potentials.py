@@ -40,7 +40,6 @@ from molpot.derivation.protocol import (
     write_virial,
 )
 from molpot.forcefield.exclusions import ExclusionTable
-from molpot.forcefield.neighbor_list import NeighborListBuilder
 from molpot.forcefield.pair_terms import (
     CoulombOpenPotential,
     CoulombPeriodicPotential,
@@ -69,6 +68,13 @@ __all__ = ["Potentials"]
 #: 0.01 e a drifting learned charge head produces.
 _TOTAL_CHARGE_TOL = 1e-6
 
+#: Floor applied to a squared separation before its ``sqrt`` in
+#: :meth:`Potentials._placed_pairs` (Å²). ``sqrt``'s gradient at zero is
+#: ``inf``/``NaN`` and a padding self-loop is exactly a zero vector, so the
+#: clamp has to happen *before* the root — no later multiply-by-zero mask can
+#: undo a NaN. Far below any physical separation, so no live pair is moved.
+_SQ_DIST_CLAMP_MIN = 1e-24
+
 
 class Potentials(BasePotential):
     """Classical Class-I energy as a molpot :class:`BasePotential` (``nn.Module``).
@@ -90,14 +96,27 @@ class Potentials(BasePotential):
       truncation.
     * ``pair:coulomb`` open → :class:`CoulombOpenPotential` (optional
       ``cutoff`` in Å; ``prefactor`` in kcal Å mol⁻¹ e⁻²)
-    * ``pair:coulomb`` + cell → :class:`CoulombPeriodicPotential`
-      (``calculator=ewald|pme|p3m``, ``smearing`` in Å, on the Potential)
+    * ``pair:coulomb`` + cell → :class:`CoulombPeriodicPotential`, whose style
+      options are ``smearing`` (Gaussian splitting width, Å),
+      ``real_space_cutoff`` (Å, default ``3 × smearing``), ``capacity_factor``
+      (dimensionless head-room on the frozen reciprocal shape),
+      ``lr_wavelength`` (Å, ``ewald`` only), ``mesh_spacing`` (Å, ``pme`` /
+      ``p3m`` only), ``prefactor`` (kcal Å mol⁻¹ e⁻²) and
+      ``calculator=pme|ewald|p3m``, defaulting to the ``pme`` mesh — the
+      explicit ``O(N²)`` ``ewald`` k-vector sum is the small-box reference,
+      not what a real periodic system should get by default
 
-    ::
+    Every pair term above reads the ``edges`` neighbour list already on the
+    batch; molpot never enumerates pairs of its own, so a batch evaluated by a
+    ForceField with any pair style must carry one (:meth:`_placed_pairs`)::
+
+        from molix.batch import NeighborList
 
         ff.def_pairstyle("lj/cut", cutoff=12.0, switch_start=10.0)
-        ff.def_pairstyle("coulomb", calculator="pme", smearing=5.0)
+        ff.def_pairstyle("coulomb", smearing=5.0, capacity_factor=1.2)
         pots = ff.to_potentials()
+        # molix builds the cutoff graph; Potentials only prices it.
+        system = NeighborList(cutoff=12.0).execute(system)
         E = pots.calc_energy(system)
 
     Args:
@@ -123,13 +142,13 @@ class Potentials(BasePotential):
     def __init__(self, forcefield: ForceField) -> None:
         super().__init__()
         self.forcefield = forcefield
-        self._neighbors = NeighborListBuilder()
         self.lj: LJCutPotential | None = None
         self.coulomb_open: CoulombOpenPotential | None = None
         self.coulomb_periodic: CoulombPeriodicPotential | None = None
         self.mlip = getattr(forcefield, "_mlip", None)
         self._exclusions: ExclusionTable | None = None
         self._bound_topology: tuple[int, ...] | None = None
+        self._bonded_styles: frozenset[str] = frozenset()
         self._check_composition()
         self._assemble_pair_potentials()
         self._assemble_bonded()
@@ -192,7 +211,10 @@ class Potentials(BasePotential):
                 cutoff=opts.get("cutoff"),
                 prefactor=pref,
             )
-            calc = str(opts.get("calculator", "ewald"))
+            # The mesh method is the default under a cell: ``ewald`` sums every
+            # k-vector explicitly, which is the reference a small-box finite
+            # difference wants and not what a real periodic system should pay.
+            calc = str(opts.get("calculator", "pme"))
             self.coulomb_periodic = CoulombPeriodicPotential(
                 smearing=float(opts.get("smearing", 5.0)),
                 calculator=calc,
@@ -200,10 +222,27 @@ class Potentials(BasePotential):
                 mesh_spacing=float(opts.get("mesh_spacing", 1.0)),
                 prefactor=pref,
                 real_space_cutoff=opts.get("real_space_cutoff"),
+                capacity_factor=float(opts.get("capacity_factor", 1.0)),
             )
 
     def _assemble_bonded(self) -> None:
         ff = self.forcefield
+        # Which bonded categories the ForceField declares, resolved **once**.
+        # Every energy path branches on this, and asking the ForceField again
+        # would walk its molrs-side style registry — a call dynamo cannot
+        # trace, i.e. one graph break per branch on the hot path. The answer is
+        # exactly as stale-proof as the terms assembled just below: both are
+        # frozen here, and ``to_potentials()`` builds a fresh container.
+        self._bonded_styles = frozenset(
+            category
+            for category, declared in (
+                ("bond", ff.bond_style()),
+                ("angle", ff.angle_style()),
+                ("dihedral", ff.dihedral_style()),
+                ("improper", ff.improper_style()),
+            )
+            if declared is not None
+        )
         bp = ff.params("bonds")
         if bp is not None and "k" in bp and "r0" in bp:
             self.bond = BondHarmonic(k=bp["k"], r0=bp["r0"])
@@ -351,7 +390,11 @@ class Potentials(BasePotential):
         Args:
             system: Batch / mapping carrying ``atoms.pos`` ``(N, 3)`` Å and the
                 topology namespaces (``bonds`` / ``angles`` / ``propers``).
-                ``graphs.total_charge`` ``(B,)`` in e is checked when present.
+                ``graphs.total_charge`` ``(B,)`` in e is checked when present,
+                and so is the orientation of ``edges.edge_index``
+                (:meth:`_check_pair_orientation`) — bind time is the one place
+                that check is affordable, and a mis-oriented list is otherwise
+                a silent zero rather than an error.
             pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``. Only
                 their count and device are read.
 
@@ -362,9 +405,13 @@ class Potentials(BasePotential):
                 :data:`_TOTAL_CHARGE_TOL` (S5, fail-closed). A charge head that
                 drifts off the constraint changes the molecule's net charge,
                 and under PBC an Ewald background term absorbs that silently
-                instead of reporting it.
+                instead of reporting it. Or the batch's placed edge list holds
+                pair rows but not one with ``source < target`` — the half that
+                :meth:`_placed_pairs` prices — so every pair term would cost
+                exactly zero.
         """
         p = self._pos(system, pos)
+        self._check_pair_orientation(system)
         self._bound_topology = self._topology_fingerprint(system, p.shape[0])
         self._exclusions = ExclusionTable(
             n_atoms=p.shape[0],
@@ -392,25 +439,80 @@ class Potentials(BasePotential):
                 f"(tolerance {_TOTAL_CHARGE_TOL:g} e)"
             )
 
+    def _check_pair_orientation(self, system: Any) -> None:
+        """Refuse a placed list that :meth:`_placed_pairs` would read as all dead.
+
+        :meth:`_placed_pairs` prices the ``source < target`` half of the
+        bidirectional list :class:`molix.batch.NeighborList` writes at its
+        ``symmetry=True`` default — one orientation of each pair, chosen by the
+        rule rather than by the order the rows happen to be in. Its
+        ``symmetry=False`` mode emits the *other* half (``source > target``), a
+        list every pair term then multiplies by an all-false mask: no raise, no
+        missing key, every nonbonded energy exactly zero.
+
+        Called from :meth:`bind_topology`, which is host-side and runs once per
+        topology, so the single ``.any()`` sync it costs never reaches a
+        compiled step. Self-loop rows (a capacity list's dead padding) are not
+        evidence either way, which is why the refusal needs a row that actually
+        runs ``source > target``.
+
+        Args:
+            system: Batch / mapping optionally carrying ``edges.edge_index``
+                ``(E, 2)``. No list, or a list of no rows, is nothing to check.
+
+        Raises:
+            ValueError: Some row runs ``source > target`` and none runs
+                ``source < target``.
+        """
+        edge_index = self._ns_tensor(self._namespace(system, "edges"), "edge_index")
+        if edge_index is None or edge_index.shape[0] == 0:
+            return
+        src, tgt = edge_index[:, 0], edge_index[:, 1]
+        # One host sync, folded into a single boolean: "reversed rows exist and
+        # forward ones do not".
+        if bool((src > tgt).any() & ~(src < tgt).any()):
+            raise ValueError(
+                "this batch's edges.edge_index carries only source > target rows: "
+                "Potentials prices the source < target half of a bidirectional list, so "
+                "every pair term would silently cost zero on this one. "
+                "molix.batch.NeighborList(symmetry=False) produces exactly this "
+                "upper-triangle-reversed half list — build it with the symmetry=True "
+                "default (both orientations, one of them priced), or transpose the two "
+                "columns before binding."
+            )
+
     def bind_cell(self, cell: torch.Tensor) -> None:
-        """Hand the live simulation cell to the mlip, if it keeps cell state.
+        """Hand the live simulation cell to every term that keeps cell state.
 
-        One layer of delegation, guarded by :class:`molix.schema.CellBound`.
-        The guard is not decoration: ``def_pairstyle`` accepts *any*
-        ``nn.Module`` as the mlip, so an mlip with no ``bind_cell`` at all is a
-        supported shape and an unconditional call would break every such model.
-
-        A **documented no-op** when there is no mlip — the classical Class-I
-        terms hold nothing sized by the lattice, and the neighbour list owns its
-        own rebinding — and equally when the mlip does not satisfy
+        Two of them can: the periodic Coulomb term, which freezes its
+        reciprocal-space shape here, and the mlip — the latter guarded by
+        :class:`molix.schema.CellBound`, because ``def_pairstyle`` accepts
+        *any* ``nn.Module`` as the mlip and an unconditional call would break
+        every model without the method. The bonded terms and the
+        Lennard-Jones one hold nothing sized by the lattice, and the neighbour
+        list owns its own rebinding, so a ForceField of only those makes this
+        a **documented no-op** — as does an mlip that does not satisfy
         ``CellBound``. Neither case raises.
+
+        The ``(1, 3, 3)`` batched layout is resolved here, once, for the
+        classical term — the protocol puts that on the caller — while the mlip
+        keeps receiving the caller's own storage untouched.
 
         Args:
             cell: Lattice vectors ``(3, 3)`` — or ``(1, 3, 3)`` — in Å, rows
-                being the lattice vectors. Passed through untouched, storage
+                being the lattice vectors. Passed to the mlip untouched, storage
                 included, so an implementer that re-reads it sees the barostat's
                 in-place updates.
+
+        Raises:
+            RuntimeError: Propagated from
+                :meth:`~molpot.forcefield.pair_terms.CoulombPeriodicPotential.bind_cell`
+                when the cell has outgrown the reciprocal shape a previous bind
+                froze (raise ``capacity_factor``), or from a ``CellBound``
+                mlip's own capacity guard.
         """
+        if self.coulomb_periodic is not None:
+            self.coulomb_periodic.bind_cell(cell[0] if cell.dim() == 3 else cell)
         if isinstance(self.mlip, CellBound):
             self.mlip.bind_cell(cell)
 
@@ -482,8 +584,10 @@ class Potentials(BasePotential):
         Args:
             system: Batch / mapping carrying ``atoms.pos`` ``(N, 3)`` Å and the
                 topology namespaces (``bonds`` / ``angles`` / ``propers`` /
-                ``impropers``). Must be a ``TensorDict`` to take the mlip
-                branch above.
+                ``impropers``). With any pair style declared it must also carry
+                the ``edges`` neighbour list a molix owner placed
+                (:meth:`_placed_pairs`). Must be a ``TensorDict`` to take the
+                mlip branch above.
             pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``.
 
         Returns:
@@ -495,6 +599,15 @@ class Potentials(BasePotential):
             family) — which the ForceField's declared ``units`` (``"metal"``
             for an MLIP pair style) is expected to already match; neither
             branch performs a unit conversion here.
+
+        Raises:
+            ValueError: Raised through :meth:`term_energies` on the classical
+                path — a declared style's parameter table is absent; a pair
+                style is declared and the batch carries no usable ``edges``
+                list; or ``pair:coulomb`` is evaluated under a ``graphs.cell``
+                on a batch of more than one graph (one lattice gives one
+                reciprocal sum, so each graph would otherwise be charged the
+                whole box). See :meth:`term_energies` for each.
         """
         if self.mlip is not None and isinstance(system, TensorDict):
             # The pos override lands on the batch first: the mlip reads its
@@ -576,7 +689,13 @@ class Potentials(BasePotential):
 
         Raises:
             TypeError: If ``system`` is not a TensorDict.
-            ValueError: If ``graphs.cell`` is missing.
+            ValueError: ``graphs.cell`` is missing; or a classical pair term is
+                declared and the batch carries a placed edge list without
+                ``edges.shifts``, whose lattice remainder those terms recover
+                as a constant that no strain reaches — the virial would be
+                missing every pair that meets its partner through a lattice
+                vector (F13). :meth:`calc_energy` and :meth:`calc_forces` stay
+                exact on such a batch and keep working.
         """
         if not isinstance(system, TensorDict):
             raise TypeError("calc_energy_forces_virial requires a TensorDict system")
@@ -593,8 +712,29 @@ class Potentials(BasePotential):
         # Passing frozen edge_diff as an independent cartesian makes local
         # graph energy (MACE / Polar) a function of strain only, so
         # ∂E/∂pos drops the short-range forces and NPT heats.
+        stored_shifts = ("edges", "shifts") in nested
+        if not stored_shifts and edge_index is not None and self._rebuilds_pairs():
+            # A classical nonbonded term rebuilds its own pair vectors through
+            # ``Potentials._placed_pairs``, which recovers a shift-less
+            # list's lattice remainder as a **detached** constant — right in
+            # value (energy and forces below match a stored-``shifts`` batch to
+            # the bit) but not a function of the cell, so the strain applied
+            # here never reaches a pair that meets its partner through a
+            # lattice vector and its share of ``W = ∂E/∂ε`` is silently absent
+            # (finding F13 in ``.claude/notes/composable-potentials.md``).
+            # An mlip is not affected: it reads ``edges.edge_diff``, which
+            # ``energy_fn`` rebuilds from the *strained* remainder below.
+            raise ValueError(
+                "calc_energy_forces_virial needs edges.shifts on a placed list under a cell "
+                "when a classical pair term is declared: this list carries none, and the "
+                "edge_diff fallback its pair vectors are rebuilt from is a detached constant "
+                "that carries no lattice strain, so every pair reaching its partner through "
+                "a lattice vector would be missing from the virial. Build the list with "
+                "molix.md.NeighborList (which writes edges.shifts), or ask for energy and "
+                "forces only — those are exact on this batch."
+            )
         shifts_buf = None
-        if ("edges", "shifts") in nested:
+        if stored_shifts:
             shifts_buf = system["edges", "shifts"]
         elif edge_diff_buf is not None and edge_index is not None:
             src0 = edge_index[:, 0]
@@ -607,6 +747,13 @@ class Potentials(BasePotential):
         ) -> torch.Tensor:
             system["atoms", "pos"] = pos_s
             system["graphs", "cell"] = cell_s.unsqueeze(0) if batched_cell else cell_s
+            if strained and stored_shifts:
+                # The remainder a term rebuilds its own pair vectors from
+                # (``Potentials._placed_pairs``) must be the *strained*
+                # one, or every wrapped pair holds its lattice vector fixed
+                # while the box deforms and its share of ``W = dE/deps`` is
+                # missing.
+                system["edges", "shifts"] = strained[0]
             if edge_index is not None:
                 src = edge_index[:, 0]
                 tgt = edge_index[:, 1]
@@ -624,6 +771,8 @@ class Potentials(BasePotential):
         # next neighbour update still see the same storage.
         system["atoms", "pos"] = pos_buf
         system["graphs", "cell"] = cell_buf
+        if stored_shifts and shifts_buf is not None:
+            system["edges", "shifts"] = shifts_buf
         if edge_diff_buf is not None:
             system["edges", "edge_diff"] = edge_diff_buf
             system["edges", "edge_dist"] = edge_diff_buf.norm(dim=-1)
@@ -677,7 +826,11 @@ class Potentials(BasePotential):
         Raises:
             ValueError: A declared style's parameter table is absent — the same
                 contract as :meth:`term_energies`, checked branch for branch so
-                the two routes agree on which ForceFields evaluate at all.
+                the two routes agree on which ForceFields evaluate at all — or
+                a pair style is declared and the batch carries no usable
+                ``edges`` list, or ``pair:coulomb`` meets a ``graphs.cell`` on
+                a batch of more than one graph. All three are the
+                :meth:`term_energies` contract.
         """
         if self.mlip is not None and isinstance(system, TensorDict):
             # Same branch policy as ``calc_energy``: the mlip owns the whole
@@ -700,9 +853,8 @@ class Potentials(BasePotential):
 
         energy = zero
         forces = p.new_zeros((n_atoms, 3))
-        ff = self.forcefield
 
-        if ff.bond_style() is not None:
+        if "bond" in self._bonded_styles:
             self._require_bonded_params("bond", "bonds", self.bond)
             bond_index = self._bond_index(system)
             if self.bond is not None and bond_index is not None and bond_index.size(1) > 0:
@@ -718,7 +870,7 @@ class Potentials(BasePotential):
             energy = energy + e
             forces = forces + f
 
-        if ff.angle_style() is not None:
+        if "angle" in self._bonded_styles:
             self._require_bonded_params("angle", "angles", self.angle)
             angle_index = self._angle_index(system)
             if self.angle is not None and angle_index is not None and angle_index.size(1) > 0:
@@ -734,7 +886,7 @@ class Potentials(BasePotential):
             energy = energy + e
             forces = forces + f
 
-        if ff.dihedral_style() is not None:
+        if "dihedral" in self._bonded_styles:
             self._require_bonded_params("dihedral", "propers", self.proper)
             proper_index = self._proper_index(system)
             if self.proper is not None and proper_index is not None and proper_index.size(1) > 0:
@@ -750,7 +902,7 @@ class Potentials(BasePotential):
             energy = energy + e
             forces = forces + f
 
-        if ff.improper_style() is not None:
+        if "improper" in self._bonded_styles:
             self._require_bonded_params("improper", "impropers", self.improper)
             improper_index = self._improper_index(system)
             if (
@@ -771,12 +923,12 @@ class Potentials(BasePotential):
             forces = forces + f
 
         if self.lj is not None:
-            (rep, disp), f = self._lj_energy_forces(system, p, zero, n_atoms)
+            (rep, disp), f = self._lj_energy_forces(system, p)
             energy = energy + rep + disp
             forces = forces + f
 
         if self.coulomb_open is not None or self.coulomb_periodic is not None:
-            e, f = self._coulomb_energy_forces(system, p, zero, n_atoms)
+            e, f = self._coulomb_energy_forces(system, p, n_atoms)
             energy = energy + e
             forces = forces + f
 
@@ -803,7 +955,8 @@ class Potentials(BasePotential):
 
         Args:
             system: Batch / mapping carrying ``atoms.pos`` ``(N, 3)`` Å and the
-                topology namespaces.
+                topology namespaces — plus, for any declared pair style, the
+                ``edges`` neighbour list built upstream in molix.
             pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``.
 
         Returns:
@@ -811,10 +964,16 @@ class Potentials(BasePotential):
             ForceField's unit convention (``units="real"`` default: kcal/mol).
 
         Raises:
-            ValueError: A declared style's parameter table is absent.
+            ValueError: A declared style's parameter table is absent; a pair
+                style is declared and the batch carries no usable placed
+                neighbour list — no ``edges.edge_index``, or one with neither
+                ``edges.shifts`` nor ``edges.edge_diff`` to price it by
+                (:meth:`_placed_pairs`); or ``pair:coulomb`` is evaluated under
+                a ``graphs.cell`` on a batch of more than one graph — one
+                lattice gives one reciprocal sum, so each graph would be
+                charged the whole box.
         """
         p = self._pos(system, pos)
-        ff = self.forcefield
         device = p.device
         dtype = p.dtype
         num_graphs = self._num_graphs(system)
@@ -823,7 +982,7 @@ class Potentials(BasePotential):
         atom_batch = self._atom_batch(system, p.shape[0], device)
         terms: dict[str, torch.Tensor] = {}
 
-        if ff.bond_style() is not None:
+        if "bond" in self._bonded_styles:
             self._require_bonded_params("bond", "bonds", self.bond)
             bond_index = self._bond_index(system)
             if self.bond is not None and bond_index is not None and bond_index.size(1) > 0:
@@ -838,7 +997,7 @@ class Potentials(BasePotential):
             else:
                 terms["bonds"] = zero
 
-        if ff.angle_style() is not None:
+        if "angle" in self._bonded_styles:
             self._require_bonded_params("angle", "angles", self.angle)
             angle_index = self._angle_index(system)
             if self.angle is not None and angle_index is not None and angle_index.size(1) > 0:
@@ -853,7 +1012,7 @@ class Potentials(BasePotential):
             else:
                 terms["angles"] = zero
 
-        if ff.dihedral_style() is not None:
+        if "dihedral" in self._bonded_styles:
             self._require_bonded_params("dihedral", "propers", self.proper)
             proper_index = self._proper_index(system)
             if self.proper is not None and proper_index is not None and proper_index.size(1) > 0:
@@ -868,7 +1027,7 @@ class Potentials(BasePotential):
             else:
                 terms["propers"] = zero
 
-        if ff.improper_style() is not None:
+        if "improper" in self._bonded_styles:
             self._require_bonded_params("improper", "impropers", self.improper)
             improper_index = self._improper_index(system)
             if (
@@ -888,9 +1047,9 @@ class Potentials(BasePotential):
                 terms["impropers"] = zero
 
         if self.lj is not None:
-            terms["lj_repulsion"], terms["lj_dispersion"] = self._lj_energy(system, p, zero)
+            terms["lj_repulsion"], terms["lj_dispersion"] = self._lj_energy(system, p)
         if self.coulomb_open is not None or self.coulomb_periodic is not None:
-            terms["coulomb"] = self._coulomb_energy(system, p, zero)
+            terms["coulomb"] = self._coulomb_energy(system, p)
         return terms
 
     def contribution_energies(
@@ -983,6 +1142,139 @@ class Potentials(BasePotential):
             return system["cell"]
         return None
 
+    def _placed_pairs(
+        self,
+        system: Any,
+        pos: torch.Tensor,
+        *,
+        cutoff: float | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The batch's placed ``edges`` list, priced at the **live** positions.
+
+        ``molpot`` consumes the cutoff graph; it never enumerates one. Both
+        owners live upstream in ``molix`` (CLAUDE.md dependency graph;
+        ``.claude/notes/architecture.md`` §Layer roles):
+
+        * :class:`molix.batch.NeighborList` — the training path and the Edge
+          Convention owner. Writes ``edge_index`` ``(E, 2)``, ``edge_diff``
+          ``(E, 3)`` = ``pos[target] - pos[source]`` and ``edge_dist`` ``(E,)``,
+          bidirectional at its ``symmetry=True`` default.
+        * :class:`molix.md.NeighborList` — the MD path. Writes those three plus
+          ``edges.shifts`` (each row's lattice remainder) at a fixed capacity
+          whose dead rows are in-range self-loops.
+
+        No in-tree producer writes ``edges.num_edges``. The MD list keeps its
+        live count as a Python attribute and marks its dead tail with
+        ``source == target`` rows, which the ``source < target`` half-list rule
+        below already kills (finding F22 in
+        ``.claude/notes/composable-potentials.md``; publishing the count from
+        molix is a molix follow-up). The ``row < num_edges`` liveness leg is
+        therefore **optional** — honoured when some producer does place the
+        key, never required for a list to be priced.
+
+        The list is returned at the capacity it arrived at and ``live`` is the
+        mask of the rows that contribute, never a selection to apply:
+        compacting it makes the output shape a function of the data, which is a
+        graph break on the compiled force path, so the pair terms multiply by
+        the mask instead. Liveness is ``source < target`` (one orientation of
+        each bidirectional pair) ∧ — when the asking term declares a cutoff —
+        ``0 < r < r_c`` ∧ — when the list declares one — ``row < num_edges``,
+        compared as tensors because reading the live count out to Python is a
+        host sync. Both legs travel with their condition: a ``cutoff`` of
+        ``None`` drops the ``r`` test whole, ``0 < r`` included, which costs
+        nothing because a zero-length row is a padding self-loop and
+        ``source < target`` has already killed it.
+
+        Distances are recomputed from the live ``pos`` by the first branch the
+        list supports:
+
+        1. ``shifts`` — ``|pos[t] - pos[s] + shifts|``, clamped *before* the
+           ``sqrt`` because a padding self-loop is a zero vector whose ``√``
+           gradient is ``NaN``, which the later multiply-by-zero cannot undo.
+           The only branch that is a function of both the live positions and
+           the live lattice, hence the only one whose ``∂E/∂ε`` is complete
+           (finding F13 in ``.claude/notes/composable-potentials.md``).
+        2. ``edge_diff`` — the lattice remainder is recoverable only as
+           ``edge_diff - (pos[t] - pos[s])`` on **detached** tensors, i.e. a
+           constant. Equal to branch 1 to the last bit while ``pos`` is the
+           geometry the list was written at (``edge_diff`` is defined as that
+           same sum), and energy/forces stay exact under a rigid shift of the
+           whole batch — but the constant is **stale** for any other positions,
+           and it carries no strain, which is why
+           :meth:`calc_energy_forces_virial` refuses a shift-less list.
+
+        A stored ``edge_dist`` is **not** a third branch. It is a number, not
+        geometry: forwarded as the answer it does not depend on the ``pos``
+        leaf the energy is differentiated against, so ``dE/dpos`` is
+        structurally zero and the batch prices a finite energy with silently
+        zero forces — the worst failure an MD path can have. It also carries
+        whatever imaging its owner applied, which a second convention here can
+        only disagree with. A list with neither ``shifts`` nor ``edge_diff`` is
+        refused instead (see ``Raises``).
+
+        Args:
+            system: Batch / mapping carrying the ``edges`` namespace.
+            pos: Live positions ``(N, 3)`` in Å the distances are priced at —
+                the strained / integrated leaf, not necessarily ``atoms.pos``.
+            cutoff: Real-space cutoff ``r_c`` in Å of the asking term, or
+                ``None`` to keep every row of the list.
+
+        Returns:
+            ``(edge_index, dist, live)`` at the list's capacity — ``(E, 2)``
+            endpoints as placed, ``(E,)`` separations in Å and a boolean
+            ``(E,)``. ``E == 0`` (a list with no rows) is an ordinary empty
+            list — no pair in range — and prices at zero; only an *absent* list
+            raises.
+
+        Raises:
+            ValueError: The batch carries no ``edges.edge_index``, or an
+                ``edge_index`` with neither ``shifts`` nor ``edge_diff`` to
+                price it by — a stored ``edge_dist`` alone is refused, not
+                forwarded. Enumerating a replacement here would answer with a
+                different neighbour set than the model was trained or
+                integrated against, so the message names the geometry a list
+                must carry and the two molix owners instead.
+        """
+        edges = self._namespace(system, "edges")
+        edge_index = self._ns_tensor(edges, "edge_index")
+        if edge_index is None:
+            raise ValueError(
+                "this batch carries no edges.edge_index, and molpot does not enumerate "
+                "neighbour pairs — the cutoff graph is built upstream by "
+                "molix.batch.NeighborList (training batches: edge_index, edge_diff, "
+                "edge_dist) or by molix.md.NeighborList (MD: the same at a fixed capacity, "
+                "plus edges.shifts). Place a list on the batch before evaluating; a list "
+                "with zero rows is accepted and prices at zero."
+            )
+        shifts = self._ns_tensor(edges, "shifts")
+        edge_diff = self._ns_tensor(edges, "edge_diff")
+        src, tgt = edge_index[:, 0], edge_index[:, 1]
+        if shifts is not None:
+            shifted = pos[tgt] - pos[src] + shifts
+            dist = (shifted * shifted).sum(-1).clamp_min(_SQ_DIST_CLAMP_MIN).sqrt()
+        elif edge_diff is not None:
+            implied = edge_diff.detach() - (pos.detach()[tgt] - pos.detach()[src])
+            vectors = pos[tgt] - pos[src] + implied
+            dist = (vectors * vectors).sum(-1).clamp_min(_SQ_DIST_CLAMP_MIN).sqrt()
+        else:
+            raise ValueError(
+                "edges.edge_index is placed but carries no geometry to price it by: "
+                "edges.shifts or edges.edge_diff is required. A stored edges.edge_dist is "
+                "not geometry — it is not a function of the live positions, so forwarding it "
+                "prices a finite energy with structurally zero forces. "
+                "molix.batch.NeighborList writes edge_diff beside edge_dist; "
+                "molix.md.NeighborList writes edges.shifts as well (the branch whose virial "
+                "is complete). molpot never re-enumerates the pairs itself."
+            )
+        live = src < tgt
+        num_edges = self._ns_tensor(edges, "num_edges")
+        if num_edges is not None:
+            rows = torch.arange(edge_index.shape[0], device=edge_index.device)
+            live = live & (rows < num_edges)
+        if cutoff is not None:
+            live = live & (dist < cutoff) & (dist > 0)
+        return edge_index, dist, live
+
     def _scaled_pairs(
         self,
         system: Any,
@@ -990,15 +1282,16 @@ class Potentials(BasePotential):
         *,
         cutoff: float | None,
         scale_kind: str,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Half neighbor list ``(edge_index, dist, scales, live)`` for one pair term.
 
-        The list keeps the capacity the builder returned it at — ``live`` is the
-        boolean mask of the rows that contribute, not a selection to apply.
-        ``None`` when there is no list at all (fewer than two atoms, or an
-        enumeration that produced no pair). ``scales`` is the exclusion factor
-        of every row including the dead ones (which read ``1.0``), so the term
-        multiplies instead of slicing.
+        The list keeps the capacity :meth:`_placed_pairs` read it at — ``live``
+        is the boolean mask of the rows that contribute, not a selection to
+        apply. ``scales`` is the exclusion factor of every row including the
+        dead ones (which read ``1.0``), so the term multiplies instead of
+        slicing. There is no "no list" answer: a batch with zero rows prices at
+        zero and a batch with no ``edges`` namespace raises, because molpot
+        does not enumerate its own pairs.
 
         The one seam every pair term reaches for, so it is where the bound
         table is checked against the batch. Binds the topology on first use
@@ -1011,9 +1304,9 @@ class Potentials(BasePotential):
         Args:
             system: Batch / mapping carrying ``atoms.pos`` and the topology
                 namespaces, as :meth:`bind_topology` reads them.
-            pos: Positions ``(N, 3)`` in Å the list is enumerated from.
+            pos: Live positions ``(N, 3)`` in Å the placed list is priced at.
             cutoff: Real-space cutoff ``r_c`` in Å of the asking term, or
-                ``None`` to keep every pair the builder produced.
+                ``None`` to keep every row of the placed list.
             scale_kind: Interaction class of the asking term — one of the
                 ForceField's :meth:`~molpot.ir.NonbondedScaling.kinds`
                 (``"q"`` for Coulomb, ``"lj"`` for Lennard-Jones).
@@ -1021,14 +1314,15 @@ class Potentials(BasePotential):
         Returns:
             ``(edge_index, dist, scales, live)`` — pairs ``(E, 2)``,
             separations ``(E,)`` in Å, dimensionless scale factors ``(E,)``
-            and the boolean liveness mask ``(E,)`` — or ``None`` when the
-            builder produced no list.
+            and the boolean liveness mask ``(E,)``, all at the placed list's
+            capacity.
 
         Raises:
             ValueError: The batch's topology has a different shape than the
                 bound one (atom count, or the ``bonds`` / ``angles`` /
-                ``propers`` column counts). The message names
-                :meth:`bind_topology`, which is the fix.
+                ``propers`` column counts) — the message names
+                :meth:`bind_topology`, which is the fix; or the batch carries
+                no usable placed list (:meth:`_placed_pairs`).
         """
         if self._exclusions is None:
             self.bind_topology(system, pos=pos)
@@ -1042,16 +1336,13 @@ class Potentials(BasePotential):
                     "exclusion table is never rebuilt implicitly — call "
                     "bind_topology(system) for the new topology"
                 )
-        assert self._exclusions is not None
-        atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
-        cell = self._cell(system)
-        edges = self._namespace(system, "edges")
-        built = self._neighbors.build(
-            pos=pos, atom_batch=atom_batch, cell=cell, cutoff=cutoff, edges=edges
-        )
-        if built is None:
-            return None
-        edge_index, dist, live = built
+        if self._exclusions is None:
+            raise RuntimeError(
+                "_scaled_pairs reached its exclusion lookup with no bound exclusion table; "
+                "the branch above binds one on first use and the other rejects a topology "
+                "change, so neither can leave it unset — call bind_topology(system)"
+            )
+        edge_index, dist, live = self._placed_pairs(system, pos, cutoff=cutoff)
         scales = self._exclusions.lookup(edge_index, scale_kind, dtype=pos.dtype)
         return edge_index, dist, scales, live
 
@@ -1059,18 +1350,20 @@ class Potentials(BasePotential):
         self,
         system: Any,
         pos: torch.Tensor,
-        zero: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """``(repulsion, dispersion)`` of the LJ style — zeros when no pair is in range."""
-        assert self.lj is not None
+        if self.lj is None:
+            raise RuntimeError(
+                "_lj_energy called with no lj/cut style assembled; every caller reaches it "
+                "under `if self.lj is not None`"
+            )
         epsilon, sigma = self._lj_params()
         # Keep LJ on its own cutoff list. Reusing an unlimited Coulomb half-list
         # forced the exclusion lookup (and distance storage) onto all
         # intramolecular pairs even though LJ only needs ``r < cutoff``.
-        pairs = self._scaled_pairs(system, pos, cutoff=self.lj.cutoff, scale_kind="lj")
-        if pairs is None:
-            return zero, zero
-        edge_index, dist, scales, live = pairs
+        edge_index, dist, scales, live = self._scaled_pairs(
+            system, pos, cutoff=self.lj.cutoff, scale_kind="lj"
+        )
         num_graphs = self._num_graphs(system)
         atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
         return self.lj.energy(
@@ -1088,16 +1381,17 @@ class Potentials(BasePotential):
         self,
         system: Any,
         pos: torch.Tensor,
-        zero: torch.Tensor,
-        n_atoms: int,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """``((repulsion, dispersion), forces)`` of the LJ style."""
-        assert self.lj is not None
+        if self.lj is None:
+            raise RuntimeError(
+                "_lj_energy_forces called with no lj/cut style assembled; every caller "
+                "reaches it under `if self.lj is not None`"
+            )
         epsilon, sigma = self._lj_params()
-        pairs = self._scaled_pairs(system, pos, cutoff=self.lj.cutoff, scale_kind="lj")
-        if pairs is None:
-            return (zero, zero), pos.new_zeros((n_atoms, 3))
-        edge_index, dist, scales, live = pairs
+        edge_index, dist, scales, live = self._scaled_pairs(
+            system, pos, cutoff=self.lj.cutoff, scale_kind="lj"
+        )
         num_graphs = self._num_graphs(system)
         atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
         return self.lj.energy_forces(
@@ -1116,7 +1410,6 @@ class Potentials(BasePotential):
         self,
         system: Any,
         pos: torch.Tensor,
-        zero: torch.Tensor,
     ) -> torch.Tensor:
         q = self._charges()
         if q.shape[0] != pos.shape[0]:
@@ -1124,12 +1417,17 @@ class Potentials(BasePotential):
 
         cell = self._cell(system)
         if cell is None:
-            assert self.coulomb_open is not None
+            if self.coulomb_open is None:
+                raise RuntimeError(
+                    "this batch carries no cell, so Coulomb takes the open-boundary path, "
+                    "but no CoulombOpenPotential was assembled; _assemble_pair_potentials "
+                    "builds the open and periodic terms together from one 'pair:coulomb' "
+                    "style, so neither can exist without the other"
+                )
             cut = self.coulomb_open.cutoff
-            pairs = self._scaled_pairs(system, pos, cutoff=cut, scale_kind="q")
-            if pairs is None:
-                return zero
-            edge_index, dist, scales, live = pairs
+            edge_index, dist, scales, live = self._scaled_pairs(
+                system, pos, cutoff=cut, scale_kind="q"
+            )
             num_graphs = self._num_graphs(system)
             atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
             return self.coulomb_open.energy(
@@ -1142,38 +1440,66 @@ class Potentials(BasePotential):
                 edge_mask=live,
             )
 
-        assert self.coulomb_periodic is not None
+        if self.coulomb_periodic is None:
+            raise RuntimeError(
+                "this batch carries a cell, so Coulomb takes the periodic path, but no "
+                "CoulombPeriodicPotential was assembled; _assemble_pair_potentials builds "
+                "the open and periodic terms together from one 'pair:coulomb' style, so "
+                "neither can exist without the other"
+            )
+        num_graphs = self._num_graphs(system)
+        if num_graphs > 1:
+            # One lattice, one reciprocal sum, one number: ``_cell`` reads
+            # ``graphs.cell[0]`` and the term below returns a scalar that
+            # ``calc_energy`` would add into every entry of its ``(B,)``
+            # accumulator — each graph charged the whole box's electrostatics,
+            # evaluated in graph 0's cell, with no other cell ever read.
+            # Per-graph periodic electrostatics needs a per-graph reciprocal
+            # sum and a list that never bridges two graphs (finding F4 in
+            # ``.claude/notes/composable-potentials.md``, which owns its own
+            # spec); until it lands the batch is refused, not answered wrongly.
+            raise ValueError(
+                "periodic Coulomb evaluates one graph per cell, but this batch has "
+                f"num_graphs={num_graphs}: the reciprocal sum would price the whole box "
+                "in graph 0's cell and hand that same energy to every graph. Per-graph "
+                "periodic batches are not supported yet — evaluate one periodic system "
+                "per batch, or drop graphs.cell for the open-boundary Coulomb path."
+            )
         # Neighbor list cutoff from the periodic Potential's real-space cutoff
-        pairs = self._scaled_pairs(
+        edge_index, dist, _, live = self._scaled_pairs(
             system,
             pos,
             cutoff=self.coulomb_periodic.real_space_cutoff,
             scale_kind="q",
         )
-        if pairs is None:
-            edge_index = torch.zeros(0, 2, dtype=torch.long, device=pos.device)
-            dist = torch.zeros(0, dtype=pos.dtype, device=pos.device)
-            scales = torch.zeros(0, dtype=pos.dtype, device=pos.device)
-        else:
-            edge_index, dist, scales, live = pairs
-            # The periodic term still selects its real-space rows by
-            # ``scales > 0``; folding liveness into the scale drops the dead
-            # rows through that same test (a0-03 rewrites the term itself).
-            scales = scales * live.to(scales.dtype)
+        # Per-row scales are *not* what the periodic term wants: under Ewald an
+        # excluded pair also sits in the reciprocal sum, so it is corrected over
+        # the topology's own pair table (whatever the neighbour list happened to
+        # enumerate) rather than attenuated in the real-space sum.
+        # ``_scaled_pairs`` has bound the table by now.
+        if self._exclusions is None:
+            raise RuntimeError(
+                "periodic Coulomb reached its exclusion correction with no bound exclusion "
+                "table; _scaled_pairs binds one on first use, so this means the topology was "
+                "never bound — call bind_topology(system) before evaluating"
+            )
+        exclusions = self._exclusions
+        excluded_pairs = exclusions.pairs
         return self.coulomb_periodic.energy(
             positions=pos,
             charges=q,
             cell=cell,
             edge_index=edge_index,
             distances=dist,
-            scales=scales,
+            edge_mask=live,
+            excluded_pairs=excluded_pairs,
+            excluded_scales=exclusions.lookup(excluded_pairs, "q", dtype=pos.dtype),
         )
 
     def _coulomb_energy_forces(
         self,
         system: Any,
         pos: torch.Tensor,
-        zero: torch.Tensor,
         n_atoms: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         q = self._charges()
@@ -1186,7 +1512,7 @@ class Potentials(BasePotential):
         grad_enabled = torch.is_grad_enabled()
         with torch.enable_grad():
             p_nb = pos.detach().requires_grad_(True)
-            nb_energy = self._coulomb_energy(system, p_nb, zero)
+            nb_energy = self._coulomb_energy(system, p_nb)
             create_graph = grad_enabled and q.requires_grad
             nb_forces = (
                 autograd_forces_from_energy(nb_energy, p_nb, create_graph=create_graph)
@@ -1196,6 +1522,21 @@ class Potentials(BasePotential):
         # ``create_graph=False`` freed ``nb_energy``'s graph inside the grad call;
         # detach it so a later ``loss.backward()`` never touches the freed graph.
         return nb_energy if create_graph else nb_energy.detach(), nb_forces
+
+    def _rebuilds_pairs(self) -> bool:
+        """Whether a declared term rebuilds its pair vectors from the placed list.
+
+        The three nonbonded terms reach the neighbour list through
+        :meth:`_scaled_pairs`; the bonded ones read ``pos`` and their own index
+        columns, and an mlip reads ``edges.edge_diff`` as handed to it. Only the
+        first group is served by :meth:`_placed_pairs` and therefore cares
+        whether that list carries ``shifts``.
+        """
+        return (
+            self.lj is not None
+            or self.coulomb_open is not None
+            or self.coulomb_periodic is not None
+        )
 
     def _atom_batch(self, system: Any, n: int, device: torch.device) -> torch.Tensor:
         atoms = self._namespace(system, "atoms")
@@ -1228,7 +1569,7 @@ class Potentials(BasePotential):
             try:
                 if name in system:
                     return system[name]
-            except Exception:  # noqa: BLE001
+            except Exception:
                 return None
         return None
 
@@ -1239,7 +1580,7 @@ class Potentials(BasePotential):
             try:
                 if isinstance(ns, (Mapping, TensorDict)) and key in ns:
                     return ns[key]
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
         return None
 

@@ -1,6 +1,6 @@
 ---
 slug: composable-a0-03-periodic-coulomb
-status: approved
+status: code-complete
 criteria:
   - id: ac-001
     summary: excluded bonded pairs are corrected by the full Coulomb term under Ewald/PME (F1)
@@ -13,11 +13,14 @@ criteria:
     status: pending
     last_checked: null
   - id: ac-002
-    summary: Madelung energy of an 8-ion rocksalt cube matches the offline golden
+    summary: Madelung energy of a rocksalt supercell matches the closed-form golden
     type: scientific
     pass_when: |
-      tests/test_molpot/test_forcefield/test_coulomb.py reproduces the hard-coded
-      Madelung energy literal to rtol 1e-6 with Ewald and with PME.
+      tests/test_molpot/test_forcefield/test_coulomb.py reproduces the closed-form
+      rocksalt lattice energy E = -(N/2) * M * k_e / d with M = 1.74756459463 on a
+      2x2x2 supercell (64 ions, d = 2.82 A) to rtol 1e-6 with Ewald and with PME.
+      (The 8-ion conventional cube is ill-posed under minimum image - its nearest
+      neighbours sit at exactly L/2 - see finding F14.)
     status: pending
     last_checked: null
   - id: ac-003
@@ -46,6 +49,8 @@ criteria:
       Growing the cell past the bound capacity raises RuntimeError naming
       capacity_factor on the eager path; the compiled path returns NaN energy
       rather than a wrong finite value (test_coulomb.py).
-    status: pending
-    last_checked: null
+    status: verified
+    last_checked: 2026-09-07
+    verified_by: impl
+    evidence: "tests/test_molpot/test_forcefield/test_coulomb.py TestCoulombPeriodicPotential - eager RuntimeError naming capacity_factor on an over-capacity rebind, NaN energy in-graph on a cell that outgrew the bound shape, bind_cell idempotent"
 ---

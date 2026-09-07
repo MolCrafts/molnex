@@ -1,4 +1,11 @@
-"""LJ 12-6 on ForceField.to_potentials() via existing lj126 kernel."""
+"""LJ 12-6 on ForceField.to_potentials() via existing lj126 kernel.
+
+Every batch here arrives with a placed ``edges`` namespace built by
+:func:`~tests.test_molpot.test_forcefield.conftest.place_edges` at
+:data:`LJ_CUTOFF` — the same cutoff the ``lj/cut`` style declares, so the live
+pair set is exactly the set the style asks for (``composable-a0-03b``: pair
+enumeration is molix's, not molpot's).
+"""
 
 from __future__ import annotations
 
@@ -9,6 +16,12 @@ from tensordict import TensorDict
 
 from molpot.forcefield import ForceField
 from molpot.potentials.vdw.lj126 import lj126_pair_energy
+from tests.test_molpot.test_forcefield.conftest import place_edges
+
+#: Cutoff (Å) of every ``lj/cut`` style declared here, and the build radius of
+#: every placed list. Past the largest separation in any fixture below (4 Å),
+#: so no pair is dropped by the list rather than by the style.
+LJ_CUTOFF = 10.0
 
 
 class TestLJEnergy:
@@ -17,7 +30,7 @@ class TestLJEnergy:
         sig = torch.full((4,), 3.0, dtype=torch.float64)
         ff = (
             ForceField(name="packed-lj")
-            .def_pairstyle("lj/cut", cutoff=10.0)
+            .def_pairstyle("lj/cut", cutoff=LJ_CUTOFF)
             .with_params(atoms={"epsilon": eps, "sigma": sig})
         )
         batch = TensorDict(
@@ -36,6 +49,7 @@ class TestLJEnergy:
             },
             batch_size=[],
         )
+        place_edges(batch, cutoff=LJ_CUTOFF)
         energy = ff.to_potentials().calc_energy(batch)
         assert energy.shape == (2,)
         assert not torch.isclose(energy[0], energy[1])
@@ -52,7 +66,7 @@ class TestLJEnergy:
         )
         ff = (
             ForceField(name="lj")
-            .def_pairstyle("lj/cut", cutoff=10.0)
+            .def_pairstyle("lj/cut", cutoff=LJ_CUTOFF)
             .with_params(atoms={"epsilon": eps, "sigma": sig})
         )
         batch = TensorDict(
@@ -67,6 +81,7 @@ class TestLJEnergy:
             },
             batch_size=[],
         )
+        place_edges(batch, cutoff=LJ_CUTOFF)
         e = ff.to_potentials().calc_energy(batch)
         assert math.isclose(float(e), float(e_ref), rel_tol=1e-10)
 
@@ -75,7 +90,7 @@ class TestLJEnergy:
 
         ff = (
             ForceField(name="lj", nonbonded_scaling=NonbondedScaling())
-            .def_pairstyle("lj/cut", cutoff=10.0)
+            .def_pairstyle("lj/cut", cutoff=LJ_CUTOFF)
             .with_params(
                 atoms={
                     "epsilon": torch.tensor([0.15, 0.15], dtype=torch.float64),
@@ -104,5 +119,6 @@ class TestLJEnergy:
             },
             batch_size=[],
         )
+        place_edges(batch, cutoff=LJ_CUTOFF)
         e = ff.to_potentials().calc_energy(batch)
         assert math.isclose(float(e), 0.0, abs_tol=1e-12)

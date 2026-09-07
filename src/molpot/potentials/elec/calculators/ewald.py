@@ -5,7 +5,7 @@ from typing import Optional
 import torch
 
 from molpot.potentials.elec.calculators.calculator import Calculator
-from molpot.potentials.elec.lib.kvectors import generate_kvectors_for_ewald
+from molpot.potentials.elec.lib.kvectors import generate_kvectors_for_ewald, get_ns_ewald
 from molpot.potentials.elec.potentials import Potential
 
 
@@ -61,13 +61,11 @@ class EwaldCalculator(Calculator):
             K-space potential ``(n_atoms, n_channels)``.
         """
         if kvectors is None:
-            k_cutoff = 2 * torch.pi / self.lr_wavelength
-
-            basis_norms = torch.linalg.norm(cell, dim=1)
-            ns_float = k_cutoff * basis_norms / 2 / torch.pi
-            ns = torch.ceil(ns_float).long()
-
-            kvectors = generate_kvectors_for_ewald(ns=ns, cell=cell)
+            # Sized off the live cell — a host read, hence the unbound path.
+            # A caller that froze the shape passes ``kvectors`` instead.
+            kvectors = generate_kvectors_for_ewald(
+                ns=get_ns_ewald(cell, self.lr_wavelength), cell=cell
+            )
 
         knorm_sq = torch.sum(kvectors**2, dim=-1)
 

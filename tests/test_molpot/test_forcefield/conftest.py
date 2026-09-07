@@ -6,6 +6,68 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from molix.batch import NeighborList
+
+
+def place_edges(batch: TensorDict, *, cutoff: float) -> TensorDict:
+    """Write ``batch["edges"]`` with molix's neighbour list (``composable-a0-03b``).
+
+    :class:`molix.batch.NeighborList` is the repo's Edge Convention owner and
+    the training-side of the two owners named in
+    ``.claude/notes/architecture.md`` §Layer roles (the other being
+    :class:`molix.md.NeighborList`). ``molpot`` **consumes** a placed ``edges``
+    namespace; it does not enumerate one, so every fixture that reaches a pair
+    term has to arrive with a list, exactly as a collated training batch does.
+
+    ``symmetry`` is left at its ``True`` default and that is load-bearing, not
+    incidental: the half-pair mode emits ``edge_index[:, 0] > edge_index[:, 1]``,
+    and the placed-list liveness rule keeps ``source < target``, so a
+    ``symmetry=False`` list would read as **entirely dead** and every pair term
+    would silently cost zero. The full bidirectional list carries each pair
+    twice and the rule keeps exactly one orientation of each.
+
+    The list is built on a throw-away probe batch and only the resulting
+    namespace is moved across, so the caller's ``atoms`` / ``graphs`` /
+    topology tensors are never replaced by copies of themselves.
+
+    Args:
+        batch: Post-collate batch with ``atoms.pos`` ``(N, 3)`` in Å and
+            ``atoms.batch`` ``(N,)`` graph membership, optionally carrying
+            ``graphs.cell`` — ``(3, 3)`` or ``(B, 3, 3)`` — which switches the
+            build to the minimum-image convention.
+        cutoff: Build radius in Å. Pass the cutoff the *asking style* declares
+            so the live pair set is exactly the set that style would have
+            enumerated; where a style declares none (open ``pair:coulomb``
+            defaults to ``cutoff=None``, i.e. every pair), pass a radius past
+            the fixture's largest separation.
+
+    Returns:
+        The same ``batch`` object, with ``edges`` holding ``edge_index``
+        ``(E, 2)``, ``edge_diff`` ``(E, 3)`` (``pos[target] - pos[source]``)
+        and ``edge_dist`` ``(E,)``. ``E`` is ``0`` when no pair is inside
+        ``cutoff`` — an empty list, not an absent one.
+    """
+    atoms = batch["atoms"]
+    pos = atoms["pos"]
+    n_atoms = int(pos.shape[0])
+    membership = (
+        atoms["batch"] if "batch" in atoms.keys() else torch.zeros(n_atoms, dtype=torch.long)
+    )
+    cell = None
+    if "graphs" in batch.keys() and "cell" in batch["graphs"].keys():
+        cell = batch["graphs", "cell"]
+        cell = cell if cell.ndim == 3 else cell.unsqueeze(0)
+
+    probe = TensorDict(
+        {"atoms": TensorDict({"pos": pos, "batch": membership}, batch_size=[n_atoms])},
+        batch_size=[],
+    )
+    if cell is not None:
+        probe["graphs"] = TensorDict({"cell": cell}, batch_size=[int(cell.shape[0])])
+    NeighborList(cutoff=cutoff, pbc=cell is not None).execute(probe)
+    batch["edges"] = probe["edges"]
+    return batch
+
 
 @pytest.fixture
 def fake_pol_styles(monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
@@ -114,6 +176,14 @@ BUTANE_OPLS_SCALES: tuple[float, ...] = (
 )
 # fmt: on
 
+#: Build radius (Å) of the butane fixture's placed neighbour list. Past the
+#: largest of the 91 separations (6.04 Å), so the list holds **every** pair —
+#: which is what ``BUTANE_OPLS_SCALES`` was captured against, and what the
+#: cutoff-less open ``pair:coulomb`` of ``_butane_forcefield`` asks for. It is
+#: also the ``lj/cut`` cutoff that fixture declares, so LJ and Coulomb read the
+#: same rows.
+BUTANE_LIST_CUTOFF = 10.0
+
 #: A fixed all-atom butane geometry (Å). Every one of the 91 pairs lies between
 #: 1.09 Å and 6.04 Å, so a 10 Å neighbour list keeps all of them and the
 #: exclusion vector above lines up with the full half list.
@@ -199,11 +269,18 @@ def butane_scales() -> torch.Tensor:
 
 @pytest.fixture
 def butane_batch() -> TensorDict:
-    """Post-collate butane batch: ``atoms`` + ``bonds`` / ``angles`` / ``propers``."""
+    """Post-collate butane batch: ``atoms`` + ``bonds`` / ``angles`` / ``propers`` + ``edges``.
+
+    The ``edges`` namespace is built by :func:`place_edges` at
+    :data:`BUTANE_LIST_CUTOFF`, which keeps all 91 pairs — the same set the
+    deleted molpot enumerator produced, so ``BUTANE_OPLS_SCALES`` still lines
+    up row for row (as a set; the placed list is not in ``triu`` order and the
+    energies the golden pins are sums).
+    """
     angle_index = torch.tensor(butane_angles(), dtype=torch.long).t().contiguous()
     proper_index = torch.tensor(butane_propers(), dtype=torch.long).t().contiguous()
     bond_index = torch.tensor(BUTANE_BONDS, dtype=torch.long).t().contiguous()
-    return TensorDict(
+    batch = TensorDict(
         {
             "atoms": TensorDict(
                 {
@@ -237,3 +314,4 @@ def butane_batch() -> TensorDict:
         },
         batch_size=[],
     )
+    return place_edges(batch, cutoff=BUTANE_LIST_CUTOFF)
