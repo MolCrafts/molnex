@@ -11,10 +11,6 @@ from molpot.derivation import EnergyAggregation, ForceDerivation
 class TestEnergyAggregation:
     """Test EnergyAggregation pooling layer."""
 
-    def test_initialization(self):
-        head = EnergyAggregation(pooling="mean")
-        assert head.pooling == "mean"
-
     def test_invalid_pooling(self):
         with pytest.raises(ValueError):
             EnergyAggregation(pooling="invalid")

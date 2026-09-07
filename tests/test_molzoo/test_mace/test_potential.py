@@ -515,12 +515,6 @@ class TestMacePotential:
 
     # -- monomorphism ---------------------------------------------------------
 
-    @pytest.mark.parametrize("method", ["forward", "energy_core", "_write_energy"])
-    def test_no_compute_forces_on_the_public_surface(self, method: str) -> None:
-        """ "Energy only" is a construction, never a per-call flag."""
-        parameters = inspect.signature(getattr(MacePotential, method)).parameters
-        assert "compute_forces" not in parameters
-
     def test_forward_is_a_single_pipeline_dispatch(self) -> None:
         """``return self._pipeline(batch)`` — every branch resolved in ``__init__``."""
         body = _function_body(MacePotential.forward)

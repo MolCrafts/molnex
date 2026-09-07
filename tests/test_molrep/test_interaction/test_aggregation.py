@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from molrep.interaction.aggregation import MessageAggregation, MessageAggregationSpec
+from molrep.interaction.aggregation import MessageAggregation
 from molrep.utils.equivariance import (
     check_equivariance,
     rotate_irreps_features_simple,
@@ -12,30 +12,8 @@ from molrep.utils.equivariance import (
 )
 
 
-class TestMessageAggregationSpec:
-    """Test MessageAggregationSpec configuration."""
-
-    def test_valid_config(self):
-        """Test creation with valid parameters."""
-        spec = MessageAggregationSpec(
-            irreps="64x0e + 32x1o",
-            apply_cutoff=True,
-        )
-        assert spec.irreps == "64x0e + 32x1o"
-        assert spec.apply_cutoff is True
-
-
 class TestMessageAggregation:
     """Test MessageAggregation layer."""
-
-    def test_initialization(self):
-        """Test MessageAggregation initialization."""
-        agg = MessageAggregation(
-            irreps="64x0e",
-            apply_cutoff=True,
-        )
-        assert agg.config.irreps == "64x0e"
-        assert agg.config.apply_cutoff is True
 
     def test_forward_shape(self):
         """Test output shape."""

@@ -21,9 +21,6 @@ class _LegacySquare(torch.autograd.Function):
 
 
 class TestForceDerivation:
-    def test_default_is_autograd(self):
-        assert ForceDerivation().method == "autograd"
-
     def test_invalid_method_rejected(self):
         with pytest.raises(ValueError, match="method must be one of"):
             ForceDerivation(method="nope")

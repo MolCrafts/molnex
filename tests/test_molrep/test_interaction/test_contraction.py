@@ -10,17 +10,6 @@ from molrep.interaction.contraction import SymmetricContraction, SymmetricContra
 class TestSymmetricContractionSpec:
     """Test SymmetricContractionSpec configuration."""
 
-    def test_valid_config(self):
-        """Test creation with valid parameters."""
-        spec = SymmetricContractionSpec(
-            hidden_dim=64,
-            num_species=10,
-            max_body_order=2,
-        )
-        assert spec.hidden_dim == 64
-        assert spec.num_species == 10
-        assert spec.max_body_order == 2
-
     def test_invalid_hidden_dim(self):
         """Test validation for hidden_dim."""
         with pytest.raises(ValueError):
@@ -42,17 +31,6 @@ class TestSymmetricContractionSpec:
 
 class TestSymmetricContraction:
     """Test SymmetricContraction multi-body basis construction."""
-
-    def test_initialization(self):
-        """Test SymmetricContraction initialization."""
-        contraction = SymmetricContraction(
-            hidden_dim=64,
-            num_species=10,
-            max_body_order=2,
-        )
-        assert contraction.config.hidden_dim == 64
-        assert contraction.config.num_species == 10
-        assert contraction.config.max_body_order == 2
 
     def test_forward_shape(self):
         """Test output shape matches input."""

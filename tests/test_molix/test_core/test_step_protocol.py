@@ -65,92 +65,6 @@ class MockDataModule:
 
 
 # Test Step Protocol
-def test_default_train_step_satisfies_protocol():
-    """Verify DefaultTrainStep satisfies Step protocol."""
-    step = DefaultTrainStep()
-
-    # Check methods exist
-    assert hasattr(step, "on_train_batch")
-    assert hasattr(step, "on_eval_batch")
-    assert callable(step.on_train_batch)
-    assert callable(step.on_eval_batch)
-
-
-def test_default_eval_step_satisfies_protocol():
-    """Verify DefaultEvalStep satisfies Step protocol."""
-    step = DefaultEvalStep()
-
-    # Check methods exist
-    assert hasattr(step, "on_train_batch")
-    assert hasattr(step, "on_eval_batch")
-    assert callable(step.on_train_batch)
-    assert callable(step.on_eval_batch)
-
-
-def test_trainer_accepts_default_steps():
-    """Verify Trainer accepts default steps (implicit and explicit)."""
-    model = SimpleModel()
-
-    # Implicit default steps
-    trainer1 = Trainer(
-        model=model,
-        loss_fn=simple_loss_fn,
-        optimizer_factory=simple_optimizer_factory,
-    )
-    assert isinstance(trainer1.train_step, DefaultTrainStep)
-    assert isinstance(trainer1.eval_step, DefaultEvalStep)
-
-    # Explicit default steps
-    trainer2 = Trainer(
-        model=model,
-        loss_fn=simple_loss_fn,
-        optimizer_factory=simple_optimizer_factory,
-        train_step=DefaultTrainStep(),
-        eval_step=DefaultEvalStep(),
-    )
-    assert isinstance(trainer2.train_step, DefaultTrainStep)
-    assert isinstance(trainer2.eval_step, DefaultEvalStep)
-
-
-def test_trainer_accepts_custom_step():
-    """Verify Trainer accepts custom step implementations."""
-
-    class CustomStep:
-        def __init__(self):
-            self.train_called = False
-            self.eval_called = False
-
-        def on_train_batch(self, trainer, state, batch):
-            self.train_called = True
-            predictions = trainer.model(batch)
-            loss = trainer.loss_fn(predictions, batch)
-            trainer.optimizer.zero_grad()
-            loss.backward()
-            trainer.optimizer.step()
-            return {"loss": loss, "predictions": predictions}
-
-        def on_eval_batch(self, trainer, state, batch):
-            self.eval_called = True
-            with torch.no_grad():
-                predictions = trainer.model(batch)
-                loss = trainer.loss_fn(predictions, batch)
-            return {"loss": loss, "predictions": predictions}
-
-    custom_step = CustomStep()
-    model = SimpleModel()
-
-    trainer = Trainer(
-        model=model,
-        loss_fn=simple_loss_fn,
-        optimizer_factory=simple_optimizer_factory,
-        train_step=custom_step,
-        eval_step=custom_step,
-    )
-
-    assert trainer.train_step is custom_step
-    assert trainer.eval_step is custom_step
-
-
 def test_default_train_step_computes_loss_and_updates():
     """Verify DefaultTrainStep performs forward, backward, and optimizer step."""
     model = SimpleModel()
@@ -320,32 +234,6 @@ def test_custom_step_gradient_accumulation():
     # Verify training completed
     assert state.epoch == 1
     assert state.global_step == 3  # 3 training batches
-
-
-def test_step_return_format():
-    """Verify steps return correct output format."""
-    model = SimpleModel()
-
-    trainer = Trainer(
-        model=model,
-        loss_fn=simple_loss_fn,
-        optimizer_factory=simple_optimizer_factory,
-    )
-
-    state = TrainState()
-    batch = _make_batch()
-
-    # Test train step output
-    train_outputs = trainer.train_step.on_train_batch(trainer, state, batch)
-    assert isinstance(train_outputs, dict)
-    assert "loss" in train_outputs
-    assert "predictions" in train_outputs
-
-    # Test eval step output
-    eval_outputs = trainer.eval_step.on_eval_batch(trainer, state, batch)
-    assert isinstance(eval_outputs, dict)
-    assert "loss" in eval_outputs
-    assert "predictions" in eval_outputs
 
 
 # ---- AMP tests ----

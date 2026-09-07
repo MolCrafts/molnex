@@ -235,29 +235,3 @@ class TestIntegratorRebuildSwitch:
         # ‖x‖² = 1 + 4 = 5 → E = ½·2·5 = 5; F = −2x
         assert float(out["energy"]) == pytest.approx(5.0, abs=1e-10)
         assert torch.equal(out["forces"], -2.0 * pos)
-
-    def test_integrator_has_no_rebuild_switch(self):
-        ig = Integrator().bind_force(_harmonic_potential_like(1.0))
-        assert not hasattr(ig, "rebuild")
-        assert not hasattr(ig, "rebuilds_neighbors")
-
-    def test_no_class_defined_in_this_file_subclasses_forcefield(self):
-        import inspect
-
-        from molpy import ForceField as MolpyForceField
-
-        import tests.test_molix.test_md.test_integrators as this_module
-        from molix.md import ForceField
-
-        for name, obj in inspect.getmembers(this_module, inspect.isclass):
-            if obj.__module__ != this_module.__name__:
-                continue
-            assert not issubclass(obj, ForceField), name
-            assert not issubclass(obj, MolpyForceField), name
-
-    def test_the_modulo_counter_is_gone(self):
-        """One owner: the list. The integrator keeps no cadence state at all."""
-        ig = _nve(1.0, dt=0.01, mass=1.0)
-        assert not hasattr(ig, "rebuild_every")
-        assert not hasattr(ig, "_force_eval_count")
-        assert not hasattr(ig, "rebuild")

@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from molix.compile import Compiler, ExplainSummary
+from molix.compile import Compiler
 from molix.compile import logger as compile_logger
 
 
@@ -192,12 +192,3 @@ class TestExplainSummary:
         assert all(isinstance(reason, str) for reason in summary.break_reasons)
         assert all(isinstance(site, str) for site in summary.break_sites)
         assert expected_site in summary.break_sites
-
-    def test_explain_summary_is_the_only_explain_surface(self):
-        """ac-002: the return type is exported beside ``Compiler``; the bare
-        count helper it replaces is gone."""
-        import molix
-
-        assert molix.ExplainSummary is ExplainSummary
-        assert "ExplainSummary" in molix.__all__
-        assert not hasattr(Compiler, "count_graph_breaks")

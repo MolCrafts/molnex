@@ -9,11 +9,6 @@ from molrep.readout.pooling import PoolingSpec, ScatterPooling
 class TestPoolingSpec:
     """Test PoolingSpec configuration."""
 
-    def test_valid_config(self):
-        """Test creation with valid parameters."""
-        spec = PoolingSpec(strategy="sum")
-        assert spec.strategy == "sum"
-
     def test_valid_strategies(self):
         """Test all valid pooling strategies."""
         for strategy in ["sum", "mean", "none"]:

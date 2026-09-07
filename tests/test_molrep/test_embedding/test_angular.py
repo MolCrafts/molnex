@@ -18,11 +18,6 @@ from molrep.utils.equivariance import (
 class TestSphericalHarmonicsSpec:
     """Test SphericalHarmonicsSpec configuration."""
 
-    def test_valid_config(self):
-        """Test creation with valid parameters."""
-        spec = SphericalHarmonicsSpec(l_max=2)
-        assert spec.l_max == 2
-
     def test_invalid_l_max(self):
         """Test validation for l_max."""
         with pytest.raises(ValueError):
@@ -31,13 +26,6 @@ class TestSphericalHarmonicsSpec:
 
 class TestSphericalHarmonics:
     """Test SphericalHarmonics computation."""
-
-    def test_initialization(self):
-        """Test SphericalHarmonics initialization."""
-        sh = SphericalHarmonics(l_max=2)
-        assert sh.config.l_max == 2
-        # Check output_dim property
-        assert sh.config.output_dim == 9  # (2+1)^2
 
     def test_forward_shape(self):
         """Test output shape for different l_max."""

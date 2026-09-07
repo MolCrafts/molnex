@@ -104,10 +104,6 @@ def test_emit_property_features_off_drops_only_property_tracks(rank):
         assert key not in out_lean["edges"].keys()
 
 
-def test_emit_property_features_defaults_on():
-    assert PiNet(atom_types=[1, 6]).emit_property_features is True
-
-
 def test_translation_invariance():
     enc = _encoder(rank=5)
     g = _graph()
@@ -137,9 +133,3 @@ def test_permutation_equivariance():
         ref = enc(g.clone())["atoms", "node_features"]
         got = enc(permute_graph(g, perm))["atoms", "node_features"]
     torch.testing.assert_close(ref[perm], got, atol=1e-5, rtol=1e-5)
-
-
-def test_no_lazy_linear_in_encoder():
-    enc = _encoder(rank=3)
-    for m in enc.modules():
-        assert type(m).__name__ != "LazyLinear"

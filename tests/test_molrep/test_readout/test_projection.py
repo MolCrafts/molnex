@@ -9,19 +9,6 @@ from molrep.readout.projection import BasisProjection, BasisProjectionSpec
 class TestBasisProjectionSpec:
     """Test BasisProjectionSpec configuration."""
 
-    def test_valid_config(self):
-        """Test creation with valid parameters."""
-        spec = BasisProjectionSpec(
-            hidden_dim=64,
-            num_radial=8,
-            l_max=2,
-            max_body_order=2,
-        )
-        assert spec.hidden_dim == 64
-        assert spec.num_radial == 8
-        assert spec.l_max == 2
-        assert spec.max_body_order == 2
-
     def test_invalid_hidden_dim(self):
         """Test validation for hidden_dim."""
         with pytest.raises(ValueError):
@@ -30,17 +17,6 @@ class TestBasisProjectionSpec:
 
 class TestBasisProjection:
     """Test BasisProjection layer."""
-
-    def test_initialization(self):
-        """Test BasisProjection initialization."""
-        proj = BasisProjection(
-            hidden_dim=64,
-            num_radial=8,
-            l_max=2,
-            max_body_order=2,
-        )
-        assert proj.config.hidden_dim == 64
-        assert proj.config.num_radial == 8
 
     def test_forward_shape(self):
         """Test that output shape matches input (passthrough)."""

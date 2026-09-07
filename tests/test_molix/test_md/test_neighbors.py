@@ -7,9 +7,6 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-import molix.batch.neighbor
-import molix.md
-import molix.md.neighbors
 from molix.md import MD, VelocityVerletIntegrator
 from molix.md.neighbors import NeighborList, NeighborStrategy
 from tests.test_molix.test_md.conftest import make_cubic_lattice
@@ -104,46 +101,6 @@ class TestNeighborList:
         assert torch.equal(nl.edge_index, index)
         assert torch.allclose(nl.cell, cell * mu)
         assert torch.allclose(nl._x_hold, pos * mu)
-
-    def test_renamed_symbol_is_the_md_export(self):
-        """The MD list is exported as ``NeighborList``; the old name is gone.
-
-        There is no back-compat alias (``stage: experimental``, repo norm), so
-        the old name must be absent from the module *and* from ``__all__`` — a
-        ``PeriodicNeighborList = NeighborList`` shim would defeat this guard.
-        """
-        from molix.md import NeighborList
-
-        assert NeighborList is molix.md.neighbors.NeighborList
-        assert not hasattr(molix.md, "PeriodicNeighborList")
-
-        names = list(molix.md.__all__)
-        assert "PeriodicNeighborList" not in names
-        assert "NeighborList" in names
-        # ``__all__`` stays alphabetized (notes, 2026-08-09) inside the
-        # PascalCase block that follows the CONSTANT_CASE block, so the entry
-        # sorts into the "N" run instead of keeping the old "P" slot. Pinned
-        # against ``NeighborStrategy`` (a permanent export) rather than the
-        # ``NeighborListHook`` this chain's link 07 deletes.
-        pascal = [name for name in names if not name.isupper()]
-        assert pascal == sorted(pascal)
-        assert names.index("NeighborList") < names.index("NeighborStrategy")
-
-    def test_md_list_is_not_the_pipeline_task(self):
-        """Anti-shadow: two deliberate same-name types in different layers.
-
-        ``molix.md.neighbors`` imports the batch-side transform — the one
-        owner of kernel-output normalisation — into its own namespace. Once the
-        MD buffer owner takes the bare name, that import must be aliased to
-        ``NeighborListTask``, or the class definition rebinds the module-level
-        name and the constructor calls *itself* recursively.
-        """
-        assert molix.md.NeighborList is not molix.batch.neighbor.NeighborList
-        assert molix.md.neighbors.NeighborListTask is molix.batch.neighbor.NeighborList
-
-    def test_satisfies_the_neighbor_strategy_protocol(self, nlist):
-        nl, _ = nlist
-        assert isinstance(nl, NeighborStrategy)
 
     def test_capacity_exceeds_initial_edges(self, nlist):
         """Headroom is what lets the edge count grow without reallocating."""
@@ -628,35 +585,6 @@ class TestNeighborListPolicy:
 
     # --- protocol -----------------------------------------------------------
 
-    def test_a_skinned_list_satisfies_the_widened_protocol(self):
-        """Widening ``NeighborStrategy`` must not push its own implementation
-        out of the contract."""
-        nl, _ = _policy_list(skin=1.5)
-        assert isinstance(nl, NeighborStrategy)
-
-    def test_a_list_without_the_policy_members_fails_the_protocol(self):
-        """The protocol has to actually *require* ``cutoff`` / ``skin`` /
-        ``update``: a stub carrying only the buffer members must no longer
-        pass."""
-
-        class _BufferOnly:
-            edge_index: torch.Tensor = torch.zeros(1, 2, dtype=torch.long)
-            shifts: torch.Tensor = torch.zeros(1, 3)
-            num_edges: int = 0
-            capacity: int = 1
-
-            def rebuild(self, positions: torch.Tensor) -> None:
-                """No-op build."""
-
-            def to(
-                self,
-                device: torch.device | str | torch.dtype | None = None,
-                dtype: torch.dtype | None = None,
-            ) -> "_BufferOnly":
-                return self
-
-        assert not isinstance(_BufferOnly(), NeighborStrategy)
-
     def test_the_interaction_cutoff_is_the_bar_not_the_build_radius(self):
         """A skinned list holds pairs out to ``r_build``, but they are only
         *complete* out to ``cutoff`` between rebuilds.
@@ -1119,45 +1047,7 @@ class TestNeighborListBind:
             nl.update(_batch(pos.to(torch.float32)))
         assert "float64" in str(excinfo.value)
 
-    def test_the_dispatch_has_no_twin_entry_points(self):
-        """One method, two accepted types — ``update_td`` / ``update_pos`` twins
-        are rejected by design: callers would have to know which one their
-        driver holds, and the policy state would live behind two doors."""
-        assert not hasattr(molix.md.neighbors, "update_td")
-        assert not hasattr(molix.md.neighbors, "update_pos")
-        assert not hasattr(NeighborList, "update_td")
-        assert not hasattr(NeighborList, "update_pos")
-
     # --- protocol -----------------------------------------------------------
-
-    def test_a_list_without_build_fails_the_widened_protocol(self):
-        """``MD.set_neighbors`` / ``NeighborList.build`` go through the
-        ``NeighborStrategy`` annotation, so the protocol has to actually
-        *require* ``build``: a stub carrying every policy member but no
-        ``build`` must no longer pass."""
-
-        class _PolicyWithoutBuild:
-            edge_index: torch.Tensor = torch.zeros(1, 2, dtype=torch.long)
-            shifts: torch.Tensor = torch.zeros(1, 3)
-            num_edges: int = 0
-            capacity: int = 1
-            cutoff: float = 3.5
-            skin: float = 0.0
-
-            def rebuild(self, positions: torch.Tensor) -> None:
-                """No-op build."""
-
-            def update(self, positions: TensorDict | torch.Tensor) -> bool:
-                return False
-
-            def to(
-                self,
-                device: torch.device | str | torch.dtype | None = None,
-                dtype: torch.dtype | None = None,
-            ) -> "_PolicyWithoutBuild":
-                return self
-
-        assert not isinstance(_PolicyWithoutBuild(), NeighborStrategy)
 
 
 # ---------------------------------------------------------------------------

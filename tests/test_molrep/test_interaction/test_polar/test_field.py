@@ -160,7 +160,3 @@ class TestOneBodyMLPFieldReadout:
     def test_mlp_is_official_width(self):
         """RadialMLP([2 n_0e, 128, 128, 128, 1]); tiny n_0e=4."""
         assert _readout().mlp.hs == [8, 128, 128, 128, 1]
-
-
-class TestPolarFieldPackage:
-    """Package-level constraints for the field modules."""

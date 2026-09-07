@@ -213,7 +213,3 @@ class TestChemEncoder:
         reversed_bonds["bonds", "atomj"] = mini_batch["bonds", "atomi"].clone()
         reverse = enc.compose(reversed_bonds)
         assert torch.allclose(forward.bond, reverse.bond, rtol=1e-5, atol=1e-6)
-
-
-class TestNoMolpotImport:
-    """molrep.chem must not import molpot or pinet."""

@@ -15,7 +15,6 @@ import torch
 
 from molix.store.cache import PackedCache
 from molix.store.dataset import (
-    BaseDataset,
     CachedDataset,
     MmapDataset,
     SubsetDataset,
@@ -159,9 +158,6 @@ class TestCachedDataset:
         assert len(ds) == 5
         assert torch.equal(ds[2]["Z"], samples[2]["Z"])
 
-    def test_is_base_dataset(self):
-        assert issubclass(CachedDataset, BaseDataset)
-
     def test_task_states_exposed(self, tmp_path):
         sink = _make_cache(
             tmp_path,
@@ -193,9 +189,6 @@ class TestSubsetDataset:
         assert torch.equal(sub[0]["Z"], samples[0]["Z"])
         assert torch.equal(sub[1]["Z"], samples[3]["Z"])
         assert torch.equal(sub[2]["Z"], samples[7]["Z"])
-
-    def test_is_base_dataset(self):
-        assert issubclass(SubsetDataset, BaseDataset)
 
     def test_forwards_attribute_access_to_parent(self, tmp_path):
         sink = _make_cache(tmp_path, n=6)

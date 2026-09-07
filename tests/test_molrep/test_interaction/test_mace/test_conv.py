@@ -14,10 +14,6 @@ from molrep.utils.equivariance import (
 )
 
 
-class TestConvTPSpec:
-    """Test ConvTPSpec configuration."""
-
-
 class TestConvTP:
     """Test ConvTP tensor product layer."""
 

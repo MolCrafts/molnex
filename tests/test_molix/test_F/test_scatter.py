@@ -64,9 +64,6 @@ class TestScatterSum:
 class TestScatterSumCuda:
     """Native ``molix::scatter_sum`` on GPU."""
 
-    def test_native_op_registered(self) -> None:
-        assert hasattr(torch.ops.molix, "scatter_sum")
-
     def test_cuda_matches_index_add(self) -> None:
         torch.manual_seed(0)
         src = torch.randn(64, 8, device="cuda", dtype=torch.float32)

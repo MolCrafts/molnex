@@ -32,9 +32,6 @@ from pathlib import Path
 
 import pytest
 
-import molzoo
-import molzoo.mace
-
 #: Repo root — ``tests/test_molzoo/test_imports.py`` → ``tests/test_molzoo`` →
 #: ``tests`` → root. Used to put ``src/`` on the probe interpreter's path
 #: whether or not the package happens to be installed.
@@ -112,31 +109,7 @@ class TestPublicImportSurface:
     re-export package, which runs the same PEP 562 policy.
     """
 
-    def test_top_level_exports_the_symbols_the_scripts_bind(self) -> None:
-        """The six names ``run_nve.py`` / ``bench_mace_matpes.py`` import."""
-        from molzoo import (
-            MACE,
-            MaceMatpes,
-            MaceOmol,
-            MacePolar,
-            MACESpec,
-        )
-
-        resolved = (
-            MACE,
-            MACESpec,
-            MaceMatpes,
-            MaceOmol,
-            MacePolar,
-        )
-        assert all(symbol is not None for symbol in resolved)
-
-    def test_mace_sub_package_re_exports_the_research_encoder(self) -> None:
-        """``bench_trainer_throughput.py:26`` imports through the package."""
-        from molzoo.mace import MACE
-
-        assert isinstance(MACE, type)
-
+    @pytest.mark.slow
     @pytest.mark.slow
     def test_importing_molzoo_does_not_import_cuequivariance(
         self, lazy_probe: dict[str, bool]
@@ -145,34 +118,9 @@ class TestPublicImportSurface:
         assert lazy_probe["at_import"] is False
 
     @pytest.mark.slow
+    @pytest.mark.slow
     def test_touching_a_model_symbol_imports_cuequivariance(
         self, lazy_probe: dict[str, bool]
     ) -> None:
         """Lazy, not absent: the symbol still resolves to the real class."""
         assert lazy_probe["after_attribute_access"] is True
-
-    def test_unknown_attribute_raises_attribute_error(self) -> None:
-        """``__getattr__`` must not turn a typo into an import error."""
-        with pytest.raises(AttributeError):
-            molzoo.NotAThing
-
-    def test_dir_reports_exactly_the_public_surface(self) -> None:
-        """``__dir__`` keeps completion and ``from molzoo import *`` alive."""
-        assert set(dir(molzoo)) == set(molzoo.__all__)
-
-    def test_mace_subpackage_dir_covers_its_public_surface(self) -> None:
-        """``molzoo.mace.__dir__`` reports exactly the sub-package's ``__all__``.
-
-        The mirror of :meth:`test_dir_reports_exactly_the_public_surface` one
-        level down, and the ac-001 lock. ``molzoo.mace`` imports only its
-        torch-free config models eagerly, so without ``__dir__`` sixteen of its
-        eighteen exported names would be absent from ``dir()`` — completion
-        would hide every lazy symbol while ``from molzoo.mace import *`` still
-        bound it.
-
-        ac-001's gate is the subset form ``set(__all__) <= set(dir())``; the
-        equality asserted here is what ``src/molzoo/mace/__init__.py``'s
-        ``__dir__`` actually guarantees and is strictly stronger, since it also
-        catches a ``dir()`` that grew a name ``__all__`` does not export.
-        """
-        assert set(dir(molzoo.mace)) == set(molzoo.mace.__all__)

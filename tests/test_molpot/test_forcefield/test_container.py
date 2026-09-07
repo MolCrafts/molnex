@@ -7,13 +7,6 @@ from molpy import ForceField as MolpyForceField
 from molpot.forcefield import ForceField
 
 
-class TestForceField:
-    def test_has_no_class_i_or_opls_classmethod(self):
-        assert not hasattr(ForceField, "class_i")
-        assert not hasattr(ForceField, "opls")
-        assert not hasattr(ForceField, "oplsaa")
-
-
 class TestOPLSAAForceField:
     def test_default_styles_are_oplsaa_set(self):
         from molpot.forcefield import OPLSAAForceField

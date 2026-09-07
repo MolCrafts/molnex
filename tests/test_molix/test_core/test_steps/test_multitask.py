@@ -572,15 +572,6 @@ def test_multitask_module_imports_no_science_package() -> None:
     assert not [name for name in imported if name.split(".")[0] in {"molpot", "molrep", "molzoo"}]
 
 
-def test_multitask_module_never_clips_gradients() -> None:
-    """Clipping stays with ``GradClipHook`` (single owner)."""
-    referenced = {
-        node.attr for node in ast.walk(_multitask_ast()) if isinstance(node, ast.Attribute)
-    } | {node.id for node in ast.walk(_multitask_ast()) if isinstance(node, ast.Name)}
-
-    assert "clip_grad_norm_" not in referenced
-
-
 def test_multitask_module_never_calls_item() -> None:
     """Per-task scalars stay detached device tensors — one host sync per batch."""
     called = {

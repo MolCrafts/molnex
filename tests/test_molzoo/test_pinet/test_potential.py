@@ -168,12 +168,6 @@ def test_force_loss_single_backward_populates_param_grads():
     assert n_grad > 0, "no parameter received a gradient from the force loss"
 
 
-def test_no_lazy_linear_in_potential():
-    model = _model(compute_forces=True)
-    for m in model.modules():
-        assert type(m).__name__ != "LazyLinear"
-
-
 class TestPiNetPotentialCompile:
     """The removed ``compile`` override — ``nn.Module.compile`` is in-place."""
 

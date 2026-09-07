@@ -199,6 +199,50 @@ default and MACE with no knob at all).
 ---
 
 <!-- mol:note:topic:test-tiers-orthogonal -->
+## [2026-09-07] Tests assert behaviour, not surface (user rule)
+
+**Rule (operator, 2026-09-07).** `tests/` holds correctness tests. Beyond the
+static source scans banned the same day, three more genres are out:
+
+1. **Namespace / re-export pins** — `__all__` contents, `__module__` location,
+   "this name is gone", "A is the same object as B", "the symbol is importable".
+   An import that breaks fails every real test in the package already.
+2. **Protocol-membership pins** — `isinstance(x, SomeRuntimeProtocol)` and its
+   negation. A `runtime_checkable` Protocol check *is* a `hasattr` check.
+3. **Constructor / default echoes** — build an object, assert the arguments or
+   the field defaults come back. CLAUDE.md already forbade "tests of signature
+   defaults"; molrep's `test_valid_config` / `test_initialization` pairs were
+   nine copies of exactly that.
+
+Deleted: 151 test functions + 4 whole files
+(`test_hooks/test_reexports.py`, `test_nn/test_init.py`,
+`test_md/test_forcefield.py`, `test_forcefield/test_exports_cut.py`),
+~1230 lines. Collected tests 3173 → 3021.
+
+**Kept, deliberately.** Anything asserting a *computed* value, a state
+transition, an error path with real inputs, or a measured resource property:
+`PackedCache` atomicity (no partial file after a failed save), the sampler's
+"no `(F,)`-length table survives construction", `DEFAULT_ALPHA_NORM_FACTOR`
+equals its Bohr³ → e·Å²·V⁻¹ formula, the class-I 1-2/1-3 scaling constants
+(physics, not a default), and the MACE readout-width wiring relation.
+The molzoo lazy-import probes survived and moved to `slow`: "importing molzoo
+must not import cuEquivariance" is a real, load-bearing contract.
+
+**This was a maintenance win, not a speed win — measured.** Deleting the 126
+pins moved user CPU from 76.7 s to 75.3 s, i.e. nothing: a `hasattr` assertion
+costs nothing to run. The speed win came only from the static scans, which
+walked the filesystem. Judge test-suite bloat by what a test *pins*, not by
+what it costs.
+
+**Measuring on this box.** The login node has **4 cores**, 260+ users and a
+routine load average above 100, so wall-clock suite timings are not comparable
+between runs — the same tree measured 106 s and 418 s hours apart. Use
+`/usr/bin/time` user+sys CPU, and treat any wall-clock delta under 2× as noise.
+
+**Status.** active.
+
+---
+
 ## [2026-09-07] No static source-scanning tests (user rule)
 
 **Rule (operator, 2026-09-07).** `tests/` must not contain tests that assert on

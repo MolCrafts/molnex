@@ -324,10 +324,6 @@ class TestCheckpoint:
 
 
 class TestTrainStateBestMetric:
-    def test_best_metric_default_none(self):
-        state = TrainState()
-        assert state.best_metric is None
-
     def test_best_metric_setter(self):
         state = TrainState()
         state.best_metric = 0.42
@@ -360,10 +356,6 @@ class TestTrainerNewParams:
         trainer.set_precision("fp16-mixed")
         assert trainer.scaler is not None
         assert trainer._checkpoint.scaler is trainer.scaler
-
-    def test_resume_path_stored(self):
-        trainer = _make_trainer(resume_from_checkpoint="/tmp/test.pt")
-        assert trainer._resume_from_checkpoint == "/tmp/test.pt"
 
     def test_resolve_checkpoint_path_missing(self):
         result = Trainer._resolve_checkpoint_path("/nonexistent/path.pt")

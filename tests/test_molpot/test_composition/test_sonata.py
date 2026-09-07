@@ -398,19 +398,3 @@ def test_from_encoder_requires_lmax_for_dipole(encoder_lmax1):
 # ---------------------------------------------------------------------------
 # ac-010 — public surface
 # ---------------------------------------------------------------------------
-
-
-def test_public_surface_reexports():
-    import molpot
-    import molpot.composition
-
-    assert "Sonata" in molpot.__all__
-    assert "SonataSpec" in molpot.__all__
-    assert "build_sonata" not in molpot.__all__
-    assert "Sonata" in molpot.composition.__all__
-    assert "SonataSpec" in molpot.composition.__all__
-    assert "build_sonata" not in molpot.composition.__all__
-    assert molpot.Sonata is Sonata
-    assert molpot.SonataSpec is SonataSpec
-    assert not hasattr(molpot, "build_sonata")
-    assert not hasattr(molpot.composition, "build_sonata")

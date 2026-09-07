@@ -3,33 +3,11 @@
 import torch
 
 from molix import config
-from molrep.interaction.linear import EquivariantLinear, EquivariantLinearSpec
-
-
-class TestEquivariantLinearSpec:
-    """Test EquivariantLinearSpec configuration."""
-
-    def test_valid_config(self):
-        """Test creation with valid parameters."""
-        spec = EquivariantLinearSpec(
-            irreps_in="0e + 1o",
-            irreps_out="0e + 1o",
-        )
-        assert spec.irreps_in == "0e + 1o"
-        assert spec.irreps_out == "0e + 1o"
+from molrep.interaction.linear import EquivariantLinear
 
 
 class TestEquivariantLinear:
     """Test EquivariantLinear layer."""
-
-    def test_initialization(self):
-        """Test EquivariantLinear initialization."""
-        linear = EquivariantLinear(
-            irreps_in="0e + 1o",
-            irreps_out="0e + 1o",
-        )
-        assert linear.config.irreps_in == "0e + 1o"
-        assert linear.config.irreps_out == "0e + 1o"
 
     def test_forward_scalar_only(self):
         """Test with scalar features only."""

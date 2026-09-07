@@ -220,13 +220,6 @@ class TestForceFieldPredictions:
     def test_supported_keys_are_the_four_task_predictions(self) -> None:
         assert ForceFieldPredictions.SUPPORTED_KEYS == ("energy", "forces", "hessian", "q")
 
-    def test_forcefield_predictions_importable_at_package_roots(self) -> None:
-        from molpot import ForceFieldPredictions as TopLevel
-        from molpot.forcefield import ForceFieldPredictions as PkgLevel
-
-        assert TopLevel is ForceFieldPredictions
-        assert PkgLevel is ForceFieldPredictions
-
     @pytest.mark.parametrize(
         "keys",
         [("energy",), ("energy", "forces"), ("energy", "hessian"), ("q",)],

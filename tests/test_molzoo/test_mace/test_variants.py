@@ -65,10 +65,6 @@ from tests.test_molzoo.test_mace.conftest import (
     raw_tensors,
 )
 
-#: Iron (26) is outside the ``[1, 6, 8]`` table — ``searchsorted`` would snap it
-#: onto a neighbouring row and return a plausible, wrong energy.
-OFF_TABLE_Z = [26]
-
 #: The same probe inside a whole five-atom system, for the ``forward`` gate.
 OFF_TABLE_CLUSTER_Z = [1, 6, 8, 1, 26]
 
@@ -98,21 +94,10 @@ EXACT = 0.0
 FORWARD_ENERGY_ATOL = 1e-9  # eV
 FORWARD_FORCE_ATOL = 1e-8  # eV/Å
 
-#: Newton's third law on an isolated system, as the two flat files asserted it.
-MATPES_NET_FORCE_ATOL = 1e-8  # eV/Å
-OMOL_NET_FORCE_ATOL = 1e-7  # eV/Å
-
 #: Rotation angles (rad) of the two rigid test rotations: ``Rz`` for the energy
 #: invariance, ``Rx`` for the force equivariance (flat file's own choices).
 ROTATION_Z = 0.7
 ROTATION_X = -0.4
-
-#: Central-difference step and tolerance of the finite-difference force check.
-FD_STEP = 1e-6  # Å
-FD_ATOL = 1e-5  # eV/Å
-
-#: Atom/axis pairs probed by the finite-difference case.
-FD_PROBES = ((0, 0), (2, 1), (4, 2))
 
 #: Cubic cell edge (Å) and neighbour cutoff (Å) of the dead-edge padding cases.
 PBC_CELL = 7.0
@@ -319,11 +304,6 @@ class TestMaceMatpes:
         """MACE only carries a residual from the second layer on."""
         assert matpes_variant.products[0].use_sc is False
         assert matpes_variant.products[1].use_sc is True
-
-    def test_last_layer_keeps_scalars_only(self, matpes_variant: MaceMatpes) -> None:
-        """The final hidden state is scalar; earlier layers keep l>0."""
-        assert matpes_variant.readouts[0].__class__.__name__ == "LinearReadout"
-        assert matpes_variant.readouts[1].__class__.__name__ == "NonLinearReadout"
 
     # -- migrated from tests/test_molzoo/test_mace_matpes.py::TestDeadEdgePadding
     #    (same step; the subject is the variant, so the two cases fold into this

@@ -1,13 +1,8 @@
 """Tests for molix.units — pint-style molpy.UnitSystem."""
 
 import pytest
-from molpy import UnitSystem
 
 from molix.units import DEAD_EDGE_CUTOFF_FACTOR, units
-
-
-def test_units_is_molpy_registry():
-    assert isinstance(units, UnitSystem)
 
 
 def test_boltzmann_pint():

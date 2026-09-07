@@ -10,15 +10,6 @@ from molrep.interaction.element import ElementUpdate, ElementUpdateSpec
 class TestElementUpdateSpec:
     """Test ElementUpdateSpec configuration."""
 
-    def test_valid_config(self):
-        """Test creation with valid parameters."""
-        spec = ElementUpdateSpec(
-            hidden_dim=64,
-            num_species=10,
-        )
-        assert spec.hidden_dim == 64
-        assert spec.num_species == 10
-
     def test_invalid_hidden_dim(self):
         """Test validation for hidden_dim."""
         with pytest.raises(ValueError):
@@ -38,16 +29,6 @@ class TestElementUpdateSpec:
 
 class TestElementUpdate:
     """Test ElementUpdate layer."""
-
-    def test_initialization(self):
-        """Test ElementUpdate initialization."""
-        update = ElementUpdate(hidden_dim=64, num_species=10)
-        assert update.config.hidden_dim == 64
-        assert update.config.num_species == 10
-        # One backend only: the sorted-index `indexed_linear` kernel measured
-        # slower than `naive` once the required argsort round-trip is counted.
-        assert hasattr(update, "_linear_naive")
-        assert not hasattr(update, "_linear_indexed")
 
     def test_forward_shape(self):
         """Test output shape."""

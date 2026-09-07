@@ -69,7 +69,6 @@ import torch
 
 from molix.batch.block_plan import (
     BlockCoverage,
-    BlockFrameView,
     BlockPlan,
     BlockPlanSource,
 )
@@ -497,12 +496,6 @@ class TestBlockFrameView:
     and fail on the first production collate instead. Each member is therefore
     called or read here.
     """
-
-    def test_stub_view_satisfies_the_protocol(self):
-        assert isinstance(_pure_view(max_open=3), BlockFrameView)
-
-    def test_real_block_dataset_satisfies_the_protocol(self, real_view: BlockDataset):
-        assert isinstance(real_view, BlockFrameView)
 
     def test_real_block_dataset_locate_is_vectorized(self, real_view: BlockDataset):
         blocks, locals_ = real_view.locate([0])

@@ -2,28 +2,7 @@
 
 from collections.abc import Mapping
 
-from molpot.ir import CLASS_I_CANONICAL, UnitTag
-
-
-class TestUnitTag:
-    """UnitTag enumerates the physical dimensions named by the Potential IR."""
-
-    def test_required_dimension_members_exist(self):
-        names = {m.name.lower() if hasattr(m, "name") else str(m).lower() for m in UnitTag}
-        # Accept either Enum members or string values for the dimension tags.
-        values = set()
-        for m in UnitTag:
-            if hasattr(m, "value"):
-                values.add(str(m.value).lower())
-            values.add(str(m).lower().split(".")[-1])
-        combined = names | values
-        for required in (
-            "energy",
-            "length",
-            "charge",
-            "angle",
-        ):
-            assert any(required in c for c in combined), f"missing UnitTag for {required}"
+from molpot.ir import CLASS_I_CANONICAL
 
 
 class TestClassICanonical:

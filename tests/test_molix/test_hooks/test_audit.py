@@ -21,8 +21,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-import molix.hooks
-import molix.hooks.audit
 from molix.core.audit import TaskGradientProbe
 from molix.core.state import TrainState
 from molix.hooks import GradientBalanceHook
@@ -146,8 +144,3 @@ class TestGradientBalanceHook:
     def test_scalar_keys_declares_the_nested_train_path(self, hook: GradientBalanceHook) -> None:
         """Container hooks discover the column via ``scalar_keys``."""
         assert hook.scalar_keys == (("train", "grad_imbalance"),)
-
-    def test_hook_is_reexported_from_molix_hooks(self) -> None:
-        """``from molix.hooks import GradientBalanceHook`` resolves the impl."""
-        assert GradientBalanceHook is molix.hooks.audit.GradientBalanceHook
-        assert "GradientBalanceHook" in molix.hooks.__all__

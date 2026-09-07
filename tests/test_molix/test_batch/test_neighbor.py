@@ -90,17 +90,6 @@ def _compute_neighbor_list_naive(positions: torch.Tensor, cutoff: float):
 
 
 class TestNeighborList:
-    def test_is_sample_task(self):
-        """Structural runnable contract: an ``execute`` callable plus a ``task_id``.
-
-        The nominal ``Runnable`` protocol left with the acquisition layer
-        (spec molix-data-dissolution-04-etl-exit); the two members it declared
-        are what callers actually use, so they are asserted directly.
-        """
-        t = NeighborList(cutoff=5.0)
-        assert callable(getattr(t, "execute", None))
-        assert isinstance(getattr(t, "task_id", None), str)
-
     def test_small_system_pairs_symmetric_default(self):
         """Default ``symmetry=True`` returns full bidirectional edges.
 

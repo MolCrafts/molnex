@@ -732,9 +732,6 @@ class TestBlockDataset:
         assert str(barren) in message
         assert "manifest.json" in message
 
-    def test_load_from_disk_defaults_max_open_to_four(self, prepared: Path):
-        assert BlockDataset.load_from_disk(prepared).max_open == 4
-
     def test_load_from_disk_passes_max_open_through_to_the_reader_pool(self, prepared: Path):
         bounded = BlockDataset.load_from_disk(prepared, max_open=1)
         assert bounded.max_open == 1

@@ -1489,12 +1489,6 @@ class TestTaskMixtureAudit:
         assert sampler.batches_per_task() == snapshot
         assert list(sampler) == plan
 
-    def test_no_combined_accessor_or_verdict_method_exists(self, task_ds):
-        """ac-011: tolerance comparison stays the caller's job (evidence E2)."""
-        sampler = self._sampler(task_ds)
-        for forbidden in ("check_mixture", "assert_balanced", "mixture_report", "audit"):
-            assert not hasattr(sampler, forbidden)
-
     def test_exhaustion_warns_exactly_once_naming_the_exhausted_task(self, task_ds):
         """ac-010: ``batches_per_epoch=7`` demands 3 equilibrium batches of 2."""
 

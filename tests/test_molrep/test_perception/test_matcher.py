@@ -8,7 +8,6 @@ import torch
 from molrep.perception import (
     FakeSmartsMatcher,
     MolpySmartsMatcher,
-    SmartsMatcher,
     SymbolicPattern,
 )
 
@@ -36,19 +35,8 @@ class TestFakeSmartsMatcher:
         with pytest.raises(ValueError, match="arity"):
             matcher.match(None, pat)
 
-    def test_satisfies_protocol(self):
-        matcher = FakeSmartsMatcher()
-        assert isinstance(matcher, SmartsMatcher)
-
 
 class TestMolpySmartsMatcher:
-    def test_satisfies_protocol(self):
-        try:
-            matcher = MolpySmartsMatcher()
-        except ImportError:
-            pytest.skip("molpy.SmartsPattern unavailable")
-        assert isinstance(matcher, SmartsMatcher)
-
     def test_functional_match_if_available(self):
         """Optional smoke: match carbon atoms in ethanol when molpy works."""
         try:

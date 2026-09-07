@@ -22,11 +22,6 @@ R_CUT_NOT_FP32_EXACT = 5.1
 class TestCosineCutoffSpec:
     """Test CosineCutoffSpec configuration."""
 
-    def test_valid_config(self):
-        """Test creation with valid parameters."""
-        spec = CosineCutoffSpec(r_cut=5.0)
-        assert spec.r_cut == 5.0
-
     def test_invalid_r_cut(self):
         """Test validation for r_cut."""
         with pytest.raises(ValueError):
@@ -38,11 +33,6 @@ class TestCosineCutoffSpec:
 
 class TestCosineCutoff:
     """Test CosineCutoff envelope function."""
-
-    def test_initialization(self):
-        """Test CosineCutoff initialization."""
-        cutoff = CosineCutoff(r_cut=5.0)
-        assert cutoff.config.r_cut == 5.0
 
     def test_forward_shape(self):
         """Test output shape matches input."""

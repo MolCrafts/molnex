@@ -9,14 +9,6 @@ from molzoo.chem import ChemPerception, ChemPerceptionSpec
 from molzoo.chem.encoder import ChemPerception as ChemPerceptionDirect
 
 
-class TestChemPerceptionSpec:
-    def test_defaults(self):
-        spec = ChemPerceptionSpec()
-        assert spec.atom_dim > 0
-        assert spec.bond_dim > 0
-        assert spec.num_elements > 0
-
-
 class TestChemPerception:
     def test_constructs_and_forwards(self):
         model = ChemPerception(
@@ -74,12 +66,3 @@ class TestChemPerception:
         model = ChemPerception(spec=spec)
         assert model.config.atom_dim == 4
         assert isinstance(model, ChemPerceptionDirect)
-
-    def test_lazy_export_from_molzoo(self):
-        import molzoo
-
-        assert "ChemPerception" in molzoo.__all__
-        assert "ChemPerceptionSpec" in molzoo.__all__
-        # Attribute access resolves via lazy table
-        assert molzoo.ChemPerception is ChemPerception
-        assert molzoo.ChemPerceptionSpec is ChemPerceptionSpec

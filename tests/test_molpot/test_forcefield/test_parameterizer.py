@@ -117,16 +117,6 @@ def _oplsaa_heads(feature_dim: int = 4) -> dict[str, nn.Module]:
 
 
 class TestParameterizer:
-    def test_template_required_and_stored(self):
-        ff = ForceField().def_bondstyle("harmonic")
-        model = Parameterizer(
-            _FakeEncoder({}),
-            ff,
-            bond_head=_ConstantBondHead(1.0, 1.0),
-        )
-        assert model.template is ff
-        assert type(model.template) is ForceField
-
     def test_forward_writes_continuous_params(self):
         bond_head = BondParamHead(feature_dim=4, hidden_dim=8)
         angle_head = AngleParamHead(feature_dim=4, hidden_dim=8)
@@ -273,24 +263,6 @@ class TestParameterizer:
         filled = model(batch)
         assert filled.params("bonds") is not None
         assert ff.params("bonds") is None
-
-    def test_no_project_attribute(self):
-        model = Parameterizer(
-            _FakeEncoder({}),
-            ForceField().def_bondstyle("harmonic"),
-            bond_head=_ConstantBondHead(1.0, 1.0),
-        )
-        assert not hasattr(model, "project")
-        assert "project" not in Parameterizer.__dict__
-
-    def test_no_energy_api_on_parameterizer(self):
-        model = Parameterizer(
-            _FakeEncoder({}),
-            ForceField().def_bondstyle("harmonic"),
-            bond_head=_ConstantBondHead(1.0, 1.0),
-        )
-        for name in ("calc_energy", "calc_forces", "energy"):
-            assert not hasattr(model, name)
 
     def test_oplsaa_missing_proper_head_raises(self):
         heads = _oplsaa_heads()

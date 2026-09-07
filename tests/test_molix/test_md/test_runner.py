@@ -10,8 +10,6 @@ trajectory loop stands between a hook test and the method it tests.
 import pytest
 import torch
 
-import molix.md
-import molix.md.runner
 from molix.md import (
     LangevinVerletIntegrator,
     MDCheckpointHook,
@@ -234,22 +232,6 @@ class TestTrajectoryHook:
 
     def test_declares_its_stride_as_cadence(self):
         assert TrajectoryHook("x.pt", stride=3).cadence == 3
-
-
-def test_the_step_start_rebuild_hook_is_gone():
-    """``NeighborListHook`` is deleted, not deprecated (``stage: experimental``).
-
-    It rebuilt at the *start-of-step* positions while velocity-Verlet evaluates
-    ``F`` at the end-of-step ones, so ``F`` was not ``-∇E`` of the surface the
-    list defined — a one-signed leak measured ~30× worse at ``every=5`` than at
-    ``every=1``. The seam is ``Integrator.eval_force``; the migration is
-    ``NeighborList(skin=, every=, delay=, check=)``. A back-compat alias would
-    defeat this guard, so the name must be absent from the module, the package
-    namespace and ``__all__``.
-    """
-    assert not hasattr(molix.md.runner, "NeighborListHook")
-    assert not hasattr(molix.md, "NeighborListHook")
-    assert "NeighborListHook" not in molix.md.__all__
 
 
 class TestMDCheckpointHook:

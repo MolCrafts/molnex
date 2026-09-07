@@ -133,14 +133,6 @@ class TestDataModuleConstruction:
 
 
 class TestDataLoaders:
-    def test_train_dataloader_returns_dataloader(self, _dm_factory):
-        dm = _dm_factory(batch_size=4)
-        assert isinstance(dm.train_dataloader(), DataLoader)
-
-    def test_val_dataloader_returns_dataloader(self, _dm_factory):
-        dm = _dm_factory(batch_size=4)
-        assert isinstance(dm.val_dataloader(), DataLoader)
-
     def test_train_dataloader_batch_size(self, _dm_factory):
         dm = _dm_factory(batch_size=4)
         dl = dm.train_dataloader()
@@ -248,11 +240,6 @@ class TestPickling:
 
 
 class TestWorkerContext:
-    def test_default_is_spawn(self, _dm_factory):
-        """Default sidesteps Python 3.14's multi-threaded forkserver warning."""
-        dm = _dm_factory()
-        assert dm.multiprocessing_context == "spawn"
-
     def test_context_forwarded_when_workers_enabled(self, _dm_factory):
         dm = _dm_factory(num_workers=2, persistent_workers=False)
         dl = dm.train_dataloader()
@@ -514,12 +501,6 @@ class TestBatchSamplerInjection:
     One symbol (BatchSamplerSource) is imported locally in the protocol-conformance test.
     """
 
-    def test_source_conforms_to_protocol(self):
-        """The stub satisfies the runtime-checkable ``BatchSamplerSource``."""
-        from molix.batch import BatchSamplerSource
-
-        assert isinstance(_FixedPlanSource(INJECTED_PLAN), BatchSamplerSource)
-
     def test_loader_batch_sampler_is_the_injected_plan(self, tmp_path):
         """The object returned by the source is handed straight to DataLoader."""
         source = _FixedPlanSource(INJECTED_PLAN)
@@ -580,44 +561,6 @@ class TestBatchSamplerInjection:
 # Worker start-method regression (preserved from the deleted
 # tests/test_molix/test_data/test_e2e_workers.py, rebuilt on PackedCache)
 # ---------------------------------------------------------------------------
-
-
-def _chain_samples(n: int = 16) -> list[dict]:
-    """Build *n* four-atom samples wired as a linear chain (3 edges each).
-
-    Geometry comes from a local :class:`torch.Generator` (seed 1), so the
-    fixture is independent of global RNG state and of test execution order.
-    The per-sample edge count (3) never equals the atom count (4), so the
-    packed schema routes per-atom and per-edge keys unambiguously.
-
-    Args:
-        n: Number of samples. ``targets.U0`` carries the identity
-            ``float(i)``.
-
-    Returns:
-        Flat sample dicts with per-atom ``Z`` ``(4,)`` / ``pos`` ``(4, 3)``,
-        per-edge ``edge_index`` ``(3, 2)`` / ``edge_diff`` ``(3, 3)`` /
-        ``edge_dist`` ``(3,)`` and graph-level ``targets.U0`` ``(1,)``.
-    """
-    gen = torch.Generator().manual_seed(1)
-    src = torch.arange(3)
-    dst = src + 1
-    edge_index = torch.stack([src, dst], dim=1).long()
-    samples: list[dict] = []
-    for i in range(n):
-        pos = torch.randn(4, 3, generator=gen)
-        diff = pos[dst] - pos[src]
-        samples.append(
-            {
-                "Z": torch.tensor([1, 6, 1, 1], dtype=torch.long),
-                "pos": pos,
-                "edge_index": edge_index.clone(),
-                "edge_diff": diff,
-                "edge_dist": diff.norm(dim=-1),
-                "targets": {"U0": torch.tensor([float(i)])},
-            }
-        )
-    return samples
 
 
 class TestDataModule:

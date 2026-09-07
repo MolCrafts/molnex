@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACEPolarSpec, MACESpec
+from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACESpec
 from tests.test_molzoo.test_mace.conftest import ATOMIC_ENERGIES, ATOMIC_NUMBERS
 
 #: The five variant switches are required on the base and defaulted on the
@@ -221,15 +221,6 @@ class TestMACESpec:
 class TestMACEMatpesSpec:
     """Test the MACE-MatPES configuration."""
 
-    @pytest.mark.parametrize(("field", "expected"), sorted(MATPES_DEFAULTS.items()))
-    def test_field_default_matches_the_flat_constructor(self, field: str, expected: Any):
-        """Every default equals the ``MaceMatpes.__init__`` default it replaces."""
-        spec = MACEMatpesSpec(
-            atomic_numbers=list(ATOMIC_NUMBERS),
-            atomic_energies=list(ATOMIC_ENERGIES),
-        )
-        assert getattr(spec, field) == expected
-
     def test_single_interaction_is_rejected(self):
         """MatPES needs a residual second layer (mace_matpes.py:109-110)."""
         with pytest.raises(ValueError, match="num_interactions"):
@@ -249,15 +240,6 @@ class TestMACEMatpesSpec:
 class TestMACEOMolSpec:
     """Test the MACE-OMOL configuration."""
 
-    @pytest.mark.parametrize(("field", "expected"), sorted(OMOL_DEFAULTS.items()))
-    def test_field_default_matches_the_flat_constructor(self, field: str, expected: Any):
-        """Every default equals the ``MaceOmol.__init__`` default it replaces."""
-        spec = MACEOMolSpec(
-            atomic_numbers=list(ATOMIC_NUMBERS),
-            atomic_energies=list(ATOMIC_ENERGIES),
-        )
-        assert getattr(spec, field) == expected
-
     def test_scalar_only_angular_order_is_rejected(self):
         """OMOL's mid-layer edge irreps use ``range(l_max)`` (mace_omol.py:151-153)."""
         with pytest.raises(ValueError, match="l_max"):
@@ -272,22 +254,3 @@ class TestMACEOMolSpec:
         assert tiny_omol_spec.num_features == 16
         assert tiny_omol_spec.edge_channels == 8
         assert tiny_omol_spec.conditioning == "charge_spin"
-
-
-class TestMACEPolarSpec:
-    """Test the MACE-POLAR configuration."""
-
-    def test_self_interaction_defaults_are_opposite(self):
-        """Dump ``include_electrostatic_self_interaction`` True, ``field_si`` False.
-
-        Two independent switches with opposite defaults: the Hartree energy
-        counts the on-site GTO overlap, the field features do not let an atom
-        see its own multipole. A single shared flag would be wrong on one of
-        the two sides.
-        """
-        spec = MACEPolarSpec(
-            atomic_numbers=list(ATOMIC_NUMBERS),
-            atomic_energies=list(ATOMIC_ENERGIES),
-        )
-        assert spec.electrostatic_self_interaction is True
-        assert spec.field_self_interaction is False

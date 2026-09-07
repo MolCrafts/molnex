@@ -44,10 +44,6 @@ def _isolated_molix_logger():
 
 
 class TestTableWidth:
-    def test_defaults_to_80(self):
-        # Fresh state → default
-        assert get_table_width() == 80
-
     def test_set_and_get(self):
         set_table_width(125)
         assert get_table_width() == 125
