@@ -1,4 +1,4 @@
-"""Multi-system batch independence — ac-010.
+"""Multi-system batch independence.
 
 Per-graph energy from a batched ``Sonata`` forward must match the
 single-graph energy each constituent graph would yield if forwarded on
@@ -164,7 +164,7 @@ def _stack_graphs(graphs: list[TensorDict]) -> TensorDict:
 
 
 # ---------------------------------------------------------------------------
-# 9 — Multi-system batching independence (ac-010)
+# 9 — Multi-system batching independence
 # ---------------------------------------------------------------------------
 
 

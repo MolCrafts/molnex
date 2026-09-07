@@ -8,11 +8,11 @@ roundoff alone.
 
 Each invariant traces to one acceptance criterion:
 
-* ac-002 — translation invariance, ≤ 1e-7
-* ac-003 — SO(3) invariance of U + equivariance of μ (D⁽¹⁾) and Θ (D⁽²⁾)
-* ac-004 — permutation equivariance of all per-atom outputs
-* ac-005 — Σqᵢ = Q_tot per graph to ≤ 1e-10
-* ac-006 — tr(Θ) = 0 per atom to ≤ 1e-12
+* translation invariance, ≤ 1e-7
+* SO(3) invariance of U + equivariance of μ (D⁽¹⁾) and Θ (D⁽²⁾)
+* permutation equivariance of all per-atom outputs
+* Σqᵢ = Q_tot per graph to ≤ 1e-10
+* tr(Θ) = 0 per atom to ≤ 1e-12
 
 A failing test here is, by sub-spec contract, a real bug against
 ``sonata-01-composer`` to file separately; loosening a tolerance to
@@ -105,7 +105,7 @@ def _scatter_sum(values: torch.Tensor, batch: torch.Tensor, n_graphs: int) -> to
 
 
 # ---------------------------------------------------------------------------
-# 1 — Translation invariance (ac-002)
+# 1 — Translation invariance
 # ---------------------------------------------------------------------------
 
 
@@ -155,7 +155,7 @@ class TestTranslation:
 
 
 # ---------------------------------------------------------------------------
-# 2 — SO(3) invariance / equivariance (ac-003)
+# 2 — SO(3) invariance / equivariance
 # ---------------------------------------------------------------------------
 
 
@@ -254,7 +254,7 @@ class TestRotation:
 
 
 # ---------------------------------------------------------------------------
-# 3 — Permutation equivariance (ac-004)
+# 3 — Permutation equivariance
 # ---------------------------------------------------------------------------
 
 
@@ -302,7 +302,7 @@ class TestPermutation:
 
 
 # ---------------------------------------------------------------------------
-# 4 — Σqᵢ = Q_tot per graph (ac-005)
+# 4 — Σqᵢ = Q_tot per graph
 # ---------------------------------------------------------------------------
 
 
@@ -346,7 +346,7 @@ class TestChargeConservation:
 
 
 # ---------------------------------------------------------------------------
-# 5 — tr(Θ) = 0 per atom (ac-006)
+# 5 — tr(Θ) = 0 per atom
 # ---------------------------------------------------------------------------
 
 

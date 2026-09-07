@@ -51,34 +51,10 @@ References:
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Callable
 
 import torch
 import torch.nn as nn
-
-# Module-level marker set to ``True`` by
-# :class:`molpot.composition.Sonata`'s ``forward`` (and any future
-# LES-style electrostatics composer) after it has evaluated the
-# σ-screened multipole-Coulomb / Ewald energy on a batch. A subsequent
-# call to :meth:`Polarization.forward` reads this flag and emits a
-# ``UserWarning`` mentioning ``double-count`` so a user who hand-builds
-# a parallel ``Sonata + Polarization`` graph does not silently
-# double-count induction (Polarization's CG Thole solve is
-# self-consistent; Sonata's LES α-mode is non-self-consistent linear
-# response — composing both is physically wrong).
-_LES_ELECTROSTATICS_PRECOMPUTED = False
-
-
-def _set_les_electrostatics_precomputed(value: bool = True) -> None:
-    """Mark whether LES-style electrostatics has been evaluated this session.
-
-    Sonata's forward calls this with ``value=True`` at the end of its
-    Ewald evaluation. Tests that need to restore the default can call
-    with ``value=False``.
-    """
-    global _LES_ELECTROSTATICS_PRECOMPUTED
-    _LES_ELECTROSTATICS_PRECOMPUTED = bool(value)
 
 
 class Polarization(nn.Module):
@@ -103,10 +79,19 @@ class Polarization(nn.Module):
         :class:`EwaldMultipoleEnergy`. Pick exactly one model line:
         this :class:`Polarization` (classical-polarizable AMOEBA-style)
         OR the LES α-mode (ML interatomic potential). Composing both
-        on the same atoms double-counts induction; calling
-        :meth:`Polarization.forward` after a :class:`Sonata` forward in
-        the same Python process emits a ``UserWarning`` matching
-        ``double-count`` so the hazard surfaces at runtime.
+        on the same atoms double-counts induction. Only one composition
+        is guarded today: :class:`molpot.composition.Sonata` refuses a
+        :class:`Polarization` passed as its ``short_range_head``. This
+        class is **not** a registered style, so
+        :meth:`molpot.forcefield.PotentialMeta.check_composition` never
+        sees it and a hand-built *parallel* graph (Sonata's α-mode and
+        this module summed side by side) is unguarded until
+        ``composable-a1-03`` replaces this class with the registered
+        ``pair:induced/thole`` style (planned, ``VariationalInducedDipole``
+        — not in tree yet), at which point
+        ``check_composition``'s "at most one polarization style" rule
+        takes over. An energy evaluation reads no ambient module state
+        and never warns.
 
     Args:
         damping_factor: Thole-style damping factor for the dipole-dipole
@@ -150,27 +135,6 @@ class Polarization(nn.Module):
         Returns:
             Per-graph polarization energy ``(B,)`` or scalar.
         """
-        if _LES_ELECTROSTATICS_PRECOMPUTED:
-            warnings.warn(
-                "Polarization.forward called after an LES-style "
-                "electrostatics composer (e.g. molpot.composition.Sonata) "
-                "has already evaluated electrostatics in this session. "
-                "Combining this self-consistent CG Thole induced-dipole "
-                "solve with the LES α-mode (non-self-consistent linear "
-                "response) double-counts induction. Pick exactly one "
-                "model line: Polarization (classical-polarizable "
-                "AMOEBA-style) or Sonata's future LesPolarizable line "
-                "(ML interatomic potential).",
-                UserWarning,
-                stacklevel=2,
-            )
-            # One-shot consumption: reset the flag so subsequent
-            # ``Polarization.forward`` calls in unrelated test
-            # contexts (or downstream pipelines that no longer
-            # interleave Sonata) do not re-warn. A subsequent
-            # ``Sonata.forward`` will set the flag again.
-            _set_les_electrostatics_precomputed(False)
-
         N = pos.shape[0]
         device = pos.device
         dtype = pos.dtype

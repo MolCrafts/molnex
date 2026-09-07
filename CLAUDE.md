@@ -220,6 +220,11 @@ TensorDict / torch ecosystem already in `pyproject.toml`, **numpy**, and
 e3nn, no mace-torch** (or other chemistry-ML wrappers). Extxyz I/O uses
 `molix.io.extxyz`; equivariance uses cue only. Upstream oracles live
 out-of-tree if ever needed — do not re-introduce those imports here.
+**No `lammps`, no `openmm`** Python imports either (user rule, 2026-09-07):
+anything that drives LAMMPS — subprocess `lmp` included — lives only under
+`interface/` (`interface/tests/`, ctest), never in `src/`, `tests/`, or
+`scripts/`. LAMMPS is the production truth for classical parity; OpenMM
+export stays text-golden only.
 
 Source ↔ unit-test path mirror:
 
@@ -706,3 +711,8 @@ See `.claude/notes/learnable-classical-ff.md`. Short form:
 3. **Non-diff sinks to molpy/molrs** — *enumeration*, SMARTS, classical non-torch E/F, FF tables under molpy (≥0.13, with `k_B` / `openmm` preset). Imports: `molpy` only (never bare `molrs`).
 4. **Batch topology lives in molix TensorDict**, not molpy Frame. Column form under namespaces, e.g. `batch["angles"]["atomi"]` / `batch["angles", "atomj"]` / `atomk` (propers/impropers add `atoml`; improper **center = atomi**). Stack to COO only at kernel call sites if a potential still wants `[arity, N]`.
 5. **Units** — `from molix.units import units` and pint `.to(...)`. Do not restate conversion floats.
+6. **Composable-potential roadmap** — the S1–S8 spec ↔ molnex mapping, the shared
+   `InteractionContract` / `ModelManifest` / variational-polarization designs, and the
+   `composable-a0` → `a1` → `iface` → `b1` → `b2` → `a2` chains live in
+   `.claude/notes/composable-potentials.md`. Open later chains with `/mol:spec` only
+   after re-reading it.

@@ -2,23 +2,27 @@
 
 Sub-spec 01 of the Sonata model line. Tests cover:
 
-* ac-001 — `Sonata.from_encoder` returns a wired `nn.Module` with the right
+* `Sonata.from_encoder` returns a wired `nn.Module` with the right
   sub-module types.
-* ac-002 — `Sonata.__init__` refuses `kappa_head=`, `alpha_head=`,
+* `Sonata.__init__` refuses `kappa_head=`, `alpha_head=`,
   `induced_*` kwargs (future `LesPolarizable` composer territory).
-* ac-003 — `short_range_head` containing a `Polarization` instance is
+* `short_range_head` containing a `Polarization` instance is
   refused (would double-count induction).
-* ac-004 — `Sonata.forward` returns the documented output dict (key set,
+* `Sonata.forward` returns the documented output dict (key set,
   tensor shapes).
-* ac-005 — `total = short + es` energy decomposition holds.
-* ac-006 — `compute_forces=True` adds a finite `(N, 3)` forces tensor.
-* ac-007 — `compute_stress=True` adds a symmetric `(B, 3, 3)` stress.
-* ac-008 — `Sonata.from_spec(sonata.config, encoder)` round-trips when
+* `total = short + es` energy decomposition holds.
+* `compute_forces=True` adds a finite `(N, 3)` forces tensor.
+* `compute_stress=True` adds a symmetric `(B, 3, 3)` stress.
+* `Sonata.from_spec(sonata.config, encoder)` round-trips when
   state_dict is transferred.
-* ac-009 — `Sonata.from_encoder` validates `encoder.expose_tensor_track`
+* `Sonata.from_encoder` validates `encoder.expose_tensor_track`
   and `encoder.l_max`.
-* ac-010 — `Sonata` and `SonataSpec` are exported from `molpot` and
+* `Sonata` and `SonataSpec` are exported from `molpot` and
   `molpot.composition`.
+* anti-double-counting is now the constructor refusal here
+  plus `PotentialMeta.check_composition` (see
+  `tests/test_molpot/test_forcefield/test_schema.py`); the session-flag
+  `UserWarning` it used to be asserted through is deleted.
 """
 
 from __future__ import annotations
@@ -145,7 +149,7 @@ def _short_range_head(encoder: Allegro) -> EdgeEnergyHead:
 
 
 # ---------------------------------------------------------------------------
-# ac-001 — construction returns a wired nn.Module
+# construction returns a wired nn.Module
 # ---------------------------------------------------------------------------
 
 
@@ -164,7 +168,7 @@ def test_from_encoder_returns_wired_model(encoder):
 
 
 # ---------------------------------------------------------------------------
-# ac-002 — refuse kappa_head, alpha_head, induced_* kwargs
+# refuse kappa_head, alpha_head, induced_* kwargs
 # ---------------------------------------------------------------------------
 
 
@@ -210,7 +214,7 @@ def test_refuse_induced_kwarg(encoder):
 
 
 # ---------------------------------------------------------------------------
-# ac-003 — refuse Polarization in short_range_head (single + list)
+# refuse Polarization in short_range_head (single + list)
 # ---------------------------------------------------------------------------
 
 
@@ -238,7 +242,7 @@ def test_refuse_polarization_in_short_range_list(encoder):
 
 
 # ---------------------------------------------------------------------------
-# ac-004 — forward output schema
+# forward output schema
 # ---------------------------------------------------------------------------
 
 
@@ -278,7 +282,7 @@ def test_forward_output_schema(encoder, batch):
 
 
 # ---------------------------------------------------------------------------
-# ac-005 — energy decomposition total = short + es
+# energy decomposition total = short + es
 # ---------------------------------------------------------------------------
 
 
@@ -298,7 +302,7 @@ def test_energy_decomposition(encoder, batch):
 
 
 # ---------------------------------------------------------------------------
-# ac-006 — compute_forces yields finite (N, 3)
+# compute_forces yields finite (N, 3)
 # ---------------------------------------------------------------------------
 
 
@@ -319,7 +323,7 @@ def test_compute_forces(encoder, batch):
 
 
 # ---------------------------------------------------------------------------
-# ac-007 — compute_stress yields symmetric (B, 3, 3)
+# compute_stress yields symmetric (B, 3, 3)
 # ---------------------------------------------------------------------------
 
 
@@ -338,7 +342,7 @@ def test_compute_stress(encoder, batch_with_cell):
 
 
 # ---------------------------------------------------------------------------
-# ac-008 — SonataSpec round-trip preserves forward output
+# SonataSpec round-trip preserves forward output
 # ---------------------------------------------------------------------------
 
 
@@ -369,7 +373,7 @@ def test_spec_round_trip(encoder, batch):
 
 
 # ---------------------------------------------------------------------------
-# ac-009 — from_encoder validates encoder
+# from_encoder validates encoder
 # ---------------------------------------------------------------------------
 
 
@@ -396,5 +400,5 @@ def test_from_encoder_requires_lmax_for_dipole(encoder_lmax1):
 
 
 # ---------------------------------------------------------------------------
-# ac-010 — public surface
+# public surface
 # ---------------------------------------------------------------------------

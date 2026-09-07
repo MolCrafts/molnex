@@ -55,10 +55,7 @@ from molpot.potentials.elec.ewald_multipole import (
     EwaldMultipoleEnergy,
     EwaldMultipoleEnergySpec,
 )
-from molpot.potentials.polarization import (
-    Polarization,
-    _set_les_electrostatics_precomputed,
-)
+from molpot.potentials.polarization import Polarization
 
 # ---------------------------------------------------------------------------
 # Refusal messages — used by the construction-time scope checks.
@@ -522,11 +519,6 @@ class Sonata(nn.Module):
             stress_eps_sym = 0.5 * (stress_eps + stress_eps.transpose(-1, -2))
             volume = torch.linalg.det(cell_orig).abs()
             out["stress"] = stress_eps_sym / volume.unsqueeze(-1).unsqueeze(-1)
-
-        # Surface the double-counting hazard for any subsequent
-        # :class:`molpot.potentials.Polarization` call in this session
-        # (the boundary contract documented in the class docstring).
-        _set_les_electrostatics_precomputed(True)
 
         return out
 

@@ -3,10 +3,10 @@
 Categories 6–8 of the ``sonata-02-tests`` integration suite. Each test
 covers one acceptance criterion:
 
-* ac-007 — cell-periodic invariance under one-atom lattice translation
+* cell-periodic invariance under one-atom lattice translation
   (≤ 1e-7) using minimum-image bond geometry.
-* ac-008 — autograd forces match central FD to ≤ 1e-5 eV/Å, ``dh = 1e-4``.
-* ac-009 — autograd stress matches central FD to relative ≤ 1e-5,
+* autograd forces match central FD to ≤ 1e-5 eV/Å, ``dh = 1e-4``.
+* autograd stress matches central FD to relative ≤ 1e-5,
   ``dh = 1e-4``, on a differentiable strain ``ε``.
 
 The force / stress tests use ``TensorDict`` clones constructed inside
@@ -203,7 +203,7 @@ def single_graph_periodic() -> tuple[Sonata, TensorDict]:
 
 
 # ---------------------------------------------------------------------------
-# 6 — Cell-periodic consistency under one-atom lattice translation (ac-007)
+# 6 — Cell-periodic consistency under one-atom lattice translation
 # ---------------------------------------------------------------------------
 
 
@@ -270,7 +270,7 @@ class TestCellPeriodicConsistency:
 
 
 # ---------------------------------------------------------------------------
-# 7 — Autograd forces match central FD (ac-008)
+# 7 — Autograd forces match central FD
 # ---------------------------------------------------------------------------
 
 
@@ -383,7 +383,7 @@ class TestForceFD:
 
 
 # ---------------------------------------------------------------------------
-# 8 — Autograd stress matches central FD (ac-009)
+# 8 — Autograd stress matches central FD
 # ---------------------------------------------------------------------------
 
 
@@ -391,7 +391,7 @@ class TestStressFD:
     """Stress ``σ_αβ = (1/V) ∂U/∂ε_αβ`` autograd vs central FD on a
     differentiable strain ``ε``. ``dh = 1e-4`` (consistent with the
     force test). Single-graph batch — multi-graph stress is the same
-    contract per-graph and is covered indirectly by ac-010.
+    contract per-graph and is covered indirectly by the batch-independence tests.
 
     The strict 1e-5 contract is gated on ``cuequivariance_ops_torch``
     AND uses the frozen-grid Ewald path. Without freezing, cell strain

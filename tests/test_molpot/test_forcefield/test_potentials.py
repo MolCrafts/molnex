@@ -23,6 +23,7 @@ from tensordict import TensorDict
 
 from molix.schema import ENERGY_KEY, CellBound
 from molpot.forcefield import ForceField, Potentials
+from molpot.forcefield.schema import PotentialMeta
 
 DTYPE = torch.float64
 
@@ -40,7 +41,7 @@ FORCE_SEAM = "src/molpot/derivation/force.py"
 #: Cubic edge (Å) of the tiny periodic Polar fixture. Its ``capacity_factor =
 #: 1.2`` k-grid bins to ``N_c = 4`` per axis (``x = L·k_cutoff/2π = 2.94``), so
 #: a 1.5x barostat expansion still fits (``floor(1.5·2.94) = 4``) and a 2.0x one
-#: overflows (``floor(2·2.94) = 5``) — the two sides of ac-012.
+#: overflows (``floor(2·2.94) = 5``) — the two sides of the capacity contract.
 POLAR_CELL_EDGE = 10.0
 #: Isotropic expansion that stays inside the k-grid capacity above.
 CELL_WITHIN_CAPACITY = 1.5
@@ -112,6 +113,70 @@ def _two_molecule_bond_batch() -> TensorDict:
     )
 
 
+def _angle_batch() -> TensorDict:
+    """Three atoms carrying one ``angles`` entry — topology present, parameters absent."""
+    pos = torch.tensor(
+        [[0.0, 0.0, 0.0], [BOND_R, 0.0, 0.0], [BOND_R, BOND_R, 0.0]],
+        dtype=DTYPE,
+    )
+    return TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": pos,
+                    "Z": torch.tensor([1, 1, 1], dtype=torch.long),
+                    "batch": torch.zeros(3, dtype=torch.long),
+                },
+                batch_size=[3],
+            ),
+            "angles": TensorDict(
+                {
+                    "atomi": torch.tensor([0], dtype=torch.long),
+                    "atomj": torch.tensor([1], dtype=torch.long),
+                    "atomk": torch.tensor([2], dtype=torch.long),
+                },
+                batch_size=[1],
+            ),
+        },
+        batch_size=[],
+    )
+
+
+def _torsion_batch(namespace: str) -> TensorDict:
+    """Four atoms carrying one ``propers`` / ``impropers`` entry (improper centre = atomi)."""
+    pos = torch.tensor(
+        [
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.5, 0.5],
+        ],
+        dtype=DTYPE,
+    )
+    return TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": pos,
+                    "Z": torch.tensor([1, 1, 1, 1], dtype=torch.long),
+                    "batch": torch.zeros(4, dtype=torch.long),
+                },
+                batch_size=[4],
+            ),
+            namespace: TensorDict(
+                {
+                    "atomi": torch.tensor([0], dtype=torch.long),
+                    "atomj": torch.tensor([1], dtype=torch.long),
+                    "atomk": torch.tensor([2], dtype=torch.long),
+                    "atoml": torch.tensor([3], dtype=torch.long),
+                },
+                batch_size=[1],
+            ),
+        },
+        batch_size=[],
+    )
+
+
 def _bond_potentials(k: torch.Tensor | None = None, *, n_bonds: int = 1) -> Potentials:
     """Harmonic-bond-only :class:`Potentials` with optional differentiable ``k``."""
     force_constant = torch.full((n_bonds,), BOND_K, dtype=DTYPE) if k is None else k
@@ -125,6 +190,65 @@ def _bond_potentials(k: torch.Tensor | None = None, *, n_bonds: int = 1) -> Pote
             }
         )
         .to_potentials()
+    )
+
+
+#: Charges (e), well depth (kcal/mol) and size (Å) of the three-atom Class-I
+#: fixture below. Atom 2 sits off the bond axis so the two unexcluded pairs
+#: (0–2, 1–2) give LJ and Coulomb a non-zero value while the bonded 1–2 pair
+#: stays excluded by the default :class:`NonbondedScaling`.
+CHARGES = (-0.5, 0.25, 0.25)
+EPSILON = 0.2
+SIGMA = 3.0
+LJ_CUTOFF = 10.0
+
+
+def _class_i_forcefield() -> ForceField:
+    """Harmonic bond + ``lj/cut`` + ``coulomb``, every parameter table filled."""
+    return (
+        ForceField(name="class-i")
+        .def_bondstyle("harmonic")
+        .def_pairstyle("lj/cut", cutoff=LJ_CUTOFF)
+        .def_pairstyle("coulomb")
+        .with_params(
+            bonds={
+                "k": torch.full((1,), BOND_K, dtype=DTYPE),
+                "r0": torch.full((1,), BOND_R0, dtype=DTYPE),
+            },
+            atoms={
+                "epsilon": torch.full((3,), EPSILON, dtype=DTYPE),
+                "sigma": torch.full((3,), SIGMA, dtype=DTYPE),
+                "q": torch.tensor(CHARGES, dtype=DTYPE),
+            },
+        )
+    )
+
+
+def _class_i_batch() -> TensorDict:
+    """Three atoms, one bond — bonded, LJ and Coulomb all contribute."""
+    pos = torch.tensor(
+        [[0.0, 0.0, 0.0], [BOND_R, 0.0, 0.0], [0.0, 3.0, 0.0]],
+        dtype=DTYPE,
+    )
+    return TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": pos,
+                    "Z": torch.tensor([1, 1, 1], dtype=torch.long),
+                    "batch": torch.zeros(3, dtype=torch.long),
+                },
+                batch_size=[3],
+            ),
+            "bonds": TensorDict(
+                {
+                    "atomi": torch.tensor([0], dtype=torch.long),
+                    "atomj": torch.tensor([1], dtype=torch.long),
+                },
+                batch_size=[1],
+            ),
+        },
+        batch_size=[],
     )
 
 
@@ -256,19 +380,160 @@ class TestPotentials:
         assert forces.shape == (4, 3)
         assert torch.allclose(forces.detach(), expected, atol=1e-10, rtol=0.0)
 
+    def test_term_energies_splits_lj_into_repulsion_and_dispersion(self) -> None:
+        """S3: one LJ evaluation, two labelled halves — the ``lj`` key is gone."""
+        terms = _class_i_forcefield().to_potentials().term_energies(_class_i_batch())
+        assert "lj" not in terms
+        assert float(terms["lj_repulsion"]) > 0.0
+        assert float(terms["lj_dispersion"]) < 0.0
+
+    def test_term_energies_keys_are_exactly_the_registered_term_keys(self) -> None:
+        """Every emitted key is a ``TermSpec`` of a declared style, and vice versa."""
+        forcefield = _class_i_forcefield()
+        terms = forcefield.to_potentials().term_energies(_class_i_batch())
+        registered = {
+            spec.key
+            for style in forcefield.style_names()
+            for spec in PotentialMeta.contract_for(style).terms
+        }
+        assert set(terms) == registered
+
+    def test_contribution_energies_partition_the_total_energy(self) -> None:
+        """The S-decomposition is a grouping of ``term_energies``, never a second path."""
+        potentials = _class_i_forcefield().to_potentials()
+        batch = _class_i_batch()
+        total = potentials.calc_energy(batch)
+        assert abs(float(total)) > 1e-6
+        grouped = sum(potentials.contribution_energies(batch).values())
+        assert float(grouped) == pytest.approx(float(total), abs=1e-12)
+
+    def test_contribution_energies_are_keyed_by_s_decomposition_label(self) -> None:
+        from molpot.contract import Contribution
+
+        grouped = _class_i_forcefield().to_potentials().contribution_energies(_class_i_batch())
+        assert set(grouped) == {Contribution.LOCAL, Contribution.DISP, Contribution.PERM}
+
+    def test_declared_lj_style_without_its_parameter_table_raises(self) -> None:
+        """F2: a missing table silently contributed zero energy before."""
+        potentials = ForceField(name="lj").def_pairstyle("lj/cut", cutoff=LJ_CUTOFF).to_potentials()
+        with pytest.raises(ValueError) as excinfo:
+            potentials.calc_energy(_class_i_batch())
+        message = str(excinfo.value)
+        assert "pair:lj/cut" in message
+        assert "epsilon" in message or "sigma" in message
+
+    def test_declared_coulomb_style_without_charges_raises(self) -> None:
+        potentials = ForceField(name="es").def_pairstyle("coulomb").to_potentials()
+        with pytest.raises(ValueError) as excinfo:
+            potentials.calc_energy(_class_i_batch())
+        message = str(excinfo.value)
+        assert "pair:coulomb" in message
+        assert re.search(r"\bq\b", message) is not None
+
+    def test_declared_bond_style_without_its_parameter_table_raises(self) -> None:
+        """S1 on the bonded branch: no ``bonds`` table is a missing parameter, not a zero.
+
+        The nonbonded guards above already refuse this. The bonded branches read
+        ``k`` / ``r0`` off a table that was never filled and contributed an
+        explicit zero instead, which is indistinguishable from a molecule whose
+        bonds genuinely cost nothing.
+        """
+        potentials = ForceField(name="bonded").def_bondstyle("harmonic").to_potentials()
+        with pytest.raises(ValueError) as excinfo:
+            potentials.calc_energy(_two_atom_bond_batch())
+        message = str(excinfo.value)
+        assert "bond:harmonic" in message
+        assert "bonds" in message
+
+    def test_declared_angle_style_without_its_parameter_table_raises(self) -> None:
+        """Same rule for ``angle:harmonic`` and its ``angles`` table (``k`` / ``theta0``)."""
+        potentials = ForceField(name="angular").def_anglestyle("harmonic").to_potentials()
+        with pytest.raises(ValueError) as excinfo:
+            potentials.calc_energy(_angle_batch())
+        message = str(excinfo.value)
+        assert "angle:harmonic" in message
+        assert "angles" in message
+
+    def test_declared_dihedral_style_without_its_parameter_table_raises(self) -> None:
+        """Same rule for ``dihedral:periodic`` and its ``propers`` table."""
+        potentials = ForceField(name="torsional").def_dihedralstyle("periodic").to_potentials()
+        with pytest.raises(ValueError) as excinfo:
+            potentials.calc_energy(_torsion_batch("propers"))
+        message = str(excinfo.value)
+        assert "dihedral:periodic" in message
+        assert "propers" in message
+
+    def test_declared_improper_style_without_its_parameter_table_raises(self) -> None:
+        """Same rule for ``improper:harmonic`` and its ``impropers`` table."""
+        potentials = ForceField(name="improper").def_improperstyle("harmonic").to_potentials()
+        with pytest.raises(ValueError) as excinfo:
+            potentials.calc_energy(_torsion_batch("impropers"))
+        message = str(excinfo.value)
+        assert "improper:harmonic" in message
+        assert "impropers" in message
+
+    def test_declared_styles_with_tables_but_empty_topology_are_zero(self) -> None:
+        """Absent *topology* is not absent *parameters* — it stays an explicit zero."""
+        forcefield = (
+            ForceField(name="empty")
+            .def_bondstyle("harmonic")
+            .def_pairstyle("lj/cut", cutoff=3.0)
+            .with_params(
+                bonds={
+                    "k": torch.full((1,), BOND_K, dtype=DTYPE),
+                    "r0": torch.full((1,), BOND_R0, dtype=DTYPE),
+                },
+                atoms={
+                    "epsilon": torch.full((2,), EPSILON, dtype=DTYPE),
+                    "sigma": torch.full((2,), SIGMA, dtype=DTYPE),
+                },
+            )
+        )
+        far_apart = TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": torch.tensor([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=DTYPE),
+                        "Z": torch.tensor([1, 1], dtype=torch.long),
+                        "batch": torch.zeros(2, dtype=torch.long),
+                    },
+                    batch_size=[2],
+                )
+            },
+            batch_size=[],
+        )
+        energy = forcefield.to_potentials().calc_energy(far_apart)
+        assert float(energy) == pytest.approx(0.0, abs=1e-12)
+
+    def test_two_polarization_styles_are_refused_at_construction(
+        self, fake_pol_styles: tuple[str, str]
+    ) -> None:
+        """S1: unsupported combinations are rejected, not warned about at forward."""
+        forcefield = ForceField(name="double-pol").def_pairstyle("coulomb")
+        for key in fake_pol_styles:
+            forcefield = forcefield.def_pairstyle(key.split(":", 1)[1])
+        with pytest.raises(ValueError):
+            forcefield.to_potentials()
+
+    def test_unregistered_style_key_is_refused_at_construction(self) -> None:
+        """F6: a typo'd style used to assemble into a silent no-op."""
+        forcefield = ForceField(name="typo").def_pairstyle("lj/cutt", cutoff=LJ_CUTOFF)
+        with pytest.raises(ValueError):
+            forcefield.to_potentials()
+
 
 def _polar_forcefield() -> tuple[ForceField, nn.Module]:
     """A tiny periodic Polar mlip behind a ``metal``-unit ForceField.
 
-    The only in-tree potential that is both :class:`~molix.schema.CellBound`
-    and :class:`~molix.schema.CoreCompilable`, so the compiled-route criteria
-    (ac-004 / ac-005 / ac-012) need it rather than a stub. Its hyper-parameters
-    come from the mace test package's conftest — one definition of "tiny
-    Polar", not a second copy that drifts.
+       The only in-tree potential that is both :class:`~molix.schema.CellBound`
+       and :class:`~molix.schema.CoreCompilable`, so the compiled-route criteria
+    need it rather than a stub. Its hyper-parameters
+       come from the mace test package's conftest — one definition of "tiny
+       Polar", not a second copy that drifts.
 
-    The caller must already have raised the global precision to fp64 (the
-    ``fp64`` fixture): cuEquivariance freezes its working precision at
-    construction, so a model built here at fp32 stays fp32.
+       The caller must already have raised the global precision to fp64 (the
+       ``fp64`` fixture): cuEquivariance freezes its working precision at
+       construction, so a model built here at fp32 stays fp32.
     """
     from tests.test_molzoo.test_mace.conftest import (
         ATOMIC_ENERGIES,

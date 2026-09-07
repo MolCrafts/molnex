@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 import torch
 
@@ -158,6 +160,36 @@ class TestPolarization:
             edge_index=edge_index,
         )
         assert energy.shape == (2,)
+
+    def test_forward_never_warns(
+        self,
+        water_like: tuple[torch.Tensor, ...],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No ambient module state may turn an energy evaluation into a warning.
+
+        Composition legality is the registry's job (S1): the deleted
+        ``_LES_ELECTROSTATICS_PRECOMPUTED`` marker made "Sonata already ran" a
+        process-wide, one-shot, order-dependent piece of state that only ever
+        produced a warning. ``PotentialMeta.check_composition`` now rejects the
+        same pairing at construction.
+        """
+        from molpot.potentials import polarization
+
+        monkeypatch.setattr(polarization, "_LES_ELECTROSTATICS_PRECOMPUTED", True, raising=False)
+        pos, charge, alpha, batch, edge_index = water_like
+        pol = Polarization().double()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            energy = pol(
+                pos=pos,
+                charge=charge,
+                alpha=alpha,
+                batch=batch,
+                edge_index=edge_index,
+                num_graphs=1,
+            )
+        assert torch.isfinite(energy).all()
 
 
 class TestPolarizationQuantitative:

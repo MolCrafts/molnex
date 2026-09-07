@@ -168,11 +168,13 @@ class TestForceFieldToIR:
         gamma = math.pi / 4.0
         a = k * math.cos(gamma)
         b = k * math.sin(gamma)
+        # Only the torsion style is declared: this asserts the cartesian→cosine
+        # kernel identity, so a bond / angle style with no ``bonds`` / ``angles``
+        # table would be an unparameterised declaration riding on the branch that
+        # used to contribute a silent zero.
         ff = (
             ForceField(name="class-i", units="real")
             .def_atomstyle("full")
-            .def_bondstyle("harmonic")
-            .def_anglestyle("harmonic")
             .def_dihedralstyle("fourier")
             .with_params(
                 propers={

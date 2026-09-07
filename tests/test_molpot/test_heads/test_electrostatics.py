@@ -108,7 +108,7 @@ def _build_anisotropic_head(input_dim: int = 4, mul: int = 3) -> PolarizabilityH
 class TestPolarizabilityHeadAnisotropic:
     @pytest.mark.parametrize("seed", SEEDS)
     def test_alpha_dev_is_symmetric_traceless(self, seed: int) -> None:
-        """Per spec ac-010: ``α_dev`` symmetric traceless to <1e-12 in float64."""
+        """``α_dev`` symmetric traceless to <1e-12 in float64."""
         torch.manual_seed(seed)
         mul = 3
         head = _build_anisotropic_head(mul=mul).to(torch.float64)

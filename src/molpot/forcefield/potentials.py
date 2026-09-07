@@ -2,6 +2,19 @@
 
 Pair cutoffs and electrostatic calculator options live on the **Potential
 terms** (see :mod:`molpot.forcefield.pair_terms`), not on this container.
+
+The energy is reported three ways over **one** evaluation:
+:meth:`Potentials.calc_energy` (the total), :meth:`Potentials.term_energies`
+(per named term — ``bonds``, ``lj_repulsion``, ``coulomb``, …) and
+:meth:`Potentials.contribution_energies`, which groups those terms into the
+S-decomposition ``E = E_local + E_disp + E_perm + E_pol + E_CT`` using the
+label each style declares in its
+:class:`~molpot.contract.InteractionContract`. Grouping, never a second energy
+path, so the parts always sum back to the total.
+
+The labels ``S1`` / ``S3`` (the two spec requirements this contract layer
+implements) and ``F2`` / ``F6`` (the two silent-zero findings the raises below
+close) are defined in ``.claude/notes/composable-potentials.md``.
 """
 
 from __future__ import annotations
@@ -14,6 +27,7 @@ import torch
 from tensordict import TensorDict
 
 from molix.schema import CellBound, CoreCompilable
+from molpot.contract import Contribution, ExclusionClass
 from molpot.derivation.force import autograd_forces_and_virial, autograd_forces_from_energy
 from molpot.derivation.protocol import (
     ENERGY_KEY,
@@ -76,6 +90,16 @@ class Potentials(BasePotential):
             styles and parameter tables are assembled into torch terms here. Its
             unit convention (``units="real"`` by default: kcal/mol, Å) is the unit
             convention of every energy and force this container returns.
+
+    Raises:
+        ValueError: The declared styles do not compose, checked before a single
+            term is assembled: a style is not registered in
+            :class:`~molpot.forcefield.schema.PotentialMeta`; the combination is
+            refused by
+            :meth:`~molpot.forcefield.schema.PotentialMeta.check_composition`
+            (more than one polarization style, or a polarization style with no
+            permanent-electrostatics partner); or a style consumes the
+            induced-response exclusion table that no ForceField carries yet.
     """
 
     name = "class_i"
@@ -89,8 +113,43 @@ class Potentials(BasePotential):
         self.coulomb_open: CoulombOpenPotential | None = None
         self.coulomb_periodic: CoulombPeriodicPotential | None = None
         self.mlip = getattr(forcefield, "_mlip", None)
+        self._check_composition()
         self._assemble_pair_potentials()
         self._assemble_bonded()
+
+    def _check_composition(self) -> None:
+        """Refuse a style combination before a single term is assembled.
+
+        Runs ahead of :meth:`_assemble_pair_potentials` /
+        :meth:`_assemble_bonded` so a refused ForceField never leaves a
+        half-built container behind.
+
+        Raises:
+            ValueError: A declared style is not registered (a typo used to
+                assemble into a silent no-op), the combination is refused by
+                :meth:`~molpot.forcefield.schema.PotentialMeta.check_composition`,
+                or a style consumes the induced-exclusion table that no
+                ForceField carries yet.
+        """
+        keys = list(self.forcefield.style_names())
+        for key in keys:
+            if key.startswith("atom:") or key in PotentialMeta._REGISTRY:
+                continue
+            raise ValueError(
+                f"ForceField declares an unregistered style {key!r}; registered styles: "
+                f"{sorted(PotentialMeta._REGISTRY)}"
+            )
+        PotentialMeta.check_composition(keys)
+        for key in keys:
+            if key.startswith("atom:"):
+                continue
+            if PotentialMeta.contract_for(key).exclusion is ExclusionClass.INDUCED and not hasattr(
+                self.forcefield, "induced_scaling"
+            ):
+                raise ValueError(
+                    f"style {key!r} consumes the induced-response exclusion table, but this "
+                    "ForceField has no 'induced_scaling' (arrives with composable-a1)"
+                )
 
     def _assemble_pair_potentials(self) -> None:
         ff = self.forcefield
@@ -163,6 +222,54 @@ class Potentials(BasePotential):
             periodicity=pp["periodicity"],
             phase=pp["phase"],
             idivf=pp["idivf"],
+        )
+
+    def _require_bonded_params(
+        self,
+        category: str,
+        table: str,
+        term: BasePotential | None,
+    ) -> None:
+        """Refuse a declared bonded style whose parameter table never filled its term.
+
+        The bonded counterpart of :meth:`_charges` / :meth:`_lj_params`, and the
+        same F2 rule: :meth:`_assemble_bonded` leaves ``term`` at ``None`` when
+        the style's table is absent or misses a parameter it reads, and an
+        unparameterised declaration then contributed a zero indistinguishable
+        from a molecule whose bonds genuinely cost nothing. ``term is not None``
+        is the whole fast path — the schema lookup happens only on the way to
+        the exception.
+
+        Absent *topology* is a different fact and stays a zero: it is checked by
+        the caller *after* this guard, so a filled table with no bonds in the
+        batch still contributes an explicit zero.
+
+        Args:
+            category: Style category of the branch — ``"bond"``, ``"angle"``,
+                ``"dihedral"`` or ``"improper"``. Called only from a branch that
+                already found a declared style of this category.
+            table: Parameter table the style reads (``"bonds"``, ``"angles"``,
+                ``"propers"``, ``"impropers"``).
+            term: Term assembled by :meth:`_assemble_bonded`, ``None`` when the
+                parameter tables could not fill it.
+
+        Raises:
+            ValueError: ``term`` is ``None``; the message names the style key,
+                the parameters missing from the table, and the table.
+        """
+        if term is not None:
+            return
+        style_key, schema = next(
+            (key, style)
+            for key, style in self.get_schema().styles.items()
+            if style.category == category
+        )
+        declared = tuple(spec.name for spec in schema.params)
+        filled = self.forcefield.params(table) or {}
+        missing = tuple(name for name in declared if name not in filled) or declared
+        raise ValueError(
+            f"style {style_key!r} is declared but its parameter table is absent: "
+            f"no {' / '.join(missing)} under {table}"
         )
 
     def forward(self, data: Any = None, **kwargs: Any) -> Any:
@@ -464,6 +571,11 @@ class Potentials(BasePotential):
             in the ForceField's unit convention (``units="real"`` default:
             kcal/mol and kcal mol⁻¹ Å⁻¹). mlip path: the mlip's own energy
             unit (eV for the MACE family), never a sum with classical terms.
+
+        Raises:
+            ValueError: A declared style's parameter table is absent — the same
+                contract as :meth:`term_energies`, checked branch for branch so
+                the two routes agree on which ForceFields evaluate at all.
         """
         if self.mlip is not None and isinstance(system, TensorDict):
             # Same branch policy as ``calc_energy``: the mlip owns the whole
@@ -489,6 +601,7 @@ class Potentials(BasePotential):
         ff = self.forcefield
 
         if ff.bond_style() is not None:
+            self._require_bonded_params("bond", "bonds", self.bond)
             bond_index = self._bond_index(system)
             if self.bond is not None and bond_index is not None and bond_index.size(1) > 0:
                 e, f = self.bond.energy_forces(
@@ -504,6 +617,7 @@ class Potentials(BasePotential):
             forces = forces + f
 
         if ff.angle_style() is not None:
+            self._require_bonded_params("angle", "angles", self.angle)
             angle_index = self._angle_index(system)
             if self.angle is not None and angle_index is not None and angle_index.size(1) > 0:
                 e, f = self.angle.energy_forces(
@@ -519,6 +633,7 @@ class Potentials(BasePotential):
             forces = forces + f
 
         if ff.dihedral_style() is not None:
+            self._require_bonded_params("dihedral", "propers", self.proper)
             proper_index = self._proper_index(system)
             if self.proper is not None and proper_index is not None and proper_index.size(1) > 0:
                 e, f = self.proper.energy_forces(
@@ -534,6 +649,7 @@ class Potentials(BasePotential):
             forces = forces + f
 
         if ff.improper_style() is not None:
+            self._require_bonded_params("improper", "impropers", self.improper)
             improper_index = self._improper_index(system)
             if (
                 self.improper is not None
@@ -553,8 +669,8 @@ class Potentials(BasePotential):
             forces = forces + f
 
         if self.lj is not None:
-            e, f = self._lj_energy_forces(system, p, zero, n_atoms)
-            energy = energy + e
+            (rep, disp), f = self._lj_energy_forces(system, p, zero, n_atoms)
+            energy = energy + rep + disp
             forces = forces + f
 
         if self.coulomb_open is not None or self.coulomb_periodic is not None:
@@ -572,12 +688,16 @@ class Potentials(BasePotential):
     ) -> dict[str, torch.Tensor]:
         """Energy of each declared term, keyed by term name.
 
-        One entry per style the ForceField declares — ``bonds`` / ``angles`` /
-        ``propers`` / ``impropers`` / ``lj`` / ``coulomb`` — so a bonded-only
-        ForceField yields no ``lj`` and no ``coulomb`` key even when ``epsilon`` /
-        ``sigma`` or charges already sit in its parameter tables. A declared style
-        whose topology or parameters are missing contributes an explicit zero rather
-        than silently disappearing.
+        The keys are exactly the :class:`~molpot.contract.TermSpec` keys of the
+        declared styles' contracts — ``bonds`` / ``angles`` / ``propers`` /
+        ``impropers`` / ``lj_repulsion`` / ``lj_dispersion`` / ``coulomb`` — so a
+        bonded-only ForceField yields no LJ and no ``coulomb`` key even when
+        ``epsilon`` / ``sigma`` or charges already sit in its parameter tables.
+        ``pair:lj/cut`` contributes **two** keys from one evaluation (S3): the
+        repulsive wall ``4ε(σ/r)¹²`` and the dispersive tail ``−4ε(σ/r)⁶``, whose
+        sum is the LJ energy. A declared style whose *topology* is empty
+        contributes an explicit zero; a declared style whose *parameter table* is
+        absent raises instead of contributing a silent zero.
 
         Args:
             system: Batch / mapping carrying ``atoms.pos`` ``(N, 3)`` Å and the
@@ -587,6 +707,9 @@ class Potentials(BasePotential):
         Returns:
             Term name → energy ``(B,)`` (``()`` for a single molecule) in the
             ForceField's unit convention (``units="real"`` default: kcal/mol).
+
+        Raises:
+            ValueError: A declared style's parameter table is absent.
         """
         p = self._pos(system, pos)
         ff = self.forcefield
@@ -599,6 +722,7 @@ class Potentials(BasePotential):
         terms: dict[str, torch.Tensor] = {}
 
         if ff.bond_style() is not None:
+            self._require_bonded_params("bond", "bonds", self.bond)
             bond_index = self._bond_index(system)
             if self.bond is not None and bond_index is not None and bond_index.size(1) > 0:
                 n = bond_index.size(1)
@@ -613,6 +737,7 @@ class Potentials(BasePotential):
                 terms["bonds"] = zero
 
         if ff.angle_style() is not None:
+            self._require_bonded_params("angle", "angles", self.angle)
             angle_index = self._angle_index(system)
             if self.angle is not None and angle_index is not None and angle_index.size(1) > 0:
                 n = angle_index.size(1)
@@ -627,6 +752,7 @@ class Potentials(BasePotential):
                 terms["angles"] = zero
 
         if ff.dihedral_style() is not None:
+            self._require_bonded_params("dihedral", "propers", self.proper)
             proper_index = self._proper_index(system)
             if self.proper is not None and proper_index is not None and proper_index.size(1) > 0:
                 n = proper_index.size(1)
@@ -641,6 +767,7 @@ class Potentials(BasePotential):
                 terms["propers"] = zero
 
         if ff.improper_style() is not None:
+            self._require_bonded_params("improper", "impropers", self.improper)
             improper_index = self._improper_index(system)
             if (
                 self.improper is not None
@@ -659,25 +786,89 @@ class Potentials(BasePotential):
                 terms["impropers"] = zero
 
         if self.lj is not None:
-            terms["lj"] = self._lj_energy(system, p, zero)
+            terms["lj_repulsion"], terms["lj_dispersion"] = self._lj_energy(system, p, zero)
         if self.coulomb_open is not None or self.coulomb_periodic is not None:
             terms["coulomb"] = self._coulomb_energy(system, p, zero)
         return terms
+
+    def contribution_energies(
+        self,
+        system: Any,
+        *,
+        pos: torch.Tensor | None = None,
+    ) -> dict[Contribution, torch.Tensor]:
+        """Term energies grouped into the S-decomposition buckets.
+
+        The physical partition is ``E = E_local + E_disp + E_perm + E_pol +
+        E_CT``. Each declared style's contract labels its terms, and this method
+        only *sums* :meth:`term_energies` by that label — it is a grouping of the
+        one evaluation, never a second energy path, so the returned values add up
+        to :meth:`calc_energy` by construction. In tree today: ``bonds`` /
+        ``angles`` / ``propers`` / ``impropers`` and ``lj_repulsion`` →
+        :attr:`~molpot.contract.Contribution.LOCAL`, ``lj_dispersion`` →
+        :attr:`~molpot.contract.Contribution.DISP`, ``coulomb`` →
+        :attr:`~molpot.contract.Contribution.PERM`.
+
+        Args:
+            system: Batch / mapping carrying ``atoms.pos`` ``(N, 3)`` Å and the
+                topology namespaces.
+            pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``.
+
+        Returns:
+            Contribution → summed energy ``(B,)`` (``()`` for a single molecule)
+            in the ForceField's unit convention (``units="real"`` default:
+            kcal/mol). Only contributions with at least one declared term appear,
+            so a bonded-only ForceField returns ``{LOCAL: ...}`` alone.
+
+        Raises:
+            ValueError: A declared style's parameter table is absent (from
+                :meth:`term_energies`).
+        """
+        labels = {
+            spec.key: spec.contribution
+            for key in self.forcefield.style_names()
+            if not key.startswith("atom:")
+            for spec in PotentialMeta.contract_for(key).terms
+        }
+        grouped: dict[Contribution, torch.Tensor] = {}
+        for name, energy in self.term_energies(system, pos=pos).items():
+            contribution = labels[name]
+            previous = grouped.get(contribution)
+            grouped[contribution] = energy if previous is None else previous + energy
+        return grouped
 
     # ------------------------------------------------------------------
     # nonbonded
     # ------------------------------------------------------------------
 
-    def _charges(self) -> torch.Tensor | None:
-        atoms = self.forcefield.params("atoms")
-        if atoms is None:
-            return None
-        return atoms.get("q")
+    def _charges(self) -> torch.Tensor:
+        """Partial charges ``(N,)`` of the declared ``pair:coulomb`` style.
 
-    def _lj_params(self) -> tuple[torch.Tensor, torch.Tensor] | None:
-        atoms = self.forcefield.params("atoms")
-        if atoms is None or "epsilon" not in atoms or "sigma" not in atoms:
-            return None
+        Raises:
+            ValueError: ``atoms.q`` is absent. A declared style with no table
+                contributed a silent zero before (F2).
+        """
+        atoms = self.forcefield.params("atoms") or {}
+        if "q" not in atoms:
+            raise ValueError(
+                "style 'pair:coulomb' is declared but its parameter table is absent: "
+                "no q (partial charges) under atoms"
+            )
+        return atoms["q"]
+
+    def _lj_params(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-atom ``(epsilon, sigma)`` of the declared ``pair:lj/cut`` style.
+
+        Raises:
+            ValueError: ``atoms.epsilon`` or ``atoms.sigma`` is absent.
+        """
+        atoms = self.forcefield.params("atoms") or {}
+        if "epsilon" not in atoms or "sigma" not in atoms:
+            missing = [name for name in ("epsilon", "sigma") if name not in atoms]
+            raise ValueError(
+                "style 'pair:lj/cut' is declared but its parameter table is absent: "
+                f"no {' / '.join(missing)} under atoms"
+            )
         return atoms["epsilon"], atoms["sigma"]
 
     def _cell(self, system: Any) -> torch.Tensor | None:
@@ -724,18 +915,16 @@ class Potentials(BasePotential):
         system: Any,
         pos: torch.Tensor,
         zero: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(repulsion, dispersion)`` of the LJ style — zeros when no pair is in range."""
         assert self.lj is not None
-        params = self._lj_params()
-        if params is None:
-            return zero
-        epsilon, sigma = params
+        epsilon, sigma = self._lj_params()
         # Keep LJ on its own cutoff list. Reusing an unlimited Coulomb half-list
         # forced ``_pair_scales`` (and distance storage) onto all intramolecular
         # pairs even though LJ only needs ``r < cutoff``.
         pairs = self._scaled_pairs(system, pos, cutoff=self.lj.cutoff, scale_kind="lj")
         if pairs is None:
-            return zero
+            return zero, zero
         edge_index, dist, scales = pairs
         num_graphs = self._num_graphs(system)
         atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
@@ -755,15 +944,13 @@ class Potentials(BasePotential):
         pos: torch.Tensor,
         zero: torch.Tensor,
         n_atoms: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+        """``((repulsion, dispersion), forces)`` of the LJ style."""
         assert self.lj is not None
-        params = self._lj_params()
-        if params is None:
-            return zero, pos.new_zeros((n_atoms, 3))
-        epsilon, sigma = params
+        epsilon, sigma = self._lj_params()
         pairs = self._scaled_pairs(system, pos, cutoff=self.lj.cutoff, scale_kind="lj")
         if pairs is None:
-            return zero, pos.new_zeros((n_atoms, 3))
+            return (zero, zero), pos.new_zeros((n_atoms, 3))
         edge_index, dist, scales = pairs
         num_graphs = self._num_graphs(system)
         atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
@@ -785,8 +972,6 @@ class Potentials(BasePotential):
         zero: torch.Tensor,
     ) -> torch.Tensor:
         q = self._charges()
-        if q is None:
-            return zero
         if q.shape[0] != pos.shape[0]:
             raise ValueError(f"charge length {q.shape[0]} != n_atoms {pos.shape[0]}")
 
@@ -840,8 +1025,6 @@ class Potentials(BasePotential):
         n_atoms: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         q = self._charges()
-        if q is None:
-            return zero, pos.new_zeros((n_atoms, 3))
         if q.shape[0] != pos.shape[0]:
             raise ValueError(f"charge length {q.shape[0]} != n_atoms {pos.shape[0]}")
 

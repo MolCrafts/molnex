@@ -80,13 +80,21 @@ class Parameterizer(nn.Module):
         charge_model: :class:`~molpot.charge.AtomicChargeModel` that writes
             partial charges ``atoms.q`` (``e``) via EEM / QEq. Required when
             ``pair:coulomb`` is registered.
+        polarizability_head: Rejected — named in the signature only so a call
+            written against the future polarizable profile fails with an
+            explanation instead of a bare ``TypeError``. Polarizability is the
+            parameter of an *induced-dipole* response (an atom's dipole
+            responding to the electric field of its neighbours), which belongs
+            to the A1 profile (``composable-a1``); the A0 registry these heads
+            fill declares no induced style, so such a head would have no
+            parameter table to write into.
 
     Raises:
         TypeError: ``encoder`` is not an ``nn.Module``, or ``template`` is
             not a :class:`ForceField`.
-        ValueError: A style on ``template`` lacks its required head, or
+        ValueError: A style on ``template`` lacks its required head,
             ``dihedral:opls`` is paired with a proper head whose ``form``
-            is not ``"opls"``.
+            is not ``"opls"``, or ``polarizability_head`` is not ``None``.
     """
 
     def __init__(
@@ -100,8 +108,17 @@ class Parameterizer(nn.Module):
         improper_head: nn.Module | None = None,
         atom_head: nn.Module | None = None,
         charge_model: nn.Module | None = None,
+        polarizability_head: nn.Module | None = None,
     ) -> None:
         super().__init__()
+        if polarizability_head is not None:
+            raise ValueError(
+                "polarizability_head is rejected on the A0 Parameterizer: "
+                "induced-dipole / polarizability heads belong to the A1 "
+                "profile (composable-a1). The A0 registry declares no "
+                "induced-response style, so the head has no parameter "
+                "table to fill."
+            )
         if not isinstance(encoder, nn.Module):
             raise TypeError("encoder must be an nn.Module")
         if not isinstance(template, ForceField):

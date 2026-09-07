@@ -342,7 +342,7 @@ class TestGTOFieldFeaturesKspace:
         assert torch.allclose(out_tight, out_default, atol=1e-12, rtol=0.0)
 
     def test_ctor_derived_buffers_leave_the_state_dict(self) -> None:
-        """ac-016: five ``persistent=False`` buffers — one home per fact."""
+        """five ``persistent=False`` buffers — one home per fact."""
         assert set(_dump_block().state_dict()) == set()
 
     @pytest.mark.parametrize(
@@ -386,7 +386,7 @@ class TestGTOFieldFeaturesKspace:
     def test_isolated_features_match_literal(
         self, include_self_interaction: bool, expected: list[list[float]]
     ) -> None:
-        """The reduction kernel swap is ``atol=1e-12``, not bitwise (ac-007)."""
+        """The reduction kernel swap is ``atol=1e-12``, not bitwise."""
         block = _dump_block(include_self_interaction=include_self_interaction)
         pos = torch.tensor(PAIR_POS, dtype=torch.float64)
         feats = torch.tensor(PAIR_FEATS, dtype=torch.float64)
@@ -398,7 +398,7 @@ class TestGTOFieldFeaturesKspace:
 
     @pytest.mark.slow
     def test_periodic_branch_compiles_to_one_graph(self) -> None:
-        """ac-006: bound grid + explicit ``num_graphs`` → 1 graph, 0 breaks."""
+        """bound grid + explicit ``num_graphs`` → 1 graph, 0 breaks."""
         block = _dump_block()
         pos = torch.tensor(PAIR_POS, dtype=torch.float64)
         feats = torch.tensor(PAIR_FEATS, dtype=torch.float64)

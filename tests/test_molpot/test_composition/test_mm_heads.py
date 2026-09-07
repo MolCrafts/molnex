@@ -28,7 +28,7 @@ from molpot.composition.multihead import MultiHead
 from molpot.forcefield import ForceField
 
 # ---------------------------------------------------------------------------
-# BondParamHead (ac-001)
+# BondParamHead
 # ---------------------------------------------------------------------------
 
 
@@ -73,7 +73,7 @@ class TestBondParamHead:
 
 
 # ---------------------------------------------------------------------------
-# AngleParamHead (ac-002)
+# AngleParamHead
 # ---------------------------------------------------------------------------
 
 
@@ -293,7 +293,7 @@ class TestImproperParamHead:
 
 
 # ---------------------------------------------------------------------------
-# MultiHead + ChargeHead + LJParameterHead reuse (ac-005)
+# MultiHead + ChargeHead + LJParameterHead reuse
 # ---------------------------------------------------------------------------
 
 
@@ -320,7 +320,7 @@ class TestMultiHeadChargeLJReuse:
 
 
 # ---------------------------------------------------------------------------
-# OPLS-AA reuse schema contracts (oplsaa-parameterizer-02-heads, ac-005)
+# OPLS-AA reuse schema contracts
 # ---------------------------------------------------------------------------
 
 

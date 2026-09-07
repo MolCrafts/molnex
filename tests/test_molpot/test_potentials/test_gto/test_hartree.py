@@ -37,7 +37,7 @@ PROBE_FEATS: list[list[float]] = [
 #: ``κ = 1.0`` — the official checkpoint's ``kspace_cutoff`` buffer.
 K_CUT = 1.8467166200173746
 
-# -- ac-008 goldens ---------------------------------------------------------
+# -- goldens ---------------------------------------------------------
 #
 # Two unit charges 1 Å apart in a 10 Å cubic cell, ``σ = 1.5 Å``, ``l_max = 1``
 # (zero dipoles). Hard-coded fp64 literals captured from *this* tree before the
@@ -86,7 +86,7 @@ PROBE_ISOLATED_SI = 0.04313372746319044
 PROBE_ISOLATED_L0_NOSI = -0.6665851178517852
 PROBE_ISOLATED_L0_SI = 0.03750614756736037
 
-# -- Retained isolated-branch enumeration (ac-007) --------------------------
+# -- Retained isolated-branch enumeration --------------------------
 #
 # ``inspect.getsource`` of the four pair-enumeration helpers, captured from the
 # same pre-change tree. They are *not* touched by the k-grid work (their break
@@ -411,7 +411,7 @@ class TestGTOHartreeEnergyKspace:
     def test_two_charges_periodic_energy_matches_pre_change_literal(
         self, include_self_interaction: bool, expected: float
     ) -> None:
-        """ac-008: fp64 periodic energy is unchanged by the fixed-capacity grid."""
+        """fp64 periodic energy is unchanged by the fixed-capacity grid."""
         model = GTOHartreeEnergy(
             sigma=1.5, l_max=1, include_self_interaction=include_self_interaction
         )
@@ -431,7 +431,7 @@ class TestGTOHartreeEnergyKspace:
     def test_two_charges_position_gradient_matches_pre_change_literal(
         self, include_self_interaction: bool, expected: list[list[float]]
     ) -> None:
-        """ac-008: ``∂E/∂pos`` in eV/Å against the pre-change eager path."""
+        """``∂E/∂pos`` in eV/Å against the pre-change eager path."""
         model = GTOHartreeEnergy(
             sigma=1.5, l_max=1, include_self_interaction=include_self_interaction
         )
@@ -456,7 +456,7 @@ class TestGTOHartreeEnergyKspace:
     def test_two_charges_strain_gradient_matches_pre_change_literal(
         self, include_self_interaction: bool, expected: list[list[float]]
     ) -> None:
-        """ac-008 / D7: ``∂E/∂ε`` in eV — the half-box weights carry no strain."""
+        """``∂E/∂ε`` in eV — the half-box weights carry no strain."""
         model = GTOHartreeEnergy(
             sigma=1.5, l_max=1, include_self_interaction=include_self_interaction
         )
@@ -475,7 +475,7 @@ class TestGTOHartreeEnergyKspace:
         )
 
     def test_periodic_energy_and_position_gradient_are_finite(self) -> None:
-        """ac-003: the guarded denominator keeps ``0 · inf`` out of the sum."""
+        """the guarded denominator keeps ``0 · inf`` out of the sum."""
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
         feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
         leaf = torch.tensor(PROBE_POS, dtype=torch.float64).requires_grad_(True)
@@ -487,7 +487,7 @@ class TestGTOHartreeEnergyKspace:
         assert bool(torch.isfinite(dpos).all())
 
     def test_over_capacity_cell_poisons_energy_and_force(self) -> None:
-        """ac-010: an over-capacity grid returns NaN in-graph, never truncates.
+        """an over-capacity grid returns NaN in-graph, never truncates.
 
         ``_kspace_energy`` is the compiled route: ``forward``'s eager
         ``bind_cell`` guard is skipped there, exactly as
@@ -548,7 +548,7 @@ class TestGTOHartreeEnergyKspace:
     def test_isolated_l1_energy_matches_literal(
         self, include_self_interaction: bool, expected: float
     ) -> None:
-        """ac-007: ``scatter_sum_compile_safe`` swaps the reduction kernel.
+        """``scatter_sum_compile_safe`` swaps the reduction kernel.
 
         ``index_add_`` instead of ``scatter_add_`` is not a bitwise contract on
         CUDA, hence ``atol=1e-12`` rather than ``torch.equal``.
@@ -584,7 +584,7 @@ class TestGTOHartreeEnergyKspace:
 
     @pytest.mark.slow
     def test_periodic_branch_compiles_to_one_graph(self) -> None:
-        """ac-006: bound grid + explicit ``num_graphs`` → 1 graph, 0 breaks."""
+        """bound grid + explicit ``num_graphs`` → 1 graph, 0 breaks."""
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
         feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
         pos = torch.tensor(PROBE_POS, dtype=torch.float64)
@@ -596,7 +596,7 @@ class TestGTOHartreeEnergyKspace:
         assert explanation.graph_break_count == 0
 
     def test_batch_cell_energy_is_bitwise_equal(self) -> None:
-        """ac-014: ``(1, 3, 3)`` and ``(3, 3)`` differ by a squeeze, nothing else."""
+        """``(1, 3, 3)`` and ``(3, 3)`` differ by a squeeze, nothing else."""
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
         feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
         pos = torch.tensor(PROBE_POS, dtype=torch.float64)
@@ -623,7 +623,7 @@ class TestGTOHartreeEnergyKspace:
 
     @pytest.mark.slow
     def test_isolated_branch_still_breaks_by_design(self) -> None:
-        """ac-007: the retained all-pairs enumeration is a *named* break."""
+        """the retained all-pairs enumeration is a *named* break."""
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
         feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
         pos = torch.tensor(PROBE_POS, dtype=torch.float64)
@@ -637,7 +637,7 @@ class TestGTOHartreeEnergyKspace:
 
     @pytest.mark.slow
     def test_compiling_without_bind_cell_names_bind_cell(self) -> None:
-        """ac-011: the unbound grid fails at trace time with its own message."""
+        """the unbound grid fails at trace time with its own message."""
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
         feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
         pos = torch.tensor(PROBE_POS, dtype=torch.float64)
@@ -651,7 +651,7 @@ class TestGTOHartreeEnergyKspace:
         assert "bind_cell" in str(excinfo.value)
 
     def test_two_graph_batch_is_rejected_with_explicit_num_graphs(self) -> None:
-        """ac-014: the owner's own single-system guard survives ``num_graphs``."""
+        """the owner's own single-system guard survives ``num_graphs``."""
         model = GTOHartreeEnergy(sigma=1.5, l_max=0)
         pos = torch.zeros(4, 3, dtype=torch.float64)
         q = torch.ones(4, 1, dtype=torch.float64)

@@ -371,6 +371,16 @@ class TestParameterizer:
         with pytest.raises(ValueError, match="atom features"):
             model(batch)
 
+    def test_polarizability_head_is_refused_until_composable_a1(self):
+        """No induced-response style exists yet, so the head has nothing to fill."""
+        with pytest.raises(ValueError, match="composable-a1"):
+            Parameterizer(
+                _FakeEncoder({}),
+                ForceField().def_bondstyle("harmonic"),
+                bond_head=_ConstantBondHead(k=2.0, r0=1.0),
+                polarizability_head=nn.Linear(4, 1),
+            )
+
 
 class TestEnergy:
     def test_bond_harmonic_via_to_potentials(self):
