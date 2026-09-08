@@ -7,7 +7,7 @@ Source: the user's design specification "Composable Interatomic Potentials"
 A0 → A1 → B1 → B2, A2 after ablations). It describes a *proposed* framework.
 This note records what molnex already has, what is missing, the shared type
 designs both families will use, and the chain of executable specs. Only the
-`composable-a0` chain is active in `.claude/specs/`; later chains are opened
+`composable-a0` chain closed on 2026-09-08 (all seven specs done; ledger F1–F29 records what it found); later chains are opened
 with `/mol:spec` when reached and must re-read this note first.
 
 ## Decision
@@ -282,7 +282,7 @@ training runs `run_record.write_meta(extra={"manifest": manifest.to_dict()})`. `
 
 ## Roadmap
 
-### `composable-a0` — active (six merge units)
+### `composable-a0` — closed 2026-09-08 (seven merge units: 01 b87e3268 · 02 5eacaa67 · 03 + 03b 61cd4fd6 · 04 e813d439 · 05 551bbe8c + f9da931f · 06 c9b69dc4)
 
 **Test-tier decision (2026-09-08, a0-06).** A bounded MD rollout *is* permitted under `tests/` when it is `slow`-marked and asserts one gate (the 200-step NVE drift on the butane-pair box) — the CLAUDE.md "two tiers" paragraph says so ("… or rolls out MD is marked `slow`"), while the older "Unit tests only … no MD rollouts" sentence predates the deletion of `regressions/` and reads as the fast tier's rule. Reconcile that sentence in CLAUDE.md when the tree is quiet (the peer session holds CLAUDE.md hunks today); `tests/test_molix/test_md/test_integrators.py`'s docstring is corrected in a0-06.
 
@@ -296,7 +296,7 @@ training runs `run_record.write_meta(extra={"manifest": manifest.to_dict()})`. `
 | `composable-a0-05-export` | LAMMPS `hybrid/overlay lj/mdf coul/long` + `kspace_style pppm` + `special_bonds`; OpenMM PME + switching (text only); `LammpsWriter.write_pair_block` (+ `write_settings(skip_pair_style=True)`, box from `graphs.cell`, zero-padded identity labels, `nonbonded_scaling` → molpy `special_bonds`; `write_manifest` dropped — `ModelManifest.write`); `export_for_lammps(manifest=)`; classical parity moved to `interface/tests/parity_classical.py` with a `--case periodic` (run for real: butane 2.6e-12, periodic 9.9e-9); ruff `TID251` bans `lammps`/`openmm`-import check | S7; F5 (classical) |
 | `composable-a0-06-gates` | reflection symmetry test (with a chiral negative control); `EnergyDriftHook(MDHook)` in `molix.md.runner`; gate tests in the mirrored unit modules (T/R/P/reflection, Σq, FD force + strain, continuity, 200-step NVE drift as `slow`, manifest round trip, contribution partition) | S8 |
 
-Acceptance criteria live in `.claude/specs/composable-a0-0N-*.acceptance.md`.
+Acceptance ledgers were deleted at close; the verdicts and commit shas live in the closed rows of `.claude/specs/INDEX.md`.
 
 ### `composable-a1` — variational induced dipoles (opened after A0 closes)
 
