@@ -188,7 +188,7 @@ class TestForceFieldToIR:
         )
         ff.realize(system)
         names = [t.name for t in ff.get_types(BondType)]
-        assert names == ["1-2"]
+        assert names == ["t1-t2"]
 
     def test_cartesian_propers_to_ir_maps_to_cosine_table(self):
         a = torch.tensor([[0.6]], dtype=torch.float64)

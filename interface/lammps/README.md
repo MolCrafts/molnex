@@ -298,7 +298,7 @@ a machine nobody has any more.
 |---|---|
 | **claim** | one rank, two ranks and a direct Python evaluation of the same periodic configuration agree on total energy and forces within rel `1e-6` |
 | **proves** | the local-only energy partition (no ghost site energy counted twice) **and** the single reduction path (no ghost force communicated twice). Single-rank alone cannot show the second — only a decomposed run has an inter-rank reduction to double. It is also the full-scale edge-order-invariance check: C++ builds edges in raw neighbour-list order while the Python reference builds them sorted, and they agree. |
-| **tool** | `scripts/lammps_iface_parity.py` |
+| **tool** | `scripts/lammps_iface_parity.py` — **tool removed from the tree** (F5 / `lammps-iface-post-chain`): it drives LAMMPS from `scripts/`, which Decision 4 confines to `interface/`, and it has not yet been moved. Until it is, this row's evidence cannot be regenerated. |
 | **owner** | the implementer of the `lammps-iface` chain |
 | **re-run trigger** | **any change under `interface/` or `src/molix/engine/`** |
 | **status** | **RECORDED 2026-08-30** — all six comparisons OK at ≤1.6e-15 (gate rel 1e-6); provenance below. The tool exits non-zero without a LAMMPS build; it never skips. |
@@ -337,6 +337,108 @@ The tool's Provenance block records the LAMMPS version, rank count,
 `atom_style`, `comm_modify` settings, plugin commit, torch version,
 device/precision, the capture command and the date. A run whose provenance no
 longer matches the tree is expired evidence, not evidence.
+
+### Classical periodic parity
+
+| | |
+|---|---|
+| **claim** | a Class-I force field **exported** by `molix.ff_export` means the same energy and forces once LAMMPS, not molnex, evaluates it — bonded terms, switched Lennard-Jones, Ewald-split Coulomb under a lattice, and 1-2 / 1-3 / 1-4 exclusions on both classes |
+| **proves** | the export *conventions*: `½k` → `K`, radians → degrees, the quintic taper vs `lj/mdf`, Lorentz–Berthelot mixing, `special_bonds` carrying `NonbondedScaling`, and excluded pairs subtracted against the reciprocal sum rather than attenuated in real space. Nothing here involves `pair_style molnex`: no plugin, no exported model. Both sides are converged first and the report says so, so a residual cannot be mesh error wearing a convention's clothes. |
+| **tool** | `interface/tests/parity_classical.py` (ctest `parity_classical_butane`, `parity_classical_periodic`; exit 77 = no `lmp`) |
+| **owner** | the implementer of the `composable-a0` chain |
+| **re-run trigger** | **any change under `src/molix/ff_export/` or `src/molpot/forcefield/`** |
+| **status** | **RECORDED 2026-09-08** — butane relative energy 2.583e-12, worst force component 3.506e-12; periodic relative energy 9.913e-09, worst force component 6.876e-06 kcal/mol/Å (gates 1e-6 and 1e-5). The deck is consumed exactly as `LammpsWriter` writes it — the tool patches nothing. Provenance below. |
+
+Recorded run (local x86_64 workstation, `/home/jicli594/.local/x86_64/bin/lmp`):
+
+```
+lammps          : LAMMPS (30 Mar 2026 - Development - patch_30Mar2026-1074-g7f680de296)
+                  packages EXTRA-PAIR (lj/mdf) + KSPACE + MOLECULE
+torch           : 2.14.0+cpu    platform: Linux-5.14.0-687.29.1.el9_8.x86_64
+butane          : C4 chain, bonded-only OPLS form (bond/angle/OPLS torsion),
+                  boundary f f f, deck-local pair_style zero
+                  E molnex = 0.1309516320367863, lammps = 0.130951632036448
+                  rel 2.583e-12
+                  max|dF| 3.506e-12; 200-step NVE both sides, |dPE_final| 2.583e-10
+                  molnex 0.42 ms/step, lammps 1.01 ms/step
+periodic        : 8 TIP3P-geometry waters + Na+ + Cl-, 26 atoms, boundary p p p,
+                  cubic L = 12.0 A, seed 20260908, 352 placed edges
+                  lj/cut switch 4.5-5.5 A; coulomb smearing 1.0 A, real-space
+                  cutoff 5.5 A; special_bonds lj 0 0 0.5 coul 0 0 0.5
+                  deck: pair_style hybrid/overlay lj/mdf 4.5 5.5 coul/long 5.5
+                        + kspace_style pppm 1e-10 + kspace_modify gewald 0.7071068
+                  E molnex = -47.23502966626038, lammps = -47.235029198050
+                  per term (molnex - lammps): bond -2.309e-14, angle -1.127e-11,
+                        vdW -3.309e-08, coulomb -4.351e-07
+                  rel 9.912e-09; max|dF| 6.876e-06 kcal/mol/A
+                  the vdW residual is the .7g rendering of the 351 mixed
+                  eps_ij / sigma_ij pair_coeff values, nothing else
+deck statement  : every pair_style / pair_coeff / kspace_style / kspace_modify /
+                  special_bonds / bonded line is INCLUDED from what LammpsWriter
+                  wrote, unmodified. The deck adds only `pair_modify table 16`
+                  and the output-format lines - numerics and printing, no model.
+convergence     : splitting a = 1/(sigma*sqrt2) = 0.7071068 1/A, carried by the
+                  EXPORTED `kspace_modify gewald` line so LAMMPS solves molnex's
+                  decomposition instead of picking its own a from the requested
+                  accuracy; the erfc(a*r_c) = 3.8e-08 real-space residue then
+                  cancels instead of appearing in the parity;
+                  molnex side is the converged ewald k-vector sum (lambda_min
+                  0.25 A, unchanged when halved), because the pme mesh does not
+                  reach 1e-8 at any affordable spacing in this box:
+                    mesh 0.25 A   |dE|/|E| 7.3e-05  max|dF| 1.1e-02
+                    mesh 0.125 A  |dE|/|E| 4.2e-06  max|dF| 1.4e-03
+                    mesh 0.0625 A |dE|/|E| 2.5e-07  max|dF| 1.7e-04   (~7 s)
+                    mesh 0.03125A |dE|/|E| 1.7e-08  max|dF| 2.0e-05   (~60 s)
+                  the pme evaluation still runs every time and is reported as the
+                  mesh diagnostic it is. LAMMPS side: pppm accuracy 1e-10 (grid
+                  192^3) and `pair_modify table 16` — measured against an
+                  independent analytic real-space sum, the default 12-bit erfc
+                  table leaves ~1e-6 kcal/mol in ecoul and `pair_modify table 0`
+                  (the Abramowitz-Stegun polynomial LAMMPS' own warning
+                  recommends) is an order of magnitude WORSE.
+floor           : k_e differs between the two codes by 9.9e-09 relative
+                  (molnex 332.0637132991921, LAMMPS qqrd2e 332.06371 measured),
+                  which is the hard floor of any Coulomb comparison here.
+goldens         : the molnex side of both cases is pinned at rel 1e-10 inside the
+                  tool and checked on every run, so a molnex regression is caught
+                  even when it is the LAMMPS binary that moved.
+capture_command : PYTHONPATH=src python interface/tests/parity_classical.py \
+                      --case periodic --lmp <lmp> --capture
+date            : 2026-09-08
+```
+
+**What this run fixed in the exporter.** The first recorded attempt could not
+be read by LAMMPS at all, and the four defects it exposed are fixed in the
+library rather than worked around in the tool — the deck above is consumed
+byte-for-byte as written:
+
+1. `LammpsWriter.write_pair_block` now emits an explicit `pair_coeff i j` for
+   every `i <= j`, mixed by `molpot.potentials.vdw.lj126.lorentz_berthelot`
+   itself. Diagonal lines alone were **silently zero** for every cross-type LJ
+   pair under `hybrid/overlay` (its `pair_coeff * * coul/long` maps every type
+   pair to the Coulomb sub-style, and LAMMPS never mixes an LJ sub-style onto a
+   pair it was not explicitly assigned), and LAMMPS's default combining rule is
+   geometric in σ where molnex is Lorentz–Berthelot. Cost: `N(N+1)/2` lines with
+   identity types — ledger debt **F25**, whose fix is condensed typing, not a
+   return to LAMMPS-side mixing.
+2. Identity types are named by `ForceField.identity_type_label` — `t1`, `t2`, …
+   A LAMMPS type label may not begin with a digit, so the previous `1-2` /
+   `1-2-3` names stopped `read_data` at `ERROR: Invalid type label 1-2` and no
+   exported system carrying bonds could be read. The labels are **zero-padded to
+   a common width** (`ForceField.identity_type_label` takes the atom count):
+   molrs numbers a data
+   file's types by sorting their labels as *text*, so unpadded `t1 … t26` makes
+   LAMMPS type 2 be atom 10 and the numeric `pair_coeff` lines address the wrong
+   ε/σ — measured `E_vdwl = -0.2251` against molnex's `-0.8163`, no warning.
+   Invisible below ten atoms, which is why only a real box caught it.
+3. `LammpsWriter.write_settings` passes `skip_units=True`; the include is sourced
+   after `read_data`, where LAMMPS refuses a `units` command.
+4. `ForceField.nonbonded_scaling` mirrors into molpy's `set_special_bonds`, and
+   `LammpsWriter.to_frame` writes the molecule column as `mol_id` (the spelling
+   molrs reads to infer `atom_style full`). Without the first, an exported
+   bonded include carried `special_bonds … 1.0` — every 1–4 pair at full
+   strength; without the second, the data file came out `Atoms # charge` and
+   LAMMPS refused it under the `atom_style full` the include declares.
 
 ## Building the plugin
 

@@ -38,7 +38,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-#: One spelling, one home: the canonical flat per-atom-energy key (ac-012).
+#: One spelling, one home: the canonical flat per-atom-energy key.
 from molix.schema import ATOMIC_ENERGY_FLAT_KEY as _ATOMIC_ENERGY_FLAT_KEY
 
 

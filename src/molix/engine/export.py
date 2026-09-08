@@ -9,11 +9,12 @@ module writes.
 
 :func:`export_for_lammps` wraps a model in a flat-convention :class:`EngineForward`
 (see :mod:`molix.engine.adapter`), compiles it ahead-of-time (AOT) via
-:class:`molix.export.Exporter` into a single ``{name}.pt2`` package (a
-self-contained AOTInductor artifact that runs without a Python interpreter),
-then writes a sibling ``{name}.meta.json`` whose ``lammps`` block carries
-everything the C++ side needs to stay model-agnostic. That block is schema v3 and
-is assembled — as a whole and nowhere else — by :func:`_lammps_meta_block`:
+:class:`molix.export.Exporter` into a single ``{name}.pt2`` package — a
+self-contained *AOTInductor* (AOTI) artifact, i.e. compiled machine code plus
+weights that runs without a Python interpreter — then writes a sibling
+``{name}.meta.json`` whose ``lammps`` block carries everything the C++ side needs
+to stay model-agnostic. That block is schema v3 and is assembled — as a whole and
+nowhere else — by :func:`_lammps_meta_block`:
 
 * ``schema_version`` — contract version of this block, :data:`LAMMPS_META_SCHEMA`.
                       The C++ ``LammpsContract`` refuses any other value while
@@ -78,6 +79,16 @@ re-exported.** The tensor count, names and meaning all moved — an added
 schema version and refuses anything else rather than guessing at the field set,
 so an old artifact fails loudly at load instead of running a mis-wired graph.
 
+An optional third artifact, ``{name}.manifest.json``, is written when
+:func:`export_for_lammps` is handed a ``manifest`` mapping: the caller's
+model-provenance record — which model, trained on what, at which precision —
+carried verbatim for humans and tooling. In molnex today it is produced by
+``ForceField.manifest(profile=...).to_dict()`` in ``molpot``, but this module
+never imports that package and never inspects the mapping; it travels as plain
+JSON-native data. It is invisible to the C++ side — which reads
+``doc["lammps"]`` of ``meta.json`` and nothing else — and its presence changes
+no byte of that file.
+
 Two properties of a model are checked **eagerly, on the example system, before
 tracing**, because neither can be expressed as a traced assertion and both are
 silent physics errors if left to runtime:
@@ -102,6 +113,7 @@ over static shapes.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
@@ -367,6 +379,7 @@ def export_for_lammps(
     requires_sorted_edges: bool = False,
     n_atoms: int | None = None,
     e_max: int | None = None,
+    manifest: Mapping[str, object] | None = None,
 ) -> Path:
     """Export ``model`` to an AOTI ``.pt2`` consumable by ``pair_style molnex <dir>``.
 
@@ -382,7 +395,9 @@ def export_for_lammps(
             pass consumes its autograd graph in eval mode — PiNet's
             ``method="grad"`` — cannot be re-differentiated at trace time).
         export_dir: Output directory (created if missing); receives ``{name}.pt2``
-            and ``{name}.meta.json``.
+            and ``{name}.meta.json``, plus ``{name}.manifest.json`` whenever
+            ``manifest`` is not ``None`` — an empty mapping is a manifest that
+            says nothing, not the absence of one, and still writes its file.
         species: Atomic numbers the model supports. Recorded in ``meta.json``
             sorted and deduplicated, as the model's declared species set — the
             LAMMPS atom type → ``Z`` mapping itself comes from the user's
@@ -429,6 +444,16 @@ def export_for_lammps(
         n_atoms: Fixed atom count ``N`` (required when ``cuda_graph``).
         e_max: Fixed padded edge count (required when ``cuda_graph``); the C++ side
             must fail loudly when the real edge count exceeds it.
+        manifest: Optional provenance record of the exported model — the
+            caller's ``ModelManifest`` already reduced to a plain mapping
+            (``ModelManifest.to_dict()``). Its schema belongs to the caller and
+            is opaque here: ``molix.engine`` must not import ``molpot``, so this
+            travels as data, is never inspected, and is written verbatim
+            (sorted keys, indented) to ``export_dir/{name}.manifest.json``
+            beside the ``.pt2``. It is for humans and tooling only — the C++
+            reader validates ``doc["lammps"]`` of ``meta.json`` and never opens
+            this file — and ``meta.json`` is byte-identical whether or not a
+            manifest is passed.
 
     Returns:
         The export directory as a :class:`Path`.
@@ -519,6 +544,12 @@ def export_for_lammps(
     )
     meta = {"device": device, "model_class": model.__class__.__name__, "lammps": lammps_meta}
     (export_dir / f"{name}.meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+
+    if manifest is not None:
+        manifest_path = export_dir / f"{name}.manifest.json"
+        with manifest_path.open("w", encoding="utf-8") as fh:
+            json.dump(dict(manifest), fh, indent=2, sort_keys=True)
+            fh.write("\n")
 
     logger.info(
         f"Exported LAMMPS model to {export_dir} "

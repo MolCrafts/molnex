@@ -5,6 +5,7 @@ import torch
 
 from molpot.ir import (
     BondBag,
+    NonbondedMethodRecord,
     NonbondedScaling,
     PotentialIR,
 )
@@ -41,3 +42,22 @@ class TestPotentialIR:
         )
         assert ir.bonds is not None
         assert ir.scaling is not None
+
+    def test_nonbonded_method_defaults_to_an_empty_record(self):
+        """Never ``None``: a consumer branches on a field, not on the record.
+
+        A bonded-only model declares no nonbonded method at all, and asking it
+        for one has to answer "none of them" rather than force every caller
+        through a null check they will eventually forget.
+        """
+        assert PotentialIR().nonbonded_method == NonbondedMethodRecord(
+            lj_cutoff=None,
+            lj_switch_start=None,
+            coulomb_cutoff=None,
+            coulomb_calculator=None,
+            real_space_cutoff=None,
+            smearing=None,
+            lr_wavelength=None,
+            mesh_spacing=None,
+            capacity_factor=None,
+        )

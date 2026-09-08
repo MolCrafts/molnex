@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 
 import pytest
 import torch
@@ -18,10 +19,42 @@ from molpot.ir import (
     ChargeBag,
     ImproperHarmonicBag,
     LJBag,
+    NonbondedMethodRecord,
     NonbondedScaling,
     PotentialIR,
     ProperTorsionBag,
 )
+from tests.test_molix.test_ff_export.conftest import PME_SWITCHED_METHOD
+
+#: Every field unset — a model that declared no nonbonded method at all.
+_NO_METHOD = NonbondedMethodRecord(
+    lj_cutoff=None,
+    lj_switch_start=None,
+    coulomb_cutoff=None,
+    coulomb_calculator=None,
+    real_space_cutoff=None,
+    smearing=None,
+    lr_wavelength=None,
+    mesh_spacing=None,
+    capacity_factor=None,
+)
+
+
+def _nonbonded_ir(record: NonbondedMethodRecord, *, charges: bool = True) -> PotentialIR:
+    """Single-type LJ (optionally charged) IR running the method ``record`` describes.
+
+    Without charges there is no exclusion policy to declare either, so
+    ``scaling`` goes with them.
+    """
+    return PotentialIR(
+        lj=LJBag(
+            epsilon=torch.tensor([0.1], dtype=torch.float64),
+            sigma=torch.tensor([3.5], dtype=torch.float64),
+        ),
+        charges=ChargeBag(q=torch.tensor([0.5, -0.5], dtype=torch.float64)) if charges else None,
+        scaling=NonbondedScaling() if charges else None,
+        nonbonded_method=record,
+    )
 
 
 def _class_i_ir() -> PotentialIR:
@@ -48,6 +81,11 @@ def _class_i_ir() -> PotentialIR:
         charges=ChargeBag(q=torch.tensor([0.5, -0.5])),
         scaling=NonbondedScaling(),
     )
+
+
+def _lj_only_ir() -> PotentialIR:
+    """LJ truncated at 12 Å with no charges, no solver and no exclusions."""
+    return _nonbonded_ir(replace(_NO_METHOD, lj_cutoff=12.0), charges=False)
 
 
 class TestOpenMMAdapterRegistration:
@@ -121,13 +159,16 @@ class TestOpenMMAdapterTranslate:
         assert nb["charges"][0] == 0.5
         assert nb["charges"][1] == -0.5
 
-    def test_scaling_14_from_ir(self):
-        """ac-006: Class-I defaults scale_q_14=5/6, scale_lj_14=0.5."""
-        spec = OpenMMAdapter().translate(_class_i_ir())
-        assert math.isclose(spec.scaling["scale_q_14"], 5.0 / 6.0)
-        assert math.isclose(spec.scaling["scale_lj_14"], 0.5)
-        assert math.isclose(spec.scaling["scale_q_12"], 0.0)
-        assert math.isclose(spec.scaling["scale_lj_12"], 0.0)
+    def test_scaling_is_the_shared_flat_spelling(self):
+        """The spec carries the IR's scaling through the shared flattener.
+
+        What the six factors *are* is pinned once, on the adapter base that
+        owns the flat key spelling (``test_adapter.py``); this backend only has
+        to route them.
+        """
+        ir = _class_i_ir()
+        spec = OpenMMAdapter().translate(ir)
+        assert spec.scaling == BackendAdapter.scaling_dict(ir.scaling)
 
     def test_force_spec_json_serializable(self):
         spec = OpenMMAdapter().translate(_class_i_ir())
@@ -146,3 +187,69 @@ class TestOpenMMAdapterTranslate:
             OpenMMAdapter().translate(ir)
         assert ei.value.term == "improper_harmonic"
         assert ei.value.case is TranslationCase.UNSUPPORTED
+
+    def test_pme_nonbonded_method_in_nanometres(self):
+        """A lattice solver + switching window → PME with both radii in nm."""
+        nb = next(
+            f
+            for f in OpenMMAdapter().translate(_nonbonded_ir(PME_SWITCHED_METHOD)).forces
+            if f["type"] == "NonbondedForce"
+        )
+        assert nb["nonbondedMethod"] == "PME"
+        assert nb["cutoffDistance"] == pytest.approx(1.2)  # 12 Å
+        assert nb["ewaldErrorTolerance"] == 1e-6
+        assert nb["useSwitchingFunction"] is True
+        assert nb["switchingDistance"] == pytest.approx(1.0)  # 10 Å
+
+    def test_open_boundary_cutoff_without_switch(self):
+        """An open-boundary Coulomb cutoff is CutoffNonPeriodic, no taper."""
+        record = replace(
+            PME_SWITCHED_METHOD,
+            lj_switch_start=None,
+            coulomb_cutoff=12.0,
+            coulomb_calculator=None,
+            real_space_cutoff=None,
+            smearing=None,
+        )
+        nb = next(
+            f
+            for f in OpenMMAdapter().translate(_nonbonded_ir(record)).forces
+            if f["type"] == "NonbondedForce"
+        )
+        assert nb["nonbondedMethod"] == "CutoffNonPeriodic"
+        assert nb["useSwitchingFunction"] is False
+        assert nb["switchingDistance"] is None
+
+    def test_lj_cutoff_alone_is_a_cutoff_method(self):
+        """The method follows both pair terms, not only the Coulomb one.
+
+        A Lennard-Jones-only model still runs at a cutoff, and reporting
+        ``NoCutoff`` for it would build an OpenMM system that sums every pair
+        in the box — a different energy function, quadratically more expensive.
+        """
+        nb = next(
+            f
+            for f in OpenMMAdapter().translate(_lj_only_ir()).forces
+            if f["type"] == "NonbondedForce"
+        )
+        assert nb["nonbondedMethod"] == "CutoffNonPeriodic"
+        assert nb["cutoffDistance"] == pytest.approx(1.2)  # 12 Å
+        assert nb["useSwitchingFunction"] is False
+
+    def test_no_declared_method_is_nocutoff(self):
+        nb = next(
+            f
+            for f in OpenMMAdapter().translate(_nonbonded_ir(_NO_METHOD)).forces
+            if f["type"] == "NonbondedForce"
+        )
+        assert nb["nonbondedMethod"] == "NoCutoff"
+
+    def test_ewald_error_tolerance_is_configurable(self):
+        nb = next(
+            f
+            for f in OpenMMAdapter(ewald_error_tolerance=1e-5)
+            .translate(_nonbonded_ir(PME_SWITCHED_METHOD))
+            .forces
+            if f["type"] == "NonbondedForce"
+        )
+        assert nb["ewaldErrorTolerance"] == 1e-5

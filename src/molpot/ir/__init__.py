@@ -16,7 +16,7 @@ from molpot.ir.bags import (
     ProperTorsionBag,
 )
 from molpot.ir.nonbonded import NonbondedMethodRecord
-from molpot.ir.potential_ir import PotentialIR
+from molpot.ir.potential_ir import PotentialIR, no_nonbonded_method
 from molpot.ir.scaling import ExclusionScales, NonbondedScaling
 from molpot.ir.units import CLASS_I_CANONICAL, UnitTag
 
@@ -32,6 +32,7 @@ __all__ = [
     "NonbondedMethodRecord",
     "NonbondedScaling",
     "PotentialIR",
+    "no_nonbonded_method",
     "ProperTorsionBag",
     "UnitTag",
 ]

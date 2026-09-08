@@ -8,10 +8,23 @@ units; the load-bearing reparameterizations are:
   ``K = k/2``; angle ``theta0`` converted to degrees.
 * proper torsions: multi-term cosine bags; when ``n∈{1..4}`` with OPLS phases
   they are also emitted as a compact ``dihedral_style opls`` ``K1..K4`` group.
+* nonbonded terms: the pair style is chosen from the *method* the model ran
+  (:class:`~molpot.ir.NonbondedMethodRecord`), not from the bags alone — a
+  switching window selects ``lj/mdf`` over ``lj/cut`` and a lattice solver
+  selects ``coul/long`` plus a ``kspace_style`` over ``coul/cut``. molnex's
+  quintic taper ``1 − x³(10 − 15x + 6x²)`` and the ``lj/mdf`` taper
+  ``(1 − x)³(1 + 3x + 6x²)`` with ``x = (r − r_m)/(r_cut − r_m)`` expand to the
+  same polynomial ``1 − 10x³ + 15x⁴ − 6x⁵``, so the window transfers exactly.
+
+Every number is rendered with ``{:.7g}``: a LAMMPS input line is parsed as
+text, so the record carries the same digits the deck will.
 
 References:
-    LAMMPS docs: bond_style harmonic, angle_style harmonic, dihedral_style opls
-    Spec: learnable-classical-ff-08-ff-export (peer of OpenMMAdapter)
+    LAMMPS docs: bond_style harmonic, angle_style harmonic, dihedral_style
+    opls, pair_style lj/mdf, pair_style lj/cut/coul/long, kspace_style pppm,
+    special_bonds
+    Spec: ``.claude/notes/learnable-classical-ff.md`` (peer of OpenMMAdapter);
+    composable-a0-05-export (periodic pair styles)
 """
 
 from __future__ import annotations
@@ -23,20 +36,65 @@ import torch
 
 from molix.ff_export.adapter import BackendAdapter
 from molix.ff_export.cases import TranslationCase
+from molix.ff_export.exceptions import UnsupportedTermError
 from molix.ff_export.force_spec import ForceSpec
-from molpot.ir import PotentialIR, ProperTorsionBag
+from molpot.ir import (
+    NonbondedMethodRecord,
+    NonbondedScaling,
+    PotentialIR,
+    ProperTorsionBag,
+)
 
 __all__ = ["LammpsAdapter"]
+
+
+def _resolved_smearing(smearing: float | None) -> float:
+    """The Ewald smearing σ of a record whose Coulomb term ran a lattice sum.
+
+    :meth:`~molpot.forcefield.ForceField._nonbonded_method_record` fills
+    ``smearing`` together with ``coulomb_calculator`` — both are ``None``
+    exactly when no ``pair:coulomb`` style is declared — so a lattice solver
+    with no width means the resolver and the export disagree about which model
+    this is. Emitting ``kspace_modify gewald`` from a guessed width would hand
+    LAMMPS a different decomposition under a line that claims to state molnex's.
+
+    Args:
+        smearing: The record's ``smearing`` field, in Å.
+
+    Returns:
+        ``smearing``.
+
+    Raises:
+        ValueError: ``smearing`` is ``None`` or not positive.
+    """
+    if smearing is None or smearing <= 0.0:
+        raise ValueError(
+            "a lattice Coulomb solver was exported with smearing="
+            f"{smearing!r}; the Ewald splitting width is model identity and "
+            "kspace_modify gewald cannot be written without it"
+        )
+    return smearing
 
 
 class LammpsAdapter(BackendAdapter):
     """Translate Class-I IR into LAMMPS ``units real`` force-spec records.
 
     Does **not** invoke LAMMPS. Unit tests pin hard-coded numeric goldens
-    (bond ``k=100`` → LAMMPS ``K=50``; OPLS phases → ``dihedral_coeff``).
+    (bond ``k = 100 kcal/mol/Å²`` → LAMMPS ``K = 50 kcal/mol/Å²``, the ``½k``
+    → ``K`` halving; OPLS phases in rad → ``dihedral_coeff`` in kcal/mol).
+
+    Args:
+        kspace_accuracy: Relative RMS force accuracy passed to
+            ``kspace_style pppm`` when the model ran a lattice Coulomb sum.
+            Dimensionless; LAMMPS's own default is ``1e-4``, tightened here so
+            the exported deck reproduces the molnex reciprocal-space term
+            rather than merely a converged-looking one.
     """
 
     name = "lammps"
+
+    def __init__(self, kspace_accuracy: float = 1e-6) -> None:
+        self.kspace_accuracy = kspace_accuracy
 
     def translate(
         self,
@@ -52,6 +110,10 @@ class LammpsAdapter(BackendAdapter):
 
         Returns:
             Force-spec with LAMMPS ``units real`` coeff conventions.
+
+        Raises:
+            UnsupportedTermError: When the nonbonded method the model ran has
+                no LAMMPS pair style (see :meth:`_pair`).
         """
         forces: list[dict[str, Any]] = []
 
@@ -65,8 +127,10 @@ class LammpsAdapter(BackendAdapter):
             forces.append(self._impropers_harmonic(ir))
         if ir.impropers_periodic is not None:
             forces.append(self._impropers_periodic(ir))
-        if ir.lj is not None:
-            forces.append(self._lj(ir))
+        if ir.lj is not None or ir.charges is not None:
+            forces.extend(self._pair(ir))
+        if ir.scaling is not None:
+            forces.append(self._exclusions(ir.scaling))
         if ir.charges is not None:
             forces.append(self._charges(ir))
 
@@ -247,21 +311,310 @@ class LammpsAdapter(BackendAdapter):
             "parameters": params,
         }
 
-    def _lj(self, ir: PotentialIR) -> dict[str, Any]:
-        assert ir.lj is not None
+    def _pair(self, ir: PotentialIR) -> list[dict[str, Any]]:
+        """Emit the nonbonded records the model's method spells in LAMMPS.
+
+        Four steps, each its own method because each answers a different
+        question: which Lennard-Jones sub-style the window and cutoff ask for
+        (:meth:`_lj_sub_style`), which Coulomb sub-style the solver asks for
+        (:meth:`_coulomb_sub_style`), how the two combine into the single
+        ``pair_style`` line LAMMPS takes (:meth:`_fuse_pair_style`), and what
+        reciprocal-space solver has to follow when the Coulomb half was summed
+        over the lattice (:meth:`_kspace_records`). The style is a function of
+        the *method* (:class:`~molpot.ir.NonbondedMethodRecord`) throughout, not
+        of the bags — the bags only fill the coefficient table, which is
+        :meth:`_lj_parameters`.
+
+        Args:
+            ir: The IR being translated; at least one of ``lj`` / ``charges``
+                is set.
+
+        Returns:
+            The ``pair`` record — ``sub_styles`` carries the style words and
+            their radii in Å as floats, so the writer never re-parses the
+            rendered ``type`` line — followed by the ``kspace`` and
+            ``kspace_modify`` records when a lattice solver ran.
+
+        Raises:
+            UnsupportedTermError: Propagated from the two sub-style steps — a
+                Lennard-Jones bag with no cutoff radius, or charges with
+                neither a lattice solver nor a Coulomb cutoff.
+            ValueError: Propagated from :meth:`_kspace_records` when a lattice
+                solver ran with no ``smearing`` on the record.
+        """
+        method = ir.nonbonded_method
+        lj = self._lj_sub_style(ir, method)
+        coulomb = self._coulomb_sub_style(ir, method)
+        line, style, sub_styles = self._fuse_pair_style(lj, coulomb)
+        case = (
+            TranslationCase.DECOMPOSE
+            if style == "hybrid/overlay"
+            else TranslationCase.DIRECT_UNIT_SCALE
+        )
+        pair = {
+            "type": f"pair_style {line}",
+            "style": style,
+            "category": "pair",
+            "case": case.value,
+            "sub_styles": sub_styles,
+            "parameters": self._lj_parameters(ir),
+        }
+        lattice = coulomb is not None and coulomb["style"] == "coul/long"
+        return [pair, *(self._kspace_records(method) if lattice else ())]
+
+    def _lj_parameters(self, ir: PotentialIR) -> list[dict[str, Any]]:
+        """The per-type Lennard-Jones coefficient table of the ``pair`` record.
+
+        Kept apart from the style steps because it answers a different
+        question: they decide which ``pair_style`` line is written, this decides
+        what goes on the ``pair_coeff`` lines under it. Type indices are the
+        identity typing molnex exports with — one type per atom, in atom order,
+        which is the order
+        :meth:`~molpot.forcefield.ForceField.identity_type_label` labels them
+        in.
+
+        Args:
+            ir: The IR being translated.
+
+        Returns:
+            One ``{"type_index", "epsilon", "sigma"}`` entry per type in
+            kcal/mol and Å, or an empty list for a charges-only model.
+        """
+        if ir.lj is None:
+            return []
         eps = self.as_floats(ir.lj.epsilon)
         sig = self.as_floats(ir.lj.sigma)
-        params = [
+        return [
             {"type_index": i + 1, "epsilon": e, "sigma": s}
             for i, (e, s) in enumerate(zip(eps, sig, strict=True))
         ]
+
+    def _lj_sub_style(
+        self,
+        ir: PotentialIR,
+        method: NonbondedMethodRecord,
+    ) -> dict[str, Any] | None:
+        """The Lennard-Jones sub-style the model's window and cutoff spell.
+
+        A switching window is what selects ``lj/mdf <r_switch> <r_cut>`` over
+        the hard ``lj/cut <r_cut>``: molnex's quintic taper and ``lj/mdf``'s
+        expand to the same polynomial, so the window transfers exactly.
+
+        Args:
+            ir: The IR being translated.
+            method: Its nonbonded method.
+
+        Returns:
+            ``{"style", "args"}`` with radii in Å, or ``None`` when the model
+            carries no Lennard-Jones bag.
+
+        Raises:
+            UnsupportedTermError: A bag with no cutoff radius. Every LAMMPS
+                pair style truncates, so no style is an untruncated 12-6 sum.
+        """
+        if ir.lj is None:
+            return None
+        if method.lj_cutoff is None:
+            raise UnsupportedTermError(
+                "lj",
+                "Lennard-Jones bag exported without a cutoff radius; every "
+                "LAMMPS pair style truncates, so no style is an untruncated "
+                "12-6 sum",
+            )
+        if method.lj_switch_start is None:
+            return {"style": "lj/cut", "args": [method.lj_cutoff]}
+        return {"style": "lj/mdf", "args": [method.lj_switch_start, method.lj_cutoff]}
+
+    def _coulomb_sub_style(
+        self,
+        ir: PotentialIR,
+        method: NonbondedMethodRecord,
+    ) -> dict[str, Any] | None:
+        """The Coulomb sub-style the model's solver spells.
+
+        A lattice solver is summed in reciprocal space, so LAMMPS takes the
+        real-space half at ``coul/long <r_real>`` and the rest through a
+        ``kspace_style``; an open-boundary model is truncated outright at
+        ``coul/cut <r_coul>``. The two are not interchangeable, which is why a
+        lattice solver with no split radius raises instead of borrowing the
+        open-boundary style.
+
+        Args:
+            ir: The IR being translated.
+            method: Its nonbonded method.
+
+        Returns:
+            ``{"style", "args"}`` with radii in Å, or ``None`` when the model
+            carries no charges.
+
+        Raises:
+            UnsupportedTermError: A lattice solver ran but the record names no
+                ``real_space_cutoff`` to split at, or charges were exported with
+                neither a lattice solver nor a Coulomb cutoff. The first fails
+                closed rather than falling through to ``coul/cut``: that style
+                is a *truncated* open-boundary sum with no reciprocal-space
+                half, so the deck would silently drop the lattice contribution
+                the model was solved with — the same reason
+                :func:`_resolved_smearing` refuses a split it cannot state. The
+                second has no spelling at all, since every LAMMPS pair style
+                truncates and none is an untruncated open-boundary ``1/r`` sum.
+        """
+        if ir.charges is None:
+            return None
+        if method.is_lattice_sum:
+            if method.real_space_cutoff is None:
+                raise UnsupportedTermError(
+                    "coulomb",
+                    "a lattice Coulomb solver "
+                    f"({method.coulomb_calculator!r}) was exported with no "
+                    "real_space_cutoff; coul/long has nowhere to split, and "
+                    "falling back to coul/cut would export a truncated "
+                    "open-boundary sum in place of the lattice one",
+                )
+            return {"style": "coul/long", "args": [method.real_space_cutoff]}
+        if method.coulomb_cutoff is not None:
+            return {"style": "coul/cut", "args": [method.coulomb_cutoff]}
+        raise UnsupportedTermError(
+            "coulomb",
+            "charges exported with neither a lattice solver nor a Coulomb "
+            "cutoff; LAMMPS has no untruncated open-boundary 1/r sum",
+        )
+
+    def _fuse_pair_style(
+        self,
+        lj: dict[str, Any] | None,
+        coulomb: dict[str, Any] | None,
+    ) -> tuple[str, str, list[dict[str, Any]]]:
+        """Combine the two sub-styles into the one ``pair_style`` LAMMPS takes.
+
+        An **unswitched** LJ term has a fused spelling with Coulomb —
+        ``lj/cut/coul/long`` / ``lj/cut/coul/cut`` — and fusing is preferred
+        because one style is cheaper than an overlay of two. A **switched** one
+        has no fused form, so the two are summed by ``hybrid/overlay``; plain
+        ``hybrid`` would hand each type pair to exactly one sub-style and drop
+        Coulomb from every LJ pair.
+
+        Args:
+            lj: The Lennard-Jones sub-style, or ``None``.
+            coulomb: The Coulomb sub-style, or ``None``.
+
+        Returns:
+            ``(line, style, sub_styles)`` — the ``pair_style`` line without its
+            keyword, the style word the writer branches on, and the sub-style
+            records after any fusion. Numbers are rendered by :meth:`number`,
+            so the record carries the digits the deck will.
+        """
+        sub_styles: list[dict[str, Any]] = [sub for sub in (lj, coulomb) if sub is not None]
+        if len(sub_styles) == 2 and sub_styles[0]["style"] == "lj/cut":
+            first, second = sub_styles
+            fused: dict[str, Any] = {
+                "style": f"lj/cut/{second['style']}",
+                "args": [*first["args"], *second["args"]],
+            }
+            sub_styles = [fused]
+        body = " ".join(
+            " ".join([sub["style"], *(self.number(a) for a in sub["args"])]) for sub in sub_styles
+        )
+        if len(sub_styles) > 1:
+            return f"hybrid/overlay {body}", "hybrid/overlay", sub_styles
+        return body, sub_styles[0]["style"], sub_styles
+
+    def _kspace_records(self, method: NonbondedMethodRecord) -> list[dict[str, Any]]:
+        """The reciprocal-space solver and its splitting parameter.
+
+        ``kspace_style pppm`` is emitted for every lattice calculator,
+        including ``"ewald"``: a converged lattice sum is the same number
+        whichever solver produced it, so the recorded choice is an accuracy/cost
+        trade rather than a different energy, and ``pppm`` at
+        :attr:`kspace_accuracy` reproduces it.
+
+        The splitting parameter then travels with it. LAMMPS otherwise derives
+        its own from the requested accuracy, which decomposes the *same*
+        electrostatics differently: at a finite real-space cutoff neither half
+        is converged better than ``erfc(alpha * r_c)``, so two alphas leave two
+        different residues and the deck reproduces a neighbouring model rather
+        than this one. ``smearing`` is model identity for exactly that reason
+        (``molpot/ir/nonbonded.py``), and molnex's Coulomb kernel screens with
+        ``erf(r / (sigma * sqrt(2)))``, so ``alpha = 1 / (sigma * sqrt(2))``.
+
+        Args:
+            method: The nonbonded method, whose Coulomb term ran a lattice sum.
+
+        Returns:
+            The ``kspace`` record followed by the ``kspace_modify`` one.
+
+        Raises:
+            ValueError: The record names no ``smearing`` (see
+                :func:`_resolved_smearing`).
+        """
+        alpha = 1.0 / (_resolved_smearing(method.smearing) * math.sqrt(2.0))
+        return [
+            {
+                "type": f"kspace_style pppm {self.number(self.kspace_accuracy)}",
+                "style": "pppm",
+                "category": "kspace",
+                "accuracy": self.kspace_accuracy,
+            },
+            {
+                "type": f"kspace_modify gewald {self.number(alpha)}",
+                "style": "gewald",
+                "category": "kspace_modify",
+                "gewald": alpha,
+            },
+        ]
+
+    def _exclusions(self, scaling: NonbondedScaling) -> dict[str, Any]:
+        """Emit ``special_bonds`` from the force field's 1-2 / 1-3 / 1-4 scales.
+
+        LAMMPS spells the two Class-I interaction classes ``lj`` and ``coul``;
+        the IR spells the latter ``q``. The weights are dimensionless, ``0``
+        removing the bonded-path pair and ``1`` keeping it in full.
+
+        Args:
+            scaling: The force field's per-interaction-class scales.
+
+        Returns:
+            The ``special_bonds`` record, with the LAMMPS weights also carried
+            as ``lj`` / ``coul`` float triples.
+        """
+        lj = list(scaling.triple("lj"))
+        coul = list(scaling.triple("q"))
+        weights = " ".join(self.number(x) for x in lj)
+        charges = " ".join(self.number(x) for x in coul)
         return {
-            "type": "pair_style lj/cut",
-            "style": "lj/cut",
-            "category": "pair",
+            "type": f"special_bonds lj {weights} coul {charges}",
+            "category": "special_bonds",
             "case": TranslationCase.DIRECT_UNIT_SCALE.value,
-            "parameters": params,
+            "lj": lj,
+            "coul": coul,
         }
+
+    @staticmethod
+    def number(value: float) -> str:
+        """Render ``value`` the way it will read in the LAMMPS input deck.
+
+        Seven significant digits, and this is the **one** place that decides so.
+        A LAMMPS deck is parsed as text: whatever is written here is exactly
+        what LAMMPS evaluates, so the rendering is part of the exported model
+        and not a display choice. Seven digits keep the round-trip within
+        ~1e-7 relative — thirty times under the ``1e-6`` energy gate of the
+        classical parity (``interface/tests/parity_classical.py``), where it is
+        the measured floor of the Lennard-Jones term — while staying short
+        enough that a deck is still something a human reads.
+
+        :meth:`~molix.ff_export.LammpsWriter.write_pair_block` calls this rather
+        than restating the format, so the ``pair_style`` line the adapter
+        renders and the ``pair_coeff`` lines the writer renders can never
+        disagree about precision (ledger debt **F25** records the cost of the
+        coefficient table those lines make up).
+
+        Args:
+            value: The number, in the record's own unit.
+
+        Returns:
+            Its LAMMPS spelling.
+        """
+        return f"{value:.7g}"
 
     def _charges(self, ir: PotentialIR) -> dict[str, Any]:
         assert ir.charges is not None

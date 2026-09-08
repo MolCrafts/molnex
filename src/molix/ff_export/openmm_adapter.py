@@ -5,15 +5,30 @@ Emits JSON-friendly records matching OpenMM User Guide §19 force names:
 * ``HarmonicBondForce`` — ``k`` kJ/mol/nm², ``r0`` nm
 * ``HarmonicAngleForce`` — ``k`` kJ/mol/rad², ``theta0`` rad
 * ``PeriodicTorsionForce`` — ``k`` kJ/mol, ``periodicity``, ``phase`` rad
-* ``NonbondedForce`` — ``charge`` e, ``sigma`` nm, ``epsilon`` kJ/mol
+* ``NonbondedForce`` — ``charge`` e, ``sigma`` nm, ``epsilon`` kJ/mol,
+  plus the nonbonded *method* the model ran: ``nonbondedMethod``,
+  ``cutoffDistance`` nm, ``ewaldErrorTolerance``, ``useSwitchingFunction``
+  and ``switchingDistance`` nm
+
+A single OpenMM ``NonbondedForce`` owns both nonbonded pair terms — the
+Lennard-Jones 12-6 interaction and the Coulomb ``1/r`` one — together with how
+they are truncated, which is why those five method fields ride on the same
+record as the per-type parameters. ``nonbondedMethod`` is one of ``"PME"``
+(particle-mesh Ewald: the periodic lattice sum, split into a real-space
+remainder and an FFT-mesh reciprocal part), ``"CutoffNonPeriodic"`` (open
+boundary, truncated at ``cutoffDistance``) or ``"NoCutoff"`` (open boundary,
+every pair summed).
 
 Particle indices are **not** required for type-level IR bags; records carry
 ``type_index`` (and ``term_index`` for multi-term torsions). Topology binding
 is a later consumer concern.
 
 References:
-    OpenMM User Guide §19 "Forces"
-    Spec: learnable-classical-ff-08-ff-export
+    OpenMM User Guide §19 "Forces" — ``NonbondedForce`` for the method,
+    cutoff and switching-function fields emitted here.
+    Design note: ``.claude/notes/learnable-classical-ff.md`` (the
+    ``learnable-classical-ff-08-ff-export`` spec it came from was completed and
+    removed).
 """
 
 from __future__ import annotations
@@ -22,7 +37,7 @@ from typing import Any
 
 from molix.ff_export.adapter import BackendAdapter
 from molix.ff_export.cases import TranslationCase
-from molix.ff_export.conventions import ConventionTable
+from molix.ff_export.conventions import ANGSTROM_TO_NM, ConventionTable
 from molix.ff_export.exceptions import UnsupportedTermError
 from molix.ff_export.force_spec import ForceSpec
 from molpot.ir import PotentialIR
@@ -33,16 +48,35 @@ __all__ = ["OpenMMAdapter"]
 class OpenMMAdapter(BackendAdapter):
     """Translate Class-I :class:`~molpot.ir.PotentialIR` into OpenMM force-spec records.
 
-    Does **not** import OpenMM. Unit tests pin hard-coded numeric goldens
-    (bond ``k`` 100 → 41840; torsion Vn=2 → ``k`` 4.184).
+    Does **not** import OpenMM. Unit tests pin hard-coded numeric goldens: a
+    bond force constant ``k`` of 100 kcal/mol/Å² comes out 41840 kJ/mol/nm²,
+    and an AMBER torsion barrier ``Vn`` of 2 kcal/mol (which the IR carries as
+    the half-barrier ``k`` = 1) comes out ``k`` = 4.184 kJ/mol.
+
+    Args:
+        conventions: Unit / form matrix to translate through. Defaults to
+            :meth:`~molix.ff_export.conventions.ConventionTable.default_openmm`.
+        ewald_error_tolerance: Dimensionless target error of OpenMM's
+            particle-mesh Ewald (PME) sum — the relative accuracy from which
+            OpenMM derives its own splitting parameter and mesh size. Reported
+            on the ``NonbondedForce`` record whichever method the model ran,
+            since the field is part of that record's schema. OpenMM's own
+            default is ``5e-4``, tightened here so the exported system
+            reproduces the molnex reciprocal-space term rather than merely a
+            converged-looking one.
     """
 
     name = "openmm"
 
-    def __init__(self, conventions: ConventionTable | None = None) -> None:
+    def __init__(
+        self,
+        conventions: ConventionTable | None = None,
+        ewald_error_tolerance: float = 1e-6,
+    ) -> None:
         if conventions is None:
             conventions = ConventionTable.default_openmm()
         self.conventions = conventions
+        self.ewald_error_tolerance = ewald_error_tolerance
 
     def translate(
         self,
@@ -196,6 +230,52 @@ class OpenMMAdapter(BackendAdapter):
         }
 
     def _nonbonded(self, ir: PotentialIR) -> dict[str, Any]:
+        """Emit ``NonbondedForce`` — the LJ / charge parameters and the method.
+
+        OpenMM ties the Lennard-Jones truncation and the real-space half of the
+        Coulomb sum to a *single* ``cutoffDistance``, while the IR records the
+        two radii separately. Splitting them is not physics: a converged Ewald
+        sum is independent of where its real-space half is cut, because the
+        reciprocal-space half makes up exactly what the real-space one drops.
+        Exporting the LJ cutoff as ``cutoffDistance`` and letting OpenMM
+        re-derive its own splitting parameter from
+        :attr:`ewald_error_tolerance` is therefore exact, not a
+        reparameterization — only when no LJ bag names a radius does the record
+        fall back to a Coulomb one.
+
+        The method word weighs **both** pair terms, in this order: ``"PME"``
+        when the Coulomb half was a lattice sum
+        (:attr:`~molpot.ir.NonbondedMethodRecord.is_lattice_sum`),
+        ``"CutoffNonPeriodic"`` when *either* term declared a radius — an
+        open-boundary ``coulomb_cutoff`` or a ``lj_cutoff`` — and ``"NoCutoff"``
+        only when neither did. Reading the word off the Coulomb half alone
+        would send a charge-free, Lennard-Jones-only model to ``"NoCutoff"``,
+        under which OpenMM truncates nothing and ignores ``cutoffDistance``:
+        the ``lj_cutoff`` the model declared would be exported and then
+        silently not applied, which is a different model, not a rounding.
+
+        ``cutoffDistance`` is then the radius the chosen word truncates at: the
+        Lennard-Jones one whenever there is a Lennard-Jones bag carrying it,
+        the Ewald real-space radius under ``"PME"`` without such a bag, and the
+        open-boundary ``coulomb_cutoff`` otherwise.
+
+        Args:
+            ir: The IR being translated; at least one of ``lj`` / ``charges``
+                is set.
+
+        Returns:
+            The ``NonbondedForce`` record. ``epsilon`` is kJ/mol, ``sigma`` nm
+            and ``charges`` e. ``cutoffDistance`` and ``switchingDistance`` are
+            in nm (the IR carries Å); the first is ``None`` under
+            ``"NoCutoff"``, which truncates nothing.
+            ``useSwitchingFunction`` is ``True`` exactly when the model declared
+            a Lennard-Jones switching window (``lj_switch_start``), and
+            ``switchingDistance`` is that window's inner radius — OpenMM then
+            multiplies the Lennard-Jones interaction by a smooth taper running
+            from ``1`` at ``switchingDistance`` to ``0`` at ``cutoffDistance``,
+            instead of cutting it off abruptly. With no window declared the two
+            come out ``False`` and ``None``.
+        """
         row_lj = self.conventions.row("lj")
         row_q = self.conventions.row("charge")
         params: list[dict[str, Any]] = []
@@ -215,10 +295,35 @@ class OpenMMAdapter(BackendAdapter):
         if ir.charges is not None:
             charges = self.as_floats(ir.charges.q)
 
+        method = ir.nonbonded_method
+        if method.is_lattice_sum:
+            nonbonded_method = "PME"
+        elif method.coulomb_cutoff is not None or method.lj_cutoff is not None:
+            nonbonded_method = "CutoffNonPeriodic"
+        else:
+            nonbonded_method = "NoCutoff"
+
+        if ir.lj is not None and method.lj_cutoff is not None:
+            cutoff_A = method.lj_cutoff
+        elif method.is_lattice_sum:
+            cutoff_A = method.real_space_cutoff
+        else:
+            cutoff_A = method.coulomb_cutoff
+        if nonbonded_method == "NoCutoff" or cutoff_A is None:
+            cutoff_nm = None
+        else:
+            cutoff_nm = cutoff_A * ANGSTROM_TO_NM
+        switch_A = method.lj_switch_start
+
         return {
             "type": "NonbondedForce",
             "case": row_lj.case.value,
             "parameters": params,
             "charges": charges,
             "charge_case": row_q.case.value,
+            "nonbondedMethod": nonbonded_method,
+            "cutoffDistance": cutoff_nm,
+            "ewaldErrorTolerance": self.ewald_error_tolerance,
+            "useSwitchingFunction": switch_A is not None,
+            "switchingDistance": None if switch_A is None else switch_A * ANGSTROM_TO_NM,
         }

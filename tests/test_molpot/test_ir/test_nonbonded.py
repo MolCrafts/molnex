@@ -25,6 +25,23 @@ import pytest
 from molpot.ir.nonbonded import NonbondedMethodRecord
 
 
+def _record(**overrides: float | str | None) -> NonbondedMethodRecord:
+    """All-``None`` record with ``overrides`` applied — every field is required."""
+    fields = {
+        "lj_cutoff": None,
+        "lj_switch_start": None,
+        "coulomb_cutoff": None,
+        "coulomb_calculator": None,
+        "real_space_cutoff": None,
+        "smearing": None,
+        "lr_wavelength": None,
+        "mesh_spacing": None,
+        "capacity_factor": None,
+    }
+    fields.update(overrides)
+    return NonbondedMethodRecord(**fields)  # ty: ignore[invalid-argument-type]
+
+
 class TestNonbondedMethodRecord:
     def test_field_set_is_the_declared_method_surface(self) -> None:
         """The nine knobs ``Potentials._assemble_pair_potentials`` reads back."""
@@ -55,6 +72,17 @@ class TestNonbondedMethodRecord:
         )
         assert record.lj_cutoff is None
         assert record.coulomb_calculator is None
+
+    def test_is_lattice_sum_tracks_the_declared_solver(self) -> None:
+        """True exactly when a reciprocal-space solver ran, i.e. under a cell.
+
+        Consumers ask this instead of re-listing the solver names: an
+        open-boundary model declares none, and every backend that has to choose
+        between a truncated sum and a lattice sum reads the same predicate.
+        """
+        for calculator in ("ewald", "pme", "p3m"):
+            assert _record(coulomb_calculator=calculator).is_lattice_sum, calculator
+        assert not _record(coulomb_calculator=None).is_lattice_sum
 
     def test_is_frozen(self) -> None:
         """Manifests are hashed and compared; a mutable record would lie."""

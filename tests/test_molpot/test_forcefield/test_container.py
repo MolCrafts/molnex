@@ -7,9 +7,79 @@ import dataclasses
 import pytest
 import torch
 from molpy import ForceField as MolpyForceField
+from tensordict import TensorDict
 
 from molpot.forcefield import ForceField, OPLSAAForceField
+from molpot.ir import ExclusionScales, NonbondedScaling
 from molpot.manifest import ModelManifest, NumericsRecord, ParamTableRecord
+
+
+def _realized(n_atoms: int) -> ForceField:
+    """Force field with identity atom types realized over ``n_atoms`` atoms."""
+    ff = ForceField(name="class-i", units="real").def_atomstyle("full")
+    pos = torch.arange(n_atoms, dtype=torch.float64).unsqueeze(1) * torch.tensor(
+        [1.53, 0.0, 0.0], dtype=torch.float64
+    )
+    system = TensorDict({"atoms": TensorDict({"pos": pos}, batch_size=[n_atoms])}, batch_size=[])
+    return ff.realize(system)
+
+
+class TestForceField:
+    def test_identity_types_are_labelled_for_lammps(self):
+        """Identity type names start with a letter: ``t1``, ``t2``, …
+
+        They leave molnex as LAMMPS *type labels*, and a type label may not
+        begin with a digit — ``read_data`` refuses a bare ``1``.
+        """
+        from molpy import AtomType
+
+        assert ForceField.identity_type_label(0, 2) == "t1"
+        assert [t.name for t in _realized(2).get_types(AtomType)] == ["t1", "t2"]
+
+    def test_identity_labels_are_zero_padded_to_the_atom_count(self):
+        """Ten atoms label as ``t01``…``t10``, so text order is atom order.
+
+        The labels are sorted as text downstream (molrs writes the type tables
+        in that order), and unpadded ``t10`` sorts before ``t2`` — which
+        renumbers the types against the atoms they came from and corrupts every
+        coeff line that follows.
+        """
+        from molpy import AtomType
+
+        assert ForceField.identity_type_label(0, 10) == "t01"
+        names = [t.name for t in _realized(10).get_types(AtomType)]
+        assert names == [f"t{i:02d}" for i in range(1, 11)]
+        assert sorted(names) == names
+
+    def test_nonbonded_scaling_is_mirrored_into_molpy_special_bonds(self):
+        """The exclusion policy reaches molpy, which is what writes the deck.
+
+        molpy formats the ``special_bonds`` line from its own arrays, so a
+        policy that lived only on the Python side would export an unscaled 1–4
+        (``1.0``) — the most expensive silent error a Class-I deck can carry.
+        """
+        opls = NonbondedScaling(
+            q=ExclusionScales(0.0, 0.0, 0.5),
+            lj=ExclusionScales(0.0, 0.0, 0.5),
+        )
+        ff = ForceField(name="x", units="real", nonbonded_scaling=opls)
+        assert list(ff.special_bonds_lj) == [0.0, 0.0, 0.5]
+        assert list(ff.special_bonds_coul) == [0.0, 0.0, 0.5]
+
+        ff.nonbonded_scaling = NonbondedScaling()  # AMBER: q 1–4 = 5/6
+        assert ff.special_bonds_coul[2] == pytest.approx(5.0 / 6.0)
+        assert ff.special_bonds_lj[2] == 0.5
+
+        clone = ff.clone()
+        assert list(clone.special_bonds_lj) == list(ff.special_bonds_lj)
+        assert list(clone.special_bonds_coul) == list(ff.special_bonds_coul)
+
+    def test_setting_molpy_special_bonds_updates_the_scaling(self):
+        """The mirror runs both ways, so the two spellings cannot drift apart."""
+        ff = ForceField(name="x", units="real")  # AMBER default: q 1–4 = 5/6
+        ff.set_special_bonds((0.0, 0.0, 0.5), (0.0, 0.0, 0.5))
+        assert ff.nonbonded_scaling.triple("q") == (0.0, 0.0, 0.5)
+        assert ff.nonbonded_scaling.triple("lj") == (0.0, 0.0, 0.5)
 
 
 class TestOPLSAAForceField:

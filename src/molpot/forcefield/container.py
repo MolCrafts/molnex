@@ -79,7 +79,10 @@ class ForceField(MolpyForceField):
             :class:`OPLSAAForceField` does.
 
     Attributes:
-        nonbonded_scaling: The scales above.
+        nonbonded_scaling: The scales above — a property, not a plain field:
+            assigning it also writes molpy's own ``special_bonds`` arrays, so
+            the policy that runs and the policy an exported deck states cannot
+            drift apart (see the property and :meth:`set_special_bonds`).
             :meth:`~molpot.forcefield.Potentials.bind_topology` reads them
             once per topology to build its
             :class:`~molpot.forcefield.ExclusionTable`, so replacing this
@@ -106,6 +109,78 @@ class ForceField(MolpyForceField):
         self._style_options: dict[str, dict[str, Any]] = {}
         self._params: dict[str, dict[str, torch.Tensor]] = {}
         self._mlip: Any = None
+
+    @property
+    def nonbonded_scaling(self) -> NonbondedScaling:
+        """The 1–2 / 1–3 / 1–4 exclusion policy, mirrored into molpy on write.
+
+        Assigning here also calls molpy's
+        :meth:`~molpy.ForceField.set_special_bonds`, because molpy — not molnex
+        — is what formats the ``special_bonds`` line of an exported deck, and it
+        formats it from *its own* arrays. A policy that lived only on the Python
+        side would leave those at molpy's unscaled default and export
+        ``special_bonds lj 0 0 1 coul 0 0 1``: every 1–4 pair at full strength,
+        which is a different force field and the most expensive error a Class-I
+        deck can carry silently. Mirroring on assignment rather than at write
+        time means the two can never be out of step, including after
+        :meth:`clone`.
+
+        Only the two kinds molpy has a slot for — ``lj`` and ``q`` (its
+        ``coul``) — are mirrored; a kind a later model adds keeps living in
+        :class:`~molpot.forcefield.ExclusionTable` alone, since LAMMPS has
+        nowhere to put it either.
+        """
+        return self._nonbonded_scaling
+
+    @nonbonded_scaling.setter
+    def nonbonded_scaling(self, scaling: NonbondedScaling) -> None:
+        self.set_special_bonds(list(scaling.triple("lj")), list(scaling.triple("q")))
+
+    def set_special_bonds(self, lj: Any, coul: Any) -> None:
+        """Set molpy's exclusion triples **and** this container's scaling, together.
+
+        Overrides :meth:`molpy.ForceField.set_special_bonds` so the two
+        representations of one policy cannot diverge. molpy owns the arrays an
+        exported deck's ``special_bonds`` line is formatted from; molnex owns
+        :class:`~molpot.ir.NonbondedScaling`, which
+        :meth:`~molpot.forcefield.Potentials.bind_topology` reads to build its
+        :class:`~molpot.forcefield.ExclusionTable` and which the IR and the
+        manifest report. Writing either one alone leaves the model that runs and
+        the model that is described disagreeing about which pairs are excluded —
+        the most expensive silent error a Class-I deck can carry, since an
+        unscaled 1–4 runs every third-neighbour pair at full strength.
+
+        Both directions land here: :attr:`nonbonded_scaling`'s setter calls this
+        method, and a caller reaching for molpy's own spelling gets the molnex
+        side updated too.
+
+        Kinds other than ``lj`` and ``q`` are preserved as they were. molpy has
+        exactly two slots and LAMMPS exactly two classes, so a kind a later
+        model declares (``induced`` for a polarizable field) has nowhere to go
+        on either side and keeps living in the exclusion table alone — it must
+        not be dropped merely because this method was called.
+
+        Args:
+            lj: Length-3 ``(1-2, 1-3, 1-4)`` Lennard-Jones scales.
+            coul: Length-3 ``(1-2, 1-3, 1-4)`` Coulomb scales — molnex's ``q``
+                kind under molpy's ``coul`` name.
+
+        Raises:
+            ValueError: Propagated from molpy when either sequence is not
+                length 3.
+        """
+        super().set_special_bonds(lj, coul)
+        # __init__ assigns nonbonded_scaling, whose setter calls this method, so
+        # the first call happens before there is a previous policy to carry over.
+        previous = getattr(self, "_nonbonded_scaling", None)
+        scales = (
+            {kind: getattr(previous, kind) for kind in previous.kinds()}
+            if previous is not None
+            else {}
+        )
+        scales["lj"] = ExclusionScales(*(float(x) for x in lj))
+        scales["q"] = ExclusionScales(*(float(x) for x in coul))
+        self._nonbonded_scaling = NonbondedScaling(**scales)
 
     def def_atomstyle(self, name: str = "full") -> Self:
         super().def_atomstyle(name)
@@ -229,6 +304,70 @@ class ForceField(MolpyForceField):
         del frame
         return Potentials(self, **kwargs)
 
+    @staticmethod
+    def _identity_type_width(n_atoms: int) -> int:
+        """Digit width :meth:`identity_type_label` pads to for ``n_atoms`` atoms.
+
+        Private, and the **only** place the width is derived: molnex writes the
+        same labels on both sides of the molpy seam
+        (:meth:`realize` and :meth:`molix.ff_export.LammpsWriter.to_frame`), and
+        a width computed twice is a width that can differ once.
+
+        Args:
+            n_atoms: Number of atoms in the system being exported, i.e. of
+                identity types to name.
+
+        Returns:
+            The number of decimal digits in ``n_atoms`` — ``1`` for a system of
+            nine atoms or fewer, ``2`` up to ninety-nine, and so on. Never less
+            than ``1``, so an empty system still yields a usable width.
+        """
+        return max(1, len(str(max(1, n_atoms))))
+
+    @staticmethod
+    def identity_type_label(index: int, n_atoms: int) -> str:
+        """Name of the identity type of atom ``index`` in an ``n_atoms`` system.
+
+        ``"t1"``/``"t2"`` for a pair of atoms, ``"t01"``…``"t26"`` for
+        twenty-six. Identity typing gives every atom its own type, so the only
+        question a name has to answer is *which atom* — but it has to answer it
+        in a form LAMMPS accepts, and there are two separate constraints:
+
+        **It must not begin with a digit.** These strings leave molnex as LAMMPS
+        *type labels*: molpy writes them into the ``Atom Type Labels`` section of
+        the data file and onto the ``*_coeff`` lines of the include, and a bare
+        ``"1"`` / ``"1-2"`` makes ``read_data`` stop at
+        ``ERROR: Invalid type label 1-2``, so no exported system carrying bonds
+        can be read at all.
+
+        **They must all be the same length.** molrs numbers a data file's types
+        by sorting their labels *as text*, and decimal strings sort in numeric
+        order only when equally long: unpadded ``t1 … t26`` sorts
+        ``t1, t10, …, t19, t2, t20, …``, so LAMMPS type ``2`` is atom 10 and
+        every numeric ``pair_coeff i j``
+        (:meth:`molix.ff_export.LammpsWriter.write_pair_block`) reads another
+        atom's Lennard-Jones well depth ``ε`` (kcal/mol) and diameter ``σ`` (Å).
+        Measured on a 26-atom water/ion box exported that way, ``E_vdwl`` —
+        LAMMPS' name for the summed Lennard-Jones energy — came out
+        ``-0.2251 kcal/mol`` against molnex's ``-0.8163 kcal/mol``, no warning.
+        Systems of nine atoms or fewer are unaffected, which is why this stayed
+        invisible until a real box was exported — and why ``n_atoms`` is
+        required rather than defaulted. A default width would be correct for
+        small systems, silently wrong for the rest, and impossible to see at the
+        call site.
+
+        Args:
+            index: 0-based atom index.
+            n_atoms: Number of identity types, i.e. of atoms in the system being
+                exported. Both sides of the molpy seam pass the same count, which
+                is what makes them spell every type identically.
+
+        Returns:
+            The label. Bonded labels are the join of their atoms' labels
+            (``"t1-t2"``) — molpy's own composition rule, not restated here.
+        """
+        return f"t{index + 1:0{ForceField._identity_type_width(n_atoms)}d}"
+
     def realize(
         self,
         system: Any,
@@ -238,7 +377,33 @@ class ForceField(MolpyForceField):
         """Fill native molpy type tables from torch params + topology.
 
         Identity types: one atom type per atom, one bonded type per
-        interaction. After this, :mod:`molpy.io` can write ``self`` directly.
+        interaction, named by :meth:`identity_type_label`. After this,
+        :mod:`molpy.io` can write ``self`` directly.
+
+        Mutates this container in place, which is why the writers clone first
+        (:meth:`molix.ff_export.LammpsWriter.write_settings` realizes
+        ``forcefield.clone()``): a realized field carries one type per atom of
+        *that* system and is no longer a template for any other.
+
+        Args:
+            system: Post-collate nested batch. Read here: ``atoms.pos``
+                ``(N, 3)`` in Å — only its length, since coordinates belong in
+                the data file and not in a type — ``atoms.q`` in units of the
+                elementary charge ``e`` when no ``q`` parameter table is
+                filled, and the bonded namespaces ``bonds`` / ``angles`` /
+                ``propers`` through their ``atomi`` … ``atoml`` index columns.
+            masses: Per-atom mass in amu ``(N,)``. Default: ``12.011`` amu —
+                the mass of carbon — for every atom, which suffices for a
+                single-point energy and is wrong for anything that integrates.
+
+        Returns:
+            ``self``, so the call chains straight into a molpy writer.
+
+        Raises:
+            TypeError: ``system["atoms"]["pos"]`` is not a tensor.
+            ValueError: ``masses`` has a different length than ``atoms.pos``.
+            KeyError: A bonded namespace is present but missing one of the
+                index columns its arity needs.
         """
         pos = self._system_tensor(system, "atoms", "pos")
         n_atoms = int(pos.shape[0])
@@ -257,7 +422,7 @@ class ForceField(MolpyForceField):
             if atoms is not None and "epsilon" in atoms and "sigma" in atoms:
                 kwargs["epsilon"] = float(atoms["epsilon"][i].item())
                 kwargs["sigma"] = float(atoms["sigma"][i].item())
-            atom_types.append(astyle.def_type(str(i + 1), **kwargs))
+            atom_types.append(astyle.def_type(self.identity_type_label(i, n_atoms), **kwargs))
         self._realize_bonds(system, atom_types)
         self._realize_angles(system, atom_types)
         self._realize_propers(system, atom_types)

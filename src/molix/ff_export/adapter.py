@@ -1,12 +1,14 @@
 """BackendAdapter protocol + self-registering peer types.
 
 Mirrors :class:`molix.engine.EngineAdapter`: each backend is a named
-peer class (``OpenMMAdapter``, future ``GromacsAdapter``), **not** a
-``Translator(method="openmm")`` switch.
+peer class (``LammpsAdapter``, ``OpenMMAdapter``, a future ``GromacsAdapter``),
+**not** a ``Translator(method="openmm")`` switch.
 
 References:
-    Spec: learnable-classical-ff-08-ff-export
-    Placement: ``.claude/notes/learnable-classical-ff.md`` (no method=)
+    Placement note: ``.claude/notes/learnable-classical-ff.md`` — one peer class
+    per backend, never a ``method=`` switch (the
+    ``learnable-classical-ff-08-ff-export`` spec it came from was completed and
+    removed).
 """
 
 from __future__ import annotations
@@ -27,6 +29,11 @@ class BackendAdapter(ABC):
 
     Concrete subclasses set a class-level :attr:`name` (auto-registered) and
     implement :meth:`translate`. Resolve by name via :meth:`from_name`.
+
+    Attributes:
+        name: Backend key the subclass registers itself under (``"lammps"``,
+            ``"openmm"``). Left empty on this abstract base, which is what
+            keeps the base itself out of the registry.
     """
 
     name: str = ""
@@ -39,7 +46,18 @@ class BackendAdapter(ABC):
 
     @classmethod
     def from_name(cls, name: str) -> BackendAdapter:
-        """Instantiate the registered adapter for ``name`` (e.g. ``"openmm"``)."""
+        """Instantiate the registered adapter for ``name`` (e.g. ``"openmm"``).
+
+        Args:
+            name: A key from :meth:`names`.
+
+        Returns:
+            A new adapter of that backend, built with its own defaults.
+
+        Raises:
+            ValueError: ``name`` is not registered; the message lists the keys
+                that are.
+        """
         try:
             return cls._registry[name]()
         except KeyError:
@@ -73,34 +91,30 @@ class BackendAdapter(ABC):
         the export layer rather than on the physics type: the values are read
         through :meth:`~molpot.ir.NonbondedScaling.triple`, which is the same
         per-class ``(s12, s13, s14)`` accessor
-        :meth:`~molpot.ir.NonbondedScaling.as_dict` reports nested. Only the
-        ``q`` (Coulomb) and ``lj`` (Lennard-Jones) classes are flattened: an
-        interaction class a later model declares — ``induced`` for a
-        polarizable force field — needs its own key spelling added here and is
-        otherwise absent from the exported spec.
+        :meth:`~molpot.ir.NonbondedScaling.as_dict` reports nested. The key
+        set follows :meth:`~molpot.ir.NonbondedScaling.kinds` rather than a
+        hard-coded ``q`` / ``lj`` pair, so an interaction class a later model
+        declares — ``induced`` for a polarizable force field — is exported
+        under ``scale_induced_<12|13|14>`` instead of being silently dropped.
 
         Args:
             scaling: The force field's per-interaction-class scales, or
                 ``None`` when the IR carries none.
 
         Returns:
-            ``{"scale_q_12", "scale_q_13", "scale_q_14", "scale_lj_12",
-            "scale_lj_13", "scale_lj_14"}`` → dimensionless factor, where
-            ``0`` removes the pair and ``1`` keeps it in full. ``None`` when
-            ``scaling`` is ``None``, which a backend must treat as "no
-            exclusion policy declared", not as "no exclusions".
+            One ``scale_<kind>_<12|13|14>`` key per declared class —
+            ``{"scale_q_12", …, "scale_lj_14"}`` for the Class-I default —
+            → dimensionless factor, where ``0`` removes the pair and ``1``
+            keeps it in full. ``None`` when ``scaling`` is ``None``, which a
+            backend must treat as "no exclusion policy declared", not as "no
+            exclusions".
         """
         if scaling is None:
             return None
-        q12, q13, q14 = scaling.triple("q")
-        lj12, lj13, lj14 = scaling.triple("lj")
         return {
-            "scale_q_12": q12,
-            "scale_q_13": q13,
-            "scale_q_14": q14,
-            "scale_lj_12": lj12,
-            "scale_lj_13": lj13,
-            "scale_lj_14": lj14,
+            f"scale_{kind}_{relation}": value
+            for kind in scaling.kinds()
+            for relation, value in zip((12, 13, 14), scaling.triple(kind), strict=True)
         }
 
     @abstractmethod

@@ -7,9 +7,11 @@ open-boundary truncation and the lattice sum, because the same style is
 truncated at a cutoff without a cell and lattice-summed with one. The cutoff
 radii, the switching window and the reciprocal-space solver with its sizing are
 therefore per-model runtime state, recorded here and carried by
-:attr:`~molpot.ir.PotentialIR.nonbonded_method` and by the model manifest
-(``composable-a0-04``; ``S2`` labels the manifest requirement and ``F7`` the
-finding that a contract cannot name the solver, both in the notes below).
+:attr:`~molpot.ir.PotentialIR.nonbonded_method` and by the model manifest.
+``S2`` (the requirement that a model carry a versioned manifest) and ``F7`` (the
+finding that a style contract cannot name the solver) are entries of the notes
+file cited below; the record itself landed with the completed
+``composable-a0-04-manifest`` spec.
 
 The values are the ones
 :meth:`~molpot.forcefield.potentials.Potentials._assemble_pair_potentials`
@@ -19,7 +21,15 @@ field is optional, because a bonded-only force field declares no nonbonded
 method at all — such a model still gets an all-``None`` record rather than no
 record, so a consumer branches on a field, never on the record's presence.
 
-Reference:
+References:
+    Ewald, P. P. "Die Berechnung optischer und elektrostatischer
+    Gitterpotentiale" Ann. Phys. 369, 253 (1921) — the lattice sum whose split
+    the ``smearing`` / ``real_space_cutoff`` / reciprocal-space fields below
+    size. https://doi.org/10.1002/andp.19213690304
+    LAMMPS ``kspace_style`` command — how the reciprocal-space half is named on
+    export.
+    OpenMM User Guide §19 "Forces", ``NonbondedForce`` — the same split, with
+    the cutoff and switching window attached to one force object.
     ``.claude/notes/composable-potentials.md`` §"S2 manifest" (record table).
 """
 
@@ -94,3 +104,30 @@ class NonbondedMethodRecord:
     lr_wavelength: float | None
     mesh_spacing: float | None
     capacity_factor: float | None
+
+    @property
+    def is_lattice_sum(self) -> bool:
+        """Whether the Coulomb term was summed over the lattice in reciprocal space.
+
+        True exactly when :attr:`coulomb_calculator` is set, because every value
+        it can take is a reciprocal-space algorithm: the vocabulary is
+        ``ewald`` / ``pme`` / ``p3m``, and it is closed by
+        :class:`~molpot.forcefield.pair_terms.CoulombPeriodicPotential`, which
+        both types its ``calculator`` argument to those three literals and
+        raises on anything else. There is therefore no "declared but not a
+        lattice sum" state to test for — an open-boundary model leaves this
+        field ``None`` and is truncated at :attr:`coulomb_cutoff` instead.
+
+        The question is asked by every export target, each of which then needs
+        its own reciprocal-space solver (LAMMPS' ``kspace_style``, OpenMM's
+        ``PME`` — particle-mesh Ewald, the FFT-mesh flavour of the same
+        decomposition). It is answered here, on the record that holds the evidence,
+        rather than by a set of calculator names kept beside the adapters —
+        which was a second place for the vocabulary to be listed, and so a
+        second place for it to fall out of date with the potential.
+
+        Returns:
+            ``True`` for a periodic lattice sum, ``False`` for an open-boundary
+            model or a bonded-only one.
+        """
+        return self.coulomb_calculator is not None

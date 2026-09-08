@@ -156,13 +156,48 @@ in the example spells out a conversion factor.
 
 ## 3. Write LAMMPS files
 
+A deck is three files: `system.data` (atoms, box, topology), a bonded include
+and a pair include. The first two are molpy's; the nonbonded section is molnex's
+own, because a field that declares pair styles has no faithful spelling on the
+molrs side — LAMMPS wants `hybrid/overlay` and one explicit `pair_coeff` per
+type pair, and molrs would write plain `hybrid`, which hands each type pair to a
+single sub-style and so drops Coulomb from every Lennard-Jones pair.
+
 ```python
-from molix.ff_export import LammpsWriter
+from molix.ff_export import LammpsAdapter, LammpsWriter
 
 writer = LammpsWriter()
 writer.write_data("system.data", batch)
-writer.write_settings("system.ff", ff, batch)
+writer.write_settings("system.in.settings", ff, batch, skip_pair_style=True)
+writer.write_pair_block("system.in.pair", LammpsAdapter().translate(ff.to_ir()))
 ```
 
-The writer calls `ff.clone().realize(batch)` then `molpy.io`. There is no
-`to_molpy()`.
+`write_settings` calls `ff.clone().realize(batch)` then `molpy.io`. There is no
+`to_molpy()`. `skip_pair_style=True` drops every `pair:*` style from that clone,
+so the include is bonded-only and the two files cannot disagree about the
+nonbonded model; it also carries no `units` line, since LAMMPS refuses `units`
+once `read_data` has made a box. `write_pair_block` then emits the `pair_style`
+line, one `pair_coeff i j` for every `i <= j` mixed with molnex's own
+Lorentz–Berthelot rule, `kspace_style pppm` with `kspace_modify gewald` under a
+lattice Coulomb solver, and `special_bonds` from `ff.nonbonded_scaling`.
+
+The box comes from `batch["graphs", "cell"]` when the batch carries one and is a
+padded open box otherwise. Atom types are identity types — one per atom, named
+`t1`, `t2`, … zero-padded to a common width so LAMMPS accepts the label and
+molrs numbers the types in atom order. Source the three files in this order:
+
+```
+units real
+atom_style full
+read_data system.data
+include system.in.settings
+include system.in.pair
+```
+
+A bonded-only field needs neither the flag nor the pair block. The field above
+is not one: `OPLSAAForceField` declares `pair:coulomb`, whose default solver is
+a lattice sum, so its deck belongs in a periodic box.
+`interface/tests/parity_classical.py` runs both shapes against a real `lmp` —
+`--case butane` (bonded-only, open boundary) agrees with molnex to 2.6e-12 in
+relative energy, `--case periodic` (8 waters plus Na⁺ and Cl⁻ in a 12 Å cube,
+switched Lennard-Jones and Ewald-split Coulomb) to 9.9e-9.

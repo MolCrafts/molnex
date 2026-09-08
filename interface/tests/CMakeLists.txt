@@ -59,6 +59,42 @@ set_tests_properties(contract_reads_generated_v3_fixture PROPERTIES
 )
 
 # ---------------------------------------------------------------------------
+# Classical Class-I export parity (spec composable-a0-05-export).
+#
+# Not a C++ case: parity_classical.py writes a LAMMPS deck with
+# molix.ff_export.LammpsWriter and drives a real `lmp` binary in a subprocess,
+# which is what confines it to interface/ (CLAUDE.md third-party surface rule —
+# no `import lammps` anywhere, this tool included). It needs neither the plugin
+# nor an exported model, so it carries no FIXTURES_REQUIRED and never pulls in
+# fixture_setup.
+#
+# SKIP_RETURN_CODE 77: unlike the neural gate, which must never skip because a
+# missing plugin is the very thing it exists to police, this one is a plain
+# LAMMPS run — a machine without LAMMPS has nothing to say about it and says so
+# by skipping visibly rather than by passing.
+#
+# LMP is forwarded from the configuring environment so a site with lmp under a
+# non-standard prefix needs no cmake edit; the tool falls back to $LMP and then
+# to lmp on PATH.
+# ---------------------------------------------------------------------------
+
+set(_PARITY_CLASSICAL_CASES butane periodic)
+
+foreach(_case IN LISTS _PARITY_CLASSICAL_CASES)
+  add_test(
+    NAME parity_classical_${_case}
+    COMMAND "${Python_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/parity_classical.py"
+            --case ${_case}
+  )
+  set_tests_properties(parity_classical_${_case} PROPERTIES
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "LMP=$ENV{LMP}"
+  )
+endforeach()
+
+
+# ---------------------------------------------------------------------------
 # NO-FIXTURE tests
 #
 # Header-reader cases driven entirely by in-test JSON string literals: no
