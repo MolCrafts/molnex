@@ -36,9 +36,9 @@ obtained — ``"variational"`` (minimise the polarization functional),
 non-converged number of steps). For every other contribution it stays ``None``.
 
 These are stdlib value objects — frozen, hashable and torch-free — because they
-are serialised into ``ForceFieldSchemaView.as_dict()`` (and, once
-``composable-a0-04`` lands it, into the versioned model manifest), and are read
-by code that must not import torch.
+are serialised into ``ForceFieldSchemaView.as_dict()`` and into the versioned
+model manifest (:mod:`molpot.manifest`), and are read by code that must not
+import torch.
 
 Reference:
     ``.claude/notes/composable-potentials.md`` §"S1 contract"
@@ -56,6 +56,7 @@ __all__ = [
     "ExclusionClass",
     "InteractionContract",
     "ParamFrame",
+    "ParamSpec",
     "TermSpec",
 ]
 
@@ -173,6 +174,37 @@ class ParamFrame(StrEnum):
 
 
 @dataclass(frozen=True)
+class ParamSpec:
+    """One parameter of a style, as the parameter tables carry it.
+
+    Lives in this leaf beside :class:`ParamFrame`, the type of its own
+    :attr:`frame`, and is re-exported by :mod:`molpot.forcefield.schema` for the
+    style registry that declares it: :class:`~molpot.manifest.InteractionRecord`
+    records a style's parameters, so owning the class here is what lets
+    :mod:`molpot.manifest` sit *below* the ForceField package instead of
+    importing one of its submodules.
+
+    Attributes:
+        name: Parameter name inside the style's table (``"k"``, ``"sigma"``).
+        shape: Shape annotation, e.g. ``"[n, n_terms]"``.
+        unit: Unit string in the ForceField's unit set (``"kcal/mol"``, ``"Å"``).
+        description: Human-readable meaning.
+        frame: Transformation law under a rotation of the lab frame. Defaults to
+            :attr:`ParamFrame.SCALAR` — a force constant, a well depth or a
+            charge is rotation invariant. Only a directional parameter (a
+            dipole, a local-frame vector, a polarizability tensor) declares
+            otherwise, and only then does a rotation of the batch have to touch
+            the parameter as well as the positions.
+    """
+
+    name: str
+    shape: str
+    unit: str
+    description: str = ""
+    frame: ParamFrame = ParamFrame.SCALAR
+
+
+@dataclass(frozen=True)
 class TermSpec:
     """One named energy term and the S-decomposition bucket it belongs to.
 
@@ -192,8 +224,8 @@ class InteractionContract:
 
     Frozen and hashable: contracts are compared and deduplicated when a
     composition is validated, and serialised by
-    :meth:`~molpot.forcefield.schema.ForceFieldSchemaView.as_dict` (and into the
-    versioned model manifest once ``composable-a0-04`` adds it).
+    :meth:`~molpot.forcefield.schema.ForceFieldSchemaView.as_dict` and into the
+    versioned model manifest (:class:`~molpot.manifest.InteractionRecord`).
 
     Attributes:
         inputs: Batch keys the style reads, written as ``"<namespace>.<field>"``

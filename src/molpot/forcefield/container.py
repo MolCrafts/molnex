@@ -14,7 +14,8 @@ from typing import Any, Self
 import torch
 from molpy import ForceField as MolpyForceField
 
-from molpot.forcefield.potentials import Potentials
+from molpot.forcefield.potentials import PAIR_STYLE_DEFAULTS, Potentials
+from molpot.forcefield.schema import PotentialMeta
 from molpot.ir import (
     AngleBag,
     BondBag,
@@ -22,12 +23,38 @@ from molpot.ir import (
     ImproperHarmonicBag,
     ImproperPeriodicBag,
     LJBag,
+    NonbondedMethodRecord,
     PotentialIR,
     ProperTorsionBag,
 )
 from molpot.ir.scaling import ExclusionScales, NonbondedScaling
+from molpot.manifest import (
+    MANIFEST_SCHEMA,
+    ElectrostaticsRecord,
+    InteractionRecord,
+    ModelManifest,
+    NumericsRecord,
+    ParamTableRecord,
+)
 
 __all__ = ["ForceField", "OPLSAAForceField"]
+
+
+#: Model profiles :meth:`ForceField.manifest` can describe. ``"A0"`` is the
+#: fixed-charge Class-I form; ``"A1"`` joins it when the induced-response
+#: records exist to fill (``composable-a1``). Module-private: a profile is
+#: chosen at the one call site that writes a manifest, not looked up.
+_MANIFEST_PROFILES = ("A0",)
+
+
+def _optional_float(value: float | str | None) -> float | None:
+    """One style option as a float, or ``None`` when it was never declared.
+
+    ``None`` is not ``0.0``: an undeclared switching window means "no window"
+    and an undeclared cutoff means "no truncation", and a zero would be a
+    different model.
+    """
+    return None if value is None else float(value)
 
 
 class ForceField(MolpyForceField):
@@ -287,7 +314,178 @@ class ForceField(MolpyForceField):
             lj=lj_bag,
             charges=charge_bag,
             scaling=self.nonbonded_scaling,
+            nonbonded_method=self._nonbonded_method_record(),
             unit_system="class_i_canonical",
+        )
+
+    def _nonbonded_method_record(self) -> NonbondedMethodRecord:
+        """The nonbonded method this ForceField will actually run (F7).
+
+        The **single** resolver of the pair-style options: each field is the
+        declared option where one was given and otherwise the
+        :data:`~molpot.forcefield.potentials.PAIR_STYLE_DEFAULTS` fallback.
+        :meth:`~molpot.forcefield.potentials.Potentials._assemble_pair_potentials`
+        builds its terms from this record and :meth:`to_ir` / :meth:`manifest`
+        report it. Each of those three calls this method for itself and gets a
+        fresh record — nothing caches one — but because they all resolve the
+        options here, the model that runs and the model that is described come
+        out equal and cannot disagree.
+
+        The real-space split radius is the one derived fallback: unset, it is
+        ``real_space_cutoff_factor × smearing``, and that effective radius is
+        what the record states — a ``None`` there would name no radius at all
+        while the term ran at one. Only the two options with no fallback of any
+        kind — the Lennard-Jones switching window and the open-boundary Coulomb
+        cutoff — stay ``None`` when unset: they mean "no window" and "no
+        truncation", which are absences rather than numbers.
+
+        Returns:
+            The record. A ForceField with no pair style gets one with every
+            field ``None`` rather than no record at all, so a consumer branches
+            on a field and never on the record's presence.
+        """
+        defaults = PAIR_STYLE_DEFAULTS
+        lj_cutoff: float | None = None
+        lj_switch_start: float | None = None
+        coulomb_cutoff: float | None = None
+        coulomb_calculator: str | None = None
+        real_space_cutoff: float | None = None
+        smearing: float | None = None
+        lr_wavelength: float | None = None
+        mesh_spacing: float | None = None
+        capacity_factor: float | None = None
+        if "lj/cut" in self.pair_styles():
+            lj = self.style_options("pair:lj/cut")
+            lj_cutoff = float(lj.get("cutoff", defaults.lj_cutoff))
+            lj_switch_start = _optional_float(lj.get("switch_start"))
+        if self.has_coulomb():
+            coulomb = self.style_options("pair:coulomb")
+            coulomb_cutoff = _optional_float(coulomb.get("cutoff"))
+            coulomb_calculator = str(coulomb.get("calculator", defaults.coulomb_calculator))
+            smearing = float(coulomb.get("smearing", defaults.smearing))
+            declared_split = _optional_float(coulomb.get("real_space_cutoff"))
+            real_space_cutoff = (
+                defaults.real_space_cutoff_factor * smearing
+                if declared_split is None
+                else declared_split
+            )
+            lr_wavelength = float(coulomb.get("lr_wavelength", defaults.lr_wavelength))
+            mesh_spacing = float(coulomb.get("mesh_spacing", defaults.mesh_spacing))
+            capacity_factor = float(coulomb.get("capacity_factor", defaults.capacity_factor))
+        return NonbondedMethodRecord(
+            lj_cutoff=lj_cutoff,
+            lj_switch_start=lj_switch_start,
+            coulomb_cutoff=coulomb_cutoff,
+            coulomb_calculator=coulomb_calculator,
+            real_space_cutoff=real_space_cutoff,
+            smearing=smearing,
+            lr_wavelength=lr_wavelength,
+            mesh_spacing=mesh_spacing,
+            capacity_factor=capacity_factor,
+        )
+
+    def manifest(self, *, profile: str) -> ModelManifest:
+        """Describe this force field as a versioned :class:`ModelManifest` (S2).
+
+        The ForceField is where the styles, their options, the parameter tables
+        and the exclusion scaling already live, so it is what fills the
+        manifest; :class:`~molpot.forcefield.Potentials` is only its torch view
+        and owns no second copy of any of them.
+
+        :attr:`~molpot.manifest.ModelManifest.representation` and
+        :attr:`~molpot.manifest.ModelManifest.provenance` are left ``None`` on
+        purpose — composition is the caller's job, with ``model`` the
+        :class:`~molpot.forcefield.Parameterizer` that filled this ForceField's
+        tables (the fuller example, electrostatics included, is on
+        :class:`~molpot.manifest.ModelManifest`)::
+
+            import dataclasses
+
+            from molpot.manifest import ProvenanceRecord
+
+            manifest = dataclasses.replace(
+                ff.manifest(profile="A0"),
+                representation=model.representation_record(),
+                provenance=ProvenanceRecord(
+                    reference_method="wB97X-D/def2-TZVPD",
+                    data_version="v0",
+                    run_id="exp-0001",
+                ),
+            )
+
+        What the manifest says about electrostatics is limited to what a
+        container can know: the multipole order (``0`` — point charges) and the
+        permanent exclusion scaling. A ``pair:coulomb`` style is not a charge
+        model, so it constrains nothing and runs no solve; ``atoms.q`` may
+        equally have been read from a file. The constraint and the solver come
+        from :meth:`AtomicChargeModel.electrostatics_record
+        <molpot.charge.AtomicChargeModel.electrostatics_record>` and are
+        composed in the same way as the representation.
+
+        Args:
+            profile: Model profile this force field belongs to — ``"A0"`` for
+                the fixed-charge Class-I form.
+
+        Returns:
+            The manifest: one :class:`~molpot.manifest.InteractionRecord` per
+            declared energy-bearing style (``atom:*`` is a per-atom record
+            layout, not a term, and is skipped), the shared
+            :class:`~molpot.ir.nonbonded.NonbondedMethodRecord`, the A0
+            electrostatics with this ForceField's permanent exclusion scaling,
+            a content hash per filled parameter category, and the global
+            numerical precision. Units are this ForceField's own
+            (``"real"``: kcal/mol, Å, ``e``).
+
+        Raises:
+            ValueError: ``profile`` is not one this molnex describes
+                (``"A0"`` today). Written through verbatim it would label the
+                manifest as a profile whose records — induced scaling, a
+                response solver — this schema has no fields for, and the
+                mislabelling would surface only in whatever read it back.
+            KeyError: A declared non-``atom:*`` style is not registered in
+                :class:`~molpot.forcefield.PotentialMeta` — an unregistered
+                style has no contract to record.
+        """
+        if profile not in _MANIFEST_PROFILES:
+            raise ValueError(
+                f"unknown manifest profile {profile!r}; this molnex describes "
+                f"{', '.join(_MANIFEST_PROFILES)}"
+            )
+        view = PotentialMeta.schema_for(self.style_names(), units=self.units)
+        return ModelManifest(
+            schema_version=MANIFEST_SCHEMA,
+            profile=profile,
+            units=self.units,
+            interactions=tuple(
+                InteractionRecord(
+                    style=key,
+                    contract=schema.contract,
+                    params=schema.params,
+                    options=self.style_options(key),
+                )
+                for key, schema in view.styles.items()
+            ),
+            nonbonded=self._nonbonded_method_record(),
+            electrostatics=ElectrostaticsRecord(
+                multipole_order=0,
+                polarization_scheme=None,
+                damping=None,
+                # A container holds charges; it does not obtain them. The
+                # charge model names the constraint it imposed and the solve it
+                # ran (``AtomicChargeModel.electrostatics_record``), and the
+                # caller composes the two records.
+                charge_constraint="none",
+                total_charge=None,
+                permanent_scaling=self.nonbonded_scaling,
+                induced_scaling=None,
+                solver=None,
+            ),
+            tables=tuple(
+                ParamTableRecord.from_tables(category, tables)
+                for category, tables in sorted(self._params.items())
+                if tables
+            ),
+            numerics=NumericsRecord.from_runtime(),
         )
 
     def _propers_to_ir(self, pp: dict[str, torch.Tensor]) -> ProperTorsionBag:

@@ -38,6 +38,7 @@ from tensordict import TensorDict
 
 from molpot.forcefield.container import ForceField
 from molpot.forcefield.schema import PotentialMeta
+from molpot.manifest import RepresentationRecord
 
 __all__ = ["Parameterizer"]
 
@@ -164,6 +165,43 @@ class Parameterizer(nn.Module):
             raise ValueError("template declares pair:lj/cut but atom_head is None")
         if "pair:coulomb" in styles and self.charge_model is None:
             raise ValueError("template declares pair:coulomb but charge_model is None")
+
+    def representation_record(self) -> RepresentationRecord:
+        """Name the representation that produces this model's parameters (S2).
+
+        The parameterizer is the only object that knows which encoder generated
+        the parameter tables, so it supplies the manifest's representation
+        record; :meth:`ForceField.manifest
+        <molpot.forcefield.ForceField.manifest>` leaves that field ``None`` and
+        the caller composes the two with :func:`dataclasses.replace`.
+
+        Returns:
+            A :class:`~molpot.manifest.RepresentationRecord` with
+            ``family="graph-parameterizer"`` (parameters predicted from the
+            covalent graph), the encoder's class name, and the encoder's
+            ``spec`` mapping when it exposes one — ``{}`` when it does not.
+            ``checkpoint_id`` is left ``None``: which weights were loaded is
+            the training side's to record (``composable-a0-05``).
+
+        Raises:
+            TypeError: The encoder exposes a ``spec`` that is not a mapping.
+                Recording ``{}`` for it would claim the encoder is unconfigured
+                when it is merely configured through an object this profile
+                cannot serialise; a structured encoder spec arrives with
+                ``composable-b1-01``.
+        """
+        spec = getattr(self.encoder, "spec", None)
+        if spec is not None and not isinstance(spec, Mapping):
+            raise TypeError(
+                f"{type(self.encoder).__name__}.spec is a {type(spec).__name__}, not a mapping; "
+                "the A0 representation record carries a JSON-native spec (composable-b1-01)"
+            )
+        return RepresentationRecord(
+            family="graph-parameterizer",
+            encoder=type(self.encoder).__name__,
+            checkpoint_id=None,
+            spec={} if spec is None else {str(key): value for key, value in spec.items()},
+        )
 
     def forward(self, batch: TensorDict | Mapping[str, Any]) -> ForceField:
         """Write continuous parameters into a copy of the template ForceField.

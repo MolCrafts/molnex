@@ -1,8 +1,9 @@
 """Potential Intermediate Representation (Class-I molecular mechanics).
 
-Names interaction bags, canonical units, and nonbonded scaling for the
-learnable classical force-field stack. Bags are parameter containers only —
-evaluation lives in :mod:`molpot.potentials`.
+Names interaction bags, canonical units, nonbonded scaling and the nonbonded
+*method* (cutoffs and Coulomb solver) for the learnable classical force-field
+stack. Bags are parameter containers only — evaluation lives in
+:mod:`molpot.potentials`.
 """
 
 from molpot.ir.bags import (
@@ -14,6 +15,7 @@ from molpot.ir.bags import (
     LJBag,
     ProperTorsionBag,
 )
+from molpot.ir.nonbonded import NonbondedMethodRecord
 from molpot.ir.potential_ir import PotentialIR
 from molpot.ir.scaling import ExclusionScales, NonbondedScaling
 from molpot.ir.units import CLASS_I_CANONICAL, UnitTag
@@ -27,6 +29,7 @@ __all__ = [
     "ImproperHarmonicBag",
     "ImproperPeriodicBag",
     "LJBag",
+    "NonbondedMethodRecord",
     "NonbondedScaling",
     "PotentialIR",
     "ProperTorsionBag",

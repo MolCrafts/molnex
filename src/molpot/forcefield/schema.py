@@ -15,6 +15,11 @@ instead of being synthesised into a blank entry that silently contributes zero
 energy, and combinations that do not compose physically are refused by
 :meth:`PotentialMeta.check_composition`.
 
+:class:`~molpot.contract.ParamSpec` — the parameter half of that declaration —
+is defined in :mod:`molpot.contract` and re-exported here for the registry
+below, so :mod:`molpot.manifest` can record a style's parameters without
+importing this package.
+
 Reference:
     ``.claude/notes/composable-potentials.md`` §"S1 contract" (the requirement
     labelled ``S1``) and §"Findings ledger" (the silent-zero findings ``F2`` /
@@ -33,7 +38,7 @@ from molpot.contract import (
     Derivative,
     ExclusionClass,
     InteractionContract,
-    ParamFrame,
+    ParamSpec,
     TermSpec,
 )
 
@@ -42,30 +47,6 @@ __all__ = ["ParamSpec", "StyleSchema", "ForceFieldSchemaView", "PotentialMeta"]
 #: Every classical analytic term in this registry is twice differentiable in
 #: closed form, so autograd supplies all three orders.
 _ALL_DERIVATIVES = frozenset({Derivative.FORCES, Derivative.VIRIAL, Derivative.HESSIAN})
-
-
-@dataclass(frozen=True)
-class ParamSpec:
-    """One parameter of a style, as the parameter tables carry it.
-
-    Attributes:
-        name: Parameter name inside the style's table (``"k"``, ``"sigma"``).
-        shape: Shape annotation, e.g. ``"[n, n_terms]"``.
-        unit: Unit string in the ForceField's unit set (``"kcal/mol"``, ``"Å"``).
-        description: Human-readable meaning.
-        frame: Transformation law under a rotation of the lab frame. Defaults to
-            :attr:`~molpot.contract.ParamFrame.SCALAR` — a force constant, a well
-            depth or a charge is rotation invariant. Only a directional
-            parameter (a dipole, a local-frame vector, a polarizability tensor)
-            declares otherwise, and only then does a rotation of the batch have
-            to touch the parameter as well as the positions.
-    """
-
-    name: str
-    shape: str
-    unit: str
-    description: str = ""
-    frame: ParamFrame = ParamFrame.SCALAR
 
 
 @dataclass(frozen=True)
@@ -135,9 +116,10 @@ class ForceFieldSchemaView:
 
         Every enum is emitted as its string value and the unordered
         ``derivatives`` set as a sorted list, so the same ForceField always
-        serialises to the same bytes — determinism the versioned model manifest
-        will rely on when it hashes this payload (``composable-a0-04``; no
-        manifest module is in tree yet).
+        serialises to the same bytes. The versioned model manifest
+        (:class:`molpot.manifest.ModelManifest`) applies the same rules through
+        its own codec rather than reusing this payload, so a ForceField and its
+        manifest describe the same styles the same way.
 
         Returns:
             ``{"units": …, "styles": {key: {…, "params": [{…, "frame": …}],
@@ -383,9 +365,8 @@ class PotentialMeta:
                 # EWALD is a *policy* label, not the solver that runs: this one
                 # style is truncated at a hard cutoff under open boundaries and
                 # lattice-summed under a cell. Which solver actually ran (open
-                # cutoff / Ewald / PME) is runtime state, to be recorded per
-                # model by the manifest's NonbondedMethodRecord once
-                # composable-a0-04 adds it. Because the label spans
+                # cutoff / Ewald / PME) is runtime state, recorded per model by
+                # molpot.ir.nonbonded.NonbondedMethodRecord. Because the label spans
                 # both cases it says nothing a composition check could compare
                 # against; check_composition therefore only requires that a
                 # polarization term have some permanent partner (the
@@ -463,8 +444,9 @@ class PotentialMeta:
            ``composable-a1-01`` as a solver-compatibility relation, because
            ``pair:coulomb`` declares ``EWALD`` as a *policy* label covering both
            the open-boundary cutoff and the lattice sum — which solver actually
-           ran is runtime state, for the manifest to record rather than the
-           label (``composable-a0-04``), so
+           ran is runtime state, carried by
+           :class:`~molpot.ir.nonbonded.NonbondedMethodRecord` rather than by
+           the label, so
            comparing labels would refuse every real-space-truncated induced
            response on physics it does not actually assert.
 

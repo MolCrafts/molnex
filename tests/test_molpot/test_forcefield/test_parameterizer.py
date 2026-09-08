@@ -23,6 +23,7 @@ from molpot.composition.mm_heads import (
 )
 from molpot.composition.multihead import MultiHead
 from molpot.forcefield import ForceField, OPLSAAForceField, Parameterizer
+from molpot.manifest import RepresentationRecord
 
 
 def _two_atom_bond_batch(
@@ -500,3 +501,39 @@ class TestForces:
         assert forces.shape == (2, 3)
         assert math.isclose(float(forces[0, 0].detach()), 2.0 * 0.5, abs_tol=1e-5)
         assert math.isclose(float(forces[1, 0].detach()), -2.0 * 0.5, abs_tol=1e-5)
+
+
+class _SpecEncoder(_FakeEncoder):
+    """Encoder exposing the ``spec`` dict its own config layer was built from."""
+
+    def __init__(self) -> None:
+        super().__init__({})
+        self.spec = {"depth": 3, "width": 16}
+
+
+class TestRepresentationRecord:
+    """``Parameterizer.representation_record`` — the manifest's S2 §representation.
+
+    The parameterizer is the only object that knows which encoder generated
+    the parameter tables, so it supplies the record; ``ForceField.manifest``
+    leaves ``representation`` unset and the caller composes the two with
+    ``dataclasses.replace``. Only the *shape* is pinned here — a checkpoint id
+    is the training side's to fill (``composable-a0-05``), and the encoder's
+    own spec content is the encoder's business.
+    """
+
+    def test_record_names_the_family_and_the_encoder_type(self):
+        encoder = _FakeEncoder({})
+        model = Parameterizer(encoder, ForceField(name="empty").def_atomstyle("full"))
+        assert model.representation_record() == RepresentationRecord(
+            family="graph-parameterizer",
+            encoder="_FakeEncoder",
+            checkpoint_id=None,
+            spec={},
+        )
+
+    def test_record_carries_the_encoder_spec_when_the_encoder_exposes_one(self):
+        model = Parameterizer(_SpecEncoder(), ForceField(name="empty").def_atomstyle("full"))
+        record = model.representation_record()
+        assert record.encoder == "_SpecEncoder"
+        assert record.spec == {"depth": 3, "width": 16}

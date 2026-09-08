@@ -10,10 +10,87 @@ import torch
 from tensordict import TensorDict
 
 from molpot.forcefield import ForceField, OPLSAAForceField
-from molpot.ir import BondBag, ProperTorsionBag
+from molpot.forcefield.potentials import PAIR_STYLE_DEFAULTS
+from molpot.ir import BondBag, NonbondedMethodRecord, ProperTorsionBag
 
 
 class TestForceFieldToIR:
+    def test_nonbonded_method_carries_the_declared_pair_style_options(self):
+        """F7: which cutoff / solver ran is model state, so ``to_ir`` records it.
+
+        ``PotentialMeta`` cannot: ``pair:coulomb`` declares ``CutoffKind.EWALD``
+        as a policy label spanning both the open-boundary truncation and the
+        lattice sum. Every value here is set explicitly through
+        ``def_pairstyle`` and differs from the assembly default, so a record
+        filled from the defaults instead of the options would fail.
+        """
+        ff = (
+            ForceField(name="nonbonded", units="real")
+            .def_pairstyle("lj/cut", cutoff=12.0, switch_start=10.0)
+            .def_pairstyle(
+                "coulomb",
+                cutoff=8.0,
+                calculator="ewald",
+                smearing=2.0,
+                real_space_cutoff=6.0,
+                lr_wavelength=0.5,
+                mesh_spacing=0.25,
+                capacity_factor=1.5,
+            )
+        )
+        assert ff.to_ir().nonbonded_method == NonbondedMethodRecord(
+            lj_cutoff=12.0,
+            lj_switch_start=10.0,
+            coulomb_cutoff=8.0,
+            coulomb_calculator="ewald",
+            real_space_cutoff=6.0,
+            smearing=2.0,
+            lr_wavelength=0.5,
+            mesh_spacing=0.25,
+            capacity_factor=1.5,
+        )
+
+    def test_nonbonded_method_records_the_effective_assembly_defaults(self):
+        """A declared style with no options reports what ``Potentials`` will use.
+
+        The defaults are those of ``Potentials._assemble_pair_potentials`` — LJ
+        cutoff 10 Å, the ``pme`` mesh, smearing 5 Å, ``lr_wavelength`` and
+        ``mesh_spacing`` 1 Å, ``capacity_factor`` 1. The real-space split
+        radius has one too, and it is derived rather than absolute: unset, the
+        periodic Coulomb term runs at ``real_space_cutoff_factor × smearing``,
+        so that is the radius the record has to state. Only the two fields with
+        no assembly fallback at all (the LJ switching window and the
+        open-boundary Coulomb cutoff) stay ``None``: they are genuinely unset,
+        not silently zero.
+        """
+        d = PAIR_STYLE_DEFAULTS
+        assert OPLSAAForceField().to_ir().nonbonded_method == NonbondedMethodRecord(
+            lj_cutoff=d.lj_cutoff,
+            lj_switch_start=None,
+            coulomb_cutoff=None,
+            coulomb_calculator=d.coulomb_calculator,
+            real_space_cutoff=d.real_space_cutoff_factor * d.smearing,
+            smearing=d.smearing,
+            lr_wavelength=d.lr_wavelength,
+            mesh_spacing=d.mesh_spacing,
+            capacity_factor=d.capacity_factor,
+        )
+
+    def test_bonded_only_forcefield_reports_an_all_none_nonbonded_method(self):
+        """The record is always present — consumers branch on fields, not on it."""
+        ff = ForceField(name="bonded", units="real").def_bondstyle("harmonic")
+        assert ff.to_ir().nonbonded_method == NonbondedMethodRecord(
+            lj_cutoff=None,
+            lj_switch_start=None,
+            coulomb_cutoff=None,
+            coulomb_calculator=None,
+            real_space_cutoff=None,
+            smearing=None,
+            lr_wavelength=None,
+            mesh_spacing=None,
+            capacity_factor=None,
+        )
+
     def test_bonds_and_opls_propers(self):
         ff = OPLSAAForceField().with_params(
             bonds={

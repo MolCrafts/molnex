@@ -1052,6 +1052,50 @@ class TestPotentials:
         assert truncated.lj.cutoff == LJ_CUTOFF
         assert truncated.lj.switch_start is None
 
+    def test_assembled_pair_terms_and_the_recorded_method_agree_field_by_field(self) -> None:
+        """F7: one resolver for the pair-style options, read from both ends.
+
+        The declared options are turned into numbers twice — by
+        :meth:`Potentials._assemble_pair_potentials` into the terms that
+        actually run, and by ``ForceField._nonbonded_method_record`` into the
+        record ``to_ir`` and the manifest carry. Two independent readers of one
+        options dict is one edit away from a manifest that describes a model
+        which was never assembled, so every field is asserted against the
+        *term*, never against a literal: the test cannot pass with two readers
+        that agree only by coincidence.
+
+        ``real_space_cutoff`` is deliberately left undeclared, because it is
+        the one option whose fallback is *derived* rather than absolute — the
+        periodic Coulomb term runs at ``3 × smearing = 12 Å``, and a record
+        that reports ``None`` for it names no radius at all.
+        """
+        ff = (
+            ForceField(name="pair-style-resolver")
+            .def_pairstyle("lj/cut", cutoff=8.5, switch_start=7.0)
+            .def_pairstyle(
+                "coulomb",
+                calculator="ewald",
+                smearing=4.0,
+                lr_wavelength=0.5,
+                capacity_factor=1.3,
+            )
+        )
+        pots = ff.to_potentials()
+        record = ff.to_ir().nonbonded_method
+        assert pots.lj is not None
+        assert pots.coulomb_open is not None
+        assert pots.coulomb_periodic is not None
+
+        assert pots.lj.cutoff == record.lj_cutoff
+        assert pots.lj.switch_start == record.lj_switch_start
+        assert pots.coulomb_open.cutoff == record.coulomb_cutoff
+        assert pots.coulomb_periodic.calculator_name == record.coulomb_calculator
+        assert pots.coulomb_periodic.smearing == record.smearing
+        assert pots.coulomb_periodic.lr_wavelength == record.lr_wavelength
+        assert pots.coulomb_periodic.mesh_spacing == record.mesh_spacing
+        assert pots.coulomb_periodic.capacity_factor == record.capacity_factor
+        assert pots.coulomb_periodic.real_space_cutoff == record.real_space_cutoff
+
     def test_switched_lj_energy_is_the_analytic_taper_inside_the_window(self) -> None:
         """Domain golden: ``E = S(r)·E_LJ(r)`` at the midpoint of ``[r_s, r_c]``.
 

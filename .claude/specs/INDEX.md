@@ -8,7 +8,6 @@ must not be treated as authority for a new training submission.
 
 | Spec | Chain | Opened | Scope |
 |---|---|---|---|
-| [composable-a0-04-manifest](composable-a0-04-manifest.md) | composable-a0 | 2026-09-07 | `ModelManifest` records, `ForceField.manifest()`, `PotentialIR.nonbonded_method` (F7). |
 | [composable-a0-05-export](composable-a0-05-export.md) | composable-a0 | 2026-09-07 | LAMMPS `hybrid/overlay lj/mdf coul/long` + `pppm` + `special_bonds`; OpenMM PME text; manifest sibling; classical parity moved under `interface/tests/` (F5). |
 | [composable-a0-06-gates](composable-a0-06-gates.md) | composable-a0 | 2026-09-07 | Reflection gate, `EnergyDriftHook`, gate tests (NVE drift `slow`); closes the chain. |
 
@@ -19,6 +18,7 @@ Design source for the chain: `.claude/notes/composable-potentials.md`
 
 | Spec or chain | Closed | Disposition |
 |---|---|---|
+| composable-a0-04-manifest | 2026-09-08 | Completed; 3/3 code criteria verified (impl evidence from the mirrored unit tests). Commit 041b3e51: `molpot.manifest` (`MANIFEST_SCHEMA=1`, frozen records, `ModelManifest` dict/file codec, sha256 param tables), `NonbondedMethodRecord` on `PotentialIR` from the single `PAIR_STYLE_DEFAULTS` resolver (F7), `ForceField.manifest(profile=)`, `Parameterizer.representation_record()`, charge-model-owned `ElectrostaticsRecord`; `ParamSpec` moved to `molpot.contract`. |
 | composable-a0-03-periodic-coulomb | 2026-09-08 | Completed; 5/5 criteria verified (ac-005 impl; ac-001..003 scientific + ac-004 performance agent-auto — exclusion identities, rocksalt Madelung golden, FD force/strain, ewald+pme explains at 0 breaks). Commit 61cd4fd6: F1 fixed, CellBound k-space with capacity_factor, PME default + compile-clean bound path, F13/F16/F17/F20 fixed. |
 | composable-a0-03b-neighbor-list-to-molix | 2026-09-08 | Completed; 3/3 code criteria verified. Commit 61cd4fd6: molpot/forcefield/neighbor_list.py deleted, Potentials._placed_pairs consumes the molix-placed list and fails closed, fixtures rebuilt through molix.batch.NeighborList; F4 closed. |
 | composable-a0-02-exclusions-switching | 2026-09-07 | Completed; 5/5 criteria verified (ac-001/005 impl; ac-002/004 scientific + ac-003 performance agent-auto — butane golden equality, LJ switch continuity/analytic-vs-autograd, two slow explains at 0 breaks; no bench.repo). Commit 5eacaa67: keyed NonbondedScaling + ExclusionTable (1-2 > 1-3 > 1-4, F11 fixed), quintic LJ switch, capacity-shaped pair lists, fail-closed total charge, staleness fingerprint. |

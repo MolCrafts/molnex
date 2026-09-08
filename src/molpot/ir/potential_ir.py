@@ -21,6 +21,7 @@ from molpot.ir.bags import (
     LJBag,
     ProperTorsionBag,
 )
+from molpot.ir.nonbonded import NonbondedMethodRecord
 from molpot.ir.scaling import NonbondedScaling
 
 __all__ = ["PotentialIR", "KNOWN_UNIT_SYSTEMS"]
@@ -41,6 +42,16 @@ class PotentialIR:
         lj: Optional :class:`~molpot.ir.bags.LJBag`.
         charges: Optional :class:`~molpot.ir.bags.ChargeBag`.
         scaling: Optional :class:`~molpot.ir.scaling.NonbondedScaling`.
+        nonbonded_method: Which nonbonded method the model runs — cutoffs in Å,
+            switching window, Coulomb solver and its sizing
+            (:class:`~molpot.ir.nonbonded.NonbondedMethodRecord`). The style
+            contracts cannot carry it: ``pair:coulomb`` declares
+            ``CutoffKind.EWALD`` as a policy label covering both the
+            open-boundary truncation and the lattice sum, so the solver that
+            ran is per-model state (F7).
+            :meth:`~molpot.forcefield.ForceField.to_ir` always fills it, with
+            an all-``None`` record for a bonded-only force field; ``None`` here
+            means an IR assembled without a force field never stated one.
         unit_system: Unit-system label. Default ``"class_i_canonical"``.
     """
 
@@ -52,6 +63,7 @@ class PotentialIR:
     lj: LJBag | None = None
     charges: ChargeBag | None = None
     scaling: NonbondedScaling | None = None
+    nonbonded_method: NonbondedMethodRecord | None = None
     unit_system: str = field(default="class_i_canonical")
 
     def __post_init__(self) -> None:

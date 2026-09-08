@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -60,7 +61,63 @@ from molpot.potentials.elec.prefactors import kcalmol_A
 if TYPE_CHECKING:
     from molpot.forcefield.container import ForceField
 
-__all__ = ["Potentials"]
+__all__ = ["PAIR_STYLE_DEFAULTS", "PairStyleDefaults", "Potentials"]
+
+
+@dataclass(frozen=True)
+class PairStyleDefaults:
+    """Values :meth:`Potentials._assemble_pair_potentials` falls back to.
+
+    A pair style declared bare (``def_pairstyle("lj/cut")``) still runs at some
+    cutoff and through some solver. Those values are model identity, so they
+    live here once and are read in exactly one place:
+    :meth:`ForceField._nonbonded_method_record
+    <molpot.forcefield.container.ForceField._nonbonded_method_record>`, whose
+    :class:`~molpot.ir.nonbonded.NonbondedMethodRecord` both
+    :meth:`Potentials._assemble_pair_potentials` and the recording path
+    (:meth:`ForceField.to_ir <molpot.forcefield.ForceField.to_ir>`,
+    :meth:`ForceField.manifest <molpot.forcefield.ForceField.manifest>`) then
+    consume. A second reading of these defaults on either side would let a
+    manifest report a model that was never assembled.
+
+    Only the options that *have* a fallback appear. The Lennard-Jones switching
+    window and the open-boundary Coulomb cutoff have none: unset they mean "no
+    window" and "no truncation", which are absences rather than radii. The
+    real-space split radius does have one, but a *derived* one — it is a
+    multiple of the smearing, so it appears below as
+    :attr:`real_space_cutoff_factor` rather than as an absolute length.
+
+    Attributes:
+        lj_cutoff: Lennard-Jones cutoff radius in Å.
+        coulomb_calculator: Reciprocal-space algorithm under a cell. The mesh
+            is the default; the explicit ``"ewald"`` k-vector sum is the
+            small-box reference, not what a real periodic system should pay.
+        smearing: Gaussian charge-splitting width of the Ewald decomposition,
+            in Å.
+        real_space_cutoff_factor: Multiple of :attr:`smearing` at which the
+            real-space half of the Ewald split is truncated when no
+            ``real_space_cutoff`` option is declared (dimensionless). At three
+            widths the complementary error function has fallen to ``~2e-5`` of
+            the bare ``1/r``, so what is dropped there is below the accuracy of
+            the reciprocal sum that replaces it.
+        lr_wavelength: Shortest reciprocal wavelength resolved by ``"ewald"``,
+            in Å.
+        mesh_spacing: Grid spacing of the ``"pme"`` / ``"p3m"`` mesh, in Å.
+        capacity_factor: Dimensionless head-room on the frozen reciprocal
+            shape; ``1.0`` sizes for the bound cell exactly.
+    """
+
+    lj_cutoff: float = 10.0
+    coulomb_calculator: str = "pme"
+    smearing: float = 5.0
+    real_space_cutoff_factor: float = 3.0
+    lr_wavelength: float = 1.0
+    mesh_spacing: float = 1.0
+    capacity_factor: float = 1.0
+
+
+#: The single instance of :class:`PairStyleDefaults` the resolver reads.
+PAIR_STYLE_DEFAULTS = PairStyleDefaults()
 
 #: Largest per-graph deviation of ``Σ_g q`` from the declared
 #: ``graphs.total_charge`` that :meth:`Potentials.bind_topology` accepts (e).
@@ -76,6 +133,36 @@ _TOTAL_CHARGE_TOL = 1e-6
 _SQ_DIST_CLAMP_MIN = 1e-24
 
 
+def _resolved(value: float | None, option: str) -> float:
+    """One numeric field of a declared style's nonbonded record, as a number.
+
+    Every numeric field of
+    :class:`~molpot.ir.nonbonded.NonbondedMethodRecord` is filled together with
+    the style it belongs to, so a ``None`` reaching a term the same record just
+    said to build means the resolver and the assembly disagree.
+
+    Args:
+        value: The record field.
+        option: Its style-option name, for the message.
+
+    Returns:
+        ``value``.
+
+    Raises:
+        ValueError: ``value`` is ``None`` — a defect in
+            :meth:`ForceField._nonbonded_method_record
+            <molpot.forcefield.container.ForceField._nonbonded_method_record>`
+            rather than a user error, raised here instead of being defaulted
+            back to a number the record never reported.
+    """
+    if value is None:
+        raise ValueError(
+            f"the nonbonded record declares this pair style but leaves {option!r} unset; "
+            "ForceField._nonbonded_method_record resolves every field of a declared style"
+        )
+    return value
+
+
 class Potentials(BasePotential):
     """Classical Class-I energy as a molpot :class:`BasePotential` (``nn.Module``).
 
@@ -89,7 +176,8 @@ class Potentials(BasePotential):
 
     * ``pair:lj/cut`` → :class:`LJCutPotential`. Style options, both in Å and
       both owned by the Potential: ``cutoff`` — the radius ``r_c`` beyond
-      which a pair contributes nothing (default ``10.0``) — and the optional
+      which a pair contributes nothing (default
+      :attr:`PairStyleDefaults.lj_cutoff`) — and the optional
       ``switch_start`` ``r_s`` with ``0 < r_s < r_c``, which tapers the energy
       smoothly to zero over ``[r_s, r_c]`` with the quintic switch instead of
       truncating it at ``r_c``. Omitting ``switch_start`` keeps the hard
@@ -98,13 +186,21 @@ class Potentials(BasePotential):
       ``cutoff`` in Å; ``prefactor`` in kcal Å mol⁻¹ e⁻²)
     * ``pair:coulomb`` + cell → :class:`CoulombPeriodicPotential`, whose style
       options are ``smearing`` (Gaussian splitting width, Å),
-      ``real_space_cutoff`` (Å, default ``3 × smearing``), ``capacity_factor``
-      (dimensionless head-room on the frozen reciprocal shape),
-      ``lr_wavelength`` (Å, ``ewald`` only), ``mesh_spacing`` (Å, ``pme`` /
-      ``p3m`` only), ``prefactor`` (kcal Å mol⁻¹ e⁻²) and
-      ``calculator=pme|ewald|p3m``, defaulting to the ``pme`` mesh — the
+      ``real_space_cutoff`` (Å, default
+      :attr:`PairStyleDefaults.real_space_cutoff_factor` × ``smearing``),
+      ``capacity_factor`` (dimensionless head-room on the frozen reciprocal
+      shape), ``lr_wavelength`` (Å, ``ewald`` only), ``mesh_spacing`` (Å,
+      ``pme`` / ``p3m`` only), ``prefactor`` (kcal Å mol⁻¹ e⁻²) and
+      ``calculator=pme|ewald|p3m``, defaulting to
+      :attr:`PairStyleDefaults.coulomb_calculator` (the ``pme`` mesh) — the
       explicit ``O(N²)`` ``ewald`` k-vector sum is the small-box reference,
       not what a real periodic system should get by default
+
+    Every option left undeclared takes its value from
+    :data:`PAIR_STYLE_DEFAULTS`, applied in one place only
+    (:meth:`ForceField._nonbonded_method_record
+    <molpot.forcefield.container.ForceField._nonbonded_method_record>`), so the
+    numbers above are stated there and not duplicated per term.
 
     Every pair term above reads the ``edges`` neighbour list already on the
     batch; molpot never enumerates pairs of its own, so a batch evaluated by a
@@ -188,41 +284,60 @@ class Potentials(BasePotential):
                 )
 
     def _assemble_pair_potentials(self) -> None:
+        """Build the pair terms from the ForceField's resolved nonbonded record.
+
+        :meth:`ForceField._nonbonded_method_record
+        <molpot.forcefield.container.ForceField._nonbonded_method_record>` is
+        the **one** resolver of the pair-style options: it applies
+        :data:`PAIR_STYLE_DEFAULTS` to whatever ``def_pairstyle`` declared, and
+        both the terms built here and the record ``to_ir`` and the manifest
+        carry come out of that single reading. Resolving the options a second
+        time here is one edit away from a manifest that describes a model which
+        was never assembled.
+
+        Each field of the record is ``None`` exactly when the style it belongs
+        to was never declared, so the two branches below read "the ForceField
+        declares this style, and here is what it resolved to".
+
+        The Coulomb ``prefactor`` is the one style option with no field on the
+        record: ``k_e`` is a unit-system constant, not a nonbonded *method*, so
+        it stays a direct read of the style options.
+        """
         ff = self.forcefield
-        if "lj/cut" in ff.pair_styles():
-            opts = ff.style_options("pair:lj/cut")
+        method = ff._nonbonded_method_record()
+        if method.lj_cutoff is not None:
             # ``switch_start`` is the second half of the ``lj/cut`` cutoff option
             # and travels with it: dropped here, the quintic taper on
             # :class:`LJCutPotential` would be unreachable from any ForceField and
             # every assembled Class-I model would keep the hard truncation.
             # ``None`` (no window) stays ``None``; the ``0 < r_s < r_c`` check is
             # the term's, so a bad window raises there rather than twice.
-            switch_start = opts.get("switch_start")
             self.lj = LJCutPotential(
-                cutoff=float(opts.get("cutoff", 10.0)),
-                switch_start=None if switch_start is None else float(switch_start),
+                cutoff=method.lj_cutoff,
+                switch_start=method.lj_switch_start,
             )
-        if "coulomb" in ff.pair_styles() or ff.has_coulomb():
-            opts = ff.style_options("pair:coulomb")
-            # Periodic calculator is chosen when cell is present at energy time;
-            # build both open + periodic potentials from style options.
-            pref = float(opts.get("prefactor", kcalmol_A))
+        if method.coulomb_calculator is not None:
+            # Periodic calculator is chosen when a cell is present at energy
+            # time; build both the open and the periodic term here.
+            pref = float(ff.style_options("pair:coulomb").get("prefactor", kcalmol_A))
             self.coulomb_open = CoulombOpenPotential(
-                cutoff=opts.get("cutoff"),
+                cutoff=method.coulomb_cutoff,
                 prefactor=pref,
             )
             # The mesh method is the default under a cell: ``ewald`` sums every
             # k-vector explicitly, which is the reference a small-box finite
             # difference wants and not what a real periodic system should pay.
-            calc = str(opts.get("calculator", "pme"))
             self.coulomb_periodic = CoulombPeriodicPotential(
-                smearing=float(opts.get("smearing", 5.0)),
-                calculator=calc,
-                lr_wavelength=float(opts.get("lr_wavelength", 1.0)),
-                mesh_spacing=float(opts.get("mesh_spacing", 1.0)),
+                smearing=_resolved(method.smearing, "smearing"),
+                calculator=method.coulomb_calculator,
+                lr_wavelength=_resolved(method.lr_wavelength, "lr_wavelength"),
+                mesh_spacing=_resolved(method.mesh_spacing, "mesh_spacing"),
                 prefactor=pref,
-                real_space_cutoff=opts.get("real_space_cutoff"),
-                capacity_factor=float(opts.get("capacity_factor", 1.0)),
+                # Explicit, so the term's own ``3 × smearing`` fallback is not
+                # what the assembled model silently runs at while the record
+                # reports the same number from the other side of the seam.
+                real_space_cutoff=_resolved(method.real_space_cutoff, "real_space_cutoff"),
+                capacity_factor=_resolved(method.capacity_factor, "capacity_factor"),
             )
 
     def _assemble_bonded(self) -> None:

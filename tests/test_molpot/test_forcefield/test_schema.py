@@ -14,15 +14,7 @@ from __future__ import annotations
 import pytest
 
 from molpot.forcefield import OPLSAAForceField
-from molpot.forcefield.schema import ParamSpec, PotentialMeta, StyleSchema
-
-
-class TestParamSpec:
-    def test_frame_defaults_to_scalar_for_an_undirected_parameter(self) -> None:
-        """Only directional parameters (dipoles, quadrupoles) declare a frame."""
-        from molpot.contract import ParamFrame
-
-        assert ParamSpec("k", "[n]", "kcal/mol/Å²").frame is ParamFrame.SCALAR
+from molpot.forcefield.schema import PotentialMeta, StyleSchema
 
 
 class TestPotentialMeta:
