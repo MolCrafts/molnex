@@ -15,11 +15,26 @@ from pathlib import Path
 
 import pytest
 import torch
+from tensordict import TensorDict
 
 from molix.batch.neighbor import NeighborList
 
 #: The two backends of ``torch.ops.molix.get_neighbor_pairs``.
 _KERNELS = Path(__file__).resolve().parents[3] / "src/molix/op/src/neighbors"
+
+
+def _one_graph(pos: torch.Tensor, cell: torch.Tensor | None = None) -> TensorDict:
+    """Wrap one molecule's positions as the collated batch the task consumes."""
+    n = int(pos.shape[0])
+    graphs: dict = {"num_atoms": torch.tensor([n])}
+    if cell is not None:
+        graphs["cell"] = cell.unsqueeze(0)
+    return TensorDict(
+        atoms=TensorDict({"pos": pos, "batch": torch.zeros(n, dtype=torch.long)}, batch_size=[n]),
+        graphs=TensorDict(graphs, batch_size=[1]),
+        edges=TensorDict({}, batch_size=[0]),
+        batch_size=[],
+    )
 
 
 def test_pair_enumeration_indexes_in_64_bit():
@@ -54,18 +69,22 @@ def test_edge_diff_is_target_minus_source():
     sample = _triangle()
     pos = sample["pos"]
     for symmetry in (True, False):
-        out = NeighborList(cutoff=2.0, max_num_pairs=10, symmetry=symmetry)(sample)
-        edge_index = out["edge_index"]
+        out = NeighborList(cutoff=2.0, max_num_pairs=10, symmetry=symmetry)(
+            _one_graph(sample["pos"], sample.get("cell"))
+        )
+        edge_index = out["edges", "edge_index"]
         expected = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-        assert torch.allclose(out["edge_diff"], expected, atol=1e-5)
-        assert torch.allclose(out["edge_dist"], expected.norm(dim=1), atol=1e-5)
+        assert torch.allclose(out["edges", "edge_diff"], expected, atol=1e-5)
+        assert torch.allclose(out["edges", "edge_dist"], expected.norm(dim=1), atol=1e-5)
 
 
 def test_symmetry_appends_reverse_edge_with_negated_edge_diff():
     sample = _triangle()
-    out = NeighborList(cutoff=2.0, max_num_pairs=10, symmetry=True)(sample)
-    edge_index = out["edge_index"]
-    edge_diff = out["edge_diff"]
+    out = NeighborList(cutoff=2.0, max_num_pairs=10, symmetry=True)(
+        _one_graph(sample["pos"], sample.get("cell"))
+    )
+    edge_index = out["edges", "edge_index"]
+    edge_diff = out["edges", "edge_diff"]
     n_pairs = edge_index.shape[0] // 2
 
     # Reverse edges are appended after the forward half: row k and row k+n_pairs
@@ -107,8 +126,10 @@ class TestNeighborList:
             "targets": {"U0": torch.tensor([0.0])},
         }
 
-        result = NeighborList(cutoff=2.0, max_num_pairs=10)(sample)
-        edge_index = result["edge_index"]
+        result = NeighborList(cutoff=2.0, max_num_pairs=10)(
+            _one_graph(sample["pos"], sample.get("cell"))
+        )
+        edge_index = result["edges", "edge_index"]
 
         ref_i, ref_j, _, ref_dist = _compute_neighbor_list_naive(positions, 2.0)
         assert edge_index.ndim == 2 and edge_index.shape[1] == 2
@@ -119,7 +140,7 @@ class TestNeighborList:
             assert (a, b) in edges and (b, a) in edges
 
         doubled = torch.cat([ref_dist, ref_dist]).sort().values
-        assert torch.allclose(result["edge_dist"].sort().values, doubled, atol=1e-5)
+        assert torch.allclose(result["edges", "edge_dist"].sort().values, doubled, atol=1e-5)
 
     def test_small_system_pairs_half(self):
         """With ``symmetry=False`` the output matches the upper-triangle reference."""
@@ -133,12 +154,16 @@ class TestNeighborList:
             "targets": {"U0": torch.tensor([0.0])},
         }
 
-        result = NeighborList(cutoff=2.0, max_num_pairs=10, symmetry=False)(sample)
-        edge_index = result["edge_index"]
+        result = NeighborList(cutoff=2.0, max_num_pairs=10, symmetry=False)(
+            _one_graph(sample["pos"], sample.get("cell"))
+        )
+        edge_index = result["edges", "edge_index"]
 
         ref_i, ref_j, _, ref_dist = _compute_neighbor_list_naive(positions, 2.0)
         assert edge_index.shape == (ref_i.numel(), 2)
-        assert torch.allclose(result["edge_dist"].sort().values, ref_dist.sort().values, atol=1e-5)
+        assert torch.allclose(
+            result["edges", "edge_dist"].sort().values, ref_dist.sort().values, atol=1e-5
+        )
 
     def test_bond_diff_source_to_target_convention(self):
         """``edge_diff[k] == pos[target_k] - pos[source_k]`` for every edge.
@@ -163,10 +188,10 @@ class TestNeighborList:
                 cutoff=2.0,
                 max_num_pairs=10,
                 symmetry=symmetry,
-            )(sample)
-            edge_index = result["edge_index"]
+            )(_one_graph(sample["pos"], sample.get("cell")))
+            edge_index = result["edges", "edge_index"]
             expected = positions[edge_index[:, 1]] - positions[edge_index[:, 0]]
-            assert torch.allclose(result["edge_diff"], expected, atol=1e-5), (
+            assert torch.allclose(result["edges", "edge_diff"], expected, atol=1e-5), (
                 f"edge_diff violates source→target convention (symmetry={symmetry})"
             )
 
@@ -181,8 +206,10 @@ class TestNeighborList:
             "targets": {"U0": torch.tensor([0.0])},
         }
 
-        result = NeighborList(cutoff=2.0, max_num_pairs=10)(sample)
-        assert torch.all(result["edge_dist"] <= 2.0)
+        result = NeighborList(cutoff=2.0, max_num_pairs=10)(
+            _one_graph(sample["pos"], sample.get("cell"))
+        )
+        assert torch.all(result["edges", "edge_dist"] <= 2.0)
 
     def test_task_id_deterministic(self):
         t1 = NeighborList(cutoff=5.0, max_num_pairs=512)
@@ -213,15 +240,17 @@ class TestNeighborList:
 
         # half_complete = 4*3/2 = 6; buffers below/above/at that, plus -1.
         outs = [
-            NeighborList(cutoff=2.0, max_num_pairs=m, symmetry=False)(sample)
+            NeighborList(cutoff=2.0, max_num_pairs=m, symmetry=False)(
+                _one_graph(sample["pos"], sample.get("cell"))
+            )
             for m in (1, 6, 512, -1)
         ]
         reference = outs[0]
-        assert reference["edge_index"].shape == (6, 2)
+        assert reference["edges", "edge_index"].shape == (6, 2)
         for out in outs[1:]:
-            assert torch.equal(out["edge_index"], reference["edge_index"])
-            assert torch.equal(out["edge_diff"], reference["edge_diff"])
-            assert torch.equal(out["edge_dist"], reference["edge_dist"])
+            assert torch.equal(out["edges", "edge_index"], reference["edges", "edge_index"])
+            assert torch.equal(out["edges", "edge_diff"], reference["edges", "edge_diff"])
+            assert torch.equal(out["edges", "edge_dist"], reference["edges", "edge_dist"])
 
     def test_tight_max_num_pairs_is_auto_grown_to_complete_half_pairs(self):
         """A 1-slot buffer on a fully connected 4-atom system still finds 6 pairs.
@@ -240,10 +269,12 @@ class TestNeighborList:
         )
         sample = {"Z": torch.ones(4, dtype=torch.long), "pos": pos}
 
-        out = NeighborList(cutoff=5.0, max_num_pairs=1, symmetry=False)(sample)
+        out = NeighborList(cutoff=5.0, max_num_pairs=1, symmetry=False)(
+            _one_graph(sample["pos"], sample.get("cell"))
+        )
 
-        assert out["edge_index"].shape == (6, 2)
-        assert {(int(a), int(b)) for a, b in out["edge_index"].tolist()} == {
+        assert out["edges", "edge_index"].shape == (6, 2)
+        assert {(int(a), int(b)) for a, b in out["edges", "edge_index"].tolist()} == {
             (1, 0),
             (2, 0),
             (2, 1),
@@ -286,7 +317,7 @@ class TestNeighborList:
             RuntimeError,
             match=r"Neighbor buffer overflow: found 4 pairs > max_num_pairs=3",
         ):
-            NeighborList(cutoff=2.0, max_num_pairs=3)(sample)
+            NeighborList(cutoff=2.0, max_num_pairs=3)(_one_graph(sample["pos"], sample.get("cell")))
 
     def test_nan_padding_rows_are_stripped_by_default(self):
         """``filter_padding=True`` leaves exactly the true pairs, no NaN rows.
@@ -302,14 +333,16 @@ class TestNeighborList:
         )
         sample = {"Z": torch.tensor([8, 1, 1]), "pos": pos}
 
-        out = NeighborList(cutoff=2.0, max_num_pairs=16, symmetry=False)(sample)
+        out = NeighborList(cutoff=2.0, max_num_pairs=16, symmetry=False)(
+            _one_graph(sample["pos"], sample.get("cell"))
+        )
 
-        assert out["edge_index"].tolist() == [[1, 0], [2, 0], [2, 1]]
-        assert not torch.isnan(out["edge_diff"]).any()
-        assert not torch.isnan(out["edge_dist"]).any()
-        assert (out["edge_index"] >= 0).all()
+        assert out["edges", "edge_index"].tolist() == [[1, 0], [2, 0], [2, 1]]
+        assert not torch.isnan(out["edges", "edge_diff"]).any()
+        assert not torch.isnan(out["edges", "edge_dist"]).any()
+        assert (out["edges", "edge_index"] >= 0).all()
         assert torch.allclose(
-            out["edge_dist"],
+            out["edges", "edge_dist"],
             torch.tensor([1.0, 1.0, 2.0**0.5], dtype=torch.float64),
             atol=1e-12,
         )
@@ -327,12 +360,12 @@ class TestNeighborList:
         sample = {"Z": torch.tensor([8, 1, 1]), "pos": pos}
 
         out = NeighborList(cutoff=2.0, max_num_pairs=5, symmetry=False, filter_padding=False)(
-            sample
+            _one_graph(sample["pos"])
         )
 
-        assert out["edge_index"].tolist() == [[1, 0], [2, 0], [2, 1], [-1, -1], [-1, -1]]
-        assert torch.isnan(out["edge_dist"][3:]).all()
-        assert torch.isnan(out["edge_diff"][3:]).all()
+        assert out["edges", "edge_index"].tolist() == [[1, 0], [2, 0], [2, 1], [-1, -1], [-1, -1]]
+        assert torch.isnan(out["edges", "edge_dist"][3:]).all()
+        assert torch.isnan(out["edges", "edge_diff"][3:]).all()
 
     def test_pbc_true_returns_minimum_image_edge_diff(self):
         """Minimum-image convention across the periodic boundary (hard-coded golden).
@@ -349,16 +382,18 @@ class TestNeighborList:
         )
         sample = {"Z": torch.tensor([1, 1]), "pos": pos, "cell": cell}
 
-        out = NeighborList(cutoff=1.0, max_num_pairs=8, pbc=True)(sample)
+        out = NeighborList(cutoff=1.0, max_num_pairs=8, pbc=True)(
+            _one_graph(sample["pos"], sample.get("cell"))
+        )
 
-        assert out["edge_index"].tolist() == [[1, 0], [0, 1]]
+        assert out["edges", "edge_index"].tolist() == [[1, 0], [0, 1]]
         assert torch.allclose(
-            out["edge_diff"],
+            out["edges", "edge_diff"],
             torch.tensor([[0.2, 0.0, 0.0], [-0.2, 0.0, 0.0]], dtype=torch.float64),
             atol=1e-12,
         )
         assert torch.allclose(
-            out["edge_dist"],
+            out["edges", "edge_dist"],
             torch.tensor([0.2, 0.2], dtype=torch.float64),
             atol=1e-12,
         )
@@ -375,10 +410,12 @@ class TestNeighborList:
         )
         sample = {"Z": torch.tensor([1, 1]), "pos": pos, "cell": cell}
 
-        out = NeighborList(cutoff=1.0, max_num_pairs=8, pbc=False)(sample)
+        out = NeighborList(cutoff=1.0, max_num_pairs=8, pbc=False)(
+            _one_graph(sample["pos"], sample.get("cell"))
+        )
 
-        assert out["edge_index"].shape == (0, 2)
-        assert out["edge_dist"].numel() == 0
+        assert out["edges", "edge_index"].shape == (0, 2)
+        assert out["edges", "edge_dist"].numel() == 0
 
     def test_task_id_distinguishes_pbc(self):
         """``pbc`` is part of the cache key — PBC and open caches must not alias."""

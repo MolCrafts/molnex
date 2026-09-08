@@ -46,9 +46,9 @@
 
 ::: molix.store.dataset
 
-::: molix.store.block
+::: molix.store.frame_store
 
-::: molix.store.block_view
+::: molix.store.frame_store_view
 
 ## Force-field export
 

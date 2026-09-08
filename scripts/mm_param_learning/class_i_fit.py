@@ -29,15 +29,16 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
+from molpy import Frame
 from tensordict import TensorDict
 
-from molix.batch import DataMixture, DataModule, TargetSchema
+from molix.batch import DataMixture, DataModule, TotalCharge
+from molix.config import config
 from molix.core.hook import BaseHook
 from molix.core.steps import MultiTaskEvalStep, MultiTaskTrainStep, TaskRouter, TaskSpec
 from molix.core.trainer import Trainer
 from molix.hooks import CheckpointHook, GradClipHook, Log, MolRecMetricsHook, StepSpeedHook
 from molix.store.frame_dataset import FrameDataset
-from molix.store.frame_sample import FrameSample
 from molix.units import units
 from molpot.heads.energy import AtomicReferenceEnergy
 from scripts.mm_param_learning.espaloma_mm_protocol_train import (
@@ -45,6 +46,7 @@ from scripts.mm_param_learning.espaloma_mm_protocol_train import (
     enumerate_angles,
     enumerate_impropers,
     enumerate_propers,
+    espaloma_like_template,
 )
 
 TASK_ENERGY = "energy"
@@ -53,11 +55,6 @@ TASK_CODE_ENERGY = 0
 # OMol25 publishes eV / eV·Å⁻¹; Class-I training is kcal/mol (LAMMPS real).
 _EV_TO_KCAL = float((1.0 * units.eV).to(units.kilocalorie_per_mole).magnitude)
 _EV_PER_A_TO_KCAL_PER_A = _EV_TO_KCAL
-
-_FIT_SCHEMA = TargetSchema(
-    graph_level=frozenset({"energy", "task", "group"}),
-    atom_level=frozenset({"forces"}),
-)
 
 # Saturates (σ/r)^12 energy spikes; kcal/mol. Quadratic below, linear above.
 ENERGY_HUBER_BETA = 20.0
@@ -98,7 +95,6 @@ class _LabeledFrames:
         self.group_ids = dataset.group_ids
         self.atom_counts = dataset.atom_counts
         self.edge_counts = dataset.edge_counts
-        self.target_schema = _FIT_SCHEMA
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -145,27 +141,64 @@ def _valence_families(
     return angles, propers, impropers
 
 
-def label_sample(frame: Any, *, group: float) -> dict[str, Any]:
-    """One frame as a pre-collate dict with task/group and valence columns.
+def _with_meta(frame: Any, **extra: Any) -> Frame:
+    """Copy *frame* with ``extra`` merged into its meta.
 
-    Angles/propers/impropers are always present (empty if there are no bonds)
-    so a packed batch never mixes missing and present valence families.
+    ``Frame.meta`` returns a **copy**, so ``frame.meta["task"] = 0`` is a silent
+    no-op — the only way to add a meta scalar is to build a new frame. Blocks
+    are carried over by reference to their column arrays, so this costs one
+    dict walk, not a data copy.
+
+    Args:
+        frame: The source molpy ``Frame``.
+        **extra: Meta scalars to add or override. An ``int`` stays integral
+            through collation, which is what keeps a task code routable.
+
+    Returns:
+        A new ``Frame`` with the same blocks and the merged meta.
     """
-    sample = FrameSample(frame).as_dict()
+    meta = {k: getattr(v, "value", v) for k, v in (getattr(frame, "meta", None) or {}).items()}
+    meta.update(extra)
+    out = Frame(meta=meta)
+    for name in frame.keys():
+        block = frame[name]
+        out[name] = {column: block[column] for column in block.keys()}
+    return out
+
+
+def label_sample(frame: Any, *, group: float) -> Frame:
+    """Label one frame in place with task/group and its valence families.
+
+    Angles/propers/impropers are always written (empty when there are no bonds)
+    so a batch never mixes missing and present valence families — a molecule
+    with no angles must contribute zero angle rows, not absent ones.
+
+    Args:
+        frame: A molpy ``Frame`` carrying ``atoms`` and, when bonded, ``bonds``.
+        group: Parameter-group code, recorded as a per-frame meta scalar.
+
+    Returns:
+        The same frame, with the valence blocks and the ``task`` / ``group``
+        meta scalars added.
+    """
     atomi = atomj = None
-    if "bond_index" in sample:
-        atomi = np.asarray(sample["bond_index"][0])
-        atomj = np.asarray(sample["bond_index"][1])
-    sample["angles"], sample["propers"], sample["impropers"] = _valence_families(
-        atomi, atomj, int(sample["Z"].shape[0])
-    )
-    targets = sample.setdefault("targets", {})
-    targets["task"] = TASK_CODE_ENERGY
-    targets["group"] = float(group)
-    return sample
+    if "bonds" in frame:
+        bonds = frame["bonds"]
+        atomi = np.asarray(bonds["atomi"], dtype=np.int64)
+        atomj = np.asarray(bonds["atomj"], dtype=np.int64)
+    n_atoms = int(np.asarray(frame["atoms"]["number"]).shape[0])
+    angles, propers, impropers = _valence_families(atomi, atomj, n_atoms)
+    frame["angles"] = angles
+    frame["propers"] = propers
+    frame["impropers"] = impropers
+    # No ``total_charge`` here: the charge model's fail-closed net-charge column
+    # is declared once at the batch tasks (``TotalCharge()``), not per frame. A
+    # frame that publishes its own charge keeps it — the task only fills a
+    # column that is absent.
+    return _with_meta(frame, task=TASK_CODE_ENERGY, group=float(group))
 
 
-def _sample_from_arrays(
+def _frame_from_arrays(
     *,
     numbers: np.ndarray,
     positions: np.ndarray,
@@ -174,35 +207,58 @@ def _sample_from_arrays(
     atomi: np.ndarray,
     atomj: np.ndarray,
     group: float,
-) -> dict[str, Any]:
-    """Labeled sample from raw arrays — the fast path for LMDB records.
+) -> Frame:
+    """Labeled frame from raw arrays — the fast path for LMDB records.
 
-    Produces exactly the dict :func:`label_sample` would from an equivalent
-    molpy Frame, without building the Frame or its element-symbol table.
+    Produces exactly the frame :func:`label_sample` would, without going
+    through the source frame or its element-symbol table.
+
+    Args:
+        numbers: Atomic numbers ``(N,)``.
+        positions: Positions ``(N, 3)`` in Å.
+        energy: Total energy in kcal/mol.
+        forces: Forces ``(N, 3)`` in kcal/mol/Å.
+        atomi: Bond first-atom indices ``(B,)``; may be empty.
+        atomj: Bond second-atom indices ``(B,)``; may be empty.
+        group: Parameter-group code.
+
+    Returns:
+        A ``Frame`` with ``atoms`` / ``bonds`` / the three valence blocks and
+        ``energy`` / ``task`` / ``group`` meta scalars.
     """
     bonded = int(atomi.shape[0]) > 0
-    sample: dict[str, Any] = {
-        "Z": torch.as_tensor(numbers, dtype=torch.long),
-        "pos": torch.as_tensor(positions, dtype=torch.float32),
+    xyz = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    f = np.asarray(forces, dtype=np.float64).reshape(-1, 3)
+    # See :func:`label_sample`: no ``total_charge`` meta — the net charge is the
+    # batch tasks' declaration, and these records publish none of their own.
+    frame = Frame(
+        meta={
+            "energy": float(energy),
+            "task": TASK_CODE_ENERGY,
+            "group": float(group),
+        }
+    )
+    frame["atoms"] = {
+        "number": np.asarray(numbers, dtype=np.int64),
+        "x": xyz[:, 0],
+        "y": xyz[:, 1],
+        "z": xyz[:, 2],
+        "fx": f[:, 0],
+        "fy": f[:, 1],
+        "fz": f[:, 2],
     }
     if bonded:
-        sample["bond_index"] = torch.stack(
-            [
-                torch.as_tensor(atomi, dtype=torch.long),
-                torch.as_tensor(atomj, dtype=torch.long),
-            ],
-            dim=0,
-        )
-    sample["angles"], sample["propers"], sample["impropers"] = _valence_families(
+        frame["bonds"] = {
+            "atomi": np.asarray(atomi, dtype=np.int64),
+            "atomj": np.asarray(atomj, dtype=np.int64),
+        }
+    angles, propers, impropers = _valence_families(
         atomi if bonded else None, atomj if bonded else None, int(numbers.shape[0])
     )
-    sample["targets"] = {
-        "energy": float(energy),
-        "forces": torch.as_tensor(forces, dtype=torch.float32),
-        "task": TASK_CODE_ENERGY,
-        "group": float(group),
-    }
-    return sample
+    frame["angles"] = angles
+    frame["propers"] = propers
+    frame["impropers"] = impropers
+    return frame
 
 
 def _frame_atomic_numbers(frame: Any) -> np.ndarray:
@@ -430,6 +486,12 @@ class ClassIFit:
         self.eval_every_epochs = max(1, int(eval_every_epochs))
         self.eval_loss = eval_loss if eval_loss is not None else val_omol_mae
         self.clip_max_norm = float(clip_max_norm)
+        #: The one OPLS-AA field of this fit. :meth:`model` parameterizes *this*
+        #: object and :meth:`datamodule` mounts *its* pair list, so the graph
+        #: the batches carry and the radius the model prices are the same fact
+        #: read twice, not two numbers kept in step by hand (ledger finding
+        #: **F21**). Never mutated: ``Parameterizer`` fills a copy.
+        self.forcefield = espaloma_like_template()
         self.num_workers = int(num_workers)
         self.prefetch_factor = prefetch_factor
         self.multiprocessing_context = multiprocessing_context
@@ -456,13 +518,18 @@ class ClassIFit:
             {TASK_ENERGY: self.train_ds},
             mixture={TASK_ENERGY: 1.0},
             max_atoms=self.max_atoms,
-            target_schema=_FIT_SCHEMA,
         )
         on_cuda = self.device.type == "cuda"
+        # The two post-collate facts the model needs, both owned by the field it
+        # is built on (``self.forcefield``, which :meth:`model` parameterizes):
+        # the pair list at the radius its own styles are priced at — molpot
+        # consumes a placed ``edges`` namespace and never enumerates one — and
+        # the neutral net charge its charge model is fail-closed on. OMol25
+        # conformers are isolated molecules, hence the open (``pbc=False``) list.
         return DataModule(
             train,
             self.val_ds,
-            target_schema=_FIT_SCHEMA,
+            batch_tasks=[self.forcefield.neighbor_list(), TotalCharge()],
             batch_size=8,
             num_workers=self.num_workers,
             pin_memory=on_cuda,
@@ -473,12 +540,21 @@ class ClassIFit:
         )
 
     def model(self) -> ForceAwareModel:
+        # Built in the project dtype (``molix.config``), which is the dtype the
+        # DataModule's collate casts every batch to — one policy, so a probe
+        # that bypasses the DataModule (``align._collate``) has a dtype to cast
+        # to without asking the model what it happens to be.
+        #
+        # ``template=self.forcefield`` is what makes ``model.imm.template`` this
+        # fit's own field: a probe reads the pair list off the model it is
+        # probing (``align._field_of``) and gets the list ``datamodule`` mounts.
         imm = build_espaloma_like_model(
             energy_scope=self.energy_scope,
             hidden=self.hidden,
             n_blocks=self.n_blocks,
             n_torsion_terms=self.n_torsion_terms,
-            dtype=torch.float32,
+            dtype=config["ftype"],
+            template=self.forcefield,
         )
         dressing = AtomicReferenceEnergy(
             atomic_energies=self.dressing.atomic_energies.detach().cpu().clone()
@@ -734,11 +810,7 @@ def load_omol25_split(
 
 
 def _is_labeled_source(obj: Any) -> bool:
-    return (
-        hasattr(obj, "atom_counts")
-        and hasattr(obj, "task_labels")
-        and hasattr(obj, "target_schema")
-    )
+    return hasattr(obj, "atom_counts") and hasattr(obj, "task_labels")
 
 
 class LazyOMol25:
@@ -765,7 +837,6 @@ class LazyOMol25:
         self.edge_counts = torch.zeros(len(self._indices), dtype=torch.long)
         self.task_labels = (TASK_ENERGY,) * len(self._indices)
         self.group_ids = tuple(str(i) for i in self._indices)
-        self.target_schema = _FIT_SCHEMA
         self.dressing = dressing
 
     def __len__(self) -> int:
@@ -792,15 +863,15 @@ class LazyOMol25:
         )
         return (label_sample(converted, group=float(idx)),)
 
-    def _sample_from_record(self, record: dict[str, Any], *, group: float) -> dict[str, Any]:
-        """Raw LMDB row → labeled sample, skipping the molpy Frame round trip."""
+    def _sample_from_record(self, record: dict[str, Any], *, group: float) -> Frame:
+        """Raw LMDB row → labeled frame, skipping the source frame round trip."""
         from molhub.dataset.omol25 import infer_bonds
 
         numbers = np.asarray(record["numbers"], dtype=np.int64).reshape(-1)
         positions = np.asarray(record["positions"], dtype=np.float64)
         atomi, atomj = infer_bonds(numbers, positions)
         forces = np.asarray(record["forces"], dtype=np.float64) * _EV_PER_A_TO_KCAL_PER_A
-        return _sample_from_arrays(
+        return _frame_from_arrays(
             numbers=numbers,
             positions=positions,
             energy=float(record["energy"]) * _EV_TO_KCAL,

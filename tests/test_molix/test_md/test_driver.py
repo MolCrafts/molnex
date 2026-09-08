@@ -1,9 +1,11 @@
 """Tests for molix.md.driver — composer wiring and per-call contracts only."""
 
+import numpy as np
 import pytest
 import torch
 from tensordict import TensorDict
 
+from molix.batch import TensorFrame
 from molix.md import (
     MD,
     LangevinVerletIntegrator,
@@ -13,6 +15,7 @@ from molix.md import (
     VelocityInitHook,
     VelocityVerletIntegrator,
 )
+from tests.conftest import collate_frames, frame
 from tests.test_molix.test_md.conftest import make_cubic_lattice, md_system
 
 #: How close the split-precision run has to sit to a *fully* fp32 evaluation,
@@ -46,16 +49,17 @@ def _class_i_harmonic(*, k: float = 2.0, r0: float = 1.0):
 
 
 def _two_atom_system(*, r: float = 1.5, dtype: torch.dtype = torch.float64) -> TensorDict:
-    pos = torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=dtype)
-    atoms = md_system(pos, torch.zeros_like(pos), 1.0)
-    atoms["bonds"] = TensorDict(
-        {
-            "atomi": torch.tensor([0], dtype=torch.long),
-            "atomj": torch.tensor([1], dtype=torch.long),
-        },
-        batch_size=[1],
-    )
-    return atoms
+    """One bonded pair at rest, ``r`` Å apart — a molpy ``Frame`` through the collate.
+
+    ``mass`` is a per-atom column of the frame; ``vel`` is written after
+    collation, because the collate has no per-atom *vector* route beyond
+    ``pos`` and the ``fx``/``fy``/``fz`` it stacks into ``atoms.forces``.
+    """
+    built = frame(Z=(1, 1), pos=((0.0, 0.0, 0.0), (r, 0.0, 0.0)), bonds=([0], [1]))
+    built["atoms"]["mass"] = np.ones(2, dtype=np.float64)
+    system = collate_frames([built], dtype=dtype)
+    system["atoms", "vel"] = torch.zeros_like(system["atoms", "pos"])
+    return system
 
 
 def _nve(force, *, dt: float, dtype=None, hooks=None) -> MD:
@@ -331,9 +335,8 @@ class TestMD:
         # 10 Å cube around a 1.5 Å bond: well inside the F29 half-width, so the
         # only thing under test here is which build evaluates the field.
         system = _two_atom_system()
-        system["graphs"] = TensorDict(
-            {"cell": (torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0)}, batch_size=[1]
-        )
+        # F35: ``collate_molecules`` does not read ``frame.box`` yet.
+        system["graphs", "cell"] = (torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0)
 
         try:
             md = (
@@ -379,6 +382,28 @@ class TestMD:
         assert system["graphs", "cell"].dtype == torch.float64
         assert state.cell is not None
         assert state.cell.dtype == torch.float64
+
+    def test_run_on_a_typed_view_matches_the_plain_run(self):
+        """``MD.run`` on a ``TensorFrame`` is the same trajectory, bit for bit.
+
+        The driver casts and writes back ``atoms.pos`` / ``vel`` / ``mass`` on
+        whatever it is handed, and the typed view of the batch (CLAUDE.md
+        § TensorDict Contract) holds exactly those leaves. So a view must be
+        integrable: the same state out, *and* the caller's own batch advanced,
+        since the view owns no storage of its own and every write lands in the
+        batch it wraps.
+        """
+        plain_system = _two_atom_system()
+        viewed_system = _two_atom_system()
+        view = TensorFrame.from_tensordict(viewed_system)
+
+        plain = _nve(_class_i_harmonic(), dt=0.5).run(plain_system, 4)
+        viewed = _nve(_class_i_harmonic(), dt=0.5).run(view, 4)
+
+        assert torch.equal(viewed.pos, plain.pos)
+        assert torch.equal(viewed.vel, plain.vel)
+        assert torch.equal(viewed.forces, plain.forces)
+        assert torch.equal(viewed_system["atoms", "pos"], plain_system["atoms", "pos"])
 
     def test_run_requires_both_components(self, system):
         with pytest.raises(RuntimeError, match="set_forcefield and set_integrator"):

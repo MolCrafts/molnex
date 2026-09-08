@@ -7,7 +7,7 @@ from molpy import Block, Frame
 from torch.utils.data import Dataset
 
 from molix.batch import DataMixture, DataModule
-from molix.store.frame_dataset import CLASS_I_FRAME_SCHEMA, FrameCollection, FrameDataset
+from molix.store.frame_dataset import FrameCollection, FrameDataset
 
 
 def _geom(z: list[int], *, molecule_id: str, energy: float = 0.0) -> Frame:
@@ -132,7 +132,6 @@ class TestDataMixture:
             {"equilibrium": eq, "torsion": tor},
             mixture={"equilibrium": 0.5, "torsion": 0.5},
             max_atoms=16,
-            target_schema=CLASS_I_FRAME_SCHEMA,
         )
         dm = DataModule(mix, mix, batch_size=1, num_workers=0)
         dm.setup()

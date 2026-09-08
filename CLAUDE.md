@@ -261,7 +261,7 @@ python -m pytest tests/test_molzoo/test_mace.py::test_mace_forward -v
 python -m pytest tests/ --cov=src --cov-report=term-missing
 ```
 
-Python >=3.12 required (pyproject pins >=3.12; the BlockFrameView protocol's raising-property isinstance safety needs 3.12+). Requires `torch>=2.10` (always use latest stable PyTorch).
+Python >=3.12 required (pyproject pins >=3.12; the FrameStoreView protocol's raising-property isinstance safety needs 3.12+). Requires `torch>=2.14` and `tensordict>=0.14` (always use latest stable PyTorch; the native op lib is built with C++20, which torch 2.14 headers require).
 
 GH200 / `.aarch64`: on every env/torch change rebuild **all** native libs together on GH200 — `molrs/_lib.abi3.so` (`maturin develop --release`, aarch64 toolchain) **and** `src/molix/op/libmolnex_opLib.aarch64.so` against **this** interpreter's torch (`TORCH_CUDA_ARCH_LIST=9.0`). Login-node rustc overwrites the untagged molrs `.so` with x86-64; do not reuse a stale `.so`. Runtime `LD_LIBRARY_PATH` must include GCC 14 `lib64` + `torch/lib` + CUDA `lib64`. See `.claude/notes/notes.md` native-op-rebuild.
 
@@ -303,7 +303,7 @@ this wrong and `KeyError(('edges','edge_index'))` is the first thing you see.
 
 | Stage | Container | Example access |
 |---|---|---|
-| MolHub-side sample production / preprocessing I/O, `BlockDataset[i]` | **flat `dict`** | `sample["Z"]`, `sample["edge_index"]`, `sample["targets"]["U0"]` |
+| MolHub-side sample production / preprocessing I/O, `FrameStoreDataset[i]` | **flat `dict`** | `sample["Z"]`, `sample["edge_index"]`, `sample["targets"]["U0"]` |
 | Post-`collate_molecules` (what encoders / losses receive) | **nested `TensorDict`** (plain, no subclass) | `batch["atoms", "Z"]`, `batch["edges", "edge_index"]`, `batch["graphs", "energy"]` |
 
 The single conversion point is `molix.batch.collate.collate_molecules`
@@ -344,27 +344,35 @@ mutate the batch in place, writing `node_features` under `atoms` and
 
 ### On-disk format
 
-`molix.block/1` (`molix.store.block`) is molnex's **one** on-disk format:
-a directory of raw little-endian column files plus `manifest.json`, written
-by `BlockWriter` one `SamplingUnit` at a time, committed through a crc32
-commit log and sealed with per-column sha256. `BlockReader` mmaps a sealed
-block; `BlockDataset` indexes an ordered sequence of them as one frame space.
+`molix.block/1` (`molix.store.frame_store`) is molnex's **one** on-disk
+format: a directory of raw little-endian column files plus `manifest.json`,
+written by `FrameStoreWriter.append(frames, key=…, task=…)`, committed through
+a crc32 commit log and sealed with per-column sha256. `FrameStoreReader` mmaps
+a sealed store and `.batch(frames)` reads a batch straight off it;
+`FrameStoreDataset` indexes an ordered sequence of stores as one frame space.
 MolHub writes these; molnex only reads them.
 
-Its column vocabulary is a **closed registry** (`_COLUMN_ROUTES`): a name is
-either a registered row or a `ValueError`. Adding a target is a deliberate
-format revision, never an incidental producer detail. Blocks carry **no
-neighbour graph** — the cutoff graph is a function of positions and a cutoff,
-so it is built downstream by `molix.batch.NeighborList`, not stored.
+**Naming.** The types are `FrameStore*` because `Block` already means a
+molpy `Block` (a Frame's sub-table) — one name, two meanings, was the
+collision. The **format id stays `molix.block/1`** and the on-disk unit is
+still called a block in prose and in manifest keys: it is a wire contract
+already written into every store MolHub has produced, and renaming it would
+be a format revision, not a rename.
 
-Reading a block yields a **packed payload** — `atoms` / `edges` / `graphs` /
-`scalars` buckets of concat tensors plus `atom_ptr` / `edge_ptr` cumsum
-pointers — which `PackedView` wraps and `collate_packed` turns into a batch
-without ever materialising per-sample dicts.
+There is **no** column registry. What a column is called and where it lands is
+decided by where it sits in the molpy `Frame` — a new target is a new frame
+column and nothing else. (`_COLUMN_ROUTES` and `SamplingUnit` were deleted on
+2026-09-07 along with the schema-declaration layer they served.) Stores carry
+**no neighbour graph** — the cutoff graph is a function of positions and a
+cutoff, so it is built downstream by `molix.batch.NeighborList`, not stored.
 
-The single-`.pt` `PackedCache` that preceded this (one file, schema inferred
-across samples, run-scoped) was deleted on 2026-09-07: MolHub had already
-moved to blocks, so it had no producer left.
+Reads go straight from mmapped columns to the batch `TensorDict`: one gather
+per column, no intermediate per-sample dicts and no re-gather. The
+`PackedView` / `collate_packed` pair that used to sit in between was deleted
+on 2026-09-07 — it re-gathered every tensor through an identity index, a full
+copy of the batch for nothing. The single-`.pt` `PackedCache` that preceded
+all of this went the same day: MolHub had already moved to stores, so it had
+no producer left.
 
 ### Edge Convention (MUST follow everywhere)
 
@@ -441,7 +449,7 @@ molpot.composition (PotentialComposer,    molpot.potentials
     ↓                              molpot.derivation (EnergyAggregation,
 molix.core (Trainer, TrainState, Step, Hook)    ForceDerivation)
     ↓
-molix.batch (collate, NeighborList, DataModule, BatchTask) · molix.store (BlockWriter/Reader, BlockDataset)
+molix.batch (collate, NeighborList, DataModule, BatchTask) · molix.store (FrameStoreWriter/Reader, FrameStoreDataset)
     ↑ dataset acquisition (download / parse / preprocess / cache write) is MolHub's, not molnex's
 molix.md (Langevin velocity-Verlet) ─→ molix.quant (T_eff / quantization scalars)
 molix.export (Exporter, AOTInductor .pt2) · molix.compile (Compiler, torch.compile / CUDA graphs)   [leaf execution utils]
@@ -586,14 +594,24 @@ hooks (`MetricsHook`, `TensorBoardHook`) should write their
 
 ### TensorDict Contract
 
-The post-collate batch is a **plain `tensordict.TensorDict`** — no subclass.
+The post-collate batch is a `tensordict.TensorDict`. `molix.batch.TensorFrame`
+(`mn.TensorFrame`, a `TypedTensorDict`) is the **typed view** of that batch: its
+declared fields are exactly the namespaces in the table above — `atoms`
+required, `edges` / `graphs` / `bonds` / `angles` / `propers` / `impropers`
+`NotRequired`. It adds no storage and no behaviour;
+`TensorFrame.from_tensordict(batch)` is a zero-copy wrap (every leaf keeps its
+storage), and it traces to the same dynamo graph as the plain batch. Its name
+differs from molpy's `Frame` so a reader always knows which side of
+`collate_molecules` they are on.
+
 The `AtomData / EdgeData / GraphData / GraphBatch` subclasses that existed
-before 2026-05-18 have been removed. The `atoms / edges / graphs` namespace
-structure and per-namespace `batch_size` are the only schema contract; they
-are documented in the table above, not enforced by Python types.
+before 2026-05-18 stay removed — they carried behaviour and per-class storage,
+which is the thing that is forbidden, not the type declaration.
 
 **Rules for new code:**
-- Use plain `TensorDict(..., batch_size=[N])`, never subclass it for batch data.
+- Build batches as plain `TensorDict(..., batch_size=[N])`; wrap in
+  `TensorFrame` where a typed read is wanted. Never write a batch container
+  that owns storage or methods.
 - Encoders: prefer inheriting `TensorDictModuleBase` for `in_keys`/`out_keys`
   validation. Plain `nn.Module` is accepted as long as `forward(td: TensorDict)
   -> TensorDict` is respected.

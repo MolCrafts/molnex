@@ -27,7 +27,8 @@ import torch
 from molix.batch.datamodule import DataModule
 from molix.config import config
 from molix.core.steps import batch_to
-from molix.store import BlockDataset
+from molix.store import FrameStoreDataset
+from tests.conftest import frame
 from tests.test_molix.conftest import unit_a, unit_b, write_block
 
 # ---------------------------------------------------------------------------
@@ -42,25 +43,18 @@ def _reset_precision():
     config.set_precision("fp32")
 
 
-def _make_samples(n: int = 6) -> list[dict]:
-    """fp32 source samples — mirrors what QM9Source / RevMD17Source emit."""
+def _make_samples(n: int = 6) -> list:
+    """fp32 source frames — what a dataset hands the collate."""
     return [
-        {
-            "Z": torch.tensor([1, 6], dtype=torch.long),
-            "pos": torch.randn(2, 3, dtype=torch.float32),
-            "edge_index": torch.tensor([[0, 1]], dtype=torch.long),
-            "edge_diff": torch.randn(1, 3, dtype=torch.float32),
-            "edge_dist": torch.tensor([1.5], dtype=torch.float32),
-            "targets": {"energy": torch.tensor([float(i)], dtype=torch.float32)},
-        }
+        frame(Z=[1, 6], pos=torch.randn(2, 3, dtype=torch.float32), energy=float(i))
         for i in range(n)
     ]
 
 
 def _build_dm(tmp_path: Path, *, batch_size: int = 2) -> DataModule:
     return DataModule(
-        BlockDataset.load_from_disk(write_block(tmp_path / "train" / "b", [unit_a()]).parent),
-        BlockDataset.load_from_disk(
+        FrameStoreDataset.load_from_disk(write_block(tmp_path / "train" / "b", [unit_a()]).parent),
+        FrameStoreDataset.load_from_disk(
             write_block(tmp_path / "val" / "b", [unit_b()], split="val").parent
         ),
         batch_size=batch_size,
@@ -191,7 +185,7 @@ class TestPrecisionFlowsToBatch:
         happens at collate, not at load. This keeps one block reusable
         across precisions."""
         config.set_precision("fp64")
-        ds = BlockDataset.load_from_disk(write_block(tmp_path / "b" / "x", [unit_a()]).parent)
+        ds = FrameStoreDataset.load_from_disk(write_block(tmp_path / "b" / "x", [unit_a()]).parent)
         raw = ds[0]
-        assert raw["pos"].dtype is torch.float32
+        assert raw["atoms", "pos"].dtype is torch.float32
         assert config["ftype"] is torch.float64

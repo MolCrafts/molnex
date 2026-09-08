@@ -17,7 +17,7 @@ plain-`TensorDict` batch contract used by models and losses (namespaces
 - [Trainer](user-guide/trainer.md): configure the training loop.
 - [Hooks](user-guide/hooks.md): add logging, metrics, checkpointing, and custom
   lifecycle behavior.
-- [Data Loading](user-guide/data-loading.md): convert flat sample dicts into
+- [Data Loading](user-guide/data-loading.md): convert molpy frames into
   collated nested `TensorDict` batches (dataset acquisition itself lives in
   MolHub).
 - [Data Modules](user-guide/data-modules.md): wire datasets into `Trainer`.

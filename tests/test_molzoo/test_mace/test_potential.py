@@ -221,7 +221,7 @@ class TestMacePotential:
     # -- construction ---------------------------------------------------------
 
     def test_inherits_the_encoder_so_state_dict_keys_stay_flat(self) -> None:
-        """Holding an encoder would prefix every key with ``encoder.`` (ac-007)."""
+        """Holding an encoder would prefix every key with ``encoder.``."""
         assert issubclass(MacePotential, MACEEncoder)
 
     @pytest.mark.parametrize("dtype", [None, torch.float32, torch.float64])

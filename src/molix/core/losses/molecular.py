@@ -13,7 +13,7 @@ a per-script closure that knows *where* to read targets from the
 These presets absorb that wrapping. They return ``Callable[[preds, batch], Tensor]``
 that consumes ``preds`` (plain dict from the model forward) and ``batch``
 (a ``TensorDict``), following the convention encoded in
-:class:`~molix.batch.collate.TargetSchema`:
+the collate's per-atom routing:
 
 * graph-level targets (e.g. ``energy``) live at ``batch["graphs", key]``;
 * atom-level targets (e.g. ``forces``) live at ``batch["atoms", key]``.

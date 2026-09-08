@@ -7,7 +7,7 @@ Two concerns, one class each:
   ``execute``. No DataLoader involved.
 * ``TestDataModuleBatchTasks`` — ``DataModule(batch_tasks=[...])`` runs the
   tasks, in declaration order, on **both** collate paths (per-sample
-  ``_CollateFn`` and block ``_BlockCollateFn``), and its ``__init__``
+  ``_CollateFn`` and block ``_FrameStoreCollateFn``), and its ``__init__``
   exposes ``batch_tasks`` and no longer ``batch_nodes`` (the ETL ``Node``
   coupling this phase severs).
 
@@ -27,60 +27,41 @@ from tensordict import TensorDict
 from torch.utils.data import Dataset
 
 from molix.batch import PadMolecularBatch
-from molix.batch.collate import TargetSchema
-from molix.batch.datamodule import DataModule, _BlockCollateFn, _CollateFn
+from molix.batch.datamodule import DataModule, _CollateFn, _FrameStoreCollateFn
 from molix.batch.task import BatchTask
-from molix.store import BlockDataset
+from molix.store import FrameStoreDataset
+from tests.conftest import frame
 from tests.test_molix.conftest import unit_a, unit_b, write_block
-
-#: Graph-level ``U0`` only — the fixture carries no atom-level target.
-SCHEMA = TargetSchema(graph_level=frozenset({"energy"}), atom_level=frozenset({"forces"}))
-
 
 # ---------------------------------------------------------------------------
 # Fixture data
 # ---------------------------------------------------------------------------
 
 
-def _samples(n: int = 4) -> list[dict]:
-    """Build *n* two-atom samples with one edge each, hand-built (no RNG).
+def _samples(n: int = 4) -> list:
+    """Build *n* two-atom frames, hand-built (no RNG).
 
     Args:
-        n: Number of samples. ``targets.U0`` carries the identity
-            ``float(i)``.
+        n: Number of frames; the ``energy`` meta scalar carries ``float(i)``.
 
     Returns:
-        Flat sample dicts with per-atom ``Z`` ``(2,)`` / ``pos`` ``(2, 3)``,
-        per-edge ``edge_index`` ``(1, 2)`` / ``edge_diff`` ``(1, 3)`` /
-        ``edge_dist`` ``(1,)`` and graph-level ``targets.U0`` ``(1,)``.
+        molpy ``Frame`` objects.
     """
-    out: list[dict] = []
-    for i in range(n):
-        pos = torch.tensor([[0.0, 0.0, 0.0], [1.0 + 0.1 * i, 0.0, 0.0]])
-        diff = (pos[1] - pos[0]).unsqueeze(0)
-        out.append(
-            {
-                "Z": torch.tensor([1, 6], dtype=torch.long),
-                "pos": pos,
-                "edge_index": torch.tensor([[0, 1]], dtype=torch.long),
-                "edge_diff": diff,
-                "edge_dist": diff.norm(dim=-1),
-                "targets": {"U0": torch.tensor([float(i)])},
-            }
-        )
-    return out
+    return [
+        frame(Z=[1, 6], pos=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], energy=float(i)) for i in range(n)
+    ]
 
 
 class _SampleDictDataset(Dataset):
-    """Map-style dataset with no packed backing — forces the per-sample path."""
+    """Map-style dataset of frames — forces the per-sample collate path."""
 
-    def __init__(self, samples: list[dict]) -> None:
+    def __init__(self, samples: list) -> None:
         self._samples = samples
 
     def __len__(self) -> int:
         return len(self._samples)
 
-    def __getitem__(self, idx: int) -> dict:
+    def __getitem__(self, idx: int):
         return self._samples[idx]
 
 
@@ -172,14 +153,13 @@ class TestBatchTask:
 
 
 def _packed_dm(tmp_path: Path, tag: str, **kwargs) -> DataModule:
-    """DataModule over sealed blocks — routes through ``_BlockCollateFn``."""
-    train = BlockDataset.load_from_disk(
+    """DataModule over sealed blocks — routes through ``_FrameStoreCollateFn``."""
+    train = FrameStoreDataset.load_from_disk(
         write_block(tmp_path / f"{tag}_train" / "b", [unit_a()]).parent
     )
-    val = BlockDataset.load_from_disk(
+    val = FrameStoreDataset.load_from_disk(
         write_block(tmp_path / f"{tag}_val" / "b", [unit_b()], split="val").parent
     )
-    kwargs.setdefault("target_schema", SCHEMA)
     kwargs.setdefault("batch_size", 2)
     kwargs.setdefault("num_workers", 0)
     kwargs.setdefault("pin_memory", False)
@@ -189,7 +169,6 @@ def _packed_dm(tmp_path: Path, tag: str, **kwargs) -> DataModule:
 def _unpacked_dm(**kwargs) -> DataModule:
     """DataModule over a plain dict dataset — routes through ``_CollateFn``."""
     ds = _SampleDictDataset(_samples(4))
-    kwargs.setdefault("target_schema", SCHEMA)
     kwargs.setdefault("batch_size", 2)
     kwargs.setdefault("num_workers", 0)
     kwargs.setdefault("pin_memory", False)
@@ -237,10 +216,10 @@ class TestDataModuleBatchTasks:
         assert torch.equal(batch["graphs", "stamp"], torch.tensor([21, 21]))
 
     def test_tasks_run_on_packed_path(self, tmp_path):
-        """The block ``_BlockCollateFn`` applies the same tasks."""
+        """The block ``_FrameStoreCollateFn`` applies the same tasks."""
         dm = _packed_dm(tmp_path, "stamp", batch_tasks=[_StampTask(1)])
         loader = dm.val_dataloader()
-        assert isinstance(loader.collate_fn, _BlockCollateFn)
+        assert isinstance(loader.collate_fn, _FrameStoreCollateFn)
         batch = next(iter(loader))
         assert torch.equal(batch["graphs", "stamp"], torch.tensor([1, 1]))
 

@@ -80,13 +80,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 from molhub.dataset import PhalkethohMMDataset
+from molpy import Frame
 from tensordict import TensorDict
 
 from molix.batch import (
     DataModule,
     MoleculeCollator,
-    TargetSchema,
     TaskMixtureBatchSampler,
+    TotalCharge,
 )
 from molix.core.audit import TaskGradientProbe
 from molix.core.hook import BaseHook
@@ -121,7 +122,7 @@ from molpot.composition.mm_heads import (
     ImproperParamHead,
     ProperTorsionParamHead,
 )
-from molpot.forcefield import OPLSAAForceField, Parameterizer
+from molpot.forcefield import ForceField, OPLSAAForceField, Parameterizer
 from molrep.chem.encoder import ChemEncoder
 
 # Espaloma notebook protocol pins
@@ -254,62 +255,87 @@ def enumerate_impropers(
     )
 
 
-def frame_to_sample(fr) -> dict:
-    """Convert one MolHub frame to the pre-collate molecular schema.
+def label_frame(fr) -> Frame:
+    """Label one MolHub frame with its valence families and task code.
 
-    The ``task`` target rides along as a graph-level integer label so every
+    The ``task`` scalar rides along in ``meta`` as an **integer** so every
     collated batch is routable by :class:`~molix.core.steps.TaskRouter` (one
-    task per batch — here always :data:`TASK_CODE_ENERGY`).
+    task per batch — here always :data:`TASK_CODE_ENERGY`), which refuses a
+    floating label rather than truncate one silently.
+
+    Args:
+        fr: A MolHub molpy ``Frame`` with ``atoms`` and ``bonds`` blocks and an
+            ``mm_energy`` meta scalar.
+
+    Returns:
+        A new ``Frame`` carrying the same atoms/bonds plus ``angles`` /
+        ``propers`` / ``impropers`` blocks and the ``task`` meta scalar.
     """
     atoms = fr["atoms"]
     bonds = fr["bonds"]
-    z = torch.as_tensor(np.asarray(atoms["number"]), dtype=torch.long)
-    pos = torch.stack(
-        [torch.as_tensor(np.asarray(atoms[c]), dtype=torch.float64) for c in ("x", "y", "z")],
-        dim=-1,
-    )
     atomi = np.asarray(bonds["atomi"], dtype=np.int64)
     atomj = np.asarray(bonds["atomj"], dtype=np.int64)
-    n_atoms = int(z.shape[0])
+    n_atoms = int(np.asarray(atoms["number"]).shape[0])
     ang_i, ang_j, ang_k = enumerate_angles(atomi, atomj, n_atoms)
     pr_i, pr_j, pr_k, pr_l = enumerate_propers(atomi, atomj, n_atoms)
     im_i, im_j, im_k, im_l = enumerate_impropers(atomi, atomj, n_atoms)
-    sample = {
-        "Z": z,
-        "pos": pos,
-        "bond_index": torch.as_tensor(np.stack([atomi, atomj]), dtype=torch.long),
-        "targets": {
-            "mm_energy": float(getattr(fr.meta["mm_energy"], "value", fr.meta["mm_energy"])),
-            "task": TASK_CODE_ENERGY,
-        },
-        "angles": {
-            "atomi": torch.as_tensor(ang_i, dtype=torch.long),
-            "atomj": torch.as_tensor(ang_j, dtype=torch.long),
-            "atomk": torch.as_tensor(ang_k, dtype=torch.long),
-        },
-        "propers": {
-            "atomi": torch.as_tensor(pr_i, dtype=torch.long),
-            "atomj": torch.as_tensor(pr_j, dtype=torch.long),
-            "atomk": torch.as_tensor(pr_k, dtype=torch.long),
-            "atoml": torch.as_tensor(pr_l, dtype=torch.long),
-        },
-        "impropers": {
-            "atomi": torch.as_tensor(im_i, dtype=torch.long),
-            "atomj": torch.as_tensor(im_j, dtype=torch.long),
-            "atomk": torch.as_tensor(im_k, dtype=torch.long),
-            "atoml": torch.as_tensor(im_l, dtype=torch.long),
-        },
+
+    meta = {k: getattr(v, "value", v) for k, v in (getattr(fr, "meta", None) or {}).items()}
+    meta["task"] = TASK_CODE_ENERGY
+    # No ``total_charge`` is written here: the neutrality of this dataset is
+    # declared once, where the batch tasks are mounted (``TotalCharge()``), not
+    # re-stated per frame. A dataset that does publish a charge keeps it — the
+    # task fills only an absent column, and the meta scalar of a frame that
+    # carries one collates into exactly that column.
+    out = Frame(meta=meta)
+    out["atoms"] = {column: atoms[column] for column in atoms.keys()}
+    out["bonds"] = {column: bonds[column] for column in bonds.keys()}
+    out["angles"] = {
+        "atomi": np.asarray(ang_i, dtype=np.int64),
+        "atomj": np.asarray(ang_j, dtype=np.int64),
+        "atomk": np.asarray(ang_k, dtype=np.int64),
     }
-    return sample
+    out["propers"] = {
+        "atomi": np.asarray(pr_i, dtype=np.int64),
+        "atomj": np.asarray(pr_j, dtype=np.int64),
+        "atomk": np.asarray(pr_k, dtype=np.int64),
+        "atoml": np.asarray(pr_l, dtype=np.int64),
+    }
+    out["impropers"] = {
+        "atomi": np.asarray(im_i, dtype=np.int64),
+        "atomj": np.asarray(im_j, dtype=np.int64),
+        "atomk": np.asarray(im_k, dtype=np.int64),
+        "atoml": np.asarray(im_l, dtype=np.int64),
+    }
+    return out
 
 
-_MM_TARGET_SCHEMA = TargetSchema(graph_level=frozenset({"mm_energy", "task"}))
-_MM_COLLATOR = MoleculeCollator(_MM_TARGET_SCHEMA)
+_MM_COLLATOR = MoleculeCollator()
 
 
-def frames_to_batch(frames: list, device: torch.device) -> tuple[TensorDict, torch.Tensor]:
-    """Pack heterogeneous conformers into one graph-aware GPU batch."""
-    batch = _MM_COLLATOR([frame_to_sample(frame) for frame in frames]).to(device)
+def frames_to_batch(
+    frames: list, device: torch.device, forcefield: ForceField
+) -> tuple[TensorDict, torch.Tensor]:
+    """Pack heterogeneous conformers into one graph-aware GPU batch.
+
+    Applies by hand the two tasks a :class:`~molix.batch.DataModule` mounts
+    (:func:`build_datamodule`), because this path collates without one: the
+    field's own pair list — molpot consumes a placed ``edges`` namespace and
+    never enumerates one — and the neutral ``graphs.total_charge`` the charge
+    model is fail-closed on.
+
+    Args:
+        frames: Conformer frames to pack.
+        device: Where the batch is moved.
+        forcefield: The field of the model these batches feed
+            (``model.imm.template``). Its ``neighbor_list()`` is the graph, so
+            the batch reaches exactly the radius that model prices — a second
+            field built here would be that radius stated twice.
+    """
+    batch = _MM_COLLATOR([label_frame(f) for f in frames])
+    for task in (forcefield.neighbor_list(), TotalCharge()):
+        batch = task.execute(batch)
+    batch = batch.to(device)
     return batch, batch["graphs", "mm_energy"]
 
 
@@ -402,6 +428,33 @@ def pick_molecules(
     return {mid: by[mid] for mid in mids}
 
 
+def espaloma_like_template() -> OPLSAAForceField:
+    """The OPLS-AA field this protocol's model is parameterized on.
+
+    Every fact about the fitted model's *nonbonded range* is stated here, once,
+    because a :class:`~molpot.forcefield.ForceField` is what
+    :meth:`~molpot.forcefield.ForceField.neighbor_list` derives a pair list
+    from: molpot prices exactly the pairs the batch carries and never
+    enumerates its own, so a list built from a second, equal-looking field is a
+    number tracked by hand in two places (ledger finding **F21**).
+
+    **The 10 Å open Coulomb cutoff.** These datasets are isolated gas-phase
+    molecules — no cell — so the model runs
+    :class:`~molpot.forcefield.pair_terms.CoulombOpenPotential`, whose ``1/r``
+    sum is unbounded unless a radius is declared, and ``neighbor_list()``
+    refuses to invent one. 10 Å is the radius these fits have always run at: it
+    is where the scripts placed their pair list before the force field owned
+    that number. Declaring it on the style states the model that was already
+    being fitted rather than changing it.
+
+    Returns:
+        A fresh template. Hand the *same* object to the model
+        (:func:`build_espaloma_like_model`) and to whatever mounts its pair
+        list; a model already built exposes its own as ``model.template``.
+    """
+    return OPLSAAForceField(name="oplsaa-learned").def_pairstyle("coulomb", cutoff=10.0)
+
+
 def build_espaloma_like_model(
     *,
     energy_scope: str = "bonded",
@@ -409,6 +462,7 @@ def build_espaloma_like_model(
     n_blocks: int = 5,
     n_torsion_terms: int = ESPALOMA_N_TORSION_TERMS,
     dtype: torch.dtype | None = None,
+    template: OPLSAAForceField | None = None,
 ) -> Parameterizer:
     """ChemEncoder + OPLS-AA heads on :class:`~molpot.forcefield.OPLSAAForceField`.
 
@@ -419,6 +473,17 @@ def build_espaloma_like_model(
               for CLI compatibility; ``full`` is the physical default path.
         n_torsion_terms: Ignored (OPLS-AA emits fixed ``k1..k4``). Retained so
             callers that still pass Espaloma's historical ``6`` do not break.
+        template: The field to parameterize. Pass one to keep a caller's own
+            object (:meth:`~scripts.mm_param_learning.class_i_fit.ClassIFit`
+            mounts its pair list) and the model's field the same object.
+            Default: :func:`espaloma_like_template`.
+
+    Returns:
+        The :class:`~molpot.forcefield.Parameterizer`. Its field is
+        ``model.template`` — the one object that owns both this model's
+        nonbonded range and the parameter tables its heads write, so a pair
+        list is mounted as ``model.template.neighbor_list()`` and cannot be
+        built at a radius the model does not price.
     """
     del n_torsion_terms  # OPLS-AA proper head is fixed k1..k4
     if energy_scope not in ("bonded", "full"):
@@ -434,11 +499,9 @@ def build_espaloma_like_model(
         n_blocks=n_blocks,
         local_attention=False,
     )
-    ff = OPLSAAForceField(name="oplsaa-learned")
-
     model = Parameterizer(
         encoder,
-        ff,
+        espaloma_like_template() if template is None else template,
         bond_head=BondParamHead(feature_dim=hidden, hidden_dim=hidden),
         angle_head=AngleParamHead(feature_dim=hidden, hidden_dim=hidden),
         proper_head=ProperTorsionParamHead(
@@ -528,15 +591,14 @@ class ConformerDataset(BaseDataset):
             [int(len(frame["atoms"]["number"])) for frame in self._frames], dtype=torch.long
         )
         self.edge_counts = torch.zeros_like(self.atom_counts)
-        self.target_schema = _MM_TARGET_SCHEMA
 
     def __len__(self) -> int:
         """Number of conformers in this split."""
         return len(self._frames)
 
-    def __getitem__(self, idx: int) -> dict:
-        """The ``idx``-th conformer in the pre-collate molecular schema."""
-        return frame_to_sample(self._frames[idx])
+    def __getitem__(self, idx: int) -> Frame:
+        """The ``idx``-th conformer as a labelled molpy ``Frame``."""
+        return label_frame(self._frames[idx])
 
     def atom_budget(self, batch_size: int) -> int:
         """Per-batch atom budget standing in for a conformer ``batch_size``.
@@ -643,8 +705,11 @@ def eval_split(
     preds: list[torch.Tensor] = []
     refs: list[torch.Tensor] = []
     frames = [frame for mid in mol_ids for frame in frames_by_mol[mid]]
+    # The graph is priced by the field this model was built on, not by a second
+    # one assembled here (F21).
+    forcefield = model.imm.template
     for start in range(0, len(frames), batch_size):
-        batch, ref = frames_to_batch(frames[start : start + batch_size], device)
+        batch, ref = frames_to_batch(frames[start : start + batch_size], device, forcefield)
         preds.append(model(batch)["energy"].reshape(-1))
         refs.append(ref.reshape(-1))
     pred = torch.cat(preds)
@@ -982,6 +1047,7 @@ def build_datamodule(
     *,
     batch_size: int,
     seed: int,
+    forcefield: ForceField,
 ) -> DataModule:
     """Molecule-grouped train batches + fixed-size val batches for the Trainer.
 
@@ -991,6 +1057,11 @@ def build_datamodule(
         batch_size: Conformer batch size; the train side converts it to an atom
             budget (see :meth:`ConformerDataset.atom_budget`).
         seed: Base seed; the DataModule reseeds the sampler as ``seed + epoch``.
+        forcefield: The field of the model these batches feed
+            (``model.imm.template``, i.e. ``build_espaloma_like_model``'s
+            ``.template``). It owns both post-collate facts: the radius its
+            pair styles are priced at, and — with ``TotalCharge`` — the neutral
+            net charge its charge model is fail-closed on.
 
     Returns:
         A :class:`~molix.batch.DataModule` satisfying ``DataModuleProtocol``.
@@ -1000,7 +1071,7 @@ def build_datamodule(
     return DataModule(
         train_ds,
         val_ds,
-        target_schema=_MM_TARGET_SCHEMA,
+        batch_tasks=[forcefield.neighbor_list(), TotalCharge()],
         batch_size=batch_size,
         batch_sampler_source=EnergyTaskSamplerSource(max_atoms=train_ds.atom_budget(batch_size)),
         num_workers=0,  # frames are already in memory; no worker round trip

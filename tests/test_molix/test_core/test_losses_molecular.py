@@ -19,22 +19,13 @@ from molix.core.losses.molecular import (
     molecule_centered_energy_mse,
     parameter_bag_mse,
 )
+from tests.conftest import frame
 
 
 def _sample(Z, pos, *, U0=None, forces=None):
-    s = {
-        "Z": torch.as_tensor(Z, dtype=torch.long),
-        "pos": torch.as_tensor(pos, dtype=torch.float32),
-        "edge_index": torch.zeros(0, 2, dtype=torch.long),
-        "edge_diff": torch.zeros(0, 3),
-        "edge_dist": torch.zeros(0),
-        "targets": {},
-    }
-    if U0 is not None:
-        s["targets"]["U0"] = torch.tensor([float(U0)])
-    if forces is not None:
-        s["targets"]["forces"] = torch.as_tensor(forces, dtype=torch.float32)
-    return s
+    """One molpy ``Frame``; ``U0`` becomes a graph leaf, forces a per-atom leaf."""
+    meta = {} if U0 is None else {"U0": float(U0)}
+    return frame(Z=Z, pos=pos, forces=forces, **meta)
 
 
 class TestEnergyMSE:
@@ -82,10 +73,7 @@ class TestEnergyForceMSE:
             _sample([1, 6], [[0, 0, 0], [1, 0, 0]], U0=1.0, forces=forces_a),
             _sample([6, 8], [[0, 0, 0], [1.2, 0, 0]], U0=2.0, forces=forces_b),
         ]
-        from molix.batch.collate import TargetSchema
-
-        schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset({"forces"}))
-        batch = collate_molecules(samples, schema)
+        batch = collate_molecules(samples)
 
         preds = {
             "energy": torch.tensor([0.5, 2.5]),
@@ -109,10 +97,7 @@ class TestEnergyForceMSE:
     def test_lambda_zero_matches_energy_only(self):
         forces = torch.zeros(1, 3)
         samples = [_sample([1], [[0, 0, 0]], U0=1.0, forces=forces)]
-        from molix.batch.collate import TargetSchema
-
-        schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset({"forces"}))
-        batch = collate_molecules(samples, schema)
+        batch = collate_molecules(samples)
 
         preds = {
             "energy": torch.tensor([2.0]),

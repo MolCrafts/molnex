@@ -4,10 +4,9 @@ Two builders live here, both for the same reason: their consumers sit in
 different sub-packages, so the shared code lives at the nearest common
 ancestor rather than being copied (and drifting) in each leaf conftest.
 
-- :func:`equal_count_samples` — the degenerate ``n_edges == n_atoms``
-  geometry used by ``test_store/test_cache.py``,
-  ``test_store/test_dataset.py`` and ``test_batch/test_collate_packed.py``
-  to pin the packed-cache bucket-identity contract.
+- :func:`frame` — one molpy ``Frame`` from plain arrays. Fixtures build
+  frames, never dicts: a ``Frame`` and a ``TensorDict`` are the only two data
+  structures molnex has.
 - :func:`write_block` / :func:`sampling_unit` / :func:`unit_samples` — the
   ``molix.block/1`` fixture builders. Every dataset fixture in these tests
   writes a real sealed block, because a block is molnex's only on-disk format
@@ -28,50 +27,12 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 
-from molix.store.block import BlockWriter, SamplingUnit
-
-
-def equal_count_samples(n: int = 3) -> list[dict]:
-    """Build *n* samples with ``n_edges == n_atoms == 2`` in every sample.
-
-    A 2-atom molecule with a single bidirectional pair (``NeighborList``'s
-    default ``symmetry=True`` → ``E = 2 x n_pairs``) is the smallest
-    physically real case where the per-sample edge count collides with the
-    atom count. Nothing in the leading dim then distinguishes a per-atom
-    key from a per-edge key, so the packed schema must decide bucket
-    membership by key role, not by numerology.
-
-    Every value is hand-built (no RNG), so the fixture is bit-identical
-    across runs and independent of global torch seed state.
-
-    Args:
-        n: Number of samples.
-
-    Returns:
-        Flat sample dicts with per-atom ``Z`` ``(2,)`` / ``pos`` ``(2, 3)``,
-        per-edge ``edge_index`` ``(2, 2)`` / ``edge_diff`` ``(2, 3)`` /
-        ``edge_dist`` ``(2,)``, and graph-level ``targets.U0`` ``(1,)``
-        carrying the sample's identity ``float(i)``.
-    """
-    samples: list[dict] = []
-    for i in range(n):
-        # Atom 1 sits at +1 A along x from atom 0; the pair is stored in both
-        # directions, so edge_diff = pos[target] - pos[source] flips sign.
-        samples.append(
-            {
-                "Z": torch.tensor([1, 6], dtype=torch.long),
-                "pos": torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
-                "edge_index": torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
-                "edge_diff": torch.tensor([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]),
-                "edge_dist": torch.tensor([1.0, 1.0]),
-                "targets": {"U0": torch.tensor([float(i)])},
-            }
-        )
-    return samples
-
+from molix.store.frame_store import FrameStoreWriter
+from tests.conftest import frame
 
 # ---------------------------------------------------------------------------
 # Extended-XYZ water fixture (shared by test_io/ and test_datasets/)
@@ -198,7 +159,7 @@ def water_les_root(tmp_path: Path) -> Path:
 
 BLOCK_PROVENANCE: dict[str, Any] = {
     "source": {"name": "molnex-unit-test", "coordinate": "n/a"},
-    "generator": {"tool": "test_block.py", "version": "1", "commit": "0"},
+    "generator": {"tool": "test_frame_store.py", "version": "1", "commit": "0"},
     "created_at": "2026-08-14T00:00:00+00:00",
     "units": {
         "pos": "angstrom",
@@ -252,71 +213,62 @@ def valence_columns(n_atoms: int) -> dict[str, torch.Tensor]:
     }
 
 
-def sampling_unit(key: str, task: str, z: list[int], n_frames: int, offset: int) -> SamplingUnit:
+def sampling_unit(key: str, task: str, z: list[int], n_frames: int, offset: int) -> tuple:
+    """One unit as ``(frames, key, task)`` — the shape ``write_block`` appends."""
     n_atoms = len(z)
-    topology = {"Z": torch.tensor(z, dtype=torch.int16), **valence_columns(n_atoms)}
-    return SamplingUnit(
-        key=key,
-        task=task,
-        topology=topology,
-        frames=frame_columns(n_frames, n_atoms, offset),
-    )
+    valence = valence_columns(n_atoms)
+    frames = []
+    for k in range(n_frames):
+        base = offset + k * n_atoms * 3
+        frames.append(
+            frame(
+                Z=np.asarray(z, dtype=np.int64),
+                pos=halves(n_atoms * 3, base).reshape(n_atoms, 3).numpy(),
+                forces=-halves(n_atoms * 3, base + 7).reshape(n_atoms, 3).numpy(),
+                energy=float(halves(1, offset + 3 + k)[0]),
+                bonds=(valence["bond_atomi"].numpy(), valence["bond_atomj"].numpy()),
+                bond_types=valence["bond_type"].numpy(),
+                terms={
+                    "angles": {
+                        "atomi": valence["angle_atomi"].numpy(),
+                        "atomj": valence["angle_atomj"].numpy(),
+                        "atomk": valence["angle_atomk"].numpy(),
+                        "type_id": valence["angle_type"].numpy(),
+                    },
+                    "propers": {
+                        "atomi": valence["proper_atomi"].numpy(),
+                        "atomj": valence["proper_atomj"].numpy(),
+                        "atomk": valence["proper_atomk"].numpy(),
+                        "atoml": valence["proper_atoml"].numpy(),
+                        "type_id": valence["proper_type"].numpy(),
+                    },
+                },
+            )
+        )
+    return frames, key, task
 
 
-def unit_a() -> SamplingUnit:
+def unit_a() -> tuple:
     return sampling_unit("mol-a", "equilibrium", [8, 1, 1], 2, 0)
 
 
-def unit_b() -> SamplingUnit:
+def unit_b() -> tuple:
     return sampling_unit("mol-b", "relax", [6, 6, 1, 1], 3, 40)
 
 
-def unit_c() -> SamplingUnit:
+def unit_c() -> tuple:
     return sampling_unit("scan-c", "torsion", [6, 6, 8, 1], 5, 100)
 
 
-def write_block(root: Path, units: list[SamplingUnit], *, split: str = "train") -> Path:
+def write_block(root: Path, units: list, *, split: str = "train") -> Path:
     """Write and seal a block holding *units* — the uninterrupted reference write."""
-    writer = BlockWriter(root, split=split, provenance=BLOCK_PROVENANCE)
-    for unit in units:
-        writer.append_unit(unit)
+    writer = FrameStoreWriter(root, split=split, provenance=BLOCK_PROVENANCE)
+    for frames, key, task in units:
+        writer.append(frames, key=key, task=task)
     writer.seal()
     return root
 
 
-def unit_samples(units: list[SamplingUnit]) -> list[dict]:
-    """The same data as flat per-frame sample dicts (the v1 / oracle shape)."""
-    out: list[dict] = []
-    for unit in units:
-        n_atoms = unit.n_atoms
-        topology = unit.topology
-        for k in range(unit.n_frames):
-            rows = slice(k * n_atoms, (k + 1) * n_atoms)
-            out.append(
-                {
-                    "Z": topology["Z"].long(),
-                    "pos": unit.frames["pos"][rows].clone(),
-                    "targets": {
-                        "energy": unit.frames["energy"][k : k + 1].clone(),
-                        "forces": unit.frames["forces"][rows].clone(),
-                    },
-                    "bond_index": torch.stack(
-                        [topology["bond_atomi"], topology["bond_atomj"]]
-                    ).long(),
-                    "bond_types": topology["bond_type"].long(),
-                    "angles": {
-                        "atomi": topology["angle_atomi"].long(),
-                        "atomj": topology["angle_atomj"].long(),
-                        "atomk": topology["angle_atomk"].long(),
-                        "type": topology["angle_type"].long(),
-                    },
-                    "propers": {
-                        "atomi": topology["proper_atomi"].long(),
-                        "atomj": topology["proper_atomj"].long(),
-                        "atomk": topology["proper_atomk"].long(),
-                        "atoml": topology["proper_atoml"].long(),
-                        "type": topology["proper_type"].long(),
-                    },
-                }
-            )
-    return out
+def unit_samples(units: list) -> list:
+    """Every stored frame, in block order — the collate oracle."""
+    return [f for frames, _key, _task in units for f in frames]

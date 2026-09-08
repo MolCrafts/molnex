@@ -47,6 +47,7 @@ from molix.batch.datamodule import DataModule
 from molix.batch.sampler import TaskMixtureBatchSampler, TokenBudgetBatchSampler
 from molix.core.seed import make_generator
 from molix.store.dataset import BaseDataset, SubsetDataset
+from tests.conftest import frame
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,33 +60,20 @@ ATOM_COUNTS = [3 + (i % 8) for i in range(N_SAMPLES)]
 EDGE_COUNTS = [c + 2 for c in ATOM_COUNTS]
 
 
-def _make_varied_samples(n: int) -> list[dict]:
-    """Build ``n`` samples whose atom/edge counts follow the module tables.
+def _make_varied_samples(n: int) -> list:
+    """Build ``n`` frames whose atom counts follow the module tables.
 
     Args:
-        n: Number of samples (``ATOM_COUNTS`` / ``EDGE_COUNTS`` prefix used).
+        n: Number of frames (``ATOM_COUNTS`` prefix used).
 
     Returns:
-        Flat sample dicts with per-atom (``Z``, ``pos``), per-edge
-        (``edge_index``, ``edge_diff``, ``edge_dist``) and graph-level
-        (``targets.U0`` — unique identity ``float(i)``) keys.
+        molpy ``Frame`` objects carrying the identity ``energy = float(i)``.
     """
     torch.manual_seed(0)
-    samples = []
-    for i in range(n):
-        na = 3 + (i % 8)
-        ne = na + 2
-        samples.append(
-            {
-                "Z": torch.ones(na, dtype=torch.long),
-                "pos": torch.randn(na, 3),
-                "edge_index": torch.randint(0, na, (ne, 2), dtype=torch.long),
-                "edge_diff": torch.randn(ne, 3),
-                "edge_dist": torch.rand(ne) + 0.5,
-                "targets": {"U0": torch.tensor([float(i)])},
-            }
-        )
-    return samples
+    return [
+        frame(Z=[1] * (3 + (i % 8)), pos=torch.randn(3 + (i % 8), 3), energy=float(i))
+        for i in range(n)
+    ]
 
 
 def _make_edgeless_samples(n: int) -> list[dict]:
@@ -105,44 +93,59 @@ def _make_edgeless_samples(n: int) -> list[dict]:
 
 
 class _CountsDataset(BaseDataset):
-    """Samples plus the two count accessors a token-budget sampler reads.
+    """Frames plus the two count accessors a token-budget sampler reads.
 
     The sampler is storage-agnostic: it consumes ``atom_counts`` /
-    ``edge_counts`` and never unpacks a sample, so its fixture is these counts
-    rather than any on-disk format. ``edge_counts`` refuses when the samples
-    carry no neighbour graph, which is what a block-backed dataset does too.
+    ``edge_counts`` and never opens a frame, so the counts are given directly.
+    ``edge_counts`` refuses when no edge counts were supplied — frames carry no
+    neighbour graph, exactly like a block-backed dataset.
     """
 
-    def __init__(self, samples: list[dict]) -> None:
+    def __init__(self, samples: list, *, edge_counts: list[int] | None = None) -> None:
         self._samples = samples
+        self._edge_counts = edge_counts
         self.getitem_calls = 0
 
     def __len__(self) -> int:
         return len(self._samples)
 
-    def __getitem__(self, idx: int) -> dict:
+    def __getitem__(self, idx: int):
         self.getitem_calls += 1
         return self._samples[idx]
 
+    def __getstate__(self) -> dict:
+        """Pickle the counts, not the frames: molpy ``Frame`` is not picklable.
+
+        The sampler plans from counts alone, so a round-tripped stub still
+        reproduces its plan — which is exactly what the pickle tests assert.
+        """
+        state = self.__dict__.copy()
+        state["_samples"] = [None] * len(self._samples)
+        state["_atom_counts"] = self.atom_counts.tolist()
+        return state
+
     @property
     def atom_counts(self) -> torch.Tensor:
-        return torch.tensor([len(s["Z"]) for s in self._samples], dtype=torch.long)
+        cached = getattr(self, "_atom_counts", None)
+        if cached is not None:
+            return torch.tensor(cached, dtype=torch.long)
+        return torch.tensor([len(s["atoms"]["number"]) for s in self._samples], dtype=torch.long)
 
     @property
     def edge_counts(self) -> torch.Tensor:
-        if "edge_index" not in self._samples[0]:
+        if self._edge_counts is None:
             raise ValueError(
                 "dataset carries no neighbour graph, so it has no edge counts — "
                 "budget on atom_counts and build the cutoff graph downstream "
                 "with molix.batch.NeighborList"
             )
-        return torch.tensor([len(s["edge_index"]) for s in self._samples], dtype=torch.long)
+        return torch.tensor(self._edge_counts[: len(self._samples)], dtype=torch.long)
 
 
 @pytest.fixture
 def varied_ds() -> _CountsDataset:
     """A dataset with the hand-checkable count distribution."""
-    return _CountsDataset(_make_varied_samples(N_SAMPLES))
+    return _CountsDataset(_make_varied_samples(N_SAMPLES), edge_counts=EDGE_COUNTS)
 
 
 def _make_budget_dm(tmp_path: Path, tag: str, *, seed: int = 42, **dm_kwargs) -> DataModule:
@@ -159,8 +162,8 @@ def _make_budget_dm(tmp_path: Path, tag: str, *, seed: int = 42, **dm_kwargs) ->
         varied-count dataset.
     """
     samples = _make_varied_samples(N_SAMPLES + 4)
-    train = _CountsDataset(samples[:N_SAMPLES])
-    val = _CountsDataset(samples[N_SAMPLES:])
+    train = _CountsDataset(samples[:N_SAMPLES], edge_counts=EDGE_COUNTS)
+    val = _CountsDataset(samples[N_SAMPLES:], edge_counts=EDGE_COUNTS)
     dm_kwargs.setdefault("batch_size", 4)
     dm_kwargs.setdefault("num_workers", 0)
     dm_kwargs.setdefault("pin_memory", False)
@@ -336,7 +339,7 @@ class TestSamplerValidation:
         with pytest.raises(ValueError) as excinfo:
             TokenBudgetBatchSampler(_NonPackedDataset(), max_atoms=16, seed=0)
         message = str(excinfo.value)
-        assert "BlockDataset" in message
+        assert "FrameStoreDataset" in message
         assert "SubsetDataset" in message
 
 
@@ -345,7 +348,7 @@ class TestSamplerNoUnpack:
 
     def test_zero_getitem_calls_during_construction_and_iteration(self, tmp_path):
         """__getitem__ is called 0 times by __init__ + one full epoch."""
-        ds = _CountsDataset(_make_varied_samples(N_SAMPLES))
+        ds = _CountsDataset(_make_varied_samples(N_SAMPLES), edge_counts=EDGE_COUNTS)
         sampler = TokenBudgetBatchSampler(ds, max_atoms=16, max_edges=24, seed=0)
         list(sampler)
         assert ds.getitem_calls == 0
@@ -356,7 +359,7 @@ class TestSamplerPickle:
 
     def test_pickle_round_trip_same_batches(self, tmp_path):
         """pickle.loads(pickle.dumps(s)) yields the identical batch list."""
-        ds = _CountsDataset(_make_varied_samples(N_SAMPLES))
+        ds = _CountsDataset(_make_varied_samples(N_SAMPLES), edge_counts=EDGE_COUNTS)
         sampler = TokenBudgetBatchSampler(ds, max_atoms=16, seed=11)
         restored = pickle.loads(pickle.dumps(sampler))
         assert list(restored) == list(sampler)
@@ -386,7 +389,7 @@ class TestDataModuleBudgetOptIn:
         for batch in loader:
             n_atoms = batch["atoms", "Z"].shape[0]
             assert 0 < n_atoms <= 16
-            total_graphs += batch["graphs", "U0"].shape[0]
+            total_graphs += batch["graphs", "energy"].shape[0]
         assert total_graphs == N_SAMPLES
 
 
@@ -527,7 +530,7 @@ def golden_ds() -> _CountsDataset:
     ``atoms + 2`` edges), so rebuilding it per test reproduces the captured
     plans exactly.
     """
-    return _CountsDataset(_make_varied_samples(GOLDEN_N))
+    return _CountsDataset(_make_varied_samples(GOLDEN_N), edge_counts=EDGE_COUNTS)
 
 
 class TestSamplerGoldenPlan:
@@ -792,37 +795,28 @@ BIG_MAX_ATOMS = 6
 BIG_BATCHES_PER_EPOCH = 203
 
 
-def _make_sized_samples(atom_counts: list[int]) -> list[dict]:
-    """Build samples with the exact per-sample atom counts given.
+def _make_sized_samples(atom_counts: list[int]) -> list:
+    """Build frames with the exact per-sample atom counts given.
 
     Args:
-        atom_counts: Per-sample atom count; edge count is ``atoms + 2`` so the
-            packed-cache schema inference cannot confuse per-atom and per-edge
-            keys (same invariant as :func:`_make_varied_samples`).
+        atom_counts: Per-frame atom count.
 
     Returns:
-        Flat sample dicts in the pipeline's raw-sample shape.
+        molpy ``Frame`` objects.
     """
     torch.manual_seed(0)
-    samples = []
-    for i, na in enumerate(atom_counts):
-        ne = na + 2
-        samples.append(
-            {
-                "Z": torch.ones(na, dtype=torch.long),
-                "pos": torch.randn(na, 3),
-                "edge_index": torch.randint(0, na, (ne, 2), dtype=torch.long),
-                "edge_diff": torch.randn(ne, 3),
-                "edge_dist": torch.rand(ne) + 0.5,
-                "targets": {"U0": torch.tensor([float(i)])},
-            }
-        )
-    return samples
+    return [
+        frame(Z=[1] * na, pos=torch.randn(na, 3), energy=float(i))
+        for i, na in enumerate(atom_counts)
+    ]
 
 
 def _task_ds() -> "_CountsDataset":
     """The 24-sample task fixture dataset."""
-    return _CountsDataset(_make_sized_samples(TASK_ATOM_COUNTS))
+    return _CountsDataset(
+        _make_sized_samples(TASK_ATOM_COUNTS),
+        edge_counts=[c + 2 for c in TASK_ATOM_COUNTS],
+    )
 
 
 def _big_task_tables() -> tuple[list[int], list[str], list[str]]:
@@ -868,7 +862,11 @@ def task_ds() -> _CountsDataset:
 def big_task_fixture() -> tuple[_CountsDataset, list[str], list[str]]:
     """Wide read-only fixture: 4 tasks × 96 units → ≥ 200 batches available."""
     atoms, labels, groups = _big_task_tables()
-    return _CountsDataset(_make_sized_samples(atoms)), labels, groups
+    return (
+        _CountsDataset(_make_sized_samples(atoms), edge_counts=[c + 2 for c in atoms]),
+        labels,
+        groups,
+    )
 
 
 def _units_in(indices: list[int]) -> dict[tuple[str, str], list[int]]:
@@ -880,10 +878,10 @@ def _units_in(indices: list[int]) -> dict[tuple[str, str], list[int]]:
 
 
 class TestTaskMixturePlan:
-    """Eager plan: single-task batches and the hard-coded golden (ac-001, ac-007)."""
+    """Eager plan: single-task batches and the hard-coded golden."""
 
     def test_every_batch_carries_exactly_one_task_label(self, task_ds):
-        """ac-001: the flat frame pool is structurally unreachable."""
+        """The flat frame pool is structurally unreachable."""
 
         sampler = TaskMixtureBatchSampler(
             task_ds,
@@ -900,7 +898,7 @@ class TestTaskMixturePlan:
             assert len({TASK_LABELS[i] for i in batch}) == 1
 
     def test_plan_indices_are_a_duplicate_free_subset_of_the_split(self, task_ds):
-        """ac-001: an epoch never repeats a frame nor reaches outside ``indices``."""
+        """An epoch never repeats a frame nor reaches outside ``indices``."""
 
         sampler = TaskMixtureBatchSampler(
             task_ds,
@@ -931,7 +929,7 @@ class TestTaskMixturePlan:
         assert len(sampler) == 5
 
     def test_hard_coded_golden_plan(self, task_ds):
-        """ac-007: the captured Stage B plan at ``seed=20260814`` reproduces."""
+        """The captured Stage B plan at ``seed=20260814`` reproduces."""
 
         sampler = TaskMixtureBatchSampler(
             task_ds,
@@ -945,7 +943,7 @@ class TestTaskMixturePlan:
         assert list(sampler) == GOLDEN_TASK_PLAN
 
     def test_hard_coded_golden_audit_dicts(self, task_ds):
-        """ac-007: the audit accessors match the hand-derived apportionment."""
+        """The audit accessors match the hand-derived apportionment."""
 
         sampler = TaskMixtureBatchSampler(
             task_ds,
@@ -961,10 +959,10 @@ class TestTaskMixturePlan:
 
 
 class TestTaskMixtureIntegrity:
-    """Unit integrity, budget compliance and the reuse boundary (ac-002/005/006)."""
+    """Unit integrity, budget compliance and the reuse boundary."""
 
     def test_scan_units_never_straddle_batches(self, task_ds):
-        """ac-002: each unit's frames land in exactly one batch, whole."""
+        """Each unit's frames land in exactly one batch, whole."""
 
         with pytest.warns(UserWarning):
             sampler = TaskMixtureBatchSampler(
@@ -986,7 +984,7 @@ class TestTaskMixtureIntegrity:
             assert set(frames) <= set(hosts[0])
 
     def test_oversize_unit_is_kept_whole_as_a_singleton_batch(self, task_ds):
-        """ac-002: ``tor_a`` (24 atoms > 20) is one whole batch, never split."""
+        """``tor_a`` (24 atoms > 20) is one whole batch, never split."""
 
         with pytest.warns(UserWarning):
             sampler = TaskMixtureBatchSampler(
@@ -1002,7 +1000,7 @@ class TestTaskMixtureIntegrity:
         assert [6, 7, 8, 9] in list(sampler)
 
     def test_oversize_unit_warns_exactly_once_naming_task_and_group(self, task_ds):
-        """ac-002: one sampler-owned UserWarning naming ``torsion`` + ``tor_a``."""
+        """One sampler-owned UserWarning naming ``torsion`` + ``tor_a``."""
 
         with pytest.warns(UserWarning) as record:
             TaskMixtureBatchSampler(
@@ -1020,7 +1018,7 @@ class TestTaskMixtureIntegrity:
         assert "torsion" in str(oversize[0].message)
 
     def test_every_batch_respects_both_budgets(self, task_ds):
-        """ac-005: no non-oversize batch exceeds ``max_atoms`` or ``max_edges``."""
+        """No non-oversize batch exceeds ``max_atoms`` or ``max_edges``."""
 
         sampler = TaskMixtureBatchSampler(
             task_ds,
@@ -1040,7 +1038,7 @@ class TestTaskMixtureIntegrity:
             assert int(edges[batch].sum()) <= 34
 
     def test_edge_budget_closes_batches_the_atom_budget_would_not(self, task_ds):
-        """ac-005: the edge cap is honoured, not silently dropped.
+        """The edge cap is honoured, not silently dropped.
 
         All 6 equilibrium units cost 30 atoms — one batch under
         ``max_atoms=100``. Their 42 edges exceed ``max_edges=32`` after the
@@ -1065,7 +1063,7 @@ class TestTaskMixtureIntegrity:
             assert int(edges[batch].sum()) <= 32
 
     def test_single_next_fit_loop_lives_in_the_packer(self):
-        """ac-005: the one open-bin accumulator appears once, inside 09's packer.
+        """The one open-bin accumulator appears once, inside 09's packer.
 
         Characterization — green already, like ``TestSamplerGoldenPlan``. It
         exists so that adding a second next-fit loop while implementing
@@ -1078,7 +1076,7 @@ class TestTaskMixtureIntegrity:
         assert "current.append(" in inspect.getsource(TokenBudgetPacker)
 
     def test_task_mixture_sampler_has_no_second_packing_loop(self):
-        """ac-005: the sampler delegates instead of re-implementing next-fit."""
+        """The sampler delegates instead of re-implementing next-fit."""
 
         source = inspect.getsource(TaskMixtureBatchSampler)
         for marker in ("current.append(", "batches.append(current)", "totals ="):
@@ -1087,7 +1085,7 @@ class TestTaskMixtureIntegrity:
         assert ".pack(" in source
 
     def test_zero_getitem_calls_during_construction_and_iteration(self, tmp_path):
-        """ac-006: unit costs come from pointers only — no sample is unpacked."""
+        """Unit costs come from pointers only — no sample is unpacked."""
 
         ds = _task_ds()
         sampler = TaskMixtureBatchSampler(
@@ -1106,10 +1104,10 @@ class TestTaskMixtureIntegrity:
 
 
 class TestTaskMixtureMixture:
-    """Largest-remainder apportionment and anti-starvation (ac-003, ac-004)."""
+    """Largest-remainder apportionment and anti-starvation."""
 
     def test_stage_b_apportionment_bound_over_203_batches(self, big_task_fixture):
-        """ac-003: ``|count_t - p_t·n| <= 1`` for Stage B, no override fired.
+        """``|count_t - p_t·n| <= 1`` for Stage B, no override fired.
 
         Deterministic apportionment makes this a hard bound, strictly stronger
         than a χ² test on a zero-variance realization. Hand-derived at n=203:
@@ -1135,7 +1133,7 @@ class TestTaskMixtureMixture:
             assert abs(counts[task] - p * len(sampler)) <= 1
 
     def test_stage_c_apportionment_bound_over_203_batches(self, big_task_fixture):
-        """ac-003: same hard bound for the four-task Stage C mixture."""
+        """Same hard bound for the four-task Stage C mixture."""
 
         ds, labels, groups = big_task_fixture
         sampler = TaskMixtureBatchSampler(
@@ -1154,7 +1152,7 @@ class TestTaskMixtureMixture:
             assert abs(counts[task] - p * len(sampler)) <= 1
 
     def test_scarce_stage_c_task_receives_at_least_one_batch(self, task_ds):
-        """ac-004: electrostatic (p=0.10, 1 unit) is never dropped at small n."""
+        """Electrostatic (p=0.10, 1 unit) is never dropped at small n."""
 
         sampler = TaskMixtureBatchSampler(
             task_ds,
@@ -1169,7 +1167,7 @@ class TestTaskMixtureMixture:
         assert sampler.batches_per_task()["electrostatic"] >= 1
 
     def test_anti_starvation_donor_stays_within_one_plus_k(self, big_task_fixture):
-        """ac-004: the override fires for p=0.02 and the donor deviates ≤ 1+K.
+        """The override fires for p=0.02 and the donor deviates ≤ 1+K.
 
         Hand-derived at n=10 for ``SCARCE_MIXTURE``: bases are (3, 3, 3, 0) for
         (equilibrium 3.0, torsion 3.5, relax 3.3, electrostatic 0.2); the single
@@ -1203,7 +1201,7 @@ class TestTaskMixtureMixture:
 
 
 class TestTaskMixtureDeterminism:
-    """The plan is a pure function of the constructor arguments (ac-008)."""
+    """The plan is a pure function of the constructor arguments."""
 
     def _build(self, dataset, seed: int):
         """Stage B sampler over the fixture split, at *seed*."""
@@ -1219,20 +1217,20 @@ class TestTaskMixtureDeterminism:
         )
 
     def test_same_arguments_give_identical_plans(self, task_ds):
-        """ac-008(a): two instances with identical config agree."""
+        """Two instances with identical config agree."""
         assert list(self._build(task_ds, TASK_SEED)) == list(self._build(task_ds, TASK_SEED))
 
     def test_seed_plus_one_gives_a_different_plan(self, task_ds):
-        """ac-008(b): reseeding actually reshuffles units and slots."""
+        """Reseeding actually reshuffles units and slots."""
         assert list(self._build(task_ds, TASK_SEED)) != list(self._build(task_ds, TASK_SEED + 1))
 
     def test_iterating_one_instance_twice_is_stable(self, task_ds):
-        """ac-008(c): ``__iter__`` replays the cached eager plan."""
+        """``__iter__`` replays the cached eager plan."""
         sampler = self._build(task_ds, TASK_SEED)
         assert list(sampler) == list(sampler)
 
     def test_pickle_round_trip_gives_an_identical_plan(self, tmp_path):
-        """ac-008(d): no dataset-sized count tensor is stored on the instance."""
+        """No dataset-sized count tensor is stored on the instance."""
         ds = _task_ds()
         sampler = self._build(ds, TASK_SEED)
         restored = pickle.loads(pickle.dumps(sampler))
@@ -1240,7 +1238,7 @@ class TestTaskMixtureDeterminism:
         assert restored.batches_per_task() == sampler.batches_per_task()
 
     def test_epoch_one_plan_is_derivable_from_seed_plus_one(self, task_ds):
-        """ac-008(e): resume needs ``seed + epoch`` only, no carried RNG state."""
+        """Resume needs ``seed + epoch`` only, no carried RNG state."""
         epoch0 = list(self._build(task_ds, TASK_SEED))
         epoch1 = list(self._build(task_ds, TASK_SEED + 1))
         fresh_epoch1 = list(self._build(task_ds, TASK_SEED + 1))
@@ -1249,7 +1247,7 @@ class TestTaskMixtureDeterminism:
 
 
 class TestTaskMixtureValidation:
-    """Eager ``ValueError``s naming argument, value and fix (ac-009)."""
+    """Eager ``ValueError``s naming argument, value and fix."""
 
     def _kwargs(self, **overrides):
         """Valid Stage B constructor kwargs, with *overrides* applied."""
@@ -1393,7 +1391,7 @@ class TestTaskMixtureValidation:
 
 
 class TestTaskMixtureAudit:
-    """Read-only audit accessors and the exhaustion path (ac-010, ac-011)."""
+    """Read-only audit accessors and the exhaustion path."""
 
     def _sampler(self, dataset, **overrides):
         """Stage C sampler covering all four tasks (4 slots, no exhaustion)."""
@@ -1411,18 +1409,18 @@ class TestTaskMixtureAudit:
         return TaskMixtureBatchSampler(dataset, **kwargs)
 
     def test_batches_per_task_sums_to_len(self, task_ds):
-        """ac-011: every planned batch is attributed to exactly one task."""
+        """Every planned batch is attributed to exactly one task."""
         sampler = self._sampler(task_ds)
         assert sum(sampler.batches_per_task().values()) == len(sampler)
 
     def test_frames_per_task_sums_to_the_planned_frame_count(self, task_ds):
-        """ac-011: every planned frame is attributed to exactly one task."""
+        """Every planned frame is attributed to exactly one task."""
         sampler = self._sampler(task_ds)
         total = sum(len(batch) for batch in sampler)
         assert sum(sampler.frames_per_task().values()) == total
 
     def test_audit_dicts_match_a_direct_recount_of_the_plan(self, task_ds):
-        """ac-011: the accessors report the realized plan, not the request."""
+        """The accessors report the realized plan, not the request."""
         sampler = self._sampler(task_ds)
         batches: dict[str, int] = {}
         frames: dict[str, int] = {}
@@ -1434,7 +1432,7 @@ class TestTaskMixtureAudit:
         assert sampler.frames_per_task() == frames
 
     def test_mutating_a_returned_dict_does_not_corrupt_the_plan(self, task_ds):
-        """ac-011: accessors hand back fresh copies, not internal state."""
+        """Accessors hand back fresh copies, not internal state."""
         sampler = self._sampler(task_ds)
         snapshot = sampler.batches_per_task()
         plan = list(sampler)
@@ -1444,7 +1442,7 @@ class TestTaskMixtureAudit:
         assert list(sampler) == plan
 
     def test_exhaustion_warns_exactly_once_naming_the_exhausted_task(self, task_ds):
-        """ac-010: ``batches_per_epoch=7`` demands 3 equilibrium batches of 2."""
+        """``batches_per_epoch=7`` demands 3 equilibrium batches of 2."""
 
         with pytest.warns(UserWarning) as record:
             TaskMixtureBatchSampler(
@@ -1461,7 +1459,7 @@ class TestTaskMixtureAudit:
         assert len(exhausted) == 1
 
     def test_exhausted_plan_length_and_composition_are_hand_computed(self, task_ds):
-        """ac-010: apportionment (3, 3, 1) vs supply (2, 3, 1) → 6 realized slots.
+        """Apportionment (3, 3, 1) vs supply (2, 3, 1) → 6 realized slots.
 
         At n=7 Stage B apportions equilibrium 2.45 → 2 + the leftover (largest
         remainder 0.45) = 3, torsion 3.15 → 3, relax 1.4 → 1. Equilibrium only
@@ -1492,7 +1490,7 @@ class TestTaskMixtureAudit:
 # ---------------------------------------------------------------------------
 #
 # The block store already emits its scheduler metadata in bounded integer form
-# (``BlockReader.task_codes`` / ``group_codes`` ``(F,) int32`` plus the
+# (``FrameStoreReader.task_codes`` / ``group_codes`` ``(F,) int32`` plus the
 # ``task_names`` dictionary), so the GROUP E fixture is written here a second
 # time as codes.  Both code tables are hand-transcribed from the GROUP E table
 # above, in first-appearance order — the order ``FrameLabelTable.from_labels``
@@ -1541,10 +1539,10 @@ def _frame_label_table() -> type:
 
 
 class TestFrameLabelTable:
-    """Per-frame ``(task, group)`` identity of one parent index space (ac-004, ac-005)."""
+    """Per-frame ``(task, group)`` identity of one parent index space."""
 
     def test_from_labels_factorizes_in_first_appearance_order(self):
-        """ac-004: the string tables factorize into exactly the block-native codes."""
+        """The string tables factorize into exactly the block-native codes."""
 
         table = _frame_label_table().from_labels(TASK_LABELS, GROUP_IDS)
         tasks, groups = table.codes_at(ALL_FRAMES)
@@ -1552,33 +1550,33 @@ class TestFrameLabelTable:
         assert groups == GROUP_CODES.tolist()
 
     def test_from_labels_keeps_the_task_dictionary_in_first_appearance_order(self):
-        """ac-004: ``task_names`` is the bounded dictionary, not a sorted set."""
+        """``task_names`` is the bounded dictionary, not a sorted set."""
 
         table = _frame_label_table().from_labels(TASK_LABELS, GROUP_IDS)
         assert table.task_names == TASK_NAMES
 
     def test_len_is_the_frame_count(self):
-        """ac-004: ``len(table)`` is ``F``, the parent index space size."""
+        """``len(table)`` is ``F``, the parent index space size."""
 
         table = _frame_label_table().from_labels(TASK_LABELS, GROUP_IDS)
         assert len(table) == 24
 
     def test_task_name_round_trips_every_frame_label(self):
-        """ac-004: decoding every task code reproduces ``TASK_LABELS``."""
+        """Decoding every task code reproduces ``TASK_LABELS``."""
 
         table = _frame_label_table().from_labels(TASK_LABELS, GROUP_IDS)
         tasks, _ = table.codes_at(ALL_FRAMES)
         assert [table.task_name(code) for code in tasks] == TASK_LABELS
 
     def test_group_label_round_trips_every_frame_group_id(self):
-        """ac-004: decoding every group code reproduces ``GROUP_IDS``."""
+        """Decoding every group code reproduces ``GROUP_IDS``."""
 
         table = _frame_label_table().from_labels(TASK_LABELS, GROUP_IDS)
         _, groups = table.codes_at(ALL_FRAMES)
         assert [table.group_label(code) for code in groups] == GROUP_IDS
 
     def test_canonical_constructor_takes_the_block_native_int32_columns(self):
-        """ac-004: ``(F,) int32`` columns + a dictionary are accepted verbatim."""
+        """``(F,) int32`` columns + a dictionary are accepted verbatim."""
 
         table = _frame_label_table()(
             task_codes=TASK_CODES,
@@ -1589,7 +1587,7 @@ class TestFrameLabelTable:
         assert table.task_name(1) == "torsion"
 
     def test_group_label_falls_back_to_str_of_the_code_without_a_dictionary(self):
-        """ac-004: no ``group_names`` → the code renders as ``str(code)``."""
+        """No ``group_names`` → the code renders as ``str(code)``."""
 
         table = _frame_label_table()(
             task_codes=TASK_CODES,
@@ -1599,7 +1597,7 @@ class TestFrameLabelTable:
         assert table.group_label(TOR_A_GROUP_CODE) == "6"
 
     def test_group_label_uses_the_dictionary_when_group_names_are_given(self):
-        """ac-004: with ``group_names`` the original label comes back."""
+        """With ``group_names`` the original label comes back."""
 
         table = _frame_label_table()(
             task_codes=TASK_CODES,
@@ -1610,7 +1608,7 @@ class TestFrameLabelTable:
         assert table.group_label(TOR_A_GROUP_CODE) == "tor_a"
 
     def test_codes_at_returns_python_int_pairs_in_the_given_order(self):
-        """ac-004: one gather per table, in the caller's order, Python ints out."""
+        """One gather per table, in the caller's order, Python ints out."""
 
         table = _frame_label_table().from_labels(TASK_LABELS, GROUP_IDS)
         tasks, groups = table.codes_at([13, 0, 20, 6])
@@ -1619,7 +1617,7 @@ class TestFrameLabelTable:
         assert all(type(code) is int for code in (*tasks, *groups))
 
     def test_unequal_table_lengths_raise_naming_both_arguments_and_lengths(self):
-        """ac-005: 24 task codes vs 20 group codes → both names, both lengths."""
+        """24 task codes vs 20 group codes → both names, both lengths."""
 
         with pytest.raises(ValueError) as excinfo:
             _frame_label_table()(
@@ -1634,7 +1632,7 @@ class TestFrameLabelTable:
         assert "20" in message
 
     def test_two_dimensional_code_tensor_raises_naming_the_argument(self):
-        """ac-005: the code tables are ``(F,)``, never ``(4, 6)``."""
+        """The code tables are ``(F,)``, never ``(4, 6)``."""
 
         with pytest.raises(ValueError) as excinfo:
             _frame_label_table()(
@@ -1647,7 +1645,7 @@ class TestFrameLabelTable:
         assert "1-D" in message or "(F,)" in message
 
     def test_floating_code_tensor_raises_naming_the_dtype(self):
-        """ac-005: a float table cannot index a dictionary — reject, never round."""
+        """A float table cannot index a dictionary — reject, never round."""
 
         with pytest.raises(ValueError) as excinfo:
             _frame_label_table()(
@@ -1660,7 +1658,7 @@ class TestFrameLabelTable:
         assert "integ" in message.lower() or "dtype" in message.lower()
 
     def test_non_cpu_code_tensor_raises_naming_cpu(self):
-        """ac-005: tables live on CPU (a ``meta`` tensor stands in for CUDA)."""
+        """Tables live on CPU (a ``meta`` tensor stands in for CUDA)."""
 
         elsewhere = torch.zeros(len(TASK_LABELS), dtype=torch.int32, device="meta")
         with pytest.raises(ValueError) as excinfo:
@@ -1674,7 +1672,7 @@ class TestFrameLabelTable:
         assert "cpu" in message.lower()
 
     def test_negative_code_raises_naming_the_argument(self):
-        """ac-005: codes index dictionaries, so ``-1`` is a table bug, not a wrap."""
+        """Codes index dictionaries, so ``-1`` is a table bug, not a wrap."""
 
         codes = GROUP_CODES.clone()
         codes[3] = -1
@@ -1689,7 +1687,7 @@ class TestFrameLabelTable:
         assert "-1" in message or "negative" in message.lower()
 
     def test_task_code_outside_the_dictionary_raises_naming_task_names(self):
-        """ac-005: code 3 with a 2-entry dictionary → names the dictionary and both."""
+        """Code 3 with a 2-entry dictionary → names the dictionary and both."""
 
         with pytest.raises(ValueError) as excinfo:
             _frame_label_table()(
@@ -1704,7 +1702,7 @@ class TestFrameLabelTable:
 
 
 class TestTaskMixtureTableForms:
-    """One sampler, two label representations (ac-005, ac-006, ac-008, ac-009)."""
+    """One sampler, two label representations."""
 
     def _string_form(self, dataset, **overrides) -> TaskMixtureBatchSampler:
         """The legacy Stage B sampler over the fixture split, string tables."""
@@ -1736,24 +1734,24 @@ class TestTaskMixtureTableForms:
         return TaskMixtureBatchSampler(dataset, **kwargs)
 
     def test_code_form_plan_equals_the_string_form_plan(self, task_ds):
-        """ac-006: two representations, one plan, at ``seed=TASK_SEED``."""
+        """Two representations, one plan, at ``seed=TASK_SEED``."""
 
         assert list(self._code_form(task_ds)) == list(self._string_form(task_ds))
 
     def test_code_form_batches_per_task_equals_the_string_form(self, task_ds):
-        """ac-006: the batch-share audit dict is representation-independent."""
+        """The batch-share audit dict is representation-independent."""
 
         code_form = self._code_form(task_ds).batches_per_task()
         assert code_form == self._string_form(task_ds).batches_per_task()
 
     def test_code_form_frames_per_task_equals_the_string_form(self, task_ds):
-        """ac-006: the frame-share audit dict is representation-independent."""
+        """The frame-share audit dict is representation-independent."""
 
         code_form = self._code_form(task_ds).frames_per_task()
         assert code_form == self._string_form(task_ds).frames_per_task()
 
     def test_oversize_warning_names_the_group_code_without_a_name_dictionary(self, task_ds):
-        """ac-006: no group dictionary → the warning names ``torsion/6``."""
+        """No group dictionary → the warning names ``torsion/6``."""
 
         with pytest.warns(UserWarning) as record:
             self._code_form(task_ds, max_atoms=20, batches_per_epoch=6)
@@ -1761,7 +1759,7 @@ class TestTaskMixtureTableForms:
         assert len(oversize) == 1
 
     def test_oversize_warning_names_the_group_label_when_group_names_are_given(self, task_ds):
-        """ac-006: with a group dictionary the code form names ``torsion/tor_a``."""
+        """With a group dictionary the code form names ``torsion/tor_a``."""
 
         with pytest.warns(UserWarning) as record:
             self._code_form(
@@ -1774,7 +1772,7 @@ class TestTaskMixtureTableForms:
         assert len(oversize) == 1
 
     def test_mutating_the_caller_code_tensors_changes_neither_plan_nor_audit(self, task_ds):
-        """ac-008: the sampler copies the tables it plans from."""
+        """The sampler copies the tables it plans from."""
 
         task_codes = TASK_CODES.clone()
         group_codes = GROUP_CODES.clone()
@@ -1791,7 +1789,7 @@ class TestTaskMixtureTableForms:
         assert sampler.frames_per_task() == frames
 
     def test_no_parent_space_table_is_retained_on_the_instance(self, task_ds):
-        """ac-008: the R1 win — no ``(F,)``-length object survives construction.
+        """The R1 win — no ``(F,)``-length object survives construction.
 
         The dataset reference is exempt (it *is* ``len(dataset)`` long by
         definition); every other retained attribute must be shorter.
@@ -1811,7 +1809,7 @@ class TestTaskMixtureTableForms:
             assert size != len(task_ds), f"sampler retains a parent-space table in {name!r}"
 
     def test_integer_task_codes_without_task_names_raise_naming_task_names(self, task_ds):
-        """ac-005: integer codes are undecodable without their dictionary."""
+        """Integer codes are undecodable without their dictionary."""
 
         with pytest.raises(ValueError) as excinfo:
             TaskMixtureBatchSampler(
@@ -1828,7 +1826,7 @@ class TestTaskMixtureTableForms:
         assert "task_labels" in message
 
     def test_task_names_with_string_labels_raise_naming_both_arguments(self, task_ds):
-        """ac-005: string labels already carry their names — a dictionary is a bug."""
+        """String labels already carry their names — a dictionary is a bug."""
 
         with pytest.raises(ValueError) as excinfo:
             TaskMixtureBatchSampler(
@@ -1846,7 +1844,7 @@ class TestTaskMixtureTableForms:
         assert "task_labels" in message
 
     def test_espaloma_shaped_construction_yields_a_non_empty_plan(self, task_ds):
-        """ac-009: ``EnergyTaskSamplerSource.batch_sampler``'s exact call shape.
+        """``EnergyTaskSamplerSource.batch_sampler``'s exact call shape.
 
         Tuple string tables, ``indices=range(len(dataset))`` and a single-task
         mixture at probability 1.0 (``scripts/mm_param_learning/

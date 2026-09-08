@@ -6,9 +6,11 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from molix.batch import TensorFrame
 from molix.ff_export import LammpsAdapter, LammpsWriter
 from molpot.forcefield import ForceField
 from molpot.ir import ExclusionScales, NonbondedScaling
+from tests.conftest import collate_frames, frame
 
 
 def _two_atom_system() -> tuple[ForceField, TensorDict]:
@@ -32,19 +34,12 @@ def _two_atom_system() -> tuple[ForceField, TensorDict]:
             },
         )
     )
-    pos = torch.tensor([[0.0, 0.0, 0.0], [1.53, 0.0, 0.0]], dtype=torch.float64)
-    system = TensorDict(
-        {
-            "atoms": TensorDict({"pos": pos}, batch_size=[2]),
-            "bonds": TensorDict(
-                {
-                    "atomi": torch.tensor([0], dtype=torch.long),
-                    "atomj": torch.tensor([1], dtype=torch.long),
-                },
-                batch_size=[1],
-            ),
-        },
-        batch_size=[],
+    # One bonded molecule at rest, put through the only Frame -> batch
+    # conversion there is: its ``bonds`` therefore reach the writer as the
+    # ``(2, N)`` COO block ``collate_molecules`` writes, not as ``atomi`` /
+    # ``atomj`` columns a fixture spelled by hand.
+    system = collate_frames(
+        [frame(Z=(6, 6), pos=((0.0, 0.0, 0.0), (1.53, 0.0, 0.0)), bonds=([0], [1]))]
     )
     return ff, system
 
@@ -136,19 +131,14 @@ def _four_atom_nonbonded(
     )
     atoms = ff.params("atoms")
     assert atoms is not None  # just filled above; narrows the ``dict | None``
-    pos = torch.arange(4, dtype=torch.float64).unsqueeze(1) * torch.tensor(
-        [3.0, 0.0, 0.0], dtype=torch.float64
+    built = frame(
+        Z=(6, 6, 6, 6),
+        pos=[[3.0 * i, 0.0, 0.0] for i in range(4)],
     )
-    system = TensorDict(
-        {
-            "atoms": TensorDict(
-                {"pos": pos, "q": atoms["q"]},
-                batch_size=[4],
-            )
-        },
-        batch_size=[],
-    )
-    return ff, system
+    # ``frame()`` takes no per-atom extras, so the charge column is written onto
+    # the block it built; the collate carries it through as ``atoms.q``.
+    built["atoms"]["q"] = atoms["q"].detach().cpu().double().numpy()
+    return ff, collate_frames([built])
 
 
 def _charges_only_forcefield() -> ForceField:
@@ -198,11 +188,7 @@ class TestLammpsWriter:
         then both neutral. LAMMPS accepts that file and runs a model with no
         electrostatics in it.
         """
-        pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float64)
-        system = TensorDict(
-            {"atoms": TensorDict({"pos": pos}, batch_size=[2])},
-            batch_size=[],
-        )
+        system = collate_frames([frame(Z=(6, 6), pos=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)))])
         ff = (
             ForceField(name="q", units="real")
             .def_atomstyle("full")
@@ -377,9 +363,9 @@ class TestLammpsWriter:
         ff, system = _two_atom_system()
         types = ff.assign_types(system)
         periodic = system.clone()
-        periodic["graphs"] = TensorDict(
-            {"cell": torch.eye(3, dtype=torch.float64).unsqueeze(0) * 12.0}, batch_size=[1]
-        )
+        # F35: ``collate_molecules`` does not read ``frame.box`` yet, so the
+        # lattice is written onto the collated batch's ``graphs`` namespace.
+        periodic["graphs", "cell"] = torch.eye(3, dtype=torch.float64).unsqueeze(0) * 12.0
         text = LammpsWriter().write_data(tmp_path / "cell.data", periodic, types=types).read_text()
         assert "0 12 xlo xhi" in text
         assert "0 12 ylo yhi" in text
@@ -514,3 +500,22 @@ class TestLammpsWriter:
             .read_text()
         )
         assert "special_bonds lj 0.000000 0.000000 0.500000 coul 0.000000 0.000000 0.833333" in text
+
+    def test_write_data_reads_a_typed_view_like_the_plain_batch(self, tmp_path):
+        """``TensorFrame`` in, the same deck out — byte for byte.
+
+        The writer reads the post-collate batch: ``atoms.pos``, the bonded
+        namespaces and ``graphs.cell``. Wrapping that batch in its typed view
+        (CLAUDE.md § TensorDict Contract) replaces no storage — ``pos`` is the
+        same tensor — so the only thing a difference in the text could mean is
+        that some reader took a different branch on the container's *type*
+        rather than on its content.
+        """
+        ff, system = _four_atom_nonbonded()
+        types = ff.assign_types(system)
+        view = TensorFrame.from_tensordict(system)
+
+        plain = LammpsWriter().write_data(tmp_path / "plain.data", system, types=types).read_text()
+        viewed = LammpsWriter().write_data(tmp_path / "view.data", view, types=types).read_text()
+
+        assert viewed == plain

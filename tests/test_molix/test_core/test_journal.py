@@ -6,9 +6,6 @@ kwargs ``append`` API (no ``MetricRecord`` dataclass, no
 ``Journal`` regression suite and pins the same invariants under
 the new contract.
 
-Acceptance traces:
-    ac-004 — kwargs API used by JournalHook.
-    ac-011 — train/val behavioural parity preserved.
 """
 
 from __future__ import annotations

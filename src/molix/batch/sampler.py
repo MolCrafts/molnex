@@ -171,7 +171,7 @@ class TokenBudgetBatchSampler:
     Args:
         dataset: A count-bearing dataset exposing ``atom_counts`` /
             ``edge_counts`` ``(n_samples,)`` count vectors —
-            :class:`~molix.store.block_view.BlockDataset` or a
+            :class:`~molix.store.frame_store_view.FrameStoreDataset` or a
             :class:`~molix.store.dataset.SubsetDataset` wrapping either.
         max_atoms: Maximum total atom count per batch, or ``None``.
         max_edges: Maximum total edge count per batch, or ``None``.
@@ -221,7 +221,7 @@ class TokenBudgetBatchSampler:
         except AttributeError as e:
             raise ValueError(
                 "TokenBudgetBatchSampler requires a count-bearing "
-                "dataset exposing atom_counts/edge_counts — use BlockDataset "
+                "dataset exposing atom_counts/edge_counts — use FrameStoreDataset "
                 "or a SubsetDataset wrapping one; got "
                 f"{type(self._dataset).__name__}."
             ) from e
@@ -597,7 +597,7 @@ class TaskMixtureBatchSampler:
     Args:
         dataset: A count-bearing dataset exposing ``atom_counts`` /
             ``edge_counts`` ``(n_samples,)`` count vectors —
-            :class:`~molix.store.block_view.BlockDataset` or a
+            :class:`~molix.store.frame_store_view.FrameStoreDataset` or a
             :class:`~molix.store.dataset.SubsetDataset` wrapping either.
             Unit costs are pointer arithmetic over those vectors; no
             sample is ever unpacked.
@@ -856,7 +856,7 @@ class TaskMixtureBatchSampler:
         except AttributeError as e:
             raise ValueError(
                 "TaskMixtureBatchSampler requires a count-bearing "
-                "dataset exposing atom_counts/edge_counts — use BlockDataset "
+                "dataset exposing atom_counts/edge_counts — use FrameStoreDataset "
                 "or a SubsetDataset wrapping one; got "
                 f"{type(self._dataset).__name__}."
             ) from e

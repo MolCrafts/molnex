@@ -28,8 +28,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase
 
+from molix.batch import TensorFrame, as_tensor_frame
 from molix.schema import CellBound, CoreCompilable
 from molpot.contract import Contribution, ExclusionClass
 from molpot.derivation.force import (
@@ -290,6 +291,15 @@ class Potentials(BasePotential):
         # and keyed on the batch rather than on its shape because a new frame of
         # the same shape is a new geometry (:meth:`_check_geometry`).
         self._checked_geometry: tuple[weakref.ref[Any], tuple[int, ...]] | None = None
+        # The typed view last built for a batch, keyed on that batch object by
+        # weak reference (:meth:`_frame`). Not a cache for speed: the view's
+        # *identity* is what the geometry memo above is keyed on, so a fresh
+        # wrapper per call would re-run the F29 host sync on every MD step and
+        # put it inside any trace that reaches it.
+        self._frame_view: tuple[weakref.ref[Any], TensorFrame] | None = None
+        # The view of "no system at all" — the ``BasePotential`` ``pos=``-only
+        # call — built once so that path is memoized like any other frame.
+        self._empty_frame: TensorFrame | None = None
         self._bonded_styles: frozenset[str] = frozenset()
         # The compiled build of :meth:`_classical_core`, installed by
         # :meth:`compile_core` on a field with no mlip. ``None`` means "call the
@@ -512,11 +522,17 @@ class Potentials(BasePotential):
         )
 
     def forward(self, data: Any = None, **kwargs: Any) -> Any:
-        """Energy, or TensorDict with ``graphs.energy`` / ``atoms.forces``.
+        """Energy, or the batch with ``graphs.energy`` / ``atoms.forces`` written.
 
-        A nested TensorDict is treated as an MD / composer batch: energy and
-        forces are written in place and the batch is returned so the module
-        composes into the MD driver's TensorDict force adapter.
+        A batch is treated as an MD / composer system: energy and forces are
+        written in place and the batch is returned so the module composes into
+        the MD driver's TensorDict force adapter. "A batch" is the post-collate
+        container in any of its spellings — the plain ``TensorDict`` and its
+        :class:`~molix.batch.TensorFrame` view alike, since the view *is* the
+        caller's leaves (:meth:`_frame`) and a write through it lands in the
+        caller's own storage. Answering a view with a bare energy tensor
+        instead would leave that caller's batch with no forces in it and
+        nothing raised.
 
         The energy is reshaped to the ``graphs`` namespace's own batch size on
         the way in — the same defence :meth:`calc_energy_forces_virial` applies
@@ -528,21 +544,31 @@ class Potentials(BasePotential):
         batch, so without the reshape the most ordinary case is the one that
         raises.
         """
-        if self.mlip is not None and isinstance(data, TensorDict) and kwargs.get("pos") is None:
-            return self.mlip(data)
-        energy, forces = self.calc_energy_forces(data, pos=kwargs.get("pos"))
-        if isinstance(data, TensorDict):
-            if "graphs" not in data.keys():
-                data["graphs"] = TensorDict({}, batch_size=[])
-            graphs_bs = data["graphs"].batch_size
+        writes_back = isinstance(data, TensorDictBase)
+        frame = self._frame(data)
+        if self.mlip is not None and writes_back and kwargs.get("pos") is None:
+            return self.mlip(frame)
+        energy, forces = self.calc_energy_forces(frame, pos=kwargs.get("pos"))
+        if writes_back:
+            if "graphs" not in frame.keys():
+                frame["graphs"] = TensorDict({}, batch_size=[])
+            graphs_bs = frame.graphs.batch_size
             # A ``batch_size=[]`` graphs namespace constrains nothing, so the
             # energy is stored as produced; a sized one is the shape to answer in.
-            data[ENERGY_KEY] = energy.reshape(*graphs_bs) if graphs_bs else energy
-            data[FORCES_KEY] = forces
+            frame[ENERGY_KEY] = energy.reshape(*graphs_bs) if graphs_bs else energy
+            frame[FORCES_KEY] = forces
+            # The caller's own container back, not the view: the writes above
+            # went into its storage, so the two carry the same batch and the
+            # one that was handed in is the one that composes onward.
             return data
         return energy
 
-    def bind_topology(self, system: Any, *, pos: torch.Tensor | None = None) -> None:
+    def bind_topology(
+        self,
+        system: TensorDict | TensorFrame | Mapping[str, Any],
+        *,
+        pos: torch.Tensor | None = None,
+    ) -> None:
         """Build this topology's exclusion table, and check the declared net charge.
 
         Called **once per topology** — the connectivity analogue of
@@ -642,13 +668,14 @@ class Potentials(BasePotential):
         # three bound fields are assigned at the very bottom, after everything
         # that can raise. (The geometry record in between is the gate's own
         # bookkeeping, not a bind: it says a frame passed, which it did.)
-        p = self._pos(system, pos)
-        self._check_pair_orientation(system)
+        frame = self._frame(system)
+        p = self._pos(frame, pos)
+        self._check_pair_orientation(frame)
         charges = (self.forcefield.params("atoms") or {}).get("q")
-        declared = self._ns_tensor(self._namespace(system, "graphs"), "total_charge")
+        declared = frame.graphs.get("total_charge", None) if "graphs" in frame.keys() else None
         if charges is not None and declared is not None and declared.numel() != 0:
             q = charges.detach()
-            atom_batch = self._atom_batch(system, p.shape[0], p.device)
+            atom_batch = self._atom_batch(frame, p.shape[0], p.device)
             summed = torch.zeros(declared.shape[0], dtype=q.dtype, device=q.device).index_add_(
                 0, atom_batch, q
             )
@@ -667,24 +694,24 @@ class Potentials(BasePotential):
         # gate hands back the fingerprint it built, so the bind does not build a
         # second one.
         self._checked_geometry = None
-        fingerprint = self._check_geometry(system, p)
+        fingerprint = self._check_geometry(frame, p)
         # Host-side, once: how many graphs this batch holds. Off the hot path
         # it is the one number an evaluation cannot read without a device sync
         # (see :meth:`_num_graphs`), and a bind is where syncs are allowed.
-        num_graphs = self._count_graphs(system)
+        num_graphs = self._count_graphs(frame)
         exclusions = ExclusionTable(
             n_atoms=p.shape[0],
             scaling=self.forcefield.nonbonded_scaling,
-            bond_index=self._bond_index(system),
-            angle_index=self._angle_index(system),
-            proper_index=self._proper_index(system),
+            bond_index=self._bond_index(frame),
+            angle_index=self._angle_index(frame),
+            proper_index=self._proper_index(frame),
             device=p.device,
         )
         self._bound_topology = fingerprint
         self._bound_num_graphs = num_graphs
         self._exclusions = exclusions
 
-    def _check_pair_orientation(self, system: Any) -> None:
+    def _check_pair_orientation(self, frame: TensorFrame) -> None:
         """Refuse a placed list that :meth:`_placed_pairs` would read as all dead.
 
         :meth:`_placed_pairs` prices the ``source < target`` half of the
@@ -702,14 +729,16 @@ class Potentials(BasePotential):
         runs ``source > target``.
 
         Args:
-            system: Batch / mapping optionally carrying ``edges.edge_index``
-                ``(E, 2)``. No list, or a list of no rows, is nothing to check.
+            frame: The batch's typed view, optionally carrying
+                ``edges.edge_index`` ``(E, 2)``. No list, or a list of no rows,
+                is nothing to check.
 
         Raises:
             ValueError: Some row runs ``source > target`` and none runs
                 ``source < target``.
         """
-        edge_index = self._ns_tensor(self._namespace(system, "edges"), "edge_index")
+        edges = frame.edges if "edges" in frame.keys() else None
+        edge_index = None if edges is None else edges.get("edge_index", None)
         if edge_index is None or edge_index.shape[0] == 0:
             return
         src, tgt = edge_index[:, 0], edge_index[:, 1]
@@ -726,7 +755,7 @@ class Potentials(BasePotential):
                 "columns before binding."
             )
 
-    def _check_geometry(self, system: Any, pos: torch.Tensor) -> tuple[int, ...]:
+    def _check_geometry(self, frame: TensorFrame, pos: torch.Tensor) -> tuple[int, ...]:
         """Put this batch's geometry through :meth:`_check_bonds_unwrapped`, once.
 
         The **gate every public entry point goes through** — :meth:`calc_energy`,
@@ -808,11 +837,13 @@ class Potentials(BasePotential):
         all (finding F34, failed closed at :meth:`molix.md.MD.set_compiler`).
 
         Args:
-            system: The batch being priced, as :meth:`_check_bonds_unwrapped`
-                reads it (``graphs.cell``, the ``bonds`` namespace,
-                ``atoms.batch``). Its identity **is** the memo key; a mapping
-                that does not support weak references is simply never memoized
-                and is checked on every call.
+            frame: The typed view of the batch being priced, as
+                :meth:`_check_bonds_unwrapped` reads it (``graphs.cell``, the
+                ``bonds`` namespace, ``atoms.batch``). Its identity **is** the
+                memo key — which is why :meth:`_frame` hands back the same view
+                for the same batch object, rather than a fresh wrapper per
+                call. A system that cannot be weakly referenced (a plain
+                ``dict``) is simply never memoized and is checked on every call.
             pos: Positions ``(N, 3)`` Å the energy would be priced at — the
                 caller's ``pos`` override when there is one, since that is the
                 geometry that gets measured. It is deliberately **not** part of
@@ -834,15 +865,15 @@ class Potentials(BasePotential):
                 eager one (see above).
         """
         checked = self._checked_geometry
-        if checked is not None and checked[0]() is system:
+        if checked is not None and checked[0]() is frame:
             return checked[1]
         # No "are we tracing?" escape hatch here, deliberately — see the
         # docstring. A miss runs the check in every mode, because the one thing
         # this method may never do is return without an answer.
-        fingerprint = self._topology_fingerprint(system, pos.shape[0])
-        self._check_bonds_unwrapped(system, pos)
+        fingerprint = self._topology_fingerprint(frame, pos.shape[0])
+        self._check_bonds_unwrapped(frame, pos)
         try:
-            self._checked_geometry = (weakref.ref(system), fingerprint)
+            self._checked_geometry = (weakref.ref(frame), fingerprint)
         except TypeError:
             # A mapping that cannot be weakly referenced (a plain dict) is
             # checked on every call rather than memoized against an address
@@ -850,7 +881,7 @@ class Potentials(BasePotential):
             self._checked_geometry = None
         return fingerprint
 
-    def _check_bonds_unwrapped(self, system: Any, pos: torch.Tensor) -> None:
+    def _check_bonds_unwrapped(self, frame: TensorFrame, pos: torch.Tensor) -> None:
         """Refuse a periodic frame whose molecules are folded across a box face.
 
         This is the **one** place the precondition every public entry point
@@ -903,9 +934,10 @@ class Potentials(BasePotential):
         is passed through untouched.
 
         Args:
-            system: Batch / mapping optionally carrying ``graphs.cell``
-                ``(3, 3)`` or ``(B, 3, 3)`` in Å and the ``bonds`` namespace.
-                ``atoms.batch`` picks each bond's cell out of a batched one.
+            frame: The batch's typed view, optionally carrying
+                ``graphs.cell`` ``(3, 3)`` or ``(B, 3, 3)`` in Å and the
+                ``bonds`` namespace. ``atoms.batch`` picks each bond's cell out
+                of a batched one.
             pos: Positions ``(N, 3)`` in Å the energy would be priced at — the
                 ``pos`` override when :meth:`bind_topology` was handed one,
                 since that is the geometry, not ``atoms.pos``. Read detached.
@@ -915,8 +947,8 @@ class Potentials(BasePotential):
                 width of its graph's cell, naming that bond, its length, the
                 limit and the remedy.
         """
-        cell = self._ns_tensor(self._namespace(system, "graphs"), "cell")
-        bond_index = self._bond_index(system)
+        cell = frame.graphs.get("cell", None) if "graphs" in frame.keys() else None
+        bond_index = self._bond_index(frame)
         if cell is None or bond_index is None or bond_index.shape[-1] == 0:
             return
         cells = cell.detach().to(pos)
@@ -944,7 +976,7 @@ class Potentials(BasePotential):
         p = pos.detach()
         length = (p[target] - p[source]).norm(dim=-1)
         graph = (
-            self._atom_batch(system, p.shape[0], p.device)[source]
+            self._atom_batch(frame, p.shape[0], p.device)[source]
             if half_width.shape[0] > 1
             else torch.zeros_like(source)
         )
@@ -1083,7 +1115,7 @@ class Potentials(BasePotential):
 
     def calc_energy(
         self,
-        system: Any,
+        system: TensorDict | TensorFrame | Mapping[str, Any],
         *,
         pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -1095,19 +1127,22 @@ class Potentials(BasePotential):
         differentiate it.
 
         **The mlip branch.** When :attr:`mlip` is not ``None`` (``def_pairstyle``
-        was given an ``nn.Module`` instead of a classical style name) and
-        ``system`` is a ``TensorDict``, this method never sums the classical
-        term energies below — it hands the whole batch to
+        was given an ``nn.Module`` instead of a classical style name) and the
+        system carries an ``atoms`` namespace, this method never sums the
+        classical term energies below — it hands the whole batch to
         :func:`molpot.derivation.protocol.call_energy`, which is the single
         place that decides whether the mlip's ``_write_energy`` protocol hook or
         a plain ``model(batch)`` forward runs. Whether the mlip has an installed
         compiled core (see :meth:`compile_core`) is invisible here too — the
         mlip decides, not this branch. A ``pos`` override is written onto
-        ``system["atoms", "pos"]`` *before* that call, since the mlip only ever
-        reads positions off the batch — writing it after would be ignored. With
-        an mlip but a non-``TensorDict`` ``system``, this falls through to the
-        classical path below instead (which, with no classical styles
-        declared, contributes an empty sum).
+        ``atoms.pos`` *before* that call, since the mlip only ever reads
+        positions off the batch — writing it after would be ignored. What the
+        batch is *carried in* decides nothing here: a ``TensorDict``, its
+        :class:`~molix.batch.TensorFrame` view and a nested mapping of the same
+        namespaces are one system (:meth:`_frame`). With an mlip but a system
+        carrying no ``atoms`` at all — the ``pos=``-only call — there is nothing
+        to hand it, so this falls through to the classical path below instead
+        (which, with no classical styles declared, contributes an empty sum).
 
         **Precondition — each molecule must arrive whole (F29).** A periodic
         frame's molecules must not be wrapped across a box face: the bonded
@@ -1151,32 +1186,35 @@ class Potentials(BasePotential):
                 that cannot wait for a bind, because a bonded-only field never
                 performs one.
         """
-        if self.mlip is not None and isinstance(system, TensorDict):
+        frame = self._frame(system)
+        if self.mlip is not None and "atoms" in frame.keys():
             # The pos override lands on the batch first: the mlip reads its
             # positions off ``atoms.pos``, so writing after the call would be
-            # ignored. Which entry of the mlip evaluates the energy is
-            # ``call_energy``'s policy alone — this branch must not reimplement
-            # it by probing the mlip. Whether a compiled core is installed is
-            # likewise the mlip's own business and invisible here.
+            # ignored. The write goes through the view, which shares the
+            # caller's storage, so it lands on the caller's own batch. Which
+            # entry of the mlip evaluates the energy is ``call_energy``'s policy
+            # alone — this branch must not reimplement it by probing the mlip.
+            # Whether a compiled core is installed is likewise the mlip's own
+            # business and invisible here.
             if pos is not None:
-                system["atoms", "pos"] = pos
-            out = call_energy(self.mlip, system)
+                frame["atoms", "pos"] = pos
+            out = call_energy(self.mlip, frame)
             return out[ENERGY_KEY]
-        p = self._pos(system, pos)
+        p = self._pos(frame, pos)
         # The F29 gate, on the entry rather than on the bind: a bonded-only
         # field binds nothing, so a bind-only check would miss precisely the
         # composition whose bonded terms it protects (:meth:`_check_geometry`,
         # once per frame).
-        self._check_geometry(system, p)
-        num_graphs = self._num_graphs(system)
+        self._check_geometry(frame, p)
+        num_graphs = self._num_graphs(frame)
         total = torch.zeros((num_graphs,) if num_graphs > 1 else (), device=p.device, dtype=p.dtype)
-        for e in self.term_energies(system, pos=p).values():
+        for e in self.term_energies(frame, pos=p).values():
             total = total + e
         return total
 
     def calc_forces(
         self,
-        system: Any,
+        system: TensorDict | TensorFrame | Mapping[str, Any],
         *,
         pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -1212,14 +1250,15 @@ class Potentials(BasePotential):
             Forces ``(N, 3)`` in the ForceField's unit convention
             (``units="real"`` default: kcal mol⁻¹ Å⁻¹).
         """
-        p = position_leaf(self._pos(system, pos))
+        frame = self._frame(system)
+        p = position_leaf(self._pos(frame, pos))
         with torch.enable_grad():
-            energy = self.calc_energy(system, pos=p)
+            energy = self.calc_energy(frame, pos=p)
         return autograd_forces_from_energy(energy, p)
 
     def calc_energy_forces_virial(
         self,
-        system: Any,
+        system: TensorDict | TensorFrame | Mapping[str, Any],
         *,
         pos: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1240,7 +1279,9 @@ class Potentials(BasePotential):
 
         Args:
             system: Batch carrying ``atoms.pos`` and ``graphs.cell``, each
-                molecule whole (see the precondition above).
+                molecule whole (see the precondition above). Read — and written
+                back to, for the duration of the strain closure — through its
+                typed view (:meth:`_frame`), which shares the caller's storage.
             pos: Optional positions overriding ``atoms.pos``.
 
         Returns:
@@ -1248,7 +1289,8 @@ class Potentials(BasePotential):
             ``(3, 3)`` in the ForceField energy unit.
 
         Raises:
-            TypeError: If ``system`` is not a TensorDict.
+            TypeError: ``system`` is not a batch, a view of one or a nested
+                mapping of its namespaces (:func:`as_tensor_frame`).
             ValueError: ``graphs.cell`` is missing; or a classical pair term is
                 declared and the batch carries a placed edge list without
                 ``edges.shifts``, whose lattice remainder those terms recover
@@ -1260,22 +1302,28 @@ class Potentials(BasePotential):
                 (F29) — a cell is a precondition of this entry, so the check
                 always has a limit to measure against here.
         """
-        if not isinstance(system, TensorDict):
-            raise TypeError("calc_energy_forces_virial requires a TensorDict system")
-        nested = system.keys(include_nested=True)
+        frame = self._frame(system)
+        nested = frame.keys(include_nested=True)
         if ("graphs", "cell") not in nested:
             raise ValueError("calc_energy_forces_virial requires graphs.cell")
-        cell_buf = system["graphs", "cell"]
+        # Annotated because the view's ``__getitem__`` is typed as
+        # "leaf or sub-namespace": what these keys hold is a tensor, and the
+        # reads below (``.dim()``, ``.norm(dim=-1)``, indexing) are a tensor's.
+        cell_buf: torch.Tensor = frame["graphs", "cell"]
         batched_cell = cell_buf.dim() == 3
         cell_3 = cell_buf[0] if batched_cell else cell_buf
-        pos_buf = self._pos(system, pos)
+        pos_buf = self._pos(frame, pos)
         # F29, on the frame as handed in: the strain closure below replaces
         # ``atoms.pos`` with a deformed copy, so the geometry a caller is
         # answerable for is this one, and it must be judged before it is
         # deformed (:meth:`_check_geometry`, once per frame).
-        self._check_geometry(system, pos_buf)
-        edge_index = system["edges", "edge_index"] if ("edges", "edge_index") in nested else None
-        edge_diff_buf = system["edges", "edge_diff"] if ("edges", "edge_diff") in nested else None
+        self._check_geometry(frame, pos_buf)
+        edge_index: torch.Tensor | None = (
+            frame["edges", "edge_index"] if ("edges", "edge_index") in nested else None
+        )
+        edge_diff_buf: torch.Tensor | None = (
+            frame["edges", "edge_diff"] if ("edges", "edge_diff") in nested else None
+        )
         # Strain the Cartesian periodic remainder, not a copy of edge_diff.
         # Passing frozen edge_diff as an independent cartesian makes local
         # graph energy (MACE / Polar) a function of strain only, so
@@ -1301,9 +1349,9 @@ class Potentials(BasePotential):
                 "molix.md.NeighborList (which writes edges.shifts), or ask for energy and "
                 "forces only — those are exact on this batch."
             )
-        shifts_buf = None
+        shifts_buf: torch.Tensor | None = None
         if stored_shifts:
-            shifts_buf = system["edges", "shifts"]
+            shifts_buf = frame["edges", "shifts"]
         elif edge_diff_buf is not None and edge_index is not None:
             src0 = edge_index[:, 0]
             tgt0 = edge_index[:, 1]
@@ -1313,47 +1361,47 @@ class Potentials(BasePotential):
         def energy_fn(
             pos_s: torch.Tensor, cell_s: torch.Tensor, *strained: torch.Tensor
         ) -> torch.Tensor:
-            system["atoms", "pos"] = pos_s
-            system["graphs", "cell"] = cell_s.unsqueeze(0) if batched_cell else cell_s
+            frame["atoms", "pos"] = pos_s
+            frame["graphs", "cell"] = cell_s.unsqueeze(0) if batched_cell else cell_s
             if strained and stored_shifts:
                 # The remainder a term rebuilds its own pair vectors from
                 # (``Potentials._placed_pairs``) must be the *strained*
                 # one, or every wrapped pair holds its lattice vector fixed
                 # while the box deforms and its share of ``W = dE/deps`` is
                 # missing.
-                system["edges", "shifts"] = strained[0]
+                frame["edges", "shifts"] = strained[0]
             if edge_index is not None:
                 src = edge_index[:, 0]
                 tgt = edge_index[:, 1]
                 diff = pos_s[tgt] - pos_s[src]
                 if strained:
                     diff = diff + strained[0]
-                system["edges", "edge_diff"] = diff
-                system["edges", "edge_dist"] = diff.norm(dim=-1)
-            energy = self.calc_energy(system, pos=pos_s)
+                frame["edges", "edge_diff"] = diff
+                frame["edges", "edge_dist"] = diff.norm(dim=-1)
+            energy = self.calc_energy(frame, pos=pos_s)
             return energy if energy.ndim == 0 else energy.sum()
 
         energy, forces, virial = autograd_forces_and_virial(energy_fn, pos_buf, cell_3, *cartesians)
         # Strain writes replace graphs.cell / pos / edge_diff with graph
         # tensors. Put the MD buffers back so the barostat copy_ and the
         # next neighbour update still see the same storage.
-        system["atoms", "pos"] = pos_buf
-        system["graphs", "cell"] = cell_buf
+        frame["atoms", "pos"] = pos_buf
+        frame["graphs", "cell"] = cell_buf
         if stored_shifts and shifts_buf is not None:
-            system["edges", "shifts"] = shifts_buf
+            frame["edges", "shifts"] = shifts_buf
         if edge_diff_buf is not None:
-            system["edges", "edge_diff"] = edge_diff_buf
-            system["edges", "edge_dist"] = edge_diff_buf.norm(dim=-1)
-        graphs_bs = system["graphs"].batch_size
+            frame["edges", "edge_diff"] = edge_diff_buf
+            frame["edges", "edge_dist"] = edge_diff_buf.norm(dim=-1)
+        graphs_bs = frame.graphs.batch_size
         stored = energy.detach().reshape(*graphs_bs) if graphs_bs else energy.detach().reshape(())
-        write_energy(system, stored)
-        write_forces(system, forces)
-        write_virial(system, virial)
+        write_energy(frame, stored)
+        write_forces(frame, forces)
+        write_virial(frame, virial)
         return energy, forces, virial
 
     def calc_virial(
         self,
-        system: Any,
+        system: TensorDict | TensorFrame | Mapping[str, Any],
         *,
         pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -1367,7 +1415,7 @@ class Potentials(BasePotential):
 
     def calc_energy_forces(
         self,
-        system: Any,
+        system: TensorDict | TensorFrame | Mapping[str, Any],
         *,
         pos: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1440,17 +1488,18 @@ class Potentials(BasePotential):
                 which runs whether or not the field binds — a molecule wrapped
                 across a box face.
         """
-        if self.mlip is not None and isinstance(system, TensorDict):
+        frame = self._frame(system)
+        if self.mlip is not None and "atoms" in frame.keys():
             # Same branch policy as ``calc_energy``: the mlip owns the whole
             # energy. Without this, an mlip ForceField — which declares no
             # classical style — falls through the term loop below and returns a
             # silent ``(0, zeros)`` instead of its energy and forces.
-            leaf = position_leaf(self._pos(system, pos))
+            leaf = position_leaf(self._pos(frame, pos))
             with torch.enable_grad():
-                energy = self.calc_energy(system, pos=leaf)
+                energy = self.calc_energy(frame, pos=leaf)
             return energy, autograd_forces_from_energy(energy, leaf)
 
-        p = self._pos(system, pos)
+        p = self._pos(frame, pos)
         # Bind the topology *before* the core, not lazily from inside the first
         # ``_scaled_pairs``. Identical work either way — this is the same
         # once-per-topology bind, just hoisted — but it is host-side work
@@ -1460,7 +1509,7 @@ class Potentials(BasePotential):
         # graph from its very first call, so a caller does not have to know to
         # evaluate once eagerly before ``compile_core``.
         if self._exclusions is None and self._rebuilds_pairs():
-            self.bind_topology(system, pos=p)
+            self.bind_topology(frame, pos=p)
         # The F29 geometry gate, unconditionally — the bind above is skipped for
         # a bonded-only field, and that is the field whose bonded terms the
         # check protects. Idempotent per frame (:meth:`_check_geometry`): the
@@ -1469,18 +1518,21 @@ class Potentials(BasePotential):
         # check on its first step and that same pointer comparison on every
         # later one. It stays outside the core, so the host sync it costs when
         # it does run never reaches a trace.
-        self._check_geometry(system, p)
+        self._check_geometry(frame, p)
         # One function, two builds: the compiled one when ``compile_core`` has
         # installed it, otherwise the eager bound method. Never a second
-        # evaluation path — see :meth:`compile_core`.
+        # evaluation path — see :meth:`compile_core`. The core is handed the
+        # **view**, wrapped once out here where the wrap is eager: it reads the
+        # same leaves the plain batch holds, so the trace is the one it always
+        # was (:meth:`_frame`).
         core = self._compiled_classical
         if core is None:
             core = self._classical_core
-        return core(system, p)
+        return core(frame, p)
 
     def _classical_core(
         self,
-        system: Any,
+        frame: TensorFrame,
         pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """The classical ``(system, pos) -> (energy, forces)`` evaluation itself.
@@ -1503,8 +1555,15 @@ class Potentials(BasePotential):
         measure the seam the way the run reaches it.
 
         Args:
-            system: Batch / mapping carrying the topology and the ``edges``
-                list, as :meth:`calc_energy_forces` received it.
+            frame: The batch's typed view, carrying the topology and the
+                ``edges`` list — the container :meth:`calc_energy_forces`
+                wrapped once, eagerly, before entering here. The view is the
+                only spelling this core accepts, so the compiled region holds
+                no wrap and no branch on the container's type; a caller
+                measuring *this* function — the compile seam's own gate does —
+                hands ``as_tensor_frame(batch)``, the same container production
+                hands it, so the graph the gate certifies is the graph the run
+                compiles.
             pos: Positions ``(N, 3)`` Å already resolved by :meth:`_pos` —
                 detached here, so callers may pass the batch's own tensor.
 
@@ -1515,18 +1574,18 @@ class Potentials(BasePotential):
         p = pos.detach()
         device = p.device
         dtype = p.dtype
-        num_graphs = self._num_graphs(system)
+        num_graphs = self._num_graphs(frame)
         batched = num_graphs > 1
         zero = torch.zeros((num_graphs,) if batched else (), device=device, dtype=dtype)
         n_atoms = p.shape[0]
-        atom_batch = self._atom_batch(system, n_atoms, device)
+        atom_batch = self._atom_batch(frame, n_atoms, device)
 
         energy = zero
         forces = p.new_zeros((n_atoms, 3))
 
         if "bond" in self._bonded_styles:
             self._require_bonded_params("bond", "bonds", self.bond)
-            bond_index = self._bond_index(system)
+            bond_index = self._bond_index(frame)
             if self.bond is not None and bond_index is not None and bond_index.size(1) > 0:
                 e, f = self.bond.energy_forces(
                     pos=p,
@@ -1542,7 +1601,7 @@ class Potentials(BasePotential):
 
         if "angle" in self._bonded_styles:
             self._require_bonded_params("angle", "angles", self.angle)
-            angle_index = self._angle_index(system)
+            angle_index = self._angle_index(frame)
             if self.angle is not None and angle_index is not None and angle_index.size(1) > 0:
                 e, f = self.angle.energy_forces(
                     pos=p,
@@ -1558,7 +1617,7 @@ class Potentials(BasePotential):
 
         if "dihedral" in self._bonded_styles:
             self._require_bonded_params("dihedral", "propers", self.proper)
-            proper_index = self._proper_index(system)
+            proper_index = self._proper_index(frame)
             if self.proper is not None and proper_index is not None and proper_index.size(1) > 0:
                 e, f = self.proper.energy_forces(
                     pos=p,
@@ -1574,7 +1633,7 @@ class Potentials(BasePotential):
 
         if "improper" in self._bonded_styles:
             self._require_bonded_params("improper", "impropers", self.improper)
-            improper_index = self._improper_index(system)
+            improper_index = self._improper_index(frame)
             if (
                 self.improper is not None
                 and improper_index is not None
@@ -1593,12 +1652,12 @@ class Potentials(BasePotential):
             forces = forces + f
 
         if self.lj is not None:
-            (rep, disp), f = self._lj_energy_forces(system, p)
+            (rep, disp), f = self._lj_energy_forces(frame, p)
             energy = energy + rep + disp
             forces = forces + f
 
         if self.coulomb_open is not None or self.coulomb_periodic is not None:
-            e, f = self._coulomb_energy_forces(system, p, n_atoms)
+            e, f = self._coulomb_energy_forces(frame, p, n_atoms)
             energy = energy + e
             forces = forces + f
 
@@ -1606,7 +1665,7 @@ class Potentials(BasePotential):
 
     def term_energies(
         self,
-        system: Any,
+        system: TensorDict | TensorFrame | Mapping[str, Any],
         *,
         pos: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
@@ -1643,18 +1702,19 @@ class Potentials(BasePotential):
                 lattice gives one reciprocal sum, so each graph would be
                 charged the whole box.
         """
-        p = self._pos(system, pos)
+        frame = self._frame(system)
+        p = self._pos(frame, pos)
         device = p.device
         dtype = p.dtype
-        num_graphs = self._num_graphs(system)
+        num_graphs = self._num_graphs(frame)
         batched = num_graphs > 1
         zero = torch.zeros((num_graphs,) if batched else (), device=device, dtype=dtype)
-        atom_batch = self._atom_batch(system, p.shape[0], device)
+        atom_batch = self._atom_batch(frame, p.shape[0], device)
         terms: dict[str, torch.Tensor] = {}
 
         if "bond" in self._bonded_styles:
             self._require_bonded_params("bond", "bonds", self.bond)
-            bond_index = self._bond_index(system)
+            bond_index = self._bond_index(frame)
             if self.bond is not None and bond_index is not None and bond_index.size(1) > 0:
                 n = bond_index.size(1)
                 terms["bonds"] = self.bond(
@@ -1669,7 +1729,7 @@ class Potentials(BasePotential):
 
         if "angle" in self._bonded_styles:
             self._require_bonded_params("angle", "angles", self.angle)
-            angle_index = self._angle_index(system)
+            angle_index = self._angle_index(frame)
             if self.angle is not None and angle_index is not None and angle_index.size(1) > 0:
                 n = angle_index.size(1)
                 terms["angles"] = self.angle(
@@ -1684,7 +1744,7 @@ class Potentials(BasePotential):
 
         if "dihedral" in self._bonded_styles:
             self._require_bonded_params("dihedral", "propers", self.proper)
-            proper_index = self._proper_index(system)
+            proper_index = self._proper_index(frame)
             if self.proper is not None and proper_index is not None and proper_index.size(1) > 0:
                 n = proper_index.size(1)
                 terms["propers"] = self.proper(
@@ -1699,7 +1759,7 @@ class Potentials(BasePotential):
 
         if "improper" in self._bonded_styles:
             self._require_bonded_params("improper", "impropers", self.improper)
-            improper_index = self._improper_index(system)
+            improper_index = self._improper_index(frame)
             if (
                 self.improper is not None
                 and improper_index is not None
@@ -1717,14 +1777,14 @@ class Potentials(BasePotential):
                 terms["impropers"] = zero
 
         if self.lj is not None:
-            terms["lj_repulsion"], terms["lj_dispersion"] = self._lj_energy(system, p)
+            terms["lj_repulsion"], terms["lj_dispersion"] = self._lj_energy(frame, p)
         if self.coulomb_open is not None or self.coulomb_periodic is not None:
-            terms["coulomb"] = self._coulomb_energy(system, p)
+            terms["coulomb"] = self._coulomb_energy(frame, p)
         return terms
 
     def contribution_energies(
         self,
-        system: Any,
+        system: TensorDict | TensorFrame | Mapping[str, Any],
         *,
         pos: torch.Tensor | None = None,
     ) -> dict[Contribution, torch.Tensor]:
@@ -1802,19 +1862,17 @@ class Potentials(BasePotential):
             )
         return atoms["epsilon"], atoms["sigma"]
 
-    def _cell(self, system: Any) -> torch.Tensor | None:
-        graphs = self._namespace(system, "graphs")
-        if graphs is not None:
-            cell = self._ns_tensor(graphs, "cell")
-            if cell is not None:
-                return cell[0] if cell.ndim == 3 else cell
-        if isinstance(system, Mapping) and "cell" in system:
-            return system["cell"]
-        return None
+    def _cell(self, frame: TensorFrame) -> torch.Tensor | None:
+        if "graphs" not in frame.keys():
+            return None
+        cell = frame.graphs.get("cell", None)
+        if cell is None:
+            return None
+        return cell[0] if cell.ndim == 3 else cell
 
     def _placed_pairs(
         self,
-        system: Any,
+        frame: TensorFrame,
         pos: torch.Tensor,
         *,
         cutoff: float | None,
@@ -1891,7 +1949,11 @@ class Potentials(BasePotential):
         refused instead (see ``Raises``).
 
         Args:
-            system: Batch / mapping carrying the ``edges`` namespace.
+            frame: The batch's typed view carrying the ``edges`` namespace —
+                the one every caller inside the evaluation already holds, so
+                nothing is wrapped or branched on here, one hop inside the
+                compiled region. A caller holding a plain batch wraps it with
+                :func:`~molix.batch.as_tensor_frame` first.
             pos: Live positions ``(N, 3)`` in Å the distances are priced at —
                 the strained / integrated leaf, not necessarily ``atoms.pos``.
             cutoff: Real-space cutoff ``r_c`` in Å of the asking term, or
@@ -1908,6 +1970,8 @@ class Potentials(BasePotential):
             only an *absent* list raises.
 
         Raises:
+            TypeError: *system* is not a batch, a view of one or a nested
+                mapping of its namespaces (:meth:`_frame`).
             ValueError: The batch carries no ``edges.edge_index``, or an
                 ``edge_index`` with neither ``shifts`` nor ``edge_diff`` to
                 price it by — a stored ``edge_dist`` alone is refused, not
@@ -1916,9 +1980,9 @@ class Potentials(BasePotential):
                 integrated against, so the message names the geometry a list
                 must carry and the two molix owners instead.
         """
-        edges = self._namespace(system, "edges")
-        edge_index = self._ns_tensor(edges, "edge_index")
-        if edge_index is None:
+        edges = frame.edges if "edges" in frame.keys() else None
+        edge_index = None if edges is None else edges.get("edge_index", None)
+        if edges is None or edge_index is None:
             raise ValueError(
                 "this batch carries no edges.edge_index, and molpot does not enumerate "
                 "neighbour pairs — the cutoff graph is built upstream by "
@@ -1927,8 +1991,8 @@ class Potentials(BasePotential):
                 "plus edges.shifts). Place a list on the batch before evaluating; a list "
                 "with zero rows is accepted and prices at zero."
             )
-        shifts = self._ns_tensor(edges, "shifts")
-        edge_diff = self._ns_tensor(edges, "edge_diff")
+        shifts = edges.get("shifts", None)
+        edge_diff = edges.get("edge_diff", None)
         src, tgt = edge_index[:, 0], edge_index[:, 1]
         if shifts is not None:
             vectors = pos[tgt] - pos[src] + shifts
@@ -1947,7 +2011,7 @@ class Potentials(BasePotential):
             )
         dist = (vectors * vectors).sum(-1).clamp_min(_SQ_DIST_CLAMP_MIN).sqrt()
         live = src < tgt
-        num_edges = self._ns_tensor(edges, "num_edges")
+        num_edges = edges.get("num_edges", None)
         if num_edges is not None:
             rows = torch.arange(edge_index.shape[0], device=edge_index.device)
             live = live & (rows < num_edges)
@@ -1957,7 +2021,7 @@ class Potentials(BasePotential):
 
     def _scaled_pairs(
         self,
-        system: Any,
+        frame: TensorFrame,
         pos: torch.Tensor,
         *,
         cutoff: float | None,
@@ -1982,8 +2046,8 @@ class Potentials(BasePotential):
         different topology must be rebound explicitly.
 
         Args:
-            system: Batch / mapping carrying ``atoms.pos`` and the topology
-                namespaces, as :meth:`bind_topology` reads them.
+            frame: The batch's typed view, carrying ``atoms.pos`` and the
+                topology namespaces, as :meth:`bind_topology` reads them.
             pos: Live positions ``(N, 3)`` in Å the placed list is priced at.
             cutoff: Real-space cutoff ``r_c`` in Å of the asking term, or
                 ``None`` to keep every row of the placed list.
@@ -2008,9 +2072,9 @@ class Potentials(BasePotential):
                 no usable placed list (:meth:`_placed_pairs`).
         """
         if self._exclusions is None:
-            self.bind_topology(system, pos=pos)
+            self.bind_topology(frame, pos=pos)
         else:
-            current = self._topology_fingerprint(system, pos.shape[0])
+            current = self._topology_fingerprint(frame, pos.shape[0])
             if current != self._bound_topology:
                 raise ValueError(
                     "this Potentials is bound to a topology with fingerprint "
@@ -2025,13 +2089,13 @@ class Potentials(BasePotential):
                 "the branch above binds one on first use and the other rejects a topology "
                 "change, so neither can leave it unset — call bind_topology(system)"
             )
-        edge_index, vectors, dist, live = self._placed_pairs(system, pos, cutoff=cutoff)
+        edge_index, vectors, dist, live = self._placed_pairs(frame, pos, cutoff=cutoff)
         scales = self._exclusions.lookup(edge_index, scale_kind, dtype=pos.dtype)
         return edge_index, vectors, dist, scales, live
 
     def _lj_energy(
         self,
-        system: Any,
+        frame: TensorFrame,
         pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """``(repulsion, dispersion)`` of the LJ style — zeros when no pair is in range."""
@@ -2045,10 +2109,10 @@ class Potentials(BasePotential):
         # forced the exclusion lookup (and distance storage) onto all
         # intramolecular pairs even though LJ only needs ``r < cutoff``.
         edge_index, _vectors, dist, scales, live = self._scaled_pairs(
-            system, pos, cutoff=self.lj.cutoff, scale_kind="lj"
+            frame, pos, cutoff=self.lj.cutoff, scale_kind="lj"
         )
-        num_graphs = self._num_graphs(system)
-        atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
+        num_graphs = self._num_graphs(frame)
+        atom_batch = self._atom_batch(frame, pos.shape[0], pos.device)
         return self.lj.energy(
             edge_index=edge_index,
             distances=dist,
@@ -2062,7 +2126,7 @@ class Potentials(BasePotential):
 
     def _lj_energy_forces(
         self,
-        system: Any,
+        frame: TensorFrame,
         pos: torch.Tensor,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """``((repulsion, dispersion), forces)`` of the LJ style."""
@@ -2073,10 +2137,10 @@ class Potentials(BasePotential):
             )
         epsilon, sigma = self._lj_params()
         edge_index, vectors, dist, scales, live = self._scaled_pairs(
-            system, pos, cutoff=self.lj.cutoff, scale_kind="lj"
+            frame, pos, cutoff=self.lj.cutoff, scale_kind="lj"
         )
-        num_graphs = self._num_graphs(system)
-        atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
+        num_graphs = self._num_graphs(frame)
+        atom_batch = self._atom_batch(frame, pos.shape[0], pos.device)
         return self.lj.energy_forces(
             # The geometry's atom count, not the parameter table's length.
             # ``pos.shape[0]`` stays a shape (a ``SymInt`` under dynamic
@@ -2098,14 +2162,14 @@ class Potentials(BasePotential):
 
     def _coulomb_energy(
         self,
-        system: Any,
+        frame: TensorFrame,
         pos: torch.Tensor,
     ) -> torch.Tensor:
         q = self._charges()
         if q.shape[0] != pos.shape[0]:
             raise ValueError(f"charge length {q.shape[0]} != n_atoms {pos.shape[0]}")
 
-        cell = self._cell(system)
+        cell = self._cell(frame)
         if cell is None:
             if self.coulomb_open is None:
                 raise RuntimeError(
@@ -2116,10 +2180,10 @@ class Potentials(BasePotential):
                 )
             cut = self.coulomb_open.cutoff
             edge_index, _vectors, dist, scales, live = self._scaled_pairs(
-                system, pos, cutoff=cut, scale_kind="q"
+                frame, pos, cutoff=cut, scale_kind="q"
             )
-            num_graphs = self._num_graphs(system)
-            atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
+            num_graphs = self._num_graphs(frame)
+            atom_batch = self._atom_batch(frame, pos.shape[0], pos.device)
             return self.coulomb_open.energy(
                 edge_index=edge_index,
                 distances=dist,
@@ -2137,7 +2201,7 @@ class Potentials(BasePotential):
                 "the open and periodic terms together from one 'pair:coulomb' style, so "
                 "neither can exist without the other"
             )
-        num_graphs = self._num_graphs(system)
+        num_graphs = self._num_graphs(frame)
         if num_graphs > 1:
             # One lattice, one reciprocal sum, one number: ``_cell`` reads
             # ``graphs.cell[0]`` and the term below returns a scalar that
@@ -2157,7 +2221,7 @@ class Potentials(BasePotential):
             )
         # Neighbor list cutoff from the periodic Potential's real-space cutoff
         edge_index, _vectors, dist, _, live = self._scaled_pairs(
-            system,
+            frame,
             pos,
             cutoff=self.coulomb_periodic.real_space_cutoff,
             scale_kind="q",
@@ -2188,7 +2252,7 @@ class Potentials(BasePotential):
 
     def _coulomb_energy_forces(
         self,
-        system: Any,
+        frame: TensorFrame,
         pos: torch.Tensor,
         n_atoms: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2206,7 +2270,7 @@ class Potentials(BasePotential):
         grad_enabled = torch.is_grad_enabled()
         with torch.enable_grad():
             p_nb = position_leaf(pos)
-            nb_energy = self._coulomb_energy(system, p_nb)
+            nb_energy = self._coulomb_energy(frame, p_nb)
             create_graph = grad_enabled and q.requires_grad
             nb_forces = (
                 autograd_forces_from_energy(nb_energy, p_nb, create_graph=create_graph)
@@ -2232,15 +2296,14 @@ class Potentials(BasePotential):
             or self.coulomb_periodic is not None
         )
 
-    def _atom_batch(self, system: Any, n: int, device: torch.device) -> torch.Tensor:
-        atoms = self._namespace(system, "atoms")
-        if atoms is not None:
-            b = self._ns_tensor(atoms, "batch")
+    def _atom_batch(self, frame: TensorFrame, n: int, device: torch.device) -> torch.Tensor:
+        if "atoms" in frame.keys():
+            b = frame.atoms.get("batch", None)
             if b is not None:
                 return b.long()
         return torch.zeros(n, dtype=torch.long, device=device)
 
-    def _num_graphs(self, system: Any) -> int:
+    def _num_graphs(self, frame: TensorFrame) -> int:
         """How many graphs the energy is summed into — never a device sync.
 
         Every term needs this number to size its energy vector, so it is read
@@ -2267,8 +2330,8 @@ class Potentials(BasePotential):
         indistinguishable here, as everywhere the fingerprint is used.
 
         Args:
-            system: The batch being evaluated; on the served path its
-                ``atoms.pos`` length and the shapes of its topology columns are
+            frame: The typed view of the batch being evaluated; on the served
+                path its ``atoms.pos`` length and the shapes of its columns are
                 read — shapes only, so nothing here is a host sync, and a trace
                 folds the reads to constants.
 
@@ -2278,15 +2341,15 @@ class Potentials(BasePotential):
         bound = self._bound_num_graphs
         fingerprint = self._bound_topology
         if bound is not None and fingerprint is not None:
-            pos = self._ns_tensor(self._namespace(system, "atoms"), "pos")
+            pos = frame.atoms.get("pos", None) if "atoms" in frame.keys() else None
             # No ``atoms.pos`` is no atom count to compare; the topology columns
             # still are, so the rest of the fingerprint still has to match.
             n_atoms = fingerprint[0] if pos is None else int(pos.shape[0])
-            if self._topology_fingerprint(system, n_atoms) == fingerprint:
+            if self._topology_fingerprint(frame, n_atoms) == fingerprint:
                 return bound
-        return self._count_graphs(system)
+        return self._count_graphs(frame)
 
-    def _count_graphs(self, system: Any) -> int:
+    def _count_graphs(self, frame: TensorFrame) -> int:
         """Resolve the graph count from the batch — the sync :meth:`_num_graphs` avoids.
 
         Three sources, cheapest first: the ``graphs`` namespace's own
@@ -2297,20 +2360,19 @@ class Potentials(BasePotential):
         :meth:`_num_graphs` when the batch is not the bound one.
 
         Args:
-            system: The batch whose ``graphs`` / ``atoms`` namespaces are read.
+            frame: The typed view whose ``graphs`` / ``atoms`` namespaces are read.
 
         Returns:
             The graph count ``B``; ``1`` when the batch names no graphs at all.
         """
-        graphs = self._namespace(system, "graphs")
-        if isinstance(graphs, TensorDict) and graphs.batch_size:
-            return int(graphs.batch_size[0])
-        if isinstance(graphs, (Mapping, TensorDict)):
-            num_atoms = self._ns_tensor(graphs, "num_atoms")
+        if "graphs" in frame.keys():
+            graphs = frame.graphs
+            if graphs.batch_size:
+                return int(graphs.batch_size[0])
+            num_atoms = graphs.get("num_atoms", None)
             if num_atoms is not None and num_atoms.ndim >= 1:
                 return int(num_atoms.shape[0])
-        atoms = self._namespace(system, "atoms")
-        atom_batch = self._ns_tensor(atoms, "batch")
+        atom_batch = frame.atoms.get("batch", None) if "atoms" in frame.keys() else None
         if atom_batch is not None and atom_batch.numel():
             # ``max``, not ``[-1]``: a collate that interleaves graphs still
             # answers with the count rather than with the last row's id.
@@ -2319,41 +2381,72 @@ class Potentials(BasePotential):
 
     # --- topology readers ---
 
-    def _namespace(self, system: Any, name: str) -> Any | None:
+    def _frame(self, system: TensorDict | TensorFrame | Mapping[str, Any] | None) -> TensorFrame:
+        """This container's one accessor: the batch, as its typed view.
+
+        Every public entry point calls this **once, eagerly**, and hands the
+        view to everything below — the readers, the checks and
+        :meth:`_classical_core` — so a compiled core sees the same leaves a
+        plain batch would give it and the wrap never appears inside a trace.
+
+        The wrap is memoized on the batch *object*, by weak reference, and this
+        is a correctness requirement rather than a saving. The F29 geometry
+        memo (:meth:`_check_geometry`) is keyed on the identity of the system it
+        vouched for; a fresh wrapper per call would miss that memo on every
+        step, which turns a once-per-frame host sync into a per-step one and
+        puts it inside any region a caller compiles. A system that cannot be
+        weakly referenced (a plain ``dict``) is simply re-wrapped, exactly as
+        that memo re-checks it.
+
+        Args:
+            system: The batch — a ``TensorDict``, a :class:`TensorFrame` view
+                of one, or a nested ``Mapping`` of its namespaces. ``None`` is
+                the ``BasePotential`` "no system, positions passed as a keyword"
+                call and reads as a system carrying no namespaces at all.
+
+        Returns:
+            The typed view (:func:`as_tensor_frame`).
+
+        Raises:
+            TypeError: *system* is not a batch, a view or a mapping.
+        """
+        if isinstance(system, TensorFrame):
+            return system
         if system is None:
-            return None
-        if isinstance(system, (Mapping, TensorDict)):
-            try:
-                if name in system:
-                    return system[name]
-            except Exception:
-                return None
-        return None
+            # One empty view per container, not one per call: the ``pos=``-only
+            # path is memoized by identity like any other frame, so a fresh
+            # wrapper here would miss the F29 memo on every such call.
+            empty = self._empty_frame
+            if empty is None:
+                empty = self._empty_frame = as_tensor_frame(TensorDict({}, batch_size=[]))
+            return empty
+        cached = self._frame_view
+        if cached is not None and cached[0]() is system:
+            return cached[1]
+        view = as_tensor_frame(system)
+        try:
+            # Weak key, strong value — deliberately asymmetric. The key must not
+            # keep the batch alive (a dead reference misses instead of matching
+            # a reused address); the value is the view, which holds the batch's
+            # leaves, so the previous batch stays alive until the next distinct
+            # one arrives. One extra batch per step in training, none in MD.
+            self._frame_view = (weakref.ref(system), view)
+        except TypeError:
+            # A mapping that cannot be weakly referenced is wrapped afresh each
+            # call rather than keyed on an address the next system may reuse.
+            self._frame_view = None
+        return view
 
-    def _ns_tensor(self, ns: Any, *keys: str) -> torch.Tensor | None:
-        if ns is None:
-            return None
-        for key in keys:
-            try:
-                if isinstance(ns, (Mapping, TensorDict)) and key in ns:
-                    return ns[key]
-            except Exception:
-                continue
-        return None
-
-    def _pos(self, system: Any, pos: torch.Tensor | None) -> torch.Tensor:
+    def _pos(self, frame: TensorFrame, pos: torch.Tensor | None) -> torch.Tensor:
         if pos is not None:
             return pos
-        atoms = self._namespace(system, "atoms")
-        if atoms is not None:
-            p = self._ns_tensor(atoms, "pos")
+        if "atoms" in frame.keys():
+            p = frame.atoms.get("pos", None)
             if p is not None:
                 return p
-        if isinstance(system, Mapping) and "pos" in system:
-            return system["pos"]
         raise ValueError("calc_energy requires pos or system atoms.pos")
 
-    def _topology_fingerprint(self, system: Any, n_atoms: int) -> tuple[int, ...]:
+    def _topology_fingerprint(self, frame: TensorFrame, n_atoms: int) -> tuple[int, ...]:
         """Shape-level identity of a batch's topology: ``(N, n_b, n_a, n_p)``.
 
         Column *counts* only — the last dimension of each index block, or
@@ -2370,7 +2463,7 @@ class Potentials(BasePotential):
         constant and drops.
 
         Args:
-            system: The batch whose ``bonds`` / ``angles`` / ``propers``
+            frame: The typed view whose ``bonds`` / ``angles`` / ``propers``
                 namespaces are read, exactly as :meth:`bind_topology` reads them.
             n_atoms: Atom count ``N`` the table would be keyed against.
 
@@ -2380,52 +2473,66 @@ class Potentials(BasePotential):
         """
         counts = [int(n_atoms)]
         for reader in (self._bond_index, self._angle_index, self._proper_index):
-            index = reader(system)
+            index = reader(frame)
             counts.append(-1 if index is None else int(index.shape[-1]))
         return tuple(counts)
 
-    def _bond_index(self, system: Any) -> torch.Tensor | None:
-        bonds = self._namespace(system, "bonds")
-        if bonds is not None:
-            packed = self._ns_tensor(bonds, "bond_index")
-            if packed is not None:
-                return packed
-            atomi = self._ns_tensor(bonds, "atomi")
-            atomj = self._ns_tensor(bonds, "atomj")
-            if atomi is not None and atomj is not None:
-                return torch.stack([atomi.long(), atomj.long()], dim=0)
-        if isinstance(system, Mapping) and "bond_index" in system:
-            return system["bond_index"]
+    def _bond_index(self, frame: TensorFrame) -> torch.Tensor | None:
+        """The covalent topology as the ``(2, N)`` COO index, or ``None``.
+
+        Two spellings of the same block, because the batch has two producers:
+        :func:`~molix.batch.collate.collate_molecules` writes
+        ``bonds.bond_index`` (the schema's COO, whose shape is the anti-alias
+        guard against ``edge_index``), while a caller assembling the namespace
+        by hand — as the valence namespaces are — writes ``atomi`` / ``atomj``
+        columns. Both are read; neither is preferred over the other beyond the
+        order below.
+        """
+        if "bonds" not in frame.keys():
+            return None
+        bonds = frame.bonds
+        packed = bonds.get("bond_index", None)
+        if packed is not None:
+            return packed
+        atomi = bonds.get("atomi", None)
+        atomj = bonds.get("atomj", None)
+        if atomi is not None and atomj is not None:
+            return torch.stack([atomi.long(), atomj.long()], dim=0)
         return None
 
-    def _angle_index(self, system: Any) -> torch.Tensor | None:
-        angles = self._namespace(system, "angles")
-        if angles is None:
+    def _angle_index(self, frame: TensorFrame) -> torch.Tensor | None:
+        if "angles" not in frame.keys():
             return None
-        atomi = self._ns_tensor(angles, "atomi")
-        atomj = self._ns_tensor(angles, "atomj")
-        atomk = self._ns_tensor(angles, "atomk")
-        if atomi is None or atomj is None or atomk is None:
-            return None
-        return torch.stack([atomi.long(), atomj.long(), atomk.long()], dim=0)
+        return self._term_index(frame.angles, ("atomi", "atomj", "atomk"))
 
-    def _proper_index(self, system: Any) -> torch.Tensor | None:
-        propers = self._namespace(system, "propers")
-        if propers is None:
+    def _proper_index(self, frame: TensorFrame) -> torch.Tensor | None:
+        if "propers" not in frame.keys():
             return None
-        cols = [self._ns_tensor(propers, k) for k in ("atomi", "atomj", "atomk", "atoml")]
-        if any(c is None for c in cols):
-            return None
-        return torch.stack([c.long() for c in cols], dim=0)
+        return self._term_index(frame.propers, ("atomi", "atomj", "atomk", "atoml"))
 
-    def _improper_index(self, system: Any) -> torch.Tensor | None:
-        impropers = self._namespace(system, "impropers")
-        if impropers is None:
+    def _improper_index(self, frame: TensorFrame) -> torch.Tensor | None:
+        if "impropers" not in frame.keys():
             return None
-        cols = [self._ns_tensor(impropers, k) for k in ("atomi", "atomj", "atomk", "atoml")]
-        if any(c is None for c in cols):
+        return self._term_index(frame.impropers, ("atomi", "atomj", "atomk", "atoml"))
+
+    @staticmethod
+    def _term_index(namespace: TensorDict, columns: tuple[str, ...]) -> torch.Tensor | None:
+        """One valence namespace's index columns stacked into ``(arity, N)``.
+
+        Args:
+            namespace: The ``angles`` / ``propers`` / ``impropers`` namespace.
+            columns: Its index column names, in index order.
+
+        Returns:
+            The stacked index, or ``None`` when the namespace is missing one of
+            the columns its arity needs — a namespace that cannot be read is
+            not a topology, and the term it belongs to contributes an explicit
+            zero rather than a partial index.
+        """
+        cols = [namespace.get(name, None) for name in columns]
+        if any(column is None for column in cols):
             return None
-        return torch.stack([c.long() for c in cols], dim=0)
+        return torch.stack([column.long() for column in cols], dim=0)
 
     @staticmethod
     def _identity_types(n: int, device: torch.device) -> torch.Tensor:

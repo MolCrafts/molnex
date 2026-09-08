@@ -68,9 +68,13 @@ import math
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
+from molpy import Frame
 from tensordict import TensorDict
 
+from molix.batch import TotalCharge
+from molix.batch.collate import collate_molecules
 from molix.md import (
     MD,
     EnergyDrift,
@@ -134,6 +138,83 @@ class _ThermoSeries(MDHook):
         self.pe.append(float(obs.potential))
         self.ke.append(float(obs.kinetic))
         self.temp.append(float(obs.temperature))
+
+
+def _lattice_frame(pos: torch.Tensor) -> Frame:
+    """The FCC argon lattice as one molpy ``Frame`` — this run's data at rest.
+
+    A ``Frame`` is the unit of data at rest in molnex and
+    :func:`~molix.batch.collate.collate_molecules` is the only conversion to the
+    batch a model reads, so a benchmark that builds a system from scratch builds
+    the same object a dataset would rather than assembling batch tensors by
+    hand. One frame for the whole cell (**F20**).
+
+    Args:
+        pos: Positions ``(N, 3)`` in Å.
+
+    Returns:
+        The frame, with ``mass`` (amu) as a per-atom column and the (zero) net
+        charge declared in ``meta``.
+    """
+    xyz = pos.detach().cpu().double().numpy()
+    n = int(xyz.shape[0])
+    frame = Frame(meta={"total_charge": 0.0})
+    frame["atoms"] = {
+        # Argon: the species this benchmark's epsilon / sigma / mass are.
+        "number": np.full(n, 18, dtype=np.int64),
+        "x": np.ascontiguousarray(xyz[:, 0]),
+        "y": np.ascontiguousarray(xyz[:, 1]),
+        "z": np.ascontiguousarray(xyz[:, 2]),
+    }
+    frame["atoms"]["mass"] = np.full(n, _MASS, dtype=np.float64)
+    return frame
+
+
+def _lattice_batch(pos: torch.Tensor, *, dtype: torch.dtype, device: torch.device) -> TensorDict:
+    """The rollout's batch: :func:`_lattice_frame` through the real collate.
+
+    What the collate cannot carry is added on the way out, named where it is:
+
+    * **F36** — it writes every float column at ``float32``, while this run is
+      at ``--precision``, so the frame's own fp64 ``x`` / ``y`` / ``z`` and
+      ``mass`` are *re-read* at that dtype rather than cast through single
+      precision.
+    * ``vel`` — the collate stacks ``fx``/``fy``/``fz`` into ``atoms.forces``
+      and carries every other column scalar-wise, so a per-atom *vector* that is
+      neither ``pos`` nor ``forces`` cannot be spelled in a frame yet. It is
+      zeroed here and drawn by ``VelocityInitHook`` on the run.
+
+    **F35** has nothing to repair here: the lattice of this run belongs to the
+    :class:`~molix.md.NeighborList` (built with ``cell=``), and the batch
+    deliberately carries no ``graphs.cell`` — the pair geometry reaches the
+    potential as the list's per-row ``edges.shifts``.
+
+    Args:
+        pos: Positions ``(N, 3)`` in Å, at ``dtype``.
+        dtype: MD-side precision the batch is declared at.
+        device: Device the batch is placed on.
+
+    Returns:
+        The batch ``MD.run`` integrates.
+    """
+    frame = _lattice_frame(pos)
+    batch = collate_molecules([frame])
+
+    def column(name: str) -> torch.Tensor:
+        return torch.tensor(np.asarray(frame["atoms"][name], dtype=np.float64), dtype=dtype)
+
+    # The F36 repair below is also spelled in tests/conftest.py (collate_frames,
+    # the owner), interface/tests/parity_classical.py and
+    # benchmarks/verify_md_lj_nve.py; all four collapse into collate_molecules
+    # once it carries frame.box and the frame's precision.
+    # F36: collate_molecules narrows to float32.
+    batch["atoms", "pos"] = torch.stack([column(axis) for axis in ("x", "y", "z")], dim=-1)
+    # F36: collate_molecules narrows to float32.
+    batch["atoms", "mass"] = column("mass")
+    batch["atoms", "vel"] = torch.zeros_like(batch["atoms", "pos"])
+    # The frame declared its net charge; this only normalises the dtype.
+    TotalCharge().execute(batch)
+    return batch.to(device)
 
 
 def main() -> int:
@@ -285,19 +366,7 @@ def main() -> int:
         from molix.compile import Compiler
 
         md.set_compiler(Compiler(cuda_graphs=True) if args.cuda_graphs else Compiler())
-    atoms = TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "vel": torch.zeros_like(pos),
-                    "mass": torch.full((n_atoms,), _MASS, device=device, dtype=md_dtype),
-                },
-                batch_size=[n_atoms],
-            )
-        },
-        batch_size=[],
-    )
+    atoms = _lattice_batch(pos, dtype=md_dtype, device=device)
     md.run(atoms.clone(), min(3 * args.sample_every, n_steps), chunk=args.sample_every)
     # Both observers drain at the timed run's on_run_start, so the warmup's
     # samples are gone without a reset call here.

@@ -3,7 +3,7 @@
 Measures how much time a training loop spends blocked waiting for the next
 batch — the DataLoader stall time.  Accepts either a
 :class:`~molix.profiler.mock.MockSource` or a real
-:class:`~molix.store.block_view.BlockDataset` / :class:`torch.utils.data.Dataset`.
+:class:`~molix.store.frame_store_view.FrameStoreDataset` / :class:`torch.utils.data.Dataset`.
 
 The stall time is measured via the **inter-batch gap technique**: the
 wall-clock elapsed from ``next(iter)`` returning batch *i* to the point
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 from torch.utils.data import DataLoader, Dataset
 
-from molix.batch.collate import DEFAULT_TARGET_SCHEMA, TargetSchema, collate_molecules
+from molix.batch.collate import collate_molecules
 from molix.batch.task import BatchTask
 from molix.profiler._utils import TimingStat, ValueStat, _fmt_table, batch_counts
 
@@ -132,17 +132,15 @@ class _ProfilerCollate:
     the dtype cast (the profiler measures raw collation throughput).
 
     Args:
-        schema: How targets are routed during collation.
         batch_tasks: Post-collate :class:`~molix.batch.task.BatchTask`
             instances to apply in order.
     """
 
-    def __init__(self, schema: TargetSchema, batch_tasks: Sequence[BatchTask]) -> None:
-        self.schema = schema
+    def __init__(self, batch_tasks: Sequence[BatchTask]) -> None:
         self.batch_tasks = batch_tasks
 
     def __call__(self, batch_samples: list[dict]) -> object:
-        batch = collate_molecules(batch_samples, self.schema)
+        batch = collate_molecules(batch_samples)
         for task in self.batch_tasks:
             batch = task.execute(batch)
         return batch
@@ -178,7 +176,6 @@ class DataLoaderProfiler:
         num_workers: Number of DataLoader worker processes.
         pin_memory: Whether to pin memory for GPU transfer.
         persistent_workers: Keep workers alive between epochs.
-        target_schema: How targets are collated into batches.
         batch_tasks: Post-collate :class:`~molix.batch.task.BatchTask`
             instances applied, in order, inside ``collate_fn``.
 
@@ -201,14 +198,12 @@ class DataLoaderProfiler:
         num_workers: int = 0,
         pin_memory: bool = False,
         persistent_workers: bool = False,
-        target_schema: TargetSchema = DEFAULT_TARGET_SCHEMA,
         batch_tasks: Sequence[BatchTask] = (),
     ) -> None:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers and num_workers > 0
-        self.target_schema = target_schema
         self.batch_tasks = tuple(batch_tasks)
 
     def run(
@@ -306,7 +301,7 @@ class DataLoaderProfiler:
         # A picklable top-level collate (not a closure) so num_workers > 0
         # under spawn/forkserver can ship it to workers — same rationale as
         # molix.batch.datamodule._CollateFn.
-        collate_fn = _ProfilerCollate(self.target_schema, self.batch_tasks)
+        collate_fn = _ProfilerCollate(self.batch_tasks)
         kwargs = {}
         if self.num_workers > 0:
             kwargs["multiprocessing_context"] = "spawn"

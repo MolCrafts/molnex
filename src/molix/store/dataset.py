@@ -1,21 +1,17 @@
-"""Map-style datasets over a **packed payload**.
+"""Index views over a dataset.
 
-A packed payload is the shape :func:`~molix.batch.collate.collate_packed`
-consumes: ``atoms`` / ``edges`` / ``graphs`` / ``scalars`` buckets of concat
-tensors plus the ``atom_ptr`` / ``edge_ptr`` cumsum pointers locating each
-sample's rows. :class:`~molix.store.block.BlockReader` produces one from a
-``molix.block/1`` block; a caller can build one in memory.
-
-:class:`~molix.store.block_view.BlockDataset` is the map-style reader over a
-sealed block's payload; :class:`SubsetDataset` is an index view into any
-:class:`BaseDataset`.
+:class:`BaseDataset` is the reader protocol (``__len__`` / ``__getitem__`` plus
+:meth:`~BaseDataset.split`); :class:`SubsetDataset` is an index view into any of
+them. The storage→model conversion itself lives with the format, in
+:class:`molix.store.frame_store.FrameStoreReader` and
+:class:`molix.store.frame_store_view.FrameStoreDataset`, whose ``batch()`` hands the model
+its one structure — a ``TensorDict``.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -25,62 +21,8 @@ from torch.utils.data import Dataset
 
 __all__ = [
     "BaseDataset",
-    "PackedView",
     "SubsetDataset",
 ]
-
-
-@dataclass(frozen=True)
-class PackedView:
-    """Read-only handle onto a packed payload.
-
-    Exposes exactly what the packed-aware collate fast path
-    (:func:`molix.batch.collate.collate_packed`) needs — the packed payload
-    dict, its cumsum pointers / schema, and a local→packed index remap —
-    without callers reaching into a dataset's private ``_payload``. A
-    :class:`SubsetDataset`'s view carries an ``index_map`` so its local
-    indices resolve to packed (global) rows; a full dataset's view uses
-    identity mapping. Holds only a reference to the (possibly mmap'd)
-    payload — never a tensor copy.
-
-    Args:
-        payload: The packed-cache payload mapping (``atoms`` / ``edges`` /
-            ``graphs`` / ``scalars`` buckets, ``atom_ptr`` / ``edge_ptr``,
-            ``schema``, ``n_samples``).
-        index_map: Packed row index per local index, or ``None`` for the
-            identity mapping of a full dataset.
-    """
-
-    payload: Mapping[str, Any]
-    index_map: tuple[int, ...] | None = None
-
-    def map_indices(self, local_indices: Sequence[int]) -> list[int]:
-        """Resolve *local_indices* to packed (global) row indices.
-
-        Args:
-            local_indices: Indices in this view's local coordinate.
-
-        Returns:
-            The corresponding packed-cache row indices.
-        """
-        if self.index_map is None:
-            return [int(i) for i in local_indices]
-        return [self.index_map[i] for i in local_indices]
-
-    def remap(self, local_indices: Sequence[int]) -> "PackedView":
-        """Return a sub-view restricted/reordered to *local_indices*.
-
-        Composes index maps so nested subsets resolve straight to packed
-        rows in a single hop.
-
-        Args:
-            local_indices: Indices in this view's local coordinate.
-
-        Returns:
-            A new :class:`PackedView` over the same payload whose identity
-            is *local_indices* expressed as packed rows.
-        """
-        return PackedView(self.payload, tuple(self.map_indices(local_indices)))
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +104,7 @@ def _reject_misfiled_edges(payload: Mapping[str, Any], sink: Path | str) -> None
     A packed cache written before edge keys were routed by identity classified
     ``edge_index`` as a per-atom key whenever ``n_edges == n_atoms`` held for
     every sample, which also suppressed ``edge_ptr``. Its edges are then
-    unreadable: ``collate_packed`` emits an empty edges namespace and
+    unreadable: the batch gets an empty edges namespace and
     ``avg_num_neighbors`` would report ``0.0``. A cache with no edge keys at
     all is a different, legitimate state and is left alone.
 
@@ -216,7 +158,7 @@ class SubsetDataset(BaseDataset):
         """Forward unknown public attributes to the wrapped dataset.
 
         Lets subset views transparently expose dataset-declared attributes
-        (e.g. ``target_schema``) so :class:`~molix.batch.DataModule`
+        (e.g. ``task_labels``) so :class:`~molix.batch.DataModule`
         auto-discovery works on splits. Private / dunder names raise
         :class:`AttributeError` instead of forwarding — during unpickling
         ``__setstate__`` has not populated ``__dict__`` yet, so reaching
@@ -243,20 +185,6 @@ class SubsetDataset(BaseDataset):
         wrapped dataset.
         """
         return self._dataset[self._indices[idx]]
-
-    def packed_view(self) -> PackedView:
-        """Return a :class:`PackedView` whose rows are this subset's rows.
-
-        Delegates to the wrapped dataset's view and composes the index maps, so
-        a (possibly nested) subset's local indices resolve to packed rows in one
-        hop. Defined explicitly rather than left to :meth:`__getattr__`, which
-        would forward to the parent and hand back an **unmapped** view.
-
-        Raises:
-            AttributeError: The wrapped dataset serves no packed view; the
-                caller treats that as "no fast path".
-        """
-        return self._dataset.packed_view().remap(self._indices)
 
     @cached_property
     def atom_counts(self) -> torch.Tensor:

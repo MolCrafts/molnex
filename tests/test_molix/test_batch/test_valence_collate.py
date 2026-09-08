@@ -10,10 +10,12 @@ Packed COO ``angle_index [3, N]`` is intentionally NOT the collate schema.
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 from tensordict import TensorDict
 
 from molix.batch.collate import collate_molecules
+from tests.conftest import frame
 
 
 def _mol(
@@ -24,35 +26,34 @@ def _mol(
     impropers: dict | None = None,
     bond_index: torch.Tensor | None = None,
     bond_types: torch.Tensor | None = None,
-) -> dict:
-    sample: dict = {
-        "Z": torch.ones(n_atoms, dtype=torch.long),
-        "pos": torch.zeros(n_atoms, 3),
-    }
-    if angles is not None:
-        sample["angles"] = {k: torch.as_tensor(v, dtype=torch.long) for k, v in angles.items()}
-    if propers is not None:
-        sample["propers"] = {k: torch.as_tensor(v, dtype=torch.long) for k, v in propers.items()}
-    if impropers is not None:
-        sample["impropers"] = {
-            k: torch.as_tensor(v, dtype=torch.long) for k, v in impropers.items()
-        }
+):
+    """One molpy ``Frame`` with the requested valence blocks."""
+    terms = {}
+    for label, block in (("angles", angles), ("propers", propers), ("impropers", impropers)):
+        if block is not None:
+            terms[label] = {k: np.asarray(v, dtype=np.int64) for k, v in block.items()}
+    bonds = None
     if bond_index is not None:
-        sample["bond_index"] = bond_index.long()
-    if bond_types is not None:
-        sample["bond_types"] = bond_types.long()
-    return sample
+        coo = bond_index.long().numpy()
+        bonds = (coo[0], coo[1])
+    return frame(
+        Z=np.ones(n_atoms, dtype=np.int64),
+        pos=np.zeros((n_atoms, 3)),
+        bonds=bonds,
+        bond_types=None if bond_types is None else bond_types.long().numpy(),
+        terms=terms,
+    )
 
 
 def test_angles_column_rebase_two_molecules():
-    """Second molecule's angle indices equal local + n_atoms_0 (ac-001)."""
+    """Second molecule's angle indices equal local + n_atoms_0."""
     m1 = _mol(
         3,
         angles={
             "atomi": [0],
             "atomj": [1],  # central
             "atomk": [2],
-            "type": [0],
+            "type_id": [0],
         },
     )
     m2 = _mol(
@@ -61,7 +62,7 @@ def test_angles_column_rebase_two_molecules():
             "atomi": [0, 1],
             "atomj": [1, 2],
             "atomk": [2, 3],
-            "type": [1, 0],
+            "type_id": [1, 0],
         },
     )
     batch = collate_molecules([m1, m2])
@@ -78,7 +79,7 @@ def test_angles_column_rebase_two_molecules():
     assert atomi.tolist() == [0, 3, 4]
     assert atomj.tolist() == [1, 4, 5]
     assert atomk.tolist() == [2, 5, 6]
-    assert batch["angles"]["type"].tolist() == [0, 1, 0]
+    assert batch["angles"]["type_id"].tolist() == [0, 1, 0]
     # Prefer batch_size=[N] when all leaves share length N.
     assert list(angles.batch_size) == [3]
     # Primary schema is columns, not packed angle_index [3, N].
@@ -86,7 +87,7 @@ def test_angles_column_rebase_two_molecules():
 
 
 def test_propers_and_impropers_columns_with_center_first():
-    """Propers/impropers expose atomi..atoml; impropers.atomi is center (ac-002)."""
+    """Propers/impropers expose atomi..atoml; impropers.atomi is center."""
     m1 = _mol(
         4,
         propers={
@@ -94,14 +95,14 @@ def test_propers_and_impropers_columns_with_center_first():
             "atomj": [1],
             "atomk": [2],
             "atoml": [3],
-            "type": [0],
+            "type_id": [0],
         },
         impropers={
             "atomi": [1],  # center (molrs)
             "atomj": [0],
             "atomk": [2],
             "atoml": [3],
-            "type": [2],
+            "type_id": [2],
         },
     )
     m2 = _mol(
@@ -111,14 +112,14 @@ def test_propers_and_impropers_columns_with_center_first():
             "atomj": [1, 2],
             "atomk": [2, 3],
             "atoml": [3, 4],
-            "type": [1, 0],
+            "type_id": [1, 0],
         },
         impropers={
             "atomi": [2],
             "atomj": [0],
             "atomk": [1],
             "atoml": [3],
-            "type": [0],
+            "type_id": [0],
         },
     )
     batch = collate_molecules([m1, m2])
@@ -128,14 +129,14 @@ def test_propers_and_impropers_columns_with_center_first():
     assert batch["propers"]["atomj"].tolist() == [1, 5, 6]
     assert batch["propers"]["atomk"].tolist() == [2, 6, 7]
     assert batch["propers"]["atoml"].tolist() == [3, 7, 8]
-    assert batch["propers"]["type"].tolist() == [0, 1, 0]
+    assert batch["propers"]["type_id"].tolist() == [0, 1, 0]
     assert list(batch["propers"].batch_size) == [3]
 
     assert batch["impropers"]["atomi"].tolist() == [1, 6]  # centers: 1, 2+4
     assert batch["impropers"]["atomj"].tolist() == [0, 4]
     assert batch["impropers"]["atomk"].tolist() == [2, 5]
     assert batch["impropers"]["atoml"].tolist() == [3, 7]
-    assert batch["impropers"]["type"].tolist() == [2, 0]
+    assert batch["impropers"]["type_id"].tolist() == [2, 0]
     assert list(batch["impropers"].batch_size) == [2]
 
 
@@ -175,17 +176,17 @@ def test_no_valence_omits_namespaces():
 
 
 def test_bonds_still_work_alongside_angles():
-    """Existing bond_index path stays green next to angles (ac-006)."""
+    """Existing bond_index path stays green next to angles."""
     # bond_index is COO [2, N]: m1 has bonds 0-1 and 1-2; m2 has bond 0-1.
     m1 = _mol(
         3,
-        angles={"atomi": [0], "atomj": [1], "atomk": [2], "type": [0]},
+        angles={"atomi": [0], "atomj": [1], "atomk": [2], "type_id": [0]},
         bond_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
         bond_types=torch.tensor([0, 1], dtype=torch.long),
     )
     m2 = _mol(
         2,
-        angles={"atomi": [0], "atomj": [0], "atomk": [1], "type": [1]},
+        angles={"atomi": [0], "atomj": [0], "atomk": [1], "type_id": [1]},
         bond_index=torch.tensor([[0], [1]], dtype=torch.long),
         bond_types=torch.tensor([0], dtype=torch.long),
     )

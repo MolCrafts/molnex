@@ -193,7 +193,7 @@ class TaskRouter:
             raise ValueError(
                 f"batch is missing its task label at {self.task_key!r} "
                 f"(batch[{namespace_key!r}][{label_key!r}]); declare it as a graph-level "
-                "target via TargetSchema so the collate routes it into the graphs namespace."
+                "target in the frame's meta so the collate routes it into the graphs namespace."
             )
         if labels.numel() == 0:
             raise ValueError(

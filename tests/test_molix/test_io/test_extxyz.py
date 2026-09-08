@@ -2,9 +2,9 @@
 
 Acceptance trace
 ----------------
-* ac-006 → ``test_parse_water_fixture`` / ``test_no_ase_imports``
+* ``test_parse_water_fixture`` / ``test_no_ase_imports``
 
-The former ``TestChargedDimersRemoved`` class (ac-007 of the extxyz spec)
+The former ``TestChargedDimersRemoved`` class
 pinned the absence of one dataset adapter; the whole acquisition package is
 gone now (spec molix-data-dissolution-04-etl-exit) and
 ``tests/test_repository_boundaries.py`` enforces that outright, so the
@@ -23,7 +23,7 @@ from molix.io.extxyz import ExtxyzFrame, parse_extxyz_frames
 
 class TestParseFixture:
     def test_parse_water_fixture(self, water_les_root: Path) -> None:
-        """ac-006: parser returns one ExtxyzFrame per fixture frame with correct shapes."""
+        """Parser returns one ExtxyzFrame per fixture frame with correct shapes."""
         path = water_les_root / "train-H2O_RPBE-D3.xyz"
         frames = parse_extxyz_frames(path)
         assert len(frames) == 40
@@ -42,7 +42,7 @@ class TestParseFixture:
             assert frame.forces.shape == (6, 3)
 
     def test_cell_row_major(self, water_les_root: Path) -> None:
-        """ac-006: Lattice="..." parses into row-major (3,3) Å matrix.
+        """Lattice="..." parses into row-major (3,3) Å matrix.
 
         Fixture writes ``Lattice="12.0 0 0 0 12.0 0 0 0 12.0"``; the matrix is
         ``edge·I₃``. Read it back element-wise to nail the row-major ordering.
@@ -54,7 +54,7 @@ class TestParseFixture:
             np.testing.assert_allclose(frame.cell, expected, atol=1e-6)
 
     def test_lattice_with_spaces_inside_quotes(self, tmp_path: Path) -> None:
-        """ac-006: tokenizer handles quoted values containing whitespace.
+        """Tokenizer handles quoted values containing whitespace.
 
         ``comment.split()`` would shatter ``Lattice="a b c d ..."`` into nine
         broken tokens. The parser must use a quote-aware splitter.
@@ -73,7 +73,7 @@ class TestParseFixture:
         assert frames[0].energy == pytest.approx(-1.5)
 
     def test_forces_optional_when_missing_from_properties(self, tmp_path: Path) -> None:
-        """ac-006: Properties without ``forces:R:3`` ⇒ ``frame.forces is None``."""
+        """Properties without ``forces:R:3`` ⇒ ``frame.forces is None``."""
         f = tmp_path / "noforce.xyz"
         f.write_text(
             "1\n"
@@ -87,7 +87,7 @@ class TestParseFixture:
         np.testing.assert_allclose(frames[0].pos, [[5.0, 5.0, 5.0]])
 
     def test_missing_energy_raises(self, tmp_path: Path) -> None:
-        """ac-006: missing ``energy=...`` in comment raises ``ValueError``."""
+        """Missing ``energy=...`` in comment raises ``ValueError``."""
         f = tmp_path / "noenergy.xyz"
         f.write_text(
             "1\n"
@@ -99,7 +99,7 @@ class TestParseFixture:
             parse_extxyz_frames(f)
 
     def test_pbc_defaults_to_true_when_missing(self, tmp_path: Path) -> None:
-        """ac-006: missing ``pbc=`` defaults to (True, True, True) (logs a warning)."""
+        """Missing ``pbc=`` defaults to (True, True, True) (logs a warning)."""
         f = tmp_path / "nopbc.xyz"
         f.write_text(
             "1\n"

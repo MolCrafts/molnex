@@ -6,7 +6,7 @@ import numpy as np
 from molpy import Block, Frame
 
 from molix.batch import collate_molecules
-from molix.store.frame_dataset import CLASS_I_FRAME_SCHEMA, FrameCollection, FrameDataset
+from molix.store.frame_dataset import FrameCollection, FrameDataset
 
 
 def _geom(z: list[int], *, molecule_id: str, energy: float = 0.0) -> Frame:
@@ -56,7 +56,7 @@ class TestFrameDataset:
         ds = FrameDataset.from_records(
             [_one(_geom([8, 1, 1], molecule_id="w"))], task="equilibrium"
         )
-        batch = collate_molecules([ds[0]], CLASS_I_FRAME_SCHEMA)
+        batch = collate_molecules([ds[0]])
         assert batch["atoms", "Z"].tolist() == [8, 1, 1]
         assert batch["graphs", "energy"].shape == (1,)
 

@@ -25,7 +25,7 @@ The complete project shape is:
 
 ```text
 source samples (MolHub acquisition + preprocessing)
-  -> packed cache read through molix.store
+  -> molix.block/1 store read through molix.store
   -> collated nested TensorDict
   -> molzoo encoder
   -> learned features
@@ -47,7 +47,7 @@ collated nested TensorDict
 ## 2. Prepare the Batch
 
 MolZoo encoders expect a post-collate batch — the nested `TensorDict` with
-`atoms` / `edges` / `graphs` namespaces — not a raw sample dict.
+`atoms` / `edges` / `graphs` namespaces — not a molpy `Frame`.
 For Allegro the required fields are:
 
 ```text
@@ -59,14 +59,14 @@ For Allegro the required fields are:
 
 In production the edges come from `molix.batch.NeighborList(symmetry=True)`,
 run during preprocessing so every undirected neighbor pair is represented as
-two directed edges. That preprocessing, and the packed cache it writes, are
+two directed edges. That preprocessing, and the stores it writes, are
 MolHub's; the tutorial starts from the cache:
 
 ```python
 from molix.batch import DataModule
-from molix.store import BlockDataset
+from molix.store import FrameStoreDataset
 
-train_ds, val_ds = BlockDataset.load_from_disk("./blocks/allegro-run").split(ratio=0.9, seed=42)
+train_ds, val_ds = FrameStoreDataset.load_from_disk("./blocks/allegro-run").split(ratio=0.9, seed=42)
 
 dm = DataModule(
     train_ds,

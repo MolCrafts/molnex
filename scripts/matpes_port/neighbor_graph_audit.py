@@ -15,7 +15,7 @@ Writes:
 ``interface/`` pair_style feeds flat ``(Z, pos, edge_index)`` into the exported
 model; molnex MD rebuilds via ``NeighborList``. A three-way
 oracle vs molix vs LAMMPS-fed list needs a non-default debug dump at the
-ML-IAP neighbor handoff — tracked as ac-011 (document seam; no production
+ML-IAP neighbor handoff — a documented seam (no production
 behavior change in this suite).
 
 Cutoff convention (production): ``0 < r <= cutoff``.
@@ -166,10 +166,10 @@ def main(argv: list[str] | None = None) -> int:
         print("--- mismatch detail (truncated) ---")
         print("\n".join(dumps[:50]))
 
-    # ac-011 seam note
+    # seam note
     print(
         "LAMMPS/ML-IAP: no invasive dump in this tool; "
-        "molnex MD uses NeighborList; pair_style path is interface/ (ac-011)."
+        "molnex MD uses NeighborList; pair_style path is interface/."
     )
     return 1 if any_bad else 0
 

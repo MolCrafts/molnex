@@ -17,9 +17,13 @@ from typing import Any
 
 import torch
 
-from scripts.mm_param_learning.align import _active_groups, _collate, _device_of
+from scripts.mm_param_learning.align import (
+    _active_groups,
+    _collate,
+    _device_of,
+    _field_of,
+)
 from scripts.mm_param_learning.class_i_fit import (
-    _FIT_SCHEMA,
     FORCE_OUTLIER_KCAL_A,
     ClassIFit,
     ForceAwareModel,
@@ -59,7 +63,7 @@ def inspect_scales(
     if not samples:
         raise ValueError("inspect_scales needs at least one sample")
     device = _device_of(model)
-    packed = _collate(samples, _FIT_SCHEMA, device)
+    packed = _collate(samples, device, _field_of(model))
     out = model(packed)
     energy = out["energy"].reshape(-1)
     forces = out["forces"]

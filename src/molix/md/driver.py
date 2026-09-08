@@ -41,6 +41,7 @@ from typing import Any
 import torch
 from tensordict import TensorDict
 
+from molix.batch import TensorFrame, as_tensor_frame
 from molix.md.barostat import BerendsenBarostat
 from molix.md.forcefield import ForceField, MDForceField
 from molix.md.integrators import Integrator
@@ -100,7 +101,14 @@ class _TensorDictForce:
         self._scale = float(scale)
         self._md_dtype = md_dtype
         self._pot_dtype = pot_dtype
+        # The caller's batch and its typed view: the same storage under two
+        # names, because the two have different jobs. ``_work`` is what the
+        # potential and the neighbour list are handed — the container the caller
+        # built, so a potential that refuses it names the container the caller
+        # actually passed. ``_frame`` is what *this* adapter reads and swaps
+        # through (CLAUDE.md § TensorDict Contract).
         self._work: TensorDict | None = None
+        self._frame: TensorFrame | None = None
         self._cell_view: torch.Tensor | None = None
         # The potential-dtype copy of the cell and the batch tensor it stands in
         # for during a call. Both ``None`` without a ``pot_dtype`` — then the
@@ -113,6 +121,11 @@ class _TensorDictForce:
         self.want_virial = False
         self._eval = self._eval_classical
 
+    @property
+    def work(self) -> TensorDict | None:
+        """The bound working batch — the caller's container; ``None`` before :meth:`bind_work`."""
+        return self._work
+
     def bind_work(self, work: TensorDict) -> None:
         """Bind the working ``TensorDict`` for the run and pick the eval kernel.
 
@@ -122,11 +135,22 @@ class _TensorDictForce:
         barostat wants the virial (``want_virial``), else :meth:`_eval_mlip`
         when the pots expose an ``mlip`` attribute, else :meth:`_eval_classical`.
 
+        The batch is wrapped **once here** as its typed view
+        (:func:`~molix.batch.as_tensor_frame`, CLAUDE.md § TensorDict Contract)
+        and every read and swap below addresses that view — the wrap is a view,
+        so the caller's batch is the storage throughout and one rollout pays
+        one wrap rather than one per step. This is the **only** place the two
+        fields are assigned: ``_work`` and ``_frame`` are one storage under two
+        names, and a path that set one without the other would desynchronise
+        them silently — so no other method assigns either, and readers outside
+        this class reach the batch through :attr:`work`.
+
         Args:
             work: The system ``TensorDict`` that positions are written into
                 and potentials are evaluated on for the remainder of the run.
         """
         self._work = work
+        self._frame = as_tensor_frame(work)
         self.rebind_cell()
         if self.want_virial:
             self._eval = self._eval_npt
@@ -185,8 +209,8 @@ class _TensorDictForce:
             "the live lattice and lose the update into a buffer _restore_cell discards. "
             "Rebind between evaluations, not inside one"
         )
-        work = self._work
-        cell = None if work is None else self._live_cell(work)
+        frame = self._frame
+        cell = None if frame is None else self._live_cell(frame)
         self._cell_view = None if cell is None else (cell[0] if cell.dim() == 3 else cell)
         cell_view = self._cell_view
         if new_cell is not None and cell_view is not None:
@@ -196,7 +220,7 @@ class _TensorDictForce:
             self._pots.bind_cell(bound)
 
     @staticmethod
-    def _live_cell(work: TensorDict) -> torch.Tensor | None:
+    def _live_cell(frame: TensorFrame) -> torch.Tensor | None:
         """``graphs.cell`` as it stands right now, or ``None`` if there is none.
 
         The one read of that key on this path, so the "never cache a cell view"
@@ -206,9 +230,9 @@ class _TensorDictForce:
         untouched — resolving the layout is the caller's step, because the two
         callers want it at different depths.
         """
-        if ("graphs", "cell") not in work.keys(include_nested=True):
+        if ("graphs", "cell") not in frame.keys(include_nested=True):
             return None
-        cell = work["graphs", "cell"]
+        cell = frame["graphs", "cell"]
         return cell if isinstance(cell, torch.Tensor) else None
 
     def _pot_cell(self, cell_view: torch.Tensor | None) -> torch.Tensor | None:
@@ -270,17 +294,23 @@ class _TensorDictForce:
                 ``calc_energy_forces_virial``.
         """
         work = self._work
-        if work is None:
+        frame = self._frame
+        if work is None or frame is None:
             raise RuntimeError("bind the working TensorDict before evaluating forces")
-        work[POS_KEY] = self._cast_in(work, pos)
-        self._expose_live_edges(work)
+        # Read and swapped through the view, evaluated on the caller's own
+        # container: the two are one storage, so the potential is handed the
+        # narrowed, cast geometry either way — and a potential that refuses the
+        # batch names the container the caller built rather than a wrapper this
+        # adapter made.
+        frame[POS_KEY] = self._cast_in(frame, pos)
+        self._expose_live_edges(frame)
         try:
             return self._eval(work)
         finally:
-            self._restore_edges(work)
-            self._restore_cell(work)
+            self._restore_edges(frame)
+            self._restore_cell(frame)
 
-    def _cast_in(self, work: TensorDict, pos: torch.Tensor) -> torch.Tensor:
+    def _cast_in(self, frame: TensorFrame, pos: torch.Tensor) -> torch.Tensor:
         """Put the potential's geometry on ``pot_dtype`` — positions and the cell.
 
         Returns ``pos`` untouched when no ``potential_dtype`` was asked for, so
@@ -305,24 +335,24 @@ class _TensorDictForce:
         dtype = self._pot_dtype
         if dtype is None:
             return pos
-        cell = self._live_cell(work)
+        cell = self._live_cell(frame)
         if cell is not None:
             batched = cell.dim() == 3
             pot_cell = self._pot_cell(cell[0] if batched else cell)
             if pot_cell is not None and pot_cell.dtype != cell.dtype:
                 self._cell_md = cell
-                work["graphs", "cell"] = pot_cell.unsqueeze(0) if batched else pot_cell
+                frame["graphs", "cell"] = pot_cell.unsqueeze(0) if batched else pot_cell
         return pos.to(dtype)
 
-    def _restore_cell(self, work: TensorDict) -> None:
+    def _restore_cell(self, frame: TensorFrame) -> None:
         """Put the MD-dtype cell back under ``graphs.cell`` after an evaluation."""
         cell = self._cell_md
         if cell is None:
             return
-        work["graphs", "cell"] = cell
+        frame["graphs", "cell"] = cell
         self._cell_md = None
 
-    def _expose_live_edges(self, work: TensorDict) -> None:
+    def _expose_live_edges(self, frame: TensorFrame) -> None:
         """Hand the potential the edge rows it should price, at its own dtype.
 
         Two independent narrowings, one swap (undone by :meth:`_restore_edges`):
@@ -345,9 +375,9 @@ class _TensorDictForce:
         the failure the in-place buffers exist to avoid. That is one copy of
         the edge columns per step, in this arm only.
         """
-        if "edges" not in work.keys():
+        if "edges" not in frame.keys():
             return
-        full = work["edges"]
+        full = frame["edges"]
         cap = int(full.batch_size[0]) if full.batch_size else 0
         n = self.n_live
         rows = n if n is not None and self.live_edges_are_prefix and 0 < n < cap else cap
@@ -363,13 +393,13 @@ class _TensorDictForce:
                 for key, column in columns.items()
             }
         self._edges_full = full
-        work["edges"] = TensorDict(columns, batch_size=[rows])
+        frame["edges"] = TensorDict(columns, batch_size=[rows])
 
-    def _restore_edges(self, work: TensorDict) -> None:
+    def _restore_edges(self, frame: TensorFrame) -> None:
         full = self._edges_full
         if full is None:
             return
-        work["edges"] = full
+        frame["edges"] = full
         self._edges_full = None
 
     def _pack(self, energy: torch.Tensor, forces: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -837,7 +867,7 @@ class MD:
         """
         if self._adapter is None:
             raise RuntimeError("set_forcefield and set_integrator before compute_force")
-        work = self._adapter._work
+        work = self._adapter.work
         if work is None:
             raise RuntimeError("bind the working TensorDict before evaluating forces")
         work[POS_KEY] = pos
@@ -899,7 +929,7 @@ class MD:
         """
         if state.cell is None or self._adapter is None:
             return
-        work = self._adapter._work
+        work = self._adapter.work
         if work is None:
             return
         self._adapter.rebind_cell(state.cell)

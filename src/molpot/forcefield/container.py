@@ -16,7 +16,7 @@ from typing import Any, Self
 import torch
 from molpy import ForceField as MolpyForceField
 
-from molix.batch import NeighborList
+from molix.batch import NeighborList, TensorFrame, as_tensor_frame
 from molpot.forcefield.potentials import PAIR_STYLE_DEFAULTS, Potentials
 from molpot.forcefield.schema import PotentialMeta
 from molpot.ir import (
@@ -836,12 +836,17 @@ class ForceField(MolpyForceField):
         like every other bonded class.
 
         Args:
-            system: Post-collate nested batch. Read here: ``atoms.pos``
-                ``(N, 3)`` in Å — only its length — ``atoms.q`` in units of the
-                elementary charge ``e`` when no ``q`` parameter table is filled,
-                and the bonded namespaces ``bonds`` / ``angles`` / ``propers``
-                through their ``atomi`` … ``atoml`` index columns. An
-                ``impropers`` namespace is not read (above).
+            system: Post-collate nested batch, read through its typed view
+                (:func:`~molix.batch.as_tensor_frame`), so a
+                ``TensorDict``, a :class:`~molix.batch.TensorFrame` and a
+                nested mapping of the namespaces are one system. Read here:
+                ``atoms.pos`` ``(N, 3)`` in Å — only its length — ``atoms.q``
+                in units of the elementary charge ``e`` when no ``q`` parameter
+                table is filled, and the bonded namespaces ``bonds`` /
+                ``angles`` / ``propers`` (:meth:`_arity`, which takes the
+                collate's ``bonds.bond_index`` COO as readily as ``atomi`` …
+                ``atoml`` columns). An ``impropers`` namespace is not read
+                (above).
             masses: Per-atom mass in amu ``(N,)``. Default: ``12.011`` amu — the
                 mass of carbon — for every atom. Mass is part of the atom key, so
                 the default collapses a mixed system onto fewer types than it
@@ -851,7 +856,9 @@ class ForceField(MolpyForceField):
             The assignment.
 
         Raises:
-            TypeError: ``system["atoms"]["pos"]`` is not a tensor.
+            TypeError: ``system`` is not a batch, a view of one or a nested
+                mapping of its namespaces, or ``system["atoms"]["pos"]`` is not
+                a tensor.
             ValueError: ``masses`` or a parameter table has a different length
                 than ``atoms.pos``.
             KeyError: A bonded namespace is present but missing one of the index
@@ -862,17 +869,18 @@ class ForceField(MolpyForceField):
             (identity typing and the quadratic pair block it forced), closed by
             this method.
         """
-        pos = self._system_tensor(system, "atoms", "pos")
+        frame = as_tensor_frame(system)
+        pos = self._system_tensor(frame, "atoms", "pos")
         n_atoms = int(pos.shape[0])
         atom_type, n_atom_types = _condense(
-            _param_key(row) for row in self._atom_params(system, n_atoms, masses)
+            _param_key(row) for row in self._atom_params(frame, n_atoms, masses)
         )
         # The same resolver ``_atom_params`` keyed the atoms with, so the charge
         # the deck writes is the charge its typing was computed from.
-        charges = self._charge_list(system, n_atoms)
-        bonds = self._arity(system, "bonds", 2)
-        angles = self._arity(system, "angles", 3)
-        propers = self._arity(system, "propers", 4)
+        charges = self._charge_list(frame, n_atoms)
+        bonds = self._arity(frame, "bonds", 2)
+        angles = self._arity(frame, "angles", 3)
+        propers = self._arity(frame, "propers", 4)
         bond_type, n_bond_types = _condense(
             _bonded_keys(atom_type, bonds, self._bond_params(len(bonds)))
         )
@@ -954,23 +962,24 @@ class ForceField(MolpyForceField):
             KeyError: A bonded namespace is present but missing one of the
                 index columns its arity needs.
         """
+        frame = as_tensor_frame(system)
         if types is None:
-            types = self.assign_types(system, masses=masses)
-        pos = self._system_tensor(system, "atoms", "pos")
+            types = self.assign_types(frame, masses=masses)
+        pos = self._system_tensor(frame, "atoms", "pos")
         n_atoms = int(pos.shape[0])
         astyle = self.get_style("atom", "full")
         if astyle is None:
             self.def_atomstyle("full")
             astyle = self.get_style("atom", "full")
-        params = self._atom_params(system, n_atoms, masses)
+        params = self._atom_params(frame, n_atoms, masses)
         atom_reps = _representatives(types.atom_type, len(types.atom_labels))
         atom_types = [
             astyle.def_type(label, **params[rep])
             for label, rep in zip(types.atom_labels, atom_reps, strict=True)
         ]
-        self._realize_bonds(system, atom_types, types)
-        self._realize_angles(system, atom_types, types)
-        self._realize_propers(system, atom_types, types)
+        self._realize_bonds(frame, atom_types, types)
+        self._realize_angles(frame, atom_types, types)
+        self._realize_propers(frame, atom_types, types)
         self._realize_pairs(atom_types, atom_reps)
         return self
 
@@ -1236,7 +1245,7 @@ class ForceField(MolpyForceField):
 
     def _atom_params(
         self,
-        system: Any,
+        frame: TensorFrame,
         n_atoms: int,
         masses: torch.Tensor | list[float] | None,
     ) -> list[dict[str, float]]:
@@ -1255,7 +1264,7 @@ class ForceField(MolpyForceField):
                 system against another system's parameters.
         """
         rows: list[dict[str, float]] = [{"mass": mass} for mass in self._mass_list(masses, n_atoms)]
-        charges = self._charge_list(system, n_atoms)
+        charges = self._charge_list(frame, n_atoms)
         if charges is not None:
             for row, charge in zip(rows, charges, strict=True):
                 row["charge"] = charge
@@ -1318,11 +1327,13 @@ class ForceField(MolpyForceField):
             for n in range(count)
         ]
 
-    def _realize_bonds(self, system: Any, atom_types: list[Any], types: TypeAssignment) -> None:
+    def _realize_bonds(
+        self, frame: TensorFrame, atom_types: list[Any], types: TypeAssignment
+    ) -> None:
         if self.bond_style() != "harmonic":
             return
         bp = self.params("bonds")
-        bonds = self._arity(system, "bonds", 2)
+        bonds = self._arity(frame, "bonds", 2)
         if bp is None or not bonds:
             return
         bstyle = self.get_style("bond", "harmonic")
@@ -1340,11 +1351,13 @@ class ForceField(MolpyForceField):
                 **params[rep],
             )
 
-    def _realize_angles(self, system: Any, atom_types: list[Any], types: TypeAssignment) -> None:
+    def _realize_angles(
+        self, frame: TensorFrame, atom_types: list[Any], types: TypeAssignment
+    ) -> None:
         if self.angle_style() != "harmonic":
             return
         ap = self.params("angles")
-        angles = self._arity(system, "angles", 3)
+        angles = self._arity(frame, "angles", 3)
         if ap is None or not angles:
             return
         astyle = self.get_style("angle", "harmonic")
@@ -1363,12 +1376,14 @@ class ForceField(MolpyForceField):
                 **params[rep],
             )
 
-    def _realize_propers(self, system: Any, atom_types: list[Any], types: TypeAssignment) -> None:
+    def _realize_propers(
+        self, frame: TensorFrame, atom_types: list[Any], types: TypeAssignment
+    ) -> None:
         style = self.dihedral_style()
         if style is None:
             return
         pp = self.params("propers")
-        propers = self._arity(system, "propers", 4)
+        propers = self._arity(frame, "propers", 4)
         if pp is None or not propers:
             return
         dstyle = self.get_style("dihedral", style)
@@ -1404,22 +1419,75 @@ class ForceField(MolpyForceField):
             )
 
     @staticmethod
-    def _system_tensor(system: Any, *keys: str) -> torch.Tensor:
-        value = system[keys] if len(keys) > 1 else system[keys[0]]
+    def _system_tensor(frame: TensorFrame, *keys: str) -> torch.Tensor:
+        """One leaf of the typed view, refused unless it is a tensor.
+
+        Args:
+            frame: The batch's typed view (:func:`~molix.batch.as_tensor_frame`).
+            keys: The leaf's path, e.g. ``("atoms", "pos")``.
+
+        Returns:
+            The leaf.
+
+        Raises:
+            TypeError: The leaf is not a tensor.
+        """
+        value = frame[keys] if len(keys) > 1 else frame[keys[0]]
         if not isinstance(value, torch.Tensor):
             raise TypeError(f"system{list(keys)} must be a tensor, got {type(value)!r}")
         return value
 
     @staticmethod
-    def _arity(system: Any, ns: str, arity: int) -> list[tuple[int, ...]]:
-        if ns not in system:
+    def _arity(frame: TensorFrame, ns: str, arity: int) -> list[tuple[int, ...]]:
+        """One connectivity namespace as a list of per-interaction index tuples.
+
+        ``bonds`` has **two** spellings on a batch, and both are read here for
+        the same reason :meth:`~molpot.forcefield.potentials.Potentials._bond_index`
+        reads both: :func:`~molix.batch.collate.collate_molecules` writes the
+        schema's ``(2, N)`` COO ``bond_index`` — whose shape is the anti-alias
+        guard against ``edge_index`` — while a caller assembling the namespace
+        by hand writes ``atomi`` / ``atomj`` columns, as every valence namespace
+        does. Reading only the columns made every Frame-collated system look
+        like a system with no bonds at all, which types and exports a deck whose
+        molecules have come apart. ``angles`` / ``propers`` / ``impropers`` have
+        the column spelling only.
+
+        Args:
+            frame: The batch's typed view.
+            ns: The namespace — ``"bonds"``, ``"angles"`` or ``"propers"``.
+            arity: How many atoms one interaction of that namespace spans.
+
+        Returns:
+            One ``(i, j, …)`` tuple of global atom indices per interaction, in
+            the namespace's own row order; empty when the namespace is absent.
+
+        Raises:
+            KeyError: The namespace is present but carries neither a usable
+                index block nor the columns its arity needs.
+            ValueError: ``bonds.bond_index`` is not the schema's ``(arity, N)``
+                COO. A cutoff neighbour list's ``(E, 2)`` ``edge_index`` is the
+                shape this catches, and the whole reason the two differ
+                (CLAUDE.md § edge_index vs bond_index): read as bonds it would
+                type and export a molecule that is bonded by proximity.
+        """
+        if ns not in frame.keys():
             return []
-        block = system[ns]
-        cols = ("atomi", "atomj", "atomk", "atoml")[:arity]
-        missing = [c for c in cols if c not in block]
-        if missing:
-            raise KeyError(f"system[{ns!r}] missing columns {missing}")
-        arrays = [block[c].detach().cpu().long().reshape(-1) for c in cols]
+        block = frame[ns]
+        packed = block.get("bond_index", None) if ns == "bonds" else None
+        if packed is not None:
+            if int(packed.shape[0]) != arity:
+                raise ValueError(
+                    f"system[{ns!r}].bond_index is {tuple(packed.shape)}, not the schema's "
+                    f"({arity}, N) COO — a cutoff neighbour graph is not a covalent topology, "
+                    "and the differing shape is what says so"
+                )
+            arrays = [row.detach().cpu().long().reshape(-1) for row in packed]
+        else:
+            cols = ("atomi", "atomj", "atomk", "atoml")[:arity]
+            missing = [c for c in cols if c not in block.keys()]
+            if missing:
+                raise KeyError(f"system[{ns!r}] missing columns {missing}")
+            arrays = [block[c].detach().cpu().long().reshape(-1) for c in cols]
         n = int(arrays[0].shape[0])
         return [tuple(int(a[i]) for a in arrays) for i in range(n)]
 
@@ -1432,7 +1500,7 @@ class ForceField(MolpyForceField):
             raise ValueError(f"masses length {mass_t.numel()} != n_atoms {n_atoms}")
         return [float(x) for x in mass_t.tolist()]
 
-    def _charge_list(self, system: Any, n_atoms: int) -> list[float] | None:
+    def _charge_list(self, frame: TensorFrame, n_atoms: int) -> list[float] | None:
         """Per-atom charge in ``e``, in one fixed order of precedence, or ``None``.
 
         The field's own ``atoms`` table wins over the system's ``atoms.q``
@@ -1452,8 +1520,8 @@ class ForceField(MolpyForceField):
         atoms = self.params("atoms")
         if atoms is not None and "q" in atoms:
             return [float(x) for x in atoms["q"].detach().cpu().reshape(-1).tolist()]
-        if "atoms" in system and "q" in system["atoms"]:
-            q = system["atoms"]["q"]
+        if "atoms" in frame.keys() and "q" in frame.atoms.keys():
+            q = frame.atoms["q"]
             return [float(x) for x in q.detach().cpu().reshape(-1).tolist()]
         return None
 

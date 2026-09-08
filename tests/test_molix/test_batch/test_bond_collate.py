@@ -8,20 +8,21 @@ a topological energy must therefore equal the sum of per-molecule energies.
 import torch
 
 from molix.batch.bond_adapter import bond_index_from_columns
-from molix.batch.collate import collate_molecules, collate_packed
-from molix.store import BlockDataset, PackedView
+from molix.batch.collate import collate_molecules
+from molix.store import FrameStoreDataset
 from molpot.potentials.bonds import BondHarmonic
+from tests.conftest import frame
 from tests.test_molix.conftest import unit_a, unit_b, unit_samples, write_block
 
 
 def _mol(pos, bonds, types):
-    pos = torch.tensor(pos)
-    return {
-        "Z": torch.ones(pos.shape[0], dtype=torch.long),
-        "pos": pos,
-        "bond_index": torch.tensor(bonds, dtype=torch.long),  # [2, n]
-        "bond_types": torch.tensor(types, dtype=torch.long),
-    }
+    """One frame: all-hydrogen geometry plus a bond block."""
+    return frame(
+        Z=[1] * len(pos),
+        pos=pos,
+        bonds=(bonds[0], bonds[1]),
+        bond_types=types,
+    )
 
 
 def test_bond_index_offset_and_types_preserved():
@@ -49,7 +50,12 @@ def test_two_molecule_bondharmonic_equals_sum():
     )
 
     def energy(m):
-        return pot(pos=m["pos"], bond_index=m["bond_index"], bond_types=m["bond_types"])
+        one = collate_molecules([m])
+        return pot(
+            pos=one["atoms", "pos"],
+            bond_index=one["bonds", "bond_index"],
+            bond_types=one["bonds", "bond_types"],
+        )
 
     batch = collate_molecules([m1, m2])
     batched = pot(
@@ -67,33 +73,31 @@ def test_bond_index_from_columns_roundtrip():
     bi, bt = bond_index_from_columns(atomi, atomj, types)
     assert bi.tolist() == [[0, 1], [1, 2]]
     assert bt.tolist() == [0, 1]
-    # feeds straight into a sample for collation
-    sample = {
-        "Z": torch.ones(3, dtype=torch.long),
-        "pos": torch.zeros(3, 3),
-        "bond_index": bi,
-        "bond_types": bt,
-    }
-    batch = collate_molecules([sample])
+    # feeds straight into a frame for collation
+    batch = collate_molecules(
+        [frame(Z=[1, 1, 1], pos=torch.zeros(3, 3), bonds=(atomi, atomj), bond_types=types)]
+    )
     assert torch.equal(batch["bonds", "bond_index"], bi)
 
 
 def test_block_bonds_roundtrip_equals_molecules(tmp_path):
-    """Bonds survive a sealed block and ``collate_packed`` equals the oracle.
+    """Bonds survive a sealed block and ``batch`` equals the oracle.
 
-    ``collate_molecules`` over the per-frame sample dicts is the equivalence
-    oracle for the packed path on the ``bonds`` namespace (ac-004).
+    ``collate_molecules`` over the frames the block was written from is the
+    equivalence oracle for the packed path on the ``bonds`` namespace.
     """
     units = [unit_a(), unit_b()]
-    ds = BlockDataset.load_from_disk(write_block(tmp_path / "b", units).parent)
+    ds = FrameStoreDataset.load_from_disk(write_block(tmp_path / "b", units).parent)
     samples = unit_samples(units)
 
-    # per-sample unpack restores bond_index / bond_types
-    assert torch.equal(ds[1]["bond_index"], samples[1]["bond_index"])
-    assert torch.equal(ds[1]["bond_types"], samples[1]["bond_types"])
+    # one frame comes back as a one-frame batch carrying its bonds
+    one = ds[1]
+    assert torch.equal(
+        one["bonds", "bond_index"], collate_molecules([samples[1]])["bonds", "bond_index"]
+    )
 
     frames = [0, 2]
-    fast = collate_packed(PackedView(ds.frame_payload(frames)), range(len(frames)))
+    fast = ds.batch(frames)
     oracle = collate_molecules([samples[f] for f in frames])
     assert torch.equal(fast["bonds", "bond_index"], oracle["bonds", "bond_index"])
     assert torch.equal(fast["bonds", "bond_types"], oracle["bonds", "bond_types"])

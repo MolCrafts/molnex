@@ -1,11 +1,11 @@
 """Read-only dataset view over an ordered sequence of sealed READY blocks.
 
-A training epoch consumes many sealed blocks, but :class:`molix.store.block.BlockReader`
+A training epoch consumes many sealed blocks, but :class:`molix.store.frame_store.FrameStoreReader`
 reads exactly one directory and :class:`molix.store.dataset.SubsetDataset` wraps
-exactly one packed payload. :class:`BlockDataset` is the one level up: an ordered,
+exactly one packed payload. :class:`FrameStoreDataset` is the one level up: an ordered,
 read-only view whose global index is ``(block, local frame)`` **in the given block
 order**, presenting the concatenated metadata surface a batch sampler needs and an
-order-preserving, cross-block :meth:`BlockDataset.frame_payload`. It moves no
+order-preserving, cross-block :meth:`FrameStoreDataset.frame_payload`. It moves no
 numbers, converts no units and re-exposes each block's columns verbatim (``pos`` in
 Å, ``energy`` in kcal mol⁻¹, ``forces`` in kcal mol⁻¹ Å⁻¹, as recorded in every
 manifest's ``provenance.units``); its whole domain content is index algebra plus the
@@ -14,8 +14,8 @@ molecule-level grouping discipline the block format already encodes.
 Index algebra
 -------------
 
-For blocks ``b = 0 … B-1`` in caller order, with ``F_b = BlockReader.frame_count``
-and ``M_b = BlockManifest.units``::
+For blocks ``b = 0 … B-1`` in caller order, with ``F_b = FrameStoreReader.frame_count``
+and ``M_b = FrameStoreManifest.units``::
 
     frame_ptr[0] = 0,  frame_ptr[b+1] = frame_ptr[b] + F_b        # (B+1,) long
     unit_ptr[0]  = 0,  unit_ptr[b+1]  = unit_ptr[b]  + M_b        # (B+1,) long
@@ -24,20 +24,20 @@ and for a global frame ``g ∈ [0, frame_ptr[B])``::
 
     b     = searchsorted(frame_ptr, g, right=True) - 1     # owning block
     local = g - frame_ptr[b]                               # frame row inside b
-    atom_counts[g] = BlockReader(b).atom_counts[local]                    # (F,) long
-    group_codes[g] = BlockReader(b).group_codes[local] + unit_ptr[b]      # (F,) long
-    task_codes[g]  = global_of[b][ BlockReader(b).task_codes[local] ]     # (F,) long
+    atom_counts[g] = FrameStoreReader(b).atom_counts[local]                    # (F,) long
+    group_codes[g] = FrameStoreReader(b).group_codes[local] + unit_ptr[b]      # (F,) long
+    task_codes[g]  = global_of[b][ FrameStoreReader(b).task_codes[local] ]     # (F,) long
 
 ``M_b`` is read from the manifest (authoritative once sealed); ``F_b`` is not a
 manifest field — ``rows`` carries a ``frame`` entry only when a frame-space column
 such as ``energy`` is declared — so the frame count is read from
-:class:`~molix.store.block.BlockReader` through the bounded pool, which maps the
+:class:`~molix.store.frame_store.FrameStoreReader` through the bounded pool, which maps the
 small count columns only.
 
 Why ``locate`` is vectorized only
 ---------------------------------
 
-:meth:`BlockDataset.locate` takes a whole frame list and returns two ``(B,)``
+:meth:`FrameStoreDataset.locate` takes a whole frame list and returns two ``(B,)``
 tensors. That is the shape the plan's collate route calls it in — one
 ``searchsorted`` over ``(B+1,)`` pointers per batch instead of ``len(frames)``
 Python-level lookups — and a scalar API would invite exactly the per-frame loop the
@@ -50,9 +50,9 @@ Why there is no wrap indexing
 A plan speaks in absolute frame rows, so a negative row is a producer bug, never a
 request for the tail: ``view[-1]`` would silently read a frame from the *last*
 block of the plan while its author meant "frame −1 of this block". Both
-:meth:`BlockDataset.locate` and :meth:`BlockDataset.frame_payload` therefore
+:meth:`FrameStoreDataset.locate` and :meth:`FrameStoreDataset.frame_payload` therefore
 range-check ``[0, len(view))`` and refuse anything outside it, and
-:meth:`BlockDataset.__getitem__` inherits that refusal by routing through
+:meth:`FrameStoreDataset.__getitem__` inherits that refusal by routing through
 ``frame_payload``, rather than deferring to the wrap-around
 :func:`_unpack_packed_sample` performs on a packed payload.
 
@@ -60,7 +60,7 @@ Scope of the not-ready guard
 ----------------------------
 
 A planned block that is missing, unparsable or unsealed raises
-:class:`BlockNotReadyError` at construction: it is never skipped and never
+:class:`FrameStoreNotReadyError` at construction: it is never skipped and never
 substituted by a neighbour, so a hole in the plan stalls the view instead of
 silently shortening the epoch. The same signal wraps a mid-epoch failure to reopen a
 block. That guard is scoped honestly: POSIX mmap survives ``unlink``, so a block
@@ -73,12 +73,12 @@ Why ``edge_counts`` refuses
 ---------------------------
 
 Blocks deliberately store no neighbour-graph columns (see the
-:mod:`molix.store.block` module docstring for the ~10x payload argument), so this
-view delegates :attr:`BlockDataset.edge_counts` to the block store's own refusal and
+:mod:`molix.store.frame_store` module docstring for the ~10x payload argument), so this
+view delegates :attr:`FrameStoreDataset.edge_counts` to the block store's own refusal and
 fabricates nothing: handing a token-budget sampler a per-frame count of nothing at
 all would be a false budget for a cutoff graph that will exist downstream, built by
 :class:`molix.batch.NeighborList` or the MD bind path. Samplers over this view are
-constructed with ``max_edges=None`` and budget on :attr:`BlockDataset.atom_counts`.
+constructed with ``max_edges=None`` and budget on :attr:`FrameStoreDataset.atom_counts`.
 
 Why group codes are an offset, not a ``(block, code)`` pair
 -----------------------------------------------------------
@@ -92,8 +92,8 @@ pair would force either an ``(F, 2)`` table they reject or a table of Python tup
 which is un-tensorable, slower to build and no longer sortable in an audit.
 
 Layering: this module imports stdlib + torch + :mod:`molix.store` only. It must not
-import ``tensordict`` or any collate symbol — batch construction stays the caller's
-composition, ``collate_packed(PackedView(view.frame_payload(frames)), ...)``.
+build the batch ``TensorDict`` directly: storage hands the model its one structure,
+composition, ``payload_to_batch(view._columns(frames))``.
 
 References:
     Wang, Fass & Chodera. "End-to-end differentiable construction of molecular
@@ -118,24 +118,30 @@ from typing import Any, Final, NoReturn
 
 import torch
 
-from molix.store.block import (
+from molix.store.dataset import BaseDataset
+from molix.store.frame_store import (
     _FAMILY_BUCKETS,
     _MANIFEST_NAME,
-    _META_ROUTE_PREFIX,
-    BlockManifest,
-    BlockReader,
+    _SPACE_META,
+    FrameStoreManifest,
+    FrameStoreReader,
+    _batch_from_columns,
     _exclusive_cumsum,
 )
-from molix.store.dataset import BaseDataset
 
 __all__ = [
-    "BlockDataset",
-    "BlockNotReadyError",
-    "BlockSchemaMismatchError",
-    "BlockSplitMismatchError",
+    "FrameStoreDataset",
+    "FrameStoreNotReadyError",
+    "FrameStoreSchemaMismatchError",
+    "FrameStoreSplitMismatchError",
 ]
 
 #: Covalent-bond keys, handled outside the per-atom / per-frame row model.
+_TARGET_PREFIX: Final[str] = "targets."
+
+#: Valence columns whose values are molecule-local atom indices.
+_ATOM_INDEX_COLUMNS: Final[frozenset[str]] = frozenset({"atomi", "atomj", "atomk", "atoml"})
+
 _BOND_INDEX_KEY: Final[str] = "bond_index"
 _BOND_TYPES_KEY: Final[str] = "bond_types"
 
@@ -171,7 +177,7 @@ def _unpack_packed_sample(payload: Mapping[str, Any], idx: int) -> dict[str, Any
 
     Slices into the shared concat tensors — no storage copy when the payload
     came from a memory-mapped read. The payload shape is the one
-    :func:`~molix.batch.collate.collate_packed` consumes: ``atoms`` / ``edges``
+    :func:`payload_to_batch` consumes: ``atoms`` / ``edges``
     / ``graphs`` / ``scalars`` buckets plus the cumsum pointers that locate
     each sample's rows.
 
@@ -231,7 +237,7 @@ def _unpack_packed_sample(payload: Mapping[str, Any], idx: int) -> dict[str, Any
     return _unflatten(flat)
 
 
-class BlockNotReadyError(ValueError):
+class FrameStoreNotReadyError(ValueError):
     """A planned block is missing, unreadable or unsealed (invariant I8).
 
     Raised at construction for a root with no ``manifest.json``, an unparsable
@@ -246,16 +252,16 @@ class BlockNotReadyError(ValueError):
     """
 
 
-class BlockSplitMismatchError(ValueError):
+class FrameStoreSplitMismatchError(ValueError):
     """The planned blocks do not share one manifest split (invariant I7).
 
     Raised when the roots of one view carry distinct ``manifest.split`` values.
     Mixing is never inferred and never silently allowed: construct one
-    :class:`BlockDataset` per split. Subclasses :class:`ValueError`.
+    :class:`FrameStoreDataset` per split. Subclasses :class:`ValueError`.
     """
 
 
-class BlockSchemaMismatchError(ValueError):
+class FrameStoreSchemaMismatchError(ValueError):
     """The planned blocks are not concatenable.
 
     Raised for the three ways concatenation would lie: a block whose routed
@@ -267,21 +273,21 @@ class BlockSchemaMismatchError(ValueError):
     """
 
 
-class BlockDataset(BaseDataset):
+class FrameStoreDataset(BaseDataset):
     """Ordered, read-only view over several sealed blocks as one frame index.
 
     Global frame ``g`` is ``(block, local)`` in the **given** block order (see the
     module docstring for the index algebra). The view holds no column data of its
     own: every tensor it hands out is produced by advanced indexing inside
-    :meth:`~molix.store.block.BlockReader.frame_payload`, which copies, so an
+    :meth:`~molix.store.frame_store.FrameStoreReader.frame_payload`, which copies, so an
     eviction from the bounded reader pool can never invalidate a live batch or a
     cached table and results are independent of *max_open*.
 
     Construction is manifest-driven — readiness, split, the declared column set and
     the task dictionary are read from ``manifest.json``, and only the small per-unit
     count columns are mapped — so a plan is validated before a single frame is
-    faulted in. The three refusals (:class:`BlockNotReadyError`,
-    :class:`BlockSplitMismatchError`, :class:`BlockSchemaMismatchError`) all fire
+    faulted in. The three refusals (:class:`FrameStoreNotReadyError`,
+    :class:`FrameStoreSplitMismatchError`, :class:`FrameStoreSchemaMismatchError`) all fire
     here, at construction, rather than mid-epoch.
 
     ``split`` is a **property** on this type, deliberately shadowing
@@ -293,24 +299,24 @@ class BlockDataset(BaseDataset):
 
     Composition stays the caller's::
 
-        view = BlockDataset(roots)
-        batch = collate_packed(PackedView(view.frame_payload(frames)), range(len(frames)))
+        view = FrameStoreDataset(roots)
+        batch = payload_to_batch(view._columns(frames))
 
     Args:
         roots: Sealed block directories, in visit order. The order *is* the global
             index order; it is consumed as given (which blocks and in what order is
             the plan's decision, not this view's).
         max_open: Bound ``K`` on the reader pool — at most this many
-            :class:`~molix.store.block.BlockReader` instances (and their column
+            :class:`~molix.store.frame_store.FrameStoreReader` instances (and their column
             mappings) stay resident, evicted least-recently-used. Trades address
             space and file descriptors against reopen churn; it never changes a
             result.
 
     Raises:
         ValueError: *roots* is empty, or ``max_open < 1``.
-        BlockNotReadyError: A root is missing its manifest, unreadable, or unsealed.
-        BlockSplitMismatchError: The roots carry more than one manifest split.
-        BlockSchemaMismatchError: The roots are not concatenable (differing routed
+        FrameStoreNotReadyError: A root is missing its manifest, unreadable, or unsealed.
+        FrameStoreSplitMismatchError: The roots carry more than one manifest split.
+        FrameStoreSchemaMismatchError: The roots are not concatenable (differing routed
             column sets, a task code beyond its dictionary, or an unroutable
             valence family).
 
@@ -329,7 +335,7 @@ class BlockDataset(BaseDataset):
         blocks = tuple(Path(root) for root in roots)
         if not blocks:
             raise ValueError(
-                "BlockDataset needs at least one block root: an empty view indexes no "
+                "FrameStoreDataset needs at least one block root: an empty view indexes no "
                 "frame, so it can only hide the fact that the plan resolved to nothing."
             )
         if max_open < 1:
@@ -339,7 +345,7 @@ class BlockDataset(BaseDataset):
             )
         self._blocks: Final[tuple[Path, ...]] = blocks
         self._max_open: Final[int] = int(max_open)
-        self._pool: OrderedDict[int, BlockReader] = OrderedDict()
+        self._pool: OrderedDict[int, FrameStoreReader] = OrderedDict()
 
         manifests = self._ready_manifests()
         self._split = self._single_split(manifests)
@@ -361,7 +367,7 @@ class BlockDataset(BaseDataset):
         directory: str | os.PathLike[str],
         *,
         max_open: int = 4,
-    ) -> BlockDataset:
+    ) -> FrameStoreDataset:
         """Open a directory of sealed block roots as one view.
 
         The consuming half of the cross-repo seam: molhub's ``prepare`` writes a
@@ -378,14 +384,14 @@ class BlockDataset(BaseDataset):
         roots and are ignored. A *directory* that carries ``manifest.json`` itself is
         taken as the single root of a one-block view. Every refusal below block
         construction stays :meth:`__init__`'s and is not re-checked here: a
-        discovered-but-unsealed root is refused by :class:`BlockNotReadyError`, never
+        discovered-but-unsealed root is refused by :class:`FrameStoreNotReadyError`, never
         quietly skipped, which would shorten the epoch by exactly the frames still
         being written.
 
         Args:
             directory: A ``prepare`` output directory of block roots, or one sealed
                 block root.
-            max_open: Reader-pool bound, forwarded verbatim to :class:`BlockDataset`.
+            max_open: Reader-pool bound, forwarded verbatim to :class:`FrameStoreDataset`.
 
         Returns:
             A view over the discovered roots, in sorted child-name order.
@@ -394,9 +400,9 @@ class BlockDataset(BaseDataset):
             ValueError: *directory* holds no ``manifest.json`` root at either level.
                 An empty view indexes no frame, so it could only hide a mistyped path
                 or a ``prepare`` run that wrote nothing.
-            BlockNotReadyError: A discovered root is unreadable or unsealed.
-            BlockSplitMismatchError: The discovered roots carry more than one split.
-            BlockSchemaMismatchError: The discovered roots are not concatenable.
+            FrameStoreNotReadyError: A discovered root is unreadable or unsealed.
+            FrameStoreSplitMismatchError: The discovered roots carry more than one split.
+            FrameStoreSchemaMismatchError: The discovered roots are not concatenable.
         """
         root = Path(directory)
         children = sorted(root.iterdir(), key=lambda child: child.name) if root.is_dir() else []
@@ -415,7 +421,7 @@ class BlockDataset(BaseDataset):
     # -- construction guards -----------------------------------------------
 
     @staticmethod
-    def _readiness(root: Path) -> tuple[BlockManifest | None, str]:
+    def _readiness(root: Path) -> tuple[FrameStoreManifest | None, str]:
         """Return the sealed manifest of *root*, or why it is not READY.
 
         Args:
@@ -430,25 +436,25 @@ class BlockDataset(BaseDataset):
         if not (root / _MANIFEST_NAME).is_file():
             return None, "missing manifest"
         try:
-            manifest = BlockManifest.read(root)
+            manifest = FrameStoreManifest.read(root)
         except ValueError:
             return None, "unreadable manifest"
         if not manifest.sealed:
             return None, "unsealed — the writer has not called seal()"
         return manifest, ""
 
-    def _not_ready(self, row: int, root: Path, state: str) -> BlockNotReadyError:
+    def _not_ready(self, row: int, root: Path, state: str) -> FrameStoreNotReadyError:
         """Build the I8 refusal naming the block row, its path and its state."""
-        return BlockNotReadyError(
+        return FrameStoreNotReadyError(
             f"block row {row} of {len(self._blocks)} at {root} is not READY: {state}. "
             "A planned block is never skipped and never substituted by a neighbour, so "
             "this view stalls here instead of silently shortening the epoch; seal the "
             "block, restore it, or re-plan without it."
         )
 
-    def _ready_manifests(self) -> tuple[BlockManifest, ...]:
+    def _ready_manifests(self) -> tuple[FrameStoreManifest, ...]:
         """Read every planned manifest in order, refusing the first not-READY block."""
-        manifests: list[BlockManifest] = []
+        manifests: list[FrameStoreManifest] = []
         for row, root in enumerate(self._blocks):
             manifest, state = self._readiness(root)
             if manifest is None:
@@ -456,20 +462,20 @@ class BlockDataset(BaseDataset):
             manifests.append(manifest)
         return tuple(manifests)
 
-    def _single_split(self, manifests: Sequence[BlockManifest]) -> str:
+    def _single_split(self, manifests: Sequence[FrameStoreManifest]) -> str:
         """Return the one split of every planned block, or raise the I7 refusal."""
         splits = [manifest.split for manifest in manifests]
         if len(set(splits)) > 1:
             listing = ", ".join(f"{root} -> {split!r}" for root, split in zip(self._blocks, splits))
-            raise BlockSplitMismatchError(
-                f"one BlockDataset holds exactly one manifest split, but the planned "
+            raise FrameStoreSplitMismatchError(
+                f"one FrameStoreDataset holds exactly one manifest split, but the planned "
                 f"blocks carry {sorted(set(splits))}: {listing}. Mixing splits is never "
                 "inferred — construct one view per split."
             )
         return splits[0]
 
     @staticmethod
-    def _declared_families(manifest: BlockManifest) -> tuple[str, ...]:
+    def _declared_families(manifest: FrameStoreManifest) -> tuple[str, ...]:
         """Return the valence families *manifest* declares, in sorted order."""
         return tuple(
             sorted(
@@ -481,7 +487,7 @@ class BlockDataset(BaseDataset):
             )
         )
 
-    def _refuse_unroutable_families(self, manifests: Sequence[BlockManifest]) -> None:
+    def _refuse_unroutable_families(self, manifests: Sequence[FrameStoreManifest]) -> None:
         """Refuse a block declaring a valence family nothing downstream can route.
 
         Checked before the column-set comparison so a single-root view refuses on
@@ -492,10 +498,10 @@ class BlockDataset(BaseDataset):
             unroutable = [
                 family
                 for family in self._declared_families(manifest)
-                if _FAMILY_BUCKETS[family] not in _ROUTABLE_BUCKETS
+                if _FAMILY_BUCKETS.get(family, family) not in _ROUTABLE_BUCKETS
             ]
             if unroutable:
-                raise BlockSchemaMismatchError(
+                raise FrameStoreSchemaMismatchError(
                     f"block row {row} at {self._blocks[row]} declares the valence "
                     f"{'families' if len(unroutable) > 1 else 'family'} "
                     f"{unroutable}, which has no downstream route: "
@@ -506,22 +512,20 @@ class BlockDataset(BaseDataset):
                 )
 
     @staticmethod
-    def _routed_columns(manifest: BlockManifest) -> frozenset[str]:
+    def _routed_columns(manifest: FrameStoreManifest) -> frozenset[str]:
         """Return the payload-routed (non-``meta.``) column names of *manifest*."""
         return frozenset(
-            name
-            for name, spec in manifest.columns.items()
-            if not str(spec["route"]).startswith(_META_ROUTE_PREFIX)
+            name for name, spec in manifest.columns.items() if str(spec["space"]) != _SPACE_META
         )
 
-    def _refuse_column_set_drift(self, manifests: Sequence[BlockManifest]) -> None:
+    def _refuse_column_set_drift(self, manifests: Sequence[FrameStoreManifest]) -> None:
         """Refuse blocks whose routed column sets differ from block 0's."""
         reference = self._routed_columns(manifests[0])
         for row, manifest in enumerate(manifests[1:], start=1):
             columns = self._routed_columns(manifest)
             if columns == reference:
                 continue
-            raise BlockSchemaMismatchError(
+            raise FrameStoreSchemaMismatchError(
                 f"block row {row} at {self._blocks[row]} is not concatenable with block "
                 f"row 0 at {self._blocks[0]}: their routed column sets differ by "
                 f"{sorted(columns ^ reference)}. A cross-block batch would fail "
@@ -531,7 +535,7 @@ class BlockDataset(BaseDataset):
 
     @staticmethod
     def _merged_task_dictionary(
-        manifests: Sequence[BlockManifest],
+        manifests: Sequence[FrameStoreManifest],
     ) -> tuple[tuple[str, ...], tuple[torch.Tensor, ...]]:
         """Merge the per-block task dictionaries in first-appearance order.
 
@@ -557,7 +561,7 @@ class BlockDataset(BaseDataset):
             lookup.append(torch.tensor(local, dtype=torch.long))
         return tuple(names), tuple(lookup)
 
-    def _scan_blocks(self, manifests: Sequence[BlockManifest]) -> tuple[list[int], int]:
+    def _scan_blocks(self, manifests: Sequence[FrameStoreManifest]) -> tuple[list[int], int]:
         """Open every block once for its frame count, atom bound and code check.
 
         The frame count is not a manifest field, so it is read through the bounded
@@ -574,7 +578,7 @@ class BlockDataset(BaseDataset):
             max_atoms = max(max_atoms, reader.max_atoms)
             codes = reader.task_codes
             if codes.numel() and int(codes.max()) >= len(manifest.task_names):
-                raise BlockSchemaMismatchError(
+                raise FrameStoreSchemaMismatchError(
                     f"block row {row} at {self._blocks[row]} carries the task code "
                     f"{int(codes.max())} but its manifest task_names holds "
                     f"{len(manifest.task_names)} name(s), so the code table and the name "
@@ -585,7 +589,7 @@ class BlockDataset(BaseDataset):
 
     # -- bounded-K reader pool ---------------------------------------------
 
-    def reader(self, block: int) -> BlockReader:
+    def reader(self, block: int) -> FrameStoreReader:
         """Return the reader of one block row, opening it if it is not resident.
 
         At most :attr:`max_open` readers stay live in an LRU pool: a hit moves the
@@ -598,11 +602,11 @@ class BlockDataset(BaseDataset):
             block: Block row in ``[0, len(blocks))``.
 
         Returns:
-            The live :class:`~molix.store.block.BlockReader` of that row.
+            The live :class:`~molix.store.frame_store.FrameStoreReader` of that row.
 
         Raises:
             IndexError: *block* is outside the planned block rows.
-            BlockNotReadyError: The block is cold (never opened or evicted) and can
+            FrameStoreNotReadyError: The block is cold (never opened or evicted) and can
                 no longer be opened — e.g. its directory was deleted under the view.
         """
         row = int(block)
@@ -617,7 +621,7 @@ class BlockDataset(BaseDataset):
             return resident
         root = self._blocks[row]
         try:
-            opened = BlockReader(root)
+            opened = FrameStoreReader(root)
         except (ValueError, OSError) as exc:
             _, state = self._readiness(root)
             raise self._not_ready(row, root, state or str(exc)) from exc
@@ -732,7 +736,7 @@ class BlockDataset(BaseDataset):
         """Atoms per frame ``(F,) torch.long``, concatenated in planned order.
 
         Pointer arithmetic only — each block contributes
-        :attr:`~molix.store.block.BlockReader.atom_counts`, a gathered copy — so a
+        :attr:`~molix.store.frame_store.FrameStoreReader.atom_counts`, a gathered copy — so a
         token-budget sampler consumes the whole view without unpacking a frame.
         """
         return torch.cat([self.reader(row).atom_counts for row in range(len(self._blocks))])
@@ -777,7 +781,7 @@ class BlockDataset(BaseDataset):
     def edge_counts(self) -> NoReturn:
         """Never returns — blocks carry no neighbour-graph columns by design.
 
-        Delegates to :attr:`~molix.store.block.BlockReader.edge_counts` so the
+        Delegates to :attr:`~molix.store.frame_store.FrameStoreReader.edge_counts` so the
         refusal keeps one copy of its rationale and one message, which already names
         :class:`molix.batch.NeighborList` as the downstream builder. Budget batches
         on :attr:`atom_counts` and construct samplers with ``max_edges=None``.
@@ -789,14 +793,14 @@ class BlockDataset(BaseDataset):
 
     # -- payload assembly --------------------------------------------------
 
-    def frame_payload(self, frames: Sequence[int] | torch.Tensor) -> dict[str, Any]:
+    def _columns(self, frames: Sequence[int] | torch.Tensor) -> dict[str, Any]:
         """Assemble one packed-cache-v1 payload for *frames*, in caller order.
 
         Same name, same contract and same return shape as
-        :meth:`~molix.store.block.BlockReader.frame_payload`, one level up, so the
+        :meth:`~molix.store.frame_store.FrameStoreReader.frame_payload`, one level up, so the
         caller composition is byte-identical to the single-block one::
 
-            collate_packed(PackedView(view.frame_payload(frames)), range(len(frames)))
+            payload_to_batch(view._columns(frames))
 
         Frames are grouped by owning block in first-appearance order and each group
         is materialised by its own reader. A request touching one block returns that
@@ -819,7 +823,7 @@ class BlockDataset(BaseDataset):
 
         Raises:
             ValueError: *frames* is empty, not 1-D, or names a row outside the view.
-            BlockNotReadyError: An owning block is cold and can no longer be opened.
+            FrameStoreNotReadyError: An owning block is cold and can no longer be opened.
         """
         selected = self._resolve("frame_payload", frames)
         if selected.numel() == 0:
@@ -833,12 +837,12 @@ class BlockDataset(BaseDataset):
         local_rows = locals_.tolist()
         if len(slots_of_block) == 1:
             (row,) = slots_of_block
-            return self.reader(row).frame_payload(local_rows)
+            return self.reader(row)._columns(local_rows)
 
         payloads: list[Mapping[str, Any]] = []
         block_major: list[int] = []
         for row, slots in slots_of_block.items():
-            payloads.append(self.reader(row).frame_payload([local_rows[s] for s in slots]))
+            payloads.append(self.reader(row)._columns([local_rows[s] for s in slots]))
             block_major.extend(slots)
         perm = torch.argsort(torch.tensor(block_major, dtype=torch.long))
         return self._merge(payloads, perm)
@@ -847,7 +851,7 @@ class BlockDataset(BaseDataset):
     def _gather(counts: torch.Tensor, perm: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Plan one block-major → caller-order gather of a ragged row space.
 
-        The arithmetic :meth:`~molix.store.block.BlockReader.frame_payload` already
+        The arithmetic :meth:`~molix.store.frame_store.FrameStoreReader.frame_payload` already
         uses for its own ragged spaces, applied to the concatenated payloads.
 
         Args:
@@ -909,30 +913,49 @@ class BlockDataset(BaseDataset):
             }
         return merged
 
-    def __getitem__(self, idx: int) -> dict:
-        """Return one frame as a flat pre-collate sample ``dict``.
+    def batch(self, frames: Sequence[int]):
+        """Return the batch ``TensorDict`` for *frames* — storage to model, one hop.
 
-        The one-frame payload run through
-        :func:`_unpack_packed_sample` — there is no second
-        route into the data. The ``"scalars"`` adapter is empty because the block
-        column registry has no Python-scalar space while the unpacker indexes that
-        bucket unconditionally.
+        The mmap'd block columns are gathered once, in caller order, and wrapped
+        as the nested ``atoms`` / ``edges`` / ``graphs`` batch the encoders read.
+        Nothing is copied a second time and no intermediate per-sample object
+        exists: the batch leaves share storage with the gathered columns.
 
-        **Negative indexing is unsupported**: a plan speaks in absolute frame rows,
-        so ``view[-1]`` is refused exactly like ``view[len(view)]`` rather than
-        silently resolving to the last frame of the last planned block (the range
-        check inside :meth:`frame_payload` is the enforcement).
+        Blocks carry no neighbour graph, so ``edges`` comes back empty and the
+        cutoff graph is built downstream.
+
+        Args:
+            frames: Global frame rows, in the order the batch wants them.
+
+        Returns:
+            The batch ``TensorDict``.
+
+        Raises:
+            ValueError: *frames* is empty, or a row is outside the view.
+        """
+        rows = list(frames)
+        if not rows:
+            raise ValueError("cannot build a batch from zero frames")
+        return _batch_from_columns(self._columns(rows))
+
+    def __getitem__(self, idx: int):
+        """Return frame *idx* as a one-frame batch ``TensorDict``.
+
+        A block yields the model's structure directly — there is no per-sample
+        object between them. Composing several frames is :meth:`batch`.
+
+        **Negative indexing is unsupported**: a plan speaks in absolute frame
+        rows, so ``view[-1]`` is refused exactly like ``view[len(view)]``
+        rather than silently resolving to the last frame of the last planned
+        block.
 
         Args:
             idx: Global frame row in ``[0, len(self))``.
 
         Returns:
-            Flat sample ``dict`` with ``Z`` ``(N,)``, ``pos`` ``(N, 3)`` in Å,
-            nested ``targets`` (e.g. ``energy`` in kcal mol⁻¹, ``forces`` in
-            kcal mol⁻¹ Å⁻¹), ``bond_index`` ``(2, T)`` with ``bond_types`` ``(T,)``,
-            and one nested dict per further declared valence family.
+            The one-frame batch.
 
         Raises:
             ValueError: *idx* is outside ``[0, len(self))``.
         """
-        return _unpack_packed_sample({**self.frame_payload([idx]), "scalars": {}}, 0)
+        return self.batch([idx])

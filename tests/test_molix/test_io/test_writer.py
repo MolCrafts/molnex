@@ -1,9 +1,4 @@
-"""RED tests for ``molix.io.JournalWriter`` (kwargs API).
-
-Acceptance traces:
-    ac-004 — kwargs API, dispatches five reserved types, ValueError on unknown.
-    ac-006 — Zarr v3 sharded layout (chunks=1024, shards=1_048_576) preserved.
-"""
+"""RED tests for ``molix.io.JournalWriter`` (kwargs API)."""
 
 from __future__ import annotations
 
@@ -32,7 +27,7 @@ def test_writer_importable() -> None:
 
 
 def test_append_kwargs_api(tmp_path: Path) -> None:
-    """ac-004: ``append`` accepts kwargs (no MetricRecord), persists a scalar."""
+    """``append`` accepts kwargs (no MetricRecord), persists a scalar."""
     from molix.io import JournalWriter
 
     with JournalWriter(tmp_path, run_id="run0") as writer:
@@ -64,7 +59,7 @@ def test_append_kwargs_api(tmp_path: Path) -> None:
     ],
 )
 def test_five_reserved_types_dispatch(tmp_path: Path, type_name: str, value: Any) -> None:
-    """ac-004: All five wire-format types dispatch correctly inside ``append``."""
+    """All five wire-format types dispatch correctly inside ``append``."""
     from molix.io import JournalWriter
 
     with JournalWriter(tmp_path, run_id="run0") as writer:
@@ -83,7 +78,7 @@ def test_five_reserved_types_dispatch(tmp_path: Path, type_name: str, value: Any
 
 
 def test_append_unknown_type_raises(tmp_path: Path) -> None:
-    """ac-004: unknown ``type`` raises ValueError (replaces dataclass validation)."""
+    """Unknown ``type`` raises ValueError (replaces dataclass validation)."""
     from molix.io import JournalWriter
 
     with JournalWriter(tmp_path, run_id="run0") as writer:
@@ -98,7 +93,7 @@ def test_append_unknown_type_raises(tmp_path: Path) -> None:
 
 
 def test_zarr_layout_chunks_and_shards(tmp_path: Path) -> None:
-    """ac-006: ``chunks=(1024,)``, ``shards=(1_048_576,)`` preserved verbatim.
+    """``chunks=(1024,)``, ``shards=(1_048_576,)`` preserved verbatim.
 
     HPC-inode discipline relies on these exact values per the original
     ``recorder/__init__.py`` rationale (mirrors the block writer).
@@ -120,7 +115,7 @@ def test_zarr_layout_chunks_and_shards(tmp_path: Path) -> None:
 
 
 def test_sharding_keeps_file_count_small(tmp_path: Path) -> None:
-    """ac-006: 100k records produce O(50) files (block-equivalent inode discipline)."""
+    """100k records produce O(50) files (block-equivalent inode discipline)."""
     from molix.io import JournalWriter
 
     keys = [f"train/m{i}" for i in range(5)]

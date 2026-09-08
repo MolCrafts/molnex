@@ -12,9 +12,20 @@ Required system contract (post-collate nested TensorDict)::
                                            #   charge source; see below
     system["graphs"]["cell"]               # optional (3, 3) or (1, 3, 3) Å —
                                            #   periodic box; open padded box otherwise
-    system["bonds"]["atomi" / "atomj"]     # optional
+    system["bonds"]["bond_index"]          # optional (2, N) COO — what
+                                           #   collate_molecules writes; the
+                                           #   "atomi" / "atomj" column spelling
+                                           #   is read too
     system["angles"]["atomi" / "atomj" / "atomk"]
     system["propers"]["atomi" … "atoml"]
+
+Read through :class:`~molix.batch.TensorFrame` — the batch's typed view — so a
+``TensorDict`` and a view of it are one system here (CLAUDE.md § TensorDict
+Contract). The wrap is :func:`~molix.batch.as_tensor_frame`, the one accessor
+this side and :meth:`~molpot.forcefield.ForceField.assign_types` both read the
+deck's system through. ``ForceField`` and ``TypeAssignment`` come in over the
+sanctioned ``molix.ff_export`` → ``molpot`` edge, through ``molpot.forcefield``'s
+public surface.
 
 Charges are **not** read from the system here. They arrive on the
 :class:`~molpot.forcefield.TypeAssignment` every call takes
@@ -59,10 +70,11 @@ import numpy as np
 import torch
 from tensordict import TensorDict
 
+from molix.batch import TensorFrame, as_tensor_frame
 from molix.ff_export.force_spec import ForceSpec
 from molix.ff_export.lammps_adapter import LammpsAdapter
 from molpot import MixingRule
-from molpot.forcefield.container import ForceField, TypeAssignment
+from molpot.forcefield import ForceField, TypeAssignment
 
 __all__ = ["LammpsWriter"]
 
@@ -97,7 +109,7 @@ class LammpsWriter:
     def write_data(
         self,
         path: str | Path,
-        system: TensorDict,
+        system: TensorDict | TensorFrame,
         *,
         types: TypeAssignment,
         masses: torch.Tensor | list[float] | None = None,
@@ -126,9 +138,8 @@ class LammpsWriter:
             The written path.
 
         Raises:
-            TypeError: A column read off ``system`` is not a tensor.
             ValueError: ``graphs.cell`` holds more than one cell — one data file
-                describes one box (both raised through :meth:`to_frame`).
+                describes one box (raised through :meth:`to_frame`).
         """
         from molpy.io.writers import write_lammps_data
 
@@ -144,7 +155,7 @@ class LammpsWriter:
         self,
         path: str | Path,
         forcefield: ForceField,
-        system: TensorDict,
+        system: TensorDict | TensorFrame,
         *,
         types: TypeAssignment,
         masses: torch.Tensor | list[float] | None = None,
@@ -190,7 +201,6 @@ class LammpsWriter:
             The written path.
 
         Raises:
-            TypeError: ``system["atoms"]["pos"]`` is not a tensor.
             ValueError: ``masses`` has a different length than ``atoms.pos``
                 (raised through :meth:`to_frame`).
         """
@@ -419,7 +429,7 @@ class LammpsWriter:
 
     def to_frame(
         self,
-        system: TensorDict,
+        system: TensorDict | TensorFrame,
         *,
         types: TypeAssignment,
         masses: torch.Tensor | list[float] | None = None,
@@ -471,7 +481,6 @@ class LammpsWriter:
             The molpy ``Frame``.
 
         Raises:
-            TypeError: ``atoms.pos`` or ``graphs.cell`` is not a tensor.
             ValueError: ``graphs.cell`` is batched with ``B > 1`` — one data
                 file describes one box, so there is no faithful single lattice
                 to write for a batch of several. Or ``masses`` has a different
@@ -480,7 +489,13 @@ class LammpsWriter:
         from molpy import Box
         from molpy.core.atomistic import Atomistic
 
-        pos = self._tensor(system, "atoms", "pos")
+        # One wrap, here, and every reader below addresses the view: this is the
+        # sanctioned ``molix.ff_export`` -> ``molpot`` edge (module docstring),
+        # taken so the deck is written off the same accessor
+        # ``ForceField.assign_types`` typed the system through — a second
+        # spelling of "read the batch" is a second answer waiting to happen.
+        frame_view = as_tensor_frame(system)
+        pos = frame_view["atoms", "pos"]
         xyz = pos.detach().cpu().double().numpy()
         n_atoms = int(xyz.shape[0])
         mass_list = ForceField._mass_list(masses, n_atoms)
@@ -522,16 +537,16 @@ class LammpsWriter:
                     }
                 )
             )
-        for n, (i, j) in enumerate(ForceField._arity(system, "bonds", 2)):
+        for n, (i, j) in enumerate(ForceField._arity(frame_view, "bonds", 2)):
             world.def_bond(handles[i], handles[j], type=types.bond_labels[types.bond_type[n]])
-        for n, (i, j, k) in enumerate(ForceField._arity(system, "angles", 3)):
+        for n, (i, j, k) in enumerate(ForceField._arity(frame_view, "angles", 3)):
             world.def_angle(
                 handles[i],
                 handles[j],
                 handles[k],
                 type=types.angle_labels[types.angle_type[n]],
             )
-        for n, (i, j, k, l) in enumerate(ForceField._arity(system, "propers", 4)):
+        for n, (i, j, k, l) in enumerate(ForceField._arity(frame_view, "propers", 4)):
             world.def_dihedral(
                 handles[i],
                 handles[j],
@@ -540,7 +555,7 @@ class LammpsWriter:
                 type=types.proper_labels[types.proper_type[n]],
             )
         frame = world.to_frame()
-        cell = self._cell(system)
+        cell = self._cell(frame_view)
         frame.box = (
             Box(cell)
             if cell is not None
@@ -549,15 +564,18 @@ class LammpsWriter:
         return frame
 
     @staticmethod
-    def _cell(system: TensorDict) -> np.ndarray | None:
+    def _cell(frame: TensorFrame) -> np.ndarray | None:
         """Lattice vectors ``(3, 3)`` in Å from ``graphs.cell``, or ``None``.
+
+        Args:
+            frame: The batch's typed view.
 
         Raises:
             ValueError: The cell is batched over more than one graph.
         """
-        if ("graphs", "cell") not in system.keys(include_nested=True):
+        if ("graphs", "cell") not in frame.keys(include_nested=True):
             return None
-        cell = LammpsWriter._tensor(system, "graphs", "cell")
+        cell = frame["graphs", "cell"]
         if cell.ndim == 3:
             if cell.shape[0] != 1:
                 raise ValueError(
@@ -566,10 +584,3 @@ class LammpsWriter:
                 )
             cell = cell[0]
         return cell.detach().cpu().double().numpy()
-
-    @staticmethod
-    def _tensor(system: TensorDict, *keys: str) -> torch.Tensor:
-        value = system[keys] if len(keys) > 1 else system[keys[0]]
-        if not isinstance(value, torch.Tensor):
-            raise TypeError(f"system{list(keys)} must be a tensor, got {type(value)!r}")
-        return value

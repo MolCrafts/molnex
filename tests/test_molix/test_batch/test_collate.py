@@ -2,27 +2,21 @@ import torch
 from tensordict import TensorDict
 
 from molix.batch.collate import INDEX_KEYS, MoleculeCollator, collate_molecules, rebase
+from tests.conftest import frame
 
 
 def test_collate_basic_fields_and_offsets():
-    sample1 = {
-        "Z": torch.tensor([1, 8], dtype=torch.long),
-        "pos": torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
-        "edge_index": torch.tensor([[0, 1]], dtype=torch.long),
-        "edge_diff": torch.tensor([[1.0, 0.0, 0.0]]),
-        "edge_dist": torch.tensor([1.0]),
-        "targets": {"U0": torch.tensor([1.5])},
-    }
-    sample2 = {
-        "Z": torch.tensor([6, 1, 1], dtype=torch.long),
-        "pos": torch.tensor([[0.0, 1.0, 0.0], [0.0, 2.0, 0.0], [1.0, 1.0, 0.0]]),
-        "edge_index": torch.tensor([[0, 1], [0, 2]], dtype=torch.long),
-        "edge_diff": torch.tensor([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]),
-        "edge_dist": torch.tensor([1.0, 1.0]),
-        "targets": {"U0": torch.tensor([2.5])},
-    }
-
-    batch = collate_molecules([sample1, sample2])
+    """Two frames become one batch: atoms concatenate, graphs stack, no edges."""
+    batch = collate_molecules(
+        [
+            frame(Z=[1, 8], pos=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], U0=1.5),
+            frame(
+                Z=[6, 1, 1],
+                pos=[[0.0, 1.0, 0.0], [0.0, 2.0, 0.0], [1.0, 1.0, 0.0]],
+                U0=2.5,
+            ),
+        ]
+    )
 
     assert isinstance(batch, TensorDict)
     assert batch["atoms", "Z"].shape == (5,)
@@ -31,19 +25,18 @@ def test_collate_basic_fields_and_offsets():
     assert batch["graphs"].batch_size[0] == 2
     assert batch["graphs", "num_atoms"].tolist() == [2, 3]
 
-    # Canonical [E, 2] format; sample2 indices offset by +2 atoms
-    assert batch["edges", "edge_index"].shape == (3, 2)
-    assert batch["edges", "edge_index"][1:].tolist() == [[2, 3], [2, 4]]
+    # Frames carry no neighbour graph: NeighborList builds it on the batch.
+    assert batch["edges", "edge_index"].shape == (0, 2)
 
     assert torch.allclose(batch["graphs", "U0"], torch.tensor([1.5, 2.5]))
 
 
 def test_molecule_collator_is_reusable_callable():
-    samples = [
-        {"Z": torch.tensor([1]), "pos": torch.zeros(1, 3), "targets": {"energy": 1.0}},
-        {"Z": torch.tensor([6, 1]), "pos": torch.zeros(2, 3), "targets": {"energy": 2.0}},
+    frames = [
+        frame(Z=[1], pos=[[0.0, 0.0, 0.0]], energy=1.0),
+        frame(Z=[6, 1], pos=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], energy=2.0),
     ]
-    batch = MoleculeCollator()(samples)
+    batch = MoleculeCollator()(frames)
     assert batch["atoms", "batch"].tolist() == [0, 1, 1]
     assert batch["graphs", "energy"].tolist() == [1.0, 2.0]
 
@@ -64,7 +57,7 @@ def test_rebase_scalar_offset_edge_index():
 
 
 def test_rebase_vector_offset_edge_index_matches_unsqueeze1():
-    # collate_packed path: per-edge segment offset broadcast over both columns.
+    # packed path: per-edge segment offset broadcast over both columns.
     edge_index = torch.tensor([[0, 1], [0, 2], [1, 0]], dtype=torch.long)
     seg_offset = torch.tensor([0, 0, 5], dtype=torch.long)
     out = rebase(edge_index, seg_offset, "edge_index")
@@ -81,3 +74,21 @@ def test_rebase_generalizes_to_cat_dim1_mock_bond_index():
     out = rebase(bond_index, per_bond_offset, "bond_index")
     assert torch.equal(out, bond_index + per_bond_offset.unsqueeze(0))
     assert out.tolist() == [[10, 11, 22], [11, 12, 20]]
+
+
+def test_integer_meta_scalars_stay_integral():
+    """A task code must survive collation as an integer.
+
+    ``TaskRouter.route`` refuses a floating task label rather than truncate one
+    silently, so casting every ``meta`` scalar to float would break multi-task
+    routing for every frame-fed batch.
+    """
+    batch = collate_molecules(
+        [
+            frame(Z=[8, 1], pos=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], energy=-1.5, task=3),
+            frame(Z=[6, 1], pos=[[0.0, 0.0, 0.0], [1.1, 0.0, 0.0]], energy=-2.5, task=3),
+        ]
+    )
+    assert not batch["graphs", "task"].is_floating_point()
+    assert batch["graphs", "task"].tolist() == [3, 3]
+    assert batch["graphs", "energy"].is_floating_point()

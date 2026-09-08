@@ -11,19 +11,22 @@ Surfaces:
 * **Collation** — :func:`collate_molecules` (and the reusable
   :class:`MoleculeCollator` callable) turn a list of flat sample dicts into the
   nested ``atoms`` / ``edges`` / ``graphs`` / ``bonds`` ``TensorDict``,
-  rebasing index columns onto the batch. :class:`TargetSchema` (default
-  :data:`DEFAULT_TARGET_SCHEMA`) routes target keys to the graph or atom
-  namespace.
+  rebasing index columns onto the batch.
+* **Typed view** — :class:`TensorFrame` declares those namespaces as fields
+  over the same storage, and :func:`as_tensor_frame` is the one wrap every
+  reader (molpot's ``Potentials``, the MD driver, the batch tasks, the
+  LAMMPS writer) goes through.
 * **Post-collate transforms** — :class:`BatchTask` is the extension point for
-  transforms that must run on the collated batch; :class:`PadMolecularBatch` / :class:`TotalCharge`
-  is the shipped fixed-shape padder for ``torch.compile`` / CUDA graphs.
+  transforms that must run on the collated batch; :class:`PadMolecularBatch`
+  is the shipped fixed-shape padder for ``torch.compile`` / CUDA graphs and
+  :class:`TotalCharge` owns the per-graph ``graphs.total_charge`` column.
 * **Batch policies** — :class:`TokenBudgetPacker` /
   :class:`TokenBudgetBatchSampler` pack samples under atom / edge budgets,
   :class:`TaskMixtureBatchSampler` interleaves per-task streams, and
   :class:`BatchSamplerSource` is the protocol a :class:`DataModule` calls once
-  per epoch. :class:`BlockPlanSource` implements it over a multi-block
-  :class:`BlockFrameView`, returning a :class:`BlockPlan` (with its
-  :class:`BlockCoverage` rows) that is planned globally and consumed
+  per epoch. :class:`FrameStorePlanSource` implements it over a multi-block
+  :class:`FrameStoreView`, returning a :class:`FrameStorePlan` (with its
+  :class:`FrameStoreCoverage` rows) that is planned globally and consumed
   block-windowed. :func:`group_split_indices` splits indices without splitting a
   group across sides.
 * **Mixture** — :class:`DataMixture` is a Dataset of named sources (the
@@ -38,21 +41,20 @@ Storage lives in :mod:`molix.store`; nothing here reads or writes files.
 
 from __future__ import annotations
 
-from molix.batch.block_plan import (
-    BlockCoverage,
-    BlockFrameView,
-    BlockPlan,
-    BlockPlanSource,
-)
 from molix.batch.bond_adapter import bond_index_from_columns
 from molix.batch.charge import TotalCharge
 from molix.batch.collate import (
-    DEFAULT_TARGET_SCHEMA,
     MoleculeCollator,
-    TargetSchema,
     collate_molecules,
 )
 from molix.batch.datamodule import DataModule, DataModuleProtocol
+from molix.batch.frame import TensorFrame, as_tensor_frame
+from molix.batch.frame_store_plan import (
+    FrameStoreCoverage,
+    FrameStorePlan,
+    FrameStorePlanSource,
+    FrameStoreView,
+)
 from molix.batch.group_split import group_split_indices
 from molix.batch.mixture import DataMixture
 from molix.batch.neighbor import NeighborList
@@ -73,22 +75,22 @@ from molix.batch.valence_columns import (
 __all__ = [
     "BatchSamplerSource",
     "BatchTask",
-    "BlockCoverage",
-    "BlockFrameView",
-    "BlockPlan",
-    "BlockPlanSource",
-    "DEFAULT_TARGET_SCHEMA",
+    "FrameStoreCoverage",
+    "FrameStoreView",
+    "FrameStorePlan",
+    "FrameStorePlanSource",
     "DataMixture",
     "DataModule",
     "DataModuleProtocol",
     "MoleculeCollator",
     "NeighborList",
     "PadMolecularBatch",
-    "TargetSchema",
     "TaskMixtureBatchSampler",
+    "TensorFrame",
     "TokenBudgetBatchSampler",
     "TokenBudgetPacker",
     "TotalCharge",
+    "as_tensor_frame",
     "bond_index_from_columns",
     "collate_molecules",
     "group_split_indices",

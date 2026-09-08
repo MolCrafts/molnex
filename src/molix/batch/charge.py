@@ -21,8 +21,9 @@ Reference:
 from __future__ import annotations
 
 import torch
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase
 
+from molix.batch.frame import as_tensor_frame
 from molix.batch.task import BatchTask
 
 
@@ -76,10 +77,20 @@ class TotalCharge(BatchTask):
     def execute(self, data: TensorDict | dict) -> TensorDict | dict:
         """Fill an absent ``graphs.total_charge``, or float-cast a present one.
 
+        Read and written through :class:`~molix.batch.TensorFrame`, the typed
+        view of the post-collate batch (CLAUDE.md § TensorDict Contract), via
+        :func:`~molix.batch.as_tensor_frame`. The wrap is a *view* — it shares
+        every leaf — so the column written below lands in the batch the caller
+        still holds, whether that caller handed in the batch or a view of it.
+        A plain ``dict`` is refused (``TypeError``): the write would land in a
+        container the caller does not hold.
+
         Args:
             data: Collated batch carrying an ``atoms`` namespace — whose ``pos``
                 ``(N, 3)`` in Å fixes the batch float dtype and device — and a
-                ``graphs`` namespace sized ``[B]``, one row per graph.
+                ``graphs`` namespace sized ``[B]``, one row per graph. A
+                ``TensorFrame`` view of that batch is the same system and is
+                read the same way.
 
         Returns:
             The same batch, mutated in place, with ``graphs.total_charge``
@@ -96,15 +107,33 @@ class TotalCharge(BatchTask):
             IndexError: ``graphs`` carries no batch dimension (``batch_size=[]``
                 rather than ``[B]``), so the graph count is unknown.
         """
-        pos = data["atoms"]["pos"]
-        graphs = data["graphs"]
+        # Refused, not wrapped: ``as_tensor_frame`` would put a plain dict into
+        # a *new* TensorDict, so the column written below would land in a
+        # container the caller never sees — and the caller's own batch would
+        # come back looking processed. No in-tree producer hands this task a
+        # dict (every DataModule / profiler path passes the collate's
+        # TensorDict); the ``| dict`` half of ``BatchTask``'s signature is the
+        # extension point's, and this task fails closed on it.
+        if not isinstance(data, TensorDictBase):
+            raise TypeError(
+                "TotalCharge writes graphs.total_charge into the batch it is handed, so it "
+                "needs the collated TensorDict (or a TensorFrame view of it) — a plain "
+                f"{type(data).__name__} would be wrapped into a container the caller does "
+                "not hold. Collate the frames with molix.batch.collate_molecules first."
+            )
+        frame = as_tensor_frame(data)
+        pos = frame["atoms"]["pos"]
+        graphs = frame["graphs"]
         if "total_charge" in graphs:
             declared = graphs["total_charge"]
             if declared.dtype != pos.dtype:
-                data["graphs", "total_charge"] = declared.to(pos.dtype)
+                frame["graphs", "total_charge"] = declared.to(pos.dtype)
             return data
         n_graphs = int(graphs.batch_size[0])
-        data["graphs", "total_charge"] = torch.full(
+        frame["graphs", "total_charge"] = torch.full(
             (n_graphs,), self.charge, dtype=pos.dtype, device=pos.device
         )
+        # The caller's own container back, not the view: the write above went
+        # into its storage, so the two carry one batch and the one handed in is
+        # the one that composes onward.
         return data

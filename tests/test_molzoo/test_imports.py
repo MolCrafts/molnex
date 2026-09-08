@@ -18,7 +18,7 @@ does), so an in-process ``sys.modules`` assertion is vacuously green.
 :class:`TestMolzooMaceReexports` additionally pins the *identity* of the
 ``molzoo.mace`` re-export surface against its promoted ``molrep`` home. It was
 moved here from ``tests/test_molrep/test_reexport_compat.py`` by
-``mace-subpackage-restructure-06-wire`` ac-006 (no ``molzoo`` import may appear
+the restructure (no ``molzoo`` import may appear
 under ``tests/test_molrep/``); the assertions are unchanged.
 """
 

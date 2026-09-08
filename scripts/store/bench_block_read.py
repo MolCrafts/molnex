@@ -4,7 +4,7 @@
 Answers the two questions ``streaming-data-tiers-02-block-format`` § "Measured
 decisions" leaves open before the hot read path is frozen:
 
-1. **Which read path wins** — the :class:`molix.store.BlockReader` mmap gather or
+1. **Which read path wins** — the :class:`molix.store.FrameStoreReader` mmap gather or
    an ``os.pread`` of exactly the same byte ranges — under sequential and under
    shuffled frame order. The Lustre client's mmap page-fault readahead was
    historically poor, so this is measured per client, never assumed.
@@ -67,7 +67,9 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO / "src") not in sys.path:
     sys.path.insert(0, str(_REPO / "src"))
 
-from molix.store import BlockReader, BlockWriter, SamplingUnit  # noqa: E402
+from molpy import Frame  # noqa: E402
+
+from molix.store import FrameStoreReader, FrameStoreWriter  # noqa: E402
 
 _BENCH_COLUMN = "pos"
 _MB = 1e6
@@ -170,7 +172,7 @@ class FrameLayout:
     row_bytes: int
 
     @classmethod
-    def of(cls, reader: BlockReader, column: str) -> FrameLayout:
+    def of(cls, reader: FrameStoreReader, column: str) -> FrameLayout:
         """Build the layout of *column* from *reader*'s derived pointers.
 
         Args:
@@ -193,7 +195,7 @@ class FrameLayout:
 
 
 class MmapGather:
-    """Gather frame rows through the :class:`BlockReader` mmap column.
+    """Gather frame rows through the :class:`FrameStoreReader` mmap column.
 
     Opens its own reader, so constructing one is what makes a cold pass cold: a
     reader caches its mapping for the life of the instance.
@@ -207,7 +209,7 @@ class MmapGather:
     __slots__ = ("_column", "_layout")
 
     def __init__(self, root: Path, column: str, layout: FrameLayout) -> None:
-        self._column = BlockReader(root).column(column)
+        self._column = FrameStoreReader(root).column(column)
         self._layout = layout
 
     def read(self, frames: torch.Tensor, batch: int) -> int:
@@ -326,7 +328,7 @@ class WriteCost:
 
     Attributes:
         units: Units appended.
-        append_seconds: Wall time of all ``append_unit`` calls.
+        append_seconds: Wall time of all ``append`` calls.
         seal_seconds: Wall time of ``seal()`` (per-column sha256 streaming).
         payload_bytes: Committed column payload.
         columns: Declared column count (fsyncs per unit are ``columns + 1``).
@@ -390,7 +392,7 @@ class ScratchBlock:
 
     def write(self) -> WriteCost:
         """Append every unit, seal, and return the measured cost."""
-        writer = BlockWriter(
+        writer = FrameStoreWriter(
             self._root,
             split="train",
             provenance={
@@ -402,9 +404,13 @@ class ScratchBlock:
         )
         append_seconds = 0.0
         for index in range(self._units):
-            unit = self._unit(index)
+            frames = self._unit(index)
             start = time.perf_counter()
-            writer.append_unit(unit)
+            writer.append(
+                frames,
+                key=f"unit-{index:06d}",
+                task="torsion" if index % 2 else "equilibrium",
+            )
             append_seconds += time.perf_counter() - start
         payload_bytes = writer.committed_bytes
         columns = len(list(Path(self._root).glob("*.bin")))
@@ -413,30 +419,44 @@ class ScratchBlock:
         seal_seconds = time.perf_counter() - start
         return WriteCost(self._units, append_seconds, seal_seconds, payload_bytes, columns)
 
-    def _unit(self, index: int) -> SamplingUnit:
-        """Build unit *index*: one topology plus ``frames_per_unit`` frames."""
+    def _unit(self, index: int) -> list[Frame]:
+        """Build unit *index*: ``frames_per_unit`` frames over one topology.
+
+        The store takes molpy ``Frame`` objects and derives its columns from
+        where each one sits in the frame, so the bench builds the same shape a
+        real converter would rather than hand-rolling column dicts.
+        """
         atoms = self._atoms
-        rows = self._frames_per_unit * atoms
-        bond_i = torch.arange(atoms - 1, dtype=torch.int64)
-        angle_i = torch.arange(atoms - 2, dtype=torch.int64)
-        return SamplingUnit(
-            key=f"unit-{index:06d}",
-            task="torsion" if index % 2 else "equilibrium",
-            topology={
-                "Z": torch.full((atoms,), 6, dtype=torch.int16),
-                "bond_atomi": bond_i,
-                "bond_atomj": bond_i + 1,
-                "bond_type": torch.zeros(atoms - 1, dtype=torch.int64),
-                "angle_atomi": angle_i,
-                "angle_atomj": angle_i + 1,
-                "angle_atomk": angle_i + 2,
-            },
-            frames={
-                "pos": (torch.arange(rows * 3, dtype=torch.float32) * 0.5).reshape(rows, 3),
-                "energy": torch.arange(self._frames_per_unit, dtype=torch.float32).mul_(0.25),
-                "torsion_angle": torch.arange(self._frames_per_unit, dtype=torch.int64),
-            },
-        )
+        bond_i = np.arange(atoms - 1, dtype=np.int64)
+        angle_i = np.arange(atoms - 2, dtype=np.int64)
+        number = np.full(atoms, 6, dtype=np.int16)
+        frames: list[Frame] = []
+        for offset in range(self._frames_per_unit):
+            xyz = (np.arange(atoms * 3, dtype=np.float32) * 0.5 + offset).reshape(atoms, 3)
+            frame = Frame(
+                meta={
+                    "energy": float(offset) * 0.25,
+                    "torsion_angle": int(offset),
+                }
+            )
+            frame["atoms"] = {
+                "number": number,
+                "x": xyz[:, 0],
+                "y": xyz[:, 1],
+                "z": xyz[:, 2],
+            }
+            frame["bonds"] = {
+                "atomi": bond_i,
+                "atomj": bond_i + 1,
+                "type_id": np.zeros(atoms - 1, dtype=np.int64),
+            }
+            frame["angles"] = {
+                "atomi": angle_i,
+                "atomj": angle_i + 1,
+                "atomk": angle_i + 2,
+            }
+            frames.append(frame)
+        return frames
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +605,7 @@ def _measure_reads(block: Path, args: argparse.Namespace) -> list[ReadResult]:
     Raises:
         SystemExit: The two read paths disagree on the gathered checksum.
     """
-    reader = BlockReader(block)
+    reader = FrameStoreReader(block)
     layout = FrameLayout.of(reader, _BENCH_COLUMN)
     total = reader.frame_count
     count = min(args.pass_frames, total)

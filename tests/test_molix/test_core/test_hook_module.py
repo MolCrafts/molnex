@@ -5,11 +5,6 @@ layer (`Hook` Protocol, `BaseHook`, `ScalarHook`) lives in
 ``molix.core.hook`` and depends on nothing from the concrete-hook /
 io / recorder side-tiers.
 
-Trace to acceptance:
-    ac-001 — core/hook.py exposes Hook, BaseHook, ScalarHook with no
-             external imports.
-    ac-008 — Trainer depends only on core.hook (verified indirectly
-             via the import-isolation assertion below).
 """
 
 from __future__ import annotations
@@ -25,7 +20,7 @@ def test_module_importable() -> None:
 
 
 def test_module_does_not_import_concrete_layers() -> None:
-    """ac-001: ``core/hook.py`` imports nothing from the side-tiers.
+    """``core/hook.py`` imports nothing from the side-tiers.
 
     Forbidden: ``molix.hooks``, ``molix.io``, ``molix.recorder``. The
     contract layer must stay free of dependencies on concrete hook

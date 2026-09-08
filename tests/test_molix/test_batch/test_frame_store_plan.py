@@ -1,27 +1,26 @@
-"""Unit tests for :mod:`molix.batch.block_plan` — the block-aware batch plan.
+"""Unit tests for :mod:`molix.batch.frame_store_plan` — the block-aware batch plan.
 
 Spec: ``.claude/specs/streaming-data-tiers-04-scheduler-integration-03-plan.md``
-(Tasks 1 + 2; acceptance ac-001..ac-005 and the ac-010 planning refusals).
 
-Layout mirror: ``src/molix/batch/block_plan.py`` → this file, one class per public
-type (:class:`BlockCoverage`, :class:`BlockFrameView`, :class:`BlockPlan`,
-:class:`BlockPlanSource`).
+Layout mirror: ``src/molix/batch/frame_store_plan.py`` → this file, one class per public
+type (:class:`FrameStoreCoverage`, :class:`FrameStoreView`, :class:`FrameStorePlan`,
+:class:`FrameStorePlanSource`).
 
 Pinned value-object contract — these tests **are** the RED specification of the
 constructor surface, since the spec fixes the members but not their spelling::
 
-    BlockPlan(
+    FrameStorePlan(
         batches=(list[int], ...),       # index batches, emission order
         blocks=(str, ...),              # owning block identity per batch, parallel
-        coverage=(BlockCoverage, ...),  # one row per block the plan touches
+        coverage=(FrameStoreCoverage, ...),  # one row per block the plan touches
         split=str, seed=int, window=int, boundary_splits=int,
     )
-    BlockCoverage(block=str, units=int, frames=int, batches=int)
+    FrameStoreCoverage(block=str, units=int, frames=int, batches=int)
 
 Planning is pointer arithmetic over metadata, so every planning fixture is a
 literal-table stub view — no block reaches the disk except in
-:class:`TestBlockFrameView`, whose contract-seam probes **call** the real
-:class:`~molix.store.block_view.BlockDataset` (a ``runtime_checkable``
+:class:`TestFrameStoreView`, whose contract-seam probes **call** the real
+:class:`~molix.store.frame_store_view.FrameStoreDataset` (a ``runtime_checkable``
 ``isinstance`` only proves member presence, never a signature).
 
 Hand-computed fixtures
@@ -67,14 +66,15 @@ from typing import NoReturn
 import pytest
 import torch
 
-from molix.batch.block_plan import (
-    BlockCoverage,
-    BlockPlan,
-    BlockPlanSource,
+from molix.batch.frame_store_plan import (
+    FrameStoreCoverage,
+    FrameStorePlan,
+    FrameStorePlanSource,
 )
 from molix.batch.sampler import TaskMixtureBatchSampler
-from molix.store.block import BlockWriter, SamplingUnit
-from molix.store.block_view import BlockDataset, BlockNotReadyError
+from molix.store.frame_store import FrameStoreWriter
+from molix.store.frame_store_view import FrameStoreDataset, FrameStoreNotReadyError
+from tests.conftest import frame
 
 # ---------------------------------------------------------------------------
 # Hand-computed goldens
@@ -109,7 +109,7 @@ _STRADDLE_PLANNED_BATCHES = 2
 _STRADDLE_EMITTED_BATCHES = 3
 _STRADDLE_BOUNDARY_SPLITS = 1
 
-# Literal :class:`BlockPlan` of the value-object tests: block-b is visited, left
+# Literal :class:`FrameStorePlan` of the value-object tests: block-b is visited, left
 # for block-a, and never returned to — so first appearance is *not* sorted order.
 _LITERAL_BATCHES: tuple[list[int], ...] = ([0, 1], [8, 9], [2, 3])
 _LITERAL_BLOCKS: tuple[str, ...] = ("block-b", "block-a", "block-b")
@@ -126,13 +126,13 @@ _LITERAL_COVERAGE_ROWS: tuple[dict[str, object], ...] = (
 _VISIT_ORDER_FORMAT = "molix.visit-order/1"
 
 # ---------------------------------------------------------------------------
-# Stub view — the ``BlockFrameView`` surface, literal tables, no disk
+# Stub view — the ``FrameStoreView`` surface, literal tables, no disk
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, eq=False)
-class _StubBlockReader:
-    """The sliver of :class:`~molix.store.block.BlockReader` a stub can supply.
+class _StubFrameStoreReader:
+    """The sliver of :class:`~molix.store.frame_store.FrameStoreReader` a stub can supply.
 
     Planning never opens a reader (residency is the view's concern), so this
     exists only to make ``view.reader(b)`` answerable at all — and to make the
@@ -142,8 +142,8 @@ class _StubBlockReader:
     task_codes: torch.Tensor
 
 
-class _StubBlockView:
-    """In-memory :class:`~molix.batch.block_plan.BlockFrameView` over literal tables.
+class _StubFrameStoreView:
+    """In-memory :class:`~molix.batch.frame_store_plan.FrameStoreView` over literal tables.
 
     Holds the exact members the plan consumes — ``block_ids`` as directory-basename
     strings, one ``max_open`` (``K``), and a **vectorized** ``locate`` — so a
@@ -216,31 +216,31 @@ class _StubBlockView:
         blocks = torch.searchsorted(self._frame_ptr, selected, right=True) - 1
         return blocks, selected - self._frame_ptr[blocks]
 
-    def reader(self, block: int) -> _StubBlockReader:
+    def reader(self, block: int) -> _StubFrameStoreReader:
         """Return one block's reader, refusing the ordinals declared unavailable.
 
         Args:
             block: Block ordinal in the planned order.
 
         Returns:
-            A :class:`_StubBlockReader` over that block's local task codes.
+            A :class:`_StubFrameStoreReader` over that block's local task codes.
 
         Raises:
-            BlockNotReadyError: *block* was declared unavailable.
+            FrameStoreNotReadyError: *block* was declared unavailable.
         """
         row = int(block)
         self.opened.append(row)
         if row in self._unavailable:
-            raise BlockNotReadyError(
+            raise FrameStoreNotReadyError(
                 f"block row {row} at {self.block_ids[row]} is not READY: missing manifest."
             )
         start, stop = int(self._frame_ptr[row]), int(self._frame_ptr[row + 1])
-        return _StubBlockReader(task_codes=self.task_codes[start:stop])
+        return _StubFrameStoreReader(task_codes=self.task_codes[start:stop])
 
 
-def _pure_view(*, max_open: int, unavailable: frozenset[int] = frozenset()) -> _StubBlockView:
+def _pure_view(*, max_open: int, unavailable: frozenset[int] = frozenset()) -> _StubFrameStoreView:
     """The three-block, task-per-block fixture (module docstring)."""
-    return _StubBlockView(
+    return _StubFrameStoreView(
         frame_ptr=_PURE_FRAME_PTR,
         atom_counts=_PURE_ATOM_COUNTS,
         task_codes=_PURE_TASK_CODES,
@@ -252,9 +252,9 @@ def _pure_view(*, max_open: int, unavailable: frozenset[int] = frozenset()) -> _
     )
 
 
-def _straddle_view() -> _StubBlockView:
+def _straddle_view() -> _StubFrameStoreView:
     """The two-block fixture whose ``torsion`` batch straddles both blocks."""
-    return _StubBlockView(
+    return _StubFrameStoreView(
         frame_ptr=_STRADDLE_FRAME_PTR,
         atom_counts=_STRADDLE_ATOM_COUNTS,
         task_codes=_STRADDLE_TASK_CODES,
@@ -265,24 +265,24 @@ def _straddle_view() -> _StubBlockView:
     )
 
 
-def _pure_source() -> BlockPlanSource:
+def _pure_source() -> FrameStorePlanSource:
     """The source under test over the pure fixture's mixture and atom budget."""
-    return BlockPlanSource(mixture=_PURE_MIXTURE, max_atoms=_PURE_MAX_ATOMS)
+    return FrameStorePlanSource(mixture=_PURE_MIXTURE, max_atoms=_PURE_MAX_ATOMS)
 
 
-def _straddle_source() -> BlockPlanSource:
+def _straddle_source() -> FrameStorePlanSource:
     """The source under test over the straddle fixture's mixture and budget."""
-    return BlockPlanSource(mixture=_STRADDLE_MIXTURE, max_atoms=_STRADDLE_MAX_ATOMS)
+    return FrameStorePlanSource(mixture=_STRADDLE_MIXTURE, max_atoms=_STRADDLE_MAX_ATOMS)
 
 
 def _direct_plan(
-    view: _StubBlockView,
+    view: _StubFrameStoreView,
     *,
     mixture: dict[str, float],
     max_atoms: int,
     seed: int = _SEED,
 ) -> list[list[int]]:
-    """The planning authority, built directly — the ac-001 equality oracle.
+    """The planning authority, built directly — the equality oracle.
 
     One :class:`~molix.batch.sampler.TaskMixtureBatchSampler` over the view's own
     int-code tables, the same mixture, the same atoms-only budget and the same
@@ -302,14 +302,14 @@ def _direct_plan(
     return [list(batch) for batch in sampler]
 
 
-def _block_id(view: _StubBlockView, batch: Sequence[int]) -> str:
+def _block_id(view: _StubFrameStoreView, batch: Sequence[int]) -> str:
     """The identity string of the single block *batch* lives in."""
     blocks, _ = view.locate(list(batch))
     assert blocks.unique().numel() == 1, "helper takes block-pure batches only"
     return view.block_ids[int(blocks[0])]
 
 
-def _emitted_blocks(plan: BlockPlan) -> list[str]:
+def _emitted_blocks(plan: FrameStorePlan) -> list[str]:
     """The block identity of every emitted batch, in emission order."""
     return [plan.block_of(position) for position in range(len(plan))]
 
@@ -321,16 +321,16 @@ def _windows(order: Sequence[str], size: int) -> list[tuple[str, ...]]:
 
 def _literal_plan(
     *,
-    coverage: tuple[BlockCoverage, ...] | None = None,
-) -> BlockPlan:
+    coverage: tuple[FrameStoreCoverage, ...] | None = None,
+) -> FrameStorePlan:
     """A hand-written plan — the value-object tests never run the source."""
     rows = coverage
     if rows is None:
         rows = (
-            BlockCoverage(block="block-b", units=2, frames=4, batches=2),
-            BlockCoverage(block="block-a", units=1, frames=2, batches=1),
+            FrameStoreCoverage(block="block-b", units=2, frames=4, batches=2),
+            FrameStoreCoverage(block="block-a", units=1, frames=2, batches=1),
         )
-    return BlockPlan(
+    return FrameStorePlan(
         batches=tuple(list(batch) for batch in _LITERAL_BATCHES),
         blocks=_LITERAL_BLOCKS,
         coverage=rows,
@@ -347,7 +347,7 @@ def _literal_plan(
 
 _SEAM_PROVENANCE: dict[str, object] = {
     "source": {"name": "molnex-unit-test", "coordinate": "n/a"},
-    "generator": {"tool": "test_block_plan.py", "version": "1", "commit": "0"},
+    "generator": {"tool": "test_frame_store_plan.py", "version": "1", "commit": "0"},
     "created_at": "2026-08-14T00:00:00+00:00",
     "units": {"pos": "angstrom", "energy": "kcal/mol", "forces": "kcal/mol/angstrom"},
 }
@@ -365,58 +365,60 @@ def _halves(count: int, start: int) -> torch.Tensor:
     return (torch.arange(count, dtype=torch.float32) + float(start)) * 0.5
 
 
-def _seam_unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) -> SamplingUnit:
-    """One topology plus *n_frames* frames of it (pos in Å, energy in kcal/mol)."""
-    rows = n_frames * n_atoms
-    return SamplingUnit(
-        key=key,
-        task=task,
-        topology={"Z": torch.tensor([8] + [1] * (n_atoms - 1), dtype=torch.int16)},
-        frames={
-            "pos": _halves(rows * 3, offset).reshape(rows, 3),
-            "energy": _halves(n_frames, offset + 3),
-        },
-    )
+def _seam_unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) -> tuple:
+    """One molecule's frames (pos in Å, energy in kcal/mol) as ``(frames, key, task)``."""
+    frames = [
+        frame(
+            Z=[8] + [1] * (n_atoms - 1),
+            pos=_halves(n_atoms * 3, offset + k * n_atoms * 3).reshape(n_atoms, 3).numpy(),
+            energy=float(_halves(1, offset + 3 + k)[0]),
+        )
+        for k in range(n_frames)
+    ]
+    return frames, key, task
 
 
 @pytest.fixture
-def real_view(tmp_path: Path) -> BlockDataset:
+def real_view(tmp_path: Path) -> FrameStoreDataset:
     """One sealed ``split="train"`` block: 2 units × 2 frames, opened at ``K = 2``."""
     root = tmp_path / "block-seam"
-    writer = BlockWriter(root, split="train", provenance=_SEAM_PROVENANCE)
-    writer.append_unit(_seam_unit("u0", "equilibrium", 3, 2, 0))
-    writer.append_unit(_seam_unit("u1", "torsion", 2, 2, 40))
+    writer = FrameStoreWriter(root, split="train", provenance=_SEAM_PROVENANCE)
+    for unit_frames, key, task in (
+        _seam_unit("u0", "equilibrium", 3, 2, 0),
+        _seam_unit("u1", "torsion", 2, 2, 40),
+    ):
+        writer.append(unit_frames, key=key, task=task)
     writer.seal()
-    return BlockDataset([root], max_open=_SEAM_MAX_OPEN)
+    return FrameStoreDataset([root], max_open=_SEAM_MAX_OPEN)
 
 
 # ---------------------------------------------------------------------------
-# BlockCoverage
+# FrameStoreCoverage
 # ---------------------------------------------------------------------------
 
 
-class TestBlockCoverage:
+class TestFrameStoreCoverage:
     """One block's accounting row: identity plus three dimensionless counts."""
 
     def test_records_the_block_identity_and_its_unit_frame_batch_counts(self):
-        row = BlockCoverage(block="block-a", units=2, frames=4, batches=1)
+        row = FrameStoreCoverage(block="block-a", units=2, frames=4, batches=1)
         assert row.block == "block-a"
         assert row.units == 2
         assert row.frames == 4
         assert row.batches == 1
 
     def test_is_frozen(self):
-        row = BlockCoverage(block="block-a", units=2, frames=4, batches=1)
+        row = FrameStoreCoverage(block="block-a", units=2, frames=4, batches=1)
         with pytest.raises(dataclasses.FrozenInstanceError):
             row.frames = 5  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
-# BlockPlan
+# FrameStorePlan
 # ---------------------------------------------------------------------------
 
 
-class TestBlockPlan:
+class TestFrameStorePlan:
     """The value object handed to ``DataLoader(batch_sampler=...)``."""
 
     def test_iteration_yields_the_stored_index_batches(self):
@@ -462,8 +464,8 @@ class TestBlockPlan:
         with pytest.raises(ValueError, match="(?i)coverage"):
             _literal_plan(
                 coverage=(
-                    BlockCoverage(block="block-b", units=2, frames=99, batches=2),
-                    BlockCoverage(block="block-a", units=1, frames=2, batches=1),
+                    FrameStoreCoverage(block="block-b", units=2, frames=99, batches=2),
+                    FrameStoreCoverage(block="block-a", units=1, frames=2, batches=1),
                 )
             )
 
@@ -471,8 +473,8 @@ class TestBlockPlan:
         with pytest.raises(ValueError, match="(?i)coverage"):
             _literal_plan(
                 coverage=(
-                    BlockCoverage(block="block-b", units=2, frames=4, batches=2),
-                    BlockCoverage(block="block-z", units=1, frames=2, batches=1),
+                    FrameStoreCoverage(block="block-b", units=2, frames=4, batches=2),
+                    FrameStoreCoverage(block="block-z", units=1, frames=2, batches=1),
                 )
             )
 
@@ -483,21 +485,21 @@ class TestBlockPlan:
 
 
 # ---------------------------------------------------------------------------
-# BlockFrameView — the contract seam against the real -02 view
+# FrameStoreView — the contract seam against the real -02 view
 # ---------------------------------------------------------------------------
 
 
-class TestBlockFrameView:
+class TestFrameStoreView:
     """``runtime_checkable`` presence **plus** behavioural probes of each member.
 
     ``isinstance`` against a ``Protocol`` checks member *names* only, so a
-    signature drift in :mod:`molix.store.block_view` (a scalar ``locate``, a
+    signature drift in :mod:`molix.store.frame_store_view` (a scalar ``locate``, a
     ``resident_window`` rename, path-valued ``block_ids``) would sail through it
     and fail on the first production collate instead. Each member is therefore
     called or read here.
     """
 
-    def test_real_block_dataset_locate_is_vectorized(self, real_view: BlockDataset):
+    def test_real_block_dataset_locate_is_vectorized(self, real_view: FrameStoreDataset):
         blocks, locals_ = real_view.locate([0])
         assert tuple(blocks.shape) == (1,)
         assert tuple(locals_.shape) == (1,)
@@ -506,17 +508,17 @@ class TestBlockFrameView:
         assert (int(blocks[0]), int(locals_[0])) == (0, 0)
 
     def test_real_block_dataset_block_ids_are_directory_basename_strings(
-        self, real_view: BlockDataset
+        self, real_view: FrameStoreDataset
     ):
         assert real_view.block_ids == ("block-seam",)
 
-    def test_real_block_dataset_max_open_is_the_window(self, real_view: BlockDataset):
+    def test_real_block_dataset_max_open_is_the_window(self, real_view: FrameStoreDataset):
         assert real_view.max_open == _SEAM_MAX_OPEN
 
-    def test_real_block_dataset_reports_one_split(self, real_view: BlockDataset):
+    def test_real_block_dataset_reports_one_split(self, real_view: FrameStoreDataset):
         assert real_view.split == "train"
 
-    def test_real_block_dataset_code_tables_are_frame_length(self, real_view: BlockDataset):
+    def test_real_block_dataset_code_tables_are_frame_length(self, real_view: FrameStoreDataset):
         assert len(real_view) == _SEAM_LEN
         assert real_view.atom_counts.tolist() == list(_SEAM_ATOM_COUNTS)
         assert real_view.task_codes.tolist() == list(_SEAM_TASK_CODES)
@@ -525,14 +527,14 @@ class TestBlockFrameView:
 
 
 # ---------------------------------------------------------------------------
-# BlockPlanSource
+# FrameStorePlanSource
 # ---------------------------------------------------------------------------
 
 
-class TestBlockPlanSource:
+class TestFrameStorePlanSource:
     """Plans once globally, emits in block-windowed order (invariant I8)."""
 
-    # -- the plan is the authority (ac-001) --------------------------------
+    # -- the plan is the authority --------------------------------
 
     def test_plan_equals_the_direct_task_mixture_sampler_at_full_window(self):
         view = _pure_view(max_open=len(_PURE_BLOCK_IDS))
@@ -577,7 +579,7 @@ class TestBlockPlanSource:
         assert view.opened == []
         assert len(plan) == _PURE_BATCHES
 
-    # -- block-pure division (ac-002) --------------------------------------
+    # -- block-pure division --------------------------------------
 
     def test_every_emitted_batch_maps_to_exactly_one_block(self):
         view = _straddle_view()
@@ -616,11 +618,11 @@ class TestBlockPlanSource:
 
         owner: dict[int, int] = {}
         for position, batch in enumerate(plan):
-            for frame in batch:
-                code = int(view.group_codes[frame])
+            for row in batch:
+                code = int(view.group_codes[row])
                 assert owner.setdefault(code, position) == position
 
-    # -- K-window ordering (ac-003) ----------------------------------------
+    # -- K-window ordering ----------------------------------------
 
     def test_window_of_one_is_strict_block_major(self):
         view = _pure_view(max_open=1)
@@ -678,7 +680,7 @@ class TestBlockPlanSource:
             want = [batch for batch in planned if _block_id(view, batch) in window]
             assert got == want
 
-    # -- coverage (ac-005) --------------------------------------------------
+    # -- coverage --------------------------------------------------
 
     def test_coverage_covers_exactly_the_blocks_the_plan_touches(self):
         view = _pure_view(max_open=len(_PURE_BLOCK_IDS))
@@ -712,11 +714,11 @@ class TestBlockPlanSource:
             assert row.frames == len(planned_frames)
             assert row.units == len({int(view.group_codes[frame]) for frame in planned_frames})
 
-    # -- eager refusals (ac-010) -------------------------------------------
+    # -- eager refusals -------------------------------------------
 
     def test_max_edges_is_refused_eagerly_naming_edge_counts(self):
         with pytest.raises(ValueError, match="edge_counts"):
-            BlockPlanSource(mixture=_PURE_MIXTURE, max_atoms=_PURE_MAX_ATOMS, max_edges=64)
+            FrameStorePlanSource(mixture=_PURE_MIXTURE, max_atoms=_PURE_MAX_ATOMS, max_edges=64)
 
     def test_batch_sampler_refuses_a_dataset_that_is_not_a_block_view(self):
         with pytest.raises(TypeError):

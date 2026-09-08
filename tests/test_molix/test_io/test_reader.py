@@ -1,8 +1,4 @@
-"""RED tests for ``molix.io.JournalReader`` (yields plain ``dict``).
-
-Acceptance traces:
-    ac-005 — JournalReader yields plain dicts (not dataclass instances).
-"""
+"""RED tests for ``molix.io.JournalReader`` (yields plain ``dict``)."""
 
 from __future__ import annotations
 
@@ -26,7 +22,7 @@ def test_reader_importable() -> None:
 
 
 def test_records_yields_plain_dicts(tmp_path: Path) -> None:
-    """ac-005: ``next(reader.records())`` returns a plain ``dict`` instance."""
+    """``next(reader.records())`` returns a plain ``dict`` instance."""
     from molix.io import JournalReader
 
     _write_records(

@@ -179,7 +179,7 @@ class TestDatasetProfiler:
 
     def test_run_rejects_empty_dataset(self):
         """Empty input is a user error, and the message must say what to pass instead."""
-        with pytest.raises(ValueError, match="BlockDataset"):
+        with pytest.raises(ValueError, match="FrameStoreDataset"):
             DatasetProfiler().run([])
 
     def test_init_rejects_degenerate_config(self):

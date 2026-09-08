@@ -8,6 +8,7 @@ must not be treated as authority for a new training submission.
 
 | Spec | Chain | Opened | Scope |
 |---|---|---|---|
+| [composable-a0-debt-07-frame-native](composable-a0-debt-07-frame-native.md) | composable-a0-debt | 2026-09-08 | the a0 / a0-debt readers on the `TensorFrame` view; every chain-built system a molpy `Frame` through `collate_molecules` (F35: collate drops `frame.box`). |
 
 Design source for the chain: `.claude/notes/composable-potentials.md`
 (spec S1–S8 mapping, shared type designs, A1 / iface / B1 / B2 / A2 roadmap).

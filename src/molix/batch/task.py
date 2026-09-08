@@ -12,7 +12,7 @@ from tensordict import TensorDict
 
 
 class BatchTask:
-    """Post-collate batch processing. **Extension point — one built-in subclass.**
+    """Post-collate batch processing. **Extension point — two built-in subclasses.**
 
     Executed after :func:`~molix.batch.collate.collate_molecules` inside the
     DataLoader's ``collate_fn``. Input and output are both ``TensorDict``
@@ -22,7 +22,7 @@ class BatchTask:
     Instances are passed straight to
     :class:`~molix.batch.datamodule.DataModule` as ``batch_tasks=[...]``, in
     execution order; molix ships :class:`~molix.batch.pad.PadMolecularBatch`
-    as the one built-in subclass.
+    and :class:`~molix.batch.charge.TotalCharge` as its built-in subclasses.
 
     Use this only when the transform **must** operate on the collated batch
     (e.g. batch-level augmentation that mixes atoms across graphs,

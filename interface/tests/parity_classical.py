@@ -124,7 +124,10 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_ROOT / "src"))
 
-from molix.batch import NeighborList
+from molpy import Frame
+
+from molix.batch import TotalCharge
+from molix.batch.collate import collate_molecules
 from molix.ff_export import LammpsAdapter, LammpsWriter
 from molix.md import (
     MD,
@@ -222,55 +225,126 @@ class _PosEnergyHook(MDHook):
         self.etot.append(float(obs.total.detach().cpu()))
 
 
+#: The C4 chain of the butane case, Å. One row per atom, in atom order.
+BUTANE_XYZ = np.array(
+    [
+        [0.0, 0.0, 0.0],
+        [1.53, 0.0, 0.0],
+        [2.05, 1.43, 0.0],
+        [3.58, 1.43, 0.0],
+    ],
+    dtype=float,
+)
+
+
+def _fp64_atom_columns(batch: TensorDict, frames: list[Frame], dtype: torch.dtype) -> None:
+    """Re-read the frames' own fp64 ``atoms`` columns onto the collated batch.
+
+    **F36** — :func:`~molix.batch.collate.collate_molecules` writes every float
+    column at ``float32``, while this tool's whole comparison is fp64: it prices
+    a deck against LAMMPS at ``rel 1e-6`` and pins its own side at ``1e-10``.
+    Casting the collated ``float32`` up would keep single precision's rounding of
+    the geometry — some four orders above the golden gate — so the frames' own
+    ``x`` / ``y`` / ``z`` and per-atom float columns are **re-read** here, not
+    cast. ``graphs`` leaves are left exactly as the collate wrote them: a
+    declared ``total_charge`` is data, and normalising its dtype is what
+    :class:`~molix.batch.TotalCharge` is for.
+
+    The same repair is spelled in ``tests/conftest.py`` (``collate_frames``, the
+    owner the unit gates read), ``benchmarks/verify_md_lj_nve.py`` and
+    ``benchmarks/verify_md_ljcut_nve.py``; this tool cannot import ``tests/``.
+    All four collapse into ``collate_molecules`` once it carries ``frame.box``
+    and the frame's precision (or takes ``dtype=``).
+
+    Args:
+        batch: The batch ``collate_molecules(frames)`` returned, mutated here.
+        frames: The frames it was collated from, in batch order.
+        dtype: The floating dtype the batch is priced in.
+    """
+
+    def column(name: str) -> torch.Tensor:
+        values = [np.asarray(frame["atoms"][name], dtype=np.float64) for frame in frames]
+        return torch.tensor(np.concatenate(values), dtype=dtype)
+
+    # F36: collate_molecules narrows to float32.
+    batch["atoms", "pos"] = torch.stack([column(axis) for axis in ("x", "y", "z")], dim=-1)
+    for name in list(batch["atoms"].keys()):
+        leaf = batch["atoms", name]
+        if name == "pos" or not isinstance(leaf, torch.Tensor) or not leaf.is_floating_point():
+            continue
+        # F36: collate_molecules narrows to float32. A leaf the collate
+        # *stacked* (``forces``) has no column of its own to re-read.
+        named = all(name in frame["atoms"].keys() for frame in frames)
+        batch["atoms", name] = column(name) if named else leaf.to(dtype)
+
+
+def butane_frame() -> Frame:
+    """The butane-like C4 chain as one molpy ``Frame`` — this case's data at rest.
+
+    3 bonds, 2 angles, 1 proper torsion, and a declared neutral
+    ``total_charge``. A ``Frame`` is the unit of data at rest in molnex and
+    :func:`~molix.batch.collate.collate_molecules` is the only conversion to the
+    batch a model reads, so this tool builds the same object a dataset would
+    rather than assembling batch tensors by hand.
+
+    Returns:
+        The frame.
+    """
+    frame = Frame(meta={"total_charge": 0.0})
+    frame["atoms"] = {
+        "number": np.full(4, 6, dtype=np.int64),
+        "x": BUTANE_XYZ[:, 0].copy(),
+        "y": BUTANE_XYZ[:, 1].copy(),
+        "z": BUTANE_XYZ[:, 2].copy(),
+    }
+    # A per-atom float column on the block the line above built: this field
+    # carries no ``atoms`` parameter table, so the chain's (zero) charges are
+    # the system's own column and the deck's charge column comes from them.
+    frame["atoms"]["q"] = np.zeros(4, dtype=np.float64)
+    frame["bonds"] = {
+        "atomi": np.array([0, 1, 2], dtype=np.int64),
+        "atomj": np.array([1, 2, 3], dtype=np.int64),
+        "type_id": np.zeros(3, dtype=np.int64),
+    }
+    frame["angles"] = {
+        "atomi": np.array([0, 1], dtype=np.int64),
+        "atomj": np.array([1, 2], dtype=np.int64),
+        "atomk": np.array([2, 3], dtype=np.int64),
+    }
+    frame["propers"] = {
+        "atomi": np.array([0], dtype=np.int64),
+        "atomj": np.array([1], dtype=np.int64),
+        "atomk": np.array([2], dtype=np.int64),
+        "atoml": np.array([3], dtype=np.int64),
+    }
+    return frame
+
+
 def butane_batch(dtype: torch.dtype = torch.float64) -> TensorDict:
-    """A butane-like C4 chain: 3 bonds, 2 angles, 1 proper torsion."""
-    pos = torch.tensor(
-        [
-            [0.0, 0.0, 0.0],
-            [1.53, 0.0, 0.0],
-            [2.05, 1.43, 0.0],
-            [3.58, 1.43, 0.0],
-        ],
-        dtype=dtype,
-    )
-    return TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "Z": torch.tensor([6, 6, 6, 6]),
-                    "batch": torch.zeros(4, dtype=torch.long),
-                    "q": torch.zeros(4, dtype=dtype),
-                },
-                batch_size=[4],
-            ),
-            "bonds": TensorDict(
-                {
-                    "atomi": torch.tensor([0, 1, 2], dtype=torch.long),
-                    "atomj": torch.tensor([1, 2, 3], dtype=torch.long),
-                },
-                batch_size=[3],
-            ),
-            "angles": TensorDict(
-                {
-                    "atomi": torch.tensor([0, 1], dtype=torch.long),
-                    "atomj": torch.tensor([1, 2], dtype=torch.long),
-                    "atomk": torch.tensor([2, 3], dtype=torch.long),
-                },
-                batch_size=[2],
-            ),
-            "propers": TensorDict(
-                {
-                    "atomi": torch.tensor([0], dtype=torch.long),
-                    "atomj": torch.tensor([1], dtype=torch.long),
-                    "atomk": torch.tensor([2], dtype=torch.long),
-                    "atoml": torch.tensor([3], dtype=torch.long),
-                },
-                batch_size=[1],
-            ),
-        },
-        batch_size=[],
-    )
+    """The butane case's batch: :func:`butane_frame` through the real collate.
+
+    No list is placed: the field is bonded-only, so there is no pair term to
+    price and nothing to build one at — ``ForceField.neighbor_list`` refuses a
+    field with no pair style, which is the right answer here. The collate's
+    empty ``edges`` namespace is left as it comes, unread.
+
+    **F36** — the collate writes every float column at ``float32``, so the
+    frame's own fp64 columns are re-read (:func:`_fp64_atom_columns`). **F35**
+    has nothing to repair: this case is open-boundary and carries no lattice.
+
+    Args:
+        dtype: Floating dtype the batch is priced in.
+
+    Returns:
+        The batch.
+    """
+    frames = [butane_frame()]
+    batch = collate_molecules(frames)
+    _fp64_atom_columns(batch, frames, dtype)
+    # The frame declared its net charge; this only normalises the dtype the
+    # collate wrote it in — no fixture states a charge the data does not have.
+    TotalCharge().execute(batch)
+    return batch
 
 
 def synthetic_opls_ff(dtype: torch.dtype = torch.float64) -> ForceField:
@@ -517,94 +591,88 @@ def water_ion_geometry() -> tuple[
     return labels, xyz, bonds, angles
 
 
-def place_edges(batch: TensorDict, *, cutoff: float) -> TensorDict:
-    """Write ``batch["edges"]`` with molix's neighbour list.
+def water_ion_frame() -> Frame:
+    """The whole periodic box as **one** molpy ``Frame`` — this case's data at rest.
 
-    :class:`molix.batch.NeighborList` is the repo's Edge Convention owner;
-    ``molpot`` consumes a placed ``edges`` namespace and never enumerates one,
-    so a batch that reaches a pair term has to arrive with a list exactly as a
-    collated training batch does. ``symmetry=True`` is load-bearing: the
-    half-pair mode emits ``edge_index[:, 0] > edge_index[:, 1]``, which
-    ``Potentials`` reads as an entirely dead list.
+    **One frame, not twenty-six.** A frame per molecule collates to a batch of
+    ten graphs, and a periodic Coulomb sum is defined per *lattice*:
+    :class:`~molpot.forcefield.Potentials` refuses ``num_graphs > 1`` under a
+    ``graphs.cell`` outright (ledger finding **F20**) rather than price the whole
+    box in graph 0's cell and hand that number to every graph. The box is
+    therefore one system, and :func:`water_ion_geometry` already numbers its
+    bonds and angles in box-global indices, so the collate has nothing to rebase.
 
-    This mirrors the fixture of ``tests/test_molpot/test_forcefield/conftest.py``
-    rather than importing it — ``tests/`` is not on this tool's import path, and
-    a unit fixture is not an interface dependency.
-
-    Args:
-        batch: Post-collate batch with ``atoms.pos`` and ``atoms.batch``, and
-            ``graphs.cell`` when periodic.
-        cutoff: Build radius in Å.
+    The species tables ride as per-atom columns (``q`` in ``e``, ``mass`` in
+    amu) and the declared net charge as a ``meta`` scalar, so both are the
+    frame's data rather than something bolted onto the batch afterwards.
 
     Returns:
-        The same ``batch``, with ``edges`` filled.
+        The frame.
     """
-    atoms = batch["atoms"]
-    pos = atoms["pos"]
-    n_atoms = int(pos.shape[0])
-    membership = (
-        atoms["batch"] if "batch" in atoms.keys() else torch.zeros(n_atoms, dtype=torch.long)
-    )
-    cell = None
-    if "graphs" in batch.keys() and "cell" in batch["graphs"].keys():
-        cell = batch["graphs", "cell"]
-        cell = cell if cell.ndim == 3 else cell.unsqueeze(0)
-
-    probe = TensorDict(
-        {"atoms": TensorDict({"pos": pos, "batch": membership}, batch_size=[n_atoms])},
-        batch_size=[],
-    )
-    if cell is not None:
-        probe["graphs"] = TensorDict({"cell": cell}, batch_size=[int(cell.shape[0])])
-    NeighborList(cutoff=cutoff, pbc=cell is not None, symmetry=True).execute(probe)
-    batch["edges"] = probe["edges"]
-    return batch
+    labels, xyz, bonds, angles = water_ion_geometry()
+    frame = Frame(meta={"total_charge": 0.0})
+    frame["atoms"] = {
+        "number": np.array([SPECIES[t][4] for t in labels], dtype=np.int64),
+        "x": np.ascontiguousarray(xyz[:, 0]),
+        "y": np.ascontiguousarray(xyz[:, 1]),
+        "z": np.ascontiguousarray(xyz[:, 2]),
+    }
+    # Per-atom float columns on the block the line above built.
+    frame["atoms"]["q"] = np.array([SPECIES[t][2] for t in labels], dtype=np.float64)
+    frame["atoms"]["mass"] = np.array([SPECIES[t][3] for t in labels], dtype=np.float64)
+    frame["bonds"] = {
+        "atomi": np.array([b[0] for b in bonds], dtype=np.int64),
+        "atomj": np.array([b[1] for b in bonds], dtype=np.int64),
+        "type_id": np.zeros(len(bonds), dtype=np.int64),
+    }
+    frame["angles"] = {
+        "atomi": np.array([a[0] for a in angles], dtype=np.int64),
+        "atomj": np.array([a[1] for a in angles], dtype=np.int64),
+        "atomk": np.array([a[2] for a in angles], dtype=np.int64),
+    }
+    return frame
 
 
 def water_ion_batch(dtype: torch.dtype = torch.float64) -> TensorDict:
-    """The periodic batch: atoms, lattice, declared net charge, topology, edges."""
-    labels, xyz, bonds, angles = water_ion_geometry()
-    n_atoms = len(labels)
-    return place_edges(
-        TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": torch.tensor(xyz, dtype=dtype),
-                        "Z": torch.tensor([SPECIES[t][4] for t in labels], dtype=torch.long),
-                        "q": torch.tensor([SPECIES[t][2] for t in labels], dtype=dtype),
-                        "mass": torch.tensor([SPECIES[t][3] for t in labels], dtype=dtype),
-                        "batch": torch.zeros(n_atoms, dtype=torch.long),
-                    },
-                    batch_size=[n_atoms],
-                ),
-                "graphs": TensorDict(
-                    {
-                        "cell": (torch.eye(3, dtype=dtype) * BOX_A).unsqueeze(0),
-                        "total_charge": torch.zeros(1, dtype=dtype),
-                    },
-                    batch_size=[1],
-                ),
-                "bonds": TensorDict(
-                    {
-                        "atomi": torch.tensor([b[0] for b in bonds], dtype=torch.long),
-                        "atomj": torch.tensor([b[1] for b in bonds], dtype=torch.long),
-                    },
-                    batch_size=[len(bonds)],
-                ),
-                "angles": TensorDict(
-                    {
-                        "atomi": torch.tensor([a[0] for a in angles], dtype=torch.long),
-                        "atomj": torch.tensor([a[1] for a in angles], dtype=torch.long),
-                        "atomk": torch.tensor([a[2] for a in angles], dtype=torch.long),
-                    },
-                    batch_size=[len(angles)],
-                ),
-            },
-            batch_size=[],
-        ),
-        cutoff=CUTOFF_A,
+    """The periodic batch: :func:`water_ion_frame` through the real collate, plus the list.
+
+    Two things the collate cannot carry yet are repaired on the way out, each
+    named where it is: **F35** — it never reads ``frame.box``, so the lattice is
+    written here as the ``(B, 3, 3)`` leaf the ``graphs`` namespace demands — and
+    **F36** — it narrows every float column to ``float32``
+    (:func:`_fp64_atom_columns`).
+
+    The list is placed by :meth:`~molpot.forcefield.ForceField.neighbor_list`,
+    so its radius is the field's own (finding **F21**) rather than a number this
+    builder picks; ``symmetry=True`` is that method's, and it is load-bearing —
+    the half-pair mode emits ``edge_index[:, 0] > edge_index[:, 1]``, which
+    ``Potentials`` reads as an entirely dead list (**F22**). The ``pme`` and
+    ``ewald`` spellings declare the same real-space radius, so which one asks
+    for the list does not matter.
+
+    Args:
+        dtype: Floating dtype the batch is priced in.
+
+    Returns:
+        The batch, with ``edges`` placed at the field's radius under the
+        minimum-image convention.
+    """
+    frames = [water_ion_frame()]
+    batch = collate_molecules(frames)
+    _fp64_atom_columns(batch, frames, dtype)
+    # F35: collate_molecules does not read frame.box, so the lattice has no
+    # Frame-native route to graphs.cell yet and is written here.
+    batch["graphs", "cell"] = (torch.eye(3, dtype=dtype) * BOX_A).unsqueeze(0)
+    # The frame declared its net charge; this only normalises the dtype.
+    TotalCharge().execute(batch)
+    neighbors = water_ion_ff(batch, dtype=dtype).neighbor_list(pbc=True)
+    assert neighbors.cutoff == CUTOFF_A, (
+        f"the field's own list radius is {neighbors.cutoff} A but this case's real-space "
+        f"cutoff is {CUTOFF_A} A: the deck and the molnex side would be summing different "
+        "neighbour sets"
     )
+    neighbors.execute(batch)
+    return batch
 
 
 def water_ion_ff(
@@ -622,7 +690,9 @@ def water_ion_ff(
 
     Args:
         batch: The batch built by :func:`water_ion_batch`; its ``atoms.q`` and
-            topology counts size the parameter tables.
+            topology counts size the parameter tables. Read before the
+            neighbour list is placed — that list's radius is *this* field's, so
+            the field has to exist first.
         calculator: ``"pme"`` (what the deck exports) or ``"ewald"`` (the
             convergence reference the mesh is checked against).
         dtype: Parameter dtype.
@@ -631,7 +701,10 @@ def water_ion_ff(
         The filled :class:`~molpot.forcefield.ForceField`.
     """
     labels = _labels_of(batch)
-    n_bonds = int(batch["bonds"].batch_size[0])
+    # ``bonds`` is the schema's ``(2, N)`` COO under ``batch_size=[]``, so the
+    # bond count is that block's second axis; the valence namespaces keep their
+    # 1-D columns and are sized by their own batch size.
+    n_bonds = int(batch["bonds", "bond_index"].shape[1])
     n_angles = int(batch["angles"].batch_size[0])
     return (
         ForceField(

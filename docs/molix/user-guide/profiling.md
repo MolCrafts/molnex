@@ -53,7 +53,7 @@ blocks for 200 ms will show a mean close to zero and a large `p95`.
 
 **The `Data:` line.** Reports name their input by calling `describe()` on it if
 it has one (`MockSource` and `MockBatch` do), and otherwise fall back to the
-class name — a `BlockDataset` simply prints as `BlockDataset`.
+class name — a `FrameStoreDataset` simply prints as `FrameStoreDataset`.
 
 **`[WARN]` lines.** Diagnostics are printed, never raised. A profiler that
 notices something suspicious — a skewed size distribution, a missing pointer, a
@@ -248,9 +248,7 @@ Configuration is the DataLoader configuration you want to test: `batch_size`,
 `num_workers` (worker subprocesses; `0` means load in the main process),
 `pin_memory` (allocate host buffers in page-locked memory so the copy to the GPU
 can run asynchronously), `persistent_workers` (keep workers alive across epochs;
-silently forced off when `num_workers == 0`), `target_schema` (how labels are
-routed during collation, defaulting to `DEFAULT_TARGET_SCHEMA`), and optional
-`batch_tasks` — `molix.batch.BatchTask` instances applied, in order, inside
+silently forced off when `num_workers == 0`), and optional `batch_tasks` — `molix.batch.BatchTask` instances applied, in order, inside
 `collate_fn`.
 
 `run()` resolves its argument in three ways. An existing `DataLoader` is used
@@ -355,7 +353,7 @@ The same numbers are available on `TrainerResult` as `n_steps`, `device`,
 ## DatasetProfiler
 
 `DatasetProfiler` characterises the data itself rather than the loop around it.
-Point it at anything that yields **flat sample dicts** — the raw-sample tier of
+Point it at anything that yields **molpy frames** — the at-rest tier of
 the two-tier data contract, so `sample["Z"]`, `sample["pos"]`,
 `sample["edge_index"]`, `sample["targets"]["U0"]` — and it answers four
 questions at once: how big are the records, what does one access cost, how are
@@ -410,7 +408,7 @@ counts are then just `ptr[i+1] - ptr[i]`, one vectorised subtraction over the
 whole file with no sample unpacked.
 
 So when the object exposes `atom_counts`, `edge_counts`, `avg_num_neighbors`,
-`max_atoms` and `max_edges` — `BlockDataset`, and `SubsetDataset` which remaps
+`max_atoms` and `max_edges` — `FrameStoreDataset`, and `SubsetDataset` which remaps
 them to its own indices — the profiler reads those properties
 directly. Size statistics then describe **every** record in the dataset, not the
 sampled subset, and the result reports `counts_exact=True`. The report prints
@@ -431,7 +429,7 @@ validation data. The ratio is dimensionless. With
 bidirectional, so this ratio is the mean number of neighbours per atom, which is
 the normalisation constant MACE and Allegro divide their aggregated messages by.
 
-Without a packed cache — a plain `list[dict]`, a `MockSource` — none of those
+Without a store — a plain in-memory list, a `MockSource` — none of those
 properties exist. The profiler then derives size statistics from the records it
 sampled, sets `counts_exact=False`, and says so in a `[WARN]` line. The numbers
 are still useful; they are just estimates from a subset.
@@ -448,7 +446,7 @@ Some things cannot be read off a pointer vector and genuinely require touching
 records one at a time:
 
 - `cold_access_ms` — the very first `data[i]`, including memory-map page-in from
-  disk. On a memory-mapped `BlockDataset` this is usually much larger than the
+  disk. On a memory-mapped `FrameStoreDataset` this is usually much larger than the
   steady state.
 - `access_ms` — steady-state `__getitem__` latency after `n_warmup` discarded
   accesses, as a full `TimingStat`.

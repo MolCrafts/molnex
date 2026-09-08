@@ -20,15 +20,20 @@ the GH200 calibration job::
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any
 
+import numpy as np
 import torch
+from molpy import Frame
 from tensordict import TensorDict
 
-from molix.batch.collate import TargetSchema, collate_molecules
+from molix.batch import TotalCharge
+from molix.batch.collate import collate_molecules
+from molix.config import config
+from molix.core.steps import batch_to
+from molpot.forcefield import ForceField
 from scripts.mm_param_learning.class_i_fit import (
-    _FIT_SCHEMA,
     ClassIFit,
     ForceAwareModel,
     load_omol25_official_tiny,
@@ -94,12 +99,44 @@ def _device_of(model: torch.nn.Module) -> torch.device:
     return next(model.parameters()).device
 
 
-def _collate(
-    samples: Sequence[dict[str, Any]],
-    schema: TargetSchema,
-    device: torch.device,
-) -> TensorDict:
-    return collate_molecules(samples, schema).to(device)
+def _field_of(model: ForceAwareModel) -> ForceField:
+    """The one force field *model* prices with — its Parameterizer's template.
+
+    Read rather than rebuilt, for the same reason as :func:`_device_of`: a
+    probe that assembles its own equal-looking field is enumerating the graph
+    at a radius it has to keep in step with the model's by hand, which is
+    exactly how these scripts once priced a 15 Å model on a 10 Å list (ledger
+    finding **F21**).
+    """
+    return model.imm.template
+
+
+def _collate(frames: Sequence[Any], device: torch.device, forcefield: ForceField) -> TensorDict:
+    """One packed batch, carrying what a :class:`~molix.batch.DataModule` mounts.
+
+    These probes collate directly, so the two post-collate tasks
+    :meth:`~scripts.mm_param_learning.class_i_fit.ClassIFit.datamodule` mounts
+    are applied here by hand: the pair list the fitted field is priced against
+    (molpot consumes a placed ``edges`` namespace and never enumerates one) and
+    the neutral ``graphs.total_charge`` its charge model is fail-closed on.
+
+    The cast is the project dtype policy (``molix.config``'s ``ftype``) — the
+    same one the DataModule's ``_CollateFn`` applies — rather than a probe of
+    whatever dtype the model happens to carry. The model is built in that dtype
+    too (``ClassIFit.model``), so reference and packed path agree by policy
+    instead of by inspection.
+
+    Args:
+        frames: Frames to collate into one batch.
+        device: Where the batch is moved.
+        forcefield: The field of the model this batch is fed to — pass
+            :func:`_field_of`, so the graph reaches the radius that model
+            prices and no other.
+    """
+    batch = collate_molecules(frames)
+    for task in (forcefield.neighbor_list(), TotalCharge()):
+        batch = task.execute(batch)
+    return batch_to(batch, device=device, dtype=config["ftype"])
 
 
 def _grad_map(model: torch.nn.Module) -> dict[str, torch.Tensor]:
@@ -110,20 +147,52 @@ def _grad_map(model: torch.nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
-def _clone_sample(sample: Mapping[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for key, value in sample.items():
-        if torch.is_tensor(value):
-            out[key] = value.detach().clone()
-        elif isinstance(value, Mapping):
-            out[key] = _clone_sample(value)
-        else:
-            out[key] = value
+def _rebuild(frame: Any, *, atoms: dict[str, Any] | None = None) -> Frame:
+    """Copy *frame*, overriding the named ``atoms`` columns.
+
+    ``Frame.meta`` returns a copy and blocks are replaced wholesale, so a
+    perturbed frame is built rather than mutated.
+
+    Args:
+        frame: The source molpy ``Frame``.
+        atoms: Columns to override in the ``atoms`` block; every other block
+            and every other column is carried over unchanged.
+
+    Returns:
+        The new ``Frame``.
+    """
+    meta = {k: getattr(v, "value", v) for k, v in (getattr(frame, "meta", None) or {}).items()}
+    out = Frame(meta=meta)
+    for name in frame.keys():
+        block = frame[name]
+        columns = {column: np.asarray(block[column]) for column in block.keys()}
+        if name == "atoms" and atoms:
+            columns.update(atoms)
+        out[name] = columns
     return out
 
 
-def _n_atoms(sample: Mapping[str, Any]) -> int:
-    return int(sample["Z"].shape[0])
+def _positions(frame: Any) -> np.ndarray:
+    atoms = frame["atoms"]
+    return np.stack([np.asarray(atoms[axis], dtype=np.float64) for axis in ("x", "y", "z")], -1)
+
+
+def _forces(frame: Any) -> np.ndarray | None:
+    atoms = frame["atoms"]
+    if "fx" not in atoms.keys():
+        return None
+    return np.stack([np.asarray(atoms[axis], dtype=np.float64) for axis in ("fx", "fy", "fz")], -1)
+
+
+def _xyz_columns(pos: np.ndarray, forces: np.ndarray | None) -> dict[str, np.ndarray]:
+    columns = {"x": pos[:, 0], "y": pos[:, 1], "z": pos[:, 2]}
+    if forces is not None:
+        columns |= {"fx": forces[:, 0], "fy": forces[:, 1], "fz": forces[:, 2]}
+    return columns
+
+
+def _n_atoms(frame: Any) -> int:
+    return int(np.asarray(frame["atoms"]["number"]).shape[0])
 
 
 def bucket_of(n_atoms: int) -> str | None:
@@ -134,41 +203,50 @@ def bucket_of(n_atoms: int) -> str | None:
     return None
 
 
-def _shift_sample(sample: Mapping[str, Any], delta: Sequence[float]) -> dict[str, Any]:
-    out = _clone_sample(sample)
-    shift = torch.tensor(tuple(delta), dtype=out["pos"].dtype)
-    out["pos"] = out["pos"] + shift
-    return out
+def _shift_frame(frame: Any, delta: Sequence[float]) -> Frame:
+    """Translate every position by *delta* — energy and forces must not move."""
+    pos = _positions(frame) + np.asarray(tuple(delta), dtype=np.float64)
+    return _rebuild(frame, atoms=_xyz_columns(pos, _forces(frame)))
 
 
-def _rotate_sample(sample: Mapping[str, Any], rot: Sequence[Sequence[float]]) -> dict[str, Any]:
-    out = _clone_sample(sample)
-    matrix = torch.tensor([tuple(row) for row in rot], dtype=out["pos"].dtype)
-    out["pos"] = out["pos"] @ matrix.T
-    targets = out.get("targets")
-    if isinstance(targets, dict) and "forces" in targets:
-        targets["forces"] = targets["forces"] @ matrix.T
-    return out
+def _rotate_frame(frame: Any, rot: Sequence[Sequence[float]]) -> Frame:
+    """Rotate positions and forces — energy invariant, forces equivariant."""
+    matrix = np.asarray([tuple(row) for row in rot], dtype=np.float64)
+    forces = _forces(frame)
+    return _rebuild(
+        frame,
+        atoms=_xyz_columns(
+            _positions(frame) @ matrix.T,
+            None if forces is None else forces @ matrix.T,
+        ),
+    )
 
 
-def _permute_sample(sample: Mapping[str, Any], perm: torch.Tensor) -> dict[str, Any]:
-    inv = torch.empty_like(perm)
-    inv[perm] = torch.arange(int(perm.numel()), dtype=perm.dtype)
-    out = _clone_sample(sample)
-    out["Z"] = out["Z"][perm]
-    out["pos"] = out["pos"][perm]
-    if "bond_index" in out:
-        out["bond_index"] = inv[out["bond_index"]]
-    for family in ("angles", "propers", "impropers"):
-        block = out.get(family)
-        if not isinstance(block, dict):
+def _permute_frame(frame: Any, perm: torch.Tensor) -> Frame:
+    """Relabel atoms by *perm* — every atom index in every block follows."""
+    order = np.asarray(perm.tolist(), dtype=np.int64)
+    inverse = np.empty_like(order)
+    inverse[order] = np.arange(order.shape[0], dtype=np.int64)
+
+    meta = {k: getattr(v, "value", v) for k, v in (getattr(frame, "meta", None) or {}).items()}
+    out = Frame(meta=meta)
+    forces = _forces(frame)
+    atoms = frame["atoms"]
+    columns = {c: np.asarray(atoms[c])[order] for c in atoms.keys()}
+    columns |= _xyz_columns(_positions(frame)[order], None if forces is None else forces[order])
+    out["atoms"] = columns
+    for name in frame.keys():
+        if name == "atoms":
             continue
-        for col in ("atomi", "atomj", "atomk", "atoml"):
-            if col in block:
-                block[col] = inv[block[col]]
-    targets = out.get("targets")
-    if isinstance(targets, dict) and "forces" in targets:
-        targets["forces"] = targets["forces"][perm]
+        block = frame[name]
+        out[name] = {
+            column: (
+                inverse[np.asarray(block[column], dtype=np.int64)]
+                if column.startswith("atom")
+                else np.asarray(block[column])
+            )
+            for column in block.keys()
+        }
     return out
 
 
@@ -184,7 +262,6 @@ def align_packed(
     model: ForceAwareModel,
     samples: Sequence[dict[str, Any]],
     *,
-    target_schema: TargetSchema = _FIT_SCHEMA,
     atol_energy: float = ATOL_ENERGY,
     atol_force: float = ATOL_FORCE,
     atol_loss: float = ATOL_LOSS,
@@ -202,12 +279,13 @@ def align_packed(
     if not samples:
         raise ValueError("align_packed needs at least one sample")
     device = _device_of(model)
+    field = _field_of(model)
     singles_e: list[torch.Tensor] = []
     singles_mm: list[torch.Tensor] = []
     singles_e0: list[torch.Tensor] = []
     singles_f: list[torch.Tensor] = []
     for sample in samples:
-        out = model(_collate([sample], target_schema, device))
+        out = model(_collate([sample], device, field))
         singles_e.append(out["energy"].reshape(-1))
         singles_mm.append(out["energy_mm"].reshape(-1))
         singles_e0.append(out["e0"].reshape(-1))
@@ -217,7 +295,7 @@ def align_packed(
     e0_ref = torch.cat(singles_e0)
     forces_ref = torch.cat(singles_f, dim=0)
 
-    packed = _collate(samples, target_schema, device)
+    packed = _collate(samples, device, field)
     out_p = model(packed)
     energy_p = out_p["energy"].reshape(-1)
     energy_max = _max_abs(energy_p, energy_ref)
@@ -271,7 +349,7 @@ def align_packed(
     singles_e0_2: list[torch.Tensor] = []
     singles_f2: list[torch.Tensor] = []
     for sample in samples:
-        out = model(_collate([sample], target_schema, device))
+        out = model(_collate([sample], device, field))
         singles_e2.append(out["energy"].reshape(-1))
         singles_mm2.append(out["energy_mm"].reshape(-1))
         singles_e0_2.append(out["e0"].reshape(-1))
@@ -315,7 +393,6 @@ def align_invariants(
     model: ForceAwareModel,
     sample: dict[str, Any],
     *,
-    target_schema: TargetSchema = _FIT_SCHEMA,
     atol_energy: float = ATOL_INVARIANT,
     atol_force: float = ATOL_FORCE,
     rtol_force: float = RTOL_FORCE,
@@ -323,17 +400,18 @@ def align_invariants(
 ) -> dict[str, float]:
     """Rigid translation/rotation, atom permutation, and charge conservation."""
     device = _device_of(model)
-    base = model(_collate([sample], target_schema, device))
+    field = _field_of(model)
+    base = model(_collate([sample], device, field))
     energy = base["energy"].reshape(-1)
     forces = base["forces"]
 
-    shifted = model(_collate([_shift_sample(sample, _SHIFT)], target_schema, device))
+    shifted = model(_collate([_shift_frame(sample, _SHIFT)], device, field))
     energy_scale = float(energy.abs().max().item())
     trans_e = _max_abs(shifted["energy"].reshape(-1), energy)
     trans_f = _max_abs(shifted["forces"], forces)
 
     rot = torch.tensor(_ROT_Z90, dtype=forces.dtype, device=device)
-    rotated = model(_collate([_rotate_sample(sample, _ROT_Z90)], target_schema, device))
+    rotated = model(_collate([_rotate_frame(sample, _ROT_Z90)], device, field))
     rot_expected_f = forces @ rot.T
     rot_e = _max_abs(rotated["energy"].reshape(-1), energy)
     rot_f = _max_abs(rotated["forces"], rot_expected_f)
@@ -343,11 +421,11 @@ def align_invariants(
 
     n_atoms = _n_atoms(sample)
     perm = torch.arange(n_atoms - 1, -1, -1)
-    permuted = model(_collate([_permute_sample(sample, perm)], target_schema, device))
+    permuted = model(_collate([_permute_frame(sample, perm)], device, field))
     perm_e = _max_abs(permuted["energy"].reshape(-1), energy)
     perm_f = _max_abs(permuted["forces"], forces[perm])
 
-    batch = _collate([sample], target_schema, device)
+    batch = _collate([sample], device, field)
     charges = _charges(model, batch)
     atom_batch = batch["atoms", "batch"].long()
     n_graphs = int(atom_batch.max().item()) + 1
@@ -388,7 +466,6 @@ def align_energy_shift(
     model: ForceAwareModel,
     samples: Sequence[dict[str, Any]],
     *,
-    target_schema: TargetSchema = _FIT_SCHEMA,
     atol_loss: float = ATOL_LOSS,
 ) -> dict[str, float]:
     """A constant offset on the energy labels must change the energy term.
@@ -401,8 +478,9 @@ def align_energy_shift(
     if len(samples) < 2:
         raise ValueError("align_energy_shift needs at least two samples")
     device = _device_of(model)
-    paired = [_clone_sample(samples[0]), _clone_sample(samples[1])]
-    packed = _collate(paired, target_schema, device)
+    field = _field_of(model)
+    paired = [_rebuild(samples[0]), _rebuild(samples[1])]
+    packed = _collate(paired, device, field)
     out = model(packed)
     loss0 = train_objective(out, packed)
     shifted = packed.clone()
@@ -419,7 +497,6 @@ def align_leak(
     model: ForceAwareModel,
     samples: Sequence[dict[str, Any]],
     *,
-    target_schema: TargetSchema = _FIT_SCHEMA,
     atol_energy: float = ATOL_LEAK,
     atol_force: float = ATOL_FORCE,
 ) -> dict[str, float]:
@@ -427,14 +504,15 @@ def align_leak(
     if len(samples) < 2:
         raise ValueError("align_leak needs at least two samples")
     device = _device_of(model)
+    field = _field_of(model)
     first_n = _n_atoms(samples[0])
-    packed = model(_collate(list(samples), target_schema, device))
+    packed = model(_collate(list(samples), device, field))
     energy0 = packed["energy"].reshape(-1)[0].detach()
     forces0 = packed["forces"][:first_n].detach()
 
-    mutated = [_clone_sample(samples[0]), _shift_sample(samples[1], (8.0, 0.0, 0.0))]
-    mutated.extend(_clone_sample(sample) for sample in samples[2:])
-    after = model(_collate(mutated, target_schema, device))
+    mutated = [_rebuild(samples[0]), _shift_frame(samples[1], (8.0, 0.0, 0.0))]
+    mutated.extend(_rebuild(sample) for sample in samples[2:])
+    after = model(_collate(mutated, device, field))
     energy_max = float((after["energy"].reshape(-1)[0] - energy0).abs().item())
     force_max = _max_abs(after["forces"][:first_n], forces0)
     return {
@@ -468,8 +546,6 @@ def _active_groups(samples: Sequence[dict[str, Any]]) -> frozenset[str]:
 def align_finite(
     model: ForceAwareModel,
     samples: Sequence[dict[str, Any]],
-    *,
-    target_schema: TargetSchema = _FIT_SCHEMA,
 ) -> dict[str, float]:
     """NaN/Inf scan plus per-group finite/nonzero gradients.
 
@@ -479,7 +555,8 @@ def align_finite(
     if not samples:
         raise ValueError("align_finite needs at least one sample")
     device = _device_of(model)
-    packed = _collate(samples, target_schema, device)
+    field = _field_of(model)
+    packed = _collate(samples, device, field)
     out = model(packed)
     loss = train_objective(out, packed)
     model.zero_grad(set_to_none=True)
@@ -524,18 +601,16 @@ def align_finite(
 def align_suite(
     model: ForceAwareModel,
     samples: Sequence[dict[str, Any]],
-    *,
-    target_schema: TargetSchema = _FIT_SCHEMA,
 ) -> dict[str, float]:
     """Packed + invariants + leak + finite on one sample list."""
     if not samples:
         raise ValueError("align_suite needs at least one sample")
-    report = align_packed(model, samples, target_schema=target_schema)
-    report.update(align_invariants(model, samples[0], target_schema=target_schema))
-    report.update(align_finite(model, samples, target_schema=target_schema))
+    report = align_packed(model, samples)
+    report.update(align_invariants(model, samples[0]))
+    report.update(align_finite(model, samples))
     if len(samples) >= 2:
-        report.update(align_leak(model, samples, target_schema=target_schema))
-        report.update(align_energy_shift(model, samples, target_schema=target_schema))
+        report.update(align_leak(model, samples))
+        report.update(align_energy_shift(model, samples))
     else:
         report["leak_ok"] = 0.0
         report["energy_shift_ok"] = 0.0

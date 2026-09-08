@@ -26,10 +26,11 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-  "torch>=2.10",
-  "tensordict",
-  "cuequivariance",
-  "cuequivariance-torch",
+  "torch>=2.14",
+  # TypedTensorDict backs molix.TensorFrame.
+  "tensordict>=0.14",
+  "cuequivariance>=0.11",
+  "cuequivariance-torch>=0.11",
   # Needs UnitSystem k_B + openmm preset (current 0.13 line).
   "molcrafts-molpy>=0.13.0",
   "python-multipart",

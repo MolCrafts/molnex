@@ -2,7 +2,7 @@
 
 A streaming training epoch reads from many sealed blocks, but only ``K`` of them
 fit in the reader pool at once. This module makes the strategy's "plan globally,
-consume rolling" claim executable: :class:`BlockPlanSource` plans **once**, over
+consume rolling" claim executable: :class:`FrameStorePlanSource` plans **once**, over
 every block's metadata, with the one
 :class:`~molix.batch.sampler.TaskMixtureBatchSampler` the non-streaming path
 already uses, and then emits that same plan in **block-windowed** consumption
@@ -19,20 +19,20 @@ The plan is the authority. Its batch order is the consumed order forever:
   division — nothing is dropped, duplicated, substituted or reordered *within* a
   window;
 * a block the view cannot supply stalls the consumer at its plan position
-  (:class:`~molix.batch.datamodule._BlockCollateFn` propagates the view's
+  (:class:`~molix.batch.datamodule._FrameStoreCollateFn` propagates the view's
   refusal); it is never skipped and never replaced by another block's batches.
 
 Division at a block boundary is safe by construction: a sampling unit never
 straddles a block (the block format's invariant I2), so cutting a planned batch
 into maximal runs of frames sharing a block can never cut a unit, never exceed a
 token budget (a part is ≤ the whole) and never mix tasks (the planned batch was
-single-task). :attr:`BlockPlan.boundary_splits` counts the planned batches that
+single-task). :attr:`FrameStorePlan.boundary_splits` counts the planned batches that
 had to be divided.
 
 Why the collate stamps *global* task codes
 ------------------------------------------
 
-``BlockReader.frame_payload`` deliberately skips ``meta.`` routes, so the
+``FrameStoreReader.frame_payload`` deliberately skips ``meta.`` routes, so the
 per-frame task code never reaches a batch, while
 :class:`~molix.core.steps.multitask.TaskRouter` requires a single-task
 ``("graphs", "task")`` label. The block collate route therefore **stamps** that
@@ -52,13 +52,13 @@ preserves the per-epoch apportionment and every batch's contents exactly, but
 consecutive batches now come from at most ``K`` blocks; if blocks are single-task,
 task interleaving degrades toward per-block at ``K = 1``. The levers are a larger
 ``K`` (interleaving across the resident set at bounded residency) and task-mixed
-blocks on the producer side. :attr:`BlockPlan.window` and
-:attr:`BlockPlan.coverage` make the realized situation inspectable;
+blocks on the producer side. :attr:`FrameStorePlan.window` and
+:attr:`FrameStorePlan.coverage` make the realized situation inspectable;
 ``batches_per_task()`` / ``frames_per_task()`` still report the epoch-level shares
 unchanged.
 
-Layering: this module binds to the :class:`BlockFrameView` *contract*, not to
-:class:`molix.store.block_view.BlockDataset`, so a plan can be built (and unit
+Layering: this module binds to the :class:`FrameStoreView` *contract*, not to
+:class:`molix.store.frame_store_view.FrameStoreDataset`, so a plan can be built (and unit
 tested) over any view exposing that surface. It computes nothing physical — every
 quantity here is a dimensionless count of frames, units, batches or blocks.
 
@@ -89,14 +89,14 @@ import torch
 from molix.batch.sampler import TaskMixtureBatchSampler
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime dependency
-    from molix.store.block import BlockReader
     from molix.store.dataset import BaseDataset
+    from molix.store.frame_store import FrameStoreReader
 
 __all__ = [
-    "BlockCoverage",
-    "BlockFrameView",
-    "BlockPlan",
-    "BlockPlanSource",
+    "FrameStoreCoverage",
+    "FrameStoreView",
+    "FrameStorePlan",
+    "FrameStorePlanSource",
 ]
 
 #: Version tag of the visit-order document MolHub's conveyor parses.
@@ -104,13 +104,13 @@ _VISIT_ORDER_FORMAT = "molix.visit-order/1"
 
 
 @runtime_checkable
-class BlockFrameView(Protocol):
+class FrameStoreView(Protocol):
     """The multi-block view surface a block plan consumes.
 
     Declared here so planning binds to a contract rather than to
-    :class:`molix.store.block_view.BlockDataset`, and so it can be exercised
+    :class:`molix.store.frame_store_view.FrameStoreDataset`, and so it can be exercised
     against an in-memory stub. The vocabulary is
-    :class:`~molix.store.block.BlockReader`'s, one level up: ``F`` is the view's
+    :class:`~molix.store.frame_store.FrameStoreReader`'s, one level up: ``F`` is the view's
     global frame count, block ordinals index the planned block order.
 
     Members:
@@ -160,20 +160,20 @@ class BlockFrameView(Protocol):
         """
         ...
 
-    def reader(self, block: int) -> BlockReader:
+    def reader(self, block: int) -> FrameStoreReader:
         """Return one block's reader; residency is the view's concern.
 
         Args:
             block: Block ordinal in the planned order.
 
         Returns:
-            The sealed block's :class:`~molix.store.block.BlockReader`.
+            The sealed block's :class:`~molix.store.frame_store.FrameStoreReader`.
         """
         ...
 
 
 @dataclass(frozen=True)
-class BlockCoverage:
+class FrameStoreCoverage:
     """One block's accounting row of a plan (invariant I10).
 
     Every field is a dimensionless count of the plan, not of the block on disk: a
@@ -195,7 +195,7 @@ class BlockCoverage:
 
 
 @dataclass(frozen=True)
-class BlockPlan:
+class FrameStorePlan:
     """One epoch's block-ordered batch plan — the ``batch_sampler`` object itself.
 
     Iterable and ``Sized``, so it is handed straight to
@@ -207,7 +207,7 @@ class BlockPlan:
         batches: Index batches in **emission** order; each is a ``list[int]`` of
             global frame rows, ``B_i`` long.
         blocks: Owning block identity per batch, parallel to *batches*.
-        coverage: One :class:`BlockCoverage` row per block the plan touches, in
+        coverage: One :class:`FrameStoreCoverage` row per block the plan touches, in
             visit order.
         split: The view's single split (invariant I7).
         seed: The per-epoch planning seed (``DataModule.seed + epoch``).
@@ -223,7 +223,7 @@ class BlockPlan:
 
     batches: tuple[list[int], ...]
     blocks: tuple[str, ...]
-    coverage: tuple[BlockCoverage, ...]
+    coverage: tuple[FrameStoreCoverage, ...]
     split: str
     seed: int
     window: int
@@ -307,7 +307,7 @@ class BlockPlan:
         Path(path).write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
 
 
-class BlockPlanSource:
+class FrameStorePlanSource:
     """Plans one epoch globally over a block view, emits it block-windowed.
 
     A :class:`~molix.batch.sampler.BatchSamplerSource` implementation:
@@ -341,7 +341,7 @@ class BlockPlanSource:
         if max_edges is not None:
             raise ValueError(
                 f"max_edges={max_edges} cannot be budgeted over blocks: the block "
-                "format stores no neighbour-graph column, so BlockReader.edge_counts "
+                "format stores no neighbour-graph column, so FrameStoreReader.edge_counts "
                 "raises by design and this plan will not fabricate a count. The cutoff "
                 "graph is built downstream (molix.batch.NeighborList or the MD bind "
                 "path) — budget the plan on max_atoms instead."
@@ -349,7 +349,7 @@ class BlockPlanSource:
         self._mixture = dict(mixture)
         self._max_atoms = int(max_atoms)
 
-    def batch_sampler(self, dataset: BlockFrameView, *, seed: int) -> BlockPlan:
+    def batch_sampler(self, dataset: FrameStoreView, *, seed: int) -> FrameStorePlan:
         """Plan this epoch over *dataset* and return it in consumption order.
 
         Planning reads metadata only — the ``(F,)`` count and code tables — so no
@@ -362,17 +362,17 @@ class BlockPlanSource:
                 of the plan derives from it.
 
         Returns:
-            The epoch's :class:`BlockPlan`: block-pure batches of global frame
+            The epoch's :class:`FrameStorePlan`: block-pure batches of global frame
             rows, ordered window by window over at most ``dataset.max_open``
             blocks.
 
         Raises:
-            TypeError: *dataset* is not a :class:`BlockFrameView`.
+            TypeError: *dataset* is not a :class:`FrameStoreView`.
         """
-        if not isinstance(dataset, BlockFrameView):
+        if not isinstance(dataset, FrameStoreView):
             raise TypeError(
-                "BlockPlanSource plans over a BlockFrameView (e.g. "
-                "molix.store.block_view.BlockDataset), which supplies the block_ids / "
+                "FrameStorePlanSource plans over a FrameStoreView (e.g. "
+                "molix.store.frame_store_view.FrameStoreDataset), which supplies the block_ids / "
                 "max_open / split / atom_counts / task_codes / group_codes / locate "
                 f"surface a block plan needs; got {type(dataset).__name__}. Wrap the "
                 "blocks in a view, or use TokenBudgetBatchSampler for a packed cache."
@@ -380,7 +380,7 @@ class BlockPlanSource:
         planned = [list(batch) for batch in self._plan(dataset, seed)]
         parts, boundary_splits = self._divide(dataset, planned)
         ordered = self._window(dataset, parts)
-        return BlockPlan(
+        return FrameStorePlan(
             batches=tuple(frames for _, frames in ordered),
             blocks=tuple(dataset.block_ids[block] for block, _ in ordered),
             coverage=self._coverage(dataset, ordered),
@@ -390,7 +390,7 @@ class BlockPlanSource:
             boundary_splits=boundary_splits,
         )
 
-    def _plan(self, view: BlockFrameView, seed: int) -> TaskMixtureBatchSampler:
+    def _plan(self, view: FrameStoreView, seed: int) -> TaskMixtureBatchSampler:
         """Build the one global sampler — the plan authority (invariant I8).
 
         One :class:`~molix.batch.sampler.TaskMixtureBatchSampler` over
@@ -406,7 +406,7 @@ class BlockPlanSource:
         """
         # The sampler declares the wider BaseDataset but consumes exactly ``len()``
         # plus the budget count vector — ``atom_counts`` here, since ``max_edges`` is
-        # None — both of which BlockFrameView pins. The cast records that, rather
+        # None — both of which FrameStoreView pins. The cast records that, rather
         # than narrowing this module's binding to a concrete view class.
         return TaskMixtureBatchSampler(
             cast("BaseDataset", view),
@@ -422,7 +422,7 @@ class BlockPlanSource:
 
     @staticmethod
     def _divide(
-        view: BlockFrameView, planned: Sequence[list[int]]
+        view: FrameStoreView, planned: Sequence[list[int]]
     ) -> tuple[list[tuple[int, list[int]]], int]:
         """Cut each planned batch into maximal runs of frames sharing a block.
 
@@ -430,7 +430,7 @@ class BlockPlanSource:
         never exceed the token budget (a part is ≤ the whole) and never mix tasks.
 
         Args:
-            view: The multi-block view, for :meth:`BlockFrameView.locate`.
+            view: The multi-block view, for :meth:`FrameStoreView.locate`.
             planned: The planned batches, in plan order.
 
         Returns:
@@ -453,7 +453,7 @@ class BlockPlanSource:
 
     @staticmethod
     def _window(
-        view: BlockFrameView, parts: Sequence[tuple[int, list[int]]]
+        view: FrameStoreView, parts: Sequence[tuple[int, list[int]]]
     ) -> list[tuple[int, list[int]]]:
         """Reorder *parts* so at most ``K`` blocks are resident at a time.
 
@@ -478,8 +478,8 @@ class BlockPlanSource:
 
     @staticmethod
     def _coverage(
-        view: BlockFrameView, ordered: Sequence[tuple[int, list[int]]]
-    ) -> tuple[BlockCoverage, ...]:
+        view: FrameStoreView, ordered: Sequence[tuple[int, list[int]]]
+    ) -> tuple[FrameStoreCoverage, ...]:
         """Account the plan per block, in visit order (invariant I10).
 
         Args:
@@ -487,7 +487,7 @@ class BlockPlanSource:
             ordered: The emitted ``(block ordinal, frames)`` parts.
 
         Returns:
-            One :class:`BlockCoverage` row per block the plan touches — units
+            One :class:`FrameStoreCoverage` row per block the plan touches — units
             (distinct group codes among that block's planned frames), frames and
             batches.
         """
@@ -497,7 +497,7 @@ class BlockPlanSource:
             frames_of.setdefault(block, []).extend(frames)
             batches_of[block] = batches_of.get(block, 0) + 1
         return tuple(
-            BlockCoverage(
+            FrameStoreCoverage(
                 block=view.block_ids[block],
                 units=int(
                     view.group_codes[torch.as_tensor(frames, dtype=torch.long)].unique().numel()

@@ -639,12 +639,11 @@ class NeighborList:
     def _compute(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run the compiled kernel; returns ``(source, target, shifts)``."""
         pos = positions.detach()
-        graph = self._nl.execute({"pos": pos, "cell": self.cell.to(pos.dtype)})
-        edge_index = graph["edge_index"]  # (E, 2) — canonical layout throughout
+        edge_index, edge_diff, _ = self._nl.pairs(pos, self.cell.to(pos.dtype))
         source, target = edge_index[:, 0], edge_index[:, 1]
         # The kernel returns minimum-image displacements; the model recomputes
         # pos[target]-pos[source] itself, so hand it the periodic remainder.
-        shifts = graph["edge_diff"] - (pos[target] - pos[source])
+        shifts = edge_diff - (pos[target] - pos[source])
         return source, target, shifts
 
     def _configure_bins(self, requested: float) -> None:

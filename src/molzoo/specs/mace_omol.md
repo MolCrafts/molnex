@@ -182,7 +182,7 @@ $$
 |----|------------|--------|------|------------|
 | A1 | PolynomialCutoff + trainable un-normalised Bessel (`eps=0`) | OMOL variant vs standard MACE | low | `scripts/omol_port/verify_radial.py` (7e-15) |
 | A2 | charge/spin via `JointFeatureEmbedding` added to node feats + into E0 | OMOL conditioning | low | `scripts/omol_port/verify_joint_embed.py` (0) |
-| A3 | cue `"O3"` group everywhere (no `O3_e3nn`) | weights are converted into the cue-O3 twin, so O3 is the native target; O3 vs O3_e3nn CG differ only ~1.4e-8/op and the O3 twin already matches e3nn to 1.5e-8 — O3_e3nn would not reduce the residual and would add an `e3nn` dep | low | residual 7e-7 eV / 4.3e-6 eV/Å vs official (reimplementation accumulation, not a convention diff) — inside the 1e-4 bar (`mace-omol-port-02` ac-003) |
+| A3 | cue `"O3"` group everywhere (no `O3_e3nn`) | weights are converted into the cue-O3 twin, so O3 is the native target; O3 vs O3_e3nn CG differ only ~1.4e-8/op and the O3 twin already matches e3nn to 1.5e-8 — O3_e3nn would not reduce the residual and would add an `e3nn` dep | low | residual 7e-7 eV / 4.3e-6 eV/Å vs official (reimplementation accumulation, not a convention diff) — inside the 1e-4 bar |
 | A4 | TensorDict `forward` forces via `molpot.derivation.kernels.grad_force_pass`; `energy_forces` via `molpot.derivation.force.autograd_forces_from_energy`. Both are `torch.autograd.grad`; the earlier `torch.func.grad` plan was dropped because cuEquivariance's fused ops register legacy `autograd.Function`s without `setup_context` | compile-friendly molnex contract | low | `tests/test_molzoo/test_mace/test_variants.py::TestMACEOMol::test_forward_matches_energy_forces` (1e-8 vs autograd) |
 | A5 | edge convention `v=pos[t]-pos[s]`, `edge_index (E,2)` end to end (upstream's `(2,E)` transposed away at the port boundary) | MolNex collate schema | low | `tests/test_molzoo/test_mace/test_geometry.py::TestEdgeVectors`, `tests/test_molzoo/test_mace/test_variants.py::TestMACEOMol` |
 | A6 | `RadialMLP` honors `config.ftype` | fp64-via-config without `.double()` | low | `tests/test_molzoo/test_mace/test_variants.py::TestMACEOMol` (fp64 fixtures) |
@@ -295,7 +295,7 @@ rows.
   `mace-omol-port-01/02` implementation (status draft → partial). §5 rows
   `matched` per `scripts/omol_port/verify_*.py`.
 - 2026-06-21: accuracy bar set to 1e-4 (operator); cue O3 meets it at
-  7e-7 eV / 4.3e-6 eV/Å. `mace-omol-port-02` ac-003 verified; chain done.
+  7e-7 eV / 4.3e-6 eV/Å. Verified; chain done.
 - 2026-06-21: measured O3 vs O3_e3nn CG = 1.4e-8/op → the 7e-7 residual is
   reimplementation accumulation, not a convention diff. Dropped the O3_e3nn
   pursuit entirely and removed the dead `MACEOMol(group=)` hook from

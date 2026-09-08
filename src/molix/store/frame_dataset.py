@@ -13,21 +13,14 @@ from collections.abc import Callable, Sequence
 import torch
 from molpy import Frame
 
-from molix.batch.collate import TargetSchema
 from molix.store.dataset import BaseDataset
-from molix.store.frame_sample import FrameSample
 
-__all__ = ["CLASS_I_FRAME_SCHEMA", "FrameCollection", "FrameDataset"]
+__all__ = ["FrameCollection", "FrameDataset"]
 
 #: One record: an ordered sequence of frames sharing one identity (a single
 #: geometry is a length-1 collection; a scan or relaxation is longer). molpy
 #: exports no such type — the alias is owned here.
 FrameCollection = Sequence[Frame]
-
-CLASS_I_FRAME_SCHEMA = TargetSchema(
-    graph_level=frozenset({"energy", "mm_energy", "torsion_angle"}),
-    atom_level=frozenset({"forces", "atomic_charge"}),
-)
 
 _GROUP_KEYS = ("scan_id", "molecule_id", "source_record_id")
 
@@ -58,8 +51,6 @@ class FrameDataset(BaseDataset):
         records: One FrameCollection per index.
         task_labels: Per-collection task name, same length as *records*.
         group_ids: Per-collection sampling group, same length as *records*.
-        target_schema: How :class:`~molix.batch.collate.collate_molecules`
-            routes targets. Defaults to :data:`CLASS_I_FRAME_SCHEMA`.
     """
 
     def __init__(
@@ -68,7 +59,6 @@ class FrameDataset(BaseDataset):
         *,
         task_labels: Sequence[str],
         group_ids: Sequence[str],
-        target_schema: TargetSchema | None = None,
     ) -> None:
         collections = [_as_collection(record) for record in records]
         if not (len(collections) == len(task_labels) == len(group_ids)):
@@ -79,10 +69,9 @@ class FrameDataset(BaseDataset):
         self._records = collections
         self.task_labels: tuple[str, ...] = tuple(task_labels)
         self.group_ids: tuple[str, ...] = tuple(str(g) for g in group_ids)
-        self.target_schema = target_schema or CLASS_I_FRAME_SCHEMA
         self.atom_counts = torch.tensor(
             [
-                sum(FrameSample(frame).n_atoms for frame in collection)
+                sum(len(frame["atoms"]["number"]) for frame in collection)
                 for collection in self._records
             ],
             dtype=torch.long,
@@ -96,7 +85,6 @@ class FrameDataset(BaseDataset):
         *,
         task: str,
         group_of: Callable[[Frame], str] | None = None,
-        target_schema: TargetSchema | None = None,
     ) -> FrameDataset:
         """Label every collection with one *task*. Does not flatten frames."""
         key = group_of or _group_of
@@ -106,7 +94,6 @@ class FrameDataset(BaseDataset):
             collections,
             task_labels=(task,) * len(collections),
             group_ids=groups,
-            target_schema=target_schema,
         )
 
     def __len__(self) -> int:

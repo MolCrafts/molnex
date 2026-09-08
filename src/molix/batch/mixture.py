@@ -14,10 +14,8 @@ from typing import Any, Protocol
 
 import torch
 
-from molix.batch.collate import DEFAULT_TARGET_SCHEMA, TargetSchema
 from molix.batch.sampler import TaskMixtureBatchSampler
 from molix.store.dataset import BaseDataset
-from molix.store.frame_sample import FrameSample
 
 __all__ = ["DataMixture"]
 
@@ -43,7 +41,7 @@ def _source_atom_counts(source: _MapStyle) -> torch.Tensor:
             if isinstance(item, dict):
                 n_atoms += int(item["Z"].shape[0])
             else:
-                n_atoms += FrameSample(item).n_atoms
+                n_atoms += len(item["atoms"]["number"])
         atoms.append(n_atoms)
     return torch.tensor(atoms, dtype=torch.long)
 
@@ -66,8 +64,6 @@ class DataMixture(BaseDataset):
             must match *sources* exactly.
         max_atoms: Per-batch atom budget.
         max_edges: Optional per-batch edge budget.
-        target_schema: How collate routes targets. Defaults to the first
-            source's ``target_schema``, else the generic default.
     """
 
     def __init__(
@@ -77,7 +73,6 @@ class DataMixture(BaseDataset):
         mixture: Mapping[str, float],
         max_atoms: int,
         max_edges: int | None = None,
-        target_schema: TargetSchema | None = None,
     ) -> None:
         if not sources:
             raise ValueError("DataMixture needs at least one source")
@@ -92,10 +87,6 @@ class DataMixture(BaseDataset):
         self.mixture = dict(mixture)
         self.max_atoms = int(max_atoms)
         self.max_edges = max_edges
-        if target_schema is None:
-            first = next(iter(self.sources.values()))
-            target_schema = getattr(first, "target_schema", DEFAULT_TARGET_SCHEMA)
-        self.target_schema = target_schema
 
         labels: list[str] = []
         groups: list[str] = []

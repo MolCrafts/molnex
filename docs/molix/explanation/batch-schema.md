@@ -5,41 +5,46 @@ shapes are intentionally different — you must know which side you're on:
 
 | Stage | Container | Example access |
 |---|---|---|
-| Pre-collate (source, pipeline task I/O, `BlockDataset[i]`) | **flat `dict`** | `sample["Z"]`, `sample["edge_index"]` |
-| Post-collate (output of `collate_molecules`) | **nested `TensorDict`** | `batch["atoms", "Z"]`, `batch["edges", "edge_index"]` |
+| At rest (a store on disk, or built in memory) | **molpy `Frame`** | `frame["atoms"]["x"]`, `frame.meta["energy"]` |
+| In the model (output of `collate_molecules`) | **nested `TensorDict`** | `batch["atoms", "Z"]`, `batch["edges", "edge_index"]` |
 
 The single conversion point is `collate_molecules` (invoked by
 `DataModule._CollateFn`). Tuple-key access like `batch["atoms", "Z"]` is a
-`TensorDict`-only feature and **does not work** on a raw sample dict — that's
-why `sample["edges", "edge_index"]` raises `KeyError`.
+`TensorDict`-only feature and does not work on a `Frame`.
 
-The batch side is a **plain `tensordict.TensorDict`** — there is no subclass and
-no `@tensorclass` wrapper. What makes it a "molecular batch" is the namespace
-layout (`atoms` / `edges` / `graphs`, plus `bonds` when the samples carry
-covalent topology), not a Python type. Each namespace is itself a `TensorDict`
-carrying its own `batch_size`, which is what lets per-atom, per-edge and
-per-graph tensors of different lengths live in one container.
+The batch is a **`tensordict.TensorDict`**; `molix.batch.TensorFrame` is its
+typed view, declaring the namespaces as fields and wrapping an existing batch
+without copying. Neither owns storage or behaviour — what makes a batch a
+"molecular batch" is the namespace layout (`atoms` / `edges` / `graphs`, plus
+`bonds` / `angles` / `propers` / `impropers` when the frames carry them). Each
+namespace is itself a `TensorDict` carrying its own `batch_size`, which is what
+lets per-atom, per-edge and per-graph tensors of different lengths live in one
+container.
 
-## Sample Schema (pre-collate, single molecule, plain flat dict)
+## Frame Schema (at rest, single molecule)
 
-Individual samples from `DataSource.__getitem__`, pipeline task I/O, and
-`BlockDataset[i]` is a plain Python dict with **flat
-top-level keys** (no `"atoms"` / `"edges"` nesting):
+A molpy `Frame` holds its columns in blocks, and where a column sits is what
+decides where it lands in the batch — nothing is declared:
 
-- `Z`: `LongTensor[N]` - Atomic numbers
-- `pos`: `FloatTensor[N, 3]` - Atom positions
-- `edge_index` (optional, added by `NeighborList`): `LongTensor[E, 2]` - Edge source-target pairs
-- `edge_diff` (optional, added by `NeighborList`): `FloatTensor[E, 3]` - Edge vectors
-- `edge_dist` (optional, added by `NeighborList`): `FloatTensor[E]` - Edge distances
-- `targets` (optional): `dict[str, Tensor]` - Target labels
+- `atoms.number` → `atoms.Z`, atomic numbers
+- `atoms.x` / `.y` / `.z` → `atoms.pos`, positions
+- `atoms.fx` / `.fy` / `.fz` → `atoms.forces`
+- any other `atoms` column → `atoms.<name>`
+- a `meta` scalar (`energy=…`) → `graphs.<name>`
+- `bonds.atomi` / `.atomj` → `bonds.bond_index`, rebased onto the batch;
+  `bonds.type_id` → `bonds.bond_types`
+- an `angles` / `propers` / `impropers` block → its own namespace of 1-D
+  index columns (improper centre is `atomi`)
 
-Access with flat keys: `sample["Z"]`, `sample["edge_index"]`,
-`sample["targets"]["U0"]`. The nested tuple-key syntax below is for the
-post-collate batch only.
+`FrameStoreDataset[i]` skips the `Frame` entirely and returns frame `i` as a
+one-frame batch `TensorDict`, read straight off the store's mmapped columns.
+
+The cutoff graph is not part of a frame: it is a function of positions and a
+cutoff, so `NeighborList` builds it downstream.
 
 ## Batch Schema (nested TensorDict)
 
-`collate_molecules` converts a list of sample dicts into one nested
+`collate_molecules` converts a list of molpy `Frame` objects into one nested
 `TensorDict`:
 
 ```
@@ -93,9 +98,10 @@ batch["graphs", "energy"]     # graph-level target (B,)
 
 - Graph-level targets (energy, U0, etc.) go under `graphs`, shape `[B]`.
 - Atom-level targets (forces) go under `atoms`, shape `[N_total, ...]`.
-  Which target name is routed where is declared by the `TargetSchema` passed to
-  `collate_molecules`; names in `atom_level` go to `atoms`, everything else is
-  flattened to `[B]` under `graphs`.
+  Nothing declares the routing: where a column sits in the molpy `Frame`
+  decides where it lands. A column of the frame's `atoms` block becomes an
+  `atoms` leaf; a frame `meta` scalar becomes a `graphs` leaf. A new target is
+  a new frame column and nothing else.
 - `edge_index` is always `[E, 2]` with `[:, 0] = source`, `[:, 1] = target`, and
   `edge_diff = pos[target] - pos[source]`. Per-molecule edge indices are rebased
   onto the concatenated atom numbering during collation.

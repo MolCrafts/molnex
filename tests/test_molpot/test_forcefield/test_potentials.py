@@ -22,7 +22,8 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molix.schema import ENERGY_KEY, CellBound
+from molix.batch import TensorFrame, as_tensor_frame
+from molix.schema import ENERGY_KEY, FORCES_KEY, CellBound
 from molpot.forcefield import ForceField, Potentials
 from molpot.forcefield.schema import PotentialMeta
 from molpot.potentials.elec.prefactors import kcalmol_A
@@ -1192,7 +1193,7 @@ class TestPotentials:
         }
 
         returned_index, _vectors, dist, live_mask = potentials._placed_pairs(
-            system, pos, cutoff=2.5
+            as_tensor_frame(system), pos, cutoff=2.5
         )
 
         assert returned_index.shape == (6, 2)
@@ -1231,7 +1232,7 @@ class TestPotentials:
         }
 
         with pytest.raises(ValueError) as excinfo:
-            potentials._placed_pairs(system, pos, cutoff=5.0)
+            potentials._placed_pairs(as_tensor_frame(system), pos, cutoff=5.0)
         message = str(excinfo.value)
         assert "edge_diff" in message or "shifts" in message
 
@@ -1260,7 +1261,9 @@ class TestPotentials:
             },
         }
 
-        _, _vectors, dist, _live = potentials._placed_pairs(system, pos, cutoff=20.0)
+        _, _vectors, dist, _live = potentials._placed_pairs(
+            as_tensor_frame(system), pos, cutoff=20.0
+        )
 
         # pos[1] - pos[0] + shift = 1 + 10 = 11, not the stored 4.
         assert float(dist[0]) == pytest.approx(11.0, abs=1e-12)
@@ -1284,7 +1287,9 @@ class TestPotentials:
             "edges": {"edge_index": torch.tensor([[0, 1]], dtype=torch.long), "shifts": shifts},
         }
 
-        _, _vectors, dist, _live = potentials._placed_pairs(system, pos, cutoff=20.0)
+        _, _vectors, dist, _live = potentials._placed_pairs(
+            as_tensor_frame(system), pos, cutoff=20.0
+        )
         (grad,) = torch.autograd.grad(dist.sum(), shifts)
 
         # d|d|/d(shift_x) = (pos[t] - pos[s] + shift)_x / |...| = 11 / 11 = 1.
@@ -1312,7 +1317,9 @@ class TestPotentials:
             },
         }
 
-        edge_index, _vectors, dist, live = potentials._placed_pairs(system, pos, cutoff=LJ_CUTOFF)
+        edge_index, _vectors, dist, live = potentials._placed_pairs(
+            as_tensor_frame(system), pos, cutoff=LJ_CUTOFF
+        )
 
         assert edge_index.shape == (0, 2)
         assert dist.shape == (0,)
@@ -2067,6 +2074,112 @@ class TestPotentials:
 
     # -- S8 gate 1: symmetries of the assembled Class-I energy ---------------
 
+    # -- the typed view of the batch: TensorFrame in, same answer out -------
+
+    def test_a_typed_view_prices_the_same_energy_as_the_batch_it_wraps(self) -> None:
+        """``TensorFrame.from_tensordict`` is a view, so the energy cannot move.
+
+        molnex speaks two shapes — a molpy ``Frame`` at rest, the post-collate
+        batch in the model — and ``TensorFrame`` is the *typed read* of the
+        second (CLAUDE.md § TensorDict Contract): the same leaves, declared, no
+        storage of its own. The pair of assertions is the whole contract: the
+        wrapped ``pos`` is the same tensor, and the assembled energy of the
+        butane-pair box is the same number to the last bit — not to a tolerance,
+        because nothing here is recomputed.
+        """
+        batch = butane_pair_batch()
+        view = TensorFrame.from_tensordict(batch)
+
+        viewed = butane_pair_class_i_forcefield().to_potentials().calc_energy(view)
+        plain = butane_pair_class_i_forcefield().to_potentials().calc_energy(batch)
+
+        assert float(viewed) == float(plain)
+
+    def test_bind_topology_reads_the_topology_through_a_typed_view(self) -> None:
+        """A bind taken on the view is the bind the plain batch would have taken.
+
+        ``bind_topology`` is where the exclusion table, the graph count and the
+        Σq check are read — the one host-side pass over the batch's topology.
+        Binding on the view and then pricing the batch has to answer exactly as
+        pricing it alone does: if the view hid a namespace, the table would be
+        built from a topology the energy is not evaluated on, and the 1-2 / 1-3
+        pairs would come back into the nonbonded sum with nothing raised.
+        """
+        batch = butane_pair_batch()
+        potentials = butane_pair_class_i_forcefield().to_potentials()
+        potentials.bind_topology(TensorFrame.from_tensordict(batch))
+
+        assert float(potentials.calc_energy(batch)) == float(
+            butane_pair_class_i_forcefield().to_potentials().calc_energy(batch)
+        )
+
+    def test_forward_on_a_typed_view_writes_into_the_batch_it_wraps(self) -> None:
+        """``forward`` fills ``graphs.energy`` / ``atoms.forces`` on a view too.
+
+        The MD adapter and the composer both call ``forward`` for its *write*:
+        a batch goes in and comes back carrying the energy and the forces. The
+        view is not a second container — it wraps the caller's leaves — so a
+        ``forward`` handed one has to leave the caller's batch filled, and with
+        the same numbers. Answering with a bare energy tensor instead is the
+        silent version of this failing: nothing raises, and the caller's batch
+        simply has no forces in it.
+        """
+        batch = butane_pair_batch()
+        reference = butane_pair_class_i_forcefield().to_potentials().forward(butane_pair_batch())
+        view = TensorFrame.from_tensordict(batch)
+
+        butane_pair_class_i_forcefield().to_potentials().forward(view)
+
+        assert ENERGY_KEY in batch.keys(include_nested=True)
+        assert FORCES_KEY in batch.keys(include_nested=True)
+        assert torch.equal(batch[ENERGY_KEY], reference[ENERGY_KEY])
+        assert torch.equal(batch[FORCES_KEY], reference[FORCES_KEY])
+
+    def test_calc_energy_forces_virial_accepts_a_typed_view(self) -> None:
+        """The strained path reads the view like any other batch.
+
+        It is the one entry that refuses a non-``TensorDict`` outright, so the
+        typed view — a ``TensorDictBase`` that is deliberately *not* a
+        ``TensorDict`` — was refused by an ``isinstance`` check rather than by
+        anything about the system it describes. The periodic Coulomb fixture is
+        the one with stored ``edges.shifts``, which this entry requires (F13).
+        """
+        potentials = _coulomb_forcefield().to_potentials()
+        cell = torch.eye(3, dtype=DTYPE) * COULOMB_EDGE
+        potentials.bind_cell(cell)
+        edge_index, shifts = _coulomb_edges()
+        positions = torch.tensor(COULOMB_POSITIONS, dtype=DTYPE)
+        batch = _coulomb_batch(positions, cell, edge_index, shifts)
+
+        energy, forces, virial = potentials.calc_energy_forces_virial(
+            TensorFrame.from_tensordict(batch)
+        )
+        expected = potentials.calc_energy_forces_virial(
+            _coulomb_batch(positions, cell, edge_index, shifts)
+        )
+
+        assert float(energy) == float(expected[0])
+        assert torch.equal(forces.detach(), expected[1].detach())
+        assert torch.equal(virial.detach(), expected[2].detach())
+
+    def test_a_nested_mapping_is_read_as_the_batch_it_describes(self) -> None:
+        """A plain ``{"atoms": TensorDict, …}`` prices like the batch itself.
+
+        The contract is the *shape* of the system — the namespaces of the
+        post-collate schema — not the class carrying them, so a caller holding
+        the namespaces in a plain mapping is not holding a different system.
+        Reading it through the same accessor is what keeps that true; the
+        alternative is a silent zero, since a system nothing recognises has no
+        topology and no placed list.
+        """
+        batch = butane_pair_batch()
+        mapping = {name: batch[name] for name in batch.keys()}
+
+        viewed = butane_pair_class_i_forcefield().to_potentials().calc_energy(mapping)
+        plain = butane_pair_class_i_forcefield().to_potentials().calc_energy(batch)
+
+        assert float(viewed) == float(plain)
+
     def test_assembled_energy_is_translation_invariant(self) -> None:
         """A rigid translation of the contents of a periodic box costs nothing.
 
@@ -2143,6 +2256,9 @@ class TestPotentials:
         permuted = butane_pair_batch(positions[permutation])
         for field in ("Z", "mass"):
             permuted["atoms", field] = _leaf(reference, "atoms", field)[permutation]
+        # ``bonds`` is the ``(2, N)`` COO block ``collate_molecules`` writes, so
+        # it is remapped as one tensor; the valence namespaces are 1-D columns.
+        permuted["bonds", "bond_index"] = inverse[_leaf(reference, "bonds", "bond_index")]
         for namespace, columns in BUTANE_PAIR_TOPOLOGY_COLUMNS.items():
             for column in columns:
                 permuted[namespace, column] = inverse[_leaf(reference, namespace, column)]
@@ -2519,7 +2635,9 @@ class TestPotentialsCompiledCore:
         lj_batch = _lj_pair_batch(r=COMPILED_CORE_R)
         lj.bind_topology(lj_batch)
         lj.compile_core(capture)
-        flat = Compiler.explain(captured[-1], lj_batch, _leaf(lj_batch, "atoms", "pos"))
+        flat = Compiler.explain(
+            captured[-1], as_tensor_frame(lj_batch), _leaf(lj_batch, "atoms", "pos")
+        )
         assert (flat.graph_count, flat.graph_break_count) == (1, 0), (
             "a bonded + lj/cut core has no autograd seam and must trace as one graph; "
             f"break sites: {flat.break_sites}"
@@ -2534,7 +2652,9 @@ class TestPotentialsCompiledCore:
         )
         coulomb.bind_topology(periodic)
         coulomb.compile_core(capture)
-        core = Compiler.explain(captured[-1], periodic, _leaf(periodic, "atoms", "pos"))
+        core = Compiler.explain(
+            captured[-1], as_tensor_frame(periodic), _leaf(periodic, "atoms", "pos")
+        )
         assert core.graph_break_count > 0
         strays = _strays_outside_the_force_seam(core.break_sites)
         assert strays == [], (

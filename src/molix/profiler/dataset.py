@@ -2,7 +2,7 @@
 
 Answers *"what is in my data, and what does one sample cost?"* for any object
 yielding **flat sample dicts** (the raw-sample tier of the two-tier data
-contract): :class:`~molix.store.block_view.BlockDataset` /
+contract): :class:`~molix.store.frame_store_view.FrameStoreDataset` /
 :class:`~molix.store.dataset.SubsetDataset`, a
 :class:`~molix.profiler.mock.MockSource`, or a plain ``Sequence[dict]``.
 Complements :class:`~molix.profiler.dataloader.DataLoaderProfiler`, which
@@ -65,8 +65,8 @@ class FieldSpec:
 
     This is the **report view** of one entry of a packed cache's
     ``payload["schema"]`` — not to be confused with
-    :class:`molix.batch.collate.TargetSchema`, which is a collate-time
-    routing rule. ``FieldSpec`` describes storage, ``TargetSchema``
+     a collate-time
+    routing rule. ``FieldSpec`` describes storage, the collate
     describes destination.
 
     Attributes:
@@ -136,8 +136,7 @@ class FieldSpec:
 class TargetStat:
     """Numeric distribution of one label column across the sampled records.
 
-    Unrelated to :class:`molix.batch.collate.TargetSchema`: this is a
-    *measurement* of the label values, whereas ``TargetSchema`` is the rule
+    This is a *measurement* of the label values, whereas collate routing is the rule
     that routes labels into batch namespaces at collate time.
 
     Attributes:
@@ -739,7 +738,7 @@ class DatasetProfiler:
         Raises:
             ValueError: *data* is not a non-empty indexable sequence.
         """
-        remedy = "Point it at a sealed block (BlockDataset) or a non-empty Sequence[dict]."
+        remedy = "Point it at a sealed block (FrameStoreDataset) or a non-empty Sequence[dict]."
         if not hasattr(data, "__len__") or not hasattr(data, "__getitem__"):
             raise ValueError(
                 f"{type(data).__name__} exposes no __len__ / __getitem__, so no sample "

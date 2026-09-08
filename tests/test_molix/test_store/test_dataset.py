@@ -2,8 +2,8 @@
 
 Both are storage-agnostic — a dataset is anything with ``__len__`` and
 ``__getitem__`` — so the fixture here is a list-backed stub rather than any
-on-disk format. Block-backed reading is covered by ``test_store/test_block.py``
-and ``test_store/test_block_view.py``.
+on-disk format. Block-backed reading is covered by ``test_store/test_frame_store.py``
+and ``test_store/test_frame_store_view.py``.
 """
 
 from __future__ import annotations

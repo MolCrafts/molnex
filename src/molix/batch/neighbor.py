@@ -1,5 +1,9 @@
 """Neighbour-list construction — the owner of the repo Edge Convention.
 
+A :class:`~molix.batch.task.BatchTask`: the cutoff graph is a function of
+positions and a cutoff, not dataset content, so it is built on the collated
+batch rather than stored.
+
 Builds the cutoff graph (``edge_index`` / ``edge_diff`` / ``edge_dist``) that
 the collate schema in :mod:`molix.batch.collate` consumes, which is why it
 lives beside it rather than in an acquisition-side task tree.
@@ -12,6 +16,7 @@ needs in order to wrap and cache it.
 from __future__ import annotations
 
 import torch
+from tensordict import TensorDict
 
 from molix.F.locality import get_neighbor_pairs
 
@@ -79,8 +84,8 @@ class NeighborList:
         """Alias of :meth:`execute`, preserved from the former ``Task`` base."""
         return self.execute(data)
 
-    def execute(self, data: dict) -> dict:
-        """Compute the neighbour list for one sample and attach edge fields.
+    def pairs(self, pos: torch.Tensor, box_vectors: torch.Tensor | None = None) -> tuple:
+        """Build one system's edges: ``(edge_index, edge_diff, edge_dist)``.
 
         Calls the C++ kernel on the sample's ``pos`` (and ``cell`` under
         PBC), normalises pair indices to ``(E, 2)``, optionally strips
@@ -91,16 +96,14 @@ class NeighborList:
         ``edge_diff`` and duplicated distances.
 
         Args:
-            data: A sample dict with ``pos`` ``(N, 3)`` and, under PBC, a
-                ``cell`` ``(3, 3)``.
+            pos: Positions ``(N, 3)`` of one molecule.
+            box_vectors: Lattice ``(3, 3)`` under PBC, else ``None``.
 
         Returns:
-            A new sample dict adding ``edge_index`` ``(E, 2)`` (source in
-            column 0, target in column 1), ``edge_diff`` ``(E, 3)``
-            (``pos[target] - pos[source]``), and ``edge_dist`` ``(E,)``.
+            ``edge_index`` ``(E, 2)`` (source in column 0, target in column 1),
+            ``edge_diff`` ``(E, 3)`` (``pos[target] - pos[source]``) and
+            ``edge_dist`` ``(E,)``, all molecule-local.
         """
-        pos = data["pos"]
-        box_vectors = data.get("cell") if self.pbc else None
 
         # O(N²) pair enum in the C++ kernel — size the buffer from N when the
         # caller left the small default (512) on a larger system.
@@ -148,9 +151,51 @@ class NeighborList:
             edge_diff = torch.cat([edge_diff, -edge_diff], dim=0)
             distances = torch.cat([distances, distances], dim=0)
 
-        return {
-            **data,
-            "edge_index": edge_index,
-            "edge_diff": edge_diff,
-            "edge_dist": distances,
-        }
+        return edge_index, edge_diff, distances
+
+    def execute(self, batch: TensorDict) -> TensorDict:
+        """Build the cutoff graph of every molecule in *batch* and write ``edges``.
+
+        Blocks carry no neighbour graph — it is a function of positions and a
+        cutoff, not dataset content — so it is built here, on the collated
+        batch, one molecule at a time with indices rebased into batch space.
+
+        Args:
+            batch: A collated batch with ``atoms.pos`` ``(N, 3)``,
+                ``atoms.batch`` ``(N,)`` graph membership and, under PBC,
+                ``graphs.cell`` ``(B, 3, 3)``.
+
+        Returns:
+            The same batch with its ``edges`` namespace replaced by
+            ``edge_index`` ``(E, 2)``, ``edge_diff`` ``(E, 3)`` and
+            ``edge_dist`` ``(E,)``, indices global to the batch.
+        """
+        pos = batch["atoms", "pos"]
+        membership = batch["atoms", "batch"]
+        n_graphs = int(membership.max().item()) + 1 if membership.numel() else 0
+        cells = batch["graphs", "cell"] if self.pbc and "cell" in batch["graphs"].keys() else None
+
+        index_parts: list[torch.Tensor] = []
+        diff_parts: list[torch.Tensor] = []
+        dist_parts: list[torch.Tensor] = []
+        offset = 0
+        for graph in range(n_graphs):
+            rows = membership == graph
+            local_pos = pos[rows]
+            box = cells[graph] if cells is not None else None
+            edge_index, edge_diff, edge_dist = self.pairs(local_pos, box)
+            index_parts.append(edge_index + offset)
+            diff_parts.append(edge_diff)
+            dist_parts.append(edge_dist)
+            offset += int(local_pos.shape[0])
+
+        edge_index = torch.cat(index_parts) if index_parts else torch.zeros(0, 2, dtype=torch.long)
+        batch["edges"] = TensorDict(
+            {
+                "edge_index": edge_index,
+                "edge_diff": torch.cat(diff_parts) if diff_parts else torch.zeros(0, 3),
+                "edge_dist": torch.cat(dist_parts) if dist_parts else torch.zeros(0),
+            },
+            batch_size=[int(edge_index.shape[0])],
+        )
+        return batch

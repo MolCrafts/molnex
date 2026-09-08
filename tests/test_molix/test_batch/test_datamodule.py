@@ -11,13 +11,13 @@ import torch
 from torch.utils.data import DataLoader
 
 from molix.batch import datamodule as _datamodule
-from molix.batch.collate import TargetSchema
 from molix.batch.datamodule import DataModule
 from molix.batch.task import BatchTask
 from molix.config import config
-from molix.store.block import BlockReader, BlockWriter, SamplingUnit
-from molix.store.block_view import BlockDataset, BlockNotReadyError
 from molix.store.dataset import BaseDataset
+from molix.store.frame_store import FrameStoreReader, FrameStoreWriter
+from molix.store.frame_store_view import FrameStoreDataset, FrameStoreNotReadyError
+from tests.conftest import frame
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -33,45 +33,27 @@ _OUT_OF_CUTOFF_SEP = 5.0
 _JITTER = 0.01
 
 
-def _make_samples(n: int = 10) -> list[dict]:
-    """Build *n* two-atom samples with deterministic geometry.
+def _make_samples(n: int = 10) -> list:
+    """Build *n* two-atom frames with deterministic geometry.
 
     Positions come from a local :class:`torch.Generator` (seed 0), so the
-    fixture is independent of global RNG state and of test execution
-    order. Separations alternate across the ``3.0`` cutoff used by the
-    pipeline tests, which keeps the per-sample edge count *varying* (2 and
-    0) instead of landing on a constant ``E == n_atoms`` — the degenerate
-    geometry pinned in ``test_cache.py::TestPackSchema``.
+    fixture is independent of global RNG state and of test execution order.
 
     Args:
-        n: Number of samples. ``targets.U0`` carries the identity
+        n: Number of frames. The ``energy`` meta scalar carries the identity
             ``float(i)`` used by the shuffle-order tests.
 
     Returns:
-        Flat sample dicts with per-atom ``Z`` / ``pos``, one pre-built
-        edge (``edge_index`` ``(1, 2)``, ``edge_diff`` ``(1, 3)``,
-        ``edge_dist`` ``(1,)``) and graph-level ``targets.U0`` ``(1,)``.
+        molpy ``Frame`` objects — the only thing a dataset hands the collate.
     """
     gen = torch.Generator().manual_seed(0)
-    samples: list[dict] = []
+    frames = []
     for i in range(n):
         sep = _IN_CUTOFF_SEP if i % 2 == 0 else _OUT_OF_CUTOFF_SEP
         pos = torch.tensor([[0.0, 0.0, 0.0], [sep, 0.0, 0.0]])
         pos = pos + _JITTER * torch.randn(2, 3, generator=gen)
-        # edge_index [[0, 1]] → source 0, target 1; edge_diff follows the
-        # repo convention pos[target] - pos[source].
-        diff = (pos[1] - pos[0]).unsqueeze(0)
-        samples.append(
-            {
-                "Z": torch.tensor([1, 6], dtype=torch.long),
-                "pos": pos,
-                "edge_index": torch.tensor([[0, 1]], dtype=torch.long),
-                "edge_diff": diff,
-                "edge_dist": diff.norm(dim=-1),
-                "targets": {"U0": torch.tensor([float(i)])},
-            }
-        )
-    return samples
+        frames.append(frame(Z=[1, 6], pos=pos.tolist(), energy=float(i)))
+    return frames
 
 
 class _SampleDataset(BaseDataset):
@@ -181,48 +163,8 @@ class TestCollation:
     def test_targets_in_graphs(self, _dm_factory):
         dm = _dm_factory(batch_size=4)
         batch = next(iter(dm.train_dataloader()))
-        assert "U0" in batch["graphs"].keys()
-        assert batch["graphs", "U0"].shape == (4,)
-
-    def test_custom_target_schema(self, tmp_path):
-        from molix.batch.collate import TargetSchema
-
-        train, val = _write_and_load_split(tmp_path, 4, 2)
-        schema = TargetSchema(graph_level={"U0"}, atom_level=set())
-        dm = DataModule(
-            train, val, target_schema=schema, batch_size=2, num_workers=0, pin_memory=False
-        )
-        batch = next(iter(dm.train_dataloader()))
-        assert "U0" in batch["graphs"].keys()
-
-    def test_target_schema_auto_discovered_from_dataset(self, tmp_path):
-        from molix.batch.collate import TargetSchema
-
-        class SchemaCarrier(_SampleDataset):
-            target_schema = TargetSchema(graph_level={"U0"}, atom_level=frozenset())
-
-        samples = _make_samples(6)
-        dm = DataModule(
-            SchemaCarrier(samples[:4]), SchemaCarrier(samples[4:]), batch_size=2, pin_memory=False
-        )
-        assert dm.target_schema.graph_level == frozenset({"U0"})
-
-    def test_explicit_target_schema_overrides_dataset(self, tmp_path):
-        from molix.batch.collate import TargetSchema
-
-        class SchemaCarrier(_SampleDataset):
-            target_schema = TargetSchema(graph_level={"foo"}, atom_level=frozenset())
-
-        samples = _make_samples(6)
-        explicit = TargetSchema(graph_level={"U0"}, atom_level=frozenset())
-        dm = DataModule(
-            SchemaCarrier(samples[:4]),
-            SchemaCarrier(samples[4:]),
-            target_schema=explicit,
-            batch_size=2,
-            pin_memory=False,
-        )
-        assert dm.target_schema is explicit
+        assert "energy" in batch["graphs"].keys()
+        assert batch["graphs", "energy"].shape == (4,)
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +268,7 @@ def _make_shuffle_dm(tmp_path: Path, tag: str, *, seed: int = 123, n_train: int 
 
 def _loader_order(dl: DataLoader) -> list[float]:
     """Iterate *dl* and return per-sample ``U0`` identities in yield order."""
-    return [float(u) for batch in dl for u in batch["graphs", "U0"]]
+    return [float(u) for batch in dl for u in batch["graphs", "energy"]]
 
 
 class TestEpochReshuffle:
@@ -507,7 +449,7 @@ class TestBatchSamplerInjection:
         dm = _make_injection_dm(
             tmp_path, "iter", batch_sampler_source=_FixedPlanSource(INJECTED_PLAN)
         )
-        yielded = [[float(u) for u in batch["graphs", "U0"]] for batch in dm.train_dataloader()]
+        yielded = [[float(u) for u in batch["graphs", "energy"]] for batch in dm.train_dataloader()]
         assert yielded == INJECTED_PLAN_IDENTITIES
 
     def test_source_receives_seed_plus_epoch(self, tmp_path):
@@ -583,7 +525,7 @@ class TestDataModule:
 # ---------------------------------------------------------------------------
 # Block collate route
 # (spec streaming-data-tiers-04-scheduler-integration-03-plan, Task 5;
-#  ac-006..ac-010)
+#
 # ---------------------------------------------------------------------------
 
 #: Fixture blocks, deliberately tiny — a unit commit costs ~18 fsyncs
@@ -595,10 +537,9 @@ class TestDataModule:
 #:
 #: Both blocks order their task dictionary the same way (``alpha`` first), so the
 #: view's merged dictionary is the identity on each block's *local* codes — the
-#: ac-006 stamp reads ``reader.task_codes`` and this fixture deliberately does not
+#: The stamp reads ``reader.task_codes`` and this fixture deliberately does not
 #: discriminate local from global codes (see the spec note in the summary).
 _BLOCK_MIXTURE: dict[str, float] = {"alpha": 0.5, "beta": 0.5}
-_BLOCK_SCHEMA = TargetSchema(graph_level=frozenset({"energy"}), atom_level=frozenset())
 
 #: Hand-computed goldens of block-p unit ``u0`` (frames 0, 1): every value is a
 #: multiple of 0.5 and therefore exact in float32 — no FP tolerance is needed.
@@ -619,31 +560,30 @@ def _block_halves(count: int, start: int) -> torch.Tensor:
     return (torch.arange(count, dtype=torch.float32) + float(start)) * 0.5
 
 
-def _block_unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) -> SamplingUnit:
-    """One topology plus *n_frames* frames (``pos`` Å, ``energy`` kcal mol⁻¹)."""
-    rows = n_frames * n_atoms
-    return SamplingUnit(
-        key=key,
-        task=task,
-        topology={"Z": torch.tensor([8] + [1] * (n_atoms - 1), dtype=torch.int16)},
-        frames={
-            "pos": _block_halves(rows * 3, offset).reshape(rows, 3),
-            "energy": _block_halves(n_frames, offset + 3),
-        },
-    )
+def _block_unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) -> tuple:
+    """One molecule's frames (``pos`` Å, ``energy`` kcal mol⁻¹) as ``(frames, key, task)``."""
+    frames = [
+        frame(
+            Z=[8] + [1] * (n_atoms - 1),
+            pos=_block_halves(n_atoms * 3, offset + k * n_atoms * 3).reshape(n_atoms, 3).numpy(),
+            energy=float(_block_halves(1, offset + 3 + k)[0]),
+        )
+        for k in range(n_frames)
+    ]
+    return frames, key, task
 
 
-def _write_block(root: Path, units: list[SamplingUnit]) -> Path:
+def _write_block(root: Path, units: list) -> Path:
     """Write and seal one block of the two-block fixture."""
-    writer = BlockWriter(root, split="train", provenance=_BLOCK_PROVENANCE)
-    for unit in units:
-        writer.append_unit(unit)
+    writer = FrameStoreWriter(root, split="train", provenance=_BLOCK_PROVENANCE)
+    for frames, key, task in units:
+        writer.append(frames, key=key, task=task)
     writer.seal()
     return root
 
 
 @pytest.fixture
-def block_view(tmp_path: Path) -> BlockDataset:
+def block_view(tmp_path: Path) -> FrameStoreDataset:
     """The two sealed ``split="train"`` blocks p and q, in view order."""
     roots = [
         _write_block(
@@ -655,7 +595,7 @@ def block_view(tmp_path: Path) -> BlockDataset:
         ),
         _write_block(tmp_path / "block-q", [_block_unit("u2", "alpha", 4, 2, 80)]),
     ]
-    return BlockDataset(roots, max_open=2)
+    return FrameStoreDataset(roots, max_open=2)
 
 
 @pytest.fixture
@@ -670,18 +610,17 @@ def fp64() -> Iterator[torch.dtype]:
 
 def _block_collate(
     view: object,
-    schema: TargetSchema,
     batch_tasks: tuple[BatchTask, ...] = (),
 ) -> object:
-    """Build the block-route collate callable (``datamodule._BlockCollateFn``)."""
-    return _datamodule._BlockCollateFn(view, schema, batch_tasks)
+    """Build the block-route collate callable (``datamodule._FrameStoreCollateFn``)."""
+    return _datamodule._FrameStoreCollateFn(view, batch_tasks)
 
 
-class _UnavailableBlockView:
+class _UnavailableFrameStoreView:
     """Delegating block view whose ``reader()`` refuses one block ordinal.
 
     Models a planned block the conveyor cannot supply: the refusal is the view's
-    (:class:`~molix.store.block_view.BlockNotReadyError`, naming the block), and
+    (:class:`~molix.store.frame_store_view.FrameStoreNotReadyError`, naming the block), and
     the collate route must let it through untouched — never advancing to another
     block's frames, never substituting (invariant I8).
 
@@ -690,7 +629,7 @@ class _UnavailableBlockView:
         missing: Block ordinal whose reader refuses.
     """
 
-    def __init__(self, view: BlockDataset, *, missing: int) -> None:
+    def __init__(self, view: FrameStoreDataset, *, missing: int) -> None:
         self._view = view
         self._missing = int(missing)
         #: Block ordinals whose reader was requested, in request order.
@@ -734,11 +673,11 @@ class _UnavailableBlockView:
     def locate(self, frames: Sequence[int] | torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return self._view.locate(frames)
 
-    def reader(self, block: int) -> BlockReader:
+    def reader(self, block: int) -> FrameStoreReader:
         row = int(block)
         self.requested.append(row)
         if row == self._missing:
-            raise BlockNotReadyError(
+            raise FrameStoreNotReadyError(
                 f"block row {row} at {self._view.block_ids[row]} is not READY: missing "
                 "manifest. A planned block is never skipped and never substituted."
             )
@@ -770,10 +709,10 @@ class _PlainDataset(BaseDataset):
         return self._samples[idx]
 
 
-class TestBlockCollation:
+class TestFrameStoreCollation:
     """The third ``_resolve_collation`` route: one block per batch, task stamped.
 
-    ``BlockReader.frame_payload`` skips ``meta.`` routes, so the per-frame task
+    ``FrameStoreReader.frame_payload`` skips ``meta.`` routes, so the per-frame task
     code never reaches the payload, while
     :class:`~molix.core.steps.multitask.TaskRouter` requires a single-task
     ``("graphs", "task")`` label — this route stamps it from
@@ -781,10 +720,14 @@ class TestBlockCollation:
     to the block format.
     """
 
-    # -- the ("graphs", "task") stamp (ac-006) -----------------------------
+    # -- the ("graphs", "task") stamp -----------------------------
 
-    def test_stamps_graphs_task_int64_from_the_readers_task_codes(self, block_view: BlockDataset):
-        fn = _block_collate(block_view, _BLOCK_SCHEMA)
+    def test_stamps_graphs_task_int64_from_the_readers_task_codes(
+        self, block_view: FrameStoreDataset
+    ):
+        fn = _block_collate(
+            block_view,
+        )
 
         batch = fn([0, 1])
 
@@ -795,8 +738,10 @@ class TestBlockCollation:
         assert torch.equal(label, expected)
         assert label.tolist() == [_U0_TASK_CODE, _U0_TASK_CODE]
 
-    def test_stamped_batch_carries_that_blocks_own_payload(self, block_view: BlockDataset):
-        fn = _block_collate(block_view, _BLOCK_SCHEMA)
+    def test_stamped_batch_carries_that_blocks_own_payload(self, block_view: FrameStoreDataset):
+        fn = _block_collate(
+            block_view,
+        )
 
         batch = fn([0, 1])
 
@@ -807,9 +752,11 @@ class TestBlockCollation:
         assert tuple(batch["edges", "edge_index"].shape) == (0, 2)
 
     def test_mixed_task_batch_raises_naming_the_block_and_the_single_task_rule(
-        self, block_view: BlockDataset
+        self, block_view: FrameStoreDataset
     ):
-        fn = _block_collate(block_view, _BLOCK_SCHEMA)
+        fn = _block_collate(
+            block_view,
+        )
 
         # Frame 1 is task ``alpha`` (unit u0), frame 2 is ``beta`` (unit u1).
         with pytest.raises(ValueError, match="(?i)single[- ]task") as excinfo:
@@ -817,14 +764,16 @@ class TestBlockCollation:
 
         assert "block-p" in str(excinfo.value)
 
-    # -- no skip, no substitution (ac-007) ---------------------------------
+    # -- no skip, no substitution ---------------------------------
 
     def test_mixed_block_batch_raises_naming_both_blocks_and_the_plan(
-        self, block_view: BlockDataset
+        self, block_view: FrameStoreDataset
     ):
-        fn = _block_collate(block_view, _BLOCK_SCHEMA)
+        fn = _block_collate(
+            block_view,
+        )
 
-        with pytest.raises(ValueError, match="BlockPlan") as excinfo:
+        with pytest.raises(ValueError, match="FrameStorePlan") as excinfo:
             fn([1, 4])
 
         message = str(excinfo.value)
@@ -832,33 +781,34 @@ class TestBlockCollation:
         assert "block-q" in message
 
     def test_unavailable_block_error_propagates_with_the_block_identity(
-        self, block_view: BlockDataset
+        self, block_view: FrameStoreDataset
     ):
-        fn = _block_collate(_UnavailableBlockView(block_view, missing=1), _BLOCK_SCHEMA)
+        fn = _block_collate(_UnavailableFrameStoreView(block_view, missing=1))
 
-        with pytest.raises(BlockNotReadyError, match="block-q"):
+        with pytest.raises(FrameStoreNotReadyError, match="block-q"):
             fn([4, 5])
 
-    def test_unavailable_block_produces_no_substitute_batch(self, block_view: BlockDataset):
-        view = _UnavailableBlockView(block_view, missing=1)
-        fn = _block_collate(view, _BLOCK_SCHEMA)
+    def test_unavailable_block_produces_no_substitute_batch(self, block_view: FrameStoreDataset):
+        view = _UnavailableFrameStoreView(block_view, missing=1)
+        fn = _block_collate(
+            view,
+        )
 
-        with pytest.raises(BlockNotReadyError):
+        with pytest.raises(FrameStoreNotReadyError):
             fn([4, 5])
 
         # Only the planned block was asked for: the route never advanced to
         # block-p's frames to keep the loader fed.
         assert view.requested == [1]
 
-    # -- DataModule wiring (ac-008) ----------------------------------------
+    # -- DataModule wiring ----------------------------------------
 
     def test_resolve_collation_routes_a_block_view_to_the_block_collate(
-        self, block_view: BlockDataset
+        self, block_view: FrameStoreDataset
     ):
         dm = DataModule(
             block_view,
             block_view,
-            target_schema=_BLOCK_SCHEMA,
             batch_size=2,
             num_workers=0,
             pin_memory=False,
@@ -868,7 +818,7 @@ class TestBlockCollation:
 
         assert isinstance(loader_dataset, _datamodule._IndexDataset)
         assert len(loader_dataset) == len(block_view)
-        assert isinstance(collate_fn, _datamodule._BlockCollateFn)
+        assert isinstance(collate_fn, _datamodule._FrameStoreCollateFn)
 
     def test_resolve_collation_still_routes_a_plain_dataset_to_the_per_sample_collate(
         self, _dm_factory
@@ -881,15 +831,16 @@ class TestBlockCollation:
         assert loader_dataset is plain
         assert isinstance(collate_fn, _datamodule._CollateFn)
 
-    def test_block_plan_source_under_ddp_still_raises(self, block_view: BlockDataset, monkeypatch):
-        from molix.batch.block_plan import BlockPlanSource
+    def test_frame_store_plan_source_under_ddp_still_raises(
+        self, block_view: FrameStoreDataset, monkeypatch
+    ):
+        from molix.batch.frame_store_plan import FrameStorePlanSource
 
         monkeypatch.setattr("molix.batch.datamodule._is_distributed", lambda: True)
         dm = DataModule(
             block_view,
             block_view,
-            target_schema=_BLOCK_SCHEMA,
-            batch_sampler_source=BlockPlanSource(mixture=_BLOCK_MIXTURE, max_atoms=16),
+            batch_sampler_source=FrameStorePlanSource(mixture=_BLOCK_MIXTURE, max_atoms=16),
             batch_size=2,
             num_workers=0,
             pin_memory=False,
@@ -900,12 +851,12 @@ class TestBlockCollation:
 
         assert "batch_sampler_source" in str(excinfo.value)
 
-    # -- post-collate contract shared with the packed path (ac-009) --------
+    # -- post-collate contract shared with the packed path --------
 
     def test_batch_tasks_and_ftype_apply_while_the_task_label_stays_int64(
-        self, block_view: BlockDataset, fp64: torch.dtype
+        self, block_view: FrameStoreDataset, fp64: torch.dtype
     ):
-        fn = _block_collate(block_view, _BLOCK_SCHEMA, (_MarkerBatchTask(),))
+        fn = _block_collate(block_view, (_MarkerBatchTask(),))
 
         batch = fn([0, 1])
 
@@ -919,10 +870,12 @@ class TestBlockCollation:
         assert all(leaf.dtype is fp64 for leaf in floating)
         assert batch["graphs", "task"].dtype is torch.int64
 
-    def test_pickle_round_trip_produces_the_same_batch(self, block_view: BlockDataset):
+    def test_pickle_round_trip_produces_the_same_batch(self, block_view: FrameStoreDataset):
         import pickle
 
-        fn = _block_collate(block_view, _BLOCK_SCHEMA)
+        fn = _block_collate(
+            block_view,
+        )
         expected = fn([0, 1])
 
         batch = pickle.loads(pickle.dumps(fn))([0, 1])
@@ -931,18 +884,14 @@ class TestBlockCollation:
         assert torch.equal(batch["graphs", "energy"], expected["graphs", "energy"])
         assert torch.equal(batch["graphs", "task"], expected["graphs", "task"])
 
-    def test_getstate_carries_no_payload_tensors(self, block_view: BlockDataset):
-        fn = _block_collate(block_view, _BLOCK_SCHEMA)
+    def test_getstate_carries_no_payload_tensors(self, block_view: FrameStoreDataset):
+        fn = _block_collate(
+            block_view,
+        )
         fn([0, 1])  # warm any lazily built per-block state
 
         state = fn.__getstate__()
 
         assert not any(isinstance(value, torch.Tensor) for value in state.values())
 
-    # -- eager refusal (ac-010) --------------------------------------------
-
-    def test_task_declared_atom_level_is_refused_eagerly(self, block_view: BlockDataset):
-        schema = TargetSchema(graph_level=frozenset({"energy"}), atom_level=frozenset({"task"}))
-
-        with pytest.raises(ValueError, match="task"):
-            _block_collate(block_view, schema)
+    # -- eager refusal --------------------------------------------

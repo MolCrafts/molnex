@@ -299,7 +299,7 @@ class SyntheticSplit:
 
         Returns:
             ``(task_codes, group_codes)``, both ``(F,)`` ``int32`` exactly as
-            :attr:`~molix.store.block.BlockReader.task_codes` /
+            :attr:`~molix.store.frame_store.FrameStoreReader.task_codes` /
             ``group_codes`` emit them. Codes match :meth:`labels`'
             first-appearance factorization frame for frame.
         """

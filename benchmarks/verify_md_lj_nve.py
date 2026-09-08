@@ -35,9 +35,13 @@ import argparse
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
+from molpy import Frame
 from tensordict import TensorDict
 
+from molix.batch import TotalCharge
+from molix.batch.collate import collate_molecules
 from molix.compile import Compiler
 from molix.md import MD, EnergyDriftHook, MDHook, NeighborList, VelocityVerletIntegrator
 from molix.units import units
@@ -108,6 +112,86 @@ class _ThermoSeries(MDHook):
         self.frames.append(obs.pos.detach().cpu().clone())
 
 
+def _cluster_frame(pos: torch.Tensor) -> Frame:
+    """The argon cluster as one molpy ``Frame`` — this run's data at rest.
+
+    A ``Frame`` is the unit of data at rest in molnex and
+    :func:`~molix.batch.collate.collate_molecules` is the only conversion to the
+    batch a model reads, so a benchmark that builds a system from scratch builds
+    the same object a dataset would rather than assembling batch tensors by
+    hand. One frame: the cluster is one periodic cell (**F20**).
+
+    ``mass`` rides as a per-atom column and the (zero) net charge as a ``meta``
+    scalar, so both are the frame's own data.
+
+    Args:
+        pos: Positions ``(N, 3)`` in Å, already inside the box.
+
+    Returns:
+        The frame.
+    """
+    xyz = pos.detach().cpu().double().numpy()
+    n = int(xyz.shape[0])
+    frame = Frame(meta={"total_charge": 0.0})
+    frame["atoms"] = {
+        # Argon: the species this benchmark's epsilon / sigma / mass are.
+        "number": np.full(n, 18, dtype=np.int64),
+        "x": np.ascontiguousarray(xyz[:, 0]),
+        "y": np.ascontiguousarray(xyz[:, 1]),
+        "z": np.ascontiguousarray(xyz[:, 2]),
+    }
+    frame["atoms"]["mass"] = np.full(n, _MASS, dtype=np.float64)
+    return frame
+
+
+def _cluster_batch(pos: torch.Tensor, vel: torch.Tensor) -> TensorDict:
+    """The rollout's batch: :func:`_cluster_frame` through the real collate.
+
+    Three things the collate cannot carry are added on the way out, each named
+    where it is:
+
+    * **F36** — it writes every float column at ``float32`` while this run is
+      fp64, so the frame's own fp64 ``x`` / ``y`` / ``z`` and ``mass`` are
+      *re-read* rather than cast: a 5 ns energy-drift gate cannot be given
+      single precision's rounding of its own initial geometry.
+    * **F35** — it never reads ``frame.box``, so ``graphs.cell`` has no
+      Frame-native source and is written here, ``(B, 3, 3)`` under a sized
+      ``graphs`` (the batch schema's layout, and what MD writes a cast /
+      barostat-scaled lattice back into; a bare ``(3, 3)`` under
+      ``batch_size=[1]`` is refused by TensorDict on that write).
+    * ``vel`` — the collate stacks ``fx``/``fy``/``fz`` into ``atoms.forces``
+      and carries every other column scalar-wise, so a per-atom *vector* that is
+      neither ``pos`` nor ``forces`` cannot be spelled in a frame yet.
+
+    Args:
+        pos: Positions ``(N, 3)`` in Å.
+        vel: Velocities ``(N, 3)`` in Å/fs.
+
+    Returns:
+        The batch ``MD.run`` integrates.
+    """
+    frame = _cluster_frame(pos)
+    batch = collate_molecules([frame])
+
+    def column(name: str) -> torch.Tensor:
+        return torch.tensor(np.asarray(frame["atoms"][name], dtype=np.float64), dtype=_DTYPE)
+
+    # The F35 / F36 repair below is also spelled in tests/conftest.py
+    # (collate_frames, the owner), interface/tests/parity_classical.py and
+    # benchmarks/verify_md_ljcut_nve.py; all four collapse into
+    # collate_molecules once it carries frame.box and the frame's precision.
+    # F36: collate_molecules narrows to float32.
+    batch["atoms", "pos"] = torch.stack([column(axis) for axis in ("x", "y", "z")], dim=-1)
+    # F36: collate_molecules narrows to float32.
+    batch["atoms", "mass"] = column("mass")
+    batch["atoms", "vel"] = vel
+    # F35: collate_molecules does not read frame.box.
+    batch["graphs", "cell"] = (torch.eye(3, dtype=_DTYPE) * _BOX).unsqueeze(0)
+    # The frame declared its net charge; this only normalises the dtype.
+    TotalCharge().execute(batch)
+    return batch
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -140,24 +224,7 @@ def main() -> int:
     cell = torch.eye(3, dtype=_DTYPE) * _BOX
     pos = pos + 0.5 * _BOX
     nl = NeighborList(cell=cell, cutoff=_CUTOFF, positions=pos, skin=1.0)
-    system = TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "vel": vel,
-                    "mass": torch.full((n,), _MASS, dtype=_DTYPE),
-                    "batch": torch.zeros(n, dtype=torch.long),
-                },
-                batch_size=[n],
-            ),
-            # (B, 3, 3) under a sized ``graphs``: the batch schema's layout, and
-            # what MD writes a cast / barostat-scaled lattice back into. A bare
-            # (3, 3) under batch_size=[1] is refused by TensorDict on that write.
-            "graphs": TensorDict({"cell": cell.unsqueeze(0)}, batch_size=[1]),
-        },
-        batch_size=[],
-    )
+    system = _cluster_batch(pos, vel)
     hook = EnergyDriftHook()
     thermo = _ThermoSeries()
     md = (

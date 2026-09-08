@@ -9,20 +9,18 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from molix.batch.block_plan import BlockFrameView
 from molix.batch.collate import (
-    DEFAULT_TARGET_SCHEMA,
     MoleculeCollator,
-    TargetSchema,
-    collate_packed,
 )
+from molix.batch.frame_store_plan import FrameStoreView
 from molix.batch.mixture import DataMixture
 from molix.batch.sampler import BatchSamplerSource, TokenBudgetBatchSampler
 from molix.batch.task import BatchTask
 from molix.config import config
 from molix.core.seed import make_generator, make_worker_init_fn
 from molix.core.steps import batch_to
-from molix.store.dataset import BaseDataset, PackedView
+from molix.store.dataset import BaseDataset
+from molix.store.frame_store_view import _batch_from_columns
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -82,10 +80,9 @@ class DataModule:
 
     Usage::
 
-        full = BlockDataset.load_from_disk(blocks_dir)
+        full = FrameStoreDataset.load_from_disk(blocks_dir)
         train_ds, val_ds = full.split(sizes=(n_train, n_val), seed=42)
         dm = DataModule(train_ds, val_ds,
-                        target_schema=QM9Source.TARGET_SCHEMA,
                         batch_tasks=[PadMolecularBatch(max_atoms=256,
                                                        max_edges=4096)],
                         batch_size=32, num_workers=4)
@@ -98,7 +95,6 @@ class DataModule:
         val_dataset: Pre-built validation dataset. A
             :class:`~molix.batch.mixture.DataMixture` is iterated in
             source order, not re-mixed.
-        target_schema: Which target keys are graph-level vs atom-level.
         batch_tasks: Post-collate
             :class:`~molix.batch.task.BatchTask` instances, applied to every
             collated batch in the order given.
@@ -128,8 +124,8 @@ class DataModule:
             competing batch policies) and, like them, incompatible with
             DDP. Omit it and every existing code path is unchanged. A
             multi-block train dataset is driven by
-            :class:`~molix.batch.block_plan.BlockPlanSource` here, whose
-            :class:`~molix.batch.block_plan.BlockPlan` is the consumed
+            :class:`~molix.batch.frame_store_plan.FrameStorePlanSource` here, whose
+            :class:`~molix.batch.frame_store_plan.FrameStorePlan` is the consumed
             order (block-pure batches, at most ``view.max_open`` blocks
             resident); the matching collate route is picked automatically
             by :meth:`_resolve_collation`.
@@ -152,7 +148,6 @@ class DataModule:
         train_dataset: BaseDataset,
         val_dataset: BaseDataset,
         *,
-        target_schema: TargetSchema | None = None,
         batch_tasks: Sequence[BatchTask] | None = None,
         batch_size: int = 32,
         max_atoms_per_batch: int | None = None,
@@ -192,9 +187,6 @@ class DataModule:
 
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
-        if target_schema is None:
-            target_schema = getattr(train_dataset, "target_schema", DEFAULT_TARGET_SCHEMA)
-        self.target_schema = target_schema
         self.batch_tasks: tuple[BatchTask, ...] = tuple(batch_tasks) if batch_tasks else ()
         self.batch_size = batch_size
         self.max_atoms_per_batch = max_atoms_per_batch
@@ -456,7 +448,7 @@ class DataModule:
         return loader
 
     def _make_collate_fn(self) -> "_CollateFn":
-        return _CollateFn(self.target_schema, self.batch_tasks)
+        return _CollateFn(self.batch_tasks)
 
     def _resolve_collation(self, dataset: BaseDataset) -> tuple[object, object]:
         """Pick ``(loader_dataset, collate_fn)`` — block, packed, or fallback.
@@ -464,9 +456,9 @@ class DataModule:
         Three routes, probed in this order (all fast paths are skipped under
         DDP, which falls back to the per-sample collate):
 
-        1. **Block view** — a :class:`~molix.batch.block_plan.BlockFrameView`
+        1. **Block view** — a :class:`~molix.batch.frame_store_plan.FrameStoreView`
            gets an :class:`_IndexDataset` over its global frame rows plus a
-           :class:`_BlockCollateFn`, which materialises one block's frames per
+           :class:`_FrameStoreCollateFn`, which materialises one block's frames per
            batch. Probed *first* because a block view carries no single packed
            payload: the per-sample fallback is unavailable for it, and silently
            taking it would raise ``KeyError`` deep in the collate instead of an
@@ -481,9 +473,7 @@ class DataModule:
             ``(loader_dataset, collate_fn)`` to hand to ``DataLoader``.
         """
         if not _is_distributed() and _block_capable(dataset):
-            return _IndexDataset(len(dataset)), _BlockCollateFn(
-                dataset, self.target_schema, self.batch_tasks
-            )
+            return _IndexDataset(len(dataset)), _FrameStoreCollateFn(dataset, self.batch_tasks)
         return dataset, self._make_collate_fn()
 
     @property
@@ -547,9 +537,8 @@ class _CollateFn:
     parent and pickled along with this callable.
     """
 
-    def __init__(self, schema: TargetSchema, batch_tasks: Sequence[BatchTask]) -> None:
-        self.schema = schema
-        self.collator = MoleculeCollator(schema)
+    def __init__(self, batch_tasks: Sequence[BatchTask]) -> None:
+        self.collator = MoleculeCollator()
         self.batch_tasks = batch_tasks
         self.ftype = config["ftype"]
 
@@ -560,11 +549,11 @@ class _CollateFn:
         return batch_to(batch, dtype=self.ftype)
 
 
-def _block_capable(dataset: BaseDataset) -> TypeGuard[BlockFrameView]:
+def _block_capable(dataset: BaseDataset) -> TypeGuard[FrameStoreView]:
     """Whether *dataset* can serve the block-aware collate route.
 
     A cheap structural probe — ``isinstance`` against the
-    :class:`~molix.batch.block_plan.BlockFrameView` protocol, which reads member
+    :class:`~molix.batch.frame_store_plan.FrameStoreView` protocol, which reads member
     presence with :func:`inspect.getattr_static` (Python 3.12+, this project's
     floor), so no property is evaluated — a view's deliberately raising
     ``edge_counts`` is not tripped — and no tensor is copied. Every other
@@ -580,7 +569,7 @@ def _block_capable(dataset: BaseDataset) -> TypeGuard[BlockFrameView]:
         :class:`~typing.TypeGuard` so the route that follows sees the view
         surface it is about to consume, rather than the wider dataset type.
     """
-    return isinstance(dataset, BlockFrameView)
+    return isinstance(dataset, FrameStoreView)
 
 
 class _IndexDataset(Dataset):
@@ -588,7 +577,7 @@ class _IndexDataset(Dataset):
 
     Lets the DataLoader's sampler / ``batch_sampler`` drive batch
     composition while the real per-sample data is sliced from the packed
-    block by :class:`_BlockCollateFn`. Transparent to shuffling and the
+    block by :class:`_FrameStoreCollateFn`. Transparent to shuffling and the
     token-budget sampler, which depend only on ``__len__``.
     """
 
@@ -602,14 +591,14 @@ class _IndexDataset(Dataset):
         return idx
 
 
-class _BlockCollateFn:
+class _FrameStoreCollateFn:
     """Picklable block-route collate: one block's frames per batch, task stamped.
 
     Receives a ``list[int]`` of **global frame rows** (from :class:`_IndexDataset`
     via the plan's ``batch_sampler``) and builds the batch with the composition the
     block store documents::
 
-        collate_packed(PackedView(reader.frame_payload(frames)), range(B), schema)
+        view.batch(frames)
 
     then applies the same post-collate contract as :class:`_CollateFn` —
     ``batch_tasks`` in order, followed by
@@ -619,14 +608,14 @@ class _BlockCollateFn:
     cutoff graph is built downstream.
 
     **The batch must be block-pure and single-task.** Both are guarantees of
-    :class:`~molix.batch.block_plan.BlockPlan`, so a violation means the plan was
+    :class:`~molix.batch.frame_store_plan.FrameStorePlan`, so a violation means the plan was
     bypassed and is refused rather than papered over: no cross-block payload merge
     exists on this path, and
     :class:`~molix.core.steps.multitask.TaskRouter` maps one ``("graphs", "task")``
     code per batch to one :class:`~molix.core.steps.multitask.TaskSpec`.
 
     **The task label is stamped from the view's global codes.**
-    ``BlockReader.frame_payload`` skips ``meta.`` routes, so the per-frame task
+    ``FrameStoreReader.frame_payload`` skips ``meta.`` routes, so the per-frame task
     code never reaches the payload; it is stamped here as a ``targets.task`` leaf,
     which rides the existing target route and lands as a ``(B,)`` int64 leaf at
     ``("graphs", "task")``. The codes come from ``view.task_codes`` (the merged,
@@ -642,7 +631,7 @@ class _BlockCollateFn:
     reference, the schema, the tasks and the dtype, never a payload tensor.
 
     Args:
-        view: The multi-block :class:`~molix.batch.block_plan.BlockFrameView` the
+        view: The multi-block :class:`~molix.batch.frame_store_plan.FrameStoreView` the
             frame rows address.
         schema: Routes target keys to the ``atoms`` or ``graphs`` namespace.
         batch_tasks: Post-collate :class:`~molix.batch.task.BatchTask` instances,
@@ -654,19 +643,8 @@ class _BlockCollateFn:
             reads.
     """
 
-    def __init__(
-        self, view: BlockFrameView, schema: TargetSchema, batch_tasks: Sequence[BatchTask]
-    ) -> None:
-        if "task" in schema.atom_level:
-            raise ValueError(
-                "target_schema lists 'task' as an atom-level target, but the block "
-                "route stamps 'task' as the per-graph single-task label TaskRouter "
-                'reads at ("graphs", "task"); routing it per atom would make the '
-                "stamp a (N,) leaf and silently break routing. Drop 'task' from "
-                "atom_level, or rename the atom-level target."
-            )
+    def __init__(self, view: FrameStoreView, batch_tasks: Sequence[BatchTask]) -> None:
         self._view = view
-        self.schema = schema
         self.batch_tasks = batch_tasks
         self.ftype = config["ftype"]
 
@@ -684,7 +662,7 @@ class _BlockCollateFn:
         Raises:
             ValueError: *indices* span more than one block (the plan was
                 bypassed), or more than one task code.
-            BlockNotReadyError: The owning block is not available — propagated
+            FrameStoreNotReadyError: The owning block is not available — propagated
                 from the view with the block named. Consumption stalls here; it
                 never advances to another block's batches and never substitutes.
         """
@@ -696,9 +674,9 @@ class _BlockCollateFn:
             raise ValueError(
                 f"a block batch holds frames from {owners.numel()} blocks ({named}), "
                 "but this route materialises exactly one block per batch — there is no "
-                "cross-block payload merge here, by design. Every batch a BlockPlan "
+                "cross-block payload merge here, by design. Every batch a FrameStorePlan "
                 "emits is block-pure, so this batch did not come from one: drive the "
-                "loader with BlockPlan (DataModule(batch_sampler_source=...))."
+                "loader with FrameStorePlan (DataModule(batch_sampler_source=...))."
             )
         block = int(owners[0])
         reader = self._view.reader(block)
@@ -709,13 +687,13 @@ class _BlockCollateFn:
                 f"a block batch of {self._view.block_ids[block]} carries the task codes "
                 f"{sorted(set(codes.tolist()))}, but TaskRouter routes one batch to one "
                 'TaskSpec through the single-task label at ("graphs", "task"). Every '
-                "batch a BlockPlan emits is single-task by construction, so this batch "
+                "batch a FrameStorePlan emits is single-task by construction, so this batch "
                 "did not come from one."
             )
 
-        payload = reader.frame_payload(locals_.tolist())
-        payload["graphs"]["targets.task"] = codes.to(torch.int64)
-        batch = collate_packed(PackedView(payload), range(len(indices)), self.schema)
+        columns = reader._columns(locals_.tolist())
+        columns["graphs"]["task"] = codes.to(torch.int64)
+        batch = _batch_from_columns(columns)
         for task in self.batch_tasks:
             batch = task.execute(batch)
         return batch_to(batch, dtype=self.ftype)

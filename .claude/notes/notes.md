@@ -215,7 +215,7 @@ profiler helper that round-tripped samples through a temp file purely to
 one was a test or a `regressions/` script.
 
 **What survived, and why.** The *packed payload* is the real contract and it
-stays: `BlockReader.frame_payload` produces it, `PackedView` wraps it, and
+stays: `FrameStoreReader.frame_payload` produces it, `PackedView` wraps it, and
 `collate_packed` turns it into a batch without materialising per-sample dicts.
 `PackedCache` was only one on-disk spelling of that payload, and the worse one
 (no manifest, no seal, no digests, no resume, no splits). The unpacker moved to
@@ -861,7 +861,7 @@ Write side: 1000 small units (12 atoms, 4 frames → 18 fsyncs/unit) commit at
 **153 ms/unit = 6.5 units/s**; the ~1 MB-per-unit read block at 185 ms/unit
 = 21.8 MB/s. `seal()` streams sha256 at **1.4 GB/s** (spec assumed 1 GB/s).
 
-**Rule**: `BlockReader._map_column` stays mmap. Warm, mmap wins 5.1× (seq) /
+**Rule**: `FrameStoreReader._map_column` stays mmap. Warm, mmap wins 5.1× (seq) /
 3.4× (shuffled); cold the paths are a wash (`pread`'s best reproducible edge
 1.23×, under the spec's 1.5× follow-up threshold), so no `pread` column
 reader. Budget the write path by **fsync latency, not bandwidth** — cost is
@@ -941,7 +941,7 @@ under the default budget 1e8 self-skips by design.
 **Rule.** The `("graphs","task")` stamp on block-collated batches is the
 **view's global** task code (never block-local `reader.task_codes` — a block's
 local `(0,1)` may be global `(1,2)` after the dictionary merge). Each
-`BlockDataset` merges its OWN dictionary, so two views (e.g. train vs val)
+`FrameStoreDataset` merges its OWN dictionary, so two views (e.g. train vs val)
 can assign the same integer to different tasks: a `TaskRouter` shared across
 loaders must be fed views whose dictionaries agree, or the caller must remap.
 Pinned by `regressions/streaming-data-tiers-04-scheduler-integration-03-plan.py`
@@ -950,7 +950,7 @@ docstring as a deliberate sharp edge).
 
 **Open routes** (named, not silent): `/mol:fix` scoped to `molix.batch.task`
 (`BatchTask.execute` annotated `dict` while the contract is TensorDict — one
-pre-existing ty warn per collate route); `BlockDataset.__getstate__` should
+pre-existing ty warn per collate route); `FrameStoreDataset.__getstate__` should
 drop the LRU pool + cached tables so a spawn worker re-opens by path (worker
 pickling currently ships mmap'd column bytes by value — same shape as the
 pre-existing `_PackedCollateFn` debt, worse for the streaming tier;
@@ -962,8 +962,8 @@ pre-existing `_PackedCollateFn` debt, worse for the streaming tier;
 sampler generalization + R1 bench: no crossover below 1e8, code-form chosen,
 85% of plan footprint is representation-shared planning machinery →
 unit-granularity planning is the real lever), digest-core revision 180332f
-(task_names covered), 02-view bc75a9d (BlockDataset), 03-plan eb39d8d
-(BlockPlanSource + block collate + visit-order handoff).
+(task_names covered), 02-view bc75a9d (FrameStoreDataset), 03-plan eb39d8d
+(FrameStorePlanSource + block collate + visit-order handoff).
 
 ## [2026-08-30] LAMMPS interface — fixed_graph kept, C++ toolchain fixed
 
@@ -990,3 +990,142 @@ pinned to `22.1.*` because wrap decisions drift across clang-format majors.
 Non-ASCII (em-dash) comment lines wrap by byte count — accept clang-format's
 choice, do not hand-wrap. `mol_project.language` stays `python`: `build.check`
 is the Python gate; C++ hygiene rides the interface CI job + this file.
+
+---
+
+<!-- mol:note:topic:tensorframe -->
+## `TensorFrame` — the typed batch view, and the torch 2.14 bump it rode in on (2026-09-07)
+
+**Two shapes, two names.** At rest a molecule is a molpy ``Frame`` (`mp.Frame`);
+in the model it is `molix.batch.TensorFrame` (`mn.TensorFrame`) — a
+`tensordict.TypedTensorDict` whose declared fields *are* the post-collate
+schema. `atoms` is the only required namespace; `edges` / `graphs` / `bonds` /
+`angles` / `propers` / `impropers` are `NotRequired`, because `edges` is built
+downstream by `NeighborList` and the term namespaces depend on what the frames
+carried. `from_tensordict(td)` wraps **without copying** — asserted by
+comparing every leaf `data_ptr` against the `collate_molecules` output — so the
+storage↔model seam stays copy-free. No methods, no storage: it is a view.
+
+`TypedTensorDict` is the landed form of pytorch/tensordict#1768; there was
+nothing to wait for.
+
+**ty suppression is deliberate.** `TypedTensorDict`'s metaclass is
+`@dataclass_transform`-decorated, so ty reads the class under PEP 681 rules
+where PEP 655 `NotRequired` is not a legal field form. The annotation is
+correct (it is what populates `__optional_keys__` at runtime); the six
+`# ty: ignore[invalid-type-form]` comments name the protocol mismatch. Do not
+"fix" it by making the namespaces required.
+
+**Compile evidence** (torch 2.14.0, tensordict 0.14.1), plain `TensorDict` vs
+`TensorFrame` at every real seam that takes a batch:
+
+| seam | plain | TensorFrame |
+|---|---|---|
+| `PiNet.forward` | 1 graph, 0 breaks | 1 graph, 0 breaks |
+| `MacePotential.forward` (matpes) | 8 graphs, 7 breaks | 6 graphs, 5 breaks |
+| `MacePotential.forward` (polar) | 5 graphs, 4 breaks | 5 graphs, 4 breaks |
+
+Outputs are equal leaf-for-leaf in all three. The MACE breaks are the
+pre-existing `torch.autograd.grad` seam at `molpot/derivation/force.py:137`
+(`trace_autograd_ops=False`), not the container — which is why the compiled
+MACE seam is the flat `energy_core`, not `forward`.
+
+**Env bump this required.** `torch 2.12.1+cpu → 2.14.0+cpu`,
+`tensordict 0.13.0 → 0.14.1`, `cuequivariance(+torch) 0.10.0 → 0.11.1` in the
+shared `.x86_64` env. torch 2.14 headers **require C++20**: building
+`molix/op` at `CMAKE_CXX_STANDARD 17` fails inside `ATen/ExpandUtils.h`
+(`'sizes' is not a member of 'at::symint'`), so the op CMakeLists is now `20`
+and `libmolnex_opLib.x86_64.so` was rebuilt. pyproject pins `torch>=2.14`,
+`tensordict>=0.14`, `cuequivariance*>=0.11`.
+
+**Both arches are now on torch 2.14.** `.aarch64` was upgraded and rebuilt in
+one GH200 job (2137657) and verified on a GH200 node (2139809, exit 0):
+torch 2.14.0+cu130 with `cuda True`, tensordict 0.14.1, cueq 0.11.1,
+molrs aarch64, `molix._lib_loaded True`, `torch.ops.molix.get_neighbor_pairs`
+registered, and `TensorFrame` importing with the right required/optional keys.
+Recipe: `.scratch/polar_npt/upgrade_aarch64_torch214.sbatch` (upgrade + molrs +
+op lib, in that order — the rebuilds must follow the torch change, never
+precede it) and `verify_aarch64_torch214.sbatch` (probe only, no rebuild).
+
+Two traps that cost a job each: the inherited probe asserted
+`from molrs import Record`, which molrs 0.14 no longer exports — a stale probe
+fails a job whose real work succeeded. And pip's `Successfully installed` line
+reported `cuequivariance-ops-torch-cu13-0.10.0` while the dist-info on disk read
+`0.11.1`; trust the dist-info, not the summary line.
+
+---
+
+<!-- mol:note:topic:frame-store-rename -->
+## `Block*` → `FrameStore*`; the format id stays `molix.block/1` (2026-09-08)
+
+**Why.** `Block` already meant a molpy `Block` (a Frame's sub-table). molnex
+never exported a bare `Block`, but every `Block*` type read as if it did. The
+Python surface is what collided, so the Python surface is what changed:
+
+| was | is |
+|---|---|
+| `BlockWriter` / `BlockReader` / `BlockManifest` | `FrameStoreWriter` / `FrameStoreReader` / `FrameStoreManifest` |
+| `BlockDataset` / `BlockFrameView` | `FrameStoreDataset` / `FrameStoreView` |
+| `BlockPlan` / `BlockPlanSource` / `BlockCoverage` | `FrameStorePlan` / `FrameStorePlanSource` / `FrameStoreCoverage` |
+| `BlockNotReadyError` / `BlockSchemaMismatchError` / `BlockSplitMismatchError` | `FrameStoreNotReadyError` / … |
+| `molix.store.block` / `block_view` / `molix.batch.block_plan` | `molix.store.frame_store` / `frame_store_view` / `molix.batch.frame_store_plan` |
+
+**What deliberately did not change**: the format id `molix.block/1`, the
+manifest keys, and lowercase "block" as the name of the on-disk unit. That id
+is a wire contract already written into every store MolHub has produced;
+changing it is a format revision, not a rename. So: a `FrameStoreWriter`
+writes a frame store, whose on-disk form is one `molix.block/1` block.
+
+**Downstream**: molhub funnels its coupling through exactly one import,
+`src/molhub/conveyor/prepare.py:446` (`from molix.store.block import
+BlockWriter, SamplingUnit`), plus `molix.batch.neighbor.NeighborList` in
+`src/molhub/dataset/neighbor.py`. That line was already broken by the
+`SamplingUnit` deletion; the rename makes the module path stale too. Fixing it
+is one line: `from molix.store.frame_store import FrameStoreWriter`, then
+`writer.append(frames, key=…, task=…)`.
+
+---
+
+<!-- mol:note:topic:frame-collate-fallout -->
+## Fallout of the Frame-native collate — three live bugs, and the rule behind them (2026-09-08)
+
+Deleting `TargetSchema` / `FrameSample` / `SamplingUnit` left more than stale
+imports. Found and fixed while porting the consumers:
+
+1. **Integer meta scalars were being cast to float.** `collate_molecules` sent
+   every frame `meta` value through `float(...)`, but
+   `TaskRouter.route` **refuses a floating task label** rather than truncate one
+   silently — so multi-task routing was broken for every frame-fed batch. Fixed
+   with `_meta_scalar` (integral in, integral out), test in
+   `tests/test_molix/test_batch/test_collate.py`. **Producers of
+   `graphs.total_charge` must now emit a float**: `total_charge=0` collates to
+   int64 and the EEM solver wants the dtype it solves the charges in.
+2. **`DataLoaderProfiler` raised on use.** `profiler/dataloader.py` called
+   `_ProfilerCollate(self.target_schema, self.batch_tasks)` against a
+   one-argument constructor, reading an attribute that no longer existed. No
+   test covered it.
+3. **`molpot` never enumerates its own pairs** (since `composable-a0-03b`), so
+   every batch chain feeding an OPLS-AA pair style must place a list. Since
+   `composable-a0-debt-06` (2026-09-08) the field declares it: mount
+   `batch_tasks=[ff.neighbor_list(pbc=...), TotalCharge()]` (or apply the same
+   two tasks at a collate choke point that bypasses `DataModule`) — the radius
+   comes from the field's own pair styles, so nothing restates it; a bare open
+   `pair:coulomb` is refused (every pair), declare `cutoff=` on it.
+
+**The rule this teaches**: deleting a declaration layer moves the contract from
+"declared" to "derived", and every derived value silently acquires a dtype and a
+default. Grep for the deleted symbol, then grep for what *read* what it produced.
+
+Ported consumers: `scripts/mm_param_learning/{class_i_fit,align,espaloma_mm_protocol_train,scale_audit}.py`
+(the fourth was in nobody's ledger) and `scripts/store/bench_block_read.py`.
+`Frame.meta` returns a **copy** — `frame.meta["x"] = 1` is a silent no-op, so
+adding a meta scalar means rebuilding the frame (`_with_meta`).
+
+**Still open**: `molhub` cannot write a store. Its conveyor flattens frames into
+molnex's storage column vocabulary (`RawUnit`) and calls a writer API that no
+longer exists. The fix is *not* an import change: `encode()` already takes
+`Sequence[Frame]`, so the flattening is now molnex's job and molhub should hand
+its frames to `FrameStoreWriter.append(frames, key=…, task=…)` directly. Only
+three lines consume the columns (`prepare.py:471-472`, `encoder.py:147,156`),
+but `RawUnit` and its tests are built around them — a molhub design change,
+owned there, not here.

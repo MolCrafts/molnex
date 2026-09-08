@@ -1,6 +1,5 @@
 """Optional kernel-local stack helpers for valence columns → COO.
 
-Spec: learnable-classical-ff-02-valence-topology (ac-005).
 
 These helpers build ``[arity, N]`` long tensors only at potential call sites;
 collate output stays column form under nested TensorDict namespaces.
@@ -18,6 +17,7 @@ from molix.batch.valence_columns import (
     stack_improper_index,
     stack_proper_index,
 )
+from tests.conftest import frame
 
 
 def test_stack_angle_index_shape_and_values():
@@ -65,18 +65,15 @@ def test_stack_proper_and_improper_index():
 
 def test_stack_from_collated_batch_not_required_by_schema():
     """Helper is opt-in after collate; batch itself has no angle_index leaf."""
-    samples = [
-        {
-            "Z": torch.ones(3, dtype=torch.long),
-            "pos": torch.zeros(3, 3),
-            "angles": {
-                "atomi": torch.tensor([0], dtype=torch.long),
-                "atomj": torch.tensor([1], dtype=torch.long),
-                "atomk": torch.tensor([2], dtype=torch.long),
-            },
-        }
-    ]
-    batch = collate_molecules(samples)
+    batch = collate_molecules(
+        [
+            frame(
+                Z=[1, 1, 1],
+                pos=torch.zeros(3, 3),
+                terms={"angles": {"atomi": [0], "atomj": [1], "atomk": [2]}},
+            )
+        ]
+    )
     assert "angle_index" not in batch["angles"].keys()
     idx = stack_angle_index(batch["angles"])
     assert idx.tolist() == [[0], [1], [2]]

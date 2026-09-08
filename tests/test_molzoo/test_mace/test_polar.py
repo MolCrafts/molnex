@@ -176,7 +176,7 @@ class TestMacePolarKspaceCompile:
     def test_energy_core_forwards_num_graphs_to_both_gto_blocks(
         self, tiny_polar_spec: MACEPolarSpec, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """ac-012: one coulomb call and two descriptor calls per recursion step.
+        """One coulomb call and two descriptor calls per recursion step.
 
         No call may fall back to ``int(batch.max().item())`` — the pipeline is
         broken today at ``polar.py:241-246`` / ``:266``, which pass ``cell``
@@ -217,7 +217,7 @@ class TestMacePolarKspaceCompile:
     def test_periodic_energy_core_compiles_to_one_graph(
         self, tiny_polar_spec: MACEPolarSpec
     ) -> None:
-        """ac-012: bound grids + explicit ``num_graphs`` → 1 graph, 0 breaks."""
+        """Bound grids + explicit ``num_graphs`` → 1 graph, 0 breaks."""
         model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
         pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
         atomic_numbers = torch.tensor(CLUSTER_Z, dtype=torch.long)

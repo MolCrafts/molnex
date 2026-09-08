@@ -11,10 +11,16 @@ from molpy import ForceField as MolpyForceField
 from tensordict import TensorDict
 from torch import nn
 
-from molix.batch import NeighborList
+from molix.batch import NeighborList, TensorFrame
 from molpot.forcefield import ForceField, OPLSAAForceField, TypeAssignment
 from molpot.ir import ExclusionScales, NonbondedScaling
 from molpot.manifest import ModelManifest, NumericsRecord, ParamTableRecord
+from tests.conftest import (
+    BUTANE_PAIR_LIST_CUTOFF,
+    butane_pair_class_i_forcefield,
+    collate_frames,
+    frame,
+)
 
 #: Per-species ``(ε kcal/mol, σ Å, q e, mass amu)`` of the periodic parity case
 #: — TIP3P water with OPLS-shaped ions, copied from
@@ -34,20 +40,18 @@ HOH_DEG = 104.52
 
 
 def _line_of_atoms(n_atoms: int, bonds: list[tuple[int, int]] | None = None) -> TensorDict:
-    """``n_atoms`` collinear atoms, optionally bonded — a topology, no parameters."""
-    pos = torch.arange(n_atoms, dtype=torch.float64).unsqueeze(1) * torch.tensor(
-        [1.53, 0.0, 0.0], dtype=torch.float64
+    """``n_atoms`` collinear carbons, optionally bonded — a topology, no parameters.
+
+    One molpy ``Frame`` through ``collate_molecules``: the ``bonds`` block
+    therefore arrives as the ``(2, N)`` COO ``bonds.bond_index``, which is what
+    a batch's covalent topology looks like everywhere downstream of the collate.
+    """
+    built = frame(
+        Z=(6,) * n_atoms,
+        pos=[[1.53 * i, 0.0, 0.0] for i in range(n_atoms)],
+        bonds=None if not bonds else ([b[0] for b in bonds], [b[1] for b in bonds]),
     )
-    system = TensorDict({"atoms": TensorDict({"pos": pos}, batch_size=[n_atoms])}, batch_size=[])
-    if bonds:
-        system["bonds"] = TensorDict(
-            {
-                "atomi": torch.tensor([b[0] for b in bonds], dtype=torch.long),
-                "atomj": torch.tensor([b[1] for b in bonds], dtype=torch.long),
-            },
-            batch_size=[len(bonds)],
-        )
-    return system
+    return collate_frames([built])
 
 
 def _water_ion_box() -> tuple[ForceField, TensorDict, torch.Tensor]:
@@ -76,29 +80,21 @@ def _water_ion_box() -> tuple[ForceField, TensorDict, torch.Tensor]:
     def column(index: int) -> torch.Tensor:
         return torch.tensor([WATER_ION_SPECIES[t][index] for t in labels], dtype=torch.float64)
 
-    system = TensorDict(
-        {
-            "atoms": TensorDict(
-                {"pos": torch.tensor(xyz, dtype=torch.float64)}, batch_size=[len(labels)]
-            ),
-            "bonds": TensorDict(
-                {
-                    "atomi": torch.tensor([0, 0, 3, 3], dtype=torch.long),
-                    "atomj": torch.tensor([1, 2, 4, 5], dtype=torch.long),
-                },
-                batch_size=[4],
-            ),
-            "angles": TensorDict(
-                {
-                    "atomi": torch.tensor([1, 4], dtype=torch.long),
-                    "atomj": torch.tensor([0, 3], dtype=torch.long),
-                    "atomk": torch.tensor([2, 5], dtype=torch.long),
-                },
-                batch_size=[2],
-            ),
-        },
-        batch_size=[],
-    )
+    # Two water molecules and two ions, each its own molpy ``Frame``, collated
+    # the way a dataset reaches a model: the per-molecule bond and angle indices
+    # below are molecule-local and the collate rebases them into the box.
+    numbers = {"O": 8, "H": 1, "Na": 11, "Cl": 17}
+    waters = [
+        frame(
+            Z=(8, 1, 1),
+            pos=xyz[3 * molecule : 3 * molecule + 3],
+            bonds=([0, 0], [1, 2]),
+            terms={"angles": {"atomi": [1], "atomj": [0], "atomk": [2]}},
+        )
+        for molecule in range(2)
+    ]
+    ions = [frame(Z=(numbers[label],), pos=[xyz[6 + ion]]) for ion, label in enumerate(labels[6:])]
+    system = collate_frames([*waters, *ions])
     ff = (
         ForceField(name="water-ion", units="real")
         .def_atomstyle("full")
@@ -156,6 +152,21 @@ class TestForceField:
         assert types.bond_type == (0, 0, 0, 0)
         assert types.angle_labels == ("a1",)
         assert types.angle_type == (0, 0)
+
+    def test_assign_types_reads_a_typed_view_like_the_plain_batch(self):
+        """``TensorFrame`` in, the same assignment out.
+
+        ``TensorFrame.from_tensordict`` is a zero-copy typed view of the
+        post-collate batch (CLAUDE.md § TensorDict Contract) — the same leaves,
+        declared. Typing reads ``atoms.pos``, ``atoms.q`` and the bonded
+        namespaces off whichever of the two it is handed, so an assignment that
+        moved between them would mean some reader branched on the container's
+        *type* instead of on the system it describes.
+        """
+        ff, system, masses = _water_ion_box()
+        view = TensorFrame.from_tensordict(system)
+
+        assert ff.assign_types(view, masses=masses) == ff.assign_types(system, masses=masses)
 
     def test_one_atom_type_pair_can_carry_two_bond_types(self):
         """Same atom types, different ``(k, r0)`` — two bond types, not one.
@@ -442,6 +453,17 @@ class TestForceField:
         ff = ForceField(name="q", units="real").def_pairstyle("coulomb", cutoff=12.0)
         assert ff.neighbor_list().cutoff == pytest.approx(12.0)
         assert ff.neighbor_list(pbc=True).cutoff == pytest.approx(15.0)
+
+    def test_the_butane_pair_field_places_its_list_at_the_fixture_radius(self):
+        """The shared butane-pair box is priced at the radius its field owns (F21).
+
+        ``butane_pair_batch`` places its list through ``neighbor_list(pbc=True)``
+        rather than a number of its own, and every symmetry / NVE gate on that
+        box reads it. A style change that moved the radius would move those
+        goldens with nothing naming why — this pin does.
+        """
+        neighbors = butane_pair_class_i_forcefield().neighbor_list(pbc=True)
+        assert neighbors.cutoff == BUTANE_PAIR_LIST_CUTOFF
 
     def test_an_open_boundary_coulomb_without_a_cutoff_is_refused(self):
         """An untruncated open Coulomb needs every pair — say so, do not guess.

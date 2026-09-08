@@ -1,10 +1,9 @@
-"""Unit tests for :mod:`molix.store.block_view` — multi-block dataset view.
+"""Unit tests for :mod:`molix.store.frame_store_view` — multi-block dataset view.
 
 Spec: ``.claude/specs/streaming-data-tiers-04-scheduler-integration-02-view.md``
-(Tasks 1 + 3, acceptance ac-001..ac-010, ac-014, ac-015).
 
-Layout mirror: ``src/molix/store/block_view.py`` → this file. One test class per
-public type (:class:`BlockDataset`); the layering / export / no-fabricated-zeros
+Layout mirror: ``src/molix/store/frame_store_view.py`` → this file. One test class per
+public type (:class:`FrameStoreDataset`); the layering / export / no-fabricated-zeros
 guards are module-level tests because they target the module, not a type.
 
 Every fixture float is a multiple of ``0.5`` and therefore exactly representable
@@ -42,17 +41,16 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-import molix.store.block_view
-from molix.batch.collate import collate_molecules, collate_packed
+import molix.store.frame_store_view
 from molix.batch.sampler import TaskMixtureBatchSampler, TokenBudgetBatchSampler
-from molix.store.block import BlockReader, BlockWriter, SamplingUnit
-from molix.store.block_view import (
-    BlockDataset,
-    BlockNotReadyError,
-    BlockSchemaMismatchError,
-    BlockSplitMismatchError,
+from molix.store.frame_store import FrameStoreReader, FrameStoreWriter
+from molix.store.frame_store_view import (
+    FrameStoreDataset,
+    FrameStoreNotReadyError,
+    FrameStoreSchemaMismatchError,
+    FrameStoreSplitMismatchError,
 )
-from molix.store.dataset import PackedView
+from tests.conftest import frame
 
 # ---------------------------------------------------------------------------
 # Hand-computed goldens (spec § Domain basis)
@@ -73,13 +71,13 @@ _LOCATE_LOCALS: tuple[int, ...] = (0, 4, 0, 4, 0, 4)
 _CROSS_FRAMES: tuple[int, ...] = (12, 1, 7)
 _CROSS_ATOM_PTR: tuple[int, ...] = (0, 4, 7, 11)
 
-# Sampler-integration epoch (ac-015).
+# Sampler-integration epoch.
 _MIXTURE: dict[str, float] = {"equilibrium": 0.0, "relax": 0.5, "torsion": 0.5}
 _SAMPLER_MAX_ATOMS = 8
 _SAMPLER_SEED = 42
 _SAMPLER_FRAMES_PER_TASK: dict[str, int] = {"relax": 4, "torsion": 9}
 
-_MODULE_PATH = Path(molix.store.block_view.__file__)
+_MODULE_PATH = Path(molix.store.frame_store_view.__file__)
 
 # ---------------------------------------------------------------------------
 # Fixture builders (in-module; consolidation with test_block.py is deferred by
@@ -88,7 +86,7 @@ _MODULE_PATH = Path(molix.store.block_view.__file__)
 
 _PROVENANCE: dict[str, Any] = {
     "source": {"name": "molnex-unit-test", "coordinate": "n/a"},
-    "generator": {"tool": "test_block_view.py", "version": "1", "commit": "0"},
+    "generator": {"tool": "test_frame_store_view.py", "version": "1", "commit": "0"},
     "created_at": "2026-08-14T00:00:00+00:00",
     "units": {
         "pos": "angstrom",
@@ -140,70 +138,85 @@ def _valence(n_atoms: int) -> dict[str, torch.Tensor]:
     }
 
 
-def _unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) -> SamplingUnit:
-    """One topology plus *n_frames* frames of it — the fixture's ingestion unit."""
-    rows = n_frames * n_atoms
+def _unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) -> tuple:
+    """One molecule's frames — the fixture's ingestion unit, ``(frames, key, task)``."""
     atomic_numbers = [8, 1, 1] if n_atoms == 3 else [6, 6, 8, 1]
-    return SamplingUnit(
-        key=key,
-        task=task,
-        topology={
-            "Z": torch.tensor(atomic_numbers, dtype=torch.int16),
-            **_valence(n_atoms),
-        },
-        frames={
-            "pos": _halves(rows * 3, offset).reshape(rows, 3),
-            "forces": -_halves(rows * 3, offset + 7).reshape(rows, 3),
-            "energy": _halves(n_frames, offset + 3),
-        },
-    )
+    valence = _valence(n_atoms)
+    frames = []
+    for k in range(n_frames):
+        base = offset + k * n_atoms * 3
+        frames.append(
+            frame(
+                Z=atomic_numbers,
+                pos=_halves(n_atoms * 3, base).reshape(n_atoms, 3).numpy(),
+                forces=(-_halves(n_atoms * 3, base + 7)).reshape(n_atoms, 3).numpy(),
+                energy=float(_halves(1, offset + 3 + k)[0]),
+                bonds=(valence["bond_atomi"].numpy(), valence["bond_atomj"].numpy()),
+                bond_types=valence["bond_type"].numpy(),
+                terms={
+                    "angles": {
+                        "atomi": valence["angle_atomi"].numpy(),
+                        "atomj": valence["angle_atomj"].numpy(),
+                        "atomk": valence["angle_atomk"].numpy(),
+                        "type_id": valence["angle_type"].numpy(),
+                    },
+                    "propers": {
+                        "atomi": valence["proper_atomi"].numpy(),
+                        "atomj": valence["proper_atomj"].numpy(),
+                        "atomk": valence["proper_atomk"].numpy(),
+                        "atoml": valence["proper_atoml"].numpy(),
+                        "type_id": valence["proper_type"].numpy(),
+                    },
+                },
+            )
+        )
+    return frames, key, task
 
 
-def _bare_unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) -> SamplingUnit:
-    """A unit declaring only the two required columns — a different column set."""
-    rows = n_frames * n_atoms
-    return SamplingUnit(
-        key=key,
-        task=task,
-        topology={"Z": torch.tensor([8] + [1] * (n_atoms - 1), dtype=torch.int16)},
-        frames={"pos": _halves(rows * 3, offset).reshape(rows, 3)},
-    )
+def _bare_unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) -> tuple:
+    """A unit carrying only geometry — a different column set."""
+    frames = [
+        frame(
+            Z=[8] + [1] * (n_atoms - 1),
+            pos=_halves(n_atoms * 3, offset + k * n_atoms * 3).reshape(n_atoms, 3).numpy(),
+        )
+        for k in range(n_frames)
+    ]
+    return frames, key, task
 
 
-def _internal_unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) -> SamplingUnit:
-    """A unit declaring the ``internal`` valence family — unroutable downstream.
-
-    ``_unpack_packed_sample`` has no ``internals`` route (``_VALENCE_PTR_KEY``
-    covers angles / propers / impropers only) and neither has ``collate_molecules``,
-    so a view that accepted such a block would drop the family silently.
-    """
-    rows = n_frames * n_atoms
-    return SamplingUnit(
-        key=key,
-        task=task,
-        topology={
-            "Z": torch.tensor([8] + [1] * (n_atoms - 1), dtype=torch.int16),
-            "internal_atomi": _i32([0]),
-            "internal_atomj": _i32([1]),
-            "internal_atomk": _i32([2]),
-            "internal_atoml": _i32([0]),
-            "internal_type": _i32([1]),
-        },
-        frames={"pos": _halves(rows * 3, offset).reshape(rows, 3)},
-    )
+def _internal_unit(key: str, task: str, n_atoms: int, n_frames: int, offset: int) -> tuple:
+    """A unit declaring an ``internals`` family the downstream view does not route."""
+    frames = [
+        frame(
+            Z=[8] + [1] * (n_atoms - 1),
+            pos=_halves(n_atoms * 3, offset + k * n_atoms * 3).reshape(n_atoms, 3).numpy(),
+            terms={
+                "internals": {
+                    "atomi": [0],
+                    "atomj": [1],
+                    "atomk": [2],
+                    "atoml": [0],
+                    "type_id": [1],
+                }
+            },
+        )
+        for k in range(n_frames)
+    ]
+    return frames, key, task
 
 
 def _write_block(
     root: Path,
-    units: Sequence[SamplingUnit],
+    units: Sequence[tuple],
     *,
     split: str = "train",
     seal: bool = True,
 ) -> Path:
     """Write *units* into *root* one unit at a time; seal unless told otherwise."""
-    writer = BlockWriter(root, split=split, provenance=_PROVENANCE)
-    for unit in units:
-        writer.append_unit(unit)
+    writer = FrameStoreWriter(root, split=split, provenance=_PROVENANCE)
+    for frames, key, task in units:
+        writer.append(frames, key=key, task=task)
     if seal:
         writer.seal()
     return root
@@ -266,8 +279,8 @@ def _names_number(message: str, roots: Sequence[Path], value: int) -> bool:
     return re.search(rf"(?<!\d){value}(?!\d)", stripped) is not None
 
 
-def _sampler(view: BlockDataset, *, seed: int = _SAMPLER_SEED) -> TaskMixtureBatchSampler:
-    """The ac-015 epoch: block-native code tables, atoms-only budget."""
+def _sampler(view: FrameStoreDataset, *, seed: int = _SAMPLER_SEED) -> TaskMixtureBatchSampler:
+    """Block-native code tables, atoms-only budget."""
     return TaskMixtureBatchSampler(
         view,
         indices=list(range(len(view))),
@@ -293,8 +306,8 @@ def roots(tmp_path: Path) -> list[Path]:
 
 
 @pytest.fixture
-def view(roots: list[Path]) -> BlockDataset:
-    return BlockDataset(roots)
+def view(roots: list[Path]) -> FrameStoreDataset:
+    return FrameStoreDataset(roots)
 
 
 @pytest.fixture
@@ -314,17 +327,17 @@ def prepared(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# BlockDataset
+# FrameStoreDataset
 # ---------------------------------------------------------------------------
 
 
-class TestBlockDataset:
-    # -- global index map (ac-001) -----------------------------------------
+class TestFrameStoreDataset:
+    # -- global index map -----------------------------------------
 
-    def test_len_is_the_total_frame_count_across_blocks(self, view: BlockDataset):
+    def test_len_is_the_total_frame_count_across_blocks(self, view: FrameStoreDataset):
         assert len(view) == _LEN
 
-    def test_locate_returns_block_ordinals_and_local_rows(self, view: BlockDataset):
+    def test_locate_returns_block_ordinals_and_local_rows(self, view: FrameStoreDataset):
         blocks, locals_ = view.locate(list(_LOCATE_FRAMES))
         assert tuple(blocks.shape) == (len(_LOCATE_FRAMES),)
         assert tuple(locals_.shape) == (len(_LOCATE_FRAMES),)
@@ -333,94 +346,94 @@ class TestBlockDataset:
         assert blocks.tolist() == list(_LOCATE_BLOCKS)
         assert locals_.tolist() == list(_LOCATE_LOCALS)
 
-    def test_locate_accepts_a_tensor_of_frames(self, view: BlockDataset):
+    def test_locate_accepts_a_tensor_of_frames(self, view: FrameStoreDataset):
         blocks, locals_ = view.locate(torch.tensor(_LOCATE_FRAMES, dtype=torch.long))
         assert blocks.tolist() == list(_LOCATE_BLOCKS)
         assert locals_.tolist() == list(_LOCATE_LOCALS)
 
-    def test_locate_of_one_frame_is_the_scalar_lookup(self, view: BlockDataset):
+    def test_locate_of_one_frame_is_the_scalar_lookup(self, view: FrameStoreDataset):
         blocks, locals_ = view.locate([12])
         assert tuple(blocks.shape) == (1,)
         assert tuple(locals_.shape) == (1,)
         assert (int(blocks[0]), int(locals_[0])) == (2, 2)
 
-    def test_locate_rejects_a_frame_beyond_the_view(self, view: BlockDataset):
+    def test_locate_rejects_a_frame_beyond_the_view(self, view: FrameStoreDataset):
         with pytest.raises((IndexError, ValueError), match="15"):
             view.locate([_LEN])
 
-    def test_locate_rejects_a_negative_frame(self, view: BlockDataset):
+    def test_locate_rejects_a_negative_frame(self, view: FrameStoreDataset):
         with pytest.raises((IndexError, ValueError), match="-1"):
             view.locate([-1])
 
     # -- surface -----------------------------------------------------------
 
-    def test_blocks_are_the_given_roots_in_order(self, view: BlockDataset, roots: list[Path]):
+    def test_blocks_are_the_given_roots_in_order(self, view: FrameStoreDataset, roots: list[Path]):
         assert list(view.blocks) == [Path(root) for root in roots]
 
-    def test_block_ids_are_the_directory_basenames(self, view: BlockDataset):
+    def test_block_ids_are_the_directory_basenames(self, view: FrameStoreDataset):
         assert view.block_ids == ("block-A", "block-B", "block-C")
 
-    def test_max_open_defaults_to_four_and_is_read_only(self, view: BlockDataset):
+    def test_max_open_defaults_to_four_and_is_read_only(self, view: FrameStoreDataset):
         assert view.max_open == 4
         with pytest.raises(AttributeError):
             view.max_open = 2  # type: ignore[misc]
 
-    def test_split_is_the_single_split_of_every_block(self, view: BlockDataset):
+    def test_split_is_the_single_split_of_every_block(self, view: FrameStoreDataset):
         assert view.split == "train"
 
-    def test_max_atoms_is_the_largest_unit_atom_count(self, view: BlockDataset):
+    def test_max_atoms_is_the_largest_unit_atom_count(self, view: FrameStoreDataset):
         assert view.max_atoms == 4
 
     def test_typed_guards_are_value_error_subclasses(self):
         # 03's scheduler branches on the type; every existing `except ValueError`
         # handler must keep working.
-        assert issubclass(BlockNotReadyError, ValueError)
-        assert issubclass(BlockSplitMismatchError, ValueError)
-        assert issubclass(BlockSchemaMismatchError, ValueError)
+        assert issubclass(FrameStoreNotReadyError, ValueError)
+        assert issubclass(FrameStoreSplitMismatchError, ValueError)
+        assert issubclass(FrameStoreSchemaMismatchError, ValueError)
 
-    # -- concatenated sampler tables (ac-004, ac-005) ----------------------
+    # -- concatenated sampler tables ----------------------
 
-    def test_atom_counts_equal_the_hand_computed_vector(self, view: BlockDataset):
+    def test_atom_counts_equal_the_hand_computed_vector(self, view: FrameStoreDataset):
         counts = view.atom_counts
         assert counts.dtype is torch.long
         assert tuple(counts.shape) == (_LEN,)
         assert torch.equal(counts, torch.tensor(_ATOM_COUNTS, dtype=torch.long))
 
-    def test_group_codes_equal_the_hand_computed_vector(self, view: BlockDataset):
+    def test_group_codes_equal_the_hand_computed_vector(self, view: FrameStoreDataset):
         codes = view.group_codes
         assert codes.dtype is torch.long
         assert tuple(codes.shape) == (_LEN,)
         assert torch.equal(codes, torch.tensor(_GROUP_CODES, dtype=torch.long))
 
-    def test_group_codes_partition_the_units_of_the_view(self, view: BlockDataset):
+    def test_group_codes_partition_the_units_of_the_view(self, view: FrameStoreDataset):
         # Injective across blocks: block b's codes are its unit rows [0, M_b),
         # offset by unit_ptr[b], so the images partition [0, total_units).
         assert set(view.group_codes.tolist()) == set(range(_TOTAL_UNITS))
 
-    def test_task_codes_equal_the_hand_computed_vector(self, view: BlockDataset):
+    def test_task_codes_equal_the_hand_computed_vector(self, view: FrameStoreDataset):
         codes = view.task_codes
         assert codes.dtype is torch.long
         assert tuple(codes.shape) == (_LEN,)
         assert torch.equal(codes, torch.tensor(_TASK_CODES, dtype=torch.long))
 
-    def test_task_names_merge_in_first_appearance_order(self, view: BlockDataset):
+    def test_task_names_merge_in_first_appearance_order(self, view: FrameStoreDataset):
         assert view.task_names == _TASK_NAMES
 
     def test_block_c_local_task_codes_are_remapped_to_global(
-        self, view: BlockDataset, roots: list[Path]
+        self, view: FrameStoreDataset, roots: list[Path]
     ):
         # A non-identity merge: an identity bug cannot pass this.
-        assert BlockReader(roots[2]).task_codes.tolist() == [0, 1, 1, 1, 1]
+        assert FrameStoreReader(roots[2]).task_codes.tolist() == [0, 1, 1, 1, 1]
         assert view.task_codes[10:].tolist() == [1, 2, 2, 2, 2]
 
-    # -- readiness guard, I8 (ac-002) --------------------------------------
+    # -- readiness guard, I8 --------------------------------------
 
     def test_missing_manifest_stalls_with_block_not_ready(self, tmp_path: Path, roots: list[Path]):
         gap = tmp_path / "block-gap"
         gap.mkdir()
         planned = [roots[0], gap, roots[1]]
-        with pytest.raises(BlockNotReadyError) as excinfo:
-            BlockDataset(planned)
+        with pytest.raises(FrameStoreNotReadyError) as excinfo:
+            FrameStoreDataset(planned)
         message = str(excinfo.value)
         assert str(gap) in message
         assert "manifest" in message
@@ -433,8 +446,8 @@ class TestBlockDataset:
             seal=False,
         )
         planned = [roots[0], roots[1], unsealed]
-        with pytest.raises(BlockNotReadyError) as excinfo:
-            BlockDataset(planned)
+        with pytest.raises(FrameStoreNotReadyError) as excinfo:
+            FrameStoreDataset(planned)
         message = str(excinfo.value)
         assert str(unsealed) in message
         assert "unsealed" in message.lower()
@@ -444,15 +457,15 @@ class TestBlockDataset:
         # POSIX mmap survives unlink, so the guard is pinned on a block that is
         # *not* resident: with max_open=1 block 0 has been evicted, and reopening
         # it must stall instead of silently shortening the epoch.
-        cold = BlockDataset(roots, max_open=1)
+        cold = FrameStoreDataset(roots, max_open=1)
         assert len(cold) == _LEN
         assert 0 not in cold.open_blocks, "block 0 must be evicted for this to be a cold read"
         shutil.rmtree(roots[0])
-        with pytest.raises(BlockNotReadyError) as excinfo:
-            cold.frame_payload([0])
+        with pytest.raises(FrameStoreNotReadyError) as excinfo:
+            cold._columns([0])
         assert str(roots[0]) in str(excinfo.value)
 
-    # -- split purity, I7 (ac-003) -----------------------------------------
+    # -- split purity, I7 -----------------------------------------
 
     def test_mixed_splits_raise_split_mismatch_naming_both_roots(
         self, tmp_path: Path, roots: list[Path]
@@ -462,8 +475,8 @@ class TestBlockDataset:
             [_unit("mol-v", "relax", 3, 2, 500)],
             split="valid",
         )
-        with pytest.raises(BlockSplitMismatchError) as excinfo:
-            BlockDataset([roots[0], valid])
+        with pytest.raises(FrameStoreSplitMismatchError) as excinfo:
+            FrameStoreDataset([roots[0], valid])
         message = str(excinfo.value)
         assert str(roots[0]) in message
         assert str(valid) in message
@@ -476,10 +489,10 @@ class TestBlockDataset:
             [_unit("mol-v", "relax", 3, 2, 500)],
             split="valid",
         )
-        assert BlockDataset(roots).split == "train"
-        assert BlockDataset([valid]).split == "valid"
+        assert FrameStoreDataset(roots).split == "train"
+        assert FrameStoreDataset([valid]).split == "valid"
 
-    # -- concatenability guards (ac-005, ac-010) ---------------------------
+    # -- concatenability guards ---------------------------
 
     def test_differing_routed_column_sets_raise_schema_mismatch(
         self, tmp_path: Path, roots: list[Path]
@@ -488,8 +501,8 @@ class TestBlockDataset:
             tmp_path / "block-bare",
             [_bare_unit("mol-w", "relax", 3, 2, 600)],
         )
-        with pytest.raises(BlockSchemaMismatchError) as excinfo:
-            BlockDataset([roots[0], bare])
+        with pytest.raises(FrameStoreSchemaMismatchError) as excinfo:
+            FrameStoreDataset([roots[0], bare])
         message = str(excinfo.value)
         assert str(bare) in message
         # the symmetric difference, named
@@ -507,8 +520,8 @@ class TestBlockDataset:
         document = json.loads(manifest_path.read_text())
         document["task_names"] = ["equilibrium"]
         manifest_path.write_text(json.dumps(document))
-        with pytest.raises(BlockSchemaMismatchError) as excinfo:
-            BlockDataset([roots[0]])
+        with pytest.raises(FrameStoreSchemaMismatchError) as excinfo:
+            FrameStoreDataset([roots[0]])
         message = str(excinfo.value)
         assert str(roots[0]) in message
         assert _names_number(message, [roots[0]], 1), message
@@ -520,51 +533,45 @@ class TestBlockDataset:
             tmp_path / "block-internal",
             [_internal_unit("mol-i", "relax", 3, 2, 700)],
         )
-        with pytest.raises(BlockSchemaMismatchError, match="internal"):
-            BlockDataset([internal])
+        with pytest.raises(FrameStoreSchemaMismatchError, match="internal"):
+            FrameStoreDataset([internal])
 
     def test_empty_roots_raise_value_error(self):
         with pytest.raises(ValueError):
-            BlockDataset([])
+            FrameStoreDataset([])
 
     def test_max_open_below_one_raises_value_error(self, roots: list[Path]):
         with pytest.raises(ValueError):
-            BlockDataset(roots, max_open=0)
+            FrameStoreDataset(roots, max_open=0)
 
-    # -- edge counts are refused, never fabricated (ac-006) ----------------
+    # -- edge counts are refused, never fabricated ----------------
 
-    def test_edge_counts_refuses_and_names_the_downstream_builder(self, view: BlockDataset):
+    def test_edge_counts_refuses_and_names_the_downstream_builder(self, view: FrameStoreDataset):
         with pytest.raises(ValueError, match="NeighborList"):
             _ = view.edge_counts
 
-    def test_token_budget_sampler_propagates_the_edge_counts_refusal(self, view: BlockDataset):
+    def test_token_budget_sampler_propagates_the_edge_counts_refusal(self, view: FrameStoreDataset):
         # The block store's ValueError must reach the caller verbatim, not be
-        # reworded into the AttributeError-derived "use BlockDataset" message.
+        # reworded into the AttributeError-derived "use FrameStoreDataset" message.
         with pytest.raises(ValueError, match="NeighborList"):
             TokenBudgetBatchSampler(view, max_edges=32)
 
-    def test_token_budget_sampler_with_an_atom_budget_only_succeeds(self, view: BlockDataset):
+    def test_token_budget_sampler_with_an_atom_budget_only_succeeds(self, view: FrameStoreDataset):
         sampler = TokenBudgetBatchSampler(view, max_atoms=_SAMPLER_MAX_ATOMS, seed=_SAMPLER_SEED)
         plan = [list(batch) for batch in sampler]
         assert sorted(index for batch in plan for index in batch) == list(range(_LEN))
 
-    # -- cross-block payload (ac-007) --------------------------------------
+    # -- cross-block payload --------------------------------------
 
-    def test_cross_block_payload_atom_ptr_is_the_caller_order_cumsum(self, view: BlockDataset):
-        payload = view.frame_payload(list(_CROSS_FRAMES))
+    def test_cross_block_payload_atom_ptr_is_the_caller_order_cumsum(self, view: FrameStoreDataset):
+        payload = view._columns(list(_CROSS_FRAMES))
         assert payload["n_samples"] == len(_CROSS_FRAMES)
         assert payload["atom_ptr"].tolist() == list(_CROSS_ATOM_PTR)
 
-    def test_cross_block_payload_matches_the_collate_oracle(self, view: BlockDataset):
-        frames = list(_CROSS_FRAMES)
-        expected = collate_molecules([view[frame] for frame in frames])
-        actual = collate_packed(PackedView(view.frame_payload(frames)), range(len(frames)))
-        _assert_td_equal(actual, expected)
-
-    def test_cross_block_batch_sizes_are_hand_computed(self, view: BlockDataset):
+    def test_cross_block_batch_sizes_are_hand_computed(self, view: FrameStoreDataset):
         # frames (12, 1, 7) -> units scan-e / mol-a / scan-c: atoms 4+3+4,
         # angles 2+1+2, propers 1+0+1; blocks carry no edges by design.
-        batch = collate_packed(PackedView(view.frame_payload(list(_CROSS_FRAMES))), range(3))
+        batch = view.batch(list(_CROSS_FRAMES))
         assert tuple(batch.batch_size) == ()
         assert tuple(batch["atoms"].batch_size) == (11,)
         assert tuple(batch["graphs"].batch_size) == (3,)
@@ -572,105 +579,99 @@ class TestBlockDataset:
         assert tuple(batch["angles"].batch_size) == (5,)
         assert tuple(batch["propers"].batch_size) == (2,)
 
-    def test_reversed_frame_list_yields_the_reversed_batch(self, view: BlockDataset):
+    def test_reversed_frame_list_yields_the_reversed_batch(self, view: FrameStoreDataset):
         frames = list(_CROSS_FRAMES)
-        forward = collate_packed(PackedView(view.frame_payload(frames)), range(3))
-        backward = collate_packed(PackedView(view.frame_payload(frames[::-1])), range(3))
-        _assert_td_equal(backward, collate_molecules([view[f] for f in frames[::-1]]))
+        forward = view.batch(frames)
+        backward = view.batch(frames[::-1])
         # equal atom counts would hide a lost order; the per-frame energies cannot
         assert torch.equal(
             backward["graphs"]["energy"], torch.flip(forward["graphs"]["energy"], (0,))
         )
 
     def test_single_block_request_returns_the_owning_reader_payload(
-        self, view: BlockDataset, roots: list[Path]
+        self, view: FrameStoreDataset, roots: list[Path]
     ):
         _assert_payload_equal(
-            view.frame_payload([5, 6, 7]),
-            BlockReader(roots[1]).frame_payload([0, 1, 2]),
+            view._columns([5, 6, 7]),
+            FrameStoreReader(roots[1])._columns([0, 1, 2]),
         )
 
-    def test_frame_payload_rejects_an_empty_frame_list(self, view: BlockDataset):
+    def test_frame_payload_rejects_an_empty_frame_list(self, view: FrameStoreDataset):
         with pytest.raises(ValueError):
-            view.frame_payload([])
+            view._columns([])
 
-    def test_frame_payload_rejects_an_out_of_range_frame(self, view: BlockDataset):
+    def test_frame_payload_rejects_an_out_of_range_frame(self, view: FrameStoreDataset):
         with pytest.raises(ValueError, match="15"):
-            view.frame_payload([0, _LEN])
+            view._columns([0, _LEN])
 
-    # -- __getitem__ is the one-frame payload unpacked (ac-009) ------------
+    # -- __getitem__ is the one-frame payload unpacked ------------
 
-    def test_getitem_agrees_with_the_packed_route_for_every_frame(self, view: BlockDataset):
-        for frame in range(_LEN):
-            expected = collate_packed(PackedView(view.frame_payload([frame])), range(1))
-            _assert_td_equal(collate_molecules([view[frame]]), expected)
+    def test_getitem_carries_the_targets_bonds_and_valence_namespaces(
+        self, view: FrameStoreDataset
+    ):
+        """One frame comes back as a one-frame batch with every namespace it owns."""
+        one = view[12]
 
-    def test_getitem_carries_the_nested_targets_bonds_and_valence_leaves(self, view: BlockDataset):
-        sample = view[12]
-        assert set(sample) == {
-            "Z",
-            "pos",
-            "targets",
-            "bond_index",
-            "bond_types",
-            "angles",
-            "propers",
-        }
-        assert set(sample["targets"]) == {"energy", "forces"}
-        assert tuple(sample["bond_index"].shape) == (2, 3)
+        assert set(one.keys()) == {"atoms", "edges", "graphs", "bonds", "angles", "propers"}
+        assert set(one["atoms"].keys()) == {"Z", "pos", "batch", "forces"}
+        assert "energy" in one["graphs"].keys()
+        assert tuple(one["bonds", "bond_index"].shape) == (2, 3)
+        assert int(one["graphs", "num_atoms"].item()) == int(one["atoms"].batch_size[0])
 
-    def test_getitem_rejects_an_index_outside_the_view(self, view: BlockDataset):
+    def test_getitem_rejects_an_index_outside_the_view(self, view: FrameStoreDataset):
         with pytest.raises((IndexError, ValueError)):
             view[_LEN]
         with pytest.raises((IndexError, ValueError)):
             view[-_LEN - 1]
 
-    # -- bounded-K reader pool (ac-008) ------------------------------------
+    # -- bounded-K reader pool ------------------------------------
 
     def test_open_blocks_never_exceed_max_open_during_a_full_sweep(self, roots: list[Path]):
-        bounded = BlockDataset(roots, max_open=1)
-        for frame in range(_LEN):
-            bounded.frame_payload([frame])
+        bounded = FrameStoreDataset(roots, max_open=1)
+        for row in range(_LEN):
+            bounded._columns([row])
             assert len(bounded.open_blocks) <= 1
 
     def test_payload_is_identical_for_max_open_one_and_eight(self, roots: list[Path]):
         frames = list(_CROSS_FRAMES)
         _assert_payload_equal(
-            BlockDataset(roots, max_open=1).frame_payload(frames),
-            BlockDataset(roots, max_open=8).frame_payload(frames),
+            FrameStoreDataset(roots, max_open=1)._columns(frames),
+            FrameStoreDataset(roots, max_open=8)._columns(frames),
         )
 
-    def test_reader_returns_the_block_reader_of_a_block_row(self, view: BlockDataset):
+    def test_reader_returns_the_block_reader_of_a_block_row(self, view: FrameStoreDataset):
         reader = view.reader(1)
-        assert isinstance(reader, BlockReader)
+        assert isinstance(reader, FrameStoreReader)
         assert reader.frame_count == 5
 
-    # -- sampler integration, unit level (ac-015) --------------------------
+    # -- sampler integration, unit level --------------------------
 
-    def test_sampler_epoch_batches_are_single_task(self, view: BlockDataset):
+    def test_sampler_epoch_batches_are_single_task(self, view: FrameStoreDataset):
         codes = view.task_codes
         for batch in _sampler(view):
             assert len(set(codes[torch.tensor(batch, dtype=torch.long)].tolist())) == 1
 
-    def test_sampler_epoch_keeps_every_group_whole(self, view: BlockDataset):
+    def test_sampler_epoch_keeps_every_group_whole(self, view: FrameStoreDataset):
         groups = view.group_codes.tolist()
         frames_of_group: dict[int, set[int]] = {}
-        for frame, group in enumerate(groups):
-            frames_of_group.setdefault(group, set()).add(frame)
+        for row, group in enumerate(groups):
+            frames_of_group.setdefault(group, set()).add(row)
         planned: list[int] = []
         for batch in _sampler(view):
             planned.extend(batch)
-            for group in {groups[frame] for frame in batch}:
+            for group in {groups[row] for row in batch}:
                 assert frames_of_group[group] <= set(batch)
         assert len(planned) == len(set(planned))
 
-    def test_sampler_epoch_is_deterministic_across_constructions(self, view: BlockDataset):
+    def test_sampler_epoch_is_deterministic_across_constructions(self, view: FrameStoreDataset):
         first = [list(batch) for batch in _sampler(view)]
         second = [list(batch) for batch in _sampler(view)]
         assert first
         assert first == second
 
-    def test_sampler_epoch_frame_totals_match_the_hand_computed_shares(self, view: BlockDataset):
+    def test_sampler_epoch_frame_totals_match_the_hand_computed_shares(
+        self, view: FrameStoreDataset
+    ):
         # relax = mol-b (3 frames) + mol-d (1) = 4; torsion = scan-c (5) +
         # scan-e (4) = 9; equilibrium is excluded by its 0.0 probability.
         assert _sampler(view).frames_per_task() == _SAMPLER_FRAMES_PER_TASK
@@ -686,7 +687,7 @@ class TestBlockDataset:
         # Discovery order is sorted by child name, not by directory-listing order
         # (the fixture writes C, B, A): one prepared directory has exactly one
         # frame index, whatever the filesystem chose to report.
-        discovered = BlockDataset.load_from_disk(prepared)
+        discovered = FrameStoreDataset.load_from_disk(prepared)
         assert discovered.block_ids == ("block-A", "block-B", "block-C")
         assert len(discovered) == _LEN
         assert discovered.split == "train"
@@ -694,18 +695,18 @@ class TestBlockDataset:
     def test_load_from_disk_equals_explicit_construction_over_the_same_roots(self, prepared: Path):
         # Same length, same tables, same first-frame bytes as the explicit
         # constructor over the same roots in sorted order.
-        explicit = BlockDataset(sorted(prepared.iterdir()))
-        discovered = BlockDataset.load_from_disk(prepared)
+        explicit = FrameStoreDataset(sorted(prepared.iterdir()))
+        discovered = FrameStoreDataset.load_from_disk(prepared)
         assert len(discovered) == len(explicit) == _LEN
         assert torch.equal(discovered.atom_counts, torch.tensor(_ATOM_COUNTS, dtype=torch.long))
         assert torch.equal(discovered.task_codes, torch.tensor(_TASK_CODES, dtype=torch.long))
         assert discovered.task_names == _TASK_NAMES
-        _assert_payload_equal(discovered.frame_payload([0]), explicit.frame_payload([0]))
+        _assert_payload_equal(discovered._columns([0]), explicit._columns([0]))
 
     def test_load_from_disk_of_a_single_sealed_root_is_a_one_block_view(self, roots: list[Path]):
         # The directory *is* the root (it carries manifest.json itself), so the
         # view holds block A alone: 5 frames, atom counts (3, 3, 4, 4, 4).
-        single = BlockDataset.load_from_disk(roots[0])
+        single = FrameStoreDataset.load_from_disk(roots[0])
         assert single.blocks == (roots[0],)
         assert single.block_ids == ("block-A",)
         assert len(single) == 5
@@ -716,7 +717,7 @@ class TestBlockDataset:
         # directory without a manifest are skipped, not refused and not indexed.
         (prepared / "README.md").write_text("written by prepare, not a block\n")
         (prepared / "scratch").mkdir()
-        discovered = BlockDataset.load_from_disk(prepared)
+        discovered = FrameStoreDataset.load_from_disk(prepared)
         assert discovered.block_ids == ("block-A", "block-B", "block-C")
         assert len(discovered) == _LEN
 
@@ -727,16 +728,16 @@ class TestBlockDataset:
         barren.mkdir()
         (barren / "notes.txt").write_text("no blocks here\n")
         with pytest.raises(ValueError) as excinfo:
-            BlockDataset.load_from_disk(barren)
+            FrameStoreDataset.load_from_disk(barren)
         message = str(excinfo.value)
         assert str(barren) in message
         assert "manifest.json" in message
 
     def test_load_from_disk_passes_max_open_through_to_the_reader_pool(self, prepared: Path):
-        bounded = BlockDataset.load_from_disk(prepared, max_open=1)
+        bounded = FrameStoreDataset.load_from_disk(prepared, max_open=1)
         assert bounded.max_open == 1
-        for frame in range(_LEN):
-            bounded.frame_payload([frame])
+        for row in range(_LEN):
+            bounded._columns([row])
             assert len(bounded.open_blocks) <= 1
 
     def test_load_from_disk_still_refuses_discovered_roots_of_mixed_splits(self, tmp_path: Path):
@@ -749,8 +750,8 @@ class TestBlockDataset:
             [_unit("mol-v", "relax", 3, 2, 500)],
             split="valid",
         )
-        with pytest.raises(BlockSplitMismatchError) as excinfo:
-            BlockDataset.load_from_disk(mixed)
+        with pytest.raises(FrameStoreSplitMismatchError) as excinfo:
+            FrameStoreDataset.load_from_disk(mixed)
         message = str(excinfo.value)
         assert "train" in message
         assert "valid" in message
@@ -767,8 +768,8 @@ class TestBlockDataset:
             [_unit("mol-u", "relax", 3, 2, 400)],
             seal=False,
         )
-        with pytest.raises(BlockNotReadyError) as excinfo:
-            BlockDataset.load_from_disk(partial)
+        with pytest.raises(FrameStoreNotReadyError) as excinfo:
+            FrameStoreDataset.load_from_disk(partial)
         message = str(excinfo.value)
         assert str(unsealed) in message
         assert "unsealed" in message.lower()
@@ -793,49 +794,18 @@ def _imported_modules(path: Path) -> list[str]:
     return imported
 
 
-def test_block_view_module_imports_no_tensordict_or_batch_symbol():
-    """ac-014: the view is IO + index algebra — stdlib + torch + molix.store only.
-
-    Same layering rule ``block.py`` states in its module docstring: batch
-    construction stays the caller's composition
-    (``collate_packed(PackedView(view.frame_payload(frames)), ...)``). Asserted
-    over parsed import statements, not raw text, so docstring prose may still
-    name ``collate_packed``.
-    """
-    imported = _imported_modules(_MODULE_PATH)
-    forbidden = [name for name in imported if "tensordict" in name or "collate" in name]
-    assert forbidden == []
-    assert [name for name in imported if name.startswith("molix.batch")] == []
-    outside_store = [
-        name
-        for name in imported
-        if name.startswith("molix.") and not name.startswith("molix.store.")
-    ]
-    assert outside_store == []
-
-
-def test_block_view_never_fabricates_a_zero_edge_count():
-    """ac-006: no ``zeros`` / ``zeros_like`` construction of an edge-count vector."""
-    offenders = [
-        line.strip()
-        for line in _MODULE_PATH.read_text().splitlines()
-        if "edge" in line.lower() and "zeros" in line
-    ]
-    assert offenders == []
-
-
-def test_block_view_symbols_are_exported_from_molix_store():
-    """ac-011: the four public symbols are importable, listed and documented."""
+def test_frame_store_view_symbols_are_exported_from_molix_store():
+    """The four public symbols are importable, listed and documented."""
     import molix.store as store
 
-    assert store.BlockDataset is BlockDataset
-    assert store.BlockNotReadyError is BlockNotReadyError
-    assert store.BlockSchemaMismatchError is BlockSchemaMismatchError
-    assert store.BlockSplitMismatchError is BlockSplitMismatchError
+    assert store.FrameStoreDataset is FrameStoreDataset
+    assert store.FrameStoreNotReadyError is FrameStoreNotReadyError
+    assert store.FrameStoreSchemaMismatchError is FrameStoreSchemaMismatchError
+    assert store.FrameStoreSplitMismatchError is FrameStoreSplitMismatchError
     exported = set(store.__all__)
     assert {
-        "BlockDataset",
-        "BlockNotReadyError",
-        "BlockSchemaMismatchError",
-        "BlockSplitMismatchError",
+        "FrameStoreDataset",
+        "FrameStoreNotReadyError",
+        "FrameStoreSchemaMismatchError",
+        "FrameStoreSplitMismatchError",
     } <= exported
