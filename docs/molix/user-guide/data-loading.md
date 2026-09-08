@@ -59,10 +59,22 @@ loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_mol
 `collate_molecules` produces a plain nested `TensorDict` whose namespaces each
 carry their own batch size:
 
-- Atom-level fields (`Z`, `pos`, `batch`) → `atoms` (batch_size=[N_total])
+- Atom-level fields (`Z`, `pos`, `batch`) → `atoms` (batch_size=[N_total]).
+  The `x`/`y`/`z`, `fx`/`fy`/`fz` and `vx`/`vy`/`vz` columns stack into
+  `atoms.pos`, `atoms.forces` and `atoms.vel`; every other atom column is
+  carried through as `atoms.<name>`.
 - Edge fields (`edge_index`, `edge_diff`, `edge_dist`) → `edges` (batch_size=[E_total])
-- Graph-level metadata (`num_atoms`) + graph targets → `graphs` (batch_size=[B])
+- Graph-level metadata (`num_atoms`) + graph targets (the frame's `meta`
+  scalars) → `graphs` (batch_size=[B]). A frame's `box` becomes
+  `graphs.cell` `(B, 3, 3)` with the lattice vectors as rows (molpy's
+  `Box.matrix` holds them as columns; the collate transposes). Either every
+  frame in a batch carries a box or none does.
 - Covalent topology (`bond_index`, `bond_types`), when present → `bonds` (batch_size=[])
+
+The batch keeps the frames' precision — a molpy `Frame` is fp64 at rest and the
+collate narrows nothing on its own. The floating dtype a pipeline wants is the
+loader's policy: `DataModule` builds each batch at its `ftype` by passing
+`collate_molecules(frames, dtype=...)`; a raw caller does the same.
 
 Read it with tuple keys: `batch["atoms", "Z"]`, `batch["edges", "edge_index"]`,
 `batch["graphs", "energy"]`.

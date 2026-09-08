@@ -21,7 +21,7 @@ This module provides three things:
        :func:`permute_graph` — the three input transforms.
     3. :func:`recompute_edge_geometry` — call inside a forward pass so
        autograd can trace ``∂E/∂pos`` for force / equivariance tests.
-    4. :func:`collate_frames`, :func:`place_edges` and the **butane**
+    4. :func:`place_edges` and the **butane**
        fixture family — one molecule's geometry and topology, and the
        two-molecule periodic box (:func:`butane_pair_frame` →
        :func:`butane_pair_batch`, with
@@ -42,12 +42,11 @@ the module they exercise (encoders in ``test_molzoo``, heads in
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
-from molpy import Frame
+from molpy import Box, Frame
 from tensordict import TensorDict
 
 from molix.batch import NeighborList, TotalCharge
@@ -62,6 +61,8 @@ def frame(
     Z,
     pos,
     forces=None,
+    vel=None,
+    box=None,
     bonds=None,
     bond_types=None,
     terms=None,
@@ -76,6 +77,10 @@ def frame(
         Z: Atomic numbers ``(N,)``.
         pos: Positions ``(N, 3)``.
         forces: Optional per-atom forces ``(N, 3)``, stored as ``fx``/``fy``/``fz``.
+        vel: Optional per-atom velocities ``(N, 3)`` Å/fs, stored as ``vx``/``vy``/``vz``.
+        box: Optional lattice ``(3, 3)`` in Å with the lattice vectors as
+            **rows** (the ``graphs.cell`` convention); stored as the frame's
+            molpy ``Box``, whose matrix holds them as columns.
         bonds: Optional ``(atomi, atomj)`` pair of index sequences.
         bond_types: Optional integer bond types, stored as ``type_id`` because
             molpy's frame schema reserves ``type`` for a string column.
@@ -93,7 +98,12 @@ def frame(
     if forces is not None:
         fxyz = np.asarray(forces, dtype=np.float64).reshape(len(z), 3)
         columns |= {"fx": fxyz[:, 0], "fy": fxyz[:, 1], "fz": fxyz[:, 2]}
+    if vel is not None:
+        vxyz = np.asarray(vel, dtype=np.float64).reshape(len(z), 3)
+        columns |= {"vx": vxyz[:, 0], "vy": vxyz[:, 1], "vz": vxyz[:, 2]}
     f["atoms"] = columns
+    if box is not None:
+        f.box = Box(np.asarray(box, dtype=np.float64).reshape(3, 3).T)
     if bonds is not None:
         block = {"atomi": np.asarray(bonds[0]), "atomj": np.asarray(bonds[1])}
         if bond_types is not None:
@@ -102,73 +112,6 @@ def frame(
     for name, block in (terms or {}).items():
         f[name] = {col: np.asarray(values) for col, values in block.items()}
     return f
-
-
-def collate_frames(
-    frames: Sequence[Frame],
-    *,
-    cell: torch.Tensor | None = None,
-    dtype: torch.dtype = torch.float64,
-) -> TensorDict:
-    """The batch a list of molpy ``Frame`` objects collates to, at *dtype*.
-
-    :func:`~molix.batch.collate.collate_molecules` is the only Frame → batch
-    conversion in molnex, so a fixture that builds a system from scratch builds
-    ``Frame``s and comes through here. Two things that conversion cannot carry
-    yet are repaired on the way out, each named where it is:
-
-    * **F35** — the collate never reads ``frame.box``, so a periodic system has
-      no ``graphs.cell``; *cell* is written after collate as the ``(B, 3, 3)``
-      leaf the ``graphs`` namespace's batch size demands.
-    * **F36** (opened here) — the collate writes every float column at
-      ``float32``, while the classical / MD stack this feeds is fp64. So the
-      frames' fp64 ``x``/``y``/``z`` and per-atom float columns are **re-read**
-      here rather than cast. A cast is not the same thing and is not enough:
-      ``batch_to(collate_molecules([butane_pair_frame()]), dtype=torch.float64)``
-      keeps float32's rounding of the geometry, which prices the butane-pair
-      box at ``54.230056959711774`` against its ``54.230060241979125`` golden
-      (3.3e-6 kcal/mol) and leaves the translation gate 9.6e-6 off its own
-      answer — five orders past the 1e-10 that gate holds. Only the frame's own
-      fp64 column reproduces the box. ``graphs`` leaves are left exactly as the
-      collate wrote them — a declared ``total_charge`` is data, and what dtype
-      it arrives in is what :class:`~molix.batch.TotalCharge` exists to
-      normalise.
-
-    The same repair is spelled three more times where ``tests/`` is not on the
-    import path — ``interface/tests/parity_classical.py`` (``_fp64_atom_columns``),
-    ``benchmarks/verify_md_lj_nve.py`` and ``benchmarks/verify_md_ljcut_nve.py``
-    (their batch builders). All four collapse into ``collate_molecules`` once it
-    carries ``frame.box`` and the frame's precision (or takes ``dtype=``).
-
-    Args:
-        frames: The molpy ``Frame`` objects, in batch order.
-        cell: Optional lattice ``(3, 3)`` in Å, rows being the lattice vectors.
-            Broadcast to one cell per graph.
-        dtype: Floating dtype of ``atoms.pos`` and every per-atom float column
-            — the batch's float dtype.
-
-    Returns:
-        The collated batch.
-    """
-    batch = collate_molecules(frames)
-
-    def column(name: str) -> torch.Tensor:
-        values = [np.asarray(frame["atoms"][name], dtype=np.float64) for frame in frames]
-        return torch.tensor(np.concatenate(values), dtype=dtype)
-
-    batch["atoms", "pos"] = torch.stack([column(axis) for axis in ("x", "y", "z")], dim=-1)
-    for name in list(batch["atoms"].keys()):
-        leaf = batch["atoms", name]
-        if name == "pos" or not isinstance(leaf, torch.Tensor) or not leaf.is_floating_point():
-            continue
-        # A leaf the collate *stacked* (``forces`` from ``fx``/``fy``/``fz``)
-        # has no column of its own to re-read, so it is cast.
-        named = all(name in frame["atoms"].keys() for frame in frames)
-        batch["atoms", name] = column(name) if named else leaf.to(dtype)
-    if cell is not None:
-        n_graphs = int(batch["graphs"].batch_size[0])
-        batch["graphs", "cell"] = cell.to(dtype).reshape(1, 3, 3).expand(n_graphs, 3, 3).clone()
-    return batch
 
 
 def make_graph_batch(
@@ -769,8 +712,9 @@ def butane_pair_frame(positions: torch.Tensor | None = None) -> "Frame":
     :data:`BUTANE_N_ATOMS` — which is exactly what
     :func:`butane_pair_topology` builds.
 
-    ``mass`` rides as a per-atom column and the declared ``total_charge``
-    as a ``meta`` scalar, so both are frame data rather than something a
+    ``mass`` rides as a per-atom column, the lattice as the frame's box, a
+    zero velocity as ``vx``/``vy``/``vz`` and the declared ``total_charge`` as
+    a ``meta`` scalar, so all of them are frame data rather than something a
     fixture bolts onto the batch afterwards.
 
     Args:
@@ -786,6 +730,8 @@ def butane_pair_frame(positions: torch.Tensor | None = None) -> "Frame":
     built = frame(
         Z=numbers,
         pos=pos.detach().cpu().double().numpy(),
+        vel=np.zeros((len(numbers), 3)),
+        box=np.eye(3) * BUTANE_PAIR_BOX,
         bonds=(
             [row[0] for row in topology["bonds"]],
             [row[1] for row in topology["bonds"]],
@@ -808,11 +754,10 @@ def butane_pair_batch(positions: torch.Tensor | None = None) -> TensorDict:
     """The pair's post-collate batch: atoms, topology, lattice and placed list.
 
     Built the way data reaches a model: :func:`butane_pair_frame` is the system
-    at rest and :func:`collate_frames` (i.e. ``collate_molecules``) is the only
-    conversion — the topology columns, the atomic numbers, the masses and the
-    declared total charge are all the frame's, none of them assembled here as
-    tensors. What the collate cannot carry yet is repaired by
-    :func:`collate_frames` and named there (**F35** cell, **F36** fp64).
+    at rest and ``collate_molecules`` is the only conversion — the topology
+    columns, the atomic numbers, the masses, the lattice, the velocities and
+    the declared total charge are all the frame's, none of them assembled here
+    as tensors, and the batch keeps the frame's fp64.
 
     One graph, not two: the box is one periodic system (see
     :func:`butane_pair_frame`), so ``atoms.batch`` is all zeros and
@@ -840,15 +785,7 @@ def butane_pair_batch(positions: torch.Tensor | None = None) -> TensorDict:
         The batch, with ``edges`` placed at :data:`BUTANE_PAIR_LIST_CUTOFF`
         under the minimum-image convention.
     """
-    batch = collate_frames(
-        [butane_pair_frame(positions)],
-        cell=torch.eye(3, dtype=torch.float64) * BUTANE_PAIR_BOX,
-    )
-    # ``vel`` is the one MD column the collate has no route for: it stacks
-    # ``fx``/``fy``/``fz`` into ``atoms.forces`` and carries every other column
-    # scalar-wise, so a per-atom *vector* that is not ``pos`` or ``forces``
-    # cannot be spelled in a frame (F36's neighbour, same peer-held file).
-    batch["atoms", "vel"] = torch.zeros_like(batch["atoms", "pos"])
+    batch = collate_molecules([butane_pair_frame(positions)])
     neighbors = butane_pair_class_i_forcefield().neighbor_list(pbc=True)
     neighbors.execute(batch)
     TotalCharge().execute(batch)

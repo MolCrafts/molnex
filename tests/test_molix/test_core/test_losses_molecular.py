@@ -23,7 +23,12 @@ from tests.conftest import frame
 
 
 def _sample(Z, pos, *, U0=None, forces=None):
-    """One molpy ``Frame``; ``U0`` becomes a graph leaf, forces a per-atom leaf."""
+    """One molpy ``Frame``; ``U0`` becomes a graph leaf, forces a per-atom leaf.
+
+    The batches below are collated at fp32 — the dtype a ``DataModule`` serves
+    a model at — so the fp32 predictions the tests hand the losses meet targets
+    of the same dtype, as they do in a pipeline.
+    """
     meta = {} if U0 is None else {"U0": float(U0)}
     return frame(Z=Z, pos=pos, forces=forces, **meta)
 
@@ -34,7 +39,7 @@ class TestEnergyMSE:
             _sample([1, 6], [[0, 0, 0], [1, 0, 0]], U0=1.0),
             _sample([6, 8], [[0, 0, 0], [1.2, 0, 0]], U0=2.5),
         ]
-        batch = collate_molecules(samples)
+        batch = collate_molecules(samples, dtype=torch.float32)
         preds = {"energy": torch.tensor([0.8, 2.7])}
 
         loss_fn = energy_mse("U0")
@@ -50,7 +55,7 @@ class TestEnergyMSE:
             _sample([1], [[0, 0, 0]], U0=1.0),
             _sample([6], [[0, 0, 0]], U0=3.0),
         ]
-        batch = collate_molecules(samples)
+        batch = collate_molecules(samples, dtype=torch.float32)
         preds = {"energy": torch.tensor([1.5, 2.5])}
 
         loss_fn = energy_mse("U0", reduction="none")
@@ -59,7 +64,7 @@ class TestEnergyMSE:
         assert torch.allclose(got, torch.tensor([0.25, 0.25]))
 
     def test_custom_pred_key(self):
-        batch = collate_molecules([_sample([1], [[0, 0, 0]], U0=2.0)])
+        batch = collate_molecules([_sample([1], [[0, 0, 0]], U0=2.0)], dtype=torch.float32)
         preds = {"E_pred": torch.tensor([1.0])}
         loss_fn = energy_mse("U0", pred_key="E_pred")
         assert torch.allclose(loss_fn(preds, batch), torch.tensor(1.0))
@@ -73,7 +78,7 @@ class TestEnergyForceMSE:
             _sample([1, 6], [[0, 0, 0], [1, 0, 0]], U0=1.0, forces=forces_a),
             _sample([6, 8], [[0, 0, 0], [1.2, 0, 0]], U0=2.0, forces=forces_b),
         ]
-        batch = collate_molecules(samples)
+        batch = collate_molecules(samples, dtype=torch.float32)
 
         preds = {
             "energy": torch.tensor([0.5, 2.5]),
@@ -97,7 +102,7 @@ class TestEnergyForceMSE:
     def test_lambda_zero_matches_energy_only(self):
         forces = torch.zeros(1, 3)
         samples = [_sample([1], [[0, 0, 0]], U0=1.0, forces=forces)]
-        batch = collate_molecules(samples)
+        batch = collate_molecules(samples, dtype=torch.float32)
 
         preds = {
             "energy": torch.tensor([2.0]),

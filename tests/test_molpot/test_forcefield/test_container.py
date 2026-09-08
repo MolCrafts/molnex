@@ -11,14 +11,13 @@ from molpy import ForceField as MolpyForceField
 from tensordict import TensorDict
 from torch import nn
 
-from molix.batch import NeighborList, TensorFrame
+from molix.batch import NeighborList, TensorFrame, collate_molecules
 from molpot.forcefield import ForceField, OPLSAAForceField, TypeAssignment
 from molpot.ir import ExclusionScales, NonbondedScaling
 from molpot.manifest import ModelManifest, NumericsRecord, ParamTableRecord
 from tests.conftest import (
     BUTANE_PAIR_LIST_CUTOFF,
     butane_pair_class_i_forcefield,
-    collate_frames,
     frame,
 )
 
@@ -51,7 +50,7 @@ def _line_of_atoms(n_atoms: int, bonds: list[tuple[int, int]] | None = None) -> 
         pos=[[1.53 * i, 0.0, 0.0] for i in range(n_atoms)],
         bonds=None if not bonds else ([b[0] for b in bonds], [b[1] for b in bonds]),
     )
-    return collate_frames([built])
+    return collate_molecules([built])
 
 
 def _water_ion_box() -> tuple[ForceField, TensorDict, torch.Tensor]:
@@ -94,7 +93,7 @@ def _water_ion_box() -> tuple[ForceField, TensorDict, torch.Tensor]:
         for molecule in range(2)
     ]
     ions = [frame(Z=(numbers[label],), pos=[xyz[6 + ion]]) for ion, label in enumerate(labels[6:])]
-    system = collate_frames([*waters, *ions])
+    system = collate_molecules([*waters, *ions])
     ff = (
         ForceField(name="water-ion", units="real")
         .def_atomstyle("full")

@@ -538,9 +538,12 @@ class _CollateFn:
     """
 
     def __init__(self, batch_tasks: Sequence[BatchTask]) -> None:
-        self.collator = MoleculeCollator()
-        self.batch_tasks = batch_tasks
         self.ftype = config["ftype"]
+        # Built at ``ftype`` directly: a frame is fp64 at rest, and building the
+        # batch at the pipeline's precision is what the collate's ``dtype`` is
+        # for. The ``batch_to`` below then covers what the tasks add.
+        self.collator = MoleculeCollator(dtype=self.ftype)
+        self.batch_tasks = batch_tasks
 
     def __call__(self, samples: list[dict]) -> dict:
         batch = self.collator(samples)

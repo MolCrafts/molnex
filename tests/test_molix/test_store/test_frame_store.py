@@ -710,7 +710,9 @@ class TestFrameStoreReader:
         """
         frames = [7, 0, 3]
         samples = unit_samples(units)
-        expected = collate_molecules([samples[f] for f in frames])
+        # A store holds fp32 columns, so the reader answers at fp32; the collate
+        # keeps the frames' fp64 unless asked for the store's precision.
+        expected = collate_molecules([samples[f] for f in frames], dtype=torch.float32)
         actual = reader.batch(frames)
         for namespace in ("angles", "propers"):
             for leaf in ("type", "type_id"):

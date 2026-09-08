@@ -124,7 +124,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_ROOT / "src"))
 
-from molpy import Frame
+from molpy import Box, Frame
 
 from molix.batch import TotalCharge
 from molix.batch.collate import collate_molecules
@@ -237,47 +237,6 @@ BUTANE_XYZ = np.array(
 )
 
 
-def _fp64_atom_columns(batch: TensorDict, frames: list[Frame], dtype: torch.dtype) -> None:
-    """Re-read the frames' own fp64 ``atoms`` columns onto the collated batch.
-
-    **F36** — :func:`~molix.batch.collate.collate_molecules` writes every float
-    column at ``float32``, while this tool's whole comparison is fp64: it prices
-    a deck against LAMMPS at ``rel 1e-6`` and pins its own side at ``1e-10``.
-    Casting the collated ``float32`` up would keep single precision's rounding of
-    the geometry — some four orders above the golden gate — so the frames' own
-    ``x`` / ``y`` / ``z`` and per-atom float columns are **re-read** here, not
-    cast. ``graphs`` leaves are left exactly as the collate wrote them: a
-    declared ``total_charge`` is data, and normalising its dtype is what
-    :class:`~molix.batch.TotalCharge` is for.
-
-    The same repair is spelled in ``tests/conftest.py`` (``collate_frames``, the
-    owner the unit gates read), ``benchmarks/verify_md_lj_nve.py`` and
-    ``benchmarks/verify_md_ljcut_nve.py``; this tool cannot import ``tests/``.
-    All four collapse into ``collate_molecules`` once it carries ``frame.box``
-    and the frame's precision (or takes ``dtype=``).
-
-    Args:
-        batch: The batch ``collate_molecules(frames)`` returned, mutated here.
-        frames: The frames it was collated from, in batch order.
-        dtype: The floating dtype the batch is priced in.
-    """
-
-    def column(name: str) -> torch.Tensor:
-        values = [np.asarray(frame["atoms"][name], dtype=np.float64) for frame in frames]
-        return torch.tensor(np.concatenate(values), dtype=dtype)
-
-    # F36: collate_molecules narrows to float32.
-    batch["atoms", "pos"] = torch.stack([column(axis) for axis in ("x", "y", "z")], dim=-1)
-    for name in list(batch["atoms"].keys()):
-        leaf = batch["atoms", name]
-        if name == "pos" or not isinstance(leaf, torch.Tensor) or not leaf.is_floating_point():
-            continue
-        # F36: collate_molecules narrows to float32. A leaf the collate
-        # *stacked* (``forces``) has no column of its own to re-read.
-        named = all(name in frame["atoms"].keys() for frame in frames)
-        batch["atoms", name] = column(name) if named else leaf.to(dtype)
-
-
 def butane_frame() -> Frame:
     """The butane-like C4 chain as one molpy ``Frame`` — this case's data at rest.
 
@@ -328,9 +287,8 @@ def butane_batch(dtype: torch.dtype = torch.float64) -> TensorDict:
     field with no pair style, which is the right answer here. The collate's
     empty ``edges`` namespace is left as it comes, unread.
 
-    **F36** — the collate writes every float column at ``float32``, so the
-    frame's own fp64 columns are re-read (:func:`_fp64_atom_columns`). **F35**
-    has nothing to repair: this case is open-boundary and carries no lattice.
+    Open-boundary: the frame carries no box, so the batch carries no
+    ``graphs.cell``. The batch is built at *dtype* by the collate itself.
 
     Args:
         dtype: Floating dtype the batch is priced in.
@@ -338,9 +296,7 @@ def butane_batch(dtype: torch.dtype = torch.float64) -> TensorDict:
     Returns:
         The batch.
     """
-    frames = [butane_frame()]
-    batch = collate_molecules(frames)
-    _fp64_atom_columns(batch, frames, dtype)
+    batch = collate_molecules([butane_frame()], dtype=dtype)
     # The frame declared its net charge; this only normalises the dtype the
     # collate wrote it in — no fixture states a charge the data does not have.
     TotalCharge().execute(batch)
@@ -611,6 +567,10 @@ def water_ion_frame() -> Frame:
     """
     labels, xyz, bonds, angles = water_ion_geometry()
     frame = Frame(meta={"total_charge": 0.0})
+    # The lattice is the frame's own: molpy holds the lattice vectors as the
+    # columns of ``Box.matrix`` and the collate transposes them into the rows
+    # of ``graphs.cell``.
+    frame.box = Box(np.eye(3) * BOX_A)
     frame["atoms"] = {
         "number": np.array([SPECIES[t][4] for t in labels], dtype=np.int64),
         "x": np.ascontiguousarray(xyz[:, 0]),
@@ -637,11 +597,6 @@ def water_ion_batch(dtype: torch.dtype = torch.float64) -> TensorDict:
     """The periodic batch: :func:`water_ion_frame` through the real collate, plus the list.
 
     Two things the collate cannot carry yet are repaired on the way out, each
-    named where it is: **F35** — it never reads ``frame.box``, so the lattice is
-    written here as the ``(B, 3, 3)`` leaf the ``graphs`` namespace demands — and
-    **F36** — it narrows every float column to ``float32``
-    (:func:`_fp64_atom_columns`).
-
     The list is placed by :meth:`~molpot.forcefield.ForceField.neighbor_list`,
     so its radius is the field's own (finding **F21**) rather than a number this
     builder picks; ``symmetry=True`` is that method's, and it is load-bearing —
@@ -657,12 +612,7 @@ def water_ion_batch(dtype: torch.dtype = torch.float64) -> TensorDict:
         The batch, with ``edges`` placed at the field's radius under the
         minimum-image convention.
     """
-    frames = [water_ion_frame()]
-    batch = collate_molecules(frames)
-    _fp64_atom_columns(batch, frames, dtype)
-    # F35: collate_molecules does not read frame.box, so the lattice has no
-    # Frame-native route to graphs.cell yet and is written here.
-    batch["graphs", "cell"] = (torch.eye(3, dtype=dtype) * BOX_A).unsqueeze(0)
+    batch = collate_molecules([water_ion_frame()], dtype=dtype)
     # The frame declared its net charge; this only normalises the dtype.
     TotalCharge().execute(batch)
     neighbors = water_ion_ff(batch, dtype=dtype).neighbor_list(pbc=True)

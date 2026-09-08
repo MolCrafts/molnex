@@ -93,6 +93,11 @@ switch and the case it deliberately refuses.
 
 ## Minimal Custom DataModule
 
+`collate_molecules` keeps the frames' precision (fp64 at rest); a module that
+wants its batches at another dtype hands the loader
+`MoleculeCollator(dtype=torch.float32)` instead — that is what `DataModule`
+does with its `ftype`.
+
 ```python
 from torch.utils.data import DataLoader
 from molix.batch.collate import collate_molecules

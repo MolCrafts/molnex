@@ -1,24 +1,24 @@
 """Graph-aware collation producing nested TensorDict batches.
 
-Collates a list of single-molecule sample dicts into a nested
-``TensorDict`` with per-level batch sizes: atoms (N), edges (E), graphs (B).
+Collates a list of molpy ``Frame`` objects into a nested ``TensorDict`` with
+per-level batch sizes: atoms (N), edges (E), graphs (B). A frame's ``box``
+becomes ``graphs.cell``, its float columns keep their precision unless a
+``dtype`` is asked for, and its ``x``/``y``/``z``, ``fx``/``fy``/``fz`` and
+``vx``/``vy``/``vz`` triples stack into ``atoms.pos`` / ``forces`` / ``vel``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import torch
 from tensordict import TensorDict
 
-if TYPE_CHECKING:
-    pass
-
 # ---------------------------------------------------------------------------
-# Target schema
+# Collator
 # ---------------------------------------------------------------------------
 
 
@@ -28,12 +28,20 @@ class MoleculeCollator:
 
     The emitted :class:`TensorDict` has globally rebased connectivity,
     ``atoms.batch`` graph membership, a ``graphs`` namespace, and packed
-    bond/angle/proper/improper namespaces. Stateless: where a column sits in
-    the frame decides where it lands, so there is nothing to configure.
+    bond/angle/proper/improper namespaces. Where a column sits in the frame
+    decides where it lands; the one thing to configure is the floating dtype
+    the batch is built in.
+
+    Args:
+        dtype: Floating dtype every float leaf is built in, or ``None`` to
+            keep each frame column's own precision (see
+            :func:`collate_molecules`).
     """
 
+    dtype: torch.dtype | None = None
+
     def __call__(self, samples: Sequence[Any]) -> TensorDict:
-        return collate_molecules(samples)
+        return collate_molecules(samples, dtype=self.dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -66,10 +74,17 @@ _VALENCE_REQUIRED: dict[str, tuple[str, ...]] = {
     "impropers": ("atomi", "atomj", "atomk", "atoml"),
 }
 _VALENCE_OPTIONAL: tuple[str, ...] = ("type",)
-#: Frame ``atoms`` columns that become structure, not a per-atom leaf.
-_XYZ = ("x", "y", "z")
-_FORCES = ("fx", "fy", "fz")
-_ATOM_STRUCTURAL = frozenset({"number", *_XYZ, *_FORCES})
+#: Per-atom *vector* leaves and the three frame columns each is stacked from.
+#: ``pos`` is required; the others are carried when every frame has all three
+#: components. A per-atom vector has no other spelling in a frame, so a new one
+#: is a new row here and nothing else.
+_VECTORS: dict[str, tuple[str, str, str]] = {
+    "pos": ("x", "y", "z"),
+    "forces": ("fx", "fy", "fz"),
+    "vel": ("vx", "vy", "vz"),
+}
+#: Frame ``atoms`` columns that become structure, not a per-atom scalar leaf.
+_ATOM_STRUCTURAL = frozenset({"number", *(c for cols in _VECTORS.values() for c in cols)})
 
 _ATOM_INDEX_COLS: frozenset[str] = frozenset({"atomi", "atomj", "atomk", "atoml"})
 
@@ -101,25 +116,44 @@ def rebase(tensor: torch.Tensor, offset: int | torch.Tensor, key: str) -> torch.
 # ---------------------------------------------------------------------------
 
 
-def _meta_scalar(value: Any) -> torch.Tensor:
+def _column(values: Any, dtype: torch.dtype | None) -> torch.Tensor:
+    """One frame column as a tensor: integers stay integral, floats keep or take *dtype*.
+
+    Args:
+        values: The column, anything ``np.asarray`` accepts.
+        dtype: Floating dtype to build a float column in, or ``None`` to keep
+            the column's own (a molpy ``Frame`` holds float columns at fp64).
+
+    Returns:
+        The column as a 1-D tensor.
+    """
+    tensor = torch.as_tensor(np.asarray(values))
+    if dtype is not None and tensor.is_floating_point():
+        return tensor.to(dtype)
+    return tensor
+
+
+def _meta_scalar(value: Any, dtype: torch.dtype | None) -> torch.Tensor:
     """One frame ``meta`` scalar as a 1-element tensor, keeping integers integral.
 
     Args:
         value: The unwrapped meta value (``bool`` / ``int`` / ``float`` / any
             object with ``__int__`` or ``__float__``).
+        dtype: Floating dtype for a float scalar, or ``None`` for ``float64`` —
+            a Python float is a double, and a frame at rest is fp64.
 
     Returns:
-        ``(1,)`` tensor — ``torch.long`` for an integral value, otherwise
-        ``torch.float32``.
+        ``(1,)`` tensor — ``torch.long`` for an integral value, otherwise a
+        float at *dtype*.
     """
     if isinstance(value, bool):
         return torch.as_tensor([int(value)], dtype=torch.long)
     if isinstance(value, (int, np.integer)):
         return torch.as_tensor([int(value)], dtype=torch.long)
-    return torch.as_tensor([float(value)], dtype=torch.float32)
+    return torch.as_tensor([float(value)], dtype=dtype or torch.float64)
 
 
-def collate_molecules(frames: Sequence[Any]) -> TensorDict:
+def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None) -> TensorDict:
     """Collate molpy ``Frame`` objects into the batch ``TensorDict`` the model reads.
 
     A ``Frame`` is the unit of data at rest and a ``TensorDict`` is the unit the
@@ -128,9 +162,14 @@ def collate_molecules(frames: Sequence[Any]) -> TensorDict:
     new target is a new frame column and nothing else.
 
     * ``atoms`` block — ``number`` becomes ``atoms.Z`` and ``x``/``y``/``z``
-      become ``atoms.pos``; ``fx``/``fy``/``fz`` stack into ``atoms.forces``;
-      every remaining column is carried through as ``atoms.<name>``.
+      become ``atoms.pos``; ``fx``/``fy``/``fz`` stack into ``atoms.forces`` and
+      ``vx``/``vy``/``vz`` into ``atoms.vel`` (:data:`_VECTORS`); every
+      remaining column is carried through as ``atoms.<name>``.
     * ``meta`` — every scalar becomes a per-graph leaf ``graphs.<name>``.
+    * ``box`` — a frame's lattice becomes ``graphs.cell`` ``(B, 3, 3)`` with the
+      lattice vectors as **rows** (the convention every reader of ``graphs.cell``
+      uses: ``fractional @ cell``); molpy's ``Box.matrix`` holds them as columns
+      and is transposed here. Either every frame carries a box or none does.
     * ``bonds`` block — ``atomi``/``atomj`` become the COO ``bonds.bond_index``
       (rebased into batch space), ``type`` becomes ``bonds.bond_types``.
     * any further block whose columns are ``atomi``…``atoml`` (``angles`` /
@@ -141,8 +180,20 @@ def collate_molecules(frames: Sequence[Any]) -> TensorDict:
     a cutoff, not frame content, so it is built downstream by
     :class:`~molix.batch.neighbor.NeighborList`.
 
+    **Precision is the frame's.** A molpy ``Frame`` holds its float columns at
+    fp64, and by default that is what the batch carries — the collate narrows
+    nothing on its own, because a caller that prices a golden at 1e-10 cannot
+    cast single precision's rounding of the geometry back out. The floating
+    dtype a *pipeline* wants is a policy of the loader that serves it:
+    :class:`~molix.batch.datamodule.DataModule` passes its ``ftype`` as
+    *dtype*, and every float leaf (columns, stacked vectors, meta scalars, the
+    cell) is then built at that dtype directly. Integer columns are never
+    touched either way.
+
     Args:
         frames: Frames, or sequences of frames, in batch order.
+        dtype: Floating dtype to build every float leaf in, or ``None`` to
+            keep each column's own precision.
 
     Returns:
         Nested ``TensorDict`` with ``atoms``, ``edges``, ``graphs`` and any
@@ -150,7 +201,8 @@ def collate_molecules(frames: Sequence[Any]) -> TensorDict:
         frames carry.
 
     Raises:
-        ValueError: *frames* is empty.
+        ValueError: *frames* is empty, or some frames carry a ``box`` and
+            others do not — a batch is heterogeneous in size, never in schema.
         KeyError: A frame has no ``atoms`` block.
     """
     flat: list[Any] = []
@@ -168,6 +220,8 @@ def collate_molecules(frames: Sequence[Any]) -> TensorDict:
     num_atoms: list[int] = []
     atom_extras: dict[str, list[torch.Tensor]] = {}
     graph_leaves: dict[str, list[torch.Tensor]] = {}
+    cells: list[torch.Tensor] = []
+    boxless: list[int] = []
     bond_index: list[torch.Tensor] = []
     bond_types: list[torch.Tensor] = []
     terms: dict[str, dict[str, list[torch.Tensor]]] = {}
@@ -179,31 +233,31 @@ def collate_molecules(frames: Sequence[Any]) -> TensorDict:
         atoms = frame["atoms"]
         z = torch.as_tensor(np.asarray(atoms["number"]), dtype=torch.long)
         n_atoms = int(z.shape[0])
-        pos = torch.stack(
-            [torch.as_tensor(np.asarray(atoms[axis]), dtype=torch.float32) for axis in _XYZ],
-            dim=-1,
-        )
+        columns = set(atoms.keys())
+        pos = torch.stack([_column(atoms[axis], dtype) for axis in _VECTORS["pos"]], dim=-1)
         z_all.append(z)
         pos_all.append(pos)
         batch_all.append(torch.full((n_atoms,), graph_idx, dtype=torch.long))
         num_atoms.append(n_atoms)
 
-        if all(axis in atoms.keys() for axis in _FORCES):
-            atom_extras.setdefault("forces", []).append(
-                torch.stack(
-                    [
-                        torch.as_tensor(np.asarray(atoms[axis]), dtype=torch.float32)
-                        for axis in _FORCES
-                    ],
-                    dim=-1,
+        for name, components in _VECTORS.items():
+            if name != "pos" and all(axis in columns for axis in components):
+                atom_extras.setdefault(name, []).append(
+                    torch.stack([_column(atoms[axis], dtype) for axis in components], dim=-1)
                 )
-            )
-        for name in sorted(atoms.keys()):
+        for name in sorted(columns):
             if name in _ATOM_STRUCTURAL:
                 continue
-            atom_extras.setdefault(name, []).append(
-                torch.as_tensor(np.asarray(atoms[name]), dtype=torch.float32)
-            )
+            atom_extras.setdefault(name, []).append(_column(atoms[name], dtype))
+
+        box = getattr(frame, "box", None)
+        if box is None:
+            boxless.append(graph_idx)
+        else:
+            # molpy holds the lattice vectors as the columns of ``Box.matrix``;
+            # ``graphs.cell`` holds them as rows.
+            matrix = np.asarray(box.matrix, dtype=np.float64).T
+            cells.append(_column(matrix, dtype).reshape(3, 3))
 
         for name, raw in (getattr(frame, "meta", None) or {}).items():
             # molrs >= 0.14 wraps meta entries in MetaValue; .value unwraps.
@@ -214,7 +268,7 @@ def collate_molecules(frames: Sequence[Any]) -> TensorDict:
             # matters: ``TaskRouter`` refuses a floating label rather than
             # truncate one silently, so casting every meta scalar to float here
             # would break multi-task routing for every frame-fed batch.
-            leaf = _meta_scalar(value)
+            leaf = _meta_scalar(value, dtype)
             graph_leaves.setdefault(name, []).append(leaf)
 
         if "bonds" in frame:
@@ -264,6 +318,13 @@ def collate_molecules(frames: Sequence[Any]) -> TensorDict:
     for name, values in graph_leaves.items():
         if len(values) == len(flat):
             graphs_dict[name] = torch.cat(values)
+    if cells and boxless:
+        raise ValueError(
+            f"{len(cells)} of {len(flat)} frames carry a box and frames {boxless} do not; a batch "
+            "is heterogeneous in size, never in schema — give every frame a box or none"
+        )
+    if cells:
+        graphs_dict["cell"] = torch.stack(cells)
 
     out = TensorDict(
         atoms=TensorDict(atoms_dict, batch_size=[int(atoms_dict["Z"].shape[0])]),
@@ -289,10 +350,3 @@ def collate_molecules(frames: Sequence[Any]) -> TensorDict:
         columns = {col: torch.cat(values) for col, values in bucket.items()}
         out[name] = TensorDict(columns, batch_size=[int(next(iter(columns.values())).shape[0])])
     return out
-
-
-# ---------------------------------------------------------------------------
-# Packed-aware fast path
-# ---------------------------------------------------------------------------
-
-_TARGET_PREFIX = "targets."

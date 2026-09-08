@@ -328,7 +328,7 @@ TensorDict (batch_size=[])
 │   └── shifts: periodic remainders (E, 3)  [optional]  # pos[t]-pos[s]+shift = min-image vector, Å
 └── "graphs": TensorDict (batch_size=[B])  [optional]
     ├── num_atoms: (B,)
-    ├── cell: cell vectors (B, 3, 3)  [optional]  # Å; read by the sonata stress path
+    ├── cell: cell vectors (B, 3, 3)  [optional]  # Å; rows = lattice vectors, from frame.box
     └── <targets>
 ```
 

@@ -1,3 +1,5 @@
+import numpy as np
+import pytest
 import torch
 from tensordict import TensorDict
 
@@ -28,7 +30,8 @@ def test_collate_basic_fields_and_offsets():
     # Frames carry no neighbour graph: NeighborList builds it on the batch.
     assert batch["edges", "edge_index"].shape == (0, 2)
 
-    assert torch.allclose(batch["graphs", "U0"], torch.tensor([1.5, 2.5]))
+    # The frames are fp64 at rest and the collate keeps that precision.
+    assert torch.allclose(batch["graphs", "U0"], torch.tensor([1.5, 2.5], dtype=torch.float64))
 
 
 def test_molecule_collator_is_reusable_callable():
@@ -92,3 +95,90 @@ def test_integer_meta_scalars_stay_integral():
     assert not batch["graphs", "task"].is_floating_point()
     assert batch["graphs", "task"].tolist() == [3, 3]
     assert batch["graphs", "energy"].is_floating_point()
+
+
+def test_a_frame_box_becomes_graphs_cell_with_the_lattice_vectors_as_rows():
+    """``frame.box`` → ``graphs.cell (B, 3, 3)``, rows = lattice vectors, at the frame's precision.
+
+    molpy's ``Box.matrix`` holds the lattice vectors as *columns*; every
+    reader of ``graphs.cell`` (the MD list, the periodic pair terms) computes
+    ``fractional @ cell``, so the collate transposes. A triclinic box is the
+    only geometry that can tell the two apart.
+    """
+    from molpy import Box
+
+    box = Box.from_lengths_angles(np.array([10.0, 12.0, 14.0]), np.array([90.0, 90.0, 60.0]))
+    rows = np.asarray(box.matrix).T  # the helper takes rows and rebuilds the same Box
+    batch = collate_molecules(
+        [
+            frame(Z=[1, 8], pos=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], box=rows),
+            frame(Z=[6], pos=[[2.0, 2.0, 2.0]], box=rows),
+        ]
+    )
+
+    cell = batch["graphs", "cell"]
+    assert cell.shape == (2, 3, 3)
+    assert cell.dtype is torch.float64
+    assert torch.equal(cell[0], torch.tensor(rows))
+    assert torch.equal(cell[1], torch.tensor(rows))
+    assert torch.allclose(
+        cell[0].norm(dim=1), torch.tensor([10.0, 12.0, 14.0], dtype=torch.float64)
+    )
+
+
+def test_frames_carry_a_box_all_or_none():
+    """A box on some frames and not others is refused by name; no boxes, no cell."""
+    with_box = frame(Z=[1], pos=[[0.0, 0.0, 0.0]], box=np.eye(3) * 5.0)
+    without = frame(Z=[1], pos=[[0.0, 0.0, 0.0]])
+
+    with pytest.raises(ValueError, match=r"frames \[1\] do not"):
+        collate_molecules([with_box, without])
+
+    batch = collate_molecules([without, without])
+    assert ("graphs", "cell") not in batch.keys(include_nested=True)
+
+
+def test_float_leaves_keep_the_frames_precision_unless_a_dtype_is_asked_for():
+    """fp64 in, fp64 out — pos, a per-atom column, a stacked vector and a meta scalar alike.
+
+    The collate narrows nothing on its own; ``dtype=`` is where a pipeline's
+    precision is applied, and integer leaves are untouched either way.
+    """
+    frames = [
+        frame(
+            Z=[1, 8],
+            pos=[[0.0, 0.0, 0.0], [0.1, 0.2, 0.3]],
+            forces=[[1.0] * 3] * 2,
+            energy=-1.5,
+            task=2,
+        ),
+    ]
+    frames[0]["atoms"]["mass"] = np.array([1.008, 15.999])
+
+    kept = collate_molecules(frames)
+    assert kept["atoms", "pos"].dtype is torch.float64
+    assert kept["atoms", "mass"].dtype is torch.float64
+    assert kept["atoms", "forces"].dtype is torch.float64
+    assert kept["graphs", "energy"].dtype is torch.float64
+    assert kept["graphs", "task"].dtype is torch.long
+    assert kept["atoms", "pos"][1, 2].item() == 0.3
+
+    cast = collate_molecules(frames, dtype=torch.float32)
+    assert cast["atoms", "pos"].dtype is torch.float32
+    assert cast["atoms", "mass"].dtype is torch.float32
+    assert cast["atoms", "forces"].dtype is torch.float32
+    assert cast["graphs", "energy"].dtype is torch.float32
+    assert cast["graphs", "task"].dtype is torch.long
+    assert cast["atoms", "Z"].dtype is torch.long
+
+    assert MoleculeCollator(dtype=torch.float32)(frames)["atoms", "pos"].dtype is torch.float32
+
+
+def test_velocity_columns_stack_into_atoms_vel():
+    """``vx``/``vy``/``vz`` become ``atoms.vel (N, 3)``, like ``fx``/``fy``/``fz`` → ``forces``."""
+    vel = [[0.01, 0.0, 0.0], [0.0, -0.02, 0.0]]
+    batch = collate_molecules([frame(Z=[1, 8], pos=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], vel=vel)])
+
+    assert torch.equal(batch["atoms", "vel"], torch.tensor(vel, dtype=torch.float64))
+    for component in ("vx", "vy", "vz"):
+        assert ("atoms", component) not in batch.keys(include_nested=True)

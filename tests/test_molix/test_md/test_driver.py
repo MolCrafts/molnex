@@ -5,7 +5,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.batch import TensorFrame
+from molix.batch import TensorFrame, collate_molecules
 from molix.md import (
     MD,
     LangevinVerletIntegrator,
@@ -15,7 +15,7 @@ from molix.md import (
     VelocityInitHook,
     VelocityVerletIntegrator,
 )
-from tests.conftest import collate_frames, frame
+from tests.conftest import frame
 from tests.test_molix.test_md.conftest import make_cubic_lattice, md_system
 
 #: How close the split-precision run has to sit to a *fully* fp32 evaluation,
@@ -48,18 +48,23 @@ def _class_i_harmonic(*, k: float = 2.0, r0: float = 1.0):
     )
 
 
-def _two_atom_system(*, r: float = 1.5, dtype: torch.dtype = torch.float64) -> TensorDict:
+def _two_atom_system(
+    *, r: float = 1.5, dtype: torch.dtype = torch.float64, box: float | None = None
+) -> TensorDict:
     """One bonded pair at rest, ``r`` Å apart — a molpy ``Frame`` through the collate.
 
-    ``mass`` is a per-atom column of the frame; ``vel`` is written after
-    collation, because the collate has no per-atom *vector* route beyond
-    ``pos`` and the ``fx``/``fy``/``fz`` it stacks into ``atoms.forces``.
+    ``mass``, a zero ``vel`` and (with *box*) the cubic lattice are the frame's
+    own; the batch is built at *dtype*.
     """
-    built = frame(Z=(1, 1), pos=((0.0, 0.0, 0.0), (r, 0.0, 0.0)), bonds=([0], [1]))
+    built = frame(
+        Z=(1, 1),
+        pos=((0.0, 0.0, 0.0), (r, 0.0, 0.0)),
+        vel=np.zeros((2, 3)),
+        box=None if box is None else np.eye(3) * box,
+        bonds=([0], [1]),
+    )
     built["atoms"]["mass"] = np.ones(2, dtype=np.float64)
-    system = collate_frames([built], dtype=dtype)
-    system["atoms", "vel"] = torch.zeros_like(system["atoms", "pos"])
-    return system
+    return collate_molecules([built], dtype=dtype)
 
 
 def _nve(force, *, dt: float, dtype=None, hooks=None) -> MD:
@@ -334,9 +339,7 @@ class TestMD:
 
         # 10 Å cube around a 1.5 Å bond: well inside the F29 half-width, so the
         # only thing under test here is which build evaluates the field.
-        system = _two_atom_system()
-        # F35: ``collate_molecules`` does not read ``frame.box`` yet.
-        system["graphs", "cell"] = (torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0)
+        system = _two_atom_system(box=10.0)
 
         try:
             md = (

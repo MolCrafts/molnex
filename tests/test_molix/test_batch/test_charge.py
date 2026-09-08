@@ -12,7 +12,7 @@ Pure ``execute()`` tests on two molpy ``Frame``s put through
 ``collate_molecules`` — no DataModule, no DataLoader, no model. Every charge a
 frame declares is a ``meta`` scalar, which is where a dataset states one, so
 the three column dtypes under test are the three the collate itself produces:
-an integral meta scalar becomes ``int64``, a float one ``float32``, and a frame
+an integral meta scalar becomes ``int64``, a float one the batch's float dtype, and a frame
 that declares nothing leaves the column absent. The batch's own float dtype is
 read from ``atoms.pos``, so the fill test uses an fp64 batch and the cast test
 an fp32 one: a hard-coded ``torch.get_default_dtype()`` would pass one and fail
@@ -25,8 +25,8 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.batch import TensorFrame, TotalCharge
-from tests.conftest import collate_frames, frame
+from molix.batch import TensorFrame, TotalCharge, collate_molecules
+from tests.conftest import frame
 
 _Z = (1, 8)
 _POS = (
@@ -45,7 +45,7 @@ def _batch(
         dtype: Floating dtype of ``atoms.pos`` — the batch's float dtype.
         total_charge: Optional charge each frame declares in its ``meta``;
             omitted entirely when ``None`` (the absent-column case). Integers
-            collate to an ``int64`` column, floats to a ``float32`` one.
+            collate to an ``int64`` column, floats to one at *dtype*.
 
     Returns:
         The collated batch.
@@ -58,7 +58,7 @@ def _batch(
         )
         for graph, pos in enumerate(_POS)
     ]
-    return collate_frames(frames, dtype=dtype)
+    return collate_molecules(frames, dtype=dtype)
 
 
 class TestTotalCharge:
@@ -98,6 +98,9 @@ class TestTotalCharge:
         The values are exact halves, so a cast that changed one would show.
         """
         batch = _batch(torch.float64, (0.5, -0.5))
+        # The collate builds the column at the batch dtype; the mismatch under
+        # test is a dataset's, so it is put back by hand.
+        batch["graphs", "total_charge"] = batch["graphs", "total_charge"].to(torch.float32)
 
         out = TotalCharge().execute(batch)
 

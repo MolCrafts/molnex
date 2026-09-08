@@ -153,8 +153,12 @@ def _lattice_frame(pos: torch.Tensor) -> Frame:
         pos: Positions ``(N, 3)`` in Å.
 
     Returns:
-        The frame, with ``mass`` (amu) as a per-atom column and the (zero) net
-        charge declared in ``meta``.
+        The frame, with ``mass`` (amu) as a per-atom column, a zero velocity
+        as ``vx``/``vy``/``vz`` (drawn by ``VelocityInitHook`` on the run) and
+        the (zero) net charge declared in ``meta``. No box: the lattice of this
+        run belongs to the :class:`~molix.md.NeighborList` (built with
+        ``cell=``) and reaches the potential as the list's per-row
+        ``edges.shifts``, so the batch deliberately carries no ``graphs.cell``.
     """
     xyz = pos.detach().cpu().double().numpy()
     n = int(xyz.shape[0])
@@ -165,29 +169,16 @@ def _lattice_frame(pos: torch.Tensor) -> Frame:
         "x": np.ascontiguousarray(xyz[:, 0]),
         "y": np.ascontiguousarray(xyz[:, 1]),
         "z": np.ascontiguousarray(xyz[:, 2]),
+        "vx": np.zeros(n, dtype=np.float64),
+        "vy": np.zeros(n, dtype=np.float64),
+        "vz": np.zeros(n, dtype=np.float64),
     }
     frame["atoms"]["mass"] = np.full(n, _MASS, dtype=np.float64)
     return frame
 
 
 def _lattice_batch(pos: torch.Tensor, *, dtype: torch.dtype, device: torch.device) -> TensorDict:
-    """The rollout's batch: :func:`_lattice_frame` through the real collate.
-
-    What the collate cannot carry is added on the way out, named where it is:
-
-    * **F36** — it writes every float column at ``float32``, while this run is
-      at ``--precision``, so the frame's own fp64 ``x`` / ``y`` / ``z`` and
-      ``mass`` are *re-read* at that dtype rather than cast through single
-      precision.
-    * ``vel`` — the collate stacks ``fx``/``fy``/``fz`` into ``atoms.forces``
-      and carries every other column scalar-wise, so a per-atom *vector* that is
-      neither ``pos`` nor ``forces`` cannot be spelled in a frame yet. It is
-      zeroed here and drawn by ``VelocityInitHook`` on the run.
-
-    **F35** has nothing to repair here: the lattice of this run belongs to the
-    :class:`~molix.md.NeighborList` (built with ``cell=``), and the batch
-    deliberately carries no ``graphs.cell`` — the pair geometry reaches the
-    potential as the list's per-row ``edges.shifts``.
+    """The rollout's batch: :func:`_lattice_frame` through the real collate, built at *dtype*.
 
     Args:
         pos: Positions ``(N, 3)`` in Å, at ``dtype``.
@@ -197,21 +188,7 @@ def _lattice_batch(pos: torch.Tensor, *, dtype: torch.dtype, device: torch.devic
     Returns:
         The batch ``MD.run`` integrates.
     """
-    frame = _lattice_frame(pos)
-    batch = collate_molecules([frame])
-
-    def column(name: str) -> torch.Tensor:
-        return torch.tensor(np.asarray(frame["atoms"][name], dtype=np.float64), dtype=dtype)
-
-    # The F36 repair below is also spelled in tests/conftest.py (collate_frames,
-    # the owner), interface/tests/parity_classical.py and
-    # benchmarks/verify_md_lj_nve.py; all four collapse into collate_molecules
-    # once it carries frame.box and the frame's precision.
-    # F36: collate_molecules narrows to float32.
-    batch["atoms", "pos"] = torch.stack([column(axis) for axis in ("x", "y", "z")], dim=-1)
-    # F36: collate_molecules narrows to float32.
-    batch["atoms", "mass"] = column("mass")
-    batch["atoms", "vel"] = torch.zeros_like(batch["atoms", "pos"])
+    batch = collate_molecules([_lattice_frame(pos)], dtype=dtype)
     # The frame declared its net charge; this only normalises the dtype.
     TotalCharge().execute(batch)
     return batch.to(device)

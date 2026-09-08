@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.batch import TensorFrame
+from molix.batch import TensorFrame, collate_molecules
 from molix.ff_export import LammpsAdapter, LammpsWriter
 from molpot.forcefield import ForceField
 from molpot.ir import ExclusionScales, NonbondedScaling
-from tests.conftest import collate_frames, frame
+from tests.conftest import frame
 
 
-def _two_atom_system() -> tuple[ForceField, TensorDict]:
+def _two_atom_system(*, box: np.ndarray | None = None) -> tuple[ForceField, TensorDict]:
+    """One bonded C-C pair through the collate; *box* (rows, Å) makes it periodic."""
     # OPLS proper table without improper/pair (LAMMPS *.ff writer: harmonic improper only)
     ff = (
         ForceField(name="OPLS", units="real")
@@ -38,8 +40,8 @@ def _two_atom_system() -> tuple[ForceField, TensorDict]:
     # conversion there is: its ``bonds`` therefore reach the writer as the
     # ``(2, N)`` COO block ``collate_molecules`` writes, not as ``atomi`` /
     # ``atomj`` columns a fixture spelled by hand.
-    system = collate_frames(
-        [frame(Z=(6, 6), pos=((0.0, 0.0, 0.0), (1.53, 0.0, 0.0)), bonds=([0], [1]))]
+    system = collate_molecules(
+        [frame(Z=(6, 6), pos=((0.0, 0.0, 0.0), (1.53, 0.0, 0.0)), bonds=([0], [1]), box=box)]
     )
     return ff, system
 
@@ -138,7 +140,7 @@ def _four_atom_nonbonded(
     # ``frame()`` takes no per-atom extras, so the charge column is written onto
     # the block it built; the collate carries it through as ``atoms.q``.
     built["atoms"]["q"] = atoms["q"].detach().cpu().double().numpy()
-    return ff, collate_frames([built])
+    return ff, collate_molecules([built])
 
 
 def _charges_only_forcefield() -> ForceField:
@@ -188,7 +190,7 @@ class TestLammpsWriter:
         then both neutral. LAMMPS accepts that file and runs a model with no
         electrostatics in it.
         """
-        system = collate_frames([frame(Z=(6, 6), pos=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)))])
+        system = collate_molecules([frame(Z=(6, 6), pos=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)))])
         ff = (
             ForceField(name="q", units="real")
             .def_atomstyle("full")
@@ -360,18 +362,15 @@ class TestLammpsWriter:
         open-boundary padded bounds instead would silently change the lattice
         sum LAMMPS performs.
         """
-        ff, system = _two_atom_system()
-        types = ff.assign_types(system)
-        periodic = system.clone()
-        # F35: ``collate_molecules`` does not read ``frame.box`` yet, so the
-        # lattice is written onto the collated batch's ``graphs`` namespace.
-        periodic["graphs", "cell"] = torch.eye(3, dtype=torch.float64).unsqueeze(0) * 12.0
+        ff, periodic = _two_atom_system(box=np.eye(3) * 12.0)
+        types = ff.assign_types(periodic)
         text = LammpsWriter().write_data(tmp_path / "cell.data", periodic, types=types).read_text()
         assert "0 12 xlo xhi" in text
         assert "0 12 ylo yhi" in text
         assert "0 12 zlo zhi" in text
 
-        # No cell declared → the open box still pads the bounds by box_pad_A.
+        # No box on the frame → no graphs.cell → the open box pads the bounds by box_pad_A.
+        _, system = _two_atom_system()
         open_text = (
             LammpsWriter().write_data(tmp_path / "open.data", system, types=types).read_text()
         )
