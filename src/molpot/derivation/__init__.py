@@ -42,6 +42,7 @@ from molpot.derivation.force import (
     autograd_forces_from_energy,
     functorch_forces,
     functorch_forces_with_aux,
+    position_leaf,
 )
 from molpot.derivation.force_readout import ForceReadout
 from molpot.derivation.hessian import HessianDerivation
@@ -62,5 +63,6 @@ __all__ = [
     "functorch_forces",
     "functorch_forces_with_aux",
     "grad_force_pass",
+    "position_leaf",
     "symmetrize_strain_grad",
 ]

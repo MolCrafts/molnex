@@ -59,6 +59,21 @@ class StyleSchema:
         index_arity: Number of atoms one interaction of this style spans.
         params: Parameters the style reads from the ForceField tables.
         energy_formula: Functional form, as written in the reference.
+        options: Every keyword this style accepts from ``def_*style`` — the
+            per-model knobs (cutoffs, solver, combining rule) as opposed to
+            :attr:`params`, which are the per-type tables. The list is
+            **closed**: a keyword outside it is refused at declaration by
+            :meth:`~molpot.forcefield.ForceField.def_pairstyle`, because an
+            unknown key used to be stored and then never read, so a misspelled
+            ``mixng="geometric"`` ran Lorentz–Berthelot and the manifest
+            faithfully reported the model that ran rather than the one that was
+            meant. Empty for a style with no options at all. Names only: the
+            values, their units and their fallbacks belong to
+            :class:`~molpot.forcefield.potentials.PairStyleDefaults` and the
+            resolver, and the values a given model declared are recorded by
+            :attr:`~molpot.manifest.InteractionRecord.options`. That is also why
+            this does not appear in :meth:`ForceFieldSchemaView.as_dict` — it is
+            the accepted-keyword vocabulary, not part of what a model is.
         contract: The style's S1 declaration. Keyword-only and required: a style
             without a contract cannot be placed in the S-decomposition, so it
             may not be registered at all.
@@ -69,6 +84,7 @@ class StyleSchema:
     index_arity: int
     params: tuple[ParamSpec, ...]
     energy_formula: str = ""
+    options: tuple[str, ...] = ()
     contract: InteractionContract = field(kw_only=True)
 
     @property
@@ -332,6 +348,15 @@ class PotentialMeta:
                 terms=(TermSpec("impropers", Contribution.LOCAL),),
             ),
         ),
+        # ``cutoff`` / ``switch_start`` are radii in Å; ``mixing`` is the
+        # combining rule making per-pair ``eps`` / ``sig`` out of the per-atom
+        # tables, whose closed vocabulary is
+        # :class:`~molpot.potentials.vdw.lj126.MixingRule` and is not restated
+        # here — ``ForceField.def_pairstyle`` validates the value against the
+        # enum itself, so a rule cannot be spelled here and unimplemented
+        # there. All three are resolved in one place,
+        # ``ForceField._nonbonded_method_record``, and recorded on the model's
+        # ``NonbondedMethodRecord``.
         "pair:lj/cut": StyleSchema(
             category="pair",
             name="lj/cut",
@@ -341,6 +366,7 @@ class PotentialMeta:
                 ParamSpec("epsilon", "[n_atom_types]", "kcal/mol", "well depth"),
                 ParamSpec("sigma", "[n_atom_types]", "Å", "length scale"),
             ),
+            options=("cutoff", "switch_start", "mixing"),
             contract=InteractionContract(
                 inputs=("atoms.pos", "atoms.epsilon", "atoms.sigma"),
                 cutoff=CutoffKind.SWITCHED,
@@ -360,6 +386,21 @@ class PotentialMeta:
             index_arity=2,
             energy_formula="ke * qi*qj/r with 1-2/1-3/1-4 scales",
             params=(ParamSpec("q", "[n_atoms]", "e", "partial charges on atoms"),),
+            # The seven the nonbonded record resolves, plus ``prefactor``:
+            # ``k_e`` is a unit-system constant rather than a nonbonded
+            # *method*, so it has no field on the record, but
+            # ``Potentials._assemble_pair_potentials`` does read it off the
+            # style — an accepted keyword either way.
+            options=(
+                "cutoff",
+                "calculator",
+                "smearing",
+                "real_space_cutoff",
+                "lr_wavelength",
+                "mesh_spacing",
+                "capacity_factor",
+                "prefactor",
+            ),
             contract=InteractionContract(
                 inputs=("atoms.pos", "atoms.q"),
                 # EWALD is a *policy* label, not the solver that runs: this one
@@ -426,6 +467,26 @@ class PotentialMeta:
                 declaration-only style carries no energy and hence no contract.
         """
         return cls._schema(key).contract
+
+    @classmethod
+    def options_for(cls, key: str) -> tuple[str, ...]:
+        """The keywords a registered style accepts from ``def_*style``.
+
+        The declaring side of :attr:`StyleSchema.options`: whoever validates a
+        declaration asks the registry rather than keeping a second list of
+        keyword names beside the container.
+
+        Args:
+            key: Style key, ``"<category>:<name>"`` (e.g. ``"pair:lj/cut"``).
+
+        Returns:
+            The accepted option names, in declaration order; empty for a style
+            that takes none.
+
+        Raises:
+            KeyError: ``key`` is not registered.
+        """
+        return cls._schema(key).options
 
     @classmethod
     def check_composition(cls, style_keys: Sequence[str]) -> None:

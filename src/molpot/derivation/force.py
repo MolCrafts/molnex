@@ -79,6 +79,41 @@ def functorch_forces_with_aux(
 # ---------------------------------------------------------------------------
 
 
+def position_leaf(pos: torch.Tensor) -> torch.Tensor:
+    """The fresh ``requires_grad`` leaf an autograd force is differentiated against.
+
+    One line, but it belongs to this module rather than to each caller, for the
+    same reason ``autograd.grad`` does: it is the **seam**, not physics.
+    Detaching drops whatever history the caller's positions carried (so the
+    force is a gradient of this energy alone, not of how the positions were
+    produced) and ``requires_grad_`` re-attaches them as the differentiation
+    variable.
+
+    Dynamo — PyTorch's tracing front-end for ``torch.compile`` — cannot trace
+    either half: a leaf created inside a graph and used outside it is
+    "requires_grad_() intermediate leaked as output", so the trace stops there
+    (a *graph break*: the compiled region ends and the rest runs eagerly).
+    Creating it here means that break, like the ``autograd.grad`` below it, is
+    reported against ``molpot/derivation/force.py``, which owns the seam and its
+    cost. A physics module that spells this inline instead puts an unexplained
+    break site in the middle of an energy expression.
+
+    That attribution is load-bearing for the compiled classical core:
+    :meth:`molpot.forcefield.Potentials.compile_core` declares this file as the
+    **one** break a classical field may show, and it is reached only through a
+    declared ``pair:coulomb``, which has no closed-form force. A ``lj/cut`` +
+    bonded field never creates a leaf and traces as a single graph.
+
+    Args:
+        pos: Positions ``(N, 3)`` in Å, attached or not.
+
+    Returns:
+        A detached copy of ``pos`` with ``requires_grad=True``, in Å and on
+        ``pos``'s dtype and device.
+    """
+    return pos.detach().requires_grad_(True)
+
+
 def autograd_forces(
     energy_fn: Callable[[torch.Tensor], torch.Tensor],
     pos: torch.Tensor,
@@ -93,7 +128,7 @@ def autograd_forces(
     """
     create_graph = torch.is_grad_enabled()
     with torch.enable_grad():
-        p = pos.detach().requires_grad_(True)
+        p = position_leaf(pos)
         (grad,) = torch.autograd.grad(energy_fn(p), p, create_graph=create_graph)
     return -grad
 
@@ -169,7 +204,7 @@ def autograd_forces_and_virial(
         create_graph = torch.is_grad_enabled()
     if tuple(cell.shape) != (3, 3):
         raise ValueError(f"cell must be (3, 3), got {tuple(cell.shape)}")
-    pos_leaf = pos.detach().requires_grad_(True)
+    pos_leaf = position_leaf(pos)
     strain = torch.zeros(3, 3, dtype=pos.dtype, device=pos.device, requires_grad=True)
     with torch.enable_grad():
         sym = 0.5 * (strain + strain.T)

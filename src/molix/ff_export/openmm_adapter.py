@@ -7,17 +7,28 @@ Emits JSON-friendly records matching OpenMM User Guide §19 force names:
 * ``PeriodicTorsionForce`` — ``k`` kJ/mol, ``periodicity``, ``phase`` rad
 * ``NonbondedForce`` — ``charge`` e, ``sigma`` nm, ``epsilon`` kJ/mol,
   plus the nonbonded *method* the model ran: ``nonbondedMethod``,
-  ``cutoffDistance`` nm, ``ewaldErrorTolerance``, ``useSwitchingFunction``
-  and ``switchingDistance`` nm
+  ``cutoffDistance`` nm, ``ewaldErrorTolerance``, ``useSwitchingFunction``,
+  ``switchingDistance`` nm and ``mixing`` — the Lennard-Jones combining rule,
+  which is a name from a closed vocabulary rather than a number: either
+  ``"lorentz-berthelot"`` or ``"geometric"``
+  (:class:`~molpot.potentials.vdw.lj126.MixingRule`)
 
 A single OpenMM ``NonbondedForce`` owns both nonbonded pair terms — the
 Lennard-Jones 12-6 interaction and the Coulomb ``1/r`` one — together with how
-they are truncated, which is why those five method fields ride on the same
+they are truncated, which is why those six method fields ride on the same
 record as the per-type parameters. ``nonbondedMethod`` is one of ``"PME"``
 (particle-mesh Ewald: the periodic lattice sum, split into a real-space
 remainder and an FFT-mesh reciprocal part), ``"CutoffNonPeriodic"`` (open
 boundary, truncated at ``cutoffDistance``) or ``"NoCutoff"`` (open boundary,
 every pair summed).
+
+The combining rule is the one part of a Class-I model this backend cannot
+always express. ``NonbondedForce`` combines per-atom ``ε`` / ``σ`` by
+Lorentz–Berthelot and offers no alternative, so a ``"geometric"`` model — the
+OPLS-AA rule — is emitted with ``case`` :attr:`TranslationCase.DECOMPOSE` and a
+``mixing_note``: its parameters translate exactly, its *combination* does not,
+and a consumer needs per-pair exceptions or a ``CustomNonbondedForce`` to build
+the same model. See :meth:`OpenMMAdapter._nonbonded`.
 
 Particle indices are **not** required for type-level IR bags; records carry
 ``type_index`` (and ``term_index`` for multi-term torsions). Topology binding
@@ -40,9 +51,19 @@ from molix.ff_export.cases import TranslationCase
 from molix.ff_export.conventions import ANGSTROM_TO_NM, ConventionTable
 from molix.ff_export.exceptions import UnsupportedTermError
 from molix.ff_export.force_spec import ForceSpec
+from molpot import MixingRule
 from molpot.ir import PotentialIR
 
 __all__ = ["OpenMMAdapter"]
+
+#: Why a Lennard-Jones bag with no declared combining rule cannot be exported.
+#: Stated identically by :mod:`molix.ff_export.lammps_adapter`: it is one policy
+#: — the rule is model identity, so no backend supplies one the model did not
+#: declare — and the evaluation side refuses the same record.
+_NO_MIXING_RULE = (
+    "lj parameters without a declared mixing rule — a rule is model identity; "
+    "declare it on pair:lj/cut"
+)
 
 
 class OpenMMAdapter(BackendAdapter):
@@ -259,6 +280,26 @@ class OpenMMAdapter(BackendAdapter):
         the Ewald real-space radius under ``"PME"`` without such a bag, and the
         open-boundary ``coulomb_cutoff`` otherwise.
 
+        ``mixing`` states the model's Lennard-Jones **combining rule** — how one
+        ``ε`` (kcal/mol) and one ``σ`` (Å) per atom type become one of each per
+        *pair* — as a :class:`~molpot.potentials.vdw.lj126.MixingRule` value. It
+        is present exactly when the model has a Lennard-Jones bag to mix: a
+        charges-only model gets no key rather than a rule it never declared, and
+        a bag whose record names no rule at all is refused (see Raises) rather
+        than exported under a guessed one. A single
+        ``NonbondedForce`` has no rule to choose: OpenMM mixes Lorentz–Berthelot
+        and nothing else. A ``"geometric"`` model — OPLS-AA, which is geometric
+        in ``σ`` too — therefore does not translate into one force object at
+        all. It needs an explicit exception per pair, or a
+        ``CustomNonbondedForce`` with the rule written into its energy
+        expression, so the record's ``case`` becomes
+        :attr:`TranslationCase.DECOMPOSE` and a ``mixing_note`` says which. The
+        record still carries the per-type ``ε`` / ``σ`` unchanged; what changes
+        is that a consumer may not build one plain ``NonbondedForce`` from them
+        and call it the same model. A *declared* geometric rule does not raise,
+        because the parameters *are* faithfully translated — only their
+        combination is not.
+
         Args:
             ir: The IR being translated; at least one of ``lj`` / ``charges``
                 is set.
@@ -274,7 +315,18 @@ class OpenMMAdapter(BackendAdapter):
             multiplies the Lennard-Jones interaction by a smooth taper running
             from ``1`` at ``switchingDistance`` to ``0`` at ``cutoffDistance``,
             instead of cutting it off abruptly. With no window declared the two
-            come out ``False`` and ``None``.
+            come out ``False`` and ``None``. ``mixing`` is present exactly for a
+            model with a Lennard-Jones bag; ``mixing_note`` only when that rule
+            is one ``NonbondedForce`` cannot express.
+
+        Raises:
+            UnsupportedTermError: The model has Lennard-Jones parameters but its
+                record names no combining rule. The rule is model identity, so
+                no backend may supply one it was not given — the same policy
+                :meth:`Potentials._assemble_pair_potentials
+                <molpot.forcefield.potentials.Potentials._assemble_pair_potentials>`
+                applies on the evaluation side, where ``MixingRule(None)``
+                raises.
         """
         row_lj = self.conventions.row("lj")
         row_q = self.conventions.row("charge")
@@ -315,7 +367,18 @@ class OpenMMAdapter(BackendAdapter):
             cutoff_nm = cutoff_A * ANGSTROM_TO_NM
         switch_A = method.lj_switch_start
 
-        return {
+        if ir.lj is None:
+            # No Lennard-Jones bag, nothing to combine: the record states no
+            # rule at all rather than one the model never used. A charges-only
+            # model may still carry ``lj_mixing`` on its method record (the
+            # ForceField declared the style, the IR has no bag), and reporting
+            # that here would describe mixing that never happens.
+            mixing = None
+        elif method.lj_mixing is None:
+            raise UnsupportedTermError("lj", _NO_MIXING_RULE)
+        else:
+            mixing = method.lj_mixing
+        record: dict[str, Any] = {
             "type": "NonbondedForce",
             "case": row_lj.case.value,
             "parameters": params,
@@ -326,4 +389,12 @@ class OpenMMAdapter(BackendAdapter):
             "ewaldErrorTolerance": self.ewald_error_tolerance,
             "useSwitchingFunction": switch_A is not None,
             "switchingDistance": None if switch_A is None else switch_A * ANGSTROM_TO_NM,
+            **({} if mixing is None else {"mixing": mixing}),
         }
+        if mixing == MixingRule.GEOMETRIC:
+            record["case"] = TranslationCase.DECOMPOSE.value
+            record["mixing_note"] = (
+                "OpenMM NonbondedForce mixes Lorentz-Berthelot; geometric sigma "
+                "needs per-pair exceptions or a CustomNonbondedForce"
+            )
+        return record

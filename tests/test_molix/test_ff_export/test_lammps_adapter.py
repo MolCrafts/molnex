@@ -143,6 +143,7 @@ class TestLammpsAdapter:
             {"type_index": 1, "epsilon": 0.066, "sigma": 3.5},
             {"type_index": 2, "epsilon": 0.03, "sigma": 2.5},
         ]
+        assert pair["mixing"] == "lorentz-berthelot"
         kspace = next(f for f in spec.forces if f["category"] == "kspace")
         assert kspace["type"] == "kspace_style pppm 1e-06"
         assert kspace["style"] == "pppm"
@@ -152,6 +153,51 @@ class TestLammpsAdapter:
         assert modify["gewald"] == pytest.approx(1.0 / (5.0 * math.sqrt(2.0)))
         exclusions = next(f for f in spec.forces if f["category"] == "special_bonds")
         assert exclusions["type"] == "special_bonds lj 0 0 0.5 coul 0 0 0.8333333"
+
+    def test_pair_record_carries_the_models_combining_rule(self):
+        """The rule travels with the coefficients the writer will mix.
+
+        ``pair_coeff i j`` lines are mixed by ``LammpsWriter`` from the
+        per-type table above, so the record has to say *which* rule — the
+        alternative is the writer re-deciding, which is how molnex and a
+        LAMMPS deck came to describe different models on every cross pair
+        without either side saying so (ledger finding **F24**). The default
+        rule rides on the same field in the golden above, so a record that
+        hard-coded ``"lorentz-berthelot"`` fails here.
+        """
+        record = replace(PME_SWITCHED_METHOD, lj_mixing="geometric")
+        spec = LammpsAdapter().translate(_pair_ir(record))
+        pair = next(f for f in spec.forces if f["category"] == "pair")
+        assert pair["mixing"] == "geometric"
+
+    def test_an_lj_bag_whose_record_names_no_rule_is_refused(self):
+        """Fail closed: the deck cannot be mixed by a rule nobody declared.
+
+        ``write_pair_block`` states every ``pair_coeff i j`` explicitly and
+        mixes them itself, so a record with an ``lj`` bag but no rule leaves the
+        writer to choose one. Choosing means exporting a force field the model
+        never described — and it would be *this* export, the one whose whole
+        purpose is to be compared against LAMMPS, that silently disagreed.
+        Refusing names the field instead.
+        """
+        record = replace(PME_SWITCHED_METHOD, lj_mixing=None)
+        with pytest.raises(UnsupportedTermError, match="mixing rule"):
+            LammpsAdapter().translate(_pair_ir(record))
+
+    def test_a_charges_only_model_states_no_combining_rule(self):
+        """No ``lj`` bag, nothing to combine — the key is absent, not ``None``.
+
+        A charges-only model declares no ``pair:lj/cut`` style, so its record's
+        ``lj_mixing`` is ``None`` and there are no ``pair_coeff`` coefficients
+        for a rule to apply to. Emitting the key anyway would put a rule (or a
+        null) on a record that has no Lennard-Jones term, which the writer would
+        then have to know to ignore.
+        """
+        record = replace(PME_SWITCHED_METHOD, lj_cutoff=None, lj_switch_start=None, lj_mixing=None)
+        spec = LammpsAdapter().translate(_pair_ir(record, lj=False))
+        pair = next(f for f in spec.forces if f["category"] == "pair")
+        assert pair["parameters"] == []
+        assert "mixing" not in pair
 
     def test_periodic_hard_cutoff_uses_single_style(self):
         """No switching window → the fused lj/cut/coul/long style, still with pppm."""

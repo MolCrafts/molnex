@@ -52,7 +52,7 @@ def no_nonbonded_method() -> NonbondedMethodRecord:
     """The record a model with no nonbonded method at all implies.
 
     Every field ``None``: no Lennard-Jones cutoff, no switching window, no
-    Coulomb solver. It is the default of
+    combining rule, no Coulomb solver. It is the default of
     :attr:`PotentialIR.nonbonded_method`, which is why that attribute is never
     ``None`` — see its docstring for why the two spellings had to collapse into
     one.
@@ -68,6 +68,7 @@ def no_nonbonded_method() -> NonbondedMethodRecord:
     return NonbondedMethodRecord(
         lj_cutoff=None,
         lj_switch_start=None,
+        lj_mixing=None,
         coulomb_cutoff=None,
         coulomb_calculator=None,
         real_space_cutoff=None,

@@ -8,6 +8,12 @@ must not be treated as authority for a new training submission.
 
 | Spec | Chain | Opened | Scope |
 |---|---|---|---|
+| [composable-a0-debt-06-batch-primitives](composable-a0-debt-06-batch-primitives.md) | composable-a0-debt | 2026-09-08 | `ForceField.neighbor_list()` + `molix.batch.TotalCharge` replace the scripts' placement / total-charge glue (F12, F21 — ours, per the operator). |
+| [composable-a0-debt-01-mixing](composable-a0-debt-01-mixing.md) | composable-a0-debt | 2026-09-08 | `MixingRule` option on `pair:lj/cut`, carried by `NonbondedMethodRecord` / manifest, honoured by `LJCutPotential` and both exporters; OPLS-AA declares geometric (F24). |
+| [composable-a0-debt-02-unwrapped](composable-a0-debt-02-unwrapped.md) | composable-a0-debt | 2026-09-08 | `bind_topology` refuses wrapped molecules in a periodic box (F29 decided: reject at bind). |
+| [composable-a0-debt-03-md-seam](composable-a0-debt-03-md-seam.md) | composable-a0-debt | 2026-09-08 | `MD.set_compiler` + `potential_dtype`; classical `Potentials.compile_core`; benchmarks back on the seams (F28). |
+| [composable-a0-debt-04-type-dedup](composable-a0-debt-04-type-dedup.md) | composable-a0-debt | 2026-09-08 | `ForceField.assign_types` condenses LAMMPS types by parameter equality; writer + parity on the assignment (F25). |
+| [composable-a0-debt-05-scripts-docs](composable-a0-debt-05-scripts-docs.md) | composable-a0-debt | 2026-09-08 | delete `_probe_nan_term.py`; ledger F12/F21/F23 (scripts ported by the peer session); CLAUDE.md tier sentence. |
 
 Design source for the chain: `.claude/notes/composable-potentials.md`
 (spec S1–S8 mapping, shared type designs, A1 / iface / B1 / B2 / A2 roadmap).

@@ -41,7 +41,7 @@ from molpot.potentials.elec.lib.kvectors import (
 )
 from molpot.potentials.elec.potentials import CoulombPotential
 from molpot.potentials.elec.prefactors import kcalmol_A
-from molpot.potentials.vdw.lj126 import lj126_pair_energy_split, lorentz_berthelot
+from molpot.potentials.vdw.lj126 import MixingRule, lj126_pair_energy_split
 
 __all__ = [
     "LJCutPotential",
@@ -94,10 +94,11 @@ class LJCutPotential:
     (kcal/mol) is the depth of the resulting energy minimum and ``σ`` (Å) the
     separation at which the energy crosses zero.
 
-    Wraps :func:`lj126_pair_energy_split` + Lorentz–Berthelot mixing (per-atom
-    ``ε`` / ``σ`` combined into per-pair values, see
-    :func:`~molpot.potentials.vdw.lj126.lorentz_berthelot`). Pairs with
-    ``r >= cutoff`` are zeroed (the caller may also pre-filter the list).
+    Wraps :func:`lj126_pair_energy_split` + the declared combining rule
+    (per-atom ``ε`` / ``σ`` combined into per-pair values, see
+    :class:`~molpot.potentials.vdw.lj126.MixingRule`): Lorentz–Berthelot by
+    default, geometric for an OPLS-AA model. Pairs with ``r >= cutoff`` are
+    zeroed (the caller may also pre-filter the list).
 
     There are two entry points. :meth:`energy` prices a pair list; the
     **analytic-force branch** :meth:`energy_forces` prices the same list and
@@ -127,17 +128,39 @@ class LJCutPotential:
         switch_start: Start ``r_s`` of the switching window in Å, with
             ``0 < r_s < r_c``. ``None`` (the default) means no window: ``S ≡ 1``
             up to ``r_c`` and a hard truncation there.
+        mixing: Combining rule turning the per-atom ``ε`` / ``σ`` tables into
+            the per-pair values both entry points price. Defaults to
+            :attr:`~molpot.potentials.vdw.lj126.MixingRule.LORENTZ_BERTHELOT`
+            (``σ`` arithmetic, ``ε`` geometric); an OPLS-AA model declares
+            :attr:`~molpot.potentials.vdw.lj126.MixingRule.GEOMETRIC` instead.
+            Fixed here, at construction, and read as a static attribute inside
+            the traced region — the rule is model identity, not a per-call
+            argument, and a branch taken per call would break the graph. It is
+            re-narrowed through the enum on the way in, so a value outside that
+            closed vocabulary raises here rather than being mixed some other way
+            at evaluation time.
 
     Attributes:
         cutoff: The cutoff radius in Å, as a Python ``float``.
         switch_start: The switching-window start in Å, or ``None``.
+        mixing: The :class:`~molpot.potentials.vdw.lj126.MixingRule` in force.
 
     Raises:
-        ValueError: ``cutoff`` is not positive, or ``switch_start`` is given
-            and does not satisfy ``0 < switch_start < cutoff``.
+        ValueError: ``cutoff`` is not positive; ``switch_start`` is given and
+            does not satisfy ``0 < switch_start < cutoff``; or ``mixing`` names
+            no :class:`~molpot.potentials.vdw.lj126.MixingRule`. On the
+            ForceField path the last of those has already been refused, with a
+            message naming the allowed rules, by
+            :meth:`~molpot.forcefield.ForceField.def_pairstyle` — this term is
+            the second gate, for a caller constructing it directly.
     """
 
-    def __init__(self, cutoff: float = 10.0, switch_start: float | None = None) -> None:
+    def __init__(
+        self,
+        cutoff: float = 10.0,
+        switch_start: float | None = None,
+        mixing: MixingRule = MixingRule.LORENTZ_BERTHELOT,
+    ) -> None:
         if cutoff <= 0:
             raise ValueError(f"LJ cutoff must be positive, got {cutoff}")
         if switch_start is not None and not 0.0 < switch_start < cutoff:
@@ -147,6 +170,7 @@ class LJCutPotential:
             )
         self.cutoff = float(cutoff)
         self.switch_start = None if switch_start is None else float(switch_start)
+        self.mixing = MixingRule(mixing)
 
     def _switch(self, distances: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Quintic switching factor ``S(r)`` and its radial derivative.
@@ -226,8 +250,9 @@ class LJCutPotential:
         Returns:
             ``(repulsion, dispersion)`` — ``Σ scale · S(r) · 4 ε (σ/r)¹²`` and
             ``−Σ scale · S(r) · 4 ε (σ/r)⁶`` accumulated over the pairs within
-            the cutoff, with ``ε`` / ``σ`` the per-pair values Lorentz–Berthelot
-            mixing makes of the per-atom arguments, ``S`` the switching factor
+            the cutoff, with ``ε`` / ``σ`` the per-pair values this term's
+            :attr:`mixing` rule makes of the per-atom arguments, ``S`` the
+            switching factor
             of :meth:`_switch` (identically ``1`` without a ``switch_start``)
             and ``scale`` the row's entry of ``scales``. Each is ``(B,)`` in
             kcal/mol when ``edge_batch`` is given, scalar ``()`` otherwise.
@@ -236,7 +261,7 @@ class LJCutPotential:
         """
         live, weight = _live_pairs(distances, self.cutoff, edge_mask)
         dist = torch.where(live, distances, distances.new_full((), self.cutoff))
-        mixed = lorentz_berthelot({"epsilon": epsilon, "sigma": sigma}, edge_index)
+        mixed = self.mixing.mix({"epsilon": epsilon, "sigma": sigma}, edge_index)
         rep_pair, disp_pair = lj126_pair_energy_split(dist, mixed["epsilon_ij"], mixed["sigma_ij"])
         switch, _ = self._switch(dist)
         sw = switch * (scales * weight)
@@ -270,8 +295,10 @@ class LJCutPotential:
 
         Differentiating ``4 ε [(σ/r)¹² − (σ/r)⁶]`` gives the radial derivative
         ``dE/dr = 24 ε (σ/r)⁶ (1 - 2 (σ/r)⁶) / r`` (kcal mol⁻¹ Å⁻¹), where
-        ``ε`` and ``σ`` are the **per-pair** values Lorentz–Berthelot mixing
-        makes of the per-atom ``epsilon`` / ``sigma`` arguments. Write
+        ``ε`` and ``σ`` are the **per-pair** values this term's :attr:`mixing`
+        rule makes of the per-atom ``epsilon`` / ``sigma`` arguments — the
+        derivative is the same closed form under either rule, since both mix
+        before the radial dependence. Write
         ``g = scale · live · dE/dr`` for that derivative after the pair's scale
         factor and its liveness weight (``1`` on a contributing row, ``0`` on a
         dead or out-of-range one),
@@ -359,7 +386,7 @@ class LJCutPotential:
         # weight can zero it — ``0 · inf`` is ``nan``, and a ``nan`` force
         # poisons the whole scatter.
         dist = torch.where(live, distances, distances.new_full((), self.cutoff))
-        mixed = lorentz_berthelot({"epsilon": epsilon, "sigma": sigma}, edge_index)
+        mixed = self.mixing.mix({"epsilon": epsilon, "sigma": sigma}, edge_index)
         eps = mixed["epsilon_ij"]
         sig = mixed["sigma_ij"]
 

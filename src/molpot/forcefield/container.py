@@ -9,11 +9,14 @@ IO is :mod:`molpy.io` — pass this object to the writers after :meth:`realize`.
 from __future__ import annotations
 
 import math
+from collections.abc import Hashable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Self
 
 import torch
 from molpy import ForceField as MolpyForceField
 
+from molix.batch import NeighborList
 from molpot.forcefield.potentials import PAIR_STYLE_DEFAULTS, Potentials
 from molpot.forcefield.schema import PotentialMeta
 from molpot.ir import (
@@ -36,8 +39,9 @@ from molpot.manifest import (
     NumericsRecord,
     ParamTableRecord,
 )
+from molpot.potentials.vdw.lj126 import MixingRule
 
-__all__ = ["ForceField", "OPLSAAForceField"]
+__all__ = ["ForceField", "OPLSAAForceField", "TypeAssignment"]
 
 
 #: Model profiles :meth:`ForceField.manifest` can describe. ``"A0"`` is the
@@ -45,6 +49,170 @@ __all__ = ["ForceField", "OPLSAAForceField"]
 #: records exist to fill (``composable-a1``). Module-private: a profile is
 #: chosen at the one call site that writes a manifest, not looked up.
 _MANIFEST_PROFILES = ("A0",)
+
+
+def _param_key(params: Mapping[str, float]) -> tuple[tuple[str, float], ...]:
+    """A ``def_type`` parameter mapping as a hashable, order-independent key.
+
+    Floats are compared bit-exactly, which is what "these two atoms carry the
+    same Lennard-Jones parameters" has to mean here: the values are about to be
+    rendered into a LAMMPS deck as text, so two numbers that differ in the last
+    ulp are two coefficient lines and therefore two types.
+    """
+    return tuple(sorted(params.items()))
+
+
+def _condense(keys: Iterable[Hashable]) -> tuple[tuple[int, ...], int]:
+    """Group ``keys`` by equality, numbering the classes in first-occurrence order.
+
+    Args:
+        keys: One key per atom or interaction.
+
+    Returns:
+        ``(assignment, n_classes)`` — the 0-based class of every item, and how
+        many distinct classes there are.
+    """
+    classes: dict[Hashable, int] = {}
+    assignment: list[int] = []
+    for key in keys:
+        assignment.append(classes.setdefault(key, len(classes)))
+    return tuple(assignment), len(classes)
+
+
+def _representatives(assignment: Sequence[int], n_classes: int) -> tuple[int, ...]:
+    """Index of the first member of every class of ``assignment``.
+
+    :meth:`ForceField.realize` registers one molpy type per class and needs one
+    concrete member to read the coefficients off; because
+    :func:`_condense` numbers classes in first-occurrence order, member ``0`` of
+    class ``t`` is also the item that created it.
+    """
+    first = [-1] * n_classes
+    for index, cls in enumerate(assignment):
+        if first[cls] < 0:
+            first[cls] = index
+    return tuple(first)
+
+
+def _type_labels(prefix: str, count: int) -> tuple[str, ...]:
+    """``count`` LAMMPS type labels ``<prefix>1``…, zero-padded to a common width.
+
+    Two constraints shape these strings, and both are measured rather than
+    assumed:
+
+    **A label may not begin with a digit.** They leave molnex as LAMMPS *type
+    labels* — molpy writes them into the ``Atom Type Labels`` section of the data
+    file and onto the ``*_coeff`` lines of the include — and a bare ``"1"`` /
+    ``"1-2"`` stops ``read_data`` at ``ERROR: Invalid type label 1-2``, so no
+    exported system carrying bonds can be read at all.
+
+    **They must all be the same length.** molrs numbers a data file's types by
+    sorting their labels *as text*, and decimal strings sort in numeric order
+    only when equally long: unpadded ``t1 … t26`` sorts ``t1, t10, …, t19, t2,
+    t20, …``, so LAMMPS type ``2`` is the tenth type and every numeric
+    ``pair_coeff i j``
+    (:meth:`molix.ff_export.LammpsWriter.write_pair_block`) reads another type's
+    Lennard-Jones well depth ``ε`` (kcal/mol) and diameter ``σ`` (Å). Measured on
+    a 26-atom water/ion box exported that way, ``E_vdwl`` — LAMMPS' name for the
+    summed Lennard-Jones energy — came out ``-0.2251 kcal/mol`` against molnex's
+    ``-0.8163 kcal/mol``, no warning.
+
+    Args:
+        prefix: Class letter — ``t`` atoms, ``b`` bonds, ``a`` angles,
+            ``d`` propers (dihedrals), ``i`` impropers.
+        count: Number of types to name.
+
+    Returns:
+        The labels, in class order, so ``labels[t]`` names class ``t`` and text
+        order is class order.
+    """
+    width = max(1, len(str(count)))
+    return tuple(f"{prefix}{n:0{width}d}" for n in range(1, count + 1))
+
+
+def _bonded_keys(
+    atom_type: Sequence[int],
+    members: Sequence[tuple[int, ...]],
+    params: Sequence[Mapping[str, float]],
+) -> list[tuple[tuple[int, ...], tuple[tuple[str, float], ...]]]:
+    """Type key of every bonded interaction: its atom types plus its parameters.
+
+    Both halves are needed. Without the atom types, an O–H and a C–H bond that
+    happened to share a force constant would be one LAMMPS type, and the data
+    file would then name a type whose ``bond_coeff`` says nothing about which
+    atoms it joins; without the parameters, two O–H bonds with different ``k``
+    would collapse onto one coefficient line and one of the two force constants
+    would silently disappear from the deck.
+
+    The atom types are taken in the interaction's own order — molnex does not
+    canonicalise ``(i, j)`` against ``(j, i)``, so a topology that lists a bond
+    both ways gets two types carrying identical coefficients. That is a deck one
+    line longer than necessary, never a wrong one.
+    """
+    return [
+        (tuple(atom_type[a] for a in atoms), _param_key(row))
+        for atoms, row in zip(members, params, strict=True)
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class TypeAssignment:
+    """Which LAMMPS type every atom and interaction of one system belongs to.
+
+    The output of :meth:`ForceField.assign_types` and the **one** numbering the
+    exporter uses: :meth:`ForceField.realize` registers a molpy type per class
+    from it and :class:`~molix.ff_export.LammpsWriter` labels the data file's
+    atoms and interactions from the same object, so the coefficient lines of the
+    include and the type labels of the data file cannot disagree.
+
+    Pure data — indices, labels and the one parameter a type is *named* by, no
+    behaviour. The coefficients themselves stay on the ForceField, which is
+    where they can be trained; this type only says which of them are the same.
+
+    ``atom_charges`` is the exception that proves the rule, and it is here
+    because it is read on both sides of the molpy seam: it is part of the atom
+    key (two atoms are one type only if their charge matches), *and* it is the
+    fourth column of the data file's ``Atoms # full`` section. Read a second
+    time on the writer's side those two disagree the moment the charges live on
+    the field rather than on the system — a deck whose types exist *because* the
+    atoms differ in charge, and whose atoms are then all neutral, which LAMMPS
+    runs without a word (routed from ``composable-a0-debt-04``).
+
+    Attributes:
+        atom_type: Class of every atom, 0-based, indexing ``atom_labels``.
+        atom_labels: Label of every atom type (``t1``…), in class order.
+        atom_charges: Charge of every atom in ``e``, exactly the values
+            :meth:`ForceField.assign_types` keyed the atom types on — the
+            field's own ``atoms`` table where it carries ``q``, else the
+            system's ``atoms.q``, else zeros (``atom_style full`` has a charge
+            column either way, so "no charge source" is 0, not absent).
+        bond_type: Class of every bond of ``system["bonds"]``.
+        bond_labels: Label of every bond type (``b1``…).
+        angle_type: Class of every angle of ``system["angles"]``.
+        angle_labels: Label of every angle type (``a1``…).
+        proper_type: Class of every proper torsion of ``system["propers"]``.
+        proper_labels: Label of every proper type (``d1``…, for *dihedral*).
+
+    Impropers have no fields here. They were typed and labelled (``i1``…) until
+    2026-09-08 with nothing on either side of the seam reading either one —
+    :meth:`ForceField.realize` registers no improper type and
+    :class:`~molix.ff_export.LammpsWriter` writes no improper section, both
+    because molpy's LAMMPS include writer takes the harmonic form only. A
+    numbering no file states is not a smaller version of the gap, it is a
+    second thing to keep in step with the first; the day the form is
+    registered, the fields come back beside their writer (see
+    :meth:`ForceField.assign_types` for the limitation itself).
+    """
+
+    atom_type: tuple[int, ...]
+    atom_labels: tuple[str, ...]
+    atom_charges: tuple[float, ...]
+    bond_type: tuple[int, ...] = ()
+    bond_labels: tuple[str, ...] = ()
+    angle_type: tuple[int, ...] = ()
+    angle_labels: tuple[str, ...] = ()
+    proper_type: tuple[int, ...] = ()
+    proper_labels: tuple[str, ...] = ()
 
 
 def _optional_float(value: float | str | None) -> float | None:
@@ -209,16 +377,104 @@ class ForceField(MolpyForceField):
         ``nn.Module`` (MACE, PiNet, …) is the MLIP pair term — same seam,
         same ForceField. Periodicity is the neighbour list's job, not a
         second ForceField class.
+
+        **Re-declaring a style updates the options you name and keeps the
+        rest.** A second declaration is how a caller states one option on a
+        template that already declared the others —
+        ``OPLSAAForceField().def_pairstyle("lj/cut", cutoff=12.0)`` gives the
+        template's Lennard-Jones a cutoff and leaves its ``mixing="geometric"``
+        standing. Replacing the whole option dict instead, as this did until
+        2026-09-08, dropped that rule in one line and returned the model to
+        Lorentz–Berthelot ``σ``: a different force field on every pair of
+        unequal sizes, stated nowhere (ledger finding **F24**). Naming an
+        option again overrides it, so ``mixing=`` is still how the rule is
+        changed.
+
+        Only the *options* merge. molpy's side of the declaration re-registers
+        the style itself, so any types :meth:`realize` put on it do not survive
+        a second declaration: declare a field, then realize it, never the other
+        way round (which is why the writers realize a :meth:`clone`).
+
+        Option values are kept as given and resolved once, in
+        :meth:`_nonbonded_method_record`. Option *keys* are checked here,
+        against the style's :attr:`~molpot.forcefield.schema.StyleSchema.options`
+        — the only place that knows which keywords are ever read. An unknown key
+        used to be stored and then silently never looked at, so
+        ``def_pairstyle("lj/cut", mixng="geometric")`` ran Lorentz–Berthelot and
+        every description of the model agreed with the run rather than with the
+        intent. The one option with a *closed value* vocabulary — ``lj/cut``'s
+        ``mixing`` — has its value checked here too, for the same reason: a rule
+        is model identity, and an unrecognised one would otherwise reach a
+        manifest describing a model nothing can evaluate. Declaring is where
+        both fail.
+
+        An unregistered style name is left alone: it has no schema to check
+        against, and :class:`~molpot.forcefield.Potentials` refuses it by name
+        when the ForceField is assembled. The MLIP branch likewise keeps its
+        options unchecked — an ``nn.Module`` pair term is not a registered
+        style and has no declared keyword set.
+
+        Args:
+            name: Style name, or the ``nn.Module`` of an MLIP pair term.
+            **options: Style options, e.g. ``cutoff`` / ``switch_start`` (Å) and
+                ``mixing`` (:class:`~molpot.potentials.vdw.lj126.MixingRule`
+                value) for ``lj/cut``.
+
+        Returns:
+            ``self``, so declarations chain.
+
+        Raises:
+            ValueError: An option key the style does not declare, or a
+                ``mixing`` value naming no
+                :class:`~molpot.potentials.vdw.lj126.MixingRule`.
         """
         if not isinstance(name, str):
             self._mlip = name
             if options:
-                self._style_options["pair:mlip"] = dict(options)
+                self._style_options.setdefault("pair:mlip", {}).update(options)
             return self
+        key = f"pair:{name}"
+        self._check_style_options(key, options)
         super().def_pairstyle(name)
         if options:
-            self._style_options[f"pair:{name}"] = dict(options)
+            self._style_options.setdefault(key, {}).update(options)
         return self
+
+    @staticmethod
+    def _check_style_options(key: str, options: Mapping[str, Any]) -> None:
+        """Refuse a declaration a registered style could not read (fail closed).
+
+        Keys come from the registry
+        (:meth:`~molpot.forcefield.schema.PotentialMeta.options_for`); the
+        ``mixing`` *value* is checked against
+        :class:`~molpot.potentials.vdw.lj126.MixingRule` and only for
+        ``pair:lj/cut``, whose option it is — on any other style ``mixing`` is
+        an unknown key, which the first check has already rejected.
+
+        Args:
+            key: Style key being declared, ``"<category>:<name>"``.
+            options: The keyword options passed with the declaration.
+
+        Raises:
+            ValueError: An option key the style does not declare, or a
+                ``mixing`` value naming no :class:`MixingRule`.
+        """
+        try:
+            accepted = PotentialMeta.options_for(key)
+        except KeyError:
+            return
+        for name in options:
+            if name not in accepted:
+                allowed = ", ".join(accepted) or "(none)"
+                raise ValueError(f"{key} has no option {name!r}; options: {allowed}")
+        if key == "pair:lj/cut" and "mixing" in options:
+            try:
+                MixingRule(options["mixing"])
+            except ValueError:
+                allowed = ", ".join(repr(rule.value) for rule in MixingRule)
+                raise ValueError(
+                    f"unknown LJ mixing rule {options['mixing']!r}; allowed: {allowed}"
+                ) from None
 
     def style_options(self, key: str) -> dict[str, Any]:
         """Options registered for a style key (e.g. ``pair:lj/cut``)."""
@@ -260,6 +516,37 @@ class ForceField(MolpyForceField):
         return self._params.get(category)
 
     def clone(self) -> Self:
+        """A second container describing the same model — the base of every copy-on-write.
+
+        **By value** — the clone owns these and may be rewritten without the
+        receiver noticing: the parameter tables (:meth:`params`, one fresh dict
+        per category; the tensors themselves are shared, which is what makes
+        :meth:`with_params` / :meth:`to_dtype` copy-on-write rather than a deep
+        copy), the per-style options (:meth:`style_options`), the exclusion
+        policy (:attr:`nonbonded_scaling`, re-assigned through the setter so
+        molpy's ``special_bonds`` arrays are mirrored on the clone too), and the
+        molpy style registry, which is rebuilt by re-declaring each name.
+
+        **By reference** — the mlip pair term (``def_pairstyle(module)``). This
+        is a clone of the *container*, not of the network: the clone evaluates
+        the same ``nn.Module``, sharing its parameters, its buffers, and any
+        compiled core installed on it. That is the intended meaning — restating
+        a field at another dtype or with fitted tables must not fork the model
+        being trained — and it is why the carry lives here rather than in the
+        callers: rebuilding styles by name cannot reach the mlip, because the
+        mlip *has* no name (it is the module), so a clone that stopped at the
+        registry handed :meth:`to_potentials` ``mlip=None`` and evaluated a
+        silently zero-energy field.
+
+        The mlip is deliberately not a molpy style — the term loop of
+        :class:`~molpot.forcefield.Potentials` is empty for an mlip field — so
+        there is nothing for :meth:`has_style` / :meth:`style_names` to carry
+        beyond its ``"pair:mlip"`` options entry, which travels with the rest by
+        value; both containers report the same style set either way.
+
+        Returns:
+            A new container of this class describing the same model.
+        """
         # molrs __new__ only accepts (name, units); set Python fields after.
         # Subclass __init__ may already register styles — skip those.
         out = type(self)(self.name, self.units)
@@ -271,6 +558,49 @@ class ForceField(MolpyForceField):
             getattr(out, f"def_{cat}style")(sname)
         out._style_options = {k: dict(v) for k, v in self._style_options.items()}
         out._params = {cat: dict(p) for cat, p in self._params.items()}
+        out._mlip = self._mlip
+        return out
+
+    def to_dtype(self, dtype: torch.dtype) -> Self:
+        """Copy-on-write: the same field with every float parameter table at ``dtype``.
+
+        The precision of a *field* is the precision of its numbers, and they do
+        not all live in one place: the assembled :class:`Potentials` registers
+        the bonded tables as buffers (so ``.to(dtype)`` reaches those), while
+        the per-atom nonbonded ones — ``atoms.epsilon`` / ``atoms.sigma`` /
+        ``atoms.q`` — are read live off this container on every evaluation and
+        no module cast can see them. This method is the container's half:
+        restate every table, then assemble. Both halves together are what
+        ``MD(dtype, potential_dtype=…)`` means by evaluating a potential at a
+        second precision (:class:`molix.md.MD`).
+
+        The reason molnex has that seam at all is the
+        quantization-as-thermal-noise study in :mod:`molix.quant`, whose
+        operating point is an fp64 trajectory over an fp32 potential: lowering
+        the *potential's* precision perturbs the forces, and the effect of that
+        perturbation on the trajectory can only be read against an integrator
+        that is not itself a second noise source. Running the whole loop at
+        fp32 confounds the two.
+
+        Copy-on-write like :meth:`with_params`: the receiver keeps its own
+        tensors, and only floating tables are touched — type-id and index
+        columns keep their integer dtype, which a blanket ``.to(dtype)`` would
+        destroy.
+
+        Args:
+            dtype: Floating dtype for every float parameter table.
+
+        Returns:
+            A new container of this class at ``dtype``.
+        """
+        out = self.clone()
+        out._params = {
+            category: {
+                name: value.to(dtype) if value.is_floating_point() else value
+                for name, value in table.items()
+            }
+            for category, table in self._params.items()
+        }
         return out
 
     def with_params(
@@ -304,129 +634,344 @@ class ForceField(MolpyForceField):
         del frame
         return Potentials(self, **kwargs)
 
-    @staticmethod
-    def _identity_type_width(n_atoms: int) -> int:
-        """Digit width :meth:`identity_type_label` pads to for ``n_atoms`` atoms.
+    def neighbor_list(self, *, pbc: bool = False, max_num_pairs: int = 512) -> NeighborList:
+        """The :class:`~molix.batch.NeighborList` this field is priced against (F21).
 
-        Private, and the **only** place the width is derived: molnex writes the
-        same labels on both sides of the molpy seam
-        (:meth:`realize` and :meth:`molix.ff_export.LammpsWriter.to_frame`), and
-        a width computed twice is a width that can differ once.
+        Since ``composable-a0-03b`` molpot consumes a placed ``edges`` namespace
+        and never enumerates one: the live pair set of every nonbonded term *is*
+        whatever list the batch carries. Which radius that list has to reach is
+        therefore not the caller's taste but this field's identity — the largest
+        radius among **the terms that will run**, each already resolved once by
+        :meth:`_nonbonded_method_record`. A list built shorter than that
+        silently drops every pair between the two radii, with nothing raised:
+        the private ``LJ_CUT_CUTOFF = 10.0`` the four fitting scripts each kept
+        a copy of would take a periodic OPLS-AA model, whose real-space Coulomb
+        reaches 15 Å, down to under a third of its electrostatic pairs (ledger
+        finding **F21**).
+
+        **``pbc`` is the switch between the two Coulomb terms.**
+        :meth:`Potentials._assemble_pair_potentials` builds *both* — the
+        truncated open sum
+        (:class:`~molpot.forcefield.pair_terms.CoulombOpenPotential`) and the
+        lattice sum (:class:`~molpot.forcefield.pair_terms.CoulombPeriodicPotential`,
+        PME by default) — and picks between them by whether the batch carries a
+        cell. The record therefore describes both possibilities at once, and
+        its :attr:`~molpot.ir.nonbonded.NonbondedMethodRecord.is_lattice_sum`
+        cannot be the discriminator: an undeclared ``calculator`` resolves to
+        the ``pme`` default, so it is true for *every* declared ``pair:coulomb``,
+        including a model that will only ever run open. The data settles it, so
+        ``pbc`` does: periodic → the Ewald split's ``real_space_cutoff``; open →
+        the declared ``coulomb_cutoff``.
+
+        An open ``pair:coulomb`` with no cutoff has no radius at all — it is the
+        full ``N(N-1)/2`` sum, which no finite list reproduces — so it is
+        refused rather than given a number nobody chose. That is why
+        ``OPLSAAForceField().neighbor_list()`` raises by design: the template
+        declares ``pair:coulomb`` bare, which under open boundaries is
+        untruncated electrostatics. The same field is well defined the moment
+        the boundary is stated — ``neighbor_list(pbc=True)`` is 15.0 Å, the
+        ``3 × smearing`` real-space split — or the moment the truncation is,
+        ``def_pairstyle("coulomb", cutoff=…)``.
+
+        ``symmetry`` is not an argument, because only one value of it is alive:
+        :meth:`Potentials._placed_pairs` prices the ``source < target`` half of
+        a bidirectional list, and ``NeighborList(symmetry=False)`` emits the
+        *other* half, which every pair term multiplies by an all-false mask —
+        an energy of exactly zero, refused at
+        :meth:`Potentials.bind_topology` since ``composable-a0-03b`` rather
+        than run (ledger finding **F22**). So the list handed out here is
+        always full bidirectional.
+
+        ``pbc`` and ``max_num_pairs`` are properties of the *data*, not of the
+        model: the same parameters price an isolated molecule and a periodic
+        box, and the pair buffer is sized by the systems being batched. They are
+        forwarded so a caller never has to rebuild the list by hand to change
+        one — the path by which a script ends up enumerating a graph at a radius
+        its force field does not run at.
+
+        **What this list does not carry.**
+        :meth:`molix.batch.NeighborList.execute` writes ``edges.edge_index``,
+        ``edges.edge_diff`` and ``edges.edge_dist`` — no ``edges.shifts``, the
+        per-pair lattice remainder in Å. Energies and forces are exact without
+        it, but :meth:`Potentials.calc_energy_forces_virial` refuses a batch
+        under a cell that has none, because the remainder it would otherwise
+        rebuild is a detached constant that carries no lattice strain (ledger
+        finding **F13**). A run that needs the virial builds its list with
+        :class:`molix.md.NeighborList`, which writes ``shifts``.
 
         Args:
-            n_atoms: Number of atoms in the system being exported, i.e. of
-                identity types to name.
+            pbc: Whether the batched systems are periodic — both the boundary
+                the list itself applies (minimum image against ``graphs.cell``
+                ``(B, 3, 3)`` in Å) and the statement of which Coulomb term the
+                model will run.
+            max_num_pairs: Half-pair buffer the C++ kernel is given, a count
+                rather than a length; the list grows it to ``N(N-1)/2`` when a
+                system needs more.
 
         Returns:
-            The number of decimal digits in ``n_atoms`` — ``1`` for a system of
-            nine atoms or fewer, ``2`` up to ninety-nine, and so on. Never less
-            than ``1``, so an empty system still yields a usable width.
+            The list, at ``cutoff`` in Å and ``symmetry=True``, ready to mount
+            as a :class:`~molix.batch.task.BatchTask` (``DataModule(...,
+            batch_tasks=[ff.neighbor_list(), TotalCharge()])``) or to
+            ``execute`` on a batch at a collate site that bypasses one.
+
+        Raises:
+            ValueError: An open-boundary ``pair:coulomb`` (``pbc=False``) with
+                no declared cutoff, which is the untruncated ``N(N-1)/2`` sum;
+                an ``nn.Module`` (MLIP) pair term, whose radius is the
+                encoder's ``r_max`` and not a style option this record can
+                read — a field that prices its nonbonded energy through an
+                MLIP is asked for its list at the encoder's cutoff, not here;
+                or no pair style declared at all.
+
+        References:
+            ``.claude/notes/composable-potentials.md`` — findings **F21** (the
+            scripts that built lists at a radius their field did not run at),
+            **F22** (why ``symmetry=False`` reads as dead) and **F13** (the
+            missing ``shifts`` and the virial).
         """
-        return max(1, len(str(max(1, n_atoms))))
+        method = self._nonbonded_method_record()
+        radii: list[float] = []
+        if method.lj_cutoff is not None:
+            radii.append(float(method.lj_cutoff))
+        if self.has_coulomb():
+            if pbc:
+                if method.real_space_cutoff is None:
+                    # Unreachable through ``def_pairstyle``: the resolver derives
+                    # this radius from the smearing for every declared coulomb
+                    # style. A ``None`` here is that resolver disagreeing with
+                    # itself, not a user error — and a zero-radius list would be
+                    # an empty electrostatics nobody asked for.
+                    raise ValueError(
+                        "the nonbonded record declares pair:coulomb but leaves "
+                        "'real_space_cutoff' unset; there is no periodic radius to cover"
+                    )
+                radii.append(float(method.real_space_cutoff))
+            elif method.coulomb_cutoff is not None:
+                radii.append(float(method.coulomb_cutoff))
+            else:
+                raise ValueError(
+                    "open-boundary Coulomb without a cutoff needs every pair; "
+                    "declare cutoff=... on pair:coulomb or build the list with "
+                    "pbc=True for a periodic system"
+                )
+        if not radii:
+            if self._mlip is not None:
+                # The MLIP is a pair term with no style options: its radius is
+                # a property of the encoder (``r_max`` on its config), which
+                # this record never reads. Naming a radius here would be this
+                # field guessing at another object's cutoff.
+                raise ValueError(
+                    "the pair term is an MLIP module: its cutoff is the encoder's "
+                    "own (r_max on its config), not this force field's record; "
+                    "build the list at that radius"
+                )
+            raise ValueError("no pair style declared: nothing to price")
+        return NeighborList(
+            cutoff=max(radii),
+            max_num_pairs=max_num_pairs,
+            pbc=pbc,
+            symmetry=True,
+        )
 
-    @staticmethod
-    def identity_type_label(index: int, n_atoms: int) -> str:
-        """Name of the identity type of atom ``index`` in an ``n_atoms`` system.
+    def assign_types(
+        self,
+        system: Any,
+        *,
+        masses: torch.Tensor | list[float] | None = None,
+    ) -> TypeAssignment:
+        """Condense ``system`` onto LAMMPS types by parameter equality (F25).
 
-        ``"t1"``/``"t2"`` for a pair of atoms, ``"t01"``…``"t26"`` for
-        twenty-six. Identity typing gives every atom its own type, so the only
-        question a name has to answer is *which atom* — but it has to answer it
-        in a form LAMMPS accepts, and there are two separate constraints:
+        A LAMMPS type is an equivalence class of *parameters*, not an atom: two
+        atoms carrying the same mass, charge and Lennard-Jones pair
+        (``ε`` kcal/mol, ``σ`` Å) are one atom type, and two interactions between
+        the same atom types with the same force constants are one bonded type.
+        molnex exported one type per atom and one per interaction until
+        2026-09-08 — *identity typing*, the ``composable-a0`` shortcut. That is
+        correct and quadratic: with the explicit ``pair_coeff i j`` lines
+        :meth:`molix.ff_export.LammpsWriter.write_pair_block` has to write, 26
+        atoms cost 351 coefficient lines and 1000 atoms half a million, plus a
+        type label apiece in the data file (ledger debt **F25**). Condensing
+        costs one pass over the system and leaves that block ``T(T+1)/2`` lines
+        in the number of *distinct* types — ten lines for the 26-atom water/ion
+        box of ``interface/tests/parity_classical.py``, which has four.
 
-        **It must not begin with a digit.** These strings leave molnex as LAMMPS
-        *type labels*: molpy writes them into the ``Atom Type Labels`` section of
-        the data file and onto the ``*_coeff`` lines of the include, and a bare
-        ``"1"`` / ``"1-2"`` makes ``read_data`` stop at
-        ``ERROR: Invalid type label 1-2``, so no exported system carrying bonds
-        can be read at all.
+        This is the **single owner** of the mapping. :meth:`realize` registers
+        one molpy type per class from it, and
+        :class:`~molix.ff_export.LammpsWriter` labels the data file's atoms and
+        interactions from the same object. Two independent condensations are two
+        numberings that can differ once, and the deck states its coefficients by
+        number — a numbering that slips is a ``pair_coeff`` line reading another
+        type's ``ε`` / ``σ``, which LAMMPS accepts without a word.
 
-        **They must all be the same length.** molrs numbers a data file's types
-        by sorting their labels *as text*, and decimal strings sort in numeric
-        order only when equally long: unpadded ``t1 … t26`` sorts
-        ``t1, t10, …, t19, t2, t20, …``, so LAMMPS type ``2`` is atom 10 and
-        every numeric ``pair_coeff i j``
-        (:meth:`molix.ff_export.LammpsWriter.write_pair_block`) reads another
-        atom's Lennard-Jones well depth ``ε`` (kcal/mol) and diameter ``σ`` (Å).
-        Measured on a 26-atom water/ion box exported that way, ``E_vdwl`` —
-        LAMMPS' name for the summed Lennard-Jones energy — came out
-        ``-0.2251 kcal/mol`` against molnex's ``-0.8163 kcal/mol``, no warning.
-        Systems of nine atoms or fewer are unaffected, which is why this stayed
-        invisible until a real box was exported — and why ``n_atoms`` is
-        required rather than defaulted. A default width would be correct for
-        small systems, silently wrong for the rest, and impossible to see at the
-        call site.
+        **What enters a key.** Exactly the parameters :meth:`realize` would hand
+        to molpy's ``def_type``, compared as bit-exact fp64: mass, charge and the
+        Lennard-Jones pair for an atom, dropping any of them the field carries no
+        table for (a field with no charges types by mass alone); the ordered
+        tuple of atom types plus the interaction's own parameters for a bonded
+        type, so two O–H bonds with different ``(k, r0)`` stay two types. An atom
+        type is therefore "the atoms molpy would be given identical parameters
+        for", which is the only grouping that cannot change what the deck means.
+
+        **Labels.** ``t``/``b``/``a``/``d`` for atoms / bonds / angles /
+        propers, numbered from 1 in first-occurrence order and
+        zero-padded to the type count, so text order — the order molrs numbers a
+        data file's types in — is class order (:func:`_type_labels`).
+
+        The per-atom charges that entered the atom key travel out on the
+        assignment (:attr:`TypeAssignment.atom_charges`), because the data file
+        has to state the same ones it typed the atoms by — see that attribute.
+
+        **Impropers are not typed at all.** :meth:`realize` registers no
+        improper type — molpy's LAMMPS include writer takes the harmonic form
+        only, and ``improper:periodic``, the form :class:`OPLSAAForceField`
+        declares, has no spelling to be registered under — and
+        :class:`~molix.ff_export.LammpsWriter` writes no improper section, so a
+        field whose impropers carry energy exports a deck that omits that term
+        (ledger debt **F25**). They *were* keyed here, by their atom types
+        alone, and labelled ``i1``… for a writer that has never read either;
+        that numbering was deleted on 2026-09-08 rather than kept warm, since
+        an unread class map is one more thing to keep in step with the file it
+        does not appear in. It returns when the form does — with parameters in
+        :meth:`_proper_params`' shape, so the types split by force constant
+        like every other bonded class.
 
         Args:
-            index: 0-based atom index.
-            n_atoms: Number of identity types, i.e. of atoms in the system being
-                exported. Both sides of the molpy seam pass the same count, which
-                is what makes them spell every type identically.
+            system: Post-collate nested batch. Read here: ``atoms.pos``
+                ``(N, 3)`` in Å — only its length — ``atoms.q`` in units of the
+                elementary charge ``e`` when no ``q`` parameter table is filled,
+                and the bonded namespaces ``bonds`` / ``angles`` / ``propers``
+                through their ``atomi`` … ``atoml`` index columns. An
+                ``impropers`` namespace is not read (above).
+            masses: Per-atom mass in amu ``(N,)``. Default: ``12.011`` amu — the
+                mass of carbon — for every atom. Mass is part of the atom key, so
+                the default collapses a mixed system onto fewer types than it
+                has species; pass the real masses to any export that will move.
 
         Returns:
-            The label. Bonded labels are the join of their atoms' labels
-            (``"t1-t2"``) — molpy's own composition rule, not restated here.
+            The assignment.
+
+        Raises:
+            TypeError: ``system["atoms"]["pos"]`` is not a tensor.
+            ValueError: ``masses`` or a parameter table has a different length
+                than ``atoms.pos``.
+            KeyError: A bonded namespace is present but missing one of the index
+                columns its arity needs.
+
+        References:
+            ``.claude/notes/composable-potentials.md`` — finding **F25**
+            (identity typing and the quadratic pair block it forced), closed by
+            this method.
         """
-        return f"t{index + 1:0{ForceField._identity_type_width(n_atoms)}d}"
+        pos = self._system_tensor(system, "atoms", "pos")
+        n_atoms = int(pos.shape[0])
+        atom_type, n_atom_types = _condense(
+            _param_key(row) for row in self._atom_params(system, n_atoms, masses)
+        )
+        # The same resolver ``_atom_params`` keyed the atoms with, so the charge
+        # the deck writes is the charge its typing was computed from.
+        charges = self._charge_list(system, n_atoms)
+        bonds = self._arity(system, "bonds", 2)
+        angles = self._arity(system, "angles", 3)
+        propers = self._arity(system, "propers", 4)
+        bond_type, n_bond_types = _condense(
+            _bonded_keys(atom_type, bonds, self._bond_params(len(bonds)))
+        )
+        angle_type, n_angle_types = _condense(
+            _bonded_keys(atom_type, angles, self._angle_params(len(angles)))
+        )
+        proper_type, n_proper_types = _condense(
+            _bonded_keys(atom_type, propers, self._proper_params(len(propers)))
+        )
+        return TypeAssignment(
+            atom_type=atom_type,
+            atom_labels=_type_labels("t", n_atom_types),
+            atom_charges=tuple(charges) if charges is not None else (0.0,) * n_atoms,
+            bond_type=bond_type,
+            bond_labels=_type_labels("b", n_bond_types),
+            angle_type=angle_type,
+            angle_labels=_type_labels("a", n_angle_types),
+            proper_type=proper_type,
+            proper_labels=_type_labels("d", n_proper_types),
+        )
 
     def realize(
         self,
         system: Any,
         *,
         masses: torch.Tensor | list[float] | None = None,
+        types: TypeAssignment | None = None,
     ) -> Self:
         """Fill native molpy type tables from torch params + topology.
 
-        Identity types: one atom type per atom, one bonded type per
-        interaction, named by :meth:`identity_type_label`. After this,
-        :mod:`molpy.io` can write ``self`` directly.
+        One molpy type per class of :meth:`assign_types` — the condensed typing
+        that replaced one-type-per-atom on 2026-09-08 (ledger debt **F25**) —
+        registered under that method's labels. After this, :mod:`molpy.io` can
+        write ``self`` directly. Bonded types are given their label explicitly
+        (``def_type(…, name="b1")``) rather than letting molpy compose one from
+        the atom types: two O–H bonds with different force constants share their
+        atom types, so a composed name would collide and one of the two
+        ``bond_coeff`` lines would silently disappear.
 
         Mutates this container in place, which is why the writers clone first
         (:meth:`molix.ff_export.LammpsWriter.write_settings` realizes
-        ``forcefield.clone()``): a realized field carries one type per atom of
-        *that* system and is no longer a template for any other.
+        ``forcefield.clone()``): a realized field carries the types of *that*
+        system and is no longer a template for any other.
+
+        **One condensation per deck.** A caller that already holds the
+        assignment — every exporter does, because the data file has to label
+        the same classes this registers — passes it as ``types`` and this
+        computes none. It used to condense unconditionally, so writing one deck
+        ran :meth:`assign_types` three times over the same system (once for the
+        caller, once for the writer's own equality guard, once here) to reach
+        the answer it was handed.
 
         Args:
-            system: Post-collate nested batch. Read here: ``atoms.pos``
-                ``(N, 3)`` in Å — only its length, since coordinates belong in
-                the data file and not in a type — ``atoms.q`` in units of the
-                elementary charge ``e`` when no ``q`` parameter table is
-                filled, and the bonded namespaces ``bonds`` / ``angles`` /
-                ``propers`` through their ``atomi`` … ``atoml`` index columns.
-            masses: Per-atom mass in amu ``(N,)``. Default: ``12.011`` amu —
-                the mass of carbon — for every atom, which suffices for a
+            system: Post-collate nested batch; see :meth:`assign_types` for the
+                columns read.
+            masses: Per-atom mass in amu ``(N,)``. Default: ``12.011`` amu — the
+                mass of carbon — for every atom, which suffices for a
                 single-point energy and is wrong for anything that integrates.
+                Read whether or not ``types`` is given — the mass a type is
+                *registered* with comes from here — so it must be the same
+                ``masses`` the given assignment was condensed at, mass being
+                part of an atom key.
+            types: This system's typing under this field. Passing one **asserts
+                it is this field's own** — ``self.assign_types(system,
+                masses=masses)`` — and nothing re-derives it to check: an
+                assignment from another field, another system or other masses
+                would register molpy types under labels its data file never
+                uses, which LAMMPS reads as a shifted numbering without
+                complaint. Default: condense it here.
 
         Returns:
             ``self``, so the call chains straight into a molpy writer.
 
         Raises:
             TypeError: ``system["atoms"]["pos"]`` is not a tensor.
-            ValueError: ``masses`` has a different length than ``atoms.pos``.
+            ValueError: ``masses`` — or one of the parameter tables the types
+                are keyed on — has a different length than ``atoms.pos``
+                (raised through :meth:`assign_types`).
             KeyError: A bonded namespace is present but missing one of the
                 index columns its arity needs.
         """
+        if types is None:
+            types = self.assign_types(system, masses=masses)
         pos = self._system_tensor(system, "atoms", "pos")
         n_atoms = int(pos.shape[0])
-        mass_list = self._mass_list(masses, n_atoms)
-        charges = self._charge_list(system, n_atoms)
         astyle = self.get_style("atom", "full")
         if astyle is None:
             self.def_atomstyle("full")
             astyle = self.get_style("atom", "full")
-        atom_types = []
-        atoms = self.params("atoms")
-        for i in range(n_atoms):
-            kwargs: dict[str, Any] = {"mass": mass_list[i]}
-            if charges is not None:
-                kwargs["charge"] = charges[i]
-            if atoms is not None and "epsilon" in atoms and "sigma" in atoms:
-                kwargs["epsilon"] = float(atoms["epsilon"][i].item())
-                kwargs["sigma"] = float(atoms["sigma"][i].item())
-            atom_types.append(astyle.def_type(self.identity_type_label(i, n_atoms), **kwargs))
-        self._realize_bonds(system, atom_types)
-        self._realize_angles(system, atom_types)
-        self._realize_propers(system, atom_types)
-        self._realize_pairs(atom_types)
+        params = self._atom_params(system, n_atoms, masses)
+        atom_reps = _representatives(types.atom_type, len(types.atom_labels))
+        atom_types = [
+            astyle.def_type(label, **params[rep])
+            for label, rep in zip(types.atom_labels, atom_reps, strict=True)
+        ]
+        self._realize_bonds(system, atom_types, types)
+        self._realize_angles(system, atom_types, types)
+        self._realize_propers(system, atom_types, types)
+        self._realize_pairs(atom_types, atom_reps)
         return self
 
     def to_ir(self) -> PotentialIR:
@@ -504,6 +1049,13 @@ class ForceField(MolpyForceField):
         cutoff — stay ``None`` when unset: they mean "no window" and "no
         truncation", which are absences rather than numbers.
 
+        The Lennard-Jones combining rule is a plain fallback like the cutoffs
+        (:attr:`~molpot.forcefield.potentials.PairStyleDefaults.lj_mixing`), and
+        the only one whose value set is closed — :meth:`def_pairstyle` already
+        refused anything outside
+        :class:`~molpot.potentials.vdw.lj126.MixingRule`, so what is read back
+        here is a rule that exists.
+
         Returns:
             The record. A ForceField with no pair style gets one with every
             field ``None`` rather than no record at all, so a consumer branches
@@ -512,6 +1064,7 @@ class ForceField(MolpyForceField):
         defaults = PAIR_STYLE_DEFAULTS
         lj_cutoff: float | None = None
         lj_switch_start: float | None = None
+        lj_mixing: str | None = None
         coulomb_cutoff: float | None = None
         coulomb_calculator: str | None = None
         real_space_cutoff: float | None = None
@@ -523,6 +1076,7 @@ class ForceField(MolpyForceField):
             lj = self.style_options("pair:lj/cut")
             lj_cutoff = float(lj.get("cutoff", defaults.lj_cutoff))
             lj_switch_start = _optional_float(lj.get("switch_start"))
+            lj_mixing = str(lj.get("mixing", defaults.lj_mixing))
         if self.has_coulomb():
             coulomb = self.style_options("pair:coulomb")
             coulomb_cutoff = _optional_float(coulomb.get("cutoff"))
@@ -540,6 +1094,7 @@ class ForceField(MolpyForceField):
         return NonbondedMethodRecord(
             lj_cutoff=lj_cutoff,
             lj_switch_start=lj_switch_start,
+            lj_mixing=lj_mixing,
             coulomb_cutoff=coulomb_cutoff,
             coulomb_calculator=coulomb_calculator,
             real_space_cutoff=real_space_cutoff,
@@ -679,7 +1234,91 @@ class ForceField(MolpyForceField):
             idivf=idivf,
         )
 
-    def _realize_bonds(self, system: Any, atom_types: list[Any]) -> None:
+    def _atom_params(
+        self,
+        system: Any,
+        n_atoms: int,
+        masses: torch.Tensor | list[float] | None,
+    ) -> list[dict[str, float]]:
+        """The molpy ``AtomStyle.def_type`` parameters of every atom.
+
+        One mapping per atom: ``mass`` in amu always, ``charge`` in ``e`` when
+        the field's ``atoms`` table or the system carries charges, and
+        ``epsilon`` (kcal/mol) / ``sigma`` (Å) when the ``atoms`` table carries
+        both. These are both the atom key :meth:`assign_types` groups on and the
+        coefficients :meth:`realize` registers — one function, so a type can
+        never be a class of atoms that would have been registered differently.
+
+        Raises:
+            ValueError: A table does not have one row per atom. Silently reading
+                the first ``n_atoms`` rows of a longer table would type the
+                system against another system's parameters.
+        """
+        rows: list[dict[str, float]] = [{"mass": mass} for mass in self._mass_list(masses, n_atoms)]
+        charges = self._charge_list(system, n_atoms)
+        if charges is not None:
+            for row, charge in zip(rows, charges, strict=True):
+                row["charge"] = charge
+        atoms = self.params("atoms")
+        if atoms is not None and "epsilon" in atoms and "sigma" in atoms:
+            epsilon = [float(x) for x in atoms["epsilon"].detach().cpu().reshape(-1).tolist()]
+            sigma = [float(x) for x in atoms["sigma"].detach().cpu().reshape(-1).tolist()]
+            for row, eps, sig in zip(rows, epsilon, sigma, strict=True):
+                row["epsilon"] = eps
+                row["sigma"] = sig
+        return rows
+
+    def _bond_params(self, count: int) -> list[dict[str, float]]:
+        """``BondStyle.def_type`` parameters of every bond — ``k``, ``r0``.
+
+        Empty mappings when the field declares no harmonic bond style or carries
+        no ``bonds`` table: :meth:`realize` registers nothing for those bonds, so
+        nothing distinguishes them beyond the atom types they join.
+        """
+        bp = self.params("bonds")
+        if self.bond_style() != "harmonic" or bp is None:
+            return [{} for _ in range(count)]
+        return [
+            {"k": float(bp["k"][n].item()), "r0": float(bp["r0"][n].item())} for n in range(count)
+        ]
+
+    def _angle_params(self, count: int) -> list[dict[str, float]]:
+        """``AngleStyle.def_type`` parameters of every angle — ``k``, ``theta0``."""
+        ap = self.params("angles")
+        if self.angle_style() != "harmonic" or ap is None:
+            return [{} for _ in range(count)]
+        return [
+            {"k": float(ap["k"][n].item()), "theta0": float(ap["theta0"][n].item())}
+            for n in range(count)
+        ]
+
+    def _proper_params(self, count: int) -> list[dict[str, float]]:
+        """``DihedralStyle.def_type`` parameters of every proper torsion.
+
+        ``c1``…``c4`` for the OPLS ``k1``…``k4`` table, and the first cosine
+        amplitude ``k`` otherwise — the same two spellings :meth:`_realize_propers`
+        registers, since the type key is defined as what would be registered.
+        """
+        pp = self.params("propers")
+        if self.dihedral_style() is None or pp is None:
+            return [{} for _ in range(count)]
+        if "k1" in pp:
+            return [
+                {
+                    "c1": float(pp["k1"][n].item()),
+                    "c2": float(pp["k2"][n].item()),
+                    "c3": float(pp["k3"][n].item()),
+                    "c4": float(pp["k4"][n].item()),
+                }
+                for n in range(count)
+            ]
+        k = pp["k"]
+        return [
+            {"k": float(k[n].reshape(-1)[0].item()) if k.ndim == 1 else float(k[n, 0].item())}
+            for n in range(count)
+        ]
+
+    def _realize_bonds(self, system: Any, atom_types: list[Any], types: TypeAssignment) -> None:
         if self.bond_style() != "harmonic":
             return
         bp = self.params("bonds")
@@ -687,15 +1326,21 @@ class ForceField(MolpyForceField):
         if bp is None or not bonds:
             return
         bstyle = self.get_style("bond", "harmonic")
-        for n, (i, j) in enumerate(bonds):
+        params = self._bond_params(len(bonds))
+        for label, rep in zip(
+            types.bond_labels,
+            _representatives(types.bond_type, len(types.bond_labels)),
+            strict=True,
+        ):
+            i, j = bonds[rep]
             bstyle.def_type(
-                atom_types[i],
-                atom_types[j],
-                k=float(bp["k"][n].item()),
-                r0=float(bp["r0"][n].item()),
+                atom_types[types.atom_type[i]],
+                atom_types[types.atom_type[j]],
+                name=label,
+                **params[rep],
             )
 
-    def _realize_angles(self, system: Any, atom_types: list[Any]) -> None:
+    def _realize_angles(self, system: Any, atom_types: list[Any], types: TypeAssignment) -> None:
         if self.angle_style() != "harmonic":
             return
         ap = self.params("angles")
@@ -703,16 +1348,22 @@ class ForceField(MolpyForceField):
         if ap is None or not angles:
             return
         astyle = self.get_style("angle", "harmonic")
-        for n, (i, j, k) in enumerate(angles):
+        params = self._angle_params(len(angles))
+        for label, rep in zip(
+            types.angle_labels,
+            _representatives(types.angle_type, len(types.angle_labels)),
+            strict=True,
+        ):
+            i, j, k = angles[rep]
             astyle.def_type(
-                atom_types[i],
-                atom_types[j],
-                atom_types[k],
-                k=float(ap["k"][n].item()),
-                theta0=float(ap["theta0"][n].item()),
+                atom_types[types.atom_type[i]],
+                atom_types[types.atom_type[j]],
+                atom_types[types.atom_type[k]],
+                name=label,
+                **params[rep],
             )
 
-    def _realize_propers(self, system: Any, atom_types: list[Any]) -> None:
+    def _realize_propers(self, system: Any, atom_types: list[Any], types: TypeAssignment) -> None:
         style = self.dihedral_style()
         if style is None:
             return
@@ -721,42 +1372,35 @@ class ForceField(MolpyForceField):
         if pp is None or not propers:
             return
         dstyle = self.get_style("dihedral", style)
-        for n, (i, j, k, l) in enumerate(propers):
-            if "k1" in pp:
-                dstyle.def_type(
-                    atom_types[i],
-                    atom_types[j],
-                    atom_types[k],
-                    atom_types[l],
-                    c1=float(pp["k1"][n].item()),
-                    c2=float(pp["k2"][n].item()),
-                    c3=float(pp["k3"][n].item()),
-                    c4=float(pp["k4"][n].item()),
-                )
-            else:
-                dstyle.def_type(
-                    atom_types[i],
-                    atom_types[j],
-                    atom_types[k],
-                    atom_types[l],
-                    k=float(pp["k"][n].reshape(-1)[0].item())
-                    if pp["k"].ndim == 1
-                    else float(pp["k"][n, 0].item()),
-                )
+        params = self._proper_params(len(propers))
+        for label, rep in zip(
+            types.proper_labels,
+            _representatives(types.proper_type, len(types.proper_labels)),
+            strict=True,
+        ):
+            i, j, k, l = propers[rep]
+            dstyle.def_type(
+                atom_types[types.atom_type[i]],
+                atom_types[types.atom_type[j]],
+                atom_types[types.atom_type[k]],
+                atom_types[types.atom_type[l]],
+                name=label,
+                **params[rep],
+            )
 
-    def _realize_pairs(self, atom_types: list[Any]) -> None:
+    def _realize_pairs(self, atom_types: list[Any], atom_reps: Sequence[int]) -> None:
         if "lj/cut" not in self.pair_styles():
             return
         atoms = self.params("atoms")
         if atoms is None or "epsilon" not in atoms:
             return
         pstyle = self.get_style("pair", "lj/cut")
-        for i, at in enumerate(atom_types):
+        for at, rep in zip(atom_types, atom_reps, strict=True):
             pstyle.def_type(
                 at,
                 at,
-                epsilon=float(atoms["epsilon"][i].item()),
-                sigma=float(atoms["sigma"][i].item()),
+                epsilon=float(atoms["epsilon"][rep].item()),
+                sigma=float(atoms["sigma"][rep].item()),
             )
 
     @staticmethod
@@ -789,6 +1433,22 @@ class ForceField(MolpyForceField):
         return [float(x) for x in mass_t.tolist()]
 
     def _charge_list(self, system: Any, n_atoms: int) -> list[float] | None:
+        """Per-atom charge in ``e``, in one fixed order of precedence, or ``None``.
+
+        The field's own ``atoms`` table wins over the system's ``atoms.q``
+        column, because a trained or freshly assigned charge lives on the field
+        and the batch may still carry the charges it was read from disk with.
+        ``None`` means neither source exists — which :meth:`assign_types` turns
+        into zeros for the data file's charge column, since ``atom_style full``
+        has that column either way, while :meth:`_atom_params` instead omits
+        ``charge`` from the type key so a field with no charges types by mass
+        (and Lennard-Jones parameters) alone.
+
+        The **single** reader of both sources: :meth:`assign_types` keys the
+        atom types on what this returns and hands the same list out on
+        :attr:`TypeAssignment.atom_charges`, so the charges a deck states are
+        the charges its types were condensed by.
+        """
         atoms = self.params("atoms")
         if atoms is not None and "q" in atoms:
             return [float(x) for x in atoms["q"].detach().cpu().reshape(-1).tolist()]
@@ -820,8 +1480,25 @@ class OPLSAAForceField(ForceField):
     the AMBER ``5⁄6``. An explicit ``nonbonded_scaling`` is kept as given (not
     silently replaced).
 
+    The ``pair:lj/cut`` style is declared with ``mixing="geometric"``: OPLS-AA
+    combines **both** ``ε`` and ``σ`` geometrically (Jorgensen 1996), unlike the
+    Lorentz–Berthelot arithmetic ``σ`` of AMBER / CHARMM, which is molnex's
+    default and which molnex applied to this template too until 2026-09-08
+    (ledger finding ``F24``). The two differ on every pair of unequal sizes —
+    ``σ = 3.5 Å`` with ``2.5 Å`` gives ``2.958 Å`` rather than ``3.0 Å`` — so
+    the rule the parameters were fitted with has to be the rule they are
+    evaluated with, and it now rides on the model's
+    :class:`~molpot.ir.nonbonded.NonbondedMethodRecord` into every manifest and
+    exported deck.
+
     Units follow LAMMPS real: energy kcal/mol, length Å, charge ``e``. The
     scale factors themselves are dimensionless.
+
+    References:
+        Jorgensen, W. L.; Maxwell, D. S.; Tirado-Rives, J. "Development and
+        Testing of the OPLS All-Atom Force Field on Conformational Energetics
+        and Properties of Organic Liquids" J. Am. Chem. Soc. 118, 11225 (1996).
+        https://doi.org/10.1021/ja9621760
 
     Args:
         name: Force-field name (default ``"OPLS-AA"``).
@@ -848,5 +1525,5 @@ class OPLSAAForceField(ForceField):
         self.def_anglestyle("harmonic")
         self.def_dihedralstyle("opls")
         self.def_improperstyle("periodic")
-        self.def_pairstyle("lj/cut")
+        self.def_pairstyle("lj/cut", mixing="geometric")
         self.def_pairstyle("coulomb")

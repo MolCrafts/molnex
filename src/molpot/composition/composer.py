@@ -1,4 +1,30 @@
-"""Potential composer: head -> potential(mixing -> energy) -> forces."""
+"""Potential composer: head -> potential(mixing -> energy) -> forces.
+
+Assembles a force field out of two learnable halves. A **parameter head** turns
+the per-atom feature vectors an encoder produced into per-atom physical
+parameters (a well depth, a radius, a dispersion coefficient); a set of
+**potential terms** turn those into an energy. The composer owns the step
+between them: applying each term's **combining rule** — the function that makes
+one parameter per *pair* out of the two per-atom values at the ends of an edge,
+also called a mixing rule — and then summing the terms.
+
+The rule is read off the potential (``potential.mixing_fn``) rather than held
+here, so a term and the rule that feeds it travel together and the composer
+never has to know which parameters a given term wants. Each rule is called as
+``mixing_fn(atom_params, edge_index)`` with the head's per-atom dict and the
+``(E, 2)`` edge list, and returns a dict of per-pair ``(E,)`` tensors whose keys
+are exactly the keyword arguments that term's ``forward`` accepts — by
+convention the per-atom key with an ``_ij`` suffix. Key sets differ per term
+(:func:`~molpot.potentials.nonbonded.repulsion_mixing` and
+:func:`~molpot.potentials.vdw.lj126.lorentz_berthelot` share no keys at all), so
+rules are not interchangeable between terms.
+
+Units are the model's own: whatever the head emits, the terms consume and the
+energy comes back in. This path is *not* the unit-pinned Class-I force field —
+that is :class:`~molpot.forcefield.Potentials`, whose Lennard-Jones rule is a
+recorded :class:`~molpot.potentials.vdw.lj126.MixingRule` rather than a free
+callable, because there the rule is part of the exported model's identity.
+"""
 
 from __future__ import annotations
 
@@ -18,12 +44,25 @@ class PotentialComposer(nn.Module):
                 potential.mixing_fn(atom_params, edge_index) → pair_params
                 potential(distance, **pair_params) → energy
 
-    Each potential carries its own ``mixing_fn`` that knows how to
-    convert per-atom parameters to per-pair parameters.
+    Each potential carries its own ``mixing_fn``, the combining rule that turns
+    per-atom parameters into the per-pair ones that term prices; this class
+    applies it, and the module docstring states the contract in full. Terms are
+    summed, so ``head`` must emit every key every rule asks for — one head
+    serving several terms is the normal case, and rules ignore keys they do not
+    need.
 
     Args:
-        head: Maps node features to per-atom parameter dict.
-        potentials: Named potentials.
+        head: Maps per-atom features ``(N, D)`` to a dict of per-atom parameters,
+            each ``(N,)``, in the model's own units. Called as
+            ``head(node_features, **head_kwargs)``.
+        potentials: Name → potential term. Each must expose a ``mixing_fn``
+            attribute and accept the keys that rule returns as keyword arguments
+            of its ``forward``, alongside ``distance`` / ``edge_batch`` /
+            ``num_graphs``. Names label the per-term energies in the output.
+
+    Raises:
+        ValueError: ``potentials`` is empty — a composed force field with no
+            term has no energy to return.
     """
 
     def __init__(

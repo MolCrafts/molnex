@@ -17,9 +17,14 @@ from molpot.ir import NonbondedMethodRecord
 #: dimensionless capacity factor. ``real_space_cutoff`` is the derived
 #: ``PAIR_STYLE_DEFAULTS.real_space_cutoff_factor * smearing`` = 3 x 5, i.e.
 #: what a force field declaring only ``calculator="pme"`` actually runs at.
+#: ``lj_mixing`` is the ``PAIR_STYLE_DEFAULTS.lj_mixing`` fallback, so a test
+#: wanting the OPLS-AA rule states it with
+#: ``dataclasses.replace(..., lj_mixing="geometric")`` and the difference in the
+#: exported deck is attributable to that one field.
 PME_SWITCHED_METHOD = NonbondedMethodRecord(
     lj_cutoff=12.0,
     lj_switch_start=10.0,
+    lj_mixing="lorentz-berthelot",
     coulomb_cutoff=None,
     coulomb_calculator="pme",
     real_space_cutoff=15.0,

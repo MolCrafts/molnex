@@ -4,11 +4,12 @@ Drives a Lennard-Jones cluster (argon parameters, the LJ13 icosahedral minimum)
 under NVE with the compiled MD engine for a long trajectory, and checks the
 total energy shows no systematic drift — the gold-standard integrator test.
 
-Units: (amu, Å, fs) with energy in amu·Å²/fs² (see molix.md.integrators). All
-pairs interact (no cutoff/neighbour list) so the PES is exact for any
-displacement. The single BAOAB step is ``torch.compile``d (LJ is analytic — no
-scatter, so the Inductor CPU backend works) and looped in Python; 5 ns is only
-feasible because the step is compiled.
+Units: (amu, Å, fs) with energy in amu·Å²/fs² (see molix.md.integrators). Every
+pair interacts — the cutoff is far larger than the cluster — so the PES is
+exact for any displacement the trajectory reaches. The hot path is the force
+field's analytic energy/force core, ``torch.compile``d through
+:meth:`molix.md.MD.set_compiler` (LJ is analytic — no scatter, so the Inductor
+CPU backend works); 5 ns is only feasible because that core is compiled.
 
 Run::
 
@@ -16,10 +17,12 @@ Run::
     PYTHONPATH=src:. python benchmarks/verify_md_lj_nve.py --ps 100   # short smoke
 
 The conservation criterion itself is :class:`molix.md.EnergyDriftHook`'s, not
-this script's: the sampling branch feeds it ``(t, E_tot)`` with
-:meth:`~molix.md.EnergyDriftHook.record` — there is no runner here to mount it
-on, the compiled step is looped directly — and
-:meth:`~molix.md.EnergyDriftHook.drift` returns the fit.
+this script's: the hook is mounted on the run and fed ``(t, E_tot)`` by the
+runner once per ``--sample-every`` steps, and publishes the fit as
+:attr:`~molix.md.EnergyDriftHook.result` at run end. ``_ThermoSeries`` beside it
+holds the PE / KE / frames the figure wants. Both are ordinary
+:class:`molix.md.MDHook` s: this script drives ``MD`` through its public
+setters only.
 
 Pass when ``rel_drift = |slope · duration_fs| / |e0| < 1e-3`` with bounded RMS
 fluctuation, where ``e0`` is the first *sampled* total energy and
@@ -35,7 +38,8 @@ from pathlib import Path
 import torch
 from tensordict import TensorDict
 
-from molix.md import MD, EnergyDriftHook, NeighborList, VelocityVerletIntegrator
+from molix.compile import Compiler
+from molix.md import MD, EnergyDriftHook, MDHook, NeighborList, VelocityVerletIntegrator
 from molix.units import units
 from molpot.forcefield import ForceField
 
@@ -50,6 +54,14 @@ _SIGMA = 3.4
 _MASS = 39.95
 _DT = 5.0  # fs — ~1/350 of the LJ vibrational period; comfortably stable
 _DTYPE = torch.float64
+# The cluster is ~7.6 Å across, so a 30 Å cutoff keeps every pair in range and
+# admits no periodic image inside the 80 Å box. It is also the largest radius
+# the list will build at here: ``NeighborList`` refuses cutoff + skin beyond
+# half the minimum perpendicular width, because the kernel's sequential
+# minimum-image reduction would silently drop pairs — the 50 Å this script used
+# to ask for was such a refusal, and the run died at construction.
+_CUTOFF = 30.0
+_BOX = 80.0
 
 
 def _icosahedron13(r_min: float) -> torch.Tensor:
@@ -69,6 +81,31 @@ def _maxwell_velocities(n: int, kbt: float, seed: int) -> torch.Tensor:
     vel = sigma_v * torch.randn(n, 3, generator=g, dtype=_DTYPE)
     vel = vel - vel.mean(0, keepdim=True)  # remove COM momentum
     return vel
+
+
+class _ThermoSeries(MDHook):
+    """The PE / KE / frame series the figure wants, beside the drift gate.
+
+    ``EnergyDriftHook`` owns ``(t, E_tot)`` and the pass/fail criterion; this
+    second, smaller observer holds what only the artifacts need. It drains at
+    ``on_run_start`` so a second run on the same object never fits one line
+    across two trajectories.
+    """
+
+    def __init__(self) -> None:
+        self.pe: list[float] = []
+        self.ke: list[float] = []
+        self.frames: list[torch.Tensor] = []
+
+    def on_run_start(self, runner) -> None:
+        self.pe.clear()
+        self.ke.clear()
+        self.frames.clear()
+
+    def on_step_end(self, runner, step, obs) -> None:
+        self.pe.append(float(obs.potential))
+        self.ke.append(float(obs.kinetic))
+        self.frames.append(obs.pos.detach().cpu().clone())
 
 
 def main() -> int:
@@ -92,7 +129,7 @@ def main() -> int:
     n = int(pos.shape[0])
     ff = (
         ForceField("lj13", units="metal")
-        .def_pairstyle("lj/cut", cutoff=50.0)
+        .def_pairstyle("lj/cut", cutoff=_CUTOFF)
         .with_params(
             atoms={
                 "epsilon": torch.full((n,), 0.0103, dtype=_DTYPE),
@@ -100,9 +137,9 @@ def main() -> int:
             }
         )
     )
-    cell = torch.eye(3, dtype=_DTYPE) * 80.0
-    pos = pos + 40.0
-    nl = NeighborList(cell=cell, cutoff=50.0, positions=pos, skin=1.0)
+    cell = torch.eye(3, dtype=_DTYPE) * _BOX
+    pos = pos + 0.5 * _BOX
+    nl = NeighborList(cell=cell, cutoff=_CUTOFF, positions=pos, skin=1.0)
     system = TensorDict(
         {
             "atoms": TensorDict(
@@ -114,41 +151,39 @@ def main() -> int:
                 },
                 batch_size=[n],
             ),
-            "graphs": TensorDict({"cell": cell}, batch_size=[1]),
+            # (B, 3, 3) under a sized ``graphs``: the batch schema's layout, and
+            # what MD writes a cast / barostat-scaled lattice back into. A bare
+            # (3, 3) under batch_size=[1] is refused by TensorDict on that write.
+            "graphs": TensorDict({"cell": cell.unsqueeze(0)}, batch_size=[1]),
         },
         batch_size=[],
     )
+    hook = EnergyDriftHook()
+    thermo = _ThermoSeries()
     md = (
         MD(_DTYPE)
         .set_forcefield(ff)
         .set_neighbors(nl)
         .set_integrator(VelocityVerletIntegrator(_DT))
+        .set_hooks([hook, thermo])
     )
-    ig = md.integrator
-    assert ig is not None
-    md._wire()
-    nl.build(system)
-    if md._adapter is not None:
-        md._adapter.bind_work(system)
-    step = ig.step if args.no_compile else torch.compile(ig.step, fullgraph=True)
-    state = ig.initial(pos, vel)
-    hook = EnergyDriftHook()
-    pes: list[float] = []
-    kes: list[float] = []
-    traj: list[torch.Tensor] = []
+    if not args.no_compile:
+        # The one compile seam of a run: the force field's classical
+        # energy/force core. Applied through the setter so it survives the
+        # potential rebuild every other setter performs.
+        md.set_compiler(Compiler())
     t_wall = time.perf_counter()
-    for i in range(n_steps):
-        state = step(state)
-        if i % args.sample_every == 0:
-            pe = float(state.energy)
-            ke = 0.5 * _MASS * float((state.vel * state.vel).sum())
-            hook.record(i * _DT, pe + ke)
-            pes.append(pe)
-            kes.append(ke)
-            traj.append(state.pos.detach().cpu().clone())
+    md.run(system, n_steps, chunk=args.sample_every)
     wall = time.perf_counter() - t_wall
+    pes, kes, traj = thermo.pe, thermo.ke, thermo.frames
 
-    drift = hook.drift()
+    drift = hook.result
+    if drift is None:
+        raise SystemExit(
+            f"the run recorded {len(hook.totals)} energy sample(s): {n_steps} steps at "
+            f"--sample-every {args.sample_every} give fewer than the two the drift fit "
+            "needs. Lower --sample-every or raise --ps."
+        )
     t = torch.tensor(hook.times_fs, dtype=_DTYPE) / 1000.0  # ps
     e = torch.tensor(hook.totals, dtype=_DTYPE)
     e0, rel_drift, rms_rel = drift.e0, drift.rel_drift, drift.rms_rel

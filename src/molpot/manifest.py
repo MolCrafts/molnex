@@ -87,7 +87,21 @@ __all__ = [
 #: Version of the :class:`ModelManifest` layout. Bumping it is a breaking
 #: change to every consumer that reads a manifest, not a refactor; it is
 #: versioned independently of ``molix.engine.export.LAMMPS_META_SCHEMA``.
-MANIFEST_SCHEMA = 1
+#:
+#: ``2`` (2026-09-08) added
+#: :attr:`~molpot.ir.nonbonded.NonbondedMethodRecord.lj_mixing`, the
+#: Lennard-Jones combining rule. The field rides inside a nested record, so a
+#: schema-1 payload still parses — :meth:`ModelManifest.from_dict` reads one and
+#: fills the field with ``None``, the value that field defines as
+#: "Lorentz–Berthelot by the then-default". The bump is nonetheless required in
+#: the *other* direction: without it a reader of this vintage would silently
+#: accept a newer payload and drop whatever model-identity fields it grew, which
+#: is exactly the failure a version exists to prevent.
+MANIFEST_SCHEMA = 2
+
+#: Payload versions :meth:`ModelManifest.from_dict` can read, oldest first. A
+#: version outside this set is refused rather than parsed best-effort.
+_READABLE_SCHEMAS = (1, MANIFEST_SCHEMA)
 
 
 @dataclass(frozen=True)
@@ -382,7 +396,7 @@ class ModelManifest:
         interactions: One record per enabled interaction term, in the order the
             force field declared them.
         nonbonded: Which nonbonded method ran — cutoffs in Å, the switching
-            window, the Coulomb solver and its sizing. It comes from the same
+            window, the LJ combining rule, the Coulomb solver and its sizing. It comes from the same
             single resolver that
             :attr:`~molpot.ir.PotentialIR.nonbonded_method` and the assembled
             pair terms come from (:meth:`ForceField._nonbonded_method_record
@@ -462,32 +476,80 @@ class ModelManifest:
     def from_dict(cls, payload: Mapping[str, object]) -> ModelManifest:
         """Rebuild a manifest from :meth:`to_dict` output — its exact inverse.
 
+        Reads **schema 1 and schema 2**, and nothing else. The difference
+        between them is one key of one nested record:
+        :attr:`~molpot.ir.nonbonded.NonbondedMethodRecord.lj_mixing`, the
+        Lennard-Jones combining rule, which the record grew on 2026-09-08. In a
+        schema-1 payload that key is absent and is filled with ``None`` — a
+        value that field *defines* as "Lorentz–Berthelot by the then-default",
+        which is what every molnex model mixed with when such a payload could
+        have been written, so nothing is invented by supplying it. In a schema-2
+        payload the key is required like any other: the tolerance is a property
+        of the *older* layout, not a permanent softness in the codec.
+
+        A newer version is refused rather than read leniently. The absent key of
+        a schema-1 payload has a defined meaning; the fields a schema-3 payload
+        might add do not, and accepting one here would mean quietly discarding
+        whatever model identity it carries — the failure the version number
+        exists to prevent. This is also why the field could not simply be added
+        to schema 1 in place: tolerating the absence costs nothing, but a reader
+        that tolerates it *and* claims to read every schema-1 payload gives a
+        newer writer no way to say "you are missing something".
+
         Args:
             payload: A mapping produced by :meth:`to_dict` (directly or through
                 JSON).
 
         Returns:
             The reconstructed manifest, with every nested record, enum and
-            frozenset restored.
+            frozenset restored. Its :attr:`schema_version` is always the current
+            :data:`MANIFEST_SCHEMA`: a schema-1 payload is *upgraded* on read —
+            the ``None`` rule is now stated rather than implied — so writing it
+            back out emits the newer layout, and the payload it came from is not
+            silently re-emitted as something this molnex would read differently.
 
         Raises:
-            ValueError: ``payload`` carries a different
-                :data:`MANIFEST_SCHEMA`. Refused rather than best-effort
+            ValueError: ``payload`` carries a ``schema_version`` outside
+                :data:`_READABLE_SCHEMAS`. Refused rather than best-effort
                 parsed: a layout this version does not know is not a manifest
                 it can honestly report on.
+            KeyError: A required top-level key (``profile``, ``units``,
+                ``interactions``, ``nonbonded``, ``electrostatics``, ``tables``,
+                ``numerics``) is absent. Only ``representation`` and
+                ``provenance`` are optional, because they are optional on the
+                manifest itself; an absent ``schema_version`` reads as ``None``
+                and so raises the ``ValueError`` above instead.
+            TypeError: A value has the wrong JSON shape (a list where an object
+                belongs, or the reverse), or a *nested* record is missing a
+                field. The nested case arrives as a ``TypeError`` from that
+                record's own constructor rather than as a ``KeyError``, because
+                the codec omits an absent key and lets the frozen record decide
+                whether it had a default — which is precisely why ``lj_mixing``
+                is defaulted for a schema-1 payload instead of being left out:
+                all ten fields of
+                :class:`~molpot.ir.nonbonded.NonbondedMethodRecord` are
+                required, so an absent key would otherwise arrive as that
+                ``TypeError``. In a schema-2 payload it does arrive that way,
+                like any other missing field.
         """
         version = payload.get("schema_version")
-        if version != MANIFEST_SCHEMA:
+        if version not in _READABLE_SCHEMAS:
             raise ValueError(
-                f"manifest schema_version {version!r} is not the {MANIFEST_SCHEMA} "
-                "this molnex reads"
+                f"manifest schema_version {version!r} is not one this molnex reads "
+                f"({', '.join(str(v) for v in _READABLE_SCHEMAS)})"
             )
+        # Schema 1 has no ``lj_mixing`` key; supply the ``None`` that layout
+        # implies. Schema 2 is passed through untouched, so a missing key there
+        # reaches the record's constructor and raises like any other.
+        nonbonded = _as_mapping(payload["nonbonded"])
+        if version == 1:
+            nonbonded = {"lj_mixing": None, **nonbonded}
         return cls(
             schema_version=MANIFEST_SCHEMA,
             profile=_decode_str(payload["profile"]),
             units=_decode_str(payload["units"]),
             interactions=_decode_tuple(InteractionRecord, payload["interactions"]),
-            nonbonded=_decode_record(NonbondedMethodRecord, payload["nonbonded"]),
+            nonbonded=_decode_record(NonbondedMethodRecord, nonbonded),
             electrostatics=_decode_record(ElectrostaticsRecord, payload["electrostatics"]),
             tables=_decode_tuple(ParamTableRecord, payload["tables"]),
             numerics=_decode_record(NumericsRecord, payload["numerics"]),

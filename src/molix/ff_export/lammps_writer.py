@@ -8,20 +8,45 @@ types, then delegates files to molpy. Independent of ``pair_style molnex``.
 Required system contract (post-collate nested TensorDict)::
 
     system["atoms"]["pos"]                 # (N, 3) Å
-    system["atoms"]["q"]                   # optional (N,) e
+    system["atoms"]["q"]                   # optional (N,) e — a *fallback*
+                                           #   charge source; see below
     system["graphs"]["cell"]               # optional (3, 3) or (1, 3, 3) Å —
                                            #   periodic box; open padded box otherwise
     system["bonds"]["atomi" / "atomj"]     # optional
     system["angles"]["atomi" / "atomj" / "atomk"]
     system["propers"]["atomi" … "atoml"]
 
+Charges are **not** read from the system here. They arrive on the
+:class:`~molpot.forcefield.TypeAssignment` every call takes
+(``types.atom_charges``, in ``e``), which is where
+:meth:`~molpot.forcefield.ForceField.assign_types` put the values it keyed the
+atom types on: the force field's own ``atoms.q`` parameter table when it has
+one, else the system's ``atoms.q`` column, else zeros. Reading the system a
+second time on this side wrote zeros for every field that keeps its charges in
+its own table — a deck whose types exist *because* the atoms differ in charge
+and whose atoms are then all neutral. ``charges=`` on
+:meth:`LammpsWriter.write_data` / :meth:`LammpsWriter.to_frame` overrides that
+column and nothing else, so an override that disagrees with the typing states
+two models in one deck.
+
 The bonded include is molpy's; the *pair* section is molnex's
 (:meth:`LammpsWriter.write_pair_block`), because a periodic Class-I model has
 no faithful spelling on the molrs side — see that method for the two defects.
 
+Impropers are a **known gap**: they are neither written into the data file nor
+registered by :meth:`~molpot.forcefield.ForceField.realize`, because molpy's
+LAMMPS include writer takes the harmonic improper form only and
+``improper:periodic`` — the form :class:`~molpot.forcefield.OPLSAAForceField`
+declares — has no spelling to be registered under. A field whose impropers carry
+energy therefore exports a deck that omits them (ledger debt ``F25``). They are
+not typed either: :class:`~molpot.forcefield.TypeAssignment` carried an
+``improper_type`` / ``improper_labels`` pair that no file ever read, and it was
+deleted on 2026-09-08 rather than kept in step with a section nothing writes.
+
 References:
     LAMMPS docs: pair_style lj/mdf, pair_style lj/cut/coul/long, pair_style
-    hybrid/overlay, kspace_style pppm, special_bonds
+    hybrid/overlay, kspace_style pppm, special_bonds, pair_modify mix — the
+    combining rule this writer refuses to leave to the deck.
     Spec: composable-a0-05-export
 """
 
@@ -36,8 +61,8 @@ from tensordict import TensorDict
 
 from molix.ff_export.force_spec import ForceSpec
 from molix.ff_export.lammps_adapter import LammpsAdapter
-from molpot import lorentz_berthelot
-from molpot.forcefield.container import ForceField
+from molpot import MixingRule
+from molpot.forcefield.container import ForceField, TypeAssignment
 
 __all__ = ["LammpsWriter"]
 
@@ -45,11 +70,28 @@ __all__ = ["LammpsWriter"]
 class LammpsWriter:
     """Serialize a Class-I :class:`~molpot.forcefield.ForceField` through molpy IO.
 
-    Identity types: one atom type per atom, one bonded type per interaction.
-    The bonded half of a deck is two calls — :meth:`write_data` and
-    :meth:`write_settings` — and the nonbonded half is a third,
-    :meth:`write_pair_block`, kept separate because molpy has no faithful
-    spelling for it (see that method).
+    Every call takes the same :class:`~molpot.forcefield.TypeAssignment` — the
+    condensed typing :meth:`~molpot.forcefield.ForceField.assign_types` computes
+    once for a (force field, system) pair — because the three files address the
+    types by the *same* numbers: the data file labels them, the bonded include
+    names its coefficients after them and the pair block writes them as
+    ``pair_coeff i j``. A second condensation computed per file is a numbering
+    that can differ once, and LAMMPS reads a shifted one without complaint::
+
+        types = ff.assign_types(batch, masses=masses)
+        writer.write_data("system.data", batch, types=types, masses=masses)
+        writer.write_settings(
+            "system.in.settings", ff, batch, types=types, masses=masses, skip_pair_style=True
+        )
+        writer.write_pair_block("system.in.pair", spec, types=types)
+
+    The bonded half of a deck is the first two calls and the nonbonded half the
+    third, kept separate because molpy has no faithful spelling for it (see
+    :meth:`write_pair_block`). ``skip_pair_style=True`` is what keeps them from
+    both claiming the nonbonded section: without it the include also carries
+    ``pair_style`` / ``pair_coeff`` / ``special_bonds`` lines, and a deck that
+    sources both files states its nonbonded model twice. A **bonded-only** field
+    is the one case that omits the flag and the third call together.
     """
 
     def write_data(
@@ -57,6 +99,7 @@ class LammpsWriter:
         path: str | Path,
         system: TensorDict,
         *,
+        types: TypeAssignment,
         masses: torch.Tensor | list[float] | None = None,
         charges: torch.Tensor | list[float] | None = None,
         box_pad_A: float = 20.0,
@@ -67,21 +110,33 @@ class LammpsWriter:
             path: Destination file.
             system: Nested TensorDict with ``atoms.pos`` and optional bonded
                 namespaces (``atomi`` … columns).
+            types: The system's condensed typing, from
+                :meth:`~molpot.forcefield.ForceField.assign_types` on the force
+                field this data file will be read with. Its ``atom_charges``
+                fill the ``Atoms`` section's charge column.
             masses: Per-atom mass in amu ``(N,)``. Default: 12.011.
-            charges: Per-atom charge ``(N,)`` in ``e``. Default: ``atoms.q``
-                or zeros.
+            charges: Per-atom charge ``(N,)`` in ``e``, overriding
+                ``types.atom_charges``. See :meth:`to_frame` — the default is
+                the charges the types were keyed on, and an override that
+                disagrees with them writes a deck stating two models.
             box_pad_A: Padding around the molecule for an open box (Å). Ignored
                 when ``system`` carries ``graphs.cell`` — see :meth:`to_frame`.
 
         Returns:
             The written path.
+
+        Raises:
+            TypeError: A column read off ``system`` is not a tensor.
+            ValueError: ``graphs.cell`` holds more than one cell — one data file
+                describes one box (both raised through :meth:`to_frame`).
         """
         from molpy.io.writers import write_lammps_data
 
         dest = Path(path)
         dest.parent.mkdir(parents=True, exist_ok=True)
         write_lammps_data(
-            dest, self.to_frame(system, masses=masses, charges=charges, box_pad_A=box_pad_A)
+            dest,
+            self.to_frame(system, types=types, masses=masses, charges=charges, box_pad_A=box_pad_A),
         )
         return dest
 
@@ -91,6 +146,7 @@ class LammpsWriter:
         forcefield: ForceField,
         system: TensorDict,
         *,
+        types: TypeAssignment,
         masses: torch.Tensor | list[float] | None = None,
         box_pad_A: float = 20.0,
         skip_pair_style: bool = False,
@@ -107,8 +163,18 @@ class LammpsWriter:
         Args:
             path: Destination file.
             forcefield: Filled Class-I container.
-            system: Topology used to assign identity types.
-            masses: Per-atom mass in amu (must match :meth:`write_data`).
+            system: Topology whose types the coefficients are written for.
+            types: That system's condensed typing under ``forcefield``, and the
+                names the coefficients are written under. It is passed straight
+                to :meth:`~molpot.forcefield.ForceField.realize`, which
+                registers the molpy types from it and condenses nothing — so
+                this must be the assignment ``forcefield`` itself makes for
+                ``system`` at these ``masses``. A foreign one names
+                ``bond_coeff`` lines the data file's labelmap does not contain,
+                and nothing here re-derives it to say so.
+            masses: Per-atom mass in amu (must match :meth:`write_data`, and the
+                ``masses`` ``types`` was assigned with — mass is part of an atom
+                type).
             box_pad_A: Open-box padding (must match :meth:`write_data`); ignored
                 under ``graphs.cell`` — see :meth:`to_frame`.
             skip_pair_style: Write a **bonded-only** include — no
@@ -122,14 +188,23 @@ class LammpsWriter:
 
         Returns:
             The written path.
+
+        Raises:
+            TypeError: ``system["atoms"]["pos"]`` is not a tensor.
+            ValueError: ``masses`` has a different length than ``atoms.pos``
+                (raised through :meth:`to_frame`).
         """
         from molpy import PairStyle
         from molpy.io.writers import write_lammps_forcefield
 
         dest = Path(path)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        frame = self.to_frame(system, masses=masses, box_pad_A=box_pad_A)
-        ff = forcefield.clone().realize(system, masses=masses)
+        frame = self.to_frame(system, types=types, masses=masses, box_pad_A=box_pad_A)
+        # The caller's assignment *is* the numbering, handed to the one object
+        # that registers molpy types from it. Condensing again here — to compare
+        # with what was given, and again inside ``realize`` — made three passes
+        # produce the answer this method was already holding.
+        ff = forcefield.clone().realize(system, masses=masses, types=types)
         if skip_pair_style:
             for name in list(ff.pair_styles()):
                 ff.remove_style(PairStyle, name)
@@ -143,7 +218,13 @@ class LammpsWriter:
         )
         return dest
 
-    def write_pair_block(self, path: str | Path, spec: ForceSpec) -> Path:
+    def write_pair_block(
+        self,
+        path: str | Path,
+        spec: ForceSpec,
+        *,
+        types: TypeAssignment,
+    ) -> Path:
         """Write the nonbonded section of a LAMMPS deck from ``spec``.
 
         molnex owns this block rather than molpy because a periodic Class-I
@@ -165,20 +246,25 @@ class LammpsWriter:
           mixes the LJ sub-style onto an ``i ≠ j`` pair it was not explicitly
           assigned to. With diagonal lines only, **every cross-type
           Lennard-Jones interaction is silently zero** — no warning, no error.
-        * Even without the hybrid, LAMMPS's default combining rule is
-          *geometric* in σ, while molnex mixes Lorentz–Berthelot. So the cross
-          terms of an exported deck would be a different model even where LAMMPS
-          does mix.
+        * Even without the hybrid, LAMMPS's default combining rule (``geometric``
+          in both ε and σ unless the deck says ``pair_modify mix``) is not
+          necessarily the model's: molnex mixes Lorentz–Berthelot by default and
+          geometrically for OPLS-AA. So the cross terms of an exported deck would
+          be a different model even where LAMMPS does mix.
 
-        The values therefore come from
-        :func:`~molpot.potentials.vdw.lj126.lorentz_berthelot` itself — the same
-        function :class:`~molpot.forcefield.Potentials` evaluates with — applied
-        to the per-type ``ε`` / ``σ`` over an ``edge_index`` of the ``i <= j``
-        pairs. Calling molnex's own rule rather than restating ``σ_ij =
-        ½(σ_i + σ_j)`` here is what makes "the deck uses molnex's mixing" true by
-        construction instead of by review. (This is the one sanctioned
-        ``molix.ff_export`` → ``molpot`` edge beyond the IR, alongside
-        ``molix.ff_export``'s existing import of ``molpot.ir``.)
+        The values therefore come from the model's own rule — the ``mixing``
+        field the adapter read off
+        :class:`~molpot.ir.nonbonded.NonbondedMethodRecord`, applied through
+        :meth:`MixingRule.mix
+        <molpot.potentials.vdw.lj126.MixingRule.mix>`, the same call
+        :class:`~molpot.forcefield.Potentials` evaluates with — over the
+        per-type ``ε`` / ``σ`` on an ``edge_index`` of the ``i <= j`` pairs.
+        Dispatching on what the model declared, rather than restating ``σ_ij =
+        ½(σ_i + σ_j)`` here, is what makes "the deck uses molnex's mixing" true
+        by construction instead of by review, and it is why an OPLS-AA export
+        stopped silently changing rules on 2026-09-08. (This is the one
+        sanctioned ``molix.ff_export`` → ``molpot`` edge beyond the IR,
+        alongside ``molix.ff_export``'s existing import of ``molpot.ir``.)
 
         ``pair_coeff * * <coulomb sub-style>`` carries no parameters — charges
         come from the data file — and is also what a **charges-only** model
@@ -194,14 +280,16 @@ class LammpsWriter:
         Ewald splitting parameter, so the deck solves the decomposition molnex
         ran rather than one LAMMPS picked from the requested accuracy.
 
-        **Cost, and the debt it carries.** With identity types (one type per
-        atom) the block is ``N(N+1)/2`` lines, i.e. quadratic in the atom count:
-        26 atoms give 351 ``pair_coeff`` lines, 1000 atoms give half a million.
-        That is fine for the export sizes A0 targets and is *not* fine as a
-        general path; it is recorded as ledger debt **F25** in
-        ``.claude/notes/composable-potentials.md``. The fix is condensed typing
-        (equivalent atoms sharing a type), not a return to LAMMPS-side mixing —
-        which would be wrong at any size.
+        **Cost, and what pays it.** The block is ``T(T+1)/2`` lines for ``T``
+        distinct atom types. Until 2026-09-08 molnex exported *identity* types —
+        one per atom — which made that ``N(N+1)/2``: 26 atoms cost 351 lines and
+        1000 atoms half a million (ledger debt **F25**). The rows the adapter
+        hands over are still per atom, because the Lennard-Jones bag of a
+        Class-I :class:`~molpot.ir.PotentialIR` is per atom; they are collapsed
+        here onto ``types``, whose classes are equal-parameter atoms by
+        construction — the 26-atom water/ion box has four (O, H, Na⁺, Cl⁻) and
+        writes ten lines. The fix was never a return to LAMMPS-side mixing,
+        which is wrong at any size for the two reasons above.
 
         Args:
             path: Destination file, typically ``include``-d after the bonded
@@ -210,6 +298,11 @@ class LammpsWriter:
             spec: Force-spec from
                 :class:`~molix.ff_export.LammpsAdapter`, carrying the ``pair``
                 record and optionally the ``kspace`` / ``special_bonds`` ones.
+            types: The condensed typing the data file was written with. LAMMPS
+                type ``i`` is class ``i - 1`` here, because
+                :meth:`~molpot.forcefield.ForceField.assign_types` labels the
+                classes in an order molrs reproduces when it sorts the labels as
+                text.
 
         Returns:
             The written path.
@@ -217,6 +310,11 @@ class LammpsWriter:
         Raises:
             KeyError: ``spec`` has no ``pair`` record — an all-bonded force
                 field has no pair block to write.
+            ValueError: ``spec`` and ``types`` describe different systems —
+                either a different atom count, or two atoms of one type carrying
+                different ``ε`` / ``σ``, which means the assignment was made by
+                another force field than the one that was translated. One line
+                would then have to state two models.
         """
         pair = next((f for f in spec.forces if f.get("category") == "pair"), None)
         if pair is None:
@@ -234,22 +332,20 @@ class LammpsWriter:
         lines: list[str] = [pair["type"]]
         entries = pair["parameters"]
         if entries:
-            rows = [(a, b) for a in range(len(entries)) for b in range(a, len(entries))]
-            mixed = lorentz_berthelot(
+            epsilon, sigma = self._lj_per_type(entries, types)
+            n_types = len(types.atom_labels)
+            rows = [(a, b) for a in range(n_types) for b in range(a, n_types)]
+            mixed = MixingRule(pair["mixing"]).mix(
                 {
-                    "epsilon": torch.tensor([e["epsilon"] for e in entries], dtype=torch.float64),
-                    "sigma": torch.tensor([e["sigma"] for e in entries], dtype=torch.float64),
+                    "epsilon": torch.tensor(epsilon, dtype=torch.float64),
+                    "sigma": torch.tensor(sigma, dtype=torch.float64),
                 },
                 torch.tensor(rows, dtype=torch.long),
             )
             epsilon_ij = mixed["epsilon_ij"].tolist()
             sigma_ij = mixed["sigma_ij"].tolist()
             for row, (a, b) in enumerate(rows):
-                coeff = [
-                    "pair_coeff",
-                    str(entries[a]["type_index"]),
-                    str(entries[b]["type_index"]),
-                ]
+                coeff = ["pair_coeff", str(a + 1), str(b + 1)]
                 if lj_tag:
                     coeff.append(lj_tag)
                 coeff += [
@@ -273,15 +369,73 @@ class LammpsWriter:
         dest.write_text("".join(f"{line}\n" for line in lines))
         return dest
 
+    @staticmethod
+    def _lj_per_type(
+        entries: list[dict[str, Any]],
+        types: TypeAssignment,
+    ) -> tuple[list[float], list[float]]:
+        """Collapse the adapter's per-atom ``ε`` / ``σ`` rows onto ``types``.
+
+        Args:
+            entries: The ``pair`` record's ``parameters``, one row per atom in
+                atom order (``LammpsAdapter._lj_parameters``).
+            types: The condensed typing of the same system.
+
+        Returns:
+            ``(epsilon, sigma)`` in kcal/mol and Å, one entry per atom type, in
+            class order.
+
+        Raises:
+            ValueError: There is not one row per atom, or two atoms of one type
+                disagree about ``(ε, σ)``. Both mean ``entries`` and ``types``
+                came from different force fields: an atom type is *defined* by
+                parameter equality, so within one field the disagreement cannot
+                happen, and picking either value would export a model neither
+                side holds. The message names the two atoms.
+        """
+        if len(entries) != len(types.atom_type):
+            raise ValueError(
+                f"the pair record carries {len(entries)} Lennard-Jones rows but the "
+                f"type assignment covers {len(types.atom_type)} atoms; they describe "
+                "different systems"
+            )
+        epsilon = [0.0] * len(types.atom_labels)
+        sigma = [0.0] * len(types.atom_labels)
+        owner = [-1] * len(types.atom_labels)
+        for atom, (entry, cls) in enumerate(zip(entries, types.atom_type, strict=True)):
+            if owner[cls] < 0:
+                owner[cls] = atom
+                epsilon[cls] = float(entry["epsilon"])
+                sigma[cls] = float(entry["sigma"])
+            elif (epsilon[cls], sigma[cls]) != (float(entry["epsilon"]), float(entry["sigma"])):
+                raise ValueError(
+                    f"atoms {owner[cls]} and {atom} share LAMMPS type "
+                    f"{types.atom_labels[cls]!r} but carry different Lennard-Jones "
+                    f"parameters: (epsilon, sigma) = "
+                    f"({epsilon[cls]!r}, {sigma[cls]!r}) vs "
+                    f"({float(entry['epsilon'])!r}, {float(entry['sigma'])!r})"
+                )
+        return epsilon, sigma
+
     def to_frame(
         self,
         system: TensorDict,
         *,
+        types: TypeAssignment,
         masses: torch.Tensor | list[float] | None = None,
         charges: torch.Tensor | list[float] | None = None,
         box_pad_A: float = 20.0,
     ) -> Any:
         """Build a molpy ``Frame`` (Atomistic → ``to_frame``) from ``system``.
+
+        Bonds, angles and proper dihedrals are written, each labelled with its
+        class name from ``types``. **Impropers are not** — neither here nor in
+        the include :meth:`write_settings` realizes, because molpy's LAMMPS
+        writer takes the harmonic improper form only and OPLS-AA's
+        ``improper:periodic`` has no spelling to be registered under. A field
+        whose impropers carry energy exports a deck that silently omits that
+        term (ledger debt ``F25``); ``types`` carries no improper class map
+        either, since nothing on this side would read one.
 
         The **box** is the periodic/open switch of the whole export, so it is
         read from the system rather than assumed: ``system["graphs", "cell"]``
@@ -295,10 +449,21 @@ class LammpsWriter:
 
         Args:
             system: Nested TensorDict with ``atoms.pos`` ``(N, 3)`` Å, optional
-                ``atoms.q``, optional ``graphs.cell`` and the bonded namespaces.
+                ``graphs.cell`` and the bonded namespaces.
+            types: The system's condensed typing; every atom and interaction is
+                labelled with its class name (``t1``, ``b1``, …) rather than with
+                one name of its own, and its ``atom_charges`` are the default
+                charge column (below).
             masses: Per-atom mass in amu ``(N,)``. Default: 12.011.
-            charges: Per-atom charge ``(N,)`` in ``e``. Default: ``atoms.q``
-                or zeros.
+            charges: Per-atom charge ``(N,)`` in ``e``, overriding
+                ``types.atom_charges`` — which is what the ``Atoms`` section
+                states otherwise, being the charges
+                :meth:`~molpot.forcefield.ForceField.assign_types` keyed the
+                atom types on (the field's ``atoms.q`` table, else the system's
+                ``atoms.q``, else zeros). Pass this only to write a column the
+                typing was *not* computed from; two atoms of one type given
+                different charges here make a deck whose ``Atoms`` section and
+                whose type list describe different models.
             box_pad_A: Padding around the molecule (Å) for the open box. Unused
                 when a cell is present.
 
@@ -306,9 +471,11 @@ class LammpsWriter:
             The molpy ``Frame``.
 
         Raises:
+            TypeError: ``atoms.pos`` or ``graphs.cell`` is not a tensor.
             ValueError: ``graphs.cell`` is batched with ``B > 1`` — one data
                 file describes one box, so there is no faithful single lattice
-                to write for a batch of several.
+                to write for a batch of several. Or ``masses`` has a different
+                length than ``atoms.pos``.
         """
         from molpy import Box
         from molpy.core.atomistic import Atomistic
@@ -317,30 +484,27 @@ class LammpsWriter:
         xyz = pos.detach().cpu().double().numpy()
         n_atoms = int(xyz.shape[0])
         mass_list = ForceField._mass_list(masses, n_atoms)
+        # Default: the charges the typing was computed from, carried on the
+        # assignment. Reading ``atoms.q`` again here instead wrote zeros for
+        # every field that keeps its charges in its own ``atoms`` table — the
+        # deck's types would then differ *by* a charge its atoms do not carry.
         if charges is not None:
             charge_list = [float(x) for x in torch.as_tensor(charges).reshape(-1).tolist()]
-        elif ("atoms", "q") in system.keys(include_nested=True):
-            charge_list = [
-                float(x)
-                for x in self._tensor(system, "atoms", "q").detach().cpu().reshape(-1).tolist()
-            ]
         else:
-            charge_list = [0.0] * n_atoms
+            charge_list = list(types.atom_charges)
 
-        # The same atom count both sides of the molpy seam pass, so the frame's
-        # labels and the realized force field's are the same strings — and so
-        # molrs numbers the types in atom order, which is the numbering
-        # ``write_pair_block`` addresses (see ``ForceField.identity_type_label``).
-        def label(index: int) -> str:
-            return ForceField.identity_type_label(index, n_atoms)
-
+        # One assignment reaches both sides of the molpy seam — this frame and
+        # the force field ``write_settings`` realizes — so the labels are the
+        # same strings, and molrs then numbers the types in class order, which is
+        # the numbering ``write_pair_block`` addresses (see
+        # ``ForceField.assign_types``).
         world = Atomistic()
         handles = []
         for i in range(n_atoms):
             handles.append(
                 world.def_atom(
                     {
-                        "type": label(i),
+                        "type": types.atom_labels[types.atom_type[i]],
                         "x": float(xyz[i, 0]),
                         "y": float(xyz[i, 1]),
                         "z": float(xyz[i, 2]),
@@ -358,22 +522,22 @@ class LammpsWriter:
                     }
                 )
             )
-        for i, j in ForceField._arity(system, "bonds", 2):
-            world.def_bond(handles[i], handles[j], type="-".join((label(i), label(j))))
-        for i, j, k in ForceField._arity(system, "angles", 3):
+        for n, (i, j) in enumerate(ForceField._arity(system, "bonds", 2)):
+            world.def_bond(handles[i], handles[j], type=types.bond_labels[types.bond_type[n]])
+        for n, (i, j, k) in enumerate(ForceField._arity(system, "angles", 3)):
             world.def_angle(
                 handles[i],
                 handles[j],
                 handles[k],
-                type="-".join((label(i), label(j), label(k))),
+                type=types.angle_labels[types.angle_type[n]],
             )
-        for i, j, k, l in ForceField._arity(system, "propers", 4):
+        for n, (i, j, k, l) in enumerate(ForceField._arity(system, "propers", 4)):
             world.def_dihedral(
                 handles[i],
                 handles[j],
                 handles[k],
                 handles[l],
-                type="-".join((label(i), label(j), label(k), label(l))),
+                type=types.proper_labels[types.proper_type[n]],
             )
         frame = world.to_frame()
         cell = self._cell(system)

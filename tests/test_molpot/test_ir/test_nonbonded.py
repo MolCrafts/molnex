@@ -30,6 +30,7 @@ def _record(**overrides: float | str | None) -> NonbondedMethodRecord:
     fields = {
         "lj_cutoff": None,
         "lj_switch_start": None,
+        "lj_mixing": None,
         "coulomb_cutoff": None,
         "coulomb_calculator": None,
         "real_space_cutoff": None,
@@ -39,15 +40,22 @@ def _record(**overrides: float | str | None) -> NonbondedMethodRecord:
         "capacity_factor": None,
     }
     fields.update(overrides)
-    return NonbondedMethodRecord(**fields)  # ty: ignore[invalid-argument-type]
+    return NonbondedMethodRecord(**fields)
 
 
 class TestNonbondedMethodRecord:
     def test_field_set_is_the_declared_method_surface(self) -> None:
-        """The nine knobs ``Potentials._assemble_pair_potentials`` reads back."""
+        """The ten knobs ``Potentials._assemble_pair_potentials`` reads back.
+
+        ``lj_mixing`` is one of them: the Lennard-Jones combining rule is model
+        identity (a table mixed the other way is a different force field on
+        every cross pair), so it is recorded here beside the radii rather than
+        left to whichever kernel happens to run — ledger finding **F24**.
+        """
         assert {f.name for f in dataclasses.fields(NonbondedMethodRecord)} == {
             "lj_cutoff",
             "lj_switch_start",
+            "lj_mixing",
             "coulomb_cutoff",
             "coulomb_calculator",
             "real_space_cutoff",
@@ -62,6 +70,7 @@ class TestNonbondedMethodRecord:
         record = NonbondedMethodRecord(
             lj_cutoff=None,
             lj_switch_start=None,
+            lj_mixing=None,
             coulomb_cutoff=None,
             coulomb_calculator=None,
             real_space_cutoff=None,
@@ -71,6 +80,7 @@ class TestNonbondedMethodRecord:
             capacity_factor=None,
         )
         assert record.lj_cutoff is None
+        assert record.lj_mixing is None
         assert record.coulomb_calculator is None
 
     def test_is_lattice_sum_tracks_the_declared_solver(self) -> None:
@@ -83,12 +93,16 @@ class TestNonbondedMethodRecord:
         for calculator in ("ewald", "pme", "p3m"):
             assert _record(coulomb_calculator=calculator).is_lattice_sum, calculator
         assert not _record(coulomb_calculator=None).is_lattice_sum
+        # The Lennard-Jones combining rule says nothing about the Coulomb
+        # solver, so declaring one may not move this predicate either way.
+        assert not _record(lj_mixing="geometric").is_lattice_sum
 
     def test_is_frozen(self) -> None:
         """Manifests are hashed and compared; a mutable record would lie."""
         record = NonbondedMethodRecord(
             lj_cutoff=10.0,
             lj_switch_start=None,
+            lj_mixing="lorentz-berthelot",
             coulomb_cutoff=None,
             coulomb_calculator="pme",
             real_space_cutoff=None,

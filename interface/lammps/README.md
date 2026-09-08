@@ -343,11 +343,11 @@ longer matches the tree is expired evidence, not evidence.
 | | |
 |---|---|
 | **claim** | a Class-I force field **exported** by `molix.ff_export` means the same energy and forces once LAMMPS, not molnex, evaluates it — bonded terms, switched Lennard-Jones, Ewald-split Coulomb under a lattice, and 1-2 / 1-3 / 1-4 exclusions on both classes |
-| **proves** | the export *conventions*: `½k` → `K`, radians → degrees, the quintic taper vs `lj/mdf`, Lorentz–Berthelot mixing, `special_bonds` carrying `NonbondedScaling`, and excluded pairs subtracted against the reciprocal sum rather than attenuated in real space. Nothing here involves `pair_style molnex`: no plugin, no exported model. Both sides are converged first and the report says so, so a residual cannot be mesh error wearing a convention's clothes. |
+| **proves** | the export *conventions*: `½k` → `K`, radians → degrees, the quintic taper vs `lj/mdf`, the model's declared combining rule on every `pair_coeff i j` (`MixingRule`; Lorentz–Berthelot for the bare `ForceField` both cases build), `special_bonds` carrying `NonbondedScaling`, and excluded pairs subtracted against the reciprocal sum rather than attenuated in real space. Nothing here involves `pair_style molnex`: no plugin, no exported model. Both sides are converged first and the report says so, so a residual cannot be mesh error wearing a convention's clothes. |
 | **tool** | `interface/tests/parity_classical.py` (ctest `parity_classical_butane`, `parity_classical_periodic`; exit 77 = no `lmp`) |
 | **owner** | the implementer of the `composable-a0` chain |
 | **re-run trigger** | **any change under `src/molix/ff_export/` or `src/molpot/forcefield/`** |
-| **status** | **RECORDED 2026-09-08** — butane relative energy 2.583e-12, worst force component 3.506e-12; periodic relative energy 9.913e-09, worst force component 6.876e-06 kcal/mol/Å (gates 1e-6 and 1e-5). The deck is consumed exactly as `LammpsWriter` writes it — the tool patches nothing. Provenance below. |
+| **status** | **RECORDED 2026-09-08 (condensed types)** — butane relative energy 2.583e-12, worst force component 3.506e-12; periodic relative energy 9.912e-09, worst force component 6.876e-06 kcal/mol/Å (gates 1e-6 and 1e-5). Re-run unchanged after `ForceField.assign_types` replaced identity typing (F25): the periodic deck went from 545 to 116 lines — data 160 → 94, bonded include 29 → 7, pair block 356 → 15 — with **every number identical**, which is what a pure type-condensation must do. The deck is consumed exactly as `LammpsWriter` writes it — the tool patches nothing. Provenance below. |
 
 Recorded run (local x86_64 workstation, `/home/jicli594/.local/x86_64/bin/lmp`):
 
@@ -367,12 +367,19 @@ periodic        : 8 TIP3P-geometry waters + Na+ + Cl-, 26 atoms, boundary p p p,
                   cutoff 5.5 A; special_bonds lj 0 0 0.5 coul 0 0 0.5
                   deck: pair_style hybrid/overlay lj/mdf 4.5 5.5 coul/long 5.5
                         + kspace_style pppm 1e-10 + kspace_modify gewald 0.7071068
+                  types: 4 atom (O, H, Na+, Cl-), 1 bond, 1 angle - condensed by
+                        parameter equality, so 10 numeric pair_coeff lines
+                        (4*5/2) + `pair_coeff * * coul/long`, one bond_coeff and
+                        one angle_coeff. Identity typing wrote 351 / 16 / 8.
+                  files: system.data 94 lines, system.in.settings 7,
+                        system.in.pair 15 (identity: 160 / 29 / 356)
                   E molnex = -47.23502966626038, lammps = -47.235029198050
                   per term (molnex - lammps): bond -2.309e-14, angle -1.127e-11,
                         vdW -3.309e-08, coulomb -4.351e-07
                   rel 9.912e-09; max|dF| 6.876e-06 kcal/mol/A
-                  the vdW residual is the .7g rendering of the 351 mixed
-                  eps_ij / sigma_ij pair_coeff values, nothing else
+                  the vdW residual is the .7g rendering of the 10 mixed
+                  eps_ij / sigma_ij pair_coeff values, nothing else - identical
+                  to the identity-typed run, since condensing repeats no value
 deck statement  : every pair_style / pair_coeff / kspace_style / kspace_modify /
                   special_bonds / bonded line is INCLUDED from what LammpsWriter
                   wrote, unmodified. The deck adds only `pair_modify table 16`
@@ -413,24 +420,40 @@ library rather than worked around in the tool — the deck above is consumed
 byte-for-byte as written:
 
 1. `LammpsWriter.write_pair_block` now emits an explicit `pair_coeff i j` for
-   every `i <= j`, mixed by `molpot.potentials.vdw.lj126.lorentz_berthelot`
-   itself. Diagonal lines alone were **silently zero** for every cross-type LJ
+   every `i <= j`, mixed by the rule **the model declares** — the `mixing`
+   option of its `pair:lj/cut` style, carried on `NonbondedMethodRecord` and
+   applied through `molpot.potentials.vdw.lj126.MixingRule.mix`, the same call
+   `Potentials` evaluates with. That is `"lorentz-berthelot"` (σ arithmetic, ε
+   geometric) for a bare `ForceField` — what both parity cases here use — and
+   `"geometric"` (both, the Jorgensen 1996 OPLS-AA rule) for
+   `OPLSAAForceField` since 2026-09-08; before that date molnex mixed
+   Lorentz–Berthelot regardless of template and said so nowhere (ledger finding
+   **F24**). Diagonal lines alone were **silently zero** for every cross-type LJ
    pair under `hybrid/overlay` (its `pair_coeff * * coul/long` maps every type
    pair to the Coulomb sub-style, and LAMMPS never mixes an LJ sub-style onto a
-   pair it was not explicitly assigned), and LAMMPS's default combining rule is
-   geometric in σ where molnex is Lorentz–Berthelot. Cost: `N(N+1)/2` lines with
-   identity types — ledger debt **F25**, whose fix is condensed typing, not a
+   pair it was not explicitly assigned), and LAMMPS's own default (`pair_modify
+   mix geometric`) is a third rule again — so the deck states every mixed pair
+   rather than letting either side choose. Cost: `T(T+1)/2` lines for `T`
+   distinct atom types — `N(N+1)/2` while types were identity types, which is
+   what ledger debt **F25** recorded and what condensing (item 2) closed, not a
    return to LAMMPS-side mixing.
-2. Identity types are named by `ForceField.identity_type_label` — `t1`, `t2`, …
-   A LAMMPS type label may not begin with a digit, so the previous `1-2` /
-   `1-2-3` names stopped `read_data` at `ERROR: Invalid type label 1-2` and no
-   exported system carrying bonds could be read. The labels are **zero-padded to
-   a common width** (`ForceField.identity_type_label` takes the atom count):
-   molrs numbers a data
-   file's types by sorting their labels as *text*, so unpadded `t1 … t26` makes
-   LAMMPS type 2 be atom 10 and the numeric `pair_coeff` lines address the wrong
-   ε/σ — measured `E_vdwl = -0.2251` against molnex's `-0.8163`, no warning.
-   Invisible below ten atoms, which is why only a real box caught it.
+2. Types are **condensed on parameter equality** by
+   `ForceField.assign_types`, the one owner of the mapping: `realize` registers
+   a molpy type per class from it and every `LammpsWriter` call labels from the
+   same object, so the data file's labelmap and the include's coeff names cannot
+   drift apart. Two atoms with the same (mass, charge, ε, σ) are one atom type
+   and two interactions between the same atom types with the same constants are
+   one bonded type — 26 water/ion atoms are 4 types, not 26. Until 2026-09-08
+   molnex exported *identity* types (one per atom), which was correct and
+   quadratic. Labels are `t1`/`b1`/`a1`/`d1`/`i1`-style: a LAMMPS type label may
+   not begin with a digit, so the original `1-2` / `1-2-3` names stopped
+   `read_data` at `ERROR: Invalid type label 1-2` and no exported system
+   carrying bonds could be read. They are **zero-padded to the type count**,
+   because molrs numbers a data file's types by sorting their labels as *text*:
+   unpadded `t1 … t26` makes LAMMPS type 2 be the tenth type and the numeric
+   `pair_coeff` lines address the wrong ε/σ — measured `E_vdwl = -0.2251`
+   against molnex's `-0.8163`, no warning. Invisible below ten types, which is
+   why only a real box caught it.
 3. `LammpsWriter.write_settings` passes `skip_units=True`; the include is sourced
    after `read_data`, where LAMMPS refuses a `units` command.
 4. `ForceField.nonbonded_scaling` mirrors into molpy's `set_special_bonds`, and

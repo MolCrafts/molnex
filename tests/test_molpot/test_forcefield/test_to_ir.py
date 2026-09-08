@@ -26,7 +26,7 @@ class TestForceFieldToIR:
         """
         ff = (
             ForceField(name="nonbonded", units="real")
-            .def_pairstyle("lj/cut", cutoff=12.0, switch_start=10.0)
+            .def_pairstyle("lj/cut", cutoff=12.0, switch_start=10.0, mixing="geometric")
             .def_pairstyle(
                 "coulomb",
                 cutoff=8.0,
@@ -41,6 +41,7 @@ class TestForceFieldToIR:
         assert ff.to_ir().nonbonded_method == NonbondedMethodRecord(
             lj_cutoff=12.0,
             lj_switch_start=10.0,
+            lj_mixing="geometric",
             coulomb_cutoff=8.0,
             coulomb_calculator="ewald",
             real_space_cutoff=6.0,
@@ -62,11 +63,19 @@ class TestForceFieldToIR:
         no assembly fallback at all (the LJ switching window and the
         open-boundary Coulomb cutoff) stay ``None``: they are genuinely unset,
         not silently zero.
+
+        ``lj_mixing`` is the one field this template does **not** take from the
+        defaults: OPLS-AA combines both ``ε`` and ``σ`` geometrically (Jorgensen
+        et al., JACS 118, 11225 (1996)), so the template declares
+        ``mixing="geometric"`` and the record has to report the declaration
+        rather than the ``"lorentz-berthelot"`` fallback a bare style gets in
+        the test below.
         """
         d = PAIR_STYLE_DEFAULTS
         assert OPLSAAForceField().to_ir().nonbonded_method == NonbondedMethodRecord(
             lj_cutoff=d.lj_cutoff,
             lj_switch_start=None,
+            lj_mixing="geometric",
             coulomb_cutoff=None,
             coulomb_calculator=d.coulomb_calculator,
             real_space_cutoff=d.real_space_cutoff_factor * d.smearing,
@@ -76,12 +85,30 @@ class TestForceFieldToIR:
             capacity_factor=d.capacity_factor,
         )
 
+    def test_a_bare_lj_style_mixes_lorentz_berthelot(self):
+        """The undeclared combining rule is the assembly fallback, and it is named.
+
+        Every molnex model mixed Lorentz–Berthelot before 2026-09-08 and no
+        record said so (ledger finding **F24**), which made a LAMMPS comparison
+        unfalsifiable: the deck's own default is geometric in ``σ``, so the two
+        engines could disagree on every cross pair with nothing in the model
+        description to attribute it to. The fallback is unchanged — what
+        changed is that the record now states it.
+        """
+        ff = ForceField(name="lj", units="real").def_pairstyle("lj/cut")
+        assert (
+            ff.to_ir().nonbonded_method.lj_mixing
+            == PAIR_STYLE_DEFAULTS.lj_mixing
+            == "lorentz-berthelot"
+        )
+
     def test_bonded_only_forcefield_reports_an_all_none_nonbonded_method(self):
         """The record is always present — consumers branch on fields, not on it."""
         ff = ForceField(name="bonded", units="real").def_bondstyle("harmonic")
         assert ff.to_ir().nonbonded_method == NonbondedMethodRecord(
             lj_cutoff=None,
             lj_switch_start=None,
+            lj_mixing=None,
             coulomb_cutoff=None,
             coulomb_calculator=None,
             real_space_cutoff=None,
@@ -188,7 +215,7 @@ class TestForceFieldToIR:
         )
         ff.realize(system)
         names = [t.name for t in ff.get_types(BondType)]
-        assert names == ["t1-t2"]
+        assert names == ["b1"]
 
     def test_cartesian_propers_to_ir_maps_to_cosine_table(self):
         a = torch.tensor([[0.6]], dtype=torch.float64)

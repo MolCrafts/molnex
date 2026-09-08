@@ -38,6 +38,12 @@ final = md.run(system, n_steps=100_000)
 which `MD` calls itself on every setter. `molix.md.ForceField` re-exports
 `molpy.ForceField` for readers who want the base type.
 
+Two things are `MD`'s own policy rather than a component's, because both have to
+be re-applied on every one of those rebuilds: `set_compiler(compiler)` compiles
+the potential's hot core, and `MD(dtype, potential_dtype=…)` evaluates the
+potential at a second precision while the trajectory stays at `dtype`. Both are
+described below.
+
 Units are (amu, Å, fs); energy in amu·Å²/fs². **There is no `energy_scale`
 keyword**: the factor is derived from the ForceField's own unit style by
 `molix.units.preset_energy_to_md(ff.units)` — `units="metal"` for an eV/Å
@@ -50,22 +56,41 @@ conversion out by hand only outside this path, with pint-style
 
 ## Two precisions, deliberately independent
 
-`MD(dtype)` governs the **MD side only**: trajectory state and the
-integrator's step constants. The potential's precision is the force field's:
+`MD(dtype)` governs the **MD side**: trajectory state (positions, velocities,
+masses) and the integrator's step constants. `potential_dtype` governs the
+force field's numbers. Leave it out and there is one precision everywhere and
+no cast on the force path at all; pass it and the whole evaluation moves:
 
 ```python
-force.to(dtype=torch.float32)                        # inference
 md = (
-    MD(torch.float64)                                # fp64 trajectory
-    .set_forcefield(force)
+    MD(torch.float64, potential_dtype=torch.float32)  # fp64 trajectory,
+    .set_forcefield(ff)                               # fp32 potential
     .set_integrator(VelocityVerletIntegrator(0.5))
 )
 ```
 
-The integrator casts force output back into the state dtype at the component
-boundary, so the two precisions never silently promote mid-step. Mixed
-precision inside the model is the force field's job (wrap the callable /
-`torch.autocast` there), not an `MD` keyword.
+A field's numbers live in three places, so `MD` moves all three: the container's
+parameter tables (the per-atom ε / σ / q a `Potentials` reads live off the
+ForceField on every call, restated by `ForceField.to_dtype`), the assembled
+module's own buffers and any MLIP weights (`.to(potential_dtype)`), and the
+geometry handed over per step — positions, `graphs.cell`, the edge columns —
+cast on the way in, with energy, forces and virial cast back to `dtype` on the
+way out. Partial casts are not an option: molpot's Coulomb kernels compare the
+dtype of the charges and pair distances against the positions' and raise rather
+than promote. The neighbour list stays on the MD dtype throughout; it owns
+`edges` and validates every update against its own build precision.
+
+Why the split exists at all: the quantization-as-thermal-noise study
+(`molix.quant`) runs an fp64 integrator over an fp32 potential, because
+lowering the *potential's* precision is the force perturbation under study and
+its effect on the trajectory can only be read against an integrator that is not
+itself a second noise source. Running the whole loop at fp32 confounds the two.
+`benchmarks/verify_md_ljcut_nve.py --potential-precision fp32` is that arm.
+
+Below `MD`, the integrator casts force output back into the state dtype at the
+component boundary as well, so the two precisions never silently promote
+mid-step. Mixed precision *inside* a model (`torch.autocast`) remains the force
+field's business, not an `MD` keyword.
 
 ## Choosing a force field
 
@@ -92,7 +117,7 @@ Migration: `MD(rebuild_every=)` and `NeighborListHook` are removed —
 the cadence lives on the list now.
 
 A pure-GPU compiled bulk run composes the primitives directly — compile the
-potential's hot core, keep the rebuild eager:
+potential's hot core with `set_compiler`, keep the rebuild eager:
 
 ```python
 from molix.compile import Compiler
@@ -117,17 +142,41 @@ md = (
     .set_neighbors(nl)
     .set_integrator(VelocityVerletIntegrator(4.0))
     .set_hooks([VelocityInitHook(MaxwellBoltzmann(172.0, seed=1))])
+    .set_compiler(Compiler())            # or Compiler(cuda_graphs=True)
     .to("cuda")
 )
 state = md.run(system, n_steps=25_000)
 ```
 
+`set_compiler` is a setter like the others, and it has to be: every `set_*`
+call re-runs `ff.to_potentials()`, so a compiled core installed by hand on the
+container would survive exactly until the next setter and the run would go
+eager with nothing said. Passing the compiler to `MD` instead re-applies it
+after each rebuild, which is why the order of the setters above does not
+matter. The compiler is structural — any `callable -> callable`;
+`molix.compile.Compiler` is molnex's, with `Compiler(cuda_graphs=True)` the
+fixed-shape CUDA-graph preset the list's fixed capacity was built for.
+
+What gets compiled is `Potentials`' classical `(system, pos) -> (energy,
+forces)` core. A `lj/cut` + bonded field traces as one graph with zero breaks;
+a field that also declares `pair:coulomb` shows exactly one, at the
+`torch.autograd.grad` seam in `molpot/derivation/force.py` — Coulomb has no
+closed-form force — and that break is named and owned there rather than
+appearing unexplained mid-kernel. The once-per-topology bind (exclusion table,
+net-charge / edge-orientation / unwrapped-molecule checks) happens *outside*
+the compiled region on the first call, so the core is one graph from the start.
+
+`benchmarks/verify_md_ljcut_nve.py` drives all of this from the command line:
+`--compile` / `--no-compile`, `--cuda-graphs`, and `--potential-precision fp32`
+for the split-precision arm above.
+
 ### Compiling an MLIP core
 
-A neural potential mounted with `def_pairstyle(model)` compiles through one
-primitive, `compile_core`, and the compiled build is installed **on the model**
-— not on the `Potentials` container, which `MD` rebuilds on every setter call.
-The sequence is the caller's to compose, and its order is load-bearing:
+A neural potential mounted with `def_pairstyle(model)` compiles through the same
+primitive, `compile_core`, but the compiled build is installed **on the model** —
+not on the `Potentials` container, which `MD` rebuilds on every setter call. The
+model is the one object that survives those rebuilds, so an MLIP core installed
+by hand does survive them, unlike a classical one:
 
 ```python
 pots = ff.to_potentials()
@@ -146,6 +195,14 @@ md = (
 cannot: sizing a k-space grid and validating the element table each read a
 tensor back to the host. `compile_core` refuses with a `RuntimeError` if that
 eager forward has not happened.
+
+`md.set_compiler(Compiler(dynamic=True))` reaches the same seam — it forwards to
+`pots.compile_core` after each rebuild — and is the shorter spelling once the
+eager forward above has run. Attach it to a wired `MD` (force field *and*
+integrator already set) before that forward has happened and it raises the same
+`RuntimeError`, which is the intended failure: an MLIP whose element table was
+never validated cannot be traced, and a silent eager fallback would be reported
+as a compiled run.
 
 Use `dynamic=True` on the MD path. The neighbour list exposes only its live
 edges each step, so the edge count `E` changes with every rebuild; under static

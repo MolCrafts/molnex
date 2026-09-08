@@ -67,6 +67,43 @@ class TestPotentialMeta:
         # Open boundaries truncate; a cell switches the same style to Ewald.
         assert contract.cutoff in {CutoffKind.HARD, CutoffKind.EWALD}
 
+    def test_registered_styles_declare_their_option_vocabulary(self) -> None:
+        """Each style names the options it accepts, so a typo can be refused.
+
+        A style option is per-model state (a radius, a solver, a combining
+        rule), not a per-type parameter, so it has no ``ParamSpec`` — and
+        before this tuple existed there was nowhere that said which keys a
+        style even has. ``def_pairstyle`` accepted anything and dropped the
+        misspelling into the options dict, where it read as "not declared" at
+        resolve time: ``mixng="geometric"`` silently mixed Lorentz–Berthelot.
+        The vocabulary belongs in the registry beside the parameters and the
+        contract, because that is the one place a style is described.
+
+        A bonded style takes none — its ``k`` / ``r0`` are per-type parameters,
+        which is a different axis entirely.
+
+        ``pair:coulomb``'s ``prefactor`` is listed although it has no field on
+        :class:`~molpot.ir.NonbondedMethodRecord`: ``k_e`` is a unit-system
+        constant rather than a nonbonded *method*, but
+        ``Potentials._assemble_pair_potentials`` does read it off the style, so
+        it is a keyword the style accepts. The tuple is the accepted-keyword
+        set, not the recorded-field set — leaving it out would refuse a
+        declaration the assembly honours.
+        """
+        view = PotentialMeta.schema_for(["pair:lj/cut", "pair:coulomb", "bond:harmonic"])
+        assert view["pair:lj/cut"].options == ("cutoff", "switch_start", "mixing")
+        assert view["pair:coulomb"].options == (
+            "cutoff",
+            "calculator",
+            "smearing",
+            "real_space_cutoff",
+            "lr_wavelength",
+            "mesh_spacing",
+            "capacity_factor",
+            "prefactor",
+        )
+        assert view["bond:harmonic"].options == ()
+
     def test_contract_for_unregistered_style_raises_key_error(self) -> None:
         with pytest.raises(KeyError, match="pair:not/a/style"):
             PotentialMeta.contract_for("pair:not/a/style")

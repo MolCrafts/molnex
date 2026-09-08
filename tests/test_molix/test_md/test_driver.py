@@ -15,6 +15,17 @@ from molix.md import (
 )
 from tests.test_molix.test_md.conftest import make_cubic_lattice, md_system
 
+#: How close the split-precision run has to sit to a *fully* fp32 evaluation,
+#: as a fraction of the fp32-vs-fp64 gap the same fixture shows (``max|ΔF| =
+#: 1.7e-4`` kcal mol⁻¹ Å⁻¹, 1.9e-5 relative — 7.1e-8 once converted to MD
+#: units, which is why this is a fraction and not an absolute: the ratio is
+#: scale-free). A run that evaluated the potential at fp32 lands a long way
+#: inside the gap, differing from the reference only by reduction order; one
+#: that evaluated at fp64 and cast the answer down at the end lands *at* the
+#: gap, and so does one that casts only half the inputs and lets torch promote
+#: the rest back to fp64. A quarter of the gap separates the two.
+FP32_MATCH_FRACTION = 0.25
+
 
 @pytest.fixture
 def system():
@@ -158,6 +169,216 @@ class TestMD:
         """Omitting dtype must not silently downcast a float64 caller."""
         md = _nve(_class_i_harmonic(), dt=0.01)
         assert md.run(_two_atom_system(), 1).pos.dtype == torch.float64
+
+    def test_set_compiler_is_applied_once_per_potential_rebuild(self):
+        """Every ``set_*`` rebuilds the potential, so the compiler is a setter too.
+
+        ``_wire`` calls ``force.to_potentials()`` afresh in each setter: a
+        compiled core installed by hand would survive exactly until the next
+        one, and the run would fall back to eager with nothing saying so. So
+        the compiler is held on ``MD`` and re-applied at every rebuild — once
+        when the field first has both halves it needs to assemble, and once
+        more per later setter, on the container that is actually about to run.
+
+        The recorder is the identity, so it changes nothing; what it counts is
+        the *installs*, and ``__self__`` says which container each went to —
+        two different ones, which is the whole reason this cannot be a one-shot
+        call.
+        """
+        cores = []
+
+        def recording(core):
+            cores.append(core)
+            return core
+
+        md = (
+            MD(torch.float64)
+            .set_compiler(recording)
+            .set_integrator(VelocityVerletIntegrator(0.01))
+            .set_forcefield(_class_i_harmonic())
+        )
+        assert len(cores) == 1
+
+        md.set_integrator(VelocityVerletIntegrator(0.02))
+        assert len(cores) == 2
+        assert cores[0].__self__ is not cores[1].__self__
+
+    def test_an_installed_compiler_changes_no_force(self):
+        """The seam is a build switch, not a second physics path.
+
+        ``MDState.forces`` here is ``MD.compute_force``'s own output — the
+        integrator's entry evaluation, taken at ``n_steps=0`` so nothing has
+        moved and both runs are asked about the same geometry. With the
+        identity compiler installed the two builds are the same function, so
+        the forces have to agree to the bit-level tolerance of a reduction
+        reorder; anything larger means the compiled route is not evaluating the
+        field the eager one evaluates.
+        """
+        eager = _nve(_class_i_harmonic(), dt=0.01, dtype=torch.float64)
+        compiled = (
+            MD(torch.float64)
+            .set_compiler(lambda core: core)
+            .set_forcefield(_class_i_harmonic())
+            .set_integrator(VelocityVerletIntegrator(0.01))
+        )
+        reference = eager.run(_two_atom_system(), 0).forces
+        assert torch.allclose(
+            compiled.run(_two_atom_system(), 0).forces, reference, atol=1e-12, rtol=0.0
+        )
+
+    def test_potential_dtype_evaluates_the_potential_at_the_second_precision(self):
+        """fp64 trajectory over an fp32 potential — and no cast at all without it.
+
+        The quantization-as-thermal-noise operating point (``molix.quant``):
+        the potential's precision is the perturbation under study, so it has to
+        be reducible *without* the integrator becoming a second noise source.
+        Two things therefore have to hold at once. The state stays fp64 —
+        positions, velocities and the forces handed back — while the numbers in
+        those forces are the fp32 field's, not the fp64 one's.
+
+        The fp32 reference is built by hand rather than read off the seam: the
+        same ForceField with every float parameter table cast, evaluated on a
+        cast copy of the same batch. ``.to(dtype)`` on the assembled
+        ``Potentials`` reaches its bonded buffers only — the per-atom ε / σ / q
+        live in the molpy container — so a field whose *pair* tables are still
+        fp64 is exactly the failure this reference can see.
+
+        The tolerance is the fixture's own: fp32 and fp64 disagree by
+        ``max|ΔF| = 1.7e-4`` kcal mol⁻¹ Å⁻¹ on this box (1.9e-5 relative), and
+        a run that agrees with fp32 to a quarter of that gap
+        (:data:`FP32_MATCH_FRACTION`) cannot be an fp64 evaluation with a cast
+        bolted on the end. Below it, the default path is pinned the other way — with
+        no ``potential_dtype`` there is no cast anywhere, so its forces are
+        *bitwise* the fp64 evaluation's.
+        """
+        from molix.units import preset_energy_to_md
+        from tests.conftest import butane_pair_batch, butane_pair_class_i_forcefield
+
+        def forces_at(dtype: torch.dtype) -> torch.Tensor:
+            """The whole field and the whole batch at ``dtype``, in MD units."""
+            forcefield = butane_pair_class_i_forcefield()
+            tables = {
+                namespace: {
+                    name: value.to(dtype) if value.is_floating_point() else value
+                    for name, value in (forcefield.params(namespace) or {}).items()
+                }
+                for namespace in ("atoms", "bonds", "angles", "propers")
+            }
+            potentials = forcefield.with_params(**tables).to_potentials().to(dtype)
+            batch = butane_pair_batch().apply(
+                lambda leaf: leaf.to(dtype) if leaf.is_floating_point() else leaf
+            )
+            _, forces = potentials.calc_energy_forces(batch)
+            return forces.double() * preset_energy_to_md(forcefield.units)
+
+        reference32 = forces_at(torch.float32)
+        reference64 = forces_at(torch.float64)
+        gap = float((reference64 - reference32).abs().max())
+        assert gap > 0.0, "the fixture must be able to tell the two precisions apart"
+
+        split = (
+            MD(torch.float64, potential_dtype=torch.float32)
+            .set_forcefield(butane_pair_class_i_forcefield())
+            .set_integrator(VelocityVerletIntegrator(0.5))
+        ).run(butane_pair_batch(), 0)
+        assert (split.pos.dtype, split.vel.dtype, split.forces.dtype) == (
+            torch.float64,
+            torch.float64,
+            torch.float64,
+        )
+        assert float((split.forces - reference32).abs().max()) <= FP32_MATCH_FRACTION * gap
+
+        plain = (
+            MD(torch.float64)
+            .set_forcefield(butane_pair_class_i_forcefield())
+            .set_integrator(VelocityVerletIntegrator(0.5))
+        ).run(butane_pair_batch(), 0)
+        assert torch.equal(plain.forces, reference64)
+
+    def test_set_compiler_is_honoured_under_a_barostat(self):
+        """A compiled build must reach the NPT force path, or the pair be refused.
+
+        ``set_compiler`` installs one build of the potential's core, and the
+        adapter picks its entry once per run: with a barostat attached that is
+        ``calc_energy_forces_virial``, not the ``calc_energy_forces`` the core
+        is installed behind. So an NPT run with a compiler installed used to be
+        an eager run that every log line described as compiled — the worst kind
+        of silence, because the only visible symptom is a step time nobody
+        compares against a baseline.
+
+        Exactly **one** of two contracts satisfies this test, and either is a
+        defensible resolution:
+
+        1. *Honoured* — the installed core is called at least once while a
+           barostat is attached, i.e. the virial path routes through the same
+           build the NVE path does.
+        2. *Fail-closed* — the combination is refused with a ``RuntimeError``
+           naming the compiler and the barostat, so the caller chooses between
+           an eager NPT run and a compiled NVE one rather than being given one
+           of them silently.
+
+        Neither held before: the core was called zero times and nothing raised.
+        """
+        calls: list[object] = []
+
+        def recording(core):
+            def wrapper(*args, **kwargs):
+                calls.append(core)
+                return core(*args, **kwargs)
+
+            return wrapper
+
+        # 10 Å cube around a 1.5 Å bond: well inside the F29 half-width, so the
+        # only thing under test here is which build evaluates the field.
+        system = _two_atom_system()
+        system["graphs"] = TensorDict(
+            {"cell": (torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0)}, batch_size=[1]
+        )
+
+        try:
+            md = (
+                MD(torch.float64)
+                .set_compiler(recording)
+                .set_forcefield(_class_i_harmonic())
+                .set_integrator(VelocityVerletIntegrator(0.5))
+                .set_barostat(_expanding_barostat())
+            )
+            md.run(system, 2, chunk=1)
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            assert "compil" in message, exc
+            assert "barostat" in message or "virial" in message, exc
+        else:
+            assert calls, "the installed core never ran: the NPT path evaluated eagerly"
+
+    def test_potential_dtype_leaves_the_callers_cell_at_the_md_dtype(self):
+        """The precision seam is the potential's alone — the caller's lattice is not cast.
+
+        ``potential_dtype`` says at which precision the *field* is evaluated;
+        ``dtype`` says at which the trajectory is carried. The adapter casts
+        the geometry on the way in, and for positions that cast is a copy — but
+        the cell was cast **in place of** the batch's own tensor, so a run left
+        the caller's ``graphs.cell`` at fp32 after asking for an fp64
+        trajectory. Everything downstream of the run then reads a lattice at
+        the potential's precision: the volume in a reported pressure, a
+        neighbour list rebuilt against it, a second run over the same system.
+        The state's ``cell`` is the same lattice by another name and has to
+        agree.
+        """
+        from tests.conftest import butane_pair_batch, butane_pair_class_i_forcefield
+
+        system = butane_pair_batch()
+        assert system["graphs", "cell"].dtype == torch.float64
+
+        state = (
+            MD(torch.float64, potential_dtype=torch.float32)
+            .set_forcefield(butane_pair_class_i_forcefield())
+            .set_integrator(VelocityVerletIntegrator(0.5))
+        ).run(system, 1)
+
+        assert system["graphs", "cell"].dtype == torch.float64
+        assert state.cell is not None
+        assert state.cell.dtype == torch.float64
 
     def test_run_requires_both_components(self, system):
         with pytest.raises(RuntimeError, match="set_forcefield and set_integrator"):
@@ -457,6 +678,44 @@ class TestRebindCell:
         assert adapter._cell_view is None
         assert pots.calls == []
 
+    def test_rebind_cell_inside_an_evaluation_is_refused(self):
+        """The potential-dtype swap window has no correct rebind, so none is allowed.
+
+        *Between* evaluations ``graphs.cell`` is the trajectory's own fp64
+        storage, and ``rebind_cell`` copies a barostat update straight into it
+        — which is why both in-tree callers sit there. *During* one,
+        ``_cast_in`` has the fp32 copy standing under ``graphs.cell`` and the
+        real tensor parked on ``_cell_md``, so the same call would resolve the
+        copy as the live lattice and write the update into a buffer
+        ``_restore_cell`` is about to discard: the barostat's step silently
+        lost, the potential left on the pre-barostat cell, and a trajectory
+        that keeps integrating.
+
+        No in-tree path reaches the adapter from inside an evaluation, which is
+        precisely why the window is worth a test — an unreachable guard is the
+        one nobody notices deleting. The re-entry is driven the honest way,
+        through a potential that calls back during ``calc_energy_forces``,
+        rather than by setting the flag by hand.
+        """
+        from molix.md.driver import _TensorDictForce
+
+        holder: list[_TensorDictForce] = []
+
+        class _ReentrantPots(_CellRecordingPots):
+            def calc_energy_forces(self, work: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
+                holder[0].rebind_cell(torch.eye(3, dtype=torch.float64) * 4.0)
+                return super().calc_energy_forces(work)
+
+        work = _cell_system((torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0))
+        adapter = _TensorDictForce(
+            _ReentrantPots(), 1.0, md_dtype=torch.float64, pot_dtype=torch.float32
+        )
+        holder.append(adapter)
+        adapter.bind_work(work)
+
+        with pytest.raises(AssertionError, match="in-flight"):
+            adapter(torch.zeros(2, 3, dtype=torch.float64))
+
     def test_bind_cell_fires_once_per_barostat_update_not_once_per_step(self):
         """``MDRunner`` syncs per chunk (runner.py:208-211) — 1 + one per chunk.
 
@@ -618,7 +877,7 @@ class TestCompiledMlipStep:
 
     @pytest.mark.slow
     def test_an_over_capacity_cell_fails_at_kspace_before_the_neighbour_list(self, fp64) -> None:
-        """ac-012: MD.run's barostat path names KSpaceGrid, not r_build.
+        """MD.run's barostat path names KSpaceGrid, not r_build.
 
         ``_sync_cell`` rebinds the k-grid *before* it scales the neighbour
         list, so an isotropic 2x expansion of the 10 Å Polar cube

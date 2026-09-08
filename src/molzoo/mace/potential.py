@@ -137,8 +137,9 @@ class MacePotential(MACEEncoder):
         potential = MacePolar(..., use_fallback=True)
 
     A complete, runnable use of this public surface (both variants, free and
-    periodic, energy-only and energy+forces, with hard-coded fp64 goldens) is
-    ``regressions/mace-subpackage-restructure-04-potential.py``.
+    periodic, energy-only and energy+forces, with hard-coded fp64 goldens) lives
+    in the mirrored unit tests under ``tests/test_molzoo/test_mace/`` (the
+    ``regressions/`` tier was deleted on 2026-09-07).
 
     Args:
         spec: Validated variant configuration —
@@ -429,7 +430,7 @@ class MacePotential(MACEEncoder):
         compilable at all), build a new potential.
 
         **Prescribed sequence.** The caller composes it — scripts, docs and
-        ``regressions/`` do, the library does not::
+        the docs do, the library does not::
 
             ff.def_pairstyle(model)
             pots = ff.to_potentials()

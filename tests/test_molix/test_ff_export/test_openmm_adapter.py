@@ -26,10 +26,16 @@ from molpot.ir import (
 )
 from tests.test_molix.test_ff_export.conftest import PME_SWITCHED_METHOD
 
-#: Every field unset — a model that declared no nonbonded method at all.
+#: No radius and no solver — a model that truncates nothing — but the
+#: Lennard-Jones combining rule is still stated, because every IR below carries
+#: an ``lj`` bag and a bag whose rule is unrecorded is refused on export (see
+#: ``test_an_lj_bag_whose_record_names_no_rule_is_refused``). "Unset" here means
+#: the *method*, which is what this record is about; the rule is model identity
+#: and has no unset state while there are ``ε`` / ``σ`` to combine.
 _NO_METHOD = NonbondedMethodRecord(
     lj_cutoff=None,
     lj_switch_start=None,
+    lj_mixing="lorentz-berthelot",
     coulomb_cutoff=None,
     coulomb_calculator=None,
     real_space_cutoff=None,
@@ -80,6 +86,21 @@ def _class_i_ir() -> PotentialIR:
         ),
         charges=ChargeBag(q=torch.tensor([0.5, -0.5])),
         scaling=NonbondedScaling(),
+        # An IR that carries ``ε`` / ``σ`` states the rule they were mixed
+        # with, or the export refuses it — the record is otherwise unset, so
+        # this stays the untruncated "no method declared" fixture it was.
+        nonbonded_method=_NO_METHOD,
+    )
+
+
+def _charges_only_ir() -> PotentialIR:
+    """Charges under PME with no Lennard-Jones bag — nothing to combine."""
+    return PotentialIR(
+        charges=ChargeBag(q=torch.tensor([0.5, -0.5], dtype=torch.float64)),
+        scaling=NonbondedScaling(),
+        nonbonded_method=replace(
+            PME_SWITCHED_METHOD, lj_cutoff=None, lj_switch_start=None, lj_mixing=None
+        ),
     )
 
 
@@ -200,6 +221,73 @@ class TestOpenMMAdapterTranslate:
         assert nb["ewaldErrorTolerance"] == 1e-6
         assert nb["useSwitchingFunction"] is True
         assert nb["switchingDistance"] == pytest.approx(1.0)  # 10 Å
+
+    def test_nonbonded_record_states_the_lorentz_berthelot_rule_it_can_spell(self):
+        """OpenMM's ``NonbondedForce`` mixes Lorentz–Berthelot, so this is a direct map.
+
+        The rule is on the record whichever one the model ran, because a
+        consumer building the OpenMM system has to know what the per-type
+        ``sigma`` / ``epsilon`` it is handed mean — the same reason the record
+        carries the cutoff it truncates at rather than leaving it implied.
+        """
+        nb = next(
+            f
+            for f in OpenMMAdapter().translate(_nonbonded_ir(PME_SWITCHED_METHOD)).forces
+            if f["type"] == "NonbondedForce"
+        )
+        assert nb["mixing"] == "lorentz-berthelot"
+        assert nb["case"] == TranslationCase.DIRECT_UNIT_SCALE.value
+
+    def test_geometric_mixing_is_flagged_as_a_decomposition_with_a_note(self):
+        """``NonbondedForce`` cannot spell geometric ``σ``, so it is not a direct map.
+
+        OpenMM's built-in force combines ``σ`` arithmetically and offers no
+        switch; reproducing an OPLS-AA model needs per-pair exceptions or a
+        ``CustomNonbondedForce``. Emitting the parameters under the unchanged
+        ``direct_unit_scale`` case would claim a faithful translation and
+        silently build a different force field, so the case moves to
+        ``decompose`` and the record carries the reason in text.
+        """
+        record = replace(PME_SWITCHED_METHOD, lj_mixing="geometric")
+        nb = next(
+            f
+            for f in OpenMMAdapter().translate(_nonbonded_ir(record)).forces
+            if f["type"] == "NonbondedForce"
+        )
+        assert nb["mixing"] == "geometric"
+        assert nb["case"] == TranslationCase.DECOMPOSE.value
+        assert isinstance(nb["mixing_note"], str)
+        assert nb["mixing_note"].strip()
+
+    def test_an_lj_bag_whose_record_names_no_rule_is_refused(self):
+        """Fail closed: ``sigma`` / ``epsilon`` mean nothing without their rule.
+
+        OpenMM's ``NonbondedForce`` applies its own Lorentz–Berthelot mixing to
+        whatever per-type parameters it is handed, so exporting a bag whose rule
+        was never recorded builds a system by *OpenMM's* convention and calls it
+        the model's. The two agree only when the model happened to mix
+        Lorentz–Berthelot, which is exactly the assumption this whole change
+        exists to stop making.
+        """
+        record = replace(PME_SWITCHED_METHOD, lj_mixing=None)
+        with pytest.raises(UnsupportedTermError, match="mixing rule"):
+            OpenMMAdapter().translate(_nonbonded_ir(record))
+
+    def test_a_charges_only_model_states_no_combining_rule(self):
+        """No ``lj`` bag, no ``mixing`` key — and no refusal either.
+
+        The fail-closed check above is about parameters that need a rule, not
+        about the field being set: a charges-only model has no ``ε`` / ``σ`` and
+        so has nothing to combine, which is why its record's ``lj_mixing`` is
+        ``None`` and why that ``None`` must not be reported as a rule.
+        """
+        nb = next(
+            f
+            for f in OpenMMAdapter().translate(_charges_only_ir()).forces
+            if f["type"] == "NonbondedForce"
+        )
+        assert nb["parameters"] == []
+        assert "mixing" not in nb
 
     def test_open_boundary_cutoff_without_switch(self):
         """An open-boundary Coulomb cutoff is CutoffNonPeriodic, no taper."""

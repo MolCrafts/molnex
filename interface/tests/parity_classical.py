@@ -32,7 +32,9 @@ Cases
     ``write_data`` (box from ``graphs.cell``), ``write_settings(skip_pair_style=
     True)`` for the bonded include and ``write_pair_block`` for
     ``pair_style hybrid/overlay lj/mdf … coul/long …`` + ``kspace_style pppm`` +
-    ``special_bonds``.
+    ``special_bonds``. All three read one ``ForceField.assign_types`` result, so
+    the 26 atoms reach LAMMPS as the four types their parameters actually make
+    (O, H, Na⁺, Cl⁻) and the pair block is ten ``pair_coeff`` lines.
 
 Both sides must be *converged* before a disagreement can mean anything, so the
 periodic case reports its own convergence first and only then its parity:
@@ -331,8 +333,14 @@ def write_butane_job(
 ) -> None:
     """Write ``system.data`` / ``system.in.settings`` and the two NVE decks."""
     writer = LammpsWriter()
-    writer.write_data(out_dir / "system.data", batch, masses=masses)
-    writer.write_settings(out_dir / "system.in.settings", ff, batch, masses=masses)
+    # One assignment for both files: the data file's type labels and the
+    # include's coeff names are the same strings by construction. All four
+    # carbons carry the same mass and the field declares no pair table, so they
+    # condense onto a single atom type, the three bonds onto one and the two
+    # angles onto one.
+    types = ff.assign_types(batch, masses=masses)
+    writer.write_data(out_dir / "system.data", batch, types=types, masses=masses)
+    writer.write_settings(out_dir / "system.in.settings", ff, batch, types=types, masses=masses)
     thermo_every = max(1, n_steps // 10)
     # The field declares no pair style, so nothing is exported for the nonbonded
     # section and the deck has to name one: ``zero`` is LAMMPS's "no pair
@@ -605,7 +613,12 @@ def water_ion_ff(
     calculator: str = "pme",
     dtype: torch.dtype = torch.float64,
 ) -> ForceField:
-    """The Class-I field of the periodic case, over ``batch``'s identity types.
+    """The Class-I field of the periodic case, per atom of ``batch``.
+
+    Parameters are stated per atom and per interaction — the tables are as long
+    as the system — and condensed onto the four species
+    (:meth:`~molpot.forcefield.ForceField.assign_types`) only where the deck
+    needs types.
 
     Args:
         batch: The batch built by :func:`water_ion_batch`; its ``atoms.q`` and
@@ -683,12 +696,23 @@ def write_periodic_job(out_dir: Path, ff: ForceField, batch: TensorDict) -> None
     """
     writer = LammpsWriter()
     masses = batch["atoms", "mass"]
-    writer.write_data(out_dir / "system.data", batch, masses=masses)
+    # One assignment for all three files. The 26 atoms condense onto the four
+    # species (O, H, Na+, Cl-) because a LAMMPS type is an equivalence class of
+    # (mass, charge, epsilon, sigma); the pair block is then 4*5/2 = 10
+    # pair_coeff lines instead of 26*27/2 = 351, and the 16 O-H bonds and 8
+    # H-O-H angles one coeff line each.
+    types = ff.assign_types(batch, masses=masses)
+    writer.write_data(out_dir / "system.data", batch, types=types, masses=masses)
     writer.write_settings(
-        out_dir / "system.in.settings", ff, batch, masses=masses, skip_pair_style=True
+        out_dir / "system.in.settings",
+        ff,
+        batch,
+        types=types,
+        masses=masses,
+        skip_pair_style=True,
     )
     spec = LammpsAdapter(kspace_accuracy=KSPACE_ACCURACY).translate(ff.to_ir())
-    writer.write_pair_block(out_dir / "system.in.pair", spec)
+    writer.write_pair_block(out_dir / "system.in.pair", spec, types=types)
     (out_dir / "in.run0").write_text(
         """# water + ion single-point deck. Every pair_style / pair_coeff /
 # kspace_style / kspace_modify / special_bonds / bonded line is INCLUDED from

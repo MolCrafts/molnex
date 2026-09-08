@@ -34,11 +34,20 @@ from molpot.potentials.nonbonded import (
 )
 from molpot.potentials.polarization import Polarization
 from molpot.potentials.repulsion import ZBLRepulsion
-from molpot.potentials.vdw import LJ126, lorentz_berthelot
+from molpot.potentials.vdw import (
+    LJ126,
+    MixingRule,
+    geometric_mean,
+    geometric_mixing,
+    lorentz_berthelot,
+)
 
 __all__ = [
     "BasePotential",
     "LJ126",
+    "MixingRule",
+    "geometric_mean",
+    "geometric_mixing",
     "lorentz_berthelot",
     "BondHarmonic",
     "AngleHarmonic",

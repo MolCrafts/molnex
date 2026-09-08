@@ -27,6 +27,7 @@ import pytest
 import torch
 
 from molpot.forcefield.pair_terms import CoulombOpenPotential, LJCutPotential
+from molpot.potentials.vdw.lj126 import MixingRule
 
 DTYPE = torch.float64
 EPSILON = 0.2
@@ -39,6 +40,65 @@ R_CUT = 10.0
 R_SWITCH = 0.9 * R_CUT
 #: The two probes that straddle ``r_c`` in the continuity gate (Å).
 DELTA = 1e-6
+
+#: Two *different* atom types, so the combining rule is observable at all — an
+#: alkane-shaped ``ε`` (kcal/mol) / ``σ`` (Å) pair. Lorentz–Berthelot mixes
+#: these to ``σ_ij = ½(3.5 + 2.5) = 3.0`` exactly, geometric mixing to
+#: ``sqrt(3.5 · 2.5) = 2.958039891549808``; both mix ``ε`` to
+#: ``sqrt(0.066 · 0.03) = 0.044497190922573975``.
+CROSS_EPSILON = (0.066, 0.03)
+CROSS_SIGMA = (3.5, 2.5)
+
+#: Probe separation of the cross-pair goldens (Å) — chosen to be exactly the
+#: Lorentz–Berthelot ``σ_ij``, where ``E_LJ(σ_ij) = 0``. A term that mixed with
+#: the wrong rule is then not merely off by a few percent, it is off against
+#: zero.
+CROSS_R = 3.0
+
+#: **Hard-coded golden** — the geometric-mixing energy of that one pair,
+#: ``4 ε_ij [(σ_ij/r)¹² − (σ_ij/r)⁶]`` with ``ε_ij = sqrt(0.066·0.03)``,
+#: ``σ_ij = sqrt(3.5·2.5)`` and ``r = 3.0`` Å, in kcal/mol::
+#:
+#:     python - <<'EOF'
+#:     import math
+#:     eps, sig, r = math.sqrt(0.066*0.03), math.sqrt(3.5*2.5), 3.0
+#:     sr6 = (sig/r)**6
+#:     print(repr(4*eps*(sr6*sr6 - sr6)))
+#:     EOF
+#:     -0.01325526431854519
+#:
+#: Closed-form arithmetic, no oracle. Lorentz–Berthelot gives exactly ``0.0``
+#: at this separation.
+CROSS_ENERGY_GEOMETRIC = -0.01325526431854519
+
+
+def _cross_pair_energy(
+    potential: LJCutPotential,
+    *,
+    distances: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """LJ energy of one half-list pair between the two *different* types.
+
+    Arguments are passed by keyword rather than splatted from a ``dict``, so
+    each one keeps its declared tensor type through the call.
+
+    Args:
+        potential: The term under test.
+        distances: Separation ``(1,)`` in Å; ``None`` uses ``CROSS_R``. A leaf
+            with ``requires_grad`` may be passed to differentiate the result.
+
+    Returns:
+        ``repulsion + dispersion`` as a scalar tensor, autograd graph intact.
+    """
+    return _sum(
+        potential.energy(
+            edge_index=torch.tensor([[0, 1]], dtype=torch.long),
+            distances=torch.tensor([CROSS_R], dtype=DTYPE) if distances is None else distances,
+            epsilon=torch.tensor(CROSS_EPSILON, dtype=DTYPE),
+            sigma=torch.tensor(CROSS_SIGMA, dtype=DTYPE),
+            scales=torch.ones(1, dtype=DTYPE),
+        )
+    )
 
 
 def _one_pair_kwargs(*, r: float = R_MIN) -> dict[str, torch.Tensor]:
@@ -117,6 +177,60 @@ class TestLJCutPotential:
         assert float(repulsion) == pytest.approx(float(expected_repulsion), abs=1e-10)
         assert float(dispersion) == pytest.approx(float(expected_dispersion), abs=1e-10)
         assert forces.shape == (2, 3)
+
+    # --- combining rule (composable-a0-debt-01, F24) ---
+
+    def test_geometric_mixing_prices_the_pair_with_the_root_of_both_products(self) -> None:
+        """Domain golden: ``σ_ij = sqrt(σ_i σ_j)``, not the arithmetic mean.
+
+        OPLS-AA combines both tables geometrically (Jorgensen, Maxwell,
+        Tirado-Rives, JACS 118, 11225 (1996), doi:10.1021/ja9621760), where
+        AMBER / CHARMM take Lorentz–Berthelot's arithmetic ``σ``. The probe sits
+        at the Lorentz–Berthelot ``σ_ij`` = 3.0 Å, where that rule's energy is
+        exactly zero, so the golden below is measured against the rule the term
+        was told to use and not against a nearby number.
+        """
+        energy = _cross_pair_energy(LJCutPotential(cutoff=R_CUT, mixing=MixingRule.GEOMETRIC))
+        assert float(energy) == pytest.approx(CROSS_ENERGY_GEOMETRIC, abs=1e-12)
+
+    def test_the_undeclared_rule_is_lorentz_berthelot(self) -> None:
+        """The default is unchanged, and it is observable, not a signature read.
+
+        At ``r`` equal to the arithmetic ``σ_ij`` the Lennard-Jones energy
+        crosses zero exactly; a term that had silently switched to the
+        geometric ``σ_ij`` = 2.958 Å would return
+        ``CROSS_ENERGY_GEOMETRIC`` here instead.
+        """
+        assert float(_cross_pair_energy(LJCutPotential(cutoff=R_CUT))) == pytest.approx(
+            0.0, abs=1e-14
+        )
+
+    def test_analytic_forces_match_autograd_under_geometric_mixing(self) -> None:
+        """The closed-form ``dE/dr`` reads the same ``ε_ij`` / ``σ_ij`` the energy did.
+
+        The analytic force path mixes a second time (:meth:`energy_forces`
+        computes its own ``sr6``), so a rule threaded into only one of the two
+        entry points gives forces that are not the gradient of the energy the
+        same call returns — an MD run that pumps energy, which is finding F27
+        all over again with a different cause.
+        """
+        potential = LJCutPotential(cutoff=R_CUT, mixing=MixingRule.GEOMETRIC)
+        positions = torch.tensor([[0.0, 0.0, 0.0], [CROSS_R, 0.0, 0.0]], dtype=DTYPE)
+        edge_index = torch.tensor([[0, 1]], dtype=torch.long)
+        _, analytic = potential.energy_forces(
+            n_atoms=2,
+            edge_index=edge_index,
+            pair_vectors=positions[edge_index[:, 1]] - positions[edge_index[:, 0]],
+            distances=torch.tensor([CROSS_R], dtype=DTYPE),
+            epsilon=torch.tensor(CROSS_EPSILON, dtype=DTYPE),
+            sigma=torch.tensor(CROSS_SIGMA, dtype=DTYPE),
+            scales=torch.ones(1, dtype=DTYPE),
+        )
+
+        leaf = positions.clone().requires_grad_(True)
+        energy = _cross_pair_energy(potential, distances=(leaf[1] - leaf[0]).norm().reshape(1))
+        (autograd,) = torch.autograd.grad(energy, leaf)
+        assert torch.allclose(analytic, -autograd, atol=1e-10, rtol=0.0)
 
     # --- quintic switch (composable-a0-02, S8 gate 2) ---
 

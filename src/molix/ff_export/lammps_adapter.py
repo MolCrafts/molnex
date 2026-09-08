@@ -15,6 +15,14 @@ units; the load-bearing reparameterizations are:
   quintic taper ``1 − x³(10 − 15x + 6x²)`` and the ``lj/mdf`` taper
   ``(1 − x)³(1 + 3x + 6x²)`` with ``x = (r − r_m)/(r_cut − r_m)`` expand to the
   same polynomial ``1 − 10x³ + 15x⁴ − 6x⁵``, so the window transfers exactly.
+* the Lennard-Jones **combining rule** — how one ``ε`` (kcal/mol) and one ``σ``
+  (Å) per atom type become one of each per *pair* — travels on the same ``pair``
+  record, as ``mixing``. It is not a reparameterization but model identity:
+  LAMMPS would otherwise apply its own default rule, which is geometric in both
+  ``ε`` and ``σ`` and so is not molnex's Lorentz–Berthelot default. Carrying it
+  is what lets :class:`~molix.ff_export.LammpsWriter` render explicit
+  ``pair_coeff i j`` lines mixed by the model's own rule instead of leaving the
+  cross terms to the deck.
 
 Every number is rendered with ``{:.7g}``: a LAMMPS input line is parsed as
 text, so the record carries the same digits the deck will.
@@ -46,6 +54,15 @@ from molpot.ir import (
 )
 
 __all__ = ["LammpsAdapter"]
+
+#: Why a Lennard-Jones bag with no declared combining rule cannot be exported.
+#: The evaluation side refuses the same record (``MixingRule(None)`` raises in
+#: ``Potentials._assemble_pair_potentials``), so neither half of molnex ever
+#: supplies a rule the model did not state.
+_NO_MIXING_RULE = (
+    "lj parameters without a declared mixing rule — a rule is model identity; "
+    "declare it on pair:lj/cut"
+)
 
 
 def _resolved_smearing(smearing: float | None) -> float:
@@ -332,13 +349,26 @@ class LammpsAdapter(BackendAdapter):
         Returns:
             The ``pair`` record — ``sub_styles`` carries the style words and
             their radii in Å as floats, so the writer never re-parses the
-            rendered ``type`` line — followed by the ``kspace`` and
-            ``kspace_modify`` records when a lattice solver ran.
+            rendered ``type`` line, and ``mixing`` the model's combining rule
+            (a :class:`~molpot.potentials.vdw.lj126.MixingRule` value), which
+            :meth:`~molix.ff_export.LammpsWriter.write_pair_block` mixes the
+            explicit ``pair_coeff i j`` lines with. It is present exactly when
+            the model has a Lennard-Jones bag: a charges-only model has nothing
+            to mix and gets no key, rather than a default rule it never
+            declared. Followed by the ``kspace`` and ``kspace_modify`` records
+            when a lattice solver ran.
 
         Raises:
             UnsupportedTermError: Propagated from the two sub-style steps — a
                 Lennard-Jones bag with no cutoff radius, or charges with
-                neither a lattice solver nor a Coulomb cutoff.
+                neither a lattice solver nor a Coulomb cutoff — or raised here
+                for a Lennard-Jones bag whose record names no combining rule.
+                The rule is model identity, so a deck cannot be written by
+                guessing one; this is the same policy
+                :meth:`Potentials._assemble_pair_potentials
+                <molpot.forcefield.potentials.Potentials._assemble_pair_potentials>`
+                applies on the evaluation side, where ``MixingRule(None)``
+                raises.
             ValueError: Propagated from :meth:`_kspace_records` when a lattice
                 solver ran with no ``smearing`` on the record.
         """
@@ -351,34 +381,50 @@ class LammpsAdapter(BackendAdapter):
             if style == "hybrid/overlay"
             else TranslationCase.DIRECT_UNIT_SCALE
         )
+        if ir.lj is not None and method.lj_mixing is None:
+            raise UnsupportedTermError("lj", _NO_MIXING_RULE)
         pair = {
             "type": f"pair_style {line}",
             "style": style,
             "category": "pair",
             "case": case.value,
             "sub_styles": sub_styles,
+            **({} if ir.lj is None else {"mixing": method.lj_mixing}),
             "parameters": self._lj_parameters(ir),
         }
         lattice = coulomb is not None and coulomb["style"] == "coul/long"
         return [pair, *(self._kspace_records(method) if lattice else ())]
 
     def _lj_parameters(self, ir: PotentialIR) -> list[dict[str, Any]]:
-        """The per-type Lennard-Jones coefficient table of the ``pair`` record.
+        """The per-atom Lennard-Jones coefficient table of the ``pair`` record.
 
         Kept apart from the style steps because it answers a different
         question: they decide which ``pair_style`` line is written, this decides
-        what goes on the ``pair_coeff`` lines under it. Type indices are the
-        identity typing molnex exports with — one type per atom, in atom order,
-        which is the order
-        :meth:`~molpot.forcefield.ForceField.identity_type_label` labels them
-        in.
+        what goes on the ``pair_coeff`` lines under it.
+
+        The rows are **per atom**, in atom order, because that is what a Class-I
+        :class:`~molpot.ir.PotentialIR` carries: its
+        :class:`~molpot.ir.LJBag` holds one ``ε`` / ``σ`` pair for each atom of
+        the system, learned per atom rather than per type. Collapsing them onto
+        the deck's atom types is
+        :meth:`~molix.ff_export.LammpsWriter.write_pair_block`'s job — it has
+        the :class:`~molpot.forcefield.TypeAssignment` that says which atoms are
+        one type, and this adapter deliberately does not (it translates an IR,
+        which knows nothing of a system's typing). ``type_index`` is therefore
+        an **atom ordinal** (1-based), not a LAMMPS type id; the writer refuses
+        the pair outright if its length disagrees with the assignment it is
+        given.
 
         Args:
             ir: The IR being translated.
 
         Returns:
-            One ``{"type_index", "epsilon", "sigma"}`` entry per type in
-            kcal/mol and Å, or an empty list for a charges-only model.
+            One ``{"type_index", "epsilon", "sigma"}`` entry per atom, ``ε`` in
+            kcal/mol and ``σ`` in Å, or an empty list for a charges-only model.
+            These are the parameters as the model stores them, **unmixed**: the
+            per-pair ``ε_ij`` / ``σ_ij`` that reach the deck are made from them
+            by :meth:`~molix.ff_export.LammpsWriter.write_pair_block`, under the
+            ``mixing`` rule carried on the same record.
         """
         if ir.lj is None:
             return []

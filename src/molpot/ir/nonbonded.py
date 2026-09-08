@@ -5,7 +5,8 @@ it deliberately cannot say which solver ran. ``pair:coulomb`` declares
 :attr:`~molpot.contract.CutoffKind.EWALD` as a *policy* label spanning both the
 open-boundary truncation and the lattice sum, because the same style is
 truncated at a cutoff without a cell and lattice-summed with one. The cutoff
-radii, the switching window and the reciprocal-space solver with its sizing are
+radii, the switching window, the Lennard-Jones combining rule and the
+reciprocal-space solver with its sizing are
 therefore per-model runtime state, recorded here and carried by
 :attr:`~molpot.ir.PotentialIR.nonbonded_method` and by the model manifest.
 ``S2`` (the requirement that a model carry a versioned manifest) and ``F7`` (the
@@ -42,13 +43,13 @@ __all__ = ["NonbondedMethodRecord"]
 
 @dataclass(frozen=True)
 class NonbondedMethodRecord:
-    """Cutoffs, switching window and Coulomb solver of one model.
+    """Cutoffs, switching window, combining rule and Coulomb solver of one model.
 
     Frozen: a manifest is compared and hashed to decide whether two runs
     describe the same model, so a record that could be edited after the fact
     would lie about the run it came from.
 
-    All nine fields are required — an omitted keyword would otherwise read as
+    All ten fields are required — an omitted keyword would otherwise read as
     "unset" when it was merely forgotten, which is exactly the silent default
     this record exists to make visible.
 
@@ -71,6 +72,23 @@ class NonbondedMethodRecord:
         lj_switch_start: Inner radius in Å where the quintic switching taper
             begins. ``None`` means no window, i.e. a hard truncation at
             :attr:`lj_cutoff`.
+        lj_mixing: Combining rule the per-atom ``ε`` / ``σ`` tables were mixed
+            with — the value of a
+            :class:`~molpot.potentials.vdw.lj126.MixingRule`, i.e.
+            ``"lorentz-berthelot"`` (``σ`` arithmetic, ``ε`` geometric) or
+            ``"geometric"`` (both geometric, the OPLS-AA rule). Model identity,
+            not a numerical detail: the same parameter table mixed the other way
+            is a different force field on every cross pair, which is why it is
+            recorded beside the cutoffs rather than left to whichever kernel
+            happens to run. ``None`` when no ``pair:lj/cut`` style is declared —
+            and, in a record written before this field existed, "Lorentz–Berthelot
+            by the then-default", which is what every molnex model mixed with
+            until 2026-09-08. That second reading is what lets
+            :meth:`ModelManifest.from_dict
+            <molpot.manifest.ModelManifest.from_dict>` decode a manifest payload
+            that predates the field as ``None`` instead of refusing it: the
+            absent key has a defined meaning, so no schema bump and no guess is
+            involved. It is the only field of this record with that property.
         coulomb_cutoff: Open-boundary Coulomb truncation radius in Å, or
             ``None`` for an untruncated open sum.
         coulomb_calculator: Reciprocal-space algorithm used under a cell —
@@ -97,6 +115,7 @@ class NonbondedMethodRecord:
 
     lj_cutoff: float | None
     lj_switch_start: float | None
+    lj_mixing: str | None
     coulomb_cutoff: float | None
     coulomb_calculator: str | None
     real_space_cutoff: float | None

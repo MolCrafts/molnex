@@ -12,7 +12,15 @@ from molpot.forcefield import OPLSAAForceField
 
 ff = (
     OPLSAAForceField()
-    .def_pairstyle("lj/cut", cutoff=12.0)
+    # Re-declaring a style *replaces* its options, so the OPLS-AA combining
+    # rule has to be restated alongside the cutoff — dropping it would silently
+    # fall back to Lorentz–Berthelot, a different force field on every pair of
+    # unequal sizes.
+    .def_pairstyle("lj/cut", cutoff=12.0, mixing="geometric")
+    # The template declares pair:coulomb bare, which under open boundaries is
+    # the untruncated N(N-1)/2 sum. This example is an isolated fragment, so
+    # state the truncation it is actually run at (§2 builds its list from it).
+    .def_pairstyle("coulomb", cutoff=12.0)
     .with_params(
         # A table for *every* style OPLSAAForceField declares — bond, angle,
         # dihedral, improper, lj/cut and coulomb. Values are OPLS-like
@@ -66,6 +74,10 @@ batch = TensorDict(
             },
             batch_size=[1],
         ),
+        # One graph. The namespace is sized [B], and that size is where the
+        # per-graph columns (energies, and the total charge written in §2) get
+        # their length from — a collated batch always has it.
+        "graphs": TensorDict({"num_atoms": torch.tensor([2])}, batch_size=[1]),
     },
     batch_size=[],
 )
@@ -87,18 +99,33 @@ is 1-2 bonded, which OPLS-AA excludes outright (scale 0).
 ## 2. Evaluate as a torch module
 
 ```python
-from molix.batch import NeighborList
+from molix.batch import TotalCharge
 
 pots = ff.to_potentials()   # overrides molpy native kernels
-batch = NeighborList(cutoff=12.0).execute(batch)  # molix builds the pair list
-E = pots.calc_energy(batch)
-out = pots(batch)           # writes graphs.energy and atoms.forces
+for task in (ff.neighbor_list(), TotalCharge()):
+    batch = task.execute(batch)   # molix builds the pair list and the charge column
+E = pots.calc_energy(batch)                  # () here — (B,) for a batch
+energy, forces = pots.calc_energy_forces(batch)  # forces (N, 3) kcal mol⁻¹ Å⁻¹
 ```
 
-`Potentials` consumes the `edges` list molix builds and never enumerates
-pairs itself, so the neighbour-list line is required once a pair style is
-declared — give it the largest pair cutoff (here the `lj/cut` 12 Å) and keep
-the `symmetry=True` default.
+Those two tasks are what a Class-I field needs on every batch, and both are the
+field's semantics rather than script glue. In a training run they are mounted
+once — `DataModule(..., batch_tasks=[ff.neighbor_list(), TotalCharge()])` — and
+run per batch inside the collate.
+
+`Potentials` consumes the `edges` list molix builds and never enumerates pairs
+itself, so a list is required once a pair style is declared. `ff.neighbor_list()`
+is that list: the field resolves the largest radius among the terms that will
+run (here both pair styles were declared at 12 Å) and keeps the `symmetry=True`
+default, because molpot prices the `source < target` half of a bidirectional
+list and a half list built the other way would make every pair term cost exactly
+zero. `pbc=True` switches the Coulomb radius to the Ewald split's real-space
+cutoff for a periodic system.
+
+`TotalCharge()` writes `graphs.total_charge` (B,) in e — `0.0`, i.e. *these
+graphs are neutral* — which a charge model is fail-closed on and which
+`bind_topology` cross-checks against the sum of `atoms.q` (0 here, by
+construction). A dataset carrying its own charge column keeps it.
 
 ## 2b. Condense by SMARTS, then `def_type`
 
@@ -140,9 +167,8 @@ import torch
 from molix.md import MD, VelocityVerletIntegrator
 
 md = (
-    MD(torch.float64)
+    MD(torch.float64)            # trajectory precision
     .set_forcefield(ff)          # the ForceField itself, not a wrapper
-    .set_neighbors(nl)
     .set_integrator(VelocityVerletIntegrator(0.5))
 )
 ```
@@ -153,6 +179,16 @@ every setter re-runs `ff.to_potentials()`. Masses come from the system
 (amu, Å, fs) is read off `ff.units` by `molix.units.preset_energy_to_md` — a
 Class-I ForceField at the default `units="real"` reports kcal/mol, and nothing
 in the example spells out a conversion factor.
+
+No neighbour list is mounted here, so `edges` stays whatever was bound into the
+batch — acceptable for a two-atom fragment whose single pair never leaves the
+cutoff, wrong for anything that diffuses. A real run attaches
+`molix.md.NeighborList(cell=…, cutoff=…, positions=…, skin=…)` with
+`set_neighbors`, which owns its own rebuild cadence and needs a cell (it is a
+minimum-image list). Two further policies are `MD`'s own and re-applied on every
+rebuild: `set_compiler(Compiler())` compiles the classical energy/force core,
+and `MD(dtype, potential_dtype=…)` evaluates the potential at a second
+precision. Both are in the [MD guide](../../molix/user-guide/md.md).
 
 ## 3. Write LAMMPS files
 
@@ -167,24 +203,35 @@ single sub-style and so drops Coulomb from every Lennard-Jones pair.
 from molix.ff_export import LammpsAdapter, LammpsWriter
 
 writer = LammpsWriter()
-writer.write_data("system.data", batch)
-writer.write_settings("system.in.settings", ff, batch, skip_pair_style=True)
-writer.write_pair_block("system.in.pair", LammpsAdapter().translate(ff.to_ir()))
+types = ff.assign_types(batch)          # one condensation, three files
+writer.write_data("system.data", batch, types=types)
+writer.write_settings("system.in.settings", ff, batch, types=types, skip_pair_style=True)
+writer.write_pair_block(
+    "system.in.pair", LammpsAdapter().translate(ff.to_ir()), types=types
+)
 ```
 
-`write_settings` calls `ff.clone().realize(batch)` then `molpy.io`. There is no
-`to_molpy()`. `skip_pair_style=True` drops every `pair:*` style from that clone,
+`write_settings` calls `ff.clone().realize(batch, types=types)` then `molpy.io`
+— the assignment made above is what registers the molpy types, so a deck is
+condensed once and every file numbers its types from that one answer. There is
+no `to_molpy()`. `skip_pair_style=True` drops every `pair:*` style from that clone,
 so the include is bonded-only and the two files cannot disagree about the
 nonbonded model; it also carries no `units` line, since LAMMPS refuses `units`
 once `read_data` has made a box. `write_pair_block` then emits the `pair_style`
-line, one `pair_coeff i j` for every `i <= j` mixed with molnex's own
-Lorentz–Berthelot rule, `kspace_style pppm` with `kspace_modify gewald` under a
+line, one `pair_coeff i j` for every `i <= j` *type* pair mixed with the
+combining rule the field declares (`mixing` on `pair:lj/cut`; geometric for
+OPLS-AA), `kspace_style pppm` with `kspace_modify gewald` under a
 lattice Coulomb solver, and `special_bonds` from `ff.nonbonded_scaling`.
 
 The box comes from `batch["graphs", "cell"]` when the batch carries one and is a
-padded open box otherwise. Atom types are identity types — one per atom, named
-`t1`, `t2`, … zero-padded to a common width so LAMMPS accepts the label and
-molrs numbers the types in atom order. Source the three files in this order:
+padded open box otherwise. Types are condensed on parameter equality by
+`ForceField.assign_types` — atoms sharing (mass, charge, ε, σ) are one atom type,
+interactions between the same atom types with the same constants one bonded type
+— and all three calls take that one result, so the data file's labels, the
+include's coeff names and the pair block's numbers are the same typing. The
+labels are `t1`/`b1`/`a1`/`d1`/`i1`-style, zero-padded to the type count so
+LAMMPS accepts them and molrs, which sorts labels as text, numbers the types in
+class order. Source the three files in this order:
 
 ```
 units real

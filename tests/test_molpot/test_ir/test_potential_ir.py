@@ -53,6 +53,7 @@ class TestPotentialIR:
         assert PotentialIR().nonbonded_method == NonbondedMethodRecord(
             lj_cutoff=None,
             lj_switch_start=None,
+            lj_mixing=None,
             coulomb_cutoff=None,
             coulomb_calculator=None,
             real_space_cutoff=None,

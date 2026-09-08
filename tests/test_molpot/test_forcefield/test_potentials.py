@@ -16,7 +16,6 @@ from __future__ import annotations
 import itertools
 import re
 from collections.abc import Callable
-from pathlib import Path
 
 import pytest
 import torch
@@ -50,7 +49,6 @@ BOND_R = 1.5
 GOLDEN_ENERGY = 12.5
 GOLDEN_FORCE_X = 50.0
 
-SOURCE = Path(__file__).resolve().parents[3] / "src/molpot/forcefield/potentials.py"
 FORCE_SEAM = "src/molpot/derivation/force.py"
 
 #: Cubic edge (Å) of the tiny periodic Polar fixture. Its ``capacity_factor =
@@ -388,12 +386,32 @@ def _class_i_batch() -> TensorDict:
 BUTANE_CUTOFF = 10.0
 
 
+#: Build radius (Å) of the charged fixture's placed list — past its single
+#: 2 Å pair, so the open ``pair:coulomb`` prices the pair it would enumerate.
+CHARGED_CUTOFF = 10.0
+
+
+def _anion_potentials() -> Potentials:
+    """Open ``pair:coulomb`` over two atoms of +0.5 e — a graph of net +1 e."""
+    return (
+        ForceField(name="anion")
+        .def_pairstyle("coulomb")
+        .with_params(atoms={"q": torch.tensor([0.5, 0.5], dtype=DTYPE)})
+        .to_potentials()
+    )
+
+
 def _charged_batch(*, total_charge: float | None) -> TensorDict:
-    """Two atoms carrying +0.5 e each; ``graphs.total_charge`` optional."""
+    """Two atoms carrying +0.5 e each; ``graphs.total_charge`` optional.
+
+    Carries a placed list, so the Coulomb term can price it: a batch the charge
+    check refuses has to be one the field would otherwise have answered, or
+    "refused again" and "could not be evaluated" are the same observation.
+    """
     graphs: dict[str, torch.Tensor] = {"num_atoms": torch.tensor([2], dtype=torch.long)}
     if total_charge is not None:
         graphs["total_charge"] = torch.tensor([total_charge], dtype=DTYPE)
-    return TensorDict(
+    batch = TensorDict(
         {
             "atoms": TensorDict(
                 {
@@ -407,6 +425,7 @@ def _charged_batch(*, total_charge: float | None) -> TensorDict:
         },
         batch_size=[],
     )
+    return place_edges(batch, cutoff=CHARGED_CUTOFF)
 
 
 def _butane_forcefield() -> ForceField:
@@ -496,6 +515,82 @@ def _lj_boundary_batch(positions: torch.Tensor) -> TensorDict:
         ),
         cutoff=LJ_BOUNDARY_CUTOFF,
     )
+
+
+# ---------------------------------------------------------------------------
+# F29 — a molecule wrapped across a box face is refused at bind
+# ---------------------------------------------------------------------------
+
+#: Cubic edge (Å) of the wrapped-bond fixture. Every perpendicular width of a
+#: cube is its own edge, so ``bind_topology``'s limit here is ``5``.
+WRAP_EDGE = 10.0
+#: The wrapped molecule's ``x`` coordinates (Å) — the two bonded atoms either
+#: side of the ``x`` face. Their plain displacement is 8 Å, the long way round
+#: the box, while their minimum image is the 2 Å the bond really is: exactly
+#: what a trajectory writer that wraps coordinates into the cell produces, and
+#: exactly the frame whose bonded terms would price a stretched bond.
+WRAPPED_X = (1.0, 9.0)
+#: The same molecule unwrapped — atom 1 left *outside* the box instead of
+#: folded back into it. The bond is the 2 Å above; a coordinate past the cell
+#: is not an error, being wrapped is.
+UNWRAPPED_X = (9.0, 11.0)
+#: Harmonic energy (kcal/mol) of that 2 Å bond: ``½·BOND_K·(2 − BOND_R0)² =
+#: 50``, written out here rather than read back off the term.
+UNWRAPPED_ENERGY = 50.0
+#: Third lattice vector (Å) of the sheared cell: the 10 Å cube's ``c`` tilted
+#: in ``x`` so ``|c|`` is still 10 Å while the volume falls to 600 Å³. Its
+#: widest face is ``|b × c| = 100 Å²``, so the thinnest slab between two faces
+#: — the perpendicular width — is ``600 / 100 = 6 Å`` and the bind limit is
+#: 3 Å, while every *edge* is still 10 Å. That gap is the whole point: it
+#: tells the width rule and the shortest-edge rule apart.
+SHEARED_C = (8.0, 0.0, 6.0)
+#: Perpendicular width (Å) of that cell, and the bond length (Å) placed in
+#: both cells: inside the cube's 5 Å limit, past the sheared cell's 3 Å one.
+SHEARED_WIDTH = 6.0
+SHEARED_BOND_R = 4.0
+
+
+def _periodic_bond_batch(x0: float, x1: float, cell: torch.Tensor | None = None) -> TensorDict:
+    """Two bonded atoms on the ``x`` axis, optionally inside a lattice.
+
+    Bond-only, so it carries no placed ``edges`` namespace: no pair style asks
+    about this fixture and the bind-time check reads the bond columns and the
+    cell, nothing else.
+
+    Args:
+        x0: ``x`` of atom 0 in Å.
+        x1: ``x`` of atom 1 in Å.
+        cell: Lattice vectors ``(3, 3)`` in Å, rows being the vectors, or
+            ``None`` for an open boundary.
+
+    Returns:
+        The batch, carrying ``atoms`` and ``bonds``, plus ``graphs.cell`` when
+        a lattice was given.
+    """
+    pos = torch.tensor([[x0, 5.0, 5.0], [x1, 5.0, 5.0]], dtype=DTYPE)
+    batch = TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": pos,
+                    "Z": torch.tensor([1, 1], dtype=torch.long),
+                    "batch": torch.zeros(2, dtype=torch.long),
+                },
+                batch_size=[2],
+            ),
+            "bonds": TensorDict(
+                {
+                    "atomi": torch.tensor([0], dtype=torch.long),
+                    "atomj": torch.tensor([1], dtype=torch.long),
+                },
+                batch_size=[1],
+            ),
+        },
+        batch_size=[],
+    )
+    if cell is not None:
+        batch["graphs"] = TensorDict({"cell": cell}, batch_size=[])
+    return batch
 
 
 # ---------------------------------------------------------------------------
@@ -1259,6 +1354,12 @@ class TestPotentials:
         *term*, never against a literal: the test cannot pass with two readers
         that agree only by coincidence.
 
+        ``mixing`` rides here for the same reason the radii do: the
+        Lennard-Jones combining rule is model identity (ledger finding
+        **F24**), so the rule the assembled term mixes with and the rule the
+        manifest reports are one resolved value, not two readings that happen
+        to agree while both default to Lorentz–Berthelot.
+
         ``real_space_cutoff`` is deliberately left undeclared, because it is
         the one option whose fallback is *derived* rather than absolute — the
         periodic Coulomb term runs at ``3 × smearing = 12 Å``, and a record
@@ -1266,7 +1367,7 @@ class TestPotentials:
         """
         ff = (
             ForceField(name="pair-style-resolver")
-            .def_pairstyle("lj/cut", cutoff=8.5, switch_start=7.0)
+            .def_pairstyle("lj/cut", cutoff=8.5, switch_start=7.0, mixing="geometric")
             .def_pairstyle(
                 "coulomb",
                 calculator="ewald",
@@ -1283,6 +1384,7 @@ class TestPotentials:
 
         assert pots.lj.cutoff == record.lj_cutoff
         assert pots.lj.switch_start == record.lj_switch_start
+        assert pots.lj.mixing == record.lj_mixing
         assert pots.coulomb_open.cutoff == record.coulomb_cutoff
         assert pots.coulomb_periodic.calculator_name == record.coulomb_calculator
         assert pots.coulomb_periodic.smearing == record.smearing
@@ -1379,17 +1481,238 @@ class TestPotentials:
         silently regularised by the Ewald background term. The check is eager
         and per graph, so it fires at bind time rather than as a wrong number.
         """
-        potentials = (
-            ForceField(name="anion")
-            .def_pairstyle("coulomb")
-            .with_params(atoms={"q": torch.tensor([0.5, 0.5], dtype=DTYPE)})
-            .to_potentials()
-        )
+        potentials = _anion_potentials()
         with pytest.raises(ValueError, match="total_charge"):
             potentials.bind_topology(_charged_batch(total_charge=0.0))
 
         potentials.bind_topology(_charged_batch(total_charge=1.0))
         potentials.bind_topology(_charged_batch(total_charge=None))
+
+    def test_bind_topology_refuses_a_bond_wrapped_across_a_box_face(self) -> None:
+        """F29 fail-closed: under a cell, a bond over half the box is a folded molecule.
+
+        The two halves of an assembled energy read geometry differently. The
+        bonded terms take the plain ``pos_j − pos_i`` off their index columns;
+        the pair terms take minimum-image separations. Wrapping a periodic
+        frame into the box — what a trajectory writer does by default — is
+        therefore invisible to the pair half and fatal to the bonded one: the
+        two atoms below are 2 Å apart through the ``x`` face and 8 Å apart in
+        the coordinates as given, and every bond, angle and torsion built on
+        them would be priced at the 8 Å. The number that comes back is finite,
+        differentiable and wrong, so the frame is refused at the bind instead,
+        where one host sync is affordable and the force path stays free of it.
+
+        Three legs, because the rule is only as good as its boundaries: the
+        wrapped frame raises and the message names the bond, its length, the
+        limit and the finding; the *unwrapped* copy of the same molecule —
+        a coordinate outside the box, which is legal — binds and prices the
+        2 Å bond; and the same 8 Å displacement with **no** lattice binds,
+        since an open boundary has nothing to be wrapped into.
+        """
+        potentials = _bond_potentials()
+        cell = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
+
+        with pytest.raises(ValueError, match="F29") as excinfo:
+            potentials.bind_topology(_periodic_bond_batch(*WRAPPED_X, cell=cell))
+        message = str(excinfo.value)
+        # The message has to identify *which* bond and *by how much*: the
+        # two atom indices, the 8 Å it spans and the 5 Å half-width it broke.
+        # Only the numbers are pinned — the phrasing around them is not.
+        for token in ("0", "1", "8", "5"):
+            assert re.search(rf"\b{token}\b", message), message
+
+        unwrapped = _periodic_bond_batch(*UNWRAPPED_X, cell=cell)
+        potentials.bind_topology(unwrapped)
+        assert float(potentials.calc_energy(unwrapped)) == pytest.approx(
+            UNWRAPPED_ENERGY, abs=1e-10
+        )
+
+        potentials.bind_topology(_periodic_bond_batch(*WRAPPED_X))
+
+    def test_the_bind_limit_is_the_perpendicular_width_not_the_shortest_edge(self) -> None:
+        """A flat triclinic cell fails a bond a cube of the same edges accepts.
+
+        How far a molecule can reach before its own image is nearer than itself
+        is set by the thinnest slab between two faces, ``V / max |a_i × a_j|``,
+        not by the shortest lattice *vector*. Shear the 10 Å cube's ``c`` in
+        ``x`` and every edge stays 10 Å long while the volume — and with it the
+        slab between the ``b``/``c`` faces — falls to 6 Å. A 4 Å bond is
+        therefore fine in the cube (limit 5 Å) and wrapped in the sheared cell
+        (limit 3 Å); an implementation that measured against the edge length
+        would accept both and answer the folded frame.
+        """
+        cube = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
+        sheared = torch.tensor(
+            [[WRAP_EDGE, 0.0, 0.0], [0.0, WRAP_EDGE, 0.0], SHEARED_C], dtype=DTYPE
+        )
+        # The fixture's own claim, checked rather than asserted in a comment:
+        # same three edge lengths, a thinner slab.
+        assert [float(row.norm()) for row in sheared] == pytest.approx([WRAP_EDGE] * 3)
+        volume = float(torch.linalg.det(sheared).abs())
+        widest_face = float(torch.linalg.cross(sheared[1], sheared[2]).norm())
+        assert volume / widest_face == pytest.approx(SHEARED_WIDTH, abs=1e-12)
+
+        potentials = _bond_potentials()
+        potentials.bind_topology(_periodic_bond_batch(0.0, SHEARED_BOND_R, cell=cube))
+
+        with pytest.raises(ValueError, match="F29") as excinfo:
+            potentials.bind_topology(_periodic_bond_batch(0.0, SHEARED_BOND_R, cell=sheared))
+        message = str(excinfo.value)
+        # 4 Å of bond against a 3 Å limit — the half-width, not the 5 Å the
+        # 10 Å edges would have allowed.
+        assert re.search(r"\b4\b", message), message
+        assert re.search(r"\b3\b", message), message
+
+    def test_a_wrapped_bond_is_refused_through_calc_energy_without_an_explicit_bind(
+        self,
+    ) -> None:
+        """F29 has to hold at the entries a caller uses, not only at the bind.
+
+        :meth:`bind_topology` refuses a folded frame, but nothing makes a
+        caller call it. For a **bonded-only** field there is no nonbonded term,
+        so the lazy bind inside ``_scaled_pairs`` never runs either, and the
+        wrapped molecule of :data:`WRAPPED_X` — 2 Å apart through the ``x``
+        face, 8 Å apart in the coordinates as given — used to be priced at
+        ``½·BOND_K·(8 − BOND_R0)² = 2450`` kcal/mol straight through the public
+        API: finite, differentiable and wrong, which is exactly what F29
+        exists to refuse. A guard that only fires on an explicit bind is a
+        guard on the path that was never the problem.
+
+        Both public energy entries are checked, each on a **fresh** container,
+        because a bind performed by the first call would otherwise be what
+        protected the second.
+        """
+        cell = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
+
+        with pytest.raises(ValueError, match="F29"):
+            _bond_potentials().calc_energy(_periodic_bond_batch(*WRAPPED_X, cell=cell))
+
+        with pytest.raises(ValueError, match="F29"):
+            _bond_potentials().calc_energy_forces(_periodic_bond_batch(*WRAPPED_X, cell=cell))
+
+    def test_a_second_frame_of_the_same_shape_is_checked_afresh(self) -> None:
+        """The F29 memo may not vouch for a frame it never read.
+
+        The gate is remembered per *topology* — a shape-level fingerprint of
+        the atom count and the bonded column counts — so a later call on a
+        batch of the same shape is passed straight through. That positions are
+        free afterwards is the point: an MD rollout cannot pay a host sync per
+        step, and an integrator never wraps in place, so a rollout whose first
+        frame is whole stays whole.
+
+        A **frame** is not a topology, though. The same two bonded atoms arrive
+        whole or folded, in one cell or another, at the same shape either way —
+        which is precisely the training path, where one container prices batch
+        after batch. Priced one whole frame first, the container then answered
+        the folded one behind it with ``½·BOND_K·(8 − BOND_R0)² = 2450``
+        kcal/mol: the guard reduced to a check on whichever frame happened to
+        arrive first.
+        """
+        cell = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
+        potentials = _bond_potentials()
+
+        # A whole frame, priced — this is what arms the memo.
+        potentials.calc_energy(_periodic_bond_batch(*UNWRAPPED_X, cell=cell))
+
+        with pytest.raises(ValueError, match="F29"):
+            potentials.calc_energy(_periodic_bond_batch(*WRAPPED_X, cell=cell))
+
+    @pytest.mark.slow
+    def test_a_wrapped_frame_is_refused_even_under_torch_compile(self) -> None:
+        """Compiling the caller's own entry point may not switch the F29 gate off.
+
+        The check is host-side, so it cannot be traced — and
+        :meth:`_check_geometry` therefore returns early under
+        ``torch.compiler.is_compiling()``. That is right for the *compiled
+        core*, which :meth:`calc_energy_forces` calls the gate before entering.
+        It is wrong for a caller who wraps a whole public entry themselves,
+        which is the ordinary way to compile a single-point energy: the guard
+        then evaporates exactly where nothing else is watching, and the folded
+        frame comes back as ``½·BOND_K·(8 − BOND_R0)² = 2450`` kcal/mol —
+        measured, under ``torch.compile`` — while the same call eagerly raises.
+        A precondition that holds only in eager mode is not a precondition; it
+        is a lint.
+
+        The narrow opt-out the compiled region actually needs is the memo:
+        a frame an eager :meth:`calc_energy` or :meth:`bind_topology` has
+        already vouched for stays free, and anything else is refused with a
+        message naming that as the way through. Both halves are pinned here —
+        the unvouched frame raises, and the vouched one runs.
+
+        Marked ``slow``: the first ``torch.compile`` of this field costs 47 s
+        on the CI box (0.1 s for a second one in the same process), which is
+        the compile tier by any reading of the rule.
+        """
+        cell = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
+
+        refusing = _bond_potentials()
+        with pytest.raises(ValueError, match="F29"):
+            torch.compile(lambda batch: refusing.calc_energy(batch))(
+                _periodic_bond_batch(*WRAPPED_X, cell=cell)
+            )
+
+        # Vouched for eagerly first, then compiled: the same object, the same
+        # topology, so the memo carries it and the compiled call goes through.
+        vouched = _bond_potentials()
+        whole = _periodic_bond_batch(*UNWRAPPED_X, cell=cell)
+        vouched.calc_energy(whole)
+        torch.compile(lambda batch: vouched.calc_energy(batch))(whole)
+
+    def test_a_refused_bind_leaves_nothing_armed(self) -> None:
+        """A bind that raised must not have installed half of itself.
+
+        :meth:`bind_topology` builds the exclusion table and records the
+        topology fingerprint *before* it checks the declared net charge, so a
+        refusal left the container looking bound: the exclusion table is not
+        ``None`` any more, the lazy bind inside the next evaluation sees
+        nothing to do, and the very batch that was just refused is priced —
+        41.51 kcal/mol here, from charges the field itself says are wrong. One
+        caught exception in a fitting loop (or a notebook cell re-run) is all
+        it takes, and every number after it is quietly outside the S5
+        constraint.
+
+        Refusing repeatedly is the only safe state: the container is either
+        bound to a frame it accepted or bound to nothing. Both entry orders are
+        checked, because the arming happens on the bind and the *lazy* bind is
+        the one no caller can see.
+        """
+        batch = _charged_batch(total_charge=0.0)
+
+        explicit = _anion_potentials()
+        with pytest.raises(ValueError, match="total_charge"):
+            explicit.bind_topology(batch)
+        with pytest.raises(ValueError, match="total_charge"):
+            explicit.calc_energy(batch)
+
+        lazy = _anion_potentials()
+        with pytest.raises(ValueError, match="total_charge"):
+            lazy.calc_energy(batch)
+        with pytest.raises(ValueError, match="total_charge"):
+            lazy.calc_energy(batch)
+
+    def test_forward_writes_a_per_graph_energy_column_on_a_one_graph_batch(self) -> None:
+        """``graphs`` sized ``[1]`` takes a ``(1,)`` energy, not a bare scalar.
+
+        A post-collate batch carries one row per graph
+        (``graphs.batch_size == [B]``), and ``B = 1`` — one molecule per
+        forward — is the shape the composer, the loss and the MD adapter all
+        meet first. The classical sum, though, is a 0-dim tensor whenever the
+        batch holds a single graph, so :meth:`Potentials.forward` writing it
+        under a ``[1]`` namespace hands TensorDict a value of the wrong rank:
+        the batch dimension the namespace declares is not there. The energy
+        column has to arrive shaped like the namespace that holds it, and the
+        forces like the atoms.
+        """
+        batch = _two_atom_bond_batch()
+        batch["graphs"] = TensorDict(
+            {"num_atoms": torch.tensor([2], dtype=torch.long)}, batch_size=[1]
+        )
+
+        out = _bond_potentials()(batch)
+
+        assert out is batch
+        assert out["graphs", "energy"].shape == (1,)
+        assert out["atoms", "forces"].shape == (2, 3)
 
     def test_two_polarization_styles_are_refused_at_construction(
         self, fake_pol_styles: tuple[str, str]
@@ -1687,10 +2010,20 @@ class TestPotentials:
             f"break sites: {flat.break_sites}"
         )
 
-        step = Compiler.explain(
-            potentials.calc_energy_forces_virial,
-            _coulomb_batch(positions, cell, edge_index, shifts),
-        )
+        # Host-side preconditions are stated *before* the compiled region —
+        # the same rule that puts ``bind_cell`` at the top of this test. The
+        # F29 geometry gate (:meth:`Potentials._check_geometry`) is one host
+        # sync per **frame**, memoized on the batch object, so a frame nothing
+        # has vouched for runs that sync wherever it is first evaluated —
+        # inside this trace, if that is where it happens, for four breaks at
+        # ``potentials.py:952-953``. Every production entry vouches outside the
+        # compiled region already: ``calc_energy_forces`` gates before entering
+        # ``_classical_core``, MD binds one work batch for the whole rollout,
+        # and a training step binds at its first evaluation. The bind here is
+        # that step, not a concession.
+        step_batch = _coulomb_batch(positions, cell, edge_index, shifts)
+        potentials.bind_topology(step_batch)
+        step = Compiler.explain(potentials.calc_energy_forces_virial, step_batch)
         assert step.graph_break_count > 0
         strays = _strays_outside_the_force_seam(step.break_sites)
         assert strays == [], (
@@ -1905,6 +2238,17 @@ def _strays_outside_the_force_seam(sites: tuple[str, ...]) -> list[str]:
     return [site for site in sites if not re.fullmatch(rf".*{re.escape(FORCE_SEAM)}:\d+", site)]
 
 
+#: Type of the classical ``(system, pos) -> (energy, forces)`` core that
+#: :meth:`~molpot.forcefield.Potentials.compile_core` hands a compiler.
+ClassicalCore = Callable[..., tuple[torch.Tensor, torch.Tensor]]
+
+#: Separation (Å) of the two-atom ``lj/cut`` fixture the classical core is
+#: compiled on. Past the ``2^(1/6) σ = 3.37 Å`` minimum, so the pair sits on
+#: the attractive shoulder with a non-zero force — at the well bottom every
+#: build agrees on a zero and the parity leg would prove nothing.
+COMPILED_CORE_R = 3.5
+
+
 def _polar_forcefield() -> tuple[ForceField, nn.Module]:
     """A tiny periodic Polar mlip behind a ``metal``-unit ForceField.
 
@@ -2003,9 +2347,14 @@ class TestPotentialsCompiledCore:
         ``def_pairstyle`` accepts any ``nn.Module``, so both protocols are
         optional on an mlip: ``bind_cell`` must silently do nothing (and change
         no result) for one that lacks it, while ``compile_core`` must refuse
-        loudly rather than report success having compiled nothing. When the
-        mlip does satisfy them, exactly one call is forwarded, with the
-        caller's own storage. The import guards keep the package direction
+        loudly rather than report success having compiled nothing — an mlip
+        owns the whole energy, so a container that cannot reach its core has
+        nothing left to compile. A **classical** field is the other case
+        entirely: it owns its core and compiles it
+        (:meth:`test_a_classical_field_compiles_its_own_core_and_routes_through_it`),
+        so only its ``bind_cell`` is a no-op here. When the mlip does satisfy
+        both protocols, exactly one call is forwarded, with the caller's own
+        storage. The import guards keep the package direction
         ``molix <- molrep <- molzoo/molpot`` intact: the protocols come from
         ``molix.schema``, never from ``molix.md`` or ``molix.compile``.
         """
@@ -2017,10 +2366,10 @@ class TestPotentialsCompiledCore:
         with pytest.raises(RuntimeError, match="compile_core"):
             toy.compile_core(lambda core: core)
 
+        # A bonded-only field holds nothing sized by the lattice: the
+        # documented no-op, which is a raise-free call and nothing else.
         classical = _bond_potentials()
         classical.bind_cell(torch.eye(3, dtype=DTYPE))
-        with pytest.raises(RuntimeError, match="compile_core"):
-            classical.compile_core(lambda core: core)
 
         bound: list[int] = []
         compilers: list[object] = []
@@ -2087,6 +2436,111 @@ class TestPotentialsCompiledCore:
         assert len(calls) == 2
         assert batch["atoms", "pos"] is shifted
         assert not torch.allclose(moved.detach(), energy.detach())
+
+    def test_a_classical_field_compiles_its_own_core_and_routes_through_it(self) -> None:
+        """A field with no mlip hands out ``_classical_core`` and then calls it.
+
+        The classical analytic step is a hot path, so ``compile_core`` must have
+        something to install for a ForceField that declares only styles: the
+        whole ``(system, pos) -> (energy, forces)`` evaluation, as one bound
+        method of the container. Two things are pinned, because either one alone
+        can be true while the seam is useless. The compiler is applied **once**,
+        to a bound method of *this* ``Potentials`` — not to a lambda closing
+        over a rebuilt one, which would be a second evaluation path. And
+        ``calc_energy_forces`` then goes through the build the compiler returned
+        — a container that installed it and kept calling the eager method would
+        report a compiled run and never have one.
+
+        The compiler here is the identity, so the values must be untouched: one
+        function, two builds, and the only licensed difference between them is
+        reduction order. ``1e-12`` on a two-atom LJ pair is well under that.
+        """
+        installed: list[ClassicalCore] = []
+        routed: list[int] = []
+
+        def recording(core: ClassicalCore) -> ClassicalCore:
+            installed.append(core)
+
+            def through(*args: object, **kwargs: object) -> tuple[torch.Tensor, torch.Tensor]:
+                routed.append(1)
+                return core(*args, **kwargs)
+
+            return through
+
+        potentials = _lj_pair_forcefield().to_potentials()
+        batch = _lj_pair_batch(r=COMPILED_CORE_R)
+        eager_energy, eager_forces = potentials.calc_energy_forces(batch)
+        eager = (eager_energy.detach().clone(), eager_forces.detach().clone())
+
+        potentials.compile_core(recording)
+        assert len(installed) == 1
+        assert getattr(installed[0], "__self__", None) is potentials
+
+        energy, forces = potentials.calc_energy_forces(batch)
+        assert routed == [1]
+        assert torch.allclose(energy.detach(), eager[0], atol=1e-12, rtol=0.0)
+        assert torch.allclose(forces.detach(), eager[1], atol=1e-12, rtol=0.0)
+
+    @pytest.mark.slow
+    def test_the_installed_classical_core_traces_with_no_break_outside_force_py(self) -> None:
+        """What ``compile_core`` hands a compiler has to be compilable.
+
+        The iron law is per hot path, and the classical analytic step is one: a
+        ``lj/cut`` field is fixed-shape arithmetic over the list's capacity with
+        a liveness mask — no boolean selection, no host read, no Python branch
+        on a tensor value — and must trace as **one** graph with zero breaks. A
+        break there is not a slow path, it is the compiled region collapsing to
+        the eager one.
+
+        A declared ``pair:coulomb`` has no closed-form force, so the core builds
+        a position leaf and calls ``autograd.grad`` through
+        ``molpot/derivation/force.py``: dynamo cannot trace either, that break
+        is deliberate and named, and it is the *only* one a classical field may
+        show. Owner: molpot derivation. The core is taken from the compiler
+        itself rather than off the container, so this asks about the function
+        the seam actually installs.
+
+        ``bind_topology`` first, which is the composition
+        :meth:`~molpot.forcefield.Potentials.bind_topology` documents for a
+        compiled path: the exclusion table and the orientation check are
+        topology work, they are host-side by design, and left to the lazy call
+        inside the first evaluation they would be traced as breaks of the core.
+        Everything that survives that bind is per-step work and has to compile.
+        """
+        from molix.compile import Compiler
+
+        captured: list[ClassicalCore] = []
+
+        def capture(core: ClassicalCore) -> ClassicalCore:
+            captured.append(core)
+            return core
+
+        lj = _lj_pair_forcefield().to_potentials()
+        lj_batch = _lj_pair_batch(r=COMPILED_CORE_R)
+        lj.bind_topology(lj_batch)
+        lj.compile_core(capture)
+        flat = Compiler.explain(captured[-1], lj_batch, _leaf(lj_batch, "atoms", "pos"))
+        assert (flat.graph_count, flat.graph_break_count) == (1, 0), (
+            "a bonded + lj/cut core has no autograd seam and must trace as one graph; "
+            f"break sites: {flat.break_sites}"
+        )
+
+        coulomb = _coulomb_forcefield().to_potentials()
+        cell = torch.eye(3, dtype=DTYPE) * COULOMB_EDGE
+        coulomb.bind_cell(cell)
+        edge_index, shifts = _coulomb_edges()
+        periodic = _coulomb_batch(
+            torch.tensor(COULOMB_POSITIONS, dtype=DTYPE), cell, edge_index, shifts
+        )
+        coulomb.bind_topology(periodic)
+        coulomb.compile_core(capture)
+        core = Compiler.explain(captured[-1], periodic, _leaf(periodic, "atoms", "pos"))
+        assert core.graph_break_count > 0
+        strays = _strays_outside_the_force_seam(core.break_sites)
+        assert strays == [], (
+            f"the classical core may break only at the named autograd seam in {FORCE_SEAM} "
+            f"(owner: molpot derivation); stray break sites: {strays}"
+        )
 
     @pytest.mark.slow
     def test_the_compiled_route_matches_eager_and_breaks_only_in_force_py(self, fp64) -> None:

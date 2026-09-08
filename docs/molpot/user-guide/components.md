@@ -23,8 +23,31 @@ bond = BondHarmonic()
 angle = AngleHarmonic()
 ```
 
-`LJ126` expects `distance`, `epsilon_ij`, and `sigma_ij`. Its default mixing
-function converts per-atom `epsilon` and `sigma` values to per-pair values.
+`LJ126` expects `distance`, `epsilon_ij`, and `sigma_ij` — all *per-pair*. A
+force field stores one `epsilon` (well depth, kcal/mol) and one `sigma`
+(zero-crossing distance, Å) per *atom*, so something has to make one of each per
+pair first. That something is a **combining rule**, and `LJ126` carries it as
+`mixing_fn`; `PotentialComposer` applies it before calling the term.
+
+Which rule a model uses is part of its identity, not a numerical detail: the
+same parameter table combined two different ways is two different force fields
+on every cross pair. molnex spells the choice as `MixingRule`:
+
+- `MixingRule.LORENTZ_BERTHELOT` — `sigma` arithmetic, `epsilon` geometric. The
+  AMBER / CHARMM rule and molnex's default (`lorentz_berthelot`).
+- `MixingRule.GEOMETRIC` — both geometric. The OPLS-AA rule
+  (`geometric_mixing`), which `OPLSAAForceField` declares.
+
+```python
+from molpot.potentials import MixingRule, geometric_mixing
+
+lj_opls = LJ126(mixing_fn=geometric_mixing)      # or MixingRule.GEOMETRIC.mix
+```
+
+On the Class-I path you do not pass a function at all — you declare the rule on
+the style, `def_pairstyle("lj/cut", mixing="geometric")`, and it is recorded in
+the model manifest and carried into the LAMMPS and OpenMM exports. See the
+[ff-export guide](../../molix/user-guide/ff-export.md).
 
 ## Parameter Heads
 

@@ -96,10 +96,12 @@ from molpot.potentials import (
     DispersionC6,
     ImproperHarmonic,
     ImproperPeriodic,
+    MixingRule,
     Polarization,
     ProperTorsionPeriodic,
     RepulsionExp6,
     geometric_arithmetic_mixing,
+    geometric_mixing,
     lorentz_berthelot,
 )
 
@@ -153,6 +155,7 @@ __all__ = [
     "MANIFEST_SCHEMA",
     "MaxPooling",
     "MeanPooling",
+    "MixingRule",
     "ModelManifest",
     "MultiHead",
     "NonbondedMethodRecord",
@@ -186,5 +189,6 @@ __all__ = [
     "UnitTag",
     "WilsonBMatrix",
     "geometric_arithmetic_mixing",
+    "geometric_mixing",
     "lorentz_berthelot",
 ]

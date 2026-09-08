@@ -88,6 +88,16 @@ def _bonds_tables() -> dict[str, torch.Tensor]:
     }
 
 
+def _without_lj_mixing(nonbonded: object) -> dict[str, object]:
+    """An encoded nonbonded record with the combining rule removed.
+
+    What a payload written before the field existed looks like — the key is
+    absent, not ``None``.
+    """
+    assert isinstance(nonbonded, dict)
+    return {str(key): value for key, value in nonbonded.items() if key != "lj_mixing"}
+
+
 def _manifest() -> ModelManifest:
     """A fully populated manifest — every optional record present.
 
@@ -95,6 +105,12 @@ def _manifest() -> ModelManifest:
     ``representation`` / ``provenance`` / ``solver`` to the caller), so the
     round trip covers every record type, both enums and the unordered
     ``derivatives`` frozenset.
+
+    ``nonbonded.lj_mixing`` is the OPLS-AA ``"geometric"`` rather than the
+    ``"lorentz-berthelot"`` default, so a codec that dropped the Lennard-Jones
+    combining rule — or defaulted it back — fails the round trip instead of
+    agreeing by coincidence. It rides inside the nested ``nonbonded`` record,
+    which is why carrying it needs no ``MANIFEST_SCHEMA`` bump.
     """
     return ModelManifest(
         schema_version=MANIFEST_SCHEMA,
@@ -125,6 +141,7 @@ def _manifest() -> ModelManifest:
         nonbonded=NonbondedMethodRecord(
             lj_cutoff=12.0,
             lj_switch_start=10.0,
+            lj_mixing="geometric",
             coulomb_cutoff=None,
             coulomb_calculator="pme",
             real_space_cutoff=15.0,
@@ -180,12 +197,22 @@ def _manifest() -> ModelManifest:
 
 
 class TestModelManifest:
-    def test_schema_version_is_one(self) -> None:
+    def test_schema_version_is_two(self) -> None:
         """Pinned literal: bumping it is a breaking change, not a refactor.
+
+        Went to ``2`` on 2026-09-08 with
+        :attr:`~molpot.ir.nonbonded.NonbondedMethodRecord.lj_mixing`, the
+        Lennard-Jones combining rule. The field is *required* on the record, so
+        every schema-2 payload states the rule and a reader never has to guess
+        which force field a manifest describes — which is the whole point of
+        recording it. That is exactly what a version bump is for: a schema-1
+        payload is still readable (below), but it is honestly labelled as
+        coming from before the field existed rather than being retro-fitted
+        into the current layout.
 
         Versioned independently of ``molix.engine.export.LAMMPS_META_SCHEMA``.
         """
-        assert MANIFEST_SCHEMA == 1
+        assert MANIFEST_SCHEMA == 2
 
     def test_from_dict_inverts_to_dict(self) -> None:
         """Exact inverse — enums, frozensets and tuples all come back."""
@@ -223,12 +250,46 @@ class TestModelManifest:
         manifest = _manifest()
         path = manifest.write(tmp_path / "m.json")
         assert path.read_text() == json.dumps(manifest.to_dict(), sort_keys=True, indent=2)
+        # The version is *in* the file: it is what a reader branches on before
+        # it may interpret a single other key.
+        assert json.loads(path.read_text())["schema_version"] == 2
 
     def test_is_frozen(self) -> None:
         """A manifest describes one model; rewriting a field in place lies."""
         manifest = _manifest()
         with pytest.raises(dataclasses.FrozenInstanceError):
             manifest.profile = "B1"  # ty: ignore[invalid-assignment]
+
+    def test_a_schema_one_payload_reads_back_with_no_declared_mixing_rule(self) -> None:
+        """The previous layout is still readable, and honestly so.
+
+        A schema-1 manifest was written before the combining rule was recorded
+        at all, so the only true thing to say about its rule is "none was
+        declared" — ``None``, which the field documents as "Lorentz–Berthelot by
+        the then-default", the rule every molnex model mixed with until
+        2026-09-08. Refusing the payload would strand every manifest already on
+        disk; inventing ``"lorentz-berthelot"`` would claim the run *declared* a
+        rule it never did, and two runs would then compare equal on a field
+        neither of them recorded.
+        """
+        payload = _manifest().to_dict()
+        payload["schema_version"] = 1
+        payload["nonbonded"] = _without_lj_mixing(payload["nonbonded"])
+        assert ModelManifest.from_dict(payload).nonbonded.lj_mixing is None
+
+    def test_a_schema_two_payload_without_the_mixing_rule_is_defective(self) -> None:
+        """Tolerance is for the *old* layout, not for a hole in the current one.
+
+        A payload labelled schema 2 claims to have been written by a molnex
+        that records the rule, so a missing key is a truncated or hand-edited
+        file rather than an older one. Decoding it to ``None`` would give it
+        the same reading as a genuine schema-1 manifest and quietly erase the
+        distinction the version bump exists to draw.
+        """
+        payload = _manifest().to_dict()
+        payload["nonbonded"] = _without_lj_mixing(payload["nonbonded"])
+        with pytest.raises(TypeError):
+            ModelManifest.from_dict(payload)
 
     def test_from_dict_refuses_a_schema_version_this_molnex_cannot_read(self) -> None:
         """A layout this version does not know is not one it may parse.

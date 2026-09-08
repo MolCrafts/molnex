@@ -9,18 +9,19 @@ to rebuild, under its own Verlet skin and LAMMPS ``every`` / ``delay`` /
 being evaluated; the fixed-capacity buffers keep every tensor shape static
 across rebuilds.
 
-Two arms this benchmark used to have are gone — finding **F28** in
-``.claude/notes/composable-potentials.md``, which owns them and names the
-follow-up (one ``compile_core``-style seam on :class:`molix.md.MD` plus a
-precision policy). Both were lost when d9043cee replaced the compiled
-``LennardJonesCutForceField`` module with the molpy ForceField path, whose
-force evaluation sits behind ``MD.compute_force`` together with the neighbour
-rebuild. The ``torch.compile``d force path needs that compile seam, so its
-``--no-compile`` / ``--cuda-graphs`` flags are **deleted** rather than kept as
-switches that quietly do nothing. The split-precision arm
-(``--potential-precision``) needs parameter buffers at a dtype other than the
-MD state's, so it **fails closed** rather than silently running at
-``--precision``.
+Two arms ride on :class:`molix.md.MD`'s own seams. ``--compile`` /
+``--no-compile`` (compiled by default) installs a ``torch.compile``d build of
+the force field's classical energy/force core with
+:meth:`molix.md.MD.set_compiler`, and ``--cuda-graphs`` asks for the
+fixed-shape CUDA-graph preset instead (``Compiler(cuda_graphs=True)``, which
+the list's fixed capacity is what makes admissible). ``--potential-precision``
+is the split-precision arm: the force field's parameter tables and the
+geometry handed to it go to that dtype (``MD(..., potential_dtype=…)``) while
+the trajectory, the integrator and the neighbour list stay at ``--precision``
+— the fp64-integrator over fp32-potential operating point of the
+quantization-as-thermal-noise study (``molix.quant``). Both were dead between
+d9043cee and the seam that restored them (finding **F28** in
+``.claude/notes/composable-potentials.md``).
 
 The default ``--skin 1.02`` Å is 0.3 σ — the ``neighbor 0.3 bin`` setting shipped
 with the LAMMPS ``melt`` example — giving a half-skin of 0.51 Å against a
@@ -161,6 +162,20 @@ def main() -> int:
         "(e.g. MD fp64 over pot fp32)",
     )
     ap.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="compile the force field's classical energy/force core "
+        "(MD.set_compiler(Compiler())); --no-compile runs it eager",
+    )
+    ap.add_argument(
+        "--cuda-graphs",
+        action="store_true",
+        help="compile with the fixed-shape CUDA-graph preset "
+        "(Compiler(cuda_graphs=True)) instead of the default inductor config; "
+        "implies --compile",
+    )
+    ap.add_argument(
         "--skin",
         type=float,
         default=1.02,
@@ -194,15 +209,10 @@ def main() -> int:
 
     md_dtype = _DTYPE_MAP[args.precision]
     pot_name = args.potential_precision or args.precision
-    # The split-precision arm lost its wiring in d9043cee (finding F28 in
-    # ``.claude/notes/composable-potentials.md``; see the module docstring) and
-    # is opt-in, so it fails closed rather than silently running at --precision.
-    if pot_name != args.precision:
-        raise SystemExit(
-            "--potential-precision is unwired since d9043cee: the molpy ForceField "
-            "path builds its parameter buffers at the MD state dtype, so this arm "
-            "would silently run at --precision. Restore the split in molix.md first."
-        )
+    # None when the two agree: MD then adds no cast at all on the force path,
+    # so the single-precision arm is byte-identical to having no seam.
+    pot_dtype = _DTYPE_MAP[pot_name] if pot_name != args.precision else None
+    compiled = args.compile or args.cuda_graphs
     device = torch.device(args.device)
     n_steps = int(args.ps * 1000.0 / args.dt)
     a = _SIGMA * (4.0 / _RHO_STAR) ** (1.0 / 3.0)
@@ -229,9 +239,15 @@ def main() -> int:
             ) from err
         raise
 
-    # Geometry, nblist and LJ parameter buffers all sit on the MD-state dtype:
-    # the split-precision arm that used to put the parameters on pot_dtype is
-    # refused above until molix.md can express it again.
+    # Everything this script builds — geometry, the nblist, the LJ tables — is
+    # declared at the MD-state dtype, and the split-precision arm is left
+    # entirely to ``MD(potential_dtype=…)``. That seam already restates the
+    # container's parameter tables through ``ForceField.to_dtype`` (ε / σ are
+    # read live off the container, so no module cast can reach them), moves the
+    # assembled module's own buffers, and casts the per-step geometry. Declaring
+    # the tables at the potential dtype here as well would quantize them twice —
+    # harmless while the second cast is a widening no-op, and a silent second
+    # rounding the moment the two dtypes are read in the other order.
     from molpot.forcefield import ForceField
 
     n_atoms = int(pos.shape[0])
@@ -253,7 +269,7 @@ def main() -> int:
     drift_hook = EnergyDriftHook()
     thermo = _ThermoSeries()
     md = (
-        MD(md_dtype)
+        MD(md_dtype, potential_dtype=pot_dtype)
         .set_forcefield(ff)
         .set_neighbors(neighbors)
         .set_integrator(VelocityVerletIntegrator(args.dt))
@@ -262,6 +278,13 @@ def main() -> int:
         )
         .to(device)
     )
+    if compiled:
+        # set_compiler is a setter like the others: it rebuilds the potential
+        # and re-installs the compiled core, so it is safe here at the end of
+        # the chain and equally safe in the middle of it.
+        from molix.compile import Compiler
+
+        md.set_compiler(Compiler(cuda_graphs=True) if args.cuda_graphs else Compiler())
     atoms = TensorDict(
         {
             "atoms": TensorDict(
@@ -314,7 +337,10 @@ def main() -> int:
         f"lj/cut NVE melt: N={n_atoms} (fcc {args.n}^3)  rho*={_RHO_STAR}  rc={_CUTOFF:.2f} A  "
         f"dt={args.dt} fs  steps={n_steps}  duration={duration / 1000:.3f} ns"
     )
-    print(f"  device={device}  precision: MD {args.precision}, potential {pot_name}")
+    print(
+        f"  device={device}  precision: MD {args.precision}, potential {pot_name}  "
+        f"compiled={compiled}{' (cuda graphs)' if compiled and args.cuda_graphs else ''}"
+    )
     print(
         f"  policy: skin={neighbors.skin:g} A  every={neighbors.every}  delay={neighbors.delay}  "
         f"check={neighbors.check}  r_build={neighbors.r_build:.2f} A"

@@ -22,6 +22,7 @@ defined in ``.claude/notes/composable-potentials.md``.
 from __future__ import annotations
 
 import math
+import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -31,7 +32,11 @@ from tensordict import TensorDict
 
 from molix.schema import CellBound, CoreCompilable
 from molpot.contract import Contribution, ExclusionClass
-from molpot.derivation.force import autograd_forces_and_virial, autograd_forces_from_energy
+from molpot.derivation.force import (
+    autograd_forces_and_virial,
+    autograd_forces_from_energy,
+    position_leaf,
+)
 from molpot.derivation.protocol import (
     ENERGY_KEY,
     FORCES_KEY,
@@ -57,6 +62,7 @@ from molpot.potentials import (
 )
 from molpot.potentials.base import BasePotential
 from molpot.potentials.elec.prefactors import kcalmol_A
+from molpot.potentials.vdw.lj126 import MixingRule
 
 if TYPE_CHECKING:
     from molpot.forcefield.container import ForceField
@@ -89,6 +95,13 @@ class PairStyleDefaults:
 
     Attributes:
         lj_cutoff: Lennard-Jones cutoff radius in Å.
+        lj_mixing: Combining rule a ``pair:lj/cut`` style declared without a
+            ``mixing`` option runs with — the value of a
+            :class:`~molpot.potentials.vdw.lj126.MixingRule`. Lorentz–Berthelot
+            (``σ`` arithmetic, ``ε`` geometric), the AMBER / CHARMM rule; a
+            product form parameterized the other way declares its own, as
+            :class:`~molpot.forcefield.OPLSAAForceField` does with
+            ``"geometric"``.
         coulomb_calculator: Reciprocal-space algorithm under a cell. The mesh
             is the default; the explicit ``"ewald"`` k-vector sum is the
             small-box reference, not what a real periodic system should pay.
@@ -108,6 +121,7 @@ class PairStyleDefaults:
     """
 
     lj_cutoff: float = 10.0
+    lj_mixing: str = MixingRule.LORENTZ_BERTHELOT
     coulomb_calculator: str = "pme"
     smearing: float = 5.0
     real_space_cutoff_factor: float = 3.0
@@ -196,7 +210,10 @@ class Potentials(BasePotential):
       ``switch_start`` ``r_s`` with ``0 < r_s < r_c``, which tapers the energy
       smoothly to zero over ``[r_s, r_c]`` with the quintic switch instead of
       truncating it at ``r_c``. Omitting ``switch_start`` keeps the hard
-      truncation.
+      truncation. Its third option is dimensionless: ``mixing``, the combining
+      rule making per-pair ``ε`` / ``σ`` out of the per-atom tables
+      (``"lorentz-berthelot"``, the default, or ``"geometric"`` — see
+      :class:`~molpot.potentials.vdw.lj126.MixingRule`).
     * ``pair:coulomb`` open → :class:`CoulombOpenPotential` (optional
       ``cutoff`` in Å; ``prefactor`` in kcal Å mol⁻¹ e⁻²)
     * ``pair:coulomb`` + cell → :class:`CoulombPeriodicPotential`, whose style
@@ -219,15 +236,18 @@ class Potentials(BasePotential):
 
     Every pair term above reads the ``edges`` neighbour list already on the
     batch; molpot never enumerates pairs of its own, so a batch evaluated by a
-    ForceField with any pair style must carry one (:meth:`_placed_pairs`)::
-
-        from molix.batch import NeighborList
+    ForceField with any pair style must carry one (:meth:`_placed_pairs`). The
+    radius that list must reach is the field's, not the caller's, so the field
+    hands it out (:meth:`ForceField.neighbor_list
+    <molpot.forcefield.container.ForceField.neighbor_list>`)::
 
         ff.def_pairstyle("lj/cut", cutoff=12.0, switch_start=10.0)
         ff.def_pairstyle("coulomb", smearing=5.0, capacity_factor=1.2)
         pots = ff.to_potentials()
-        # molix builds the cutoff graph; Potentials only prices it.
-        system = NeighborList(cutoff=12.0).execute(system)
+        # molix builds the cutoff graph; Potentials only prices it. Under a
+        # cell the radius is the Ewald split's 3 x smearing = 15 A, not the
+        # Lennard-Jones 12 A — the field resolves which of the two is larger.
+        system = ff.neighbor_list(pbc=True).execute(system)   # system has graphs.cell
         E = pots.calc_energy(system)
 
     Args:
@@ -259,7 +279,23 @@ class Potentials(BasePotential):
         self.mlip = getattr(forcefield, "_mlip", None)
         self._exclusions: ExclusionTable | None = None
         self._bound_topology: tuple[int, ...] | None = None
+        # How many graphs the bound batch holds, resolved once at
+        # :meth:`bind_topology` because reading it off ``atoms.batch`` is a host
+        # sync and therefore a graph break on a compiled core (:meth:`_num_graphs`).
+        self._bound_num_graphs: int | None = None
+        # The frame whose geometry last passed :meth:`_check_bonds_unwrapped`:
+        # a weak reference to the batch object and its topology fingerprint.
+        # Separate from ``_bound_topology`` because a bonded-only field never
+        # binds an exclusion table and would otherwise never be checked at all,
+        # and keyed on the batch rather than on its shape because a new frame of
+        # the same shape is a new geometry (:meth:`_check_geometry`).
+        self._checked_geometry: tuple[weakref.ref[Any], tuple[int, ...]] | None = None
         self._bonded_styles: frozenset[str] = frozenset()
+        # The compiled build of :meth:`_classical_core`, installed by
+        # :meth:`compile_core` on a field with no mlip. ``None`` means "call the
+        # eager bound method"; it is the *same* function either way, so there is
+        # no second evaluation path (see :meth:`compile_core`).
+        self._compiled_classical: Callable[..., tuple[torch.Tensor, torch.Tensor]] | None = None
         self._check_composition()
         self._assemble_pair_potentials()
         self._assemble_bonded()
@@ -327,9 +363,16 @@ class Potentials(BasePotential):
             # every assembled Class-I model would keep the hard truncation.
             # ``None`` (no window) stays ``None``; the ``0 < r_s < r_c`` check is
             # the term's, so a bad window raises there rather than twice.
+            # The combining rule travels with them: it is model identity (an
+            # OPLS-AA table mixed Lorentz–Berthelot is a different force field
+            # on every cross pair), and the record is where the declaration
+            # already resolved it. ``MixingRule`` refuses anything else, so a
+            # record naming a cutoff but no rule fails here rather than
+            # silently mixing by whichever kernel default is current.
             self.lj = LJCutPotential(
                 cutoff=method.lj_cutoff,
                 switch_start=method.lj_switch_start,
+                mixing=MixingRule(method.lj_mixing),
             )
         if method.coulomb_calculator is not None:
             # Periodic calculator is chosen when a cell is present at energy
@@ -474,6 +517,16 @@ class Potentials(BasePotential):
         A nested TensorDict is treated as an MD / composer batch: energy and
         forces are written in place and the batch is returned so the module
         composes into the MD driver's TensorDict force adapter.
+
+        The energy is reshaped to the ``graphs`` namespace's own batch size on
+        the way in — the same defence :meth:`calc_energy_forces_virial` applies
+        before its ``write_energy``. :meth:`calc_energy_forces` answers a
+        single-molecule batch with a **scalar** ``()``, which is the right shape
+        for the sum it is, while a collated batch of one graph carries
+        ``graphs`` at ``batch_size=[1]`` and a TensorDict refuses to store a
+        ``()`` leaf under it. Every collate in molnex produces exactly that
+        batch, so without the reshape the most ordinary case is the one that
+        raises.
         """
         if self.mlip is not None and isinstance(data, TensorDict) and kwargs.get("pos") is None:
             return self.mlip(data)
@@ -481,7 +534,10 @@ class Potentials(BasePotential):
         if isinstance(data, TensorDict):
             if "graphs" not in data.keys():
                 data["graphs"] = TensorDict({}, batch_size=[])
-            data[ENERGY_KEY] = energy
+            graphs_bs = data["graphs"].batch_size
+            # A ``batch_size=[]`` graphs namespace constrains nothing, so the
+            # energy is stored as produced; a sized one is the shape to answer in.
+            data[ENERGY_KEY] = energy.reshape(*graphs_bs) if graphs_bs else energy
             data[FORCES_KEY] = forces
             return data
         return energy
@@ -497,6 +553,18 @@ class Potentials(BasePotential):
         must call it again, because positions may change freely between energy
         calls but the bond / angle / torsion columns may not. Repeated calls
         are harmless: the table is rebuilt from scratch each time.
+
+        **All or nothing.** Every check below runs before a single field of this
+        container is written, so a bind that raises leaves the container exactly
+        as it found it — still unbound if it was unbound, still on the previous
+        topology if it was bound. That is not tidiness: the state a half-bind
+        used to leave behind was *load-bearing*, because
+        :meth:`calc_energy_forces` binds only when ``_exclusions`` is ``None``.
+        A refused bind that had already installed the table therefore disarmed
+        the very guard that would have refused the next call, and the batch the
+        container had just rejected got a number back. It is
+        :meth:`_check_composition`'s principle — a refused ForceField never
+        leaves a half-built container behind — applied one stage later.
 
         The bind records a **shape-level** fingerprint of what it read — the
         atom count and the column counts of ``bonds`` / ``angles`` /
@@ -515,7 +583,25 @@ class Potentials(BasePotential):
 
         The total-charge check lives here rather than in the force loop
         precisely because here it is affordable: eager, per graph and
-        host-side, once per topology instead of once per step.
+        host-side, once per topology instead of once per step. The
+        **unwrapped-molecule** check (finding F29) has the same cost model but
+        not the same home: a bonded-only field never binds, and it is exactly
+        the composition that check exists for, so it belongs to
+        :meth:`_check_geometry` — its own once-per-frame gate, which every
+        public entry point calls and which this bind calls too. Under a
+        ``graphs.cell`` every bond is measured against half the cell's minimum
+        perpendicular width, and a molecule folded across a box face — every
+        bonded term of which would then be priced across the whole box — is
+        refused instead of answered.
+
+        What that check can vouch for ends at the frame it read. Its record,
+        like the fingerprint above, is shape-level, so positions stay free
+        afterwards. MD is covered by construction — the integrator never wraps
+        in place, so a rollout whose initial frame is whole stays whole — while
+        a **training batch** is vouched for only at the first call that read
+        its shape: a data pipeline that wraps frames (the normal state of a
+        trajectory read back from disk) must unwrap them before they arrive,
+        and no later stage will notice if it does not.
 
         Args:
             system: Batch / mapping carrying ``atoms.pos`` ``(N, 3)`` Å and the
@@ -524,9 +610,13 @@ class Potentials(BasePotential):
                 and so is the orientation of ``edges.edge_index``
                 (:meth:`_check_pair_orientation`) — bind time is the one place
                 that check is affordable, and a mis-oriented list is otherwise
-                a silent zero rather than an error.
-            pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``. Only
-                their count and device are read.
+                a silent zero rather than an error. ``graphs.cell`` ``(3, 3)``
+                or ``(B, 3, 3)`` in Å, with ``bonds``, additionally puts the
+                frame through :meth:`_check_bonds_unwrapped`.
+            pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``. Their
+                count and device are read, and — under a cell — their bonded
+                displacements, since they are the geometry the energy would be
+                priced at.
 
         Raises:
             ValueError: The ForceField carries a ``q`` table and the batch
@@ -538,12 +628,51 @@ class Potentials(BasePotential):
                 instead of reporting it. Or the batch's placed edge list holds
                 pair rows but not one with ``source < target`` — the half that
                 :meth:`_placed_pairs` prices — so every pair term would cost
-                exactly zero.
+                exactly zero. Or, under a cell, some bond is longer than half
+                its cell's minimum perpendicular width
+                (:meth:`_check_bonds_unwrapped`).
         """
+        # Every refusal first, then every mutation — the same rule
+        # :meth:`_check_composition` applies to assembly, applied to binding.
+        # Assigning as we went left a refused bind *armed*: the fingerprint, the
+        # graph count and the exclusion table were already installed when the
+        # charge check raised, so the very next ``calc_energy`` on that batch
+        # found ``_exclusions`` set, skipped its own bind and answered — 97.7
+        # kcal/mol out of a container that had just refused the frame. So the
+        # three bound fields are assigned at the very bottom, after everything
+        # that can raise. (The geometry record in between is the gate's own
+        # bookkeeping, not a bind: it says a frame passed, which it did.)
         p = self._pos(system, pos)
         self._check_pair_orientation(system)
-        self._bound_topology = self._topology_fingerprint(system, p.shape[0])
-        self._exclusions = ExclusionTable(
+        charges = (self.forcefield.params("atoms") or {}).get("q")
+        declared = self._ns_tensor(self._namespace(system, "graphs"), "total_charge")
+        if charges is not None and declared is not None and declared.numel() != 0:
+            q = charges.detach()
+            atom_batch = self._atom_batch(system, p.shape[0], p.device)
+            summed = torch.zeros(declared.shape[0], dtype=q.dtype, device=q.device).index_add_(
+                0, atom_batch, q
+            )
+            drift = (summed - declared.detach().to(summed)).abs()
+            graph = int(torch.argmax(drift))
+            if float(drift[graph]) > _TOTAL_CHARGE_TOL:
+                raise ValueError(
+                    f"graph {graph}: sum of atoms.q is {float(summed[graph]):.8g} e but "
+                    f"graphs.total_charge declares {float(declared[graph]):.8g} e "
+                    f"(tolerance {_TOTAL_CHARGE_TOL:g} e)"
+                )
+        # An explicit bind rebuilds everything from scratch, the geometry record
+        # included: rebinding the *same batch object* into a new lattice (its
+        # cell written in place) is the one call that would otherwise ride the
+        # memo, and it is exactly the call that means "check this again". The
+        # gate hands back the fingerprint it built, so the bind does not build a
+        # second one.
+        self._checked_geometry = None
+        fingerprint = self._check_geometry(system, p)
+        # Host-side, once: how many graphs this batch holds. Off the hot path
+        # it is the one number an evaluation cannot read without a device sync
+        # (see :meth:`_num_graphs`), and a bind is where syncs are allowed.
+        num_graphs = self._count_graphs(system)
+        exclusions = ExclusionTable(
             n_atoms=p.shape[0],
             scaling=self.forcefield.nonbonded_scaling,
             bond_index=self._bond_index(system),
@@ -551,23 +680,9 @@ class Potentials(BasePotential):
             proper_index=self._proper_index(system),
             device=p.device,
         )
-        charges = (self.forcefield.params("atoms") or {}).get("q")
-        declared = self._ns_tensor(self._namespace(system, "graphs"), "total_charge")
-        if charges is None or declared is None or declared.numel() == 0:
-            return
-        q = charges.detach()
-        atom_batch = self._atom_batch(system, p.shape[0], p.device)
-        summed = torch.zeros(declared.shape[0], dtype=q.dtype, device=q.device).index_add_(
-            0, atom_batch, q
-        )
-        drift = (summed - declared.detach().to(summed)).abs()
-        graph = int(torch.argmax(drift))
-        if float(drift[graph]) > _TOTAL_CHARGE_TOL:
-            raise ValueError(
-                f"graph {graph}: sum of atoms.q is {float(summed[graph]):.8g} e but "
-                f"graphs.total_charge declares {float(declared[graph]):.8g} e "
-                f"(tolerance {_TOTAL_CHARGE_TOL:g} e)"
-            )
+        self._bound_topology = fingerprint
+        self._bound_num_graphs = num_graphs
+        self._exclusions = exclusions
 
     def _check_pair_orientation(self, system: Any) -> None:
         """Refuse a placed list that :meth:`_placed_pairs` would read as all dead.
@@ -611,6 +726,242 @@ class Potentials(BasePotential):
                 "columns before binding."
             )
 
+    def _check_geometry(self, system: Any, pos: torch.Tensor) -> tuple[int, ...]:
+        """Put this batch's geometry through :meth:`_check_bonds_unwrapped`, once.
+
+        The **gate every public entry point goes through** — :meth:`calc_energy`,
+        :meth:`calc_energy_forces` and :meth:`calc_energy_forces_virial` all call
+        it before pricing anything — and the reason the F29 refusal is not
+        :meth:`bind_topology`'s alone. A bind happens only where there is an
+        exclusion table to build, i.e. only for a field with a nonbonded term
+        (:meth:`_rebuilds_pairs`); a **bonded-only** field under a
+        ``graphs.cell`` binds nothing, so hanging the check on the bind left
+        exactly the composition whose energy the check exists for — bonds
+        measured on plain displacements — as the one that never got it. The
+        guard therefore belongs to a seam of its own, called wherever a public
+        entry resolves positions, and :meth:`bind_topology` calls it too rather
+        than the underlying check.
+
+        **Once per frame, not once per step.** The memo is keyed on the batch
+        *object*, held by weak reference, and a repeated call on that same
+        object is a pointer comparison and nothing else — no fingerprint is
+        rebuilt. Rebuilding one stacks the bond / angle / proper index columns,
+        which is tens of microseconds per step (25 µs measured on the butane
+        topology, against 0.09 µs for the comparison) sitting directly in front
+        of a compiled core — the whole saving spent on deciding not to work.
+        The fingerprint of the frame that passed is cached in the record
+        instead, and handed back to :meth:`bind_topology` so the bind does not
+        compute a second one either.
+
+        That the key is the object is the split the physics asks for. A
+        **frame** is a geometry, and the check is about geometry, so every new
+        frame is checked: a training container prices batch after batch of the
+        same shape, and one whole molecule at the front of that stream says
+        nothing about the folded one behind it. Within one bound frame, on the
+        other hand, positions are deliberately free — that is the MD rollout,
+        which cannot pay a host sync per step and does not need to, since an
+        integrator never wraps in place and a barostat scales the cell and the
+        coordinates together, so a molecule that starts whole stays whole.
+        Keying on identity rather than on shape is what makes those two cases
+        separable at all; they are indistinguishable by fingerprint. The weak
+        reference is what makes the key safe — a freed batch cannot have its
+        address reused into a false match, because the dead reference misses
+        instead. The record is written only after the check passes, so a refused
+        frame is refused again on the next call rather than accepted by its own
+        failure, and :meth:`bind_topology` clears it first so an explicit rebind
+        — the deliberate "same molecule, new box", and equally a topology
+        rewritten into the same object — is always an explicit re-check.
+
+        **A miss runs the check in every mode — there is no "we are tracing"
+        escape hatch, because one here failed open.** Refusing a frame means
+        reading a comparison back to Python and branching on it, so this method
+        cannot be *traced* into a graph. The tempting conclusion — skip it under
+        ``torch.compiler.is_compiling()`` — is wrong twice over. It is wrong in
+        principle, because "the check cannot be compiled" is not "the frame need
+        not be checked", and a folded molecule priced through a compiled entry
+        is the same finite, differentiable, wrong energy as through an eager
+        one, with nothing downstream to catch it. And it is wrong in fact:
+        measured, ``is_compiling()`` reads ``False`` by the time this method
+        runs under ``torch.compile``, ``torch._dynamo.explain`` and
+        ``fullgraph=True`` alike — dynamo has already given up on the frame and
+        is re-running it eagerly — so such a guard is not a trade-off, it is
+        dead code that silences the check on the *eager* re-run.
+
+        What actually happens on a miss under a compiler is therefore the right
+        thing, and it is measured rather than assumed: dynamo bails out of the
+        frame, the check runs for real, and a wrapped molecule raises its
+        ``ValueError`` out through the compiled call. Under ``fullgraph=True``,
+        where bailing is not allowed, dynamo refuses to compile the
+        data-dependent comparison instead. Both are refusals; neither is a
+        number.
+
+        The cost of a miss under a compiler is graph breaks, and that is the
+        honest signal: it means a whole public entry point was wrapped in a
+        compiler on a frame nothing had vouched for. The composition that
+        avoids it is the one :meth:`bind_topology` prescribes for a compiled
+        path — bind, or evaluate once eagerly, *then* compile — after which
+        every later call on that batch is the pointer comparison above and the
+        trace is clean. Nothing molnex compiles itself pays it: the compiled
+        region a force field runs is :meth:`_classical_core`, and
+        :meth:`calc_energy_forces` calls this **before** entering it, eagerly,
+        every step; :meth:`calc_energy_forces_virial` has no compiled build at
+        all (finding F34, failed closed at :meth:`molix.md.MD.set_compiler`).
+
+        Args:
+            system: The batch being priced, as :meth:`_check_bonds_unwrapped`
+                reads it (``graphs.cell``, the ``bonds`` namespace,
+                ``atoms.batch``). Its identity **is** the memo key; a mapping
+                that does not support weak references is simply never memoized
+                and is checked on every call.
+            pos: Positions ``(N, 3)`` Å the energy would be priced at — the
+                caller's ``pos`` override when there is one, since that is the
+                geometry that gets measured. It is deliberately **not** part of
+                the key: positions are free within one bound frame (see above),
+                so a second call on the same batch with different ``pos`` is
+                passed through. Every in-tree caller hands the same geometry the
+                batch carries, as a leaf or a cast of it, so this costs nothing
+                today; a caller that scores genuinely different coordinates on
+                one batch object wants a bind between them.
+
+        Returns:
+            The :meth:`_topology_fingerprint` of the frame now vouched for —
+            cached on a hit, computed on a miss.
+
+        Raises:
+            ValueError: Propagated from :meth:`_check_bonds_unwrapped` — some
+                bond is longer than half the minimum perpendicular width of its
+                graph's cell (F29). Raised from a compiled call too, not only an
+                eager one (see above).
+        """
+        checked = self._checked_geometry
+        if checked is not None and checked[0]() is system:
+            return checked[1]
+        # No "are we tracing?" escape hatch here, deliberately — see the
+        # docstring. A miss runs the check in every mode, because the one thing
+        # this method may never do is return without an answer.
+        fingerprint = self._topology_fingerprint(system, pos.shape[0])
+        self._check_bonds_unwrapped(system, pos)
+        try:
+            self._checked_geometry = (weakref.ref(system), fingerprint)
+        except TypeError:
+            # A mapping that cannot be weakly referenced (a plain dict) is
+            # checked on every call rather than memoized against an address
+            # that may be reused by the next frame.
+            self._checked_geometry = None
+        return fingerprint
+
+    def _check_bonds_unwrapped(self, system: Any, pos: torch.Tensor) -> None:
+        """Refuse a periodic frame whose molecules are folded across a box face.
+
+        This is the **one** place the precondition every public entry point
+        states (:meth:`calc_energy`, :meth:`calc_energy_forces`,
+        :meth:`calc_energy_forces_virial`) is spelled out and enforced.
+
+        The two halves of an assembled energy read geometry differently: the
+        bonded terms take plain ``pos_j - pos_i`` off their own index columns,
+        while the pair terms take *minimum-image* separations
+        (:meth:`_placed_pairs`; :meth:`_rebuilds_pairs` says which terms belong
+        to which group). Wrapping a periodic frame into the box is
+        therefore invisible to one half and fatal to the other — an atom folded
+        across a face keeps its pair energy exact, the minimum image being
+        wrap-invariant, and has its bonds, angles and torsions measured right
+        across the box. Nothing downstream can spot it: a stretched bond is a
+        legal configuration, and the number that comes back is finite,
+        differentiable and wrong. It is finding **F29** in
+        ``.claude/notes/composable-potentials.md``, and a frame read back from a
+        wrapped trajectory is its normal source.
+
+        Bonds alone decide it. A molecule whose every covalent bond is shorter
+        than half its cell's minimum perpendicular width is contiguous in the
+        coordinates as given, so every displacement built on top of the bond
+        graph — angle, proper, improper — is the intramolecular one too; a
+        molecule folded across a face has to leave at least one bond nearly a
+        box long.
+
+        **The limit, in symbols.** Write the cell's three lattice vectors as
+        ``a_1``, ``a_2``, ``a_3`` (rows of ``graphs.cell``, Å) and its volume as
+        ``V = |det(cell)|`` (Å³). The perpendicular width between the pair of
+        faces spanned by ``a_i`` and ``a_j`` is the volume divided by that
+        face's area, ``V / |a_i × a_j|``; the **smallest** of the three widths
+        therefore uses the **largest** face area, so
+
+            ``w_min = V / max over the three face pairs of |a_i × a_j|``
+
+        (``w_min = L`` for a cube of edge ``L``). A bond is refused when its
+        length exceeds ``w_min / 2`` — ``L/2`` for that cube — which is the code
+        below: ``half_width = 0.5 * volume / widest_face``. It is *not* half the
+        shortest lattice vector: a flattened triclinic cell can have long edges
+        and a thin slab between two of its faces, and it is the slab that limits
+        how far a molecule can reach before its image is nearer than itself.
+
+        Reached only through :meth:`_check_geometry`, which is host-side and
+        admits one frame per topology, so the single ``argmax`` sync this costs
+        is paid once and never once per step — the force path stays free of it,
+        which is the whole reason the check lives out here rather than in a
+        term. A batch with no ``graphs.cell`` (an open boundary, nothing to
+        wrap into), no bonds, or a degenerate lattice has no limit to exceed and
+        is passed through untouched.
+
+        Args:
+            system: Batch / mapping optionally carrying ``graphs.cell``
+                ``(3, 3)`` or ``(B, 3, 3)`` in Å and the ``bonds`` namespace.
+                ``atoms.batch`` picks each bond's cell out of a batched one.
+            pos: Positions ``(N, 3)`` in Å the energy would be priced at — the
+                ``pos`` override when :meth:`bind_topology` was handed one,
+                since that is the geometry, not ``atoms.pos``. Read detached.
+
+        Raises:
+            ValueError: Some bond is longer than half the minimum perpendicular
+                width of its graph's cell, naming that bond, its length, the
+                limit and the remedy.
+        """
+        cell = self._ns_tensor(self._namespace(system, "graphs"), "cell")
+        bond_index = self._bond_index(system)
+        if cell is None or bond_index is None or bond_index.shape[-1] == 0:
+            return
+        cells = cell.detach().to(pos)
+        if cells.ndim == 2:
+            cells = cells.unsqueeze(0)
+        a, b, c = cells[:, 0], cells[:, 1], cells[:, 2]
+        # Perpendicular width between two faces: the volume divided by the area
+        # of the face pair they span. The *widest* face gives the *thinnest*
+        # slab, which is the one a molecule folds across first.
+        widest_face = torch.stack(
+            [
+                torch.linalg.cross(b, c).norm(dim=-1),
+                torch.linalg.cross(c, a).norm(dim=-1),
+                torch.linalg.cross(a, b).norm(dim=-1),
+            ],
+            dim=-1,
+        ).amax(dim=-1)
+        volume = torch.linalg.det(cells).abs()
+        half_width = torch.where(
+            volume > 0.0,
+            0.5 * volume / widest_face.clamp_min(torch.finfo(cells.dtype).tiny),
+            torch.inf,
+        )
+        source, target = bond_index[0].long(), bond_index[1].long()
+        p = pos.detach()
+        length = (p[target] - p[source]).norm(dim=-1)
+        graph = (
+            self._atom_batch(system, p.shape[0], p.device)[source]
+            if half_width.shape[0] > 1
+            else torch.zeros_like(source)
+        )
+        limit = half_width[graph]
+        # One host sync on the passing path, the same shape as the charge check
+        # above: pick the worst offender, then ask about that one alone.
+        worst = int(torch.argmax(length - limit))
+        if float(length[worst] - limit[worst]) > 0.0:
+            raise ValueError(
+                f"bond {worst} (atoms {int(source[worst])}-{int(target[worst])}) spans "
+                f"{float(length[worst]):.6g} Å, over the {float(limit[worst]):.6g} Å half-width "
+                "of its cell: this molecule is wrapped across a box face. "
+                "molpot prices bonded terms on plain displacements (F29); unwrap molecules "
+                "before evaluation — MD never wraps in place, so a rollout only needs its "
+                "initial frame unwrapped."
+            )
+
     def bind_cell(self, cell: torch.Tensor) -> None:
         """Hand the live simulation cell to every term that keeps cell state.
 
@@ -647,37 +998,84 @@ class Potentials(BasePotential):
             self.mlip.bind_cell(cell)
 
     def compile_core(self, compiler: Callable[[Callable[..., Any]], Callable[..., Any]]) -> None:
-        """Ask the mlip to install a compiled build of its own hot core.
+        """Install a compiled build of this field's hot core — mlip or classical.
 
-        One layer of delegation, guarded by
-        :class:`molix.schema.CoreCompilable`. The compiled core is installed on
-        the **mlip**, never on this container: ``to_potentials()`` builds a
-        fresh ``Potentials`` on every ``MD`` setter call, while the mlip is the
-        one ``nn.Module`` the ForceField holds throughout — so a core installed
-        here would be silently discarded by the next ``set_*``, and one
-        installed on the mlip survives every rebuild. This class therefore
-        keeps no ``_compiled_core`` and has no second evaluation path;
-        :meth:`calc_energy` cannot tell whether a core is installed.
+        **Which core.** An mlip field has exactly one: the mlip's own, and this
+        method is one layer of delegation to it, guarded by
+        :class:`molix.schema.CoreCompilable`. That build is installed on the
+        **mlip**, never here — ``to_potentials()`` returns a fresh
+        ``Potentials`` on every ``MD`` setter call, while the mlip is the one
+        ``nn.Module`` the ForceField holds throughout, so a core installed on
+        the container would be silently discarded by the next ``set_*``.
+        (:meth:`molix.md.MD.set_compiler` closes that gap from the other side:
+        it re-applies this method after every rebuild.)
+
+        A classical field's core is :meth:`_classical_core` — the whole
+        bonded + LJ + Coulomb ``(system, pos) -> (energy, forces)`` evaluation
+        that :meth:`calc_energy_forces` is. The compiled build is stored in
+        ``_compiled_classical`` and :meth:`calc_energy_forces` routes through
+        it when it is there. It is the *same* function either way, so there is
+        still no second evaluation path and no "is it compiled?" physics
+        branch: eager and compiled differ only in reduction order.
+
+        **The seam.** The compiled region is the whole classical core except
+        one known break: a declared ``pair:coulomb`` (open or periodic) has no
+        closed-form force, so :meth:`_coulomb_energy_forces` creates a position
+        leaf and calls ``autograd.grad`` through
+        ``molpot/derivation/force.py`` — dynamo breaks there, deliberately, and
+        that is the *only* break a classical field may show. Owner: molpot
+        derivation. A ``lj/cut`` + bonded field has no such term and traces as
+        one graph with zero breaks.
+
+        **What this does not cover: the virial (F34).** The classical core is
+        the energy/force one. :meth:`calc_energy_forces_virial` — the entry an
+        NPT step calls — evaluates a *strained* energy through
+        :func:`~molpot.derivation.force.autograd_forces_and_virial`, whose two
+        leaves and ``autograd.grad`` are the seam dynamo cannot trace, wrapped
+        around a closure that rewrites five columns of the batch per call.
+        Compiling it is a restructuring of that seam, not an installation, and
+        until it happens **a barostat run is eager whatever is installed
+        here**. That gap is not left to be discovered by a benchmark that looks
+        fast on paper: :meth:`molix.md.MD.set_compiler` refuses a compiler while
+        a barostat is attached, and :meth:`~molix.md.MD.set_barostat` refuses a
+        barostat while one is installed, so no run can report itself compiled
+        and step eager.
 
         ``compiler`` is structural — any ``callable -> callable``, such as
         :class:`molix.compile.Compiler`, which molpot must not import.
 
         Args:
-            compiler: Applied by the mlip to whichever flat method it nominates
-                as its core.
+            compiler: Applied to the mlip's nominated core, or to this
+                container's :meth:`_classical_core`.
 
         Raises:
-            RuntimeError: If there is no mlip, or the mlip does not satisfy
-                ``CoreCompilable``. Failing loudly beats compiling nothing and
-                reporting success.
+            RuntimeError: There is no compilable core to install — an mlip that
+                does not satisfy ``CoreCompilable`` owns the whole energy
+                (:meth:`calc_energy_forces` never reaches the classical terms
+                for it), so there is nothing left to compile. Failing loudly
+                beats compiling nothing and reporting success. An mlip that
+                *does* satisfy it may raise this from its own ``compile_core``
+                instead — molnex's MACE encoders do, when no eager forward has
+                validated their element table and sized their k-space grids
+                yet, neither of which a traced call can repair.
+
+        References:
+            ``.claude/notes/composable-potentials.md`` — finding **F28** (an
+            ``MD`` rollout with no compile seam), closed by this method
+            together with :meth:`molix.md.MD.set_compiler`; finding **F34**
+            (the strained virial core this method does not compile), open and
+            failed closed at both setters.
         """
-        if not isinstance(self.mlip, CoreCompilable):
-            raise RuntimeError(
-                "compile_core: this mlip has no compilable core "
-                f"({type(self.mlip).__name__} does not implement compile_core); "
-                "only an mlip satisfying molix.schema.CoreCompilable can be compiled"
-            )
-        self.mlip.compile_core(compiler)
+        if self.mlip is not None:
+            if not isinstance(self.mlip, CoreCompilable):
+                raise RuntimeError(
+                    "compile_core: this mlip has no compilable core "
+                    f"({type(self.mlip).__name__} does not implement compile_core); "
+                    "only an mlip satisfying molix.schema.CoreCompilable can be compiled"
+                )
+            self.mlip.compile_core(compiler)
+            return
+        self._compiled_classical = compiler(self._classical_core)
 
     def get_schema(self) -> ForceFieldSchemaView:
         """Metadata of the declared styles: parameter names, units, energy formulas."""
@@ -711,20 +1109,14 @@ class Potentials(BasePotential):
         classical path below instead (which, with no classical styles
         declared, contributes an empty sum).
 
-        **Precondition — each molecule must arrive whole (F29).** The two
-        halves of this sum read geometry differently: the bonded terms (bond /
-        angle / proper / improper) take plain ``pos_j - pos_i`` differences off
-        their own index columns, while the pair terms go through
-        :meth:`_placed_pairs` and get *minimum-image* separations (see
-        :meth:`_rebuilds_pairs` for which terms belong to which group). A
-        periodic frame whose coordinates have been wrapped into the box
-        therefore has to carry every molecule unwrapped: an atom folded across
-        a face keeps its pair energy correct — the minimum image is
-        wrap-invariant — while its bonds, angles and torsions are measured
-        across the whole box and come out wrong. Nothing here can detect it: a
-        stretched bond is a legal configuration. Wrap for visualisation, never
-        on the way in. This is finding **F29** in
-        ``.claude/notes/composable-potentials.md``.
+        **Precondition — each molecule must arrive whole (F29).** A periodic
+        frame's molecules must not be wrapped across a box face: the bonded
+        terms price plain displacements while the pair terms price minimum-image
+        ones, so a folded molecule returns a finite, differentiable, wrong
+        energy. Enforced here, on the classical path, by
+        :meth:`_check_geometry` — once per frame, whatever the field declares,
+        so a bonded-only periodic field is covered too; the mechanism and its
+        limits are on :meth:`_check_bonds_unwrapped`.
 
         Args:
             system: Batch / mapping carrying ``atoms.pos`` ``(N, 3)`` Å and the
@@ -753,7 +1145,11 @@ class Potentials(BasePotential):
                 list; or ``pair:coulomb`` is evaluated under a ``graphs.cell``
                 on a batch of more than one graph (one lattice gives one
                 reciprocal sum, so each graph would otherwise be charged the
-                whole box). See :meth:`term_energies` for each.
+                whole box). See :meth:`term_energies` for each. Plus, on that
+                path, the F29 refusal :meth:`_check_geometry` raises on a
+                molecule wrapped across a box face — the one bind-time check
+                that cannot wait for a bind, because a bonded-only field never
+                performs one.
         """
         if self.mlip is not None and isinstance(system, TensorDict):
             # The pos override lands on the batch first: the mlip reads its
@@ -767,6 +1163,11 @@ class Potentials(BasePotential):
             out = call_energy(self.mlip, system)
             return out[ENERGY_KEY]
         p = self._pos(system, pos)
+        # The F29 gate, on the entry rather than on the bind: a bonded-only
+        # field binds nothing, so a bind-only check would miss precisely the
+        # composition whose bonded terms it protects (:meth:`_check_geometry`,
+        # once per frame).
+        self._check_geometry(system, p)
         num_graphs = self._num_graphs(system)
         total = torch.zeros((num_graphs,) if num_graphs > 1 else (), device=p.device, dtype=p.dtype)
         for e in self.term_energies(system, pos=p).values():
@@ -786,9 +1187,10 @@ class Potentials(BasePotential):
         second force path lives here. Per-graph energies ``(B,)`` are summed to
         one scalar before differentiating, so a multi-molecule batch works.
 
-        Positions are re-attached as a fresh ``requires_grad`` leaf taken from
-        ``pos.detach()``: any autograd history the caller's ``pos`` carried is not
-        differentiated through, while the force stays connected to the model
+        Positions are re-attached as a fresh ``requires_grad`` leaf through
+        :func:`~molpot.derivation.force.position_leaf`, which owns that seam for
+        the whole package: any autograd history the caller's ``pos`` carried is
+        not differentiated through, while the force stays connected to the model
         parameters ``θ`` (the mixed second derivative ``∂²E/∂pos∂θ`` is kept)
         whenever grad is enabled, so a force loss can reach the parameter heads.
 
@@ -810,7 +1212,7 @@ class Potentials(BasePotential):
             Forces ``(N, 3)`` in the ForceField's unit convention
             (``units="real"`` default: kcal mol⁻¹ Å⁻¹).
         """
-        p = self._pos(system, pos).detach().requires_grad_(True)
+        p = position_leaf(self._pos(system, pos))
         with torch.enable_grad():
             energy = self.calc_energy(system, pos=p)
         return autograd_forces_from_energy(energy, p)
@@ -827,20 +1229,14 @@ class Potentials(BasePotential):
         grad mode — wrap the run in ``torch.no_grad()`` so the tape is not
         kept for parameter derivatives.
 
-        **Precondition — each molecule must arrive whole (F29).** The two
-        halves of this sum read geometry differently: the bonded terms (bond /
-        angle / proper / improper) take plain ``pos_j - pos_i`` differences off
-        their own index columns, while the pair terms go through
-        :meth:`_placed_pairs` and get *minimum-image* separations (see
-        :meth:`_rebuilds_pairs` for which terms belong to which group). A
-        periodic frame whose coordinates have been wrapped into the box
-        therefore has to carry every molecule unwrapped: an atom folded across
-        a face keeps its pair energy correct — the minimum image is
-        wrap-invariant — while its bonds, angles and torsions are measured
-        across the whole box and come out wrong. Nothing here can detect it: a
-        stretched bond is a legal configuration. Wrap for visualisation, never
-        on the way in. This is finding **F29** in
-        ``.claude/notes/composable-potentials.md``.
+        **Precondition — each molecule must arrive whole (F29).** A periodic
+        frame's molecules must not be wrapped across a box face: the bonded
+        terms price plain displacements while the pair terms price minimum-image
+        ones, so a folded molecule returns a finite, differentiable, wrong
+        energy — and a wrong virial with it. Enforced here by
+        :meth:`_check_geometry`, on the unstrained frame and before the strain
+        closure runs, once per frame and whatever the field declares; the
+        mechanism and its limits are on :meth:`_check_bonds_unwrapped`.
 
         Args:
             system: Batch carrying ``atoms.pos`` and ``graphs.cell``, each
@@ -859,7 +1255,10 @@ class Potentials(BasePotential):
                 as a constant that no strain reaches — the virial would be
                 missing every pair that meets its partner through a lattice
                 vector (F13). :meth:`calc_energy` and :meth:`calc_forces` stay
-                exact on such a batch and keep working.
+                exact on such a batch and keep working. Or, from
+                :meth:`_check_geometry`, a molecule wrapped across a box face
+                (F29) — a cell is a precondition of this entry, so the check
+                always has a limit to measure against here.
         """
         if not isinstance(system, TensorDict):
             raise TypeError("calc_energy_forces_virial requires a TensorDict system")
@@ -870,6 +1269,11 @@ class Potentials(BasePotential):
         batched_cell = cell_buf.dim() == 3
         cell_3 = cell_buf[0] if batched_cell else cell_buf
         pos_buf = self._pos(system, pos)
+        # F29, on the frame as handed in: the strain closure below replaces
+        # ``atoms.pos`` with a deformed copy, so the geometry a caller is
+        # answerable for is this one, and it must be judged before it is
+        # deformed (:meth:`_check_geometry`, once per frame).
+        self._check_geometry(system, pos_buf)
         edge_index = system["edges", "edge_index"] if ("edges", "edge_index") in nested else None
         edge_diff_buf = system["edges", "edge_diff"] if ("edges", "edge_diff") in nested else None
         # Strain the Cartesian periodic remainder, not a copy of edge_diff.
@@ -977,20 +1381,38 @@ class Potentials(BasePotential):
         has no cheap closed form, so it falls back to the autograd backend on
         a fresh position leaf.
 
-        **Precondition — each molecule must arrive whole (F29).** The two
-        halves of this sum read geometry differently: the bonded terms (bond /
-        angle / proper / improper) take plain ``pos_j - pos_i`` differences off
-        their own index columns, while the pair terms go through
-        :meth:`_placed_pairs` and get *minimum-image* separations (see
-        :meth:`_rebuilds_pairs` for which terms belong to which group). A
-        periodic frame whose coordinates have been wrapped into the box
-        therefore has to carry every molecule unwrapped: an atom folded across
-        a face keeps its pair energy correct — the minimum image is
-        wrap-invariant — while its bonds, angles and torsions are measured
-        across the whole box and come out wrong. Nothing here can detect it: a
-        stretched bond is a legal configuration. Wrap for visualisation, never
-        on the way in. This is finding **F29** in
-        ``.claude/notes/composable-potentials.md``.
+        **What this method does around the evaluation itself.** Three things, in
+        this order, and all of them are why the evaluation proper lives in
+        :meth:`_classical_core` rather than here. First, when the field has a
+        nonbonded term (:meth:`_rebuilds_pairs`) and no topology is bound yet, it
+        calls :meth:`bind_topology` — the once-per-topology, host-side build of
+        the exclusion table plus the bind-time checks (net charge, edge
+        orientation), so every ``ValueError`` those raise can surface from
+        *this* call and not only from an explicit bind. Doing it here rather
+        than lazily inside the core is what lets the core be one graph from its
+        first call: the same work traced inside a compiled region is six
+        measured graph breaks. A bonded-only field binds nothing — it has no
+        pair list to price and no exclusion table to consult.
+        Second, and precisely because of that, the F29 geometry gate is *not*
+        left to the bind: :meth:`_check_geometry` runs on every classical call,
+        so the bonded-only field the bind skips is checked all the same. It
+        carries its own once-per-frame record, so an MD rollout — one bound
+        batch for the whole run — pays it once and an identity test per step
+        thereafter, while a training stream is checked batch by batch.
+        Third, it dispatches to the compiled build of the core when
+        :meth:`compile_core` has installed one, and to the eager bound method
+        otherwise. It is the same function either way — compiled and eager
+        differ only in reduction order, never in physics — so nothing
+        downstream branches on "is it compiled?". All three run *outside* the
+        compiled region, which is what keeps their host syncs out of the trace.
+
+        **Precondition — each molecule must arrive whole (F29).** A periodic
+        frame's molecules must not be wrapped across a box face: the bonded
+        terms price plain displacements while the pair terms price minimum-image
+        ones, so a folded molecule returns a finite, differentiable, wrong
+        energy. Enforced by the geometry gate above, which refuses such a frame
+        whatever the field declares; the mechanism and its limits are on
+        :meth:`_check_bonds_unwrapped`.
 
         Args:
             system: Batch / mapping carrying ``atoms.pos`` and the topology,
@@ -1010,19 +1432,87 @@ class Potentials(BasePotential):
                 a pair style is declared and the batch carries no usable
                 ``edges`` list, or ``pair:coulomb`` meets a ``graphs.cell`` on
                 a batch of more than one graph. All three are the
-                :meth:`term_energies` contract.
+                :meth:`term_energies` contract. Plus, from the bind this method
+                performs on a not-yet-bound classical field, the two
+                :meth:`bind_topology` refusals: a net charge that misses the
+                declared ``graphs.total_charge`` and an edge list carrying only
+                ``source > target`` rows. And, from :meth:`_check_geometry` —
+                which runs whether or not the field binds — a molecule wrapped
+                across a box face.
         """
         if self.mlip is not None and isinstance(system, TensorDict):
             # Same branch policy as ``calc_energy``: the mlip owns the whole
             # energy. Without this, an mlip ForceField — which declares no
             # classical style — falls through the term loop below and returns a
             # silent ``(0, zeros)`` instead of its energy and forces.
-            leaf = self._pos(system, pos).detach().requires_grad_(True)
+            leaf = position_leaf(self._pos(system, pos))
             with torch.enable_grad():
                 energy = self.calc_energy(system, pos=leaf)
             return energy, autograd_forces_from_energy(energy, leaf)
 
-        p = self._pos(system, pos).detach()
+        p = self._pos(system, pos)
+        # Bind the topology *before* the core, not lazily from inside the first
+        # ``_scaled_pairs``. Identical work either way — this is the same
+        # once-per-topology bind, just hoisted — but it is host-side work
+        # (an ``.any()`` orientation check, an exclusion table of
+        # data-dependent shape) and inside a compiled core it is six graph
+        # breaks on the first trace, measured. Out here the core stays one
+        # graph from its very first call, so a caller does not have to know to
+        # evaluate once eagerly before ``compile_core``.
+        if self._exclusions is None and self._rebuilds_pairs():
+            self.bind_topology(system, pos=p)
+        # The F29 geometry gate, unconditionally — the bind above is skipped for
+        # a bonded-only field, and that is the field whose bonded terms the
+        # check protects. Idempotent per frame (:meth:`_check_geometry`): the
+        # bind's own call and this one cost one pointer comparison between them,
+        # and an MD rollout — one batch object for the whole run — pays the
+        # check on its first step and that same pointer comparison on every
+        # later one. It stays outside the core, so the host sync it costs when
+        # it does run never reaches a trace.
+        self._check_geometry(system, p)
+        # One function, two builds: the compiled one when ``compile_core`` has
+        # installed it, otherwise the eager bound method. Never a second
+        # evaluation path — see :meth:`compile_core`.
+        core = self._compiled_classical
+        if core is None:
+            core = self._classical_core
+        return core(system, p)
+
+    def _classical_core(
+        self,
+        system: Any,
+        pos: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The classical ``(system, pos) -> (energy, forces)`` evaluation itself.
+
+        The body of :meth:`calc_energy_forces` for a field with no mlip, split
+        out as a flat bound method so it can be handed to a compiler:
+        :meth:`compile_core` stores ``compiler(self._classical_core)`` and
+        :meth:`calc_energy_forces` then calls that instead. Every contract
+        stated there — the analytic bonded/LJ branch, the autograd Coulomb
+        fallback, and the whole-molecule precondition (F29) — is this method's;
+        it is documented once, on the public entry.
+
+        The one break inside the compiled region is the Coulomb autograd seam
+        in ``molpot/derivation/force.py`` (:meth:`compile_core`); a ``lj/cut``
+        + bonded field traces as one graph with none. That holds for a core
+        entered through :meth:`calc_energy_forces`, which binds the topology
+        first. Tracing this method directly on a container that has never been
+        evaluated traces the lazy bind with it — an ``.any()`` orientation
+        check and an exclusion table of data-dependent shape, six breaks — so
+        measure the seam the way the run reaches it.
+
+        Args:
+            system: Batch / mapping carrying the topology and the ``edges``
+                list, as :meth:`calc_energy_forces` received it.
+            pos: Positions ``(N, 3)`` Å already resolved by :meth:`_pos` —
+                detached here, so callers may pass the batch's own tensor.
+
+        Returns:
+            Energy ``(B,)`` — ``()`` for a single molecule — and forces
+            ``(N, 3)`` in the ForceField's unit convention.
+        """
+        p = pos.detach()
         device = p.device
         dtype = p.dtype
         num_graphs = self._num_graphs(system)
@@ -1708,10 +2198,14 @@ class Potentials(BasePotential):
 
         # Open Coulomb and Ewald/PME/P3M all share the molpot Coulomb kernel
         # stack; neither exposes a cheap closed form for forces, so the single
-        # force path is one autograd backward on a fresh position leaf.
+        # force path is one autograd backward on a fresh position leaf. Both
+        # halves of that seam — the leaf and the backward — belong to
+        # ``molpot.derivation.force``: this method runs inside the compiled
+        # classical core, and the two graph breaks they cost must be reported
+        # against the module that owns them, not against the Coulomb energy.
         grad_enabled = torch.is_grad_enabled()
         with torch.enable_grad():
-            p_nb = pos.detach().requires_grad_(True)
+            p_nb = position_leaf(pos)
             nb_energy = self._coulomb_energy(system, p_nb)
             create_graph = grad_enabled and q.requires_grad
             nb_forces = (
@@ -1747,6 +2241,67 @@ class Potentials(BasePotential):
         return torch.zeros(n, dtype=torch.long, device=device)
 
     def _num_graphs(self, system: Any) -> int:
+        """How many graphs the energy is summed into — never a device sync.
+
+        Every term needs this number to size its energy vector, so it is read
+        on the hot path, inside :meth:`_classical_core` and again inside each
+        pair term. Two of the three ways to get it are metadata (a sized
+        ``graphs`` batch_size, or ``graphs.num_atoms``' length); the third —
+        the largest entry of ``atoms.batch`` — is a **value**, and reading a
+        value to Python is a host sync and a graph break under dynamo. So it is
+        resolved once at :meth:`bind_topology` (:meth:`_count_graphs`) and
+        served from there.
+
+        A bind is per batch *shape* as well as per topology: rebind before
+        evaluating a batch with a different graph count, exactly as for the
+        exclusion table. Which batch the bound number may be served to is
+        therefore the same question :meth:`_scaled_pairs` asks about the bound
+        table, and it is asked the same way — the batch's whole
+        :meth:`_topology_fingerprint` against ``_bound_topology``, not just its
+        first entry. The atom count alone is not identity: two batches of the
+        same ``N`` can hold a different number of molecules (fourteen atoms as
+        one butane or as two heptane fragments), and answering the second with
+        the first's count sizes every term's energy vector wrong — a shape
+        error at best, a batch's energy summed into one graph at worst. The
+        limit is the fingerprint's own: two topologies of equal shape are
+        indistinguishable here, as everywhere the fingerprint is used.
+
+        Args:
+            system: The batch being evaluated; on the served path its
+                ``atoms.pos`` length and the shapes of its topology columns are
+                read — shapes only, so nothing here is a host sync, and a trace
+                folds the reads to constants.
+
+        Returns:
+            The graph count ``B`` — ``1`` for an unbatched single molecule.
+        """
+        bound = self._bound_num_graphs
+        fingerprint = self._bound_topology
+        if bound is not None and fingerprint is not None:
+            pos = self._ns_tensor(self._namespace(system, "atoms"), "pos")
+            # No ``atoms.pos`` is no atom count to compare; the topology columns
+            # still are, so the rest of the fingerprint still has to match.
+            n_atoms = fingerprint[0] if pos is None else int(pos.shape[0])
+            if self._topology_fingerprint(system, n_atoms) == fingerprint:
+                return bound
+        return self._count_graphs(system)
+
+    def _count_graphs(self, system: Any) -> int:
+        """Resolve the graph count from the batch — the sync :meth:`_num_graphs` avoids.
+
+        Three sources, cheapest first: the ``graphs`` namespace's own
+        ``batch_size``, then the length of ``graphs.num_atoms``, then — only if
+        neither exists — the largest entry of ``atoms.batch``, which is a tensor
+        *value* and therefore the one host sync of the three. Called from
+        :meth:`bind_topology`, where a sync is affordable, and from
+        :meth:`_num_graphs` when the batch is not the bound one.
+
+        Args:
+            system: The batch whose ``graphs`` / ``atoms`` namespaces are read.
+
+        Returns:
+            The graph count ``B``; ``1`` when the batch names no graphs at all.
+        """
         graphs = self._namespace(system, "graphs")
         if isinstance(graphs, TensorDict) and graphs.batch_size:
             return int(graphs.batch_size[0])
@@ -1757,7 +2312,9 @@ class Potentials(BasePotential):
         atoms = self._namespace(system, "atoms")
         atom_batch = self._ns_tensor(atoms, "batch")
         if atom_batch is not None and atom_batch.numel():
-            return int(atom_batch[-1].detach().to("cpu")) + 1
+            # ``max``, not ``[-1]``: a collate that interleaves graphs still
+            # answers with the count rather than with the last row's id.
+            return int(atom_batch.detach().max().to("cpu")) + 1
         return 1
 
     # --- topology readers ---

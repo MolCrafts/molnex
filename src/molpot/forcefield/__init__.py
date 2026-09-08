@@ -32,7 +32,7 @@ projected-Hessian loss consumes. Wilson's ``q_int`` is written ``q`` in the
 vibrational-spectroscopy literature; it is *not* the partial charge ``q`` above.
 """
 
-from molpot.forcefield.container import ForceField, OPLSAAForceField
+from molpot.forcefield.container import ForceField, OPLSAAForceField, TypeAssignment
 from molpot.forcefield.exclusions import ExclusionTable
 from molpot.forcefield.parameterizer import Parameterizer
 from molpot.forcefield.potentials import Potentials
@@ -56,5 +56,6 @@ __all__ = [
     "PotentialMeta",
     "Potentials",
     "StyleSchema",
+    "TypeAssignment",
     "WilsonBMatrix",
 ]
