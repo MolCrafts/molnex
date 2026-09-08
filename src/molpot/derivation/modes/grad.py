@@ -6,8 +6,12 @@ In-place batch contract. Sequential Energy then Force is one model forward when
 
 from __future__ import annotations
 
+from typing import cast
+
+import torch
 from tensordict import TensorDict
 
+from molpot.derivation.force import position_leaf
 from molpot.derivation.kernels import grad_force_pass
 from molpot.derivation.protocol import (
     POS_KEY,
@@ -33,9 +37,11 @@ class GradMode:
         if model is None:
             raise RuntimeError("session model is not set")
 
-        pos = batch[POS_KEY]
+        # ``TensorDict.__getitem__`` is typed as a tensor-or-subtree union;
+        # POS_KEY is a leaf by the batch schema, so narrow once at the read.
+        pos = cast(torch.Tensor, batch[POS_KEY])
         if backward:
-            pos = pos.detach().requires_grad_(True)
+            pos = position_leaf(pos)
             batch[POS_KEY] = pos
             deriv._pos_leaf = pos
             deriv._backward = True

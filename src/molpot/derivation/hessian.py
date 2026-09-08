@@ -82,7 +82,7 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molpot.derivation.force import autograd_forces_from_energy
+from molpot.derivation.force import autograd_forces_from_energy, position_leaf
 from molpot.derivation.kernels import EnergyCore, grad_force_pass
 from molpot.derivation.protocol import FORCES_KEY, POS_KEY
 
@@ -150,7 +150,7 @@ class HessianDerivation(nn.Module):
 
         create_graph = torch.is_grad_enabled()
         with torch.enable_grad():
-            leaf = pos.detach().requires_grad_(True)
+            leaf = position_leaf(pos)
             # create_graph=True on the first derivative regardless of the ambient
             # grad mode: the second derivative is exactly what differentiates it.
             gradient = -autograd_forces_from_energy(energy_fn(leaf), leaf, create_graph=True)

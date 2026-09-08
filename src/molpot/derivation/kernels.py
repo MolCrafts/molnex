@@ -50,11 +50,16 @@ State: neither kernel holds state, allocates modules, or touches the
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import cast
 
 import torch
 from tensordict import TensorDict
 
-from molpot.derivation.force import autograd_forces_from_energy, functorch_forces_with_aux
+from molpot.derivation.force import (
+    autograd_forces_from_energy,
+    functorch_forces_with_aux,
+    position_leaf,
+)
 from molpot.derivation.protocol import (
     ENERGY_KEY,
     POS_KEY,
@@ -130,7 +135,9 @@ def grad_force_pass(
         returns correct forces even under an ambient ``torch.no_grad()`` — the
         gradient is a *value*, not a side effect of the caller's grad mode.
     """
-    pos = batch[POS_KEY]
+    # ``TensorDict.__getitem__`` is typed as a tensor-or-subtree union; POS_KEY
+    # is a leaf by the batch schema, so narrow once here rather than at each use.
+    pos = cast(torch.Tensor, batch[POS_KEY])
     owns_leaf = not (pos.requires_grad and pos.is_leaf)
 
     if energy_core is None and owns_leaf:
@@ -146,7 +153,7 @@ def grad_force_pass(
     resolved_create_graph = torch.is_grad_enabled() if create_graph is None else create_graph
 
     if owns_leaf:
-        pos = pos.detach().requires_grad_(True)
+        pos = position_leaf(pos)
         batch[POS_KEY] = pos
         # Cached geometry was derived from the positions just replaced. Freeze
         # it to a value: a core that images its edges (``molzoo.mace.geometry
