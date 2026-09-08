@@ -96,7 +96,7 @@ line-length = 100
 src = ["src"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+select = ["E", "F", "W", "I", "TID251"]
 ignore = [
   "E402",  # module-level import not at top (needed for conditional imports)
   "E741",  # ambiguous variable name (common in ML: l for layers, etc.)
@@ -106,6 +106,13 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["F401"]  # re-exports don't need to be "used"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# Rule (CLAUDE.md, third-party surface): no lammps / openmm Python imports under
+# src/, tests/, scripts/. LAMMPS-driven code lives only under interface/; OpenMM
+# export is text-only. Enforced here (ci-lint on every commit), not by a test.
+"lammps".msg = "LAMMPS-driven Python lives only under interface/ (CLAUDE.md third-party surface rule)"
+"openmm".msg = "OpenMM export is text-only; no openmm import under src/, tests/, scripts/ (CLAUDE.md)"
 
 [tool.ty]
 [tool.ty.rules]
