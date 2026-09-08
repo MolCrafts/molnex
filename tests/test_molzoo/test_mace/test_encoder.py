@@ -148,26 +148,6 @@ class TestMACEEncoder:
         theirs = {k: (tuple(v.shape), v.dtype) for k, v in oracle.items() if k in own}
         assert mine == theirs
 
-    def test_cueq_target_blocks_are_execution_state_only(self, matpes_encoder):
-        """Receiver blocking propagates without adding checkpoint entries."""
-        before = set(matpes_encoder.state_dict())
-        matpes_encoder.configure_cueq_target_blocks(2)
-        assert matpes_encoder.cueq_target_block_size == 2
-        assert all(
-            interaction.target_block_size == 2 for interaction in matpes_encoder.interactions
-        )
-        assert set(matpes_encoder.state_dict()) == before
-
-        matpes_encoder.configure_cueq_target_blocks(None)
-        assert all(
-            interaction.target_block_size is None for interaction in matpes_encoder.interactions
-        )
-
-    def test_cueq_target_blocks_reject_an_invalid_size(self, matpes_encoder):
-        """The compiled plan cannot contain zero-sized receiver blocks."""
-        with pytest.raises(ValueError, match="integer >= 1"):
-            matpes_encoder.configure_cueq_target_blocks(0)
-
     # -- element table primitives --------------------------------------------
 
     def test_node_attrs_is_the_hard_coded_one_hot(self, matpes_encoder):

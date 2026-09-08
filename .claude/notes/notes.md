@@ -466,6 +466,8 @@ peak 56.5 GiB, 0.59 s/step. Official mace-torch (cueq, conv fusion) on the
 same box: 25.2 GiB / 0.5–1.0 s at fp32. Records:
 `peo-tg/experiments/size-convergence-mace-polar/bench5k/verify_molnex*.json`.
 
+**Receiver blocking — REMOVED 2026-09-09 (operator: slower at every size, memory saving lost under `torch.compile`; the paragraphs below are the record of why it existed).** Deleted: `MACEEncoder.configure_cueq_target_blocks`, `configure_target_blocks` on the interactions / `ConvTP`, the checkpointed block path in `conv.py`, `molix.md.NeighborList(target_block_size=)` with its interleaved padding and `live_edges_are_prefix`, the `--cueq-target-block-size` runner flag, and their tests.
+
 **Receiver blocking saves memory only in eager (measured 2026-09-06).**
 On a 21 400-atom cooled PEO melt, blocking cuts the eager peak from 86.8 to
 19.1 GiB (−78 %) but the compiled peak only from 71.1 to 67.1 GiB (−6 %): the

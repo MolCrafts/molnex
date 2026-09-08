@@ -188,47 +188,6 @@ def test_adapter_exposes_live_edges_then_restores_capacity() -> None:
     assert work["edges"].batch_size == torch.Size([cap])
 
 
-def test_adapter_keeps_interleaved_target_block_padding() -> None:
-    """A target-blocked layout reaches the potential at its fixed capacity."""
-    from tensordict import TensorDict
-
-    from molix.md.driver import _TensorDictForce
-
-    cap, n_live = 10, 4
-    work = TensorDict(
-        {
-            "atoms": TensorDict({"pos": torch.zeros(2, 3, dtype=_DTYPE)}, batch_size=[2]),
-            "edges": TensorDict(
-                {
-                    "edge_index": torch.zeros(cap, 2, dtype=torch.long),
-                    "edge_diff": torch.zeros(cap, 3, dtype=_DTYPE),
-                },
-                batch_size=[cap],
-            ),
-            "graphs": TensorDict({}, batch_size=[1]),
-        },
-        batch_size=[],
-    )
-
-    class _Pots:
-        mlip = object()
-        n_seen: int | None = None
-
-        def calc_forces(self, system: object) -> torch.Tensor:
-            self.n_seen = int(system["edges", "edge_index"].shape[0])
-            system["graphs", "energy"] = torch.zeros(1, dtype=_DTYPE)
-            return torch.zeros(2, 3, dtype=_DTYPE)
-
-    pots = _Pots()
-    adapter = _TensorDictForce(pots, 1.0)
-    adapter.bind_work(work)
-    adapter.n_live = n_live
-    adapter.live_edges_are_prefix = False
-    adapter(work["atoms", "pos"])
-    assert pots.n_seen == cap
-    assert work["edges"].batch_size == torch.Size([cap])
-
-
 def test_run_does_not_require_grad_on_the_state() -> None:
     """MD trajectory tensors are inference-only — no energy graph leaks out."""
     from tensordict import TensorDict

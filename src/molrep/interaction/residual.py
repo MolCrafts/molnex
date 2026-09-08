@@ -6,7 +6,6 @@ the cuEquivariance backend. One edge→node message-passing layer with:
 * node-attribute source/target embeddings concatenated onto the radial edge
   features that drive the tensor-product weights,
 * an official cuEquivariance channel-wise convolution ``node ⊗ Y_l(r̂)``;
-  large systems may execute it in fixed receiver blocks,
 * a learnable density normalisation ``message / (ρ·β + α)``,
 * a residual (``linear_res``) path and an equivariant gated nonlinearity,
 * a separate ``skip_tp`` (Linear) carried out for the downstream product block.
@@ -110,7 +109,6 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
             method="naive" if use_fallback else "uniform_1d",
             use_fallback=use_fallback,
         )
-        self.target_block_size: int | None = None
         irreps_mid = self.conv_tp.irreps_out
 
         input_dim = edge_feats.dim + 2 * node_scalar.dim
@@ -150,12 +148,6 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
             out.append(field)
         return torch.cat(out, dim=-2)
 
-    def configure_target_blocks(self, block_size: int | None) -> None:
-        """Use full cuEq convolution or a maximum receiver-block size."""
-        if block_size is not None and (int(block_size) != block_size or block_size < 1):
-            raise ValueError(f"target block size must be an integer >= 1, got {block_size!r}")
-        self.target_block_size = None if block_size is None else int(block_size)
-
     def forward(
         self,
         node_attrs: torch.Tensor,
@@ -191,7 +183,6 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
             edge_feats,
             edge_index,
             cutoff,
-            target_block_size=self.target_block_size,
             source_features=source_emb,
             target_features=target_emb,
         )

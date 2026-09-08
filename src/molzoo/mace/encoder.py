@@ -287,29 +287,6 @@ class MACEEncoder(nn.Module):
             self.readout = NonLinearBiasReadout(irreps_in=feat0, mlp_dim=spec.mlp_dim)
 
         self.scale_shift = GlobalRescale(scale=spec.scale, shift=spec.shift)
-        # Execution layout only: no checkpoint/state-dict entry.  Configure it
-        # before compiling and pair it with a target-blocked neighbour list.
-        self.cueq_target_block_size: int | None = None
-
-    def configure_cueq_target_blocks(self, block_size: int | None) -> None:
-        """Bound the official cuEq convolution workspace by receiver blocks.
-
-        ``None`` restores the ordinary full indexed convolution. A positive
-        size is the maximum receivers per block: ``ceil(N / size)`` intervals
-        are spread evenly, then packed into equal-capacity edge slices by
-        ``molix.md.NeighborList(target_block_size=...)``. This is an execution
-        plan, not model architecture: it adds no parameters or buffers and
-        leaves official checkpoint keys unchanged.
-
-        Configure this before ``compile_core``; changing Python control flow
-        after compilation would leave the installed graph on the old plan.
-        """
-        if block_size is not None and (int(block_size) != block_size or block_size < 1):
-            raise ValueError(f"target block size must be an integer >= 1, got {block_size!r}")
-        value = None if block_size is None else int(block_size)
-        for interaction in self.interactions:
-            interaction.configure_target_blocks(value)
-        self.cueq_target_block_size = value
 
     def validate_elements(self, Z: torch.Tensor) -> None:
         """Raise if any atomic number in ``Z`` is outside the element table.

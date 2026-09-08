@@ -5,7 +5,6 @@ Faithful port of MACE's ``RealAgnosticDensityInteractionBlock`` and
 One edge→node message-passing layer with:
 
 * an official cuEquivariance channel-wise convolution ``node ⊗ Y_l(r̂)``;
-  large systems may execute it in fixed receiver blocks,
 * a **learned density** normalisation ``message / (ρ + 1)`` where
   ``ρ_i = Σ_j tanh(MLP(edge_feats_ij)²)·u(r_ij)`` — this replaces the fixed
   ``avg_num_neighbors`` divisor and is what lets one model span the
@@ -110,7 +109,6 @@ class _DensityInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
             method="naive" if use_fallback else "uniform_1d",
             use_fallback=use_fallback,
         )
-        self.target_block_size: int | None = None
 
         num_radial = edge_feats.dim
         self.conv_tp_weights = MomentNormalizedMLP(
@@ -158,12 +156,6 @@ class _DensityInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
             out.append(field)
         return torch.cat(out, dim=-2)
 
-    def configure_target_blocks(self, block_size: int | None) -> None:
-        """Use full cuEq convolution or a maximum receiver-block size."""
-        if block_size is not None and (int(block_size) != block_size or block_size < 1):
-            raise ValueError(f"target block size must be an integer >= 1, got {block_size!r}")
-        self.target_block_size = None if block_size is None else int(block_size)
-
     def _message(
         self,
         node_feats: torch.Tensor,
@@ -180,7 +172,6 @@ class _DensityInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
             edge_feats,
             edge_index,
             cutoff,
-            target_block_size=self.target_block_size,
         )
         return self.linear(message) / (density + 1.0)
 

@@ -125,12 +125,6 @@ def main() -> None:
     parser.add_argument(
         "--compile-core", action="store_true", help="benchmark fullgraph Inductor core"
     )
-    parser.add_argument(
-        "--cueq-target-block-size",
-        type=int,
-        default=4096,
-        help="maximum receiver atoms per official cuEq convolution block (0 disables)",
-    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--precision", choices=("fp32", "fp64"), default="fp32")
@@ -201,14 +195,11 @@ def main() -> None:
         f"precision: state={args.precision} model={potential_precision} "
         f"energy={args.energy_precision} matmul={args.matmul_precision}"
     )
-    target_block_size = args.cueq_target_block_size or None
-    model.configure_cueq_target_blocks(target_block_size)
     r_max = float(model._spec.r_max)
     energy_only = model._pipeline.__func__ is model._write_energy.__func__
     print(
         f"Polar r_max={r_max} Å  params={sum(p.numel() for p in model.parameters())}  "
         f"use_fallback={model._spec.use_fallback}  torch.compile=False  "
-        f"cueq_target_block_size={target_block_size}  "
         f"pipeline={'energy' if energy_only else 'ef'}"
     )
     print(f"conv weight_numel: {[layer.conv_tp.weight_numel for layer in model.interactions]}")
@@ -225,14 +216,9 @@ def main() -> None:
         check=False,
         bin=args.neighbor_bin,
         capacity_factor=1.2,
-        target_block_size=target_block_size,
         device=device,
     )
-    print(
-        f"neighbors: r_build={neighbors.r_build:.2f} Å  capacity={neighbors.capacity}  "
-        f"target_block_span={neighbors.target_block_span}  "
-        f"edges_per_target_block={neighbors.edges_per_target_block}"
-    )
+    print(f"neighbors: r_build={neighbors.r_build:.2f} Å  capacity={neighbors.capacity}")
 
     ff = MolpotForceField("polar", units="metal")
     ff.def_pairstyle(model)
@@ -266,11 +252,10 @@ def main() -> None:
     neighbors.build(work)
     n_live = neighbors.num_edges
     full_edges = work["edges"]
-    if neighbors.live_edges_are_prefix:
-        work["edges"] = TensorDict(
-            {key: full_edges[key][:n_live] for key in full_edges.keys()},
-            batch_size=[n_live],
-        )
+    work["edges"] = TensorDict(
+        {key: full_edges[key][:n_live] for key in full_edges.keys()},
+        batch_size=[n_live],
+    )
     pots = ff.to_potentials()
     if args.benchmark_repeats:
         # Fixed geometry: do not compare timings from evolving NPT states or
@@ -348,8 +333,6 @@ def main() -> None:
                     / 1024**3,
                     "torch": torch.__version__,
                     "cueq": _metadata.version("cuequivariance"),
-                    "target_block_size": target_block_size,
-                    "target_block_span": neighbors.target_block_span,
                     "edge_capacity": neighbors.capacity,
                     "live_edges": n_live,
                     "neighbor_bin": args.neighbor_bin,

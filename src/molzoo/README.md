@@ -36,8 +36,8 @@ Public construction is flat and product-owned::
     model = MaceMatpes.load(path, format="official")
 
 See [MACE precision and official checkpoints](../../docs/molzoo/user-guide/mace.md)
-for precision-sensitive MD, safe weight loading, cuEq receiver blocking and
-the current validation limits.
+for precision-sensitive MD, safe weight loading and the current validation
+limits.
 
 ## Model Specifications
 

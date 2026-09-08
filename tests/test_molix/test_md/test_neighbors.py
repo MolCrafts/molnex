@@ -116,42 +116,6 @@ class TestNeighborList:
         assert nl.edge_index.shape == (nl.capacity, 2)
         assert nl.shifts.shape == (nl.capacity, 3)
 
-    def test_target_block_layout_has_fixed_slices_and_in_block_dead_edges(self):
-        """cuEq receiver blocks keep fixed shapes without pretending live rows are a prefix."""
-        pos, cell = make_cubic_lattice()
-        max_block_size = 10
-        nl = NeighborList(
-            cell=cell,
-            cutoff=3.5,
-            positions=pos,
-            capacity_factor=2.0,
-            target_block_size=max_block_size,
-        )
-        assert nl.live_edges_are_prefix is False
-        assert nl.num_target_blocks == math.ceil(pos.shape[0] / max_block_size)
-        assert nl.target_block_span == math.ceil(pos.shape[0] / nl.num_target_blocks)
-        assert nl.target_block_span == 9 < max_block_size
-        assert nl.edges_per_target_block is not None
-        assert nl.capacity == nl.num_target_blocks * nl.edges_per_target_block
-        assert sum(nl._target_block_counts) == nl.num_edges
-
-        width = nl.edges_per_target_block
-        for block, count in enumerate(nl._target_block_counts):
-            start = block * width
-            live_target = nl.edge_index[start : start + count, 1]
-            assert bool((live_target >= block * nl.target_block_span).all())
-            assert bool((live_target < min((block + 1) * nl.target_block_span, pos.shape[0])).all())
-
-            dead_index = nl.edge_index[start + count : start + width]
-            if dead_index.numel():
-                assert torch.equal(dead_index[:, 0], dead_index[:, 1])
-                dead_vector = (
-                    pos[dead_index[:, 1]]
-                    - pos[dead_index[:, 0]]
-                    + nl.shifts[start + count : start + width]
-                )
-                assert bool((dead_vector.norm(dim=-1) > nl.cutoff).all())
-
     def test_rebuild_keeps_shapes_constant(self, nlist):
         """Displacing every atom changes the edge set, never the shapes."""
         nl, pos = nlist

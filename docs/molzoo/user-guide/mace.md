@@ -114,11 +114,9 @@ fail rather than silently changing the fitted energy surface.
 
 ## Memory and multi-GPU boundary
 
-Full indexed cuEq convolution is fastest in the tested near-10k case when it
-fits. `model.configure_cueq_target_blocks(4096)` trades speed for lower peak
-memory using official kernels and checkpoint recomputation. The neighbor list
-must use the same maximum receiver block size; arbitrary collated COO cannot
-be passed to a receiver-blocked model. Runtime scheduling adds no weight keys.
+The convolution is the full indexed cuEq kernel; there is no memory-bounded
+alternative layout (the receiver-blocked one was removed on 2026-09-09: slower
+at every size, and its memory saving did not survive `torch.compile`).
 
 Current measurements use **8,850**, not exactly 10,000, PEO atoms on GH200.
 They validate bounded energy/force/virial evaluation, not long-trajectory
