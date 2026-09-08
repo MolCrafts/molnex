@@ -482,6 +482,24 @@ the only configuration that reaches 35 400 atoms on a 95 GiB GH200 is
 assume `torch.compile` preserves a checkpoint's memory intent.
 Records: `lab-v3` experiment `peo-tg/polar-inference-bench`.
 
+**Parity and cost against official mace-torch 0.3.16, both ports, -OCH3 PEO
+melts (2026-09-08, `lab-v3` experiment `peo-tg/mace-scaling-bench`, molnex
+c6be5652).** MatPES fp64: dE 8e-16 eV/atom, max|dF| 4e-14 eV/Å, max|dW| 5e-12 eV
+— machine precision on 7 400 / 8 850 atoms. Polar fp64 (3 700-atom sub-cell,
+the official model OOMs at 7 400 in fp64): dE −3e-9 eV/atom, max|dF| 2.9e-8
+eV/Å, rms 6e-9 — not the fp64 floor; since the MACE body is bit-identical the
+residual sits in the GTO / k-space part (k-vector set or summation order —
+open, diagnose per term when machine precision is wanted). max|dW| 0.2 %: the
+official virial strains the cell but reads `rcell`/`volume` unstrained. Virial
+convention is `W_molnex = −W_official` element for element — the doubled
+off-diagonals recorded by `polar-inference-bench` were wrong. fp32: molnex
+fp32 sits 1.7e-4 eV/Å / 1e-7 eV/atom from its fp64 (fp64 energy accumulation);
+the official fp32 Polar loses 8.6e-3 eV/atom in E at 7 400 (the earlier "0.3 %
+disagreement" was theirs) and its forces blow up at 8 850 atoms (max|F| 75 eV/Å
+vs 2.05). Cost, fp32, 7 400→21 400 atoms: Polar molnex compiled 21→23 µs/atom
+(α 1.06) vs official 75 µs/atom and OOM ≥ 17 700; MatPES molnex compiled 5.5
+µs/atom vs official 7 µs/atom, official E+F+W 4.5× its own E+F.
+
 **Compiled + receiver-blocked breaks above 21 400 atoms (2026-09-06, fixed).**
 `Compiler(fullgraph=True, dynamic=False, donated_buffer=True)` on the blocked
 Polar core fails in Inductor codegen at 2.1 M edges and above:
