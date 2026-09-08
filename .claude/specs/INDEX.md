@@ -8,7 +8,6 @@ must not be treated as authority for a new training submission.
 
 | Spec | Chain | Opened | Scope |
 |---|---|---|---|
-| [composable-a0-05-export](composable-a0-05-export.md) | composable-a0 | 2026-09-07 | LAMMPS `hybrid/overlay lj/mdf coul/long` + `pppm` + `special_bonds`; OpenMM PME text; manifest sibling; classical parity moved under `interface/tests/` (F5). |
 | [composable-a0-06-gates](composable-a0-06-gates.md) | composable-a0 | 2026-09-07 | Reflection gate, `EnergyDriftHook`, gate tests (NVE drift `slow`); closes the chain. |
 
 Design source for the chain: `.claude/notes/composable-potentials.md`
@@ -18,6 +17,7 @@ Design source for the chain: `.claude/notes/composable-potentials.md`
 
 | Spec or chain | Closed | Disposition |
 |---|---|---|
+| composable-a0-05-export | 2026-09-08 | Completed; 5/5 criteria verified (4 code by the mirrored unit tests, ac-003 scientific by the recorded LAMMPS run: butane 2.6e-12, periodic water+ions 9.9e-9 / max dF 6.9e-6). Commits 551bbe8c (export: `LammpsAdapter` lj/mdf · lj/cut/coul/long · hybrid/overlay + pppm + gewald + special_bonds, `OpenMMAdapter` PME/switching text, `LammpsWriter.write_pair_block` / `skip_pair_style` / box from `graphs.cell` / zero-padded labels / special_bonds mirror, `export_for_lammps(manifest=)`, `interface/tests/parity_classical.py` with ctest entries; F5 classical half closed) and f9da931f (ruff `TID251` bans `lammps` / `openmm` imports — the lint gate replaces the planned source-scanning test). Findings F23–F26 recorded. |
 | composable-a0-04-manifest | 2026-09-08 | Completed; 3/3 code criteria verified (impl evidence from the mirrored unit tests). Commit e813d439: `molpot.manifest` (`MANIFEST_SCHEMA=1`, frozen records, `ModelManifest` dict/file codec, sha256 param tables), `NonbondedMethodRecord` on `PotentialIR` from the single `PAIR_STYLE_DEFAULTS` resolver (F7), `ForceField.manifest(profile=)`, `Parameterizer.representation_record()`, charge-model-owned `ElectrostaticsRecord`; `ParamSpec` moved to `molpot.contract`. |
 | composable-a0-03-periodic-coulomb | 2026-09-08 | Completed; 5/5 criteria verified (ac-005 impl; ac-001..003 scientific + ac-004 performance agent-auto — exclusion identities, rocksalt Madelung golden, FD force/strain, ewald+pme explains at 0 breaks). Commit 61cd4fd6: F1 fixed, CellBound k-space with capacity_factor, PME default + compile-clean bound path, F13/F16/F17/F20 fixed. |
 | composable-a0-03b-neighbor-list-to-molix | 2026-09-08 | Completed; 3/3 code criteria verified. Commit 61cd4fd6: molpot/forcefield/neighbor_list.py deleted, Potentials._placed_pairs consumes the molix-placed list and fails closed, fixtures rebuilt through molix.batch.NeighborList; F4 closed. |
