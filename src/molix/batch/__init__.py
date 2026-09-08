@@ -15,7 +15,7 @@ Surfaces:
   :data:`DEFAULT_TARGET_SCHEMA`) routes target keys to the graph or atom
   namespace.
 * **Post-collate transforms** — :class:`BatchTask` is the extension point for
-  transforms that must run on the collated batch; :class:`PadMolecularBatch`
+  transforms that must run on the collated batch; :class:`PadMolecularBatch` / :class:`TotalCharge`
   is the shipped fixed-shape padder for ``torch.compile`` / CUDA graphs.
 * **Batch policies** — :class:`TokenBudgetPacker` /
   :class:`TokenBudgetBatchSampler` pack samples under atom / edge budgets,
@@ -45,6 +45,7 @@ from molix.batch.block_plan import (
     BlockPlanSource,
 )
 from molix.batch.bond_adapter import bond_index_from_columns
+from molix.batch.charge import TotalCharge
 from molix.batch.collate import (
     DEFAULT_TARGET_SCHEMA,
     MoleculeCollator,
@@ -87,6 +88,7 @@ __all__ = [
     "TaskMixtureBatchSampler",
     "TokenBudgetBatchSampler",
     "TokenBudgetPacker",
+    "TotalCharge",
     "bond_index_from_columns",
     "collate_molecules",
     "group_split_indices",

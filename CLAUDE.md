@@ -271,12 +271,15 @@ GH200 / `.aarch64`: on every env/torch change rebuild **all** native libs togeth
   files — no `helpers.py` / free-floating utility modules. Shared test code
   lives in the nearest `conftest.py` and is imported by package path
   (e.g. `from tests.conftest import make_graph_batch`).
-- **Unit tests only.** Every test under `tests/` tests one function or
-  module and finishes in seconds. No e2e runs (training loops, MD rollouts,
-  export→load→run round trips, spawned DataLoader workers), no
-  reference-value parity / regression suites, no benchmark or profiling
-  runs under `tests/` — those categories were deleted on 2026-09-03 and must
-  not come back. The `regressions/` tier that used to hold public-API
+- **Unit tests only in the fast tier.** Every test under `tests/` tests one
+  function or module and finishes in seconds. No e2e runs in the default tier
+  (training loops, MD rollouts, export→load→run round trips, spawned DataLoader
+  workers), no reference-value parity / regression suites, no benchmark or
+  profiling runs under `tests/` — those categories were deleted on 2026-09-03
+  and must not come back. The one sanctioned exception is the `slow` tier
+  below: a *bounded* rollout, compile trace or export check that asserts one
+  gate (e.g. the 200-step NVE drift in `test_runner.py`) is `slow`-marked and
+  runs on demand; LAMMPS-driven parity lives under `interface/`, never here. The `regressions/` tier that used to hold public-API
   scenarios with hard-coded goldens was deleted on 2026-09-07.
 - **Two tiers, orthogonal tests (hard rule).** The default `pytest` run is
   the fast unit tier (`addopts = -m "not slow"`) and must finish in a couple
