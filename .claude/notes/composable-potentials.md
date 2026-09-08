@@ -282,6 +282,10 @@ training runs `run_record.write_meta(extra={"manifest": manifest.to_dict()})`. `
 
 ## Roadmap
 
+### `composable-a0-debt` — closed 2026-09-08 (commits 75b90721, 8b3c1880, 422252ab)
+
+Six specs that paid the ledger debt the a0 chain named: 01 mixing rule (F24, F10), 02 wrapped-molecule guard (F29), 03 MD compile seam + precision (F28; F34 opened for the barostat path), 04 condensed LAMMPS types (F25), 05 probe / CLAUDE.md tier sentence, 06 force-field-owned batch primitives (F12, F21 — operator ruling: ownership stays here). Found and fixed on the way: F33 (`clone` dropped the mlip), `Potentials.forward` energy shape, two dead legs of `verify_md_lj_nve.py`. Opened: F30 (composer-path `mixing_fn`), F31 (`RepulsionExp6` wall dimensions), F32 (espaloma dtype), F34 (compiled virial core). The four `scripts/mm_param_learning` cleanups ride on the departed peer session's uncommitted Frame-native port and are left in the worktree for the operator to land with it.
+
 ### `composable-a0` — closed 2026-09-08 (seven merge units: 01 b87e3268 · 02 5eacaa67 · 03 + 03b 61cd4fd6 · 04 e813d439 · 05 551bbe8c + f9da931f · 06 c9b69dc4)
 
 **Test-tier decision (2026-09-08, a0-06).** A bounded MD rollout *is* permitted under `tests/` when it is `slow`-marked and asserts one gate (the 200-step NVE drift on the butane-pair box) — the CLAUDE.md "two tiers" paragraph says so ("… or rolls out MD is marked `slow`"), while the older "Unit tests only … no MD rollouts" sentence predates the deletion of `regressions/` and reads as the fast tier's rule. Reconcile that sentence in CLAUDE.md when the tree is quiet (the peer session holds CLAUDE.md hunks today); `tests/test_molix/test_md/test_integrators.py`'s docstring is corrected in a0-06.
