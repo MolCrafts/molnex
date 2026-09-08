@@ -171,6 +171,21 @@ class Potentials(BasePotential):
     :meth:`molix.md.MD.set_forcefield`. ``forward`` on a TensorDict
     writes ``graphs.energy`` and ``atoms.forces``.
 
+    Those forces come from :meth:`calc_energy_forces`, which is **mixed**: the
+    bonded terms and ``pair:lj/cut`` evaluate a closed-form
+    ``F = -∂E/∂pos`` (the *analytic* branch — no ``requires_grad`` position
+    leaf, no backward pass), while Coulomb and an mlip pair style have no
+    cheap closed form and fall back to one ``torch.autograd.grad`` on a fresh
+    position leaf. :meth:`calc_forces` is the all-autograd route and
+    :meth:`calc_energy_forces_virial` the strained one NPT uses; the three
+    agree to numerical precision on the same batch, so the analytic branch is a
+    cost choice and never a physics choice. It does constrain what a batch must
+    carry: an analytic pair force needs the minimum-image separation *vector*,
+    which :meth:`_placed_pairs` forms and hands to
+    :meth:`LJCutPotential.energy_forces
+    <molpot.forcefield.pair_terms.LJCutPotential.energy_forces>` together with
+    its norm.
+
     Bonded terms use existing harmonic / torsion kernels. Nonbonded terms are
     concrete Potential objects that own their cutoffs:
 
@@ -696,10 +711,26 @@ class Potentials(BasePotential):
         classical path below instead (which, with no classical styles
         declared, contributes an empty sum).
 
+        **Precondition — each molecule must arrive whole (F29).** The two
+        halves of this sum read geometry differently: the bonded terms (bond /
+        angle / proper / improper) take plain ``pos_j - pos_i`` differences off
+        their own index columns, while the pair terms go through
+        :meth:`_placed_pairs` and get *minimum-image* separations (see
+        :meth:`_rebuilds_pairs` for which terms belong to which group). A
+        periodic frame whose coordinates have been wrapped into the box
+        therefore has to carry every molecule unwrapped: an atom folded across
+        a face keeps its pair energy correct — the minimum image is
+        wrap-invariant — while its bonds, angles and torsions are measured
+        across the whole box and come out wrong. Nothing here can detect it: a
+        stretched bond is a legal configuration. Wrap for visualisation, never
+        on the way in. This is finding **F29** in
+        ``.claude/notes/composable-potentials.md``.
+
         Args:
             system: Batch / mapping carrying ``atoms.pos`` ``(N, 3)`` Å and the
                 topology namespaces (``bonds`` / ``angles`` / ``propers`` /
-                ``impropers``). With any pair style declared it must also carry
+                ``impropers``), each molecule whole (see the precondition
+                above). With any pair style declared it must also carry
                 the ``edges`` neighbour list a molix owner placed
                 (:meth:`_placed_pairs`). Must be a ``TensorDict`` to take the
                 mlip branch above.
@@ -770,7 +801,9 @@ class Potentials(BasePotential):
         ``Compiler(donated_buffer=True)`` trades that back for MD-only reuse.
 
         Args:
-            system: Batch / mapping carrying ``atoms.pos`` and the topology.
+            system: Batch / mapping carrying ``atoms.pos`` and the topology,
+                each molecule whole — this differentiates :meth:`calc_energy`
+                and inherits its F29 precondition verbatim.
             pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``.
 
         Returns:
@@ -794,8 +827,24 @@ class Potentials(BasePotential):
         grad mode — wrap the run in ``torch.no_grad()`` so the tape is not
         kept for parameter derivatives.
 
+        **Precondition — each molecule must arrive whole (F29).** The two
+        halves of this sum read geometry differently: the bonded terms (bond /
+        angle / proper / improper) take plain ``pos_j - pos_i`` differences off
+        their own index columns, while the pair terms go through
+        :meth:`_placed_pairs` and get *minimum-image* separations (see
+        :meth:`_rebuilds_pairs` for which terms belong to which group). A
+        periodic frame whose coordinates have been wrapped into the box
+        therefore has to carry every molecule unwrapped: an atom folded across
+        a face keeps its pair energy correct — the minimum image is
+        wrap-invariant — while its bonds, angles and torsions are measured
+        across the whole box and come out wrong. Nothing here can detect it: a
+        stretched bond is a legal configuration. Wrap for visualisation, never
+        on the way in. This is finding **F29** in
+        ``.claude/notes/composable-potentials.md``.
+
         Args:
-            system: Batch carrying ``atoms.pos`` and ``graphs.cell``.
+            system: Batch carrying ``atoms.pos`` and ``graphs.cell``, each
+                molecule whole (see the precondition above).
             pos: Optional positions overriding ``atoms.pos``.
 
         Returns:
@@ -928,8 +977,24 @@ class Potentials(BasePotential):
         has no cheap closed form, so it falls back to the autograd backend on
         a fresh position leaf.
 
+        **Precondition — each molecule must arrive whole (F29).** The two
+        halves of this sum read geometry differently: the bonded terms (bond /
+        angle / proper / improper) take plain ``pos_j - pos_i`` differences off
+        their own index columns, while the pair terms go through
+        :meth:`_placed_pairs` and get *minimum-image* separations (see
+        :meth:`_rebuilds_pairs` for which terms belong to which group). A
+        periodic frame whose coordinates have been wrapped into the box
+        therefore has to carry every molecule unwrapped: an atom folded across
+        a face keeps its pair energy correct — the minimum image is
+        wrap-invariant — while its bonds, angles and torsions are measured
+        across the whole box and come out wrong. Nothing here can detect it: a
+        stretched bond is a legal configuration. Wrap for visualisation, never
+        on the way in. This is finding **F29** in
+        ``.claude/notes/composable-potentials.md``.
+
         Args:
-            system: Batch / mapping carrying ``atoms.pos`` and the topology.
+            system: Batch / mapping carrying ``atoms.pos`` and the topology,
+                each molecule whole (see the precondition above).
             pos: Optional positions ``(N, 3)`` Å overriding ``atoms.pos``.
 
         Returns:
@@ -1263,7 +1328,7 @@ class Potentials(BasePotential):
         pos: torch.Tensor,
         *,
         cutoff: float | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """The batch's placed ``edges`` list, priced at the **live** positions.
 
         ``molpot`` consumes the cutoff graph; it never enumerates one. Both
@@ -1300,8 +1365,16 @@ class Potentials(BasePotential):
         nothing because a zero-length row is a padding self-loop and
         ``source < target`` has already killed it.
 
-        Distances are recomputed from the live ``pos`` by the first branch the
-        list supports:
+        Each row's separation **vector** is recomputed from the live ``pos`` by
+        the first branch the list supports, and the returned distance is its
+        norm. Both come back, from the one tensor: a term that needs a
+        direction (the analytic LJ force's ``r̂``) must divide *that* vector by
+        *this* distance, not rebuild ``pos[t] - pos[s]`` for itself. Under a
+        cell the two disagree for every pair whose nearest image is through a
+        lattice vector — the unwrapped difference is longer than the distance
+        priced and points the other way — so a term that re-derives its own
+        direction reports a force that is not the gradient of the energy
+        returned beside it. Owning both here is what keeps them one geometry.
 
         1. ``shifts`` — ``|pos[t] - pos[s] + shifts|``, clamped *before* the
            ``sqrt`` because a padding self-loop is a zero vector whose ``√``
@@ -1335,11 +1408,14 @@ class Potentials(BasePotential):
                 ``None`` to keep every row of the list.
 
         Returns:
-            ``(edge_index, dist, live)`` at the list's capacity — ``(E, 2)``
-            endpoints as placed, ``(E,)`` separations in Å and a boolean
-            ``(E,)``. ``E == 0`` (a list with no rows) is an ordinary empty
-            list — no pair in range — and prices at zero; only an *absent* list
-            raises.
+            ``(edge_index, pair_vectors, dist, live)`` at the list's capacity —
+            ``(E, 2)`` endpoints as placed, ``(E, 3)`` separation vectors in Å
+            pointing source → target (``pos[t] - pos[s] + shift`` under a
+            cell), ``(E,)`` separations in Å which are exactly
+            ``|pair_vectors|``, and a boolean ``(E,)``. The vectors stay on the
+            autograd graph with the distances. ``E == 0`` (a list with no rows)
+            is an ordinary empty list — no pair in range — and prices at zero;
+            only an *absent* list raises.
 
         Raises:
             ValueError: The batch carries no ``edges.edge_index``, or an
@@ -1365,12 +1441,10 @@ class Potentials(BasePotential):
         edge_diff = self._ns_tensor(edges, "edge_diff")
         src, tgt = edge_index[:, 0], edge_index[:, 1]
         if shifts is not None:
-            shifted = pos[tgt] - pos[src] + shifts
-            dist = (shifted * shifted).sum(-1).clamp_min(_SQ_DIST_CLAMP_MIN).sqrt()
+            vectors = pos[tgt] - pos[src] + shifts
         elif edge_diff is not None:
             implied = edge_diff.detach() - (pos.detach()[tgt] - pos.detach()[src])
             vectors = pos[tgt] - pos[src] + implied
-            dist = (vectors * vectors).sum(-1).clamp_min(_SQ_DIST_CLAMP_MIN).sqrt()
         else:
             raise ValueError(
                 "edges.edge_index is placed but carries no geometry to price it by: "
@@ -1381,6 +1455,7 @@ class Potentials(BasePotential):
                 "molix.md.NeighborList writes edges.shifts as well (the branch whose virial "
                 "is complete). molpot never re-enumerates the pairs itself."
             )
+        dist = (vectors * vectors).sum(-1).clamp_min(_SQ_DIST_CLAMP_MIN).sqrt()
         live = src < tgt
         num_edges = self._ns_tensor(edges, "num_edges")
         if num_edges is not None:
@@ -1388,7 +1463,7 @@ class Potentials(BasePotential):
             live = live & (rows < num_edges)
         if cutoff is not None:
             live = live & (dist < cutoff) & (dist > 0)
-        return edge_index, dist, live
+        return edge_index, vectors, dist, live
 
     def _scaled_pairs(
         self,
@@ -1397,8 +1472,8 @@ class Potentials(BasePotential):
         *,
         cutoff: float | None,
         scale_kind: str,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Half neighbor list ``(edge_index, dist, scales, live)`` for one pair term.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Half list ``(edge_index, pair_vectors, dist, scales, live)`` for one pair term.
 
         The list keeps the capacity :meth:`_placed_pairs` read it at — ``live``
         is the boolean mask of the rows that contribute, not a selection to
@@ -1427,10 +1502,13 @@ class Potentials(BasePotential):
                 (``"q"`` for Coulomb, ``"lj"`` for Lennard-Jones).
 
         Returns:
-            ``(edge_index, dist, scales, live)`` — pairs ``(E, 2)``,
-            separations ``(E,)`` in Å, dimensionless scale factors ``(E,)``
-            and the boolean liveness mask ``(E,)``, all at the placed list's
-            capacity.
+            ``(edge_index, pair_vectors, dist, scales, live)`` — pairs
+            ``(E, 2)``, their source → target separation vectors ``(E, 3)`` in
+            Å, the separations ``(E,)`` in Å those vectors' norms give,
+            dimensionless scale factors ``(E,)`` and the boolean liveness mask
+            ``(E,)``, all at the placed list's capacity. The vectors are
+            :meth:`_placed_pairs`'s, forwarded unchanged: a term that wants a
+            direction takes it from here rather than rebuilding one.
 
         Raises:
             ValueError: The batch's topology has a different shape than the
@@ -1457,9 +1535,9 @@ class Potentials(BasePotential):
                 "the branch above binds one on first use and the other rejects a topology "
                 "change, so neither can leave it unset — call bind_topology(system)"
             )
-        edge_index, dist, live = self._placed_pairs(system, pos, cutoff=cutoff)
+        edge_index, vectors, dist, live = self._placed_pairs(system, pos, cutoff=cutoff)
         scales = self._exclusions.lookup(edge_index, scale_kind, dtype=pos.dtype)
-        return edge_index, dist, scales, live
+        return edge_index, vectors, dist, scales, live
 
     def _lj_energy(
         self,
@@ -1476,7 +1554,7 @@ class Potentials(BasePotential):
         # Keep LJ on its own cutoff list. Reusing an unlimited Coulomb half-list
         # forced the exclusion lookup (and distance storage) onto all
         # intramolecular pairs even though LJ only needs ``r < cutoff``.
-        edge_index, dist, scales, live = self._scaled_pairs(
+        edge_index, _vectors, dist, scales, live = self._scaled_pairs(
             system, pos, cutoff=self.lj.cutoff, scale_kind="lj"
         )
         num_graphs = self._num_graphs(system)
@@ -1504,14 +1582,21 @@ class Potentials(BasePotential):
                 "reaches it under `if self.lj is not None`"
             )
         epsilon, sigma = self._lj_params()
-        edge_index, dist, scales, live = self._scaled_pairs(
+        edge_index, vectors, dist, scales, live = self._scaled_pairs(
             system, pos, cutoff=self.lj.cutoff, scale_kind="lj"
         )
         num_graphs = self._num_graphs(system)
         atom_batch = self._atom_batch(system, pos.shape[0], pos.device)
         return self.lj.energy_forces(
-            positions=pos,
+            # The geometry's atom count, not the parameter table's length.
+            # ``pos.shape[0]`` stays a shape (a ``SymInt`` under dynamic
+            # shapes), which is what ``new_zeros`` wants — never ``int(...)``,
+            # which would burn a host read into the traced graph.
+            n_atoms=pos.shape[0],
             edge_index=edge_index,
+            # The vector ``dist`` is the norm of — under a cell it is the
+            # minimum image, which ``pos`` alone cannot reconstruct.
+            pair_vectors=vectors,
             distances=dist,
             epsilon=epsilon,
             sigma=sigma,
@@ -1540,7 +1625,7 @@ class Potentials(BasePotential):
                     "style, so neither can exist without the other"
                 )
             cut = self.coulomb_open.cutoff
-            edge_index, dist, scales, live = self._scaled_pairs(
+            edge_index, _vectors, dist, scales, live = self._scaled_pairs(
                 system, pos, cutoff=cut, scale_kind="q"
             )
             num_graphs = self._num_graphs(system)
@@ -1581,7 +1666,7 @@ class Potentials(BasePotential):
                 "per batch, or drop graphs.cell for the open-boundary Coulomb path."
             )
         # Neighbor list cutoff from the periodic Potential's real-space cutoff
-        edge_index, dist, _, live = self._scaled_pairs(
+        edge_index, _vectors, dist, _, live = self._scaled_pairs(
             system,
             pos,
             cutoff=self.coulomb_periodic.real_space_cutoff,

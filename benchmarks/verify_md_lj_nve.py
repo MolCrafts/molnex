@@ -15,7 +15,15 @@ Run::
     PYTHONPATH=src:. python benchmarks/verify_md_lj_nve.py            # full 5 ns
     PYTHONPATH=src:. python benchmarks/verify_md_lj_nve.py --ps 100   # short smoke
 
-Pass when ``|slope·duration| / |E_tot(0)| < 1e-3`` with bounded RMS fluctuation.
+The conservation criterion itself is :class:`molix.md.EnergyDriftHook`'s, not
+this script's: the sampling branch feeds it ``(t, E_tot)`` with
+:meth:`~molix.md.EnergyDriftHook.record` — there is no runner here to mount it
+on, the compiled step is looped directly — and
+:meth:`~molix.md.EnergyDriftHook.drift` returns the fit.
+
+Pass when ``rel_drift = |slope · duration_fs| / |e0| < 1e-3`` with bounded RMS
+fluctuation, where ``e0`` is the first *sampled* total energy and
+``duration_fs`` the sampled span.
 """
 
 from __future__ import annotations
@@ -25,11 +33,11 @@ import time
 from pathlib import Path
 
 import torch
+from tensordict import TensorDict
 
-from molix.md import MD, NeighborList, VelocityVerletIntegrator
+from molix.md import MD, EnergyDriftHook, NeighborList, VelocityVerletIntegrator
 from molix.units import units
 from molpot.forcefield import ForceField
-from tensordict import TensorDict
 
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
 
@@ -61,10 +69,6 @@ def _maxwell_velocities(n: int, kbt: float, seed: int) -> torch.Tensor:
     vel = sigma_v * torch.randn(n, 3, generator=g, dtype=_DTYPE)
     vel = vel - vel.mean(0, keepdim=True)  # remove COM momentum
     return vel
-
-
-def _total_energy(pe: torch.Tensor, vel: torch.Tensor) -> float:
-    return float(pe + 0.5 * _MASS * (vel * vel).sum())
 
 
 def main() -> int:
@@ -128,9 +132,7 @@ def main() -> int:
         md._adapter.bind_work(system)
     step = ig.step if args.no_compile else torch.compile(ig.step, fullgraph=True)
     state = ig.initial(pos, vel)
-    e0 = _total_energy(state.energy, state.vel)
-    ts: list[float] = []
-    es: list[float] = []
+    hook = EnergyDriftHook()
     pes: list[float] = []
     kes: list[float] = []
     traj: list[torch.Tensor] = []
@@ -138,25 +140,21 @@ def main() -> int:
     for i in range(n_steps):
         state = step(state)
         if i % args.sample_every == 0:
+            pe = float(state.energy)
             ke = 0.5 * _MASS * float((state.vel * state.vel).sum())
-            ts.append(i * _DT / 1000.0)  # ps
-            pes.append(float(state.energy))
+            hook.record(i * _DT, pe + ke)
+            pes.append(pe)
             kes.append(ke)
-            es.append(float(state.energy) + ke)
             traj.append(state.pos.detach().cpu().clone())
     wall = time.perf_counter() - t_wall
 
-    t = torch.tensor(ts, dtype=_DTYPE)
-    e = torch.tensor(es, dtype=_DTYPE)
-    # Linear fit E(t) = a + b·t  → slope b
-    tc = t - t.mean()
-    slope = (tc * (e - e.mean())).sum() / (tc * tc).sum()
-    duration = n_steps * _DT / 1000.0  # ps
-    rel_drift = float(abs(slope * duration) / abs(e0))
-    rms_rel = float((e - e.mean()).pow(2).mean().sqrt() / abs(e0))
+    drift = hook.drift()
+    t = torch.tensor(hook.times_fs, dtype=_DTYPE) / 1000.0  # ps
+    e = torch.tensor(hook.totals, dtype=_DTYPE)
+    e0, rel_drift, rms_rel = drift.e0, drift.rel_drift, drift.rms_rel
     rate = n_steps / wall if wall > 0 else float("nan")
 
-    ns = duration / 1000
+    ns = drift.duration_fs / 1e6  # sampled window, ns
     print(f"LJ13 NVE: N={pos.shape[0]} dt={_DT} fs  steps={n_steps}  duration={ns:.3f} ns")
     print(f"  T0={args.t0} K  E_tot(0)={e0:.6e}  compiled={not args.no_compile}")
     print(f"  rel energy drift (|slope·dur|/|E0|) = {rel_drift:.3e}  (bound 1e-3)")

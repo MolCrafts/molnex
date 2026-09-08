@@ -52,6 +52,22 @@ def _one_pair_kwargs(*, r: float = R_MIN) -> dict[str, torch.Tensor]:
     }
 
 
+def _from_positions(positions: torch.Tensor, edge_index: torch.Tensor) -> dict[str, object]:
+    """The two geometry arguments :meth:`LJCutPotential.energy_forces` takes.
+
+    That method no longer sees the positions: it takes the separation vectors,
+    so direction and distance always come out of the *same* vector (under a
+    cell that vector is the minimum image, which the raw difference is not),
+    and an explicit ``n_atoms`` for the force buffer it scatters into. These
+    fixtures are all open-boundary, so ``pos[j] - pos[i]`` is that vector and
+    the values below are unchanged.
+    """
+    return {
+        "pair_vectors": positions[edge_index[:, 1]] - positions[edge_index[:, 0]],
+        "n_atoms": int(positions.shape[0]),
+    }
+
+
 def _sum(halves: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
     """``repulsion + dispersion`` — the full LJ energy, autograd graph intact."""
     repulsion, dispersion = halves
@@ -75,7 +91,10 @@ def _dedr(potential: LJCutPotential, r: float) -> float:
 def _two_atom_energy_force(potential: LJCutPotential, r: float) -> tuple[float, float]:
     """``(E, F_x)`` of a two-atom pair at separation ``r`` along x̂."""
     positions = torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=DTYPE)
-    halves, forces = potential.energy_forces(positions=positions, **_one_pair_kwargs(r=r))
+    kwargs = _one_pair_kwargs(r=r)
+    halves, forces = potential.energy_forces(
+        **_from_positions(positions, kwargs["edge_index"]), **kwargs
+    )
     return _total(halves), float(forces[0, 0])
 
 
@@ -91,7 +110,9 @@ class TestLJCutPotential:
         potential = LJCutPotential(cutoff=10.0)
         positions = torch.tensor([[0.0, 0.0, 0.0], [0.9 * R_MIN, 0.0, 0.0]], dtype=DTYPE)
         kwargs = _one_pair_kwargs(r=0.9 * R_MIN)
-        (repulsion, dispersion), forces = potential.energy_forces(positions=positions, **kwargs)
+        (repulsion, dispersion), forces = potential.energy_forces(
+            **_from_positions(positions, kwargs["edge_index"]), **kwargs
+        )
         expected_repulsion, expected_dispersion = potential.energy(**kwargs)
         assert float(repulsion) == pytest.approx(float(expected_repulsion), abs=1e-10)
         assert float(dispersion) == pytest.approx(float(expected_dispersion), abs=1e-10)
@@ -150,7 +171,10 @@ class TestLJCutPotential:
         potential = LJCutPotential(cutoff=R_CUT, switch_start=R_SWITCH)
         r = 0.5 * (R_SWITCH + R_CUT)
         positions = torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=DTYPE)
-        _, analytic = potential.energy_forces(positions=positions, **_one_pair_kwargs(r=r))
+        window = _one_pair_kwargs(r=r)
+        _, analytic = potential.energy_forces(
+            **_from_positions(positions, window["edge_index"]), **window
+        )
 
         leaf = positions.clone().requires_grad_(True)
         distances = (leaf[1] - leaf[0]).norm().reshape(1)
@@ -179,7 +203,9 @@ class TestLJCutPotential:
         masked = _total(potential.energy(**padded))
         assert masked == pytest.approx(_total(potential.energy(**_one_pair_kwargs())), abs=1e-14)
 
-        (_, _), forces = potential.energy_forces(positions=positions, **padded)
+        (_, _), forces = potential.energy_forces(
+            **_from_positions(positions, padded["edge_index"]), **padded
+        )
         assert torch.equal(forces[2], torch.zeros(3, dtype=DTYPE))
 
     @pytest.mark.slow
@@ -191,10 +217,11 @@ class TestLJCutPotential:
         positions = torch.tensor(
             [[0.0, 0.0, 0.0], [R_MIN, 0.0, 0.0], [0.0, R_MIN, 0.0]], dtype=DTYPE
         )
+        edge_index = torch.tensor([[0, 1], [0, 2], [0, 0], [0, 0]], dtype=torch.long)
         explanation = Compiler.explain(
             potential.energy_forces,
-            positions=positions,
-            edge_index=torch.tensor([[0, 1], [0, 2], [0, 0], [0, 0]], dtype=torch.long),
+            **_from_positions(positions, edge_index),
+            edge_index=edge_index,
             distances=torch.tensor([R_MIN, R_MIN, 1.0, 1.0], dtype=DTYPE),
             epsilon=torch.full((3,), EPSILON, dtype=DTYPE),
             sigma=torch.full((3,), SIGMA, dtype=DTYPE),

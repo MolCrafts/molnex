@@ -1,6 +1,6 @@
 ---
 title: S8 release gates for A0 — reflection, NVE drift hook, chain regression (composable-a0-06)
-status: approved
+status: done
 created: 2026-09-07
 chain: composable-a0
 ---
@@ -22,9 +22,11 @@ conservation; FD force and cell derivative; reference vs production), gate 2
 release with manifest). Drift criterion lifted from
 `benchmarks/verify_md_ljcut_nve.py:36-39`: pass when
 `|slope · duration| / |E_tot(0)| < 1e-3` with bounded RMS fluctuation.
-Periodic impropers with phase ∈ {0, π} and OPLS torsions are achiral, so the
-OPLS-AA template energy is reflection-invariant; `improper:harmonic` with
-`chi0 ≠ 0` is not (the negative control proves the gate is template-scoped).
+Periodic torsions and impropers with phase ∈ {0, π} are achiral, so a Class-I
+template built from them (the gate fixture is a hand-built Class-I butane pair,
+not `OPLSAAForceField` itself — geometry-derived `r0`/`θ0`, made-up barriers)
+is reflection-invariant; `improper:harmonic` with `chi0 ≠ 0` is not (the
+negative control proves the gate is template-scoped).
 
 ## Design
 
@@ -53,11 +55,15 @@ OPLS-AA template energy is reflection-invariant; `improper:harmonic` with
 - `benchmarks/verify_md_ljcut_nve.py`
 - `.claude/specs/INDEX.md`, `.claude/notes/composable-potentials.md`
 
+Pre-flight (2026-09-08): `EnergyDriftHook` exposes `record(time_fs, total)` and `drift() -> EnergyDrift` (frozen record: `e0`, `duration_fs`, `slope`, `rel_drift`, `rms_rel`) so the slope fact is unit-tested on the primitive; `on_step_end` reads `runner.integrator.dt` and `obs.total` (observer host sync per chunk, off the hot path), `on_run_end` stores `self.result`.
+Found on the way (2026-09-08): the analytic LJ force direction used the raw unwrapped pair difference against the minimum-image distance (F27) — fixed here, gated by a boundary-crossing FD test; symmetry gates run on Ewald, not PME, because a box-anchored mesh cannot be translation-invariant at 1e-10.
+
 ## Tasks
 
-- [ ] reflection tests (+ negative control)
-- [ ] `EnergyDriftHook` + unit test on a synthetic linear series; benchmark consumes it
-- [ ] chain regression with capture header
+- [x] reflection tests (+ negative control) — inversion 6.4e-14, mirror-x 0.0; improper:harmonic chi0=0.3 differs by 13.1 kcal/mol
+- [x] `EnergyDriftHook` + unit test on a synthetic linear series; benchmark consumes it (`_EnergySampler` deleted; benchmark's dead compile flags → F28)
+- [x] A0 gate tests in the mirrored unit modules (T/R/P ≤ 7.1e-14 on the Ewald box; NVE 200 × 0.5 fs rel_drift 7.47e-6; F27 boundary FD gate < 1e-6): T / R / P / reflection on the assembled energy (fast), the 200-step NVE drift through `molix.md` (`slow`); manifest round trip + sha literals and contribution partition are already pinned (a0-04 `test_manifest.py`, a0-01 `test_potentials.py`) — cited as evidence, not re-asserted
+- [x] hygiene (2026-09-08): architect round (hook drains per run, explicit n_atoms, F29 precondition, benchmark composition, fixture honesty + tests/conftest ownership, FD helper, place_edges imports repointed) applied; janitor manual items → F10
 - [ ] close the chain (INDEX, note)
 
 ## Testing

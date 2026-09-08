@@ -1,16 +1,26 @@
-"""Bulk lj/cut NVE on GPU with a compiled force field (LAMMPS-melt state point).
+"""Bulk lj/cut NVE on GPU at the LAMMPS-melt state point.
 
 Drives an FCC argon lattice at the classic ``melt`` state point (ρ* = 0.8442,
-T0* = 1.44, r_c = 2.5σ) under NVE with :class:`molix.md.LennardJonesCutForceField`
-over a rebuilding :class:`molix.md.NeighborList`. The force evaluation
-is ``torch.compile``d — fullgraph inductor by default, ``--cuda-graphs`` for the
-``reduce-overhead`` preset — while the *list* decides when to rebuild, under its
-own Verlet skin and LAMMPS ``every`` / ``delay`` / ``check`` gate
-(``--skin`` / ``--every`` / ``--delay`` / ``--no-check``). ``Integrator.eval_force``
-asks it once per force evaluation, at the positions being evaluated, and runs the
-answer eagerly *between* compiled force calls; the fixed-capacity buffers keep
-every tensor shape static across rebuilds, which is what lets the compiled force
-path survive the whole run.
+T0* = 1.44, r_c = 2.5σ) under NVE with a molpy ``ForceField`` (``lj/cut``)
+over a rebuilding :class:`molix.md.NeighborList`, while the *list* decides when
+to rebuild, under its own Verlet skin and LAMMPS ``every`` / ``delay`` /
+``check`` gate (``--skin`` / ``--every`` / ``--delay`` / ``--no-check``).
+``Integrator.eval_force`` asks it once per force evaluation, at the positions
+being evaluated; the fixed-capacity buffers keep every tensor shape static
+across rebuilds.
+
+Two arms this benchmark used to have are gone — finding **F28** in
+``.claude/notes/composable-potentials.md``, which owns them and names the
+follow-up (one ``compile_core``-style seam on :class:`molix.md.MD` plus a
+precision policy). Both were lost when d9043cee replaced the compiled
+``LennardJonesCutForceField`` module with the molpy ForceField path, whose
+force evaluation sits behind ``MD.compute_force`` together with the neighbour
+rebuild. The ``torch.compile``d force path needs that compile seam, so its
+``--no-compile`` / ``--cuda-graphs`` flags are **deleted** rather than kept as
+switches that quietly do nothing. The split-precision arm
+(``--potential-precision``) needs parameter buffers at a dtype other than the
+MD state's, so it **fails closed** rather than silently running at
+``--precision``.
 
 The default ``--skin 1.02`` Å is 0.3 σ — the ``neighbor 0.3 bin`` setting shipped
 with the LAMMPS ``melt`` example — giving a half-skin of 0.51 Å against a
@@ -29,31 +39,45 @@ Run::
 
     PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py            # 100 ps default
     PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --ps 5000  # 5 ns production
-    PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --cuda-graphs
     PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py --skin 0   # no-skin arm
-    PYTHONPATH=src:. python benchmarks/verify_md_ljcut_nve.py \\
-        --precision fp64 --potential-precision fp32   # split-precision arm
 
-Pass when ``|slope·duration| / |E_tot(0)| < 1e-3`` with bounded RMS fluctuation
-and — at ``skin > 0``, where the counter carries information — no dangerous
-builds (``ndanger == 0``).
+The energy-conservation criterion is **not** this script's: it belongs to
+:class:`molix.md.EnergyDriftHook`, which accumulates ``(t, E_tot)`` on every
+observation and fits the secular slope. This script mounts that hook and,
+beside it, the small ``_ThermoSeries`` observer below holding the potential /
+kinetic / temperature series the figure wants, and reads the gate back off
+:attr:`~molix.md.EnergyDriftHook.result` as an :class:`molix.md.EnergyDrift`
+record.
+
+Pass when ``rel_drift = |slope · duration_fs| / |e0| < 1e-3``, every sampled
+total energy is finite, and — at ``skin > 0``, where the counter carries
+information — no rebuild came late (``ndanger == 0``). ``e0`` is the first
+sampled total energy and ``duration_fs`` the sampled span ``t_last − t_first``:
+both observers drain at the timed run's ``on_run_start``, so the warm-up
+segment is gone and both refer to the timed trajectory only. The bounded RMS fluctuation
+``rms_rel`` is printed beside the drift as the scale the slope has to be read
+against — it is reported, not asserted, because its size is set by ``dt`` and
+is not an error.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from pathlib import Path
 
 import torch
 from tensordict import TensorDict
 
-from molix.compile import Compiler
 from molix.md import (
     MD,
+    EnergyDrift,
+    EnergyDriftHook,
     MaxwellBoltzmann,
     MDHook,
     NeighborList,
+    VelocityInitHook,
     VelocityVerletIntegrator,
 )
 from molix.units import units
@@ -64,8 +88,7 @@ _KB_EV = (1.0 * units.k_B).to("eV / kelvin").magnitude
 _OUT_DEFAULT = Path(__file__).resolve().parent / "results" / "md_ljcut_nve"
 
 # Argon in (amu, Å, fs): ε = 0.0103 eV, σ = 3.4 Å, m = 39.95 amu.
-_EPS_EV = 0.0103
-_EPS = _EPS_EV / 103.6426965638  # eV -> amu·Å²/fs²
+_EPS_EV = 0.0103  # eV; the force field is declared in metal units and rescales
 _SIGMA = 3.4
 _MASS = 39.95
 _RHO_STAR = 0.8442  # LAMMPS melt reduced density
@@ -87,26 +110,28 @@ def _fcc(n_cells: int, a: float, *, dtype: torch.dtype) -> tuple[torch.Tensor, t
     return pos, cell
 
 
-class _EnergySampler(MDHook):
-    """Record (t, PE, KE, E_tot, T) at every hook-visible chunk boundary."""
+class _ThermoSeries(MDHook):
+    """The PE / KE / T series this script plots — mounted beside the drift hook.
 
-    def __init__(self, dt_fs: float) -> None:
-        self._dt = float(dt_fs)
-        self.t_ps: list[float] = []
+    ``EnergyDriftHook`` owns ``(t, E_tot)`` and the gate; these three series
+    exist only for the figure and the ``<T>`` line, which is why they are a
+    second, smaller observer rather than a subclass of it. Both drain at
+    ``on_run_start``, so the warm-up run's samples never reach the timed run's
+    figure and the two series stay index-aligned.
+    """
+
+    def __init__(self) -> None:
         self.pe: list[float] = []
         self.ke: list[float] = []
-        self.etot: list[float] = []
         self.temp: list[float] = []
 
-    def clear(self) -> None:
-        for series in (self.t_ps, self.pe, self.ke, self.etot, self.temp):
+    def on_run_start(self, runner) -> None:
+        for series in (self.pe, self.ke, self.temp):
             series.clear()
 
     def on_step_end(self, runner, step, obs) -> None:
-        self.t_ps.append(step * self._dt / 1000.0)
         self.pe.append(float(obs.potential))
         self.ke.append(float(obs.kinetic))
-        self.etot.append(float(obs.total))
         self.temp.append(float(obs.temperature))
 
 
@@ -163,24 +188,25 @@ def main() -> int:
     ap.add_argument("--sample-every", type=int, default=100, help="steps between energy samples")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--no-compile", action="store_true")
-    ap.add_argument(
-        "--cuda-graphs",
-        action="store_true",
-        help="compile with the reduce-overhead CUDA-graph preset instead of default inductor",
-    )
     ap.add_argument("--out", type=Path, default=_OUT_DEFAULT, help="artifact dir (npz + png)")
     ap.add_argument("--no-save", action="store_true", help="skip writing artifacts")
     args = ap.parse_args()
 
     md_dtype = _DTYPE_MAP[args.precision]
     pot_name = args.potential_precision or args.precision
-    pot_dtype = _DTYPE_MAP[pot_name]
+    # The split-precision arm lost its wiring in d9043cee (finding F28 in
+    # ``.claude/notes/composable-potentials.md``; see the module docstring) and
+    # is opt-in, so it fails closed rather than silently running at --precision.
+    if pot_name != args.precision:
+        raise SystemExit(
+            "--potential-precision is unwired since d9043cee: the molpy ForceField "
+            "path builds its parameter buffers at the MD state dtype, so this arm "
+            "would silently run at --precision. Restore the split in molix.md first."
+        )
     device = torch.device(args.device)
     n_steps = int(args.ps * 1000.0 / args.dt)
     a = _SIGMA * (4.0 / _RHO_STAR) ** (1.0 / 3.0)
     pos, cell = _fcc(args.n, a, dtype=md_dtype)
-    n_atoms = pos.shape[0]
     pos, cell = pos.to(device), cell.to(device)
 
     try:
@@ -203,11 +229,9 @@ def main() -> int:
             ) from err
         raise
 
-    # Geometry / nblist stays on the MD-state dtype (like MACE's run_nve path);
-    # only the LJ parameter buffers (and the pair arithmetic that reads them)
-    # sit on pot_dtype. Casting the whole module to pot_dtype would drag the
-    # list with it via _apply and smuggle a second free variable into the
-    # "precision matrix".
+    # Geometry, nblist and LJ parameter buffers all sit on the MD-state dtype:
+    # the split-precision arm that used to put the parameters on pot_dtype is
+    # refused above until molix.md can express it again.
     from molpot.forcefield import ForceField
 
     n_atoms = int(pos.shape[0])
@@ -216,18 +240,26 @@ def main() -> int:
         .def_pairstyle("lj/cut", cutoff=2.5 * _SIGMA)
         .with_params(
             atoms={
-                "epsilon": torch.full((n_atoms,), _EPS, dtype=md_dtype, device=device),
+                # eV: ForceField(units="metal") rescales to MD units itself.
+                # Passing the pre-converted _EPS here (as d9043cee did when it
+                # replaced the MD-unit LennardJonesCutForceField module) divided
+                # epsilon by 103.6 a second time and the crystal free-streamed
+                # into the r^-12 core.
+                "epsilon": torch.full((n_atoms,), _EPS_EV, dtype=md_dtype, device=device),
                 "sigma": torch.full((n_atoms,), _SIGMA, dtype=md_dtype, device=device),
             }
         )
     )
-    sampler = _EnergySampler(args.dt)
+    drift_hook = EnergyDriftHook()
+    thermo = _ThermoSeries()
     md = (
         MD(md_dtype)
         .set_forcefield(ff)
         .set_neighbors(neighbors)
         .set_integrator(VelocityVerletIntegrator(args.dt))
-        .set_hooks([sampler])
+        .set_hooks(
+            [VelocityInitHook(MaxwellBoltzmann(args.t0, seed=args.seed)), drift_hook, thermo]
+        )
         .to(device)
     )
     atoms = TensorDict(
@@ -243,10 +275,9 @@ def main() -> int:
         },
         batch_size=[],
     )
-    MaxwellBoltzmann().sample(atoms, args.t0, seed=args.seed)
-
     md.run(atoms.clone(), min(3 * args.sample_every, n_steps), chunk=args.sample_every)
-    sampler.clear()
+    # Both observers drain at the timed run's on_run_start, so the warmup's
+    # samples are gone without a reset call here.
     # The warmup left the list built at the *warmup's* final configuration, and
     # its counters carrying the warmup's rebuilds. Re-phase it onto the timed
     # run's initial configuration with the forced-build escape hatch (so the
@@ -265,25 +296,25 @@ def main() -> int:
     rebuilds = neighbors.rebuild_count - rebuilds_before
     ndanger = neighbors.ndanger - ndanger_before
 
-    t = torch.tensor(sampler.t_ps, dtype=torch.float64)
-    e = torch.tensor(sampler.etot, dtype=torch.float64)
-    e0 = float(e[0])
-    tc = t - t.mean()
-    slope = (tc * (e - e.mean())).sum() / (tc * tc).sum()
-    duration = n_steps * args.dt / 1000.0  # ps
-    rel_drift = float(abs(slope * duration) / abs(e0))
-    rms_rel = float((e - e.mean()).pow(2).mean().sqrt() / abs(e0))
+    # A run too short to fit (one observation at a coarse --sample-every)
+    # publishes result=None rather than raising. The timed run is the one that
+    # must produce a gate, so read its record and fail closed if there is none.
+    drift = drift_hook.result
+    if drift is None:
+        raise SystemExit(
+            f"the timed run recorded {len(drift_hook.totals)} energy sample(s): "
+            f"{n_steps} steps at --sample-every {args.sample_every} give fewer than the "
+            "two the drift fit needs. Lower --sample-every or raise --ps."
+        )
+    duration = drift.duration_fs / 1000.0  # ps, the sampled window
     rate = n_steps / wall if wall > 0 else float("nan")
-    t_mean = sum(sampler.temp[len(sampler.temp) // 2 :]) / max(1, len(sampler.temp) // 2)
+    t_mean = sum(thermo.temp[len(thermo.temp) // 2 :]) / max(1, len(thermo.temp) // 2)
 
     print(
         f"lj/cut NVE melt: N={n_atoms} (fcc {args.n}^3)  rho*={_RHO_STAR}  rc={_CUTOFF:.2f} A  "
         f"dt={args.dt} fs  steps={n_steps}  duration={duration / 1000:.3f} ns"
     )
-    print(
-        f"  device={device}  compiled={compiled}  cuda_graphs={args.cuda_graphs}  "
-        f"precision: MD {args.precision}, potential {pot_name}"
-    )
+    print(f"  device={device}  precision: MD {args.precision}, potential {pot_name}")
     print(
         f"  policy: skin={neighbors.skin:g} A  every={neighbors.every}  delay={neighbors.delay}  "
         f"check={neighbors.check}  r_build={neighbors.r_build:.2f} A"
@@ -292,28 +323,34 @@ def main() -> int:
         f"  rebuilds={rebuilds} ({rebuilds / max(1, n_steps):.3f} of {n_steps} steps)  "
         f"ndanger={ndanger}"
     )
-    print(f"  T0={args.t0:.1f} K  <T>(2nd half)={t_mean:.1f} K  E_tot(0)={e0:.6e}")
-    print(f"  rel energy drift (|slope*dur|/|E0|) = {rel_drift:.3e}  (bound 1e-3)")
-    print(f"  rel RMS energy fluctuation          = {rms_rel:.3e}")
+    print(f"  T0={args.t0:.1f} K  <T>(2nd half)={t_mean:.1f} K  E_tot(0)={drift.e0:.6e}")
+    print(f"  rel energy drift (|slope*dur|/|E0|) = {drift.rel_drift:.3e}  (bound 1e-3)")
+    print(f"  rel RMS energy fluctuation          = {drift.rms_rel:.3e}")
     print(f"  steps/s = {rate:.0f}   ({rate * args.dt / 1e6 * 86400:.1f} ns/day)")
     # At skin=0 every rebuild lands on the first permitted opportunity by
     # construction, so ndanger just counts rebuilds and carries no information;
     # at skin>0 a nonzero count means a rebuild came too late and pairs were
     # missed, which is a wrong PES however small the drift happens to look.
-    ok = rel_drift < 1e-3 and bool(torch.isfinite(e).all())
+    ok = drift.rel_drift < 1e-3 and all(math.isfinite(v) for v in drift_hook.totals)
     if neighbors.skin > 0.0:
         ok = ok and ndanger == 0
     print("RESULT:", "PASS" if ok else "FAIL")
 
     if not args.no_save:
-        _save_artifacts(
-            args.out, sampler, e0, rel_drift, rms_rel, duration, args, n_atoms, pot_name
-        )
+        _save_artifacts(args.out, drift_hook, thermo, drift, args, n_atoms, pot_name)
 
     return 0 if ok else 1
 
 
-def _save_artifacts(out, sampler, e0, rel_drift, rms_rel, duration, args, n_atoms, pot_name):
+def _save_artifacts(
+    out: Path,
+    drift_hook: EnergyDriftHook,
+    thermo: _ThermoSeries,
+    drift: EnergyDrift,
+    args: argparse.Namespace,
+    n_atoms: int,
+    pot_name: str,
+) -> None:
     """Write the energy/temperature series (.npz) and a conservation figure (.png)."""
     import matplotlib
 
@@ -322,11 +359,13 @@ def _save_artifacts(out, sampler, e0, rel_drift, rms_rel, duration, args, n_atom
     import numpy as np
 
     out.mkdir(parents=True, exist_ok=True)
-    t = np.asarray(sampler.t_ps)
-    e = np.asarray(sampler.etot)
-    pe = np.asarray(sampler.pe)
-    ke = np.asarray(sampler.ke)
-    temp = np.asarray(sampler.temp)
+    e0 = drift.e0
+    duration = drift.duration_fs / 1000.0  # ps
+    t = np.asarray(drift_hook.times_fs) / 1000.0  # ps
+    e = np.asarray(drift_hook.totals)
+    pe = np.asarray(thermo.pe)
+    ke = np.asarray(thermo.ke)
+    temp = np.asarray(thermo.temp)
 
     tag = f"md{args.precision[-2:]}_pot{pot_name[-2:]}"
     npz = out / f"ljcut_nve_{tag}.npz"
@@ -342,7 +381,7 @@ def _save_artifacts(out, sampler, e0, rel_drift, rms_rel, duration, args, n_atom
             f"dt={args.dt}fs; T0={args.t0:.1f}K; duration={duration:.1f}ps; seed={args.seed}; "
             f"skin={args.skin}A; every={args.every}; delay={args.delay}; "
             f"check={not args.no_check}; MD={args.precision}; pot={pot_name}; "
-            f"rel_drift={rel_drift:.3e}; rel_rms={rms_rel:.3e}; units=(amu,A,fs)"
+            f"rel_drift={drift.rel_drift:.3e}; rel_rms={drift.rms_rel:.3e}; units=(amu,A,fs)"
         ),
     )
 
@@ -352,7 +391,7 @@ def _save_artifacts(out, sampler, e0, rel_drift, rms_rel, duration, args, n_atom
     ax0.set_ylabel(r"$(E_{\rm tot}-E_0)/|E_0|$  [ppm]")
     ax0.set_title(
         f"lj/cut NVE melt, N={n_atoms}, {duration:.0f} ps, MD {args.precision}/pot {pot_name} — "
-        f"drift {rel_drift:.1e}, RMS {rms_rel:.1e}"
+        f"drift {drift.rel_drift:.1e}, RMS {drift.rms_rel:.1e}"
     )
     ax1.plot(t, pe, lw=0.7, color="C0", label="potential")
     ax1.plot(t, ke, lw=0.7, color="C1", label="kinetic")

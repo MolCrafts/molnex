@@ -1,4 +1,12 @@
-"""Shared fixtures for the ForceField unit tests."""
+"""Shared fixtures for the ForceField unit tests.
+
+The butane geometry and topology themselves live in ``tests/conftest.py``:
+the two-molecule periodic box built on them is the fixture both the molpot
+symmetry gates and the molix NVE drift gate run, so it belongs at the
+conftest common to both packages rather than in this leaf one. What stays
+here is what only these tests use — the exclusion-scale golden and the
+column-form topology / batch fixtures built around it.
+"""
 
 from __future__ import annotations
 
@@ -6,67 +14,14 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.batch import NeighborList
-
-
-def place_edges(batch: TensorDict, *, cutoff: float) -> TensorDict:
-    """Write ``batch["edges"]`` with molix's neighbour list (``composable-a0-03b``).
-
-    :class:`molix.batch.NeighborList` is the repo's Edge Convention owner and
-    the training-side of the two owners named in
-    ``.claude/notes/architecture.md`` §Layer roles (the other being
-    :class:`molix.md.NeighborList`). ``molpot`` **consumes** a placed ``edges``
-    namespace; it does not enumerate one, so every fixture that reaches a pair
-    term has to arrive with a list, exactly as a collated training batch does.
-
-    ``symmetry`` is left at its ``True`` default and that is load-bearing, not
-    incidental: the half-pair mode emits ``edge_index[:, 0] > edge_index[:, 1]``,
-    and the placed-list liveness rule keeps ``source < target``, so a
-    ``symmetry=False`` list would read as **entirely dead** and every pair term
-    would silently cost zero. The full bidirectional list carries each pair
-    twice and the rule keeps exactly one orientation of each.
-
-    The list is built on a throw-away probe batch and only the resulting
-    namespace is moved across, so the caller's ``atoms`` / ``graphs`` /
-    topology tensors are never replaced by copies of themselves.
-
-    Args:
-        batch: Post-collate batch with ``atoms.pos`` ``(N, 3)`` in Å and
-            ``atoms.batch`` ``(N,)`` graph membership, optionally carrying
-            ``graphs.cell`` — ``(3, 3)`` or ``(B, 3, 3)`` — which switches the
-            build to the minimum-image convention.
-        cutoff: Build radius in Å. Pass the cutoff the *asking style* declares
-            so the live pair set is exactly the set that style would have
-            enumerated; where a style declares none (open ``pair:coulomb``
-            defaults to ``cutoff=None``, i.e. every pair), pass a radius past
-            the fixture's largest separation.
-
-    Returns:
-        The same ``batch`` object, with ``edges`` holding ``edge_index``
-        ``(E, 2)``, ``edge_diff`` ``(E, 3)`` (``pos[target] - pos[source]``)
-        and ``edge_dist`` ``(E,)``. ``E`` is ``0`` when no pair is inside
-        ``cutoff`` — an empty list, not an absent one.
-    """
-    atoms = batch["atoms"]
-    pos = atoms["pos"]
-    n_atoms = int(pos.shape[0])
-    membership = (
-        atoms["batch"] if "batch" in atoms.keys() else torch.zeros(n_atoms, dtype=torch.long)
-    )
-    cell = None
-    if "graphs" in batch.keys() and "cell" in batch["graphs"].keys():
-        cell = batch["graphs", "cell"]
-        cell = cell if cell.ndim == 3 else cell.unsqueeze(0)
-
-    probe = TensorDict(
-        {"atoms": TensorDict({"pos": pos, "batch": membership}, batch_size=[n_atoms])},
-        batch_size=[],
-    )
-    if cell is not None:
-        probe["graphs"] = TensorDict({"cell": cell}, batch_size=[int(cell.shape[0])])
-    NeighborList(cutoff=cutoff, pbc=cell is not None).execute(probe)
-    batch["edges"] = probe["edges"]
-    return batch
+from tests.conftest import (
+    BUTANE_BONDS,
+    BUTANE_N_ATOMS,
+    BUTANE_POSITIONS,
+    butane_angles,
+    butane_propers,
+    place_edges,
+)
 
 
 @pytest.fixture
@@ -117,33 +72,8 @@ def fake_pol_styles(monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
 
 
 # ----------------------------------------------------------------------------
-# OPLS butane (n-C4H10) — the shared exclusion-table fixture
+# Butane exclusion table — the hard-coded 1-2 / 1-3 / 1-4 scale golden
 # ----------------------------------------------------------------------------
-
-#: Atom order of the butane fixture: ``C0 C1 C2 C3`` then the hydrogens
-#: ``H4 H5 H6`` on ``C0``, ``H7 H8`` on ``C1``, ``H9 H10`` on ``C2`` and
-#: ``H11 H12 H13`` on ``C3``.
-BUTANE_N_ATOMS = 14
-
-#: The 13 covalent bonds of n-butane, ``(atomi, atomj)`` with ``i < j``.
-#: Angles (24) and proper torsions (27) are *derived* from this list by
-#: :func:`butane_angles` / :func:`butane_propers`, so the topology has a single
-#: source of truth.
-BUTANE_BONDS: tuple[tuple[int, int], ...] = (
-    (0, 1),
-    (1, 2),
-    (2, 3),
-    (0, 4),
-    (0, 5),
-    (0, 6),
-    (1, 7),
-    (1, 8),
-    (2, 9),
-    (2, 10),
-    (3, 11),
-    (3, 12),
-    (3, 13),
-)
 
 #: Per-pair nonbonded scale factors for the 91 undirected pairs of the butane
 #: fixture, in ``torch.triu_indices(14, 14, offset=1)`` order, under
@@ -183,62 +113,6 @@ BUTANE_OPLS_SCALES: tuple[float, ...] = (
 #: also the ``lj/cut`` cutoff that fixture declares, so LJ and Coulomb read the
 #: same rows.
 BUTANE_LIST_CUTOFF = 10.0
-
-#: A fixed all-atom butane geometry (Å). Every one of the 91 pairs lies between
-#: 1.09 Å and 6.04 Å, so a 10 Å neighbour list keeps all of them and the
-#: exclusion vector above lines up with the full half list.
-BUTANE_POSITIONS: tuple[tuple[float, float, float], ...] = (
-    (0.000000, 0.000000, 0.000000),
-    (1.268427, 0.855565, 0.000000),
-    (2.536855, 0.000000, 0.000000),
-    (3.805282, 0.855565, 0.000000),
-    (-0.974926, -0.487463, 0.000000),
-    (-0.291315, -0.582630, 0.873944),
-    (-0.291315, -0.582630, -0.873944),
-    (1.268427, 1.460188, 0.906935),
-    (1.268427, 1.460188, -0.906935),
-    (2.536855, -0.604623, 0.906935),
-    (2.536855, -0.604623, -0.906935),
-    (4.780208, 1.343028, 0.000000),
-    (4.096597, 1.438195, 0.873944),
-    (4.096597, 1.438195, -0.873944),
-)
-
-
-def butane_neighbors() -> dict[int, list[int]]:
-    """Adjacency of :data:`BUTANE_BONDS`, each neighbour list sorted."""
-    adjacency: dict[int, list[int]] = {i: [] for i in range(BUTANE_N_ATOMS)}
-    for i, j in BUTANE_BONDS:
-        adjacency[i].append(j)
-        adjacency[j].append(i)
-    return {atom: sorted(neighbors) for atom, neighbors in adjacency.items()}
-
-
-def butane_angles() -> list[tuple[int, int, int]]:
-    """The 24 ``(i, j, k)`` angles of butane — every neighbour pair of a centre."""
-    adjacency = butane_neighbors()
-    triples: list[tuple[int, int, int]] = []
-    for centre in range(BUTANE_N_ATOMS):
-        neighbors = adjacency[centre]
-        for a in range(len(neighbors)):
-            for b in range(a + 1, len(neighbors)):
-                triples.append((neighbors[a], centre, neighbors[b]))
-    return triples
-
-
-def butane_propers() -> list[tuple[int, int, int, int]]:
-    """The 27 ``(i, j, k, l)`` proper torsions of butane, ``j-k`` the central bond."""
-    adjacency = butane_neighbors()
-    quads: list[tuple[int, int, int, int]] = []
-    for j, k in BUTANE_BONDS:
-        for i in adjacency[j]:
-            if i == k:
-                continue
-            for end in adjacency[k]:
-                if end == j:
-                    continue
-                quads.append((i, j, k, end))
-    return quads
 
 
 @pytest.fixture

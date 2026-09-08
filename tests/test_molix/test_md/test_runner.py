@@ -5,20 +5,41 @@ analytic harmonic well just far enough to observe its own contract (hook
 dispatch order, step accounting, typed return); every hook class is driven
 **directly** with synthetic :class:`MDObservables` / :class:`MDState` — no
 trajectory loop stands between a hook test and the method it tests.
+
+:class:`EnergyDriftHook` is the one exception, and only in its ``slow`` arm:
+the NVE conservation criterion it owns is a statement about a *trajectory*, so
+its release gate runs one real rollout. Every other property of the hook —
+the least-squares slope, the constant-series floor, the refusal below two
+samples, the timestep it reads — is pinned on the primitive with synthetic
+series, where the arithmetic has an exact answer.
 """
+
+import math
 
 import pytest
 import torch
 
 from molix.md import (
+    MD,
+    EnergyDrift,
+    EnergyDriftHook,
     LangevinVerletIntegrator,
     MDCheckpointHook,
     MDHook,
     MDObservables,
     MDRunner,
     MDState,
+    NeighborList,
     TrajectoryHook,
     VelocityVerletIntegrator,
+)
+from tests.conftest import (
+    BUTANE_PAIR_BOX,
+    BUTANE_PAIR_LJ_CUTOFF,
+    BUTANE_PAIR_LR_WAVELENGTH_MD,
+    butane_pair_batch,
+    butane_pair_class_i_forcefield,
+    butane_pair_positions,
 )
 from tests.test_molix.test_md.conftest import harmonic_potential_like, md_system
 
@@ -232,6 +253,191 @@ class TestTrajectoryHook:
 
     def test_declares_its_stride_as_cadence(self):
         assert TrajectoryHook("x.pt", stride=3).cadence == 3
+
+
+#: Synthetic drift series of :class:`TestEnergyDriftHook`: ``E(t) = E0 + a t``
+#: sampled every ``dt`` fs for ``n`` samples, i.e. over ``(n - 1) dt`` fs.
+_DRIFT_E0 = -12.5
+_DRIFT_SLOPE = 3e-4
+_DRIFT_DT_FS = 0.5
+_DRIFT_SAMPLES = 200
+#: The least-squares fit of an exactly linear series is exact in fp64; ``1e-12``
+#: is round-off on the centred sums, not a fitting margin.
+_DRIFT_EXACT = 1e-12
+
+#: The NVE gate: 200 steps of velocity-Verlet at 0.5 fs on the OPLS butane pair
+#: in its 20 Å periodic box, against the criterion
+#: ``benchmarks/verify_md_ljcut_nve.py`` declares.
+_NVE_STEPS = 200
+_NVE_DT_FS = 0.5
+#: Neighbour-list skin (Å). ``r_build = cutoff + skin = 9.0`` stays under the
+#: minimum-image limit ``L/2 = 10``, which the list refuses to cross.
+_NVE_SKIN = 1.0
+_NVE_DRIFT_BOUND = 1e-3
+
+
+class TestEnergyDriftHook:
+    """Driven directly: synthetic ``(t, E_tot)`` series in, one drift record out."""
+
+    def test_recovers_a_synthetic_linear_slope_exactly(self) -> None:
+        """A series that drifts linearly is reported with its own slope.
+
+        The whole point of the hook is that ``rel_drift`` is a *fitted* number,
+        not ``|E_last − E_first| / |E_first|``: a trajectory's total energy
+        oscillates at the integrator's own frequency, and an endpoint
+        difference reads that oscillation as drift. Feeding the primitive
+        ``E(t) = E₀ + a t`` — the one series whose least-squares slope has a
+        closed form — pins that the fit is a fit and that ``rel_drift`` is
+        ``|a T| / |E₀|`` with ``T`` the sampled duration, both to fp64.
+        """
+        hook = EnergyDriftHook()
+        for sample in range(_DRIFT_SAMPLES):
+            time_fs = sample * _DRIFT_DT_FS
+            hook.record(time_fs, _DRIFT_E0 + _DRIFT_SLOPE * time_fs)
+
+        result: EnergyDrift = hook.drift()
+        duration = (_DRIFT_SAMPLES - 1) * _DRIFT_DT_FS
+        assert result.slope == pytest.approx(_DRIFT_SLOPE, abs=_DRIFT_EXACT, rel=0.0)
+        assert result.rel_drift == pytest.approx(
+            abs(_DRIFT_SLOPE * duration) / abs(_DRIFT_E0), abs=_DRIFT_EXACT, rel=0.0
+        )
+
+    def test_constant_series_has_zero_fluctuation(self) -> None:
+        """A perfectly conserved series reports no drift and no fluctuation.
+
+        ``rms_rel`` is the second half of the criterion — the bounded
+        oscillation a symplectic integrator carries around the conserved value
+        — and it has to read zero when there is nothing to bound. Exactly
+        zero, not "small": every deviation from the mean is identically ``0``,
+        so any non-zero answer here is a bug in the reduction rather than
+        round-off.
+        """
+        hook = EnergyDriftHook()
+        for sample in range(_DRIFT_SAMPLES):
+            hook.record(sample * _DRIFT_DT_FS, _DRIFT_E0)
+
+        result = hook.drift()
+        assert result.rms_rel == 0.0
+        assert result.rel_drift == 0.0
+
+    def test_fewer_than_two_samples_is_refused(self) -> None:
+        """One sample is not a slope — the hook raises rather than inventing one.
+
+        A single observation makes the least-squares denominator
+        ``Σ (t − t̄)²`` exactly zero, and dividing by it would hand back a
+        ``nan`` (or worse, a ``0/0`` that some reduction turns into ``0.0``)
+        that reads as "no drift". A run too short to have a slope has to say
+        so.
+        """
+        hook = EnergyDriftHook()
+        hook.record(0.0, _DRIFT_E0)
+        with pytest.raises(ValueError):
+            hook.drift()
+
+    def test_on_step_end_reads_the_integrator_timestep(self) -> None:
+        """The time axis comes from the runner's integrator, not from the step count.
+
+        ``on_step_end`` is handed a step *index*; the drift criterion is per
+        unit time, so the hook has to convert with the timestep the run is
+        actually using. Reading it off ``runner.integrator.dt`` is what keeps
+        the reported duration in femtoseconds when the same 200 steps are run
+        at another ``dt`` — a hook that recorded the raw step index would
+        report the same drift for a 0.5 fs run and a 2 fs one.
+        """
+        runner = MDRunner(VelocityVerletIntegrator(_DRIFT_DT_FS))
+        hook = EnergyDriftHook()
+        n_calls = 5
+        hook.on_run_start(runner)
+        for step in range(1, n_calls + 1):
+            hook.on_step_end(runner, step, _obs(fill=float(step)))
+        hook.on_run_end(runner)
+
+        result = hook.result
+        assert result is not None, "on_run_end must publish the drift record"
+        assert result.duration_fs == pytest.approx(
+            _DRIFT_DT_FS * (n_calls - 1), abs=_DRIFT_EXACT, rel=0.0
+        )
+
+    def test_a_run_too_short_to_fit_leaves_result_none(self) -> None:
+        """A one-observation run ends quietly with no record, and does not raise.
+
+        The refusal of :meth:`EnergyDriftHook.drift` is for a *caller* who asks
+        for a slope that does not exist. ``on_run_end`` is not that caller: it
+        is a lifecycle callback the runner fires unconditionally, so raising
+        there turns "this run was too short to measure" into a failed run, and
+        takes down a rollout whose only fault is that it was one chunk long —
+        including one whose real result the user was about to read off some
+        *other* hook. The two are different questions with different answers:
+        no record (``result is None``) versus no slope (``ValueError``, which
+        :meth:`test_fewer_than_two_samples_is_refused` owns), and this pins the
+        lifecycle half of that contrast.
+        """
+        runner = MDRunner(VelocityVerletIntegrator(_DRIFT_DT_FS))
+        hook = EnergyDriftHook()
+        hook.on_run_start(runner)
+        hook.on_step_end(runner, 1, _obs())
+        hook.on_run_end(runner)
+
+        assert hook.result is None
+
+    @pytest.mark.slow
+    def test_nve_drift_on_the_butane_pair_box_is_within_the_criterion(self) -> None:
+        """200 fp64 velocity-Verlet steps on the butane pair conserve energy.
+
+        The release gate the hook exists for, on the same OPLS butane pair in
+        the same 20 Å periodic Ewald box the assembled-energy symmetry gates
+        run on
+        (``tests/test_molpot/test_forcefield/test_potentials.py``): a
+        conservative force field integrated by a symplectic integrator has no
+        secular energy drift, only a bounded oscillation. The criterion is the
+        one ``benchmarks/verify_md_ljcut_nve.py`` declares — ``|slope · T| /
+        |E_tot(0)| < 1e-3`` — and it is asserted here, on the hook that now
+        owns it, rather than in a script nothing runs.
+
+        ``rel_drift`` also carries the finiteness half of that criterion: it is
+        a reduction over **every** sample, so a single ``nan`` or ``inf`` total
+        propagates into it and fails the comparison rather than being averaged
+        away. ``rms_rel`` is asserted finite for the same reason on the
+        fluctuation side.
+
+        The rollout starts from rest, which makes it deterministic to the last
+        bit: no thermostat, no sampled velocities, one trajectory. It runs the
+        k-sum at :data:`~tests.conftest.BUTANE_PAIR_LR_WAVELENGTH_MD` rather
+        than at the single-point gates' finer wavelength: the explicit sum
+        costs ``(L / λ)³`` vectors on **every** one of the 200 force
+        evaluations, and both wavelengths are converged some twenty orders
+        below the ``1e-3`` this asserts.
+        """
+        batch = butane_pair_batch()
+        hook = EnergyDriftHook()
+        neighbors = NeighborList(
+            cell=torch.eye(3, dtype=torch.float64) * BUTANE_PAIR_BOX,
+            cutoff=BUTANE_PAIR_LJ_CUTOFF,
+            positions=butane_pair_positions(),
+            skin=_NVE_SKIN,
+        )
+        (
+            MD(torch.float64)
+            .set_forcefield(
+                butane_pair_class_i_forcefield(lr_wavelength=BUTANE_PAIR_LR_WAVELENGTH_MD)
+            )
+            .set_neighbors(neighbors)
+            .set_integrator(VelocityVerletIntegrator(_NVE_DT_FS))
+            .set_hooks([hook])
+            .run(batch, _NVE_STEPS)
+        )
+
+        result = hook.result
+        assert result is not None, "on_run_end must publish the drift record"
+        assert result.duration_fs == pytest.approx(
+            _NVE_DT_FS * (_NVE_STEPS - 1), abs=_DRIFT_EXACT, rel=0.0
+        )
+        assert math.isfinite(result.rms_rel)
+        assert result.rel_drift < _NVE_DRIFT_BOUND, (
+            f"NVE energy drift {result.rel_drift:.3e} exceeds {_NVE_DRIFT_BOUND:g} "
+            f"(slope {result.slope:.3e} per fs over {result.duration_fs:g} fs, "
+            f"E_tot(0) = {result.e0:.6g}, rms {result.rms_rel:.3e})"
+        )
 
 
 class TestMDCheckpointHook:

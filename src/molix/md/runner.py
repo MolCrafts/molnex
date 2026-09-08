@@ -18,13 +18,19 @@ would silently skip firings.
 on-disk shards every ``flush_every`` frames so host memory stays bounded, and
 writes one ``.pt`` (+ optional extended-XYZ via
 :func:`molix.io.extxyz.write_extxyz_frames`) at :meth:`MDHook.on_run_end`.
+:class:`EnergyDriftHook` accumulates ``(t, E_tot)`` — sample time and total
+energy — and reports the energy-conservation gate for an NVE run (constant
+atom number ``N``, volume ``V`` and total energy ``E``: no thermostat and no
+barostat, so a correct integration must not gain or lose energy) as an
+:class:`EnergyDrift` record.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 from tensordict import TensorDict
@@ -444,3 +450,200 @@ class MDCheckpointHook(MDHook):
             f"T={float(obs.temperature):.1f} K",
             flush=True,
         )
+
+
+@dataclass(frozen=True)
+class EnergyDrift:
+    """Energy-conservation record of one MD run — the fit, not the samples.
+
+    Produced by :meth:`EnergyDriftHook.drift`. Energies are in the MD energy
+    unit (amu·Å²/fs², the (amu, Å, fs) unit set every :class:`MDState` is
+    integrated in), times in fs; ``rel_drift`` and ``rms_rel`` are
+    dimensionless because both divide by ``|e0|``.
+
+    Every field describes the *sampled* series, not the run: the window opens
+    at the first sample recorded, not at ``t = 0``. Driven through
+    :class:`MDRunner` with a timestep ``dt`` (fs) the first observation lands
+    at ``chunk · dt``, so ``n_steps`` at that ``chunk`` sample a window of
+    ``(n_steps − chunk) · dt``. Nothing here depends on where the time axis
+    starts: adding the same constant to every sample time moves no two samples
+    relative to each other, so the fitted ``slope``, the window
+    ``duration_fs`` and both ratios come out identical.
+
+    Attributes:
+        e0: Total energy of the **first** sample, ``E_tot(t_first)``
+            (amu·Å²/fs²) — the reference every ratio below divides by.
+        duration_fs: Length of the sampled window, ``t_last − t_first`` (fs).
+        slope: Least-squares ``dE_tot/dt`` over the window, i.e. amu·Å²/fs²
+            per fs (amu·Å²/fs³).
+        rel_drift: ``|slope · duration_fs| / |e0|`` — the fitted secular
+            energy change over the whole window, relative to ``|e0|``.
+        rms_rel: ``rms(E_tot − mean E_tot) / |e0|`` — the bounded fluctuation
+            about the mean, relative to ``|e0|``.
+    """
+
+    e0: float
+    duration_fs: float
+    slope: float
+    rel_drift: float
+    rms_rel: float
+
+
+class EnergyDriftHook(MDHook):
+    """Measure NVE energy conservation: secular drift vs bounded fluctuation.
+
+    A symplectic integrator (velocity-Verlet) conserves a *shadow* Hamiltonian
+    rather than ``E_tot``, so the total energy of a correct NVE run oscillates
+    with a bounded amplitude — that amplitude is :attr:`EnergyDrift.rms_rel`,
+    it is set by ``dt``, and it is not an error. What *is* an error is a
+    **secular** term underneath: energy leaking in or out step after step,
+    which is never the integrator but the thing being integrated — a
+    discontinuous cutoff, a neighbour list rebuilt too late (missed pairs), an
+    energy and a force that are not each other's derivative, or precision
+    loss. Fitting a straight line through ``E_tot(t)`` separates the two:
+    :attr:`EnergyDrift.slope` is the secular part, ``rms_rel`` the bounded
+    part. Extrapolated over the sampled window and made dimensionless, the
+    slope is the gate: pass when ``rel_drift = |slope · duration_fs| / |e0| <
+    1e-3``, where ``e0`` is the **first sampled** total energy and
+    ``duration_fs = t_last − t_first`` the span it was fitted over (both as
+    defined on :class:`EnergyDrift`, which also explains why the choice of
+    time origin cannot change either number).
+
+    The hook fires on every observation (no :attr:`MDHook.cadence`), so the
+    sample spacing is the runner's ``chunk`` and the first sample sits at
+    ``chunk · dt``, not at ``t = 0``. That costs **one** host read per
+    observation (the step's ``E_tot``); ``dt`` is constant, so it is read once
+    at :meth:`on_run_start` and reused. Even so this is an observer fired per
+    chunk and never a per-step term on the force path.
+
+    Drive it through a runner, or feed it a series directly with
+    :meth:`record`::
+
+        hook = EnergyDriftHook()
+        MDRunner(integrator, hooks=[hook]).run(system, 200, chunk=10)
+        assert hook.result.rel_drift < 1e-3
+
+    Attributes:
+        times_fs: Sample times in fs (``step · dt``) of the run in progress —
+            :meth:`on_run_start` drops the previous run's.
+        totals: Sampled total energies in amu·Å²/fs², drained alongside
+            ``times_fs``.
+        result: The fit published at :meth:`on_run_end`; ``None`` before the
+            run ends, and still ``None`` after a run that recorded fewer than
+            two observations.
+
+    Reference:
+        The physics — a symplectic (structure-preserving) integrator such as
+        velocity-Verlet conserving a nearby *shadow* Hamiltonian, hence
+        bounded ``E_tot`` oscillation with no secular term — is
+        M. P. Allen & D. J. Tildesley, *Computer Simulation of Liquids*,
+        2nd ed., Oxford University Press (2017), ch. 3,
+        https://doi.org/10.1093/oso/9780198803195.001.0001.
+
+        The numeric gate ``rel_drift < 1e-3`` is this repo's, lifted from
+        ``benchmarks/verify_md_ljcut_nve.py`` (lj/cut argon at the LAMMPS
+        ``melt`` state point), which now measures it through this hook.
+    """
+
+    def __init__(self) -> None:
+        self.times_fs: list[float] = []
+        self.totals: list[float] = []
+        self.result: EnergyDrift | None = None
+        self._dt_fs: float | None = None
+
+    def on_run_start(self, runner: MDRunner) -> None:
+        """Start a fresh series, and read the timestep once.
+
+        **One run, one series.** A hook mounted for several runs — a warm-up
+        and then the timed run, the usual benchmark shape — drops the previous
+        run's samples and its published :attr:`result` here, the way
+        :class:`TrajectoryHook` drains its buffers per run. Fitting one line
+        across two runs would price a discontinuity in ``E_tot`` (a re-seeded
+        velocity draw, a re-phased neighbour list) as drift, and the caller
+        would have no way to see it. A caller that wants both runs in one fit
+        feeds :meth:`record` itself and never mounts the hook.
+
+        ``dt`` is a registered buffer and constant for the run, so it is read
+        back from the device once here rather than per observation.
+        """
+        self.times_fs.clear()
+        self.totals.clear()
+        self.result = None
+        # A registered buffer widens to ``Tensor | Module`` on attribute
+        # access; the cast keeps the read honest for the type checker.
+        self._dt_fs = float(cast(torch.Tensor, runner.integrator.dt))
+
+    def record(self, time_fs: float, total: float) -> None:
+        """Append one ``(t, E_tot)`` sample.
+
+        Args:
+            time_fs: Sample time in fs.
+            total: Total energy at ``time_fs`` in amu·Å²/fs².
+        """
+        self.times_fs.append(float(time_fs))
+        self.totals.append(float(total))
+
+    def drift(self) -> EnergyDrift:
+        """Fit the recorded series and report the conservation record.
+
+        The slope is the ordinary least-squares estimate over the centred
+        times, ``Σ (t−t̄)(E−Ē) / Σ (t−t̄)²``, where ``t`` and ``E`` run over
+        the recorded ``(times_fs, totals)`` pairs and ``t̄`` / ``Ē`` are their
+        means — the straight line through the samples that minimises the
+        summed squared vertical distance to them. Both sums are accumulated in
+        float64 whatever dtype the MD state runs at, so the fit does not
+        inherit an fp32 trajectory's rounding. Centring the times is also what
+        makes the fit independent of where the time axis starts.
+
+        Returns:
+            The :class:`EnergyDrift` record for the samples recorded so far —
+            ``slope`` in amu·Å²/fs³, ``duration_fs`` in fs, ``e0`` in
+            amu·Å²/fs², the two ratios dimensionless.
+
+        Raises:
+            ValueError: If fewer than two samples were recorded — a slope
+                needs two points. Through a runner this means the run produced
+                fewer than two observations (``n_steps < 2 · chunk``).
+        """
+        n = len(self.totals)
+        if n < 2:
+            raise ValueError(f"energy drift needs at least 2 samples, got {n}")
+        times = torch.tensor(self.times_fs, dtype=torch.float64)
+        energies = torch.tensor(self.totals, dtype=torch.float64)
+        centred = times - times.mean()
+        residual = energies - energies.mean()
+        slope = float((centred * residual).sum() / (centred * centred).sum())
+        e0 = self.totals[0]
+        duration_fs = self.times_fs[-1] - self.times_fs[0]
+        return EnergyDrift(
+            e0=e0,
+            duration_fs=duration_fs,
+            slope=slope,
+            rel_drift=abs(slope * duration_fs) / abs(e0),
+            rms_rel=float(residual.pow(2).mean().sqrt()) / abs(e0),
+        )
+
+    def on_step_end(self, runner: MDRunner, step: int, obs: MDObservables) -> None:
+        """Record ``(step · dt, E_tot)`` for this observation.
+
+        ``step`` counts completed MD steps and the integrator's ``dt`` is in
+        fs, so the product is the sample time in fs; ``obs.total`` is the
+        potential plus kinetic energy in amu·Å²/fs². ``dt`` comes from
+        :meth:`on_run_start`, and is read here only when the hook is driven
+        method-by-method without that call.
+        """
+        dt_fs = self._dt_fs
+        if dt_fs is None:
+            dt_fs = float(cast(torch.Tensor, runner.integrator.dt))
+        self.record(step * dt_fs, float(obs.total))
+
+    def on_run_end(self, runner: MDRunner) -> None:
+        """Publish the fit on :attr:`result`, or ``None`` if it cannot be fitted.
+
+        :attr:`result` stays ``None`` when fewer than two observations were
+        recorded: a warm-up segment, or a run shorter than one ``chunk``, is
+        not an error of the hook, and ending such a run must not take the
+        runner down. :meth:`drift` itself still raises — a caller that needs
+        the fit asks for it and gets the reason it cannot have one.
+        """
+        self.result = self.drift() if len(self.totals) >= 2 else None

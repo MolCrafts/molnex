@@ -14,7 +14,8 @@ the caller composes:
 * :class:`~molix.md.forcefield.ForceField` — ``molpy.ForceField`` re-export;
   mount with :meth:`~molix.md.driver.MD.set_forcefield`.
 * :class:`~molix.md.integrators.Integrator` /
-  :class:`~molix.md.integrators.VelocityVerletIntegrator` (NVE) /
+  :class:`~molix.md.integrators.VelocityVerletIntegrator` (NVE — constant
+  atom number, volume and total energy) /
   :class:`~molix.md.integrators.LangevinVerletIntegrator` (γ>0) — constructed
   with ``dt`` (Langevin also γ / kT); mass is ``atoms.mass``, bound at run.
 * :class:`~molix.md.barostat.BerendsenBarostat` — isotropic NPT rescale,
@@ -22,7 +23,9 @@ the caller composes:
 * :class:`~molix.md.runner.MDRunner` — drives the integrator through the
   :class:`~molix.md.runner.MDHook` lifecycle;
   :class:`~molix.md.runner.TrajectoryHook` captures trajectories,
-  :class:`~molix.md.runner.MDCheckpointHook` persists restartable state.
+  :class:`~molix.md.runner.MDCheckpointHook` persists restartable state,
+  :class:`~molix.md.runner.EnergyDriftHook` reports the NVE conservation gate
+  (:class:`~molix.md.runner.EnergyDrift`).
 * :class:`~molix.md.driver.MaxwellBoltzmann` — velocity distribution;
   :class:`~molix.md.runner.VelocityInitHook` applies it at ``on_init``.
 
@@ -42,6 +45,8 @@ from molix.md.forcefield import ForceField, MDForceField
 from molix.md.integrators import Integrator, LangevinVerletIntegrator, VelocityVerletIntegrator
 from molix.md.neighbors import NeighborList, NeighborStrategy
 from molix.md.runner import (
+    EnergyDrift,
+    EnergyDriftHook,
     MDCheckpointHook,
     MDHook,
     MDRunner,
@@ -53,6 +58,8 @@ from molix.units import units
 
 __all__ = [
     "BerendsenBarostat",
+    "EnergyDrift",
+    "EnergyDriftHook",
     "ForceField",
     "Integrator",
     "LangevinVerletIntegrator",

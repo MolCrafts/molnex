@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import itertools
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -26,7 +27,18 @@ from molix.schema import ENERGY_KEY, CellBound
 from molpot.forcefield import ForceField, Potentials
 from molpot.forcefield.schema import PotentialMeta
 from molpot.potentials.elec.prefactors import kcalmol_A
-from tests.test_molpot.test_forcefield.conftest import place_edges
+from tests.conftest import (
+    BUTANE_EPSILON,
+    BUTANE_N_ATOMS,
+    BUTANE_PAIR_BOX,
+    BUTANE_PAIR_TOPOLOGY_COLUMNS,
+    BUTANE_Q,
+    BUTANE_SIGMA,
+    butane_pair_batch,
+    butane_pair_class_i_forcefield,
+    butane_pair_positions,
+    place_edges,
+)
 
 DTYPE = torch.float64
 
@@ -370,12 +382,9 @@ def _class_i_batch() -> TensorDict:
     return place_edges(batch, cutoff=LJ_CUTOFF)
 
 
-#: OPLS-AA all-atom alkane charges (e), well depths (kcal/mol) and sizes (Å) for
-#: the butane fixture in ``conftest.py``: CH3 carbon −0.18, CH2 carbon −0.12,
-#: every hydrogen +0.06 — a neutral molecule.
-BUTANE_Q = (-0.18, -0.12, -0.12, -0.18) + (0.06,) * 10
-BUTANE_EPSILON = (0.066,) * 4 + (0.030,) * 10
-BUTANE_SIGMA = (3.50,) * 4 + (2.50,) * 10
+#: ``lj/cut`` cutoff (Å) of the open-boundary butane fixture. Its charges /
+#: well depths / sizes are :data:`~tests.conftest.BUTANE_Q` and friends, owned
+#: by ``tests/conftest.py`` alongside the geometry and topology they belong to.
 BUTANE_CUTOFF = 10.0
 
 
@@ -414,6 +423,190 @@ def _butane_forcefield() -> ForceField:
             }
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# LJ across a periodic boundary — analytic force vs a finite difference
+# ---------------------------------------------------------------------------
+
+#: Cubic edge (Å) of the two-atom periodic LJ fixture.
+LJ_BOUNDARY_EDGE = 10.0
+#: The two atoms (Å). Their raw separation is 8 Å — **outside** the 4.5 Å
+#: cutoff — while their minimum image is 2 Å across the ``x`` boundary and well
+#: inside it. The energy therefore comes entirely from a wrapped pair, which is
+#: the only configuration in which a force built from the raw ``pos[target] −
+#: pos[source]`` and the minimum-image ``r`` can disagree with ``−∂E/∂pos``.
+LJ_BOUNDARY_POSITIONS = ((1.0, 5.0, 5.0), (9.0, 5.0, 5.0))
+#: ``lj/cut`` cutoff (Å): past the 2 Å minimum image, under the 5 Å
+#: minimum-image limit, and far from both, so a 1e-5 Å probe step can never
+#: move the pair across it.
+LJ_BOUNDARY_CUTOFF = 4.5
+#: Well depth (kcal/mol) and size (Å). ``2^(1/6) σ = 1.91 Å`` sits just inside
+#: the 2 Å separation, so the pair is on the attractive shoulder with a
+#: non-zero gradient rather than at the bottom of the well where every force
+#: is zero and any direction would pass.
+LJ_BOUNDARY_EPSILON = 0.2
+LJ_BOUNDARY_SIGMA = 1.7
+#: Central-difference step (Å) and the gap it has to close (kcal mol⁻¹ Å⁻¹).
+#: Truncation on this smooth pair energy is ``O(h²) ≈ 1e-11``.
+LJ_BOUNDARY_FD_STEP = 1e-5
+LJ_BOUNDARY_FORCE_TOL = 1e-6
+
+
+def _lj_boundary_potentials() -> Potentials:
+    """``lj/cut``-only Class-I model of the two-atom periodic fixture."""
+    return (
+        ForceField(name="lj-boundary", units="real")
+        .def_pairstyle("lj/cut", cutoff=LJ_BOUNDARY_CUTOFF)
+        .with_params(
+            atoms={
+                "epsilon": torch.full((2,), LJ_BOUNDARY_EPSILON, dtype=DTYPE),
+                "sigma": torch.full((2,), LJ_BOUNDARY_SIGMA, dtype=DTYPE),
+            }
+        )
+        .to_potentials()
+    )
+
+
+def _lj_boundary_batch(positions: torch.Tensor) -> TensorDict:
+    """One periodic graph holding the two atoms and a freshly placed list.
+
+    The list is rebuilt for every geometry the finite difference asks about:
+    which lattice image of the partner is the nearest one is a function of the
+    positions, so a list carried over from the reference geometry would answer
+    about a pair that is no longer the pair being differentiated.
+    """
+    return place_edges(
+        TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": positions,
+                        "Z": torch.tensor([18, 18], dtype=torch.long),
+                        "batch": torch.zeros(2, dtype=torch.long),
+                    },
+                    batch_size=[2],
+                ),
+                "graphs": TensorDict(
+                    {"cell": torch.eye(3, dtype=DTYPE) * LJ_BOUNDARY_EDGE},
+                    batch_size=[],
+                ),
+            },
+            batch_size=[],
+        ),
+        cutoff=LJ_BOUNDARY_CUTOFF,
+    )
+
+
+# ---------------------------------------------------------------------------
+# S8 symmetry gates on the assembled energy — butane pair, 20 Å Ewald box
+# ---------------------------------------------------------------------------
+
+#: Largest energy change (kcal/mol) a symmetry of the periodic system may
+#: produce. The assembled energy here is ``54.23`` kcal/mol, so this is
+#: ``2e-12`` relative — a few times fp64 round-off on the reduction, and
+#: nothing else.
+SYMMETRY_TOL = 1e-10
+#: Centre of the cubic box (Å); every point operation below is taken about it,
+#: because a rotation or a mirror about any other point is a symmetry only when
+#: composed with a translation the lattice may not have.
+BUTANE_PAIR_CENTRE = 0.5 * BUTANE_PAIR_BOX
+#: Seeds of the two random transformations. Fixed, so a gate that fires names
+#: one reproducible configuration rather than "some run last week".
+TRANSLATION_SEED = 20260908
+PERMUTATION_SEED = 7
+
+#: Harmonic improper of the chiral negative control: ``E = ½ k (χ − χ₀)²`` with
+#: ``χ`` the *signed* dihedral of ``(atomj, atomi, atomk, atoml)``.
+CHIRAL_IMPROPER_K = 10.0
+CHIRAL_IMPROPER_CHI0 = 0.3
+#: Smallest energy change (kcal/mol) that counts as "this term told the two
+#: mirror images apart" rather than round-off. The measured gap is ``13.1``.
+CHIRAL_TOL = 1e-6
+
+
+def _central_difference_forces(
+    energy_at: Callable[[torch.Tensor], float],
+    positions: torch.Tensor,
+    step: float,
+) -> torch.Tensor:
+    """``F = −dE/dpos`` by a central difference on every atom and axis.
+
+    The reference an analytic or autograd force is checked against: it asks the
+    model for nothing but energies, so it cannot inherit the gradient path's
+    own mistake. Truncation is ``O(step²)`` on a smooth energy, which is what
+    sets the tolerance each caller declares.
+
+    Args:
+        energy_at: Total energy (kcal/mol) of a geometry. Must rebuild whatever
+            the geometry implies — a placed neighbour list above all — rather
+            than reuse the reference one, or the difference measures the wrong
+            function.
+        positions: Reference geometry ``(N, 3)`` in Å.
+        step: Half-width ``h`` of the difference in Å.
+
+    Returns:
+        Forces ``(N, 3)`` in kcal mol⁻¹ Å⁻¹.
+    """
+    forces = torch.zeros_like(positions)
+    for atom in range(positions.shape[0]):
+        for axis in range(3):
+            forward, backward = positions.clone(), positions.clone()
+            forward[atom, axis] += step
+            backward[atom, axis] -= step
+            forces[atom, axis] = -(energy_at(forward) - energy_at(backward)) / (2.0 * step)
+    return forces
+
+
+def _leaf(batch: TensorDict, namespace: str, name: str) -> torch.Tensor:
+    """``batch[namespace, name]`` narrowed to a tensor.
+
+    ``TensorDict.__getitem__`` is typed as "a tensor **or** a sub-collection",
+    so reading a leaf needs the narrowing for the result to be usable as a
+    tensor without an escape hatch.
+    """
+    value = batch[namespace, name]
+    assert isinstance(value, torch.Tensor)
+    return value
+
+
+def _butane_pair_energy(positions: torch.Tensor) -> float:
+    """Assembled energy (kcal/mol) of the butane-pair box at ``positions``.
+
+    A fresh :class:`Potentials` and a freshly placed neighbour list per call:
+    the list is a function of the geometry, and the periodic Coulomb term
+    freezes its reciprocal shape on the first cell it sees, so reusing either
+    across a transformed geometry would answer about the *previous* one.
+    """
+    potentials = butane_pair_class_i_forcefield().to_potentials()
+    return float(potentials.calc_energy(butane_pair_batch(positions)))
+
+
+def _translated_whole_molecules(positions: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+    """Translate by ``shift`` and wrap each molecule back into the box as a unit.
+
+    Wrapping per **atom** would split a molecule across the boundary, and the
+    bonded terms read plain displacements rather than minimum-image ones — a
+    split molecule would report 20 Å bonds and the test would be measuring that
+    instead of the symmetry. Wrapping per molecule moves each one by a whole
+    lattice vector, which leaves every intramolecular displacement and every
+    minimum-image separation exactly where it was.
+
+    Args:
+        positions: Atom positions ``(2 * BUTANE_N_ATOMS, 3)`` in Å, molecule 0
+            first.
+        shift: Translation ``(3,)`` in Å.
+
+    Returns:
+        The translated, per-molecule-wrapped positions, every coordinate inside
+        ``[0, BUTANE_PAIR_BOX)``.
+    """
+    moved = positions + shift
+    for molecule in range(moved.shape[0] // BUTANE_N_ATOMS):
+        rows = slice(molecule * BUTANE_N_ATOMS, (molecule + 1) * BUTANE_N_ATOMS)
+        centroid = moved[rows].mean(dim=0)
+        moved[rows] -= torch.floor(centroid / BUTANE_PAIR_BOX) * BUTANE_PAIR_BOX
+    return moved
 
 
 def _coulomb_forcefield(*, calculator: str = "ewald") -> ForceField:
@@ -903,7 +1096,9 @@ class TestPotentials:
             },
         }
 
-        returned_index, dist, live_mask = potentials._placed_pairs(system, pos, cutoff=2.5)
+        returned_index, _vectors, dist, live_mask = potentials._placed_pairs(
+            system, pos, cutoff=2.5
+        )
 
         assert returned_index.shape == (6, 2)
         assert dist.shape == (6,)
@@ -970,7 +1165,7 @@ class TestPotentials:
             },
         }
 
-        _, dist, _live = potentials._placed_pairs(system, pos, cutoff=20.0)
+        _, _vectors, dist, _live = potentials._placed_pairs(system, pos, cutoff=20.0)
 
         # pos[1] - pos[0] + shift = 1 + 10 = 11, not the stored 4.
         assert float(dist[0]) == pytest.approx(11.0, abs=1e-12)
@@ -994,7 +1189,7 @@ class TestPotentials:
             "edges": {"edge_index": torch.tensor([[0, 1]], dtype=torch.long), "shifts": shifts},
         }
 
-        _, dist, _live = potentials._placed_pairs(system, pos, cutoff=20.0)
+        _, _vectors, dist, _live = potentials._placed_pairs(system, pos, cutoff=20.0)
         (grad,) = torch.autograd.grad(dist.sum(), shifts)
 
         # d|d|/d(shift_x) = (pos[t] - pos[s] + shift)_x / |...| = 11 / 11 = 1.
@@ -1022,7 +1217,7 @@ class TestPotentials:
             },
         }
 
-        edge_index, dist, live = potentials._placed_pairs(system, pos, cutoff=LJ_CUTOFF)
+        edge_index, _vectors, dist, live = potentials._placed_pairs(system, pos, cutoff=LJ_CUTOFF)
 
         assert edge_index.shape == (0, 2)
         assert dist.shape == (0,)
@@ -1239,22 +1434,13 @@ class TestPotentials:
         )
         forces = forces.detach()
 
-        differences = torch.zeros_like(forces)
-        for atom in range(positions.shape[0]):
-            for axis in range(3):
-                stepped = positions.clone()
-                stepped[atom, axis] += FD_STEP
-                with torch.no_grad():
-                    forward = potentials.calc_energy(
-                        _coulomb_batch(stepped, cell, edge_index, shifts)
-                    )
-                stepped = positions.clone()
-                stepped[atom, axis] -= FD_STEP
-                with torch.no_grad():
-                    backward = potentials.calc_energy(
-                        _coulomb_batch(stepped, cell, edge_index, shifts)
-                    )
-                differences[atom, axis] = -(forward - backward) / (2.0 * FD_STEP)
+        def energy_at(stepped: torch.Tensor) -> float:
+            with torch.no_grad():
+                return float(
+                    potentials.calc_energy(_coulomb_batch(stepped, cell, edge_index, shifts))
+                )
+
+        differences = _central_difference_forces(energy_at, positions, FD_STEP)
 
         gap = float((forces - differences).abs().max())
         assert gap < FD_FORCE_TOL, f"max |F_auto - F_fd| = {gap:.3e} kcal/mol/A"
@@ -1511,6 +1697,193 @@ class TestPotentials:
             f"the periodic Coulomb step ({calculator}) may break only at the named autograd "
             f"seam in {FORCE_SEAM} (owner: molpot derivation); stray break sites: {strays}"
         )
+
+    def test_lj_analytic_forces_match_a_finite_difference_across_the_boundary(self) -> None:
+        """The LJ closed form must differentiate the **minimum-image** pair.
+
+        ``lj/cut`` is the one pair style with an analytic force branch: the
+        energy path reads the neighbour list's minimum-image ``edge_dist``,
+        while the force path builds the pair direction itself. The two have to
+        be the same pair. For a pair whose nearest image is across a box face
+        the raw displacement ``pos[target] − pos[source]`` is the *long* way
+        round — here 8 Å against a 2 Å minimum image — so a direction taken
+        from it is both reversed and four times too long, and the analytic
+        force stops being the gradient of the energy that is reported. In MD
+        that is not a small error: a non-conservative force does work around
+        every cycle and pumps energy into an NVE trajectory.
+
+        The reference is a central difference of ``calc_energy`` — the same
+        function whose gradient the closed form claims to be — taken on both
+        atoms and all three axes, with the neighbour list rebuilt at each
+        displaced geometry.
+        """
+        positions = torch.tensor(LJ_BOUNDARY_POSITIONS, dtype=DTYPE)
+        potentials = _lj_boundary_potentials()
+        _, forces = potentials.calc_energy_forces(_lj_boundary_batch(positions))
+
+        def energy_at(stepped: torch.Tensor) -> float:
+            return float(_lj_boundary_potentials().calc_energy(_lj_boundary_batch(stepped)))
+
+        finite = _central_difference_forces(energy_at, positions, LJ_BOUNDARY_FD_STEP)
+
+        gap = float((forces - finite).abs().max())
+        assert gap < LJ_BOUNDARY_FORCE_TOL, (
+            f"analytic LJ force is not -dE/dpos across the boundary: max gap {gap:.6g} "
+            f"kcal/mol/A; analytic {forces.tolist()} vs finite difference {finite.tolist()}"
+        )
+
+    # -- S8 gate 1: symmetries of the assembled Class-I energy ---------------
+
+    def test_assembled_energy_is_translation_invariant(self) -> None:
+        """A rigid translation of the contents of a periodic box costs nothing.
+
+        Every term of the assembled model is a function of separations:
+        bonded terms of intramolecular displacements, the pair terms of
+        minimum-image distances, and the Ewald reciprocal sum of ``|S(k)|²``,
+        whose phase factor ``exp(i k · δ)`` cancels against its conjugate. None
+        of them can see where the box's origin is, so a translation followed by
+        a whole-molecule wrap must return the same number.
+
+        The wrap is what makes this a *periodic* statement rather than a
+        trivially exact one: the shift is drawn over the whole box, so both
+        molecules leave it and come back on the far side, and the energy is
+        then re-derived from a neighbour list rebuilt under the minimum-image
+        convention.
+        """
+        positions = butane_pair_positions()
+        generator = torch.Generator().manual_seed(TRANSLATION_SEED)
+        shift = torch.rand(3, generator=generator, dtype=DTYPE) * BUTANE_PAIR_BOX
+        moved = _translated_whole_molecules(positions.clone(), shift)
+
+        assert float(moved.min()) >= 0.0 and float(moved.max()) < BUTANE_PAIR_BOX
+        assert _butane_pair_energy(moved) == pytest.approx(
+            _butane_pair_energy(positions), abs=SYMMETRY_TOL, rel=0.0
+        )
+
+    def test_assembled_energy_is_rotation_invariant(self) -> None:
+        """A 90° rotation about z through the box centre costs nothing.
+
+        **Why not a random rotation.** The energy is invariant under an
+        arbitrary rotation only for an isolated cluster. Here the molecules sit
+        in a lattice, and rotating the contents while leaving the box alone is
+        a symmetry of the *system* only when the rotation maps the lattice onto
+        itself — i.e. for an element of the cubic box's point group ``O_h``. A
+        random ``SO(3)`` element would move the periodic images and change the
+        minimum-image distances, so it would fail here for a reason that has
+        nothing to do with the force field.
+
+        A quarter turn about ``ẑ``, ``(x, y, z) → (L − y, x, z)``, is such an
+        element: it permutes the lattice vectors and leaves the neighbour list
+        the same set of separations.
+        """
+        positions = butane_pair_positions()
+        centred = positions - BUTANE_PAIR_CENTRE
+        rotated = (
+            torch.stack([-centred[:, 1], centred[:, 0], centred[:, 2]], dim=1) + BUTANE_PAIR_CENTRE
+        )
+
+        assert _butane_pair_energy(rotated) == pytest.approx(
+            _butane_pair_energy(positions), abs=SYMMETRY_TOL, rel=0.0
+        )
+
+    def test_assembled_energy_is_permutation_invariant(self) -> None:
+        """Relabelling the atoms costs nothing when every table is relabelled with them.
+
+        Permutation invariance is a statement about *bookkeeping*, not geometry:
+        the same physical configuration written down in another atom order must
+        price the same. That takes the permutation through all five places an
+        atom index lives — the positions, the per-atom parameter tables
+        (``q`` / ``epsilon`` / ``sigma``) and ``Z`` that travel with them, and
+        the ``bonds`` / ``angles`` / ``propers`` columns, which are remapped by
+        the *inverse* permutation because they name where an atom went rather
+        than which atom a row came from. The bonded parameter rows are not
+        touched: rows keep their identity, only the indices in them move.
+        """
+        reference = butane_pair_batch()
+        positions = butane_pair_positions()
+        n_atoms = int(positions.shape[0])
+        generator = torch.Generator().manual_seed(PERMUTATION_SEED)
+        permutation = torch.randperm(n_atoms, generator=generator)
+        inverse = torch.empty_like(permutation)
+        inverse[permutation] = torch.arange(n_atoms)
+
+        permuted = butane_pair_batch(positions[permutation])
+        for field in ("Z", "mass"):
+            permuted["atoms", field] = _leaf(reference, "atoms", field)[permutation]
+        for namespace, columns in BUTANE_PAIR_TOPOLOGY_COLUMNS.items():
+            for column in columns:
+                permuted[namespace, column] = inverse[_leaf(reference, namespace, column)]
+        forcefield = butane_pair_class_i_forcefield()
+        per_atom = forcefield.params("atoms") or {}
+        forcefield = forcefield.with_params(
+            atoms={name: table[permutation] for name, table in per_atom.items()}
+        )
+
+        assert float(forcefield.to_potentials().calc_energy(permuted)) == pytest.approx(
+            float(butane_pair_class_i_forcefield().to_potentials().calc_energy(reference)),
+            abs=SYMMETRY_TOL,
+            rel=0.0,
+        )
+
+    def test_assembled_energy_is_reflection_invariant(self) -> None:
+        """The Class-I template is achiral: inversion and a mirror both cost nothing.
+
+        A Class-I template whose torsional and improper phases are ``0`` or
+        ``π`` is achiral. Improper rotations flip the sign of every signed
+        dihedral, ``φ → −φ``, and leave every distance and every bond angle
+        alone; the only ``φ``-dependent term here is the proper torsion
+        ``Σ_m k_m [1 + cos(n_m φ − γ_m)]``, and ``cos(nφ − γ)`` is even in
+        ``φ`` for exactly those two phases
+        (:data:`~tests.conftest.BUTANE_PAIR_TORSION_PHASE`), so the whole
+        assembled energy is invariant. A phase anywhere else — or a harmonic
+        improper with ``χ₀ ≠ 0``, which
+        :meth:`test_harmonic_improper_is_chiral` shows — would not be, so this
+        gate is scoped to the template's phases rather than to the machinery.
+
+        Both improper rotations of the cube are taken about the box centre:
+        the inversion ``pos → −pos`` and the one-axis mirror ``x → −x``. The
+        cubic lattice is invariant under both.
+        """
+        positions = butane_pair_positions()
+        reference = _butane_pair_energy(positions)
+        inverted = 2.0 * BUTANE_PAIR_CENTRE - positions
+        mirrored = positions.clone()
+        mirrored[:, 0] = 2.0 * BUTANE_PAIR_CENTRE - mirrored[:, 0]
+
+        assert _butane_pair_energy(inverted) == pytest.approx(reference, abs=SYMMETRY_TOL, rel=0.0)
+        assert _butane_pair_energy(mirrored) == pytest.approx(reference, abs=SYMMETRY_TOL, rel=0.0)
+
+    def test_harmonic_improper_is_chiral(self) -> None:
+        """``improper:harmonic`` with ``χ₀ ≠ 0`` tells the two mirror images apart.
+
+        The negative control for the reflection gate above. ``χ`` is a
+        **signed** dihedral, so an improper rotation sends ``χ → −χ`` and
+        ``E = ½ k (χ − χ₀)²`` to ``½ k (χ + χ₀)²``: the two agree only at
+        ``χ₀ = 0``. A force field that declares a non-zero equilibrium improper
+        angle is therefore chiral by construction, and the reflection gate must
+        be read as a property of this template's phases — not as something the
+        assembled-energy machinery enforces on every model.
+
+        The smallest fixture that can show it: one non-planar quartet with the
+        improper centre at ``atomi`` (the molnex column convention).
+        """
+        forcefield = (
+            ForceField(name="chiral-improper", units="real")
+            .def_improperstyle("harmonic")
+            .with_params(
+                impropers={
+                    "k": torch.full((1,), CHIRAL_IMPROPER_K, dtype=DTYPE),
+                    "chi0": torch.full((1,), CHIRAL_IMPROPER_CHI0, dtype=DTYPE),
+                }
+            )
+        )
+        upright = _torsion_batch("impropers")
+        reflected = _torsion_batch("impropers")
+        reflected["atoms", "pos"] = -reflected["atoms", "pos"]
+
+        energy = float(forcefield.to_potentials().calc_energy(upright))
+        mirror_energy = float(forcefield.to_potentials().calc_energy(reflected))
+        assert abs(mirror_energy - energy) > CHIRAL_TOL
 
 
 def _strays_outside_the_force_seam(sites: tuple[str, ...]) -> list[str]:

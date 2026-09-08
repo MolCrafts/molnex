@@ -21,6 +21,15 @@ This module provides three things:
        :func:`permute_graph` — the three input transforms.
     3. :func:`recompute_edge_geometry` — call inside a forward pass so
        autograd can trace ``∂E/∂pos`` for force / equivariance tests.
+    4. :func:`place_edges` and the **butane** fixture family — one
+       molecule's geometry and topology, and the two-molecule periodic
+       box (:func:`butane_pair_batch` /
+       :func:`butane_pair_class_i_forcefield`) that the assembled-energy
+       symmetry gates in ``test_molpot`` and the NVE drift gate in
+       ``test_molix`` both run on. They live here, at the nearest
+       conftest common to both, rather than in either package's leaf
+       conftest: a fixture two test packages share must not make one of
+       them import the other's private test scaffolding.
 
 The transforms are intentionally small — concrete tests live next to
 the module they exercise (encoders in ``test_molzoo``, heads in
@@ -29,8 +38,16 @@ the module they exercise (encoders in ``test_molzoo``, heads in
 
 from __future__ import annotations
 
+import math
+from typing import TYPE_CHECKING
+
 import torch
 from tensordict import TensorDict
+
+from molix.batch import NeighborList
+
+if TYPE_CHECKING:
+    from molpot.forcefield import ForceField
 
 
 def make_graph_batch(
@@ -200,3 +217,471 @@ def _extract_shifts(batch: TensorDict) -> torch.Tensor | None:
     if ("edges", "shifts") not in batch.keys(include_nested=True):
         return None
     return batch["edges", "shifts"]
+
+
+# --------------------------------------------------------------------------
+# Placed neighbour lists
+# --------------------------------------------------------------------------
+
+
+def place_edges(batch: TensorDict, *, cutoff: float) -> TensorDict:
+    """Write ``batch["edges"]`` with molix's neighbour list (``composable-a0-03b``).
+
+    :class:`molix.batch.NeighborList` is the repo's Edge Convention owner and
+    the training-side of the two owners named in
+    ``.claude/notes/architecture.md`` §Layer roles (the other being
+    :class:`molix.md.NeighborList`). ``molpot`` **consumes** a placed ``edges``
+    namespace; it does not enumerate one, so every fixture that reaches a pair
+    term has to arrive with a list, exactly as a collated training batch does.
+
+    ``symmetry`` is left at its ``True`` default and that is load-bearing, not
+    incidental: the half-pair mode emits ``edge_index[:, 0] > edge_index[:, 1]``,
+    and the placed-list liveness rule keeps ``source < target``, so a
+    ``symmetry=False`` list would read as **entirely dead** and every pair term
+    would silently cost zero. The full bidirectional list carries each pair
+    twice and the rule keeps exactly one orientation of each.
+
+    The list is built on a throw-away probe batch and only the resulting
+    namespace is moved across, so the caller's ``atoms`` / ``graphs`` /
+    topology tensors are never replaced by copies of themselves.
+
+    Args:
+        batch: Post-collate batch with ``atoms.pos`` ``(N, 3)`` in Å and
+            ``atoms.batch`` ``(N,)`` graph membership, optionally carrying
+            ``graphs.cell`` — ``(3, 3)`` or ``(B, 3, 3)`` — which switches the
+            build to the minimum-image convention.
+        cutoff: Build radius in Å. Pass the cutoff the *asking style* declares
+            so the live pair set is exactly the set that style would have
+            enumerated; where a style declares none (open ``pair:coulomb``
+            defaults to ``cutoff=None``, i.e. every pair), pass a radius past
+            the fixture's largest separation.
+
+    Returns:
+        The same ``batch`` object, with ``edges`` holding ``edge_index``
+        ``(E, 2)``, ``edge_diff`` ``(E, 3)`` (``pos[target] - pos[source]``)
+        and ``edge_dist`` ``(E,)``. ``E`` is ``0`` when no pair is inside
+        ``cutoff`` — an empty list, not an absent one.
+    """
+    atoms = batch["atoms"]
+    pos = atoms["pos"]
+    n_atoms = int(pos.shape[0])
+    membership = (
+        atoms["batch"] if "batch" in atoms.keys() else torch.zeros(n_atoms, dtype=torch.long)
+    )
+    cell = None
+    if "graphs" in batch.keys() and "cell" in batch["graphs"].keys():
+        cell = batch["graphs", "cell"]
+        cell = cell if cell.ndim == 3 else cell.unsqueeze(0)
+
+    probe = TensorDict(
+        {"atoms": TensorDict({"pos": pos, "batch": membership}, batch_size=[n_atoms])},
+        batch_size=[],
+    )
+    if cell is not None:
+        probe["graphs"] = TensorDict({"cell": cell}, batch_size=[int(cell.shape[0])])
+    NeighborList(cutoff=cutoff, pbc=cell is not None).execute(probe)
+    batch["edges"] = probe["edges"]
+    return batch
+
+
+# --------------------------------------------------------------------------
+# Butane (n-C4H10) — the shared molecular fixture
+# --------------------------------------------------------------------------
+
+
+#: Atom order of the butane fixture: ``C0 C1 C2 C3`` then the hydrogens
+#: ``H4 H5 H6`` on ``C0``, ``H7 H8`` on ``C1``, ``H9 H10`` on ``C2`` and
+#: ``H11 H12 H13`` on ``C3``.
+BUTANE_N_ATOMS = 14
+
+#: The 13 covalent bonds of n-butane, ``(atomi, atomj)`` with ``i < j``.
+#: Angles (24) and proper torsions (27) are *derived* from this list by
+#: :func:`butane_angles` / :func:`butane_propers`, so the topology has a single
+#: source of truth.
+BUTANE_BONDS: tuple[tuple[int, int], ...] = (
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (0, 4),
+    (0, 5),
+    (0, 6),
+    (1, 7),
+    (1, 8),
+    (2, 9),
+    (2, 10),
+    (3, 11),
+    (3, 12),
+    (3, 13),
+)
+
+#: A fixed all-atom butane geometry (Å). Every one of the 91 pairs lies between
+#: 1.09 Å and 6.04 Å, so a 10 Å neighbour list keeps all of them — which is the
+#: list the exclusion-scale golden in
+#: ``tests/test_molpot/test_forcefield/conftest.py`` was captured against.
+BUTANE_POSITIONS: tuple[tuple[float, float, float], ...] = (
+    (0.000000, 0.000000, 0.000000),
+    (1.268427, 0.855565, 0.000000),
+    (2.536855, 0.000000, 0.000000),
+    (3.805282, 0.855565, 0.000000),
+    (-0.974926, -0.487463, 0.000000),
+    (-0.291315, -0.582630, 0.873944),
+    (-0.291315, -0.582630, -0.873944),
+    (1.268427, 1.460188, 0.906935),
+    (1.268427, 1.460188, -0.906935),
+    (2.536855, -0.604623, 0.906935),
+    (2.536855, -0.604623, -0.906935),
+    (4.780208, 1.343028, 0.000000),
+    (4.096597, 1.438195, 0.873944),
+    (4.096597, 1.438195, -0.873944),
+)
+
+
+def butane_neighbors() -> dict[int, list[int]]:
+    """Adjacency of :data:`BUTANE_BONDS`, each neighbour list sorted."""
+    adjacency: dict[int, list[int]] = {i: [] for i in range(BUTANE_N_ATOMS)}
+    for i, j in BUTANE_BONDS:
+        adjacency[i].append(j)
+        adjacency[j].append(i)
+    return {atom: sorted(neighbors) for atom, neighbors in adjacency.items()}
+
+
+def butane_angles() -> list[tuple[int, int, int]]:
+    """The 24 ``(i, j, k)`` angles of butane — every neighbour pair of a centre."""
+    adjacency = butane_neighbors()
+    triples: list[tuple[int, int, int]] = []
+    for centre in range(BUTANE_N_ATOMS):
+        neighbors = adjacency[centre]
+        for a in range(len(neighbors)):
+            for b in range(a + 1, len(neighbors)):
+                triples.append((neighbors[a], centre, neighbors[b]))
+    return triples
+
+
+def butane_propers() -> list[tuple[int, int, int, int]]:
+    """The 27 ``(i, j, k, l)`` proper torsions of butane, ``j-k`` the central bond."""
+    adjacency = butane_neighbors()
+    quads: list[tuple[int, int, int, int]] = []
+    for j, k in BUTANE_BONDS:
+        for i in adjacency[j]:
+            if i == k:
+                continue
+            for end in adjacency[k]:
+                if end == j:
+                    continue
+                quads.append((i, j, k, end))
+    return quads
+
+
+#: All-atom alkane charges (e), well depths (kcal/mol) and sizes (Å) of one
+#: butane: CH3 carbon −0.18, CH2 carbon −0.12, every hydrogen +0.06 — a
+#: neutral molecule, so a box of whole molecules satisfies ``Σ_g q = 0`` by
+#: construction and no background charge is doing hidden work in the Ewald
+#: sum. Alkane-shaped values, not a published parameter set (see
+#: :func:`butane_pair_class_i_forcefield`).
+BUTANE_Q: tuple[float, ...] = (-0.18, -0.12, -0.12, -0.18) + (0.06,) * 10
+BUTANE_EPSILON: tuple[float, ...] = (0.066,) * 4 + (0.030,) * 10
+BUTANE_SIGMA: tuple[float, ...] = (3.50,) * 4 + (2.50,) * 10
+
+#: Cubic edge (Å) of the two-molecule periodic box. Every cutoff below has to
+#: stay at or under the minimum-image limit ``L/2 = 10``.
+BUTANE_PAIR_BOX = 20.0
+#: Where the first copy of :data:`BUTANE_POSITIONS` is placed (Å). The raw
+#: fixture has negative coordinates; shifting it here keeps both molecules
+#: strictly inside ``[0, L)`` so the reference configuration is unwrapped and a
+#: test that *does* wrap is visibly doing something.
+BUTANE_PAIR_ORIGIN = (4.0, 4.0, 4.0)
+#: Displacement of the second copy (Å). The two molecules interlock across the
+#: 8 Å cutoff (closest intermolecular contact ≈ 2.4 Å, largest live pair
+#: ≈ 7.7 Å) without overlapping, so the intermolecular LJ and real-space
+#: Coulomb sums are both non-trivial.
+BUTANE_PAIR_OFFSET = (6.0, 6.0, 6.0)
+#: ``lj/cut`` cutoff and quintic switching window (Å). The window is inside the
+#: box (``r_c = 8 < L/2 = 10``), so the taper is a property of the pair term
+#: rather than of the minimum-image convention running out of room.
+BUTANE_PAIR_LJ_CUTOFF = 8.0
+BUTANE_PAIR_LJ_SWITCH_START = 7.0
+#: Ewald splitting width ``σ`` (Å) and real-space cutoff ``r_c`` (Å) of the
+#: periodic Coulomb sum. ``erfc(r_c / σ√2) = erfc(2.83) ≈ 6e-5``, so the
+#: real-space half is converged and what the reciprocal half has to supply is
+#: exactly the smooth remainder.
+BUTANE_PAIR_SMEARING = 2.0
+BUTANE_PAIR_REAL_SPACE_CUTOFF = 8.0
+#: Shortest reciprocal wavelength resolved by the ``"ewald"`` sum (Å) — the
+#: value the rocksalt Madelung fixture in ``test_coulomb.py`` runs at. With
+#: ``σ = 2 Å`` the Gaussian factor at the shortest kept wavelength is
+#: ``exp(−σ²k²/2) = e^−79``, so the k-sum is converged far past anything
+#: asserted on this box.
+BUTANE_PAIR_LR_WAVELENGTH = 0.5
+#: The same, for the NVE rollout (Å). The explicit k-sum costs ``(L / λ)³``
+#: vectors per force evaluation, so 0.5 Å is 8x the work of 1.0 Å and a
+#: 200-step rollout feels it; 1.0 Å still keeps ``exp(−σ²k²/2) = e^−79`` at the
+#: shortest wavelength dropped, i.e. converged past every digit either gate
+#: reads. Two numbers rather than one because a single-point gate and a
+#: trajectory buy accuracy at very different prices, and the trajectory's own
+#: assertion (``rel_drift < 1e-3``) is nowhere near this resolution.
+BUTANE_PAIR_LR_WAVELENGTH_MD = 1.0
+#: Target mesh spacing (Å) handed to the ``"pme"`` spelling of the same style,
+#: so ``calculator`` is the *only* difference between the two assemblies.
+#: ``get_ns_mesh`` turns it into ``2^ceil(log2(2L/h + 1)) = 64`` points per
+#: axis (an effective 0.31 Å grid), whose total electrostatic energy sits
+#: 7e-5 kcal/mol from the Ewald sum of the same box — a converged mesh by
+#: PME's own standards, and the repo default
+#: (``PairStyleDefaults.mesh_spacing``).
+BUTANE_PAIR_MESH_SPACING = 1.0
+#: Build radius (Å) of the placed list: the larger of the two pair-style radii
+#: (they are equal here), so both nonbonded terms read the rows they are
+#: allowed to and neither is starved by the list.
+BUTANE_PAIR_LIST_CUTOFF = 8.0
+#: 1-2 / 1-3 / 1-4 nonbonded scales, hand-set: directly bonded pairs and the
+#: two ends of an angle are excluded outright, 1-4 pairs are halved for both
+#: the Lennard-Jones and the Coulomb kind.
+BUTANE_PAIR_SCALES = (0.0, 0.0, 0.5)
+
+#: Harmonic bond and angle force constants (kcal/mol/Å², kcal/mol/rad²) and the
+#: offsets that place their equilibria off the reference geometry (Å, rad).
+#:
+#: The equilibria are the reference geometry's **own** lengths and angles less
+#: a fixed offset, rather than tabulated values (``r0 = 1.529 / 1.090``,
+#: ``θ0 = 1.911`` for sp3 carbon). :data:`BUTANE_POSITIONS` is a constructed geometry whose
+#: terminal methyls are not tetrahedral (``1-0-4`` opens to 172.6° and
+#: ``4-0-5`` closes to 61.4°), so tabulated angle equilibria would load 342
+#: kcal/mol of strain into the start configuration and a short NVE rollout
+#: would be measuring that relaxation instead of the integrator. The offset
+#: keeps every bonded term live — non-zero energy *and* non-zero gradient, so a
+#: symmetry gate can actually see it — while leaving the fixture near its
+#: bonded minimum.
+BUTANE_PAIR_BOND_K = 300.0
+BUTANE_PAIR_BOND_OFFSET = 0.03
+BUTANE_PAIR_ANGLE_K = 60.0
+BUTANE_PAIR_ANGLE_OFFSET = 0.05
+#: Proper-torsion barriers (kcal/mol), periodicities and phases (rad) of the
+#: Fourier form ``Σ_m k_m [1 + cos(n_m φ − γ_m)]``. The barriers are invented
+#: — alkane-scaled, not fitted. The **phases** are not: every one is ``0`` or
+#: ``π``, which is what makes the torsion term achiral, since ``cos(nφ − γ)``
+#: is even in ``φ`` for exactly those two values and so ``E(−φ) = E(φ)``.
+BUTANE_PAIR_TORSION_K = (0.7, 0.1, 0.3)
+BUTANE_PAIR_TORSION_PERIODICITY = (1, 2, 3)
+BUTANE_PAIR_TORSION_PHASE = (0.0, math.pi, 0.0)
+
+#: Atomic masses (amu) keyed by the fixture's two elements — carbon and
+#: hydrogen — for the MD side of the fixture.
+BUTANE_PAIR_MASS = {6: 12.011, 1: 1.008}
+
+#: Column names of the three topology namespaces the pair fixture carries, in
+#: index order. ``impropers`` is absent: n-butane has no improper centre.
+BUTANE_PAIR_TOPOLOGY_COLUMNS: dict[str, tuple[str, ...]] = {
+    "bonds": ("atomi", "atomj"),
+    "angles": ("atomi", "atomj", "atomk"),
+    "propers": ("atomi", "atomj", "atomk", "atoml"),
+}
+
+
+def butane_pair_positions() -> torch.Tensor:
+    """Two copies of :data:`BUTANE_POSITIONS`, ``(28, 3)`` fp64 in Å.
+
+    Copy 0 sits at :data:`BUTANE_PAIR_ORIGIN`, copy 1 a further
+    :data:`BUTANE_PAIR_OFFSET` away. Atom ``i`` of copy 1 is atom ``i + 14``,
+    which is the offset every topology column of :func:`butane_pair_topology`
+    is built with.
+    """
+    base = torch.tensor(BUTANE_POSITIONS, dtype=torch.float64) + torch.tensor(
+        BUTANE_PAIR_ORIGIN, dtype=torch.float64
+    )
+    return torch.cat([base, base + torch.tensor(BUTANE_PAIR_OFFSET, dtype=torch.float64)])
+
+
+def butane_pair_topology() -> dict[str, list[tuple[int, ...]]]:
+    """The pair's ``bonds`` / ``angles`` / ``propers`` rows as index tuples.
+
+    Each namespace is the single molecule's rows followed by the same rows with
+    every index shifted by :data:`BUTANE_N_ATOMS` — 26 bonds, 48 angles and 54
+    proper torsions.
+    """
+    shifted: dict[str, list[tuple[int, ...]]] = {}
+    for name, rows in (
+        ("bonds", [tuple(b) for b in BUTANE_BONDS]),
+        ("angles", [tuple(a) for a in butane_angles()]),
+        ("propers", [tuple(p) for p in butane_propers()]),
+    ):
+        shifted[name] = list(rows) + [
+            tuple(index + BUTANE_N_ATOMS for index in row) for row in rows
+        ]
+    return shifted
+
+
+def _butane_pair_equilibria() -> tuple[list[float], list[float]]:
+    """Reference bond lengths (Å) and angles (rad) of the pair's topology rows."""
+    pos = torch.tensor(BUTANE_POSITIONS, dtype=torch.float64)
+    lengths = [float((pos[j] - pos[i]).norm()) for i, j in BUTANE_BONDS]
+    angles: list[float] = []
+    for i, j, k in butane_angles():
+        left, right = pos[i] - pos[j], pos[k] - pos[j]
+        cosine = float((left @ right) / (left.norm() * right.norm()))
+        angles.append(math.acos(cosine))
+    return lengths + lengths, angles + angles
+
+
+def butane_pair_class_i_forcefield(
+    *,
+    calculator: str = "ewald",
+    lr_wavelength: float = BUTANE_PAIR_LR_WAVELENGTH,
+) -> "ForceField":
+    """A hand-built Class-I model of the butane pair in its box.
+
+    Harmonic bonds and angles, a periodic proper-torsion Fourier series,
+    switched ``lj/cut`` and a periodic ``pair:coulomb`` — every Class-I
+    contribution live at once, which is what makes the assembled energy worth
+    putting a symmetry gate on. 1-2 / 1-3 pairs are excluded and 1-4 pairs are
+    halved (:data:`BUTANE_PAIR_SCALES`) for both the Lennard-Jones and the
+    Coulomb kind.
+
+    **Not OPLS-AA, and deliberately not claiming to be.** The charges and
+    Lennard-Jones parameters are alkane-shaped, but the bond and angle
+    equilibria are read off this fixture's own geometry
+    (:func:`_butane_pair_equilibria`), the torsion barriers are invented, and
+    the exclusion scales are set by hand rather than by
+    :class:`~molpot.forcefield.container.OPLSAAForceField`. Nothing here is a
+    published parameter set and no test may read it as one: it is a *shape* —
+    the full Class-I functional form with every term non-zero — assembled so
+    the gates have something to be invariant about. Parameter fidelity to a
+    published field is a different question with a different fixture.
+
+    **Why Ewald and not the PME default.** A mesh method is anchored to the
+    *box*, not to the atoms: the B-spline charge assignment interpolates onto a
+    grid whose points are fixed in the cell, so the interpolation error is a
+    function of where the atoms sit relative to that grid. Translate the whole
+    contents of the box and the exact reciprocal sum does not move — every
+    ``|S(k)|²`` is translation invariant — but the mesh estimate does, here by
+    **7.4e-5 kcal/mol** for a random shift, five orders above the 1e-10 the
+    symmetry gates hold the model to. No mesh spacing fixes that; it is a
+    property of the estimator, not of the assembled model. The explicit
+    k-vector sum has no grid and reproduces the same transform to 7e-14, so it
+    is what the exactness gates run on. That this is only an *estimator*
+    difference — that the mesh and the k-sum agree on the physics to their
+    declared accuracy — is pinned separately, by the rocksalt Madelung test in
+    ``test_coulomb.py``, which asserts the literature constant through both
+    spellings.
+
+    Args:
+        calculator: Reciprocal-space algorithm of the periodic Coulomb sum —
+            ``"ewald"`` (every k-vector summed explicitly; the default here)
+            or ``"pme"`` (the FFT mesh, and the repo default under a cell).
+            The two assemblies differ in nothing else, so an energy that moves
+            between them moved by the mesh's own interpolation error.
+        lr_wavelength: Shortest reciprocal wavelength the ``"ewald"`` sum
+            resolves, in Å. The cost of the explicit k-sum is
+            ``(L / λ)³`` vectors *per force evaluation*, so a rollout may
+            legitimately ask for a coarser one than a single-point gate does;
+            :data:`BUTANE_PAIR_LR_WAVELENGTH_MD` is the value the NVE gate
+            passes. Both are converged far past what they assert — see the
+            constant's note.
+
+    Returns:
+        The unbound :class:`molpot.forcefield.ForceField`, in LAMMPS ``real``
+        units (kcal/mol, Å, e).
+    """
+    from molpot.forcefield import ForceField
+
+    topology = butane_pair_topology()
+    lengths, angles = _butane_pair_equilibria()
+    n_propers = len(topology["propers"])
+    forcefield = (
+        ForceField(name="butane-pair", units="real")
+        .def_bondstyle("harmonic")
+        .def_anglestyle("harmonic")
+        .def_dihedralstyle("periodic")
+        .def_pairstyle(
+            "lj/cut",
+            cutoff=BUTANE_PAIR_LJ_CUTOFF,
+            switch_start=BUTANE_PAIR_LJ_SWITCH_START,
+        )
+        .def_pairstyle(
+            "coulomb",
+            calculator=calculator,
+            smearing=BUTANE_PAIR_SMEARING,
+            real_space_cutoff=BUTANE_PAIR_REAL_SPACE_CUTOFF,
+            mesh_spacing=BUTANE_PAIR_MESH_SPACING,
+            lr_wavelength=lr_wavelength,
+        )
+    )
+    forcefield.set_special_bonds(BUTANE_PAIR_SCALES, BUTANE_PAIR_SCALES)
+    return forcefield.with_params(
+        bonds={
+            "k": torch.full((len(topology["bonds"]),), BUTANE_PAIR_BOND_K, dtype=torch.float64),
+            "r0": torch.tensor(lengths, dtype=torch.float64) - BUTANE_PAIR_BOND_OFFSET,
+        },
+        angles={
+            "k": torch.full((len(topology["angles"]),), BUTANE_PAIR_ANGLE_K, dtype=torch.float64),
+            "theta0": torch.tensor(angles, dtype=torch.float64) - BUTANE_PAIR_ANGLE_OFFSET,
+        },
+        propers={
+            "k": torch.tensor([BUTANE_PAIR_TORSION_K] * n_propers, dtype=torch.float64),
+            "periodicity": torch.tensor(BUTANE_PAIR_TORSION_PERIODICITY, dtype=torch.long),
+            "phase": torch.tensor([BUTANE_PAIR_TORSION_PHASE] * n_propers, dtype=torch.float64),
+            "idivf": torch.ones(n_propers, dtype=torch.float64),
+        },
+        atoms={
+            "q": torch.tensor(BUTANE_Q * 2, dtype=torch.float64),
+            "epsilon": torch.tensor(BUTANE_EPSILON * 2, dtype=torch.float64),
+            "sigma": torch.tensor(BUTANE_SIGMA * 2, dtype=torch.float64),
+        },
+    )
+
+
+def butane_pair_batch(positions: torch.Tensor | None = None) -> TensorDict:
+    """The pair's post-collate batch: atoms, topology, lattice and placed list.
+
+    One graph, not two: ``atoms.batch`` is all zeros because the periodic
+    Coulomb term evaluates **one** lattice per call and refuses a batch of more
+    than one graph. ``graphs.cell`` is the ``(3, 3)`` lattice under an empty
+    ``batch_size`` and ``graphs.total_charge`` the declared zero the two
+    neutral molecules add up to. ``atoms.mass`` (amu) and a zero
+    ``atoms.vel`` (Å/fs) are carried too, so the same fixture is the one an MD
+    rollout runs — the energy gates and the NVE gate must not be looking at two
+    different boxes.
+
+    Args:
+        positions: Atom positions ``(28, 3)`` in Å, defaulting to
+            :func:`butane_pair_positions`. A transformed geometry is passed
+            here so the neighbour list is rebuilt for it: the list is a
+            function of the positions, and reusing one across a move would be
+            asking the energy about connectivity that is no longer there.
+
+    Returns:
+        The batch, with ``edges`` placed at :data:`BUTANE_PAIR_LIST_CUTOFF`
+        under the minimum-image convention.
+    """
+    pos = butane_pair_positions() if positions is None else positions
+    n_atoms = int(pos.shape[0])
+    numbers = torch.tensor(([6] * 4 + [1] * 10) * 2, dtype=torch.long)
+    mass = torch.tensor([BUTANE_PAIR_MASS[int(z)] for z in numbers.tolist()], dtype=torch.float64)
+    namespaces: dict[str, TensorDict] = {
+        "atoms": TensorDict(
+            {
+                "pos": pos,
+                "Z": numbers,
+                "mass": mass,
+                "vel": torch.zeros_like(pos),
+                "batch": torch.zeros(n_atoms, dtype=torch.long),
+            },
+            batch_size=[n_atoms],
+        ),
+        "graphs": TensorDict(
+            {
+                "cell": torch.eye(3, dtype=torch.float64) * BUTANE_PAIR_BOX,
+                "total_charge": torch.zeros(1, dtype=torch.float64),
+            },
+            batch_size=[],
+        ),
+    }
+    topology = butane_pair_topology()
+    for name, columns in BUTANE_PAIR_TOPOLOGY_COLUMNS.items():
+        rows = topology[name]
+        namespaces[name] = TensorDict(
+            {
+                column: torch.tensor([row[axis] for row in rows], dtype=torch.long)
+                for axis, column in enumerate(columns)
+            },
+            batch_size=[len(rows)],
+        )
+    return place_edges(TensorDict(namespaces, batch_size=[]), cutoff=BUTANE_PAIR_LIST_CUTOFF)

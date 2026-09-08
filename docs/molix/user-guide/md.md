@@ -200,6 +200,45 @@ asserted anywhere.
   sharded to disk so host memory stays bounded.
 - `MDCheckpointHook` — restartable `(pos, vel, step)` every N steps, written
   atomically; doubles as a heartbeat line in the log.
+- `EnergyDriftHook` — the NVE (constant atom number, volume and total energy)
+  energy-conservation gate: it records `(t, E_tot)` on every observation and
+  fits a straight line through the series.
+
+Why a fit and not a tolerance on `E_tot`: velocity-Verlet is *symplectic*, so
+it conserves a Hamiltonian slightly displaced from the real one and the true
+total energy oscillates with a bounded amplitude set by `dt`. That amplitude is
+not an error. An error is a *secular* term underneath it — energy leaking in or
+out step after step, which comes from the model rather than the integrator (a
+force truncated discontinuously at a cutoff, a neighbour list rebuilt too late,
+a force that is not the gradient of the energy beside it). The line separates
+the two, and the run is judged from the `EnergyDrift` record the hook publishes
+on its `.result` attribute at `on_run_end`:
+
+```python
+from molix.md import EnergyDriftHook
+
+drift = EnergyDriftHook()
+md.set_hooks([VelocityInitHook(MaxwellBoltzmann(300, seed=0)), drift])
+md.run(system, n_steps=200, chunk=10)
+
+assert drift.result.rel_drift < 1e-3      # secular drift, dimensionless
+print(drift.result.rms_rel)               # bounded fluctuation, dimensionless
+```
+
+`rel_drift` is `|slope · duration_fs| / |e0|`: the fitted `dE_tot/dt`
+(amu·Å²/fs³) extrapolated over the sampled window `duration_fs = t_last −
+t_first` (fs) and divided by the first sampled total energy `e0`
+(amu·Å²/fs²). `rms_rel` is the root-mean-square deviation of `E_tot` from its
+own mean over the same window, divided by `|e0|` as well, so both numbers are
+dimensionless and comparable across system sizes. The hook declares
+no `cadence`, so the sample spacing is `run(chunk=...)` and the first sample
+lands at `chunk · dt` — a run shorter than two observations has no slope, so
+`on_run_end` leaves `result` at `None` (ending such a run is not an error);
+`drift()` is what raises `ValueError`, for a caller that asks for a fit the
+samples cannot support. `on_run_start` drops the previous run's samples, so a
+hook reused for a warm-up and then a timed run reports the timed run only.
+The `< 1e-3` figure is the gate `benchmarks/verify_md_ljcut_nve.py` applies to
+bulk lj/cut argon.
 
 A custom hook overrides any of `on_run_start` / `on_step_start` /
 `on_step_end(runner, step, obs)` / `on_run_end`; `obs` is a typed

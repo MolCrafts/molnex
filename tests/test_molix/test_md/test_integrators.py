@@ -1,8 +1,10 @@
 """Tests for the BAOAB Langevin velocity-Verlet integrator component.
 
-Single-function correctness only (repo rule: no e2e under ``tests/``).
-Long-horizon physics validation — NVE energy conservation, equipartition —
-lives in ``benchmarks/verify_md_lj_nve.py``, not here.
+Single-function correctness only (repo rule: no e2e under ``tests/``). The
+200-step NVE drift gate is the slow-tier ``TestEnergyDriftHook`` case in
+``test_runner.py``, which owns the ``rel_drift < 1e-3`` criterion;
+long-horizon validation — thousands of steps, equipartition — stays in
+``benchmarks/`` (``verify_md_lj_nve.py``, ``verify_md_ljcut_nve.py``).
 """
 
 import pytest

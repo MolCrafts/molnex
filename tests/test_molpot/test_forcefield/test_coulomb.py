@@ -36,7 +36,7 @@ from molpot.charge import (
 from molpot.forcefield import ForceField, Potentials
 from molpot.ir.scaling import ExclusionScales, NonbondedScaling
 from molpot.potentials.elec.prefactors import kcalmol_A
-from tests.test_molpot.test_forcefield.conftest import place_edges
+from tests.conftest import place_edges
 
 #: Build radius (Å) of the placed list on the **open**-boundary fixtures of
 #: :class:`TestCoulombEnergy`. Open ``pair:coulomb`` declares no cutoff there

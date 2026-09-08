@@ -16,7 +16,7 @@ from tensordict import TensorDict
 
 from molpot.forcefield import ForceField
 from molpot.potentials.vdw.lj126 import lj126_pair_energy
-from tests.test_molpot.test_forcefield.conftest import place_edges
+from tests.conftest import place_edges
 
 #: Cutoff (Å) of every ``lj/cut`` style declared here, and the build radius of
 #: every placed list. Past the largest separation in any fixture below (4 Å),

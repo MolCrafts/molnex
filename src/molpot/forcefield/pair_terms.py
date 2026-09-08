@@ -97,10 +97,22 @@ class LJCutPotential:
     Wraps :func:`lj126_pair_energy_split` + Lorentz–Berthelot mixing (per-atom
     ``ε`` / ``σ`` combined into per-pair values, see
     :func:`~molpot.potentials.vdw.lj126.lorentz_berthelot`). Pairs with
-    ``r >= cutoff`` are zeroed (the caller may also pre-filter the list). Both
-    entry points return the repulsive and attractive halves separately, so
-    :class:`~molpot.forcefield.potentials.Potentials` can label one ``local``
-    and the other ``disp`` (S3) without evaluating a second energy path.
+    ``r >= cutoff`` are zeroed (the caller may also pre-filter the list).
+
+    There are two entry points. :meth:`energy` prices a pair list; the
+    **analytic-force branch** :meth:`energy_forces` prices the same list and
+    additionally returns ``F = -∂E/∂pos`` from the closed-form radial
+    derivative, so a caller (:meth:`Potentials.calc_energy_forces
+    <molpot.forcefield.potentials.Potentials.calc_energy_forces>`) gets forces
+    with no ``requires_grad`` position leaf and no autograd backward. It takes
+    the pair **vectors** as well as the distances, because a direction and a
+    length that do not come from the same vector are not each other's
+    gradient under periodic boundaries — see :meth:`energy_forces`.
+
+    Both entry points return the repulsive and attractive halves separately,
+    so :class:`~molpot.forcefield.potentials.Potentials` can label one
+    ``local`` and the other ``disp`` (S3) without evaluating a second energy
+    path.
 
     With ``switch_start`` set, the energy is tapered to zero over
     ``[r_s, r_c]`` by the quintic switch ``S`` of :meth:`_switch` instead of
@@ -214,12 +226,13 @@ class LJCutPotential:
         Returns:
             ``(repulsion, dispersion)`` — ``Σ scale · S(r) · 4 ε (σ/r)¹²`` and
             ``−Σ scale · S(r) · 4 ε (σ/r)⁶`` accumulated over the pairs within
-            the cutoff, where ``S`` is the switching factor of :meth:`_switch`
-            (identically ``1`` without a ``switch_start``) and ``scale`` the
-            row's entry of ``scales``. Each is ``(B,)`` in kcal/mol when
-            ``edge_batch`` is given and scalar ``()`` otherwise. Repulsion is
-            non-negative, dispersion non-positive, and their sum is the
-            (scaled, switched) Lennard-Jones energy.
+            the cutoff, with ``ε`` / ``σ`` the per-pair values Lorentz–Berthelot
+            mixing makes of the per-atom arguments, ``S`` the switching factor
+            of :meth:`_switch` (identically ``1`` without a ``switch_start``)
+            and ``scale`` the row's entry of ``scales``. Each is ``(B,)`` in
+            kcal/mol when ``edge_batch`` is given, scalar ``()`` otherwise.
+            Repulsion is non-negative, dispersion non-positive, and their sum
+            is the (scaled, switched) Lennard-Jones energy.
         """
         live, weight = _live_pairs(distances, self.cutoff, edge_mask)
         dist = torch.where(live, distances, distances.new_full((), self.cutoff))
@@ -242,8 +255,9 @@ class LJCutPotential:
     def energy_forces(
         self,
         *,
-        positions: torch.Tensor,
+        n_atoms: int,
         edge_index: torch.Tensor,
+        pair_vectors: torch.Tensor,
         distances: torch.Tensor,
         epsilon: torch.Tensor,
         sigma: torch.Tensor,
@@ -255,17 +269,38 @@ class LJCutPotential:
         """LJ energy halves and analytic forces ``F = -∂E/∂pos`` for a half list.
 
         Differentiating ``4 ε [(σ/r)¹² − (σ/r)⁶]`` gives the radial derivative
-        ``dE/dr = 24 ε (σ/r)⁶ (1 - 2 (σ/r)⁶) / r`` (kcal mol⁻¹ Å⁻¹). Write
+        ``dE/dr = 24 ε (σ/r)⁶ (1 - 2 (σ/r)⁶) / r`` (kcal mol⁻¹ Å⁻¹), where
+        ``ε`` and ``σ`` are the **per-pair** values Lorentz–Berthelot mixing
+        makes of the per-atom ``epsilon`` / ``sigma`` arguments. Write
         ``g = scale · live · dE/dr`` for that derivative after the pair's scale
         factor and its liveness weight (``1`` on a contributing row, ``0`` on a
         dead or out-of-range one),
-        and ``r̂ = (pos_j - pos_i) / r`` for the unit vector from the first atom
-        of the pair to the second. Because ``∂r/∂pos_i = -r̂``, the chain rule
+        and ``r̂ = pair_vectors / r`` for the unit vector from the first atom of
+        the pair to the second. Because ``∂r/∂pos_i = -r̂``, the chain rule
         gives ``F_i = -∂E/∂pos_i = +g r̂`` and, by Newton's third law,
         ``F_j = -g r̂``. Evaluating this closed form needs no ``requires_grad``
         position leaf and no autograd backward. The forces derive from the
         **total** ``repulsion + dispersion``, so splitting the reported energy
         into halves leaves them unchanged.
+
+        Direction and distance are read from the **same** vector, which is why
+        this takes ``pair_vectors`` rather than the positions. Under periodic
+        boundaries a pair's separation is its *minimum image*
+        ``pos_j - pos_i + shift``, and ``distances`` is the norm of exactly
+        that. Rebuilding the direction here as the unwrapped
+        ``pos_j - pos_i`` would pair a wrapped length with an unwrapped
+        heading: every pair whose minimum image crosses the cell would get an
+        ``r̂`` that is neither a unit vector nor aimed at the partner actually
+        being priced, so ``F`` would stop being ``-∇E`` of the energy this
+        same call returns and an MD run would pump energy. One vector in, both
+        quantities out of it, is the whole guard — the caller
+        (:meth:`~molpot.forcefield.Potentials._placed_pairs`) forms it once and
+        hands over the norm beside it. This is measured, not hypothetical: it
+        is finding **F27** in ``.claude/notes/composable-potentials.md``, where
+        the earlier raw-difference direction disagreed with a finite difference
+        of the (correct) energy by more than an order of magnitude on a
+        256-atom argon box and made an NVE run gain 9 % of its energy in ten
+        steps.
 
         Inside a switching window the energy is ``S(r) · E_LJ(r)``, so the
         product rule puts *two* terms in the radial derivative,
@@ -275,10 +310,29 @@ class LJCutPotential:
         truncating it.
 
         Args:
-            positions: Atom positions ``(N, 3)`` in Å.
+            n_atoms: Number of atoms ``N`` the returned force buffer spans.
+                Explicit because nothing here is entitled to infer it: the
+                per-atom ``epsilon`` / ``sigma`` are *parameter tables*, whose
+                length matching the geometry is a convention of the assembler,
+                not an invariant of this call — a table broadcast from one
+                type, or one padded to a capacity, would size the buffer wrong
+                and scatter the forces of a system into the shape of a
+                parameter set. The caller holds ``pos`` and therefore knows
+                ``N``, and the sibling force path
+                ``Potentials._coulomb_energy_forces`` already takes it as an
+                argument for the same reason.
             edge_index: Half-list pairs ``(E, 2)``, atom indices into the ``N``
                 atoms; column 0 is the ``i`` above, column 1 the ``j``.
-            distances: Pair separations ``r`` ``(E,)`` in Å.
+            pair_vectors: Separation vectors ``(E, 3)`` in Å, pointing from
+                each row's ``i`` to its ``j`` — ``pos_j - pos_i`` under open
+                boundaries, ``pos_j - pos_i + shift`` (the minimum image)
+                under a cell. Must be the vector ``distances`` is the norm of.
+            distances: Pair separations ``r`` ``(E,)`` in Å. Must be exactly
+                ``|pair_vectors|`` row for row — this is the argument
+                :meth:`Potentials._placed_pairs
+                <molpot.forcefield.potentials.Potentials._placed_pairs>` takes
+                as the norm of the vector it returns beside it, never a
+                separately stored ``edges.edge_dist``.
             epsilon: Per-atom well depth ``ε`` ``(N,)`` in kcal/mol.
             sigma: Per-atom zero-crossing distance ``σ`` ``(N,)`` in Å.
             scales: Per-pair scale factors ``(E,)``, dimensionless; see
@@ -296,7 +350,7 @@ class LJCutPotential:
         Returns:
             ``((repulsion, dispersion), forces)`` — the energy halves of
             :meth:`energy` (each ``(B,)`` or scalar ``()``, kcal/mol) and forces
-            ``(N, 3)`` in kcal mol⁻¹ Å⁻¹.
+            ``(N, 3)`` in kcal mol⁻¹ Å⁻¹, with ``N`` the ``n_atoms`` passed in.
         """
         live, weight = _live_pairs(distances, self.cutoff, edge_mask)
         # A dead row is evaluated at ``r_c`` rather than at its stored distance:
@@ -329,9 +383,14 @@ class LJCutPotential:
         dedr = 24.0 * eps * sr6 * (1.0 - 2.0 * sr6) / dist
         g = (switch * dedr + (rep_lj + disp_lj) * dswitch) * w
         source, target = edge_index[:, 0], edge_index[:, 1]
-        rhat = (positions[target] - positions[source]) / dist.unsqueeze(-1)
+        # Same ``dist`` as the energy above, so a dead row divides its stored
+        # vector by ``r_c`` instead of by its own length: a padding self-loop
+        # (zero vector) gives ``0``, a row killed by the half-list or cutoff
+        # rule gives some non-unit vector. Both are finite, which is all that
+        # is asked of them — ``g`` is zero on every dead row regardless.
+        rhat = pair_vectors / dist.unsqueeze(-1)
         f_i = g.unsqueeze(-1) * rhat
-        forces = positions.new_zeros((positions.shape[0], 3))
+        forces = pair_vectors.new_zeros((n_atoms, 3))
         forces.index_add_(0, source, f_i)
         forces.index_add_(0, target, -f_i)
         return (repulsion, dispersion), forces

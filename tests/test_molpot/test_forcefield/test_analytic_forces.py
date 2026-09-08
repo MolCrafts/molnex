@@ -14,7 +14,7 @@ from tensordict import TensorDict
 
 from molpot.forcefield import ForceField
 from molpot.potentials import AngleHarmonic, BondHarmonic, ImproperPeriodic, ProperTorsionPeriodic
-from tests.test_molpot.test_forcefield.conftest import place_edges
+from tests.conftest import place_edges
 
 DTYPE = torch.float64
 _TOL = 1e-8
