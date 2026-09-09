@@ -506,7 +506,9 @@ cuBLAS but its own Triton override `_bmm_outer_product_kernel`
 (`torch/_native/ops/bmm_outer_product/`), whose store offset
 `pid_b * stride_ob` is int32 and wraps from N = 8 209 atoms on
 (2³¹ / (511·512) = 8 208.03; standalone `cudaErrorIllegalAddress`, inside the
-model silent garbage), fp32 and fp64 alike — a PyTorch bug that MACE exposes. Forward energies stay
+model silent garbage), fp32 and fp64 alike — a PyTorch bug that MACE exposes.
+`TORCH_DISABLE_NATIVE_JIT=1` (cuBLAS fallback) makes the official fp32 forces at
+8 319 atoms agree with molnex fp64 to 2e-4 eV/Å again. Forward energies stay
 right; the k-space electrostatics spreads the wrong gradient to every force.
 molnex is unaffected because `molrep.interaction.polar.uvu` reassociates the
 contraction and never builds the (N, 512, 512) tensor, so that autograd node
