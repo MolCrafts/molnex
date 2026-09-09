@@ -501,10 +501,12 @@ disagreement" was theirs) and its forces blow up at 8 850 atoms (max|F| 75 eV/Å
 vs 2.05). Root cause (2026-09-09, lab `mace-scaling-bench` plan-book, records
 `.records/diag/`): not precision, not cuEq — the backward of the official
 `SparseUvuTensorProduct` (Polar field blocks) forms d/dpair with
-`torch.bmm((512, N, 1), (512, 1, 512))`, and that k = 1 batched GEMM is wrong on
-GH200 / torch 2.14.0+cu130 from N = 8 209 atoms on (2³¹ / (511·512) = 8 208.03,
-an int32 element offset; standalone it faults with `cudaErrorIllegalAddress`,
-inside the model it reads garbage), fp32 and fp64 alike. Forward energies stay
+`torch.bmm((512, N, 1), (512, 1, 512))`; for k = 1 torch 2.14 does not call
+cuBLAS but its own Triton override `_bmm_outer_product_kernel`
+(`torch/_native/ops/bmm_outer_product/`), whose store offset
+`pid_b * stride_ob` is int32 and wraps from N = 8 209 atoms on
+(2³¹ / (511·512) = 8 208.03; standalone `cudaErrorIllegalAddress`, inside the
+model silent garbage), fp32 and fp64 alike — a PyTorch bug that MACE exposes. Forward energies stay
 right; the k-space electrostatics spreads the wrong gradient to every force.
 molnex is unaffected because `molrep.interaction.polar.uvu` reassociates the
 contraction and never builds the (N, 512, 512) tensor, so that autograd node
