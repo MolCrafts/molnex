@@ -498,10 +498,18 @@ off-diagonals recorded by `polar-inference-bench` were wrong. fp32: molnex
 fp32 sits 1.7e-4 eV/Å / 1e-7 eV/atom from its fp64 (fp64 energy accumulation);
 the official fp32 Polar loses 8.6e-3 eV/atom in E at 7 400 (the earlier "0.3 %
 disagreement" was theirs) and its forces blow up at 8 850 atoms (max|F| 75 eV/Å
-vs 2.05) — pinned 2026-09-09 to an edge-count cliff between 768 618 (fine)
-and 827 328 edges (broken) in the same 42.6 Å box, reproducible, fp32 only;
-the official e3nn path crashes (`CUDA_ERROR_ILLEGAL_ADDRESS`) at 7 080 atoms
-fp32. Cost, fp32, 7 400→21 400 atoms: Polar molnex compiled 21→23 µs/atom
+vs 2.05). Root cause (2026-09-09, lab `mace-scaling-bench` plan-book, records
+`.records/diag/`): not precision, not cuEq — the backward of the official
+`SparseUvuTensorProduct` (Polar field blocks) forms d/dpair with
+`torch.bmm((512, N, 1), (512, 1, 512))`, and that k = 1 batched GEMM is wrong on
+GH200 / torch 2.14.0+cu130 from N = 8 209 atoms on (2³¹ / (511·512) = 8 208.03,
+an int32 element offset; standalone it faults with `cudaErrorIllegalAddress`,
+inside the model it reads garbage), fp32 and fp64 alike. Forward energies stay
+right; the k-space electrostatics spreads the wrong gradient to every force.
+molnex is unaffected because `molrep.interaction.polar.uvu` reassociates the
+contraction and never builds the (N, 512, 512) tensor, so that autograd node
+does not exist. The official e3nn path crashes (`CUDA_ERROR_ILLEGAL_ADDRESS`) at
+7 080 atoms fp32 for its own reasons. Cost, fp32, 7 400→21 400 atoms: Polar molnex compiled 21→23 µs/atom
 (α 1.06) vs official 75 µs/atom and OOM ≥ 17 700; MatPES molnex compiled 5.5
 µs/atom vs official 7 µs/atom, official E+F+W 4.5× its own E+F.
 
