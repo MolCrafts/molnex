@@ -1169,3 +1169,42 @@ its frames to `FrameStoreWriter.append(frames, key=…, task=…)` directly. Onl
 three lines consume the columns (`prepare.py:471-472`, `encoder.py:147,156`),
 but `RawUnit` and its tests are built around them — a molhub design change,
 owned there, not here.
+
+## torch 2.14 AOTI drops a defaulted trailing `Scalar` from the extern-node schema (2026-09-09)
+
+`ctest -R bridge_dynamic_exec_matches_reference` fails against torch 2.14 with
+
+```
+Mismatch between ints consumed and num_ints, got int_id = 1, num_ints = 2
+oss_proxy_executor.cpp:835 → AOTInductorModel::run_impl
+```
+
+The two halves of AOTInductor's extern-kernel path disagree about
+`aten::index_add(Tensor self, int dim, Tensor index, Tensor source, *, Scalar
+alpha=1)`:
+
+- the generated wrapper calls
+  `aoti_torch_proxy_executor_call_function(…, num_ints=2, {0, 1}, num_tensors=4, …)`
+  — `dim=0` **and** the defaulted `alpha=1`;
+- the extern-node JSON in the `.pt2`
+  (`…wrapper.json`, node `buf2`) lists only four inputs — `self`, `dim`,
+  `index`, `source`. `alpha` is omitted because it sits at its default.
+
+`OSSProxyExecutor::call_function` walks the JSON, consumes the one int the
+schema mentions, then asserts it consumed all of them. Not a molnex defect:
+the wrapper serialiser and the node serialiser are both torch's, and they
+disagree on defaulted trailing arguments.
+
+**Reach.** Anything exported through AOTI whose graph contains the
+*functional* `Tensor.index_add`. In-tree that is
+`molrep/embedding/angular.py:200` (the only functional use; the other 227
+call sites are the in-place `index_add_`) plus the interface fixture
+`interface/tests/generate_fixtures.py:125,133`. The fixture is what the
+ctest exports, which is why the failure surfaces there first.
+
+**Status.** Open. The interface ctest under the CI filter is 68/69 because
+of it. Not to be papered over by excluding the test — the exclusion would
+hide a real export limitation, not a flaky case.
+
+Related: `compile-no-graph-breaks`, and the k=1 `torch.bmm` int32 overflow
+(pytorch/pytorch#196431) — same family of upstream defect, found the same way.
