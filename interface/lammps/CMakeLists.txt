@@ -19,7 +19,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(molnexplugin LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+# C++20, not 17: the ATen headers of the pinned torch (>=2.14, pyproject)
+# hard-`#error` below C++20 and use std::strong_ordering, string_view's
+# starts_with/ends_with and constrained members. Matches
+# src/molix/op/CMakeLists.txt, which is already on 20.
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
