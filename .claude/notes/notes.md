@@ -510,7 +510,9 @@ model silent garbage), fp32 and fp64 alike — a PyTorch bug that MACE exposes.
 `TORCH_DISABLE_NATIVE_JIT=1` (cuBLAS fallback) makes the official fp32 forces at
 8 319 atoms agree with molnex fp64 to 2e-4 eV/Å again. Unfixed upstream as of
 2026-09-09 (kernel unchanged on `main`; nightly 2.15.0.dev20260908+cu130
-reproduces, job 2198256); issue draft in the lab experiment's
+reproduces, job 2198256). Fix submitted upstream as
+https://github.com/pytorch/pytorch/pull/196431 (int64 offsets + regression
+test); issue draft in the lab experiment's
 `knowledges/pytorch-issue-bmm-outer-product-int32.md`. Forward energies stay
 right; the k-space electrostatics spreads the wrong gradient to every force.
 molnex is unaffected because `molrep.interaction.polar.uvu` reassociates the
