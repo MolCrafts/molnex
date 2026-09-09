@@ -1170,9 +1170,10 @@ three lines consume the columns (`prepare.py:471-472`, `encoder.py:147,156`),
 but `RawUnit` and its tests are built around them — a molhub design change,
 owned there, not here.
 
-## torch 2.14 AOTI drops a defaulted trailing `Scalar` from the extern-node schema (2026-09-09)
+## torch 2.14 AOTI miscounts a defaulted kwarg-only `Scalar`; fixed upstream (2026-09-09)
 
-`ctest -R bridge_dynamic_exec_matches_reference` fails against torch 2.14 with
+`ctest -R bridge_dynamic_exec_matches_reference` fails against torch **2.14**
+with
 
 ```
 Mismatch between ints consumed and num_ints, got int_id = 1, num_ints = 2
@@ -1186,25 +1187,44 @@ alpha=1)`:
 - the generated wrapper calls
   `aoti_torch_proxy_executor_call_function(…, num_ints=2, {0, 1}, num_tensors=4, …)`
   — `dim=0` **and** the defaulted `alpha=1`;
-- the extern-node JSON in the `.pt2`
-  (`…wrapper.json`, node `buf2`) lists only four inputs — `self`, `dim`,
-  `index`, `source`. `alpha` is omitted because it sits at its default.
+- the extern-node JSON in the `.pt2` lists only `self`, `dim`, `index`,
+  `source`. `serialize_inputs` takes a kwarg-only argument only out of
+  `kwargs` (its positional branch is guarded by `not schema_arg.kwarg_only`),
+  so a kwarg-only argument left at its default is dropped.
 
-`OSSProxyExecutor::call_function` walks the JSON, consumes the one int the
-schema mentions, then asserts it consumed all of them. Not a molnex defect:
-the wrapper serialiser and the node serialiser are both torch's, and they
-disagree on defaulted trailing arguments.
+`OSSProxyExecutor::call_function` then walks the JSON, consumes the one int
+the schema mentions, and asserts it consumed all of them.
 
-**Reach.** Anything exported through AOTI whose graph contains the
-*functional* `Tensor.index_add`. In-tree that is
-`molrep/embedding/angular.py:200` (the only functional use; the other 227
-call sites are the in-place `index_add_`) plus the interface fixture
-`interface/tests/generate_fixtures.py:125,133`. The fixture is what the
-ctest exports, which is why the failure surfaces there first.
+**Already fixed upstream.** On torch nightly `2.15.0.dev20260908` the same
+fallback op is emitted with `num_ints=0` — the wrapper no longer counts the
+defaulted kwarg-only Scalar — and both the minimal reproducer and this ctest
+pass unmodified. The three Python functions involved
+(`FallbackKernel.export_extern_kernel_node`, `serialize_inputs`,
+`generate_extern_kernel_args_decl_if_needed`) are byte-identical between 2.14
+and that nightly, so the change is on the argument-collection side feeding
+them. No PR was opened: there is nothing left to fix upstream.
 
-**Status.** Open. The interface ctest under the CI filter is 68/69 because
-of it. Not to be papered over by excluding the test — the exclusion would
-hide a real export limitation, not a flaky case.
+**Reproducer** (`.scratch/aoti-alpha/probe_scalar.py`): a namespaced custom op
+declared with an explicit schema ending in `*, Scalar alpha=3`, made an
+inductor fallback, exported with `aoti_compile_and_package`. Fails on 2.14,
+passes on the nightly. Note that `torch.library.custom_op` infers **SymInt**
+for an `int` annotation, which takes a different path and does *not*
+reproduce — the schema has to be spelled out.
 
-Related: `compile-no-graph-breaks`, and the k=1 `torch.bmm` int32 overflow
-(pytorch/pytorch#196431) — same family of upstream defect, found the same way.
+**Reach while molnex is on 2.14.** Anything exported through AOTI whose graph
+contains the *functional* `Tensor.index_add`: `molrep/embedding/angular.py:200`
+(the only functional use; the other 227 call sites are the in-place
+`index_add_`, which export functionalises back to the same node) and the
+interface fixture `interface/tests/generate_fixtures.py:125,133`. Two
+molnex-side workarounds were measured and both fail: passing `alpha=1`
+explicitly (FX normalises it back to the default before serialisation) and
+switching to `index_add_` (functionalised back to `aten::index_add`).
+
+**Status.** The interface ctest under the CI filter is 68/69 on torch 2.14 and
+69/69 once torch carries the fix. Not to be papered over by excluding the
+test — the exclusion would outlive the torch pin.
+
+Related: `compile-no-graph-breaks` (why `index_add` is an inductor fallback in
+the first place), and the k=1 `torch.bmm` int32 overflow
+(pytorch/pytorch#196431) — same family, found the same way, but that one *is*
+still open upstream.
