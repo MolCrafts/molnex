@@ -692,6 +692,29 @@ fixes it reports **0**. Every other `config.ftype` in the tree is an
 `nn.Linear(..., dtype=config.ftype)` in a constructor, which is correct and not
 on a traced path.
 
+**The same sweep, widened to the other forbidden sources** (2026-09-18). Flag
+`.item()` / `.tolist()` / `nonzero()` and `int(...)` / `float(...)` / `bool(...)`
+of a non-literal, in the same set of runtime methods, over `molzoo/rondo`,
+`molrep/chem`, `molpot/forcefield`, `molix/core/steps`, `molix/autograd` and
+`molix/data`. Nine candidates, and **none is a hot-path hazard** — worth writing
+down because the sweep will keep reporting them:
+
+- Seven are `int(x.shape[0])` (or `int(graphs.batch_size[0])`): reading a
+  **static shape**, not a tensor value. Under the static-shape MD/training
+  default dynamo constant-folds these, which is why Rondo's traced half measures
+  1 graph / 0 breaks with them present. A shape read is not a sync.
+- Two are `molix/data/residual.py`'s unsupported-Z diagnostic —
+  `bool(illegal.any())` and `z_long[illegal].tolist()`, a host sync and a
+  boolean-mask index. They are in a `BatchTask.execute`, and
+  `datamodule._CollateFn` runs the batch tasks **before** `batch_to`, so they
+  operate on CPU tensors in the collate (in a DataLoader worker), never on the
+  compiled path. Not a device sync, and not in the compiled region.
+
+So the honest summary of the classification is: a sweep of this kind cannot tell
+a shape read from a value read, or a collate-time task from a traced one. Read
+the hit before believing it, and keep the two facts that decide it — static
+shapes are the default, and batch tasks precede `batch_to`.
+
 <!-- mol:note:topic:compile-no-graph-breaks -->
 ## [2026-09-03] Everything compiles, zero graph breaks (user rule)
 
