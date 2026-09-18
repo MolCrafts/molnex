@@ -15,7 +15,7 @@ weight-loadable, E/F-faithful native port — every block bit-exact vs official
 on CPU, full-model 7e-7 eV / 4e-6 eV·Å, all of 01's code criteria verified).
 
 This step takes the standalone `MACEOMol` (which today consumes raw tensors via
-`MACEOMol.energy_forces(positions, Z, edge_index, batch, total_charge,
+`MACEOMol.energy_forces(positions, Z, pair_index, batch, total_charge,
 total_spin, ...)`) and wires it into the **molnex runtime contract**:
 
 1. **Pipeline integration (ac-008, carried from 01)** — expose `MACEOMol` as a
@@ -41,14 +41,14 @@ total_spin, ...)`) and wires it into the **molnex runtime contract**:
 Same model as 01 — MACE equivariant message passing (Batatia et al., NeurIPS
 2022, arXiv:2206.07697), OMOL variant. No new physics; this step is plumbing +
 the CG-basis convention swap. The post-collate batch schema and edge convention
-(`edge_index[:,0]=source/sender`, `edge_index[:,1]=target/receiver`,
+(`pair_index[:,0]=source/sender`, `pair_index[:,1]=target/receiver`,
 `bond_diff = pos[target] − pos[source]`) are defined in CLAUDE.md "Architecture".
 
 ## Design
 
 - **Encoder adapter**: a thin `forward(td: TensorDict) -> TensorDict` wrapper that
   reads `td["atoms","Z"]`, `td["atoms","pos"]`, `td["atoms","batch"]`,
-  `td["edges","edge_index"]`, and per-graph `total_charge` / `total_spin` from
+  `td["pairs","pair_index"]`, and per-graph `total_charge` / `total_spin` from
   `td["graphs", ...]`, calls the existing `MACEOMol` core, and writes node /
   energy outputs back into the batch. Reuse the existing `energy_forces` math;
   do not duplicate the forward.

@@ -39,10 +39,10 @@ which `MD` calls itself on every setter. `molix.md.ForceField` re-exports
 `molpy.ForceField` for readers who want the base type.
 
 Two things are `MD`'s own policy rather than a component's, because both have to
-be re-applied on every one of those rebuilds: `set_compiler(compiler)` compiles
-the potential's hot core, and `MD(dtype, potential_dtype=…)` evaluates the
-potential at a second precision while the trajectory stays at `dtype`. Both are
-described below.
+survive every one of those rebuilds: `set_compiler(compiler)` compiles the
+derivative op `MD` composes over the potential for each run, and `MD(dtype,
+potential_dtype=…)` evaluates the potential at a second precision while the
+trajectory stays at `dtype`. Both are described below.
 
 Units are (amu, Å, fs); energy in amu·Å²/fs². **There is no `energy_scale`
 keyword**: the factor is derived from the ForceField's own unit style by
@@ -73,12 +73,15 @@ A field's numbers live in three places, so `MD` moves all three: the container's
 parameter tables (the per-atom ε / σ / q a `Potentials` reads live off the
 ForceField on every call, restated by `ForceField.to_dtype`), the assembled
 module's own buffers and any MLIP weights (`.to(potential_dtype)`), and the
-geometry handed over per step — positions, `graphs.cell`, the edge columns —
-cast on the way in, with energy, forces and virial cast back to `dtype` on the
-way out. Partial casts are not an option: molpot's Coulomb kernels compare the
-dtype of the charges and pair distances against the positions' and raise rather
-than promote. The neighbour list stays on the MD dtype throughout; it owns
-`edges` and validates every update against its own build precision.
+geometry handed over — positions and `graphs.cell` cast per step, the edge
+columns written at `potential_dtype` by the neighbour list itself
+(`NeighborList.geometry_dtype`, which `set_neighbors` sets; its cast shifts
+are refreshed in place on each rebuild, never per step) — with energy, forces
+and virial cast back to `dtype` on the way out. Partial casts are not an
+option: molpot's Coulomb kernels compare the dtype of the charges and pair
+distances against the positions' and raise rather than promote. The neighbour
+list's own buffers stay on the MD dtype throughout; it owns `edges` and
+validates every update against its own build precision.
 
 Why the split exists at all: the quantization-as-thermal-noise study
 (`molix.quant`) runs an fp64 integrator over an fp32 potential, because
@@ -117,7 +120,7 @@ Migration: `MD(rebuild_every=)` and `NeighborListHook` are removed —
 the cadence lives on the list now.
 
 A pure-GPU compiled bulk run composes the primitives directly — compile the
-potential's hot core with `set_compiler`, keep the rebuild eager:
+force op with `set_compiler`, keep the neighbour rebuild eager:
 
 ```python
 from molix.compile import Compiler
@@ -142,85 +145,111 @@ md = (
     .set_neighbors(nl)
     .set_integrator(VelocityVerletIntegrator(4.0))
     .set_hooks([VelocityInitHook(MaxwellBoltzmann(172.0, seed=1))])
-    .set_compiler(Compiler())            # or Compiler(cuda_graphs=True)
+    .set_compiler(Compiler(cuda_graphs=True))   # the MD build of choice
     .to("cuda")
 )
 state = md.run(system, n_steps=25_000)
 ```
 
 `set_compiler` is a setter like the others, and it has to be: every `set_*`
-call re-runs `ff.to_potentials()`, so a compiled core installed by hand on the
+call re-runs `ff.to_potentials()`, so a build installed by hand on one
 container would survive exactly until the next setter and the run would go
-eager with nothing said. Passing the compiler to `MD` instead re-applies it
-after each rebuild, which is why the order of the setters above does not
+eager with nothing said. Holding the compiler on `MD` instead applies it to
+the op of every run, which is why the order of the setters above does not
 matter. The compiler is structural — any `callable -> callable`;
 `molix.compile.Compiler` is molnex's, with `Compiler(cuda_graphs=True)` the
-fixed-shape CUDA-graph preset the list's fixed capacity was built for.
+fixed-shape CUDA-graph preset the list's fixed capacity was built for — and
+the recommended MD compiler, because **static shapes are the MD default**:
+the op is handed the list's whole capacity buffer on every step (dead rows
+included — `(0, 0)` self-loops displaced by the dead-edge shift, which price
+exactly nothing), so `E` never changes between rebuilds and the whole op can
+be recorded once and replayed. `MD` applies the replay contract for you (a
+`cudagraph_mark_step_begin()` before each call, outputs cloned out of the
+graph's static pool) whenever the installed compiler reports `cuda_graphs`;
+the neighbour-list rebuild itself stays eager, outside the captured region.
 
-What gets compiled is `Potentials`' classical `(system, pos) -> (energy,
-forces)` core. A `lj/cut` + bonded field traces as one graph with zero breaks;
-a field that also declares `pair:coulomb` shows exactly one, at the
-`torch.autograd.grad` seam in `molpot/derivation/force.py` — Coulomb has no
-closed-form force — and that break is named and owned there rather than
-appearing unexplained mid-kernel. The once-per-topology bind (exclusion table,
-net-charge / edge-orientation / unwrapped-molecule checks) happens *outside*
-the compiled region on the first call, so the core is one graph from the start.
+What `MD.run` compiles is one `molix.autograd.Derivative` composed over the
+assembled potential at `bind_work` — `wrt=("atoms.pos",)` for NVE,
+`("atoms.pos", "graphs.strain")` under a barostat — the same op you would
+write by hand:
+
+```python
+from molix.autograd import Derivative
+
+pots = ff.to_potentials()
+nve = Derivative(pots, wrt=("atoms.pos",))                 # graphs.energy, atoms.forces
+npt = Derivative(pots, wrt=("atoms.pos", "graphs.strain"))  # + graphs.virial (1, 3, 3)
+```
+
+The op owns the position and strain leaves, rebuilds the edge geometry from
+them, differentiates once and puts the batch back as it found it; it is the
+compile boundary, and there is no barostat-specific core on `Potentials`. An
+`lj/cut` + bonded field and a periodic Coulomb field each trace as one graph
+with zero breaks in inference, forces alone and forces with the virial. The
+compile sequence is always the same three steps, and `MD` does them for you:
+`bind_cell` (through `rebind_cell`, once per run and after every barostat
+update), **one eager evaluation** of the op on the working batch (the
+once-per-topology bind — exclusion table, net-charge / edge-orientation /
+unwrapped-molecule checks — an mlip's element-table check and any k-space grid
+sizing are host-side work a trace cannot do), then `compiler(op)`.
 
 `benchmarks/verify_md_ljcut_nve.py` drives all of this from the command line:
 `--compile` / `--no-compile`, `--cuda-graphs`, and `--potential-precision fp32`
 for the split-precision arm above.
 
-### Compiling an MLIP core
+### Compiling an MLIP field
 
-A neural potential mounted with `def_pairstyle(model)` compiles through the same
-primitive, `compile_core`, but the compiled build is installed **on the model** —
-not on the `Potentials` container, which `MD` rebuilds on every setter call. The
-model is the one object that survives those rebuilds, so an MLIP core installed
-by hand does survive them, unlike a classical one:
+A neural potential mounted with `def_pairstyle(model)` compiles through the
+same op: `MD` composes `Derivative(pots, wrt=...)` over the container whose
+`energy` hands the batch to the model's own `energy`, evaluates it once eagerly
+and compiles it:
 
 ```python
-pots = ff.to_potentials()
-pots.bind_cell(cell)        # size the reciprocal grids + capacity check
-pots.calc_energy(work)      # one eager forward: element table + grids
-pots.compile_core(Compiler(dynamic=True))
 md = (
     MD(torch.float64)
-    .set_forcefield(ff)     # every setter rebuilds Potentials; the core survives
+    .set_forcefield(ff)             # def_pairstyle(model), units="metal"
     .set_neighbors(nl)
     .set_integrator(VelocityVerletIntegrator(0.5))
+    .set_compiler(Compiler(cuda_graphs=True))
 )
 ```
 
-`bind_cell` and the eager forward come first because both do work a traced call
-cannot: sizing a k-space grid and validating the element table each read a
-tensor back to the host. `compile_core` refuses with a `RuntimeError` if that
-eager forward has not happened.
+Outside `MD` the same three steps are spelled by hand — bind the cell, run
+one eager forward, then compile the composed op:
 
-`md.set_compiler(Compiler(dynamic=True))` reaches the same seam — it forwards to
-`pots.compile_core` after each rebuild — and is the shorter spelling once the
-eager forward above has run. Attach it to a wired `MD` (force field *and*
-integrator already set) before that forward has happened and it raises the same
-`RuntimeError`, which is the intended failure: an MLIP whose element table was
-never validated cannot be traced, and a silent eager fallback would be reported
-as a compiled run.
+```python
+pots = ff.to_potentials()
+pots.bind_cell(cell)                                   # size the reciprocal grids + capacity check
+op = Derivative(pots, wrt=("atoms.pos", "graphs.strain"))
+op(work)                                               # one eager forward: element table + grids
+op = Compiler(cuda_graphs=True)(op)
+```
 
-Use `dynamic=True` on the MD path. The neighbour list exposes only its live
-edges each step, so the edge count `E` changes with every rebuild; under static
-shapes dynamo would recompile on each new `E`, while a dynamic shape traces `E`
-symbolically and keeps one graph. (Fixed-capacity static edges plus whole-step
-CUDA-graph capture is a different design, not this one.)
+`bind_cell` and the eager forward come first because both do work a traced
+call cannot: sizing a k-space grid and validating the element table each read
+a tensor back to the host, and a traced call skips the element gate rather
+than performing it.
 
-The compiled region is the potential's energy core only. Forces still come from
-one `torch.autograd.grad` **outside** it — a deliberate, named seam in
-`molpot.derivation.force` — so a whole NPT step is "compiled core + that one
-break", not zero breaks. Force-supervised *training* needs a second backward,
-which is not compilable at all; keep training on the eager core.
+Do **not** reach for `dynamic=True` on the MD path. The neighbour list binds
+its full fixed-capacity buffer, so `E` is the same on every step and every
+rebuild; a static trace is the one that captures, and `Compiler(cuda_graphs=True)`
+is what the fixed capacity was built for (the E+F step of a small periodic
+system is launch-bound, and a replayed graph is the only thing that removes
+launches — see `docs/molix/explanation/throughput-and-compilation.md` for the
+measured numbers). `dynamic=True` is for **ragged training** batches that are
+not padded to fixed shapes — nowhere else.
+
+The compiled region is the whole op — leaves, geometry, energy and the one
+`torch.autograd.grad`; AOTAutograd supplies the energy's backward inside it.
+In inference (`MD.run` is under `torch.no_grad()`) it is one dynamo graph with
+no break; force-supervised *training* returns the forces attached to the
+parameters and stock torch breaks once at the leaf (pytorch/pytorch#196653).
 
 See `benchmarks/verify_md_ljcut_nve.py` for the full melt-benchmark version
 with energy-conservation checks.
 
 A batch `TensorDict` can carry the live neighbour buffers directly —
-`build(batch)` binds `edges.edge_index` / `edges.shifts` **by reference**, so
+`build(batch)` binds `edges.pair_index` / `edges.shifts` **by reference**, so
 every in-place rebuild is visible through the batch with no re-binding:
 
 ```python

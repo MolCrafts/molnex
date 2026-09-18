@@ -70,7 +70,7 @@ Do not claim measured performance on a different GPU or exactly 10,000 atoms.
    blocking is not a universal speed optimization.
 
 6. **Neighbor rebuilding remains quadratic in the default pair backend.**
-   `molix/batch/neighbor.py` forces candidate capacity N(N-1)/2. At 35,400
+   `molix/neighbor.py` forces candidate capacity N(N-1)/2. At 35,400
    atoms the measured rebuild peak is 28.34 GiB, even after convolution and
    field memory improvements. Existing `NeighborList(bin=0.0)` is a
    pure-PyTorch cell-list alternative; no new neighbor op is proposed.

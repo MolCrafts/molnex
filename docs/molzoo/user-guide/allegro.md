@@ -55,10 +55,10 @@ $$
 MolNex stores this as:
 
 ```text
-edge_index[:, 0] = i
-edge_index[:, 1] = j
-edge_diff        = pos[j] - pos[i]
-edge_dist        = ||edge_diff||
+pair_index[:, 0] = i
+pair_index[:, 1] = j
+pair_diff        = pos[j] - pos[i]
+pair_dist        = ||pair_diff||
 ```
 
 ## 2. Energy Decomposition
@@ -91,7 +91,7 @@ MolNex keeps this structure, but splits responsibilities:
 
 | Paper / reference model concept | MolNex owner |
 |---|---|
-| directed local environment | `molix.batch.NeighborList(symmetry=True)` |
+| directed local environment | `molix.data.NeighborList(symmetry=True)` |
 | edge representation | `molzoo.Allegro` |
 | edge energy readout | `molpot.heads.EdgeEnergyHead` |
 | force derivation and losses | downstream model / `molix` training path |
@@ -144,7 +144,7 @@ expensive. It increases tensor-product paths, not just feature length.
 | Symbol | Meaning | MolNex parameter or tensor |
 |---|---|---|
 | `N` | number of atoms | `batch["atoms", "Z"].shape[0]` |
-| `E` | number of directed edges | `batch["edges", "edge_index"].shape[0]` |
+| `E` | number of directed edges | `batch["pairs", "pair_index"].shape[0]` |
 | `L` | Allegro layer count | `num_layers` |
 | `F` | scalar track width | `num_scalar_features` |
 | `U` | tensor channel multiplicity | `num_tensor_features` |
@@ -261,7 +261,7 @@ $$
 MolNex implements this as:
 
 ```python
-tensor_basis = self.spherical_harmonics(edge_diff)
+tensor_basis = self.spherical_harmonics(pair_diff)
 v0_weights = self.env_embed_linear(twobody_scalar_embed)
 tensor_features = _make_weighted_channels(
     tensor_basis,
@@ -413,7 +413,7 @@ aggregation.
 ## 9. Hands-On: Build a Tiny Allegro Batch
 
 This section constructs a tiny directed graph by hand. In production, let
-`molix.batch.NeighborList(symmetry=True)` build the edge tensors.
+`molix.data.NeighborList(symmetry=True)` build the edge tensors.
 
 ```python
 import torch
@@ -429,7 +429,7 @@ pos = torch.tensor(
 )
 Z = torch.tensor([8, 1, 1], dtype=torch.long)
 
-edge_index = torch.tensor(
+pair_index = torch.tensor(
     [
         [0, 1],
         [1, 0],
@@ -439,10 +439,10 @@ edge_index = torch.tensor(
     dtype=torch.long,
 )
 
-src = edge_index[:, 0]
-dst = edge_index[:, 1]
-edge_diff = pos[dst] - pos[src]
-edge_dist = edge_diff.norm(dim=-1)
+src = pair_index[:, 0]
+dst = pair_index[:, 1]
+pair_diff = pos[dst] - pos[src]
+pair_dist = pair_diff.norm(dim=-1)
 
 batch = TensorDict(
     atoms=TensorDict(
@@ -451,11 +451,11 @@ batch = TensorDict(
         batch=torch.zeros(len(Z), dtype=torch.long),
         batch_size=[len(Z)],
     ),
-    edges=TensorDict(
-        edge_index=edge_index,
-        edge_diff=edge_diff,
-        edge_dist=edge_dist,
-        batch_size=[len(edge_index)],
+    pairs=TensorDict(
+        pair_index=pair_index,
+        pair_diff=pair_diff,
+        pair_dist=pair_dist,
+        batch_size=[len(pair_index)],
     ),
     graphs=TensorDict(
         num_atoms=torch.tensor([len(Z)]),
@@ -472,7 +472,7 @@ hand you; nothing here is a molecule-specific subclass.
 The directed average neighbor count for this toy batch is:
 
 ```python
-avg_num_neighbors = len(edge_index) / len(Z)
+avg_num_neighbors = len(pair_index) / len(Z)
 ```
 
 ## 10. Run the Encoder
@@ -491,7 +491,7 @@ encoder = Allegro(
 )
 
 batch = encoder(batch)
-edge_features = batch["edges", "edge_features"]
+edge_features = batch["pairs", "edge_features"]
 print(edge_features.shape)
 print(encoder.output_dim)
 ```
@@ -589,13 +589,13 @@ Then train with `molix.core.trainer.Trainer`.
 Wrong edge direction:
 
 ```text
-edge_diff = pos[source] - pos[target]  # wrong for MolNex Allegro
+pair_diff = pos[source] - pos[target]  # wrong for MolNex Allegro
 ```
 
 Correct:
 
 ```text
-edge_diff = pos[target] - pos[source]
+pair_diff = pos[target] - pos[source]
 ```
 
 Using half edges:

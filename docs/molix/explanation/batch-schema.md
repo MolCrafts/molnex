@@ -6,13 +6,13 @@ shapes are intentionally different — you must know which side you're on:
 | Stage | Container | Example access |
 |---|---|---|
 | At rest (a store on disk, or built in memory) | **molpy `Frame`** | `frame["atoms"]["x"]`, `frame.meta["energy"]` |
-| In the model (output of `collate_molecules`) | **nested `TensorDict`** | `batch["atoms", "Z"]`, `batch["edges", "edge_index"]` |
+| In the model (output of `collate_molecules`) | **nested `TensorDict`** | `batch["atoms", "Z"]`, `batch["pairs", "pair_index"]` |
 
 The single conversion point is `collate_molecules` (invoked by
 `DataModule._CollateFn`). Tuple-key access like `batch["atoms", "Z"]` is a
 `TensorDict`-only feature and does not work on a `Frame`.
 
-The batch is a **`tensordict.TensorDict`**; `molix.batch.TensorFrame` is its
+The batch is a **`tensordict.TensorDict`**; `molix.data.TensorFrame` is its
 typed view, declaring the namespaces as fields and wrapping an existing batch
 without copying. Neither owns storage or behaviour — what makes a batch a
 "molecular batch" is the namespace layout (`atoms` / `edges` / `graphs`, plus
@@ -36,7 +36,7 @@ decides where it lands in the batch — nothing is declared:
 - an `angles` / `propers` / `impropers` block → its own namespace of 1-D
   index columns (improper centre is `atomi`)
 
-`FrameStoreDataset[i]` skips the `Frame` entirely and returns frame `i` as a
+A packed dataset may skip the `Frame` entirely and return sample `i` as a
 one-frame batch `TensorDict`, read straight off the store's mmapped columns.
 
 The cutoff graph is not part of a frame: it is a function of positions and a
@@ -54,10 +54,10 @@ TensorDict (batch_size=[])
 │   ├── pos: FloatTensor[N_total, 3]
 │   ├── batch: LongTensor[N_total]       # graph membership
 │   └── <atom-level targets, e.g. forces>
-├── "edges": TensorDict (batch_size=[E_total])
-│   ├── edge_index: LongTensor[E_total, 2]
-│   ├── edge_diff: FloatTensor[E_total, 3]
-│   └── edge_dist: FloatTensor[E_total]
+├── "pairs": TensorDict (batch_size=[E_total])
+│   ├── pair_index: LongTensor[E_total, 2]
+│   ├── pair_diff: FloatTensor[E_total, 3]
+│   └── pair_dist: FloatTensor[E_total]
 ├── "graphs": TensorDict (batch_size=[B])
 │   ├── num_atoms: LongTensor[B]
 │   └── <graph-level targets, e.g. energy, U0>
@@ -90,7 +90,7 @@ key addition — the batch object is mutated in place, never replaced.
 ```python
 batch["atoms", "Z"]           # atomic numbers (N_total,)
 batch["atoms", "pos"]         # positions (N_total, 3)
-batch["edges", "edge_index"]  # edge pairs (E_total, 2)
+batch["pairs", "pair_index"]  # edge pairs (E_total, 2)
 batch["graphs", "energy"]     # graph-level target (B,)
 ```
 
@@ -102,8 +102,8 @@ batch["graphs", "energy"]     # graph-level target (B,)
   decides where it lands. A column of the frame's `atoms` block becomes an
   `atoms` leaf; a frame `meta` scalar becomes a `graphs` leaf. A new target is
   a new frame column and nothing else.
-- `edge_index` is always `[E, 2]` with `[:, 0] = source`, `[:, 1] = target`, and
-  `edge_diff = pos[target] - pos[source]`. Per-molecule edge indices are rebased
+- `pair_index` is always `[E, 2]` with `[:, 0] = source`, `[:, 1] = target`, and
+  `pair_diff = pos[target] - pos[source]`. Per-molecule edge indices are rebased
   onto the concatenated atom numbering during collation.
 - Models receive the whole batch and access nested keys as needed.
 - Loss functions receive `(predictions, batch)` and read targets from the batch.

@@ -1,7 +1,7 @@
 # Train a Graph Model
 
 This tutorial trains against MolNex's nested `TensorDict` batch format. In real
-data pipelines, `molix.batch.collate.collate_molecules` creates this structure
+data pipelines, `molix.data.collate.collate_molecules` creates this structure
 from flat molecule samples. Here, the batch is built directly.
 
 ## 1. Define the Model
@@ -52,9 +52,9 @@ atoms = TensorDict(
 )
 
 edges = TensorDict(
-    edge_index=torch.zeros(0, 2, dtype=torch.long),
-    edge_diff=torch.zeros(0, 3),
-    edge_dist=torch.zeros(0),
+    pair_index=torch.zeros(0, 2, dtype=torch.long),
+    pair_diff=torch.zeros(0, 3),
+    pair_dist=torch.zeros(0),
     batch_size=[0],
 )
 
@@ -64,7 +64,7 @@ graphs = TensorDict(
     batch_size=[1],
 )
 
-batch = TensorDict(atoms=atoms, edges=edges, graphs=graphs, batch_size=[])
+batch = TensorDict(atoms=atoms, pairs=edges, graphs=graphs, batch_size=[])
 ```
 
 This is one methane molecule with no edges — enough to exercise the training

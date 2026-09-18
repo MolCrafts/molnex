@@ -9,16 +9,16 @@ created: 2026-06-10
 
 ## Summary
 
-当前数据通路对每个 batch 先经 `PackedCache.unpack_sample` 逐样本重建 flat dict，再由 `collate_molecules` 重新 `torch.cat` 拼回大张量 —— 对本就以 packed 连续布局存盘的缓存而言是一次"拆了再拼"的纯开销。本规格新增 `collate_packed` 快速路径：给定样本索引列表，直接按 `atom_ptr` / `edge_ptr` 切片 PackedCache 的 packed 张量、向量化重定基 `edge_index`、按 `TargetSchema` 路由 targets，一步构出嵌套 `atoms/edges/graphs` TensorDict。其输出与对相同索引逐样本 dict 调用 `collate_molecules` 的结果**逐叶完全相等**（等价性 oracle，`src/molix/data/collate.py:62-174`）。数据集侧新增只读 `packed_view()` 访问器，使 collate 代码不再触碰私有 `_payload`；`DataModule` 在构造期检测 packed 能力并自动路由，非 packed 数据集与 DDP 场景完全回退到现有逐样本路径，用户可见行为（batch 内容、dtype、`batch_nodes` 后处理、spawn worker 可 pickle 性）不变。
+当前数据通路对每个 batch 先经 `PackedCache.unpack_sample` 逐样本重建 flat dict，再由 `collate_molecules` 重新 `torch.cat` 拼回大张量 —— 对本就以 packed 连续布局存盘的缓存而言是一次"拆了再拼"的纯开销。本规格新增 `collate_packed` 快速路径：给定样本索引列表，直接按 `atom_ptr` / `edge_ptr` 切片 PackedCache 的 packed 张量、向量化重定基 `pair_index`、按 `TargetSchema` 路由 targets，一步构出嵌套 `atoms/edges/graphs` TensorDict。其输出与对相同索引逐样本 dict 调用 `collate_molecules` 的结果**逐叶完全相等**（等价性 oracle，`src/molix/data/collate.py:62-174`）。数据集侧新增只读 `packed_view()` 访问器，使 collate 代码不再触碰私有 `_payload`；`DataModule` 在构造期检测 packed 能力并自动路由，非 packed 数据集与 DDP 场景完全回退到现有逐样本路径，用户可见行为（batch 内容、dtype、`batch_nodes` 后处理、spawn worker 可 pickle 性）不变。
 
 ## Design
 
-**等价性 oracle 是唯一正确性标准。** `collate_packed(view, indices, target_schema)` 的输出必须与 `collate_molecules([dataset[i] for i in indices], target_schema)` 在键集合、每叶 `torch.equal`、dtype、各层 `batch_size` 上全部一致。`collate_molecules` 只消费 `Z`、`pos`、`edge_index`、`bond_diff`、`bond_dist`、`targets.*` 并忽略其余键 —— 快速路径同样只处理这组键。
+**等价性 oracle 是唯一正确性标准。** `collate_packed(view, indices, target_schema)` 的输出必须与 `collate_molecules([dataset[i] for i in indices], target_schema)` 在键集合、每叶 `torch.equal`、dtype、各层 `batch_size` 上全部一致。`collate_molecules` 只消费 `Z`、`pos`、`pair_index`、`bond_diff`、`bond_dist`、`targets.*` 并忽略其余键 —— 快速路径同样只处理这组键。
 
 **(a) `collate_packed`（`src/molix/data/collate.py`）。** 设 `idx` 为重映射后的 packed 索引张量，`B = len(indices)`：
 
-- 原子级：`counts = atom_ptr[idx+1] - atom_ptr[idx]`；`Z`/`pos` 取 `torch.cat` 的逐样本切片（视图 cat，无中间 dict），`Z` 与 `edge_index` 镜像 oracle 施加 `.long()`。`batch = repeat_interleave(arange(B), counts)`，偏移 `offsets = cumsum(counts) - counts`。
-- 边级：`e_counts = edge_ptr[idx+1] - edge_ptr[idx]`；拼接的 `(E, 2)` `edge_index` 两列同加 `repeat_interleave(offsets, e_counts).unsqueeze(1)`（向量化重定基）；`bond_diff` / `bond_dist` 同法切片拼接。schema 中无 edge 键时，构造与 `collate.py:149-156` **逐字节一致**的空边回退 TensorDict（`edge_index zeros(0,2) long`、`bond_diff zeros(0,3)`、`bond_dist zeros(0)`、`batch_size=[0]`）；含 0 边样本的混合 batch 走正常拼接分支（与 oracle 行为一致）。
+- 原子级：`counts = atom_ptr[idx+1] - atom_ptr[idx]`；`Z`/`pos` 取 `torch.cat` 的逐样本切片（视图 cat，无中间 dict），`Z` 与 `pair_index` 镜像 oracle 施加 `.long()`。`batch = repeat_interleave(arange(B), counts)`，偏移 `offsets = cumsum(counts) - counts`。
+- 边级：`e_counts = edge_ptr[idx+1] - edge_ptr[idx]`；拼接的 `(E, 2)` `pair_index` 两列同加 `repeat_interleave(offsets, e_counts).unsqueeze(1)`（向量化重定基）；`bond_diff` / `bond_dist` 同法切片拼接。schema 中无 edge 键时，构造与 `collate.py:149-156` **逐字节一致**的空边回退 TensorDict（`pair_index zeros(0,2) long`、`bond_diff zeros(0,3)`、`bond_dist zeros(0)`、`batch_size=[0]`）；含 0 边样本的混合 batch 走正常拼接分支（与 oracle 行为一致）。
 - targets：剥去点分前缀 `targets.`，按 `TargetSchema` **名称**路由（与 oracle 完全一致）：`atom_level` → cat 进 `atoms`；其余 → 从 `graphs` 桶 `index_select(0, idx)` 后复现 oracle 的 `reshape(-1)` / cat 语义，scalar 桶（python 标量 targets）经 `torch.tensor` 复现 oracle 的转换路径。`graphs` 层固定含 `num_atoms`（long）。
 - 急切报错：空 `indices` 抛与 oracle 同文案的 `ValueError`；schema 缺 `Z` 或 `pos` 时抛出指明 cache 来源与缺键的可操作 `ValueError`。
 
@@ -37,7 +37,7 @@ created: 2026-06-10
 
 - [x] Write failing equivalence tests for collate_packed vs collate_molecules (tests/test_molix/test_data/test_collate_packed.py): multi-sample with edges, edge-less samples mixed in, all-edge-less fallback, graph+atom targets per TargetSchema, scalar targets, SubsetDataset views, singleton batches — asserting torch.equal per leaf, same key sets, same dtypes, same batch_size attrs
 - [x] Implement PackedView and packed_view() accessors on _CacheBacked and SubsetDataset in src/molix/data/dataset.py (read-only; local→packed remap; cache.py untouched, no tensordict/TargetSchema import there)
-- [x] Implement collate_packed in src/molix/data/collate.py (vectorized edge_index rebase via repeat_interleave, batch column, TargetSchema routing, empty-edge fallback identical to collate.py:149-156, eager actionable ValueError)
+- [x] Implement collate_packed in src/molix/data/collate.py (vectorized pair_index rebase via repeat_interleave, batch column, TargetSchema routing, empty-edge fallback identical to collate.py:149-156, eager actionable ValueError)
 - [x] Write failing integration tests for DataModule fast-path routing in tests/test_molix/test_data/test_collate_packed.py: num_workers=0 and spawn num_workers=2 end-to-end, fallback for non-packed dataset, batch_nodes + ftype cast applied, collate callable pickles without captured payload tensors
 - [x] Implement _IndexDataset and _PackedCollateFn wiring in src/molix/data/datamodule.py (construction-time detection, DDP and non-packed fallback to _CollateFn, batch_nodes + batch_to post-steps, lazy view excluded from __getstate__, -01 batch_sampler passthrough preserved)
 - [x] Add Google-style docstrings with tensor shapes for collate_packed, PackedView, packed_view, _IndexDataset, _PackedCollateFn in src/molix/data/collate.py, src/molix/data/dataset.py, src/molix/data/datamodule.py

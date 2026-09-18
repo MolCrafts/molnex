@@ -14,23 +14,23 @@
 
 ## Batch construction
 
-::: molix.batch
+::: molix.data
 
-::: molix.batch.neighbor
+::: molix.neighbor
 
-::: molix.batch.collate
+::: molix.data.collate
 
-::: molix.batch.datamodule
+::: molix.data.datamodule
 
-::: molix.batch.sampler
+::: molix.data.sampler
 
-::: molix.batch.task
+::: molix.data.task
 
-::: molix.batch.pad
+::: molix.data.pad
 
-::: molix.batch.bond_adapter
+::: molix.data.bond_adapter
 
-::: molix.batch.valence_columns
+::: molix.data.valence_columns
 
 ## Run IO
 
@@ -40,15 +40,15 @@
 
 ## Storage
 
-::: molix.store
+::: molix.data
 
-::: molix.store.cache
+::: molix.data.cache
 
-::: molix.store.dataset
+::: molix.data.dataset
 
-::: molix.store.frame_store
+::: molix.data.frame_store
 
-::: molix.store.frame_store_view
+::: molix.data.frame_store_view
 
 ## Force-field export
 

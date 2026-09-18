@@ -5,7 +5,7 @@ param tables. Concrete forms inherit it — there is no
 `ForceField.class_i()` façade.
 
 ```python
-from molix.batch import NeighborList
+from molix.data import NeighborList
 from molpot.forcefield import OPLSAAForceField, Parameterizer
 
 template = OPLSAAForceField()
@@ -46,7 +46,7 @@ ff = (
         bonds={"k": k, "r0": r0},
         angles={"k": ka, "theta0": theta0},
         propers={"k1": k1, "k2": k2, "k3": k3, "k4": k4},
-        atoms={"q": q, "epsilon": eps, "sigma": sig},
+        atoms={"charge": q, "epsilon": eps, "sigma": sig},
     )
 )
 ```

@@ -167,6 +167,13 @@ Inside MolNex, the winning combo is the named `cuda_graphs` preset — use
 `trainer.compile(cuda_graphs=True)` (or `molix.compile.Compiler.CUDA_GRAPH_PRESET`)
 instead of spelling out the four flags, so the config can't drift.
 
+A model that derives forces is the same object: `Derivative(model,
+wrt=("atoms.pos",))` or `PiNetPotential(..., wrt=("atoms.pos",))` — one
+`nn.Module`, compiled with the same `Compiler(...)(model)` /
+`trainer.compile(...)` and handed to `Trainer(...)` like any other. There is
+no separate compile seam for the force path: leaves, energy and the one
+`autograd.grad` are one region.
+
 **Migration note.** `PiNetPotential.compile(...)` has been removed. It shadowed
 `nn.Module.compile`, whose contract is different: the base method compiles
 **in place** and returns `None`, so `model.compile(...)` without rebinding the
@@ -174,11 +181,11 @@ result silently kept running eager. Use `molix.compile.Compiler` whenever you
 need a new compiled object (`model = Compiler(...)(model)`), and
 `nn.Module.compile` only for its in-place effect.
 
-`cuda_graphs=True` additionally: registers `PadMolecularBatch` (pads atoms→
-`max_atoms`, edges→`max_edges`, with a masked ghost region so energy and
+`cuda_graphs=True` additionally: compose `FrameCollator` with `MoleculePadder` (pads atoms→
+`max_atoms`, edges→`max_pairs`, with a masked ghost region so energy and
 real-atom forces are numerically identical to the unpadded batch — see
-`tests/test_molix/test_batch/test_pad.py`), and sets `train_drop_last=True` so the
-graph count is fixed too. Set `max_atoms` / `max_edges` above the largest
+`tests/test_molix/test_data/test_pad.py`), and sets `train_drop_last=True` so the
+graph count is fixed too. Set `max_atoms` / `max_pairs` above the largest
 per-batch counts; overflow raises rather than truncating.
 
 ## Real Trainer run of the winning combo
@@ -230,8 +237,78 @@ Three things worth knowing:
    fp32 is 1.75x fp64. Anyone benchmarking precision *in eager mode* on a small
    system will wrongly conclude precision does not matter.
 
-Static shapes come free for MD here. Open-system runs freeze the neighbour
-list for the trajectory; periodic runs rebuild it on a cadence into
-fixed-capacity buffers (`molix.md.NeighborList` — contents change in
-place, shapes never do). Either way no padding registry is needed, unlike the
-training path.
+Static shapes come free for MD here, and they are the MD default. Open-system
+runs freeze the neighbour list for the trajectory; periodic runs rebuild it on
+a cadence into fixed-capacity buffers (`molix.md.NeighborList` — contents
+change in place, shapes never do), and the MD driver hands the composed
+derivative op that **whole** buffer on every step, dead rows included (they sit
+at the dead-edge displacement and price exactly nothing). Either way no padding
+registry is needed, unlike the training path, and `Compiler(cuda_graphs=True)`
+is the MD compiler to use: `MD` applies the replay contract (a
+`cudagraph_mark_step_begin()` before each call, batch-side outputs cloned out
+of the static pool) whenever the installed compiler reports `cuda_graphs`, and
+keeps the rebuild eager, outside the captured region. `dynamic=True` is for
+ragged training batches that are not padded — not for MD. The measured
+MD-path numbers (eager vs default inductor vs the CUDA-graph preset, through
+the real neighbour list and driver op) live in `.claude/notes/notes.md`, topic
+`compile-no-graph-breaks`.
+
+## Compiling the step
+
+`Trainer.compile(...)` compiles the training **step**, not the model
+(`step=True`, the default): the traced body of `train_step.forward_loss` and
+`eval_step.forward_loss` — `predictions = model(batch)` followed by
+`compute_loss` — is swapped in place for its `torch.compile` wrapper under
+the `Compiler` config. Dynamo captures forward and objective as one region and
+AOTAutograd emits its backward, so `loss.backward()` replays a compiled graph
+too. Everything else in `DefaultTrainStep.on_train_batch` stays eager Python
+around the call: the accumulation window, `GradScaler`, the
+`on_after_backward` hooks, the optimizer and the LR scheduler. The autocast
+context wraps the compiled call from *outside* — dynamo guards on the autocast
+state and captures the ops under it, and the `config[...]` read that resolves
+it never enters the trace. `Trainer.smoke` warms up the same attribute `train`
+runs, so the smoke pass compiles exactly the training graph (and, through
+`eval_step.on_eval_batch`, the eval graph).
+
+```python
+model = Derivative(MaceMatpes(...), wrt=("atoms.pos",))       # or MaceMatpes(..., wrt=...)
+trainer = Trainer(model, energy_force_mse(...), optimizer_factory, ...)
+trainer.compile()                   # inductor — one graph, zero breaks on stock torch
+trainer.compile(cuda_graphs=True)   # padded fixed shapes: the fastest force-training config
+trainer.compile(step=False)         # model only, the loss stays eager
+trainer.smoke(datamodule)
+trainer.train(datamodule, max_steps=...)
+```
+
+**The caller-owned leaf.** `forward_loss` is two things: an eager prologue and
+the traced body. The prologue finds the derivative op the model runs — the
+model itself when it is a `Derivative`, otherwise the potential's `derivative`
+property — and calls `op.mark_leaves(batch)`, which replaces every variable's
+column (`atoms.pos`, and `graphs.strain` for a virial) by a fresh live leaf
+*before* anything is traced. The op reuses a column that already is a live
+leaf instead of making one, so inside the region the leaf is a graph input:
+the neighbour geometry rebuilt from it, the energy, the one `autograd.grad`,
+the writes onto the frame and the loss trace as **one graph with zero breaks
+on stock torch 2.15**, forces attached to the parameters. (A leaf made inside
+the region would leak through those attached outputs — "requires_grad_()
+intermediate leaked as output", the break pytorch/pytorch#196653 lifts — which
+is why the leaf is made outside.) A model with no op, or an energy-only op
+(`wrt=()`), needs no prologue. Because the region is break-free,
+`fullgraph=True` and `cuda_graphs=True` work for force training on stock
+torch; the measured numbers (eager / inductor / CUDA graphs on a 256-atom tiny
+MACE, fp64, GH200) are in the notes topic `compile-no-graph-breaks`. The slow
+gates: `tests/test_molix/test_core/test_steps/test_train.py::TestDefaultTrainStepTrace`.
+
+**Which losses trace.** Anything with no tensor-valued Python control flow:
+`energy_mse`, `energy_force_mse`, `MSELoss`, `MAELoss`, `WeightedLoss`,
+`ChargeMSELoss`, `ScaleNormalizedLoss`, and the body of
+`ProjectedInternalHessianLoss`. Not `center_by_group` and what is built on it
+(`molecule_centered_energy_mse`, `TorsionProfileLoss`): they loop over
+`group_ids.unique()` with boolean-mask indexing — a data-dependent shape per
+group. A step running one of those compiles the model alone
+(`compile(step=False)`).
+
+**The router exception.** `MultiTaskTrainStep` / `MultiTaskEvalStep` route each
+batch by `torch.unique(labels).tolist()` in `TaskRouter.route` — a host sync —
+so they declare `untraceable` and `compile(step=True)` raises naming it; use
+`compile(step=False)` for them.

@@ -20,7 +20,7 @@ criteria:
     pass_when: |
       Tests pass for (1) a batch mixing zero-edge and edged samples and (2) a
       schema with no edge keys, where the fast-path edges TensorDict equals the
-      collate.py:149-156 fallback (edge_index zeros(0,2) long, bond_diff
+      collate.py:149-156 fallback (pair_index zeros(0,2) long, bond_diff
       zeros(0,3), bond_dist zeros(0), batch_size=[0]) and equals the oracle output.
     status: verified
     last_checked: 2026-06-10

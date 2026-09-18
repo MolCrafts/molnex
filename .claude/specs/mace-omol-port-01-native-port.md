@@ -37,7 +37,7 @@ MACE 等变消息传递（Batatia et al., NeurIPS 2022, arXiv:2206.07697）。OM
 - 能量头：`NonLinearBiasReadoutBlock`（Linear→SiLU→o3.Linear(bias)→SiLU→o3.Linear(bias)，仅末层读出）+
   `AtomicEnergiesBlock`(per-element E0) + `ScaleShiftBlock`；charge/spin 经 `GenericJointEmbedding`
   加到 node_feats，`embedding_readout` 贡献加进 E0。
-- edge 向量约定 `v = pos[receiver]-pos[sender]`（receiver=edge_index[1]）。
+- edge 向量约定 `v = pos[receiver]-pos[sender]`（receiver=pair_index[1]）。
 
 数值等价基线：官方 e3nn↔cueq 转换本身误差 1.5e-8 eV，是本对照的地板。cue 默认 `"O3"` 群与官方
 `O3_e3nn` 群的 Clebsch-Gordan 基在 conv_tp / 对称收缩上差约 1e-14/op。

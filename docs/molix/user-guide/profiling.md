@@ -1,13 +1,13 @@
 # Profiling
 
-`molix.profiler` is a suite of five standalone measurement tools. Each one
+`molix.profiler` is a suite of standalone measurement tools. Each one
 answers a single "where does the time go?" question about one layer of the
 stack, and none of them asks you to wire up a real training run first.
 
 | Profiler | Question it answers |
 | --- | --- |
 | `TaskProfiler` | How long does one preprocessing task take per sample? |
-| `ModuleProfiler` | How long does one `nn.Module` take per forward and backward pass? |
+| `ProfileSweep` / `Profiler` | What do concrete model/data/runtime configurations cost? |
 | `DataLoaderProfiler` | How long does the consumer block waiting for the next batch? |
 | `TrainerProfiler` | How much per-step time does `Trainer` add on top of a bare loop? |
 | `DatasetProfiler` | What is in my dataset, and what does reading one sample cost? |
@@ -53,7 +53,7 @@ blocks for 200 ms will show a mean close to zero and a large `p95`.
 
 **The `Data:` line.** Reports name their input by calling `describe()` on it if
 it has one (`MockSource` and `MockBatch` do), and otherwise fall back to the
-class name — a `FrameStoreDataset` simply prints as `FrameStoreDataset`.
+class name — a `FrameDataset` simply prints as `FrameDataset`.
 
 **`[WARN]` lines.** Diagnostics are printed, never raised. A profiler that
 notices something suspicious — a skewed size distribution, a missing pointer, a
@@ -81,7 +81,7 @@ from molix.profiler import MockBatch, MockSource
 source = MockSource(n_samples=500, n_atoms=(5, 20), seed=0)
 sample = source[0]                     # {"Z": (N,), "pos": (N, 3)}
 
-factory = MockBatch(n_atoms=(32, 96), n_edges=(100, 600), n_graphs=4, seed=0)
+factory = MockBatch(n_atoms=(32, 96), n_pairs=(100, 600), n_graphs=4, seed=0)
 batch = factory()                      # nested TensorDict
 ```
 
@@ -101,14 +101,14 @@ parameter.
 ## TaskProfiler
 
 A *task* is one transform step: anything with an `execute(sample)` method (such
-as `molix.batch.NeighborList`, or a `molix.batch.BatchTask` over an
+as `molix.data.NeighborList`, or a `molix.data.BatchTask` over an
 already-collated batch) or any plain callable. Dispatch is structural, and a
 task carrying a callable `fit` is fitted once over the whole source before
 timing starts. `TaskProfiler` times `task.execute(...)` on its own, with no
 DataLoader, workers or collation in the picture.
 
 ```python
-from molix.batch import NeighborList
+from molix.data import NeighborList
 from molix.profiler import MockSource, TaskProfiler
 
 source = MockSource(n_samples=500, n_atoms=(5, 20), seed=0)
@@ -136,6 +136,62 @@ in memory, so use a subset for large sources. Second, the fit itself is not time
 per-sample `execute` is. For a `BatchTask`, whatever `source[i]` returns is fed
 straight to `execute`, so the "source" must already yield collated batches.
 
+## Model profiling
+
+The model profiler uses four concepts: `ProfileSweep` lazily expands a grid,
+each `ProfileSpec` is one concrete point, `Profiler` measures it, and its
+Pydantic `Report` is the serialisable result.
+
+```python
+from molix.profiler import Profiler, ProfilerConfig, ProfileSweep
+
+sweep = ProfileSweep(
+    "mace-scaling",
+    model_class=MACE,
+    dataloader_class=DataLoader,
+    model_kwargs={"cutoff": 5.0},
+    dataloader_kwargs={"dataset": dataset, "shuffle": False},
+    parameters={"precision": "fp32", "device": "cuda:0"},
+).grid(
+    model={"num_layers": [2, 4]},
+    data={"batch_size": [1, 16]},
+)
+
+config = ProfilerConfig(
+    device="cuda:0",
+    warmup=10,
+    steps=100,
+    transfer_batch=True,
+    memory="cuda",
+    activities=("cpu", "cuda"),
+    hotspot_steps=5,
+    hotspot_limit=20,
+)
+reports = [Profiler().profile(spec, config) for spec in sweep]
+```
+
+`ProfileSpec` accepts classes only and constructs both resources directly from
+their supplied positional and keyword arguments. Scan values override fixed
+kwargs, and the sweep itself never constructs a model. A workload needing
+weight loading, dtype conversion, compilation, loss/backward, or an optimizer
+step represents that behavior in an explicit `nn.Module` class.
+
+`ProfilerConfig` contains the complete measurement protocol. The profiler does
+not set random seeds, inspect Git or platform state, discover CUDA devices, or
+save and restore model state. Each measurement window directly constructs a
+fresh model and dataloader from the spec.
+
+The report separates model-only latency/throughput from end-to-end measurements
+that consume the real dataloader and transfer batches. It also records a
+separate operator-hotspot window, CUDA allocated/reserved memory, raw timing
+samples, and explicit measurement errors. Use
+`report.model_dump_json()` for an artifact and `report.flat()` for a
+DataFrame row. Hotspots are diagnostic and are never used to label a workload as
+launch- or compute-bound.
+
+<!-- Removed ModuleProfiler API documentation, kept temporarily below only to
+avoid a large unrelated documentation rewrite.
+
 ## ModuleProfiler
 
 `ModuleProfiler` times any `torch.nn.Module` in isolation: no `Trainer`, no
@@ -148,7 +204,7 @@ from molix.profiler import MockBatch, ModuleProfiler
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 profiler = ModuleProfiler(model, loss_fn=my_loss, device="cuda:0", optimizer=optimizer)
 
-factory = MockBatch(n_atoms=(32, 96), n_edges=(100, 600), n_graphs=4, device="cuda:0")
+factory = MockBatch(n_atoms=(32, 96), n_pairs=(100, 600), n_graphs=4, device="cuda:0")
 result = profiler.run(factory, n_steps=200, n_warmup=10)
 result.print_report()
 ```
@@ -220,12 +276,14 @@ result = ModuleProfiler(rbf, device="cuda:0").run_fn(
     forward_fn=lambda: rbf(distances),
     backward_fn=lambda out: out.sum(),
     n_steps=200,
-    label="edge_dist E=512",
+    label="pair_dist E=512",
 )
 ```
 
 `run_fn` reports the forward/backward breakdown and memory only; throughput is
 reported as zero, because raw tensors carry no atom or graph counts.
+
+-->
 
 ## DataLoaderProfiler
 
@@ -248,7 +306,7 @@ Configuration is the DataLoader configuration you want to test: `batch_size`,
 `num_workers` (worker subprocesses; `0` means load in the main process),
 `pin_memory` (allocate host buffers in page-locked memory so the copy to the GPU
 can run asynchronously), `persistent_workers` (keep workers alive across epochs;
-silently forced off when `num_workers == 0`), and optional `batch_tasks` — `molix.batch.BatchTask` instances applied, in order, inside
+silently forced off when `num_workers == 0`), and optional `batch_tasks` — `molix.data.BatchTask` instances applied, in order, inside
 `collate_fn`.
 
 `run()` resolves its argument in three ways. An existing `DataLoader` is used
@@ -355,7 +413,7 @@ The same numbers are available on `TrainerResult` as `n_steps`, `device`,
 `DatasetProfiler` characterises the data itself rather than the loop around it.
 Point it at anything that yields **molpy frames** — the at-rest tier of
 the two-tier data contract, so `sample["Z"]`, `sample["pos"]`,
-`sample["edge_index"]`, `sample["targets"]["U0"]` — and it answers four
+`sample["pair_index"]`, `sample["targets"]["U0"]` — and it answers four
 questions at once: how big are the records, what does one access cost, how are
 the fields laid out, and what do the labels look like.
 
@@ -373,10 +431,10 @@ def ring(i: int) -> dict:
     return {
         "Z": torch.full((n,), 6),
         "pos": torch.arange(3 * n, dtype=torch.float32).reshape(n, 3),
-        "edge_index": torch.cat(
+        "pair_index": torch.cat(
             [torch.stack([src, dst], dim=1), torch.stack([dst, src], dim=1)]
         ),
-        "edge_dist": torch.full((2 * n,), 1.5),
+        "pair_dist": torch.full((2 * n,), 1.5),
         "targets": {"U0": torch.tensor([float(i)])},
     }
 
@@ -407,10 +465,11 @@ sum ("cumsum") vectors marking where each record's slice begins. Per-record
 counts are then just `ptr[i+1] - ptr[i]`, one vectorised subtraction over the
 whole file with no sample unpacked.
 
-So when the object exposes `atom_counts`, `edge_counts`, `avg_num_neighbors`,
-`max_atoms` and `max_edges` — `FrameStoreDataset`, and `SubsetDataset` which remaps
-them to its own indices — the profiler reads those properties
-directly. Size statistics then describe **every** record in the dataset, not the
+So when `BaseDataset.nrows_of(dataset, table)` can read a declared count column /
+a count-sidecar
+`n_<table>[frame_mol]`, plus `avg_num_neighbors` / `max_atoms` / `max_pairs`
+— and `SubsetDataset`, which remaps indices — the profiler
+reads those directly. Size statistics then describe **every** record in the dataset, not the
 sampled subset, and the result reports `counts_exact=True`. The report prints
 the flag next to the neighbour count so you always know which regime produced
 the numbers.
@@ -435,7 +494,7 @@ sampled, sets `counts_exact=False`, and says so in a `[WARN]` line. The numbers
 are still useful; they are just estimates from a subset.
 
 One legitimate half-way case: a cache whose preprocessing never ran
-`NeighborList` has atoms but no edges, so `edge_counts` raises `ValueError`. The
+`NeighborList` has atoms but no edges, so `pair_counts` raises `ValueError`. The
 profiler catches it, sets `edge_stats=None`, drops the edge row from the report,
 and appends a `[WARN]` carrying the underlying message. Missing edges are a fact
 about how the cache was built, not a profiler failure.
@@ -446,7 +505,7 @@ Some things cannot be read off a pointer vector and genuinely require touching
 records one at a time:
 
 - `cold_access_ms` — the very first `data[i]`, including memory-map page-in from
-  disk. On a memory-mapped `FrameStoreDataset` this is usually much larger than the
+  disk. On a memory-mapped dataset this is usually much larger than the
   steady state.
 - `access_ms` — steady-state `__getitem__` latency after `n_warmup` discarded
   accesses, as a full `TimingStat`.
@@ -507,6 +566,6 @@ Working outwards from the data usually converges fastest. Run `DatasetProfiler`
 first to learn what the records look like and whether sizes are skewed; then
 `TaskProfiler` on any preprocessing step that looks expensive; then
 `DataLoaderProfiler` to see whether batch production keeps up; then
-`ModuleProfiler` to find out whether the model is compute-bound or launch-bound;
+`Profiler` to compare model-only and end-to-end costs and inspect its hotspots;
 and finally `TrainerProfiler` if per-step time still exceeds what the model and
 the loader together explain.

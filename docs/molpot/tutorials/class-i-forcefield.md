@@ -50,7 +50,7 @@ ff = (
         },
         atoms={
             # one row per atom, in the order of atoms.pos below
-            "q": torch.tensor([0.0, 0.0]),            # e — neutral, identical sites
+            "charge": torch.tensor([0.0, 0.0]),            # e — neutral, identical sites
             "epsilon": torch.tensor([0.207, 0.207]),  # kcal/mol
             "sigma": torch.tensor([3.775, 3.775]),    # Å
         },
@@ -99,13 +99,13 @@ is 1-2 bonded, which OPLS-AA excludes outright (scale 0).
 ## 2. Evaluate as a torch module
 
 ```python
-from molix.batch import TotalCharge
+from molix.data import TotalCharge
 
 pots = ff.to_potentials()   # overrides molpy native kernels
 for task in (ff.neighbor_list(), TotalCharge()):
     batch = task.execute(batch)   # molix builds the pair list and the charge column
 E = pots.calc_energy(batch)                  # () here — (B,) for a batch
-energy, forces = pots.calc_energy_forces(batch)  # forces (N, 3) kcal mol⁻¹ Å⁻¹
+out = ff.to_potentials(wrt=("atoms.pos",))(batch)   # graphs.energy, atoms.forces (N, 3) kcal mol⁻¹ Å⁻¹
 ```
 
 Those two tasks are what a Class-I field needs on every batch, and both are the
@@ -124,7 +124,7 @@ cutoff for a periodic system.
 
 `TotalCharge()` writes `graphs.total_charge` (B,) in e — `0.0`, i.e. *these
 graphs are neutral* — which a charge model is fail-closed on and which
-`bind_topology` cross-checks against the sum of `atoms.q` (0 here, by
+`bind_topology` cross-checks against the sum of `atoms.charge` (0 here, by
 construction). A dataset carrying its own charge column keeps it.
 
 ## 2b. Condense by SMARTS, then `def_type`
@@ -186,7 +186,8 @@ cutoff, wrong for anything that diffuses. A real run attaches
 `molix.md.NeighborList(cell=…, cutoff=…, positions=…, skin=…)` with
 `set_neighbors`, which owns its own rebuild cadence and needs a cell (it is a
 minimum-image list). Two further policies are `MD`'s own and re-applied on every
-rebuild: `set_compiler(Compiler())` compiles the classical energy/force core,
+rebuild: `set_compiler(Compiler())` compiles the analytic NVE core and the
+ordinary energy primitive used by the independent NPT virial derivation,
 and `MD(dtype, potential_dtype=…)` evaluates the potential at a second
 precision. Both are in the [MD guide](../../molix/user-guide/md.md).
 

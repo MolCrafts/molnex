@@ -40,7 +40,7 @@ energy/force façades such as `PiNetPotential` / `MACEOMol`). It does not own:
 For Allegro, this means:
 
 ```text
-molix.batch.NeighborList
+molix.data.NeighborList
   -> nested TensorDict batch
   -> molzoo.Allegro
   -> edge / node features

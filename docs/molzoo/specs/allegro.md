@@ -43,16 +43,16 @@ readouts.
 | Direction | TensorDict path | Shape | Dtype | Contract |
 |-----------|------------------|-------|-------|----------|
 | In | `("atoms", "Z")` | `(N,)` | `int64` | Atomic numbers used by the center and neighbor embedding tables. |
-| In | `("edges", "edge_index")` | `(E, 2)` | `int64` | Directed edges; column 0 is source/center `i`, column 1 is neighbor `j`. |
-| In | `("edges", "edge_diff")` | `(E, 3)` | float | Edge vector `pos[j] - pos[i]`. |
-| In | `("edges", "edge_dist")` | `(E,)` | float | Edge distance `||edge_diff||`. |
+| In | `("pairs", "pair_index")` | `(E, 2)` | `int64` | Directed edges; column 0 is source/center `i`, column 1 is neighbor `j`. |
+| In | `("pairs", "pair_diff")` | `(E, 3)` | float | Edge vector `pos[j] - pos[i]`. |
+| In | `("pairs", "pair_dist")` | `(E,)` | float | Edge distance `||pair_diff||`. |
 
 ### 2.2 Outputs
 
 | Direction | TensorDict path | Shape | Written when | Contract |
 |-----------|------------------|-------|--------------|----------|
-| Out | `("edges", "edge_features")` | `(E, F * (L + 1))` | always | DenseNet scalar stack `[f_0; f_1; ...; f_L]`. |
-| Out | `("edges", "edge_tensor_features")` | `(E, tensor_track_irreps.dim)` | `expose_tensor_track=True` | Final equivariant tensor track in `ir_mul` layout. |
+| Out | `("pairs", "edge_features")` | `(E, F * (L + 1))` | always | DenseNet scalar stack `[f_0; f_1; ...; f_L]`. |
+| Out | `("pairs", "edge_tensor_features")` | `(E, tensor_track_irreps.dim)` | `expose_tensor_track=True` | Final equivariant tensor track in `ir_mul` layout. |
 
 Here `F = num_scalar_features` and `L = num_layers`. The encoder exposes
 `output_dim = F * (L + 1)` for readout construction.
@@ -67,7 +67,7 @@ write `("graphs", *)`, compute gradients, or attach losses.
 | Symbol | Meaning | Code anchor |
 |--------|---------|-------------|
 | `N` | number of atoms | `td["atoms", "Z"].shape[0]` |
-| `E` | number of directed edges | `td["edges", "edge_index"].shape[0]` |
+| `E` | number of directed edges | `td["pairs", "pair_index"].shape[0]` |
 | `F` | scalar feature width | `num_scalar_features` |
 | `U` | tensor channel multiplicity | `num_tensor_features` |
 | `L` | Allegro layer count | `num_layers` |
@@ -78,7 +78,7 @@ write `("graphs", *)`, compute gradients, or attach losses.
 | `n_sh` | number of spherical-harmonic irreps | `l_max + 1` |
 | `d_sh` | spherical-harmonic vector width | `sum_l (2l + 1)` |
 | `W` | environment-weight width | `n_sh * U` |
-| `N(i)` | directed neighbors of source atom `i` | `{k : (i, k) in edge_index}` |
+| `N(i)` | directed neighbors of source atom `i` | `{k : (i, k) in pair_index}` |
 
 ### 3.2 Radial and Type Embedding
 
@@ -318,7 +318,7 @@ $$
 When `expose_tensor_track=False`, the last layer is pruned to scalar output
 irreps because no downstream equivariant tensor output is requested. When
 `expose_tensor_track=True`, the final layer keeps the tensor irreps and writes
-that final tensor track to `("edges", "edge_tensor_features")` without changing
+that final tensor track to `("pairs", "edge_tensor_features")` without changing
 `edge_features`.
 
 | Quantity | Shape | Code anchor |
@@ -383,7 +383,7 @@ that final tensor track to `("edges", "edge_tensor_features")` without changing
 | ID | Adaptation | Reason | Risk | Validation |
 |----|------------|--------|------|------------|
 | A1 | Pair-energy readout, energy aggregation, and per-species scale/shift are outside `molzoo`. | MolZoo encoders emit representations; MolPot owns physical readouts. | low | `tests/test_molzoo/test_allegro.py::TestEnergyInvariants`, `tests/test_molzoo/test_allegro.py::TestOverfitSingleBatch`, `tests/test_molpot/test_heads/test_edge_energy.py` |
-| A2 | Optional tensor-track exposure uses `("edges", "edge_tensor_features")` instead of a reference return flag. | MolNex modules communicate through TensorDict keys. Scalar output remains unchanged. | low | `tests/test_molpot/test_heads/test_multipole_symmetry.py`, `tests/test_molpot/test_heads/test_multipole_energy_kernels.py` |
+| A2 | Optional tensor-track exposure uses `("pairs", "edge_tensor_features")` instead of a reference return flag. | MolNex modules communicate through TensorDict keys. Scalar output remains unchanged. | low | `tests/test_molpot/test_heads/test_multipole_symmetry.py`, `tests/test_molpot/test_heads/test_multipole_energy_kernels.py` |
 
 ## 7. Validation Contract
 
@@ -438,9 +438,9 @@ average atom count `18`, `L=3`, `l_max=2`, `F=128`, `U=32`, and
 
 | Concern | Owner | Contract |
 |---------|-------|----------|
-| edge construction | `molix.batch.NeighborList` | creates full directed edges with `symmetry=True`; `edge_diff = pos[dst] - pos[src]` |
-| scalar encoder | `molzoo.Allegro` | reads §2.1 and writes `("edges", "edge_features")` |
-| optional tensor encoder output | `molzoo.Allegro` | writes `("edges", "edge_tensor_features")` only when `expose_tensor_track=True` |
+| edge construction | `molix.data.NeighborList` | creates full directed edges with `symmetry=True`; `pair_diff = pos[dst] - pos[src]` |
+| scalar encoder | `molzoo.Allegro` | reads §2.1 and writes `("pairs", "edge_features")` |
+| optional tensor encoder output | `molzoo.Allegro` | writes `("pairs", "edge_tensor_features")` only when `expose_tensor_track=True` |
 | pair-energy readout | `molpot.heads.EdgeEnergyHead` | consumes scalar edge features |
 | equivariant multipole readout | `molpot.heads.PermMultipoleHead` and related heads | may consume tensor edge features |
 | graph energy aggregation | `molpot` | writes graph-level energies |

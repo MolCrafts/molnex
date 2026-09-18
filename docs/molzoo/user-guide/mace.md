@@ -16,7 +16,7 @@ model = MaceMatpes.load(
     "matpes_r2scan_cueq_state.pt",
     config="matpes_r2scan_config.json",
     energy_dtype=torch.float64,
-    compute_forces=False,
+    wrt=("atoms.pos",),          # forward writes graphs.energy and atoms.forces
 ).cuda().eval()
 model.requires_grad_(False)  # inference only; leave enabled for training
 model.configure_input_dtype(torch.float32)
@@ -25,9 +25,10 @@ model.configure_input_dtype(torch.float32)
 The caller may keep positions, velocities and cell in float64. The model
 boundary casts geometry differentiably; forces and virial still differentiate
 the original MD state. `energy_core` is the lower-level, already-cast kernel;
-use `forward`, `energy_forces` or the Molpot interface for the precision boundary.
-After one eager validation, `model.compile_core(Compiler(...))` compiles that
-same kernel. Choose all precision settings first.
+use `forward` (the `molix.autograd.Derivative` built from `wrt=`) or the
+Molpot interface for the precision boundary. After one eager forward,
+`Compiler(...)(model)` compiles the whole op. Choose all precision settings
+first.
 
 | Control | Meaning |
 | --- | --- |
@@ -72,9 +73,11 @@ snapshots. Energies retain their accumulation dtype regardless of this option.
 `flush_every` bounds capture buffers, not the final full-trajectory shard merge;
 choose stride and retained-frame count to fit host memory for long tests.
 BF16 autocast remains an explicit experimental MatPES option, not an accepted
-precision-sensitive MD policy. MatPES compilation uses dynamic edge counts:
-the MD adapter trims live-prefix edges, so this runner does not promise static
-CUDA graph replay. Polar compiled MD remains gated behind benchmark mode.
+precision-sensitive MD policy. MatPES compiled MD runs on static shapes: the
+MD driver hands the op the neighbour list's full capacity buffer every step,
+so `Compiler(cuda_graphs=True)` replays one recorded graph
+(`docs/molix/user-guide/md.md`). Polar compiled MD remains gated behind
+benchmark mode.
 
 ## Official weights: convert once, load once
 

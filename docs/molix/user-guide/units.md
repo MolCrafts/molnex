@@ -26,5 +26,5 @@ The last line is the Class-I bond golden: `k = 100` kcal mol⁻¹ Å⁻² →
 The in-process MD integrator advances in (amu, Å, fs). Scale a potential
 into that energy unit with `.to("amu * angstrom ** 2 / femtosecond ** 2")`.
 
-`DEAD_EDGE_CUTOFF_FACTOR` on the same module is not a physical unit: it
+`DEAD_PAIR_CUTOFF_FACTOR` on the same module is not a physical unit: it
 is the padding used to silence dead neighbour edges.

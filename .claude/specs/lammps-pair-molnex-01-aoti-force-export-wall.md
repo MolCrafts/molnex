@@ -91,7 +91,7 @@ Mirror upstream `pair_style mace`:
    `pos.grad` gives `-F`. Autodiff runs live in libtorch, where cuet's eager
    backward works — never goes through Inductor/AOTI lowering.
 3. **Protocol**: define the tensor contract at the C++↔model seam — inputs
-   (`Z`, `pos`, `edge_index`/neighbor pairs, `cell`/shifts, `total_charge`,
+   (`Z`, `pos`, `pair_index`/neighbor pairs, `cell`/shifts, `total_charge`,
    `total_spin`), outputs (`energy`, optionally per-atom). Charge/spin are
    per-system scalars (MACE-OMol is charge/spin-conditioned) and must be passed
    through, defaulting to `(0, 1)` (neutral singlet).

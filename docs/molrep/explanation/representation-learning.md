@@ -12,9 +12,9 @@ MolRep modules commonly consume:
 
 - `Z`: atomic numbers
 - `pos`: atom positions
-- `edge_index`: source-target edge pairs
-- `edge_diff`: edge vectors, `pos[target] - pos[source]`
-- `edge_dist`: edge distances
+- `pair_index`: source-target edge pairs
+- `pair_diff`: edge vectors, `pos[target] - pos[source]`
+- `pair_dist`: edge distances
 
 ## Outputs
 

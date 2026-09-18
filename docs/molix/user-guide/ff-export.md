@@ -40,7 +40,8 @@ anyone writing a conversion factor.
 therefore needs two batch tasks, and both are declarations rather than settings:
 
 ```python
-from molix.batch import DataModule, TotalCharge
+from molix.data import TotalCharge
+from molix.data import DataModule
 
 dm = DataModule(train_ds, val_ds, batch_tasks=[ff.neighbor_list(), TotalCharge()])
 ```
@@ -61,7 +62,7 @@ pipeline's graphs are neutral*, declared once instead of pasted into every
 collate site. A dataset carrying its own charge column keeps it; the task only
 casts an integer column to the batch float dtype. A charge model is fail-closed
 on this column, and `Potentials.bind_topology` cross-checks the per-graph sum of
-`atoms.q` against it, so a declaration the data does not support is caught.
+`atoms.charge` against it, so a declaration the data does not support is caught.
 
 At a collate site that bypasses the `DataModule`, run the same two tasks by
 hand: `for task in (ff.neighbor_list(), TotalCharge()): batch = task.execute(batch)`.

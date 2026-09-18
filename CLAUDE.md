@@ -125,12 +125,11 @@ For non-trivial work, prefer:
 
 ## What must never change casually
 
-- Post-collate batch schema (`atoms` / `edges` / `graphs` / `bonds`)
-- Edge convention: `edge_index[:,0]=source`, `edge_diff = pos[target]-pos[source]`
+- Post-collate batch schema (`atoms` / `pairs` / `graphs` / `bonds`)
+- Edge convention: `pair_index[:,0]=source`, `pair_diff = pos[target]-pos[source]`
 - One-way package dependency: `molix` ← `molrep` ← `molzoo` / `molpot`
 - molpy-only imports under `src/` and `tests/` (never bare `molrs`)
 - `TrainState` nested-namespace write contract (no slash-key writes)
-- `molix.block/1` column layout (manifest, commit log, per-column sha256)
 
 <!-- mol:bootstrap:managed end -->
 
@@ -153,7 +152,24 @@ hot path: `.item()` / `int(tensor)` host syncs, data-dependent shapes
 length), Python branches on tensor values, per-call `.to(device)` of freshly
 built CPU tensors, pydantic / config attribute reads, dict-of-tensor keys
 built per call. Dynamic sizes are handled by fixed capacity + mask (the
-`NeighborList` pattern), never by data-dependent shapes. A compile test
+`NeighborList` pattern), never by data-dependent shapes. **Static shapes are
+the MD default** (2026-09-11, spec `derivation-head-02-static-shapes`): the
+driver hands the derivative op the list's full capacity buffer every step,
+dead rows are `(0, 0)` self-loops at `molix.schema.dead_pair_shift(cutoff)`
+(shared by `NeighborList`, `MoleculePadder(max_atoms=, max_pairs=, …, max_graphs=, cutoff=)`
+and `StaticForward`), ghost atoms are killed by multiplying `atoms.mask` into
+every per-atom energy before the graph sum (never a slice), and
+`Compiler(cuda_graphs=True)` is the MD compiler (GH200: 1.9 ms/step vs 21 ms
+eager at 256 atoms). **Training batches are capacity-first** (2026-09-14):
+the padder owns the static shape — `MoleculePadder.from_counts(counts,
+atoms=2**k, cutoff=)` sizes every cap from the dataset density and never
+below the largest molecule, pads the graph count too (`max_graphs`, dead
+slots + `graphs.mask`, ghosts in the sink slot) — and the loader packs under
+`padder.budgets()` (`DataModule(batch_counts=, val_batch_counts=)`), so the
+molecule count per batch floats and no batch can exceed a cap. Never fix the
+molecule count and pad to `B × per-molecule max` (OMol25 4m: 17 M proper
+rows, 10 % filled), never size a cap from a quantile, never leave the graph
+count unpadded (each new `B` is a recompile). A compile test
 (explain → 0 breaks) accompanies every new hot-path module.
 
 ## Iron law — no training before verified optimization
@@ -183,13 +199,18 @@ the exact configuration being submitted:
    stability. Model dimensions and calibration candidates use powers of two.
 6. A bounded smoke run demonstrates loss movement, validation reporting,
    checkpoint/resume, and failure recovery.
-7. The evidence is recorded as a versioned **molexp calibration experiment**
-   linked to the production experiment.
+7. The evidence is written under one timestamped run directory.
 
 If any item is missing or stale, only explicitly bounded validation,
 profiling, or calibration jobs may run. Production launchers must fail closed
 when the calibration evidence or its exact configuration fingerprint is
 absent; they must never silently downgrade this rule to a warning.
+
+**Not gates** (operator ruling, 2026-09-16): a **molexp** experiment/run record
+is optional — use it where it helps, but its absence never blocks a run — and a
+committed or clean git tree is never required. The gate is evidence that the
+configuration works, not bookkeeping about where the evidence is filed or
+whether the tree is committed.
 
 ## Project Overview
 
@@ -199,8 +220,8 @@ absent; they must never silently downgrade this rule to a warning.
 |---------|------|-------------|
 | **molix** | Training infrastructure | Trainer, TrainState (dict), Step protocol, Hook lifecycle |
 | **molrep** | Representation learning | Embedding → Interaction → Readout pipeline, equivariance via cuEquivariance |
-| **molpot** | Potential functions | BasePotential (nn.Module + ABC), functorch forces, PotentialComposer |
-| **molzoo** | Pre-built encoders | Encoder recipes (MACE, Allegro, PiNet); physics heads/derivation stay in molpot |
+| **molpot** | Potential functions | BasePotential (nn.Module + ABC), Potentials (Class-I container), PotentialComposer; derivatives via `molix.autograd.Derivative` |
+| **molzoo** | Pre-built encoders and named models | Encoder recipes (MACE, Allegro, PiNet) and the learnable Class-I force field **Rondo**; physics heads/derivation stay in molpot |
 
 ### Industrial layout + test mirror (hard rules)
 
@@ -261,7 +282,7 @@ python -m pytest tests/test_molzoo/test_mace.py::test_mace_forward -v
 python -m pytest tests/ --cov=src --cov-report=term-missing
 ```
 
-Python >=3.12 required (pyproject pins >=3.12; the FrameStoreView protocol's raising-property isinstance safety needs 3.12+). Requires `torch>=2.14` and `tensordict>=0.14` (always use latest stable PyTorch; the native op lib is built with C++20, which torch 2.14 headers require).
+Python >=3.12 required (pyproject pins >=3.12). Requires `torch>=2.14` and `tensordict>=0.14` (always use latest stable PyTorch; the native op lib is built with C++20, which torch 2.14 headers require).
 
 GH200 / `.aarch64`: on every env/torch change rebuild **all** native libs together on GH200 — `molrs/_lib.abi3.so` (`maturin develop --release`, aarch64 toolchain) **and** `src/molix/op/libmolnex_opLib.aarch64.so` against **this** interpreter's torch (`TORCH_CUDA_ARCH_LIST=9.0`). Login-node rustc overwrites the untagged molrs `.so` with x86-64; do not reuse a stale `.so`. Runtime `LD_LIBRARY_PATH` must include GCC 14 `lib64` + `torch/lib` + CUDA `lib64`. See `.claude/notes/notes.md` native-op-rebuild.
 
@@ -299,14 +320,14 @@ GH200 / `.aarch64`: on every env/torch change rebuild **all** native libs togeth
 ### Two-tier data contract (raw sample vs collated batch)
 
 The data path speaks **two** shapes. They are intentionally different — get
-this wrong and `KeyError(('edges','edge_index'))` is the first thing you see.
+this wrong and `KeyError(('pairs','pair_index'))` is the first thing you see.
 
 | Stage | Container | Example access |
 |---|---|---|
-| MolHub-side sample production / preprocessing I/O, `FrameStoreDataset[i]` | **flat `dict`** | `sample["Z"]`, `sample["edge_index"]`, `sample["targets"]["U0"]` |
-| Post-`collate_molecules` (what encoders / losses receive) | **nested `TensorDict`** (plain, no subclass) | `batch["atoms", "Z"]`, `batch["edges", "edge_index"]`, `batch["graphs", "energy"]` |
+| MolHub-side sample production / preprocessing I/O, `FrameDataset[i]` | **flat `dict`** | `sample["Z"]`, `sample["pair_index"]`, `sample["targets"]["U0"]` |
+| Post-`collate_molecules` (what encoders / losses receive) | **nested `TensorDict`** (plain, no subclass) | `batch["atoms", "Z"]`, `batch["pairs", "pair_index"]`, `batch["graphs", "energy"]` |
 
-The single conversion point is `molix.batch.collate.collate_molecules`
+The single conversion point is `molix.data.collate.collate_molecules`
 (invoked by `DataModule._CollateFn`). Stats / diagnostics operating on
 individual cached samples use **flat** keys; model / loss / metric code
 operating on batches uses **nested tuple-keys**.
@@ -321,10 +342,10 @@ TensorDict (batch_size=[])
 │   ├── mass: atomic masses (N,) amu  [MD]
 │   ├── vel: velocities (N, 3) Å/fs   [MD]
 │   └── batch: graph membership (N,)
-├── "edges": TensorDict (batch_size=[E])
-│   ├── edge_index: source-target pairs (E, 2)   # [:,0]=source, [:,1]=target
-│   ├── edge_diff: edge vectors (E, 3)            # pos[target] - pos[source]
-│   ├── edge_dist: edge distances (E,)
+├── "pairs": TensorDict (batch_size=[E])
+│   ├── pair_index: source-target pairs (E, 2)   # [:,0]=source, [:,1]=target
+│   ├── pair_diff: edge vectors (E, 3)            # pos[target] - pos[source]
+│   ├── pair_dist: edge distances (E,)
 │   └── shifts: periodic remainders (E, 3)  [optional]  # pos[t]-pos[s]+shift = min-image vector, Å
 └── "graphs": TensorDict (batch_size=[B])  [optional]
     ├── num_atoms: (B,)
@@ -332,55 +353,96 @@ TensorDict (batch_size=[])
     └── <targets>
 ```
 
-`("edges", "shifts")` is written by the MD bind path (`molix.md.NeighborList.build`)
+### Row counts: an attribute, a declaration, and a request
+
+Three spellings, deliberately different, because they cost different things:
+
+| Spelling | What | Cost |
+|---|---|---|
+| `frame["atoms"].nrows` | molpy `Block` **attribute** — this one block's length | free |
+| `MyDataset.counted_tables = {"atoms": "_n_atoms"}` | **declaration** — this container already holds the per-row vector in that attribute | a read |
+| `MyDataset.count_rows(table)` | **verb** — the container has to measure, and may cache what it measured | a scan, once |
+| `BaseDataset.nrows_of(source, table)` | the one **request** every batch budget goes through | whichever of the three applies |
+
+`nrows_of` tries them cheapest-first and falls back to materialising every
+sample. That fallback is correct and is the slowest thing in a data path: on a
+four-million-row LMDB it is a quarter of an hour (measured 140-230 us/row), so
+a container that can do better must say so.
+
+There is deliberately **no** `dataset.nrows(table)`. A `Block.nrows` attribute
+returning a scalar and a dataset method returning a vector would read the same
+at the call site and mean different things; the verb and the declaration keep
+them apart.
+
+`("pairs", "shifts")` is written by the MD bind path (`molix.md.NeighborList.build`)
 and read by `molzoo.mace` potentials; `("graphs", "cell")` is read by
-`molpot.composition.sonata` (stress). On the MD bind path the `edges`
-namespace has `batch_size=[capacity]` with live edges in `[0, num_edges)`
-and dead padding beyond — the list owns `edges` once bound.
+`molpot.composition.sonata` (stress). On the MD bind path the `pairs`
+namespace has `batch_size=[capacity]` with live pairs in `[0, num_pairs)`
+and dead padding beyond — the list owns `pairs` once bound.
 
-Access: `batch["atoms", "Z"]`, `batch["edges", "edge_dist"]`. Encoders
+Access: `batch["atoms", "Z"]`, `batch["pairs", "pair_dist"]`. Encoders
 mutate the batch in place, writing `node_features` under `atoms` and
-`edge_features` under `edges` — no subclass swap.
+`edge_features` under `pairs` — the ML feature column on the chemistry
+namespace, dual to `node_features` on `atoms` — no subclass swap.
 
-### On-disk format
+### On-disk format — molnex has none
 
-`molix.block/1` (`molix.store.frame_store`) is molnex's **one** on-disk
-format: a directory of raw little-endian column files plus `manifest.json`,
-written by `FrameStoreWriter.append(frames, key=…, task=…)`, committed through
-a crc32 commit log and sealed with per-column sha256. `FrameStoreReader` mmaps
-a sealed store and `.batch(frames)` reads a batch straight off it;
-`FrameStoreDataset` indexes an ordered sequence of stores as one frame space.
-MolHub writes these; molnex only reads them.
+molnex **reads** datasets; it does not define a file format. Acquiring the
+data — download, parse, preprocess, cache — is MolHub's, and so is whatever it
+is stored in. A dataset reaches molnex as an indexable space of molpy `Frame`s
+behind `molix.data.BaseDataset`, and that protocol is the whole contract.
 
-**Naming.** The types are `FrameStore*` because `Block` already means a
-molpy `Block` (a Frame's sub-table) — one name, two meanings, was the
-collision. The **format id stays `molix.block/1`** and the on-disk unit is
-still called a block in prose and in manifest keys: it is a wire contract
-already written into every store MolHub has produced, and renaming it would
-be a format revision, not a rename.
+molnex did carry its own format, `molix.block/1` (`FrameStoreWriter` /
+`FrameStoreReader` / `FrameStoreDataset` — a directory of raw little-endian
+column files with a crc32 commit log and per-column sha256). It was **deleted
+on 2026-09-17** (spec `data-layer-01-consolidation`) because it had no
+producer, no consumer and no instance on disk: the only `FrameStoreWriter` call
+outside its own tests was a benchmark, the Class-I production path reads
+MolHub's LMDB (measured call stack `molhub/io/lmdb.py:94`), and molhub's import
+of it had been broken since 2026-09-08 without anyone noticing. About 5 500
+lines of code and tests went with it, together with a second collate route in
+`DataModule` that was probed on every dataloader build and could never fire.
+**Do not reintroduce a molnex file format**: a faster on-disk shape belongs to
+MolHub, and molnex grows at most an alternate constructor on `FrameDataset` to
+read it.
 
-There is **no** column registry. What a column is called and where it lands is
-decided by where it sits in the molpy `Frame` — a new target is a new frame
-column and nothing else. (`_COLUMN_ROUTES` and `SamplingUnit` were deleted on
-2026-09-07 along with the schema-declaration layer they served.) Stores carry
-**no neighbour graph** — the cutoff graph is a function of positions and a
-cutoff, so it is built downstream by `molix.batch.NeighborList`, not stored.
+A dataset carries **no neighbour graph** — the cutoff graph is a function of
+positions and a radius, so it is built by `molix.neighbor.NeighborList`, never
+stored. A dataset that can answer a table length without materialising a
+sample (a count sidecar, `n_<table>` / `<family>_n`) lets the sampler budget a
+whole epoch with zero `__getitem__` calls; it declares them in
+`BaseDataset.counted_tables`, and every batch budget asks for them through
+`BaseDataset.nrows_of(source, table)`.
 
-Reads go straight from mmapped columns to the batch `TensorDict`: one gather
-per column, no intermediate per-sample dicts and no re-gather. The
-`PackedView` / `collate_packed` pair that used to sit in between was deleted
-on 2026-09-07 — it re-gathered every tensor through an identity index, a full
-copy of the batch for nothing. The single-`.pt` `PackedCache` that preceded
-all of this went the same day: MolHub had already moved to stores, so it had
-no producer left.
+### Two vocabularies, one seam: `pairs` (chemistry) vs `edge` (ML)
+
+The cutoff neighbour list is a **pair list** in every chemistry-layer surface
+and a **graph edge set** inside the models, and each name is right where it
+sits (decision 2026-09-15):
+
+| layer | spelling | where |
+|---|---|---|
+| chemistry / data | `pairs` namespace, `pair_index` / `pair_diff` / `pair_dist`, `max_pairs`, `num_pairs`, `dead_pair_shift` | `TensorFrame` and the batch schema, collate, `MoleculePadder`, the samplers, `molix.data`, `molix.md`, `molix.engine`, all of `molpot`, `interface/` |
+| ML / graph net | `edge_index` / `edge_diff` / `edge_attrs` / `edge_feats` as **parameter and local names** | `molrep` blocks, `molzoo` encoders, and the kwargs dicts they pass among themselves |
+
+The seam is explicit and lives in the encoder's first line —
+`edge_index = batch["pairs", "pair_index"]`, *the chemistry pair list, read as
+graph edges*. A call site follows its **callee**: building a batch takes the
+chemistry names even inside an ML test; calling a molrep block takes `edge_*`
+even from molpot. Feature columns keep the ML word on the chemistry
+namespace — `atoms.node_features` and `pairs.edge_features` are duals.
+
+Why not one word: `edges` read as *bonds*, and a cutoff pair list is not a
+bond list — on OMol25 4m at a 10 Å list there are 68.7 pairs per atom against
+1.76 angles per atom, a factor of N apart.
 
 ### Edge Convention (MUST follow everywhere)
 
 ```
-edge_index[:, 0]  — source atom  (the "centre" in Allegro; the "sender" in MACE ConvTP)
-edge_index[:, 1]  — target atom  (the "neighbour" in Allegro; the "receiver" in MACE ConvTP)
-edge_diff         — pos[target] - pos[source]   (displacement vector, source → target)
-edge_dist         — ‖edge_diff‖
+pair_index[:, 0]  — source atom  (the "centre" in Allegro; the "sender" in MACE ConvTP)
+pair_index[:, 1]  — target atom  (the "neighbour" in Allegro; the "receiver" in MACE ConvTP)
+pair_diff         — pos[target] - pos[source]   (displacement vector, source → target)
+pair_dist         — ‖pair_diff‖
 ```
 
 `NeighborList` defaults to **full bidirectional** edges (`symmetry=True`, `E = 2 × n_pairs`).
@@ -388,25 +450,25 @@ Pass `symmetry=False` to get only the upper-triangle half-pairs (`E = n_pairs`) 
 want to exploit Newton's-3rd-law symmetry.  The two modes produce different `task_id`s so their
 preprocessed caches are kept separate.
 
-`edge_index` is `(E, 2)` **everywhere** — including every MACE-family block
+`pair_index` is `(E, 2)` **everywhere** — including every MACE-family block
 (`DensityInteraction`, `ResidualInteraction`, `ZBLRepulsion`, both model cores).
 Upstream MACE's `(2, E)` layout is transposed away at the checkpoint-port
 boundary and never crosses a module seam; unpack as `source, target`
 (never `sender, receiver`). `(2, N)` is reserved for `bond_index`.
 
-**Why edge_diff = pos[target] − pos[source]?**  This makes the displacement vector point in the
+**Why pair_diff = pos[target] − pos[source]?**  This makes the displacement vector point in the
 same direction as the edge (source → target), which is the convention expected by `SphericalHarmonics`
 and all `cuEquivariance`-based tensor products in this repo.  The C++ `getNeighborPairs` kernel
 returns `pos[rows] − pos[cols]` (opposite sign); `NeighborList.execute` negates it.
 
-### `edge_index` (cutoff graph) vs `bond_index` (covalent topology)
+### `pair_index` (cutoff graph) vs `bond_index` (covalent topology)
 
 Two **different** connectivity objects, with **deliberately different shapes**
 so one can never be silently used as the other:
 
 | field | shape | meaning | offset axis |
 |---|---|---|---|
-| `edge_index` | `(E, 2)` | geometric neighbour graph `G(r_c)` — recomputed from positions each step, bidirectional, includes through-space contacts | rows |
+| `pair_index` | `(E, 2)` | geometric neighbour graph `G(r_c)` — recomputed from positions each step, bidirectional, includes through-space contacts | rows |
 | `bond_index` | `(2, N)` COO | fixed covalent topology (from molpy `atomi`/`atomj`), paired with `bond_types`; consumed by `BondHarmonic` and other bonded terms | columns |
 
 A within-cutoff neighbour is **not** a chemical bond. `BondHarmonic` rejects a
@@ -425,9 +487,9 @@ collate intentionally implements only the lazy subset of PyG's batching:
 | `__inc__` / `__cat_dim__` (per-key offset on batching) | **implemented** as the declarative `INDEX_KEYS` registry + `rebase()` in `collate.py` | the one piece worth having — also fixes the latent un-offset `bond_index` bug |
 | `follow_batch` (per-attribute batch vectors) | **skip** | no consumer |
 | `ptr` (cumsum boundaries) | **skip** — derive on demand from `graphs.num_atoms` / `atom_ptr` | redundant to materialise |
-| `to_data_list()` / unbatch | **skip** | `molix.block/1` covers persistence/unpack |
+| `to_data_list()` / unbatch | **skip** | persistence is MolHub's, not molnex's |
 | `exclude_keys` | **skip** | no consumer |
-| arbitrary `HeteroData` node/edge types | **skip** | fixed `atoms`/`edges`/`graphs`/`bonds` namespaces are the contract |
+| arbitrary `HeteroData` node/edge types | **skip** | fixed `atoms`/`pairs`/`graphs`/`bonds` namespaces are the contract |
 
 The packed-mmap collate fast path (`collate_packed`) is a deliberate
 divergence from PyG's per-sample Python `Collater` — faster and HPC-fs
@@ -447,9 +509,10 @@ molzoo (MACE, Allegro, PiNet encoders) ──→ molpot.heads
 molpot.composition (PotentialComposer,    molpot.potentials
     Sonata, Sonata.from_encoder)               ↓
     ↓                              molpot.derivation (EnergyAggregation,
-molix.core (Trainer, TrainState, Step, Hook)    ForceDerivation)
+molix.core (Trainer, TrainState, Step, Hook)    ForceDerivation, HessianDerivation)
     ↓
-molix.batch (collate, NeighborList, DataModule, BatchTask) · molix.store (FrameStoreWriter/Reader, FrameStoreDataset)
+molix.data (BaseDataset/FrameDataset, collate, MoleculePadder, samplers, DataModule, BatchTask)
+molix.frame (TensorFrame) · molix.neighbor (NeighborList)
     ↑ dataset acquisition (download / parse / preprocess / cache write) is MolHub's, not molnex's
 molix.md (Langevin velocity-Verlet) ─→ molix.quant (T_eff / quantization scalars)
 molix.export (Exporter, AOTInductor .pt2) · molix.compile (Compiler, torch.compile / CUDA graphs)   [leaf execution utils]
@@ -482,7 +545,7 @@ Notes on cross-package edges (verified against imports):
   utilities that wrap a trained model — nothing in the core training loop
   imports them.
 - `molix.engine` is the engine-neutral export bridge: `EngineAdapter` /
-  `EngineForward` map a model onto the flat `(Z, pos, edge_index) -> (energy,
+  `EngineForward` map a model onto the flat `(Z, pos, pair_index) -> (energy,
   forces)` convention, `StaticForward` is the fixed-shape CUDA-graph-capturable
   variant, and `export_for_lammps` is the LAMMPS preset. The engine-specific C++
   (`pair_style molnex`, AOTI `ModelRunner`) lives in the repo-root `interface/`
@@ -587,17 +650,17 @@ hooks (`MetricsHook`, `TensorBoardHook`) should write their
 - **Encoder-only molzoo**: Encoders take a batch `TensorDict` and write per-layer features `(N, layers, features)` under `atoms.node_features`; readout/potentials handled by molpot
 - **Pydantic configs**: All block configs use `BaseModel` with `ConfigDict(arbitrary_types_allowed=True)`
 - **cuEquivariance**: Tensor products use `cuequivariance` / `cuequivariance_torch` for GPU-accelerated equivariant operations. Edge convolutions always use cueq's indexed TP (conv fusion): global `indices_out` with `size_out=N`. Never `conv_tp(x[source], …)` + Python `scatter_sum`, which materialises an `(E, target.dim)` message, and never add a local TP/CG kernel (`.claude/notes/notes.md` topic `cueq-conv-fusion`).
-- **Force derivation (dual backends)**: `molpot.derivation.ForceDerivation` is the single entry for `F = -dE/dpos`. Default `method="autograd"` (`torch.autograd.grad`) works for every model, including cuEquivariance fused ops. Use `method="functorch"` (`torch.func.grad`) only for pure-PyTorch energy graphs (e.g. PiNet) when you want a single backward + `torch.compile(fullgraph=True)`. `BasePotential.calc_forces` uses the autograd backend so the molpy protocol path stays universal. Do not hand-roll a third force path inside encoders.
+- **Force derivation (one op)**: every batch-level derivative is `molix.autograd.Derivative(energy, *, of="graphs.energy", wrt=(), outputs=None)` — `energy(frame) -> frame` writes `of`; `wrt` names TensorFrame keys (`"atoms.pos" → atoms.forces` scale −1, `"graphs.strain" → graphs.virial` (1,3,3) symmetrised, any other column → `<ns>.<name>_grad`). The op makes a leaf for every variable unless the column already is a live leaf (then it is differentiated as is and left in the frame — the caller's), rebuilds live edge geometry from it, does the one `torch.autograd.grad`, puts the caller's buffers back, detaches `of` iff grad is off; `Derivative.mark_leaves(frame)` is the eager prologue that marks the columns so a force-supervised training step traces as one graph on stock torch (the default steps run it in `forward_loss` before the traced body). Every potential exposes `energy(frame)` and takes `wrt=()` at construction; `forward` is the op built in `__init__` (`MaceMatpes(..., wrt=("atoms.pos",))` ≡ `Derivative(MaceMatpes(...), wrt=("atoms.pos",))`). `MD` composes `Derivative(pots, wrt=("atoms.pos"[, "graphs.strain"]))` once per run; compile with `Compiler(...)(op)` after one eager forward — no `compile_core`, no `compute_forces`, no `calc_forces` family. `ForceDerivation` stays only as the tensor-level `F = -dE/dpos` for `BasePotential` / `Sonata`; `HessianDerivation` owns its own leaf. Do not hand-roll a second force or virial path anywhere (decision 2026-09-11, spec `derivation-head-04-molix-derivative`).
 - **Functional composition**: `PotentialComposer` chains pooling → parameter heads → potential terms → aggregation
 - **Hook protocol**: Lifecycle callbacks (`on_train_start`, `on_epoch_end`, etc.) via `Hook` protocol
-- **Step protocol**: `DefaultTrainStep` / `DefaultEvalStep` wrap forward → loss → backward → optimizer
+- **Step protocol**: `DefaultTrainStep` / `DefaultEvalStep` wrap forward → loss → backward → optimizer; `forward_loss(trainer, state, batch)` (model forward + loss) is the one traced function and `Trainer.compile(step=True)` compiles it in place (`step=False` compiles the model only; steps that declare `untraceable`, e.g. `MultiTaskTrainStep`'s router host sync, are refused by name). `smoke` runs the same `forward_loss`. Spec `derivation-head-03-step-compile`.
 
 ### TensorDict Contract
 
-The post-collate batch is a `tensordict.TensorDict`. `molix.batch.TensorFrame`
+The post-collate batch is a `tensordict.TensorDict`. `molix.frame.TensorFrame`
 (`mn.TensorFrame`, a `TypedTensorDict`) is the **typed view** of that batch: its
 declared fields are exactly the namespaces in the table above — `atoms`
-required, `edges` / `graphs` / `bonds` / `angles` / `propers` / `impropers`
+required, `pairs` / `graphs` / `bonds` / `angles` / `propers` / `impropers`
 `NotRequired`. It adds no storage and no behaviour;
 `TensorFrame.from_tensordict(batch)` is a zero-copy wrap (every leaf keeps its
 storage), and it traces to the same dynamo graph as the plain batch. Its name
@@ -619,9 +682,9 @@ which is the thing that is forbidden, not the type declaration.
 
 ### Adding New Components
 
-**New encoder** (molzoo): Implement `forward(td: TensorDict) -> TensorDict`, reading `td["atoms", "Z"]` / `td["edges", ...]` and writing per-layer features `(N, layers, features)` back under `atoms.node_features`. Use `molrep` building blocks. Add paper reference.
+**New encoder** (molzoo): Implement `forward(td: TensorDict) -> TensorDict`, reading `td["atoms", "Z"]` / `td["pairs", ...]` and writing per-layer features `(N, layers, features)` back under `atoms.node_features`. Use `molrep` building blocks. Add paper reference.
 
-**New potential** (molpot): Inherit `BasePotential`, implement `forward() -> scalar energy Tensor`. Forces come from `ForceDerivation` / `BasePotential.calc_forces` (autograd by default; functorch only when the energy graph is pure torch) — `forward` must read positions via `pos=`/`_get_positions` so the energy can be differentiated as a function of positions.
+**New potential** (molpot): Inherit `BasePotential`, implement `forward() -> scalar energy Tensor`. Forces come from `ForceDerivation` / `BasePotential.calc_forces` (autograd) — `forward` must read positions via `pos=`/`_get_positions` so the energy can be differentiated as a function of positions.
 
 **New embedding/interaction** (molrep): Pure `nn.Module`, use `cuequivariance` for equivariant layers.
 
@@ -646,12 +709,12 @@ This project tracks **latest stable PyTorch** (currently >=2.10). Use modern PyT
 Google-style docstrings with tensor shape annotations:
 
 ```python
-def forward(self, node_feats: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+def forward(self, node_feats: torch.Tensor, pair_index: torch.Tensor) -> torch.Tensor:
     """Message passing step.
 
     Args:
         node_feats: Node features ``(n_nodes, hidden_dim)``.
-        edge_index: Edge indices ``(n_edges, 2)``.
+        pair_index: Edge indices ``(n_pairs, 2)``.
 
     Returns:
         Updated node features ``(n_nodes, hidden_dim)``.
@@ -732,6 +795,11 @@ The 10-section structure of `<encoder>.md` is **immutable** — adding / removin
 
 See `.claude/notes/learnable-classical-ff.md`. Short form:
 
+0. **The named product is `Rondo`** (`src/molzoo/rondo/`, spec
+   `src/molzoo/specs/rondo.md`): `RondoForceField` + `RondoSpec` + `Rondo`
+   (the `Parameterizer` recipe) + `RondoPotential`. It supersedes
+   `espaloma_like_template` / `build_espaloma_like_model` / `ForceAwareModel`
+   in `scripts/` — a model does not live in `scripts/`.
 1. **Reuse first** — molnex `ForceField` **is** `molpy.ForceField` (subclass). No `to_molpy()`. Named product template is `OPLSAAForceField(ForceField)`; trainable fill is `Parameterizer(encoder, template=…)`; task mapping is `ForceFieldPredictions` — no `ForceField.class_i()` / `.opls()` façades. Override `to_potentials()` for torch; IO is `molpy.io` after `realize(system)`. Graph → SMARTS is `molpy.io.write_smarts` (molrs local-SMARTS). `Condenser` merges params inside those keys; types are registered with molpy `def_type`.
 2. **Generalize without `Foo(method=…)`** — single-responsibility types only; no multi-backend method switches on new APIs.
 3. **Non-diff sinks to molpy/molrs** — *enumeration*, SMARTS, classical non-torch E/F, FF tables under molpy (≥0.13, with `k_B` / `openmm` preset). Imports: `molpy` only (never bare `molrs`).

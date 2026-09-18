@@ -25,7 +25,7 @@ The complete project shape is:
 
 ```text
 source samples (MolHub acquisition + preprocessing)
-  -> molix.block/1 store read through molix.store
+  -> molix.block/1 store read through molix.data
   -> collated nested TensorDict
   -> molzoo encoder
   -> learned features
@@ -39,7 +39,7 @@ For Allegro specifically:
 ```text
 collated nested TensorDict
   -> molzoo.Allegro
-  -> ("edges", "edge_features")
+  -> ("pairs", "edge_features")
   -> molpot.heads.EdgeEnergyHead
   -> graph energy
 ```
@@ -52,21 +52,21 @@ For Allegro the required fields are:
 
 ```text
 ("atoms", "Z")
-("edges", "edge_index")
-("edges", "edge_diff")
-("edges", "edge_dist")
+("pairs", "pair_index")
+("pairs", "pair_diff")
+("pairs", "pair_dist")
 ```
 
-In production the edges come from `molix.batch.NeighborList(symmetry=True)`,
+In production the edges come from `molix.data.NeighborList(symmetry=True)`,
 run during preprocessing so every undirected neighbor pair is represented as
 two directed edges. That preprocessing, and the stores it writes, are
 MolHub's; the tutorial starts from the cache:
 
 ```python
-from molix.batch import DataModule
-from molix.store import FrameStoreDataset
+from molix.data import DataModule
+import molhub
 
-train_ds, val_ds = FrameStoreDataset.load_from_disk("./blocks/allegro-run").split(ratio=0.9, seed=42)
+train_ds, val_ds = molhub.load("allegro-run").split(ratio=0.9, seed=42)
 
 dm = DataModule(
     train_ds,
@@ -83,9 +83,9 @@ materialisation run before it, outside molnex. See
 The edge convention is fixed:
 
 ```text
-edge_index[:, 0] = source / center
-edge_index[:, 1] = target / neighbor
-edge_diff        = pos[target] - pos[source]
+pair_index[:, 0] = source / center
+pair_index[:, 1] = target / neighbor
+pair_diff        = pos[target] - pos[source]
 ```
 
 ## 3. Compute Dataset Statistics
@@ -101,7 +101,7 @@ def estimate_avg_num_neighbors(loader, max_batches=100):
     total_edges = 0
     total_atoms = 0
     for step, batch in enumerate(loader):
-        total_edges += int(batch["edges", "edge_index"].shape[0])
+        total_edges += int(batch["pairs", "pair_index"].shape[0])
         total_atoms += int(batch["atoms", "Z"].shape[0])
         if step + 1 >= max_batches:
             break

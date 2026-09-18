@@ -74,38 +74,43 @@ src/molrep/interaction/pinet/{ff,message,residual,blocks}.py
 src/molzoo/pinet/{spec,geometry,encoder,potential,properties}.py
 tests/test_molrep/test_interaction/test_pinet/...
 tests/test_molzoo/test_pinet/...
-tests/test_molix/test_batch/test_pad.py
+tests/test_molix/test_data/test_pad.py
 ```
 
 **Status.** active (PiNet spine done; full-repo mirror is incremental).
 
 ---
 
-## Force derivation — dual explicit backends (2026-07-29)
+## Force derivation — one op (2026-09-11; supersedes "one head" and "dual explicit backends")
 
-**Context.** CLAUDE.md and some docs still said “forces always via
-`torch.func.grad`”. Reality is more nuanced: cuEquivariance fused kernels
-register a legacy `autograd.Function` without `setup_context`, so
-`torch.func.grad` rejects them (pytorch#170834). PiNet (pure torch) benefits
-from functorch + `torch.compile(fullgraph)`; MACE / OMOL need autograd.
-
-**Decision.** Canonical entry is `molpot.derivation.ForceDerivation`:
-
-| `method` | Implementation | Use when |
-|----------|----------------|----------|
-| `"autograd"` (default) | `torch.autograd.grad` | cuEq / MACE / any model; always correct |
-| `"functorch"` | `torch.func.grad` | pure-torch energy graphs (e.g. PiNet) for single-backward + fullgraph |
-
-`BasePotential.calc_forces` uses `ForceDerivation(method="autograd")` (protocol
-path must work for every potential). Models must not invent a third force path.
-
-**Status.** active (promoted into CLAUDE.md Key Design Patterns; docs/gradients
-aligned). Landed 2026-07-29: OMOL/`energy_forces`, Sonata forces, PiNet via
-`molpot.derivation.protocol` helpers, `BasePotential.calc_forces` all go
-through `ForceDerivation`.
-`has_aux` supported on functorch backend for single-pass eval.
-
----
+**Decision (operator, spec `derivation-head-04-molix-derivative`, D-a..D-e).**
+One derivative op across the project, at the molix base layer:
+`molix.autograd.Derivative(energy, *, of="graphs.energy", wrt=(), outputs=None)`
+— `energy(frame) -> frame` writes `of`; `wrt` are TensorFrame keys (dotted
+strings or tuples, no variable classes): `atoms.pos → atoms.forces` (scale −1),
+`graphs.strain → graphs.virial` `(1, 3, 3)` (ε maps `pos`, `cell` and the
+lattice remainder by `v ↦ v (I + ε_sym)ᵀ`; symmetrised gradient; must follow
+`atoms.pos`), any other column `→ <ns>.<name>_grad`; `outputs=` renames. The
+op owns every leaf (`molix.autograd.leaf`), rebuilds `pair_diff` / `pair_dist`
+once from the perturbed columns (`shifts` = `edges.shifts` or `pair_diff −
+Δpos`, detached), one `torch.autograd.grad`, restores the caller's objects,
+detaches `of` / `atoms.energy` iff grad is off; a potential handed in is
+differentiated through its `energy` seam. Every potential (`MacePotential`
+family, `PiNetPotential`, `Potentials`) exposes `energy(frame)` and takes
+`wrt=()` at construction; `forward` is the op built in `__init__`. `MD`
+composes `Derivative(pots, wrt=("atoms.pos"[, "graphs.strain"]))` at
+`bind_work`, evaluates it once eagerly and applies `set_compiler`'s compiler
+to it. Deleted: `DerivativeHead`, `ForceReadout` / `EnergyReadout`,
+`StressDerivation`, `compile_core` / `CoreCompilable`, `compute_forces`,
+`energy_forces` raw adapter, `calc_forces` / `calc_energy_forces` /
+`calc_energy_forces_virial`, the analytic classical core `_classical_core`
+(D-c), `Potentials`' `pos=` overrides and `Mapping` input. Measured (torch
+2.15 nightly CPU): op inference 1 graph / 0 breaks for `("atoms.pos",)` and
+`("atoms.pos", "graphs.strain")`; training breaks once at
+`molix/autograd/variables.py::leaf` (pytorch#196653). Residue: `molix.engine`
+adapters keep their own leaf (`molix.autograd.leaf`) because the partitioned
+`local_mask` energy is not frame-in/frame-out; molzoo specs still name
+`grad_force_pass` (auditor 📝).
 
 ## Soft-optional native deps for datasets (2026-07-29)
 
@@ -202,13 +207,13 @@ default and MACE with no knob at all).
 ## [2026-09-07] One on-disk format (molix.block/1); `regressions/` deleted (user rule)
 
 **Decision (user).** molnex keeps **one** on-disk format: `molix.block/1`.
-`molix.store.cache.PackedCache` — the single-`.pt`, schema-inferred, run-scoped
+`molix.data.cache.PackedCache` — the single-`.pt`, schema-inferred, run-scoped
 packed cache — is gone, along with `MmapDataset` / `CachedDataset` and the
 `_PackedCollateFn` route in `DataModule`.
 
 **Why it could go.** MolHub owns dataset production and already writes only
 `molix.block/1` (`molhub/loader/materialize.py`: `_BLOCK_FORMAT`,
-`_WRITER_MODULES = ("molix.store.block", "torch")`); it never imported
+`_WRITER_MODULES = ("molix.data.block", "torch")`); it never imported
 `PackedCache`. Inside molnex `src/`, the only production writer left was a
 profiler helper that round-tripped samples through a temp file purely to
 "exercise the same code path real workflows do". Everything else that wrote
@@ -219,14 +224,14 @@ stays: `FrameStoreReader.frame_payload` produces it, `PackedView` wraps it, and
 `collate_packed` turns it into a batch without materialising per-sample dicts.
 `PackedCache` was only one on-disk spelling of that payload, and the worse one
 (no manifest, no seal, no digests, no resume, no splits). The unpacker moved to
-`molix.store.block_view._unpack_packed_sample`; `SubsetDataset.packed_view()`
+`molix.data.block_view._unpack_packed_sample`; `SubsetDataset.packed_view()`
 is defined explicitly rather than inherited, because `__getattr__` forwarding
 would silently hand back an **unmapped** view.
 
 **Consequences that are features, not losses.** Blocks carry no neighbour
 graph by design, so the cutoff graph is built downstream by
-`molix.batch.NeighborList` — the cache's `edges` bucket, the sampler's
-`max_edges` budget and `avg_num_neighbors` had no producer left. The
+`molix.data.NeighborList` — the cache's `edges` bucket, the sampler's
+`max_pairs` budget and `avg_num_neighbors` had no producer left. The
 `TensorDict.memmap_` argument in the old docstring was answering the wrong
 question: it argued against `LazyStackedTensorDict.memmap_` (one directory per
 sample, ~1M files for QM9), which nobody proposed. Packing first and memmapping
@@ -453,7 +458,7 @@ work partition. Pinned by
 blocked/full equivalence tests in those files and `test_conv.py`.
 
 **Inference grad mode.** `calc_energy_forces_virial` / `calc_forces` /
-`grad_force_pass` resolve `create_graph` from the *ambient* grad mode
+`DerivativeHead` (formerly `grad_force_pass`) resolves `create_graph` from the *ambient* grad mode
 (training needs it). Outside `torch.no_grad()` that is `retain_graph=True`:
 the forward tape and every backward intermediate stay alive until the
 gradient is dropped. `molix.md.MD.run` wraps in `no_grad`; any hand-rolled
@@ -594,6 +599,99 @@ goldens on the PEO box). Isolated path unchanged (water regression).
 
 ---
 
+## [2026-09-18] A unit is the dataset's to declare — and `kcal/mol` is two units in molpy
+
+`ClassIPrepare` defaulted its source unit to eV, which is OMol25's and was right
+only where the transform started. THEMol publishes kcal/mol, so that default
+multiplied every label by 23.06 — silently, the result still a plausible energy
+(caught only because `residual std 36.35` did not match `barrier 7.014`).
+
+**The fix is not a better default; it is reading what the dataset says.** MolHub
+datasets already declare `@dataset(units={"energy": ...})`, so
+`ClassIPrepare.from_dataset(dataset)` reads it and `source_unit` has **no**
+default: built without one, the transform refuses to `convert` (bond / label /
+topology still work, and those are the paths that never needed a unit).
+
+Two things this needed on the MolHub side:
+
+1. **A loaded dataset must be able to state its own units.** `THEMolTorsionScan`
+   declares them, but `load()` returns a *different* object
+   (`THEMolShardDataset`) which dropped the manifest, so a consumer holding the
+   loaded dataset had to restate the unit — which is where drift comes from.
+   `THEMolShardDataset` now carries it, `SubsetDataset.manifest` reads through to
+   its parent (same reason `source_id` is derived), and the narrow protocol
+   `DeclaredDataset` names the capability next to `IdentifiedDataset`. OMol25
+   needed nothing: its `load()` returns `self`, so it never lost the manifest.
+2. **`kcal/mol` and `kilocalorie_per_mole` are not the same unit in molpy.**
+   `units.parse("kcal/mol")` is energy per *amount* (`L² M T⁻² N⁻¹`);
+   `units.kilocalorie_per_mole` is the per-particle energy chemistry means
+   (`L² M T⁻²`). Converting between them raises `UnitsError: dimension mismatch`,
+   so reading a declaration and handing it to pint is not enough — MolHub's
+   chemistry spelling is bridged to molpy's registry name by
+   `MOLHUB_ENERGY_SPELLING`, which covers all of MolHub (`eV`, `kcal/mol`) and
+   refuses a third spelling by name rather than guessing. Note also that
+   `units` is not callable: parse with `units.parse(expr)`.
+
+Verified: declared `kcal/mol` → scale 1.0, declared `eV` → 23.0605, unknown
+spelling and absent manifest both refused, and `convert` without a declared unit
+refused.
+
+<!-- mol:note:topic:compile-no-graph-breaks -->
+## [2026-09-18] A global config read is a graph break, and dynamo skips the caller
+
+`molrep.chem.encoder._empty` built the `(0, D)` stand-in for an absent
+namespace with `like.new_zeros((0, dim), dtype=config.ftype)`. That one
+attribute read cost Rondo's traced half **12 graph breaks** (13 graphs);
+without it the same measurement is **1 graph / 0 breaks** (GH200 job 2616579).
+
+Two things worth keeping:
+
+1. **Why it breaks.** `molcfg.Config` resolves every non-underscore attribute
+   through a custom `__getattribute__` that calls
+   `object.__getattribute__(self, "_data")`. Dynamo cannot trace that —
+   `TypeError: expected 1 argument, got 2` — so it is a break wherever a
+   config attribute is read, which is the general form of CLAUDE.md's
+   "pydantic / config attribute reads". `molix.config` is that kind of object.
+2. **Why it was expensive out of proportion.** The break was not graceful:
+   `Failed to handle graph break gracefully. Skipping the function and falling
+   back to eager`. One unreachable-looking line therefore de-compiled whole
+   enclosing functions, which is why 1 read produced 12 breaks.
+
+**The fix is not to hoist the read — it is to not need it.** A tensor standing
+in for features derived from the atom embedding has the atom embedding's
+dtype by construction, and `like.new_zeros((0, D))` already carries dtype and
+device. Reading a global to restate what the reference tensor already knows
+was both the break and a latent mixed-precision bug.
+
+**How it hid.** The empty-namespace path only runs for a molecule with no
+impropers — butane has none, so the smallest real batch exercised it, but no
+*eager* test could see it: the result is numerically identical either way.
+Only the compile gate catches this class, which is the argument for keeping
+one `explain` test per compile seam rather than trusting eager tests.
+
+**Diagnosing the next one.** `Compiler.explain` reports `break_sites` from
+`break_reasons`, and on torch 2.15.0.dev this came back **empty** for these 12
+breaks while reporting them correctly for a control function with a `print`.
+So an empty `break_sites` next to a non-zero `graph_break_count` does not mean
+"no attributable site" — run the target under `TORCH_LOGS=graph_breaks`, which
+printed the full user traceback down to the offending line.
+
+**The second site, and the sweep that found it.** `molrep.chem.embed`
+`AtomChemEmbedding.forward` had the same read behind `if Z.numel() == 0`, so the
+compile gate could not see it — butane has atoms. Fixed the same way: the empty
+answer is a non-persistent `(0, D)` buffer built in `__init__` from
+`next(self.joint.parameters()).dtype`, which is the dtype the skipped
+`self.joint` call would have produced, and which follows `.to(device)` /
+`.to(dtype)` with the module.
+
+An AST sweep is the cheap standing check, because a *guarded* read is invisible
+to any single trace: walk `src/`, flag `config.<attr>` whose enclosing
+`FunctionDef` is one of `forward` / `energy` / `execute` / `compose` /
+`embeddings` / `tables` / `charges`. It found exactly these two; after the
+fixes it reports **0**. Every other `config.ftype` in the tree is an
+`nn.Linear(..., dtype=config.ftype)` in a constructor, which is correct and not
+on a traced path.
+
 <!-- mol:note:topic:compile-no-graph-breaks -->
 ## [2026-09-03] Everything compiles, zero graph breaks (user rule)
 
@@ -623,6 +721,140 @@ kernels are `torch.library.custom_op` + `register_fake`, i.e. compile-safe.
 Compile seam: `energy_core` (flat tensors) — `autograd.grad` stays outside
 and gets its backward from AOTAutograd. Fix tracked by spec
 `polar-compile-clean`.
+
+**MACE E+F seam on torch 2.15dev (2026-09-10/11).** Why `energy_forces` was
+not one graph, in three independent parts. (1) `torch._dynamo.config
+.trace_autograd_ops` defaults to False (2.14 and 2.15 nightly), so the in-graph
+`torch.autograd.grad` at `force.py` graph-breaks — `molix.compile.Compiler
+.__call__` now sets it process-wide and `Compiler.explain` patches it for the
+trace; with it, inference E+F is 1 graph / 0 breaks on all four MACE models
+(force parity 1e-16…1e-14, GH200). (2) Training (`create_graph=True` inside,
+`backward` outside) is refused by dynamo's leaked-intermediate check
+(`output_graph.py _check_requires_grad_intermediate_outputs`: FX-taint from the
+`requires_grad_()` leaf, refuses any tainted requires-grad output) although the
+force is differentiable w.r.t. the parameters and AOTAutograd is correct there
+(grad parity 5e-17…8e-15 with the check relaxed). Upstream PR
+pytorch/pytorch#196653 relaxes it to autograd reachability of a graph input;
+molnex does not wait for it: the **caller-owned leaf** rule (2026-09-11) —
+`Derivative` reuses a column that already is a live leaf instead of making
+one, `Derivative.mark_leaves(frame)` marks the columns eagerly, and the
+default steps run it in `forward_loss` before the traced body — makes the
+leaf a graph input (probe C10: 0 breaks, same parity). (3) The virial strain
+`torch.zeros(3, 3, requires_grad=True)` is an unconditional dynamo break;
+upstream PR pytorch/pytorch#196652 traces the kwarg as `requires_grad_()`;
+molnex now writes `torch.zeros(3, 3).requires_grad_(True)` in
+`autograd_forces_and_virial` (2026-09-11), which traces on stock torch —
+`test_force.py::test_autograd_forces_and_virial_traces_to_one_graph` (slow).
+Also fixed here: `autograd_forces_and_virial` returns `energy.detach()` when
+`create_graph=False` — the consumed energy graph was a legitimate dynamo
+break ("autograd.grad consumed returned tensor's grad_fn"). Measured with both
+PRs (GH200, matpes fused, 256 atoms / 3080 edges, fp64): training step
+`fullgraph` inductor 43.5 → 13.9 ms, peak 0.048 → 0.044 GiB; E+F+virial
+inference 20.8 → 6.3 ms — both vs pure eager, NOT vs the current
+compiled-`energy_core` + eager-grad seam, which was not measured. **Periodic
+E+F+W (2026-09-11, `repro/probe_periodic_virial.py`, job 2292738: 128 atoms,
+12 Å cube, 4936 edges of which 1888 images, `pair_diff = pos[t]-pos[s]+shift`
+strained with pos and cell, fp64):** autograd virial vs central differences
+1.2e-5 on |W| = 620 (h = 1e-4), net force 7e-13. Inference on the **stock**
+nightly: 1 graph / 0 breaks, inductor 21.1 → 5.9 ms (3.6×), peak 0.040 → 0.037
+GiB, dF 1e-13 / dW 2e-13. Training (loss on E, F, W): stock 4 breaks (both
+leaves leak, `force.py:120` / `:222`); with #196653: 1 graph / 0 breaks,
+inductor 46.8 → 14.7 ms (3.2×), peak 0.053 → 0.046 GiB, param-grad diff
+2.4e-11. **Static shapes + CUDA graphs (2026-09-11, jobs 2293234/2293350,
+`repro/probe_design.py`, `repro/probe_cudagraph.py`):** E+F inference on
+fixed-capacity edges (live prefix + dead self-loops on atom 0 at 10·r_cut,
+capacity 1.35×, dE 0 / dF 7e-15 vs live-only) is launch-bound at these sizes —
+eager ≈ 20 ms and default inductor ≈ 5.5 ms flat from 128 to 1024 atoms, and
++35 % dead edges cost nothing (5.30 vs 5.37 ms). `Compiler(cuda_graphs=True)`
+on the static seam: **0.41 ms (128, 256 atoms), 0.72 ms (1024 atoms)** — 8–14×
+over inductor, 27–48× over eager, forces identical (1e-14); outputs must be
+consumed (cloned) each step with `torch.compiler.cudagraph_mark_step_begin()`.
+**Static shapes end to end (spec `derivation-head-02-static-shapes`,
+2026-09-11).** The MD driver hands the composed op the list's **whole capacity
+buffer** every step (`_expose_live_edges` / `_restore_edges` / `n_live` are
+gone); dead rows are `(0, 0)` self-loops at the dead-edge shift, which every
+producer now takes from one place — `molix.schema.dead_pair_length` /
+`dead_pair_shift` (`NeighborList._dead_shift`, `PadMolecularBatch`, which
+takes `cutoff` and pads *dead* edges instead of `r = 0` self-loops, and
+`StaticForward`). Under `MD(potential_dtype=…)` the list writes the geometry
+at `NeighborList.geometry_dtype` and refreshes its cast shifts in place per
+rebuild — no per-step cast, the bound `edges` namespace is one object for the
+run. `MacePotential.energy_core(..., atom_mask=)` multiplies every per-atom
+energy by the mask in `_sum_energy` (Polar also zeroes ghost densities and
+Fukui sources), `energy(frame)` forwards `atoms.mask`; `energy_force_mse`
+divides the force MSE by the real atom count. `Compiler.cuda_graphs` tells the
+driver to apply the replay contract (`cudagraph_mark_step_begin()` + cloned
+outputs). **GH200 benchmark through the real `NeighborList` + driver op**
+(job 2301635, `repro/probe_static_md.py` / `run_static_md_gpu.sbatch`,
+`results/static-md-aarch64.jsonl`; tiny fused MatPES fp64, random periodic
+box, skin 0.5, capacity 1.35×, forces at the same geometry): per force
+evaluation `md.compute_force` (eager list update + op) / op alone / whole
+`md.run` step — 256 atoms (5660 live / 7642 capacity edges): eager 20.6 /
+20.0 / 21.3 ms, inductor `fullgraph` 5.8 / 5.9 / 7.4 ms,
+`Compiler(cuda_graphs=True)` **1.03 / 0.56 / 1.9 ms**; 1024 atoms (22184 /
+29949): eager 23.8 / 21.0 / 24.0, inductor 5.9 / 5.7 / 7.5, cuda_graphs
+**1.48 / 0.86 / 2.2 ms**. Force parity vs eager 5.6e-16 (256) / 8.9e-16 (1024)
+for both compiled arms. The op alone matches the 2026-09-11 probe (0.41 ms
+hand-built vs 0.56 ms through the driver at 256 atoms); the rest of the
+`compute_force` time is the eager `NeighborList.update` displacement check
+(one host sync) plus `_write_geometry` over the capacity, and the `run` step
+adds the integrator and the rebuilds a random box provokes (28 / 36 rebuilds
+in 100 steps). Next lever is therefore the eager list update, not the op.
+Training leaf placement is worth ≤ 8 % (stock leaf-inside 2 breaks
+14.3 ms, stock leaf-outside 0 breaks 14.5 ms, #196653 leaf-inside 13.4 ms):
+the caller owns the leaf in training (`mark_leaves`), the op makes it
+otherwise. **TensorDict
+path (2026-09-11):** `kernels.py grad_force_pass` used to leave its own
+position leaf in `batch["atoms","pos"]` (and the core's `atoms.energy`
+attached to it), so the leaf escaped through a graph-input side effect and
+dynamo refused it — correctly, even with #196653. Now the kernel installs the
+leaf only for the core forward, puts the caller's positions back, and the
+`detach_energy` policy covers `atoms.energy` too; callers that need the leaf
+afterwards own it themselves (`HessianDerivation.graph_blocks`, like
+`GradMode.run_energy(backward=True)` already did). Measured on the stock
+nightly (GH200, matpes fused, `model(batch)`): inference 1 graph / 0 breaks,
+fullgraph parity dF 1.2e-16; training 1 break at the leaf (needs #196653; 0
+breaks and dF 1.1e-16 with it). Toy kernel: `test_kernels.py::TestGradForcePass
+::test_traces_to_one_graph_when_kernel_creates_leaf` (slow) asserts the single
+graph. `compile_core` still compiles `energy_core` only; compiling
+`energy_forces` / a training step as one graph is a separate change.
+Probe, repros and jobs: `.scratch/compile-seam/` (`probe_autograd_seam.py`,
+`repro/min_a_factory.py`, `repro/min_b_leak.py`, `results/*.jsonl`).
+
+**Step compile (spec 03, 2026-09-11, GH200 job 2302140, tiny MACE-MatPES
+`wrt=("atoms.pos",)`, 256 atoms, fp64, `energy_force_mse`, Adam).**
+`Trainer.compile()` traces the step's body `_traced_forward_loss` (model
+forward + loss; backward from AOTAutograd; autocast / accumulation /
+GradScaler / hooks / optimizer stay outside) after the eager prologue
+`forward_loss` runs: `Derivative.mark_leaves(batch)` on the op the model runs
+(the model itself, or the potential's `derivative` property, through a
+`compile(step=False)` wrapper's `_orig_mod`). **Stock torch 2.15.0.dev20260909,
+job 2306601 (`repro/probe_step_leaf.py`, `results/step-leaf-aarch64-2306601.jsonl`):
+the E+F step is 1 graph / 0 breaks** — eager 46.0 ms/step; step compile
+(inductor) 15.3 ms (3.0×, param-grad diff 4.7e-9 vs eager); `fullgraph=True`
+15.5 ms; `cuda_graphs=True` **2.30 ms (20×)**, grad diff 1.4e-9. Marking the
+leaf costs nothing measurable (PR-B in-region leaf was 14.6 / 2.25 ms), and
+pytorch/pytorch#196653 is no longer needed for training. **Open — the
+classical container on a fresh batch** (job 2306962,
+`repro/diag_polar_marked.py`): `Potentials` memoises its typed view and F29
+geometry gate on the batch *object* (`potentials.py::_frame` /
+`_check_geometry`), so a batch it has never evaluated pays that host work
+inside the region and the wrap breaks at tensordict
+`typedtensordict.py:514 __setattr__` ("mapping proxy affected by dictionary
+mutation"), then `derivative.py` "autograd.grad with external grad_fn" — 7
+graphs marked, 11 unmarked; the same batch evaluated once eagerly is 1 graph /
+0 breaks with grad enabled. MD (one bound batch) is unaffected; classical-FF
+*training* through `Trainer.compile()` hands a new batch every step and is
+therefore not one graph until the wrap / gate move out of the region (a
+`Potentials` prologue, or a plain-batch reader) — a design decision, not
+taken here. Found on the way: `Derivative` made its
+leaves inside `enable_grad`, so on stock torch a compiled training backward was
+a double backward for model-only and step compile alike ("aot_autograd does not
+support double backward") — fixed by making the leaves in `Derivative._leaves`
+before the block (a loop or comprehension inside `forward` re-breaks it);
+pinned by `test_derivative.py::test_training_backward_through_the_compiled_op_matches_eager`.
+`MultiTaskTrainStep` declares `untraceable` (`TaskRouter.route` host sync) and
+`compile(step=True)` refuses it by name.
 
 **01-kgrid (2026-09-03) — fixed-capacity reciprocal grid.** Sites (1) and
 (2) above are closed: `gto/kspace.py` now owns `KSpaceGrid` (plain class,
@@ -748,7 +980,7 @@ numerical parity check must run under `backend="inductor"` on the target
 device, not only `aot_eager`. Upstream reproducer = the probe above
 (torch 2.12.0+cu130, sm_90).
 **03-wire GH200 (2026-09-04, job 1976727, n186, 4995-atom 46.36 Å PEO, fused cueq, `Compiler(dynamic=True)`).**
-fp64 compiled vs eager: `dE = 0.0`, `max_dF = 4.97e-14`, `max_dW = 6.29e-11`, `n_edges = 285546` (job 1974822 had `max_dW = 1.087e-10` against the same 1e-9 virial contract; |W| ~ 5200 eV, ~2e-14 relative). fp32 compiled: mean step **0.190 s** (eager baseline 0.38 s), peak **25.87 GiB** (eager 28.3 GiB; the larger k-grid did not OOM), recompiles after warm-up **0** (live E 285546 → 285446). Official goldens unchanged: `regressions/mace-polar-periodic-gto.py` diffs ~1e-5 eV (`atol` 1e-3), `mace-polar-official-water.py` `dE = 1.3e-7 eV`.
+fp64 compiled vs eager: `dE = 0.0`, `max_dF = 4.97e-14`, `max_dW = 6.29e-11`, `n_pairs = 285546` (job 1974822 had `max_dW = 1.087e-10` against the same 1e-9 virial contract; |W| ~ 5200 eV, ~2e-14 relative). fp32 compiled: mean step **0.190 s** (eager baseline 0.38 s), peak **25.87 GiB** (eager 28.3 GiB; the larger k-grid did not OOM), recompiles after warm-up **0** (live E 285546 → 285446). Official goldens unchanged: `regressions/mace-polar-periodic-gto.py` diffs ~1e-5 eV (`atol` 1e-3), `mace-polar-official-water.py` `dE = 1.3e-7 eV`.
 **Same-job eager vs compiled (2026-09-04, job 1984979).** `regressions/polar-peo-compile-compare.py`: fp64 compiled vs eager `dE = 0.0`, `max_dF = 5.7e-14`, `max_dW = 1.08e-10`. fp32 molnex eager 0.395 s / 39.24 GiB, compiled **0.142 s / 25.87 GiB** (2.78×), 0 recompiles. Official fp64 goldens unchanged (`denergy = +3.0e-5` eV).
 **Kernel-only official PolarMACE vs molnex E+F (2026-09-04, job 1987847, n412).** Neighbour graph built once; official `PolarMACE.forward` (autograd forces, no ASE rebuild) vs molnex `calc_energy_forces_virial`. fp32:
 
@@ -783,6 +1015,104 @@ branch *still* breaks so it cannot silently become a contract.
 ---
 
 <!-- mol:note:topic:cueq-ops-capability -->
+## [2026-09-14] Static capacity packing — the padder owns the shape, the packer fills it (user rule)
+
+**Rule.** A compile-static training loader is *capacity-first*: the invariant
+is the per-column capacity, never the molecule count. `MoleculePadder` is the
+one owner of the static shape — `from_counts(counts, atoms=2**k, cutoff=)`
+sizes every cap as `max(round_up(Σc/Σatoms × (atoms − N_GHOSTS) × slack),
+max_c)` and the graph-slot count as `ceil(graphs_slack × budget / mean_atoms)
++ 1` — and `padder.budgets()` are the `TokenBudgetPacker` budgets (atoms
+minus ghosts, graphs minus the sink, every other axis its cap), wired by
+`DataModule(batch_counts=, val_batch_counts=)`. So no batch can exceed any
+cap (construction, not probability), `padder.check(counts)` refuses a
+dataset with a molecule no batch could carry, and the graph count is padded
+too (`max_graphs`: dead slots with `num_atoms = 0`, `graphs.mask`; ghost
+atoms' `batch` = the last slot, the sink, so a per-atom head that forgets
+`atoms.mask` pollutes a slot the loss weights out). `energy_loss` /
+`energy_mse` take `weight_key="mask"` on `graphs` like `force_loss` on
+`atoms`; the Class-I script's Huber / MAE / per-structure L2 weight by both
+masks. `PadBuckets` (smallest-fit among ≤ 8 padders) is deleted: one shape
+suffices, and a per-task shape — if ever — is a `TaskMixture` concern, not a
+pick by live size.
+
+**Why (OMol25 4m, extent `molhub-home/derived/class-i-extent`, 3,986,754
+rows).** Mean 54.85 atoms / 132.5 propers per molecule; Σpropers/Σatoms
+2.415; max 350 atoms / 8516 propers. The retired scheme fixed `B` and padded
+to `B × per-molecule max`: small@2048 = 716,804 atoms / 17.4 M proper rows
+(OOM rc=137, job 2439130), large@512 = 59.5 GiB / 619 ms with a random batch
+filling 16 % of the atom slots and 1.6 % of the proper slots. Next-fit dry
+pack with caps at density × A × 1.10: A = 65,536 → ~1194 molecules / batch,
+A = 131,072 → ~2390, A = 262,144 → ~4781; atom fill 99.9 % in every case,
+cheap columns ~91 % (min 85–88 %), atoms close 100 % of bins. At 131,072 the
+proper cap is 348 k — 50× under the retired scheme for *more* molecules.
+
+**The recompile that "capacity-first" hit before** (`runs/pad-buckets-2418298.err`)
+was not capacity-first: `graphs.num_atoms` was never padded, so every
+distinct live `B` was a new shape (`expected 282, actual 312 … 425`,
+`FailOnRecompileLimitHit` after 8), and the valence caps came from a p99
+quantile while only atoms were budgeted, so a high-density molecule pushed
+propers over the cap. Caps come from max and density, never from a quantile;
+every padded axis is a budget; the graph count is an axis.
+
+**Edges are a budget column, and on 4m they are *the* column** (user ruling:
+every potential has non-bonded terms; there is no bonded-only training). The
+extent scan counts each molecule's cutoff list by the collate list's own rule
+(`0 < r <= cutoff`, both orientations — `get_neighbor_pairs.cpp`), keyed by
+`(source_id, cutoff)`. Measured at the field's 10 Å open-boundary list (scan
+job 2448990, 32 cores, 4 min 19 s): mean **3768.7 edges/molecule**,
+Σedges/Σatoms **68.7**, max 70,250 — at 10 Å a 55-atom molecule's cutoff
+graph is nearly complete. So the edge cap is ~76× the atom cap (A = 65,536 →
+4.95 M edge rows) and **edges, not the valence columns, set HBM**; the atom
+grid of the sweep starts at 2^13, and the provisional `packed_max_atoms` is
+2^16 / 2^15 / 2^14 (small / medium / large). The `pad_atoms × 128` heuristic
+is gone (it could overflow a dense 350-atom molecule *and* shipped dead
+edges). `nrows(store, "propers")` now resolves the `<family>_n` count column,
+so a FrameStore budgets valence families without a scan.
+
+**Scan cost**: the per-frame edge count is a numpy `(N, N)` distance matrix
+(0.17 ms), not a one-frame collate through the O(N²) kernel (248 ms, 316×) —
+verified equal on 34 real 4m frames. Whole 4m + val-neutral scan is ~22
+core-hours: 32 cores, 4 min. The job asks for 128 cores / 20 min so it
+backfills.
+
+**Calibration, done (checklist §4/§5/§7; `runs/class-i-hbm/*.json`, GH200 96
+GiB, 2026-09-15).** `benchmarks/bench_class_i_hbm.py --size <tier> --atoms
+2**k --view random|top10`: `random` = a random 10 % of 4m; `top10` = the union
+of the top 10 % by every budgeted column, packed under the **same** padder —
+the recompile gate (`torch._dynamo.config.error_on_recompile`). **Every one of
+the 24 cells: 0 recompiles**, 12–20 distinct live graph counts each, so one
+compiled graph served every shape the packer produced.
+
+| atoms | mol/batch | small GiB/ms | medium GiB/ms | large GiB/ms | steps/epoch |
+|---|---|---|---|---|---|
+| 65536 | 1185 | 6.4 / 77 | 7.1 / 84 | 10.1 / 106 | 3362 |
+| 131072 | 2388 | 12.7 / 143 | 14.1 / 154 | 20.2 / 198 | 1669 |
+| 262144 | 4806 | 25.4 / 264 | 28.1 / 285 | 40.3 / 369 | 829 |
+| 524288 | 9598 | 47.1 / 513 | 47.5 / 555 | OOM (77.5 peak) | 415 |
+
+Operating point **131072 for all three tiers** (89 / 90 / 93 % of each tier's
+peak molecule throughput at a quarter of 524288's memory and twice 262144's
+optimizer steps); HBM ceiling 2^19 small / 2^19 medium / 2^18 large. The fills
+are the design working: on `random` the atom column fills 1.000 and pairs
+0.907; on `top10` atoms drop to 0.810 and **pairs go to 1.000** — the big
+molecules close their bins on pairs, and the step time and peak memory are
+unchanged between the two views, which is the whole point of fixing the shape.
+
+**Three bugs the gate caught, all of them "a shape that depends on the data":**
+(1) the first batch carried one extra `atoms` column because the one-time seed
+ForceField build ran the encoder on the caller's batch (`chem_features` written
+in place) — seed on a `clone()`; a namespace's *column count* is a dynamo guard
+exactly like a tensor size. (2) `ExclusionTable._keys` was sized by how many
+1-2/1-3/1-4 pairs survived the dedup, i.e. by content — now padded to one slot
+per bonded column with the `_NO_MATCH_KEY` sentinel, so its length is a
+function of the input shapes. (3) `NeighborList(max_num_pairs=)` is a
+**per-molecule** floor (the kernel runs per molecule and grows to that
+molecule's own complete half graph), and the loader was handing it the whole
+*batch's* edge capacity — 4.95 M pairs allocated per molecule per worker, which
+took the host out of memory at 11.7 GiB RSS. It is `n(n-1)/2` of the largest
+molecule (`_list_capacity`).
+
 ## [2026-08-08] cuEq fused-kernel capability is probed, never assumed
 
 Without the `cuequivariance-ops-torch` wheel, cuEq honours
@@ -988,7 +1318,7 @@ Pinned by `regressions/streaming-data-tiers-04-scheduler-integration-03-plan.py`
 (discriminating local!=global fixture; the cross-view case documented in its
 docstring as a deliberate sharp edge).
 
-**Open routes** (named, not silent): `/mol:fix` scoped to `molix.batch.task`
+**Open routes** (named, not silent): `/mol:fix` scoped to `molix.data.task`
 (`BatchTask.execute` annotated `dict` while the contract is TensorDict — one
 pre-existing ty warn per collate route); `FrameStoreDataset.__getstate__` should
 drop the LRU pool + cached tables so a spawn worker re-opens by path (worker
@@ -1037,7 +1367,7 @@ is the Python gate; C++ hygiene rides the interface CI job + this file.
 ## `TensorFrame` — the typed batch view, and the torch 2.14 bump it rode in on (2026-09-07)
 
 **Two shapes, two names.** At rest a molecule is a molpy ``Frame`` (`mp.Frame`);
-in the model it is `molix.batch.TensorFrame` (`mn.TensorFrame`) — a
+in the model it is `molix.data.TensorFrame` (`mn.TensorFrame`) — a
 `tensordict.TypedTensorDict` whose declared fields *are* the post-collate
 schema. `atoms` is the only required namespace; `edges` / `graphs` / `bonds` /
 `angles` / `propers` / `impropers` are `NotRequired`, because `edges` is built
@@ -1108,7 +1438,7 @@ Python surface is what collided, so the Python surface is what changed:
 | `BlockDataset` / `BlockFrameView` | `FrameStoreDataset` / `FrameStoreView` |
 | `BlockPlan` / `BlockPlanSource` / `BlockCoverage` | `FrameStorePlan` / `FrameStorePlanSource` / `FrameStoreCoverage` |
 | `BlockNotReadyError` / `BlockSchemaMismatchError` / `BlockSplitMismatchError` | `FrameStoreNotReadyError` / … |
-| `molix.store.block` / `block_view` / `molix.batch.block_plan` | `molix.store.frame_store` / `frame_store_view` / `molix.batch.frame_store_plan` |
+| `molix.data.block` / `block_view` / `molix.data.block_plan` | `molix.data.frame_store` / `frame_store_view` / `molix.data` |
 
 **What deliberately did not change**: the format id `molix.block/1`, the
 manifest keys, and lowercase "block" as the name of the on-disk unit. That id
@@ -1117,11 +1447,11 @@ changing it is a format revision, not a rename. So: a `FrameStoreWriter`
 writes a frame store, whose on-disk form is one `molix.block/1` block.
 
 **Downstream**: molhub funnels its coupling through exactly one import,
-`src/molhub/conveyor/prepare.py:446` (`from molix.store.block import
-BlockWriter, SamplingUnit`), plus `molix.batch.neighbor.NeighborList` in
+`src/molhub/conveyor/prepare.py:446` (`from molix.data.block import
+BlockWriter, SamplingUnit`), plus `molix.neighbor.NeighborList` in
 `src/molhub/dataset/neighbor.py`. That line was already broken by the
 `SamplingUnit` deletion; the rename makes the module path stale too. Fixing it
-is one line: `from molix.store.frame_store import FrameStoreWriter`, then
+is one line: `from molix.data.frame_store import FrameStoreWriter`, then
 `writer.append(frames, key=…, task=…)`.
 
 ---
@@ -1137,7 +1467,7 @@ imports. Found and fixed while porting the consumers:
    `TaskRouter.route` **refuses a floating task label** rather than truncate one
    silently — so multi-task routing was broken for every frame-fed batch. Fixed
    with `_meta_scalar` (integral in, integral out), test in
-   `tests/test_molix/test_batch/test_collate.py`. **Producers of
+   `tests/test_molix/test_data/test_collate.py`. **Producers of
    `graphs.total_charge` must now emit a float**: `total_charge=0` collates to
    int64 and the EEM solver wants the dtype it solves the charges in.
 2. **`DataLoaderProfiler` raised on use.** `profiler/dataloader.py` called
@@ -1228,3 +1558,92 @@ Related: `compile-no-graph-breaks` (why `index_add` is an inductor fallback in
 the first place), and the k=1 `torch.bmm` int32 overflow
 (pytorch/pytorch#196431) — same family, found the same way, but that one *is*
 still open upstream.
+
+---
+
+<!-- mol:note:topic:one-data-layer -->
+## One data layer; molnex has no file format (2026-09-17)
+
+**What changed.** `molix.store` + `molix.dataloader` + `molix.batch` → **`molix.data`**.
+`TensorFrame` → `molix/frame.py`, `NeighborList` → `molix/neighbor.py`: one is what
+the *model* reads, the other is geometry, so neither is loading machinery.
+`molix.block/1` and the whole `FrameStore*` family are **deleted**.
+
+**Why the format went.** It had no producer, no consumer, and no instance:
+
+- `find <workspace> -name commit.log` → **0**; no store was ever written.
+- The only `FrameStoreWriter(` outside its own tests was a benchmark script.
+- The Class-I production path reads MolHub's LMDB — measured call stack
+  `molhub/io/lmdb.py:94 get` → `omol25.py:_frame_from_record` (job 2577512).
+- molhub's import of it had been broken since the 2026-09-08 rename and nobody
+  noticed, because nobody used it.
+- `DataModule._resolve_collation` probed `_block_capable(dataset)` on every
+  dataloader build for a route that could never fire.
+
+~6 200 lines of code and tests went; the unit tier went 8:26 → 5:20.
+
+**The naming note above (`frame-store-rename`, 2026-09-08) is superseded.** It
+recorded a decision *I* made and gave *my* rationale; it cited no operator
+instruction, and the operator's position was that the `FrameStore` spelling was
+never asked for. A note recording "I decided X" is not evidence that X was
+approved — do not read `.claude/notes/` that way.
+
+**Two things that looked dead and were not.** Both were caught by tests, and
+both are now pinned in docstrings:
+
+1. The `column` / `frame_mol` branch of `nrows` is a **count-sidecar protocol**,
+   not a store detail: a source that answers `n_<table>` without materialising a
+   sample lets the sampler budget a whole epoch with **zero** `__getitem__`
+   calls. Deleting it turned an O(1) metadata read into materialising every
+   sample (`assert 128 == 0`). Same reason `SubsetDataset.nrows` reads *through*
+   the parent instead of via `self[i]`.
+2. `tests/test_repository_boundaries.py` banned the *name* `molix.data` because
+   a deleted ETL layer had owned it. The guard was re-aimed at the invariant it
+   always meant — molnex acquires no data — and now fails on any acquisition
+   verb in `molix.data.__all__`, which is stricter than the name check was.
+
+**`nrows` is a member now**, not a module: the scalar is molpy's
+(`block.nrows`), `BaseDataset.nrows(table)` is the per-index vector, and
+`BaseDataset.nrows_of(source, table)` is the adapter for a foreign dataset,
+since `DataModule` is handed whatever dataset the caller owns.
+
+**Superseded 2026-09-18 (operator ruling).** `BaseDataset.nrows` is deleted:
+a *dataset* must not spell a request the same way a *block* spells an
+attribute. `Block.nrows` stays the free attribute; the dataset side is three
+named things — `counted_tables` (a class-level **declaration**, for the common
+tables a dataset developer already knows: `OMol25Dataset.counted_tables =
+{"atoms": "_n_atoms"}`), `count_rows(table)` (a **verb**, for a container that
+must decode to count and wants to cache what it measured), and
+`nrows_of(source, table)` (the **request** every batch budget goes through,
+resolving declaration → verb → materialise-every-sample).
+
+**Open, not decided here**: molhub still imports `molix.store.block`
+(`conveyor/prepare.py`, `loader/materialize.py`) — its half of the deleted
+format. Re-pointing it would be a fake fix; whether molhub's store *writer*
+goes too is a cross-repo call for the operator.
+
+<!-- mol:note:topic:scripts-hold-no-model -->
+## A model does not live in `scripts/` (2026-09-17)
+
+`scripts/mm_param_learning/` went from 7 661 lines to 3 439. Deleted outright:
+`align.py`, `profile_class_i.py`, `overfit_gate.py`, `scale_audit.py`,
+`materialize_workspace.py`, `workflows.py`, `prod_day.py`, `quasi_prod.py`,
+`diagnose_phalkethoh_mm.py`, `zinc_typing_recovery.py`, `gpu_bench.py`,
+`train.py`, `molcfg.yaml`, 15 `.sbatch`/`.sh` job scripts, the whole of
+`tests/test_scripts/`, and the two Class-I benchmarks. Workflow drivers belong
+to a molab project/experiment; dataset acquisition belongs to MolHub; the
+profiler already exists.
+
+The model definitions that were living there — `espaloma_like_template`,
+`build_espaloma_like_model`, `ForceAwareModel` — are gone too, superseded by
+`molzoo.rondo` (`RondoForceField` / `RondoSpec` / `Rondo` / `RondoPotential`).
+`ClassIFit` now *holds* a `Rondo` and exposes `forcefield` as
+`self.parameterizer.template`, so the field the loader mounts and the field the
+model fills are one object rather than two equal-looking ones (finding **F21**
+closed by construction, not by convention).
+
+What is left under `scripts/` is composition: `class_i_fit.py`,
+`espaloma_mm_protocol_train.py`, `configs.py`, `constants.py`,
+`omol25_fairchem_4m.py`, `scan_omol25_extent.py`. The OMol25 loaders inside
+`class_i_fit.py` (~350 lines: `LazyOMol25`, `load_omol25_*`,
+`_index_omol_source`, the e0 and count caches) still owe a move to MolHub.

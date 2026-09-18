@@ -48,11 +48,11 @@ not an encoder-only feature extractor: its `forward` writes `graphs.energy` and
 | In | `atoms.Z` | `(N,)` | long | Atomic numbers; must be present in the construction `atomic_numbers` table |
 | In | `atoms.pos` | `(N, 3)` | float (`config.ftype`) | Cartesian positions; forces are `-∂E/∂pos` |
 | In | `atoms.batch` | `(N,)` | long | Graph membership index `0..B-1` |
-| In | `edges.edge_index` | `(E, 2)` | long | `[:,0]`=source/sender, `[:,1]`=target/receiver (MolNex convention) |
+| In | `edges.pair_index` | `(E, 2)` | long | `[:,0]`=source/sender, `[:,1]`=target/receiver (MolNex convention) |
 | In | `graphs.total_charge` | `(B,)` | long | Optional; per-graph total charge in units of `e`. Absent → neutral (`0`) |
 | In | `graphs.total_spin` | `(B,)` | long | Optional; per-graph spin channel. Absent → `1` (singlet multiplicity `2S+1 = 1`, all electrons paired). **Not `0`** — `MACEPotential._condition_charge_spin` fills `torch.ones(...)`, and spin `0` would index an untrained embedding row (`spin_offset = 0`) and return garbage |
 
-`edges.edge_diff` / `edges.edge_dist` are **not** consumed: `forward` recomputes
+`edges.pair_diff` / `edges.pair_dist` are **not** consumed: `forward` recomputes
 edge vectors from `atoms.pos` so the energy is differentiable w.r.t. positions.
 
 ### 2.2 Outputs
@@ -66,7 +66,7 @@ edge vectors from `atoms.pos` so the energy is differentiable w.r.t. positions.
 returns the same object. The raw-tensor entry point `MACEOMol.energy_forces(...)`
 returns `{"energy", "forces"}` and is used by the `scripts/omol_port/verify_*.py`
 block/E2E checks; the differentiable energy alone is
-`MACEPotential.energy_core(positions, Z, edge_index, batch, num_graphs,
+`MACEPotential.energy_core(positions, Z, pair_index, batch, num_graphs,
 shifts=None, total_charge=None, total_spin=None)`.
 
 ## 3. Forward Contract
@@ -78,7 +78,7 @@ shifts=None, total_charge=None, total_spin=None)`.
 | $N, E, B$ | atoms, edges, graphs | `molzoo.mace.potential.MACEPotential.energy_core` |
 | $Z_i$ | atomic number of atom $i$ | `atoms.Z` |
 | $\mathbf r_i$ | position of atom $i$ | `atoms.pos` |
-| $s,t$ | sender / receiver of an edge | `edge_index[:,0]`, `edge_index[:,1]` |
+| $s,t$ | sender / receiver of an edge | `pair_index[:,0]`, `pair_index[:,1]` |
 | $\mathbf v_e=\mathbf r_t-\mathbf r_s$ | edge vector | `molzoo.mace.geometry.edge_vectors` |
 | $h_i$ | node features (irreps, `cue.ir_mul`) | `node_feats` |
 | $E_0$ | per-element reference + charge/spin readout | `e0` |
@@ -184,7 +184,7 @@ $$
 | A2 | charge/spin via `JointFeatureEmbedding` added to node feats + into E0 | OMOL conditioning | low | `scripts/omol_port/verify_joint_embed.py` (0) |
 | A3 | cue `"O3"` group everywhere (no `O3_e3nn`) | weights are converted into the cue-O3 twin, so O3 is the native target; O3 vs O3_e3nn CG differ only ~1.4e-8/op and the O3 twin already matches e3nn to 1.5e-8 — O3_e3nn would not reduce the residual and would add an `e3nn` dep | low | residual 7e-7 eV / 4.3e-6 eV/Å vs official (reimplementation accumulation, not a convention diff) — inside the 1e-4 bar |
 | A4 | TensorDict `forward` forces via `molpot.derivation.kernels.grad_force_pass`; `energy_forces` via `molpot.derivation.force.autograd_forces_from_energy`. Both are `torch.autograd.grad`; the earlier `torch.func.grad` plan was dropped because cuEquivariance's fused ops register legacy `autograd.Function`s without `setup_context` | compile-friendly molnex contract | low | `tests/test_molzoo/test_mace/test_variants.py::TestMACEOMol::test_forward_matches_energy_forces` (1e-8 vs autograd) |
-| A5 | edge convention `v=pos[t]-pos[s]`, `edge_index (E,2)` end to end (upstream's `(2,E)` transposed away at the port boundary) | MolNex collate schema | low | `tests/test_molzoo/test_mace/test_geometry.py::TestEdgeVectors`, `tests/test_molzoo/test_mace/test_variants.py::TestMACEOMol` |
+| A5 | edge convention `v=pos[t]-pos[s]`, `pair_index (E,2)` end to end (upstream's `(2,E)` transposed away at the port boundary) | MolNex collate schema | low | `tests/test_molzoo/test_mace/test_geometry.py::TestEdgeVectors`, `tests/test_molzoo/test_mace/test_variants.py::TestMACEOMol` |
 | A6 | `RadialMLP` honors `config.ftype` | fp64-via-config without `.double()` | low | `tests/test_molzoo/test_mace/test_variants.py::TestMACEOMol` (fp64 fixtures) |
 | A7 | per-layer irreps + edge-mid (128) hardcoded to OMOL dims | faithful OMOL weight load | medium | non-OMOL `l_max≥2`+small `num_features` unsupported; tracked in `mace-omol-port-02` |
 
@@ -259,7 +259,7 @@ for this spec (tracked in `scripts/omol_port/SPEC.md`).
 
 | Concern | Owner | Contract |
 |---------|-------|----------|
-| Neighbor list / edges | collate / `molix.batch.NeighborList` | populates `edges.edge_index` `(E,2)` |
+| Neighbor list / edges | collate / `molix.data.NeighborList` | populates `edges.pair_index` `(E,2)` |
 | Edge displacements | `molzoo.mace.geometry` | `edge_vectors` / `edge_lengths`; differentiable w.r.t. `pos` |
 | Charge/spin inputs | dataset / collate | `graphs.total_charge`, `graphs.total_spin` (optional) |
 | Building blocks | `molrep.readout.mace` (+ generic `molrep` / `molpot`) | reused; not owned here |

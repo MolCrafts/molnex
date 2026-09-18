@@ -1,17 +1,52 @@
 # Production training preflight checklist
 
-This checklist is binding for every production training submission. Complete
-it against one versioned molexp calibration experiment/run and attach every
-result to that run. An unchecked item, missing evidence, `N/A`, waiver, stale
-result, or run mismatch means **NO-GO**. Before sign-off, only explicitly
-bounded calibration/validation jobs may run.
+This checklist is binding for every production training submission. An
+unchecked item, missing evidence, `N/A`, waiver, or stale result means
+**NO-GO**. Before sign-off, only explicitly bounded calibration/validation jobs
+may run.
+
+**What the gate is about (operator ruling, 2026-09-16).** The gate is *evidence
+that the configuration works*, not bookkeeping about where that evidence is
+filed. Two things are therefore explicitly **not** gates:
+
+- **A molexp experiment/run record is optional.** Use it when it helps — it is
+  a good place to keep evidence — but an absent or stale molexp record never
+  blocks a submission. Evidence under a timestamped `runs/<slug>-<utc>/` is
+  sufficient on its own, and §0 below is satisfied by that directory.
+- **A clean or committed git tree is not required.** Committing is the
+  operator's call and its timing is theirs; "uncommitted work" is never a
+  reason to refuse a run. Record what was run (the run dir holds `config.json`)
+  and move on.
+
+**Where the launcher and the gates went (operator ruling, 2026-09-17).** Four
+molnex scripts this checklist cites no longer exist here:
+
+| Was | Now |
+|---|---|
+| `scripts/mm_param_learning/prod_day.py` | `lab-new/projects/class-i/train/prod_day.py` — a production day is a molab *workflow* under a project/experiment, not repo code |
+| `scripts/mm_param_learning/align.py` | **deleted.** The operator ruled the align gate out; its one surviving fact, the size-bucket triple, is `configs.SIZE_BUCKETS` |
+| `scripts/mm_param_learning/overfit_gate.py` | **deleted** by the same ruling |
+| `scripts/mm_param_learning/profile_class_i.py` | **deleted** — molnex has a profiler (`molix.profiler`); a second one in `scripts/` was duplication |
+
+Items below that name `align.py` / `overfit_gate.py` as the *implementation* of
+a gate are therefore satisfied by evidence, not by running those files. The
+recorded PASS lines that cite them are historical sign-offs and are left as the
+dated record they are. The iron-law items in CLAUDE.md are unchanged: what was
+deleted is one particular implementation, not the requirement for evidence.
+
+What stays binding is everything that can make a run silently wrong: data
+provenance and units, reference-vs-optimized parity, learnability, batching and
+hardware calibration, and a bounded smoke. Those must be re-established
+whenever the code, data, batching, precision or hardware changes — that rule is
+about *staleness of measurement*, not about version control.
 
 ## 0. Submission identity
 
 - [x] The run is still classified as calibration/validation; no production
   job has been submitted early.
-- [x] Run identity is owned by molexp (`Workspace → Project → Experiment →
-  Run`); launchers record a molexp run id, not a git/config hash.
+- [x] Run identity is owned by the run directory. A molexp id may be recorded
+  alongside it and is **optional** (ruling above); launchers never require one,
+  and never require a git hash or a clean tree.
 - [x] Every artifact below is written under the run's record dir (or a
   timestamped `runs/<slug>-<utc>/` when launched outside a declared molexp
   run).
@@ -23,7 +58,7 @@ bounded calibration/validation jobs may run.
   `slurm_account`. Science pins (4m/val-neutral, pack 16384, lr, clip,
   energy_scope, seed) match.
 
-Launcher: `scripts/mm_param_learning/prod_day.py` writes
+Launcher: `lab-new/projects/class-i/train/prod_day.py` writes
 `runs/prod-day1-<size>-<utc>/` plus `molexp.json` / `config.json`.
 molexp experiment `universal-class-i-v0-prod-day1-gh200` (runs
 `f2dd9ed5` small / `90e71a0d` medium / `ef38fb1c` large). Unbounded
@@ -44,7 +79,8 @@ three-size campaign only.
   task, so this item is not applicable until a second task is live.
 - [x] Coverage (n_mols, n_atoms min/max, Z set, size buckets 1–8 / 9–16 /
   17–32) is written to `split.json` by `write_split_manifest`.
-- [x] Size buckets are the same triple as `align.py` §2.
+- [x] Size buckets are the same triple as `configs.SIZE_BUCKETS`
+  (previously stated as `align.py` §2, which is deleted).
 
 ## 2. Network correctness and numerical parity
 
@@ -136,6 +172,22 @@ coordinates.
   that cap and the pack is a per-step atom budget, not a per-bucket split.
   Splitting would add loader/collator branches with no HBM or throughput
   benefit at this scale (16384-atom packs use 0.59 GiB).
+- [x] **4m static shape is capacity-first (2026-09-14/15).** The padder is
+  `MoleculePadder.from_counts(extent.counts(), atoms=2**k, cutoff=)` over the
+  full-4m extent (scan keyed by the field's list cutoff, edges included) and
+  the loader packs under `padder.budgets()` (`batch_counts` /
+  `val_batch_counts`); the molecule count per batch floats. The old
+  `B × per-molecule max` pad is retired (small@2048 = 17.4 M proper rows,
+  OOM, job 2439130). Calibration = `benchmarks/bench_class_i_hbm.py` per
+  tier over atoms ∈ {2^16 … 2^19}: `random` view (ms / GiB / fill) and
+  `top10` view (largest 10 % by every column; gate = 0 recompiles, 0 padder
+  raises). **Done 2026-09-15** (`runs/class-i-hbm/*.json`, GH200 96 GiB): 24
+  cells, every one 0 recompiles with 12-20 distinct live graph counts;
+  operating point `packed_max_atoms=131072` for all three tiers (2388
+  molecules/batch, 12.7 / 14.1 / 20.2 GiB, 143 / 154 / 198 ms, 89-93 % of each
+  tier's peak molecule throughput); HBM ceiling 2^19 / 2^19 / 2^18 (large OOMs
+  at 2^19 after a 77.5 GiB peak). The json files under `runs/class-i-hbm/` are the
+  evidence; linking them to a molexp record is optional (ruling above).
 - [x] HBM sweep GH200 Slurm 1417874 / molq `a03ff86c`, run
   `runs/quasi-prod-d8247ba3046e-20260819T101139Z/pack_sweep.json`:
   4096→0.19 GiB (181 mols), 8192→0.33, 16384→0.59, 32768→1.10,
@@ -176,7 +228,7 @@ coordinates.
 - [x] Output is `runs/prod-day1-<size>-<utc>/` (gitignored),
   not repo-root `checkpoints/`.
 - [x] Launcher fail-closed: non-power-of-two sizes, train/val id overlap.
-  Direct `python scripts/mm_param_learning/prod_day.py {small,medium,large}`.
+  Direct `python lab-new/projects/class-i/train/prod_day.py {small,medium,large}`.
 - [x] **decision: GO** for the 1-day / 3-size campaign. Unbounded
   multi-week production remains NO-GO. Official 4m/val-neutral, pack
   16384, stop is Slurm wall 24h.
