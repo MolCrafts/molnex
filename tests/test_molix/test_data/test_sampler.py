@@ -1927,8 +1927,10 @@ class TestTaskMixtureTableForms:
         """``EnergyTaskSamplerSource.batch_sampler``'s exact call shape.
 
         Tuple string tables, ``indices=range(len(dataset))`` and a single-task
-        mixture at probability 1.0 (``scripts/mm_param_learning/
-        espaloma_mm_protocol_train.py:560-568``) must keep working verbatim.
+        mixture at probability 1.0 must keep working verbatim. That shape came
+        from the pre-Rondo Espaloma-protocol trainer, deleted 2026-09-18; the
+        call shape is pinned here because it is the one a single-task source
+        produces, not because that caller still exists.
         """
 
         sampler = TaskMixtureBatchSampler(

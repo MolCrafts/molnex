@@ -8,25 +8,18 @@ must not be treated as authority for a new training submission.
 
 | Spec | Chain | Opened | Scope |
 |---|---|---|---|
-| [cache-layers-01-sources](cache-layers-01-sources.md) | cache-layers | 2026-09-11 | Approved: official OMol25 durable source — native eV, pinned 4m/val tarballs, in-memory domain `assignment()`, hosted `omol-elem-refs` YAML via `ArtifactHub.fetch`. |
-| [cache-layers-02-cache](cache-layers-02-cache.md) | cache-layers | 2026-09-11 | Code-complete (revised 2026-09-12): `loaded.cache("graph.natoms")`; Python home later renamed to `config.home_dir` (09-01); no `$MOLHUB_HOME`. |
-| [cache-layers-03-refs](cache-layers-03-refs.md) | cache-layers | 2026-09-11 | Approved: generalize `AtomicReferenceEnergy` to float64 `c[Z]` + explicit support mask; no silent zero. |
-| [cache-layers-04-dtype](cache-layers-04-dtype.md) | cache-layers | 2026-09-11 | Approved: Frame collate emits float64 `graphs.energy`/`e0`; `batch_to` NestedKey skip; DataMixture count snapshots. |
-| [cache-layers-05-residual](cache-layers-05-residual.md) | cache-layers | 2026-09-11 | Approved: unexported `EnergyResidual` BatchTask writes in-flight residual/e0; public export deferred to the protocol slug. |
-| [cache-layers-06-geometry](cache-layers-06-geometry.md) | cache-layers | 2026-09-12 | Approved: F29 always-on on eager public `calc_energy` / `bind_topology` / `warmup`; `energy()` is the compile-clean `_sum_energy` Derivative seam; `_frame_view` wrap identity stays; bonded-only `MD.run` named as compiled-energy residual. |
-| [cache-layers-07-protocol](cache-layers-07-protocol.md) | cache-layers | 2026-09-12 | Approved: named `omol25-fairchem-4m` composed beside historical Class-I; `ClassIFit.model()` forwards `energy_unit`; one optional `dressing=`; extra-role `Trainer.evaluate` isolated from `best.pt`; `EnergyResidual` exported. |
-| [cache-layers-08-molnex-counts](cache-layers-08-molnex-counts.md) | cache-layers | 2026-09-12 | Code-complete: molnex scripts read `loaded.cache("graph.natoms")`; `AtomCountCache` deleted; wrap later dropped in 09-02. |
-| [cache-layers-09-frame-dirs-01-types](cache-layers-09-frame-dirs-01-types.md) | cache-layers | 2026-09-12 | Code-complete: `molhub.config.home_dir = Path(...)`; grain-one is `atoms.nrows`; no `frame.meta` `n_atoms`. |
-| [cache-layers-09-frame-dirs-02-wire](cache-layers-09-frame-dirs-02-wire.md) | cache-layers | 2026-09-12 | Code-complete: drop `_VectorCounts` / `LazyOMol25.atom_counts`; public `source`/`indices`; `DataModule(batch_size)`; `home_dir`. |
-| [derivation-head-01-unify](derivation-head-01-unify.md) | derivation-head | 2026-09-11 | One `DerivativeHead` (F, or F+W) for the whole project; func/grad kernels, GradMode, VirialDerivation deleted; MACE / PiNet / readouts / `Potentials` route through it. |
+| [classical-tables-as-inputs-01-from-forcefield](classical-tables-as-inputs-01-from-forcefield.md) | classical-tables | 2026-09-12 | Draft, not started. |
+| [ff-params-01-canonical-vocabulary](ff-params-01-canonical-vocabulary.md) | ff-params | 2026-09-14 | Partially landed: molnex/molrs force-field parameter naming unified, molrs side still owes work. |
 
-Design source for the chain: `.claude/notes/composable-potentials.md`
-(spec S1–S8 mapping, shared type designs, A1 / iface / B1 / B2 / A2 roadmap).
+Design source for the composable chain:
+`.claude/notes/composable-potentials.md` (spec S1–S8 mapping, shared type
+designs, A1 / iface / B1 / B2 / A2 roadmap).
 
 ## Closed specifications and chains
 
 | Spec or chain | Closed | Disposition |
 |---|---|---|
+| `cache-layers-01..09-02` (10 specs), `data-layer-01-consolidation`, `derivation-head-01..04`, `dynamic-batching-packed-collate-02-collate`, `lammps-pair-molnex-01-aoti-force-export-wall`, `mace-omol-port-01..02` | 2026-09-18 | Deleted from the active set: a runtime spec is alive only until its work lands, and all of this has. The cache-layers protocol is committed (`counted_tables` / `count_rows` / `nrows_of`, `molhub.cache.CountSidecar`), the data layer is one package (`molix.data`, `molix.block/1` gone), and `molix.autograd.Derivative` is the single derivative op with `forward_loss` compiled by the default steps. Their durable reasoning is in `.claude/notes/` (`notes.md`, `cache-layers.md`, `architecture.md`); the files said `code-complete` / `closed` / stale `active` and were not authority for anything. Commits e8652f7 / b4eb852. |
 | composable-a0-debt-01-mixing | 2026-09-08 | Completed; 3/3 criteria verified. Commits 75b90721 (chain feature), 8b3c1880 (CLAUDE.md / batch `__init__` / data-modules via temp index), 422252ab (derivation leaves). `MixingRule` on `pair:lj/cut` (+ `StyleSchema.options` allowlist, option-merging re-declaration), `NonbondedMethodRecord.lj_mixing`, `MANIFEST_SCHEMA` 2, OPLS-AA geometric, exporters honour the rule; F24 + the `mixing.py` epsilon bias (F10) closed. |
 | composable-a0-debt-02-unwrapped | 2026-09-08 | Completed; 2/2 criteria verified. Commits 75b90721 (chain feature), 8b3c1880 (CLAUDE.md / batch `__init__` / data-modules via temp index), 422252ab (derivation leaves). `Potentials._check_geometry` refuses wrapped bonds from every public entry (bind validates before arming; no compile-time opt-out); F29 closed. |
 | composable-a0-debt-03-md-seam | 2026-09-08 | Completed; 3/3 criteria verified. Commits 75b90721 (chain feature), 8b3c1880 (CLAUDE.md / batch `__init__` / data-modules via temp index), 422252ab (derivation leaves). `MD.set_compiler` + `potential_dtype` (`ForceField.to_dtype`, private cast cell), classical `compile_core`, `derivation.position_leaf` the one leaf owner, bind-time graph count; barostat path fails closed (F34); benchmarks on the seams; F28 closed. |
@@ -66,10 +59,10 @@ Design source for the chain: `.claude/notes/composable-potentials.md`
 | lammps-iface-03-graph | 2026-08-30 | Completed; all 16 acceptance criteria verified (15 evidence, 1 agent-auto). |
 | lammps-iface-02-view | 2026-08-30 | Completed; all 14 acceptance criteria verified (12 evidence, 2 agent-auto). |
 | lammps-iface-01-meta | 2026-08-30 | Completed; all 14 acceptance criteria verified (12 evidence, 2 agent-auto). Chain 02-05 active. |
-| [dynamic-batching-packed-collate-02-collate](dynamic-batching-packed-collate-02-collate.md) | 2026-08-13 | Completed; all acceptance criteria verified. |
-| [mace-omol-port-01-native-port](mace-omol-port-01-native-port.md) | 2026-08-13 | Completed; all acceptance criteria verified. |
-| [mace-omol-port-02-pipeline-integration](mace-omol-port-02-pipeline-integration.md) | 2026-08-13 | Completed; all acceptance criteria verified. |
-| [lammps-pair-molnex-01-aoti-force-export-wall](lammps-pair-molnex-01-aoti-force-export-wall.md) | 2026-08-13 | Investigation closed; implementation requires a separate successor spec. |
+| `dynamic-batching-packed-collate-02-collate` | 2026-08-13 | Completed; all acceptance criteria verified. |
+| `mace-omol-port-01-native-port` | 2026-08-13 | Completed; all acceptance criteria verified. |
+| `mace-omol-port-02-pipeline-integration` | 2026-08-13 | Completed; all acceptance criteria verified. |
+| `lammps-pair-molnex-01-aoti-force-export-wall` | 2026-08-13 | Investigation closed; implementation requires a separate successor spec. |
 | `learnable-classical-ff-01..09` | 2026-08-13 | Completed library chain; removed from the active specification set. |
 | `universal-class-i-01..04` | 2026-08-13 | Completed library steps; removed from the active specification set. |
 | `mm-param-val-01..08` | 2026-08-13 | Closed and removed from the active specification set; superseded by `universal-class-i-05-dataset-composition`. |
@@ -86,6 +79,6 @@ Design source for the chain: `.claude/notes/composable-potentials.md`
 | [universal-class-i-07-wilson] | 2026-08-14 | Completed; all 11 acceptance criteria verified. |
 | [universal-class-i-06-hessian] | 2026-08-14 | Completed; all 10 acceptance criteria verified. |
 | `universal-class-i-05-dataset-composition` | 2026-08-14 | Closed in MolNex because dataset composition is not a MolNex responsibility; moved to MolHub as `universal-class-i-01-dataset-composition`. |
-| [derivation-head-02-static-shapes](derivation-head-02-static-shapes.md) | derivation-head | 2026-09-11 | Draft: full-capacity edges on the MD path (no live-prefix slice), one dead-edge constant shared by `NeighborList` / `PadMolecularBatch` / `StaticForward`, `atoms.mask` in MACE, CUDA-graph step contract. |
-| [derivation-head-03-step-compile](derivation-head-03-step-compile.md) | derivation-head | 2026-09-11 | Draft: `Trainer.compile(step=True)` compiles `forward_loss` (forward + loss) on both steps; `smoke` shares it; router losses stay eager. |
-| [derivation-head-04-molix-derivative](derivation-head-04-molix-derivative.md) | derivation-head | 2026-09-11 | Draft, awaiting review: `molix.autograd.Derivative(energy, wrt=(Positions(), Strain()))` as the one derivative op; Potential.forward = energy only; `compile_core` removed in favour of `Compiler()(op)`. 02 and 03 depend on it. |
+| `derivation-head-02-static-shapes` | derivation-head | 2026-09-11 | Draft: full-capacity edges on the MD path (no live-prefix slice), one dead-edge constant shared by `NeighborList` / `PadMolecularBatch` / `StaticForward`, `atoms.mask` in MACE, CUDA-graph step contract. |
+| `derivation-head-03-step-compile` | derivation-head | 2026-09-11 | Draft: `Trainer.compile(step=True)` compiles `forward_loss` (forward + loss) on both steps; `smoke` shares it; router losses stay eager. |
+| `derivation-head-04-molix-derivative` | derivation-head | 2026-09-11 | Draft, awaiting review: `molix.autograd.Derivative(energy, wrt=(Positions(), Strain()))` as the one derivative op; Potential.forward = energy only; `compile_core` removed in favour of `Compiler()(op)`. 02 and 03 depend on it. |
