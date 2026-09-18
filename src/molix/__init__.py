@@ -99,6 +99,7 @@ def ensure_op_registered(op_name: str) -> None:
 _load_ops_library()
 
 from molix import logger, logging
+from molix.autograd import Derivative
 from molix.compile import Compiler, ExplainSummary, register_inductor_fallbacks
 from molix.config import config
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
@@ -112,6 +113,7 @@ __all__ = [
     "Checkpoint",
     "CheckpointBackend",
     "Compiler",
+    "Derivative",
     "ExplainSummary",
     "Exporter",
     "JournalHook",

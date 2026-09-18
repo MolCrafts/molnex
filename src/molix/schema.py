@@ -1,7 +1,7 @@
 """Post-collate batch-schema keys, shared constants, and cross-layer protocols.
 
 The nested ``atoms / edges / graphs`` TensorDict layout produced by
-:func:`molix.batch.collate.collate_molecules` is a molix contract (see
+:func:`molix.data.collate.collate_molecules` is a molix contract (see
 CLAUDE.md, "Post-collate batch schema"). The tuple keys under which models
 write energy/force outputs live here so every layer — molix execution
 utilities and the higher molpot/molzoo packages alike — addresses one schema
@@ -12,31 +12,43 @@ here, keeping the one-way package dependency ``molix ← molrep ← molzoo/molpo
 intact.
 
 Alongside the keys, this module owns the numeric constants that two or more
-schema consumers must agree on exactly — currently
-:data:`EDGE_DIST_CLAMP_MIN`. They live here for the same reason the keys do:
-a constant duplicated at each use site is a contract only until the copies
-drift.
+schema consumers must agree on exactly — :data:`PAIR_DIST_CLAMP_MIN`, and the
+dead-edge convention :func:`dead_pair_length` / :func:`dead_pair_shift` that
+every producer of padded edges writes and every consumer relies on. They live
+here for the same reason the keys do: a constant duplicated at each use site
+is a contract only until the copies drift.
 
-For the same one-way-dependency reason it also owns the **structural protocols
-that cross the package boundary** — :class:`CellBound` and
-:class:`CoreCompilable`. Their implementers live in molpot/molzoo and their
-callers in molix, so neither end can name the other's class: molpot already
-imports this module and must never import :mod:`molix.md`, which is why the
-contracts are declared at the base layer rather than beside the MD driver that
-invokes them. :mod:`molix.md.forcefield` re-exports both for MD-side readers;
-the contract text stays here.
+For the same one-way-dependency reason it also owns the **structural protocol
+that crosses the package boundary** — :class:`CellBound`. Its implementers
+live in molpot/molzoo and its caller in molix, so neither end can name the
+other's class: molpot already imports this module and must never import
+:mod:`molix.md`, which is why the contract is declared at the base layer
+rather than beside the MD driver that invokes it. :mod:`molix.md.forcefield`
+re-exports it for MD-side readers; the contract text stays here.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import torch
 from tensordict import TensorDict
 
+from molix.units import DEAD_PAIR_CUTOFF_FACTOR
+
 #: Graph-level total energy written by a potential (``batch["graphs", "energy"]``).
 ENERGY_KEY: tuple[str, str] = ("graphs", "energy")
+#: Optional graph-level elemental reference sum (``batch["graphs", "e0"]``).
+#: Address only; not a residual column. This module does not write the leaf.
+E0_KEY: tuple[str, str] = ("graphs", "e0")
+#: In-flight residual energy label (``batch["graphs", "energy_residual"]``).
+#: Address only; this module does not write the leaf. Distinct from
+#: :data:`E0_KEY`. Not in :data:`FLOAT64_LABEL_KEYS` — the residual follows
+#: the batch compute dtype after a float64 subtract.
+ENERGY_RESIDUAL_KEY: tuple[str, str] = ("graphs", "energy_residual")
+#: Graph totals that skip the collate / ``batch_to`` dtype axis. Matched as
+#: full NestedKeys (``ENERGY_KEY``, ``E0_KEY``), never the leaf name ``"energy"``.
+FLOAT64_LABEL_KEYS: frozenset[tuple[str, str]] = frozenset({ENERGY_KEY, E0_KEY})
 #: Per-atom energy contributions (``batch["atoms", "energy"]``).
 ATOMIC_ENERGY_KEY: tuple[str, str] = ("atoms", "energy")
 #: Flat alias of :data:`ATOMIC_ENERGY_KEY` — the *same* quantity addressed
@@ -56,9 +68,9 @@ ATOMIC_ENERGY_KEY: tuple[str, str] = ("atoms", "energy")
 #: ``eng_vdwl`` there.
 ATOMIC_ENERGY_FLAT_KEY: str = "atomic_energy"
 
-#: Lower bound for ``edge_dist`` on the flat export paths, in Å.
+#: Lower bound for ``pair_dist`` on the flat export paths, in Å.
 #:
-#: Regularises degenerate near-coincident pairs: ``edge_diff.norm()`` is exactly
+#: Regularises degenerate near-coincident pairs: ``pair_diff.norm()`` is exactly
 #: zero for two coincident atoms (and denormally small just above it), which
 #: propagates a ``0/0`` NaN into any radial basis or ``1/r`` term and, through
 #: the backward pass, into every force. Clamping the distance keeps such a pair
@@ -69,21 +81,69 @@ ATOMIC_ENERGY_FLAT_KEY: str = "atomic_energy"
 #: which are documented as equivalent constructions of the same batch and used
 #: to disagree (1e-6 vs 1e-8). One constant is what makes that documented
 #: equivalence checkable; the more conservative value wins.
-EDGE_DIST_CLAMP_MIN: float = 1e-6
+PAIR_DIST_CLAMP_MIN: float = 1e-6
 #: Per-atom forces ``= -∂E/∂pos`` (``batch["atoms", "forces"]``).
 FORCES_KEY: tuple[str, str] = ("atoms", "forces")
-#: Graph-level virial ``W = ∂E/∂ε`` (``batch["graphs", "virial"]``), ``(3, 3)``
-#: or ``(B, 3, 3)`` in the energy unit. Cauchy stress is ``σ = W / V``: ``ε`` is
-#: the symmetric strain and a shear component is **not** doubled. Producers
-#: route their raw strain gradient through
-#: ``molpot.derivation.symmetrize_strain_grad``.
+#: Graph-level virial ``W = ∂E/∂ε`` (``batch["graphs", "virial"]``), ``(1, 3, 3)``
+#: in the energy unit. Cauchy stress is ``σ = W / V``: ``ε`` is the symmetric
+#: strain and a shear component is **not** doubled. Producers route their raw
+#: strain gradient through ``molix.autograd.symmetrize_strain_grad``.
 VIRIAL_KEY: tuple[str, str] = ("graphs", "virial")
+#: The symmetric strain ``ε`` (``batch["graphs", "strain"]``), ``(1, 3, 3)``,
+#: dimensionless — the variable ``molix.autograd.Derivative`` differentiates
+#: against for the virial. It is a zero column at the linearisation point;
+#: the op creates it when absent and leaves it on the frame.
+STRAIN_KEY: tuple[str, str] = ("graphs", "strain")
 #: Per-atom positions (``batch["atoms", "pos"]``).
 POS_KEY: tuple[str, str] = ("atoms", "pos")
 #: Per-atom velocities (``batch["atoms", "vel"]``) in Å/fs — MD trajectory.
 VEL_KEY: tuple[str, str] = ("atoms", "vel")
 #: Per-atom masses (``batch["atoms", "mass"]``) in amu — MD trajectory.
 MASS_KEY: tuple[str, str] = ("atoms", "mass")
+
+
+def dead_pair_length(cutoff: float) -> float:
+    """Displacement of a dead (padding) edge, in Å: ``DEAD_PAIR_CUTOFF_FACTOR · r_cut``.
+
+    The one dead-edge convention of the batch schema. A padded edge — the tail
+    of a fixed-capacity MD neighbour list (:class:`molix.md.NeighborList`), the
+    padding rows of a training batch (:class:`molix.data.MoleculePadder`)
+    or of an exported fixed-shape forward (:class:`molix.engine.static.StaticForward`)
+    — is a self-loop displaced by :func:`dead_pair_shift`, so its ``pair_dist``
+    is exactly this length, every cutoff envelope evaluates to zero on it and
+    no ``1/r`` term ever sees ``r = 0``. Three producers used to spell it
+    separately; a padded batch that one of them wrote and another read is what
+    makes one function of the cutoff the contract.
+
+    Args:
+        cutoff: Interaction cutoff ``r_cut`` in Å.
+
+    Returns:
+        The dead-edge displacement in Å.
+    """
+    return DEAD_PAIR_CUTOFF_FACTOR * float(cutoff)
+
+
+def dead_pair_shift(
+    cutoff: float, *, dtype: torch.dtype | None = None, device: torch.device | None = None
+) -> torch.Tensor:
+    """The dead-edge displacement vector ``[dead_pair_length(cutoff), 0, 0]`` ``(3,)``.
+
+    What a producer writes as the ``pair_diff`` (and the periodic ``shifts``)
+    of a padding self-loop: with ``pos[t] - pos[s] = 0`` on a self-loop, the
+    shift alone carries the displacement, so an op that rebuilds
+    ``pair_diff = pos[t] - pos[s] + shifts`` from its own position leaf keeps
+    the row dead.
+
+    Args:
+        cutoff: Interaction cutoff ``r_cut`` in Å.
+        dtype: Tensor dtype (default: torch's default floating dtype).
+        device: Tensor device (default: CPU).
+
+    Returns:
+        ``(3,)`` tensor in Å.
+    """
+    return torch.tensor([dead_pair_length(cutoff), 0.0, 0.0], dtype=dtype, device=device)
 
 
 def has_energy(batch: TensorDict) -> bool:
@@ -144,25 +204,3 @@ class CellBound(Protocol):
     """
 
     def bind_cell(self, cell: torch.Tensor) -> None: ...
-
-
-@runtime_checkable
-class CoreCompilable(Protocol):
-    """A potential that can install a compiled build of its own hot core.
-
-    ``compiler`` is **structural**, not nominal: any ``callable -> callable``
-    of that shape satisfies it, and :meth:`molix.compile.Compiler.__call__`'s
-    PEP 695 generic signature does so without this module importing
-    :mod:`molix.compile`.
-
-    The implementer decides *what* to compile — typically one flat bound method
-    such as an energy core — and *where* to install the result: an attribute
-    the per-step evaluation path already calls, so the caller needs no "is it
-    compiled?" branch and pays no per-step dispatch. Repeated calls must not
-    recompile; a second call is a no-op unless the implementer is genuinely
-    handed a different compiler.
-    """
-
-    def compile_core(
-        self, compiler: Callable[[Callable[..., Any]], Callable[..., Any]]
-    ) -> None: ...

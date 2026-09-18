@@ -21,6 +21,7 @@ import torch
 from tensordict import TensorDict
 
 from molix import config
+from molix.autograd import Derivative
 from molix.compile import Compiler
 from molix.md import (
     MD,
@@ -185,7 +186,6 @@ def main() -> None:
         converted_weights=None if args.config else args.cueq_state,
         trusted=args.trust_checkpoint,
         use_fallback=False,
-        compute_forces=False,
         energy_dtype=energy_dtype,
     )
     model = model.to(device=device, dtype=potential_dtype).eval()
@@ -196,7 +196,7 @@ def main() -> None:
         f"energy={args.energy_precision} matmul={args.matmul_precision}"
     )
     r_max = float(model._spec.r_max)
-    energy_only = model._pipeline.__func__ is model._write_energy.__func__
+    energy_only = True  # built with wrt=(): MD composes the force/virial op over it
     print(
         f"Polar r_max={r_max} Å  params={sum(p.numel() for p in model.parameters())}  "
         f"use_fallback={model._spec.use_fallback}  torch.compile=False  "
@@ -250,9 +250,9 @@ def main() -> None:
 
     t_sp = time.perf_counter()
     neighbors.build(work)
-    n_live = neighbors.num_edges
-    full_edges = work["edges"]
-    work["edges"] = TensorDict(
+    n_live = neighbors.num_pairs
+    full_edges = work["pairs"]
+    work["pairs"] = TensorDict(
         {key: full_edges[key][:n_live] for key in full_edges.keys()},
         batch_size=[n_live],
     )
@@ -262,14 +262,18 @@ def main() -> None:
         # include cuEq JIT/cache construction in the steady-state samples.
         cold_start = time.perf_counter()
         with torch.no_grad():
+            npt = Derivative(pots, wrt=("atoms.pos", "graphs.strain"))
+
+            def energy_forces_virial(frame: TensorDict) -> tuple[torch.Tensor, ...]:
+                out = npt(frame)
+                return out["graphs", "energy"], out["atoms", "forces"], out["graphs", "virial"][0]
+
             eager_reference = None
             if args.compile_core:
-                eager_reference = tuple(
-                    t.detach().clone() for t in pots.calc_energy_forces_virial(work)
-                )
-                model.compile_core(Compiler(fullgraph=True, dynamic=False, donated_buffer=True))
+                eager_reference = tuple(t.detach().clone() for t in energy_forces_virial(work))
+                npt = Compiler(fullgraph=True, dynamic=False, donated_buffer=True)(npt)
             for _ in range(args.benchmark_warmup):
-                energy, forces, virial = pots.calc_energy_forces_virial(work)
+                energy, forces, virial = energy_forces_virial(work)
             torch.cuda.synchronize()
             cold_seconds = time.perf_counter() - cold_start
             reference = tuple(t.detach().clone() for t in (energy, forces, virial))
@@ -284,7 +288,7 @@ def main() -> None:
             for _ in range(args.benchmark_repeats):
                 torch.cuda.synchronize()
                 start = time.perf_counter()
-                energy, forces, virial = pots.calc_energy_forces_virial(work)
+                energy, forces, virial = energy_forces_virial(work)
                 torch.cuda.synchronize()
                 samples.append(time.perf_counter() - start)
                 for i, (observed, expected) in enumerate(zip((energy, forces, virial), reference)):
@@ -293,12 +297,12 @@ def main() -> None:
                     max_deltas[i] = max(max_deltas[i], float((observed - expected).abs().max()))
             model_peak = torch.cuda.max_memory_allocated() / 1024**3
             model_reserved = torch.cuda.max_memory_reserved() / 1024**3
-            force_only = pots.calc_forces(work)
+            force_only = Derivative(pots, wrt=("atoms.pos",))(work)["atoms", "forces"]
             force_route_delta = float((force_only - forces).abs().max())
             work["atoms", "pos"] = pos
             # Report neighbor rebuilding separately; no topology change is
             # allowed to contaminate the fixed-edge model samples above.
-            work["edges"] = full_edges
+            work["pairs"] = full_edges
             neighbor_samples = []
             torch.cuda.reset_peak_memory_stats()
             for _ in range(args.benchmark_repeats):
@@ -361,9 +365,9 @@ def main() -> None:
     # create_graph=False. Otherwise this one-off probe retains every backward
     # intermediate and can consume the entire GH200 before MD even starts.
     with torch.no_grad():
-        e0 = pots.calc_energy(work)
-        f0 = pots.calc_forces(work)
-    work["edges"] = full_edges
+        single_point = Derivative(pots, wrt=("atoms.pos",))(work)
+        e0, f0 = single_point["graphs", "energy"], single_point["atoms", "forces"]
+    work["pairs"] = full_edges
     if device.type == "cuda":
         torch.cuda.synchronize()
     print(

@@ -95,19 +95,19 @@ class EdgeEnergyHead(nn.Module):
         Args:
             batch: ``TensorDict`` with ``edges.edge_features`` of shape
                 ``(E, F·(L+1))`` (the Allegro DenseNet stack), plus
-                ``edges.edge_index``, ``atoms.Z``, ``atoms.batch``, and
+                ``edges.pair_index``, ``atoms.Z``, ``atoms.batch``, and
                 a ``graphs`` subdict that carries the per-graph batch size.
 
         Returns:
             ``{self.out_key: Tensor}`` with per-graph energy of shape ``(B,)``.
         """
-        edge_features = batch["edges", "edge_features"]
+        edge_features = batch["pairs", "edge_features"]
         edge_e = self.mlp(edge_features).squeeze(-1) * self._inv_sqrt_avg_n  # (E,)
 
-        edge_index = batch["edges", "edge_index"]
+        pair_index = batch["pairs", "pair_index"]
         n_nodes = int(batch["atoms", "Z"].shape[0])
         node_e = torch.zeros(n_nodes, dtype=edge_e.dtype, device=edge_e.device)
-        node_e.scatter_add_(0, edge_index[:, 0], edge_e)  # (N,)
+        node_e.scatter_add_(0, pair_index[:, 0], edge_e)  # (N,)
         # /√2 — mirrors mir-group/allegro::EdgewiseReduce. Per-source aggregate
         # is double-counted relative to a single-direction sum because dE/dr_i
         # picks up contributions from both dE/dr_ij and dE/dr_ji on every

@@ -67,24 +67,70 @@ def _proper_index() -> torch.Tensor:
     return torch.tensor([[0], [1], [2], [3]], dtype=torch.long)
 
 
-def _single_term_potential(*, k: float = 1.0, n: int = 1, gamma: float = 0.0, s: float = 1.0):
+def _single_term_potential(*, k: float = 1.0, n: int = 1, gamma: float = 0.0):
     """Build a one-type, one-term ProperTorsionPeriodic.
 
     Formula-correct goldens use k=1 so cis (phi=0) yields E=2.0:
-        E = (k/s)[1 + cos(n*phi - gamma)] = 1*[1+1] = 2.0
+        E = k[1 + cos(n*phi - gamma)] = 1*[1+1] = 2.0
     """
     return ProperTorsionPeriodic(
         k=torch.tensor([[k]], dtype=torch.float64),
         periodicity=torch.tensor([n], dtype=torch.long),
         phase=torch.tensor([[gamma]], dtype=torch.float64),
-        idivf=torch.tensor([s], dtype=torch.float64),
     )
 
 
 class TestProperTorsionPeriodic:
+    def test_an_empty_table_takes_its_depth_from_the_table_width(self):
+        """Same rule as the improper: width is the only capacity a 0-row table states."""
+        pot = ProperTorsionPeriodic(
+            k=torch.zeros(0, 6, dtype=torch.float64),
+            periodicity=torch.zeros(0, 6, dtype=torch.long),
+            phase=torch.zeros(0, 6, dtype=torch.float64),
+        )
+        assert pot.n_max == 6
+
+    def test_an_empty_table_is_a_molecule_with_no_propers(self):
+        """Zero rows is ordinary — water has no proper torsion at all."""
+        pot = ProperTorsionPeriodic(
+            k=torch.zeros(0, 1, dtype=torch.float64),
+            periodicity=torch.zeros(0, 1, dtype=torch.long),
+            phase=torch.zeros(0, 1, dtype=torch.float64),
+        )
+        assert pot.n_max == 1
+        energy = pot(
+            pos=torch.zeros((4, 3), dtype=torch.float64),
+            proper_index=torch.zeros((4, 0), dtype=torch.long),
+            proper_types=torch.zeros(0, dtype=torch.long),
+        )
+        assert float(energy) == 0.0
+
+    @pytest.mark.slow
+    def test_energy_forces_trace_as_one_graph(self):
+        """The torsion force path is a hot path: one dynamo graph, no break.
+
+        The Fourier basis used to read ``periodicity.max()`` back from the
+        device on every call — a host sync dynamo can only break on. The depth
+        is now fixed at construction (``n_max``), so the whole closed-form
+        energy + force traces as one graph, measured once here.
+        """
+        from molix.compile import Compiler
+
+        pot = _single_term_potential(k=1.0, n=3, gamma=0.0)
+        kwargs = dict(
+            pos=_perp_pos(),
+            proper_index=_proper_index(),
+            proper_types=torch.tensor([0], dtype=torch.long),
+        )
+        pot.energy_forces(**kwargs)
+        explanation = Compiler.explain(pot.energy_forces, **kwargs)
+        assert (explanation.graph_count, explanation.graph_break_count) == (1, 0), (
+            f"break sites: {explanation.break_sites}"
+        )
+
     def test_cis_phi0_k1_gives_energy_2(self):
         # E = (1/1)[1 + cos(0)] = 2.0  (hard-coded golden; Class-I identity)
-        pot = _single_term_potential(k=1.0, n=1, gamma=0.0, s=1.0)
+        pot = _single_term_potential(k=1.0, n=1, gamma=0.0)
         e = pot(
             pos=_cis_pos(),
             proper_index=_proper_index(),
@@ -94,7 +140,7 @@ class TestProperTorsionPeriodic:
 
     def test_trans_phi_pi_gives_energy_0(self):
         # E = (1/1)[1 + cos(pi)] = 0.0
-        pot = _single_term_potential(k=1.0, n=1, gamma=0.0, s=1.0)
+        pot = _single_term_potential(k=1.0, n=1, gamma=0.0)
         e = pot(
             pos=_trans_pos(),
             proper_index=_proper_index(),
@@ -104,7 +150,7 @@ class TestProperTorsionPeriodic:
 
     def test_perp_phi_half_pi_gives_energy_1(self):
         # E = (1/1)[1 + cos(pi/2)] = 1.0
-        pot = _single_term_potential(k=1.0, n=1, gamma=0.0, s=1.0)
+        pot = _single_term_potential(k=1.0, n=1, gamma=0.0)
         e = pot(
             pos=_perp_pos(),
             proper_index=_proper_index(),
@@ -153,7 +199,7 @@ class TestProperTorsionPeriodic:
 
     def test_colinear_torsion_is_cos_phi_zero(self):
         # H-C≡C-H: both planes vanish, LAMMPS rginv=0 ⇒ cos φ = 0 ⇒ E = k.
-        pot = _single_term_potential(k=1.0, n=1, gamma=0.0, s=1.0)
+        pot = _single_term_potential(k=1.0, n=1, gamma=0.0)
         pos = torch.tensor(
             [[-2.2, 0.0, 0.0], [-1.2, 0.0, 0.0], [0.0, 0.0, 0.0], [1.06, 0.0, 0.0]],
             dtype=torch.float64,
@@ -170,7 +216,6 @@ class TestProperTorsionPeriodic:
             k=torch.tensor([[1.0]], dtype=torch.float32),
             periodicity=torch.tensor([1], dtype=torch.long),
             phase=torch.tensor([[0.0]], dtype=torch.float32),
-            idivf=torch.tensor([1.0], dtype=torch.float32),
         )
         colinear = torch.tensor(
             [[-2.2, 0.0, 0.0], [-1.2, 0.0, 0.0], [0.0, 0.0, 0.0], [1.06, 0.0, 0.0]],
@@ -202,7 +247,6 @@ class TestProperTorsionPeriodic:
             k=torch.tensor([[1.0, 0.5]], dtype=torch.float64),
             periodicity=torch.tensor([1, 2], dtype=torch.long),
             phase=torch.tensor([[0.0, 0.0]], dtype=torch.float64),
-            idivf=torch.tensor([1.0], dtype=torch.float64),
         )
         e = pot(
             pos=_cis_pos(),

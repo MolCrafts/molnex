@@ -100,13 +100,15 @@ class ImproperHarmonic(BasePotential):
             if improper_types is None:
                 improper_types = data.get("improper_types")
 
-        if pos is None or improper_index is None or improper_types is None:
+        if pos is None or improper_index is None:
             raise ValueError("ImproperHarmonic requires pos, improper_index, and improper_types.")
 
         if not isinstance(pos, torch.Tensor):
             pos = torch.from_numpy(pos).float()
             improper_index = torch.from_numpy(improper_index).long()
-            improper_types = torch.from_numpy(improper_types).long()
+            improper_types = (
+                None if improper_types is None else torch.from_numpy(improper_types).long()
+            )
 
         _require_index_4_by_n(improper_index, "improper_index")
 
@@ -114,8 +116,8 @@ class ImproperHarmonic(BasePotential):
             return torch.tensor(0.0, device=pos.device, dtype=pos.dtype)
 
         chi = _dihedral_phi(pos, _improper_to_dihedral_index(improper_index))
-        k_imp = self.k[improper_types]
-        chi0_imp = self.chi0[improper_types]
+        k_imp = self.rows("k", kwargs, improper_types)
+        chi0_imp = self.rows("chi0", kwargs, improper_types)
         energy_per = 0.5 * k_imp * (chi - chi0_imp) ** 2
         return energy_per.sum()
 

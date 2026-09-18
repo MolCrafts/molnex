@@ -2,25 +2,19 @@
 
 Every model in this repository communicates through one object: the
 *post-collate batch*, a nested :class:`~tensordict.TensorDict` whose ``atoms``
-/ ``edges`` / ``graphs`` sub-dictionaries hold per-atom, per-edge and per-graph
-tensors. :func:`molix.batch.collate.collate_molecules` builds that object and
+/ ``pairs`` / ``graphs`` sub-dictionaries hold per-atom, per-edge and per-graph
+tensors. :func:`molix.data.collate.collate_molecules` builds that object and
 owns its schema (CLAUDE.md, "Post-collate batch schema"). This module owns only
 the handful of keys a *potential* — a model mapping atomic positions to an
 energy — writes back into it, plus the helpers that perform those writes in
 place.
 
 No differentiation logic lives here: force values arrive already computed.
-``F = -dE/dpos`` is taken by the two *modes* (``molpot.derivation.modes.func``
-and ``.grad`` — the :mod:`torch.func` and :mod:`torch.autograd` backends). Those
-modes call a potential's **energy core**, the private ``_write_energy`` entry
-point that computes the energy and nothing else, never the public ``forward``,
-which may append further readouts a force pass must not re-run;
-:func:`call_energy` is that dispatch.
-
-Readout sessions live in a module-level dictionary keyed by ``id(batch)`` rather
-than on the batch itself. TensorDict's ``set_non_tensor`` would place a plain
-Python object inside a tensor container, which Dynamo — the Python-bytecode
-tracer behind :func:`torch.compile` — cannot trace, so it breaks compilation.
+``F = -dE/dpos`` is taken by :class:`molix.autograd.Derivative`, composed over
+a potential's ``energy(frame) -> frame`` — the entry that computes the energy
+and nothing else, never the public ``forward``, which is the potential's own
+op and would derive again; :func:`call_energy` is that dispatch for a
+container holding an arbitrary ``nn.Module``.
 """
 
 from __future__ import annotations
@@ -54,21 +48,14 @@ __all__ = [
     "VIRIAL_KEY",
     "PotentialModule",
     "absorb_model_output",
-    "attach_session",
     "call_energy",
-    "detach_session",
     "ensure_graphs",
-    "get_session",
     "has_energy",
     "has_forces",
     "has_virial",
     "write_energy",
     "write_forces",
-    "write_virial",
 ]
-
-# Session side-channel: never batch.set_non_tensor (breaks torch.compile / Dynamo).
-_SESSIONS: dict[int, Any] = {}
 
 
 @runtime_checkable
@@ -76,20 +63,20 @@ class PotentialModule(Protocol):
     """Potential that can write energy peers onto a batch."""
 
     def forward(self, batch: TensorDict) -> TensorDict:
-        """Public entry (may compose readouts). Not used by modes for the core."""
+        """Public entry (the potential's own op). A container reaches ``energy``, not this."""
         ...
 
 
 def call_energy(model: Any, batch: TensorDict) -> TensorDict:
-    """Run the energy core only.
+    """Run the energy alone.
 
-    Prefer ``model._write_energy(batch)`` when present (full potentials that
-    compose readouts in ``forward``). Fall back to ``model(batch)`` for toys
-    whose ``forward`` *is* the energy path.
+    Prefer ``model.energy(batch)`` when present (every molnex potential: the
+    seam :class:`molix.autograd.Derivative` differentiates). Fall back to
+    ``model(batch)`` for toys whose ``forward`` *is* the energy path.
     """
-    write = getattr(model, "_write_energy", None)
-    if callable(write):
-        return write(batch)
+    energy = getattr(model, "energy", None)
+    if callable(energy):
+        return energy(batch)
     return model(batch)
 
 
@@ -99,7 +86,7 @@ def ensure_graphs(batch: TensorDict, num_graphs: int | None = None) -> TensorDic
     An existing ``graphs`` namespace is returned untouched — its ``batch_size``
     is never rewritten, even when ``num_graphs`` disagrees with it. The
     canonical producer of that namespace is
-    :func:`molix.batch.collate.collate_molecules`; this helper only fills the
+    :func:`molix.data.collate.collate_molecules`; this helper only fills the
     gap for batches assembled by hand.
 
     Args:
@@ -159,16 +146,6 @@ def write_forces(batch: TensorDict, forces: torch.Tensor) -> TensorDict:
     return batch
 
 
-def write_virial(batch: TensorDict, virial: torch.Tensor) -> TensorDict:
-    """Write ``W = ∂E/∂ε`` onto ``batch['graphs','virial']`` (in-place)."""
-    graphs = batch["graphs"] if "graphs" in batch.keys() else None
-    if virial.dim() == 2 and graphs is not None and graphs.batch_size == torch.Size([1]):
-        virial = virial.unsqueeze(0)
-    ensure_graphs(batch, virial.shape[0] if virial.dim() == 3 else None)
-    batch[VIRIAL_KEY] = virial
-    return batch
-
-
 def absorb_model_output(batch: TensorDict, out: TensorDict | dict) -> TensorDict:
     """Merge a model return value into ``batch``.
 
@@ -198,18 +175,3 @@ def absorb_model_output(batch: TensorDict, out: TensorDict | dict) -> TensorDict
             )
         return batch
     return batch
-
-
-def attach_session(batch: TensorDict, session: Any) -> None:
-    """Store a readout session for ``batch`` (side-channel, not on TensorDict)."""
-    _SESSIONS[id(batch)] = session
-
-
-def get_session(batch: TensorDict) -> Any | None:
-    """Return the readout session if EnergyReadout attached one."""
-    return _SESSIONS.get(id(batch))
-
-
-def detach_session(batch: TensorDict) -> None:
-    """Drop session for ``batch`` (call after ForceReadout finishes)."""
-    _SESSIONS.pop(id(batch), None)

@@ -42,7 +42,7 @@ class AtomicChargeModel(nn.Module):
       * a param head producing ``χ``, ``η``
       * an equilibration solver (e.g. :class:`ElectronegativityEqualization`)
 
-    Does **not** evaluate Coulomb energy — only returns ``q`` or writes them
+    Does **not** evaluate Coulomb energy — only returns ``charge`` or writes them
     onto a :class:`~molpot.forcefield.ForceField`.
     """
 
@@ -80,16 +80,16 @@ class AtomicChargeModel(nn.Module):
         *,
         total_charge: float | torch.Tensor | None = None,
     ) -> ForceField:
-        """Copy-on-write ForceField with ``atoms["q"]`` (and keep other atom params)."""
+        """Copy-on-write ForceField with ``atoms["charge"]`` (and keep other atom params)."""
         q = self.charges(atom_features, batch, total_charge=total_charge)
         atoms = dict(forcefield.params("atoms") or {})
-        atoms["q"] = q
+        atoms["charge"] = q
         # alias for heads that use "charge"
         atoms["charge"] = q
         return forcefield.with_params(atoms=atoms)
 
     def electrostatics_record(self, *, permanent_scaling: NonbondedScaling) -> ElectrostaticsRecord:
-        """Name the charge constraint and the solve that produced ``q`` (S2).
+        """Name the charge constraint and the solve that produced ``charge`` (S2).
 
         :meth:`ForceField.manifest <molpot.forcefield.ForceField.manifest>`
         reports only the electrostatics a container owns — point charges and
@@ -160,7 +160,7 @@ class AtomicChargeModel(nn.Module):
         forcefield: ForceField | None = None,
         total_charge: float | torch.Tensor | None = None,
     ) -> torch.Tensor | ForceField:
-        """If ``forcefield`` is given, return filled FF; else return ``q`` only."""
+        """If ``forcefield`` is given, return filled FF; else return ``charge`` only."""
         if forcefield is None:
             return self.charges(atom_features, batch, total_charge=total_charge)
         return self.write_forcefield(forcefield, atom_features, batch, total_charge=total_charge)

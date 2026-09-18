@@ -39,9 +39,9 @@ class TestExclusionScales:
 
 class TestNonbondedScaling:
     def test_class_i_defaults_are_amber_gaff_smirnoff(self) -> None:
-        """1-2 / 1-3 fully excluded; 1-4 is 5/6 for ``q`` and 1/2 for ``lj``."""
+        """1-2 / 1-3 fully excluded; 1-4 is 5/6 for ``charge`` and 1/2 for ``lj``."""
         scaling = NonbondedScaling()
-        q12, q13, q14 = scaling.triple("q")
+        q12, q13, q14 = scaling.triple("charge")
         lj12, lj13, lj14 = scaling.triple("lj")
         assert (q12, q13) == (0.0, 0.0)
         assert math.isclose(q14, 5.0 / 6.0, rel_tol=1e-12, abs_tol=1e-12)
@@ -49,17 +49,17 @@ class TestNonbondedScaling:
         assert math.isclose(lj14, 0.5, rel_tol=1e-12, abs_tol=1e-12)
 
     def test_kinds_are_the_declared_permanent_interaction_classes(self) -> None:
-        """``("q", "lj")`` today; ``composable-a1`` appends ``"induced"``."""
-        assert NonbondedScaling().kinds() == ("q", "lj")
+        """``("charge", "lj")`` today; ``composable-a1`` appends ``"induced"``."""
+        assert NonbondedScaling().kinds() == ("charge", "lj")
 
     def test_as_dict_is_nested_by_kind(self) -> None:
         """One sub-dict per kind — the export adapters flatten it, not this type."""
         nested = NonbondedScaling().as_dict()
-        assert set(nested) == {"q", "lj"}
-        assert set(nested["q"]) == {"s12", "s13", "s14"}
+        assert set(nested) == {"charge", "lj"}
+        assert set(nested["charge"]) == {"s12", "s13", "s14"}
         assert set(nested["lj"]) == {"s12", "s13", "s14"}
         assert nested["lj"]["s14"] == 0.5
-        assert math.isclose(nested["q"]["s14"], 5.0 / 6.0, rel_tol=1e-12, abs_tol=1e-12)
+        assert math.isclose(nested["charge"]["s14"], 5.0 / 6.0, rel_tol=1e-12, abs_tol=1e-12)
 
     def test_unknown_kind_raises_listing_the_declared_kinds(self) -> None:
         """A silent 1.0 for an unmodelled class is how a term escapes exclusion."""
@@ -67,11 +67,11 @@ class TestNonbondedScaling:
             NonbondedScaling().triple("induced")
         message = str(excinfo.value)
         assert "induced" in message
-        assert "q" in message
+        assert "charge" in message
         assert "lj" in message
 
     def test_is_frozen(self) -> None:
         """Same reason as :class:`ExclusionScales`: the table caches its answers."""
         scaling = NonbondedScaling()
         with pytest.raises(dataclasses.FrozenInstanceError):
-            scaling.q = ExclusionScales()  # ty: ignore[invalid-assignment]
+            scaling.charge = ExclusionScales()  # ty: ignore[invalid-assignment]

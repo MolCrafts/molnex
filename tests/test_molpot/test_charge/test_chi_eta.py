@@ -2,7 +2,7 @@
 
 The head predicts the two per-atom parameters the charge equilibration reads:
 electronegativity ``χ`` and hardness ``η``. ``η`` sits on the diagonal of the
-system that is solved for ``q``, so its positivity is the head's contract, not
+system that is solved for ``charge``, so its positivity is the head's contract, not
 the solver's.
 """
 

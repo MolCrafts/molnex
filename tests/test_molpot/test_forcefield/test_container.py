@@ -11,7 +11,9 @@ from molpy import ForceField as MolpyForceField
 from tensordict import TensorDict
 from torch import nn
 
-from molix.batch import NeighborList, TensorFrame, collate_molecules
+from molix.data import collate_molecules
+from molix.frame import TensorFrame
+from molix.neighbor import NeighborList
 from molpot.forcefield import ForceField, OPLSAAForceField, TypeAssignment
 from molpot.ir import ExclusionScales, NonbondedScaling
 from molpot.manifest import ModelManifest, NumericsRecord, ParamTableRecord
@@ -108,7 +110,7 @@ def _water_ion_box() -> tuple[ForceField, TensorDict, torch.Tensor]:
                 "k": torch.full((2,), 200.0, dtype=torch.float64),
                 "theta0": torch.full((2,), math.radians(HOH_DEG), dtype=torch.float64),
             },
-            atoms={"epsilon": column(0), "sigma": column(1), "q": column(2)},
+            atoms={"epsilon": column(0), "sigma": column(1), "charge": column(2)},
         )
     )
     return ff, system, column(3)
@@ -124,7 +126,7 @@ class _StubMlip(nn.Module):
     it computes.
     """
 
-    def _write_energy(self, system: TensorDict) -> TensorDict:
+    def energy(self, system: TensorDict) -> TensorDict:
         return system
 
 
@@ -157,7 +159,7 @@ class TestForceField:
 
         ``TensorFrame.from_tensordict`` is a zero-copy typed view of the
         post-collate batch (CLAUDE.md § TensorDict Contract) — the same leaves,
-        declared. Typing reads ``atoms.pos``, ``atoms.q`` and the bonded
+        declared. Typing reads ``atoms.pos``, ``atoms.charge`` and the bonded
         namespaces off whichever of the two it is handed, so an assignment that
         moved between them would mean some reader branched on the container's
         *type* instead of on the system it describes.
@@ -302,7 +304,7 @@ class TestForceField:
         (``1.0``) — the most expensive silent error a Class-I deck can carry.
         """
         opls = NonbondedScaling(
-            q=ExclusionScales(0.0, 0.0, 0.5),
+            charge=ExclusionScales(0.0, 0.0, 0.5),
             lj=ExclusionScales(0.0, 0.0, 0.5),
         )
         ff = ForceField(name="x", units="real", nonbonded_scaling=opls)
@@ -321,7 +323,7 @@ class TestForceField:
         """The mirror runs both ways, so the two spellings cannot drift apart."""
         ff = ForceField(name="x", units="real")  # AMBER default: q 1–4 = 5/6
         ff.set_special_bonds((0.0, 0.0, 0.5), (0.0, 0.0, 0.5))
-        assert ff.nonbonded_scaling.triple("q") == (0.0, 0.0, 0.5)
+        assert ff.nonbonded_scaling.triple("charge") == (0.0, 0.0, 0.5)
         assert ff.nonbonded_scaling.triple("lj") == (0.0, 0.0, 0.5)
 
     def test_an_option_the_style_does_not_declare_is_refused(self):
@@ -409,7 +411,7 @@ class TestForceField:
         did with a private ``LJ_CUT_CUTOFF`` constant.
 
         ``symmetry`` is not a caller's choice: molpot consumes a placed
-        ``edges`` namespace and never re-symmetrises a half list, so a list
+        ``pairs`` namespace and never re-symmetrises a half list, so a list
         handed out here is always full bidirectional.
         """
         nlist = OPLSAAForceField().neighbor_list(pbc=True)
@@ -449,7 +451,7 @@ class TestForceField:
         short of the split the reciprocal half was written against, which is a
         different electrostatics rather than a cheaper one.
         """
-        ff = ForceField(name="q", units="real").def_pairstyle("coulomb", cutoff=12.0)
+        ff = ForceField(name="charge", units="real").def_pairstyle("coulomb", cutoff=12.0)
         assert ff.neighbor_list().cutoff == pytest.approx(12.0)
         assert ff.neighbor_list(pbc=True).cutoff == pytest.approx(15.0)
 
@@ -511,16 +513,16 @@ class TestForceField:
         when they carry the same one; the exporter then has to write *that*
         charge next to *that* type. Carrying the values on the assignment is
         what makes the two impossible to disagree — reading them a second time
-        on the writer's side let a field-supplied ``q`` type the atoms while
+        on the writer's side let a field-supplied ``charge`` type the atoms while
         the data file's fourth column stayed at the system's (here absent)
-        ``atoms.q``, i.e. a deck whose types say one charge and whose atoms
+        ``atoms.charge``, i.e. a deck whose types say one charge and whose atoms
         carry another.
         """
-        system = _line_of_atoms(2)  # no ``atoms.q``: the field is the only source
+        system = _line_of_atoms(2)  # no ``atoms.charge``: the field is the only source
         ff = (
-            ForceField(name="q", units="real")
+            ForceField(name="charge", units="real")
             .def_atomstyle("full")
-            .with_params(atoms={"q": torch.tensor([0.3, -0.3], dtype=torch.float64)})
+            .with_params(atoms={"charge": torch.tensor([0.3, -0.3], dtype=torch.float64)})
         )
         assert ff.assign_types(system).atom_charges == (0.3, -0.3)
 
@@ -531,13 +533,13 @@ class TestForceField:
         assert bare.assign_types(system).atom_charges == (0.0, 0.0)
 
         # The system is the second source, read only where the field has no
-        # ``q`` table: a batch loaded from disk carries the charges it was
+        # ``charge`` table: a batch loaded from disk carries the charges it was
         # stored with, and a field that has not been given any must type — and
         # export — those rather than zeros. This is the same reading the data
         # file's fourth column is written from, which is why it is asserted
         # here on the assignment and not again on the writer.
         from_system = _line_of_atoms(2)
-        from_system["atoms", "q"] = torch.tensor([0.2, -0.2], dtype=torch.float64)
+        from_system["atoms", "charge"] = torch.tensor([0.2, -0.2], dtype=torch.float64)
         assert bare.assign_types(from_system).atom_charges == (0.2, -0.2)
 
     def test_clone_carries_the_mlip(self):
@@ -564,7 +566,7 @@ class TestForceField:
         # ``with_params`` is ``clone`` plus a table, so it inherits the same
         # loss: the fitted field that comes back out of a training step is the
         # one that would be exported and run.
-        refilled = ff.with_params(atoms={"q": torch.zeros(2, dtype=torch.float64)})
+        refilled = ff.with_params(atoms={"charge": torch.zeros(2, dtype=torch.float64)})
         assert refilled.to_potentials().mlip is mlip
 
 
@@ -589,7 +591,7 @@ class TestOPLSAAForceField:
         from molpot.forcefield import OPLSAAForceField
 
         scaling = OPLSAAForceField().nonbonded_scaling
-        assert scaling.q.s14 == 0.5
+        assert scaling.charge.s14 == 0.5
         assert scaling.lj.s14 == 0.5
 
 
@@ -608,7 +610,7 @@ def _filled_oplsaa() -> OPLSAAForceField:
         atoms={
             "epsilon": torch.tensor([0.066, 0.030], dtype=torch.float64),
             "sigma": torch.tensor([3.50, 2.50], dtype=torch.float64),
-            "q": torch.tensor([-0.12, 0.06], dtype=torch.float64),
+            "charge": torch.tensor([-0.12, 0.06], dtype=torch.float64),
         },
     )
 
@@ -654,7 +656,7 @@ class TestForceFieldManifest:
         constraint (``"total-charge-kkt"``) and the solve it ran, and the
         caller composes the two with ``dataclasses.replace``. Claiming the KKT
         constraint here describes a solver this container never ran — and
-        says it even for a field whose ``atoms.q`` came from a file.
+        says it even for a field whose ``atoms.charge`` came from a file.
         """
         electrostatics = _filled_oplsaa().manifest(profile="A0").electrostatics
         assert electrostatics is not None

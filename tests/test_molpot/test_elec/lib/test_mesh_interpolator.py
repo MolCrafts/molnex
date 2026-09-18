@@ -45,8 +45,8 @@ class TestMeshInterpolatorForward:
             interpolation_nodes=interpolation_nodes,
             method=method,
         )
-        interpolator.compute_weights(positions)
-        mesh_values = interpolator.points_to_mesh(particle_weights)
+        stencil = interpolator.compute_weights(positions, cell)
+        mesh_values = interpolator.points_to_mesh(particle_weights, stencil)
 
         # Compare total "weight (charge)" on the mesh with the sum of the particle
         # contributions
@@ -86,8 +86,8 @@ class TestMeshInterpolatorForward:
             interpolation_nodes=interpolation_nodes,
             method=method,
         )
-        interpolator.compute_weights(positions)
-        mesh_values = interpolator.points_to_mesh(particle_weights)
+        stencil = interpolator.compute_weights(positions, cell)
+        mesh_values = interpolator.points_to_mesh(particle_weights, stencil)
 
         # Compare total "weight (charge)" on the mesh with the sum of the particle
         # contributions
@@ -129,8 +129,8 @@ class TestMeshInterpolatorForward:
             interpolation_nodes=interpolation_nodes,
             method="P3M",
         )
-        interpolator.compute_weights(positions)
-        mesh_values = interpolator.points_to_mesh(particle_weights)
+        stencil = interpolator.compute_weights(positions, cell)
+        mesh_values = interpolator.points_to_mesh(particle_weights, stencil)
 
         # Recover the interpolated values at the atomic positions
         indices_x = indices[0]
@@ -182,9 +182,9 @@ class TestMeshInterpolatorBackward:
         interpolator = MeshInterpolator(
             cell=cell, ns_mesh=ns_mesh, interpolation_nodes=1, method="P3M"
         )
-        interpolator.compute_weights(positions)
-        mesh_values = interpolator.points_to_mesh(particle_weights)
-        interpolated_values = interpolator.mesh_to_points(mesh_values)
+        stencil = interpolator.compute_weights(positions, cell)
+        mesh_values = interpolator.points_to_mesh(particle_weights, stencil)
+        interpolated_values = interpolator.mesh_to_points(mesh_values, stencil)
 
         # !!! WARNING for debugging !!!
         # If two particles are so close to one another that
@@ -219,9 +219,9 @@ class TestMeshInterpolatorBackward:
         interpolator = MeshInterpolator(
             cell=cell, ns_mesh=ns_mesh, interpolation_nodes=2, method="P3M"
         )
-        interpolator.compute_weights(positions)
-        mesh_values = interpolator.points_to_mesh(particle_weights)
-        interpolated_values = interpolator.mesh_to_points(mesh_values)
+        stencil = interpolator.compute_weights(positions, cell)
+        mesh_values = interpolator.points_to_mesh(particle_weights, stencil)
+        interpolated_values = interpolator.mesh_to_points(mesh_values, stencil)
 
         # !!! WARNING for debugging !!!
         # If two particles are so close to one another that
@@ -268,9 +268,9 @@ class TestMeshInterpolatorBackward:
             interpolation_nodes=interpolation_nodes,
             method="P3M",
         )
-        interpolator.compute_weights(positions)
+        stencil = interpolator.compute_weights(positions, cell)
         mesh_values = torch.randn(size=(n_channels, nx, ny, nz)) * 3.0 + 9.3
-        interpolated_values = interpolator.mesh_to_points(mesh_values)
+        interpolated_values = interpolator.mesh_to_points(mesh_values, stencil)
 
         # Sum and test
         weight_before = torch.sum(mesh_values, dim=(1, 2, 3))
@@ -310,8 +310,8 @@ class TestMeshInterpolatorBackward:
             method="P3M",
         )
 
-        interpolator.compute_weights(positions)
-        mesh_values = interpolator.points_to_mesh(weights)
+        stencil = interpolator.compute_weights(positions, cell)
+        mesh_values = interpolator.points_to_mesh(weights, stencil)
         total_mass = mesh_values.sum()
 
         # Computes derivatives by backpropagation
@@ -338,9 +338,9 @@ def test_update(cell_update, ns_mesh_update):
 
     mesh_interpolator.update(cell=cell_update, ns_mesh=ns_mesh_update)
 
-    if cell_update is not None:
-        assert torch.all(mesh_interpolator.cell == cell_update)
-        assert torch.all(mesh_interpolator.inverse_cell == torch.linalg.inv(cell_update))
+    # The cell is read for its dtype and device only — never kept.
+    assert not hasattr(mesh_interpolator, "cell")
+    assert not hasattr(mesh_interpolator, "inverse_cell")
 
     if ns_mesh_update is not None:
         assert torch.all(mesh_interpolator.ns_mesh == ns_mesh_update)
@@ -444,7 +444,7 @@ def Lagrange_mesh_interpolator():
 def test_mexh_xyz_edge(method):
     cell = torch.normal(mean=1, std=1, size=(3, 3))
     mesh_interpolator = MeshInterpolator(cell, torch.tensor([2, 2, 2]), 3, method=method)
-    xyz = mesh_interpolator.get_mesh_xyz()
+    xyz = mesh_interpolator.get_mesh_xyz(cell)
 
     torch.testing.assert_close(xyz[1, 1, 1], cell.sum(axis=0) / 2, rtol=1e-5, atol=1e-6)
 
@@ -454,7 +454,7 @@ def test_mexh_xyz_edge(method):
 )
 def test_mexh_xyz_shape(mesh_interpolator, request):
     mesh_interpolator = request.getfixturevalue(mesh_interpolator)
-    xyz = mesh_interpolator.get_mesh_xyz()
+    xyz = mesh_interpolator.get_mesh_xyz(torch.eye(3))
 
     assert xyz.shape == (2, 2, 2, 3)
 
@@ -468,7 +468,7 @@ def test_positions_wrong_device(mesh_interpolator, request):
     match = "`positions` device meta is not the same as instance device cpu"
 
     with pytest.raises(ValueError, match=match):
-        mesh_interpolator.compute_weights(positions)
+        mesh_interpolator.compute_weights(positions, torch.eye(3))
 
 
 @pytest.mark.parametrize(
@@ -480,7 +480,7 @@ def test_positions_wrong_shape(mesh_interpolator, request):
     match = "shape \\[10, 2\\] of `positions` has to be \\(N, 3\\)"
 
     with pytest.raises(ValueError, match=match):
-        mesh_interpolator.compute_weights(positions)
+        mesh_interpolator.compute_weights(positions, torch.eye(3))
 
 
 @pytest.mark.parametrize(
@@ -489,10 +489,11 @@ def test_positions_wrong_shape(mesh_interpolator, request):
 def test_particle_weights_wrong_device(mesh_interpolator, request):
     mesh_interpolator = request.getfixturevalue(mesh_interpolator)
     particle_weights = torch.randn(size=(10, 1), device="meta")  # different device
+    stencil = mesh_interpolator.compute_weights(torch.rand(10, 3), torch.eye(3))
     match = "`particle_weights` device meta is not the same as instance device cpu"
 
     with pytest.raises(ValueError, match=match):
-        mesh_interpolator.points_to_mesh(particle_weights)
+        mesh_interpolator.points_to_mesh(particle_weights, stencil)
 
 
 @pytest.mark.parametrize(
@@ -501,10 +502,11 @@ def test_particle_weights_wrong_device(mesh_interpolator, request):
 def test_particle_weights_wrong_dim(mesh_interpolator, request):
     mesh_interpolator = request.getfixturevalue(mesh_interpolator)
     particle_weights = torch.randn(size=(10,))  # missing one dimension
+    stencil = mesh_interpolator.compute_weights(torch.rand(10, 3), torch.eye(3))
     match = "`particle_weights` of dimension 1 has to be of dimension 2"
 
     with pytest.raises(ValueError, match=match):
-        mesh_interpolator.points_to_mesh(particle_weights)
+        mesh_interpolator.points_to_mesh(particle_weights, stencil)
 
 
 @pytest.mark.parametrize(
@@ -513,10 +515,11 @@ def test_particle_weights_wrong_dim(mesh_interpolator, request):
 def test_mesh_to_points_wrong_dim(mesh_interpolator, request):
     mesh_interpolator = request.getfixturevalue(mesh_interpolator)
     mesh_vals = torch.randn(size=(10,))  # missing one dimension
+    stencil = mesh_interpolator.compute_weights(torch.rand(10, 3), torch.eye(3))
     match = "`mesh_vals` of dimension 1 has to be of dimension 4"
 
     with pytest.raises(ValueError, match=match):
-        mesh_interpolator.mesh_to_points(mesh_vals)
+        mesh_interpolator.mesh_to_points(mesh_vals, stencil)
 
 
 def test_wrong_interpolation_nodes_lagrange():

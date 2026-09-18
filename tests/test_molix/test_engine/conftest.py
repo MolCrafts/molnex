@@ -43,15 +43,15 @@ from molix.schema import ATOMIC_ENERGY_FLAT_KEY as _ATOMIC_ENERGY_FLAT_KEY
 
 
 def pair_site_energies_and_forces(
-    pos: torch.Tensor, edge_index: torch.Tensor, edge_diff: torch.Tensor
+    pos: torch.Tensor, pair_index: torch.Tensor, pair_diff: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Decomposable pair stub: ``E_e = |d_e|²`` split evenly over both endpoints.
 
     Args:
         pos: Positions ``(N, 3)``.
-        edge_index: Source-target pairs ``(E, 2)``; ``[:, 0]`` source,
+        pair_index: Source-target pairs ``(E, 2)``; ``[:, 0]`` source,
             ``[:, 1]`` target (CLAUDE.md edge convention).
-        edge_diff: Edge vectors ``(E, 3)`` ``= pos[target] - pos[source]``.
+        pair_diff: Edge vectors ``(E, 3)`` ``= pos[target] - pos[source]``.
             Taken as an argument rather than recomputed so the caller's
             padded/neutralised edges (``StaticForward``) are honoured.
 
@@ -61,11 +61,11 @@ def pair_site_energies_and_forces(
         **unmasked** total (analytic, so no autograd graph is consumed and the
         caller's own differentiation of the site energies stays possible).
     """
-    src, tgt = edge_index[:, 0], edge_index[:, 1]
-    half = 0.5 * (edge_diff * edge_diff).sum(-1)
-    zeros = torch.zeros(pos.shape[0], dtype=edge_diff.dtype, device=edge_diff.device)
+    src, tgt = pair_index[:, 0], pair_index[:, 1]
+    half = 0.5 * (pair_diff * pair_diff).sum(-1)
+    zeros = torch.zeros(pos.shape[0], dtype=pair_diff.dtype, device=pair_diff.device)
     atomic = zeros.index_add(0, src, half).index_add(0, tgt, half)
-    grad = 2.0 * edge_diff  # ∂E_total/∂pos[target] for one edge
+    grad = 2.0 * pair_diff  # ∂E_total/∂pos[target] for one edge
     forces = torch.zeros_like(pos).index_add(0, src, grad).index_add(0, tgt, -grad)
     return atomic, forces
 
@@ -75,7 +75,7 @@ class _DummyTDPotential(nn.Module):
 
     Returns ``{energy, forces, atomic_energy}`` — the plain-dict (flat) output
     shape, so the per-atom energy is read under the flat spelling. Consumes the
-    ``edge_diff`` the adapter built (as PiNet does), which keeps the site
+    ``pair_diff`` the adapter built (as PiNet does), which keeps the site
     energies differentiable with respect to the caller's ``pos``.
     """
 
@@ -84,7 +84,7 @@ class _DummyTDPotential(nn.Module):
         # potential that derives forces was built that way and always writes them.
         pos = batch["atoms", "pos"]
         atomic, forces = pair_site_energies_and_forces(
-            pos, batch["edges", "edge_index"], batch["edges", "edge_diff"]
+            pos, batch["pairs", "pair_index"], batch["pairs", "pair_diff"]
         )
         return {
             "energy": atomic.sum().reshape(1),
@@ -96,14 +96,14 @@ class _DummyTDPotential(nn.Module):
 class _FlatEFPotential(nn.Module):
     """Exportable flat-convention potential with analytic forces (no functorch).
 
-    ``forward(Z, pos, edge_index) -> (energy, forces, atomic_energy)`` — the
+    ``forward(Z, pos, pair_index) -> (energy, forces, atomic_energy)`` — the
     schema-v3 triple :class:`~molix.engine.adapter.FlatTensorAdapter` requires
     of a third-party model.
     """
 
-    def forward(self, Z, pos, edge_index):
-        edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-        atomic, forces = pair_site_energies_and_forces(pos, edge_index, edge_diff)
+    def forward(self, Z, pos, pair_index):
+        pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]]
+        atomic, forces = pair_site_energies_and_forces(pos, pair_index, pair_diff)
         return atomic.sum().reshape(1), forces, atomic
 
 
@@ -111,5 +111,5 @@ class _FlatEFPotential(nn.Module):
 def graph():
     Z = torch.tensor([1, 6, 8])
     pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.2, 0.0]])
-    edge_index = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1]])
-    return Z, pos, edge_index
+    pair_index = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1]])
+    return Z, pos, pair_index

@@ -212,6 +212,10 @@ def _official_state(model: torch.nn.Module, names: Mapping[str, str]) -> dict[st
     ordered = sorted(names.items(), key=lambda item: -len(item[0]))
     out: dict[str, torch.Tensor] = {}
     for key, value in model.state_dict().items():
+        # A cueq checkpoint holds tensors only; ``_extra_state`` is molnex's
+        # own module metadata and never appears in the artifact being faked.
+        if not torch.is_tensor(value):
+            continue
         for prefix, official in ordered:
             if key == prefix or key.startswith(prefix):
                 key = official + (key[len(prefix) :] if key != prefix else "")

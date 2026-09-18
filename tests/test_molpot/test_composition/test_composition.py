@@ -25,7 +25,7 @@ def molecular_batch():
         ],
         dtype=torch.float32,
     )
-    edge_index = torch.tensor(
+    pair_index = torch.tensor(
         [
             [0, 1],
             [1, 0],
@@ -36,8 +36,8 @@ def molecular_batch():
         ],
         dtype=torch.long,
     )
-    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    edge_dist = edge_diff.norm(dim=-1)
+    pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]]
+    pair_dist = pair_diff.norm(dim=-1)
     batch_idx = torch.tensor([0, 0, 0, 1, 1], dtype=torch.long)
     Z = torch.tensor([1, 6, 8, 1, 6], dtype=torch.long)
 
@@ -48,10 +48,10 @@ def molecular_batch():
             batch=batch_idx,
             batch_size=[5],
         ),
-        edges=TensorDict(
-            edge_index=edge_index,
-            edge_diff=edge_diff,
-            edge_dist=edge_dist,
+        pairs=TensorDict(
+            pair_index=pair_index,
+            pair_diff=pair_diff,
+            pair_dist=pair_dist,
             batch_size=[6],
         ),
         batch_size=[],
@@ -87,14 +87,14 @@ def test_layer_pooling_last():
 
 def test_edge_to_node_pooling():
     edge_features = torch.arange(4 * 2, dtype=torch.float32).reshape(4, 2)
-    edge_index = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1]], dtype=torch.long)
+    pair_index = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1]], dtype=torch.long)
 
     pool = EdgeToNodePooling("mean")
-    node_features = pool(edge_features, edge_index, num_nodes=3)
+    node_features = pool(edge_features, pair_index, num_nodes=3)
     assert node_features.shape == (3, 2)
 
     pool_sum = EdgeToNodePooling("sum")
-    node_features_sum = pool_sum(edge_features, edge_index, num_nodes=3)
+    node_features_sum = pool_sum(edge_features, pair_index, num_nodes=3)
     assert node_features_sum.shape == (3, 2)
 
 
@@ -125,7 +125,7 @@ def test_potential_composer_aggregates_terms_and_derives_forces(molecular_batch)
 
     data = {
         "pos": molecular_batch["atoms", "pos"].clone().requires_grad_(True),
-        "edge_index": molecular_batch["edges", "edge_index"],
+        "pair_index": molecular_batch["pairs", "pair_index"],
         "batch": molecular_batch["atoms", "batch"],
     }
     outputs = composer(node_features=node_features, data=data, compute_forces=True)
@@ -155,7 +155,7 @@ def test_integration_with_mace_encoder(molecular_batch):
     )
     data = {
         "pos": molecular_batch["atoms", "pos"].clone().requires_grad_(True),
-        "edge_index": molecular_batch["edges", "edge_index"],
+        "pair_index": molecular_batch["pairs", "pair_index"],
         "batch": molecular_batch["atoms", "batch"],
     }
     outputs = composer(node_features=node_features, data=data, compute_forces=True)
@@ -182,12 +182,12 @@ def test_integration_with_allegro_encoder(molecular_batch):
 
     # Allegro encoder writes a flat ``(E, F·(L+1))`` DenseNet stack;
     # reshape to ``(E, L+1, F)`` so LayerPooling reduces over the layer axis.
-    ef = result["edges", "edge_features"]
+    ef = result["pairs", "edge_features"]
     ef = ef.view(ef.shape[0], -1, encoder.num_scalar_features)
     edge_features = layer_pool(ef)
     node_features = edge_to_node(
         edge_features,
-        molecular_batch["edges", "edge_index"],
+        molecular_batch["pairs", "pair_index"],
         num_nodes=molecular_batch["atoms", "Z"].shape[0],
     )
 
@@ -197,7 +197,7 @@ def test_integration_with_allegro_encoder(molecular_batch):
     )
     data = {
         "pos": molecular_batch["atoms", "pos"].clone().requires_grad_(True),
-        "edge_index": molecular_batch["edges", "edge_index"],
+        "pair_index": molecular_batch["pairs", "pair_index"],
         "batch": molecular_batch["atoms", "batch"],
     }
     outputs = composer(node_features=node_features, data=data, compute_forces=True)

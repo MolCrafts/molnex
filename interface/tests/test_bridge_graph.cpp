@@ -60,7 +60,7 @@
 //    public:
 //     virtual ~Exec();
 //     virtual ModelOutputs run(const at::Tensor& Z, const at::Tensor& pos_f64,
-//                              const at::Tensor& edge_index,
+//                              const at::Tensor& pair_index,
 //                              const at::Tensor& local_mask) = 0;
 //     const std::string& model_dtype_name() const;
 //   };
@@ -71,7 +71,7 @@
 //   class DynamicExec : public Exec { DynamicExec(ModelRunner*, at::Device,
 //                                                 at::ScalarType, bool); };
 //   struct PaddedEdges { at::Tensor edges; at::Tensor mask; };
-//   PaddedEdges pad_edges(const at::Tensor& edge_index, int64_t e_max);
+//   PaddedEdges pad_edges(const at::Tensor& pair_index, int64_t e_max);
 //   class GraphedExec : public Exec { GraphedExec(ModelRunner*, at::Device,
 //                                                 at::ScalarType, bool,
 //                                                 int64_t n_fixed,
@@ -349,17 +349,17 @@ class SyntheticSystem {
 /// Require `edges` to be exactly `want`, row by row, with the pinned shape.
 void expect_edges(const at::Tensor& edges, const std::vector<EdgePair>& want,
                   const std::string& tag) {
-  expect_true(edges.defined(), tag + ": edge_index must be a defined tensor");
+  expect_true(edges.defined(), tag + ": pair_index must be a defined tensor");
   expect_true(edges.scalar_type() == at::kLong,
-              tag + ": edge_index must be int64");
+              tag + ": pair_index must be int64");
   expect_true(edges.device().is_cpu(),
               tag +
-                  ": edge_index must stay on the CPU — the device transfer "
+                  ": pair_index must stay on the CPU — the device transfer "
                   "belongs to the execution site");
-  expect_int(edges.dim(), 2, tag + ": edge_index must be 2-D");
+  expect_int(edges.dim(), 2, tag + ": pair_index must be 2-D");
   expect_int(edges.size(0), static_cast<long long>(want.size()),
              tag + ": edge count");
-  expect_int(edges.size(1), 2, tag + ": edge_index must be (ne, 2)");
+  expect_int(edges.size(1), 2, tag + ": pair_index must be (ne, 2)");
 
   const auto ea = edges.accessor<int64_t, 2>();
   for (std::size_t k = 0; k < want.size(); ++k) {
@@ -501,7 +501,7 @@ void test_bridge_graph_empty_neighbor_list() {
   SyntheticSystem bare(std::vector<std::vector<int>>{{}, {}, {}, {}});
   const at::Tensor none = graph.build(bare.view(), kNall);
   expect_edges(none, {}, "empty neighbour lists");
-  expect_int(none.numel(), 0, "empty edge_index must hold no elements");
+  expect_int(none.numel(), 0, "empty pair_index must hold no elements");
 
   // (b) n_graph == 0 — no atom is a graph node, so every candidate is dropped
   // after the lists have actually been walked.
@@ -531,7 +531,7 @@ void test_bridge_graph_reuses_buffers_across_calls() {
 
   // The first result must be untouched by the second build. It would not be if
   // the returned tensor aliased the reused buffer instead of owning a copy —
-  // the caller's edge_index would silently change under it mid-step, and a
+  // the caller's pair_index would silently change under it mid-step, and a
   // shrink leaves the surplus capacity holding the previous step's tail rather
   // than anything the caller could notice going wrong.
   expect_edges(first, kEdgesAll, "first build after the second");
@@ -1368,7 +1368,7 @@ void test_bridge_dynamic_exec_matches_reference() {
 
   const at::Tensor Z = reference_entry(ref, "Z", ref_path);
   const at::Tensor pos = reference_entry(ref, "pos", ref_path);
-  const at::Tensor edge_index = reference_entry(ref, "edge_index", ref_path);
+  const at::Tensor pair_index = reference_entry(ref, "pair_index", ref_path);
   // All-ones: the fixture's reference outputs were captured at full mask, which
   // is the case whose energy equals the undecomposed total. A partial mask is
   // the impl's subject (impl_energy_sums_locals_only), not the execution
@@ -1387,7 +1387,7 @@ void test_bridge_dynamic_exec_matches_reference() {
   expect_string(exec.model_dtype_name(), "float64",
                 "the fixture is an fp64 export");
 
-  const ModelOutputs out = exec.run(Z, pos, edge_index, local_mask);
+  const ModelOutputs out = exec.run(Z, pos, pair_index, local_mask);
 
   // fp64 in, fp64 through, fp64 out: the fixture's outputs are a closed-form
   // expression of its inputs, so 1e-12 is a real parity claim and not a
@@ -1430,7 +1430,7 @@ void test_bridge_dynamic_exec_matches_reference() {
   // buffers that the next replay overwrites in place, and the dynamic path is
   // held to the same promise so the facade can rely on it uniformly.
   const at::Tensor first_forces = out.forces;
-  const ModelOutputs again = exec.run(Z, pos, edge_index, local_mask);
+  const ModelOutputs again = exec.run(Z, pos, pair_index, local_mask);
   expect_true(again.forces.data_ptr() != first_forces.data_ptr(),
               "a second run must not alias the first run's force storage");
   expect_allclose_f64(again.forces, first_forces, 0.0,
@@ -1455,8 +1455,8 @@ void test_bridge_graphed_exec_matches_dynamic() {
   const auto ref = load_tensor_dict(ref_path);
   const at::Tensor Z = reference_entry(ref, "Z", ref_path).to(at::kCPU);
   const at::Tensor pos = reference_entry(ref, "pos", ref_path).to(at::kCPU);
-  const at::Tensor edge_index =
-      reference_entry(ref, "edge_index", ref_path).to(at::kCPU);
+  const at::Tensor pair_index =
+      reference_entry(ref, "pair_index", ref_path).to(at::kCPU);
   const at::Tensor local_mask =
       reference_entry(ref, "local_mask", ref_path).to(at::kCPU);
 
@@ -1471,12 +1471,12 @@ void test_bridge_graphed_exec_matches_dynamic() {
   ModelRunner dyn_runner((dir / "model_graph_v3_cuda").string());
   DynamicExec dynamic(&dyn_runner, at::Device(at::kCUDA), at::kDouble,
                       /*supports_virial=*/false);
-  const ModelOutputs want = dynamic.run(Z, pos, edge_index, local_mask);
+  const ModelOutputs want = dynamic.run(Z, pos, pair_index, local_mask);
 
   ModelRunner graph_runner((dir / "model_graph_fixed_v3_cuda").string());
   GraphedExec graphed(&graph_runner, at::Device(at::kCUDA), at::kDouble,
                       /*supports_virial=*/false, n_fixed, e_max);
-  const ModelOutputs got = graphed.run(Z, pos, edge_index, local_mask);
+  const ModelOutputs got = graphed.run(Z, pos, pair_index, local_mask);
 
   // rel 1e-6 is this chain's parity judgement; energies here are O(1), so an
   // absolute tolerance of the same size is the stricter reading of it.
@@ -1502,7 +1502,7 @@ void test_bridge_graphed_exec_matches_dynamic() {
   // GraphedExec returning those directly would silently rewrite the caller's
   // previous-step forces.
   const at::Tensor first_forces = got.forces;
-  const ModelOutputs second = graphed.run(Z, pos, edge_index, local_mask);
+  const ModelOutputs second = graphed.run(Z, pos, pair_index, local_mask);
   expect_true(second.forces.data_ptr() != first_forces.data_ptr(),
               "a replay must not hand back the previous call's storage");
   expect_allclose_f64(first_forces, want.forces, 1e-6,

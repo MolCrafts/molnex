@@ -31,7 +31,6 @@ References:
 from __future__ import annotations
 
 import math
-from typing import Literal
 
 import torch
 import torch.nn as nn
@@ -140,50 +139,34 @@ class AngleParamHead(nn.Module):
 
 
 class ProperTorsionParamHead(nn.Module):
-    """Map proper-torsion features to Cartesian or OPLS-AA amplitudes.
+    """Map proper-torsion features to the general Fourier amplitudes.
 
-    Two output forms (``form``):
+    Emits unconstrained Cartesian ``(a_n, b_n)`` with periodicities
+    ``n = 1…T`` (default 6). The mapping onto the canonical cosine table
+    ``(k, γ, periodicity)`` happens at IR / ``to_potentials`` / ``project``
+    export, not here — ``k = hypot(a, b)`` and ``γ = atan2(b, a)``.
 
-    * ``"cartesian"`` (default): unconstrained Fourier ``(a_n, b_n)`` with
-      default periodicities ``n = 1…6``. Mapping onto the cosine table
-      ``(k, γ, periodicity, idivf)`` happens at IR / ``to_potentials`` /
-      ``project`` export, not in this head.
-    * ``"opls"``: unconstrained LAMMPS ``dihedral_style opls`` coefficients
-      ``k1..k4`` (each ``(N,)``). Aligns with ``PotentialMeta``
-      ``dihedral:opls`` ParamSpec.
+    **Why Cartesian and not ``(k, γ)`` directly.** A barrier that passes
+    through zero is ordinary during a fit, and at ``k = 0`` the phase is
+    undefined: ``(k, γ)`` has a coordinate singularity there and its gradient
+    does not exist, while ``(a, b)`` is smooth through the origin. The polar
+    pair is the storage form; the Cartesian pair is the trainable one.
 
-    Units (``CLASS_I_CANONICAL``): ``a``, ``b``, and OPLS ``k1..k4`` in
-    kcal/mol; Cartesian ``idivf`` dimensionless. There is no ``c0`` /
-    heat-of-formation offset.
+    **No vendor dialect.** There is no OPLS output form: OPLS is this series
+    at ``n = 1,2,3,4`` with ``γ = 0, π, 0, π``, so a fit that wants it reaches
+    it, and the exporters detect that manifold and write ``dihedral_style
+    opls`` when it holds (spec ff-params-01 § 5). Emitting ``k1..k4`` here
+    would build one vendor's constraint into the model's shape.
 
-    **OPLS ``Kn`` vs Class-I half-amplitudes:** the OPLS-AA / LAMMPS energy
-
-    .. math::
-
-        E = \\tfrac12 K_1[1+\\cos\\phi]
-          + \\tfrac12 K_2[1-\\cos 2\\phi]
-          + \\tfrac12 K_3[1+\\cos 3\\phi]
-          + \\tfrac12 K_4[1-\\cos 4\\phi]
-
-    already includes the factor :math:`\\tfrac12`. Keys ``k1..k4`` **are**
-    the LAMMPS ``dihedral_coeff`` ``Kn`` values — do **not** multiply or
-    divide by :math:`\\tfrac12` again. Class-I multi-cosine IR on the OPLS
-    manifold uses half-amplitudes :math:`k_m = K_n/2` with
-    :math:`n=(1,2,3,4)` and :math:`\\gamma=(0,\\pi,0,\\pi)`; this head's
-    OPLS path emits :math:`K_n`, not :math:`k_m`.
+    Units (``CLASS_I_CANONICAL``): ``a``, ``b`` in kcal/mol. There is no
+    ``c0`` / heat-of-formation offset.
 
     Args:
         feature_dim: Input feature dimension.
         hidden_dim: Hidden layer dimension.
-        n_terms: Number of Fourier terms ``T`` (Cartesian only). Defaults
-            to 6. Incompatible with ``form="opls"`` when not left at the
-            Cartesian default.
-        periodicity: Integer periodicities of length ``T`` (Cartesian
-            only). Defaults to ``(1, 2, …, T)``. Must be omitted for
-            ``form="opls"``.
-        default_idivf: Default AMBER-style identity divisor per interaction
-            (Cartesian only).
-        form: ``"cartesian"`` or ``"opls"``. Defaults to ``"cartesian"``.
+        n_terms: Number of Fourier terms ``T``. Defaults to 6.
+        periodicity: Integer periodicities of length ``T``. Defaults to
+            ``(1, 2, …, T)``.
     """
 
     def __init__(
@@ -192,31 +175,8 @@ class ProperTorsionParamHead(nn.Module):
         hidden_dim: int = 64,
         n_terms: int = 6,
         periodicity: tuple[int, ...] | list[int] | None = None,
-        default_idivf: float = 1.0,
-        form: Literal["cartesian", "opls"] = "cartesian",
     ) -> None:
         super().__init__()
-        if form not in ("cartesian", "opls"):
-            raise ValueError(f"form must be 'cartesian' or 'opls', got {form!r}")
-        self.form = form
-        self.default_idivf = default_idivf
-
-        if form == "opls":
-            if n_terms != 6:
-                raise ValueError(
-                    f"form='opls' does not accept n_terms (got {n_terms}; OPLS emits fixed k1..k4)"
-                )
-            if periodicity is not None:
-                raise ValueError(
-                    "form='opls' does not accept periodicity "
-                    "(OPLS emits k1..k4 only, no periodicity buffer)"
-                )
-            self.n_terms = 4
-            self.mlp = _mlp(feature_dim, hidden_dim, 4)
-            # No periodicity buffer — OPLS emits k1..k4 only; an empty
-            # register_buffer would enter state_dict and break empty-.max().
-            return
-
         if n_terms < 1:
             raise ValueError(f"n_terms must be >= 1, got {n_terms}")
         if periodicity is None:
@@ -239,44 +199,25 @@ class ProperTorsionParamHead(nn.Module):
                 match.
 
         Returns:
-            For ``form="cartesian"``: dict with
+            Dict with
 
             - ``a``: ``(N, T)`` cosine amplitudes (kcal/mol), unconstrained
             - ``b``: ``(N, T)`` sine amplitudes (kcal/mol), unconstrained
-            - ``periodicity``: ``(T,)`` integer buffer
-            - ``idivf``: ``(N,)`` identity divisors
+            - ``periodicity``: ``(N, T)`` integer multiplicities, one row per
+              interaction
 
-            Does not emit ``k``, ``phase``, or ``c0``.
-
-            For ``form="opls"``: dict with exactly ``k1``, ``k2``, ``k3``,
-            ``k4`` — each ``(N,)`` unconstrained LAMMPS ``Kn`` (kcal/mol).
-            Does not emit ``a``/``b``/``k``/``phase``/``periodicity``/``idivf``.
+            Does not emit ``k``, ``phase``, ``c0`` or any ``k1..k4``.
         """
-        if self.form == "opls":
-            raw = self.mlp(features)
-            return {
-                "k1": raw[:, 0],
-                "k2": raw[:, 1],
-                "k3": raw[:, 2],
-                "k4": raw[:, 3],
-            }
-
-        n = features.shape[0]
         raw = self.mlp(features)
         t = self.n_terms
         a = raw[:, :t]
         b = raw[:, t : 2 * t]
-        idivf = torch.full(
-            (n,),
-            self.default_idivf,
-            dtype=features.dtype,
-            device=features.device,
-        )
         return {
             "a": a,
             "b": b,
-            "periodicity": self.periodicity,
-            "idivf": idivf,
+            # One row per interaction: the canonical table is per type,
+            # per term, so a head that predicts N rows declares N of them.
+            "periodicity": self.periodicity.expand(a.shape[0], -1),
         }
 
 
@@ -289,7 +230,7 @@ class ImproperParamHead(nn.Module):
     When both modes are enabled, keys are namespaced
     (``k_harmonic`` / ``chi0`` and ``k_periodic`` / ``phase`` / …) to avoid
     collisions. Single-mode outputs use the short IR field names (``k``,
-    ``chi0`` or ``k``, ``phase``, ``periodicity``, ``idivf``).
+    ``chi0`` or ``k``, ``phase``, ``periodicity``).
 
     Universal-v0 defaults emit the periodic branch only (``n = 1, 2``)
     in polar ``(k, phase)`` coordinates — not Cartesian. Harmonic
@@ -304,7 +245,6 @@ class ImproperParamHead(nn.Module):
         periodicity: Integer periodicities for the periodic branch.
             Defaults to ``(1, 2, …, n_terms)``.
         min_k: Softplus floor for force constants / barriers.
-        default_idivf: Identity divisor for the periodic branch.
     """
 
     def __init__(
@@ -317,7 +257,6 @@ class ImproperParamHead(nn.Module):
         n_terms: int = 2,
         periodicity: tuple[int, ...] | list[int] | None = None,
         min_k: float = 1e-4,
-        default_idivf: float = 1.0,
     ) -> None:
         super().__init__()
         if not include_harmonic and not include_periodic:
@@ -325,7 +264,6 @@ class ImproperParamHead(nn.Module):
         self.include_harmonic = include_harmonic
         self.include_periodic = include_periodic
         self.min_k = min_k
-        self.default_idivf = default_idivf
         self.n_terms = n_terms
 
         out_dim = 0
@@ -361,7 +299,6 @@ class ImproperParamHead(nn.Module):
             Dict of parameter tensors. See class docstring for key naming when
             both harmonic and periodic modes are enabled.
         """
-        n = features.shape[0]
         raw = self.mlp(features)
         out: dict[str, torch.Tensor] = {}
         offset = 0
@@ -382,18 +319,11 @@ class ImproperParamHead(nn.Module):
             t = self.n_terms
             k_p = F.softplus(raw[:, offset : offset + t]) + self.min_k
             phase = raw[:, offset + t : offset + 2 * t]
-            idivf = torch.full(
-                (n,),
-                self.default_idivf,
-                dtype=features.dtype,
-                device=features.device,
-            )
             if both:
                 out["k_periodic"] = k_p
             else:
                 out["k"] = k_p
             out["phase"] = phase
-            out["periodicity"] = self.periodicity
-            out["idivf"] = idivf
+            out["periodicity"] = self.periodicity.expand(k_p.shape[0], -1)
 
         return out

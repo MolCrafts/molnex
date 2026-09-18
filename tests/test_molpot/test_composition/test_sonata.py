@@ -100,10 +100,10 @@ def _make_batch(*, with_cell: bool = False) -> TensorDict:
             for j in range(4):
                 if i != j:
                     edge_pairs.append([offset + i, offset + j])
-    edge_index = torch.tensor(edge_pairs, dtype=torch.long)  # (24, 2)
+    pair_index = torch.tensor(edge_pairs, dtype=torch.long)  # (24, 2)
 
-    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    edge_dist = edge_diff.norm(dim=-1)
+    pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]]
+    pair_dist = pair_diff.norm(dim=-1)
     batch_idx = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.long)
     Z = torch.tensor([1, 6, 8, 7, 1, 6, 8, 7], dtype=torch.long)
     total_charge = torch.zeros(2, dtype=torch.float32)
@@ -118,10 +118,10 @@ def _make_batch(*, with_cell: bool = False) -> TensorDict:
 
     return TensorDict(
         atoms=TensorDict(Z=Z, pos=pos, batch=batch_idx, batch_size=[8]),
-        edges=TensorDict(
-            edge_index=edge_index,
-            edge_diff=edge_diff,
-            edge_dist=edge_dist,
+        pairs=TensorDict(
+            pair_index=pair_index,
+            pair_diff=pair_diff,
+            pair_dist=pair_dist,
             batch_size=[24],
         ),
         graphs=TensorDict(**graphs_kwargs),

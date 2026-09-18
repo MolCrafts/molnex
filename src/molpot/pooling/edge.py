@@ -6,8 +6,8 @@ to per-node features suitable for downstream parameter heads.
 Example:
     >>> pool = EdgeToNodePooling("mean")
     >>> edge_features = torch.randn(20, 64)  # 20 edges, 64 features
-    >>> edge_index = torch.randint(0, 10, (20, 2))
-    >>> node_features = pool(edge_features, edge_index, num_nodes=10)  # (10, 64)
+    >>> pair_index = torch.randint(0, 10, (20, 2))
+    >>> node_features = pool(edge_features, pair_index, num_nodes=10)  # (10, 64)
 """
 
 from __future__ import annotations
@@ -35,20 +35,20 @@ class EdgeToNodePooling(nn.Module):
     def forward(
         self,
         edge_features: torch.Tensor,
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
         num_nodes: int,
     ) -> torch.Tensor:
         """Aggregate edge features to nodes.
 
         Args:
             edge_features: Per-edge features ``(E, D)``.
-            edge_index: Edge indices ``(E, 2)``.
+            pair_index: Edge indices ``(E, 2)``.
             num_nodes: Total number of nodes.
 
         Returns:
             Per-node features ``(N, D)``.
         """
-        dst = edge_index[:, 1]
+        dst = pair_index[:, 1]
         feat_dim = edge_features.shape[-1]
 
         node_features = torch.zeros(

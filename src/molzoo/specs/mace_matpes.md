@@ -22,7 +22,7 @@ tutorial; use the MolZoo user guide for narrative and worked examples.
 | `molzoo.mace.research.MACE` | Encoder-only trainable MACE; see `mace.md` |
 | `molzoo.mace.potential.MaceOmol` | OMOL foundation model (charge/spin conditioned); see `mace_omol.md` |
 | `molzoo.mace.encoder.MACEEncoder` | Shared block graph both variants inherit (`MacePotential` subclasses it) |
-| `molix.batch.NeighborList` | Cutoff graph construction (PBC minimum image) |
+| `molix.data.NeighborList` | Cutoff graph construction (PBC minimum image) |
 
 ## 1. Scope
 
@@ -49,9 +49,9 @@ It does **not** own:
 | In | `("atoms", "Z")` / `Z=` | `(N,)` | int64 | Atomic numbers; must all be in the model's z-table |
 | In | `("atoms", "pos")` / `positions=` | `(N, 3)` | float | Cartesian positions, Å |
 | In | `("atoms", "batch")` / `batch=` | `(N,)` | int64 | Graph membership |
-| In | `("edges", "edge_index")` | `(E, 2)` | int64 | Col 0 = source, col 1 = target |
+| In | `("pairs", "pair_index")` | `(E, 2)` | int64 | Col 0 = source, col 1 = target |
 | In | `edge_index=` (raw API) | `(E, 2)` | int64 | `[:, 0]` = source, `[:, 1]` = target (repo edge convention) |
-| In | `("edges", "shifts")` / `shifts=` | `(E, 3)` | float | Optional PBC shift `unit_shifts @ cell` |
+| In | `("pairs", "shifts")` / `shifts=` | `(E, 3)` | float | Optional PBC shift `unit_shifts @ cell` |
 
 ### 2.2 Outputs
 
@@ -322,7 +322,7 @@ Two facts worth keeping:
 
 | Concern | Owner | Contract |
 |---------|-------|----------|
-| Neighbour list + PBC shifts | caller / `molix.batch.NeighborList` | `(E,2)` edges; `shifts = mic_diff - (pos[t]-pos[s])` |
+| Neighbour list + PBC shifts | caller / `molix.data.NeighborList` | `(E,2)` edges; `shifts = mic_diff - (pos[t]-pos[s])` |
 | Edge displacements | `molzoo.mace.geometry` | `edge_vectors` / `edge_lengths`; differentiable w.r.t. `pos` |
 | Building blocks | `molrep.interaction.mace` / `molrep.readout.mace` / `molrep.embedding.mace` (+ generic `molrep` / `molpot`) | reused; not owned here |
 | Model graph | `molzoo.mace.encoder.MACEEncoder` | blocks + wiring; no energy, no forces |

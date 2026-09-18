@@ -54,10 +54,10 @@ PY
 
 echo "=== small batch atoms=512 graphs=16 ==="
 "$PY" benchmarks/bench_pinet_rank3_speed.py --device cuda --steps 50 --warmup 15 \
-    --atoms 512 --edges 4096 --graphs 16
+    --atoms 512 --pairs 4096 --graphs 16
 
 echo "=== large batch atoms=2048 graphs=64 ==="
 "$PY" benchmarks/bench_pinet_rank3_speed.py --device cuda --steps 30 --warmup 10 \
-    --atoms 2048 --edges 16384 --graphs 64
+    --atoms 2048 --pairs 16384 --graphs 64
 
 echo "=== DONE $(date) ==="

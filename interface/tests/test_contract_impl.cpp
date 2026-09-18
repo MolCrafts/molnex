@@ -182,7 +182,7 @@ struct MetaFields {
   std::string energy_conv = R"({"real": 23.060549, "metal": 1.0})";
   std::string species = "[1, 6, 8]";
   std::string model_dtype = "float64";
-  std::string inputs = R"(["Z", "pos", "edge_index", "local_mask"])";
+  std::string inputs = R"(["Z", "pos", "pair_index", "local_mask"])";
   std::string outputs = R"(["energy", "forces", "atomic_energy", "virial"])";
   std::string adapter = "molnex-tensordict";
   std::string supports_pbc = "false";
@@ -452,12 +452,12 @@ class StubExec : public Exec {
         emit_virial_(emit_virial) {}
 
   ModelOutputs run(const at::Tensor& Z, const at::Tensor& pos_f64,
-                   const at::Tensor& edge_index,
+                   const at::Tensor& pair_index,
                    const at::Tensor& local_mask) override {
     calls += 1;
     Z_seen = Z.clone();
     pos_seen = pos_f64.clone();
-    edges_seen = edge_index.clone();
+    edges_seen = pair_index.clone();
     local_mask_seen = local_mask.clone();
 
     const auto opts = at::TensorOptions().dtype(at::kDouble);
@@ -582,11 +582,11 @@ LammpsRunEnv pbc_env() {
 void expect_edges(const at::Tensor& edges, const std::vector<EdgePair>& want,
                   const std::string& tag) {
   expect_true(edges.defined(),
-              tag + ": the impl must have built an edge_index");
-  expect_int(edges.dim(), 2, tag + ": edge_index must be 2-D");
+              tag + ": the impl must have built an pair_index");
+  expect_int(edges.dim(), 2, tag + ": pair_index must be 2-D");
   expect_int(edges.size(0), static_cast<long long>(want.size()),
              tag + ": edge count");
-  expect_int(edges.size(1), 2, tag + ": edge_index must be (ne, 2)");
+  expect_int(edges.size(1), 2, tag + ": pair_index must be (ne, 2)");
   const auto ea = edges.accessor<int64_t, 2>();
   for (std::size_t k = 0; k < want.size(); ++k) {
     const std::string row = tag + ": row " + std::to_string(k);
@@ -673,7 +673,7 @@ void test_impl_compute_composes_pipeline() {
   // already in (source, target) order, so the raw order and the sorted order
   // coincide here — the two are told apart in test_bridge_graph.cpp, where the
   // input is deliberately shuffled.
-  expect_edges(under.exec->edges_seen, kEdgesLocal, "composed edge_index");
+  expect_edges(under.exec->edges_seen, kEdgesLocal, "composed pair_index");
 
   // (3) The energy is the sum of the LOCAL site energies, times energy_conv,
   // ONCE: (0.25 + 0.5 + 0.75) eV in a `real` run is 1.5 * 23.060549
@@ -717,7 +717,7 @@ void test_impl_compute_n_graph_local_only() {
   expect_int(under.exec->pos_seen.size(0), kNlocal, "pos rows == nlocal");
   // The edge set is the local one: the fourth atom's storage exists but is not
   // a node, so the (2,3) pair that survives the cutoff never becomes an edge.
-  expect_edges(under.exec->edges_seen, kEdgesLocal, "local-only edge_index");
+  expect_edges(under.exec->edges_seen, kEdgesLocal, "local-only pair_index");
   expect_force_row(sys, 3, /*scattered=*/false,
                    "storage past nlocal is never written");
 }
@@ -736,7 +736,7 @@ void test_impl_compute_n_graph_with_ghost() {
              "a periodic export stages local + ghost nodes");
   expect_int(under.exec->Z_seen.accessor<int64_t, 1>()[3], kAtomZ[3],
              "the ghost's Z is mapped like any other atom");
-  expect_edges(under.exec->edges_seen, kEdgesAll, "ghost-inclusive edge_index");
+  expect_edges(under.exec->edges_seen, kEdgesAll, "ghost-inclusive pair_index");
 
   // EVERY row, ghost included, carries the converted model force — and that is
   // not an accident of the stub. The partition energy sums local sites only,

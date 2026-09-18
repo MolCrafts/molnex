@@ -33,7 +33,17 @@ value per input row** — dead padding rows of a fixed-capacity list included.
 ``torch.unique`` and every other data-dependent shape happen once at
 construction; the query is ``searchsorted`` + ``torch.where``, with no boolean
 indexing, no host sync and no Python branch on a tensor value, so it traces
-under ``torch.compile`` with zero graph breaks. A *graph break* is a point
+under ``torch.compile`` with zero graph breaks.
+
+The query table's own **length** is likewise a function of the input column
+*shapes*, never of their contents: it is padded to one slot per bonded column
+with a sentinel key no query can match. A capacity-padded training batch
+(:class:`molix.data.MoleculePadder`) therefore rebinds to the same table
+length every batch, where an exactly-sized table would change length with the
+molecules drawn and recompile the step once per batch. :attr:`pairs` is the
+exception and stays exact — it is the topology's real pair list, read by the
+Ewald correction on the single-topology periodic path, not by the packed
+training path. A *graph break* is a point
 where ``torch.compile`` cannot keep building its traced graph — because an
 output shape depends on the data, or a value has to be read back to Python —
 and has to fall back to the eager interpreter, which costs most of the
@@ -59,10 +69,11 @@ __all__ = ["ExclusionTable"]
 #: numeric order *is* the precedence: the smallest code of a pair wins.
 _BONDED, _ANGLE_END, _TORSION_END = 0, 1, 2
 
-#: Key stored when a topology excludes nothing at all. Pair keys are
-#: ``lo * n_atoms + hi ≥ 0``, so this one can never be matched, which is what
-#: lets :meth:`ExclusionTable.lookup` keep a single branch-free body instead of
-#: testing an empty table on every call.
+#: Key stored in every slot no relation claims — an empty topology's whole
+#: table, and the pad that holds a table's length to its shape-derived
+#: capacity. Pair keys are ``lo * n_atoms + hi ≥ 0``, so this one can never be
+#: matched, which is what lets :meth:`ExclusionTable.lookup` keep a single
+#: branch-free body instead of testing an empty table on every call.
 _NO_MATCH_KEY = -1
 
 
@@ -94,7 +105,7 @@ class ExclusionTable:
 
     Args:
         n_atoms: Number of atoms ``N`` the indices below address. Fixes the
-            key encoding, so it must be the count the queried ``edge_index``
+            key encoding, so it must be the count the queried ``pair_index``
             is numbered against.
         scaling: Declared interaction classes and their dimensionless
             ``(s12, s13, s14)`` triples.
@@ -134,10 +145,14 @@ class ExclusionTable:
 
         keys: list[torch.Tensor] = []
         relations: list[torch.Tensor] = []
+        capacity = 0
         for code, index in columns:
             if index is None or index.numel() == 0:
                 continue
             ends = index.to(device=device, dtype=torch.long)
+            # One key per column at most, whatever the column holds: the query
+            # table's length is a function of the input *shapes* alone.
+            capacity += int(ends.shape[-1])
             lo = torch.minimum(ends[0], ends[-1])
             hi = torch.maximum(ends[0], ends[-1])
             # ``lo == hi`` is a degenerate or padded column, never a relation.
@@ -157,9 +172,21 @@ class ExclusionTable:
         self._pairs = torch.stack(
             [unique_keys // self._n_atoms, unique_keys % self._n_atoms], dim=1
         )
-        if unique_keys.numel() == 0:
-            unique_keys = torch.full((1,), _NO_MATCH_KEY, dtype=torch.long, device=device)
-            closest = torch.zeros(1, dtype=torch.long, device=device)
+        # Pad the query table to that shape-derived capacity with the sentinel.
+        # How many pairs *survive* the dedup is a property of the molecules in
+        # the batch, so an exact table changes length from one packed batch to
+        # the next — and its length is a dynamo guard on every energy call
+        # ("_keys size mismatch: expected 32990, actual 30097", GH200 job
+        # 2462406), which is one recompile per batch on a padded training path.
+        # ``_NO_MATCH_KEY`` is negative and every real key is ``>= 0``, so the
+        # pad sorts ahead of the table, ``searchsorted`` is unaffected, and the
+        # equality in :meth:`lookup` can never select a pad slot.
+        n_pad = max(capacity, 1) - int(unique_keys.shape[0])
+        if n_pad > 0:
+            unique_keys = torch.cat(
+                [torch.full((n_pad,), _NO_MATCH_KEY, dtype=torch.long, device=device), unique_keys]
+            )
+            closest = torch.cat([torch.zeros(n_pad, dtype=torch.long, device=device), closest])
         self._keys = unique_keys
         self._relation = closest
         # One ``(3,)`` row per declared class, indexed by relation code. fp64 so
@@ -187,7 +214,7 @@ class ExclusionTable:
 
     def lookup(
         self,
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
         kind: str,
         *,
         dtype: torch.dtype,
@@ -199,11 +226,11 @@ class ExclusionTable:
         dropped, so the caller multiplies instead of slicing.
 
         Args:
-            edge_index: Pairs ``(E, 2)``, ``torch.long``, in either order —
+            pair_index: Pairs ``(E, 2)``, ``torch.long``, in either order —
                 the table is undirected. A self-pair ``(i, i)`` is in no
                 relation and reads ``1.0``.
             kind: Interaction class, one of the ``scaling.kinds()`` the table
-                was built with (``"q"``, ``"lj"``).
+                was built with (``"charge"``, ``"lj"``).
             dtype: Working precision of the result, **required**. The table
                 stores its triples in ``float64`` so a repeating factor such as
                 5/6 is not rounded at build time, but the answer is multiplied
@@ -229,8 +256,8 @@ class ExclusionTable:
                 f"Unknown interaction class {kind!r}; declared kinds are {tuple(self._scales)}"
             )
         scales = scales.to(dtype)
-        lo = torch.minimum(edge_index[:, 0], edge_index[:, 1])
-        hi = torch.maximum(edge_index[:, 0], edge_index[:, 1])
+        lo = torch.minimum(pair_index[:, 0], pair_index[:, 1])
+        hi = torch.maximum(pair_index[:, 0], pair_index[:, 1])
         query = lo * self._n_atoms + hi
         # ``clamp`` keeps the gather in range for a query past the last key;
         # the equality below is what decides whether the slot actually matched.

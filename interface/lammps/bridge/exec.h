@@ -4,7 +4,7 @@
 //
 // `Exec` is the seam between "what the bridge staged" and "how this model
 // happens to be run". Everything above it deals in CPU tensors with molnex
-// semantics — `Z` int64, `pos` float64 angstrom, `edge_index` int64 `(ne, 2)`
+// semantics — `Z` int64, `pos` float64 angstrom, `pair_index` int64 `(ne, 2)`
 // in the repo Edge Convention — and gets back CPU float64 energy / forces /
 // optional virial. Device transfer, model-dtype casting, padding, masking and
 // the copy back to the host are each implementation's private policy, because
@@ -183,7 +183,7 @@ class Exec {
   /// \param pos_f64     Positions `(n, 3)` float64 on the CPU in angstrom. The
   ///                    cast to the model's own dtype belongs to the
   ///                    implementation — callers never need to know it.
-  /// \param edge_index  Cutoff graph `(ne, 2)` int64 on the CPU, as
+  /// \param pair_index  Cutoff graph `(ne, 2)` int64 on the CPU, as
   ///                    `GraphBridge::build` produced it. Its ROW ORDER IS NOT
   ///                    PROMISED: scatter-class reductions are permutation-
   ///                    invariant, so the builder sorts only when the export
@@ -206,7 +206,7 @@ class Exec {
   ///                             accept, or on a malformed output (see
   ///                             `read_model_outputs`).
   virtual ModelOutputs run(const at::Tensor& Z, const at::Tensor& pos_f64,
-                           const at::Tensor& edge_index,
+                           const at::Tensor& pair_index,
                            const at::Tensor& local_mask) = 0;
 
   /// The model's input dtype as the export meta spells it: `"float32"` or

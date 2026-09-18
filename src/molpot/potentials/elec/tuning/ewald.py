@@ -31,8 +31,8 @@ def tune_ewald(
         cell: Unit cell matrix ``(3, 3)``.
         positions: Cartesian coordinates ``(n_atoms, 3)``.
         cutoff: Real-space cutoff distance.
-        neighbor_indices: Edge index pairs ``(n_edges, 2)``.
-        neighbor_distances: Edge distances ``(n_edges,)``.
+        neighbor_indices: Edge index pairs ``(n_pairs, 2)``.
+        neighbor_distances: Edge distances ``(n_pairs,)``.
         full_neighbor_list: If True, full neighbor list expected.
         prefactor: Electrostatics prefactor.
         exponent: Exponent for potential (only 1 supported).

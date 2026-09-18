@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molix import config
 from molrep.chem.blocks import ChemGraphBlock
 from molrep.chem.context import (
     AngleContext,
@@ -74,7 +73,16 @@ def _bond_endpoints(bonds: Any) -> tuple[torch.Tensor, torch.Tensor] | None:
 
 
 def _empty(dim: int, like: torch.Tensor) -> torch.Tensor:
-    return like.new_zeros((0, dim), dtype=config.ftype)
+    """A ``(0, dim)`` stand-in for a namespace this batch does not carry.
+
+    dtype and device come from *like* — pass the atom embedding, whose dtype is
+    by definition the one these features would have had. Reading the global
+    ``config.ftype`` here instead is a **graph break**: molcfg resolves every
+    attribute through a custom ``__getattribute__``, which dynamo cannot trace
+    ("expected 1 argument, got 2"), and this function sits on the traced half of
+    a Class-I step (measured 2026-09-18, GH200 job 2616365).
+    """
+    return like.new_zeros((0, dim))
 
 
 class ChemEncoder(nn.Module):
@@ -213,20 +221,24 @@ class ChemEncoder(nn.Module):
             raise KeyError("ChemEncoder requires batch['atoms', 'Z']")
 
         h_atom = self.atom_embed(z.long())
-        ref = h_atom if h_atom.numel() else z
 
         # Bonds
         bonds = _ns(batch, "bonds")
         endpoints = _bond_endpoints(bonds)
         if endpoints is None:
-            h_bond = _empty(self.bond_dim, ref)
+            h_bond = _empty(self.bond_dim, h_atom)
         else:
             atomi, atomj = endpoints
             btype = _get_tensor(bonds, "bond_types", "type", "bond_type")
             h_bond = self.bond_context(h_atom, atomi, atomj, bond_type=btype)
+            bmask = _get_tensor(bonds, "mask")
+            if bmask is not None:
+                h_bond = h_bond * bmask.to(dtype=h_bond.dtype).unsqueeze(-1)
             if int(atomi.shape[0]) > 0:
                 for block in self.blocks:
-                    h_atom, h_bond = block(h_atom, h_bond, atomi, atomj, bond_type=btype)
+                    h_atom, h_bond = block(
+                        h_atom, h_bond, atomi, atomj, bond_type=btype, mask=bmask
+                    )
 
         # Angles
         angles = _ns(batch, "angles")
@@ -234,9 +246,12 @@ class ChemEncoder(nn.Module):
         aj = _get_tensor(angles, "atomj")
         ak = _get_tensor(angles, "atomk")
         if ai is None or aj is None or ak is None:
-            h_angle = _empty(self.angle_dim, ref)
+            h_angle = _empty(self.angle_dim, h_atom)
         else:
             h_angle = self.angle_context(h_atom, ai, aj, ak)
+            amask = _get_tensor(angles, "mask")
+            if amask is not None:
+                h_angle = h_angle * amask.to(dtype=h_angle.dtype).unsqueeze(-1)
 
         # Propers
         propers = _ns(batch, "propers")
@@ -245,9 +260,12 @@ class ChemEncoder(nn.Module):
         pk = _get_tensor(propers, "atomk")
         pl = _get_tensor(propers, "atoml")
         if pi is None or pj is None or pk is None or pl is None:
-            h_proper = _empty(self.proper_dim, ref)
+            h_proper = _empty(self.proper_dim, h_atom)
         else:
             h_proper = self.proper_context(h_atom, pi, pj, pk, pl)
+            pmask = _get_tensor(propers, "mask")
+            if pmask is not None:
+                h_proper = h_proper * pmask.to(dtype=h_proper.dtype).unsqueeze(-1)
 
         # Impropers (atomi = center)
         impropers = _ns(batch, "impropers")
@@ -256,9 +274,12 @@ class ChemEncoder(nn.Module):
         ik = _get_tensor(impropers, "atomk")
         il = _get_tensor(impropers, "atoml")
         if ii is None or ij is None or ik is None or il is None:
-            h_improper = _empty(self.improper_dim, ref)
+            h_improper = _empty(self.improper_dim, h_atom)
         else:
             h_improper = self.improper_context(h_atom, ii, ij, ik, il)
+            imask = _get_tensor(impropers, "mask")
+            if imask is not None:
+                h_improper = h_improper * imask.to(dtype=h_improper.dtype).unsqueeze(-1)
 
         return ChemEmbeddings(
             atom=h_atom,

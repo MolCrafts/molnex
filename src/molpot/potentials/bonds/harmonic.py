@@ -57,7 +57,7 @@ class BondHarmonic(BasePotential):
             data: Optional batch dict. Reads ``pos`` (or ``atoms.pos``),
                 canonical ``bond_index`` (or ``bonds.bond_index``), and
                 ``bond_types`` (or ``bonds.bond_types``). There is no
-                ``edge_index`` fallback — a geometric cutoff edge is not a
+                ``pair_index`` fallback — a geometric cutoff edge is not a
                 bond.
             **kwargs: Alternate way to pass explicit tensors:
                 - pos: Positions [N, 3]
@@ -70,10 +70,10 @@ class BondHarmonic(BasePotential):
         Raises:
             ValueError: ``pos`` / ``bond_index`` / ``bond_types`` missing, or
                 ``bond_index`` is not COO ``[2, num_bonds]`` (e.g. a geometric
-                ``edge_index`` ``[E, 2]`` was passed).
+                ``pair_index`` ``[E, 2]`` was passed).
         """
         # Extract data — canonical covalent connectivity only. There is no
-        # edge_index fallback: a geometric cutoff edge is NOT a chemical bond
+        # pair_index fallback: a geometric cutoff edge is NOT a chemical bond
         # (edge != bond), and unlike bond_index it carries no bond_type — so
         # routing it here is a category error, not a convenience.
         pos = kwargs.get("pos")
@@ -92,25 +92,25 @@ class BondHarmonic(BasePotential):
             if bond_types is None:
                 bond_types = data.get("bond_types")
 
-        if pos is None or bond_index is None or bond_types is None:
-            raise ValueError("BondHarmonic requires pos, bond_index, and bond_types.")
+        if pos is None or bond_index is None:
+            raise ValueError("BondHarmonic requires pos and bond_index.")
 
         # Convert numpy to torch if needed
         if not isinstance(pos, torch.Tensor):
             pos = torch.from_numpy(pos).float()
             bond_index = torch.from_numpy(bond_index).long()
-            bond_types = torch.from_numpy(bond_types).long()
+            bond_types = None if bond_types is None else torch.from_numpy(bond_types).long()
 
         # Canonical bond_index is COO [2, num_bonds] — deliberately a different
-        # shape from the geometric neighbour graph edge_index [E, 2], so a cutoff
+        # shape from the geometric neighbour graph pair_index [E, 2], so a cutoff
         # pair can never be silently mis-indexed as a bond. Reject anything else
         # loudly instead of computing a wrong energy. See CLAUDE.md (bond_index
-        # vs edge_index).
+        # vs pair_index).
         if bond_index.ndim != 2 or bond_index.shape[0] != 2:
             raise ValueError(
                 f"bond_index must be COO [2, num_bonds] covalent topology; got shape "
-                f"{tuple(bond_index.shape)}. A neighbour-graph edge_index [E, 2] is not "
-                "a bond list — see the bond_index vs edge_index distinction in CLAUDE.md."
+                f"{tuple(bond_index.shape)}. A neighbour-graph pair_index [E, 2] is not "
+                "a bond list — see the bond_index vs pair_index distinction in CLAUDE.md."
             )
 
         # Handle empty bonds
@@ -126,8 +126,8 @@ class BondHarmonic(BasePotential):
         bond_lengths = torch.norm(bond_vec, dim=-1)  # [num_bonds]
 
         # Look up parameters for each bond
-        k_bonds = self.k[bond_types]  # [num_bonds]
-        r0_bonds = self.r0[bond_types]  # [num_bonds]
+        k_bonds = self.rows("k", kwargs, bond_types)  # [num_bonds]
+        r0_bonds = self.rows("r0", kwargs, bond_types)  # [num_bonds]
 
         # Compute harmonic energy: E = 0.5 * k * (r - r0)^2
         displacement = bond_lengths - r0_bonds
@@ -178,8 +178,8 @@ class BondHarmonic(BasePotential):
         pos_j = pos[bond_index[1]]
         bond_vec = pos_j - pos_i
         bond_lengths = torch.norm(bond_vec, dim=-1)
-        k_bonds = self.k[bond_types]
-        r0_bonds = self.r0[bond_types]
+        k_bonds = self.rows("k", kwargs, bond_types)
+        r0_bonds = self.rows("r0", kwargs, bond_types)
         displacement = bond_lengths - r0_bonds
         energy_per_bond = 0.5 * k_bonds * displacement**2
 

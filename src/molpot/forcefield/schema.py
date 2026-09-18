@@ -231,9 +231,8 @@ class PotentialMeta:
             energy_formula="sum_m (k_m / s) * [1 + cos(n_m * phi - gamma_m)]",
             params=(
                 ParamSpec("k", "[n, n_terms]", "kcal/mol", "barrier heights"),
-                ParamSpec("periodicity", "[n_terms]", "1", "integer periods"),
+                ParamSpec("periodicity", "[n, n_terms]", "1", "integer periods"),
                 ParamSpec("phase", "[n, n_terms]", "rad", "phase offsets"),
-                ParamSpec("idivf", "[n]", "1", "AMBER idivf scale"),
             ),
             contract=InteractionContract(
                 inputs=(
@@ -256,9 +255,8 @@ class PotentialMeta:
             energy_formula="sum_m (k_m / s) * [1 + cos(n_m * phi - gamma_m)]",
             params=(
                 ParamSpec("k", "[n, n_terms]", "kcal/mol", "Fourier amplitudes"),
-                ParamSpec("periodicity", "[n_terms]", "1", "integer periods"),
+                ParamSpec("periodicity", "[n, n_terms]", "1", "integer periods"),
                 ParamSpec("phase", "[n, n_terms]", "rad", "phase offsets"),
-                ParamSpec("idivf", "[n]", "1", "scale"),
             ),
             contract=InteractionContract(
                 inputs=(
@@ -306,9 +304,8 @@ class PotentialMeta:
             energy_formula="sum_m (k_m / s) * [1 + cos(n_m * chi - gamma_m)]",
             params=(
                 ParamSpec("k", "[n, n_terms]", "kcal/mol", "barrier heights"),
-                ParamSpec("periodicity", "[n_terms]", "1", "integer periods"),
+                ParamSpec("periodicity", "[n, n_terms]", "1", "integer periods"),
                 ParamSpec("phase", "[n, n_terms]", "rad", "phase offsets"),
-                ParamSpec("idivf", "[n]", "1", "scale"),
             ),
             contract=InteractionContract(
                 # Improper center is atomi (molnex column convention).
@@ -385,7 +382,7 @@ class PotentialMeta:
             name="coulomb",
             index_arity=2,
             energy_formula="ke * qi*qj/r with 1-2/1-3/1-4 scales",
-            params=(ParamSpec("q", "[n_atoms]", "e", "partial charges on atoms"),),
+            params=(ParamSpec("charge", "[n_atoms]", "e", "partial charges on atoms"),),
             # The seven the nonbonded record resolves, plus ``prefactor``:
             # ``k_e`` is a unit-system constant rather than a nonbonded
             # *method*, so it has no field on the record, but
@@ -402,7 +399,7 @@ class PotentialMeta:
                 "prefactor",
             ),
             contract=InteractionContract(
-                inputs=("atoms.pos", "atoms.q"),
+                inputs=("atoms.pos", "atoms.charge"),
                 # EWALD is a *policy* label, not the solver that runs: this one
                 # style is truncated at a hard cutoff under open boundaries and
                 # lattice-summed under a cell. Which solver actually ran (open

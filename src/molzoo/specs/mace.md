@@ -22,7 +22,7 @@ not a tutorial; use the MolZoo user guide for narrative and worked examples.
 | `molzoo.mace.variants.MACEMatpes` | Thin `MACEPotential` alias for the MatPES/MP weights; see `mace_matpes.md` |
 | `molzoo.mace.checkpoint.CheckpointRemap` | Official-weight key remap (`MATPES_REMAP` / `OMOL_REMAP` presets) |
 | `molpot.composition` / heads / derivation | Energy readout, forces, composition |
-| `molix.batch.NeighborList` | Cutoff graph construction |
+| `molix.data.NeighborList` | Cutoff graph construction |
 
 ## 1. Scope
 
@@ -51,9 +51,9 @@ for the full-model path).
 | Direction | TensorDict path / kwarg | Shape | Dtype | Contract |
 |-----------|-------------------------|-------|-------|----------|
 | In | `("atoms", "Z")` or `Z=` | `(N,)` | int64 | Atomic numbers |
-| In | `("edges", "edge_index")` or `edge_index=` | `(E, 2)` | int64 | Col 0 = source, col 1 = target |
-| In | `("edges", "edge_diff")` or `edge_diff=` | `(E, 3)` | float | `pos[target] - pos[source]` |
-| In | `("edges", "edge_dist")` or `edge_dist=` | `(E,)` | float | `‖edge_diff‖` |
+| In | `("pairs", "pair_index")` or `edge_index=` | `(E, 2)` | int64 | Col 0 = source, col 1 = target |
+| In | `("pairs", "pair_diff")` or `edge_diff=` | `(E, 3)` | float | `pos[target] - pos[source]` |
+| In | `("pairs", "pair_dist")` or `edge_dist=` | `(E,)` | float | `‖edge_diff‖` |
 
 ### 2.2 Outputs
 
@@ -141,7 +141,7 @@ No dedicated `bench_mace` yet (tracked as perf work queue).
 
 | Concern | Owner | Contract |
 |---------|-------|----------|
-| Neighbor list | `molix.batch.NeighborList` | cutoff graph, edge convention |
+| Neighbor list | `molix.data.NeighborList` | cutoff graph, edge convention |
 | Encoder features | `molzoo.mace.research.MACE` | this spec |
 | Energy / force | `molpot` or `molzoo.mace.potential.MACEPotential` | not this module |
 | Foundation-block reuse | `molrep.interaction.mace` / `molrep.readout.mace` / `molrep.embedding.mace` | MACE-only blocks; owned by `molrep`, not here |

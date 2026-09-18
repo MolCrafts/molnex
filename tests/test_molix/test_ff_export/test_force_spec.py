@@ -18,7 +18,7 @@ class TestForceSpec:
                     "parameters": [{"type_index": 0, "k": 41840.0, "r0": 0.15}],
                 }
             ],
-            scaling={"scale_q_14": 5.0 / 6.0, "scale_lj_14": 0.5},
+            scaling={"scale_charge_14": 5.0 / 6.0, "scale_lj_14": 0.5},
             metadata={"unit_system_source": "class_i_canonical"},
         )
         d = spec.to_dict()
@@ -54,7 +54,7 @@ class TestForceSpec:
                     ],
                 }
             ],
-            scaling={"scale_q_14": 5.0 / 6.0, "scale_lj_14": 0.5},
+            scaling={"scale_charge_14": 5.0 / 6.0, "scale_lj_14": 0.5},
             metadata={"note": "roundtrip"},
         )
         restored = ForceSpec.from_dict(original.to_dict())

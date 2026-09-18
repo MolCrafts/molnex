@@ -51,7 +51,7 @@ class TestDipoleHead:
         head = _make_head("ac_bc")
 
         pos = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float64)
-        edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+        pair_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
         out = head(
             pos=pos,
             atom_batch=torch.zeros(2, dtype=torch.long),
@@ -59,8 +59,8 @@ class TestDipoleHead:
             node_scalars=torch.ones(2, 4, dtype=torch.float64),
             edge_scalars=torch.ones(2, 3, dtype=torch.float64),
             edge_vectors=torch.ones(2, 3, 2, dtype=torch.float64),
-            edge_index=edge_index,
-            edge_diff=pos[edge_index[:, 1]] - pos[edge_index[:, 0]],
+            pair_index=pair_index,
+            pair_diff=pos[pair_index[:, 1]] - pos[pair_index[:, 0]],
         )
 
         assert out["dipole"].shape == (1, 3)

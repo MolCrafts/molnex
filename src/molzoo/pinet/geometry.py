@@ -29,9 +29,14 @@ def edge_bond_diff(edges, pos: torch.Tensor, edge_index: torch.Tensor) -> torch.
     """Source→target edge displacement, PBC-correct and differentiable.
 
     Open systems: recompute ``pos[target] - pos[source]`` so forces flow to ``pos``.
-    Periodic systems: use the neighbour list's minimum-image ``edge_diff`` value
-    but route the gradient through the raw displacement via a straight-through
-    term — exact, because ``∂(imaged diff)/∂pos = ∂raw/∂pos``.
+    Periodic systems, frozen list: use the neighbour list's minimum-image
+    ``edge_diff`` value but route the gradient through the raw displacement via
+    a straight-through term — exact, because ``∂(imaged diff)/∂pos = ∂raw/∂pos``.
+    Periodic systems, live geometry: an ``edge_diff`` that requires grad was
+    rebuilt from the position leaf by the derivative head (and, under a
+    virial head, strained with the cell) and is returned as is — a
+    straight-through term would add a second, unimaged ``∂/∂ε``. Same rule as
+    :func:`molzoo.mace.geometry.edge_vectors`.
 
     Args:
         edges: The batch's ``edges`` sub-TensorDict (may carry ``edge_diff``).
@@ -42,8 +47,10 @@ def edge_bond_diff(edges, pos: torch.Tensor, edge_index: torch.Tensor) -> torch.
         Edge displacement ``(E, 3)`` with periodic-correct value and exact gradient.
     """
     raw = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    if "edge_diff" in edges.keys():
-        # Detach the supplied value so gradient always flows solely through
-        # ``raw`` (never double-counts a live supplied tensor).
-        return edges["edge_diff"].detach() + (raw - raw.detach())
+    if "pair_diff" in edges.keys():
+        supplied = edges["pair_diff"]
+        if supplied.requires_grad:
+            return supplied
+        # Frozen neighbour-list buffer: value from the image, ``∂/∂pos`` from raw.
+        return supplied.detach() + (raw - raw.detach())
     return raw

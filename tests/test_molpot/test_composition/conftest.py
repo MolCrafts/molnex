@@ -14,7 +14,7 @@ Layout decisions:
   finite-difference tests, which call ``sonata`` 50+ times).
 * Float64 precision is set inside the fixture body (``config.ftype =
   float64``) and restored at teardown, so existing tests in this
-  directory (``test_sonata.py``, ``test_byteff_heads.py``,
+  directory (``test_sonata.py``, ``test_heads.py``, ``test_multihead.py``,
   ``test_composition.py``) are unaffected — the swap only happens for
   tests that depend on ``sonata_pipeline``.
 * Sample batches use deterministic seeded random positions in Å and
@@ -40,7 +40,7 @@ from molzoo import Allegro
 
 
 def _full_bidirectional_edges(offsets: list[tuple[int, int]]) -> torch.Tensor:
-    """Build a full intra-graph edge_index (no self-loops) from per-graph slices.
+    """Build a full intra-graph pair_index (no self-loops) from per-graph slices.
 
     ``offsets`` is a list of ``(start, n_atoms)`` tuples; for each tuple
     we add all ``n_atoms · (n_atoms - 1)`` directed pairs in that range.
@@ -60,16 +60,16 @@ def _make_batch_fp64(
     *,
     pos: torch.Tensor,
     Z: torch.Tensor,
-    edge_index: torch.Tensor,
+    pair_index: torch.Tensor,
     batch_idx: torch.Tensor,
     total_charge: torch.Tensor,
     cell: torch.Tensor | None = None,
 ) -> TensorDict:
     """Assemble a float64 ``TensorDict`` with per-graph ``total_charge``."""
-    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    edge_dist = edge_diff.norm(dim=-1)
+    pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]]
+    pair_dist = pair_diff.norm(dim=-1)
     n_atoms = pos.shape[0]
-    n_edges = edge_index.shape[0]
+    n_pairs = pair_index.shape[0]
     n_graphs = int(total_charge.shape[0])
 
     num_atoms = torch.zeros(n_graphs, dtype=torch.long)
@@ -85,11 +85,11 @@ def _make_batch_fp64(
 
     return TensorDict(
         atoms=TensorDict(Z=Z, pos=pos, batch=batch_idx, batch_size=[n_atoms]),
-        edges=TensorDict(
-            edge_index=edge_index,
-            edge_diff=edge_diff,
-            edge_dist=edge_dist,
-            batch_size=[n_edges],
+        pairs=TensorDict(
+            pair_index=pair_index,
+            pair_diff=pair_diff,
+            pair_dist=pair_dist,
+            batch_size=[n_pairs],
         ),
         graphs=TensorDict(**graphs_kwargs),
         batch_size=[],
@@ -179,12 +179,12 @@ def _two_graph_pos_Z(seed: int = 0) -> tuple[torch.Tensor, torch.Tensor, torch.T
 def sample_neutral_batch_open() -> TensorDict:
     """Two 4-atom graphs, no cell, total_charge = 0 per graph."""
     pos, Z, batch_idx = _two_graph_pos_Z(seed=0)
-    edge_index = _full_bidirectional_edges([(0, 4), (4, 4)])
+    pair_index = _full_bidirectional_edges([(0, 4), (4, 4)])
     total_charge = torch.zeros(2, dtype=torch.float64)
     return _make_batch_fp64(
         pos=pos,
         Z=Z,
-        edge_index=edge_index,
+        pair_index=pair_index,
         batch_idx=batch_idx,
         total_charge=total_charge,
         cell=None,
@@ -195,13 +195,13 @@ def sample_neutral_batch_open() -> TensorDict:
 def sample_neutral_batch_periodic() -> TensorDict:
     """Two 4-atom graphs, cubic cells (L = 10 Å each), total_charge = 0."""
     pos, Z, batch_idx = _two_graph_pos_Z(seed=0)
-    edge_index = _full_bidirectional_edges([(0, 4), (4, 4)])
+    pair_index = _full_bidirectional_edges([(0, 4), (4, 4)])
     total_charge = torch.zeros(2, dtype=torch.float64)
     cell = 10.0 * torch.eye(3, dtype=torch.float64).unsqueeze(0).repeat(2, 1, 1)
     return _make_batch_fp64(
         pos=pos,
         Z=Z,
-        edge_index=edge_index,
+        pair_index=pair_index,
         batch_idx=batch_idx,
         total_charge=total_charge,
         cell=cell,
@@ -219,13 +219,13 @@ def sample_charged_batch_periodic() -> TensorDict:
     the whole point of the per-graph projection contract.
     """
     pos, Z, batch_idx = _two_graph_pos_Z(seed=0)
-    edge_index = _full_bidirectional_edges([(0, 4), (4, 4)])
+    pair_index = _full_bidirectional_edges([(0, 4), (4, 4)])
     total_charge = torch.tensor([1.0, -2.0], dtype=torch.float64)
     cell = 10.0 * torch.eye(3, dtype=torch.float64).unsqueeze(0).repeat(2, 1, 1)
     return _make_batch_fp64(
         pos=pos,
         Z=Z,
-        edge_index=edge_index,
+        pair_index=pair_index,
         batch_idx=batch_idx,
         total_charge=total_charge,
         cell=cell,

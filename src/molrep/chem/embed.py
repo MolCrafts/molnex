@@ -67,6 +67,19 @@ class AtomChemEmbedding(nn.Module):
             ],
             out_dim=self.atom_dim,
         )
+        # The empty-input answer, built once. `forward` must not reach for
+        # `config.ftype`: molcfg resolves attributes through a custom
+        # `__getattribute__` that dynamo cannot trace, so a config read on a
+        # traced path is a graph break — and not a graceful one, it de-compiles
+        # the enclosing function (notes.md, compile-no-graph-breaks, 2026-09-18).
+        # The dtype is this module's own anyway: the empty result stands in for
+        # what `self.joint` would have returned. Non-persistent, so it stays out
+        # of the state dict but still follows `.to(device)` / `.to(dtype)`.
+        self.register_buffer(
+            "_no_atoms",
+            torch.zeros(0, self.atom_dim, dtype=next(self.joint.parameters()).dtype),
+            persistent=False,
+        )
 
     def forward(self, Z: torch.Tensor) -> torch.Tensor:
         """Embed atomic numbers.
@@ -79,7 +92,7 @@ class AtomChemEmbedding(nn.Module):
             ``(0, atom_dim)`` without a JointEmbedding call.
         """
         if Z.numel() == 0:
-            return Z.new_zeros((0, self.atom_dim), dtype=config.ftype)
+            return self._no_atoms
         return self.joint(Z=Z.long())
 
 

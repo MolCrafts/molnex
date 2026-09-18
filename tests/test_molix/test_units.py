@@ -2,7 +2,7 @@
 
 import pytest
 
-from molix.units import DEAD_EDGE_CUTOFF_FACTOR, units
+from molix.units import DEAD_PAIR_CUTOFF_FACTOR, units
 
 
 def test_boltzmann_pint():
@@ -18,7 +18,7 @@ def test_energy_bridge_pint():
 
 
 def test_dead_edge_factor_clears_any_cutoff_envelope():
-    assert DEAD_EDGE_CUTOFF_FACTOR > 1.0
+    assert DEAD_PAIR_CUTOFF_FACTOR > 1.0
 
 
 def test_quant_uses_pint_kb():

@@ -16,7 +16,8 @@ from typing import Any, Self
 import torch
 from molpy import ForceField as MolpyForceField
 
-from molix.batch import NeighborList, TensorFrame, as_tensor_frame
+from molix.frame import TensorFrame, as_tensor_frame
+from molix.neighbor import NeighborList
 from molpot.forcefield.potentials import PAIR_STYLE_DEFAULTS, Potentials
 from molpot.forcefield.schema import PotentialMeta
 from molpot.ir import (
@@ -41,7 +42,7 @@ from molpot.manifest import (
 )
 from molpot.potentials.vdw.lj126 import MixingRule
 
-__all__ = ["ForceField", "OPLSAAForceField", "TypeAssignment"]
+__all__ = ["ClassIForceField", "ForceField", "OPLSAAForceField", "TypeAssignment"]
 
 
 #: Model profiles :meth:`ForceField.manifest` can describe. ``"A0"`` is the
@@ -183,8 +184,8 @@ class TypeAssignment:
         atom_labels: Label of every atom type (``t1``…), in class order.
         atom_charges: Charge of every atom in ``e``, exactly the values
             :meth:`ForceField.assign_types` keyed the atom types on — the
-            field's own ``atoms`` table where it carries ``q``, else the
-            system's ``atoms.q``, else zeros (``atom_style full`` has a charge
+            field's own ``atoms`` table where it carries ``charge``, else the
+            system's ``atoms.charge``, else zeros (``atom_style full`` has a charge
             column either way, so "no charge source" is 0, not absent).
         bond_type: Class of every bond of ``system["bonds"]``.
         bond_labels: Label of every bond type (``b1``…).
@@ -241,7 +242,7 @@ class ForceField(MolpyForceField):
         nonbonded_scaling: Dimensionless 1–2 / 1–3 / 1–4 factors the nonbonded
             terms apply to pairs one, two or three covalent bonds apart (see
             :class:`~molpot.ir.NonbondedScaling`). Defaults to
-            ``NonbondedScaling()`` — the AMBER-style ``q`` 0 / 0 / 5⁄6 and
+            ``NonbondedScaling()`` — the AMBER-style ``charge`` 0 / 0 / 5⁄6 and
             ``lj`` 0 / 0 / 0.5 — **not** to "no scaling"; a product form with
             different conventions passes its own, as
             :class:`OPLSAAForceField` does.
@@ -293,7 +294,7 @@ class ForceField(MolpyForceField):
         time means the two can never be out of step, including after
         :meth:`clone`.
 
-        Only the two kinds molpy has a slot for — ``lj`` and ``q`` (its
+        Only the two kinds molpy has a slot for — ``lj`` and ``charge`` (its
         ``coul``) — are mirrored; a kind a later model adds keeps living in
         :class:`~molpot.forcefield.ExclusionTable` alone, since LAMMPS has
         nowhere to put it either.
@@ -302,7 +303,7 @@ class ForceField(MolpyForceField):
 
     @nonbonded_scaling.setter
     def nonbonded_scaling(self, scaling: NonbondedScaling) -> None:
-        self.set_special_bonds(list(scaling.triple("lj")), list(scaling.triple("q")))
+        self.set_special_bonds(list(scaling.triple("lj")), list(scaling.triple("charge")))
 
     def set_special_bonds(self, lj: Any, coul: Any) -> None:
         """Set molpy's exclusion triples **and** this container's scaling, together.
@@ -322,7 +323,7 @@ class ForceField(MolpyForceField):
         method, and a caller reaching for molpy's own spelling gets the molnex
         side updated too.
 
-        Kinds other than ``lj`` and ``q`` are preserved as they were. molpy has
+        Kinds other than ``lj`` and ``charge`` are preserved as they were. molpy has
         exactly two slots and LAMMPS exactly two classes, so a kind a later
         model declares (``induced`` for a polarizable field) has nowhere to go
         on either side and keeps living in the exclusion table alone — it must
@@ -330,7 +331,7 @@ class ForceField(MolpyForceField):
 
         Args:
             lj: Length-3 ``(1-2, 1-3, 1-4)`` Lennard-Jones scales.
-            coul: Length-3 ``(1-2, 1-3, 1-4)`` Coulomb scales — molnex's ``q``
+            coul: Length-3 ``(1-2, 1-3, 1-4)`` Coulomb scales — molnex's ``charge``
                 kind under molpy's ``coul`` name.
 
         Raises:
@@ -347,7 +348,7 @@ class ForceField(MolpyForceField):
             else {}
         )
         scales["lj"] = ExclusionScales(*(float(x) for x in lj))
-        scales["q"] = ExclusionScales(*(float(x) for x in coul))
+        scales["charge"] = ExclusionScales(*(float(x) for x in coul))
         self._nonbonded_scaling = NonbondedScaling(**scales)
 
     def def_atomstyle(self, name: str = "full") -> Self:
@@ -568,7 +569,7 @@ class ForceField(MolpyForceField):
         not all live in one place: the assembled :class:`Potentials` registers
         the bonded tables as buffers (so ``.to(dtype)`` reaches those), while
         the per-atom nonbonded ones — ``atoms.epsilon`` / ``atoms.sigma`` /
-        ``atoms.q`` — are read live off this container on every evaluation and
+        ``atoms.charge`` — are read live off this container on every evaluation and
         no module cast can see them. This method is the container's half:
         restate every table, then assemble. Both halves together are what
         ``MD(dtype, potential_dtype=…)`` means by evaluating a potential at a
@@ -635,9 +636,9 @@ class ForceField(MolpyForceField):
         return Potentials(self, **kwargs)
 
     def neighbor_list(self, *, pbc: bool = False, max_num_pairs: int = 512) -> NeighborList:
-        """The :class:`~molix.batch.NeighborList` this field is priced against (F21).
+        """The :class:`~molix.data.NeighborList` this field is priced against (F21).
 
-        Since ``composable-a0-03b`` molpot consumes a placed ``edges`` namespace
+        Since ``composable-a0-03b`` molpot consumes a placed ``pairs`` namespace
         and never enumerates one: the live pair set of every nonbonded term *is*
         whatever list the batch carries. Which radius that list has to reach is
         therefore not the caller's taste but this field's identity — the largest
@@ -690,13 +691,13 @@ class ForceField(MolpyForceField):
         its force field does not run at.
 
         **What this list does not carry.**
-        :meth:`molix.batch.NeighborList.execute` writes ``edges.edge_index``,
-        ``edges.edge_diff`` and ``edges.edge_dist`` — no ``edges.shifts``, the
+        :meth:`molix.data.NeighborList.execute` writes ``edges.pair_index``,
+        ``edges.pair_diff`` and ``edges.pair_dist`` — no ``edges.shifts``, the
         per-pair lattice remainder in Å. Energies and forces are exact without
-        it, but :meth:`Potentials.calc_energy_forces_virial` refuses a batch
-        under a cell that has none, because the remainder it would otherwise
-        rebuild is a detached constant that carries no lattice strain (ledger
-        finding **F13**). A run that needs the virial builds its list with
+        it, but :meth:`Potentials.energy` refuses a batch under a strain
+        variable (a virial) that has none, because the remainder it would
+        otherwise rebuild is a detached constant that carries no lattice
+        strain (ledger finding **F13**). A run that needs the virial builds its list with
         :class:`molix.md.NeighborList`, which writes ``shifts``.
 
         Args:
@@ -710,7 +711,7 @@ class ForceField(MolpyForceField):
 
         Returns:
             The list, at ``cutoff`` in Å and ``symmetry=True``, ready to mount
-            as a :class:`~molix.batch.task.BatchTask` (``DataModule(...,
+            as a :class:`~molix.data.task.BatchTask` (``DataModule(...,
             batch_tasks=[ff.neighbor_list(), TotalCharge()])``) or to
             ``execute`` on a batch at a collate site that bypasses one.
 
@@ -837,11 +838,11 @@ class ForceField(MolpyForceField):
 
         Args:
             system: Post-collate nested batch, read through its typed view
-                (:func:`~molix.batch.as_tensor_frame`), so a
-                ``TensorDict``, a :class:`~molix.batch.TensorFrame` and a
+                (:func:`~molix.data.as_tensor_frame`), so a
+                ``TensorDict``, a :class:`~molix.data.TensorFrame` and a
                 nested mapping of the namespaces are one system. Read here:
-                ``atoms.pos`` ``(N, 3)`` in Å — only its length — ``atoms.q``
-                in units of the elementary charge ``e`` when no ``q`` parameter
+                ``atoms.pos`` ``(N, 3)`` in Å — only its length — ``atoms.charge``
+                in units of the elementary charge ``e`` when no ``charge`` parameter
                 table is filled, and the bonded namespaces ``bonds`` /
                 ``angles`` / ``propers`` (:meth:`_arity`, which takes the
                 collate's ``bonds.bond_index`` COO as readily as ``atomi`` …
@@ -1011,7 +1012,6 @@ class ForceField(MolpyForceField):
                     k=ip["k"],
                     periodicity=ip["periodicity"],
                     phase=ip["phase"],
-                    idivf=ip["idivf"],
                 )
 
         lj_bag = None
@@ -1020,9 +1020,9 @@ class ForceField(MolpyForceField):
         if atoms is not None:
             if "epsilon" in atoms and "sigma" in atoms:
                 lj_bag = LJBag(epsilon=atoms["epsilon"], sigma=atoms["sigma"])
-            q = atoms.get("q")
+            q = atoms.get("charge")
             if q is not None:
-                charge_bag = ChargeBag(q=q)
+                charge_bag = ChargeBag(charge=q)
 
         return PotentialIR(
             bonds=bonds_bag,
@@ -1145,7 +1145,7 @@ class ForceField(MolpyForceField):
         What the manifest says about electrostatics is limited to what a
         container can know: the multipole order (``0`` — point charges) and the
         permanent exclusion scaling. A ``pair:coulomb`` style is not a charge
-        model, so it constrains nothing and runs no solve; ``atoms.q`` may
+        model, so it constrains nothing and runs no solve; ``atoms.charge`` may
         equally have been read from a file. The constraint and the solver come
         from :meth:`AtomicChargeModel.electrostatics_record
         <molpot.charge.AtomicChargeModel.electrostatics_record>` and are
@@ -1226,21 +1226,20 @@ class ForceField(MolpyForceField):
             phase = torch.zeros(n, 4, device=device, dtype=dtype)
             phase[:, 1] = math.pi
             phase[:, 3] = math.pi
-            periodicity = torch.tensor([1, 2, 3, 4], device=device, dtype=torch.long)
-            idivf = pp.get("idivf", torch.ones(n, device=device, dtype=dtype))
-            return ProperTorsionBag(k=k, periodicity=periodicity, phase=phase, idivf=idivf)
+            periodicity = (
+                torch.tensor([1, 2, 3, 4], device=device, dtype=torch.long)
+                .expand(n, 4)
+                .contiguous()
+            )
+            return ProperTorsionBag(k=k, periodicity=periodicity, phase=phase)
 
         pp = ProperTorsionBag._cosine_fields(pp)
         if "k" not in pp:
             raise ValueError("propers params need 'k', cartesian 'a'/'b', or OPLS 'k1..k4'")
-        idivf = pp.get("idivf")
-        if idivf is None:
-            idivf = torch.ones(pp["k"].shape[0], device=pp["k"].device, dtype=pp["k"].dtype)
         return ProperTorsionBag(
             k=pp["k"],
             periodicity=pp["periodicity"],
             phase=pp["phase"],
-            idivf=idivf,
         )
 
     def _atom_params(
@@ -1304,9 +1303,18 @@ class ForceField(MolpyForceField):
     def _proper_params(self, count: int) -> list[dict[str, float]]:
         """``DihedralStyle.def_type`` parameters of every proper torsion.
 
-        ``c1``…``c4`` for the OPLS ``k1``…``k4`` table, and the first cosine
-        amplitude ``k`` otherwise — the same two spellings :meth:`_realize_propers`
-        registers, since the type key is defined as what would be registered.
+        The canonical spelling on both sides: ``k1``…``k4`` for an OPLS table,
+        and the per-term ``k{m}`` / ``periodicity{m}`` / ``phase{m}`` triples of
+        spec ff-params-01 for a general periodic table — the same spellings
+        :meth:`_realize_propers` registers, since the type key is defined as
+        what would be registered. This used to translate into molpy's ``c1``…
+        ``c4``, which the molrs OPLS kernel does not read: every torsion of a
+        realized field then evaluated to zero, in silence (spec ff-params-01).
+
+        A periodic table used to emit the first amplitude alone, under the bare
+        name ``k``. The molrs kernel requires the multiplicity with it, so a
+        realized ``ClassIForceField`` could not be built into potentials at all,
+        and every term past the first was dropped on the floor.
         """
         pp = self.params("propers")
         if self.dihedral_style() is None or pp is None:
@@ -1314,18 +1322,27 @@ class ForceField(MolpyForceField):
         if "k1" in pp:
             return [
                 {
-                    "c1": float(pp["k1"][n].item()),
-                    "c2": float(pp["k2"][n].item()),
-                    "c3": float(pp["k3"][n].item()),
-                    "c4": float(pp["k4"][n].item()),
+                    "k1": float(pp["k1"][n].item()),
+                    "k2": float(pp["k2"][n].item()),
+                    "k3": float(pp["k3"][n].item()),
+                    "k4": float(pp["k4"][n].item()),
                 }
                 for n in range(count)
             ]
-        k = pp["k"]
-        return [
-            {"k": float(k[n].reshape(-1)[0].item()) if k.ndim == 1 else float(k[n, 0].item())}
-            for n in range(count)
-        ]
+        # Cartesian ``(a, b)`` is the fit's interior form and a shared
+        # periodicity row is legal: :meth:`_propers_to_ir` is the one place that
+        # converts and broadcasts, so a realized field and its IR cannot disagree.
+        bag = self._propers_to_ir(pp)
+        n_terms = bag.k.shape[1]
+        out: list[dict[str, float]] = []
+        for n in range(count):
+            terms: dict[str, float] = {}
+            for m in range(n_terms):
+                terms[f"k{m + 1}"] = float(bag.k[n, m].item())
+                terms[f"periodicity{m + 1}"] = float(bag.periodicity[n, m].item())
+                terms[f"phase{m + 1}"] = float(bag.phase[n, m].item())
+            out.append(terms)
+        return out
 
     def _realize_bonds(
         self, frame: TensorFrame, atom_types: list[Any], types: TypeAssignment
@@ -1423,7 +1440,7 @@ class ForceField(MolpyForceField):
         """One leaf of the typed view, refused unless it is a tensor.
 
         Args:
-            frame: The batch's typed view (:func:`~molix.batch.as_tensor_frame`).
+            frame: The batch's typed view (:func:`~molix.data.as_tensor_frame`).
             keys: The leaf's path, e.g. ``("atoms", "pos")``.
 
         Returns:
@@ -1443,9 +1460,9 @@ class ForceField(MolpyForceField):
 
         ``bonds`` has **two** spellings on a batch, and both are read here for
         the same reason :meth:`~molpot.forcefield.potentials.Potentials._bond_index`
-        reads both: :func:`~molix.batch.collate.collate_molecules` writes the
+        reads both: :func:`~molix.data.collate.collate_molecules` writes the
         schema's ``(2, N)`` COO ``bond_index`` — whose shape is the anti-alias
-        guard against ``edge_index`` — while a caller assembling the namespace
+        guard against ``pair_index`` — while a caller assembling the namespace
         by hand writes ``atomi`` / ``atomj`` columns, as every valence namespace
         does. Reading only the columns made every Frame-collated system look
         like a system with no bonds at all, which types and exports a deck whose
@@ -1465,9 +1482,9 @@ class ForceField(MolpyForceField):
             KeyError: The namespace is present but carries neither a usable
                 index block nor the columns its arity needs.
             ValueError: ``bonds.bond_index`` is not the schema's ``(arity, N)``
-                COO. A cutoff neighbour list's ``(E, 2)`` ``edge_index`` is the
+                COO. A cutoff neighbour list's ``(E, 2)`` ``pair_index`` is the
                 shape this catches, and the whole reason the two differ
-                (CLAUDE.md § edge_index vs bond_index): read as bonds it would
+                (CLAUDE.md § pair_index vs bond_index): read as bonds it would
                 type and export a molecule that is bonded by proximity.
         """
         if ns not in frame.keys():
@@ -1503,7 +1520,7 @@ class ForceField(MolpyForceField):
     def _charge_list(self, frame: TensorFrame, n_atoms: int) -> list[float] | None:
         """Per-atom charge in ``e``, in one fixed order of precedence, or ``None``.
 
-        The field's own ``atoms`` table wins over the system's ``atoms.q``
+        The field's own ``atoms`` table wins over the system's ``atoms.charge``
         column, because a trained or freshly assigned charge lives on the field
         and the batch may still carry the charges it was read from disk with.
         ``None`` means neither source exists — which :meth:`assign_types` turns
@@ -1518,10 +1535,10 @@ class ForceField(MolpyForceField):
         the charges its types were condensed by.
         """
         atoms = self.params("atoms")
-        if atoms is not None and "q" in atoms:
-            return [float(x) for x in atoms["q"].detach().cpu().reshape(-1).tolist()]
-        if "atoms" in frame.keys() and "q" in frame.atoms.keys():
-            q = frame.atoms["q"]
+        if atoms is not None and "charge" in atoms:
+            return [float(x) for x in atoms["charge"].detach().cpu().reshape(-1).tolist()]
+        if "atoms" in frame.keys() and "charge" in frame.atoms.keys():
+            q = frame.atoms["charge"]
             return [float(x) for x in q.detach().cpu().reshape(-1).tolist()]
         return None
 
@@ -1532,6 +1549,49 @@ class ForceField(MolpyForceField):
             f"{type(self).__name__}(name={self.name!r}, units={self.units!r}, "
             f"styles=[{styles}], params=[{filled}])"
         )
+
+
+class ClassIForceField(ForceField):
+    """A general Class-I container: the diagonal forms, no vendor dialect.
+
+    Harmonic bonds and angles, the **general periodic torsion** for propers and
+    impropers, Lennard-Jones 12-6 and Coulomb. This is the shape a *fitted*
+    field takes: the torsion is the full cosine series ``Σ_m k_m [1 + cos(n_m φ
+    − γ_m)]`` with its multiplicities and phases free per type, so an AMBER or
+    CHARMM torsion fits as naturally as an OPLS one. OPLS-AA is the special
+    case where every type carries ``n = 1,2,3,4`` and ``γ = 0, π, 0, π``; it is
+    :class:`OPLSAAForceField`, a named product, and the exporters detect that
+    manifold and write ``dihedral_style opls`` when it holds (spec
+    ff-params-01 § 5).
+
+    Choosing this over the named product is what keeps a learned field from
+    being born inside one vendor's functional form.
+
+    Args:
+        name: Force-field name.
+        units: Unit set passed to molpy (default ``"real"``).
+        nonbonded_scaling: Dimensionless 1-2 / 1-3 / 1-4 scales. No default is
+            invented here — the scales are part of the parameterisation being
+            fitted, so the caller states them.
+        mixing: Lennard-Jones combination rule for ``pair:lj/cut``.
+    """
+
+    def __init__(
+        self,
+        name: str = "class-i",
+        units: str = "real",
+        *,
+        nonbonded_scaling: NonbondedScaling | None = None,
+        mixing: str = "lorentz-berthelot",
+    ) -> None:
+        super().__init__(name, units, nonbonded_scaling=nonbonded_scaling)
+        self.def_atomstyle("full")
+        self.def_bondstyle("harmonic")
+        self.def_anglestyle("harmonic")
+        self.def_dihedralstyle("periodic")
+        self.def_improperstyle("periodic")
+        self.def_pairstyle("lj/cut", mixing=mixing)
+        self.def_pairstyle("coulomb")
 
 
 class OPLSAAForceField(ForceField):
@@ -1584,7 +1644,7 @@ class OPLSAAForceField(ForceField):
     ) -> None:
         if nonbonded_scaling is None:
             nonbonded_scaling = NonbondedScaling(
-                q=ExclusionScales(0.0, 0.0, 0.5),
+                charge=ExclusionScales(0.0, 0.0, 0.5),
                 lj=ExclusionScales(0.0, 0.0, 0.5),
             )
         super().__init__(name, units, nonbonded_scaling=nonbonded_scaling)

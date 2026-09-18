@@ -76,11 +76,11 @@ class CombinedPotential(Potential):
         """Weighted combination of full potentials.
 
         Args:
-            dist: Interatomic distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            dist: Interatomic distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
-            Combined potential values ``(n_edges,)``.
+            Combined potential values ``(n_pairs,)``.
         """
         pots = [pot.from_dist(dist, pair_mask) for pot in self.potentials]
         pots = torch.stack(pots, dim=-1)
@@ -92,11 +92,11 @@ class CombinedPotential(Potential):
         """Weighted combination of short-range parts.
 
         Args:
-            dist: Interatomic distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            dist: Interatomic distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
-            Combined short-range values ``(n_edges,)``.
+            Combined short-range values ``(n_pairs,)``.
         """
         pots = [pot.sr_from_dist(dist, pair_mask) for pot in self.potentials]
         pots = torch.stack(pots, dim=-1)
@@ -108,11 +108,11 @@ class CombinedPotential(Potential):
         """Weighted combination of long-range real-space parts.
 
         Args:
-            dist: Interatomic distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            dist: Interatomic distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
-            Combined long-range values ``(n_edges,)``.
+            Combined long-range values ``(n_pairs,)``.
         """
         pots = [pot.lr_from_dist(dist, pair_mask) for pot in self.potentials]
         pots = torch.stack(pots, dim=-1)

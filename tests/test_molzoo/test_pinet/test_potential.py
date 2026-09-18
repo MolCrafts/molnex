@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 from tensordict import TensorDict
 
+from molix.autograd import Derivative
 from molzoo.pinet import PiNet, PiNetPotential
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -35,7 +36,7 @@ def _batch(
             forces=torch.zeros(n_atoms, 3, dtype=dtype, device=DEVICE),
             batch_size=[n_atoms],
         ),
-        edges=TensorDict(edge_index=edge_index, batch_size=[edge_index.shape[0]]),
+        pairs=TensorDict(pair_index=edge_index, batch_size=[edge_index.shape[0]]),
         graphs=TensorDict(
             num_atoms=torch.full((n_graphs,), atoms_per_graph, dtype=torch.long, device=DEVICE),
             energy=torch.zeros(n_graphs, dtype=dtype, device=DEVICE),
@@ -45,7 +46,10 @@ def _batch(
     )
 
 
-def _model(*, compute_forces: bool = True) -> PiNetPotential:
+FORCES = ("atoms.pos",)
+
+
+def _model(*, wrt: tuple[str, ...] = FORCES) -> PiNetPotential:
     torch.manual_seed(0)
     return PiNetPotential(
         atom_types=[1, 6, 7, 8],
@@ -57,7 +61,7 @@ def _model(*, compute_forces: bool = True) -> PiNetPotential:
         depth=3,
         rank=3,
         hidden_dim=16,
-        compute_forces=compute_forces,
+        wrt=wrt,
     ).to(DEVICE)
 
 
@@ -72,7 +76,7 @@ def test_energy_and_force_shapes():
         depth=2,
         rank=3,
         hidden_dim=8,
-        compute_forces=True,
+        wrt=FORCES,
     )
     n = 4
     batch = TensorDict(
@@ -82,8 +86,8 @@ def test_energy_and_force_shapes():
             batch=torch.zeros(n, dtype=torch.long),
             batch_size=[n],
         ),
-        edges=TensorDict(
-            edge_index=torch.tensor(
+        pairs=TensorDict(
+            pair_index=torch.tensor(
                 [[0, 1], [1, 0], [0, 2], [2, 0], [1, 3], [3, 1], [2, 3], [3, 2]],
                 dtype=torch.long,
             ),
@@ -97,6 +101,21 @@ def test_energy_and_force_shapes():
     assert batch["atoms", "forces"].shape == (n, 3)
 
 
+def test_derivative_exposes_the_init_fixed_op():
+    """The training step marks the leaves through ``derivative`` — the op ``forward`` runs."""
+    assert _model(wrt=FORCES).derivative.wrt == (("atoms", "pos"),)
+
+
+def test_forward_is_the_same_op_composed_outside():
+    """``wrt`` at construction and ``Derivative(model, wrt=...)`` are one code path."""
+    built_in = _model(wrt=FORCES).eval()
+    composed = Derivative(_model(wrt=()).eval(), wrt=FORCES)
+    with torch.no_grad():
+        inside = built_in(_batch())["atoms", "forces"]
+        outside = composed(_batch())["atoms", "forces"]
+    assert torch.equal(inside, outside)
+
+
 def test_encoder_kwarg_composition():
     enc = PiNet(
         atom_types=[1, 6, 7, 8],
@@ -108,20 +127,20 @@ def test_encoder_kwarg_composition():
         depth=2,
         rank=1,
     )
-    model = PiNetPotential(encoder=enc, hidden_dim=8, compute_forces=False)
+    model = PiNetPotential(encoder=enc, hidden_dim=8)
     assert model.encoder is enc
 
 
-def test_func_forces_match_autograd_reference():
-    model = _model(compute_forces=True)
+def test_forces_match_an_autograd_reference():
+    model = _model()
     model.eval()
     batch = _batch()
 
     b1 = model(batch.clone())
-    f_func = b1["atoms", "forces"].detach()
+    f_head = b1["atoms", "forces"].detach()
 
     # Energy-only model for the reference path (same architecture / weights).
-    ref_model = _model(compute_forces=False)
+    ref_model = _model(wrt=())
     ref_model.load_state_dict(
         {k: v for k, v in model.state_dict().items()},
         strict=False,
@@ -138,14 +157,14 @@ def test_func_forces_match_autograd_reference():
         energy = ref["graphs", "energy"].sum()
     f_autograd = -torch.autograd.grad(energy, pos)[0].detach()
 
-    assert f_func.shape == f_autograd.shape
-    assert torch.allclose(f_func, f_autograd, atol=1e-5, rtol=1e-5), (
-        f"max abs diff {(f_func - f_autograd).abs().max().item():.3e}"
+    assert f_head.shape == f_autograd.shape
+    assert torch.allclose(f_head, f_autograd, atol=1e-5, rtol=1e-5), (
+        f"max abs diff {(f_head - f_autograd).abs().max().item():.3e}"
     )
 
 
 def test_eval_and_train_forward_match():
-    model = _model(compute_forces=True)
+    model = _model()
     torch.manual_seed(1)
     batch = _batch()
 
@@ -159,7 +178,7 @@ def test_eval_and_train_forward_match():
 
 
 def test_force_loss_single_backward_populates_param_grads():
-    model = _model(compute_forces=True)
+    model = _model()
     model.train()
     batch = model(_batch().clone())
     batch["atoms", "forces"].pow(2).mean().backward()

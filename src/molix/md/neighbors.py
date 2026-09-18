@@ -159,7 +159,7 @@ vector (whose minimum image is the zero vector) are dropped identically.
 bin-sorted order, the kernel in upper-triangle index order. What binds is the
 *set* of ``(source, target, shift)`` triples plus the edge count: consumers
 reduce with order-independent scatter / ``index_add_`` and read the shift
-buffer positionally alongside ``edge_index``, never by index-order assumption.
+buffer positionally alongside ``pair_index``, never by index-order assumption.
 
 **Small cells degenerate gracefully.** When ``2 k_i + 1 >= n_i`` on every axis
 the stencil's residue sets cover the whole grid and the search enumerates all
@@ -201,7 +201,7 @@ References:
     source, and the stencil-completeness and ``|f_i| <= 1/2`` relations are
     derived in line above rather than taken from a text.
 
-Owning ``edges``: the bind surface
+Owning ``pairs``: the bind surface
 ----------------------------------
 
 Two entry points, two audiences, one owner. The MD hot path drives the list
@@ -211,15 +211,32 @@ caller drives it with the batch itself (:meth:`NeighborList.build` builds *and*
 binds, :meth:`NeighborList.update` again — one method with an ``isinstance``
 dispatch at the top, never an ``update_td`` / ``update_pos`` pair of twins).
 
-**The list owns ``edges`` once bound.** :meth:`NeighborList.build` writes
-``batch["edges"]`` as a ``TensorDict`` holding the live ``edge_index`` /
+**The list owns ``pairs`` once bound.** :meth:`NeighborList.build` writes
+``batch["pairs"]`` as a ``TensorDict`` holding the live ``pair_index`` /
 ``shifts`` buffers **by reference**, replacing whatever was there — including a
-precomputed ``edge_diff`` / ``edge_dist`` pair, which a potential would
+precomputed ``pair_diff`` / ``pair_dist`` pair, which a potential would
 otherwise consume straight through as a value and so freeze the PES. Because
 every rebuild is in place, that tie survives all later ``rebuild`` / ``update``
 calls with no re-binding: the potential simply sees the current neighbour set.
 It does **not** survive :meth:`NeighborList.to`, which rebinds the buffers to
 new tensors — the owner re-binds (see :meth:`~molix.md.driver.MD.to`).
+
+**The whole capacity is what is bound**, dead tail included — ``pairs`` has
+``batch_size=[capacity]`` and every consumer sees a static ``E``. That is the
+CUDA-graph contract: nothing downstream slices to the live prefix, because a
+data-dependent ``E`` is a recompile per rebuild and no graph capture at all.
+Dead rows cost nothing to price (their envelope is zero) and nothing to
+differentiate (``pos[0] - pos[0]`` cancels).
+
+**Geometry precision.** The float columns a potential reads off ``pairs`` —
+``shifts``, ``pair_diff``, ``pair_dist`` — are written at
+:attr:`NeighborList.geometry_dtype`, which defaults to the buffers' own dtype
+(then ``shifts`` *is* the buffer, by reference). ``MD(potential_dtype=…)``
+sets it to the potential's precision: the shifts are then a cast copy the list
+owns and refreshes **in place on every rebuild** (so the bind still survives
+rebuilds and nothing is cast per step), and the geometry is written at that
+dtype from the MD-dtype positions the list validates. The buffers, the cell
+and the displacement reference stay at the MD dtype throughout.
 
 Two ``NeighborList`` classes, deliberately
 -----------------------------------------
@@ -228,14 +245,14 @@ The repository holds two classes named ``NeighborList``, in different layers,
 and the collision is intentional rather than an accident awaiting cleanup:
 
 * :class:`molix.md.neighbors.NeighborList` (this one) — the **MD engine**
-  symbol: a *stateful, fixed-capacity buffer owner* holding ``edge_index
-  (capacity, 2)``, ``shifts (capacity, 3)``, ``num_edges`` and
+  symbol: a *stateful, fixed-capacity buffer owner* holding ``pair_index
+  (capacity, 2)``, ``shifts (capacity, 3)``, ``num_pairs`` and
   ``rebuild_count``, rebuilt in place so shapes never change and the force path
   stays CUDA-graph capturable. One instance per run, held by
   :class:`~molix.md.driver.MD` via :meth:`~molix.md.driver.MD.set_neighbors`.
-* :class:`molix.batch.neighbor.NeighborList` — the **batch-construction**
+* :class:`molix.neighbor.NeighborList` — the **batch-construction**
   symbol: a *stateless* transform mapping one flat sample dict to
-  ``edge_index`` / ``edge_diff`` / ``edge_dist`` and carrying a ``task_id``
+  ``pair_index`` / ``pair_diff`` / ``pair_dist`` and carrying a ``task_id``
   for cache keying. Constructed once per pipeline definition, no per-call state.
 
 They are not two variants of one concept — a per-run mutable buffer with an
@@ -260,8 +277,9 @@ from tensordict import TensorDict, TensorDictBase
 # against the raw ``molix.F.locality`` kernel would fork it. Aliased because
 # the MD buffer owner defined below is *also* named ``NeighborList`` and would
 # otherwise shadow its own dependency — the class would then call itself.
-from molix.batch.neighbor import NeighborList as NeighborListTask
-from molix.units import DEAD_EDGE_CUTOFF_FACTOR
+from molix.neighbor import NeighborList as NeighborListTask
+from molix.schema import dead_pair_shift
+from molix.units import DEAD_PAIR_CUTOFF_FACTOR
 
 #: Largest stencil half-width ``k_i`` (in bins) the binned build accepts. At the
 #: cap the Python loop runs over ``17^3 = 4913`` bin offsets; beyond it an
@@ -334,10 +352,10 @@ class NeighborStrategy(Protocol):
     these members with fixed-shape, in-place-rebuilt buffers.
 
     Attributes:
-        edge_index: Edge buffer ``(capacity, 2)`` — ``[:, 0]`` source,
+        pair_index: Edge buffer ``(capacity, 2)`` — ``[:, 0]`` source,
             ``[:, 1]`` target, per the repo edge convention.
         shifts: Periodic shift vectors ``(capacity, 3)``.
-        num_edges: Number of live edges; they occupy ``[0, num_edges)``.
+        num_pairs: Number of live edges; they occupy ``[0, num_pairs)``.
         capacity: Fixed buffer length.
         cutoff: Interaction cutoff ``r_cut`` in Angstrom — the radius the list
             guarantees *complete* between rebuilds, and the horizon a force
@@ -348,9 +366,9 @@ class NeighborStrategy(Protocol):
             the bare cutoff.
     """
 
-    edge_index: torch.Tensor
+    pair_index: torch.Tensor
     shifts: torch.Tensor
-    num_edges: int
+    num_pairs: int
     capacity: int
     cutoff: float
     skin: float
@@ -362,7 +380,7 @@ class NeighborStrategy(Protocol):
     def build(self, batch: TensorDict) -> TensorDict:
         """Rebuild at ``batch["atoms", "pos"]`` and bind the buffers into ``batch``.
 
-        Returns the same batch object, with ``batch["edges"]`` holding the
+        Returns the same batch object, with ``batch["pairs"]`` holding the
         strategy's live buffers by reference — the strategy owns that namespace
         from here on. :class:`~molix.md.driver.MD` calls this through this
         annotation at :meth:`~molix.md.driver.MD.run` and after every ``.to()``.
@@ -461,7 +479,7 @@ class NeighborList:
             ``w_i = ||a_i||`` for an orthorhombic cell), beyond which the
             minimum-image reduction silently drops pairs that lie inside the
             cutoff; if ``skin`` reaches the dead-edge padding radius
-            ``(DEAD_EDGE_CUTOFF_FACTOR - 1) * cutoff``; or if ``bin`` is
+            ``(DEAD_PAIR_CUTOFF_FACTOR - 1) * cutoff``; or if ``bin`` is
             negative or so small that the stencil half-width exceeds
             ``_MAX_STENCIL_HALF_WIDTH`` bins.
     """
@@ -508,13 +526,13 @@ class NeighborList:
                 "the kernel's sequential minimum-image reduction would silently drop pairs "
                 "inside the cutoff. Use a larger cell, a shorter cutoff, or a thinner skin."
             )
-        dead_edge_headroom = (DEAD_EDGE_CUTOFF_FACTOR - 1.0) * cutoff_f
+        dead_edge_headroom = (DEAD_PAIR_CUTOFF_FACTOR - 1.0) * cutoff_f
         if skin_f >= dead_edge_headroom:
             raise ValueError(
                 f"skin {skin_f} A reaches the dead padding edges: they sit at "
-                f"DEAD_EDGE_CUTOFF_FACTOR * cutoff = {DEAD_EDGE_CUTOFF_FACTOR} * {cutoff_f} = "
-                f"{DEAD_EDGE_CUTOFF_FACTOR * cutoff_f} A, so the skin must stay below "
-                f"(DEAD_EDGE_CUTOFF_FACTOR - 1) * cutoff = {dead_edge_headroom} A or a dead "
+                f"DEAD_PAIR_CUTOFF_FACTOR * cutoff = {DEAD_PAIR_CUTOFF_FACTOR} * {cutoff_f} = "
+                f"{DEAD_PAIR_CUTOFF_FACTOR * cutoff_f} A, so the skin must stay below "
+                f"(DEAD_PAIR_CUTOFF_FACTOR - 1) * cutoff = {dead_edge_headroom} A or a dead "
                 "edge falls inside r_build and is built as a real pair."
             )
 
@@ -551,10 +569,15 @@ class NeighborList:
         # will keep refilling the buffers (the two agree, by the equivalence).
         source, target, shifts = self._build_pairs(positions)
         self.capacity = max(1, int(math.ceil(self.capacity_factor * source.numel())))
-        self.edge_index = torch.zeros(self.capacity, 2, dtype=torch.long, device=self._device)
+        self.pair_index = torch.zeros(self.capacity, 2, dtype=torch.long, device=self._device)
         self.shifts = torch.zeros(self.capacity, 3, dtype=self._dtype, device=self._device)
+        # The precision the bound geometry is written at (``None`` = the
+        # buffers' own) and, when it differs, the cast copy of ``shifts`` that
+        # is bound instead of the buffer — refreshed in place by ``_write``.
+        self._geometry_dtype: torch.dtype | None = None
+        self._shifts_geometry: torch.Tensor | None = None
         #: Number of live edges; the dead rows are one tail behind them.
-        self.num_edges = 0
+        self.num_pairs = 0
         #: Rebuilds since construction; the initial build is not one of them.
         self.rebuild_count = 0
         #: Steps since the last build (LAMMPS ``ago``); 0 on a fresh list.
@@ -582,14 +605,61 @@ class NeighborList:
         """
         return self._r_build
 
+    @property
+    def geometry_dtype(self) -> torch.dtype:
+        """Dtype the bound ``shifts`` / ``pair_diff`` / ``pair_dist`` are written at.
+
+        The buffers' own dtype unless set otherwise. Setting it to the
+        potential's precision (``MD(potential_dtype=…)`` does, on
+        :meth:`~molix.md.driver.MD.set_neighbors`) makes the bound ``shifts``
+        a cast copy this list owns and refreshes in place on every rebuild —
+        never per step — and :meth:`_write_geometry` write the geometry at
+        that dtype. ``None`` puts it back to the buffers' dtype.
+        """
+        return self._dtype if self._geometry_dtype is None else self._geometry_dtype
+
+    @geometry_dtype.setter
+    def geometry_dtype(self, dtype: torch.dtype | None) -> None:
+        self._geometry_dtype = dtype
+        self._refresh_geometry_shifts()
+
+    def _refresh_geometry_shifts(self) -> None:
+        """Bring the bound shifts up to date with the buffer, at :attr:`geometry_dtype`.
+
+        No copy exists while the two dtypes agree — the buffer itself is
+        bound. Otherwise the copy is the **same storage across rebuilds**
+        (``copy_``, not a fresh cast), which is what keeps a batch bound before
+        a rebuild reading the rebuilt shifts; it is reallocated only when the
+        buffer's shape, device or the requested dtype changed.
+        """
+        dtype = self.geometry_dtype
+        if dtype == self.shifts.dtype:
+            self._shifts_geometry = None
+            return
+        copy = self._shifts_geometry
+        if (
+            copy is None
+            or copy.dtype != dtype
+            or copy.device != self.shifts.device
+            or copy.shape != self.shifts.shape
+        ):
+            copy = torch.empty_like(self.shifts, dtype=dtype)
+            self._shifts_geometry = copy
+        copy.copy_(self.shifts)
+
+    def _bound_shifts(self) -> torch.Tensor:
+        """The ``(capacity, 3)`` shifts a batch is bound to: the buffer, or its cast copy."""
+        copy = self._shifts_geometry
+        return self.shifts if copy is None else copy
+
     def _compute(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run the compiled kernel; returns ``(source, target, shifts)``."""
         pos = positions.detach()
-        edge_index, edge_diff, _ = self._nl.pairs(pos, self.cell.to(pos.dtype))
-        source, target = edge_index[:, 0], edge_index[:, 1]
+        pair_index, pair_diff, _ = self._nl.pairs(pos, self.cell.to(pos.dtype))
+        source, target = pair_index[:, 0], pair_index[:, 1]
         # The kernel returns minimum-image displacements; the model recomputes
         # pos[target]-pos[source] itself, so hand it the periodic remainder.
-        shifts = edge_diff - (pos[target] - pos[source])
+        shifts = pair_diff - (pos[target] - pos[source])
         return source, target, shifts
 
     def _configure_bins(self, requested: float) -> None:
@@ -761,7 +831,7 @@ class NeighborList:
             total = int(occupied.sum())
             if total == 0:
                 continue
-            # Ragged gather, the molix.batch.collate._gather_indices idiom (that
+            # Ragged gather, the molix.data.collate._gather_indices idiom (that
             # one is CPU-pinned for DataLoader workers, so it is followed, not
             # imported): counts -> segment ids -> exclusive cumsum -> row index.
             segment = torch.repeat_interleave(atoms, occupied)
@@ -786,7 +856,7 @@ class NeighborList:
             source, target, displacement = source[keep], target[keep], displacement[keep]
             sources.append(source)
             targets.append(target)
-            # Same definition as _compute's edge_diff - (pos[target] - pos[source]),
+            # Same definition as _compute's pair_diff - (pos[target] - pos[source]),
             # against the stored (unwrapped) positions.
             remainders.append(displacement - (pos[target] - pos[source]))
 
@@ -824,12 +894,8 @@ class NeighborList:
         return self._build_binned(positions, grid)
 
     def _dead_shift(self) -> torch.Tensor:
-        """A displacement long enough that every cutoff envelope evaluates to 0."""
-        return torch.tensor(
-            [DEAD_EDGE_CUTOFF_FACTOR * self.cutoff, 0.0, 0.0],
-            dtype=self._dtype,
-            device=self._device,
-        )
+        """The schema's dead-edge displacement: every cutoff envelope evaluates to 0 on it."""
+        return dead_pair_shift(self.cutoff, dtype=self._dtype, device=self._device)
 
     def _write(self, source: torch.Tensor, target: torch.Tensor, shifts: torch.Tensor) -> None:
         """Fill buffers in place: live edges first, dead padding behind them."""
@@ -840,31 +906,37 @@ class NeighborList:
                 f"capacity_factor (currently {self.capacity_factor})."
             )
         # In-place so the compiled graph keeps seeing the same tensors.
-        self.edge_index[:n, 0] = source
-        self.edge_index[:n, 1] = target
+        self.pair_index[:n, 0] = source
+        self.pair_index[:n, 1] = target
         self.shifts[:n] = shifts.to(self._dtype)
-        self.edge_index[n:] = 0
+        self.pair_index[n:] = 0
         self.shifts[n:] = self._dead_shift()
-        self.num_edges = n
+        self.num_pairs = n
+        self._refresh_geometry_shifts()
 
     def _write_geometry(self, batch: TensorDict, pos: torch.Tensor) -> None:
-        """Write live MIC ``edge_diff`` / ``edge_dist`` from ``pos`` (Å).
+        """Write MIC ``pair_diff`` / ``pair_dist`` over the whole capacity from ``pos`` (Å).
 
-        ``edge_diff = pos[target] - pos[source] + shifts``. ``pos`` is not
-        detached so ``edge_diff`` stays on the position autograd graph.
+        ``pair_diff = pos[target] - pos[source] + shifts`` at
+        :attr:`geometry_dtype` — the one place the MD-dtype positions meet the
+        potential's precision on the edge side; the positions are cast here
+        (a no-op when the two agree) and never written back. ``pos`` is not
+        detached so ``pair_diff`` stays on the position autograd graph.
         ``shifts`` is the constant lattice remainder from the last connectivity
-        build.
+        build; dead rows are ``pos[0] - pos[0]`` plus the dead-edge shift.
 
         Args:
-            batch: Working system TensorDict with an ``edges`` namespace.
-            pos: Live positions ``(N, 3)`` in Å — the same tensor as
-                ``batch["atoms", "pos"]``.
+            batch: Working system TensorDict with an ``pairs`` namespace.
+            pos: Live positions ``(N, 3)`` in Å at the buffer dtype — the same
+                tensor as ``batch["atoms", "pos"]``.
         """
-        source = self.edge_index[:, 0]
-        target = self.edge_index[:, 1]
-        edge_diff = pos[target] - pos[source] + self.shifts
-        batch["edges", "edge_diff"] = edge_diff
-        batch["edges", "edge_dist"] = edge_diff.norm(dim=-1)
+        shifts = self._bound_shifts()
+        p = pos if pos.dtype == shifts.dtype else pos.to(shifts.dtype)
+        source = self.pair_index[:, 0]
+        target = self.pair_index[:, 1]
+        pair_diff = p[target] - p[source] + shifts
+        batch["pairs", "pair_diff"] = pair_diff
+        batch["pairs", "pair_dist"] = pair_diff.norm(dim=-1)
 
     def _hold(self, positions: torch.Tensor) -> None:
         """Adopt ``positions`` as the reference of the current build.
@@ -1037,7 +1109,8 @@ class NeighborList:
                 "below the neighbour-list cutoff. Use a larger starting cell "
                 "or a shorter cutoff."
             )
-        self.shifts[: self.num_edges].mul_(mu)
+        self.shifts[: self.num_pairs].mul_(mu)
+        self._refresh_geometry_shifts()
         self._x_hold.mul_(mu)
         self.cell = cell
         self._wrap_guard_sq = half**2
@@ -1081,18 +1154,20 @@ class NeighborList:
 
         The TensorDict-side forced build: it validates that ``batch`` describes
         the system this list was constructed for, rebuilds at
-        ``batch["atoms", "pos"]`` (Angstrom), then writes ``batch["edges"]`` as
-        a ``TensorDict`` of :attr:`edge_index` ``(capacity, 2)`` and
-        :attr:`shifts` ``(capacity, 3)`` held **by reference**, at
-        ``batch_size=[capacity]``. Every later in-place :meth:`rebuild` /
-        :meth:`update` is therefore visible to whatever reads that batch, with
-        no shape change and no re-binding — which is what keeps a compiled or
-        graph-captured force path valid across a rebuild.
+        ``batch["atoms", "pos"]`` (Angstrom), then writes ``batch["pairs"]`` as
+        a ``TensorDict`` of :attr:`pair_index` ``(capacity, 2)`` and
+        :attr:`shifts` ``(capacity, 3)`` held **by reference** (or, under a
+        :attr:`geometry_dtype` other than the buffers', the cast copy this list
+        refreshes in place on every rebuild), at ``batch_size=[capacity]``.
+        Every later in-place :meth:`rebuild` / :meth:`update` is therefore
+        visible to whatever reads that batch, with no shape change and no
+        re-binding — which is what keeps a compiled or graph-captured force
+        path valid across a rebuild.
 
-        **The list owns ``edges`` once bound.** The namespace is replaced
-        wholesale, not merged: a pre-existing ``edge_diff`` / ``edge_dist``
+        **The list owns ``pairs`` once bound.** The namespace is replaced
+        wholesale, not merged: a pre-existing ``pair_diff`` / ``pair_dist``
         pair would be consumed straight through as a *value* by a potential and
-        freeze the PES, and a surviving shorter ``edge_index`` would disagree
+        freeze the PES, and a surviving shorter ``pair_index`` would disagree
         with the capacity.
 
         This is *not* counted as a :attr:`rebuild_count` rebuild — it is a
@@ -1120,7 +1195,7 @@ class NeighborList:
                 against the constructor cell and never adopted.
 
         Returns:
-            The **same** ``batch`` object, with ``batch["edges"]`` bound.
+            The **same** ``batch`` object, with ``batch["pairs"]`` bound.
 
         Raises:
             ValueError: Per :meth:`_positions_from` — missing positions, a
@@ -1130,8 +1205,8 @@ class NeighborList:
         """
         positions = self._positions_from(batch)
         self._build_at(positions)
-        batch["edges"] = TensorDict(
-            {"edge_index": self.edge_index, "shifts": self.shifts},
+        batch["pairs"] = TensorDict(
+            {"pair_index": self.pair_index, "shifts": self._bound_shifts()},
             batch_size=[self.capacity],
         )
         self._write_geometry(batch, positions)
@@ -1228,7 +1303,7 @@ class NeighborList:
 
         Warning:
             **This severs any :meth:`build` binding.** The move rebinds
-            :attr:`edge_index` / :attr:`shifts` to *new* tensors, so a batch
+            :attr:`pair_index` / :attr:`shifts` to *new* tensors, so a batch
             bound beforehand keeps pointing at the old ones and would freeze at
             the pre-cast neighbour set. Re-binding from inside ``to`` is
             deliberately not done — it would make the list hold a reference to
@@ -1242,7 +1317,7 @@ class NeighborList:
             device, dtype = None, device
         if device is not None:
             self._device = torch.device(device)
-            self.edge_index = self.edge_index.to(self._device)
+            self.pair_index = self.pair_index.to(self._device)
             self.shifts = self.shifts.to(self._device)
             self.cell = self.cell.to(self._device)
             self._x_hold = self._x_hold.to(self._device)
@@ -1251,6 +1326,7 @@ class NeighborList:
             self.shifts = self.shifts.to(dtype)
             self.cell = self.cell.to(dtype)
             self._x_hold = self._x_hold.to(dtype)
+        self._refresh_geometry_shifts()
         if self.n_bins is not None:
             # The grid itself is a property of the cell and r_build, so only its
             # two tensors move: the stencil is integer offsets, and the inverse

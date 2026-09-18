@@ -47,7 +47,7 @@ def make_pipeline(encoder, is_edge_encoder: bool = False):
     force_deriv = ForceDerivation()
 
     def _energy_and_feats(batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
-        edge_index = batch["edges", "edge_index"]
+        edge_index = batch["pairs", "pair_index"]
         pos = batch["atoms", "pos"]
 
         recompute_edge_geometry(batch)
@@ -55,7 +55,7 @@ def make_pipeline(encoder, is_edge_encoder: bool = False):
         result = encoder(batch)
 
         if is_edge_encoder:
-            ef = result["edges", "edge_features"]
+            ef = result["pairs", "edge_features"]
             # Allegro emits a DenseNet stack of per-layer scalars in a single
             # flat ``(E, F·(L+1))`` tensor. Reshape into ``(E, L+1, F)`` so the
             # pipeline's ``LayerPooling("mean")`` reduces over the layer axis
@@ -193,8 +193,8 @@ class TestTranslationInvariance:
         t = torch.randn(3) * 10.0
 
         with torch.no_grad():
-            ref = allegro_encoder(small_molecule.clone())["edges", "edge_features"]
-            shifted = allegro_encoder(translate_graph(small_molecule, t))["edges", "edge_features"]
+            ref = allegro_encoder(small_molecule.clone())["pairs", "edge_features"]
+            shifted = allegro_encoder(translate_graph(small_molecule, t))["pairs", "edge_features"]
 
         # Tolerance is float32-ULP — `(pos+t)[j]-(pos+t)[i]` is not
         # bit-exactly `pos[j]-pos[i]` for `t ≈ 10*randn`, so the encoder
@@ -271,8 +271,8 @@ class TestRotationEquivariance:
         R = random_rotation_matrix()
 
         with torch.no_grad():
-            ref = allegro_encoder(small_molecule.clone())["edges", "edge_features"]
-            rotated = allegro_encoder(rotate_graph(small_molecule, R))["edges", "edge_features"]
+            ref = allegro_encoder(small_molecule.clone())["pairs", "edge_features"]
+            rotated = allegro_encoder(rotate_graph(small_molecule, R))["pairs", "edge_features"]
 
         assert torch.allclose(ref, rotated, atol=1e-4, rtol=1e-4)
 
@@ -378,13 +378,13 @@ class TestPermutationEquivariance:
         with torch.no_grad():
             ref_batch = small_molecule.clone()
             ref_result = allegro_encoder(ref_batch)
-            ref_features = ref_result["edges", "edge_features"]
-            ref_edges = ref_batch["edges", "edge_index"]
+            ref_features = ref_result["pairs", "edge_features"]
+            ref_edges = ref_batch["pairs", "pair_index"]
 
             perm_batch = permute_graph(small_molecule, perm)
             perm_result = allegro_encoder(perm_batch)
-            perm_features = perm_result["edges", "edge_features"]
-            perm_edges = perm_batch["edges", "edge_index"]
+            perm_features = perm_result["pairs", "edge_features"]
+            perm_edges = perm_batch["pairs", "pair_index"]
 
         # Build lookup: (src, dst) -> feature for both
         ref_dict = {}

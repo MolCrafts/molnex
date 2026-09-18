@@ -141,7 +141,9 @@ class TestForceFieldToIR:
             ir.propers.phase[0],
             torch.tensor([0.0, math.pi, 0.0, math.pi]),
         )
-        assert ir.propers.periodicity.tolist() == [1, 2, 3, 4]
+        # one row per type: the shared OPLS quartet is the general table's
+        # special case, broadcast at construction
+        assert ir.propers.periodicity.tolist() == [[1, 2, 3, 4]] * ir.propers.k.shape[0]
 
     def test_fourier_propers_passthrough(self):
         k = torch.tensor([[0.1, 0.2, 0.0, 0.0]])
@@ -158,7 +160,6 @@ class TestForceFieldToIR:
                     "k": k,
                     "phase": phase,
                     "periodicity": torch.tensor([1, 2, 3, 4], dtype=torch.long),
-                    "idivf": torch.ones(1),
                 }
             )
         )
@@ -173,11 +174,11 @@ class TestForceFieldToIR:
             .def_bondstyle("harmonic")
             .def_anglestyle("harmonic")
             .def_dihedralstyle("fourier")
-            .with_params(atoms={"q": torch.tensor([0.1, -0.1])})
+            .with_params(atoms={"charge": torch.tensor([0.1, -0.1])})
         )
         ir = ff.to_ir()
         assert ir.charges is not None
-        assert torch.allclose(ir.charges.q, torch.tensor([0.1, -0.1]))
+        assert torch.allclose(ir.charges.charge, torch.tensor([0.1, -0.1]))
 
     def test_is_molpy_forcefield_and_realize(self):
         from molpy import BondType
@@ -231,7 +232,6 @@ class TestForceFieldToIR:
                     "a": a,
                     "b": b,
                     "periodicity": torch.tensor([1], dtype=torch.long),
-                    "idivf": torch.ones(1, dtype=torch.float64),
                 }
             )
         )
@@ -247,7 +247,6 @@ class TestForceFieldToIR:
             "k",
             "phase",
             "periodicity",
-            "idivf",
         }
         assert not hasattr(ir.propers, "c0")
 
@@ -262,7 +261,6 @@ class TestForceFieldToIR:
                     "k": torch.tensor([[1.0]]),
                     "phase": torch.tensor([[0.0]]),
                     "periodicity": torch.tensor([1], dtype=torch.long),
-                    "idivf": torch.ones(1),
                 }
             ).to_ir()
 
@@ -285,7 +283,6 @@ class TestForceFieldToIR:
                     "a": torch.tensor([[a]], dtype=torch.float64),
                     "b": torch.tensor([[b]], dtype=torch.float64),
                     "periodicity": torch.tensor([2], dtype=torch.long),
-                    "idivf": torch.ones(1, dtype=torch.float64),
                 }
             )
         )

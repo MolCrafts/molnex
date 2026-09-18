@@ -427,7 +427,7 @@ class ModelManifest:
         filled, ``model`` the :class:`~molpot.forcefield.Parameterizer` that
         filled them, and ``charge_model`` the
         :class:`~molpot.charge.AtomicChargeModel` that solved for the partial
-        charges ``atoms.q`` (in ``e``)::
+        charges ``atoms.charge`` (in ``e``)::
 
             import dataclasses
 

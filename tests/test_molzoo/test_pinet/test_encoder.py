@@ -62,13 +62,13 @@ def test_rank_output_shapes(rank):
     enc = _encoder(rank=rank)
     out = enc(_graph())
     assert out["atoms", "node_features"].shape == (4, 2, 8)
-    assert out["edges", "i1_features"].shape == (8, 2, 8 * (rank // 2 + 1))
+    assert out["pairs", "i1_features"].shape == (8, 2, 8 * (rank // 2 + 1))
     if rank >= 3:
         assert out["atoms", "p3_features"].shape == (4, 2, 3, 8)
-        assert out["edges", "i3_features"].shape == (8, 2, 3, 8)
+        assert out["pairs", "i3_features"].shape == (8, 2, 3, 8)
     if rank >= 5:
         assert out["atoms", "p5_features"].shape == (4, 2, 5, 8)
-        assert out["edges", "i5_features"].shape == (8, 2, 5, 8)
+        assert out["pairs", "i5_features"].shape == (8, 2, 5, 8)
 
 
 @pytest.mark.parametrize("rank", [1, 3, 5])
@@ -97,11 +97,11 @@ def test_emit_property_features_off_drops_only_property_tracks(rank):
         assert torch.equal(out_lean["atoms", key], out_full["atoms", key])
 
     # Only the property-head tracks are gone.
-    assert "i1_features" not in out_lean["edges"].keys()
+    assert "i1_features" not in out_lean["pairs"].keys()
     for key in ("p3_features", "p5_features"):
         assert key not in out_lean["atoms"].keys()
     for key in ("i3_features", "i5_features"):
-        assert key not in out_lean["edges"].keys()
+        assert key not in out_lean["pairs"].keys()
 
 
 def test_translation_invariance():

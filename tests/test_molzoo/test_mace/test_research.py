@@ -136,7 +136,7 @@ def tiny_cluster() -> TensorDict:
     return make_graph_batch(
         pos=torch.tensor(CLUSTER_POS, dtype=config.ftype),
         Z=torch.tensor(CLUSTER_SPECIES, dtype=torch.long),
-        edge_index=full_edge_index(SINGLE_GRAPH),
+        pair_index=full_edge_index(SINGLE_GRAPH),
         batch=torch.zeros(len(CLUSTER_SPECIES), dtype=torch.long),
     )
 

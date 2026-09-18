@@ -16,8 +16,8 @@
 
 namespace molnex::lammps_bridge {
 
-PaddedEdges pad_edges(const at::Tensor& edge_index, int64_t e_max) {
-  const int64_t ne = edge_index.size(0);
+PaddedEdges pad_edges(const at::Tensor& pair_index, int64_t e_max) {
+  const int64_t ne = pair_index.size(0);
   if (ne > e_max) {
     throw std::runtime_error(
         "pad_edges: " + std::to_string(ne) +
@@ -35,7 +35,7 @@ PaddedEdges pad_edges(const at::Tensor& edge_index, int64_t e_max) {
   PaddedEdges out{at::zeros({e_max, 2}, opts.dtype(at::kLong)),
                   at::zeros({e_max}, opts.dtype(at::kBool))};
   if (ne > 0) {
-    out.edges.narrow(0, 0, ne).copy_(edge_index);
+    out.edges.narrow(0, 0, ne).copy_(pair_index);
     out.mask.narrow(0, 0, ne).fill_(true);
   }
   return out;
@@ -84,14 +84,14 @@ GraphedExec::GraphedExec(molnex::interface::ModelRunner* runner,
 }
 
 ModelOutputs GraphedExec::run(const at::Tensor& Z, const at::Tensor& pos_f64,
-                              const at::Tensor& edge_index,
+                              const at::Tensor& pair_index,
                               const at::Tensor& local_mask) {
 #ifndef MOLNEX_INTERFACE_CUDA
   // Unreachable in practice — the constructor already refused — but the method
   // still has to exist so a CPU-only build links the class its tests name.
   (void)Z;
   (void)pos_f64;
-  (void)edge_index;
+  (void)pair_index;
   (void)local_mask;
   throw std::runtime_error(
       "GraphedExec::run: libmolnex_interface was built CPU-only (no CUDA "
@@ -104,14 +104,14 @@ ModelOutputs GraphedExec::run(const at::Tensor& Z, const at::Tensor& pos_f64,
         "GraphedExec: nlocal=" + std::to_string(Z.size(0)) + " != fixed N=" +
         std::to_string(n_fixed_) + " (export n_atoms must match the system)");
   }
-  if (edge_index.size(0) > e_max_) {
+  if (pair_index.size(0) > e_max_) {
     throw std::runtime_error(
-        "GraphedExec: " + std::to_string(edge_index.size(0)) +
+        "GraphedExec: " + std::to_string(pair_index.size(0)) +
         " edges > e_max " + std::to_string(e_max_) +
         " (re-export with a larger e_max)");
   }
 
-  const PaddedEdges padded = pad_edges(edge_index, e_max_);
+  const PaddedEdges padded = pad_edges(pair_index, e_max_);
 
   // In-place content updates, then replay. `copy_` handles both the
   // host->device move and any dtype narrowing; `pos` is cast first so the
@@ -124,7 +124,7 @@ ModelOutputs GraphedExec::run(const at::Tensor& Z, const at::Tensor& pos_f64,
   local_maskg_.copy_(local_mask);
 
   // THE ORDER IS THE CONTRACT: it must match the meta's `inputs` list for a
-  // cuda-graph export, ["Z", "pos", "edge_index", "edge_mask", "local_mask"],
+  // cuda-graph export, ["Z", "pos", "pair_index", "pair_mask", "local_mask"],
   // which LammpsContract validates the arity of at load.
   const std::vector<at::Tensor> inputs = {Zg_, posg_, edgeg_, edge_maskg_,
                                           local_maskg_};

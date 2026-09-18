@@ -321,10 +321,10 @@ class TestWilsonBMatrix:
         """``(E,2)`` bond_index and a non-3-row angle_index fail loud."""
         pos = _pos(WATER_POS)
         builder = WilsonBMatrix()
-        edge_index = _index([[0, 1], [1, 2], [2, 0]])  # (E, 2) neighbour graph
+        pair_index = _index([[0, 1], [1, 2], [2, 0]])  # (E, 2) neighbour graph
 
-        with pytest.raises(ValueError, match="edge_index"):
-            builder.stretch_rows(pos, edge_index)
+        with pytest.raises(ValueError, match="pair_index"):
+            builder.stretch_rows(pos, pair_index)
 
         with pytest.raises(ValueError):
             builder.bend_rows(pos, _index([[0, 1], [1, 2]]))  # (2, n) — apex row missing

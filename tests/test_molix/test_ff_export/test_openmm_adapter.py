@@ -57,7 +57,9 @@ def _nonbonded_ir(record: NonbondedMethodRecord, *, charges: bool = True) -> Pot
             epsilon=torch.tensor([0.1], dtype=torch.float64),
             sigma=torch.tensor([3.5], dtype=torch.float64),
         ),
-        charges=ChargeBag(q=torch.tensor([0.5, -0.5], dtype=torch.float64)) if charges else None,
+        charges=ChargeBag(charge=torch.tensor([0.5, -0.5], dtype=torch.float64))
+        if charges
+        else None,
         scaling=NonbondedScaling() if charges else None,
         nonbonded_method=record,
     )
@@ -74,17 +76,16 @@ def _class_i_ir() -> PotentialIR:
             theta0=torch.tensor([1.9106332362490186]),  # ~109.47°
         ),
         propers=ProperTorsionBag(
-            # AMBER Vn=2 → IR half-barrier k=1 with idivf=1
+            # AMBER Vn=2 → IR half-barrier k=1
             k=torch.tensor([[1.0]]),
             periodicity=torch.tensor([2], dtype=torch.long),
             phase=torch.tensor([[0.0]]),
-            idivf=torch.tensor([1.0]),
         ),
         lj=LJBag(
             epsilon=torch.tensor([0.1]),  # kcal/mol
             sigma=torch.tensor([3.5]),  # Å
         ),
-        charges=ChargeBag(q=torch.tensor([0.5, -0.5])),
+        charges=ChargeBag(charge=torch.tensor([0.5, -0.5])),
         scaling=NonbondedScaling(),
         # An IR that carries ``ε`` / ``σ`` states the rule they were mixed
         # with, or the export refuses it — the record is otherwise unset, so
@@ -96,7 +97,7 @@ def _class_i_ir() -> PotentialIR:
 def _charges_only_ir() -> PotentialIR:
     """Charges under PME with no Lennard-Jones bag — nothing to combine."""
     return PotentialIR(
-        charges=ChargeBag(q=torch.tensor([0.5, -0.5], dtype=torch.float64)),
+        charges=ChargeBag(charge=torch.tensor([0.5, -0.5], dtype=torch.float64)),
         scaling=NonbondedScaling(),
         nonbonded_method=replace(
             PME_SWITCHED_METHOD, lj_cutoff=None, lj_switch_start=None, lj_mixing=None
@@ -140,18 +141,17 @@ class TestOpenMMAdapterTranslate:
         assert p0["periodicity"] == 2
         assert p0["phase"] == 0.0
 
-    def test_idivf_absorbed_into_k(self):
+    def test_half_barrier_k_scales_to_openmm_units(self):
         ir = PotentialIR(
             propers=ProperTorsionBag(
-                k=torch.tensor([[2.0]]),
+                k=torch.tensor([[1.0]]),
                 periodicity=torch.tensor([1], dtype=torch.long),
                 phase=torch.tensor([[0.0]]),
-                idivf=torch.tensor([2.0]),
             )
         )
         spec = OpenMMAdapter().translate(ir)
         torsion = next(f for f in spec.forces if f["type"] == "PeriodicTorsionForce")
-        # (k/idivf)*4.184 = 1*4.184
+        # k is already the half barrier: 1 * 4.184 kJ/mol
         assert torsion["parameters"][0]["k"] == 4.184
         assert torsion["case"] == TranslationCase.FORM_REPARAMETERIZE.value
 
@@ -161,7 +161,6 @@ class TestOpenMMAdapterTranslate:
                 k=torch.tensor([[1.0, 0.5]]),
                 periodicity=torch.tensor([1, 2], dtype=torch.long),
                 phase=torch.tensor([[0.0, math.pi]]),
-                idivf=torch.tensor([1.0]),
             )
         )
         spec = OpenMMAdapter().translate(ir)

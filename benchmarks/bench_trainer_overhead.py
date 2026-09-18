@@ -50,7 +50,7 @@ def _loss(pred: torch.Tensor, batch: TensorDict) -> torch.Tensor:
     return pred * pred
 
 
-def _make_batch(n_atoms: int = 32, n_edges: int = 128, n_graphs: int = 4) -> TensorDict:
+def _make_batch(n_atoms: int = 32, n_pairs: int = 128, n_graphs: int = 4) -> TensorDict:
     return TensorDict(
         {
             "atoms": TensorDict(
@@ -61,13 +61,13 @@ def _make_batch(n_atoms: int = 32, n_edges: int = 128, n_graphs: int = 4) -> Ten
                 },
                 batch_size=[n_atoms],
             ),
-            "edges": TensorDict(
+            "pairs": TensorDict(
                 {
-                    "edge_index": torch.randint(0, n_atoms, (n_edges, 2)),
-                    "edge_diff": torch.randn(n_edges, 3),
-                    "edge_dist": torch.rand(n_edges),
+                    "pair_index": torch.randint(0, n_atoms, (n_pairs, 2)),
+                    "pair_diff": torch.randn(n_pairs, 3),
+                    "pair_dist": torch.rand(n_pairs),
                 },
-                batch_size=[n_edges],
+                batch_size=[n_pairs],
             ),
         },
         batch_size=[],

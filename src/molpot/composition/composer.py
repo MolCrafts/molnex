@@ -11,7 +11,7 @@ also called a mixing rule — and then summing the terms.
 The rule is read off the potential (``potential.mixing_fn``) rather than held
 here, so a term and the rule that feeds it travel together and the composer
 never has to know which parameters a given term wants. Each rule is called as
-``mixing_fn(atom_params, edge_index)`` with the head's per-atom dict and the
+``mixing_fn(atom_params, pair_index)`` with the head's per-atom dict and the
 ``(E, 2)`` edge list, and returns a dict of per-pair ``(E,)`` tensors whose keys
 are exactly the keyword arguments that term's ``forward`` accepts — by
 convention the per-atom key with an ``_ij`` suffix. Key sets differ per term
@@ -41,7 +41,7 @@ class PotentialComposer(nn.Module):
 
         node_features → head → atom_params (dict)
             for each potential:
-                potential.mixing_fn(atom_params, edge_index) → pair_params
+                potential.mixing_fn(atom_params, pair_index) → pair_params
                 potential(distance, **pair_params) → energy
 
     Each potential carries its own ``mixing_fn``, the combining rule that turns
@@ -57,7 +57,7 @@ class PotentialComposer(nn.Module):
             ``head(node_features, **head_kwargs)``.
         potentials: Name → potential term. Each must expose a ``mixing_fn``
             attribute and accept the keys that rule returns as keyword arguments
-            of its ``forward``, alongside ``distance`` / ``edge_batch`` /
+            of its ``forward``, alongside ``distance`` / ``pair_batch`` /
             ``num_graphs``. Names label the per-term energies in the output.
 
     Raises:
@@ -89,7 +89,7 @@ class PotentialComposer(nn.Module):
 
         Args:
             node_features: Pooled per-node features ``(N, D)``.
-            data: Must contain ``"edge_index"`` ``(E, 2)``,
+            data: Must contain ``"pair_index"`` ``(E, 2)``,
                 ``"batch"`` ``(N,)``. Must contain ``"pos"`` ``(N, 3)``
                 if ``compute_forces=True``.
             compute_forces: Derive forces as ``-dE/dpos``.
@@ -100,9 +100,9 @@ class PotentialComposer(nn.Module):
             Dict with ``"energy"``, ``"term_energies"``,
             ``"parameters"``, and optionally ``"forces"``.
         """
-        edge_index = data["edge_index"]
+        pair_index = data["pair_index"]
         batch = data["batch"]
-        src, dst = edge_index[:, 0], edge_index[:, 1]
+        src, dst = pair_index[:, 0], pair_index[:, 1]
 
         # 1. Head: features → per-atom params
         atom_params = self.head(node_features, **(head_kwargs or {}))
@@ -112,19 +112,19 @@ class PotentialComposer(nn.Module):
         if pos is not None:
             distance = (pos[dst] - pos[src]).norm(dim=-1)
         else:
-            distance = data["edge_dist"]
+            distance = data["pair_dist"]
 
         # 3. Evaluate each potential (each applies its own mixing)
-        edge_batch = batch[src]
+        pair_batch = batch[src]
         num_graphs = data.get("num_graphs")
 
         def _term_energies(distance: torch.Tensor) -> dict[str, torch.Tensor]:
             terms: dict[str, torch.Tensor] = {}
             for name, potential in self.potentials.items():
-                pair_params = potential.mixing_fn(atom_params, edge_index)
+                pair_params = potential.mixing_fn(atom_params, pair_index)
                 terms[name] = potential(
                     distance=distance,
-                    edge_batch=edge_batch,
+                    pair_batch=pair_batch,
                     num_graphs=num_graphs,
                     **pair_params,
                 )

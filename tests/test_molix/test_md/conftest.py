@@ -101,10 +101,9 @@ def make_tiny_potential():
             depth=2,
             rank=3,
             hidden_dim=16,
-            # Force derivation is fixed at construction since b85d12f (the
-            # monomorphic pipelines torch.compile needs); an MD force field
-            # cannot ask for it per call.
-            compute_forces=True,
+            # What is derived is fixed at construction (the one op torch.compile
+            # needs); an MD force field cannot ask for it per call.
+            wrt=("atoms.pos",),
         )
         .to(_DEVICE)
         .eval()
@@ -121,10 +120,10 @@ def make_pinet_template():
         device=_DEVICE,
     )
     z = torch.tensor([1, 6, 7, 8], dtype=torch.long, device=_DEVICE)
-    edge_index = torch.tensor(
+    pair_index = torch.tensor(
         [[0, 1], [1, 0], [0, 2], [2, 0], [1, 3], [3, 1], [2, 3], [3, 2]],
         dtype=torch.long,
         device=_DEVICE,
     )
     batch = torch.zeros(4, dtype=torch.long, device=_DEVICE)
-    return make_graph_batch(pos, z, edge_index, batch)
+    return make_graph_batch(pos, z, pair_index, batch)

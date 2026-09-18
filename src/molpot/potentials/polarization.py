@@ -64,7 +64,7 @@ class Polarization(nn.Module):
       1. Computing the permanent electric field from partial charges:
          ``E_perm,i = k_e · Σⱼ qⱼ · r̂ᵢⱼ / rᵢⱼ²``  (Coulomb's law).
       2. Building a sparse dipole-dipole interaction tensor T from
-         edge_index, with Thole damping and the same Coulomb prefactor:
+         pair_index, with Thole damping and the same Coulomb prefactor:
          ``Tᵢⱼ = k_e · λ(uᵢⱼ) · (3 r̂r̂ − I) / rᵢⱼ³``.
       3. Solving ``(α⁻¹ − T) · μ = E_perm`` per molecule via CG.
       4. ``U_pol = -½ Σᵢ μᵢ · E_perm,i`` per molecule.
@@ -119,7 +119,7 @@ class Polarization(nn.Module):
         charge: torch.Tensor,
         alpha: torch.Tensor,
         batch: torch.Tensor,
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
         num_graphs: int | None = None,
     ) -> torch.Tensor:
         """Compute induced-dipole polarization energy.
@@ -129,7 +129,7 @@ class Polarization(nn.Module):
             charge: Partial charges ``(N,)``.
             alpha: Isotropic polarizabilities ``(N,)``.
             batch: Graph index per atom ``(N,)``.
-            edge_index: Neighbor pairs ``(E, 2)``.
+            pair_index: Neighbor pairs ``(E, 2)``.
             num_graphs: Number of graphs.
 
         Returns:
@@ -149,8 +149,8 @@ class Polarization(nn.Module):
         # what we want is r_vec / r_norm³ = r̂ / r². Sign of r̂_{src→dst} vs
         # r̂_{dst→src} is irrelevant for the energy (μ flips with E so U_pol
         # = −½ μ·E_perm is sign-invariant); the chosen convention here
-        # matches the edge_index direction.
-        src, dst = edge_index[:, 0], edge_index[:, 1]
+        # matches the pair_index direction.
+        src, dst = pair_index[:, 0], pair_index[:, 1]
         r_vec = pos[dst] - pos[src]  # (E, 3)
         r_norm = r_vec.norm(dim=-1, keepdim=True).clamp(min=1e-8)  # (E, 1)
         r_hat = r_vec / r_norm  # (E, 3) unit

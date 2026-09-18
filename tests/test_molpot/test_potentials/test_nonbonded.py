@@ -23,10 +23,10 @@ from molpot.potentials.nonbonded import (
 @pytest.fixture
 def pair_data():
     """Minimal 2-molecule batch with 6 edges."""
-    edge_index = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1], [3, 4], [4, 3]], dtype=torch.long)
+    pair_index = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1], [3, 4], [4, 3]], dtype=torch.long)
     distance = torch.tensor([1.4, 1.4, 1.5, 1.5, 2.0, 2.0])
-    edge_batch = torch.tensor([0, 0, 0, 0, 1, 1], dtype=torch.long)
-    return distance, edge_index, edge_batch
+    pair_batch = torch.tensor([0, 0, 0, 0, 1, 1], dtype=torch.long)
+    return distance, pair_index, pair_batch
 
 
 @pytest.fixture
@@ -49,10 +49,10 @@ def atom_params():
 
 class TestMixing:
     def test_geometric_arithmetic_mixing_shapes(self, atom_params, pair_data):
-        _, edge_index, _ = pair_data
+        _, pair_index, _ = pair_data
         result = geometric_arithmetic_mixing(
             atom_params,
-            edge_index,
+            pair_index,
             geometric_keys=["eps_rep"],
             arithmetic_keys=["r_star"],
         )
@@ -60,10 +60,10 @@ class TestMixing:
         assert result["r_star_ij"].shape == (6,)
 
     def test_geometric_mean_is_symmetric(self, atom_params, pair_data):
-        _, edge_index, _ = pair_data
+        _, pair_index, _ = pair_data
         result = geometric_arithmetic_mixing(
             atom_params,
-            edge_index,
+            pair_index,
             geometric_keys=["eps_rep"],
             arithmetic_keys=[],
         )
@@ -71,31 +71,31 @@ class TestMixing:
         assert torch.allclose(result["eps_rep_ij"][0], result["eps_rep_ij"][1])
 
     def test_arithmetic_mean_is_symmetric(self, atom_params, pair_data):
-        _, edge_index, _ = pair_data
+        _, pair_index, _ = pair_data
         result = geometric_arithmetic_mixing(
             atom_params,
-            edge_index,
+            pair_index,
             geometric_keys=[],
             arithmetic_keys=["r_star"],
         )
         assert torch.allclose(result["r_star_ij"][0], result["r_star_ij"][1])
 
     def test_repulsion_mixing(self, atom_params, pair_data):
-        _, edge_index, _ = pair_data
-        result = repulsion_mixing(atom_params, edge_index)
+        _, pair_index, _ = pair_data
+        result = repulsion_mixing(atom_params, pair_index)
         assert "eps_rep_ij" in result
         assert "lam_rep_ij" in result
         assert "r_star_ij" in result
 
     def test_dispersion_mixing(self, atom_params, pair_data):
-        _, edge_index, _ = pair_data
-        result = dispersion_mixing(atom_params, edge_index)
+        _, pair_index, _ = pair_data
+        result = dispersion_mixing(atom_params, pair_index)
         assert "c6_ij" in result
         assert "r_star_ij" in result
 
     def test_ct_mixing(self, atom_params, pair_data):
-        _, edge_index, _ = pair_data
-        result = ct_mixing(atom_params, edge_index)
+        _, pair_index, _ = pair_data
+        result = ct_mixing(atom_params, pair_index)
         assert "eps_ct_ij" in result
         assert "lam_ct_ij" in result
         assert "r_star_ij" in result
@@ -108,7 +108,7 @@ class TestMixing:
 
 class TestRepulsionExp6:
     def test_output_shape_batched(self, pair_data):
-        distance, _, edge_batch = pair_data
+        distance, _, pair_batch = pair_data
         pot = RepulsionExp6()
         E = 6
         energy = pot(
@@ -116,7 +116,7 @@ class TestRepulsionExp6:
             eps_rep_ij=torch.full((E,), 0.1),
             lam_rep_ij=torch.full((E,), 10.0),
             r_star_ij=torch.full((E,), 1.5),
-            edge_batch=edge_batch,
+            pair_batch=pair_batch,
             num_graphs=2,
         )
         assert energy.shape == (2,)
@@ -157,14 +157,14 @@ class TestRepulsionExp6:
         assert energies[0] > energies[1] > energies[2]
 
     def test_energy_scale(self, pair_data):
-        distance, _, edge_batch = pair_data
+        distance, _, pair_batch = pair_data
         E = 6
         kwargs = dict(
             distance=distance,
             eps_rep_ij=torch.full((E,), 0.1),
             lam_rep_ij=torch.full((E,), 10.0),
             r_star_ij=torch.full((E,), 1.5),
-            edge_batch=edge_batch,
+            pair_batch=pair_batch,
             num_graphs=2,
         )
         e1 = RepulsionExp6(energy_scale=1.0)(**kwargs)
@@ -190,14 +190,14 @@ class TestRepulsionExp6:
 
 class TestDispersionC6:
     def test_output_shape_batched(self, pair_data):
-        distance, _, edge_batch = pair_data
+        distance, _, pair_batch = pair_data
         pot = DispersionC6()
         E = 6
         energy = pot(
             distance=distance,
             c6_ij=torch.full((E,), 5.0),
             r_star_ij=torch.full((E,), 1.5),
-            edge_batch=edge_batch,
+            pair_batch=pair_batch,
             num_graphs=2,
         )
         assert energy.shape == (2,)
@@ -244,7 +244,7 @@ class TestDispersionC6:
 
 class TestChargeTransfer:
     def test_output_shape_batched(self, pair_data):
-        distance, _, edge_batch = pair_data
+        distance, _, pair_batch = pair_data
         pot = ChargeTransfer()
         E = 6
         energy = pot(
@@ -252,7 +252,7 @@ class TestChargeTransfer:
             eps_ct_ij=torch.full((E,), 0.01),
             lam_ct_ij=torch.full((E,), 3.0),
             r_star_ij=torch.full((E,), 1.5),
-            edge_batch=edge_batch,
+            pair_batch=pair_batch,
             num_graphs=2,
         )
         assert energy.shape == (2,)

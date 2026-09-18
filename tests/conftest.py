@@ -16,7 +16,7 @@ Three physical symmetries every encoder + property head must satisfy:
 This module provides three things:
 
     1. :func:`make_graph_batch` — build a ``TensorDict`` from raw
-       tensors, computing ``edge_diff`` / ``edge_dist`` from positions.
+       tensors, computing ``pair_diff`` / ``pair_dist`` from positions.
     2. :func:`translate_graph` / :func:`rotate_graph` /
        :func:`permute_graph` — the three input transforms.
     3. :func:`recompute_edge_geometry` — call inside a forward pass so
@@ -49,8 +49,9 @@ import torch
 from molpy import Box, Frame
 from tensordict import TensorDict
 
-from molix.batch import NeighborList, TotalCharge
-from molix.batch.collate import collate_molecules
+from molix.data import TotalCharge
+from molix.data.collate import collate_molecules
+from molix.neighbor import NeighborList
 
 if TYPE_CHECKING:
     from molpot.forcefield import ForceField
@@ -117,7 +118,7 @@ def frame(
 def make_graph_batch(
     pos: torch.Tensor,
     Z: torch.Tensor,
-    edge_index: torch.Tensor,
+    pair_index: torch.Tensor,
     batch: torch.Tensor,
     *,
     graphs: dict[str, torch.Tensor] | None = None,
@@ -128,27 +129,27 @@ def make_graph_batch(
     Args:
         pos: ``(N, 3)`` atomic positions.
         Z: ``(N,)`` atomic numbers.
-        edge_index: ``(E, 2)`` source/target index pairs.
+        pair_index: ``(E, 2)`` source/target index pairs.
         batch: ``(N,)`` graph membership index per atom.
         graphs: Optional per-graph fields (e.g. ``{"total_charge": tensor}``)
             written to the ``"graphs"`` sub-tensordict. ``num_atoms`` is
             auto-derived from ``batch`` and always present.
         shifts: Optional PBC shift vectors ``(E, 3)`` (``unit_shifts @ cell``),
             written to ``edges.shifts`` and folded additively into
-            ``edge_diff``. ``S_ij`` is constant w.r.t. ``pos``, so the
+            ``pair_diff``. ``S_ij`` is constant w.r.t. ``pos``, so the
             position gradient of the edge geometry is unchanged.
 
     Returns:
         A fully-formed ``TensorDict`` with
-        ``edge_diff = pos[dst] - pos[src] (+ shifts)`` and
-        ``edge_dist = ‖edge_diff‖`` recomputed from ``pos``.
+        ``pair_diff = pos[dst] - pos[src] (+ shifts)`` and
+        ``pair_dist = ‖pair_diff‖`` recomputed from ``pos``.
     """
-    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]]
     if shifts is not None:
-        edge_diff = edge_diff + shifts
-    edge_dist = edge_diff.norm(dim=-1).clamp(min=1e-6)
+        pair_diff = pair_diff + shifts
+    pair_dist = pair_diff.norm(dim=-1).clamp(min=1e-6)
     n_atoms = pos.shape[0]
-    n_edges = edge_index.shape[0]
+    n_pairs = pair_index.shape[0]
     n_graphs = int(batch.max().item()) + 1 if n_atoms > 0 else 0
 
     num_atoms_per_graph = torch.zeros(n_graphs, dtype=torch.long)
@@ -159,17 +160,17 @@ def make_graph_batch(
             graph_data[k] = v
 
     edge_data = TensorDict(
-        edge_index=edge_index,
-        edge_diff=edge_diff,
-        edge_dist=edge_dist,
-        batch_size=[n_edges],
+        pair_index=pair_index,
+        pair_diff=pair_diff,
+        pair_dist=pair_dist,
+        batch_size=[n_pairs],
     )
     if shifts is not None:
         edge_data["shifts"] = shifts
 
     return TensorDict(
         atoms=TensorDict(Z=Z, pos=pos, batch=batch, batch_size=[n_atoms]),
-        edges=edge_data,
+        pairs=edge_data,
         graphs=graph_data,
         batch_size=[],
     )
@@ -186,7 +187,7 @@ def translate_graph(batch: TensorDict, t: torch.Tensor) -> TensorDict:
     return make_graph_batch(
         pos=pos,
         Z=batch["atoms", "Z"],
-        edge_index=batch["edges", "edge_index"],
+        pair_index=batch["pairs", "pair_index"],
         batch=batch["atoms", "batch"],
         graphs=extras,
         shifts=_extract_shifts(batch),
@@ -206,7 +207,7 @@ def rotate_graph(batch: TensorDict, R: torch.Tensor) -> TensorDict:
     return make_graph_batch(
         pos=pos,
         Z=batch["atoms", "Z"],
-        edge_index=batch["edges", "edge_index"],
+        pair_index=batch["pairs", "pair_index"],
         batch=batch["atoms", "batch"],
         graphs=extras,
         shifts=None if shifts is None else shifts @ R.T,
@@ -214,10 +215,10 @@ def rotate_graph(batch: TensorDict, R: torch.Tensor) -> TensorDict:
 
 
 def permute_graph(batch: TensorDict, perm: torch.Tensor) -> TensorDict:
-    """Relabel atoms by ``perm``; edge_index is remapped, per-graph fields kept.
+    """Relabel atoms by ``perm``; pair_index is remapped, per-graph fields kept.
 
     ``edges.shifts`` is per-edge and the edge *rows* keep their order (only the
-    node labels inside ``edge_index`` are rewritten), so shifts stay aligned
+    node labels inside ``pair_index`` are rewritten), so shifts stay aligned
     and are carried unchanged.
     """
     inv_perm = torch.empty_like(perm)
@@ -225,12 +226,12 @@ def permute_graph(batch: TensorDict, perm: torch.Tensor) -> TensorDict:
     pos = batch["atoms", "pos"][perm]
     Z = batch["atoms", "Z"][perm]
     batch_idx = batch["atoms", "batch"][perm]
-    edge_index = inv_perm[batch["edges", "edge_index"]]
+    pair_index = inv_perm[batch["pairs", "pair_index"]]
     extras = _extract_graph_extras(batch)
     return make_graph_batch(
         pos=pos,
         Z=Z,
-        edge_index=edge_index,
+        pair_index=pair_index,
         batch=batch_idx,
         graphs=extras,
         shifts=_extract_shifts(batch),
@@ -238,7 +239,7 @@ def permute_graph(batch: TensorDict, perm: torch.Tensor) -> TensorDict:
 
 
 def recompute_edge_geometry(batch: TensorDict) -> TensorDict:
-    """Re-derive ``edge_diff`` / ``edge_dist`` from ``pos`` in-place.
+    """Re-derive ``pair_diff`` / ``pair_dist`` from ``pos`` in-place.
 
     Call this at the start of a pipeline forward when ``pos`` carries
     ``requires_grad`` so autograd can trace ``∂E/∂pos`` for force tests.
@@ -246,14 +247,14 @@ def recompute_edge_geometry(batch: TensorDict) -> TensorDict:
     :func:`make_graph_batch` does.
     """
     pos = batch["atoms", "pos"]
-    edge_index = batch["edges", "edge_index"]
-    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    pair_index = batch["pairs", "pair_index"]
+    pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]]
     shifts = _extract_shifts(batch)
     if shifts is not None:
-        edge_diff = edge_diff + shifts
-    edge_dist = edge_diff.norm(dim=-1).clamp(min=1e-6)
-    batch["edges", "edge_diff"] = edge_diff
-    batch["edges", "edge_dist"] = edge_dist
+        pair_diff = pair_diff + shifts
+    pair_dist = pair_diff.norm(dim=-1).clamp(min=1e-6)
+    batch["pairs", "pair_diff"] = pair_diff
+    batch["pairs", "pair_dist"] = pair_dist
     return batch
 
 
@@ -278,9 +279,9 @@ def _extract_graph_extras(batch: TensorDict) -> dict[str, torch.Tensor] | None:
 
 def _extract_shifts(batch: TensorDict) -> torch.Tensor | None:
     """Return ``edges.shifts`` if the batch carries PBC shift vectors."""
-    if ("edges", "shifts") not in batch.keys(include_nested=True):
+    if ("pairs", "shifts") not in batch.keys(include_nested=True):
         return None
-    return batch["edges", "shifts"]
+    return batch["pairs", "shifts"]
 
 
 # --------------------------------------------------------------------------
@@ -289,17 +290,17 @@ def _extract_shifts(batch: TensorDict) -> torch.Tensor | None:
 
 
 def place_edges(batch: TensorDict, *, cutoff: float) -> TensorDict:
-    """Write ``batch["edges"]`` with molix's neighbour list (``composable-a0-03b``).
+    """Write ``batch["pairs"]`` with molix's neighbour list (``composable-a0-03b``).
 
-    :class:`molix.batch.NeighborList` is the repo's Edge Convention owner and
+    :class:`molix.data.NeighborList` is the repo's Edge Convention owner and
     the training-side of the two owners named in
     ``.claude/notes/architecture.md`` §Layer roles (the other being
-    :class:`molix.md.NeighborList`). ``molpot`` **consumes** a placed ``edges``
+    :class:`molix.md.NeighborList`). ``molpot`` **consumes** a placed ``pairs``
     namespace; it does not enumerate one, so every fixture that reaches a pair
     term has to arrive with a list, exactly as a collated training batch does.
 
     ``symmetry`` is left at its ``True`` default and that is load-bearing, not
-    incidental: the half-pair mode emits ``edge_index[:, 0] > edge_index[:, 1]``,
+    incidental: the half-pair mode emits ``pair_index[:, 0] > pair_index[:, 1]``,
     and the placed-list liveness rule keeps ``source < target``, so a
     ``symmetry=False`` list would read as **entirely dead** and every pair term
     would silently cost zero. The full bidirectional list carries each pair
@@ -321,9 +322,9 @@ def place_edges(batch: TensorDict, *, cutoff: float) -> TensorDict:
             the fixture's largest separation.
 
     Returns:
-        The same ``batch`` object, with ``edges`` holding ``edge_index``
-        ``(E, 2)``, ``edge_diff`` ``(E, 3)`` (``pos[target] - pos[source]``)
-        and ``edge_dist`` ``(E,)``. ``E`` is ``0`` when no pair is inside
+        The same ``batch`` object, with ``pairs`` holding ``pair_index``
+        ``(E, 2)``, ``pair_diff`` ``(E, 3)`` (``pos[target] - pos[source]``)
+        and ``pair_dist`` ``(E,)``. ``E`` is ``0`` when no pair is inside
         ``cutoff`` — an empty list, not an absent one.
     """
     atoms = batch["atoms"]
@@ -344,7 +345,7 @@ def place_edges(batch: TensorDict, *, cutoff: float) -> TensorDict:
     if cell is not None:
         probe["graphs"] = TensorDict({"cell": cell}, batch_size=[int(cell.shape[0])])
     NeighborList(cutoff=cutoff, pbc=cell is not None).execute(probe)
-    batch["edges"] = probe["edges"]
+    batch["pairs"] = probe["pairs"]
     return batch
 
 
@@ -539,7 +540,7 @@ BUTANE_PAIR_MASS = {6: 12.011, 1: 1.008}
 #: order. ``impropers`` is absent: n-butane has no improper centre. ``bonds``
 #: is absent for a different reason — ``collate_molecules`` turns a frame's
 #: bonds block into the ``(2, N)`` COO ``bonds.bond_index`` rather than into
-#: 1-D columns (the anti-alias shape of CLAUDE.md § edge_index vs bond_index),
+#: 1-D columns (the anti-alias shape of CLAUDE.md § pair_index vs bond_index),
 #: so the batch's bonds are addressed as one tensor and not through this map.
 BUTANE_PAIR_TOPOLOGY_COLUMNS: dict[str, tuple[str, ...]] = {
     "angles": ("atomi", "atomj", "atomk"),
@@ -689,10 +690,9 @@ def butane_pair_class_i_forcefield(
             "k": torch.tensor([BUTANE_PAIR_TORSION_K] * n_propers, dtype=torch.float64),
             "periodicity": torch.tensor(BUTANE_PAIR_TORSION_PERIODICITY, dtype=torch.long),
             "phase": torch.tensor([BUTANE_PAIR_TORSION_PHASE] * n_propers, dtype=torch.float64),
-            "idivf": torch.ones(n_propers, dtype=torch.float64),
         },
         atoms={
-            "q": torch.tensor(BUTANE_Q * 2, dtype=torch.float64),
+            "charge": torch.tensor(BUTANE_Q * 2, dtype=torch.float64),
             "epsilon": torch.tensor(BUTANE_EPSILON * 2, dtype=torch.float64),
             "sigma": torch.tensor(BUTANE_SIGMA * 2, dtype=torch.float64),
         },
@@ -763,7 +763,7 @@ def butane_pair_batch(positions: torch.Tensor | None = None) -> TensorDict:
     :func:`butane_pair_frame`), so ``atoms.batch`` is all zeros and
     ``graphs.cell`` is the single lattice under ``batch_size=[1]``.
     ``graphs.total_charge`` is the frame's declared zero, normalised to the
-    batch float dtype by :class:`~molix.batch.TotalCharge` — the task that owns
+    batch float dtype by :class:`~molix.data.TotalCharge` — the task that owns
     that column — rather than written by hand. ``atoms.mass`` (amu) and a zero
     ``atoms.vel`` (Å/fs) are carried too, so the same fixture is the one an MD
     rollout runs — the energy gates and the NVE gate must not be looking at two
@@ -782,7 +782,7 @@ def butane_pair_batch(positions: torch.Tensor | None = None) -> TensorDict:
             asking the energy about connectivity that is no longer there.
 
     Returns:
-        The batch, with ``edges`` placed at :data:`BUTANE_PAIR_LIST_CUTOFF`
+        The batch, with ``pairs`` placed at :data:`BUTANE_PAIR_LIST_CUTOFF`
         under the minimum-image convention.
     """
     batch = collate_molecules([butane_pair_frame(positions)])

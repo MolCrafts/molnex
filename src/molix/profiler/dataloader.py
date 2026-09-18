@@ -3,7 +3,7 @@
 Measures how much time a training loop spends blocked waiting for the next
 batch — the DataLoader stall time.  Accepts either a
 :class:`~molix.profiler.mock.MockSource` or a real
-:class:`~molix.store.frame_store_view.FrameStoreDataset` / :class:`torch.utils.data.Dataset`.
+:class:`~molix.data.frame_dataset.FrameDataset` / :class:`torch.utils.data.Dataset`.
 
 The stall time is measured via the **inter-batch gap technique**: the
 wall-clock elapsed from ``next(iter)`` returning batch *i* to the point
@@ -29,8 +29,8 @@ from dataclasses import dataclass
 
 from torch.utils.data import DataLoader, Dataset
 
-from molix.batch.collate import collate_molecules
-from molix.batch.task import BatchTask
+from molix.data.collate import collate_molecules
+from molix.data.task import BatchTask
 from molix.profiler._utils import TimingStat, ValueStat, _fmt_table, batch_counts
 
 # ---------------------------------------------------------------------------
@@ -128,11 +128,11 @@ class _ProfilerCollate:
     """Picklable collate callable for the profiler's worker DataLoaders.
 
     A top-level class (not a closure) so ``spawn`` / ``forkserver`` workers
-    can pickle it; mirrors :class:`molix.batch.datamodule._CollateFn` minus
+    can pickle it; mirrors :class:`molix.data.datamodule._CollateFn` minus
     the dtype cast (the profiler measures raw collation throughput).
 
     Args:
-        batch_tasks: Post-collate :class:`~molix.batch.task.BatchTask`
+        batch_tasks: Post-collate :class:`~molix.data.task.BatchTask`
             instances to apply in order.
     """
 
@@ -176,7 +176,7 @@ class DataLoaderProfiler:
         num_workers: Number of DataLoader worker processes.
         pin_memory: Whether to pin memory for GPU transfer.
         persistent_workers: Keep workers alive between epochs.
-        batch_tasks: Post-collate :class:`~molix.batch.task.BatchTask`
+        batch_tasks: Post-collate :class:`~molix.data.task.BatchTask`
             instances applied, in order, inside ``collate_fn``.
 
     Example::
@@ -300,7 +300,7 @@ class DataLoaderProfiler:
     def _make_dataloader(self, dataset: Dataset) -> DataLoader:
         # A picklable top-level collate (not a closure) so num_workers > 0
         # under spawn/forkserver can ship it to workers — same rationale as
-        # molix.batch.datamodule._CollateFn.
+        # molix.data.datamodule._CollateFn.
         collate_fn = _ProfilerCollate(self.batch_tasks)
         kwargs = {}
         if self.num_workers > 0:

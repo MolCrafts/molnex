@@ -1,6 +1,6 @@
 """Wilson B-matrix (``B = ∂q/∂x``) for Class-I internal coordinates.
 
-*Internal coordinates* ``q`` are the chemically meaningful shape variables of
+*Internal coordinates* ``charge`` are the chemically meaningful shape variables of
 a molecule. This module builds the two that a **Class-I force field** uses --
 the classical functional form of the AMBER / OPLS / CHARMM family, in which
 the energy is a sum of harmonic bond and angle terms, periodic torsions,
@@ -91,7 +91,7 @@ class WilsonBMatrix:
     ``k–j`` of the bend, matching
     :class:`~molpot.potentials.angles.harmonic.AngleHarmonic`.
 
-    That COO shape is also the anti-alias guard against ``edge_index``. A
+    That COO shape is also the anti-alias guard against ``pair_index``. A
     *bond* is fixed covalent topology; an *edge* is a geometric neighbour pair
     within a cutoff radius, recomputed from positions every step, and is
     stored transposed as ``(E, 2)`` so that a mis-wired tensor is caught by
@@ -154,7 +154,7 @@ class WilsonBMatrix:
             pos: Cartesian positions ``(N, 3)`` in Å, ``N`` atoms.
             bond_index: Covalent bonds in coordinate-list (COO) layout
                 ``(2, n_bonds)``, integer atom ids -- row 0 is ``i``, row 1 is
-                ``j``. Not a geometric ``edge_index`` ``(E, 2)``.
+                ``j``. Not a geometric ``pair_index`` ``(E, 2)``.
 
         Returns:
             Rows ``(n_bonds, 3N)`` in input order, dtype and device of
@@ -367,15 +367,15 @@ class WilsonBMatrix:
 
         Mirrors :class:`~molpot.potentials.bonds.harmonic.BondHarmonic`'s
         guard: the covalent ``bond_index (2, n_bonds)`` is deliberately a
-        different shape from the geometric neighbour graph ``edge_index
+        different shape from the geometric neighbour graph ``pair_index
         (E, 2)`` so a cutoff pair can never be silently used as a bond.
         ``name`` only appears in the error message.
         """
         if index.ndim != 2 or index.shape[0] != arity:
             raise ValueError(
                 f"{name} must be COO [{arity}, n_terms] covalent topology; got shape "
-                f"{tuple(index.shape)}. A neighbour-graph edge_index [E, 2] is not a bond "
-                "or angle list — see the bond_index vs edge_index distinction in CLAUDE.md."
+                f"{tuple(index.shape)}. A neighbour-graph pair_index [E, 2] is not a bond "
+                "or angle list — see the bond_index vs pair_index distinction in CLAUDE.md."
             )
 
     @staticmethod

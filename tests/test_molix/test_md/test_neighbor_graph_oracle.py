@@ -48,7 +48,7 @@ def _list(
 
 
 def _sut_keys(nl: NeighborList, cell: torch.Tensor) -> set:
-    return neighborlist_edge_keys(nl.edge_index, nl.shifts, nl.num_edges, cell, open_system=False)
+    return neighborlist_edge_keys(nl.pair_index, nl.shifts, nl.num_pairs, cell, open_system=False)
 
 
 def _compare(nl: NeighborList, pos: torch.Tensor, cell: torch.Tensor, cutoff: float, label: str):
@@ -121,7 +121,7 @@ class TestCutoffBoundary:
         has = (0, 1, 0, 0, 0) in keys and (1, 0, 0, 0, 0) in keys
         assert has is expect_edge, (
             f"cutoff convention is 0 < r <= r_c; at r=r_c+{delta:g} expected "
-            f"edge={expect_edge}, got has={has}; num_edges={nl.num_edges}"
+            f"edge={expect_edge}, got has={has}; num_pairs={nl.num_pairs}"
         )
         ref = bruteforce_edges(pos, cell=cell, cutoff=r_c)
         assert ((0, 1, 0, 0, 0) in ref) is expect_edge
@@ -141,7 +141,7 @@ class TestPeriodicWrap:
         cmp = _compare(nl, pos, cell, cutoff, "pbc-wrap: ")
         assert cmp.n_ref >= 2
         # physical |dr| ≈ 0.2
-        src, tgt = nl.edge_index[0, 0], nl.edge_index[0, 1]
+        src, tgt = nl.pair_index[0, 0], nl.pair_index[0, 1]
         dr = pos[int(tgt)] - pos[int(src)] + nl.shifts[0]
         assert float(dr.norm()) == pytest.approx(0.2, abs=1e-9)
 
@@ -252,10 +252,10 @@ class TestWrapInvarianceEnergyForces:
                 e = model.energy_core(
                     leaf,
                     Z,
-                    nl.edge_index[: nl.num_edges],
+                    nl.pair_index[: nl.num_pairs],
                     batch,
                     1,
-                    nl.shifts[: nl.num_edges],
+                    nl.shifts[: nl.num_pairs],
                 ).sum()
             f = autograd_forces_from_energy(e, leaf)
             return float(e.detach()), f.detach()

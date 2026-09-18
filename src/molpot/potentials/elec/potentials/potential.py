@@ -50,11 +50,11 @@ class Potential(torch.nn.Module):
         :math:`1 - ((1 - \\cos \\pi r / r_{cut}) / 2)^n`.
 
         Args:
-            dist: Interatomic distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            dist: Interatomic distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
-            Cutoff values ``(n_edges,)``.
+            Cutoff values ``(n_pairs,)``.
         """
         if self.exclusion_radius is None:
             raise ValueError("Cannot compute cutoff function when `exclusion_radius` is not set")
@@ -77,11 +77,11 @@ class Potential(torch.nn.Module):
         """Full pair potential given interatomic distances.
 
         Args:
-            dist: Distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            dist: Distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
-            Potential values ``(n_edges,)``.
+            Potential values ``(n_pairs,)``.
         """
         raise NotImplementedError(f"from_dist is not implemented for {self.__class__.__name__}")
 
@@ -94,11 +94,11 @@ class Potential(torch.nn.Module):
         :math:`-V_{LR}(r) * f_{cut}(r)` when ``exclusion_radius`` is set.
 
         Args:
-            dist: Distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            dist: Distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
-            Short-range potential values ``(n_edges,)``.
+            Short-range potential values ``(n_pairs,)``.
         """
         if self.smearing is None:
             raise ValueError(
@@ -119,11 +119,11 @@ class Potential(torch.nn.Module):
         """Long-range part of the pair potential in real space.
 
         Args:
-            dist: Distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            dist: Distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
-            Long-range potential values ``(n_edges,)``.
+            Long-range potential values ``(n_pairs,)``.
         """
         raise NotImplementedError(f"lr_from_dist is not implemented for {self.__class__.__name__}")
 

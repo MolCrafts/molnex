@@ -22,8 +22,8 @@ from tests.test_molzoo.test_mace.conftest import (
 #: captured from *this* tree before the fixed-capacity k-grid rewrite (molnex @
 #: ``feat/oplsaa-parameterizer``, ``PYTHONPATH=src python
 #: capture_kgrid_goldens.py``, 2026-09-03). Construction is
-#: ``torch.manual_seed(0)`` → ``MacePolar(**polar_kwargs(tiny_polar_spec,
-#: compute_forces=False)).eval()`` on :data:`CLUSTER_POS` / :data:`CLUSTER_Z`.
+#: ``torch.manual_seed(0)`` → ``MacePolar(**polar_kwargs(tiny_polar_spec)).eval()``
+#: on :data:`CLUSTER_POS` / :data:`CLUSTER_Z`.
 #: No live oracle.
 TINY_POLAR_PERIODIC10_ENERGY_SEED0 = -2860.720879072809
 TINY_POLAR_ISOLATED_ENERGY_SEED0 = -2829.8252847964013
@@ -52,12 +52,12 @@ class TestMacePolar:
 
     @pytest.mark.parametrize("dtype", [None, torch.float32, torch.float64])
     def test_energy_precision_covers_hartree(self, tiny_polar_spec, omol_cluster, dtype):
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, energy_dtype=dtype, compute_forces=False))
+        model = MacePolar(**polar_kwargs(tiny_polar_spec, energy_dtype=dtype))
         energy = model(omol_cluster)["graphs", "energy"]
         assert energy.dtype == (dtype or torch.float64)
 
     def test_split_precision_keeps_md_geometry_and_force_dtype(self, tiny_polar_spec, omol_cluster):
-        model = MacePolar(**polar_kwargs(tiny_polar_spec)).float().eval()
+        model = MacePolar(**polar_kwargs(tiny_polar_spec, wrt=("atoms.pos",))).float().eval()
         model.configure_input_dtype(torch.float32)
         pos = omol_cluster["atoms", "pos"]
         before = pos.clone()
@@ -68,7 +68,7 @@ class TestMacePolar:
 
     def test_official_submodule_names(self, tiny_polar_spec: MACEPolarSpec):
         """Keys polar_remap copies by name."""
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False))
+        model = MacePolar(**polar_kwargs(tiny_polar_spec))
         names = set(model._modules)
         assert {
             "lr_source_maps",
@@ -84,7 +84,7 @@ class TestMacePolar:
 
     def test_energy_is_finite_and_per_graph(self, tiny_polar_spec: MACEPolarSpec, omol_cluster):
         """Neutral singlet cluster: one finite eV."""
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False))
+        model = MacePolar(**polar_kwargs(tiny_polar_spec))
         out = model(omol_cluster)
         energy = out["graphs", "energy"]
         assert energy.shape == (1,)
@@ -92,19 +92,54 @@ class TestMacePolar:
 
     def test_energy_is_translation_invariant(self, tiny_polar_spec: MACEPolarSpec, omol_cluster):
         """Isolated electrostatics + local MACE: E(r+Δ)=E(r)."""
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False))
+        model = MacePolar(**polar_kwargs(tiny_polar_spec))
         e0 = model(omol_cluster.clone())["graphs", "energy"].clone()
         shifted = omol_cluster.clone()
         shifted["atoms", "pos"] = shifted["atoms", "pos"] + 2.5
         e1 = model(shifted)["graphs", "energy"]
         assert torch.allclose(e0, e1, atol=1e-8)
 
+    def test_a_padded_batch_returns_the_unpadded_energy_and_forces(
+        self, tiny_polar_spec: MACEPolarSpec, omol_cluster
+    ):
+        """``MoleculePadder`` ghosts are inert through the long-range terms too.
+
+        Polar's per-atom energies (``e0``, the readouts, the local electron
+        energy) are masked like MatPES's, and the ghost atoms' densities and
+        Fukui sources are masked as well, so the charge equilibration, the
+        field descriptor and the Hartree sum never see a ghost charge. The
+        cluster is translated off the origin first: a padded ghost sits at
+        ``(0, 0, 0)``, and a real atom coincident with it would exercise the
+        kernels' small-``r`` clamp rather than the mask.
+        """
+        from molix.data import MoleculePadder
+        from molix.schema import ENERGY_KEY, FORCES_KEY
+
+        torch.manual_seed(0)
+        model = MacePolar(**polar_kwargs(tiny_polar_spec, wrt=("atoms.pos",))).eval()
+        cluster = omol_cluster.clone()
+        cluster["atoms", "pos"] = cluster["atoms", "pos"] + 2.5
+        n_atoms = int(cluster["atoms"].batch_size[0])
+        n_pairs = int(cluster["pairs"].batch_size[0])
+        reference = model(cluster.clone())
+        padded = MoleculePadder(
+            max_atoms=n_atoms + 3, max_pairs=n_pairs + 5, cutoff=tiny_polar_spec.r_max
+        )(cluster.clone())
+        out = model(padded)
+        assert torch.allclose(out[ENERGY_KEY], reference[ENERGY_KEY], atol=1e-10, rtol=0.0)
+        assert torch.allclose(
+            out[FORCES_KEY][:n_atoms], reference[FORCES_KEY], atol=1e-10, rtol=0.0
+        )
+        assert torch.allclose(
+            out[FORCES_KEY][n_atoms:], torch.zeros(3, 3, dtype=torch.float64), atol=1e-12, rtol=0.0
+        )
+
     def test_fp32_energy_keeps_interaction_below_large_atomic_baseline(
         self, tiny_polar_spec: MACEPolarSpec
     ):
         """Adding a large constant E0 cannot round away the learned energy."""
         config.set_precision("fp32")
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        model = MacePolar(**polar_kwargs(tiny_polar_spec)).eval()
         pos = torch.tensor(CLUSTER_POS, dtype=torch.float32, requires_grad=True)
         z = torch.tensor(CLUSTER_Z, dtype=torch.long)
         edges = full_edge_index(SINGLE_GRAPH)
@@ -129,13 +164,12 @@ class TestMacePolar:
         potential) and the dump sets them independently, so one flag each —
         wired straight through :class:`~molzoo.mace.spec.MACEPolarSpec`.
         """
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False))
+        model = MacePolar(**polar_kwargs(tiny_polar_spec))
         assert model.coulomb_energy.include_self_interaction is True
         assert model.electric_potential_descriptor.include_self_interaction is False
         flipped = MacePolar(
             **polar_kwargs(
                 tiny_polar_spec,
-                compute_forces=False,
                 electrostatic_self_interaction=False,
                 field_self_interaction=True,
             )
@@ -149,8 +183,12 @@ class TestPOLARRemap:
 
     def test_synthetic_state_fills_parameters(self, tiny_polar_spec: MACEPolarSpec):
         """A native-key dump plus one remapped nested weight loads without unfilled params."""
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False))
-        native = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        model = MacePolar(**polar_kwargs(tiny_polar_spec))
+        native = {
+            k: v.detach().clone()
+            for k, v in model.state_dict().items()
+            if torch.is_tensor(v)  # ``_extra_state`` is metadata, not a checkpoint tensor
+        }
         official = {}
         for key, value in native.items():
             if key.endswith("readout.linear_mid.linear.weight"):
@@ -182,7 +220,7 @@ class TestMacePolarKspaceCompile:
         broken today at ``polar.py:241-246`` / ``:266``, which pass ``cell``
         only.
         """
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        model = MacePolar(**polar_kwargs(tiny_polar_spec)).eval()
         coulomb_calls: list[dict[str, object]] = []
         descriptor_calls: list[dict[str, object]] = []
         coulomb_forward = model.coulomb_energy.forward
@@ -218,7 +256,7 @@ class TestMacePolarKspaceCompile:
         self, tiny_polar_spec: MACEPolarSpec
     ) -> None:
         """Bound grids + explicit ``num_graphs`` → 1 graph, 0 breaks."""
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        model = MacePolar(**polar_kwargs(tiny_polar_spec)).eval()
         pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
         atomic_numbers = torch.tensor(CLUSTER_Z, dtype=torch.long)
         edge_index = full_edge_index(SINGLE_GRAPH)
@@ -237,7 +275,7 @@ class TestMacePolarKspaceCompile:
     ) -> None:
         """fp64 tiny-Polar energy in a 10 Å cubic cell is unchanged."""
         torch.manual_seed(0)
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        model = MacePolar(**polar_kwargs(tiny_polar_spec)).eval()
         pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
         atomic_numbers = torch.tensor(CLUSTER_Z, dtype=torch.long)
         edge_index = full_edge_index(SINGLE_GRAPH)
@@ -252,7 +290,7 @@ class TestMacePolarKspaceCompile:
     ) -> None:
         """fp64 tiny-Polar isolated energy is unchanged by the k-grid work."""
         torch.manual_seed(0)
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        model = MacePolar(**polar_kwargs(tiny_polar_spec)).eval()
         pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
         atomic_numbers = torch.tensor(CLUSTER_Z, dtype=torch.long)
         edge_index = full_edge_index(SINGLE_GRAPH)
@@ -279,7 +317,7 @@ class TestMacePolarBindCell:
         An over-capacity cell fails closed and the message names the grid, so
         the k-space overflow is never mistaken for the neighbour list's.
         """
-        model = MacePolar(**polar_kwargs(tiny_polar_spec, compute_forces=False)).eval()
+        model = MacePolar(**polar_kwargs(tiny_polar_spec)).eval()
         field: list[int] = []
         hartree: list[int] = []
         monkeypatch.setattr(

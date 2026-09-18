@@ -1,17 +1,19 @@
-"""PiNet energy + force potential (encoder + monomorphic init-fixed pipeline).
+"""PiNet energy + force potential (encoder + monomorphic init-fixed op).
 
-All branching is in ``__init__`` (``compute_forces``, ``method``). ``forward``
-always runs one static pipeline — energy-only has **no** Derivative session.
+All branching is in ``__init__``: what :meth:`PiNetPotential.forward` derives
+beside the energy is the ``wrt`` given at construction, and ``forward`` is the
+one :class:`molix.autograd.Derivative` built over :meth:`PiNetPotential.energy`.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Sequence
 
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molpot.derivation import EnergyAggregation, func_force_pass, grad_force_pass
+from molix.autograd import Derivative
+from molpot.derivation import EnergyAggregation
 from molpot.derivation.protocol import write_energy
 from molrep.interaction.pinet import OutLayer
 
@@ -19,36 +21,43 @@ from .encoder import PiNet
 
 
 class PiNetPotential(nn.Module):
-    """PiNet energy (+ optional forces) with in-place batch writes.
+    """PiNet energy (+ optional derivatives) with in-place batch writes.
 
     Configuration is fixed at construction; ``forward`` has no flags::
 
         # energy only
-        model = PiNetPotential(..., compute_forces=False)
-        batch = model(batch)  # writes graphs.energy
+        model = PiNetPotential(...)
+        batch = model(batch)  # writes graphs.energy, atoms.energy
 
-        # energy + forces (func = compile-friendly 1-pass)
-        model = PiNetPotential(..., compute_forces=True, method="func")
+        # energy + forces through the derivative op
+        model = PiNetPotential(..., wrt=("atoms.pos",))
         batch = model(batch)  # + atoms.forces
 
-        # train force-matching often prefers method="grad"
-        model = PiNetPotential(..., compute_forces=True, method="grad")
+    ``create_graph`` follows the ambient grad mode, so a training step keeps
+    energy and forces attached to the parameters and an evaluation under
+    ``torch.no_grad()`` gets detached values. Compile the model as a whole with
+    ``molix.compile.Compiler(...)(model)``.
+
+    Args:
+        hidden_dim: Width of the per-layer output MLPs.
+        wrt: TensorFrame keys :meth:`forward` differentiates the energy
+            against (:class:`molix.autograd.Derivative`); ``()`` is energy only.
+        encoder: A built :class:`~molzoo.pinet.encoder.PiNet`; exclusive
+            with ``pinet_kwargs``.
+        **pinet_kwargs: Forwarded to :class:`~molzoo.pinet.encoder.PiNet`.
     """
 
     def __init__(
         self,
         *,
         hidden_dim: int = 64,
-        compute_forces: bool = False,
-        method: Literal["func", "grad"] = "func",
+        wrt: Sequence[str | Sequence[str]] = (),
         encoder: PiNet | None = None,
         **pinet_kwargs: object,
     ) -> None:
         super().__init__()
         if encoder is not None and pinet_kwargs:
             raise ValueError("Pass either encoder=... or PiNet kwargs, not both.")
-        if method not in ("func", "grad"):
-            raise ValueError(f"method must be 'func' or 'grad', got {method!r}")
         if encoder is not None:
             self.encoder = encoder
         else:
@@ -69,24 +78,25 @@ class PiNetPotential(nn.Module):
             ]
         )
         self.energy_aggregation = EnergyAggregation(pooling="sum")
-        self.compute_forces = compute_forces
-        self.method = method
-
-        # Monomorphic pipeline — one bound call path, no runtime if/else.
-        if not compute_forces:
-            self._pipeline = self._write_energy
-        elif method == "func":
-            self._pipeline = self._pipeline_ef_func
-        else:
-            self._pipeline = self._pipeline_ef_grad
+        #: The one derivative route: the op over :meth:`energy`, fixed at
+        #: construction (a bound method, so no submodule is registered).
+        self._derivative = Derivative(self.energy, wrt=wrt)
 
     def forward(self, batch: TensorDict) -> TensorDict:
-        """Run the init-fixed pipeline; mutate ``batch`` in place."""
-        return self._pipeline(batch)
+        """Run the init-fixed op; mutate ``batch`` in place."""
+        return self._derivative(batch)
 
-    # ------------------------------------------------------------------ energy
-    def _write_energy(self, batch: TensorDict) -> TensorDict:
-        """Energy core only — also the energy-only public pipeline."""
+    @property
+    def derivative(self) -> Derivative:
+        """The op :meth:`forward` runs: ``Derivative(self.energy, wrt=...)``, fixed in ``__init__``.
+
+        What a training step marks its leaves through
+        (:meth:`molix.autograd.Derivative.mark_leaves`).
+        """
+        return self._derivative
+
+    def energy(self, batch: TensorDict) -> TensorDict:
+        """The energy alone — ``graphs.energy`` ``(B,)`` and ``atoms.energy`` ``(N,)``, in place."""
         batch = self.encoder(batch)
 
         block_outputs = batch["atoms", "p1_block_outputs"]  # (N, depth, D)
@@ -102,25 +112,3 @@ class PiNetPotential(nn.Module):
         energy = self.energy_aggregation(atom_energy, atom_batch, num_graphs=num_graphs)
         write_energy(batch, energy, atomic_energy=atom_energy)
         return batch
-
-    # ----------------------------------------------------------- force kernels
-    def _pipeline_ef_func(self, batch: TensorDict) -> TensorDict:
-        """Init-fixed: single ``torch.func.grad(..., has_aux=True)`` pass.
-
-        Compile-friendly monomorphic path (no session / no set_non_tensor).
-        """
-        return func_force_pass(self._write_energy, batch)
-
-    def _pipeline_ef_grad(self, batch: TensorDict) -> TensorDict:
-        """Init-fixed: one energy pass + ``torch.autograd.grad`` on positions.
-
-        Often faster for force-supervised training (``create_graph`` when
-        ``self.training``). Energy stays attached (``detach_energy=False``) so
-        an energy loss can share the graph with the force loss.
-        """
-        return grad_force_pass(
-            self._write_energy,
-            batch,
-            create_graph=bool(self.training),
-            detach_energy=False,
-        )

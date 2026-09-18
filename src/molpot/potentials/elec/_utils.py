@@ -22,10 +22,10 @@ def _validate_parameters(
         charges: Atomic charges ``(n_atoms, n_channels)``.
         cell: Unit cell matrix ``(3, 3)``.
         positions: Cartesian coordinates ``(n_atoms, 3)``.
-        neighbor_indices: Edge index pairs ``(n_edges, 2)``.
-        neighbor_distances: Edge distances ``(n_edges,)``.
+        neighbor_indices: Edge index pairs ``(n_pairs, 2)``.
+        neighbor_distances: Edge distances ``(n_pairs,)``.
         periodic: Boolean mask for periodic directions ``(3,)``.
-        pair_mask: Boolean mask for edge filtering ``(n_edges,)``.
+        pair_mask: Boolean mask for edge filtering ``(n_pairs,)``.
         node_mask: Boolean mask for node filtering ``(n_atoms,)``.
         kvectors: Precomputed k-vectors ``(n_kvecs, 3)``.
 

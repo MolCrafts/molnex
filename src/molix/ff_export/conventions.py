@@ -145,8 +145,8 @@ class ConventionTable:
                 unit_factors=MappingProxyType({"k": KCAL_PER_MOL_TO_KJ_PER_MOL}),
                 notes=(
                     "OpenMM PeriodicTorsionForce: E = k[1+cos(nφ−γ)]. "
-                    "IR stores E = (k/idivf)[1+cos]; export k_omm = "
-                    "(k/idivf)×4.184 (idivf absorption = form reparameterize). "
+                    "IR stores E = k[1+cos]; export k_omm = "
+                    "k×4.184 (half-barrier convention = form reparameterize). "
                     "Multi-term bags use DECOMPOSE at emit time. "
                     "AMBER Vn full barrier: k_omm = table.scale_amber_vn(Vn); "
                     "golden Vn=2 → 4.184 kJ/mol."
@@ -169,7 +169,7 @@ class ConventionTable:
             "charge": ConventionRow(
                 ir_term="charge",
                 case=TranslationCase.DIRECT_UNIT_SCALE,
-                unit_factors=MappingProxyType({"q": 1.0}),
+                unit_factors=MappingProxyType({"charge": 1.0}),
                 notes="Elementary charge e is identical in IR and OpenMM.",
             ),
             "improper_harmonic": ConventionRow(

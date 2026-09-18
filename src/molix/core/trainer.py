@@ -16,14 +16,57 @@ import torch
 import torch.nn as nn
 
 from molix import logger as _logger_mod
-from molix.batch.datamodule import DataModuleProtocol
 from molix.config import config
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
 from molix.core.hook import Hook
 from molix.core.state import Stage, TrainState, resolve
 from molix.core.steps import DefaultEvalStep, DefaultTrainStep, Step, batch_to
+from molix.data import DataModuleProtocol
 
 logger = _logger_mod.getLogger(__name__)
+
+
+def snapshot_state_dict(state: dict[str, Any]) -> dict[str, Any]:
+    """Clone a ``state_dict``, including non-tensor extra state.
+
+    Public because a Class-I / Parameterizer ``state_dict`` is not a flat map
+    of tensors — it carries nested force-field tables — so the obvious
+    ``{k: v.detach().clone()}`` raises, and every caller that snapshots one
+    (the smoke warmup, the packed-vs-single alignment gate) needs this exact
+    behaviour rather than its own near-copy.
+    """
+    out: dict[str, Any] = {}
+    for key, value in state.items():
+        if torch.is_tensor(value):
+            out[key] = value.detach().clone()
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def restore_state_dict(module: nn.Module, snap: dict[str, Any]) -> None:
+    """Load a smoke snapshot, dropping handles warmup registered.
+
+    Class-I keeps the assembled ``_physics`` container off the module tree
+    (``ForceAwareModel._hold``). A compiled step can still ``add_module`` it,
+    so the post-warmup ``state_dict`` grows live OPLS tables
+    (``_physics.bond.k``, …) the snapshot never had (profile 2026-09-13).
+    Drop those new top-level names, then load strictly.
+    """
+    snap_roots = {k.split(".", 1)[0] for k in snap}
+    extra_roots: set[str] = set()
+    for key in module.state_dict():
+        root = key.split(".", 1)[0]
+        if root not in snap_roots:
+            extra_roots.add(root)
+    for name in extra_roots:
+        if name in module._modules:
+            del module._modules[name]
+        elif name in module._parameters:
+            del module._parameters[name]
+        elif name in module._buffers:
+            del module._buffers[name]
+    module.load_state_dict(snap)
 
 
 class Trainer:
@@ -343,10 +386,12 @@ class Trainer:
         - **Real-data check.** Running actual dataloader batches surfaces
           shape / dtype / NaN problems immediately, before training starts. A
           non-finite warmup loss aborts loudly.
-        - **Configured objective.** The loss comes from
-          ``train_step.compute_loss`` when the Step provides that seam (so a
-          Step owning its own losses, i.e. ``Trainer(loss_fn=None)``, warms up
-          the objective it will actually train), else from ``loss_fn``.
+        - **The configured region.** Forward and objective come from
+          ``train_step.forward_loss`` — the very callable ``train`` runs,
+          whose traced body :meth:`compile` (``step=True``) swapped for its
+          compiled wrapper — so a Step that owns its losses
+          (``Trainer(loss_fn=None)``) warms up the objective it will train,
+          and smoke compiles exactly the graph training uses.
 
         The pass fires **no hooks** and does **not** advance ``global_step``, so
         nothing reaches the journal, metrics, checkpoints or the step counters.
@@ -376,7 +421,10 @@ class Trainer:
         t0 = time.perf_counter()
 
         # Snapshot every mutable piece so the warmup is invisible to the real run.
-        model_snap = {k: v.detach().clone() for k, v in self.model.state_dict().items()}
+        # Class-I / Parameterizer state_dicts carry nested dicts (force-field
+        # tables), not only tensors — cloning with ``.detach()`` raises
+        # (profile 2026-09-13).
+        model_snap = snapshot_state_dict(self.model.state_dict())
         opt_snap = copy.deepcopy(self.optimizer.state_dict())
         scaler_snap = copy.deepcopy(self.scaler.state_dict()) if self.scaler is not None else None
         cpu_rng = torch.get_rng_state()
@@ -386,11 +434,6 @@ class Trainer:
         amp_enabled = bool(config["use_amp"])
         amp_dtype = config["amp_dtype"]
         device_type = model_device.type
-
-        # Warm up the *configured* objective: a Step that owns its losses via
-        # the ``compute_loss`` seam (Trainer(loss_fn=None)) must be routed
-        # through, or smoke would compile a different graph than training uses.
-        compute = getattr(self.train_step, "compute_loss", None)
 
         try:
             self.model.train()
@@ -410,12 +453,10 @@ class Trainer:
                     else nullcontext()
                 )
                 self.optimizer.zero_grad(set_to_none=True)
+                # The one region: the same attribute ``train`` calls and
+                # ``compile(step=True)`` swaps, so smoke warms the real graph.
                 with ctx:
-                    predictions = self.model(batch)
-                    if compute is not None:
-                        loss = compute(self, self.state, batch, predictions)
-                    else:
-                        loss = self.loss_fn(predictions, batch)
+                    loss, _ = self.train_step.forward_loss(self, self.state, batch)
                 if not torch.isfinite(loss).all():
                     raise RuntimeError(
                         f"Smoke warmup produced a non-finite loss ({loss.detach()}) on "
@@ -440,7 +481,7 @@ class Trainer:
                     logger.info(f"Smoke warmup: eval-graph warmup skipped ({exc!r}).")
         finally:
             # Restore: the real run must start from the exact pre-warmup state.
-            self.model.load_state_dict(model_snap)
+            restore_state_dict(self.model, model_snap)
             self.optimizer.load_state_dict(opt_snap)
             if self.scaler is not None and scaler_snap is not None:
                 self.scaler.load_state_dict(scaler_snap)
@@ -603,6 +644,20 @@ class Trainer:
             self.state.increment_epoch()
             epoch += 1
 
+        if self.state.global_step == start_global_step:
+            # Zero steps is a legitimate request (``max_steps`` already met),
+            # but after a resume it is almost always an accident: the restored
+            # epoch counter already satisfies ``max_epochs``, so the loop never
+            # runs and the run looks successful while training nothing. Caught
+            # on a Class-I resume gate that reported success for a no-op.
+            logger.warning(
+                f"Training ran 0 steps (epoch {start_epoch} of limit {epoch_limit}, "
+                f"step {start_global_step} of limit {max_steps}). "
+                "After a resume this usually means the restored epoch or step "
+                "counter already meets the limit — raise max_epochs/max_steps "
+                "above what the checkpoint carries."
+            )
+
         self._call_hooks("on_train_end", self, self.state)
 
         elapsed = time.perf_counter() - start_time
@@ -621,25 +676,58 @@ class Trainer:
         fullgraph: bool = False,
         dynamic: bool | None = None,
         mode: str | None = None,
+        step: bool = True,
     ) -> "Trainer":
-        """Compile the model with ``torch.compile`` for optimized execution.
+        """Compile the training step — or the model alone — with ``torch.compile``.
+
+        ``step=True`` (default) compiles the traced body of
+        ``train_step.forward_loss`` and ``eval_step.forward_loss``
+        (``_traced_forward_loss``) in place: forward pass and objective are
+        one traced region and AOTAutograd emits its backward, so ``backward()``
+        runs compiled as well. ``forward_loss`` itself stays eager — it is the
+        prologue that marks the derivative op's leaves on the batch before
+        the region. Outside the region, eager Python as before: the
+        accumulation window, ``GradScaler``, the ``on_after_backward`` hooks,
+        the optimizer and the LR scheduler. The model object is untouched, so
+        checkpoints and ``state_dict`` see the plain module. ``step=False``
+        compiles ``self.model`` alone (the loss stays eager) for a step whose
+        objective cannot trace — a routing step such as
+        :class:`~molix.core.steps.multitask.MultiTaskTrainStep`, whose
+        ``TaskRouter.route`` host-syncs on the task label, declares that
+        through ``untraceable`` and is refused with ``step=True``.
 
         Can be chained after construction::
 
-            # Force training (energy → functorch force → loss is one fullgraph):
-            # the benchmarked winning config — ~10x eager on PiNet/GH200.
+            # Force training on padded, fixed-shape batches: one region per
+            # step under CUDA graphs — the benchmarked winning config.
             trainer = Trainer(model, ...).compile(cuda_graphs=True)
 
             # Custom config:
             trainer = Trainer(model, ...).compile(mode="max-autotune")
+
+            # A step whose objective host-syncs: model only.
+            trainer = Trainer(model, None, ..., train_step=MultiTaskTrainStep(router))
+            trainer.compile(step=False)
+
+        Which shipped losses trace is listed on
+        :class:`~molix.core.steps.train.DefaultTrainStep`. A force-supervised
+        region (``Derivative(..., wrt=("atoms.pos",))``) is one graph with
+        zero breaks on stock torch 2.15: ``forward_loss`` marks the position
+        leaf *before* the traced body (:meth:`molix.autograd.Derivative.mark_leaves`),
+        so it is a graph input — a leaf made inside the region would leak
+        through the attached forces and break there ("requires_grad_()
+        intermediate leaked as output", pytorch/pytorch#196653). ``fullgraph=True``
+        and ``cuda_graphs=True`` are therefore available for force training;
+        see ``docs/molix/explanation/throughput-and-compilation.md``.
 
         Args:
             cuda_graphs: Apply :data:`molix.compile.Compiler.CUDA_GRAPH_PRESET`
                 (``backend="inductor", fullgraph=True, dynamic=False,
                 mode="reduce-overhead"``) — inductor fusion + CUDA graphs, the
                 fastest force-training config. Overrides the four params below.
-                REQUIRES static shapes: register
-                :class:`molix.batch.PadMolecularBatch` and set the train
+                REQUIRES static shapes: pass
+                :class:`~molix.data.FrameCollator` with a
+                :class:`~molix.data.MoleculePadder` and set the train
                 loader's ``drop_last=True`` (see
                 ``docs/molix/explanation/throughput-and-compilation.md``).
             backend: Compile backend (default: ``"inductor"``).
@@ -647,21 +735,44 @@ class Trainer:
             dynamic: Enable dynamic shape tracing.
             mode: Compile mode (``"default"``, ``"reduce-overhead"``,
                 ``"max-autotune"``).
+            step: Compile the two steps' ``forward_loss`` (``True``, default)
+                or the model alone (``False``).
 
         Returns:
             ``self`` for method chaining.
+
+        Raises:
+            ValueError: ``step=True`` and a step declares its objective
+                untraceable (``train_step.untraceable`` /
+                ``eval_step.untraceable``).
         """
         from molix.compile import Compiler
 
-        self.model = Compiler(
+        compiler = Compiler(
             cuda_graphs=cuda_graphs,
             backend=backend,
             fullgraph=fullgraph,
             dynamic=dynamic,
             mode=mode,
-        )(self.model)
-        # Keep checkpoint in sync so state_dict() sees the compiled wrapper
-        self._checkpoint.model = self.model
+        )
+        if not step:
+            self.model = compiler(self.model)
+            # Keep checkpoint in sync so state_dict() sees the compiled wrapper
+            self._checkpoint.model = self.model
+            return self
+
+        for target in (self.train_step, self.eval_step):
+            reason = getattr(target, "untraceable", None)
+            if reason:
+                raise ValueError(
+                    f"compile(step=True): {type(target).__name__}.forward_loss cannot be "
+                    f"traced — {reason}. Pass step=False to compile the model alone."
+                )
+        # A bound method stays callable with the same signature, and the
+        # eager ``forward_loss`` (the leaf prologue) reads the instance
+        # attribute, so the swap is the whole install.
+        self.train_step._traced_forward_loss = compiler(self.train_step._traced_forward_loss)
+        self.eval_step._traced_forward_loss = compiler(self.eval_step._traced_forward_loss)
         return self
 
     def _log_setup_banner(

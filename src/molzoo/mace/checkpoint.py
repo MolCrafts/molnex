@@ -215,7 +215,13 @@ class CheckpointRemap:
                 linear weight, the analytic ``nπ/r_max`` for ``bessel.freqs``).
         """
         renamed = self.rename(official_state)
-        own = model.state_dict()
+        # ``_extra_state`` is a module's own metadata (``get_extra_state``),
+        # not a tensor: ``AtomicReferenceEnergy`` carries its ``scheme`` and
+        # ``units`` there. An upstream checkpoint has no such key, and the
+        # model's own must be left as constructed — so it takes no part in the
+        # name, shape or coverage preflight below, all of which speak tensors.
+        renamed = {k: v for k, v in renamed.items() if not _is_extra_state(k)}
+        own = {k: v for k, v in model.state_dict().items() if not _is_extra_state(k)}
 
         unexpected = sorted(set(renamed) - set(own))
         if unexpected and self._on_unexpected == "raise":
@@ -259,7 +265,20 @@ class CheckpointRemap:
         if unfilled:
             raise RuntimeError(f"parameters not covered by the checkpoint: {unfilled}")
         missing, _ = model.load_state_dict(renamed, strict=False)
-        return sorted(set(missing) - parameters), unexpected
+        return sorted(set(missing) - parameters - {k for k in missing if _is_extra_state(k)}), (
+            unexpected
+        )
+
+
+def _is_extra_state(key: str) -> bool:
+    """Whether *key* is a module's ``get_extra_state`` slot rather than a tensor.
+
+    ``torch.nn.Module`` appends this fixed suffix for any module that defines
+    :meth:`~torch.nn.Module.get_extra_state`; the value is whatever that method
+    returns (a ``dict`` for :class:`~molpot.heads.energy.AtomicReferenceEnergy`),
+    so every tensor-shaped check has to step around it.
+    """
+    return key.endswith("_extra_state")
 
 
 polar_keys: dict[str, str | None] = {

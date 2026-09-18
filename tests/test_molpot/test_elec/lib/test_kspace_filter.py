@@ -64,68 +64,66 @@ class TestFilter:
 
     def test_meshes_consistent_size(self):
         # make sure we get conistent mesh sizes
-        self.mymesh1.compute_weights(self.points)
-        mesh = self.mymesh1.points_to_mesh(self.weights)
+        stencil = self.mymesh1.compute_weights(self.points, self.cell1)
+        mesh = self.mymesh1.points_to_mesh(self.weights, stencil)
         # nb - the third value is different because of the real-valued FT
-        assert mesh.shape[1:3] == self.myfilter1._kvectors.shape[:-2]
+        assert mesh.shape[1:3] == self.myfilter1.kfilter(self.cell1).shape[:-1]
 
     def test_meshes_inconsistent_size(self):
         # make sure we get consistent mesh sizes
-        self.mymesh1.compute_weights(self.points)
-        mesh = self.mymesh1.points_to_mesh(self.weights)
+        stencil = self.mymesh1.compute_weights(self.points, self.cell1)
+        mesh = self.mymesh1.points_to_mesh(self.weights, stencil)
         match = "The real-space mesh is inconsistent with the k-space grid."
         with pytest.raises(ValueError, match=match):
-            self.myfilter2.forward(mesh)
+            self.myfilter2.forward(mesh, self.cell2)
 
     def test_kernel_noop(self):
         # make sure that a filter of ones recovers the initial mesh
-        self.mymesh1.compute_weights(self.points)
-        mesh = self.mymesh1.points_to_mesh(self.weights)
-        mesh_transformed = self.myfilter_noop.forward(mesh)
+        stencil = self.mymesh1.compute_weights(self.points, self.cell1)
+        mesh = self.mymesh1.points_to_mesh(self.weights, stencil)
+        mesh_transformed = self.myfilter_noop.forward(mesh, self.cell1)
 
-        torch.allclose(mesh, mesh_transformed, atol=1e-6, rtol=0)
+        assert torch.allclose(mesh, mesh_transformed, atol=1e-6, rtol=0)
 
     def test_filter_linear(self):
         # checks that the filter (as well as the mesh interpolator) are linear
-        self.mymesh1.compute_weights(self.points)
-        mesh1 = self.mymesh1.points_to_mesh(self.weights)
+        stencil = self.mymesh1.compute_weights(self.points, self.cell1)
+        mesh1 = self.mymesh1.points_to_mesh(self.weights, stencil)
 
         mesh2 = torch.exp(mesh1)
 
-        tmesh1 = self.myfilter1.forward(mesh1)
-        tmesh2 = self.myfilter1.forward(mesh2)
-        tmesh12 = self.myfilter1.forward(mesh1 + 0.3 * mesh2)
+        tmesh1 = self.myfilter1.forward(mesh1, self.cell1)
+        tmesh2 = self.myfilter1.forward(mesh2, self.cell1)
+        tmesh12 = self.myfilter1.forward(mesh1 + 0.3 * mesh2, self.cell1)
 
-        torch.allclose(tmesh12, tmesh1 + 0.3 * tmesh2)
+        assert torch.allclose(tmesh12, tmesh1 + 0.3 * tmesh2, atol=1e-6, rtol=1e-5)
 
 
-@pytest.mark.parametrize("cell_update", [None, torch.eye(3)])
-@pytest.mark.parametrize("ns_mesh_update", [None, torch.tensor([3, 3, 3])])
-def test_update(cell_update, ns_mesh_update):
-    cell = 2 * torch.eye(3)
+def test_update():
+    kernel_filter = KSpaceFilter(
+        cell=2 * torch.eye(3),
+        ns_mesh=torch.tensor([2, 2, 2]),
+        kernel=TestKernel.DemoKernel(1.0),
+    )
+
+    kernel_filter.update(ns_mesh=torch.tensor([3, 3, 3]))
+
+    assert torch.all(kernel_filter.ns_mesh == torch.tensor([3, 3, 3]))
+
+
+@pytest.mark.parametrize("cell", [2 * torch.eye(3), torch.randn(3, 3)])
+def test_kfilter_follows_the_cell_and_the_kernel_it_is_called_with(cell):
+    """Nothing is cached: the filter is the live kernel on the k-grid of the given cell."""
     ns_mesh = torch.tensor([2, 2, 2])
-
     kernel = TestKernel.DemoKernel(1.0)
-    kernel_filter = KSpaceFilter(cell=cell, ns_mesh=ns_mesh, kernel=kernel)
+    kernel_filter = KSpaceFilter(cell=torch.eye(3), ns_mesh=ns_mesh, kernel=kernel)
 
-    # update param of demo kernel and check if updates are consistent.
+    # A kernel parameter changed after construction is seen on the next call.
     kernel.param = 2.0
 
-    kernel_filter.update(cell=cell_update, ns_mesh=ns_mesh_update)
-
-    if cell_update is not None:
-        assert torch.all(kernel_filter.cell == cell_update)
-
-    if ns_mesh_update is not None:
-        assert torch.all(kernel_filter.ns_mesh == ns_mesh_update)
-
-    if cell_update is not None and ns_mesh_update is not None:
-        kvectors = generate_kvectors_for_mesh(ns=ns_mesh_update, cell=cell_update)
-        k_sq = torch.linalg.norm(kvectors, dim=3) ** 2
-
-        torch.testing.assert_close(kernel_filter._k_sq, k_sq)
-
-    torch.testing.assert_close(kernel_filter._kfilter, kernel.kernel_from_k_sq(kernel_filter._k_sq))
+    kvectors = generate_kvectors_for_mesh(ns=ns_mesh, cell=cell)
+    k_sq = torch.linalg.norm(kvectors, dim=3) ** 2
+    torch.testing.assert_close(kernel_filter.kfilter(cell), kernel.kernel_from_k_sq(k_sq))
 
 
 def test_update_ns_wrong_shape():
@@ -140,7 +138,7 @@ def test_update_ns_wrong_shape():
         kernel_filter.update(ns_mesh=torch.tensor([2, 2]))
 
 
-def test_update_cell_wrong_shape():
+def test_kfilter_cell_wrong_shape():
     kernel_filter = KSpaceFilter(
         cell=torch.eye(3),
         ns_mesh=torch.tensor([2, 2, 2]),
@@ -149,10 +147,10 @@ def test_update_cell_wrong_shape():
 
     match = "cell of shape \\[2, 3\\] should be of shape \\(3, 3\\)"
     with pytest.raises(ValueError, match=match):
-        kernel_filter.update(cell=torch.tensor([[1.0, 0, 0], [0, 1, 0]]))
+        kernel_filter.kfilter(torch.tensor([[1.0, 0, 0], [0, 1, 0]]))
 
 
-def test_update_devices_ns_cell():
+def test_kfilter_devices_ns_cell():
     kernel_filter = KSpaceFilter(
         cell=torch.eye(3),
         ns_mesh=torch.tensor([2, 2, 2]),
@@ -161,7 +159,7 @@ def test_update_devices_ns_cell():
 
     match = "`cell` and `ns_mesh` are on different devices, got meta and cpu"
     with pytest.raises(ValueError, match=match):
-        kernel_filter.update(cell=torch.eye(3, device="meta"))
+        kernel_filter.kfilter(torch.eye(3, device="meta"))
 
 
 def test_fft_modes():

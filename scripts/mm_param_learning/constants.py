@@ -53,6 +53,16 @@ V0_PROD_RUN_IDS: dict[str, str] = {
 }
 """Pending molexp run ids for the prod-day1 campaign, one per model size."""
 
+V0_PROD_DAY2_EXPERIMENT_SLUG: str = "universal-class-i-v0-prod-day2-gh200"
+"""Continue from prod-day1 ``last.pt``. Same science pins, new molexp experiment."""
+
+V0_PROD_DAY1_HOST_RUNS: dict[str, str] = {
+    "small": "prod-day1-small-20260823T193943Z",
+    "medium": "prod-day1-medium-20260823T193943Z",
+    "large": "prod-day1-large-20260824T013930Z",
+}
+"""Host training trees under molnex ``runs/`` that hold day-1 ``last.pt``."""
+
 PROTOCOL_EXPERIMENT_SLUG: str = V0_EXPERIMENT_SLUG
 """Alias kept so older setup callers resolve to v0."""
 

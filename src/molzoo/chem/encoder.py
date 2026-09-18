@@ -55,6 +55,8 @@ class ChemPerception(ChemEncoder):
             num_elements=spec.num_elements,
             hidden_dim=spec.hidden_dim,
             num_bond_types=spec.num_bond_types,
+            n_blocks=spec.n_blocks,
+            local_attention=spec.local_attention,
         )
         self.config = spec
 

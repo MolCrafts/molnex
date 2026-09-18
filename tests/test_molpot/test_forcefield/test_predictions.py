@@ -188,7 +188,7 @@ class _CountingHessianDerivation(nn.Module):
 
 
 class _NoQChargeModel(nn.Module):
-    """``charge_model`` that writes no ``q`` — the silent-zero trap."""
+    """``charge_model`` that writes no ``charge`` — the silent-zero trap."""
 
     def write_forcefield(
         self,
@@ -240,11 +240,11 @@ def _charge_model(head: nn.Module | None = None) -> AtomicChargeModel:
 
 class TestForceFieldPredictions:
     def test_supported_keys_are_the_four_task_predictions(self) -> None:
-        assert ForceFieldPredictions.SUPPORTED_KEYS == ("energy", "forces", "hessian", "q")
+        assert ForceFieldPredictions.SUPPORTED_KEYS == ("energy", "forces", "hessian", "charge")
 
     @pytest.mark.parametrize(
         "keys",
-        [("energy",), ("energy", "forces"), ("energy", "hessian"), ("q",)],
+        [("energy",), ("energy", "forces"), ("energy", "hessian"), ("charge",)],
     )
     def test_call_returns_exactly_declared_keys(self, keys: tuple[str, ...]) -> None:
         model = _bond_model(charge_model=_charge_model())
@@ -272,7 +272,7 @@ class TestForceFieldPredictions:
         assert derivation.calls == 1
 
     def test_q_only_skips_potentials_assembly(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``keys=("q",)`` reads topology charges — no energy path is built."""
+        """``keys=("charge",)`` reads topology charges — no energy path is built."""
         assembled: list[str] = []
         original = ForceField.to_potentials
 
@@ -282,8 +282,8 @@ class TestForceFieldPredictions:
 
         monkeypatch.setattr(ForceField, "to_potentials", counting)
         model = _bond_model(charge_model=_charge_model())
-        out = ForceFieldPredictions(model, keys=("q",))(_two_atom_bond_batch())
-        assert set(out) == {"q"}
+        out = ForceFieldPredictions(model, keys=("charge",))(_two_atom_bond_batch())
+        assert set(out) == {"charge"}
         assert assembled == []
 
     def test_potentials_are_bound_before_their_first_energy_call(
@@ -311,22 +311,18 @@ class TestForceFieldPredictions:
         binds: list[str] = []
         bound_on_entry: list[bool] = []
         bind_topology = Potentials.bind_topology
-        calc_energy_forces = Potentials.calc_energy_forces
+        energy = Potentials.energy
 
-        def recording_bind(
-            self: Potentials, system: TensorDict, *, pos: torch.Tensor | None = None
-        ) -> None:
+        def recording_bind(self: Potentials, system: TensorDict) -> None:
             binds.append(repr(self.forcefield.style_names()))
-            bind_topology(self, system, pos=pos)
+            bind_topology(self, system)
 
-        def recording_energy_forces(
-            self: Potentials, system: TensorDict, *, pos: torch.Tensor | None = None
-        ) -> tuple[torch.Tensor, torch.Tensor]:
+        def recording_energy(self: Potentials, system: TensorDict) -> TensorDict:
             bound_on_entry.append(self._exclusions is not None)
-            return calc_energy_forces(self, system, pos=pos)
+            return energy(self, system)
 
         monkeypatch.setattr(Potentials, "bind_topology", recording_bind)
-        monkeypatch.setattr(Potentials, "calc_energy_forces", recording_energy_forces)
+        monkeypatch.setattr(Potentials, "energy", recording_energy)
 
         adapter = ForceFieldPredictions(_bond_model(), keys=("energy", "forces"))
         adapter(_two_atom_bond_batch())
@@ -335,10 +331,10 @@ class TestForceFieldPredictions:
         assert bound_on_entry == [True]
 
     def test_charge_solve_runs_once_per_call(self) -> None:
-        """One model forward per call: ``q`` is read, never re-solved."""
+        """One model forward per call: ``charge`` is read, never re-solved."""
         head = _ConstantChiEtaHead()
         model = _bond_model(charge_model=_charge_model(head))
-        ForceFieldPredictions(model, keys=("energy", "q"))(_two_atom_bond_batch())
+        ForceFieldPredictions(model, keys=("energy", "charge"))(_two_atom_bond_batch())
         assert head.calls == 1
 
     def test_energy_parity_with_direct_potentials_path(self) -> None:
@@ -359,10 +355,14 @@ class TestForceFieldPredictions:
         model = _bond_model()
         batch = _two_atom_bond_batch()
         pots = model(batch).to_potentials()
-        expected = ForceDerivation(method="autograd")(
-            lambda p: pots.calc_energy(batch, pos=p),
-            batch["atoms", "pos"],
-        )
+        pos = batch["atoms", "pos"]
+
+        def energy_at(leaf: torch.Tensor) -> torch.Tensor:
+            batch["atoms", "pos"] = leaf
+            return pots.calc_energy(batch)
+
+        expected = ForceDerivation()(energy_at, pos)
+        batch["atoms", "pos"] = pos
         forces = ForceFieldPredictions(model, keys=("forces",)).forces(batch)
         assert forces.shape == (2, 3)
         assert torch.allclose(forces, expected, atol=1e-10, rtol=0.0)
@@ -427,7 +427,7 @@ class TestForceFieldPredictions:
         electronegative atom carries the negative charge.
         """
         model = _bond_model(charge_model=_charge_model())
-        charges = ForceFieldPredictions(model, keys=("q",)).charges(_two_atom_bond_batch())
+        charges = ForceFieldPredictions(model, keys=("charge",)).charges(_two_atom_bond_batch())
         expected = torch.tensor(list(GOLDEN_Q), dtype=DTYPE)
         assert charges.shape == (2,)
         assert torch.allclose(charges.detach(), expected, atol=1e-10, rtol=0.0)
@@ -437,12 +437,12 @@ class TestForceFieldPredictions:
         model = _bond_model(charge_model=charge_model)
         batch = _two_atom_bond_batch()
         expected = charge_model.charges(_features()["atoms"], batch)
-        charges = ForceFieldPredictions(model, keys=("q",)).charges(batch)
+        charges = ForceFieldPredictions(model, keys=("charge",)).charges(batch)
         assert torch.allclose(charges, expected, atol=1e-10, rtol=0.0)
 
     def test_charges_are_geometry_independent(self) -> None:
         """``dq/dx = 0`` for the diagonal hardness kernel — pins force consistency."""
-        adapter = ForceFieldPredictions(_bond_model(charge_model=_charge_model()), keys=("q",))
+        adapter = ForceFieldPredictions(_bond_model(charge_model=_charge_model()), keys=("charge",))
         first = adapter.charges(_two_atom_bond_batch(r=1.5))
         second = adapter.charges(_two_atom_bond_batch(r=2.7))
         assert torch.equal(first, second)
@@ -479,7 +479,7 @@ class TestForceFieldPredictions:
 
     def test_q_without_charge_model_raises(self) -> None:
         with pytest.raises(ValueError, match="charge_model"):
-            ForceFieldPredictions(_bond_model(), keys=("q",))
+            ForceFieldPredictions(_bond_model(), keys=("charge",))
 
     def test_hessian_without_derivation_raises(self) -> None:
         with pytest.raises(ValueError, match="derivation"):
@@ -491,6 +491,6 @@ class TestForceFieldPredictions:
             atom_head=LJParameterHead(feature_dim=2, hidden_dim=4).double(),
             charge_model=_NoQChargeModel(),
         )
-        adapter = ForceFieldPredictions(model, keys=("q",))
-        with pytest.raises(RuntimeError, match="q"):
+        adapter = ForceFieldPredictions(model, keys=("charge",))
+        with pytest.raises(RuntimeError, match="charge"):
             adapter.charges(_two_atom_bond_batch())

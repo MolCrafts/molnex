@@ -120,7 +120,7 @@ void test_meta_string_array() {
   const std::string json = R"json({
   "device": "cuda",
   "lammps": {
-    "inputs": ["Z", "pos", "edge_index"],
+    "inputs": ["Z", "pos", "pair_index"],
     "outputs": ["energy", "forces", "virial"]
   }
 })json";
@@ -131,7 +131,7 @@ void test_meta_string_array() {
                                       std::to_string(inputs.size()));
   expect_string(inputs[0], "Z", "inputs[0]");
   expect_string(inputs[1], "pos", "inputs[1]");
-  expect_string(inputs[2], "edge_index", "inputs[2]");
+  expect_string(inputs[2], "pair_index", "inputs[2]");
 
   const std::vector<std::string> outputs = lammps.get_string_array("outputs");
   expect_true(outputs.size() == 3, "outputs: expected 3 elements, got " +

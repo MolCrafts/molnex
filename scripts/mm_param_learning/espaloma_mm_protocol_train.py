@@ -30,8 +30,8 @@ Training composition (``universal-class-i-13-grad-audit``)
 
 There is **no** hand-rolled epoch loop and **no** flat conformer pool here.
 The script composes molix primitives — ``ConformerDataset`` +
-``EnergyTaskSamplerSource`` (:class:`molix.batch.TaskMixtureBatchSampler`)
-behind a :class:`molix.batch.DataModule`, a
+``EnergyTaskSamplerSource`` (:class:`molix.data.TaskMixtureBatchSampler`)
+behind a :class:`molix.data.DataModule`, a
 :class:`molix.core.steps.MultiTaskTrainStep` routing the single ``energy``
 task, and :class:`molix.core.trainer.Trainer` with
 ``GradClipHook`` / ``MetricsHook`` / ``CheckpointHook(save_best=True)`` /
@@ -83,12 +83,6 @@ from molhub.dataset import PhalkethohMMDataset
 from molpy import Frame
 from tensordict import TensorDict
 
-from molix.batch import (
-    DataModule,
-    MoleculeCollator,
-    TaskMixtureBatchSampler,
-    TotalCharge,
-)
 from molix.core.audit import TaskGradientProbe
 from molix.core.hook import BaseHook
 from molix.core.metrics import MAE, RMSE
@@ -101,6 +95,13 @@ from molix.core.steps import (
     batch_to,
 )
 from molix.core.trainer import Trainer
+from molix.data import (
+    BaseDataset,
+    DataModule,
+    MoleculeCollator,
+    TaskMixtureBatchSampler,
+    TotalCharge,
+)
 from molix.hooks import (
     CheckpointHook,
     EarlyStop,
@@ -108,22 +109,7 @@ from molix.hooks import (
     GradientBalanceHook,
     MetricsHook,
 )
-from molix.store import BaseDataset
-from molpot.charge import (
-    AtomicChargeModel,
-    ChiEtaHead,
-    DiagonalHardnessKernel,
-    ElectronegativityEqualization,
-)
-from molpot.composition.heads import LJParameterHead
-from molpot.composition.mm_heads import (
-    AngleParamHead,
-    BondParamHead,
-    ImproperParamHead,
-    ProperTorsionParamHead,
-)
-from molpot.forcefield import ForceField, OPLSAAForceField, Parameterizer
-from molrep.chem.encoder import ChemEncoder
+from molpot.forcefield import ForceField, Parameterizer
 
 # Espaloma notebook protocol pins
 ESPALOMA_SPLIT_SEED = 2666
@@ -151,110 +137,6 @@ BEST_METRIC = ("eval", "MAE")
 GRAD_AUDIT_PROBE_BATCHES = 4
 
 
-def enumerate_angles(
-    atomi: np.ndarray, atomj: np.ndarray, n_atoms: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """i-j-k angles from undirected bonds (j central)."""
-    adj: list[list[int]] = [[] for _ in range(n_atoms)]
-    for i, j in zip(atomi.tolist(), atomj.tolist(), strict=True):
-        adj[i].append(j)
-        adj[j].append(i)
-    ii: list[int] = []
-    jj: list[int] = []
-    kk: list[int] = []
-    for j in range(n_atoms):
-        nbrs = adj[j]
-        for a in range(len(nbrs)):
-            for b in range(a + 1, len(nbrs)):
-                ii.append(nbrs[a])
-                jj.append(j)
-                kk.append(nbrs[b])
-    if not ii:
-        z = np.zeros(0, dtype=np.int64)
-        return z, z, z
-    return (
-        np.asarray(ii, dtype=np.int64),
-        np.asarray(jj, dtype=np.int64),
-        np.asarray(kk, dtype=np.int64),
-    )
-
-
-def enumerate_propers(
-    atomi: np.ndarray, atomj: np.ndarray, n_atoms: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """i-j-k-l propers with central bond j-k."""
-    adj: list[list[int]] = [[] for _ in range(n_atoms)]
-    edges = list(zip(atomi.tolist(), atomj.tolist(), strict=True))
-    for i, j in edges:
-        adj[i].append(j)
-        adj[j].append(i)
-    ii: list[int] = []
-    jj: list[int] = []
-    kk: list[int] = []
-    ll: list[int] = []
-    seen: set[tuple[int, int]] = set()
-    for a, b in edges:
-        for j, k in ((a, b), (b, a)):
-            if (j, k) in seen:
-                continue
-            seen.add((j, k))
-            seen.add((k, j))
-            for i in adj[j]:
-                if i == k:
-                    continue
-                for l in adj[k]:
-                    if l == j or l == i:
-                        continue
-                    ii.append(i)
-                    jj.append(j)
-                    kk.append(k)
-                    ll.append(l)
-    if not ii:
-        z = np.zeros(0, dtype=np.int64)
-        return z, z, z, z
-    return (
-        np.asarray(ii, dtype=np.int64),
-        np.asarray(jj, dtype=np.int64),
-        np.asarray(kk, dtype=np.int64),
-        np.asarray(ll, dtype=np.int64),
-    )
-
-
-def enumerate_impropers(
-    atomi: np.ndarray, atomj: np.ndarray, n_atoms: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Center-first impropers for every trivalent atom.
-
-    molrs / batch layout: ``atomi`` is the center, ``atomj/k/l`` the three
-    outer legs (sorted). Degree ≠ 3 contributes nothing.
-    """
-    adj: list[list[int]] = [[] for _ in range(n_atoms)]
-    for i, j in zip(atomi.tolist(), atomj.tolist(), strict=True):
-        adj[i].append(j)
-        adj[j].append(i)
-    ii: list[int] = []
-    jj: list[int] = []
-    kk: list[int] = []
-    ll: list[int] = []
-    for center, nbrs in enumerate(adj):
-        if len(nbrs) != 3:
-            continue
-        a, b, c = sorted(nbrs)
-        ii.append(center)
-        jj.append(a)
-        kk.append(b)
-        ll.append(c)
-    if not ii:
-        z = np.zeros(0, dtype=np.int64)
-        return z, z, z, z
-    return (
-        np.asarray(ii, dtype=np.int64),
-        np.asarray(jj, dtype=np.int64),
-        np.asarray(kk, dtype=np.int64),
-        np.asarray(ll, dtype=np.int64),
-    )
-
-
 def label_frame(fr) -> Frame:
     """Label one MolHub frame with its valence families and task code.
 
@@ -273,12 +155,9 @@ def label_frame(fr) -> Frame:
     """
     atoms = fr["atoms"]
     bonds = fr["bonds"]
-    atomi = np.asarray(bonds["atomi"], dtype=np.int64)
-    atomj = np.asarray(bonds["atomj"], dtype=np.int64)
-    n_atoms = int(np.asarray(atoms["number"]).shape[0])
-    ang_i, ang_j, ang_k = enumerate_angles(atomi, atomj, n_atoms)
-    pr_i, pr_j, pr_k, pr_l = enumerate_propers(atomi, atomj, n_atoms)
-    im_i, im_j, im_k, im_l = enumerate_impropers(atomi, atomj, n_atoms)
+    from scripts.mm_param_learning.class_i_fit import _valence_blocks
+
+    valence = _valence_blocks(fr)
 
     meta = {k: getattr(v, "value", v) for k, v in (getattr(fr, "meta", None) or {}).items()}
     meta["task"] = TASK_CODE_ENERGY
@@ -290,23 +169,8 @@ def label_frame(fr) -> Frame:
     out = Frame(meta=meta)
     out["atoms"] = {column: atoms[column] for column in atoms.keys()}
     out["bonds"] = {column: bonds[column] for column in bonds.keys()}
-    out["angles"] = {
-        "atomi": np.asarray(ang_i, dtype=np.int64),
-        "atomj": np.asarray(ang_j, dtype=np.int64),
-        "atomk": np.asarray(ang_k, dtype=np.int64),
-    }
-    out["propers"] = {
-        "atomi": np.asarray(pr_i, dtype=np.int64),
-        "atomj": np.asarray(pr_j, dtype=np.int64),
-        "atomk": np.asarray(pr_k, dtype=np.int64),
-        "atoml": np.asarray(pr_l, dtype=np.int64),
-    }
-    out["impropers"] = {
-        "atomi": np.asarray(im_i, dtype=np.int64),
-        "atomj": np.asarray(im_j, dtype=np.int64),
-        "atomk": np.asarray(im_k, dtype=np.int64),
-        "atoml": np.asarray(im_l, dtype=np.int64),
-    }
+    for name, columns in valence.items():
+        out[name] = {col: np.asarray(values, dtype=np.int64) for col, values in columns.items()}
     return out
 
 
@@ -318,9 +182,9 @@ def frames_to_batch(
 ) -> tuple[TensorDict, torch.Tensor]:
     """Pack heterogeneous conformers into one graph-aware GPU batch.
 
-    Applies by hand the two tasks a :class:`~molix.batch.DataModule` mounts
+    Applies by hand the two tasks a :class:`~molix.data.DataModule` mounts
     (:func:`build_datamodule`), because this path collates without one: the
-    field's own pair list — molpot consumes a placed ``edges`` namespace and
+    field's own pair list — molpot consumes a placed ``pairs`` namespace and
     never enumerates one — and the neutral ``graphs.total_charge`` the charge
     model is fail-closed on.
 
@@ -428,102 +292,6 @@ def pick_molecules(
     return {mid: by[mid] for mid in mids}
 
 
-def espaloma_like_template() -> OPLSAAForceField:
-    """The OPLS-AA field this protocol's model is parameterized on.
-
-    Every fact about the fitted model's *nonbonded range* is stated here, once,
-    because a :class:`~molpot.forcefield.ForceField` is what
-    :meth:`~molpot.forcefield.ForceField.neighbor_list` derives a pair list
-    from: molpot prices exactly the pairs the batch carries and never
-    enumerates its own, so a list built from a second, equal-looking field is a
-    number tracked by hand in two places (ledger finding **F21**).
-
-    **The 10 Å open Coulomb cutoff.** These datasets are isolated gas-phase
-    molecules — no cell — so the model runs
-    :class:`~molpot.forcefield.pair_terms.CoulombOpenPotential`, whose ``1/r``
-    sum is unbounded unless a radius is declared, and ``neighbor_list()``
-    refuses to invent one. 10 Å is the radius these fits have always run at: it
-    is where the scripts placed their pair list before the force field owned
-    that number. Declaring it on the style states the model that was already
-    being fitted rather than changing it.
-
-    Returns:
-        A fresh template. Hand the *same* object to the model
-        (:func:`build_espaloma_like_model`) and to whatever mounts its pair
-        list; a model already built exposes its own as ``model.template``.
-    """
-    return OPLSAAForceField(name="oplsaa-learned").def_pairstyle("coulomb", cutoff=10.0)
-
-
-def build_espaloma_like_model(
-    *,
-    energy_scope: str = "bonded",
-    hidden: int = ESPALOMA_HIDDEN,
-    n_blocks: int = 5,
-    n_torsion_terms: int = ESPALOMA_N_TORSION_TERMS,
-    dtype: torch.dtype | None = None,
-    template: OPLSAAForceField | None = None,
-) -> Parameterizer:
-    """ChemEncoder + OPLS-AA heads on :class:`~molpot.forcefield.OPLSAAForceField`.
-
-    Args:
-        energy_scope:
-            * ``bonded`` / ``full`` — both use the OPLS-AA template (harmonic
-              bond/angle, OPLS proper, periodic improper, LJ + Coulomb). Kept
-              for CLI compatibility; ``full`` is the physical default path.
-        n_torsion_terms: Ignored (OPLS-AA emits fixed ``k1..k4``). Retained so
-            callers that still pass Espaloma's historical ``6`` do not break.
-        template: The field to parameterize. Pass one to keep a caller's own
-            object (:meth:`~scripts.mm_param_learning.class_i_fit.ClassIFit`
-            mounts its pair list) and the model's field the same object.
-            Default: :func:`espaloma_like_template`.
-
-    Returns:
-        The :class:`~molpot.forcefield.Parameterizer`. Its field is
-        ``model.template`` — the one object that owns both this model's
-        nonbonded range and the parameter tables its heads write, so a pair
-        list is mounted as ``model.template.neighbor_list()`` and cannot be
-        built at a radius the model does not price.
-    """
-    del n_torsion_terms  # OPLS-AA proper head is fixed k1..k4
-    if energy_scope not in ("bonded", "full"):
-        raise ValueError(f"energy_scope must be bonded|full, got {energy_scope!r}")
-
-    encoder = ChemEncoder(
-        atom_dim=hidden,
-        bond_dim=hidden,
-        angle_dim=hidden,
-        proper_dim=hidden,
-        improper_dim=hidden,
-        hidden_dim=hidden,
-        n_blocks=n_blocks,
-        local_attention=False,
-    )
-    model = Parameterizer(
-        encoder,
-        espaloma_like_template() if template is None else template,
-        bond_head=BondParamHead(feature_dim=hidden, hidden_dim=hidden),
-        angle_head=AngleParamHead(feature_dim=hidden, hidden_dim=hidden),
-        proper_head=ProperTorsionParamHead(
-            feature_dim=hidden,
-            hidden_dim=hidden,
-            form="opls",
-        ),
-        improper_head=ImproperParamHead(
-            feature_dim=hidden,
-            hidden_dim=hidden,
-            include_periodic=True,
-            include_harmonic=False,
-        ),
-        atom_head=LJParameterHead(feature_dim=hidden, hidden_dim=hidden),
-        charge_model=AtomicChargeModel(
-            ChiEtaHead(feature_dim=hidden, hidden_dim=hidden),
-            ElectronegativityEqualization(DiagonalHardnessKernel()),
-        ),
-    )
-    return model.to(dtype=dtype) if dtype is not None else model.double()
-
-
 class MMEnergyModel(nn.Module):
     """Parameterizer + OPLS-AA energy as one ``forward``.
 
@@ -573,10 +341,10 @@ class ConformerDataset(BaseDataset):
 
     Flat *per conformer* for indexing, but every conformer carries its
     ``molecule_id`` as a sampling-group label, so
-    :class:`~molix.batch.TaskMixtureBatchSampler` can keep a molecule's
-    conformer set whole inside one batch. ``atom_counts`` is the per-conformer
-    cost vector the token packer needs; ``edge_counts`` is zero because this
-    protocol builds no cutoff graph (Class-I reads covalent topology only).
+    :class:`~molix.data.TaskMixtureBatchSampler` can keep a molecule's
+    conformer set whole inside one batch. Packing cost is
+    ``frame["atoms"].nrows`` per conformer. This protocol builds no cutoff
+    graph (Class-I reads covalent topology only).
 
     Args:
         frames_by_mol: Molecule id → its conformer frames.
@@ -587,10 +355,6 @@ class ConformerDataset(BaseDataset):
         self._frames = [frame for mid in mol_ids for frame in frames_by_mol[mid]]
         self.group_ids: tuple[str, ...] = tuple(mid for mid in mol_ids for _ in frames_by_mol[mid])
         self.task_labels: tuple[str, ...] = (TASK_ENERGY,) * len(self._frames)
-        self.atom_counts = torch.tensor(
-            [int(len(frame["atoms"]["number"])) for frame in self._frames], dtype=torch.long
-        )
-        self.edge_counts = torch.zeros_like(self.atom_counts)
 
     def __len__(self) -> int:
         """Number of conformers in this split."""
@@ -617,14 +381,15 @@ class ConformerDataset(BaseDataset):
         Returns:
             Total atom cap per batch.
         """
-        return batch_size * int(self.atom_counts.max())
+        n_atoms = max((int(frame["atoms"].nrows) for frame in self._frames), default=0)
+        return batch_size * n_atoms
 
 
 class EnergyTaskSamplerSource:
     """Per-epoch molecule-grouped batch sampler for the single-task protocol.
 
-    Implements the :class:`~molix.batch.BatchSamplerSource` protocol:
-    :class:`~molix.batch.DataModule` calls
+    Implements the :class:`~molix.data.BatchSamplerSource` protocol:
+    :class:`~molix.data.DataModule` calls
     ``batch_sampler(train_dataset, seed=seed + epoch)`` once per epoch, so each
     epoch reshuffles the molecules while epoch *k* stays re-derivable. The
     mixture is a single task at probability 1.0 — this run fits energies only —
@@ -1064,7 +829,7 @@ def build_datamodule(
             net charge its charge model is fail-closed on.
 
     Returns:
-        A :class:`~molix.batch.DataModule` satisfying ``DataModuleProtocol``.
+        A :class:`~molix.data.DataModule` satisfying ``DataModuleProtocol``.
     """
     train_ds = ConformerDataset(frames_by_mol, split["train"])
     val_ds = ConformerDataset(frames_by_mol, split["val"])

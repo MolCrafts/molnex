@@ -1,8 +1,9 @@
 """Re-export :class:`molpy.ForceField` plus the structural contract MD binds to.
 
 ``from molix.md import ForceField`` and ``from molpy import ForceField`` are
-the same object. Evaluation is ``ff.to_potentials()`` then ``calc_energy`` /
-``calc_forces`` on a working ``TensorDict``, wired by :class:`~molix.md.driver.MD`.
+the same object. Evaluation is ``ff.to_potentials()`` composed under a
+:class:`molix.autograd.Derivative` over a working ``TensorDict``, wired by
+:class:`~molix.md.driver.MD`.
 
 :class:`MDForceField` is what the driver actually requires: a **nullary**
 ``to_potentials`` and a ``units`` style label. ``molpy.ForceField``'s own
@@ -15,19 +16,18 @@ an object whose ``to_potentials()`` call would fail at wire time; the one-way
 package rule (``molix`` must not import ``molpot``) rules out naming the
 subclass here directly.
 
-:class:`~molix.schema.CellBound` and :class:`~molix.schema.CoreCompilable` are
-re-exported here for MD-side readers; both are declared in
-:mod:`molix.schema` (which molpot already imports), and that module's class
-docstrings are the sole home of their contracts.
+:class:`~molix.schema.CellBound` is re-exported here for MD-side readers; it
+is declared in :mod:`molix.schema` (which molpot already imports), and that
+module's class docstring is the sole home of its contract.
 """
 
 from typing import Protocol, runtime_checkable
 
 from molpy import ForceField
 
-from molix.schema import CellBound, CoreCompilable
+from molix.schema import CellBound
 
-__all__ = ["CellBound", "CoreCompilable", "ForceField", "MDForceField"]
+__all__ = ["CellBound", "ForceField", "MDForceField"]
 
 
 @runtime_checkable

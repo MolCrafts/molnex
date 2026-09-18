@@ -22,7 +22,7 @@ same uniform-shift recipe used by :class:`molpot.heads.DipoleHead`'s
 
 The head emits an atom-level ``q_i`` that plugs directly into
 :class:`molpot.potentials.elec.ewald_multipole.EwaldMultipoleEnergy`'s
-``q`` input. For an atomic dipole ``\\mu_i``, the LES Ewald already
+``charge`` input. For an atomic dipole ``\\mu_i``, the LES Ewald already
 covers all q-q, q-μ and μ-μ cross terms (Aguado & Madden 2003 split,
 Cheng 2025 LES screening) — no separate q-μ kernel is needed here.
 
@@ -79,7 +79,7 @@ class BondChargeHead(nn.Module):
             the bond distance scalar.
         hidden_dim: Hidden dimension of the bond-charge MLP.
         full_neighbor_list: When ``True`` (default, matches
-            :class:`molix.batch.NeighborList`'s ``symmetry=True``
+            :class:`molix.data.NeighborList`'s ``symmetry=True``
             default), the edge list contains both ``(i, j)`` and
             ``(j, i)`` and ``q_{ij}`` is scattered only to the source
             atom — antisymmetry of the bidirectional pair guarantees
@@ -98,9 +98,9 @@ class BondChargeHead(nn.Module):
 
     Forward inputs (keyword-only):
         node_features: ``(N, node_dim)`` invariant per-atom features.
-        edge_index: ``(E, 2)`` directed edges; ``[:, 0]`` source,
+        pair_index: ``(E, 2)`` directed edges; ``[:, 0]`` source,
             ``[:, 1]`` target (matches CLAUDE.md edge convention).
-        edge_dist: ``(E,)`` per-edge distances ``\\|r_{ij}\\|``.
+        pair_dist: ``(E,)`` per-edge distances ``\\|r_{ij}\\|``.
         atom_batch: ``(N,)`` int graph membership of each atom.
         num_graphs: number of graphs in the batch.
         edge_features: optional ``(E, edge_dim)`` invariant edge
@@ -152,8 +152,8 @@ class BondChargeHead(nn.Module):
     def _bond_charges(
         self,
         node_features: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_dist: torch.Tensor,
+        pair_index: torch.Tensor,
+        pair_dist: torch.Tensor,
         edge_features: torch.Tensor | None,
     ) -> torch.Tensor:
         """Compute per-edge ``q_{ij}`` via one batched antisymmetric MLP call.
@@ -165,11 +165,11 @@ class BondChargeHead(nn.Module):
         smaller GEMM calls and keeps the kernel-launch count constant
         regardless of edge-list size.
         """
-        src = edge_index[:, 0]
-        tgt = edge_index[:, 1]
+        src = pair_index[:, 0]
+        tgt = pair_index[:, 1]
         h_src = node_features[src]
         h_tgt = node_features[tgt]
-        dist = edge_dist.unsqueeze(-1)
+        dist = pair_dist.unsqueeze(-1)
 
         fwd_parts = [h_src, h_tgt, dist]
         rev_parts = [h_tgt, h_src, dist]
@@ -179,15 +179,15 @@ class BondChargeHead(nn.Module):
 
         stacked = torch.cat([torch.cat(fwd_parts, dim=-1), torch.cat(rev_parts, dim=-1)], dim=0)
         scores = self.mlp(stacked).squeeze(-1)
-        n_edges = edge_index.shape[0]
-        return scores[:n_edges] - scores[n_edges:]
+        n_pairs = pair_index.shape[0]
+        return scores[:n_pairs] - scores[n_pairs:]
 
     def forward(
         self,
         *,
         node_features: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_dist: torch.Tensor,
+        pair_index: torch.Tensor,
+        pair_dist: torch.Tensor,
         atom_batch: torch.Tensor,
         num_graphs: int,
         edge_features: torch.Tensor | None = None,
@@ -201,8 +201,8 @@ class BondChargeHead(nn.Module):
 
         Args:
             node_features: Per-atom features ``(N, F)``.
-            edge_index: Source/target atom pairs ``(E, 2)``.
-            edge_dist: Edge distances ``(E,)``.
+            pair_index: Source/target atom pairs ``(E, 2)``.
+            pair_dist: Edge distances ``(E,)``.
             atom_batch: Graph membership per atom ``(N,)``.
             num_graphs: Number of graphs in the batch.
             edge_features: Optional per-edge features ``(E, F_e)``.
@@ -215,13 +215,13 @@ class BondChargeHead(nn.Module):
             (``charge_sum_pre_proj`` / ``charge_sum_post_proj``, ``(num_graphs,)``).
         """
         n_atoms = node_features.shape[0]
-        q_ij = self._bond_charges(node_features, edge_index, edge_dist, edge_features)
+        q_ij = self._bond_charges(node_features, pair_index, pair_dist, edge_features)
 
-        src = edge_index[:, 0]
+        src = pair_index[:, 0]
         charges = torch.zeros(n_atoms, dtype=q_ij.dtype, device=q_ij.device)
         charges.index_add_(0, src, q_ij)
         if not self.full_neighbor_list:
-            tgt = edge_index[:, 1]
+            tgt = pair_index[:, 1]
             charges.index_add_(0, tgt, -q_ij)
 
         pre = scatter_sum(charges, atom_batch, dim=0, dim_size=num_graphs)

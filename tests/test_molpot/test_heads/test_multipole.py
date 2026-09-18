@@ -52,7 +52,7 @@ def _stub_batch(dtype: torch.dtype) -> TensorDict:
     Three atoms, four (bidirectional) edges, with both the scalar and the
     tensor edge tracks present so the q / μ / Θ readouts all run.
     """
-    n_atoms, n_edges = 3, 4
+    n_atoms, n_pairs = 3, 4
     atoms = TensorDict(
         Z=torch.tensor([1, 6, 8]),
         pos=torch.tensor(
@@ -62,25 +62,25 @@ def _stub_batch(dtype: torch.dtype) -> TensorDict:
         batch=torch.zeros(n_atoms, dtype=torch.long),
         batch_size=[n_atoms],
     )
-    edges = TensorDict(
-        edge_index=torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1]], dtype=torch.long),
-        batch_size=[n_edges],
+    pairs = TensorDict(
+        pair_index=torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1]], dtype=torch.long),
+        batch_size=[n_pairs],
     )
-    edges["edge_features"] = torch.ones(n_edges, 8, dtype=dtype)
-    edges["edge_tensor_features"] = torch.ones(n_edges, TENSOR_IRREPS.dim, dtype=dtype)
+    pairs["edge_features"] = torch.ones(n_pairs, 8, dtype=dtype)
+    pairs["edge_tensor_features"] = torch.ones(n_pairs, TENSOR_IRREPS.dim, dtype=dtype)
     graphs = TensorDict(
         num_atoms=torch.tensor([n_atoms]),
         total_charge=torch.zeros(1, dtype=dtype),
         batch_size=[1],
     )
-    return TensorDict(atoms=atoms, edges=edges, graphs=graphs, batch_size=[])
+    return TensorDict(atoms=atoms, pairs=pairs, graphs=graphs, batch_size=[])
 
 
 class TestPermMultipoleHead:
     @pytest.mark.parametrize(
         "moments",
         MOMENT_CASES,
-        ids=["q", "q_mu", "q_theta", "q_mu_theta", "mu_theta"],
+        ids=["charge", "q_mu", "q_theta", "q_mu_theta", "mu_theta"],
     )
     def test_all_parameters_honour_the_fp64_precision(
         self, fp64: None, moments: tuple[str, ...]

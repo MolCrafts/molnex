@@ -1,6 +1,6 @@
 """Trainer-loop overhead profiler.
 
-Unlike :class:`~molix.profiler.module.ModuleProfiler` (which times a model in
+Unlike :class:`~molix.profiler.module.Profiler` (which times a model in
 isolation), :class:`TrainerProfiler` profiles the **Trainer's own per-step
 machinery** — Step-protocol dispatch, hook calls, ``batch_to``, TrainState
 writes, the optimizer/scheduler/eval-cadence bookkeeping — by driving a real
@@ -170,7 +170,7 @@ class TrainerProfiler:
             A :class:`TrainerResult`.
         """
         if batch is None:
-            factory = MockBatch(n_atoms=32, n_edges=128, n_graphs=4, device=str(self.device))
+            factory = MockBatch(n_atoms=32, n_pairs=128, n_graphs=4, device=str(self.device))
             batch = factory()
             desc = factory.describe()
         else:
@@ -178,7 +178,7 @@ class TrainerProfiler:
             # of the post-collate contract (``graphs`` is optional there).
             shape = [
                 f"{tag}={batch[ns].batch_size[0]}"
-                for tag, ns in (("N", "atoms"), ("E", "edges"), ("B", "graphs"))
+                for tag, ns in (("N", "atoms"), ("E", "pairs"), ("B", "graphs"))
                 if ns in batch
             ]
             desc = f"TensorDict({', '.join(shape)})"

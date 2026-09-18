@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import random
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -29,25 +28,29 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
-from molpy import Frame
+from molhub.config import config as molhub_config
+from molhub.dataset.protocol import SubsetDataset
+from molhub.dataset.statistic import Field
+from molhub.loader import DataModule
+from molpy import Block, Frame
 from tensordict import TensorDict
 
-from molix.batch import DataMixture, DataModule, TotalCharge
-from molix.config import config
 from molix.core.hook import BaseHook
-from molix.core.steps import MultiTaskEvalStep, MultiTaskTrainStep, TaskRouter, TaskSpec
+from molix.core.losses import energy_loss
+from molix.core.steps import DefaultEvalStep, DefaultTrainStep
 from molix.core.trainer import Trainer
+from molix.data import (
+    DataModuleProtocol,
+    FrameCollator,
+    MoleculeCollator,
+    MoleculePadder,
+    TotalCharge,
+)
+from molix.data.frame_dataset import FrameDataset
 from molix.hooks import CheckpointHook, GradClipHook, Log, MolRecMetricsHook, StepSpeedHook
-from molix.store.frame_dataset import FrameDataset
 from molix.units import units
 from molpot.heads.energy import AtomicReferenceEnergy
-from scripts.mm_param_learning.espaloma_mm_protocol_train import (
-    build_espaloma_like_model,
-    enumerate_angles,
-    enumerate_impropers,
-    enumerate_propers,
-    espaloma_like_template,
-)
+from molzoo.rondo import Rondo, RondoPotential, RondoSpec
 
 TASK_ENERGY = "energy"
 TASK_CODE_ENERGY = 0
@@ -65,23 +68,79 @@ FORCE_HUBER_BETA = 20.0
 FORCE_OUTLIER_KCAL_A = 200.0
 
 
-def _inlier_forces(pred: torch.Tensor, ref: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Drop atoms whose reference force exceeds ``FORCE_OUTLIER_KCAL_A``."""
+def inlier_weight(ref: torch.Tensor) -> torch.Tensor:
+    """Per-atom ``1.0``/``0.0`` weight: is ``|F_ref|`` within the outlier bound?
+
+    Args:
+        ref: Reference Cartesian forces ``(N, 3)`` (kcal mol⁻¹ Å⁻¹).
+
+    Returns:
+        Weights ``(N, 1)`` in ``ref``'s dtype, broadcastable over components.
+    """
     keep = ref.detach().norm(dim=-1) <= FORCE_OUTLIER_KCAL_A
-    if keep.ndim == pred.ndim - 1 and bool(keep.any()):
-        return pred[keep], ref[keep]
-    return pred, ref
+    return keep.to(ref.dtype).unsqueeze(-1)
 
 
-def force_mse(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-    """Huber of Cartesian forces on DFT inliers (``beta=FORCE_HUBER_BETA``)."""
-    pred, ref = _inlier_forces(pred, ref)
-    return torch.nn.functional.smooth_l1_loss(pred, ref, beta=FORCE_HUBER_BETA)
+def force_huber(
+    pred: torch.Tensor, ref: torch.Tensor, weight: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Huber of Cartesian forces over DFT inliers (``beta=FORCE_HUBER_BETA``).
+
+    The outlier bound is applied as a **weight**, not as a boolean gather. The
+    gather it replaces produced a data-dependent output shape and a host sync
+    (``bool(keep.any())``) — a graph break on the training hot path, forbidden
+    by the compile law — and made the Huber denominator the number of surviving
+    atoms, so the loss scale moved with how many outliers a batch happened to
+    draw. Weighting divides by that same count without either.
+
+    A batch whose atoms are *all* outliers contributes ``0`` rather than
+    silently falling back to fitting the outliers, which is what the boolean
+    form did.
+
+    Args:
+        pred: Predicted forces ``(N, 3)``.
+        ref: Reference forces ``(N, 3)``.
+        weight: Optional per-atom ``(N,)`` weight — ``atoms.mask`` on a padded
+            batch, so ghost rows neither score nor count.
+
+    Returns:
+        Scalar loss (kcal mol⁻¹ Å⁻¹).
+    """
+    kept_weight = inlier_weight(ref)
+    if weight is not None:
+        kept_weight = kept_weight * weight.reshape(-1, 1).to(kept_weight.dtype)
+    per_component = torch.nn.functional.smooth_l1_loss(
+        pred, ref, beta=FORCE_HUBER_BETA, reduction="none"
+    )
+    kept = kept_weight.sum() * pred.shape[-1]
+    return (per_component * kept_weight).sum() / kept.clamp(min=1.0)
 
 
-def force_mae(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-    """MAE of Cartesian forces."""
-    return (pred - ref).abs().mean()
+def force_mae(
+    pred: torch.Tensor, ref: torch.Tensor, weight: torch.Tensor | None = None
+) -> torch.Tensor:
+    """MAE of Cartesian forces, over ``weight``-ed atoms when a weight is given."""
+    per_component = (pred - ref).abs()
+    if weight is None:
+        return per_component.mean()
+    w = weight.reshape(-1, 1).to(per_component.dtype)
+    return (per_component * w).sum() / (w.sum() * pred.shape[-1]).clamp(min=1.0)
+
+
+def _atom_mask(batch: TensorDict) -> torch.Tensor | None:
+    """``atoms.mask`` of a padded batch, or ``None`` when every atom is real."""
+    atoms = batch.get("atoms")
+    if atoms is None or "mask" not in atoms.keys():
+        return None
+    return atoms["mask"]
+
+
+def _graph_mask(batch: TensorDict) -> torch.Tensor | None:
+    """``graphs.mask`` of a padded batch, or ``None`` when every graph is live."""
+    graphs = batch.get("graphs")
+    if graphs is None or "mask" not in graphs.keys():
+        return None
+    return graphs["mask"]
 
 
 class _LabeledFrames:
@@ -93,8 +152,6 @@ class _LabeledFrames:
         self._codes = tuple(codes[gid] for gid in dataset.group_ids)
         self.task_labels = dataset.task_labels
         self.group_ids = dataset.group_ids
-        self.atom_counts = dataset.atom_counts
-        self.edge_counts = dataset.edge_counts
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -107,62 +164,85 @@ class _LabeledFrames:
         return tuple(label_sample(frame, group=code) for frame in self.dataset[idx])
 
 
-def _valence_families(
-    atomi: np.ndarray | None,
-    atomj: np.ndarray | None,
-    n_atoms: int,
-) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """Angle / proper / improper columns; empty when there are no bonds."""
+def _valence_blocks(frame: Any) -> dict[str, dict[str, torch.Tensor]]:
+    """Angle / proper / improper columns of *frame*'s bond graph.
+
+    The enumeration runs in the molrs Rust kernel, reached through
+    :meth:`molpy.Atomistic.get_topo`; molnex keeps no copy of it. Only bonds
+    go in — an ``Atomistic`` perceives valence terms from the graph and never
+    from a coordinate, which is what makes these terms a property of the
+    molecule rather than of the conformer.
+
+    molpy says ``dihedrals``; the batch schema says ``propers``. The rename is
+    this function's one job beyond the call.
+
+    Args:
+        frame: A molpy ``Frame`` with ``atoms`` and, when bonded, ``bonds``.
+
+    Returns:
+        ``{"angles": {...}, "propers": {...}, "impropers": {...}}``, each an
+        empty ``(0,)`` column set when the graph has no such term.
+    """
+    from molpy import Atomistic
+
+    perceived = (
+        Atomistic.from_frame(frame)
+        .get_topo(gen_angle=True, gen_dihe=True, gen_improper=True)
+        .to_frame()
+    )
     empty = torch.zeros(0, dtype=torch.long)
-    ang_i = ang_j = ang_k = empty
-    pr_i = pr_j = pr_k = pr_l = empty
-    im_i = im_j = im_k = im_l = empty
-    if atomi is not None and atomj is not None and int(atomi.shape[0]) > 0:
-        ang_i, ang_j, ang_k = enumerate_angles(atomi, atomj, n_atoms)
-        pr_i, pr_j, pr_k, pr_l = enumerate_propers(atomi, atomj, n_atoms)
-        im_i, im_j, im_k, im_l = enumerate_impropers(atomi, atomj, n_atoms)
-    angles = {
-        "atomi": torch.as_tensor(ang_i, dtype=torch.long),
-        "atomj": torch.as_tensor(ang_j, dtype=torch.long),
-        "atomk": torch.as_tensor(ang_k, dtype=torch.long),
-    }
-    propers = {
-        "atomi": torch.as_tensor(pr_i, dtype=torch.long),
-        "atomj": torch.as_tensor(pr_j, dtype=torch.long),
-        "atomk": torch.as_tensor(pr_k, dtype=torch.long),
-        "atoml": torch.as_tensor(pr_l, dtype=torch.long),
-    }
-    impropers = {
-        "atomi": torch.as_tensor(im_i, dtype=torch.long),
-        "atomj": torch.as_tensor(im_j, dtype=torch.long),
-        "atomk": torch.as_tensor(im_k, dtype=torch.long),
-        "atoml": torch.as_tensor(im_l, dtype=torch.long),
-    }
-    return angles, propers, impropers
+    blocks: dict[str, dict[str, torch.Tensor]] = {}
+    for out_name, in_name, columns in (
+        ("angles", "angles", ("atomi", "atomj", "atomk")),
+        ("propers", "dihedrals", ("atomi", "atomj", "atomk", "atoml")),
+        ("impropers", "impropers", ("atomi", "atomj", "atomk", "atoml")),
+    ):
+        if in_name in perceived:
+            block = perceived[in_name]
+            blocks[out_name] = {
+                column: torch.as_tensor(np.asarray(block[column], dtype=np.int64))
+                for column in columns
+            }
+        else:
+            blocks[out_name] = {column: empty for column in columns}
+    return blocks
 
 
-def _with_meta(frame: Any, **extra: Any) -> Frame:
-    """Copy *frame* with ``extra`` merged into its meta.
+def _with_meta(frame: Any, blocks: Mapping[str, Any] | None = None, **extra: Any) -> Frame:
+    """Copy *frame* with *blocks* added and ``extra`` merged into its meta.
 
     ``Frame.meta`` returns a **copy**, so ``frame.meta["task"] = 0`` is a silent
     no-op — the only way to add a meta scalar is to build a new frame. Blocks
     are carried over by reference to their column arrays, so this costs one
     dict walk, not a data copy.
 
+    *blocks* exists so a caller that has new blocks to add writes each column
+    **once**. Writing them into *frame* first and copying afterwards writes
+    every column twice, and a column write is not free: it goes through the
+    schema (``schema.column`` was 31 % of the whole per-sample prepare, and
+    the prepare is what bounds loader throughput).
+
     Args:
         frame: The source molpy ``Frame``.
+        blocks: Extra blocks to write, by name. They override same-named
+            blocks of *frame*.
         **extra: Meta scalars to add or override. An ``int`` stays integral
             through collation, which is what keeps a task code routable.
 
     Returns:
-        A new ``Frame`` with the same blocks and the merged meta.
+        A new ``Frame`` with *frame*'s blocks plus *blocks*, and merged meta.
     """
     meta = {k: getattr(v, "value", v) for k, v in (getattr(frame, "meta", None) or {}).items()}
     meta.update(extra)
     out = Frame(meta=meta)
+    added = dict(blocks or {})
     for name in frame.keys():
+        if name in added:
+            continue
         block = frame[name]
         out[name] = {column: block[column] for column in block.keys()}
+    for name, block in added.items():
+        out[name] = block
     return out
 
 
@@ -181,84 +261,477 @@ def label_sample(frame: Any, *, group: float) -> Frame:
         The same frame, with the valence blocks and the ``task`` / ``group``
         meta scalars added.
     """
-    atomi = atomj = None
-    if "bonds" in frame:
-        bonds = frame["bonds"]
-        atomi = np.asarray(bonds["atomi"], dtype=np.int64)
-        atomj = np.asarray(bonds["atomj"], dtype=np.int64)
-    n_atoms = int(np.asarray(frame["atoms"]["number"]).shape[0])
-    angles, propers, impropers = _valence_families(atomi, atomj, n_atoms)
-    frame["angles"] = angles
-    frame["propers"] = propers
-    frame["impropers"] = impropers
+    blocks = _valence_blocks(frame)
+    # Handed to ``_with_meta`` rather than written into *frame* first: the new
+    # frame is built once, so each valence column is written once.
     # No ``total_charge`` here: the charge model's fail-closed net-charge column
     # is declared once at the batch tasks (``TotalCharge()``), not per frame. A
     # frame that publishes its own charge keeps it — the task only fills a
     # column that is absent.
-    return _with_meta(frame, task=TASK_CODE_ENERGY, group=float(group))
+    return _with_meta(
+        frame,
+        blocks=blocks,
+        task=TASK_CODE_ENERGY,
+        group=float(group),
+    )
 
 
-def _frame_from_arrays(
-    *,
-    numbers: np.ndarray,
-    positions: np.ndarray,
-    energy: float,
-    forces: np.ndarray,
-    atomi: np.ndarray,
-    atomj: np.ndarray,
-    group: float,
-) -> Frame:
-    """Labeled frame from raw arrays — the fast path for LMDB records.
+_EXTENT_FIELDS = ("graph.natoms", "pairs", "bonds", "angles", "propers", "impropers")
+#: ``MoleculeExtent.counts()`` key of each scanned field — the namespace the
+#: padder and the packer budget under.
+_EXTENT_TABLE = {
+    "graph.natoms": "atoms",
+    "pairs": "pairs",
+    "bonds": "bonds",
+    "angles": "angles",
+    "propers": "propers",
+    "impropers": "impropers",
+}
+#: Largest dataset :func:`class_i_data_module` scans in-process when no frozen
+#: extent exists; above it the scan is a job (``scan_omol25_extent.py``).
+INLINE_SCAN_MAX = 20_000
 
-    Produces exactly the frame :func:`label_sample` would, without going
-    through the source frame or its element-symbol table.
+
+def _extent_path(source_id: str, cutoff: float) -> Path:
+    digest = hashlib.sha1(f"{source_id}:class-i-topology:cutoff={cutoff:.6g}".encode()).hexdigest()[
+        :16
+    ]
+    return Path(molhub_config.home_dir) / "derived" / "class-i-extent" / f"{digest}.npz"
+
+
+def _edge_count(frame: Frame, cutoff: float) -> int:
+    """Bidirectional cutoff-list rows of one frame: ``#{(i, j), i != j : 0 < r_ij <= cutoff}``.
+
+    The liveness rule of the :class:`molix.data.NeighborList` the collate
+    mounts — ``ForceField.neighbor_list()``: open boundary, both
+    orientations, and the kernel's own comparison ``0 < r <= cutoff``
+    (``get_neighbor_pairs.cpp``: ``(distances <= cutoff) & (distances >
+    0)``) — spelled as one ``(N, N)`` distance matrix. A molecule is a few
+    hundred atoms at most, so that costs microseconds; routing each frame
+    through a one-frame collate and the O(N²) kernel cost **248 ms**, which
+    made a full 4m scan days of CPU (measured 2026-09-14). Exact, not an
+    estimate: this number is the per-molecule edge cost the packer budgets.
+    """
+    atoms = frame["atoms"]
+    xyz = np.stack(
+        [
+            np.asarray(atoms["x"], dtype=np.float64),
+            np.asarray(atoms["y"], dtype=np.float64),
+            np.asarray(atoms["z"], dtype=np.float64),
+        ],
+        axis=-1,
+    )
+    n = int(xyz.shape[0])
+    if n < 2:
+        return 0
+    diff = xyz[:, None, :] - xyz[None, :, :]
+    r2 = (diff * diff).sum(-1)
+    return int(((r2 <= float(cutoff) ** 2) & (r2 > 0.0)).sum())
+
+
+def _scan_extent_slice(payload: tuple[Any, int, int, float]) -> tuple[int, dict[str, np.ndarray]]:
+    """Worker: topology-scan ``dataset[start:stop]``. Picklable for a process pool."""
+    dataset, start, stop, cutoff = payload
+    prepare = ClassIPrepare()
+    readers = tuple(Field(field) for field in _EXTENT_FIELDS if field != "pairs")
+    n = int(stop - start)
+    columns = {field: np.empty(n, dtype=np.int32) for field in _EXTENT_FIELDS}
+    for offset, idx in enumerate(range(start, stop)):
+        sample = dataset[idx]
+        frame = sample[0] if isinstance(sample, Sequence) else sample
+        prepared = prepare.topology(frame)
+        for reader in readers:
+            columns[reader.key][offset] = int(reader.read(prepared))
+        columns["pairs"][offset] = _edge_count(prepared, cutoff)
+    return start, columns
+
+
+class MoleculeExtent:
+    """Per-molecule topology sizes from one full scan, then frozen.
+
+    Arrays are aligned with the source row index. ``get_max_*_per_molecule``
+    returns those constants; it does not walk the dataset. A
+    :class:`~molhub.dataset.protocol.SubsetDataset` view :meth:`take`s the
+    parent arrays. :meth:`counts` is the table
+    :meth:`molix.data.MoleculePadder.from_counts` sizes the static shape
+    from and the packer budgets against.
+
+    The edge column is a function of the list cutoff, so an extent is keyed
+    by ``(source_id, cutoff)``; a field whose cutoff changes needs a new scan.
+    """
+
+    FIELDS = _EXTENT_FIELDS
+
+    def __init__(self, source_id: str, columns: Mapping[str, np.ndarray], *, cutoff: float) -> None:
+        self.source_id = source_id
+        self.cutoff = float(cutoff)
+        self._columns = {field: np.asarray(columns[field], dtype=np.int32) for field in self.FIELDS}
+        n = next(iter(self._columns.values())).size
+        if any(col.size != n for col in self._columns.values()):
+            raise ValueError("MoleculeExtent columns disagree on length")
+        self._max = {
+            field: int(col.max()) if col.size else 0 for field, col in self._columns.items()
+        }
+
+    def column(self, field: str) -> np.ndarray:
+        """Stored per-row vector for *field* (source order)."""
+        return self._columns[field]
+
+    def counts(self) -> dict[str, torch.Tensor]:
+        """Per-molecule counts keyed by batch namespace (``atoms``, ``pairs``, …)."""
+        return {
+            _EXTENT_TABLE[field]: torch.as_tensor(col, dtype=torch.long)
+            for field, col in self._columns.items()
+        }
+
+    def take(self, indices: Sequence[int]) -> "MoleculeExtent":
+        """The same constants restricted to *indices* into the source."""
+        idx = np.asarray(list(indices), dtype=np.int64)
+        return MoleculeExtent(
+            self.source_id,
+            {field: col[idx] for field, col in self._columns.items()},
+            cutoff=self.cutoff,
+        )
+
+    def get_max_atoms_per_molecule(self) -> int:
+        return self._max["graph.natoms"]
+
+    def get_max_edges_per_molecule(self) -> int:
+        return self._max["pairs"]
+
+    def get_max_bonds_per_molecule(self) -> int:
+        return self._max["bonds"]
+
+    def get_max_angles_per_molecule(self) -> int:
+        return self._max["angles"]
+
+    def get_max_propers_per_molecule(self) -> int:
+        return self._max["propers"]
+
+    def get_max_impropers_per_molecule(self) -> int:
+        return self._max["impropers"]
+
+    def save(self, path: Path | None = None) -> Path:
+        """Write the constant arrays. Default path is keyed by ``(source_id, cutoff)``."""
+        out = Path(path) if path is not None else _extent_path(self.source_id, self.cutoff)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            out,
+            _source_id=np.asarray(self.source_id),
+            _cutoff=np.asarray(self.cutoff),
+            **self._columns,
+        )
+        return out
+
+    @classmethod
+    def load(cls, source_id: str, *, cutoff: float, path: Path | None = None) -> "MoleculeExtent":
+        """Read constants written by :meth:`save`. Does not scan."""
+        stored = Path(path) if path is not None else _extent_path(source_id, cutoff)
+        if not stored.is_file():
+            raise FileNotFoundError(
+                f"Class-I topology constants missing for {source_id!r} at cutoff {cutoff} "
+                f"({stored}). Scan the full source once: "
+                f"ClassIPrepare().scan_extent(dataset, cutoff={cutoff}, workers=16).save()"
+            )
+        data = np.load(stored)
+        columns = {field: cls._stored_column(data, field, stored) for field in cls.FIELDS}
+        raw_id = np.asarray(data["_source_id"]).reshape(-1)
+        loaded_id = str(raw_id[0]) if raw_id.size else source_id
+        stored_cutoff = float(np.asarray(data["_cutoff"]).reshape(-1)[0])
+        if abs(stored_cutoff - float(cutoff)) > 1e-9:
+            raise ValueError(
+                f"extent at {stored} was scanned at cutoff {stored_cutoff}, not {cutoff}"
+            )
+        return cls(loaded_id, columns, cutoff=stored_cutoff)
+
+    #: Column names earlier scans wrote, by the name this class reads today.
+    #: The cutoff-list column was ``edges`` until the chemistry layer settled on
+    #: ``pairs`` (2026-09-15). A frozen scan is hours of LMDB decoding, so it is
+    #: read under its old spelling rather than rescanned — the reader
+    #: normalises, which is what every other reader in this tree does.
+    LEGACY_FIELDS: dict[str, tuple[str, ...]] = {"pairs": ("edges",)}
+
+    @classmethod
+    def _stored_column(cls, data: Any, field: str, stored: Path) -> np.ndarray:
+        """One column of a stored scan, accepting the names earlier scans used."""
+        for name in (field, *cls.LEGACY_FIELDS.get(field, ())):
+            if name in data:
+                return np.asarray(data[name])
+        raise KeyError(
+            f"{stored} has no column {field!r} "
+            f"(nor {cls.LEGACY_FIELDS.get(field, ())}); it holds {sorted(data.keys())}"
+        )
+
+    @classmethod
+    def for_dataset(cls, dataset: Any, *, cutoff: float) -> "MoleculeExtent":
+        """Constants for *dataset*, slicing a parent scan when it is a subset."""
+        source = getattr(dataset, "source", None)
+        if source is not None and hasattr(dataset, "indices"):
+            return cls.load(source.source_id, cutoff=cutoff).take(dataset.indices)
+        return cls.load(dataset.source_id, cutoff=cutoff)
+
+    @classmethod
+    def try_for_dataset(cls, dataset: Any, *, cutoff: float) -> "MoleculeExtent | None":
+        """The frozen scan of *dataset*, or ``None`` when none was ever written.
+
+        ``None`` means *nothing was ever frozen for this dataset*: either no
+        file (``FileNotFoundError``) or no scan identity at all — an in-memory
+        record list has no ``source_id`` and never had a scan
+        (``AttributeError``). The caller answers both by scanning inline.
+
+        A scan that **exists but cannot be read** is a different fact and
+        raises. Swallowing ``KeyError`` here is what turned a frozen 4m scan
+        whose cutoff column still spelled ``edges`` into "no frozen extent …
+        run the scan first", sending the operator to redo hours of work that
+        was already on disk.
+        """
+        try:
+            return cls.for_dataset(dataset, cutoff=cutoff)
+        except (FileNotFoundError, AttributeError):
+            return None
+
+
+#: MolHub publishes energies in the chemistry spelling; molpy's registry names
+#: the same quantity differently, and for ``kcal/mol`` the two are not even
+#: dimensionally equal: ``units.parse("kcal/mol")`` is energy **per amount**
+#: (``L² M T⁻² N⁻¹``) while ``units.kilocalorie_per_mole`` is the per-particle
+#: energy chemistry means by it (``L² M T⁻²``), so converting between them
+#: raises ``UnitsError: dimension mismatch`` rather than scaling. The two
+#: vocabularies are bridged here, once, instead of at every call site.
+#:
+#: These two spellings are all of MolHub as of 2026-09-18 (``eV`` and
+#: ``kcal/mol``); a dataset publishing a third is refused by name, not guessed.
+MOLHUB_ENERGY_SPELLING: dict[str, str] = {
+    "eV": "eV",
+    "kcal/mol": "kilocalorie_per_mole",
+}
+
+
+class ClassIPrepare:
+    """Bonds, unit conversion, and labels. Not a Dataset.
+
+    OMol25 Frames stay in published eV with no bonds. This type is the
+    Class-I sample transform applied at collate. Override :meth:`bond`,
+    :meth:`convert`, or :meth:`label` to change one concern.
 
     Args:
-        numbers: Atomic numbers ``(N,)``.
-        positions: Positions ``(N, 3)`` in Å.
-        energy: Total energy in kcal/mol.
-        forces: Forces ``(N, 3)`` in kcal/mol/Å.
-        atomi: Bond first-atom indices ``(B,)``; may be empty.
-        atomj: Bond second-atom indices ``(B,)``; may be empty.
-        group: Parameter-group code.
+        energy_unit: Pint unit the labels are converted **to**.
+        source_unit: Pint unit the frames already carry, or ``None`` when it
+            has not been declared — then :meth:`convert` refuses rather than
+            guesses, and only the unit-free concerns (:meth:`bond`,
+            :meth:`label`, :meth:`topology`) are available. Prefer
+            :meth:`from_dataset`, which reads the unit the dataset publishes
+            instead of having it restated here.
 
-    Returns:
-        A ``Frame`` with ``atoms`` / ``bonds`` / the three valence blocks and
-        ``energy`` / ``task`` / ``group`` meta scalars.
+    Note:
+        This used to default to eV, which is OMol25's unit and was right only
+        where this transform started. THEMol publishes kcal mol⁻¹, so that
+        default multiplied every label by 23.06 — silently, the result still
+        being a plausible energy. A unit is a fact about the dataset in hand,
+        so it is read from the dataset, never defaulted here.
     """
-    bonded = int(atomi.shape[0]) > 0
-    xyz = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
-    f = np.asarray(forces, dtype=np.float64).reshape(-1, 3)
-    # See :func:`label_sample`: no ``total_charge`` meta — the net charge is the
-    # batch tasks' declaration, and these records publish none of their own.
-    frame = Frame(
-        meta={
-            "energy": float(energy),
-            "task": TASK_CODE_ENERGY,
-            "group": float(group),
+
+    def __init__(
+        self,
+        *,
+        energy_unit: Any = units.kilocalorie_per_mole,
+        source_unit: Any = None,
+    ) -> None:
+        self.energy_unit = energy_unit
+        self.source_unit = source_unit
+        self.scale = (
+            None if source_unit is None else float((1.0 * source_unit).to(energy_unit).magnitude)
+        )
+
+    @classmethod
+    def from_dataset(
+        cls, dataset: Any, *, energy_unit: Any = units.kilocalorie_per_mole
+    ) -> "ClassIPrepare":
+        """Build one whose source unit is the dataset's own declaration.
+
+        A MolHub dataset states what it publishes —
+        ``@dataset(units={"energy": "eV"})`` — and that declaration is the
+        authority. Reading it here is what keeps the unit out of the model and
+        out of every call site: the transform follows the data rather than
+        being told about it.
+
+        Args:
+            dataset: A MolHub dataset (or its class) carrying
+                ``manifest.units["energy"]``.
+            energy_unit: Pint unit the labels are converted **to**.
+
+        Returns:
+            A :class:`ClassIPrepare` whose :attr:`source_unit` is the declared one.
+
+        Raises:
+            ValueError: *dataset* declares no energy unit — there is nothing to
+                read, and guessing is the bug this constructor exists to prevent.
+        """
+        manifest = getattr(dataset, "manifest", None) or getattr(type(dataset), "manifest", None)
+        declared = dict(getattr(manifest, "units", None) or {})
+        if "energy" not in declared:
+            raise ValueError(
+                f"{type(dataset).__name__} declares no energy unit "
+                f"(manifest.units = {declared or '{}'}), so the unit its frames "
+                "carry cannot be read. Declare it on the dataset with "
+                "@dataset(units={'energy': ...}), or pass source_unit= to "
+                "ClassIPrepare directly if you know it."
+            )
+        published = str(declared["energy"])
+        spelling = MOLHUB_ENERGY_SPELLING.get(published)
+        if spelling is None:
+            raise ValueError(
+                f"{type(dataset).__name__} publishes energy in {published!r}, which has "
+                "no molpy registry spelling here. Add it to MOLHUB_ENERGY_SPELLING "
+                f"(known: {sorted(MOLHUB_ENERGY_SPELLING)}) — after checking whether "
+                "molpy treats it as a per-particle energy or carries the amount "
+                "dimension — or pass source_unit= directly."
+            )
+        return cls(energy_unit=energy_unit, source_unit=units.parse(spelling))
+
+    def execute(self, frame: Frame) -> Frame:
+        """Return a bonded, converted, labeled copy of *frame*."""
+        return self.label(self.convert(self.bond(_copy_frame(frame))))
+
+    def bond(self, frame: Frame) -> Frame:
+        """Infer covalent bonds when the Frame has none. Leave existing bonds."""
+        if "bonds" in frame:
+            return frame
+        # The dataset-neutral entry point, not the OMol25 adapter: molnex must
+        # never import a concrete MolHub dataset module (architecture note,
+        # "Library and experiment boundaries").
+        from molhub.dataset import infer_bonds
+
+        atoms = frame["atoms"]
+        numbers = np.asarray(atoms["number"], dtype=np.int64).reshape(-1)
+        xyz = np.stack(
+            [
+                np.asarray(atoms["x"], dtype=np.float64),
+                np.asarray(atoms["y"], dtype=np.float64),
+                np.asarray(atoms["z"], dtype=np.float64),
+            ],
+            axis=-1,
+        )
+        atomi, atomj = infer_bonds(numbers, xyz)
+        if int(atomi.shape[0]) > 0:
+            frame["bonds"] = Block({"atomi": atomi, "atomj": atomj})
+        return frame
+
+    def convert(self, frame: Frame) -> Frame:
+        """Rescale energy and forces from :attr:`source_unit` into :attr:`energy_unit`.
+
+        Raises:
+            ValueError: No source unit was declared. Converting on a guess is
+                what turned every THEMol label into 23.06x itself; this refuses
+                instead.
+        """
+        if self.scale is None:
+            raise ValueError(
+                f"{type(self).__name__} has no source unit, so it cannot convert "
+                "into "
+                f"{self.energy_unit}. Build it with ClassIPrepare.from_dataset("
+                "dataset), which reads what the dataset declares, or pass "
+                "source_unit= if you know it. (bond/label/topology need no unit "
+                "and work without one.)"
+            )
+        if self.scale == 1.0:
+            return frame
+        atoms = frame["atoms"]
+        if "fx" in atoms:
+            atoms["fx"] = np.asarray(atoms["fx"], dtype=np.float64) * self.scale
+            atoms["fy"] = np.asarray(atoms["fy"], dtype=np.float64) * self.scale
+            atoms["fz"] = np.asarray(atoms["fz"], dtype=np.float64) * self.scale
+        raw_meta = getattr(frame, "meta", None) or {}
+        meta = {k: getattr(v, "value", v) for k, v in raw_meta.items()}
+        if "energy" in meta:
+            meta["energy"] = float(meta["energy"]) * self.scale
+        frame.meta = meta
+        return frame
+
+    def label(self, frame: Frame) -> Frame:
+        """Write task/group meta and valence families."""
+        return label_sample(frame, group=0.0)
+
+    def topology(self, frame: Frame) -> Frame:
+        """Bonds and valence families only — the Frame stats read."""
+        return self.label(self.bond(_copy_frame(frame)))
+
+    def scan_extent(self, dataset: Any, *, cutoff: float, workers: int = 1) -> MoleculeExtent:
+        """Scan every row of *dataset* once and freeze a :class:`MoleculeExtent`.
+
+        Reads the pad axes off each prepared Frame (``graph.natoms``,
+        ``bonds``, ``angles``, ``propers``, ``impropers``) and counts the
+        cutoff list at *cutoff* the way the collate builds it. *workers* > 1
+        uses a process pool. Nothing is written: the caller decides whether
+        to :meth:`MoleculeExtent.save` (the full-role scan does; an in-process
+        scan of a small view does not).
+        """
+        n = len(dataset)
+        source_id = str(getattr(dataset, "source_id", ""))
+        workers = max(1, int(workers))
+        if n == 0:
+            empty = {field: np.empty(0, dtype=np.int32) for field in MoleculeExtent.FIELDS}
+            return MoleculeExtent(source_id, empty, cutoff=cutoff)
+        if workers == 1:
+            _start, columns = _scan_extent_slice((dataset, 0, n, float(cutoff)))
+            return MoleculeExtent(source_id, columns, cutoff=cutoff)
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        chunk = max(int(np.ceil(n / workers)), 1)
+        spans = [(s, min(s + chunk, n)) for s in range(0, n, chunk)]
+        parts: dict[int, dict[str, np.ndarray]] = {}
+        done = 0
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futs = {
+                pool.submit(_scan_extent_slice, (dataset, start, stop, float(cutoff))): (
+                    start,
+                    stop,
+                )
+                for start, stop in spans
+            }
+            for fut in as_completed(futs):
+                start, stop = futs[fut]
+                origin, columns = fut.result()
+                parts[origin] = columns
+                done += stop - start
+                print(f"extent {done}/{n} source_id={source_id}", flush=True)
+        columns = {
+            field: np.concatenate([parts[start][field] for start, _ in spans])
+            for field in MoleculeExtent.FIELDS
         }
-    )
-    frame["atoms"] = {
-        "number": np.asarray(numbers, dtype=np.int64),
-        "x": xyz[:, 0],
-        "y": xyz[:, 1],
-        "z": xyz[:, 2],
-        "fx": f[:, 0],
-        "fy": f[:, 1],
-        "fz": f[:, 2],
-    }
-    if bonded:
-        frame["bonds"] = {
-            "atomi": np.asarray(atomi, dtype=np.int64),
-            "atomj": np.asarray(atomj, dtype=np.int64),
-        }
-    angles, propers, impropers = _valence_families(
-        atomi if bonded else None, atomj if bonded else None, int(numbers.shape[0])
-    )
-    frame["angles"] = angles
-    frame["propers"] = propers
-    frame["impropers"] = impropers
-    return frame
+        return MoleculeExtent(source_id, columns, cutoff=cutoff)
+
+
+class PrepareCollator:
+    """Run a per-frame prepare, then the Frame collator."""
+
+    def __init__(self, prepare: ClassIPrepare, collator: FrameCollator) -> None:
+        self.prepare = prepare
+        self.collator = collator
+        self.frame_collator = collator
+
+    def __call__(self, samples: Sequence[Any]) -> Any:
+        prepared: list[tuple[Frame, ...]] = []
+        for sample in samples:
+            if hasattr(sample, "keys") and "atoms" in sample:
+                frames: Sequence[Any] = (sample,)
+            else:
+                frames = sample
+            prepared.append(tuple(self.prepare.execute(frame) for frame in frames))
+        return self.collator(prepared)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.collator, name)
+
+
+def _copy_frame(frame: Frame) -> Frame:
+    """Shallow block copy so a prepare can add bonds without mutating *frame*."""
+    meta = {k: getattr(v, "value", v) for k, v in (getattr(frame, "meta", None) or {}).items()}
+    out = Frame(meta=meta)
+    for name in frame.keys():
+        block = frame[name]
+        out[name] = {column: block[column] for column in block.keys()}
+    return out
 
 
 def _frame_atomic_numbers(frame: Any) -> np.ndarray:
@@ -288,74 +761,68 @@ def fit_atomic_reference(records: Sequence) -> AtomicReferenceEnergy:
     max_z = max(elements) if elements else 0
     max_z = max(max_z, 94)
     if not frames or not elements:
-        return AtomicReferenceEnergy(atomic_energies=torch.zeros(max_z + 1))
+        return _historical_are(torch.zeros(max_z + 1))
     dress = AtomicDress(elements=sorted(elements), target_key="energy")
     dress.fit(frames)
     table = [float(dress.atomic_energies.get(z, 0.0)) for z in range(max_z + 1)]
-    return AtomicReferenceEnergy(atomic_energies=table)
+    return _historical_are(table)
 
 
-def _graph_count(batch: TensorDict, atom_batch: torch.Tensor) -> int:
-    graphs = batch.get("graphs")
-    if graphs is not None and "num_atoms" in graphs.keys():
-        return int(graphs["num_atoms"].shape[0])
-    if atom_batch.numel() == 0:
-        return 1
-    return int(atom_batch.max().item()) + 1
+def _historical_are(values: torch.Tensor | Sequence[float]) -> AtomicReferenceEnergy:
+    """lstsq kcal table: explicit support, provenance units, empirical scheme."""
+    tensor = torch.as_tensor(values, dtype=torch.float64).flatten()
+    return AtomicReferenceEnergy(
+        atomic_energies=tensor,
+        supported=torch.ones(tensor.numel(), dtype=torch.bool),
+        scheme="empirical_fit",
+        units="kilocalorie_per_mole",
+    )
 
 
-class ForceAwareModel(nn.Module):
-    """Parameterizer energy and forces as one prediction mapping."""
+class _FitTrainStep(DefaultTrainStep):
+    """Default train step that also publishes ``train/loss_energy``.
 
-    def __init__(self, imm: nn.Module, dressing: AtomicReferenceEnergy) -> None:
-        super().__init__()
-        self.imm = imm
-        self.dressing = dressing
+    Class-I is one energy task. :class:`~molix.core.steps.MultiTaskTrainStep`
+    refuses ``Trainer.compile(step=True)`` because the router host-syncs on
+    the task label. The alias is written *after* the compiled region, so it
+    is not a graph break. Historical jsonl / Log / CheckpointHook keys stay
+    ``loss_energy``.
+    """
 
-    def forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
-        pots = self.imm(batch).to_potentials()
-        infer = not torch.is_grad_enabled()
-        with torch.enable_grad():
-            energy, forces = pots.calc_energy_forces(batch)
-        energy_mm = energy.reshape(-1)
-        e0 = None
-        atoms = batch.get("atoms")
-        if atoms is not None and "Z" in atoms.keys():
-            z = atoms["Z"]
-            atom_batch = atoms.get("batch")
-            # Sum the frozen dressing in float64. Per-graph sums are ~1e5
-            # kcal/mol; float32 ``index_add`` is order-dependent on GPU, so
-            # packed vs single differ by ~1 ULP (~0.03) and that noise leaks
-            # into the residualized energy target, breaking gradient parity.
-            e0_per_atom = self.dressing.atomic_energies[z.to(torch.long)].double()
-            if atom_batch is None:
-                e0 = e0_per_atom.sum()
-            else:
-                n_graphs = _graph_count(batch, atom_batch)
-                e0 = torch.zeros(n_graphs, dtype=torch.float64, device=e0_per_atom.device)
-                e0.index_add_(0, atom_batch.to(torch.long), e0_per_atom)
-            energy = energy_mm + e0.float()
-        else:
-            energy = energy_mm
-        if infer:
-            energy = energy.detach()
-            forces = forces.detach()
-            energy_mm = energy_mm.detach()
-        out: dict[str, torch.Tensor] = {
-            "energy": energy,
-            "forces": forces,
-            "energy_mm": energy_mm,
-        }
-        if e0 is not None:
-            out["e0"] = e0
-        return out
+    scalar_keys = (("train", "loss"), ("train", "loss_energy"))
 
-    def parameter_groups(self) -> dict[str, tuple[nn.Parameter, ...]]:
-        groups = {
-            name: tuple(p for p in child.parameters() if p.requires_grad)
-            for name, child in self.imm.named_children()
-        }
-        return {name: params for name, params in groups.items() if params}
+    def on_train_batch(self, trainer: Any, state: Any, batch: Any) -> dict[str, Any]:
+        outputs = super().on_train_batch(trainer, state, batch)
+        state["train"]["loss_energy"] = state["train"]["loss"]
+        return outputs
+
+
+class _FitEvalStep(DefaultEvalStep):
+    """Eval step with its own objective (MAE), not the train Huber.
+
+    ``compute_loss`` is inside the compiled region and must stay pure tensor
+    ops — :func:`val_omol_mae` is. The ``loss_energy`` alias is written after.
+    """
+
+    scalar_keys = (("eval", "loss"), ("eval", "loss_energy"))
+
+    def __init__(self, objective: Callable[..., torch.Tensor], *, no_grad: bool = True) -> None:
+        super().__init__(no_grad=no_grad)
+        self.objective = objective
+
+    def compute_loss(
+        self,
+        trainer: Any,
+        state: Any,
+        batch: Any,
+        predictions: Any,
+    ) -> torch.Tensor:
+        return self.objective(predictions, batch)
+
+    def on_eval_batch(self, trainer: Any, state: Any, batch: Any) -> dict[str, Any]:
+        outputs = super().on_eval_batch(trainer, state, batch)
+        state["eval"]["loss_energy"] = state["eval"]["loss"]
+        return outputs
 
 
 def _graph_tensor(batch: TensorDict, name: str) -> torch.Tensor | None:
@@ -370,16 +837,29 @@ def energy_mse(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     return (pred.reshape(-1) - ref.reshape(-1)).square().mean()
 
 
-def energy_huber(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+def _graph_mean(per_graph: torch.Tensor, weight: torch.Tensor | None) -> torch.Tensor:
+    """Mean over graphs, or the ``weight``-ed mean (``graphs.mask`` drops dead slots)."""
+    if weight is None:
+        return per_graph.mean()
+    w = weight.reshape(-1).to(per_graph.dtype)
+    return (per_graph * w).sum() / w.sum().clamp(min=1.0)
+
+
+def energy_huber(
+    pred: torch.Tensor, ref: torch.Tensor, weight: torch.Tensor | None = None
+) -> torch.Tensor:
     """Huber (smooth L1) of graph energies, ``beta=ENERGY_HUBER_BETA`` kcal/mol."""
-    return torch.nn.functional.smooth_l1_loss(
-        pred.reshape(-1), ref.reshape(-1), beta=ENERGY_HUBER_BETA
+    per_graph = torch.nn.functional.smooth_l1_loss(
+        pred.reshape(-1), ref.reshape(-1), beta=ENERGY_HUBER_BETA, reduction="none"
     )
+    return _graph_mean(per_graph, weight)
 
 
-def energy_mae(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+def energy_mae(
+    pred: torch.Tensor, ref: torch.Tensor, weight: torch.Tensor | None = None
+) -> torch.Tensor:
     """MAE of graph energies (kcal/mol)."""
-    return (pred.reshape(-1) - ref.reshape(-1)).abs().mean()
+    return _graph_mean((pred.reshape(-1) - ref.reshape(-1)).abs(), weight)
 
 
 def energy_force_terms(
@@ -401,13 +881,13 @@ def energy_force_terms(
         e0 = predictions.get("e0")
         if energy_mm is not None and e0 is not None:
             target = (energy.reshape(-1).double() - e0.reshape(-1).double()).float()
-            energy_term = energy_huber(energy_mm, target)
+            energy_term = energy_huber(energy_mm, target, _graph_mask(batch))
         else:
-            energy_term = energy_huber(predictions["energy"], energy)
+            energy_term = energy_huber(predictions["energy"], energy, _graph_mask(batch))
     force_term = predictions["energy"].new_zeros(())
     atoms = batch.get("atoms")
     if atoms is not None and "forces" in atoms.keys() and "forces" in predictions:
-        force_term = force_mse(predictions["forces"], atoms["forces"])
+        force_term = force_huber(predictions["forces"], atoms["forces"], _atom_mask(batch))
     return energy_term, force_term
 
 
@@ -422,12 +902,190 @@ def val_omol_mae(predictions: Mapping[str, torch.Tensor], batch: TensorDict) -> 
     energy_term = predictions["energy"].new_zeros(())
     energy = _graph_tensor(batch, "energy")
     if energy is not None:
-        energy_term = energy_mae(predictions["energy"], energy)
+        energy_term = energy_mae(predictions["energy"], energy, _graph_mask(batch))
     force_term = predictions["energy"].new_zeros(())
     atoms = batch.get("atoms")
     if atoms is not None and "forces" in atoms.keys() and "forces" in predictions:
-        force_term = force_mae(predictions["forces"], atoms["forces"])
+        force_term = force_mae(predictions["forces"], atoms["forces"], _atom_mask(batch))
     return energy_term + force_term
+
+
+_PER_ATOM_MAE = energy_loss(
+    target_key="energy_residual",
+    pred_key="energy",
+    per_atom=True,
+    elementwise=torch.nn.L1Loss(reduction="none"),
+)
+
+
+def per_atom_mae_energy(predictions: Mapping[str, torch.Tensor], batch: TensorDict) -> torch.Tensor:
+    """Per-atom L1 on ``graphs.energy_residual``, divided by protocol ``s_E``."""
+    from scripts.mm_param_learning.configs import OMOL25_FAIRCHEM_4M
+
+    scale = float(OMOL25_FAIRCHEM_4M["energy_rms"])
+    # Reference arithmetic is float64 (protocol refs_dtype); float32 ULP misses 1e-10.
+    return _PER_ATOM_MAE({"energy": predictions["energy"].double()}, batch) / scale
+
+
+def per_structure_l2_force(
+    predictions: Mapping[str, torch.Tensor], batch: TensorDict
+) -> torch.Tensor:
+    """Mean over graphs of mean-atom Euclidean force error, divided by ``s_F``.
+
+    Ghost rows contribute 0 through ``atoms.mask`` (multiply, never a gather)
+    and dead graph slots drop out of the graph mean through ``graphs.mask``.
+    Missing masks treat every atom / graph as real. Zero-error structures
+    stay in the graph mean.
+    """
+    from scripts.mm_param_learning.configs import OMOL25_FAIRCHEM_4M
+
+    scale = float(OMOL25_FAIRCHEM_4M["force_rms"])
+    delta = predictions["forces"].double() - batch["atoms", "forces"].double()
+    atoms = batch["atoms"]
+    if "mask" in atoms.keys():
+        real = atoms["mask"].to(dtype=delta.dtype)
+        delta = delta * real.unsqueeze(-1)
+    else:
+        real = torch.ones(delta.shape[0], dtype=delta.dtype, device=delta.device)
+    atom_l2 = delta.norm(dim=-1)
+    atom_batch = atoms["batch"].to(dtype=torch.long)
+    n_graphs = batch["graphs", "num_atoms"].shape[0]
+    per_sum = atom_l2.new_zeros(n_graphs)
+    per_n = atom_l2.new_zeros(n_graphs)
+    per_sum.index_add_(0, atom_batch, atom_l2)
+    per_n.index_add_(0, atom_batch, real)
+    return _graph_mean(per_sum / per_n.clamp(min=1.0) / scale, _graph_mask(batch))
+
+
+def fairchem_4m_objective(
+    predictions: Mapping[str, torch.Tensor], batch: TensorDict
+) -> torch.Tensor:
+    """Named protocol loss ``10 L_E + 10 L_F`` on residual energy and forces."""
+    from scripts.mm_param_learning.configs import OMOL25_FAIRCHEM_4M
+
+    energy_w = float(OMOL25_FAIRCHEM_4M["energy_coefficient"])
+    force_w = float(OMOL25_FAIRCHEM_4M["force_coefficient"])
+    return energy_w * per_atom_mae_energy(predictions, batch) + force_w * per_structure_l2_force(
+        predictions, batch
+    )
+
+
+def _list_capacity(atom_counts: Any) -> int:
+    """``max_num_pairs`` for a list built over these molecules.
+
+    :class:`molix.data.NeighborList` runs its O(N²) kernel **per molecule**
+    and grows the buffer to that molecule's own complete half graph when the
+    configured floor is smaller, so this number is a *per-molecule* bound —
+    the largest molecule's ``n(n-1)/2`` — never the batch's edge capacity.
+    Handing it the batch capacity instead makes every molecule allocate the
+    whole pack's worth of pair buffers: at 65536 atom slots that is 4.95 M
+    pairs per molecule per worker, which took the host out of memory rather
+    than the GPU (GH200 sweep round 2, 11.7 GiB RSS cap).
+    """
+    n = int(torch.as_tensor(atom_counts).max())
+    return max(512, n * (n - 1) // 2)
+
+
+def _extent_for(fit: "ClassIFit", dataset: Any, *, cutoff: float) -> MoleculeExtent:
+    """The frozen scan of *dataset* at *cutoff*, or an in-process scan of a small view.
+
+    A dataset above :data:`INLINE_SCAN_MAX` rows without a frozen scan is
+    refused: walking OMol25 4m inside a loader constructor is hours of
+    surprise, and the scan is a job (``scan_omol25_extent.py``).
+    """
+    extent = MoleculeExtent.try_for_dataset(dataset, cutoff=cutoff)
+    if extent is not None:
+        return extent
+    if len(dataset) > INLINE_SCAN_MAX:
+        raise FileNotFoundError(
+            f"no frozen Class-I extent for {getattr(dataset, 'source_id', dataset)!r} at "
+            f"cutoff {cutoff} and the dataset ({len(dataset)} rows) is too large to scan "
+            "here; run scripts/mm_param_learning/scan_omol25_extent.py first."
+        )
+    # scan_extent reads topology only, so no source unit is needed here; a
+    # ClassIPrepare built without one refuses to convert rather than guessing.
+    prepare = fit.prepare if fit.prepare is not None else ClassIPrepare(energy_unit=fit.energy_unit)
+    return prepare.scan_extent(dataset, cutoff=cutoff, workers=1)
+
+
+def class_i_data_module(
+    fit: "ClassIFit",
+    *,
+    atoms: int | None = None,
+    slack: float = 1.10,
+    train_counts: Mapping[str, torch.Tensor] | None = None,
+    val_counts: Mapping[str, torch.Tensor] | None = None,
+    num_workers: int = 0,
+    prefetch_factor: int | None = None,
+    multiprocessing_context: str | None = "spawn",
+) -> DataModule:
+    """Compose the molhub DataModule this fit's field needs.
+
+    One static shape for the whole run: the padder is sized from the train
+    split's per-molecule counts at atom capacity *atoms*
+    (:meth:`molix.data.MoleculePadder.from_counts` — every cap is the
+    dataset density times the atom budget, never below the largest
+    molecule), and the DataModule packs train and val under that padder's
+    own budgets (``batch_counts`` / ``val_batch_counts``), so no batch can
+    exceed any cap and the compiled step never sees a second shape. The
+    molecule count per batch floats; the atom capacity is the knob.
+
+    Args:
+        fit: Fit whose ``train_ds`` / ``val_ds`` / ``forcefield`` /
+            ``batch_tasks`` / ``seed`` / ``device`` are read.
+        atoms: Padded atom capacity (ghost slots included; a power of two
+            picked by the HBM sweep). Default ``fit.max_atoms``.
+        slack: Head-room factor on every density-derived cap.
+        train_counts: Per-molecule count tables of the train split
+            (``MoleculeExtent.counts()`` shape). Default: the frozen scan of
+            the split at the field's cutoff, or an in-process scan of a small
+            view (:func:`_extent_for`) — pass them to skip both.
+        val_counts: The same for the val split.
+        num_workers: DataLoader workers.
+        prefetch_factor: Batches prefetched per worker.
+        multiprocessing_context: Worker start method.
+
+    Returns:
+        A molhub :class:`~molhub.loader.DataModule` satisfying molix
+        ``DataModuleProtocol``.
+    """
+    on_cuda = fit.device.type == "cuda"
+    cutoff = float(fit.forcefield.neighbor_list().cutoff)
+    if train_counts is None:
+        train_counts = _extent_for(fit, fit.train_ds, cutoff=cutoff).counts()
+    if val_counts is None:
+        val_counts = _extent_for(fit, fit.val_ds, cutoff=cutoff).counts()
+    capacity = int(fit.max_atoms if atoms is None else atoms)
+    padder = MoleculePadder.from_counts(train_counts, atoms=capacity, cutoff=cutoff, slack=slack)
+    nlist = fit.forcefield.neighbor_list(max_num_pairs=_list_capacity(train_counts["atoms"]))
+    print(
+        "class_i_pad "
+        + json.dumps({"caps": padder.caps(), "budgets": padder.budgets(), "cutoff": cutoff}),
+        flush=True,
+    )
+    collate_fn: Any = FrameCollator(
+        collator=MoleculeCollator(),
+        padder=padder,
+        prepare=fit.prepare,
+    )
+    return DataModule(
+        fit.train_ds,
+        fit.val_ds,
+        collate_fn=collate_fn,
+        batch_tasks=[
+            nlist,
+            TotalCharge(),
+            *fit.batch_tasks,
+        ],
+        batch_counts=dict(train_counts),
+        val_batch_counts=dict(val_counts),
+        num_workers=num_workers,
+        pin_memory=on_cuda,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=prefetch_factor,
+        multiprocessing_context=multiprocessing_context,
+        seed=fit.seed,
+    )
 
 
 _GROUP_META = ("scan_id", "molecule_id", "source_record_id")
@@ -467,15 +1125,23 @@ class ClassIFit:
         record_root: Path | None = None,
         energy_scope: str = "full",
         eval_every_epochs: int = 1,
+        eval_every_n_steps: int | None = None,
         eval_loss: Callable[..., torch.Tensor] | None = None,
-        num_workers: int = 0,
-        prefetch_factor: int | None = None,
-        multiprocessing_context: str | None = "spawn",
+        loss: Callable[..., torch.Tensor] = train_objective,
+        optimizer_factory: Callable[..., Any] | None = None,
+        lr_scheduler_factory: Callable[..., Any] | None = None,
+        batch_tasks: Sequence[Any] = (),
+        dressing: AtomicReferenceEnergy | None = None,
+        energy_unit: Any = units.kilocalorie_per_mole,
         clip_max_norm: float = 1.0e3,
+        log_every_n_steps: int = 500,
+        metrics_every_n_steps: int = 100,
     ) -> None:
         self.hidden = hidden
         self.n_blocks = n_blocks
         self.n_torsion_terms = n_torsion_terms
+        #: Padded atom capacity (ghost slots included) the loader packs to —
+        #: :func:`class_i_data_module`'s default ``atoms``.
         self.max_atoms = max_atoms
         self.epochs = epochs
         self.lr = lr
@@ -484,147 +1150,193 @@ class ClassIFit:
         self.record_root = record_root
         self.energy_scope = energy_scope
         self.eval_every_epochs = max(1, int(eval_every_epochs))
+        # An epoch is the stop unit only while an epoch is short. On the 4M
+        # OMol25 role one epoch is ~1.2e5 steps, so an epoch-boundary eval
+        # fires twice in a 24 h run — too few points to see a trend or to pick
+        # a checkpoint by. ``eval_every_n_steps`` states the stride directly.
+        # Exactly one of the two knobs may be non-default: two spellings of the
+        # same cadence silently disagreeing is the failure this refuses.
+        if eval_every_n_steps is not None:
+            if int(eval_every_n_steps) < 1:
+                raise ValueError(f"eval_every_n_steps must be >= 1, got {eval_every_n_steps}")
+            if int(eval_every_epochs) != 1:
+                raise ValueError(
+                    "pass eval_every_epochs or eval_every_n_steps, not both "
+                    f"(got {eval_every_epochs} epochs and {eval_every_n_steps} steps)"
+                )
+        self.eval_every_n_steps = None if eval_every_n_steps is None else int(eval_every_n_steps)
         self.eval_loss = eval_loss if eval_loss is not None else val_omol_mae
+        self.loss = loss
+        self.optimizer_factory = optimizer_factory or (
+            lambda params: torch.optim.Adam(params, lr=self.lr)
+        )
+        self.lr_scheduler_factory = lr_scheduler_factory
+        self.batch_tasks = tuple(batch_tasks)
+        self.energy_unit = energy_unit
         self.clip_max_norm = float(clip_max_norm)
-        #: The one OPLS-AA field of this fit. :meth:`model` parameterizes *this*
-        #: object and :meth:`datamodule` mounts *its* pair list, so the graph
-        #: the batches carry and the radius the model prices are the same fact
-        #: read twice, not two numbers kept in step by hand (ledger finding
-        #: **F21**). Never mutated: ``Parameterizer`` fills a copy.
-        self.forcefield = espaloma_like_template()
-        self.num_workers = int(num_workers)
-        self.prefetch_factor = prefetch_factor
-        self.multiprocessing_context = multiprocessing_context
-        if _is_labeled_source(train_records) and _is_labeled_source(val_records):
-            self.train_ds = train_records
-            self.val_ds = val_records
-            ready = getattr(train_records, "dressing", None)
-            self.dressing = (
-                ready
-                if ready is not None
-                else AtomicReferenceEnergy(atomic_energies=torch.zeros(95))
-            )
-        else:
+        # Both sinks materialise device scalars (``grad_norm`` is a 0-d CUDA
+        # tensor kept undetached on purpose), so each sampled step costs one
+        # GPU->CPU sync. Sampling every step buys no resolution a 3e5-step run
+        # can use and pays that sync 3e5 times.
+        self.log_every_n_steps = int(log_every_n_steps)
+        self.metrics_every_n_steps = int(metrics_every_n_steps)
+        #: The Rondo model this fit trains. Built once, in the constructor,
+        #: because :attr:`forcefield` — the field whose pair list
+        #: :func:`class_i_data_module` mounts — is *its* field. One object
+        #: owns both the parameter tables and the nonbonded radius, so the
+        #: graph the batches carry and the radius the model prices cannot
+        #: drift apart (ledger finding **F21**).
+        self.spec = RondoSpec(
+            hidden=hidden,
+            n_blocks=n_blocks,
+            n_torsion_terms=n_torsion_terms,
+        )
+        self.parameterizer = Rondo(self.spec)
+        if isinstance(train_records, (list, tuple)):
             self.train_ds = _LabeledFrames(
                 FrameDataset.from_records(train_records, task=train_task, group_of=_require_group)
             )
             self.val_ds = _LabeledFrames(
                 FrameDataset.from_records(val_records, task=val_task, group_of=_require_group)
             )
-            self.dressing = fit_atomic_reference(train_records)
+            self.prepare = None
+            self.dressing = (
+                dressing if dressing is not None else fit_atomic_reference(train_records)
+            )
+        else:
+            self.train_ds = train_records
+            self.val_ds = val_records
+            # This branch is the one where *train_records* is a dataset rather
+            # than a list of frames, so its declared unit is right here to read.
+            self.prepare = ClassIPrepare.from_dataset(train_records, energy_unit=energy_unit)
+            self.dressing = dressing
 
-    def datamodule(self) -> DataModule:
-        train = DataMixture(
-            {TASK_ENERGY: self.train_ds},
-            mixture={TASK_ENERGY: 1.0},
-            max_atoms=self.max_atoms,
-        )
-        on_cuda = self.device.type == "cuda"
-        # The two post-collate facts the model needs, both owned by the field it
-        # is built on (``self.forcefield``, which :meth:`model` parameterizes):
-        # the pair list at the radius its own styles are priced at — molpot
-        # consumes a placed ``edges`` namespace and never enumerates one — and
-        # the neutral net charge its charge model is fail-closed on. OMol25
-        # conformers are isolated molecules, hence the open (``pbc=False``) list.
-        return DataModule(
-            train,
-            self.val_ds,
-            batch_tasks=[self.forcefield.neighbor_list(), TotalCharge()],
-            batch_size=8,
-            num_workers=self.num_workers,
-            pin_memory=on_cuda,
-            persistent_workers=self.num_workers > 0,
-            prefetch_factor=self.prefetch_factor,
-            multiprocessing_context=self.multiprocessing_context,
-            seed=self.seed,
+    @property
+    def forcefield(self) -> Any:
+        """The one field of this fit — the model's own (ledger finding **F21**).
+
+        Reading it off the model is what makes a pair list built here and the
+        pairs the model prices the same fact, rather than two equal-looking
+        objects kept in step by hand.
+        """
+        return self.parameterizer.template
+
+    def model(self) -> RondoPotential:
+        """Wrap this fit's Rondo parameterizer as an energy/force model.
+
+        The dressing table is cloned so the fit's own frozen reference
+        energies are never mutated by the model that reads them.
+        """
+        cloned = None
+        if self.dressing is not None:
+            cloned = AtomicReferenceEnergy(
+                atomic_energies=self.dressing.atomic_energies.detach().cpu().clone(),
+                supported=self.dressing.supported.detach().cpu().clone(),
+                scheme=self.dressing.scheme,
+                units=self.dressing.units,
+            )
+        return RondoPotential(self.parameterizer, dressing=cloned, energy_unit=self.energy_unit).to(
+            self.device
         )
 
-    def model(self) -> ForceAwareModel:
-        # Built in the project dtype (``molix.config``), which is the dtype the
-        # DataModule's collate casts every batch to — one policy, so a probe
-        # that bypasses the DataModule (``align._collate``) has a dtype to cast
-        # to without asking the model what it happens to be.
-        #
-        # ``template=self.forcefield`` is what makes ``model.imm.template`` this
-        # fit's own field: a probe reads the pair list off the model it is
-        # probing (``align._field_of``) and gets the list ``datamodule`` mounts.
-        imm = build_espaloma_like_model(
-            energy_scope=self.energy_scope,
-            hidden=self.hidden,
-            n_blocks=self.n_blocks,
-            n_torsion_terms=self.n_torsion_terms,
-            dtype=config["ftype"],
-            template=self.forcefield,
-        )
-        dressing = AtomicReferenceEnergy(
-            atomic_energies=self.dressing.atomic_energies.detach().cpu().clone()
-        )
-        return ForceAwareModel(imm, dressing).to(self.device)
-
-    def run(
-        self,
-        *,
-        resume_from: Path | str | None = None,
-        max_steps: int | None = None,
-    ) -> dict[str, float]:
-        """Train on OMol25 labels; report the configured eval loss."""
-        datamodule = self.datamodule()
-        model = self.model()
-        spec = TaskSpec(name=TASK_ENERGY, code=TASK_CODE_ENERGY, loss=train_objective)
-        router = TaskRouter((spec,))
+    def trainer(self, model: nn.Module) -> Trainer:
+        """Build the historical Trainer primitive. Official cosine is run()-only."""
+        if self.loss is fairchem_4m_objective and self.lr_scheduler_factory is None:
+            raise ValueError(
+                "fairchem_4m_objective requires a cosine lr_scheduler_factory; "
+                "compose it in omol25_fairchem_4m.run"
+            )
         if self.record_root is not None:
             checkpoint_dir = self.record_root / "checkpoints"
         else:
             checkpoint_dir = Path("checkpoints")
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
         hooks: list[BaseHook] = [
             GradClipHook(max_norm=self.clip_max_norm),
             StepSpeedHook(window_size=4),
             Log(
-                every_n_steps=5,
+                every_n_steps=self.log_every_n_steps,
                 keys=(
-                    ("train", "loss_energy"),
+                    ("train", "loss"),
                     ("train", "grad_norm"),
-                    ("eval", "loss_energy"),
+                    ("eval", "loss"),
                     ("performance", "step_per_second"),
                 ),
             ),
             CheckpointHook(
                 checkpoint_dir=str(checkpoint_dir),
                 save_best=True,
-                best_metric_name=("eval", "loss_energy"),
+                save_last=True,
+                best_metric_name=("eval", "loss"),
                 best_metric_mode="min",
             ),
         ]
         if self.record_root is not None:
-            hooks.append(MolRecMetricsHook(record_root=self.record_root))
-        steps_per_epoch = max(1, len(datamodule.train_dataloader()))
-        eval_every_n_steps = (
-            None if self.eval_every_epochs <= 1 else steps_per_epoch * self.eval_every_epochs
-        )
-        trainer = Trainer(
+            hooks.append(
+                MolRecMetricsHook(
+                    record_root=self.record_root,
+                    every_n_steps=self.metrics_every_n_steps,
+                )
+            )
+        return Trainer(
             model,
-            loss_fn=None,
-            optimizer_factory=lambda params: torch.optim.Adam(params, lr=self.lr),
-            train_step=MultiTaskTrainStep(router),
-            eval_step=MultiTaskEvalStep(
-                TaskRouter(
-                    (TaskSpec(name=TASK_ENERGY, code=TASK_CODE_ENERGY, loss=self.eval_loss),)
-                ),
-                no_grad=True,
-            ),
+            loss_fn=self.loss,
+            optimizer_factory=self.optimizer_factory,
+            lr_scheduler_factory=self.lr_scheduler_factory,
+            train_step=_FitTrainStep(),
+            eval_step=_FitEvalStep(self.eval_loss, no_grad=True),
             hooks=hooks,
-            eval_every_n_steps=eval_every_n_steps,
-            resume_from_checkpoint=None if resume_from is None else str(resume_from),
+            eval_every_n_steps=self.eval_every_n_steps,
             device=str(self.device),
         )
+
+    def run(
+        self,
+        datamodule: DataModuleProtocol,
+        *,
+        resume_from: Path | str | None = None,
+        max_steps: int | None = None,
+    ) -> dict[str, float]:
+        """Train on OMol25 labels; report the configured eval loss.
+
+        Args:
+            datamodule: Loader composed by the caller (typically
+                :func:`class_i_data_module`).
+        """
+        if self.loss is fairchem_4m_objective:
+            raise ValueError(
+                "ClassIFit.run cannot train fairchem_4m_objective; "
+                "compose attach_omol_elem_refs and extra-role eval in "
+                "omol25_fairchem_4m.run"
+            )
+        model = self.model()
+        trainer = self.trainer(model)
+        if self.eval_every_n_steps is None and self.eval_every_epochs > 1:
+            steps_per_epoch = max(1, len(datamodule.train_dataloader()))
+            trainer.eval_every_n_steps = steps_per_epoch * self.eval_every_epochs
+        # Loader already has the one padder. Compile the train body only —
+        # eval compile leaks encoder ``grad_fn``s (GH200 2363952). Do not
+        # fall back to eager.
+        from molix.compile import Compiler
+
+        trainer.train_step._traced_forward_loss = Compiler(fullgraph=True)(
+            trainer.train_step._traced_forward_loss
+        )
+        trainer._resume_from_checkpoint = None if resume_from is None else str(resume_from)
+        trainer.smoke(datamodule, steps=3)
         trainer.train(datamodule, max_epochs=self.epochs, max_steps=max_steps)
-        val_mae = trainer.state.get(("eval", "loss_energy"))
-        train_loss = trainer.state.get(("train", "loss_energy"))
+        val_mae = trainer.state.get(("eval", "loss"))
+        if val_mae is None:
+            val_mae = trainer.state.get(("eval", "loss_energy"))
+        train_loss = trainer.state.get(("train", "loss"))
         if train_loss is None:
-            train_loss = trainer.state.get(("train", "loss"))
+            train_loss = trainer.state.get(("train", "loss_energy"))
         step_per_second = trainer.state.get(("performance", "step_per_second"))
         return {
+            # Where the run stopped. A resume is only demonstrated by a step
+            # counter that moved past the checkpoint's, and ``max_steps`` is an
+            # absolute target: ``max_steps=1`` on a run resumed at step 16 is
+            # already satisfied and trains nothing.
+            "global_step": float(trainer.state.global_step),
             "train_loss": float(train_loss) if train_loss is not None else float("nan"),
             "val_mae_kcal": float(val_mae) if val_mae is not None else float("nan"),
             "step_per_second": (
@@ -635,9 +1347,10 @@ class ClassIFit:
             "n_val": float(len(self.val_ds)),
         }
 
-    def probe_finite(self, *, max_steps: int = 33) -> dict[str, float]:
+    def probe_finite(
+        self, datamodule: DataModuleProtocol, *, max_steps: int = 33
+    ) -> dict[str, float]:
         """Walk the packed train loader; count batches whose force Hessian is non-finite."""
-        datamodule = self.datamodule()
         model = self.model()
         model.train()
         n_bad = 0
@@ -673,12 +1386,6 @@ class ClassIFit:
                 n_bad += 1
             n_steps += 1
         return {"n_steps": float(n_steps), "n_bad": float(n_bad)}
-
-    def align(self) -> dict[str, float]:
-        """Packed vs per-molecule parity on the train set. Not a training run."""
-        from scripts.mm_param_learning.align import _flatten, align_suite
-
-        return align_suite(self.model(), _flatten(self))
 
 
 def split_records(
@@ -809,143 +1516,12 @@ def load_omol25_split(
     return split_records(raw, train_frac=train_frac, seed=seed)
 
 
-def _is_labeled_source(obj: Any) -> bool:
-    return hasattr(obj, "atom_counts") and hasattr(obj, "task_labels")
-
-
-class LazyOMol25:
-    """Labeled Class-I samples over an OMol25 LMDB, converted on read.
-
-    Does not hold frames. ``atom_counts`` is filled by :func:`load_omol25_official`.
-    Source frames stay in published eV; this view converts to kcal/mol on read.
-    """
-
-    def __init__(
-        self,
-        source: Any,
-        indices: Sequence[int],
-        atom_counts: Sequence[int],
-        *,
-        dressing: AtomicReferenceEnergy | None = None,
-    ) -> None:
-        from molhub.dataset.omol25 import OMol25Small
-
-        self._source = source
-        self._indices = tuple(int(i) for i in indices)
-        self._bond = OMol25Small._bonded
-        self.atom_counts = torch.as_tensor(list(atom_counts), dtype=torch.long)
-        self.edge_counts = torch.zeros(len(self._indices), dtype=torch.long)
-        self.task_labels = (TASK_ENERGY,) * len(self._indices)
-        self.group_ids = tuple(str(i) for i in self._indices)
-        self.dressing = dressing
-
-    def __len__(self) -> int:
-        return len(self._indices)
-
-    def subset(self, indices: Sequence[int]) -> "LazyOMol25":
-        """A lazy view over the given row indices (same source + dressing)."""
-        kept = [int(i) for i in indices]
-        counts = self.atom_counts[kept].tolist()
-        return LazyOMol25(self._source, kept, counts, dressing=self.dressing)
-
-    def __getitem__(self, idx: int) -> tuple[dict[str, Any], ...]:
-        src_idx = self._indices[idx]
-        view = _omol_lmdb_view(self._source)
-        record_fn = getattr(view, "record", None)
-        if callable(record_fn) and getattr(view, "_tables", None) is not None:
-            return (self._sample_from_record(record_fn(src_idx), group=float(idx)),)
-        # Frame-shaped source (tests / packed NPZ): keep the molpy path.
-        frame = self._source[src_idx][0]
-        bonded = self._bond(frame, record_id=str(src_idx))
-        converted = self._to_kcal(
-            bonded if bonded is not None else frame,
-            record_id=str(src_idx),
-        )
-        return (label_sample(converted, group=float(idx)),)
-
-    def _sample_from_record(self, record: dict[str, Any], *, group: float) -> Frame:
-        """Raw LMDB row → labeled frame, skipping the source frame round trip."""
-        from molhub.dataset.omol25 import infer_bonds
-
-        numbers = np.asarray(record["numbers"], dtype=np.int64).reshape(-1)
-        positions = np.asarray(record["positions"], dtype=np.float64)
-        atomi, atomj = infer_bonds(numbers, positions)
-        forces = np.asarray(record["forces"], dtype=np.float64) * _EV_PER_A_TO_KCAL_PER_A
-        return _frame_from_arrays(
-            numbers=numbers,
-            positions=positions,
-            energy=float(record["energy"]) * _EV_TO_KCAL,
-            forces=forces,
-            atomi=atomi,
-            atomj=atomj,
-            group=group,
-        )
-
-    def __getstate__(self) -> dict[str, Any]:
-        """Drop the imported bond helper; workers restore it in ``__setstate__``."""
-        state = self.__dict__.copy()
-        state["_bond"] = None
-        return state
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        from molhub.dataset.omol25 import OMol25Small
-
-        self.__dict__.update(state)
-        self._bond = OMol25Small._bonded
-
-    def _to_kcal(self, frame: Any, *, record_id: str) -> Any:
-        from molpy import Block, Frame
-
-        atoms = frame["atoms"]
-        scale = _EV_PER_A_TO_KCAL_PER_A
-        out = Frame()
-        atom_block: dict[str, Any] = {
-            "element": np.asarray(atoms["element"]),
-            "number": np.asarray(atoms["number"]),
-            "x": np.asarray(atoms["x"]),
-            "y": np.asarray(atoms["y"]),
-            "z": np.asarray(atoms["z"]),
-        }
-        if "fx" in atoms:
-            atom_block["fx"] = np.asarray(atoms["fx"], dtype=np.float64) * scale
-            atom_block["fy"] = np.asarray(atoms["fy"], dtype=np.float64) * scale
-            atom_block["fz"] = np.asarray(atoms["fz"], dtype=np.float64) * scale
-        out["atoms"] = Block(atom_block)
-        if "bonds" in frame:
-            bonds = frame["bonds"]
-            out["bonds"] = Block(
-                {
-                    "atomi": np.asarray(bonds["atomi"]),
-                    "atomj": np.asarray(bonds["atomj"]),
-                }
-            )
-        raw_meta = getattr(frame, "meta", None) or {}
-        # molpy 0.14 MetaValue unwrap — str()/float() on the wrapper corrupts.
-        meta = {k: getattr(v, "value", v) for k, v in raw_meta.items()}
-        meta["energy"] = float(meta["energy"]) * _EV_TO_KCAL
-        meta["source_record_id"] = str(meta.get("source_record_id") or record_id)
-        meta["molecule_id"] = str(meta.get("molecule_id") or record_id)
-        out.meta = meta
-        return out
-
-
-def _omol_lmdb_view(source: Any) -> Any:
-    """Underlying :class:`OMol25Lmdb` when *source* is a loaded :class:`OMol25`."""
-    view = getattr(source, "_view", None)
-    if view is not None:
-        return view
-    return source
-
-
 def _raw_omol_record(source: Any, idx: int) -> dict[str, Any]:
-    """LMDB dict when available; otherwise a Frame-shaped fallback for tests."""
-    view = _omol_lmdb_view(source)
-    tables = getattr(view, "_tables", None)
-    index = getattr(view, "_index", None)
-    if tables is not None and index is not None:
-        table_idx, row_id = index[idx]
-        rec = dict(tables[table_idx].get(row_id))
-        rec["energy_is_ev"] = True
+    """LMDB dict via public ``record()``; Frame-shaped fallback for tests."""
+    record_fn = getattr(source, "record", None)
+    if callable(record_fn):
+        rec = dict(record_fn(idx))
+        rec.setdefault("energy_is_ev", True)
         return rec
     frame = source[idx][0]
     atoms = frame["atoms"]
@@ -958,8 +1534,21 @@ def _raw_omol_record(source: Any, idx: int) -> dict[str, Any]:
     }
 
 
-def _n_atoms_cache_path(source: Any) -> Path:
-    home = Path(os.environ.get("MOLHUB_HOME", Path.home() / ".cache" / "molhub"))
+def _counts_cache_path(source: Any) -> Path:
+    """On-disk path for *source*'s per-row atom-count vector.
+
+    Keyed like :func:`_e0_cache_path` — identity plus row count — and written
+    under the same ``derived/omol25-index`` directory. The same caveat applies:
+    a source that changes content without changing length or identity would
+    read a stale vector.
+
+    Args:
+        source: Loaded MolHub view.
+
+    Returns:
+        ``home_dir / "derived" / "omol25-index" / {digest}-n_atoms.npy``.
+    """
+    home = Path(molhub_config.home_dir)
     root = str(getattr(source, "root", getattr(source, "source_id", type(source).__name__)))
     digest = hashlib.sha1(f"{root}:{len(source)}".encode()).hexdigest()[:16]
     path = home / "derived" / "omol25-index" / f"{digest}-n_atoms.npy"
@@ -967,41 +1556,78 @@ def _n_atoms_cache_path(source: Any) -> Path:
     return path
 
 
-def _omol_atom_counts(source: Any) -> np.ndarray:
-    """Per-row atom counts from LMDB ``numbers``, cached on disk.
+def _official_vector_counts(source: Any) -> np.ndarray:
+    """Per-row atom counts from ``source.get_distrib("graph.natoms")``."""
+    return np.asarray(source.get_distrib("graph.natoms").raw)
 
-    Does not build molpy Frames. Last 4m pass kept every row (max 350 atoms);
-    the 8-hour Frame scan was the bug.
+
+def _measured_counts(source: Any) -> np.ndarray:
+    """:func:`_official_vector_counts`, measured once and kept on disk.
+
+    ``get_distrib`` decodes **every** row into a molpy ``Frame`` to read one
+    scalar from it. On official 4m that is 3.99 M decodes: measured at 1632 s
+    on a GPU node with the ε[Z] cache already warm (Slurm 2528891), and paid
+    again at every process start, before step 1 — 27 minutes of a 24 h run
+    spent re-measuring a constant. Cached, the same phase takes 0.3 s.
+
+    The measurement itself stays in :func:`_official_vector_counts`, which is
+    deliberately a bare call: this wrapper adds storage, never discovery, and
+    never a fabricated count.
     """
-    path = _n_atoms_cache_path(source)
-    n_src = len(source)
-    if path.is_file():
-        counts = np.load(path)
-        if counts.shape == (n_src,):
-            print(f"omol n_atoms cache hit {path} n={n_src}", flush=True)
-            return counts.astype(np.int32, copy=False)
-    # Official 4m: a prior full pass kept every row, max 350 atoms. Do not
-    # decode 4M Frames/LMDB records on a GPU node just to count atoms.
-    view = _omol_lmdb_view(source)
-    if getattr(view, "_tables", None) is not None:
-        hint = 512
-        print(
-            f"omol n_atoms cache miss n={n_src}; pack with {hint} "
-            "(4m max observed 350; skip GPU index scan)",
-            flush=True,
-        )
-        return np.full(n_src, hint, dtype=np.int32)
-    counts = np.empty(n_src, dtype=np.int32)
-    for i in range(n_src):
-        numbers = np.asarray(_raw_omol_record(source, i)["numbers"]).reshape(-1)
-        counts[i] = int(numbers.shape[0])
+    identity = str(getattr(source, "source_id", ""))
+    if not identity.startswith("dataset:"):
+        # Only a versioned MolHub coordinate pins content, and the key is
+        # identity plus row count. Anything else — a local view, a test
+        # double — can hold different rows under one name, and a cache keyed
+        # on it would hand back another source's counts.
+        return _official_vector_counts(source)
+    path = _counts_cache_path(source)
+    n_rows = len(source)
+    cached = _stored_counts(path, n_rows)
+    if cached is not None:
+        return cached
+    counts = _official_vector_counts(source)
     np.save(path, counts)
     return counts
 
 
+def _stored_counts(path: Path, n_rows: int) -> np.ndarray | None:
+    """A cached count vector, or ``None`` when the file cannot be trusted.
+
+    Refuses anything that is not a readable integer vector of the right
+    length. The 2026-09-11 files under this name are a raw ``int32`` dump of
+    the constant 512 — a fabricated fallback from a deleted code path, with no
+    ``.npy`` header at all — so "a file is there" is not evidence that the
+    counts in it were ever measured. A rejected file is re-measured and
+    overwritten.
+    """
+    if not path.is_file():
+        return None
+    try:
+        cached = np.load(path)
+    except (ValueError, OSError, EOFError):
+        return None
+    if cached.shape != (n_rows,) or not np.issubdtype(cached.dtype, np.integer):
+        return None
+    return cached
+
+
 def _e0_cache_path(source: Any, *, max_atoms: int, n_fit: int, seed: int) -> Path:
-    """On-disk cache for ε[Z] keyed by source identity and fit hyper-parameters."""
-    home = Path(os.environ.get("MOLHUB_HOME", Path.home() / ".cache" / "molhub"))
+    """On-disk ε[Z] cache path under ``molhub_config.home_dir``.
+
+    Args:
+        source: Loaded MolHub view. Identity is ``root`` (or ``source_id``)
+            plus ``len(source)``.
+        max_atoms: Keep bound used when the subsample was chosen (atoms).
+        n_fit: Number of rows in the least-squares subsample (dimensionless).
+        seed: RNG seed of that subsample (dimensionless).
+
+    Returns:
+        ``home_dir / "derived" / "omol25-index" / {digest}-e0.npy`` where
+        *digest* is the sha1[:16] of ``root:len:max_atoms:n_fit:seed``.
+        *home_dir* is a pathlib Path, not a physical unit.
+    """
+    home = Path(molhub_config.home_dir)
     root = str(getattr(source, "root", getattr(source, "source_id", type(source).__name__)))
     digest = hashlib.sha1(f"{root}:{len(source)}:{max_atoms}:{n_fit}:{seed}".encode()).hexdigest()[
         :16
@@ -1032,7 +1658,7 @@ def _fit_e0_subsample(
         if cached.shape == (95,):
             return cached.astype(np.float64, copy=False)
 
-    factor = _EV_TO_KCAL
+    factor = _EV_PER_A_TO_KCAL_PER_A
     pick = list(indices)
     if len(pick) > n_fit:
         rng = random.Random(seed)
@@ -1056,18 +1682,52 @@ def _fit_e0_subsample(
 
 def _index_omol_source(
     source: Any, *, max_atoms: int, fit_e0: bool = True
-) -> tuple[list[int], list[int], np.ndarray]:
-    """Keep rows with ``1 ≤ n_atoms ≤ max_atoms``. Counts come from cache/LMDB."""
-    n_atoms = _omol_atom_counts(source)
+) -> tuple[list[int], np.ndarray]:
+    """Keep rows with ``1 <= n_atoms <= max_atoms``; optionally fit ε[Z].
+
+    The count vector is fully known, so the keep is exact. A measured
+    zero is dropped (``n >= 1``); negatives are dropped by the same
+    predicate.
+
+    Args:
+        source: Loaded MolHub view with ``get_distrib("graph.natoms")``.
+        max_atoms: Inclusive keep bound (atoms).
+        fit_e0: When True, least-squares ε[Z] on a subsample of the keep.
+
+    Returns:
+        ``(keep, e0)`` — kept source-row indices and the 95-element ε
+        table in kcal mol⁻¹ (zeros when *fit_e0* is False or keep is empty).
+    """
+    n_atoms = _measured_counts(source)
     keep = np.flatnonzero((n_atoms >= 1) & (n_atoms <= int(max_atoms)))
     if keep.size == 0:
-        return [], [], np.zeros(95, dtype=np.float64)
+        return [], np.zeros(95, dtype=np.float64)
     e0 = (
         _fit_e0_subsample(source, keep.tolist(), max_atoms=int(max_atoms))
         if fit_e0
         else np.zeros(95, dtype=np.float64)
     )
-    return keep.tolist(), n_atoms[keep].astype(int).tolist(), e0
+    return keep.tolist(), e0
+
+
+class OMolSplit:
+    """Train/val index views of OMol25, plus the optional ε[Z] table.
+
+    The datasets are :class:`~molhub.dataset.protocol.SubsetDataset` over
+    :class:`~molhub.dataset.omol25.OMol25`. Dressing is a model table, not
+    a dataset attribute.
+    """
+
+    def __init__(
+        self,
+        train: SubsetDataset,
+        val: SubsetDataset,
+        *,
+        dressing: AtomicReferenceEnergy | None = None,
+    ) -> None:
+        self.train = train
+        self.val = val
+        self.dressing = dressing
 
 
 def load_omol25_official(
@@ -1075,8 +1735,8 @@ def load_omol25_official(
     train_role: str = "4m",
     val_role: str = "val-neutral",
     max_atoms: int = 16384,
-) -> tuple[LazyOMol25, LazyOMol25]:
-    """Official OMol25: ``4m`` train, ``val-neutral`` val. Lazy, kcal, bonds on read."""
+) -> OMolSplit:
+    """Official OMol25: ``4m`` train, ``val-neutral`` val. Frames stay eV, no bonds."""
     t0 = perf_counter()
     train_src = _official_source(train_role)
     print(
@@ -1090,18 +1750,17 @@ def load_omol25_official(
         flush=True,
     )
     t0 = perf_counter()
-    train_keep, train_n, e0 = _index_omol_source(train_src, max_atoms=max_atoms)
+    train_keep, e0 = _index_omol_source(train_src, max_atoms=max_atoms)
     print(f"omol train index_s={perf_counter() - t0:.1f}", flush=True)
     t0 = perf_counter()
-    val_keep, val_n, _ = _index_omol_source(val_src, max_atoms=max_atoms, fit_e0=False)
+    val_keep, _ = _index_omol_source(val_src, max_atoms=max_atoms, fit_e0=False)
     print(f"omol val index_s={perf_counter() - t0:.1f}", flush=True)
     if not train_keep or not val_keep:
         raise ValueError("OMol25 official split kept no frames")
-    dressing = AtomicReferenceEnergy(atomic_energies=e0.tolist())
-    train = LazyOMol25(train_src, train_keep, train_n, dressing=dressing)
-    val = LazyOMol25(val_src, val_keep, val_n, dressing=dressing)
+    train = SubsetDataset(train_src, train_keep)
+    val = SubsetDataset(val_src, val_keep)
     print(f"omol kept train={len(train)} val={len(val)}", flush=True)
-    return train, val
+    return OMolSplit(train, val, dressing=_historical_are(e0.tolist()))
 
 
 _OFFICIAL_SOURCE_CACHE: dict[str, Any] = {}
@@ -1123,27 +1782,30 @@ def _official_source(role: str) -> Any:
     return cached
 
 
-def _official_prefix(
-    source: Any, n: int, max_atoms: int, scan_cap: int
-) -> tuple[list[int], list[int]]:
-    """First *n* row indices of *source* with real ``1 ≤ n_atoms ≤ max_atoms``.
+def _official_prefix(n_atoms: np.ndarray, n: int, max_atoms: int, scan_cap: int) -> list[int]:
+    """First *n* source rows with ``1 <= n_atoms <= max_atoms``.
 
-    Reads per-row ``numbers`` for a bounded prefix only, so it never runs the
-    full 4M-row index scan the 512-hint fallback exists to avoid.
+    Operates on an already-loaded numpy count vector; does not decode
+    LMDB records.
+
+    Args:
+        n_atoms: Per-row atom counts (dimensionless, atoms per row).
+        n: Maximum number of kept rows (dimensionless).
+        max_atoms: Inclusive keep bound (atoms).
+        scan_cap: Maximum prefix of *n_atoms* to scan (dimensionless).
+
+    Returns:
+        Source row indices of the first *n* rows that pass the predicate.
     """
-    indices: list[int] = []
-    counts: list[int] = []
-    limit = min(int(len(source)), int(scan_cap))
+    limit = min(int(n_atoms.shape[0]), int(scan_cap))
+    keep: list[int] = []
     for i in range(limit):
-        if len(indices) >= n:
+        if len(keep) >= n:
             break
-        rec = _raw_omol_record(source, i)
-        numbers = np.asarray(rec.get("numbers", np.zeros(0, dtype=np.int64))).reshape(-1)
-        n_atoms = int(numbers.shape[0])
-        if 1 <= n_atoms <= int(max_atoms):
-            indices.append(i)
-            counts.append(n_atoms)
-    return indices, counts
+        size = int(n_atoms[i])
+        if 1 <= size <= int(max_atoms):
+            keep.append(i)
+    return keep
 
 
 def load_omol25_official_tiny(
@@ -1153,19 +1815,21 @@ def load_omol25_official_tiny(
     max_atoms: int = 32,
     seed: int = 2666,
     scan_cap: int = 8192,
-) -> tuple[LazyOMol25, LazyOMol25]:
+) -> OMolSplit:
     """Official ``4m`` / ``val-neutral`` coordinates on a bounded real subset.
 
     For the align / inspect / overfit calibration gates: same coordinate
     identity as production, but only the first ``n_train`` / ``n_val`` rows
-    with ``1 ≤ n_atoms ≤ max_atoms`` atoms are materialised, with real
-    per-row atom counts (no 512 hint). ε[Z] is fitted on that tiny subset.
-    The molecule count is an explicitly enumerated calibration-only difference.
+    with ``1 ≤ n_atoms ≤ max_atoms`` atoms are kept. ε[Z] is fitted on that
+    tiny subset. The molecule count is an explicitly enumerated
+    calibration-only difference.
     """
     train_src = _official_source("4m")
     val_src = _official_source("val-neutral")
-    train_keep, train_n = _official_prefix(train_src, n_train, max_atoms, scan_cap)
-    val_keep, val_n = _official_prefix(val_src, n_val, max_atoms, scan_cap)
+    train_counts = _measured_counts(train_src)
+    val_counts = _measured_counts(val_src)
+    train_keep = _official_prefix(train_counts, n_train, max_atoms, scan_cap)
+    val_keep = _official_prefix(val_counts, n_val, max_atoms, scan_cap)
     if not train_keep or not val_keep:
         raise ValueError(
             "official tiny subset kept no frames "
@@ -1174,11 +1838,69 @@ def load_omol25_official_tiny(
     e0 = _fit_e0_subsample(
         train_src, train_keep, n_fit=len(train_keep), max_atoms=max_atoms, seed=seed
     )
-    dressing = AtomicReferenceEnergy(atomic_energies=e0.tolist())
-    return (
-        LazyOMol25(train_src, train_keep, train_n, dressing=dressing),
-        LazyOMol25(val_src, val_keep, val_n, dressing=dressing),
+    return OMolSplit(
+        SubsetDataset(train_src, train_keep),
+        SubsetDataset(val_src, val_keep),
+        dressing=_historical_are(e0.tolist()),
     )
+
+
+_FAIRCHEM_EVAL_ROLES: tuple[tuple[str, str], ...] = (
+    ("general", ""),
+    ("metal", "val_metal_complexes"),
+    ("electrolytes", "val_electrolytes"),
+    ("biomolecules", "val_biomolecules"),
+    ("spice", "val_spice"),
+    ("neutral_organics", "val_neutralorganics"),
+)
+
+
+def _omol_elem_refs_path() -> Path:
+    """Hosted ``omol-elem-refs`` YAML path. Fail-closed if the artifact is absent."""
+    import molhub
+    from molhub.dataset.omol25 import COORDINATE
+
+    paths = molhub.fetch(COORDINATE, roles=["omol-elem-refs"])
+    path = Path(paths["omol-elem-refs"])
+    if not path.is_file():
+        raise FileNotFoundError(f"omol-elem-refs artifact is absent: {path}")
+    return path
+
+
+def load_omol25_fairchem_4m() -> tuple[Any, dict[str, Any]]:
+    """Official eV 4M train plus named official-val / domain views.
+
+    Fail-closes if ``omol-elem-refs`` is absent. Does not construct
+    :class:`AtomicReferenceEnergy` and does not filter by ``batch_max_atoms``.
+    Train and ``general`` val are the OMol25 sources; named domain views
+    are :class:`~molhub.dataset.protocol.SubsetDataset`.
+    """
+    _omol_elem_refs_path()
+    train_src = _official_source("4m")
+    val_src = _official_source("val")
+    assignment = val_src.assignment()
+    roles: dict[str, Any] = {}
+    for name, key in _FAIRCHEM_EVAL_ROLES:
+        if name == "general":
+            roles[name] = val_src
+        else:
+            roles[name] = SubsetDataset(val_src, list(assignment[key]))
+    return train_src, roles
+
+
+def load_omol25_fairchem_4m_tiny(
+    *,
+    n_train: int = 48,
+    n_val: int = 12,
+) -> tuple[SubsetDataset, dict[str, SubsetDataset]]:
+    """Bounded prefix of :func:`load_omol25_fairchem_4m` roles, still eV."""
+    train, roles = load_omol25_fairchem_4m()
+    train_view = SubsetDataset(train, list(range(min(n_train, len(train)))))
+    role_views = {
+        name: SubsetDataset(view, list(range(min(n_val, len(view)))))
+        for name, view in roles.items()
+    }
+    return train_view, role_views
 
 
 def load_phalkethoh_val(root: str | Path, *, n_keep: int = 0) -> list:

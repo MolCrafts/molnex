@@ -20,7 +20,7 @@ cutoff, are removed by multiplying their contribution by zero, never by
 data, which forces a dynamo graph break on the force path (a point where
 ``torch.compile`` must fall back to the eager interpreter;
 ``.claude/notes/notes.md`` topic ``compile-no-graph-breaks``). Every term here
-therefore takes an ``edge_mask``: :class:`LJCutPotential` and
+therefore takes an ``pair_mask``: :class:`LJCutPotential` and
 :class:`CoulombOpenPotential` turn it into a multiplicative weight,
 :class:`CoulombPeriodicPotential` hands it to its calculator as a
 ``pair_mask``.
@@ -53,7 +53,7 @@ __all__ = [
 def _live_pairs(
     distances: torch.Tensor,
     cutoff: float | None,
-    edge_mask: torch.Tensor | None,
+    pair_mask: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Liveness of a fixed-capacity pair list, as a mask and as a weight.
 
@@ -66,7 +66,7 @@ def _live_pairs(
         distances: Pair separations ``r`` ``(E,)`` in Å, padding rows included.
         cutoff: Real-space cutoff ``r_c`` in Å; ``None`` keeps every pair the
             list produced.
-        edge_mask: Live-row mask ``(E,)`` of a fixed-capacity list; ``None``
+        pair_mask: Live-row mask ``(E,)`` of a fixed-capacity list; ``None``
             treats every row as live.
 
     Returns:
@@ -77,11 +77,11 @@ def _live_pairs(
         so the trace has no data-dependent shape and no graph break.
     """
     if cutoff is None:
-        live = edge_mask if edge_mask is not None else torch.ones_like(distances, dtype=torch.bool)
+        live = pair_mask if pair_mask is not None else torch.ones_like(distances, dtype=torch.bool)
     else:
         live = distances < cutoff
-        if edge_mask is not None:
-            live = live & edge_mask
+        if pair_mask is not None:
+            live = live & pair_mask
     return live, live.to(distances.dtype)
 
 
@@ -100,13 +100,14 @@ class LJCutPotential:
     default, geometric for an OPLS-AA model. Pairs with ``r >= cutoff`` are
     zeroed (the caller may also pre-filter the list).
 
-    There are two entry points. :meth:`energy` prices a pair list; the
+    There are two entry points. :meth:`energy` prices a pair list — the one
+    :class:`~molpot.forcefield.potentials.Potentials` composes, whose forces
+    are the derivative op's ``torch.autograd.grad`` through it; the
     **analytic-force branch** :meth:`energy_forces` prices the same list and
     additionally returns ``F = -∂E/∂pos`` from the closed-form radial
-    derivative, so a caller (:meth:`Potentials.calc_energy_forces
-    <molpot.forcefield.potentials.Potentials.calc_energy_forces>`) gets forces
-    with no ``requires_grad`` position leaf and no autograd backward. It takes
-    the pair **vectors** as well as the distances, because a direction and a
+    derivative, for a caller holding raw tensors that wants forces with no
+    ``requires_grad`` position leaf and no autograd backward. It takes the
+    pair **vectors** as well as the distances, because a direction and a
     length that do not come from the same vector are not each other's
     gradient under periodic boundaries — see :meth:`energy_forces`.
 
@@ -209,14 +210,14 @@ class LJCutPotential:
     def energy(
         self,
         *,
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
         distances: torch.Tensor,
         epsilon: torch.Tensor,
         sigma: torch.Tensor,
         scales: torch.Tensor,
-        edge_batch: torch.Tensor | None = None,
+        pair_batch: torch.Tensor | None = None,
         num_graphs: int | None = None,
-        edge_mask: torch.Tensor | None = None,
+        pair_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Repulsive and dispersive LJ energy for a half neighbor list.
 
@@ -225,7 +226,7 @@ class LJCutPotential:
         every interaction exactly once — no factor of ``½`` is applied here.
 
         Args:
-            edge_index: Half-list pairs ``(E, 2)``, atom indices into the ``N``
+            pair_index: Half-list pairs ``(E, 2)``, atom indices into the ``N``
                 atoms.
             distances: Pair separations ``r`` ``(E,)`` in Å.
             epsilon: Per-atom well depth ``ε`` ``(N,)`` in kcal/mol.
@@ -235,12 +236,12 @@ class LJCutPotential:
                 exclusion policy — ``0`` drops the pair entirely, ``1`` keeps it
                 in full, and an intermediate value is the usual 1-4 scaling
                 applied to atoms three bonds apart.
-            edge_batch: Index of the molecule (graph) each edge belongs to
+            pair_batch: Index of the molecule (graph) each edge belongs to
                 ``(E,)``. ``None`` sums to a scalar. Padding rows must still
                 carry an in-range graph index; their contribution is zero.
-            num_graphs: Number of molecules ``B``; required when ``edge_batch``
+            num_graphs: Number of molecules ``B``; required when ``pair_batch``
                 is given.
-            edge_mask: Live-row mask ``(E,)`` of a fixed-capacity neighbour
+            pair_mask: Live-row mask ``(E,)`` of a fixed-capacity neighbour
                 list. Dead rows contribute **exactly** zero to every returned
                 entry — they are multiplied out, not sliced out, and their
                 distance is replaced by ``cutoff`` first so a coincident
@@ -255,21 +256,21 @@ class LJCutPotential:
             switching factor
             of :meth:`_switch` (identically ``1`` without a ``switch_start``)
             and ``scale`` the row's entry of ``scales``. Each is ``(B,)`` in
-            kcal/mol when ``edge_batch`` is given, scalar ``()`` otherwise.
+            kcal/mol when ``pair_batch`` is given, scalar ``()`` otherwise.
             Repulsion is non-negative, dispersion non-positive, and their sum
             is the (scaled, switched) Lennard-Jones energy.
         """
-        live, weight = _live_pairs(distances, self.cutoff, edge_mask)
+        live, weight = _live_pairs(distances, self.cutoff, pair_mask)
         dist = torch.where(live, distances, distances.new_full((), self.cutoff))
-        mixed = self.mixing.mix({"epsilon": epsilon, "sigma": sigma}, edge_index)
+        mixed = self.mixing.mix({"epsilon": epsilon, "sigma": sigma}, pair_index)
         rep_pair, disp_pair = lj126_pair_energy_split(dist, mixed["epsilon_ij"], mixed["sigma_ij"])
         switch, _ = self._switch(dist)
         sw = switch * (scales * weight)
         rep_pair = rep_pair * sw
         disp_pair = disp_pair * sw
-        if edge_batch is None:
+        if pair_batch is None:
             return rep_pair.sum(), disp_pair.sum()
-        index = edge_batch.long()
+        index = pair_batch.long()
         graphs = int(num_graphs)
         repulsion = rep_pair.new_zeros(graphs)
         dispersion = disp_pair.new_zeros(graphs)
@@ -281,15 +282,15 @@ class LJCutPotential:
         self,
         *,
         n_atoms: int,
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
         pair_vectors: torch.Tensor,
         distances: torch.Tensor,
         epsilon: torch.Tensor,
         sigma: torch.Tensor,
         scales: torch.Tensor,
-        edge_batch: torch.Tensor | None = None,
+        pair_batch: torch.Tensor | None = None,
         num_graphs: int | None = None,
-        edge_mask: torch.Tensor | None = None,
+        pair_mask: torch.Tensor | None = None,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """LJ energy halves and analytic forces ``F = -∂E/∂pos`` for a half list.
 
@@ -348,7 +349,7 @@ class LJCutPotential:
                 ``N``, and the sibling force path
                 ``Potentials._coulomb_energy_forces`` already takes it as an
                 argument for the same reason.
-            edge_index: Half-list pairs ``(E, 2)``, atom indices into the ``N``
+            pair_index: Half-list pairs ``(E, 2)``, atom indices into the ``N``
                 atoms; column 0 is the ``i`` above, column 1 the ``j``.
             pair_vectors: Separation vectors ``(E, 3)`` in Å, pointing from
                 each row's ``i`` to its ``j`` — ``pos_j - pos_i`` under open
@@ -359,17 +360,17 @@ class LJCutPotential:
                 :meth:`Potentials._placed_pairs
                 <molpot.forcefield.potentials.Potentials._placed_pairs>` takes
                 as the norm of the vector it returns beside it, never a
-                separately stored ``edges.edge_dist``.
+                separately stored ``edges.pair_dist``.
             epsilon: Per-atom well depth ``ε`` ``(N,)`` in kcal/mol.
             sigma: Per-atom zero-crossing distance ``σ`` ``(N,)`` in Å.
             scales: Per-pair scale factors ``(E,)``, dimensionless; see
                 :meth:`energy`.
-            edge_batch: Index of the molecule (graph) each edge belongs to
+            pair_batch: Index of the molecule (graph) each edge belongs to
                 ``(E,)``. ``None`` sums to a scalar. Padding rows must still
                 carry an in-range graph index.
-            num_graphs: Number of molecules ``B``; required when ``edge_batch``
+            num_graphs: Number of molecules ``B``; required when ``pair_batch``
                 is given.
-            edge_mask: Live-row mask ``(E,)`` of a fixed-capacity neighbour
+            pair_mask: Live-row mask ``(E,)`` of a fixed-capacity neighbour
                 list; see :meth:`energy`. A dead row adds exactly zero to both
                 energy halves and zero force to both of its atoms, without any
                 shape ever depending on how many rows are live.
@@ -379,14 +380,14 @@ class LJCutPotential:
             :meth:`energy` (each ``(B,)`` or scalar ``()``, kcal/mol) and forces
             ``(N, 3)`` in kcal mol⁻¹ Å⁻¹, with ``N`` the ``n_atoms`` passed in.
         """
-        live, weight = _live_pairs(distances, self.cutoff, edge_mask)
+        live, weight = _live_pairs(distances, self.cutoff, pair_mask)
         # A dead row is evaluated at ``r_c`` rather than at its stored distance:
         # padding often stores ``r = 0`` between an atom and itself, whose
         # energy overflows to ``inf`` (and whose ``r̂`` is ``0/0``) before the
         # weight can zero it — ``0 · inf`` is ``nan``, and a ``nan`` force
         # poisons the whole scatter.
         dist = torch.where(live, distances, distances.new_full((), self.cutoff))
-        mixed = self.mixing.mix({"epsilon": epsilon, "sigma": sigma}, edge_index)
+        mixed = self.mixing.mix({"epsilon": epsilon, "sigma": sigma}, pair_index)
         eps = mixed["epsilon_ij"]
         sig = mixed["sigma_ij"]
 
@@ -396,10 +397,10 @@ class LJCutPotential:
         sw = switch * w
         rep_pair = rep_lj * sw
         disp_pair = disp_lj * sw
-        if edge_batch is None:
+        if pair_batch is None:
             repulsion, dispersion = rep_pair.sum(), disp_pair.sum()
         else:
-            index = edge_batch.long()
+            index = pair_batch.long()
             graphs = int(num_graphs)
             repulsion = rep_pair.new_zeros(graphs)
             dispersion = disp_pair.new_zeros(graphs)
@@ -409,7 +410,7 @@ class LJCutPotential:
         sr6 = (sig / dist.clamp(min=1e-6)).pow(6)
         dedr = 24.0 * eps * sr6 * (1.0 - 2.0 * sr6) / dist
         g = (switch * dedr + (rep_lj + disp_lj) * dswitch) * w
-        source, target = edge_index[:, 0], edge_index[:, 1]
+        source, target = pair_index[:, 0], pair_index[:, 1]
         # Same ``dist`` as the energy above, so a dead row divides its stored
         # vector by ``r_c`` instead of by its own length: a padding self-loop
         # (zero vector) gives ``0``, a row killed by the half-list or cutoff
@@ -455,29 +456,29 @@ class CoulombOpenPotential:
     def energy(
         self,
         *,
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
         distances: torch.Tensor,
         charges: torch.Tensor,
         scales: torch.Tensor,
-        edge_batch: torch.Tensor | None = None,
+        pair_batch: torch.Tensor | None = None,
         num_graphs: int | None = None,
-        edge_mask: torch.Tensor | None = None,
+        pair_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Coulomb energy of a half neighbor list under open boundaries.
 
         Args:
-            edge_index: Half-list pairs ``(E, 2)`` — each unordered pair once.
+            pair_index: Half-list pairs ``(E, 2)`` — each unordered pair once.
             distances: Pair separations ``(E,)`` in Å.
             charges: Per-atom partial charges ``(N,)`` in elementary charges
                 ``e``.
             scales: Per-pair scale factors ``(E,)``, dimensionless; ``0`` drops
                 an excluded bonded pair, ``1`` keeps a pair in full.
-            edge_batch: Index of the molecule (graph) each edge belongs to
+            pair_batch: Index of the molecule (graph) each edge belongs to
                 ``(E,)``. ``None`` sums to a scalar. Padding rows must still
                 carry an in-range graph index.
-            num_graphs: Number of molecules ``B``; required when ``edge_batch``
+            num_graphs: Number of molecules ``B``; required when ``pair_batch``
                 is given.
-            edge_mask: Live-row mask ``(E,)`` of a fixed-capacity neighbour
+            pair_mask: Live-row mask ``(E,)`` of a fixed-capacity neighbour
                 list. Dead rows contribute **exactly** zero: they are
                 multiplied out rather than sliced out, at a stand-in distance
                 of 1 Å so a coincident padding pair cannot turn the ``1/r``
@@ -485,20 +486,20 @@ class CoulombOpenPotential:
                 live.
 
         Returns:
-            ``Σ scale_ij k_e q_i q_j / r_ij`` — ``(B,)`` when ``edge_batch`` is
+            ``Σ scale_ij k_e q_i q_j / r_ij`` — ``(B,)`` when ``pair_batch`` is
             given, scalar ``()`` otherwise, in kcal/mol for the default
             prefactor.
         """
-        live, weight = _live_pairs(distances, self.cutoff, edge_mask)
+        live, weight = _live_pairs(distances, self.cutoff, pair_mask)
         dist = torch.where(live, distances, distances.new_full((), 1.0))
         v = self.potential.from_dist(dist)
-        qi = charges[edge_index[:, 0]]
-        qj = charges[edge_index[:, 1]]
+        qi = charges[pair_index[:, 0]]
+        qj = charges[pair_index[:, 1]]
         pair_energy = scales * qi * qj * v * weight
-        if edge_batch is None:
+        if pair_batch is None:
             return pair_energy.sum()
         energy = pair_energy.new_zeros(int(num_graphs))
-        energy.index_add_(0, edge_batch.long(), pair_energy)
+        energy.index_add_(0, pair_batch.long(), pair_energy)
         return energy
 
 
@@ -697,9 +698,9 @@ class CoulombPeriodicPotential:
         positions: torch.Tensor,
         charges: torch.Tensor,
         cell: torch.Tensor,
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
         distances: torch.Tensor,
-        edge_mask: torch.Tensor,
+        pair_mask: torch.Tensor,
         excluded_pairs: torch.Tensor,
         excluded_scales: torch.Tensor,
     ) -> torch.Tensor:
@@ -771,10 +772,10 @@ class CoulombPeriodicPotential:
             charges: Per-atom partial charges ``(N,)`` in elementary charges
                 ``e``.
             cell: Lattice vectors ``(3, 3)`` in Å, rows being the vectors.
-            edge_index: Half-list pairs ``(E, 2)`` at the capacity the list was
+            pair_index: Half-list pairs ``(E, 2)`` at the capacity the list was
                 written at — dead padding rows included.
             distances: Pair separations ``(E,)`` in Å, padding rows included.
-            edge_mask: Live-row mask ``(E,)`` of that capacity-shaped list.
+            pair_mask: Live-row mask ``(E,)`` of that capacity-shaped list.
                 Combined with ``r < r_c`` into the calculator's ``pair_mask``.
             excluded_pairs: Endpoints ``(P, 2)`` of every scaled pair of the
                 topology — :attr:`ExclusionTable.pairs
@@ -793,7 +794,7 @@ class CoulombPeriodicPotential:
             Scalar total electrostatic energy ``()``, in kcal/mol for the
             default prefactor — or ``NaN`` when ``cell`` has outgrown the
             frozen reciprocal shape. One cell, one number: the reciprocal sum
-            takes no ``edge_batch``, and
+            takes no ``pair_batch``, and
             :meth:`~molpot.forcefield.potentials.Potentials.calc_energy`
             refuses a batch of more than one graph rather than charging each of
             them this box's energy.
@@ -802,7 +803,7 @@ class CoulombPeriodicPotential:
             ValueError: On the lazy first bind only, when ``cell`` is not
                 ``(3, 3)``.
         """
-        pair_mask, _ = _live_pairs(distances, self.real_space_cutoff, edge_mask)
+        pair_mask, _ = _live_pairs(distances, self.real_space_cutoff, pair_mask)
         cell = cell.to(dtype=positions.dtype, device=positions.device)
         frozen = self._bound_ns
         if frozen is None:
@@ -817,7 +818,7 @@ class CoulombPeriodicPotential:
             charges=charge_column,
             cell=cell,
             positions=positions,
-            neighbor_indices=edge_index,
+            neighbor_indices=pair_index,
             neighbor_distances=distances,
             periodic=torch.ones(3, dtype=torch.bool, device=positions.device),
             pair_mask=pair_mask,

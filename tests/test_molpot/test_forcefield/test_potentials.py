@@ -1,14 +1,13 @@
-"""Tests for Potentials force methods (analytic bonded + LJ).
+"""Tests for Potentials — the assembled Class-I energy and the op over it.
 
 Mirrors ``src/molpot/forcefield/potentials.py``.
 
-``Potentials.calc_energy_forces`` evaluates bonded terms (bond / angle /
-proper / improper) and the LJ term with closed-form forces; Coulomb (open and
-periodic) falls back to the autograd backend
-(:func:`molpot.derivation.autograd_forces_from_energy`), which has no cheap
-closed form. No method hand-rolls ``torch.autograd.grad``. Numerics are
-pinned here against the analytic harmonic bond so the generalization stays
-behaviour-preserving.
+``Potentials.energy`` writes the assembled energy; every derivative —
+forces for NVE, forces and virial for NPT — is ``molix.autograd.Derivative``
+over that one energy, built in by ``wrt=`` at construction or composed
+outside. No method hand-rolls ``torch.autograd.grad``. Numerics are pinned
+here against the analytic harmonic bond, a periodic LJ pair and a periodic
+Coulomb box.
 """
 
 from __future__ import annotations
@@ -17,14 +16,17 @@ import itertools
 import re
 from collections.abc import Callable
 
+import mollog
 import pytest
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molix.batch import TensorFrame, as_tensor_frame
-from molix.schema import ENERGY_KEY, FORCES_KEY, CellBound
+from molix.autograd import Derivative
+from molix.frame import TensorFrame, as_tensor_frame
+from molix.schema import ENERGY_KEY, FORCES_KEY, POS_KEY, VIRIAL_KEY, CellBound
 from molpot.forcefield import ForceField, Potentials
+from molpot.forcefield.potentials import logger as potentials_logger
 from molpot.forcefield.schema import PotentialMeta
 from molpot.potentials.elec.prefactors import kcalmol_A
 from tests.conftest import (
@@ -50,7 +52,9 @@ BOND_R = 1.5
 GOLDEN_ENERGY = 12.5
 GOLDEN_FORCE_X = 50.0
 
-FORCE_SEAM = "src/molpot/derivation/force.py"
+FORCE_SEAM = "src/molix/autograd/variables.py"
+FORCES = ("atoms.pos",)
+FORCES_AND_VIRIAL = ("atoms.pos", "graphs.strain")
 
 #: Cubic edge (Å) of the tiny periodic Polar fixture. Its ``capacity_factor =
 #: 1.2`` k-grid bins to ``N_c = 4`` per axis (``x = L·k_cutoff/2π = 2.94``), so
@@ -200,6 +204,53 @@ def _angle_batch() -> TensorDict:
     )
 
 
+def _opls_proper_forcefield(n: int = 1) -> ForceField:
+    """``dihedral:opls`` with ``k1..k4`` of length *n* — the learned-head spelling."""
+    ones = torch.ones(n, dtype=DTYPE)
+    zeros = torch.zeros(n, dtype=DTYPE)
+    return (
+        ForceField(name="opls-proper")
+        .def_dihedralstyle("opls")
+        .with_params(propers={"k1": ones, "k2": zeros, "k3": zeros, "k4": zeros})
+    )
+
+
+def _two_proper_batch() -> TensorDict:
+    """Five-atom chain, two overlapping proper quartets (n_propers=2)."""
+    pos = torch.tensor(
+        [
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.5, 0.5],
+            [2.0, 0.5, 0.0],
+        ],
+        dtype=DTYPE,
+    )
+    return TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "pos": pos,
+                    "Z": torch.ones(5, dtype=torch.long),
+                    "batch": torch.zeros(5, dtype=torch.long),
+                },
+                batch_size=[5],
+            ),
+            "propers": TensorDict(
+                {
+                    "atomi": torch.tensor([0, 1], dtype=torch.long),
+                    "atomj": torch.tensor([1, 2], dtype=torch.long),
+                    "atomk": torch.tensor([2, 3], dtype=torch.long),
+                    "atoml": torch.tensor([3, 4], dtype=torch.long),
+                },
+                batch_size=[2],
+            ),
+        },
+        batch_size=[],
+    )
+
+
 def _torsion_batch(namespace: str) -> TensorDict:
     """Four atoms carrying one ``propers`` / ``impropers`` entry (improper centre = atomi)."""
     pos = torch.tensor(
@@ -235,7 +286,9 @@ def _torsion_batch(namespace: str) -> TensorDict:
     )
 
 
-def _bond_potentials(k: torch.Tensor | None = None, *, n_bonds: int = 1) -> Potentials:
+def _bond_potentials(
+    k: torch.Tensor | None = None, *, n_bonds: int = 1, wrt: tuple[str, ...] = ()
+) -> Potentials:
     """Harmonic-bond-only :class:`Potentials` with optional differentiable ``k``."""
     force_constant = torch.full((n_bonds,), BOND_K, dtype=DTYPE) if k is None else k
     return (
@@ -247,7 +300,7 @@ def _bond_potentials(k: torch.Tensor | None = None, *, n_bonds: int = 1) -> Pote
                 "r0": torch.full((n_bonds,), BOND_R0, dtype=DTYPE),
             }
         )
-        .to_potentials()
+        .to_potentials(wrt=wrt)
     )
 
 
@@ -304,7 +357,7 @@ def _lj_pair_forcefield(*, switch_start: float | None = None) -> ForceField:
 def _lj_pair_batch(*, r: float) -> TensorDict:
     """Two unbonded atoms ``r`` Å apart along x̂ — one nonbonded pair, nothing else.
 
-    Carries the placed ``edges`` namespace :meth:`Potentials._placed_pairs`
+    Carries the placed ``pairs`` namespace :meth:`Potentials._placed_pairs`
     consumes, built at :data:`LJ_CUTOFF` — the cutoff ``_lj_pair_forcefield``
     declares, so the list holds exactly the row that style may read.
     """
@@ -340,7 +393,7 @@ def _class_i_forcefield() -> ForceField:
             atoms={
                 "epsilon": torch.full((3,), EPSILON, dtype=DTYPE),
                 "sigma": torch.full((3,), SIGMA, dtype=DTYPE),
-                "q": torch.tensor(CHARGES, dtype=DTYPE),
+                "charge": torch.tensor(CHARGES, dtype=DTYPE),
             },
         )
     )
@@ -397,7 +450,7 @@ def _anion_potentials() -> Potentials:
     return (
         ForceField(name="anion")
         .def_pairstyle("coulomb")
-        .with_params(atoms={"q": torch.tensor([0.5, 0.5], dtype=DTYPE)})
+        .with_params(atoms={"charge": torch.tensor([0.5, 0.5], dtype=DTYPE)})
         .to_potentials()
     )
 
@@ -429,6 +482,28 @@ def _charged_batch(*, total_charge: float | None) -> TensorDict:
     return place_edges(batch, cutoff=CHARGED_CUTOFF)
 
 
+def _reversed_edge_batch() -> TensorDict:
+    """A placed list carrying only ``source > target`` rows.
+
+    :meth:`Potentials._check_pair_orientation` refuses it: ``_placed_pairs``
+    prices the ``source < target`` half, so every pair term on this batch would
+    cost exactly zero. Used as the vehicle for "a refusal arms nothing".
+    """
+    batch = _charged_batch(total_charge=1.0)
+    pairs = batch["pairs"]
+    index = pairs["pair_index"]
+    reversed_rows = index[:, 0] > index[:, 1]
+    if not bool(reversed_rows.any()):
+        index = index.flip(-1)
+        reversed_rows = index[:, 0] > index[:, 1]
+    keep = torch.nonzero(reversed_rows, as_tuple=True)[0]
+    batch["pairs"] = TensorDict(
+        {name: pairs[name][keep] for name in pairs.keys()},
+        batch_size=[int(keep.numel())],
+    )
+    return batch
+
+
 def _butane_forcefield() -> ForceField:
     """``lj/cut`` + ``coulomb`` on the butane fixture, Class-I default scaling."""
     return (
@@ -437,7 +512,7 @@ def _butane_forcefield() -> ForceField:
         .def_pairstyle("coulomb")
         .with_params(
             atoms={
-                "q": torch.tensor(BUTANE_Q, dtype=DTYPE),
+                "charge": torch.tensor(BUTANE_Q, dtype=DTYPE),
                 "epsilon": torch.tensor(BUTANE_EPSILON, dtype=DTYPE),
                 "sigma": torch.tensor(BUTANE_SIGMA, dtype=DTYPE),
             }
@@ -554,7 +629,7 @@ SHEARED_BOND_R = 4.0
 def _periodic_bond_batch(x0: float, x1: float, cell: torch.Tensor | None = None) -> TensorDict:
     """Two bonded atoms on the ``x`` axis, optionally inside a lattice.
 
-    Bond-only, so it carries no placed ``edges`` namespace: no pair style asks
+    Bond-only, so it carries no placed ``pairs`` namespace: no pair style asks
     about this fixture and the bind-time check reads the bond columns and the
     cell, nothing else.
 
@@ -734,7 +809,7 @@ def _coulomb_forcefield(*, calculator: str = "ewald") -> ForceField:
             lr_wavelength=COULOMB_LR_WAVELENGTH,
             mesh_spacing=COULOMB_MESH_SPACING,
         )
-        .with_params(atoms={"q": torch.tensor(COULOMB_CHARGES, dtype=DTYPE)})
+        .with_params(atoms={"charge": torch.tensor(COULOMB_CHARGES, dtype=DTYPE)})
     )
 
 
@@ -742,15 +817,15 @@ def _coulomb_edges() -> tuple[torch.Tensor, torch.Tensor]:
     """The fixed half list of the periodic fixture, padded to capacity.
 
     Enumerated once from the reference geometry, the way MD enumerates once per
-    rebuild and then reuses the rows: ``edge_index`` and the lattice ``shifts``
+    rebuild and then reuses the rows: ``pair_index`` and the lattice ``shifts``
     are *connectivity*, and every later energy recomputes only
-    ``edge_diff = pos[target] - pos[source] + shift`` from them. Handing the
+    ``pair_diff = pos[target] - pos[source] + shift`` from them. Handing the
     batch a placed list — rather than letting the builder re-enumerate — is
     also what keeps the distances on the position autograd graph, which the
     enumerated path (numpy, via molpy) cannot be.
 
     Returns:
-        ``(edge_index, shifts)`` — ``(C, 2)`` int64 and ``(C, 3)`` Å at the
+        ``(pair_index, shifts)`` — ``(C, 2)`` int64 and ``(C, 3)`` Å at the
         capacity :data:`COULOMB_LIST_CAPACITY`. Live rows come first; padding
         rows are coincident self-loops ``(0, 0)`` with a zero shift, which the
         list's own ``source < target`` liveness rule kills.
@@ -761,24 +836,24 @@ def _coulomb_edges() -> tuple[torch.Tensor, torch.Tensor]:
         torch.tensor(image, dtype=DTYPE) @ cell
         for image in itertools.product((-1.0, 0.0, 1.0), repeat=3)
     ]
-    edge_index = torch.zeros(COULOMB_LIST_CAPACITY, 2, dtype=torch.long)
+    pair_index = torch.zeros(COULOMB_LIST_CAPACITY, 2, dtype=torch.long)
     shifts = torch.zeros(COULOMB_LIST_CAPACITY, 3, dtype=DTYPE)
     row = 0
     for source in range(positions.shape[0]):
         for target in range(source + 1, positions.shape[0]):
             for shift in lattice:
                 if float((positions[target] - positions[source] + shift).norm()) < COULOMB_CUTOFF:
-                    edge_index[row] = torch.tensor([source, target], dtype=torch.long)
+                    pair_index[row] = torch.tensor([source, target], dtype=torch.long)
                     shifts[row] = shift
                     row += 1
     assert row < COULOMB_LIST_CAPACITY, "the fixture must keep at least one dead padding row"
-    return edge_index, shifts
+    return pair_index, shifts
 
 
 def _coulomb_batch(
     positions: torch.Tensor,
     cell: torch.Tensor,
-    edge_index: torch.Tensor,
+    pair_index: torch.Tensor,
     shifts: torch.Tensor,
 ) -> TensorDict:
     """A one-molecule periodic batch carrying the placed list and one bond.
@@ -791,29 +866,29 @@ def _coulomb_batch(
     Args:
         positions: Atom positions ``(N, 3)`` in Å.
         cell: Lattice vectors ``(3, 3)`` in Å, rows being the vectors.
-        edge_index: Placed half list ``(C, 2)``.
+        pair_index: Placed half list ``(C, 2)``.
         shifts: Lattice remainder of each row ``(C, 3)`` in Å.
 
     Returns:
-        The batch, with ``edges.edge_diff`` rebuilt from ``positions`` and
+        The batch, with ``edges.pair_diff`` rebuilt from ``positions`` and
         ``shifts`` so it is a function of the arguments, never a stale buffer.
     """
     n_atoms = positions.shape[0]
-    edge_diff = positions[edge_index[:, 1]] - positions[edge_index[:, 0]] + shifts
+    pair_diff = positions[pair_index[:, 1]] - positions[pair_index[:, 0]] + shifts
     return TensorDict(
         {
             "atoms": TensorDict(
                 {"pos": positions, "batch": torch.zeros(n_atoms, dtype=torch.long)},
                 batch_size=[n_atoms],
             ),
-            "edges": TensorDict(
+            "pairs": TensorDict(
                 {
-                    "edge_index": edge_index,
-                    "edge_diff": edge_diff,
-                    "edge_dist": edge_diff.norm(dim=-1),
+                    "pair_index": pair_index,
+                    "pair_diff": pair_diff,
+                    "pair_dist": pair_diff.norm(dim=-1),
                     "shifts": shifts,
                 },
-                batch_size=[edge_index.shape[0]],
+                batch_size=[pair_index.shape[0]],
             ),
             "graphs": TensorDict({"cell": cell.unsqueeze(0)}, batch_size=[1]),
             "bonds": TensorDict(
@@ -829,24 +904,17 @@ def _coulomb_batch(
 
 
 class _EdgeSpring(nn.Module):
-    """The minimal mlip shape ``def_pairstyle`` accepts: ``_write_energy`` only.
+    """The minimal mlip shape ``def_pairstyle`` accepts: ``energy`` only.
 
-    Neither :class:`molix.schema.CellBound` nor
-    :class:`~molix.schema.CoreCompilable` — which is the point: it is the
-    in-tree proof that both are optional on an mlip, so ``Potentials`` must
-    guard its delegation instead of calling through unconditionally.
+    Not :class:`molix.schema.CellBound` — which is the point: it is the
+    in-tree proof that the protocol is optional on an mlip, so ``Potentials``
+    must guard its delegation instead of calling through unconditionally.
+    It reads ``edges.pair_diff`` as handed — the derivative op rebuilds that
+    from its own leaf, so ``∂/∂pos`` flows without any trick here.
     """
 
-    def _write_energy(self, system: TensorDict) -> TensorDict:
-        pos = system["atoms", "pos"]
-        index = system["edges", "edge_index"]
-        imaged = system["edges", "edge_diff"]
-        raw = pos[index[:, 1]] - pos[index[:, 0]]
-        # Same STE Polar/MACE use: frozen buffer supplies the MIC value, live
-        # pos supplies ∂/∂pos. A requires_grad edge_diff is trusted as the
-        # live geometry.
-        vectors = imaged if imaged.requires_grad else imaged + (raw - raw.detach())
-        energy = 0.5 * vectors.pow(2).sum()
+    def energy(self, system: TensorDict) -> TensorDict:
+        energy = 0.5 * system["pairs", "pair_diff"].pow(2).sum()
         system[ENERGY_KEY] = energy.reshape(1)
         return system
 
@@ -854,9 +922,9 @@ class _EdgeSpring(nn.Module):
 def _edge_batch(*, r: float = 1.5) -> TensorDict:
     """Two atoms, both edges, a unit cell — the ``_EdgeSpring`` system."""
     pos = torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=DTYPE)
-    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    pair_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
     shifts = torch.zeros(2, 3, dtype=DTYPE)
-    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]] + shifts
+    pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]] + shifts
     return TensorDict(
         {
             "atoms": TensorDict(
@@ -867,11 +935,11 @@ def _edge_batch(*, r: float = 1.5) -> TensorDict:
                 },
                 batch_size=[2],
             ),
-            "edges": TensorDict(
+            "pairs": TensorDict(
                 {
-                    "edge_index": edge_index,
-                    "edge_diff": edge_diff.clone(),
-                    "edge_dist": edge_diff.norm(dim=-1),
+                    "pair_index": pair_index,
+                    "pair_diff": pair_diff.clone(),
+                    "pair_dist": pair_diff.norm(dim=-1),
                     "shifts": shifts.clone(),
                 },
                 batch_size=[2],
@@ -883,9 +951,9 @@ def _edge_batch(*, r: float = 1.5) -> TensorDict:
 
 
 class TestPotentials:
-    def test_calc_forces_analytic_golden(self) -> None:
+    def test_forces_match_the_analytic_golden(self) -> None:
         """F = −∂E/∂x = ∓k(r−r0) x̂ for the stretched two-atom harmonic bond."""
-        forces = _bond_potentials().calc_forces(_two_atom_bond_batch())
+        forces = _bond_potentials(wrt=FORCES)(_two_atom_bond_batch())[FORCES_KEY]
         expected = torch.tensor(
             [[GOLDEN_FORCE_X, 0.0, 0.0], [-GOLDEN_FORCE_X, 0.0, 0.0]],
             dtype=DTYPE,
@@ -893,57 +961,60 @@ class TestPotentials:
         assert forces.shape == (2, 3)
         assert torch.allclose(forces.detach(), expected, atol=1e-10, rtol=0.0)
 
-    def test_calc_energy_forces_matches_separate_calls(self) -> None:
-        pots = _bond_potentials()
+    def test_forward_is_the_same_op_composed_outside(self) -> None:
+        """``wrt`` at construction and ``Derivative(pots, wrt=...)`` are one code path."""
         batch = _two_atom_bond_batch()
-        energy, forces = pots.calc_energy_forces(batch)
-        assert float(energy.detach()) == pytest.approx(GOLDEN_ENERGY, abs=1e-10)
-        assert torch.allclose(forces.detach(), pots.calc_forces(batch).detach(), atol=1e-10)
+        inside = _bond_potentials(wrt=FORCES)(batch.clone())
+        outside = Derivative(_bond_potentials(), wrt=FORCES)(batch.clone())
+        assert torch.equal(inside[FORCES_KEY], outside[FORCES_KEY])
+        assert torch.equal(inside[ENERGY_KEY], outside[ENERGY_KEY])
 
-    def test_calc_energy_forces_uses_the_mlip_branch(self) -> None:
+    def test_derivative_exposes_the_init_fixed_op(self) -> None:
+        """The training step marks the leaves through ``derivative`` — the op ``forward`` runs."""
+        assert _bond_potentials(wrt=FORCES).derivative.wrt == (POS_KEY,)
+
+    def test_the_mlip_branch_feeds_the_op(self) -> None:
         """An mlip ForceField declares no classical style, so the term loop is empty.
 
-        Falling through it returns ``(0, zeros)`` — a silent wrong answer, not a
-        missing feature. ``calc_energy`` and ``calc_forces`` both branch on the
-        mlip; this third entry must agree with them.
+        Falling through it would return ``(0, zeros)`` — a silent wrong answer,
+        not a missing feature. ``energy`` must hand the batch to the mlip and
+        the op over it must derive non-zero forces from that energy.
         """
         batch = _edge_batch()
-        pots = ForceField().def_pairstyle(_EdgeSpring()).to_potentials()
-        energy, forces = pots.calc_energy_forces(batch)
-        assert float(energy.detach().reshape(())) == pytest.approx(
+        pots = ForceField().def_pairstyle(_EdgeSpring()).to_potentials(wrt=FORCES)
+        out = pots(batch)
+        assert float(out[ENERGY_KEY].detach().reshape(())) == pytest.approx(
             float(pots.calc_energy(batch).detach().reshape(())), abs=1e-10
         )
-        assert torch.allclose(forces.detach(), pots.calc_forces(batch).detach(), atol=1e-10)
-        assert float(forces.detach().abs().max()) > 0.0
+        assert float(out[FORCES_KEY].detach().abs().max()) > 0.0
 
-    def test_calc_forces_double_backward_reaches_parameters(self) -> None:
+    def test_force_loss_double_backward_reaches_parameters(self) -> None:
         """``create_graph`` keeps ∂²E/∂x∂θ alive so a force loss reaches θ."""
         parameter = nn.Parameter(torch.tensor([BOND_K], dtype=DTYPE))
-        pots = _bond_potentials(parameter * 1.0)
-        forces = pots.calc_forces(_two_atom_bond_batch())
+        pots = _bond_potentials(parameter * 1.0, wrt=FORCES)
+        forces = pots(_two_atom_bond_batch())[FORCES_KEY]
         torch.mean(forces**2).backward()
         assert parameter.grad is not None
         # d/dk mean(F²) with F = ±k(r−r0): mean over 6 components = k²·0.5²·2/6
         assert float(parameter.grad) == pytest.approx(2.0 * BOND_K * 0.25 * 2.0 / 6.0, abs=1e-10)
 
-    def test_virial_forces_match_calc_forces_when_energy_uses_edge_diff(self) -> None:
+    def test_virial_forces_match_the_force_op_when_energy_uses_edge_diff(self) -> None:
         """NPT strain must keep ∂E/∂pos through imaged edge geometry.
 
-        Polar / MACE read ``edges.edge_diff``. If that tensor is strained as an
+        Polar / MACE read ``edges.pair_diff``. If that tensor is strained as an
         independent cartesian, local graph energy drops off ``pos`` and MD
         integrates electrostatics-only forces.
         """
-        batch = _edge_batch()
         pots = ForceField().def_pairstyle(_EdgeSpring()).to_potentials()
-        reference = pots.calc_forces(batch)
-        _, virial_forces, virial = pots.calc_energy_forces_virial(batch)
-        assert torch.allclose(virial_forces, reference, atol=1e-10, rtol=0.0)
-        assert virial.shape == (3, 3)
-        assert virial.abs().sum().item() > 0.0
+        reference = Derivative(pots, wrt=FORCES)(_edge_batch())[FORCES_KEY]
+        npt = Derivative(pots, wrt=FORCES_AND_VIRIAL)(_edge_batch())
+        assert torch.allclose(npt[FORCES_KEY], reference, atol=1e-10, rtol=0.0)
+        assert npt[VIRIAL_KEY].shape == (1, 3, 3)
+        assert npt[VIRIAL_KEY].abs().sum().item() > 0.0
 
-    def test_calc_forces_on_multi_graph_batch(self) -> None:
+    def test_forces_on_a_multi_graph_batch(self) -> None:
         """Per-graph energies ``(B,)`` reduce to one scalar before differentiating."""
-        forces = _bond_potentials(n_bonds=2).calc_forces(_two_molecule_bond_batch())
+        forces = _bond_potentials(n_bonds=2, wrt=FORCES)(_two_molecule_bond_batch())[FORCES_KEY]
         expected = torch.tensor(
             [
                 [GOLDEN_FORCE_X, 0.0, 0.0],
@@ -1004,7 +1075,7 @@ class TestPotentials:
             potentials.calc_energy(_class_i_batch())
         message = str(excinfo.value)
         assert "pair:coulomb" in message
-        assert re.search(r"\bq\b", message) is not None
+        assert re.search(r"\bcharge\b", message) is not None
 
     def test_declared_bond_style_without_its_parameter_table_raises(self) -> None:
         """S1 on the bonded branch: no ``bonds`` table is a missing parameter, not a zero.
@@ -1094,7 +1165,7 @@ class TestPotentials:
 
         Not a second copy of the ``ExclusionTable`` unit test — what is pinned
         here is the *wiring*: an unbound ``Potentials`` builds the table lazily
-        on the first energy call, hands ``"q"`` to Coulomb and ``"lj"`` to LJ,
+        on the first energy call, hands ``"charge"`` to Coulomb and ``"lj"`` to LJ,
         and its neighbour list enumerates the 91 half-pairs in the same
         ``triu`` order the golden was captured in (every butane pair is inside
         the 10 Å cutoff). ``BUTANE_OPLS_SCALES`` holds the 1-4 entries at 0.5;
@@ -1134,11 +1205,11 @@ class TestPotentials:
     # ------------------------------------------------------------------
 
     def test_a_pair_style_on_a_batch_without_edges_names_both_molix_owners(self) -> None:
-        """No ``edges`` namespace is a missing neighbour list, not an invitation to build one.
+        """No ``pairs`` namespace is a missing neighbour list, not an invitation to build one.
 
         ``molpot`` is downstream of ``molix`` in the dependency graph and does
         not own pair enumeration: the cutoff graph is built by
-        :class:`molix.batch.NeighborList` on the training path and by
+        :class:`molix.data.NeighborList` on the training path and by
         :class:`molix.md.NeighborList` on the MD path. A ``Potentials`` that
         silently enumerated its own all-pairs list when the batch arrived
         without one answered with a *different* neighbour set than the model
@@ -1151,12 +1222,12 @@ class TestPotentials:
         """
         potentials = _lj_pair_forcefield().to_potentials()
         bare = _lj_pair_batch(r=SWITCH_R)
-        del bare["edges"]
+        del bare["pairs"]
 
         with pytest.raises(ValueError) as excinfo:
             potentials.calc_energy(bare)
         message = str(excinfo.value)
-        assert "molix.batch.NeighborList" in message
+        assert "molix.data.NeighborList" in message
         assert "molix.md.NeighborList" in message
 
     def test_placed_pairs_returns_the_list_at_capacity_with_a_live_mask(self) -> None:
@@ -1165,30 +1236,30 @@ class TestPotentials:
         Moved from the deleted ``test_neighbor_list.py`` (``composable-a0-02``
         contract, now owned by :meth:`Potentials._placed_pairs`). Live is
         exactly ``source < target`` (the half list), ``0 < r < cutoff`` and
-        inside ``num_edges``. Row 1 is the reversed duplicate of row 0, rows
+        inside ``num_pairs``. Row 1 is the reversed duplicate of row 0, rows
         2-3 are outside the cutoff, rows 4-5 are dead capacity — none may be
         dropped, because dropping them makes the output shape depend on the
         data, which is a graph break on the compiled force path.
 
-        The list carries ``edge_diff`` beside ``edge_dist`` because that is
-        what :class:`molix.batch.NeighborList` writes and because an
-        ``edge_dist``-only list is refused
+        The list carries ``pair_diff`` beside ``pair_dist`` because that is
+        what :class:`molix.data.NeighborList` writes and because an
+        ``pair_dist``-only list is refused
         (:meth:`test_placed_pairs_refuses_an_edge_dist_only_list`); the
         capacity / mask contract asserted here is independent of which geometry
         branch prices the rows.
         """
         potentials = _lj_pair_forcefield().to_potentials()
         pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [3.0, 0.0, 0.0]], dtype=DTYPE)
-        edge_index = torch.tensor(
+        pair_index = torch.tensor(
             [[0, 1], [1, 0], [0, 2], [2, 0], [0, 0], [0, 0]], dtype=torch.long
         )
         system = {
             "atoms": {"pos": pos, "batch": torch.zeros(3, dtype=torch.long)},
-            "edges": {
-                "edge_index": edge_index,
-                "edge_diff": pos[edge_index[:, 1]] - pos[edge_index[:, 0]],
-                "edge_dist": torch.tensor([1.0, 1.0, 3.0, 3.0, 0.0, 0.0], dtype=DTYPE),
-                "num_edges": 4,
+            "pairs": {
+                "pair_index": pair_index,
+                "pair_diff": pos[pair_index[:, 1]] - pos[pair_index[:, 0]],
+                "pair_dist": torch.tensor([1.0, 1.0, 3.0, 3.0, 0.0, 0.0], dtype=DTYPE),
+                "num_pairs": 4,
             },
         }
 
@@ -1199,19 +1270,19 @@ class TestPotentials:
         assert returned_index.shape == (6, 2)
         assert dist.shape == (6,)
         assert live_mask.dtype == torch.bool
-        assert torch.equal(returned_index, edge_index)
+        assert torch.equal(returned_index, pair_index)
         assert torch.equal(live_mask, torch.tensor([True, False, False, False, False, False]))
 
     def test_placed_pairs_refuses_an_edge_dist_only_list(self) -> None:
         """A stored scalar distance is not geometry, so the list is refused.
 
-        Forwarding ``edge_dist`` as the answer reads a number that is not a
+        Forwarding ``pair_dist`` as the answer reads a number that is not a
         function of the ``pos`` leaf the energy is differentiated against, so
         ``dE/dpos`` is structurally zero: such a batch used to price a finite
         energy and hand back **zero forces**, silently, which is the worst
         possible failure on an MD path. Nothing in the tree produces this list
-        either — :class:`molix.batch.NeighborList` writes ``edge_diff`` beside
-        ``edge_dist`` and :class:`molix.md.NeighborList` writes ``shifts`` as
+        either — :class:`molix.data.NeighborList` writes ``pair_diff`` beside
+        ``pair_dist`` and :class:`molix.md.NeighborList` writes ``shifts`` as
         well — so the only reachable caller was a hand-built dict.
 
         The fixture is deliberately the one that used to pass: the stored 2 Å
@@ -1225,39 +1296,39 @@ class TestPotentials:
         system = {
             "atoms": {"pos": pos, "batch": torch.zeros(2, dtype=torch.long)},
             "graphs": {"cell": torch.eye(3, dtype=DTYPE) * 10.0},
-            "edges": {
-                "edge_index": torch.tensor([[0, 1]], dtype=torch.long),
-                "edge_dist": torch.tensor([2.0], dtype=DTYPE),
+            "pairs": {
+                "pair_index": torch.tensor([[0, 1]], dtype=torch.long),
+                "pair_dist": torch.tensor([2.0], dtype=DTYPE),
             },
         }
 
         with pytest.raises(ValueError) as excinfo:
             potentials._placed_pairs(as_tensor_frame(system), pos, cutoff=5.0)
         message = str(excinfo.value)
-        assert "edge_diff" in message or "shifts" in message
+        assert "pair_diff" in message or "shifts" in message
 
     def test_placed_pairs_prefers_shifts_over_a_stored_edge_diff(self) -> None:
-        """F13: ``shifts`` is the branch, ``edge_diff`` only the fallback.
+        """F13: ``shifts`` is the branch, ``pair_diff`` only the fallback.
 
-        Both keys are present and they disagree — ``edge_diff`` claims a 4 Å
+        Both keys are present and they disagree — ``pair_diff`` claims a 4 Å
         separation the geometry plus ``shifts`` does not support. The
         ``shifts`` branch rebuilds the pair vector as
         ``pos[t] - pos[s] + shifts`` and must win, because it is the only one
-        that is a function of the *live* lattice; the ``edge_diff``
+        that is a function of the *live* lattice; the ``pair_diff``
         reconstruction can recover the lattice remainder only as a detached
         constant.
         """
         potentials = _lj_pair_forcefield().to_potentials()
         pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=DTYPE)
-        edge_index = torch.tensor([[0, 1]], dtype=torch.long)
+        pair_index = torch.tensor([[0, 1]], dtype=torch.long)
         shifts = torch.tensor([[10.0, 0.0, 0.0]], dtype=DTYPE)
         system = {
             "atoms": {"pos": pos, "batch": torch.zeros(2, dtype=torch.long)},
-            "edges": {
-                "edge_index": edge_index,
+            "pairs": {
+                "pair_index": pair_index,
                 "shifts": shifts,
-                "edge_diff": torch.tensor([[4.0, 0.0, 0.0]], dtype=DTYPE),
-                "edge_dist": torch.tensor([4.0], dtype=DTYPE),
+                "pair_diff": torch.tensor([[4.0, 0.0, 0.0]], dtype=DTYPE),
+                "pair_dist": torch.tensor([4.0], dtype=DTYPE),
             },
         }
 
@@ -1272,7 +1343,7 @@ class TestPotentials:
         """F13: the ``shifts`` branch is not detached, so ``dE/deps`` sees the lattice.
 
         A pair that reaches its partner through a lattice vector contributes a
-        shift term to the strain derivative. The ``edge_diff`` fallback can only
+        shift term to the strain derivative. The ``pair_diff`` fallback can only
         recover that remainder from detached tensors — a constant — so its
         virial is exact only while every pair sits in the same image. The
         ``shifts`` branch has to keep the remainder differentiable, which is
@@ -1284,7 +1355,7 @@ class TestPotentials:
         shifts = torch.tensor([[10.0, 0.0, 0.0]], dtype=DTYPE, requires_grad=True)
         system = {
             "atoms": {"pos": pos, "batch": torch.zeros(2, dtype=torch.long)},
-            "edges": {"edge_index": torch.tensor([[0, 1]], dtype=torch.long), "shifts": shifts},
+            "pairs": {"pair_index": torch.tensor([[0, 1]], dtype=torch.long), "shifts": shifts},
         }
 
         _, _vectors, dist, _live = potentials._placed_pairs(
@@ -1298,9 +1369,9 @@ class TestPotentials:
     def test_placed_pairs_on_an_empty_list_is_empty_not_absent(self) -> None:
         """A list with no rows means "no pair in range", never "no list".
 
-        :class:`molix.batch.NeighborList` returns zero rows for a system whose
+        :class:`molix.data.NeighborList` returns zero rows for a system whose
         atoms are all outside the cutoff, and that is a perfectly ordinary
-        batch — the pair terms must price it at zero. Only a *missing* ``edges``
+        batch — the pair terms must price it at zero. Only a *missing* ``pairs``
         namespace is the fail-closed case
         (:meth:`test_a_pair_style_on_a_batch_without_edges_names_both_molix_owners`),
         and conflating the two either resurrects the enumerator or refuses a
@@ -1310,18 +1381,18 @@ class TestPotentials:
         pos = torch.tensor([[0.0, 0.0, 0.0], [50.0, 0.0, 0.0]], dtype=DTYPE)
         system = {
             "atoms": {"pos": pos, "batch": torch.zeros(2, dtype=torch.long)},
-            "edges": {
-                "edge_index": torch.zeros(0, 2, dtype=torch.long),
-                "edge_diff": torch.zeros(0, 3, dtype=DTYPE),
-                "edge_dist": torch.zeros(0, dtype=DTYPE),
+            "pairs": {
+                "pair_index": torch.zeros(0, 2, dtype=torch.long),
+                "pair_diff": torch.zeros(0, 3, dtype=DTYPE),
+                "pair_dist": torch.zeros(0, dtype=DTYPE),
             },
         }
 
-        edge_index, _vectors, dist, live = potentials._placed_pairs(
+        pair_index, _vectors, dist, live = potentials._placed_pairs(
             as_tensor_frame(system), pos, cutoff=LJ_CUTOFF
         )
 
-        assert edge_index.shape == (0, 2)
+        assert pair_index.shape == (0, 2)
         assert dist.shape == (0,)
         assert live.shape == (0,)
 
@@ -1459,7 +1530,7 @@ class TestPotentials:
         )
         # The placed list is connectivity *plus* the geometry it was built at:
         # ``_placed_pairs`` recovers each row's lattice remainder as
-        # ``edge_diff - (pos[t] - pos[s])``, so a list left at the old
+        # ``pair_diff - (pos[t] - pos[s])``, so a list left at the old
         # positions would hand back the old distances. Rebuild it, exactly as
         # molix does after atoms move.
         place_edges(restated, cutoff=LJ_CUTOFF)
@@ -1480,20 +1551,373 @@ class TestPotentials:
         with pytest.raises(ValueError, match="bind_topology"):
             potentials.calc_energy(with_angle)
 
-    def test_bind_topology_rejects_charges_that_miss_the_declared_total(self) -> None:
-        """S5 fail-closed: ``Σ_g q`` must equal ``graphs.total_charge`` to 1e-6 e.
+    def test_bind_topology_does_not_sum_seed_q(self) -> None:
+        """Seed ForceField q is a previous topology; pad made N static (GH200 2390967).
 
-        A learned charge head that drifts off the constraint changes the
-        molecule's net charge, and under PBC that is an infinite-energy system
-        silently regularised by the Ewald background term. The check is eager
-        and per graph, so it fires at bind time rather than as a wrong number.
+        EspalomaCharge / ByteFF conserve ``sum q = Q_tot`` on the charges just
+        assigned, not a leftover table. Bind must stay silent even when seed
+        ``charge`` length matches this batch and the declared total does not.
         """
-        potentials = _anion_potentials()
-        with pytest.raises(ValueError, match="total_charge"):
-            potentials.bind_topology(_charged_batch(total_charge=0.0))
+        captured: list[str] = []
 
+        class _Capture(mollog.Handler):
+            def emit(self, record: mollog.LogRecord) -> None:
+                captured.append(record.message)
+
+        capture = _Capture()
+        capture.set_level(mollog.WARNING)
+        potentials_logger.add_handler(capture)
+        try:
+            potentials = _anion_potentials()
+            potentials.bind_topology(_charged_batch(total_charge=0.0))
+            assert captured == []
+        finally:
+            potentials_logger.remove_handler(capture)
+
+    def test_coulomb_warns_when_live_q_misses_the_declared_total(self) -> None:
+        """``Σ_g q`` off ``graphs.total_charge`` is reported on the priced charges."""
+        captured: list[str] = []
+
+        class _Capture(mollog.Handler):
+            def emit(self, record: mollog.LogRecord) -> None:
+                captured.append(record.message)
+
+        capture = _Capture()
+        capture.set_level(mollog.WARNING)
+        potentials_logger.add_handler(capture)
+        try:
+            potentials = _anion_potentials()
+            potentials.energy(_charged_batch(total_charge=0.0))
+            assert any("total_charge" in message for message in captured)
+            assert any("drift 1 e" in message for message in captured)
+
+            captured.clear()
+            potentials.energy(_charged_batch(total_charge=1.0))
+            potentials.energy(_charged_batch(total_charge=None))
+            assert captured == []
+        finally:
+            potentials_logger.remove_handler(capture)
+
+    def test_coulomb_masks_ghost_q_out_of_the_net_charge(self) -> None:
+        """Padding ghosts (``atoms.mask`` False) must not enter ``Σ q``."""
+        captured: list[str] = []
+
+        class _Capture(mollog.Handler):
+            def emit(self, record: mollog.LogRecord) -> None:
+                captured.append(record.message)
+
+        capture = _Capture()
+        capture.set_level(mollog.WARNING)
+        potentials_logger.add_handler(capture)
+        try:
+            live = _charged_batch(total_charge=1.0)
+            pos = torch.zeros(4, 3, dtype=DTYPE)
+            pos[:2] = live["atoms", "pos"]
+            batch = TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": pos,
+                            "Z": torch.tensor([11, 11, 1, 1], dtype=torch.long),
+                            "batch": torch.zeros(4, dtype=torch.long),
+                            "mask": torch.tensor([True, True, False, False]),
+                        },
+                        batch_size=[4],
+                    ),
+                    "pairs": live["pairs"],
+                    "graphs": live["graphs"],
+                },
+                batch_size=[],
+            )
+            pots = (
+                ForceField(name="anion")
+                .def_pairstyle("coulomb")
+                .with_params(atoms={"charge": torch.tensor([0.5, 0.5, 9.0, -9.0], dtype=DTYPE)})
+                .to_potentials()
+            )
+            pots.energy(batch)
+            assert captured == []
+        finally:
+            potentials_logger.remove_handler(capture)
+
+    def test_bind_topology_skips_charge_sum_when_q_is_a_different_n(self) -> None:
+        """Reused container: seed q is N=2, next batch is N=3 — no index_add crash."""
+        potentials = _anion_potentials()
         potentials.bind_topology(_charged_batch(total_charge=1.0))
-        potentials.bind_topology(_charged_batch(total_charge=None))
+        bigger = TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": torch.tensor(
+                            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+                            dtype=DTYPE,
+                        ),
+                        "Z": torch.tensor([11, 11, 11], dtype=torch.long),
+                        "batch": torch.zeros(3, dtype=torch.long),
+                    },
+                    batch_size=[3],
+                ),
+                "graphs": TensorDict(
+                    {
+                        "num_atoms": torch.tensor([3], dtype=torch.long),
+                        "total_charge": torch.zeros(1, dtype=DTYPE),
+                    },
+                    batch_size=[1],
+                ),
+            },
+            batch_size=[],
+        )
+        potentials.bind_topology(place_edges(bigger, cutoff=CHARGED_CUTOFF))
+
+    def test_atom_params_for_n_drops_a_seed_table_of_the_wrong_length(self) -> None:
+        """Predicted q of N=3 must not keep seed epsilon of N=2."""
+        potentials = (
+            ForceField(name="anion")
+            .def_pairstyle("coulomb")
+            .with_params(
+                atoms={
+                    "charge": torch.tensor([0.5, 0.5], dtype=DTYPE),
+                    "epsilon": torch.tensor([1.0, 1.0], dtype=DTYPE),
+                    "sigma": torch.tensor([3.0, 3.0], dtype=DTYPE),
+                }
+            )
+            .to_potentials()
+        )
+        merged = potentials._atom_params_for_n(
+            {"charge": torch.tensor([0.1, 0.2, 0.3], dtype=DTYPE)},
+            n_atoms=3,
+        )
+        assert merged["charge"].tolist() == pytest.approx([0.1, 0.2, 0.3])
+        assert "epsilon" not in merged
+        assert "sigma" not in merged
+
+    def test_called_proper_tables_maps_opls_k1_of_this_n_onto_k(self) -> None:
+        """Live OPLS tables must not fall back to the seed cosine ``k``."""
+        k1 = torch.ones(3, dtype=DTYPE)
+        called = {"k1": k1, "k2": k1, "k3": torch.zeros(3, dtype=DTYPE), "k4": k1 * 0}
+        out = Potentials._opls_to_cosine(called)
+        assert out["k"].shape == (3, 4)
+        torch.testing.assert_close(out["k"][:, 0], 0.5 * k1)
+        assert "k1" not in out
+        mapped = Potentials._called_proper_tables(called)
+        assert mapped["k"].shape[0] == 3
+
+    def test_opls_proper_energy_on_a_bigger_batch_uses_called_k1k4(self) -> None:
+        """Reused OPLS container: seed 1 proper, next topology 2 with this-n k1..k4."""
+        potentials = _opls_proper_forcefield(n=1).to_potentials()
+        potentials.bind_topology(_torsion_batch("propers"))
+        bigger = _two_proper_batch()
+        potentials.bind_topology(bigger)
+        k1 = torch.ones(2, dtype=DTYPE, requires_grad=True)
+        tables = {
+            "propers": {
+                "k1": k1,
+                "k2": torch.zeros(2, dtype=DTYPE),
+                "k3": torch.zeros(2, dtype=DTYPE),
+                "k4": torch.zeros(2, dtype=DTYPE),
+            }
+        }
+        energy = potentials.energy(bigger, tables)[ENERGY_KEY]
+        assert torch.isfinite(energy).all()
+        energy.sum().backward()
+        assert k1.grad is not None
+        fresh = _opls_proper_forcefield(n=2).to_potentials().energy(bigger)[ENERGY_KEY]
+        torch.testing.assert_close(energy.detach(), fresh)
+
+    def test_net_charge_tolerance_scales_with_the_sum_it_checks(self) -> None:
+        """A fixed 1e-6 e cannot separate fp32 noise from a head off its constraint.
+
+        On a 350-atom molecule the charges themselves sum to ~100 e, where
+        float32 accumulation alone costs a few 1e-6 e. The fixed threshold
+        fired 33 times on one production-shaped profile batch, every one of
+        them arithmetic; the 0.01 e of a real modelling error must still be
+        reported.
+        """
+        captured: list[str] = []
+
+        class _Capture(mollog.Handler):
+            def emit(self, record: mollog.LogRecord) -> None:
+                captured.append(record.message)
+
+        capture = _Capture()
+        capture.set_level(mollog.WARNING)
+        potentials_logger.add_handler(capture)
+        try:
+            n_atoms = 350
+            potentials = (
+                ForceField(name="big-neutral")
+                .def_pairstyle("coulomb")
+                .with_params(atoms={"charge": torch.zeros(n_atoms, dtype=DTYPE)})
+                .to_potentials()
+            )
+            batch = TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": torch.zeros((n_atoms, 3), dtype=DTYPE),
+                            "Z": torch.ones(n_atoms, dtype=torch.long),
+                            "batch": torch.zeros(n_atoms, dtype=torch.long),
+                        },
+                        batch_size=[n_atoms],
+                    ),
+                    "graphs": TensorDict(
+                        {
+                            "num_atoms": torch.tensor([n_atoms], dtype=torch.long),
+                            "total_charge": torch.zeros(1, dtype=DTYPE),
+                        },
+                        batch_size=[1],
+                    ),
+                },
+                batch_size=[],
+            )
+            frame = potentials._frame(batch)
+            # float32 because that is what production trains in, and the
+            # tolerance tracks the dtype: the same 5e-6 e in float64 is a real
+            # error and must still be reported there.
+            charge = torch.full((n_atoms,), 0.3, dtype=torch.float32)
+            charge[n_atoms // 2 :] = -0.3
+
+            arithmetic = charge.clone()
+            arithmetic[0] += 5e-6
+            potentials._warn_net_charge_drift(frame, arithmetic)
+            assert captured == [], f"arithmetic-scale drift must not warn: {captured}"
+
+            # A small molecule has almost no size-scaled headroom, and the fp32
+            # EEM solve still returns its constraint only to ~1e-5 e; the floor
+            # is what covers it.
+            small = torch.zeros(4, dtype=torch.float32)
+            small[0] = 3.8e-6
+            small_frame = potentials._frame(
+                TensorDict(
+                    {
+                        "atoms": TensorDict(
+                            {
+                                "pos": torch.zeros((4, 3), dtype=DTYPE),
+                                "Z": torch.ones(4, dtype=torch.long),
+                                "batch": torch.zeros(4, dtype=torch.long),
+                            },
+                            batch_size=[4],
+                        ),
+                        "graphs": TensorDict(
+                            {
+                                "num_atoms": torch.tensor([4], dtype=torch.long),
+                                "total_charge": torch.zeros(1, dtype=DTYPE),
+                            },
+                            batch_size=[1],
+                        ),
+                    },
+                    batch_size=[],
+                )
+            )
+            potentials._warn_net_charge_drift(small_frame, small)
+            assert captured == [], f"fp32 solve residual must not warn: {captured}"
+
+            off_constraint = charge.clone()
+            off_constraint[0] += 0.01
+            potentials._warn_net_charge_drift(frame, off_constraint)
+            assert len(captured) == 1, "a head off its constraint must still be reported"
+            assert "total_charge" in captured[0]
+
+            captured.clear()
+            exact_in_double = charge.to(torch.float64)
+            exact_in_double[0] += 5e-6
+            potentials._warn_net_charge_drift(frame, exact_in_double)
+            assert len(captured) == 1, "float64 has no excuse for a 5e-6 e miss"
+        finally:
+            potentials_logger.remove_handler(capture)
+
+    def test_cartesian_proper_tables_price_a_torsion_without_the_seed_phase(self) -> None:
+        """``ProperTorsionParamHead`` speaks ``(a, b)``; the seed speaks ``(k, phase)``."""
+        seed = (
+            ForceField(name="periodic-proper")
+            .def_dihedralstyle("periodic")
+            .with_params(
+                propers={
+                    "k": torch.ones(1, 2, dtype=DTYPE),
+                    "periodicity": torch.tensor([[1, 2]], dtype=torch.long),
+                    "phase": torch.zeros(1, 2, dtype=DTYPE),
+                }
+            )
+            .to_potentials()
+        )
+        batch = _torsion_batch("propers")
+        a = torch.ones(1, 2, dtype=DTYPE, requires_grad=True)
+        tables = {
+            "propers": {
+                "a": a,
+                "b": torch.zeros(1, 2, dtype=DTYPE),
+                "periodicity": torch.tensor([[1, 2]], dtype=torch.long),
+            }
+        }
+        energy = seed.energy(batch, tables)[ENERGY_KEY]
+        assert torch.isfinite(energy).all()
+        energy.sum().backward()
+        assert a.grad is not None
+
+    def test_opls_proper_energy_refuses_a_bigger_batch_without_this_n_tables(self) -> None:
+        """Seed cosine k of 1 proper must not be gathered with 2 identity types."""
+        potentials = _opls_proper_forcefield(n=1).to_potentials()
+        potentials.bind_topology(_torsion_batch("propers"))
+        bigger = _two_proper_batch()
+        potentials.bind_topology(bigger)
+        with pytest.raises(ValueError, match="k"):
+            potentials.energy(bigger)
+
+    def test_lj_energy_on_a_bigger_batch_uses_called_tables(self) -> None:
+        """Reused lj/cut container: seed N=2, next batch N=3 with this-N tables."""
+        potentials = _lj_pair_forcefield().to_potentials()
+        potentials.bind_topology(_lj_pair_batch(r=2.0))
+        bigger = TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": torch.tensor(
+                            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+                            dtype=DTYPE,
+                        ),
+                        "Z": torch.tensor([18, 18, 18], dtype=torch.long),
+                        "batch": torch.zeros(3, dtype=torch.long),
+                    },
+                    batch_size=[3],
+                ),
+            },
+            batch_size=[],
+        )
+        bigger = place_edges(bigger, cutoff=LJ_CUTOFF)
+        potentials.bind_topology(bigger)
+        tables = {
+            "atoms": {
+                "epsilon": torch.full((3,), EPSILON, dtype=DTYPE),
+                "sigma": torch.full((3,), SIGMA, dtype=DTYPE),
+            }
+        }
+        energy = potentials.energy(bigger, tables)[ENERGY_KEY]
+        assert torch.isfinite(energy).all()
+
+    def test_lj_energy_refuses_a_bigger_batch_without_this_n_tables(self) -> None:
+        """Seed epsilon of N=2 must not be gathered with a 3-atom edge list."""
+        potentials = _lj_pair_forcefield().to_potentials()
+        potentials.bind_topology(_lj_pair_batch(r=2.0))
+        bigger = TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": torch.tensor(
+                            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+                            dtype=DTYPE,
+                        ),
+                        "Z": torch.tensor([18, 18, 18], dtype=torch.long),
+                        "batch": torch.zeros(3, dtype=torch.long),
+                    },
+                    batch_size=[3],
+                ),
+            },
+            batch_size=[],
+        )
+        bigger = place_edges(bigger, cutoff=LJ_CUTOFF)
+        potentials.bind_topology(bigger)
+        with pytest.raises(ValueError, match="epsilon"):
+            potentials.energy(bigger)
 
     def test_bind_topology_refuses_a_bond_wrapped_across_a_box_face(self) -> None:
         """F29 fail-closed: under a cell, a bond over half the box is a folded molecule.
@@ -1573,78 +1997,199 @@ class TestPotentials:
     def test_a_wrapped_bond_is_refused_through_calc_energy_without_an_explicit_bind(
         self,
     ) -> None:
-        """F29 has to hold at the entries a caller uses, not only at the bind.
+        """F29 on public ``calc_energy``, even without an explicit bind.
 
         :meth:`bind_topology` refuses a folded frame, but nothing makes a
         caller call it. For a **bonded-only** field there is no nonbonded term,
         so the lazy bind inside ``_scaled_pairs`` never runs either, and the
         wrapped molecule of :data:`WRAPPED_X` — 2 Å apart through the ``x``
-        face, 8 Å apart in the coordinates as given — used to be priced at
-        ``½·BOND_K·(8 − BOND_R0)² = 2450`` kcal/mol straight through the public
-        API: finite, differentiable and wrong, which is exactly what F29
-        exists to refuse. A guard that only fires on an explicit bind is a
-        guard on the path that was never the problem.
+        face, 8 Å apart in the coordinates as given — would otherwise be a
+        finite, differentiable, wrong bonded energy. The public energy entry
+        that must still refuse is :meth:`calc_energy`. :meth:`energy` /
+        ``Potentials.__call__`` is the :class:`~molix.autograd.Derivative`
+        seam and does not run that host check.
 
-        Both public energy entries are checked, each on a **fresh** container,
-        because a bind performed by the first call would otherwise be what
-        protected the second.
+        Checked on a **fresh** container: a bind performed by an earlier call
+        would otherwise be what protected this one.
         """
         cell = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
 
         with pytest.raises(ValueError, match="F29"):
             _bond_potentials().calc_energy(_periodic_bond_batch(*WRAPPED_X, cell=cell))
 
-        with pytest.raises(ValueError, match="F29"):
-            _bond_potentials().calc_energy_forces(_periodic_bond_batch(*WRAPPED_X, cell=cell))
-
     def test_a_second_frame_of_the_same_shape_is_checked_afresh(self) -> None:
-        """The F29 memo may not vouch for a frame it never read.
+        """A second frame of the same topology shape is still a new geometry.
 
-        The gate is remembered per *topology* — a shape-level fingerprint of
-        the atom count and the bonded column counts — so a later call on a
-        batch of the same shape is passed straight through. That positions are
-        free afterwards is the point: an MD rollout cannot pay a host sync per
-        step, and an integrator never wraps in place, so a rollout whose first
-        frame is whole stays whole.
-
-        A **frame** is not a topology, though. The same two bonded atoms arrive
-        whole or folded, in one cell or another, at the same shape either way —
-        which is precisely the training path, where one container prices batch
-        after batch. Priced one whole frame first, the container then answered
-        the folded one behind it with ``½·BOND_K·(8 − BOND_R0)² = 2450``
-        kcal/mol: the guard reduced to a check on whichever frame happened to
-        arrive first.
+        Public :meth:`calc_energy` re-runs F29 on the positions and cell it is
+        handed. Two TensorDicts of the same bonded-column counts can still be
+        a whole molecule and a folded one; a previous Python object is not a
+        physical invariant. MD does not skip this check because an identity
+        memo keyed the first frame: an integrator never wraps in place, and
+        bonded-only ``MD.run`` is the compiled :meth:`energy` residual (the
+        caller unwraps before ``run``). Training hands a new container every
+        step, so the folded frame behind a whole one must still raise.
         """
         cell = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
         potentials = _bond_potentials()
 
-        # A whole frame, priced — this is what arms the memo.
         potentials.calc_energy(_periodic_bond_batch(*UNWRAPPED_X, cell=cell))
 
         with pytest.raises(ValueError, match="F29"):
             potentials.calc_energy(_periodic_bond_batch(*WRAPPED_X, cell=cell))
 
+    def test_an_in_place_wrap_of_the_same_object_is_refused(self) -> None:
+        """Rewriting ``atoms.pos`` in place is a new geometry, not a voucher.
+
+        Object identity of a TensorDict is not a physical invariant: the same
+        storage that priced the unwrapped 2 Å bond at 50.0 kcal/mol can hold
+        the folded 8 Å span a moment later. Public :meth:`calc_energy` and
+        :meth:`bind_topology` re-read that storage.
+        """
+        cell = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
+        potentials = _bond_potentials()
+        batch = _periodic_bond_batch(*UNWRAPPED_X, cell=cell)
+        pos = _leaf(batch, "atoms", "pos")
+
+        assert float(potentials.calc_energy(batch)) == pytest.approx(UNWRAPPED_ENERGY, abs=1e-10)
+
+        pos[0, 0] = WRAPPED_X[0]
+        pos[1, 0] = WRAPPED_X[1]
+        assert _leaf(batch, "atoms", "pos") is pos
+
+        with pytest.raises(ValueError, match="F29") as excinfo:
+            potentials.calc_energy(batch)
+        message = str(excinfo.value)
+        for token in ("8", "5"):
+            assert re.search(rf"\b{token}\b", message), message
+
+        with pytest.raises(ValueError, match="F29") as excinfo:
+            potentials.bind_topology(batch)
+        message = str(excinfo.value)
+        for token in ("8", "5"):
+            assert re.search(rf"\b{token}\b", message), message
+
+    def test_an_in_place_shear_of_the_same_cell_is_refused(self) -> None:
+        """Rewriting ``graphs.cell`` in place is a new geometry, not a voucher.
+
+        A 4 Å bond is legal in the 10 Å cube (limit 5 Å) and wrapped in the
+        sheared cell whose perpendicular width is 6 Å (limit 3 Å). Writing
+        that lattice into the same ``graphs.cell`` storage must refuse.
+        """
+        cube = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
+        sheared = torch.tensor(
+            [[WRAP_EDGE, 0.0, 0.0], [0.0, WRAP_EDGE, 0.0], SHEARED_C], dtype=DTYPE
+        )
+        potentials = _bond_potentials()
+        batch = _periodic_bond_batch(0.0, SHEARED_BOND_R, cell=cube)
+        cell_storage = _leaf(batch, "graphs", "cell")
+
+        potentials.calc_energy(batch)
+
+        cell_storage.copy_(sheared)
+        assert _leaf(batch, "graphs", "cell") is cell_storage
+
+        with pytest.raises(ValueError, match="F29") as excinfo:
+            potentials.calc_energy(batch)
+        message = str(excinfo.value)
+        assert re.search(r"\b4\b", message), message
+        assert re.search(r"\b3\b", message), message
+
+        with pytest.raises(ValueError, match="F29") as excinfo:
+            potentials.bind_topology(batch)
+        message = str(excinfo.value)
+        assert re.search(r"\b4\b", message), message
+        assert re.search(r"\b3\b", message), message
+
+    def test_warmup_does_not_voucher_a_fresh_wrapped_batch(self) -> None:
+        """Warming one unwrapped frame does not validate the next one.
+
+        :meth:`warmup` binds and F29-checks *that* batch. A fresh wrapped
+        TensorDict of the same topology shape is a new geometry: public
+        :meth:`calc_energy` must still raise F29 (8 Å vs 5 Å). The warmed
+        batch itself still prices at 50.0 kcal/mol.
+        """
+        cell = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
+        potentials = _bond_potentials()
+        unwrapped = _periodic_bond_batch(*UNWRAPPED_X, cell=cell)
+        potentials.warmup(unwrapped)
+
+        assert float(potentials.calc_energy(unwrapped)) == pytest.approx(
+            UNWRAPPED_ENERGY, abs=1e-10
+        )
+
+        with pytest.raises(ValueError, match="F29") as excinfo:
+            potentials.calc_energy(_periodic_bond_batch(*WRAPPED_X, cell=cell))
+        message = str(excinfo.value)
+        for token in ("8", "5"):
+            assert re.search(rf"\b{token}\b", message), message
+
+    def test_warmup_does_not_voucher_an_in_place_wrap_of_the_warmed_object(self) -> None:
+        """In-place wrap of the warmed TensorDict is still F29.
+
+        Validating the warmup batch must not validate a later geometry written
+        into the same object. Public :meth:`calc_energy` re-reads ``atoms.pos``.
+        """
+        cell = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
+        potentials = _bond_potentials()
+        batch = _periodic_bond_batch(*UNWRAPPED_X, cell=cell)
+        pos = _leaf(batch, "atoms", "pos")
+        potentials.warmup(batch)
+
+        assert float(potentials.calc_energy(batch)) == pytest.approx(UNWRAPPED_ENERGY, abs=1e-10)
+
+        pos[0, 0] = WRAPPED_X[0]
+        pos[1, 0] = WRAPPED_X[1]
+        assert _leaf(batch, "atoms", "pos") is pos
+
+        with pytest.raises(ValueError, match="F29") as excinfo:
+            potentials.calc_energy(batch)
+        message = str(excinfo.value)
+        for token in ("8", "5"):
+            assert re.search(rf"\b{token}\b", message), message
+
+    def test_bind_topology_does_not_voucher_an_in_place_wrap(self) -> None:
+        """An explicit bind of the unwrapped frame is not a later-geometry voucher.
+
+        :meth:`bind_topology` F29-checks the coordinates it is handed. Writing
+        :data:`WRAPPED_X` into the same ``atoms.pos`` storage afterwards is a
+        new geometry: public :meth:`calc_energy` must still raise F29.
+        """
+        cell = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
+        potentials = _bond_potentials()
+        batch = _periodic_bond_batch(*UNWRAPPED_X, cell=cell)
+        pos = _leaf(batch, "atoms", "pos")
+        potentials.bind_topology(batch)
+
+        assert float(potentials.calc_energy(batch)) == pytest.approx(UNWRAPPED_ENERGY, abs=1e-10)
+
+        pos[0, 0] = WRAPPED_X[0]
+        pos[1, 0] = WRAPPED_X[1]
+        assert _leaf(batch, "atoms", "pos") is pos
+
+        with pytest.raises(ValueError, match="F29") as excinfo:
+            potentials.calc_energy(batch)
+        message = str(excinfo.value)
+        for token in ("8", "5"):
+            assert re.search(rf"\b{token}\b", message), message
+
     @pytest.mark.slow
     def test_a_wrapped_frame_is_refused_even_under_torch_compile(self) -> None:
-        """Compiling the caller's own entry point may not switch the F29 gate off.
+        """Compiling public ``calc_energy`` may not switch the F29 gate off.
 
-        The check is host-side, so it cannot be traced — and
-        :meth:`_check_geometry` therefore returns early under
-        ``torch.compiler.is_compiling()``. That is right for the *compiled
-        core*, which :meth:`calc_energy_forces` calls the gate before entering.
-        It is wrong for a caller who wraps a whole public entry themselves,
-        which is the ordinary way to compile a single-point energy: the guard
-        then evaporates exactly where nothing else is watching, and the folded
-        frame comes back as ``½·BOND_K·(8 − BOND_R0)² = 2450`` kcal/mol —
-        measured, under ``torch.compile`` — while the same call eagerly raises.
-        A precondition that holds only in eager mode is not a precondition; it
-        is a lint.
+        The check is host-side, so dynamo cannot trace the ``argmax`` / Python
+        raise: an unvouched compiled public :meth:`calc_energy` graph-breaks
+        on that host sync and the eager re-run still runs the check
+        (fail-closed). Handing a :class:`~molix.data.TensorFrame` so
+        ``_frame`` does not wrap is not a substitute for F29 — a wrap-hit
+        plus ``is_compiling()`` skip is the fail-open this pins closed.
+        Scoring is not the MD kernel: :meth:`energy` is the Derivative seam
+        and is not compiled here.
 
-        The narrow opt-out the compiled region actually needs is the memo:
-        a frame an eager :meth:`calc_energy` or :meth:`bind_topology` has
-        already vouched for stays free, and anything else is refused with a
-        message naming that as the way through. Both halves are pinned here —
-        the unvouched frame raises, and the vouched one runs.
+        Both unvouched containers raise, TensorDict and TensorFrame: a wrap
+        break on the former is not what refuses the bond. An unwrapped
+        TensorFrame under ``torch.compile(calc_energy)`` may still price at
+        50.0 kcal/mol because the host check runs and *passes*, not because
+        a previous eager call skipped F29.
 
         Marked ``slow``: the first ``torch.compile`` of this field costs 47 s
         on the CI box (0.1 s for a second one in the same process), which is
@@ -1653,48 +2198,61 @@ class TestPotentials:
         cell = torch.eye(3, dtype=DTYPE) * WRAP_EDGE
 
         refusing = _bond_potentials()
-        with pytest.raises(ValueError, match="F29"):
+        with pytest.raises(ValueError, match="F29") as excinfo:
             torch.compile(lambda batch: refusing.calc_energy(batch))(
                 _periodic_bond_batch(*WRAPPED_X, cell=cell)
             )
+        message = str(excinfo.value)
+        for token in ("8", "5"):
+            assert re.search(rf"\b{token}\b", message), message
 
-        # Vouched for eagerly first, then compiled: the same object, the same
-        # topology, so the memo carries it and the compiled call goes through.
-        vouched = _bond_potentials()
-        whole = _periodic_bond_batch(*UNWRAPPED_X, cell=cell)
-        vouched.calc_energy(whole)
-        torch.compile(lambda batch: vouched.calc_energy(batch))(whole)
+        framed = _bond_potentials()
+        with pytest.raises(ValueError, match="F29") as excinfo:
+            torch.compile(lambda batch: framed.calc_energy(batch))(
+                as_tensor_frame(_periodic_bond_batch(*WRAPPED_X, cell=cell))
+            )
+        message = str(excinfo.value)
+        for token in ("8", "5"):
+            assert re.search(rf"\b{token}\b", message), message
+
+        passing = _bond_potentials()
+        whole = as_tensor_frame(_periodic_bond_batch(*UNWRAPPED_X, cell=cell))
+        energy = torch.compile(lambda batch: passing.calc_energy(batch))(whole)
+        assert float(energy) == pytest.approx(UNWRAPPED_ENERGY, abs=1e-10)
 
     def test_a_refused_bind_leaves_nothing_armed(self) -> None:
         """A bind that raised must not have installed half of itself.
 
-        :meth:`bind_topology` builds the exclusion table and records the
-        topology fingerprint *before* it checks the declared net charge, so a
-        refusal left the container looking bound: the exclusion table is not
-        ``None`` any more, the lazy bind inside the next evaluation sees
-        nothing to do, and the very batch that was just refused is priced —
-        41.51 kcal/mol here, from charges the field itself says are wrong. One
-        caught exception in a fitting loop (or a notebook cell re-run) is all
-        it takes, and every number after it is quietly outside the S5
-        constraint.
+        :meth:`bind_topology` used to build the exclusion table and record the
+        topology fingerprint *before* its refusals ran, so a refusal left the
+        container looking bound: the exclusion table is not ``None`` any more,
+        the lazy bind inside the next evaluation sees nothing to do, and the
+        very batch that was just refused is priced. One caught exception in a
+        fitting loop (or a notebook cell re-run) is all it takes, and every
+        number after it is quietly outside the constraint it was refused for.
 
         Refusing repeatedly is the only safe state: the container is either
         bound to a frame it accepted or bound to nothing. Both entry orders are
         checked, because the arming happens on the bind and the *lazy* bind is
         the one no caller can see.
+
+        Driven by the edge-orientation refusal. The net-charge check that used
+        to drive it warns rather than raises (operator ruling 2026-09-11), and
+        a warning arms nothing — but the ordering rule it exposed is the
+        bind's, not that one check's.
         """
-        batch = _charged_batch(total_charge=0.0)
+        batch = _reversed_edge_batch()
 
         explicit = _anion_potentials()
-        with pytest.raises(ValueError, match="total_charge"):
+        with pytest.raises(ValueError, match="source > target"):
             explicit.bind_topology(batch)
-        with pytest.raises(ValueError, match="total_charge"):
+        with pytest.raises(ValueError, match="source > target"):
             explicit.calc_energy(batch)
 
         lazy = _anion_potentials()
-        with pytest.raises(ValueError, match="total_charge"):
+        with pytest.raises(ValueError, match="source > target"):
             lazy.calc_energy(batch)
-        with pytest.raises(ValueError, match="total_charge"):
+        with pytest.raises(ValueError, match="source > target"):
             lazy.calc_energy(batch)
 
     def test_forward_writes_a_per_graph_energy_column_on_a_one_graph_batch(self) -> None:
@@ -1715,7 +2273,7 @@ class TestPotentials:
             {"num_atoms": torch.tensor([2], dtype=torch.long)}, batch_size=[1]
         )
 
-        out = _bond_potentials()(batch)
+        out = _bond_potentials(wrt=FORCES)(batch)
 
         assert out is batch
         assert out["graphs", "energy"].shape == (1,)
@@ -1756,18 +2314,17 @@ class TestPotentials:
         potentials = _coulomb_forcefield().to_potentials()
         cell = torch.eye(3, dtype=DTYPE) * COULOMB_EDGE
         potentials.bind_cell(cell)
-        edge_index, shifts = _coulomb_edges()
+        pair_index, shifts = _coulomb_edges()
         positions = torch.tensor(COULOMB_POSITIONS, dtype=DTYPE)
 
-        _, forces, _ = potentials.calc_energy_forces_virial(
-            _coulomb_batch(positions, cell, edge_index, shifts)
-        )
-        forces = forces.detach()
+        forces = Derivative(potentials, wrt=FORCES_AND_VIRIAL)(
+            _coulomb_batch(positions, cell, pair_index, shifts)
+        )[FORCES_KEY].detach()
 
         def energy_at(stepped: torch.Tensor) -> float:
             with torch.no_grad():
                 return float(
-                    potentials.calc_energy(_coulomb_batch(stepped, cell, edge_index, shifts))
+                    potentials.calc_energy(_coulomb_batch(stepped, cell, pair_index, shifts))
                 )
 
         differences = _central_difference_forces(energy_at, positions, FD_STEP)
@@ -1778,10 +2335,9 @@ class TestPotentials:
     def test_periodic_coulomb_virial_matches_a_central_strain_difference(self) -> None:
         """``W = dE/deps`` against six symmetric-strain differences.
 
-        The deformation is the one
-        :func:`~molpot.derivation.force.autograd_forces_and_virial` applies:
-        positions, lattice vectors **and** the per-edge lattice shifts are all
-        mapped by ``v @ (I + eps)^T``. Straining the shifts is not decoration —
+        The deformation is the one :class:`molix.autograd.Derivative`
+        applies: positions, lattice vectors **and** the per-edge lattice shifts
+        are all mapped by ``v @ (I + eps)^T``. Straining the shifts is not decoration —
         atom 3 of the fixture is wrapped, so three of its six pairs reach their
         partner through a lattice vector, and a virial that holds those vectors
         fixed while the box deforms is missing a term of order the energy
@@ -1791,18 +2347,17 @@ class TestPotentials:
         gradient, so a shear moves ``eps_ab`` and ``eps_ba`` together and the
         difference quotient counts the pair twice: the off-diagonals are halved
         to land on the Cauchy convention
-        (:func:`~molpot.derivation.stress.symmetrize_strain_grad`).
+        (:func:`molix.autograd.symmetrize_strain_grad`).
         """
         potentials = _coulomb_forcefield().to_potentials()
         cell = torch.eye(3, dtype=DTYPE) * COULOMB_EDGE
         potentials.bind_cell(cell)
-        edge_index, shifts = _coulomb_edges()
+        pair_index, shifts = _coulomb_edges()
         positions = torch.tensor(COULOMB_POSITIONS, dtype=DTYPE)
 
-        _, _, virial = potentials.calc_energy_forces_virial(
-            _coulomb_batch(positions, cell, edge_index, shifts)
-        )
-        virial = virial.detach()
+        virial = Derivative(potentials, wrt=FORCES_AND_VIRIAL)(
+            _coulomb_batch(positions, cell, pair_index, shifts)
+        )[VIRIAL_KEY][0].detach()
 
         def deformed(deformation: torch.Tensor) -> torch.Tensor:
             transform = deformation.T
@@ -1811,7 +2366,7 @@ class TestPotentials:
                     _coulomb_batch(
                         positions @ transform,
                         cell @ transform,
-                        edge_index,
+                        pair_index,
                         shifts @ transform,
                     )
                 )
@@ -1851,7 +2406,7 @@ class TestPotentials:
         ``.claude/notes/composable-potentials.md``, which owns its own spec.
         Until that lands the batch is refused rather than answered wrongly.
         The refusal is scoped to the periodic branch: open-boundary Coulomb
-        already reduces per graph through ``edge_batch`` / ``num_graphs``.
+        already reduces per graph through ``pair_batch`` / ``num_graphs``.
 
         Fixture: two copies of the four-ion box concatenated (``atoms.batch =
         [0,0,0,0,1,1,1,1]``), the second copy translated by half the cell edge
@@ -1866,9 +2421,9 @@ class TestPotentials:
         positions = torch.cat([single, single + COULOMB_EDGE / 2.0], dim=0)
         cell = torch.eye(3, dtype=DTYPE) * COULOMB_EDGE
         half_list, half_shifts = _coulomb_edges()
-        edge_index = torch.cat([half_list, half_list + n_atoms], dim=0)
+        pair_index = torch.cat([half_list, half_list + n_atoms], dim=0)
         shifts = torch.cat([half_shifts, half_shifts], dim=0)
-        edge_diff = positions[edge_index[:, 1]] - positions[edge_index[:, 0]] + shifts
+        pair_diff = positions[pair_index[:, 1]] - positions[pair_index[:, 0]] + shifts
         batch = TensorDict(
             {
                 "atoms": TensorDict(
@@ -1880,14 +2435,14 @@ class TestPotentials:
                     },
                     batch_size=[2 * n_atoms],
                 ),
-                "edges": TensorDict(
+                "pairs": TensorDict(
                     {
-                        "edge_index": edge_index,
-                        "edge_diff": edge_diff,
-                        "edge_dist": edge_diff.norm(dim=-1),
+                        "pair_index": pair_index,
+                        "pair_diff": pair_diff,
+                        "pair_dist": pair_diff.norm(dim=-1),
                         "shifts": shifts,
                     },
-                    batch_size=[edge_index.shape[0]],
+                    batch_size=[pair_index.shape[0]],
                 ),
                 "graphs": TensorDict(
                     {"cell": torch.stack([cell, cell])},
@@ -1905,7 +2460,7 @@ class TestPotentials:
         )
         potentials = (
             _coulomb_forcefield()
-            .with_params(atoms={"q": torch.tensor(COULOMB_CHARGES * 2, dtype=DTYPE)})
+            .with_params(atoms={"charge": torch.tensor(COULOMB_CHARGES * 2, dtype=DTYPE)})
             .to_potentials()
         )
 
@@ -1916,17 +2471,16 @@ class TestPotentials:
         """A placed list with no ``edges.shifts`` prices E and F, never W.
 
         ``Potentials._placed_pairs`` recovers the lattice remainder of
-        a shift-less list as ``(edge_diff - (pos[t] - pos[s])).detach()``. That
+        a shift-less list as ``(pair_diff - (pos[t] - pos[s])).detach()``. That
         constant carries the right *value* — energy and forces below match the
         stored-``shifts`` batch to the bit — but it is not a function of the
-        cell, so the strain applied by
-        :meth:`Potentials.calc_energy_forces_virial` never reaches the pairs
+        cell, so the strain the derivative op applies never reaches the pairs
         that reach their partner through a lattice vector. On this wrapped
         four-ion fixture that silently drops ~13.5 kcal/mol from ``tr W`` (the
         F13 boundary in ``.claude/notes/composable-potentials.md``): the
         virial is wrong, and nothing in the returned value says so.
 
-        So the boundary is pinned as a boundary. The ``edge_diff`` fallback
+        So the boundary is pinned as a boundary. The ``pair_diff`` fallback
         stays complete for energy and forces; the virial refuses a periodic
         batch whose list does not carry ``shifts``, and the message names the
         key that is missing.
@@ -1934,10 +2488,10 @@ class TestPotentials:
         potentials = _coulomb_forcefield().to_potentials()
         positions = torch.tensor(COULOMB_POSITIONS, dtype=DTYPE)
         cell = torch.eye(3, dtype=DTYPE) * COULOMB_EDGE
-        edge_index, shifts = _coulomb_edges()
-        stored = _coulomb_batch(positions, cell, edge_index, shifts)
-        implied = _coulomb_batch(positions, cell, edge_index, shifts)
-        del implied["edges", "shifts"]
+        pair_index, shifts = _coulomb_edges()
+        stored = _coulomb_batch(positions, cell, pair_index, shifts)
+        implied = _coulomb_batch(positions, cell, pair_index, shifts)
+        del implied["pairs", "shifts"]
 
         assert torch.allclose(
             potentials.calc_energy(implied).detach(),
@@ -1945,21 +2499,62 @@ class TestPotentials:
             atol=1e-10,
             rtol=0.0,
         )
+        forces = Derivative(potentials, wrt=FORCES)
         assert torch.allclose(
-            potentials.calc_forces(implied).detach(),
-            potentials.calc_forces(stored).detach(),
+            forces(implied)[FORCES_KEY].detach(),
+            forces(stored)[FORCES_KEY].detach(),
             atol=1e-8,
             rtol=0.0,
         )
         with pytest.raises(ValueError, match="shifts"):
-            potentials.calc_energy_forces_virial(implied)
+            Derivative(potentials, wrt=FORCES_AND_VIRIAL)(implied)
+
+    @pytest.mark.slow
+    def test_cartesian_proper_tables_trace_as_one_graph(self) -> None:
+        """The ``(a, b)`` → ``(k, γ)`` map runs inside the compiled region.
+
+        Converting through :meth:`ProperTorsionBag.from_cartesian` would drag
+        the bag's eager positivity check (a ``bool()`` on a tensor) onto the
+        hot path, where it is a host sync and a data-dependent guard.
+        """
+        from molix.compile import Compiler
+
+        potentials = (
+            ForceField(name="periodic-proper")
+            .def_dihedralstyle("periodic")
+            .with_params(
+                propers={
+                    "k": torch.ones(1, 2, dtype=DTYPE),
+                    "periodicity": torch.tensor([[1, 2]], dtype=torch.long),
+                    "phase": torch.zeros(1, 2, dtype=DTYPE),
+                }
+            )
+            .to_potentials()
+        )
+        batch = _torsion_batch("propers")
+        # A declared graph count keeps ``_num_graphs`` off its ``int(max())``
+        # fallback, which is a host sync a real collated batch never reaches.
+        batch["graphs"] = TensorDict(
+            {"num_atoms": torch.tensor([4], dtype=torch.long)}, batch_size=[1]
+        )
+        tables = {
+            "propers": {
+                "a": torch.ones(1, 2, dtype=DTYPE),
+                "b": torch.zeros(1, 2, dtype=DTYPE),
+                "periodicity": torch.tensor([[1, 2]], dtype=torch.long),
+            }
+        }
+        explanation = Compiler.explain(potentials.energy, batch, tables)
+        assert (explanation.graph_count, explanation.graph_break_count) == (1, 0), (
+            f"break sites: {explanation.break_sites}"
+        )
 
     @pytest.mark.slow
     @pytest.mark.parametrize("calculator", ("ewald", "pme"))
-    def test_periodic_coulomb_traces_clean_and_the_step_breaks_only_in_force_py(
+    def test_periodic_coulomb_traces_clean_and_the_step_breaks_only_at_the_leaf(
         self, calculator: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The bound term is one graph; the step around it breaks only at the seam.
+        """The bound term is one graph; the training step around it breaks only at the leaf.
 
         A cell-bound periodic Coulomb term is a fixed-shape computation: the
         real-space sum runs over the list's capacity with a mask, the
@@ -1982,19 +2577,18 @@ class TestPotentials:
         business, and a test that re-spells it pins plumbing instead of
         behaviour.
 
-        Around that graph the whole step still breaks, and every break must sit
-        in ``molpot/derivation/force.py`` — the leaf creation and
-        ``autograd.grad`` that dynamo cannot trace and that molpot deliberately
-        keeps outside the compiled region. A break anywhere else (a boolean
-        index in the term, a ``.item()`` on the k-grid, a style-registry lookup
-        on the hot path) is a regression.
+        Around that graph the whole NPT step is one graph in inference, and
+        traced with grad enabled it breaks only where the attached outputs
+        leak the leaves — ``molix/autograd/variables.py``. A break anywhere
+        else (a boolean index in the term, a ``.item()`` on the k-grid, a
+        style-registry lookup on the hot path) is a regression.
         """
         from molix.compile import Compiler
 
         potentials = _coulomb_forcefield(calculator=calculator).to_potentials()
         cell = torch.eye(3, dtype=DTYPE) * COULOMB_EDGE
         potentials.bind_cell(cell)
-        edge_index, shifts = _coulomb_edges()
+        pair_index, shifts = _coulomb_edges()
         positions = torch.tensor(COULOMB_POSITIONS, dtype=DTYPE)
 
         term = potentials.coulomb_periodic
@@ -2007,7 +2601,7 @@ class TestPotentials:
             return energy_of(**kwargs)
 
         monkeypatch.setattr(term, "energy", capturing)
-        potentials.calc_energy(_coulomb_batch(positions, cell, edge_index, shifts))
+        potentials.calc_energy(_coulomb_batch(positions, cell, pair_index, shifts))
         monkeypatch.undo()
         assert captured, "the periodic term was never reached"
 
@@ -2017,59 +2611,84 @@ class TestPotentials:
             f"break sites: {flat.break_sites}"
         )
 
-        # Host-side preconditions are stated *before* the compiled region —
-        # the same rule that puts ``bind_cell`` at the top of this test. The
-        # F29 geometry gate (:meth:`Potentials._check_geometry`) is one host
-        # sync per **frame**, memoized on the batch object, so a frame nothing
-        # has vouched for runs that sync wherever it is first evaluated —
-        # inside this trace, if that is where it happens, for four breaks at
-        # ``potentials.py:952-953``. Every production entry vouches outside the
-        # compiled region already: ``calc_energy_forces`` gates before entering
-        # ``_classical_core``, MD binds one work batch for the whole rollout,
-        # and a training step binds at its first evaluation. The bind here is
-        # that step, not a concession.
-        step_batch = _coulomb_batch(positions, cell, edge_index, shifts)
+        # Host-side preconditions sit *before* the compiled region — the same
+        # rule that puts ``bind_cell`` at the top of this test. ``_coulomb_batch``
+        # HAS bonds (atoms 0–1, 2.2 Å vs 4 Å half-width of the 8 Å cube); F29
+        # runs at eager ``bind_topology`` / ``calc_energy``. The explained graph
+        # is ``energy()`` after that. Wrap identity (``_frame_view``) keeps
+        # ``as_tensor_frame`` out of the compiled MD ``op(work)`` region; it is
+        # not an F29 voucher, and MD ``bind_work`` does not eager-vouch F29
+        # (``Derivative`` differentiates ``energy()``). The bind here is
+        # exclusion-table work, not a concession.
+        step_batch = _coulomb_batch(positions, cell, pair_index, shifts)
         potentials.bind_topology(step_batch)
-        step = Compiler.explain(potentials.calc_energy_forces_virial, step_batch)
+        step = Compiler.explain(Derivative(potentials, wrt=FORCES_AND_VIRIAL), step_batch)
         assert step.graph_break_count > 0
         strays = _strays_outside_the_force_seam(step.break_sites)
         assert strays == [], (
-            f"the periodic Coulomb step ({calculator}) may break only at the named autograd "
-            f"seam in {FORCE_SEAM} (owner: molpot derivation); stray break sites: {strays}"
+            f"the periodic Coulomb step ({calculator}) may break only at the leaf in "
+            f"{FORCE_SEAM} (owner: molix autograd); stray break sites: {strays}"
         )
 
-    def test_lj_analytic_forces_match_a_finite_difference_across_the_boundary(self) -> None:
-        """The LJ closed form must differentiate the **minimum-image** pair.
+    @pytest.mark.slow
+    @pytest.mark.parametrize("calculator", ("ewald", "pme"))
+    def test_the_periodic_coulomb_op_traces_to_one_graph_in_inference(
+        self, calculator: str
+    ) -> None:
+        """The iron law on the periodic NPT step: one graph, zero breaks, under ``no_grad``.
 
-        ``lj/cut`` is the one pair style with an analytic force branch: the
-        energy path reads the neighbour list's minimum-image ``edge_dist``,
-        while the force path builds the pair direction itself. The two have to
-        be the same pair. For a pair whose nearest image is across a box face
-        the raw displacement ``pos[target] − pos[source]`` is the *long* way
-        round — here 8 Å against a 2 Å minimum image — so a direction taken
-        from it is both reversed and four times too long, and the analytic
-        force stops being the gradient of the energy that is reported. In MD
-        that is not a small error: a non-conservative force does work around
-        every cycle and pumps energy into an NVE trajectory.
+        ``_coulomb_batch`` HAS bonds; F29 runs at the eager ``bind_topology`` /
+        ``calc_energy`` below. The explained graph is ``energy()`` after that.
+        ``(1, 0)`` is wrap identity (``_frame_view``) for compiled MD
+        ``op(work)``, not an F29-skip green and not ``bind_work`` vouching F29.
+        """
+        from molix.compile import Compiler
+
+        potentials = _coulomb_forcefield(calculator=calculator).to_potentials()
+        cell = torch.eye(3, dtype=DTYPE) * COULOMB_EDGE
+        potentials.bind_cell(cell)
+        pair_index, shifts = _coulomb_edges()
+        positions = torch.tensor(COULOMB_POSITIONS, dtype=DTYPE)
+        step_batch = _coulomb_batch(positions, cell, pair_index, shifts)
+        potentials.bind_topology(step_batch)
+        potentials.calc_energy(step_batch)
+        with torch.no_grad():
+            inference = Compiler.explain(Derivative(potentials, wrt=FORCES_AND_VIRIAL), step_batch)
+        assert (inference.graph_count, inference.graph_break_count) == (1, 0), (
+            f"the periodic Coulomb NPT step ({calculator}) must be one graph in inference; "
+            f"break sites: {inference.break_sites}"
+        )
+
+    def test_lj_forces_match_a_finite_difference_across_the_boundary(self) -> None:
+        """The LJ force must differentiate the **minimum-image** pair.
+
+        For a pair whose nearest image is across a box face the raw
+        displacement ``pos[target] − pos[source]`` is the *long* way round —
+        here 8 Å against a 2 Å minimum image — so an energy priced on the
+        minimum image but differentiated through the raw displacement would
+        report a force that is not the gradient of the energy. The pair
+        vectors :meth:`Potentials._placed_pairs` builds from the leaf and the
+        lattice remainder are what keeps the two one geometry. In MD that is
+        not a small error: a non-conservative force does work around every
+        cycle and pumps energy into an NVE trajectory.
 
         The reference is a central difference of ``calc_energy`` — the same
-        function whose gradient the closed form claims to be — taken on both
-        atoms and all three axes, with the neighbour list rebuilt at each
-        displaced geometry.
+        function whose gradient the op takes — on both atoms and all three
+        axes, with the neighbour list rebuilt at each displaced geometry.
         """
         positions = torch.tensor(LJ_BOUNDARY_POSITIONS, dtype=DTYPE)
         potentials = _lj_boundary_potentials()
-        _, forces = potentials.calc_energy_forces(_lj_boundary_batch(positions))
+        forces = Derivative(potentials, wrt=FORCES)(_lj_boundary_batch(positions))[FORCES_KEY]
 
         def energy_at(stepped: torch.Tensor) -> float:
             return float(_lj_boundary_potentials().calc_energy(_lj_boundary_batch(stepped)))
 
         finite = _central_difference_forces(energy_at, positions, LJ_BOUNDARY_FD_STEP)
 
-        gap = float((forces - finite).abs().max())
+        gap = float((forces.detach() - finite).abs().max())
         assert gap < LJ_BOUNDARY_FORCE_TOL, (
-            f"analytic LJ force is not -dE/dpos across the boundary: max gap {gap:.6g} "
-            f"kcal/mol/A; analytic {forces.tolist()} vs finite difference {finite.tolist()}"
+            f"LJ force is not -dE/dpos across the boundary: max gap {gap:.6g} "
+            f"kcal/mol/A; op {forces.tolist()} vs finite difference {finite.tolist()}"
         )
 
     # -- S8 gate 1: symmetries of the assembled Class-I energy ---------------
@@ -2125,60 +2744,45 @@ class TestPotentials:
         simply has no forces in it.
         """
         batch = butane_pair_batch()
-        reference = butane_pair_class_i_forcefield().to_potentials().forward(butane_pair_batch())
+        reference = butane_pair_class_i_forcefield().to_potentials(wrt=FORCES)(butane_pair_batch())
         view = TensorFrame.from_tensordict(batch)
 
-        butane_pair_class_i_forcefield().to_potentials().forward(view)
+        butane_pair_class_i_forcefield().to_potentials(wrt=FORCES)(view)
 
         assert ENERGY_KEY in batch.keys(include_nested=True)
         assert FORCES_KEY in batch.keys(include_nested=True)
         assert torch.equal(batch[ENERGY_KEY], reference[ENERGY_KEY])
         assert torch.equal(batch[FORCES_KEY], reference[FORCES_KEY])
 
-    def test_calc_energy_forces_virial_accepts_a_typed_view(self) -> None:
+    def test_the_strained_op_accepts_a_typed_view(self) -> None:
         """The strained path reads the view like any other batch.
 
-        It is the one entry that refuses a non-``TensorDict`` outright, so the
-        typed view — a ``TensorDictBase`` that is deliberately *not* a
-        ``TensorDict`` — was refused by an ``isinstance`` check rather than by
-        anything about the system it describes. The periodic Coulomb fixture is
-        the one with stored ``edges.shifts``, which this entry requires (F13).
+        The typed view — a ``TensorDictBase`` that is deliberately *not* a
+        ``TensorDict`` — must be read by what it describes, not refused by an
+        ``isinstance`` check. The periodic Coulomb fixture is the one with
+        stored ``edges.shifts``, which a virial requires (F13).
         """
         potentials = _coulomb_forcefield().to_potentials()
         cell = torch.eye(3, dtype=DTYPE) * COULOMB_EDGE
         potentials.bind_cell(cell)
-        edge_index, shifts = _coulomb_edges()
+        pair_index, shifts = _coulomb_edges()
         positions = torch.tensor(COULOMB_POSITIONS, dtype=DTYPE)
-        batch = _coulomb_batch(positions, cell, edge_index, shifts)
+        batch = _coulomb_batch(positions, cell, pair_index, shifts)
+        npt = Derivative(potentials, wrt=FORCES_AND_VIRIAL)
 
-        energy, forces, virial = potentials.calc_energy_forces_virial(
-            TensorFrame.from_tensordict(batch)
-        )
-        expected = potentials.calc_energy_forces_virial(
-            _coulomb_batch(positions, cell, edge_index, shifts)
-        )
+        viewed = npt(TensorFrame.from_tensordict(batch))
+        expected = npt(_coulomb_batch(positions, cell, pair_index, shifts))
 
-        assert float(energy) == float(expected[0])
-        assert torch.equal(forces.detach(), expected[1].detach())
-        assert torch.equal(virial.detach(), expected[2].detach())
+        assert torch.equal(viewed[ENERGY_KEY].detach(), expected[ENERGY_KEY].detach())
+        assert torch.equal(viewed[FORCES_KEY].detach(), expected[FORCES_KEY].detach())
+        assert torch.equal(viewed[VIRIAL_KEY].detach(), expected[VIRIAL_KEY].detach())
 
-    def test_a_nested_mapping_is_read_as_the_batch_it_describes(self) -> None:
-        """A plain ``{"atoms": TensorDict, …}`` prices like the batch itself.
-
-        The contract is the *shape* of the system — the namespaces of the
-        post-collate schema — not the class carrying them, so a caller holding
-        the namespaces in a plain mapping is not holding a different system.
-        Reading it through the same accessor is what keeps that true; the
-        alternative is a silent zero, since a system nothing recognises has no
-        topology and no placed list.
-        """
+    def test_a_plain_mapping_is_refused(self) -> None:
+        """The container evaluates a batch or its view; a bare mapping is not one."""
         batch = butane_pair_batch()
         mapping = {name: batch[name] for name in batch.keys()}
-
-        viewed = butane_pair_class_i_forcefield().to_potentials().calc_energy(mapping)
-        plain = butane_pair_class_i_forcefield().to_potentials().calc_energy(batch)
-
-        assert float(viewed) == float(plain)
+        with pytest.raises(TypeError, match="TensorDict"):
+            butane_pair_class_i_forcefield().to_potentials().calc_energy(mapping)  # type: ignore[arg-type]
 
     def test_assembled_energy_is_translation_invariant(self) -> None:
         """A rigid translation of the contents of a periodic box costs nothing.
@@ -2239,7 +2843,7 @@ class TestPotentials:
         the same physical configuration written down in another atom order must
         price the same. That takes the permutation through all five places an
         atom index lives — the positions, the per-atom parameter tables
-        (``q`` / ``epsilon`` / ``sigma``) and ``Z`` that travel with them, and
+        (``charge`` / ``epsilon`` / ``sigma``) and ``Z`` that travel with them, and
         the ``bonds`` / ``angles`` / ``propers`` columns, which are remapped by
         the *inverse* permutation because they name where an atom went rather
         than which atom a row came from. The bonded parameter rows are not
@@ -2336,13 +2940,14 @@ class TestPotentials:
 
 
 def _strays_outside_the_force_seam(sites: tuple[str, ...]) -> list[str]:
-    """Break sites that are not the retained autograd seam of ``force.py``.
+    """Break sites that are not the leaf in ``molix/autograd/variables.py``.
 
-    ``calc_energy_forces_virial`` builds a ``requires_grad`` leaf and calls
-    ``torch.autograd.grad``; dynamo traces neither, so the whole step is
-    *expected* to break there — and nowhere else. One definition, because the
-    mlip route and the classical route assert the same rule about the same
-    seam.
+    With grad enabled, the derivative op returns forces (and a virial) that
+    still require grad and derive from the leaves made there; stock dynamo
+    breaks where such a leaf leaks (pytorch/pytorch#196653 lifts it), so a
+    training-mode step is *expected* to break there — and nowhere else. One
+    definition, because the mlip route and the classical route assert the
+    same rule about the same seam.
 
     Args:
         sites: ``ExplainSummary.break_sites``, one ``file:line`` per break.
@@ -2354,12 +2959,8 @@ def _strays_outside_the_force_seam(sites: tuple[str, ...]) -> list[str]:
     return [site for site in sites if not re.fullmatch(rf".*{re.escape(FORCE_SEAM)}:\d+", site)]
 
 
-#: Type of the classical ``(system, pos) -> (energy, forces)`` core that
-#: :meth:`~molpot.forcefield.Potentials.compile_core` hands a compiler.
-ClassicalCore = Callable[..., tuple[torch.Tensor, torch.Tensor]]
-
-#: Separation (Å) of the two-atom ``lj/cut`` fixture the classical core is
-#: compiled on. Past the ``2^(1/6) σ = 3.37 Å`` minimum, so the pair sits on
+#: Separation (Å) of the two-atom ``lj/cut`` fixture the classical op is
+#: traced on. Past the ``2^(1/6) σ = 3.37 Å`` minimum, so the pair sits on
 #: the attractive shoulder with a non-zero force — at the well bottom every
 #: build agrees on a zero and the parity leg would prove nothing.
 COMPILED_CORE_R = 3.5
@@ -2368,9 +2969,9 @@ COMPILED_CORE_R = 3.5
 def _polar_forcefield() -> tuple[ForceField, nn.Module]:
     """A tiny periodic Polar mlip behind a ``metal``-unit ForceField.
 
-    The only in-tree potential that is both :class:`~molix.schema.CellBound`
-    and :class:`~molix.schema.CoreCompilable`, so the compiled-route criteria
-    need it rather than a stub. Its hyper-parameters
+    The only in-tree potential that is :class:`~molix.schema.CellBound` with
+    a cell-sized reciprocal grid, so the compiled-route criteria need it
+    rather than a stub. Its hyper-parameters
     come from the mace test package's conftest — one definition of "tiny
     Polar", not a second copy that drifts.
 
@@ -2393,7 +2994,7 @@ def _polar_forcefield() -> tuple[ForceField, nn.Module]:
         **TINY_POLAR_KWARGS,
     )
     torch.manual_seed(0)
-    model = MacePolar(**polar_kwargs(spec, compute_forces=False)).eval()
+    model = MacePolar(**polar_kwargs(spec)).eval()
     forcefield = ForceField("mace-polar", units="metal")
     forcefield.def_pairstyle(model)
     return forcefield, model
@@ -2403,8 +3004,8 @@ def _polar_batch(pos: torch.Tensor, cell: torch.Tensor) -> TensorDict:
     """A one-graph periodic batch on the mace-package cluster geometry."""
     from tests.test_molzoo.test_mace.conftest import CLUSTER_Z, SINGLE_GRAPH, full_edge_index
 
-    edge_index = full_edge_index(SINGLE_GRAPH)
-    diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    pair_index = full_edge_index(SINGLE_GRAPH)
+    diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]]
     n_atoms = len(CLUSTER_Z)
     return TensorDict(
         {
@@ -2416,13 +3017,13 @@ def _polar_batch(pos: torch.Tensor, cell: torch.Tensor) -> TensorDict:
                 },
                 batch_size=[n_atoms],
             ),
-            "edges": TensorDict(
+            "pairs": TensorDict(
                 {
-                    "edge_index": edge_index,
-                    "edge_diff": diff.clone(),
-                    "edge_dist": diff.norm(dim=-1),
+                    "pair_index": pair_index,
+                    "pair_diff": diff.clone(),
+                    "pair_dist": diff.norm(dim=-1),
                 },
-                batch_size=[edge_index.shape[0]],
+                batch_size=[pair_index.shape[0]],
             ),
             "graphs": TensorDict({"cell": cell.unsqueeze(0)}, batch_size=[1]),
         },
@@ -2430,13 +3031,13 @@ def _polar_batch(pos: torch.Tensor, cell: torch.Tensor) -> TensorDict:
     )
 
 
-class TestPotentialsCompiledCore:
-    """``bind_cell`` / ``compile_core`` delegation and the compiled mlip route.
+class TestPotentialsMlip:
+    """``bind_cell`` delegation, the ``call_energy`` policy and the compiled routes.
 
-    ``Potentials`` owns one line of each: a protocol-guarded hand-over to the
-    mlip. It keeps no compiled state of its own — that lives on the mlip, which
-    is what makes it survive ``to_potentials()`` rebuilds — and its ``mlip``
-    branch of ``calc_energy`` has exactly one policy, ``protocol.call_energy``.
+    ``Potentials`` owns one line of ``bind_cell``: a protocol-guarded hand-over
+    to the mlip. It keeps no compiled state — the composed op is what a
+    caller compiles — and its ``mlip`` branch of ``calc_energy`` has exactly
+    one policy, ``protocol.call_energy``.
     """
 
     @pytest.fixture
@@ -2457,68 +3058,44 @@ class TestPotentialsCompiledCore:
         yield
         config.set_precision("fp64" if previous == torch.float64 else "fp32")
 
-    def test_bind_cell_and_compile_core_delegate_behind_the_protocol_guards(self) -> None:
+    def test_bind_cell_delegates_behind_the_protocol_guard(self) -> None:
         """Guarded, one-layer, side-effect-free — and molpot stays downstream.
 
-        ``def_pairstyle`` accepts any ``nn.Module``, so both protocols are
-        optional on an mlip: ``bind_cell`` must silently do nothing (and change
-        no result) for one that lacks it, while ``compile_core`` must refuse
-        loudly rather than report success having compiled nothing — an mlip
-        owns the whole energy, so a container that cannot reach its core has
-        nothing left to compile. A **classical** field is the other case
-        entirely: it owns its core and compiles it
-        (:meth:`test_a_classical_field_compiles_its_own_core_and_routes_through_it`),
-        so only its ``bind_cell`` is a no-op here. When the mlip does satisfy
-        both protocols, exactly one call is forwarded, with the caller's own
-        storage. The import guards keep the package direction
-        ``molix <- molrep <- molzoo/molpot`` intact: the protocols come from
-        ``molix.schema``, never from ``molix.md`` or ``molix.compile``.
+        ``def_pairstyle`` accepts any ``nn.Module``, so the protocol is optional
+        on an mlip: ``bind_cell`` must silently do nothing (and change no
+        result) for one that lacks it, and a **classical** field holds nothing
+        sized by the lattice, so its ``bind_cell`` is a documented no-op too.
+        When the mlip does satisfy ``CellBound``, exactly one call is forwarded,
+        with the caller's own storage. The import guard keeps the package
+        direction ``molix <- molrep <- molzoo/molpot`` intact: the protocol
+        comes from ``molix.schema``, never from ``molix.md``.
         """
-        batch = _edge_batch()
-        toy = ForceField().def_pairstyle(_EdgeSpring()).to_potentials()
-        before = toy.calc_forces(batch).detach().clone()
+        toy = ForceField().def_pairstyle(_EdgeSpring()).to_potentials(wrt=FORCES)
+        before = toy(_edge_batch())[FORCES_KEY].detach().clone()
         toy.bind_cell(torch.eye(3, dtype=DTYPE))
-        assert torch.equal(toy.calc_forces(batch).detach(), before)
-        with pytest.raises(RuntimeError, match="compile_core"):
-            toy.compile_core(lambda core: core)
+        assert torch.equal(toy(_edge_batch())[FORCES_KEY].detach(), before)
 
-        # A bonded-only field holds nothing sized by the lattice: the
-        # documented no-op, which is a raise-free call and nothing else.
         classical = _bond_potentials()
         classical.bind_cell(torch.eye(3, dtype=DTYPE))
 
         bound: list[int] = []
-        compilers: list[object] = []
 
-        class _CellBoundCompilable(nn.Module):
+        class _CellBoundMlip(nn.Module):
             def bind_cell(self, cell: torch.Tensor) -> None:
                 bound.append(cell.data_ptr())
 
-            def compile_core(self, compiler: object) -> None:
-                compilers.append(compiler)
-
-        mlip = _CellBoundCompilable()
-        pots = ForceField().def_pairstyle(mlip).to_potentials()
+        pots = ForceField().def_pairstyle(_CellBoundMlip()).to_potentials()
         cell = torch.eye(3, dtype=DTYPE) * 10.0
         pots.bind_cell(cell)
-        compiler = object()
-        pots.compile_core(compiler)
         assert bound == [cell.data_ptr()]
-        assert compilers == [compiler]
-        assert not hasattr(pots, "_compiled_core")
         assert isinstance(pots, CellBound)
 
-    def test_calc_energy_routes_through_call_energy_and_the_pos_override_lands_first(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """One policy for the mlip branch, and ``pos=`` reaches the batch first.
+    def test_calc_energy_routes_through_call_energy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """One policy for the mlip branch.
 
         Which entry of an mlip evaluates the energy is ``protocol.call_energy``'s
         decision alone; re-implementing that probe here is how the two copies
-        drift. The override has to be written onto ``atoms.pos`` *before* the
-        call, because the mlip reads its positions off the batch — writing
-        afterwards would be silently ignored and the energy would be the one at
-        the old geometry.
+        drift.
         """
         import molpot.forcefield.potentials as module
 
@@ -2530,9 +3107,9 @@ class TestPotentialsCompiledCore:
             return real(model, system)
 
         class _PosSpring(nn.Module):
-            """Energy read off ``atoms.pos`` only — so a stale override shows up."""
+            """Energy read off ``atoms.pos`` only."""
 
-            def _write_energy(self, system: TensorDict) -> TensorDict:
+            def energy(self, system: TensorDict) -> TensorDict:
                 system[ENERGY_KEY] = 0.5 * system["atoms", "pos"].pow(2).sum().reshape(1)
                 return system
 
@@ -2545,140 +3122,90 @@ class TestPotentialsCompiledCore:
         assert calls == [mlip]
         assert energy is batch[ENERGY_KEY]
 
-        shifted = batch["atoms", "pos"] + torch.tensor(
-            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]], dtype=DTYPE
-        )
-        moved = pots.calc_energy(batch, pos=shifted)
-        assert len(calls) == 2
-        assert batch["atoms", "pos"] is shifted
-        assert not torch.allclose(moved.detach(), energy.detach())
-
-    def test_a_classical_field_compiles_its_own_core_and_routes_through_it(self) -> None:
-        """A field with no mlip hands out ``_classical_core`` and then calls it.
-
-        The classical analytic step is a hot path, so ``compile_core`` must have
-        something to install for a ForceField that declares only styles: the
-        whole ``(system, pos) -> (energy, forces)`` evaluation, as one bound
-        method of the container. Two things are pinned, because either one alone
-        can be true while the seam is useless. The compiler is applied **once**,
-        to a bound method of *this* ``Potentials`` — not to a lambda closing
-        over a rebuilt one, which would be a second evaluation path. And
-        ``calc_energy_forces`` then goes through the build the compiler returned
-        — a container that installed it and kept calling the eager method would
-        report a compiled run and never have one.
-
-        The compiler here is the identity, so the values must be untouched: one
-        function, two builds, and the only licensed difference between them is
-        reduction order. ``1e-12`` on a two-atom LJ pair is well under that.
-        """
-        installed: list[ClassicalCore] = []
-        routed: list[int] = []
-
-        def recording(core: ClassicalCore) -> ClassicalCore:
-            installed.append(core)
-
-            def through(*args: object, **kwargs: object) -> tuple[torch.Tensor, torch.Tensor]:
-                routed.append(1)
-                return core(*args, **kwargs)
-
-            return through
-
-        potentials = _lj_pair_forcefield().to_potentials()
-        batch = _lj_pair_batch(r=COMPILED_CORE_R)
-        eager_energy, eager_forces = potentials.calc_energy_forces(batch)
-        eager = (eager_energy.detach().clone(), eager_forces.detach().clone())
-
-        potentials.compile_core(recording)
-        assert len(installed) == 1
-        assert getattr(installed[0], "__self__", None) is potentials
-
-        energy, forces = potentials.calc_energy_forces(batch)
-        assert routed == [1]
-        assert torch.allclose(energy.detach(), eager[0], atol=1e-12, rtol=0.0)
-        assert torch.allclose(forces.detach(), eager[1], atol=1e-12, rtol=0.0)
-
     @pytest.mark.slow
-    def test_the_installed_classical_core_traces_with_no_break_outside_force_py(self) -> None:
-        """What ``compile_core`` hands a compiler has to be compilable.
+    def test_the_classical_op_traces_to_one_graph_in_inference(self) -> None:
+        """The iron law on the classical hot path: NVE and NPT, one graph, zero breaks.
 
-        The iron law is per hot path, and the classical analytic step is one: a
-        ``lj/cut`` field is fixed-shape arithmetic over the list's capacity with
-        a liveness mask — no boolean selection, no host read, no Python branch
-        on a tensor value — and must trace as **one** graph with zero breaks. A
-        break there is not a slow path, it is the compiled region collapsing to
-        the eager one.
-
-        A declared ``pair:coulomb`` has no closed-form force, so the core builds
-        a position leaf and calls ``autograd.grad`` through
-        ``molpot/derivation/force.py``: dynamo cannot trace either, that break
-        is deliberate and named, and it is the *only* one a classical field may
-        show. Owner: molpot derivation. The core is taken from the compiler
-        itself rather than off the container, so this asks about the function
-        the seam actually installs.
+        A ``lj/cut`` field is fixed-shape arithmetic over the list's capacity
+        with a liveness mask — no boolean selection, no host read, no Python
+        branch on a tensor value — and the op over it must trace as **one**
+        graph with zero breaks, forces alone and forces with the virial. A
+        declared ``pair:coulomb`` has no closed-form force either way; with
+        ``trace_autograd_ops`` on (the flag ``Compiler`` sets and ``explain``
+        patches in) the whole op — leaves, geometry, energy, ``autograd.grad``
+        — is one graph too.
 
         ``bind_topology`` first, which is the composition
         :meth:`~molpot.forcefield.Potentials.bind_topology` documents for a
         compiled path: the exclusion table and the orientation check are
         topology work, they are host-side by design, and left to the lazy call
-        inside the first evaluation they would be traced as breaks of the core.
-        Everything that survives that bind is per-step work and has to compile.
+        inside the first evaluation they would be traced as breaks.
+
+        The ``(1, 0)`` asserts pin wrap identity (``_frame_view``) for compiled
+        MD ``op(work)``, not an F29 skip: LJ (``_lj_pair_batch``) has no
+        ``bonds``, so ``_check_bonds_unwrapped`` returns before ``argmax``;
+        Coulomb (``_coulomb_batch``) HAS bonds and F29 runs at the eager
+        ``bind_topology`` / ``calc_energy`` below, after which the explained
+        graph is ``energy()``. MD ``bind_work`` does not voucher F29.
         """
         from molix.compile import Compiler
 
-        captured: list[ClassicalCore] = []
-
-        def capture(core: ClassicalCore) -> ClassicalCore:
-            captured.append(core)
-            return core
-
         lj = _lj_pair_forcefield().to_potentials()
         lj_batch = _lj_pair_batch(r=COMPILED_CORE_R)
+        # The strain variable needs a lattice to deform and a stored lattice
+        # remainder to strain (F13); a 10 Å box with zero shifts leaves the
+        # placed pair and its LJ energy exactly where they were.
+        lj_batch["graphs"] = TensorDict(
+            {"cell": torch.eye(3, dtype=DTYPE).unsqueeze(0) * 10.0}, batch_size=[1]
+        )
+        lj_batch["pairs", "shifts"] = torch.zeros_like(lj_batch["pairs", "pair_diff"])
+        # No bonds on this fixture: F29 returns before argmax. (1, 0) is wrap
+        # identity (``_frame_view``), not an F29-skip green.
         lj.bind_topology(lj_batch)
-        lj.compile_core(capture)
-        flat = Compiler.explain(
-            captured[-1], as_tensor_frame(lj_batch), _leaf(lj_batch, "atoms", "pos")
-        )
-        assert (flat.graph_count, flat.graph_break_count) == (1, 0), (
-            "a bonded + lj/cut core has no autograd seam and must trace as one graph; "
-            f"break sites: {flat.break_sites}"
-        )
+        lj.calc_energy(lj_batch)
+        for wrt in (FORCES, FORCES_AND_VIRIAL):
+            with torch.no_grad():
+                summary = Compiler.explain(Derivative(lj, wrt=wrt), lj_batch)
+            assert (summary.graph_count, summary.graph_break_count) == (1, 0), (
+                f"the lj/cut op wrt={wrt} must trace as one graph; "
+                f"break sites: {summary.break_sites}"
+            )
 
         coulomb = _coulomb_forcefield().to_potentials()
         cell = torch.eye(3, dtype=DTYPE) * COULOMB_EDGE
         coulomb.bind_cell(cell)
-        edge_index, shifts = _coulomb_edges()
+        pair_index, shifts = _coulomb_edges()
         periodic = _coulomb_batch(
-            torch.tensor(COULOMB_POSITIONS, dtype=DTYPE), cell, edge_index, shifts
+            torch.tensor(COULOMB_POSITIONS, dtype=DTYPE), cell, pair_index, shifts
         )
+        # Bonds are present; F29 runs at this eager bind / calc_energy. The
+        # explained graph is energy() after that — wrap identity, not F29 skip.
         coulomb.bind_topology(periodic)
-        coulomb.compile_core(capture)
-        core = Compiler.explain(
-            captured[-1], as_tensor_frame(periodic), _leaf(periodic, "atoms", "pos")
-        )
-        assert core.graph_break_count > 0
-        strays = _strays_outside_the_force_seam(core.break_sites)
-        assert strays == [], (
-            f"the classical core may break only at the named autograd seam in {FORCE_SEAM} "
-            f"(owner: molpot derivation); stray break sites: {strays}"
-        )
+        coulomb.calc_energy(periodic)
+        for wrt in (FORCES, FORCES_AND_VIRIAL):
+            with torch.no_grad():
+                summary = Compiler.explain(Derivative(coulomb, wrt=wrt), periodic)
+            assert (summary.graph_count, summary.graph_break_count) == (1, 0), (
+                f"the periodic Coulomb op wrt={wrt} must trace as one graph; "
+                f"break sites: {summary.break_sites}"
+            )
 
     @pytest.mark.slow
-    def test_the_compiled_route_matches_eager_and_breaks_only_in_force_py(self, fp64) -> None:
+    def test_the_compiled_route_matches_eager_and_breaks_only_at_the_leaf(self, fp64) -> None:
         """The prescribed sequence: parity, the break split, and fail-closed.
 
-        ``bind_cell -> one eager call -> compile_core`` is the caller's
-        composition. After it, the cell-bound Polar core is one dynamo graph
-        with no break, while the whole step still breaks — and every break must
-        be the autograd seam in ``molpot/derivation/force.py`` (leaf creation
-        and ``autograd.grad``), which Q3 deliberately keeps outside the compiled
-        region. Owner: molpot derivation. A break anywhere else is a regression.
+        ``bind_cell -> one eager call -> Compiler()(op)`` is the caller's
+        composition. After it, the compiled NPT op over the cell-bound Polar
+        mlip matches eager to 1e-10 in fp64 (reduction order only), the
+        flat ``energy_core`` and the whole op are one dynamo graph each in
+        inference, and the op traced with grad enabled still breaks —
+        attached outputs leak the leaves until pytorch/pytorch#196653 — and
+        every break must be that leaf in ``molix/autograd/variables.py``.
+        Owner: molix autograd. A break anywhere else is a regression.
 
-        Compiled and eager agree to 1e-10 in fp64 (reduction order only). The
-        installed core lives on the mlip, so a ``Potentials`` rebuilt by
-        ``to_potentials()`` still dispatches through it. And an over-capacity
-        cell fails closed twice over: loudly at the eager rebind, as an
-        in-graph NaN if the rebind is skipped — never as a truncated finite
-        energy.
+        An over-capacity cell fails closed twice over: loudly at the eager
+        rebind, as an in-graph NaN if the rebind is skipped — never as a
+        truncated finite energy.
 
         The MD route is first-order **inference**: those evaluations run under
         ``torch.no_grad()``. Outside it the ambient grad mode asks for
@@ -2686,7 +3213,7 @@ class TestPotentialsCompiledCore:
         donation is off — ``register_inductor_fallbacks`` pins
         ``torch._functorch.config.donated_buffer = False`` for exactly that
         reason. Pinned here rather than left as folklore: it is the difference
-        between "MD" and "force-loss training" reaching the same compiled core
+        between "MD" and "force-loss training" reaching the same compiled op
         (spec ``cuet-force-doublebackward``).
         """
         from molix.compile import Compiler
@@ -2699,82 +3226,252 @@ class TestPotentialsCompiledCore:
 
         pots.bind_cell(cell)
         pots.calc_energy(_polar_batch(pos, cell))
+        npt = Derivative(pots, wrt=FORCES_AND_VIRIAL)
+        keys = (ENERGY_KEY, FORCES_KEY, VIRIAL_KEY)
         # MD inference is measured under no_grad; the grad-enabled route is
         # asserted after this block, once buffer donation is known to be off.
         with torch.no_grad():
-            eager = tuple(
-                tensor.detach().clone()
-                for tensor in pots.calc_energy_forces_virial(_polar_batch(pos, cell))
-            )
+            eager_out = npt(_polar_batch(pos, cell))
+            eager = tuple(eager_out[key].detach().clone() for key in keys)
 
-            pots.compile_core(Compiler(backend="aot_eager", dynamic=True))
-            compiled = pots.calc_energy_forces_virial(_polar_batch(pos, cell))
-            for got, want in zip(compiled, eager, strict=True):
-                assert torch.allclose(got.detach(), want, atol=1e-10, rtol=0.0)
+            compiled = Compiler(backend="aot_eager", dynamic=True)(npt)
+            out = compiled(_polar_batch(pos, cell))
+            for key, want in zip(keys, eager, strict=True):
+                assert torch.allclose(out[key].detach(), want, atol=1e-10, rtol=0.0)
 
             work = _polar_batch(pos, cell)
             first = pots.calc_energy(work).detach().clone()
             assert torch.equal(work[ENERGY_KEY].detach(), first)
             # ONE atom moves. A rigid translation is *exactly* a symmetry of
             # this energy — the k-space |S(k)|² phases cancel and the local term
-            # reads the frozen edge_diff — so shifting every atom asserts
+            # reads the frozen pair_diff — so shifting every atom asserts
             # nothing: the two values are bitwise equal on aarch64 and differ
             # only by last-bit round-off on x86.
             moved = pos.clone()
             moved[1, 0] += NUDGE
-            second = pots.calc_energy(work, pos=moved).detach().clone()
+            work[POS_KEY] = moved
+            second = pots.calc_energy(work).detach().clone()
             assert float((second - first).abs().max()) > ENERGY_CHANGE_MIN
             assert torch.equal(work[ENERGY_KEY].detach(), second)
-
-            hits: list[int] = []
-            installed = mlip._core
-
-            def counting(*args: object, **kwargs: object) -> torch.Tensor:
-                hits.append(1)
-                return installed(*args, **kwargs)
-
-            mlip._core = counting
-            rebuilt = forcefield.to_potentials()
-            assert rebuilt is not pots
-            assert rebuilt.mlip is pots.mlip
-            rebuilt.calc_energy(_polar_batch(pos, cell))
-            assert hits == [1]
 
             over = cell * CELL_OVER_CAPACITY
             with pytest.raises(RuntimeError) as excinfo:
                 pots.bind_cell(over)
             assert "KSpaceGrid" in str(excinfo.value)
             assert "capacity_factor" in str(excinfo.value)
-            assert bool(torch.isnan(pots.calc_energy(_polar_batch(pos, over))).all())
+            # The compiled op never re-checks the capacity: an over-capacity
+            # lattice comes back as an in-graph NaN, never a truncated number.
+            assert bool(torch.isnan(compiled(_polar_batch(pos, over))[ENERGY_KEY]).all())
             within = cell * CELL_WITHIN_CAPACITY
             pots.bind_cell(within)
             assert bool(torch.isfinite(pots.calc_energy(_polar_batch(pos, within))).all())
-
-        # Grad enabled: the same compiled core now answers a create_graph=True
-        # backward instead of refusing on donated buffers, and returns the
-        # inference values.
-        assert torch._functorch.config.donated_buffer is False
-        with_grad = pots.calc_energy_forces_virial(_polar_batch(pos, cell))
-        for got, want in zip(with_grad, eager, strict=True):
-            assert torch.allclose(got.detach(), want, atol=1e-10, rtol=0.0)
 
         probe = _polar_batch(pos, cell)
         flat = Compiler.explain(
             mlip.energy_core,
             pos,
             probe["atoms", "Z"],
-            probe["edges", "edge_index"],
+            probe["pairs", "pair_index"],
             probe["atoms", "batch"],
             1,
-            edge_diff=probe["edges", "edge_diff"],
+            # ``energy_core`` is the mlip's own flat seam, so its keyword is the
+            # ML spelling; the values come from the chemistry namespace.
+            edge_diff=probe["pairs", "pair_diff"],
             cell=cell.unsqueeze(0),
         )
         assert (flat.graph_count, flat.graph_break_count) == (1, 0)
 
-        step = Compiler.explain(pots.calc_energy_forces_virial, _polar_batch(pos, cell))
-        assert step.graph_break_count > 0
-        strays = _strays_outside_the_force_seam(step.break_sites)
-        assert strays == [], (
-            f"the whole step may break only at the named autograd seam in {FORCE_SEAM} "
-            f"(owner: molpot derivation, retained by Q3); stray break sites: {strays}"
+        # Polar is the mlip ``call_energy`` branch and never reaches F29. The
+        # (1, 0) is wrap identity (``_frame_view``) of the reused work TensorDict
+        # for compiled MD ``op(work)``: a fresh wrap would break at
+        # ``TypedTensorDict.__setattr__``. bind/cell already sit outside the
+        # explained ``energy()`` graph. Not an F29-skip green, and not MD
+        # ``bind_work`` vouching F29.
+        step_pots = forcefield.to_potentials()
+        step = Derivative(step_pots, wrt=FORCES_AND_VIRIAL)
+        step_batch = _polar_batch(pos, cell)
+        with torch.no_grad():
+            step(step_batch)
+            inference = Compiler.explain(step, step_batch)
+        assert (inference.graph_count, inference.graph_break_count) == (1, 0), (
+            f"the NPT step must be one graph in inference; break sites: {inference.break_sites}"
         )
+
+    @pytest.mark.slow
+    def test_the_grad_enabled_compiled_route_is_one_graph_after_mark_leaves(self, fp64) -> None:
+        """With grad enabled the compiled NPT op answers a create_graph=True call and,
+        on marked leaves, traces as one graph with zero breaks on stock torch.
+
+        Two preconditions, each owned by someone else than the op. The leaf:
+        unmarked, stock torch 2.15 breaks where the in-region leaves leak
+        through the attached outputs (``molix/autograd/variables.py``), so the
+        columns are marked before the region (``mark_leaves``). The frame:
+        ``Potentials._frame_view`` is wrap identity for compiled MD
+        ``op(work)`` — a reused TensorDict does not wrap inside the graph.
+        Polar is the mlip ``call_energy`` branch and never reaches F29. A batch
+        it has never wrapped pays that host work inside the region: the
+        typed-view wrap breaks at tensordict's ``TypedTensorDict.__setattr__``
+        ("mapping proxy affected by dictionary mutation"), the resumed trace
+        then refuses the in-graph ``autograd.grad`` ("external grad_fn"), and
+        AOTAutograd's backward prologue fails on a tangent leaf. Measured
+        2026-09-11 (``.scratch/compile-seam/repro/diag_polar_marked.py``, job
+        2306962): fresh batch unmarked 11 graphs, fresh batch marked 7 graphs
+        (the wrap and the grad, no leaf), a batch wrapped once before —
+        marked, grad enabled — **1 graph, 0 breaks**. That ``(1, 0)`` is wrap
+        identity, not an F29-skip green, and not MD ``bind_work`` vouching F29
+        (``Derivative`` differentiates ``energy()``). The classical route's
+        documented precondition is therefore one eager wrap of the very frame
+        the compiled op is handed, as the inference test above applies.
+        """
+        from molix.compile import Compiler
+        from tests.test_molzoo.test_mace.conftest import CLUSTER_POS
+
+        forcefield, _mlip = _polar_forcefield()
+        pots = forcefield.to_potentials()
+        pos = torch.tensor(CLUSTER_POS, dtype=DTYPE)
+        cell = torch.eye(3, dtype=DTYPE) * POLAR_CELL_EDGE
+        pots.bind_cell(cell)
+        pots.calc_energy(_polar_batch(pos, cell))
+        npt = Derivative(pots, wrt=FORCES_AND_VIRIAL)
+        keys = (ENERGY_KEY, FORCES_KEY, VIRIAL_KEY)
+        with torch.no_grad():
+            eager_out = npt(_polar_batch(pos, cell))
+            eager = tuple(eager_out[key].detach().clone() for key in keys)
+        compiled = Compiler(backend="aot_eager", dynamic=True)(npt)
+        # Buffer donation is pinned off by the compile itself (the fallback
+        # registration); a create_graph=True call needs it off.
+        assert torch._functorch.config.donated_buffer is False
+        # The same work object: ``_frame_view`` is wrap identity, so the
+        # explained ``energy()`` graph does not wrap inside the region. Polar
+        # never reaches F29 (mlip ``call_energy``).
+        batch = _polar_batch(pos, cell)
+        with torch.no_grad():
+            npt(batch)
+        with_grad = compiled(npt.mark_leaves(batch))
+        for key, want in zip(keys, eager, strict=True):
+            assert torch.allclose(with_grad[key].detach(), want, atol=1e-10, rtol=0.0)
+        training = Compiler.explain(npt, npt.mark_leaves(batch))
+        assert (training.graph_count, training.graph_break_count) == (1, 0), (
+            f"the marked NPT step must be one graph with grad enabled; "
+            f"break sites: {training.break_sites}"
+        )
+
+
+class TestPotentialsPaddedBatch:
+    """``Potentials.energy`` on a ``MoleculePadder`` batch: ghosts enter no term.
+
+    The classical container has no per-atom energy term — every declared style
+    is a bonded term over the topology namespaces or a pair term over the placed
+    list — so an ``atoms.mask`` has nothing to multiply: a ghost atom enters no
+    bond / angle / torsion column, and a padding edge is a ``(ghost, ghost)``
+    self-loop that the ``source < target`` liveness rule already kills. The
+    padded energy is therefore the unpadded one without any mask read, the real
+    atoms' forces are unchanged and the ghosts' are zero. A *pair* style prices
+    a padded batch once its per-atom ``epsilon`` / ``sigma`` / ``charge`` tables are
+    handed in per batch at the padded atom count (the Class-I training path,
+    where the heads predict them); the seed tables a container carries at the
+    real atom count cannot index a ghost — see ``Potentials.energy``.
+    """
+
+    def test_ghost_atoms_and_dead_edges_price_nothing(self) -> None:
+        from molix.data import MoleculePadder
+
+        batch = _two_atom_bond_batch()
+        batch["pairs"] = TensorDict(
+            {
+                "pair_index": torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+                "pair_diff": torch.tensor([[BOND_R, 0.0, 0.0], [-BOND_R, 0.0, 0.0]], dtype=DTYPE),
+                "pair_dist": torch.tensor([BOND_R, BOND_R], dtype=DTYPE),
+            },
+            batch_size=[2],
+        )
+        batch["graphs"] = TensorDict({}, batch_size=[1])
+        reference = _bond_potentials(wrt=FORCES)(batch.clone())
+        padded = MoleculePadder(
+            max_atoms=4,
+            max_pairs=5,
+            cutoff=BOND_R0,
+            max_bonds=1,
+            max_angles=0,
+            max_propers=0,
+            max_impropers=0,
+        )(batch.clone())
+        out = _bond_potentials(wrt=FORCES)(padded)
+        assert torch.equal(out[ENERGY_KEY], reference[ENERGY_KEY])
+        assert torch.equal(out[FORCES_KEY][:2], reference[FORCES_KEY])
+        assert torch.equal(out[FORCES_KEY][2:], torch.zeros(2, 3, dtype=DTYPE))
+        assert float(out[ENERGY_KEY].reshape(())) == pytest.approx(GOLDEN_ENERGY, abs=1e-10)
+
+    def test_dummy_bonds_with_mask_price_nothing(self) -> None:
+        from molix.data import MoleculePadder
+
+        batch = _two_atom_bond_batch()
+        batch["pairs"] = TensorDict(
+            {
+                "pair_index": torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+                "pair_diff": torch.tensor([[BOND_R, 0.0, 0.0], [-BOND_R, 0.0, 0.0]], dtype=DTYPE),
+                "pair_dist": torch.tensor([BOND_R, BOND_R], dtype=DTYPE),
+            },
+            batch_size=[2],
+        )
+        batch["graphs"] = TensorDict({}, batch_size=[1])
+        reference = _bond_potentials(wrt=FORCES)(batch.clone())
+        padded = MoleculePadder(
+            max_atoms=8,
+            max_pairs=8,
+            cutoff=BOND_R0,
+            max_bonds=4,
+            max_angles=0,
+            max_propers=0,
+            max_impropers=0,
+        )(batch.clone())
+        out = _bond_potentials(n_bonds=4, wrt=FORCES)(padded)
+        assert torch.allclose(out[ENERGY_KEY], reference[ENERGY_KEY], atol=1e-10)
+        assert torch.allclose(out[FORCES_KEY][:2], reference[FORCES_KEY], atol=1e-10)
+        assert torch.equal(out[FORCES_KEY][2:], torch.zeros(6, 3, dtype=DTYPE))
+
+    def test_pair_style_prices_a_padded_batch_with_per_batch_tables(self) -> None:
+        """LJ over a padded batch with graph slots: live graph exact, dead slots zero.
+
+        The per-atom tables arrive per call at the padded atom count (as the
+        Class-I heads predict them); padding edges are ``(ghost0, ghost0)``
+        self-loops the ``source < target`` rule kills, ghosts sit on no live
+        edge, and ghost atoms scatter into the sink slot.
+        """
+        from functools import partial
+
+        from molix.data import MoleculePadder
+
+        potentials = _lj_pair_forcefield().to_potentials()
+        batch = _lj_pair_batch(r=3.5)
+        batch["graphs"] = TensorDict({"num_atoms": torch.tensor([2])}, batch_size=[1])
+        reference = potentials.calc_energy(batch.clone())
+        forces_ref = Derivative(potentials.energy, wrt=FORCES)(batch.clone())[FORCES_KEY]
+        padded = MoleculePadder(
+            max_atoms=6,
+            max_pairs=8,
+            cutoff=LJ_CUTOFF,
+            max_bonds=0,
+            max_angles=0,
+            max_propers=0,
+            max_impropers=0,
+            max_graphs=3,
+        )(batch.clone())
+        tables = {
+            "atoms": {
+                "epsilon": torch.full((6,), EPSILON, dtype=DTYPE),
+                "sigma": torch.full((6,), SIGMA, dtype=DTYPE),
+            }
+        }
+        # A new topology shape is a new bind; the exclusion table is never
+        # rebuilt implicitly (bind_topology's contract).
+        potentials.bind_topology(padded)
+        out = potentials.calc_energy(padded.clone(), tables)
+        assert out.shape == (3,)
+        assert torch.allclose(out[0], reference.reshape(-1)[0], atol=1e-12)
+        assert torch.equal(out[1:], torch.zeros(2, dtype=DTYPE))
+
+        op = Derivative(partial(potentials.energy, tables=tables), wrt=FORCES)
+        forces = op(padded)[FORCES_KEY]
+        assert torch.allclose(forces[:2], forces_ref, atol=1e-12)
+        assert torch.equal(forces[2:], torch.zeros(4, 3, dtype=DTYPE))

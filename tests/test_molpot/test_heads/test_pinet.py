@@ -23,7 +23,7 @@ def _graph(total_charge: float = 0.0):
         dtype=torch.float32,
     )
     z = torch.tensor([1, 6, 7, 8], dtype=torch.long)
-    edge_index = torch.tensor(
+    pair_index = torch.tensor(
         [[0, 1], [1, 0], [0, 2], [2, 0], [1, 3], [3, 1], [2, 3], [3, 2]],
         dtype=torch.long,
     )
@@ -31,7 +31,7 @@ def _graph(total_charge: float = 0.0):
     return make_graph_batch(
         pos,
         z,
-        edge_index,
+        pair_index,
         batch,
         graphs={"total_charge": torch.tensor([total_charge], dtype=torch.float32)},
     )
@@ -63,9 +63,9 @@ class TestPiNetPotential:
             depth=2,
             rank=3,
             hidden_dim=8,
-            # Monomorphic since b85d12f: force derivation is fixed here, not
+            # Monomorphic: what is derived is fixed at construction, not
             # requested per call.
-            compute_forces=True,
+            wrt=("atoms.pos",),
         )
         g = _graph()
         g["atoms", "pos"] = g["atoms", "pos"].clone().requires_grad_(True)

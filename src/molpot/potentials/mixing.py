@@ -9,7 +9,7 @@ from molpot.potentials.vdw.lj126 import geometric_mean
 
 def geometric_arithmetic_mixing(
     atom_params: dict[str, torch.Tensor],
-    edge_index: torch.Tensor,
+    pair_index: torch.Tensor,
     geometric_keys: list[str],
     arithmetic_keys: list[str],
 ) -> dict[str, torch.Tensor]:
@@ -32,7 +32,7 @@ def geometric_arithmetic_mixing(
 
     Args:
         atom_params: Per-atom parameter dict, each value ``(N,)``.
-        edge_index: Edge indices ``(E, 2)``.
+        pair_index: Edge indices ``(E, 2)``.
         geometric_keys: Parameter names to combine via geometric mean.
         arithmetic_keys: Parameter names to combine via arithmetic mean.
 
@@ -40,7 +40,7 @@ def geometric_arithmetic_mixing(
         Dict with ``"key_ij"`` entries for each input key ``(E,)``, each in the
         unit of the parameter it was mixed from.
     """
-    src, dst = edge_index[:, 0], edge_index[:, 1]
+    src, dst = pair_index[:, 0], pair_index[:, 1]
     result: dict[str, torch.Tensor] = {}
 
     for key in geometric_keys:

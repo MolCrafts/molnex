@@ -64,20 +64,20 @@ class EdgeToNodePooling(nn.Module):
     def forward(
         self,
         edge_features: torch.Tensor,
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
         num_nodes: int,
     ) -> torch.Tensor:
         """Aggregate edge features to nodes.
 
         Args:
             edge_features: Per-edge features ``(E, D)``.
-            edge_index: Edge indices ``(E, 2)``.
+            pair_index: Edge indices ``(E, 2)``.
             num_nodes: Total number of nodes.
 
         Returns:
             Per-node features ``(N, D)``.
         """
-        dst = edge_index[:, 1]
+        dst = pair_index[:, 1]
         feat_dim = edge_features.shape[-1]
 
         node_features = torch.zeros(

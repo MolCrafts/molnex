@@ -99,4 +99,4 @@ def preset_energy_ratio(source_style: str, target_style: str) -> float:
 #: cutoff envelope evaluates to exactly zero. Shared by
 #: :class:`molix.md.neighbors.NeighborList` and
 #: :class:`molix.engine.static.StaticForward`.
-DEAD_EDGE_CUTOFF_FACTOR: float = 10.0
+DEAD_PAIR_CUTOFF_FACTOR: float = 10.0

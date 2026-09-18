@@ -55,10 +55,10 @@ class PotentialDipole(torch.nn.Module):
         :math:`1 - ((1 - \\cos \\pi r / r_{cut}) / 2)^n`.
 
         Args:
-            vector: Pair vectors ``(n_edges, 3)``.
+            vector: Pair vectors ``(n_pairs, 3)``.
 
         Returns:
-            Cutoff values ``(n_edges, 1)``.
+            Cutoff values ``(n_pairs, 1)``.
         """
         r_mag = torch.norm(vector, dim=1, keepdim=True)
         if self.exclusion_radius is None:
@@ -76,10 +76,10 @@ class PotentialDipole(torch.nn.Module):
         """Full dipolar potential as a function of pair vectors.
 
         Args:
-            vector: Pair vectors ``(n_edges, 3)``.
+            vector: Pair vectors ``(n_pairs, 3)``.
 
         Returns:
-            Potential tensor ``(n_edges, 3, 3)``.
+            Potential tensor ``(n_pairs, 3, 3)``.
         """
         r_mag = torch.norm(vector, dim=1, keepdim=True)
         scalar_potential = 1.0 / (r_mag**3)
@@ -93,10 +93,10 @@ class PotentialDipole(torch.nn.Module):
         """Short-range part of the dipolar potential.
 
         Args:
-            dist: Pair vectors ``(n_edges, 3)``.
+            dist: Pair vectors ``(n_pairs, 3)``.
 
         Returns:
-            Short-range potential tensor ``(n_edges, 3, 3)``.
+            Short-range potential tensor ``(n_pairs, 3, 3)``.
         """
         if self.smearing is None:
             raise ValueError(
@@ -113,10 +113,10 @@ class PotentialDipole(torch.nn.Module):
         """Long-range part of the range-separated dipolar potential.
 
         Args:
-            dist: Pair vectors ``(n_edges, 3)``.
+            dist: Pair vectors ``(n_pairs, 3)``.
 
         Returns:
-            Long-range potential tensor ``(n_edges, 3, 3)``.
+            Long-range potential tensor ``(n_pairs, 3, 3)``.
         """
         if self.smearing is None:
             raise ValueError(

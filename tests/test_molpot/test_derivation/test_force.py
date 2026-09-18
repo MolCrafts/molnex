@@ -1,30 +1,41 @@
-"""Unit tests for molpot.derivation.force.ForceDerivation backends.
+"""Unit tests for the tensor-level autograd primitives in molpot.derivation.force.
 
-Each backend is pure: functorch helpers never run under method=autograd and
-autograd helpers never run under method=functorch.
+Mirrors ``src/molpot/derivation/force.py``: one backend, ``torch.autograd.grad``.
 """
 
 from __future__ import annotations
 
-import pytest
 import torch
 
 from molpot.derivation.force import (
     ForceDerivation,
-    autograd_forces_and_virial,
+    autograd_forces,
     autograd_forces_from_energy,
 )
 
 
-def test_functorch_and_autograd_agree_on_energy_fn():
-    pos = torch.randn(5, 3)
+class _CountedQuadratic(torch.autograd.Function):
+    """Quadratic energy node recording physical forward/backward executions."""
 
-    def energy_fn(p: torch.Tensor) -> torch.Tensor:
-        return (p.pow(2).sum(dim=-1) * torch.tensor([1.0, 2.0, 0.5, 1.5, 0.25])).sum()
+    forward_calls = 0
+    backward_calls = 0
 
-    f_ft = ForceDerivation(method="functorch")(energy_fn, pos)
-    f_ag = ForceDerivation(method="autograd")(energy_fn, pos)
-    torch.testing.assert_close(f_ft, f_ag, atol=1e-5, rtol=1e-5)
+    @staticmethod
+    def forward(ctx, pos: torch.Tensor) -> torch.Tensor:
+        _CountedQuadratic.forward_calls += 1
+        ctx.save_for_backward(pos)
+        return 0.5 * pos.square().sum()
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor]:
+        _CountedQuadratic.backward_calls += 1
+        (pos,) = ctx.saved_tensors
+        return (grad_output * pos,)
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.forward_calls = 0
+        cls.backward_calls = 0
 
 
 def test_autograd_forces_from_energy_matches_autograd_forward():
@@ -35,55 +46,38 @@ def test_autograd_forces_from_energy_matches_autograd_forward():
     def energy_fn(p: torch.Tensor) -> torch.Tensor:
         return (p.pow(2).sum(dim=-1) * torch.tensor([1.0, 2.0, 0.5, 1.5])).sum()
 
-    f_fwd = ForceDerivation(method="autograd")(energy_fn, pos.detach())
+    f_fwd = ForceDerivation()(energy_fn, pos.detach())
     torch.testing.assert_close(f_from_e, f_fwd, atol=1e-5, rtol=1e-5)
 
 
-def test_forces_from_energy_rejected_on_functorch_instance():
-    deriv = ForceDerivation(method="functorch")
-    pos = torch.zeros(2, 3, requires_grad=True)
-    try:
-        deriv.forces_from_energy(pos.pow(2).sum(), pos)
-        raise AssertionError("expected ValueError")
-    except ValueError as e:
-        assert "autograd-only" in str(e)
+def test_autograd_force_evaluates_the_energy_and_its_backward_once():
+    """An arbitrary energy graph is traversed exactly once per force request."""
+    _CountedQuadratic.reset()
+
+    forces = ForceDerivation()(
+        lambda pos: _CountedQuadratic.apply(pos),
+        torch.randn(4, 3),
+    )
+
+    assert tuple(forces.shape) == (4, 3)
+    assert _CountedQuadratic.forward_calls == 1
+    assert _CountedQuadratic.backward_calls == 1
 
 
-def test_autograd_forces_and_virial_matches_fd_strain():
-    """Isotropic pair ``½k‖r‖²``: W_αα = k r_α², forces = −k r."""
-    pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float64)
-    cell = torch.eye(3, dtype=torch.float64) * 8.0
-    edge = pos[1] - pos[0]
-    k = 2.0
+def test_autograd_forces_follow_the_ambient_grad_mode():
+    """Detached under ``no_grad``; attached to the parameters with grad enabled."""
+    weight = torch.nn.Parameter(torch.tensor(1.7, dtype=torch.float64))
+    pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.5, 0.0]], dtype=torch.float64)
 
-    def energy_fn(p: torch.Tensor, c: torch.Tensor, diff: torch.Tensor) -> torch.Tensor:
-        del p, c
-        return 0.5 * k * (diff * diff).sum()
+    def energy_fn(p: torch.Tensor) -> torch.Tensor:
+        return (weight * p * p).sum()
 
-    energy, forces, virial = autograd_forces_and_virial(energy_fn, pos, cell, edge)
-    assert energy.item() == pytest.approx(0.5 * k)
-    assert torch.allclose(forces[1], torch.tensor([0.0, 0.0, 0.0], dtype=torch.float64), atol=1e-12)
-    # Straining the displacement: E = ½ k ‖r @ (I+ε)ᵀ‖² → W_xx = k r_x².
-    assert virial[0, 0].item() == pytest.approx(k)
-    assert virial[1, 1].item() == pytest.approx(0.0)
+    with torch.no_grad():
+        detached = autograd_forces(energy_fn, pos)
+    assert not detached.requires_grad
+    assert torch.allclose(detached, -2.0 * 1.7 * pos)
 
-
-def test_has_aux_rejected_on_autograd_instance():
-    deriv = ForceDerivation(method="autograd")
-
-    def energy_fn_aux(p: torch.Tensor):
-        return p.pow(2).sum(), p
-
-    try:
-        deriv(energy_fn_aux, torch.zeros(2, 3), has_aux=True)
-        raise AssertionError("expected ValueError")
-    except ValueError as e:
-        assert "functorch-only" in str(e)
-
-
-def test_invalid_method_raises():
-    try:
-        ForceDerivation(method="magic")
-        raise AssertionError("expected ValueError")
-    except ValueError:
-        pass
+    attached = autograd_forces(energy_fn, pos)
+    assert attached.requires_grad
+    attached.pow(2).sum().backward()
+    assert weight.grad is not None and float(weight.grad.abs()) > 0.0

@@ -2,9 +2,9 @@
 
 Energy formula (OpenMM §19.4 / SMIRNOFF / AMBER)::
 
-    E = Σ_torsions Σ_m (k[t,m] / s[t]) * [1 + cos(n[m] * φ − γ[t,m])]
+    E = Σ_torsions Σ_m k[t,m] * [1 + cos(n[m] * φ − γ[t,m])]
 
-where ``t = proper_types[i]``, ``s = idivf``, ``n = periodicity``,
+where ``t = proper_types[i]``, ``n = periodicity``,
 ``γ = phase``. ``cos(nφ − γ)`` is the Chebyshev recurrence in
 ``(cos φ, sin φ)`` used by LAMMPS ``dihedral_style opls`` / CHARMM; ``φ``
 is never formed. ``(cos φ, sin φ)`` come from
@@ -75,15 +75,13 @@ class ProperTorsionPeriodic(BasePotential):
     Parameters are type-indexed tables:
 
     - ``k``: ``[n_types, n_terms]``
-    - ``periodicity``: ``[n_terms]`` (shared integer periods)
+    - ``periodicity``: ``[n_types, n_terms]`` (per type, per term)
     - ``phase``: ``[n_types, n_terms]`` (radians)
-    - ``idivf``: ``[n_types]`` AMBER scale factor ``s``
 
     Attributes:
         k: Barrier heights ``[n_types, n_terms]``.
-        periodicity: Periodicities ``[n_terms]``.
+        periodicity: Periodicities ``[n_types, n_terms]``.
         phase: Phase offsets ``[n_types, n_terms]``.
-        idivf: Identity / scale divisors ``[n_types]``.
     """
 
     name = "proper_torsion_periodic_torch"
@@ -92,22 +90,19 @@ class ProperTorsionPeriodic(BasePotential):
     k: torch.Tensor
     periodicity: torch.Tensor
     phase: torch.Tensor
-    idivf: torch.Tensor
 
     def __init__(
         self,
         k: torch.Tensor,
         periodicity: torch.Tensor,
         phase: torch.Tensor,
-        idivf: torch.Tensor,
     ) -> None:
         """Initialize ProperTorsionPeriodic.
 
         Args:
             k: Barrier heights ``[n_types, n_terms]``.
-            periodicity: Integer periods ``[n_terms]`` (must be > 0).
+            periodicity: Integer periods ``[n_types, n_terms]`` (must be > 0).
             phase: Phase offsets γ in radians ``[n_types, n_terms]``.
-            idivf: Scale factors ``s`` per type ``[n_types]``.
         """
         super().__init__()
 
@@ -116,19 +111,35 @@ class ProperTorsionPeriodic(BasePotential):
         if phase.shape != k.shape:
             raise ValueError(f"phase must match k shape {tuple(k.shape)}, got {tuple(phase.shape)}")
         n_types, n_terms = k.shape
-        if periodicity.ndim != 1 or periodicity.shape[0] != n_terms:
+        if periodicity.ndim == 1 and periodicity.shape[0] == k.shape[1]:
+            # A multiplicity set shared by every type — the OPLS/CHARMM case of
+            # the general per-type table.
+            periodicity = periodicity.expand(k.shape[0], -1).contiguous()
+        if periodicity.shape != k.shape:
             raise ValueError(
-                f"periodicity must be [n_terms]={n_terms}, got shape {tuple(periodicity.shape)}"
+                f"periodicity must match k shape {tuple(k.shape)}, got {tuple(periodicity.shape)}"
             )
-        if idivf.ndim != 1 or idivf.shape[0] != n_types:
-            raise ValueError(f"idivf must be [n_types]={n_types}, got shape {tuple(idivf.shape)}")
         if not bool((periodicity > 0).all()):
             raise ValueError(f"periodicity entries must be > 0, got {periodicity.tolist()}")
 
         self.register_buffer("k", k)
         self.register_buffer("periodicity", periodicity)
         self.register_buffer("phase", phase)
-        self.register_buffer("idivf", idivf)
+        # Python int, fixed at construction: a trip count read off a
+        # tensor is a data-dependent loop bound and a graph break.
+        #
+        # An empty table is a real, ordinary case: a learned field declares its
+        # styles with no rows and the head fills them per batch, so whichever
+        # batch assembles this container may carry no term of this kind at all
+        # (a small molecule has no improper). ``max()`` over zero elements
+        # raises, and guessing 1 is worse than raising — the next batch that
+        # *does* bring rows gathers past the ladder and dies in a CUDA
+        # index assert, far from here. With no rows the only capacity the
+        # table still states is its own width, which for the canonical
+        # ``n = 1…T`` tables these heads emit is exactly the depth needed.
+        self.n_max = (
+            int(periodicity.max()) if periodicity.numel() else max(int(periodicity.shape[-1]), 1)
+        )
 
     def forward(self, data: dict[str, Any] | None = None, **kwargs: Any) -> torch.Tensor:
         """Compute Class-I multi-term proper torsion energy.
@@ -162,13 +173,13 @@ class ProperTorsionPeriodic(BasePotential):
             if proper_types is None:
                 proper_types = data.get("proper_types")
 
-        if pos is None or proper_index is None or proper_types is None:
+        if pos is None or proper_index is None:
             raise ValueError("ProperTorsionPeriodic requires pos, proper_index, and proper_types.")
 
         if not isinstance(pos, torch.Tensor):
             pos = torch.from_numpy(pos).float()
             proper_index = torch.from_numpy(proper_index).long()
-            proper_types = torch.from_numpy(proper_types).long()
+            proper_types = None if proper_types is None else torch.from_numpy(proper_types).long()
 
         _require_index_4_by_n(proper_index, "proper_index")
 
@@ -176,11 +187,11 @@ class ProperTorsionPeriodic(BasePotential):
             return torch.tensor(0.0, device=pos.device, dtype=pos.dtype)
 
         cos_phi, sin_phi = dihedral_cos_sin(*_dihedral_bond_vectors(pos, proper_index))
-        k_t = self.k[proper_types]
-        phase_t = self.phase[proper_types]
-        s_t = self.idivf[proper_types]
-        cos_arg = fourier_cos(cos_phi, sin_phi, self.periodicity, phase_t)
-        energy_per_proper = ((k_t / s_t.unsqueeze(1)) * (1.0 + cos_arg)).sum(dim=1)
+        k_t = self.rows("k", kwargs, proper_types)
+        phase_t = self.rows("phase", kwargs, proper_types)
+        n_t = self.rows("periodicity", kwargs, proper_types)
+        cos_arg = fourier_cos(cos_phi, sin_phi, n_t, phase_t, n_max=self.n_max)
+        energy_per_proper = (k_t * (1.0 + cos_arg)).sum(dim=1)
         if term_batch is not None:
             energy = energy_per_proper.new_zeros(int(num_graphs))
             energy.index_add_(0, term_batch.long(), energy_per_proper)
@@ -209,7 +220,7 @@ class ProperTorsionPeriodic(BasePotential):
         proper_types = kwargs.get("proper_types")
         term_batch = kwargs.get("term_batch")
         num_graphs = kwargs.get("num_graphs")
-        if pos is None or proper_index is None or proper_types is None:
+        if pos is None or proper_index is None:
             raise ValueError(
                 "ProperTorsionPeriodic.energy_forces requires pos, proper_index, proper_types."
             )
@@ -225,15 +236,15 @@ class ProperTorsionPeriodic(BasePotential):
 
         b1, b2, b3 = _dihedral_bond_vectors(pos, proper_index)
         cos_phi, sin_phi = dihedral_cos_sin(b1, b2, b3)
-        k_t = self.k[proper_types]
-        phase_t = self.phase[proper_types]
-        s_t = self.idivf[proper_types]
-        cos_arg, sin_arg = fourier_cos_sin(cos_phi, sin_phi, self.periodicity, phase_t)
-        scale = k_t / s_t.unsqueeze(1)
+        k_t = self.rows("k", kwargs, proper_types)
+        phase_t = self.rows("phase", kwargs, proper_types)
+        n_t = self.rows("periodicity", kwargs, proper_types)
+        cos_arg, sin_arg = fourier_cos_sin(cos_phi, sin_phi, n_t, phase_t, n_max=self.n_max)
+        scale = k_t
         energy_per = (scale * (1.0 + cos_arg)).sum(dim=1)
 
-        n = self.periodicity.to(dtype=k_t.dtype)
-        g = (scale * n.unsqueeze(0) * sin_arg).sum(dim=1)
+        n = n_t.to(dtype=k_t.dtype)
+        g = (scale * n * sin_arg).sum(dim=1)
         fi, fj, fk, fl = dihedral_phi_grad(b1, b2, b3)
         g = g.unsqueeze(-1)
         forces = pos.new_zeros((pos.shape[0], 3))

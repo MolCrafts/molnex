@@ -10,7 +10,7 @@ registered in :class:`molpot.forcefield.PotentialMeta` and are what a
 Every registered style carries one :class:`InteractionContract` declaring, in
 machine-readable form, what the style is and what it may be composed with:
 
-* **inputs** — the batch keys it reads (``"atoms.pos"``, ``"atoms.q"``,
+* **inputs** — the batch keys it reads (``"atoms.pos"``, ``"atoms.charge"``,
   ``"bonds.bond_index"``, …), so a missing input is a construction-time error
   rather than a ``KeyError`` inside a kernel;
 * **transformation law** — :class:`ParamFrame`, carried per parameter on

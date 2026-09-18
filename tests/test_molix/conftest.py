@@ -25,13 +25,12 @@ import math
 import random
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pytest
 import torch
 
-from molix.store.frame_store import FrameStoreWriter
+from molix.data.frame_dataset import FrameDataset
 from tests.conftest import frame
 
 # ---------------------------------------------------------------------------
@@ -157,18 +156,6 @@ def water_les_root(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-BLOCK_PROVENANCE: dict[str, Any] = {
-    "source": {"name": "molnex-unit-test", "coordinate": "n/a"},
-    "generator": {"tool": "test_frame_store.py", "version": "1", "commit": "0"},
-    "created_at": "2026-08-14T00:00:00+00:00",
-    "units": {
-        "pos": "angstrom",
-        "energy": "kcal/mol",
-        "forces": "kcal/mol/angstrom",
-    },
-}
-
-
 def halves(count: int, start: int) -> torch.Tensor:
     """``count`` distinct multiples of 0.5 — exactly representable in float32."""
     return (torch.arange(count, dtype=torch.float32) + float(start)) * 0.5
@@ -214,7 +201,7 @@ def valence_columns(n_atoms: int) -> dict[str, torch.Tensor]:
 
 
 def sampling_unit(key: str, task: str, z: list[int], n_frames: int, offset: int) -> tuple:
-    """One unit as ``(frames, key, task)`` — the shape ``write_block`` appends."""
+    """One unit as ``(frames, key, task)`` — the shape ``frames_dataset`` takes."""
     n_atoms = len(z)
     valence = valence_columns(n_atoms)
     frames = []
@@ -260,13 +247,18 @@ def unit_c() -> tuple:
     return sampling_unit("scan-c", "torsion", [6, 6, 8, 1], 5, 100)
 
 
-def write_block(root: Path, units: list, *, split: str = "train") -> Path:
-    """Write and seal a block holding *units* — the uninterrupted reference write."""
-    writer = FrameStoreWriter(root, split=split, provenance=BLOCK_PROVENANCE)
-    for frames, key, task in units:
-        writer.append(frames, key=key, task=task)
-    writer.seal()
-    return root
+def frames_dataset(units: list) -> FrameDataset:
+    """A :class:`FrameDataset` over *units* — one record per sampling unit.
+
+    The single-task constructor is what the fixtures need: every caller here
+    passes units of one task, and a multi-task source is a ``DataMixture``.
+    """
+    tasks = {task for _frames, _key, task in units}
+    if len(tasks) != 1:
+        raise ValueError(f"frames_dataset takes units of one task, got {sorted(tasks)}")
+    return FrameDataset.from_records(
+        [tuple(frames) for frames, _key, _task in units], task=tasks.pop()
+    )
 
 
 def unit_samples(units: list) -> list:

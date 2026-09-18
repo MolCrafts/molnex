@@ -1,61 +1,194 @@
-"""Tests for ModuleProfiler, focused on the submodule breakdown enhancement."""
+"""Tests for the stateless sweep/spec/profiler/report API."""
 
 from __future__ import annotations
 
+import json
+
+import pytest
+import torch
 import torch.nn as nn
-from tensordict import TensorDict
 
-from molix.profiler import MockBatch, ModuleProfiler
+from molix.profiler import Profiler, ProfilerConfig, ProfileSpec, ProfileSweep
 
 
-class _Composite(nn.Module):
-    """Tiny encoder-shaped model: a named child + a ModuleList of blocks."""
-
-    def __init__(self) -> None:
+class _Counter(nn.Module):
+    def __init__(self, width: int = 1) -> None:
         super().__init__()
-        self.embed = nn.Linear(3, 8)
-        self.blocks = nn.ModuleList([nn.Linear(8, 8), nn.Linear(8, 8)])
+        self.weight = nn.Parameter(torch.ones(width))
 
-    def forward(self, batch: TensorDict) -> TensorDict:
-        x = self.embed(batch["atoms", "pos"])
-        for blk in self.blocks:
-            x = blk(x)
-        batch["atoms", "node_features"] = x.unsqueeze(1)
-        return batch
+    def forward(self, batch: torch.Tensor) -> torch.Tensor:
+        return batch.sum() * self.weight.sum()
 
 
-def _loss(out, batch=None):
-    return out["atoms", "node_features"].sum()
+class _Loader:
+    def __init__(self, batch_size: int = 1) -> None:
+        self.batch_size = batch_size
+
+    def __iter__(self):
+        yield torch.ones(self.batch_size, 1)
+        yield torch.full((self.batch_size, 1), 2.0)
 
 
-def _factory():
-    return MockBatch(n_atoms=64, n_edges=128, n_graphs=4, atomic_numbers=7, device="cpu", seed=0)
+class _OneShotLoader:
+    def __init__(self) -> None:
+        self.done = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.done:
+            raise StopIteration
+        self.done = True
+        return torch.ones(1, 1)
 
 
-def test_run_basic_component_breakdown():
-    prof = ModuleProfiler(_Composite(), loss_fn=_loss, device="cpu")
-    result = prof.run(_factory(), n_steps=8, n_warmup=2)
-    assert result.forward_ms.mean_ms > 0
-    assert result.backward_ms is not None
-    assert result.n_params > 0
-    assert result.submodule_table is None  # off by default
+class _FailingModel(nn.Module):
+    def forward(self, batch):
+        raise RuntimeError("kernel failed")
 
 
-def test_submodule_breakdown_expands_modulelist():
-    prof = ModuleProfiler(_Composite(), loss_fn=_loss, device="cpu")
-    result = prof.run(_factory(), n_steps=8, n_warmup=2, submodules=True)
-    table = result.submodule_table
-    assert table is not None
-    # named child shows up, and the ModuleList is expanded into its entries
-    assert "embed" in table
-    assert "blocks.0" in table
-    assert "blocks.1" in table
-    assert "Σ captured" in table
+def test_sweep_builds_classes_lazily_and_scan_values_override_kwargs():
+    sweep = ProfileSweep(
+        "counter",
+        _Counter,
+        _Loader,
+        model_kwargs={"width": 1},
+        dataloader_kwargs={"batch_size": 1},
+        parameters={"precision": "fp32"},
+    ).grid(model={"width": [2, 3]}, data={"batch_size": [4]})
+
+    specs = list(sweep)
+
+    assert len(specs) == 2
+    assert specs[0].model_kwargs["width"] == 2
+    assert specs[1].model_kwargs["width"] == 3
+    assert specs[0].dataloader_kwargs["batch_size"] == 4
+    assert specs[0].report_spec.parameters == {
+        "precision": "fp32",
+        "model.width": 2,
+        "data.batch_size": 4,
+    }
 
 
-def test_submodule_breakdown_none_without_children():
-    """A leaf module (no named children) yields no submodule table."""
-    prof = ModuleProfiler(nn.Identity(), loss_fn=None, device="cpu")
-    # Identity ignores the batch; use run_fn-free path via a wrapper is overkill —
-    # just assert the breakdown helper returns None for a childless module.
-    assert prof._submodule_breakdown(nn.Identity(), _factory(), 2, 1, False) is None
+def test_spec_directly_constructs_the_declared_classes():
+    spec = ProfileSpec("counter", _Counter, _Loader, model_args=(3,))
+
+    with spec.build() as (model, dataloader):
+        assert type(model) is _Counter
+        assert type(dataloader) is _Loader
+        assert model.weight.numel() == 3
+
+
+def test_spec_rejects_factory_functions():
+    with pytest.raises(TypeError, match="nn.Module class"):
+        ProfileSpec("invalid", lambda: _Counter(), _Loader)
+    with pytest.raises(TypeError, match="dataloader_class"):
+        ProfileSpec("invalid", _Counter, lambda: _Loader())
+
+
+def test_profiler_returns_an_immutable_pydantic_report():
+    config = ProfilerConfig(
+        device="cpu",
+        warmup=1,
+        steps=3,
+        transfer_batch=False,
+        memory="none",
+        activities=("cpu",),
+        hotspot_steps=2,
+        hotspot_limit=10,
+    )
+    report = Profiler().profile(
+        ProfileSpec("counter", _Counter, _Loader, parameters={"system": "test"}), config
+    )
+
+    assert report.model.error is None
+    assert report.end_to_end.error is None
+    assert len(report.model.latency.samples_ms) == 3
+    assert len(report.end_to_end.latency.samples_ms) == 3
+    assert report.model.throughput_steps_per_sec is not None
+    assert report.end_to_end.throughput_steps_per_sec is not None
+    assert report.hotspots
+    payload = json.loads(report.model_dump_json())
+    assert payload["config"]["device"] == "cpu"
+    assert payload["spec"]["parameters"]["system"] == "test"
+    assert "environment" not in payload
+    with pytest.raises(Exception):
+        report.errors = ("changed",)
+
+
+def test_profiler_does_not_change_the_global_rng_state():
+    config = ProfilerConfig(
+        device="cpu",
+        warmup=0,
+        steps=1,
+        transfer_batch=False,
+        memory="none",
+        activities=(),
+        hotspot_steps=0,
+        hotspot_limit=1,
+    )
+    before = torch.random.get_rng_state().clone()
+
+    Profiler().profile(ProfileSpec("counter", _Counter, _Loader), config)
+
+    assert torch.equal(torch.random.get_rng_state(), before)
+
+
+def test_one_shot_loader_is_reported_without_hiding_the_exception_type():
+    config = ProfilerConfig(
+        device="cpu",
+        warmup=0,
+        steps=1,
+        transfer_batch=False,
+        memory="none",
+        activities=(),
+        hotspot_steps=0,
+        hotspot_limit=1,
+    )
+
+    report = Profiler().profile(ProfileSpec("one-shot", _Counter, _OneShotLoader), config)
+
+    assert "TypeError" in (report.model.error or "")
+    assert "re-iterable" in (report.model.error or "")
+
+
+def test_model_device_must_match_explicit_config():
+    config = ProfilerConfig(
+        device="meta",
+        warmup=0,
+        steps=1,
+        transfer_batch=False,
+        memory="none",
+        activities=(),
+        hotspot_steps=0,
+        hotspot_limit=1,
+    )
+
+    report = Profiler().profile(ProfileSpec("wrong-device", _Counter, _Loader), config)
+
+    assert "expected meta" in (report.model.error or "")
+
+
+def test_failed_model_is_returned_as_one_error_without_stage_objects():
+    config = ProfilerConfig(
+        device="cpu",
+        warmup=0,
+        steps=1,
+        transfer_batch=False,
+        memory="none",
+        activities=(),
+        hotspot_steps=0,
+        hotspot_limit=1,
+    )
+
+    report = Profiler().profile(ProfileSpec("failure", _FailingModel, _Loader), config)
+
+    assert "kernel failed" in (report.model.error or "")
+    assert not hasattr(report, "model_stage")
+
+
+def test_grid_requires_sequence_values():
+    sweep = ProfileSweep("counter", _Counter, _Loader)
+    with pytest.raises(TypeError, match="sequence"):
+        sweep.grid(model={"width": 2})

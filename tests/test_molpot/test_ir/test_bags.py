@@ -42,14 +42,15 @@ class TestAngleBag:
 
 class TestProperTorsionBag:
     def test_construct_with_equal_term_tables(self):
-        # k / phase: [n_types, n_terms]; periodicity: [n_terms]; idivf/s: [n_types]
+        # Every table is [n_types, n_terms]; a shared [n_terms] multiplicity
+        # row is accepted and broadcast to each type.
         bag = ProperTorsionBag(
             k=torch.tensor([[1.0, 0.5]]),
             periodicity=torch.tensor([1, 2], dtype=torch.long),
             phase=torch.tensor([[0.0, 0.0]]),
-            idivf=torch.tensor([1.0]),
         )
-        assert bag.k.shape[-1] == bag.periodicity.shape[0]
+        assert bag.periodicity.shape == bag.k.shape
+        assert bag.periodicity.tolist() == [[1, 2]]
         assert bag.phase.shape == bag.k.shape
 
     def test_mismatch_term_counts_raise(self):
@@ -58,7 +59,6 @@ class TestProperTorsionBag:
                 k=torch.tensor([[1.0, 0.5]]),
                 periodicity=torch.tensor([1], dtype=torch.long),
                 phase=torch.tensor([[0.0, 0.0]]),
-                idivf=torch.tensor([1.0]),
             )
 
     def test_non_positive_periodicity_raises(self):
@@ -67,7 +67,6 @@ class TestProperTorsionBag:
                 k=torch.tensor([[1.0]]),
                 periodicity=torch.tensor([0], dtype=torch.long),
                 phase=torch.tensor([[0.0]]),
-                idivf=torch.tensor([1.0]),
             )
 
     def test_negative_periodicity_raises(self):
@@ -76,12 +75,11 @@ class TestProperTorsionBag:
                 k=torch.tensor([[1.0]]),
                 periodicity=torch.tensor([-1], dtype=torch.long),
                 phase=torch.tensor([[0.0]]),
-                idivf=torch.tensor([1.0]),
             )
 
     def test_fields_exclude_c0_and_cartesian_storage(self):
         names = {f.name for f in fields(ProperTorsionBag)}
-        assert names == {"k", "phase", "periodicity", "idivf"}
+        assert names == {"k", "phase", "periodicity"}
 
     def test_from_cartesian_maps_hard_coded_goldens(self):
         dtype = torch.float64
@@ -130,6 +128,21 @@ class TestProperTorsionBag:
         assert torch.allclose(a_back, a, atol=1e-12)
         assert torch.allclose(b_back, b, atol=1e-12)
 
+    def test_a_zero_row_keeps_the_gradient_finite(self):
+        """Padded torsion rows are exactly ``(0, 0)`` — the map's singular point."""
+        dtype = torch.float64
+        a = torch.tensor([[0.6, 0.0]], dtype=dtype, requires_grad=True)
+        b = torch.tensor([[0.8, 0.0]], dtype=dtype, requires_grad=True)
+        k, phase = ProperTorsionBag.polar_from_cartesian(a, b)
+        assert torch.allclose(k, torch.tensor([[1.0, 0.0]], dtype=dtype), atol=1e-12)
+        # The dead row's phase is multiplied by ``k = 0`` downstream, so only
+        # finiteness matters here — but it must not poison the whole backward.
+        (k.sum() + (k * phase).sum()).backward()
+        assert bool(torch.isfinite(a.grad).all())
+        assert bool(torch.isfinite(b.grad).all())
+        assert a.grad[0, 1] == 0.0
+        assert b.grad[0, 1] == 0.0
+
     def test_from_cartesian_rejects_shape_mismatch(self):
         with pytest.raises(ValueError):
             ProperTorsionBag.from_cartesian(
@@ -155,15 +168,6 @@ class TestProperTorsionBag:
         assert torch.allclose(bag.k, torch.zeros(1, 1, dtype=torch.float64), atol=1e-12)
         assert torch.allclose(bag.phase, torch.zeros(1, 1, dtype=torch.float64), atol=1e-12)
 
-    def test_from_cartesian_default_idivf_is_ones(self):
-        bag = ProperTorsionBag.from_cartesian(
-            a=torch.tensor([[2.0], [0.0]], dtype=torch.float64),
-            b=torch.tensor([[0.0], [1.0]], dtype=torch.float64),
-            periodicity=torch.tensor([1], dtype=torch.long),
-        )
-        assert bag.idivf.shape == (2,)
-        assert torch.equal(bag.idivf, torch.ones(2, dtype=bag.k.dtype))
-
 
 class TestImproperPeriodicBag:
     def test_construct_with_equal_term_tables(self):
@@ -171,7 +175,6 @@ class TestImproperPeriodicBag:
             k=torch.tensor([[1.0]]),
             periodicity=torch.tensor([2], dtype=torch.long),
             phase=torch.tensor([[3.141592653589793]]),
-            idivf=torch.tensor([1.0]),
         )
         assert bag.k.shape[-1] == 1
 
@@ -200,5 +203,5 @@ class TestLJBag:
 
 class TestChargeBag:
     def test_construct(self):
-        bag = ChargeBag(q=torch.tensor([0.1, -0.1, 0.0]))
-        assert bag.q.shape[0] == 3
+        bag = ChargeBag(charge=torch.tensor([0.1, -0.1, 0.0]))
+        assert bag.charge.shape[0] == 3

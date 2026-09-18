@@ -9,10 +9,10 @@ from tensordict import TensorDict
 from molpot.heads import EdgeEnergyHead
 
 
-def _stub_batch(*, n_atoms=3, n_edges=6, feat_dim=8):
+def _stub_batch(*, n_atoms=3, n_pairs=6, feat_dim=8):
     torch.manual_seed(0)
-    edge_index = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1], [0, 2], [2, 0]], dtype=torch.long)[
-        :n_edges
+    pair_index = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1], [0, 2], [2, 0]], dtype=torch.long)[
+        :n_pairs
     ]
     atoms = TensorDict(
         Z=torch.tensor([1, 6, 8][:n_atoms]),
@@ -20,15 +20,15 @@ def _stub_batch(*, n_atoms=3, n_edges=6, feat_dim=8):
         batch=torch.zeros(n_atoms, dtype=torch.long),
         batch_size=[n_atoms],
     )
-    edges = TensorDict(
-        edge_index=edge_index,
-        edge_diff=torch.randn(n_edges, 3),
-        edge_dist=torch.rand(n_edges) + 0.5,
-        batch_size=[n_edges],
+    pairs = TensorDict(
+        pair_index=pair_index,
+        pair_diff=torch.randn(n_pairs, 3),
+        pair_dist=torch.rand(n_pairs) + 0.5,
+        batch_size=[n_pairs],
     )
-    edges["edge_features"] = torch.randn(n_edges, feat_dim)
+    pairs["edge_features"] = torch.randn(n_pairs, feat_dim)
     graphs = TensorDict(num_atoms=torch.tensor([n_atoms]), batch_size=[1])
-    return TensorDict(atoms=atoms, edges=edges, graphs=graphs, batch_size=[])
+    return TensorDict(atoms=atoms, pairs=pairs, graphs=graphs, batch_size=[])
 
 
 class TestShape:
@@ -78,17 +78,17 @@ class TestLinearReadout:
 
         # Energy at (a) features f, (b) features 2f, (c) features f + g should
         # satisfy E(2f) = 2 E(f) and E(f+g) = E(f) + E(g) (within numerical noise).
-        f = b["edges", "edge_features"]
+        f = b["pairs", "edge_features"]
         g = torch.randn_like(f)
 
         b1 = b.clone()
-        b1["edges", "edge_features"] = f
+        b1["pairs", "edge_features"] = f
         b2 = b.clone()
-        b2["edges", "edge_features"] = 2.0 * f
+        b2["pairs", "edge_features"] = 2.0 * f
         b3 = b.clone()
-        b3["edges", "edge_features"] = f + g
+        b3["pairs", "edge_features"] = f + g
         b4 = b.clone()
-        b4["edges", "edge_features"] = g
+        b4["pairs", "edge_features"] = g
 
         with torch.no_grad():
             e1 = head(b1)["energy"]
@@ -109,15 +109,15 @@ class TestEmptyGraph:
             batch=torch.zeros(1, dtype=torch.long),
             batch_size=[1],
         )
-        edges = TensorDict(
-            edge_index=torch.empty(0, 2, dtype=torch.long),
-            edge_diff=torch.empty(0, 3),
-            edge_dist=torch.empty(0),
+        pairs = TensorDict(
+            pair_index=torch.empty(0, 2, dtype=torch.long),
+            pair_diff=torch.empty(0, 3),
+            pair_dist=torch.empty(0),
             batch_size=[0],
         )
-        edges["edge_features"] = torch.empty(0, 8)
+        pairs["edge_features"] = torch.empty(0, 8)
         graphs = TensorDict(num_atoms=torch.tensor([1]), batch_size=[1])
-        b = TensorDict(atoms=atoms, edges=edges, graphs=graphs, batch_size=[])
+        b = TensorDict(atoms=atoms, pairs=pairs, graphs=graphs, batch_size=[])
 
         head = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=1.0)
         with torch.no_grad():

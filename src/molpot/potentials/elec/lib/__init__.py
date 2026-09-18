@@ -11,7 +11,7 @@ from molpot.potentials.elec.lib.kvectors import (
     get_ns_mesh,
 )
 from molpot.potentials.elec.lib.math import exp1, gamma, gammaincc_over_powerlaw
-from molpot.potentials.elec.lib.mesh_interpolator import MeshInterpolator
+from molpot.potentials.elec.lib.mesh_interpolator import MeshInterpolator, MeshStencil
 from molpot.potentials.elec.lib.splines import (
     CubicSpline,
     CubicSplineReciprocal,
@@ -24,6 +24,7 @@ __all__ = [
     "KSpaceFilter",
     "P3MKSpaceFilter",
     "MeshInterpolator",
+    "MeshStencil",
     "CubicSpline",
     "CubicSplineReciprocal",
     "compute_second_derivatives",

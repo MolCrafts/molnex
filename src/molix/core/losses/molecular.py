@@ -25,6 +25,7 @@ static shape/key access (keeps ``torch.compile`` graphs stable).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
@@ -172,6 +173,137 @@ def parameter_bag_mse(
     raise ValueError(f"Unknown reduction {reduction!r}")
 
 
+def energy_loss(
+    target_key: str = "energy",
+    *,
+    pred_key: str = "energy",
+    elementwise: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+    reduction: str = "mean",
+    per_atom: bool = False,
+    num_atoms_key: str = "num_atoms",
+    weight_key: str | None = "mask",
+) -> Callable[[Mapping[str, Any], Any], torch.Tensor]:
+    """Graph-level energy loss under a caller-chosen elementwise measure.
+
+    Three things are varied independently here, and this is the one that says
+    *how a residual is measured*. The other two are the per-atom weight (see
+    :func:`force_loss`) and how several terms combine
+    (:class:`~molix.core.losses.WeightedLoss`).
+
+    ``elementwise`` is any callable that maps ``(pred, target)`` to a tensor of
+    **per-element** residuals — it must not reduce, because the reduction is
+    this function's (a weight cannot be applied after a mean). Torch's own loss
+    modules satisfy it at ``reduction="none"``, which is the point: squared
+    error is ``nn.MSELoss(reduction="none")`` and a Huber is
+    ``nn.HuberLoss(delta=…, reduction="none")``. molnex adds no loss class of
+    its own.
+
+    **When a Huber earns its keep.** Its gradient is bounded past ``delta``,
+    so a residual 100× the typical one contributes 1×, not 10⁴×. That matters
+    wherever the target has a tail the model's functional form cannot follow —
+    a Class-I force field against DFT forces whose mean is 20 kcal mol⁻¹ Å⁻¹
+    and whose max is 250, say, where a squared error spends the batch chasing
+    what cannot be fitted.
+
+    Args:
+        target_key: Graph-level target at ``batch["graphs", target_key]``.
+        pred_key: Key the model's forward writes its energy under.
+        elementwise: Per-element residual measure; ``None`` is
+            ``nn.MSELoss(reduction="none")``.
+        reduction: ``'mean'`` / ``'sum'`` / ``'none'``, applied here.
+        per_atom: Divide the residual by each graph's atom count first, so the
+            loss is per atom and large molecules do not dominate a
+            variable-size batch.
+        num_atoms_key: Per-graph atom count, read only when ``per_atom``.
+        weight_key: Per-graph weight column on ``graphs``, or ``None`` for no
+            weighting — the same road :func:`force_loss` takes on ``atoms``.
+            A :class:`~molix.data.MoleculePadder` with ``max_graphs`` writes
+            ``graphs.mask`` (False on its dead slots), so under ``'mean'``
+            the divisor is the live graph count and a padded batch scores
+            exactly as the unpadded one. Absent from the batch means
+            unweighted.
+
+    Returns:
+        ``loss_fn(preds, batch) -> Tensor``.
+    """
+    measure = nn.MSELoss(reduction="none") if elementwise is None else elementwise
+
+    def _fn(preds: Mapping[str, Any], batch: Any) -> torch.Tensor:
+        e_pred = preds[pred_key]
+        graphs = batch["graphs"]
+        e_true = graphs[target_key].view_as(e_pred)
+        if per_atom:
+            scale = graphs[num_atoms_key].view_as(e_pred).to(e_pred.dtype).clamp(min=1)
+            e_pred, e_true = e_pred / scale, e_true / scale
+        weight = None
+        if weight_key is not None and weight_key in graphs.keys():
+            weight = graphs[weight_key].view_as(e_pred).to(e_pred.dtype)
+        return _reduce(measure(e_pred, e_true), weight, reduction)
+
+    return _fn
+
+
+def force_loss(
+    target_key: str = "forces",
+    *,
+    pred_key: str = "forces",
+    elementwise: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+    reduction: str = "mean",
+    weight_key: str | None = "mask",
+) -> Callable[[Mapping[str, Any], Any], torch.Tensor]:
+    """Atom-level force loss, weighted by a per-atom column.
+
+    The weight is the second of the three axes, and it has exactly one road:
+    a per-atom column on ``atoms``, multiplied into the residual before the
+    reduction divides by its sum. Padding ghosts and reference outliers are the
+    same thing to this function — a row that should not count — so neither
+    needs its own code path, and neither is ever a boolean gather (that is a
+    data-dependent shape, which ``torch.compile`` cannot trace).
+
+    Args:
+        target_key: Atom-level target at ``batch["atoms", target_key]``.
+        pred_key: Key the model's forward writes its forces under.
+        elementwise: Per-element residual measure; ``None`` is
+            ``nn.MSELoss(reduction="none")``. See :func:`energy_loss`.
+        reduction: ``'mean'`` / ``'sum'`` / ``'none'``. Under ``'mean'`` the
+            divisor is the **weighted** element count, so the value does not
+            move with how many rows a batch happens to mask out.
+        weight_key: Per-atom weight column on ``atoms``, or ``None`` for no
+            weighting. Absent from the batch means unweighted.
+
+    Returns:
+        ``loss_fn(preds, batch) -> Tensor``.
+    """
+    measure = nn.MSELoss(reduction="none") if elementwise is None else elementwise
+
+    def _fn(preds: Mapping[str, Any], batch: Any) -> torch.Tensor:
+        f_pred = preds[pred_key]
+        atoms = batch["atoms"]
+        f_true = atoms[target_key].view_as(f_pred)
+        weight = None
+        if weight_key is not None and weight_key in atoms.keys():
+            weight = atoms[weight_key].to(f_pred.dtype).unsqueeze(-1)
+        return _reduce(measure(f_pred, f_true), weight, reduction)
+
+    return _fn
+
+
+def _reduce(per_element: torch.Tensor, weight: torch.Tensor | None, reduction: str) -> torch.Tensor:
+    """Reduce per-element residuals, dividing a mean by the weight it kept."""
+    if weight is not None:
+        per_element = per_element * weight
+    if reduction == "none":
+        return per_element
+    total = per_element.sum()
+    if reduction == "sum":
+        return total
+    if weight is None:
+        return per_element.mean()
+    # Elements per weighted row: 3 for (N, 3) forces, 1 for (B,) energies.
+    kept = weight.sum() * math.prod(per_element.shape[1:])
+    return total / kept.clamp(min=1.0)
+
+
 def energy_mse(
     target_key: str = "energy",
     *,
@@ -179,6 +311,7 @@ def energy_mse(
     reduction: str = "mean",
     per_atom: bool = False,
     num_atoms_key: str = "num_atoms",
+    weight_key: str | None = "mask",
 ) -> Callable[[Mapping[str, Any], Any], torch.Tensor]:
     """MSE between predicted energy and a graph-level target.
 
@@ -197,23 +330,21 @@ def energy_mse(
             (e.g. fixed-composition rMD17).
         num_atoms_key: Graph-level key holding the per-graph atom count,
             used only when ``per_atom`` is set.
+        weight_key: Per-graph weight column on ``graphs`` (``graphs.mask``
+            on a padded batch), or ``None``; see :func:`energy_loss`.
 
     Returns:
         ``loss_fn(preds, batch) -> Tensor`` suitable for the Trainer's
         ``step.loss_fn`` slot.
     """
-    mse = nn.MSELoss(reduction=reduction)
-
-    def _fn(preds: Mapping[str, Any], batch: Any) -> torch.Tensor:
-        e_pred = preds[pred_key]
-        e_true = batch["graphs", target_key].view_as(e_pred)
-        if per_atom:
-            n_atoms = batch["graphs", num_atoms_key].view_as(e_pred).to(e_pred.dtype)
-            scale = n_atoms.clamp(min=1)
-            return mse(e_pred / scale, e_true / scale)
-        return mse(e_pred, e_true)
-
-    return _fn
+    return energy_loss(
+        target_key,
+        pred_key=pred_key,
+        reduction=reduction,
+        per_atom=per_atom,
+        num_atoms_key=num_atoms_key,
+        weight_key=weight_key,
+    )
 
 
 def energy_force_mse(
@@ -234,6 +365,14 @@ def energy_force_mse(
     ``batch["atoms", force_target_key]`` (atom-level vector, shape
     ``(N_total, 3)``).
 
+    On a padded batch (:class:`molix.data.MoleculePadder`, which writes a
+    boolean ``atoms.mask``) the force term runs over the **real** atoms only:
+    the squared residual is multiplied by the mask and, under ``"mean"``,
+    divided by ``3 · mask.sum()`` — the real atom count — rather than by
+    ``3 · max_atoms``, so the value does not depend on how much padding a batch
+    happens to carry. Ghost rows are a multiply by zero, never a slice, so the
+    loss keeps its static shape under ``torch.compile``.
+
     Args:
         energy_target_key: Graph-level energy target key in the batch.
         force_target_key: Atom-level force target key in the batch.
@@ -251,19 +390,17 @@ def energy_force_mse(
     Returns:
         ``loss_fn(preds, batch) -> Tensor``.
     """
-    energy_fn = energy_mse(
+    energy_fn = energy_loss(
         energy_target_key,
         pred_key=energy_pred_key,
         reduction=reduction,
         per_atom=per_atom,
         num_atoms_key=num_atoms_key,
     )
-    mse_f = nn.MSELoss(reduction=reduction)
+    force_fn = force_loss(force_target_key, pred_key=force_pred_key, reduction=reduction)
 
     def _fn(preds: Mapping[str, Any], batch: Any) -> torch.Tensor:
-        f_pred = preds[force_pred_key]
-        f_true = batch["atoms", force_target_key].view_as(f_pred)
-        return energy_fn(preds, batch) + lambda_F * mse_f(f_pred, f_true)
+        return energy_fn(preds, batch) + lambda_F * force_fn(preds, batch)
 
     return _fn
 
@@ -609,8 +746,8 @@ class ChargeMSELoss(nn.Module):
 
     def __init__(
         self,
-        pred_key: str = "q",
-        target_key: str = "q",
+        pred_key: str = "charge",
+        target_key: str = "charge",
         reduction: str = "mean",
     ) -> None:
         super().__init__()

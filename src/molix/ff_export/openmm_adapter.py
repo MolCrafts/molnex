@@ -194,20 +194,17 @@ class OpenMMAdapter(BackendAdapter):
         assert ir.propers is not None
         bag = ir.propers
         n_types, n_terms = bag.k.shape
-        periodicity = self.as_ints(bag.periodicity)
+        periodicity = self.as_int_rows(bag.periodicity)
         row = self.conventions.row("proper_periodic")
         params: list[dict[str, Any]] = []
         for t in range(n_types):
-            idivf = float(bag.idivf[t].item())
-            if idivf == 0.0:
-                raise ValueError(f"proper torsion idivf[{t}] must be non-zero")
             for m in range(n_terms):
-                k_ir = float(bag.k[t, m].item()) / idivf
+                k_ir = float(bag.k[t, m].item())
                 params.append(
                     {
                         "type_index": t,
                         "term_index": m,
-                        "periodicity": periodicity[m],
+                        "periodicity": periodicity[t][m],
                         "phase": float(bag.phase[t, m].item()),
                         "k": row.scale("k", k_ir),
                     }
@@ -223,20 +220,17 @@ class OpenMMAdapter(BackendAdapter):
         assert ir.impropers_periodic is not None
         bag = ir.impropers_periodic
         n_types, n_terms = bag.k.shape
-        periodicity = self.as_ints(bag.periodicity)
+        periodicity = self.as_int_rows(bag.periodicity)
         row = self.conventions.row("improper_periodic")
         params: list[dict[str, Any]] = []
         for t in range(n_types):
-            idivf = float(bag.idivf[t].item())
-            if idivf == 0.0:
-                raise ValueError(f"improper periodic idivf[{t}] must be non-zero")
             for m in range(n_terms):
-                k_ir = float(bag.k[t, m].item()) / idivf
+                k_ir = float(bag.k[t, m].item())
                 params.append(
                     {
                         "type_index": t,
                         "term_index": m,
-                        "periodicity": periodicity[m],
+                        "periodicity": periodicity[t][m],
                         "phase": float(bag.phase[t, m].item()),
                         "k": row.scale("k", k_ir),
                     }
@@ -345,7 +339,7 @@ class OpenMMAdapter(BackendAdapter):
                     }
                 )
         if ir.charges is not None:
-            charges = self.as_floats(ir.charges.q)
+            charges = self.as_floats(ir.charges.charge)
 
         method = ir.nonbonded_method
         if method.is_lattice_sum:

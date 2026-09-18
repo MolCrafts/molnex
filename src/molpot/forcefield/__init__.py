@@ -9,7 +9,7 @@
         OPLSAAForceField(),
         bond_head=...,
         angle_head=...,
-        proper_head=...,  # form="opls" → k1..k4
+        proper_head=...,  # general Fourier (a, b, periodicity)
         improper_head=...,
         atom_head=...,
         charge_model=...,
@@ -21,18 +21,23 @@
 :class:`~molpot.forcefield.predictions.ForceFieldPredictions` is the one hop
 from that model path to the per-task prediction mapping a loss consumes
 (``energy`` in kcal/mol, ``forces`` in kcal mol⁻¹ Å⁻¹, ``hessian`` in
-kcal mol⁻¹ Å⁻², ``q`` = per-atom partial charges in ``e``), with the keys
+kcal mol⁻¹ Å⁻², ``charge`` = per-atom partial charges in ``e``), with the keys
 declared at construction.
 
 Geometry helpers of the same shape live beside the container:
 :class:`~molpot.forcefield.wilson.WilsonBMatrix` builds the Wilson
 ``B = ∂q_int/∂x`` matrix (rows = internal coordinates ``q_int`` — bond stretches in
 Å and bend angles in rad — columns = the ``3N`` Cartesian components in Å) that a
-projected-Hessian loss consumes. Wilson's ``q_int`` is written ``q`` in the
-vibrational-spectroscopy literature; it is *not* the partial charge ``q`` above.
+projected-Hessian loss consumes. Wilson's ``q_int`` is written ``charge`` in the
+vibrational-spectroscopy literature; it is *not* the partial charge ``charge`` above.
 """
 
-from molpot.forcefield.container import ForceField, OPLSAAForceField, TypeAssignment
+from molpot.forcefield.container import (
+    ClassIForceField,
+    ForceField,
+    OPLSAAForceField,
+    TypeAssignment,
+)
 from molpot.forcefield.exclusions import ExclusionTable
 from molpot.forcefield.parameterizer import Parameterizer
 from molpot.forcefield.potentials import Potentials
@@ -50,6 +55,7 @@ __all__ = [
     "ForceField",
     "ForceFieldPredictions",
     "ForceFieldSchemaView",
+    "ClassIForceField",
     "OPLSAAForceField",
     "ParamSpec",
     "Parameterizer",

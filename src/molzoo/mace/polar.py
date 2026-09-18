@@ -97,7 +97,7 @@ class MacePolar(MacePotential):
         kspace_cutoff: float | None = None,
         electrostatic_self_interaction: bool = True,
         field_self_interaction: bool = False,
-        compute_forces: bool = True,
+        wrt: Sequence[str | Sequence[str]] = (),
         use_fallback: bool = False,
         energy_dtype: torch.dtype | None = torch.float64,
     ) -> None:
@@ -132,7 +132,7 @@ class MacePolar(MacePotential):
         )
         super().__init__(
             spec,
-            compute_forces=compute_forces,
+            wrt=wrt,
             use_fallback=use_fallback,
             energy_dtype=energy_dtype,
         )
@@ -211,8 +211,8 @@ class MacePolar(MacePotential):
         each of the two GTO blocks, the field descriptor and the Hartree
         energy. Both grids must be sized eagerly, because sizing reads the
         three lattice-vector norms back to the host, which a traced call cannot
-        do. This is therefore the call that has to precede
-        :meth:`~molzoo.mace.potential.MacePotential.compile_core`.
+        do. This is therefore the call that has to precede compiling the
+        potential (``Compiler(...)(model)``), together with one eager forward.
 
         Idempotent and O(1): the first call fixes each grid's integer box, and
         every later call only re-checks that the current lattice still fits
@@ -248,6 +248,7 @@ class MacePolar(MacePotential):
         total_charge: torch.Tensor | None = None,
         total_spin: torch.Tensor | None = None,
         cell: torch.Tensor | None = None,
+        atom_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Per-graph Polar energy ``(B,)`` in eV.
 
@@ -296,6 +297,15 @@ class MacePolar(MacePotential):
             cell: Optional lattice vectors ``(3, 3)`` or ``(1, 3, 3)`` in Å,
                 one per row. When given, the batch must hold exactly one system
                 (``B = 1``) — the reciprocal sum knows one cell.
+            atom_mask: Optional ``(N,)`` boolean real-atom mask of a padded
+                batch. Beyond the per-atom energies (``e0``, the readouts, the
+                local electron energy — masked in
+                :meth:`~molzoo.mace.potential.MacePotential._sum_energy`), a
+                ghost's *density* and Fukui source are multiplied to zero
+                before every charge equilibration, so the field descriptor and
+                the Hartree sum never see a ghost charge; a zero charge at the
+                ghost's position contributes nothing to either. Multiplies
+                only, never a slice.
 
         Returns:
             Total energy per graph ``(B,)`` in eV. ``energy_dtype`` selects
@@ -320,7 +330,7 @@ class MacePolar(MacePotential):
         # energy is invariant; GTO dipoles are not.
         edge_attrs = self.angular_features(vectors[:, [1, 2, 0]])
         node_feats = self.initial_node_features(node_attrs)
-        e0 = self._sum_energy(self.atomic_energies(Z), batch, num_graphs)
+        e0 = self._sum_energy(self.atomic_energies(Z), batch, num_graphs, atom_mask)
 
         per_layer = self.layer_features(
             node_feats=node_feats,
@@ -335,20 +345,27 @@ class MacePolar(MacePotential):
             raise RuntimeError("MacePolar requires per-layer readouts")
         for readout, layer in zip(self.readouts, per_layer, strict=True):
             node_es = node_es + readout(layer).squeeze(-1)
-        inter_e = self._sum_energy(self.scale_shift(node_es), batch, num_graphs)
+        inter_e = self._sum_energy(self.scale_shift(node_es), batch, num_graphs, atom_mask)
 
         density = per_layer[0].new_zeros(per_layer[0].shape[0], 2, self._y_dim)
         for src, layer in zip(self.lr_source_maps, per_layer, strict=True):
             density = density + src(layer)
         mixed = self.layer_feature_mixer(torch.stack(per_layer, dim=0))
 
+        # A ghost atom carries no charge: its density and its Fukui source are
+        # zeroed before every equilibration (the ``None`` test folds away).
+        charge_mask = None if atom_mask is None else atom_mask.to(density.dtype).unsqueeze(-1)
+        if charge_mask is not None:
+            density = density * charge_mask.unsqueeze(-1)
+        fukui_source = self.fukui_source_map(per_layer[-1])
+        if charge_mask is not None:
+            fukui_source = fukui_source * charge_mask
+
         if total_charge is None:
             total_charge = positions.new_zeros(num_graphs)
         if total_spin is None:
             total_spin = positions.new_ones(num_graphs)
-        density = self.fukui(
-            density, self.fukui_source_map(per_layer[-1]), batch, total_charge, total_spin
-        )
+        density = self.fukui(density, fukui_source, batch, total_charge, total_spin)
         field_independent = density.clone()
         norms = self.field_feature_norms.to(dtype=density.dtype)
         potential_features = density.new_zeros(density.shape[0], 2 * norms.shape[0])
@@ -366,6 +383,8 @@ class MacePolar(MacePotential):
                 potential_features,
                 density.reshape(density.shape[0], -1),
             )
+            if charge_mask is not None:
+                out = out * charge_mask
             density = density + out[:, :-2].reshape(density.shape)
             density = self.fukui(density, out[:, -2:], batch, total_charge, total_spin)
 
@@ -375,7 +394,7 @@ class MacePolar(MacePotential):
             field_independent.reshape(density.shape[0], -1),
             density.reshape(density.shape[0], -1),
         )
-        le_total = self._sum_energy(le, batch, num_graphs)
+        le_total = self._sum_energy(le, batch, num_graphs, atom_mask)
         if not self.add_local_electron_energy:
             le_total = torch.zeros_like(le_total)
         hartree = self.coulomb_energy(

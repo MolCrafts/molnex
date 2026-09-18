@@ -19,6 +19,9 @@ class ChargeEquilibrationProblem:
         total_charge: Target total charge per molecule ``(B,)``.
         pos: Optional positions ``(N, 3)`` when the Coulomb kernel needs geometry.
         Z: Optional atomic numbers ``(N,)``.
+        atom_mask: Optional real-atom mask ``(N,)`` from
+            :class:`~molix.data.MoleculePadder`. Ghosts stay in the
+            static ``N`` but must not enter the per-graph dense solve.
     """
 
     atom_batch: torch.Tensor
@@ -26,6 +29,7 @@ class ChargeEquilibrationProblem:
     total_charge: torch.Tensor
     pos: torch.Tensor | None = None
     Z: torch.Tensor | None = None
+    atom_mask: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         if self.atom_batch.ndim != 1:
@@ -43,7 +47,15 @@ class ChargeEquilibrationProblem:
         *,
         total_charge: float | torch.Tensor = 0.0,
     ) -> ChargeEquilibrationProblem:
-        """Build from a TensorDict / Mapping with ``atoms.batch`` and ``atoms.pos``."""
+        """Build from a TensorDict / Mapping with ``atoms.batch`` and ``atoms.pos``.
+
+        ``num_graphs`` is taken from a static shape — the ``(B,)``
+        ``total_charge`` tensor when one is given, else the ``graphs``
+        namespace's batch size — so a compiled charge path never reads
+        ``atom_batch.max()`` back to the host. A ``total_charge`` shorter than
+        the batch fails at the scatter over ``atom_batch``; one longer declares
+        empty trailing molecules, which the solve pins to zero charge.
+        """
         from collections.abc import Mapping
 
         from tensordict import TensorDict
@@ -57,7 +69,18 @@ class ChargeEquilibrationProblem:
             atom_batch = torch.zeros(n, dtype=torch.long, device=atoms["pos"].device)
         else:
             atom_batch = atoms["batch"].long()
-        num_graphs = int(atom_batch.max().item()) + 1 if atom_batch.numel() else 0
+        # ``B`` from a static shape wherever the batch states one — the
+        # ``(B,)`` total-charge column or the ``graphs`` namespace — so a
+        # compiled charge path never reads ``atom_batch.max()`` back to the
+        # host. The ``.item()`` survives only for a batch that states neither.
+        if "batch" not in atoms:
+            num_graphs = 1
+        elif isinstance(total_charge, torch.Tensor) and total_charge.ndim == 1:
+            num_graphs = total_charge.shape[0]
+        elif "graphs" in batch and getattr(batch["graphs"], "batch_size", None):
+            num_graphs = batch["graphs"].batch_size[0]
+        else:
+            num_graphs = int(atom_batch.max().item()) + 1 if atom_batch.numel() else 0
         device = atom_batch.device
         dtype = atoms["pos"].dtype if "pos" in atoms else torch.float32
         if isinstance(total_charge, (int, float)):
@@ -68,10 +91,12 @@ class ChargeEquilibrationProblem:
                 raise ValueError("total_charge tensor must match num_graphs")
         pos = atoms["pos"] if "pos" in atoms else None
         Z = atoms["Z"] if "Z" in atoms else None
+        atom_mask = atoms["mask"].to(dtype=torch.bool) if "mask" in atoms.keys() else None
         return cls(
             atom_batch=atom_batch,
             num_graphs=num_graphs,
             total_charge=qtot,
             pos=pos,
             Z=Z,
+            atom_mask=atom_mask,
         )

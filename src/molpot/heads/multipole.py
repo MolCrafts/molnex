@@ -1,7 +1,7 @@
 """Direct permanent atomic multipole readout (no electrostatic energy).
 
 Reads pooled atom features (from an Allegro-style edge encoder), predicts
-selected atomic moments ``q`` (l=0), ``μ`` (l=1) and ``Θ`` (l=2), and applies
+selected atomic moments ``charge`` (l=0), ``μ`` (l=1) and ``Θ`` (l=2), and applies
 an optional total-charge projection. The whole permanent-multipole *readout*
 surface lives in a single :class:`PermMultipoleHead` — the l=1 / l=2 paths
 are inlined so the head is self-contained and the public surface is one
@@ -340,13 +340,13 @@ class PermMultipoleHead(nn.Module):
     def forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
         """Read permanent atomic multipoles ``(q, μ, Θ)`` from the batch.
 
-        Reads ``edges.edge_features`` / ``edges.edge_index`` / ``atoms.batch``
+        Reads ``edges.edge_features`` / ``edges.pair_index`` / ``atoms.batch``
         from the collated batch, runs the enabled charge / dipole / quadrupole
         readouts, and optionally projects the per-graph total charge.
 
         Args:
             batch: Post-collate :class:`~tensordict.TensorDict` with the
-                ``atoms`` / ``edges`` / ``graphs`` namespaces.
+                ``atoms`` / ``pairs`` / ``graphs`` namespaces.
 
         Returns:
             Dict keyed by the configured output names (e.g.
@@ -354,8 +354,8 @@ class PermMultipoleHead(nn.Module):
             ``out_quadrupole_key``) plus ``molecular_dipole`` and the
             pre/post total-charge sums when charge projection is active.
         """
-        edge_features = batch["edges", "edge_features"]  # (E, F)
-        edge_index = batch["edges", "edge_index"]  # (E, 2)
+        edge_features = batch["pairs", "edge_features"]  # (E, F)
+        pair_index = batch["pairs", "pair_index"]  # (E, 2)
         atom_batch = batch["atoms", "batch"]  # (N,)
         n_nodes: int = int(batch["atoms", "Z"].shape[0])
         n_graphs: int = int(batch["graphs"].batch_size[0])
@@ -364,7 +364,7 @@ class PermMultipoleHead(nn.Module):
         #    equivariant moment readouts do their own source-side scatter
         #    inside _equivariant_moment_readout).
         atom_feats = (
-            self._scatter_mean_to_atoms(edge_features, edge_index, n_nodes) if self.charge else None
+            self._scatter_mean_to_atoms(edge_features, pair_index, n_nodes) if self.charge else None
         )  # (N, F)
 
         out: dict[str, torch.Tensor] = {}
@@ -386,8 +386,8 @@ class PermMultipoleHead(nn.Module):
 
         mu: torch.Tensor | None = None
         if self.dipole or self.quadrupole:
-            tensor_feats = batch["edges", "edge_tensor_features"]  # (E, irreps_dim)
-            src = edge_index[:, 0]
+            tensor_feats = batch["pairs", "edge_tensor_features"]  # (E, irreps_dim)
+            src = pair_index[:, 0]
             if self.dipole:
                 mu = self._equivariant_moment_readout(
                     tensor_feats=tensor_feats,
@@ -498,10 +498,10 @@ class PermMultipoleHead(nn.Module):
     def _scatter_mean_to_atoms(
         self,
         edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
         n_nodes: int,
     ) -> torch.Tensor:
-        src = edge_index[:, 0]
+        src = pair_index[:, 0]
         atom_feats = torch.zeros(
             n_nodes,
             edge_feats.shape[-1],

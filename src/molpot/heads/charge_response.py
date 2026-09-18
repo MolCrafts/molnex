@@ -133,8 +133,8 @@ class ChargeResponseHead(nn.Module):
         Z: torch.Tensor,
         atom_batch: torch.Tensor,
         num_graphs: int,
-        edge_index: torch.Tensor,
-        edge_diff: torch.Tensor,
+        pair_index: torch.Tensor,
+        pair_diff: torch.Tensor,
         node_scalars: torch.Tensor,
         edge_scalars: torch.Tensor,
         edge_vectors: torch.Tensor | None = None,
@@ -146,8 +146,8 @@ class ChargeResponseHead(nn.Module):
             Z: Atomic numbers ``(N,)``.
             atom_batch: Graph membership per atom ``(N,)``.
             num_graphs: Number of graphs in the batch.
-            edge_index: Source/target atom pairs ``(E, 2)``.
-            edge_diff: Edge displacement vectors ``(E, 3)``.
+            pair_index: Source/target atom pairs ``(E, 2)``.
+            pair_diff: Edge displacement vectors ``(E, 3)``.
             node_scalars: Per-atom scalar features ``(N, F_n)``.
             edge_scalars: Per-edge scalar features ``(E, F_e)``.
             edge_vectors: Optional per-edge vector features ``(E, 3)``.
@@ -171,15 +171,15 @@ class ChargeResponseHead(nn.Module):
         extra: dict[str, torch.Tensor] = {}
 
         if self.variant == "local":
-            chi = self._make_local_chi(edge_index, edge_response, atom_batch, rel, counts, nmax)
-            alpha = self._local_alpha(edge_index, edge_diff, edge_response, atom_batch, num_graphs)
+            chi = self._make_local_chi(pair_index, edge_response, atom_batch, rel, counts, nmax)
+            alpha = self._local_alpha(pair_index, pair_diff, edge_response, atom_batch, num_graphs)
         elif self.variant == "localchi":
-            chi = self._make_local_chi(edge_index, edge_response, atom_batch, rel, counts, nmax)
+            chi = self._make_local_chi(pair_index, edge_response, atom_batch, rel, counts, nmax)
             alpha = self._chi_to_alpha(pos, atom_batch, num_graphs, chi)
         elif self.variant == "etainv":
             chi, eta_inv = self._make_etainv(
                 atom_diag,
-                edge_index,
+                pair_index,
                 edge_response,
                 atom_batch,
                 rel,
@@ -193,7 +193,7 @@ class ChargeResponseHead(nn.Module):
             alpha = self._chi_to_alpha(pos, atom_batch, num_graphs, chi)
             extra["eta"] = eta
         else:  # acks2
-            chi_s = self._make_local_chi(edge_index, edge_response, atom_batch, rel, counts, nmax)
+            chi_s = self._make_local_chi(pair_index, edge_response, atom_batch, rel, counts, nmax)
             eta = self._make_eta(atom_diag, sigma, pos, atom_batch, num_graphs, counts, nmax)
             eye = torch.eye(nmax, dtype=eta.dtype, device=eta.device).expand_as(eta)
             system = eye - eta @ chi_s
@@ -229,7 +229,7 @@ class ChargeResponseHead(nn.Module):
         return torch.where(matches.any(dim=1), sigma, fallback.expand_as(sigma))
 
     @staticmethod
-    def _make_local_chi(edge_index, edge_response, atom_batch, rel, counts, nmax):
+    def _make_local_chi(pair_index, edge_response, atom_batch, rel, counts, nmax):
         num_graphs = counts.shape[0]
         chi = torch.zeros(
             num_graphs,
@@ -238,9 +238,9 @@ class ChargeResponseHead(nn.Module):
             dtype=edge_response.dtype,
             device=edge_response.device,
         )
-        if edge_index.numel() == 0:
+        if pair_index.numel() == 0:
             return chi
-        src, dst = edge_index[:, 0], edge_index[:, 1]
+        src, dst = pair_index[:, 0], pair_index[:, 1]
         b = atom_batch[src]
         ri, rj = rel[src], rel[dst]
         y = edge_response.abs()
@@ -251,15 +251,15 @@ class ChargeResponseHead(nn.Module):
         chi[:, idx, idx] = diag
         return chi
 
-    def _make_etainv(self, atom_diag, edge_index, edge_response, atom_batch, rel, counts, nmax):
+    def _make_etainv(self, atom_diag, pair_index, edge_response, atom_batch, rel, counts, nmax):
         num = counts.shape[0]
         m = torch.zeros(num, nmax, nmax, dtype=atom_diag.dtype, device=atom_diag.device)
         idx = torch.arange(nmax, device=atom_diag.device)
         diag_dense = torch.zeros(num, nmax, dtype=atom_diag.dtype, device=atom_diag.device)
         diag_dense[atom_batch, rel] = atom_diag
         m[:, idx, idx] = diag_dense
-        if edge_index.numel() > 0:
-            src, dst = edge_index[:, 0], edge_index[:, 1]
+        if pair_index.numel() > 0:
+            src, dst = pair_index[:, 0], pair_index[:, 1]
             b = atom_batch[src]
             m.index_put_((b, rel[src], rel[dst]), edge_response, accumulate=True)
         eta_inv = m.transpose(-1, -2) @ m
@@ -325,14 +325,14 @@ class ChargeResponseHead(nn.Module):
         dense_pos = dense_pos * ANG2BOHR
         return -torch.einsum("bix,bij,bjy->bxy", dense_pos, chi, dense_pos)
 
-    def _local_alpha(self, edge_index, edge_diff, edge_response, atom_batch, num_graphs):
-        pos_dtype = edge_diff.dtype
-        if edge_index.numel() == 0:
-            return torch.zeros(num_graphs, 3, 3, dtype=pos_dtype, device=edge_diff.device)
-        src = edge_index[:, 0]
-        edge_vec = edge_diff * ANG2BOHR
+    def _local_alpha(self, pair_index, pair_diff, edge_response, atom_batch, num_graphs):
+        pos_dtype = pair_diff.dtype
+        if pair_index.numel() == 0:
+            return torch.zeros(num_graphs, 3, 3, dtype=pos_dtype, device=pair_diff.device)
+        src = pair_index[:, 0]
+        edge_vec = pair_diff * ANG2BOHR
         weighted = edge_response.unsqueeze(-1).unsqueeze(-1).abs() * (
             edge_vec.unsqueeze(-1) * edge_vec.unsqueeze(-2)
         )
-        edge_batch = atom_batch[src]
-        return scatter_sum(weighted, edge_batch, dim_size=num_graphs)
+        pair_batch = atom_batch[src]
+        return scatter_sum(weighted, pair_batch, dim_size=num_graphs)

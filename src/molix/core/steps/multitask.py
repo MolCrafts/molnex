@@ -237,11 +237,20 @@ class MultiTaskTrainStep(DefaultTrainStep):
     A ``WeightedLoss`` evaluates *every* term, so it may only appear **inside**
     one :attr:`TaskSpec.loss`; cross-task selection is this router's job.
 
+    The routed objective is **not** a traceable region: :meth:`TaskRouter.route`
+    reads the task label with ``torch.unique(labels).tolist()`` — a host sync
+    that dynamo cannot capture — so ``Trainer.compile`` refuses ``step=True``
+    for this step and the model is compiled alone (``compile(step=False)``).
+
     Args:
         router: The :class:`TaskRouter` holding the declared task mixture.
     """
 
     namespace = "train"
+    untraceable = (
+        "TaskRouter.route reads the batch's task label with torch.unique(labels).tolist(), "
+        "a host sync dynamo cannot trace"
+    )
 
     def __init__(self, router: TaskRouter) -> None:
         self.router = router
@@ -291,7 +300,9 @@ class MultiTaskEvalStep(DefaultEvalStep):
     """Evaluation step that routes each batch to one task's loss.
 
     Inherits ``on_eval_batch`` unchanged and overrides only
-    :meth:`compute_loss`.
+    :meth:`compute_loss`. Like its train counterpart it is not a traceable
+    region (the router's host sync), so ``Trainer.compile`` refuses
+    ``step=True`` for it.
 
     Args:
         router: The :class:`TaskRouter` holding the declared task mixture.
@@ -301,6 +312,7 @@ class MultiTaskEvalStep(DefaultEvalStep):
     """
 
     namespace = "eval"
+    untraceable = MultiTaskTrainStep.untraceable
 
     def __init__(self, router: TaskRouter, *, no_grad: bool = False) -> None:
         super().__init__(no_grad=no_grad)

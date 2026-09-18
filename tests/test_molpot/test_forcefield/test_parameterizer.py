@@ -89,15 +89,6 @@ class _ConstantBondHead(nn.Module):
         }
 
 
-class _MissingK1ProperHead(nn.Module):
-    form = "opls"
-
-    def forward(self, features: torch.Tensor) -> dict[str, torch.Tensor]:
-        n = features.shape[0]
-        z = torch.zeros(n, dtype=features.dtype, device=features.device)
-        return {"k2": z, "k3": z, "k4": z}
-
-
 class _FakeEncoder(nn.Module):
     def __init__(self, features: dict[str, torch.Tensor]):
         super().__init__()
@@ -131,7 +122,7 @@ def _oplsaa_heads(feature_dim: int = 4) -> dict[str, nn.Module]:
     return {
         "bond_head": BondParamHead(feature_dim=feature_dim, hidden_dim=8),
         "angle_head": AngleParamHead(feature_dim=feature_dim, hidden_dim=8),
-        "proper_head": ProperTorsionParamHead(feature_dim=feature_dim, hidden_dim=8, form="opls"),
+        "proper_head": ProperTorsionParamHead(feature_dim=feature_dim, hidden_dim=8, n_terms=4),
         "improper_head": ImproperParamHead(feature_dim=feature_dim, hidden_dim=8),
         "atom_head": LJParameterHead(feature_dim=feature_dim, hidden_dim=8),
         "charge_model": _charge_model(feature_dim),
@@ -145,7 +136,7 @@ class TestParameterizer:
         atom_head = MultiHead(
             {
                 "lj": LJParameterHead(feature_dim=4, hidden_dim=8),
-                "q": ChargeHead(feature_dim=4, hidden_dim=8),
+                "charge": ChargeHead(feature_dim=4, hidden_dim=8),
             }
         )
         ff = (
@@ -204,7 +195,7 @@ class TestParameterizer:
         assert "bond:harmonic" in schema
         assert "angle:harmonic" in schema
 
-    def test_oplsaa_forward_fills_all_namespaces_with_opls_k(self):
+    def test_oplsaa_forward_fills_all_namespaces_with_fourier_amplitudes(self):
         d = 4
         features = {
             "bonds": torch.randn(2, d),
@@ -278,10 +269,13 @@ class TestParameterizer:
             assert filled.params(ns) is not None
         pp = filled.params("propers")
         assert pp is not None
-        for key in ("k1", "k2", "k3", "k4"):
+        # The head predicts the general Fourier amplitudes; the OPLS quartet
+        # is reached, not assumed.
+        for key in ("a", "b", "periodicity"):
             assert key in pp
-            assert pp[key].shape == (1,)
-        assert "q" in filled.params("atoms")
+        assert pp["a"].shape == (1, 4)
+        assert pp["b"].shape == (1, 4)
+        assert "charge" in filled.params("atoms")
 
     def test_forward_does_not_mutate_template(self):
         ff = ForceField().def_bondstyle("harmonic")
@@ -312,72 +306,6 @@ class TestParameterizer:
         del heads["charge_model"]
         with pytest.raises(ValueError, match="charge_model"):
             Parameterizer(_FakeEncoder({}), OPLSAAForceField(), **heads)
-
-    def test_oplsaa_cartesian_proper_form_raises(self):
-        heads = _oplsaa_heads()
-        heads["proper_head"] = ProperTorsionParamHead(feature_dim=4, hidden_dim=8)
-        with pytest.raises(ValueError, match="form"):
-            Parameterizer(_FakeEncoder({}), OPLSAAForceField(), **heads)
-
-    def test_oplsaa_proper_missing_k1_raises_on_forward(self):
-        heads = _oplsaa_heads()
-        heads["proper_head"] = _MissingK1ProperHead()
-        features = {
-            "bonds": torch.zeros(1, 4),
-            "angles": torch.zeros(1, 4),
-            "propers": torch.zeros(1, 4),
-            "impropers": torch.zeros(1, 4),
-            "atoms": torch.zeros(2, 4),
-        }
-        model = Parameterizer(_FakeEncoder(features), OPLSAAForceField(), **heads)
-        batch = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": torch.randn(2, 3),
-                        "Z": torch.tensor([1, 1]),
-                        "batch": torch.zeros(2, dtype=torch.long),
-                    },
-                    batch_size=[2],
-                ),
-                "bonds": TensorDict(
-                    {
-                        "atomi": torch.tensor([0], dtype=torch.long),
-                        "atomj": torch.tensor([1], dtype=torch.long),
-                    },
-                    batch_size=[1],
-                ),
-                "angles": TensorDict(
-                    {
-                        "atomi": torch.tensor([0], dtype=torch.long),
-                        "atomj": torch.tensor([0], dtype=torch.long),
-                        "atomk": torch.tensor([1], dtype=torch.long),
-                    },
-                    batch_size=[1],
-                ),
-                "propers": TensorDict(
-                    {
-                        "atomi": torch.tensor([0], dtype=torch.long),
-                        "atomj": torch.tensor([0], dtype=torch.long),
-                        "atomk": torch.tensor([1], dtype=torch.long),
-                        "atoml": torch.tensor([1], dtype=torch.long),
-                    },
-                    batch_size=[1],
-                ),
-                "impropers": TensorDict(
-                    {
-                        "atomi": torch.tensor([0], dtype=torch.long),
-                        "atomj": torch.tensor([0], dtype=torch.long),
-                        "atomk": torch.tensor([1], dtype=torch.long),
-                        "atoml": torch.tensor([1], dtype=torch.long),
-                    },
-                    batch_size=[1],
-                ),
-            },
-            batch_size=[],
-        )
-        with pytest.raises(ValueError, match="k1"):
-            model(batch)
 
     def test_charge_model_without_atom_features_raises(self):
         charge = _charge_model()
@@ -426,7 +354,7 @@ class TestParameterizer:
             charge_model=_charge_model(),
         )
         filled = model(_ion_batch(total_charge=-1.0))
-        charges = filled.params("atoms")["q"]
+        charges = filled.params("atoms")["charge"]
         assert float(charges.sum()) == pytest.approx(-1.0, abs=1e-6)
 
     def test_polarizability_head_is_refused_until_composable_a1(self):
@@ -457,7 +385,6 @@ class TestEnergy:
 
     def test_potentials_is_embeddable_module(self):
         from molpot.derivation.protocol import ENERGY_KEY, FORCES_KEY
-        from molpot.potentials.base import BasePotential
 
         ff = (
             ForceField()
@@ -465,8 +392,7 @@ class TestEnergy:
             .with_params(bonds={"k": torch.tensor([2.0]), "r0": torch.tensor([1.0])})
         )
         batch = _two_atom_bond_batch(r=1.5)
-        pots = ff.to_potentials()
-        assert isinstance(pots, BasePotential)
+        pots = ff.to_potentials(wrt=("atoms.pos",))
         assert isinstance(pots, nn.Module)
         out = pots(batch)
         assert out is batch
@@ -488,7 +414,9 @@ class TestEnergy:
 
 
 class TestForces:
-    def test_calc_forces_on_potentials(self):
+    def test_forces_through_the_op_on_potentials(self):
+        from molix.schema import FORCES_KEY
+
         ff = ForceField().def_bondstyle("harmonic")
         model = Parameterizer(
             _FakeEncoder({"bonds": torch.zeros(1, 1, dtype=torch.float64)}),
@@ -496,8 +424,8 @@ class TestForces:
             bond_head=_ConstantBondHead(k=2.0, r0=1.0),
         )
         batch = _two_atom_bond_batch(r=1.5)
-        pots = model(batch).to_potentials()
-        forces = pots.calc_forces(batch)
+        pots = model(batch).to_potentials(wrt=("atoms.pos",))
+        forces = pots(batch)[FORCES_KEY]
         assert forces.shape == (2, 3)
         assert math.isclose(float(forces[0, 0].detach()), 2.0 * 0.5, abs_tol=1e-5)
         assert math.isclose(float(forces[1, 0].detach()), -2.0 * 0.5, abs_tol=1e-5)

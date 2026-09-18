@@ -6,7 +6,7 @@ the repulsive and attractive halves of ``4ε[(σ/r)¹² − (σ/r)⁶]`` separat
 energy path. Analytic-force values are pinned one layer up
 (``test_analytic_forces.py``); what is pinned here is the return *shape* of
 both entry points, the split at the LJ minimum, and — from
-``composable-a0-02`` — the quintic switching function and the ``edge_mask``.
+``composable-a0-02`` — the quintic switching function and the ``pair_mask``.
 
 The switch is ``S = 1 − x³(10 − 15x + 6x²)`` on
 ``x = clamp((r − r_s)/(r_c − r_s), 0, 1)`` (OpenMM ``useSwitchingFunction``;
@@ -16,7 +16,7 @@ force go to zero smoothly at the cutoff — the S8 continuity gate. The hard
 truncation it replaces put a step in the force at ``r_c``, which an MD
 integrator turns into a slow energy drift.
 
-``edge_mask`` is the other half of the same change: a fixed-capacity neighbour
+``pair_mask`` is the other half of the same change: a fixed-capacity neighbour
 list carries dead rows, and they are multiplied out rather than sliced out, so
 the shape of every intermediate is known at trace time (zero graph breaks).
 """
@@ -92,7 +92,7 @@ def _cross_pair_energy(
     """
     return _sum(
         potential.energy(
-            edge_index=torch.tensor([[0, 1]], dtype=torch.long),
+            pair_index=torch.tensor([[0, 1]], dtype=torch.long),
             distances=torch.tensor([CROSS_R], dtype=DTYPE) if distances is None else distances,
             epsilon=torch.tensor(CROSS_EPSILON, dtype=DTYPE),
             sigma=torch.tensor(CROSS_SIGMA, dtype=DTYPE),
@@ -104,7 +104,7 @@ def _cross_pair_energy(
 def _one_pair_kwargs(*, r: float = R_MIN) -> dict[str, torch.Tensor]:
     """A single half-list pair at separation ``r`` along x̂, unscaled."""
     return {
-        "edge_index": torch.tensor([[0, 1]], dtype=torch.long),
+        "pair_index": torch.tensor([[0, 1]], dtype=torch.long),
         "distances": torch.tensor([r], dtype=DTYPE),
         "epsilon": torch.full((2,), EPSILON, dtype=DTYPE),
         "sigma": torch.full((2,), SIGMA, dtype=DTYPE),
@@ -112,7 +112,7 @@ def _one_pair_kwargs(*, r: float = R_MIN) -> dict[str, torch.Tensor]:
     }
 
 
-def _from_positions(positions: torch.Tensor, edge_index: torch.Tensor) -> dict[str, object]:
+def _from_positions(positions: torch.Tensor, pair_index: torch.Tensor) -> dict[str, object]:
     """The two geometry arguments :meth:`LJCutPotential.energy_forces` takes.
 
     That method no longer sees the positions: it takes the separation vectors,
@@ -123,7 +123,7 @@ def _from_positions(positions: torch.Tensor, edge_index: torch.Tensor) -> dict[s
     the values below are unchanged.
     """
     return {
-        "pair_vectors": positions[edge_index[:, 1]] - positions[edge_index[:, 0]],
+        "pair_vectors": positions[pair_index[:, 1]] - positions[pair_index[:, 0]],
         "n_atoms": int(positions.shape[0]),
     }
 
@@ -153,7 +153,7 @@ def _two_atom_energy_force(potential: LJCutPotential, r: float) -> tuple[float, 
     positions = torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=DTYPE)
     kwargs = _one_pair_kwargs(r=r)
     halves, forces = potential.energy_forces(
-        **_from_positions(positions, kwargs["edge_index"]), **kwargs
+        **_from_positions(positions, kwargs["pair_index"]), **kwargs
     )
     return _total(halves), float(forces[0, 0])
 
@@ -171,7 +171,7 @@ class TestLJCutPotential:
         positions = torch.tensor([[0.0, 0.0, 0.0], [0.9 * R_MIN, 0.0, 0.0]], dtype=DTYPE)
         kwargs = _one_pair_kwargs(r=0.9 * R_MIN)
         (repulsion, dispersion), forces = potential.energy_forces(
-            **_from_positions(positions, kwargs["edge_index"]), **kwargs
+            **_from_positions(positions, kwargs["pair_index"]), **kwargs
         )
         expected_repulsion, expected_dispersion = potential.energy(**kwargs)
         assert float(repulsion) == pytest.approx(float(expected_repulsion), abs=1e-10)
@@ -216,11 +216,11 @@ class TestLJCutPotential:
         """
         potential = LJCutPotential(cutoff=R_CUT, mixing=MixingRule.GEOMETRIC)
         positions = torch.tensor([[0.0, 0.0, 0.0], [CROSS_R, 0.0, 0.0]], dtype=DTYPE)
-        edge_index = torch.tensor([[0, 1]], dtype=torch.long)
+        pair_index = torch.tensor([[0, 1]], dtype=torch.long)
         _, analytic = potential.energy_forces(
             n_atoms=2,
-            edge_index=edge_index,
-            pair_vectors=positions[edge_index[:, 1]] - positions[edge_index[:, 0]],
+            pair_index=pair_index,
+            pair_vectors=positions[pair_index[:, 1]] - positions[pair_index[:, 0]],
             distances=torch.tensor([CROSS_R], dtype=DTYPE),
             epsilon=torch.tensor(CROSS_EPSILON, dtype=DTYPE),
             sigma=torch.tensor(CROSS_SIGMA, dtype=DTYPE),
@@ -287,7 +287,7 @@ class TestLJCutPotential:
         positions = torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=DTYPE)
         window = _one_pair_kwargs(r=r)
         _, analytic = potential.energy_forces(
-            **_from_positions(positions, window["edge_index"]), **window
+            **_from_positions(positions, window["pair_index"]), **window
         )
 
         leaf = positions.clone().requires_grad_(True)
@@ -307,40 +307,40 @@ class TestLJCutPotential:
             [[0.0, 0.0, 0.0], [R_MIN, 0.0, 0.0], [0.0, R_MIN, 0.0]], dtype=DTYPE
         )
         padded = {
-            "edge_index": torch.tensor([[0, 1], [0, 2]], dtype=torch.long),
+            "pair_index": torch.tensor([[0, 1], [0, 2]], dtype=torch.long),
             "distances": torch.tensor([R_MIN, R_MIN], dtype=DTYPE),
             "epsilon": torch.full((3,), EPSILON, dtype=DTYPE),
             "sigma": torch.full((3,), SIGMA, dtype=DTYPE),
             "scales": torch.ones(2, dtype=DTYPE),
-            "edge_mask": torch.tensor([True, False]),
+            "pair_mask": torch.tensor([True, False]),
         }
         masked = _total(potential.energy(**padded))
         assert masked == pytest.approx(_total(potential.energy(**_one_pair_kwargs())), abs=1e-14)
 
         (_, _), forces = potential.energy_forces(
-            **_from_positions(positions, padded["edge_index"]), **padded
+            **_from_positions(positions, padded["pair_index"]), **padded
         )
         assert torch.equal(forces[2], torch.zeros(3, dtype=DTYPE))
 
     @pytest.mark.slow
     def test_energy_forces_has_no_graph_breaks_on_a_masked_padded_list(self) -> None:
-        """Multiplicative mask, no ``edge_index[within]`` — one dynamo graph."""
+        """Multiplicative mask, no ``pair_index[within]`` — one dynamo graph."""
         from molix.compile import Compiler
 
         potential = LJCutPotential(cutoff=R_CUT, switch_start=R_SWITCH)
         positions = torch.tensor(
             [[0.0, 0.0, 0.0], [R_MIN, 0.0, 0.0], [0.0, R_MIN, 0.0]], dtype=DTYPE
         )
-        edge_index = torch.tensor([[0, 1], [0, 2], [0, 0], [0, 0]], dtype=torch.long)
+        pair_index = torch.tensor([[0, 1], [0, 2], [0, 0], [0, 0]], dtype=torch.long)
         explanation = Compiler.explain(
             potential.energy_forces,
-            **_from_positions(positions, edge_index),
-            edge_index=edge_index,
+            **_from_positions(positions, pair_index),
+            pair_index=pair_index,
             distances=torch.tensor([R_MIN, R_MIN, 1.0, 1.0], dtype=DTYPE),
             epsilon=torch.full((3,), EPSILON, dtype=DTYPE),
             sigma=torch.full((3,), SIGMA, dtype=DTYPE),
             scales=torch.ones(4, dtype=DTYPE),
-            edge_mask=torch.tensor([True, True, False, False]),
+            pair_mask=torch.tensor([True, True, False, False]),
         )
         assert (explanation.graph_count, explanation.graph_break_count) == (1, 0)
 
@@ -351,16 +351,16 @@ class TestCoulombOpenPotential:
         potential = CoulombOpenPotential(cutoff=R_CUT)
         charges = torch.tensor([1.0, -1.0, -1.0], dtype=DTYPE)
         live_only = potential.energy(
-            edge_index=torch.tensor([[0, 1]], dtype=torch.long),
+            pair_index=torch.tensor([[0, 1]], dtype=torch.long),
             distances=torch.tensor([2.0], dtype=DTYPE),
             charges=charges,
             scales=torch.ones(1, dtype=DTYPE),
         )
         padded = potential.energy(
-            edge_index=torch.tensor([[0, 1], [0, 2]], dtype=torch.long),
+            pair_index=torch.tensor([[0, 1], [0, 2]], dtype=torch.long),
             distances=torch.tensor([2.0, 2.0], dtype=DTYPE),
             charges=charges,
             scales=torch.ones(2, dtype=DTYPE),
-            edge_mask=torch.tensor([True, False]),
+            pair_mask=torch.tensor([True, False]),
         )
         assert float(padded) == pytest.approx(float(live_only), abs=1e-14)

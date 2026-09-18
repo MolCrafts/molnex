@@ -7,8 +7,9 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.batch import TensorFrame, collate_molecules
+from molix.data import collate_molecules
 from molix.ff_export import LammpsAdapter, LammpsWriter
+from molix.frame import TensorFrame
 from molpot.forcefield import ForceField
 from molpot.ir import ExclusionScales, NonbondedScaling
 from tests.conftest import frame
@@ -69,7 +70,7 @@ def _nonbonded_forcefield(
             name="OPLS",
             units="real",
             nonbonded_scaling=NonbondedScaling(
-                q=ExclusionScales(0.0, 0.0, 0.5),
+                charge=ExclusionScales(0.0, 0.0, 0.5),
                 lj=ExclusionScales(0.0, 0.0, 0.5),
             ),
         )
@@ -83,7 +84,7 @@ def _nonbonded_forcefield(
                 "r0": torch.tensor([1.53], dtype=torch.float64),
             },
             atoms={
-                "q": torch.tensor([0.5, -0.5], dtype=torch.float64),
+                "charge": torch.tensor([0.5, -0.5], dtype=torch.float64),
                 "epsilon": torch.tensor([0.066, 0.03], dtype=torch.float64),
                 "sigma": torch.tensor([3.5, 2.5], dtype=torch.float64),
             },
@@ -116,7 +117,7 @@ def _four_atom_nonbonded(
             name="OPLS",
             units="real",
             nonbonded_scaling=NonbondedScaling(
-                q=ExclusionScales(0.0, 0.0, 0.5),
+                charge=ExclusionScales(0.0, 0.0, 0.5),
                 lj=ExclusionScales(0.0, 0.0, 0.5),
             ),
         )
@@ -125,7 +126,7 @@ def _four_atom_nonbonded(
         .def_pairstyle("coulomb", calculator="pme")
         .with_params(
             atoms={
-                "q": torch.tensor([0.5, -0.5, 0.5, -0.25], dtype=torch.float64),
+                "charge": torch.tensor([0.5, -0.5, 0.5, -0.25], dtype=torch.float64),
                 "epsilon": torch.tensor(epsilon, dtype=torch.float64),
                 "sigma": torch.tensor([3.5, 2.5, 3.5, 3.0], dtype=torch.float64),
             },
@@ -138,8 +139,8 @@ def _four_atom_nonbonded(
         pos=[[3.0 * i, 0.0, 0.0] for i in range(4)],
     )
     # ``frame()`` takes no per-atom extras, so the charge column is written onto
-    # the block it built; the collate carries it through as ``atoms.q``.
-    built["atoms"]["q"] = atoms["q"].detach().cpu().double().numpy()
+    # the block it built; the collate carries it through as ``atoms.charge``.
+    built["atoms"]["charge"] = atoms["charge"].detach().cpu().double().numpy()
     return ff, collate_molecules([built])
 
 
@@ -150,13 +151,13 @@ def _charges_only_forcefield() -> ForceField:
             name="OPLS",
             units="real",
             nonbonded_scaling=NonbondedScaling(
-                q=ExclusionScales(0.0, 0.0, 0.5),
+                charge=ExclusionScales(0.0, 0.0, 0.5),
                 lj=ExclusionScales(0.0, 0.0, 0.5),
             ),
         )
         .def_atomstyle("full")
         .def_pairstyle("coulomb", calculator="pme")
-        .with_params(atoms={"q": torch.tensor([0.5, -0.5], dtype=torch.float64)})
+        .with_params(atoms={"charge": torch.tensor([0.5, -0.5], dtype=torch.float64)})
     )
 
 
@@ -180,10 +181,10 @@ class TestLammpsWriter:
     def test_write_data_charges_are_the_ones_the_types_were_keyed_on(self, tmp_path):
         """One charge reading types the atoms and fills the data file's column.
 
-        The field's own ``atoms.q`` table is what
+        The field's own ``atoms.charge`` table is what
         :meth:`~molpot.forcefield.ForceField.assign_types` keys the atom types
         on — here it is the only charge source, since the system carries no
-        ``atoms.q`` — so it is also what the ``Atoms`` section has to state.
+        ``atoms.charge`` — so it is also what the ``Atoms`` section has to state.
         The writer used to read the charges again from the system and wrote
         zeros whenever the field carried the table instead: a deck whose two
         types exist *because* the atoms differ in charge, and whose atoms are
@@ -192,9 +193,9 @@ class TestLammpsWriter:
         """
         system = collate_molecules([frame(Z=(6, 6), pos=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)))])
         ff = (
-            ForceField(name="q", units="real")
+            ForceField(name="charge", units="real")
             .def_atomstyle("full")
-            .with_params(atoms={"q": torch.tensor([0.3, -0.3], dtype=torch.float64)})
+            .with_params(atoms={"charge": torch.tensor([0.3, -0.3], dtype=torch.float64)})
         )
         types = ff.assign_types(system)
         text = LammpsWriter().write_data(tmp_path / "s.data", system, types=types).read_text()

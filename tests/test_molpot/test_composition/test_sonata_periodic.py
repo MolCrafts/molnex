@@ -10,8 +10,8 @@ covers one acceptance criterion:
   ``dh = 1e-4``, on a differentiable strain ``ε``.
 
 The force / stress tests use ``TensorDict`` clones constructed inside
-the test loop; positions / cells are perturbed and ``edge_diff /
-edge_dist`` are recomputed exactly the way ``Sonata.forward`` does it
+the test loop; positions / cells are perturbed and ``pair_diff /
+pair_dist`` are recomputed exactly the way ``Sonata.forward`` does it
 internally, so the FD path samples the same ``E(pos, cell)`` surface
 autograd differentiates.
 
@@ -74,7 +74,7 @@ _REQUIRES_CUE_OPS = pytest.mark.skipif(
 )
 
 # ---------------------------------------------------------------------------
-# Helpers — minimum-image edge_diff and batch reconstruction
+# Helpers — minimum-image pair_diff and batch reconstruction
 # ---------------------------------------------------------------------------
 
 
@@ -82,7 +82,7 @@ def _build_graph_batch(
     *,
     pos: torch.Tensor,
     Z: torch.Tensor,
-    edge_index: torch.Tensor,
+    pair_index: torch.Tensor,
     batch_idx: torch.Tensor,
     total_charge: torch.Tensor,
     cell: torch.Tensor | None = None,
@@ -90,16 +90,16 @@ def _build_graph_batch(
 ) -> TensorDict:
     """Build a ``TensorDict`` from positions, optionally applying minimum-image
     convention to the edge geometry for orthorhombic ``cell`` inputs."""
-    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
+    pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]]
     if minimum_image and cell is not None:
-        edge_batch = batch_idx[edge_index[:, 0]]
-        cell_per_edge = cell[edge_batch]  # (E, 3, 3)
+        pair_batch = batch_idx[pair_index[:, 0]]
+        cell_per_edge = cell[pair_batch]  # (E, 3, 3)
         cell_diag = torch.diagonal(cell_per_edge, dim1=-2, dim2=-1)  # (E, 3)
-        edge_diff = edge_diff - cell_diag * torch.round(edge_diff / cell_diag)
-    edge_dist = edge_diff.norm(dim=-1)
+        pair_diff = pair_diff - cell_diag * torch.round(pair_diff / cell_diag)
+    pair_dist = pair_diff.norm(dim=-1)
 
     n_atoms = pos.shape[0]
-    n_edges = edge_index.shape[0]
+    n_pairs = pair_index.shape[0]
     n_graphs = int(total_charge.shape[0])
 
     num_atoms = torch.zeros(n_graphs, dtype=torch.long)
@@ -115,11 +115,11 @@ def _build_graph_batch(
 
     return TensorDict(
         atoms=TensorDict(Z=Z, pos=pos, batch=batch_idx, batch_size=[n_atoms]),
-        edges=TensorDict(
-            edge_index=edge_index,
-            edge_diff=edge_diff,
-            edge_dist=edge_dist,
-            batch_size=[n_edges],
+        pairs=TensorDict(
+            pair_index=pair_index,
+            pair_diff=pair_diff,
+            pair_dist=pair_dist,
+            batch_size=[n_pairs],
         ),
         graphs=TensorDict(**graphs_kwargs),
         batch_size=[],
@@ -181,7 +181,7 @@ def single_graph_periodic() -> tuple[Sonata, TensorDict]:
             dtype=torch.float64,
         )
         Z = torch.tensor([1, 6, 8, 7], dtype=torch.long)
-        edge_index = torch.tensor(
+        pair_index = torch.tensor(
             [[i, j] for i in range(4) for j in range(4) if i != j],
             dtype=torch.long,
         )
@@ -192,7 +192,7 @@ def single_graph_periodic() -> tuple[Sonata, TensorDict]:
         batch = _build_graph_batch(
             pos=pos,
             Z=Z,
-            edge_index=edge_index,
+            pair_index=pair_index,
             batch_idx=batch_idx,
             total_charge=total_charge,
             cell=cell,
@@ -221,11 +221,11 @@ class TestCellPeriodicConsistency:
     def test_cell_periodic_atom0_shift(
         self, sonata_pipeline: Sonata, sample_neutral_batch_periodic: TensorDict
     ) -> None:
-        # Reconstruct the periodic batch with MI edge_diff so the test
+        # Reconstruct the periodic batch with MI pair_diff so the test
         # is consistent with itself before/after the shift.
         pos = sample_neutral_batch_periodic["atoms", "pos"].clone()
         Z = sample_neutral_batch_periodic["atoms", "Z"]
-        edge_index = sample_neutral_batch_periodic["edges", "edge_index"]
+        pair_index = sample_neutral_batch_periodic["pairs", "pair_index"]
         batch_idx = sample_neutral_batch_periodic["atoms", "batch"]
         total_charge = sample_neutral_batch_periodic["graphs", "total_charge"]
         cell = sample_neutral_batch_periodic["graphs", "cell"]
@@ -233,7 +233,7 @@ class TestCellPeriodicConsistency:
         batch_orig = _build_graph_batch(
             pos=pos,
             Z=Z,
-            edge_index=edge_index,
+            pair_index=pair_index,
             batch_idx=batch_idx,
             total_charge=total_charge,
             cell=cell,
@@ -256,7 +256,7 @@ class TestCellPeriodicConsistency:
             batch_shifted = _build_graph_batch(
                 pos=pos_shifted,
                 Z=Z,
-                edge_index=edge_index,
+                pair_index=pair_index,
                 batch_idx=batch_idx,
                 total_charge=total_charge,
                 cell=cell,
@@ -302,7 +302,7 @@ class TestForceFD:
         """
         pos = sample_neutral_batch_periodic["atoms", "pos"].clone()
         Z = sample_neutral_batch_periodic["atoms", "Z"]
-        edge_index = sample_neutral_batch_periodic["edges", "edge_index"]
+        pair_index = sample_neutral_batch_periodic["pairs", "pair_index"]
         batch_idx = sample_neutral_batch_periodic["atoms", "batch"]
         total_charge = sample_neutral_batch_periodic["graphs", "total_charge"]
         cell = sample_neutral_batch_periodic["graphs", "cell"]
@@ -317,7 +317,7 @@ class TestForceFD:
         batch_for_grad = _build_graph_batch(
             pos=pos,
             Z=Z,
-            edge_index=edge_index,
+            pair_index=pair_index,
             batch_idx=batch_idx,
             total_charge=total_charge,
             cell=cell,
@@ -334,7 +334,7 @@ class TestForceFD:
                 batch_plus = _build_graph_batch(
                     pos=pos_plus,
                     Z=Z,
-                    edge_index=edge_index,
+                    pair_index=pair_index,
                     batch_idx=batch_idx,
                     total_charge=total_charge,
                     cell=cell,
@@ -347,7 +347,7 @@ class TestForceFD:
                 batch_minus = _build_graph_batch(
                     pos=pos_minus,
                     Z=Z,
-                    edge_index=edge_index,
+                    pair_index=pair_index,
                     batch_idx=batch_idx,
                     total_charge=total_charge,
                     cell=cell,
@@ -407,7 +407,7 @@ class TestStressFD:
         sonata, batch = single_graph_periodic
         pos = batch["atoms", "pos"].clone()
         Z = batch["atoms", "Z"]
-        edge_index = batch["edges", "edge_index"]
+        pair_index = batch["pairs", "pair_index"]
         batch_idx = batch["atoms", "batch"]
         total_charge = batch["graphs", "total_charge"]
         cell = batch["graphs", "cell"].clone()
@@ -417,7 +417,7 @@ class TestStressFD:
         batch_for_grad = _build_graph_batch(
             pos=pos,
             Z=Z,
-            edge_index=edge_index,
+            pair_index=pair_index,
             batch_idx=batch_idx,
             total_charge=total_charge,
             cell=cell,
@@ -443,7 +443,7 @@ class TestStressFD:
                 batch_plus = _build_graph_batch(
                     pos=pos_plus,
                     Z=Z,
-                    edge_index=edge_index,
+                    pair_index=pair_index,
                     batch_idx=batch_idx,
                     total_charge=total_charge,
                     cell=cell_plus,
@@ -457,7 +457,7 @@ class TestStressFD:
                 batch_minus = _build_graph_batch(
                     pos=pos_minus,
                     Z=Z,
-                    edge_index=edge_index,
+                    pair_index=pair_index,
                     batch_idx=batch_idx,
                     total_charge=total_charge,
                     cell=cell_minus,

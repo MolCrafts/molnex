@@ -14,7 +14,7 @@ eager. The open question this measures, head-on:
 graphs?" is answered explicitly (cudagraphs backend, and reduce-overhead =
 inductor+cudagraph), not just bundled into one mode.
 
-Self-timed (no ModuleProfiler train() assumption) so train vs inference and
+Self-timed (no profiler training-mode assumption) so train vs inference and
 create_graph are controlled exactly. Run on GH200:
     python benchmarks/bench_pinet_compile_modes.py
 """
@@ -48,12 +48,14 @@ def _model(compute_forces: bool) -> PiNetPotential:
         depth=3,
         rank=3,
     )
-    return PiNetPotential(encoder=enc, hidden_dim=64, compute_forces=compute_forces).cuda()
+    return PiNetPotential(
+        encoder=enc, hidden_dim=64, wrt=("atoms.pos",) if compute_forces else ()
+    ).cuda()
 
 
 def _batch():
     return MockBatch(
-        n_atoms=512, n_edges=4096, n_graphs=16, atomic_numbers=7, device="cuda", seed=0
+        n_atoms=512, n_pairs=4096, n_graphs=16, atomic_numbers=7, device="cuda", seed=0
     )()
 
 

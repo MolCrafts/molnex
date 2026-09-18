@@ -1,10 +1,41 @@
 """Mesh interpolation for particle-mesh methods (Lagrange and P3M)."""
 
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import torch
 
 from molpot.potentials.elec.lib.kvectors import MeshShape
+
+
+class MeshStencil(NamedTuple):
+    """Where each particle lands on the mesh, and with what weight.
+
+    The value :meth:`MeshInterpolator.compute_weights` returns and both
+    transfer methods — :meth:`MeshInterpolator.points_to_mesh` and
+    :meth:`MeshInterpolator.mesh_to_points` — take back: one stencil of
+    ``interpolation_nodes**3`` mesh points per particle.
+
+    A value rather than state on the interpolator, because every field is a
+    function of the positions and the cell of **one** call: dynamo treats
+    leaf-derived tensors stored on a module as leaked graph outputs, and under
+    a derivative (forces, virial) they require grad, so every such store broke
+    the traced graph. Passed along, the stencil lives and dies inside the one
+    graph that made it.
+
+    Attributes:
+        weights: Assignment weight of every stencil point
+            ``(interpolation_nodes**3, n_atoms)`` — the product of the three
+            1-D weights, summing to one per particle.
+        x_indices: Mesh index along ``x`` of every stencil point
+            ``(interpolation_nodes**3, n_atoms)``, wrapped into the mesh.
+        y_indices: The same along ``y``.
+        z_indices: The same along ``z``.
+    """
+
+    weights: torch.Tensor
+    x_indices: torch.Tensor
+    y_indices: torch.Tensor
+    z_indices: torch.Tensor
 
 
 class MeshInterpolator(torch.nn.Module):
@@ -13,6 +44,12 @@ class MeshInterpolator(torch.nn.Module):
     Handles both forward interpolation (particles → mesh) and backward
     interpolation (mesh → particles) using either Lagrange or P3M
     cardinal B-spline assignment functions.
+
+    Nothing derived from a cell or from positions is kept on the instance:
+    :meth:`compute_weights` returns a :class:`MeshStencil` that the two
+    transfer methods take back, and :meth:`get_mesh_xyz` takes the cell it
+    lays the grid on. What the instance holds is metadata (mesh shape, dtype,
+    device) and the leaf-independent stencil offsets.
 
     The mesh shape arrives in one of two modes, and they trace differently:
 
@@ -30,7 +67,10 @@ class MeshInterpolator(torch.nn.Module):
     :attr:`ns_mesh` is the ``(3,)`` tensor form in both modes.
 
     Args:
-        cell: Unit cell matrix ``(3, 3)`` in Å, rows being the lattice vectors.
+        cell: Unit cell matrix ``(3, 3)`` in Å, rows being the lattice vectors
+            — read here for its dtype and device only. The lattice itself is
+            an argument of :meth:`compute_weights` and :meth:`get_mesh_xyz`
+            and is never stored.
         ns_mesh: Mesh dimensions ``(3,)`` as a tensor, or three Python ints —
             see the two modes above.
         interpolation_nodes: Number of mesh points per axis each particle is
@@ -68,17 +108,19 @@ class MeshInterpolator(torch.nn.Module):
         self.interpolation_nodes: int = interpolation_nodes
 
         self._ns_shape: MeshShape = MeshShape(ns_mesh, cell.device)
-        self.update(cell, ns_mesh)
-
-        self.interpolation_weights: torch.Tensor = torch.zeros(
-            1, device=self._device, dtype=self._dtype
+        self._dtype: torch.dtype = cell.dtype
+        self._device: torch.device = cell.device
+        # Stencil offsets ``{0..nodes-1}^3``, flattened: which of the
+        # ``nodes**3`` mesh points around a particle each stencil entry is.
+        # Leaf-independent constants — built once, moved only by ``update``
+        # when the device changes, never per call.
+        self.x_shifts, self.y_shifts, self.z_shifts = (
+            axis.flatten()
+            for axis in torch.meshgrid(
+                *(torch.arange(interpolation_nodes, device=cell.device),) * 3, indexing="ij"
+            )
         )
-        self.x_shifts: torch.Tensor = torch.zeros(1, device=self._device)
-        self.y_shifts: torch.Tensor = torch.zeros(1, device=self._device)
-        self.z_shifts: torch.Tensor = torch.zeros(1, device=self._device)
-        self.x_indices: torch.Tensor = torch.zeros(1, device=self._device)
-        self.y_indices: torch.Tensor = torch.zeros(1, device=self._device)
-        self.z_indices: torch.Tensor = torch.zeros(1, device=self._device)
+        self.update(cell, ns_mesh)
 
     @property
     def ns_mesh(self) -> torch.Tensor:
@@ -94,11 +136,17 @@ class MeshInterpolator(torch.nn.Module):
         cell: Optional[torch.Tensor] = None,
         ns_mesh: Optional[torch.Tensor | tuple[int, int, int]] = None,
     ) -> None:
-        """Update buffers when cell or mesh resolution changes.
+        """Adopt the dtype and device of ``cell`` and/or a new mesh resolution.
+
+        Only Python-level metadata changes hands here: the cell's dtype and
+        device, and the mesh shape. The cell itself is not kept — it is a
+        function of the strain leaf under a virial, and a leaf-derived tensor
+        stored on a module is a leaked graph output to dynamo. It is an
+        argument of every per-call method instead.
 
         Args:
             cell: Unit cell matrix ``(3, 3)`` in Å, rows being the lattice
-                vectors.
+                vectors — read for its dtype and device.
             ns_mesh: Mesh dimensions ``(3,)`` as a tensor (live mode), or three
                 Python ints (frozen mode) — see the class docstring. The mode
                 is whichever this call was given; a frozen shape repeated
@@ -111,27 +159,28 @@ class MeshInterpolator(torch.nn.Module):
         if cell is not None:
             if cell.shape != (3, 3):
                 raise ValueError(f"cell of shape {list(cell.shape)} should be of shape (3, 3)")
-            self.cell = cell
-            self.inverse_cell = cell.clone()
+            if cell.device != self._device:
+                self.x_shifts = self.x_shifts.to(cell.device)
+                self.y_shifts = self.y_shifts.to(cell.device)
+                self.z_shifts = self.z_shifts.to(cell.device)
             self._dtype = cell.dtype
             self._device = cell.device
 
-            if self.cell.is_cuda:
-                self.inverse_cell = torch.linalg.inv_ex(cell)[0]
-            else:
-                self.inverse_cell = torch.linalg.inv(cell)
-
         if ns_mesh is not None:
-            self._ns_shape.update(ns_mesh, self.cell.device)
+            self._ns_shape.update(ns_mesh, self._device)
 
-        if self.cell.device != self.ns_mesh.device:
+        if self._device != self.ns_mesh.device:
             raise ValueError(
                 "`cell` and `ns_mesh` are on different devices, got "
-                f"{self.cell.device} and {self.ns_mesh.device}"
+                f"{self._device} and {self.ns_mesh.device}"
             )
 
-    def get_mesh_xyz(self) -> torch.Tensor:
+    def get_mesh_xyz(self, cell: torch.Tensor) -> torch.Tensor:
         """Return Cartesian positions of all mesh points.
+
+        Args:
+            cell: Unit cell matrix ``(3, 3)`` in Å, rows being the lattice
+                vectors, that the grid is laid on.
 
         Returns:
             Mesh positions ``(nx, ny, nz, 3)`` in Å.
@@ -140,14 +189,14 @@ class MeshInterpolator(torch.nn.Module):
 
         grid_scaled = torch.stack(
             torch.meshgrid(
-                torch.arange(nx, dtype=self._dtype, device=self._device) / nx,
-                torch.arange(ny, dtype=self._dtype, device=self._device) / ny,
-                torch.arange(nz, dtype=self._dtype, device=self._device) / nz,
+                torch.arange(nx, dtype=cell.dtype, device=cell.device) / nx,
+                torch.arange(ny, dtype=cell.dtype, device=cell.device) / ny,
+                torch.arange(nz, dtype=cell.dtype, device=cell.device) / nz,
                 indexing="ij",
             ),
             dim=-1,
         )
-        return torch.matmul(grid_scaled, self.cell)
+        return torch.matmul(grid_scaled, cell)
 
     def _compute_1d_weights(self, x: torch.Tensor) -> torch.Tensor:
         if self.method == "Lagrange":
@@ -273,13 +322,21 @@ class MeshInterpolator(torch.nn.Module):
             )
         raise ValueError("Only `interpolation_nodes` from 3 to 7 are allowed")
 
-    def compute_weights(self, positions: torch.Tensor):
-        """Compute interpolation weights for all atoms.
+    def compute_weights(self, positions: torch.Tensor, cell: torch.Tensor) -> MeshStencil:
+        """Compute the mesh stencil — indices and weights — of every atom.
 
-        Must be called before :meth:`points_to_mesh` or :meth:`mesh_to_points`.
+        The result is what :meth:`points_to_mesh` and :meth:`mesh_to_points`
+        take: a value, not state on the instance (see :class:`MeshStencil`
+        for why). The inverse cell is computed here from the argument, per
+        call, and not stored either.
 
         Args:
             positions: Cartesian coordinates ``(n_atoms, 3)`` in Å.
+            cell: Unit cell matrix ``(3, 3)`` in Å, rows being the lattice
+                vectors, that the positions are reduced against.
+
+        Returns:
+            The :class:`MeshStencil` of these positions on this cell.
 
         Raises:
             ValueError: ``positions`` is on another device than this
@@ -295,7 +352,10 @@ class MeshInterpolator(torch.nn.Module):
         if positions.shape != (n_positions, 3):
             raise ValueError(f"shape {list(positions.shape)} of `positions` has to be (N, 3)")
 
-        positions_rel = self.ns_mesh * torch.matmul(positions, self.inverse_cell)
+        # ``inv_ex`` on CUDA: ``inv`` checks its info tensor on the host, a
+        # sync on the force path — a singular cell is not a lattice either way.
+        inverse_cell = torch.linalg.inv_ex(cell)[0] if cell.is_cuda else torch.linalg.inv(cell)
+        positions_rel = self.ns_mesh * torch.matmul(positions, inverse_cell)
 
         even = self.interpolation_nodes % 2 == 0
         if even:
@@ -305,7 +365,8 @@ class MeshInterpolator(torch.nn.Module):
             positions_rel_idx = torch.round(positions_rel).long()
             offsets = positions_rel - positions_rel_idx
 
-        self.interpolation_weights = self._compute_1d_weights(offsets)
+        # 1-D weights ``(interpolation_nodes, n_atoms, 3)``, one per axis.
+        weights_1d = self._compute_1d_weights(offsets)
 
         indices_to_interpolate = torch.stack(
             [
@@ -318,30 +379,23 @@ class MeshInterpolator(torch.nn.Module):
             dim=0,
         )
 
-        # meshgrid shifts depend only on interpolation_nodes + device — cache them.
-        cache_key = (int(self.interpolation_nodes), str(self._device))
-        if getattr(self, "_shift_cache_key", None) != cache_key:
-            x_shifts, y_shifts, z_shifts = torch.meshgrid(
-                torch.arange(self.interpolation_nodes, device=self._device),
-                torch.arange(self.interpolation_nodes, device=self._device),
-                torch.arange(self.interpolation_nodes, device=self._device),
-                indexing="ij",
-            )
-            self.x_shifts = x_shifts.flatten()
-            self.y_shifts = y_shifts.flatten()
-            self.z_shifts = z_shifts.flatten()
-            self._shift_cache_key = cache_key
+        xs, ys, zs = self.x_shifts, self.y_shifts, self.z_shifts
+        return MeshStencil(
+            # Spatial weights are channel-independent — the product once, here.
+            weights=weights_1d[xs, :, 0] * weights_1d[ys, :, 1] * weights_1d[zs, :, 2],
+            x_indices=indices_to_interpolate[xs, :, 0],
+            y_indices=indices_to_interpolate[ys, :, 1],
+            z_indices=indices_to_interpolate[zs, :, 2],
+        )
 
-        self.x_indices = indices_to_interpolate[self.x_shifts, :, 0]
-        self.y_indices = indices_to_interpolate[self.y_shifts, :, 1]
-        self.z_indices = indices_to_interpolate[self.z_shifts, :, 2]
-
-    def points_to_mesh(self, particle_weights: torch.Tensor) -> torch.Tensor:
+    def points_to_mesh(self, particle_weights: torch.Tensor, stencil: MeshStencil) -> torch.Tensor:
         """Interpolate particle weights onto the mesh.
 
         Args:
             particle_weights: Per-particle weights ``(n_atoms, n_channels)`` —
                 the partial charges in ``e`` on the electrostatic path.
+            stencil: The particles' :class:`MeshStencil`, from
+                :meth:`compute_weights` on the same positions.
 
         Returns:
             Mesh density ``(n_channels, nx, ny, nz)`` in the weights' own unit
@@ -363,26 +417,22 @@ class MeshInterpolator(torch.nn.Module):
         n_channels = particle_weights.shape[1]
         nx, ny, nz = self._ns_shape.counts
         rho_mesh = torch.zeros((n_channels, nx, ny, nz), dtype=self._dtype, device=self._device)
-        # Spatial interpolation weights are channel-independent — compute once.
-        spatial = (
-            self.interpolation_weights[self.x_shifts, :, 0]
-            * self.interpolation_weights[self.y_shifts, :, 1]
-            * self.interpolation_weights[self.z_shifts, :, 2]
-        )
         for a in range(n_channels):
             rho_mesh[a].index_put_(
-                (self.x_indices, self.y_indices, self.z_indices),
-                particle_weights[:, a] * spatial,
+                (stencil.x_indices, stencil.y_indices, stencil.z_indices),
+                particle_weights[:, a] * stencil.weights,
                 accumulate=True,
             )
 
         return rho_mesh
 
-    def mesh_to_points(self, mesh_vals: torch.Tensor) -> torch.Tensor:
+    def mesh_to_points(self, mesh_vals: torch.Tensor, stencil: MeshStencil) -> torch.Tensor:
         """Interpolate mesh values back to particle positions.
 
         Args:
             mesh_vals: Mesh values ``(n_channels, nx, ny, nz)``.
+            stencil: The particles' :class:`MeshStencil`, from
+                :meth:`compute_weights` on the positions to read at.
 
         Returns:
             Interpolated values ``(n_atoms, n_channels)``.
@@ -392,10 +442,8 @@ class MeshInterpolator(torch.nn.Module):
 
         return (
             (
-                mesh_vals[:, self.x_indices, self.y_indices, self.z_indices]
-                * self.interpolation_weights[self.x_shifts, :, 0]
-                * self.interpolation_weights[self.y_shifts, :, 1]
-                * self.interpolation_weights[self.z_shifts, :, 2]
+                mesh_vals[:, stencil.x_indices, stencil.y_indices, stencil.z_indices]
+                * stencil.weights
             )
             .sum(dim=1)
             .T

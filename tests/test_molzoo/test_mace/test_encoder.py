@@ -65,9 +65,9 @@ def _rotation_matrix() -> torch.Tensor:
 def _layer_inputs(encoder: MACEEncoder, batch: TensorDict) -> dict[str, Any]:
     """Compose the encoder primitives into ``layer_features`` keyword arguments."""
     Z = batch["atoms", "Z"]
-    edge_index = batch["edges", "edge_index"]
-    vectors = batch["edges", "edge_diff"]
-    lengths = batch["edges", "edge_dist"]
+    edge_index = batch["pairs", "pair_index"]
+    vectors = batch["pairs", "pair_diff"]
+    lengths = batch["pairs", "pair_dist"]
 
     node_attrs = encoder.node_attrs(Z, vectors.dtype)
     edge_feats, cutoff = encoder.radial_features(lengths, Z, edge_index)
@@ -117,6 +117,11 @@ def omol_encoder(tiny_omol_spec) -> MACEEncoder:
     return MACEEncoder(tiny_omol_spec).eval()
 
 
+def _tensors(state: dict) -> dict:
+    """The tensor entries of a ``state_dict`` — ``_extra_state`` is not one."""
+    return {k: v for k, v in state.items() if torch.is_tensor(v)}
+
+
 class TestMACEEncoder:
     """Test the configuration-driven MACE backbone."""
 
@@ -129,9 +134,15 @@ class TestMACEEncoder:
     def test_state_dict_shapes_and_dtypes_match_the_matpes_variant(
         self, matpes_encoder, matpes_variant
     ):
-        """Every shared MatPES entry agrees on ``shape`` and ``dtype``."""
-        oracle = matpes_variant.state_dict()
-        own = matpes_encoder.state_dict()
+        """Every shared MatPES entry agrees on ``shape`` and ``dtype``.
+
+        Tensors only: a module that defines ``get_extra_state`` (here
+        ``AtomicReferenceEnergy``, carrying ``scheme`` / ``units``) puts a
+        plain object under ``_extra_state``, which has neither. That the two
+        sides carry the same *keys* is the sibling test's job.
+        """
+        oracle = _tensors(matpes_variant.state_dict())
+        own = _tensors(matpes_encoder.state_dict())
         mine = {k: (tuple(v.shape), v.dtype) for k, v in own.items() if k in oracle}
         theirs = {k: (tuple(v.shape), v.dtype) for k, v in oracle.items() if k in own}
         assert mine == theirs
@@ -141,9 +152,9 @@ class TestMACEEncoder:
         assert set(omol_encoder.state_dict()) == set(omol_variant.state_dict())
 
     def test_state_dict_shapes_and_dtypes_match_the_omol_variant(self, omol_encoder, omol_variant):
-        """Every shared OMOL entry agrees on ``shape`` and ``dtype``."""
-        oracle = omol_variant.state_dict()
-        own = omol_encoder.state_dict()
+        """Every shared OMOL entry agrees on ``shape`` and ``dtype`` (tensors only)."""
+        oracle = _tensors(omol_variant.state_dict())
+        own = _tensors(omol_encoder.state_dict())
         mine = {k: (tuple(v.shape), v.dtype) for k, v in own.items() if k in oracle}
         theirs = {k: (tuple(v.shape), v.dtype) for k, v in oracle.items() if k in own}
         assert mine == theirs

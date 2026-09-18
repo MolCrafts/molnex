@@ -21,7 +21,7 @@ one, mirroring upstream's ``ScaleShiftMACE(MACE)``: holding an encoder would
 prefix every ``state_dict`` key with ``encoder.`` and official checkpoints
 would stop loading.
 
-Two seams, deliberately coexisting:
+Three seams, deliberately coexisting:
 
 ``energy_core(positions, Z, edge_index, batch, num_graphs, …) -> (B,)``
     Flat, public, compilable. Raw tensors in, per-graph energy out; no
@@ -29,20 +29,28 @@ Two seams, deliberately coexisting:
     hence ``num_graphs`` as an argument. It performs **no element validation**:
     that check host-syncs, so whoever drives this seam calls
     :meth:`~molzoo.mace.encoder.MACEEncoder.validate_elements` once beforehand.
-    :meth:`MacePotential.compile_core` installs a compiled build of it, scoped
-    to first-order, cell-bound, B=1 inference — the force derivative stays
-    outside the compiled region.
+    Export (``molix.engine``) drives it directly.
 
-``_write_energy(batch) -> batch``
-    The protocol hook on the batch schema, preferred by
-    ``molpot.derivation.protocol.call_energy``. It detaches neither positions
-    nor energy: an outer readout may own the position leaf, and a detach here
-    would sever ``F = -∂E/∂r`` before anyone differentiates.
+``energy(batch) -> batch``
+    The energy on the batch schema — what :class:`molix.autograd.Derivative`
+    differentiates. It detaches neither positions nor energy: the op that
+    calls it owns the position leaf, and a detach here would sever
+    ``F = -∂E/∂r`` before anyone differentiates.
 
-Every branch — forces on/off, conditioning, per-layer vs final readout — is
-resolved once in ``__init__`` into a bound attribute, and ``forward`` is a
-single dispatch through ``self._pipeline``. There is no ``compute_forces``
-flag on any public signature: energy-only is a *construction*.
+``forward(batch) -> batch``
+    The :class:`~molix.autograd.Derivative` built once in ``__init__`` over
+    :meth:`energy`, from the ``wrt`` keys given at construction:
+    ``MaceMatpes(...)`` writes the energy alone, ``MaceMatpes(...,
+    wrt=("atoms.pos",))`` the energy and forces, and ``Derivative(model,
+    wrt=...)`` composed outside is the same op. Compile it with
+    ``Compiler(...)(model)`` after one eager forward (the element-table check
+    below and, on the polarisable variant, the k-space grid sizing are
+    host-side work a trace cannot do).
+
+Every branch — conditioning, per-layer vs final readout, what is derived —
+is resolved once in ``__init__`` into a bound attribute; ``forward`` is a
+single dispatch through the op. There is no ``compute_forces`` flag on any
+public signature: what a potential derives is a *construction*.
 
 Units: ``graphs.energy`` eV ``(B,)``, ``atoms.forces`` eV/Å ``(N, 3)``,
 positions and ``r_max`` in Å. Nothing here converts units.
@@ -61,17 +69,16 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import torch
 from tensordict import TensorDict
 
+from molix.autograd import Derivative
 from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
 from molix.schema import POS_KEY
-from molpot.derivation.force import autograd_forces_from_energy
-from molpot.derivation.kernels import grad_force_pass
 from molpot.derivation.protocol import write_energy
 from molzoo.mace.checkpoint import CheckpointRemap, matpes_keys, omol_keys
 from molzoo.mace.encoder import MACEEncoder
@@ -125,15 +132,15 @@ class MacePotential(MACEEncoder):
     """MACE foundation-model energy (and forces) on the molnex batch schema.
 
     Given a batch of atomic systems it writes the per-graph potential energy
-    ``graphs.energy`` ``(B,)`` in eV and, unless built energy-only, the per-atom
-    forces ``atoms.forces`` ``(N, 3)`` in eV/Å; the energy expression it
-    evaluates and the ``F_i = -∂E/∂r_i`` convention are spelled out in the
-    module docstring. The variant is the spec's business; the only two switches
-    here decide *how much* is computed and *which cuEquivariance path* the
-    blocks take::
+    ``graphs.energy`` ``(B,)`` in eV and, when built with
+    ``wrt=("atoms.pos",)``, the per-atom forces ``atoms.forces`` ``(N, 3)`` in
+    eV/Å; the energy expression it evaluates and the ``F_i = -∂E/∂r_i``
+    convention are spelled out in the module docstring. The variant is the
+    spec's business; the only two switches here decide *what is derived* and
+    *which cuEquivariance path* the blocks take::
 
         potential = MaceMatpes(atomic_numbers=..., atomic_energies=...)
-        potential = MaceOmol(..., compute_forces=False)
+        potential = MaceOmol(..., wrt=("atoms.pos",))
         potential = MacePolar(..., use_fallback=True)
 
     A complete, runnable use of this public surface (both variants, free and
@@ -145,12 +152,11 @@ class MacePotential(MACEEncoder):
         spec: Validated variant configuration —
             :class:`~molzoo.mace.spec.MACEMatpesSpec` or
             :class:`~molzoo.mace.spec.MACEOMolSpec`.
-        compute_forces: Build the energy **and** force pipeline. Defaults to
-            ``True``: both foundation checkpoints are used for MD and
-            evaluation, where the force is the point.
-            (:class:`~molzoo.pinet.potential.PiNetPotential` defaults to
-            ``False`` because its main road is energy-only training — the
-            disagreement is deliberate, not an oversight.)
+        wrt: What :meth:`forward` derives beside the energy, as TensorFrame
+            keys (:class:`molix.autograd.Derivative`): ``()`` (the default)
+            writes ``graphs.energy`` alone, ``("atoms.pos",)`` adds
+            ``atoms.forces``, ``("atoms.pos", "graphs.strain")`` adds
+            ``graphs.virial`` on a one-graph periodic batch.
         use_fallback: Put the equivariant blocks on the pure-torch
             cuEquivariance path instead of its *fused* kernels — single GPU
             kernels that do a whole tensor product at once, and which need a
@@ -179,7 +185,7 @@ class MacePotential(MACEEncoder):
         self,
         spec: MACESpec,
         *,
-        compute_forces: bool = True,
+        wrt: Sequence[str | Sequence[str]] = (),
         use_fallback: bool = False,
         energy_dtype: torch.dtype | None = torch.float64,
     ) -> None:
@@ -202,15 +208,12 @@ class MacePotential(MACEEncoder):
             if spec.readout == "per_layer"
             else self._final_readout_energy
         )
-        #: One bound call path; ``forward`` never branches (cf. PiNetPotential).
-        self._pipeline = self._pipeline_ef if compute_forces else self._write_energy
-        #: Element-table gate, spent after the first batch (see ``_write_energy``).
+        #: The one derivative route: the op over :meth:`energy`, fixed at
+        #: construction. Its ``energy`` is a bound method, so it registers no
+        #: submodule and the checkpoint keys stay flat.
+        self._derivative = Derivative(self.energy, wrt=wrt)
+        #: Element-table gate, spent after the first eager batch (see ``energy``).
         self._elements_validated = False
-        #: Compiled build of :meth:`energy_core`, or ``None`` while eager.
-        #: A plain attribute, never a buffer: it is a callable, not model state,
-        #: and must stay out of ``state_dict``. Installed by
-        #: :meth:`compile_core`, read by :meth:`_write_energy`.
-        self._core: Callable[..., torch.Tensor] | None = None
 
     @classmethod
     def load(
@@ -240,7 +243,7 @@ class MacePotential(MACEEncoder):
                 Tensor state plus JSON config does not need this.
             converted_weights: Official cuEq-converted tensor state; ``path``
                 then supplies metadata only, never an intermediate weight load.
-            **kwargs: Constructor overrides (``use_fallback``, ``compute_forces``,
+            **kwargs: Constructor overrides (``use_fallback``, ``wrt``,
                 architecture fields).
 
         Returns:
@@ -266,47 +269,6 @@ class MacePotential(MACEEncoder):
     def _from_official(cls, official: dict[str, Any], **kwargs: Any) -> MacePotential:
         raise NotImplementedError(f"{cls.__name__} does not implement official construction")
 
-    def energy_forces(
-        self,
-        positions: torch.Tensor,
-        Z: torch.Tensor,
-        edge_index: torch.Tensor,
-        batch: torch.Tensor,
-        num_graphs: int | None = None,
-        *,
-        edge_diff: torch.Tensor | None = None,
-        total_charge: torch.Tensor | None = None,
-        total_spin: torch.Tensor | None = None,
-        cell: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
-        """Energy and forces from raw tensors.
-
-        Returns:
-            ``{"energy": (B,) eV, "forces": (N, 3) eV/Å}``.
-        """
-        if num_graphs is None:
-            num_graphs = (
-                int(total_charge.shape[0])
-                if total_charge is not None
-                else int(batch.max().item()) + 1
-            )
-        leaf = positions.detach().requires_grad_(True)
-        with torch.enable_grad():
-            energy = self._evaluate_core(
-                leaf,
-                Z,
-                edge_index,
-                batch,
-                num_graphs,
-                # A new position leaf owns this inference derivative. An
-                # incoming live edge graph belongs to the caller's old leaf.
-                edge_diff=None if edge_diff is None else edge_diff.detach(),
-                total_charge=total_charge,
-                total_spin=total_spin,
-                cell=cell,
-            )
-        return {"energy": energy.detach(), "forces": autograd_forces_from_energy(energy, leaf)}
-
     def configure_input_dtype(self, dtype: torch.dtype | None) -> None:
         """Cast geometry at the model boundary, preserving the caller's MD state.
 
@@ -318,8 +280,6 @@ class MacePotential(MACEEncoder):
         """
         if dtype not in (None, torch.float32, torch.float64):
             raise ValueError("input dtype must be torch.float32, torch.float64 or None")
-        if self._core is not None:
-            raise RuntimeError("configure input dtype before compile_core")
         self._input_dtype = dtype
 
     def _evaluate_core(
@@ -334,6 +294,7 @@ class MacePotential(MACEEncoder):
         total_charge: torch.Tensor | None = None,
         total_spin: torch.Tensor | None = None,
         cell: torch.Tensor | None = None,
+        atom_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """One dispatch/precision boundary for flat and TensorDict callers."""
         dtype = self._input_dtype
@@ -343,8 +304,7 @@ class MacePotential(MACEEncoder):
             cell = None if cell is None else cell.to(dtype=dtype)
             total_charge = None if total_charge is None else total_charge.to(dtype=dtype)
             total_spin = None if total_spin is None else total_spin.to(dtype=dtype)
-        core = self._core if self._core is not None else self.energy_core
-        return core(
+        return self.energy_core(
             positions,
             Z,
             edge_index,
@@ -354,25 +314,50 @@ class MacePotential(MACEEncoder):
             total_charge=total_charge,
             total_spin=total_spin,
             cell=cell,
+            atom_mask=atom_mask,
         )
 
     def _sum_energy(
-        self, values: torch.Tensor, batch: torch.Tensor, num_graphs: int
+        self,
+        values: torch.Tensor,
+        batch: torch.Tensor,
+        num_graphs: int,
+        atom_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Per-graph energy reduction with the user's accumulation precision."""
+        """Per-graph reduction of a per-atom energy, at the user's accumulation precision.
+
+        The one place a padded batch's ``atom_mask`` enters: every per-atom
+        energy (``e0``, the readouts, OMOL's embedding readout, Polar's local
+        electron energy) is multiplied by it **before** the graph sum, so a
+        ghost atom adds exactly zero to whichever graph it is assigned to. A
+        multiply, never a slice: the traced shape does not depend on the mask.
+
+        Args:
+            values: Per-atom energies ``(N,)`` in eV.
+            batch: Graph index per atom ``(N,)``.
+            num_graphs: Number of graphs ``B``.
+            atom_mask: Optional ``(N,)`` bool / float, ``True`` for real atoms.
+
+        Returns:
+            Per-graph energies ``(B,)`` in eV.
+        """
+        if atom_mask is not None:
+            values = values * atom_mask.to(dtype=values.dtype)
         if self.energy_dtype is not None:
             values = values.to(dtype=self.energy_dtype)
         return _scatter_sum(values, batch, num_graphs)
 
     def forward(self, batch: TensorDict) -> TensorDict:
-        """Run the construction-fixed pipeline, mutating ``batch`` in place.
+        """Run the construction-fixed op, mutating ``batch`` in place.
 
         Reads ``atoms.{Z,pos,batch}``, ``edges.edge_index`` ``(E, 2)`` (``[:,0]``
-        source, ``[:,1]`` target — never transposed on the way in), optional
-        ``edges.shifts`` ``(E, 3)`` and, for the OMOL variant, optional
+        source, ``[:,1]`` target — never transposed on the way in),
+        ``edges.edge_diff`` ``(E, 3)`` and, for the OMOL variant, optional
         ``graphs.{total_charge,total_spin}``. Writes ``graphs.energy`` ``(B,)``
-        in eV and — unless the instance was built with ``compute_forces=False``
-        — ``atoms.forces`` ``(N, 3)`` in eV/Å.
+        in eV and, per the ``wrt`` keys of construction, ``atoms.forces``
+        ``(N, 3)`` in eV/Å and ``graphs.virial`` ``(1, 3, 3)`` in eV. Under
+        ``torch.no_grad()`` every output is detached; with grad enabled they
+        stay attached to the parameters, so an energy or force loss trains.
 
         Args:
             batch: Post-collate ``TensorDict``.
@@ -385,10 +370,17 @@ class MacePotential(MACEEncoder):
                 model's element table (checked once per instance), or if it
                 carries ``graphs.total_charge`` / ``graphs.total_spin`` for a
                 variant that has no charge/spin conditioning.
-            RuntimeError: From the force kernel, if forces were requested but
-                the energy did not reach ``graphs.energy``.
         """
-        return self._pipeline(batch)
+        return self._derivative(batch)
+
+    @property
+    def derivative(self) -> Derivative:
+        """The op :meth:`forward` runs: ``Derivative(self.energy, wrt=...)``, fixed in ``__init__``.
+
+        What a training step marks its leaves through
+        (:meth:`molix.autograd.Derivative.mark_leaves`).
+        """
+        return self._derivative
 
     # --------------------------------------------------------- compile seam
     def bind_cell(self, cell: torch.Tensor) -> None:
@@ -408,69 +400,6 @@ class MacePotential(MACEEncoder):
         """
         del cell
 
-    def compile_core(self, compiler: Callable[[Callable[..., Any]], Callable[..., Any]]) -> None:
-        """Install a compiled build of :meth:`energy_core` as the evaluated core.
-
-        The single action is ``self._core = compiler(self.energy_core)``.
-        :meth:`_write_energy` then calls ``self._core`` instead of
-        :meth:`energy_core`, so no caller ever branches on "is it compiled?".
-        ``compiler`` is **structural** — any ``callable -> callable``, such as
-        :class:`molix.compile.Compiler`, which this module deliberately does
-        not import.
-
-        **Installation is idempotent and shared.** The mlip is one
-        ``nn.Module`` held by the ForceField, and every
-        :meth:`~molpot.forcefield.container.ForceField.to_potentials` call
-        builds a *fresh* ``Potentials`` around that same object — which is
-        exactly why the core is installed here and not on the container: it
-        survives every rebuild. A second call while a core is installed returns
-        without invoking ``compiler``, so a second, *different* compiler is
-        silently ignored. There is no ``uninstall``: to get the eager core back
-        (a force-supervised training run, say, whose double backward is not
-        compilable at all), build a new potential.
-
-        **Prescribed sequence.** The caller composes it — scripts, docs and
-        the docs do, the library does not::
-
-            ff.def_pairstyle(model)
-            pots = ff.to_potentials()
-            pots.bind_cell(cell)      # size the grids + capacity check
-            pots.calc_energy(work)    # one eager forward: elements + grids
-            pots.compile_core(Compiler(dynamic=True, backend=...))
-
-        ``dynamic=True`` on the MD path: the live edge count varies with every
-        neighbour-list rebuild, and a static shape would recompile each time.
-
-        **What the batch must carry** is unchanged by compiling, because
-        :meth:`_write_energy` keeps doing the unpacking either way: it resolves
-        ``num_graphs``, creates the ``graphs`` namespace when absent, and writes
-        the energy back through ``protocol.write_energy`` **undetached**. A
-        batch without a ``graphs`` namespace does *not* raise — it takes the one
-        documented host sync (``int(atom_batch.max().item()) + 1``), which is
-        affordable because ``_write_energy`` itself is never traced. A batch
-        without ``edges.edge_diff`` does raise, with the existing
-        ``ValueError``.
-
-        Args:
-            compiler: Any ``callable -> callable``; applied once to the bound
-                :meth:`energy_core`.
-
-        Raises:
-            RuntimeError: If no eager forward has happened yet — the element
-                table is unvalidated and, on the polarisable variant, the
-                k-space grids are unsized, neither of which a traced call can
-                repair.
-        """
-        if not self._elements_validated:
-            raise RuntimeError(
-                "compile_core needs a validated element table: run one eager "
-                "forward first (bind_cell(cell) then calc_energy(batch)) so the "
-                "element check and any k-space grid sizing happen outside the trace"
-            )
-        if self._core is not None:
-            return
-        self._core = compiler(self.energy_core)
-
     # ------------------------------------------------------------ energy core
     def energy_core(
         self,
@@ -485,6 +414,7 @@ class MacePotential(MACEEncoder):
         total_charge: torch.Tensor | None = None,
         total_spin: torch.Tensor | None = None,
         cell: torch.Tensor | None = None,
+        atom_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Per-graph total energy ``(B,)`` as a pure function of ``positions``.
 
@@ -509,14 +439,13 @@ class MacePotential(MACEEncoder):
         ``torch.compile``, ``torch.export``,
         ``molix.engine.export_for_lammps`` — calls
         :meth:`~molzoo.mace.encoder.MACEEncoder.validate_elements` once first.
-        On the batch path :meth:`_write_energy` is that caller and does it on
-        its first *eager* call.
+        On the batch path :meth:`energy` is that caller and does it on its
+        first *eager* call.
 
-        This method is also what :meth:`compile_core` compiles. The compiled
-        build covers **first-order, cell-bound, B = 1 MD inference only** — the
-        force backward runs outside it, and double backward (force-supervised
-        training) is not compilable under AOTAutograd, spec
-        ``cuet-force-doublebackward``.
+        The whole op — :meth:`forward` unpacking, leaf, this core and the
+        ``autograd.grad`` — compiles as one region under
+        :class:`molix.compile.Compiler` once one eager forward has spent the
+        element gate; this seam alone is what the exporters drive.
 
         Args:
             positions: Atom positions ``(N, 3)`` in Å.
@@ -545,6 +474,12 @@ class MacePotential(MACEEncoder):
                 :meth:`~molzoo.mace.polar.MacePolar.energy_core` overrides
                 this method and uses ``cell`` to select its periodic
                 reciprocal-space path.
+            atom_mask: Optional ``(N,)`` boolean, ``True`` for real atoms — what
+                a padded batch (:class:`molix.data.MoleculePadder`) carries
+                as ``atoms.mask``. Every per-atom energy is multiplied by it
+                before the graph sum (:meth:`_sum_energy`), so ghost atoms add
+                nothing; padding edges are dead by their geometry. ``None``
+                means every atom is real.
 
         Returns:
             Total energy per graph ``(B,)`` in eV.
@@ -567,9 +502,9 @@ class MacePotential(MACEEncoder):
         edge_attrs = self.angular_features(vectors)
 
         node_feats = self.initial_node_features(node_attrs)
-        e0 = self._sum_energy(self.atomic_energies(Z), batch, num_graphs)
+        e0 = self._sum_energy(self.atomic_energies(Z), batch, num_graphs, atom_mask)
         node_feats, e0 = self._conditioning(
-            node_feats, e0, batch, num_graphs, total_charge, total_spin
+            node_feats, e0, batch, num_graphs, total_charge, total_spin, atom_mask
         )
 
         per_layer = self.layer_features(
@@ -588,7 +523,7 @@ class MacePotential(MACEEncoder):
             else node_feats.new_zeros(node_feats.shape[0])
         )
         node_es = self._readout_energy(per_layer, node_es)
-        return e0 + self._sum_energy(self.scale_shift(node_es), batch, num_graphs)
+        return e0 + self._sum_energy(self.scale_shift(node_es), batch, num_graphs, atom_mask)
 
     # -------------------------------------------------------------- variants
     def _reject_conditioning(
@@ -599,6 +534,7 @@ class MacePotential(MACEEncoder):
         num_graphs: int,
         total_charge: torch.Tensor | None,
         total_spin: torch.Tensor | None,
+        atom_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Pass the node state through — this variant has no charge/spin input.
 
@@ -612,6 +548,7 @@ class MacePotential(MACEEncoder):
             num_graphs: Number of graphs ``B`` (unused).
             total_charge: Must be ``None``.
             total_spin: Must be ``None``.
+            atom_mask: Unused — nothing per-atom is added here.
 
         Returns:
             ``(node_feats, e0)`` unchanged.
@@ -636,6 +573,7 @@ class MacePotential(MACEEncoder):
         num_graphs: int,
         total_charge: torch.Tensor | None,
         total_spin: torch.Tensor | None,
+        atom_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Add the OMOL charge/spin embedding and its scalar readout to ``e0``.
 
@@ -652,6 +590,8 @@ class MacePotential(MACEEncoder):
                 embedding row and return garbage
                 (``src/molzoo/mace_omol.py:330-335`` at 0e05959, before
                 deletion).
+            atom_mask: Optional ``(N,)`` real-atom mask; the per-atom embedding
+                readout is multiplied by it before the graph sum.
 
         Returns:
             ``(conditioned node features (N, num_features), e0 (B,) eV)``.
@@ -664,7 +604,7 @@ class MacePotential(MACEEncoder):
             batch, total_spin=total_spin, total_charge=total_charge
         )
         embedded = self.embedding_readout(node_feats).squeeze(-1)
-        return node_feats, e0 + self._sum_energy(embedded, batch, num_graphs)
+        return node_feats, e0 + self._sum_energy(embedded, batch, num_graphs, atom_mask)
 
     def _per_layer_readout_energy(
         self, per_layer: list[torch.Tensor], node_es: torch.Tensor
@@ -698,14 +638,14 @@ class MacePotential(MACEEncoder):
         """
         return node_es + self.readout(per_layer[-1]).squeeze(-1)
 
-    # ------------------------------------------------------------- pipelines
-    def _write_energy(self, batch: TensorDict) -> TensorDict:
-        """Energy core on the batch schema — the ``protocol.call_energy`` hook.
+    # ---------------------------------------------------------------- energy
+    def energy(self, batch: TensorDict) -> TensorDict:
+        """The energy on the batch schema — what :class:`~molix.autograd.Derivative` differentiates.
 
-        Also the whole pipeline of a ``compute_forces=False`` instance.
-        Deliberately detaches **nothing**: an outer ``EnergyReadout`` /
-        ``ForceReadout`` session may own the position leaf this energy hangs
-        off, and detaching would cut ``F = -∂E/∂r``.
+        Also the whole of :meth:`forward` on an instance built with ``wrt=()``.
+        Deliberately detaches **nothing**: the op that calls it (this
+        potential's own, or one composed outside) owns the position leaf this
+        energy hangs off, and detaching would cut ``F = -∂E/∂r``.
 
         The ``graphs`` namespace is created here — ``TensorDict({},
         batch_size=[num_graphs])`` — *before* ``protocol.write_energy`` runs, so
@@ -720,21 +660,23 @@ class MacePotential(MACEEncoder):
         Args:
             batch: Post-collate ``TensorDict`` carrying ``atoms.{Z,pos,batch}``
                 and ``edges.edge_index`` ``(E, 2)``. Optional and consumed when
-                present: ``edges.shifts`` ``(E, 3)`` in Å (periodic images) and,
-                for the OMOL variant, ``graphs.{total_charge,total_spin}``
+                present: ``edges.shifts`` ``(E, 3)`` in Å (periodic images),
+                ``atoms.mask`` ``(N,)`` (a padded batch's real-atom mask, passed
+                to :meth:`energy_core` as ``atom_mask``) and, for the OMOL
+                variant, ``graphs.{total_charge,total_spin}``
                 ``(B,)``. A ``graphs`` namespace that is already there supplies
                 ``B`` from its ``batch_size``; without one, ``B`` costs the one
-                host sync on this path (``forward`` is not the compile target,
-                :meth:`energy_core` is).
+                host sync on this path — hand the op a batch with a ``graphs``
+                namespace, as every collate produces, before compiling.
 
         Returns:
             The same ``batch``, with ``graphs.energy`` ``(B,)`` in eV written.
 
         Raises:
             ValueError: On the first **eager** call, if any atomic number lies
-                outside this model's element table — the compiled seam never
-                validates, since the check host-syncs (see
-                :meth:`compile_core`); on every call, if a variant without
+                outside this model's element table — a traced call never
+                validates, since the check host-syncs, which is why one eager
+                forward precedes any compile; on every call, if a variant without
                 charge/spin conditioning was handed ``graphs.total_charge`` or
                 ``graphs.total_spin``; on every call, if ``edges.edge_diff`` is
                 absent from ``batch`` (``edges.shifts`` alone is no longer a
@@ -743,7 +685,7 @@ class MacePotential(MACEEncoder):
         Z = batch["atoms", "Z"]
         positions = batch[POS_KEY]
         atom_batch = batch["atoms", "batch"]
-        edge_index = batch["edges", "edge_index"]  # (E, 2) — the core's own convention
+        edge_index = batch["pairs", "pair_index"]  # (E, 2) — the core's own convention
 
         # Once per instance: Z is constant over a trajectory and a wrongly
         # wired model/dataset pair fails on the very first batch, while a
@@ -764,23 +706,21 @@ class MacePotential(MACEEncoder):
             # target — ``energy_core`` is, and it takes ``num_graphs`` directly.
             num_graphs = int(atom_batch.max().item()) + 1
 
-        if ("edges", "edge_diff") not in nested:
+        if ("pairs", "pair_diff") not in nested:
             raise ValueError(
-                "MacePotential.forward requires edges.edge_diff; "
+                "MacePotential.energy requires edges.edge_diff; "
                 "edges.shifts is no longer a PBC channel"
             )
         cell = None
         if ("graphs", "cell") in nested:
             cell = batch["graphs", "cell"]
-        # One evaluation path: the compiled build when compile_core installed
-        # one, the eager bound method otherwise. No caller branches on this.
         energy = self._evaluate_core(
             positions,
             Z,
             edge_index,
             atom_batch,
             num_graphs,
-            edge_diff=batch["edges", "edge_diff"],
+            edge_diff=batch["pairs", "pair_diff"],
             total_charge=(
                 batch["graphs", "total_charge"] if ("graphs", "total_charge") in nested else None
             ),
@@ -788,36 +728,13 @@ class MacePotential(MACEEncoder):
                 batch["graphs", "total_spin"] if ("graphs", "total_spin") in nested else None
             ),
             cell=cell,
+            atom_mask=batch["atoms", "mask"] if ("atoms", "mask") in nested else None,
         )
 
         if not has_graphs:
             batch["graphs"] = TensorDict({}, batch_size=[num_graphs])
         write_energy(batch, energy)
         return batch
-
-    def _pipeline_ef(self, batch: TensorDict) -> TensorDict:
-        """Energy + forces: one energy forward, one ``autograd.grad`` backward.
-
-        Delegates to the shared batch-level kernel
-        (:func:`molpot.derivation.kernels.grad_force_pass`) — the autograd
-        backend, the only one cuEquivariance's fused kernels support. This
-        module hand-rolls no force path of its own.
-
-        ``detach_energy=None`` is the ``needs_leaf`` policy the flat models
-        implemented by hand: the kernel detaches ``graphs.energy`` exactly when
-        it had to create the position leaf itself, and leaves it attached when
-        the caller handed in a live ``requires_grad`` leaf, so a training
-        ``loss.backward()`` still reaches the parameters. ``create_graph``
-        follows the ambient grad mode.
-
-        Args:
-            batch: Post-collate ``TensorDict`` carrying ``atoms.pos``.
-
-        Returns:
-            The same ``batch``, with ``graphs.energy`` ``(B,)`` in eV and
-            ``atoms.forces`` ``(N, 3)`` in eV/Å.
-        """
-        return grad_force_pass(self._write_energy, batch, detach_energy=None)
 
 
 def _energy_table(atomic_energies: Sequence[float] | torch.Tensor) -> list[float]:
@@ -924,7 +841,7 @@ class MaceMatpes(MacePotential):
         radial_mlp: Sequence[int] = (64, 64, 64),
         scale: float = 1.0,
         shift: float = 0.0,
-        compute_forces: bool = True,
+        wrt: Sequence[str | Sequence[str]] = (),
         use_fallback: bool = False,
         energy_dtype: torch.dtype | None = torch.float64,
     ) -> None:
@@ -947,7 +864,7 @@ class MaceMatpes(MacePotential):
         )
         super().__init__(
             spec,
-            compute_forces=compute_forces,
+            wrt=wrt,
             use_fallback=use_fallback,
             energy_dtype=energy_dtype,
         )
@@ -1010,7 +927,7 @@ class MaceOmol(MacePotential):
         spin_offset: int = 0,
         scale: float = 1.0,
         shift: float = 0.0,
-        compute_forces: bool = True,
+        wrt: Sequence[str | Sequence[str]] = (),
         use_fallback: bool = False,
         energy_dtype: torch.dtype | None = torch.float64,
     ) -> None:
@@ -1036,7 +953,7 @@ class MaceOmol(MacePotential):
         )
         super().__init__(
             spec,
-            compute_forces=compute_forces,
+            wrt=wrt,
             use_fallback=use_fallback,
             energy_dtype=energy_dtype,
         )

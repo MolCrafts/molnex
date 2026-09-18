@@ -79,11 +79,11 @@ def _make_single_graph(
     total_charge: float,
 ) -> TensorDict:
     n = pos.shape[0]
-    edge_index = torch.tensor(
+    pair_index = torch.tensor(
         [[i, j] for i in range(n) for j in range(n) if i != j], dtype=torch.long
     )
-    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    edge_dist = edge_diff.norm(dim=-1)
+    pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]]
+    pair_dist = pair_diff.norm(dim=-1)
     batch_idx = torch.zeros(n, dtype=torch.long)
     num_atoms = torch.tensor([n], dtype=torch.long)
 
@@ -97,11 +97,11 @@ def _make_single_graph(
 
     return TensorDict(
         atoms=TensorDict(Z=Z, pos=pos, batch=batch_idx, batch_size=[n]),
-        edges=TensorDict(
-            edge_index=edge_index,
-            edge_diff=edge_diff,
-            edge_dist=edge_dist,
-            batch_size=[edge_index.shape[0]],
+        pairs=TensorDict(
+            pair_index=pair_index,
+            pair_diff=pair_diff,
+            pair_dist=pair_dist,
+            batch_size=[pair_index.shape[0]],
         ),
         graphs=TensorDict(**graphs_kwargs),
         batch_size=[],
@@ -126,12 +126,12 @@ def _stack_graphs(graphs: list[TensorDict]) -> TensorDict:
     for gi, g in enumerate(graphs):
         n_g = g["atoms", "pos"].shape[0]
         batch_parts.append(torch.full((n_g,), gi, dtype=torch.long))
-        edge_parts.append(g["edges", "edge_index"] + offset)
+        edge_parts.append(g["pairs", "pair_index"] + offset)
         offset += n_g
     batch_idx = torch.cat(batch_parts, dim=0)
-    edge_index = torch.cat(edge_parts, dim=0)
-    edge_diff = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    edge_dist = edge_diff.norm(dim=-1)
+    pair_index = torch.cat(edge_parts, dim=0)
+    pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]]
+    pair_dist = pair_diff.norm(dim=-1)
 
     total_charge = torch.cat([g["graphs", "total_charge"] for g in graphs], dim=0)  # (B,)
 
@@ -147,11 +147,11 @@ def _stack_graphs(graphs: list[TensorDict]) -> TensorDict:
 
     return TensorDict(
         atoms=TensorDict(Z=Z, pos=pos, batch=batch_idx, batch_size=[pos.shape[0]]),
-        edges=TensorDict(
-            edge_index=edge_index,
-            edge_diff=edge_diff,
-            edge_dist=edge_dist,
-            batch_size=[edge_index.shape[0]],
+        pairs=TensorDict(
+            pair_index=pair_index,
+            pair_diff=pair_diff,
+            pair_dist=pair_dist,
+            batch_size=[pair_index.shape[0]],
         ),
         graphs=TensorDict(
             num_atoms=num_atoms,

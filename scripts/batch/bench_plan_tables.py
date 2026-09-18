@@ -8,7 +8,7 @@ and the block-native code form (``(F,) int32`` columns plus a bounded
 ``task_names`` tuple) are only ~2x apart in steady state, and that the plan —
 not the table — dominates at every frame count. That is a hand-derivation, not
 a measurement. This bench plans the *same* synthetic split through both
-representations of :class:`~molix.batch.sampler.TaskMixtureBatchSampler` at
+representations of :class:`~molix.data.sampler.TaskMixtureBatchSampler` at
 F in {1e6, 1e7, 1e8} and reports the numbers ``02-view`` / ``03-plan`` are
 allowed to design against.
 
@@ -23,7 +23,7 @@ Method
   reported as ``base MB`` so the interpreter + torch offset stays visible.
 * **The dataset is counts only.** :class:`CountOnlyDataset` exposes exactly the
   two members the sampler touches — ``len(dataset)`` in ``_validate_tables``
-  (``src/molix/batch/sampler.py:789``) and ``dataset.atom_counts`` in
+  (``src/molix/data/sampler.py``) and ``n_atoms[frame_mol]`` in
   ``_frame_budgets`` (``:833``) — and raises from ``__getitem__``, so "no sample
   is unpacked during planning" is enforced by construction rather than trusted.
 * **No divergence between representations.** :class:`SyntheticSplit` derives
@@ -45,7 +45,7 @@ Projection model (CPython 3.13/3.14, 64-bit)
 --------------------------------------------
 
 Per-unit terms are amortized over ``--frames-per-unit`` frames. Per frame,
-shared by both representations: the ``int64`` ``atom_counts`` column
+shared by both representations: the ``int64`` ``n_atoms`` column
 (8 B); the parent-index tuple the sampler materialises, pointer plus uncached
 ``int`` object (36 B); the two ``codes_at`` Python lists, two pointers plus the
 uncached group ``int`` (44 B); one pointer per frame in its unit's member list
@@ -89,7 +89,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO / "src") not in sys.path:
     sys.path.insert(0, str(_REPO / "src"))
 
-from molix.batch.sampler import TaskMixtureBatchSampler  # noqa: E402
+from molix.data.sampler import TaskMixtureBatchSampler  # noqa: E402
 
 _MB = 1e6
 _GB = 1e9
@@ -108,7 +108,7 @@ _REQUIRED_FRAMES = (1_000_000, 10_000_000)
 # Hand model of the peak footprint, in bytes; see the module docstring.
 _FRAME_TERMS: dict[str, tuple[tuple[str, int], ...]] = {
     "shared": (
-        ("atom_counts int64 column", 8),
+        ("n_atoms int64 column", 8),
         ("parent index tuple: pointer + int object", 36),
         ("codes_at lists: 2 pointers + uncached group int", 44),
         ("unit member list: one pointer per frame", 8),
@@ -183,30 +183,32 @@ class CountOnlyDataset:
 
     The sampler touches a dataset exactly twice — ``len(dataset)`` when it
     validates the label table against the parent index space
-    (``src/molix/batch/sampler.py:789``) and ``dataset.atom_counts`` when it
-    resolves its budgets (``:833``, guarded by ``except AttributeError``). It
-    never indexes one, which is the invariant
+    (``src/molix/data/sampler.py``) and
+    :func:`~molix.data.nrows.nrows` (this object's ``n_atoms``
+    column at ``frame_mol``). It never indexes one, which is the invariant
     ``test_no_sample_is_unpacked_during_planning`` pins; ``__getitem__`` here
     raises so this bench would fail loudly rather than quietly measure an
     unpacking path.
 
     Args:
-        atom_counts: ``(F,)`` ``int64`` per-frame atom counts.
+        n_atoms: ``(F,)`` ``int64`` per-frame ``atoms.nrows``.
     """
 
-    __slots__ = ("_atom_counts",)
+    __slots__ = ("_n_atoms", "frame_mol")
 
-    def __init__(self, atom_counts: torch.Tensor) -> None:
-        self._atom_counts = atom_counts
+    def __init__(self, n_atoms: torch.Tensor) -> None:
+        self._n_atoms = n_atoms
+        self.frame_mol = torch.arange(n_atoms.shape[0], dtype=torch.long)
 
-    @property
-    def atom_counts(self) -> torch.Tensor:
-        """``(F,)`` ``int64`` per-frame atom counts, the sampler's budget cost vector."""
-        return self._atom_counts
+    def column(self, name: str) -> torch.Tensor:
+        """Per-frame ``n_atoms`` column, ``(F,)`` for this synthetic split."""
+        if name != "n_atoms":
+            raise KeyError(name)
+        return self._n_atoms
 
     def __len__(self) -> int:
         """Frame count ``F`` of the parent index space."""
-        return int(self._atom_counts.shape[0])
+        return int(self._n_atoms.shape[0])
 
     def __getitem__(self, index: int) -> dict:
         """Never called during planning.
@@ -219,7 +221,7 @@ class CountOnlyDataset:
         """
         raise AssertionError(
             f"CountOnlyDataset[{index}]: planning must not unpack a sample; "
-            "the sampler is only allowed len() and atom_counts."
+            "the sampler is only allowed len() and n_atoms[frame_mol]."
         )
 
 
@@ -299,7 +301,7 @@ class SyntheticSplit:
 
         Returns:
             ``(task_codes, group_codes)``, both ``(F,)`` ``int32`` exactly as
-            :attr:`~molix.store.frame_store.FrameStoreReader.task_codes` /
+            per-frame ``task_codes`` /
             ``group_codes`` emit them. Codes match :meth:`labels`'
             first-appearance factorization frame for frame.
         """

@@ -33,21 +33,30 @@ def _require_equal_1d(a: torch.Tensor, b: torch.Tensor, name_a: str, name_b: str
         )
 
 
+def _broadcast_periodicity(k: torch.Tensor, periodicity: torch.Tensor) -> torch.Tensor:
+    """Per-type multiplicities, broadcasting a shared ``[n_terms]`` row.
+
+    The canonical table is per type and per term so AMBER and CHARMM torsions
+    fit; one row shared by every type (OPLS ``n = 1,2,3,4``) is that table's
+    special case, so it is accepted here and expanded rather than refused.
+    """
+    if periodicity.ndim == 1 and k.ndim == 2 and periodicity.shape[0] == k.shape[1]:
+        return periodicity.expand(k.shape[0], -1).contiguous()
+    return periodicity
+
+
 def _validate_cosine_term_tables(
     *,
     k: torch.Tensor,
     periodicity: torch.Tensor,
     phase: torch.Tensor,
-    idivf: torch.Tensor,
     bag_name: str,
 ) -> None:
     """Validate multi-term cosine torsion tables.
 
     Expected shapes
     ---------------
-    k, phase : ``[n_types, n_terms]``
-    periodicity : ``[n_terms]``
-    idivf : ``[n_types]``
+    k, phase, periodicity : ``[n_types, n_terms]``
     """
     if k.ndim != 2:
         raise ValueError(f"{bag_name}.k must be [n_types, n_terms], got shape {tuple(k.shape)}")
@@ -55,15 +64,10 @@ def _validate_cosine_term_tables(
         raise ValueError(
             f"{bag_name}.phase must match k shape {tuple(k.shape)}, got {tuple(phase.shape)}"
         )
-    n_types, n_terms = k.shape
-    if periodicity.ndim != 1 or periodicity.shape[0] != n_terms:
+    if periodicity.shape != k.shape:
         raise ValueError(
-            f"{bag_name}.periodicity must be [n_terms]={n_terms}, "
-            f"got shape {tuple(periodicity.shape)}"
-        )
-    if idivf.ndim != 1 or idivf.shape[0] != n_types:
-        raise ValueError(
-            f"{bag_name}.idivf must be [n_types]={n_types}, got shape {tuple(idivf.shape)}"
+            f"{bag_name}.periodicity must match k shape {tuple(k.shape)} "
+            f"(or be [n_terms] and broadcast), got {tuple(periodicity.shape)}"
         )
     if not bool((periodicity > 0).all()):
         raise ValueError(f"{bag_name}.periodicity entries must be > 0, got {periodicity.tolist()}")
@@ -107,32 +111,32 @@ class ProperTorsionBag:
 
     Energy per interaction type ``t`` and term ``m``::
 
-        E = Σ_m (k[t,m] / idivf[t]) * [1 + cos(n[m] * φ − γ[t,m])]
+        E = Σ_m k[t,m] * [1 + cos(n[m] * φ − γ[t,m])]
 
-    Storage is the cosine table ``(k, phase, periodicity, idivf)`` only —
-    no ``c0`` and no persisted ``a``/``b``. Cartesian Fourier amplitudes
-    convert through :meth:`from_cartesian`.
+    Storage is the cosine table ``(k, phase, periodicity)`` only — no
+    ``c0``, no persisted ``a``/``b``, and no AMBER divisor: a reader divides
+    ``k`` by ``IDIVF`` on the way in (spec ff-params-01). Cartesian Fourier
+    amplitudes convert through :meth:`from_cartesian`.
 
     Units (``CLASS_I_CANONICAL``): ``k`` in kcal/mol; ``phase`` in rad.
 
     Attributes:
         k: Barrier heights ``[n_types, n_terms]`` (kcal/mol).
-        periodicity: Integer periodicities ``[n_terms]`` (shared across types).
+        periodicity: Integer periodicities ``[n_types, n_terms]`` — per type and
+            per term, so AMBER and CHARMM torsions fit as well as OPLS.
         phase: Phase offsets γ ``[n_types, n_terms]`` (radians).
-        idivf: AMBER scale / identity divisor ``s`` per type ``[n_types]``.
     """
 
     k: torch.Tensor
     periodicity: torch.Tensor
     phase: torch.Tensor
-    idivf: torch.Tensor
 
     def __post_init__(self) -> None:
+        self.periodicity = _broadcast_periodicity(self.k, self.periodicity)
         _validate_cosine_term_tables(
             k=self.k,
             periodicity=self.periodicity,
             phase=self.phase,
-            idivf=self.idivf,
             bag_name="ProperTorsionBag",
         )
 
@@ -142,13 +146,12 @@ class ProperTorsionBag:
         a: torch.Tensor,
         b: torch.Tensor,
         periodicity: torch.Tensor,
-        idivf: torch.Tensor | None = None,
     ) -> ProperTorsionBag:
         """Build cosine-table storage from Cartesian Fourier amplitudes.
 
         Maps ``k = hypot(a, b)`` and ``phase = atan2(b, a)`` (radians).
         Zero amplitude uses the IEEE convention ``atan2(0, 0) = 0``.
-        ``idivf`` defaults to ones. There is no ``c0`` field.
+        There is no ``c0`` field and no divisor.
 
         Units (``CLASS_I_CANONICAL``): ``a``, ``b``, ``k`` in kcal/mol;
         ``phase`` in rad.
@@ -156,11 +159,37 @@ class ProperTorsionBag:
         Args:
             a: Cosine amplitudes ``[n_types, n_terms]`` (kcal/mol).
             b: Sine amplitudes ``[n_types, n_terms]`` (kcal/mol).
-            periodicity: Integer periodicities ``[n_terms]``.
-            idivf: Identity divisor ``[n_types]``. Defaults to ones.
+            periodicity: Integer periodicities ``[n_types, n_terms]``.
 
         Returns:
-            Bag with fields ``k``, ``phase``, ``periodicity``, ``idivf``.
+            Bag with fields ``k``, ``phase``, ``periodicity``.
+
+        Raises:
+            ValueError: If ``a``/``b`` are not 2-D or their shapes differ.
+        """
+        k, phase = cls.polar_from_cartesian(a, b)
+        return cls(k=k, periodicity=periodicity, phase=phase)
+
+    @staticmethod
+    def polar_from_cartesian(a: torch.Tensor, b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """``k = hypot(a, b)``, ``phase = atan2(b, a)`` — tensor math only.
+
+        Separate from :meth:`from_cartesian` because the parameterized energy
+        path converts *inside* the compiled region, and building a bag there
+        would run :func:`_validate_cosine_term_tables` — whose positivity check
+        is a ``bool()`` on a tensor, i.e. a host sync and a data-dependent
+        guard dynamo refuses. The shape checks below are Python-level and
+        stay: they are free under compile.
+
+        Units (``CLASS_I_CANONICAL``): ``a``, ``b``, ``k`` in kcal/mol;
+        ``phase`` in rad.
+
+        Args:
+            a: Cosine amplitudes ``[n_types, n_terms]`` (kcal/mol).
+            b: Sine amplitudes ``[n_types, n_terms]`` (kcal/mol).
+
+        Returns:
+            ``(k, phase)``, each ``[n_types, n_terms]``.
 
         Raises:
             ValueError: If ``a``/``b`` are not 2-D or their shapes differ.
@@ -173,11 +202,25 @@ class ProperTorsionBag:
             raise ValueError(
                 f"a and b must have equal shape, got {tuple(a.shape)} vs {tuple(b.shape)}"
             )
-        k = torch.hypot(a, b)
-        phase = torch.atan2(b, a)
-        if idivf is None:
-            idivf = torch.ones(a.shape[0], device=a.device, dtype=k.dtype)
-        return cls(k=k, periodicity=periodicity, phase=phase, idivf=idivf)
+        # The map is singular at the origin: ``d hypot / d a = a / hypot`` and
+        # ``d atan2 / d a = -b / (a² + b²)`` are both ``0 / 0`` there, so a row
+        # of exactly ``(0, 0)`` returns a finite ``k = 0`` and a NaN gradient.
+        # That row is not hypothetical — every padded torsion slot is exactly
+        # zero, because the mask zeroes the parameters rather than the energy
+        # (``Potentials._mask_term_tables``). Left alone it hands NaN to every
+        # encoder weight while the loss itself still reads finite.
+        #
+        # Evaluate the branch on substituted inputs and select afterwards: at a
+        # zero row both ``k`` and its gradient are 0, and ``phase`` carries the
+        # gradient of ``atan2(b, 1)``, which the caller multiplies by
+        # ``k = 0`` (``dE/dγ = k · sin(nφ − γ)``). Live rows are untouched —
+        # exact values, no epsilon bias.
+        degenerate = (a == 0) & (b == 0)
+        ones = torch.ones_like(a)
+        square = torch.where(degenerate, ones, a * a + b * b)
+        k = torch.where(degenerate, torch.zeros_like(a), torch.sqrt(square))
+        phase = torch.atan2(b, torch.where(degenerate, ones, a))
+        return k, phase
 
     @classmethod
     def _cosine_fields(cls, pp: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -191,12 +234,11 @@ class ProperTorsionBag:
         if has_cartesian and has_polar:
             raise ValueError("propers params cannot mix cartesian (a, b) with polar (k, phase)")
         if "a" in pp and "b" in pp:
-            bag = cls.from_cartesian(pp["a"], pp["b"], pp["periodicity"], pp.get("idivf"))
+            k, phase = cls.polar_from_cartesian(pp["a"], pp["b"])
             return {
-                "k": bag.k,
-                "phase": bag.phase,
-                "periodicity": bag.periodicity,
-                "idivf": bag.idivf,
+                "k": k,
+                "phase": phase,
+                "periodicity": _broadcast_periodicity(k, pp["periodicity"]),
             }
         return pp
 
@@ -210,22 +252,20 @@ class ImproperPeriodicBag:
 
     Attributes:
         k: Barrier heights ``[n_types, n_terms]``.
-        periodicity: Integer periodicities ``[n_terms]``.
+        periodicity: Integer periodicities ``[n_types, n_terms]``.
         phase: Phase offsets γ ``[n_types, n_terms]`` (radians).
-        idivf: Scale / identity divisor ``s`` per type ``[n_types]``.
     """
 
     k: torch.Tensor
     periodicity: torch.Tensor
     phase: torch.Tensor
-    idivf: torch.Tensor
 
     def __post_init__(self) -> None:
+        self.periodicity = _broadcast_periodicity(self.k, self.periodicity)
         _validate_cosine_term_tables(
             k=self.k,
             periodicity=self.periodicity,
             phase=self.phase,
-            idivf=self.idivf,
             bag_name="ImproperPeriodicBag",
         )
 
@@ -267,7 +307,7 @@ class ChargeBag:
     """Partial charges.
 
     Attributes:
-        q: Charges in elementary charge units ``[n_atoms]`` (or per type).
+        charge: Charges in elementary charge units ``[n_atoms]`` (or per type).
     """
 
-    q: torch.Tensor
+    charge: torch.Tensor

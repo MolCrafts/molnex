@@ -260,7 +260,7 @@ def charge_default_criterion() -> MergeCriterion:
     """Default charge budget: |Δq| ≤ 0.02 e (conservative; often unused)."""
     return MergeCriterion(
         interaction=InteractionClass.CHARGE,
-        abs_tol={"q": _CHARGE_ABS_Q, "charge": _CHARGE_ABS_Q},
+        abs_tol={"charge": _CHARGE_ABS_Q},
         required_keys=(),
     )
 

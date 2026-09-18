@@ -259,7 +259,7 @@ for this spec (tracked in `scripts/omol_port/SPEC.md`).
 
 | Concern | Owner | Contract |
 |---------|-------|----------|
-| Neighbor list / edges | collate / `molix.batch.NeighborList` | populates `edges.edge_index` `(E,2)` |
+| Neighbor list / edges | collate / `molix.data.NeighborList` | populates `edges.edge_index` `(E,2)` |
 | Edge displacements | `molzoo.mace.geometry` | `edge_vectors` / `edge_lengths`; differentiable w.r.t. `pos` |
 | Charge/spin inputs | dataset / collate | `graphs.total_charge`, `graphs.total_spin` (optional) |
 | Building blocks | `molrep.readout.mace` (+ generic `molrep` / `molpot`) | reused; not owned here |

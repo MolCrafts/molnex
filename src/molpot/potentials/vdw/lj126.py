@@ -141,7 +141,7 @@ def geometric_mean(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 def lorentz_berthelot(
     atom_params: dict[str, torch.Tensor],
-    edge_index: torch.Tensor,
+    pair_index: torch.Tensor,
 ) -> dict[str, torch.Tensor]:
     """Lorentz-Berthelot mixing rules: per-atom → per-pair.
 
@@ -162,7 +162,7 @@ def lorentz_berthelot(
     Args:
         atom_params: Must contain ``"epsilon"`` ``(N,)`` in kcal/mol and
             ``"sigma"`` ``(N,)`` in Å, one entry per atom.
-        edge_index: Edge indices ``(E, 2)`` — column 0 the first atom of each
+        pair_index: Edge indices ``(E, 2)`` — column 0 the first atom of each
             pair, column 1 the second. Both rules are symmetric in the two
             columns, so the edge direction does not matter here.
 
@@ -177,7 +177,7 @@ def lorentz_berthelot(
         Berthelot, D. "Sur le mélange des gaz" C. R. Acad. Sci. 126, 1703
         (1898) — the geometric ``ε`` rule.
     """
-    src, dst = edge_index[:, 0], edge_index[:, 1]
+    src, dst = pair_index[:, 0], pair_index[:, 1]
     epsilon, sigma = atom_params["epsilon"], atom_params["sigma"]
     return {
         "epsilon_ij": geometric_mean(epsilon[src], epsilon[dst]),
@@ -187,7 +187,7 @@ def lorentz_berthelot(
 
 def geometric_mixing(
     atom_params: dict[str, torch.Tensor],
-    edge_index: torch.Tensor,
+    pair_index: torch.Tensor,
 ) -> dict[str, torch.Tensor]:
     """Geometric mixing rules (OPLS-AA): per-atom → per-pair.
 
@@ -207,7 +207,7 @@ def geometric_mixing(
     Args:
         atom_params: Must contain ``"epsilon"`` ``(N,)`` in kcal/mol and
             ``"sigma"`` ``(N,)`` in Å, one entry per atom.
-        edge_index: Edge indices ``(E, 2)`` — column 0 the first atom of each
+        pair_index: Edge indices ``(E, 2)`` — column 0 the first atom of each
             pair, column 1 the second. Both means are symmetric in the two
             columns, so the edge direction does not matter here.
 
@@ -221,7 +221,7 @@ def geometric_mixing(
         and Properties of Organic Liquids" J. Am. Chem. Soc. 118, 11225 (1996).
         https://doi.org/10.1021/ja9621760
     """
-    src, dst = edge_index[:, 0], edge_index[:, 1]
+    src, dst = pair_index[:, 0], pair_index[:, 1]
     epsilon, sigma = atom_params["epsilon"], atom_params["sigma"]
     return {
         "epsilon_ij": geometric_mean(epsilon[src], epsilon[dst]),
@@ -255,7 +255,7 @@ class MixingRule(StrEnum):
     def mix(
         self,
         atom_params: dict[str, torch.Tensor],
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         """Apply this rule to a per-atom parameter table.
 
@@ -274,7 +274,7 @@ class MixingRule(StrEnum):
         Args:
             atom_params: Must contain ``"epsilon"`` ``(N,)`` in kcal/mol and
                 ``"sigma"`` ``(N,)`` in Å.
-            edge_index: Edge indices ``(E, 2)``.
+            pair_index: Edge indices ``(E, 2)``.
 
         Returns:
             Dict with ``"epsilon_ij"`` ``(E,)`` in kcal/mol and ``"sigma_ij"``
@@ -286,7 +286,7 @@ class MixingRule(StrEnum):
         rule = _MIXING_FUNCTIONS.get(self)
         if rule is None:
             raise ValueError(f"no mixing function is registered for {self!r}")
-        return rule(atom_params, edge_index)
+        return rule(atom_params, pair_index)
 
 
 #: Which function each :class:`MixingRule` member evaluates. Defined beside the
@@ -310,7 +310,7 @@ class LJ126(nn.Module):
     force field's per-atom tables into those per-pair values is held here as
     :attr:`mixing_fn` and applied by the caller one step earlier —
     :class:`~molpot.composition.PotentialComposer` is that caller in tree, which
-    evaluates ``potential.mixing_fn(atom_params, edge_index)`` and passes the
+    evaluates ``potential.mixing_fn(atom_params, pair_index)`` and passes the
     result in as ``epsilon_ij`` / ``sigma_ij``. Reading the rule off the
     potential is what keeps the parameters and the rule that combined them
     together, rather than leaving the composer to pick one.
@@ -323,9 +323,9 @@ class LJ126(nn.Module):
 
     Args:
         mixing_fn: Combining rule, called as
-            ``mixing_fn(atom_params, edge_index)`` where ``atom_params`` holds
+            ``mixing_fn(atom_params, pair_index)`` where ``atom_params`` holds
             ``"epsilon"`` ``(N,)`` in kcal/mol and ``"sigma"`` ``(N,)`` in Å and
-            ``edge_index`` is ``(E, 2)``, returning ``"epsilon_ij"`` ``(E,)`` in
+            ``pair_index`` is ``(E, 2)``, returning ``"epsilon_ij"`` ``(E,)`` in
             kcal/mol and ``"sigma_ij"`` ``(E,)`` in Å. Defaults to
             :func:`lorentz_berthelot`, the AMBER / CHARMM rule;
             :func:`geometric_mixing` (equivalently
@@ -363,7 +363,7 @@ class LJ126(nn.Module):
         distance: torch.Tensor,
         epsilon_ij: torch.Tensor,
         sigma_ij: torch.Tensor,
-        edge_batch: torch.Tensor | None = None,
+        pair_batch: torch.Tensor | None = None,
         num_graphs: int | None = None,
     ) -> torch.Tensor:
         """Compute LJ 12-6 energy.
@@ -372,9 +372,9 @@ class LJ126(nn.Module):
             distance: Pairwise distances ``r`` ``(E,)`` in Å.
             epsilon_ij: Per-pair well depth ``ε_ij`` ``(E,)`` in kcal/mol.
             sigma_ij: Per-pair zero-crossing distance ``σ_ij`` ``(E,)`` in Å.
-            edge_batch: Index of the molecule (graph) each edge belongs to
+            pair_batch: Index of the molecule (graph) each edge belongs to
                 ``(E,)``. If None, returns summed scalar.
-            num_graphs: Number of molecules ``B`` (inferred from ``edge_batch``
+            num_graphs: Number of molecules ``B`` (inferred from ``pair_batch``
                 if None).
 
         Returns:
@@ -386,12 +386,12 @@ class LJ126(nn.Module):
         if self.bidirectional:
             pair_energy = 0.5 * pair_energy
 
-        if edge_batch is None:
+        if pair_batch is None:
             return pair_energy.sum()
 
         if num_graphs is None:
-            num_graphs = int(edge_batch.max().item()) + 1
+            num_graphs = int(pair_batch.max().item()) + 1
 
         energy = torch.zeros(num_graphs, dtype=pair_energy.dtype, device=pair_energy.device)
-        energy.index_add_(0, edge_batch, pair_energy)
+        energy.index_add_(0, pair_batch, pair_energy)
         return energy

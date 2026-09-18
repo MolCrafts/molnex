@@ -25,7 +25,6 @@ torch.ops.load_library = soft  # type: ignore[method-assign]
 
 from molix.compile import Compiler  # noqa: E402
 from molix.profiler import MockBatch  # noqa: E402
-from molpot.derivation import EnergyReadout, ForceReadout  # noqa: E402
 from molzoo.pinet import PiNet, PiNetPotential  # noqa: E402
 
 ATOM = list(range(1, 8))
@@ -33,10 +32,10 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def factory(n=64, e=256, g=4):
-    return MockBatch(n_atoms=n, n_edges=e, n_graphs=g, atomic_numbers=7, device=device, seed=0)
+    return MockBatch(n_atoms=n, n_pairs=e, n_graphs=g, atomic_numbers=7, device=device, seed=0)
 
 
-def make_pot(*, forces=False, method="func", rank=3, depth=2, hidden=32):
+def make_pot(*, forces=False, rank=3, depth=2, hidden=32):
     pot = PiNetPotential(
         atom_types=ATOM,
         r_max=5.0,
@@ -47,17 +46,9 @@ def make_pot(*, forces=False, method="func", rank=3, depth=2, hidden=32):
         depth=depth,
         rank=rank,
         hidden_dim=hidden,
-        compute_forces=forces,
+        wrt=("atoms.pos",) if forces else (),
         emit_property_features=False,
     )
-    if method != "func":
-        pot.deriv_method = method
-        if forces:
-            er = EnergyReadout(pot, method=method, backward=True)
-            fr = ForceReadout(pot, method=method)
-            pot._pipeline = lambda b, e=er, f=fr: f(e(b))
-        else:
-            pot._pipeline = EnergyReadout(pot, method=method, backward=False)
     if device == "cuda":
         pot = pot.cuda()
     return pot
@@ -141,14 +132,14 @@ def main() -> None:
                 self.p = p
 
             def forward(self, batch):
-                return self.p._write_energy(batch)
+                return self.p.energy(batch)
 
         core = torch.compile(Core(pot), backend="inductor", fullgraph=False)
         with torch.no_grad():
             b = core(factory()())
         return ("energy", float(b["graphs", "energy"].sum()))
 
-    try_call("D Core(_write_energy) compile fullgraph=False", d)
+    try_call("D Core(energy) compile fullgraph=False", d)
 
     def e():
         pot = make_pot(forces=False).eval()
@@ -163,7 +154,7 @@ def main() -> None:
     try_call("E dynamo.explain energy-only", e)
 
     def f():
-        pot = make_pot(forces=True, method="grad").eval()
+        pot = make_pot(forces=True).eval()
         c = torch.compile(pot, backend="inductor", fullgraph=False)
         with torch.enable_grad():
             b = c(factory()())
@@ -174,21 +165,7 @@ def main() -> None:
             float(b["atoms", "forces"].abs().mean()),
         )
 
-    try_call("F force grad torch.compile(fullgraph=False)", f)
-
-    def g():
-        pot = make_pot(forces=True, method="func").eval()
-        c = torch.compile(pot, backend="inductor", fullgraph=False)
-        with torch.enable_grad():
-            b = c(factory()())
-        return (
-            "E",
-            float(b["graphs", "energy"].sum()),
-            "F",
-            float(b["atoms", "forces"].abs().mean()),
-        )
-
-    try_call("G force func torch.compile(fullgraph=False)", g)
+    try_call("F force head torch.compile(fullgraph=False)", f)
 
     def h():
         pot = make_pot(forces=False).eval()
@@ -207,7 +184,6 @@ def main() -> None:
     def i():
         pot = make_pot(forces=False).eval()
         pot.encoder = torch.compile(pot.encoder, backend="inductor", fullgraph=False)
-        pot._pipeline = EnergyReadout(pot, method="func", backward=False)
         with torch.no_grad():
             b = pot(factory()())
         return ("energy", float(b["graphs", "energy"].sum()))
@@ -215,7 +191,7 @@ def main() -> None:
     try_call("I compile encoder submodule, energy readout eager", i)
 
     def j():
-        pot = make_pot(forces=True, method="grad").train()
+        pot = make_pot(forces=True).train()
         pot = torch.compile(pot, backend="inductor", fullgraph=False)
         opt = torch.optim.Adam(pot.parameters(), lr=1e-3)
         opt.zero_grad(set_to_none=True)
@@ -225,11 +201,11 @@ def main() -> None:
         opt.step()
         return ("loss", float(loss.detach()))
 
-    try_call("J force-train grad compiled fullgraph=False one step", j)
+    try_call("J force-train head compiled fullgraph=False one step", j)
 
     # K: fullgraph force with grad (old production claim)
     def k():
-        pot = make_pot(forces=True, method="grad").eval()
+        pot = make_pot(forces=True).eval()
         pot = torch.compile(pot, backend="inductor", fullgraph=True, dynamic=False)
         with torch.enable_grad():
             b = pot(factory()())
@@ -240,9 +216,9 @@ def main() -> None:
             float(b["atoms", "forces"].abs().mean()),
         )
 
-    try_call("K force grad torch.compile(fullgraph=True)", k)
+    try_call("K force head torch.compile(fullgraph=True)", k)
 
-    # L: plain tensors path — extract energy as function of (Z, pos, edge_index, batch)
+    # L: plain tensors path — extract energy as function of (Z, pos, pair_index, batch)
     #    (future compile surface if TensorDict is the problem)
     def l_flat():
         pot = make_pot(forces=False).eval()
@@ -255,7 +231,7 @@ def main() -> None:
                 self.out_layers = p.out_layers
                 self.energy_aggregation = p.energy_aggregation
 
-            def forward(self, Z, pos, edge_index, atom_batch, num_graphs: int):
+            def forward(self, Z, pos, pair_index, atom_batch, num_graphs: int):
                 from tensordict import TensorDict
 
                 td = TensorDict(
@@ -264,9 +240,9 @@ def main() -> None:
                             {"Z": Z, "pos": pos, "batch": atom_batch},
                             batch_size=[Z.shape[0]],
                         ),
-                        "edges": TensorDict(
-                            {"edge_index": edge_index},
-                            batch_size=[edge_index.shape[0]],
+                        "pairs": TensorDict(
+                            {"pair_index": pair_index},
+                            batch_size=[pair_index.shape[0]],
                         ),
                         "graphs": TensorDict({}, batch_size=[num_graphs]),
                     },
@@ -287,14 +263,14 @@ def main() -> None:
         cflat = torch.compile(flat, backend="inductor", fullgraph=True)
         Z = batch["atoms", "Z"]
         pos = batch["atoms", "pos"]
-        ei = batch["edges", "edge_index"]
+        ei = batch["pairs", "pair_index"]
         ab = batch["atoms", "batch"]
         ng = int(batch["graphs"].batch_size[0])
         with torch.no_grad():
             e = cflat(Z, pos, ei, ab, ng)
         return ("energy", float(e.sum()), "shape", tuple(e.shape))
 
-    try_call("L flat (Z,pos,edge_index) energy fullgraph=True", l_flat)
+    try_call("L flat (Z,pos,pair_index) energy fullgraph=True", l_flat)
 
     print("\n=== DONE ===", flush=True)
 

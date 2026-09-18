@@ -56,8 +56,8 @@ class CalculatorDipole(torch.nn.Module):
 
         Args:
             dipoles: Atomic dipoles ``(n_atoms, 3)``.
-            neighbor_indices: Edge index pairs ``(n_edges, 2)``.
-            neighbor_vectors: Edge vectors ``(n_edges, 3)``.
+            neighbor_indices: Edge index pairs ``(n_pairs, 2)``.
+            neighbor_vectors: Edge vectors ``(n_pairs, 3)``.
 
         Returns:
             Real-space potential ``(n_atoms, 3)``.
@@ -138,8 +138,8 @@ class CalculatorDipole(torch.nn.Module):
             dipoles: Atomic dipoles ``(n_atoms, 3)``.
             cell: Unit cell matrix ``(3, 3)``.
             positions: Cartesian coordinates ``(n_atoms, 3)``.
-            neighbor_indices: Edge index pairs ``(n_edges, 2)``.
-            neighbor_vectors: Edge vectors ``(n_edges, 3)``.
+            neighbor_indices: Edge index pairs ``(n_pairs, 2)``.
+            neighbor_vectors: Edge vectors ``(n_pairs, 3)``.
 
         Returns:
             Total potential ``(n_atoms, 3)``.

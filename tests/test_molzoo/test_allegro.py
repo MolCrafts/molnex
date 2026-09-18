@@ -64,12 +64,12 @@ def _build_graph(
         batch_size=[n],
     )
     edges = TensorDict(
-        edge_index=edge_index,
-        edge_diff=edge_diff,
-        edge_dist=edge_dist,
+        pair_index=edge_index,
+        pair_diff=edge_diff,
+        pair_dist=edge_dist,
         batch_size=[edge_index.shape[0]],
     )
-    td = {"atoms": atoms, "edges": edges}
+    td = {"atoms": atoms, "pairs": edges}
     if with_graphs:
         td["graphs"] = TensorDict(num_atoms=torch.tensor([n], dtype=torch.long), batch_size=[1])
     return TensorDict(**td, batch_size=[])
@@ -139,8 +139,8 @@ class TestAllegroEncoder:
         Z = torch.randint(1, 5, (4,))
         g = _build_graph(pos, Z, r_cut=enc.r_max)
         out = enc(g)
-        ef = out["edges", "edge_features"]
-        assert ef.shape == (g["edges", "edge_index"].shape[0], enc.output_dim)
+        ef = out["pairs", "edge_features"]
+        assert ef.shape == (g["pairs", "pair_index"].shape[0], enc.output_dim)
 
 
 # ---------------------------------------------------------------------------

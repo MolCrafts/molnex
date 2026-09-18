@@ -156,7 +156,7 @@ class KSpaceGrid:
 
         ``w(n) = 2 · 1[first non-zero n_i > 0] · 1[0 < |k|² < k_cutoff²]``
 
-    reproduces the masked half-sphere term by term: real ``q``, ``μ``, ``r``
+    reproduces the masked half-sphere term by term: real ``charge``, ``μ``, ``r``
     give ``S(-k) = conj(S(k))``, so one member of each ``±n`` pair carries
     weight ``2`` and the rest carry exactly ``0.0`` (IEEE 754 arithmetic gives
     ``x + 0.0 == x``, so padding rows are free). ``k = 0`` is excluded by
@@ -569,7 +569,7 @@ def structure_factor(
         recip: Reciprocal basis ``(3, 3)`` Å⁻¹ from :func:`reciprocal_basis`.
         capacity: Per-axis ``N_c`` from :attr:`KSpaceGrid.capacity`.
         dipoles: Optional Cartesian dipoles ``(N, 3)`` in e·Å. ``k·μ`` is then
-            in e, so it adds to ``q`` with no unit conversion.
+            in e, so it adds to ``charge`` with no unit conversion.
 
     Returns:
         ``S_real (M,)``, ``S_imag (M,)``, both in e.

@@ -222,7 +222,7 @@ class EwaldMultipoleEnergy(BasePotential):
         and/or ``α`` are passed.
         """
         if data is not None and q is None:
-            q = data.get("q") if isinstance(data, dict) else None
+            q = data.get("charge") if isinstance(data, dict) else None
         if data is not None and pos is None:
             pos = data.get("pos") if isinstance(data, dict) else None
         if q is None or pos is None:

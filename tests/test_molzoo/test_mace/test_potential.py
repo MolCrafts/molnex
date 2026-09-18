@@ -7,23 +7,19 @@ foundation models — now the keyword aliases
 seams:
 
 * ``energy_core(...) -> (B,)`` — flat, public, compilable (1 dynamo graph);
-* ``_write_energy(batch) -> batch`` — the ``molpot.derivation.protocol``
-  hook that ``call_energy`` dispatches to.
+* ``energy(batch) -> batch`` — the energy on the batch schema, what
+  ``molix.autograd.Derivative`` differentiates and ``call_energy`` reaches.
 
-Every branch (forces on/off, charge/spin conditioning) is resolved in
-``__init__`` into ``self._pipeline``; ``forward`` is a one-line dispatch and no
-public signature carries ``compute_forces``.
+Every branch (what is derived, charge/spin conditioning) is resolved in
+``__init__``; ``forward`` is a one-line dispatch through the op and no public
+signature carries a per-call switch.
 
 The two keyword variants are imported here as **parity oracles**: the numbers
-must not move when the code moves house. Since the cutover
-(``mace-subpackage-restructure-06-wire``) they are subclasses of the class under
-test, so the parity is no longer "old module vs new module" but the two seams a
-caller actually has — ``MacePotential.forward`` (batch schema, shared force
-kernel, own position leaf policy) against ``MaceMatpes.energy_forces`` /
-``MaceOmol.energy_forces`` (raw tensors, the variants' own leaf). Those are two
-genuinely different code paths on one energy, and
-``regressions/mace-subpackage-restructure-04-potential.py`` freezes the same
-numbers as hard-coded literals with no import of either.
+must not move when the code moves house. The parity is between the two seams
+a caller actually has — ``MacePotential.forward`` (batch schema, the op owning
+the position leaf) against ``energy_core`` differentiated on a leaf of the
+test's own (:func:`_raw_energy_forces`). Those are two genuinely different
+code paths on one energy.
 
 Every model is tiny (2 layers, 16 channels, ``l_max=1``), fp64 (autouse
 ``fp64`` fixture in ``conftest.py``), CPU, seeded — see
@@ -42,7 +38,9 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from molix.autograd import Derivative
 from molix.compile import Compiler
+from molix.schema import ENERGY_KEY, FORCES_KEY, VIRIAL_KEY
 from molpot.derivation.protocol import call_energy
 from molzoo.mace.encoder import MACEEncoder
 from molzoo.mace.potential import MaceMatpes, MaceOmol, MacePotential
@@ -61,8 +59,8 @@ from tests.test_molzoo.test_mace.conftest import (
 TRANSLATION = [1.0, 0.0, 0.0]
 
 #: Re-homing the code must not move a bit: fp64 parity between the batch path
-#: and the variants' raw-tensor ``energy_forces`` (spec §Domain basis —
-#: measured bitwise equal at the same operator order).
+#: and ``energy_core`` on a raw leaf (spec §Domain basis — measured bitwise
+#: equal at the same operator order).
 ENERGY_PARITY_ATOL = 1e-12  # eV
 FORCE_PARITY_ATOL = 1e-12  # eV/Å
 
@@ -83,8 +81,16 @@ FLAT_ENERGY_CORE_PARAMETERS = ("self", "positions", "Z", "edge_index", "batch", 
 
 #: The keyword tail after the flat six: imaged geometry, the rejected legacy
 #: ``shifts``, the two per-graph conditioning tensors only the OMOL variant
-#: consumes, and the ``cell`` only the Polar k-space path reads.
-CONDITIONING_PARAMETERS = ("edge_diff", "shifts", "total_charge", "total_spin", "cell")
+#: consumes, the ``cell`` only the Polar k-space path reads, and the per-atom
+#: ``atom_mask`` a padded batch (``molix.data.MoleculePadder``) carries.
+CONDITIONING_PARAMETERS = (
+    "edge_diff",
+    "shifts",
+    "total_charge",
+    "total_spin",
+    "cell",
+    "atom_mask",
+)
 
 #: A third force path in this file is forbidden (CLAUDE.md "Force derivation").
 FORBIDDEN_GRAD_CALLS = frozenset(
@@ -114,6 +120,36 @@ def _transfer(potential: MacePotential, variant: torch.nn.Module) -> MacePotenti
     """Move the oracle's weights into the potential by a strict key match."""
     potential.load_state_dict(variant.state_dict(), strict=True)
     return potential
+
+
+def _raw_energy_forces(potential: MacePotential, batch: TensorDict) -> dict[str, torch.Tensor]:
+    """``{"energy", "forces"}`` from ``energy_core`` on a leaf of this test's own.
+
+    The raw-tensor oracle: everything is read off ``batch`` as flat tensors,
+    the positions are re-leafed here, ``edge_diff`` is rebuilt from that leaf
+    (plus the batch's own lattice remainder) and ``torch.autograd.grad`` is
+    called directly — no op, no frame, no restore.
+    """
+    pos, Z, edge_index, membership, num_graphs = raw_tensors(batch)
+    nested = batch.keys(include_nested=True)
+    leaf = pos.detach().clone().requires_grad_(True)
+    shifts = batch["pairs", "pair_diff"].detach() - (pos[edge_index[:, 1]] - pos[edge_index[:, 0]])
+    conditioning = {
+        name: batch["graphs", name]
+        for name in ("total_charge", "total_spin")
+        if ("graphs", name) in nested
+    }
+    energy = potential.energy_core(
+        leaf,
+        Z,
+        edge_index,
+        membership,
+        num_graphs,
+        edge_diff=leaf[edge_index[:, 1]] - leaf[edge_index[:, 0]] + shifts,
+        **conditioning,
+    )
+    (grad,) = torch.autograd.grad(energy.sum(), leaf)
+    return {"energy": energy.detach(), "forces": -grad}
 
 
 def _dotted_name(node: ast.expr) -> str:
@@ -161,42 +197,34 @@ def leaf_cluster() -> TensorDict:
     return make_graph_batch(
         pos=pos,
         Z=torch.tensor(CLUSTER_Z, dtype=torch.long),
-        edge_index=full_edge_index(SINGLE_GRAPH),
+        pair_index=full_edge_index(SINGLE_GRAPH),
         batch=torch.zeros(len(CLUSTER_Z), dtype=torch.long),
     )
 
 
-@pytest.fixture
-def branch_cluster() -> TensorDict:
-    """The cluster whose ``atoms.pos`` requires grad but is **not** a leaf."""
-    pos = torch.tensor(CLUSTER_POS, dtype=torch.float64).requires_grad_(True) * 1.0
-    return make_graph_batch(
-        pos=pos,
-        Z=torch.tensor(CLUSTER_Z, dtype=torch.long),
-        edge_index=full_edge_index(SINGLE_GRAPH),
-        batch=torch.zeros(len(CLUSTER_Z), dtype=torch.long),
-    )
+FORCES = ("atoms.pos",)
+FORCES_AND_VIRIAL = ("atoms.pos", "graphs.strain")
 
 
 @pytest.fixture
 def matpes_potential(tiny_matpes_spec: MACEMatpesSpec) -> MacePotential:
     """Energy + force MatPES potential on the tiny spec."""
     torch.manual_seed(0)
-    return MacePotential(tiny_matpes_spec).eval()
+    return MacePotential(tiny_matpes_spec, wrt=FORCES).eval()
 
 
 @pytest.fixture
 def energy_only_potential(tiny_matpes_spec: MACEMatpesSpec) -> MacePotential:
-    """Energy-only MatPES potential — ``compute_forces=False`` is a *construction*."""
+    """Energy-only MatPES potential — ``wrt=()`` is a *construction*."""
     torch.manual_seed(0)
-    return MacePotential(tiny_matpes_spec, compute_forces=False).eval()
+    return MacePotential(tiny_matpes_spec).eval()
 
 
 @pytest.fixture
 def omol_potential(tiny_omol_spec: MACEOMolSpec) -> MacePotential:
     """Energy + force OMOL potential on the tiny spec."""
     torch.manual_seed(0)
-    return MacePotential(tiny_omol_spec).eval()
+    return MacePotential(tiny_omol_spec, wrt=FORCES).eval()
 
 
 @pytest.fixture
@@ -204,7 +232,8 @@ def matpes_parity(
     tiny_matpes_spec: MACEMatpesSpec, matpes_variant: MaceMatpes
 ) -> tuple[MacePotential, MaceMatpes]:
     """MatPES potential holding the oracle variant's weights, plus the oracle."""
-    return _transfer(MacePotential(tiny_matpes_spec).eval(), matpes_variant), matpes_variant
+    potential = _transfer(MacePotential(tiny_matpes_spec, wrt=FORCES).eval(), matpes_variant)
+    return potential, matpes_variant
 
 
 @pytest.fixture
@@ -212,7 +241,8 @@ def omol_parity(
     tiny_omol_spec: MACEOMolSpec, omol_variant: MaceOmol
 ) -> tuple[MacePotential, MaceOmol]:
     """OMOL potential holding the oracle variant's weights, plus the oracle."""
-    return _transfer(MacePotential(tiny_omol_spec).eval(), omol_variant), omol_variant
+    potential = _transfer(MacePotential(tiny_omol_spec, wrt=FORCES).eval(), omol_variant)
+    return potential, omol_variant
 
 
 class TestMacePotential:
@@ -237,41 +267,34 @@ class TestMacePotential:
         with pytest.raises(ValueError, match="energy_dtype"):
             MacePotential(tiny_matpes_spec, energy_dtype=torch.float16)
 
-    def test_input_cast_keeps_force_chain_rule(self, matpes_variant: MaceMatpes) -> None:
+    def test_input_cast_keeps_force_chain_rule(
+        self, matpes_variant: MaceMatpes, cluster: TensorDict
+    ) -> None:
+        """The boundary cast stays differentiable and the forces come back at the caller's dtype.
+
+        An fp64 caller with ``configure_input_dtype(float32)`` and an fp32
+        caller feed the same fp32 model; they agree to fp32 precision, not to
+        the bit — the op rebuilds the edge geometry from the fp64 leaf and
+        the model casts it at its boundary, so the subtraction rounds once in
+        fp64 rather than twice in fp32 (measured 4e-8 eV/Å).
+        """
         model = matpes_variant.float().eval()
         original_keys = set(model.state_dict())
-        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
-        z = torch.tensor(CLUSTER_Z)
-        edges = full_edge_index(SINGLE_GRAPH)
-        batch = torch.zeros(len(z), dtype=torch.long)
-        expected = model.energy_forces(pos.float(), z, edges, batch, 1)
+        single = make_graph_batch(
+            pos=torch.tensor(CLUSTER_POS, dtype=torch.float32),
+            Z=torch.tensor(CLUSTER_Z, dtype=torch.long),
+            pair_index=full_edge_index(SINGLE_GRAPH),
+            batch=torch.zeros(len(CLUSTER_Z), dtype=torch.long),
+        )
+        expected = model(single)
         model.configure_input_dtype(torch.float32)
-        actual = model.energy_forces(pos, z, edges, batch, 1)
-        assert actual["forces"].dtype == torch.float64
-        torch.testing.assert_close(actual["forces"], expected["forces"].double(), atol=0, rtol=0)
-        torch.testing.assert_close(actual["energy"], expected["energy"], atol=0, rtol=0)
+        actual = model(cluster)
+        assert actual[FORCES_KEY].dtype == torch.float64
+        torch.testing.assert_close(
+            actual[FORCES_KEY], expected[FORCES_KEY].double(), atol=1e-6, rtol=1e-6
+        )
+        torch.testing.assert_close(actual[ENERGY_KEY], expected[ENERGY_KEY], atol=1e-6, rtol=1e-6)
         assert set(model.state_dict()) == original_keys
-
-    def test_input_precision_cannot_change_after_compile(self, matpes_variant: MaceMatpes) -> None:
-        matpes_variant._core = matpes_variant.energy_core
-        with pytest.raises(RuntimeError, match="before compile_core"):
-            matpes_variant.configure_input_dtype(torch.float32)
-
-    def test_energy_forces_rebinds_live_edges_to_its_position_leaf(self, matpes_variant):
-        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64, requires_grad=True)
-        z = torch.tensor(CLUSTER_Z)
-        edges = full_edge_index(SINGLE_GRAPH)
-        batch = torch.zeros(len(z), dtype=torch.long)
-        live = pos[edges[:, 1]] - pos[edges[:, 0]]
-        expected = matpes_variant.energy_forces(pos, z, edges, batch, 1, edge_diff=live.detach())
-        actual = matpes_variant.energy_forces(pos, z, edges, batch, 1, edge_diff=live)
-        torch.testing.assert_close(actual["forces"], expected["forces"], atol=0, rtol=0)
-
-    def test_forces_are_computed_by_default(self) -> None:
-        """MD / evaluation is the main use — unlike ``PiNetPotential``."""
-        parameters = inspect.signature(MacePotential.__init__).parameters
-        assert parameters["compute_forces"].default is True
-        assert parameters["use_fallback"].default is False
 
     def test_the_spec_decides_the_cuequivariance_path(
         self, matpes_potential: MacePotential
@@ -348,7 +371,7 @@ class TestMacePotential:
     def test_energy_only_forward_also_builds_graphs_with_the_batch_size(
         self, energy_only_potential: MacePotential, pair_batch: TensorDict
     ) -> None:
-        """The energy-only pipeline is ``_write_energy`` — same schema duty."""
+        """The energy-only op is ``energy`` — same schema duty."""
         del pair_batch["graphs"]
         out = energy_only_potential(pair_batch)
         assert out["graphs"].batch_size == torch.Size([2])
@@ -358,7 +381,7 @@ class TestMacePotential:
     ) -> None:
         """``edges.shifts`` must reach the edge vectors, not be dropped."""
         pos, Z, edge_index, batch, num_graphs = raw_tensors(periodic_cluster)
-        edge_diff = periodic_cluster["edges", "edge_diff"]
+        edge_diff = periodic_cluster["pairs", "pair_diff"]
         with torch.no_grad():
             expected = matpes_potential.energy_core(
                 pos, Z, edge_index, batch, num_graphs, edge_diff=edge_diff
@@ -380,34 +403,32 @@ class TestMacePotential:
         out = energy_only_potential(cluster)
         assert out["graphs", "energy"].shape == (1,)
 
-    # -- needs_leaf policy ----------------------------------------------------
+    # -- the derivative op ----------------------------------------------------
 
-    def test_detached_positions_yield_a_detached_energy(
+    def test_forward_is_the_same_op_composed_outside(
+        self,
+        matpes_potential: MacePotential,
+        energy_only_potential: MacePotential,
+        cluster: TensorDict,
+    ) -> None:
+        """``wrt`` at construction and ``Derivative(model, wrt=...)`` are one code path."""
+        energy_only_potential.load_state_dict(matpes_potential.state_dict(), strict=True)
+        composed = Derivative(energy_only_potential, wrt=FORCES)
+        with torch.no_grad():
+            inside = matpes_potential(cluster.clone())
+            outside = composed(cluster.clone())
+        assert torch.equal(inside[FORCES_KEY], outside[FORCES_KEY])
+        assert torch.equal(inside[ENERGY_KEY], outside[ENERGY_KEY])
+
+    def test_derivative_exposes_the_init_fixed_op(self, matpes_potential: MacePotential) -> None:
+        """The training step marks the leaves through ``derivative`` — the op ``forward`` runs."""
+        assert matpes_potential.derivative.wrt == (("atoms", "pos"),)
+
+    def test_energy_loss_through_forward_reaches_the_parameters(
         self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
-        """The potential owns the leaf, so nobody downstream can lose a graph."""
+        """With grad enabled the op leaves the energy attached: ``loss.backward()`` trains."""
         out = matpes_potential(cluster)
-        assert out["graphs", "energy"].requires_grad is False
-
-    def test_non_leaf_positions_yield_a_detached_energy(
-        self, matpes_potential: MacePotential, branch_cluster: TensorDict
-    ) -> None:
-        """``needs_leaf = not (requires_grad and is_leaf)`` — a branch is not a leaf."""
-        out = matpes_potential(branch_cluster)
-        assert out["graphs", "energy"].requires_grad is False
-
-    def test_grad_leaf_positions_keep_the_energy_attached(
-        self, matpes_potential: MacePotential, leaf_cluster: TensorDict
-    ) -> None:
-        """Detaching here would cut the training path at the first potential."""
-        out = matpes_potential(leaf_cluster)
-        assert out["graphs", "energy"].requires_grad is True
-
-    def test_grad_leaf_energy_loss_reaches_the_parameters(
-        self, matpes_potential: MacePotential, leaf_cluster: TensorDict
-    ) -> None:
-        """The whole point of not detaching: ``loss.backward()`` trains the model."""
-        out = matpes_potential(leaf_cluster)
         out["graphs", "energy"].sum().backward()
         weight = matpes_potential.readouts[0].linear.weight
         assert weight.grad is not None and torch.any(weight.grad != 0)
@@ -468,6 +489,58 @@ class TestMacePotential:
                 *raw_tensors(cluster), total_spin=torch.ones(1, dtype=torch.long)
             )
 
+    def test_energy_core_atom_mask_multiplies_every_per_atom_energy(
+        self, matpes_potential: MacePotential, cluster: TensorDict
+    ) -> None:
+        """``atom_mask`` scales ``e0`` and the readout node energies before the graph sum.
+
+        An all-false mask therefore prices the whole graph at exactly zero — a
+        multiply, never a slice, so the traced shape never depends on the mask.
+        """
+        pos, Z, edge_index, atom_batch, num_graphs = raw_tensors(cluster)
+        with torch.no_grad():
+            unmasked = matpes_potential.energy_core(pos, Z, edge_index, atom_batch, num_graphs)
+            masked = matpes_potential.energy_core(
+                pos,
+                Z,
+                edge_index,
+                atom_batch,
+                num_graphs,
+                atom_mask=torch.zeros_like(Z, dtype=torch.bool),
+            )
+        assert float(unmasked.abs().sum()) > 0.0
+        assert torch.equal(masked, torch.zeros_like(unmasked))
+
+    def test_a_padded_batch_returns_the_unpadded_energy_and_forces(
+        self, matpes_potential: MacePotential, tiny_matpes_spec: MACEMatpesSpec, cluster: TensorDict
+    ) -> None:
+        """``MoleculePadder`` ghosts add nothing: ``energy`` forwards ``atoms.mask``.
+
+        Ghost atoms carry ``e0`` and a readout energy of their own, and the
+        padding edges are self-loops on the first ghost at the dead-edge
+        displacement; the per-atom multiply by ``atoms.mask`` and the dead
+        geometry together leave the per-graph energy, the real atoms' forces
+        and (zero) ghost forces exactly as on the unpadded batch.
+        """
+        from molix.data import MoleculePadder
+
+        n_atoms = int(cluster["atoms"].batch_size[0])
+        n_pairs = int(cluster["pairs"].batch_size[0])
+        reference = matpes_potential(cluster.clone())
+        padded = MoleculePadder(
+            max_atoms=n_atoms + 3, max_pairs=n_pairs + 7, cutoff=tiny_matpes_spec.r_max
+        )(cluster.clone())
+        out = matpes_potential(padded)
+        assert torch.allclose(
+            out[ENERGY_KEY], reference[ENERGY_KEY], atol=ENERGY_PARITY_ATOL, rtol=0.0
+        )
+        assert torch.allclose(
+            out[FORCES_KEY][:n_atoms], reference[FORCES_KEY], atol=FORCE_PARITY_ATOL, rtol=0.0
+        )
+        assert torch.equal(
+            out[FORCES_KEY][n_atoms:], torch.zeros(3, 3, dtype=out[FORCES_KEY].dtype)
+        )
+
     def test_omol_energy_core_consumes_the_total_charge(
         self, omol_parity: tuple[MacePotential, MaceOmol], omol_cluster: TensorDict
     ) -> None:
@@ -496,12 +569,12 @@ class TestMacePotential:
             )
         assert float((cation - neutral).abs().max()) > 1e-6
 
-    # -- _write_energy: the protocol hook -------------------------------------
+    # -- energy: the seam a container reaches ---------------------------------
 
-    def test_call_energy_dispatches_to_the_energy_core(
+    def test_call_energy_dispatches_to_the_energy_not_the_op(
         self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
-        """``EnergyReadout`` must reach the core, not the force pipeline."""
+        """A container's energy call must reach ``energy``, never the force op."""
         out = call_energy(matpes_potential, cluster)
         assert ("graphs", "energy") in out.keys(include_nested=True)
         assert ("atoms", "forces") not in out.keys(include_nested=True)
@@ -509,20 +582,20 @@ class TestMacePotential:
     def test_call_energy_keeps_the_energy_on_the_callers_leaf(
         self, matpes_potential: MacePotential, leaf_cluster: TensorDict
     ) -> None:
-        """``_write_energy`` must not detach — ``ForceReadout`` differentiates it."""
+        """``energy`` must not detach — an op composed outside differentiates it."""
         out = call_energy(matpes_potential, leaf_cluster)
         assert out["graphs", "energy"].requires_grad is True
 
     # -- monomorphism ---------------------------------------------------------
 
-    def test_forward_is_a_single_pipeline_dispatch(self) -> None:
-        """``return self._pipeline(batch)`` — every branch resolved in ``__init__``."""
+    def test_forward_is_a_single_op_dispatch(self) -> None:
+        """``return self._derivative(batch)`` — every branch resolved in ``__init__``."""
         body = _function_body(MacePotential.forward)
         assert len(body) == 1
         statement = body[0]
         assert isinstance(statement, ast.Return)
         assert isinstance(statement.value, ast.Call)
-        assert _dotted_name(statement.value.func) == "self._pipeline"
+        assert _dotted_name(statement.value.func) == "self._derivative"
 
     def test_no_hand_rolled_force_pass_in_this_module(self) -> None:
         """Forces come from the shared kernel; a third force path is forbidden."""
@@ -538,8 +611,7 @@ class TestMacePotential:
     ) -> None:
         """Moving house must not move a bit (1e-12 eV on a −3.1 keV total)."""
         potential, variant = matpes_parity
-        pos, Z, edge_index, batch, num_graphs = raw_tensors(cluster)
-        reference = variant.energy_forces(pos, Z, edge_index, batch, num_graphs=num_graphs)
+        reference = _raw_energy_forces(variant, cluster)
         energy = potential(cluster)["graphs", "energy"]
         assert torch.allclose(energy, reference["energy"], atol=ENERGY_PARITY_ATOL, rtol=0.0), (
             f"bitwise equal: {torch.equal(energy, reference['energy'])}"
@@ -550,8 +622,7 @@ class TestMacePotential:
     ) -> None:
         """Same for ``F = -dE/dx`` (1e-12 eV/Å)."""
         potential, variant = matpes_parity
-        pos, Z, edge_index, batch, num_graphs = raw_tensors(cluster)
-        reference = variant.energy_forces(pos, Z, edge_index, batch, num_graphs=num_graphs)
+        reference = _raw_energy_forces(variant, cluster)
         forces = potential(cluster)["atoms", "forces"]
         assert torch.allclose(forces, reference["forces"], atol=FORCE_PARITY_ATOL, rtol=0.0), (
             f"bitwise equal: {torch.equal(forces, reference['forces'])}"
@@ -562,11 +633,7 @@ class TestMacePotential:
     ) -> None:
         """The ``edges.shifts`` path is the MD path — it gets its own parity check."""
         potential, variant = matpes_parity
-        pos, Z, edge_index, batch, num_graphs = raw_tensors(periodic_cluster)
-        edge_diff = periodic_cluster["edges", "edge_diff"]
-        reference = variant.energy_forces(
-            pos, Z, edge_index, batch, num_graphs=num_graphs, edge_diff=edge_diff
-        )
+        reference = _raw_energy_forces(variant, periodic_cluster)
         energy = potential(periodic_cluster)["graphs", "energy"]
         assert torch.allclose(energy, reference["energy"], atol=ENERGY_PARITY_ATOL, rtol=0.0), (
             f"bitwise equal: {torch.equal(energy, reference['energy'])}"
@@ -577,11 +644,7 @@ class TestMacePotential:
     ) -> None:
         """``S_ij`` is constant w.r.t. ``pos``, so the forces stay exact."""
         potential, variant = matpes_parity
-        pos, Z, edge_index, batch, num_graphs = raw_tensors(periodic_cluster)
-        edge_diff = periodic_cluster["edges", "edge_diff"]
-        reference = variant.energy_forces(
-            pos, Z, edge_index, batch, num_graphs=num_graphs, edge_diff=edge_diff
-        )
+        reference = _raw_energy_forces(variant, periodic_cluster)
         forces = potential(periodic_cluster)["atoms", "forces"]
         assert torch.allclose(forces, reference["forces"], atol=FORCE_PARITY_ATOL, rtol=0.0), (
             f"bitwise equal: {torch.equal(forces, reference['forces'])}"
@@ -592,15 +655,7 @@ class TestMacePotential:
     ) -> None:
         """The conditioned arm: charge 0 / spin 1, the flat model's own defaults."""
         potential, variant = omol_parity
-        pos, Z, edge_index, batch, _ = raw_tensors(omol_cluster)
-        reference = variant.energy_forces(
-            pos,
-            Z,
-            edge_index,
-            batch,
-            total_charge=omol_cluster["graphs", "total_charge"],
-            total_spin=omol_cluster["graphs", "total_spin"],
-        )
+        reference = _raw_energy_forces(variant, omol_cluster)
         energy = potential(omol_cluster)["graphs", "energy"]
         assert torch.allclose(energy, reference["energy"], atol=ENERGY_PARITY_ATOL, rtol=0.0), (
             f"bitwise equal: {torch.equal(energy, reference['energy'])}"
@@ -611,15 +666,7 @@ class TestMacePotential:
     ) -> None:
         """Non-vacuous by construction — see :func:`.conftest.wake_zero_init_readout`."""
         potential, variant = omol_parity
-        pos, Z, edge_index, batch, _ = raw_tensors(omol_cluster)
-        reference = variant.energy_forces(
-            pos,
-            Z,
-            edge_index,
-            batch,
-            total_charge=omol_cluster["graphs", "total_charge"],
-            total_spin=omol_cluster["graphs", "total_spin"],
-        )
+        reference = _raw_energy_forces(variant, omol_cluster)
         largest = float(reference["forces"].detach().abs().max())
         assert largest > 0.0, "vacuous oracle: every reference force is exactly zero"
         forces = potential(omol_cluster)["atoms", "forces"]
@@ -636,13 +683,12 @@ class TestMacePotential:
         garbage, so the default must stay ``1`` (``mace_omol.py:330-335``).
         """
         potential, _ = omol_parity
-        # Build the unconditioned twin first: ``forward`` swaps ``atoms.pos``
-        # for its own leaf, and reading it back afterwards would compare a
-        # different tensor object.
+        # Build the unconditioned twin from a clone so the two batches share
+        # nothing but their values.
         bare = make_graph_batch(
             pos=omol_cluster["atoms", "pos"].clone(),
             Z=omol_cluster["atoms", "Z"],
-            edge_index=omol_cluster["edges", "edge_index"],
+            pair_index=omol_cluster["pairs", "pair_index"],
             batch=omol_cluster["atoms", "batch"],
         )
         conditioned = potential(omol_cluster)["graphs", "energy"].clone()
@@ -683,10 +729,10 @@ class TestMacePotential:
         cell = torch.eye(3, dtype=torch.float64) * 12.0
         cluster["graphs", "cell"] = cell.unsqueeze(0)
         with torch.no_grad():
-            _, _, virial = pots.calc_energy_forces_virial(cluster.clone())
+            virial = Derivative(pots, wrt=FORCES_AND_VIRIAL)(cluster.clone())[VIRIAL_KEY][0]
 
         pos = cluster["atoms", "pos"].detach()
-        edge_diff = cluster["edges", "edge_diff"].detach()
+        edge_diff = cluster["pairs", "pair_diff"].detach()
         eps = 2.0e-4
 
         def strained_energy(delta: torch.Tensor) -> float:
@@ -697,7 +743,7 @@ class TestMacePotential:
             # The energy reads its geometry from the imaged edge displacements,
             # so the reference has to strain exactly what the derivation
             # strains — positions alone leave the energy unchanged.
-            frame["edges", "edge_diff"] = edge_diff @ transform
+            frame["pairs", "pair_diff"] = edge_diff @ transform
             with torch.no_grad():
                 return float(pots.calc_energy(frame).sum())
 
@@ -771,91 +817,66 @@ class TestMacePotential:
         assert explanation.graph_count == 1
         assert explanation.graph_break_count == 0
 
-
-class TestMacePotentialCompileCore:
-    """``compile_core`` — one precondition, one action, installed on the mlip.
-
-    The compiled build lives on the potential (``self._core``) and not on the
-    ``Potentials`` container, so it survives every ``to_potentials()`` rebuild;
-    what that buys the MD path is asserted in
-    ``tests/test_molix/test_md/test_driver.py``. Here only the local contract:
-    when installation is legal, that it happens exactly once, and that
-    ``_write_energy`` keeps doing all of its unpacking around the installed
-    core.
-    """
-
-    def test_compile_core_requires_one_eager_forward_then_installs_once(
-        self, matpes_variant: MaceMatpes, cluster: TensorDict
+    @pytest.mark.slow
+    def test_forward_compiles_to_one_graph_in_inference(
+        self, matpes_potential: MacePotential, cluster: TensorDict
     ) -> None:
-        """Fresh instance refuses; after one eager forward it compiles once.
+        """The op is the compile boundary: unpacking, leaf, energy and grad are one graph.
 
-        The single precondition is ``_elements_validated`` — the element table
-        is checked eagerly and never inside the trace, and on the polarisable
-        variant the same eager forward is what sizes the k-space grids.
-        Installation is idempotent: a second call must not re-invoke the
-        compiler, because the mlip is shared by every ``Potentials`` built
-        from the same ForceField.
+        One eager forward first — the documented precondition that spends the
+        element gate outside the trace.
         """
-        compiled: list[object] = []
-        replacement = matpes_variant.energy_core  # a bound method: one object
+        matpes_potential(cluster)
+        with torch.no_grad():
+            explanation = Compiler.explain(matpes_potential, cluster)
+        assert (explanation.graph_count, explanation.graph_break_count) == (1, 0), (
+            explanation.break_sites
+        )
 
-        def stub(core: object) -> object:
-            compiled.append(core)
-            return replacement
+    @pytest.mark.slow
+    def test_training_trace_breaks_only_at_the_leaf(
+        self, matpes_potential: MacePotential, cluster: TensorDict
+    ) -> None:
+        """With grad enabled the attached forces leak the leaf: stock torch breaks there only."""
+        matpes_potential(cluster)
+        explanation = Compiler.explain(matpes_potential, cluster)
+        assert explanation.graph_break_count >= 1
+        assert all("leaked" in reason for reason in explanation.break_reasons), (
+            explanation.break_reasons
+        )
+        assert all(
+            site.rsplit(":", 1)[0].endswith("molix/autograd/variables.py")
+            for site in explanation.break_sites
+        ), explanation.break_sites
 
-        with pytest.raises(RuntimeError, match="compile_core") as excinfo:
-            matpes_variant.compile_core(stub)
-        assert "eager" in str(excinfo.value)
-        assert compiled == []
-        assert matpes_variant._core is None
 
-        matpes_variant._write_energy(cluster)
-        matpes_variant.compile_core(stub)
-        assert len(compiled) == 1
-        assert matpes_variant._core is replacement
+class TestMacePotentialEnergy:
+    """``energy`` — the seam on the batch schema, and the eager element gate around it."""
 
-        matpes_variant.compile_core(stub)
-        assert len(compiled) == 1
-
-    def test_write_energy_dispatches_through_the_core_and_keeps_its_unpacking(
+    def test_energy_keeps_its_unpacking(
         self,
         matpes_variant: MaceMatpes,
         cluster: TensorDict,
         leaf_cluster: TensorDict,
     ) -> None:
-        """Installing a core moves the call site only — never the unpacking.
-
-        ``_write_energy`` still resolves ``num_graphs``, still creates a missing
-        ``graphs`` namespace at ``batch_size=[B]`` through its one documented
-        host sync, still rejects a batch without ``edges.edge_diff``, and still
-        writes the energy back **undetached** so an outer force session can
-        differentiate it.
+        """``energy`` resolves ``num_graphs``, builds a missing ``graphs`` namespace at
+        ``batch_size=[B]`` through its one documented host sync, rejects a batch
+        without ``edges.edge_diff``, and writes the energy back **undetached**
+        so an op composed outside can differentiate it.
         """
-        hits: list[int] = []
-        eager_core = matpes_variant.energy_core
-
-        def counting(*args: object, **kwargs: object) -> torch.Tensor:
-            hits.append(1)
-            return eager_core(*args, **kwargs)
-
-        matpes_variant._write_energy(cluster)  # spends the eager element gate
-        matpes_variant.compile_core(lambda _: counting)
-
         with torch.enable_grad():
-            out = matpes_variant._write_energy(leaf_cluster)
-        assert hits == [1]
+            out = matpes_variant.energy(leaf_cluster)
         assert out["graphs", "energy"].grad_fn is not None
 
         no_graphs = cluster.clone()
         del no_graphs["graphs"]
-        rebuilt = matpes_variant._write_energy(no_graphs)
-        assert len(hits) == 2
+        rebuilt = matpes_variant.energy(no_graphs)
         assert rebuilt["graphs"].batch_size == torch.Size([1])
 
         no_diff = cluster.clone()
-        no_diff["edges"] = no_diff["edges"].exclude("edge_diff")
+        no_diff["pairs"] = no_diff["pairs"].exclude("pair_diff")
         with pytest.raises(ValueError, match="requires edges.edge_diff"):
-            matpes_variant._write_energy(no_diff)
+            matpes_variant.energy(no_diff)
 
     def test_the_element_gate_is_eager_only_and_uncounted(
         self,
@@ -870,9 +891,10 @@ class TestMacePotentialCompileCore:
         graph. It must also leave ``_elements_validated`` alone: a traced call
         validated nothing, so it must not claim the gate was spent — that is
         exactly why the fact is a single flag and not a call counter, which
-        dynamo would replay and advance. Whether the check *itself* rejects an
-        off-table ``Z``, and that it runs once per eager instance, are owned by
-        ``TestMacePotential`` and ``test_encoder.py``.
+        dynamo would replay and advance, and why one eager forward precedes
+        any compile. Whether the check *itself* rejects an off-table ``Z``, and
+        that it runs once per eager instance, are owned by ``TestMacePotential``
+        and ``test_encoder.py``.
         """
         compiling = [True]
         checks: list[torch.Tensor] = []
@@ -880,12 +902,12 @@ class TestMacePotentialCompileCore:
         monkeypatch.setattr(torch.compiler, "is_compiling", lambda: compiling[0])
         monkeypatch.setattr(matpes_variant, "validate_elements", lambda Z: checks.append(Z))
 
-        matpes_variant._write_energy(cluster)
+        matpes_variant.energy(cluster)
         assert checks == []
         assert matpes_variant._elements_validated is False
 
         compiling[0] = False
-        matpes_variant._write_energy(cluster)
+        matpes_variant.energy(cluster)
         assert len(checks) == 1
         assert matpes_variant._elements_validated is True
         validate(cluster["atoms", "Z"])  # the real check still passes this batch

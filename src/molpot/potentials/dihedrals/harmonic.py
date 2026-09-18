@@ -88,14 +88,16 @@ class DihedralHarmonic(BasePotential):
                 if pos is None and "atoms" in data:
                     pos = data["atoms"]["x"]
 
-        if pos is None or dihedral_index is None or dihedral_types is None:
+        if pos is None or dihedral_index is None:
             raise ValueError("DihedralHarmonic requires pos, dihedral_index, and dihedral_types.")
 
         # Convert numpy to torch if needed
         if not isinstance(pos, torch.Tensor):
             pos = torch.from_numpy(pos).float()
             dihedral_index = torch.from_numpy(dihedral_index).long()
-            dihedral_types = torch.from_numpy(dihedral_types).long()
+            dihedral_types = (
+                None if dihedral_types is None else torch.from_numpy(dihedral_types).long()
+            )
 
         # Handle empty dihedrals
         if dihedral_index.size(1) == 0:
@@ -108,8 +110,8 @@ class DihedralHarmonic(BasePotential):
         phi = torch.atan2(sin_phi, cos_phi)
 
         # Look up parameters for each dihedral
-        k_dihedrals = self.k[dihedral_types]  # [num_dihedrals]
-        phi0_dihedrals = self.phi0[dihedral_types]  # [num_dihedrals]
+        k_dihedrals = self.rows("k", kwargs, dihedral_types)  # [num_dihedrals]
+        phi0_dihedrals = self.rows("phi0", kwargs, dihedral_types)  # [num_dihedrals]
 
         # Compute harmonic energy: E = 0.5 * k * (phi - phi0)^2
         displacement = phi - phi0_dihedrals

@@ -8,7 +8,7 @@ types, then delegates files to molpy. Independent of ``pair_style molnex``.
 Required system contract (post-collate nested TensorDict)::
 
     system["atoms"]["pos"]                 # (N, 3) Å
-    system["atoms"]["q"]                   # optional (N,) e — a *fallback*
+    system["atoms"]["charge"]                   # optional (N,) e — a *fallback*
                                            #   charge source; see below
     system["graphs"]["cell"]               # optional (3, 3) or (1, 3, 3) Å —
                                            #   periodic box; open padded box otherwise
@@ -19,9 +19,9 @@ Required system contract (post-collate nested TensorDict)::
     system["angles"]["atomi" / "atomj" / "atomk"]
     system["propers"]["atomi" … "atoml"]
 
-Read through :class:`~molix.batch.TensorFrame` — the batch's typed view — so a
+Read through :class:`~molix.data.TensorFrame` — the batch's typed view — so a
 ``TensorDict`` and a view of it are one system here (CLAUDE.md § TensorDict
-Contract). The wrap is :func:`~molix.batch.as_tensor_frame`, the one accessor
+Contract). The wrap is :func:`~molix.data.as_tensor_frame`, the one accessor
 this side and :meth:`~molpot.forcefield.ForceField.assign_types` both read the
 deck's system through. ``ForceField`` and ``TypeAssignment`` come in over the
 sanctioned ``molix.ff_export`` → ``molpot`` edge, through ``molpot.forcefield``'s
@@ -31,8 +31,8 @@ Charges are **not** read from the system here. They arrive on the
 :class:`~molpot.forcefield.TypeAssignment` every call takes
 (``types.atom_charges``, in ``e``), which is where
 :meth:`~molpot.forcefield.ForceField.assign_types` put the values it keyed the
-atom types on: the force field's own ``atoms.q`` parameter table when it has
-one, else the system's ``atoms.q`` column, else zeros. Reading the system a
+atom types on: the force field's own ``atoms.charge`` parameter table when it has
+one, else the system's ``atoms.charge`` column, else zeros. Reading the system a
 second time on this side wrote zeros for every field that keeps its charges in
 its own table — a deck whose types exist *because* the atoms differ in charge
 and whose atoms are then all neutral. ``charges=`` on
@@ -70,9 +70,9 @@ import numpy as np
 import torch
 from tensordict import TensorDict
 
-from molix.batch import TensorFrame, as_tensor_frame
 from molix.ff_export.force_spec import ForceSpec
 from molix.ff_export.lammps_adapter import LammpsAdapter
+from molix.frame import TensorFrame, as_tensor_frame
 from molpot import MixingRule
 from molpot.forcefield import ForceField, TypeAssignment
 
@@ -268,7 +268,7 @@ class LammpsWriter:
         :meth:`MixingRule.mix
         <molpot.potentials.vdw.lj126.MixingRule.mix>`, the same call
         :class:`~molpot.forcefield.Potentials` evaluates with — over the
-        per-type ``ε`` / ``σ`` on an ``edge_index`` of the ``i <= j`` pairs.
+        per-type ``ε`` / ``σ`` on an ``pair_index`` of the ``i <= j`` pairs.
         Dispatching on what the model declared, rather than restating ``σ_ij =
         ½(σ_i + σ_j)`` here, is what makes "the deck uses molnex's mixing" true
         by construction instead of by review, and it is why an OPLS-AA export
@@ -469,8 +469,8 @@ class LammpsWriter:
                 ``types.atom_charges`` — which is what the ``Atoms`` section
                 states otherwise, being the charges
                 :meth:`~molpot.forcefield.ForceField.assign_types` keyed the
-                atom types on (the field's ``atoms.q`` table, else the system's
-                ``atoms.q``, else zeros). Pass this only to write a column the
+                atom types on (the field's ``atoms.charge`` table, else the system's
+                ``atoms.charge``, else zeros). Pass this only to write a column the
                 typing was *not* computed from; two atoms of one type given
                 different charges here make a deck whose ``Atoms`` section and
                 whose type list describe different models.
@@ -500,7 +500,7 @@ class LammpsWriter:
         n_atoms = int(xyz.shape[0])
         mass_list = ForceField._mass_list(masses, n_atoms)
         # Default: the charges the typing was computed from, carried on the
-        # assignment. Reading ``atoms.q`` again here instead wrote zeros for
+        # assignment. Reading ``atoms.charge`` again here instead wrote zeros for
         # every field that keeps its charges in its own ``atoms`` table — the
         # deck's types would then differ *by* a charge its atoms do not carry.
         if charges is not None:

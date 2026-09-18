@@ -5,7 +5,7 @@ The LAMMPS C++ pair style talks to an AOT-Inductor ``.so`` through
 ``TensorDict`` never crosses into C++. The contract is therefore the **export
 calling convention**, not a model's in-memory ``forward`` (schema v3):
 
-    inputs  : Z ``(N,)`` int64, pos ``(N, 3)`` float, edge_index ``(E, 2)`` int64,
+    inputs  : Z ``(N,)`` int64, pos ``(N, 3)`` float, pair_index ``(E, 2)`` int64,
               local_mask ``(N,)`` bool
     outputs : energy ``()`` scalar float, forces ``(N, 3)`` float,
               atomic_energy ``(N,)`` float
@@ -29,8 +29,8 @@ used by :mod:`molix.quant`), so :func:`molix.engine.export_for_lammps` can selec
 one by name and stamp it into ``meta.json`` for provenance.
 
 Edge convention follows the repo-wide rule (see ``CLAUDE.md`` → Edge Convention):
-``edge_index[:, 0]`` is the source, ``[:, 1]`` the target, and
-``edge_diff = pos[target] - pos[source]``.
+``pair_index[:, 0]`` is the source, ``[:, 1]`` the target, and
+``pair_diff = pos[target] - pos[source]``.
 
 Edge **order** is unconstrained by default: molnex aggregation is scatter-class
 (``index_add_`` / ``scatter_add_``), which is permutation-invariant, so the C++
@@ -48,12 +48,13 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 
+from molix.autograd import leaf
 from molix.schema import (
     ATOMIC_ENERGY_FLAT_KEY,
     ATOMIC_ENERGY_KEY,
-    EDGE_DIST_CLAMP_MIN,
     ENERGY_KEY,
     FORCES_KEY,
+    PAIR_DIST_CLAMP_MIN,
 )
 
 
@@ -91,7 +92,7 @@ class EngineAdapter(ABC):
 
     @abstractmethod
     def build_inputs(
-        self, model: nn.Module, Z: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor
+        self, model: nn.Module, Z: torch.Tensor, pos: torch.Tensor, pair_index: torch.Tensor
     ) -> object:
         """Convert flat LAMMPS tensors into whatever ``model`` consumes.
 
@@ -99,7 +100,7 @@ class EngineAdapter(ABC):
             model: The wrapped potential.
             Z: Atomic numbers ``(N,)`` int64.
             pos: Positions ``(N, 3)`` float (model dtype).
-            edge_index: Source-target pairs ``(E, 2)`` int64, in whatever order
+            pair_index: Source-target pairs ``(E, 2)`` int64, in whatever order
                 the caller produced them — the C++ side sorts by
                 ``(source, target)`` only for exports declaring
                 ``requires_sorted_edges=True`` (see the module docstring).
@@ -131,14 +132,14 @@ class EngineAdapter(ABC):
 
         Forces are **optional**: the export wrappers derive the deployed forces
         from the site energies themselves, so an energy-only model (e.g.
-        ``PiNetPotential(compute_forces=False)``) is a complete v3 citizen —
-        its slot comes back ``None`` and the export's force-consistency check
-        is vacuous. When a model does emit forces they are read and checked.
-        Energy-only is also the *safe* construction for models whose force
-        pass consumes its own autograd graph in eval mode (PiNet's
-        ``method="grad"`` resolves ``create_graph=self.training``): the
-        wrapper's second differentiation of a consumed graph dies with
-        "backward through the graph a second time" at trace preparation.
+        ``PiNetPotential()`` with the default ``wrt=()``) is a complete v3
+        citizen — its slot comes back ``None`` and the export's
+        force-consistency check is vacuous. When a model does emit forces they
+        are read and checked. Energy-only is also the *safe* construction:
+        the wrapper differentiates the site energies itself, and a model whose
+        own op has already consumed the energy graph under ``no_grad`` would
+        die with "backward through the graph a second time" at trace
+        preparation.
 
         Lives on the base class because three call sites share it:
         :class:`MolnexTensorDictAdapter`, :class:`FlatTensorAdapter`'s dict
@@ -192,9 +193,9 @@ class EngineAdapter(ABC):
 class MolnexTensorDictAdapter(EngineAdapter):
     """Adapter for molnex-native potentials (PiNet, MACE, … via ``PiNetPotential``-style).
 
-    Builds the post-collate nested ``TensorDict`` (``atoms`` / ``edges`` / ``graphs``
-    per ``CLAUDE.md``), runs ``model(batch)`` (built with ``compute_forces=True``), reads
-    the ``{energy, forces, atomic_energy}`` output. The per-atom energy is the
+    Builds the post-collate nested ``TensorDict`` (``atoms`` / ``pairs`` / ``graphs``
+    per ``CLAUDE.md``), runs ``model(batch)``, reads the
+    ``{energy, forces, atomic_energy}`` output. The per-atom energy is the
     one the C++ pair style partitions over local sites; the scalar energy is
     read too, but only so :func:`molix.engine.export_for_lammps` can check
     eagerly that the model is decomposable before exporting it.
@@ -203,15 +204,15 @@ class MolnexTensorDictAdapter(EngineAdapter):
     name = "molnex-tensordict"
 
     def build_inputs(
-        self, model: nn.Module, Z: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor
+        self, model: nn.Module, Z: torch.Tensor, pos: torch.Tensor, pair_index: torch.Tensor
     ) -> object:
         from tensordict import TensorDict
 
         n = Z.shape[0]
-        src = edge_index[:, 0]
-        tgt = edge_index[:, 1]
-        edge_diff = pos[tgt] - pos[src]  # pos[target] - pos[source]
-        edge_dist = edge_diff.norm(dim=-1).clamp(min=EDGE_DIST_CLAMP_MIN)
+        src = pair_index[:, 0]
+        tgt = pair_index[:, 1]
+        pair_diff = pos[tgt] - pos[src]  # pos[target] - pos[source]
+        pair_dist = pair_diff.norm(dim=-1).clamp(min=PAIR_DIST_CLAMP_MIN)
         return TensorDict(
             atoms=TensorDict(
                 Z=Z,
@@ -219,11 +220,11 @@ class MolnexTensorDictAdapter(EngineAdapter):
                 batch=torch.zeros(n, dtype=torch.long, device=pos.device),
                 batch_size=[n],
             ),
-            edges=TensorDict(
-                edge_index=edge_index,
-                edge_diff=edge_diff,
-                edge_dist=edge_dist,
-                batch_size=[edge_index.shape[0]],
+            pairs=TensorDict(
+                pair_index=pair_index,
+                pair_diff=pair_diff,
+                pair_dist=pair_dist,
+                batch_size=[pair_index.shape[0]],
             ),
             graphs=TensorDict(
                 num_atoms=torch.full((1,), n, dtype=torch.long, device=pos.device),
@@ -239,7 +240,7 @@ class MolnexTensorDictAdapter(EngineAdapter):
 class FlatTensorAdapter(EngineAdapter):
     """Adapter for third-party models already speaking the flat convention.
 
-    The wrapped model must implement ``forward(Z, pos, edge_index)`` returning
+    The wrapped model must implement ``forward(Z, pos, pair_index)`` returning
     either the ``(energy, forces, atomic_energy)`` triple or a dict with
     ``"energy"`` / ``"forces"`` / ``"atomic_energy"`` keys. Use this as the
     zero-glue path; write a bespoke :class:`EngineAdapter` subclass when a model
@@ -255,9 +256,9 @@ class FlatTensorAdapter(EngineAdapter):
     name = "flat"
 
     def build_inputs(
-        self, model: nn.Module, Z: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor
+        self, model: nn.Module, Z: torch.Tensor, pos: torch.Tensor, pair_index: torch.Tensor
     ) -> object:
-        return (Z, pos, edge_index)
+        return (Z, pos, pair_index)
 
     def read_outputs(self, out: object) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         if isinstance(out, dict):
@@ -286,7 +287,7 @@ class EngineForward(nn.Module):
     """Flat-convention ``nn.Module`` wrapper that is the actual AOT-export target.
 
     Holds a potential and an :class:`EngineAdapter`. Its ``forward(Z, pos,
-    edge_index, local_mask)`` returns ``(energy, forces, atomic_energy)`` — the
+    pair_index, local_mask)`` returns ``(energy, forces, atomic_energy)`` — the
     exact signature the C++ ``pair_style molnex`` invokes through the AOTI runner
     under schema v3.
 
@@ -312,9 +313,13 @@ class EngineForward(nn.Module):
 
     Two consequences worth knowing:
 
-    * ``pos`` is re-leafed inside ``forward`` (``detach().requires_grad_()``), so
+    * ``pos`` is re-leafed inside ``forward`` (:func:`molix.autograd.leaf`), so
       any autograd graph the caller had through ``pos`` is *not* continued —
       this wrapper returns values for an MD engine, it is not a training path.
+      The partitioned energy — a masked sum of site energies read from a
+      model output that may be a plain dict — is not the frame-in/frame-out
+      shape :class:`molix.autograd.Derivative` differentiates, so the wrapper
+      keeps the leaf and the one ``autograd.grad`` itself.
     * the mask is applied by this wrapper, never by an adapter: adapters
       translate shapes, partitioning is engine semantics.
 
@@ -332,7 +337,7 @@ class EngineForward(nn.Module):
         )
 
     def model_outputs(
-        self, Z: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor
+        self, Z: torch.Tensor, pos: torch.Tensor, pair_index: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Run the model once and read its unmasked ``(energy, forces, atomic_energy)``.
 
@@ -341,12 +346,12 @@ class EngineForward(nn.Module):
         — the two quantities :meth:`forward` deliberately replaces with their
         partitioned counterparts.
         """
-        inputs = self.adapter.build_inputs(self.model, Z, pos, edge_index)
+        inputs = self.adapter.build_inputs(self.model, Z, pos, pair_index)
         if isinstance(inputs, tuple):
             out = self.model(*inputs)
         else:
-            # Monomorphic forward since b85d12f: force derivation is a
-            # construction-time property of the potential, not a call kwarg.
+            # Monomorphic forward: what a potential derives is a
+            # construction-time property (``wrt=``), not a call kwarg.
             out = self.model(inputs)
         return self.adapter.read_outputs(out)
 
@@ -354,15 +359,15 @@ class EngineForward(nn.Module):
         self,
         Z: torch.Tensor,
         pos: torch.Tensor,
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
         local_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Args: ``Z (N,)`` int64, ``pos (N,3)``, ``edge_index (E,2)`` int64,
+        """Args: ``Z (N,)`` int64, ``pos (N,3)``, ``pair_index (E,2)`` int64,
         ``local_mask (N,)`` bool. Returns ``(energy (), forces (N,3),
         atomic_energy (N,))``."""
-        pos = pos.detach().requires_grad_(True)
+        pos = leaf(pos)
         with torch.enable_grad():
-            _, _, atomic_energy = self.model_outputs(Z, pos, edge_index)
+            _, _, atomic_energy = self.model_outputs(Z, pos, pair_index)
             # Mask-multiply, never a slice: `n_local` is a runtime scalar and
             # torch.export cannot trace a shape that depends on one.
             energy = (atomic_energy * local_mask.to(atomic_energy.dtype)).sum()

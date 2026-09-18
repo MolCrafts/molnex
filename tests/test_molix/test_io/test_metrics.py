@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from molix.io.metrics import MetricsWriter, read_metrics, rebuild_metrics_index
+from molix.io.metrics import (
+    MetricsWriter,
+    read_metrics,
+    rebuild_metrics_index,
+    scan_metrics_index,
+)
 from molix.io.run_record import ensure_run_package, read_meta, read_status
 
 
@@ -34,6 +39,36 @@ class TestMetricsWriter:
         index = json.loads(index_file.read_text())
         assert index["line_count"] == 3
         assert index["series_count"] == 2
+        assert index["series"]["train/loss"]["count"] == 2
+        assert index["series"]["train/loss"]["latest_step"] == 2
+
+    def test_incremental_index_matches_a_full_scan(self, tmp_path: Path) -> None:
+        """The running index is maintained per append, never re-derived per flush."""
+        root = tmp_path / "run"
+        writer = MetricsWriter(root)
+        for step in range(12):
+            writer.scalar("train/loss", float(step), step=step)
+            writer.scalar("train/grad_norm", float(step) * 2.0, step=step)
+            if step % 5 == 0:
+                writer.flush()
+        writer.flush()
+
+        persisted = json.loads((root / "metrics" / "index.json").read_text())
+        assert persisted == scan_metrics_index(root)
+
+    def test_index_continues_an_existing_stream(self, tmp_path: Path) -> None:
+        """A second writer over the same root counts the lines already there."""
+        root = tmp_path / "run"
+        first = MetricsWriter(root)
+        first.scalar("train/loss", 1.0, step=1)
+        first.flush()
+
+        second = MetricsWriter(root)
+        second.scalar("train/loss", 2.0, step=2)
+        second.flush()
+
+        index = json.loads((root / "metrics" / "index.json").read_text())
+        assert index["line_count"] == 2
         assert index["series"]["train/loss"]["count"] == 2
         assert index["series"]["train/loss"]["latest_step"] == 2
 

@@ -5,7 +5,9 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.batch import TensorFrame, collate_molecules
+from molix.autograd import Derivative
+from molix.data import collate_molecules
+from molix.frame import TensorFrame
 from molix.md import (
     MD,
     LangevinVerletIntegrator,
@@ -15,8 +17,12 @@ from molix.md import (
     VelocityInitHook,
     VelocityVerletIntegrator,
 )
+from molix.schema import ENERGY_KEY, FORCES_KEY, POS_KEY, STRAIN_KEY
 from tests.conftest import frame
 from tests.test_molix.test_md.conftest import make_cubic_lattice, md_system
+
+FORCES = (POS_KEY,)
+FORCES_AND_VIRIAL = (POS_KEY, STRAIN_KEY)
 
 #: How close the split-precision run has to sit to a *fully* fp32 evaluation,
 #: as a fraction of the fp32-vs-fp64 gap the same fixture shows (``max|ΔF| =
@@ -76,7 +82,22 @@ def _nve(force, *, dt: float, dtype=None, hooks=None) -> MD:
     )
 
 
-class _CellRecordingPots:
+class _ZeroPots:
+    """The minimal energy the adapter's op composes: ``E = 0 · Σ pos``, zero forces.
+
+    The energy has to hang off the positions — a constant would give the op
+    nothing to differentiate — so it is a zero *function* of them.
+    """
+
+    def __call__(self, work: TensorDict) -> TensorDict:
+        pos = work["atoms", "pos"]
+        if "graphs" not in work.keys():
+            work["graphs"] = TensorDict({}, batch_size=[])
+        work[ENERGY_KEY] = (pos * 0.0).sum().reshape(work["graphs"].batch_size)
+        return work
+
+
+class _CellRecordingPots(_ZeroPots):
     """``CellBound`` stub: records every ``bind_cell`` and evaluates to zero forces.
 
     Each record is ``(data_ptr, cell.clone())`` — the pointer proves the pots
@@ -97,20 +118,6 @@ class _CellRecordingPots:
         self.calls.append((cell.data_ptr(), cell.detach().clone()))
         if self._raise_after is not None and len(self.calls) > self._raise_after:
             raise RuntimeError("KSpaceGrid overflow")
-
-    def calc_energy_forces(self, work: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
-        pos = work["atoms", "pos"]
-        return torch.zeros((), dtype=pos.dtype), torch.zeros_like(pos)
-
-    def calc_energy_forces_virial(
-        self, work: TensorDict
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        pos = work["atoms", "pos"]
-        return (
-            torch.zeros((), dtype=pos.dtype),
-            torch.zeros_like(pos),
-            torch.zeros(3, 3, dtype=pos.dtype),
-        )
 
 
 def _stub_forcefield(pots: object):
@@ -179,26 +186,23 @@ class TestMD:
         md = _nve(_class_i_harmonic(), dt=0.01)
         assert md.run(_two_atom_system(), 1).pos.dtype == torch.float64
 
-    def test_set_compiler_is_applied_once_per_potential_rebuild(self):
-        """Every ``set_*`` rebuilds the potential, so the compiler is a setter too.
+    def test_set_compiler_compiles_one_composed_op_per_run(self):
+        """One ``Derivative`` over the assembled potential per run, handed to the compiler.
 
-        ``_wire`` calls ``force.to_potentials()`` afresh in each setter: a
-        compiled core installed by hand would survive exactly until the next
-        one, and the run would fall back to eager with nothing saying so. So
-        the compiler is held on ``MD`` and re-applied at every rebuild — once
-        when the field first has both halves it needs to assemble, and once
-        more per later setter, on the container that is actually about to run.
-
-        The recorder is the identity, so it changes nothing; what it counts is
-        the *installs*, and ``__self__`` says which container each went to —
-        two different ones, which is the whole reason this cannot be a one-shot
-        call.
+        Every ``set_*`` rebuilds the potential (``force.to_potentials()`` runs
+        afresh in each setter), so the op is composed at ``run`` over the
+        container that is actually about to run — forces alone for NVE, forces
+        and virial under a barostat — and the compiler held on ``MD`` is applied
+        to exactly that op. The recorder is the identity, so it changes
+        nothing; what it records is *what* was compiled.
         """
-        cores = []
+        from molpot.forcefield import Potentials
 
-        def recording(core):
-            cores.append(core)
-            return core
+        ops = []
+
+        def recording(op):
+            ops.append(op)
+            return op
 
         md = (
             MD(torch.float64)
@@ -206,11 +210,24 @@ class TestMD:
             .set_integrator(VelocityVerletIntegrator(0.01))
             .set_forcefield(_class_i_harmonic())
         )
-        assert len(cores) == 1
+        assert ops == []
+        md.run(_two_atom_system(), 0)
+        md.run(_two_atom_system(), 0)
+        assert len(ops) == 2
+        assert all(isinstance(op, Derivative) for op in ops)
+        assert all(op.wrt == FORCES for op in ops)
+        assert isinstance(ops[0].energy, Potentials)
+        assert ops[0] is not ops[1]
+        assert ops[0].energy is ops[1].energy
 
         md.set_integrator(VelocityVerletIntegrator(0.02))
-        assert len(cores) == 2
-        assert cores[0].__self__ is not cores[1].__self__
+        md.run(_two_atom_system(), 0)
+        assert len(ops) == 3
+        assert ops[2].energy is not ops[0].energy
+
+        md.set_barostat(_expanding_barostat())
+        md.run(_two_atom_system(box=10.0), 0)
+        assert ops[3].wrt == FORCES_AND_VIRIAL
 
     def test_an_installed_compiler_changes_no_force(self):
         """The seam is a build switch, not a second physics path.
@@ -277,7 +294,7 @@ class TestMD:
             batch = butane_pair_batch().apply(
                 lambda leaf: leaf.to(dtype) if leaf.is_floating_point() else leaf
             )
-            _, forces = potentials.calc_energy_forces(batch)
+            forces = Derivative(potentials, wrt=FORCES)(batch)[FORCES_KEY]
             return forces.double() * preset_energy_to_md(forcefield.units)
 
         reference32 = forces_at(torch.float32)
@@ -304,29 +321,16 @@ class TestMD:
         ).run(butane_pair_batch(), 0)
         assert torch.equal(plain.forces, reference64)
 
-    def test_set_compiler_is_honoured_under_a_barostat(self):
-        """A compiled build must reach the NPT force path, or the pair be refused.
+    @pytest.mark.parametrize("compiler_first", [True, False])
+    def test_set_compiler_is_honoured_under_a_barostat(self, compiler_first: bool):
+        """The compiled op is the one the NPT force path calls, and it derives the virial.
 
-        ``set_compiler`` installs one build of the potential's core, and the
-        adapter picks its entry once per run: with a barostat attached that is
-        ``calc_energy_forces_virial``, not the ``calc_energy_forces`` the core
-        is installed behind. So an NPT run with a compiler installed used to be
-        an eager run that every log line described as compiled — the worst kind
-        of silence, because the only visible symptom is a step time nobody
-        compares against a baseline.
-
-        Exactly **one** of two contracts satisfies this test, and either is a
-        defensible resolution:
-
-        1. *Honoured* — the installed core is called at least once while a
-           barostat is attached, i.e. the virial path routes through the same
-           build the NVE path does.
-        2. *Fail-closed* — the combination is refused with a ``RuntimeError``
-           naming the compiler and the barostat, so the caller chooses between
-           an eager NPT run and a compiled NVE one rather than being given one
-           of them silently.
-
-        Neither held before: the core was called zero times and nothing raised.
+        An NPT run with a compiler installed used to be an eager run that every
+        log line described as compiled — the worst kind of silence, because
+        the only visible symptom is a step time nobody compares against a
+        baseline. The op is compiled as a whole; this records the compiled
+        build being reached on every step, with ``graphs.strain`` among its
+        variables.
         """
         calls: list[object] = []
 
@@ -341,21 +345,50 @@ class TestMD:
         # only thing under test here is which build evaluates the field.
         system = _two_atom_system(box=10.0)
 
-        try:
-            md = (
-                MD(torch.float64)
-                .set_compiler(recording)
-                .set_forcefield(_class_i_harmonic())
-                .set_integrator(VelocityVerletIntegrator(0.5))
-                .set_barostat(_expanding_barostat())
-            )
-            md.run(system, 2, chunk=1)
-        except RuntimeError as exc:
-            message = str(exc).lower()
-            assert "compil" in message, exc
-            assert "barostat" in message or "virial" in message, exc
+        md = (
+            MD(torch.float64)
+            .set_forcefield(_class_i_harmonic())
+            .set_integrator(VelocityVerletIntegrator(0.5))
+        )
+        if compiler_first:
+            md.set_compiler(recording).set_barostat(_expanding_barostat())
         else:
-            assert calls, "the installed core never ran: the NPT path evaluated eagerly"
+            md.set_barostat(_expanding_barostat()).set_compiler(recording)
+        md.run(system, 2, chunk=1)
+        assert calls
+        assert all(isinstance(core, Derivative) for core in calls)
+        assert {core.wrt for core in calls} == {FORCES_AND_VIRIAL}
+
+    @pytest.mark.slow
+    def test_classical_npt_runs_through_aot_eager_fullgraph(self):
+        """A real compiled energy and its AOT backward match eager NPT."""
+        from molix.compile import Compiler
+
+        eager = (
+            MD(torch.float64)
+            .set_forcefield(_class_i_harmonic())
+            .set_integrator(VelocityVerletIntegrator(0.5))
+            .set_barostat(_expanding_barostat())
+        ).run(_two_atom_system(box=10.0), 2, chunk=1)
+        state = (
+            MD(torch.float64)
+            .set_compiler(Compiler(backend="aot_eager", fullgraph=True, dynamic=True))
+            .set_forcefield(_class_i_harmonic())
+            .set_integrator(VelocityVerletIntegrator(0.5))
+            .set_barostat(_expanding_barostat())
+        ).run(_two_atom_system(box=10.0), 2, chunk=1)
+
+        assert bool(torch.isfinite(state.pos).all())
+        assert bool(torch.isfinite(state.forces).all())
+        assert bool(torch.isfinite(state.energy).all())
+        assert state.virial is not None
+        assert tuple(state.virial.shape) == (3, 3)
+        assert eager.cell is not None and eager.virial is not None
+        torch.testing.assert_close(state.pos, eager.pos, atol=1e-12, rtol=0.0)
+        torch.testing.assert_close(state.forces, eager.forces, atol=1e-12, rtol=0.0)
+        torch.testing.assert_close(state.energy, eager.energy, atol=1e-12, rtol=0.0)
+        torch.testing.assert_close(state.cell, eager.cell, atol=1e-12, rtol=0.0)
+        torch.testing.assert_close(state.virial, eager.virial, atol=1e-12, rtol=0.0)
 
     def test_potential_dtype_leaves_the_callers_cell_at_the_md_dtype(self):
         """The precision seam is the potential's alone — the caller's lattice is not cast.
@@ -486,7 +519,7 @@ class TestMD:
             .set_forcefield(MolpyForceField("bare", units="real"))
             .set_integrator(VelocityVerletIntegrator(0.1))
         )
-        with pytest.raises(TypeError, match="TensorDict"):
+        with pytest.raises(TypeError, match="callable"):
             md.run(_two_atom_system(), 1)
 
     def test_set_neighbors_returns_self(self):
@@ -669,28 +702,25 @@ class TestRebindCell:
         assert len(pots.calls) == 2
         assert pots.calls[1][0] == replacement[0].data_ptr()
 
-    def test_a_non_cellbound_pots_never_dispatches_and_keeps_the_eval_resolution(self):
-        """Classical fields have no ``bind_cell``; the dispatch step is a silent no-op."""
+    def test_a_non_cellbound_pots_never_dispatches_and_the_op_follows_the_barostat(self):
+        """No ``bind_cell`` means no dispatch; the op's variables follow ``want_virial``."""
         from molix.md.driver import _TensorDictForce
 
         work = _cell_system((torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0))
 
-        classical = _TensorDictForce(object(), 1.0)
-        classical.bind_work(work)
-        assert classical._cell_view is not None
-        assert classical._eval.__func__ is _TensorDictForce._eval_classical
+        nve = _TensorDictForce(_ZeroPots(), 1.0)
+        nve.bind_work(work)
+        assert nve._cell_view is not None
+        assert isinstance(nve._op, Derivative)
+        assert nve._op.wrt == FORCES
 
-        class _Mlip:
-            mlip = object()
-
-        mlip = _TensorDictForce(_Mlip(), 1.0)
-        mlip.bind_work(work)
-        assert mlip._eval.__func__ is _TensorDictForce._eval_mlip
-
-        npt = _TensorDictForce(object(), 1.0)
+        npt = _TensorDictForce(_ZeroPots(), 1.0)
         npt.want_virial = True
         npt.bind_work(work)
-        assert npt._eval.__func__ is _TensorDictForce._eval_npt
+        assert isinstance(npt._op, Derivative)
+        assert npt._op.wrt == FORCES_AND_VIRIAL
+        out = npt(work[POS_KEY])
+        assert tuple(out["virial"].shape) == (3, 3)
 
     def test_a_missing_graphs_cell_is_a_no_op_on_both_call_paths(self):
         """No cell means no view — never hand ``None`` to a ``Tensor`` signature."""
@@ -722,17 +752,17 @@ class TestRebindCell:
         No in-tree path reaches the adapter from inside an evaluation, which is
         precisely why the window is worth a test — an unreachable guard is the
         one nobody notices deleting. The re-entry is driven the honest way,
-        through a potential that calls back during ``calc_energy_forces``,
-        rather than by setting the flag by hand.
+        through a potential that calls back during its energy, rather than by
+        setting the flag by hand.
         """
         from molix.md.driver import _TensorDictForce
 
         holder: list[_TensorDictForce] = []
 
         class _ReentrantPots(_CellRecordingPots):
-            def calc_energy_forces(self, work: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
+            def __call__(self, work: TensorDict) -> TensorDict:
                 holder[0].rebind_cell(torch.eye(3, dtype=torch.float64) * 4.0)
-                return super().calc_energy_forces(work)
+                return super().__call__(work)
 
         work = _cell_system((torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0))
         adapter = _TensorDictForce(
@@ -805,7 +835,7 @@ class TestRebindCell:
 
 
 class TestCompiledMlipStep:
-    """A compiled mlip core across ``_wire``'s rebuilds and the per-step energy."""
+    """The composed op over an mlip field, compiled by ``MD`` for the run."""
 
     @pytest.fixture
     def fp64(self):
@@ -825,23 +855,9 @@ class TestCompiledMlipStep:
         yield
         config.set_precision("fp64" if previous == torch.float64 else "fp32")
 
-    @pytest.mark.slow
-    def test_compiled_core_survives_rebuilds_and_updates_energy_per_step(self, fp64) -> None:
-        """Every ``set_*`` rebuilds ``Potentials``; the compiled core must not care.
-
-        ``MD._wire`` calls ``force.to_potentials()`` afresh in each setter, so a
-        core installed on the *container* would be silently discarded by the
-        next one and the run would quietly fall back to eager. Installing it on
-        the mlip — the single ``nn.Module`` the ForceField holds — is what makes
-        the prescribed ``bind_cell -> one eager call -> compile_core`` sequence
-        survive being handed to ``MD`` afterwards.
-
-        The second assertion is that the step is live: ``_eval_mlip`` reads
-        ``graphs.energy`` back off the work batch, so a stale value from the
-        warm-up would integrate a frozen potential without any error. Two steps
-        at two different geometries must give two different energies.
-        """
-        from molix.compile import Compiler
+    @staticmethod
+    def _polar_setup(*, cutoff: float, skin: float, **list_options: object):
+        """A tiny periodic Polar mlip field, its list and the system to run."""
         from molpot.forcefield import ForceField
         from molzoo.mace.polar import MacePolar
         from molzoo.mace.spec import MACEPolarSpec
@@ -860,8 +876,7 @@ class TestCompiledMlipStep:
             **TINY_POLAR_KWARGS,
         )
         torch.manual_seed(0)
-        mlip = MacePolar(**polar_kwargs(spec, compute_forces=False)).eval()
-
+        mlip = MacePolar(**polar_kwargs(spec)).eval()
         pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
         n_atoms = len(CLUSTER_Z)
         cell = torch.eye(3, dtype=torch.float64) * 10.0
@@ -869,39 +884,44 @@ class TestCompiledMlipStep:
         system["atoms", "Z"] = torch.tensor(CLUSTER_Z, dtype=torch.long)
         system["atoms", "batch"] = torch.zeros(n_atoms, dtype=torch.long)
         system["graphs"] = TensorDict({"cell": cell.unsqueeze(0)}, batch_size=[1])
-
         forcefield = ForceField("mace-polar", units="metal")
         forcefield.def_pairstyle(mlip)
-        neighbors = NeighborList(cell=cell, cutoff=3.0, positions=pos, skin=0.5)
-        pots = forcefield.to_potentials()
-        pots.bind_cell(cell)
-        warm_up = system.clone()
-        neighbors.build(warm_up)
-        with torch.no_grad():
-            pots.calc_energy(warm_up)
-            pots.compile_core(Compiler(backend="aot_eager", dynamic=True))
+        neighbors = NeighborList(cell=cell, cutoff=cutoff, positions=pos, skin=skin, **list_options)
+        return forcefield, neighbors, system
 
-        energies: list[float] = []
-        installed = mlip._core
+    @pytest.mark.slow
+    def test_a_compiled_mlip_run_matches_eager(self, fp64) -> None:
+        """``set_compiler`` on an mlip field: one eager warm-up, then the compiled op.
 
-        def counting(*args: object, **kwargs: object) -> torch.Tensor:
-            energy = installed(*args, **kwargs)
-            energies.append(float(energy.detach().sum()))
-            return energy
+        The warm-up ``bind_work`` performs is what spends the element gate and
+        sizes the k-space grids outside the trace; the compiled op then drives
+        every step, and the whole two-step trajectory — positions, forces and
+        energy at two geometries — must match the eager run to reduction-order
+        precision.
+        """
+        from molix.compile import Compiler
 
-        mlip._core = counting
-
-        md = (
+        forcefield, neighbors, system = self._polar_setup(cutoff=3.0, skin=0.5)
+        eager = (
             MD(torch.float64)
             .set_forcefield(forcefield)
             .set_neighbors(neighbors)
             .set_integrator(VelocityVerletIntegrator(0.5))
-        )
-        state = md.run(system, 2)
+        ).run(system.clone(), 2)
 
-        assert len(energies) >= 2
-        assert energies[0] != energies[-1]
-        assert torch.isfinite(state.energy).all()
+        forcefield, neighbors, system = self._polar_setup(cutoff=3.0, skin=0.5)
+        compiled = (
+            MD(torch.float64)
+            .set_forcefield(forcefield)
+            .set_neighbors(neighbors)
+            .set_integrator(VelocityVerletIntegrator(0.5))
+            .set_compiler(Compiler(backend="aot_eager", dynamic=True))
+        ).run(system, 2)
+
+        assert torch.isfinite(compiled.energy).all()
+        torch.testing.assert_close(compiled.pos, eager.pos, atol=1e-10, rtol=0.0)
+        torch.testing.assert_close(compiled.forces, eager.forces, atol=1e-10, rtol=0.0)
+        torch.testing.assert_close(compiled.energy, eager.energy, atol=1e-10, rtol=0.0)
 
     @pytest.mark.slow
     def test_an_over_capacity_cell_fails_at_kspace_before_the_neighbour_list(self, fp64) -> None:
@@ -915,54 +935,19 @@ class TestCompiledMlipStep:
         ``scale_isotropic`` would not have raised first.
         """
         from molix.compile import Compiler
-        from molpot.forcefield import ForceField
-        from molzoo.mace.polar import MacePolar
-        from molzoo.mace.spec import MACEPolarSpec
-        from tests.test_molzoo.test_mace.conftest import (
-            ATOMIC_ENERGIES,
-            ATOMIC_NUMBERS,
-            CLUSTER_POS,
-            CLUSTER_Z,
-            TINY_POLAR_KWARGS,
-            polar_kwargs,
-        )
 
-        spec = MACEPolarSpec(
-            atomic_numbers=ATOMIC_NUMBERS,
-            atomic_energies=ATOMIC_ENERGIES,
-            **TINY_POLAR_KWARGS,
-        )
-        torch.manual_seed(0)
-        mlip = MacePolar(**polar_kwargs(spec, compute_forces=False)).eval()
-        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
-        n_atoms = len(CLUSTER_Z)
-        cell = torch.eye(3, dtype=torch.float64) * 10.0
-        system = md_system(pos.clone(), torch.zeros(n_atoms, 3, dtype=torch.float64), 12.0)
-        system["atoms", "Z"] = torch.tensor(CLUSTER_Z, dtype=torch.long)
-        system["atoms", "batch"] = torch.zeros(n_atoms, dtype=torch.long)
-        system["graphs"] = TensorDict({"cell": cell.unsqueeze(0)}, batch_size=[1])
-
-        forcefield = ForceField("mace-polar", units="metal")
-        forcefield.def_pairstyle(mlip)
         # r_build = 1.0 Å; half-width of the 2x cell is 10 Å, so the list
         # cannot raise ValueError about r_build on this expansion.
-        neighbors = NeighborList(
-            cell=cell, cutoff=1.0, positions=pos, skin=0.0, every=1, delay=0, check=False
+        forcefield, neighbors, system = self._polar_setup(
+            cutoff=1.0, skin=0.0, every=1, delay=0, check=False
         )
-        pots = forcefield.to_potentials()
-        pots.bind_cell(cell)
-        warm_up = system.clone()
-        neighbors.build(warm_up)
-        with torch.no_grad():
-            pots.calc_energy(warm_up)
-            pots.compile_core(Compiler(backend="aot_eager", dynamic=True))
-
         md = (
             MD(torch.float64)
             .set_forcefield(forcefield)
             .set_neighbors(neighbors)
             .set_integrator(VelocityVerletIntegrator(0.5))
             .set_barostat(_expanding_barostat(2.0))
+            .set_compiler(Compiler(backend="aot_eager", dynamic=True))
         )
         with pytest.raises(RuntimeError) as excinfo:
             md.run(system, 1, chunk=1)
@@ -971,3 +956,244 @@ class TestCompiledMlipStep:
         assert "capacity_factor" in message
         assert "r_build" not in message
         assert "ValueError" not in message
+
+
+#: Argon ``lj/cut`` in eV / Å for the static-capacity cases below; the lattice
+#: is jittered so no force vanishes by symmetry.
+_ARGON_EPSILON_EV = 0.0104
+_ARGON_SIGMA = 3.4
+_ARGON_CUTOFF = 4.0
+_ARGON_SKIN = 0.5
+_ARGON_SPACING = 3.8
+_ARGON_JITTER = 0.15
+
+
+def _argon_system() -> tuple[TensorDict, torch.Tensor]:
+    """A jittered 27-atom argon cube (11.4 Å) as an MD working batch, plus its cell."""
+    pos, cell = make_cubic_lattice(n_side=3, spacing=_ARGON_SPACING)
+    generator = torch.Generator().manual_seed(7)
+    pos = pos + _ARGON_JITTER * torch.randn(pos.shape, generator=generator, dtype=torch.float64)
+    n = int(pos.shape[0])
+    system = md_system(pos, torch.zeros_like(pos), 39.948)
+    system["atoms", "Z"] = torch.full((n,), 18, dtype=torch.long)
+    system["atoms", "batch"] = torch.zeros(n, dtype=torch.long)
+    system["graphs"] = TensorDict({"cell": cell.unsqueeze(0)}, batch_size=[1])
+    return system, cell
+
+
+def _argon_forcefield(n_atoms: int):
+    from molpot.forcefield import ForceField
+
+    return (
+        ForceField("argon", units="metal")
+        .def_pairstyle("lj/cut", cutoff=_ARGON_CUTOFF)
+        .with_params(
+            atoms={
+                "epsilon": torch.full((n_atoms,), _ARGON_EPSILON_EV, dtype=torch.float64),
+                "sigma": torch.full((n_atoms,), _ARGON_SIGMA, dtype=torch.float64),
+            }
+        )
+    )
+
+
+def _argon_list(system: TensorDict, cell: torch.Tensor, **options: object) -> NeighborList:
+    return NeighborList(
+        cell=cell, cutoff=_ARGON_CUTOFF, positions=system[POS_KEY], skin=_ARGON_SKIN, **options
+    )
+
+
+class _EdgeRecordingPots(_ZeroPots):
+    """Records the ``pairs`` batch size the op hands the potential on every call."""
+
+    def __init__(self) -> None:
+        self.seen: list[torch.Size] = []
+
+    def __call__(self, work: TensorDict) -> TensorDict:
+        self.seen.append(work["pairs"].batch_size)
+        return super().__call__(work)
+
+
+class TestStaticCapacity:
+    """The op is handed the list's whole capacity buffer, every step.
+
+    The list pads its dead rows as ``(0, 0)`` self-loops displaced by the
+    dead-edge shift and recomputes the geometry over the whole capacity, so
+    every op call sees a static ``E = capacity`` — the precondition for
+    ``Compiler(cuda_graphs=True)`` on the composed op. There is no live-prefix
+    slice on the way to the potential any more (it changed ``E`` on every
+    rebuild and forbade CUDA-graph capture).
+    """
+
+    def test_the_op_is_handed_the_full_capacity_edges_every_step(self):
+        system, cell = _argon_system()
+        neighbors = _argon_list(system, cell)
+        pots = _EdgeRecordingPots()
+        (
+            MD(torch.float64)
+            .set_forcefield(_stub_forcefield(pots))
+            .set_neighbors(neighbors)
+            .set_integrator(VelocityVerletIntegrator(0.5))
+            .run(system, 2)
+        )
+        assert neighbors.capacity > neighbors.num_pairs  # there *are* dead rows to hand over
+        assert len(pots.seen) >= 3
+        assert all(size == torch.Size([neighbors.capacity]) for size in pots.seen)
+
+    def test_capacity_padded_forces_equal_the_live_only_forces(self):
+        """Dead rows price exactly nothing: MD forces match a live-prefix evaluation to 1e-12."""
+        from molix.units import preset_energy_to_md
+
+        system, cell = _argon_system()
+        n_atoms = int(system[POS_KEY].shape[0])
+        state = (
+            MD(torch.float64)
+            .set_forcefield(_argon_forcefield(n_atoms))
+            .set_neighbors(_argon_list(system, cell))
+            .set_integrator(VelocityVerletIntegrator(0.5))
+            .run(system, 0)
+        )
+
+        live, _ = _argon_system()
+        reference_list = _argon_list(live, cell)
+        reference_list.build(live)
+        n_live = reference_list.num_pairs
+        live["pairs"] = TensorDict(
+            {key: column[:n_live] for key, column in live["pairs"].items()}, batch_size=[n_live]
+        )
+        forces = Derivative(_argon_forcefield(n_atoms).to_potentials(), wrt=FORCES)(live)[
+            FORCES_KEY
+        ]
+        expected = forces * preset_energy_to_md("metal")
+        assert float(expected.abs().max()) > 0.0
+        assert torch.allclose(state.forces, expected, atol=1e-12, rtol=0.0)
+
+    def test_potential_dtype_geometry_comes_from_the_list_and_is_never_swapped(self):
+        """Under a ``potential_dtype`` the list writes the geometry at that precision.
+
+        The op is handed the list-bound ``pairs`` namespace itself on every
+        call — one object for the whole run, never a per-step cast copy — with
+        its float columns at the potential's dtype, while the list's own buffers
+        and the trajectory stay at the MD dtype.
+        """
+        seen: list[tuple[int, torch.dtype, torch.dtype, torch.dtype, torch.dtype]] = []
+
+        def recording(op):
+            def compiled(work):
+                pairs = work["pairs"]
+                seen.append(
+                    (
+                        id(pairs),
+                        pairs["shifts"].dtype,
+                        pairs["pair_diff"].dtype,
+                        pairs["pair_dist"].dtype,
+                        work[POS_KEY].dtype,
+                    )
+                )
+                return op(work)
+
+            return compiled
+
+        system, cell = _argon_system()
+        n_atoms = int(system[POS_KEY].shape[0])
+        neighbors = _argon_list(system, cell)
+        state = (
+            MD(torch.float64, potential_dtype=torch.float32)
+            .set_forcefield(_argon_forcefield(n_atoms))
+            .set_neighbors(neighbors)
+            .set_integrator(VelocityVerletIntegrator(0.5))
+            .set_compiler(recording)
+            .run(system, 2)
+        )
+        assert len(seen) >= 3
+        assert len({entry[0] for entry in seen}) == 1
+        assert all(entry[1:] == (torch.float32,) * 4 for entry in seen)
+        assert system["pairs", "shifts"].dtype == torch.float32
+        assert neighbors.shifts.dtype == torch.float64
+        assert state.pos.dtype == torch.float64 and state.forces.dtype == torch.float64
+
+    @pytest.mark.slow
+    def test_the_composed_op_traces_to_one_graph_on_the_full_capacity_buffer(self):
+        """The compiled region is the whole op over ``E = capacity``; the rebuild sits outside."""
+        from molix.compile import Compiler
+
+        ops = []
+
+        def recording(op):
+            ops.append(op)
+            return op
+
+        system, cell = _argon_system()
+        n_atoms = int(system[POS_KEY].shape[0])
+        (
+            MD(torch.float64)
+            .set_forcefield(_argon_forcefield(n_atoms))
+            .set_neighbors(_argon_list(system, cell))
+            .set_integrator(VelocityVerletIntegrator(0.5))
+            .set_compiler(recording)
+            .run(system, 0)
+        )
+        with torch.no_grad():
+            explanation = Compiler.explain(ops[-1], system)
+        assert (explanation.graph_count, explanation.graph_break_count) == (1, 0), (
+            explanation.break_sites
+        )
+
+
+class _GraphCapturingCompiler:
+    """Stands in for ``Compiler(cuda_graphs=True)``: an identity build that says so.
+
+    Records the force tensor the op wrote on each compiled call, so the test can
+    tell whether the adapter left that (graph-pool) tensor on the batch or
+    replaced it with its own copy.
+    """
+
+    def __init__(self, *, cuda_graphs: bool) -> None:
+        self.cuda_graphs = cuda_graphs
+        self.raw_forces: list[torch.Tensor] = []
+
+    def __call__(self, op):
+        def compiled(work):
+            out = op(work)
+            self.raw_forces.append(out[FORCES_KEY])
+            return out
+
+        return compiled
+
+
+class TestCudaGraphStepContract:
+    """What a CUDA-graph build needs from the caller, applied only when it is one.
+
+    ``reduce-overhead`` replays a recorded graph whose outputs live in a static
+    memory pool overwritten by the next replay, and it needs
+    ``torch.compiler.cudagraph_mark_step_begin()`` before each replay to know
+    the previous outputs are dead. The adapter reads ``compiler.cuda_graphs``
+    (``molix.compile.Compiler`` exposes it): under a CUDA-graph build it marks
+    the step before the op and clones the outputs it leaves on the batch; under
+    any other build it does neither, so the default path is byte-identical to
+    having no seam.
+    """
+
+    @pytest.mark.parametrize("cuda_graphs", [True, False])
+    def test_mark_step_and_cloned_outputs_follow_the_compiler(self, monkeypatch, cuda_graphs: bool):
+        marks: list[int] = []
+        monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: marks.append(1))
+        compiler = _GraphCapturingCompiler(cuda_graphs=cuda_graphs)
+        system = _two_atom_system()
+        state = (
+            MD(torch.float64)
+            .set_compiler(compiler)
+            .set_forcefield(_class_i_harmonic())
+            .set_integrator(VelocityVerletIntegrator(0.01))
+            .run(system, 1)
+        )
+        assert len(compiler.raw_forces) == 2  # the step-0 evaluation and one step
+        raw = compiler.raw_forces[-1]
+        if cuda_graphs:
+            # one mark per op call: the eager warm-up in bind_work and every compiled call
+            assert len(marks) == 3
+            assert system[FORCES_KEY] is not raw
+            assert torch.equal(system[FORCES_KEY], raw)
+        else:
+            assert marks == []
+            assert system[FORCES_KEY] is raw
+        assert torch.isfinite(state.forces).all()

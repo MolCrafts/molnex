@@ -141,8 +141,8 @@ class TunerBase:
 
         Args:
             cutoff: Real-space cutoff distance.
-            neighbor_indices: Edge index pairs ``(n_edges, 2)``.
-            neighbor_distances: Edge distances ``(n_edges,)``.
+            neighbor_indices: Edge index pairs ``(n_pairs, 2)``.
+            neighbor_distances: Edge distances ``(n_pairs,)``.
 
         Returns:
             Tuple of filtered ``(neighbor_indices, neighbor_distances)``.
@@ -162,8 +162,8 @@ class GridSearchTuner(TunerBase):
         calculator: Calculator class to tune.
         error_bounds: Error bound estimator class.
         params: List of parameter dicts to search over.
-        neighbor_indices: Edge index pairs ``(n_edges, 2)``.
-        neighbor_distances: Edge distances ``(n_edges,)``.
+        neighbor_indices: Edge index pairs ``(n_pairs, 2)``.
+        neighbor_distances: Edge distances ``(n_pairs,)``.
         full_neighbor_list: If True, full neighbor list expected.
         prefactor: Electrostatics prefactor.
         exponent: Exponent for potential (only 1 supported).
@@ -252,8 +252,8 @@ class TuningTimings(torch.nn.Module):
         charges: Atomic charges ``(n_atoms, 1)``.
         cell: Unit cell matrix ``(3, 3)``.
         positions: Cartesian coordinates ``(n_atoms, 3)``.
-        neighbor_indices: Edge index pairs ``(n_edges, 2)``.
-        neighbor_distances: Edge distances ``(n_edges,)``.
+        neighbor_indices: Edge index pairs ``(n_pairs, 2)``.
+        neighbor_distances: Edge distances ``(n_pairs,)``.
         n_repeat: Number of timing repetitions.
         n_warmup: Number of warmup runs.
         run_backward: If True, include backward pass in timing.

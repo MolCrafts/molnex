@@ -11,13 +11,13 @@ from __future__ import annotations
 import pytest
 import torch
 
+from molix.data.dataset import BaseDataset
 from molix.profiler.dataset import (
     DatasetProfiler,
     DatasetResult,
     TargetStat,
     _flatten_leaves,
 )
-from molix.store.dataset import BaseDataset
 
 # ---------------------------------------------------------------------------
 # Literal fixtures — no RNG, so every expectation below is analytic
@@ -35,8 +35,8 @@ def _record(i: int, n: int | None = None) -> dict:
     """One literal sample dict: a ring molecule of ``n`` (default ``2 + i % 4``) atoms.
 
     Keys follow the raw-sample tier of the two-tier data contract:
-    ``Z`` ``(N,)``, ``pos`` ``(N, 3)``, ``edge_index`` ``(2N, 2)``,
-    ``edge_dist`` ``(2N,)``, and the scalar target ``targets.U0`` ``(1,)``.
+    ``Z`` ``(N,)``, ``pos`` ``(N, 3)``, ``pair_index`` ``(2N, 2)``,
+    ``pair_dist`` ``(2N,)``, and the scalar target ``targets.U0`` ``(1,)``.
 
     Args:
         i: Record index; drives the atom count and the target value.
@@ -48,12 +48,12 @@ def _record(i: int, n: int | None = None) -> dict:
     n_atoms = 2 + i % 4 if n is None else n
     src = torch.arange(n_atoms, dtype=torch.long)
     dst = (src + 1) % n_atoms
-    edge_index = torch.cat([torch.stack([src, dst], dim=1), torch.stack([dst, src], dim=1)], dim=0)
+    pair_index = torch.cat([torch.stack([src, dst], dim=1), torch.stack([dst, src], dim=1)], dim=0)
     return {
         "Z": torch.full((n_atoms,), 6, dtype=torch.long),
         "pos": torch.arange(3 * n_atoms, dtype=torch.float32).reshape(n_atoms, 3),
-        "edge_index": edge_index,
-        "edge_dist": torch.full((2 * n_atoms,), 1.5, dtype=torch.float32),
+        "pair_index": pair_index,
+        "pair_dist": torch.full((2 * n_atoms,), 1.5, dtype=torch.float32),
         "targets": {"U0": torch.tensor([float(i)], dtype=torch.float32)},
     }
 
@@ -78,29 +78,32 @@ class _CountingDataset(BaseDataset):
         return self._samples[idx]
 
     @property
-    def atom_counts(self) -> torch.Tensor:
-        return torch.tensor([len(s["Z"]) for s in self._samples], dtype=torch.long)
+    def frame_mol(self) -> torch.Tensor:
+        return torch.arange(len(self._samples), dtype=torch.long)
 
-    @property
-    def edge_counts(self) -> torch.Tensor:
-        if "edge_index" not in self._samples[0]:
-            raise ValueError("dataset carries no neighbour graph — no edge counts")
-        return torch.tensor([len(s["edge_index"]) for s in self._samples], dtype=torch.long)
+    def column(self, name: str) -> torch.Tensor:
+        if name == "n_atoms":
+            return torch.tensor([len(s["Z"]) for s in self._samples], dtype=torch.long)
+        if name == "n_pairs":
+            if "pair_index" not in self._samples[0]:
+                raise KeyError(name)
+            return torch.tensor([len(s["pair_index"]) for s in self._samples], dtype=torch.long)
+        raise KeyError(name)
 
     @property
     def max_atoms(self) -> int:
-        return int(self.atom_counts.max())
+        return int(self.column("n_atoms").max())
 
     @property
-    def max_edges(self) -> int:
-        return int(self.edge_counts.max())
+    def max_pairs(self) -> int:
+        return int(self.column("n_pairs").max())
 
     @property
     def avg_num_neighbors(self) -> float:
         """``0.0`` without a neighbour graph — zero neighbours is the honest answer."""
-        if "edge_index" not in self._samples[0]:
+        if "pair_index" not in self._samples[0]:
             return 0.0
-        return float(self.edge_counts.sum()) / float(self.atom_counts.sum())
+        return float(self.column("n_pairs").sum()) / float(self.column("n_atoms").sum())
 
 
 @pytest.fixture
@@ -125,10 +128,10 @@ class TestDatasetProfiler:
         assert result.counts_exact is True
         assert result.n_total == _N_RECORDS
         assert result.max_atoms == ring_dataset.max_atoms == _MAX_ATOMS
-        assert result.max_edges == ring_dataset.max_edges == _MAX_EDGES
+        assert result.max_pairs == ring_dataset.max_pairs == _MAX_EDGES
         assert result.avg_num_neighbors == ring_dataset.avg_num_neighbors
         assert result.avg_num_neighbors == pytest.approx(_AVG_NUM_NEIGHBORS, rel=1e-12)
-        assert result.atom_stats.mean == float(ring_dataset.atom_counts.double().mean())
+        assert result.atom_stats.mean == float(ring_dataset.column("n_atoms").double().mean())
         assert result.atom_stats.mean == pytest.approx(_ATOM_MEAN, rel=1e-12)
         assert result.edge_stats is not None
         assert result.edge_stats.mean == pytest.approx(_EDGE_MEAN, rel=1e-12)
@@ -170,7 +173,7 @@ class TestDatasetProfiler:
         ]
         ds = _CountingDataset(samples)
         with pytest.raises(ValueError):
-            _ = ds.edge_counts  # precondition: the exact fast path really does raise
+            BaseDataset.nrows_of(ds, "pairs")  # precondition: no edges table, exact path refuses
 
         result = DatasetProfiler(n_samples=3).run(ds)
 
@@ -179,7 +182,7 @@ class TestDatasetProfiler:
 
     def test_run_rejects_empty_dataset(self):
         """Empty input is a user error, and the message must say what to pass instead."""
-        with pytest.raises(ValueError, match="FrameStoreDataset"):
+        with pytest.raises(ValueError, match="FrameDataset"):
             DatasetProfiler().run([])
 
     def test_init_rejects_degenerate_config(self):

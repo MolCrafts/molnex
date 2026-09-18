@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 
+import pytest
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
@@ -53,6 +54,42 @@ def _charge_model() -> AtomicChargeModel:
 
 
 class TestAtomicChargeModel:
+    @pytest.mark.slow
+    def test_charges_trace_as_one_graph_at_a_declared_capacity(self):
+        """The charge path is a hot path: ``features -> q`` must be one graph.
+
+        With ``max_atoms`` declared on the solver and the ``(B,)`` total charge
+        the Parameterizer always forwards, nothing on the way from features to
+        charges reads a tensor back to the host — ``B`` is the total-charge
+        length, the dense layout is the capacity, the empty-molecule pin is a
+        mask select. Zero breaks, measured once here at the public entry.
+        """
+        from molix.compile import Compiler
+
+        model = AtomicChargeModel(
+            _ConstChiEta(),
+            ElectronegativityEqualization(DiagonalHardnessKernel(), jitter=0.0, max_atoms=4),
+        )
+        batch = TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+                        "batch": torch.zeros(2, dtype=torch.long),
+                    },
+                    batch_size=[2],
+                )
+            },
+            batch_size=[],
+        )
+        feats = torch.zeros(2, 4)
+        total = torch.zeros(1)
+        model.charges(feats, batch, total_charge=total)
+        explanation = Compiler.explain(model.charges, feats, batch, total_charge=total)
+        assert (explanation.graph_count, explanation.graph_break_count) == (1, 0), (
+            f"break sites: {explanation.break_sites}"
+        )
+
     def test_write_forcefield_q(self):
         model = _charge_model()
         batch = TensorDict(
@@ -69,11 +106,11 @@ class TestAtomicChargeModel:
         )
         feats = torch.zeros(2, 4)
         ff = model.write_forcefield(ForceField(name="c"), feats, batch)
-        q = ff.params("atoms")["q"]
+        q = ff.params("atoms")["charge"]
         assert math.isclose(float(q.sum()), 0.0, abs_tol=1e-10)
 
     def test_electrostatics_record_names_the_constraint_and_the_solve_it_ran(self) -> None:
-        """S2: the charge model is the only thing that knows how ``q`` was got.
+        """S2: the charge model is the only thing that knows how ``charge`` was got.
 
         The constraint is the per-graph total charge imposed through the KKT
         row of the equilibration system. The solve is *direct* — one bordered

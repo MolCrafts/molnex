@@ -86,21 +86,21 @@ class ZBLRepulsion(nn.Module):
         self,
         r: torch.Tensor,
         Z: torch.Tensor,
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
     ) -> torch.Tensor:
         """Compute the per-atom ZBL repulsion energy.
 
         Args:
             r: Edge distances ``(E,)``.
             Z: Atomic numbers ``(N,)``.
-            edge_index: ``(E, 2)`` with ``[:, 0]`` = source, ``[:, 1]`` = target
+            pair_index: ``(E, 2)`` with ``[:, 0]`` = source, ``[:, 1]`` = target
                 (the repo-wide edge convention).
 
         Returns:
             Per-atom energy ``(N,)`` in eV.
         """
         z = Z.long()
-        source, target = edge_index[:, 0], edge_index[:, 1]
+        source, target = pair_index[:, 0], pair_index[:, 1]
         z_source = z[source].to(r.dtype)
         z_target = z[target].to(r.dtype)
 

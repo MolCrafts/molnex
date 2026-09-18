@@ -126,8 +126,8 @@ if str(_ROOT / "src") not in sys.path:
 
 from molpy import Box, Frame
 
-from molix.batch import TotalCharge
-from molix.batch.collate import collate_molecules
+from molix.data import TotalCharge
+from molix.data.collate import collate_molecules
 from molix.ff_export import LammpsAdapter, LammpsWriter
 from molix.md import (
     MD,
@@ -242,7 +242,7 @@ def butane_frame() -> Frame:
 
     3 bonds, 2 angles, 1 proper torsion, and a declared neutral
     ``total_charge``. A ``Frame`` is the unit of data at rest in molnex and
-    :func:`~molix.batch.collate.collate_molecules` is the only conversion to the
+    :func:`~molix.data.collate.collate_molecules` is the only conversion to the
     batch a model reads, so this tool builds the same object a dataset would
     rather than assembling batch tensors by hand.
 
@@ -259,7 +259,7 @@ def butane_frame() -> Frame:
     # A per-atom float column on the block the line above built: this field
     # carries no ``atoms`` parameter table, so the chain's (zero) charges are
     # the system's own column and the deck's charge column comes from them.
-    frame["atoms"]["q"] = np.zeros(4, dtype=np.float64)
+    frame["atoms"]["charge"] = np.zeros(4, dtype=np.float64)
     frame["bonds"] = {
         "atomi": np.array([0, 1, 2], dtype=np.int64),
         "atomj": np.array([1, 2, 3], dtype=np.int64),
@@ -285,7 +285,7 @@ def butane_batch(dtype: torch.dtype = torch.float64) -> TensorDict:
     No list is placed: the field is bonded-only, so there is no pair term to
     price and nothing to build one at — ``ForceField.neighbor_list`` refuses a
     field with no pair style, which is the right answer here. The collate's
-    empty ``edges`` namespace is left as it comes, unread.
+    empty ``pairs`` namespace is left as it comes, unread.
 
     Open-boundary: the frame carries no box, so the batch carries no
     ``graphs.cell``. The batch is built at *dtype* by the collate itself.
@@ -558,7 +558,7 @@ def water_ion_frame() -> Frame:
     therefore one system, and :func:`water_ion_geometry` already numbers its
     bonds and angles in box-global indices, so the collate has nothing to rebase.
 
-    The species tables ride as per-atom columns (``q`` in ``e``, ``mass`` in
+    The species tables ride as per-atom columns (``charge`` in ``e``, ``mass`` in
     amu) and the declared net charge as a ``meta`` scalar, so both are the
     frame's data rather than something bolted onto the batch afterwards.
 
@@ -578,7 +578,7 @@ def water_ion_frame() -> Frame:
         "z": np.ascontiguousarray(xyz[:, 2]),
     }
     # Per-atom float columns on the block the line above built.
-    frame["atoms"]["q"] = np.array([SPECIES[t][2] for t in labels], dtype=np.float64)
+    frame["atoms"]["charge"] = np.array([SPECIES[t][2] for t in labels], dtype=np.float64)
     frame["atoms"]["mass"] = np.array([SPECIES[t][3] for t in labels], dtype=np.float64)
     frame["bonds"] = {
         "atomi": np.array([b[0] for b in bonds], dtype=np.int64),
@@ -600,7 +600,7 @@ def water_ion_batch(dtype: torch.dtype = torch.float64) -> TensorDict:
     The list is placed by :meth:`~molpot.forcefield.ForceField.neighbor_list`,
     so its radius is the field's own (finding **F21**) rather than a number this
     builder picks; ``symmetry=True`` is that method's, and it is load-bearing —
-    the half-pair mode emits ``edge_index[:, 0] > edge_index[:, 1]``, which
+    the half-pair mode emits ``pair_index[:, 0] > pair_index[:, 1]``, which
     ``Potentials`` reads as an entirely dead list (**F22**). The ``pme`` and
     ``ewald`` spellings declare the same real-space radius, so which one asks
     for the list does not matter.
@@ -609,7 +609,7 @@ def water_ion_batch(dtype: torch.dtype = torch.float64) -> TensorDict:
         dtype: Floating dtype the batch is priced in.
 
     Returns:
-        The batch, with ``edges`` placed at the field's radius under the
+        The batch, with ``pairs`` placed at the field's radius under the
         minimum-image convention.
     """
     batch = collate_molecules([water_ion_frame()], dtype=dtype)
@@ -639,7 +639,7 @@ def water_ion_ff(
     needs types.
 
     Args:
-        batch: The batch built by :func:`water_ion_batch`; its ``atoms.q`` and
+        batch: The batch built by :func:`water_ion_batch`; its ``atoms.charge`` and
             topology counts size the parameter tables. Read before the
             neighbour list is placed — that list's radius is *this* field's, so
             the field has to exist first.
@@ -660,8 +660,7 @@ def water_ion_ff(
         ForceField(
             name="water-ion",
             units="real",
-            nonbonded_scaling=NonbondedScaling(
-                q=ExclusionScales(0.0, 0.0, 0.5),
+            nonbonded_scaling=NonbondedScaling(charge=ExclusionScales(0.0, 0.0, 0.5),
                 lj=ExclusionScales(0.0, 0.0, 0.5),
             ),
         )
@@ -687,7 +686,7 @@ def water_ion_ff(
                 "theta0": torch.full((n_angles,), math.radians(HOH_DEG), dtype=dtype),
             },
             atoms={
-                "q": batch["atoms", "q"],
+                "charge": batch["atoms", "charge"],
                 "epsilon": torch.tensor([SPECIES[t][0] for t in labels], dtype=dtype),
                 "sigma": torch.tensor([SPECIES[t][1] for t in labels], dtype=dtype),
             },
@@ -1100,11 +1099,11 @@ def run_periodic(args: argparse.Namespace, workdir: Path) -> tuple[bool, str]:
     pots = ff_exact.to_potentials()
 
     n_atoms = len(labels)
-    n_edges = int(batch["edges", "edge_index"].shape[0])
+    n_pairs = int(batch["pairs", "pair_index"].shape[0])
     print("=== periodic system ===")
     print(f"  {n_atoms} atoms ({N_WATER} water + Na+ + Cl-), cubic L = {BOX_A} Å, seed {SEED}")
     print(
-        f"  placed edges = {n_edges} rows (bidirectional, cutoff {CUTOFF_A} Å < L/2 = {BOX_A / 2})"
+        f"  placed edges = {n_pairs} rows (bidirectional, cutoff {CUTOFF_A} Å < L/2 = {BOX_A / 2})"
     )
     print(f"  Σq = {float(batch['atoms', 'q'].sum()):+.1e} e")
 

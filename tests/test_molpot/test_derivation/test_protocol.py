@@ -7,7 +7,7 @@ accepts). The session side-channel is exercised elsewhere.
 
 The contract under test is CLAUDE.md's post-collate schema: ``"graphs"`` is a
 ``TensorDict(batch_size=[B])`` for ``B`` graphs, the same shape the canonical
-collate writes (``src/molix/batch/collate.py``). Consumers already read
+collate writes (``src/molix/data/collate.py``). Consumers already read
 ``batch["graphs"].batch_size[0]`` (``src/molzoo/pinet/potential.py``), so a
 ``batch_size=[]`` produced here is a latent ``IndexError``.
 

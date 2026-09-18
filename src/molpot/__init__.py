@@ -39,9 +39,9 @@ from molpot.derivation import (
     EnergyAggregation,
     ForceDerivation,
     HessianDerivation,
-    StressDerivation,
 )
 from molpot.forcefield import (
+    ClassIForceField,
     ExclusionTable,
     ForceField,
     ForceFieldPredictions,
@@ -161,6 +161,7 @@ __all__ = [
     "NonbondedMethodRecord",
     "NonbondedScaling",
     "NumericsRecord",
+    "ClassIForceField",
     "OPLSAAForceField",
     "ParamFrame",
     "ParamTableRecord",
@@ -181,7 +182,6 @@ __all__ = [
     "SolverRecord",
     "Sonata",
     "SonataSpec",
-    "StressDerivation",
     "SumPooling",
     "TSScalingHead",
     "TermSpec",

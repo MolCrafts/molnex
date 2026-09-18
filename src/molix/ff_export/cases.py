@@ -21,7 +21,7 @@ class TranslationCase(Enum):
         DIRECT_UNIT_SCALE: Same functional form; only unit conversion
             (e.g. harmonic bond/angle with matching ``½ k x²``).
         FORM_REPARAMETERIZE: Same physics, different parameter convention
-            (e.g. torsion ``k`` vs ``k/2``, idivf absorption, LJ ε/σ vs A/B).
+            (e.g. torsion ``k`` vs ``k/2``, LJ ε/σ vs A/B).
         DECOMPOSE: One IR bag expands to multiple backend force parameters
             (e.g. multi-term proper → multiple PeriodicTorsion rows).
         UNSUPPORTED: No faithful mapping; raise :class:`UnsupportedTermError`.

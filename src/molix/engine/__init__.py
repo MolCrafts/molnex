@@ -3,7 +3,7 @@
 The general half of the engine bridge — model wrapping + AOT export — lives here
 in ``molix``; the engine-specific C++ (currently the LAMMPS ``pair_style
 molnex``) lives in the repo-root ``interface/``. A potential is wrapped to the
-flat ``(Z, pos, edge_index, local_mask) -> (energy, forces, atomic_energy)``
+flat ``(Z, pos, pair_index, local_mask) -> (energy, forces, atomic_energy)``
 calling convention by an :class:`EngineForward` + :class:`EngineAdapter`
 (engine-neutral; the same flat convention any atomistic MD engine speaks), then
 AOT-exported. ``interface/`` has no per-model C++ — all model glue is this

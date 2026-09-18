@@ -130,19 +130,19 @@ def shifts_to_integer_S(
 
 
 def neighborlist_edge_keys(
-    edge_index: torch.Tensor,
+    pair_index: torch.Tensor,
     shifts: torch.Tensor,
-    num_edges: int,
+    num_pairs: int,
     cell: torch.Tensor | None,
     *,
     open_system: bool = False,
 ) -> set[EdgeKey]:
     """Convert live NeighborList buffers to the oracle edge-key set."""
-    n = int(num_edges)
+    n = int(num_pairs)
     if n == 0:
         return set()
-    src = edge_index[:n, 0].detach().cpu().long()
-    tgt = edge_index[:n, 1].detach().cpu().long()
+    src = pair_index[:n, 0].detach().cpu().long()
+    tgt = pair_index[:n, 1].detach().cpu().long()
     sh = shifts[:n].detach().cpu()
     if open_system or cell is None:
         return {

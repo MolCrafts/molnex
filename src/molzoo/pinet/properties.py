@@ -71,14 +71,14 @@ class PiNetDipole(nn.Module):
         edge_scalars = None
         edge_index = None
         edge_diff = None
-        if self.head.uses_bc and "i1_features" in batch["edges"].keys():
-            edge_scalars = pool_layer(batch["edges", "i1_features"], self.layer_reduction)
-            edge_index = batch["edges", "edge_index"]
+        if self.head.uses_bc and "i1_features" in batch["pairs"].keys():
+            edge_scalars = pool_layer(batch["pairs", "i1_features"], self.layer_reduction)
+            edge_index = batch["pairs", "pair_index"]
             pos = batch["atoms", "pos"]
-            edge_diff = edge_bond_diff(batch["edges"], pos, edge_index)
+            edge_diff = edge_bond_diff(batch["pairs"], pos, edge_index)
         edge_vectors = None
-        if self.head.uses_bc and "i3_features" in batch["edges"].keys():
-            edge_vectors = pool_layer(batch["edges", "i3_features"], self.layer_reduction)
+        if self.head.uses_bc and "i3_features" in batch["pairs"].keys():
+            edge_vectors = pool_layer(batch["pairs", "i3_features"], self.layer_reduction)
         oxidation = None
         if self.head.uses_os and "oxidation" in batch["atoms"].keys():
             oxidation = batch["atoms", "oxidation"]
@@ -96,8 +96,8 @@ class PiNetDipole(nn.Module):
             node_vectors=node_vectors,
             edge_scalars=edge_scalars,
             edge_vectors=edge_vectors,
-            edge_index=edge_index,
-            edge_diff=edge_diff,
+            pair_index=edge_index,
+            pair_diff=edge_diff,
             oxidation=oxidation,
             total_charge=total_charge,
         )
@@ -141,20 +141,20 @@ class PiNetPolarizability(nn.Module):
         atom_batch = batch["atoms", "batch"]
         num_graphs = batch["graphs"].batch_size[0]
         node_scalars = pool_layer(batch["atoms", "node_features"], self.layer_reduction)
-        edge_scalars = pool_layer(batch["edges", "i1_features"], self.layer_reduction)
+        edge_scalars = pool_layer(batch["pairs", "i1_features"], self.layer_reduction)
         edge_vectors = None
-        if "i3_features" in batch["edges"].keys():
-            edge_vectors = pool_layer(batch["edges", "i3_features"], self.layer_reduction)
+        if "i3_features" in batch["pairs"].keys():
+            edge_vectors = pool_layer(batch["pairs", "i3_features"], self.layer_reduction)
         pos = batch["atoms", "pos"]
-        edge_index = batch["edges", "edge_index"]
-        edge_diff = edge_bond_diff(batch["edges"], pos, edge_index)
+        edge_index = batch["pairs", "pair_index"]
+        edge_diff = edge_bond_diff(batch["pairs"], pos, edge_index)
         return self.head(
             pos=pos,
             Z=batch["atoms", "Z"],
             atom_batch=atom_batch,
             num_graphs=num_graphs,
-            edge_index=edge_index,
-            edge_diff=edge_diff,
+            pair_index=edge_index,
+            pair_diff=edge_diff,
             node_scalars=node_scalars,
             edge_scalars=edge_scalars,
             edge_vectors=edge_vectors,

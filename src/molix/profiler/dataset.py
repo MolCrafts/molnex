@@ -2,18 +2,19 @@
 
 Answers *"what is in my data, and what does one sample cost?"* for any object
 yielding **flat sample dicts** (the raw-sample tier of the two-tier data
-contract): :class:`~molix.store.frame_store_view.FrameStoreDataset` /
-:class:`~molix.store.dataset.SubsetDataset`, a
+contract): :class:`~molix.data.frame_dataset.FrameDataset` /
+:class:`~molix.data.dataset.SubsetDataset`, a
 :class:`~molix.profiler.mock.MockSource`, or a plain ``Sequence[dict]``.
 Complements :class:`~molix.profiler.dataloader.DataLoaderProfiler`, which
 times batch *throughput* rather than the data itself.
 
 :meth:`DatasetProfiler.run` merges two paths:
 
-1. **Exact fast path** — when the object exposes the packed-pointer
-   properties (``atom_counts`` / ``edge_counts`` / ``avg_num_neighbors`` /
-   ``max_atoms`` / ``max_edges``), size statistics are read straight off the
-   ``atom_ptr`` / ``edge_ptr`` cumsums: **every** record, zero unpacking.
+1. **Exact fast path** — when
+   :meth:`~molix.data.dataset.BaseDataset.nrows_of` can read table lengths
+   from a declaration rather than a sample (and optional
+   ``avg_num_neighbors`` / ``max_atoms`` / ``max_pairs``), size statistics
+   cover **every** record without unpacking.
    The result then carries ``counts_exact=True``.
 2. **Sampled slow path** — only for what genuinely needs per-sample reads:
    cold / steady-state ``__getitem__`` latency, per-sample byte footprint,
@@ -47,6 +48,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from molix.data.dataset import BaseDataset
 from molix.profiler._utils import Timer, TimingStat, ValueStat, _fmt_table, sample_counts
 
 #: Atom-count skew — ``p95 / p50`` over the records — above which the report
@@ -72,7 +74,7 @@ class FieldSpec:
     Attributes:
         key: Dotted key path into the flat sample, e.g. ``"targets.U0"``.
         axis: Packing axis — ``"atom"``, ``"edge"``, ``"graph"`` or
-            ``"scalar"``, matching :func:`molix.store.cache._infer_schema_across`.
+            ``"scalar"``, matching :func:`molix.data.cache._infer_schema_across`.
         dtype: ``torch.dtype`` of the tensor, or the Python type name for a
             non-tensor scalar.
         extra_shape: Trailing shape after the packing axis — ``(3,)`` for
@@ -105,11 +107,11 @@ class FieldSpec:
         )
 
     @classmethod
-    def from_sample(cls, key: str, value: object, n_atoms: int, n_edges: int) -> "FieldSpec":
+    def from_sample(cls, key: str, value: object, n_atoms: int, n_pairs: int) -> "FieldSpec":
         """Infer the layout of one leaf from a single sampled record.
 
         Best-effort fallback for datasets with no packed view; classification
-        mirrors :func:`molix.store.cache._infer_schema_across` (leading
+        mirrors :func:`molix.data.cache._infer_schema_across` (leading
         dimension tracks atoms, else edges, else the field is per-graph) but
         sees one record instead of all of them — the caller reports
         ``fields_exact=False``.
@@ -118,7 +120,7 @@ class FieldSpec:
             key: Dotted key of the leaf.
             value: The leaf value, normally a tensor.
             n_atoms: Atom count of the record this leaf came from.
-            n_edges: Edge count of the record this leaf came from.
+            n_pairs: Edge count of the record this leaf came from.
 
         Returns:
             The inferred :class:`FieldSpec`.
@@ -127,7 +129,7 @@ class FieldSpec:
             return cls(key=key, axis="scalar", dtype=type(value).__name__, extra_shape=())
         if value.ndim and int(value.shape[0]) == n_atoms:
             return cls(key=key, axis="atom", dtype=value.dtype, extra_shape=tuple(value.shape[1:]))
-        if value.ndim and int(value.shape[0]) == n_edges:
+        if value.ndim and int(value.shape[0]) == n_pairs:
             return cls(key=key, axis="edge", dtype=value.dtype, extra_shape=tuple(value.shape[1:]))
         return cls(key=key, axis="graph", dtype=value.dtype, extra_shape=tuple(value.shape))
 
@@ -197,7 +199,7 @@ class DatasetResult:
         edge_stats: Edges per record, or ``None`` when the dataset carries no
             edges (see :attr:`warnings`).
         max_atoms: Largest single-record atom count.
-        max_edges: Largest single-record edge count (``0`` without edges).
+        max_pairs: Largest single-record edge count (``0`` without edges).
         avg_num_neighbors: ``total_edges / total_atoms``, the MACE/Allegro
             normalisation constant. Exact iff :attr:`counts_exact`.
         access_ms: Steady-state ``__getitem__`` latency.
@@ -222,7 +224,7 @@ class DatasetResult:
     atom_stats: ValueStat
     edge_stats: ValueStat | None
     max_atoms: int
-    max_edges: int
+    max_pairs: int
     avg_num_neighbors: float
     access_ms: TimingStat
     cold_access_ms: float
@@ -269,7 +271,7 @@ class DatasetResult:
                     "std": f"{self.edge_stats.std:.2f}",
                     "p50": f"{self.edge_stats.p50:.0f}",
                     "p95": f"{self.edge_stats.p95:.0f}",
-                    "max": str(self.max_edges),
+                    "max": str(self.max_pairs),
                 }
             )
         print(_fmt_table(size_rows, ["Quantity", "mean", "std", "p50", "p95", "max"], col_width=8))
@@ -363,7 +365,7 @@ class DatasetResult:
 def _flatten_leaves(sample: Mapping[str, object], prefix: str = "") -> dict[str, object]:
     """Flatten a nested sample dict to dotted keys, read-only and never raising.
 
-    Deliberately diverges from :func:`molix.store.cache._flatten`, the
+    Deliberately diverges from :func:`molix.data.cache._flatten`, the
     packing-time flattener: that one is a **validator** and raises
     :class:`ValueError` when a sample key collides with a reserved
     packed-cache key (``schema``, ``atom_ptr``, …). This walker performs
@@ -424,7 +426,7 @@ class _SampledPass:
         access_ms: Steady-state per-record ``__getitem__`` latency, in ms.
         byte_counts: Leaf-tensor footprint of each visited record, in bytes.
         atom_counts: Atoms per visited record.
-        edge_counts: Edges per visited record.
+        pair_counts: Edges per visited record.
         fields: ``{dotted_key: FieldSpec}`` inferred from the first record that
             carried each key.
         target_values: ``{dotted_key: values}`` for every scalar ``targets.*``
@@ -435,7 +437,7 @@ class _SampledPass:
     access_ms: list[float]
     byte_counts: list[int]
     atom_counts: list[int]
-    edge_counts: list[int]
+    pair_counts: list[int]
     fields: dict[str, FieldSpec]
     target_values: dict[str, list[float]]
 
@@ -450,7 +452,7 @@ class _SizeStats:
         atom_stats: Atoms per record.
         edge_stats: Edges per record, or ``None`` when there are no edges.
         max_atoms: Largest single-record atom count.
-        max_edges: Largest single-record edge count (``0`` without edges).
+        max_pairs: Largest single-record edge count (``0`` without edges).
         avg_num_neighbors: ``total_edges / total_atoms``.
     """
 
@@ -458,7 +460,7 @@ class _SizeStats:
     atom_stats: ValueStat
     edge_stats: ValueStat | None
     max_atoms: int
-    max_edges: int
+    max_pairs: int
     avg_num_neighbors: float
 
 
@@ -534,7 +536,7 @@ class DatasetProfiler:
 
         sampled = self._sampled_pass(data, indices)
         sizes, size_warnings = self._size_stats(
-            data, sampled.atom_counts, sampled.edge_counts, len(indices)
+            data, sampled.atom_counts, sampled.pair_counts, len(indices)
         )
         fields, fields_exact, field_warnings = self._field_layout(data, sampled.fields)
         targets, target_warnings = self._target_diagnostics(sampled.target_values, sizes.atom_stats)
@@ -548,7 +550,7 @@ class DatasetProfiler:
             atom_stats=sizes.atom_stats,
             edge_stats=sizes.edge_stats,
             max_atoms=sizes.max_atoms,
-            max_edges=sizes.max_edges,
+            max_pairs=sizes.max_pairs,
             avg_num_neighbors=sizes.avg_num_neighbors,
             access_ms=TimingStat.from_list(sampled.access_ms),
             cold_access_ms=sampled.cold_access_ms,
@@ -595,15 +597,15 @@ class DatasetProfiler:
                 sample = data[idx]
             access_ms.append(timer.elapsed * 1000.0)
 
-            n_atoms, n_edges = sample_counts(sample)
+            n_atoms, n_pairs = sample_counts(sample)
             sampled_atoms.append(n_atoms)
-            sampled_edges.append(n_edges)
+            sampled_edges.append(n_pairs)
 
             leaves = _flatten_leaves(sample)
             byte_counts.append(_sample_bytes(leaves))
             for key, value in leaves.items():
                 if key not in sampled_fields:
-                    sampled_fields[key] = FieldSpec.from_sample(key, value, n_atoms, n_edges)
+                    sampled_fields[key] = FieldSpec.from_sample(key, value, n_atoms, n_pairs)
                 if not key.startswith("targets."):
                     continue
                 if isinstance(value, torch.Tensor) and value.numel() == 1:
@@ -616,7 +618,7 @@ class DatasetProfiler:
             access_ms=access_ms,
             byte_counts=byte_counts,
             atom_counts=sampled_atoms,
-            edge_counts=sampled_edges,
+            pair_counts=sampled_edges,
             fields=sampled_fields,
             target_values=target_values,
         )
@@ -641,22 +643,22 @@ class DatasetProfiler:
             reason plus, on the fallback, the ``counts_exact=False`` notice.
         """
         warnings: list[str] = []
-        atom_counts, atom_warning = self._packed_counts(data, "atom_counts")
-        edge_counts, edge_warning = self._packed_counts(data, "edge_counts")
+        n_atoms, atom_warning = self._table_nrows(data, "atoms")
+        n_pairs, edge_warning = self._table_nrows(data, "pairs")
         warnings.extend(w for w in (atom_warning, edge_warning) if w is not None)
-        counts_exact = atom_counts is not None
+        counts_exact = n_atoms is not None
 
-        if atom_counts is not None:
-            atom_stats = ValueStat.from_list(atom_counts.tolist())
-            edge_stats = None if edge_counts is None else ValueStat.from_list(edge_counts.tolist())
+        if n_atoms is not None:
+            atom_stats = ValueStat.from_list(n_atoms.tolist())
+            edge_stats = None if n_pairs is None else ValueStat.from_list(n_pairs.tolist())
             max_atoms = int(_or_default(data, "max_atoms", 0))
-            max_edges = int(_or_default(data, "max_edges", 0)) if edge_counts is not None else 0
+            max_pairs = int(_or_default(data, "max_pairs", 0)) if n_pairs is not None else 0
             avg_num_neighbors = float(_or_default(data, "avg_num_neighbors", 0.0))
         else:
             atom_stats = ValueStat.from_list(sampled_atoms)
             edge_stats = ValueStat.from_list(sampled_edges) if any(sampled_edges) else None
             max_atoms = max(sampled_atoms, default=0)
-            max_edges = max(sampled_edges, default=0)
+            max_pairs = max(sampled_edges, default=0)
             total_atoms = sum(sampled_atoms)
             avg_num_neighbors = sum(sampled_edges) / total_atoms if total_atoms else 0.0
             warnings.append(
@@ -669,7 +671,7 @@ class DatasetProfiler:
             atom_stats=atom_stats,
             edge_stats=edge_stats,
             max_atoms=max_atoms,
-            max_edges=max_edges,
+            max_pairs=max_pairs,
             avg_num_neighbors=avg_num_neighbors,
         )
         return stats, warnings
@@ -738,7 +740,7 @@ class DatasetProfiler:
         Raises:
             ValueError: *data* is not a non-empty indexable sequence.
         """
-        remedy = "Point it at a sealed block (FrameStoreDataset) or a non-empty Sequence[dict]."
+        remedy = "Point it at a FrameDataset or a non-empty Sequence[dict]."
         if not hasattr(data, "__len__") or not hasattr(data, "__getitem__"):
             raise ValueError(
                 f"{type(data).__name__} exposes no __len__ / __getitem__, so no sample "
@@ -749,26 +751,14 @@ class DatasetProfiler:
             raise ValueError(f"Cannot profile an empty dataset ({type(data).__name__}). {remedy}")
         return n_total
 
-    def _packed_counts(self, data: object, attr: str) -> tuple[torch.Tensor | None, str | None]:
-        """Read an exact per-record count vector off a packed-pointer property.
-
-        Args:
-            data: The dataset being profiled.
-            attr: Property name — ``"atom_counts"`` or ``"edge_counts"``.
-
-        Returns:
-            ``(counts, warning)``. ``counts`` is ``None`` when the dataset is
-            not cache-backed (silent — the sampled path covers it) or when the
-            cache was packed without that pointer (a legitimate case, e.g. no
-            :class:`~molix.batch.NeighborList` in the pipeline), in which
-            case ``warning`` carries the reason for the report.
-        """
+    def _table_nrows(self, data: object, table: str) -> tuple[torch.Tensor | None, str | None]:
+        """Exact per-record ``frame[table].nrows`` when the source is Frame-shaped."""
         try:
-            counts = getattr(data, attr)
-        except AttributeError:
+            counts = BaseDataset.nrows_of(data, table)
+        except ValueError as exc:
+            return None, f"exact {table!r} nrows unavailable — {exc}"
+        except (TypeError, AttributeError, KeyError):
             return None, None
-        except ValueError as exc:  # cache built without the matching pointer
-            return None, f"exact {attr} unavailable — {exc}"
         if not isinstance(counts, torch.Tensor):
             return None, None
         return counts, None

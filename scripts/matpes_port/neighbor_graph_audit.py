@@ -12,7 +12,7 @@ Writes:
   * optional ``neighbor_compare.txt`` under --out
 
 **LAMMPS / ML-IAP (optional, not implemented as invasive dump):** the production
-``interface/`` pair_style feeds flat ``(Z, pos, edge_index)`` into the exported
+``interface/`` pair_style feeds flat ``(Z, pos, pair_index)`` into the exported
 model; molnex MD rebuilds via ``NeighborList``. A three-way
 oracle vs molix vs LAMMPS-fed list needs a non-default debug dump at the
 ML-IAP neighbor handoff — a documented seam (no production
@@ -75,7 +75,7 @@ def audit_frame(
         bin=bin,
     )
     ref = bruteforce_edges(pos, cell=cell, cutoff=cutoff, pbc=(True, True, True))
-    sut = neighborlist_edge_keys(nl.edge_index, nl.shifts, nl.num_edges, cell)
+    sut = neighborlist_edge_keys(nl.pair_index, nl.shifts, nl.num_pairs, cell)
     return compare_graphs(ref, sut), nl
 
 

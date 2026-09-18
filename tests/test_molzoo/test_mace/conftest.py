@@ -194,7 +194,7 @@ def raw_tensors(
     return (
         batch["atoms", "pos"],
         batch["atoms", "Z"],
-        batch["edges", "edge_index"],
+        batch["pairs", "pair_index"],
         batch["atoms", "batch"],
         int(batch["atoms", "batch"].max()) + 1,
     )
@@ -282,7 +282,7 @@ def cluster() -> TensorDict:
     return make_graph_batch(
         pos=torch.tensor(CLUSTER_POS, dtype=torch.float64),
         Z=torch.tensor(CLUSTER_Z, dtype=torch.long),
-        edge_index=full_edge_index(SINGLE_GRAPH),
+        pair_index=full_edge_index(SINGLE_GRAPH),
         batch=torch.zeros(len(CLUSTER_Z), dtype=torch.long),
     )
 
@@ -297,7 +297,7 @@ def periodic_cluster() -> TensorDict:
     return make_graph_batch(
         pos=torch.tensor(CLUSTER_POS, dtype=torch.float64),
         Z=torch.tensor(CLUSTER_Z, dtype=torch.long),
-        edge_index=edge_index,
+        pair_index=edge_index,
         batch=torch.zeros(len(CLUSTER_Z), dtype=torch.long),
         shifts=shifts,
     )
@@ -309,7 +309,7 @@ def pair_batch() -> TensorDict:
     return make_graph_batch(
         pos=torch.tensor(PAIR_POS, dtype=torch.float64),
         Z=torch.tensor(PAIR_Z, dtype=torch.long),
-        edge_index=full_edge_index(PAIR_BATCH),
+        pair_index=full_edge_index(PAIR_BATCH),
         batch=torch.tensor(PAIR_BATCH, dtype=torch.long),
     )
 
@@ -320,7 +320,7 @@ def omol_cluster() -> TensorDict:
     return make_graph_batch(
         pos=torch.tensor(CLUSTER_POS, dtype=torch.float64),
         Z=torch.tensor(CLUSTER_Z, dtype=torch.long),
-        edge_index=full_edge_index(SINGLE_GRAPH),
+        pair_index=full_edge_index(SINGLE_GRAPH),
         batch=torch.zeros(len(CLUSTER_Z), dtype=torch.long),
         graphs={
             "total_charge": torch.zeros(1, dtype=torch.long),
@@ -341,6 +341,7 @@ def matpes_variant() -> MaceMatpes:
     return MaceMatpes(
         atomic_numbers=list(ATOMIC_NUMBERS),
         atomic_energies=torch.tensor(ATOMIC_ENERGIES),
+        wrt=("atoms.pos",),
         **TINY_MATPES_KWARGS,
     ).eval()
 
@@ -355,6 +356,7 @@ def omol_variant() -> MaceOmol:
     model = MaceOmol(
         atomic_numbers=list(ATOMIC_NUMBERS),
         atomic_energies=torch.tensor(ATOMIC_ENERGIES),
+        wrt=("atoms.pos",),
         **TINY_OMOL_KWARGS,
     ).eval()
     wake_zero_init_readout(model)

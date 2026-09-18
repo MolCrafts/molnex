@@ -73,8 +73,8 @@ import torch
 from molpy import Frame
 from tensordict import TensorDict
 
-from molix.batch import TotalCharge
-from molix.batch.collate import collate_molecules
+from molix.data import TotalCharge
+from molix.data.collate import collate_molecules
 from molix.md import (
     MD,
     EnergyDrift,
@@ -144,7 +144,7 @@ def _lattice_frame(pos: torch.Tensor) -> Frame:
     """The FCC argon lattice as one molpy ``Frame`` — this run's data at rest.
 
     A ``Frame`` is the unit of data at rest in molnex and
-    :func:`~molix.batch.collate.collate_molecules` is the only conversion to the
+    :func:`~molix.data.collate.collate_molecules` is the only conversion to the
     batch a model reads, so a benchmark that builds a system from scratch builds
     the same object a dataset would rather than assembling batch tensors by
     hand. One frame for the whole cell (**F20**).

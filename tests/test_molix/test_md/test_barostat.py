@@ -13,6 +13,19 @@ from molix.md.barostat import (
 _DTYPE = torch.float64
 
 
+class _ZeroPots:
+    """The minimal energy the adapter's op composes: ``E = 0 · Σ pos``, zero forces."""
+
+    def __call__(self, system):
+        from tensordict import TensorDict
+
+        pos = system["atoms", "pos"]
+        if "graphs" not in system.keys():
+            system["graphs"] = TensorDict({}, batch_size=[])
+        system["graphs", "energy"] = (pos * 0.0).sum().reshape(system["graphs"].batch_size)
+        return system
+
+
 def test_pressure_bar_to_md_is_positive():
     assert pressure_bar_to_md(1.0) > 0.0
 
@@ -99,7 +112,7 @@ def test_sync_cell_keeps_batched_graphs_cell() -> None:
         batch_size=[],
     )
     md = MD(_DTYPE)
-    adapter = _TensorDictForce(object(), 1.0)
+    adapter = _TensorDictForce(_ZeroPots(), 1.0)
     adapter.bind_work(work)
     md._adapter = adapter
     state = MDState(
@@ -130,7 +143,7 @@ def test_sync_cell_follows_a_replaced_graphs_cell() -> None:
         batch_size=[],
     )
     md = MD(_DTYPE)
-    adapter = _TensorDictForce(object(), 1.0)
+    adapter = _TensorDictForce(_ZeroPots(), 1.0)
     adapter.bind_work(work)
     md._adapter = adapter
     replaced = (torch.eye(3, dtype=_DTYPE) * 4.0).unsqueeze(0)
@@ -146,46 +159,6 @@ def test_sync_cell_follows_a_replaced_graphs_cell() -> None:
     md._sync_cell(state)
     assert work["graphs", "cell"] is replaced
     assert torch.allclose(replaced[0], state.cell)
-
-
-def test_adapter_exposes_live_edges_then_restores_capacity() -> None:
-    """Padding stays on the NeighborList; the potential sees ``num_edges`` rows."""
-    from tensordict import TensorDict
-
-    from molix.md.driver import _TensorDictForce
-
-    cap, n_live = 10, 4
-    work = TensorDict(
-        {
-            "atoms": TensorDict({"pos": torch.zeros(2, 3, dtype=_DTYPE)}, batch_size=[2]),
-            "edges": TensorDict(
-                {
-                    "edge_index": torch.zeros(cap, 2, dtype=torch.long),
-                    "edge_diff": torch.zeros(cap, 3, dtype=_DTYPE),
-                },
-                batch_size=[cap],
-            ),
-            "graphs": TensorDict({}, batch_size=[1]),
-        },
-        batch_size=[],
-    )
-
-    class _Pots:
-        mlip = object()
-        n_seen: int | None = None
-
-        def calc_forces(self, system: object) -> torch.Tensor:
-            self.n_seen = int(system["edges", "edge_index"].shape[0])
-            system["graphs", "energy"] = torch.zeros(1, dtype=_DTYPE)
-            return torch.zeros(2, 3, dtype=_DTYPE)
-
-    pots = _Pots()
-    adapter = _TensorDictForce(pots, 1.0)
-    adapter.bind_work(work)
-    adapter.n_live = n_live
-    adapter(work["atoms", "pos"])
-    assert pots.n_seen == n_live
-    assert work["edges"].batch_size == torch.Size([cap])
 
 
 def test_run_does_not_require_grad_on_the_state() -> None:

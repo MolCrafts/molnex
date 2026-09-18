@@ -19,6 +19,7 @@ from molix.core.steps.multitask import (
     TaskSpec,
 )
 from molix.core.steps.train import DefaultTrainStep
+from molix.schema import FLOAT64_LABEL_KEYS
 
 
 def batch_to(
@@ -29,18 +30,29 @@ def batch_to(
 ) -> Any:
     """Move and/or cast a batch in a single pass.
 
-    Handles TensorDict (via ``.to()``), plain dicts (recursive),
-    and bare tensors. Non-tensor leaves are returned unchanged.
+    Handles TensorDict (via ``named_apply(..., nested_keys=True)`` when
+    *dtype* is set, else ``apply``), plain dicts (recursive), and bare
+    tensors. Non-tensor leaves are returned unchanged.
+
+    On a TensorDict, graph totals at
+    :data:`~molix.schema.FLOAT64_LABEL_KEYS` skip the dtype axis (device
+    still applies) by matching the full NestedKey — never the leaf name
+    ``"energy"``, which is also :data:`~molix.schema.ATOMIC_ENERGY_KEY`.
+    The skip is TensorDict-only: plain-dict recurse cannot see a NestedKey.
+    Bare tensors keep this function's ordinary float-cast behaviour. A late
+    ``.double()`` is not applied.
 
     Args:
         batch: TensorDict / nested dict / Tensor / other.
         device: Target device, or ``None`` to leave the device alone.
-        dtype: Target floating-point dtype, or ``None`` to leave it alone.
+        dtype: Target floating-point dtype for compute leaves, or ``None``
+            to leave dtypes alone.
 
     Returns:
         Batch with the requested transformations applied. Non-tensor
         leaves and tensors of unrelated dtype (when ``dtype`` is set)
-        are returned unchanged.
+        are returned unchanged. Protected TensorDict graph totals keep
+        their incoming dtype.
     """
     if device is None and dtype is None:
         return batch
@@ -70,6 +82,14 @@ def batch_to(
             return t
         return t.to(device=device, dtype=eff_dtype)
 
+    if dtype is not None and hasattr(batch, "named_apply"):
+
+        def _named_move(key: object, tensor: torch.Tensor) -> torch.Tensor:
+            if key in FLOAT64_LABEL_KEYS:
+                return tensor.to(device=device)
+            return _move(tensor)
+
+        return batch.named_apply(_named_move, nested_keys=True)
     if hasattr(batch, "apply"):
         return batch.apply(_move)
     if isinstance(batch, torch.Tensor):

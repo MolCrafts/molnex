@@ -302,13 +302,12 @@ class MACEEncoder(nn.Module):
         a compiled or exported model never validates. The contract has exactly
         two bearers, and one of them must run before any traced call:
 
-        1. :meth:`molzoo.mace.potential.MacePotential._write_energy`, on its
-           first **eager** call — the batch path gets this for free.
+        1. :meth:`molzoo.mace.potential.MacePotential.energy`, on its first
+           **eager** call — the batch path gets this for free.
         2. Whoever drives the flat seam directly (``torch.compile`` /
            ``torch.export`` / ``molix.engine.export_for_lammps``), before
-           tracing. On the MD path that is the eager forward
-           :meth:`molzoo.mace.potential.MacePotential.compile_core` requires as
-           its precondition.
+           tracing. On the MD path that is the one eager forward that
+           precedes compiling the potential.
 
         Args:
             Z: Atomic numbers ``(N,)``.

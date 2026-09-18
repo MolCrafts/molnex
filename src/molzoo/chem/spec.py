@@ -17,6 +17,11 @@ class ChemPerceptionSpec(BaseModel):
         num_elements: Atomic-number embedding table size.
         hidden_dim: Optional shared MLP hidden width for context builders.
         num_bond_types: Bond-type table size; ``0`` disables type conditioning.
+        n_blocks: Covalent-graph hops. The receptive field of an atom feature
+            is ``n_blocks`` bonds, so this is the knob that decides how much
+            of a molecule a predicted parameter can see.
+        local_attention: Softmax-normalise each atom's aggregation over its
+            own incident covalent bonds instead of summing them.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -29,3 +34,5 @@ class ChemPerceptionSpec(BaseModel):
     num_elements: int = Field(default=119, gt=0)
     hidden_dim: int | None = None
     num_bond_types: int = Field(default=0, ge=0)
+    n_blocks: int = Field(default=5, ge=0)
+    local_attention: bool = False

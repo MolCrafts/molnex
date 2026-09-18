@@ -27,6 +27,20 @@ class TestAtomChemEmbedding:
         out = emb(z)
         assert out.shape == (0, atom_dim)
 
+    def test_empty_atoms_take_the_modules_dtype_not_the_global_config(self, atom_dim: int):
+        """The empty answer is this module's, so converting the module moves it.
+
+        It used to be built with ``dtype=config.ftype``, which is wrong twice:
+        a config attribute read is a graph break on a traced path (molcfg
+        resolves through a custom ``__getattribute__`` dynamo cannot trace), and
+        for a module converted away from the global dtype the caller would
+        concatenate a float32 ``(0, D)`` with float64 features.
+        """
+        emb = AtomChemEmbedding(atom_dim=atom_dim, num_elements=20).double()
+        empty = emb(torch.zeros(0, dtype=torch.long))
+        populated = emb(torch.tensor([1, 6], dtype=torch.long))
+        assert empty.dtype == populated.dtype == torch.float64
+
 
 class TestBondChemEmbedding:
     """BondChemEmbedding is endpoint-symmetric: h_ij == h_ji."""

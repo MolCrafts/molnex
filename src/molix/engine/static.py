@@ -3,15 +3,17 @@
 A CUDA graph can only be captured over a region with **static shapes** and no
 capture-illegal ops (no host sync / dynamic alloc). MD changes the edge count
 every step, so :class:`StaticForward` fixes ``N`` atoms and pads the pair list to
-``E_max`` edges, taking a per-edge ``edge_mask`` as a 4th input. Padded edges are
-made **inert without changing weights or physics**: their ``edge_diff`` is
-overwritten to a length past the cutoff, so the model's ``cutoff(edge_dist)``
-zeros their energy and force contribution (PiNet consumes the provided
-``edge_diff`` via ``edge_bond_diff`` and recomputes ``edge_dist`` from it).
+``E_max`` edges, taking a per-edge ``pair_mask`` as a 4th input. Padded edges are
+made **inert without changing weights or physics**: their ``pair_diff`` is
+overwritten with the schema's dead-edge vector (:func:`molix.schema.dead_pair_shift`,
+the same padding the MD neighbour list and ``MoleculePadder`` write), so the
+model's ``cutoff(pair_dist)`` zeros their energy and force contribution (PiNet
+consumes the provided ``pair_diff`` via ``edge_bond_diff`` and recomputes
+``pair_dist`` from it).
 
 Schema v3 adds a 5th input, ``local_mask (N,)``, and a 3rd output,
 ``atomic_energy (N,)``, matching :class:`molix.engine.adapter.EngineForward`.
-The two masks are deliberately *not* both called ``mask``: ``edge_mask`` selects
+The two masks are deliberately *not* both called ``mask``: ``pair_mask`` selects
 live rows of a padded **edge** tensor, ``local_mask`` selects the **atoms** this
 MPI rank owns, and they have different lengths, different meanings and adjacent
 positions in the argument list — the ideal conditions for a silent mis-wiring.
@@ -28,15 +30,15 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
+from molix.autograd import leaf
 from molix.engine.adapter import EngineAdapter
-from molix.schema import EDGE_DIST_CLAMP_MIN
-from molix.units import DEAD_EDGE_CUTOFF_FACTOR
+from molix.schema import PAIR_DIST_CLAMP_MIN, dead_pair_shift
 
 
 class StaticForward(nn.Module):
     """Fixed ``(N, E_max)`` flat forward, schema v3.
 
-    ``(Z, pos, edge_index, edge_mask, local_mask) -> (energy, forces, atomic_energy)``
+    ``(Z, pos, pair_index, pair_mask, local_mask) -> (energy, forces, atomic_energy)``
 
     The fixed-shape counterpart of :class:`molix.engine.adapter.EngineForward`
     and partitioned identically: ``energy = (atomic_energy * local_mask).sum()``
@@ -51,18 +53,18 @@ class StaticForward(nn.Module):
     Args:
         model: A molnex potential taking a nested ``TensorDict`` and returning
             ``{energy, atomic_energy}``, optionally with ``forces`` (e.g.
-            ``PiNetPotential(compute_forces=False)`` — the preferred
+            ``PiNetPotential()`` with the default ``wrt=()`` — the preferred
             energy-only shape), in either of the two spellings
             :meth:`~molix.engine.adapter.EngineAdapter.read_energy_triple`
             accepts.
         n_atoms: Fixed atom count ``N`` baked into the graph.
         e_max: Fixed padded edge count. The deployer must pass exactly ``e_max``
-            edges (real ones first, ``edge_mask=True``; the rest padded,
-            ``edge_mask=False``) and fail loudly when the real edge count
+            edges (real ones first, ``pair_mask=True``; the rest padded,
+            ``pair_mask=False``) and fail loudly when the real edge count
             exceeds ``e_max``.
-        cutoff: Neighbour cutoff in Å; padded edges get ``edge_diff`` of length
-            ``DEAD_EDGE_CUTOFF_FACTOR * cutoff`` (see :mod:`molix.units`) so
-            ``cutoff(edge_dist)`` zeros them.
+        cutoff: Neighbour cutoff in Å; padded edges get the schema's dead-edge
+            ``pair_diff`` (:func:`molix.schema.dead_pair_shift`, length
+            ``dead_pair_length(cutoff)``) so ``cutoff(pair_dist)`` zeros them.
     """
 
     def __init__(self, model: nn.Module, n_atoms: int, e_max: int, cutoff: float) -> None:
@@ -70,30 +72,33 @@ class StaticForward(nn.Module):
         self.model = model
         self.n_atoms = int(n_atoms)
         self.e_max = int(e_max)
-        self.pad_len = float(cutoff) * DEAD_EDGE_CUTOFF_FACTOR
+        self.cutoff = float(cutoff)
+        # A buffer, not a per-call ``torch.tensor``: it travels with ``.to()``
+        # and is a graph constant under export / compile, never a host copy.
+        self.dead_shift: torch.Tensor
+        self.register_buffer("dead_shift", dead_pair_shift(self.cutoff))
 
     def model_outputs(
         self,
         Z: torch.Tensor,
         pos: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_mask: torch.Tensor,
+        pair_index: torch.Tensor,
+        pair_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Build the padded batch, run the model, read its unmasked v3 triple.
 
         Same seam as :meth:`molix.engine.adapter.EngineForward.model_outputs`,
-        with the extra ``edge_mask`` this path needs to neutralise padding:
+        with the extra ``pair_mask`` this path needs to neutralise padding:
         :func:`molix.engine.export_for_lammps` runs its eager pre-trace checks
         through it on either path.
         """
-        src = edge_index[:, 0]
-        tgt = edge_index[:, 1]
-        edge_diff = pos[tgt] - pos[src]
-        # padded edges (edge_mask False) -> length past cutoff -> inert
-        edge_diff = torch.where(
-            edge_mask.unsqueeze(-1), edge_diff, torch.full_like(edge_diff, self.pad_len)
-        )
-        edge_dist = edge_diff.norm(dim=-1).clamp(min=EDGE_DIST_CLAMP_MIN)
+        src = pair_index[:, 0]
+        tgt = pair_index[:, 1]
+        pair_diff = pos[tgt] - pos[src]
+        # padded edges (pair_mask False) -> the dead-edge vector -> inert
+        dead = self.dead_shift.to(dtype=pair_diff.dtype)
+        pair_diff = torch.where(pair_mask.unsqueeze(-1), pair_diff, dead)
+        pair_dist = pair_diff.norm(dim=-1).clamp(min=PAIR_DIST_CLAMP_MIN)
         td = TensorDict(
             atoms=TensorDict(
                 Z=Z,
@@ -101,10 +106,10 @@ class StaticForward(nn.Module):
                 batch=torch.zeros(self.n_atoms, dtype=torch.long, device=pos.device),
                 batch_size=[self.n_atoms],
             ),
-            edges=TensorDict(
-                edge_index=edge_index,
-                edge_diff=edge_diff,
-                edge_dist=edge_dist,
+            pairs=TensorDict(
+                pair_index=pair_index,
+                pair_diff=pair_diff,
+                pair_dist=pair_dist,
                 batch_size=[self.e_max],
             ),
             graphs=TensorDict(
@@ -113,24 +118,24 @@ class StaticForward(nn.Module):
             ),
             batch_size=[],
         )
-        # Monomorphic forward since b85d12f: a potential that derives forces was
-        # constructed that way (``PiNetPotential(compute_forces=True)``).
+        # Monomorphic forward: a potential that derives forces was constructed
+        # that way (``PiNetPotential(wrt=("atoms.pos",))``).
         return EngineAdapter.read_energy_triple(self.model(td))
 
     def forward(
         self,
         Z: torch.Tensor,
         pos: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_mask: torch.Tensor,
+        pair_index: torch.Tensor,
+        pair_mask: torch.Tensor,
         local_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Args: ``Z (N,)`` int64, ``pos (N,3)``, ``edge_index (E_max,2)`` int64,
-        ``edge_mask (E_max,)`` bool, ``local_mask (N,)`` bool. Returns
+        """Args: ``Z (N,)`` int64, ``pos (N,3)``, ``pair_index (E_max,2)`` int64,
+        ``pair_mask (E_max,)`` bool, ``local_mask (N,)`` bool. Returns
         ``(energy (), forces (N,3), atomic_energy (N,))``."""
-        pos = pos.detach().requires_grad_(True)
+        pos = leaf(pos)
         with torch.enable_grad():
-            _, _, atomic_energy = self.model_outputs(Z, pos, edge_index, edge_mask)
+            _, _, atomic_energy = self.model_outputs(Z, pos, pair_index, pair_mask)
             # Mask-multiply, never a slice: `n_local` is a runtime scalar and
             # torch.export cannot trace a shape that depends on one.
             energy = (atomic_energy * local_mask.to(atomic_energy.dtype)).sum()

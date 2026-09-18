@@ -1,8 +1,8 @@
 """Single-transform profiler.
 
 Times one transform in complete isolation. Dispatch is **structural**, so any
-object works: a :class:`~molix.batch.NeighborList`, a
-:class:`~molix.batch.task.BatchTask`, or a plain callable. Samples come from
+object works: a :class:`~molix.data.NeighborList`, a
+:class:`~molix.data.task.BatchTask`, or a plain callable. Samples come from
 anything with ``__len__`` / ``__getitem__`` — a
 :class:`~molix.profiler.mock.MockSource` or a real dataset source.
 
@@ -13,7 +13,7 @@ Example::
 
     from molix.profiler.task import TaskProfiler
     from molix.profiler.mock import MockSource
-    from molix.batch import NeighborList
+    from molix.neighbor import NeighborList
 
     source = MockSource(n_samples=500, n_atoms=(5, 20))
     profiler = TaskProfiler(NeighborList(cutoff=5.0))

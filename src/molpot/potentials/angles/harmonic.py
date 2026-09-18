@@ -88,14 +88,14 @@ class AngleHarmonic(BasePotential):
                 if pos is None and "atoms" in data:
                     pos = data["atoms"]["x"]
 
-        if pos is None or angle_index is None or angle_types is None:
+        if pos is None or angle_index is None:
             raise ValueError("AngleHarmonic requires pos, angle_index, and angle_types.")
 
         # Convert numpy to torch if needed
         if not isinstance(pos, torch.Tensor):
             pos = torch.from_numpy(pos).float()
             angle_index = torch.from_numpy(angle_index).long()
-            angle_types = torch.from_numpy(angle_types).long()
+            angle_types = None if angle_types is None else torch.from_numpy(angle_types).long()
 
         # Handle empty angles
         if angle_index.size(1) == 0:
@@ -113,8 +113,8 @@ class AngleHarmonic(BasePotential):
         theta = torch.atan2(sin_theta, cos_theta)
 
         # Look up parameters for each angle
-        k_angles = self.k[angle_types]  # [num_angles]
-        theta0_angles = self.theta0[angle_types]  # [num_angles]
+        k_angles = self.rows("k", kwargs, angle_types)  # [num_angles]
+        theta0_angles = self.rows("theta0", kwargs, angle_types)  # [num_angles]
 
         # Compute harmonic energy: E = 0.5 * k * (theta - theta0)^2
         displacement = theta - theta0_angles
@@ -152,7 +152,7 @@ class AngleHarmonic(BasePotential):
         angle_types = kwargs.get("angle_types")
         term_batch = kwargs.get("term_batch")
         num_graphs = kwargs.get("num_graphs")
-        if pos is None or angle_index is None or angle_types is None:
+        if pos is None or angle_index is None:
             raise ValueError("AngleHarmonic.energy_forces requires pos, angle_index, angle_types.")
 
         if angle_index.size(1) == 0:
@@ -170,8 +170,8 @@ class AngleHarmonic(BasePotential):
         v = pos_k - pos_j
         cos_theta, sin_theta = bond_cos_sin(u, v)
         theta = torch.atan2(sin_theta, cos_theta)
-        k_angles = self.k[angle_types]
-        theta0_angles = self.theta0[angle_types]
+        k_angles = self.rows("k", kwargs, angle_types)
+        theta0_angles = self.rows("theta0", kwargs, angle_types)
         displacement = theta - theta0_angles
         energy_per_angle = 0.5 * k_angles * displacement**2
 

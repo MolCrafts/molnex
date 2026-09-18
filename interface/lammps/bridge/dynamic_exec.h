@@ -23,7 +23,7 @@ namespace molnex::lammps_bridge {
 /// Runs the model on this step's shapes, via `ModelRunner::run`.
 ///
 /// Pure delegation: the only work done here is the device/dtype policy the
-/// `Exec` interface keeps private (`Z` and `edge_index` to the model's device,
+/// `Exec` interface keeps private (`Z` and `pair_index` to the model's device,
 /// `pos` cast to the model's dtype and then moved) and the validated output
 /// conversion, which is `read_model_outputs`' job and not duplicated.
 class DynamicExec : public Exec {
@@ -48,7 +48,7 @@ class DynamicExec : public Exec {
   /// `local_mask` is a different object entirely — an ownership statement about
   /// atoms, required on both execution paths.
   ModelOutputs run(const at::Tensor& Z, const at::Tensor& pos_f64,
-                   const at::Tensor& edge_index,
+                   const at::Tensor& pair_index,
                    const at::Tensor& local_mask) override;
 
  private:

@@ -218,7 +218,7 @@ def _build_layer_irreps(
     Last layer is forced to ``0e`` only **unless** ``last_layer_keep_tensors``
     is True (in which case the last layer keeps the full SH irreps stack
     just like the middle layers — required when an equivariant downstream
-    head consumes ``("edges","edge_tensor_features")``).
+    head consumes ``("pairs","edge_tensor_features")``).
 
     Backward pass (``allegro/nn/_allegro.py:143-161``) — walking from the
     last (scalar) output back to layer 0, drop any ``arg_ir`` that cannot
@@ -302,7 +302,7 @@ class AllegroSpec(BaseModel):
     tp_method: str = "uniform_1d"
     # When True, ``forward`` additionally writes the final layer's tensor
     # features (full irreps stack, mul=num_tensor_features, ir_mul layout)
-    # to ``("edges", "edge_tensor_features")`` so equivariant downstream
+    # to ``("pairs", "edge_tensor_features")`` so equivariant downstream
     # heads (e.g. ``molpot.heads.PermMultipoleHead`` with ``dipole=True``
     # or ``quadrupole=True``) can consume the encoder's l ≥ 1 channels.
     # Off by default — the scalar DenseNet
@@ -322,13 +322,13 @@ class Allegro(TensorDictModuleBase):
     Inputs (read from ``TensorDict``):
 
     * ``("atoms","Z")`` — atomic numbers ``(N,)``.
-    * ``("edges","edge_index")`` — ``(E, 2)``, ``[:,0]=src/center``.
-    * ``("edges","edge_diff")`` — ``(E, 3)``, ``pos[dst] - pos[src]``.
-    * ``("edges","edge_dist")`` — ``(E,)``.
+    * ``("pairs","pair_index")`` — ``(E, 2)``, ``[:,0]=src/center``.
+    * ``("pairs","pair_diff")`` — ``(E, 3)``, ``pos[dst] - pos[src]``.
+    * ``("pairs","pair_dist")`` — ``(E,)``.
 
     Output:
 
-    * ``("edges","edge_features")`` — ``(E, num_scalar_features · (num_layers + 1))``,
+    * ``("pairs","edge_features")`` — ``(E, num_scalar_features · (num_layers + 1))``,
       the concatenation of the two-body scalar features and every layer's
       newly-produced scalar features (DenseNet output, mirroring
       ``allegro/nn/_allegro.py:323``).
@@ -358,11 +358,11 @@ class Allegro(TensorDictModuleBase):
 
     in_keys = [
         ("atoms", "Z"),
-        ("edges", "edge_index"),
-        ("edges", "edge_diff"),
-        ("edges", "edge_dist"),
+        ("pairs", "pair_index"),
+        ("pairs", "pair_diff"),
+        ("pairs", "pair_dist"),
     ]
-    out_keys = [("edges", "edge_features")]
+    out_keys = [("pairs", "edge_features")]
 
     def __init__(
         self,
@@ -395,9 +395,10 @@ class Allegro(TensorDictModuleBase):
                   descriptor. On CPU it falls back to a pure-torch path. The
                   fused kernel is a legacy ``autograd.Function`` without a
                   functorch ``setup_context``, so ``torch.func.grad`` cannot
-                  trace it — derive forces with
-                  ``ForceDerivation(method="autograd")`` (eager-correct,
-                  trainable, GH200-verified; not ``torch.compile(fullgraph)``-able).
+                  trace it — derive forces with the autograd op
+                  ``molix.autograd.Derivative(..., wrt=("atoms.pos",))``
+                  (eager-correct, trainable, GH200-verified; not
+                  ``torch.compile(fullgraph)``-able).
                 * ``"fused_tp"`` — the fused 4-operand kernel; same
                   functorch/force behaviour as ``uniform_1d``.
                 * ``"naive"`` — pure-torch reference. The only method
@@ -545,10 +546,10 @@ class Allegro(TensorDictModuleBase):
                 shared_weights=True,
                 internal_weights=True,
                 # ``tp_method`` selects the kernel. Default ``"uniform_1d"`` is
-                # the fused CUDA kernel (fast on GPU); pair it with
-                # ``ForceDerivation(method="autograd")`` since functorch can't
-                # trace the fused op. Use ``"naive"`` + ``method="functorch"``
-                # for a fullgraph-compilable force path. See ``Allegro.__init__``.
+                # the fused CUDA kernel (fast on GPU); pair it with the autograd
+                # ``molix.autograd.Derivative`` since functorch cannot trace the
+                # fused op. ``"naive"`` is the pure-torch path (functorch-safe).
+                # See ``Allegro.__init__``.
                 method=self._tp_method,
                 dtype=config.ftype,
             )
@@ -556,7 +557,7 @@ class Allegro(TensorDictModuleBase):
         self._n_scalar_outs: list[int] = n_scalar_outs
         # Final tensor-track output irreps (mul=num_tensor_features, ir_mul
         # layout). Exposed for equivariant downstream heads via
-        # ``("edges", "edge_tensor_features")`` when ``expose_tensor_track``.
+        # ``("pairs", "edge_tensor_features")`` when ``expose_tensor_track``.
         # ``out_keys`` is intentionally left at the class default — the extra
         # write is opt-in and visible to consumers via direct TD access.
         self.tensor_track_irreps: cue.Irreps = tps_irreps_mu[num_layers]
@@ -587,11 +588,11 @@ class Allegro(TensorDictModuleBase):
         self.output_dim: int = num_scalar_features * (num_layers + 1)
 
     def forward(self, td: TensorDict) -> TensorDict:
-        """Run the encoder and write ``("edges","edge_features")`` in place."""
+        """Run the encoder and write ``("pairs","edge_features")`` in place."""
         Z = td["atoms", "Z"]
-        edge_dist = td["edges", "edge_dist"]
-        edge_diff = td["edges", "edge_diff"]
-        edge_index = td["edges", "edge_index"]
+        edge_dist = td["pairs", "pair_dist"]
+        edge_diff = td["pairs", "pair_diff"]
+        edge_index = td["pairs", "pair_index"]
         n_nodes: int = int(Z.shape[0])
         src = edge_index[:, 0]
         dst = edge_index[:, 1]
@@ -680,8 +681,8 @@ class Allegro(TensorDictModuleBase):
             tensor_features = new_tensor
 
         # === 6. Final scalar output: cat all accumulated layer features ===
-        td["edges", "edge_features"] = torch.cat(accumulated, dim=-1)
+        td["pairs", "edge_features"] = torch.cat(accumulated, dim=-1)
         if self.expose_tensor_track:
             # Final layer's TP output, shape (E, tensor_track_irreps.dim) ir_mul.
-            td["edges", "edge_tensor_features"] = tensor_features
+            td["pairs", "edge_tensor_features"] = tensor_features
         return td

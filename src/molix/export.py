@@ -65,9 +65,9 @@ class Exporter:
 
         flat = EngineForward(pinet_potential)      # tensors in, (E, F, E_atom) out
         n = torch.export.Dim("n_atoms", min=2)
-        e = torch.export.Dim("n_edges", min=1)
+        e = torch.export.Dim("n_pairs", min=1)
         Exporter(flat).export_pretraced(
-            (Z, pos, edge_index, local_mask),
+            (Z, pos, pair_index, local_mask),
             "pinet.pt2",
             dynamic_shapes=({0: n}, {0: n}, {0: e}, {0: n}),
         )

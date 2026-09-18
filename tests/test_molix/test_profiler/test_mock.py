@@ -21,12 +21,12 @@ def _shapes(batch: TensorDict) -> tuple[tuple[int, ...], ...]:
 
     Returns:
         Shapes of ``atoms.Z`` ``(N,)``, ``atoms.pos`` ``(N, 3)``,
-        ``edges.edge_index`` ``(E, 2)`` and ``graphs.num_atoms`` ``(B,)``.
+        ``edges.pair_index`` ``(E, 2)`` and ``graphs.num_atoms`` ``(B,)``.
     """
     return (
         tuple(batch["atoms", "Z"].shape),
         tuple(batch["atoms", "pos"].shape),
-        tuple(batch["edges", "edge_index"].shape),
+        tuple(batch["pairs", "pair_index"].shape),
         tuple(batch["graphs", "num_atoms"].shape),
     )
 
@@ -47,7 +47,7 @@ class TestMockBatch:
 
     def test_seed_makes_shapes_reproducible(self):
         """Two same-seed factories emit the same shape sequence over repeated calls."""
-        first = MockBatch(n_atoms=(8, 32), n_edges=(16, 64), seed=0)
-        second = MockBatch(n_atoms=(8, 32), n_edges=(16, 64), seed=0)
+        first = MockBatch(n_atoms=(8, 32), n_pairs=(16, 64), seed=0)
+        second = MockBatch(n_atoms=(8, 32), n_pairs=(16, 64), seed=0)
 
         assert [_shapes(first()) for _ in range(4)] == [_shapes(second()) for _ in range(4)]

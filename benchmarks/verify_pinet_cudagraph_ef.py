@@ -34,7 +34,7 @@ def _model() -> PiNetPotential:
         depth=3,
         rank=3,
     )
-    return PiNetPotential(encoder=enc, hidden_dim=64, compute_forces=True).cuda()
+    return PiNetPotential(encoder=enc, hidden_dim=64, wrt=("atoms.pos",)).cuda()
 
 
 def _ef_loss(out):
@@ -105,7 +105,7 @@ def verify(dtype: torch.dtype) -> bool:
     print(f"\n{'=' * 64}\n{name}\n{'=' * 64}")
 
     batch = MockBatch(
-        n_atoms=512, n_edges=4096, n_graphs=16, atomic_numbers=7, device="cuda", seed=0
+        n_atoms=512, n_pairs=4096, n_graphs=16, atomic_numbers=7, device="cuda", seed=0
     )()
     batch["atoms", "pos"] = batch["atoms", "pos"].to(dtype)
 

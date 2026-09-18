@@ -132,7 +132,7 @@ def small_molecule_neutral() -> TensorDict:
         dtype=torch.float32,
     )
     Z = torch.tensor([6, 1, 8, 6, 1], dtype=torch.long)
-    edge_index = torch.tensor(
+    pair_index = torch.tensor(
         [
             [0, 1],
             [1, 0],
@@ -148,7 +148,7 @@ def small_molecule_neutral() -> TensorDict:
     return make_graph_batch(
         pos=pos,
         Z=Z,
-        edge_index=edge_index,
+        pair_index=pair_index,
         batch=batch,
         graphs={"total_charge": total_charge},
     )
@@ -225,7 +225,7 @@ def full_multipole_pipeline():
 class _PipelineModule(nn.Module):
     """Minimal Allegro→PermMultipoleHead pipeline.
 
-    Re-derives ``edge_diff`` / ``edge_dist`` from ``pos`` inside ``forward``
+    Re-derives ``pair_diff`` / ``pair_dist`` from ``pos`` inside ``forward``
     so that the encoder always sees fresh edge geometry under
     rotate / translate / permute transforms.
     """
@@ -264,7 +264,7 @@ class TestTranslationInvariance:
             shifted = charge_only_pipeline(translate_graph(small_molecule_neutral, t))
 
         # Float32 ULP — translation amplifies pos magnitudes by ~10×, so
-        # edge_diff differs at ~1e-5; tolerances mirror the encoder tests.
+        # pair_diff differs at ~1e-5; tolerances mirror the encoder tests.
         assert torch.allclose(
             ref["atomic_charges"], shifted["atomic_charges"], atol=1e-4, rtol=1e-4
         )

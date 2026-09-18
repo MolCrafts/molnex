@@ -80,9 +80,18 @@ def _fourier_basis(
     cos_phi: torch.Tensor,
     sin_phi: torch.Tensor,
     periodicity: torch.Tensor,
+    *,
+    n_max: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(cos nφ, sin nφ)`` per period via Chebyshev recurrence. Never forms ``φ``."""
-    n_max = int(periodicity.max().item())
+    """``(cos nφ, sin nφ)`` per period via Chebyshev recurrence. Never forms ``φ``.
+
+    ``n_max`` — the recurrence depth — is a Python int the caller fixed when
+    it fixed ``periodicity`` (a torsion term reads its ``periodicity.max()``
+    once, at construction). Reading it here from the tensor would be a
+    per-call host sync on the force path, a graph break under ``torch.compile``.
+    """
+    if n_max < 1:
+        raise ValueError(f"n_max must be >= 1, got {n_max}")
     cos_k = [torch.ones_like(cos_phi), cos_phi]
     sin_k = [torch.zeros_like(sin_phi), sin_phi]
     for _ in range(2, n_max + 1):
@@ -90,9 +99,15 @@ def _fourier_basis(
         cos_k.append(cos_phi * cos_prev - sin_phi * sin_prev)
         sin_k.append(sin_phi * cos_prev + cos_phi * sin_prev)
     n_idx = periodicity.to(dtype=torch.long)
-    cos_n = torch.stack(cos_k, dim=-1)[:, n_idx]
-    sin_n = torch.stack(sin_k, dim=-1)[:, n_idx]
-    return cos_n, sin_n
+    cos_ladder = torch.stack(cos_k, dim=-1)
+    sin_ladder = torch.stack(sin_k, dim=-1)
+    if n_idx.ndim == 1:
+        # One multiplicity set shared by every interaction.
+        return cos_ladder[:, n_idx], sin_ladder[:, n_idx]
+    # Per-interaction multiplicities ``[N, M]``: the general case, where each
+    # torsion type carries its own ``n`` per term (AMBER, CHARMM). The ladder
+    # is built once to ``n_max`` either way; only the pick differs.
+    return torch.gather(cos_ladder, 1, n_idx), torch.gather(sin_ladder, 1, n_idx)
 
 
 def fourier_cos(
@@ -100,19 +115,24 @@ def fourier_cos(
     sin_phi: torch.Tensor,
     periodicity: torch.Tensor,
     phase: torch.Tensor,
+    *,
+    n_max: int,
 ) -> torch.Tensor:
     """``cos(n φ − γ)`` by Chebyshev recurrence. Never forms ``φ``.
 
     Args:
         cos_phi: ``cos φ``, shape ``[N]``.
         sin_phi: ``sin φ``, shape ``[N]``.
-        periodicity: Integer periods ``n``, shape ``[M]``.
+        periodicity: Integer periods ``n``, shape ``[M]`` (shared) or
+            ``[N, M]`` (per interaction).
         phase: Phase offsets ``γ`` in radians, shape ``[N, M]``.
+        n_max: ``int(periodicity.max())``, fixed by the caller at
+            construction — see :func:`_fourier_basis`.
 
     Returns:
         ``cos(n φ − γ)`` of shape ``[N, M]``.
     """
-    cos_n, sin_n = _fourier_basis(cos_phi, sin_phi, periodicity)
+    cos_n, sin_n = _fourier_basis(cos_phi, sin_phi, periodicity, n_max=n_max)
     return cos_n * torch.cos(phase) + sin_n * torch.sin(phase)
 
 
@@ -121,19 +141,24 @@ def fourier_cos_sin(
     sin_phi: torch.Tensor,
     periodicity: torch.Tensor,
     phase: torch.Tensor,
+    *,
+    n_max: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``(cos(n φ − γ), sin(n φ − γ))`` by Chebyshev recurrence.
 
     Args:
         cos_phi: ``cos φ``, shape ``[N]``.
         sin_phi: ``sin φ``, shape ``[N]``.
-        periodicity: Integer periods ``n``, shape ``[M]``.
+        periodicity: Integer periods ``n``, shape ``[M]`` (shared) or
+            ``[N, M]`` (per interaction).
         phase: Phase offsets ``γ`` in radians, shape ``[N, M]``.
+        n_max: ``int(periodicity.max())``, fixed by the caller at
+            construction — see :func:`_fourier_basis`.
 
     Returns:
         ``cos(n φ − γ)`` and ``sin(n φ − γ)``, each ``[N, M]``.
     """
-    cos_n, sin_n = _fourier_basis(cos_phi, sin_phi, periodicity)
+    cos_n, sin_n = _fourier_basis(cos_phi, sin_phi, periodicity, n_max=n_max)
     cos_phase = torch.cos(phase)
     sin_phase = torch.sin(phase)
     return (

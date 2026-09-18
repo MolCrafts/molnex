@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 
+import pytest
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
@@ -120,12 +121,10 @@ class TestProperTorsionParamHead:
         torch.manual_seed(0)
         head = ProperTorsionParamHead(feature_dim=8)
         out = head(torch.randn(4, 8))
-        assert set(out) == {"a", "b", "periodicity", "idivf"}
+        assert set(out) == {"a", "b", "periodicity"}
         assert out["a"].shape == (4, 6)
         assert out["b"].shape == (4, 6)
-        assert out["periodicity"].tolist() == [1, 2, 3, 4, 5, 6]
-        assert out["idivf"].shape == (4,)
-        assert torch.equal(out["idivf"], torch.ones_like(out["idivf"]))
+        assert out["periodicity"].tolist() == [[1, 2, 3, 4, 5, 6]] * out["periodicity"].shape[0]
         assert "k" not in out
         assert "phase" not in out
         assert "c0" not in out
@@ -141,8 +140,7 @@ class TestProperTorsionParamHead:
         out = head(torch.randn(4, 8))
         assert out["a"].shape == (4, 3)
         assert out["b"].shape == (4, 3)
-        assert out["periodicity"].tolist() == [1, 2, 3]
-        assert out["idivf"].shape == (4,)
+        assert out["periodicity"].tolist() == [[1, 2, 3]] * out["periodicity"].shape[0]
         assert "k" not in out
         assert "phase" not in out
 
@@ -159,73 +157,28 @@ class TestProperTorsionParamHead:
         assert (out["a"] < 0).all()
         assert (out["b"] < 0).all()
 
-    def test_form_cartesian_explicit_matches_default_keys(self):
+    def test_emits_exactly_the_canonical_amplitude_keys(self):
         torch.manual_seed(1)
-        head = ProperTorsionParamHead(feature_dim=8, form="cartesian")
+        head = ProperTorsionParamHead(feature_dim=8)
         out = head(torch.randn(3, 8))
-        assert set(out) == {"a", "b", "periodicity", "idivf"}
+        assert set(out) == {"a", "b", "periodicity"}
         assert out["a"].shape == (3, 6)
         assert out["b"].shape == (3, 6)
-        assert out["periodicity"].tolist() == [1, 2, 3, 4, 5, 6]
+        assert out["periodicity"].tolist() == [[1, 2, 3, 4, 5, 6]] * out["periodicity"].shape[0]
 
-    def test_form_opls_emits_exactly_k1_to_k4(self):
-        torch.manual_seed(2)
-        head = ProperTorsionParamHead(feature_dim=8, hidden_dim=16, form="opls")
-        features = torch.randn(5, 8)
-        out = head(features)
-        assert set(out) == {"k1", "k2", "k3", "k4"}
-        for key in ("k1", "k2", "k3", "k4"):
-            assert out[key].shape == (5,)
-            assert out[key].dtype == features.dtype
-            assert out[key].device == features.device
-            assert torch.isfinite(out[key]).all()
-        for absent in ("a", "b", "k", "phase", "periodicity", "idivf"):
-            assert absent not in out
-
-    def test_form_opls_zero_init_yields_literal_zero_kn(self):
-        """Zero MLP → k1..k4 = 0: proves LAMMPS Kn, not softplus or Km/2."""
-        head = ProperTorsionParamHead(feature_dim=6, hidden_dim=12, form="opls")
-        with torch.no_grad():
-            for p in head.parameters():
-                p.zero_()
-        features = torch.tensor(
-            [[1.0, -2.0, 0.5, 3.0, -0.25, 4.0], [0.0, 1.0, -1.0, 2.0, 0.5, -3.0]]
-        )
-        out = head(features)
-        for key in ("k1", "k2", "k3", "k4"):
-            assert torch.allclose(
-                out[key],
-                torch.zeros(2, dtype=features.dtype),
-                atol=1e-12,
-            )
-
-    def test_form_opls_differentiable_wrt_features(self):
-        head = ProperTorsionParamHead(feature_dim=4, hidden_dim=8, form="opls")
+    def test_amplitudes_are_differentiable_wrt_features(self):
+        """The Cartesian pair is the trainable interior — gradients must flow."""
+        head = ProperTorsionParamHead(feature_dim=4, hidden_dim=8, n_terms=4)
         features = torch.randn(3, 4, requires_grad=True)
         out = head(features)
-        loss = out["k1"].sum() + out["k2"].sum() + out["k3"].sum() + out["k4"].sum()
-        loss.backward()
+        (out["a"].sum() + out["b"].sum()).backward()
         assert features.grad is not None
         assert features.grad.shape == (3, 4)
         assert torch.isfinite(features.grad).all()
 
-    def test_form_opls_rejects_incompatible_n_terms(self):
-        try:
-            ProperTorsionParamHead(feature_dim=4, form="opls", n_terms=3)
-        except ValueError:
-            return
-        raise AssertionError("expected ValueError for form='opls' with n_terms=3")
-
-    def test_form_opls_rejects_incompatible_periodicity(self):
-        try:
-            ProperTorsionParamHead(
-                feature_dim=4,
-                form="opls",
-                periodicity=(1, 2, 3, 4),
-            )
-        except ValueError:
-            return
-        raise AssertionError("expected ValueError for form='opls' with periodicity")
+    def test_periodicity_length_must_match_n_terms(self):
+        with pytest.raises(ValueError, match="periodicity"):
+            ProperTorsionParamHead(feature_dim=4, n_terms=3, periodicity=(1, 2))
 
 
 # ---------------------------------------------------------------------------
@@ -239,11 +192,10 @@ class TestImproperParamHead:
         head = ImproperParamHead(feature_dim=8)
         out = head(torch.randn(3, 8))
         assert "k" in out and "phase" in out
-        assert "periodicity" in out and "idivf" in out
-        assert out["periodicity"].tolist() == [1, 2]
+        assert "periodicity" in out
+        assert out["periodicity"].tolist() == [[1, 2]] * out["periodicity"].shape[0]
         assert out["k"].shape == (3, 2)
         assert out["phase"].shape == (3, 2)
-        assert out["idivf"].shape == (3,)
         assert torch.all(out["k"] >= 0)
         assert "chi0" not in out
         assert "a" not in out and "b" not in out
@@ -274,7 +226,7 @@ class TestImproperParamHead:
         assert out["k"].shape == (2, 2)
         assert out["phase"].shape == (2, 2)
         assert torch.all(out["k"] >= 0)
-        assert out["periodicity"].tolist() == [2, 2]
+        assert out["periodicity"].tolist() == [[2, 2]] * out["periodicity"].shape[0]
         assert "chi0" not in out
 
     def test_both_modes(self):
@@ -302,7 +254,7 @@ class TestMultiHeadChargeLJReuse:
         heads = MultiHead(
             {
                 "lj": LJParameterHead(feature_dim=8, hidden_dim=16),
-                "q": ChargeHead(feature_dim=8, hidden_dim=16, total_charge=0.0),
+                "charge": ChargeHead(feature_dim=8, hidden_dim=16, total_charge=0.0),
             }
         )
         node_features = torch.randn(5, 8)
@@ -339,11 +291,10 @@ class TestOPLSAAHeadSchemaContracts:
 
     def test_improper_param_head_default_periodic_keys(self):
         out = ImproperParamHead(feature_dim=4, hidden_dim=8)(torch.randn(2, 4))
-        assert set(out) == {"k", "phase", "periodicity", "idivf"}
+        assert set(out) == {"k", "phase", "periodicity"}
         assert out["k"].shape == (2, 2)
         assert out["phase"].shape == (2, 2)
-        assert out["periodicity"].tolist() == [1, 2]
-        assert out["idivf"].shape == (2,)
+        assert out["periodicity"].tolist() == [[1, 2]] * out["periodicity"].shape[0]
 
     def test_lj_parameter_head_keys(self):
         out = LJParameterHead(feature_dim=4, hidden_dim=8)(torch.randn(3, 4))
@@ -378,5 +329,5 @@ class TestOPLSAAHeadSchemaContracts:
         )
         ff = model.write_forcefield(ForceField(name="schema"), torch.zeros(2, 4), batch)
         atoms = ff.params("atoms")
-        assert "q" in atoms
-        assert atoms["q"].shape == (2,)
+        assert "charge" in atoms
+        assert atoms["charge"].shape == (2,)

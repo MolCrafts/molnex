@@ -3,7 +3,7 @@
 Regimes:
 
 * energy-only (baseline compile surface)
-* force inf / force train — method=func and method=grad
+* force inf / force train — the derivative head
 * eager vs compile(fullgraph=False) vs compile(fullgraph=True)
 * optional reduce-overhead (CUDA graphs; needs static shapes — same MockBatch size)
 
@@ -77,7 +77,6 @@ def _peak_mib() -> tuple[float, float]:
 def build(
     *,
     compute_forces: bool,
-    method: str = "func",
     rank: int = 3,
     depth: int = 3,
     hidden: int = 64,
@@ -92,16 +91,15 @@ def build(
         depth=depth,
         rank=rank,
         hidden_dim=hidden,
-        compute_forces=compute_forces,
-        method=method,  # type: ignore[arg-type]
+        wrt=("atoms.pos",) if compute_forces else (),
         emit_property_features=False,
     )
 
 
-def factory(device: str, n_atoms: int, n_edges: int, n_graphs: int) -> Callable[[], object]:
+def factory(device: str, n_atoms: int, n_pairs: int, n_graphs: int) -> Callable[[], object]:
     return MockBatch(
         n_atoms=n_atoms,
-        n_edges=n_edges,
+        n_pairs=n_pairs,
         n_graphs=n_graphs,
         atomic_numbers=7,
         device=device,
@@ -146,7 +144,6 @@ def run_cell(
     name: str,
     *,
     compute_forces: bool,
-    method: str,
     train: bool,
     compile_mode: str | None,
     fac: Callable[[], object],
@@ -157,10 +154,10 @@ def run_cell(
     """compile_mode: None | 'default' | 'fullgraph' | 'reduce-overhead'."""
     torch.compiler.reset()
     try:
-        pot = build(compute_forces=compute_forces, method=method).to(device)
+        pot = build(compute_forces=compute_forces).to(device)
         pot.train(train)
 
-        notes = f"method={method}"
+        notes = "head"
         if compile_mode is not None:
             kw: dict = {"backend": "inductor"}
             if compile_mode == "fullgraph":
@@ -250,7 +247,7 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=40)
     ap.add_argument("--warmup", type=int, default=12)
     ap.add_argument("--atoms", type=int, default=512)
-    ap.add_argument("--edges", type=int, default=4096)
+    ap.add_argument("--pairs", type=int, default=4096)
     ap.add_argument("--graphs", type=int, default=16)
     ap.add_argument(
         "--skip-reduce-overhead",
@@ -269,9 +266,9 @@ def main() -> None:
         props = torch.cuda.get_device_properties(0)
         print(f"total VRAM: {props.total_memory / (1024**3):.1f} GiB")
 
-    fac = factory(str(device), args.atoms, args.edges, args.graphs)
+    fac = factory(str(device), args.atoms, args.pairs, args.graphs)
     print(
-        f"batch atoms={args.atoms} edges={args.edges} graphs={args.graphs} "
+        f"batch atoms={args.atoms} pairs={args.pairs} graphs={args.graphs} "
         f"steps={args.steps} warmup={args.warmup}"
     )
 
@@ -287,7 +284,6 @@ def main() -> None:
             run_cell(
                 tag,
                 compute_forces=False,
-                method="func",
                 train=False,
                 compile_mode=cmode,
                 fac=fac,
@@ -298,58 +294,52 @@ def main() -> None:
         )
 
     # --- force inference ----------------------------------------------------
-    for method in ("func", "grad"):
-        for cmode, tag in (
-            (None, f"force-inf {method} eager"),
-            ("default", f"force-inf {method} compile"),
-            ("fullgraph", f"force-inf {method} fullgraph"),
-        ):
-            rows.append(
-                run_cell(
-                    tag,
-                    compute_forces=True,
-                    method=method,
-                    train=False,
-                    compile_mode=cmode,
-                    fac=fac,
-                    device=device,
-                    n_warmup=args.warmup,
-                    n_steps=args.steps,
-                )
+    for cmode, tag in (
+        (None, "force-inf eager"),
+        ("default", "force-inf compile"),
+        ("fullgraph", "force-inf fullgraph"),
+    ):
+        rows.append(
+            run_cell(
+                tag,
+                compute_forces=True,
+                train=False,
+                compile_mode=cmode,
+                fac=fac,
+                device=device,
+                n_warmup=args.warmup,
+                n_steps=args.steps,
             )
+        )
 
     # --- force train --------------------------------------------------------
-    for method in ("func", "grad"):
-        for cmode, tag in (
-            (None, f"force-train {method} eager"),
-            ("default", f"force-train {method} compile"),
-            ("fullgraph", f"force-train {method} fullgraph"),
-        ):
-            rows.append(
-                run_cell(
-                    tag,
-                    compute_forces=True,
-                    method=method,
-                    train=True,
-                    compile_mode=cmode,
-                    fac=fac,
-                    device=device,
-                    n_warmup=args.warmup,
-                    n_steps=args.steps,
-                )
+    for cmode, tag in (
+        (None, "force-train eager"),
+        ("default", "force-train compile"),
+        ("fullgraph", "force-train fullgraph"),
+    ):
+        rows.append(
+            run_cell(
+                tag,
+                compute_forces=True,
+                train=True,
+                compile_mode=cmode,
+                fac=fac,
+                device=device,
+                n_warmup=args.warmup,
+                n_steps=args.steps,
             )
+        )
 
     if not args.skip_reduce_overhead:
-        for method, train, tag in (
-            ("func", False, "force-inf func reduce-overhead"),
-            ("func", True, "force-train func reduce-overhead"),
-            ("grad", True, "force-train grad reduce-overhead"),
+        for train, tag in (
+            (False, "force-inf reduce-overhead"),
+            (True, "force-train reduce-overhead"),
         ):
             rows.append(
                 run_cell(
                     tag,
                     compute_forces=True,
-                    method=method,
                     train=train,
                     compile_mode="reduce-overhead",
                     fac=fac,
@@ -363,13 +353,13 @@ def main() -> None:
 
     # quick ratios vs eager force-inf func
     by = {r.name: r for r in rows if r.status == "ok" and r.ms == r.ms}
-    base = by.get("force-inf func eager")
+    base = by.get("force-inf eager")
     if base is not None:
-        print("\n# force-inf func vs eager")
+        print("\n# force-inf vs eager")
         for k in (
-            "force-inf func compile",
-            "force-inf func fullgraph",
-            "force-inf func reduce-overhead",
+            "force-inf compile",
+            "force-inf fullgraph",
+            "force-inf reduce-overhead",
         ):
             if k in by:
                 print(
@@ -377,13 +367,13 @@ def main() -> None:
                     f"alloc {by[k].peak_alloc_mib / base.peak_alloc_mib:.2f}x"
                 )
 
-    base_tr = by.get("force-train func eager")
+    base_tr = by.get("force-train eager")
     if base_tr is not None:
-        print("\n# force-train func vs eager")
+        print("\n# force-train vs eager")
         for k in (
-            "force-train func compile",
-            "force-train func fullgraph",
-            "force-train func reduce-overhead",
+            "force-train compile",
+            "force-train fullgraph",
+            "force-train reduce-overhead",
         ):
             if k in by:
                 print(

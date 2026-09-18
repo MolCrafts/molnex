@@ -47,9 +47,9 @@ class Calculator(torch.nn.Module):
 
         Args:
             charges: Atomic charges ``(n_atoms, n_channels)``.
-            neighbor_indices: Edge index pairs ``(n_edges, 2)``.
-            neighbor_distances: Edge distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            neighbor_indices: Edge index pairs ``(n_pairs, 2)``.
+            neighbor_distances: Edge distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
             Real-space potential ``(n_atoms, n_channels)``.
@@ -121,11 +121,11 @@ class Calculator(torch.nn.Module):
             charges: Atomic charges ``(n_atoms, n_channels)``.
             cell: Unit cell matrix ``(3, 3)``.
             positions: Cartesian coordinates ``(n_atoms, 3)``.
-            neighbor_indices: Edge index pairs ``(n_edges, 2)``.
-            neighbor_distances: Edge distances ``(n_edges,)``.
+            neighbor_indices: Edge index pairs ``(n_pairs, 2)``.
+            neighbor_distances: Edge distances ``(n_pairs,)``.
             periodic: Boolean mask ``(3,)`` for periodic directions.
             node_mask: Optional boolean mask ``(n_atoms,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
             kvectors: Optional precomputed k-vectors ``(n_kvecs, 3)``.
 
         Returns:

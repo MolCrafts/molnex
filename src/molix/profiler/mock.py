@@ -4,7 +4,7 @@ Provides two generators:
 
 - :class:`MockBatch` — produces a nested ``TensorDict`` batch
   with configurable (or random) atom / edge / graph counts.  Used with
-  :class:`~molix.profiler.module.ModuleProfiler`.
+  :class:`~molix.profiler.module.Profiler`.
 
 - :class:`MockSource` — implements the
   indexable-source protocol (``__len__`` / ``__getitem__``) and returns plain
@@ -17,11 +17,11 @@ Example::
     from molix.profiler.mock import MockBatch, MockSource
 
     # Fixed shape — same batch every call
-    factory = MockBatch(n_atoms=64, n_edges=512, n_graphs=8)
+    factory = MockBatch(n_atoms=64, n_pairs=512, n_graphs=8)
     batch = factory()   # -> TensorDict
 
     # Variable shape — drawn from a range on each call
-    factory = MockBatch(n_atoms=(30, 100), n_edges=(100, 600), n_graphs=(2, 8))
+    factory = MockBatch(n_atoms=(30, 100), n_pairs=(100, 600), n_graphs=(2, 8))
     batch = factory()
 
     # Mock sample source
@@ -73,7 +73,7 @@ class MockBatch:
 
     Args:
         n_atoms: Total atom count, or ``(lo, hi)`` range sampled per call.
-        n_edges: Total edge count, or ``(lo, hi)`` range sampled per call.
+        n_pairs: Total edge count, or ``(lo, hi)`` range sampled per call.
         n_graphs: Number of graphs in the batch, or ``(lo, hi)`` range.
         atomic_numbers: Number of distinct element types (controls ``Z`` range).
         device: Device for generated tensors.
@@ -81,11 +81,11 @@ class MockBatch:
 
     Example::
 
-        factory = MockBatch(n_atoms=64, n_edges=512, n_graphs=8)
+        factory = MockBatch(n_atoms=64, n_pairs=512, n_graphs=8)
         batch = factory()   # produces a TensorDict
 
         # Variable sizes — good for stress testing
-        factory = MockBatch(n_atoms=(32, 128), n_edges=(128, 1024), n_graphs=(2, 16))
+        factory = MockBatch(n_atoms=(32, 128), n_pairs=(128, 1024), n_graphs=(2, 16))
         for _ in range(10):
             batch = factory()   # different shape each time
     """
@@ -93,7 +93,7 @@ class MockBatch:
     def __init__(
         self,
         n_atoms: _IntOrRange = 32,
-        n_edges: _IntOrRange = 128,
+        n_pairs: _IntOrRange = 128,
         n_graphs: _IntOrRange = 4,
         *,
         atomic_numbers: int = 10,
@@ -101,7 +101,7 @@ class MockBatch:
         seed: int | None = None,
     ) -> None:
         self.n_atoms = n_atoms
-        self.n_edges = n_edges
+        self.n_pairs = n_pairs
         self.n_graphs = n_graphs
         self.atomic_numbers = atomic_numbers
         self.device = torch.device(device)
@@ -117,7 +117,7 @@ class MockBatch:
             A ``TensorDict`` with random tensor values and the configured shape.
         """
         n_a = _resolve(self.n_atoms, self._rng)
-        n_e = _resolve(self.n_edges, self._rng)
+        n_e = _resolve(self.n_pairs, self._rng)
         n_g = _resolve(self.n_graphs, self._rng)
 
         dev = self.device
@@ -140,17 +140,17 @@ class MockBatch:
             # Random edges (source, target) within [0, n_a)
             src = torch.randint(0, n_a, (n_e,), device=dev, generator=gen)
             dst = torch.randint(0, n_a, (n_e,), device=dev, generator=gen)
-            edge_index = torch.stack([src, dst], dim=1)  # (E, 2)
-            edge_diff = torch.randn(n_e, 3, device=dev, generator=gen)
-            edge_dist = torch.rand(n_e, device=dev, generator=gen) * 5.0
+            pair_index = torch.stack([src, dst], dim=1)  # (E, 2)
+            pair_diff = torch.randn(n_e, 3, device=dev, generator=gen)
+            pair_dist = torch.rand(n_e, device=dev, generator=gen) * 5.0
         else:
-            edge_index = torch.zeros(0, 2, dtype=torch.long, device=dev)
-            edge_diff = torch.zeros(0, 3, device=dev)
-            edge_dist = torch.zeros(0, device=dev)
+            pair_index = torch.zeros(0, 2, dtype=torch.long, device=dev)
+            pair_diff = torch.zeros(0, 3, device=dev)
+            pair_dist = torch.zeros(0, device=dev)
             n_e = 0
 
-        edges = TensorDict(
-            {"edge_index": edge_index, "edge_diff": edge_diff, "edge_dist": edge_dist},
+        pairs = TensorDict(
+            {"pair_index": pair_index, "pair_diff": pair_diff, "pair_dist": pair_dist},
             batch_size=[n_e],
         )
 
@@ -158,7 +158,7 @@ class MockBatch:
         num_atoms_per_graph = torch.bincount(batch_vec, minlength=n_g).long()
         graphs = TensorDict({"num_atoms": num_atoms_per_graph}, batch_size=[n_g])
 
-        return TensorDict({"atoms": atoms, "edges": edges, "graphs": graphs}, batch_size=[])
+        return TensorDict({"atoms": atoms, "pairs": pairs, "graphs": graphs}, batch_size=[])
 
     def describe(self) -> str:
         """Return a human-readable description of the batch shape configuration.
@@ -172,7 +172,7 @@ class MockBatch:
 
         return (
             f"MockBatch(n_atoms={_fmt(self.n_atoms)}, "
-            f"n_edges={_fmt(self.n_edges)}, "
+            f"n_pairs={_fmt(self.n_pairs)}, "
             f"n_graphs={_fmt(self.n_graphs)}, "
             f"device={self.device})"
         )
@@ -216,7 +216,7 @@ class MockSource:
         self.atomic_numbers = atomic_numbers
         # Pre-generate atom counts for each sample so source_id is stable
         rng = random.Random(seed)
-        self._atom_counts: list[int] = [_resolve(n_atoms, rng) for _ in range(n_samples)]
+        self._n_atoms_per_sample: list[int] = [_resolve(n_atoms, rng) for _ in range(n_samples)]
         # Per-sample generator seeds for reproducible, independent samples
         self._seeds: list[int] = [rng.randint(0, 2**31) for _ in range(n_samples)]
 
@@ -239,7 +239,7 @@ class MockSource:
         """
         if idx < 0 or idx >= self.n_samples:
             raise IndexError(f"Index {idx} out of range for MockSource(n={self.n_samples})")
-        n = self._atom_counts[idx]
+        n = self._n_atoms_per_sample[idx]
         gen = torch.Generator().manual_seed(self._seeds[idx])
         Z = torch.randint(1, self.atomic_numbers + 1, (n,), generator=gen)
         pos = torch.randn(n, 3, generator=gen)

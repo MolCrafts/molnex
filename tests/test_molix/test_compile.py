@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from molix.compile import Compiler
+from molix.compile import Compiler, mark_dynamic_batch
 from molix.compile import logger as compile_logger
 
 
@@ -47,6 +47,18 @@ class TestCompiler:
         c = Compiler(cuda_graphs=True, dynamic=True, mode="max-autotune")
         assert c.dynamic is False
         assert c.mode == "reduce-overhead"
+
+    def test_cuda_graphs_property_reports_the_graph_capturing_modes(self):
+        """``Compiler.cuda_graphs`` is what the MD driver reads to apply the CUDA-graph
+        step contract (``cudagraph_mark_step_begin`` + cloned outputs): true for the
+        preset and for either inductor mode that wraps the graph in CUDA graphs,
+        false for the default and for a non-inductor backend."""
+        assert Compiler(cuda_graphs=True).cuda_graphs is True
+        assert Compiler(mode="reduce-overhead").cuda_graphs is True
+        assert Compiler(mode="max-autotune").cuda_graphs is True
+        assert Compiler().cuda_graphs is False
+        assert Compiler(fullgraph=True, dynamic=True).cuda_graphs is False
+        assert Compiler(backend="aot_eager", mode="reduce-overhead").cuda_graphs is False
 
     @pytest.mark.slow
     def test_compiles_a_bound_method_and_a_plain_function(self):
@@ -103,6 +115,34 @@ class TestCompiler:
             compile_logger.remove_handler(capture)
         assert any(obj.apply.__qualname__ in message for message in capture.messages)
 
+    @pytest.mark.slow
+    def test_call_traces_autograd_grad_in_graph(self):
+        """A leaf + ``torch.autograd.grad`` inside the target is one graph after ``__call__``.
+
+        dynamo's default (``trace_autograd_ops=False``) graph-breaks at the
+        ``autograd.grad`` call, so ``fullgraph=True`` would raise. ``__call__``
+        turns the flag on process-wide before the first trace; the flag is
+        forced off here first so the test does not depend on test order.
+        """
+        x = torch.arange(12, dtype=torch.float64).reshape(4, 3)
+
+        def energy_forces(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            leaf = pos.detach().requires_grad_(True)
+            with torch.enable_grad():
+                energy = (leaf * leaf).sum()
+                (grad,) = torch.autograd.grad(energy, leaf)
+            return energy.detach(), -grad
+
+        torch._dynamo.config.trace_autograd_ops = False
+        torch._dynamo.reset()
+        compiled = Compiler(fullgraph=True, backend="aot_eager")(energy_forces)
+        with torch.no_grad():
+            energy, forces = compiled(x)
+            ref_energy, ref_forces = energy_forces(x)
+        assert torch.equal(energy, ref_energy)
+        assert torch.equal(forces, ref_forces)
+        assert not forces.requires_grad
+
 
 class TestInductorFallbacks:
     """Tests for the ATen ``index_add`` fallback registration (``register_inductor_fallbacks``)."""
@@ -150,6 +190,29 @@ class TestExplainSummary:
     """Tests for Compiler.explain() and the molnex-owned ExplainSummary."""
 
     @pytest.mark.slow
+    def test_explain_traces_autograd_grad_in_graph(self):
+        """``explain`` measures with ``trace_autograd_ops`` on, like ``__call__`` compiles.
+
+        Forced off around the call: ``explain`` must patch it on itself, or the
+        ``autograd.grad`` below reports as a break that a ``Compiler`` would
+        never see.
+        """
+        x = torch.arange(12, dtype=torch.float64).reshape(4, 3)
+
+        def energy_forces(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            leaf = pos.detach().requires_grad_(True)
+            with torch.enable_grad():
+                energy = (leaf * leaf).sum()
+                (grad,) = torch.autograd.grad(energy, leaf)
+            return energy.detach(), -grad
+
+        with torch._dynamo.config.patch(trace_autograd_ops=False), torch.no_grad():
+            summary = Compiler.explain(energy_forces, x)
+        assert summary.graph_count == 1
+        assert summary.graph_break_count == 0
+        assert summary.break_reasons == ()
+
+    @pytest.mark.slow
     def test_explain_reports_graph_count_breaks_reasons_and_sites(self):
         """One trace answers "how many graphs", "how many breaks" and "broken where".
 
@@ -192,3 +255,80 @@ class TestExplainSummary:
         assert all(isinstance(reason, str) for reason in summary.break_reasons)
         assert all(isinstance(site, str) for site in summary.break_sites)
         assert expected_site in summary.break_sites
+
+
+class TestMarkDynamicBatch:
+    """TensorDict count-axis marks for the ragged-train compile path."""
+
+    def test_marks_atom_dim0_and_bond_index_dim1(self):
+        from tensordict import TensorDict
+
+        z = torch.arange(4)
+        pos = torch.zeros(4, 3)
+        pair_index = torch.zeros(5, 2, dtype=torch.long)
+        bond_index = torch.zeros(2, 3, dtype=torch.long)
+        batch = TensorDict(
+            {
+                "atoms": TensorDict({"Z": z, "pos": pos}, batch_size=[4]),
+                "pairs": TensorDict({"pair_index": pair_index}, batch_size=[5]),
+                "bonds": TensorDict({"bond_index": bond_index}, batch_size=[]),
+            },
+            batch_size=[],
+        )
+        mark_dynamic_batch(batch)
+        assert 0 in z._dynamo_dynamic_indices
+        assert 0 in pos._dynamo_dynamic_indices
+        assert 1 not in getattr(pos, "_dynamo_dynamic_indices", set())
+        assert 0 in pair_index._dynamo_dynamic_indices
+        assert 1 in bond_index._dynamo_dynamic_indices
+        assert 0 not in getattr(bond_index, "_dynamo_dynamic_indices", set())
+
+    def test_ignores_plain_tensors_and_dicts(self):
+        mark_dynamic_batch(torch.arange(3))
+        mark_dynamic_batch({"Z": torch.arange(3)})
+
+    @pytest.mark.slow
+    def test_dynamic_compile_does_not_recompile_on_ragged_atom_count(self):
+        """``dynamic=True`` still guards TensorDict leaf sizes without marks.
+
+        Packed Class-I batches change N every step; GH200 profile 2362410
+        hit ``recompile_limit`` on ``atoms.Z`` 172 vs 190. The Compiler
+        wrapper marks count axes before the compiled region.
+        """
+        from tensordict import TensorDict
+
+        def loss(batch: object) -> torch.Tensor:
+            td = batch
+            z = td["atoms", "Z"].float()
+            eidx = td["pairs", "pair_index"].float()
+            return z.sum() + eidx.sum()
+
+        torch._dynamo.reset()
+        compiled = Compiler(backend="eager", fullgraph=True, dynamic=True)(loss)
+
+        def make_batch(n_atoms: int, n_pairs: int) -> TensorDict:
+            return TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {"Z": torch.arange(n_atoms)},
+                        batch_size=[n_atoms],
+                    ),
+                    "pairs": TensorDict(
+                        {
+                            "pair_index": torch.stack(
+                                (
+                                    torch.zeros(n_pairs, dtype=torch.long),
+                                    torch.ones(n_pairs, dtype=torch.long),
+                                ),
+                                dim=1,
+                            )
+                        },
+                        batch_size=[n_pairs],
+                    ),
+                },
+                batch_size=[],
+            )
+
+        ns = (3, 5, 8, 4, 11, 7, 9, 6, 12, 2)
+        for n in ns:
+            compiled(make_batch(n, n + 1))

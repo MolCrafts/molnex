@@ -8,9 +8,40 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
+from molix.autograd import Derivative
+
 if TYPE_CHECKING:
     from molix.core.state import TrainState
     from molix.core.trainer import Trainer
+
+
+def _mark_leaves(model: object, batch: Any) -> None:
+    """The eager prologue of the default steps: bind, then mark derivative leaves.
+
+    Unwraps a ``torch.compile`` wrapper's ``_orig_mod`` so ``compile(step=False)``
+    is served too. If the model exposes ``physics(batch)``, that runs first —
+    Class-I topology bind, ForceField assembly, and construction of the
+    :class:`~molix.autograd.Derivative` are host-side and cost 22 graph breaks
+    if they sit inside the traced region. Then finds the op the model runs —
+    the model itself, or the op it exposes as ``derivative`` — and calls
+    :meth:`~molix.autograd.Derivative.mark_leaves` when it has variables. A
+    model with no op, or an energy-only op (``wrt=()``), needs nothing.
+    Outside the traced body on purpose: a leaf made inside the region leaks
+    through the attached derivatives and breaks the graph on stock torch; a
+    leaf made here is a graph input (:mod:`molix.autograd.derivative`).
+
+    Args:
+        model: ``trainer.model``.
+        batch: The batch the traced body is handed next.
+    """
+    model = getattr(model, "_orig_mod", model)
+    physics = getattr(model, "physics", None)
+    if callable(physics):
+        physics(batch)
+    op = model if isinstance(model, Derivative) else getattr(model, "derivative", None)
+    op = getattr(op, "_orig_mod", op)
+    if isinstance(op, Derivative) and op.wrt:
+        op.mark_leaves(batch)
 
 
 class Step(Protocol):
@@ -46,6 +77,18 @@ class Step(Protocol):
     that owns its losses there may run with ``Trainer(loss_fn=None)``. This
     Protocol deliberately requires **no** ``compute_loss`` method — it is
     duck-typed by callers, so third-party steps without it keep working.
+
+    The same holds for ``forward_loss(trainer, state, batch) -> (loss,
+    predictions)``: on the default steps it is an eager prologue that marks
+    the derivative op's leaves on the batch (:func:`_mark_leaves`) followed by
+    ``_traced_forward_loss`` — the forward-plus-objective region that
+    :meth:`~molix.core.trainer.Trainer.compile` (``step=True``) swaps for a
+    compiled wrapper — and it is what :meth:`~molix.core.trainer.Trainer.smoke`
+    warms up. A step without ``_traced_forward_loss`` trains as before but
+    can only be compiled model-only (``compile(step=False)``); one without
+    ``forward_loss`` cannot be smoke-tested either; a step whose objective
+    host-syncs declares ``untraceable`` (see
+    :class:`~molix.core.steps.multitask.MultiTaskTrainStep`).
 
     Example — a custom step that adds an L2 activation penalty::
 

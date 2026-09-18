@@ -23,7 +23,7 @@ class PiNet(TensorDictModuleBase):
 
     * ``("atoms", "Z")``: atomic numbers ``(N,)``.
     * ``("atoms", "pos")``: positions ``(N, 3)``.
-    * ``("edges", "edge_index")``: source-target pairs ``(E, 2)``.
+    * ``("pairs", "pair_index")``: source-target pairs ``(E, 2)``.
 
     Edge geometry is derived from ``pos`` + ``edge_index`` inside ``forward`` so
     force derivation can flow through positions.
@@ -36,13 +36,13 @@ class PiNet(TensorDictModuleBase):
     And, when ``emit_property_features`` is set (the default):
 
     * ``("atoms", "p3_features")`` / ``("atoms", "p5_features")`` when enabled.
-    * ``("edges", "i1_features")`` (+ ``i3`` / ``i5`` when enabled).
+    * ``("pairs", "i1_features")`` (+ ``i3`` / ``i5`` when enabled).
     """
 
     in_keys = [
         ("atoms", "Z"),
         ("atoms", "pos"),
-        ("edges", "edge_index"),
+        ("pairs", "pair_index"),
     ]
     out_keys = [("atoms", "node_features")]
 
@@ -178,9 +178,9 @@ class PiNet(TensorDictModuleBase):
         Z = td["atoms", "Z"]
         pos = td["atoms", "pos"]
         # Contiguous layout for AOTInductor stride specialisation (pair_style).
-        edge_index = td["edges", "edge_index"].contiguous()
+        edge_index = td["pairs", "pair_index"].contiguous()
 
-        edge_diff = edge_bond_diff(td["edges"], pos, edge_index)
+        edge_diff = edge_bond_diff(td["pairs"], pos, edge_index)
         edge_dist = edge_diff.norm(dim=-1).clamp(min=1e-8)
 
         idx = self._z_to_idx[Z]
@@ -247,11 +247,11 @@ class PiNet(TensorDictModuleBase):
         td["atoms", "node_features"] = torch.stack(p1_states, dim=1)
         td["atoms", "p1_block_outputs"] = torch.stack(p1_block_outputs, dim=1)
         if emit_props:
-            td["edges", "i1_features"] = torch.stack(i1_states, dim=1)
+            td["pairs", "i1_features"] = torch.stack(i1_states, dim=1)
             if self.rank >= 3:
                 td["atoms", "p3_features"] = torch.stack(p3_states, dim=1)
-                td["edges", "i3_features"] = torch.stack(i3_states, dim=1)
+                td["pairs", "i3_features"] = torch.stack(i3_states, dim=1)
             if self.rank >= 5:
                 td["atoms", "p5_features"] = torch.stack(p5_states, dim=1)
-                td["edges", "i5_features"] = torch.stack(i5_states, dim=1)
+                td["pairs", "i5_features"] = torch.stack(i5_states, dim=1)
         return td

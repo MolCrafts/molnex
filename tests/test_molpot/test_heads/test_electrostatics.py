@@ -114,17 +114,17 @@ class TestPolarizabilityHeadAnisotropic:
         head = _build_anisotropic_head(mul=mul).to(torch.float64)
 
         n_nodes = 5
-        n_edges = 12
+        n_pairs = 12
         rng = torch.Generator().manual_seed(seed)
         atom_features = torch.randn(n_nodes, 4, generator=rng, dtype=torch.float64)
         # Tensor track has irrep dim = mul·(1 + 3 + 5) = 9·mul.
         irreps_dim = 9 * mul
-        tensor_features = torch.randn(n_edges, irreps_dim, generator=rng, dtype=torch.float64)
-        scalar_edge = torch.randn(n_edges, 4, generator=rng, dtype=torch.float64)
-        edge_index = torch.stack(
+        tensor_features = torch.randn(n_pairs, irreps_dim, generator=rng, dtype=torch.float64)
+        scalar_edge = torch.randn(n_pairs, 4, generator=rng, dtype=torch.float64)
+        pair_index = torch.stack(
             [
-                torch.randint(0, n_nodes, (n_edges,), generator=rng),
-                torch.randint(0, n_nodes, (n_edges,), generator=rng),
+                torch.randint(0, n_nodes, (n_pairs,), generator=rng),
+                torch.randint(0, n_nodes, (n_pairs,), generator=rng),
             ],
             dim=1,
         )
@@ -132,7 +132,7 @@ class TestPolarizabilityHeadAnisotropic:
         out = head(
             atom_features,
             tensor_features=tensor_features,
-            edge_index=edge_index,
+            pair_index=pair_index,
             scalar_edge_features=scalar_edge,
             n_nodes=n_nodes,
         )
@@ -159,16 +159,16 @@ class TestPolarizabilityHeadAnisotropic:
         head = _build_anisotropic_head().to(torch.float64)
 
         n_nodes = 5
-        n_edges = 12
+        n_pairs = 12
         atom_features = torch.randn(n_nodes, 4, dtype=torch.float64)
-        tensor_features = torch.randn(n_edges, 9 * 3, dtype=torch.float64)
-        scalar_edge = torch.randn(n_edges, 4, dtype=torch.float64)
-        edge_index = torch.randint(0, n_nodes, (n_edges, 2))
+        tensor_features = torch.randn(n_pairs, 9 * 3, dtype=torch.float64)
+        scalar_edge = torch.randn(n_pairs, 4, dtype=torch.float64)
+        pair_index = torch.randint(0, n_nodes, (n_pairs, 2))
 
         out = head(
             atom_features,
             tensor_features=tensor_features,
-            edge_index=edge_index,
+            pair_index=pair_index,
             scalar_edge_features=scalar_edge,
             n_nodes=n_nodes,
         )

@@ -157,7 +157,7 @@ def _manifest() -> ModelManifest:
             charge_constraint="per_graph_total",
             total_charge=0.0,
             permanent_scaling=NonbondedScaling(
-                q=ExclusionScales(0.0, 0.0, 0.5),
+                charge=ExclusionScales(0.0, 0.0, 0.5),
                 lj=ExclusionScales(0.0, 0.0, 0.5),
             ),
             induced_scaling=None,

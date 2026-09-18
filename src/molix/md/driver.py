@@ -21,14 +21,15 @@ else is a component the caller builds and attaches:
 integrator is constructed with ``dt`` only.
 
 Two policies are ``MD``'s own and are set on it, not on a component:
-:meth:`MD.set_compiler` (compile the potential's hot core — re-applied on every
-rebuild) and ``MD(dtype, potential_dtype=…)`` (evaluate the potential at a
-second precision while the trajectory stays at ``dtype``).
+:meth:`MD.set_compiler` (compile the derivative op composed over the potential
+— once per run, after one eager evaluation) and ``MD(dtype,
+potential_dtype=…)`` (evaluate the potential at a second precision while the
+trajectory stays at ``dtype``).
 
 Neighbour-list cadence is not ``MD``'s. Configure it on
 :class:`~molix.md.neighbors.NeighborList` and mount with
 :meth:`MD.set_neighbors`. For a compiled rollout with a frozen edge set,
-omit :meth:`MD.set_neighbors` entirely — with no list mounted, ``edges``
+omit :meth:`MD.set_neighbors` entirely — with no list mounted, ``pairs``
 is never rebuilt and stays whatever was bound into ``system`` for the
 whole run.
 """
@@ -41,14 +42,25 @@ from typing import Any
 import torch
 from tensordict import TensorDict
 
-from molix.batch import TensorFrame, as_tensor_frame
+from molix.autograd import Derivative
+from molix.frame import TensorFrame, as_tensor_frame
 from molix.md.barostat import BerendsenBarostat
 from molix.md.forcefield import ForceField, MDForceField
 from molix.md.integrators import Integrator
 from molix.md.neighbors import NeighborList
 from molix.md.runner import MDHook, MDRunner
 from molix.md.types import MDState
-from molix.schema import ENERGY_KEY, MASS_KEY, POS_KEY, VEL_KEY, CellBound
+from molix.schema import (
+    ATOMIC_ENERGY_KEY,
+    ENERGY_KEY,
+    FORCES_KEY,
+    MASS_KEY,
+    POS_KEY,
+    STRAIN_KEY,
+    VEL_KEY,
+    VIRIAL_KEY,
+    CellBound,
+)
 from molix.units import preset_energy_to_md, units
 
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
@@ -60,8 +72,10 @@ class _TensorDictForce:
     MD never owns an energy graph: the trajectory is stepped under
     ``torch.no_grad()``, and the one ``energy.detach()`` at this seam
     drops the autograd tape so the next step does not keep Polar's
-    saved tensors alive. Forces and virial come from a single
-    ``autograd.grad(..., create_graph=False)`` inside the pots.
+    saved tensors alive. Forces and virial come from one
+    :class:`molix.autograd.Derivative` composed over the pots at
+    :meth:`bind_work` — ``wrt=("atoms.pos",)``, plus ``"graphs.strain"``
+    under a barostat — and compiled there when a compiler is set.
 
     It is also the **dtype boundary** when :class:`MD` was built with a
     ``potential_dtype``: positions (and ``graphs.cell``) go in at the
@@ -69,15 +83,29 @@ class _TensorDictForce:
     so the integrator state never picks the potential's precision up. With
     ``pot_dtype=None`` no cast is performed anywhere on this path.
 
-    Every one of those casts is made **per call and off to the side**, never
-    written back onto the caller's batch: the batch is the MD state's own
-    storage (``MDState.cell`` *is* ``graphs.cell``, and the end-of-run
-    writeback lands in it), so leaving a reduced-precision copy there would
-    quietly move the trajectory to the potential's precision — the exact
-    confusion the split exists to avoid. The cell is held as a private
-    cast copy (:meth:`_pot_cell`) refreshed from the live storage each call,
-    the edge columns are re-cast each call (:meth:`_expose_live_edges`), and
-    both are swapped out again before this adapter returns.
+    Every one of those casts is made **off to the side**, never written back
+    onto the caller's batch: the batch is the MD state's own storage
+    (``MDState.cell`` *is* ``graphs.cell``, and the end-of-run writeback lands
+    in it), so leaving a reduced-precision copy there would quietly move the
+    trajectory to the potential's precision — the exact confusion the split
+    exists to avoid. The cell is held as a private cast copy
+    (:meth:`_pot_cell`) refreshed from the live storage each call and swapped
+    out again before this adapter returns. The edge columns are **not** this
+    adapter's per-step business: a mounted :class:`~molix.md.neighbors.NeighborList`
+    writes them at its ``geometry_dtype`` (:class:`MD` sets it to the
+    potential's), and edges frozen on the batch with no list mounted are cast
+    **once** at :meth:`bind_work` and put back by :meth:`unbind_work`.
+
+    **Static shapes.** The op is handed the batch as the list bound it — the
+    *whole* capacity buffer, dead tail included, ``batch_size=[capacity]`` —
+    on every call. Nothing here slices to the live prefix: a data-dependent
+    ``E`` would recompile the op on each rebuild and forbid CUDA-graph capture,
+    and the dead rows price exactly nothing (their shift is the dead-edge
+    displacement, their ``pos[0] - pos[0]`` cancels). Under a CUDA-graph build
+    (``compiler.cuda_graphs``, see :class:`molix.compile.Compiler`) the call
+    also honours the replay contract: ``torch.compiler.cudagraph_mark_step_begin()``
+    before the op, and the outputs it leaves on the batch cloned out of the
+    graph's static pool, which the next replay overwrites.
 
     Args:
         pots: The object ``ForceField.to_potentials()`` returned.
@@ -87,6 +115,9 @@ class _TensorDictForce:
             ``None`` returns whatever the potential produced.
         pot_dtype: Dtype the potential is evaluated at — :attr:`MD.potential_dtype`.
             ``None`` (the default) disables the whole cast path.
+        compiler: Applied to the composed op at :meth:`bind_work`, after one
+            eager evaluation; ``None`` runs eager. A compiler exposing a true
+            ``cuda_graphs`` attribute gets the CUDA-graph step contract.
     """
 
     def __init__(
@@ -96,11 +127,19 @@ class _TensorDictForce:
         *,
         md_dtype: torch.dtype | None = None,
         pot_dtype: torch.dtype | None = None,
+        compiler: Callable[[Callable[..., Any]], Callable[..., Any]] | None = None,
     ) -> None:
         self._pots = pots
         self._scale = float(scale)
         self._md_dtype = md_dtype
         self._pot_dtype = pot_dtype
+        self._compiler = compiler
+        # Read once: the CUDA-graph replay contract (step mark + cloned
+        # outputs) is applied iff the build says it records graphs.
+        self._cuda_graphs = bool(getattr(compiler, "cuda_graphs", False))
+        #: The composed derivative op of the current run — eager or compiled —
+        #: or ``None`` before :meth:`bind_work`.
+        self._op: Callable[[TensorDict], TensorDict] | None = None
         # The caller's batch and its typed view: the same storage under two
         # names, because the two have different jobs. ``_work`` is what the
         # potential and the neighbour list are handed — the container the caller
@@ -115,10 +154,10 @@ class _TensorDictForce:
         # potential is handed the batch's own storage and nothing is swapped.
         self._cell_pot: torch.Tensor | None = None
         self._cell_md: torch.Tensor | None = None
-        self._edges_full: TensorDict | None = None
-        self.n_live: int | None = None
+        # The caller's own ``pairs`` namespace while a once-per-run cast copy
+        # stands in for it (no list mounted, ``pot_dtype`` set); ``None`` otherwise.
+        self._edges_md: TensorDict | None = None
         self.want_virial = False
-        self._eval = self._eval_classical
 
     @property
     def work(self) -> TensorDict | None:
@@ -126,16 +165,19 @@ class _TensorDictForce:
         return self._work
 
     def bind_work(self, work: TensorDict) -> None:
-        """Bind the working ``TensorDict`` for the run and pick the eval kernel.
+        """Bind the working ``TensorDict`` for the run and compose the op.
 
         Called once per :meth:`MD.run`, never once per step. Stores ``work``,
-        re-resolves the live cell via :meth:`rebind_cell`, then selects the
-        potential-call path for the rest of the run: :meth:`_eval_npt` when a
-        barostat wants the virial (``want_virial``), else :meth:`_eval_mlip`
-        when the pots expose an ``mlip`` attribute, else :meth:`_eval_classical`.
+        re-resolves the live cell via :meth:`rebind_cell`, then composes the
+        one derivative op of the run — ``Derivative(pots,
+        wrt=("atoms.pos",))``, with ``"graphs.strain"`` added when a barostat
+        wants the virial (``want_virial``). With a compiler set, the op is
+        evaluated **once eagerly** on ``work`` first — the topology bind, the
+        element-table check and any k-space grid sizing are host-side work a
+        trace cannot do — and the compiler is applied to it afterwards.
 
         The batch is wrapped **once here** as its typed view
-        (:func:`~molix.batch.as_tensor_frame`, CLAUDE.md § TensorDict Contract)
+        (:func:`~molix.data.as_tensor_frame`, CLAUDE.md § TensorDict Contract)
         and every read and swap below addresses that view — the wrap is a view,
         so the caller's batch is the storage throughout and one rollout pays
         one wrap rather than one per step. This is the **only** place the two
@@ -151,12 +193,49 @@ class _TensorDictForce:
         self._work = work
         self._frame = as_tensor_frame(work)
         self.rebind_cell()
-        if self.want_virial:
-            self._eval = self._eval_npt
-        elif getattr(self._pots, "mlip", None) is not None:
-            self._eval = self._eval_mlip
-        else:
-            self._eval = self._eval_classical
+        self._bind_edges(self._frame)
+        wrt = (POS_KEY, STRAIN_KEY) if self.want_virial else (POS_KEY,)
+        self._op = Derivative(self._pots, wrt=wrt)  # type: ignore[arg-type]
+        if self._compiler is not None:
+            with torch.no_grad():
+                self(work[POS_KEY])
+            self._op = self._compiler(self._op)
+
+    def _bind_edges(self, frame: TensorFrame) -> None:
+        """Once per run: frozen edge columns at ``pot_dtype``, if any need casting.
+
+        With a neighbour list mounted the columns already arrive at the
+        potential's precision (the list's ``geometry_dtype``) and nothing
+        happens here — the list-bound namespace must stay the object it is, or
+        the in-place rebuilds would become invisible. With no list the edges are
+        the caller's frozen buffers, so a cast copy stands in for the run and
+        :meth:`unbind_work` puts the caller's namespace back.
+        """
+        dtype = self._pot_dtype
+        if dtype is None or "pairs" not in frame.keys():
+            return
+        pairs = frame["pairs"]
+        columns = {key: pairs[key] for key in pairs.keys()}
+        if all(not c.is_floating_point() or c.dtype == dtype for c in columns.values()):
+            return
+        self._edges_md = pairs
+        frame["pairs"] = TensorDict(
+            {k: c.to(dtype) if c.is_floating_point() else c for k, c in columns.items()},
+            batch_size=pairs.batch_size,
+        )
+
+    def unbind_work(self) -> None:
+        """Put back what :meth:`bind_work` swapped onto the batch for the run.
+
+        Called by :meth:`MD.run` when the run ends, however it ends. Today that
+        is the frozen-edges cast copy (:meth:`_bind_edges`); the batch is then
+        exactly the caller's again.
+        """
+        frame = self._frame
+        pairs = self._edges_md
+        if frame is not None and pairs is not None:
+            frame["pairs"] = pairs
+        self._edges_md = None
 
     def rebind_cell(self, new_cell: torch.Tensor | None = None) -> None:
         """Re-resolve ``graphs.cell``, optionally write into it, then hand it to the pots.
@@ -171,11 +250,11 @@ class _TensorDictForce:
         is deliberately left alone.)
 
         The lookup is redone on **every** call and the previous view is never
-        reused. ``molpot.forcefield.potentials``' virial strain closure
-        replaces ``graphs.cell`` with a graph tensor for the duration of the
-        pass and restores the buffer only on the no-exception path, so a cached
-        view can point at orphaned storage — copying a barostat update into it
-        would land nowhere and leave the potential on the stale lattice.
+        reused. The derivative op's strain variable replaces ``graphs.cell``
+        with a graph tensor for the duration of the pass and restores the
+        buffer only on the no-exception path, so a cached view can point at
+        orphaned storage — copying a barostat update into it would land
+        nowhere and leave the potential on the stale lattice.
 
         Under a ``pot_dtype`` what reaches the pots is the private cast copy
         (:meth:`_pot_cell`), not the batch's own tensor: the barostat update is
@@ -286,28 +365,59 @@ class _TensorDictForce:
         Returns:
             ``{"energy", "forces"}`` — energy amu·Å²/fs², forces amu·Å/fs² —
             plus ``"virial"`` ``(3, 3)`` in amu·Å²/fs² on the barostat path.
+            The batch is left with ``pos`` — the MD-dtype tensor handed in —
+            under ``atoms.pos``: under a ``pot_dtype`` the cast copy stands
+            there only for the duration of the call, like the cell, so the
+            integrator state built off the batch afterwards (``MDRunner.run``
+            after the eager warm-up in :meth:`bind_work`) reads the trajectory's
+            precision, never the potential's.
 
         Raises:
             RuntimeError: :meth:`bind_work` has not run, so there is no batch to
-                evaluate on; or, on the barostat path, the potential exposes no
-                ``calc_energy_forces_virial``.
+                evaluate on.
         """
         work = self._work
         frame = self._frame
-        if work is None or frame is None:
+        op = self._op
+        if work is None or frame is None or op is None:
             raise RuntimeError("bind the working TensorDict before evaluating forces")
         # Read and swapped through the view, evaluated on the caller's own
         # container: the two are one storage, so the potential is handed the
-        # narrowed, cast geometry either way — and a potential that refuses the
-        # batch names the container the caller built rather than a wrapper this
-        # adapter made.
+        # cast geometry either way — and a potential that refuses the batch
+        # names the container the caller built rather than a wrapper this
+        # adapter made. The edges go in exactly as the list bound them.
         frame[POS_KEY] = self._cast_in(frame, pos)
-        self._expose_live_edges(frame)
+        if self._cuda_graphs:
+            # Attribute lookup at call time, on purpose: the previous replay's
+            # outputs are dead from here, and a test can observe the mark.
+            torch.compiler.cudagraph_mark_step_begin()
         try:
-            return self._eval(work)
+            op(work)
+            if self._cuda_graphs:
+                self._own_outputs(work)
+            out = self._pack(work[ENERGY_KEY], work[FORCES_KEY])
+            if self.want_virial:
+                out["virial"] = self._to_md(work[VIRIAL_KEY][0] * self._scale)
+            return out
         finally:
-            self._restore_edges(frame)
             self._restore_cell(frame)
+            if self._pot_dtype is not None:
+                frame[POS_KEY] = pos
+
+    @staticmethod
+    def _own_outputs(work: TensorDict) -> None:
+        """Clone what the op left on the batch out of the CUDA graph's static pool.
+
+        A replayed graph writes its outputs into memory the *next* replay
+        reuses, and reading such a tensor afterwards is an error torch raises
+        (or, worse, a stale value a hook read too late). The packed results
+        handed to the integrator are fresh tensors already (a multiply); this
+        gives the batch-side keys the same ownership.
+        """
+        nested = work.keys(include_nested=True)
+        for key in (ENERGY_KEY, FORCES_KEY, VIRIAL_KEY, ATOMIC_ENERGY_KEY):
+            if key in nested:
+                work[key] = work[key].clone()
 
     def _cast_in(self, frame: TensorFrame, pos: torch.Tensor) -> torch.Tensor:
         """Put the potential's geometry on ``pot_dtype`` — positions and the cell.
@@ -326,10 +436,10 @@ class _TensorDictForce:
         tensor every call is also what keeps a barostat update visible, since
         :meth:`MD._sync_cell` copies *into* that storage.
 
-        The edge columns are the other half of the geometry and are cast in
-        :meth:`_expose_live_edges` on the same per-call, swap-and-restore
-        terms, because the list refills its buffers in place on a rebuild. The
-        parameter tables are :class:`MD`'s half (``potential_dtype``).
+        The edge columns are the other half of the geometry and are the
+        neighbour list's to write at this precision (its ``geometry_dtype``) —
+        or, with no list, cast once at :meth:`bind_work`. The parameter tables
+        are :class:`MD`'s half (``potential_dtype``).
         """
         dtype = self._pot_dtype
         if dtype is None:
@@ -351,54 +461,6 @@ class _TensorDictForce:
         frame["graphs", "cell"] = cell
         self._cell_md = None
 
-    def _expose_live_edges(self, frame: TensorFrame) -> None:
-        """Hand the potential the edge rows it should price, at its own dtype.
-
-        Two independent narrowings, one swap (undone by :meth:`_restore_edges`):
-
-        **Rows.** NeighborList buffers are capacity-sized (CUDA-graph
-        contract). Dead rows sit at ``DEAD_EDGE_CUTOFF_FACTOR * cutoff`` so the
-        envelope is zero, but a fallback tensor product still materialises
-        them, so the live prefix ``[0, n_live)`` is what the potential is handed.
-
-        **Dtype.** Under a ``potential_dtype`` the float columns (``shifts`` /
-        ``edge_diff`` / ``edge_dist``) are cast, because the geometry has to
-        reach the potential in one precision: molpot's Coulomb kernels compare
-        the dtype of the pair distances against the positions' and raise rather
-        than promote. The cast is redone **every call** and never cached: the
-        list refills ``edge_index`` / ``shifts`` *in place* on a rebuild, so a
-        cast copy left on the batch would freeze the connectivity at the
-        geometry of the last rebuild — a silently wrong PES, which is precisely
-        the failure the in-place buffers exist to avoid. That is one copy of
-        the edge columns per step, in this arm only.
-        """
-        if "edges" not in frame.keys():
-            return
-        full = frame["edges"]
-        cap = int(full.batch_size[0]) if full.batch_size else 0
-        n = self.n_live
-        rows = n if n is not None and 0 < n < cap else cap
-        dtype = self._pot_dtype
-        if rows == cap and dtype is None:
-            return
-        columns = {key: full[key] for key in full.keys()}
-        if rows != cap:
-            columns = {key: column[:rows] for key, column in columns.items()}
-        if dtype is not None:
-            columns = {
-                key: column.to(dtype) if column.is_floating_point() else column
-                for key, column in columns.items()
-            }
-        self._edges_full = full
-        frame["edges"] = TensorDict(columns, batch_size=[rows])
-
-    def _restore_edges(self, frame: TensorFrame) -> None:
-        full = self._edges_full
-        if full is None:
-            return
-        frame["edges"] = full
-        self._edges_full = None
-
     def _pack(self, energy: torch.Tensor, forces: torch.Tensor) -> dict[str, torch.Tensor]:
         scale = self._scale
         return {
@@ -413,25 +475,6 @@ class _TensorDictForce:
         if self._pot_dtype is None or dtype is None or tensor.dtype == dtype:
             return tensor
         return tensor.to(dtype)
-
-    def _eval_npt(self, work: TensorDict) -> dict[str, torch.Tensor]:
-        calc = getattr(self._pots, "calc_energy_forces_virial", None)
-        if calc is None:
-            raise RuntimeError(
-                f"a barostat needs pots.calc_energy_forces_virial (got {type(self._pots).__name__})"
-            )
-        energy, forces, virial = calc(work)
-        out = self._pack(energy, forces)
-        out["virial"] = self._to_md(virial * self._scale)
-        return out
-
-    def _eval_mlip(self, work: TensorDict) -> dict[str, torch.Tensor]:
-        forces = self._pots.calc_forces(work)
-        return self._pack(work[ENERGY_KEY], forces)
-
-    def _eval_classical(self, work: TensorDict) -> dict[str, torch.Tensor]:
-        energy, forces = self._pots.calc_energy_forces(work)
-        return self._pack(energy, forces)
 
 
 class MaxwellBoltzmann:
@@ -498,20 +541,23 @@ class MD:
             Otherwise the whole evaluation moves, in three places, because a
             field's numbers live in three: :meth:`_wire` assembles it from
             ``force.to_dtype(potential_dtype)``, whose parameter tables — the
-            per-atom ``epsilon`` / ``sigma`` / ``q`` a ``Potentials`` reads live
+            per-atom ``epsilon`` / ``sigma`` / ``charge`` a ``Potentials`` reads live
             off its container on every call — are restated there; it then calls
             ``.to(potential_dtype)`` on the assembled module for what the
-            module itself owns (the bonded buffers, an mlip's weights); and the
-            force adapter casts the batch geometry it hands over (positions,
-            ``graphs.cell``, the edge columns) and casts energy / forces /
-            virial back to ``dtype`` on the way out. Partial casts are not an
-            option: molpot's Coulomb kernels compare the dtype of the charges
-            and the pair distances against the positions' and raise rather than
+            module itself owns (the bonded buffers, an mlip's weights); the
+            force adapter casts the positions and ``graphs.cell`` it hands
+            over per step and casts energy / forces / virial back to ``dtype``
+            on the way out; and a mounted neighbour list writes the edge
+            geometry at this precision (its ``geometry_dtype``, set by
+            :meth:`set_neighbors`), refreshing its cast shifts in place on each
+            rebuild rather than per step. Partial casts are not an option:
+            molpot's Coulomb kernels compare the dtype of the charges and the
+            pair distances against the positions' and raise rather than
             promote.
 
-            The *state* keeps ``dtype`` throughout, and so does the neighbour
-            list: it owns ``edges``, and validates the positions it is updated
-            with against its own build precision.
+            The *state* keeps ``dtype`` throughout, and so do the neighbour
+            list's own buffers: it owns ``pairs``, and validates the positions
+            it is updated with against its own build precision.
 
     Raises:
         TypeError: ``dtype`` or ``potential_dtype`` is not a ``torch.dtype`` —
@@ -524,8 +570,7 @@ class MD:
     References:
         ``.claude/notes/composable-potentials.md`` — finding **F28** (an ``MD``
         with neither a compile seam nor a precision policy), closed by
-        :meth:`set_compiler` and ``potential_dtype`` together with
-        :meth:`molpot.forcefield.Potentials.compile_core`.
+        :meth:`set_compiler` and ``potential_dtype``.
         :mod:`molix.quant` — the quantization-as-thermal-noise study the split
         precision exists for.
     """
@@ -589,12 +634,16 @@ class MD:
 
         Args:
             neighbors: Fixed-capacity MD neighbour list. ``build`` writes
-                ``edge_index``, ``shifts``, live ``edge_diff`` and ``edge_dist``.
+                ``pair_index``, ``shifts``, ``pair_diff`` and ``pair_dist`` over
+                the whole capacity, at :attr:`potential_dtype` when one is set.
 
         Returns:
             ``self``.
         """
         self.neighbors = neighbors
+        # The list writes the geometry the potential reads, so it writes it at
+        # the potential's precision; ``None`` is its own buffer dtype.
+        neighbors.geometry_dtype = self.potential_dtype
         self._wire()
         return self
 
@@ -615,32 +664,18 @@ class MD:
     def set_barostat(self, barostat: BerendsenBarostat) -> MD:
         """Attach an isotropic Berendsen barostat and return ``self``.
 
-        Requires ``graphs.cell`` on the system and a potential that can
-        return a virial (``calc_virial`` or ``graphs.virial``). After each
-        integrator step the cell and positions are scaled and a mounted
-        neighbour list is rebuilt against the new lattice.
+        Requires ``graphs.cell`` on the system; the composed op then derives
+        ``graphs.virial`` from a ``graphs.strain`` variable beside the forces.
+        After each integrator step the cell and positions are scaled and a
+        mounted neighbour list is rebuilt against the new lattice.
 
         Raises:
             TypeError: ``barostat`` is not a
                 :class:`~molix.md.barostat.BerendsenBarostat`.
-            RuntimeError: A compiler is installed (:meth:`set_compiler`). The
-                strained energy the virial comes from has no compiled build, so
-                attaching a barostat here would silently demote the run to
-                eager — the same gap, refused from the other side. Drop the
-                compiler (``set_compiler(None)``) to run NPT eager. Finding
-                **F34** in ``.claude/notes/composable-potentials.md``.
         """
         if not isinstance(barostat, BerendsenBarostat):
             raise TypeError(
                 f"set_barostat expects a BerendsenBarostat, got {type(barostat).__name__}"
-            )
-        if self._compiler is not None:
-            raise RuntimeError(
-                "set_barostat: a compiler is installed, and the NPT force path "
-                "(calc_energy_forces_virial) has no compiled build to route through — "
-                "the installed core serves calc_energy_forces only, so this run would be "
-                "eager while reporting itself compiled (F34). Call set_compiler(None) "
-                "first to run NPT eager, or drop the barostat to keep the compiled NVE core"
             )
         self.barostat = barostat
         self._wire()
@@ -649,77 +684,50 @@ class MD:
     def set_compiler(
         self, compiler: Callable[[Callable[..., Any]], Callable[..., Any]] | None
     ) -> MD:
-        """Compile the potential's hot core, and keep it compiled across rebuilds.
+        """Compile the derivative op composed over the potential, once per run.
 
-        The one compile seam of an MD run. ``compiler`` is applied by
-        :meth:`_wire` through ``pots.compile_core`` — molpot's classical
-        ``(system, pos) -> (energy, forces)`` core, or an mlip's own — every
-        time the potential is rebuilt, which is on **every** ``set_*`` call,
-        because ``force.to_potentials()`` returns a fresh container each time.
-        Installing a compiled build by hand instead would therefore survive
-        exactly until the next setter; that is why this is a setter too, and why
-        the order of the setters does not matter::
+        The one compile seam of an MD run. :meth:`run` binds the working batch
+        and composes ``Derivative(pots, wrt=("atoms.pos"[, "graphs.strain"]))``
+        over the freshly assembled potential; with a compiler set, that op is
+        evaluated once eagerly — the topology bind, an mlip's element-table
+        check and any k-space grid sizing are host-side work a trace cannot do
+        — and ``compiler(op)`` is what every later step calls. Held on ``MD``
+        rather than installed by hand because every ``set_*`` call rebuilds
+        the potential (``force.to_potentials()`` returns a fresh container),
+        and a build installed on one container would survive exactly until the
+        next setter; that is why this is a setter too, and why the order of
+        the setters does not matter::
 
             md = (
                 MD(torch.float64)
                 .set_forcefield(ff)
                 .set_compiler(Compiler(fullgraph=True))
-                .set_integrator(VelocityVerletIntegrator(1.0))   # rebuild → recompiled
+                .set_integrator(VelocityVerletIntegrator(1.0))   # rebuild → same policy
             )
 
         ``compiler`` is structural — any ``callable -> callable``.
-        :class:`molix.compile.Compiler` is the molnex one
-        (``Compiler(cuda_graphs=True)`` for the fixed-shape CUDA-graph preset,
-        which an MD neighbour list's fixed capacity is built for). It is passed
-        as a value rather than imported by molpot, which must not depend on
-        ``molix.compile``.
+        :class:`molix.compile.Compiler` is the molnex one, and
+        ``Compiler(cuda_graphs=True)`` is the MD build of choice: the op is
+        handed the list's full capacity buffer every step, so its shapes are
+        static, and a compiler whose ``cuda_graphs`` attribute is true gets the
+        replay contract (step mark before the op, batch-side outputs cloned)
+        from the adapter. The neighbour-list rebuild stays eager, outside the
+        captured region. NVE and NPT compose the same energy through the same
+        op; there is no barostat-specific core anywhere.
 
         Args:
             compiler: The callable-to-callable compiler, or ``None`` to run
-                eager from the next rebuild on.
+                eager from the next run on.
 
         Returns:
             ``self``.
 
-        An **mlip** field has one extra precondition, and it is the model's, not
-        this method's: its ``compile_core`` refuses until one eager forward has
-        validated the element table and sized any k-space grid, neither of which
-        a traced call can do. Bind the cell and evaluate once before attaching
-        the compiler (see the MD user guide). A classical field has no such
-        step — ``Potentials.calc_energy_forces`` binds its topology outside the
-        compiled region on the first call.
-
-        **NVE only, for now.** The core this installs is the one
-        :meth:`~molpot.forcefield.Potentials.calc_energy_forces` routes
-        through; the NPT step calls ``calc_energy_forces_virial`` instead, whose
-        strained backward has no compiled build. Attaching a compiler to a run
-        that has a barostat would therefore compile something the run never
-        calls, and report a compiled rollout that is eager end to end — so it is
-        refused rather than accepted (and :meth:`set_barostat` refuses the same
-        pair from the other side). Finding **F34**.
-
-        Raises:
-            RuntimeError: A barostat is attached — see above; ``set_compiler``
-                is not a no-op that quietly does nothing on the NPT path.
-                Or raised by ``compile_core`` from :meth:`_wire` when the
-                attached potential has no core to compile, or when an mlip's
-                core is not yet ready to be traced — all of them loud failures
-                rather than an eager run reported as compiled.
-
         References:
             ``.claude/notes/composable-potentials.md`` — finding **F28**: the
-            benchmark arms that had no seam to ride on until this setter and
-            :meth:`molpot.forcefield.Potentials.compile_core` existed. Finding
-            **F34**: the compiled NPT core this setter does not yet have.
+            benchmark arms that had no seam to ride on until this setter
+            existed. Finding **F34**: the NPT path that now differentiates the
+            same compiled op through a strain variable.
         """
-        if compiler is not None and self.barostat is not None:
-            raise RuntimeError(
-                "set_compiler: this MD has a barostat, and the NPT force path "
-                "(calc_energy_forces_virial) has no compiled build to route through — "
-                "the installed core would serve calc_energy_forces, which an NPT run "
-                "never calls, so the run would be eager while reporting itself compiled "
-                "(F34). Drop the barostat for a compiled NVE run, or run NPT eager"
-            )
         self._compiler = compiler
         self._wire()
         return self
@@ -753,29 +761,18 @@ class MD:
           ``pots.to(dtype)`` moves what the assembled module itself owns — the
           bonded buffers and any mlip weights. The adapter casts the third part,
           the per-step geometry.
-        * :attr:`_compiler` — re-applied through ``pots.compile_core``, so the
-          compiled core belongs to the container that is actually about to run.
-
-        Order matters for the second: the compiler is applied **after** the
-        potential has been placed on :attr:`device`, so a setter called after
-        :meth:`to` compiles the placed module rather than leaving the run to
-        evaluate on whichever device the ForceField's tables happened to sit on.
-        The dtype half runs earlier — the potential is assembled at
-        :attr:`potential_dtype` and then placed.
+        * :attr:`_compiler` — handed to the adapter, which applies it to the
+          op it composes at :meth:`run` over the container that is actually
+          about to run, after placing it on :attr:`device`.
 
         Raises:
             TypeError: A :attr:`potential_dtype` was asked for but the attached
                 force field has no ``to_dtype`` to restate its parameter tables
                 with (``molpot.forcefield.ForceField`` has one). Casting only
                 the module's own buffers would leave the per-atom ``ε`` / ``σ``
-                / ``q`` — which a ``Potentials`` reads live off its container —
+                / ``charge`` — which a ``Potentials`` reads live off its container —
                 at the other precision, and molpot's Coulomb kernels refuse a
                 dtype mismatch rather than promote.
-            RuntimeError: A compiler was installed by :meth:`set_compiler` but
-                the assembled potential exposes no ``compile_core`` seam; or
-                raised by that seam itself when there is nothing to compile.
-                Both are loud on purpose — an eager run reported as compiled is
-                a silently wrong benchmark.
         """
         if self.force is None or self.integrator is None:
             self.runner = None
@@ -804,7 +801,11 @@ class MD:
                 pots.to(self.potential_dtype)
         scale = preset_energy_to_md(self.force.units)
         self._adapter = _TensorDictForce(
-            pots, scale, md_dtype=self.dtype, pot_dtype=self.potential_dtype
+            pots,
+            scale,
+            md_dtype=self.dtype,
+            pot_dtype=self.potential_dtype,
+            compiler=self._compiler,
         )
         self._adapter.want_virial = self.barostat is not None
         if self.device is not None:
@@ -812,15 +813,6 @@ class MD:
             # rebuild has to be placed too, or the run evaluates on whichever
             # device the ForceField's tables happen to be on.
             self._adapter.to_pots(self.device)
-        if self._compiler is not None:
-            placed = self._adapter._pots
-            compile_core = getattr(placed, "compile_core", None)
-            if compile_core is None:
-                raise RuntimeError(
-                    "set_compiler needs a potential with a compile_core seam "
-                    f"(got {type(placed).__name__}); molpot.forcefield.Potentials has one"
-                )
-            compile_core(self._compiler)
         self.integrator.bind_force(self.compute_force)
         self.runner = MDRunner(
             self.integrator,
@@ -834,18 +826,16 @@ class MD:
 
         Writes ``pos`` into the work TensorDict (Å), calls
         :meth:`NeighborList.update` when a list is mounted, then hands the batch
-        to the force adapter. Which potential entry that adapter calls is fixed
-        once per run, at :meth:`_TensorDictForce.bind_work`: with a barostat
-        attached ``pots.calc_energy_forces_virial``, for an mlip field
-        ``pots.calc_forces`` (the energy having been written onto the batch),
-        and otherwise ``pots.calc_energy_forces`` — the classical analytic +
-        autograd mix.
+        to the force adapter, which runs the one derivative op composed at
+        :meth:`_TensorDictForce.bind_work` — forces, plus the virial under a
+        barostat — and reads ``graphs.energy`` / ``atoms.forces`` /
+        ``graphs.virial`` back off the batch.
 
         Going through the adapter is also what makes the two ``MD``-level
-        policies apply: the compiled core installed by :meth:`set_compiler` is
-        inside ``calc_energy_forces``, and the :attr:`potential_dtype` boundary
-        is the adapter's — ``pos`` arrives here at the MD dtype (which is what
-        the neighbour list validates against), is handed to the potential at the
+        policies apply: the build :meth:`set_compiler` chose is the op the
+        adapter holds, and the :attr:`potential_dtype` boundary is the
+        adapter's — ``pos`` arrives here at the MD dtype (which is what the
+        neighbour list validates against), is handed to the potential at the
         potential's, and comes back at the MD dtype whatever it ran at.
 
         Args:
@@ -870,7 +860,6 @@ class MD:
         work[POS_KEY] = pos
         if self.neighbors is not None:
             self.neighbors.update(work)
-            self._adapter.n_live = self.neighbors.num_edges
         return self._adapter(pos)
 
     def run(self, system: TensorDict, n_steps: int, *, chunk: int | None = None) -> MDState:
@@ -889,9 +878,11 @@ class MD:
             system = self._cast_system(system)
             if self.neighbors is not None:
                 self.neighbors.build(system)
-                self._adapter.n_live = self.neighbors.num_edges
             self._adapter.bind_work(system)
-            return self.runner.run(system, n_steps, chunk=chunk)
+            try:
+                return self.runner.run(system, n_steps, chunk=chunk)
+            finally:
+                self._adapter.unbind_work()
 
     def _cast_system(self, system: TensorDict) -> TensorDict:
         """Bring ``atoms.pos`` / ``vel`` / ``mass`` (and cell) onto the run dtype/device."""

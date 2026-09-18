@@ -215,15 +215,12 @@ class LammpsAdapter(BackendAdapter):
 
     def _propers_opls(self, bag: ProperTorsionBag) -> dict[str, Any]:
         n_types = bag.k.shape[0]
-        periods = self.as_ints(bag.periodicity)
+        periods = self.as_int_rows(bag.periodicity)
         params: list[dict[str, Any]] = []
         for t in range(n_types):
-            idivf = float(bag.idivf[t].item())
-            if idivf == 0.0:
-                raise ValueError(f"proper idivf[{t}] must be non-zero")
             K = [0.0, 0.0, 0.0, 0.0]
-            for m, n_per in enumerate(periods):
-                k_tm = float(bag.k[t, m].item()) / idivf
+            for m, n_per in enumerate(periods[t]):
+                k_tm = float(bag.k[t, m].item())
                 if n_per in (1, 2, 3, 4):
                     K[n_per - 1] += 2.0 * k_tm
             params.append(
@@ -245,16 +242,13 @@ class LammpsAdapter(BackendAdapter):
 
     def _propers_fourier(self, bag: ProperTorsionBag) -> dict[str, Any]:
         n_types, n_terms = bag.k.shape
-        periods = self.as_ints(bag.periodicity)
+        periods = self.as_int_rows(bag.periodicity)
         params: list[dict[str, Any]] = []
         for t in range(n_types):
-            idivf = float(bag.idivf[t].item())
-            if idivf == 0.0:
-                raise ValueError(f"proper idivf[{t}] must be non-zero")
             terms = [
                 {
-                    "periodicity": periods[m],
-                    "k": float(bag.k[t, m].item()) / idivf,
+                    "periodicity": periods[t][m],
+                    "k": float(bag.k[t, m].item()),
                     "phase": float(bag.phase[t, m].item()),
                 }
                 for m in range(n_terms)
@@ -272,7 +266,9 @@ class LammpsAdapter(BackendAdapter):
     def _is_opls_manifold(bag: ProperTorsionBag) -> bool:
         """True when propers are exactly n=1..4 with OPLS phases (0, π, 0, π)."""
         periods = bag.periodicity.detach().long().tolist()
-        if periods != [1, 2, 3, 4]:
+        # Every type must carry the same 1..4 quartet; one row that does not is
+        # a general torsion and the whole bag exports as `fourier`.
+        if any(row != [1, 2, 3, 4] for row in periods):
             return False
         expected = torch.tensor(
             [0.0, math.pi, 0.0, math.pi],
@@ -307,14 +303,13 @@ class LammpsAdapter(BackendAdapter):
         assert ir.impropers_periodic is not None
         bag = ir.impropers_periodic
         n_types, n_terms = bag.k.shape
-        periods = self.as_ints(bag.periodicity)
+        periods = self.as_int_rows(bag.periodicity)
         params: list[dict[str, Any]] = []
         for t in range(n_types):
-            idivf = float(bag.idivf[t].item())
             terms = [
                 {
-                    "periodicity": periods[m],
-                    "k": float(bag.k[t, m].item()) / idivf,
+                    "periodicity": periods[t][m],
+                    "k": float(bag.k[t, m].item()),
                     "phase": float(bag.phase[t, m].item()),
                 }
                 for m in range(n_terms)
@@ -613,7 +608,7 @@ class LammpsAdapter(BackendAdapter):
         """Emit ``special_bonds`` from the force field's 1-2 / 1-3 / 1-4 scales.
 
         LAMMPS spells the two Class-I interaction classes ``lj`` and ``coul``;
-        the IR spells the latter ``q``. The weights are dimensionless, ``0``
+        the IR spells the latter ``charge``. The weights are dimensionless, ``0``
         removing the bonded-path pair and ``1`` keeping it in full.
 
         Args:
@@ -624,7 +619,7 @@ class LammpsAdapter(BackendAdapter):
             as ``lj`` / ``coul`` float triples.
         """
         lj = list(scaling.triple("lj"))
-        coul = list(scaling.triple("q"))
+        coul = list(scaling.triple("charge"))
         weights = " ".join(self.number(x) for x in lj)
         charges = " ".join(self.number(x) for x in coul)
         return {
@@ -664,10 +659,10 @@ class LammpsAdapter(BackendAdapter):
 
     def _charges(self, ir: PotentialIR) -> dict[str, Any]:
         assert ir.charges is not None
-        q = self.as_floats(ir.charges.q)
+        q = self.as_floats(ir.charges.charge)
         return {
             "type": "atom charges",
             "category": "charge",
             "case": TranslationCase.DIRECT_UNIT_SCALE.value,
-            "parameters": [{"atom_index": i + 1, "q": qi} for i, qi in enumerate(q)],
+            "parameters": [{"atom_index": i + 1, "charge": qi} for i, qi in enumerate(q)],
         }

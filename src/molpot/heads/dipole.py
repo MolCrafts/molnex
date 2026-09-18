@@ -129,8 +129,8 @@ class DipoleHead(nn.Module):
         node_vectors: torch.Tensor | None = None,
         edge_scalars: torch.Tensor | None = None,
         edge_vectors: torch.Tensor | None = None,
-        edge_index: torch.Tensor | None = None,
-        edge_diff: torch.Tensor | None = None,
+        pair_index: torch.Tensor | None = None,
+        pair_diff: torch.Tensor | None = None,
         oxidation: torch.Tensor | None = None,
         total_charge: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
@@ -148,8 +148,8 @@ class DipoleHead(nn.Module):
             node_vectors: Per-atom vector features ``(N, 3)`` (atomic-dipole term).
             edge_scalars: Per-edge scalar features ``(E, F_e)`` (bond-charge term).
             edge_vectors: Per-edge vector features ``(E, 3)``.
-            edge_index: Source/target atom pairs ``(E, 2)`` (bond terms).
-            edge_diff: Edge displacement vectors ``(E, 3)`` (bond terms).
+            pair_index: Source/target atom pairs ``(E, 2)`` (bond terms).
+            pair_diff: Edge displacement vectors ``(E, 3)`` (bond terms).
             oxidation: Per-atom oxidation states ``(N,)`` (``ad_os`` term).
             total_charge: Optional per-graph net charge ``(num_graphs,)`` for
                 the charge-neutrality projection.
@@ -199,18 +199,18 @@ class DipoleHead(nn.Module):
             dipole = dipole + scatter_sum(atomic_dipoles, atom_batch, dim_size=num_graphs)
 
         if self.uses_bc:
-            assert edge_scalars is not None and edge_index is not None
-            assert edge_diff is not None
-            edge_batch = atom_batch[edge_index[:, 0]]
+            assert edge_scalars is not None and pair_index is not None
+            assert pair_diff is not None
+            pair_batch = atom_batch[pair_index[:, 0]]
             bond_charge = self.bond_scalar_mlp(edge_scalars).squeeze(-1)
             if edge_vectors is not None:
                 bond_charge = bond_charge + self.bond_vector_mlp(
                     edge_vectors.square().sum(dim=1),
                 ).squeeze(-1)
             out["bond_charges"] = bond_charge
-            bond_dipoles = bond_charge.unsqueeze(-1) * edge_diff
+            bond_dipoles = bond_charge.unsqueeze(-1) * pair_diff
             out["bond_dipoles"] = bond_dipoles
-            dipole = dipole + scatter_sum(bond_dipoles, edge_batch, dim_size=num_graphs)
+            dipole = dipole + scatter_sum(bond_dipoles, pair_batch, dim_size=num_graphs)
             if self.regularization:
                 out["bond_charge_l2"] = bond_charge.square().mean()
 

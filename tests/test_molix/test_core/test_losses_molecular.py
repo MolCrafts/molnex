@@ -5,10 +5,16 @@ from __future__ import annotations
 import pytest
 import torch
 from tensordict import TensorDict
+from torch import nn
 
-from molix.batch.collate import collate_molecules
 from molix.config import config
-from molix.core.losses import WeightedLoss, energy_force_mse, energy_mse
+from molix.core.losses import (
+    WeightedLoss,
+    energy_force_mse,
+    energy_loss,
+    energy_mse,
+    force_loss,
+)
 from molix.core.losses.molecular import (
     ChargeMSELoss,
     ParsleyEnergyWeight,
@@ -19,6 +25,7 @@ from molix.core.losses.molecular import (
     molecule_centered_energy_mse,
     parameter_bag_mse,
 )
+from molix.data.collate import collate_molecules
 from tests.conftest import frame
 
 
@@ -70,6 +77,64 @@ class TestEnergyMSE:
         assert torch.allclose(loss_fn(preds, batch), torch.tensor(1.0))
 
 
+class TestEnergyLossGraphWeight:
+    """``weight_key`` on ``graphs`` — a padded batch's dead slots drop out of the mean."""
+
+    def _batch(self):
+        samples = [
+            _sample([1, 6], [[0, 0, 0], [1, 0, 0]], U0=1.0),
+            _sample([6, 8], [[0, 0, 0], [1.2, 0, 0]], U0=2.5),
+            _sample([1], [[0, 0, 0]], U0=0.0),  # a dead slot: label 0, garbage prediction
+        ]
+        return collate_molecules(samples, dtype=torch.float32)
+
+    def test_graphs_mask_weights_the_mean(self):
+        batch = self._batch()
+        batch["graphs", "mask"] = torch.tensor([True, True, False])
+        preds = {"energy": torch.tensor([0.8, 2.7, 100.0])}
+        got = energy_loss("U0")(preds, batch)
+        expected = torch.tensor(((0.8 - 1.0) ** 2 + (2.7 - 2.5) ** 2) / 2)
+        assert torch.allclose(got, expected)
+
+    def test_absent_weight_column_is_unweighted(self):
+        batch = self._batch()
+        preds = {"energy": torch.tensor([0.8, 2.7, 1.0])}
+        got = energy_loss("U0")(preds, batch)
+        expected = torch.nn.functional.mse_loss(preds["energy"], batch["graphs", "U0"])
+        assert torch.allclose(got, expected)
+
+    def test_weight_key_none_ignores_the_mask(self):
+        batch = self._batch()
+        batch["graphs", "mask"] = torch.tensor([True, True, False])
+        preds = {"energy": torch.tensor([0.8, 2.7, 1.0])}
+        got = energy_loss("U0", weight_key=None)(preds, batch)
+        expected = torch.nn.functional.mse_loss(preds["energy"], batch["graphs", "U0"])
+        assert torch.allclose(got, expected)
+
+    def test_sum_and_none_reductions_apply_the_weight(self):
+        batch = self._batch()
+        batch["graphs", "mask"] = torch.tensor([True, True, False])
+        preds = {"energy": torch.tensor([0.8, 2.7, 100.0])}
+        per_graph = energy_loss("U0", reduction="none")(preds, batch)
+        assert torch.allclose(per_graph, torch.tensor([0.04, 0.04, 0.0]))
+        total = energy_loss("U0", reduction="sum")(preds, batch)
+        assert torch.allclose(total, torch.tensor(0.08))
+
+    def test_per_atom_and_mask_compose(self):
+        batch = self._batch()
+        batch["graphs", "mask"] = torch.tensor([True, True, False])
+        preds = {"energy": torch.tensor([0.8, 2.7, 100.0])}
+        got = energy_loss("U0", per_atom=True)(preds, batch)
+        expected = torch.tensor(((0.8 - 1.0) ** 2 / 4 + (2.7 - 2.5) ** 2 / 4) / 2)
+        assert torch.allclose(got, expected)
+
+    def test_energy_mse_preset_forwards_the_weight(self):
+        batch = self._batch()
+        batch["graphs", "mask"] = torch.tensor([True, True, False])
+        preds = {"energy": torch.tensor([0.8, 2.7, 100.0])}
+        assert torch.allclose(energy_mse("U0")(preds, batch), energy_loss("U0")(preds, batch))
+
+
 class TestEnergyForceMSE:
     def test_combines_energy_and_force_terms(self):
         forces_a = torch.tensor([[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0]])
@@ -115,6 +180,46 @@ class TestEnergyForceMSE:
         )(preds, batch)
         energy_only = energy_mse("U0")(preds, batch)
         assert torch.allclose(joint, energy_only)
+
+    def test_masked_force_term_averages_over_the_real_atoms_only(self):
+        """On a padded batch the force MSE denominator is ``atoms.mask.sum()``.
+
+        ``MoleculePadder`` appends ghost atoms whose force target and force
+        prediction are both zero, so an unmasked mean silently divides the real
+        residual by ``max_atoms`` instead of the real atom count — the same
+        loss value then depends on how much padding a batch happened to carry.
+        The energy term is untouched (``graphs`` is never padded).
+        """
+        from molix.data import MoleculePadder
+
+        forces_a = torch.tensor([[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0]])
+        forces_b = torch.tensor([[0.2, 0.0, 0.0], [-0.2, 0.0, 0.0]])
+        samples = [
+            _sample([1, 6], [[0, 0, 0], [1, 0, 0]], U0=1.0, forces=forces_a),
+            _sample([6, 8], [[0, 0, 0], [1.2, 0, 0]], U0=2.0, forces=forces_b),
+        ]
+        batch = collate_molecules(samples, dtype=torch.float32)
+        n_real = int(batch["atoms"].batch_size[0])
+        padded = MoleculePadder(max_atoms=n_real + 6, max_pairs=8, cutoff=1.0)(batch.clone())
+        preds = {
+            "energy": torch.tensor([0.5, 2.5]),
+            "forces": torch.zeros_like(padded["atoms", "forces"]),
+        }
+
+        got = energy_force_mse(energy_target_key="U0", force_target_key="forces", lambda_F=0.5)(
+            preds, padded
+        )
+
+        e_true = padded["graphs", "U0"].view_as(preds["energy"])
+        f_true = padded["atoms", "forces"][:n_real]
+        expected = torch.nn.functional.mse_loss(
+            preds["energy"], e_true
+        ) + 0.5 * torch.nn.functional.mse_loss(preds["forces"][:n_real], f_true)
+        assert torch.allclose(got, expected)
+        unmasked = torch.nn.functional.mse_loss(preds["forces"], padded["atoms", "forces"])
+        assert not torch.allclose(
+            0.5 * unmasked, got - torch.nn.functional.mse_loss(preds["energy"], e_true)
+        )
 
 
 class TestCenterByGroup:
@@ -306,14 +411,14 @@ class TestTorsionProfileLoss:
 
 class TestChargeMSELoss:
     def test_mse_is_one_hundredth(self):
-        pred = {"q": torch.tensor([0.2, -0.2])}
-        target = {"q": torch.tensor([0.1, -0.1])}
+        pred = {"charge": torch.tensor([0.2, -0.2])}
+        target = {"charge": torch.tensor([0.1, -0.1])}
         got = ChargeMSELoss()(pred, target)
         assert torch.allclose(got, torch.tensor(0.01), atol=_ENERGY_ATOL)
 
     def test_forward_does_not_require_energy_keys(self):
-        pred = {"q": torch.tensor([0.2, -0.2])}
-        target = {"q": torch.tensor([0.1, -0.1])}
+        pred = {"charge": torch.tensor([0.2, -0.2])}
+        target = {"charge": torch.tensor([0.1, -0.1])}
         got = ChargeMSELoss()(pred, target)
         assert "energy" not in pred
         assert "energy" not in target
@@ -339,8 +444,8 @@ class TestScaleNormalizedLoss:
 
     def test_weighted_loss_combo_on_charge_golden(self):
         loss_fn = WeightedLoss([(1.0, ScaleNormalizedLoss(ChargeMSELoss(), scale=2.0))])
-        pred = {"q": torch.tensor([0.2, -0.2])}
-        target = {"q": torch.tensor([0.1, -0.1])}
+        pred = {"charge": torch.tensor([0.2, -0.2])}
+        target = {"charge": torch.tensor([0.1, -0.1])}
         got = loss_fn(pred, target)
         assert torch.allclose(got, torch.tensor(0.0025), atol=_ENERGY_ATOL)
 
@@ -637,3 +742,59 @@ class TestTorsionProfileLossParsley:
         explicit = TorsionProfileLoss(energy_weight=None)(pred, target)
         assert float(implicit) == 1.0
         assert float(explicit) == float(implicit)
+
+
+class TestComposableLosses:
+    """The three axes vary independently: measure, weight, combination."""
+
+    @staticmethod
+    def _batch() -> TensorDict:
+        return TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "forces": torch.zeros(3, 3),
+                        "inlier": torch.tensor([1.0, 0.0, 1.0]),
+                    },
+                    batch_size=[3],
+                ),
+                "graphs": TensorDict(
+                    {"energy": torch.zeros(1), "num_atoms": torch.tensor([3])},
+                    batch_size=[1],
+                ),
+            },
+            batch_size=[],
+        )
+
+    def test_the_measure_is_the_callers(self) -> None:
+        """A Huber past its delta grows linearly where a squared error grows squared."""
+        preds = {"energy": torch.tensor([100.0])}
+        batch = self._batch()
+
+        squared = energy_loss("energy")(preds, batch)
+        huber = energy_loss("energy", elementwise=nn.HuberLoss(delta=1.0, reduction="none"))(
+            preds, batch
+        )
+
+        assert float(squared) == pytest.approx(100.0**2)
+        assert float(huber) == pytest.approx(100.0 - 0.5)
+
+    def test_a_per_atom_weight_drops_a_row_without_gathering_it(self) -> None:
+        """The masked row contributes nothing, and the mean divides by what it kept."""
+        preds = {"forces": torch.tensor([[1.0, 0.0, 0.0], [9.0, 0.0, 0.0], [1.0, 0.0, 0.0]])}
+        batch = self._batch()
+
+        weighted = force_loss("forces", weight_key="inlier")(preds, batch)
+        unweighted = force_loss("forces", weight_key=None)(preds, batch)
+
+        # Two kept rows, one squared unit each, over 2*3 weighted elements.
+        assert float(weighted) == pytest.approx(2.0 / 6.0)
+        assert float(unweighted) > float(weighted)
+
+    def test_the_shape_does_not_move_with_how_many_rows_are_masked(self) -> None:
+        """A weight is a multiply, never a gather — the output stays a scalar."""
+        preds = {"forces": torch.ones(3, 3)}
+        batch = self._batch()
+        batch["atoms", "inlier"] = torch.zeros(3)
+
+        assert force_loss("forces", weight_key="inlier")(preds, batch).shape == ()

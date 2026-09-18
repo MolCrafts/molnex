@@ -1,6 +1,6 @@
 """LJ 12-6 on ForceField.to_potentials() via existing lj126 kernel.
 
-Every batch here arrives with a placed ``edges`` namespace built by
+Every batch here arrives with a placed ``pairs`` namespace built by
 :func:`~tests.test_molpot.test_forcefield.conftest.place_edges` at
 :data:`LJ_CUTOFF` — the same cutoff the ``lj/cut`` style declares, so the live
 pair set is exactly the set the style asks for (``composable-a0-03b``: pair

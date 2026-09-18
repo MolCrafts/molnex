@@ -1,6 +1,6 @@
 // Copyright (c) MolNex contributors. SPDX-License-Identifier: MIT
 //
-// The LAMMPS neighbour list as a molnex `edge_index`.
+// The LAMMPS neighbour list as a molnex `pair_index`.
 //
 // A type rather than a free function because it has state with a lifetime of
 // its own: `cutsq_` is fixed once from the model's cutoff at `pair_style`
@@ -11,7 +11,7 @@
 // Edge Convention — and its **recompute-every-step** contract: each `build`
 // call produces a freshly sized `(ne, 2)` tensor. They deliberately do NOT
 // mirror `src/molix/md/neighbors.py`, whose fixed-capacity live-range layout
-// (dead padding past `num_edges`) is a different contract that no LAMMPS
+// (dead padding past `num_pairs`) is a different contract that no LAMMPS
 // consumer asks for here.
 //
 // EDGE ORDER IS NOT PROMISED unconditionally. The default is the raw neighbour-
@@ -31,7 +31,7 @@
 
 namespace molnex::lammps_bridge {
 
-/// Builds the model's `edge_index` from a LAMMPS neighbour list, each step.
+/// Builds the model's `pair_index` from a LAMMPS neighbour list, each step.
 class GraphBridge {
  public:
   /// \param cutoff                Model cutoff in angstrom, from the export
@@ -52,7 +52,7 @@ class GraphBridge {
   ///
   /// Edge Convention: column 0 is the **source**, the centre atom out of
   /// `ilist`; column 1 is the **target**, its neighbour — the same orientation
-  /// as `src/molix/batch/neighbor.py`. No `edge_diff` is computed here: models
+  /// as `src/molix/batch/neighbor.py`. No `pair_diff` is computed here: models
   /// recompute geometry from `pos`, so this layer only owes the column order.
   ///
   /// THE SOURCE DOMAIN IS `local u ghost`, not local alone, whenever the

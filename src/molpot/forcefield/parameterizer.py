@@ -18,7 +18,7 @@ templates (``dihedral:opls``) require a proper head that emits ``k1..k4``.
         OPLSAAForceField(),
         bond_head=...,
         angle_head=...,
-        proper_head=...,  # form="opls" → k1..k4
+        proper_head=...,  # general Fourier (a, b, periodicity)
         improper_head=...,
         atom_head=...,
         charge_model=...,
@@ -41,8 +41,6 @@ from molpot.forcefield.schema import PotentialMeta
 from molpot.manifest import RepresentationRecord
 
 __all__ = ["Parameterizer"]
-
-_OPLS_PROPER_KEYS = frozenset({"k1", "k2", "k3", "k4"})
 
 
 class Parameterizer(nn.Module):
@@ -79,7 +77,7 @@ class Parameterizer(nn.Module):
             ``epsilon`` (kcal/mol) and ``sigma`` (Å). Required when
             ``pair:lj/cut`` is registered.
         charge_model: :class:`~molpot.charge.AtomicChargeModel` that writes
-            partial charges ``atoms.q`` (``e``) via EEM / QEq. Required when
+            partial charges ``atoms.charge`` (``e``) via EEM / QEq. Required when
             ``pair:coulomb`` is registered. Setting it makes
             ``graphs.total_charge`` a required batch field: :meth:`forward`
             forwards it as ``write_forcefield(..., total_charge=...)`` and
@@ -136,6 +134,9 @@ class Parameterizer(nn.Module):
         self.atom_head = atom_head
         self.charge_model = charge_model
         self._validate_schema_heads()
+        # Read once: the template is fixed for the life of the model, and a
+        # per-forward ``dihedral_style()`` is a molpy call dynamo cannot trace.
+        self._dihedral_style: str | None = self.template.dihedral_style()
 
     def _validate_schema_heads(self) -> None:
         """Require heads for every style registered on ``template``."""
@@ -150,13 +151,6 @@ class Parameterizer(nn.Module):
         dihedral = self.template.dihedral_style()
         if dihedral is not None and self.proper_head is None:
             raise ValueError(f"template declares dihedral:{dihedral} but proper_head is None")
-        if dihedral == "opls":
-            form = getattr(self.proper_head, "form", None)
-            if form is not None and form != "opls":
-                raise ValueError(
-                    "template declares dihedral:opls but proper_head.form "
-                    f"is {form!r}; expected form='opls' (k1..k4)"
-                )
 
         improper = self.template.improper_style()
         if improper is not None and self.improper_head is None:
@@ -229,27 +223,75 @@ class Parameterizer(nn.Module):
             TypeError: The ``charge_model`` exposes no
                 ``write_forcefield(ff, atom_features, batch, total_charge=…)``.
         """
+        filled = self.template.with_params(**self.tables(batch))
+        # A charge model that only implements the ForceField writer still gets
+        # to write: ``tables`` takes the tensor path when there is one, and the
+        # export path honours the other. The hot path never calls this.
+        if self.charge_model is not None and not callable(
+            getattr(self.charge_model, "charges", None)
+        ):
+            write = getattr(self.charge_model, "write_forcefield", None)
+            if not callable(write):
+                raise TypeError(
+                    "charge_model must provide charges(atom_features, batch, total_charge=…) "
+                    "or write_forcefield(ff, atom_features, batch, total_charge=…)"
+                )
+            features = self._encode(batch)
+            atom_feats = features.get("atoms")
+            if atom_feats is None:
+                raise ValueError("charge_model requires atom features under features['atoms']")
+            filled = write(filled, atom_feats, batch, total_charge=self._total_charge(batch))
+        return filled
+
+    def tables(self, batch: TensorDict | Mapping[str, Any]) -> dict[str, dict[str, torch.Tensor]]:
+        """This batch's predicted parameters, as plain tensors per namespace.
+
+        The **hot path**. :meth:`forward` is this plus one molpy
+        ``with_params``, and that copy is what the export path wants — a
+        :class:`ForceField` to hand to the LAMMPS / OpenMM writers or the
+        manifest. A training step wants none of it: molpy objects cannot be
+        constructed inside a compiled region (``ForceField.__new__`` is an
+        untraceable call), and the tables have to be *computed* inside it
+        anyway, because a table produced outside carries a ``grad_fn`` that
+        ``torch.autograd.grad`` will not trace through. So the energy consumes
+        this mapping directly — :meth:`molpot.forcefield.Potentials.energy`
+        takes it as ``tables`` — and molpy stays on the export path.
+
+        Args:
+            batch: Post-collate batch carrying ``atoms.Z`` and the topology
+                namespaces the encoder and the heads read; plus
+                ``graphs.total_charge`` ``(B,)`` in ``e`` when a
+                ``charge_model`` is configured.
+
+        Returns:
+            Namespace → parameter name → tensor, for the namespaces this
+            model's heads fill. Namespaces with no head are absent, not empty.
+
+        Raises:
+            ValueError: A ``charge_model`` is configured but the encoder
+                produced no ``features["atoms"]``; or the batch carries no
+                usable ``graphs.total_charge``; or ``dihedral:opls`` proper
+                output lacks ``k1..k4``.
+        """
         features = self._encode(batch)
-        propers = self._proper_params(features)
-        filled = self.template.with_params(
-            bonds=self._bond_params(features),
-            angles=self._angle_params(features),
-            propers=propers,
-            impropers=self._improper_params(features),
-            atoms=self._atom_params(features, batch),
-        )
+        filled: dict[str, dict[str, torch.Tensor] | None] = {
+            "bonds": self._bond_params(features),
+            "angles": self._angle_params(features),
+            "propers": self._proper_params(features),
+            "impropers": self._improper_params(features),
+            "atoms": self._atom_params(features, batch),
+        }
         if self.charge_model is not None:
             atom_feats = features.get("atoms")
             if atom_feats is None:
                 raise ValueError("charge_model requires atom features under features['atoms']")
-            write = getattr(self.charge_model, "write_forcefield", None)
-            if not callable(write):
-                raise TypeError(
-                    "charge_model must provide "
-                    "write_forcefield(ff, atom_features, batch, total_charge=…)"
-                )
-            filled = write(filled, atom_feats, batch, total_charge=self._total_charge(batch))
-        return filled
+            charges = getattr(self.charge_model, "charges", None)
+            if callable(charges):
+                q = charges(atom_feats, batch, total_charge=self._total_charge(batch))
+                # ``charge`` is the alias heads written against the older
+                # spelling read; both name the same tensor, never two.
+                filled["atoms"] = {**(filled["atoms"] or {}), "charge": q}
+        return {name: table for name, table in filled.items() if table}
 
     # --- private: encode & heads ---
 
@@ -394,14 +436,7 @@ class Parameterizer(nn.Module):
     ) -> dict[str, torch.Tensor] | None:
         if self.proper_head is None or "propers" not in features:
             return None
-        params = dict(self.proper_head(features["propers"]))
-        if self.template.dihedral_style() == "opls":
-            missing = _OPLS_PROPER_KEYS - params.keys()
-            if missing:
-                raise ValueError(
-                    f"dihedral:opls requires proper params k1..k4; missing {sorted(missing)}"
-                )
-        return params
+        return dict(self.proper_head(features["propers"]))
 
     def _improper_params(
         self, features: Mapping[str, torch.Tensor]

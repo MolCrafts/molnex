@@ -57,9 +57,8 @@ class ImproperPeriodic(BasePotential):
 
     Attributes:
         k: Barrier heights ``[n_types, n_terms]``.
-        periodicity: Periodicities ``[n_terms]``.
+        periodicity: Periodicities ``[n_types, n_terms]``.
         phase: Phase offsets ``[n_types, n_terms]``.
-        idivf: Scale factors ``[n_types]``.
     """
 
     name = "improper_periodic_torch"
@@ -68,22 +67,19 @@ class ImproperPeriodic(BasePotential):
     k: torch.Tensor
     periodicity: torch.Tensor
     phase: torch.Tensor
-    idivf: torch.Tensor
 
     def __init__(
         self,
         k: torch.Tensor,
         periodicity: torch.Tensor,
         phase: torch.Tensor,
-        idivf: torch.Tensor,
     ) -> None:
         """Initialize ImproperPeriodic.
 
         Args:
             k: Barrier heights ``[n_types, n_terms]``.
-            periodicity: Integer periods ``[n_terms]`` (must be > 0).
+            periodicity: Integer periods ``[n_types, n_terms]`` (must be > 0).
             phase: Phase offsets γ in radians ``[n_types, n_terms]``.
-            idivf: Scale factors ``s`` per type ``[n_types]``.
         """
         super().__init__()
 
@@ -92,19 +88,35 @@ class ImproperPeriodic(BasePotential):
         if phase.shape != k.shape:
             raise ValueError(f"phase must match k shape {tuple(k.shape)}, got {tuple(phase.shape)}")
         n_types, n_terms = k.shape
-        if periodicity.ndim != 1 or periodicity.shape[0] != n_terms:
+        if periodicity.ndim == 1 and periodicity.shape[0] == k.shape[1]:
+            # A multiplicity set shared by every type — the OPLS/CHARMM case of
+            # the general per-type table.
+            periodicity = periodicity.expand(k.shape[0], -1).contiguous()
+        if periodicity.shape != k.shape:
             raise ValueError(
-                f"periodicity must be [n_terms]={n_terms}, got shape {tuple(periodicity.shape)}"
+                f"periodicity must match k shape {tuple(k.shape)}, got {tuple(periodicity.shape)}"
             )
-        if idivf.ndim != 1 or idivf.shape[0] != n_types:
-            raise ValueError(f"idivf must be [n_types]={n_types}, got shape {tuple(idivf.shape)}")
         if not bool((periodicity > 0).all()):
             raise ValueError(f"periodicity entries must be > 0, got {periodicity.tolist()}")
 
         self.register_buffer("k", k)
         self.register_buffer("periodicity", periodicity)
         self.register_buffer("phase", phase)
-        self.register_buffer("idivf", idivf)
+        # Python int, fixed at construction: a trip count read off a
+        # tensor is a data-dependent loop bound and a graph break.
+        #
+        # An empty table is a real, ordinary case: a learned field declares its
+        # styles with no rows and the head fills them per batch, so whichever
+        # batch assembles this container may carry no term of this kind at all
+        # (a small molecule has no improper). ``max()`` over zero elements
+        # raises, and guessing 1 is worse than raising — the next batch that
+        # *does* bring rows gathers past the ladder and dies in a CUDA
+        # index assert, far from here. With no rows the only capacity the
+        # table still states is its own width, which for the canonical
+        # ``n = 1…T`` tables these heads emit is exactly the depth needed.
+        self.n_max = (
+            int(periodicity.max()) if periodicity.numel() else max(int(periodicity.shape[-1]), 1)
+        )
 
     def forward(self, data: dict[str, Any] | None = None, **kwargs: Any) -> torch.Tensor:
         """Compute Class-I multi-term improper torsion energy.
@@ -139,13 +151,15 @@ class ImproperPeriodic(BasePotential):
             if improper_types is None:
                 improper_types = data.get("improper_types")
 
-        if pos is None or improper_index is None or improper_types is None:
+        if pos is None or improper_index is None:
             raise ValueError("ImproperPeriodic requires pos, improper_index, and improper_types.")
 
         if not isinstance(pos, torch.Tensor):
             pos = torch.from_numpy(pos).float()
             improper_index = torch.from_numpy(improper_index).long()
-            improper_types = torch.from_numpy(improper_types).long()
+            improper_types = (
+                None if improper_types is None else torch.from_numpy(improper_types).long()
+            )
 
         _require_index_4_by_n(improper_index, "improper_index")
 
@@ -156,11 +170,11 @@ class ImproperPeriodic(BasePotential):
         cos_phi, sin_phi = dihedral_cos_sin(
             *_dihedral_bond_vectors(pos, _improper_to_dihedral_index(improper_index))
         )
-        k_t = self.k[improper_types]
-        phase_t = self.phase[improper_types]
-        s_t = self.idivf[improper_types]
-        cos_arg = fourier_cos(cos_phi, sin_phi, self.periodicity, phase_t)
-        energy_per = ((k_t / s_t.unsqueeze(1)) * (1.0 + cos_arg)).sum(dim=1)
+        k_t = self.rows("k", kwargs, improper_types)
+        phase_t = self.rows("phase", kwargs, improper_types)
+        n_t = self.rows("periodicity", kwargs, improper_types)
+        cos_arg = fourier_cos(cos_phi, sin_phi, n_t, phase_t, n_max=self.n_max)
+        energy_per = (k_t * (1.0 + cos_arg)).sum(dim=1)
         if term_batch is not None:
             energy = energy_per.new_zeros(int(num_graphs))
             energy.index_add_(0, term_batch.long(), energy_per)
@@ -189,7 +203,7 @@ class ImproperPeriodic(BasePotential):
         improper_types = kwargs.get("improper_types")
         term_batch = kwargs.get("term_batch")
         num_graphs = kwargs.get("num_graphs")
-        if pos is None or improper_index is None or improper_types is None:
+        if pos is None or improper_index is None:
             raise ValueError(
                 "ImproperPeriodic.energy_forces requires pos, improper_index, improper_types."
             )
@@ -206,15 +220,15 @@ class ImproperPeriodic(BasePotential):
         dihedral_index = _improper_to_dihedral_index(improper_index)
         b1, b2, b3 = _dihedral_bond_vectors(pos, dihedral_index)
         cos_phi, sin_phi = dihedral_cos_sin(b1, b2, b3)
-        k_t = self.k[improper_types]
-        phase_t = self.phase[improper_types]
-        s_t = self.idivf[improper_types]
-        cos_arg, sin_arg = fourier_cos_sin(cos_phi, sin_phi, self.periodicity, phase_t)
-        scale = k_t / s_t.unsqueeze(1)
+        k_t = self.rows("k", kwargs, improper_types)
+        phase_t = self.rows("phase", kwargs, improper_types)
+        n_t = self.rows("periodicity", kwargs, improper_types)
+        cos_arg, sin_arg = fourier_cos_sin(cos_phi, sin_phi, n_t, phase_t, n_max=self.n_max)
+        scale = k_t
         energy_per = (scale * (1.0 + cos_arg)).sum(dim=1)
 
-        n = self.periodicity.to(dtype=k_t.dtype)
-        g = (scale * n.unsqueeze(0) * sin_arg).sum(dim=1)
+        n = n_t.to(dtype=k_t.dtype)
+        g = (scale * n * sin_arg).sum(dim=1)
         fi, fj, fk, fl = dihedral_phi_grad(b1, b2, b3)
         g = g.unsqueeze(-1)
         forces = pos.new_zeros((pos.shape[0], 3))

@@ -262,7 +262,7 @@ class PolarizabilityHead(nn.Module):
         atom_features: torch.Tensor,
         *,
         tensor_features: torch.Tensor | None = None,
-        edge_index: torch.Tensor | None = None,
+        pair_index: torch.Tensor | None = None,
         scalar_edge_features: torch.Tensor | None = None,
         n_nodes: int | None = None,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
@@ -278,7 +278,7 @@ class PolarizabilityHead(nn.Module):
             atom_features: ``(N, F)`` pooled atom features for the l=0 head.
             tensor_features: ``(E, irreps_dim)`` encoder tensor track,
                 required when ``anisotropic=True``.
-            edge_index: ``(E, 2)`` int tensor with source-target edge pairs,
+            pair_index: ``(E, 2)`` int tensor with source-target edge pairs,
                 required when ``anisotropic=True``.
             scalar_edge_features: ``(E, F)`` per-edge scalar features for
                 the l=2 readout's gate; required when ``anisotropic=True``.
@@ -293,16 +293,16 @@ class PolarizabilityHead(nn.Module):
 
         if (
             tensor_features is None
-            or edge_index is None
+            or pair_index is None
             or scalar_edge_features is None
             or n_nodes is None
         ):
             raise ValueError(
-                "anisotropic=True forward requires tensor_features, edge_index, "
+                "anisotropic=True forward requires tensor_features, pair_index, "
                 "scalar_edge_features, n_nodes."
             )
 
-        src = edge_index[:, 0]
+        src = pair_index[:, 0]
         dev_5 = _equivariant_l_readout(
             tensor_features,
             scalar_edge_features,

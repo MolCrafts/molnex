@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from molix.config import config
+from molix.core.steps.base import _mark_leaves
 
 if TYPE_CHECKING:
     from molix.core.state import TrainState
@@ -33,7 +34,7 @@ class DefaultTrainStep:
 
     Flow per micro-batch:
         1. (window start) ``optimizer.zero_grad()``
-        2. Forward (under autocast if AMP), loss, ``/= accum``
+        2. :meth:`forward_loss` (under autocast if AMP), ``/= accum``
         3. Backward (scaled by ``trainer.scaler`` under AMP)
         4. (window end) unscale → ``on_after_backward`` → optimizer step
 
@@ -46,7 +47,47 @@ class DefaultTrainStep:
     :meth:`compute_loss` is the sanctioned seam for subclasses that need a
     different *objective* while keeping this cadence byte-for-byte (see
     :class:`~molix.core.steps.multitask.MultiTaskTrainStep`).
+
+    :meth:`forward_loss` is an eager prologue plus the one region
+    :meth:`molix.core.trainer.Trainer.compile` traces (``step=True``, its
+    default), :meth:`_traced_forward_loss` — forward pass plus objective:
+    dynamo captures ``model(batch)`` and ``compute_loss`` as one graph and
+    AOTAutograd emits the backward for it, so the whole ``backward()`` below
+    runs compiled too. The prologue marks the derivative op's leaves on the
+    batch (:meth:`molix.autograd.Derivative.mark_leaves`) *before* the region,
+    so the position leaf is a graph input and a force-supervised step is one
+    graph with zero breaks on stock torch — a leaf made inside the region
+    would leak through the attached forces and break there. Everything else in
+    :meth:`on_train_batch` stays eager Python around that call: the
+    accumulation window, ``GradScaler``, ``on_after_backward`` and the
+    optimizer. The autocast context wraps the call from outside — dynamo
+    guards on the autocast state and captures the ops under it — because
+    resolving it reads :data:`molix.config.config`, which must not enter the
+    trace.
+
+    Which shipped losses trace (no tensor-valued Python control flow):
+    :func:`~molix.core.losses.energy_mse`,
+    :func:`~molix.core.losses.energy_force_mse`,
+    :class:`~molix.core.losses.MSELoss`, :class:`~molix.core.losses.MAELoss`,
+    :class:`~molix.core.losses.WeightedLoss`,
+    :class:`~molix.core.losses.ChargeMSELoss`,
+    :class:`~molix.core.losses.ScaleNormalizedLoss` and
+    :class:`~molix.core.losses.ProjectedInternalHessianLoss` (its body; the
+    Hessian it consumes is produced outside the step). Which do not — they
+    loop over ``group_ids.unique()`` with boolean-mask indexing, a
+    data-dependent shape per group:
+    :func:`~molix.core.losses.center_by_group` and everything built on it,
+    :func:`~molix.core.losses.molecule_centered_energy_mse` and
+    :class:`~molix.core.losses.TorsionProfileLoss`. A step running one of
+    those compiles the model alone (``Trainer.compile(step=False)``).
     """
+
+    #: Why :meth:`forward_loss` cannot be traced, or ``None`` when it can. A
+    #: step whose objective host-syncs declares it here (see
+    #: :class:`~molix.core.steps.multitask.MultiTaskTrainStep`) and
+    #: :meth:`~molix.core.trainer.Trainer.compile` with ``step=True`` refuses
+    #: it, quoting this text.
+    untraceable: str | None = None
 
     def compute_loss(
         self,
@@ -74,6 +115,59 @@ class DefaultTrainStep:
         """
         assert trainer.loss_fn is not None
         return trainer.loss_fn(predictions, batch)
+
+    def forward_loss(
+        self,
+        trainer: "Trainer",
+        state: "TrainState",
+        batch: Any,
+    ) -> tuple[torch.Tensor, Any]:
+        """The eager leaf prologue, then the traced body.
+
+        Marks the derivative op's leaves on ``batch`` outside any compiled
+        region (:func:`~molix.core.steps.base._mark_leaves`), then runs
+        :meth:`_traced_forward_loss` through the instance attribute — the one
+        ``Trainer.compile(step=True)`` replaces with the compiled wrapper.
+        :meth:`on_train_batch` and :meth:`~molix.core.trainer.Trainer.smoke`
+        both call this method, so smoke and training run the one graph.
+
+        Args:
+            trainer: The owning :class:`~molix.core.trainer.Trainer`
+                (provides ``model`` and ``loss_fn``).
+            state: The :class:`~molix.core.state.TrainState`, threaded to
+                :meth:`compute_loss` unchanged.
+            batch: The collated batch handed to the model.
+
+        Returns:
+            ``(loss, predictions)`` — the scalar loss to back-propagate and the
+            model output the loss was evaluated on (for a frame-writing model
+            such as :class:`~molix.autograd.Derivative`, ``batch`` itself).
+        """
+        _mark_leaves(trainer.model, batch)
+        return self._traced_forward_loss(trainer, state, batch)
+
+    def _traced_forward_loss(
+        self,
+        trainer: "Trainer",
+        state: "TrainState",
+        batch: Any,
+    ) -> tuple[torch.Tensor, Any]:
+        """Forward pass and objective: the region ``Trainer.compile`` traces.
+
+        ``predictions = trainer.model(batch)`` then :meth:`compute_loss`, and
+        nothing else — no cadence, no context, no state write, no leaf.
+
+        Args:
+            trainer: The owning :class:`~molix.core.trainer.Trainer`.
+            state: The :class:`~molix.core.state.TrainState`, threaded to
+                :meth:`compute_loss` unchanged.
+            batch: The collated batch, its variable columns already marked.
+
+        Returns:
+            ``(loss, predictions)`` as :meth:`forward_loss`.
+        """
+        predictions = trainer.model(batch)
+        return self.compute_loss(trainer, state, batch, predictions), predictions
 
     def on_train_batch(self, trainer: "Trainer", state: "TrainState", batch: Any) -> dict[str, Any]:
         """Run one training micro-batch; step the optimizer on window boundaries.
@@ -109,8 +203,7 @@ class DefaultTrainStep:
         else:
             ctx = nullcontext()
         with ctx:
-            predictions = trainer.model(batch)
-            loss = self.compute_loss(trainer, state, batch, predictions)
+            loss, predictions = self.forward_loss(trainer, state, batch)
 
         if is_window_start:
             trainer.optimizer.zero_grad()

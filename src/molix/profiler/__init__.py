@@ -6,11 +6,11 @@ Standalone, OOP profiling tools for identifying performance bottlenecks
 Five profilers, each targeting a single component:
 
 - :class:`TaskProfiler` — wall-clock timing of a single transform
-  (:class:`~molix.batch.NeighborList`, a :class:`~molix.batch.task.BatchTask`,
+  (:class:`~molix.data.NeighborList`, a :class:`~molix.data.task.BatchTask`,
   or any callable), dispatched structurally.
 
-- :class:`ModuleProfiler` — forward/backward timing and GPU memory for any
-  :class:`torch.nn.Module`.
+- :class:`ProfileSweep` / :class:`ProfileSpec` / :class:`Profiler` /
+  :class:`Report` — reproducible model and end-to-end workload measurement.
 
 - :class:`DataLoaderProfiler` — DataLoader stall-time measurement.
 
@@ -36,28 +36,23 @@ Two data generators for use when no real dataset is available:
 Typical workflow::
 
     from molix.profiler import TaskProfiler, MockSource
-    from molix.batch import NeighborList
+    from molix.neighbor import NeighborList
 
     # Profile a single task with synthetic data
     profiler = TaskProfiler(NeighborList(cutoff=5.0))
     result = profiler.run(MockSource(n_samples=500, n_atoms=(5, 20)), n_samples=100)
     result.print_report()
 
-    # Profile a model with a mock batch factory (TensorDict modules)
-    from molix.profiler import ModuleProfiler, MockBatch
+    # Profile classes with an explicit measurement protocol
+    from molix.profiler import Profiler, ProfilerConfig, ProfileSpec
 
-    profiler = ModuleProfiler(encoder, loss_fn=my_loss, device="cuda:0")
-    result = profiler.run(MockBatch(n_atoms=(32, 96), n_edges=(100, 600), n_graphs=4))
-    result.print_report()
-
-    # Profile a sub-module with arbitrary inputs (run_fn)
-    dist = torch.rand(512)
-    result = ModuleProfiler(rbf).run_fn(
-        forward_fn=lambda: rbf(dist),
-        backward_fn=lambda out: out.sum(),
-        label="edge_dist E=512",
+    spec = ProfileSpec("my-model", model_class=MyModel, dataloader_class=DataLoader)
+    config = ProfilerConfig(
+        device="cpu", warmup=10, steps=100, transfer_batch=False,
+        memory="none", activities=("cpu",), hotspot_steps=5, hotspot_limit=20,
     )
-    result.print_report()
+    report = Profiler().profile(spec, config)
+    print(report.model_dump_json(indent=2))
 
     # Profile DataLoader throughput
     from molix.profiler import DataLoaderProfiler
@@ -70,7 +65,18 @@ Typical workflow::
 from molix.profiler.dataloader import DataLoaderProfiler, DataLoaderResult
 from molix.profiler.dataset import DatasetProfiler, DatasetResult
 from molix.profiler.mock import MockBatch, MockModel, MockSource, mock_node_feature_loss
-from molix.profiler.module import ModuleProfiler, ModuleResult
+from molix.profiler.module import (
+    Hotspot,
+    Measurement,
+    Memory,
+    Profiler,
+    ProfilerConfig,
+    ProfileSpec,
+    ProfileSweep,
+    Report,
+    ReportSpec,
+    Timing,
+)
 from molix.profiler.task import TaskProfiler, TaskResult
 from molix.profiler.trainer import TrainerProfiler, TrainerResult
 
@@ -81,13 +87,21 @@ __all__ = [
     "DataLoaderResult",
     "DatasetProfiler",
     "DatasetResult",
+    "Hotspot",
+    "Measurement",
+    "Memory",
     "MockBatch",
     "MockModel",
     "MockSource",
-    "ModuleProfiler",
-    "ModuleResult",
+    "ProfileSpec",
+    "ProfileSweep",
+    "Profiler",
+    "ProfilerConfig",
+    "Report",
+    "ReportSpec",
     "TaskProfiler",
     "TaskResult",
+    "Timing",
     "TrainerProfiler",
     "TrainerResult",
     "mock_node_feature_loss",

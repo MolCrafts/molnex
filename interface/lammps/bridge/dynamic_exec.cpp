@@ -20,7 +20,7 @@ DynamicExec::DynamicExec(molnex::interface::ModelRunner* runner,
 }
 
 ModelOutputs DynamicExec::run(const at::Tensor& Z, const at::Tensor& pos_f64,
-                              const at::Tensor& edge_index,
+                              const at::Tensor& pair_index,
                               const at::Tensor& local_mask) {
   // The dtype cast the staging layer deliberately did not do: `stage_nodes`
   // keeps `pos` in fp64 so the coordinates that reach here are exactly LAMMPS'
@@ -31,7 +31,7 @@ ModelOutputs DynamicExec::run(const at::Tensor& Z, const at::Tensor& pos_f64,
   const std::vector<at::Tensor> inputs = {
       Z.to(device_),
       pos_f64.to(model_dtype_).to(device_),
-      edge_index.to(device_),
+      pair_index.to(device_),
       local_mask.to(device_),
   };
   // The atom count the per-atom energy is checked against is the one that was

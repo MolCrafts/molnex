@@ -80,6 +80,15 @@ class BackendAdapter(ABC):
         return [int(x) for x in t.detach().cpu().reshape(-1).tolist()]
 
     @staticmethod
+    def as_int_rows(t: torch.Tensor) -> list[list[int]]:
+        """``t`` ``[n_types, n_terms]`` as nested Python ints (CPU, detached).
+
+        The per-type-per-term tables (``periodicity``) keep their rows: a
+        flattened list cannot say which multiplicity belongs to which type.
+        """
+        return [[int(x) for x in row] for row in t.detach().cpu().reshape(t.shape[0], -1).tolist()]
+
+    @staticmethod
     def scaling_dict(scaling: NonbondedScaling | None) -> dict[str, float] | None:
         """Flatten the 1–2 / 1–3 / 1–4 nonbonded scales for serialization.
 
@@ -93,7 +102,7 @@ class BackendAdapter(ABC):
         per-class ``(s12, s13, s14)`` accessor
         :meth:`~molpot.ir.NonbondedScaling.as_dict` reports nested. The key
         set follows :meth:`~molpot.ir.NonbondedScaling.kinds` rather than a
-        hard-coded ``q`` / ``lj`` pair, so an interaction class a later model
+        hard-coded ``charge`` / ``lj`` pair, so an interaction class a later model
         declares — ``induced`` for a polarizable force field — is exported
         under ``scale_induced_<12|13|14>`` instead of being silently dropped.
 
@@ -103,7 +112,7 @@ class BackendAdapter(ABC):
 
         Returns:
             One ``scale_<kind>_<12|13|14>`` key per declared class —
-            ``{"scale_q_12", …, "scale_lj_14"}`` for the Class-I default —
+            ``{"scale_charge_12", …, "scale_lj_14"}`` for the Class-I default —
             → dimensionless factor, where ``0`` removes the pair and ``1``
             keeps it in full. ``None`` when ``scaling`` is ``None``, which a
             backend must treat as "no exclusion policy declared", not as "no

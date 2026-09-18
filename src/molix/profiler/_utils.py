@@ -150,29 +150,31 @@ def batch_counts(batch: object) -> tuple[int, int]:
         ``(n_atoms, n_graphs)``, or ``(0, 0)`` if the batch does not carry
         those namespaces — this is a diagnostic helper and never raises.
     """
+    if isinstance(batch, torch.Tensor):
+        return 0, 0
     try:
         n_atoms = int(batch["atoms"]["Z"].shape[0])
         n_graphs = int(batch["graphs"]["num_atoms"].shape[0])
         return n_atoms, n_graphs
-    except (KeyError, AttributeError, TypeError):
+    except (KeyError, AttributeError, IndexError, TypeError):
         return 0, 0
 
 
 def sample_counts(sample: object) -> tuple[int, int]:
-    """Extract ``(n_atoms, n_edges)`` from one **raw** flat sample dict.
+    """Extract ``(n_atoms, n_pairs)`` from one **raw** flat sample dict.
 
     Reads the pre-collate tier of the two-tier data contract: a flat
-    ``dict`` with ``sample["Z"]`` ``(N,)`` and ``sample["edge_index"]``
+    ``dict`` with ``sample["Z"]`` ``(N,)`` and ``sample["pair_index"]``
     ``(E, 2)``. The two keys are probed independently because
-    ``edge_index`` is genuinely optional — a cache packed before
-    :class:`~molix.batch.NeighborList` ran has atoms but no edges.
+    ``pair_index`` is genuinely optional — a cache packed before
+    :class:`~molix.data.NeighborList` ran has atoms but no edges.
     For the collated nested tier use :func:`batch_counts`.
 
     Args:
         sample: Raw sample, normally a flat ``dict`` of tensors.
 
     Returns:
-        ``(n_atoms, n_edges)``; a missing or malformed key contributes
+        ``(n_atoms, n_pairs)``; a missing or malformed key contributes
         ``0`` — this is a diagnostic helper and never raises.
     """
     try:
@@ -180,10 +182,10 @@ def sample_counts(sample: object) -> tuple[int, int]:
     except (KeyError, AttributeError, TypeError, IndexError):
         n_atoms = 0
     try:
-        n_edges = int(sample["edge_index"].shape[0])
+        n_pairs = int(sample["pair_index"].shape[0])
     except (KeyError, AttributeError, TypeError, IndexError):
-        n_edges = 0
-    return n_atoms, n_edges
+        n_pairs = 0
+    return n_atoms, n_pairs
 
 
 # ---------------------------------------------------------------------------

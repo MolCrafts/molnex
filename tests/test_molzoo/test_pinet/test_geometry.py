@@ -21,7 +21,7 @@ def test_edge_bond_diff_pbc_ste_grad():
     pos = torch.randn(3, 3, requires_grad=True)
     edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
     supplied = torch.randn(2, 3)
-    edges = TensorDict(edge_diff=supplied, batch_size=[2])
+    edges = TensorDict(pair_diff=supplied, batch_size=[2])
     diff = edge_bond_diff(edges, pos, edge_index)
     # value follows supplied (detached), gradient follows raw.
     torch.testing.assert_close(diff, supplied)
@@ -35,3 +35,12 @@ def test_compute_d5_shape():
     d3 = torch.nn.functional.normalize(torch.randn(5, 3), dim=-1)
     d5 = compute_d5(d3)
     assert d5.shape == (5, 5)
+
+
+def test_edge_bond_diff_trusts_a_live_supplied_diff():
+    """An ``edge_diff`` that requires grad is the head's rebuilt geometry: returned as is."""
+    pos = torch.randn(3, 3)
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    live = torch.randn(2, 3, requires_grad=True)
+    edges = TensorDict(pair_diff=live, batch_size=[2])
+    assert edge_bond_diff(edges, pos, edge_index) is live

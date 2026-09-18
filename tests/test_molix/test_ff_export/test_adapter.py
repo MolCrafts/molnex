@@ -23,9 +23,9 @@ class TestBackendAdapter:
         flat = BackendAdapter.scaling_dict(scaling)
         assert flat == expected
         assert set(flat) == {
-            "scale_q_12",
-            "scale_q_13",
-            "scale_q_14",
+            "scale_charge_12",
+            "scale_charge_13",
+            "scale_charge_14",
             "scale_lj_12",
             "scale_lj_13",
             "scale_lj_14",

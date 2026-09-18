@@ -81,19 +81,19 @@ class NonbondedScaling:
     that consumers are written against does not change.
 
     Attributes:
-        q: Coulomb (partial-charge) scales, dimensionless. Default
+        charge: Coulomb (partial-charge) scales, dimensionless. Default
             ``(0, 0, 5/6)`` — the AMBER 1–4 electrostatic factor.
         lj: Lennard-Jones scales, dimensionless. Default ``(0, 0, 0.5)``.
     """
 
-    q: ExclusionScales = ExclusionScales(0.0, 0.0, 5.0 / 6.0)
+    charge: ExclusionScales = ExclusionScales(0.0, 0.0, 5.0 / 6.0)
     lj: ExclusionScales = ExclusionScales(0.0, 0.0, 0.5)
 
     def kinds(self) -> tuple[str, ...]:
         """Return the declared interaction-class keys, in declaration order.
 
         Returns:
-            ``("q", "lj")`` — plus any class added by a later model (e.g.
+            ``("charge", "lj")`` — plus any class added by a later model (e.g.
             ``"induced"``), so consumers iterate this instead of hard-coding
             the key set.
         """
@@ -122,7 +122,7 @@ class NonbondedScaling:
         """Return the scales nested by interaction class.
 
         Returns:
-            ``{"q": {"s12": …, "s13": …, "s14": …}, "lj": {…}}``. Export
+            ``{"charge": {"s12": …, "s13": …, "s14": …}, "lj": {…}}``. Export
             adapters flatten this into their own backend key names; this type
             does not own a flat spelling.
         """

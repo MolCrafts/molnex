@@ -54,18 +54,72 @@ def _improper_index_center_first() -> torch.Tensor:
     return torch.tensor([[1], [0], [2], [3]], dtype=torch.long)
 
 
-def _single_term(*, k: float = 1.0, n: int = 1, gamma: float = 0.0, s: float = 1.0):
+def _single_term(*, k: float = 1.0, n: int = 1, gamma: float = 0.0):
     return ImproperPeriodic(
         k=torch.tensor([[k]], dtype=torch.float64),
         periodicity=torch.tensor([n], dtype=torch.long),
         phase=torch.tensor([[gamma]], dtype=torch.float64),
-        idivf=torch.tensor([s], dtype=torch.float64),
     )
 
 
 class TestImproperPeriodic:
+    def test_an_empty_table_takes_its_depth_from_the_table_width(self):
+        """The batch that assembles the container may carry no improper at all.
+
+        Depth 1 would survive here and then gather past the ladder on the next
+        batch that does bring ``n = 2`` — a CUDA index assert nowhere near the
+        cause.
+        """
+        pot = ImproperPeriodic(
+            k=torch.zeros(0, 2, dtype=torch.float64),
+            periodicity=torch.zeros(0, 2, dtype=torch.long),
+            phase=torch.zeros(0, 2, dtype=torch.float64),
+        )
+        assert pot.n_max == 2
+        later = pot(
+            pos=_perp_pos(),
+            improper_index=_improper_index_center_first(),
+            improper_types=torch.tensor([0], dtype=torch.long),
+            k=torch.ones(1, 2, dtype=torch.float64),
+            periodicity=torch.tensor([[1, 2]], dtype=torch.long),
+            phase=torch.zeros(1, 2, dtype=torch.float64),
+        )
+        assert torch.isfinite(later).all()
+
+    def test_an_empty_table_is_a_molecule_with_no_impropers(self):
+        """Zero rows is ordinary — a small molecule has no improper at all."""
+        pot = ImproperPeriodic(
+            k=torch.zeros(0, 1, dtype=torch.float64),
+            periodicity=torch.zeros(0, 1, dtype=torch.long),
+            phase=torch.zeros(0, 1, dtype=torch.float64),
+        )
+        assert pot.n_max == 1
+        energy = pot(
+            pos=_perp_pos(),
+            improper_index=torch.zeros((4, 0), dtype=torch.long),
+            improper_types=torch.zeros(0, dtype=torch.long),
+        )
+        assert float(energy) == 0.0
+
+    @pytest.mark.slow
+    def test_energy_forces_trace_as_one_graph(self):
+        """Same gate as the proper torsion: closed-form E + F is one graph."""
+        from molix.compile import Compiler
+
+        pot = _single_term(k=1.0, n=2, gamma=0.0)
+        kwargs = dict(
+            pos=_perp_pos(),
+            improper_index=_improper_index_center_first(),
+            improper_types=torch.tensor([0], dtype=torch.long),
+        )
+        pot.energy_forces(**kwargs)
+        explanation = Compiler.explain(pot.energy_forces, **kwargs)
+        assert (explanation.graph_count, explanation.graph_break_count) == (1, 0), (
+            f"break sites: {explanation.break_sites}"
+        )
+
     def test_cis_phi0_k1_gives_energy_2(self):
-        pot = _single_term(k=1.0, n=1, gamma=0.0, s=1.0)
+        pot = _single_term(k=1.0, n=1, gamma=0.0)
         e = pot(
             pos=_cis_pos(),
             improper_index=_improper_index_center_first(),
@@ -74,7 +128,7 @@ class TestImproperPeriodic:
         assert math.isclose(float(e), 2.0, rel_tol=1e-10, abs_tol=1e-10)
 
     def test_trans_phi_pi_gives_energy_0(self):
-        pot = _single_term(k=1.0, n=1, gamma=0.0, s=1.0)
+        pot = _single_term(k=1.0, n=1, gamma=0.0)
         e = pot(
             pos=_trans_pos(),
             improper_index=_improper_index_center_first(),
@@ -83,7 +137,7 @@ class TestImproperPeriodic:
         assert math.isclose(float(e), 0.0, rel_tol=1e-10, abs_tol=1e-10)
 
     def test_perp_phi_half_pi_gives_energy_1(self):
-        pot = _single_term(k=1.0, n=1, gamma=0.0, s=1.0)
+        pot = _single_term(k=1.0, n=1, gamma=0.0)
         e = pot(
             pos=_perp_pos(),
             improper_index=_improper_index_center_first(),
@@ -97,7 +151,7 @@ class TestImproperPeriodic:
         Center-first [center, i, j, k] with center=atom 1 yields the cis
         cosine golden; a silent trefoil reorder would break the energy.
         """
-        pot = _single_term(k=1.0, n=1, gamma=0.0, s=1.0)
+        pot = _single_term(k=1.0, n=1, gamma=0.0)
         index = _improper_index_center_first()
         assert int(index[0, 0]) == 1  # central atom id at row 0
         e = pot(
@@ -131,7 +185,6 @@ class TestImproperPeriodic:
             k=torch.tensor([[1.0, 0.5]], dtype=torch.float64),
             periodicity=torch.tensor([1, 2], dtype=torch.long),
             phase=torch.tensor([[0.0, 0.0]], dtype=torch.float64),
-            idivf=torch.tensor([1.0], dtype=torch.float64),
         )
         e = pot(
             pos=_cis_pos(),

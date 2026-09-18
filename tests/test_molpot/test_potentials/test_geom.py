@@ -46,7 +46,7 @@ class TestDihedralFourier:
             b2 = pos[2] - pos[1]
             b3 = pos[3] - pos[2]
             c, s = dihedral_cos_sin(b1.unsqueeze(0), b2.unsqueeze(0), b3.unsqueeze(0))
-            got.append(float(fourier_cos(c, s, n, phase)))
+            got.append(float(fourier_cos(c, s, n, phase, n_max=1)))
         assert math.isclose(got[0], 1.0, abs_tol=1e-12)  # cis cos 0
         assert math.isclose(got[1], -1.0, abs_tol=1e-12)  # trans cos π
         assert math.isclose(got[2], 0.0, abs_tol=1e-12)  # perp cos π/2

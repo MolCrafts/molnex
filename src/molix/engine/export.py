@@ -38,8 +38,8 @@ nowhere else — by :func:`_lammps_meta_block`:
 * ``species``       — sorted atomic numbers ``Z`` the model supports
 * ``model_dtype``   — ``"float32"`` / ``"float64"``; the pair style casts positions to this
 * ``inputs`` / ``outputs`` — the flat tensor names, in call order (provenance + schema
-                      checks): ``Z (N,) int64``, ``pos (N, 3)`` in Å, ``edge_index (E, 2)
-                      int64`` and ``local_mask (N,) bool``, with ``edge_mask (E_max,) bool``
+                      checks): ``Z (N,) int64``, ``pos (N, 3)`` in Å, ``pair_index (E, 2)
+                      int64`` and ``local_mask (N,) bool``, with ``pair_mask (E_max,) bool``
                       inserted before ``local_mask`` under ``"cuda-graph"``; back come
                       ``energy ()``, ``forces (N, 3)`` and ``atomic_energy (N,)``, plus
                       ``virial (6,)`` when supported — all in the model's native units.
@@ -51,7 +51,7 @@ nowhere else — by :func:`_lammps_meta_block`:
                       ``ghost cutoff >= T * cutoff + skin`` before running and refuses
                       otherwise. It cannot infer ``T`` from anything else in this block,
                       and guessing 1 would silently declare a 3-layer MACE strictly local.
-* ``requires_sorted_edges`` — whether the model needs ``edge_index`` sorted by
+* ``requires_sorted_edges`` — whether the model needs ``pair_index`` sorted by
                       ``(source, target)``. Default ``False``: scatter-class reductions are
                       permutation-invariant, so the C++ side skips a per-step sort. Models
                       using segmented / CSR aggregation must declare ``True``. The asymmetry
@@ -75,7 +75,7 @@ a pair — see ``interface/lammps/README.md``.
 **v2 → v3 is a hard break: every export produced before v3 is invalid and must be
 re-exported.** The tensor count, names and meaning all moved — an added
 ``local_mask`` input, an added ``atomic_energy`` output, ``mask`` renamed
-``edge_mask``, and the two new fields above. The C++ ``LammpsContract`` pins the
+``pair_mask``, and the two new fields above. The C++ ``LammpsContract`` pins the
 schema version and refuses anything else rather than guessing at the field set,
 so an old artifact fails loudly at load instead of running a mis-wired graph.
 
@@ -175,8 +175,8 @@ def _example_system(species: list[int], cutoff: float, dtype: torch.dtype, devic
     # at runtime. AOTInductor fixes the input stride from this trace example at
     # the graph boundary, so it MUST match the deployed caller's layout (a
     # non-contiguous example silently scrambles source/target in C++).
-    edge_index = ((dist < cutoff) & (dist > 0)).nonzero().to(torch.long).contiguous()
-    return Z, pos, edge_index
+    pair_index = ((dist < cutoff) & (dist > 0)).nonzero().to(torch.long).contiguous()
+    return Z, pos, pair_index
 
 
 def _check_partitionable(
@@ -204,7 +204,7 @@ def _check_partitionable(
        are the gradient of its reported energy. For a consistent model the two
        agree to round-off; a model that fails here would have shipped forces
        that do not conserve its own energy. An **energy-only** model (forces
-       slot ``None`` — e.g. ``PiNetPotential(compute_forces=False)``) has
+       slot ``None`` — e.g. ``PiNetPotential()`` with the default ``wrt=()``) has
        nothing to compare: the deployed forces *are* the derivative, so only
        their finiteness is asserted.
 
@@ -300,11 +300,11 @@ def _lammps_meta_block(
             precedes it — and the C++ decoder resolves output positions by this
             ``outputs`` name list rather than by a baked-in index.
         cuda_graph: Fixed-shape export → ``execution == "cuda-graph"``, an
-            ``"edge_mask"`` input before ``"local_mask"``, and the ``n_atoms`` /
+            ``"pair_mask"`` input before ``"local_mask"``, and the ``n_atoms`` /
             ``e_max`` fields.
         receptive_field_layers: ``T``, the number of message-passing layers.
             Positive int, no default; see the module docstring.
-        requires_sorted_edges: Whether the C++ side must sort ``edge_index`` by
+        requires_sorted_edges: Whether the C++ side must sort ``pair_index`` by
             ``(source, target)`` before the call. Default ``False``.
         n_atoms: Fixed atom count ``N`` (required when ``cuda_graph``).
         e_max: Fixed padded edge count (required when ``cuda_graph``).
@@ -338,9 +338,9 @@ def _lammps_meta_block(
         "species": sorted({int(z) for z in species}),
         "model_dtype": model_dtype,
         "inputs": (
-            ["Z", "pos", "edge_index", "edge_mask", "local_mask"]
+            ["Z", "pos", "pair_index", "pair_mask", "local_mask"]
             if cuda_graph
-            else ["Z", "pos", "edge_index", "local_mask"]
+            else ["Z", "pos", "pair_index", "local_mask"]
         ),
         "outputs": (
             ["energy", "forces", "atomic_energy", "virial"]
@@ -406,7 +406,7 @@ def export_for_lammps(
         units: The model's native unit system — ``"real"`` (kcal/mol, kcal/mol/Å)
             or ``"metal"`` (eV, eV/Å). The pair style converts to LAMMPS' units.
         adapter: Registered adapter name or instance translating the flat
-            ``(Z, pos, edge_index)`` convention onto the model. Default builds the
+            ``(Z, pos, pair_index)`` convention onto the model. Default builds the
             molnex nested ``TensorDict``.
         device: ``"auto"`` / ``"cuda"`` / ``"cpu"`` — selects the export target.
         dtype: Compute dtype for the exported model (default: the model's current
@@ -425,9 +425,9 @@ def export_for_lammps(
             the C++ side loads ``run_single_threaded`` and wraps in a CUDA graph
             (PyTorch #158834; ~2.9x on small systems). Requires ``n_atoms`` and
             ``e_max``; emits a 5-input model
-            ``(Z, pos, edge_index, edge_mask, local_mask)`` with a
+            ``(Z, pos, pair_index, pair_mask, local_mask)`` with a
             ``StaticForward`` wrapper (padded edges inert via over-cutoff
-            ``edge_diff``). Only the default ``molnex-tensordict`` adapter.
+            ``pair_diff``). Only the default ``molnex-tensordict`` adapter.
         receptive_field_layers: ``T``, the number of message-passing layers —
             **required, no default**. A site energy depends on everything within
             ``T * cutoff``, and the LAMMPS side must hold a ghost shell that
@@ -436,7 +436,7 @@ def export_for_lammps(
             check computed at a third of the radius it needs, which is worse
             than no check at all — hence the explicit refusal below rather than
             a plausible-looking default.
-        requires_sorted_edges: Declare that the model needs ``edge_index``
+        requires_sorted_edges: Declare that the model needs ``pair_index``
             sorted by ``(source, target)`` — true for segmented / CSR
             aggregation, false (the default) for the scatter-class reductions
             every in-tree model uses. When false the C++ side skips a per-step
@@ -580,12 +580,12 @@ def _export_cuda_graph(
     sp = sorted(set(species))
     Z = torch.tensor([sp[i % len(sp)] for i in range(n_atoms)], dtype=torch.long, device=device)
     ei = torch.randint(0, n_atoms, (e_max, 2), generator=gen, dtype=torch.long).to(device)
-    edge_mask = torch.ones(e_max, dtype=torch.bool, device=device)
+    pair_mask = torch.ones(e_max, dtype=torch.bool, device=device)
     local_mask = torch.ones(n_atoms, dtype=torch.bool, device=device)
-    _check_partitionable(wrapper, (Z, pos, ei, edge_mask), local_mask)
+    _check_partitionable(wrapper, (Z, pos, ei, pair_mask), local_mask)
     # fixed shapes → no dynamic_shapes; load run_single_threaded + CUDA graph in C++.
     Exporter(wrapper).export_pretraced(
-        (Z, pos, ei, edge_mask, local_mask), pt2_path, dynamic_shapes=None
+        (Z, pos, ei, pair_mask, local_mask), pt2_path, dynamic_shapes=None
     )
 
 
@@ -601,17 +601,17 @@ def _export_dynamic(
 ) -> None:
     """Trace the dynamic-shape 4-input ``EngineForward`` wrapper to *pt2_path*."""
     wrapper = EngineForward(model.to(device), adapter)
-    Z, pos, edge_index = _example_system(sorted(set(species)), cutoff, dtype, device)
+    Z, pos, pair_index = _example_system(sorted(set(species)), cutoff, dtype, device)
     local_mask = torch.ones(Z.shape[0], dtype=torch.bool, device=device)
-    _check_partitionable(wrapper, (Z, pos, edge_index), local_mask)
+    _check_partitionable(wrapper, (Z, pos, pair_index), local_mask)
     # N (atoms) and E (edges) vary across MD frames → mark dynamic so one .pt2
     # serves every step. min=2 dodges torch.export's 0/1-size specialization.
     n_dim = torch.export.Dim("n_atoms", min=2, max=1 << 20)
-    e_dim = torch.export.Dim("n_edges", min=1, max=1 << 24)
+    e_dim = torch.export.Dim("n_pairs", min=1, max=1 << 24)
     # local_mask is per-atom, so it rides the same dynamic dim as Z / pos.
     dynamic_shapes = ({0: n_dim}, {0: n_dim}, {0: e_dim}, {0: n_dim})
     Exporter(wrapper).export_pretraced(
-        (Z, pos, edge_index, local_mask), pt2_path, dynamic_shapes=dynamic_shapes
+        (Z, pos, pair_index, local_mask), pt2_path, dynamic_shapes=dynamic_shapes
     )
 
 

@@ -1,7 +1,6 @@
 """PiNet performance: CPU hotspots + GPU compiler×precision matrix.
 
---device cpu  : component + per-submodule forward breakdown (ModuleProfiler)
-                plus a torch.profiler CPU op-level table — where PiNet's time
+--device cpu  : workload measurement plus a torch.profiler CPU op-level table — where PiNet's time
                 goes on CPU.
 --device cuda : a {compiler} × {precision} matrix. Each cell builds a PiNet
                 variant and reports wall/step, atoms/s and launch-bound%.
@@ -21,8 +20,9 @@ import argparse
 from contextlib import nullcontext
 
 import torch
+from _profile_workload import profile_training
 
-from molix.profiler import MockBatch, ModuleProfiler
+from molix.profiler import MockBatch
 from molzoo.pinet import PiNet
 
 ATOM_TYPES = list(range(1, 8))  # cover MockBatch Z ∈ [1, 7]
@@ -47,16 +47,16 @@ def _loss(out, batch=None):
 
 
 def _factory(device: str, dtype: torch.dtype | None = None):
-    f = MockBatch(n_atoms=512, n_edges=4096, n_graphs=16, atomic_numbers=7, device=device, seed=0)
+    f = MockBatch(n_atoms=512, n_pairs=4096, n_graphs=16, atomic_numbers=7, device=device, seed=0)
     if dtype is None:
         return f
 
     def cast():
         b = f()
         b["atoms", "pos"] = b["atoms", "pos"].to(dtype)
-        if ("edges", "edge_diff") in b.keys(include_nested=True):
-            b["edges", "edge_diff"] = b["edges", "edge_diff"].to(dtype)
-            b["edges", "edge_dist"] = b["edges", "edge_dist"].to(dtype)
+        if ("pairs", "pair_diff") in b.keys(include_nested=True):
+            b["pairs", "pair_diff"] = b["pairs", "pair_diff"].to(dtype)
+            b["pairs", "pair_dist"] = b["pairs", "pair_dist"].to(dtype)
         return b
 
     return cast
@@ -73,10 +73,12 @@ def cpu_hotspots(n_steps: int) -> None:
     print(f"\n{'#' * 78}\nPiNet CPU hotspots\n{'#' * 78}")
     enc = build_pinet()
     opt = torch.optim.Adam(enc.parameters(), lr=1e-3)
-    prof = ModuleProfiler(enc, loss_fn=_loss, device="cpu", optimizer=opt)
-    prof.run(_factory("cpu"), n_steps=n_steps, n_warmup=3, submodules=True).print_report()
+    report = profile_training(
+        enc, _loss, opt, _factory("cpu"), warmup=3, steps=n_steps, device="cpu"
+    )
+    print(report.model_dump_json(indent=2))
 
-    # CPU op-level attribution (ModuleProfiler's op table is CUDA-only).
+    # CPU op-level attribution complements the structured profiler hotspots.
     enc2 = build_pinet()
     batch = _factory("cpu")()
     for _ in range(3):
@@ -141,16 +143,17 @@ def gpu_matrix(n_steps: int) -> None:
                     (model.module if isinstance(model, _AutocastWrap) else model).parameters(),
                     lr=1e-3,
                 )
-                res = ModuleProfiler(model, loss_fn=_loss, device="cuda", optimizer=opt).run(
-                    factory, n_steps=n_steps, n_warmup=15, op_rows=0
+                res = profile_training(
+                    model, _loss, opt, factory, warmup=15, steps=n_steps, device="cuda"
                 )
+                atoms_per_second = res.atoms_per_step * res.model.throughput_steps_per_sec
                 rows.append(
                     {
                         "compiler": cname,
                         "precision": precision,
-                        "wall_ms": f"{res.wall_ms_per_step:.3f}" if res.wall_ms_per_step else "n/a",
-                        "atoms/s": f"{res.throughput_atoms_per_sec:,.0f}",
-                        "lb%": f"{res.launch_bound_pct:.0f}" if res.launch_bound_pct else "n/a",
+                        "wall_ms": f"{res.model.latency.mean_ms:.3f}",
+                        "atoms/s": f"{atoms_per_second:,.0f}",
+                        "lb%": "n/a",
                     }
                 )
                 print(f"  [ok]   {label}  wall={rows[-1]['wall_ms']} ms  lb={rows[-1]['lb%']}%")

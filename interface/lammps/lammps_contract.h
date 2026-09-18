@@ -30,7 +30,7 @@
 //     it is not a model name and does not breach "no per-model C++". Its
 //     binding consumer is the impl dispatch of lammps-iface-04-facade; this
 //     header is only that pattern's first use. `fixed-graph`'s future payload
-//     is `bond_index`, a `(2, N)` COO covalent topology — never `edge_index`,
+//     is `bond_index`, a `(2, N)` COO covalent topology — never `pair_index`,
 //     the `(E, 2)` cutoff neighbour graph. CLAUDE.md gives those two objects
 //     deliberately different shapes precisely so neither can ever be silently
 //     used as the other; this header must preserve that anti-alias guard when
@@ -48,7 +48,7 @@
 //   * input `local_mask (N,) bool` — which atoms this rank owns. The exported
 //     energy is `(atomic_energy * local_mask).sum()`, so the dynamic arity goes
 //     3 -> 4.
-//   * the cuda-graph edge-validity mask is renamed `mask` -> `edge_mask`, and
+//   * the cuda-graph edge-validity mask is renamed `mask` -> `pair_mask`, and
 //     `local_mask` follows it, so that arity goes 4 -> 5. Two differently
 //     shaped booleans in one list, one called `mask` and one `local_mask`, is a
 //     mis-wiring waiting to happen.
@@ -83,7 +83,7 @@ namespace molnex::lammps {
 /// Spelled `"cutoff-graph"` / `"fixed-graph"` in meta.json. As in the header
 /// notes: the binding consumer of this dispatch pattern is the impl selection
 /// of lammps-iface-04-facade, and `fixed_graph` will carry `bond_index`, a
-/// `(2, N)` COO covalent topology — never `edge_index`, the `(E, 2)` cutoff
+/// `(2, N)` COO covalent topology — never `pair_index`, the `(E, 2)` cutoff
 /// neighbour graph.
 enum class Contract {
   cutoff_graph,  ///< Neighbour graph rebuilt every step from a cutoff radius:
@@ -164,7 +164,7 @@ E parse_enum(const std::string& value, const std::map<std::string, E>& table,
 ///     lists are a different length with a different output order, so a silent
 ///     accept would run a mis-wired graph.
 ///  2. Input arity against `execution` — 4 for `dynamic`, 5 for `cuda-graph`
-///     (the static wrapper's extra `edge_mask`). An export whose `inputs` list
+///     (the static wrapper's extra `pair_mask`). An export whose `inputs` list
 ///     lost one would otherwise fail deep inside the runtime instead of at
 ///     load.
 ///
@@ -215,7 +215,7 @@ class LammpsContract {
   /// Neighbour-list cutoff the model was exported with, in Å.
   ///
   /// Atom pairs farther apart than this contribute nothing, so the pair style
-  /// builds `edge_index` from exactly the pairs inside it.
+  /// builds `pair_index` from exactly the pairs inside it.
   double cutoff() const { return block_.get_number("cutoff"); }
 
   /// LAMMPS unit style the model's own energies are expressed in.
@@ -308,9 +308,9 @@ class LammpsContract {
   /// Names of the tensors the exported model takes, in call order.
   ///
   /// For N atoms and E edges: `Z (N,)` int64 atomic numbers, `pos (N, 3)`
-  /// positions in angstrom, `edge_index (E, 2)` int64 with column 0 the source
+  /// positions in angstrom, `pair_index (E, 2)` int64 with column 0 the source
   /// atom and column 1 the target, then — under `Execution::cuda_graph` only —
-  /// `edge_mask (E_max,)` bool marking which of the padded edge slots are real,
+  /// `pair_mask (E_max,)` bool marking which of the padded edge slots are real,
   /// and finally `local_mask (N,)` bool marking the atoms this rank owns.
   ///
   /// `local_mask` is last under both strategies, so its position differs
@@ -441,7 +441,7 @@ class LammpsContract {
     return layers;
   }
 
-  /// Whether the model needs `edge_index` sorted by `(source, target)`.
+  /// Whether the model needs `pair_index` sorted by `(source, target)`.
   ///
   /// Scatter-class reductions (`index_add_` / `scatter_add_`, which is every
   /// aggregation in this tree today) are permutation-invariant, so the builder
@@ -467,7 +467,7 @@ class LammpsContract {
   /// Fixed edge capacity E the graph was captured for (a count, no units).
   ///
   /// The caller must always pass exactly this many edge rows: the real edges
-  /// first with `edge_mask` true, the remaining slots padded and masked off
+  /// first with `pair_mask` true, the remaining slots padded and masked off
   /// (the export makes them inert by giving them an over-cutoff displacement),
   /// and it must fail loudly when the real edge count exceeds this capacity.
   ///
@@ -490,9 +490,9 @@ class LammpsContract {
   /// Must equal molix.engine.export.LAMMPS_META_SCHEMA on the writer side; the
   /// ctest that parses a generated fixture is what keeps the two in step.
   static constexpr long long kSchemaVersion = 3;
-  /// Z (N,), pos (N, 3) in angstrom, edge_index (E, 2), local_mask (N,) bool.
+  /// Z (N,), pos (N, 3) in angstrom, pair_index (E, 2), local_mask (N,) bool.
   static constexpr std::size_t kDynamicInputs = 4;
-  /// ... with edge_mask (E_max,) bool, marking the real edges among the padded
+  /// ... with pair_mask (E_max,) bool, marking the real edges among the padded
   /// slots, inserted before local_mask.
   static constexpr std::size_t kCudaGraphInputs = 5;
   static constexpr const char* kLengthUnit = "angstrom";

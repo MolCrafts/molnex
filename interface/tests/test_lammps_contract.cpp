@@ -58,8 +58,8 @@
 // units_for() looks the style up in the `energy_conv` table (unknown style →
 // throw listing every table key), asserts length_unit == "angstrom" (else
 // throw), and only then sets force = energy. Input arity is validated at
-// construction: execution "dynamic" wants 4 inputs (Z, pos, edge_index,
-// local_mask), "cuda-graph" wants 5 (edge_mask inserted before local_mask).
+// construction: execution "dynamic" wants 4 inputs (Z, pos, pair_index,
+// local_mask), "cuda-graph" wants 5 (pair_mask inserted before local_mask).
 //
 // The two v3 fields differ deliberately in their defaulting.
 // `receptive_field_layers` (T) has NO default: every model has a receptive
@@ -119,7 +119,7 @@ struct MetaFields {
   std::string energy_conv = R"({"real": 1.0, "metal": 0.0433641043})";
   std::string species = "[1, 6, 8]";
   std::string model_dtype = "float32";
-  std::string inputs = R"(["Z", "pos", "edge_index", "local_mask"])";
+  std::string inputs = R"(["Z", "pos", "pair_index", "local_mask"])";
   std::string outputs = R"(["energy", "forces", "atomic_energy", "virial"])";
   std::string adapter = "molnex-tensordict";
   std::string supports_pbc = "true";
@@ -193,7 +193,7 @@ std::string v3_meta(const MetaFields& f) {
 MetaFields cuda_graph_fields() {
   MetaFields f;
   f.execution = "cuda-graph";
-  f.inputs = R"(["Z", "pos", "edge_index", "edge_mask", "local_mask"])";
+  f.inputs = R"(["Z", "pos", "pair_index", "pair_mask", "local_mask"])";
   f.supports_pbc = "false";  // ghost count varies; the pair style refuses both
   f.extra = R"json(,
     "n_atoms": 64,
@@ -267,7 +267,7 @@ void test_contract_unknown_execution_throws() {
               "well-formed document must read execution == dynamic");
   const std::vector<std::string> inputs = ok.inputs();
   expect_int(static_cast<long long>(inputs.size()), 4, "dynamic inputs()");
-  expect_string(inputs[2], "edge_index", "dynamic inputs()[2]");
+  expect_string(inputs[2], "pair_index", "dynamic inputs()[2]");
   // local_mask is LAST and is what makes the dynamic arity 4 under v3: it marks
   // the atoms this rank owns, and the exported energy is the site-energy sum
   // over exactly those.
@@ -345,21 +345,21 @@ void test_contract_input_arity_mismatch_throws() {
   const std::vector<std::string> inputs = graphed.inputs();
   expect_int(static_cast<long long>(inputs.size()), 5, "cuda-graph inputs()");
   // The two masks are adjacent and mean entirely different things —
-  // `edge_mask (E_max,)` marks the real rows of a padded edge tensor,
+  // `pair_mask (E_max,)` marks the real rows of a padded edge tensor,
   // `local_mask (N,)` marks the atoms this rank owns. v3 renamed the former
   // from the bare `mask` precisely because two differently-shaped booleans
   // called `mask` and `local_mask` in one list is a mis-wiring waiting to
   // happen; the order here is what the C++ buffer order must match.
-  expect_string(inputs[3], "edge_mask", "cuda-graph inputs()[3]");
+  expect_string(inputs[3], "pair_mask", "cuda-graph inputs()[3]");
   expect_string(inputs[4], "local_mask", "cuda-graph inputs()[4]");
   expect_int(graphed.n_atoms(), 64, "n_atoms()");
   expect_int(graphed.e_max(), 4096, "e_max()");
 
-  // A cuda-graph export whose inputs list lost `edge_mask` would feed the
+  // A cuda-graph export whose inputs list lost `pair_mask` would feed the
   // static wrapper four tensors and only fail deep inside AOTI, so reject at
   // load.
   MetaFields bad = cuda_graph_fields();
-  bad.inputs = R"(["Z", "pos", "edge_index", "local_mask"])";
+  bad.inputs = R"(["Z", "pos", "pair_index", "local_mask"])";
   const std::string msg = expect_throws(
       [&] {
         const LammpsContract c{MetaSchema{v3_meta(bad)}};
@@ -375,7 +375,7 @@ void test_contract_input_arity_mismatch_throws() {
   // whose schema_version was hand-edited. Refused at load, not at the first
   // step.
   MetaFields short_dynamic;
-  short_dynamic.inputs = R"(["Z", "pos", "edge_index"])";
+  short_dynamic.inputs = R"(["Z", "pos", "pair_index"])";
   const std::string dyn = expect_throws(
       [&] {
         const LammpsContract c{MetaSchema{v3_meta(short_dynamic)}};

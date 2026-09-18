@@ -56,26 +56,26 @@ struct PaddedEdges {
 /// only because `mask` marks them false and the model is expected to honour it;
 /// the two outputs are meaningless apart, which is why they come back together.
 ///
-/// \param edge_index  Real edges `(ne, 2)` int64 on the CPU, as
+/// \param pair_index  Real edges `(ne, 2)` int64 on the CPU, as
 ///                    `GraphBridge::build` produced them.
 /// \param e_max       Fixed row count the export was compiled for.
 /// \returns `PaddedEdges` owning freshly allocated `(e_max, 2)` int64 edges and
-///          an `(e_max,)` bool mask; `edge_index` is neither aliased nor
+///          an `(e_max,)` bool mask; `pair_index` is neither aliased nor
 ///          modified.
 /// \throws std::runtime_error  If `ne > e_max`. Truncating instead would drop
 ///                             interactions and change the energy with no
 ///                             diagnostic — the bound is the reason a
 ///                             fixed-shape export carries `e_max` at all.
-PaddedEdges pad_edges(const at::Tensor& edge_index, int64_t e_max);
+PaddedEdges pad_edges(const at::Tensor& pair_index, int64_t e_max);
 
 /// Runs the model at fixed shapes through a captured CUDA graph.
 ///
 /// Requires the export to declare `execution = cuda-graph`, which fixes the
 /// atom count `n_fixed` and the padded edge capacity `e_max`, and to take the
-/// five inputs `(Z, pos, edge_index, edge_mask, local_mask)`.
+/// five inputs `(Z, pos, pair_index, pair_mask, local_mask)`.
 ///
 /// THE TWO MASKS ARE NOT INTERCHANGEABLE and the buffer names keep them apart:
-/// `edge_mask (e_max,)` says which padded EDGE rows are real, `local_mask
+/// `pair_mask (e_max,)` says which padded EDGE rows are real, `local_mask
 /// (n_fixed,)` says which ATOMS this rank owns. Schema v3 renamed the former
 /// from a bare `mask` for exactly this reason — two booleans of different
 /// lengths and unrelated meanings, adjacent in one input list.
@@ -106,10 +106,10 @@ class GraphedExec : public Exec {
   /// is a CPU copy of them and never the buffers themselves.
   ///
   /// \throws std::runtime_error  If `Z` does not hold exactly `n_fixed` atoms,
-  ///                             if `edge_index` holds more than `e_max` edges,
+  ///                             if `pair_index` holds more than `e_max` edges,
   ///                             or if the library was built CPU-only.
   ModelOutputs run(const at::Tensor& Z, const at::Tensor& pos_f64,
-                   const at::Tensor& edge_index,
+                   const at::Tensor& pair_index,
                    const at::Tensor& local_mask) override;
 
  private:
@@ -120,7 +120,7 @@ class GraphedExec : public Exec {
   int64_t n_fixed_;
   int64_t e_max_;
   // Persistent device inputs, DECLARED IN THE ORDER THE CAPTURE BINDS THEM:
-  // (Z, pos, edge_index, edge_mask, local_mask). The captured graph reads these
+  // (Z, pos, pair_index, pair_mask, local_mask). The captured graph reads these
   // exact addresses every replay, so they are updated in place and never
   // reassigned. `edge_maskg_` is (e_max,) and `local_maskg_` is (n_fixed,);
   // swapping them would be a shape error rather than a silent one, but the

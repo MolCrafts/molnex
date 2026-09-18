@@ -39,8 +39,12 @@ class MolRecMetricsHook(BaseHook):
             Eval scalars are still written from the beginning.
         creator_name: ``meta.creator.name`` for the Run package scaffold.
         creator_version: optional ``meta.creator.version``.
-        flush_every_n_appends: Rebuild ``index.json`` every N successful
+        flush_every_n_appends: Persist ``index.json`` every N successful
             appends (and always on train end). ``0`` means only on train end.
+        status_every_n_steps: Train-phase cadence of the ``status/`` heartbeat.
+            Each heartbeat is a read-modify-write of ``status.json``, so it is
+            throttled independently of the metric appends; eval completion and
+            train start/end always write one regardless.
     """
 
     TRAIN_NAMESPACES: tuple[str, ...] = ("train", "performance", "gpu")
@@ -55,9 +59,12 @@ class MolRecMetricsHook(BaseHook):
         creator_name: str = "molnex",
         creator_version: str | None = None,
         flush_every_n_appends: int = 50,
+        status_every_n_steps: int = 1000,
     ) -> None:
         if every_n_steps <= 0:
             raise ValueError("every_n_steps must be positive")
+        if status_every_n_steps <= 0:
+            raise ValueError("status_every_n_steps must be positive")
         if start_step < 0:
             raise ValueError("start_step must be non-negative")
         if flush_every_n_appends < 0:
@@ -69,6 +76,7 @@ class MolRecMetricsHook(BaseHook):
         self.creator_name = creator_name
         self.creator_version = creator_version
         self.flush_every_n_appends = flush_every_n_appends
+        self.status_every_n_steps = status_every_n_steps
 
         self._writer: MetricsWriter | None = None
         self._appends_since_flush = 0
@@ -117,12 +125,17 @@ class MolRecMetricsHook(BaseHook):
     def _log_namespaces(self, state: Any, namespaces: tuple[str, ...], *, stage: str) -> None:
         assert self._writer is not None
         step = int(getattr(state, "global_step", 0))
-        write_status(
-            self.record_root,
-            state="running",
-            stage=stage,
-            global_step=step,
-        )
+        # The heartbeat re-reads and rewrites status.json; on a long run that is
+        # one filesystem round trip per logged step on the training thread, so
+        # the train phase gets its own stride. Eval completions are rare enough
+        # to publish every time.
+        if stage != "train" or step % self.status_every_n_steps == 0:
+            write_status(
+                self.record_root,
+                state="running",
+                stage=stage,
+                global_step=step,
+            )
         for ns in namespaces:
             try:
                 ns_dict = state[ns]

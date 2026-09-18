@@ -99,9 +99,9 @@ class MACE(TensorDictModuleBase):
     in_keys = [
         ("atoms", "Z"),
         ("atoms", "pos"),
-        ("edges", "edge_index"),
-        ("edges", "edge_diff"),
-        ("edges", "edge_dist"),
+        ("pairs", "pair_index"),
+        ("pairs", "pair_diff"),
+        ("pairs", "pair_dist"),
     ]
     out_keys = [("atoms", "node_features")]
 
@@ -133,9 +133,9 @@ class MACE(TensorDictModuleBase):
             correlation: Body-order correlation for symmetric contraction.
             avg_num_neighbors: Average neighbor count for message normalization.
             layer_norm: Whether to apply layer normalization between layers.
-            use_fallback: Pure-torch cuEq path (default ``True``, functorch-safe
-                for ``ForceDerivation(method="functorch")``). Set ``False`` for
-                the fused kernels when forces use the autograd backend — the
+            use_fallback: Pure-torch cuEq path (default ``True``, functorch-safe).
+                Set ``False`` for the fused kernels — forces are autograd
+                everywhere (``molix.autograd.Derivative``), so they are fine, and the
                 tensor product and symmetric contraction are the encoder's two
                 hottest blocks.
         """
@@ -247,9 +247,9 @@ class MACE(TensorDictModuleBase):
             ``(n_nodes, num_interactions, num_features)`` added.
         """
         Z = td["atoms", "Z"]
-        edge_dist = td["edges", "edge_dist"]
-        edge_diff = td["edges", "edge_diff"]
-        edge_index = td["edges", "edge_index"]
+        edge_dist = td["pairs", "pair_dist"]
+        edge_diff = td["pairs", "pair_diff"]
+        edge_index = td["pairs", "pair_index"]
 
         # ---- Embedding ----
         node_feats_init, edge_attrs, edge_feats = self.embedding(

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from molzoo.mace.research import MACE
     from molzoo.mace.spec import MACESpec
     from molzoo.pinet import PiNet, PiNetSpec
+    from molzoo.rondo import Rondo, RondoForceField, RondoPotential, RondoSpec
 
 _LAZY = {
     "Allegro": "molzoo.allegro",
@@ -35,6 +36,10 @@ _LAZY = {
     "MacePotential": "molzoo.mace.potential",
     "PiNet": "molzoo.pinet",
     "PiNetSpec": "molzoo.pinet",
+    "Rondo": "molzoo.rondo",
+    "RondoForceField": "molzoo.rondo",
+    "RondoPotential": "molzoo.rondo",
+    "RondoSpec": "molzoo.rondo",
 }
 
 __all__ = [
@@ -50,6 +55,10 @@ __all__ = [
     "MacePotential",
     "PiNet",
     "PiNetSpec",
+    "Rondo",
+    "RondoForceField",
+    "RondoPotential",
+    "RondoSpec",
 ]
 
 

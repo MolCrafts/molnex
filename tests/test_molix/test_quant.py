@@ -191,8 +191,8 @@ def _tiny_potential() -> PiNetPotential:
             depth=2,
             rank=3,
             hidden_dim=16,
-            # Monomorphic since b85d12f: force derivation is fixed here.
-            compute_forces=True,
+            # Monomorphic: what is derived is fixed at construction.
+            wrt=("atoms.pos",),
         )
         .to(_DEVICE)
         .eval()
@@ -206,13 +206,13 @@ def _tiny_batch():
         device=_DEVICE,
     )
     z = torch.tensor([1, 6, 7, 8], dtype=torch.long, device=_DEVICE)
-    edge_index = torch.tensor(
+    pair_index = torch.tensor(
         [[0, 1], [1, 0], [0, 2], [2, 0], [1, 3], [3, 1], [2, 3], [3, 2]],
         dtype=torch.long,
         device=_DEVICE,
     )
     batch = torch.zeros(4, dtype=torch.long, device=_DEVICE)
-    return make_graph_batch(pos, z, edge_index, batch)
+    return make_graph_batch(pos, z, pair_index, batch)
 
 
 def test_null_control_identical_weights_zero_delta():

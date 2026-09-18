@@ -338,9 +338,9 @@ EvalResult CutoffGraphImpl::compute(const LammpsView& view) {
   // accumulates them onto view.f in LAMMPS units.
   const molnex::lammps_bridge::NodeTensors nodes =
       molnex::lammps_bridge::stage_nodes(view, *species_map_, n_graph);
-  const at::Tensor edge_index = graph_bridge_.build(view, n_graph);
+  const at::Tensor pair_index = graph_bridge_.build(view, n_graph);
   const molnex::lammps_bridge::ModelOutputs out =
-      exec_->run(nodes.Z, nodes.pos, edge_index, local_mask);
+      exec_->run(nodes.Z, nodes.pos, pair_index, local_mask);
   // Forces over ALL n_graph rows, ghosts included. A ghost's force is not a
   // by-product to be discarded: it is the derivative of LOCAL site energies
   // with respect to that ghost's coordinates, and it belongs to the atom the

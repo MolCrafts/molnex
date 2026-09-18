@@ -10,14 +10,28 @@ the **source location** of each break, as a molnex-owned
 
 Two regimes (see ``docs/molix/explanation/throughput-and-compilation.md``):
 
-* **ragged / energy-only / general** — default inductor; dynamic shapes fine.
+* **ragged / energy-only / general** — default inductor; ``dynamic=True``.
+  TensorDict batches are Python objects, so dynamo still guards leaf sizes
+  unless :func:`mark_dynamic_batch` runs on them *before* the compiled
+  region (``Compiler`` does this when ``dynamic=True``).
 * **force training on PADDED fixed shapes** — ``Compiler(cuda_graphs=True)``
   applies the benchmarked CUDA-graph preset (``reduce-overhead``): inductor
   fusion + CUDA graphs reach ~10x eager on PiNet (measured ~130 steps/s on a
   GH200). REQUIRES static shapes — register
-  :class:`molix.batch.PadMolecularBatch` and set the train loader's
+  :class:`molix.data.MoleculePadder` and set the train loader's
   ``drop_last=True``. Without static shapes inductor recompiles every step and
   ``reduce-overhead`` is *slower* than eager.
+* **energy → force seams** — :class:`Compiler` turns on
+  ``torch._dynamo.config.trace_autograd_ops`` (process-wide, off by default
+  upstream as of torch 2.15), so a ``torch.autograd.grad`` on a position leaf
+  created *inside* the traced function is one graph instead of a break at the
+  ``autograd.grad`` call. Inference (``create_graph=False``, forces returned
+  detached) is a single graph today; training, which returns the force still
+  attached to the parameters, additionally needs pytorch/pytorch#196653, and a
+  strain leaf made by ``torch.zeros(..., requires_grad=True)`` needs
+  pytorch/pytorch#196652 (both 2026-09-10, see notes topic
+  ``compile-no-graph-breaks``).
+
 * **both regimes, and AOTInductor** — :func:`register_inductor_fallbacks` keeps
   ``aten.index_add`` an extern ATen kernel, without which inductor's fused
   atomic scatter silently adds a padded-lane contribution to every scatter
@@ -113,6 +127,45 @@ def register_inductor_fallbacks() -> None:
     logger.debug("Registered inductor ATen fallback for aten.index_add / aten.index_add_")
 
 
+# COO connectivity whose *count* axis is 1, matching ``molix.data.collate.INDEX_KEYS``.
+# ``pair_index`` is ``(E, 2)`` (count axis 0); ``bond_index`` is ``(2, N)``.
+_COO_COUNT_AXIS_1: frozenset[str] = frozenset({"bond_index", "angle_index", "dihedral_index"})
+
+
+def mark_dynamic_batch(batch: object) -> None:
+    """Mark ragged TensorDict count axes so dynamo does not recompile per size.
+
+    ``torch.compile(..., dynamic=True)`` unspecs sizes of *formal tensor
+    inputs*. A nested TensorDict is a Python object; dynamo still installs a
+    guard on ``atoms.Z.shape[0]`` (and the other namespace lengths) and
+    recompiles until ``recompile_limit`` (Class-I GH200 profile 2362410:
+    ``expected 172, actual 190``). Call this on the batch *eagerly*, before
+    the compiled region — :func:`torch._dynamo.mark_dynamic` is forbidden
+    inside a traced function.
+
+    Count axis is dim 0 for atoms / edges / graphs / valence columns, and
+    dim 1 for ``bond_index``-shaped COO ``(arity, N)``.
+
+    Args:
+        batch: A TensorDict / TensorFrame, or anything else (ignored).
+    """
+    items = getattr(batch, "items", None)
+    if not callable(items):
+        return
+    try:
+        pairs = items(include_nested=True, leaves_only=True)
+    except TypeError:
+        return
+    for key, val in pairs:
+        if not torch.is_tensor(val) or val.ndim < 1:
+            continue
+        name = key[-1] if isinstance(key, tuple) else key
+        if name in _COO_COUNT_AXIS_1 and val.ndim >= 2:
+            torch._dynamo.mark_dynamic(val, 1)
+        else:
+            torch._dynamo.mark_dynamic(val, 0)
+
+
 class ExplainSummary(NamedTuple):
     """What dynamo traced, projected onto molnex-owned types.
 
@@ -182,7 +235,7 @@ class Compiler:
 
         Args:
             cuda_graphs: Apply :data:`CUDA_GRAPH_PRESET`, overriding the four
-                params below. REQUIRES static shapes (``PadMolecularBatch`` +
+                params below. REQUIRES static shapes (``MoleculePadder`` +
                 ``drop_last=True``).
             backend: Compile backend (default ``"inductor"``).
             fullgraph: Require a single graph (error on graph breaks).
@@ -208,6 +261,21 @@ class Compiler:
         self.mode = mode
         self.donated_buffer = donated_buffer
 
+    @property
+    def cuda_graphs(self) -> bool:
+        """Whether this configuration wraps the compiled graph in CUDA graphs.
+
+        True for the :data:`CUDA_GRAPH_PRESET` and for either inductor mode that
+        records and replays the graph (``reduce-overhead``, ``max-autotune``).
+        A caller that holds the compiled object across steps reads this to
+        apply the CUDA-graph step contract — call
+        ``torch.compiler.cudagraph_mark_step_begin()`` before each replay and
+        clone any output it keeps, since replayed outputs live in a static
+        memory pool the next replay overwrites — and skips both otherwise
+        (:class:`molix.md.driver.MD` does exactly this).
+        """
+        return self.backend == "inductor" and self.mode in ("reduce-overhead", "max-autotune")
+
     def __call__[T: Callable[..., Any]](self, target: T) -> T:
         """Return ``target`` compiled with this instance's configuration.
 
@@ -224,6 +292,11 @@ class Compiler:
         # still hand a later graph to inductor, and the tables must be patched
         # before the process' first lowering, not after.
         register_inductor_fallbacks()
+        # Trace ``torch.autograd.grad`` in-graph: the energy → force seam is one
+        # graph instead of a break at the ``autograd.grad`` call. Process-wide,
+        # like the fallback registration; dynamo reads it at trace time, which is
+        # the compiled wrapper's first call, not here.
+        torch._dynamo.config.trace_autograd_ops = True
         if self.donated_buffer is not None:
             torch._functorch.config.donated_buffer = self.donated_buffer
         logger.info(
@@ -232,16 +305,30 @@ class Compiler:
             f"dynamic={self.dynamic}, mode={self.mode}, "
             f"donated_buffer={self.donated_buffer}"
         )
-        return cast(
-            T,
-            torch.compile(
-                target,
-                backend=self.backend,
-                fullgraph=self.fullgraph,
-                dynamic=self.dynamic,
-                mode=self.mode,
-            ),
+        compiled = torch.compile(
+            target,
+            backend=self.backend,
+            fullgraph=self.fullgraph,
+            dynamic=self.dynamic,
+            mode=self.mode,
         )
+        # ``dynamic=True`` does not unspec TensorDict leaf sizes. An eager
+        # wrapper marks count axes so dynamo does not specialize them.
+        # Modules keep their compiled type (checkpoints / ``state_dict``);
+        # the Trainer step path compiles a bound method, which is wrapped.
+        if self.dynamic is True and not isinstance(target, torch.nn.Module):
+
+            def wrapper(*args: object, **kwargs: object) -> object:
+                for arg in args:
+                    mark_dynamic_batch(arg)
+                for arg in kwargs.values():
+                    mark_dynamic_batch(arg)
+                return compiled(*args, **kwargs)
+
+            wrapper.__qualname__ = getattr(target, "__qualname__", "compiled")
+            wrapper.__name__ = getattr(target, "__name__", "compiled")
+            return cast(T, wrapper)
+        return cast(T, compiled)
 
     @staticmethod
     def explain(target: Callable[..., Any], *args: object, **kwargs: object) -> ExplainSummary:
@@ -259,10 +346,13 @@ class Compiler:
            grepped out of a reason string.
 
         This is a ``@staticmethod``: it measures under **dynamo's default
-        configuration**, not the calling instance's ``backend`` / ``mode`` /
-        ``fullgraph``. To measure under a different backend, set it at the call
-        site. ``torch._dynamo.explain`` resets dynamo itself, before and after
-        the trace, so callers must not add their own ``reset()``.
+        configuration** plus the one flag :meth:`__call__` sets
+        (``trace_autograd_ops=True``, patched for the duration of the trace so
+        the measurement matches what a :class:`Compiler` compiles), not the
+        calling instance's ``backend`` / ``mode`` / ``fullgraph``. To measure
+        under a different backend, set it at the call site.
+        ``torch._dynamo.explain`` resets dynamo itself, before and after the
+        trace, so callers must not add their own ``reset()``.
 
         Args:
             target: Module, function or bound method to trace.
@@ -272,7 +362,8 @@ class Compiler:
         Returns:
             The projected :class:`ExplainSummary`.
         """
-        out = torch._dynamo.explain(target)(*args, **kwargs)
+        with torch._dynamo.config.patch(trace_autograd_ops=True):
+            out = torch._dynamo.explain(target)(*args, **kwargs)
         return ExplainSummary(
             graph_count=int(out.graph_count),
             graph_break_count=int(out.graph_break_count),

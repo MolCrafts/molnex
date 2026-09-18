@@ -16,7 +16,7 @@ from molpot.heads import PermMultipoleHead
 def _stub_batch(
     *,
     n_atoms: int = 4,
-    n_edges: int = 8,
+    n_pairs: int = 8,
     feat_dim: int = 8,
     total_charge: float | None = 0.0,
 ) -> TensorDict:
@@ -26,27 +26,27 @@ def _stub_batch(
     key entirely (used for the fail-fast test).
     """
     torch.manual_seed(0)
-    edge_index = torch.tensor(
+    pair_index = torch.tensor(
         [[0, 1], [1, 0], [1, 2], [2, 1], [2, 3], [3, 2], [0, 3], [3, 0]],
         dtype=torch.long,
-    )[:n_edges]
+    )[:n_pairs]
     atoms = TensorDict(
         Z=torch.tensor([1, 6, 8, 1][:n_atoms]),
         pos=torch.randn(n_atoms, 3),
         batch=torch.zeros(n_atoms, dtype=torch.long),
         batch_size=[n_atoms],
     )
-    edges = TensorDict(
-        edge_index=edge_index,
-        edge_diff=torch.randn(n_edges, 3),
-        edge_dist=torch.rand(n_edges) + 0.5,
-        batch_size=[n_edges],
+    pairs = TensorDict(
+        pair_index=pair_index,
+        pair_diff=torch.randn(n_pairs, 3),
+        pair_dist=torch.rand(n_pairs) + 0.5,
+        batch_size=[n_pairs],
     )
-    edges["edge_features"] = torch.randn(n_edges, feat_dim)
+    pairs["edge_features"] = torch.randn(n_pairs, feat_dim)
     graphs = TensorDict(num_atoms=torch.tensor([n_atoms]), batch_size=[1])
     if total_charge is not None:
         graphs["total_charge"] = torch.tensor([total_charge])
-    return TensorDict(atoms=atoms, edges=edges, graphs=graphs, batch_size=[])
+    return TensorDict(atoms=atoms, pairs=pairs, graphs=graphs, batch_size=[])
 
 
 class TestProjectionToTarget:

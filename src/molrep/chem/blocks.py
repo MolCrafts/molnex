@@ -80,6 +80,7 @@ class ChemGraphBlock(nn.Module):
         atomi: torch.Tensor,
         atomj: torch.Tensor,
         bond_type: torch.Tensor | None = None,
+        mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply one covalent hop.
 
@@ -89,6 +90,8 @@ class ChemGraphBlock(nn.Module):
             atomi: Endpoint i indices ``(E,)``.
             atomj: Endpoint j indices ``(E,)``.
             bond_type: Optional bond types ``(E,)``.
+            mask: Optional live-bond mask ``(E,)``. Dummy valence rows
+                (``MoleculePadder``) must not scatter onto ghost atoms.
 
         Returns:
             Updated ``(h_atom, h_bond)`` with the same shapes. Does not
@@ -101,6 +104,8 @@ class ChemGraphBlock(nn.Module):
             bond_type=bond_type,
             h_bond=h_bond,
         )
+        if mask is not None:
+            h_bond = h_bond * mask.to(dtype=h_bond.dtype).unsqueeze(-1)
         src = atomi.long()
         dst = atomj.long()
         n_atoms = h_atom.shape[0]

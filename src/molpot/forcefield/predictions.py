@@ -11,14 +11,14 @@ to which) by a neural model, so the whole force field is differentiable.
 
 :class:`~molpot.forcefield.Parameterizer` produces a filled
 :class:`~molpot.forcefield.ForceField`; the Class-I task losses consume a plain
-mapping keyed ``energy`` / ``forces`` / ``hessian`` / ``q`` (``q`` = per-atom partial
+mapping keyed ``energy`` / ``forces`` / ``hessian`` / ``charge`` (``charge`` = per-atom partial
 charges). This module is that one hop and nothing else — it evaluates no new
-functional form, and it owns no derivative of its own: forces come from
-:meth:`~molpot.forcefield.Potentials.calc_energy_forces` (which delegates to
-:func:`~molpot.derivation.force.autograd_forces_from_energy`), the Cartesian
+functional form, and it owns no derivative of its own: forces come from the
+assembled :class:`~molpot.forcefield.Potentials` built with
+``wrt=("atoms.pos",)`` (its :class:`molix.autograd.Derivative`), the Cartesian
 **Hessian** — the matrix of second derivatives of the energy with respect to the
 atomic coordinates, i.e. the force constants of every small distortion — from an
-**injected** :class:`~molpot.derivation.HessianDerivation`, and ``q`` is *read* from
+**injected** :class:`~molpot.derivation.HessianDerivation`, and ``charge`` is *read* from
 the ForceField the model already filled.
 
 The declared keys are fixed at construction and drive a call plan built there,
@@ -28,14 +28,14 @@ the returned dict.
 Units follow the Class-I parameter tables, which use the LAMMPS ``units="real"``
 convention (the :class:`~molpot.forcefield.ForceField` default): kcal/mol for energy,
 kcal mol⁻¹ Å⁻¹ for forces, kcal mol⁻¹ Å⁻² for the Hessian, elementary charge ``e``
-for ``q``, Å for positions.
+for ``charge``, Å for positions.
 
 Reference:
     Cartesian Hessian and its projection onto bond / angle coordinates —
     Wilson, E. B. "A Method of Obtaining the Expanded Secular Equation for the
     Vibration Frequency of a Molecule" *J. Chem. Phys.* **9**, 76 (1941).
     https://doi.org/10.1063/1.1750829
-    Electronegativity equalization, the charge model whose output ``q`` is read here —
+    Electronegativity equalization, the charge model whose output ``charge`` is read here —
     Mortier, W. J.; Ghosh, S. K.; Shankar, S. "Electronegativity-equalization
     method for the calculation of atomic charges in molecules"
     *J. Am. Chem. Soc.* **108**, 4315 (1986).
@@ -59,6 +59,7 @@ from typing import Protocol
 import torch
 from tensordict import TensorDict
 
+from molix.schema import ENERGY_KEY, FORCES_KEY, POS_KEY
 from molpot.forcefield.container import ForceField
 from molpot.forcefield.parameterizer import Parameterizer
 from molpot.forcefield.potentials import Potentials
@@ -92,7 +93,7 @@ class ForceFieldPredictions:
     ``keys`` is the task's prediction contract and is fixed at construction:
     ``__init__`` turns it into a call plan, and :meth:`__call__` walks that plan
     with exactly **one** ``model(batch)`` forward and at most one
-    ``ForceField.to_potentials()`` assembly (zero for a ``("q",)``-only task,
+    ``ForceField.to_potentials()`` assembly (zero for a ``("charge",)``-only task,
     which needs no energy at all). There is no ``keys="all"``, no default key
     set, and no method that computes everything.
 
@@ -123,7 +124,7 @@ class ForceFieldPredictions:
 
     Attributes:
         SUPPORTED_KEYS: The four predictions a task may declare —
-            ``("energy", "forces", "hessian", "q")``.
+            ``("energy", "forces", "hessian", "charge")``.
         model: The :class:`~molpot.forcefield.Parameterizer` passed at
             construction.
         keys: The declared keys in declaration order — exactly the keys
@@ -133,7 +134,7 @@ class ForceFieldPredictions:
 
     Raises:
         ValueError: ``keys`` is empty, repeats a key, or names a key outside
-            :attr:`SUPPORTED_KEYS`; ``"q"`` is declared while the model has no
+            :attr:`SUPPORTED_KEYS`; ``"charge"`` is declared while the model has no
             ``charge_model``; ``"hessian"`` is declared without a derivation.
 
     Example:
@@ -143,7 +144,7 @@ class ForceFieldPredictions:
         ['energy', 'forces']
     """
 
-    SUPPORTED_KEYS: tuple[str, ...] = ("energy", "forces", "hessian", "q")
+    SUPPORTED_KEYS: tuple[str, ...] = ("energy", "forces", "hessian", "charge")
 
     def __init__(
         self,
@@ -166,9 +167,9 @@ class ForceFieldPredictions:
                 f"unsupported prediction keys {unsupported}; "
                 f"supported keys are {self.SUPPORTED_KEYS}"
             )
-        if "q" in declared and model.charge_model is None:
+        if "charge" in declared and model.charge_model is None:
             raise ValueError(
-                'keys declares "q" but model.charge_model is None; '
+                'keys declares "charge" but model.charge_model is None; '
                 "build Parameterizer(..., charge_model=AtomicChargeModel(...))"
             )
         if "hessian" in declared and hessian_derivation is None:
@@ -191,7 +192,9 @@ class ForceFieldPredictions:
         if "hessian" in declared:
             energy_plan.append(self._put_hessian)
         self._energy_plan: tuple[_EnergyStep, ...] = tuple(energy_plan)
-        self._charge_plan: tuple[_ChargeStep, ...] = (self._put_charges,) if "q" in declared else ()
+        self._charge_plan: tuple[_ChargeStep, ...] = (
+            (self._put_charges,) if "charge" in declared else ()
+        )
         self._evaluate = self._walk_energy_plan if energy_plan else self._skip_energy_plan
 
     def __call__(self, batch: TensorDict) -> dict[str, torch.Tensor]:
@@ -207,11 +210,11 @@ class ForceFieldPredictions:
         Returns:
             Exactly the declared keys — ``energy`` ``(B,)`` (``()`` for a single
             graph) kcal/mol, ``forces`` ``(N, 3)`` kcal mol⁻¹ Å⁻¹, ``hessian``
-            ``(3N, 3N)`` kcal mol⁻¹ Å⁻², ``q`` ``(N,)`` ``e``.
+            ``(3N, 3N)`` kcal mol⁻¹ Å⁻², ``charge`` ``(N,)`` ``e``.
 
         Raises:
-            RuntimeError: ``"q"`` was declared but the filled ForceField carries
-                no ``atoms["q"]``.
+            RuntimeError: ``"charge"`` was declared but the filled ForceField carries
+                no ``atoms["charge"]``.
         """
         forcefield: ForceField = self.model(batch)
         predictions: dict[str, torch.Tensor] = {}
@@ -272,7 +275,8 @@ class ForceFieldPredictions:
             ``(N, 3)`` in kcal mol⁻¹ Å⁻¹.
         """
         forcefield: ForceField = self.model(batch)
-        return self._bound_potentials(forcefield, batch).calc_energy_forces(batch)
+        out = self._bound_potentials(forcefield, batch, wrt=(POS_KEY,))(batch)
+        return out[ENERGY_KEY], out[FORCES_KEY]
 
     def hessian(self, batch: TensorDict) -> torch.Tensor:
         """Dense Cartesian Hessian ``H_ij = ∂²E/∂x_i∂x_j`` via the injected derivation.
@@ -287,8 +291,8 @@ class ForceFieldPredictions:
         ``B = ∂q_int/∂x`` of shape ``(n_internal, 3N)``, built by
         :class:`~molpot.forcefield.WilsonBMatrix` and consumed by
         :class:`molix.core.losses.ProjectedInternalHessianLoss`. (Wilson writes those
-        internal coordinates ``q``; they are *not* the partial charges this module
-        calls ``q``.)
+        internal coordinates ``charge``; they are *not* the partial charges this module
+        calls ``charge``.)
 
         Args:
             batch: Post-collate batch with ``atoms.pos`` ``(N, 3)`` Å and the
@@ -315,7 +319,7 @@ class ForceFieldPredictions:
         *Charge equilibration* replaces fixed per-element charges by a small
         optimization: every atom gets an electronegativity ``χ`` (kcal mol⁻¹ e⁻¹, how
         strongly it pulls electrons) and a hardness ``η`` (kcal mol⁻¹ e⁻², how much it
-        resists being charged) from the graph, and the charges ``q`` (``e``) minimize
+        resists being charged) from the graph, and the charges ``charge`` (``e``) minimize
         the electrostatic model energy ``Σ_i (χ_i q_i + ½ η_i q_i²)`` (kcal/mol)
         subject to a fixed total charge ``Q`` (``e``). The minimum of that constrained
         quadratic is a linear system — the Karush–Kuhn–Tucker (KKT) conditions, the
@@ -343,7 +347,7 @@ class ForceFieldPredictions:
             Partial charges ``(N,)`` in elementary charge ``e``.
 
         Raises:
-            RuntimeError: The filled ForceField carries no ``atoms["q"]``.
+            RuntimeError: The filled ForceField carries no ``atoms["charge"]``.
         """
         forcefield: ForceField = self.model(batch)
         return self._charges(forcefield)
@@ -357,7 +361,8 @@ class ForceFieldPredictions:
         predictions: dict[str, torch.Tensor],
     ) -> None:
         """Assemble the declared Class-I terms once, then run the energy steps."""
-        potentials = self._bound_potentials(forcefield, batch)
+        wrt = (POS_KEY,) if "forces" in self.keys else ()
+        potentials = self._bound_potentials(forcefield, batch, wrt=wrt)
         for step in self._energy_plan:
             step(batch, potentials, predictions)
 
@@ -370,7 +375,9 @@ class ForceFieldPredictions:
         """No declared prediction needs an energy — assemble no Potentials."""
         del batch, forcefield, predictions
 
-    def _bound_potentials(self, forcefield: ForceField, batch: TensorDict) -> Potentials:
+    def _bound_potentials(
+        self, forcefield: ForceField, batch: TensorDict, *, wrt: tuple[tuple[str, str], ...] = ()
+    ) -> Potentials:
         """Assemble the declared terms and bind them to this batch's topology.
 
         Every energy route here goes through this one call, so the bind is the
@@ -389,11 +396,13 @@ class ForceFieldPredictions:
             forcefield: The ForceField ``model(batch)`` just filled.
             batch: The batch about to be evaluated; its topology namespaces are
                 what the table is built from.
+            wrt: The keys the assembled container differentiates against in
+                its ``forward`` — ``("atoms", "pos")`` when forces are declared.
 
         Returns:
             The assembled :class:`~molpot.forcefield.Potentials`, already bound.
         """
-        potentials = forcefield.to_potentials()
+        potentials = forcefield.to_potentials(wrt=wrt)
         potentials.bind_topology(batch)
         return potentials
 
@@ -411,7 +420,7 @@ class ForceFieldPredictions:
         potentials: Potentials,
         predictions: dict[str, torch.Tensor],
     ) -> None:
-        predictions["forces"] = potentials.calc_energy_forces(batch)[1]
+        predictions["forces"] = potentials(batch)[FORCES_KEY]
 
     def _put_energy_forces(
         self,
@@ -419,9 +428,9 @@ class ForceFieldPredictions:
         potentials: Potentials,
         predictions: dict[str, torch.Tensor],
     ) -> None:
-        energy, forces = potentials.calc_energy_forces(batch)
-        predictions["energy"] = energy
-        predictions["forces"] = forces
+        out = potentials(batch)
+        predictions["energy"] = out[ENERGY_KEY]
+        predictions["forces"] = out[FORCES_KEY]
 
     def _put_hessian(
         self,
@@ -436,25 +445,38 @@ class ForceFieldPredictions:
         forcefield: ForceField,
         predictions: dict[str, torch.Tensor],
     ) -> None:
-        predictions["q"] = self._charges(forcefield)
+        predictions["charge"] = self._charges(forcefield)
 
     def _hessian(self, batch: TensorDict, potentials: Potentials) -> torch.Tensor:
-        """Hand the injected derivation the same ``(energy_fn, pos)`` shape ForceDerivation uses."""
+        """Hand the injected derivation the same ``(energy_fn, pos)`` shape ForceDerivation uses.
+
+        The derivation's own leaf is written onto ``atoms.pos`` for the energy
+        call — the container reads positions off the batch only — and the
+        batch's own positions are put back afterwards.
+        """
         derivation = self.hessian_derivation
         if derivation is None:
             raise ValueError(
                 "hessian requires a Hessian derivation injected at construction; "
                 "pass hessian_derivation=HessianDerivation()"
             )
-        return derivation(lambda p: potentials.calc_energy(batch, pos=p), batch["atoms", "pos"])
+        pos = batch[POS_KEY]
+
+        def energy_at(leaf: torch.Tensor) -> torch.Tensor:
+            batch[POS_KEY] = leaf
+            return potentials.calc_energy(batch)
+
+        hessian = derivation(energy_at, pos)
+        batch[POS_KEY] = pos
+        return hessian
 
     def _charges(self, forcefield: ForceField) -> torch.Tensor:
-        """Read ``atoms["q"]`` off the filled ForceField — never a silent zero vector."""
+        """Read ``atoms["charge"]`` off the filled ForceField — never a silent zero vector."""
         atoms = forcefield.params("atoms")
-        q = None if atoms is None else atoms.get("q")
+        q = None if atoms is None else atoms.get("charge")
         if q is None:
             raise RuntimeError(
-                'the filled ForceField carries no atoms["q"]: the charge model wrote no '
+                'the filled ForceField carries no atoms["charge"]: the charge model wrote no '
                 "charges for this batch, so no q prediction can be made"
             )
         return q

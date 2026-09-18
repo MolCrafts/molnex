@@ -79,9 +79,6 @@ class PMECalculator(Calculator):
             method="Lagrange",
         )
         self.interpolation_nodes: int = interpolation_nodes
-        # Cache last (cell, ns) so fixed-cell MD does not rebuild k-filter every step.
-        self._cached_cell: Optional[torch.Tensor] = None
-        self._cached_ns: Optional[torch.Tensor] = None
         # Frozen mesh shape, set by :meth:`bind`; ``None`` means unbound. Three
         # Python ints, never a tensor: the mesh libraries size their grids off
         # these, and an int read off a device tensor is the host sync that
@@ -91,13 +88,11 @@ class PMECalculator(Calculator):
     def bind(self, ns_mesh: tuple[int, int, int]) -> None:
         """Freeze the FFT mesh shape, so later calls size nothing off the cell.
 
-        A bound calculator rebuilds its interpolator and k-space filter from
-        the **live** cell on every :meth:`_compute_kspace` call — at this fixed
-        shape, and without consulting the cache. That is both cheaper to trace
-        (the cache test compares the stored cell against the incoming one,
-        which reads a boolean back to the host) and more correct under a
-        barostat, where the filter has to follow the lattice for the strain
-        derivative to exist.
+        A bound calculator sizes nothing off the cell: the interpolator and
+        the k-space filter keep this shape, and build their stencil and k-grid
+        from the **live** cell on every :meth:`_compute_kspace` call — which is
+        what a barostat needs, where the filter has to follow the lattice for
+        the strain derivative to exist.
 
         Idempotent: binding the same shape twice replaces one constant with an
         equal one. The owner that sized the shape is responsible for refusing
@@ -116,13 +111,6 @@ class PMECalculator(Calculator):
         """
         self._bound_ns_mesh = (int(ns_mesh[0]), int(ns_mesh[1]), int(ns_mesh[2]))
 
-    def _mesh_cache_valid(self, cell: torch.Tensor, ns: torch.Tensor) -> bool:
-        if self._cached_cell is None or self._cached_ns is None:
-            return False
-        if self._cached_cell.device != cell.device or self._cached_ns.device != ns.device:
-            return False
-        return bool(torch.equal(self._cached_ns, ns) and torch.allclose(self._cached_cell, cell))
-
     def _compute_kspace(
         self,
         charges: torch.Tensor,
@@ -134,15 +122,18 @@ class PMECalculator(Calculator):
     ) -> torch.Tensor:
         """Compute the PME k-space contribution via FFT.
 
-        Bound (:meth:`bind`) the mesh keeps the frozen shape and is rebuilt
-        from the live cell every call; unbound it is sized off the cell and
-        rebuilt only when the cached ``(cell, ns)`` no longer matches.
+        Bound (:meth:`bind`) the mesh keeps the frozen shape; unbound it is
+        sized off the cell, a host read for eager callers only. Either way the
+        stencil and the k-space filter are built from the live cell and
+        positions on every call and passed along, never stored: the
+        interpolator and the filter hold metadata only, because a leaf-derived
+        tensor kept on a module is a leaked graph output to dynamo.
 
         Args:
             charges: Atomic charges ``(n_atoms, n_channels)`` in ``e``.
             cell: Unit cell matrix ``(3, 3)`` in Å, rows being the lattice
-                vectors. Read live: the mesh and the k-space filter are rebuilt
-                from it on every call.
+                vectors. Read live: the stencil and the k-space filter are
+                built from it on every call.
             positions: Cartesian coordinates ``(n_atoms, 3)`` in Å.
             periodic: Boolean mask ``(3,)`` of which lattice directions are
                 periodic. It selects the slab correction the potential adds
@@ -167,24 +158,24 @@ class PMECalculator(Calculator):
         if node_mask is not None or kvectors is not None:
             raise NotImplementedError("Batching not implemented for mesh-based calculators")
         bound_ns: Optional[tuple[int, int, int]] = self._bound_ns_mesh
-        if bound_ns is None:
-            ns = get_ns_mesh(cell, self.mesh_spacing)
-            if not self._mesh_cache_valid(cell, ns):
-                self.mesh_interpolator.update(cell, ns)
-                self.kspace_filter.update(cell, ns)
-                self._cached_cell = cell.detach().clone()
-                self._cached_ns = ns.detach().clone()
-        else:
-            self.mesh_interpolator.update(cell, bound_ns)
-            self.kspace_filter.update(cell, bound_ns)
+        ns = get_ns_mesh(cell, self.mesh_spacing) if bound_ns is None else bound_ns
+        # Metadata only — dtype, device, mesh shape. The cell and positions go
+        # to each call below as arguments; the stencil and the filter they
+        # yield are values that live inside this one call, never state on the
+        # interpolator or the filter (a leaf-derived tensor parked on a module
+        # is a leaked graph output to dynamo).
+        self.mesh_interpolator.update(cell, ns)
+        self.kspace_filter.update(ns)
 
-        self.mesh_interpolator.compute_weights(positions)
-        rho_mesh = self.mesh_interpolator.points_to_mesh(particle_weights=charges)
+        stencil = self.mesh_interpolator.compute_weights(positions, cell)
+        rho_mesh = self.mesh_interpolator.points_to_mesh(charges, stencil)
 
-        potential_mesh = self.kspace_filter.forward(rho_mesh)
+        potential_mesh = self.kspace_filter.forward(rho_mesh, cell)
 
         ivolume = torch.abs(cell.det()).pow(-1)
-        interpolated_potential = self.mesh_interpolator.mesh_to_points(potential_mesh) * ivolume
+        interpolated_potential = (
+            self.mesh_interpolator.mesh_to_points(potential_mesh, stencil) * ivolume
+        )
 
         interpolated_potential -= charges * self.potential.self_contribution()
 

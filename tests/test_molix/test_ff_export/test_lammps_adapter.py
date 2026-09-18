@@ -51,7 +51,9 @@ def _pair_ir(
         )
         if lj
         else None,
-        charges=ChargeBag(q=torch.tensor([0.5, -0.5], dtype=torch.float64)) if charges else None,
+        charges=ChargeBag(charge=torch.tensor([0.5, -0.5], dtype=torch.float64))
+        if charges
+        else None,
         scaling=NonbondedScaling() if scaling else None,
         nonbonded_method=record,
     )
@@ -90,7 +92,6 @@ class TestLammpsAdapter:
                 k=k,
                 periodicity=torch.tensor([1, 2, 3, 4], dtype=torch.long),
                 phase=phase,
-                idivf=torch.ones(1),
             )
         )
         spec = LammpsAdapter().translate(ir)
@@ -108,7 +109,6 @@ class TestLammpsAdapter:
                 k=torch.tensor([[0.4, 0.1]], dtype=torch.float64),
                 periodicity=torch.tensor([1, 3], dtype=torch.long),
                 phase=torch.zeros(1, 2, dtype=torch.float64),
-                idivf=torch.ones(1, dtype=torch.float64),
             )
         )
         spec = LammpsAdapter().translate(ir)

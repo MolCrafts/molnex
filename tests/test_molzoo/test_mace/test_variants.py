@@ -7,11 +7,9 @@ constructed by keyword in ``scripts/matpes_port/run_nve.py:148-164`` and
 ``mace-subpackage-restructure-06-wire`` cutover must not touch. After the
 cutover they are thin adapters — old keyword signature in, 04/05's spec presets
 and :class:`~molzoo.mace.potential.MacePotential` out — so what this file pins
-is the surface those callers bind, plus everything that is genuinely the
-variants' own: :meth:`MaceMatpes.energy_forces` /
-:meth:`MaceOmol.energy_forces` exist **only** here (``MacePotential`` has
-``forward`` and ``energy_core``), so the raw-tensor physics belongs in this
-module and not in ``test_potential.py``.
+is the surface those callers bind, plus the raw-tensor physics of the
+variants (rotation, extensivity, dead-edge padding), driven through the one
+derivative op over a batch built from those tensors by :func:`energy_forces`.
 
 The load-bearing oddity is ``_compute_energy``: a **private** method consumed
 across packages (``run_nve.py:118`` binds it as the compiled energy core,
@@ -44,6 +42,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from molix.autograd import Derivative
 from molzoo.mace.checkpoint import CheckpointRemap, matpes_keys, omol_keys
 from molzoo.mace.potential import MaceMatpes, MaceOmol, MacePotential
 from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec
@@ -88,9 +87,10 @@ ALIEN_CHECKPOINT: dict[str, torch.Tensor] = {"not.a.mace.key": torch.zeros(1)}
 #: form are one code path, so their energies must agree *bitwise*, not closely.
 EXACT = 0.0
 
-#: ``forward(batch)`` (batch schema, shared force kernel) against
-#: ``energy_forces(...)`` (raw tensors, own position leaf) — two code paths on
-#: one energy. Criteria carried over verbatim from the flat test files.
+#: ``forward(batch)`` (the construction-time op) against a fresh
+#: ``Derivative`` composed over the same model on a batch built from raw
+#: tensors — the two spellings of one op on one energy. Criteria carried over
+#: verbatim from the flat test files.
 FORWARD_ENERGY_ATOL = 1e-9  # eV
 FORWARD_FORCE_ATOL = 1e-8  # eV/Å
 
@@ -137,6 +137,39 @@ PERTURBATION = 0.05
 PERTURBATION_SEED = 7
 
 
+def energy_forces(
+    model: MacePotential,
+    pos: torch.Tensor,
+    Z: torch.Tensor,
+    edge_index: torch.Tensor,
+    batch: torch.Tensor,
+    *,
+    num_graphs: int | None = None,
+    edge_diff: torch.Tensor | None = None,
+    total_charge: torch.Tensor | None = None,
+    total_spin: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    """``{"energy", "forces"}`` of ``model`` on raw tensors, through one composed op.
+
+    The batch is built here in the post-collate layout and
+    ``Derivative(model, wrt=("atoms.pos",))`` runs on it — the same op
+    ``model.forward`` is, composed outside. ``edge_diff`` overrides the
+    displacement the builder derives from ``pos``.
+    """
+    del num_graphs  # the batch vector fixes B
+    graphs: dict[str, torch.Tensor] = {}
+    if total_charge is not None:
+        graphs["total_charge"] = total_charge
+    if total_spin is not None:
+        graphs["total_spin"] = total_spin
+    frame = make_graph_batch(pos, Z, edge_index, batch, graphs=graphs or None)
+    if edge_diff is not None:
+        frame["pairs", "pair_diff"] = edge_diff
+        frame["pairs", "pair_dist"] = edge_diff.norm(dim=-1)
+    Derivative(model, wrt=("atoms.pos",))(frame)
+    return {"energy": frame["graphs", "energy"], "forces": frame["atoms", "forces"]}
+
+
 def _rotation_z(angle: float) -> torch.Tensor:
     """Right-handed rotation about ``z`` by ``angle`` rad, fp64."""
     c, s = math.cos(angle), math.sin(angle)
@@ -170,7 +203,7 @@ def charged_omol_cluster() -> TensorDict:
     return make_graph_batch(
         pos=torch.tensor(CLUSTER_POS, dtype=torch.float64),
         Z=torch.tensor(CLUSTER_Z, dtype=torch.long),
-        edge_index=full_edge_index(SINGLE_GRAPH),
+        pair_index=full_edge_index(SINGLE_GRAPH),
         batch=torch.zeros(len(CLUSTER_Z), dtype=torch.long),
         graphs={
             "total_charge": torch.tensor([CHARGED_TOTAL_CHARGE], dtype=torch.long),
@@ -210,10 +243,10 @@ class TestMaceMatpes:
             direct = matpes_variant.energy_core(
                 cluster["atoms", "pos"],
                 cluster["atoms", "Z"],
-                cluster["edges", "edge_index"],
+                cluster["pairs", "pair_index"],
                 cluster["atoms", "batch"],
                 1,
-                edge_diff=cluster["edges", "edge_diff"],
+                edge_diff=cluster["pairs", "pair_diff"],
             )
         energy = matpes_variant(cluster)["graphs", "energy"]
         assert float((energy - direct).abs().max()) == EXACT
@@ -237,8 +270,8 @@ class TestMaceMatpes:
         """A rigid rotation leaves the energy unchanged (O(3) invariance)."""
         pos, Z, edge_index, batch, _ = raw_tensors(cluster)
         rotation = _rotation_z(ROTATION_Z)
-        base = matpes_variant.energy_forces(pos, Z, edge_index, batch, num_graphs=1)
-        turned = matpes_variant.energy_forces(pos @ rotation.T, Z, edge_index, batch, num_graphs=1)
+        base = energy_forces(matpes_variant, pos, Z, edge_index, batch, num_graphs=1)
+        turned = energy_forces(matpes_variant, pos @ rotation.T, Z, edge_index, batch, num_graphs=1)
         assert torch.allclose(base["energy"], turned["energy"], atol=FORWARD_ENERGY_ATOL, rtol=0)
 
     def test_forces_rotate_with_the_system(
@@ -247,16 +280,16 @@ class TestMaceMatpes:
         """Forces are equivariant: F(Rx) = R F(x)."""
         pos, Z, edge_index, batch, _ = raw_tensors(cluster)
         rotation = _rotation_x(ROTATION_X)
-        base = matpes_variant.energy_forces(pos, Z, edge_index, batch, num_graphs=1)["forces"]
-        turned = matpes_variant.energy_forces(pos @ rotation.T, Z, edge_index, batch, num_graphs=1)[
-            "forces"
-        ]
+        base = energy_forces(matpes_variant, pos, Z, edge_index, batch, num_graphs=1)["forces"]
+        turned = energy_forces(
+            matpes_variant, pos @ rotation.T, Z, edge_index, batch, num_graphs=1
+        )["forces"]
         assert torch.allclose(turned, base @ rotation.T, atol=FORWARD_FORCE_ATOL, rtol=0)
 
     def test_batched_graphs(self, matpes_variant: MaceMatpes, pair_batch: TensorDict) -> None:
         """Two clusters in one batch: per-graph energies, correct atom routing."""
         pos, Z, edge_index, batch, num_graphs = raw_tensors(pair_batch)
-        reference = matpes_variant.energy_forces(pos, Z, edge_index, batch, num_graphs=num_graphs)
+        reference = energy_forces(matpes_variant, pos, Z, edge_index, batch, num_graphs=num_graphs)
         out = matpes_variant.forward(pair_batch)
         assert out["graphs", "energy"].shape == (2,)
         assert torch.allclose(
@@ -269,8 +302,9 @@ class TestMaceMatpes:
         """Two non-interacting copies carry twice one copy's energy."""
         pos, Z, edge_index, batch, _ = raw_tensors(cluster)
         n_atoms = len(CLUSTER_Z)
-        one = matpes_variant.energy_forces(pos, Z, edge_index, batch, num_graphs=1)["energy"]
-        pair = matpes_variant.energy_forces(
+        one = energy_forces(matpes_variant, pos, Z, edge_index, batch, num_graphs=1)["energy"]
+        pair = energy_forces(
+            matpes_variant,
             torch.cat([pos, pos]),
             torch.cat([Z, Z]),
             torch.cat([edge_index, edge_index + n_atoms], dim=0),
@@ -328,15 +362,15 @@ class TestMaceMatpes:
         outs = []
         for factor in PBC_CAPACITY_FACTORS:
             nl = NeighborList(cell=cell, cutoff=PBC_CUTOFF, positions=pos, capacity_factor=factor)
-            edge_diff = pos[nl.edge_index[:, 1]] - pos[nl.edge_index[:, 0]] + nl.shifts
-            out = matpes_variant.energy_forces(
-                pos, Z, nl.edge_index, batch, num_graphs=1, edge_diff=edge_diff
+            edge_diff = pos[nl.pair_index[:, 1]] - pos[nl.pair_index[:, 0]] + nl.shifts
+            out = energy_forces(
+                matpes_variant, pos, Z, nl.pair_index, batch, num_graphs=1, edge_diff=edge_diff
             )
             outs.append((nl, out))
 
         (nl_a, a), (nl_b, b) = outs
         assert nl_b.capacity > nl_a.capacity  # the padded arm really is padded
-        assert nl_a.num_edges == nl_b.num_edges
+        assert nl_a.num_pairs == nl_b.num_pairs
         assert torch.equal(a["energy"], b["energy"])
         assert torch.equal(a["forces"], b["forces"])
 
@@ -356,18 +390,19 @@ class TestMaceMatpes:
             positions=pos,
             capacity_factor=REBUILD_CAPACITY_FACTOR,
         )
-        edge_diff = pos[nl.edge_index[:, 1]] - pos[nl.edge_index[:, 0]] + nl.shifts
-        before = matpes_variant.energy_forces(
-            pos, Z, nl.edge_index, batch, num_graphs=1, edge_diff=edge_diff
+        edge_diff = pos[nl.pair_index[:, 1]] - pos[nl.pair_index[:, 0]] + nl.shifts
+        before = energy_forces(
+            matpes_variant, pos, Z, nl.pair_index, batch, num_graphs=1, edge_diff=edge_diff
         )["energy"].clone()
         nl.rebuild(pos)
-        after = matpes_variant.energy_forces(
+        after = energy_forces(
+            matpes_variant,
             pos,
             Z,
-            nl.edge_index,
+            nl.pair_index,
             batch,
             num_graphs=1,
-            edge_diff=pos[nl.edge_index[:, 1]] - pos[nl.edge_index[:, 0]] + nl.shifts,
+            edge_diff=pos[nl.pair_index[:, 1]] - pos[nl.pair_index[:, 0]] + nl.shifts,
         )["energy"]
         assert torch.equal(before, after)
 
@@ -414,8 +449,8 @@ class TestMaceOmol:
         # embedding).
         charge = torch.zeros(1, dtype=torch.long)
         spin = torch.ones(1, dtype=torch.long)
-        reference = omol_variant.energy_forces(
-            pos, Z, edge_index, batch, total_charge=charge, total_spin=spin
+        reference = energy_forces(
+            omol_variant, pos, Z, edge_index, batch, total_charge=charge, total_spin=spin
         )
         out = omol_variant.forward(cluster)
         assert torch.allclose(
@@ -448,8 +483,14 @@ class TestMaceOmol:
 
         _perturb(omol_variant)
         omol_variant.zero_grad(set_to_none=True)
-        forces = omol_variant.energy_forces(
-            pos, Z, edge_index, batch, total_charge=total_charge, total_spin=total_spin
+        forces = energy_forces(
+            omol_variant,
+            pos,
+            Z,
+            edge_index,
+            batch,
+            total_charge=total_charge,
+            total_spin=total_spin,
         )["forces"]
         assert forces.abs().max() > 0.0, "perturbed model still produces zero forces"
 
@@ -466,10 +507,10 @@ class TestMaceOmol:
     ) -> None:
         """The molnex-pipeline ``forward`` also unlocks force-supervised training.
 
-        ``forward`` derives forces through the shared batch-level force kernel
-        (``molpot.derivation.kernels``) rather than the variant's own
-        ``energy_forces`` leaf, so it is a second path that must stay connected
-        to the parameters. Before the port it raised ``setup_context`` because
+        ``forward`` derives forces through the potential's own
+        ``molix.autograd.Derivative``, the op :func:`energy_forces` composes
+        outside, so it must stay connected to the parameters. Before the port
+        it raised ``setup_context`` because
         ``torch.func.grad`` cannot trace cuEquivariance's fused custom ops; see
         spec ``cuet-force-doublebackward`` Resolution (run 3).
         """
@@ -490,7 +531,8 @@ class TestMaceOmol:
     def test_batched_graphs(self, omol_variant: MaceOmol, omol_pair_batch: TensorDict) -> None:
         """Two molecules in one batch: per-graph energies, correct atom routing."""
         pos, Z, edge_index, batch, _ = raw_tensors(omol_pair_batch)
-        reference = omol_variant.energy_forces(
+        reference = energy_forces(
+            omol_variant,
             pos,
             Z,
             edge_index,

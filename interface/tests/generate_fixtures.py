@@ -17,8 +17,8 @@ the device based on what's present. `model_graph_fixed_v3_cuda` is emitted only
 alongside the CUDA exports: it exists for the CUDA-graph replay case, which has
 nothing to run on without a GPU.
 
-The graph fixtures are schema v3 throughout — `(Z, pos, edge_index, local_mask)
--> (energy, forces, atomic_energy)` on the dynamic path, with `edge_mask`
+The graph fixtures are schema v3 throughout — `(Z, pos, pair_index, local_mask)
+-> (energy, forces, atomic_energy)` on the dynamic path, with `pair_mask`
 inserted before `local_mask` on the fixed-shape one. The three-input v2
 ``GraphToy`` that used to be emitted here is gone: the C++ batch of spec
 ``lammps-iface-05-pbc`` moved its last consumer (``Exec::run``, which now takes
@@ -57,7 +57,7 @@ class TinyLinear(nn.Module):
 def _graph_site_energies(
     Z: torch.Tensor,
     pos: torch.Tensor,
-    edge_index: torch.Tensor,
+    pair_index: torch.Tensor,
     edge_weight: torch.Tensor,
     local_mask: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -74,8 +74,8 @@ def _graph_site_energies(
         E_i = Z_i |x_i|^2 + \\tfrac{1}{2}\\sum_{e \\ni i} w_e |d_e|^2, \\qquad
         E = \\sum_i m_i E_i
 
-    with :math:`d_e = x_{t(e)} - x_{s(e)}`, ``edge_index[:, 0] = s`` the source
-    and ``edge_index[:, 1] = t`` the target per the repo Edge Convention, and
+    with :math:`d_e = x_{t(e)} - x_{s(e)}`, ``pair_index[:, 0] = s`` the source
+    and ``pair_index[:, 1] = t`` the target per the repo Edge Convention, and
     :math:`m` the local mask. At an all-ones mask the edge halves regroup
     pairwise and ``E`` reduces to :math:`\\sum_i Z_i |x_i|^2 + \\sum_e w_e
     |d_e|^2`, the undecomposed total.
@@ -105,7 +105,7 @@ def _graph_site_energies(
     Args:
         Z: Atomic numbers ``(n,)`` int64.
         pos: Positions ``(n, 3)``.
-        edge_index: Source/target pairs ``(e, 2)`` int64.
+        pair_index: Source/target pairs ``(e, 2)`` int64.
         edge_weight: Per-edge weight ``(e,)``, in ``pos``'s dtype. 1 for a real
             edge, 0 for a padding row — which is what makes the fixed-shape
             variant agree with the dynamic one edge for edge.
@@ -114,8 +114,8 @@ def _graph_site_energies(
     Returns:
         ``(energy, forces, atomic_energy)`` — a 0-dim scalar, ``(n, 3)``, ``(n,)``.
     """
-    source = edge_index[:, 0]
-    target = edge_index[:, 1]
+    source = pair_index[:, 0]
+    target = pair_index[:, 1]
     diff = pos.index_select(0, target) - pos.index_select(0, source)  # (e, 3)
     z_f = Z.to(pos.dtype)  # (n,)
     mask_f = local_mask.to(pos.dtype)  # (n,)
@@ -137,7 +137,7 @@ def _graph_site_energies(
 class GraphToyV3(nn.Module):
     """Four-input schema-v3 potential.
 
-    ``(Z, pos, edge_index, local_mask) -> (energy, forces, atomic_energy)`` —
+    ``(Z, pos, pair_index, local_mask) -> (energy, forces, atomic_energy)`` —
     the signature the ``cutoff-graph`` contract's dynamic execution path uses
     from spec ``lammps-iface-05-pbc`` on, where the energy is the site-energy
     sum over locally owned atoms only. Parameter-free and closed-form: nothing
@@ -149,18 +149,18 @@ class GraphToyV3(nn.Module):
         self,
         Z: torch.Tensor,
         pos: torch.Tensor,
-        edge_index: torch.Tensor,
+        pair_index: torch.Tensor,
         local_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        weight = torch.ones(edge_index.shape[0], dtype=pos.dtype, device=pos.device)
-        return _graph_site_energies(Z, pos, edge_index, weight, local_mask)
+        weight = torch.ones(pair_index.shape[0], dtype=pos.dtype, device=pos.device)
+        return _graph_site_energies(Z, pos, pair_index, weight, local_mask)
 
 
 class GraphToyMaskedV3(nn.Module):
-    """Five-input fixed-shape variant: ``(Z, pos, edge_index, edge_mask, local_mask)``.
+    """Five-input fixed-shape variant: ``(Z, pos, pair_index, pair_mask, local_mask)``.
 
     The signature the ``cuda-graph`` execution path replays under schema v3. The
-    two masks are unrelated and differently shaped: ``edge_mask (e_max,)`` marks
+    two masks are unrelated and differently shaped: ``pair_mask (e_max,)`` marks
     the real rows of an edge tensor padded out to ``e_max``, while
     ``local_mask (n,)`` marks the atoms the rank owns. Padding rows are ``(0, 0)``
     and weigh 0, so the outputs are identical to what :class:`GraphToyV3`
@@ -172,11 +172,11 @@ class GraphToyMaskedV3(nn.Module):
         self,
         Z: torch.Tensor,
         pos: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_mask: torch.Tensor,
+        pair_index: torch.Tensor,
+        pair_mask: torch.Tensor,
         local_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return _graph_site_energies(Z, pos, edge_index, edge_mask.to(pos.dtype), local_mask)
+        return _graph_site_energies(Z, pos, pair_index, pair_mask.to(pos.dtype), local_mask)
 
 
 def _export_with_runtime_constants(
@@ -293,19 +293,19 @@ def _emit_graph_v3_fixture(out_dir: Path, device: str) -> None:
 
     Z = torch.tensor(_GRAPH_Z, dtype=torch.int64, device=device)
     pos = torch.tensor(_GRAPH_POS, dtype=torch.float64, device=device)
-    edge_index = torch.tensor(_GRAPH_EDGES, dtype=torch.int64, device=device)
+    pair_index = torch.tensor(_GRAPH_EDGES, dtype=torch.int64, device=device)
     local_mask = torch.ones(len(_GRAPH_Z), dtype=torch.bool, device=device)
 
     model = GraphToyV3().to(device).eval()
     with torch.no_grad():
-        energy, forces, atomic_energy = model(Z, pos, edge_index, local_mask)
+        energy, forces, atomic_energy = model(Z, pos, pair_index, local_mask)
 
     n_atoms = torch.export.Dim("n_atoms", min=2, max=4096)
-    n_edges = torch.export.Dim("n_edges", min=2, max=65536)
+    n_pairs = torch.export.Dim("n_pairs", min=2, max=65536)
     Exporter(model).export(
-        (Z, pos, edge_index, local_mask),
+        (Z, pos, pair_index, local_mask),
         model_dir / "model.pt2",
-        dynamic_shapes=({0: n_atoms}, {0: n_atoms}, {0: n_edges}, {0: n_atoms}),
+        dynamic_shapes=({0: n_atoms}, {0: n_atoms}, {0: n_pairs}, {0: n_atoms}),
     )
     (model_dir / "model.meta.json").write_text(
         json.dumps({"device": device, "model_class": "GraphToyV3"}, indent=2)
@@ -315,7 +315,7 @@ def _emit_graph_v3_fixture(out_dir: Path, device: str) -> None:
         {
             "Z": Z,
             "pos": pos,
-            "edge_index": edge_index,
+            "pair_index": pair_index,
             "local_mask": local_mask,
             "energy": energy,
             "forces": forces,
@@ -335,7 +335,7 @@ def _emit_graph_fixed_v3_fixture(out_dir: Path, device: str) -> None:
     otherwise.
 
     The input order is the schema-v3 ``cuda-graph`` one,
-    ``(Z, pos, edge_index, edge_mask, local_mask)``, which is also the order
+    ``(Z, pos, pair_index, pair_mask, local_mask)``, which is also the order
     ``GraphedExec`` binds its persistent buffers in. The two lists must agree:
     the mask lengths differ (``e_max`` against ``n``), so a swap is a shape
     error at replay rather than a silent one, but only because the shapes happen
@@ -352,14 +352,14 @@ def _emit_graph_fixed_v3_fixture(out_dir: Path, device: str) -> None:
 
     Z = torch.tensor(_GRAPH_Z, dtype=torch.int64, device=device)
     pos = torch.tensor(_GRAPH_POS, dtype=torch.float64, device=device)
-    edges = torch.zeros((_GRAPH_E_MAX, 2), dtype=torch.int64, device=device)
-    edges[: len(_GRAPH_EDGES)] = torch.tensor(_GRAPH_EDGES, dtype=torch.int64, device=device)
-    edge_mask = torch.zeros(_GRAPH_E_MAX, dtype=torch.bool, device=device)
-    edge_mask[: len(_GRAPH_EDGES)] = True
+    pairs = torch.zeros((_GRAPH_E_MAX, 2), dtype=torch.int64, device=device)
+    pairs[: len(_GRAPH_EDGES)] = torch.tensor(_GRAPH_EDGES, dtype=torch.int64, device=device)
+    pair_mask = torch.zeros(_GRAPH_E_MAX, dtype=torch.bool, device=device)
+    pair_mask[: len(_GRAPH_EDGES)] = True
     local_mask = torch.ones(len(_GRAPH_Z), dtype=torch.bool, device=device)
 
     model = GraphToyMaskedV3().to(device).eval()
-    Exporter(model).export((Z, pos, edges, edge_mask, local_mask), model_dir / "model.pt2")
+    Exporter(model).export((Z, pos, pairs, pair_mask, local_mask), model_dir / "model.pt2")
     (model_dir / "model.meta.json").write_text(
         json.dumps({"device": device, "model_class": "GraphToyMaskedV3"}, indent=2)
     )

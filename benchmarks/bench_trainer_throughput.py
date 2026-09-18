@@ -1,8 +1,7 @@
 """Trainer-throughput benchmark: model fwd/bwd/opt + end-to-end Trainer loop.
 
 Measures the per-step compute that dominates training throughput, on CPU and
-GPU, using ``molix.profiler.ModuleProfiler`` (CUDA-event timing, peak memory,
-real GPU-active time via ``torch.profiler``) plus a real ``Trainer.train()``
+GPU, using the public profiler workload contract plus a real ``Trainer.train()``
 loop over mock data for the end-to-end steps/sec (data + hooks + Step protocol).
 
 Run:
@@ -20,15 +19,16 @@ import argparse
 import time
 
 import torch
+from _profile_workload import profile_training
 
-from molix.profiler import MockBatch, ModuleProfiler
+from molix.profiler import MockBatch
 from molrep.embedding.node import DiscreteEmbeddingSpec
 from molzoo.mace import MACE
 
 SIZES = {
-    "small": {"n_atoms": 64, "n_edges": 256, "n_graphs": 4},
-    "medium": {"n_atoms": 512, "n_edges": 4096, "n_graphs": 16},
-    "large": {"n_atoms": 2048, "n_edges": 16384, "n_graphs": 64},
+    "small": {"n_atoms": 64, "n_pairs": 256, "n_graphs": 4},
+    "medium": {"n_atoms": 512, "n_pairs": 4096, "n_graphs": 16},
+    "large": {"n_atoms": 2048, "n_pairs": 16384, "n_graphs": 64},
 }
 
 
@@ -52,24 +52,25 @@ def _loss(output, batch=None):
 
 
 def bench_module(device: str, n_steps: int) -> None:
-    """ModuleProfiler over each size: fwd/bwd/opt, throughput, peak mem."""
-    print(f"\n{'=' * 78}\nModuleProfiler — MACE fwd+bwd+opt on {device}\n{'=' * 78}")
+    """Profile a complete MACE training workload over each input size."""
+    print(f"\n{'=' * 78}\nProfiler — MACE fwd+bwd+opt on {device}\n{'=' * 78}")
     for name, dims in SIZES.items():
         model = build_model().to(device)
         opt = torch.optim.Adam(model.parameters(), lr=1e-3)
         factory = MockBatch(
             n_atoms=dims["n_atoms"],
-            n_edges=dims["n_edges"],
+            n_pairs=dims["n_pairs"],
             n_graphs=dims["n_graphs"],
             atomic_numbers=7,
             device=device,
             seed=0,
         )
-        prof = ModuleProfiler(model, loss_fn=_loss, device=device, optimizer=opt)
         warmup = 5 if device == "cpu" else 10
-        result = prof.run(factory, n_steps=n_steps, n_warmup=warmup)
+        result = profile_training(
+            model, _loss, opt, factory, warmup=warmup, steps=n_steps, device=device
+        )
         print(f"\n--- size={name} {dims} ---")
-        result.print_report()
+        print(result.model_dump_json(indent=2))
 
 
 def bench_trainer_loop(device: str, n_steps: int) -> None:
@@ -81,7 +82,7 @@ def bench_trainer_loop(device: str, n_steps: int) -> None:
     dims = SIZES["medium"]
     factory = MockBatch(
         n_atoms=dims["n_atoms"],
-        n_edges=dims["n_edges"],
+        n_pairs=dims["n_pairs"],
         n_graphs=dims["n_graphs"],
         atomic_numbers=7,
         device=device,

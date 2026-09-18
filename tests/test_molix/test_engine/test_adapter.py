@@ -4,7 +4,7 @@ The adapter layer is the Python-side shim that maps the flat LAMMPS convention
 onto a model's real input/output shapes. Schema v3 (spec
 ``lammps-iface-05-pbc``) changes that convention to
 
-    (Z, pos, edge_index, local_mask) -> (energy, forces, atomic_energy)
+    (Z, pos, pair_index, local_mask) -> (energy, forces, atomic_energy)
 
 because a domain-decomposed run must sum **only local** site energies
 (``E⁽ᵖ⁾ = Σ_{i∈L} E_i``, D1): a scalar total is not partitionable, so the
@@ -50,25 +50,25 @@ def test_unknown_adapter_raises():
 
 
 def test_tensordict_adapter_edge_convention(graph):
-    """edge_diff = pos[target] - pos[source]; single-graph batch metadata."""
-    from molix.schema import EDGE_DIST_CLAMP_MIN
+    """pair_diff = pos[target] - pos[source]; single-graph batch metadata."""
+    from molix.schema import PAIR_DIST_CLAMP_MIN
 
-    Z, pos, edge_index = graph
-    batch = MolnexTensorDictAdapter().build_inputs(_DummyTDPotential(), Z, pos, edge_index)
-    expected = pos[edge_index[:, 1]] - pos[edge_index[:, 0]]
-    assert torch.allclose(batch["edges", "edge_diff"], expected)
+    Z, pos, pair_index = graph
+    batch = MolnexTensorDictAdapter().build_inputs(_DummyTDPotential(), Z, pos, pair_index)
+    expected = pos[pair_index[:, 1]] - pos[pair_index[:, 0]]
+    assert torch.allclose(batch["pairs", "pair_diff"], expected)
     assert torch.allclose(
-        batch["edges", "edge_dist"], expected.norm(dim=-1).clamp(min=EDGE_DIST_CLAMP_MIN)
+        batch["pairs", "pair_dist"], expected.norm(dim=-1).clamp(min=PAIR_DIST_CLAMP_MIN)
     )
     assert (batch["atoms", "batch"] == 0).all()
     assert batch["graphs", "num_atoms"].item() == 3
 
 
 def test_lammps_forward_shapes_tensordict(graph):
-    Z, pos, edge_index = graph
+    Z, pos, pair_index = graph
     local_mask = torch.ones(3, dtype=torch.bool)
     e, f, ea = EngineForward(_DummyTDPotential(), "molnex-tensordict")(
-        Z, pos, edge_index, local_mask
+        Z, pos, pair_index, local_mask
     )
     assert e.shape == ()  # scalar partition energy
     assert f.shape == (3, 3)
@@ -76,9 +76,9 @@ def test_lammps_forward_shapes_tensordict(graph):
 
 
 def test_lammps_forward_shapes_flat(graph):
-    Z, pos, edge_index = graph
+    Z, pos, pair_index = graph
     local_mask = torch.ones(3, dtype=torch.bool)
-    e, f, ea = EngineForward(_FlatEFPotential(), "flat")(Z, pos, edge_index, local_mask)
+    e, f, ea = EngineForward(_FlatEFPotential(), "flat")(Z, pos, pair_index, local_mask)
     assert e.shape == ()
     assert f.shape == (3, 3)
     assert ea.shape == (3,)
@@ -88,7 +88,7 @@ class TestEdgeDistanceClamp:
     """Target: ``MolnexTensorDictAdapter.build_inputs`` small-``r`` regularisation.
 
     The adapter path and the ``StaticForward`` path are documented as
-    equivalent, yet used to clamp ``edge_dist`` at 1e-6 and 1e-8 respectively
+    equivalent, yet used to clamp ``pair_dist`` at 1e-6 and 1e-8 respectively
     (spec ``lammps-iface-05-pbc``, "顺带修复二"). Both must now consume one named
     constant in ``molix.schema``. This class asserts *this* path's clamp equals
     that constant; ``test_static.py::TestEdgeDistanceClamp`` asserts the same of
@@ -100,20 +100,20 @@ class TestEdgeDistanceClamp:
 
     @staticmethod
     def degenerate() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Two coincident atoms — ``|edge_diff| == 0``, i.e. clamp territory."""
+        """Two coincident atoms — ``|pair_diff| == 0``, i.e. clamp territory."""
         Z = torch.tensor([1, 1])
         pos = torch.zeros(2, 3, dtype=torch.float64)
-        edge_index = torch.tensor([[0, 1], [1, 0]])
-        return Z, pos, edge_index
+        pair_index = torch.tensor([[0, 1], [1, 0]])
+        return Z, pos, pair_index
 
     def test_coincident_atoms_clamp_to_the_shared_constant(self):
-        from molix.schema import EDGE_DIST_CLAMP_MIN
+        from molix.schema import PAIR_DIST_CLAMP_MIN
 
-        Z, pos, edge_index = self.degenerate()
-        batch = MolnexTensorDictAdapter().build_inputs(_DummyTDPotential(), Z, pos, edge_index)
-        assert batch["edges", "edge_dist"].tolist() == [
-            EDGE_DIST_CLAMP_MIN,
-            EDGE_DIST_CLAMP_MIN,
+        Z, pos, pair_index = self.degenerate()
+        batch = MolnexTensorDictAdapter().build_inputs(_DummyTDPotential(), Z, pos, pair_index)
+        assert batch["pairs", "pair_dist"].tolist() == [
+            PAIR_DIST_CLAMP_MIN,
+            PAIR_DIST_CLAMP_MIN,
         ]
 
 
@@ -275,14 +275,14 @@ class TestLocalMask:
     def system() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         Z = torch.tensor([1, 6, 8])
         pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 2.0, 0.0]], dtype=torch.float64)
-        edge_index = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1]])
-        return Z, pos, edge_index
+        pair_index = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1]])
+        return Z, pos, pair_index
 
     @staticmethod
     def run(local_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        Z, pos, edge_index = TestLocalMask.system()
+        Z, pos, pair_index = TestLocalMask.system()
         return EngineForward(_DummyTDPotential(), "molnex-tensordict")(
-            Z, pos, edge_index, local_mask
+            Z, pos, pair_index, local_mask
         )
 
     def test_all_ones_mask_sums_every_site(self):
@@ -313,15 +313,15 @@ class TestLocalMask:
 
     def test_flat_adapter_applies_the_same_mask(self):
         """The mask is the wrapper's business, not the adapter's."""
-        Z, pos, edge_index = self.system()
+        Z, pos, pair_index = self.system()
         energy, _, _ = EngineForward(_FlatEFPotential(), "flat")(
-            Z, pos, edge_index, torch.tensor([True, True, False])
+            Z, pos, pair_index, torch.tensor([True, True, False])
         )
         assert energy.item() == pytest.approx(7.0, abs=1e-10)
 
 
 class _EnergyOnlyTDPotential(_DummyTDPotential):
-    """The stub with its force output dropped — a ``compute_forces=False`` shape."""
+    """The stub with its force output dropped — an energy-only (``wrt=()``) shape."""
 
     def forward(self, batch):
         out = super().forward(batch)
@@ -339,21 +339,21 @@ class TestEnergyOnlyModel:
     """
 
     def test_derived_outputs_match_the_forceful_stub(self):
-        Z, pos, edge_index = TestLocalMask.system()
+        Z, pos, pair_index = TestLocalMask.system()
         mask = torch.ones(3, dtype=torch.bool)
         e_ref, f_ref, a_ref = EngineForward(_DummyTDPotential(), "molnex-tensordict")(
-            Z, pos, edge_index, mask
+            Z, pos, pair_index, mask
         )
         e, f, a = EngineForward(_EnergyOnlyTDPotential(), "molnex-tensordict")(
-            Z, pos, edge_index, mask
+            Z, pos, pair_index, mask
         )
         assert e.item() == pytest.approx(e_ref.item(), abs=1e-12)
         assert torch.allclose(f, f_ref, atol=1e-12, rtol=0.0)
         assert torch.allclose(a, a_ref, atol=1e-12, rtol=0.0)
 
     def test_model_outputs_forces_slot_is_none(self):
-        Z, pos, edge_index = TestLocalMask.system()
+        Z, pos, pair_index = TestLocalMask.system()
         _, forces, _ = EngineForward(_EnergyOnlyTDPotential(), "molnex-tensordict").model_outputs(
-            Z, pos, edge_index
+            Z, pos, pair_index
         )
         assert forces is None

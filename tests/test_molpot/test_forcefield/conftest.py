@@ -58,7 +58,7 @@ def fake_pol_styles(monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
             energy_formula="-0.5 * sum_i mu_i . E_i",
             params=(ParamSpec("alpha", "[n_atoms]", "Å³", "isotropic polarizability"),),
             contract=InteractionContract(
-                inputs=("atoms.pos", "atoms.q", "atoms.alpha"),
+                inputs=("atoms.pos", "atoms.charge", "atoms.alpha"),
                 cutoff=CutoffKind.HARD,
                 exclusion=ExclusionClass.INDUCED,
                 derivatives=frozenset({Derivative.FORCES, Derivative.VIRIAL}),
@@ -78,7 +78,7 @@ def fake_pol_styles(monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
 #: Per-pair nonbonded scale factors for the 91 undirected pairs of the butane
 #: fixture, in ``torch.triu_indices(14, 14, offset=1)`` order, under
 #: ``OPLSAAForceField().nonbonded_scaling`` (1-2 = 1-3 = 0, 1-4 = 0.5 for both
-#: ``q`` and ``lj``, so one vector serves both kinds).
+#: ``charge`` and ``lj``, so one vector serves both kinds).
 #:
 #: **Hard-coded golden.** Captured from the pre-step
 #: ``Potentials._pair_scales`` at commit ``29f7f004``
@@ -121,7 +121,7 @@ def butane_topology() -> dict[str, torch.Tensor]:
 
     Returns:
         ``bond_index`` ``(2, 13)``, ``angle_index`` ``(3, 24)``,
-        ``proper_index`` ``(4, 27)`` and ``edge_index`` ``(91, 2)`` — the latter
+        ``proper_index`` ``(4, 27)`` and ``pair_index`` ``(91, 2)`` — the latter
         every unordered pair of the 14 atoms in
         ``torch.triu_indices(14, 14, offset=1)`` order, which is the order
         :data:`BUTANE_OPLS_SCALES` was captured in.
@@ -131,7 +131,7 @@ def butane_topology() -> dict[str, torch.Tensor]:
         "bond_index": torch.tensor(BUTANE_BONDS, dtype=torch.long).t().contiguous(),
         "angle_index": torch.tensor(butane_angles(), dtype=torch.long).t().contiguous(),
         "proper_index": torch.tensor(butane_propers(), dtype=torch.long).t().contiguous(),
-        "edge_index": triu.t().contiguous(),
+        "pair_index": triu.t().contiguous(),
     }
 
 
@@ -143,9 +143,9 @@ def butane_scales() -> torch.Tensor:
 
 @pytest.fixture
 def butane_batch() -> TensorDict:
-    """Post-collate butane batch: ``atoms`` + ``bonds`` / ``angles`` / ``propers`` + ``edges``.
+    """Post-collate butane batch: ``atoms`` + ``bonds`` / ``angles`` / ``propers`` + ``pairs``.
 
-    The ``edges`` namespace is built by :func:`place_edges` at
+    The ``pairs`` namespace is built by :func:`place_edges` at
     :data:`BUTANE_LIST_CUTOFF`, which keeps all 91 pairs — the same set the
     deleted molpot enumerator produced, so ``BUTANE_OPLS_SCALES`` still lines
     up row for row (as a set; the placed list is not in ``triu`` order and the

@@ -1,4 +1,4 @@
-"""Coulomb term on ForceField.to_potentials() reading atoms.q.
+"""Coulomb term on ForceField.to_potentials() reading atoms.charge.
 
 Open boundaries truncate ``1/r`` at a cutoff; a ``graphs.cell`` switches the
 same style to a range-separated sum — Ewald (explicit k-vectors) or PME (the
@@ -120,7 +120,7 @@ class TestCoulombEnergy:
             .def_pairstyle("coulomb")
             .with_params(
                 atoms={
-                    "q": torch.tensor([1.0, -1.0], dtype=torch.float64),
+                    "charge": torch.tensor([1.0, -1.0], dtype=torch.float64),
                 }
             )
         )
@@ -150,7 +150,7 @@ class TestCoulombEnergy:
                 nonbonded_scaling=NonbondedScaling(),
             )
             .def_pairstyle("coulomb")
-            .with_params(atoms={"q": torch.tensor([1.0, -1.0], dtype=torch.float64)})
+            .with_params(atoms={"charge": torch.tensor([1.0, -1.0], dtype=torch.float64)})
         )
         batch = TensorDict(
             {
@@ -179,7 +179,7 @@ class TestCoulombEnergy:
 
     def test_scale_14(self):
         """Four atoms; only i–l is 1–4 with scale 0.5."""
-        scaling = NonbondedScaling(q=ExclusionScales(0.0, 0.0, 0.5))
+        scaling = NonbondedScaling(charge=ExclusionScales(0.0, 0.0, 0.5))
         q = torch.tensor([1.0, 0.0, 0.0, -1.0], dtype=torch.float64)
         # place 0 and 3 at r=2 so E_full = ke*(1)*(-1)/2 = -ke/2; with s14=0.5 → -ke/4
         pos = torch.tensor(
@@ -195,7 +195,7 @@ class TestCoulombEnergy:
         ff = (
             ForceField(name="es", nonbonded_scaling=scaling)
             .def_pairstyle("coulomb")
-            .with_params(atoms={"q": q})
+            .with_params(atoms={"charge": q})
         )
         batch = TensorDict(
             {
@@ -238,7 +238,7 @@ class TestCoulombEnergy:
         ff = (
             ForceField(name="mm")
             .def_pairstyle("coulomb")
-            .with_params(atoms={"q": torch.tensor([0.3, -0.3], dtype=torch.float64)})
+            .with_params(atoms={"charge": torch.tensor([0.3, -0.3], dtype=torch.float64)})
         )
         batch = TensorDict(
             {
@@ -274,7 +274,7 @@ class TestCoulombEnergy:
         r = 2.0
         pot = CoulombPotential(prefactor=kcalmol_A)
         e_ref = (q[0] * q[1] * pot.from_dist(torch.tensor([r], dtype=torch.float64))).sum()
-        ff = ForceField(name="es").def_pairstyle("coulomb").with_params(atoms={"q": q})
+        ff = ForceField(name="es").def_pairstyle("coulomb").with_params(atoms={"charge": q})
         batch = TensorDict(
             {
                 "atoms": TensorDict(
@@ -304,7 +304,7 @@ class TestCoulombEnergy:
                 lr_wavelength=1.5,
                 real_space_cutoff=8.0,
             )
-            .with_params(atoms={"q": q})
+            .with_params(atoms={"charge": q})
         )
         batch = TensorDict(
             {
@@ -387,7 +387,7 @@ def _periodic_potentials(
             mesh_spacing=mesh_spacing,
             **options,
         )
-        .with_params(atoms={"q": charges})
+        .with_params(atoms={"charge": charges})
     )
     return forcefield.to_potentials()
 
@@ -400,10 +400,10 @@ def _periodic_batch(
     bonds: tuple[tuple[int, int], ...] = (),
     propers: tuple[tuple[int, int, int, int], ...] = (),
 ) -> TensorDict:
-    """One periodic molecule: ``atoms`` + ``graphs.cell`` + ``edges`` (+ topology).
+    """One periodic molecule: ``atoms`` + ``graphs.cell`` + ``pairs`` (+ topology).
 
-    The ``edges`` namespace is built by :func:`place_edges`, which routes the
-    cell into :class:`molix.batch.NeighborList` under ``pbc=True`` — the same
+    The ``pairs`` namespace is built by :func:`place_edges`, which routes the
+    cell into :class:`molix.data.NeighborList` under ``pbc=True`` — the same
     minimum-image half list the deleted molpot enumerator produced from molpy's
     ``NeighborQuery``, verified pair-for-pair on every geometry in this file
     (``composable-a0-03b``).
@@ -420,7 +420,7 @@ def _periodic_batch(
         propers: ``(i, j, k, l)`` proper torsions — the 1-4 relations.
 
     Returns:
-        A post-collate batch carrying a placed minimum-image ``edges``
+        A post-collate batch carrying a placed minimum-image ``pairs``
         namespace, the lattice and any topology asked for.
     """
     n_atoms = positions.shape[0]
@@ -590,7 +590,7 @@ class TestCoulombPeriodicPotential:
                 propers=((0, 1, 2, 3),),
             )
         )
-        scale_14 = NonbondedScaling().triple("q")[2]
+        scale_14 = NonbondedScaling().triple("charge")[2]
         removed = (1.0 - scale_14) * kcalmol_A * float(charges[0] * charges[3]) / separation
         assert math.isclose(
             float(excluded), float(free) - removed, abs_tol=EXCLUSION_TOL, rel_tol=0.0
@@ -729,7 +729,7 @@ class TestCoulombPeriodicPotential:
         defaulted = (
             ForceField(name="es")
             .def_pairstyle("coulomb")
-            .with_params(atoms={"q": charges})
+            .with_params(atoms={"charge": charges})
             .to_potentials()
         )
         assert defaulted.coulomb_periodic is not None

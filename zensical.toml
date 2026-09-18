@@ -74,7 +74,8 @@ nav = [
         ]},
         { "Spec" = [
             { "Allegro Spec" = "molzoo/specs/allegro.md" },
-            { "MACEOMol Spec" = "molzoo/specs/mace_omol.md" }
+            { "MACEOMol Spec" = "molzoo/specs/mace_omol.md" },
+            { "Rondo Spec" = "molzoo/specs/rondo.md" }
         ]}
     ]},
     { "API Reference" = [

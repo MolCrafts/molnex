@@ -4,7 +4,7 @@ The real EF train step is heavier than the bare encoder forward: the model
 predicts a graph energy, derives forces ``F = -dE/dpos`` via
 ``torch.autograd.grad(create_graph=True)``, and the EF loss backprops through
 the forces — a *double* backward. This script profiles that step
-(``PiNetPotential(compute_forces=True)`` in train mode) so the numbers reflect
+(``PiNetPotential(wrt=("atoms.pos",))`` in train mode) so the numbers reflect
 revMD17-style force training, not energy-only inference.
 
 --device cpu  : component + submodule + CPU op table for the EF step.
@@ -25,8 +25,9 @@ from __future__ import annotations
 import argparse
 
 import torch
+from _profile_workload import profile_training
 
-from molix.profiler import MockBatch, ModuleProfiler
+from molix.profiler import MockBatch
 from molzoo.pinet import PiNet, PiNetPotential
 
 ATOM_TYPES = list(range(1, 8))
@@ -44,7 +45,7 @@ def build_ef_model() -> PiNetPotential:
         depth=3,
         rank=3,
     )
-    return PiNetPotential(encoder=enc, hidden_dim=64, compute_forces=True)
+    return PiNetPotential(encoder=enc, hidden_dim=64, wrt=("atoms.pos",))
 
 
 def ef_loss(out, batch=None):
@@ -54,10 +55,10 @@ def ef_loss(out, batch=None):
     return e.pow(2).mean() + f.pow(2).mean()
 
 
-def _factory(device: str, n_atoms=512, n_edges=4096, n_graphs=16, dtype=None):
+def _factory(device: str, n_atoms=512, n_pairs=4096, n_graphs=16, dtype=None):
     base = MockBatch(
         n_atoms=n_atoms,
-        n_edges=n_edges,
+        n_pairs=n_pairs,
         n_graphs=n_graphs,
         atomic_numbers=7,
         device=device,
@@ -85,9 +86,10 @@ def cpu_hotspots(n_steps: int) -> None:
     print(f"\n{'#' * 78}\nPiNet EF (energy+force) CPU hotspots\n{'#' * 78}")
     model = build_ef_model()
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    ModuleProfiler(model, loss_fn=ef_loss, device="cpu", optimizer=opt).run(
-        _factory("cpu"), n_steps=n_steps, n_warmup=3, submodules=True
-    ).print_report()
+    report = profile_training(
+        model, ef_loss, opt, _factory("cpu"), warmup=3, steps=n_steps, device="cpu"
+    )
+    print(report.model_dump_json(indent=2))
 
     model2 = build_ef_model()
     model2.train()
@@ -136,16 +138,16 @@ def _run_cell(label, model, factory, n_steps, rows, compiler, precision, batch=N
     try:
         params = (model.module if isinstance(model, _AutocastWrap) else model).parameters()
         opt = torch.optim.Adam(params, lr=1e-3)
-        res = ModuleProfiler(model, loss_fn=ef_loss, device="cuda", optimizer=opt).run(
-            factory, n_steps=n_steps, n_warmup=15, op_rows=0
+        res = profile_training(
+            model, ef_loss, opt, factory, warmup=15, steps=n_steps, device="cuda"
         )
         row = {
             "compiler": compiler,
             "precision": precision,
             "batch": str(batch or "-"),
-            "wall_ms": f"{res.wall_ms_per_step:.3f}" if res.wall_ms_per_step else "n/a",
-            "atoms/s": f"{res.throughput_atoms_per_sec:,.0f}",
-            "lb%": f"{res.launch_bound_pct:.0f}" if res.launch_bound_pct is not None else "n/a",
+            "wall_ms": f"{res.model.latency.mean_ms:.3f}",
+            "atoms/s": f"{res.atoms_per_step * res.model.throughput_steps_per_sec:,.0f}",
+            "lb%": "n/a",
         }
         print(f"  [ok]   {label}  wall={row['wall_ms']} lb={row['lb%']}%")
     except Exception as e:  # noqa: BLE001
@@ -176,7 +178,7 @@ def gpu_matrix(n_steps: int) -> None:
         _run_cell(f"eager  {precision:11s}", model, factory, n_steps, rows, "eager", precision, 16)
 
     print("\n# batch-size remedy: eager fp32, 16 vs 64 graphs:")
-    big = _factory("cuda", n_atoms=2048, n_edges=16384, n_graphs=64)
+    big = _factory("cuda", n_atoms=2048, n_pairs=16384, n_graphs=64)
     m, _ = _build("fp32")
     _run_cell("eager  fp32 bs64", m, big, n_steps, rows, "eager", "fp32", 64)
 

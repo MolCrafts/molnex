@@ -72,3 +72,21 @@ def test_hook_respects_every_n_steps(tmp_path: Path) -> None:
     result = read_metrics(root, key="train/loss")
     assert len(result.records) == 1
     assert result.records[0]["v"] == 0.5
+
+
+def test_hook_throttles_status_heartbeat(tmp_path: Path) -> None:
+    """Train-phase status writes follow their own stride, not every logged step."""
+    root = tmp_path / "record"
+    hook = MolRecMetricsHook(root, every_n_steps=1, flush_every_n_appends=0, status_every_n_steps=4)
+    state = _FakeState()
+    trainer = SimpleNamespace()
+    hook.on_train_start(trainer, state)
+
+    for step in range(1, 7):
+        state.global_step = step
+        state["train"]["loss"] = float(step)
+        hook.on_train_batch_end(trainer, state, None, None)
+
+    # Six logged steps, but the last heartbeat is the last multiple of 4.
+    assert read_status(root)["global_step"] == 4
+    assert len(read_metrics(root, key="train/loss").records) == 6

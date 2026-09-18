@@ -25,14 +25,14 @@ Where this sits relative to its siblings:
 
 * :mod:`molpot.derivation.force` owns the **first** derivative
   (``F = -∂E/∂pos``) at the tensor level;
-  :mod:`molpot.derivation.kernels` owns it at the batch level (position-leaf
-  ownership + the ``graphs.energy`` / ``atoms.forces`` writes).
-* This module never re-derives either of those. :meth:`HessianDerivation.forward`
-  composes :func:`~molpot.derivation.force.autograd_forces_from_energy` and
-  :meth:`HessianDerivation.graph_blocks` composes
-  :func:`~molpot.derivation.kernels.grad_force_pass`; the only new
-  differentiation here is the **second** ``torch.autograd.grad`` walking the
-  ``3N`` rows of ``∂E/∂pos``.
+  :class:`molix.autograd.Derivative` owns it at the batch level.
+* This module never re-derives it. Both :meth:`HessianDerivation.forward` and
+  :meth:`HessianDerivation.graph_blocks` compose
+  :func:`~molpot.derivation.force.autograd_forces_from_energy` on a leaf of
+  their own (:func:`molix.autograd.leaf`) — the op cannot serve them, because
+  the rows below need that leaf *after* the first derivative is taken and the
+  op never lets its leaf out; the only new differentiation here is the
+  **second** ``torch.autograd.grad`` walking the ``3N`` rows of ``∂E/∂pos``.
 
 Scope — **autograd double-backward only**. "Autograd" is PyTorch's reverse-mode
 automatic differentiation; a *double* backward differentiates a quantity that is
@@ -55,9 +55,9 @@ parameters, so a Hessian loss can reach a Class-I parameter head — while
 ``torch.no_grad()`` yields a detached Hessian for reporting. The first
 derivative always keeps its graph — it is what the second one differentiates.
 
-Units: the producer is unit-agnostic, exactly like
-:mod:`molpot.derivation.kernels` — it differentiates whatever the energy core
-emits. With energies in kcal/mol and positions in Å the Hessian is
+Units: the producer is unit-agnostic, exactly like the derivative op — it
+differentiates whatever the energy core emits. With energies in kcal/mol and
+positions in Å the Hessian is
 kcal·mol⁻¹·Å⁻² (eV/Å² for the repo-default eV convention); keeping the core on
 one convention is the caller's job.
 
@@ -77,24 +77,36 @@ Example:
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import cast
 
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molpot.derivation.force import autograd_forces_from_energy, position_leaf
-from molpot.derivation.kernels import EnergyCore, grad_force_pass
-from molpot.derivation.protocol import FORCES_KEY, POS_KEY
+from molix.autograd import leaf as position_leaf
+from molpot.derivation.force import autograd_forces_from_energy
+from molpot.derivation.protocol import (
+    ENERGY_KEY,
+    FORCES_KEY,
+    POS_KEY,
+    absorb_model_output,
+    has_energy,
+    write_forces,
+)
 
 __all__ = ["HessianDerivation"]
+
+#: An energy core: reads ``atoms.pos`` off the batch and writes ``graphs.energy``
+#: (optionally ``atoms.energy``). May return the batch, a ``dict`` with an
+#: ``"energy"`` entry, or ``None`` when it wrote in place.
+EnergyCore = Callable[[TensorDict], "TensorDict | dict | None"]
 
 
 class HessianDerivation(nn.Module):
     """Cartesian second derivative ``H = ∂²E/∂pos²`` by autograd double backward.
 
     Stateless (no parameters, no buffers, no session side-channel) and
-    constructed with no arguments, like its siblings
-    :class:`~molpot.derivation.stress.StressDerivation` and
+    constructed with no arguments, like its sibling
     :class:`~molpot.derivation.force.ForceDerivation`. One instance is reusable
     across batches.
 
@@ -167,31 +179,33 @@ class HessianDerivation(nn.Module):
         "graph" is one of those molecules, with ``Nᵢ`` atoms out of ``N`` in
         total.
 
-        Runs **one** energy forward through
-        :func:`~molpot.derivation.kernels.grad_force_pass`
-        (``create_graph=True, detach_energy=False``), then for each global row
-        ``i`` differentiates ``(-forces).reshape(-1)[i]`` w.r.t. the position
-        leaf and keeps only the columns belonging to ``i``'s own graph, so the
-        result held is ``Σ (3Nᵢ)²`` numbers rather than the ``(3N)²`` of a dense
-        batch-wide Hessian. (Each row is still evaluated at full width ``3N``
-        before being sliced, and the slices are views of it, so assembling one
-        block transiently holds ``3Nᵢ × 3N``.) The collate contract (per-sample
-        rebased ``edge_index`` / ``bond_index``, so no energy term couples two
-        molecules) makes the discarded cross-graph columns exactly zero — the
-        blocks are exact, not an approximation.
+        Installs its own position leaf on the batch and runs **one** energy
+        forward on it, takes ``∂E/∂pos`` with ``create_graph=True``
+        (:func:`~molpot.derivation.force.autograd_forces_from_energy`), then
+        for each global row ``i`` differentiates ``(-forces).reshape(-1)[i]``
+        w.r.t. the position leaf and keeps only the columns belonging to
+        ``i``'s own graph, so the result held is ``Σ (3Nᵢ)²`` numbers rather
+        than the ``(3N)²`` of a dense batch-wide Hessian. (Each row is still
+        evaluated at full width ``3N`` before being sliced, and the slices are
+        views of it, so assembling one block transiently holds ``3Nᵢ × 3N``.)
+        The collate contract (per-sample rebased ``pair_index`` /
+        ``bond_index``, so no energy term couples two molecules) makes the
+        discarded cross-graph columns exactly zero — the blocks are exact, not
+        an approximation.
 
         Graph extents come from ``("atoms", "batch")`` alone — the single source
         of truth for membership. Nothing is written back under a ``hessian``
-        key: batch-key writes and readout modes stay with
-        :mod:`molpot.derivation.kernels` and a future Hessian readout. The batch
-        is mutated exactly as :func:`~molpot.derivation.kernels.grad_force_pass`
-        documents (position leaf plus ``graphs.energy`` / ``atoms.forces``).
+        key: batch-key writes stay with the derivative op and a future Hessian
+        readout. The batch comes back with ``atoms.pos`` replaced by this
+        method's ``requires_grad`` leaf (the energy and forces hang off it, and
+        the rows below differentiate against exactly this tensor) plus
+        ``graphs.energy`` / ``atoms.forces``, both attached.
 
         Args:
             energy_core: Energy core — a callable ``energy_core(batch)`` that
                 runs the model on the batch and writes the per-molecule energies
-                ``graphs.energy`` ``(B,)`` back onto it, as consumed by
-                :func:`~molpot.derivation.kernels.grad_force_pass`.
+                ``graphs.energy`` ``(B,)`` back onto it (or returns a dict with
+                an ``"energy"`` entry).
             batch: Post-collate batch carrying ``atoms.pos`` ``(N, 3)`` Å and
                 the graph-membership vector ``atoms.batch`` ``(N,)`` (which
                 molecule each atom belongs to), which must be non-decreasing
@@ -216,11 +230,24 @@ class HessianDerivation(nn.Module):
                 "before taking per-graph Hessian blocks."
             )
 
-        # Resolved at entry, before grad_force_pass forces grad on for the first
-        # derivative: no_grad callers get detached blocks.
+        # Resolved at entry, before grad is forced on for the first derivative:
+        # no_grad callers get detached blocks.
         create_graph = torch.is_grad_enabled()
-        batch = grad_force_pass(energy_core, batch, create_graph=True, detach_energy=False)
-        leaf = batch[POS_KEY]
+        # This method owns the leaf — the derivative op would never let its
+        # own out, and the rows below differentiate w.r.t. exactly this tensor.
+        leaf = position_leaf(cast(torch.Tensor, batch[POS_KEY]))
+        batch[POS_KEY] = leaf
+        with torch.enable_grad():
+            batch = absorb_model_output(batch, energy_core(batch))
+            if not has_energy(batch):
+                raise RuntimeError(
+                    "energy core must write batch['graphs','energy'] "
+                    "(graphs.energy) or return a dict with 'energy'"
+                )
+            write_forces(
+                batch,
+                autograd_forces_from_energy(batch[ENERGY_KEY], leaf, create_graph=True),
+            )
 
         counts = torch.unique_consecutive(membership, return_counts=True)[1].tolist()
         blocks: list[torch.Tensor] = []

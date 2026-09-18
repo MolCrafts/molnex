@@ -156,3 +156,8 @@ runs/
 # molq MCP runtime state + downloaded aarch64 wheels
 .molq/
 .wheels-gh200/
+
+# CMake build tree for interface/ (7.7 MiB of CMakeCache/ninja output)
+build-interface/
+# Slurm job stdout/stderr; evidence worth keeping goes to the molab workspace
+logs/

@@ -78,11 +78,11 @@ class CoulombPotential(Potential):
         """Full :math:`1/r` potential.
 
         Args:
-            dist: Interatomic distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            dist: Interatomic distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
-            Potential values ``(n_edges,)``.
+            Potential values ``(n_pairs,)``.
         """
         result = 1.0 / dist.clamp(min=1e-15)
 
@@ -97,11 +97,11 @@ class CoulombPotential(Potential):
         """Long-range part of the range-separated :math:`1/r` potential.
 
         Args:
-            dist: Interatomic distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            dist: Interatomic distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
-            Long-range potential values ``(n_edges,)``.
+            Long-range potential values ``(n_pairs,)``.
         """
         if self.smearing is None:
             raise ValueError(

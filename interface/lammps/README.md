@@ -37,8 +37,8 @@ order the meta's `inputs` / `outputs` lists give:
 |---|-------|-------|-------|--------------|
 | 0 / 0 | `Z` | `(N,)` | `int64` | always |
 | 1 / 1 | `pos` | `(N,3)` | model dtype (Å) | always |
-| 2 / 2 | `edge_index` | `(E,2)` | `int64` | always |
-| — / 3 | `edge_mask` | `(E_max,)` | `bool` | `execution: "cuda-graph"` only |
+| 2 / 2 | `pair_index` | `(E,2)` | `int64` | always |
+| — / 3 | `pair_mask` | `(E_max,)` | `bool` | `execution: "cuda-graph"` only |
 | 3 / 4 | `local_mask` | `(N,)` | `bool` | always — **last** in either list |
 
 | # | output | shape | dtype | present when |
@@ -48,9 +48,9 @@ order the meta's `inputs` / `outputs` lists give:
 | 2 | `atomic_energy` | `(N,)` | model dtype | always |
 | 3 | `virial` | `(6,)` | model dtype | `supports_virial: true` only |
 
-So the input list is `["Z", "pos", "edge_index", "local_mask"]` (4) on the
-dynamic path and `["Z", "pos", "edge_index", "edge_mask", "local_mask"]` (5) on
-the cuda-graph path — `local_mask` stays last and `edge_mask` is inserted before
+So the input list is `["Z", "pos", "pair_index", "local_mask"]` (4) on the
+dynamic path and `["Z", "pos", "pair_index", "pair_mask", "local_mask"]` (5) on
+the cuda-graph path — `local_mask` stays last and `pair_mask` is inserted before
 it. `LammpsContract` refuses any other arity while loading (`kDynamicInputs` /
 `kCudaGraphInputs` in `lammps_contract.h`).
 
@@ -59,14 +59,14 @@ style converts. `virial` is ordered `(xx, yy, zz, xy, xz, yz)`.
 
 **Two masks, two different things.** `local_mask (N,)` marks the atoms this rank
 OWNS, and the exported energy is `(atomic_energy * local_mask).sum()` — the
-partition sum that makes multi-rank and periodic runs correct. `edge_mask
+partition sum that makes multi-rank and periodic runs correct. `pair_mask
 (E_max,)` exists only on the fixed-shape path and marks which rows of a padded
-`edge_index` are real. v2 called that one just `mask`; v3 renames it to
-`edge_mask` in the same bump that introduces `local_mask`, because two
+`pair_index` are real. v2 called that one just `mask`; v3 renames it to
+`pair_mask` in the same bump that introduces `local_mask`, because two
 differently-meaning masks sitting in one positional list under the names `mask`
 and `local_mask` is a mis-wiring waiting to happen.
 
-**Edge order is not promised by default.** The C++ side builds `edge_index` in
+**Edge order is not promised by default.** The C++ side builds `pair_index` in
 the LAMMPS neighbour list's own order and does **not** sort, because every
 in-tree model aggregates with `scatter` / `index_add`-class reductions, which are
 permutation-invariant. A model that needs rows grouped by index (segmented or
@@ -110,7 +110,7 @@ omitting it is a `ValueError` naming the keyword — not a plausible-looking gue
 Anything that isn't a molnex potential just needs a Python-side adapter — no C++.
 Two cases:
 
-1. **Already flat** (`forward(Z, pos, edge_index) -> (energy, forces,
+1. **Already flat** (`forward(Z, pos, pair_index) -> (energy, forces,
    atomic_energy)`): use the built-in `flat` adapter.
    ```python
    export_for_lammps(my_model, "out", species=[1,8], cutoff=5.0,
@@ -119,15 +119,17 @@ Two cases:
    A model that returns only `(energy, forces)` is refused: schema v3 needs the
    per-site decomposition, and a two-tuple cannot be widened into one.
 2. **Different input/output**: subclass `EngineAdapter` (~15 lines) — map the flat
-   `(Z, pos, edge_index)` onto your model's inputs and read back
+   `(Z, pos, pair_index)` onto your model's inputs and read back
    `(energy, forces, atomic_energy)`:
    ```python
    from molix.engine import EngineAdapter, export_for_lammps
 
    class MyNetAdapter(EngineAdapter):
        name = "mynet"
-       def build_inputs(self, model, Z, pos, edge_index):
-           return MyGraph(z=Z, r=pos, edges=edge_index)      # your model's input
+       def build_inputs(self, model, Z, pos, pair_index):
+           # The seam: the engine hands you a chemistry pair list, your model
+           # takes graph edges. Only the left-hand name is yours to choose.
+           return MyGraph(z=Z, r=pos, edges=pair_index)      # your model's input
        def read_outputs(self, out):
            # () scalar, (N,3), (N,)
            return out.total_energy, out.forces, out.site_energy
@@ -248,9 +250,9 @@ What v3 adds:
 |---|---|---|
 | `atomic_energy (N,)` output | new output, index 2 | the partition energy `Σ_{i∈local} E_i` cannot be formed from a scalar; also makes `compute pe/atom` work |
 | `local_mask (N,)` input | new input, always last | marks the atoms this rank owns; the exported energy is `(atomic_energy * local_mask).sum()` |
-| `mask` → `edge_mask` | rename (cuda-graph only) | two masks in one positional list needed two distinguishable names |
+| `mask` → `pair_mask` | rename (cuda-graph only) | two masks in one positional list needed two distinguishable names |
 | `receptive_field_layers` | new meta field, **required** | `T`; the LAMMPS side checks `ghost cutoff >= T * cutoff + skin` |
-| `requires_sorted_edges` | new meta field, default `false` | declares whether the model needs sorted `edge_index`; when false the C++ side skips a per-step sort |
+| `requires_sorted_edges` | new meta field, default `false` | declares whether the model needs sorted `pair_index`; when false the C++ side skips a per-step sort |
 | `virial` moves to output index 3 | reorder | it now sits behind `atomic_energy` |
 
 **Per-atom energy is authoritative in v3.** The exported energy is *defined* as
@@ -529,7 +531,7 @@ style:
 * builds `Z` / `pos` over **local + ghost** atoms (ghost coordinates already
   carry the minimum-image placement from LAMMPS);
 * walks ghost centres as well as local ones, so every local atom's complete set
-  of incoming edges is in `edge_index` (in neighbour-list order unless the
+  of incoming edges is in `pair_index` (in neighbour-list order unless the
   export declared `requires_sorted_edges=True`);
 * sums site energies over **local atoms only** — `E_rank = Σ_{i∈local} E_i` —
   using `local_mask`, so no ghost's site energy is counted twice;
@@ -537,7 +539,7 @@ style:
   **integrator's** global reverse communication to carry home;
 * allows multi-rank domain decomposition.
 
-Models that recompute `edge_diff = pos[target] - pos[source]` from positions
+Models that recompute `pair_diff = pos[target] - pos[source]` from positions
 need no separate `shifts` input in this cut. A future export may still add
 explicit `cell` / `edge_shift` tensors for models that require them.
 

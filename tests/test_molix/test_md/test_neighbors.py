@@ -71,13 +71,13 @@ class TestNeighborList:
             batch_size=[],
         )
         nl.build(batch)
-        src = batch["edges", "edge_index"][:, 0]
-        tgt = batch["edges", "edge_index"][:, 1]
+        src = batch["pairs", "pair_index"][:, 0]
+        tgt = batch["pairs", "pair_index"][:, 1]
         live = (src == 0) & (tgt == 1)
         assert live.any()
-        d = batch["edges", "edge_diff"][live][0]
+        d = batch["pairs", "pair_diff"][live][0]
         assert torch.allclose(d, torch.tensor([-1.0, 0.0, 0.0], dtype=torch.float64), atol=1e-12)
-        r = batch["edges", "edge_dist"][live][0]
+        r = batch["pairs", "pair_dist"][live][0]
         assert float(r) == pytest.approx(1.0, abs=1e-12)
         assert float(d.dot(d)) == pytest.approx(1.0, abs=1e-12)
         energy = 0.5 * (d * d).sum()
@@ -91,21 +91,21 @@ class TestNeighborList:
         cell = torch.eye(3, dtype=torch.float64) * 10.0
         pos = torch.tensor([[0.5, 5.0, 5.0], [9.5, 5.0, 5.0]], dtype=torch.float64)
         nl = NeighborList(cell=cell, cutoff=2.0, positions=pos, skin=0.5, bin=0.0)
-        n_edges = nl.num_edges
+        n_pairs = nl.num_pairs
         n_rebuilds = nl.rebuild_count
-        index = nl.edge_index.clone()
+        index = nl.pair_index.clone()
         mu = 1.01
         nl.scale_isotropic(cell * mu, pos * mu)
         assert nl.rebuild_count == n_rebuilds
-        assert nl.num_edges == n_edges
-        assert torch.equal(nl.edge_index, index)
+        assert nl.num_pairs == n_pairs
+        assert torch.equal(nl.pair_index, index)
         assert torch.allclose(nl.cell, cell * mu)
         assert torch.allclose(nl._x_hold, pos * mu)
 
     def test_capacity_exceeds_initial_edges(self, nlist):
         """Headroom is what lets the edge count grow without reallocating."""
         nl, _ = nlist
-        assert nl.capacity > nl.num_edges
+        assert nl.capacity > nl.num_pairs
 
     def test_buffer_shapes_are_the_capacity(self, nlist):
         """Shapes must be the capacity, not the live edge count — that is the
@@ -113,42 +113,42 @@ class TestNeighborList:
         edge buffer is ``(E, 2)`` per the repo-wide edge convention (``(2, N)``
         is reserved for ``bond_index`` as an anti-alias guard)."""
         nl, _ = nlist
-        assert nl.edge_index.shape == (nl.capacity, 2)
+        assert nl.pair_index.shape == (nl.capacity, 2)
         assert nl.shifts.shape == (nl.capacity, 3)
 
     def test_rebuild_keeps_shapes_constant(self, nlist):
         """Displacing every atom changes the edge set, never the shapes."""
         nl, pos = nlist
-        shapes = (nl.edge_index.shape, nl.shifts.shape)
+        shapes = (nl.pair_index.shape, nl.shifts.shape)
         torch.manual_seed(0)
         nl.rebuild(pos + torch.randn_like(pos) * 0.3)
-        assert (nl.edge_index.shape, nl.shifts.shape) == shapes
+        assert (nl.pair_index.shape, nl.shifts.shape) == shapes
 
     def test_rebuild_tracks_a_changed_neighbour_set(self, nlist):
         """A real displacement must actually change the recorded edges."""
         nl, pos = nlist
-        before = nl.num_edges
+        before = nl.num_pairs
         nl.rebuild(pos * 1.15)  # dilate: fewer pairs inside the cutoff
-        assert nl.num_edges != before
+        assert nl.num_pairs != before
 
     def test_dead_edges_are_self_loops_on_atom_zero(self, nlist):
         """Padding rows must not point at real atoms."""
         nl, _ = nlist
-        tail = nl.edge_index[nl.num_edges :]
+        tail = nl.pair_index[nl.num_pairs :]
         assert torch.count_nonzero(tail) == 0
 
     def test_dead_edge_shift_exceeds_the_cutoff(self, nlist):
         """Beyond the cutoff every envelope is 0, which is what zeroes them."""
         nl, _ = nlist
-        tail = nl.shifts[nl.num_edges :]
+        tail = nl.shifts[nl.num_pairs :]
         assert bool((torch.linalg.norm(tail, dim=-1) > nl.cutoff).all())
 
     def test_shifts_reconstruct_minimum_image_displacements(self, nlist):
         """``pos[t] - pos[s] + shift`` must be the minimum-image vector, i.e.
         no live edge is longer than the cutoff."""
         nl, pos = nlist
-        n = nl.num_edges
-        src, tgt = nl.edge_index[:n, 0], nl.edge_index[:n, 1]
+        n = nl.num_pairs
+        src, tgt = nl.pair_index[:n, 0], nl.pair_index[:n, 1]
         vectors = pos[tgt] - pos[src] + nl.shifts[:n]
         assert float(torch.linalg.norm(vectors, dim=-1).max()) <= nl.cutoff + 1e-9
 
@@ -167,7 +167,7 @@ class TestNeighborList:
         assert out is nl
         assert nl.shifts.dtype == torch.float32
         assert nl.cell.dtype == torch.float32
-        assert nl.edge_index.dtype == torch.long  # indices are never cast
+        assert nl.pair_index.dtype == torch.long  # indices are never cast
 
     def test_rejects_cutoff_beyond_half_the_cell(self):
         """Minimum image silently misses images past L/2 — refuse instead."""
@@ -181,7 +181,7 @@ class TestNeighborList:
         pos, cell = make_cubic_lattice()
         nl = NeighborList(cell=cell, cutoff=4.4, positions=pos)
         assert nl.cutoff == 4.4
-        assert nl.num_edges > 0
+        assert nl.num_pairs > 0
 
     def test_rejects_triclinic_cutoff_admitted_by_the_row_norm(self):
         """The bug, asserted directly: the golden cell's shortest row norm is
@@ -206,7 +206,7 @@ class TestNeighborList:
         pos, cell = _triclinic()
         nl = NeighborList(cell=cell, cutoff=3.9, positions=pos)
         assert nl.cutoff == 3.9
-        assert nl.num_edges > 0
+        assert nl.num_pairs > 0
 
     def test_rejects_a_singular_cell(self):
         """A zero-volume cell has no finite width. ``V / area`` would be ``nan``
@@ -333,14 +333,14 @@ class TestNeighborListPolicy:
         4.2426 A (the 8 body-diagonal ones at 5.196 A stay out), so the
         bidirectional list holds 64 * 18 = 1152 edges."""
         nl, _ = _policy_list(skin=1.5)
-        assert nl.num_edges == 1152
+        assert nl.num_pairs == 1152
 
     def test_zero_skin_builds_only_the_first_shell(self):
         """The same lattice at ``r_build = cutoff = 3.5 A``: 6 neighbours each,
         64 * 6 = 384 edges. The 1152/384 = 3.0x ratio is the direct measurement
         of the ``(1 + s/r_cut)^3`` growth the capacity has to absorb."""
         nl, _ = _policy_list(skin=0.0)
-        assert nl.num_edges == 384
+        assert nl.num_pairs == 384
 
     def test_capacity_is_sized_from_the_build_radius(self):
         """Sizing from ``cutoff`` instead would allocate 519 rows for a list
@@ -352,7 +352,7 @@ class TestNeighborListPolicy:
     def test_buffer_shapes_stay_the_capacity_under_a_skin(self):
         """The skin must not cost the constant shapes a CUDA graph needs."""
         nl, _ = _policy_list(skin=1.5)
-        assert nl.edge_index.shape == (nl.capacity, 2)
+        assert nl.pair_index.shape == (nl.capacity, 2)
         assert nl.shifts.shape == (nl.capacity, 3)
 
     def test_a_fresh_list_reports_no_rebuild_history(self):
@@ -386,7 +386,7 @@ class TestNeighborListPolicy:
             NeighborList(cell=cell, cutoff=3.5, positions=pos, skin=3.0)
 
     def test_rejects_a_skin_that_reaches_the_dead_edge_shift(self):
-        """Dead padding edges sit at ``DEAD_EDGE_CUTOFF_FACTOR * cutoff = 10x``
+        """Dead padding edges sit at ``DEAD_PAIR_CUTOFF_FACTOR * cutoff = 10x``
         the cutoff; a skin of ``9x`` puts them exactly on the build radius,
         where they stop being inert and start being counted as real pairs. The
         60 A cell keeps the half-width guard — checked first — out of the way,
@@ -564,7 +564,7 @@ class TestNeighborListPolicy:
         source, target, reference = _reference_pairs(moved, cell, 3.5)
         n_atoms = int(moved.shape[0])
         rows = torch.full((n_atoms * n_atoms,), -1, dtype=torch.long)
-        live = nl.edge_index[: nl.num_edges]
+        live = nl.pair_index[: nl.num_pairs]
         rows[live[:, 0] * n_atoms + live[:, 1]] = torch.arange(live.shape[0])
         found = rows[source * n_atoms + target]
         assert int((found < 0).sum()) == 0
@@ -599,7 +599,7 @@ class TestNeighborListPolicy:
             nl.update(moved)
             source, target, reference = _reference_pairs(moved, cell, 3.5)
             rows = torch.full((n_atoms * n_atoms,), -1, dtype=torch.long)
-            live = nl.edge_index[: nl.num_edges]
+            live = nl.pair_index[: nl.num_pairs]
             rows[live[:, 0] * n_atoms + live[:, 1]] = torch.arange(live.shape[0])
             found = rows[source * n_atoms + target]
             missing = int((found < 0).sum())
@@ -720,9 +720,9 @@ def _batch(pos: torch.Tensor, cell: torch.Tensor | None = None) -> TensorDict:
 class TestNeighborListBind:
     """``build(batch)`` / ``update(batch)`` — the TensorDict side of the list.
 
-    The list owns ``edges`` once bound: ``build`` refreshes the buffers at
+    The list owns ``pairs`` once bound: ``build`` refreshes the buffers at
     ``batch["atoms", "pos"]``, validates that the batch describes the system the
-    list was constructed for, writes the *live* buffers into ``batch["edges"]``
+    list was constructed for, writes the *live* buffers into ``batch["pairs"]``
     **by reference** and hands the same batch back so it composes with the
     repo-wide ``forward(td) -> td`` convention.
     """
@@ -745,26 +745,26 @@ class TestNeighborListBind:
         """
         nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
         batch = nl.build(_batch(pos))
-        assert batch["edges", "edge_index"] is nl.edge_index
-        assert batch["edges", "shifts"] is nl.shifts
+        assert batch["pairs", "pair_index"] is nl.pair_index
+        assert batch["pairs", "shifts"] is nl.shifts
 
     def test_bound_edges_span_the_capacity_not_the_live_count(self):
         """Fixed-capacity buffers go in whole: the tail of dead padding edges is
         part of the contract (constant shapes for a CUDA graph), so the bound
-        namespace is sized by ``capacity``, never by ``num_edges``."""
+        namespace is sized by ``capacity``, never by ``num_pairs``."""
         nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
         batch = nl.build(_batch(pos))
-        assert batch["edges"].batch_size == torch.Size([nl.capacity])
+        assert batch["pairs"].batch_size == torch.Size([nl.capacity])
 
     def test_bound_edges_hold_index_shifts_and_live_geometry(self):
         """The bind writes connectivity buffers plus live MIC geometry."""
         nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
         batch = nl.build(_batch(pos))
-        assert set(batch["edges"].keys()) == {
-            "edge_index",
+        assert set(batch["pairs"].keys()) == {
+            "pair_index",
             "shifts",
-            "edge_diff",
-            "edge_dist",
+            "pair_diff",
+            "pair_dist",
         }
 
     def test_build_is_never_counted_as_a_rebuild(self):
@@ -797,14 +797,14 @@ class TestNeighborListBind:
         having built at the wrong positions."""
         pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
-        assert nl.num_edges == 1152  # crystallography, link 04
+        assert nl.num_pairs == 1152  # crystallography, link 04
         dilated = pos * 1.05
         reference = NeighborList(
             cell=cell, cutoff=3.5, positions=dilated, skin=1.5, capacity_factor=4.0
         )
         nl.build(_batch(dilated))
-        assert reference.num_edges != 1152
-        assert nl.num_edges == reference.num_edges
+        assert reference.num_pairs != 1152
+        assert nl.num_pairs == reference.num_pairs
 
     # --- liveness of the tie ----------------------------------------------
 
@@ -818,17 +818,17 @@ class TestNeighborListBind:
         pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl, _ = _policy_list(skin=0.0, capacity_factor=4.0)
         batch = nl.build(_batch(pos))
-        before = nl.num_edges
+        before = nl.num_pairs
         compressed = pos * 0.8  # second-neighbour pairs enter the cutoff
         nl.rebuild(compressed)
         reference = NeighborList(cell=cell, cutoff=3.5, positions=compressed, capacity_factor=4.0)
-        assert nl.num_edges != before
-        assert nl.num_edges == reference.num_edges
-        assert batch["edges", "edge_index"] is nl.edge_index
-        assert batch["edges", "shifts"] is nl.shifts
-        n = nl.num_edges
-        assert torch.equal(batch["edges", "edge_index"][:n], reference.edge_index[:n])
-        assert torch.equal(batch["edges", "shifts"][:n], reference.shifts[:n])
+        assert nl.num_pairs != before
+        assert nl.num_pairs == reference.num_pairs
+        assert batch["pairs", "pair_index"] is nl.pair_index
+        assert batch["pairs", "shifts"] is nl.shifts
+        n = nl.num_pairs
+        assert torch.equal(batch["pairs", "pair_index"][:n], reference.pair_index[:n])
+        assert torch.equal(batch["pairs", "shifts"][:n], reference.shifts[:n])
 
     def test_a_policy_rebuild_is_visible_through_the_bound_batch(self):
         """Same liveness, driven through the batch entry point instead: the
@@ -837,17 +837,17 @@ class TestNeighborListBind:
         pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         nl, _ = _policy_list(skin=0.0, capacity_factor=4.0)
         batch = nl.build(_batch(pos))
-        before = nl.num_edges
+        before = nl.num_pairs
         compressed = pos * 0.8
         assert nl.update(_batch(compressed)) is True
         reference = NeighborList(cell=cell, cutoff=3.5, positions=compressed, capacity_factor=4.0)
-        assert nl.num_edges != before
-        assert nl.num_edges == reference.num_edges
-        assert batch["edges", "edge_index"] is nl.edge_index
-        assert batch["edges", "shifts"] is nl.shifts
-        n = nl.num_edges
-        assert torch.equal(batch["edges", "edge_index"][:n], reference.edge_index[:n])
-        assert torch.equal(batch["edges", "shifts"][:n], reference.shifts[:n])
+        assert nl.num_pairs != before
+        assert nl.num_pairs == reference.num_pairs
+        assert batch["pairs", "pair_index"] is nl.pair_index
+        assert batch["pairs", "shifts"] is nl.shifts
+        n = nl.num_pairs
+        assert torch.equal(batch["pairs", "pair_index"][:n], reference.pair_index[:n])
+        assert torch.equal(batch["pairs", "shifts"][:n], reference.shifts[:n])
 
     def test_a_bare_cast_severs_the_tie(self):
         """The documented consequence, pinned so the trade stays visible.
@@ -860,37 +860,37 @@ class TestNeighborListBind:
         nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
         batch = nl.build(_batch(pos))
         nl.to(torch.float32)
-        assert batch["edges", "shifts"] is not nl.shifts
-        assert batch["edges", "shifts"].dtype == torch.float64
+        assert batch["pairs", "shifts"] is not nl.shifts
+        assert batch["pairs", "shifts"].dtype == torch.float64
         assert nl.shifts.dtype == torch.float32
 
-    # --- the list owns ``edges`` once bound --------------------------------
+    # --- the list owns ``pairs`` once bound --------------------------------
 
     def test_build_replaces_a_stale_edges_namespace_wholesale(self):
-        """Whatever was under ``edges`` is dropped, not merged.
+        """Whatever was under ``pairs`` is dropped, not merged.
 
-        A precomputed ``edge_diff`` / ``edge_dist`` pair would be used
+        A precomputed ``pair_diff`` / ``pair_dist`` pair would be used
         straight through by a potential and freeze the PES, and a surviving
-        shorter ``edge_index`` would disagree with the capacity.
+        shorter ``pair_index`` would disagree with the capacity.
         """
         nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
         batch = _batch(pos)
-        batch["edges"] = TensorDict(
+        batch["pairs"] = TensorDict(
             {
-                "edge_index": torch.zeros(3, 2, dtype=torch.long),
-                "edge_diff": torch.zeros(3, 3, dtype=torch.float64),
-                "edge_dist": torch.zeros(3, dtype=torch.float64),
+                "pair_index": torch.zeros(3, 2, dtype=torch.long),
+                "pair_diff": torch.zeros(3, 3, dtype=torch.float64),
+                "pair_dist": torch.zeros(3, dtype=torch.float64),
             },
             batch_size=[3],
         )
         nl.build(batch)
-        assert set(batch["edges"].keys()) == {
-            "edge_index",
+        assert set(batch["pairs"].keys()) == {
+            "pair_index",
             "shifts",
-            "edge_diff",
-            "edge_dist",
+            "pair_diff",
+            "pair_dist",
         }
-        assert batch["edges"].batch_size == torch.Size([nl.capacity])
+        assert batch["pairs"].batch_size == torch.Size([nl.capacity])
 
     # --- validation: the batch must describe *this* system -----------------
 
@@ -942,7 +942,7 @@ class TestNeighborListBind:
         nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
         before = nl.cell.clone()
         nl.build(_batch(pos, cell))
-        assert nl.num_edges == 1152
+        assert nl.num_pairs == 1152
         assert torch.equal(nl.cell, before)
 
     def test_build_accepts_a_single_system_batched_cell(self):
@@ -952,7 +952,7 @@ class TestNeighborListBind:
         nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
         before = nl.cell.clone()
         nl.build(_batch(pos, cell.unsqueeze(0)))
-        assert nl.num_edges == 1152
+        assert nl.num_pairs == 1152
         assert torch.equal(nl.cell, before)
 
     def test_build_rejects_a_disagreeing_cell(self):
@@ -998,8 +998,8 @@ class TestNeighborListBind:
             nl_tensor.rebuild_count,
             nl_tensor.ndanger,
         )
-        assert nl_batch.num_edges == nl_tensor.num_edges
-        assert torch.equal(nl_batch.edge_index, nl_tensor.edge_index)
+        assert nl_batch.num_pairs == nl_tensor.num_pairs
+        assert torch.equal(nl_batch.pair_index, nl_tensor.pair_index)
         assert torch.equal(nl_batch.shifts, nl_tensor.shifts)
 
     def test_update_validates_a_batch_exactly_as_build_does(self):
@@ -1027,7 +1027,7 @@ _EdgeKey = tuple[int, int, tuple[float, ...]]
 def _directed_keys(nl: NeighborList) -> list[_EdgeKey]:
     """The live edges as hashable ``(source, target, shift)`` keys, as emitted.
 
-    Only ``[0, num_edges)`` is read: the tail is dead padding, not edges.
+    Only ``[0, num_pairs)`` is read: the tail is dead padding, not edges.
 
     Shift components are integer combinations of the cell rows — exact values
     like ``12.0`` or ``-6.0`` — so rounding at 6 decimals absorbs the ~1e-13
@@ -1041,9 +1041,9 @@ def _directed_keys(nl: NeighborList) -> list[_EdgeKey]:
         One key per live edge, in buffer order. Duplicates here are real
         duplicates: the same directed edge emitted twice.
     """
-    n = nl.num_edges
-    sources = nl.edge_index[:n, 0].tolist()
-    targets = nl.edge_index[:n, 1].tolist()
+    n = nl.num_pairs
+    sources = nl.pair_index[:n, 0].tolist()
+    targets = nl.pair_index[:n, 1].tolist()
     shifts = nl.shifts[:n].tolist()
     return [
         (source, target, tuple(round(component, 6) for component in shift))
@@ -1058,7 +1058,7 @@ def _canonical_keys(nl: NeighborList) -> list[_EdgeKey]:
     the binned path emits bin-sorted edges, the kernel upper-triangle-sorted
     ones — so equality is compared as a *set*. The key must still separate
     periodic images, which is what the shift carries: for an edge ``(s, t, D)``
-    the reverse edge is ``(t, s, -D)`` (``edge_diff = pos[t] - pos[s] + D``
+    the reverse edge is ``(t, s, -D)`` (``pair_diff = pos[t] - pos[s] + D``
     flips sign wholesale), so orienting the shift low->high makes the key
     independent of which way the edge was emitted, while keeping ``(i, j)``
     across the ``+x`` face distinct from ``(i, j)`` across the ``-x`` one.
@@ -1066,7 +1066,7 @@ def _canonical_keys(nl: NeighborList) -> list[_EdgeKey]:
     Note:
         Both paths emit a **full bidirectional** list, so every undirected pair
         contributes *two* live edges that share one canonical key: the unique
-        canonical keys number ``num_edges / 2``, not ``num_edges``. The
+        canonical keys number ``num_pairs / 2``, not ``num_pairs``. The
         duplicate-free clause is therefore asserted on the *directed* keys (see
         :func:`_assert_paths_agree`), which is where a wrapped stencil's double
         emission would actually show up.
@@ -1123,12 +1123,12 @@ def _assert_paths_agree(binned: NeighborList, kernel: NeighborList, pos: torch.T
 
     1. **Precondition** — no pair within 1e-9 A of ``r_build``, so no clause
        below can be decided by a float tie (:func:`_closest_approach_to`).
-    2. **Counts** — ``num_edges`` equal. Set equality alone cannot see a
+    2. **Counts** — ``num_pairs`` equal. Set equality alone cannot see a
        duplicated edge; a wrapped stencil that emitted every pair twice would
        double this.
     3. **Duplicate-free** — every *directed* key occurs once on each path, i.e.
-       ``len(set(directed)) == num_edges``, and the canonical keys come out at
-       exactly ``num_edges / 2`` because both paths emit a full bidirectional
+       ``len(set(directed)) == num_pairs``, and the canonical keys come out at
+       exactly ``num_pairs / 2`` because both paths emit a full bidirectional
        list (``(s,t,D)`` and ``(t,s,-D)`` share one canonical key). This is the
        intrinsic check the aliasing fixture is built to trip, and it does not
        depend on the oracle.
@@ -1145,12 +1145,12 @@ def _assert_paths_agree(binned: NeighborList, kernel: NeighborList, pos: torch.T
         f"fixture precondition violated: a pair sits {margin:.3e} A from r_build "
         f"{binned.r_build} A, where the closed r <= r_build filter is a float coin-flip"
     )
-    assert binned.num_edges == kernel.num_edges
+    assert binned.num_pairs == kernel.num_pairs
     directed_binned, directed_kernel = _directed_keys(binned), _directed_keys(kernel)
-    assert len(set(directed_binned)) == binned.num_edges, "the binned path emitted a duplicate edge"
-    assert len(set(directed_kernel)) == kernel.num_edges, "the kernel path emitted a duplicate edge"
+    assert len(set(directed_binned)) == binned.num_pairs, "the binned path emitted a duplicate edge"
+    assert len(set(directed_kernel)) == kernel.num_pairs, "the kernel path emitted a duplicate edge"
     canonical_binned = set(_canonical_keys(binned))
-    assert 2 * len(canonical_binned) == binned.num_edges, "the binned list is not bidirectional"
+    assert 2 * len(canonical_binned) == binned.num_pairs, "the binned list is not bidirectional"
     assert canonical_binned == set(_canonical_keys(kernel))
 
 
@@ -1169,8 +1169,8 @@ def _pair_distances(nl: NeighborList, pos: torch.Tensor) -> list[tuple[int, int,
     Returns:
         One entry per live edge, sorted (a multiset, duplicates kept).
     """
-    n = nl.num_edges
-    source, target = nl.edge_index[:n, 0], nl.edge_index[:n, 1]
+    n = nl.num_pairs
+    source, target = nl.pair_index[:n, 0], nl.pair_index[:n, 1]
     distance = torch.linalg.norm(pos[target] - pos[source] + nl.shifts[:n], dim=-1)
     return sorted(
         (min(s, t), max(s, t), round(d, 6))
@@ -1475,7 +1475,7 @@ class TestNeighborListBinned:
         assert explicit.bin is None
         assert explicit.n_bins is None
         assert omitted.n_bins is None
-        assert explicit.num_edges == omitted.num_edges == 1152
+        assert explicit.num_pairs == omitted.num_pairs == 1152
 
     # --- construction validation: refuse before allocating anything ---------
 
@@ -1519,8 +1519,8 @@ class TestNeighborListBinned:
         binned, kernel = _binned_pair(pos, cell)
         _assert_paths_agree(binned, kernel, pos)
 
-    @pytest.mark.parametrize(("skin", "edges"), [(0.0, 384), (1.5, 1152)], ids=["bare", "skinned"])
-    def test_the_binned_path_builds_at_the_build_radius(self, skin: float, edges: int):
+    @pytest.mark.parametrize(("skin", "pairs"), [(0.0, 384), (1.5, 1152)], ids=["bare", "skinned"])
+    def test_the_binned_path_builds_at_the_build_radius(self, skin: float, pairs: int):
         """``skin`` sets the radius, ``bin`` only the search strategy.
 
         Crystallography, not a fit: the simple-cubic lattice has 6 neighbours at
@@ -1532,8 +1532,8 @@ class TestNeighborListBinned:
         """
         pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
         binned, kernel = _binned_pair(pos, cell, skin=skin)
-        assert binned.num_edges == edges
-        assert kernel.num_edges == edges
+        assert binned.num_pairs == pairs
+        assert kernel.num_pairs == pairs
 
     def test_the_binned_path_matches_the_kernel_on_a_jittered_dense_box(self):
         """512 atoms off-lattice: the stencil actually prunes, 125 bins of 729.
@@ -1662,7 +1662,7 @@ class TestNeighborListBinned:
 
         The stencil and the cached inverse cell are the two tensors nothing else
         in the class owns, so they are exactly what a ``to`` that only knows
-        about ``edge_index`` / ``shifts`` / ``cell`` / ``_x_hold`` leaves behind
+        about ``pair_index`` / ``shifts`` / ``cell`` / ``_x_hold`` leaves behind
         — in the wrong dtype (a float64 inverse cell against float32 positions
         promotes *silently*) or on the wrong device. The rebuilt 1152 is the
         cheapest observable that both survived.
@@ -1672,8 +1672,8 @@ class TestNeighborListBinned:
         nl.to(torch.float32)
         nl.rebuild(pos.to(torch.float32))
         assert nl.n_bins == (4, 4, 4)
-        assert nl.num_edges == 1152
-        assert nl.edge_index.dtype == torch.long  # indices are never cast
+        assert nl.num_pairs == 1152
+        assert nl.pair_index.dtype == torch.long  # indices are never cast
 
     def test_the_protocol_does_not_learn_about_bins(self):
         """The build backend is an implementation detail of *this* class.
@@ -1688,3 +1688,76 @@ class TestNeighborListBinned:
         assert isinstance(nl, NeighborStrategy)
         assert "bin" not in NeighborStrategy.__annotations__
         assert "n_bins" not in NeighborStrategy.__annotations__
+
+
+class TestNeighborListGeometryDtype:
+    """``geometry_dtype`` — the precision the bound geometry is written at.
+
+    ``MD(potential_dtype=…)`` evaluates the potential at a second precision
+    while the list's own buffers (and the positions it validates) stay at the
+    MD dtype. The float columns the potential reads off ``pairs`` —
+    ``shifts``, ``pair_diff``, ``pair_dist`` — are therefore written at
+    ``geometry_dtype``: the shifts as a cast copy the list owns and refreshes
+    **in place on a rebuild**, never per step, and the geometry at that dtype
+    by ``_write_geometry``. With no second precision asked for the bind is the
+    buffers themselves, by reference, as before.
+    """
+
+    def test_geometry_dtype_defaults_to_the_buffer_dtype_and_binds_by_reference(self):
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        assert nl.geometry_dtype == torch.float64
+        batch = nl.build(_batch(pos))
+        assert batch["pairs", "shifts"] is nl.shifts
+
+    def test_the_bound_geometry_is_written_at_the_geometry_dtype(self):
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        nl.geometry_dtype = torch.float32
+        batch = nl.build(_batch(pos))
+        for key in ("shifts", "pair_diff", "pair_dist"):
+            assert batch["pairs", key].dtype == torch.float32, key
+        assert batch["pairs", "pair_index"].dtype == torch.long
+        # the list's own buffers and the batch's positions stay at the MD dtype
+        assert nl.shifts.dtype == torch.float64
+        assert batch["atoms", "pos"].dtype == torch.float64
+        assert torch.equal(batch["pairs", "shifts"], nl.shifts.to(torch.float32))
+        n = nl.num_pairs
+        source, target = nl.pair_index[:n, 0], nl.pair_index[:n, 1]
+        expected = (pos[target] - pos[source]).to(torch.float32) + nl.shifts[:n].to(torch.float32)
+        assert torch.equal(batch["pairs", "pair_diff"][:n], expected)
+
+    def test_the_cast_shifts_are_refreshed_on_a_rebuild_not_per_step(self):
+        """One cast per rebuild: the bound tensor keeps its identity across steps."""
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        nl.geometry_dtype = torch.float32
+        batch = nl.build(_batch(pos))
+        bound = batch["pairs", "shifts"]
+        assert bound.dtype == torch.float32
+        assert nl.update(batch) is False  # nothing moved: no rebuild, no cast
+        assert batch["pairs", "shifts"] is bound
+        moved = pos.clone()
+        moved[0] += torch.tensor([1.0, 0.0, 0.0], dtype=torch.float64)  # > skin / 2
+        batch["atoms", "pos"] = moved
+        assert nl.update(batch) is True
+        assert batch["pairs", "shifts"] is bound  # refreshed in place
+        assert torch.equal(bound, nl.shifts.to(torch.float32))
+
+    def test_scale_isotropic_scales_the_cast_shifts_with_the_buffers(self):
+        nl, pos = _policy_list(skin=1.5, capacity_factor=4.0)
+        nl.geometry_dtype = torch.float32
+        batch = nl.build(_batch(pos))
+        bound = batch["pairs", "shifts"]
+        nl.scale_isotropic(nl.cell * 1.01, pos * 1.01)
+        assert batch["pairs", "shifts"] is bound
+        assert torch.equal(bound, nl.shifts.to(torch.float32))
+
+    def test_to_carries_the_cast_shifts_to_the_new_dtype(self):
+        """``to(dtype)`` moves the buffers; an explicit ``geometry_dtype`` survives it."""
+        nl, _ = _policy_list(skin=1.5, capacity_factor=4.0)
+        nl.geometry_dtype = torch.float32
+        nl.to(torch.float32)
+        assert nl.geometry_dtype == torch.float32
+        assert nl.shifts.dtype == torch.float32
+        # the two precisions now agree, so the bind is the buffer itself again
+        pos, _ = make_cubic_lattice(n_side=4, spacing=3.0)
+        batch = nl.build(_batch(pos.to(torch.float32)))
+        assert batch["pairs", "shifts"] is nl.shifts

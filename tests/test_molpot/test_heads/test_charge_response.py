@@ -49,14 +49,14 @@ class TestChargeResponseHead:
         head = _make_head()
 
         pos = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float64)
-        edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+        pair_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
         out = head(
             pos=pos,
             Z=torch.tensor([1, 8], dtype=torch.long),
             atom_batch=torch.zeros(2, dtype=torch.long),
             num_graphs=1,
-            edge_index=edge_index,
-            edge_diff=pos[edge_index[:, 1]] - pos[edge_index[:, 0]],
+            pair_index=pair_index,
+            pair_diff=pos[pair_index[:, 1]] - pos[pair_index[:, 0]],
             node_scalars=torch.ones(2, 4, dtype=torch.float64),
             edge_scalars=torch.ones(2, 3, dtype=torch.float64),
         )

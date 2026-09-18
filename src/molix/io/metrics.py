@@ -212,8 +212,14 @@ def _atomic_write_json(path: Path, payload: dict[str, JSONValue]) -> None:
     tmp.replace(path)
 
 
-def rebuild_metrics_index(record_root: Path) -> dict[str, JSONValue]:
-    """Rebuild and persist ``metrics/index.json`` from the JSONL stream."""
+def scan_metrics_index(record_root: Path) -> dict[str, JSONValue]:
+    """Derive the index by reading the whole JSONL. Writes nothing.
+
+    Linear in the stream, so a caller that runs it per append is quadratic in
+    the number of appends; :class:`MetricsWriter` therefore scans **once**, at
+    the moment it first touches an existing stream, and maintains the index
+    incrementally from there.
+    """
     index = _empty_index()
     path = metrics_path(record_root)
     if path.exists():
@@ -234,6 +240,12 @@ def rebuild_metrics_index(record_root: Path) -> dict[str, JSONValue]:
                 _update_index_with_record(index, record)
 
     index["series_count"] = len(_coerce_dict(index.get("series")))
+    return index
+
+
+def rebuild_metrics_index(record_root: Path) -> dict[str, JSONValue]:
+    """Rebuild and persist ``metrics/index.json`` from the JSONL stream."""
+    index = scan_metrics_index(record_root)
     _atomic_write_json(index_path(record_root), index)
     return index
 
@@ -303,6 +315,16 @@ class MetricsWriter:
         self._root = Path(record_root)
         self._lock = threading.Lock()
         self._index_dirty = False
+        self._index: dict[str, JSONValue] | None = None
+
+    def _live_index(self) -> dict[str, JSONValue]:
+        """The running index, scanned from any pre-existing stream once.
+
+        Call under ``self._lock``.
+        """
+        if self._index is None:
+            self._index = scan_metrics_index(self._root)
+        return self._index
 
     @property
     def record_root(self) -> Path:
@@ -406,19 +428,26 @@ class MetricsWriter:
         with self._lock:
             out_dir = metrics_dir(self._root)
             out_dir.mkdir(parents=True, exist_ok=True)
+            index = self._live_index()
             with metrics_path(self._root).open("a", encoding="utf-8") as fh:
                 fh.write(line)
                 fh.write("\n")
+            _update_index_with_record(index, payload)
             self._index_dirty = True
 
         return payload
 
     def flush(self) -> None:
-        """Rebuild the derived ``metrics/index.json`` from the JSONL once."""
+        """Persist the running ``metrics/index.json``.
+
+        The index is maintained per append, so a flush is one small JSON write
+        and never a re-read of the stream — flushing on a fixed append stride
+        stays O(1) per flush instead of O(stream) per flush.
+        """
         with self._lock:
             if not self._index_dirty:
                 return
-            rebuild_metrics_index(self._root)
+            _atomic_write_json(index_path(self._root), self._live_index())
             self._index_dirty = False
 
 
@@ -434,5 +463,6 @@ __all__ = [
     "metrics_path",
     "read_metrics",
     "rebuild_metrics_index",
+    "scan_metrics_index",
     "validate_record",
 ]

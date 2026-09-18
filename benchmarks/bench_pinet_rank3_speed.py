@@ -7,8 +7,8 @@ Measures wall time for the real operating regimes with the current API:
 * force training (train, energy + force loss + ``loss.backward``)
 * encode-only forward
 
-``forces`` / method knobs are **init-only** — ``forward(batch)`` has no
-flags and no runtime branching.
+The ``forces`` knob is **init-only** — ``forward(batch)`` has no flags and no
+runtime branching.
 
 Usage::
 
@@ -41,7 +41,6 @@ def _soft_load_library(path):  # noqa: ANN001
 torch.ops.load_library = _soft_load_library  # type: ignore[method-assign]
 
 from molix.profiler import MockBatch  # noqa: E402
-from molpot.derivation import EnergyReadout, ForceReadout  # noqa: E402
 from molzoo.pinet import PiNet, PiNetPotential  # noqa: E402
 
 ATOM_TYPES = list(range(1, 8))
@@ -81,12 +80,12 @@ def _factory(
     device: str,
     *,
     n_atoms: int = 512,
-    n_edges: int = 4096,
+    n_pairs: int = 4096,
     n_graphs: int = 16,
 ) -> Callable[[], object]:
     return MockBatch(
         n_atoms=n_atoms,
-        n_edges=n_edges,
+        n_pairs=n_pairs,
         n_graphs=n_graphs,
         atomic_numbers=7,
         device=device,
@@ -112,7 +111,6 @@ def build_potential(
     hidden: int = 64,
     emit_property_features: bool | None = None,
     compute_forces: bool = True,
-    method: str = "func",
 ) -> PiNetPotential:
     kwargs: dict = dict(
         atom_types=ATOM_TYPES,
@@ -124,25 +122,11 @@ def build_potential(
         depth=depth,
         rank=rank,
         hidden_dim=hidden,
-        compute_forces=compute_forces,
+        wrt=("atoms.pos",) if compute_forces else (),
     )
     if emit_property_features is not None:
         kwargs["emit_property_features"] = emit_property_features
-    pot = PiNetPotential(**kwargs)
-    # Rebuild pipeline when method differs from the hard-coded default ("func").
-    if method != "func":
-        pot.deriv_method = method
-        if compute_forces:
-            energy_ro = EnergyReadout(pot, method=method, backward=True)  # type: ignore[arg-type]
-            force_ro = ForceReadout(pot, method=method)  # type: ignore[arg-type]
-
-            def _pipeline(batch, e=energy_ro, f=force_ro):
-                return f(e(batch))
-
-            pot._pipeline = _pipeline
-        else:
-            pot._pipeline = EnergyReadout(pot, method=method, backward=False)  # type: ignore[arg-type]
-    return pot
+    return PiNetPotential(**kwargs)
 
 
 def build_encoder(*, rank: int = 3, hidden: int = 64, emit: bool = False) -> PiNet:
@@ -178,12 +162,12 @@ def run_matrix(
     n_steps: int,
     n_warmup: int,
     n_atoms: int,
-    n_edges: int,
+    n_pairs: int,
     n_graphs: int,
     skip_compile: bool = False,
 ) -> list[Row]:
     dev = str(device)
-    factory = _factory(dev, n_atoms=n_atoms, n_edges=n_edges, n_graphs=n_graphs)
+    factory = _factory(dev, n_atoms=n_atoms, n_pairs=n_pairs, n_graphs=n_graphs)
     rows: list[Row] = []
 
     # ---- encoder-only -------------------------------------------------------
@@ -248,11 +232,9 @@ def run_matrix(
         finally:
             torch.compiler.reset()
 
-    # ---- force inference (eval fused path, method=func) --------------------
+    # ---- force inference (eval, the derivative head) -----------------------
     for emit, tag in ((False, "force-inf eval emit=0"), (True, "force-inf eval emit=1")):
-        pot = build_potential(
-            rank=3, emit_property_features=emit, compute_forces=True, method="func"
-        ).to(device)
+        pot = build_potential(rank=3, emit_property_features=emit, compute_forces=True).to(device)
         pot.eval()
         assert pot.encoder.emit_property_features is emit
 
@@ -262,12 +244,10 @@ def run_matrix(
                 m(factory())
 
         ms = _time_it(step_eval, device=device, n_warmup=n_warmup, n_steps=n_steps)
-        rows.append(_row(tag, ms, n_atoms, "func has_aux 1-pass"))
+        rows.append(_row(tag, ms, n_atoms, "head 1-pass"))
 
     # rank-1 force inf for ratio
-    pot_r1 = build_potential(
-        rank=1, emit_property_features=False, compute_forces=True, method="func"
-    ).to(device)
+    pot_r1 = build_potential(rank=1, emit_property_features=False, compute_forces=True).to(device)
     pot_r1.eval()
 
     def force_r1():
@@ -277,30 +257,9 @@ def run_matrix(
     ms = _time_it(force_r1, device=device, n_warmup=n_warmup, n_steps=n_steps)
     rows.append(_row("force-inf eval rank1", ms, n_atoms))
 
-    # force-inf grad method (autograd 1-pass)
-    pot_ig = build_potential(
-        rank=3, emit_property_features=False, compute_forces=True, method="grad"
-    ).to(device)
-    pot_ig.eval()
-
-    def force_inf_grad():
-        with torch.enable_grad():
-            pot_ig(factory())
-
-    ms = _time_it(force_inf_grad, device=device, n_warmup=n_warmup, n_steps=n_steps)
-    rows.append(_row("force-inf eval grad", ms, n_atoms, "autograd 1-pass"))
-
     # ---- force training ----------------------------------------------------
-    for method, tag, note in (
-        ("func", "force-train func emit=0", "func has_aux + loss.backward"),
-        ("grad", "force-train grad emit=0", "autograd create_graph + loss.backward"),
-    ):
-        pot = build_potential(
-            rank=3,
-            emit_property_features=False,
-            compute_forces=True,
-            method=method,
-        ).to(device)
+    for tag, note in (("force-train emit=0", "head create_graph + loss.backward"),):
+        pot = build_potential(rank=3, emit_property_features=False, compute_forces=True).to(device)
         pot.train()
         opt = torch.optim.Adam(pot.parameters(), lr=1e-3)
 
@@ -313,10 +272,8 @@ def run_matrix(
         ms = _time_it(step, device=device, n_warmup=n_warmup, n_steps=n_steps)
         rows.append(_row(tag, ms, n_atoms, note))
 
-    # emit=1 force train (func default path)
-    pot = build_potential(
-        rank=3, emit_property_features=True, compute_forces=True, method="func"
-    ).to(device)
+    # emit=1 force train
+    pot = build_potential(rank=3, emit_property_features=True, compute_forces=True).to(device)
     pot.train()
     opt = torch.optim.Adam(pot.parameters(), lr=1e-3)
 
@@ -326,7 +283,7 @@ def run_matrix(
         o.step()
 
     ms = _time_it(step_emit1, device=device, n_warmup=n_warmup, n_steps=n_steps)
-    rows.append(_row("force-train func emit=1", ms, n_atoms, "func has_aux + loss.backward"))
+    rows.append(_row("force-train emit=1", ms, n_atoms, "head create_graph + loss.backward"))
 
     # energy-only train (no forces)
     pot_et = build_potential(rank=3, emit_property_features=False, compute_forces=False).to(device)
@@ -343,9 +300,7 @@ def run_matrix(
     rows.append(_row("energy-train (no forces)", ms, n_atoms))
 
     # ---- forward-only (no loss.backward) train vs eval ---------------------
-    pot = build_potential(
-        rank=3, emit_property_features=False, compute_forces=True, method="func"
-    ).to(device)
+    pot = build_potential(rank=3, emit_property_features=False, compute_forces=True).to(device)
     b = factory()
 
     def just_forward_train():
@@ -371,7 +326,7 @@ def run_matrix(
         )
     )
 
-    print(f"\n# batch: atoms={n_atoms} edges={n_edges} graphs={n_graphs}  device={device}")
+    print(f"\n# batch: atoms={n_atoms} pairs={n_pairs} graphs={n_graphs}  device={device}")
     print(f"# torch {torch.__version__}  cuda={torch.cuda.is_available()}")
     if device.type == "cuda":
         print(f"# GPU: {torch.cuda.get_device_name(0)}")
@@ -379,10 +334,10 @@ def run_matrix(
     return rows
 
 
-def profile_cpu_ops(n_steps: int, n_atoms: int, n_edges: int, n_graphs: int) -> None:
+def profile_cpu_ops(n_steps: int, n_atoms: int, n_pairs: int, n_graphs: int) -> None:
     from torch.profiler import ProfilerActivity, profile
 
-    factory = _factory("cpu", n_atoms=n_atoms, n_edges=n_edges, n_graphs=n_graphs)
+    factory = _factory("cpu", n_atoms=n_atoms, n_pairs=n_pairs, n_graphs=n_graphs)
     pot = build_potential(rank=3, emit_property_features=False, compute_forces=True)
     pot.train()
     for _ in range(3):
@@ -403,7 +358,7 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=40)
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--atoms", type=int, default=512)
-    ap.add_argument("--edges", type=int, default=4096)
+    ap.add_argument("--pairs", type=int, default=4096)
     ap.add_argument("--graphs", type=int, default=16)
     ap.add_argument("--profile-ops", action="store_true")
     ap.add_argument("--skip-compile", action="store_true", help="Skip torch.compile cells")
@@ -421,7 +376,7 @@ def main() -> None:
         n_steps=args.steps,
         n_warmup=args.warmup,
         n_atoms=args.atoms,
-        n_edges=args.edges,
+        n_pairs=args.pairs,
         n_graphs=args.graphs,
         skip_compile=args.skip_compile,
     )
@@ -471,7 +426,7 @@ def main() -> None:
     )
 
     if args.profile_ops and device.type == "cpu":
-        profile_cpu_ops(min(args.steps, 15), args.atoms, args.edges, args.graphs)
+        profile_cpu_ops(min(args.steps, 15), args.atoms, args.pairs, args.graphs)
 
 
 if __name__ == "__main__":

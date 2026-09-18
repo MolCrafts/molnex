@@ -66,7 +66,7 @@ from molpot.potentials.mixing import geometric_arithmetic_mixing
 
 def repulsion_mixing(
     atom_params: dict[str, torch.Tensor],
-    edge_index: torch.Tensor,
+    pair_index: torch.Tensor,
 ) -> dict[str, torch.Tensor]:
     """Combining rule for :class:`RepulsionExp6`: per-atom → per-pair.
 
@@ -81,7 +81,7 @@ def repulsion_mixing(
             ``"r_star"`` ``(N,)`` (a length). Units are the model's own — see
             the module docstring. Extra keys are ignored, so one head may serve
             several potentials.
-        edge_index: Edge indices ``(E, 2)``. Both means are symmetric in the two
+        pair_index: Edge indices ``(E, 2)``. Both means are symmetric in the two
             columns, so edge direction does not matter.
 
     Returns:
@@ -95,7 +95,7 @@ def repulsion_mixing(
     """
     return geometric_arithmetic_mixing(
         atom_params,
-        edge_index,
+        pair_index,
         geometric_keys=["eps_rep", "lam_rep"],
         arithmetic_keys=["r_star"],
     )
@@ -103,7 +103,7 @@ def repulsion_mixing(
 
 def dispersion_mixing(
     atom_params: dict[str, torch.Tensor],
-    edge_index: torch.Tensor,
+    pair_index: torch.Tensor,
 ) -> dict[str, torch.Tensor]:
     """Combining rule for :class:`DispersionC6`: per-atom → per-pair.
 
@@ -119,7 +119,7 @@ def dispersion_mixing(
             model's own units — see the module docstring. A
             :class:`~molpot.composition.TSScalingHead` also emits ``"alpha"``,
             which is ignored here.
-        edge_index: Edge indices ``(E, 2)``; both means are symmetric in the two
+        pair_index: Edge indices ``(E, 2)``; both means are symmetric in the two
             columns.
 
     Returns:
@@ -132,7 +132,7 @@ def dispersion_mixing(
     """
     return geometric_arithmetic_mixing(
         atom_params,
-        edge_index,
+        pair_index,
         geometric_keys=["c6"],
         arithmetic_keys=["r_star"],
     )
@@ -140,7 +140,7 @@ def dispersion_mixing(
 
 def ct_mixing(
     atom_params: dict[str, torch.Tensor],
-    edge_index: torch.Tensor,
+    pair_index: torch.Tensor,
 ) -> dict[str, torch.Tensor]:
     """Combining rule for :class:`ChargeTransfer`: per-atom → per-pair.
 
@@ -155,7 +155,7 @@ def ct_mixing(
             :meth:`ChargeTransfer.forward`), ``"lam_ct"`` ``(N,)``
             (dimensionless) and ``"r_star"`` ``(N,)`` (a length), in the model's
             own units — see the module docstring.
-        edge_index: Edge indices ``(E, 2)``; both means are symmetric in the two
+        pair_index: Edge indices ``(E, 2)``; both means are symmetric in the two
             columns.
 
     Returns:
@@ -168,7 +168,7 @@ def ct_mixing(
     """
     return geometric_arithmetic_mixing(
         atom_params,
-        edge_index,
+        pair_index,
         geometric_keys=["eps_ct", "lam_ct"],
         arithmetic_keys=["r_star"],
     )
@@ -182,21 +182,21 @@ def ct_mixing(
 def _reduce_pair_energy(
     pair_energy: torch.Tensor,
     bidirectional: bool,
-    edge_batch: torch.Tensor | None,
+    pair_batch: torch.Tensor | None,
     num_graphs: int | None,
 ) -> torch.Tensor:
     """Sum pair energies into per-graph totals (or a scalar)."""
     if bidirectional:
         pair_energy = 0.5 * pair_energy
 
-    if edge_batch is None:
+    if pair_batch is None:
         return pair_energy.sum()
 
     if num_graphs is None:
-        num_graphs = int(edge_batch.max().item()) + 1
+        num_graphs = int(pair_batch.max().item()) + 1
 
     energy = torch.zeros(num_graphs, dtype=pair_energy.dtype, device=pair_energy.device)
-    energy.index_add_(0, edge_batch, pair_energy)
+    energy.index_add_(0, pair_batch, pair_energy)
     return energy
 
 
@@ -230,9 +230,9 @@ class RepulsionExp6(nn.Module):
 
     Args:
         mixing_fn: Combining rule making per-pair parameters from per-atom ones,
-            called as ``mixing_fn(atom_params, edge_index)`` with ``atom_params``
+            called as ``mixing_fn(atom_params, pair_index)`` with ``atom_params``
             holding ``"eps_rep"`` / ``"lam_rep"`` / ``"r_star"`` ``(N,)`` and
-            ``edge_index`` ``(E, 2)``, and returning ``"eps_rep_ij"`` /
+            ``pair_index`` ``(E, 2)``, and returning ``"eps_rep_ij"`` /
             ``"lam_rep_ij"`` / ``"r_star_ij"`` ``(E,)``. Applied by
             :class:`~molpot.composition.PotentialComposer`, not by
             :meth:`forward`. Defaults to :func:`repulsion_mixing`; a rule
@@ -273,7 +273,7 @@ class RepulsionExp6(nn.Module):
         eps_rep_ij: torch.Tensor,
         lam_rep_ij: torch.Tensor,
         r_star_ij: torch.Tensor,
-        edge_batch: torch.Tensor | None = None,
+        pair_batch: torch.Tensor | None = None,
         num_graphs: int | None = None,
     ) -> torch.Tensor:
         """Compute repulsion energy.
@@ -290,13 +290,13 @@ class RepulsionExp6(nn.Module):
             lam_rep_ij: Per-pair decay exponent ``(E,)``, dimensionless.
             r_star_ij: Per-pair reference radius ``(E,)``, a length. Also clamped
                 at ``1e-6``.
-            edge_batch: Index of the graph each edge belongs to ``(E,)``. ``None``
+            pair_batch: Index of the graph each edge belongs to ``(E,)``. ``None``
                 sums to a scalar.
-            num_graphs: Number of graphs ``B``; inferred from ``edge_batch`` when
+            num_graphs: Number of graphs ``B``; inferred from ``pair_batch`` when
                 ``None``, which costs a host sync and so breaks a compiled graph.
 
         Returns:
-            Per-graph energy ``(B,)``, or a scalar ``()`` when ``edge_batch`` is
+            Per-graph energy ``(B,)``, or a scalar ``()`` when ``pair_batch`` is
             ``None``. Non-negative: both terms of the form are repulsive.
         """
         r = distance.clamp(min=1e-6)
@@ -304,7 +304,7 @@ class RepulsionExp6(nn.Module):
         exp_term = eps_rep_ij * torch.exp(lam_rep_ij * (1.0 - r_ratio))
         wall_term = (self.s_rep / r).pow(12)
         pair_energy = (exp_term + wall_term) * self.energy_scale
-        return _reduce_pair_energy(pair_energy, self.bidirectional, edge_batch, num_graphs)
+        return _reduce_pair_energy(pair_energy, self.bidirectional, pair_batch, num_graphs)
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +330,8 @@ class DispersionC6(nn.Module):
 
     Args:
         mixing_fn: Combining rule making per-pair parameters from per-atom ones,
-            called as ``mixing_fn(atom_params, edge_index)`` with ``atom_params``
-            holding ``"c6"`` / ``"r_star"`` ``(N,)`` and ``edge_index``
+            called as ``mixing_fn(atom_params, pair_index)`` with ``atom_params``
+            holding ``"c6"`` / ``"r_star"`` ``(N,)`` and ``pair_index``
             ``(E, 2)``, and returning ``"c6_ij"`` / ``"r_star_ij"`` ``(E,)``.
             Applied by :class:`~molpot.composition.PotentialComposer`, not by
             :meth:`forward`. Defaults to :func:`dispersion_mixing`; a rule
@@ -371,7 +371,7 @@ class DispersionC6(nn.Module):
         distance: torch.Tensor,
         c6_ij: torch.Tensor,
         r_star_ij: torch.Tensor,
-        edge_batch: torch.Tensor | None = None,
+        pair_batch: torch.Tensor | None = None,
         num_graphs: int | None = None,
     ) -> torch.Tensor:
         """Compute dispersion energy.
@@ -386,13 +386,13 @@ class DispersionC6(nn.Module):
                 energy × length⁶.
             r_star_ij: Per-pair reference radius ``(E,)``, a length; sets where
                 the short-range damping takes over. Also clamped at ``1e-6``.
-            edge_batch: Index of the graph each edge belongs to ``(E,)``. ``None``
+            pair_batch: Index of the graph each edge belongs to ``(E,)``. ``None``
                 sums to a scalar.
-            num_graphs: Number of graphs ``B``; inferred from ``edge_batch`` when
+            num_graphs: Number of graphs ``B``; inferred from ``pair_batch`` when
                 ``None``, which costs a host sync and so breaks a compiled graph.
 
         Returns:
-            Per-graph energy ``(B,)``, or a scalar ``()`` when ``edge_batch`` is
+            Per-graph energy ``(B,)``, or a scalar ``()`` when ``pair_batch`` is
             ``None``. Non-positive: dispersion is purely attractive.
         """
         r = distance.clamp(min=1e-6)
@@ -400,7 +400,7 @@ class DispersionC6(nn.Module):
         r_star6 = r_star_ij.clamp(min=1e-6).pow(6)
         pair_energy = -c6_ij / (self.s_disp * r_star6 + r6)
         pair_energy = pair_energy * self.energy_scale
-        return _reduce_pair_energy(pair_energy, self.bidirectional, edge_batch, num_graphs)
+        return _reduce_pair_energy(pair_energy, self.bidirectional, pair_batch, num_graphs)
 
 
 # ---------------------------------------------------------------------------
@@ -428,9 +428,9 @@ class ChargeTransfer(nn.Module):
 
     Args:
         mixing_fn: Combining rule making per-pair parameters from per-atom ones,
-            called as ``mixing_fn(atom_params, edge_index)`` with ``atom_params``
+            called as ``mixing_fn(atom_params, pair_index)`` with ``atom_params``
             holding ``"eps_ct"`` / ``"lam_ct"`` / ``"r_star"`` ``(N,)`` and
-            ``edge_index`` ``(E, 2)``, and returning ``"eps_ct_ij"`` /
+            ``pair_index`` ``(E, 2)``, and returning ``"eps_ct_ij"`` /
             ``"lam_ct_ij"`` / ``"r_star_ij"`` ``(E,)``. Applied by
             :class:`~molpot.composition.PotentialComposer`, not by
             :meth:`forward`. Defaults to :func:`ct_mixing`; a rule written for
@@ -465,7 +465,7 @@ class ChargeTransfer(nn.Module):
         eps_ct_ij: torch.Tensor,
         lam_ct_ij: torch.Tensor,
         r_star_ij: torch.Tensor,
-        edge_batch: torch.Tensor | None = None,
+        pair_batch: torch.Tensor | None = None,
         num_graphs: int | None = None,
     ) -> torch.Tensor:
         """Compute charge-transfer energy.
@@ -482,13 +482,13 @@ class ChargeTransfer(nn.Module):
                 values switch the term off further out.
             r_star_ij: Per-pair reference radius ``(E,)``, a length. Also clamped
                 at ``1e-6``.
-            edge_batch: Index of the graph each edge belongs to ``(E,)``. ``None``
+            pair_batch: Index of the graph each edge belongs to ``(E,)``. ``None``
                 sums to a scalar.
-            num_graphs: Number of graphs ``B``; inferred from ``edge_batch`` when
+            num_graphs: Number of graphs ``B``; inferred from ``pair_batch`` when
                 ``None``, which costs a host sync and so breaks a compiled graph.
 
         Returns:
-            Per-graph energy ``(B,)``, or a scalar ``()`` when ``edge_batch`` is
+            Per-graph energy ``(B,)``, or a scalar ``()`` when ``pair_batch`` is
             ``None``. Its sign follows ``eps_ct_ij``, which the
             :class:`~molpot.composition.ChargeTransferParameterHead` floors above
             zero.
@@ -497,4 +497,4 @@ class ChargeTransfer(nn.Module):
         ratio = (lam_ct_ij * r_star_ij.clamp(min=1e-6)) / r
         pair_energy = (eps_ct_ij / r.pow(4)) * torch.exp(-ratio.pow(3))
         pair_energy = pair_energy * self.energy_scale
-        return _reduce_pair_energy(pair_energy, self.bidirectional, edge_batch, num_graphs)
+        return _reduce_pair_energy(pair_energy, self.bidirectional, pair_batch, num_graphs)

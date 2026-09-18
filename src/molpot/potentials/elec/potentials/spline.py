@@ -114,11 +114,11 @@ class SplinePotential(Potential):
         """Full potential from spline (LR + SR).
 
         Args:
-            dist: Interatomic distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            dist: Interatomic distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
-            Potential values ``(n_edges,)``.
+            Potential values ``(n_pairs,)``.
         """
         return self.prefactor * (
             self.lr_from_dist(dist, pair_mask) + self.sr_from_dist(dist, pair_mask)
@@ -130,8 +130,8 @@ class SplinePotential(Potential):
         """Short-range part (zero by default for spline potentials).
 
         Args:
-            dist: Interatomic distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            dist: Interatomic distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
             Zero tensor matching ``dist`` shape.
@@ -144,11 +144,11 @@ class SplinePotential(Potential):
         """Long-range part from the real-space spline.
 
         Args:
-            dist: Interatomic distances ``(n_edges,)``.
-            pair_mask: Optional boolean mask ``(n_edges,)``.
+            dist: Interatomic distances ``(n_pairs,)``.
+            pair_mask: Optional boolean mask ``(n_pairs,)``.
 
         Returns:
-            Long-range potential values ``(n_edges,)``.
+            Long-range potential values ``(n_pairs,)``.
         """
         return self.prefactor * self._spline(dist)
 

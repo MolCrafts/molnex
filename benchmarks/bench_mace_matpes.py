@@ -26,8 +26,10 @@ import math
 import time
 
 import torch
+from tensordict import TensorDict
 
 from molix import config
+from molix.autograd import Derivative
 from molix.compile import Compiler
 from molix.md import NeighborList
 from molpot.derivation.force import autograd_forces_from_energy
@@ -141,17 +143,30 @@ def main() -> int:
     print(f"device={device} dtype={config.ftype} fused_ops_available={fused_available}")
 
     pos, Z, batch, neighbors = _system(args.n_atoms, device)
-    print(f"system: N={args.n_atoms} E={neighbors.num_edges} (capacity {neighbors.capacity})")
+    print(f"system: N={args.n_atoms} E={neighbors.num_pairs} (capacity {neighbors.capacity})")
 
     times: dict[str, float] = {}
     for label, use_fallback in (("fused", False), ("fallback", True)):
         model = _build_model(use_fallback).to(device)
+        forces = Derivative(model, wrt=("atoms.pos",))
+        pair_index = neighbors.pair_index
+        pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]] + neighbors.shifts
+        frame = TensorDict(
+            {
+                "atoms": TensorDict(
+                    {"Z": Z, "pos": pos, "batch": batch}, batch_size=[pos.shape[0]]
+                ),
+                "pairs": TensorDict(
+                    {"pair_index": pair_index, "pair_diff": pair_diff, "shifts": neighbors.shifts},
+                    batch_size=[pair_index.shape[0]],
+                ),
+                "graphs": TensorDict({}, batch_size=[1]),
+            },
+            batch_size=[],
+        )
 
-        def step(model=model):
-            out = model.energy_forces(
-                pos, Z, neighbors.edge_index, batch, num_graphs=1, shifts=neighbors.shifts
-            )
-            return out["forces"]
+        def step(forces=forces, frame=frame):
+            return forces(frame)["atoms", "forces"]
 
         times[label] = _time(step, args.steps)
         print(f"eager energy+forces [{label:8s}]: {times[label]:9.3f} ms/step")
@@ -167,7 +182,7 @@ def main() -> int:
         def compiled_step():
             leaf = pos.detach().requires_grad_(True)
             with torch.enable_grad():
-                energy = energy_fn(leaf, Z, neighbors.edge_index, batch, 1, neighbors.shifts)
+                energy = energy_fn(leaf, Z, neighbors.pair_index, batch, 1, neighbors.shifts)
             return autograd_forces_from_energy(energy, leaf)
 
         t = _time(compiled_step, args.steps)

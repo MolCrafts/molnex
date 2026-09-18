@@ -25,6 +25,7 @@ import torch
 from tensordict import TensorDict
 
 from molix import config
+from molix.autograd import Derivative
 from molix.compile import Compiler
 from molix.md import (
     MD,
@@ -37,7 +38,7 @@ from molix.md import (
     VelocityVerletIntegrator,
 )
 from molix.units import units
-from molzoo.mace import MaceMatpes, MacePotential
+from molzoo.mace import MaceMatpes
 
 _EV_TO_MD = (1.0 * units.eV).to("amu * angstrom ** 2 / femtosecond ** 2").magnitude
 _KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
@@ -133,23 +134,21 @@ def _system_td(
     )
 
 
-def _bind_energy_core(
-    model: MacePotential,
+def _execution_policy(
     *,
     compile_energy: bool,
     autocast_dtype: torch.dtype | None,
-) -> None:
-    """Compose execution policy through the shared, validated energy seam."""
+):
+    """The ``callable -> callable`` ``MD.set_compiler`` applies to the composed force op."""
 
-    def transform(core):
+    def transform(op):
         if autocast_dtype is not None:
-            core = torch.autocast(device_type="cuda", dtype=autocast_dtype)(core)
+            op = torch.autocast(device_type="cuda", dtype=autocast_dtype)(op)
         # The MD adapter trims live-prefix edges. Their count changes across
         # rebuilds, so this runner cannot promise static CUDA graph replay.
-        return Compiler(fullgraph=True, dynamic=True)(core) if compile_energy else core
+        return Compiler(fullgraph=True, dynamic=True)(op) if compile_energy else op
 
-    if compile_energy or autocast_dtype is not None:
-        model.compile_core(transform)
+    return transform if (compile_energy or autocast_dtype is not None) else None
 
 
 def _bind_md(dtype, force_field, integrator, neighbors, hooks, device) -> MD:
@@ -187,12 +186,12 @@ def minimize_fire(
     e_eV = 0.0
     fmax = float("inf")
     step = 0
-    pots = force_field.to_potentials()
+    forces_of = Derivative(force_field.to_potentials(), wrt=("atoms.pos",))
     for step in range(1, max_steps + 1):
         work["atoms", "pos"] = pos
         neighbors.update(work)
-        energy = pots.calc_energy(work)
-        forces = pots.calc_forces(work)
+        out = forces_of(work)
+        energy, forces = out["graphs", "energy"], out["atoms", "forces"]
         e_eV = float(energy.sum())
         fmax = float(forces.abs().max())
         if fmax < fmax_eV_A or step == max_steps:
@@ -415,7 +414,6 @@ def main() -> None:
     model = MaceMatpes.load(
         args.weights_dir / "matpes_r2scan_config.json",
         use_fallback=use_fallback,
-        compute_forces=False,
         energy_dtype=energy_dtype,
     ).eval()
     model.configure_input_dtype(potential_dtype)
@@ -439,7 +437,7 @@ def main() -> None:
         capacity_factor=args.capacity_factor,
     )
     print(
-        f"edges: {neighbors.num_edges} (mean {neighbors.num_edges / Z.numel():.1f} per atom), "
+        f"edges: {neighbors.num_pairs} (mean {neighbors.num_pairs / Z.numel():.1f} per atom), "
         f"buffer capacity {neighbors.capacity}"
     )
     print(
@@ -469,12 +467,10 @@ def main() -> None:
     )
     t0 = time.perf_counter()
     neighbors.build(atoms)
-    pots0 = force_field.to_potentials()
     with torch.no_grad():
-        e0 = pots0.calc_energy(atoms)
-        f0 = pots0.calc_forces(atoms)
-    _bind_energy_core(
-        model,
+        single_point = Derivative(force_field.to_potentials(), wrt=("atoms.pos",))(atoms)
+        e0, f0 = single_point["graphs", "energy"], single_point["atoms", "forces"]
+    execution_policy = _execution_policy(
         compile_energy=args.compile,
         autocast_dtype=torch.bfloat16 if args.autocast_bf16 else None,
     )
@@ -600,7 +596,7 @@ def main() -> None:
                     ),
                 ],
                 device,
-            )
+            ).set_compiler(execution_policy)
             t_nvt = time.perf_counter()
             nvt.run(atoms, args.nvt_steps, chunk=nvt_chunk)
             print(
@@ -656,7 +652,7 @@ def main() -> None:
         neighbors,
         run_hooks,
         device,
-    )
+    ).set_compiler(execution_policy)
     remaining = args.steps - start_step
     if remaining <= 0:
         print(f"nothing to do: checkpoint already at step {start_step} >= {args.steps}")
@@ -712,14 +708,14 @@ def main() -> None:
         f"check={neighbors.check})"
     )
     # The comparison step needs the exact graph the trajectory was produced on.
-    # edge_index is (E, 2) [source, target] — the repo edge convention.
+    # pair_index is (E, 2) [source, target] — the repo edge convention.
     torch.save(
         {
             "Z": Z.cpu(),
             "cell": cell.cpu(),
-            "edge_index": neighbors.edge_index.cpu(),
+            "pair_index": neighbors.pair_index.cpu(),
             "shifts": neighbors.shifts.cpu(),
-            "num_edges": neighbors.num_edges,
+            "num_pairs": neighbors.num_pairs,
             "rebuild_count": neighbors.rebuild_count,
             "energy_scale": 1.0 / _EV_TO_MD,
             "precision": args.precision,

@@ -1,7 +1,7 @@
 """Per-element baseline tables for atomic charges and polarizabilities.
 
 Two opt-in additive baselines that supply per-element prior values for
-``q`` (formal-charge convention) and ``α`` (CRC handbook atomic
+``charge`` (formal-charge convention) and ``α`` (CRC handbook atomic
 polarizabilities). The numerical tables are public physical / chemical
 data — atomic polarizabilities from the CRC Handbook of Chemistry and
 Physics (e.g. 100th ed., Table on Atomic and Molecular Polarizabilities)

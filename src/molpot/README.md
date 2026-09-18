@@ -6,7 +6,7 @@ ML potential toolkit: classical potential functions, prediction heads, derivatio
 
 - `potentials/`: LJ126, BondHarmonic, AngleHarmonic, DihedralHarmonic, and more
 - `heads/`: AtomicEnergyMLP, EnergyHead, TypeHead
-- `derivation/`: EnergyAggregation, ForceDerivation, StressDerivation
+- `derivation/`: EnergyAggregation, ForceDerivation (raw-tensor `F = -dE/dpos`), HessianDerivation; batch-level `F` / `W` are `molix.autograd.Derivative`
 - `pooling/`: LayerPooling, EdgeToNodePooling, SumPooling, MeanPooling, MaxPooling
 - `composition/`: LJParameterHead, MultiHead, PotentialComposer
 
@@ -33,15 +33,15 @@ composer = PotentialComposer(
 )
 
 data = {
-    "edge_index": torch.randint(0, 12, (40, 2)),
-    "edge_dist": torch.rand(40) + 0.2,
+    "pair_index": torch.randint(0, 12, (40, 2)),
+    "pair_dist": torch.rand(40) + 0.2,
     "batch": torch.zeros(12, dtype=torch.long),
     "pos": torch.randn(12, 3, requires_grad=True),
 }
 out = composer(node_features=node_features, data=data, compute_forces=True)
 
-print(out["energy"].shape)   # (num_graphs,)
-print(out["forces"].shape)   # (n_nodes, 3)
+print(out["energy"].shape)  # (num_graphs,)
+print(out["forces"].shape)  # (n_nodes, 3)
 ```
 
 ## Training Integration
