@@ -636,6 +636,48 @@ Verified: declared `kcal/mol` → scale 1.0, declared `eV` → 23.0605, unknown
 spelling and absent manifest both refused, and `convert` without a declared unit
 refused.
 
+## [2026-09-18] The Class-I step is CPU-bound on per-batch bond inference
+
+Measured on a GH200 120GB, one process per cell, batch fill **measured** from
+`graphs.mask.sum()` rather than inferred from the capacity:
+
+| cell | mol/batch | fill | ms/step | peak GiB | molecules/s |
+|---|---|---|---|---|---|
+| small / 262144 atoms | 16,503 | 80 % | **6332** | 5.01 | **2,606** |
+| small / 524288 | — | — | — | — | DataLoader worker died |
+| small / 1048576 | — | — | — | — | DataLoader worker died |
+
+**~379 us of serial work per molecule**, from 6332 ms for 16,503 molecules
+against the ~85 ms fixed cost measured at near-zero fill.
+
+**Where it goes.** `FrameCollator` calls `ClassIPrepare.execute(frame)` per frame
+per batch, and `ClassIPrepare.bond()` opens with `if "bonds" in frame: return
+frame` and otherwise calls `infer_bonds(numbers, xyz)`. OMol25 ships **no bonds**,
+so that early return never fires: bond inference plus valence enumeration re-runs
+for every molecule every time it appears in a batch — every epoch. At 16.5 k
+molecules per batch that *is* the step, and it is why the two larger capacities
+killed their DataLoader workers rather than reporting a number.
+
+**This is the performance half of a correctness fix that already landed.** The
+topology work established that topology must not be derived per batch, because
+the distance criterion misreads a stretched bond (butane C-H at 1.09 -> 1.30 A
+turns 13/24/27/0 into 12/21/24/**1**). The correctness half shipped; the cost did
+not. Bonds are still derived per batch instead of once.
+
+**Do not read a capacity sweep taken at low fill.** An earlier sweep (job
+2627024) timed 16384 / 65536 / 131072 against a 48-molecule split whose padder
+budget was 10,375 graphs — a 0.5 %-full batch — and concluded that 8x the
+capacity costs 1.07x the time, i.e. that capacity is nearly free. It was timing
+dead rows. Deriving molecules-per-batch from `capacity / mean_atoms_per_molecule`
+turned that into a quoted 26,037 molecules/s against a real 2,606. Record the
+fill with every cell, and treat a fill below ~0.5 as a measurement of padding.
+
+What the low-fill sweep *did* establish, because the padded shape is what
+production allocates: `unique_graphs: 1` in all nine cells — one graph compiled
+per configuration on the real training step, not just the isolated `energy()`
+probe — and `large/131072` peaking at 11.95 GiB where the pre-Rondo table records
+20.2 GiB, so that table's ceiling is not this model's.
+
 <!-- mol:note:topic:compile-no-graph-breaks -->
 ## [2026-09-18] A global config read is a graph break, and dynamo skips the caller
 
