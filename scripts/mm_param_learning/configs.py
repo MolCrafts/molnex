@@ -78,6 +78,29 @@ QUASI_PROD: dict[str, Any] = {
 # 131072 is the operating point: 89 / 90 / 93 % of each tier's peak molecule
 # throughput at a quarter of 524288's memory and twice 262144's optimizer
 # steps. The HBM ceiling is 2^19 for small and medium, 2^18 for large.
+# **The three tiers are scaling-law points, not candidates to choose between.**
+# Their x-axis is the parameter count, measured on Rondo (GH200 job 2621863,
+# 2026-09-18):
+#
+#   tier     hidden/n_blocks/n_torsion   parameters
+#   small          32 / 2 / 4                41,108
+#   medium         64 / 4 / 8               204,188
+#   large         128 / 8 / 16            1,191,212
+#
+# ~5.0x then ~5.8x, so ~29x end to end. These are re-measured rather than
+# inherited: the architecture is Rondo now, the reference is ByteFF, and the
+# dataset changed, so counts taken against the pre-Rondo model describe a model
+# that no longer exists.
+#
+# **The HBM table below predates Rondo and is not Rondo's.** It was measured on
+# 2026-09-15 against the model Rondo replaced, and `benchmarks/bench_class_i_hbm.py`
+# — the benchmark that produced it — has since been deleted, so it is not
+# reproducible as written. Rondo adds a dense per-molecule EEM solve
+# (`RondoSpec.eem_max_atoms`, default 512) that the measured model did not have,
+# and nothing currently ties that capacity to the data's largest molecule. Treat
+# the numbers as the shape of the trade-off, not as this model's footprint, and
+# re-measure before they gate anything. One real Rondo datapoint exists so far:
+# `large` peaked at 1.55 GiB at a 16384-atom capacity (job 2621863).
 PROD_MODELS: dict[str, dict[str, int]] = {
     "small": {"hidden": 32, "n_blocks": 2, "n_torsion_terms": 4, "packed_max_atoms": 131072},
     "medium": {"hidden": 64, "n_blocks": 4, "n_torsion_terms": 8, "packed_max_atoms": 131072},
