@@ -1688,6 +1688,102 @@ format. Re-pointing it would be a fake fix; whether molhub's store *writer*
 goes too is a cross-repo call for the operator.
 
 <!-- mol:note:topic:scripts-hold-no-model -->
+## The Class-I dataset is THEMol torsion-scan, and a row is 24 molecules (2026-09-20)
+
+Rondo trains on `dataset:themol/torsion-scan@1`, not OMol25. Two reasons, both
+measured, and the second one changed a load-bearing invariant.
+
+**It ships the topology.** OMol25 frames carry no bonds, so `ClassIPrepare.bond`
+inferred them per molecule inside collate at 379 us/molecule, which is what made
+the step CPU-bound. A THEMol record carries a mapped SMILES and a `bonds` block,
+and `bond()` already short-circuits on `if "bonds" in frame` — so that cost is
+simply gone, not optimised.
+
+**A row is a whole scan.** One record is one complete constrained profile: 24
+conformers of the same molecule about one dihedral, which is what a Class-I
+torsion series is fitted to and what ByteFF (arXiv 2408.12817) trains on. Two
+consequences that do not look alike:
+
+1. *The split unit is the molecule, not the row.* 83 951 scans cover 82 332
+   distinct molecules (1.02 scans/molecule); 1 592 molecules contribute 2-3
+   scans, and those sit up to 81 834 rows apart in the shard. A row-wise shuffle
+   leaks 1 619 scans. `THEMolShardDataset.molecule_index()` is the group vector,
+   from `mapped_nonisomeric_smiles` — deliberately coarser than the frame's
+   `molecule_id` (a uuid5 of the *isomeric* SMILES), because stereoisomers share
+   a topology and therefore every Class-I parameter.
+2. *An extent row must cost what a row costs.* `_scan_extent_slice` read
+   `sample[0]` and recorded one conformer: 33 atoms where the row costs 792. The
+   padder would have sized every cap 24x too small and every batch overflowed it.
+   OMol25 hid this completely — there a record is exactly one frame, so the first
+   frame *was* the row. Fixed by summing over the record's frames, `pairs`
+   summed per frame rather than multiplied because the cutoff edge count is a
+   function of the geometry and a scan is 24 geometries.
+3. *The graph slot count is not the row count.* The same assumption was baked
+   into three more places, and fixing the atom sums did not fix them — the first
+   real batch came out of the collate with **529 graphs against max_graphs=30**.
+   `MoleculePadder.from_counts` divided the atom budget by the mean atoms per
+   *row* and called the answer a graph count; `DataModule._budget_sampler` skipped
+   the `graphs` table outright; and `TokenBudgetBatchSampler._budget_counts`
+   hard-coded `torch.ones(n)` for it. All three were right while a row was one
+   graph. The extent now carries a `graphs` column (frames per row, not a Frame
+   field), `from_counts` takes it and floors the slot count at one row's graphs
+   plus the sink, and both sampler layers use the vector when it is given —
+   defaulting to one graph per row, which is every per-molecule dataset. Adding
+   the column changes the npz schema, so the frozen scan had to be redone; the
+   reader raises `KeyError` on the old file rather than reading around it.
+
+**Two sidecars, because the shard is on Lustre.** Listing the 83 951 HDF5 group
+keys took **194 s** on a cold page cache and 0.10 s warm; the molecule index is
+one string read per group, 245 s warm for the whole shard. Both are properties of
+an immutable file, so both are cached in a `molhub.cache.CountSidecar` keyed by
+the shard's own size and mtime. `CountSidecar.load` gained `n_rows=None` for the
+key vector, which cannot be length-checked against anything because it *is* the
+row count. Earlier in the same session I quoted 29 min for the molecule index —
+that was a cold-cache extrapolation from the first 2 000 rows and was wrong.
+
+**One frozen extent serves both splits.** It is keyed by `(source_id, cutoff)`
+and `MoleculeExtent.for_dataset` slices a parent scan for a `SubsetDataset`, so
+`scan_class_i_extent.py` scans the whole shard once (134 ms/row single-core, 188
+min; ~minutes on the 128-core CPU partition) and both views read it. Do not scan
+the two views separately.
+
+**Still open, named not fixed:** the energy target. THEMol absolute energies
+carry a molecule-dependent offset (a sampled record: -503 415.87 kcal/mol), and
+the loader fits an epsilon[Z] table on the train side to absorb it — the in-tree
+path OMol25 used. ByteFF instead fits energies *relative to each scan minimum*,
+which is available cheaply here because the whole profile is one record, and is
+the more faithful target. Not switched silently; it changes what is trained.
+
+## A GH200 job ran a molrs 27 commits old, and `import molrs` could not tell (2026-09-20)
+
+`.aarch64` installs molrs as a **wheel**, because an editable build writes one
+untagged `.so` that the login node's x86 rustc and a GH200 build overwrite in
+turn. Every run script gated the reinstall on `if python -c "import molrs"` —
+and a 3-day-old extension imports perfectly. The installed one was the wheel
+built 09-17 21:13, byte-identical to it, missing nine breaking changes and the
+mrec `molrec_version` stamp. Importability is not currency.
+
+Three things conspired, and each is worth remembering separately:
+
+* `prod_day`'s launcher used a **second** wheel directory, `molnex/.wheels-gh200`,
+  holding an even older wheel (09-16 10:41) on a branch that never rebuilds.
+  Same version string, different bytes. A `lab-new` campaign note records this
+  trap biting once already.
+* molrs deleted its own `scripts/build_aarch64_wheel.sbatch` (`8e942d18`,
+  "no CI, hook or docs consumer"). It had one: every GH200 job in the workspace.
+  The build step now lives in the workspace, which is the thing that consumes it.
+* The aarch64 rustup home had a complete toolchain and no `default_toolchain`
+  key, so the shim refused with "rustup could not choose a version of cargo" —
+  and `command -v cargo` said yes, because that is a shim test, not a cargo test.
+
+The gate is now a **content fingerprint** (`molrs_fingerprint.py`: sha256 over
+every `*.rs` plus the cargo manifests, 530 files / 12.3 MB, 0.23 s with the
+build dirs pruned — 70x faster than an unpruned `rglob`) compared against what
+`.wheels-aarch64/BUILT_FROM` records. Not mtime: molrs is a shared checkout under
+active development and a touch or a reverted edit must not fire it. A mismatch
+fails the job closed; `MOLRS_WHEEL_ALLOW_STALE=1` is the operator's explicit,
+logged override.
+
 ## A model does not live in `scripts/` (2026-09-17)
 
 `scripts/mm_param_learning/` went from 7 661 lines to 3 439. Deleted outright:
@@ -1709,6 +1805,12 @@ closed by construction, not by convention).
 
 What is left under `scripts/` is composition: `class_i_fit.py`,
 `espaloma_mm_protocol_train.py`, `configs.py`, `constants.py`,
-`omol25_fairchem_4m.py`, `scan_omol25_extent.py`. The OMol25 loaders inside
-`class_i_fit.py` (~350 lines: `LazyOMol25`, `load_omol25_*`,
-`_index_omol_source`, the e0 and count caches) still owe a move to MolHub.
+`omol25_fairchem_4m.py`, `scan_class_i_extent.py`. The OMol25 loaders inside
+`class_i_fit.py` (~350 lines: `load_omol25_*`, `_index_omol_source`, the e0 and
+count caches) still owe a move to MolHub, and since the Class-I retarget
+(2026-09-20) four of them are outright **dead**: `load_omol25_official`,
+`load_omol25_official_tiny`, `load_omol25_records`, `load_omol25_split` and
+`load_phalkethoh_val` have no caller anywhere. They are not deleted yet because
+`load_omol25_fairchem_4m` — which the FAIRChem-protocol script does use — shares
+`_official_source`, `_measured_counts`, `_fit_e0_subsample` and the two cache
+paths with them, so the cut is a refactor, not a deletion.

@@ -414,11 +414,33 @@ class TestSamplerPickle:
 
 
 class TestSamplerGraphsBudgetAndOrder:
-    """``graphs`` counts one per sample; ``shuffle=False`` keeps index order; ``reseed`` replans."""
+    """``graphs`` counts one per sample unless given; ``shuffle=False`` keeps index
+    order; ``reseed`` replans."""
 
     def test_graphs_budget_caps_molecules_per_batch(self, varied_ds):
         sampler = TokenBudgetBatchSampler(varied_ds, budgets={"atoms": 64, "graphs": 3}, seed=0)
         assert all(len(batch) <= 3 for batch in sampler)
+        assert sorted(i for batch in sampler for i in batch) == list(range(N_SAMPLES))
+
+    def test_a_given_graphs_vector_beats_one_graph_per_sample(self, varied_ds):
+        """A sample that is a record of several graphs spends several of the budget.
+
+        Hard-coding one graph per sample makes the budget as many times too
+        generous as a record has graphs, and the padder then receives a batch with
+        more graphs than it has slots (a THEMol torsion-scan row is 24 conformers;
+        a 16 384-atom batch sized for 30 slots arrived with 529).
+        """
+        graphs = torch.full((N_SAMPLES,), 4, dtype=torch.long)
+        counts = {
+            "atoms": torch.tensor(ATOM_COUNTS, dtype=torch.long),
+            "graphs": graphs,
+        }
+        sampler = TokenBudgetBatchSampler(
+            varied_ds, budgets={"atoms": 10_000, "graphs": 12}, counts=counts, seed=0
+        )
+        # 12 graphs / 4 per sample = 3 samples, where one-per-sample would allow 12.
+        assert all(len(batch) <= 3 for batch in sampler)
+        assert max(len(batch) for batch in sampler) == 3
         assert sorted(i for batch in sampler for i in batch) == list(range(N_SAMPLES))
 
     def test_shuffle_false_packs_in_index_order(self, varied_ds):

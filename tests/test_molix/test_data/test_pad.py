@@ -315,6 +315,51 @@ class TestMoleculePadderFromCounts:
         with pytest.raises(ValueError, match="proper"):
             MoleculePadder.from_counts(counts, atoms=16, cutoff=CUTOFF)
 
+    def test_graphs_vector_sizes_the_slot_count_per_graph_not_per_row(self):
+        """A row that carries several graphs gets several slots' worth of budget.
+
+        Without the vector `from_counts` divides the atom budget by the mean atoms
+        per *row* and calls the answer a graph count. On a record dataset a row is
+        many graphs, so that answer is short by exactly that factor: a THEMol
+        torsion-scan row is 24 conformers, and a 16 384-atom batch was sized for
+        30 graph slots and arrived carrying 529.
+        """
+        # Same four rows, but each row is 5 graphs of 2 atoms rather than 1 of 10.
+        counts = dict(OUTLIER_COUNTS, graphs=torch.tensor([5, 5, 5, 5]))
+        # mean atoms per graph is 2, not 10 → ceil(1.25 x 12 / 2) + 1 = 9.
+        padder = MoleculePadder.from_counts(counts, atoms=16, cutoff=CUTOFF, round_to=1)
+        assert padder.caps()["graphs"] == 9
+        # and the graphs vector is not itself a padded axis
+        assert set(padder.caps()) == {"atoms", "pairs", "propers", "graphs"}
+
+    def test_graph_slots_never_fall_below_one_rows_graphs_plus_the_sink(self):
+        """A row is indivisible, so the slot count has to hold the widest one.
+
+        The density term alone can be smaller than a single row when the atom
+        budget is tight, and a batch that cannot hold one row can never be packed.
+        """
+        counts = {
+            "atoms": torch.tensor([60, 60]),
+            "pairs": torch.tensor([120, 120]),
+            "graphs": torch.tensor([50, 2]),
+        }
+        # atoms=64 → budget 60, which holds the widest row's 60 atoms. Density:
+        # mean atoms per graph = 120/52 = 2.31 → ceil(1.25 x 60 / 2.31) + 1 = 34,
+        # below the 50-graph row, so the floor binds at 50 + 1.
+        padder = MoleculePadder.from_counts(counts, atoms=64, cutoff=CUTOFF, round_to=1)
+        assert padder.caps()["graphs"] == 51
+
+    def test_without_a_graphs_vector_a_row_is_one_graph(self):
+        """The per-molecule default is unchanged — that is what every other dataset is."""
+        with_none = MoleculePadder.from_counts(OUTLIER_COUNTS, atoms=16, cutoff=CUTOFF, round_to=1)
+        with_ones = MoleculePadder.from_counts(
+            dict(OUTLIER_COUNTS, graphs=torch.ones(4, dtype=torch.long)),
+            atoms=16,
+            cutoff=CUTOFF,
+            round_to=1,
+        )
+        assert with_none.caps()["graphs"] == with_ones.caps()["graphs"] == 3
+
     def test_check_refuses_a_molecule_no_batch_can_carry(self):
         padder = MoleculePadder.from_counts(OUTLIER_COUNTS, atoms=16, cutoff=CUTOFF, round_to=1)
         padder.check(OUTLIER_COUNTS)

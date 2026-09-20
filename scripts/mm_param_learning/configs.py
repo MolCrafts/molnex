@@ -10,46 +10,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from scripts.mm_param_learning.constants import (
-    COLLECTION_COORDINATE,
-    TRAIN_COORDINATE,
-    VAL_COORDINATE,
-)
-
-# Inclusive atom-count buckets. This is now the only statement of them:
-# `align.py` held the other copy and was deleted (operator ruling, 2026-09-17).
-SIZE_BUCKETS: tuple[tuple[str, int, int], ...] = (
-    ("small", 1, 8),
-    ("medium", 9, 16),
-    ("large", 17, 32),
-)
-
-# Operating point for the quasi-production 8:2 one-epoch look-see.
-# Powers of two only. Not a production multi-epoch pin.
-QUASI_PROD: dict[str, Any] = {
-    "kind": "quasi-production-epoch1",
-    "collection": COLLECTION_COORDINATE,
-    "train_coordinate": TRAIN_COORDINATE,
-    "val_coordinate": VAL_COORDINATE,
-    "omol_role": "val-neutral",
-    "train_frac": 0.8,
-    "seed": 2666,
-    "hidden": 64,
-    "n_blocks": 4,
-    "n_torsion_terms": 8,
-    "val_split": "omol25-small-molecule-8-2",
-    "packed_max_atoms": 16384,
-    "batch_size": 256,
-    "lr": 1e-4,
-    "clip_max_norm": 1.0e3,
-    "epochs": 1,
-    "energy_scope": "full",
-    "size_buckets": [[name, lo, hi] for name, lo, hi in SIZE_BUCKETS],
-    "target_hardware": "GH200",
-    "slurm_account": "naiss2026-1-53-gpu",
-    "slurm_partition": "gpu",
-}
-
 # Three model tiers on one packed capacity. One-day wall-clock campaign, not
 # unbounded GO. packed_max_atoms is the padded atom capacity per batch (ghost
 # slots included) — the one static-shape knob. Every other cap follows the 4m
@@ -101,36 +61,77 @@ QUASI_PROD: dict[str, Any] = {
 # the numbers as the shape of the trade-off, not as this model's footprint, and
 # re-measure before they gate anything. One real Rondo datapoint exists so far:
 # `large` peaked at 1.55 GiB at a 16384-atom capacity (job 2621863).
+#: Atoms one torsion-scan row costs a batch.
+#:
+#: 24 constrained conformers of a molecule whose median size is 33 atoms
+#: (shard-000, measured 2026-09-20). A row is **indivisible**: the collate
+#: flattens every conformer of a record into the same batch and the packer
+#: budgets per row, so an atom capacity divides by this, not by 33. Getting that
+#: wrong sizes every cap 24x too small.
+TORSION_ATOMS_PER_ROW: int = 24 * 33
+
 PROD_MODELS: dict[str, dict[str, int]] = {
     "small": {"hidden": 32, "n_blocks": 2, "n_torsion_terms": 4, "packed_max_atoms": 131072},
     "medium": {"hidden": 64, "n_blocks": 4, "n_torsion_terms": 8, "packed_max_atoms": 131072},
     "large": {"hidden": 128, "n_blocks": 8, "n_torsion_terms": 16, "packed_max_atoms": 131072},
 }
 
+# The dataset is THEMol torsion-scan, not OMol25 (operator ruling, 2026-09-19).
+# Two reasons, both measured:
+#
+# * **It ships the topology.** OMol25 frames carry no bonds, so the Class-I
+#   collate inferred them per molecule at 379 us/molecule and the step was
+#   CPU-bound on that alone. A THEMol record carries a mapped SMILES and a
+#   `bonds` block (33 atoms / 34 bonds for the shard's median molecule).
+# * **It is the right physics for a torsion term.** One record is one complete
+#   constrained profile — 24 conformers of the same molecule about one
+#   dihedral — which is what a Class-I torsion series is fitted to, and it is
+#   the data ByteFF (arXiv 2408.12817) trains on.
+#
+# Energies are published in kcal/mol, which `manifest.units` states and
+# `ClassIPrepare.from_dataset` reads; the eV default that silently scaled every
+# THEMol label by 23.06 is what that seam now prevents.
 PROD_DAY: dict[str, Any] = {
-    **QUASI_PROD,
     "kind": "prod-day1",
-    "omol_role": "4m",
-    "val_role": "val-neutral",
-    "val_split": "official-4m-train-val-neutral",
-    "train_coordinate": "dataset:fairchem/omol25@1",
-    "val_coordinate": "dataset:fairchem/omol25@1",
+    "seed": 2666,
+    "hidden": 64,
+    "n_blocks": 4,
+    "n_torsion_terms": 8,
+    "packed_max_atoms": 16384,
+    "lr": 1e-4,
+    "clip_max_norm": 1.0e3,
+    "energy_scope": "full",
+    "target_hardware": "GH200",
+    "slurm_partition": "gpu",
+    # One published shard holds all 83 951 scans.
+    "shard_role": "shard-000",
+    # Held out by *molecule*, never by row: 1 592 molecules contribute more
+    # than one scan (up to 3), and their scans sit up to 81 834 rows apart, so
+    # a row-wise split leaks 1 619 of the 83 951 scans (measured 2026-09-20).
+    "val_frac": 0.05,
+    "val_split": "themol-torsion-molecule-95-5",
+    "train_coordinate": "dataset:themol/torsion-scan@1",
+    "val_coordinate": "dataset:themol/torsion-scan@1",
     "epochs": 1_000_000,
     "eval_every_epochs": 1,
-    # One 4m epoch is ~1.2e5 steps, so an epoch-boundary eval fires twice in a
-    # 24 h run. State the stride in steps instead — the eval curve and the
-    # best-checkpoint selection both need more than two points.
-    "eval_every_n_steps": 5_000,
+    # No step stride here, unlike the OMol25 pin this replaces. One 4m epoch was
+    # ~1.2e5 steps, so an epoch-boundary eval fired twice in a 24 h run and the
+    # stride was the only way to get a curve. A torsion epoch is ~500 steps
+    # (79 834 train scans x 24 conformers / ~3 900 conformers per 131 072-atom
+    # batch), so the epoch boundary alone already gives a dense curve, and a
+    # stride on top would only eval twice per epoch. Restate a stride here if
+    # calibration measures a longer epoch than that.
+    "eval_every_n_steps": None,
     "wall_hours": 24,
     "slurm_account": "naiss2026-4-715-gpu",
 }
 
-# Calibration gates run on the SAME official 4m/val-neutral coordinates as
-# production. Only duration and scheduler/output identity differ, both
-# enumerated here.
+# Calibration gates run on the SAME torsion-scan coordinate and the same
+# molecule-level split as production. Only duration and scheduler/output
+# identity differ, both enumerated here.
 CALIBRATION: dict[str, Any] = {
     **PROD_DAY,
-    "kind": "calibration-official-tiny",
+    "kind": "calibration-torsion-tiny",
     "epochs": 1,
     "eval_every_epochs": 1,
     # A calibration pass is far shorter than one production eval stride; keep

@@ -213,13 +213,20 @@ class MoleculePadder:
         random batch from closing on a cheap column before the atom column
         is full. The graph-slot count is ``ceil(graphs_slack × (atoms −
         N_GHOSTS) / mean_atoms) + 1`` (one sink slot). Quantiles are never
-        used: a cap below the maximum is a batch that cannot be packed.
+        used: a cap below the maximum is a batch that cannot be packed. With a
+        ``graphs`` vector the mean is per graph rather than per row, and the
+        slot count never falls below one row's graphs plus the sink.
 
         Args:
-            counts: Per-molecule count tables keyed by namespace — ``atoms``
+            counts: Per-**row** count tables keyed by namespace — ``atoms``
                 and ``pairs`` are required, ``bonds`` / ``angles`` /
                 ``propers`` / ``impropers`` optional; a family absent here is
-                neither padded nor budgeted. Each value is a ``(n,)`` integer
+                neither padded nor budgeted. ``graphs`` is different in kind: it
+                is not a padded axis but how many graphs each row contributes,
+                and it is what sizes the graph-slot count. Omit it and a row is
+                taken to be one graph, which is true of every per-molecule
+                dataset and false of a record dataset (one THEMol torsion-scan
+                row is 24 conformers). Each value is a ``(n,)`` integer
                 tensor / array aligned with the dataset index.
             atoms: The padded atom dimension (ghost slots included). Must
                 hold the largest molecule plus :data:`N_GHOSTS`.
@@ -239,11 +246,11 @@ class MoleculePadder:
                 *atoms* cannot hold the largest molecule with its ghosts, or
                 a table is empty / negative.
         """
-        unknown = sorted(set(counts) - set(_TABLES[:-1]))
+        unknown = sorted(set(counts) - set(_TABLES))
         if unknown:
             raise ValueError(
                 f"MoleculePadder.from_counts: unknown count tables {unknown}; "
-                f"expected a subset of {list(_TABLES[:-1])}"
+                f"expected a subset of {list(_TABLES)}"
             )
         for required in ("atoms", "pairs"):
             if required not in counts:
@@ -257,6 +264,7 @@ class MoleculePadder:
             raise ValueError("MoleculePadder.from_counts: round_to must be >= 1")
         vectors = {name: _as_long_vector(name, values) for name, values in counts.items()}
         n_atoms = vectors["atoms"]
+        n_graphs = vectors.get("graphs")
         max_atoms = int(atoms)
         atom_budget = max_atoms - N_GHOSTS
         largest = int(n_atoms.max())
@@ -269,13 +277,26 @@ class MoleculePadder:
         total_atoms = float(n_atoms.sum())
         caps: dict[str, int] = {}
         for name, vector in vectors.items():
-            if name == "atoms":
+            if name in ("atoms", "graphs"):
                 continue
             density = float(vector.sum()) / total_atoms
             by_density = _round_up(density * atom_budget * slack, round_to)
             caps[name] = max(by_density, int(vector.max()))
-        mean_atoms = total_atoms / float(n_atoms.numel())
+        # A count row is one *dataset row*, and a row is not always one graph.
+        # THEMol torsion-scan's row is a whole constrained profile: 24 conformers
+        # of the same molecule, each its own graph in the batch. Dividing the atom
+        # budget by the mean atoms *per row* then answers how many rows fit and
+        # calls that the graph count, which is 24x short — a 16 384-atom batch got
+        # max_graphs=30 and arrived carrying 529 (measured 2026-09-20). With a
+        # graphs vector the mean is per graph, which is what the slot count counts.
+        graphs_per_row = 1.0
+        if n_graphs is not None:
+            graphs_per_row = float(n_graphs.sum()) / float(n_graphs.numel())
+        mean_atoms = total_atoms / (float(n_atoms.numel()) * graphs_per_row)
         max_graphs = int(math.ceil(graphs_slack * atom_budget / mean_atoms)) + 1
+        if n_graphs is not None:
+            # A row is indivisible, so one row's graphs must fit beside the sink.
+            max_graphs = max(max_graphs, int(n_graphs.max()) + 1)
         return cls(
             max_atoms=max_atoms,
             max_pairs=caps["pairs"],

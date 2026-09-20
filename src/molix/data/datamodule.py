@@ -401,8 +401,10 @@ class DataModule:
             budgets: ``{table: per-batch cap}`` — the padder's or the legacy
                 atoms / edges pair.
             given: Caller-supplied ``{table: counts}``; every budgeted table
-                it lacks (``graphs`` aside) is read with
-                :meth:`~molix.data.dataset.BaseDataset.nrows_of`.
+                it lacks is read with
+                :meth:`~molix.data.dataset.BaseDataset.nrows_of`, except
+                ``graphs``, which no dataset can measure — pass it here for a
+                record dataset whose row is more than one graph.
             seed: Shuffle seed.
             shuffle: ``False`` packs in index order (val).
 
@@ -412,10 +414,17 @@ class DataModule:
         """
         counts: dict[str, torch.Tensor] = {}
         for table in budgets:
-            if table == "graphs":
-                continue
             if table in given:
                 counts[table] = given[table]
+                continue
+            if table == "graphs":
+                # A dataset has no `graphs` table to measure: how many graphs a
+                # row contributes is a property of the row, not of a Frame block,
+                # and for every per-molecule dataset it is 1 — so the atom budget
+                # already bounds it. A record dataset (one THEMol torsion-scan row
+                # is 24 conformers) must therefore *pass* the vector in `given`,
+                # or the graph slot count is the one cap the packer does not
+                # enforce.
                 continue
             try:
                 counts[table] = BaseDataset.nrows_of(dataset, table)

@@ -183,14 +183,17 @@ class TokenBudgetBatchSampler:
             (frame tables, not a molhub cache).
         budgets: ``{table: per-batch cap}`` — ``atoms``, ``pairs``, a valence
             family (``bonds`` / ``angles`` / ``propers`` / ``impropers``) or
-            ``graphs`` (molecules per batch: every sample counts one). Every
-            budget applies simultaneously; at least one is required.
+            ``graphs`` (graphs per batch). Every budget applies
+            simultaneously; at least one is required.
         counts: Optional ``{table: (n_samples,) counts}``. When given it
             must carry every budgeted table except ``graphs``: a missing
             entry is refused rather than silently read from the dataset,
             because that fallback walks every sample of a map-style
             dataset. A molhub loader that already scanned its sizes passes
-            them here so this sampler never opens a frame.
+            them here so this sampler never opens a frame. ``graphs`` is
+            optional and defaults to one graph per sample; pass it when a
+            sample is a *record* of several graphs, since no dataset can
+            measure that.
         seed: Seed for the shuffle permutation.
         shuffle: ``False`` packs the dataset in index order.
 
@@ -261,7 +264,15 @@ class TokenBudgetBatchSampler:
         n = len(self._dataset)
         for table, budget in self._budgets.items():
             if table == "graphs":
-                pairs.append((budget, torch.ones(n, dtype=torch.long)))
+                # One sample is one graph — unless the caller says otherwise. A
+                # record dataset's row carries several graphs (a THEMol
+                # torsion-scan row is 24 conformers), and hard-coding ones there
+                # makes the graph budget 24x too generous: the padder then gets a
+                # batch with more graphs than it has slots. No dataset can measure
+                # this (it is not a Frame block), so a supplied vector is the only
+                # route and it wins.
+                given = None if self._counts is None else self._counts.get(table)
+                pairs.append((budget, torch.ones(n, dtype=torch.long) if given is None else given))
                 continue
             if self._counts is not None:
                 pairs.append((budget, self._counts[table]))

@@ -276,7 +276,20 @@ def label_sample(frame: Any, *, group: float) -> Frame:
     )
 
 
-_EXTENT_FIELDS = ("graph.natoms", "pairs", "bonds", "angles", "propers", "impropers")
+#: ``graphs`` is not a padded axis like the others: it is how many graphs one
+#: dataset row contributes to a batch, which is 1 for a per-molecule dataset and
+#: 24 for a THEMol torsion-scan row. `MoleculePadder.from_counts` sizes the graph
+#: slot count from it; without it a row is taken to be one graph and the slot
+#: count comes out 24x short.
+_EXTENT_FIELDS = (
+    "graph.natoms",
+    "pairs",
+    "bonds",
+    "angles",
+    "propers",
+    "impropers",
+    "graphs",
+)
 #: ``MoleculeExtent.counts()`` key of each scanned field — the namespace the
 #: padder and the packer budget under.
 _EXTENT_TABLE = {
@@ -286,9 +299,10 @@ _EXTENT_TABLE = {
     "angles": "angles",
     "propers": "propers",
     "impropers": "impropers",
+    "graphs": "graphs",
 }
 #: Largest dataset :func:`class_i_data_module` scans in-process when no frozen
-#: extent exists; above it the scan is a job (``scan_omol25_extent.py``).
+#: extent exists; above it the scan is a job (``scan_class_i_extent.py``).
 INLINE_SCAN_MAX = 20_000
 
 
@@ -330,19 +344,41 @@ def _edge_count(frame: Frame, cutoff: float) -> int:
 
 
 def _scan_extent_slice(payload: tuple[Any, int, int, float]) -> tuple[int, dict[str, np.ndarray]]:
-    """Worker: topology-scan ``dataset[start:stop]``. Picklable for a process pool."""
+    """Worker: topology-scan ``dataset[start:stop]``. Picklable for a process pool.
+
+    One extent row is what one **dataset row** costs a batch, summed over every
+    frame that row contributes — not the first frame's cost.
+
+    The difference is a factor of 24 on THEMol torsion-scan, where a row is a
+    whole constrained profile and the collate flattens all 24 conformers into
+    the same batch (``PrepareCollator`` prepares a tuple per sample and the
+    packer budgets per row, so a row is indivisible). Reading only ``sample[0]``
+    sized the padder as if a row were 33 atoms when it is 792, which makes every
+    cap 24x too small and every batch overflow it. OMol25 hid this: there a
+    record is exactly one frame, so the first frame *was* the row.
+
+    ``pairs`` is summed per frame rather than multiplied, because the cutoff
+    edge count is a function of the geometry and a torsion scan is 24 different
+    geometries of the same topology.
+    """
     dataset, start, stop, cutoff = payload
     prepare = ClassIPrepare()
-    readers = tuple(Field(field) for field in _EXTENT_FIELDS if field != "pairs")
+    readers = tuple(Field(field) for field in _EXTENT_FIELDS if field not in ("pairs", "graphs"))
     n = int(stop - start)
     columns = {field: np.empty(n, dtype=np.int32) for field in _EXTENT_FIELDS}
     for offset, idx in enumerate(range(start, stop)):
         sample = dataset[idx]
-        frame = sample[0] if isinstance(sample, Sequence) else sample
-        prepared = prepare.topology(frame)
-        for reader in readers:
-            columns[reader.key][offset] = int(reader.read(prepared))
-        columns["pairs"][offset] = _edge_count(prepared, cutoff)
+        frames: Sequence[Any] = sample if isinstance(sample, Sequence) else (sample,)
+        totals = {field: 0 for field in _EXTENT_FIELDS}
+        for frame in frames:
+            prepared = prepare.topology(frame)
+            for reader in readers:
+                totals[reader.key] += int(reader.read(prepared))
+            totals["pairs"] += int(_edge_count(prepared, cutoff))
+        # Not a Frame field: how many graphs this row puts in a batch.
+        totals["graphs"] = len(frames)
+        for field in _EXTENT_FIELDS:
+            columns[field][offset] = totals[field]
     return start, columns
 
 
@@ -991,7 +1027,7 @@ def _extent_for(fit: "ClassIFit", dataset: Any, *, cutoff: float) -> MoleculeExt
 
     A dataset above :data:`INLINE_SCAN_MAX` rows without a frozen scan is
     refused: walking OMol25 4m inside a loader constructor is hours of
-    surprise, and the scan is a job (``scan_omol25_extent.py``).
+    surprise, and the scan is a job (``scan_class_i_extent.py``).
     """
     extent = MoleculeExtent.try_for_dataset(dataset, cutoff=cutoff)
     if extent is not None:
@@ -1000,7 +1036,7 @@ def _extent_for(fit: "ClassIFit", dataset: Any, *, cutoff: float) -> MoleculeExt
         raise FileNotFoundError(
             f"no frozen Class-I extent for {getattr(dataset, 'source_id', dataset)!r} at "
             f"cutoff {cutoff} and the dataset ({len(dataset)} rows) is too large to scan "
-            "here; run scripts/mm_param_learning/scan_omol25_extent.py first."
+            "here; run scripts/mm_param_learning/scan_class_i_extent.py first."
         )
     # scan_extent reads topology only, so no source unit is needed here; a
     # ClassIPrepare built without one refuses to convert rather than guessing.
@@ -1710,12 +1746,13 @@ def _index_omol_source(
     return keep.tolist(), e0
 
 
-class OMolSplit:
-    """Train/val index views of OMol25, plus the optional ε[Z] table.
+class MoleculeSplit:
+    """Train/val index views of one source, plus the optional ε[Z] table.
 
     The datasets are :class:`~molhub.dataset.protocol.SubsetDataset` over
-    :class:`~molhub.dataset.omol25.OMol25`. Dressing is a model table, not
-    a dataset attribute.
+    whatever the loader opened — OMol25's LMDB, a THEMol shard. Dressing is a
+    model table, not a dataset attribute, which is why it rides along here
+    rather than on either dataset.
     """
 
     def __init__(
@@ -1735,7 +1772,7 @@ def load_omol25_official(
     train_role: str = "4m",
     val_role: str = "val-neutral",
     max_atoms: int = 16384,
-) -> OMolSplit:
+) -> MoleculeSplit:
     """Official OMol25: ``4m`` train, ``val-neutral`` val. Frames stay eV, no bonds."""
     t0 = perf_counter()
     train_src = _official_source(train_role)
@@ -1760,7 +1797,7 @@ def load_omol25_official(
     train = SubsetDataset(train_src, train_keep)
     val = SubsetDataset(val_src, val_keep)
     print(f"omol kept train={len(train)} val={len(val)}", flush=True)
-    return OMolSplit(train, val, dressing=_historical_are(e0.tolist()))
+    return MoleculeSplit(train, val, dressing=_historical_are(e0.tolist()))
 
 
 _OFFICIAL_SOURCE_CACHE: dict[str, Any] = {}
@@ -1815,7 +1852,7 @@ def load_omol25_official_tiny(
     max_atoms: int = 32,
     seed: int = 2666,
     scan_cap: int = 8192,
-) -> OMolSplit:
+) -> MoleculeSplit:
     """Official ``4m`` / ``val-neutral`` coordinates on a bounded real subset.
 
     For the align / inspect / overfit calibration gates: same coordinate
@@ -1838,7 +1875,7 @@ def load_omol25_official_tiny(
     e0 = _fit_e0_subsample(
         train_src, train_keep, n_fit=len(train_keep), max_atoms=max_atoms, seed=seed
     )
-    return OMolSplit(
+    return MoleculeSplit(
         SubsetDataset(train_src, train_keep),
         SubsetDataset(val_src, val_keep),
         dressing=_historical_are(e0.tolist()),
@@ -1914,3 +1951,99 @@ def load_phalkethoh_val(root: str | Path, *, n_keep: int = 0) -> list:
     if not records:
         raise ValueError("PhAlkEthOH val split is empty")
     return records
+
+
+def load_themol_torsion_split(
+    *,
+    role: str = "shard-000",
+    val_frac: float = 0.05,
+    seed: int = 2666,
+    n_train: int = 0,
+    n_val: int = 0,
+    n_fit: int = 4096,
+) -> MoleculeSplit:
+    """THEMol torsion profiles, split by molecule. Frames are kcal/mol, with bonds.
+
+    One row of the shard is one **whole scan** — 24 constrained conformers of
+    the same molecule — so the split unit is not a frame and not even a row: a
+    molecule contributes as many rows as it has scanned dihedrals, and a
+    row-wise shuffle puts 1 619 of the 83 951 scans' molecules on both sides
+    (measured 2026-09-20: 82 332 distinct molecules, 1.02 scans/molecule).
+    Whole molecules are held out, using
+    :meth:`~molhub.dataset.themol.THEMolShardDataset.molecule_index`.
+
+    Why this dataset and not OMol25: it ships the topology. OMol25 frames carry
+    no bonds, so the Class-I path inferred them per molecule inside collate at
+    379 us/molecule, which is what made that step CPU-bound. THEMol records
+    carry a mapped SMILES, and the energies are already kcal/mol — the unit
+    every Class-I term is written in.
+
+    Args:
+        role: Shard role. The published torsion-scan set is one shard.
+        val_frac: Fraction of *molecules* (not rows) held out.
+        seed: Permutation seed for the molecule shuffle.
+        n_train: Cap on kept train rows. ``0`` keeps all.
+        n_val: Cap on kept val rows. ``0`` keeps all.
+        n_fit: Records the ε[Z] least-squares reads. The table has ~10 free
+            parameters, so a few thousand records is ample and the fit is not
+            what the loader should spend its time on.
+
+    Returns:
+        Train and val :class:`~molhub.dataset.protocol.SubsetDataset` views of
+        the one shard, plus the ε[Z] table fitted on the train side only.
+
+    Raises:
+        ValueError: *val_frac* leaves either side empty.
+    """
+    from molhub.dataset.themol import THEMolTorsionScan
+
+    if not 0.0 < val_frac < 1.0:
+        raise ValueError(f"val_frac must be in (0, 1), got {val_frac}")
+
+    t0 = perf_counter()
+    source = THEMolTorsionScan().load(role)
+    print(f"themol role={role} n_scans={len(source)} load_s={perf_counter() - t0:.1f}", flush=True)
+
+    t0 = perf_counter()
+    groups = source.molecule_index()
+    n_molecules = int(groups.max()) + 1 if groups.size else 0
+    print(
+        f"themol molecules={n_molecules} scans_per_molecule={len(source) / max(n_molecules, 1):.2f}"
+        f" index_s={perf_counter() - t0:.1f}",
+        flush=True,
+    )
+
+    # Hold out whole molecules: permute the molecule ids, take a prefix for val.
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(n_molecules)
+    n_val_groups = int(round(n_molecules * val_frac))
+    n_val_groups = min(max(n_val_groups, 1), n_molecules - 1)
+    is_val = np.zeros(n_molecules, dtype=bool)
+    is_val[order[:n_val_groups]] = True
+
+    val_rows = np.flatnonzero(is_val[groups]).tolist()
+    train_rows = np.flatnonzero(~is_val[groups]).tolist()
+    if not train_rows or not val_rows:
+        raise ValueError(
+            f"val_frac={val_frac} over {n_molecules} molecules left "
+            f"train={len(train_rows)} val={len(val_rows)} rows"
+        )
+    if n_train > 0:
+        train_rows = train_rows[:n_train]
+    if n_val > 0:
+        val_rows = val_rows[:n_val]
+
+    train = SubsetDataset(source, train_rows)
+    val = SubsetDataset(source, val_rows)
+    print(
+        f"themol kept train={len(train)} val={len(val)} val_molecules={n_val_groups}/{n_molecules}",
+        flush=True,
+    )
+
+    # ε[Z] on the train side only. THEMol energies are already kcal/mol, so
+    # there is no eV factor here — the OMol path needs one, this does not.
+    t0 = perf_counter()
+    pick = train_rows if len(train_rows) <= n_fit else random.Random(seed).sample(train_rows, n_fit)
+    dressing = fit_atomic_reference([source[int(row)] for row in pick])
+    print(f"themol e0 n_fit={len(pick)} fit_s={perf_counter() - t0:.1f}", flush=True)
+    return MoleculeSplit(train, val, dressing=dressing)
