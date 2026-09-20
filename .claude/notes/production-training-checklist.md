@@ -24,7 +24,7 @@ molnex scripts this checklist cites no longer exist here:
 | Was | Now |
 |---|---|
 | `scripts/mm_param_learning/prod_day.py` | `lab-new/projects/class-i/train/prod_day.py` — a production day is a molab *workflow* under a project/experiment, not repo code |
-| `scripts/mm_param_learning/align.py` | **deleted.** The operator ruled the align gate out; its one surviving fact, the size-bucket triple, is `configs.SIZE_BUCKETS` |
+| `scripts/mm_param_learning/align.py` | **deleted.** The operator ruled the align gate out; its one surviving fact, the size-bucket triple, was `configs.SIZE_BUCKETS` — itself deleted on 2026-09-20, having had no reader, and being meaningless for a dataset whose molecules are all ~33 atoms. The three tiers are *model* sizes (`configs.PROD_MODELS`), not atom buckets |
 | `scripts/mm_param_learning/overfit_gate.py` | **deleted** by the same ruling |
 | `scripts/mm_param_learning/profile_class_i.py` | **deleted** — molnex has a profiler (`molix.profiler`); a second one in `scripts/` was duplication |
 
@@ -220,18 +220,29 @@ coordinates.
 
 ## 6. Final production submission gate
 
-- [x] molexp production experiment `universal-class-i-v0-prod-day1-gh200`
-  with pending runs `f2dd9ed5` / `90e71a0d` / `ef38fb1c` (small / medium
-  / large). Quasi-prod is not this campaign.
-- [x] Pins live in `PROD_DAY`: account `naiss2026-4-715-gpu`, partition
-  `gpu`, hardware GH200, official 4m / val-neutral as calibrated.
-- [x] Output is `runs/prod-day1-<size>-<utc>/` (gitignored),
-  not repo-root `checkpoints/`.
-- [x] Launcher fail-closed: non-power-of-two sizes, train/val id overlap.
-  Direct `python lab-new/projects/class-i/train/prod_day.py {small,medium,large}`.
-- [x] **decision: GO** for the 1-day / 3-size campaign. Unbounded
-  multi-week production remains NO-GO. Official 4m/val-neutral, pack
-  16384, stop is Slurm wall 24h.
+**Not satisfied (2026-09-20).** The boxes below were ticked against OMol25 and
+the model Rondo replaced; three of the four name things that no longer exist.
+They are left as the dated record, unticked, so nothing here reads as live.
+
+- [ ] molexp production experiment. The one named here
+  (`universal-class-i-v0-prod-day1-gh200`, runs `f2dd9ed5` / `90e71a0d` /
+  `ef38fb1c`) is gone; the current record is `lab-new` project `class-i`,
+  experiment `prod-day-compile`, runs `day1-{small,medium,large}`. (A molexp
+  record is not itself a gate — operator ruling, §"What the gate is about".)
+- [x] Pins live in `PROD_DAY`: account `naiss2026-4-715-gpu`, partition `gpu`,
+  hardware GH200 — now `dataset:themol/torsion-scan@1`, `shard_role`
+  `shard-000`, held out by molecule at `val_frac` 0.05, **not yet calibrated**.
+- [x] Output is `runs/prod-day<n>-<size>-<utc>/` under
+  `workspaces/lab-new/runs/` (off the 30 GiB /home quota), not repo-root
+  `checkpoints/`.
+- [x] Launcher fail-closed on non-power-of-two sizes and on a *named* missing
+  checkpoint. It no longer refuses a first day outright: a day 1 starts from
+  scratch by definition, and refusing that left no way to launch at all.
+  `python lab-new/projects/class-i/train/prod_day.py {small,medium,large}`.
+- [ ] **decision: NO-GO.** See "Required sign-off record" below for what
+  blocks it.
+
+### Superseded: the 2026-08-23 §6 sign-off (does not apply)
 
 ```yaml
 decision: GO
@@ -250,6 +261,57 @@ evidence_index: "runs/calibrate-20260823T193404Z; runs/overfit-small-20260823T18
 
 ## Required sign-off record
 
+**Current decision: NO-GO (2026-09-20).** The previous `GO` is recorded below it
+as the dated artefact it is; it does not apply to this configuration. Every one
+of the three things the last paragraph of this file names as invalidating a
+sign-off has changed since 2026-08-23: the **model** (Rondo did not exist until
+2026-09-18, and no checkpoint from the earlier architecture loads into it), the
+**data** (`dataset:themol/torsion-scan@1`, not OMol25 — see molnex notes "The
+Class-I dataset is THEMol torsion-scan, and a row is 24 molecules"), and the
+**batching** (the graph-slot count was being sized 24x short; `MoleculePadder`,
+`DataModule` and `TokenBudgetBatchSampler` all changed).
+
+```yaml
+decision: NO-GO
+scope: "nothing cleared; bounded calibration/validation only"
+blocking:
+  - "energy target: THEMol publishes absolute energies (sampled record
+     -503415.87 kcal/mol). The epsilon[Z] dressing leaves ~2.3e5 kcal/mol of
+     per-molecule constant against a ~7 kcal/mol torsion barrier, so
+     val_mae_kcal sat at 231651 -> 231645 across all three tiers and both legs
+     of smoke 2723274 while train_loss moved 81.96 -> 48.34. The metric that
+     selects the checkpoint is not measuring what training optimizes, and the
+     energy channel carries no usable signal. ByteFF's answer is energies
+     relative to each scan's own minimum, which is cheap here (one row is one
+     whole profile) and makes the dressing redundant rather than additional.
+     Operator decision required: it changes what is trained."
+  - "checklist item 5: capacity/HBM/step-time calibration on torsion-scan has
+     not completed. The OMol25 grid is void for this dataset — different
+     molecule size, different fill, and a row that is 24 graphs."
+  - "checklist items 2 and 3: reference-vs-optimized parity and the bounded
+     tiny-set overfit test have not been re-established for Rondo on this
+     dataset."
+target_hardware: "GH200"
+slurm_account: "naiss2026-4-715-gpu"
+reviewer: "unsigned"
+reviewed_at: "2026-09-20"
+evidence_index: >
+  workspaces/lab-new/runs/rondo-smoke/smoke-2723274.out (item 6: PASS on all
+  four properties for all three tiers — loss movement, validation reported,
+  resume past the checkpoint at 8 -> 16, per-tier failure isolation; fullgraph
+  compile clean; parameters 41108 / 204188 / 1191212; peak GPU 0.49 / 0.88 /
+  1.97 GiB);
+  molnex/runs/valence-distrib/summary.json (item 1: the frozen MoleculeExtent
+  over all 83951 rows at cutoff 10.0, max 1632 atoms/row);
+  molcrafts/molrs/.wheels-aarch64/BUILT_FROM (the exact core each job ran)
+notes: >
+  Step rate in the smoke (0.64 steps/s) is NOT a throughput measurement: the
+  smoke runs num_workers=0, so 480 frames per batch go through prepare serially
+  on the main process at under 2 GiB peak. Calibration with workers measures it.
+```
+
+### Superseded: the 2026-08-23 sign-off (does not apply)
+
 ```yaml
 decision: GO
 scope: "prod-day1 three sizes; not unbounded GO"
@@ -265,6 +327,10 @@ reviewed_at: "2026-08-23"
 evidence_index: "runs/calibrate-20260823T193404Z; runs/overfit-small-20260823T183517Z; runs/profile-20260823T180803Z"
 reason: "calibrate align_ok=1 inspect_ok=1 (Huber residualized energy + inlier force, energy_term 23.2, grad_norm 8.94, clip_would_fire=0). Overfit ok=1. Profile refreshed. PROD_DAY matches CALIBRATION except enumerated duration/account/output."
 ```
+
+Those three evidence directories were deleted with the rest of the pre-Rondo run
+output (molnex `1a76844`), so the sign-off above cannot be re-checked even on its
+own terms.
 
 The reviewer must change `decision` back to `NO-GO` whenever the code,
 environment, data, model, batching, optimizer, precision, or hardware
