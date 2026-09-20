@@ -1986,7 +1986,8 @@ def _themol_e0_path(source_id: str, *, n_fit: int, seed: int, n_rows: int) -> Pa
     return path
 
 
-def load_themol_torsion_split(
+def load_themol_split(
+    definition: Any,
     *,
     role: str = "shard-000",
     val_frac: float = 0.05,
@@ -1994,55 +1995,75 @@ def load_themol_torsion_split(
     n_train: int = 0,
     n_val: int = 0,
     n_fit: int = 4096,
+    dressing: bool = True,
 ) -> MoleculeSplit:
-    """THEMol torsion profiles, split by molecule. Frames are kcal/mol, with bonds.
+    """One THEMol shard, split by molecule. Frames are kcal/mol, with bonds.
 
-    One row of the shard is one **whole scan** — 24 constrained conformers of
-    the same molecule — so the split unit is not a frame and not even a row: a
-    molecule contributes as many rows as it has scanned dihedrals, and a
-    row-wise shuffle puts 1 619 of the 83 951 scans' molecules on both sides
-    (measured 2026-09-20: 82 332 distinct molecules, 1.02 scans/molecule).
-    Whole molecules are held out, using
+    Serves every stage of the ByteFF curriculum (spec `rondo.md` §5: staged
+    partial-Hessian -> torsion profiles -> off-equilibrium E/F) plus the MBIS
+    charge set, because all five THEMol definitions load the same
+    :class:`~molhub.dataset.themol.THEMolShardDataset` and differ only in what
+    their reader puts in the Frame.
+
+    **The split unit is the molecule, never the row.** A row is whatever that
+    dataset's reader calls a record — one equilibrium geometry for
+    ``hessian``, one whole 24-conformer scan for ``torsion-scan`` — and a
+    molecule contributes as many rows as it has scanned dihedrals or sampled
+    geometries. On torsion-scan a row-wise shuffle puts 1 619 of 83 951 scans'
+    molecules on both sides (measured 2026-09-20: 82 332 distinct molecules,
+    1.02 scans/molecule). Whole molecules are held out through
     :meth:`~molhub.dataset.themol.THEMolShardDataset.molecule_index`.
 
-    Why this dataset and not OMol25: it ships the topology. OMol25 frames carry
-    no bonds, so the Class-I path inferred them per molecule inside collate at
+    Why THEMol and not OMol25: it ships the topology. OMol25 frames carry no
+    bonds, so the Class-I path inferred them per molecule inside collate at
     379 us/molecule, which is what made that step CPU-bound. THEMol records
     carry a mapped SMILES, and the energies are already kcal/mol — the unit
     every Class-I term is written in.
 
     Args:
-        role: Shard role. The published torsion-scan set is one shard.
+        definition: The THEMol definition class to load, e.g.
+            ``THEMolTorsionScan`` or ``THEMolHessian``. Passed as the class, not
+            a name, so a typo is an import error rather than a runtime one.
+        role: Shard role.
         val_frac: Fraction of *molecules* (not rows) held out.
         seed: Permutation seed for the molecule shuffle.
         n_train: Cap on kept train rows. ``0`` keeps all.
         n_val: Cap on kept val rows. ``0`` keeps all.
-        n_fit: Records the ε[Z] least-squares reads. The table has ~10 free
+        n_fit: Records the eps[Z] least-squares reads. The table has ~10 free
             parameters, so a few thousand records is ample and the fit is not
             what the loader should spend its time on.
+        dressing: Fit an eps[Z] table. ``False`` for a set whose records carry
+            no energy — MBIS declares an empty ``graph_level`` schema, so a fit
+            there would read no energies, return an all-zero table, and then be
+            refused by the element-coverage check for being all zero. A set with
+            no energy needs no dressing, and saying so is clearer than a table
+            of zeros.
 
     Returns:
         Train and val :class:`~molhub.dataset.protocol.SubsetDataset` views of
-        the one shard, plus the ε[Z] table fitted on the train side only.
+        the one shard, plus the eps[Z] table fitted on the train side only (or
+        ``None`` when *dressing* is false).
 
     Raises:
         ValueError: *val_frac* leaves either side empty.
     """
-    from molhub.dataset.themol import THEMolTorsionScan
-
     if not 0.0 < val_frac < 1.0:
         raise ValueError(f"val_frac must be in (0, 1), got {val_frac}")
 
+    name = getattr(definition, "COORDINATE", type(definition).__name__)
     t0 = perf_counter()
-    source = THEMolTorsionScan().load(role)
-    print(f"themol role={role} n_scans={len(source)} load_s={perf_counter() - t0:.1f}", flush=True)
+    source = definition().load(role)
+    print(
+        f"themol {name} role={role} n_rows={len(source)} load_s={perf_counter() - t0:.1f}",
+        flush=True,
+    )
 
     t0 = perf_counter()
     groups = source.molecule_index()
     n_molecules = int(groups.max()) + 1 if groups.size else 0
     print(
-        f"themol molecules={n_molecules} scans_per_molecule={len(source) / max(n_molecules, 1):.2f}"
-        f" index_s={perf_counter() - t0:.1f}",
+        f"themol molecules={n_molecules} rows_per_molecule="
+        f"{len(source) / max(n_molecules, 1):.2f} index_s={perf_counter() - t0:.1f}",
         flush=True,
     )
 
@@ -2061,17 +2082,17 @@ def load_themol_torsion_split(
             f"val_frac={val_frac} over {n_molecules} molecules left "
             f"train={len(train_rows)} val={len(val_rows)} rows"
         )
-    # ε[Z] is fitted from the **whole** train side, before n_train/n_val cut a view
-    # out of it. Those two only bound how much a job looks at; the dressing is a
-    # property of the dataset and the split, so a bounded job gets the same table
-    # production does — one cached table for all of them.
+    # eps[Z] is fitted from the **whole** train side, before n_train/n_val cut a
+    # view out of it. Those two only bound how much a job looks at; the dressing
+    # is a property of the dataset and the split, so a bounded job gets the same
+    # table production does — one cached table for all of them.
     #
-    # This is not a refinement. Fitting from a *truncated* train side is what broke
-    # smoke 2723274: its 80 rows held no iodine, the held-out molecules did, so
-    # ε[53] stayed 0 and those molecules kept their ~1e6 kcal/mol offset inside
-    # what the loss reads as a residual — val_mae_kcal 231 651 on a path that was
-    # working, with a median residual of 35.6 hiding under the mean.
-    dressing = _themol_dressing(source, role, train_rows, n_fit=n_fit, seed=seed)
+    # This is not a refinement. Fitting from a *truncated* train side is what
+    # broke smoke 2723274: its 80 rows held no iodine, the held-out molecules
+    # did, so eps[53] stayed 0 and those molecules kept their ~1e6 kcal/mol
+    # offset inside what the loss reads as a residual — val_mae_kcal 231 651 on a
+    # path that was working, with a median residual of 35.6 hiding under the mean.
+    table = _themol_dressing(source, role, train_rows, n_fit=n_fit, seed=seed) if dressing else None
 
     if n_train > 0:
         train_rows = train_rows[:n_train]
@@ -2085,8 +2106,9 @@ def load_themol_torsion_split(
         flush=True,
     )
 
-    _require_element_coverage(source, dressing, train_rows, val_rows)
-    return MoleculeSplit(train, val, dressing=dressing)
+    if table is not None:
+        _require_element_coverage(source, table, train_rows, val_rows)
+    return MoleculeSplit(train, val, dressing=table)
 
 
 def _themol_dressing(
