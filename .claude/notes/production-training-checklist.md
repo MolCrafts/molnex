@@ -285,9 +285,15 @@ blocking:
      relative to each scan's own minimum, which is cheap here (one row is one
      whole profile) and makes the dressing redundant rather than additional.
      Operator decision required: it changes what is trained."
-  - "checklist item 5: capacity/HBM/step-time calibration on torsion-scan has
-     not completed. The OMol25 grid is void for this dataset — different
-     molecule size, different fill, and a row that is 24 graphs."
+  - "checklist item 5 is now MET — see the grid below — but it exposed a
+     schedule that is wrong by three orders of magnitude. A 24 h wall buys
+     2 286 epochs for the large tier and 10 941 for the small over 79 765 train
+     molecules, so `epochs: 1_000_000` + `wall_hours: 24` trains a thoroughly
+     memorised model and writes 2 286 eval points. The stopping rule has to be
+     early stopping on validation, a far shorter wall, or more data — THEMol
+     also ships hessian@1 (1.4 G) and mbis@1 (13 G) locally, which together are
+     ByteFF's three-stage curriculum, and torsion-scan alone is about a tenth of
+     what is on disk. Operator decision."
   - "checklist items 2 and 3: reference-vs-optimized parity and the bounded
      tiny-set overfit test have not been re-established for Rondo on this
      dataset."
@@ -295,6 +301,37 @@ target_hardware: "GH200"
 slurm_account: "naiss2026-4-715-gpu"
 reviewer: "unsigned"
 reviewed_at: "2026-09-20"
+calibration_grid: |
+  9/9 cells, job 2727464, snapshot 20260920T132404Z (molrs 026ece44, molpy
+  f21ce723, molhub 955efeaf, molnex 8e5a49db — a verified-consistent pair, the
+  wheel gate passing on merit rather than by override).
+
+  tier    capacity  ms/step  peak GiB  mol/batch     mol/s  atom fill  graphs
+  small     131072     20.7      3.52       4229    203814      99.7%       1
+  small     262144     36.2      6.99       8274    228598      99.6%       1
+  small     524288     68.8     13.94      16678    242553      99.9%       1
+  medium    131072     32.5      6.40       4229    129965      99.7%       1
+  medium    262144     59.9     12.77       8274    138161      99.6%       1
+  medium    524288    114.6     25.49      16678    145544      99.9%       1
+  large     131072     83.5     15.35       4229     50621      99.7%       1
+  large     262144    158.9     30.61       8274     52072      99.6%       1
+  large     524288    308.4     61.19      16678     54080      99.9%       1
+
+  Every cell compiled to a single graph, so the no-graph-breaks iron law holds
+  in all nine configurations on this dataset. Atom fill is 99.6-99.9 %
+  throughout; the graph-slot count sits above the live count by the padder's
+  1.25 graphs_slack, which is what it is for.
+
+  524288 is the top usable capacity: at 61.19 GiB for the large tier the next
+  power of two needs ~122 GiB against the GH200's 120 GB. But it is not the
+  right production choice — it buys 7 % (large) to 19 % (small) more epochs for
+  4x the memory, and equal step counts across tiers serve the scaling-law axis
+  better. 131072 stands.
+
+  Step time scales with capacity (1.75-1.91x per doubling) and sub-linearly with
+  parameters (5x the parameters costs 1.57x the step; 29x costs 4.03x). The void
+  OMol25 grid was flat instead — 85.6 to 91.8 ms across an 8x capacity range —
+  which was the loader setting the pace, not the GPU.
 evidence_index: >
   workspaces/lab-new/runs/rondo-smoke/smoke-2723274.out (item 6: PASS on all
   four properties for all three tiers — loss movement, validation reported,
@@ -303,7 +340,10 @@ evidence_index: >
   1.97 GiB);
   molnex/runs/valence-distrib/summary.json (item 1: the frozen MoleculeExtent
   over all 83951 rows at cutoff 10.0, max 1632 atoms/row);
-  molcrafts/molrs/.wheels-aarch64/BUILT_FROM (the exact core each job ran)
+  workspaces/lab-new/runs/rondo-calibrate/calibration-20260920T133503Z.json
+  (item 5: the 9-cell grid above, with the per-cell logs beside it);
+  workspaces/lab-new/snapshots/20260920T132404Z/REVISIONS (the four commits
+  every job on that snapshot ran, and their wheel's BUILT_FROM)
 notes: >
   Step rate in the smoke (0.64 steps/s) is NOT a throughput measurement: the
   smoke runs num_workers=0, so 480 frames per batch go through prepare serially
