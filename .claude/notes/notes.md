@@ -1767,6 +1767,50 @@ path OMol25 used. ByteFF instead fits energies *relative to each scan minimum*,
 which is available cheaply here because the whole profile is one record, and is
 the more faithful target. Not switched silently; it changes what is trained.
 
+## A validation number of 231 651 was one missing element (2026-09-20)
+
+Smoke 2723274 passed every gate and reported `val_mae_kcal` 231 651, frozen
+across all three tiers and both legs while `train_loss` moved 81.96 -> 48.34.
+I proposed three causes before measuring any of them, and **all three were
+wrong**. They are worth writing down because each was plausible and each would
+have sent the fix somewhere useless.
+
+| Guess | What the measurement said |
+|---|---|
+| "THEMol's absolute energies dwarf the torsion barrier by 4-5 orders, so the energy channel carries no signal" | eps[Z] removes the offset: raw std 687 614 kcal/mol -> dressed std **53.3**, against a within-scan barrier of median **9.76**. A factor of 5. |
+| "Training and validation compare different targets" | They don't. `predictions["energy"]` is dressed (5.14e5), `energy_mm` is not (70.2), `e0` 6.336e5 against a label of 6.34e5, residual 35.0, and `val_omol_mae` on a train batch is **94.3**. |
+| "The metric is structurally broken" | Same metric, same code, 94.3 on train and 231 651 on val. A metric bug does not know which split it is on. |
+
+The cause was **one element**. `load_themol_torsion_split` fitted eps[Z] on its
+*bounded view* of the train side; the smoke's view was 80 rows, which held
+`[1, 5, 6, 7, 8, 9, 14, 16, 17, 35]` and no iodine. The held-out molecules carry
+iodine. `fit_atomic_reference` solves `counts @ eps = E_DFT` over the records it
+is handed and leaves **eps = 0** for every element none of them contained — and
+zero is not neutral: a molecule holding such an element keeps its whole ~1e6
+kcal/mol offset inside what the loss reads as a residual.
+
+The shape of the evidence is the lesson: val **median** |E_DFT - e0| was 35.6 and
+the **mean** was 217 162. The median says the fit is fine; the mean says a
+handful of molecules are off by a million. A summary statistic that hides the
+tail hides exactly this class of bug, and the fix for the *report* is to print
+both.
+
+Two changes, because either alone leaves the trap:
+
+* eps[Z] is fitted from the **whole** train side, before `n_train`/`n_val` cut a
+  view out of it. Those bound how much a job looks at; the dressing is a
+  property of the dataset and the split. Smoke and calibration now read one
+  cached 12-element table fitted on 79 765 rows.
+* `_require_element_coverage` refuses a table with no value for an element either
+  split needs, naming it. It reads `THEMolShardDataset.element_mask()` — one
+  cached int64 per row, bit *z* per element — so it costs a bitwise OR, not a
+  record decode. Verified against the known failure: with the 80-row table it
+  raises "no value for element(s) [53] that the val split needs".
+
+At the calibration sample (4 096 records) every element is covered and the two
+sides agree: median 52.9 train vs 56.9 val.
+
+
 ## A GH200 job ran a molrs 27 commits old, and `import molrs` could not tell (2026-09-20)
 
 `.aarch64` installs molrs as a **wheel**, because an editable build writes one
