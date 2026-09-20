@@ -1781,6 +1781,59 @@ path OMol25 used. ByteFF instead fits energies *relative to each scan minimum*,
 which is available cheaply here because the whole profile is one record, and is
 the more faithful target. Not switched silently; it changes what is trained.
 
+## molpy and molrs move in pairs, so a run has to freeze both (2026-09-20)
+
+`ImportError: cannot import name 'LammpsCpuUse' from 'molrs.io'`, in a DataLoader
+worker, three cells into calibration 2726079. Neither library was broken:
+
+| | |
+|---|---|
+| molrs `8876e938` adds `LammpsCpuUse` | 14:50:36 |
+| molpy `651a818e` starts importing it | 14:56:33 |
+| the aarch64 wheel the job installed | built 14:47:15 |
+
+A GPU job reads molpy **live** through `PYTHONPATH` and molrs from a **wheel**
+built minutes earlier, so a job straddling a coordinated pair is broken by
+construction. The gate had said the wheel did not match the sources; I overrode
+it with `MOLRS_WHEEL_ALLOW_STALE=1`, reasoning that a bounded job validates the
+training path rather than pinning molrs. **That reasoning was wrong** — a stale
+molrs breaks *molpy's imports*, not just molrs behaviour — and rebuilding faster
+does not help, because the tree moves during the four-minute build.
+
+`lab-new/projects/class-i/train/snapshot.sh` takes a `git worktree` of molrs,
+molpy, molhub and molnex at their current commits; `build_molrs_aarch64.sbatch`
+and the run scripts take `SNAPSHOT=` and work from it.
+
+**Worktrees, not a copy.** The first version rsynced the four trees behind a
+hand-written exclude list and reached **30 GB** before being killed. The list was
+guesswork over trees I had never measured: `molrs/molrs-python` is 17 GB of build
+output, `molhub/node_modules` 611 MB (molhub has a JS app), `molnex/src` 93 MB of
+compiled objects. A worktree copies the tracked files only, hardlinks the
+objects, excludes every build artifact by construction, and takes **8.4 s**.
+
+**Three things the snapshot has to get right**, each of which I got wrong first:
+
+* The wheel lives under the molrs root it was built from. Splitting that (build
+  to `${SNAPSHOT}/.wheels-aarch64`, gate reads `${SNAPSHOT}/molrs/...`) made a
+  correct wheel read as a missing one.
+* The fingerprint is taken **after** the build. Cargo writes
+  `molrs-python/Cargo.lock` (57 635 bytes) during it, gitignored — so
+  `git status` stays clean while the fingerprint changes, 524 files recorded
+  against 525 present, and the job rejects its own wheel.
+* `CARGO_TARGET_DIR` stays outside the snapshot. Inside, it left 604 MB in a tree
+  meant to be cheap; shared, snapshots reuse each other's incremental artifacts.
+
+**And the freeze alone is not enough**: a snapshot taken *between* a coordinated
+pair is itself inconsistent. The build job therefore installs the wheel it just
+built and imports the snapshot's molpy against it, touching
+`molpy.io.read_smiles` — the attribute whose lazy import found the skew — and
+fails there, at the cost of one build rather than a GPU allocation.
+
+**The cost, stated:** uncommitted work is not in a snapshot (molhub had 15 dirty
+files, molpy 4, molrs 2). For a 24-hour run that is the right default — it is
+reproducible and nameable — and `REVISIONS` records the count.
+
+
 ## The torsion-scan step is the loader, and the loader is one HDF5 read (2026-09-20)
 
 Building one packed batch takes **26.8 s** at a 131 072-atom capacity and
