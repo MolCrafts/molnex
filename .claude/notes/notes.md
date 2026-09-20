@@ -1781,6 +1781,61 @@ path OMol25 used. ByteFF instead fits energies *relative to each scan minimum*,
 which is available cheaply here because the whole profile is one record, and is
 the more faithful target. Not switched silently; it changes what is trained.
 
+## The torsion-scan step is the loader, and the loader is one HDF5 read (2026-09-20)
+
+Building one packed batch takes **26.8 s** at a 131 072-atom capacity and
+**43.5 s** at 524 288. The GPU step at those sizes is tens of milliseconds. So
+the loader is not a contributor to step time, it *is* step time, and the flat
+ms/step the old OMol25 grid showed across an 8x capacity range was that.
+
+Where it goes, measured rather than guessed:
+
+| | cost |
+|---|---|
+| read one record (24 frames) from HDF5 | **64.9 ms cold / 15.1 ms warm** |
+| `ClassIPrepare.topology` + `label` over the same frames | **0.89 ms/frame** |
+
+4.3x from the page cache, and the shard is 6.5 GB against 485 GB of node memory,
+so it warms after one pass. The read is **I/O bound**, which is why workers help
+close to linearly — and the loader was running **four** of them against 16 to 32
+allocated cores.
+
+**Two hypotheses the measurement killed**, both of which I would have acted on:
+
+* *The valence enumeration is redone for all 24 conformers of a scan.* It is not.
+  `_read_torsion` builds one topology per record and reuses it; all 24 conformers
+  come back with identical `(34, 59, 76, 9)` shapes and byte-identical angle
+  lists. Prepare is 3 % of the cost, not the problem.
+* *The padded tensors dominate host memory.* They are about a fifth of it. One
+  in-flight batch costs **0.90 GiB** at 131 072 atoms and **1.48 GiB** at
+  524 288, against 0.17 GiB for the padded columns — the unpadded frames each
+  batch is built from, and their Python objects, are the rest.
+
+That second number is what killed calibration job 2724601 in all six cells it
+ran: `num_workers=4, prefetch_factor=4` is four workers holding five batches
+each, 17.7 GiB in flight at the *smallest* calibrated capacity, against 22.8 GiB
+for the job — because Slurm hands out memory **per CPU** (`MinMemoryCPU` 1459M)
+unless a job states otherwise. `run_day_gh200.sbatch` documented `--cpus 8`,
+which is 11.4 GiB, so production would have died in its first batch.
+
+`lab-new/projects/class-i/train/loader_plan.py` reads the allocation, sizes the
+in-flight set against the measured per-batch cost, and fails closed when it
+cannot feed two workers: (3, 2) at 16 CPUs / 22.8 GiB, (16, 4) at 32 / 96 GiB,
+and a refusal at 8 CPUs.
+
+**The remaining ceiling is the random read itself** — 176 to 694 records per
+batch, 24 small HDF5 datasets each. Warm and with 16 workers that is about
+0.1 s/batch of reading against ~0.1 s of prepare, so the loader stops dominating;
+below that needs an on-disk shape built for batched reads, which is MolHub's
+(one data layer, molnex has no file format).
+
+**A failed cell must keep its output.** The parent kept `tail[-1]`, and for a
+*killed* process that is whatever was last on the pipe: an `ast.AnnAssign`
+codegen line for one cell, a plain INFO log line for another. Two readings of
+one failure, and six cells' worth of GPU time with no diagnosis. Cells now write
+`cell-*.log` in full.
+
+
 ## A validation number of 231 651 was one missing element (2026-09-20)
 
 Smoke 2723274 passed every gate and reported `val_mae_kcal` 231 651, frozen
