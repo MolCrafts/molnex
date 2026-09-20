@@ -27,7 +27,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from molhub.config import config as molhub_config
-from molhub.dataset.themol import THEMolTorsionScan
+from molhub.dataset import themol
 
 from molzoo.rondo import RondoForceField
 from scripts.mm_param_learning.class_i_fit import ClassIPrepare, MoleculeExtent
@@ -66,20 +66,42 @@ def _plot(name: str, extent: MoleculeExtent) -> Path:
     return path
 
 
+#: The THEMol definition each ByteFF stage reads, by the name this script takes.
+#: One extent per dataset, because the extent is keyed by ``(source_id, cutoff)``
+#: and a row costs a wildly different amount in each: a ``hessian`` row is one
+#: equilibrium frame, a ``torsion-scan`` row is 24 constrained conformers, and a
+#: ``hessian-relax`` row is about 72 steps of a relaxation.
+STAGES: dict[str, str] = {
+    "hessian": "THEMolHessian",
+    "torsion-scan": "THEMolTorsionScan",
+    "hessian-relax": "THEMolHessianRelax",
+    "torsion-relax": "THEMolTorsionRelax",
+    "mbis": "THEMolMBIS",
+}
+
+
 def main() -> None:
     workers = int(sys.argv[1]) if len(sys.argv) > 1 else 32
+    stage = sys.argv[3] if len(sys.argv) > 3 else "torsion-scan"
+    if stage not in STAGES:
+        raise SystemExit(f"unknown stage {stage!r}; known {sorted(STAGES)}")
+    definition = getattr(themol, STAGES[stage])
     molhub_config.home_dir = HOME
     OUT.mkdir(parents=True, exist_ok=True)
     # The same cutoff the Class-I collate mounts: the field's own list radius.
     cutoff = float(RondoForceField().neighbor_list().cutoff)
     role = str(PROD_DAY["shard_role"])
-    print(f"home={HOME} workers={workers} cutoff={cutoff} role={role}", flush=True)
+    print(
+        f"home={HOME} workers={workers} cutoff={cutoff} stage={stage} role={role}",
+        flush=True,
+    )
 
-    dataset = THEMolTorsionScan().load(role)
+    dataset = definition().load(role)
     print(f"loaded role={role} n={len(dataset)} source_id={dataset.source_id}", flush=True)
     extent = ClassIPrepare().scan_extent(dataset, cutoff=cutoff, workers=workers)
     path = extent.save()
     row: dict[str, object] = {
+        "stage": stage,
         "n": int(extent.column("graph.natoms").size),
         "cutoff": cutoff,
         "source_id": dataset.source_id,
@@ -91,10 +113,10 @@ def main() -> None:
         "max_propers_per_row": extent.get_max_propers_per_molecule(),
         "max_impropers_per_row": extent.get_max_impropers_per_molecule(),
     }
-    row["plot"] = str(_plot(role, extent))
-    print(json.dumps({role: row}, indent=2), flush=True)
-    (OUT / "summary.json").write_text(json.dumps({role: row}, indent=2) + "\n")
-    print("DONE", OUT / "summary.json", flush=True)
+    row["plot"] = str(_plot(f"{stage}-{role}", extent))
+    print(json.dumps({stage: row}, indent=2), flush=True)
+    (OUT / f"summary-{stage}.json").write_text(json.dumps({stage: row}, indent=2) + "\n")
+    print("DONE", OUT / f"summary-{stage}.json", flush=True)
 
 
 if __name__ == "__main__":

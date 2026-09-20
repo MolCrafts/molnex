@@ -1986,6 +1986,91 @@ def _themol_e0_path(source_id: str, *, n_fit: int, seed: int, n_rows: int) -> Pa
     return path
 
 
+class HessianTargets:
+    """A stage-1 view whose frames carry the frozen force constants as labels.
+
+    Wraps a ``themol/hessian@1`` shard and, per record, writes the precomputed
+    Seminario constants onto the valence blocks as ``bonds.k_ref`` and
+    ``angles.k_ref`` — columns on namespaces the batch already has, so the batch
+    schema is untouched.
+
+    **The labels are a flat vector per record, so the term order has to match.**
+    The precompute (``scan_hessian_targets.py``) enumerated angles through
+    :meth:`ClassIPrepare.topology`, i.e. the molrs kernel behind
+    ``molpy.Atomistic.get_topo``, and this re-runs the same call. That order is
+    stable — verified identical across three processes with different
+    ``PYTHONHASHSEED`` (2026-09-20) — but stability is not the same as a check,
+    and a label silently on the wrong term is the failure this class exists to
+    make impossible. So the counts are compared per record and a mismatch raises.
+
+    The ``hessian`` block is **dropped** once the labels are on. It is
+    ``(3N)**2`` rows — 65 kB per record, about 260 MB for a 4 000-molecule batch —
+    and nothing downstream reads it: the projection it existed for already
+    happened in the precompute.
+
+    Args:
+        source: The loaded ``themol/hessian@1`` shard.
+        targets: The npz written by ``scan_hessian_targets.py``.
+
+    Raises:
+        FileNotFoundError: *targets* does not exist — run the precompute first.
+        ValueError: The npz was written for a different source.
+    """
+
+    def __init__(self, source: Any, targets: Path) -> None:
+        if not Path(targets).is_file():
+            raise FileNotFoundError(
+                f"stage-1 force-constant targets missing: {targets}. Run "
+                f"scripts/mm_param_learning/scan_hessian_targets.py first."
+            )
+        data = np.load(targets)
+        stored = str(np.asarray(data["_source_id"]).reshape(-1)[0])
+        if stored != str(source.source_id):
+            raise ValueError(f"{targets} was written for {stored!r}, not {source.source_id!r}")
+        self._source = source
+        self._bond_k = np.asarray(data["bond_k"], dtype=np.float64)
+        self._bond_offsets = np.asarray(data["bond_offsets"], dtype=np.int64)
+        self._angle_k = np.asarray(data["angle_k"], dtype=np.float64)
+        self._angle_offsets = np.asarray(data["angle_offsets"], dtype=np.int64)
+        self._prepare = ClassIPrepare()
+
+    def __len__(self) -> int:
+        return len(self._source)
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate ``source_id`` / ``molecule_index`` / ``element_mask`` / ``keys``.
+
+        The split, the sidecars and :meth:`MoleculeExtent.for_dataset` all ask the
+        shard directly; wrapping must not hide it.
+        """
+        return getattr(self._source, name)
+
+    def __getitem__(self, index: int) -> Sequence[Frame]:
+        frame = self._prepare.topology(self._source[index][0])
+        n_bonds = int(frame["bonds"].nrows) if "bonds" in frame else 0
+        n_angles = int(frame["angles"].nrows) if "angles" in frame else 0
+        bond_k = self._bond_k[self._bond_offsets[index] : self._bond_offsets[index + 1]]
+        angle_k = self._angle_k[self._angle_offsets[index] : self._angle_offsets[index + 1]]
+        if bond_k.size != n_bonds or angle_k.size != n_angles:
+            raise ValueError(
+                f"stage-1 labels for row {index} do not match its terms: "
+                f"{bond_k.size} bond / {angle_k.size} angle constants against "
+                f"{n_bonds} bonds / {n_angles} angles. The frozen targets were "
+                f"enumerated from a different bond graph — rescan."
+            )
+        if n_bonds:
+            frame["bonds"] = Block(
+                {**{c: frame["bonds"][c] for c in frame["bonds"].keys()}, "k_ref": bond_k}
+            )
+        if n_angles:
+            frame["angles"] = Block(
+                {**{c: frame["angles"][c] for c in frame["angles"].keys()}, "k_ref": angle_k}
+            )
+        if "hessian" in frame:
+            del frame["hessian"]
+        return (frame,)
+
+
 def load_themol_split(
     definition: Any,
     *,
@@ -2021,9 +2106,13 @@ def load_themol_split(
     every Class-I term is written in.
 
     Args:
-        definition: The THEMol definition class to load, e.g.
-            ``THEMolTorsionScan`` or ``THEMolHessian``. Passed as the class, not
-            a name, so a typo is an import error rather than a runtime one.
+        definition: Either a THEMol definition class to load — e.g.
+            ``THEMolTorsionScan``, passed as the class so a typo is an import
+            error rather than a runtime one — or an **already-loaded** dataset.
+            The second form is what a wrapped source needs: stage 1 splits a
+            :class:`HessianTargets` view, not a bare shard, and the wrapper
+            cannot be constructed by this function because it also needs the
+            frozen targets.
         role: Shard role.
         val_frac: Fraction of *molecules* (not rows) held out.
         seed: Permutation seed for the molecule shuffle.
@@ -2032,12 +2121,15 @@ def load_themol_split(
         n_fit: Records the eps[Z] least-squares reads. The table has ~10 free
             parameters, so a few thousand records is ample and the fit is not
             what the loader should spend its time on.
-        dressing: Fit an eps[Z] table. ``False`` for a set whose records carry
-            no energy — MBIS declares an empty ``graph_level`` schema, so a fit
-            there would read no energies, return an all-zero table, and then be
-            refused by the element-coverage check for being all zero. A set with
-            no energy needs no dressing, and saying so is clearer than a table
-            of zeros.
+        dressing: Fit an eps[Z] table. **A stage needs one only if it supervises
+            absolute energies.** Stages 2 and 3 (``torsion-scan``,
+            ``hessian-relax``) declare ``energy`` in ``TARGET_SCHEMA.graph_level``
+            and do; stage 1 (``hessian``, whose labels are force constants) and
+            ``mbis`` (charges) do not — their records carry no energy at all, so a
+            fit reads nothing and returns an all-zero table. Passing ``True``
+            there is caught by :func:`_require_element_coverage`, which refuses a
+            table with no value for an element the split needs; that is how this
+            default was found to be wrong for stage 1.
 
     Returns:
         Train and val :class:`~molhub.dataset.protocol.SubsetDataset` views of
@@ -2050,9 +2142,10 @@ def load_themol_split(
     if not 0.0 < val_frac < 1.0:
         raise ValueError(f"val_frac must be in (0, 1), got {val_frac}")
 
-    name = getattr(definition, "COORDINATE", type(definition).__name__)
     t0 = perf_counter()
-    source = definition().load(role)
+    # A definition class knows how to load; anything else is already a dataset.
+    source = definition().load(role) if hasattr(definition, "load") else definition
+    name = getattr(source, "source_id", type(source).__name__)
     print(
         f"themol {name} role={role} n_rows={len(source)} load_s={perf_counter() - t0:.1f}",
         flush=True,
