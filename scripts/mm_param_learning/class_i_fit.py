@@ -1953,6 +1953,39 @@ def load_phalkethoh_val(root: str | Path, *, n_keep: int = 0) -> list:
     return records
 
 
+def _themol_e0_path(source_id: str, *, n_fit: int, seed: int, n_rows: int) -> Path:
+    """On-disk path for a THEMol ε[Z] table.
+
+    Keyed by the source, the number of train rows it was fitted over, and the
+    subsample ``(n_fit, seed)`` that selected them — every input that changes the
+    table, and nothing else.
+
+    Why it is cached at all: the fit reads *n_fit* whole records, and a record is
+    24 frames, so the default 4 096 records is ~98 000 frame decodes — measured
+    160 s on a CPU node (job 2724471). The calibration gate runs one
+    **subprocess per cell** (nine of them, deliberately, because
+    ``error_on_recompile`` is process-global), and each one calls this loader, so
+    the same table was fitted nine times: ~24 minutes of a three-hour job
+    (2724066, cancelled for this). A cached read is 0.0 s. The OMol path had
+    :func:`_e0_cache_path` for exactly this reason; this is its counterpart.
+
+    Args:
+        source_id: The loaded shard's provenance string.
+        n_fit: Records the least-squares reads.
+        seed: Subsample seed.
+        n_rows: Train rows the subsample was drawn from.
+
+    Returns:
+        ``home_dir / "derived" / "themol-e0" / {digest}.npy``.
+    """
+    digest = hashlib.sha1(
+        f"{source_id}:n_rows={n_rows}:n_fit={n_fit}:seed={seed}".encode()
+    ).hexdigest()[:16]
+    path = Path(molhub_config.home_dir) / "derived" / "themol-e0" / f"{digest}.npy"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def load_themol_torsion_split(
     *,
     role: str = "shard-000",
@@ -2028,6 +2061,18 @@ def load_themol_torsion_split(
             f"val_frac={val_frac} over {n_molecules} molecules left "
             f"train={len(train_rows)} val={len(val_rows)} rows"
         )
+    # ε[Z] is fitted from the **whole** train side, before n_train/n_val cut a view
+    # out of it. Those two only bound how much a job looks at; the dressing is a
+    # property of the dataset and the split, so a bounded job gets the same table
+    # production does — one cached table for all of them.
+    #
+    # This is not a refinement. Fitting from a *truncated* train side is what broke
+    # smoke 2723274: its 80 rows held no iodine, the held-out molecules did, so
+    # ε[53] stayed 0 and those molecules kept their ~1e6 kcal/mol offset inside
+    # what the loss reads as a residual — val_mae_kcal 231 651 on a path that was
+    # working, with a median residual of 35.6 hiding under the mean.
+    dressing = _themol_dressing(source, role, train_rows, n_fit=n_fit, seed=seed)
+
     if n_train > 0:
         train_rows = train_rows[:n_train]
     if n_val > 0:
@@ -2040,10 +2085,104 @@ def load_themol_torsion_split(
         flush=True,
     )
 
-    # ε[Z] on the train side only. THEMol energies are already kcal/mol, so
-    # there is no eV factor here — the OMol path needs one, this does not.
-    t0 = perf_counter()
-    pick = train_rows if len(train_rows) <= n_fit else random.Random(seed).sample(train_rows, n_fit)
-    dressing = fit_atomic_reference([source[int(row)] for row in pick])
-    print(f"themol e0 n_fit={len(pick)} fit_s={perf_counter() - t0:.1f}", flush=True)
+    _require_element_coverage(source, dressing, train_rows, val_rows)
     return MoleculeSplit(train, val, dressing=dressing)
+
+
+def _themol_dressing(
+    source: Any,
+    role: str,
+    train_rows: Sequence[int],
+    *,
+    n_fit: int,
+    seed: int,
+) -> AtomicReferenceEnergy:
+    """The ε[Z] table for this split's train side, read from disk when it is there.
+
+    THEMol energies are already kcal/mol, so there is no eV factor here — the
+    OMol path needs one, this does not.
+
+    Args:
+        source: The loaded shard.
+        role: Shard role, used only to name the cache when the shard reports no
+            ``source_id``.
+        train_rows: The **whole** train side, never a bounded view of it.
+        n_fit: Records the least-squares reads.
+        seed: Subsample seed.
+
+    Returns:
+        The fitted (or cached) table.
+    """
+    t0 = perf_counter()
+    cache = _themol_e0_path(
+        str(getattr(source, "source_id", role)),
+        n_fit=n_fit,
+        seed=seed,
+        n_rows=len(train_rows),
+    )
+    if cache.is_file():
+        print(f"themol e0 cached={cache.name} read_s={perf_counter() - t0:.1f}", flush=True)
+        return _historical_are(np.load(cache).tolist())
+    rows = list(train_rows)
+    pick = rows if len(rows) <= n_fit else random.Random(seed).sample(rows, n_fit)
+    dressing = fit_atomic_reference([source[int(row)] for row in pick])
+    np.save(cache, np.asarray(dressing.atomic_energies, dtype=np.float64))
+    print(
+        f"themol e0 n_fit={len(pick)} fit_s={perf_counter() - t0:.1f} wrote={cache.name}",
+        flush=True,
+    )
+    return dressing
+
+
+def _require_element_coverage(
+    source: Any,
+    dressing: AtomicReferenceEnergy,
+    train_rows: Sequence[int],
+    val_rows: Sequence[int],
+) -> None:
+    """Refuse a dressing table with a zero where a split actually needs a value.
+
+    :func:`fit_atomic_reference` solves ``counts @ eps = E_DFT`` over the records
+    it is given and leaves ``eps = 0`` for every element none of them contained.
+    That zero is not neutral: a molecule holding such an element keeps its whole
+    absolute-energy offset inside what the loss reads as a residual.
+
+    Measured 2026-09-20 (job 2723274): fitted on 80 records, the table covered
+    ``[1, 5, 6, 7, 8, 9, 14, 16, 17, 35]`` while the held-out molecules carried
+    iodine, and the validation side went to a **mean** ``|E_DFT - e0|`` of
+    217 162 kcal/mol against a **median** of 35.6 — the median says the fit is
+    fine, the mean says a handful of molecules are off by 1e6, and the smoke
+    duly reported ``val_mae_kcal`` 231 651 for a path that was working. At the
+    calibration sample of 4 096 records every element is covered and train and
+    val agree (median 52.9 vs 56.9).
+
+    Element sets come from
+    :meth:`~molhub.dataset.themol.THEMolShardDataset.element_mask` — one cached
+    integer per row — so this costs a bitwise OR, not a record decode.
+
+    Args:
+        source: The loaded shard both splits index into.
+        dressing: The fitted table.
+        train_rows: Source rows on the train side.
+        val_rows: Source rows on the val side.
+
+    Raises:
+        ValueError: An element either split needs has no fitted value.
+    """
+    masks = source.element_mask()
+    fitted = np.flatnonzero(np.asarray(dressing.atomic_energies, dtype=np.float64))
+    fitted_mask = 0
+    for z in fitted.tolist():
+        fitted_mask |= 1 << int(z)
+    for name, rows in (("train", train_rows), ("val", val_rows)):
+        needed = int(np.bitwise_or.reduce(masks[np.asarray(rows, dtype=np.int64)]))
+        gap = needed & ~fitted_mask
+        if gap:
+            missing = [z for z in range(64) if gap >> z & 1]
+            raise ValueError(
+                f"the epsilon[Z] table has no value for element(s) {missing} that the "
+                f"{name} split needs: the fit sample never saw them, so their entry is "
+                f"0 and every molecule carrying one keeps its whole ~1e6 kcal/mol "
+                f"absolute-energy offset in the residual. Raise n_fit (currently the "
+                f"loader's default) or widen the fit sample."
+            )
