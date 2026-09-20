@@ -1747,6 +1747,20 @@ and `MoleculeExtent.for_dataset` slices a parent scan for a `SubsetDataset`, so
 min; ~minutes on the 128-core CPU partition) and both views read it. Do not scan
 the two views separately.
 
+**The OMol25 capacity grid was void for this dataset, and its 13 cell files are
+deleted** — but it carried one signal worth keeping. Step time was nearly flat,
+85.6 -> 91.8 ms across an 8x capacity range for the small tier and 93.9 -> 114.8
+for the large, i.e. across a 29x parameter range too, while peak memory tracked
+capacity faithfully (0.31 -> 2.41 GiB small, 1.53 -> 11.95 GiB large). A step
+time that does not move with either the work or the model is a **loader-bound**
+step. Above that grid it stopped being subtle: `small/262144` took 6 332 ms/step
+and `small/{524288, 1048576}` died with `DataLoader worker exited unexpectedly`.
+
+So when reading a fresh grid, the first question is whether ms/step tracks
+capacity at all. If it is flat again the answer is workers — the calibration
+sbatch asks for 16 CPUs and `class_i_data_module(..., num_workers=4)` uses four
+of them — not a smaller capacity.
+
 **The three tiers' parameter counts, re-measured for this architecture** (the old
 ones described the model Rondo replaced and are void). Powers of two throughout;
 the counts are the scaling-law x-axis, not a choice between candidates:
