@@ -1747,6 +1747,19 @@ and `MoleculeExtent.for_dataset` slices a parent scan for a `SubsetDataset`, so
 min; ~minutes on the 128-core CPU partition) and both views read it. Do not scan
 the two views separately.
 
+**The three tiers' parameter counts, re-measured for this architecture** (the old
+ones described the model Rondo replaced and are void). Powers of two throughout;
+the counts are the scaling-law x-axis, not a choice between candidates:
+
+| tier | hidden | blocks | torsion terms | parameters |
+|---|---|---|---|---|
+| small | 32 | 2 | 4 | 41 108 |
+| medium | 64 | 4 | 8 | 204 188 |
+| large | 128 | 8 | 16 | 1 191 212 |
+
+1 : 4.97 : 28.98 — a decade and a half of span. ByteFF's own parameter count is
+not recorded in `src/molzoo/specs/rondo.md`, so no comparison is claimed here.
+
 **Still open, named not fixed:** the energy target. THEMol absolute energies
 carry a molecule-dependent offset (a sampled record: -503 415.87 kcal/mol), and
 the loader fits an epsilon[Z] table on the train side to absorb it — the in-tree
