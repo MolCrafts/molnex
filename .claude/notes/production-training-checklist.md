@@ -289,16 +289,11 @@ blocking:
      energy half bit-identical (stage 2, job 2750175; stage 3, job 2750637). The
      epsilon[Z] table is out of the curriculum, so the metric that selects the
      checkpoint is now the quantity training optimizes."
-  - "checklist item 5 is MET for the torsion-scan shape only — see the grid
-     below — and the three-stage curriculum has since added two shapes it does
-     not cover. Stage 1 pads a namespace the grid never saw: `hessian_pairs`,
-     the deduplicated atom pairs a bonded term couples, capped at
-     2 * (bonds + angles). `MoleculePadder.caps()` is the calibration
-     fingerprint, so a stage-1 batch has a key the signed grid has no cell for,
-     and stage 3 (hessian-relax, ~72.5 frames per row) has a different row cost
-     again. Three grids are needed, not one. The stage-1 step is also cheap in a
-     new way — no Cartesian force, a term-local second derivative instead — so
-     its step time cannot be extrapolated from the stage-2 cells."
+  - "checklist item 5 is now MET for all four curriculum stages: 35 of 36 cells,
+     one grid per stage (`calibration_grid` below). The one loss is
+     hessian/medium/524288 to a BrokenPipeError, at a capacity that stage cannot
+     use anyway — see the loader finding below. What remains for a GO is items 2
+     and 3, not item 5."
   - "the schedule the grid exposed — 2 286 epochs for the large tier and 10 941
      for the small in a 24 h wall over 79 765 train molecules — is no longer a
      wall-clock question alone: the curriculum runs three stages over 61 796 +
@@ -313,7 +308,88 @@ target_hardware: "GH200"
 slurm_account: "naiss2026-4-715-gpu"
 reviewer: "unsigned"
 reviewed_at: "2026-09-21"
-calibration_grid: |
+calibration_grid_per_stage: |
+  stage          tier    capacity    ms/step     GiB     mol/s             grid
+  -----------------------------------------------------------------------------
+  mbis           small    131,072       10.8    2.21   394,906 20260921T105718Z
+  mbis           small    262,144       18.5    4.38   463,642 20260921T105718Z
+  mbis           small    524,288       36.7    8.72   464,675 20260921T105718Z
+  mbis           medium   131,072       21.9    4.45   195,352 20260921T105718Z
+  mbis           medium   262,144       40.0    8.82   213,892 20260921T105718Z
+  mbis           medium   524,288       74.5   17.57   228,831 20260921T105718Z
+  mbis           large    131,072       70.1   12.08    61,066 20260921T105718Z
+  mbis           large    262,144      138.1   24.03    61,955 20260921T105718Z
+  mbis           large    524,288      267.9   50.43    63,640 20260921T105718Z
+  hessian        small    131,072       10.9    2.09   389,670 20260921T113008Z
+  hessian        small    262,144      498.0    4.14    17,136 20260921T113008Z
+  hessian        small    524,288    29970.7    8.25       569 20260921T113008Z
+  hessian        medium   131,072       22.3    4.57   191,016 20260921T113008Z
+  hessian        medium   262,144      185.3    9.08    46,055 20260921T113008Z
+  hessian        medium   524,288     FAILED                   20260921T113008Z  BrokenPipeError: [Errno 32] Broken pipe
+  hessian        large    131,072       66.7   12.16    63,828 20260921T113008Z
+  hessian        large    262,144      225.3   24.18    37,873 20260921T113008Z
+  hessian        large    524,288    31216.8   48.35       546 20260921T113008Z
+  torsion-scan   small    131,072       19.0    3.11   220,167 20260921T105718Z
+  torsion-scan   small    262,144       31.3    6.17   268,073 20260921T105718Z
+  torsion-scan   small    524,288      180.1   12.33    93,119 20260921T105718Z
+  torsion-scan   medium   131,072       30.6    6.24   136,973 20260921T105718Z
+  torsion-scan   medium   262,144       53.7   11.64   156,572 20260921T105718Z
+  torsion-scan   medium   524,288      107.4   23.24   156,152 20260921T105718Z
+  torsion-scan   large    131,072       78.5   14.46    53,348 20260921T105718Z
+  torsion-scan   large    262,144      150.5   28.82    55,823 20260921T105718Z
+  torsion-scan   large    524,288      300.9   57.62    55,751 20260921T105718Z
+  hessian-relax  small    131,072       22.4    3.45   186,956 20260921T123156Z
+  hessian-relax  small    262,144       39.8    6.85   206,409 20260921T123156Z
+  hessian-relax  small    524,288       73.0   13.70   231,900 20260921T123156Z
+  hessian-relax  medium   131,072       32.1    6.31   130,411 20260921T123156Z
+  hessian-relax  medium   262,144       60.8   12.61   135,046 20260921T123156Z
+  hessian-relax  medium   524,288      117.0   25.15   144,648 20260921T123156Z
+  hessian-relax  large    131,072       83.4   15.21    50,152 20260921T123156Z
+  hessian-relax  large    262,144      161.8   30.35    50,787 20260921T123156Z
+  hessian-relax  large    524,288      320.9   60.59    52,713 20260921T123156Z
+
+  35 of 36 cells calibrated
+
+  Read `ms/step` at 524 288 as contended, not clean. torsion-scan/small/524288
+  measured 83.4 ms on one grid and 180.1 ms on another at identical peak memory
+  (12.33 GiB) and identical code; the two cheaper capacities of the same tier
+  reproduced to 0.1 ms. Peak GiB is reproducible everywhere; step time at the top
+  capacity is not, on non-exclusive GPU nodes.
+
+  **Stage 1 is loader-bound above 131 072, by a factor of 700.** Its cells read
+  10.9 / 498.0 / 29 970.7 ms for 131 072 / 262 144 / 524 288 — 389 670 down to 569
+  molecules/s — on 2 to 8 GiB of a 120 GB card, with genuinely full batches
+  (131 061 and 262 116 real atoms, 0.80 graph-slot fill). The GPU is idle: at the
+  top capacity one batch is 17 044 rows, each of which `HessianTargets` re-enumerates
+  through `PartialHessianPairs`'s Python `permutations` loop, about 44 M interpreter
+  operations per batch, and the shard holds only 3.6 such batches so it re-enumerates
+  every epoch. Two symptoms confirm it is the loader and not the model:
+  hessian/medium/262144 (185.3 ms) is *faster* than hessian/small/262144 (498.0 ms)
+  despite five times the parameters, and hessian/medium/524288 died of a broken pipe.
+  **So stage 1 runs at 131 072 and nothing larger**, a quarter of what the other three
+  stages take, until that pair layout is precomputed into a sidecar the way the
+  extent is. That makes the precompute a prerequisite rather than an optimisation.
+
+  The other three stages scale cleanly in both axes — hessian-relax 22.4 / 39.8 /
+  73.0 ms with peak memory doubling exactly per step, mbis 10.8 / 18.5 / 36.7,
+  torsion-scan 19.0 / 31.3 / (contended) — and 524 288 remains the memory ceiling
+  (60.59 GiB for hessian-relax/large, so the next power of two exceeds the card).
+
+  Every stage's own fingerprint differs, which is why one grid could not have served:
+  only `hessian` carries a `hessian_pairs` axis, and a row costs 30.8 atoms there and
+  in `mbis` against 704.5 in `torsion-scan` and 2 020.6 in `hessian-relax`.
+
+  Six defects were found and fixed between the first grid and the last, every one
+  invisible to the bounded smokes because those build a batch by hand and never reach
+  the loader, the trainer or `torch.compile`: a unit guard that refused a dataset
+  publishing no energy, and a second one on the frame; molpy construction and leaf
+  creation inside the compiled region; a delegating `__getattr__` that recursed under
+  `pickle` and killed every spawned worker with a message that reads like an OOM; and
+  a `WeightedLoss` holding its weights on the host, which eager accepts silently and
+  inductor does not. `cpu_cell.py` exists so the host-side half of that class is
+  caught in seconds rather than in a GPU queue slot.
+
+superseded_calibration_grid: |
   9/9 cells, job 2727464, snapshot 20260920T132404Z (molrs 026ece44, molpy
   f21ce723, molhub 955efeaf, molnex 8e5a49db — a verified-consistent pair, the
   wheel gate passing on merit rather than by override).
