@@ -396,3 +396,63 @@ class TestMoleculePadderFromCounts:
             assert int(pairs[idx].sum()) <= caps["pairs"]
             assert int(propers[idx].sum()) <= caps["propers"]
             assert len(batch) + 1 <= caps["graphs"]
+
+
+class TestHessianPairsCap:
+    """``hessian_pairs`` — the stage-1 partial-Hessian namespace — is a padded axis."""
+
+    @staticmethod
+    def _with_hessian_pairs(n_pairs: int = 5) -> object:
+        b, _, _ = _batch()
+        b["hessian_pairs"] = TensorDict(
+            {
+                "atomi": torch.arange(n_pairs, dtype=torch.long),
+                "atomj": torch.arange(1, n_pairs + 1, dtype=torch.long),
+                "block": torch.arange(9 * n_pairs, dtype=torch.float32).reshape(n_pairs, 9) + 1.0,
+            },
+            batch_size=[n_pairs],
+        )
+        return b
+
+    def test_the_block_column_pads_to_the_cap_with_dead_rows_at_zero(self) -> None:
+        """A dead pair must contribute nothing: the label is zero and the mask is off.
+
+        The prediction side kills a dead term by multiplying its own mask in, so
+        a dead slot is never read — but a non-zero dead label would still show up
+        in any denominator computed over the whole column.
+        """
+        cap = 16
+        padded = MoleculePadder(
+            max_atoms=32, max_pairs=64, cutoff=CUTOFF, max_hessian_pairs=cap
+        )(self._with_hessian_pairs(5))
+        block = padded["hessian_pairs", "block"]
+        assert block.shape == (cap, 9)
+        assert padded["hessian_pairs", "mask"].tolist() == [True] * 5 + [False] * (cap - 5)
+        assert bool((block[5:] == 0).all())
+        assert torch.equal(block[:5], torch.arange(45, dtype=torch.float32).reshape(5, 9) + 1.0)
+
+    def test_the_cap_is_absent_from_the_fingerprint_when_no_such_namespace_exists(self) -> None:
+        """Only stage 1 has this namespace, and ``caps()`` is the calibration key.
+
+        A non-zero default would add a key to every existing configuration's
+        fingerprint and invalidate calibration evidence that is still valid.
+        """
+        padder = MoleculePadder(max_atoms=32, max_pairs=64, cutoff=CUTOFF)
+        assert padder.max_hessian_pairs == 0
+        assert "hessian_pairs" not in padder.caps()
+        assert "hessian_pairs" not in padder.budgets()
+
+    def test_from_counts_sizes_the_cap_from_a_hessian_pairs_count_column(self) -> None:
+        """The cap follows the dataset's density, floored at its largest row."""
+        padder = MoleculePadder.from_counts(
+            {
+                "atoms": torch.tensor([10, 20, 30]),
+                "pairs": torch.tensor([90, 380, 870]),
+                "hessian_pairs": torch.tensor([40, 90, 140]),
+            },
+            atoms=256,
+            cutoff=CUTOFF,
+            round_to=8,
+        )
+        assert padder.max_hessian_pairs >= 140
+        assert padder.caps()["hessian_pairs"] == padder.max_hessian_pairs

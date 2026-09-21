@@ -36,8 +36,10 @@ from molix.config import config
 from molix.core.losses.energy import MSELoss
 
 __all__ = [
+    "AtomicChargeLoss",
     "ChargeMSELoss",
     "ParsleyEnergyWeight",
+    "PartialHessianLoss",
     "ProjectedInternalHessianLoss",
     "ScaleNormalizedLoss",
     "TorsionProfileLoss",
@@ -796,3 +798,191 @@ class ScaleNormalizedLoss(nn.Module):
             Dimensionless scaled loss.
         """
         return self.loss(pred, target) / self.scale.square()
+
+
+class PartialHessianLoss(nn.Module):
+    """Trace-relative MAE on the partial Hessian — ByteFF's first stage.
+
+    The target is not the whole ``(3N, 3N)`` Hessian but the ``3x3`` mixed blocks
+    ``d2E / dx_a dx_b`` of the atom pairs that share a bonded term, deduplicated
+    into the ``hessian_pairs`` namespace by
+    :class:`~molpot.forcefield.partial_hessian.PartialHessianPairs`. The quantum
+    block is the ``block`` column; the molecular-mechanics block comes from
+    :meth:`~molpot.forcefield.potentials.Potentials.partial_hessian`.
+
+    **Why relative, and why relative to the trace.** Curvature spans orders of
+    magnitude across a molecule — a C-H stretch against a torsional softness —
+    so an absolute residual would fit the stiff pairs and ignore everything else.
+    Each block is divided by ``|trace|`` of its own quantum block, which is the
+    rotationally invariant size of that block, floored at *trace_floor* so a pair
+    with almost no curvature cannot dominate by dividing by nearly zero.
+
+    **Why a blown-up prediction is dropped, not clipped.** Early in a fit an
+    unconstrained head can put an absurd constant on one term; clipping would
+    keep its gradient and let it steer the batch, and letting it through would
+    swamp the mean. ByteFF drops the row and logs the molecule. This drops the
+    row by multiplying a mask, with no host sync: the threshold test is a tensor
+    reduction, never a ``where`` over indices.
+
+    Padded pair rows are excluded by the namespace's own ``mask``. A dead row's
+    label is zero and its prediction is zero, so it adds nothing to the numerator
+    — but it would still count in a plain ``mean()``, making the loss shrink in
+    proportion to how empty the batch happened to be.
+
+    Units are the Hessian's: kcal mol⁻¹ Å⁻². *trace_floor* is therefore
+    dimensionful, and its value is ByteFF's.
+
+    Args:
+        key: Prediction key holding the ``(n_pairs, 9)`` MM blocks.
+        label: Column on ``hessian_pairs`` holding the quantum blocks.
+        trace_floor: Lower clamp on ``|trace|`` of a label block,
+            kcal mol⁻¹ Å⁻².
+        blowup: A predicted block with any entry larger than this in magnitude
+            drops its row, kcal mol⁻¹ Å⁻².
+
+    Reference:
+        Zheng, T. et al. "Data-driven parametrization of molecular mechanics
+        force fields for expansive chemical space coverage." *Chem. Sci.* (2025).
+        https://doi.org/10.48550/arXiv.2408.12817
+    """
+
+    def __init__(
+        self,
+        *,
+        key: str = "partial_hessian",
+        label: str = "block",
+        trace_floor: float = 10.0,
+        blowup: float = 1e4,
+    ) -> None:
+        super().__init__()
+        if trace_floor <= 0.0:
+            raise ValueError(f"trace_floor must be > 0 kcal/mol/A^2, got {trace_floor}")
+        if blowup <= 0.0:
+            raise ValueError(f"blowup must be > 0 kcal/mol/A^2, got {blowup}")
+        self.key = str(key)
+        self.label = str(label)
+        self.trace_floor = float(trace_floor)
+        self.blowup = float(blowup)
+
+    def forward(self, pred: Mapping[str, Any], batch: Any) -> torch.Tensor:
+        """Mean trace-relative absolute residual over the live pair blocks.
+
+        Args:
+            pred: Mapping carrying ``(n_pairs, 9)`` MM blocks under
+                :attr:`key`.
+            batch: Post-collate batch carrying ``hessian_pairs`` with the label
+                column and, on a padded batch, its ``mask``.
+
+        Returns:
+            Scalar loss, dimensionless.
+
+        Raises:
+            KeyError: The prediction is absent.
+            ValueError: The batch carries no ``hessian_pairs`` namespace or no
+                label column on it, or the shapes disagree.
+        """
+        if self.key not in pred:
+            raise KeyError(
+                f"{self.key!r} is not among the predictions {sorted(pred)}; declare it on "
+                "ForceFieldPredictions so the partial Hessian is computed"
+            )
+        blocks = pred[self.key]
+        if "hessian_pairs" not in batch.keys():
+            raise ValueError(
+                "PartialHessianLoss: the batch carries no hessian_pairs namespace — "
+                "there is nothing to fit against"
+            )
+        namespace = batch["hessian_pairs"]
+        label = namespace.get(self.label)
+        if label is None:
+            raise ValueError(
+                f"hessian_pairs carries no {self.label!r} column; the quantum blocks are "
+                "the label this stage fits"
+            )
+        if blocks.shape != label.shape:
+            raise ValueError(
+                f"predicted partial Hessian {tuple(blocks.shape)} does not match the label "
+                f"{tuple(label.shape)}; both are (n_pairs, 9) in hessian_pairs order"
+            )
+        label = label.to(blocks.dtype)
+        rows = (blocks.abs() <= self.blowup).all(dim=-1).to(blocks.dtype)
+        mask = namespace.get("mask")
+        if mask is not None:
+            rows = rows * mask.to(blocks.dtype)
+        trace = label[:, 0] + label[:, 4] + label[:, 8]
+        denominator = trace.abs().clamp(min=self.trace_floor).unsqueeze(-1)
+        residual = ((blocks - label).abs() / denominator).sum(dim=-1)
+        return (residual * rows).sum() / (rows.sum() * label.shape[1]).clamp(min=1.0)
+
+
+class AtomicChargeLoss(nn.Module):
+    """MSE on per-atom charges against a partitioning reference, on a packed batch.
+
+    :class:`ChargeMSELoss` compares two flat mappings; this reads the reference off
+    the batch's ``atoms`` namespace and excludes the padded atoms, which is what a
+    capacity-packed batch needs. A ghost atom's label is zero while the charge
+    solve still returns *something* for it, so averaging over the ghosts pulls
+    every predicted charge toward zero in proportion to how empty the batch was.
+
+    **Why this exists at all.** ByteFF does not train charges — it takes AM1-BCC
+    bond-charge corrections as fixed input. Rondo's charges come from a
+    charge-equilibration solve with learned electronegativity and hardness
+    (spec `rondo.md` departure D1), so they are parameters, and THEMol's MBIS set
+    is what determines them. Fitting them against MBIS before the bonded stages
+    is what puts Rondo in ByteFF's position of entering the bonded fit with the
+    charges already decided.
+
+    **No net-charge penalty.** The KKT solve enforces ``sum q = Q`` exactly as a
+    constraint (:class:`~molpot.charge.ElectronegativityEqualization`), so a
+    soft penalty here would only fight the constraint's own Lagrange multiplier.
+
+    Units: elementary charge ``e``; the loss is in ``e**2``.
+
+    Args:
+        key: Prediction key holding the ``(n_atoms,)`` charges.
+        label: Column on ``atoms`` holding the reference charges. THEMol's MBIS
+            set publishes them as ``atomic_charge``.
+    """
+
+    def __init__(self, *, key: str = "charge", label: str = "atomic_charge") -> None:
+        super().__init__()
+        self.key = str(key)
+        self.label = str(label)
+
+    def forward(self, pred: Mapping[str, Any], batch: Any) -> torch.Tensor:
+        """Mean squared charge error over the live atoms.
+
+        Args:
+            pred: Mapping carrying ``(n_atoms,)`` charges under :attr:`key`.
+            batch: Post-collate batch whose ``atoms`` carries the label column
+                and, on a padded batch, its ``mask``.
+
+        Returns:
+            Scalar MSE in ``e**2``.
+
+        Raises:
+            KeyError: The prediction is absent.
+            ValueError: ``atoms`` carries no label column, or the shapes disagree.
+        """
+        if self.key not in pred:
+            raise KeyError(
+                f"{self.key!r} is not among the predictions {sorted(pred)}; declare it on "
+                "ForceFieldPredictions so the charge solve runs"
+            )
+        charges = pred[self.key].reshape(-1)
+        atoms = batch["atoms"]
+        reference = atoms.get(self.label)
+        if reference is None:
+            raise ValueError(
+                f"atoms carries no {self.label!r} column; the partitioned charges are the "
+                "label this stage fits"
+            )
+        reference = reference.reshape(-1).to(charges.dtype)
+        if charges.shape != reference.shape:
+            raise ValueError(
+                f"predicted charges {tuple(charges.shape)} do not match the label "
+                f"{tuple(reference.shape)}; both are one value per atom of the batch"
+            )
+        live = atoms.get("mask")
+        weight = torch.ones_like(charges) if live is None else live.reshape(-1).to(charges.dtype)
+        return ((charges - reference).pow(2) * weight).sum() / weight.sum().clamp(min=1.0)

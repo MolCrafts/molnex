@@ -14,12 +14,13 @@ Public surface::
 
 from .forcefield import RondoForceField
 from .parameterizer import Rondo
-from .potential import RondoPotential
+from .potential import RondoPotential, RondoPredictions
 from .spec import RondoSpec
 
 __all__ = [
     "Rondo",
     "RondoForceField",
+    "RondoPredictions",
     "RondoPotential",
     "RondoSpec",
 ]

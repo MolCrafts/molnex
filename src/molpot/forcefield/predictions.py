@@ -53,7 +53,7 @@ Reference:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Protocol
 
 import torch
@@ -82,7 +82,8 @@ class _HessianDerivation(Protocol):
     ) -> torch.Tensor: ...
 
 
-_EnergyStep = Callable[[TensorDict, Potentials, dict[str, torch.Tensor]], None]
+_Tables = Mapping[str, Mapping[str, torch.Tensor]] | None
+_EnergyStep = Callable[[TensorDict, Potentials, _Tables, dict[str, torch.Tensor]], None]
 _ChargeStep = Callable[[ForceField, dict[str, torch.Tensor]], None]
 
 
@@ -121,10 +122,21 @@ class ForceFieldPredictions:
             (:class:`~molpot.derivation.HessianDerivation`), called as
             ``derivation(energy_fn, pos)``. Required iff ``"hessian"`` is
             declared.
+        trainable: Namespaces of the predicted parameter tables that keep a
+            gradient path; every other table is priced at its predicted value
+            with its path cut. ``None`` (default) trains everything. This is
+            ByteFF's ``set_trainable_terms``, and it is how stage 1 fits
+            ``bonds`` / ``angles`` / ``impropers`` against the partial Hessian
+            while the propers that share those pairs stay put. Declaring it
+            beside ``"energy"`` / ``"forces"`` / ``"hessian"`` raises: those
+            read the field's own buffers, so freezing there is
+            :class:`~molzoo.rondo.RondoPotential`'s ``trainable=``.
 
     Attributes:
-        SUPPORTED_KEYS: The four predictions a task may declare —
-            ``("energy", "forces", "hessian", "charge")``.
+        SUPPORTED_KEYS: The predictions a task may declare — the three
+            derivative-bearing ones (``"energy"``, ``"forces"``, ``"hessian"``),
+            the stage-1 partial Hessian (``"partial_hessian"``), and the
+            parameter reads (``"charge"``, ``"bond_k"``, ``"angle_k"``).
         model: The :class:`~molpot.forcefield.Parameterizer` passed at
             construction.
         keys: The declared keys in declaration order — exactly the keys
@@ -144,7 +156,15 @@ class ForceFieldPredictions:
         ['energy', 'forces']
     """
 
-    SUPPORTED_KEYS: tuple[str, ...] = ("energy", "forces", "hessian", "charge")
+    SUPPORTED_KEYS: tuple[str, ...] = (
+        "energy",
+        "forces",
+        "hessian",
+        "charge",
+        "bond_k",
+        "angle_k",
+        "partial_hessian",
+    )
 
     def __init__(
         self,
@@ -152,6 +172,7 @@ class ForceFieldPredictions:
         *,
         keys: Sequence[str],
         hessian_derivation: _HessianDerivation | None = None,
+        trainable: Sequence[str] | None = None,
     ) -> None:
         declared = tuple(keys)
         if not declared:
@@ -178,9 +199,17 @@ class ForceFieldPredictions:
                 "pass hessian_derivation=HessianDerivation()"
             )
 
+        derivative_keys = tuple(key for key in declared if key in ("energy", "forces", "hessian"))
+        if trainable is not None and derivative_keys:
+            raise ValueError(
+                f"trainable= cannot be honoured for {list(derivative_keys)}: those go through "
+                "Derivative over the assembled energy, which reads the filled ForceField's own "
+                "buffers. Freeze tables for an energy fit with RondoPotential(trainable=…)."
+            )
         self.model = model
         self.keys = declared
         self.hessian_derivation = hessian_derivation
+        self.trainable = None if trainable is None else tuple(trainable)
 
         energy_plan: list[_EnergyStep] = []
         if "energy" in declared and "forces" in declared:
@@ -191,10 +220,17 @@ class ForceFieldPredictions:
             energy_plan.append(self._put_forces)
         if "hessian" in declared:
             energy_plan.append(self._put_hessian)
+        if "partial_hessian" in declared:
+            energy_plan.append(self._put_partial_hessian)
         self._energy_plan: tuple[_EnergyStep, ...] = tuple(energy_plan)
-        self._charge_plan: tuple[_ChargeStep, ...] = (
-            (self._put_charges,) if "charge" in declared else ()
-        )
+        table_plan: list[_ChargeStep] = []
+        if "charge" in declared:
+            table_plan.append(self._put_charges)
+        if "bond_k" in declared:
+            table_plan.append(self._put_bond_k)
+        if "angle_k" in declared:
+            table_plan.append(self._put_angle_k)
+        self._charge_plan: tuple[_ChargeStep, ...] = tuple(table_plan)
         self._evaluate = self._walk_energy_plan if energy_plan else self._skip_energy_plan
 
     def __call__(self, batch: TensorDict) -> dict[str, torch.Tensor]:
@@ -363,8 +399,36 @@ class ForceFieldPredictions:
         """Assemble the declared Class-I terms once, then run the energy steps."""
         wrt = (POS_KEY,) if "forces" in self.keys else ()
         potentials = self._bound_potentials(forcefield, batch, wrt=wrt)
+        tables = self._frozen_tables(forcefield)
         for step in self._energy_plan:
-            step(batch, potentials, predictions)
+            step(batch, potentials, tables, predictions)
+
+    def _frozen_tables(self, forcefield: ForceField) -> _Tables:
+        """The parameter tables :attr:`trainable` does **not** name, detached.
+
+        Handed to the step as its ``tables`` override: a namespace present here
+        is priced at its predicted value with no gradient path, and every
+        namespace absent here falls back to the filled field's own buffers,
+        which still carry theirs. That is ByteFF's ``set_trainable_terms`` — a
+        param not in the trainable set is detached, not removed.
+
+        Detaching is not the same as excluding the parameters from the
+        optimizer: the encoder is shared, so this removes *that table's*
+        contribution to the encoder gradient while leaving the others.
+        """
+        if self.trainable is None:
+            return None
+        frozen: dict[str, dict[str, torch.Tensor]] = {}
+        for namespace in ("bonds", "angles", "propers", "impropers", "atoms"):
+            if namespace in self.trainable:
+                continue
+            params = forcefield.params(namespace)
+            if not params:
+                continue
+            frozen[namespace] = {
+                name: value.detach() for name, value in params.items() if torch.is_tensor(value)
+            }
+        return frozen
 
     def _skip_energy_plan(
         self,
@@ -410,24 +474,36 @@ class ForceFieldPredictions:
         self,
         batch: TensorDict,
         potentials: Potentials,
+        tables: _Tables,
         predictions: dict[str, torch.Tensor],
     ) -> None:
+        # A Derivative-over-energy route reads the field's own buffers; freezing
+        # a table for such a route is RondoPotential(trainable=…), and __init__
+        # refuses the combination rather than ignore it here.
+        del tables
         predictions["energy"] = potentials.calc_energy(batch)
 
     def _put_forces(
         self,
         batch: TensorDict,
         potentials: Potentials,
+        tables: _Tables,
         predictions: dict[str, torch.Tensor],
     ) -> None:
+        # A Derivative-over-energy route reads the field's own buffers; freezing
+        # a table for such a route is RondoPotential(trainable=…), and __init__
+        # refuses the combination rather than ignore it here.
+        del tables
         predictions["forces"] = potentials(batch)[FORCES_KEY]
 
     def _put_energy_forces(
         self,
         batch: TensorDict,
         potentials: Potentials,
+        tables: _Tables,
         predictions: dict[str, torch.Tensor],
     ) -> None:
+        del tables
         out = potentials(batch)
         predictions["energy"] = out[ENERGY_KEY]
         predictions["forces"] = out[FORCES_KEY]
@@ -436,8 +512,13 @@ class ForceFieldPredictions:
         self,
         batch: TensorDict,
         potentials: Potentials,
+        tables: _Tables,
         predictions: dict[str, torch.Tensor],
     ) -> None:
+        # A Derivative-over-energy route reads the field's own buffers; freezing
+        # a table for such a route is RondoPotential(trainable=…), and __init__
+        # refuses the combination rather than ignore it here.
+        del tables
         predictions["hessian"] = self._hessian(batch, potentials)
 
     def _put_charges(
@@ -446,6 +527,74 @@ class ForceFieldPredictions:
         predictions: dict[str, torch.Tensor],
     ) -> None:
         predictions["charge"] = self._charges(forcefield)
+
+    def _put_bond_k(
+        self,
+        forcefield: ForceField,
+        predictions: dict[str, torch.Tensor],
+    ) -> None:
+        predictions["bond_k"] = self._force_constants(forcefield, "bonds")
+
+    def _put_angle_k(
+        self,
+        forcefield: ForceField,
+        predictions: dict[str, torch.Tensor],
+    ) -> None:
+        predictions["angle_k"] = self._force_constants(forcefield, "angles")
+
+    @staticmethod
+    def _put_partial_hessian(
+        batch: TensorDict,
+        potentials: Potentials,
+        tables: _Tables,
+        predictions: dict[str, torch.Tensor],
+    ) -> None:
+        """The MM partial Hessian on the pairs ``hessian_pairs`` names.
+
+        ByteFF's first stage compares ``3x3`` mixed blocks against the quantum
+        Hessian's, not the full ``(3N, 3N)`` — see
+        :meth:`~molpot.forcefield.potentials.Potentials.partial_hessian`. Unlike
+        ``"hessian"`` this needs no injected derivation: the blocks are
+        term-local by construction, so there is no ``3N``-wide object to form.
+        """
+        predictions["partial_hessian"] = potentials.partial_hessian(batch, tables)
+
+    @staticmethod
+    def _force_constants(forcefield: ForceField, namespace: str) -> torch.Tensor:
+        """Read a valence namespace's ``k`` off the filled ForceField.
+
+        The same kind of read as :meth:`_charges` — a parameter the model already
+        wrote, not a derivative — so a task declaring only these assembles no
+        potential and evaluates no energy at all.
+
+        This is what ByteFF's first stage fits: the harmonic force constants
+        against references recovered from a QM Hessian by
+        :class:`molpot.forcefield.seminario.SeminarioForceConstants`. Comparing
+        parameters to parameters rather than energies to energies is why that
+        stage needs neither the assembled potential nor a second derivative.
+
+        Args:
+            forcefield: The field the model just filled.
+            namespace: ``"bonds"`` or ``"angles"``.
+
+        Returns:
+            ``(n_terms,)`` force constants, kcal mol⁻¹ Å⁻² for bonds and
+            kcal mol⁻¹ rad⁻² for angles.
+
+        Raises:
+            RuntimeError: The namespace or its ``k`` column is absent — the head
+                wrote nothing for this batch, and a zero vector would read as a
+                molecule with no springs.
+        """
+        params = forcefield.params(namespace)
+        k = None if params is None else params.get("k")
+        if k is None:
+            raise RuntimeError(
+                f'the filled ForceField carries no {namespace}["k"]: the '
+                f"{namespace} head wrote no force constants for this batch, so no "
+                f"prediction can be made"
+            )
+        return k
 
     def _hessian(self, batch: TensorDict, potentials: Potentials) -> torch.Tensor:
         """Hand the injected derivation the same ``(energy_fn, pos)`` shape ForceDerivation uses.

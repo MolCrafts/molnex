@@ -94,6 +94,15 @@ _ATOM_STRUCTURAL = frozenset({"number", *(c for cols in _VECTORS.values() for c 
 
 _ATOM_INDEX_COLS: frozenset[str] = frozenset({"atomi", "atomj", "atomk", "atoml"})
 
+#: Valence columns that index **another namespace's rows**, by prefix.
+#:
+#: ``bonds.hpair_0_1`` says which ``hessian_pairs`` row that bond's ``(0, 1)``
+#: block accumulates into (stage 1's partial-Hessian target). Its entries are
+#: row indices of ``hessian_pairs``, so concatenating two molecules has to shift
+#: them by the running ``hessian_pairs`` length — rebasing them by the atom
+#: offset instead would point every term at the wrong molecule's blocks.
+_NAMESPACE_INDEX_PREFIX: dict[str, str] = {"hpair_": "hessian_pairs"}
+
 
 def rebase(tensor: torch.Tensor, offset: int | torch.Tensor, key: str) -> torch.Tensor:
     """Shift a registered atom-index tensor into global coordinates.
@@ -243,6 +252,8 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
     boxless: list[int] = []
     bond_index: list[torch.Tensor] = []
     bond_types: list[torch.Tensor] = []
+    bond_extras: dict[str, list[torch.Tensor]] = {}
+    namespace_offsets: dict[str, int] = dict.fromkeys(_NAMESPACE_INDEX_PREFIX.values(), 0)
     terms: dict[str, dict[str, list[torch.Tensor]]] = {}
 
     offset = 0
@@ -314,6 +325,22 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
             )
             if "type_id" in block.keys():
                 bond_types.append(torch.as_tensor(np.asarray(block["type_id"]), dtype=torch.long))
+            # Anything else on the block is a per-bond column (a label, a
+            # precomputed constant) and rides along under ``bonds`` beside
+            # ``bond_index``. Dropping it silently is how a stage-1 label
+            # vanished between the dataset view and the loss (2026-09-21).
+            for col in sorted(block.keys()):
+                if col in {"atomi", "atomj", "type_id"}:
+                    continue
+                target = next(
+                    (ns for pre, ns in _NAMESPACE_INDEX_PREFIX.items() if col.startswith(pre)),
+                    None,
+                )
+                if target is None:
+                    bond_extras.setdefault(col, []).append(_column(block[col], dtype))
+                    continue
+                index = torch.as_tensor(np.asarray(block[col]), dtype=torch.long)
+                bond_extras.setdefault(col, []).append(index + namespace_offsets[target])
 
         for name in sorted(frame.keys()):
             if name in {"atoms", "bonds"}:
@@ -324,12 +351,27 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
                 continue
             bucket = terms.setdefault(name, {})
             for col in sorted(block.keys()):
-                value = torch.as_tensor(np.asarray(block[col]), dtype=torch.long)
-                bucket.setdefault(col, []).append(
-                    value + offset if col in _ATOM_INDEX_COLS else value
+                if col in _ATOM_INDEX_COLS:
+                    index = torch.as_tensor(np.asarray(block[col]), dtype=torch.long)
+                    bucket.setdefault(col, []).append(index + offset)
+                    continue
+                target = next(
+                    (ns for pre, ns in _NAMESPACE_INDEX_PREFIX.items() if col.startswith(pre)),
+                    None,
                 )
+                if target is not None:
+                    index = torch.as_tensor(np.asarray(block[col]), dtype=torch.long)
+                    bucket.setdefault(col, []).append(index + namespace_offsets[target])
+                    continue
+                # Not an atom index, so not an integer by construction: a
+                # per-term label is a float and casting it to ``long`` turns a
+                # force constant of 77.9 into 77 with nothing raised.
+                bucket.setdefault(col, []).append(_column(block[col], dtype))
 
         offset += n_atoms
+        for target in _NAMESPACE_INDEX_PREFIX.values():
+            if target in frame.keys():
+                namespace_offsets[target] += int(frame[target].nrows)
 
     atoms_dict: dict[str, torch.Tensor] = {
         "Z": torch.cat(z_all),
@@ -371,6 +413,9 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
         bonds: dict[str, torch.Tensor] = {"bond_index": torch.cat(bond_index, dim=1)}
         if bond_types:
             bonds["bond_types"] = torch.cat(bond_types)
+        for col, values in sorted(bond_extras.items()):
+            if len(values) == len(bond_index):
+                bonds[col] = torch.cat(values)
         out["bonds"] = TensorDict(bonds, batch_size=[])
     # A term namespace exists when *any* frame declares it: a molecule with no
     # angles contributes zero angle rows, which is not the same as the batch

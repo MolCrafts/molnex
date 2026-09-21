@@ -26,6 +26,7 @@ from molix.autograd import Derivative
 from molix.frame import TensorFrame, as_tensor_frame
 from molix.schema import ENERGY_KEY, FORCES_KEY, POS_KEY, VIRIAL_KEY, CellBound
 from molpot.forcefield import ForceField, Potentials
+from molpot.forcefield.partial_hessian import PartialHessianPairs
 from molpot.forcefield.potentials import logger as potentials_logger
 from molpot.forcefield.schema import PotentialMeta
 from molpot.potentials.elec.prefactors import kcalmol_A
@@ -3475,3 +3476,153 @@ class TestPotentialsPaddedBatch:
         forces = op(padded)[FORCES_KEY]
         assert torch.allclose(forces[:2], forces_ref, atol=1e-12)
         assert torch.equal(forces[2:], torch.zeros(4, 3, dtype=DTYPE))
+
+
+class TestPartialHessian:
+    """``Potentials.partial_hessian`` — stage 1's MM target.
+
+    The pairs, the accumulation over terms and the ``3x3`` sub-block indices are
+    all asserted through one property: the blocks must equal the corresponding
+    blocks of the full ``(3N, 3N)`` Hessian of the very same
+    :meth:`Potentials.energy`. Nothing weaker distinguishes a correct scatter
+    from a plausible one.
+    """
+
+    #: A five-atom chain with a branch: four bonds, four angles, one proper and
+    #: one improper, so every term type contributes and pairs are shared.
+    POSITIONS = torch.tensor(
+        [
+            [0.00, 0.00, 0.00],
+            [1.52, 0.10, 0.05],
+            [2.10, 1.42, -0.20],
+            [3.55, 1.50, 0.35],
+            [1.95, -0.85, 0.90],
+        ],
+        dtype=torch.float64,
+    )
+    BONDS = torch.tensor([[0, 1, 2, 1], [1, 2, 3, 4]])
+    ANGLES = torch.tensor([[0, 1, 0, 2], [1, 2, 1, 1], [2, 3, 4, 4]])
+    PROPERS = torch.tensor([[0], [1], [2], [3]])
+    #: molrs center-first: the improper's central atom is row 0.
+    IMPROPERS = torch.tensor([[1], [0], [2], [4]])
+
+    @staticmethod
+    def _forcefield() -> ForceField:
+        """Bonded-only Class-I field, one parameter row per term."""
+        return (
+            ForceField(name="partial-hessian", units="real")
+            .def_atomstyle("full")
+            .def_bondstyle("harmonic")
+            .def_anglestyle("harmonic")
+            .def_dihedralstyle("periodic")
+            .def_improperstyle("periodic")
+            .with_params(
+                bonds={
+                    "k": torch.tensor([310.0, 300.0, 320.0, 340.0], dtype=torch.float64),
+                    "r0": torch.tensor([1.526, 1.510, 1.500, 1.090], dtype=torch.float64),
+                },
+                angles={
+                    "k": torch.tensor([80.0, 75.0, 70.0, 65.0], dtype=torch.float64),
+                    "theta0": torch.full((4,), 1.9670, dtype=torch.float64),
+                },
+                propers={
+                    "k": torch.tensor([[1.3, 0.4, 0.25]], dtype=torch.float64),
+                    "periodicity": torch.tensor([[1, 2, 3]]),
+                    "phase": torch.tensor([[0.0, torch.pi, 0.0]], dtype=torch.float64),
+                },
+                impropers={
+                    "k": torch.tensor([[2.1, 1.1]], dtype=torch.float64),
+                    "periodicity": torch.tensor([[1, 2]]),
+                    "phase": torch.tensor([[0.0, torch.pi]], dtype=torch.float64),
+                },
+            )
+        )
+
+    @classmethod
+    def _layout(cls) -> PartialHessianPairs:
+        return PartialHessianPairs(
+            {
+                "bonds": cls.BONDS,
+                "angles": cls.ANGLES,
+                "propers": cls.PROPERS,
+                "impropers": cls.IMPROPERS,
+            }
+        )
+
+    @classmethod
+    def _batch(cls, positions: torch.Tensor) -> TensorDict:
+        layout = cls._layout()
+        n_atoms = int(positions.shape[0])
+        batch = TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": positions,
+                        "Z": torch.tensor([6, 6, 6, 6, 1]),
+                        "batch": torch.zeros(n_atoms, dtype=torch.long),
+                    },
+                    batch_size=[n_atoms],
+                ),
+                "bonds": TensorDict(
+                    {"atomi": cls.BONDS[0], "atomj": cls.BONDS[1]},
+                    batch_size=[cls.BONDS.shape[1]],
+                ),
+                "angles": TensorDict(
+                    {"atomi": cls.ANGLES[0], "atomj": cls.ANGLES[1], "atomk": cls.ANGLES[2]},
+                    batch_size=[cls.ANGLES.shape[1]],
+                ),
+                "propers": TensorDict(
+                    {
+                        "atomi": cls.PROPERS[0],
+                        "atomj": cls.PROPERS[1],
+                        "atomk": cls.PROPERS[2],
+                        "atoml": cls.PROPERS[3],
+                    },
+                    batch_size=[1],
+                ),
+                "impropers": TensorDict(
+                    {
+                        "atomi": cls.IMPROPERS[0],
+                        "atomj": cls.IMPROPERS[1],
+                        "atomk": cls.IMPROPERS[2],
+                        "atoml": cls.IMPROPERS[3],
+                    },
+                    batch_size=[1],
+                ),
+                "graphs": TensorDict({"num_atoms": torch.tensor([n_atoms])}, batch_size=[1]),
+            },
+            batch_size=[],
+        )
+        for namespace, slots in layout.slots.items():
+            for (i, j), record in slots.items():
+                batch[namespace, f"hpair_{i}_{j}"] = record
+        batch["hessian_pairs"] = TensorDict(
+            {"atomi": layout.pairs[:, 0], "atomj": layout.pairs[:, 1]},
+            batch_size=[len(layout)],
+        )
+        return batch
+
+    def test_the_blocks_are_the_full_hessians_blocks_on_those_pairs(self) -> None:
+        """Every accumulated pair block equals the full Hessian's, to fp64.
+
+        This is the whole contract: the deduplicated pairs, the sum over the
+        bonds / angles / propers / impropers that share each pair, the ``(i, j)``
+        sub-block picks, and the improper's center-first atom order.
+        """
+        potentials = Potentials(self._forcefield())
+        layout = self._layout()
+
+        def total(flat: torch.Tensor) -> torch.Tensor:
+            return potentials.energy(self._batch(flat.reshape(-1, 3)))[ENERGY_KEY].sum()
+
+        full = torch.autograd.functional.hessian(total, self.POSITIONS.reshape(-1), vectorize=True)
+        got = potentials.partial_hessian(self._batch(self.POSITIONS))
+        assert got.shape == (len(layout), 9)
+        torch.testing.assert_close(got, layout.gather(full))
+
+    def test_a_batch_without_the_namespace_is_refused(self) -> None:
+        """The pair list is the target's own; there is nothing to answer without it."""
+        batch = self._batch(self.POSITIONS)
+        del batch["hessian_pairs"]
+        with pytest.raises(ValueError, match="no hessian_pairs namespace"):
+            Potentials(self._forcefield()).partial_hessian(batch)

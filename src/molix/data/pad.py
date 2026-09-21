@@ -67,7 +67,7 @@ from molix.schema import dead_pair_length, dead_pair_shift
 #: ghost–ghost bond at the same position has ``r = 0``; autograd of
 #: ``‖x‖`` at the origin is NaN even when ``k = 0``.
 N_GHOSTS = 4
-_VALENCE = ("bonds", "angles", "propers", "impropers")
+_VALENCE = ("bonds", "angles", "propers", "impropers", "hessian_pairs")
 _INDEX_GHOST = {"atomi": 0, "atomj": 1, "atomk": 2, "atoml": 3}
 #: Count tables :meth:`MoleculePadder.from_counts` understands, in the order
 #: :meth:`MoleculePadder.caps` reports them.
@@ -156,6 +156,13 @@ class MoleculePadder:
         max_propers: Cap for ``propers`` rows. Default ``8 * max_atoms``
             (OMol25 8-mol batches hit ~2.2 propers/atom).
         max_impropers: Cap for ``impropers`` rows. Default ``2 * max_atoms``.
+        max_hessian_pairs: Cap for ``hessian_pairs`` rows — the atom pairs a
+            bonded term couples, carrying the stage-1 partial-Hessian labels.
+            Default ``0`` (the namespace is not padded), because only the
+            partial-Hessian stage has one. An exact upper bound is
+            ``2 * (max_bonds + max_angles)``: the pairs of a proper or an
+            improper are 1-2 and 1-3 pairs, which bonds and angles already
+            enumerate.
         max_graphs: Fixed graph-slot count, or ``None`` to leave the graph
             count alone (a fixed-``batch_size`` loader with ``drop_last``
             then supplies the static graph dimension). Live graphs occupy
@@ -174,6 +181,7 @@ class MoleculePadder:
         max_angles: int | None = None,
         max_propers: int | None = None,
         max_impropers: int | None = None,
+        max_hessian_pairs: int | None = None,
         max_graphs: int | None = None,
     ) -> None:
         self.max_atoms = int(max_atoms)
@@ -184,6 +192,11 @@ class MoleculePadder:
         self.max_angles = int(4 * max_atoms if max_angles is None else max_angles)
         self.max_propers = int(8 * max_atoms if max_propers is None else max_propers)
         self.max_impropers = int(2 * max_atoms if max_impropers is None else max_impropers)
+        # Unlike the valence families there is no default: the partial-Hessian
+        # pair list exists only in stage 1, and a non-zero default would add a
+        # key to caps() — the calibration fingerprint — for every batch that has
+        # no such namespace.
+        self.max_hessian_pairs = int(0 if max_hessian_pairs is None else max_hessian_pairs)
         if max_graphs is not None and int(max_graphs) < 2:
             raise ValueError(
                 f"MoleculePadder: max_graphs={max_graphs} leaves no live slot beside the "
@@ -306,6 +319,7 @@ class MoleculePadder:
             max_angles=caps.get("angles", 0),
             max_propers=caps.get("propers", 0),
             max_impropers=caps.get("impropers", 0),
+            max_hessian_pairs=caps.get("hessian_pairs", 0),
             max_graphs=max_graphs,
         )
 

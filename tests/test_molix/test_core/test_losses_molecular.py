@@ -16,8 +16,10 @@ from molix.core.losses import (
     force_loss,
 )
 from molix.core.losses.molecular import (
+    AtomicChargeLoss,
     ChargeMSELoss,
     ParsleyEnergyWeight,
+    PartialHessianLoss,
     ProjectedInternalHessianLoss,
     ScaleNormalizedLoss,
     TorsionProfileLoss,
@@ -798,3 +800,144 @@ class TestComposableLosses:
         batch["atoms", "inlier"] = torch.zeros(3)
 
         assert force_loss("forces", weight_key="inlier")(preds, batch).shape == ()
+
+
+class TestPartialHessianLoss:
+    """Trace-relative MAE on the partial Hessian — ByteFF's stage-1 objective."""
+
+    @staticmethod
+    def _batch(label: torch.Tensor, mask: torch.Tensor | None = None):
+        namespace = {"block": label}
+        if mask is not None:
+            namespace["mask"] = mask
+        return TensorDict(
+            {"hessian_pairs": TensorDict(namespace, batch_size=[label.shape[0]])},
+            batch_size=[],
+        )
+
+    def test_a_perfect_prediction_scores_zero(self) -> None:
+        """The residual, not the magnitude, is what is measured."""
+        label = torch.arange(18, dtype=torch.float64).reshape(2, 9) * 7.0
+        loss = PartialHessianLoss()({"partial_hessian": label.clone()}, self._batch(label))
+        assert float(loss) == 0.0
+
+    def test_each_block_is_divided_by_its_own_traces_magnitude(self) -> None:
+        """A stiff pair and a soft one must weigh the same, which is why it is relative.
+
+        Two blocks with the same absolute residual but traces of 100 and 1000 must
+        contribute in the ratio 10:1. An absolute residual would fit the stiff pair
+        and ignore the soft one — curvature spans orders of magnitude within one
+        molecule.
+        """
+        label = torch.zeros(2, 9, dtype=torch.float64)
+        label[0, 0] = label[0, 4] = label[0, 8] = 100.0 / 3.0
+        label[1, 0] = label[1, 4] = label[1, 8] = 1000.0 / 3.0
+        pred = label.clone()
+        pred[:, 1] += 5.0  # the same off-diagonal error in both
+        residual = ((pred - label).abs() / torch.tensor([[100.0], [1000.0]])).sum(dim=-1)
+        expected = residual.sum() / (2 * 9)
+        torch.testing.assert_close(
+            PartialHessianLoss()({"partial_hessian": pred}, self._batch(label)), expected
+        )
+
+    def test_a_nearly_flat_block_cannot_dominate_by_dividing_by_almost_zero(self) -> None:
+        """The floor is why: without it a trace of 1e-6 makes one pair the whole loss."""
+        label = torch.zeros(1, 9, dtype=torch.float64)
+        pred = torch.full((1, 9), 1.0, dtype=torch.float64)
+        floored = PartialHessianLoss(trace_floor=10.0)
+        torch.testing.assert_close(
+            floored({"partial_hessian": pred}, self._batch(label)),
+            torch.tensor(1.0 / 10.0, dtype=torch.float64),
+        )
+
+    def test_a_blown_up_predicted_block_drops_its_row_instead_of_swamping_the_mean(
+        self,
+    ) -> None:
+        """One absurd constant early in a fit must not steer the batch.
+
+        Clipping would keep its gradient; letting it through would make the mean its
+        own. ByteFF drops the row. With the only bad row dropped, the loss is the
+        good row's alone.
+        """
+        label = torch.zeros(2, 9, dtype=torch.float64)
+        pred = torch.zeros(2, 9, dtype=torch.float64)
+        pred[0, 0] = 5.0  # a real, modest residual
+        pred[1, 0] = 1e9  # blown up
+        loss = PartialHessianLoss(blowup=1e4)({"partial_hessian": pred}, self._batch(label))
+        torch.testing.assert_close(loss, torch.tensor(5.0 / 10.0 / 9.0, dtype=torch.float64))
+
+    def test_dead_pair_rows_are_excluded_from_the_mean_not_merely_zeroed(self) -> None:
+        """Otherwise the loss shrinks with however empty the batch happened to be.
+
+        A padded row has a zero label and a zero prediction, so it adds nothing to
+        the numerator — but counting it in the denominator would scale the whole
+        loss by the fill fraction, making a run's numbers depend on its packing.
+        """
+        label = torch.zeros(4, 9, dtype=torch.float64)
+        pred = torch.zeros(4, 9, dtype=torch.float64)
+        pred[0, 0] = 5.0
+        mask = torch.tensor([True, False, False, False])
+        dense = PartialHessianLoss()({"partial_hessian": pred[:1]}, self._batch(label[:1]))
+        padded = PartialHessianLoss()({"partial_hessian": pred}, self._batch(label, mask))
+        torch.testing.assert_close(padded, dense)
+
+    def test_a_batch_without_the_namespace_is_refused(self) -> None:
+        """There is nothing to fit, and a zero loss would read as converged."""
+        with pytest.raises(ValueError, match="no hessian_pairs namespace"):
+            PartialHessianLoss()(
+                {"partial_hessian": torch.zeros(1, 9)}, TensorDict({}, batch_size=[])
+            )
+
+    def test_a_shape_disagreement_is_refused(self) -> None:
+        """Both sides are ``(n_pairs, 9)`` in the same order, or the rows are mismatched."""
+        label = torch.zeros(3, 9, dtype=torch.float64)
+        with pytest.raises(ValueError, match="does not match the label"):
+            PartialHessianLoss()({"partial_hessian": torch.zeros(2, 9)}, self._batch(label))
+
+
+class TestAtomicChargeLoss:
+    """Charge MSE on a packed batch, where the ghosts must not count."""
+
+    @staticmethod
+    def _batch(reference: torch.Tensor, mask: torch.Tensor | None = None):
+        atoms = {"atomic_charge": reference}
+        if mask is not None:
+            atoms["mask"] = mask
+        return TensorDict(
+            {"atoms": TensorDict(atoms, batch_size=[reference.shape[0]])}, batch_size=[]
+        )
+
+    def test_it_is_the_mean_squared_error_over_the_live_atoms(self) -> None:
+        """The plain case, so the padded case below has something to equal."""
+        reference = torch.tensor([0.31, -0.62, 0.31], dtype=torch.float64)
+        pred = reference + torch.tensor([0.1, -0.2, 0.0], dtype=torch.float64)
+        got = AtomicChargeLoss()({"charge": pred}, self._batch(reference))
+        torch.testing.assert_close(got, torch.tensor((0.01 + 0.04) / 3, dtype=torch.float64))
+
+    def test_ghost_atoms_are_excluded_from_the_mean_not_merely_zeroed(self) -> None:
+        """A ghost's label is zero while the charge solve still answers for it.
+
+        Counting the ghosts in the denominator would scale the loss by the fill
+        fraction; counting them in the numerator would pull every predicted charge
+        toward zero. Neither is a property of the chemistry.
+        """
+        reference = torch.tensor([0.31, -0.62, 0.31, 0.0, 0.0], dtype=torch.float64)
+        pred = torch.tensor([0.41, -0.82, 0.31, 0.77, -0.5], dtype=torch.float64)
+        mask = torch.tensor([True, True, True, False, False])
+        padded = AtomicChargeLoss()({"charge": pred}, self._batch(reference, mask))
+        dense = AtomicChargeLoss()({"charge": pred[:3]}, self._batch(reference[:3]))
+        torch.testing.assert_close(padded, dense)
+
+    def test_a_batch_without_the_label_column_is_refused(self) -> None:
+        """A zero loss on a set that carries no charges would read as converged."""
+        batch = TensorDict(
+            {"atoms": TensorDict({"Z": torch.tensor([1, 1])}, batch_size=[2])}, batch_size=[]
+        )
+        with pytest.raises(ValueError, match="no 'atomic_charge' column"):
+            AtomicChargeLoss()({"charge": torch.zeros(2)}, batch)
+
+    def test_a_shape_disagreement_is_refused(self) -> None:
+        """One value per atom of the batch, on both sides."""
+        reference = torch.zeros(3, dtype=torch.float64)
+        with pytest.raises(ValueError, match="do not match the label"):
+            AtomicChargeLoss()({"charge": torch.zeros(2)}, self._batch(reference))

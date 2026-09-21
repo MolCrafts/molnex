@@ -70,6 +70,90 @@ from typing import Any
 #: wrong sizes every cap 24x too small.
 TORSION_ATOMS_PER_ROW: int = 24 * 33
 
+#: ByteFF's staged fit, in order (spec ``src/molzoo/specs/rondo.md`` §5: staged
+#: partial-Hessian -> torsion profiles -> off-equilibrium E/F; the departure it
+#: closes is R2, "single-stage fit leaves families degenerate"), preceded by the
+#: charge stage ByteFF has no counterpart for.
+#:
+#: **Why a charge stage comes first.** ByteFF takes AM1-BCC bond-charge
+#: corrections as fixed input and never trains charges. Rondo's come from a
+#: charge-equilibration solve with learned electronegativity and hardness
+#: (departure D1), so they are parameters, and leaving them to the energy
+#: objectives would fit electrostatics against the same residual as the torsion
+#: barriers. THEMol's ``mbis@1`` determines them directly, and running it first
+#: puts Rondo in ByteFF's own position: entering the bonded fit with the charges
+#: already decided.
+#:
+#: **``mbis@1`` is three shards, not one** (4.1 + 4.1 + 3.6 GB), unlike every
+#: other THEMol set here. ``PROD_DAY["shard_role"]`` names one, so a default run
+#: trains the charges on a third of what is on disk.
+#:
+#: **Stage 3's ``trainable=None`` includes the charges this stage just fitted.**
+#: That is the operator's schedule as written ("stage 3: everything") and it is
+#: left as written. ByteFF's own structure has the charges fixed through the
+#: bonded fit; to reproduce that, stage 3's ``trainable`` becomes the four bonded
+#: namespaces instead of ``None``. Stages 1 and 2 already leave them alone —
+#: stage 1 assembles no electrostatics at all and stage 2 trains propers only.
+#:
+#: ``trainable`` is the set of parameter-table namespaces each stage may move;
+#: every other table is detached before the energy is built, so one objective
+#: cannot drive parameters it has no business constraining — ByteFF's
+#: ``set_trainable_terms`` (operator schedule, 2026-09-21).
+#:
+#: Impropers are absent from stage 2 on purpose: a *proper* dihedral scan
+#: constrains proper barriers and says nothing about planarity, so the data
+#: decides which terms it may move. They first train in stage 3.
+#:
+#: ``dressing`` follows the dataset's own declaration rather than a preference —
+#: a stage needs an eps[Z] table only if it supervises absolute energies, and
+#: ``hessian@1`` declares ``graph_level={'hessian'}`` with no energy at all.
+CURRICULUM: tuple[dict[str, Any], ...] = (
+    {
+        "stage": "mbis",
+        "definition": "THEMolMBIS",
+        "objective": "charge",
+        # No `trainable` is needed and none is given: a charge residual reaches
+        # only the electronegativity / hardness heads and the shared encoder,
+        # because no bond, angle or torsion parameter appears in the charges.
+        # Declaring one here would claim an isolation that the objective's own
+        # structure already provides.
+        "trainable": None,
+        # No energy at all, so no eps[Z] table: `mbis@1` declares
+        # `graph_level=frozenset()` and fourteen per-atom columns.
+        "dressing": False,
+        "rows": 430_906,
+    },
+    {
+        "stage": "hessian",
+        "definition": "THEMolHessian",
+        "objective": "partial_hessian",
+        # ByteFF's stage 1 trains Bond_k, Angle_k *and* ImproperTorsion_k
+        # (`byteff/train/loss.py`, HessianLossType.Partial_Hessian_MAPE), while
+        # pricing propers at their current values so the pair blocks they share
+        # are complete. The improper is in because an out-of-plane bend is
+        # curvature the partial Hessian sees and no bond or angle can absorb.
+        "trainable": ("bonds", "angles", "impropers"),
+        "dressing": False,
+        "rows": 61_796,
+    },
+    {
+        "stage": "torsion-scan",
+        "definition": "THEMolTorsionScan",
+        "objective": "energy_forces",
+        "trainable": ("propers",),
+        "dressing": True,
+        "rows": 83_951,
+    },
+    {
+        "stage": "hessian-relax",
+        "definition": "THEMolHessianRelax",
+        "objective": "energy_forces",
+        "trainable": None,
+        "dressing": True,
+        "rows": 89_161,
+    },
+)
+
 PROD_MODELS: dict[str, dict[str, int]] = {
     "small": {"hidden": 32, "n_blocks": 2, "n_torsion_terms": 4, "packed_max_atoms": 131072},
     "medium": {"hidden": 64, "n_blocks": 4, "n_torsion_terms": 8, "packed_max_atoms": 131072},

@@ -6,7 +6,7 @@ import torch
 
 from molix.schema import ENERGY_KEY, FORCES_KEY
 from molix.units import units
-from molzoo.rondo import Rondo, RondoPotential, RondoSpec
+from molzoo.rondo import Rondo, RondoPotential, RondoPredictions, RondoSpec
 
 
 def _model(**over):
@@ -60,6 +60,35 @@ class TestRondoPotential:
         torch.testing.assert_close(ev, kcal * scale)
 
 
+class TestRondoPredictions:
+    """Rondo answering a prediction contract instead of producing an energy."""
+
+    def test_it_answers_the_declared_keys_and_no_energy(self, butane_batch):
+        """The contract is the whole output: a table read assembles no potential."""
+        param = Rondo(RondoSpec(hidden=8, n_blocks=1, n_torsion_terms=2, eem_max_atoms=32))
+        out = RondoPredictions(param, keys=("bond_k", "angle_k"))(butane_batch.clone())
+        assert sorted(out) == ["angle_k", "bond_k"]
+        assert "energy" not in out and "forces" not in out
+        assert out["bond_k"].shape == (butane_batch["bonds", "bond_index"].shape[1],)
+        assert out["bond_k"].requires_grad, "the force constants must carry a gradient path"
+
+    def test_its_checkpoint_is_interchangeable_with_the_energy_model(self):
+        """The curriculum carries one stage's checkpoint into the next.
+
+        Both models hold the parameterizer under the same attribute name, so both
+        produce ``parameterizer.*`` keys. A wrapper storing it elsewhere would load
+        *partially and silently* — the failure that made three earlier production
+        checkpoints unusable — so this asserts the key sets are equal rather than
+        merely overlapping, and that a real load reports nothing unexpected.
+        """
+        spec = RondoSpec(hidden=8, n_blocks=1, n_torsion_terms=2, eem_max_atoms=32)
+        stage_one = RondoPredictions(Rondo(spec), keys=("bond_k", "angle_k"))
+        stage_two = RondoPotential(Rondo(spec))
+        assert set(stage_one.state_dict()) == set(stage_two.state_dict())
+        missing, unexpected = stage_two.load_state_dict(stage_one.state_dict(), strict=False)
+        assert not missing and not unexpected
+
+
 class TestRondoPotentialTrainable:
     """Which parameter tables an objective is allowed to move."""
 
@@ -77,6 +106,37 @@ class TestRondoPotentialTrainable:
     def test_everything_trains_by_default(self, butane_batch):
         got = self._grads(butane_batch)
         assert got["proper_head"] and got["bond_head"] and got["encoder"]
+
+    def test_the_byteff_stage_schedule_freezes_what_it_claims(self, butane_batch):
+        """The three stages of the ByteFF curriculum, as configured (2026-09-21).
+
+        Stage 1 fits the harmonic valence terms to a partial Hessian, stage 2 the
+        torsion series to a dihedral profile, stage 3 everything to
+        off-equilibrium energies and forces (spec § 5; the fit this closes is
+        departure R2). Impropers are left out of stage 2 because a *proper*
+        dihedral scan constrains proper barriers and says nothing about
+        planarity — the data decides which terms it may move.
+
+        This pins the schedule rather than trusting the namespace names to map
+        onto the heads anyone expects. ``improper_head`` appears in no assertion:
+        butane is all sp3, so this batch carries no impropers and that head can
+        take no gradient whatever ``trainable`` says — asserting it either way
+        would pin a property of butane rather than of the schedule, and the
+        general gating is covered by the test below.
+        """
+        stage_1 = self._grads(butane_batch, trainable=("bonds", "angles"))
+        assert stage_1["bond_head"] and stage_1["angle_head"]
+        assert not stage_1["proper_head"]
+        assert not stage_1["improper_head"]
+        assert not stage_1["atom_head"]
+
+        stage_2 = self._grads(butane_batch, trainable=("propers",))
+        assert stage_2["proper_head"]
+        assert not stage_2["bond_head"]
+        assert not stage_2["angle_head"]
+
+        stage_3 = self._grads(butane_batch)
+        assert all(stage_3[head] for head in ("bond_head", "angle_head", "proper_head"))
 
     def test_a_named_subset_is_the_only_head_that_moves(self, butane_batch):
         # A torsion profile constrains torsion barriers. Letting it also move

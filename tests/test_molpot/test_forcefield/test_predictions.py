@@ -239,8 +239,32 @@ def _charge_model(head: nn.Module | None = None) -> AtomicChargeModel:
 
 
 class TestForceFieldPredictions:
-    def test_supported_keys_are_the_four_task_predictions(self) -> None:
-        assert ForceFieldPredictions.SUPPORTED_KEYS == ("energy", "forces", "hessian", "charge")
+    def test_supported_keys_is_the_declared_prediction_contract(self) -> None:
+        """The exact tuple, because a task's ``keys`` is validated against it.
+
+        Three kinds sit in one tuple and cost very different amounts: the
+        Derivative-over-energy routes, the stage-1 partial Hessian (bonded terms
+        assembled, a term-local second derivative, no ``(3N, 3N)`` object), and
+        the parameter reads that assemble nothing at all.
+        """
+        assert ForceFieldPredictions.SUPPORTED_KEYS == (
+            "energy",
+            "forces",
+            "hessian",
+            "charge",
+            "bond_k",
+            "angle_k",
+            "partial_hessian",
+        )
+
+    def test_trainable_is_refused_for_a_derivative_over_energy_route(self) -> None:
+        """Those read the filled field's buffers, so freezing there is the potential's.
+
+        Accepting it silently would report a frozen table while training it, which
+        is the one failure mode a staged fit cannot detect from its own metrics.
+        """
+        with pytest.raises(ValueError, match="cannot be honoured for"):
+            ForceFieldPredictions(_bond_model(), keys=("energy",), trainable=("bonds",))
 
     @pytest.mark.parametrize(
         "keys",

@@ -312,3 +312,77 @@ class RondoPotential(nn.Module):
             for name, child in self.parameterizer.named_children()
         }
         return {name: params for name, params in groups.items() if params}
+
+
+class RondoPredictions(nn.Module):
+    """Rondo answering a declared prediction contract, without the energy wrapper.
+
+    :class:`RondoPotential` is Rondo as a potential: one energy with
+    :class:`molix.autograd.Derivative` built over it, which is what stages 2 and
+    3 fit. This is Rondo answering
+    :class:`~molpot.forcefield.predictions.ForceFieldPredictions` keys directly,
+    which is what stage 1 needs — its target is the **partial Hessian**, the
+    ``3x3`` mixed blocks on the atom pairs that share a bonded term, and no
+    Cartesian energy or force appears in it at all.
+
+    How much work a declared key costs varies, and that is the point of letting
+    the contract choose: ``"bond_k"`` / ``"angle_k"`` / ``"charge"`` are reads of
+    a table the heads already wrote, assembling no potential; ``"partial_hessian"``
+    assembles the bonded terms and takes a term-local second derivative
+    (:meth:`~molpot.forcefield.potentials.Potentials.partial_hessian`), which is
+    still far cheaper than a ``(3N, 3N)`` Hessian.
+
+    **Its ``state_dict`` is interchangeable with** :class:`RondoPotential`'s. Both
+    hold the parameterizer under the attribute name ``parameterizer``, so both
+    produce ``parameterizer.*`` keys and a staged fit can carry one stage's
+    checkpoint into the next. A wrapper that stored it under any other name would
+    load partially and silently, which is the failure that made three earlier
+    production checkpoints unusable.
+
+    Args:
+        parameterizer: The Rondo recipe whose predictions are read.
+        keys: Predictions to declare, as
+            :class:`~molpot.forcefield.predictions.ForceFieldPredictions` names
+            them — ``("partial_hessian",)`` is ByteFF's first stage.
+        trainable: Namespaces of the predicted parameter tables that keep a
+            gradient path, as for :class:`RondoPotential`. Stage 1 passes
+            ``("bonds", "angles", "impropers")``: the propers that share those
+            pairs are still priced, so the pair blocks are complete, but the
+            partial-Hessian residual cannot move them.
+
+    Example::
+
+        model = RondoPredictions(Rondo(spec))
+        predictions = model(batch)      # {"partial_hessian": (n_pairs, 9)}
+    """
+
+    def __init__(
+        self,
+        parameterizer: nn.Module,
+        *,
+        keys: Sequence[str] = ("partial_hessian",),
+        trainable: Sequence[str] | None = None,
+    ) -> None:
+        super().__init__()
+        from molpot.forcefield.predictions import ForceFieldPredictions
+
+        self.parameterizer = parameterizer
+        self.keys = tuple(keys)
+        self.trainable = None if trainable is None else tuple(trainable)
+        self._predictions = ForceFieldPredictions(
+            parameterizer, keys=self.keys, trainable=self.trainable
+        )
+
+    def forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
+        """The declared parameter tables for this batch.
+
+        Args:
+            batch: Post-collate batch carrying the Class-I topology namespaces.
+
+        Returns:
+            Exactly the declared keys, in each prediction's own units —
+            ``(n_pairs, 9)`` kcal mol⁻¹ Å⁻² for ``partial_hessian``,
+            ``(n_terms,)`` kcal mol⁻¹ Å⁻² for ``bond_k`` and
+            kcal mol⁻¹ rad⁻² for ``angle_k``.
+        """
+        return self._predictions(batch)

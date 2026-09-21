@@ -44,6 +44,7 @@ from molpot.forcefield.pair_terms import (
     CoulombPeriodicPotential,
     LJCutPotential,
 )
+from molpot.forcefield.partial_hessian import TermHessian
 from molpot.forcefield.schema import ForceFieldSchemaView, PotentialMeta
 from molpot.ir import ProperTorsionBag
 from molpot.potentials import (
@@ -734,6 +735,162 @@ class Potentials(nn.Module):
         # The caller's own container back, not the view: the write above went
         # into its storage, so the one that was handed in composes onward.
         return system
+
+    #: Bonded namespaces the partial-Hessian target covers, and how each is
+    #: priced: the attribute holding its term, the index kwarg its forward
+    #: reads, the ``*_types`` kwarg to null out, and the parameter names to
+    #: backfill from the term's own buffers.
+    _PARTIAL_HESSIAN_TERMS: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
+        ("bonds", "bond", "bond_index", "bond_types", ("k", "r0")),
+        ("angles", "angle", "angle_index", "angle_types", ("k", "theta0")),
+        ("propers", "proper", "proper_index", "proper_types", ()),
+        ("impropers", "improper", "improper_index", "improper_types", ()),
+    )
+
+    def partial_hessian(
+        self,
+        system: TensorDict | TensorFrame,
+        tables: Mapping[str, Mapping[str, torch.Tensor]] | None = None,
+    ) -> torch.Tensor:
+        """The MM partial Hessian on the pairs ``hessian_pairs`` names.
+
+        Stage 1 of the ByteFF curriculum fits harmonic force constants against
+        the quantum Hessian, but not the whole ``(3N, 3N)`` of it: only the
+        ``3x3`` mixed blocks ``d2E / dx_a dx_b`` of the atom pairs that share a
+        bonded term. Those pairs are enumerated once by
+        :class:`~molpot.forcefield.partial_hessian.PartialHessianPairs` and
+        arrive as the ``hessian_pairs`` namespace, whose ``block`` column is the
+        quantum label; each valence namespace carries ``hpair_<i>_<j>`` columns
+        saying which row of it its own ``(i, j)`` block belongs to.
+
+        **A pair's block is a sum over terms.** A 1-2 pair sits in a bond, in
+        every angle and torsion through it, and the quantum block is the total
+        curvature, so the contributions accumulate into the pair's row before
+        anything is compared. That is why the pairs are deduplicated and why
+        this returns one row per pair rather than one per term.
+
+        Ghost valence rows contribute exactly zero without being masked here:
+        :meth:`_mask_term_tables` has already zeroed their force constants, so
+        their energy — and hence their curvature — is zero wherever their
+        ``hpair`` columns point.
+
+        Geometry is differentiated; the parameters keep their graph, so a loss
+        on the returned blocks reaches the force constants that produced them.
+        Positions are read detached — stage 1 fits parameters at fixed geometry.
+
+        Args:
+            system: Post-collate batch or its typed view, carrying
+                ``atoms.pos``, the valence namespaces with their
+                ``hpair_<i>_<j>`` columns, and ``hessian_pairs``.
+            tables: Per-namespace predicted parameter tables, as for
+                :meth:`energy`.
+
+        Returns:
+            ``(n_pairs, 9)`` — each row a row-major ``3x3`` block, in
+            ``hessian_pairs`` order, in kcal mol⁻¹ Å⁻² under ``units="real"``.
+
+        Raises:
+            ValueError: *system* carries no ``hessian_pairs`` namespace, or a
+                valence namespace carries ``hpair`` columns while no declared
+                style can price it.
+        """
+        frame = self._frame(system)
+        if "hessian_pairs" not in frame.keys():
+            raise ValueError(
+                "Potentials.partial_hessian: the batch carries no hessian_pairs namespace. "
+                "It is the target's own pair list — build it with "
+                "PartialHessianPairs and collate it beside the valence namespaces."
+            )
+        pos = self._pos(frame).detach()
+        pairs = frame["hessian_pairs"]
+        n_pairs = int(pairs["atomi"].shape[0])
+        blocks = pos.new_zeros((n_pairs, 9))
+        called_all = tables or {}
+        hessian = TermHessian()
+
+        for label, attribute, index_kwarg, types_kwarg, names in self._PARTIAL_HESSIAN_TERMS:
+            if label not in frame.keys():
+                continue
+            namespace = frame[label]
+            choices = [key for key in sorted(namespace.keys()) if key.startswith("hpair_")]
+            if not choices:
+                continue
+            term = getattr(self, attribute, None)
+            index = getattr(self, f"_{attribute}_index")(frame)
+            if term is None or index is None or index.shape[1] == 0:
+                raise ValueError(
+                    f"Potentials.partial_hessian: {label} carries {len(choices)} hpair "
+                    f"columns but no {attribute} term could price it; declare the style "
+                    f"and give it a parameter table, or drop the columns."
+                )
+            asked = dict(called_all.get(label, {}))
+            if label == "propers":
+                resolved = self._called_proper_tables(
+                    self._term_tables(asked, namespace, term, self._proper_table_names(asked))
+                )
+            elif label == "impropers":
+                resolved = self._term_tables(
+                    asked, namespace, term, self._improper_table_names(term)
+                )
+            else:
+                resolved = self._term_tables(asked, namespace, term, names)
+
+            n_terms, width = int(index.shape[1]), int(index.shape[0])
+            local_index = (
+                torch.arange(n_terms * width, device=pos.device, dtype=torch.long)
+                .reshape(n_terms, width)
+                .T.contiguous()
+            )
+            call = {
+                index_kwarg: local_index,
+                types_kwarg: None,
+                "term_batch": None,
+                "num_graphs": None,
+                **resolved,
+            }
+
+            def energy(local: torch.Tensor, _term=term, _call=call) -> torch.Tensor:
+                return _term(pos=local.reshape(-1, 3), **_call)
+
+            per_term = hessian.blocks(energy, pos[index.T])
+            # The namespace's own columns are the choice list: whatever
+            # PartialHessianPairs enumerated is what it wrote, so the two can
+            # never drift.
+            for key in choices:
+                i, j = (int(part) for part in key.removeprefix("hpair_").split("_"))
+                blocks = blocks.index_add(
+                    0,
+                    namespace[key].long(),
+                    per_term[:, i, :, j, :].reshape(n_terms, 9),
+                )
+        return blocks
+
+    @staticmethod
+    def _proper_table_names(called: Mapping[str, torch.Tensor]) -> tuple[str, ...]:
+        """Which proper-torsion dialect the caller is speaking.
+
+        ``ProperTorsionPeriodic`` stores the polar cosine form, so backfilling
+        its ``k`` / ``phase`` beside an OPLS ``k1..k4`` or a Cartesian
+        ``(a, b)`` table would mix a seed's spelling *and* its term count into
+        this batch — which is exactly what
+        :meth:`~molpot.ir.bags.ProperTorsionBag._cosine_fields` refuses. Read
+        the dialect off the caller's own keys instead.
+        """
+        if "k1" in called:
+            return ("k1", "k2", "k3", "k4")
+        if "a" in called or "b" in called:
+            # Cartesian ``(a, b)`` is a complete dialect of its own — it is what
+            # ``ProperTorsionParamHead`` predicts, because ``(k, gamma)`` has a
+            # coordinate singularity at ``k = 0``.
+            return ("a", "b", "periodicity")
+        return ("k", "phase")
+
+    @staticmethod
+    def _improper_table_names(term: BasePotential) -> tuple[str, ...]:
+        """The improper parameter names of whichever improper style is assembled."""
+        if isinstance(term, ImproperHarmonic):
+            return ("k", "chi0")
+        return ("k", "phase", "periodicity")
 
     def warmup(self, system: TensorDict | TensorFrame) -> "Potentials":
         """Host setup for this batch: wrap, bind topology (F29 of *this* frame), bind cell.
@@ -1430,18 +1587,7 @@ class Potentials(nn.Module):
                 # identity gather then refused a batch it had been given
                 # correct parameters for.
                 proper_tables = called.get("propers", {})
-                if "k1" in proper_tables:
-                    proper_names = ("k1", "k2", "k3", "k4")
-                elif "a" in proper_tables or "b" in proper_tables:
-                    # Cartesian ``(a, b)`` is a complete dialect of its own —
-                    # it is what ``ProperTorsionParamHead`` predicts, because
-                    # ``(k, γ)`` has a coordinate singularity at ``k = 0``.
-                    # Backfilling the seed term's polar ``k``/``phase`` beside
-                    # it is exactly the mix ``_cosine_fields`` refuses, so a
-                    # parameterized field raised instead of pricing torsions.
-                    proper_names = ("a", "b", "periodicity")
-                else:
-                    proper_names = ("k", "phase")
+                proper_names = self._proper_table_names(proper_tables)
                 proper_called = self._called_proper_tables(
                     self._term_tables(
                         proper_tables,

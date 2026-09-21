@@ -326,3 +326,41 @@ def test_velocity_columns_stack_into_atoms_vel():
     assert torch.equal(batch["atoms", "vel"], torch.tensor(vel, dtype=torch.float64))
     for component in ("vx", "vy", "vz"):
         assert ("atoms", component) not in batch.keys(include_nested=True)
+
+
+def test_a_per_term_float_label_survives_on_bonds_and_on_a_valence_namespace():
+    """A valence column that is not an atom index keeps its own kind.
+
+    Both halves were broken: the ``bonds`` branch carried only
+    ``atomi``/``atomj``/``type_id`` and dropped anything else, and the generic
+    valence loop cast every column to ``long``, so a force-constant label of
+    77.9 arrived as 77 with nothing raised (found 2026-09-21, while wiring the
+    stage-1 partial-Hessian labels). Both are asserted here because a label that
+    silently never reaches the loss cannot be caught downstream.
+    """
+    frames = []
+    for _ in range(2):
+        f = frame(Z=[6, 6, 8], pos=[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [3.0, 0.0, 0.0]])
+        f["bonds"] = type(f["atoms"])(
+            {
+                "atomi": np.array([0, 1]),
+                "atomj": np.array([1, 2]),
+                "k_ref": np.array([321.7, 654.3]),
+            }
+        )
+        f["angles"] = type(f["atoms"])(
+            {
+                "atomi": np.array([0]),
+                "atomj": np.array([1]),
+                "atomk": np.array([2]),
+                "k_ref": np.array([77.9]),
+            }
+        )
+        frames.append(f)
+    batch = collate_molecules(frames)
+
+    assert batch["bonds", "k_ref"].tolist() == pytest.approx([321.7, 654.3, 321.7, 654.3])
+    assert batch["angles", "k_ref"].tolist() == pytest.approx([77.9, 77.9])
+    assert batch["angles", "k_ref"].is_floating_point()
+    # Atom indices are still rebased into the concatenated numbering.
+    assert batch["angles", "atomi"].tolist() == [0, 3]

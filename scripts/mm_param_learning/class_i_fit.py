@@ -49,8 +49,9 @@ from molix.data import (
 from molix.data.frame_dataset import FrameDataset
 from molix.hooks import CheckpointHook, GradClipHook, Log, MolRecMetricsHook, StepSpeedHook
 from molix.units import units
+from molpot.forcefield.partial_hessian import PartialHessianPairs
 from molpot.heads.energy import AtomicReferenceEnergy
-from molzoo.rondo import Rondo, RondoPotential, RondoSpec
+from molzoo.rondo import Rondo, RondoPotential, RondoPredictions, RondoSpec
 
 TASK_ENERGY = "energy"
 TASK_CODE_ENERGY = 0
@@ -1006,6 +1007,40 @@ def fairchem_4m_objective(
     )
 
 
+def _with_hessian_pairs(counts: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """*counts* plus the ``hessian_pairs`` row count stage 1's namespace needs.
+
+    ``2 * (n_bonds + n_angles)`` is an **exact upper bound** on the number of
+    deduplicated ordered atom pairs a molecule's bonded terms couple, and it needs
+    no scan of its own. Every pair a proper or an improper contributes is a 1-2 or
+    a 1-3 pair — its 1-4 pair is the one
+    :class:`~molpot.forcefield.partial_hessian.PartialHessianPairs` omits — so
+    bonds and angles already enumerate all of them, twice each for the two
+    orderings. The bound is tight except in three- and four-membered rings, where a
+    1-3 pair can also be a 1-2 pair and the true count is lower; a cap above the
+    true maximum only pads.
+
+    Args:
+        counts: Per-row count tables carrying ``bonds`` and ``angles``.
+
+    Returns:
+        A copy with ``hessian_pairs`` added.
+
+    Raises:
+        KeyError: ``bonds`` or ``angles`` is missing — without both, the bound
+            is not an upper bound and a batch would overflow the cap mid-run.
+    """
+    missing = [name for name in ("bonds", "angles") if name not in counts]
+    if missing:
+        raise KeyError(
+            f"cannot size the hessian_pairs cap without per-row {missing} counts; "
+            "the bound is 2 * (bonds + angles)"
+        )
+    bonds = torch.as_tensor(counts["bonds"]).reshape(-1).to(torch.long)
+    angles = torch.as_tensor(counts["angles"]).reshape(-1).to(torch.long)
+    return {**dict(counts), "hessian_pairs": 2 * (bonds + angles)}
+
+
 def _list_capacity(atom_counts: Any) -> int:
     """``max_num_pairs`` for a list built over these molecules.
 
@@ -1091,6 +1126,12 @@ def class_i_data_module(
         train_counts = _extent_for(fit, fit.train_ds, cutoff=cutoff).counts()
     if val_counts is None:
         val_counts = _extent_for(fit, fit.val_ds, cutoff=cutoff).counts()
+    if fit.predicts_partial_hessian:
+        # The padder's budgets and the packer's counts have to name the same axes,
+        # or a batch could close on the atom budget while overflowing a cap the
+        # packer was never told to watch.
+        train_counts = _with_hessian_pairs(train_counts)
+        val_counts = _with_hessian_pairs(val_counts)
     capacity = int(fit.max_atoms if atoms is None else atoms)
     padder = MoleculePadder.from_counts(train_counts, atoms=capacity, cutoff=cutoff, slack=slack)
     nlist = fit.forcefield.neighbor_list(max_num_pairs=_list_capacity(train_counts["atoms"]))
@@ -1172,6 +1213,8 @@ class ClassIFit:
         clip_max_norm: float = 1.0e3,
         log_every_n_steps: int = 500,
         metrics_every_n_steps: int = 100,
+        trainable: Sequence[str] | None = None,
+        predictions: Sequence[str] | None = None,
     ) -> None:
         self.hidden = hidden
         self.n_blocks = n_blocks
@@ -1210,6 +1253,26 @@ class ClassIFit:
         self.batch_tasks = tuple(batch_tasks)
         self.energy_unit = energy_unit
         self.clip_max_norm = float(clip_max_norm)
+        #: Parameter-table namespaces this objective may move; every other table is
+        #: detached before the energy is built, so ``None`` trains everything.
+        #: A staged fit sets it per stage — ByteFF's ``set_trainable_terms`` — so one
+        #: objective cannot drive parameters it has no business constraining: a
+        #: torsion profile that may also move Lennard-Jones sigma lets the two
+        #: compensate, which is the classical molecular-mechanics degeneracy
+        #: (spec rondo.md A8, risk R2).
+        self.trainable = None if trainable is None else tuple(trainable)
+        #: Parameter tables to predict *instead of* energy and forces. Set for a
+        #: parameter fit — ByteFF's first stage compares predicted force constants
+        #: against references from a QM Hessian, which needs no assembled
+        #: potential, no energy and no derivative. ``None`` is the energy/force
+        #: path. The two models' ``state_dict`` keys are interchangeable, which is
+        #: what lets a staged fit carry one stage's checkpoint into the next.
+        self.predictions = None if predictions is None else tuple(predictions)
+        #: Whether this fit's target is the partial Hessian, which is the one
+        #: prediction that needs a padded ``hessian_pairs`` axis.
+        self.predicts_partial_hessian = bool(
+            self.predictions is not None and "partial_hessian" in self.predictions
+        )
         # Both sinks materialise device scalars (``grad_norm`` is a 0-d CUDA
         # tensor kept undetached on purpose), so each sampled step costs one
         # GPU->CPU sync. Sampling every step buys no resolution a 3e5-step run
@@ -1271,9 +1334,16 @@ class ClassIFit:
                 scheme=self.dressing.scheme,
                 units=self.dressing.units,
             )
-        return RondoPotential(self.parameterizer, dressing=cloned, energy_unit=self.energy_unit).to(
-            self.device
-        )
+        if self.predictions is not None:
+            return RondoPredictions(
+                self.parameterizer, keys=self.predictions, trainable=self.trainable
+            ).to(self.device)
+        return RondoPotential(
+            self.parameterizer,
+            dressing=cloned,
+            energy_unit=self.energy_unit,
+            trainable=self.trainable,
+        ).to(self.device)
 
     def trainer(self, model: nn.Module) -> Trainer:
         """Build the historical Trainer primitive. Official cosine is run()-only."""
@@ -1987,51 +2057,45 @@ def _themol_e0_path(source_id: str, *, n_fit: int, seed: int, n_rows: int) -> Pa
 
 
 class HessianTargets:
-    """A stage-1 view whose frames carry the frozen force constants as labels.
+    """A stage-1 view whose frames carry the quantum partial Hessian as labels.
 
-    Wraps a ``themol/hessian@1`` shard and, per record, writes the precomputed
-    Seminario constants onto the valence blocks as ``bonds.k_ref`` and
-    ``angles.k_ref`` — columns on namespaces the batch already has, so the batch
-    schema is untouched.
+    Wraps a ``themol/hessian@1`` shard and, per record, enumerates the atom pairs
+    its bonded terms couple
+    (:class:`~molpot.forcefield.partial_hessian.PartialHessianPairs`), gathers
+    those ``3x3`` blocks out of the QM Hessian, and writes them as a
+    ``hessian_pairs`` block beside ``hpair_<i>_<j>`` columns on each valence
+    namespace saying which pair row each term's block belongs to. That is
+    ByteFF's first-stage target
+    (:meth:`~molpot.forcefield.potentials.Potentials.partial_hessian` is the
+    prediction it is compared against).
 
-    **The labels are a flat vector per record, so the term order has to match.**
-    The precompute (``scan_hessian_targets.py``) enumerated angles through
-    :meth:`ClassIPrepare.topology`, i.e. the molrs kernel behind
-    ``molpy.Atomistic.get_topo``, and this re-runs the same call. That order is
-    stable — verified identical across three processes with different
-    ``PYTHONHASHSEED`` (2026-09-20) — but stability is not the same as a check,
-    and a label silently on the wrong term is the failure this class exists to
-    make impossible. So the counts are compared per record and a mismatch raises.
+    **Nothing is precomputed, and there is no label order to keep in step.** The
+    earlier version of this class read frozen per-term force constants out of an
+    npz and had to check their count against the frame's terms, because a label
+    vector silently attached to the wrong term is invisible. The blocks are
+    instead derived here, in the same process, from the same
+    :meth:`ClassIPrepare.topology` call the batch's valence namespaces come from
+    — so the pair list, the slot columns and the labels cannot disagree.
 
-    The ``hessian`` block is **dropped** once the labels are on. It is
-    ``(3N)**2`` rows — 65 kB per record, about 260 MB for a 4 000-molecule batch —
-    and nothing downstream reads it: the projection it existed for already
-    happened in the precompute.
+    The ``hessian`` block is dropped once the blocks are out. It is ``(3N)**2``
+    rows — 65 kB per record, about 260 MB for a 4 000-molecule batch — while the
+    pairs it reduces to are ``2 * (n_bonds + n_angles)`` rows of 9.
 
     Args:
         source: The loaded ``themol/hessian@1`` shard.
-        targets: The npz written by ``scan_hessian_targets.py``.
-
-    Raises:
-        FileNotFoundError: *targets* does not exist — run the precompute first.
-        ValueError: The npz was written for a different source.
     """
 
-    def __init__(self, source: Any, targets: Path) -> None:
-        if not Path(targets).is_file():
-            raise FileNotFoundError(
-                f"stage-1 force-constant targets missing: {targets}. Run "
-                f"scripts/mm_param_learning/scan_hessian_targets.py first."
-            )
-        data = np.load(targets)
-        stored = str(np.asarray(data["_source_id"]).reshape(-1)[0])
-        if stored != str(source.source_id):
-            raise ValueError(f"{targets} was written for {stored!r}, not {source.source_id!r}")
+    #: Index columns of each valence namespace, in the term's own atom order.
+    #: Impropers are center-first (molrs ``[center, i, j, k]``).
+    COLUMNS: dict[str, tuple[str, ...]] = {
+        "bonds": ("atomi", "atomj"),
+        "angles": ("atomi", "atomj", "atomk"),
+        "propers": ("atomi", "atomj", "atomk", "atoml"),
+        "impropers": ("atomi", "atomj", "atomk", "atoml"),
+    }
+
+    def __init__(self, source: Any) -> None:
         self._source = source
-        self._bond_k = np.asarray(data["bond_k"], dtype=np.float64)
-        self._bond_offsets = np.asarray(data["bond_offsets"], dtype=np.int64)
-        self._angle_k = np.asarray(data["angle_k"], dtype=np.float64)
-        self._angle_offsets = np.asarray(data["angle_offsets"], dtype=np.int64)
         self._prepare = ClassIPrepare()
 
     def __len__(self) -> int:
@@ -2047,27 +2111,46 @@ class HessianTargets:
 
     def __getitem__(self, index: int) -> Sequence[Frame]:
         frame = self._prepare.topology(self._source[index][0])
-        n_bonds = int(frame["bonds"].nrows) if "bonds" in frame else 0
-        n_angles = int(frame["angles"].nrows) if "angles" in frame else 0
-        bond_k = self._bond_k[self._bond_offsets[index] : self._bond_offsets[index + 1]]
-        angle_k = self._angle_k[self._angle_offsets[index] : self._angle_offsets[index + 1]]
-        if bond_k.size != n_bonds or angle_k.size != n_angles:
+        if "hessian" not in frame:
             raise ValueError(
-                f"stage-1 labels for row {index} do not match its terms: "
-                f"{bond_k.size} bond / {angle_k.size} angle constants against "
-                f"{n_bonds} bonds / {n_angles} angles. The frozen targets were "
-                f"enumerated from a different bond graph — rescan."
+                f"row {index} of {self._source.source_id} carries no hessian block; "
+                "stage 1 fits the quantum partial Hessian and has no other target"
             )
-        if n_bonds:
-            frame["bonds"] = Block(
-                {**{c: frame["bonds"][c] for c in frame["bonds"].keys()}, "k_ref": bond_k}
+        n_atoms = int(frame["atoms"].nrows)
+        hessian = torch.as_tensor(np.asarray(frame["hessian"]["value"], dtype=np.float64)).reshape(
+            3 * n_atoms, 3 * n_atoms
+        )
+        indices = {
+            namespace: torch.as_tensor(
+                np.stack([np.asarray(frame[namespace][column]) for column in columns]),
+                dtype=torch.long,
             )
-        if n_angles:
-            frame["angles"] = Block(
-                {**{c: frame["angles"][c] for c in frame["angles"].keys()}, "k_ref": angle_k}
+            for namespace, columns in self.COLUMNS.items()
+            if namespace in frame and int(frame[namespace].nrows) > 0
+        }
+        layout = PartialHessianPairs(indices)
+        if len(layout) == 0:
+            raise ValueError(
+                f"row {index} of {self._source.source_id} has no bonded terms, so its "
+                "Hessian constrains no Class-I parameter; drop it from the split"
             )
-        if "hessian" in frame:
-            del frame["hessian"]
+        blocks = layout.gather(hessian)
+        for namespace, slots in layout.slots.items():
+            block = frame[namespace]
+            frame[namespace] = Block(
+                {
+                    **{column: block[column] for column in block.keys()},
+                    **{f"hpair_{i}_{j}": record.numpy() for (i, j), record in slots.items()},
+                }
+            )
+        frame["hessian_pairs"] = Block(
+            {
+                "atomi": layout.pairs[:, 0].numpy(),
+                "atomj": layout.pairs[:, 1].numpy(),
+                "block": blocks.numpy(),
+            }
+        )
+        del frame["hessian"]
         return (frame,)
 
 

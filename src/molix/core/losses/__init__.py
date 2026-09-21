@@ -38,8 +38,10 @@ from molix.core.losses.combined import WeightedLoss
 from molix.core.losses.energy import MSELoss
 from molix.core.losses.force import MAELoss
 from molix.core.losses.molecular import (
+    AtomicChargeLoss,
     ChargeMSELoss,
     ParsleyEnergyWeight,
+    PartialHessianLoss,
     ProjectedInternalHessianLoss,
     ScaleNormalizedLoss,
     TorsionProfileLoss,
@@ -53,7 +55,9 @@ from molix.core.losses.molecular import (
 )
 
 __all__ = [
+    "AtomicChargeLoss",
     "ChargeMSELoss",
+    "PartialHessianLoss",
     "MAELoss",
     "MSELoss",
     "ParsleyEnergyWeight",

@@ -285,26 +285,39 @@ blocking:
      relative to each scan's own minimum, which is cheap here (one row is one
      whole profile) and makes the dressing redundant rather than additional.
      Operator decision required: it changes what is trained."
-  - "checklist item 5 is now MET — see the grid below — but it exposed a
-     schedule that is wrong by three orders of magnitude. A 24 h wall buys
-     2 286 epochs for the large tier and 10 941 for the small over 79 765 train
-     molecules, so `epochs: 1_000_000` + `wall_hours: 24` trains a thoroughly
-     memorised model and writes 2 286 eval points. The stopping rule has to be
-     early stopping on validation, a far shorter wall, or more data — THEMol
-     also ships hessian@1 (1.4 G) and mbis@1 (13 G) locally, which together are
-     ByteFF's three-stage curriculum, and torsion-scan alone is about a tenth of
-     what is on disk. Operator decision."
+  - "checklist item 5 is MET for the torsion-scan shape only — see the grid
+     below — and the three-stage curriculum has since added two shapes it does
+     not cover. Stage 1 pads a namespace the grid never saw: `hessian_pairs`,
+     the deduplicated atom pairs a bonded term couples, capped at
+     2 * (bonds + angles). `MoleculePadder.caps()` is the calibration
+     fingerprint, so a stage-1 batch has a key the signed grid has no cell for,
+     and stage 3 (hessian-relax, ~72.5 frames per row) has a different row cost
+     again. Three grids are needed, not one. The stage-1 step is also cheap in a
+     new way — no Cartesian force, a term-local second derivative instead — so
+     its step time cannot be extrapolated from the stage-2 cells."
+  - "the schedule the grid exposed — 2 286 epochs for the large tier and 10 941
+     for the small in a 24 h wall over 79 765 train molecules — is no longer a
+     wall-clock question alone: the curriculum runs three stages over 61 796 +
+     83 951 + 89 161 rows instead of one over 83 951. The stopping rule still
+     has to be early stopping on validation rather than `epochs: 1_000_000` +
+     `wall_hours: 24`, and the per-stage epoch budget is unset. Operator
+     decision."
   - "checklist items 2 and 3: reference-vs-optimized parity and the bounded
      tiny-set overfit test have not been re-established for Rondo on this
      dataset."
 target_hardware: "GH200"
 slurm_account: "naiss2026-4-715-gpu"
 reviewer: "unsigned"
-reviewed_at: "2026-09-20"
+reviewed_at: "2026-09-21"
 calibration_grid: |
   9/9 cells, job 2727464, snapshot 20260920T132404Z (molrs 026ece44, molpy
   f21ce723, molhub 955efeaf, molnex 8e5a49db — a verified-consistent pair, the
   wheel gate passing on merit rather than by override).
+
+  **Scope: stage 2 (themol/torsion-scan) only.** The caps below carry no
+  `hessian_pairs` axis, so this grid does not fingerprint a stage-1 batch, and a
+  hessian-relax row costs ~72.5 frames against torsion-scan's 24, so it does not
+  fingerprint stage 3 either.
 
   tier    capacity  ms/step  peak GiB  mol/batch     mol/s  atom fill  graphs
   small     131072     20.7      3.52       4229    203814      99.7%       1
@@ -344,6 +357,31 @@ evidence_index: >
   (item 5: the 9-cell grid above, with the per-cell logs beside it);
   workspaces/lab-new/snapshots/20260920T132404Z/REVISIONS (the four commits
   every job on that snapshot ran, and their wheel's BUILT_FROM)
+stage_1_evidence: |
+  The partial-Hessian stage's data and loss path is validated, bounded, on real
+  rows — not calibrated. Job 2748912 (6 THEMol hessian@1 records, CPU):
+
+  * labels gathered from each record's QM Hessian and the (3N)^2 block dropped;
+    224 / 88 / 264 / 294 / 228 / 248 pairs against the cap bound
+    2 * (bonds + angles) = 230 / 88 / 264 / 294 / 228 / 248 — exact on five rows,
+    six pairs tighter on the one with a ring, which is where a 1-3 pair is also
+    a 1-2 pair.
+  * the collated label is bit-identical to the raw QM Hessian block on that pair
+    (max |d| = 0.000e+00), so collate's atom-pair and slot rebasing are right.
+  * padded 1 346 live pairs into a 4 096 cap; the prediction is finite at
+    (4096, 9); the loss is 0.699 (dimensionless, trace-relative).
+  * `trainable=("bonds","angles","impropers")` holds under backward: bond
+    6.84e-05, angle 2.32e-03, improper 2.17e-03, **proper exactly 0**, shared
+    encoder 1.69e-03. That is `set_trainable_terms` semantics — the propers are
+    still priced so the pair blocks are complete, and cannot move.
+
+  The MM prediction itself is pinned against the full (3N, 3N) Hessian of the
+  same `Potentials.energy` to 5.7e-14 on every pair, with bonds, angles, propers
+  and impropers all accumulating
+  (`tests/test_molpot/test_forcefield/test_potentials.py::TestPartialHessian`).
+
+  Still missing for stage 1: its own calibration cell (item 5) and a bounded
+  tiny-set overfit test (item 3).
 notes: >
   Step rate in the smoke (0.64 steps/s) is NOT a throughput measurement: the
   smoke runs num_workers=0, so 480 frames per batch go through prepare serially
