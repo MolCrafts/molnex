@@ -157,7 +157,16 @@ CURRICULUM: tuple[dict[str, Any], ...] = (
         # blocker — THEMol publishes absolute energies near -503 415 kcal/mol
         # against a ~10 kcal/mol barrier, so an eps[Z] table leaves a constant far
         # larger than the signal. A relative objective never sees the constant.
-        "objective": "torsion_profile",
+        #
+        # **With the Huber knee, where ByteFF uses the plain form.** ByteFF can use
+        # it: its Lennard-Jones is frozen GAFF-2.2, so a torsion scan never contains
+        # a clash. Rondo *learns* sigma, and an untrained one walks into the
+        # (sigma/r)**12 wall — this stage's loss starts at 8.5e10 (kcal/mol)^2,
+        # measured on real rows, so without a knee the first optimizer step belongs
+        # to whichever profile clashed worst. That is risk R1 arriving as a
+        # gradient. Past the knee the gradient is m/L, so such a profile is pulled
+        # back slowly instead of steering the batch.
+        "objective": "torsion_profile_soft",
         "trainable": ("propers",),
         # False, and not a preference: a relative-energy objective has no use for
         # an atomic reference table. Dropping it is what the blocker asked for.
@@ -208,6 +217,32 @@ PROD_MODELS: dict[str, dict[str, int]] = {
 # Energies are published in kcal/mol, which `manifest.units` states and
 # `ClassIPrepare.from_dataset` reads; the eV default that silently scaled every
 # THEMol label by 23.06 is what that seam now prevents.
+#: Evaluations without improvement in `eval/loss` before a stage ends.
+#:
+#: The stopping rule the curriculum did not have: `epochs: 1_000_000` with nothing
+#: watching means "until the wall kills it mid-epoch". The calibrated step times put
+#: a 24 h slot at thousands of epochs over 665 814 rows — a memorised model and a
+#: few thousand eval points.
+#:
+#: 50 and not 12, because an eval is once per epoch and an epoch is not a fixed
+#: amount of work here: 96 steps for `mbis` against 1 323 for `hessian-relax`, a
+#: twentyfold spread, since a row means one geometry in one stage and a whole
+#: relaxation in another. A patience tuned for the slow stage is seconds of
+#: stagnation in the fast one. 50 is a **backstop**, not a schedule — it is there so
+#: a plateaued stage ends, not to find the optimum — and `STAGE_SECONDS` is the
+#: other backstop. A Class-I fit also plateaus in fits and starts, so a tight
+#: patience ends a stage that was about to move again.
+PATIENCE: int = 50
+
+#: Wall-clock budget per *stage*, seconds. Four stages, so a run is about four times
+#: this plus its compiles.
+#:
+#: It exists so a stage ends *itself*. Bounded only by Slurm it is killed mid-epoch:
+#: that epoch is lost and so is the checkpoint the next stage continues from — which
+#: costs the rest of the curriculum, not one stage. Set below the job's own wall,
+#: with room for the next stage to start.
+STAGE_SECONDS: float = 4.0 * 3600.0
+
 PROD_DAY: dict[str, Any] = {
     "kind": "prod-day1",
     "seed": 2666,
@@ -229,7 +264,12 @@ PROD_DAY: dict[str, Any] = {
     "val_split": "themol-torsion-molecule-95-5",
     "train_coordinate": "dataset:themol/torsion-scan@1",
     "val_coordinate": "dataset:themol/torsion-scan@1",
-    "epochs": 1_000_000,
+    # Finite, and high enough that PATIENCE and STAGE_SECONDS are what actually end
+    # a stage — a million was not a budget, it was the absence of one, and 500 would
+    # have ended `mbis` on the ceiling in 17 minutes (2.1 s an epoch) rather than on
+    # a plateau. At 5 000, `mbis` and `hessian` finish on epochs and the two
+    # profile stages finish on patience or the clock.
+    "epochs": 5_000,
     "eval_every_epochs": 1,
     # No step stride here, unlike the OMol25 pin this replaces. One 4m epoch was
     # ~1.2e5 steps, so an epoch-boundary eval fired twice in a 24 h run and the
@@ -239,6 +279,8 @@ PROD_DAY: dict[str, Any] = {
     # stride on top would only eval twice per epoch. Restate a stride here if
     # calibration measures a longer epoch than that.
     "eval_every_n_steps": None,
+    # Recorded, not enforced: nothing in-process reads it. STAGE_SECONDS is the
+    # budget the run enforces; this is the Slurm wall the jobs are submitted with.
     "wall_hours": 24,
     "slurm_account": "naiss2026-4-715-gpu",
 }

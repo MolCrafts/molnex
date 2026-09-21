@@ -163,6 +163,12 @@ class Trainer:
             raise ValueError(f"accumulate_grad_batches must be > 0, got {accumulate_grad_batches}")
         self.eval_every_n_steps = eval_every_n_steps
         self.accumulate_grad_batches = accumulate_grad_batches
+        # Set by :meth:`stop`; read by the epoch and batch loops. A hook that wants
+        # training to end says so here rather than raising, so the epoch's
+        # bookkeeping, the final eval and the checkpoint all still happen — an
+        # exception would leave a staged run with no checkpoint for the next stage
+        # to continue from.
+        self._stop_reason: str | None = None
         # Monotonic micro-batch counter driving accumulation-window boundaries.
         self._micro_step = 0
         self.device = torch.device(device) if device is not None else None
@@ -493,6 +499,30 @@ class Trainer:
 
         logger.info(f"Smoke done in {time.perf_counter() - t0:.1f}s (state restored).")
 
+    def stop(self, reason: str) -> None:
+        """Ask the training loop to finish, cleanly, at the next boundary.
+
+        The counterpart to raising from a hook: the current batch and epoch are
+        completed, the epoch-end eval and checkpoint run as usual, and
+        :meth:`train` returns its state normally. A hook that raises instead
+        unwinds the loop, and a staged run then has no checkpoint for the next
+        stage to continue from.
+
+        Idempotent: the first reason given is the one reported, because it is the
+        condition that actually ended the run.
+
+        Args:
+            reason: Why training is ending, for the log and the returned state.
+        """
+        if self._stop_reason is None:
+            self._stop_reason = str(reason)
+            logger.info(f"Stop requested: {self._stop_reason}")
+
+    @property
+    def stop_reason(self) -> str | None:
+        """Why the loop ended, or ``None`` if it ran to its epoch/step limit."""
+        return self._stop_reason
+
     def _train(
         self,
         datamodule: DataModuleProtocol,
@@ -501,8 +531,10 @@ class Trainer:
     ) -> TrainState:
         """Execute training loop.
 
-        Stops at whichever limit (epochs or steps) is reached first.
+        Stops at whichever comes first: the epoch limit, the step limit, or a
+        hook's :meth:`stop`.
         """
+        self._stop_reason = None
         epoch_limit = max_epochs if max_epochs is not None else float("inf")
         step_limit = max_steps if max_steps is not None else float("inf")
 
@@ -541,7 +573,7 @@ class Trainer:
         step_limit_reached = False
         warned_eval_starved = False
 
-        while epoch < epoch_limit and not step_limit_reached:
+        while epoch < epoch_limit and not step_limit_reached and self._stop_reason is None:
             epoch_start_step = self.state.global_step
             on_epoch_start = getattr(datamodule, "on_epoch_start", None)
             if callable(on_epoch_start):
@@ -597,6 +629,12 @@ class Trainer:
 
                 if self.state.global_step >= step_limit:
                     step_limit_reached = True
+                    break
+                if self._stop_reason is not None:
+                    # Leave the epoch now rather than after however many batches
+                    # remain: a wall-clock budget is worth nothing if it waits for
+                    # a 1 323-step epoch to finish. The epoch-end eval and
+                    # checkpoint below still run.
                     break
 
             # Epoch-end validation. When eval_every_n_steps is set, that

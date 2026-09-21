@@ -48,7 +48,14 @@ from molix.data import (
     TotalCharge,
 )
 from molix.data.frame_dataset import FrameDataset
-from molix.hooks import CheckpointHook, GradClipHook, Log, MolRecMetricsHook, StepSpeedHook
+from molix.hooks import (
+    CheckpointHook,
+    EarlyStop,
+    GradClipHook,
+    Log,
+    MolRecMetricsHook,
+    StepSpeedHook,
+)
 from molix.units import units
 from molpot.forcefield.partial_hessian import PartialHessianPairs
 from molpot.heads.energy import AtomicReferenceEnergy
@@ -1257,6 +1264,8 @@ class ClassIFit:
         metrics_every_n_steps: int = 100,
         trainable: Sequence[str] | None = None,
         predictions: Sequence[str] | None = None,
+        patience: int | None = None,
+        max_seconds: float | None = None,
     ) -> None:
         self.hidden = hidden
         self.n_blocks = n_blocks
@@ -1310,6 +1319,12 @@ class ClassIFit:
         #: path. The two models' ``state_dict`` keys are interchangeable, which is
         #: what lets a staged fit carry one stage's checkpoint into the next.
         self.predictions = None if predictions is None else tuple(predictions)
+        #: Evaluations without improvement in ``eval/loss`` before a stage ends.
+        #: ``None`` runs to the epoch limit, which is what a stopping rule is for.
+        self.patience = None if patience is None else int(patience)
+        #: Wall-clock budget for one stage, seconds. Ends it before Slurm does, so
+        #: the checkpoint the next stage continues from is actually written.
+        self.max_seconds = None if max_seconds is None else float(max_seconds)
         #: Whether this fit's target is the partial Hessian, which is the one
         #: prediction that needs a padded ``hessian_pairs`` axis.
         self.predicts_partial_hessian = bool(
@@ -1416,6 +1431,23 @@ class ClassIFit:
                 save_last=True,
                 best_metric_name=("eval", "loss"),
                 best_metric_mode="min",
+            ),
+            # The stopping rule. Without it a stage runs to `epochs`, and with
+            # `epochs: 1_000_000` that means "until the wall kills it mid-epoch":
+            # the calibrated step times put a 24 h slot at thousands of epochs over
+            # 665 814 rows, which is a memorised model and a few thousand eval
+            # points. `patience` ends a stage when the metric that selects its
+            # checkpoint stops improving; `max_seconds` ends it before Slurm does,
+            # so the next stage has a checkpoint to continue from. `if_nan` is the
+            # third condition and the only one that is a failure — stage 2 starts
+            # near 8e10 because Rondo *learns* LJ, so a diverging run is a real
+            # possibility and must not burn the rest of the slot.
+            EarlyStop(
+                if_nan=True,
+                model=model,
+                out_dir=checkpoint_dir,
+                patience=self.patience,
+                max_seconds=self.max_seconds,
             ),
         ]
         if self.record_root is not None:
