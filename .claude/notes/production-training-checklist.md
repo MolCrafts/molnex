@@ -318,10 +318,28 @@ calibration_grid: |
   f21ce723, molhub 955efeaf, molnex 8e5a49db — a verified-consistent pair, the
   wheel gate passing on merit rather than by override).
 
-  **Scope: stage 2 (themol/torsion-scan) only.** The caps below carry no
-  `hessian_pairs` axis, so this grid does not fingerprint a stage-1 batch, and a
-  hessian-relax row costs ~72.5 frames against torsion-scan's 24, so it does not
-  fingerprint stage 3 either.
+  **SUPERSEDED (2026-09-21), and not merely incomplete.** Two things invalidate
+  it. It fingerprints one stage: the caps below carry no `hessian_pairs` axis, so
+  they do not describe a stage-1 batch, and a hessian-relax row costs 2 021 atoms
+  against torsion-scan's 704, so they do not describe stage 3 either. And the
+  stage it *did* fingerprint has since changed objective — torsion-scan now fits
+  `BoltzmannProfileLoss` with `dressing: False` instead of the dressed energy
+  Huber plus forces, so even its own ms/step and peak GiB are a different step's.
+  Four grids are being measured to replace it (jobs 2751981-2751984 on snapshot
+  20260921T095451Z); until they land, item 5 is unmet for every stage.
+
+  Row costs, measured from the frozen extents (job 2751930), which is what turns
+  an atom capacity into a row count — a row means a different thing per stage and
+  is indivisible:
+
+  stage           rows     atoms/row mean   max   graphs/row max   rows @131072
+  mbis         430 906              30.9     70                1          4 241
+  hessian       61 796              30.8     70                1          4 255
+  torsion-scan  83 951             704.5   1632               24            186
+  hessian-relax 89 161            2020.6  12180              302             64
+
+  The largest single molecule is 70 atoms across all four, so the fixed
+  `RondoSpec.eem_max_atoms=512` covers the dense charge solve everywhere.
 
   tier    capacity  ms/step  peak GiB  mol/batch     mol/s  atom fill  graphs
   small     131072     20.7      3.52       4229    203814      99.7%       1
