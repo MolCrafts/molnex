@@ -162,6 +162,41 @@ coordinates.
 
 ## 4. Packed batching and target-hardware optimization
 
+- [ ] **UNMET as of 2026-09-22 — the delivered rate is 1/68th of the step rate,
+  and every earlier number in this section measured the wrong thing.** Medium's
+  production run (job 2787862, stage `mbis`, capacity 131072, 16 workers,
+  prefetch 4) delivers **0.67 steps/s**, not the 45 steps/s its own log reports:
+  97 batches per epoch in **145 s**, of which the GPU is busy **2.15 s (1.5 %)**.
+  Measured three independent ways that agree — checkpoint-hook timestamps in
+  `run-2787862.err` (UTC) 144-146 s apart, a live poll of the checkpoint step
+  (140/140/160 s per 97 steps), and 8 730 steps in 3 h 40 m.
+  `molix.hooks.scalar.StepSpeedHook` cannot see this: it averages a 10-step
+  sliding window, and 16 workers x prefetch 4 buffer up to 64 batches, so the
+  window that closes and gets logged sits *inside* a prefetch burst. The burst
+  rate is the GPU's capability; it is not throughput. **Every ms/step in items 4
+  and 5 above is a burst rate** and must be read as "what the accelerator could
+  do", never as "what the run does".
+- [ ] The cost is per-molecule work in the loader worker, profiled on one real
+  batch (4 259 rows, `projects/class-i/train/collate_profile.py`, 27.65 s under
+  cProfile; ~19 core-s uninstrumented => **4.5 ms per molecule** against 5 us per
+  molecule on the GPU):
+  - 18.1 s (65 %) dataset `__getitem__` — molhub `themol.py:582 _read_mbis`
+    15.0 s, of which `themol.py:375 _mapped_topology_frame` 7.2 s and h5py
+    reads 6.1 s.
+  - 12.2 s the collate — `class_i_fit.py:639 execute` 9.3 s
+    (`label_sample` 6.3 s, `_with_meta` 4.5 s, `_copy_frame` 3.0 s),
+    `collate_molecules` 2.6 s.
+  - Largest single leaf: molrs `schema.column`, **434 418 calls (102 per row)
+    for 6.1 s tottime = 22 % of the batch**, reached from `Frame.__setitem__`
+    -> `_adopt_schema_dtype` on every column write.
+  Sixteen workers at ~80 % CPU each = 12.8 of the 32 allocated cores, so the
+  pool is worker-count-bound (host memory caps workers at 16 x prefetch 4 =
+  107 GiB of 192), not core-bound.
+  Closing a 68x gap is not a shaving job: the prepared per-row form has to be
+  computed once and cached, not rebuilt from HDF5 every epoch. The same
+  precompute closes the `PartialHessianPairs` re-enumeration already recorded
+  under item 5.
+
 - [x] Packed train path is `DataMixture` + `collate_molecules` (one
   forward per packed batch). No per-molecule Python loop in the step.
 - [x] Full input/kernel/optimizer profile recorded
