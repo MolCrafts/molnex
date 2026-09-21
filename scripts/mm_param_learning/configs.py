@@ -61,13 +61,19 @@ from typing import Any
 # the numbers as the shape of the trade-off, not as this model's footprint, and
 # re-measure before they gate anything. One real Rondo datapoint exists so far:
 # `large` peaked at 1.55 GiB at a 16384-atom capacity (job 2621863).
-#: Atoms one torsion-scan row costs a batch.
+#: Atoms one torsion-scan row costs a batch — a **sizing estimate only**.
 #:
-#: 24 constrained conformers of a molecule whose median size is 33 atoms
-#: (shard-000, measured 2026-09-20). A row is **indivisible**: the collate
-#: flattens every conformer of a record into the same batch and the packer
-#: budgets per row, so an atom capacity divides by this, not by 33. Getting that
-#: wrong sizes every cap 24x too small.
+#: A row is **indivisible**: the collate flattens every conformer of a record into
+#: the same batch and the packer budgets per row, so an atom capacity divides by
+#: this, not by the molecule's atom count. Getting that wrong sizes every cap 24x
+#: too small.
+#:
+#: The 24 is the *typical* grid, not a guarantee — of the first three rows of
+#: shard-000, two carry 24 conformers and one carries 10 (measured 2026-09-21).
+#: So this is for picking how many rows a bounded probe should ask for; every
+#: **cap** is sized from the frozen per-row `MoleculeExtent` instead, which counts
+#: each row's real conformers. 33 atoms is the shard's median molecule
+#: (measured 2026-09-20).
 TORSION_ATOMS_PER_ROW: int = 24 * 33
 
 #: ByteFF's staged fit, in order (spec ``src/molzoo/specs/rondo.md`` §5: staged
@@ -139,14 +145,31 @@ CURRICULUM: tuple[dict[str, Any], ...] = (
     {
         "stage": "torsion-scan",
         "definition": "THEMolTorsionScan",
-        "objective": "energy_forces",
+        # ByteFF's torsion stage (`TorsionLossType.boltzmann_mse`): each conformer
+        # against its own profile's minimum, Boltzmann-weighted, with the
+        # per-profile offset removed. That is the answer to the energy-target
+        # blocker — THEMol publishes absolute energies near -503 415 kcal/mol
+        # against a ~10 kcal/mol barrier, so an eps[Z] table leaves a constant far
+        # larger than the signal. A relative objective never sees the constant.
+        "objective": "torsion_profile",
         "trainable": ("propers",),
-        "dressing": True,
+        # False, and not a preference: a relative-energy objective has no use for
+        # an atomic reference table. Dropping it is what the blocker asked for.
+        "dressing": False,
         "rows": 83_951,
     },
     {
         "stage": "hessian-relax",
         "definition": "THEMolHessianRelax",
+        # **The energy-target blocker still applies to this stage.** It supervises
+        # absolute energies through an eps[Z] table, which is what left
+        # `val_mae_kcal` at 231 651 while the training loss moved. A relaxation row
+        # is ~72.5 frames of one molecule, so it is a profile too and
+        # `"torsion_profile"` would apply here as it does to stage 2 — at the cost
+        # of dropping the Cartesian force term, which off-equilibrium data is
+        # mostly there for. Composing the two (`WeightedLoss`) is the fix; which
+        # weights, and whether absolute energies are wanted at all here, changes
+        # what is trained and is the operator's call.
         "objective": "energy_forces",
         "trainable": None,
         "dressing": True,

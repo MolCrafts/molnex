@@ -39,6 +39,7 @@ from molix.core.losses.energy import MSELoss
 from molix.core.losses.force import MAELoss
 from molix.core.losses.molecular import (
     AtomicChargeLoss,
+    BoltzmannProfileLoss,
     ChargeMSELoss,
     ParsleyEnergyWeight,
     PartialHessianLoss,
@@ -56,6 +57,7 @@ from molix.core.losses.molecular import (
 
 __all__ = [
     "AtomicChargeLoss",
+    "BoltzmannProfileLoss",
     "ChargeMSELoss",
     "PartialHessianLoss",
     "MAELoss",

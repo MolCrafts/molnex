@@ -44,6 +44,7 @@ from molix.data import (
     FrameCollator,
     MoleculeCollator,
     MoleculePadder,
+    ProfileIndex,
     TotalCharge,
 )
 from molix.data.frame_dataset import FrameDataset
@@ -1152,6 +1153,10 @@ def class_i_data_module(
         batch_tasks=[
             nlist,
             TotalCharge(),
+            # Mounted unconditionally: it is one `torch.unique` over the graph
+            # axis, and a profile objective that finds the column missing would
+            # otherwise fail at the first step of a stage rather than here.
+            ProfileIndex(),
             *fit.batch_tasks,
         ],
         batch_counts=dict(train_counts),

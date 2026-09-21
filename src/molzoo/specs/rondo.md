@@ -368,6 +368,8 @@ marks a deliberate difference, argued in §1.3 and §6.
 | Proper torsion form | Fourier series | Fourier series, $(k, \phi_0)$ | `dihedral:periodic`, trained as $(a_n, b_n)$ | departed (D3) |
 | Improper form | periodic | $k_\psi[1 + \cos(2\psi - \pi)]$ | `improper:periodic`, amplitude and multiplicity free | adapted |
 | Stage-1 target | — | 3×3 mixed blocks of the QM Hessian on the atom pairs a bonded term couples, relative to $\lvert\mathrm{tr}\rvert$ | `PartialHessianPairs` + `Potentials.partial_hessian` + `PartialHessianLoss` | matched |
+| Stage-2 target | relative conformational energies, molecule-centered | each conformer against its own profile's **minimum**, Boltzmann-weighted, optimal per-profile offset | `BoltzmannProfileLoss` over `ProfileIndex` | matched (ByteFF) |
+| Charge supervision | — | none — AM1-BCC is fixed input | MBIS partial charges (`themol/mbis@1`) via `AtomicChargeLoss`, fitted before the bonded stages | departed (D1 consequence) |
 | Partial charges | charge-equilibration read-out on graph features | AM1-BCC-style additive bond-charge corrections | `molpot.charge`: `ChiEtaHead` → `ElectronegativityEqualization` KKT | departed (D1) |
 | Total-charge conservation | read-out construction | output-module construction | Lagrange multiplier in the KKT solve | adapted |
 | Lennard-Jones | from the OpenFF template | **inherited unchanged from GAFF-2.2** | `LJParameterHead`, learned | departed (D2) |

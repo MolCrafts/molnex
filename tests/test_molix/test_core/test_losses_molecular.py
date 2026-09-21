@@ -17,6 +17,7 @@ from molix.core.losses import (
 )
 from molix.core.losses.molecular import (
     AtomicChargeLoss,
+    BoltzmannProfileLoss,
     ChargeMSELoss,
     ParsleyEnergyWeight,
     PartialHessianLoss,
@@ -941,3 +942,92 @@ class TestAtomicChargeLoss:
         reference = torch.zeros(3, dtype=torch.float64)
         with pytest.raises(ValueError, match="do not match the label"):
             AtomicChargeLoss()({"charge": torch.zeros(2)}, self._batch(reference))
+
+
+class TestBoltzmannProfileLoss:
+    """ByteFF's torsion-stage objective: relative, weighted, offset-free."""
+
+    @staticmethod
+    def _batch(reference, profile, mask=None):
+        graphs = {
+            "energy": torch.tensor(reference, dtype=torch.float64),
+            "profile": torch.tensor(profile, dtype=torch.long),
+        }
+        if mask is not None:
+            graphs["mask"] = torch.tensor(mask)
+        return TensorDict(
+            {"graphs": TensorDict(graphs, batch_size=[len(reference)])}, batch_size=[]
+        )
+
+    def test_a_constant_offset_per_profile_costs_nothing(self) -> None:
+        """The whole reason this loss exists.
+
+        THEMol publishes absolute energies near -503 415 kcal/mol against a
+        ~10 kcal/mol barrier. A profile predicted with the right shape and the
+        wrong constant is a correct torsion term, and must score zero.
+        """
+        reference = [0.0, 1.0, 2.0]
+        pred = torch.tensor([1.0e5, 1.0e5 + 1.0, 1.0e5 + 2.0], dtype=torch.float64)
+        loss = BoltzmannProfileLoss()({"energy": pred}, self._batch(reference, [0, 0, 0]))
+        assert float(loss) == pytest.approx(0.0, abs=1e-12)
+
+    def test_profiles_weigh_equally_regardless_of_their_conformer_count(self) -> None:
+        """A 24-point scan and a 12-point one are one datum each, not 24 and 12.
+
+        Two profiles here, of three and two conformers: the first is exact up to
+        a constant (0), the second carries a residual of 1 after its own optimal
+        offset, so the mean over profiles is 1/2 — not the per-conformer mean.
+        """
+        reference = [0.0, 1.0, 2.0, 0.0, 1.0]
+        pred = torch.tensor([10.0, 11.0, 12.0, 0.0, 3.0], dtype=torch.float64)
+        loss = BoltzmannProfileLoss()({"energy": pred}, self._batch(reference, [0, 0, 0, 1, 1]))
+        torch.testing.assert_close(loss, torch.tensor(0.5, dtype=torch.float64))
+
+    def test_an_error_high_above_the_minimum_costs_less_than_the_same_error_near_it(
+        self,
+    ) -> None:
+        """The Boltzmann weight's whole job.
+
+        A barrier top that only one of the two curves reaches would otherwise
+        dominate a fit whose business is the shape near the accessible minima.
+        Same absolute error, moved from 0.5 to 10 kcal/mol above the minimum.
+        """
+        delta = 0.4
+        low = torch.tensor([0.0, 0.5, 0.5 + delta], dtype=torch.float64)
+        high = torch.tensor([0.0, 0.5, 10.0 + delta], dtype=torch.float64)
+        loss_low = BoltzmannProfileLoss()({"energy": low}, self._batch([0.0, 0.5, 0.5], [0, 0, 0]))
+        loss_high = BoltzmannProfileLoss()(
+            {"energy": high}, self._batch([0.0, 0.5, 10.0], [0, 0, 0])
+        )
+        assert float(loss_high) < float(loss_low)
+
+    def test_dead_graph_slots_enter_neither_the_minimum_nor_the_mean(self) -> None:
+        """A padded slot holds a zero energy, which would win every minimum.
+
+        It carries the last profile index — the padder's ghost sink — so it can
+        never join a live profile, and an unoccupied index contributes nothing to
+        the average over profiles.
+        """
+        reference = [0.0, 1.0, 2.0, 0.0, 1.0, 0.0, 0.0]
+        pred = torch.tensor([10.0, 11.0, 12.0, 0.0, 3.0, 0.0, 0.0], dtype=torch.float64)
+        mask = [True] * 5 + [False, False]
+        padded = BoltzmannProfileLoss()(
+            {"energy": pred}, self._batch(reference, [0, 0, 0, 1, 1, 6, 6], mask)
+        )
+        dense = BoltzmannProfileLoss()(
+            {"energy": pred[:5]}, self._batch(reference[:5], [0, 0, 0, 1, 1])
+        )
+        torch.testing.assert_close(padded, dense)
+
+    def test_a_batch_without_the_profile_index_is_refused(self) -> None:
+        """Without it there is nothing to be relative *to*, and the loss is a lie."""
+        batch = TensorDict(
+            {"graphs": TensorDict({"energy": torch.zeros(2)}, batch_size=[2])}, batch_size=[]
+        )
+        with pytest.raises(ValueError, match="ProfileIndex"):
+            BoltzmannProfileLoss()({"energy": torch.zeros(2)}, batch)
+
+    def test_a_non_positive_decay_is_refused(self) -> None:
+        """It divides an energy; zero would make every weight 0 or inf."""
+        with pytest.raises(ValueError, match="decay must be > 0"):
+            BoltzmannProfileLoss(decay=0.0)

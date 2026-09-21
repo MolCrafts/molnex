@@ -275,16 +275,21 @@ Class-I dataset is THEMol torsion-scan, and a row is 24 molecules"), and the
 decision: NO-GO
 scope: "nothing cleared; bounded calibration/validation only"
 blocking:
-  - "energy target: THEMol publishes absolute energies (sampled record
-     -503415.87 kcal/mol). The epsilon[Z] dressing leaves ~2.3e5 kcal/mol of
-     per-molecule constant against a ~7 kcal/mol torsion barrier, so
-     val_mae_kcal sat at 231651 -> 231645 across all three tiers and both legs
-     of smoke 2723274 while train_loss moved 81.96 -> 48.34. The metric that
-     selects the checkpoint is not measuring what training optimizes, and the
-     energy channel carries no usable signal. ByteFF's answer is energies
-     relative to each scan's own minimum, which is cheap here (one row is one
-     whole profile) and makes the dressing redundant rather than additional.
-     Operator decision required: it changes what is trained."
+  - "energy target: CLOSED for stage 2, OPEN for stage 3. THEMol publishes
+     absolute energies (sampled record -503415.87 kcal/mol) and the epsilon[Z]
+     dressing left ~2.3e5 kcal/mol of per-molecule constant against a
+     ~7 kcal/mol torsion barrier, so val_mae_kcal sat at 231651 -> 231645 across
+     all three tiers of smoke 2723274 while train_loss moved 81.96 -> 48.34.
+     Stage 2 now uses ByteFF's own answer (`BoltzmannProfileLoss`,
+     `TorsionLossType.boltzmann_mse`): each conformer against its own profile's
+     minimum, Boltzmann-weighted, with the per-profile offset removed and
+     detached, so the constant never enters and the stage declares
+     `dressing: False`. Stage 3 (hessian-relax) still supervises absolute
+     energies through the dressing, and a relaxation row is a profile too, so the
+     same objective applies there — at the cost of the Cartesian force term that
+     off-equilibrium data is mostly there for. Composing the two (`WeightedLoss`)
+     is the fix; the weights, and whether absolute energies are wanted at all
+     there, change what is trained and are the operator's call."
   - "checklist item 5 is MET for the torsion-scan shape only — see the grid
      below — and the three-stage curriculum has since added two shapes it does
      not cover. Stage 1 pads a namespace the grid never saw: `hessian_pairs`,

@@ -37,6 +37,7 @@ from molix.core.losses.energy import MSELoss
 
 __all__ = [
     "AtomicChargeLoss",
+    "BoltzmannProfileLoss",
     "ChargeMSELoss",
     "ParsleyEnergyWeight",
     "PartialHessianLoss",
@@ -986,3 +987,146 @@ class AtomicChargeLoss(nn.Module):
         live = atoms.get("mask")
         weight = torch.ones_like(charges) if live is None else live.reshape(-1).to(charges.dtype)
         return ((charges - reference).pow(2) * weight).sum() / weight.sum().clamp(min=1.0)
+
+
+class BoltzmannProfileLoss(nn.Module):
+    """ByteFF's torsion-stage objective: relative energies, Boltzmann-weighted.
+
+    The energies a QM scan publishes are absolute — a THEMol record sits near
+    -503 415 kcal/mol — while the quantity a torsion term has to reproduce is the
+    ~10 kcal/mol shape of the profile. Subtracting an atomic reference leaves a
+    per-molecule constant far larger than the signal, which is how a validation
+    MAE can sit at 231 651 kcal/mol while the training loss moves. This compares
+    each conformer to **its own profile's minimum** instead, so the constant never
+    enters, and no reference-energy table is needed on this stage at all.
+
+    Three pieces, each doing one job (ByteFF ``TorsionLossType.boltzmann_mse``):
+
+    * **Alignment.** Prediction and label are each shifted by their own profile's
+      minimum, so both are relative energies before anything is compared.
+    * **The Boltzmann weight.** ``exp(min(0, (clamp - dE) / decay))`` on the
+      *lower* of the two aligned energies: conformers within *clamp* of the
+      minimum count fully and higher ones decay with scale *decay*. A barrier top
+      that only one of the two curves reaches cannot then dominate the fit. The
+      weight is detached — it selects what to fit, it is not itself fitted.
+    * **The offset.** The weighted mean residual per profile, also detached, is
+      added back before squaring. It is the offset that minimises the weighted
+      squared residual, so the fit never spends capacity on a constant that a
+      torsion term cannot represent anyway.
+
+    The residual is then a plain mean over each profile's live conformers, and a
+    plain mean over profiles — so a 24-point scan and a 12-point one weigh the
+    same, which per-conformer averaging would not give.
+
+    **Profiles come from ``graphs.profile``**, the batch-local dense index
+    :class:`~molix.data.ProfileIndex` writes. Reducing into a buffer of the graph
+    axis keeps the shape static and the step free of host syncs; dead graph slots
+    carry the last index, which is the padder's ghost sink and never a live
+    profile.
+
+    Units: kcal/mol in, kcal²/mol² out. *clamp* and *decay* are energies.
+
+    Args:
+        pred_key: Prediction key holding the ``(B,)`` energies.
+        target_key: Column on ``graphs`` holding the reference energies.
+        profile_key: Column on ``graphs`` holding the batch-local profile index.
+        clamp: Energies within this of a profile's minimum keep full weight.
+        decay: Decay scale of the weight above *clamp*.
+
+    Reference:
+        Zheng, T. et al. "Data-driven parametrization of molecular mechanics
+        force fields for expansive chemical space coverage." *Chem. Sci.* (2025).
+        https://doi.org/10.48550/arXiv.2408.12817
+    """
+
+    def __init__(
+        self,
+        *,
+        pred_key: str = "energy",
+        target_key: str = "energy",
+        profile_key: str = "profile",
+        clamp: float = 2.0,
+        decay: float = 2.0,
+    ) -> None:
+        super().__init__()
+        if decay <= 0.0:
+            raise ValueError(f"decay must be > 0 kcal/mol, got {decay}")
+        self.pred_key = str(pred_key)
+        self.target_key = str(target_key)
+        self.profile_key = str(profile_key)
+        self.clamp = float(clamp)
+        self.decay = float(decay)
+
+    def forward(self, pred: Mapping[str, Any], batch: Any) -> torch.Tensor:
+        """Mean over profiles of the weighted, offset-free squared residual.
+
+        Args:
+            pred: Mapping carrying ``(B,)`` energies under :attr:`pred_key`.
+            batch: Post-collate batch whose ``graphs`` carries the reference
+                energies, the profile index and, when padded, ``mask``.
+
+        Returns:
+            Scalar loss in kcal² mol⁻².
+
+        Raises:
+            KeyError: The prediction is absent.
+            ValueError: ``graphs`` carries no reference or no profile column, or
+                the shapes disagree.
+        """
+        if self.pred_key not in pred:
+            raise KeyError(f"{self.pred_key!r} is not among the predictions {sorted(pred)}")
+        energy = pred[self.pred_key].reshape(-1)
+        graphs = batch["graphs"]
+        reference = graphs.get(self.target_key)
+        if reference is None:
+            raise ValueError(f"graphs carries no {self.target_key!r} column to fit against")
+        profile = graphs.get(self.profile_key)
+        if profile is None:
+            raise ValueError(
+                f"graphs carries no {self.profile_key!r} column; mount molix.data.ProfileIndex "
+                "as a batch task so a profile can be reduced over"
+            )
+        reference = reference.reshape(-1).to(energy.dtype)
+        if energy.shape != reference.shape:
+            raise ValueError(
+                f"predicted energies {tuple(energy.shape)} do not match the reference "
+                f"{tuple(reference.shape)}; both are one value per graph"
+            )
+        profile = profile.reshape(-1).long()
+        n_graphs = int(energy.shape[0])
+        mask = graphs.get("mask")
+        live = torch.ones_like(energy) if mask is None else mask.reshape(-1).to(energy.dtype)
+
+        # A dead slot must never win a minimum, so it is sent to +inf first.
+        far = torch.full_like(energy, float("inf"))
+        counts = energy.new_zeros(n_graphs).index_add(0, profile, live)
+        safe = counts.clamp(min=1.0)
+        reference_min = far.scatter_reduce(
+            0, profile, torch.where(live > 0, reference, far), reduce="amin"
+        )
+        energy_min = far.scatter_reduce(
+            0, profile, torch.where(live > 0, energy, far), reduce="amin"
+        )
+        reference_relative = reference - reference_min[profile]
+        energy_relative = energy - energy_min[profile]
+
+        weight = (
+            torch.exp(
+                (
+                    (self.clamp - torch.minimum(reference_relative, energy_relative)) / self.decay
+                ).clamp(max=0.0)
+            ).detach()
+            * live
+        )
+        weight_total = energy.new_zeros(n_graphs).index_add(0, profile, weight)
+        offset = (
+            energy.new_zeros(n_graphs).index_add(0, profile, (reference - energy) * weight)
+            / weight_total.clamp(min=torch.finfo(energy.dtype).eps)
+        ).detach()
+
+        residual = (energy - reference + offset[profile]).pow(2) * weight
+        per_profile = energy.new_zeros(n_graphs).index_add(0, profile, residual) / safe
+        # Only the profiles this batch actually holds are averaged over; a slot
+        # no graph landed in contributes neither a numerator nor a denominator.
+        occupied = (counts > 0).to(energy.dtype)
+        return (per_profile * occupied).sum() / occupied.sum().clamp(min=1.0)

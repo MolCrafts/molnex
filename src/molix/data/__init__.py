@@ -44,6 +44,7 @@ from molix.data.group_split import group_split_indices
 from molix.data.inlier import ForceInlierWeight
 from molix.data.mixture import DataMixture
 from molix.data.pad import MoleculePadder
+from molix.data.profile import ProfileIndex
 from molix.data.residual import EnergyResidual
 from molix.data.sampler import (
     BatchSamplerSource,
@@ -75,6 +76,7 @@ __all__ = [
     "TaskMixtureBatchSampler",
     "TokenBudgetBatchSampler",
     "TokenBudgetPacker",
+    "ProfileIndex",
     "TotalCharge",
     "bond_index_from_columns",
     "collate_molecules",
