@@ -776,7 +776,12 @@ class Potentials(nn.Module):
 
         Geometry is differentiated; the parameters keep their graph, so a loss
         on the returned blocks reaches the force constants that produced them.
-        Positions are read detached — stage 1 fits parameters at fixed geometry.
+        ``atoms.pos`` must already require grad — the caller marks it on the host,
+        because creating a leaf inside a compiled region does not trace. Nothing
+        here reads the gradient *with respect to* the positions; they are the
+        variable the curvature is taken in, and stage 1 still fits only parameters.
+        Grad is enabled around the gather, so an eval phase under ``no_grad`` still
+        measures a curvature rather than the curvature of a constant.
 
         Args:
             system: Post-collate batch or its typed view, carrying
@@ -801,7 +806,7 @@ class Potentials(nn.Module):
                 "It is the target's own pair list — build it with "
                 "PartialHessianPairs and collate it beside the valence namespaces."
             )
-        pos = self._pos(frame).detach()
+        pos = self._pos(frame)
         pairs = frame["hessian_pairs"]
         n_pairs = int(pairs["atomi"].shape[0])
         blocks = pos.new_zeros((n_pairs, 9))
@@ -852,7 +857,14 @@ class Potentials(nn.Module):
             def energy(local: torch.Tensor, _term=term, _call=call) -> torch.Tensor:
                 return _term(pos=local.reshape(-1, 3), **_call)
 
-            per_term = hessian.blocks(energy, pos[index.T])
+            # `enable_grad` around the **gather**, not just around the double
+            # backward inside `blocks`: under `torch.no_grad()` — which is every
+            # eval phase — `pos[index]` produces a tensor that tracks nothing even
+            # when `pos` itself is marked, and the curvature of a constant is not
+            # what this measures. A derivative needs grad regardless of the mode it
+            # is called in, which is why `Derivative` enables it too.
+            with torch.enable_grad():
+                per_term = hessian.blocks(energy, pos[index.T])
             # The namespace's own columns are the choice list: whatever
             # PartialHessianPairs enumerated is what it wrote, so the two can
             # never drift.

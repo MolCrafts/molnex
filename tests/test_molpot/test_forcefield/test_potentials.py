@@ -3616,7 +3616,12 @@ class TestPartialHessian:
             return potentials.energy(self._batch(flat.reshape(-1, 3)))[ENERGY_KEY].sum()
 
         full = torch.autograd.functional.hessian(total, self.POSITIONS.reshape(-1), vectorize=True)
-        got = potentials.partial_hessian(self._batch(self.POSITIONS))
+        # Marked as the host prologue marks it: the curvature is taken in the
+        # positions, and `blocks` refuses to mark them itself because creating a
+        # leaf inside a compiled region does not trace. A clone, so the reference
+        # above differentiates an untouched tensor.
+        marked = self.POSITIONS.clone().requires_grad_(True)
+        got = potentials.partial_hessian(self._batch(marked))
         assert got.shape == (len(layout), 9)
         torch.testing.assert_close(got, layout.gather(full))
 

@@ -257,15 +257,6 @@ class TestForceFieldPredictions:
             "partial_hessian",
         )
 
-    def test_trainable_is_refused_for_a_derivative_over_energy_route(self) -> None:
-        """Those read the filled field's buffers, so freezing there is the potential's.
-
-        Accepting it silently would report a frozen table while training it, which
-        is the one failure mode a staged fit cannot detect from its own metrics.
-        """
-        with pytest.raises(ValueError, match="cannot be honoured for"):
-            ForceFieldPredictions(_bond_model(), keys=("energy",), trainable=("bonds",))
-
     @pytest.mark.parametrize(
         "keys",
         [("energy",), ("energy", "forces"), ("energy", "hessian"), ("charge",)],

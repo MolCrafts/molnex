@@ -150,6 +150,19 @@ class TermHessian:
 
     Only geometry is differentiated twice — the parameters keep their graph, so
     a loss on these blocks reaches the force constants that produced them.
+
+    **The gathered positions must already require grad, and this never calls
+    ``requires_grad_`` itself.** Creating a leaf inside a compiled region is
+    ``Unsupported: returning intermediate with requires_grad_()`` — AOTAutograd
+    drops the effect on a graph output, so dynamo refuses rather than return a
+    wrong one. It cost stage 1 every cell of its first calibration grid and is
+    invisible eagerly. The caller marks ``atoms.pos`` on the host instead, the
+    same prologue discipline :class:`molix.autograd.Derivative` uses.
+
+    Differentiating the *gather* rather than a private copy is what keeps the
+    blocks per-term: ``x = pos[index]`` is one tensor node and ``dE/dx`` treats its
+    entries as independent, whatever sharing happens upstream in ``pos``. Two terms
+    on the same atom still get their own block, and no copy is made.
     """
 
     def blocks(
@@ -164,20 +177,29 @@ class TermHessian:
                 the scalar total energy of those terms. It must be separable
                 over the first axis — true of every bonded term, whose energy
                 reads only its own atoms.
-            positions: Gathered term positions ``(n_terms, w, 3)``. Detached
-                here: stage 1 differentiates the parameters, not the geometry.
+            positions: Gathered term positions ``(n_terms, w, 3)``, gathered from
+                a ``pos`` that already requires grad.
 
         Returns:
             ``(n_terms, w, 3, w, 3)`` — ``[t, a, c, b, d]`` is
             ``d2E_t / dx[a][c] dx[b][d]``.
 
         Raises:
-            ValueError: *positions* is not ``(n_terms, w, 3)``.
+            ValueError: *positions* is not ``(n_terms, w, 3)``, or does not require
+                grad — there is then nothing to differentiate, and marking it here
+                would break the compile.
         """
         if positions.ndim != 3 or positions.shape[2] != 3:
             raise ValueError(f"positions must be (n_terms, width, 3); got {tuple(positions.shape)}")
+        if not positions.requires_grad:
+            raise ValueError(
+                "positions does not require grad, so their curvature cannot be taken. "
+                "Mark atoms.pos on the host before the traced forward — this cannot "
+                "mark it, because creating a leaf inside a compiled region is "
+                "Unsupported: returning intermediate with requires_grad_()."
+            )
         n_terms, width = int(positions.shape[0]), int(positions.shape[1])
-        local = positions.detach().clone().requires_grad_(True)
+        local = positions
         with torch.enable_grad():
             total = energy(local)
             (gradient,) = torch.autograd.grad(total, local, create_graph=True)

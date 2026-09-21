@@ -572,27 +572,50 @@ class ClassIPrepare:
         out of every call site: the transform follows the data rather than
         being told about it.
 
+        **A dataset that publishes no energy gets no source unit, and that is not a
+        guess.** Two of the four curriculum stages have no energy label at all:
+        ``themol/hessian@1`` declares ``{'hessian': 'kcal/mol/angstrom^2'}`` and
+        ``themol/mbis@1`` fourteen per-atom columns, neither listing energy. A
+        *non-empty* unit declaration that omits energy is the dataset stating what
+        it publishes, so this returns a prepare with ``source_unit=None`` — and
+        :meth:`convert` still refuses loudly if anything asks it to scale an
+        energy. The failure this constructor exists to prevent is a **wrong** scale
+        applied silently (the eV default that multiplied every THEMol label by
+        23.06); a *missing* scale cannot be silent, because ``convert`` raises.
+
+        An **empty** declaration says nothing, so the fail-closed raise stands.
+
+        Why the units dict and not the target schema: ``TARGET_SCHEMA`` is a class
+        attribute of the *definition*, and a loaded shard does not carry it —
+        measured 2026-09-21, unreachable for all four THEMol definitions, through
+        the shard and through ``SubsetDataset`` alike. The manifest is what a
+        loaded dataset actually forwards.
+
         Args:
-            dataset: A MolHub dataset (or its class) carrying
-                ``manifest.units["energy"]``.
+            dataset: A MolHub dataset (or its class) carrying ``manifest.units``.
             energy_unit: Pint unit the labels are converted **to**.
 
         Returns:
-            A :class:`ClassIPrepare` whose :attr:`source_unit` is the declared one.
+            A :class:`ClassIPrepare` whose :attr:`source_unit` is the declared one,
+            or ``None`` when the dataset declares units and no energy among them.
 
         Raises:
-            ValueError: *dataset* declares no energy unit — there is nothing to
-                read, and guessing is the bug this constructor exists to prevent.
+            ValueError: *dataset* declares no units at all — there is then nothing
+                to read, and guessing is the bug this constructor exists to prevent.
         """
         manifest = getattr(dataset, "manifest", None) or getattr(type(dataset), "manifest", None)
         declared = dict(getattr(manifest, "units", None) or {})
         if "energy" not in declared:
+            if declared:
+                # Declares its targets' units, and energy is not among them: this
+                # dataset publishes no energy, so there is nothing to scale.
+                return cls(energy_unit=energy_unit)
             raise ValueError(
-                f"{type(dataset).__name__} declares no energy unit "
-                f"(manifest.units = {declared or '{}'}), so the unit its frames "
-                "carry cannot be read. Declare it on the dataset with "
-                "@dataset(units={'energy': ...}), or pass source_unit= to "
-                "ClassIPrepare directly if you know it."
+                f"{type(dataset).__name__} declares no units at all "
+                "(manifest.units = {}), so neither the unit its frames carry nor "
+                "whether it publishes an energy at all can be read. Declare them "
+                "on the dataset with @dataset(units={'energy': ...}), or pass "
+                "source_unit= to ClassIPrepare directly if you know it."
             )
         published = str(declared["energy"])
         spelling = MOLHUB_ENERGY_SPELLING.get(published)
@@ -637,23 +660,39 @@ class ClassIPrepare:
     def convert(self, frame: Frame) -> Frame:
         """Rescale energy and forces from :attr:`source_unit` into :attr:`energy_unit`.
 
+        **The guard is on the label, not on the unit.** A frame carrying neither an
+        energy nor forces needs no scale, and two of the four curriculum stages are
+        exactly that: the partial-Hessian stage supervises 3x3 curvature blocks and
+        the MBIS stage per-atom charges, neither of which is an energy and neither
+        of which this method touches. Refusing them for want of a unit they do not
+        use would make a missing declaration fatal to a stage that cannot be harmed
+        by it.
+
+        What must stay fatal is a label that *would* be scaled with no scale to
+        apply — that is the eV default which multiplied every THEMol energy by
+        23.06, silently, the result still being a plausible energy. So the raise
+        fires when a frame carries an energy or forces and :attr:`scale` is unknown,
+        which is precisely when guessing would matter.
+
         Raises:
-            ValueError: No source unit was declared. Converting on a guess is
-                what turned every THEMol label into 23.06x itself; this refuses
-                instead.
+            ValueError: The frame carries an energy or forces and no source unit was
+                declared.
         """
+        atoms = frame["atoms"]
+        raw = getattr(frame, "meta", None) or {}
+        has_label = "energy" in raw or "fx" in atoms
         if self.scale is None:
+            if not has_label:
+                return frame
             raise ValueError(
                 f"{type(self).__name__} has no source unit, so it cannot convert "
-                "into "
-                f"{self.energy_unit}. Build it with ClassIPrepare.from_dataset("
-                "dataset), which reads what the dataset declares, or pass "
-                "source_unit= if you know it. (bond/label/topology need no unit "
-                "and work without one.)"
+                f"this frame's energy/forces into {self.energy_unit}. Build it with "
+                "ClassIPrepare.from_dataset(dataset), which reads what the dataset "
+                "declares, or pass source_unit= if you know it. (bond/label/topology "
+                "need no unit and work without one.)"
             )
         if self.scale == 1.0:
             return frame
-        atoms = frame["atoms"]
         if "fx" in atoms:
             atoms["fx"] = np.asarray(atoms["fx"], dtype=np.float64) * self.scale
             atoms["fy"] = np.asarray(atoms["fy"], dtype=np.float64) * self.scale

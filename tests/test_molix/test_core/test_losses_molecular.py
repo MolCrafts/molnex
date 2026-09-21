@@ -1143,3 +1143,19 @@ class TestForceLossOutlierBound:
         pred = torch.zeros(1, 3, dtype=torch.float64)
         got = force_loss("forces")({"forces": pred}, self._batch(reference))
         torch.testing.assert_close(got, torch.tensor(900.0**2 / 3, dtype=torch.float64))
+
+    def test_a_profile_that_already_fits_stays_at_zero_under_saturation(self) -> None:
+        """The saturating rescale divides by the loss, so zero is its edge case.
+
+        It is also the case that forced the denominator to be a `clamp` rather than
+        a `where` against a Python float: that float becomes a host scalar tensor in
+        the launch, and a CUDA kernel handed one dies in `cuPointerGetAttribute`.
+        Invisible on CPU, which is why it is pinned by value here and by the
+        stage-3 calibration on the device.
+        """
+        reference = [0.0, 1.0, 2.0]
+        exact = torch.tensor([5.0, 6.0, 7.0], dtype=torch.float64)
+        loss = BoltzmannProfileLoss(soft_max=4.0)(
+            {"energy": exact}, TestBoltzmannProfileSaturation._batch(reference, [0, 0, 0])
+        )
+        assert float(loss) == 0.0

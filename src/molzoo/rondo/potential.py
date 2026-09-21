@@ -364,25 +364,122 @@ class RondoPredictions(nn.Module):
         trainable: Sequence[str] | None = None,
     ) -> None:
         super().__init__()
-        from molpot.forcefield.predictions import ForceFieldPredictions
-
+        unknown = [key for key in keys if key not in self.TABLE_KEYS and key != "partial_hessian"]
+        if unknown:
+            raise ValueError(
+                f"RondoPredictions cannot answer {unknown}; it declares "
+                f"{sorted((*self.TABLE_KEYS, 'partial_hessian'))}. An energy or a force "
+                "is RondoPotential's."
+            )
         self.parameterizer = parameterizer
         self.keys = tuple(keys)
         self.trainable = None if trainable is None else tuple(trainable)
-        self._predictions = ForceFieldPredictions(
-            parameterizer, keys=self.keys, trainable=self.trainable
-        )
+        # Assembled once on the first batch, off the parameter tree — as in
+        # RondoPotential, and for the same reason.
+        self._physics: Any = None
+
+    #: Predictions that are a read of one parameter table: ``key -> (namespace, name)``.
+    TABLE_KEYS: dict[str, tuple[str, str]] = {
+        "charge": ("atoms", "charge"),
+        "bond_k": ("bonds", "k"),
+        "angle_k": ("angles", "k"),
+    }
+
+    def _hold(self, name: str, value: Any) -> None:
+        """Keep an ``nn.Module`` off the parameter tree (see RondoPotential)."""
+        object.__setattr__(self, name, value)
+
+    def physics(self, batch: TensorDict) -> Any:
+        """The assembled Class-I container, bound to this batch's topology.
+
+        Host-side and untraceable, exactly as :meth:`RondoPotential.physics` is and
+        for the same reason: assembling it constructs a molpy ``ForceField``, and
+        ``ForceField.__new__`` inside a compiled region is
+        ``Unsupported: Unsupported method call``. The first per-stage calibration
+        found that the hard way — every cell of the ``hessian`` and ``mbis`` grids
+        (jobs 2751981, 2751982), because this class used to reach the container
+        through ``ForceFieldPredictions``, whose contract is one
+        ``parameterizer(batch)`` forward *returning a filled ForceField*. That is
+        the right shape for the export and one-shot paths it serves, and the wrong
+        one for a traced training step, which must see tensors only.
+
+        Only ``"partial_hessian"`` needs it. A pure table read declares no container
+        and assembles none.
+        """
+        if self._physics is None:
+            with torch.no_grad():
+                # Seed on a copy: the encoder writes per-namespace features into
+                # whatever batch it is handed, and a column count is a dynamo guard.
+                seed = self.parameterizer(batch.clone())
+                self._hold("_physics", seed.to_potentials(wrt=()).warmup(batch))
+        else:
+            self._physics.bind_topology(batch)
+        # The curvature is taken in the positions, so they have to be a variable of
+        # the graph — and marking one inside a compiled region is
+        # `Unsupported: returning intermediate with requires_grad_()`. Marked here,
+        # on the host, exactly as `Derivative.mark_leaves` marks the columns it
+        # differentiates. Nothing reads the gradient *with respect to* the
+        # positions; stage 1 still fits only parameters.
+        pos = batch["atoms", "pos"]
+        if not pos.requires_grad:
+            pos.requires_grad_(True)
+        return self._physics
 
     def forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
-        """The declared parameter tables for this batch.
+        """The declared predictions for this batch.
+
+        The tables are computed **here**, inside whatever region this runs in, from
+        :meth:`~molpot.forcefield.Parameterizer.tables` — plain tensors, no molpy.
+        A table produced outside would carry a ``grad_fn`` that
+        ``torch.autograd.grad`` refuses to trace through, which is the same reason
+        :meth:`RondoPotential.energy` computes them itself.
+
+        :attr:`trainable` detaches the namespaces it does not name, after prediction
+        and before anything reads them, so their parameters are still *used* at
+        their predicted values and only their gradient path is cut.
 
         Args:
             batch: Post-collate batch carrying the Class-I topology namespaces.
 
         Returns:
             Exactly the declared keys, in each prediction's own units —
-            ``(n_pairs, 9)`` kcal mol⁻¹ Å⁻² for ``partial_hessian``,
-            ``(n_terms,)`` kcal mol⁻¹ Å⁻² for ``bond_k`` and
+            ``(n_pairs, 9)`` kcal mol⁻¹ Å⁻² for ``partial_hessian``, ``(n_atoms,)``
+            ``e`` for ``charge``, ``(n_terms,)`` kcal mol⁻¹ Å⁻² for ``bond_k`` and
             kcal mol⁻¹ rad⁻² for ``angle_k``.
+
+        Raises:
+            RuntimeError: ``"partial_hessian"`` is declared and :meth:`physics` has
+                not run — a compiled forward cannot assemble the container itself.
+            KeyError: The model's heads wrote no table a declared key reads.
         """
-        return self._predictions(batch)
+        needs_physics = "partial_hessian" in self.keys
+        if needs_physics and not torch.compiler.is_compiling():
+            self.physics(batch)
+        if needs_physics and self._physics is None:
+            raise RuntimeError(
+                "RondoPredictions.physics(batch) must run before the compiled forward"
+            )
+        tables = self.parameterizer.tables(batch)
+        if self.trainable is not None:
+            tables = {
+                namespace: (
+                    params
+                    if namespace in self.trainable
+                    else {name: value.detach() for name, value in params.items()}
+                )
+                for namespace, params in tables.items()
+            }
+        out: dict[str, torch.Tensor] = {}
+        for key in self.keys:
+            if key == "partial_hessian":
+                out[key] = self._physics.partial_hessian(batch, tables)
+                continue
+            namespace, name = self.TABLE_KEYS[key]
+            table = tables.get(namespace)
+            if table is None or name not in table:
+                raise KeyError(
+                    f"{key!r} reads {namespace}[{name!r}], which this model's heads did "
+                    f"not write for this batch (namespaces: {sorted(tables)})"
+                )
+            out[key] = table[name]
+        return out

@@ -129,6 +129,7 @@ class TestTermHessian:
         positions = torch.tensor(
             [[[0.0, 0.0, 0.0], [1.4, 0.0, 0.0]], [[0.0, 2.0, 0.0], [1.0, 2.9, 0.3]]],
             dtype=torch.float64,
+            requires_grad=True,
         )
 
         def energy(local: torch.Tensor) -> torch.Tensor:
@@ -152,7 +153,7 @@ class TestTermHessian:
         equal, which they cannot be if the shared atom were differentiated once.
         """
         pair = torch.tensor([[0.0, 0.0, 0.0], [1.4, 0.0, 0.0]], dtype=torch.float64)
-        positions = torch.stack([pair, pair])
+        positions = torch.stack([pair, pair]).requires_grad_(True)
 
         def energy(local: torch.Tensor) -> torch.Tensor:
             return (local[:, 1] - local[:, 0]).norm(dim=-1).pow(2).sum()
@@ -171,6 +172,7 @@ class TestTermHessian:
         positions = torch.tensor(
             [[[0.0, 0.0, 0.0], [1.4, 0.0, 0.0]], [[0.0, 2.0, 0.0], [1.1, 2.0, 0.0]]],
             dtype=torch.float64,
+            requires_grad=True,
         )
 
         def energy(local: torch.Tensor) -> torch.Tensor:
@@ -185,4 +187,13 @@ class TestTermHessian:
     def test_positions_of_the_wrong_rank_raise(self) -> None:
         """A flat ``(n*w, 3)`` gather is the mistake this guards."""
         with pytest.raises(ValueError, match=r"must be \(n_terms, width, 3\)"):
-            TermHessian().blocks(lambda x: x.sum(), torch.zeros(6, 3))
+            TermHessian().blocks(lambda x: x.sum(), torch.zeros(6, 3, requires_grad=True))
+
+    def test_positions_that_do_not_require_grad_raise(self) -> None:
+        """It cannot mark them itself: doing so inside a compiled region does not trace.
+
+        Raising here rather than marking is what turns a silent compile failure
+        deep in dynamo into a message naming the prologue that should have run.
+        """
+        with pytest.raises(ValueError, match="does not require grad"):
+            TermHessian().blocks(lambda x: x.sum(), torch.zeros(2, 2, 3))

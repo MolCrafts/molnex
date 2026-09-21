@@ -1161,11 +1161,20 @@ class BoltzmannProfileLoss(nn.Module):
         if self.soft_max is not None:
             # tanh(L/m)*m, written as a detached rescaling of L so the gradient is
             # attenuated by the saturation rather than clipped at it.
+            #
+            # `clamp(min=eps)` and not `where(L < eps, eps, L)`: a profile's loss is
+            # a sum of squares times non-negative weights over a positive count, so
+            # it is never negative and the two are the same function here — but the
+            # `where` form takes a Python float as its second argument, which
+            # becomes a **host** scalar tensor in the launch, and a CUDA kernel
+            # handed one dies in `cuPointerGetAttribute` with
+            # `CUDA_ERROR_INVALID_VALUE`. It cost stage 3 every cell of its first
+            # calibration grid (job 2751984) and is invisible on CPU, where there is
+            # no pointer attribute to query. At L = 0 this gives tanh(0)*m/eps = 0,
+            # so a profile that already fits contributes nothing, as before.
             eps = torch.finfo(energy.dtype).eps
             saturating = (
-                torch.tanh(per_profile / self.soft_max)
-                * self.soft_max
-                / torch.where(per_profile.abs() < eps, eps, per_profile)
+                torch.tanh(per_profile / self.soft_max) * self.soft_max / per_profile.clamp(min=eps)
             ).detach()
             per_profile = per_profile * saturating
         # Only the profiles this batch actually holds are averaged over; a slot
