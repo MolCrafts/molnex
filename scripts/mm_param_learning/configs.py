@@ -101,6 +101,12 @@ TORSION_ATOMS_PER_ROW: int = 24 * 33
 #: namespaces instead of ``None``. Stages 1 and 2 already leave them alone —
 #: stage 1 assembles no electrostatics at all and stage 2 trains propers only.
 #:
+#: **No stage supervises an absolute energy.** All four declare
+#: ``dressing: False``: the charge and partial-Hessian stages carry no energy term
+#: at all, and both energy stages are relative to a profile's own minimum. The
+#: eps[Z] atomic-reference table — and the ~2.3e5 kcal/mol per-molecule constant
+#: it left against a ~7 kcal/mol barrier — is out of the curriculum entirely.
+#:
 #: ``trainable`` is the set of parameter-table namespaces each stage may move;
 #: every other table is detached before the energy is built, so one objective
 #: cannot drive parameters it has no business constraining — ByteFF's
@@ -161,18 +167,22 @@ CURRICULUM: tuple[dict[str, Any], ...] = (
     {
         "stage": "hessian-relax",
         "definition": "THEMolHessianRelax",
-        # **The energy-target blocker still applies to this stage.** It supervises
-        # absolute energies through an eps[Z] table, which is what left
-        # `val_mae_kcal` at 231 651 while the training loss moved. A relaxation row
-        # is ~72.5 frames of one molecule, so it is a profile too and
-        # `"torsion_profile"` would apply here as it does to stage 2 — at the cost
-        # of dropping the Cartesian force term, which off-equilibrium data is
-        # mostly there for. Composing the two (`WeightedLoss`) is the fix; which
-        # weights, and whether absolute energies are wanted at all here, changes
-        # what is trained and is the operator's call.
-        "objective": "energy_forces",
+        # Relative energies *and* forces (operator ruling, 2026-09-21). A
+        # relaxation row is ~72.5 frames of one molecule, so it is a profile in
+        # exactly the sense stage 2 uses, and the absolute energy never enters —
+        # which is what closes the energy-target blocker here as well. The force
+        # term is what off-equilibrium data is mostly for, and it needs no profile
+        # treatment: a force has no per-conformer constant to remove.
+        #
+        # The energy half uses ByteFF's **saturating** variant
+        # (`boltzmann_soft_mse`) rather than stage 2's plain one. Off-equilibrium
+        # frames include geometries where a (sigma/r)**12 wall is close, and an
+        # unbounded squared residual lets one such frame own the batch gradient.
+        "objective": "profile_forces",
         "trainable": None,
-        "dressing": True,
+        # False: nothing in this stage supervises an absolute energy any more, so
+        # there is no eps[Z] table to fit and none to carry.
+        "dressing": False,
         "rows": 89_161,
     },
 )

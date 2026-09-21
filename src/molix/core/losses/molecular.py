@@ -253,6 +253,7 @@ def force_loss(
     elementwise: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
     reduction: str = "mean",
     weight_key: str | None = "mask",
+    outlier_norm: float | None = None,
 ) -> Callable[[Mapping[str, Any], Any], torch.Tensor]:
     """Atom-level force loss, weighted by a per-atom column.
 
@@ -273,11 +274,21 @@ def force_loss(
             move with how many rows a batch happens to mask out.
         weight_key: Per-atom weight column on ``atoms``, or ``None`` for no
             weighting. Absent from the batch means unweighted.
+        outlier_norm: Drop an atom whose **reference** force norm exceeds this,
+            in the reference's own unit, by multiplying its weight by zero.
+            ``None`` keeps every atom. A Class-I functional form cannot
+            represent a 200-800 kcal mol⁻¹ Å⁻¹ DFT tail, so fitting one moves
+            every parameter that can reach it; the bound says so declaratively
+            instead of a caller re-deriving the same mask. It is a weight and
+            not a gather for the reason above — and because a gather makes the
+            mean's divisor the number of survivors, so the loss scale would move
+            with how many outliers a batch happened to draw.
 
     Returns:
         ``loss_fn(preds, batch) -> Tensor``.
     """
     measure = nn.MSELoss(reduction="none") if elementwise is None else elementwise
+    bound = None if outlier_norm is None else float(outlier_norm)
 
     def _fn(preds: Mapping[str, Any], batch: Any) -> torch.Tensor:
         f_pred = preds[pred_key]
@@ -286,6 +297,9 @@ def force_loss(
         weight = None
         if weight_key is not None and weight_key in atoms.keys():
             weight = atoms[weight_key].to(f_pred.dtype).unsqueeze(-1)
+        if bound is not None:
+            inlier = (f_true.detach().norm(dim=-1) <= bound).to(f_pred.dtype).unsqueeze(-1)
+            weight = inlier if weight is None else weight * inlier
         return _reduce(measure(f_pred, f_true), weight, reduction)
 
     return _fn
@@ -1024,7 +1038,19 @@ class BoltzmannProfileLoss(nn.Module):
     carry the last index, which is the padder's ghost sink and never a live
     profile.
 
-    Units: kcal/mol in, kcal²/mol² out. *clamp* and *decay* are energies.
+    **The saturating variant.** With *soft_max* set, a profile's loss is passed
+    through ``tanh(L / soft_max) * soft_max`` before the average — ByteFF's
+    ``boltzmann_soft_mse``, which it uses where ``boltzmann_mse`` is not robust
+    enough. The transform is applied as a **detached** rescaling, so the reported
+    value saturates at *soft_max* and the gradient is attenuated by the same
+    factor rather than clipped. It is what off-equilibrium data wants: one frame
+    that walked into a ``(sigma/r)**12`` wall then contributes a bounded amount
+    instead of the whole batch's gradient. ``None`` (default) is the plain
+    quadratic, which is right for a well-behaved torsion scan.
+
+    Units: kcal/mol in, kcal²/mol² out. *clamp*, *decay* and *soft_max* are all
+    dimensionful — the first two energies, the last an energy **squared**, since
+    it caps a squared residual.
 
     Args:
         pred_key: Prediction key holding the ``(B,)`` energies.
@@ -1032,6 +1058,8 @@ class BoltzmannProfileLoss(nn.Module):
         profile_key: Column on ``graphs`` holding the batch-local profile index.
         clamp: Energies within this of a profile's minimum keep full weight.
         decay: Decay scale of the weight above *clamp*.
+        soft_max: Saturation cap on a profile's loss, kcal² mol⁻². ``None``
+            leaves the loss quadratic.
 
     Reference:
         Zheng, T. et al. "Data-driven parametrization of molecular mechanics
@@ -1047,15 +1075,19 @@ class BoltzmannProfileLoss(nn.Module):
         profile_key: str = "profile",
         clamp: float = 2.0,
         decay: float = 2.0,
+        soft_max: float | None = None,
     ) -> None:
         super().__init__()
         if decay <= 0.0:
             raise ValueError(f"decay must be > 0 kcal/mol, got {decay}")
+        if soft_max is not None and soft_max <= 0.0:
+            raise ValueError(f"soft_max must be > 0 (kcal/mol)^2, got {soft_max}")
         self.pred_key = str(pred_key)
         self.target_key = str(target_key)
         self.profile_key = str(profile_key)
         self.clamp = float(clamp)
         self.decay = float(decay)
+        self.soft_max = None if soft_max is None else float(soft_max)
 
     def forward(self, pred: Mapping[str, Any], batch: Any) -> torch.Tensor:
         """Mean over profiles of the weighted, offset-free squared residual.
@@ -1126,6 +1158,16 @@ class BoltzmannProfileLoss(nn.Module):
 
         residual = (energy - reference + offset[profile]).pow(2) * weight
         per_profile = energy.new_zeros(n_graphs).index_add(0, profile, residual) / safe
+        if self.soft_max is not None:
+            # tanh(L/m)*m, written as a detached rescaling of L so the gradient is
+            # attenuated by the saturation rather than clipped at it.
+            eps = torch.finfo(energy.dtype).eps
+            saturating = (
+                torch.tanh(per_profile / self.soft_max)
+                * self.soft_max
+                / torch.where(per_profile.abs() < eps, eps, per_profile)
+            ).detach()
+            per_profile = per_profile * saturating
         # Only the profiles this batch actually holds are averaged over; a slot
         # no graph landed in contributes neither a numerator nor a denominator.
         occupied = (counts > 0).to(energy.dtype)

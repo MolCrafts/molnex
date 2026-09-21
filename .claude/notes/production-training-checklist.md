@@ -275,21 +275,20 @@ Class-I dataset is THEMol torsion-scan, and a row is 24 molecules"), and the
 decision: NO-GO
 scope: "nothing cleared; bounded calibration/validation only"
 blocking:
-  - "energy target: CLOSED for stage 2, OPEN for stage 3. THEMol publishes
+  - "energy target: CLOSED (operator ruling 2026-09-21). THEMol publishes
      absolute energies (sampled record -503415.87 kcal/mol) and the epsilon[Z]
      dressing left ~2.3e5 kcal/mol of per-molecule constant against a
      ~7 kcal/mol torsion barrier, so val_mae_kcal sat at 231651 -> 231645 across
-     all three tiers of smoke 2723274 while train_loss moved 81.96 -> 48.34.
-     Stage 2 now uses ByteFF's own answer (`BoltzmannProfileLoss`,
-     `TorsionLossType.boltzmann_mse`): each conformer against its own profile's
-     minimum, Boltzmann-weighted, with the per-profile offset removed and
-     detached, so the constant never enters and the stage declares
-     `dressing: False`. Stage 3 (hessian-relax) still supervises absolute
-     energies through the dressing, and a relaxation row is a profile too, so the
-     same objective applies there — at the cost of the Cartesian force term that
-     off-equilibrium data is mostly there for. Composing the two (`WeightedLoss`)
-     is the fix; the weights, and whether absolute energies are wanted at all
-     there, change what is trained and are the operator's call."
+     all three tiers of smoke 2723274 while train_loss moved 81.96 -> 48.34. No
+     stage supervises an absolute energy any more: all four declare
+     `dressing: False`. The charge and partial-Hessian stages carry no energy term
+     at all; stage 2 is ByteFF's `boltzmann_mse` and stage 3 its saturating
+     `boltzmann_soft_mse` plus the inlier force Huber, both relative to a
+     profile's own minimum with the per-profile offset removed and detached.
+     Verified on real rows: a +5e5 / +1e6 kcal/mol per-profile shift leaves the
+     energy half bit-identical (stage 2, job 2750175; stage 3, job 2750637). The
+     epsilon[Z] table is out of the curriculum, so the metric that selects the
+     checkpoint is now the quantity training optimizes."
   - "checklist item 5 is MET for the torsion-scan shape only — see the grid
      below — and the three-stage curriculum has since added two shapes it does
      not cover. Stage 1 pads a namespace the grid never saw: `hessian_pairs`,
@@ -386,6 +385,28 @@ stage_1_evidence: |
   (`tests/test_molpot/test_forcefield/test_potentials.py::TestPartialHessian`).
 
   Still missing for stage 1: its own calibration cell (item 5) and a bounded
+  tiny-set overfit test (item 3).
+stage_3_evidence: |
+  Stage 3's objective is relative energies plus forces (operator ruling
+  2026-09-21) — `BoltzmannProfileLoss(soft_max=PROFILE_SOFT_MAX)` beside the
+  inlier force Huber, unit weights, `WeightedLoss`. Validated bounded on real
+  `hessian-relax` rows (job 2750637): each relaxation's frames land in one
+  profile (58 and 76 frames, so the "~72.5 per row" figure is a mean and not a
+  fixed grid), the reference forces are read (|F| ~ 17-19 kcal/mol/A), the energy
+  half is invariant to a +5e5 / +1e6 kcal/mol per-profile shift, and with
+  `trainable=None` every head moves. Both halves are bounded — the energy by the
+  saturation, the force by the Huber's linear regime — which is what makes the
+  unit weights defensible.
+
+  **Measured at initialization the two halves are not balanced**: energy 4.118,
+  force 0.109, a factor of 38. That is one untrained model on two records and not
+  a converged ratio, so it is not yet a reason to reweight — but it is the number
+  to watch in the first bounded stage-3 run. If the gap persists the answer is
+  `ScaleNormalizedLoss` on each half (dividing by a measured scale, which makes
+  both dimensionless), not a hand-tuned weight.
+
+  Still missing for stage 3, as for stages 0-2: its own calibration cell (item 5;
+  a relaxation row is ~72.5 frames against torsion-scan's 24) and a bounded
   tiny-set overfit test (item 3).
 notes: >
   Step rate in the smoke (0.64 steps/s) is NOT a throughput measurement: the

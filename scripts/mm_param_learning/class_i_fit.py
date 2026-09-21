@@ -36,7 +36,7 @@ from molpy import Block, Frame
 from tensordict import TensorDict
 
 from molix.core.hook import BaseHook
-from molix.core.losses import energy_loss
+from molix.core.losses import BoltzmannProfileLoss, WeightedLoss, energy_loss, force_loss
 from molix.core.steps import DefaultEvalStep, DefaultTrainStep
 from molix.core.trainer import Trainer
 from molix.data import (
@@ -61,6 +61,12 @@ TASK_CODE_ENERGY = 0
 _EV_TO_KCAL = float((1.0 * units.eV).to(units.kilocalorie_per_mole).magnitude)
 _EV_PER_A_TO_KCAL_PER_A = _EV_TO_KCAL
 
+# Saturates a profile's relative-energy loss in stage 3; (kcal/mol)^2. ByteFF's
+# `boltzmann_soft_mse` cap: a profile's loss becomes `tanh(L/m)*m`, so one frame
+# that walked into a repulsive wall contributes a bounded amount instead of the
+# batch's whole gradient. 100 is ByteFF's own `soft_mse` default, i.e. saturation
+# sets in around a 10 kcal/mol residual — the scale of the barriers being fitted.
+PROFILE_SOFT_MAX = 100.0
 # Saturates (σ/r)^12 energy spikes; kcal/mol. Quadratic below, linear above.
 ENERGY_HUBER_BETA = 20.0
 # Saturates exploded pred-forces when σ walks into the wall; kcal/mol/Å.
@@ -70,52 +76,25 @@ FORCE_HUBER_BETA = 20.0
 FORCE_OUTLIER_KCAL_A = 200.0
 
 
-def inlier_weight(ref: torch.Tensor) -> torch.Tensor:
-    """Per-atom ``1.0``/``0.0`` weight: is ``|F_ref|`` within the outlier bound?
-
-    Args:
-        ref: Reference Cartesian forces ``(N, 3)`` (kcal mol⁻¹ Å⁻¹).
-
-    Returns:
-        Weights ``(N, 1)`` in ``ref``'s dtype, broadcastable over components.
-    """
-    keep = ref.detach().norm(dim=-1) <= FORCE_OUTLIER_KCAL_A
-    return keep.to(ref.dtype).unsqueeze(-1)
-
-
-def force_huber(
-    pred: torch.Tensor, ref: torch.Tensor, weight: torch.Tensor | None = None
-) -> torch.Tensor:
-    """Huber of Cartesian forces over DFT inliers (``beta=FORCE_HUBER_BETA``).
-
-    The outlier bound is applied as a **weight**, not as a boolean gather. The
-    gather it replaces produced a data-dependent output shape and a host sync
-    (``bool(keep.any())``) — a graph break on the training hot path, forbidden
-    by the compile law — and made the Huber denominator the number of surviving
-    atoms, so the loss scale moved with how many outliers a batch happened to
-    draw. Weighting divides by that same count without either.
-
-    A batch whose atoms are *all* outliers contributes ``0`` rather than
-    silently falling back to fitting the outliers, which is what the boolean
-    form did.
-
-    Args:
-        pred: Predicted forces ``(N, 3)``.
-        ref: Reference forces ``(N, 3)``.
-        weight: Optional per-atom ``(N,)`` weight — ``atoms.mask`` on a padded
-            batch, so ghost rows neither score nor count.
-
-    Returns:
-        Scalar loss (kcal mol⁻¹ Å⁻¹).
-    """
-    kept_weight = inlier_weight(ref)
-    if weight is not None:
-        kept_weight = kept_weight * weight.reshape(-1, 1).to(kept_weight.dtype)
-    per_component = torch.nn.functional.smooth_l1_loss(
-        pred, ref, beta=FORCE_HUBER_BETA, reduction="none"
-    )
-    kept = kept_weight.sum() * pred.shape[-1]
-    return (per_component * kept_weight).sum() / kept.clamp(min=1.0)
+#: Huber of Cartesian forces over DFT inliers — the whole force objective, as the
+#: molix primitive that owns it.
+#:
+#: The outlier bound is a **weight**, not a boolean gather. The gather it replaced
+#: produced a data-dependent output shape and a host sync (``bool(keep.any())``) —
+#: a graph break on the training hot path, forbidden by the compile law — and made
+#: the Huber denominator the number of surviving atoms, so the loss scale moved
+#: with how many outliers a batch happened to draw. Weighting divides by the same
+#: count without either, and a batch whose atoms are all outliers contributes
+#: ``0`` rather than silently falling back to fitting the outliers.
+#:
+#: ``atoms.mask`` multiplies in through ``weight_key``, so a ghost row neither
+#: scores nor counts.
+force_inlier_huber = force_loss(
+    "forces",
+    elementwise=torch.nn.SmoothL1Loss(beta=FORCE_HUBER_BETA, reduction="none"),
+    weight_key="mask",
+    outlier_norm=FORCE_OUTLIER_KCAL_A,
+)
 
 
 def force_mae(
@@ -925,7 +904,7 @@ def energy_force_terms(
     force_term = predictions["energy"].new_zeros(())
     atoms = batch.get("atoms")
     if atoms is not None and "forces" in atoms.keys() and "forces" in predictions:
-        force_term = force_huber(predictions["forces"], atoms["forces"], _atom_mask(batch))
+        force_term = force_inlier_huber(predictions, batch)
     return energy_term, force_term
 
 
@@ -933,6 +912,25 @@ def train_objective(predictions: Mapping[str, torch.Tensor], batch: TensorDict) 
     """Residualized energy Huber + inlier force MSE. Unit weights."""
     energy_term, force_term = energy_force_terms(predictions, batch)
     return energy_term + force_term
+
+
+#: Stage 3: a profile's relative energies, saturating, plus the inlier force Huber.
+#:
+#: Unit weights, which is this path's convention and is defensible here for the
+#: same reason it is for :func:`train_objective`: both terms are bounded — the
+#: energy half by ``soft_max``, the force half by the Huber's linear regime — so
+#: neither can run away against the other, and no dimensionful scale factor has to
+#: be guessed. What they are *not* is commensurable in units ((kcal/mol)² against
+#: (kcal mol⁻¹ Å⁻¹)²), so if their converged magnitudes turn out to differ by
+#: orders of magnitude the answer is
+#: :class:`~molix.core.losses.ScaleNormalizedLoss` on each, not a hand-tuned
+#: weight.
+profile_force_objective = WeightedLoss(
+    [
+        (1.0, BoltzmannProfileLoss(soft_max=PROFILE_SOFT_MAX)),
+        (1.0, force_inlier_huber),
+    ]
+)
 
 
 def val_omol_mae(predictions: Mapping[str, torch.Tensor], batch: TensorDict) -> torch.Tensor:

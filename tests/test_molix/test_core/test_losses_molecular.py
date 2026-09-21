@@ -1031,3 +1031,115 @@ class TestBoltzmannProfileLoss:
         """It divides an energy; zero would make every weight 0 or inf."""
         with pytest.raises(ValueError, match="decay must be > 0"):
             BoltzmannProfileLoss(decay=0.0)
+
+
+class TestBoltzmannProfileSaturation:
+    """``soft_max`` — ByteFF's ``boltzmann_soft_mse``, for off-equilibrium frames."""
+
+    @staticmethod
+    def _batch(reference, profile):
+        return TensorDict(
+            {
+                "graphs": TensorDict(
+                    {
+                        "energy": torch.tensor(reference, dtype=torch.float64),
+                        "profile": torch.tensor(profile, dtype=torch.long),
+                    },
+                    batch_size=[len(reference)],
+                )
+            },
+            batch_size=[],
+        )
+
+    def test_a_profiles_loss_saturates_at_soft_max(self) -> None:
+        """One frame against a repulsive wall must not own the batch.
+
+        A residual far above the cap has to converge on the cap itself, which is
+        what ``tanh(L/m)*m`` gives; an unbounded square would not.
+        """
+        cap = 4.0
+        reference = [0.0, 0.0]
+        huge = torch.tensor([0.0, 1.0e4], dtype=torch.float64)
+        loss = BoltzmannProfileLoss(soft_max=cap)({"energy": huge}, self._batch(reference, [0, 0]))
+        assert float(loss) == pytest.approx(cap, rel=1e-9)
+
+    def test_it_leaves_a_small_residual_essentially_unchanged(self) -> None:
+        """Saturation must not distort the regime the fit actually works in."""
+        reference = [0.0, 0.5]
+        pred = torch.tensor([0.0, 0.6], dtype=torch.float64)
+        plain = BoltzmannProfileLoss()({"energy": pred}, self._batch(reference, [0, 0]))
+        soft = BoltzmannProfileLoss(soft_max=100.0)(
+            {"energy": pred}, self._batch(reference, [0, 0])
+        )
+        assert float(soft) == pytest.approx(float(plain), rel=1e-3)
+
+    def test_the_gradient_is_attenuated_not_cut(self) -> None:
+        """The cap rescales the gradient; it does not zero it.
+
+        A clipped loss would stop the frame contributing at all, which is not the
+        same as contributing a bounded amount.
+        """
+        reference = [0.0, 0.0]
+        pred = torch.tensor([0.0, 50.0], dtype=torch.float64, requires_grad=True)
+        BoltzmannProfileLoss(soft_max=4.0)(
+            {"energy": pred}, self._batch(reference, [0, 0])
+        ).backward()
+        assert pred.grad is not None
+        assert float(pred.grad[1]) != 0.0
+        assert abs(float(pred.grad[1])) < 1.0  # heavily attenuated, not clipped
+
+    def test_a_non_positive_soft_max_is_refused(self) -> None:
+        """It divides a squared energy; zero would make every profile 0 or inf."""
+        with pytest.raises(ValueError, match="soft_max must be > 0"):
+            BoltzmannProfileLoss(soft_max=0.0)
+
+
+class TestForceLossOutlierBound:
+    """``outlier_norm`` — the DFT tail a Class-I form cannot represent."""
+
+    @staticmethod
+    def _batch(reference, mask=None):
+        atoms = {"forces": reference}
+        if mask is not None:
+            atoms["mask"] = torch.tensor(mask)
+        return TensorDict(
+            {"atoms": TensorDict(atoms, batch_size=[reference.shape[0]])}, batch_size=[]
+        )
+
+    def test_an_atom_whose_reference_force_exceeds_the_bound_stops_counting(self) -> None:
+        """Fitting a 200-800 kcal/mol/A tail moves every parameter that can reach it.
+
+        Dropping it must change the *denominator* too, or the loss would merely be
+        diluted rather than the atom excluded — so the bounded loss has to equal
+        the loss of the kept atoms alone.
+        """
+        reference = torch.tensor(
+            [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [900.0, 0.0, 0.0]], dtype=torch.float64
+        )
+        pred = torch.tensor(
+            [[1.5, 0.0, 0.0], [2.5, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=torch.float64
+        )
+        bounded = force_loss("forces", outlier_norm=200.0)({"forces": pred}, self._batch(reference))
+        kept = force_loss("forces")({"forces": pred[:2]}, self._batch(reference[:2]))
+        torch.testing.assert_close(bounded, kept)
+
+    def test_the_bound_multiplies_with_the_padding_mask(self) -> None:
+        """Both are 'a row that should not count'; neither may cancel the other."""
+        reference = torch.tensor(
+            [[1.0, 0.0, 0.0], [900.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=torch.float64
+        )
+        pred = torch.tensor(
+            [[1.5, 0.0, 0.0], [0.0, 0.0, 0.0], [7.0, 0.0, 0.0]], dtype=torch.float64
+        )
+        got = force_loss("forces", outlier_norm=200.0, weight_key="mask")(
+            {"forces": pred}, self._batch(reference, [True, True, False])
+        )
+        only_first = force_loss("forces")({"forces": pred[:1]}, self._batch(reference[:1]))
+        torch.testing.assert_close(got, only_first)
+
+    def test_without_the_bound_every_atom_still_counts(self) -> None:
+        """The default must not change: it is the behaviour every caller has."""
+        reference = torch.tensor([[900.0, 0.0, 0.0]], dtype=torch.float64)
+        pred = torch.zeros(1, 3, dtype=torch.float64)
+        got = force_loss("forces")({"forces": pred}, self._batch(reference))
+        torch.testing.assert_close(got, torch.tensor(900.0**2 / 3, dtype=torch.float64))
