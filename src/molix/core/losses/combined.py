@@ -76,8 +76,21 @@ class WeightedLoss(nn.Module):
 
         Returns:
             Weighted sum of all losses (scalar tensor).
+
+        Raises:
+            RuntimeError: A term returned something other than a scalar. That was
+                always the contract — this returns "a scalar tensor" — and the dot
+                product below makes it explicit instead of broadcasting silently.
         """
-        total_loss = self.weights.new_zeros(())
-        for weight, loss_fn in zip(self.weights, self._terms):
-            total_loss = total_loss + weight * loss_fn(pred, target)
-        return total_loss
+        # One dot product, not a loop that multiplies each term by a slice of the
+        # weight buffer. Iterating a tensor yields 0-dim **device** scalars, and
+        # those — together with a 0-dim `new_zeros(())` accumulator — fused into a
+        # reduction kernel that died in `cuPointerGetAttribute` with
+        # `CUDA_ERROR_INVALID_VALUE` whenever the combined loss also consumed
+        # `atoms.forces`, i.e. whenever its backward was second order. Either half
+        # of stage 3's objective ran alone, and `energy(...) + force(...)` written
+        # by hand ran too; only this combinator failed (probes 2755942, 2757760,
+        # 2758109). The buffer is still what holds the weights, so `.to()` and
+        # `state_dict` behave as before.
+        terms = torch.stack([loss_fn(pred, target).reshape(()) for loss_fn in self._terms])
+        return (self.weights.to(terms.dtype) * terms).sum()
