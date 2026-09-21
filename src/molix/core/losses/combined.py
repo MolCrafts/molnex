@@ -13,13 +13,22 @@ class WeightedLoss(nn.Module):
     Computes ``L = Σ wᵢ · Lᵢ(pred, target)`` over the supplied terms. Each
     term is a ``(weight, loss_fn)`` tuple.
 
-    The weights are held as a registered buffer, so they move with
-    :meth:`~torch.nn.Module.to` / ``.cuda()`` and ride along in
-    ``state_dict`` — no per-step device copy. Every term is evaluated and
-    summed; a term that raises (e.g. a missing target key) propagates
-    rather than being silently skipped, because silently dropping a term
-    means training a *different* objective than intended (energy-only when
-    you asked for energy+force) with no signal.
+    **The weights are plain Python floats, deliberately.** They are configuration,
+    not learned state, and a float multiplying a device tensor folds into the kernel
+    — where a weight tensor raises the one question this class has no answer to:
+    which device is it on? Nobody calls ``.to()`` on a loss, so a registered buffer
+    stays on the host, and a host 0-dim scalar multiplied into a CUDA tensor is
+    accepted silently in eager and then dies under inductor —
+    ``CUDA_ERROR_INVALID_VALUE from cuPointerGetAttribute`` inside the fused
+    reduction. That took out every cell of two stage-3 calibration grids, and only
+    when the combined loss also consumed ``atoms.forces``, i.e. when its backward
+    was second order; either half alone, and a hand-written ``a(...) + b(...)``,
+    ran clean (probes 2755942, 2757760, 2758109, 2758519).
+
+    Every term is evaluated and summed; a term that raises (e.g. a missing target
+    key) propagates rather than being silently skipped, because silently dropping a
+    term means training a *different* objective than intended (energy-only when you
+    asked for energy+force) with no signal.
 
     A term is any callable ``(pred, target) -> Tensor``. Both kinds that
     occur here are accepted: an :class:`~torch.nn.Module` (which may carry
@@ -57,11 +66,7 @@ class WeightedLoss(nn.Module):
         # Only the stateful terms go in the ModuleList — a closure in there
         # raises. Call order lives in ``_terms``, which holds both kinds.
         self.losses = nn.ModuleList([fn for fn in self._terms if isinstance(fn, nn.Module)])
-        self.register_buffer(
-            "weights",
-            torch.tensor([float(weight) for weight, _ in losses]),
-        )
-        self.weights: torch.Tensor
+        self.weights: tuple[float, ...] = tuple(float(weight) for weight, _ in losses)
 
     def forward(
         self,
@@ -75,22 +80,17 @@ class WeightedLoss(nn.Module):
             target: Targets (dict/dataclass or tensor).
 
         Returns:
-            Weighted sum of all losses (scalar tensor).
-
-        Raises:
-            RuntimeError: A term returned something other than a scalar. That was
-                always the contract — this returns "a scalar tensor" — and the dot
-                product below makes it explicit instead of broadcasting silently.
+            Weighted sum of all losses, on the terms' own device and dtype.
         """
-        # One dot product, not a loop that multiplies each term by a slice of the
-        # weight buffer. Iterating a tensor yields 0-dim **device** scalars, and
-        # those — together with a 0-dim `new_zeros(())` accumulator — fused into a
-        # reduction kernel that died in `cuPointerGetAttribute` with
-        # `CUDA_ERROR_INVALID_VALUE` whenever the combined loss also consumed
-        # `atoms.forces`, i.e. whenever its backward was second order. Either half
-        # of stage 3's objective ran alone, and `energy(...) + force(...)` written
-        # by hand ran too; only this combinator failed (probes 2755942, 2757760,
-        # 2758109). The buffer is still what holds the weights, so `.to()` and
-        # `state_dict` behave as before.
-        terms = torch.stack([loss_fn(pred, target).reshape(()) for loss_fn in self._terms])
-        return (self.weights.to(terms.dtype) * terms).sum()
+        # No accumulator seeded from a tensor of this class's own: the first term
+        # decides device and dtype, and each weight is a Python scalar. That is the
+        # shape a hand-written `a(pred, target) + b(pred, target)` has, which is the
+        # one shape measured to survive the second-order backward (see the class
+        # docstring).
+        total: torch.Tensor | None = None
+        for weight, loss_fn in zip(self.weights, self._terms, strict=True):
+            term = loss_fn(pred, target) * weight
+            total = term if total is None else total + term
+        if total is None:
+            raise ValueError("WeightedLoss has no terms; give it at least one")
+        return total
