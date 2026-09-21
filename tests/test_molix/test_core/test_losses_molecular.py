@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 from tensordict import TensorDict
@@ -1051,33 +1053,48 @@ class TestBoltzmannProfileSaturation:
             batch_size=[],
         )
 
-    def test_a_profiles_loss_saturates_at_soft_max(self) -> None:
-        """One frame against a repulsive wall must not own the batch.
+    def test_past_the_knee_the_loss_grows_logarithmically_not_quadratically(self) -> None:
+        """The property, not the formula: doubling a profile's loss costs ``m ln 2``.
 
-        A residual far above the cap has to converge on the cap itself, which is
-        what ``tanh(L/m)*m`` gives; an unbounded square would not.
+        That is what ``m (1 + log(L/m))`` means, and its gradient ``m / L`` is what
+        bounds one frame against a repulsive wall. Asserted by a *difference* so the
+        test cannot pass by restating the implementation. With this fixture
+        ``L = X**2 / 4``, so scaling the residual by ``sqrt(2)`` doubles it.
         """
-        cap = 4.0
+        knee = 4.0
         reference = [0.0, 0.0]
-        huge = torch.tensor([0.0, 1.0e4], dtype=torch.float64)
-        loss = BoltzmannProfileLoss(soft_max=cap)({"energy": huge}, self._batch(reference, [0, 0]))
-        assert float(loss) == pytest.approx(cap, rel=1e-9)
+        loss = BoltzmannProfileLoss(soft_max=knee)
+        first = loss(
+            {"energy": torch.tensor([0.0, 1.0e3], dtype=torch.float64)},
+            self._batch(reference, [0, 0]),
+        )
+        doubled = loss(
+            {"energy": torch.tensor([0.0, 1.0e3 * math.sqrt(2.0)], dtype=torch.float64)},
+            self._batch(reference, [0, 0]),
+        )
+        assert float(doubled - first) == pytest.approx(knee * math.log(2.0), rel=1e-9)
 
-    def test_it_leaves_a_small_residual_essentially_unchanged(self) -> None:
-        """Saturation must not distort the regime the fit actually works in."""
+    def test_below_the_knee_the_loss_is_exactly_unchanged(self) -> None:
+        """A Huber is the identity below its knee — not merely close to it.
+
+        The regime the fit actually works in must not be distorted at all, which a
+        saturating rescale would do everywhere.
+        """
         reference = [0.0, 0.5]
         pred = torch.tensor([0.0, 0.6], dtype=torch.float64)
         plain = BoltzmannProfileLoss()({"energy": pred}, self._batch(reference, [0, 0]))
         soft = BoltzmannProfileLoss(soft_max=100.0)(
             {"energy": pred}, self._batch(reference, [0, 0])
         )
-        assert float(soft) == pytest.approx(float(plain), rel=1e-3)
+        torch.testing.assert_close(soft, plain)
 
     def test_the_gradient_is_attenuated_not_cut(self) -> None:
-        """The cap rescales the gradient; it does not zero it.
+        """Bounded is not the same as ignored, and this is the difference.
 
-        A clipped loss would stop the frame contributing at all, which is not the
-        same as contributing a bounded amount.
+        ``m/L`` past the knee keeps pulling an outlier back slowly. Applying
+        ``m tanh(L/m)`` directly instead would give ``sech**2(L/m)``, which
+        underflows to exactly zero — a frame against a wall would then never be
+        corrected. A non-zero gradient here is the contract, not an accident.
         """
         reference = [0.0, 0.0]
         pred = torch.tensor([0.0, 50.0], dtype=torch.float64, requires_grad=True)
@@ -1089,7 +1106,7 @@ class TestBoltzmannProfileSaturation:
         assert abs(float(pred.grad[1])) < 1.0  # heavily attenuated, not clipped
 
     def test_a_non_positive_soft_max_is_refused(self) -> None:
-        """It divides a squared energy; zero would make every profile 0 or inf."""
+        """It is the knee and the only thing divided by; zero would make it inf."""
         with pytest.raises(ValueError, match="soft_max must be > 0"):
             BoltzmannProfileLoss(soft_max=0.0)
 

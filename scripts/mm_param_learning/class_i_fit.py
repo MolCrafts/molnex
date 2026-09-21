@@ -2148,8 +2148,25 @@ class HessianTargets:
 
         The split, the sidecars and :meth:`MoleculeExtent.for_dataset` all ask the
         shard directly; wrapping must not hide it.
+
+        **``_source`` is read through ``object.__getattribute__``, and its absence
+        is an ``AttributeError``.** A plain ``getattr(self._source, name)`` recurses
+        for ever the moment this object is unpickled: ``pickle`` builds the instance
+        without calling ``__init__`` and probes ``__setstate__`` before restoring
+        ``__dict__``, so the lookup of ``_source`` re-enters here, and again, until
+        the interpreter gives up. With ``num_workers=0`` nothing is ever pickled and
+        it never shows; with spawned workers every one of them dies at
+        ``reduction.pickle.load`` and the parent reports only "DataLoader worker
+        exited unexpectedly ... Details are lost due to multiprocessing", which
+        reads exactly like an out-of-memory kill. It cost the ``hessian`` stage all
+        nine cells of a calibration grid (job 2753676) and an hour of looking at
+        host-memory models that were not the problem.
         """
-        return getattr(self._source, name)
+        try:
+            source = object.__getattribute__(self, "_source")
+        except AttributeError:
+            raise AttributeError(name) from None
+        return getattr(source, name)
 
     def __getitem__(self, index: int) -> Sequence[Frame]:
         frame = self._prepare.topology(self._source[index][0])

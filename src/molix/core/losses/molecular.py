@@ -1038,15 +1038,13 @@ class BoltzmannProfileLoss(nn.Module):
     carry the last index, which is the padder's ghost sink and never a live
     profile.
 
-    **The saturating variant.** With *soft_max* set, a profile's loss is passed
-    through ``tanh(L / soft_max) * soft_max`` before the average — ByteFF's
-    ``boltzmann_soft_mse``, which it uses where ``boltzmann_mse`` is not robust
-    enough. The transform is applied as a **detached** rescaling, so the reported
-    value saturates at *soft_max* and the gradient is attenuated by the same
-    factor rather than clipped. It is what off-equilibrium data wants: one frame
-    that walked into a ``(sigma/r)**12`` wall then contributes a bounded amount
-    instead of the whole batch's gradient. ``None`` (default) is the plain
-    quadratic, which is right for a well-behaved torsion scan.
+    **The robust variant.** With *soft_max* set, a profile's loss becomes a Huber
+    with that knee — itself below it, ``m (1 + log(L/m))`` above — which is
+    ByteFF's ``boltzmann_soft_mse`` gradient written as a function that actually
+    has it. Past the knee the gradient is ``m / L``, so one frame that walked into
+    a ``(sigma/r)**12`` wall is corrected slowly instead of owning the batch, and is
+    not ignored either. That is what off-equilibrium data wants. ``None`` (default)
+    is the plain quadratic, right for a well-behaved torsion scan.
 
     Units: kcal/mol in, kcal²/mol² out. *clamp*, *decay* and *soft_max* are all
     dimensionful — the first two energies, the last an energy **squared**, since
@@ -1058,8 +1056,8 @@ class BoltzmannProfileLoss(nn.Module):
         profile_key: Column on ``graphs`` holding the batch-local profile index.
         clamp: Energies within this of a profile's minimum keep full weight.
         decay: Decay scale of the weight above *clamp*.
-        soft_max: Saturation cap on a profile's loss, kcal² mol⁻². ``None``
-            leaves the loss quadratic.
+        soft_max: Huber knee on a profile's loss, kcal² mol⁻². ``None`` leaves
+            the loss quadratic.
 
     Reference:
         Zheng, T. et al. "Data-driven parametrization of molecular mechanics
@@ -1159,24 +1157,33 @@ class BoltzmannProfileLoss(nn.Module):
         residual = (energy - reference + offset[profile]).pow(2) * weight
         per_profile = energy.new_zeros(n_graphs).index_add(0, profile, residual) / safe
         if self.soft_max is not None:
-            # tanh(L/m)*m, written as a detached rescaling of L so the gradient is
-            # attenuated by the saturation rather than clipped at it.
+            # A Huber in the profile loss, with `soft_max` as its knee: the loss
+            # itself below it, and `m * (1 + log(L/m))` above.
             #
-            # `clamp(min=eps)` and not `where(L < eps, eps, L)`: a profile's loss is
-            # a sum of squares times non-negative weights over a positive count, so
-            # it is never negative and the two are the same function here — but the
-            # `where` form takes a Python float as its second argument, which
-            # becomes a **host** scalar tensor in the launch, and a CUDA kernel
-            # handed one dies in `cuPointerGetAttribute` with
-            # `CUDA_ERROR_INVALID_VALUE`. It cost stage 3 every cell of its first
-            # calibration grid (job 2751984) and is invisible on CPU, where there is
-            # no pointer attribute to query. At L = 0 this gives tanh(0)*m/eps = 0,
-            # so a profile that already fits contributes nothing, as before.
-            eps = torch.finfo(energy.dtype).eps
-            saturating = (
-                torch.tanh(per_profile / self.soft_max) * self.soft_max / per_profile.clamp(min=eps)
-            ).detach()
-            per_profile = per_profile * saturating
+            # This is **ByteFF's gradient**, written as a function that has it.
+            # ByteFF caps with `L * detach(m*tanh(L/m) / L)`, whose value saturates
+            # at `m` while its gradient carries the factor `m tanh(L/m) / L ~ m/L` —
+            # the two are inconsistent, because a detached rescaling is not the
+            # derivative of anything. Only the gradient trains, so this integrates
+            # it: below the knee the gradient is 1 and the loss is unchanged, above
+            # it the gradient is exactly `m/L`, so one frame that walked into a
+            # `(sigma/r)**12` wall is pulled back slowly instead of owning the batch.
+            #
+            # Applying `m*tanh(L/m)` directly would *look* simpler and is wrong: its
+            # gradient is `sech**2(L/m)`, which underflows to zero, so an outlier
+            # would be ignored for ever rather than corrected slowly.
+            #
+            # Written with two clamps and `log1p` rather than a `where`: a Python
+            # float in `torch.where` becomes a host scalar tensor in the launch, and
+            # the rescaled form's fused reduction kernel died in
+            # `cuPointerGetAttribute` with `CUDA_ERROR_INVALID_VALUE` on every
+            # stage-3 cell of two grids (jobs 2751984, 2753678) while stage 2 — the
+            # same loss without the cap — ran clean. Only `m` is ever divided by,
+            # and `m > 0` is checked at construction.
+            knee = self.soft_max
+            per_profile = per_profile.clamp(max=knee) + knee * torch.log1p(
+                (per_profile.clamp(min=knee) - knee) / knee
+            )
         # Only the profiles this batch actually holds are averaged over; a slot
         # no graph landed in contributes neither a numerator nor a denominator.
         occupied = (counts > 0).to(energy.dtype)
