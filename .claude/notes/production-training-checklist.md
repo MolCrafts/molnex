@@ -179,6 +179,27 @@ coordinates.
   to near-zero and assert it gets there. A head that cannot overfit eight
   molecules has no gradient, and that is exactly what three of four bonded
   families had.
+- [ ] **The gate exists now** (`projects/class-i/train/overfit_gate.py`), and it
+  reports three independent things per stage rather than one word: whether every
+  parameter group the objective should reach carries a gradient after one backward,
+  whether the loss blows up, and whether it falls by that objective's own factor.
+  One factor cannot serve four objectives — a plain MSE has a zero floor, while the
+  partial-Hessian residual is a normalised L1 a Class-I harmonic model cannot drive
+  to zero (it converges to ~0.40 and stays, which a fall-by-10x rule called a
+  failure).
+- [x] **No head is severed.** Every `severed` list matches its stage's own
+  `trainable` and objective, and `hessian` now shows `angle=0.058` where the lost
+  slot columns had left it at exactly nothing. `atom_head` (Lennard-Jones) is dead
+  in the first three stages, which is the open R1 rather than a defect: no stage
+  before `profile_forces` supervises a nonbonded parameter.
+- [x] **The four objectives' gradients differ by ~3000x, and one lr served all
+  four** (`charge` 0.199, `partial_hessian` 0.071, `profile_forces` **616** at
+  initialisation). Swept: `torsion-scan` falls 3.2x at 1e-4 and 26.9x at 3e-3;
+  `hessian-relax` is stable at 3e-4 and, at 1e-3, never improves on its step-0 loss
+  and climbs to 4689. `PROD_DAY`'s 1e-4 was the safe end, so stage 3 was starved by
+  configuration — the shape the production run showed before it died. Fixed as
+  `configs.STAGE_LR` (molnex `45832dc`); on it, every stage is stable and nothing
+  diverges.
   Fixed in molnex `7ea99c5`; measured effect at initialisation, same batch and
   probe (`projects/class-i/train/hessian_pairing_probe.py`): loss 0.7464 → 0.7189
   (heads) → **0.5671** (slots restored), which is below the 0.728 that four hours
