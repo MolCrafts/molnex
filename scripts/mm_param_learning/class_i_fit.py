@@ -37,6 +37,7 @@ from tensordict import TensorDict
 
 from molix.core.hook import BaseHook
 from molix.core.losses import BoltzmannProfileLoss, WeightedLoss, energy_loss, force_loss
+from molix.core.seed import seed_everything
 from molix.core.steps import DefaultEvalStep, DefaultTrainStep
 from molix.core.trainer import Trainer
 from molix.data import (
@@ -1334,6 +1335,17 @@ class ClassIFit:
         self.epochs = epochs
         self.lr = lr
         self.seed = seed
+        # **Seed here, before anything random is built.** ``seed`` used to be
+        # stored and handed only to the loader's shuffle, so the *weights* came
+        # from the ambient RNG — whatever the process had consumed before this
+        # point. Two runs of the same configuration then started at different
+        # losses (the item-3 gate measured 6.39, 9.31 and 7.94 on one stage), which
+        # makes every single-run verdict about that configuration unfalsifiable and
+        # is why a divergence had to be chased with three repeats.
+        #
+        # `deterministic=False`: bit-reproducibility costs throughput and is not
+        # what is wanted here. Same seed, same initialisation, same data order.
+        seed_everything(seed)
         self.device = torch.device(device)
         self.record_root = record_root
         self.energy_scope = energy_scope
