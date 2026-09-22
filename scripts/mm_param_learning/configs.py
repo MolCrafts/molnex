@@ -150,6 +150,25 @@ TORSION_ATOMS_PER_ROW: int = 24 * 33
 #: 2-8 molecules, where a gradient is noisier than a packed batch's. `hessian` at
 #: 1e-3 is verified to 400 steps only — its gradients are the smallest of the four
 #: (0.02-0.06), so a blow-up is unlikely, but it is not measured.
+#: Eval cadence per stage, in optimizer steps. ``None`` leaves the tier's
+#: epoch-boundary eval.
+#:
+#: The two profile stages need a step cadence because their instability is
+#: *intra-epoch*: an overfit of `hessian-relax` reaches its best at step ~400 and
+#: is three orders of magnitude worse by 1400, while a production epoch on that
+#: split is ~1300 steps. An epoch-boundary eval would therefore take its first
+#: reading after the blow-up and write `best.pt` from it — the good state would
+#: exist and never be saved. This is protection, not a cure: the mechanism is not
+#: identified (see the checklist), and a production batch is far larger than the
+#: two rows the gate diverges on, so whether it diverges there at all is unmeasured.
+STAGE_EVAL_STEPS: dict[str, int | None] = {
+    "mbis": None,
+    "hessian": None,
+    "torsion-scan": 200,
+    "hessian-relax": 200,
+}
+
+
 STAGE_LR: dict[str, float] = {
     "mbis": 1e-4,
     "hessian": 1e-3,
@@ -162,6 +181,7 @@ CURRICULUM: tuple[dict[str, Any], ...] = (
     {
         "stage": "mbis",
         "lr": STAGE_LR["mbis"],
+        "eval_every_n_steps": STAGE_EVAL_STEPS["mbis"],
         "definition": "THEMolMBIS",
         "objective": "charge",
         # No `trainable` is needed and none is given: a charge residual reaches
@@ -178,6 +198,7 @@ CURRICULUM: tuple[dict[str, Any], ...] = (
     {
         "stage": "hessian",
         "lr": STAGE_LR["hessian"],
+        "eval_every_n_steps": STAGE_EVAL_STEPS["hessian"],
         "definition": "THEMolHessian",
         "objective": "partial_hessian",
         # ByteFF's stage 1 trains Bond_k, Angle_k *and* ImproperTorsion_k
@@ -192,6 +213,7 @@ CURRICULUM: tuple[dict[str, Any], ...] = (
     {
         "stage": "torsion-scan",
         "lr": STAGE_LR["torsion-scan"],
+        "eval_every_n_steps": STAGE_EVAL_STEPS["torsion-scan"],
         "definition": "THEMolTorsionScan",
         # ByteFF's torsion stage (`TorsionLossType.boltzmann_mse`): each conformer
         # against its own profile's minimum, Boltzmann-weighted, with the
@@ -218,6 +240,7 @@ CURRICULUM: tuple[dict[str, Any], ...] = (
     {
         "stage": "hessian-relax",
         "lr": STAGE_LR["hessian-relax"],
+        "eval_every_n_steps": STAGE_EVAL_STEPS["hessian-relax"],
         "definition": "THEMolHessianRelax",
         # Relative energies *and* forces (operator ruling, 2026-09-21). A
         # relaxation row is ~72.5 frames of one molecule, so it is a profile in

@@ -192,6 +192,37 @@ coordinates.
   slot columns had left it at exactly nothing. `atom_head` (Lennard-Jones) is dead
   in the first three stages, which is the open R1 rather than a defect: no stage
   before `profile_forces` supervises a nonbonded parameter.
+- [ ] **Stage 4 diverges in the gate and the mechanism is not identified.** Eight
+  candidates are dead by measurement, each recorded so nobody re-runs them:
+  1. The Boltzmann weight depending on the prediction — a **real defect**, fixed
+     (molnex `ee12ae1`): the gradient was 58 % off the loss's own finite difference.
+     It gives stage 4 a 3x better minimum and cures torsion-scan (3/3 bounded), but
+     not this stage.
+  2. Force-term dominance — no: gradient norms 221 (profile) against 132 (force).
+  3. A prediction-dependent inlier mask — no: `outlier_norm` uses the **label**.
+  4. The two terms trading off — no: both rise together, two orders of magnitude.
+  5. Charge / LJ runaway — not the sole cause: freezing them moves the blow-up from
+     step ~500 to ~1400.
+  6. Missing gradient clipping — no: `clip=10` ends at 1082, `clip=100` at 1934.
+     (Worth keeping anyway: the tier's 1e3 never fires against a measured 884.)
+  7. The force term at all — no: the **profile-only** objective on the same data
+     also diverges, 2.73 at step 400 to 873 by 1400.
+  8. Weight concentration on relaxation profiles — no, and the opposite: 56.7 of 58
+     and 73.5 of 76 frames carry weight (torsion-scan: 17.8-21.5 of 24), and the
+     label spread is 12-16 kcal/mol, not the hundreds a relaxation was assumed to
+     span.
+  **What the data says instead:** on relaxation frames at initialisation the model
+  is already within **2.55 kcal/mol rms** of the QM relative energies, with every
+  term sane (bonds 451 kcal/mol absolute but only 27.9 of within-profile spread,
+  LJ ~1e-6). It improves to step ~400 and then walks away. So this is an optimizer
+  leaving a good solution, not a bad objective or bad data.
+- [x] **Protection, since the good state exists and would not be saved.** The
+  instability is intra-epoch — best at step ~400 against a ~1300-step production
+  epoch — so an epoch-boundary eval takes its first reading after the blow-up and
+  writes `best.pt` from it. `configs.STAGE_EVAL_STEPS` gives the two profile stages
+  a 200-step eval cadence. Not a cure, and not evidence about production either:
+  the gate diverges on **two rows**, and a production batch averages thousands of
+  frames, which usually stabilises. Whether it diverges there is unmeasured.
 - [x] **The four objectives' gradients differ by ~3000x, and one lr served all
   four** (`charge` 0.199, `partial_hessian` 0.071, `profile_forces` **616** at
   initialisation). Swept: `torsion-scan` falls 3.2x at 1e-4 and 26.9x at 3e-3;
