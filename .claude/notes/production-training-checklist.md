@@ -67,6 +67,37 @@ three-size campaign only.
 
 ## 1. Dataset and sampling contract
 
+- [ ] **UNMET as of 2026-09-22 — the grouping was never validated, and it was
+  wrong.** This item's own word is "grouping". `ProfileIndex` renumbered
+  `graphs.group` into `graphs.profile`, and `ClassIPrepare.label` wrote that
+  column as the constant `0.0` for every frame on the production path, so every
+  conformer of every molecule was one profile. Stages 3 and 4 are
+  profile-relative objectives: they subtracted a minimum taken across unrelated
+  molecules, making the residual those molecules' absolute-energy spread. Nothing
+  raised — the column was present, integral and dense — and the `soft_max` knee
+  compressed 1e9-1e13 kcal²/mol² into a logged 1778-2760, which reads as noise.
+  Measured on one real torsion-scan batch with stage 2's own checkpoint
+  (`projects/class-i/train/energy_scale_probe.py`), before -> after the fix:
+  profiles in the batch 1 -> 10; QM label spread per profile **1.83e6 -> 43.94
+  kcal/mol**; per-profile squared residual 2.04e12 -> 1.33e5; rms relative-energy
+  error 1.43e6 -> 365 kcal/mol. 44 kcal/mol is what a torsion scan should span.
+  Fixed in molnex `ea1dd28`: the grouping is the dataset row, `collate_molecules`
+  stamps `graphs.row`, and `ProfileIndex` defaults to it.
+  **What to take from it for this item:** a grouping column being present and
+  well-typed is not evidence that it groups. The check that would have caught it
+  in one line is the one the probe now prints — *how many distinct profiles does
+  a real batch hold, and what does the label span inside one?*
+- [ ] Still open from the same probe, and now well-posed rather than hidden: with
+  the grouping fixed, the **proper torsion term varies by 1132 kcal/mol within a
+  scan where the QM reference varies by 44** — that is what stage 3 must pull
+  down, and it is 25x too strong at the checkpoint stage 3 starts from. The angle
+  term is effectively dead (within-scan spread 1.3e-4 kcal/mol) and the bond term
+  carries an ~8000 kcal/mol absolute offset (within-scan spread 55), so stage 2's
+  partial-Hessian fit is not producing physical bonded parameters — its loss moved
+  0.747 -> 0.728 in 3893 steps. LJ is ~1e-6 and contributes nothing, as expected
+  for parameters no stage has ever supervised (open item R1).
+
+
 - [x] Train and val pin `dataset:molcrafts/omol25-small@1` (OMol25
   val-neutral, ωB97M-V/def2-TZVPD, kcal/mol after OMol25Small).
   Collection `dataset:molcrafts/class1-universal-2026@1`. v0 val is a
@@ -184,7 +215,9 @@ coordinates.
     15.0 s, of which `themol.py:375 _mapped_topology_frame` 7.2 s and h5py
     reads 6.1 s.
   - 12.2 s the collate — `class_i_fit.py:639 execute` 9.3 s
-    (`label_sample` 6.3 s, `_with_meta` 4.5 s, `_copy_frame` 3.0 s),
+    (`label_sample` 6.3 s, `_with_meta` 4.5 s, `_copy_frame` 3.0 s; `_with_meta`
+    was deleted afterwards — `frame.meta["k"] = v` writes through, see
+    notes.md),
     `collate_molecules` 2.6 s.
   - Largest single leaf: molrs `schema.column`, **434 418 calls (102 per row)
     for 6.1 s tottime = 22 % of the batch**, reached from `Frame.__setitem__`
@@ -192,7 +225,15 @@ coordinates.
   Sixteen workers at ~80 % CPU each = 12.8 of the 32 allocated cores, so the
   pool is worker-count-bound (host memory caps workers at 16 x prefetch 4 =
   107 GiB of 192), not core-bound.
-  Closing a 68x gap is not a shaving job: the prepared per-row form has to be
+  **Update 2026-09-22 (molnex `ea1dd28`):** the two per-row Frame rebuilds are
+  gone (`_with_meta` rebuilt a frame to set two meta scalars on a false premise —
+  `Frame.meta` is a write-through view; `_copy_frame` rebuilt another for an
+  isolation no caller wants). Same batch, same profiler: **27.65 s -> 21.16 s**
+  overall, the collate/prepare segment **12.2 s -> 3.57 s**, `schema.column`
+  calls **434 418 -> 195 914**. The remaining 68 % is molhub's per-row decode
+  (`themol.py:582 _read_mbis` 14.4 s, of which `_mapped_topology_frame` 6.87 s is
+  an `mp.io.read_smiles` parse per row per epoch).
+  Closing the rest is not a shaving job: the prepared per-row form has to be
   computed once and cached, not rebuilt from HDF5 every epoch. The same
   precompute closes the `PartialHessianPairs` re-enumeration already recorded
   under item 5.

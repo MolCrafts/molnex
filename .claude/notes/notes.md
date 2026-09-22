@@ -1553,8 +1553,18 @@ default. Grep for the deleted symbol, then grep for what *read* what it produced
 
 Ported consumers: `scripts/mm_param_learning/{class_i_fit,align,espaloma_mm_protocol_train,scale_audit}.py`
 (the fourth was in nobody's ledger) and `scripts/store/bench_block_read.py`.
-`Frame.meta` returns a **copy** — `frame.meta["x"] = 1` is a silent no-op, so
-adding a meta scalar means rebuilding the frame (`_with_meta`).
+~~`Frame.meta` returns a **copy** — `frame.meta["x"] = 1` is a silent no-op, so
+adding a meta scalar means rebuilding the frame (`_with_meta`).~~
+**Wrong, and corrected 2026-09-22.** `Frame.meta` hands back `FrameMeta`, a
+live write-through view: `frame.meta["x"] = 1` lands in the frame (verified
+against the installed wheel), and so do `del`, `pop`, `update`, `clear` and
+whole-dict assignment. `_with_meta` never had a reason to exist; it rebuilt the
+frame — 434 418 `schema.column` calls, 22 % of a production batch — to set two
+floats, and it is gone from `class_i_fit.py`. What *is* still not dict
+behaviour: iteration order is alphabetical rather than insertion order,
+`keys()`/`values()`/`items()` return lists instead of views, and a nested JSON
+document is handed back as a snapshot, so `frame.meta["run"]["step"] = 3`
+**is** a silent no-op. Read, modify, write the whole value back.
 
 **Still open**: `molhub` cannot write a store. Its conveyor flattens frames into
 molnex's storage column vocabulary (`RawUnit`) and calls a writer API that no
