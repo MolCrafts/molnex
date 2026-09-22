@@ -10,6 +10,7 @@ from molix.data.collate import (
     graph_schema_from,
     rebase,
 )
+from molix.data.profile import ProfileIndex
 from molix.frame import TensorFrame
 from tests.conftest import frame
 
@@ -364,3 +365,33 @@ def test_a_per_term_float_label_survives_on_bonds_and_on_a_valence_namespace():
     assert batch["angles", "k_ref"].is_floating_point()
     # Atom indices are still rebased into the concatenated numbering.
     assert batch["angles", "atomi"].tolist() == [0, 3]
+
+
+def test_graphs_row_stamps_which_dataset_row_each_graph_came_from() -> None:
+    """A row is a profile, and the flattening is the only place a row is known.
+
+    ``collate_molecules`` accepts either a frame or a sequence of frames per
+    sample, and flattening the second kind used to discard which sample each
+    graph belonged to. Stage 3 of run 2787862 needed exactly that grouping —
+    one THEMol torsion-scan row is one scan of 10-24 conformers — and, lacking
+    it, aligned every conformer of every molecule to one batch-wide minimum.
+    """
+    one = frame(Z=[1], pos=[[0.0, 0.0, 0.0]])
+    scan = (
+        frame(Z=[8], pos=[[0.0, 0.0, 0.0]]),
+        frame(Z=[8], pos=[[0.1, 0.0, 0.0]]),
+        frame(Z=[8], pos=[[0.2, 0.0, 0.0]]),
+    )
+    pair = (frame(Z=[6], pos=[[0.0, 0.0, 0.0]]), frame(Z=[6], pos=[[0.3, 0.0, 0.0]]))
+
+    batch = collate_molecules([one, scan, pair])
+
+    assert batch["graphs", "row"].tolist() == [0, 1, 1, 1, 2, 2]
+    assert batch["graphs", "row"].dtype == torch.long
+    # And it is the grouping ProfileIndex renumbers, so the two conformers of the
+    # last row are one profile and the lone frame is its own.
+    ProfileIndex().execute(batch)
+    profile = batch["graphs", "profile"]
+    assert profile[1] == profile[2] == profile[3]
+    assert profile[4] == profile[5]
+    assert len(set(profile.tolist())) == 3

@@ -15,8 +15,8 @@ from tensordict import TensorDict
 from molix.data import ProfileIndex
 
 
-def _batch(codes, mask=None):
-    graphs = {"group": torch.tensor(codes, dtype=torch.float64)}
+def _batch(codes, mask=None, column="row"):
+    graphs = {column: torch.tensor(codes, dtype=torch.float64)}
     if mask is not None:
         graphs["mask"] = torch.tensor(mask)
     return TensorDict(
@@ -32,7 +32,7 @@ class TestProfileIndex:
     """The batch-local dense profile index."""
 
     def test_dataset_wide_codes_become_dense_over_this_batch(self) -> None:
-        """``graphs.group`` is dense over the *dataset* — 80 000 codes for a shard.
+        """A dataset-wide code is dense over the *dataset* — 80 000 for a shard.
 
         A reduction buffer sized by that is both enormous and dataset-dependent,
         which is what this column exists to avoid: the values it writes index the
@@ -68,7 +68,7 @@ class TestProfileIndex:
             },
             batch_size=[],
         )
-        with pytest.raises(KeyError, match="no 'group' column"):
+        with pytest.raises(KeyError, match="no 'row' column"):
             ProfileIndex().execute(batch)
 
     def test_a_plain_dict_is_refused(self) -> None:
@@ -79,3 +79,31 @@ class TestProfileIndex:
     def test_the_task_id_names_both_columns(self) -> None:
         """It is a cache key: two spellings produce different batches."""
         assert ProfileIndex().task_id != ProfileIndex(source="molecule_id").task_id
+
+    def test_the_default_source_is_the_row_not_a_group_code(self) -> None:
+        """The default decides what a "profile" means, so it is asserted, not assumed.
+
+        It read ``graphs.group`` before, which the Class-I path wrote as a constant
+        ``0.0``: every conformer of every molecule collapsed into profile 0, and a
+        profile-relative loss then aligned to a minimum taken across different
+        molecules. Nothing raised — the column was there, it just meant nothing.
+        """
+        assert ProfileIndex().source == "row"
+        rowed = _batch([0.0, 0.0, 1.0, 1.0, 1.0])
+        ProfileIndex().execute(rowed)
+        index = rowed["graphs", "profile"]
+        assert index[0] == index[1]
+        assert index[2] == index[3] == index[4]
+        assert index[0] != index[2]
+
+    def test_a_constant_source_column_collapses_every_graph_into_one_profile(self) -> None:
+        """What the old default did, kept as the shape of the failure.
+
+        A constant code is not an error to ``ProfileIndex`` — renumbering it is
+        correct — so this is the one place the consequence is written down: with
+        one profile, a profile-relative objective subtracts a minimum taken over
+        unrelated molecules and its residual is their absolute-energy spread.
+        """
+        batch = _batch([0.0, 0.0, 0.0, 0.0], column="group")
+        ProfileIndex(source="group").execute(batch)
+        assert int(batch["graphs", "profile"].unique().numel()) == 1

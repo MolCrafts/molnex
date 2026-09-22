@@ -196,45 +196,7 @@ def _valence_blocks(frame: Any) -> dict[str, dict[str, torch.Tensor]]:
     return blocks
 
 
-def _with_meta(frame: Any, blocks: Mapping[str, Any] | None = None, **extra: Any) -> Frame:
-    """Copy *frame* with *blocks* added and ``extra`` merged into its meta.
-
-    ``Frame.meta`` returns a **copy**, so ``frame.meta["task"] = 0`` is a silent
-    no-op — the only way to add a meta scalar is to build a new frame. Blocks
-    are carried over by reference to their column arrays, so this costs one
-    dict walk, not a data copy.
-
-    *blocks* exists so a caller that has new blocks to add writes each column
-    **once**. Writing them into *frame* first and copying afterwards writes
-    every column twice, and a column write is not free: it goes through the
-    schema (``schema.column`` was 31 % of the whole per-sample prepare, and
-    the prepare is what bounds loader throughput).
-
-    Args:
-        frame: The source molpy ``Frame``.
-        blocks: Extra blocks to write, by name. They override same-named
-            blocks of *frame*.
-        **extra: Meta scalars to add or override. An ``int`` stays integral
-            through collation, which is what keeps a task code routable.
-
-    Returns:
-        A new ``Frame`` with *frame*'s blocks plus *blocks*, and merged meta.
-    """
-    meta = {k: getattr(v, "value", v) for k, v in (getattr(frame, "meta", None) or {}).items()}
-    meta.update(extra)
-    out = Frame(meta=meta)
-    added = dict(blocks or {})
-    for name in frame.keys():
-        if name in added:
-            continue
-        block = frame[name]
-        out[name] = {column: block[column] for column in block.keys()}
-    for name, block in added.items():
-        out[name] = block
-    return out
-
-
-def label_sample(frame: Any, *, group: float) -> Frame:
+def label_sample(frame: Any, *, group: float | None = None) -> Frame:
     """Label one frame in place with task/group and its valence families.
 
     Angles/propers/impropers are always written (empty when there are no bonds)
@@ -243,25 +205,37 @@ def label_sample(frame: Any, *, group: float) -> Frame:
 
     Args:
         frame: A molpy ``Frame`` carrying ``atoms`` and, when bonded, ``bonds``.
-        group: Parameter-group code, recorded as a per-frame meta scalar.
+        group: Parameter-group code, recorded as a per-frame meta scalar when
+            given. ``None`` writes none — which is what a caller that has no
+            real code must pass. Writing a constant here is what broke stage 3:
+            ``ProfileIndex`` renumbered it into ``graphs.profile`` and every
+            conformer of every molecule came out as one profile. The grouping a
+            profile objective needs is the dataset row, and
+            :func:`~molix.data.collate.collate_molecules` writes that itself.
 
     Returns:
         The same frame, with the valence blocks and the ``task`` / ``group``
         meta scalars added.
     """
-    blocks = _valence_blocks(frame)
-    # Handed to ``_with_meta`` rather than written into *frame* first: the new
-    # frame is built once, so each valence column is written once.
+    # Written into *frame*, not into a new one. The old route rebuilt the frame
+    # to add two meta scalars, because `Frame.meta` was believed to hand back a
+    # copy — but assigning the whole dict has always gone through molrs' setter,
+    # which is what `ClassIPrepare.convert` in this very file already does. The
+    # rebuild cost every column a second trip through `schema.column`: 434 418
+    # of those calls, 22 % of a production batch, for two floats.
+    #
     # No ``total_charge`` here: the charge model's fail-closed net-charge column
     # is declared once at the batch tasks (``TotalCharge()``), not per frame. A
     # frame that publishes its own charge keeps it — the task only fills a
     # column that is absent.
-    return _with_meta(
-        frame,
-        blocks=blocks,
-        task=TASK_CODE_ENERGY,
-        group=float(group),
-    )
+    for name, block in _valence_blocks(frame).items():
+        frame[name] = block
+    meta = {k: getattr(v, "value", v) for k, v in (getattr(frame, "meta", None) or {}).items()}
+    meta["task"] = TASK_CODE_ENERGY
+    if group is not None:
+        meta["group"] = float(group)
+    frame.meta = meta
+    return frame
 
 
 #: ``graphs`` is not a padded axis like the others: it is how many graphs one
@@ -637,8 +611,25 @@ class ClassIPrepare:
         return cls(energy_unit=energy_unit, source_unit=units.parse(spelling))
 
     def execute(self, frame: Frame) -> Frame:
-        """Return a bonded, converted, labeled copy of *frame*."""
-        return self.label(self.convert(self.bond(_copy_frame(frame))))
+        """Prepare *frame* in place — bonds, unit conversion, labels — and return it.
+
+        **Takes ownership of *frame*.** A caller that needs the original must copy
+        before calling. This used to hand back a copy, which cost a full frame
+        rebuild per dataset row — every column through molrs' ``schema.column``
+        again — for isolation nothing in the tree wanted: every call site hands
+        over a frame it has just read out of a dataset and keeps no reference
+        (:meth:`molix.data.FrameCollator.prepare_samples`, :meth:`scan_extent`,
+        the smokes). Two thirds of a loader worker's time was the per-row rebuild
+        of a molpy Frame, and this was half of it.
+
+        What the three steps do to *frame* is additive and idempotent —
+        :meth:`bond` leaves existing bonds alone, :meth:`label` rewrites the same
+        valence blocks — except :meth:`convert`, which replaces the force columns
+        and the energy scalar; that one already returns early when there is
+        nothing to scale (``scale`` of 1.0, or a frame with no energy label, which
+        is what the mbis and hessian stages are).
+        """
+        return self.label(self.convert(self.bond(frame)))
 
     def bond(self, frame: Frame) -> Frame:
         """Infer covalent bonds when the Frame has none. Leave existing bonds."""
@@ -712,12 +703,22 @@ class ClassIPrepare:
         return frame
 
     def label(self, frame: Frame) -> Frame:
-        """Write task/group meta and valence families."""
-        return label_sample(frame, group=0.0)
+        """Write the task code and the valence families.
+
+        No group code: this path has none. It used to write ``0.0``, which
+        ``ProfileIndex`` then renumbered into a single profile for the whole
+        batch — see :func:`label_sample`. The row grouping a profile objective
+        needs comes from the collate, not from here.
+        """
+        return label_sample(frame)
 
     def topology(self, frame: Frame) -> Frame:
-        """Bonds and valence families only — the Frame stats read."""
-        return self.label(self.bond(_copy_frame(frame)))
+        """Bonds and valence families only, in place — the Frame stats read.
+
+        Takes ownership of *frame*, like :meth:`execute`, and touches no existing
+        column: both steps only add blocks and meta.
+        """
+        return self.label(self.bond(frame))
 
     def scan_extent(self, dataset: Any, *, cutoff: float, workers: int = 1) -> MoleculeExtent:
         """Scan every row of *dataset* once and freeze a :class:`MoleculeExtent`.
@@ -785,16 +786,6 @@ class PrepareCollator:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.collator, name)
-
-
-def _copy_frame(frame: Frame) -> Frame:
-    """Shallow block copy so a prepare can add bonds without mutating *frame*."""
-    meta = {k: getattr(v, "value", v) for k, v in (getattr(frame, "meta", None) or {}).items()}
-    out = Frame(meta=meta)
-    for name in frame.keys():
-        block = frame[name]
-        out[name] = {column: block[column] for column in block.keys()}
-    return out
 
 
 def _frame_atomic_numbers(frame: Any) -> np.ndarray:

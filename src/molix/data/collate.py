@@ -234,11 +234,22 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
         KeyError: A frame has no ``atoms`` block.
     """
     flat: list[Any] = []
-    for item in frames:
+    # Which dataset row each graph came from. The flattening below is where that
+    # is otherwise lost, and it is the only place it is known: a row is the
+    # indivisible packing unit, so every graph of one row belongs together and no
+    # row is ever split across batches. A THEMol torsion-scan row is one scan of
+    # 10-24 conformers and a hessian-relax row is one relaxation of 58-302
+    # frames, which is exactly the grouping a profile-relative objective aligns
+    # within (:class:`~molix.data.profile.ProfileIndex`, ``source="row"``).
+    rows: list[int] = []
+    for row_idx, item in enumerate(frames):
         if hasattr(item, "keys") and "atoms" in item:
             flat.append(item)
+            rows.append(row_idx)
         else:
-            flat.extend(item)
+            members = list(item)
+            flat.extend(members)
+            rows.extend([row_idx] * len(members))
     if not flat:
         raise ValueError("Cannot collate an empty frame list")
 
@@ -385,7 +396,10 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
         if len(values) == len(flat):
             atoms_dict[name] = torch.cat(values)
 
-    graphs_dict: dict[str, torch.Tensor] = {"num_atoms": torch.tensor(num_atoms, dtype=torch.long)}
+    graphs_dict: dict[str, torch.Tensor] = {
+        "num_atoms": torch.tensor(num_atoms, dtype=torch.long),
+        "row": torch.tensor(rows, dtype=torch.long),
+    }
     for name in sorted(graph_leaves):
         values = graph_leaves[name]
         if len(values) == len(flat):
@@ -437,6 +451,7 @@ GRAPH_COLUMNS: tuple[str, ...] = (
     "e0",
     "task",
     "group",
+    "row",
     "cell",
 )
 

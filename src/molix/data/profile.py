@@ -8,11 +8,21 @@ compares each conformer to its own profile's minimum and lets a per-profile
 constant offset go free.
 
 Doing that needs a per-profile reduction, which needs somewhere to reduce *into*.
-``graphs.group`` cannot be that index: it is dense over the whole dataset (about
-80 000 codes for one shard), so a buffer sized by it is both enormous and
+A dataset-wide code cannot be that index: it is dense over the whole dataset
+(about 80 000 codes for one shard), so a buffer sized by it is both enormous and
 dataset-dependent. This task renumbers whichever profiles a batch holds into
 ``[0, max_graphs)``, so the reduction buffer is the graph axis the padder already
 fixed — a static shape, no host sync in the step, and one graph.
+
+The code it renumbers is ``graphs.row``, the dataset row each graph came from,
+which :func:`~molix.data.collate.collate_molecules` writes for every batch. A row
+*is* a profile — one torsion scan, one relaxation — and a row is never split
+across batches. The previous default read ``graphs.group``, which the Class-I
+path wrote as the constant ``0.0`` for every frame: every conformer of every
+molecule then shared profile 0, so the "profile-relative" objective aligned to a
+minimum taken across *different molecules* and its residual was the spread of
+their absolute energies — 1.8e6 kcal/mol where a barrier is 10, measured on
+run 2787862's stage 3.
 
 It is a *host-side* task, mounted beside
 :class:`~molix.data.charge.TotalCharge`, precisely because the renumbering is the
@@ -40,8 +50,10 @@ class ProfileIndex(BatchTask):
     profile's.
 
     Args:
-        source: The ``graphs`` column holding the dataset-wide profile code.
-            ``"group"`` is what the Class-I path writes (one code per scan).
+        source: The ``graphs`` column whose equal values mean "same profile".
+            Defaults to ``"row"``, the dataset row
+            :func:`~molix.data.collate.collate_molecules` stamps on every graph;
+            pass another column only for a grouping coarser than a row.
         out: The column to write.
 
     Example::
@@ -49,7 +61,7 @@ class ProfileIndex(BatchTask):
         DataModule(..., batch_tasks=[neighbor_list, TotalCharge(), ProfileIndex()])
     """
 
-    def __init__(self, source: str = "group", out: str = "profile") -> None:
+    def __init__(self, source: str = "row", out: str = "profile") -> None:
         self.source = str(source)
         self.out = str(out)
 
@@ -93,9 +105,9 @@ class ProfileIndex(BatchTask):
         codes = graphs.get(self.source)
         if codes is None:
             raise KeyError(
-                f"ProfileIndex: graphs carries no {self.source!r} column. It is the "
-                "dataset-wide profile code a batch's profiles are renumbered from — the "
-                "Class-I path writes it as a per-frame meta scalar."
+                f"ProfileIndex: graphs carries no {self.source!r} column. Equal values in "
+                "it are what makes two graphs one profile; collate_molecules writes "
+                "'row' on every batch."
             )
         codes = codes.reshape(-1)
         mask = graphs.get("mask")
