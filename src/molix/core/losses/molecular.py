@@ -1019,10 +1019,12 @@ class BoltzmannProfileLoss(nn.Module):
     * **Alignment.** Prediction and label are each shifted by their own profile's
       minimum, so both are relative energies before anything is compared.
     * **The Boltzmann weight.** ``exp(min(0, (clamp - dE) / decay))`` on the
-      *lower* of the two aligned energies: conformers within *clamp* of the
-      minimum count fully and higher ones decay with scale *decay*. A barrier top
-      that only one of the two curves reaches cannot then dominate the fit. The
-      weight is detached — it selects what to fit, it is not itself fitted.
+      **label's** aligned energy: conformers within *clamp* of the label's minimum
+      count fully and higher ones decay with scale *decay*. The weight is then a
+      constant of the data, so detaching it is exact and the loss is a function
+      whose gradient is the one being followed. ByteFF uses the lower of label and
+      prediction; that makes the weight prediction-dependent, and detaching it
+      drops ``dw/dE``. See the note at the computation for what that cost.
     * **The offset.** The weighted mean residual per profile, also detached, is
       added back before squaring. It is the offset that minimises the weighted
       squared residual, so the fit never spends capacity on a constant that a
@@ -1134,18 +1136,28 @@ class BoltzmannProfileLoss(nn.Module):
         reference_min = far.scatter_reduce(
             0, profile, torch.where(live > 0, reference, far), reduce="amin"
         )
-        energy_min = far.scatter_reduce(
-            0, profile, torch.where(live > 0, energy, far), reduce="amin"
-        )
         reference_relative = reference - reference_min[profile]
-        energy_relative = energy - energy_min[profile]
 
+        # **The weight is the label's, not ``min(label, prediction)``.** ByteFF
+        # takes the lower of the two; doing that makes the weight a function of the
+        # prediction, and detaching it then drops the ``dw/dE`` term — so the
+        # quantity being reported is not the function whose gradient is being
+        # followed. It also carries a discrete trigger: the prediction's own
+        # per-profile minimum is an argmin, and when it moves to another conformer
+        # every weight in that profile jumps at once. Measured: a torsion-scan
+        # overfit reaches 0.27 by step 1000 and then walks to 74 (lr 3e-4) or 2755
+        # (lr 1e-3), stochastically — the same rate diverged in one run and
+        # converged in another. Past the knee the gradient is m/L, so it cannot
+        # come back.
+        #
+        # A label-only weight is a per-conformer constant of the data, so detaching
+        # it is exact and the objective is stationary. The asymmetry that is given
+        # up: a conformer the model *wrongly* predicts as its profile's minimum no
+        # longer earns full weight from that alone. That case is what the knee is
+        # for, and an outlier the model invented is not evidence about which part
+        # of the profile matters — the label is.
         weight = (
-            torch.exp(
-                (
-                    (self.clamp - torch.minimum(reference_relative, energy_relative)) / self.decay
-                ).clamp(max=0.0)
-            ).detach()
+            torch.exp(((self.clamp - reference_relative) / self.decay).clamp(max=0.0)).detach()
             * live
         )
         weight_total = energy.new_zeros(n_graphs).index_add(0, profile, weight)

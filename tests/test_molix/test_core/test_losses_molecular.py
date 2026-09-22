@@ -961,6 +961,70 @@ class TestBoltzmannProfileLoss:
             {"graphs": TensorDict(graphs, batch_size=[len(reference)])}, batch_size=[]
         )
 
+    def test_the_gradient_is_the_gradient_of_the_loss(self) -> None:
+        """The detached weight must be a constant of the data, not of the prediction.
+
+        ByteFF weights by the lower of the label's and the prediction's aligned
+        energy and detaches the result, which drops ``dw/dE``: the number reported
+        is then not the function whose gradient is followed, and the objective
+        moves under the optimizer. Measured consequence — a torsion-scan overfit
+        reaches 0.27 by step 1000 and walks to 74 or 2755 depending on the run, at
+        the same learning rate.
+
+        A central difference is the whole check: it is insensitive to how the loss
+        is implemented and it fails on a gradient that is not one.
+        """
+        # The inputs are the whole test. The weight depends on the prediction only
+        # where two things hold at once: the prediction's relative energy is below
+        # the label's, so ``min`` picks it, *and* above ``clamp``, so the
+        # exponential is not saturated at 1. Without such a conformer a finite
+        # difference agrees on both weightings and proves nothing — measured, on
+        # the obvious input set. Conformer 2 is built to bind it: label relative
+        # 6.0 against predicted relative 3.0, with ``clamp`` at 2.0. On the
+        # ``min(label, prediction)`` form the two gradients differ by 58 % there.
+        reference = [0.0, 0.0, 6.0, 0.3, 1.1]
+        profile = [0, 0, 0, 1, 1]
+        pred = torch.tensor([0.0, 0.0, 3.0, 1.4, 0.2], dtype=torch.float64)
+        objective = BoltzmannProfileLoss()
+        batch = self._batch(reference, profile)
+
+        variable = pred.clone().requires_grad_(True)
+        objective({"energy": variable}, batch).backward()
+        analytic = variable.grad.clone()
+
+        step = 1e-6
+        numeric = torch.zeros_like(pred)
+        for i in range(pred.numel()):
+            up, down = pred.clone(), pred.clone()
+            up[i] += step
+            down[i] -= step
+            numeric[i] = (
+                float(objective({"energy": up}, batch)) - float(objective({"energy": down}, batch))
+            ) / (2.0 * step)
+        torch.testing.assert_close(analytic, numeric, atol=1e-6, rtol=1e-5)
+
+    def test_the_weight_does_not_move_when_only_the_prediction_does(self) -> None:
+        """A profile's weights are its label's, so two predictions share them.
+
+        The discrete half of the same defect: the prediction's per-profile minimum
+        is an argmin, and a weight that depends on it jumps for every conformer of
+        that profile the moment it moves to another one.
+        """
+        reference = [0.0, 0.5, 4.0]
+        batch = self._batch(reference, [0, 0, 0])
+        objective = BoltzmannProfileLoss()
+        # Same residual shape, different argmin: conformer 0 is the predicted
+        # minimum in one and conformer 2 in the other.
+        a = torch.tensor([0.0, 1.5, 5.0], dtype=torch.float64)
+        b = torch.tensor([5.0, 6.5, 0.0], dtype=torch.float64) - 5.0 + a[0]
+        first = float(objective({"energy": a}, batch))
+        second = float(objective({"energy": b}, batch))
+        assert first != pytest.approx(second), "the two predictions differ; this is a sanity check"
+        # And the label-only weight makes each a plain function of its residual:
+        # shifting a prediction by a constant cannot change the loss at all.
+        shifted = float(objective({"energy": a + 137.0}, batch))
+        assert shifted == pytest.approx(first, rel=1e-12)
+
     def test_a_constant_offset_per_profile_costs_nothing(self) -> None:
         """The whole reason this loss exists.
 
