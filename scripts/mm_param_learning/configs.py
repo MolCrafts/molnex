@@ -133,13 +133,27 @@ TORSION_ATOMS_PER_ROW: int = 24 * 33
 #: 4689. The production run of 2026-09-22 showed the same shape: stage 3 barely
 #: moved before it died.
 #:
-#: These are the values the sweep supports, not the values it proves: the gate
-#: runs 2-8 molecules, where a gradient is noisier than a packed batch's, so each
-#: is the conservative end of the range that worked there.
+#: **A 400-step sweep picks the wrong rate for torsion-scan.** At 1e-3 it reaches
+#: 0.393 by step 400 and then climbs to 2755 by 1375 — a 400-step window stops
+#: exactly on the minimum and reads it as the best rate available. Over 1600 steps
+#: the ordering reverses, and 3e-4 is better on both counts:
+#:
+#:   torsion-scan, 1600 steps   1e-4: best 1.458, ends 1.663 (too slow)
+#:                              3e-4: best 0.266, ends 0.494  <- chosen
+#:                              1e-3: best 0.393 @400, ends 2755 (diverges)
+#:
+#: So the divergence bought nothing: the stable rate also finds the lower minimum.
+#: `hessian-relax` at 3e-4 converges to 12.5 and holds; above 3e-4 it never
+#: improves on its step-0 loss at all.
+#:
+#: These are the values the sweep supports, not the values it proves: the gate runs
+#: 2-8 molecules, where a gradient is noisier than a packed batch's. `hessian` at
+#: 1e-3 is verified to 400 steps only — its gradients are the smallest of the four
+#: (0.02-0.06), so a blow-up is unlikely, but it is not measured.
 STAGE_LR: dict[str, float] = {
     "mbis": 1e-4,
     "hessian": 1e-3,
-    "torsion-scan": 1e-3,
+    "torsion-scan": 3e-4,
     "hessian-relax": 3e-4,
 }
 
