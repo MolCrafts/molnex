@@ -119,9 +119,35 @@ TORSION_ATOMS_PER_ROW: int = 24 * 33
 #: ``dressing`` follows the dataset's own declaration rather than a preference —
 #: a stage needs an eps[Z] table only if it supervises absolute energies, and
 #: ``hessian@1`` declares ``graph_level={'hessian'}`` with no energy at all.
+#: Per-stage learning rate, because the four objectives do not share a gradient
+#: scale. Measured at initialisation on one real batch each, as the L2 norm over
+#: every parameter group (`projects/class-i/train/overfit_gate.py`):
+#: `charge` 0.199, `partial_hessian` 0.071 on its largest head, `profile_forces`
+#: **616** on bonds alone. Three thousand-fold, under one `lr`.
+#:
+#: What that cost: `PROD_DAY["lr"]` of 1e-4 is the safe end of that range, so it
+#: was chosen for `profile_forces` and starved the two stages whose gradients are
+#: small. An overfit of four torsion-scan rows falls 3.2x in 400 steps at 1e-4 and
+#: 26.9x at 3e-3; `hessian-relax` is the opposite — stable at 3e-4 and, at 1e-3,
+#: it never improves at all (its best loss is the one at step 0) and climbs to
+#: 4689. The production run of 2026-09-22 showed the same shape: stage 3 barely
+#: moved before it died.
+#:
+#: These are the values the sweep supports, not the values it proves: the gate
+#: runs 2-8 molecules, where a gradient is noisier than a packed batch's, so each
+#: is the conservative end of the range that worked there.
+STAGE_LR: dict[str, float] = {
+    "mbis": 1e-4,
+    "hessian": 1e-3,
+    "torsion-scan": 1e-3,
+    "hessian-relax": 3e-4,
+}
+
+
 CURRICULUM: tuple[dict[str, Any], ...] = (
     {
         "stage": "mbis",
+        "lr": STAGE_LR["mbis"],
         "definition": "THEMolMBIS",
         "objective": "charge",
         # No `trainable` is needed and none is given: a charge residual reaches
@@ -137,6 +163,7 @@ CURRICULUM: tuple[dict[str, Any], ...] = (
     },
     {
         "stage": "hessian",
+        "lr": STAGE_LR["hessian"],
         "definition": "THEMolHessian",
         "objective": "partial_hessian",
         # ByteFF's stage 1 trains Bond_k, Angle_k *and* ImproperTorsion_k
@@ -150,6 +177,7 @@ CURRICULUM: tuple[dict[str, Any], ...] = (
     },
     {
         "stage": "torsion-scan",
+        "lr": STAGE_LR["torsion-scan"],
         "definition": "THEMolTorsionScan",
         # ByteFF's torsion stage (`TorsionLossType.boltzmann_mse`): each conformer
         # against its own profile's minimum, Boltzmann-weighted, with the
@@ -175,6 +203,7 @@ CURRICULUM: tuple[dict[str, Any], ...] = (
     },
     {
         "stage": "hessian-relax",
+        "lr": STAGE_LR["hessian-relax"],
         "definition": "THEMolHessianRelax",
         # Relative energies *and* forces (operator ruling, 2026-09-21). A
         # relaxation row is ~72.5 frames of one molecule, so it is a profile in
