@@ -819,7 +819,22 @@ class Potentials(nn.Module):
             namespace = frame[label]
             choices = [key for key in sorted(namespace.keys()) if key.startswith("hpair_")]
             if not choices:
-                continue
+                rows = namespace.batch_size[0] if namespace.batch_size else 0
+                if not rows:
+                    continue
+                raise ValueError(
+                    f"Potentials.partial_hessian: {label} carries {int(rows)} rows and no "
+                    "hpair_<i>_<j> slot column, so this term would contribute nothing to "
+                    "the target while its parameters stay in the optimizer — no gradient, "
+                    "no warning. The pair list and the slot columns are written together "
+                    "(HessianTargets); a namespace that lost one of them lost it in "
+                    "transit. Rebuild the batch, or drop the namespace if the target is "
+                    "deliberately bonded-subset.\n"
+                    "Seen when ClassIPrepare.label re-derived the valence families and "
+                    "replaced the blocks the slot columns were sitting on: stage 2 of the "
+                    "curriculum then supervised the bond term alone for four hours and "
+                    "left the angle term at 0.004 kcal/mol (run 2787862)."
+                )
             term = getattr(self, attribute, None)
             index = getattr(self, f"_{attribute}_index")(frame)
             if term is None or index is None or index.shape[1] == 0:

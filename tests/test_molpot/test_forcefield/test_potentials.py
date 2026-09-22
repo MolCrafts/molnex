@@ -3625,6 +3625,31 @@ class TestPartialHessian:
         assert got.shape == (len(layout), 9)
         torch.testing.assert_close(got, layout.gather(full))
 
+    def test_a_populated_namespace_without_slot_columns_is_refused(self) -> None:
+        """A term with rows and no slots contributes nothing, and used to say nothing.
+
+        ``ClassIPrepare.label`` re-derived the valence families and replaced the
+        blocks that ``HessianTargets`` had written the slot columns onto, so a
+        production batch reached this method with slot columns on ``bonds`` and
+        none on ``angles`` / ``propers`` / ``impropers``. The loop skipped them,
+        and stage 2 of the curriculum supervised the bond term alone for four
+        hours — its angle term was still at 0.004 kcal/mol afterwards. Dropping a
+        whole family from a target is not a thing to infer from a missing column.
+        """
+        batch = self._batch(self.POSITIONS.clone().requires_grad_(True))
+        for key in [k for k in batch["angles"].keys() if k.startswith("hpair_")]:
+            del batch["angles", key]
+        with pytest.raises(ValueError, match="no hpair_<i>_<j> slot column"):
+            Potentials(self._forcefield()).partial_hessian(batch)
+
+    def test_an_empty_namespace_without_slot_columns_is_skipped(self) -> None:
+        """A molecule with no propers has nothing to contribute and no columns."""
+        batch = self._batch(self.POSITIONS.clone().requires_grad_(True))
+        for key in [k for k in batch["propers"].keys() if k.startswith("hpair_")]:
+            del batch["propers", key]
+        batch["propers"] = batch["propers"][:0]
+        Potentials(self._forcefield()).partial_hessian(batch)
+
     def test_a_batch_without_the_namespace_is_refused(self) -> None:
         """The pair list is the target's own; there is nothing to answer without it."""
         batch = self._batch(self.POSITIONS)

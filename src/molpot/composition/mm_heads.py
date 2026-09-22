@@ -31,6 +31,7 @@ References:
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
@@ -54,6 +55,59 @@ def _mlp(feature_dim: int, hidden_dim: int, out_dim: int) -> nn.Sequential:
     )
 
 
+#: Margin keeping ``theta0`` strictly inside ``(0, π)``. Shared by the forward
+#: transform and the initialisation that inverts it — two copies of this number
+#: would mean an ``init_theta0`` that the head does not actually start at.
+_THETA_EPS = 1e-4
+
+
+def _inv_softplus(target: float) -> float:
+    """Pre-softplus value whose ``softplus`` equals *target*.
+
+    ``log(expm1(y))`` overflows for a force constant of a few hundred, and does
+    not need to be evaluated there: ``softplus(y) - y`` is below 2e-9 already at
+    ``y = 20``, so the identity is exact to double precision above it.
+
+    Args:
+        target: Desired positive output.
+
+    Returns:
+        The pre-activation value.
+
+    Raises:
+        ValueError: *target* is not positive — softplus has no such preimage.
+    """
+    if target <= 0.0:
+        raise ValueError(f"softplus is strictly positive, so it cannot equal {target}")
+    return target if target > 20.0 else math.log(math.expm1(target))
+
+
+def _inv_scaled_sigmoid(target: float, lo: float, hi: float) -> float:
+    """Pre-sigmoid value whose ``lo + (hi - lo) * sigmoid`` equals *target*."""
+    frac = (target - lo) / (hi - lo)
+    frac = min(max(frac, 1e-3), 1.0 - 1e-3)
+    return math.log(frac / (1.0 - frac))
+
+
+def _init_constant_head(mlp: nn.Sequential, biases: Sequence[float]) -> None:
+    """Start *mlp* at a constant output: zero the last layer, bias it to *biases*.
+
+    Zeroing the last layer's weights does not freeze it — the weight gradient is
+    ``dL/draw * hidden`` and stays non-zero — so the head begins as one shared
+    parameter set for every interaction and learns to differentiate them. That is
+    the useful prior for a force field: a uniform field, not a random one.
+
+    Args:
+        mlp: The head's MLP, whose last module is the output ``nn.Linear``.
+        biases: One pre-activation bias per output channel.
+    """
+    last = mlp[-1]
+    nn.init.zeros_(last.weight)
+    nn.init.zeros_(last.bias)
+    for channel, value in enumerate(biases):
+        last.bias.data[channel] = value
+
+
 class BondParamHead(nn.Module):
     """Map bond features to harmonic bond parameters.
 
@@ -62,6 +116,23 @@ class BondParamHead(nn.Module):
         hidden_dim: Hidden layer dimension.
         min_k: Positive floor for force constants (kcal/mol/Å²).
         min_r0: Positive floor for equilibrium lengths (Å).
+        init_k: Force constant at init, kcal/mol/Å². Anchored on a measurement,
+            because the value is convention-dependent and a table would not say
+            which convention it is in. This container's bond term is
+            ``E = ½k(r−r0)²``, whose mixed block along the bond is
+            ``−k[1 + 2(r−r0)/r]`` — so ``−k`` at a near-equilibrium geometry. The
+            QM partial-Hessian labels of THEMol's hessian split, restricted to
+            the 16 872 **1-2** pairs of one batch, have a mixed-block trace of
+            median −932, mean −967 kcal/mol/Å²; the 29 702 1-3 pairs sit at
+            median −22 and belong to the angle term. Without this the head began
+            at ``softplus(0) = 0.693`` — **three orders of magnitude below** the
+            labels — and stage 2 of the curriculum moved its loss 0.747 → 0.728
+            in 3 893 steps, needing ~150 000 to arrive (run 2787862).
+        init_r0: Equilibrium length at init, Å. A compromise across C-H (1.09)
+            and C-C / C-O (1.4-1.53): it is one value for every bond until the
+            head learns to tell them apart, and it also sets the initial bond
+            *energy*, which ``E = ½k(r−r0)²`` makes quadratic in getting it
+            wrong. ``softplus(0) = 0.693`` was half a single bond.
 
     Forward:
         features: ``(N_bonds, D)`` → ``{"k": (N,), "r0": (N,)}`` with
@@ -74,11 +145,19 @@ class BondParamHead(nn.Module):
         hidden_dim: int = 64,
         min_k: float = 1e-4,
         min_r0: float = 1e-4,
+        init_k: float = 900.0,
+        init_r0: float = 1.20,
     ) -> None:
         super().__init__()
         self.min_k = min_k
         self.min_r0 = min_r0
+        self.init_k = float(init_k)
+        self.init_r0 = float(init_r0)
         self.mlp = _mlp(feature_dim, hidden_dim, 2)
+        _init_constant_head(
+            self.mlp,
+            (_inv_softplus(self.init_k - min_k), _inv_softplus(self.init_r0 - min_r0)),
+        )
 
     def forward(self, features: torch.Tensor) -> dict[str, torch.Tensor]:
         """Predict bond ``k``, ``r0`` from features.
@@ -103,6 +182,15 @@ class AngleParamHead(nn.Module):
         feature_dim: Input feature dimension.
         hidden_dim: Hidden layer dimension.
         min_k: Positive floor for force constants (kcal/mol/rad²).
+        init_k: Force constant at init, kcal/mol/rad². ``softplus(0) = 0.693``
+            left the angle term contributing 0.004 kcal/mol on a real batch —
+            dead, with a within-scan spread of 1.3e-4 against a QM reference
+            spanning 44 (run 2787862). The same batch's QM labels put the 1-3
+            mixed-block trace at a median of −22 kcal/mol/rad², which the angle
+            term carries, and a direct check confirms it does reach those pairs
+            (a lone angle's 1-3 block matches the full Hessian to fp64).
+        init_theta0: Equilibrium angle at init, rad. The default is tetrahedral
+            (109.47°); ``sigmoid(0)`` put it at exactly π/2.
 
     Forward:
         features: ``(N_angles, D)`` → ``{"k": (N,), "theta0": (N,)}`` with
@@ -114,10 +202,21 @@ class AngleParamHead(nn.Module):
         feature_dim: int,
         hidden_dim: int = 64,
         min_k: float = 1e-4,
+        init_k: float = 80.0,
+        init_theta0: float = 1.9111,
     ) -> None:
         super().__init__()
         self.min_k = min_k
+        self.init_k = float(init_k)
+        self.init_theta0 = float(init_theta0)
         self.mlp = _mlp(feature_dim, hidden_dim, 2)
+        _init_constant_head(
+            self.mlp,
+            (
+                _inv_softplus(self.init_k - min_k),
+                _inv_scaled_sigmoid(self.init_theta0, _THETA_EPS, math.pi - _THETA_EPS),
+            ),
+        )
 
     def forward(self, features: torch.Tensor) -> dict[str, torch.Tensor]:
         """Predict angle ``k``, ``theta0`` from features.
@@ -133,7 +232,7 @@ class AngleParamHead(nn.Module):
         raw = self.mlp(features)
         k = F.softplus(raw[:, 0]) + self.min_k
         # Open interval (0, π): epsilon margin avoids exact 0/π singularities.
-        eps = 1e-4
+        eps = _THETA_EPS
         theta0 = eps + (math.pi - 2.0 * eps) * torch.sigmoid(raw[:, 1])
         return {"k": k, "theta0": theta0}
 

@@ -228,8 +228,28 @@ def label_sample(frame: Any, *, group: float | None = None) -> Frame:
     # is declared once at the batch tasks (``TotalCharge()``), not per frame. A
     # frame that publishes its own charge keeps it — the task only fills a
     # column that is absent.
-    for name, block in _valence_blocks(frame).items():
-        frame[name] = block
+    # Only the families that are missing. Re-deriving a family that is already
+    # there *replaces the whole block*, and a caller may have put columns on it
+    # that this function knows nothing about: `HessianTargets` writes the
+    # ``hpair_<i>_<j>`` slot columns onto angles / propers / impropers, the
+    # collator then runs `ClassIPrepare.execute` on the frames it produced, and
+    # every one of those columns was discarded here. `Potentials.partial_hessian`
+    # skips a namespace that carries no slot column, so stage 2 of the curriculum
+    # supervised the **bond term alone** — bonds keep theirs only because
+    # `ClassIPrepare.bond` short-circuits on an existing bond block. That is why
+    # its angle term was still dead after four hours (0.004 kcal/mol on a real
+    # batch) and why its loss floors near 0.72: the 64 % of pairs that are 1-3 or
+    # further can never be fitted, so their full residual sits in the mean
+    # forever. Measured on run 2787862; the batch showed `bonds` with two slot
+    # columns and the other three with none.
+    #
+    # Skipping is also right on its own terms: the enumeration is a pure function
+    # of the bond graph, so recomputing it can only reproduce what is there.
+    if not all(name in frame for name in ("angles", "propers", "impropers")):
+        for name, block in _valence_blocks(frame).items():
+            if name in frame:
+                continue
+            frame[name] = block
     meta = {k: getattr(v, "value", v) for k, v in (getattr(frame, "meta", None) or {}).items()}
     meta["task"] = TASK_CODE_ENERGY
     if group is not None:

@@ -34,6 +34,40 @@ from molpot.forcefield import ForceField
 
 
 class TestBondParamHead:
+    def test_starts_at_the_declared_physical_force_constant(self):
+        """The init is the invariant, so it is asserted, not assumed.
+
+        ``softplus(0) = 0.693`` kcal/mol/Å² is three orders of magnitude below
+        what THEMol's QM partial-Hessian labels ask for: the 1-2 pairs of one
+        batch have a mixed-block trace of median −932, and this container's bond
+        term is ``E = ½k(r−r0)²``, whose mixed block is ``−k`` near equilibrium.
+        Stage 2 of the curriculum then moved 0.747 → 0.728 in 3 893 steps, needing
+        ~150 000 to arrive.
+        """
+        head = BondParamHead(feature_dim=8, hidden_dim=16)
+        out = head(torch.randn(5, 8))
+        assert torch.allclose(out["k"], torch.full((5,), 900.0), rtol=1e-5)
+        assert torch.allclose(out["r0"], torch.full((5,), 1.20), rtol=1e-5)
+
+    def test_the_init_is_a_constant_head_that_still_learns(self):
+        """Zeroing the last layer starts every bond equal — it does not freeze it.
+
+        The weight gradient is ``dL/draw * hidden``, so a uniform field is the
+        prior, not the answer. A zero gradient here would be a dead head.
+        """
+        head = BondParamHead(feature_dim=8, hidden_dim=16)
+        out = head(torch.randn(5, 8))
+        out["k"].sum().backward()
+        assert head.mlp[-1].weight.grad is not None
+        assert float(head.mlp[-1].weight.grad.abs().sum()) > 0.0
+
+    def test_a_requested_init_is_the_value_the_head_starts_at(self):
+        """``init_k`` is a promise about the output, not about a pre-activation."""
+        head = BondParamHead(feature_dim=4, hidden_dim=8, init_k=12.5, init_r0=2.0)
+        out = head(torch.randn(3, 4))
+        assert torch.allclose(out["k"], torch.full((3,), 12.5), rtol=1e-5)
+        assert torch.allclose(out["r0"], torch.full((3,), 2.0), rtol=1e-5)
+
     def test_shapes_and_positivity(self):
         head = BondParamHead(feature_dim=8, hidden_dim=16)
         features = torch.randn(5, 8)
@@ -79,6 +113,29 @@ class TestBondParamHead:
 
 
 class TestAngleParamHead:
+    def test_starts_tetrahedral_at_a_live_force_constant(self):
+        """``softplus(0)`` left the angle term contributing 0.004 kcal/mol — dead.
+
+        Measured on a real batch: a within-scan spread of 1.3e-4 kcal/mol against
+        a QM reference spanning 44 (run 2787862). ``sigmoid(0)`` also put the
+        equilibrium angle at exactly π/2 rather than tetrahedral.
+        """
+        head = AngleParamHead(feature_dim=8, hidden_dim=16)
+        out = head(torch.randn(6, 8))
+        assert torch.allclose(out["k"], torch.full((6,), 80.0), rtol=1e-5)
+        assert torch.allclose(out["theta0"], torch.full((6,), 1.9111), atol=2e-4)
+        assert abs(math.degrees(float(out["theta0"][0])) - 109.47) < 0.1
+
+    def test_theta0_init_and_forward_share_one_epsilon(self):
+        """Two copies of the margin would make ``init_theta0`` a value it misses.
+
+        The forward maps ``eps + (π − 2eps) · sigmoid`` and the init inverts it;
+        asking for a value close to the boundary is where a second epsilon shows.
+        """
+        head = AngleParamHead(feature_dim=4, hidden_dim=8, init_theta0=0.05)
+        out = head(torch.randn(3, 4))
+        assert torch.allclose(out["theta0"], torch.full((3,), 0.05), atol=1e-3)
+
     def test_shapes_k_positive_theta0_in_open_interval(self):
         head = AngleParamHead(feature_dim=8, hidden_dim=16)
         features = torch.randn(7, 8)
