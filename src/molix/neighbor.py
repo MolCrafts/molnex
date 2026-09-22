@@ -21,11 +21,20 @@ from tensordict import TensorDict
 from molix.F.locality import get_neighbor_pairs
 
 #: Graph count from which :meth:`NeighborList.execute` enumerates the whole
-#: batch at once instead of looping molecule by molecule. Below it the loop
-#: costs nothing and keeps the C++ kernel's exact output, which the unit tests
-#: pin; above it the loop is one Python iteration and one kernel launch per
-#: molecule — 2388 of each for a packed Class-I batch.
+#: batch at once instead of looping molecule by molecule. Above it the loop is
+#: one Python iteration and one kernel launch per molecule — 2388 of each for a
+#: packed Class-I batch.
 _BATCHED_FROM_GRAPHS = 32
+
+#: Candidate half-pairs (``sum n_i(n_i-1)/2``) under which
+#: :meth:`NeighborList.execute` enumerates the batch at once **regardless** of
+#: how few graphs it carries. Graph count alone is the wrong quantity to route
+#: on: what makes the vectorised path expensive is candidate pairs, and a batch
+#: can be tiny in both. A packed Class-I batch sits near 2e6 candidates and is
+#: already taken by :data:`_BATCHED_FROM_GRAPHS`; one 100k-atom MD graph is 5e9
+#: and must stay on the kernel's cell list. This bound only *widens* the
+#: vectorised path, so nothing that takes it today stops taking it.
+_BATCHED_MAX_CANDIDATES = 1 << 20
 
 
 def _normalize_to_E2(pair_index: torch.Tensor) -> torch.Tensor:
@@ -237,11 +246,17 @@ class NeighborList:
         source, target = source[keep], target[keep]
         diff, dist = diff[keep], dist[keep]
 
-        if self.max_num_pairs > 0 and int(source.shape[0]) > self.max_num_pairs * n_graphs:
-            raise RuntimeError(
-                f"Neighbor buffer overflow: found {int(source.shape[0])} pairs over "
-                f"{n_graphs} graphs > max_num_pairs={self.max_num_pairs} each."
-            )
+        # No buffer guard here, deliberately. ``max_num_pairs`` sizes the C++
+        # kernel's output buffer; this path allocates nothing from it and has
+        # already materialised every candidate by now, so a cap could only
+        # reject a correct answer after computing it. The loop path agrees:
+        # it grows ``max_pairs`` to the molecule's complete half graph whenever
+        # the caller asked for less (see :meth:`pairs`), which is why its own
+        # guard is unreachable in production. A cap that fires on one path and
+        # not the other would break the one invariant the routing rests on —
+        # that the two paths are the same answer — and it did: routing a small
+        # tail batch here raised `found 6 pairs over 1 graphs` on inputs the
+        # loop returns 6 pairs for.
 
         pair_index = torch.stack([source, target], dim=-1)
         if self.symmetry:
@@ -263,6 +278,38 @@ class NeighborList:
             batch_size=[int(pair_index.shape[0])],
         )
         return batch
+
+    def _prefer_batched(self, membership: torch.Tensor, n_graphs: int) -> bool:
+        """Whether to enumerate the whole batch at once rather than loop.
+
+        Two accepts, both widening: many graphs, where the loop's per-molecule
+        Python iteration and kernel launch are the cost the checklist forbids on
+        the input path; or few enough candidate half-pairs that enumerating them
+        all is trivial, which is where a packing remainder lands.
+
+        That second accept is not a tuning knob. Routing on graph count alone
+        sent an end-of-epoch tail batch — one THEMol torsion-scan row is a
+        single scan of 10-24 conformers, so a one-row batch carries fewer than
+        :data:`_BATCHED_FROM_GRAPHS` graphs — down the per-molecule loop and
+        into the C++ op, which is how a job that had been training for 8 h 48 m
+        discovered that its frozen snapshot carried no native library
+        (2026-09-22, stage ``torsion-scan`` of run 2787862). The graph count of
+        a batch tail is luck; the work it implies is not.
+
+        Args:
+            membership: Graph membership ``(N,)``.
+            n_graphs: Number of graphs in the batch.
+
+        Returns:
+            ``True`` to take :meth:`_execute_batched`.
+        """
+        if n_graphs >= _BATCHED_FROM_GRAPHS:
+            return True
+        if n_graphs == 0:
+            return True
+        counts = torch.bincount(membership, minlength=n_graphs).to(torch.float64)
+        candidates = float(((counts * (counts - 1)) / 2).sum().item())
+        return candidates <= _BATCHED_MAX_CANDIDATES
 
     def execute(self, batch: TensorDict) -> TensorDict:
         """Build the cutoff graph of every molecule in *batch* and write ``pairs``.
@@ -286,7 +333,7 @@ class NeighborList:
         n_graphs = int(membership.max().item()) + 1 if membership.numel() else 0
         cells = batch["graphs", "cell"] if self.pbc and "cell" in batch["graphs"].keys() else None
 
-        if cells is None and self.filter_padding and n_graphs >= _BATCHED_FROM_GRAPHS:
+        if cells is None and self.filter_padding and self._prefer_batched(membership, n_graphs):
             return self._execute_batched(batch, pos, membership, n_graphs)
 
         index_parts: list[torch.Tensor] = []

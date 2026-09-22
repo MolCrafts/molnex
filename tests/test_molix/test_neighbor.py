@@ -306,6 +306,10 @@ class TestNeighborList:
             return neighbors, deltas, distances, torch.tensor([4], dtype=torch.int32)
 
         monkeypatch.setattr("molix.neighbor.get_neighbor_pairs", fake_kernel)
+        # The guard under test belongs to the kernel path, so keep this input on
+        # it: a 3-atom single graph is otherwise cheap enough to be routed to the
+        # vectorised path, which calls no kernel and so cannot overflow one.
+        monkeypatch.setattr("molix.neighbor._BATCHED_MAX_CANDIDATES", 0)
 
         pos = torch.tensor(
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
@@ -462,17 +466,47 @@ class TestBatchedEnumeration:
         nlist = NeighborList(cutoff=2.0, max_num_pairs=4096, symmetry=symmetry)
 
         batched = self._sorted_rows(nlist(self._batch(n_graphs)))
-        # Same input, forced down the loop by raising the threshold.
-        original = nb._BATCHED_FROM_GRAPHS
+        # Same input, forced down the loop. Both accepts have to be closed:
+        # these molecules are 2-8 atoms, so the candidate-pair accept would keep
+        # taking the batched path and the comparison would assert nothing.
+        original = (nb._BATCHED_FROM_GRAPHS, nb._BATCHED_MAX_CANDIDATES)
         nb._BATCHED_FROM_GRAPHS = n_graphs + 1
+        nb._BATCHED_MAX_CANDIDATES = 0
         try:
             looped = self._sorted_rows(nlist(self._batch(n_graphs)))
         finally:
-            nb._BATCHED_FROM_GRAPHS = original
+            nb._BATCHED_FROM_GRAPHS, nb._BATCHED_MAX_CANDIDATES = original
 
         torch.testing.assert_close(batched[0], looped[0])
         torch.testing.assert_close(batched[1], looped[1], atol=1e-6, rtol=1e-6)
         torch.testing.assert_close(batched[2], looped[2], atol=1e-6, rtol=1e-6)
+
+    def test_a_small_tail_batch_is_routed_away_from_the_native_kernel(self) -> None:
+        """A packing remainder must not need the C++ op to be present.
+
+        Routing on graph count alone put an end-of-epoch tail batch on the
+        per-molecule loop, and the loop needs the native library — which a
+        frozen snapshot does not carry. Few graphs of few atoms each is the
+        cheapest case there is; it belongs on the vectorised path.
+        """
+        import molix.neighbor as nb
+
+        nlist = NeighborList(cutoff=2.0, max_num_pairs=4096)
+        # One THEMol torsion-scan row: a single scan of 22 conformers.
+        tail = torch.repeat_interleave(torch.arange(22), torch.full((22,), 24))
+        assert 22 < nb._BATCHED_FROM_GRAPHS
+        assert nlist._prefer_batched(tail, 22) is True
+
+    def test_one_large_graph_stays_on_the_native_kernel(self) -> None:
+        """The case the graph-count threshold existed to protect.
+
+        A single MD graph enumerates ``n(n-1)/2`` candidates, so the vectorised
+        path would materialise millions of rows where the kernel's cell list
+        walks neighbours. Widening the batched path must not reach this.
+        """
+        nlist = NeighborList(cutoff=2.0, max_num_pairs=4096)
+        one_big = torch.zeros(2100, dtype=torch.long)
+        assert nlist._prefer_batched(one_big, 1) is False
 
     def test_batched_path_never_pairs_atoms_of_different_molecules(self) -> None:
         import molix.neighbor as nb
