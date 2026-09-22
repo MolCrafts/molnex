@@ -262,7 +262,7 @@ class MockModel(nn.Module):
     ``(N, 1, n_features)`` under ``atoms.node_features`` — but does only a
     single scalar multiply, so a Trainer loop wrapped around it spends
     essentially all its time in framework machinery (Step dispatch, hooks,
-    ``batch_to``, TrainState writes), not model FLOPs. That is exactly what
+    batch moves, TrainState writes), not model FLOPs. That is exactly what
     :class:`~molix.profiler.trainer.TrainerProfiler` needs to isolate the
     Trainer's own per-step overhead.
 

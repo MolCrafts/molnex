@@ -8,6 +8,7 @@ from unittest import mock
 import pytest
 import torch
 import torch.nn as nn
+from tensordict import TensorDict
 
 from molix.core.steps import (
     DefaultEvalStep,
@@ -43,7 +44,14 @@ def _make_trainer(**kwargs: Any) -> tuple[Trainer, _SimpleModel]:
 
 
 def _batch() -> dict[str, Any]:
-    return {"x": torch.randn(5, 4), "targets": {"y": torch.randn(5, 1)}}
+    # A TensorDict, not a plain dict: the batch schema is a nested TensorDict and
+    # the Trainer moves batches with `TensorDict.to`, which a dict has no answer
+    # for. A dict stand-in here meant these tests exercised a shape production
+    # never produces.
+    return TensorDict(
+        {"x": torch.randn(5, 4), "targets": TensorDict({"y": torch.randn(5, 1)}, batch_size=[5])},
+        batch_size=[5],
+    )
 
 
 class _DataModule:

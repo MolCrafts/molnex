@@ -3,6 +3,7 @@
 import pytest
 import torch
 import torch.nn as nn
+from tensordict import TensorDict
 
 from molix.config import config
 from molix.core.state import TrainState
@@ -40,11 +41,19 @@ def simple_optimizer_factory(params):
 
 
 def _make_batch():
-    """Create a batch dict following canonical schema."""
-    return {
-        "x": torch.randn(5, 10),
-        "targets": {"y_energy": torch.randn(5, 1)},
-    }
+    """Create a batch following the canonical schema — a nested TensorDict.
+
+    Not a plain dict: the batch schema is a nested TensorDict and the Trainer
+    moves batches with ``TensorDict.to``, so a dict stand-in tested a shape
+    production never produces.
+    """
+    return TensorDict(
+        {
+            "x": torch.randn(5, 10),
+            "targets": TensorDict({"y_energy": torch.randn(5, 1)}, batch_size=[5]),
+        },
+        batch_size=[5],
+    )
 
 
 # Mock datamodule

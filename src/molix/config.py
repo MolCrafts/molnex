@@ -9,7 +9,7 @@ floating-point dtype, consumed in two places and only two places:
    :class:`molix.data.datamodule._CollateFn` captures ``config["ftype"]``
    at construction time (in the parent process, before workers spawn)
    and casts compute floating-point tensors via
-   :func:`molix.core.steps.batch_to`. Graph totals at
+   :func:`molix.core.steps.cast_compute_floats`. Graph totals at
    :data:`~molix.schema.FLOAT64_LABEL_KEYS` keep their incoming dtype.
    Long index tensors (``pair_index``, ``Z``, ``batch``) are left untouched.
 

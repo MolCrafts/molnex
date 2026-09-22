@@ -14,7 +14,6 @@ from typing import Any, Literal
 import torch
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
-from molix.core.steps import batch_to
 from molix.profiler._utils import batch_counts
 
 
@@ -543,7 +542,7 @@ class Profiler:
     def _prepare(batch: Any, config: ProfilerConfig) -> Any:
         if not config.transfer_batch:
             return batch
-        return batch_to(batch, device=config.device)
+        return batch.to(config.device)
 
     @staticmethod
     def _validate_model(model: torch.nn.Module, config: ProfilerConfig) -> None:

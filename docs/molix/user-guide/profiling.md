@@ -336,7 +336,7 @@ If the loader yields no batch beyond the warmup window, `run()` raises
 
 The other four profilers measure work you asked for. `TrainerProfiler` measures
 the work you did not: the per-step cost of the `Trainer` machinery itself —
-`Step` protocol dispatch, hook calls, `batch_to` device transfer, `TrainState`
+`Step` protocol dispatch, hook calls, batch device transfer, `TrainState`
 writes, and the optimizer/scheduler/eval-cadence bookkeeping.
 
 Isolating that cost needs two tricks. First, the model must be nearly free, or

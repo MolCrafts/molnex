@@ -20,7 +20,7 @@ from molix.config import config
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
 from molix.core.hook import Hook
 from molix.core.state import Stage, TrainState, resolve
-from molix.core.steps import DefaultEvalStep, DefaultTrainStep, Step, batch_to
+from molix.core.steps import DefaultEvalStep, DefaultTrainStep, Step
 from molix.data import DataModuleProtocol
 
 logger = _logger_mod.getLogger(__name__)
@@ -296,11 +296,12 @@ class Trainer:
         """Whether *batch* has any leaf not already on *device*.
 
         Decided once per epoch / eval phase on the first batch (batches from
-        one dataloader are device-homogeneous), so the per-step loop skips
-        both the ``batch_to`` call and its leaf-device walk when the data is
-        already in place — the dominant Trainer-loop overhead in same-device
-        (CPU, or pre-moved) training. A genuine move (CPU→cuda) returns True
-        and ``batch_to`` runs every step as before.
+        one dataloader are device-homogeneous), so the per-step loop skips the
+        move entirely when the data is already in place — the dominant
+        Trainer-loop overhead in same-device (CPU, or pre-moved) training.
+        ``TensorDict.to`` has no same-device shortcut of its own: it rebuilds the
+        tree either way (measured 10 us on a one-leaf batch), which is why this
+        guard lives at the call site rather than inside a wrapper around it.
 
         Args:
             batch: A collated batch (``TensorDict`` / dict / tensor).
@@ -310,8 +311,8 @@ class Trainer:
             ``True`` if a move is required (or cannot be ruled out cheaply).
         """
         values = getattr(batch, "values", None)
-        if not callable(getattr(batch, "apply", None)):
-            return True  # plain dict / tensor / unknown — let batch_to decide
+        if not callable(getattr(batch, "to", None)):
+            return True  # not a TensorDict — the move will say so, loudly
         dev = getattr(batch, "device", None)
         if dev is not None:
             return dev != device
@@ -451,7 +452,7 @@ class Trainer:
                 except StopIteration:
                     it = iter(loader)
                     batch = next(it)
-                batch = batch_to(batch, device=model_device)
+                batch = batch.to(model_device)
 
                 ctx = (
                     torch.amp.autocast(device_type, dtype=amp_dtype)
@@ -481,7 +482,7 @@ class Trainer:
             if callable(val_dl):
                 try:
                     self.model.eval()
-                    vbatch = batch_to(next(iter(val_dl())), device=model_device)
+                    vbatch = next(iter(val_dl())).to(model_device)
                     self.eval_step.on_eval_batch(self, self.state, vbatch)
                 except Exception as exc:  # noqa: BLE001
                     logger.info(f"Smoke warmup: eval-graph warmup skipped ({exc!r}).")
@@ -591,7 +592,7 @@ class Trainer:
                 if needs_move is None:
                     needs_move = self._needs_device_move(batch, model_device)
                 if needs_move:
-                    batch = batch_to(batch, device=model_device)
+                    batch = batch.to(model_device)
                 self._call_hooks("on_train_batch_start", self, self.state, batch)
                 outputs = self.train_step.on_train_batch(self, self.state, batch)
                 self._call_hooks("on_train_batch_end", self, self.state, batch, outputs)
@@ -978,7 +979,7 @@ class Trainer:
             if needs_move is None:
                 needs_move = self._needs_device_move(batch, model_device)
             if needs_move:
-                batch = batch_to(batch, device=model_device)
+                batch = batch.to(model_device)
             self._call_hooks("on_eval_batch_start", self, self.state, batch)
             outputs = self.eval_step.on_eval_batch(self, self.state, batch)
             self._call_hooks("on_eval_batch_end", self, self.state, batch, outputs)

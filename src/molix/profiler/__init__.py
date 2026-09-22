@@ -22,7 +22,7 @@ Five profilers, each targeting a single component:
   Drives a real Trainer over a near-zero-compute
   :class:`~molix.profiler.mock.MockModel` so a ``cProfile`` window
   attributes wall time to loop machinery (Step dispatch, hooks,
-  ``batch_to``, TrainState writes), not model FLOPs.
+  batch moves, TrainState writes), not model FLOPs.
 
 Two data generators for use when no real dataset is available:
 

@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from molix.config import config
 from molix.core.seed import make_generator, make_worker_init_fn
-from molix.core.steps import batch_to
+from molix.core.steps import cast_compute_floats
 from molix.data.collate import MoleculeCollator
 from molix.data.collator import FrameCollator
 from molix.data.dataset import BaseDataset
@@ -697,7 +697,7 @@ class _CollateFn:
 
     Captures :data:`molix.config.config["ftype"]` at construction time
     (in the main process) and routes each emitted batch through
-    :func:`molix.core.steps.batch_to` with ``dtype=self.ftype``. Compute
+    :func:`molix.core.steps.cast_compute_floats` with ``self.ftype``. Compute
     floating leaves follow ``ftype``. Frame collate emits graph totals at
     :data:`~molix.schema.FLOAT64_LABEL_KEYS` as IEEE-754 binary64; the
     store route does not narrow those totals below the mmap column and
@@ -751,7 +751,7 @@ class _CollateFn:
                 batch = padder(batch)
             batch = self.frame_collator.apply_graph_schema(batch)
             self.frame_collator._last = batch
-            return batch_to(batch, dtype=self.ftype)
+            return cast_compute_floats(batch, self.ftype)
 
         def _tick(name: str, start: float) -> float:
             now = perf_counter()
@@ -776,6 +776,6 @@ class _CollateFn:
         mark = _tick("pad", mark)
         batch = self.frame_collator.apply_graph_schema(batch)
         self.frame_collator._last = batch
-        out = batch_to(batch, dtype=self.ftype)
+        out = cast_compute_floats(batch, self.ftype)
         _tick("schema+cast", mark)
         return out

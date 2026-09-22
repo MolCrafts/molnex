@@ -46,7 +46,7 @@ E0_KEY: tuple[str, str] = ("graphs", "e0")
 #: :data:`E0_KEY`. Not in :data:`FLOAT64_LABEL_KEYS` — the residual follows
 #: the batch compute dtype after a float64 subtract.
 ENERGY_RESIDUAL_KEY: tuple[str, str] = ("graphs", "energy_residual")
-#: Graph totals that skip the collate / ``batch_to`` dtype axis. Matched as
+#: Graph totals that skip the collate / ``cast_compute_floats`` dtype axis. Matched as
 #: full NestedKeys (``ENERGY_KEY``, ``E0_KEY``), never the leaf name ``"energy"``.
 FLOAT64_LABEL_KEYS: frozenset[tuple[str, str]] = frozenset({ENERGY_KEY, E0_KEY})
 #: Per-atom energy contributions (``batch["atoms", "energy"]``).

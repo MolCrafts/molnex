@@ -2,7 +2,7 @@
 
 Unlike :class:`~molix.profiler.module.Profiler` (which times a model in
 isolation), :class:`TrainerProfiler` profiles the **Trainer's own per-step
-machinery** — Step-protocol dispatch, hook calls, ``batch_to``, TrainState
+machinery** — Step-protocol dispatch, hook calls, batch moves, TrainState
 writes, the optimizer/scheduler/eval-cadence bookkeeping — by driving a real
 :class:`~molix.core.trainer.Trainer` over a near-zero-compute
 :class:`~molix.profiler.mock.MockModel`. With model FLOPs out of the way, a
@@ -197,7 +197,7 @@ class TrainerProfiler:
         # Subtract the baseline per-function self-time so the table shows only
         # what the Trainer *adds* over a bare loop — run_backward, the model
         # forward, optimizer.step appear in both and cancel, leaving framework
-        # machinery (batch_to, hooks, the Step wrapper, state writes, _train).
+        # machinery (batch moves, hooks, the Step wrapper, state writes, _train).
         hotspots = self._extract_hotspots(trainer_pr, base_pr, n_steps, top)
         overhead = max(0.0, trainer_wall - base_wall)
 

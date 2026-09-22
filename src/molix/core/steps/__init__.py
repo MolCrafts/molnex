@@ -22,81 +22,49 @@ from molix.core.steps.train import DefaultTrainStep
 from molix.schema import FLOAT64_LABEL_KEYS
 
 
-def batch_to(
-    batch: Any,
-    *,
-    device: torch.device | str | None = None,
-    dtype: torch.dtype | None = None,
-) -> Any:
-    """Move and/or cast a batch in a single pass.
+def cast_compute_floats(batch: Any, dtype: torch.dtype) -> Any:
+    """Cast a batch's compute float leaves to *dtype*, keeping graph totals.
 
-    Handles TensorDict (via ``named_apply(..., nested_keys=True)`` when
-    *dtype* is set, else ``apply``), plain dicts (recursive), and bare
-    tensors. Non-tensor leaves are returned unchanged.
+    The one thing about moving a batch that the library cannot do: every float
+    leaf takes *dtype* **except** the graph totals at
+    :data:`~molix.schema.FLOAT64_LABEL_KEYS`, which keep their incoming dtype. The
+    skip matches the full NestedKey, never the leaf name ``"energy"`` — that name
+    is also :data:`~molix.schema.ATOMIC_ENERGY_KEY`, a per-atom quantity that
+    *should* follow the compute dtype. Integer and bool leaves are untouched.
 
-    On a TensorDict, graph totals at
-    :data:`~molix.schema.FLOAT64_LABEL_KEYS` skip the dtype axis (device
-    still applies) by matching the full NestedKey — never the leaf name
-    ``"energy"``, which is also :data:`~molix.schema.ATOMIC_ENERGY_KEY`.
-    The skip is TensorDict-only: plain-dict recurse cannot see a NestedKey.
-    Bare tensors keep this function's ordinary float-cast behaviour. A late
-    ``.double()`` is not applied.
+    Device moves are **not** here: ``batch.to(device)`` is tensordict's own and
+    needs no wrapper. This used to be ``batch_to(batch, device=, dtype=)``, which
+    reimplemented the move as a per-leaf walk, carried a same-device fast path
+    that duplicated the caller's own :meth:`Trainer._needs_device_move` guard, and
+    grew dict / bare-tensor branches no caller in the tree used.
 
     Args:
-        batch: TensorDict / nested dict / Tensor / other.
-        device: Target device, or ``None`` to leave the device alone.
-        dtype: Target floating-point dtype for compute leaves, or ``None``
-            to leave dtypes alone.
+        batch: Post-collate batch (a nested ``TensorDict``, which is the batch
+            schema).
+        dtype: Floating dtype for compute leaves.
 
     Returns:
-        Batch with the requested transformations applied. Non-tensor
-        leaves and tensors of unrelated dtype (when ``dtype`` is set)
-        are returned unchanged. Protected TensorDict graph totals keep
-        their incoming dtype.
+        A batch with the compute floats cast. A late ``.double()`` is not applied:
+        a float32 stored total stays float32.
+
+    Raises:
+        TypeError: *batch* is not a TensorDict — the NestedKey skip cannot be
+            expressed on anything that has no nested keys, and silently casting a
+            protected total is the failure this function exists to prevent.
     """
-    if device is None and dtype is None:
-        return batch
+    if not callable(getattr(batch, "named_apply", None)):
+        raise TypeError(
+            f"cast_compute_floats needs a TensorDict batch, got {type(batch).__name__}: "
+            "the graph totals it protects are addressed by NestedKey, which a plain "
+            "dict or tensor has none of"
+        )
 
-    # Fast path: a device-only move whose target every leaf already sits on
-    # is pure waste — ``TensorDict.apply`` would still walk, re-validate and
-    # rebuild the whole tree. Skip it. This is the single largest per-step
-    # Trainer overhead in same-device (CPU, or pre-moved) training; for a
-    # genuine cross-device move the guard falls through and the move runs.
-    if dtype is None and device is not None and hasattr(batch, "values"):
-        target = torch.device(device)
-        dev = getattr(batch, "device", None)
-        if dev is not None:
-            if dev == target:
-                return batch
-        else:
-            try:
-                leaves = batch.values(include_nested=True, leaves_only=True)
-                if all(v.device == target for v in leaves):
-                    return batch
-            except (AttributeError, TypeError):
-                pass
+    def _cast(key: object, tensor: torch.Tensor) -> torch.Tensor:
+        if key in FLOAT64_LABEL_KEYS or not tensor.is_floating_point():
+            return tensor
+        return tensor.to(dtype)
 
-    def _move(t: torch.Tensor) -> torch.Tensor:
-        eff_dtype = dtype if (dtype is not None and t.is_floating_point()) else None
-        if device is None and eff_dtype is None:
-            return t
-        return t.to(device=device, dtype=eff_dtype)
-
-    if dtype is not None and hasattr(batch, "named_apply"):
-
-        def _named_move(key: object, tensor: torch.Tensor) -> torch.Tensor:
-            if key in FLOAT64_LABEL_KEYS:
-                return tensor.to(device=device)
-            return _move(tensor)
-
-        return batch.named_apply(_named_move, nested_keys=True)
-    if hasattr(batch, "apply"):
-        return batch.apply(_move)
-    if isinstance(batch, torch.Tensor):
-        return _move(batch)
-    if isinstance(batch, dict):
-        return {k: batch_to(v, device=device, dtype=dtype) for k, v in batch.items()}
-    return batch
+    return batch.named_apply(_cast, nested_keys=True)
 
 
 __all__ = [
@@ -107,5 +75,5 @@ __all__ = [
     "Step",
     "TaskRouter",
     "TaskSpec",
-    "batch_to",
+    "cast_compute_floats",
 ]

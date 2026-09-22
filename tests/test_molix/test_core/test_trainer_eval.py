@@ -3,6 +3,7 @@
 import pytest
 import torch
 import torch.nn as nn
+from tensordict import TensorDict
 
 from molix.core.state import TrainState
 from molix.core.trainer import Trainer
@@ -74,7 +75,15 @@ def _simple_loss(predictions, batch):
 
 
 def _make_batch():
-    return {"x": torch.randn(4, 10), "targets": {"y_energy": torch.randn(4, 1)}}
+    # A TensorDict, not a plain dict: the batch schema is a nested TensorDict and
+    # the Trainer moves batches with `TensorDict.to`.
+    return TensorDict(
+        {
+            "x": torch.randn(4, 10),
+            "targets": TensorDict({"y_energy": torch.randn(4, 1)}, batch_size=[4]),
+        },
+        batch_size=[4],
+    )
 
 
 class _MockDataModule:
@@ -290,8 +299,6 @@ def test_eval_starvation_no_warning_without_step_cadence(monkeypatch):
 
 def test_needs_device_move_false_when_already_on_device():
     """A batch whose leaves are all on the target device needs no move."""
-    from tensordict import TensorDict
-
     from molix.core.trainer import Trainer
 
     batch = TensorDict(
@@ -302,8 +309,6 @@ def test_needs_device_move_false_when_already_on_device():
 
 def test_needs_device_move_true_for_foreign_device():
     """A move is required when the target differs from the leaves' device."""
-    from tensordict import TensorDict
-
     from molix.core.trainer import Trainer
 
     batch = TensorDict(

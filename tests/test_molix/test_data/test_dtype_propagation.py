@@ -10,7 +10,7 @@ These tests pin the contract that:
 - ``_CollateFn`` captures ``config["ftype"]`` at
   construction time;
 - compute floating leaves (``atoms.pos``, ``pair_diff``, …) follow that
-  ``ftype`` via :func:`molix.core.steps.batch_to`;
+  ``ftype`` via :func:`molix.core.steps.cast_compute_floats`;
 - graph totals at ``ENERGY_KEY`` / ``E0_KEY`` skip the dtype axis on a
   TensorDict (full NestedKey match, never the leaf name ``"energy"``);
 - Frame-route collate *emits* those totals as float64; store-route collate
@@ -32,7 +32,7 @@ import torch
 from tensordict import TensorDict
 
 from molix.config import config
-from molix.core.steps import batch_to
+from molix.core.steps import cast_compute_floats
 from molix.data import FrameCollator
 from molix.data.collate import MoleculeCollator
 from molix.data.datamodule import DataModule, _CollateFn
@@ -103,78 +103,25 @@ def _label_batch(
 
 
 # ---------------------------------------------------------------------------
-# batch_to helper — leaves long tensors alone on the dtype axis,
-# moves everything (incl. long) on the device axis
+# cast_compute_floats — the dtype policy the library has no API for: every float
+# leaf takes the compute dtype except the graph totals, matched by NestedKey.
+# Device moves are `TensorDict.to` and are not wrapped.
 # ---------------------------------------------------------------------------
 
 
-class TestBatchTo:
-    def test_noop_when_neither_set(self):
-        x = torch.randn(4, dtype=torch.float32)
-        assert batch_to(x) is x
-
-    def test_casts_floating_tensor(self):
-        x = torch.randn(4, dtype=torch.float32)
-        out = batch_to(x, dtype=torch.float64)
-        assert out.dtype is torch.float64
-
-    def test_preserves_long_tensor_under_dtype(self):
-        idx = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
-        out = batch_to(idx, dtype=torch.float64)
-        assert out.dtype is torch.long, "long index tensors must survive dtype cast"
-
-    def test_dict_recurses_selectively(self):
-        batch = {
-            "pos": torch.randn(3, dtype=torch.float32),
-            "pair_index": torch.zeros(3, dtype=torch.long),
-        }
-        out = batch_to(batch, dtype=torch.float64)
-        assert out["pos"].dtype is torch.float64
-        assert out["pair_index"].dtype is torch.long
-
-    def test_tensordict_apply_path(self, tmp_path):
+class TestCastComputeFloats:
+    def test_casts_compute_floats_and_leaves_indices_alone(self, tmp_path):
         dm = _build_dm(tmp_path)
         batch = next(iter(dm.train_dataloader()))
-        out = batch_to(batch, dtype=torch.float64)
+        out = cast_compute_floats(batch, torch.float64)
         assert out["atoms", "pos"].dtype is torch.float64
         assert out["pairs", "pair_diff"].dtype is torch.float64
         assert out["pairs", "pair_index"].dtype is torch.long
         assert out["atoms", "Z"].dtype is torch.long
 
-    def test_device_and_dtype_in_one_pass(self, tmp_path):
-        dm = _build_dm(tmp_path)
-        batch = next(iter(dm.train_dataloader()))
-        out = batch_to(batch, device=torch.device("cpu"), dtype=torch.float64)
-        assert out["atoms", "pos"].device.type == "cpu"
-        assert out["atoms", "pos"].dtype is torch.float64
-        assert out["pairs", "pair_index"].device.type == "cpu"
-        assert out["pairs", "pair_index"].dtype is torch.long
-
-    def test_same_device_move_returns_batch_unchanged(self, tmp_path):
-        """Device-only move to where the batch already lives is a no-op fast path.
-
-        The batch's leaves are all on CPU; moving to CPU must skip the
-        ``TensorDict.apply`` rebuild and return the same object — this is the
-        per-step Trainer-loop optimization, harmless because the values are
-        already correct.
-        """
-        dm = _build_dm(tmp_path)
-        batch = next(iter(dm.train_dataloader()))
-        out = batch_to(batch, device=torch.device("cpu"))
-        assert out is batch  # no rebuild
-        assert out["atoms", "pos"].device.type == "cpu"
-
-    def test_same_device_move_still_casts_with_dtype(self, tmp_path):
-        """The fast path only triggers for device-only moves, never when dtype is set."""
-        dm = _build_dm(tmp_path)
-        batch = next(iter(dm.train_dataloader()))
-        out = batch_to(batch, device=torch.device("cpu"), dtype=torch.float64)
-        assert out is not batch
-        assert out["atoms", "pos"].dtype is torch.float64
-
-    def test_named_apply_skips_graph_totals_by_nested_key(self):
+    def test_skips_graph_totals_by_nested_key(self):
         """``ENERGY_KEY`` and ``E0_KEY`` keep float64; compute leaves take dtype."""
-        out = batch_to(_label_batch(), dtype=torch.float32)
+        out = cast_compute_floats(_label_batch(), torch.float32)
         assert out["atoms", "pos"].dtype is torch.float32
         assert out[ENERGY_KEY].dtype is torch.float64
         assert out["graphs", "e0"].dtype is torch.float64
@@ -183,43 +130,39 @@ class TestBatchTo:
 
     def test_atomic_energy_follows_dtype_not_the_leaf_name_energy(self):
         """A leaf-name skip of ``"energy"`` would wrongly protect per-atom energy."""
-        out = batch_to(_label_batch(atomic_energy=True), dtype=torch.float32)
+        out = cast_compute_floats(_label_batch(atomic_energy=True), torch.float32)
         assert out[ATOMIC_ENERGY_KEY].dtype is torch.float32
         assert out[ENERGY_KEY].dtype is torch.float64
         assert out["graphs", "e0"].dtype is torch.float64
 
     def test_float32_energy_key_is_not_upcast(self):
         """A late ``.double()`` is not a repair; store float32 stays float32."""
-        out = batch_to(
+        out = cast_compute_floats(
             _label_batch(pos_dtype=torch.float32, energy_dtype=torch.float32),
-            dtype=torch.float64,
+            torch.float64,
         )
         assert out["atoms", "pos"].dtype is torch.float64
         assert out[ENERGY_KEY].dtype is torch.float32
 
-    def test_protected_keys_still_move_device(self):
-        """The skip is dtype-only; device still applies to graph totals."""
-        out = batch_to(
-            _label_batch(),
-            device=torch.device("cpu"),
-            dtype=torch.float32,
-        )
+    def test_a_protected_total_still_moves_with_the_batch(self, tmp_path):
+        """The skip is the dtype axis only — the device is `TensorDict.to`'s job."""
+        moved = _label_batch().to(torch.device("cpu"))
+        out = cast_compute_floats(moved, torch.float32)
         assert out[ENERGY_KEY].device.type == "cpu"
-        assert out["graphs", "e0"].device.type == "cpu"
         assert out[ENERGY_KEY].dtype is torch.float64
         assert out["atoms", "pos"].dtype is torch.float32
 
-    def test_plain_dict_recurse_is_not_nested_key_aware(self):
-        """The dtype skip is TensorDict-only; dict recurse cannot see a NestedKey."""
-        batch = {
-            "graphs": {"energy": torch.tensor([-1.5], dtype=torch.float64)},
-            "atoms": {"pos": torch.zeros(2, 3, dtype=torch.float64)},
-            "pair_index": torch.zeros(3, dtype=torch.long),
-        }
-        out = batch_to(batch, dtype=torch.float32)
-        assert out["graphs"]["energy"].dtype is torch.float32
-        assert out["atoms"]["pos"].dtype is torch.float32
-        assert out["pair_index"].dtype is torch.long
+    def test_a_non_tensordict_batch_is_refused(self):
+        """A NestedKey skip cannot be expressed on something with no nested keys.
+
+        The old helper recursed into plain dicts and bare tensors, where the skip
+        silently did not apply — so a protected total was cast without a word. No
+        caller in the tree used those branches.
+        """
+        with pytest.raises(TypeError, match="needs a TensorDict batch"):
+            cast_compute_floats({"graphs": {"energy": torch.zeros(1)}}, torch.float32)
+        with pytest.raises(TypeError, match="needs a TensorDict batch"):
+            cast_compute_floats(torch.zeros(3), torch.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +188,7 @@ class TestPrecisionFlowsToBatch:
         assert batch["pairs", "pair_diff"].dtype is expected
         assert batch["pairs", "pair_dist"].dtype is expected
         # A graph total is a label, not a compute leaf: the Frame route emits it
-        # at binary64 and batch_to must leave it there whatever ``ftype`` is.
+        # at binary64 and cast_compute_floats must leave it there whatever ``ftype`` is.
         assert batch["graphs", "energy"].dtype is torch.float64
         # Integers untouched
         assert batch["atoms", "Z"].dtype is torch.long

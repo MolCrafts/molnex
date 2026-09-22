@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn as nn
+from tensordict import TensorDict
 
 from molix.config import config
 from molix.core.checkpoint import (
@@ -47,7 +48,15 @@ def _simple_loss(predictions, batch):
 
 
 def _make_batch():
-    return {"x": torch.randn(4, 10), "targets": {"y_energy": torch.randn(4, 1)}}
+    # A TensorDict, not a plain dict: the batch schema is a nested TensorDict and
+    # the Trainer moves batches with `TensorDict.to`.
+    return TensorDict(
+        {
+            "x": torch.randn(4, 10),
+            "targets": TensorDict({"y_energy": torch.randn(4, 1)}, batch_size=[4]),
+        },
+        batch_size=[4],
+    )
 
 
 class _MockDataModule:
