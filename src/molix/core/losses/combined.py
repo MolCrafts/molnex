@@ -1,6 +1,6 @@
 """Generic weighted combination of multiple losses."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import torch
@@ -42,6 +42,13 @@ class WeightedLoss(nn.Module):
 
     Args:
         losses: List of ``(weight, loss_fn)`` tuples.
+        names: One short name per term, for the per-term scalars a step
+            publishes. ``None`` derives them from each term's class name, or
+            ``term<i>`` for a closure. A combined objective whose terms are not
+            reported separately can only be watched as a sum, and a sum that
+            climbs does not say which term is climbing — which is how stage 4 of
+            the Class-I curriculum reached a minimum and walked back up at every
+            learning rate with nothing to point at.
 
     Example::
 
@@ -60,6 +67,8 @@ class WeightedLoss(nn.Module):
     def __init__(
         self,
         losses: list[tuple[float, Callable[[Any, Any], torch.Tensor]]],
+        *,
+        names: Sequence[str] | None = None,
     ):
         super().__init__()
         self._terms = [loss_fn for _, loss_fn in losses]
@@ -67,6 +76,36 @@ class WeightedLoss(nn.Module):
         # raises. Call order lives in ``_terms``, which holds both kinds.
         self.losses = nn.ModuleList([fn for fn in self._terms if isinstance(fn, nn.Module)])
         self.weights: tuple[float, ...] = tuple(float(weight) for weight, _ in losses)
+        if names is not None and len(names) != len(self._terms):
+            raise ValueError(
+                f"names has {len(names)} entries for {len(self._terms)} terms; one name per term"
+            )
+        self.names: tuple[str, ...] = (
+            tuple(str(name) for name in names)
+            if names is not None
+            else tuple(
+                type(fn).__name__.removesuffix("Loss").lower() if isinstance(fn, nn.Module)
+                else f"term{i}"
+                for i, fn in enumerate(self._terms)
+            )
+        )
+
+    def terms(self, pred: Any, target: Any) -> dict[str, torch.Tensor]:
+        """Each term's **unweighted** value, by name.
+
+        For reporting, not for the objective: :meth:`forward` is the weighted sum
+        and stays the one thing differentiated. A caller watching a combined
+        objective needs the parts, because their sum can fall while one of them
+        rises.
+
+        Args:
+            pred: Forwarded to each term.
+            target: Forwarded to each term.
+
+        Returns:
+            ``{name: value}`` in declaration order.
+        """
+        return {name: term(pred, target) for name, term in zip(self.names, self._terms)}
 
     def forward(
         self,

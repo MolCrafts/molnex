@@ -853,8 +853,36 @@ def _historical_are(values: torch.Tensor | Sequence[float]) -> AtomicReferenceEn
     )
 
 
+def _publish_terms(objective: Any, outputs: Any, batch: Any, into: Any) -> None:
+    """Write each term of a combined objective into *into*, by name.
+
+    Reporting only, and outside the compiled region: the sum is what is
+    differentiated. A ``WeightedLoss`` whose parts are invisible can only be
+    watched as a sum, and a sum that rises does not say which part is rising.
+
+    Args:
+        objective: The loss; anything without named terms is skipped.
+        outputs: The step's outputs, whose ``predictions`` the terms read.
+        batch: The batch the terms read their targets from.
+        into: The state namespace dict to write into.
+    """
+    terms = getattr(objective, "terms", None)
+    predictions = outputs.get("predictions") if hasattr(outputs, "get") else None
+    if not callable(terms) or predictions is None:
+        return
+    with torch.no_grad():
+        for name, value in terms(predictions, batch).items():
+            into[f"loss_{name}"] = value.detach()
+
+
+def _term_keys(namespace: str, objective: Any) -> tuple[tuple[str, str], ...]:
+    """``(namespace, "loss_<name>")`` per named term, empty when there are none."""
+    names = getattr(objective, "names", ())
+    return tuple((namespace, f"loss_{name}") for name in names) if len(names) > 1 else ()
+
+
 class _FitTrainStep(DefaultTrainStep):
-    """Default train step that also publishes ``train/loss_energy``.
+    """Default train step that also publishes ``train/loss_energy`` and the terms.
 
     Class-I is one energy task. :class:`~molix.core.steps.MultiTaskTrainStep`
     refuses ``Trainer.compile(step=True)`` because the router host-syncs on
@@ -863,11 +891,18 @@ class _FitTrainStep(DefaultTrainStep):
     ``loss_energy``.
     """
 
-    scalar_keys = (("train", "loss"), ("train", "loss_energy"))
+    @property
+    def scalar_keys(self) -> tuple[tuple[str, str], ...]:
+        """State paths this step writes, including one per named loss term."""
+        return (("train", "loss"), ("train", "loss_energy")) + _term_keys(
+            "train", getattr(self, "_objective", None)
+        )
 
     def on_train_batch(self, trainer: Any, state: Any, batch: Any) -> dict[str, Any]:
         outputs = super().on_train_batch(trainer, state, batch)
         state["train"]["loss_energy"] = state["train"]["loss"]
+        self._objective = trainer.loss_fn
+        _publish_terms(trainer.loss_fn, outputs, batch, state["train"])
         return outputs
 
 
@@ -878,7 +913,10 @@ class _FitEvalStep(DefaultEvalStep):
     ops — :func:`val_omol_mae` is. The ``loss_energy`` alias is written after.
     """
 
-    scalar_keys = (("eval", "loss"), ("eval", "loss_energy"))
+    @property
+    def scalar_keys(self) -> tuple[tuple[str, str], ...]:
+        """State paths this step writes, including one per named loss term."""
+        return (("eval", "loss"), ("eval", "loss_energy")) + _term_keys("eval", self.objective)
 
     def __init__(self, objective: Callable[..., torch.Tensor], *, no_grad: bool = True) -> None:
         super().__init__(no_grad=no_grad)
@@ -896,6 +934,7 @@ class _FitEvalStep(DefaultEvalStep):
     def on_eval_batch(self, trainer: Any, state: Any, batch: Any) -> dict[str, Any]:
         outputs = super().on_eval_batch(trainer, state, batch)
         state["eval"]["loss_energy"] = state["eval"]["loss"]
+        _publish_terms(self.objective, outputs, batch, state["eval"])
         return outputs
 
 
@@ -986,7 +1025,15 @@ profile_force_objective = WeightedLoss(
     [
         (1.0, BoltzmannProfileLoss(soft_max=PROFILE_SOFT_MAX)),
         (1.0, force_inlier_huber),
-    ]
+    ],
+    # Named so the steps publish `loss_profile` and `loss_force` beside the sum.
+    # Watching only the sum is how this stage reached a minimum and walked back up
+    # at every learning rate with nothing to point at: two terms in incommensurate
+    # units (kcal^2/mol^2 and a kcal/mol/A Huber) can trade, and the sum does not
+    # say which is winning. Their gradient norms at initialisation are within 2x
+    # (221 against 132), so the 1:1 weight is not obviously wrong — which is
+    # exactly why the parts have to be measured over training rather than argued.
+    names=("profile", "force"),
 )
 
 
