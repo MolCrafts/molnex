@@ -131,8 +131,28 @@ def rebase(tensor: torch.Tensor, offset: int | torch.Tensor, key: str) -> torch.
 # ---------------------------------------------------------------------------
 
 
+#: Unsigned integer dtypes a molpy column can arrive in, normalised to
+#: ``int64`` — the integer dtype every other column of the batch schema uses.
+#: This is not tidiness. ``torch.uint64`` has no CUDA kernel for ``add``, and
+#: ``TensorDict._clone`` implements a recursive clone as one fused
+#: ``torch._foreach_add(leaves, 0)`` whenever the container knows its device, so
+#: a batch carrying a uint64 leaf raises ``"ufunc_add_CUDA" not implemented for
+#: 'UInt64'`` the moment anything clones it after a ``.to(device)`` —
+#: ``RondoPredictions.physics`` clones once per run to seed its container.
+#: tensordict excludes ``torch.bool`` from that fused path for exactly this
+#: reason and does not exclude the unsigned types. molpy writes ``bond_number``
+#: and ``bond_type`` as ``uint64``; nothing downstream wants the extra bit, and
+#: an index that cannot be negated or added is a landmine on every arithmetic
+#: path, not only that one.
+_UNSIGNED_TO_INT64 = (torch.uint64, torch.uint32, torch.uint16)
+
+
 def _column(values: Any, dtype: torch.dtype | None) -> torch.Tensor:
     """One frame column as a tensor: integers stay integral, floats keep or take *dtype*.
+
+    Unsigned integers wider than ``uint8`` become ``int64`` (see
+    :data:`_UNSIGNED_TO_INT64`); ``uint8`` is left alone because it is a byte
+    column, not an index.
 
     Args:
         values: The column, anything ``np.asarray`` accepts.
@@ -143,6 +163,8 @@ def _column(values: Any, dtype: torch.dtype | None) -> torch.Tensor:
         The column as a 1-D tensor.
     """
     tensor = torch.as_tensor(np.asarray(values))
+    if tensor.dtype in _UNSIGNED_TO_INT64:
+        return tensor.to(torch.int64)
     if dtype is not None and tensor.is_floating_point():
         return tensor.to(dtype)
     return tensor

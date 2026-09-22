@@ -395,3 +395,36 @@ def test_graphs_row_stamps_which_dataset_row_each_graph_came_from() -> None:
     assert profile[1] == profile[2] == profile[3]
     assert profile[4] == profile[5]
     assert len(set(profile.tolist())) == 3
+
+
+def test_unsigned_integer_columns_become_int64() -> None:
+    """A uint64 leaf is a landmine on every arithmetic path, not a preference.
+
+    ``torch.uint64`` has no CUDA ``add`` kernel, and ``TensorDict._clone``
+    implements a recursive clone as one fused ``torch._foreach_add(leaves, 0)``
+    whenever the container knows its device — which ``.to(device)`` sets and
+    ``molix.core.steps.batch_to`` does not. So a batch with a uint64 leaf clones
+    fine after ``batch_to`` and raises ``"ufunc_add_CUDA" not implemented for
+    'UInt64'`` after ``.to("cuda")``, and ``RondoPredictions.physics`` clones once
+    per run to seed its container. tensordict excludes ``torch.bool`` from that
+    fused path for the same reason and does not exclude the unsigned types.
+
+    molpy writes ``bond_number`` and ``bond_type`` as uint64.
+    """
+    one = frame(
+        Z=[6, 1],
+        pos=[[0.0, 0.0, 0.0], [1.09, 0.0, 0.0]],
+        # The whole bonds block through ``terms``: it replaces what ``bonds=``
+        # builds, and the uint64 column has to sit on it beside the indices.
+        terms={
+            "bonds": {
+                "atomi": np.array([0]),
+                "atomj": np.array([1]),
+                "bond_number": np.array([7], dtype=np.uint64),
+            }
+        },
+    )
+    batch = collate_molecules([one])
+    assert batch["bonds", "bond_number"].dtype == torch.int64
+    for _, leaf in batch.items(True, True):
+        assert leaf.dtype not in (torch.uint64, torch.uint32, torch.uint16), leaf.dtype
