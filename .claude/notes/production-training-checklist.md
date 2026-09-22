@@ -158,6 +158,34 @@ coordinates.
 
 ## 3. Learnability and hyperparameter calibration
 
+- [ ] **UNMET, and 2026-09-22 is the bill for it.** Three defects lived in stage 2
+  for its whole four-hour run, and a bounded tiny-set overfit of the
+  partial-Hessian head would have shown every one of them in minutes:
+  1. `ClassIPrepare.label` re-derived the valence families and assigned whole new
+     blocks, discarding the `hpair_<i>_<j>` slot columns `HessianTargets` had
+     written on them. Bonds kept theirs (`ClassIPrepare.bond` short-circuits on an
+     existing bond block); angles, propers and impropers lost theirs, and
+     `Potentials.partial_hessian` **silently skipped** a namespace with no slot
+     column. So the stage supervised the bond term alone. Its angle term was still
+     at 0.004 kcal/mol afterwards, and the loss cannot go below the 64 % of pairs
+     that are 1-3 or further.
+  2. Every bonded force constant initialised at `softplus(0) = 0.693` against QM
+     labels asking for ~932 (1-2 pairs) and ~22 (1-3) kcal/mol/Å² — three orders
+     of magnitude, traversed through a loss whose gradient is scale-free.
+  3. The profile grouping of item 1.
+  None of the three raised, and the logged loss moved plausibly (0.747 → 0.728)
+  the whole time. **A loss that moves is not evidence that a head is learning.**
+  The check that closes this item per head is the cheap one: overfit ~8 molecules
+  to near-zero and assert it gets there. A head that cannot overfit eight
+  molecules has no gradient, and that is exactly what three of four bonded
+  families had.
+  Fixed in molnex `7ea99c5`; measured effect at initialisation, same batch and
+  probe (`projects/class-i/train/hessian_pairing_probe.py`): loss 0.7464 → 0.7189
+  (heads) → **0.5671** (slots restored), which is below the 0.728 that four hours
+  of the stage reached; the 1-3 predicted block trace went from exactly 0.00 to a
+  median of +4.14 against a label median of −22.
+
+
 - [x] Every active task/head independently overfits a fixed tiny set to its
   predeclared threshold. Overfit gate on official 4m tiny set (8 train / 2
   val, ≤32 atoms, 4000 steps, GH200, molq `f5f4af44`, Slurm 1602274):
