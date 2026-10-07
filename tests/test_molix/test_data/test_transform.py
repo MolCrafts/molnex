@@ -1,4 +1,3 @@
-import pint
 import pytest
 import torch
 
@@ -208,7 +207,7 @@ class TestUnitConvert:
         assert torch.allclose(sample["targets"]["U0"], torch.tensor([1.0]))
 
     def test_derived_unit_force(self):
-        """Force: hartree/bohr → eV/Å — derived units flow through pint."""
+        """Force: hartree/bohr → eV/Å — derived units flow through the registry."""
         task = UnitConvert({"forces": ("hartree / bohr", "eV / angstrom")})
         # hartree/bohr ≈ 51.422 eV/Å
         assert task.factors["forces"] == pytest.approx(51.42208619, rel=1e-4)
@@ -259,13 +258,13 @@ class TestUnitConvert:
         """Registry rejects hartree → Å (energy vs length)."""
         from molpy import UnitsError
 
-        with pytest.raises((pint.errors.DimensionalityError, UnitsError)):
+        with pytest.raises(UnitsError):
             UnitConvert({"x": ("hartree", "angstrom")})
 
     def test_unknown_unit_raises(self):
         from molpy import UnitsError
 
-        with pytest.raises((pint.errors.UndefinedUnitError, UnitsError)):
+        with pytest.raises(UnitsError):
             UnitConvert({"x": ("nonsense", "eV")})
 
     def test_missing_target_raises(self):

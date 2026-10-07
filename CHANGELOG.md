@@ -122,6 +122,14 @@ models.
   is protocol-based via the `DataSource` protocol).
 - AMP-safe PiNet `IPLayer` scatter; per-epoch reshuffle and eval-starvation
   warnings; CUDA-graph force-training gradient correctness.
+- `UnitConvert` resolves factors with `molpy.UnitSystem.factor` (molpy's unit
+  registry is native now; `UnitSystem.Unit` is gone) and raises
+  `molpy.UnitsError` for unknown or incompatible units.
+- The C++ extension and `interface/` build as C++20, which current torch
+  headers require.
+- Docs: `zensical.toml` restores zensical's default Markdown extensions next to
+  arithmatex, so fenced code renders as code again.
+- Text-mode file I/O names its encoding (UTF-8) throughout.
 
 ## [0.1.0]
 

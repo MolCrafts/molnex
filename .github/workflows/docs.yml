@@ -1,0 +1,33 @@
+name: docs
+
+# The site as Cloudflare Pages builds it, --strict: any warning fails.
+# Cloudflare Pages deploys it from MolCrafts itself, so no job here deploys.
+# mkdocstrings reads src/ statically, so the docs extra is all it needs; the
+# requirements below are pyproject.toml's `docs` extra.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [dev, master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !contains(fromJSON('["dev","master","main"]'), github.base_ref || github.ref_name) }}
+
+jobs:
+  build:
+    name: docs / build
+    # A pull request from a branch of this same repository was already run by its push.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python
+      - run: >-
+          uvx --from "zensical>=0.0.51"
+          --with "molcrafts-zensical-theme>=0.2.3" --with "mkdocstrings[python]>=0.30"
+          zensical build --strict

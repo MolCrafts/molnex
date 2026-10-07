@@ -90,7 +90,7 @@ def parse_extxyz_frames(path: str | Path) -> list[ExtxyzFrame]:
         FileNotFoundError: ``path`` does not exist.
     """
     p = Path(path)
-    text = p.read_text()
+    text = p.read_text(encoding="utf-8")
     lines = text.splitlines()
 
     frames: list[ExtxyzFrame] = []
@@ -323,7 +323,7 @@ def write_extxyz_frames(
     n_frames, n_atoms = pos.shape[0], pos.shape[1]
     if len(species) != n_atoms:
         raise ValueError(f"{len(species)} species for {n_atoms} atoms")
-    with Path(path).open("w") as fh:
+    with Path(path).open("w", encoding="utf-8") as fh:
         for t in range(n_frames):
             comment = "Properties=species:S:1:pos:R:3"
             if energies is not None:

@@ -1,0 +1,41 @@
+name: test
+
+# pytest (CPU torch, the C++ extension built in place) in two tiers. A
+# feature branch (fork or MolCrafts) runs Python 3.12; dev, master, main and
+# pull requests into them run 3.12 and 3.13. Linux only: the extension builds
+# against CPU torch on Linux runners. The regression suites (-m regression) are not in CI.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [dev, master, main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !contains(fromJSON('["dev","master","main"]'), github.base_ref || github.ref_name) }}
+
+jobs:
+  pytest:
+    name: test / py${{ matrix.python }}
+    # A pull request from a branch of this same repository runs only when its
+    # push ran the fast tier, i.e. when the head is a feature branch.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !contains(fromJSON('["dev","master","main"]'), github.head_ref)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(contains(fromJSON('["dev","master","main"]'), github.base_ref || github.ref_name) && '["3.12","3.13"]' || '["3.12"]') }}
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: ./.github/actions/setup-molnex
+      - run: pytest tests/ -q -p no:cacheprovider -n auto --dist worksteal

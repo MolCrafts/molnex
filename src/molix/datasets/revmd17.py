@@ -60,7 +60,7 @@ def _download_lock(lock_path: Path):
         yield
         return
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w") as handle:
+    with open(lock_path, "w", encoding="utf-8") as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX)
         except OSError:  # pragma: no cover — flock unsupported on this fs

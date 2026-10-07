@@ -88,7 +88,7 @@ def test_module_does_not_import_concrete_layers() -> None:
     import molix.core.hook as mod
 
     source_path = pathlib.Path(inspect.getfile(mod))
-    tree = ast.parse(source_path.read_text())
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
 
     forbidden = ("molix.hooks", "molix.io", "molix.recorder")
     offenders: list[str] = []
@@ -114,7 +114,7 @@ def test_trainer_imports_hook_from_core_hook_module() -> None:
     import molix.core.trainer as trainer_mod
 
     source_path = pathlib.Path(inspect.getfile(trainer_mod))
-    tree = ast.parse(source_path.read_text())
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
 
     found = False
     for node in ast.walk(tree):

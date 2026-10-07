@@ -144,7 +144,7 @@ def main() -> int:
     import molix.data.collate as collate_mod
 
     for mod in (collate_mod, cache_mod):
-        text = Path(mod.__file__).read_text()
+        text = Path(mod.__file__).read_text(encoding="utf-8")
         assert "from molpy" not in text
         assert "import molrs" not in text
 

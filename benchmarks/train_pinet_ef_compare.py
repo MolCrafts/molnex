@@ -185,7 +185,7 @@ def main() -> None:
         f = results[mode]["final"]
         print(f"  {mode} final: {f}  ({results[mode]['wall_s']:.1f}s)")
 
-    Path(args.out).write_text(json.dumps(results, indent=2))
+    Path(args.out).write_text(json.dumps(results, indent=2), encoding="utf-8")
 
     e, c = results["eager"]["final"], results["cudagraphs"]["final"]
     print(f"\n{'=' * 64}\nFINAL (epoch {args.epochs}) — eager vs cudagraphs\n{'=' * 64}")

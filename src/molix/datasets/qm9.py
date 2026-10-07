@@ -83,7 +83,7 @@ def _download(url: str, dest: Path) -> None:
 
 def _load_exclusion_list(path: Path) -> set[int]:
     excluded: set[int] = set()
-    for line in path.read_text().splitlines()[9:-1]:
+    for line in path.read_text(encoding="utf-8").splitlines()[9:-1]:
         parts = line.split()
         if parts:
             excluded.add(int(parts[0]))
