@@ -1,0 +1,46 @@
+name: lint
+
+# The commit-stage hooks of .pre-commit-config.yaml (hygiene + ruff) on every
+# file, and ty. Same jobs in every context; see "CI" in CLAUDE.md.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [dev, master, main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !contains(fromJSON('["dev","master","main"]'), github.base_ref || github.ref_name) }}
+
+jobs:
+  hooks:
+    name: lint / hooks
+    # A pull request from a branch of this same repository was already run by its push.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python
+      # The ci-lint hook calls the ruff on PATH (language: system).
+      - run: uv tool install ruff
+      - run: uvx pre-commit run --all-files --show-diff-on-failure
+
+  # ty resolves torch & co. from the environment, so this job installs the
+  # dependencies (not the extension). Every rule pyproject.toml downgrades
+  # stays a warning; an error-level diagnostic fails.
+  ty:
+    name: lint / ty
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python
+      - uses: ./.github/actions/setup-molnex
+        with:
+          build: "false"
+      - run: ty check src/ --exit-zero-on-warning

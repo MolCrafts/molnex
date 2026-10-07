@@ -202,7 +202,7 @@ python -m pytest tests/test_molzoo/test_mace.py::test_mace_forward -v
 python -m pytest tests/ --cov=src --cov-report=term-missing
 ```
 
-Python >=3.10 required. Requires `torch>=2.10` (always use latest stable PyTorch).
+Python >=3.12 required. Requires `torch>=2.10` (always use latest stable PyTorch).
 
 ### Test layout rules
 
@@ -217,6 +217,26 @@ Python >=3.10 required. Requires `torch>=2.10` (always use latest stable PyTorch
   torch-pme). Auto-marked `regression` by its `conftest.py` and excluded from
   the default run; CI / pre-push should run `pytest -m regression` separately.
 - `slow` marker: AOT-export / compile tests (deselect with `-m "not slow"`).
+
+## CI
+
+One workflow per kind of work. A *feature* ref is any branch other than
+`dev`/`master`/`main`; an *integration* ref is one of those, or a pull request
+into one. A pull request from a branch of this repository does not re-run
+what its push already ran: lint and docs never, the full test tier only when
+the head is a feature branch (its push ran the fast tier). Every job installs
+through `.github/actions/setup-python` + `.github/actions/setup-molnex` (CPU
+torch, then the extension built in place).
+
+| workflow | feature branch (fork or MolCrafts) | integration ref (fork or MolCrafts) | MolCrafts only |
+|---|---|---|---|
+| `lint.yml` | `lint / hooks` (pre-commit stage: hygiene + ruff), `lint / ty` (`--exit-zero-on-warning`) | same | — |
+| `test.yml` | `test / py3.12` | `test / py3.12`, `test / py3.13` | — |
+| `docs.yml` | `docs / build` (`zensical build --strict`) | same | deploy: Cloudflare Pages, outside Actions |
+
+No `release.yml`: molnex is not published. The regression suites
+(`pytest -m regression`) are not in CI yet. The `protect-master` ruleset on
+`master` requires a pull request and blocks force pushes and deletion.
 
 ## Architecture
 
