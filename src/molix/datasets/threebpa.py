@@ -40,7 +40,7 @@ def _parse_extxyz(path: Path) -> list[Sample]:
     from molpy import Element
 
     samples: list[Sample] = []
-    lines = path.read_text().splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     i = 0
     while i < len(lines):
         natoms = int(lines[i].strip())

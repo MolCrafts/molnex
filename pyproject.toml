@@ -94,7 +94,13 @@ line-length = 100
 src = ["src"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+# PLW1514 (a preview rule; explicit-preview-rules keeps every other preview
+# rule off): text-mode file I/O names its encoding. Unnamed, Python decodes
+# with the locale -- cp1252 on Windows -- so a read that passes every Linux
+# hook fails only on CI's Windows leg.
+select = ["E", "F", "W", "I", "PLW1514"]
+preview = true
+explicit-preview-rules = true
 ignore = [
   "E402",  # module-level import not at top (needed for conditional imports)
   "E741",  # ambiguous variable name (common in ML: l for layers, etc.)

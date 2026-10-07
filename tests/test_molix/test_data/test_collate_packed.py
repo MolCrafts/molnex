@@ -428,7 +428,7 @@ class TestCacheLayering:
         """No import line in cache.py references tensordict or TargetSchema."""
         import molix.data.cache as cache_mod
 
-        source = Path(cache_mod.__file__).read_text()
+        source = Path(cache_mod.__file__).read_text(encoding="utf-8")
         import_lines = [
             line for line in source.splitlines() if line.lstrip().startswith(("import ", "from "))
         ]

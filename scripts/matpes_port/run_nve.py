@@ -64,7 +64,7 @@ def read_poscar(path: Path) -> dict[str, torch.Tensor]:
     """
     from molpy import Element
 
-    lines = [ln.strip() for ln in path.read_text().splitlines()]
+    lines = [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines()]
     scale = float(lines[1])
     cell = (
         torch.tensor([[float(v) for v in lines[i].split()] for i in (2, 3, 4)], dtype=config.ftype)

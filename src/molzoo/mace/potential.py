@@ -342,7 +342,7 @@ class MACEPotential(MACEEncoder):
             RuntimeError: From ``remap`` — an unhoused checkpoint key, a shape
                 disagreement, or an unfilled parameter.
         """
-        official = json.loads(Path(config_path).read_text())
+        official = json.loads(Path(config_path).read_text(encoding="utf-8"))
         absent = [key for key in ("hidden_irreps", "MLP_irreps") if key not in official]
         if absent:
             raise KeyError(

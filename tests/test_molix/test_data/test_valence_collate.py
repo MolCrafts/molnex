@@ -205,7 +205,7 @@ def test_collate_does_not_import_molpy_as_batch_store():
     import molix.data.collate as collate_mod
 
     for mod in (collate_mod, cache_mod):
-        src = Path(mod.__file__).read_text()
+        src = Path(mod.__file__).read_text(encoding="utf-8")
         assert "from molpy" not in src
         assert "import molpy" not in src
         assert "ForceField" not in src

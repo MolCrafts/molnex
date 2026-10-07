@@ -125,7 +125,7 @@ def _write_water_extxyz(path: Path, *, n_frames: int, n_water: int, edge: float)
         )
         for frame_i in range(n_frames)
     ]
-    path.write_text("".join(frames))
+    path.write_text("".join(frames), encoding="utf-8")
 
 
 def _make_dimer_frame(
@@ -184,7 +184,7 @@ def _write_dimer_extxyz(path: Path, *, separations: Iterable[float], edge: float
         )
         for i, s in enumerate(seps)
     ]
-    path.write_text("".join(frames))
+    path.write_text("".join(frames), encoding="utf-8")
 
 
 def _sha256(path: Path) -> str:

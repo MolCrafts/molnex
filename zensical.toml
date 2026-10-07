@@ -97,9 +97,38 @@ accent_soft = "rgba(219, 39, 119, 0.14)"  # secondary — soft fill behind it
 icon = "fontawesome/brands/github"
 link = "https://github.com/MolCrafts/molnex"
 
-# Markdown: keep arithmatex for MathJax; other defaults come from Zensical.
-[project.markdown_extensions."pymdownx.arithmatex"]
-generic = true
+# Markdown extensions. Declaring this section REPLACES Zensical's built-in
+# default set (it is not merged), so the full default set is reproduced here,
+# plus arithmatex for MathJax. Without it fenced code renders as paragraphs.
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+
+[project.markdown_extensions.toc]
+permalink = true
+
+[project.markdown_extensions.pymdownx]
+betterem = {}
+caret = {}
+details = {}
+inlinehilite = {}
+keys = {}
+magiclink = {}
+mark = {}
+smartsymbols = {}
+tilde = {}
+arithmatex = { generic = true }
+emoji = { emoji_generator = "zensical.extensions.emoji.to_svg", emoji_index = "zensical.extensions.emoji.twemoji" }
+highlight = { anchor_linenums = true, line_spans = "__span", pygments_lang_class = true }
+tabbed = { alternate_style = true, combine_header_slug = true }
+tasklist = { custom_checkbox = true }
+
+[project.markdown_extensions.pymdownx.superfences]
+custom_fences = [{ name = "mermaid", class = "mermaid" }]
 
 [project.plugins.search]
 enabled = true

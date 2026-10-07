@@ -1,9 +1,9 @@
-"""Unit-conversion task — per-field explicit ``(source, target)`` pint units.
+"""Unit-conversion task — per-field explicit ``(source, target)`` units.
 
 Each field in ``conversions`` declares the unit it *is in* and the unit you
 want it *rescaled to*. No preset bundles; whatever you type is what you get.
 
-The shared pint registry comes from :mod:`molpy.core.unit` (so every
+The shared unit registry comes from :mod:`molpy.core.unit` (so every
 MolCrafts component resolves unit strings against the same registry).
 
 Example — QM9 U0 in Hartree, train in eV::
@@ -17,7 +17,7 @@ Multiple fields, including derived units::
         "forces": ("hartree / bohr", "eV / angstrom"),
     })
 
-Conversion factors are resolved once at ``__init__`` via pint; the per-sample
+Conversion factors are resolved once at ``__init__`` by that registry; the per-sample
 hot path is one scalar multiply per field.
 """
 
@@ -29,18 +29,18 @@ from molix.data.task import SampleTask
 
 
 class UnitConvert(SampleTask):
-    """Rescale selected target tensors from one pint unit to another.
+    """Rescale selected target tensors from one unit to another.
 
     Args:
         conversions: Mapping ``{target_key: (src_unit, dst_unit)}``. Each
-            unit is any pint-parseable string (``"hartree"``, ``"eV"``,
+            unit is any string the molpy registry parses (``"hartree"``, ``"eV"``,
             ``"hartree / bohr"``, …). Source and target must be
-            dimensionally compatible; pint raises on mismatch.
+            dimensionally compatible; the registry raises on mismatch.
 
     Raises:
         ValueError: ``conversions`` is empty, or a resolved factor is
             non-finite.
-        pint.errors.DimensionalityError: ``src_unit`` and ``dst_unit`` are
+        molpy.UnitsError: a unit is unknown, or ``src_unit`` and ``dst_unit`` are
             not inter-convertible.
     """
 
@@ -50,6 +50,7 @@ class UnitConvert(SampleTask):
 
         factors: dict[str, float] = {}
         units_repr: dict[str, tuple[str, str]] = {}
+        units = UnitSystem()
         for key, pair in conversions.items():
             if not (isinstance(pair, tuple) and len(pair) == 2):
                 raise ValueError(
@@ -57,13 +58,7 @@ class UnitConvert(SampleTask):
                     f"(src_unit, dst_unit), got {pair!r}"
                 )
             src_str, dst_str = pair
-            # UnitSystem() is the shared molpy registry instance;
-            # ``UnitSystem.Unit`` is an unbound descriptor and cannot be called
-            # on the class.
-            ureg = UnitSystem()
-            src_unit = ureg.Unit(src_str)
-            dst_unit = ureg.Unit(dst_str)
-            factor = float((1.0 * src_unit).to(dst_unit).magnitude)
+            factor = units.factor(src_str, dst_str)
             if not _is_finite(factor):
                 raise ValueError(
                     f"UnitConvert: non-finite factor for '{key}' ({src_str} → {dst_str})"
@@ -85,7 +80,7 @@ class UnitConvert(SampleTask):
         return f"unit_convert:{body}"
 
     def execute(self, data: dict) -> dict:
-        """Rescale each configured target by its precomputed pint factor.
+        """Rescale each configured target by its precomputed factor.
 
         Multiplies ``targets[key]`` by the conversion factor resolved at
         construction time (one scalar multiply per field).
