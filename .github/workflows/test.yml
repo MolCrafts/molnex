@@ -1,9 +1,15 @@
 name: test
 
-# pytest (CPU torch, the C++ extension built in place) in two tiers. A
-# feature branch (fork or MolCrafts) runs Python 3.12; dev, master, main and
-# pull requests into them run 3.12 and 3.13. Linux only: the extension builds
-# against CPU torch on Linux runners. The regression suites (-m regression) are not in CI.
+# pytest (CPU torch, the C++ extension built in place) in two tiers
+# (`test / tier` decides):
+#
+#   fast  a feature-branch push to MolCrafts: Python 3.12.
+#   full  every push to a fork (proven before its pull request), dev, master
+#         and main on MolCrafts, pull requests, tags and dispatches: 3.12 and
+#         3.13.
+#
+# Linux only: the extension builds against CPU torch on Linux runners. The
+# regression suites (-m regression) are not in CI.
 on:
   push:
     branches: ["**"]
@@ -17,24 +23,33 @@ permissions:
 
 concurrency:
   group: test-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ !contains(fromJSON('["dev","master","main"]'), github.base_ref || github.ref_name) }}
+  cancel-in-progress: ${{ !contains(fromJSON('["refs/heads/dev","refs/heads/master","refs/heads/main"]'), github.ref) && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  pytest:
-    name: test / py${{ matrix.python }}
-    # A pull request from a branch of this same repository runs only when its
-    # push ran the fast tier, i.e. when the head is a feature branch.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !contains(fromJSON('["dev","master","main"]'), github.head_ref)
+  tier:
+    name: test / tier
+    # A pull request inside a fork was already run, full tier, by its push.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || github.repository_owner == 'MolCrafts'
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.tier.outputs.full }}
+    steps:
+      - id: tier
+        run: echo "full=${{ github.repository_owner != 'MolCrafts' || contains(fromJSON('["dev","master","main"]'), github.ref_name) || github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') }}" | tee -a "$GITHUB_OUTPUT"
+
+  python:
+    name: test / python (${{ matrix.python }})
+    needs: tier
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python: ${{ fromJSON(contains(fromJSON('["dev","master","main"]'), github.base_ref || github.ref_name) && '["3.12","3.13"]' || '["3.12"]') }}
+        python: ${{ fromJSON(needs.tier.outputs.full == 'true' && '["3.12","3.13"]' || '["3.12"]') }}
     env:
       UV_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-python
+      - uses: MolCrafts/molcrafts-ci/actions/setup-python@master
         with:
           python-version: ${{ matrix.python }}
       - uses: ./.github/actions/setup-molnex

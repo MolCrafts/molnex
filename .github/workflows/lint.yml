@@ -15,17 +15,17 @@ permissions:
 
 concurrency:
   group: lint-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ !contains(fromJSON('["dev","master","main"]'), github.base_ref || github.ref_name) }}
+  cancel-in-progress: ${{ !contains(fromJSON('["refs/heads/dev","refs/heads/master","refs/heads/main"]'), github.ref) && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   hooks:
     name: lint / hooks
-    # A pull request from a branch of this same repository was already run by its push.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    # A pull request inside a fork was already run by its push.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || github.repository_owner == 'MolCrafts'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-python
+      - uses: MolCrafts/molcrafts-ci/actions/setup-python@master
       # The ci-lint hook calls the ruff on PATH (language: system).
       - run: uv tool install ruff
       - run: uvx pre-commit run --all-files --show-diff-on-failure
@@ -35,11 +35,11 @@ jobs:
   # stays a warning; an error-level diagnostic fails.
   ty:
     name: lint / ty
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || github.repository_owner == 'MolCrafts'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-python
+      - uses: MolCrafts/molcrafts-ci/actions/setup-python@master
       - uses: ./.github/actions/setup-molnex
         with:
           build: "false"
