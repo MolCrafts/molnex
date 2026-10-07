@@ -16,17 +16,17 @@ permissions:
 
 concurrency:
   group: docs-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ !contains(fromJSON('["dev","master","main"]'), github.base_ref || github.ref_name) }}
+  cancel-in-progress: ${{ !contains(fromJSON('["refs/heads/dev","refs/heads/master","refs/heads/main"]'), github.ref) && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
     name: docs / build
-    # A pull request from a branch of this same repository was already run by its push.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    # A pull request inside a fork was already run by its push.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || github.repository_owner == 'MolCrafts'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-python
+      - uses: MolCrafts/molcrafts-ci/actions/setup-python@master
       - run: >-
           uvx --from "zensical>=0.0.51"
           --with "molcrafts-zensical-theme>=0.2.3" --with "mkdocstrings[python]>=0.30"
