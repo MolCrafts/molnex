@@ -225,7 +225,9 @@ Python >=3.12 required. Requires `torch>=2.10` (always use latest stable PyTorch
 
 ## CI
 
-One workflow per kind of work, two test tiers (`test / tier` decides). The
+One workflow per kind of work, two test tiers. Each workflow's first job,
+`<file> / context`, runs `MolCrafts/molcrafts-ci/actions/ci-context`, and every
+other job gates on its outputs (tier, upstream, skip-pr). The
 *fast* tier runs on a feature-branch push to MolCrafts; the *full* tier on every
 push to a fork (so a branch is proven before its pull request), on
 `dev`/`master`/`main` pushes to MolCrafts, on pull requests, tags and
@@ -237,12 +239,12 @@ full tier); a pull request on MolCrafts runs. Shared setup comes from
 | workflow | fast tier | full tier | MolCrafts only |
 |---|---|---|---|
 | `lint.yml` | `lint / hooks` (pre-commit stage: hygiene + ruff), `lint / ty` (`--exit-zero-on-warning`) | same | — |
-| `test.yml` | `test / tier`, `test / python (3.12)` | `test / tier`, `test / python (3.12)`, `test / python (3.13)` | — |
+| `test.yml` | `test / context`, `test / python (3.12)` | `test / context`, `test / python (3.12)`, `test / python (3.13)` | — |
 | `docs.yml` | `docs / build` (`zensical build --strict`) | same | deploy: Cloudflare Pages, outside Actions |
 
 No `release.yml`: molnex is not published. `regressions/` and `benchmarks/`
 are not in CI. The `protect-master` ruleset on `master` requires a pull request and blocks
-force pushes and deletion. Its required checks (`test / tier` plus the
+force pushes and deletion. Its required checks (`test / context` plus the
 full-tier `lint /`, `test /` and `docs /` jobs) are added once they have gone
 green on a pull request into `master`.
 
