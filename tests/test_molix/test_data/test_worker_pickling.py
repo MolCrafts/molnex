@@ -1,22 +1,14 @@
-"""End-to-end DataLoader smoke test with multiprocessing workers.
+"""DataLoader worker arguments must pickle.
 
 On Python 3.14+ the default POSIX start method is ``forkserver``, which
-requires every DataLoader worker argument (dataset, collate_fn, ...) to be
-picklable. This file is the regression test for two related bugs that broke
-real training runs:
-
-* DataModule._make_collate_fn returned a local closure (unpicklable)
-* MmapDataset must round-trip through pickle intact
-
-Test flow mirrors the data path of train_allegro_qm9.py:
-pipeline → PipelineSpec.cache() → MmapDataset → Subset →
-DataModule(num_workers>0) → iterate.
+pickles every DataLoader worker argument (dataset, collate_fn, ...).
+``DataModule._make_collate_fn`` once returned a local closure, which broke
+real training runs; the dataset side is pinned in ``test_dataset.py``.
 """
 
 from __future__ import annotations
 
 import torch
-from tensordict import TensorDict
 
 from molix.data.collate import TargetSchema
 from molix.data.datamodule import DataModule
@@ -61,38 +53,6 @@ def _raw_samples(n: int = 16) -> list[dict]:
         }
         for i in range(n)
     ]
-
-
-def test_mmap_dataset_with_num_workers_4(tmp_path):
-    """Reproduces the training data path: cache() → dataset → split →
-    DataModule with forkserver + multiple workers → iterate one epoch."""
-    src = InMemorySource(_raw_samples(16))
-    pipe = Pipeline("e2e").add(FakeNeighborList()).build()
-    dag = pipe.cache(src, base_dir=tmp_path)
-
-    full = dag.dataset(mmap=True)
-    train, val = full.split(ratio=0.75, seed=0)
-    assert len(train) == 12 and len(val) == 4
-
-    schema = TargetSchema(graph_level=frozenset({"U0"}), atom_level=frozenset())
-    dm = DataModule(
-        train,
-        val,
-        target_schema=schema,
-        batch_size=4,
-        num_workers=4,  # triggers forkserver path
-        pin_memory=False,  # avoid CUDA on CI
-        prefetch_factor=2,
-    )
-
-    seen_batches = 0
-    for batch in dm.train_dataloader():
-        assert isinstance(batch, TensorDict)
-        assert batch["atoms", "Z"].shape[0] == 4 * 4  # 4 mols × 4 atoms each
-        assert batch["graphs", "U0"].shape == (4,)
-        assert batch["edges", "edge_index"].shape[1] == 2
-        seen_batches += 1
-    assert seen_batches == 3  # 12 / 4
 
 
 def test_collate_picklable_with_batch_nodes(tmp_path):

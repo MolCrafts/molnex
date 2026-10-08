@@ -32,10 +32,11 @@ class TestMeshInterpolatorForward:
         n_channels = 5
         L = torch.tensor(6.28318530717)  # tau
 
-        # Generate inputs for interpolator class
+        # Generate inputs for interpolator class (fixed seed per case)
+        gen = torch.Generator().manual_seed(int(n_mesh) * 100 + interpolation_nodes)
         cell = torch.eye(3) * L
-        positions = torch.rand((n_particles, 3)) * L
-        particle_weights = 3 * torch.randn((n_particles, n_channels))
+        positions = torch.rand((n_particles, 3), generator=gen) * L
+        particle_weights = 3 * torch.randn((n_particles, n_channels), generator=gen)
         ns_mesh = torch.tensor([n_mesh, n_mesh, n_mesh])
 
         # Run interpolation

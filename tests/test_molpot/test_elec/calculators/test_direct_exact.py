@@ -1,10 +1,17 @@
+"""Direct (non-range-separated) Coulomb on point-charge molecules.
+
+Analytic references: the potential of a dimer, triangle, square and
+tetrahedron of unit charges is a closed-form sum of ``1/r`` terms. Rotations
+leave it invariant and a uniform scaling ``s`` divides it by ``s``.
+"""
+
 import math
 
 import pytest
 import torch
 
 from molpot.potentials.elec import Calculator, CoulombPotential
-from tests.regression.conftest import neighbor_list
+from tests.test_molpot.test_elec.conftest import periodic_neighbor_list
 
 DTYPE = torch.float64
 
@@ -184,11 +191,12 @@ def test_coulomb_exact(
     positions = scaling_factor * (positions @ orthogonal_transformation)
 
     # Choose a large cutoff that covers all atoms
-    neighbor_indices, neighbor_distances = neighbor_list(
-        positions=positions,
-        periodic=False,
+    neighbor_indices, _, neighbor_distances = periodic_neighbor_list(
+        positions,
+        torch.zeros(3, 3, dtype=DTYPE),
         cutoff=scaling_factor * 10,
-        full_neighbor_list=full_neighbor_list,
+        full_list=full_neighbor_list,
+        periodic=False,
     )
 
     potentials = direct.forward(

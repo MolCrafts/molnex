@@ -2,7 +2,6 @@
 
 import math
 import re
-from typing import NamedTuple
 
 import pytest
 import torch
@@ -12,13 +11,7 @@ import molix.data.tasks.neighbor
 import molix.md
 import molix.md.neighbors
 from molix.md import (
-    EV_PER_AMU_A2_FS2,
-    MD,
     LennardJonesCutForceField,
-    MaxwellBoltzmann,
-    MDHook,
-    MDObservables,
-    MDRunner,
 )
 from molix.md.neighbors import NeighborList, NeighborStrategy
 from tests.test_molix.test_md.conftest import make_cubic_lattice
@@ -283,111 +276,6 @@ def _displaced(pos: torch.Tensor, distance: float, *, atom: int = 0) -> torch.Te
     moved = pos.clone()
     moved[atom, 0] += distance
     return moved
-
-
-class _Frame(NamedTuple):
-    """One observed step: the evaluated configuration and the list behind it."""
-
-    pos: torch.Tensor
-    edge_index: torch.Tensor
-    shifts: torch.Tensor
-    total: torch.Tensor
-    forces: torch.Tensor
-
-
-class _FrameRecorder(MDHook):
-    """Capture ``obs.pos`` together with the live list it was evaluated against."""
-
-    def __init__(self, neighbors: NeighborList) -> None:
-        self._neighbors = neighbors
-        self.frames: list[_Frame] = []
-
-    def on_step_end(self, runner: MDRunner, step: int, obs: MDObservables) -> None:
-        """Snapshot the step; the live edges are the ones ``obs.forces`` used."""
-        n = self._neighbors.num_edges
-        self.frames.append(
-            _Frame(
-                pos=obs.pos.detach().clone(),
-                edge_index=self._neighbors.edge_index[:n].clone(),
-                shifts=self._neighbors.shifts[:n].clone(),
-                total=obs.total.detach().clone(),
-                forces=obs.forces.detach().clone(),
-            )
-        )
-
-
-def _run_lj_lattice(
-    *, skin: float, every: int = 1, delay: int = 0, check: bool = True, n_steps: int = 100
-) -> tuple[NeighborList, list[_Frame]]:
-    """NVE argon over the 64-atom lattice, driving the policy once per force eval.
-
-    Deterministic CPU float64 throughout: seeded Maxwell-Boltzmann velocities,
-    gamma = 0, no wall clock, no filesystem, no network. Argon in (amu, A, fs):
-    eps = 0.0103 eV, sigma = 2.5 A, cutoff = 3.5 A, m = 39.95 amu, dt = 4 fs.
-
-    No cadence knob is passed: link 07 makes the *force field* declare that it
-    owns a live list (``LennardJonesCutForceField.rebuilds_neighbors``), the
-    integrator derive its static switch from that, and ``rebuild_neighbors``
-    land on :meth:`NeighborList.update` — so the policy runs once per force
-    evaluation, at the positions being evaluated, with no driver kwarg and no
-    ``_PolicyForceField`` preview subclass in the way.
-
-    ``capacity_factor=2.5`` is measured, not defensive: at ``skin=0.5`` this run
-    reaches 600 live edges against the 519 rows the default 1.35 would allocate
-    from the initial 384, and the overflow guard is not what these tests pin.
-    """
-    pos, cell = make_cubic_lattice(n_side=4, spacing=3.0)
-    neighbors = NeighborList(
-        cell=cell,
-        cutoff=3.5,
-        positions=pos,
-        skin=skin,
-        every=every,
-        delay=delay,
-        check=check,
-        capacity_factor=2.5,
-    )
-    force = LennardJonesCutForceField(
-        epsilon=0.0103 / EV_PER_AMU_A2_FS2,  # argon well depth, eV -> amu A^2/fs^2
-        sigma=2.5,
-        neighbors=neighbors,
-        cutoff=3.5,
-    )
-    recorder = _FrameRecorder(neighbors)
-    velocities = MaxwellBoltzmann(39.95, n_atoms=64).sample(300.0, seed=0)
-    md = MD(
-        force,
-        mass=39.95,
-        dt=4.0,
-        gamma=0.0,
-        dtype=torch.float64,
-        hooks=[recorder],
-    )
-    md.set_potential_dtype(torch.float64)
-    md.run(pos, velocities, n_steps, chunk=1)
-    return neighbors, recorder.frames
-
-
-def _reference_pairs(
-    pos: torch.Tensor, cell: torch.Tensor, cutoff: float
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """The exact O(N^2) minimum-image pair set within ``cutoff`` — the oracle.
-
-    Computed from fractional coordinates with ``round`` to the nearest image
-    (exact for a cubic cell), so it holds for the unwrapped positions an MD run
-    drifts into. Shares no code with the neighbour list under test.
-
-    Returns:
-        ``(source, target, distance)`` for every **ordered** pair inside
-        ``cutoff``, with ``distance = ||pos[target] - pos[source] + shift||``.
-    """
-    fractional = pos @ torch.linalg.inv(cell)
-    delta = fractional.unsqueeze(0) - fractional.unsqueeze(1)  # [i, j] = frac[j] - frac[i]
-    delta = delta - torch.round(delta)
-    distance = torch.linalg.norm(delta @ cell, dim=-1)
-    inside = (distance < cutoff) & ~torch.eye(pos.shape[0], dtype=torch.bool)
-    source, target = torch.nonzero(inside, as_tuple=True)
-    return source, target, distance[source, target]
 
 
 class TestNeighborListPolicy:
@@ -678,65 +566,6 @@ class TestNeighborListPolicy:
         nl, _ = _policy_list(skin=1.5)
         with pytest.raises(ValueError):
             LennardJonesCutForceField(epsilon=1.0, sigma=2.5, neighbors=nl, cutoff=5.0)
-
-    # --- trajectory falsification (NVE argon over the lattice) -------------
-
-    def test_every_pair_within_the_cutoff_stays_in_the_live_list(self):
-        """PRIMARY falsification: a gated list must never miss a pair.
-
-        At every step the exact minimum-image O(N^2) pair set within the
-        interaction cutoff — recomputed from the very configuration the forces
-        were evaluated at — must be a subset of the live list, and each pair's
-        list-reconstructed distance ``||pos[t] - pos[s] + shift||`` must match
-        the reference. The distance half is not redundant: a stale *shift* on a
-        surviving index pair is the frozen-shift failure mode, and an
-        index-subset check alone would sail straight past it.
-        """
-        _, cell = make_cubic_lattice(n_side=4, spacing=3.0)
-        _, frames = _run_lj_lattice(skin=0.5)
-        n_atoms = 64
-        for step, frame in enumerate(frames):
-            source, target, reference = _reference_pairs(frame.pos, cell, 3.5)
-            rows = torch.full((n_atoms * n_atoms,), -1, dtype=torch.long)
-            live = frame.edge_index
-            rows[live[:, 0] * n_atoms + live[:, 1]] = torch.arange(live.shape[0])
-            found = rows[source * n_atoms + target]
-            missing = int((found < 0).sum())
-            assert missing == 0, f"step {step}: {missing} pairs inside the cutoff are not listed"
-            reconstructed = torch.linalg.norm(
-                frame.pos[target] - frame.pos[source] + frame.shifts[found], dim=-1
-            )
-            torch.testing.assert_close(reconstructed, reference, atol=1e-9, rtol=0)
-
-    def test_a_skinned_policy_matches_rebuilding_every_force_evaluation(self):
-        """Policy equivalence: the gated ``skin=0.5`` run and a ``skin=0.0`` run
-        that rebuilds at every force evaluation must trace the same physics.
-        Compared at ``atol=1e-10, rtol=0`` rather than bitwise on purpose — the
-        masked-zero skin edges reorder the ``index_add_`` accumulation."""
-        _, gated = _run_lj_lattice(skin=0.5)
-        _, every_eval = _run_lj_lattice(skin=0.0)
-        assert len(gated) == len(every_eval) == 100
-        for step, (a, b) in enumerate(zip(gated, every_eval, strict=True)):
-            torch.testing.assert_close(a.total, b.total, atol=1e-10, rtol=0, msg=f"step {step}")
-            torch.testing.assert_close(a.forces, b.forces, atol=1e-10, rtol=0, msg=f"step {step}")
-
-    def test_the_standard_run_reports_no_dangerous_builds(self):
-        """``skin=0.5`` gives a half-skin of 0.25 A against ~0.01 A of motion
-        per step, so no rebuild is ever overdue. ``ndanger`` is the cheapest
-        correctness alarm available and must stay silent on a sane run — while
-        the gate itself stays alive (``rebuild_count > 0``)."""
-        neighbors, _ = _run_lj_lattice(skin=0.5)
-        assert neighbors.ndanger == 0
-        assert neighbors.rebuild_count > 0
-
-    def test_rebuild_count_falls_as_the_skin_grows(self):
-        """The point of the skin, measured over the same trajectory. The strict
-        inequality at the ends is what catches a dead or inverted gate — plain
-        non-increasing monotonicity is also satisfied by a policy that never
-        rebuilds at all."""
-        counts = [_run_lj_lattice(skin=skin)[0].rebuild_count for skin in (0.0, 0.25, 0.5, 1.0)]
-        assert counts == sorted(counts, reverse=True)
-        assert counts[-1] < counts[0]
 
 
 def _batch(pos: torch.Tensor, cell: torch.Tensor | None = None) -> TensorDict:

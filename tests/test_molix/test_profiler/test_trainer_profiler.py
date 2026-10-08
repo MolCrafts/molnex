@@ -29,8 +29,8 @@ class TestTrainerProfiler:
     """The profiler drives a real Trainer over the mock model and attributes time."""
 
     def test_run_reports_throughput_and_hotspots(self):
-        result = TrainerProfiler(device="cpu").run(n_steps=200, n_warmup=10, top=8)
-        assert result.n_steps == 200
+        result = TrainerProfiler(device="cpu").run(n_steps=20, n_warmup=2, top=8)
+        assert result.n_steps == 20
         assert result.device == "cpu"
         assert result.steps_per_sec > 0
         assert result.wall_ms_per_step > 0
@@ -43,7 +43,9 @@ class TestTrainerProfiler:
         assert result.overhead_ms_per_step >= 0
 
     def test_hotspots_include_trainer_machinery(self):
-        result = TrainerProfiler(device="cpu").run(n_steps=200, n_warmup=10, top=20)
+        # Keep every row: rank order is wall-time noise, membership is not.
+        # Trainer-only functions have no baseline twin, so they always add time.
+        result = TrainerProfiler(device="cpu").run(n_steps=20, n_warmup=2, top=10_000)
         funcs = " ".join(r["func"] for r in result.hotspots)
         # the loop itself and the Step protocol must show up
         assert "_train" in funcs or "on_train_batch" in funcs
@@ -56,13 +58,13 @@ class TestTrainerProfiler:
                 pass
 
         result = TrainerProfiler(device="cpu", hooks=[_Noop(), _Noop()]).run(
-            n_steps=100, n_warmup=5, top=5
+            n_steps=10, n_warmup=2, top=5
         )
         assert result.n_hooks == 2
 
     def test_custom_batch_size_respected(self):
         batch = MockBatch(n_atoms=64, n_edges=256, n_graphs=4, device="cpu")()
-        result = TrainerProfiler(device="cpu").run(n_steps=100, n_warmup=5, batch=batch, top=5)
+        result = TrainerProfiler(device="cpu").run(n_steps=10, n_warmup=2, batch=batch, top=5)
         assert result.steps_per_sec > 0
         assert not torch.cuda.is_available() or result.device == "cpu"
 

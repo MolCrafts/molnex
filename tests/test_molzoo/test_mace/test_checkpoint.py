@@ -45,13 +45,11 @@ Reference:
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 import torch
-from tensordict import TensorDict
 
 from molzoo.mace.checkpoint import (
     MATPES_KEY_REMAP,
@@ -105,9 +103,6 @@ BESSEL_OFFICIAL_KEY = "radial_embedding.bessel_fn.bessel_weights"
 #: MACE stores some frozen scalars as ``(1,)`` where molnex holds a 0-d buffer.
 FROZEN_SCALAR_VALUE = 0.75
 
-#: Environment variable pointing at the offline official-weights directory.
-WEIGHTS_DIR_ENV = "MOLNEX_MACE_WEIGHTS_DIR"
-
 #: The two architecture switches of the stock MatPES dump, spelled exactly as
 #: ``matpes_r2scan_config.json`` spells them (read 2026-08-09 from the offline
 #: weights directory): ZBL pair repulsion on, Agnesi distance transform —
@@ -116,73 +111,7 @@ WEIGHTS_DIR_ENV = "MOLNEX_MACE_WEIGHTS_DIR"
 #: must accept them without caring about the case of the ``A``.
 OFFICIAL_SWITCHES: dict[str, object] = {"pair_repulsion": True, "distance_transform": "Agnesi"}
 
-#: Hard-coded goldens: the dimensions of ``MACE-matpes-r2scan-omat-ft`` as
-#: published (``hidden_irreps="128x0e+128x1o"``, ``MLP_irreps="16x0e"``). The
-#: bit-parity oracle states them literally so ``from_checkpoint`` has to derive
-#: the same numbers from the irreps strings on its own.
-OFFICIAL_NUM_FEATURES = 128
-OFFICIAL_MAX_HIDDEN_L = 1
-OFFICIAL_MLP_DIM = 16
-
-#: Offline OMol asset inside :data:`WEIGHTS_DIR_ENV`: the cueq ``state_dict`` of
-#: ``MACE-omol-0-extra-large-1024``. The shipped ``OMOL-cueq.model`` is a
-#: *pickled* ``mace.modules.models.ScaleShiftMACE`` — reading it needs ``mace``
-#: and ``e3nn`` imported, which CLAUDE.md forbids and which the toolchain does
-#: not install — so it was dumped out of tree into the plain ``name -> tensor``
-#: twin that ``torch.load(weights_only=True)`` reads with no third-party class
-#: at all, exactly the shape MatPES already ships
-#: (``matpes_r2scan_cueq_state.pt``). The converter sits beside the asset as
-#: ``convert_omol_to_cueq_state.py``.
-OMOL_WEIGHTS_FILE = "omol_cueq_state.pt"
-
-#: Hard-coded golden: every ``nn.Parameter`` tensor of the OMol model the
-#: official checkpoint has to fill. Pinning the count keeps
-#: ``test_official_omol_load_fills_every_learnable`` from passing vacuously on
-#: a model that lost half its blocks.
-OMOL_PARAMETER_COUNT = 104
-
-#: Hard-coded golden: the checkpoint keys with no home in molnex's OMol model.
-#: ``OMOL_REMAP`` exists with ``on_unexpected="return"`` because the OMol family
-#: *can* ship auxiliary heads this port does not model; the single-head
-#: ``omol`` checkpoint actually shipped has none, so the snapshot is empty —
-#: and any future key growing into this list is a deliberate decision, not a
-#: silent one.
-OMOL_UNEXPECTED_KEYS: list[str] = []
-
-#: Hard-coded goldens (eV, eV/Å): energy, ``max|F|`` and ``F[0]`` of the
-#: ``omol_cluster`` fixture under the official OMol weights, captured at
-#: ``OMP_NUM_THREADS=1`` — see :class:`TestOfficialOMolWeights` for the full
-#: provenance and :data:`OMOL_ENERGY_TOL` for why the thread count is named.
-OMOL_GOLDEN_ENERGY = -3122.454566006894
-OMOL_GOLDEN_MAX_FORCE = 5.397722165018621
-OMOL_GOLDEN_FIRST_FORCE = (-5.397722165018621, -3.9298849841895853, -3.931997122634094)
-
-#: The repo's *numerical* tolerances (energy 1e-6 eV, force 1e-4 eV/Å), not the
-#: exact ones, because this surface is **not** bit-reproducible across thread
-#: counts: the CPU reduction order inside the cuEquivariance fallback follows
-#: ``torch.get_num_threads()``. Measured here it is bit-identical within a
-#: thread count and across repeat processes, but ``{1, 4, 16}`` threads and
-#: this node's 48-thread default disagree by 3.2e-08 eV / 9.3e-08 eV/Å.
-#: Tightening to the exact pair would make the case pass or fail on how many
-#: cores the runner happens to have — a flake, not a stricter lock.
-OMOL_ENERGY_TOL = 1e-6
-OMOL_FORCE_TOL = 1e-4
-
 _TEST_PACKAGE = Path(__file__).resolve().parent
-
-
-def _official_weights_absent(filename: str) -> bool:
-    """Whether the gated offline asset ``filename`` is unavailable.
-
-    Args:
-        filename: File expected inside the :data:`WEIGHTS_DIR_ENV` directory.
-
-    Returns:
-        ``True`` when the environment variable is unset or the file is missing,
-        which is the skip condition of the weights-gated cases.
-    """
-    directory = os.environ.get(WEIGHTS_DIR_ENV)
-    return directory is None or not (Path(directory) / filename).is_file()
 
 
 # --------------------------------------------------------------------------
@@ -567,7 +496,7 @@ class TestFromCheckpoint:
         ``matpes_r2scan_config.json`` holds, so a case-sensitive comparison
         against the spec's lower-case ``"agnesi"`` would reject the very
         checkpoint this constructor exists for — and
-        ``test_official_checkpoint_bit_parity`` would only catch it where the
+        ``regressions/mace-official-weights.py`` would only catch it where the
         offline weights are installed.
         """
         source = _filled(tiny_matpes_spec, seed=0)
@@ -708,175 +637,3 @@ class TestLoadMatpesStateDict:
         load_matpes_state_dict(matpes_variant, state)
 
         assert float(matpes_variant.scale_shift.scale) == pytest.approx(FROZEN_SCALAR_VALUE)
-
-
-@pytest.mark.skipif(
-    os.environ.get(WEIGHTS_DIR_ENV) is None,
-    reason=f"{WEIGHTS_DIR_ENV} unset — the converted official weights are an offline asset",
-)
-def test_official_checkpoint_bit_parity() -> None:
-    """The real MatPES checkpoint loads identically both ways (``science``).
-
-    ``from_checkpoint`` against the hand-written "construct + ``MATPES_REMAP``"
-    path on ``MACE-matpes-r2scan-omat-ft`` (converted offline with
-    ``mace.cli.convert_e3nn_cueq``; that tool is never imported here). Bit
-    parity, not a tolerance: the two paths must place the very same tensors.
-    The oracle arm states the published ``128 / 1 / 16`` dimensions literally,
-    so ``from_checkpoint`` has to derive them from ``hidden_irreps`` /
-    ``MLP_irreps`` unaided.
-    """
-    directory = Path(os.environ[WEIGHTS_DIR_ENV])
-    config_path = directory / "matpes_r2scan_config.json"
-    weights_path = directory / "matpes_r2scan_cueq_state.pt"
-    official = json.loads(config_path.read_text())
-
-    manual = MACEPotential(
-        MACEMatpesSpec(
-            atomic_numbers=official["atomic_numbers"],
-            atomic_energies=official["atomic_energies"],
-            r_max=official["r_max"],
-            num_bessel=official["num_bessel"],
-            num_polynomial_cutoff=official["num_polynomial_cutoff"],
-            l_max=official["max_ell"],
-            num_features=OFFICIAL_NUM_FEATURES,
-            max_hidden_l=OFFICIAL_MAX_HIDDEN_L,
-            num_interactions=official["num_interactions"],
-            correlation=official["correlation"],
-            mlp_dim=OFFICIAL_MLP_DIM,
-            radial_mlp=official["radial_MLP"],
-            scale=official["atomic_inter_scale"],
-            shift=official["atomic_inter_shift"],
-        ),
-        use_fallback=True,
-    )
-    MATPES_REMAP.load(manual, torch.load(weights_path, map_location="cpu", weights_only=True))
-
-    built = MACEPotential.from_checkpoint(config_path, weights_path, use_fallback=True)
-
-    reference = manual.state_dict()
-    produced = built.state_dict()
-    assert set(produced) == set(reference)
-    for name, want in reference.items():
-        assert torch.equal(produced[name], want), name
-
-
-def _official_omol() -> tuple[MACEPotential, dict[str, torch.Tensor]]:
-    """The full-size OMol model with the official weights, and that state.
-
-    Hyper-parameters are **not** guessed: the four that vary per checkpoint —
-    element table, ``E0`` table, ``scale``, ``shift`` — are read out of the
-    checkpoint itself, and every other field is the
-    :class:`~molzoo.mace.spec.MACEOMolSpec` default, which is exactly what the
-    deleted ``scripts/omol_port/verify_e2e.py`` did (commit ``b85d12f^``:
-    ``MACEOMol(atomic_numbers=ztab, atomic_energies=ae, scale=…, shift=…)``).
-    The checkpoint corroborates every default it can: ``r_max`` 6.0,
-    ``num_interactions`` 3, ``num_bessel`` 8 (``bessel_weights``),
-    ``num_polynomial_cutoff`` 5 (``cutoff_fn.p``), ``num_features`` 1024 and
-    ``charge_classes`` / ``spin_classes`` 201 / 101 (the joint-embedding
-    tables), ``mlp_dim`` 16 (``readouts.0.linear_1.weight`` = 1024 × 16).
-
-    ``use_fallback=True`` because the fused cuEquivariance kernels need a GPU
-    and the ops wheel; :class:`~molzoo.mace.variants.MACEOMol` has no such
-    keyword (it hard-codes the fused path), so the spec is built directly.
-
-    Returns:
-        The loaded ``MACEPotential`` in eval mode and the official state.
-    """
-    weights_path = Path(os.environ[WEIGHTS_DIR_ENV]) / OMOL_WEIGHTS_FILE
-    state = torch.load(weights_path, map_location="cpu", weights_only=True)
-    spec = MACEOMolSpec(
-        atomic_numbers=state["atomic_numbers"].tolist(),
-        atomic_energies=state["atomic_energies_fn.atomic_energies"].flatten().tolist(),
-        scale=float(state["scale_shift.scale"]),
-        shift=float(state["scale_shift.shift"]),
-        use_fallback=True,
-    )
-    model = MACEPotential(spec, use_fallback=True)
-    OMOL_REMAP.load(model, state)
-    return model.eval(), state
-
-
-@pytest.mark.skipif(
-    _official_weights_absent(OMOL_WEIGHTS_FILE),
-    reason=(
-        f"{WEIGHTS_DIR_ENV} unset or {OMOL_WEIGHTS_FILE} absent — "
-        "the converted official OMol weights are an offline asset"
-    ),
-)
-class TestOfficialOMolWeights:
-    """The official OMol checkpoint, loaded and evaluated in tree (``science``).
-
-    This class re-homes the role of the deleted ``scripts/omol_port/verify_*.py``
-    oracles, which ``src/molzoo/specs/mace_omol.md`` §7.1 still cites for its
-    7.0e-7 eV / 4.3e-6 eV/Å parity record (deleted in ``b85d12f``; §7.1's own
-    Appendix-A entry of 2026-08-09 calls the record unreproducible in-tree).
-    What it is **not** is a replacement for that record: nothing here compares
-    against ``mace-torch`` or ``e3nn``, and no claim about upstream parity can
-    be read out of a green run. It is a **stability lock** — the official
-    weights load strictly, and the resulting surface is the one measured on
-    this machine on the date below. A future refactor that shifts the OMol
-    energy by more than a microelectronvolt has to say so out loud.
-
-    Provenance of the goldens (all captured 2026-08-09 on the machine this
-    repository is checked out on):
-
-    * weights ``$MOLNEX_MACE_WEIGHTS_DIR/omol_cueq_state.pt``,
-      sha256 ``074c86154a1d709f…``, derived from ``OMOL-cueq.model``
-      (sha256 ``8735a524e99fe80c…``, the ``mace.cli.convert_e3nn_cueq`` twin of
-      ``MACE-omol-0-extra-large-1024``) by the ``convert_omol_to_cueq_state.py``
-      script stored beside it — see :data:`OMOL_WEIGHTS_FILE` for why a
-      re-dump was needed at all;
-    * ``torch 2.12.1+cpu``, ``cuequivariance 0.10.0``, CPU, fp64 (the autouse
-      ``fp64`` fixture), ``use_fallback=True``, ``OMP_NUM_THREADS=1``, no seed
-      anywhere — the model is fully determined by the checkpoint and the
-      geometry is a literal, but the thread count is *not* free
-      (:data:`OMOL_ENERGY_TOL`), and on a many-core runner the forward is two
-      orders slower than at ``OMP_NUM_THREADS=8`` (48-way oversubscription on
-      a five-atom graph: ~80 s against ~0.6 s);
-    * the extraction is corroborated at *value* level, not only by shapes:
-      ``radial_embedding.bessel_fn.bessel_weights`` sits 2.2120e-07 Å⁻¹ from
-      the analytic ``nπ/r_max`` init, the fingerprint recorded independently in
-      :mod:`molzoo.mace.checkpoint`'s docstring and §7.1.
-    """
-
-    def test_official_omol_load_fills_every_learnable(self) -> None:
-        """Every ``nn.Parameter`` is covered; the unhoused keys are the snapshot.
-
-        :meth:`~molzoo.mace.checkpoint.CheckpointRemap.load` already raises on
-        an unfilled learnable, so the load itself is half the assertion; the
-        explicit subset check states the doctrine where a reader can see it,
-        and the count keeps it from holding vacuously on a shrunken model.
-        """
-        model, state = _official_omol()
-
-        renamed = OMOL_REMAP.rename(state)
-        parameters = {name for name, _ in model.named_parameters()}
-
-        assert len(parameters) == OMOL_PARAMETER_COUNT
-        assert parameters <= set(renamed)
-        assert sorted(set(renamed) - set(model.state_dict())) == OMOL_UNEXPECTED_KEYS
-
-    def test_official_omol_energy_and_forces_match_the_goldens(
-        self, omol_cluster: TensorDict
-    ) -> None:
-        """The loaded surface reproduces the captured energy and forces.
-
-        Five atoms (``O H H C H``, all inside OMol's 83-element table) at the
-        package's literal :data:`~tests.test_molzoo.test_mace.conftest.CLUSTER_POS`
-        coordinates, neutral closed-shell singlet, every ordered intra-graph
-        pair as an edge. Goldens are this machine's own output, not an upstream
-        number — see the class docstring.
-        """
-        model, _ = _official_omol()
-
-        result = model(omol_cluster)
-
-        energy = result["graphs", "energy"]
-        forces = result["atoms", "forces"]
-        assert energy.shape == (1,)
-        assert forces.shape == (len(omol_cluster["atoms", "Z"]), 3)
-        assert energy.item() == pytest.approx(OMOL_GOLDEN_ENERGY, abs=OMOL_ENERGY_TOL)
-        assert forces.abs().max().item() == pytest.approx(OMOL_GOLDEN_MAX_FORCE, abs=OMOL_FORCE_TOL)
-        assert forces[0].tolist() == pytest.approx(
-            list(OMOL_GOLDEN_FIRST_FORCE), abs=OMOL_FORCE_TOL
-        )

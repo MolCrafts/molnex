@@ -45,8 +45,8 @@ Then construct the source pointing at that directory:
 from molix.datasets import WaterLESSource
 
 train = WaterLESSource("~/datasets/water_les", split="train")
-val   = WaterLESSource("~/datasets/water_les", split="val")
-test  = WaterLESSource("~/datasets/water_les", split="test")
+val = WaterLESSource("~/datasets/water_les", split="val")
+test = WaterLESSource("~/datasets/water_les", split="test")
 ```
 
 ### Auto-download

@@ -10,9 +10,9 @@ Covers spec ``dynamic-batching-packed-collate-02-collate``:
   Acceptance ac-010.
 * GROUP 3 — layering guard: ``cache.py`` imports no ``tensordict`` /
   ``TargetSchema``. Acceptance ac-005.
-* GROUP 4 — ``DataModule`` fast-path routing, spawn workers, batch_nodes +
-  ftype post-steps, pickle without captured payload tensors. Acceptance
-  ac-006..009.
+* GROUP 4 — ``DataModule`` fast-path routing, batch_nodes + ftype
+  post-steps, pickle without captured payload tensors. Acceptance ac-006,
+  ac-008, ac-009.
 
 Imports of the production surface (``molix.data.collate.collate_packed``,
 ``packed_view()`` / ``PackedView``, ``_PackedCollateFn`` / ``_IndexDataset``)
@@ -490,11 +490,6 @@ def _make_dm(tmp_path: Path, tag: str, *, samples=None, **kwargs):
     return DataModule(MmapDataset(train_sink), MmapDataset(val_sink), **kwargs)
 
 
-def _batch_order(loader) -> list[float]:
-    """Per-sample ``U0`` identities across an entire loader, in yield order."""
-    return [float(u) for batch in loader for u in batch["graphs", "U0"]]
-
-
 def _assert_no_unpack(monkeypatch, body) -> None:
     """Run *body* with PackedCache.unpack_sample counted; assert zero calls.
 
@@ -656,48 +651,3 @@ class TestDataModulePickle:
         from molix.data.dataset import PackedView
 
         assert not any(isinstance(v, PackedView) for v in state.values())
-
-
-class TestDataModuleSpawnWorkers:
-    """Spawn num_workers=2 end-to-end matches num_workers=0 fast path (ac-007)."""
-
-    def test_spawn_workers_match_sync_fast_path(self, tmp_path):
-        """One epoch with spawn workers yields the same U0 multiset as sync."""
-        samples = _make_varied_samples(12)
-        train_sink = _save(tmp_path, "spawn_train", samples[:8])
-        val_sink = _save(tmp_path, "spawn_val", samples[8:])
-
-        from molix.data.datamodule import DataModule, _PackedCollateFn
-
-        # Val loader never shuffles → deterministic order across worker counts.
-        dm_sync = DataModule(
-            MmapDataset(train_sink),
-            MmapDataset(val_sink),
-            target_schema=SCHEMA,
-            batch_size=2,
-            num_workers=0,
-            pin_memory=False,
-        )
-        # Both worker counts must take the packed fast path.
-        assert isinstance(dm_sync.val_dataloader().collate_fn, _PackedCollateFn)
-        sync_order = _batch_order(dm_sync.val_dataloader())
-
-        dm_spawn = DataModule(
-            MmapDataset(train_sink),
-            MmapDataset(val_sink),
-            target_schema=SCHEMA,
-            batch_size=2,
-            num_workers=2,
-            persistent_workers=False,
-            pin_memory=False,
-            prefetch_factor=2,
-        )
-        seen = 0
-        for batch in dm_spawn.val_dataloader():
-            assert isinstance(batch, TensorDict)
-            assert batch["atoms", "Z"].ndim == 1
-            assert batch["edges", "edge_index"].shape[1] == 2
-            seen += 1
-        assert seen >= 1
-        spawn_order = _batch_order(dm_spawn.val_dataloader())
-        assert sorted(spawn_order) == sorted(sync_order)

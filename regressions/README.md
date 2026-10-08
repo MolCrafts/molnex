@@ -14,3 +14,8 @@ PYTHONPATH=src python regressions/<name>.py   # prints OK, exits 0; exits 1 on d
 
 Every script's header comment must record the capture command, the commit sha
 the goldens came from, the torch version, the date, and the device/precision.
+
+`elec-reference-parity.py` is the exception to "captured from a named commit":
+its references are external (published Madelung constants, GROMACS SPME,
+espressomd DipolarP3M), stored as literals or under `data/`. CI never runs
+anything here; `tests/` holds unit tests only.

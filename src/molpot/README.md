@@ -40,8 +40,8 @@ data = {
 }
 out = composer(node_features=node_features, data=data, compute_forces=True)
 
-print(out["energy"].shape)   # (num_graphs,)
-print(out["forces"].shape)   # (n_nodes, 3)
+print(out["energy"].shape)  # (num_graphs,)
+print(out["forces"].shape)  # (n_nodes, 3)
 ```
 
 ## Training Integration

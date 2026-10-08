@@ -30,13 +30,13 @@ import torch
 
 def main() -> int:
     from molrep.condensation import (
+        UNMATCHED_TYPE_ID,
         ClassAssignment,
         Condenser,
         InteractionClass,
         PhysicalErrorMetrics,
         TypeSystem,
         TypeSystemLabeler,
-        UNMATCHED_TYPE_ID,
         bond_default_criterion,
     )
     from molrep.heads import Labeler, MultiTypeHead, TypeHead

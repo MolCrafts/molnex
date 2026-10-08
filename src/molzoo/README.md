@@ -96,8 +96,8 @@ encoder = MACE(
     num_features=64,
     r_max=5.0,
 )
-batch = encoder(batch)                       # writes atoms.node_features
-features = batch["atoms", "node_features"]   # (N, num_layers, 64)
+batch = encoder(batch)  # writes atoms.node_features
+features = batch["atoms", "node_features"]  # (N, num_layers, 64)
 ```
 
 Foundation backbone — configured by a validated spec, composed by the caller:
@@ -110,7 +110,7 @@ from molzoo.mace.spec import MACEMatpesSpec
 spec = MACEMatpesSpec(atomic_numbers=[1, 6, 8], atomic_energies=[-13.6, -1029.0, -2041.0])
 encoder = MACEEncoder(spec)
 
-vectors = edge_vectors(pos, edge_index)          # optional shifts=... for PBC
+vectors = edge_vectors(pos, edge_index)  # optional shifts=... for PBC
 node_attrs = encoder.node_attrs(Z, pos.dtype)
 edge_feats, cutoff = encoder.radial_features(edge_lengths(vectors), Z, edge_index)
 per_layer = encoder.layer_features(

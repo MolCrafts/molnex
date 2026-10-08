@@ -134,13 +134,7 @@ class TestSupportClassifier:
         assert regimes[2] == CoverageRegime.UNKNOWN
 
         # Prove provenance package does not reimplement softmax-max.
-        prov_root = (
-            Path(__file__).resolve().parents[3]
-            / "src"
-            / "molpot"
-            / "heads"
-            / "provenance"
-        )
+        prov_root = Path(__file__).resolve().parents[3] / "src" / "molpot" / "heads" / "provenance"
         for py in prov_root.glob("*.py"):
             src = py.read_text()
             # No parallel softmax implementation (docs may mention the word).
@@ -240,13 +234,7 @@ class TestParameterProvenance:
 
 class TestNoActiveLearningApis:
     def test_public_modules_have_no_acquisition(self):
-        prov_root = (
-            Path(__file__).resolve().parents[3]
-            / "src"
-            / "molpot"
-            / "heads"
-            / "provenance"
-        )
+        prov_root = Path(__file__).resolve().parents[3] / "src" / "molpot" / "heads" / "provenance"
         forbidden = (
             "acquisition",
             "active_learning",

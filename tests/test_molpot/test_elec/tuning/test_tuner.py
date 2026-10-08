@@ -1,15 +1,16 @@
+"""Tuner input validation and neighbour filtering.
+
+Whether the tuned parameters reach the requested accuracy is a timing-driven
+search over full Ewald / PME / P3M sums; that parity check lives in
+``regressions/elec-reference-parity.py``.
+"""
+
 import pytest
 import torch
 
-from molpot.potentials.elec import (
-    CoulombPotential,
-    EwaldCalculator,
-    P3MCalculator,
-    PMECalculator,
-)
 from molpot.potentials.elec.tuning import tune_ewald, tune_p3m, tune_pme
 from molpot.potentials.elec.tuning.tuner import TunerBase
-from tests.regression.conftest import DEVICES, DTYPES, define_crystal, neighbor_list
+from tests.test_molpot.test_elec.conftest import DEVICES, DTYPES, periodic_neighbor_list
 
 DEFAULT_CUTOFF = 4.4
 
@@ -20,6 +21,24 @@ def system(device=None, dtype=None):
     positions = 0.3 * torch.arange(12, dtype=dtype, device=device).reshape((4, 3))
 
     return charges, cell, positions
+
+
+def cscl():
+    """CsCl in a unit cube: ``(positions, charges (2, 1), cell)``, float32."""
+    positions = torch.tensor([[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]])
+    charges = torch.tensor([[-1.0], [1.0]])
+    return positions, charges, torch.eye(3)
+
+
+def neighbor_list(positions, box, cutoff, full_neighbor_list=False):
+    pairs, _, dist = periodic_neighbor_list(
+        positions.to(torch.float64),
+        box.to(torch.float64),
+        cutoff,
+        full_list=full_neighbor_list,
+        periodic=True,
+    )
+    return pairs.to(positions.device), dist.to(dtype=positions.dtype, device=positions.device)
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -44,82 +63,14 @@ def test_TunerBase_init(device, dtype):
 
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize(
-    ("calculator", "tune", "param_length"),
-    [
-        (EwaldCalculator, tune_ewald, 1),
-        (PMECalculator, tune_pme, 2),
-        (P3MCalculator, tune_p3m, 2),
-    ],
-)
-@pytest.mark.parametrize("accuracy", [1e-1, 1e-3, 1e-5])
-@pytest.mark.parametrize("full_neighbor_list", [True, False])
-def test_parameter_choose(
-    device, dtype, calculator, tune, param_length, accuracy, full_neighbor_list
-):
-    """
-    Check that the Madelung constants obtained from the Ewald sum calculator matches
-    the reference values and that all branches of the from_accuracy method are covered.
-    """
-    # Get input parameters and adjust to account for scaling
-    pos, charges, cell, madelung_ref, num_units = define_crystal(dtype=dtype, device=device)
-
-    # Compute neighbor list
-    neighbor_indices, neighbor_distances = neighbor_list(
-        positions=pos,
-        box=cell,
-        cutoff=DEFAULT_CUTOFF,
-        full_neighbor_list=full_neighbor_list,
-    )
-
-    smearing, params, _ = tune(
-        charges,
-        cell,
-        pos,
-        DEFAULT_CUTOFF,
-        neighbor_indices=neighbor_indices,
-        neighbor_distances=neighbor_distances,
-        full_neighbor_list=full_neighbor_list,
-        accuracy=accuracy,
-    )
-
-    assert len(params) == param_length
-
-    # Compute potential and compare against target value using default hypers
-    calc = calculator(
-        potential=(CoulombPotential(smearing=smearing)),
-        full_neighbor_list=full_neighbor_list,
-        **params,
-    )
-    calc.to(device=device, dtype=dtype)
-    potentials = calc.forward(
-        positions=pos,
-        charges=charges,
-        cell=cell,
-        neighbor_indices=neighbor_indices,
-        neighbor_distances=neighbor_distances,
-    )
-    energies = potentials * charges
-    madelung = -torch.sum(energies) / num_units
-
-    torch.testing.assert_close(madelung, madelung_ref, atol=0, rtol=accuracy)
-
-
-@pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("full_neighbor_list", [True, False])
 def test_cutoff_filter(device, dtype, full_neighbor_list):
-    """
-    Check that `TunerBase` initilizes correctly.
-
-    We are using dummy `neighbor_indices` and `neighbor_distances` to verify types. Have
-    to be sure that these dummy variables are initilized correctly.
-    """
+    """Filtering a longer-range list to the cutoff equals building it at the cutoff."""
     _, cell, positions = system(device, dtype)
     neighbor_indices, neighbor_distances = neighbor_list(
         positions=positions,
         box=cell,
-        cutoff=DEFAULT_CUTOFF * 10,
+        cutoff=DEFAULT_CUTOFF * 2,
         full_neighbor_list=full_neighbor_list,
     )
     _, filtered_distances = TunerBase.filter_neighbors(
@@ -138,7 +89,7 @@ def test_cutoff_filter(device, dtype, full_neighbor_list):
 
 @pytest.mark.parametrize("tune", [tune_ewald, tune_pme, tune_p3m])
 def test_accuracy_error(tune):
-    pos, charges, cell, _, _ = define_crystal()
+    pos, charges, cell = cscl()
 
     match = "'foo' is not a float."
     neighbor_indices, neighbor_distances = neighbor_list(
@@ -158,7 +109,7 @@ def test_accuracy_error(tune):
 
 @pytest.mark.parametrize("tune", [tune_ewald, tune_pme, tune_p3m])
 def test_exponent_not_1_error(tune):
-    pos, charges, cell, _, _ = define_crystal()
+    pos, charges, cell = cscl()
     neighbor_indices, neighbor_distances = neighbor_list(
         positions=pos, box=cell, cutoff=DEFAULT_CUTOFF
     )

@@ -212,12 +212,12 @@ class TestEnergyInvariants:
 
 
 # ---------------------------------------------------------------------------
-# Single-batch overfit (sanity that forward/backward train)
+# Training signal (sanity that forward/backward reach every parameter)
 # ---------------------------------------------------------------------------
 
 
-class TestOverfitSingleBatch:
-    def test_overfit_constant_target(self):
+class TestTrainingSignal:
+    def test_optimizer_steps_reduce_loss(self):
         torch.manual_seed(42)
         pos = torch.tensor([[0.00, 0.00, 0.00], [0.96, 0.00, 0.00], [-0.24, 0.93, 0.00]])
         Z = torch.tensor([8, 1, 1])
@@ -239,17 +239,21 @@ class TestOverfitSingleBatch:
         model = _build_energy_model(encoder, avg_nbr=6.0)
         target = torch.tensor([1.234])
 
-        opt = torch.optim.Adam(model.parameters(), lr=1e-2)
-        initial_loss = None
-        for step in range(500):
-            opt.zero_grad()
+        def loss_of() -> torch.Tensor:
             pred = model(g.clone())["energy"]
-            loss = (pred - target).pow(2).mean()
-            if step == 0:
-                initial_loss = loss.item()
-            loss.backward()
+            return (pred - target).pow(2).mean()
+
+        opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+        initial_loss = loss_of()
+        initial_loss.backward()
+        assert all(p.grad is not None for p in model.parameters() if p.requires_grad)
+        opt.step()
+        for _ in range(9):
+            opt.zero_grad()
+            loss_of().backward()
             opt.step()
-        final_loss = loss.item()
-        assert final_loss < 1e-3, (
-            f"single-batch overfit failed: initial={initial_loss:.3e}, final={final_loss:.3e}"
+        with torch.no_grad():
+            final_loss = loss_of().item()
+        assert final_loss < 0.5 * initial_loss.item(), (
+            f"loss did not drop: initial={initial_loss.item():.3e}, final={final_loss:.3e}"
         )

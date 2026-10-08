@@ -15,9 +15,7 @@ The derived ``omol_cueq_state.pt`` is a throwaway artifact — the source
 checkpoint is downloadable (ACEsuit mace-foundations OMol family) and this
 script regenerates the dump in one run, so only the code is kept, not the
 419 MB output. The ``MOLNEX_MACE_WEIGHTS_DIR``-gated
-``TestOfficialOMolWeights`` cases in
-``tests/test_molzoo/test_mace/test_checkpoint.py`` skip cleanly while the
-dump is absent.
+``regressions/mace-official-weights.py`` exits 2 while the dump is absent.
 
 Run once, next to the checkpoint (or pass explicit paths)::
 

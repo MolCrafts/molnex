@@ -13,7 +13,8 @@ Hard-coded goldens only — no third-party oracles. Pins:
 
 Provenance
 ----------
-    capture command  : PYTHONPATH=src python regressions/learnable-classical-ff-02-valence-topology.py
+    capture command  : PYTHONPATH=src \
+                       python regressions/learnable-classical-ff-02-valence-topology.py
     date             : 2026-08-10
 """
 
