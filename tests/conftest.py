@@ -29,8 +29,25 @@ the module they exercise (encoders in ``test_molzoo``, heads in
 
 from __future__ import annotations
 
+import random
+
+import numpy as np
+import pytest
 import torch
 from tensordict import TensorDict
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Seed every global RNG before each test's fixtures are built.
+
+    Runs ahead of fixture setup, so module- and session-scoped fixtures that
+    draw random tensors see the same state as the test body: a test's inputs
+    never depend on which tests ran before it on the same xdist worker.
+    """
+    random.seed(0)
+    np.random.seed(0)
+    torch.manual_seed(0)
 
 
 def make_graph_batch(

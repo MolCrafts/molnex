@@ -10,10 +10,6 @@ from molix.md import (
     LangevinVerletIntegrator,
     LennardJonesCutForceField,
     MaxwellBoltzmann,
-    MDHook,
-    MDObservables,
-    MDRunner,
-    MDState,
     NeighborList,
 )
 from tests.test_molix.test_md.conftest import make_cubic_lattice
@@ -55,44 +51,6 @@ def _lj_cut_argon(skin: float) -> tuple[LennardJonesCutForceField, torch.Tensor]
         cutoff=3.5,
     )
     return force, pos
-
-
-class _TotalEnergyHook(MDHook):
-    """Sample the conserved quantity once per step — the drift observable."""
-
-    def __init__(self) -> None:
-        self.totals: list[torch.Tensor] = []
-
-    def on_step_end(self, runner: MDRunner, step: int, obs: MDObservables) -> None:
-        self.totals.append(obs.total.detach().clone())
-
-
-def _argon_nve(skin: float, *, n_steps: int = 100) -> tuple[NeighborList, MDState, list[float]]:
-    """100 steps of NVE argon through the **public** ``MD`` path at one skin.
-
-    Deterministic CPU float64: seeded Maxwell-Boltzmann velocities, γ = 0, no
-    wall clock, no filesystem, no network. No cadence kwarg — the driver
-    derives the integrator's switch from the force field, and the list owns
-    when to rebuild.
-
-    Returns:
-        ``(neighbors, final_state, total_energies)`` — the list (for
-        ``rebuild_count`` / ``ndanger``), the final :class:`MDState`, and the
-        per-step total energy in amu·Å²/fs².
-    """
-    force, pos = _lj_cut_argon(skin)
-    sampler = _TotalEnergyHook()
-    velocities = MaxwellBoltzmann(39.95, n_atoms=64).sample(300.0, seed=0)
-    md = MD(force, mass=39.95, dt=4.0, gamma=0.0, dtype=torch.float64, hooks=[sampler])
-    md.set_potential_dtype(torch.float64)
-    final = md.run(pos, velocities, n_steps, chunk=1)
-    return force.neighbors, final, [float(total) for total in sampler.totals]
-
-
-def _drift(totals: list[float]) -> float:
-    """``max_t |E(t) − E(0)| / |E(0)|`` — the dimensionless conservation metric."""
-    reference = totals[0]
-    return max(abs(total - reference) for total in totals) / abs(reference)
 
 
 class TestMD:
@@ -229,51 +187,6 @@ class TestMDNeighborPolicy:
         compiled = torch.compile(force, backend="eager")
         md = MD(compiled, mass=39.95, dt=4.0, dtype=torch.float64)
         assert md.integrator.rebuild is True
-
-    def test_a_skin_costs_no_energy_conservation(self):
-        """Invariant (c): a skin-gated run must conserve energy as well as one
-        that runs the policy at every force evaluation.
-
-        A pair inside ``r_cut`` but missing from the list contributes an O(1)
-        force error (lj/cut shifts the *energy* continuous at the cutoff, not
-        the force), which integrates into a one-signed leak — so a broken skin
-        shows up as drift, not as noise. The ``skin=0`` baseline is itself
-        nonzero (finite-``dt`` velocity-Verlet), which is asserted so the ratio
-        cannot pass vacuously.
-        """
-        _, _, gated = _argon_nve(skin=1.0)
-        _, _, every_eval = _argon_nve(skin=0.0)
-        baseline = _drift(every_eval)
-        assert baseline > 0.0, "the no-skin baseline must have real discretisation drift"
-        assert _drift(gated) <= 3.0 * baseline
-
-    def test_the_skin_buys_rebuilds_without_moving_the_physics(self):
-        """Invariant (f): the observables the public path exposes.
-
-        ``rebuild_count(skin=0) == 100`` is the anti-vacuity pin — a wiring
-        that never calls the policy satisfies every equality and monotonicity
-        assertion here but not that literal. One policy call per force
-        evaluation over 100 steps, and the entry evaluation sits at the build
-        positions (``max_d2 == 0``, strict ``>``), so it does not rebuild.
-        ``ndanger(skin=0) == 99`` (not 100): the declined entry evaluation
-        consumes one ``ago`` tick, so step 1's rebuild lands at ``ago == 2``
-        (not dangerous) and only the remaining 99 rebuilds — each at
-        ``ago == 1 == max(every, delay)`` after a reset — count. Link 04's
-        degenerate-limit alarm, off by exactly the entry evaluation.
-        """
-        arms = {skin: _argon_nve(skin=skin) for skin in (0.0, 0.5, 1.0)}
-        counts = [arms[skin][0].rebuild_count for skin in (0.0, 0.5, 1.0)]
-        assert counts == sorted(counts, reverse=True)
-        assert counts[0] == 100
-        assert counts[-1] < counts[0]
-        assert arms[0.0][0].ndanger == 99
-        assert arms[0.5][0].ndanger == 0
-        assert arms[1.0][0].ndanger == 0
-        reference = arms[0.0][1].energy
-        for skin in (0.5, 1.0):
-            torch.testing.assert_close(
-                arms[skin][1].energy, reference, atol=1e-10, rtol=0, msg=f"skin={skin}"
-            )
 
 
 class TestMaxwellBoltzmann:

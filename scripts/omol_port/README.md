@@ -22,7 +22,8 @@ imports here.
   state_dict twin of `OMOL-cueq.model`) without importing mace/e3nn. The
   419 MB dump itself is deliberately **not** kept: the source checkpoint is
   downloadable, only the code is preserved. While the dump is absent, the
-  `MOLNEX_MACE_WEIGHTS_DIR`-gated `TestOfficialOMolWeights` cases skip.
+  `MOLNEX_MACE_WEIGHTS_DIR`-gated `regressions/mace-official-weights.py`
+  exits 2.
 - `src/molzoo/mace/variants.py` — `MACEOMol` (thin alias over
   `molzoo.mace.potential.MACEPotential`) + the `load_omol_state_dict`
   back-compat loader

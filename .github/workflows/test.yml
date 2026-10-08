@@ -8,8 +8,9 @@ name: test
 #         and main on MolCrafts, pull requests, tags and dispatches: 3.12 and
 #         3.13.
 #
-# Linux only: the extension builds against CPU torch on Linux runners. The
-# regression suites (-m regression) are not in CI.
+# Linux only: the extension builds against CPU torch on Linux runners.
+# tests/ holds unit tests only; regressions/ and benchmarks/ are scripts and
+# are not in CI.
 on:
   push:
     branches: ["**"]

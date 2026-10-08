@@ -78,9 +78,9 @@ Four packages under `src/`: **molix** (infra) ← **molrep** (representation) �
 - `src/molzoo/specs/` — `allegro.md`, `mace.md`, `mace_matpes.md`, `mace_omol.md`, `pinet2.md`
   (`mace_omol.md` and `allegro.md` are mirrored under `docs/molzoo/specs/`)
 
-**tests** (mirror + regression; not a library package)
+**tests** (unit mirror only; not a library package)
 - `tests/test_molix/…`, `tests/test_molrep/…`, `tests/test_molpot/…`, `tests/test_molzoo/…`
-- `tests/regression/` — Ewald/PME/P3M numerical parity (auto-marked, excluded from default run)
+- Ewald/PME/P3M reference-value parity: `regressions/elec-reference-parity.py` (script, not pytest)
 - Gate: `scripts/check_test_mirror.py --strict-pinet` for PiNet spine
 
 **interface/** (repo root, not under `src/`)
@@ -142,7 +142,7 @@ Classical potentials + `BasePotential`; derivation (`ForceDerivation` dual backe
 - **molrep**: pure `nn.Module` + Pydantic `*Spec`; cuEquivariance for TP; PiNet GC blocks have **no** energy/force
 - **molpot**: `BasePotential` + explicit force backends; `ForceDerivation(method="autograd"|"functorch")` is the shared contract (default `autograd` for cuEq; `functorch` for pure-torch e.g. PiNet); elec is multi-layer calculator/lib/kernel/tuning
 - **molzoo**: encoder recipes prefer `TensorDictModuleBase` writing `atoms.node_features` `(N, layers, features)`; paper refs in module docstring; **PiNet potential temporarily co-located under `molzoo.pinet.potential`** (long-term home molpot); the MACE foundation variants are full energy/force models — one `molzoo.mace.potential.MACEPotential` with `MACEMatpes` / `MACEOMol` as thin `variants.py` aliases, all reached lazily
-- **tests**: industrial path mirror; unit tests under `tests/`; numerical parity in `tests/regression/`
+- **tests**: industrial path mirror; unit tests under `tests/`; numerical parity in `regressions/`
 
 ---
 
@@ -161,7 +161,7 @@ Classical potentials + `BasePotential`; derivation (`ForceDerivation` dual backe
 | `molpot.heads` / `potentials` / `derivation` / `pooling` / `composition` | physics + composition |
 | `molzoo.*` | encoder recipes (+ temporary full models: PiNetPotential, `molzoo.mace.MACEPotential` / MACEMatpes / MACEOMol) |
 | `molzoo.specs` | paper↔code contracts (not runtime) |
-| `tests/` | unit mirror + regression oracles |
+| `tests/` | unit mirror |
 
 **Hard-rule reminders for librarian:**
 1. Dependency: `molix` ← `molrep` ← `molzoo` / `molpot` (`molpot ↛ molzoo`).

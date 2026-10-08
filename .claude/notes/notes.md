@@ -63,8 +63,8 @@ src/<pkg>/<area>/<module>.py
 - One source module ↔ one primary test module.
 - One public class ↔ dedicated test class (and preferred: dedicated file when
   the source file still hosts multiple public types during migration).
-- Cross-package integration tests go under `tests/regression/` or an explicit
-  `test_*_integration.py` name — never as a substitute for unit mirrors.
+- Regression and e2e runs never go under `tests/`: reference-value parity is a
+  script in `regressions/`, performance probes live in `benchmarks/`.
 - Gate: `python scripts/check_test_mirror.py --strict-pinet`.
 
 **PiNet spine layout (landed):**

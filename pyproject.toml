@@ -54,7 +54,6 @@ dev = [
   "pytest>=7.0",
   "pytest-xdist>=3.5",
   "pytest-cov>=4.0",
-  "pytest-benchmark>=4.0",
   "ruff>=0.15",
   "ty>=0.0.25",
   "tox>=4.23",
@@ -64,7 +63,6 @@ docs = [
   "molcrafts-zensical-theme>=0.2.3",
   "mkdocstrings[python]>=0.30",
 ]
-bench = ["pytest-benchmark>=4.0"]
 
 [project.scripts]
 molnex = "molix.cli:app"
@@ -74,15 +72,14 @@ Repository = "https://github.com/molcrafts/molnex"
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]
-python_files = ["test_*", "bm_*"]
-python_classes = ["Test*", "BM*"]
+# Unit tests only. Reference-value parity runs live in regressions/ and
+# performance probes in benchmarks/, both plain scripts outside testpaths.
+testpaths = ["tests"]
+python_files = ["test_*"]
+python_classes = ["Test*"]
 markers = [
-  "slow: marks tests that compile/AOT-export models (deselect with '-m \"not slow\"')",
-  "regression: numerical reference-value parity suites under tests/regression/ (excluded by default; run with '-m regression')",
+  "slow: marks tests that compile models with torch.compile (deselect with '-m \"not slow\"')",
 ]
-# Unit runs stay fast: tests/regression/ is auto-marked and skipped by default.
-# A CLI -m overrides this (e.g. `pytest -m regression`, `pytest -m ""` for everything).
-addopts = ["-m", "not regression"]
 
 [tool.scikit-build]
 wheel.packages = ["src/molix", "src/molrep", "src/molpot", "src/molzoo"]

@@ -186,11 +186,11 @@ src/molzoo/pinet/               # spec, geometry, encoder, potential, properties
 # Install (editable, with C++ extensions via scikit-build-core + CMake >=4.0)
 pip install -e ".[dev]"
 
-# Run unit tests (default; tests/regression/ is auto-excluded via addopts)
+# Run unit tests (testpaths = tests/)
 python -m pytest tests/ -v
 
-# Run the numerical regression suite (reference-value parity; slow, ~minutes)
-python -m pytest -m regression
+# Run one reference-value parity script (slow, ~minutes; not pytest, not CI)
+PYTHONPATH=src python regressions/elec-reference-parity.py
 
 # Run single test file
 python -m pytest tests/test_molzoo/test_mace.py -v
@@ -210,13 +210,18 @@ Python >=3.12 required. Requires `torch>=2.10` (always use latest stable PyTorch
   files — no `helpers.py` / free-floating utility modules. Shared test code
   lives in the nearest `conftest.py` and is imported by package path
   (e.g. `from tests.conftest import make_graph_batch`).
-- **Unit tests** (everything outside `tests/regression/`) test one function or
-  module and must finish in seconds.
-- **`tests/regression/`** holds numerical reference-value parity suites
-  (Ewald/PME/P3M vs Madelung constants, GROMACS, espressomd — vendored from
-  torch-pme). Auto-marked `regression` by its `conftest.py` and excluded from
-  the default run; CI / pre-push should run `pytest -m regression` separately.
-- `slow` marker: AOT-export / compile tests (deselect with `-m "not slow"`).
+- `tests/` is **unit tests only**: one function or module, seconds each,
+  deterministic. No speed / timing / benchmark assertions, no regression runs
+  (reference-value parity, long trajectories, golden captures), no e2e
+  (training or inference pipelines, worker processes, external services).
+- Every random input is seeded: `tests/conftest.py` reseeds `random`, NumPy
+  and torch before each test's setup; prefer a local `torch.Generator` with a
+  fixed seed where a test draws its own inputs.
+- Reference-value parity (Ewald/PME/P3M vs Madelung constants, GROMACS,
+  espressomd) lives in `regressions/elec-reference-parity.py`; performance
+  probes in `benchmarks/`. Both are plain scripts outside `testpaths`, never
+  run by CI.
+- `slow` marker: `torch.compile` graph tests (deselect with `-m "not slow"`).
 
 ## CI
 
@@ -235,8 +240,8 @@ full tier); a pull request on MolCrafts runs. Shared setup comes from
 | `test.yml` | `test / tier`, `test / python (3.12)` | `test / tier`, `test / python (3.12)`, `test / python (3.13)` | — |
 | `docs.yml` | `docs / build` (`zensical build --strict`) | same | deploy: Cloudflare Pages, outside Actions |
 
-No `release.yml`: molnex is not published. The regression suites
-(`pytest -m regression`) are not in CI yet. The `protect-master` ruleset on `master` requires a pull request and blocks
+No `release.yml`: molnex is not published. `regressions/` and `benchmarks/`
+are not in CI. The `protect-master` ruleset on `master` requires a pull request and blocks
 force pushes and deletion. Its required checks (`test / tier` plus the
 full-tier `lint /`, `test /` and `docs /` jobs) are added once they have gone
 green on a pull request into `master`.

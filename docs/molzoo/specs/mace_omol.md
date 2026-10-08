@@ -208,7 +208,7 @@ accumulation, **not** a CG-convention difference (O3 vs O3_e3nn CG
 (route per Appendix A, 2026-08-09).
 
 **Current in-tree verification (2026-08-09).** `MOLNEX_MACE_WEIGHTS_DIR`-gated
-`tests/test_molzoo/test_mace/test_checkpoint.py::TestOfficialOMolWeights`:
+`regressions/mace-official-weights.py` (moved out of the unit suite 2026-10-08):
 strict 104-parameter load through `OMOL_REMAP` plus E/F stability goldens on a
 five-atom cluster; the weights dump is regenerated offline by
 `scripts/omol_port/convert_omol_to_cueq_state.py` (no `mace`/`e3nn`). This is
