@@ -69,6 +69,11 @@ class PMECalculator(Calculator):
         self._cached_ns: Optional[torch.Tensor] = None
 
     def _mesh_cache_valid(self, cell: torch.Tensor, ns: torch.Tensor) -> bool:
+        # A cell that carries autograd history (stress via strain) must reach
+        # the mesh weights and the k-space filter, so it is never served from
+        # a cache built off another cell tensor, even an equal-valued one.
+        if cell.requires_grad:
+            return False
         if self._cached_cell is None or self._cached_ns is None:
             return False
         if self._cached_cell.device != cell.device or self._cached_ns.device != ns.device:
@@ -104,8 +109,11 @@ class PMECalculator(Calculator):
         if not self._mesh_cache_valid(cell, ns):
             self.mesh_interpolator.update(cell, ns)
             self.kspace_filter.update(cell, ns)
-            self._cached_cell = cell.detach().clone()
-            self._cached_ns = ns.detach().clone()
+            # Meshes built from a differentiable cell hold that cell's graph;
+            # never hand them to a later call.
+            cacheable = not cell.requires_grad
+            self._cached_cell = cell.detach().clone() if cacheable else None
+            self._cached_ns = ns.detach().clone() if cacheable else None
 
         self.mesh_interpolator.compute_weights(positions)
         rho_mesh = self.mesh_interpolator.points_to_mesh(particle_weights=charges)
