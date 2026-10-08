@@ -185,7 +185,5 @@ class MultiTypeHead(nn.Module):
     ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
         """Softmax-max decode with confidence per class key."""
         return {
-            k: self.heads[k].decode_with_confidence(v)
-            for k, v in logits.items()
-            if k in self.heads
+            k: self.heads[k].decode_with_confidence(v) for k, v in logits.items() if k in self.heads
         }

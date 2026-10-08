@@ -485,8 +485,7 @@ def _extract_valence_family(
         return {}, None
     if not all(present):
         raise ValueError(
-            f"{family!r} must be present in all samples or none "
-            f"(got presence={present})."
+            f"{family!r} must be present in all samples or none (got presence={present})."
         )
 
     col_lists: dict[str, list[torch.Tensor]] = {c: [] for c in required}
@@ -499,9 +498,7 @@ def _extract_valence_family(
         for col in required:
             key = f"{family}.{col}"
             if key not in f or f[key] is None:
-                raise ValueError(
-                    f"sample is missing required {family!r} column {col!r}"
-                )
+                raise ValueError(f"sample is missing required {family!r} column {col!r}")
             t = f.pop(key).long().reshape(-1)
             col_lists[col].append(t)
             lengths[col] = int(t.shape[0])
@@ -509,8 +506,7 @@ def _extract_valence_family(
         for col in required[1:]:
             if lengths[col] != n0:
                 raise ValueError(
-                    f"{family!r} column lengths differ: {col}={lengths[col]} "
-                    f"vs {required[0]}={n0}"
+                    f"{family!r} column lengths differ: {col}={lengths[col]} vs {required[0]}={n0}"
                 )
         n_terms.append(n0)
         for col in _VALENCE_OPTIONAL:
@@ -522,14 +518,11 @@ def _extract_valence_family(
                 ot = val.long().reshape(-1)
                 if int(ot.shape[0]) != n0:
                     raise ValueError(
-                        f"{family!r} optional {col!r} length {ot.shape[0]} "
-                        f"!= n_terms={n0}"
+                        f"{family!r} optional {col!r} length {ot.shape[0]} != n_terms={n0}"
                     )
                 opt_lists[col].append(ot)
 
-    bucket: dict[str, torch.Tensor] = {
-        col: torch.cat(ts, dim=0) for col, ts in col_lists.items()
-    }
+    bucket: dict[str, torch.Tensor] = {col: torch.cat(ts, dim=0) for col, ts in col_lists.items()}
     for col, ts in opt_lists.items():
         if have_optional[col] and ts:
             bucket[col] = torch.cat(ts, dim=0)

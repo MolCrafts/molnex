@@ -55,9 +55,7 @@ def main() -> int:
     assert torch.all(aout["k"] > 0)
     assert torch.all(aout["theta0"] > 0) and torch.all(aout["theta0"] < math.pi)
 
-    proper_head = ProperTorsionParamHead(
-        feature_dim=8, n_terms=2, periodicity=(1, 2)
-    )
+    proper_head = ProperTorsionParamHead(feature_dim=8, n_terms=2, periodicity=(1, 2))
     pout = proper_head(torch.randn(2, 8))
     assert pout["k"].shape == (2, 2) and torch.all(pout["k"] >= 0)
     assert pout["phase"].shape == (2, 2)

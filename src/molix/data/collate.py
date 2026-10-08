@@ -145,8 +145,7 @@ def _collate_valence_family(
         return None
     if not all(present):
         raise ValueError(
-            f"{family!r} must be present in all samples or none "
-            f"(got presence={present})."
+            f"{family!r} must be present in all samples or none (got presence={present})."
         )
 
     cols: dict[str, list[torch.Tensor]] = {c: [] for c in required}
@@ -162,9 +161,7 @@ def _collate_valence_family(
             )
         for col in required:
             if col not in block or block[col] is None:
-                raise ValueError(
-                    f"sample[{family!r}] missing required column {col!r}"
-                )
+                raise ValueError(f"sample[{family!r}] missing required column {col!r}")
             t = torch.as_tensor(block[col]).long().reshape(-1)
             if col in _ATOM_INDEX_COLS:
                 t = t + offset
@@ -189,9 +186,7 @@ def _collate_valence_family(
                     )
                 optional_lists[col].append(ot)
 
-    out_dict: dict[str, torch.Tensor] = {
-        col: torch.cat(ts, dim=0) for col, ts in cols.items()
-    }
+    out_dict: dict[str, torch.Tensor] = {col: torch.cat(ts, dim=0) for col, ts in cols.items()}
     for col, ts in optional_lists.items():
         if have_optional[col] and ts:
             out_dict[col] = torch.cat(ts, dim=0)
@@ -575,9 +570,7 @@ def collate_packed(
         # Ensure required columns are present (defensive for corrupt caches).
         for col in required:
             if col not in fam_dict:
-                raise ValueError(
-                    f"packed cache {family!r} bucket missing required column {col!r}"
-                )
+                raise ValueError(f"packed cache {family!r} bucket missing required column {col!r}")
         n_terms = int(fam_dict[required[0]].shape[0])
         out[family] = TensorDict(fam_dict, batch_size=[n_terms])
 

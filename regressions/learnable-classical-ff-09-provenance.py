@@ -110,13 +110,7 @@ def main() -> int:
     assert regimes2[0] is CoverageRegime.IN_SUPPORT
 
     # provenance package must not reimplement softmax
-    prov_root = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "molpot"
-        / "heads"
-        / "provenance"
-    )
+    prov_root = Path(__file__).resolve().parents[1] / "src" / "molpot" / "heads" / "provenance"
     for py in prov_root.glob("*.py"):
         text = py.read_text()
         assert "torch.softmax" not in text and "F.softmax" not in text, py
@@ -145,11 +139,7 @@ def main() -> int:
 
     # --- 6. Import / AL boundaries ---
     support_src = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "molrep"
-        / "embedding"
-        / "support.py"
+        Path(__file__).resolve().parents[1] / "src" / "molrep" / "embedding" / "support.py"
     )
     tree = ast.parse(support_src.read_text())
     for node in ast.walk(tree):
