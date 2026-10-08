@@ -238,7 +238,7 @@ full tier); a pull request on MolCrafts runs. Shared setup comes from
 
 | workflow | fast tier | full tier | MolCrafts only |
 |---|---|---|---|
-| `lint.yml` | `lint / hooks` (pre-commit stage: hygiene + ruff), `lint / ty` (`--exit-zero-on-warning`) | same | — |
+| `lint.yml` | `lint / hooks` (pre-commit stage: hygiene + ruff), `lint / ty` (`--exit-zero-on-warning`), `lint / workflows` (`actions/check-workflows`) | same | — |
 | `test.yml` | `test / context`, `test / python (3.12)` | `test / context`, `test / python (3.12)`, `test / python (3.13)` | — |
 | `docs.yml` | `docs / build` (`zensical build --strict`) | same | deploy: Cloudflare Pages, outside Actions |
 

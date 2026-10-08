@@ -39,7 +39,7 @@ jobs:
       upstream: ${{ steps.context.outputs.upstream }}
       integration: ${{ steps.context.outputs.integration }}
       skip-pr: ${{ steps.context.outputs.skip-pr }}
-      cancel: ${{ steps.context.outputs.cancel }}
+      publish: ${{ steps.context.outputs.publish }}
     steps:
       - id: context
         uses: MolCrafts/molcrafts-ci/actions/ci-context@master
