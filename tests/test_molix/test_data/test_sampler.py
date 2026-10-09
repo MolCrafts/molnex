@@ -503,14 +503,25 @@ class TestDataModuleBackwardCompat:
 
 
 class TestDataModuleDDP:
-    """Budgeted batching is mutually exclusive with DDP for now."""
+    """A token budget under DDP strides one shared plan."""
 
-    def test_budget_with_ddp_raises(self, tmp_path, monkeypatch):
-        """_is_distributed() True + budget → eager ValueError mentioning DDP."""
+    def test_budget_with_ddp_strides_the_plan(self, tmp_path, monkeypatch):
+        from molix.data.sampler import BatchPlanShard
+
+        dm = _make_budget_dm(tmp_path, "full", max_atoms_per_batch=16, seed=7)
+        full = list(dm.train_dataloader().batch_sampler)
         monkeypatch.setattr("molix.data.datamodule._is_distributed", lambda: True)
-        dm = _make_budget_dm(tmp_path, "ddp", max_atoms_per_batch=16)
-        with pytest.raises(ValueError, match="(?i)ddp|distributed"):
-            dm.train_dataloader()
+        monkeypatch.setattr("molix.data.datamodule._get_world_size", lambda: 2)
+        monkeypatch.setattr("molix.data.datamodule._get_rank", lambda: 0)
+        rank0 = _make_budget_dm(tmp_path, "r0", max_atoms_per_batch=16, seed=7)
+        plan0 = rank0.train_dataloader().batch_sampler
+        assert isinstance(plan0, BatchPlanShard)
+        assert list(plan0) == list(BatchPlanShard(full, rank=0, world_size=2))
+        monkeypatch.setattr("molix.data.datamodule._get_rank", lambda: 1)
+        rank1 = _make_budget_dm(tmp_path, "r1", max_atoms_per_batch=16, seed=7)
+        assert list(rank1.train_dataloader().batch_sampler) == list(
+            BatchPlanShard(full, rank=1, world_size=2)
+        )
 
 
 class TestDataModuleEpochRederivation:
@@ -1966,3 +1977,45 @@ class TestTaskMixtureTableForms:
         )
         assert len(sampler) >= 1
         assert all(len(batch) >= 1 for batch in sampler)
+
+
+class TestBatchPlanShard:
+    """One rank's stride of a shared plan, with a matching step count."""
+
+    def test_drops_the_tail_so_both_ranks_take_the_same_steps(self):
+        from molix.data.sampler import BatchPlanShard
+
+        plan = [[0], [1], [2], [3], [4]]
+        assert list(BatchPlanShard(plan, rank=0, world_size=2)) == [[0], [2]]
+        assert list(BatchPlanShard(plan, rank=1, world_size=2)) == [[1], [3]]
+        assert len(BatchPlanShard(plan, rank=0, world_size=2)) == 2
+
+    def test_reseed_replans_the_inner_sampler(self):
+        from molix.data.sampler import BatchPlanShard
+
+        class _Plan:
+            def __init__(self) -> None:
+                self.seed = 0
+                self.batches = [[0], [1]]
+
+            def reseed(self, seed: int) -> None:
+                self.seed = seed
+                self.batches = [[seed], [seed + 1], [seed + 2]]
+
+            def __iter__(self):
+                return iter(self.batches)
+
+            def __len__(self) -> int:
+                return len(self.batches)
+
+        inner = _Plan()
+        shard = BatchPlanShard(inner, rank=0, world_size=2)
+        shard.reseed(5)
+        assert inner.seed == 5
+        assert list(shard) == [[5]]
+
+    def test_rank_outside_the_world_raises(self):
+        from molix.data.sampler import BatchPlanShard
+
+        with pytest.raises(ValueError, match="rank"):
+            BatchPlanShard([[0]], rank=2, world_size=2)

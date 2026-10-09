@@ -80,6 +80,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from molix.core.steps.base import _mark_leaves
 from molix.core.steps.eval import DefaultEvalStep
 from molix.core.steps.train import DefaultTrainStep
 
@@ -172,7 +173,10 @@ class TaskRouter:
         a missing label never surfaces as a bare ``KeyError``.
 
         ``torch.unique(labels).tolist()`` is the **one and only host sync** this
-        step performs per batch.
+        step performs per batch. It stays in this method, which the steps call
+        from the eager prologue of ``forward_loss``, outside the region
+        ``Trainer.compile`` traces. The traced body calls the already chosen
+        loss and does not read the label.
 
         Args:
             batch: The collated batch (nested ``TensorDict`` or plain nested
@@ -237,23 +241,21 @@ class MultiTaskTrainStep(DefaultTrainStep):
     A ``WeightedLoss`` evaluates *every* term, so it may only appear **inside**
     one :attr:`TaskSpec.loss`; cross-task selection is this router's job.
 
-    The routed objective is **not** a traceable region: :meth:`TaskRouter.route`
-    reads the task label with ``torch.unique(labels).tolist()`` — a host sync
-    that dynamo cannot capture — so ``Trainer.compile`` refuses ``step=True``
-    for this step and the model is compiled alone (``compile(step=False)``).
+    The label read (:meth:`TaskRouter.route`) is the named graph break and
+    stays in the eager prologue. ``_traced_forward_loss`` is the compiled
+    region: the model and the already chosen loss. Dynamo specializes that
+    region once per task. A loss that itself does not trace
+    (``TorsionProfileLoss``, ``center_by_group``) still will not.
 
     Args:
         router: The :class:`TaskRouter` holding the declared task mixture.
     """
 
     namespace = "train"
-    untraceable = (
-        "TaskRouter.route reads the batch's task label with torch.unique(labels).tolist(), "
-        "a host sync dynamo cannot trace"
-    )
 
     def __init__(self, router: TaskRouter) -> None:
         self.router = router
+        self._routed: TaskSpec | None = None
 
     @property
     def scalar_keys(self) -> tuple[tuple[str, str], ...]:
@@ -274,15 +276,15 @@ class MultiTaskTrainStep(DefaultTrainStep):
     ) -> torch.Tensor:
         """Route the batch and evaluate that task's loss.
 
-        Publishes the routed scalar as a **detached device tensor** (never
-        ``.item()``, never a flat slash key), so the launch-bound hot path keeps
-        exactly one host sync per batch — the label read in
-        :meth:`TaskRouter.route`.
+        The label was resolved in :meth:`forward_loss` before this runs, so
+        the traced body does not host-sync. The per-task state write also
+        stays in that prologue.
 
         Args:
             trainer: The owning :class:`~molix.core.trainer.Trainer`
                 (``loss_fn`` may be ``None`` — this step owns its losses).
             state: The :class:`~molix.core.state.TrainState` to record into.
+                Unused here; the prologue publishes the scalar.
             batch: The collated batch carrying the task label.
             predictions: The model output for ``batch``, handed to the routed
                 loss verbatim.
@@ -290,19 +292,52 @@ class MultiTaskTrainStep(DefaultTrainStep):
         Returns:
             The dimensionless scalar loss of the routed task.
         """
-        spec = self.router.route(batch)
-        loss = spec.loss(predictions, batch)
-        state[self.namespace][f"loss_{spec.name}"] = loss.detach()
-        return loss
+        del trainer, state
+        spec = self._routed if self._routed is not None else self.router.route(batch)
+        return spec.loss(predictions, batch)
+
+    def forward_loss(
+        self,
+        trainer: "Trainer",
+        state: "TrainState",
+        batch: Any,
+    ) -> tuple[torch.Tensor, Any]:
+        """Resolve the task, then run the traced body.
+
+        :meth:`TaskRouter.route` is the host sync and sits outside the
+        region :meth:`~molix.core.trainer.Trainer.compile` replaces.
+
+        Args:
+            trainer: The owning trainer.
+            state: Training state. The routed loss is written here, detached.
+            batch: The collated batch carrying the task label.
+
+        Returns:
+            ``(loss, predictions)`` as :meth:`DefaultTrainStep.forward_loss`.
+        """
+        self._routed = self.router.route(batch)
+        _mark_leaves(trainer.model, batch)
+        loss, predictions = self._traced_forward_loss(trainer, state, batch)
+        state[self.namespace][f"loss_{self._routed.name}"] = loss.detach()
+        return loss, predictions
+
+    def _traced_forward_loss(
+        self,
+        trainer: "Trainer",
+        state: "TrainState",
+        batch: Any,
+    ) -> tuple[torch.Tensor, Any]:
+        """Model plus the already chosen loss. No label read, no state write."""
+        predictions = trainer.model(batch)
+        return self.compute_loss(trainer, state, batch, predictions), predictions
 
 
 class MultiTaskEvalStep(DefaultEvalStep):
     """Evaluation step that routes each batch to one task's loss.
 
-    Inherits ``on_eval_batch`` unchanged and overrides only
-    :meth:`compute_loss`. Like its train counterpart it is not a traceable
-    region (the router's host sync), so ``Trainer.compile`` refuses
-    ``step=True`` for it.
+    Inherits ``on_eval_batch`` unchanged. The label read is the eager
+    prologue, as on :class:`MultiTaskTrainStep`, so ``compile(step=True)``
+    traces the model and the chosen loss.
 
     Args:
         router: The :class:`TaskRouter` holding the declared task mixture.
@@ -312,11 +347,11 @@ class MultiTaskEvalStep(DefaultEvalStep):
     """
 
     namespace = "eval"
-    untraceable = MultiTaskTrainStep.untraceable
 
     def __init__(self, router: TaskRouter, *, no_grad: bool = False) -> None:
         super().__init__(no_grad=no_grad)
         self.router = router
+        self._routed: TaskSpec | None = None
 
     @property
     def scalar_keys(self) -> tuple[tuple[str, str], ...]:
@@ -332,14 +367,13 @@ class MultiTaskEvalStep(DefaultEvalStep):
     ) -> torch.Tensor:
         """Route the batch and evaluate that task's loss.
 
-        Publishes the routed scalar as a detached device tensor under the
-        ``eval`` namespace; the returned loss keeps its graph so a
-        force / Hessian task can still differentiate.
+        The label was resolved in :meth:`forward_loss`. The returned loss
+        keeps its graph so a force / Hessian task can still differentiate.
 
         Args:
             trainer: The owning :class:`~molix.core.trainer.Trainer`
                 (``loss_fn`` may be ``None`` — this step owns its losses).
-            state: The :class:`~molix.core.state.TrainState` to record into.
+            state: Unused; the prologue publishes the scalar.
             batch: The collated batch carrying the task label.
             predictions: The model output for ``batch``, handed to the routed
                 loss verbatim.
@@ -347,7 +381,29 @@ class MultiTaskEvalStep(DefaultEvalStep):
         Returns:
             The dimensionless scalar loss of the routed task.
         """
-        spec = self.router.route(batch)
-        loss = spec.loss(predictions, batch)
-        state[self.namespace][f"loss_{spec.name}"] = loss.detach()
-        return loss
+        del trainer, state
+        spec = self._routed if self._routed is not None else self.router.route(batch)
+        return spec.loss(predictions, batch)
+
+    def forward_loss(
+        self,
+        trainer: "Trainer",
+        state: "TrainState",
+        batch: Any,
+    ) -> tuple[torch.Tensor, Any]:
+        """Resolve the task, then run the traced eval body."""
+        self._routed = self.router.route(batch)
+        _mark_leaves(trainer.model, batch)
+        loss, predictions = self._traced_forward_loss(trainer, state, batch)
+        state[self.namespace][f"loss_{self._routed.name}"] = loss.detach()
+        return loss, predictions
+
+    def _traced_forward_loss(
+        self,
+        trainer: "Trainer",
+        state: "TrainState",
+        batch: Any,
+    ) -> tuple[torch.Tensor, Any]:
+        """Model plus the already chosen loss. No label read, no state write."""
+        predictions = trainer.model(batch)
+        return self.compute_loss(trainer, state, batch, predictions), predictions

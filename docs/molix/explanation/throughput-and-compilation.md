@@ -308,7 +308,9 @@ gates: `tests/test_molix/test_core/test_steps/test_train.py::TestDefaultTrainSte
 group. A step running one of those compiles the model alone
 (`compile(step=False)`).
 
-**The router exception.** `MultiTaskTrainStep` / `MultiTaskEvalStep` route each
-batch by `torch.unique(labels).tolist()` in `TaskRouter.route` — a host sync —
-so they declare `untraceable` and `compile(step=True)` raises naming it; use
-`compile(step=False)` for them.
+**The router seam.** `MultiTaskTrainStep` / `MultiTaskEvalStep` resolve the
+task in the eager prologue with `torch.unique(labels).tolist()` — one host
+sync per batch, the named break. `_traced_forward_loss` is the model plus
+the already chosen loss, so `compile(step=True)` traces that body and dynamo
+specializes it once per task. A loss that itself does not trace
+(`TorsionProfileLoss`, `center_by_group`) still does not.

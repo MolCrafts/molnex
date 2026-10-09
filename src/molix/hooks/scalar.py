@@ -157,47 +157,62 @@ class MetricsHook(ScalarHook):
         serialise ``best_metric`` as a scalar, so they need a real number
         rather than a device tensor.
         """
+        device = None
+        try:
+            device = next(trainer.model.parameters()).device
+        except (AttributeError, StopIteration, RuntimeError):
+            device = None
         val_ns = state[self.prefix_val]
         for metric in self.val_metrics:
+            sync = getattr(metric, "sync", None)
+            if callable(sync):
+                sync(device)
             val_ns[self._scalar_name(metric)] = float(metric.compute())
 
 
 class StepSpeedHook(ScalarHook):
-    """Track training step speed and write to ``state["performance"]``.
+    """Publish delivered step rate, and the accelerator rate beside it.
 
-    Measures steps per second during training and writes to
-    ``state["performance"]["step_per_second"]``.
+    ``step_per_second`` is optimizer steps divided by wall time since
+    :meth:`on_train_start`. Wall time is the trainer's data-wait plus
+    compute, so a prefetch burst cannot report the GPU's burst rate as
+    the run's throughput. ``compute_step_per_second`` divides the same
+    steps by compute time only — what the accelerator can do when the
+    next batch is already in hand. ``data_wait_s`` is the cumulative
+    time blocked in the dataloader.
 
-    Args:
-        window_size: Number of steps to average over (default: 10).
+    The trainer records the two times around each micro-batch
+    (``_data_wait_s``, ``_compute_s``). This hook only publishes them,
+    on optimizer-step boundaries.
     """
 
-    scalar_keys = (("performance", "step_per_second"),)
+    scalar_keys = (
+        ("performance", "step_per_second"),
+        ("performance", "compute_step_per_second"),
+        ("performance", "data_wait_s"),
+    )
 
-    def __init__(self, window_size: int = 10):
-        self.window_size = window_size
-        self._step_start_time = None
-        self._steps_in_window = 0
+    def __init__(self) -> None:
+        self._optimizer_steps = 0
 
     def on_train_start(self, trainer, state):
-        """Initialize timing."""
-        import time
-
-        self._step_start_time = time.time()
-        self._steps_in_window = 0
+        """Start the delivered-rate clock at zero steps."""
+        del trainer, state
+        self._optimizer_steps = 0
 
     def on_train_batch_end(self, trainer, state, batch, outputs):
-        """Compute step speed and write to state."""
-        import time
-
-        self._steps_in_window += 1
-
-        if self._steps_in_window >= self.window_size:
-            if self._step_start_time is not None:
-                elapsed = time.time() - self._step_start_time
-                steps_per_sec = self._steps_in_window / elapsed
-
-                state["performance"]["step_per_second"] = steps_per_sec
-
-                self._step_start_time = time.time()
-                self._steps_in_window = 0
+        """Publish the cumulative rates once an optimizer step closes."""
+        del batch, outputs
+        accum = max(1, int(getattr(trainer, "accumulate_grad_batches", 1)))
+        if (int(trainer._micro_step) + 1) % accum != 0:
+            return
+        self._optimizer_steps += 1
+        data_s = float(trainer._data_wait_s)
+        compute_s = float(trainer._compute_s)
+        wall = data_s + compute_s
+        perf = state["performance"]
+        if wall > 0.0:
+            perf["step_per_second"] = self._optimizer_steps / wall
+        if compute_s > 0.0:
+            perf["compute_step_per_second"] = self._optimizer_steps / compute_s
+        perf["data_wait_s"] = data_s

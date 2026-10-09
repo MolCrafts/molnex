@@ -9,8 +9,9 @@ scalars into :class:`~molix.core.state.TrainState` live in
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
+import torch
 import torch.nn as nn
 
 from molix.core.hook import BaseHook, ScalarHook
@@ -105,3 +106,73 @@ def _apply_activation_checkpointing(
             return checkpointed_forward
 
         module.forward = _make_checkpointed(original_forward)
+
+
+def _group_name(group: dict, index: int) -> str:
+    name = group.get("name")
+    return str(name) if name else f"group_{index}"
+
+
+def _group_reached(group: dict) -> bool:
+    """True when some parameter carries a finite, nonzero gradient."""
+    for param in group["params"]:
+        grad = param.grad
+        if grad is None:
+            continue
+        if bool(torch.isfinite(grad).all()) and bool(grad.detach().abs().sum() != 0):
+            return True
+    return False
+
+
+class RequiredGradientHook(BaseHook):
+    """Fail the run when a declared optimizer group gets no gradient.
+
+    Checked once, from the first ``on_after_backward``. ``names`` are the
+    ``"name"`` entries of ``optimizer.param_groups`` (an unnamed group is
+    ``group_<index>``). A group whose every parameter has ``grad is None``,
+    or only zeros, or a non-finite grad, is named in the error. A loss
+    that moves is not that check: the scalar can fall while a head the
+    objective claims to train is absent from the graph.
+
+    Args:
+        names: Parameter-group names this objective must reach.
+
+    Raises:
+        ValueError: ``names`` is empty.
+        RuntimeError: A named group is missing from the optimizer, or it
+            has no finite nonzero gradient after the first backward.
+    """
+
+    def __init__(self, names: Sequence[str]) -> None:
+        declared = tuple(names)
+        if not declared or any(not name for name in declared):
+            raise ValueError(
+                "RequiredGradientHook needs the optimizer param-group names this "
+                f"objective must reach; got {list(names)}."
+            )
+        self.names = declared
+        self._checked = False
+
+    def on_after_backward(self, trainer, state) -> None:
+        """Raise if any declared group was not reached by this backward."""
+        del state
+        if self._checked:
+            return
+        self._checked = True
+        groups = {
+            _group_name(group, index): _group_reached(group)
+            for index, group in enumerate(trainer.optimizer.param_groups)
+        }
+        unknown = [name for name in self.names if name not in groups]
+        if unknown:
+            raise RuntimeError(
+                f"RequiredGradientHook: no optimizer param group named {unknown}; "
+                f"groups are {list(groups)}."
+            )
+        dead = [name for name in self.names if not groups[name]]
+        if dead:
+            raise RuntimeError(
+                f"RequiredGradientHook: {dead} received no finite nonzero gradient "
+                "after the first backward. Those parameters are not in this "
+                "objective's graph."
+            )

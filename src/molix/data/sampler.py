@@ -24,6 +24,8 @@ Four layers, deliberately separated:
   configuration sampling: one physical task per batch drawn from a caller
   supplied mixture, whole sampling units inside it, packed by the same
   packer under the same token budgets.
+* :class:`BatchPlanShard` — one rank's stride of a plan every rank builds
+  the same way, so a token budget can run under DDP.
 * :class:`BatchSamplerSource` — the protocol a
   :class:`~molix.data.datamodule.DataModule` calls once per epoch to obtain
   a batch sampler, so alternative batching policies can be injected.
@@ -1242,6 +1244,49 @@ class TaskMixtureBatchSampler:
         for task, batch in zip(self._batch_tasks, self._batches, strict=True):
             counts[task] = counts.get(task, 0) + len(batch)
         return counts
+
+
+class BatchPlanShard:
+    """One rank's stride of a plan that every rank builds identically.
+
+    Rank ``r`` of ``world_size`` keeps batches ``r, r + world_size, ...``.
+    The tail ``len(plan) % world_size`` batches are dropped so every rank
+    runs the same number of steps: DDP deadlocks when it does not.
+    :meth:`reseed` is forwarded when the inner plan has it, and the next
+    iteration applies the same stride.
+
+    Args:
+        plan: The full plan. Iterable and sized. Every rank must build the
+            same one (same seed).
+        rank: This process's rank, in ``[0, world_size)``.
+        world_size: Number of ranks.
+
+    Raises:
+        ValueError: ``world_size < 1`` or ``rank`` is outside that range.
+    """
+
+    def __init__(self, plan: Iterable[list[int]], *, rank: int, world_size: int) -> None:
+        if world_size < 1:
+            raise ValueError(f"world_size must be >= 1, got {world_size}.")
+        if not 0 <= rank < world_size:
+            raise ValueError(f"rank must be in [0, {world_size}), got {rank}.")
+        self._plan = plan
+        self.rank = rank
+        self.world_size = world_size
+
+    def __iter__(self) -> Iterator[list[int]]:
+        batches = list(self._plan)
+        keep = len(batches) - (len(batches) % self.world_size)
+        yield from batches[self.rank : keep : self.world_size]
+
+    def __len__(self) -> int:
+        return len(self._plan) // self.world_size
+
+    def reseed(self, seed: int) -> None:
+        """Forward ``reseed`` to the inner plan when it has one."""
+        reseed = getattr(self._plan, "reseed", None)
+        if callable(reseed):
+            reseed(seed)
 
 
 @runtime_checkable

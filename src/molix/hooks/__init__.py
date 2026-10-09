@@ -21,11 +21,12 @@ from molix.hooks.early_stop import EarlyStop
 from molix.hooks.gpu import GPUMemoryHook, GPUUtilsHook
 from molix.hooks.journal import JournalHook
 from molix.hooks.molrec_metrics import MolRecMetricsHook
+from molix.hooks.potential import PotentialReportHook
 from molix.hooks.profiler import ProfilerHook
 from molix.hooks.progress import Log, ProgressBarHook
 from molix.hooks.scalar import MetricsHook, StepSpeedHook
 from molix.hooks.tensorboard import TensorBoardHook
-from molix.hooks.training import ActivationCheckpointingHook, GradClipHook
+from molix.hooks.training import ActivationCheckpointingHook, GradClipHook, RequiredGradientHook
 
 __all__ = [
     "ActivationCheckpointingHook",
@@ -39,8 +40,10 @@ __all__ = [
     "Log",
     "MetricsHook",
     "MolRecMetricsHook",
+    "PotentialReportHook",
     "ProfilerHook",
     "ProgressBarHook",
+    "RequiredGradientHook",
     "StepSpeedHook",
     "TensorBoardHook",
 ]

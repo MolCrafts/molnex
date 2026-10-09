@@ -35,11 +35,21 @@ def test_log_accepts_scalar_hook_instances(capsys):
     log.on_train_start(trainer=None, state=TrainState())
     lines = capsys.readouterr().out.rstrip("\n").split("\n")
     assert len(lines) == 2
-    assert lines[0].split() == ["performance", "gpu", "gpu", "gpu", "train"]
+    assert lines[0].split() == [
+        "performance",
+        "performance",
+        "performance",
+        "gpu",
+        "gpu",
+        "gpu",
+        "train",
+    ]
     assert lines[1].split() == [
         "step",
         "epoch",
         "step_per_second",
+        "compute_step_per_second",
+        "data_wait_s",
         "alloc_gib",
         "resv_gib",
         "peak_gib",
@@ -50,7 +60,11 @@ def test_log_accepts_scalar_hook_instances(capsys):
 def test_log_deduplicates_keys():
     speed = StepSpeedHook()
     log = Log(1, keys=[speed, ("performance", "step_per_second"), speed])
-    assert log.keys == [("performance", "step_per_second")]
+    assert log.keys == [
+        ("performance", "step_per_second"),
+        ("performance", "compute_step_per_second"),
+        ("performance", "data_wait_s"),
+    ]
 
 
 def test_log_prints_row_every_n_steps(capsys):
@@ -329,7 +343,32 @@ def test_gpu_memory_hook_rejects_unknown_metrics():
 def test_step_speed_hook_is_scalar_hook():
     h = StepSpeedHook()
     assert isinstance(h, ScalarHook)
-    assert h.scalar_keys == (("performance", "step_per_second"),)
+    assert h.scalar_keys == (
+        ("performance", "step_per_second"),
+        ("performance", "compute_step_per_second"),
+        ("performance", "data_wait_s"),
+    )
+
+
+def test_step_speed_hook_reports_delivered_rate_not_the_burst():
+    """A stall in the dataloader counts in ``step_per_second`` and in ``data_wait_s``."""
+    from types import SimpleNamespace
+
+    from molix.core.state import TrainState
+
+    hook = StepSpeedHook()
+    state = TrainState()
+    trainer = SimpleNamespace(
+        accumulate_grad_batches=1,
+        _micro_step=0,
+        _data_wait_s=4.0,
+        _compute_s=1.0,
+    )
+    hook.on_train_start(trainer, state)
+    hook.on_train_batch_end(trainer, state, batch=None, outputs=None)
+    assert state["performance"]["step_per_second"] == pytest.approx(0.2)
+    assert state["performance"]["compute_step_per_second"] == pytest.approx(1.0)
+    assert state["performance"]["data_wait_s"] == pytest.approx(4.0)
 
 
 def test_metrics_hook_scalar_keys_are_dynamic():

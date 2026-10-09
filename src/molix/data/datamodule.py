@@ -18,7 +18,7 @@ from molix.data.collator import FrameCollator
 from molix.data.dataset import BaseDataset
 from molix.data.mixture import DataMixture
 from molix.data.pad import MoleculePadder
-from molix.data.sampler import BatchSamplerSource, TokenBudgetBatchSampler
+from molix.data.sampler import BatchPlanShard, BatchSamplerSource, TokenBudgetBatchSampler
 from molix.data.task import BatchTask
 
 # ---------------------------------------------------------------------------
@@ -116,8 +116,11 @@ class DataModule:
             batch packs as many samples as fit under the budget — keeping
             GNN compute (O(edges)) per batch approximately constant
             instead of swinging with sample sizes. Requires a
-            packed-cache-backed train dataset; incompatible with DDP
-            (raises at dataloader construction). The val loader keeps the
+            packed-cache-backed train dataset. Under DDP every rank builds
+            that same plan and keeps its own stride
+            (:class:`~molix.data.sampler.BatchPlanShard`); the tail shorter
+            than the world size is dropped so the ranks take the same number
+            of steps. The val loader keeps the
             fixed ``batch_size`` — eval has no backward pass, so memory
             headroom is ample and fixed batches keep metric accumulation
             simple.
@@ -161,7 +164,8 @@ class DataModule:
             :meth:`~molix.data.pad.MoleculePadder.check` runs here, so a
             molecule no batch could carry fails at construction. Mutually
             exclusive with ``max_atoms_per_batch`` / ``max_pairs_per_batch``
-            and ``batch_sampler_source``; incompatible with DDP.
+            and ``batch_sampler_source``. Under DDP the plan is strided
+            across ranks (:class:`~molix.data.sampler.BatchPlanShard`).
         val_batch_counts: The same for the **val** dataset: its loader
             packs in index order (no shuffle) under the same budgets, so
             evaluation sees the training shape. Omit it and the val loader
@@ -309,24 +313,15 @@ class DataModule:
         """
         pass  # datasets are ready at construction time
 
-    def _reject_ddp_batch_sampler(self, knob: str) -> None:
-        """Refuse a custom train ``batch_sampler`` while running under DDP.
+    def _shard_plan(self, plan: Iterable[list[int]]) -> Iterable[list[int]]:
+        """Stride ``plan`` across the process group, or return it unchanged.
 
-        Args:
-            knob: The constructor argument(s) that requested the custom
-                batch sampler, named verbatim in the error so the caller
-                knows what to drop.
-
-        Raises:
-            ValueError: A distributed process group is initialised.
+        Every rank must have built the same plan. The shard drops the tail
+        so the step count matches.
         """
-        if _is_distributed():
-            raise ValueError(
-                f"{knob} not supported under DDP: dynamic batching is "
-                "incompatible with DistributedSampler's fixed per-rank "
-                f"partitioning. Remove {knob} or run single-process; DDP "
-                "support belongs to a future spec."
-            )
+        if not _is_distributed():
+            return plan
+        return BatchPlanShard(plan, rank=_get_rank(), world_size=_get_world_size())
 
     def _epoch_batch_sampler(self) -> Iterable[list[int]] | None:
         """Build this epoch's train ``batch_sampler``, or ``None``.
@@ -335,32 +330,30 @@ class DataModule:
         injected :class:`~molix.data.sampler.BatchSamplerSource`, else a
         token budget, else the fixed-``batch_size`` route (``None``). Both
         custom paths are seeded ``self.seed + self._epoch``, so epoch *k*
-        reshuffles yet stays re-derivable on resume, and both pass the DDP
-        guard first.
+        reshuffles yet stays re-derivable on resume. Under DDP the plan is
+        strided (:meth:`_shard_plan`).
 
         Returns:
             An iterable, sized plan of ``list[int]`` sample-index batches,
             or ``None`` when no custom batch sampler is configured.
-
-        Raises:
-            ValueError: A custom batch sampler is configured under DDP.
         """
         if self.batch_sampler_source is not None:
-            self._reject_ddp_batch_sampler("batch_sampler_source")
-            return self.batch_sampler_source.batch_sampler(
-                self.train_dataset, seed=self.seed + self._epoch
+            return self._shard_plan(
+                self.batch_sampler_source.batch_sampler(
+                    self.train_dataset, seed=self.seed + self._epoch
+                )
             )
         if self.batch_counts is not None:
-            self._reject_ddp_batch_sampler("batch_counts")
-            return self._budget_sampler(
-                self.train_dataset,
-                self._padder().budgets(),
-                self.batch_counts,
-                seed=self.seed + self._epoch,
-                shuffle=True,
+            return self._shard_plan(
+                self._budget_sampler(
+                    self.train_dataset,
+                    self._padder().budgets(),
+                    self.batch_counts,
+                    seed=self.seed + self._epoch,
+                    shuffle=True,
+                )
             )
         if self.max_atoms_per_batch is not None or self.max_pairs_per_batch is not None:
-            self._reject_ddp_batch_sampler("max_atoms_per_batch / max_pairs_per_batch")
             budgets: dict[str, int] = {}
             given: dict[str, torch.Tensor] = {}
             if self.max_atoms_per_batch is not None:
@@ -374,8 +367,10 @@ class DataModule:
             # Counts come from the real dataset; the loader may instead see an
             # _IndexDataset (fast path) — the batch_sampler yields the same
             # index lists either way.
-            return self._budget_sampler(
-                self.train_dataset, budgets, given, seed=self.seed + self._epoch, shuffle=True
+            return self._shard_plan(
+                self._budget_sampler(
+                    self.train_dataset, budgets, given, seed=self.seed + self._epoch, shuffle=True
+                )
             )
         return None
 
@@ -462,21 +457,11 @@ class DataModule:
 
         Returns:
             A configured training ``DataLoader``.
-
-        Raises:
-            ValueError: A token budget or a ``batch_sampler_source`` is set
-                while running under DDP — dynamic batching has no
-                cross-rank partitioning protocol yet. Drop the batching
-                kwarg or run single-process.
         """
         # Cached batch-sampler fast path: on_epoch_start reseeded the stored
         # sampler in place, so the same loader (and its persistent worker
         # pool) is reused across epochs instead of re-spawned each epoch.
-        if (
-            self._train_loader is not None
-            and self._batch_sampler is not None
-            and not _is_distributed()
-        ):
+        if self._train_loader is not None and self._batch_sampler is not None:
             return self._train_loader
 
         batch_sampler = self._epoch_batch_sampler()
@@ -493,7 +478,7 @@ class DataModule:
                 multiprocessing_context=self._worker_context(),
                 worker_init_fn=self._worker_init_fn(),
             )
-            if callable(getattr(batch_sampler, "reseed", None)) and not _is_distributed():
+            if callable(getattr(batch_sampler, "reseed", None)):
                 self._batch_sampler = batch_sampler
                 self._train_loader = loader
             return loader
@@ -554,33 +539,34 @@ class DataModule:
 
         Never shuffles. With ``val_batch_counts`` set, packs the val
         dataset in index order under the padder's budgets — the training
-        shape, so a compiled eval step sees one shape too. Under DDP, uses
-        a non-shuffling :class:`~torch.utils.data.DistributedSampler` and
-        keeps ``drop_last`` off so every validation sample is seen. Shares
-        the same collate function as :meth:`train_dataloader`.
+        shape, so a compiled eval step sees one shape too. Under DDP that
+        plan is strided the same way as training, and the tail shorter
+        than the world size is not evaluated. Without ``val_batch_counts``,
+        DDP uses a non-shuffling
+        :class:`~torch.utils.data.DistributedSampler` and keeps
+        ``drop_last`` off so every validation sample is seen. Shares the
+        same collate function as :meth:`train_dataloader`.
 
         Returns:
             A configured validation ``DataLoader``.
-
-        Raises:
-            ValueError: ``val_batch_counts`` is set under DDP.
         """
-        # Cached (non-DDP): val never shuffles, so the same loader is reused every
-        # eval phase — no per-eval worker re-spawn.
-        if self._val_loader is not None and not _is_distributed():
+        # Val never shuffles, so a packed loader is reused every eval phase.
+        # The fixed-size DDP path keeps a DistributedSampler and is not cached.
+        if self._val_loader is not None and self._val_sampler is None:
             return self._val_loader
 
         if self.val_batch_counts is not None:
-            self._reject_ddp_batch_sampler("val_batch_counts")
             loader_dataset, collate_fn = self._resolve_collation(self.val_dataset)
             loader = DataLoader(
                 loader_dataset,
-                batch_sampler=self._budget_sampler(
-                    self.val_dataset,
-                    self._padder().budgets(),
-                    self.val_batch_counts,
-                    seed=self.seed,
-                    shuffle=False,
+                batch_sampler=self._shard_plan(
+                    self._budget_sampler(
+                        self.val_dataset,
+                        self._padder().budgets(),
+                        self.val_batch_counts,
+                        seed=self.seed,
+                        shuffle=False,
+                    )
                 ),
                 num_workers=self.num_workers,
                 pin_memory=self.pin_memory,

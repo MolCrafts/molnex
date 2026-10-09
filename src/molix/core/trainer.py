@@ -21,6 +21,7 @@ from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBacken
 from molix.core.hook import Hook
 from molix.core.state import Stage, TrainState, resolve
 from molix.core.steps import DefaultEvalStep, DefaultTrainStep, Step
+from molix.core.steps.base import term_keys
 from molix.data import DataModuleProtocol
 
 logger = _logger_mod.getLogger(__name__)
@@ -29,8 +30,8 @@ logger = _logger_mod.getLogger(__name__)
 def snapshot_state_dict(state: dict[str, Any]) -> dict[str, Any]:
     """Clone a ``state_dict``, including non-tensor extra state.
 
-    Public because a Class-I / Parameterizer ``state_dict`` is not a flat map
-    of tensors — it carries nested force-field tables — so the obvious
+    Public because a ``state_dict`` need not be a flat map of tensors —
+    a module may carry non-tensor extra state — so the obvious
     ``{k: v.detach().clone()}`` raises, and every caller that snapshots one
     (the smoke warmup, the packed-vs-single alignment gate) needs this exact
     behaviour rather than its own near-copy.
@@ -171,6 +172,12 @@ class Trainer:
         self._stop_reason: str | None = None
         # Monotonic micro-batch counter driving accumulation-window boundaries.
         self._micro_step = 0
+        # Wall time blocked in the dataloader, and time inside the step.
+        # :class:`~molix.hooks.scalar.StepSpeedHook` publishes both; a short
+        # window over batch-end timestamps sits inside a prefetch burst and
+        # reports the accelerator's burst rate as if it were throughput.
+        self._data_wait_s = 0.0
+        self._compute_s = 0.0
         self.device = torch.device(device) if device is not None else None
 
         self.model = model
@@ -428,9 +435,8 @@ class Trainer:
         t0 = time.perf_counter()
 
         # Snapshot every mutable piece so the warmup is invisible to the real run.
-        # Class-I / Parameterizer state_dicts carry nested dicts (force-field
-        # tables), not only tensors — cloning with ``.detach()`` raises
-        # (profile 2026-09-13).
+        # A state_dict may carry non-tensor extra state, not only tensors —
+        # cloning with ``.detach()`` raises (profile 2026-09-13).
         model_snap = snapshot_state_dict(self.model.state_dict())
         opt_snap = copy.deepcopy(self.optimizer.state_dict())
         scaler_snap = copy.deepcopy(self.scaler.state_dict()) if self.scaler is not None else None
@@ -553,6 +559,10 @@ class Trainer:
         if self._resume_from_checkpoint is not None:
             self._load_checkpoint(self._resume_from_checkpoint)
 
+        self._wrap_distributed()
+        self._data_wait_s = 0.0
+        self._compute_s = 0.0
+
         self._log_setup_banner(datamodule, max_epochs, max_steps)
 
         # AMP without grad clip → occasional outlier-gradient metric spikes.
@@ -588,13 +598,22 @@ class Trainer:
             model_device = next(self.model.parameters()).device
             accum = self.accumulate_grad_batches
             needs_move: bool | None = None
-            for batch in datamodule.train_dataloader():
+            batches = iter(datamodule.train_dataloader())
+            while True:
+                fetch_at = time.perf_counter()
+                try:
+                    batch = next(batches)
+                except StopIteration:
+                    break
+                ready_at = time.perf_counter()
                 if needs_move is None:
                     needs_move = self._needs_device_move(batch, model_device)
                 if needs_move:
                     batch = batch.to(model_device)
                 self._call_hooks("on_train_batch_start", self, self.state, batch)
                 outputs = self.train_step.on_train_batch(self, self.state, batch)
+                self._data_wait_s += ready_at - fetch_at
+                self._compute_s += time.perf_counter() - ready_at
                 self._call_hooks("on_train_batch_end", self, self.state, batch, outputs)
 
                 self._micro_step += 1
@@ -707,6 +726,52 @@ class Trainer:
         )
         return self.state
 
+    def _wrap_distributed(self) -> None:
+        """Wrap ``model`` in DDP when this process is already in a group.
+
+        The caller owns process-group setup (``torchrun``). This method
+        only puts the replica seam on the module the step calls, so
+        backward all-reduces gradients. ``find_unused_parameters`` stays
+        on: a staged head that requires grad and receives none in this
+        step is normal here, and DDP otherwise errors.
+
+        ``compile(step=True)`` is refused under the group. That compile
+        traces ``model(batch)``; once the model is DDP, the call is the
+        gradient-sync seam and does not belong in the compiled region.
+        ``compile(step=False)`` compiles the module, and this wrap puts
+        DDP around that compiled module.
+        """
+        import torch.distributed as dist
+
+        if not dist.is_available() or not dist.is_initialized():
+            return
+        if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
+            return
+        for step in (self.train_step, self.eval_step):
+            region = getattr(step, "_traced_forward_loss", None)
+            if region is not None and getattr(region, "__self__", None) is not step:
+                raise ValueError(
+                    "compile(step=True) traces model(batch) inside the step. Under a "
+                    "process group that call is DistributedDataParallel.forward, the "
+                    "gradient-sync seam, and it does not belong in the compiled region. "
+                    "Call compile(step=False): the module is compiled, and train() wraps "
+                    "DDP around it."
+                )
+        params = [p for p in self.model.parameters()]
+        if not params:
+            raise ValueError(
+                "DistributedDataParallel needs a model with parameters; "
+                f"{type(self.model).__name__} has none."
+            )
+        device = params[0].device
+        kwargs: dict[str, Any] = {"find_unused_parameters": True}
+        if device.type == "cuda":
+            index = torch.cuda.current_device() if device.index is None else device.index
+            kwargs["device_ids"] = [index]
+            kwargs["output_device"] = index
+        self.model = torch.nn.parallel.DistributedDataParallel(self.model, **kwargs)
+        self._checkpoint.model = self.model
+
     def compile(
         self,
         *,
@@ -729,11 +794,11 @@ class Trainer:
         accumulation window, ``GradScaler``, the ``on_after_backward`` hooks,
         the optimizer and the LR scheduler. The model object is untouched, so
         checkpoints and ``state_dict`` see the plain module. ``step=False``
-        compiles ``self.model`` alone (the loss stays eager) for a step whose
-        objective cannot trace — a routing step such as
-        :class:`~molix.core.steps.multitask.MultiTaskTrainStep`, whose
-        ``TaskRouter.route`` host-syncs on the task label, declares that
-        through ``untraceable`` and is refused with ``step=True``.
+        compiles ``self.model`` alone (the loss stays eager). A step whose
+        objective truly cannot trace declares ``untraceable`` and is refused
+        with ``step=True``. :class:`~molix.core.steps.multitask.MultiTaskTrainStep`
+        reads the task label in the eager prologue, outside the traced body,
+        so ``step=True`` compiles one region per task.
 
         Can be chained after construction::
 
@@ -744,9 +809,9 @@ class Trainer:
             # Custom config:
             trainer = Trainer(model, ...).compile(mode="max-autotune")
 
-            # A step whose objective host-syncs: model only.
+            # Multi-task: the label read stays eager; the body compiles.
             trainer = Trainer(model, None, ..., train_step=MultiTaskTrainStep(router))
-            trainer.compile(step=False)
+            trainer.compile()
 
         Which shipped losses trace is listed on
         :class:`~molix.core.steps.train.DefaultTrainStep`. A force-supervised
@@ -973,6 +1038,25 @@ class Trainer:
         # regardless of trigger (step-based or epoch-end).
         self._call_hooks("on_eval_phase_start", self, self.state)
 
+        # The step writes its scalars per batch; what the phase publishes is
+        # their mean over the val set. Without this the published value was
+        # the *last* batch's, and best-checkpoint selection and patience read
+        # one batch (Class-I: 12.5 published against a 9-batch mean of 1e4).
+        # Per-key counts, because a routed step writes only its own task's key.
+        declared = getattr(self.eval_step, "scalar_keys", None)
+        if declared is None:
+            objective = getattr(self.eval_step, "objective", None) or self.loss_fn
+            declared = (("eval", "loss"), *term_keys("eval", objective))
+        paths = [
+            path
+            for path in declared
+            if isinstance(path, tuple) and len(path) == 2 and path[0] == "eval"
+        ]
+        totals: dict[str, Any] = {}
+        counts: dict[str, int] = {}
+        for _, name in paths:
+            self.state["eval"].pop(name, None)
+
         model_device = next(self.model.parameters()).device
         needs_move: bool | None = None
         for batch in datamodule.val_dataloader():
@@ -983,6 +1067,20 @@ class Trainer:
             self._call_hooks("on_eval_batch_start", self, self.state, batch)
             outputs = self.eval_step.on_eval_batch(self, self.state, batch)
             self._call_hooks("on_eval_batch_end", self, self.state, batch, outputs)
+            for _, name in paths:
+                value = self.state["eval"].pop(name, None)
+                if value is None:
+                    continue
+                if torch.is_tensor(value):
+                    # detach() still aliases a CUDA-graph output. The next
+                    # eval batch replays into that storage, so the running
+                    # sum has to own its own copy.
+                    value = value.detach().clone()
+                totals[name] = value if name not in totals else totals[name] + value
+                counts[name] = counts.get(name, 0) + 1
+
+        for name, total in totals.items():
+            self.state["eval"][name] = total / counts[name]
 
         self._call_hooks("on_eval_step_complete", self, self.state)
 

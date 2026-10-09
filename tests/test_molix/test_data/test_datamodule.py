@@ -454,15 +454,19 @@ class TestBatchSamplerInjection:
         dm.train_dataloader()
         assert source.seen_seeds[-1] == dm.seed + 3
 
-    def test_injected_source_under_ddp_raises(self, tmp_path, monkeypatch):
-        """DDP + injected source → ValueError naming the offending kwarg."""
+    def test_injected_source_under_ddp_strides_the_plan(self, tmp_path, monkeypatch):
+        """DDP keeps rank 0's stride of the injected plan."""
+        from molix.data.sampler import BatchPlanShard
+
         monkeypatch.setattr("molix.data.datamodule._is_distributed", lambda: True)
+        monkeypatch.setattr("molix.data.datamodule._get_rank", lambda: 0)
+        monkeypatch.setattr("molix.data.datamodule._get_world_size", lambda: 2)
         dm = _make_injection_dm(
             tmp_path, "ddp", batch_sampler_source=_FixedPlanSource(INJECTED_PLAN)
         )
-        with pytest.raises(ValueError, match="(?i)ddp|distributed") as excinfo:
-            dm.train_dataloader()
-        assert "batch_sampler_source" in str(excinfo.value)
+        plan = dm.train_dataloader().batch_sampler
+        assert isinstance(plan, BatchPlanShard)
+        assert list(plan) == list(BatchPlanShard(INJECTED_PLAN, rank=0, world_size=2))
 
     def test_source_with_token_budget_raises_eagerly(self, tmp_path):
         """Two competing batch policies are rejected at ``__init__``."""
@@ -578,13 +582,22 @@ class TestBatchCountsPacking:
         with pytest.raises(ValueError, match="atoms"):
             _make_packing_dm(tmp_path, batch_counts=counts)
 
-    def test_under_ddp_raises_naming_the_kwarg(self, tmp_path, monkeypatch):
+    def test_under_ddp_strides_train_and_val(self, tmp_path, monkeypatch):
+        from molix.data.sampler import BatchPlanShard
+
+        full = _make_packing_dm(tmp_path, batch_counts=_counts(8), val_batch_counts=_counts(2))
+        train_full = list(full.train_dataloader().batch_sampler)
+        val_full = list(full.val_dataloader().batch_sampler)
         monkeypatch.setattr("molix.data.datamodule._is_distributed", lambda: True)
+        monkeypatch.setattr("molix.data.datamodule._get_rank", lambda: 1)
+        monkeypatch.setattr("molix.data.datamodule._get_world_size", lambda: 2)
         dm = _make_packing_dm(tmp_path, batch_counts=_counts(8), val_batch_counts=_counts(2))
-        with pytest.raises(ValueError, match="batch_counts"):
-            dm.train_dataloader()
-        with pytest.raises(ValueError, match="val_batch_counts"):
-            dm.val_dataloader()
+        assert list(dm.train_dataloader().batch_sampler) == list(
+            BatchPlanShard(train_full, rank=1, world_size=2)
+        )
+        assert list(dm.val_dataloader().batch_sampler) == list(
+            BatchPlanShard(val_full, rank=1, world_size=2)
+        )
 
 
 # ---------------------------------------------------------------------------

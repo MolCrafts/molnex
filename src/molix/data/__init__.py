@@ -17,7 +17,8 @@ Surfaces, in the order a sample travels:
   :meth:`~BaseDataset.count_rows` verb, then every sample.
 * **Batch policies** — :class:`TokenBudgetPacker` / :class:`TokenBudgetBatchSampler`
   pack under per-table budgets, :class:`TaskMixtureBatchSampler` interleaves
-  per-task streams, :class:`BatchSamplerSource` is the protocol a
+  per-task streams, :class:`BatchPlanShard` strides a plan across DDP ranks,
+  :class:`BatchSamplerSource` is the protocol a
   :class:`DataModule` calls once per epoch, and :func:`group_split_indices`
   splits indices without splitting a group across sides.
 * **Collate** — :func:`collate_molecules` turns samples into the nested batch,
@@ -47,6 +48,7 @@ from molix.data.pad import MoleculePadder
 from molix.data.profile import ProfileIndex
 from molix.data.residual import EnergyResidual
 from molix.data.sampler import (
+    BatchPlanShard,
     BatchSamplerSource,
     TaskMixtureBatchSampler,
     TokenBudgetBatchSampler,
@@ -61,6 +63,7 @@ from molix.data.valence_columns import (
 
 __all__ = [
     "BaseDataset",
+    "BatchPlanShard",
     "BatchSamplerSource",
     "BatchTask",
     "DataMixture",

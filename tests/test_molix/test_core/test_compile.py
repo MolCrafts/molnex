@@ -135,16 +135,53 @@ def test_compile_cuda_graphs_applies_preset():
 
 
 @pytest.mark.parametrize("side", ["train_step", "eval_step"])
-def test_compile_step_refuses_a_routing_step(side: str):
-    """The multi-task router host-syncs on the task label: not a traceable objective."""
+def test_compile_step_traces_the_routed_body(side: str):
+    """The task-label read stays in the prologue; compile wraps the body."""
     router = TaskRouter([TaskSpec("energy", 0, _mse_loss)])
     step = MultiTaskTrainStep(router) if side == "train_step" else MultiTaskEvalStep(router)
     trainer, _ = _make_trainer(**{side: step})
-    with (
-        mock.patch("molix.compile.torch.compile", side_effect=lambda m, **k: m),
-        pytest.raises(ValueError, match="TaskRouter"),
-    ):
+    sentinel = object()
+    with mock.patch("molix.compile.torch.compile", return_value=sentinel):
         trainer.compile()
+    assert getattr(trainer, side)._traced_forward_loss is sentinel
+    assert step.forward_loss.__func__ is type(step).forward_loss
+
+
+def test_wrap_distributed_is_a_no_op_without_a_process_group():
+    trainer, model = _make_trainer()
+    trainer._wrap_distributed()
+    assert trainer.model is model
+
+
+def test_wrap_distributed_refuses_a_compiled_step(monkeypatch: pytest.MonkeyPatch):
+    import torch.distributed as dist
+
+    trainer, _ = _make_trainer()
+    trainer.train_step._traced_forward_loss = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    with pytest.raises(ValueError, match="compile\\(step=True\\)"):
+        trainer._wrap_distributed()
+
+
+def test_wrap_distributed_puts_ddp_around_the_module(monkeypatch: pytest.MonkeyPatch):
+    import torch.distributed as dist
+
+    class _FakeDDP(nn.Module):
+        def __init__(self, module: nn.Module, **kwargs: object) -> None:
+            super().__init__()
+            self.module = module
+            self.kwargs = kwargs
+
+    trainer, model = _make_trainer()
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.nn.parallel, "DistributedDataParallel", _FakeDDP)
+    trainer._wrap_distributed()
+    assert isinstance(trainer.model, _FakeDDP)
+    assert trainer.model.module is model
+    assert trainer.model.kwargs["find_unused_parameters"] is True
+    assert trainer._checkpoint.model is trainer.model
 
 
 def test_smoke_and_train_run_the_same_forward_loss():

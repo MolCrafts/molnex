@@ -498,6 +498,38 @@ class TestMultiTaskTrainStep:
         for expected_p, actual_p in zip(reference_model.parameters(), multitask_model.parameters()):
             assert torch.equal(expected_p, actual_p)
 
+    def test_traced_body_does_not_read_the_task_label(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The host sync stays in the prologue. The traced body uses the chosen loss."""
+        step = MultiTaskTrainStep(TaskRouter(_four_tasks()))
+        trainer = _make_trainer(train_step=step)
+        batch = _tensordict_batch(1)
+        step._routed = step.router.tasks[1]
+
+        def _boom(_batch: object) -> object:
+            raise AssertionError("route() is the eager prologue, not the traced body")
+
+        monkeypatch.setattr(step.router, "route", _boom)
+        loss, _predictions = step._traced_forward_loss(trainer, TrainState(), batch)
+        assert loss.ndim == 0
+
+
+@pytest.mark.slow
+def test_routed_body_explains_as_one_graph() -> None:
+    """The compiled region is the model plus the chosen loss, with no label read."""
+    from molix.compile import Compiler
+
+    def _loss(predictions: dict, _batch: object) -> torch.Tensor:
+        return predictions["energy"].square().mean()
+
+    step = MultiTaskTrainStep(TaskRouter((TaskSpec(name="energy", code=0, loss=_loss),)))
+    trainer = _make_trainer(train_step=step)
+    batch = _tensordict_batch(0)
+    step._routed = step.router.route(batch)
+    summary = Compiler.explain(step._traced_forward_loss, trainer, TrainState(), batch)
+    assert (summary.graph_count, summary.graph_break_count) == (1, 0), summary.break_sites
+
 
 # ---------------------------------------------------------------------------
 # MultiTaskEvalStep

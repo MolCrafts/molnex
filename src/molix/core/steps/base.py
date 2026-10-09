@@ -86,9 +86,9 @@ class Step(Protocol):
     compiled wrapper — and it is what :meth:`~molix.core.trainer.Trainer.smoke`
     warms up. A step without ``_traced_forward_loss`` trains as before but
     can only be compiled model-only (``compile(step=False)``); one without
-    ``forward_loss`` cannot be smoke-tested either; a step whose objective
-    host-syncs declares ``untraceable`` (see
-    :class:`~molix.core.steps.multitask.MultiTaskTrainStep`).
+    ``forward_loss`` cannot be smoke-tested either; a step whose traced body
+    host-syncs declares ``untraceable``. The multi-task label read stays in
+    the eager prologue, outside that body.
 
     Example — a custom step that adds an L2 activation penalty::
 

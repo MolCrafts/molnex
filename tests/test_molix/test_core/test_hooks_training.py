@@ -201,3 +201,38 @@ def test_activation_checkpointing_gradient_flow():
     # All parameters should have gradients
     for name, param in model.named_parameters():
         assert param.grad is not None, f"No gradient for {name}"
+
+
+def test_required_gradient_names_a_group_the_loss_does_not_reach():
+    from types import SimpleNamespace
+
+    from molix.hooks import RequiredGradientHook
+
+    model = nn.Linear(2, 1)
+    head = nn.Linear(2, 1)
+    opt = torch.optim.SGD(
+        [
+            {"params": list(model.parameters()), "name": "encoder"},
+            {"params": list(head.parameters()), "name": "head"},
+        ],
+        lr=0.1,
+    )
+    opt.zero_grad()
+    model(torch.ones(1, 2)).sum().backward()
+    hook = RequiredGradientHook(("encoder", "head"))
+    with pytest.raises(RuntimeError, match="head"):
+        hook.on_after_backward(SimpleNamespace(optimizer=opt), TrainState())
+
+
+def test_required_gradient_passes_when_every_named_group_is_reached():
+    from types import SimpleNamespace
+
+    from molix.hooks import RequiredGradientHook
+
+    model = nn.Linear(2, 1)
+    opt = torch.optim.SGD([{"params": list(model.parameters()), "name": "encoder"}], lr=0.1)
+    opt.zero_grad()
+    model(torch.ones(1, 2)).sum().backward()
+    RequiredGradientHook(("encoder",)).on_after_backward(
+        SimpleNamespace(optimizer=opt), TrainState()
+    )

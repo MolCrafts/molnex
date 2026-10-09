@@ -117,3 +117,83 @@ class TestMoleculeCenteredMAE:
         g = torch.tensor([0, 0, 1, 1])
         m.update(pred, true, g)
         assert float(m.compute()) == pytest.approx(0.0)
+
+
+class TestPotentialReport:
+    """Force, energy-per-atom, virial and outlier sums, ignoring a loss weight."""
+
+    def test_per_element_force_and_energy_per_atom(self):
+        from molix.core.metrics import PotentialReport
+
+        report = PotentialReport(elements=(1, 8), outlier_force=1.0)
+        pred = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 3.0, 0.0]])
+        ref = torch.zeros(3, 3)
+        report.update_forces(pred, ref, z=torch.tensor([1, 1, 8]))
+        report.update_outliers(pred, ref)
+        values = report.scalars()
+        assert float(values["force_mae"]) == pytest.approx(5.0 / 9.0)
+        assert float(values["force_mae_Z1"]) == pytest.approx(2.0 / 6.0)
+        assert float(values["force_mae_Z8"]) == pytest.approx(1.0)
+        assert float(values["force_outlier_count"]) == pytest.approx(1.0)
+        assert float(values["force_outlier_fraction"]) == pytest.approx(1.0 / 3.0)
+
+        report.update_energy(
+            torch.tensor([4.0, 9.0]),
+            torch.tensor([0.0, 0.0]),
+            torch.tensor([2.0, 3.0]),
+            mask=torch.tensor([True, False]),
+        )
+        assert float(report.scalars()["energy_per_atom_mae"]) == pytest.approx(2.0)
+
+    def test_padding_is_dropped_and_a_loss_weight_is_not_an_input(self):
+        from molix.core.metrics import PotentialReport
+
+        report = PotentialReport(outlier_force=1.0)
+        pred = torch.tensor([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+        ref = torch.zeros(2, 3)
+        report.update_forces(pred, ref, mask=torch.tensor([True, False]))
+        report.update_outliers(pred, ref, mask=torch.tensor([True, False]))
+        values = report.scalars()
+        assert float(values["force_mae"]) == pytest.approx(0.0)
+        assert float(values["force_outlier_count"]) == pytest.approx(0.0)
+
+    def test_virial_mae_uses_live_graphs(self):
+        from molix.core.metrics import PotentialReport
+
+        report = PotentialReport()
+        pred = torch.ones(2, 3, 3)
+        ref = torch.zeros(2, 3, 3)
+        report.update_virial(pred, ref, mask=torch.tensor([True, False]))
+        assert float(report.scalars()["virial_mae"]) == pytest.approx(1.0)
+
+    def test_hook_reads_predictions_and_not_the_loss_weight(self):
+        from tensordict import TensorDict
+
+        from molix.core.state import TrainState
+        from molix.hooks import PotentialReportHook
+
+        atoms = TensorDict(
+            {
+                "Z": torch.tensor([1, 1]),
+                "forces": torch.zeros(2, 3),
+                "mask": torch.tensor([True, True]),
+                "force_weight": torch.zeros(2),
+            },
+            batch_size=[2],
+        )
+        graphs = TensorDict(
+            {"energy": torch.tensor([0.0]), "num_atoms": torch.tensor([2.0])},
+            batch_size=[1],
+        )
+        batch = TensorDict({"atoms": atoms, "graphs": graphs}, batch_size=[])
+        predictions = {
+            "forces": torch.tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]),
+            "energy": torch.tensor([4.0]),
+        }
+        state = TrainState()
+        PotentialReportHook(elements=(1,), outlier_force=1.0).on_train_batch_end(
+            None, state, batch, {"predictions": predictions}
+        )
+        assert float(state["train"]["force_mae"]) == pytest.approx(1.0 / 6.0)
+        assert float(state["train"]["energy_per_atom_mae"]) == pytest.approx(2.0)
+        assert float(state["train"]["force_outlier_count"]) == pytest.approx(0.0)

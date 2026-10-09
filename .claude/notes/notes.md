@@ -771,6 +771,16 @@ values, per-call CPU→device tensor creation, pydantic reads. Dynamic sizes
 module ships an explain→0 test (pattern:
 `tests/test_molzoo/test_mace/test_potential.py::test_energy_core_compiles_to_one_graph`).
 
+**Task label (2026-10-09).** `TaskRouter.route` is `torch.unique(labels).tolist()`,
+one host sync per batch. Owner: `molix.core.steps.multitask`. It stays in the
+eager prologue of `MultiTask*Step.forward_loss`. The traced body is the model
+plus the already chosen loss (`tests/test_molix/test_core/test_steps/test_multitask.py::test_routed_body_explains_as_one_graph`).
+Under a process group, `Trainer._wrap_distributed` refuses `compile(step=True)`:
+`DistributedDataParallel.forward` is the gradient-sync seam and is not part of
+that region. `compile(step=False)` compiles the module; `train()` wraps DDP
+around it. Token-budget plans are strided by `BatchPlanShard` so every rank
+takes the same number of steps.
+
 **Baseline inventory (2026-09-03, CPU tiny Polar, naive cueq).** MACE local
 backbone: 1 graph / 0 breaks. Polar MD step
 (`molpot.forcefield.potentials.Potentials.calc_energy_forces_virial`, cell given): 51 graphs /

@@ -83,10 +83,10 @@ class DefaultTrainStep:
     """
 
     #: Why :meth:`forward_loss` cannot be traced, or ``None`` when it can. A
-    #: step whose objective host-syncs declares it here (see
-    #: :class:`~molix.core.steps.multitask.MultiTaskTrainStep`) and
+    #: step whose traced body host-syncs declares the reason here, and
     #: :meth:`~molix.core.trainer.Trainer.compile` with ``step=True`` refuses
-    #: it, quoting this text.
+    #: it, quoting this text. :class:`~molix.core.steps.multitask.MultiTaskTrainStep`
+    #: keeps its label read in the eager prologue, so it does not set this.
     untraceable: str | None = None
 
     def compute_loss(
