@@ -2,8 +2,8 @@
 
 Mirrors ``src/molpot/derivation/protocol.py``. Three helpers are covered here:
 :func:`ensure_graphs` (its shape), :func:`write_energy` (the shape it asks for)
-and :func:`absorb_model_output` (which spelling of the per-atom energy it
-accepts). The session side-channel is exercised elsewhere.
+and :func:`absorb_model_output` (a ``TensorDict`` forward; a plain dict is
+refused). The session side-channel is exercised elsewhere.
 
 The contract under test is CLAUDE.md's post-collate schema: ``"graphs"`` is a
 ``TensorDict(batch_size=[B])`` for ``B`` graphs, the same shape the canonical
@@ -17,6 +17,7 @@ value is recomputed from the input by the assertion side.
 
 from __future__ import annotations
 
+import pytest
 import torch
 from tensordict import TensorDict
 
@@ -122,18 +123,8 @@ class TestWriteEnergyGraphShape:
 class TestAbsorbModelOutput:
     """Target: :func:`molpot.derivation.protocol.absorb_model_output`.
 
-    The plain-dict branch used to read the bare string ``"atomic_energy"`` with
-    no constant behind it. A model returning a plain dict that spelled the key
-    differently had its per-atom energy dropped silently: ``.get`` returned
-    ``None`` and :func:`write_energy` skipped the write. That was a feature gap
-    while the per-atom energy was optional; from spec ``lammps-iface-05-pbc`` on
-    it is the *only* source of the LAMMPS partition energy, so a silent drop
-    becomes a silent zero energy on every rank.
-
-    The canonical flat spelling is therefore
-    :data:`molix.schema.ATOMIC_ENERGY_FLAT_KEY` — the flat alias of the nested
-    :data:`~molix.schema.ATOMIC_ENERGY_KEY`, and the only accepted one. It is
-    imported inside each test so only this class is red while it is missing.
+    A model forward is a ``TensorDict``. Nested ``graphs.energy`` and
+    ``atoms.energy`` are copied onto ``batch``. A plain dict is refused.
 
     Units: energy eV. Every expected value is a hard-coded literal.
     """
@@ -149,33 +140,15 @@ class TestAbsorbModelOutput:
     def _total(cls) -> torch.Tensor:
         return torch.tensor([cls.TOTAL], dtype=torch.float64)
 
-    def test_canonical_flat_key_is_written_to_the_nested_target(self):
-        from molix.schema import ATOMIC_ENERGY_FLAT_KEY
+    def test_plain_dict_is_refused(self):
+        with pytest.raises(TypeError, match="TensorDict"):
+            absorb_model_output(
+                _batch_with_atoms(3),
+                {"energy": self._total(), "atomic_energy": self._atomic()},
+            )
 
-        batch = _batch_with_atoms(3)
-        absorb_model_output(
-            batch, {"energy": self._total(), ATOMIC_ENERGY_FLAT_KEY: self._atomic()}
-        )
-        assert torch.equal(batch[ATOMIC_ENERGY_KEY], self._atomic())
-        assert torch.equal(batch[ENERGY_KEY], self._total())
-
-    def test_non_canonical_spelling_is_not_absorbed(self):
-        """A third spelling must not reach ``("atoms", "energy")`` — one name only."""
-        from molix.schema import ATOMIC_ENERGY_FLAT_KEY
-
-        assert "node_energies" != ATOMIC_ENERGY_FLAT_KEY
-        batch = _batch_with_atoms(3)
-        absorb_model_output(batch, {"energy": self._total(), "node_energies": self._atomic()})
-        assert "energy" not in batch["atoms"].keys()
-        assert torch.equal(batch[ENERGY_KEY], self._total())
-
-    def test_tensordict_branch_reads_the_nested_keys(self):
-        """Unchanged by v3: a TensorDict output is read at the nested keys.
-
-        Deliberately constant-free — this is the "did not regress" lock for the
-        branch the flat-alias fix does not touch, so it must stay green while
-        the two cases above are red.
-        """
+    def test_tensordict_reads_the_nested_keys(self):
+        """Nested ``graphs.energy`` and ``atoms.energy`` are copied onto ``batch``."""
         out = TensorDict(
             atoms=TensorDict(energy=self._atomic(), batch_size=[3]),
             graphs=TensorDict(energy=self._total(), batch_size=[1]),

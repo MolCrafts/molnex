@@ -14,8 +14,6 @@ References:
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
@@ -64,15 +62,21 @@ class AtomTypeReadout(nn.Module):
         feats = out["atoms", "chem_features"]
         return feats
 
-    def forward(self, batch: TensorDict) -> dict[str, Any]:
-        """Return logits and argmax type ids from continuous embeddings.
+    def forward(self, batch: TensorDict) -> TensorDict:
+        """Write type logits and argmax ids onto ``atoms`` and return ``batch``.
+
+        The encoder has already written ``atoms.chem_features``. This does not
+        copy them.
 
         Args:
             batch: Nested TensorDict with atoms.Z and topology.
 
         Returns:
-            Dict with ``logits`` ``(N, num_types)`` and ``pred_type_id`` ``(N,)``.
+            ``batch``, with ``atoms.logits`` ``(N, num_types)`` and
+            ``atoms.pred_type_id`` ``(N,)``.
         """
         feats = self.encode(batch)
         logits = self.head(feats)
-        return {"logits": logits, "pred_type_id": self.head.decode(logits), "features": feats}
+        batch["atoms", "logits"] = logits
+        batch["atoms", "pred_type_id"] = self.head.decode(logits)
+        return batch

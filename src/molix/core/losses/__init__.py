@@ -32,8 +32,12 @@ class in the way::
 :class:`~molix.data.ForceInlierWeight`, and ``graphs.energy_residual`` by
 :class:`~molix.data.EnergyResidual` — the weight and the residual target are
 batch columns, so the loss stays a pure function of what the batch carries.
+
+:func:`column_match` compares two nested columns of a ``TensorDict`` forward
+(a prediction against a label, or against a teacher stamp).
 """
 
+from molix.core.losses.column import column_match
 from molix.core.losses.combined import WeightedLoss
 from molix.core.losses.energy import MSELoss
 from molix.core.losses.force import MAELoss
@@ -44,6 +48,7 @@ from molix.core.losses.molecular import (
     ParsleyEnergyWeight,
     PartialHessianLoss,
     ProjectedInternalHessianLoss,
+    ReferenceShiftPrior,
     ScaleNormalizedLoss,
     TorsionProfileLoss,
     center_by_group,
@@ -57,6 +62,7 @@ from molix.core.losses.molecular import (
 
 __all__ = [
     "AtomicChargeLoss",
+    "ReferenceShiftPrior",
     "BoltzmannProfileLoss",
     "ChargeMSELoss",
     "PartialHessianLoss",
@@ -68,6 +74,7 @@ __all__ = [
     "TorsionProfileLoss",
     "WeightedLoss",
     "center_by_group",
+    "column_match",
     "energy_force_mse",
     "energy_loss",
     "energy_mse",

@@ -24,9 +24,11 @@ from molix.core.losses.molecular import (
     ParsleyEnergyWeight,
     PartialHessianLoss,
     ProjectedInternalHessianLoss,
+    ReferenceShiftPrior,
     ScaleNormalizedLoss,
     TorsionProfileLoss,
     center_by_group,
+    log_knee,
     molecule_centered_energy_mse,
     parameter_bag_mse,
 )
@@ -898,6 +900,23 @@ class TestPartialHessianLoss:
             PartialHessianLoss()({"partial_hessian": torch.zeros(2, 9)}, self._batch(label))
 
 
+class TestReferenceShiftPrior:
+    def test_is_the_mean_squared_shift_over_live_rows(self):
+        """A padded row neither scores nor counts."""
+        batch = TensorDict(
+            {"angles": TensorDict({"mask": torch.tensor([True, True, False])}, batch_size=[3])},
+            batch_size=[],
+        )
+        pred = {"angle_theta0_residual": torch.tensor([0.1, -0.3, 5.0])}
+        got = ReferenceShiftPrior()(pred, batch)
+        assert torch.allclose(got, torch.tensor((0.01 + 0.09) / 2))
+
+    def test_a_missing_prediction_is_an_error(self):
+        batch = TensorDict({"angles": TensorDict({}, batch_size=[0])}, batch_size=[])
+        with pytest.raises(KeyError, match="angle_theta0_residual"):
+            ReferenceShiftPrior()({}, batch)
+
+
 class TestAtomicChargeLoss:
     """Charge MSE on a packed batch, where the ghosts must not count."""
 
@@ -1240,3 +1259,20 @@ class TestForceLossOutlierBound:
             {"energy": exact}, TestBoltzmannProfileSaturation._batch(reference, [0, 0, 0])
         )
         assert float(loss) == 0.0
+
+
+class TestLogKnee:
+    def test_below_the_knee_the_loss_and_its_gradient_are_unchanged(self) -> None:
+        value = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+        out = log_knee(value, 4.0)
+        assert float(out.detach()) == pytest.approx(2.0)
+        out.backward()
+        assert float(value.grad) == pytest.approx(1.0)
+
+    def test_above_the_knee_the_gradient_is_knee_over_loss(self) -> None:
+        value = torch.tensor(16.0, dtype=torch.float64, requires_grad=True)
+        out = log_knee(value, 4.0)
+        out.backward()
+        assert float(value.grad) == pytest.approx(4.0 / 16.0)
+        doubled = torch.tensor(32.0, dtype=torch.float64)
+        assert float(log_knee(doubled, 4.0) - out.detach()) == pytest.approx(4.0 * math.log(2.0))

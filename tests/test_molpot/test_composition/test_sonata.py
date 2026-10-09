@@ -256,29 +256,30 @@ def test_forward_output_schema(encoder, batch):
         short_range_head=_short_range_head(encoder),
     )
     out = sonata(batch)
-    expected_keys = {
+    assert {
         "energy",
         "energy_short",
         "energy_es",
+        "molecular_dipole",
+        "charge_sum_pre_proj",
+        "charge_sum_post_proj",
+    } <= set(out["graphs"].keys())
+    assert {
         "atomic_charges",
         "atomic_dipoles",
         "atomic_quadrupoles",
-        "molecular_dipole",
         "phi",
         "field",
-        "charge_sum_pre_proj",
-        "charge_sum_post_proj",
-    }
-    assert set(out.keys()) == expected_keys
-    assert out["energy"].shape == (2,)
-    assert out["energy_short"].shape == (2,)
-    assert out["energy_es"].shape == (2,)
-    assert out["atomic_charges"].shape == (8,)
-    assert out["atomic_dipoles"].shape == (8, 3)
-    assert out["atomic_quadrupoles"].shape == (8, 5)
-    assert out["molecular_dipole"].shape == (2, 3)
-    assert out["phi"].shape == (8,)
-    assert out["field"].shape == (8, 3)
+    } <= set(out["atoms"].keys())
+    assert out["graphs", "energy"].shape == (2,)
+    assert out["graphs", "energy_short"].shape == (2,)
+    assert out["graphs", "energy_es"].shape == (2,)
+    assert out["atoms", "atomic_charges"].shape == (8,)
+    assert out["atoms", "atomic_dipoles"].shape == (8, 3)
+    assert out["atoms", "atomic_quadrupoles"].shape == (8, 5)
+    assert out["graphs", "molecular_dipole"].shape == (2, 3)
+    assert out["atoms", "phi"].shape == (8,)
+    assert out["atoms", "field"].shape == (8, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +298,10 @@ def test_energy_decomposition(encoder, batch):
     )
     out = sonata(batch)
     assert torch.allclose(
-        out["energy"], out["energy_short"] + out["energy_es"], atol=1e-6, rtol=1e-6
+        out["graphs", "energy"],
+        out["graphs", "energy_short"] + out["graphs", "energy_es"],
+        atol=1e-6,
+        rtol=1e-6,
     )
 
 
@@ -317,9 +321,9 @@ def test_compute_forces(encoder, batch):
     )
     sonata.train()
     out = sonata(batch, compute_forces=True)
-    assert out["forces"].shape == (8, 3)
-    assert torch.isfinite(out["forces"]).all()
-    assert out["forces"].grad_fn is not None
+    assert out["atoms", "forces"].shape == (8, 3)
+    assert torch.isfinite(out["atoms", "forces"]).all()
+    assert out["atoms", "forces"].grad_fn is not None
 
 
 # ---------------------------------------------------------------------------
@@ -337,8 +341,10 @@ def test_compute_stress(encoder, batch_with_cell):
         short_range_head=_short_range_head(encoder),
     )
     out = sonata(batch_with_cell, compute_stress=True)
-    assert out["stress"].shape == (2, 3, 3)
-    assert torch.allclose(out["stress"], out["stress"].transpose(-1, -2), atol=1e-5)
+    assert out["graphs", "stress"].shape == (2, 3, 3)
+    assert torch.allclose(
+        out["graphs", "stress"], out["graphs", "stress"].transpose(-1, -2), atol=1e-5
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -366,9 +372,22 @@ def test_spec_round_trip(encoder, batch):
         out1 = sonata1(batch)
         out2 = sonata2(batch)
 
-    for key in out1:
+    columns = (
+        ("graphs", "energy"),
+        ("graphs", "energy_short"),
+        ("graphs", "energy_es"),
+        ("graphs", "molecular_dipole"),
+        ("graphs", "charge_sum_pre_proj"),
+        ("graphs", "charge_sum_post_proj"),
+        ("atoms", "atomic_charges"),
+        ("atoms", "atomic_dipoles"),
+        ("atoms", "atomic_quadrupoles"),
+        ("atoms", "phi"),
+        ("atoms", "field"),
+    )
+    for key in columns:
         assert torch.allclose(out1[key], out2[key], atol=1e-6, rtol=1e-6), (
-            f"output['{key}'] mismatch after from_spec round-trip"
+            f"output[{key!r}] mismatch after from_spec round-trip"
         )
 
 

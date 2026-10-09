@@ -126,9 +126,11 @@ class TestTranslation:
             ref = sonata_pipeline(sample_neutral_batch_open.clone())
             shifted = sonata_pipeline(translate_graph(sample_neutral_batch_open, t))
 
-        assert torch.allclose(ref["energy"], shifted["energy"], atol=1e-7, rtol=1e-7)
         assert torch.allclose(
-            ref["atomic_charges"], shifted["atomic_charges"], atol=1e-7, rtol=1e-7
+            ref["graphs", "energy"], shifted["graphs", "energy"], atol=1e-7, rtol=1e-7
+        )
+        assert torch.allclose(
+            ref["atoms", "atomic_charges"], shifted["atoms", "atomic_charges"], atol=1e-7, rtol=1e-7
         )
 
     def test_translation_invariance_periodic_lattice_vector(
@@ -148,7 +150,9 @@ class TestTranslation:
             with torch.no_grad():
                 ref = sonata_pipeline(sample_neutral_batch_periodic.clone())
                 shifted = sonata_pipeline(translate_graph(sample_neutral_batch_periodic, t))
-            rel = (shifted["energy"] - ref["energy"]).abs() / ref["energy"].abs().clamp(min=1e-12)
+            rel = (shifted["graphs", "energy"] - ref["graphs", "energy"]).abs() / ref[
+                "graphs", "energy"
+            ].abs().clamp(min=1e-12)
             assert rel.max() < 1e-7, (
                 f"lattice translation (n,m,p)=({n},{m},{p}): rel.max()={rel.max():.2e}"
             )
@@ -176,7 +180,9 @@ class TestRotation:
             rot = sonata_pipeline(rotate_graph(sample_neutral_batch_open, R))
 
         # Algebraic identity in float64 — tolerance below 1e-10.
-        rel = (rot["energy"] - ref["energy"]).abs() / ref["energy"].abs().clamp(min=1e-12)
+        rel = (rot["graphs", "energy"] - ref["graphs", "energy"]).abs() / ref[
+            "graphs", "energy"
+        ].abs().clamp(min=1e-12)
         assert rel.max() < 1e-10, f"rel.max()={rel.max():.2e}"
 
     def test_rotation_dipole_equivariance_open(
@@ -193,8 +199,8 @@ class TestRotation:
             ref = sonata_pipeline(sample_neutral_batch_open.clone())
             rot = sonata_pipeline(rotate_graph(sample_neutral_batch_open, R))
 
-        mu_rotated = _rotate_l1(ref["atomic_dipoles"], R)
-        assert torch.allclose(mu_rotated, rot["atomic_dipoles"], atol=1e-9, rtol=1e-9)
+        mu_rotated = _rotate_l1(ref["atoms", "atomic_dipoles"], R)
+        assert torch.allclose(mu_rotated, rot["atoms", "atomic_dipoles"], atol=1e-9, rtol=1e-9)
 
     def test_rotation_quadrupole_equivariance_open(
         self,
@@ -210,8 +216,10 @@ class TestRotation:
             ref = sonata_pipeline(sample_neutral_batch_open.clone())
             rot = sonata_pipeline(rotate_graph(sample_neutral_batch_open, R))
 
-        theta_rotated = _rotate_l2_via_cuet(ref["atomic_quadrupoles"], R)
-        assert torch.allclose(theta_rotated, rot["atomic_quadrupoles"], atol=1e-9, rtol=1e-9)
+        theta_rotated = _rotate_l2_via_cuet(ref["atoms", "atomic_quadrupoles"], R)
+        assert torch.allclose(
+            theta_rotated, rot["atoms", "atomic_quadrupoles"], atol=1e-9, rtol=1e-9
+        )
 
     def test_rotation_energy_invariance_periodic(
         self,
@@ -249,7 +257,9 @@ class TestRotation:
             ref = sonata_pipeline(batch.clone(), kvec_indices=nvec)
             rot = sonata_pipeline(rotated, kvec_indices=nvec)
 
-        rel = (rot["energy"] - ref["energy"]).abs() / ref["energy"].abs().clamp(min=1e-12)
+        rel = (rot["graphs", "energy"] - ref["graphs", "energy"]).abs() / ref[
+            "graphs", "energy"
+        ].abs().clamp(min=1e-12)
         assert rel.max() < 1e-9, f"periodic rel.max()={rel.max():.2e}"
 
 
@@ -283,7 +293,13 @@ class TestPermutation:
             permuted = sonata_pipeline(permute_graph(sample_neutral_batch_open, perm))
 
         # Per-atom outputs: charges, dipoles, quadrupoles, phi, field.
-        for key in ("atomic_charges", "atomic_dipoles", "atomic_quadrupoles", "phi", "field"):
+        for key in (
+            ("atoms", "atomic_charges"),
+            ("atoms", "atomic_dipoles"),
+            ("atoms", "atomic_quadrupoles"),
+            ("atoms", "phi"),
+            ("atoms", "field"),
+        ):
             assert torch.allclose(ref[key][perm], permuted[key], atol=1e-9, rtol=1e-9), (
                 f"per-atom output {key!r} not permutation-equivariant"
             )
@@ -295,7 +311,11 @@ class TestPermutation:
         # The post-perm batch index is `batch_idx[perm]`; since each
         # original graph receives the same set of atoms back (just under
         # new indices), the per-graph outputs must match by graph id.
-        for key in ("energy", "energy_es", "molecular_dipole"):
+        for key in (
+            ("graphs", "energy"),
+            ("graphs", "energy_es"),
+            ("graphs", "molecular_dipole"),
+        ):
             assert torch.allclose(ref[key], permuted[key], atol=1e-9, rtol=1e-9), (
                 f"per-graph output {key!r} not permutation-invariant"
             )
@@ -318,7 +338,7 @@ class TestChargeConservation:
         with torch.no_grad():
             out = sonata_pipeline(sample_neutral_batch_periodic.clone())
 
-        q = out["atomic_charges"]
+        q = out["atoms", "atomic_charges"]
         atom_batch = sample_neutral_batch_periodic["atoms", "batch"]
         target = sample_neutral_batch_periodic["graphs", "total_charge"]
         n_graphs = int(target.shape[0])
@@ -334,7 +354,7 @@ class TestChargeConservation:
         with torch.no_grad():
             out = sonata_pipeline(sample_charged_batch_periodic.clone())
 
-        q = out["atomic_charges"]
+        q = out["atoms", "atomic_charges"]
         atom_batch = sample_charged_batch_periodic["atoms", "batch"]
         target = sample_charged_batch_periodic["graphs", "total_charge"]
         n_graphs = int(target.shape[0])
@@ -363,7 +383,7 @@ class TestQuadrupoleTraceless:
         with torch.no_grad():
             out = sonata_pipeline(sample_neutral_batch_open.clone())
 
-        Theta_cart = _theta5_to_cartesian33(out["atomic_quadrupoles"])
+        Theta_cart = _theta5_to_cartesian33(out["atoms", "atomic_quadrupoles"])
         traces = torch.einsum("nii->n", Theta_cart)
         assert traces.abs().max() < 1e-12, f"tr(Θ).abs().max()={traces.abs().max():.2e}"
 
@@ -373,7 +393,7 @@ class TestQuadrupoleTraceless:
         with torch.no_grad():
             out = sonata_pipeline(sample_neutral_batch_periodic.clone())
 
-        Theta_cart = _theta5_to_cartesian33(out["atomic_quadrupoles"])
+        Theta_cart = _theta5_to_cartesian33(out["atoms", "atomic_quadrupoles"])
         traces = torch.einsum("nii->n", Theta_cart)
         assert traces.abs().max() < 1e-12, f"tr(Θ).abs().max()={traces.abs().max():.2e}"
 

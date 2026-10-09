@@ -124,9 +124,8 @@ def write_energy(
         atomic_energy: Optional per-atom energy ``(N,)`` in eV, written under
             :data:`~molix.schema.ATOMIC_ENERGY_KEY` (``("atoms", "energy")``).
             The keyword is named after
-            :data:`~molix.schema.ATOMIC_ENERGY_FLAT_KEY`, the flat alias of that
-            nested key, so a plain-dict model output can be forwarded here under
-            one spelling end to end.
+            :data:`~molix.schema.ATOMIC_ENERGY_FLAT_KEY`, the export tensor
+            name of that nested key.
 
     Returns:
         The same ``batch``.
@@ -146,32 +145,19 @@ def write_forces(batch: TensorDict, forces: torch.Tensor) -> TensorDict:
     return batch
 
 
-def absorb_model_output(batch: TensorDict, out: TensorDict | dict) -> TensorDict:
-    """Merge a model return value into ``batch``.
+def absorb_model_output(batch: TensorDict, out: TensorDict) -> TensorDict:
+    """Copy energy columns from a model ``TensorDict`` onto ``batch``.
 
-    Two output shapes are understood, and each has exactly one spelling of the
-    per-atom energy: a nested ``TensorDict`` is read at
-    :data:`~molix.schema.ATOMIC_ENERGY_KEY`, a plain dict at its flat alias
-    :data:`~molix.schema.ATOMIC_ENERGY_FLAT_KEY`. A per-atom tensor arriving
-    under any other name is *not* absorbed — the write is skipped rather than
-    guessed at. Both spellings come from the constants so that the writer
-    (a model) and the reader (here) cannot drift apart the way a bare string
-    literal on this side allowed.
+    Reads ``graphs.energy`` and, when present, ``atoms.energy``. A forward
+    that returned its input is already written. A plain dict is refused:
+    a model forward is a ``TensorDict``.
     """
+    if not isinstance(out, TensorDict):
+        raise TypeError(f"a model forward returns a TensorDict; got {type(out).__name__}")
     if out is batch:
         return batch
-    if isinstance(out, TensorDict):
-        if has_energy(out):
-            batch[ENERGY_KEY] = out[ENERGY_KEY]
-        if "atoms" in out.keys() and "energy" in out["atoms"].keys():
-            batch[ATOMIC_ENERGY_KEY] = out["atoms", "energy"]
-        return batch
-    if isinstance(out, dict):
-        if "energy" in out:
-            write_energy(
-                batch,
-                out["energy"],
-                atomic_energy=out.get(ATOMIC_ENERGY_FLAT_KEY),
-            )
-        return batch
+    if has_energy(out):
+        batch[ENERGY_KEY] = out[ENERGY_KEY]
+    if "atoms" in out.keys() and "energy" in out["atoms"].keys():
+        batch[ATOMIC_ENERGY_KEY] = out["atoms", "energy"]
     return batch

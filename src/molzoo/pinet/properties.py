@@ -17,6 +17,25 @@ from molpot.heads import ChargeResponseHead, DipoleHead
 from .geometry import edge_bond_diff
 
 
+def _stamp(
+    batch: TensorDict,
+    values: dict[str, torch.Tensor],
+    columns: dict[str, str | None],
+) -> TensorDict:
+    """Write each head tensor onto the batch and return it.
+
+    ``columns`` maps a head key to ``atoms`` / ``pairs`` / ``graphs``. ``None``
+    is a 0-dim tensor, which the root (batch size ``[]``) can hold.
+    """
+    for key, value in values.items():
+        namespace = columns[key]
+        if namespace is None:
+            batch[key] = value
+        else:
+            batch[namespace, key] = value
+    return batch
+
+
 def pool_layer(features: torch.Tensor, reduction: str) -> torch.Tensor:
     """Pool the layer axis of ``(N, layers, ...)`` features."""
     if reduction == "mean":
@@ -59,7 +78,21 @@ class PiNetDipole(nn.Module):
             regularization=regularization,
         )
 
-    def forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
+    #: Head key → namespace. ``None`` is the 0-dim bond-charge penalty.
+    _COLUMNS: dict[str, str | None] = {
+        "charge_sum_pre_proj": "graphs",
+        "charge_sum_post_proj": "graphs",
+        "atomic_charges": "atoms",
+        "oxidation_charges": "atoms",
+        "atomic_dipoles": "atoms",
+        "bond_charges": "pairs",
+        "bond_dipoles": "pairs",
+        "bond_charge_l2": None,
+        "molecular_dipole": "graphs",
+        "dipole": "graphs",
+    }
+
+    def forward(self, batch: TensorDict) -> TensorDict:
         batch = self.encoder(batch)
 
         atom_batch = batch["atoms", "batch"]
@@ -88,18 +121,22 @@ class PiNetDipole(nn.Module):
                 total_charge = batch["graphs", "total_charge"]
             except KeyError:
                 pass
-        return self.head(
-            pos=batch["atoms", "pos"],
-            atom_batch=atom_batch,
-            num_graphs=num_graphs,
-            node_scalars=node_scalars,
-            node_vectors=node_vectors,
-            edge_scalars=edge_scalars,
-            edge_vectors=edge_vectors,
-            pair_index=edge_index,
-            pair_diff=edge_diff,
-            oxidation=oxidation,
-            total_charge=total_charge,
+        return _stamp(
+            batch,
+            self.head(
+                pos=batch["atoms", "pos"],
+                atom_batch=atom_batch,
+                num_graphs=num_graphs,
+                node_scalars=node_scalars,
+                node_vectors=node_vectors,
+                edge_scalars=edge_scalars,
+                edge_vectors=edge_vectors,
+                pair_index=edge_index,
+                pair_diff=edge_diff,
+                oxidation=oxidation,
+                total_charge=total_charge,
+            ),
+            self._COLUMNS,
         )
 
 
@@ -135,7 +172,21 @@ class PiNetPolarizability(nn.Module):
             sigma=sigma,
         )
 
-    def forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
+    #: Head key → namespace. Response matrices are per graph.
+    _COLUMNS: dict[str, str | None] = {
+        "alpha": "graphs",
+        "chi": "graphs",
+        "atom_mask": "graphs",
+        "atom_diag": "atoms",
+        "edge_response": "pairs",
+        "eta_inv": "graphs",
+        "eta": "graphs",
+        "eta_e": "graphs",
+        "chi_s": "graphs",
+        "alpha_iso": "graphs",
+    }
+
+    def forward(self, batch: TensorDict) -> TensorDict:
         batch = self.encoder(batch)
 
         atom_batch = batch["atoms", "batch"]
@@ -148,14 +199,18 @@ class PiNetPolarizability(nn.Module):
         pos = batch["atoms", "pos"]
         edge_index = batch["pairs", "pair_index"]
         edge_diff = edge_bond_diff(batch["pairs"], pos, edge_index)
-        return self.head(
-            pos=pos,
-            Z=batch["atoms", "Z"],
-            atom_batch=atom_batch,
-            num_graphs=num_graphs,
-            pair_index=edge_index,
-            pair_diff=edge_diff,
-            node_scalars=node_scalars,
-            edge_scalars=edge_scalars,
-            edge_vectors=edge_vectors,
+        return _stamp(
+            batch,
+            self.head(
+                pos=pos,
+                Z=batch["atoms", "Z"],
+                atom_batch=atom_batch,
+                num_graphs=num_graphs,
+                pair_index=edge_index,
+                pair_diff=edge_diff,
+                node_scalars=node_scalars,
+                edge_scalars=edge_scalars,
+                edge_vectors=edge_vectors,
+            ),
+            self._COLUMNS,
         )

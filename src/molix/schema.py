@@ -51,17 +51,11 @@ ENERGY_RESIDUAL_KEY: tuple[str, str] = ("graphs", "energy_residual")
 FLOAT64_LABEL_KEYS: frozenset[tuple[str, str]] = frozenset({ENERGY_KEY, E0_KEY})
 #: Per-atom energy contributions (``batch["atoms", "energy"]``).
 ATOMIC_ENERGY_KEY: tuple[str, str] = ("atoms", "energy")
-#: Flat alias of :data:`ATOMIC_ENERGY_KEY` — the *same* quantity addressed
-#: without the nesting. The correspondence is exact and one-way::
-#:
-#:     nested (post-collate TensorDict) : ("atoms", "energy")  → ATOMIC_ENERGY_KEY
-#:     flat   (plain dict / export)     : "atomic_energy"      → ATOMIC_ENERGY_FLAT_KEY
-#:
-#: A potential returning a nested ``TensorDict`` is read at the nested key; one
-#: returning a plain dict — and the LAMMPS export's ``outputs`` tensor name — is
-#: read at this flat one (``molpot.derivation.protocol.absorb_model_output``,
-#: ``molix.engine.adapter``). These two spellings are the complete set: a third
-#: (``node_energies`` and friends) must never appear, because a reader looking
+#: Export name of :data:`ATOMIC_ENERGY_KEY`. A molnex model forward is a
+#: ``TensorDict`` and is read at the nested key. This flat spelling is the
+#: LAMMPS ``outputs`` tensor name, and the key :class:`molix.engine.adapter.FlatTensorAdapter`
+#: reads from a third-party model that already returns a flat dict. A third
+#: spelling (``node_energies`` and friends) is not accepted: a reader looking
 #: for the wrong one gets ``None`` and drops the per-atom energy silently.
 #: Since spec ``lammps-iface-05-pbc`` that silence would be a silent *zero*
 #: partition energy in LAMMPS, the per-atom energy being the only source of

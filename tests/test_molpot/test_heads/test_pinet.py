@@ -80,15 +80,19 @@ class TestPiNetDipole:
         enc = _encoder(rank=3)
         model = PiNetDipole(encoder=enc, variant="ac")
         out = model(_graph())
-        torch.testing.assert_close(out["charge_sum_post_proj"], torch.zeros(1), atol=1e-6, rtol=0)
+        torch.testing.assert_close(
+            out["graphs", "charge_sum_post_proj"], torch.zeros(1), atol=1e-6, rtol=0
+        )
 
     def test_ac_translation_invariance_after_neutralization(self):
         enc = _encoder(rank=3)
         model = PiNetDipole(encoder=enc, variant="ac")
         g = _graph()
         with torch.no_grad():
-            ref = model(g.clone())["molecular_dipole"]
-            shifted = model(translate_graph(g, torch.tensor([5.0, -2.0, 1.0])))["molecular_dipole"]
+            ref = model(g.clone())["graphs", "molecular_dipole"]
+            shifted = model(translate_graph(g, torch.tensor([5.0, -2.0, 1.0])))[
+                "graphs", "molecular_dipole"
+            ]
         torch.testing.assert_close(ref, shifted, atol=1e-5, rtol=1e-5)
 
     def test_ad_rotation_equivariance(self):
@@ -98,15 +102,15 @@ class TestPiNetDipole:
         torch.manual_seed(5)
         r = random_rotation_matrix()
         with torch.no_grad():
-            ref = model(g.clone())["molecular_dipole"]
-            got = model(rotate_graph(g, r))["molecular_dipole"]
+            ref = model(g.clone())["graphs", "molecular_dipole"]
+            got = model(rotate_graph(g, r))["graphs", "molecular_dipole"]
         torch.testing.assert_close(rotate_vectors(ref, r), got, atol=1e-4, rtol=1e-4)
 
     def test_bc_outputs_regularization(self):
         enc = _encoder(rank=3)
         model = PiNetDipole(encoder=enc, variant="bc")
         out = model(_graph())
-        assert out["bond_charges"].shape == (8,)
+        assert out["pairs", "bond_charges"].shape == (8,)
         assert out["bond_charge_l2"].ndim == 0
 
 
@@ -115,11 +119,11 @@ class TestPiNetPolarizability:
         enc = _encoder(rank=3)
         model = PiNetPolarizability(encoder=enc, variant="localchi")
         out = model(_graph())
-        chi = out["chi"]
+        chi = out["graphs", "chi"]
         torch.testing.assert_close(chi, chi.transpose(-1, -2), atol=1e-6, rtol=1e-6)
         chi_sum = chi.sum(dim=-1)
         torch.testing.assert_close(chi_sum, torch.zeros_like(chi_sum), atol=1e-5, rtol=1e-5)
-        assert out["alpha"].shape == (1, 3, 3)
+        assert out["graphs", "alpha"].shape == (1, 3, 3)
 
     def test_polarizability_rotation_covariance(self):
         enc = _encoder(rank=3)
@@ -128,8 +132,8 @@ class TestPiNetPolarizability:
         torch.manual_seed(7)
         r = random_rotation_matrix()
         with torch.no_grad():
-            ref = model(g.clone())["alpha"]
-            got = model(rotate_graph(g, r))["alpha"]
+            ref = model(g.clone())["graphs", "alpha"]
+            got = model(rotate_graph(g, r))["graphs", "alpha"]
         expected = r @ ref @ r.T
         torch.testing.assert_close(expected, got, atol=1e-4, rtol=1e-4)
 
@@ -138,5 +142,5 @@ class TestPiNetPolarizability:
         enc = _encoder(rank=3)
         model = PiNetPolarizability(encoder=enc, variant=variant)
         out = model(_graph())
-        assert out["alpha"].shape == (1, 3, 3)
-        assert out["chi"].shape == (1, 4, 4)
+        assert out["graphs", "alpha"].shape == (1, 3, 3)
+        assert out["graphs", "chi"].shape == (1, 4, 4)

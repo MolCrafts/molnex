@@ -103,10 +103,10 @@ class TestPermMultipoleHead:
 
         out = head(_stub_batch(torch.float64))
 
-        assert out["atomic_charges"].shape == (3,)
-        assert out["atomic_charges"].dtype == torch.float64
-        assert out["atomic_dipoles"].shape == (3, 3)
-        assert out["atomic_dipoles"].dtype == torch.float64
-        assert out["atomic_quadrupoles"].shape == (3, 5)
-        assert out["atomic_quadrupoles"].dtype == torch.float64
-        assert out["molecular_dipole"].dtype == torch.float64
+        assert out["atoms", "atomic_charges"].shape == (3,)
+        assert out["atoms", "atomic_charges"].dtype == torch.float64
+        assert out["atoms", "atomic_dipoles"].shape == (3, 3)
+        assert out["atoms", "atomic_dipoles"].dtype == torch.float64
+        assert out["atoms", "atomic_quadrupoles"].shape == (3, 5)
+        assert out["atoms", "atomic_quadrupoles"].dtype == torch.float64
+        assert out["graphs", "molecular_dipole"].dtype == torch.float64

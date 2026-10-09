@@ -54,10 +54,10 @@ def _encoder() -> PiNet:
 def test_dipole_ac_runs():
     model = PiNetDipole(encoder=_encoder(), variant="ac")
     out = model(_graph())
-    assert "dipole" in out or "mu" in out or any("charge" in k for k in out)
+    assert "dipole" in out["graphs"].keys()
 
 
 def test_polarizability_localchi_runs():
     model = PiNetPolarizability(encoder=_encoder(), variant="localchi", atom_types=[1, 6, 7, 8])
     out = model(_graph())
-    assert len(out) > 0
+    assert "alpha" in out["graphs"].keys()

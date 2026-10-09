@@ -120,25 +120,13 @@ class TestEdgeDistanceClamp:
 class TestMolnexTensorDictAdapter:
     """Target: ``MolnexTensorDictAdapter.read_outputs`` (schema-v3 triple).
 
-    v3 recognises exactly two spellings of the per-atom energy: the nested
-    ``ATOMIC_ENERGY_KEY`` for a ``TensorDict``-shaped model output, and the flat
-    ``ATOMIC_ENERGY_FLAT_KEY`` for a plain dict. Anything else is refused rather
-    than silently dropped — after 05 the per-atom energy is the *only* source of
-    ``eng_vdwl``, so a silent drop is a silent zero energy.
+    A molnex model forward is a nested ``TensorDict``. The per-atom energy is
+    read at ``ATOMIC_ENERGY_KEY``. A plain dict, a missing column, or a third
+    spelling is refused rather than silently dropped — the per-atom energy is
+    the only source of ``eng_vdwl``, so a silent drop is a silent zero energy.
     """
 
     ATOMIC = [1.0, 6.0, 5.0]
-
-    @classmethod
-    def flat_output(cls, *, per_atom_key: str | None) -> dict:
-        """Plain-dict model output; ``per_atom_key`` ``None`` omits the per-atom energy."""
-        out: dict[str, torch.Tensor] = {
-            "energy": torch.tensor([12.0], dtype=torch.float64),
-            "forces": torch.zeros(3, 3, dtype=torch.float64),
-        }
-        if per_atom_key is not None:
-            out[per_atom_key] = torch.tensor(cls.ATOMIC, dtype=torch.float64)
-        return out
 
     @classmethod
     def nested_output(cls) -> TensorDict:
@@ -153,16 +141,14 @@ class TestMolnexTensorDictAdapter:
             batch_size=[],
         )
 
-    def test_flat_dict_per_atom_energy_is_read_under_the_flat_key(self):
-        from molix.schema import ATOMIC_ENERGY_FLAT_KEY
-
-        out = self.flat_output(per_atom_key=ATOMIC_ENERGY_FLAT_KEY)
-        energy, forces, atomic = MolnexTensorDictAdapter().read_outputs(out)
-        assert energy.item() == pytest.approx(12.0, abs=1e-10)
-        assert forces.shape == (3, 3)
-        assert torch.allclose(
-            atomic, torch.tensor(self.ATOMIC, dtype=torch.float64), atol=1e-10, rtol=0.0
-        )
+    def test_plain_dict_is_refused(self):
+        out = {
+            "energy": torch.tensor([12.0], dtype=torch.float64),
+            "forces": torch.zeros(3, 3, dtype=torch.float64),
+            "atomic_energy": torch.tensor(self.ATOMIC, dtype=torch.float64),
+        }
+        with pytest.raises(ValueError, match="TensorDict"):
+            MolnexTensorDictAdapter().read_outputs(out)
 
     def test_nested_output_per_atom_energy_is_read_under_the_nested_key(self):
         from molix.schema import ATOMIC_ENERGY_KEY
@@ -172,33 +158,20 @@ class TestMolnexTensorDictAdapter:
         assert torch.allclose(atomic, out[ATOMIC_ENERGY_KEY], atol=1e-10, rtol=0.0)
 
     def test_missing_per_atom_energy_is_refused(self):
-        """Names both accepted spellings so the fix is obvious from the message."""
-        with pytest.raises(ValueError) as excinfo:
-            MolnexTensorDictAdapter().read_outputs(self.flat_output(per_atom_key=None))
-        message = str(excinfo.value)
-        assert "atomic_energy" in message
-        assert "atoms" in message and "energy" in message
+        """The message names the nested column the model has to write."""
+        out = self.nested_output()
+        del out["atoms", "energy"]
+        with pytest.raises(ValueError, match="atoms") as excinfo:
+            MolnexTensorDictAdapter().read_outputs(out)
+        assert "energy" in str(excinfo.value)
 
     def test_non_canonical_spelling_is_not_absorbed(self):
         """A per-atom tensor under a third spelling is refused, never silently dropped."""
-        from molix.schema import ATOMIC_ENERGY_FLAT_KEY
-
-        assert "node_energies" != ATOMIC_ENERGY_FLAT_KEY
-        with pytest.raises(ValueError):
-            MolnexTensorDictAdapter().read_outputs(self.flat_output(per_atom_key="node_energies"))
-
-    def test_energy_only_flat_dict_returns_none_forces(self):
-        """Forces are optional: the wrapper derives them, so an energy-only model is valid."""
-        from molix.schema import ATOMIC_ENERGY_FLAT_KEY
-
-        out = self.flat_output(per_atom_key=ATOMIC_ENERGY_FLAT_KEY)
-        del out["forces"]
-        energy, forces, atomic = MolnexTensorDictAdapter().read_outputs(out)
-        assert forces is None
-        assert energy.item() == pytest.approx(12.0, abs=1e-10)
-        assert torch.allclose(
-            atomic, torch.tensor(self.ATOMIC, dtype=torch.float64), atol=1e-10, rtol=0.0
-        )
+        out = self.nested_output()
+        out["atoms", "node_energies"] = out["atoms", "energy"]
+        del out["atoms", "energy"]
+        with pytest.raises(ValueError, match="atoms"):
+            MolnexTensorDictAdapter().read_outputs(out)
 
     def test_energy_only_nested_output_returns_none_forces(self):
         out = self.nested_output()
@@ -239,6 +212,20 @@ class TestFlatTensorAdapter:
             ATOMIC_ENERGY_FLAT_KEY: atomic,
         }
         got_e, _, got_a = FlatTensorAdapter().read_outputs(out)
+        assert got_e.item() == pytest.approx(12.0, abs=1e-10)
+        assert torch.allclose(got_a, atomic, atol=1e-10, rtol=0.0)
+
+    def test_energy_only_dict_returns_none_forces(self):
+        """Forces are optional: the wrapper derives them, so an energy-only model is valid."""
+        from molix.schema import ATOMIC_ENERGY_FLAT_KEY
+
+        atomic = torch.tensor(self.ATOMIC, dtype=torch.float64)
+        out = {
+            "energy": torch.tensor([12.0], dtype=torch.float64),
+            ATOMIC_ENERGY_FLAT_KEY: atomic,
+        }
+        got_e, got_f, got_a = FlatTensorAdapter().read_outputs(out)
+        assert got_f is None
         assert got_e.item() == pytest.approx(12.0, abs=1e-10)
         assert torch.allclose(got_a, atomic, atol=1e-10, rtol=0.0)
 
@@ -325,7 +312,7 @@ class _EnergyOnlyTDPotential(_DummyTDPotential):
 
     def forward(self, batch):
         out = super().forward(batch)
-        del out["forces"]
+        del out["atoms", "forces"]
         return out
 
 

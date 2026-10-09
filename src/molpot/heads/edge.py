@@ -55,10 +55,11 @@ class EdgeEnergyHead(nn.Module):
             dataset that supplies the batches —
             the dataset-wide ⟨|N(i)|⟩ the caller measures, which
             derives it from the packed cache pointers without a fit pass.
-        out_key: TensorDict key under which to write the per-graph energy.
+        out_key: Column under ``graphs`` that receives the per-graph energy.
+            ``"energy"`` is the total; a short-range term uses ``"energy_short"``.
 
     Forward output:
-        ``{out_key: (B,)}`` with the per-graph total energy tensor.
+        The same batch, with ``graphs.<out_key>`` ``(B,)`` written.
     """
 
     def __init__(
@@ -89,17 +90,17 @@ class EdgeEnergyHead(nn.Module):
         self._inv_sqrt_2 = 1.0 / math.sqrt(2.0)
         self.out_key = out_key
 
-    def forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
-        """Aggregate edge features to per-graph energies.
+    def forward(self, batch: TensorDict) -> TensorDict:
+        """Aggregate edge features to per-graph energies and return ``batch``.
 
         Args:
-            batch: ``TensorDict`` with ``edges.edge_features`` of shape
+            batch: ``TensorDict`` with ``pairs.edge_features`` of shape
                 ``(E, F·(L+1))`` (the Allegro DenseNet stack), plus
-                ``edges.pair_index``, ``atoms.Z``, ``atoms.batch``, and
+                ``pairs.pair_index``, ``atoms.Z``, ``atoms.batch``, and
                 a ``graphs`` subdict that carries the per-graph batch size.
 
         Returns:
-            ``{self.out_key: Tensor}`` with per-graph energy of shape ``(B,)``.
+            ``batch``, with ``graphs.<out_key>`` of shape ``(B,)``.
         """
         edge_features = batch["pairs", "edge_features"]
         edge_e = self.mlp(edge_features).squeeze(-1) * self._inv_sqrt_avg_n  # (E,)
@@ -118,5 +119,5 @@ class EdgeEnergyHead(nn.Module):
         n_graphs = batch["graphs"].batch_size[0]
         energy = torch.zeros(n_graphs, dtype=node_e.dtype, device=node_e.device)
         energy.scatter_add_(0, atom_batch, node_e)  # (B,)
-
-        return {self.out_key: energy}
+        batch["graphs", self.out_key] = energy
+        return batch

@@ -11,8 +11,8 @@ a per-script closure that knows *where* to read targets from the
         return mse(preds["energy"], batch["graphs", target_key])
 
 These presets absorb that wrapping. They return ``Callable[[preds, batch], Tensor]``
-that consumes ``preds`` (plain dict from the model forward) and ``batch``
-(a ``TensorDict``), following the convention encoded in
+that consumes ``preds`` (the model's ``TensorDict``, or a plain dict of columns)
+and ``batch`` (a ``TensorDict``), following the convention encoded in
 the collate's per-atom routing:
 
 * graph-level targets (e.g. ``energy``) live at ``batch["graphs", key]``;
@@ -176,10 +176,27 @@ def parameter_bag_mse(
     raise ValueError(f"Unknown reduction {reduction!r}")
 
 
+def _prediction_key(key: str | tuple[str, str]) -> str | tuple[str, str]:
+    """A flat prediction name, or a ``(namespace, column)`` pair on a TensorDict."""
+    if isinstance(key, str):
+        return key
+    if not isinstance(key, tuple) or len(key) != 2:
+        raise TypeError(f"a prediction column is a name or a (namespace, column) pair, got {key!r}")
+    namespace, column = key
+    if isinstance(namespace, str) and isinstance(column, str):
+        return (namespace, column)
+    raise TypeError(f"a prediction column is a name or a (namespace, column) pair, got {key!r}")
+
+
+def _read_prediction(pred: Any, key: str | tuple[str, str]) -> Any:
+    """Read one column from a flat dict or a nested TensorDict."""
+    return pred[key]
+
+
 def energy_loss(
     target_key: str = "energy",
     *,
-    pred_key: str = "energy",
+    pred_key: str | tuple[str, str] = "energy",
     elementwise: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
     reduction: str = "mean",
     per_atom: bool = False,
@@ -232,7 +249,7 @@ def energy_loss(
     measure = nn.MSELoss(reduction="none") if elementwise is None else elementwise
 
     def _fn(preds: Mapping[str, Any], batch: Any) -> torch.Tensor:
-        e_pred = preds[pred_key]
+        e_pred = _read_prediction(preds, pred_key)
         graphs = batch["graphs"]
         e_true = graphs[target_key].view_as(e_pred)
         if per_atom:
@@ -249,7 +266,7 @@ def energy_loss(
 def force_loss(
     target_key: str = "forces",
     *,
-    pred_key: str = "forces",
+    pred_key: str | tuple[str, str] = "forces",
     elementwise: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
     reduction: str = "mean",
     weight_key: str | None = "mask",
@@ -291,7 +308,7 @@ def force_loss(
     bound = None if outlier_norm is None else float(outlier_norm)
 
     def _fn(preds: Mapping[str, Any], batch: Any) -> torch.Tensor:
-        f_pred = preds[pred_key]
+        f_pred = _read_prediction(preds, pred_key)
         atoms = batch["atoms"]
         f_true = atoms[target_key].view_as(f_pred)
         weight = None
@@ -303,6 +320,27 @@ def force_loss(
         return _reduce(measure(f_pred, f_true), weight, reduction)
 
     return _fn
+
+
+def log_knee(loss: torch.Tensor, knee: float) -> torch.Tensor:
+    """Identity below *knee*, ``knee * (1 + log(loss/knee))`` above.
+
+    The derivative is 1 below the knee and ``knee / loss`` above. A residual
+    that has already left the basin is pulled back slowly instead of owning
+    the step. ``knee * tanh(loss/knee)`` is not this function: its gradient
+    underflows to zero and the outlier is then ignored for good.
+
+    Args:
+        loss: A non-negative scalar loss.
+        knee: Positive cap, in the loss's own units.
+
+    Returns:
+        The kneed scalar. Equal to *loss* when ``loss <= knee``.
+    """
+    if knee <= 0.0:
+        raise ValueError(f"knee must be > 0, got {knee}")
+    cap = float(knee)
+    return loss.clamp(max=cap) + cap * torch.log1p((loss.clamp(min=cap) - cap) / cap)
 
 
 def _reduce(per_element: torch.Tensor, weight: torch.Tensor | None, reduction: str) -> torch.Tensor:
@@ -864,7 +902,7 @@ class PartialHessianLoss(nn.Module):
     def __init__(
         self,
         *,
-        key: str = "partial_hessian",
+        key: str | tuple[str, str] = "partial_hessian",
         label: str = "block",
         trace_floor: float = 10.0,
         blowup: float = 1e4,
@@ -874,7 +912,7 @@ class PartialHessianLoss(nn.Module):
             raise ValueError(f"trace_floor must be > 0 kcal/mol/A^2, got {trace_floor}")
         if blowup <= 0.0:
             raise ValueError(f"blowup must be > 0 kcal/mol/A^2, got {blowup}")
-        self.key = str(key)
+        self.key = _prediction_key(key)
         self.label = str(label)
         self.trace_floor = float(trace_floor)
         self.blowup = float(blowup)
@@ -898,10 +936,10 @@ class PartialHessianLoss(nn.Module):
         """
         if self.key not in pred:
             raise KeyError(
-                f"{self.key!r} is not among the predictions {sorted(pred)}; declare it on "
-                "ForceFieldPredictions so the partial Hessian is computed"
+                f"{self.key!r} is not among the predictions {sorted(pred)}; ask the model "
+                "for it (Rondo(outputs=('partial_hessian',)))"
             )
-        blocks = pred[self.key]
+        blocks = _read_prediction(pred, self.key)
         if "hessian_pairs" not in batch.keys():
             raise ValueError(
                 "PartialHessianLoss: the batch carries no hessian_pairs namespace — "
@@ -928,6 +966,67 @@ class PartialHessianLoss(nn.Module):
         denominator = trace.abs().clamp(min=self.trace_floor).unsqueeze(-1)
         residual = ((blocks - label).abs() / denominator).sum(dim=-1)
         return (residual * rows).sum() / (rows.sum() * label.shape[1]).clamp(min=1.0)
+
+
+class ReferenceShiftPrior(nn.Module):
+    """Harmonic prior on a predicted parameter's shift from its reference.
+
+    Mean of ``shift²`` over the live rows of one namespace — e.g. Rondo's
+    ``angle_theta0_residual``, each angle's ``theta0`` minus the angle measured
+    in the frame.
+    Weighted (``WeightedLoss``), it is negligible wherever the data identifies the
+    parameter and decides it where the data is flat.
+
+    **Why theta0 needs it.** At a symmetric centre the angles are redundant
+    internal coordinates: a uniform shift of every ``theta0`` produces forces that
+    cancel at the symmetric geometry, so energies and forces barely see it (it
+    enters only the Hessian, through ``k(θ̄ − θ0)·∇²Σθᵢ``). Measured on Rondo's
+    geometry stage (GH200 3296327 / 3296603): every carbon centre drifted from
+    109.5° to ~93° while the loss changed by ~0.2 %, both loss halves pushing back
+    the other way — a flat valley the optimizer wandered along. The force-constant
+    matrix of redundant coordinates is not unique (Groner & Günthard, J. Mol.
+    Spectrosc. 61, 1976); fitting it needs a restraint (Vanommeslaeghe et al.,
+    J. Comput. Chem. 36, 1083, 2015). Anchored to the measured angle, the
+    restraint pins that direction at the observed geometry rather than at one
+    tetrahedral value for every centre.
+
+    Units: the key's squared (rad² for a theta0 shift).
+
+    Args:
+        key: Prediction key holding the per-row shift.
+        namespace: Batch namespace whose ``mask`` marks the live rows.
+    """
+
+    def __init__(
+        self, *, key: str | tuple[str, str] = "angle_theta0_residual", namespace: str = "angles"
+    ) -> None:
+        super().__init__()
+        self.key = _prediction_key(key)
+        self.namespace = str(namespace)
+
+    def forward(self, pred: Mapping[str, Any], batch: Any) -> torch.Tensor:
+        """Mean squared shift over the live rows.
+
+        Args:
+            pred: Mapping carrying the ``(M,)`` shift under :attr:`key`.
+            batch: Post-collate batch; ``batch[namespace]["mask"]`` when padded.
+
+        Returns:
+            Scalar loss.
+
+        Raises:
+            KeyError: The prediction is absent.
+        """
+        if self.key not in pred:
+            raise KeyError(
+                f"{self.key!r} is not among the predictions {sorted(pred)}; ask the model "
+                "for it (Rondo(outputs=(..., 'angle_theta0_residual')))"
+            )
+        shift = _read_prediction(pred, self.key).reshape(-1)
+        block = batch[self.namespace]
+        live = block.get("mask")
+        weight = torch.ones_like(shift) if live is None else live.reshape(-1).to(shift.dtype)
+        return (shift.pow(2) * weight).sum() / weight.sum().clamp(min=1.0)
 
 
 class AtomicChargeLoss(nn.Module):
@@ -959,9 +1058,11 @@ class AtomicChargeLoss(nn.Module):
             set publishes them as ``atomic_charge``.
     """
 
-    def __init__(self, *, key: str = "charge", label: str = "atomic_charge") -> None:
+    def __init__(
+        self, *, key: str | tuple[str, str] = "charge", label: str = "atomic_charge"
+    ) -> None:
         super().__init__()
-        self.key = str(key)
+        self.key = _prediction_key(key)
         self.label = str(label)
 
     def forward(self, pred: Mapping[str, Any], batch: Any) -> torch.Tensor:
@@ -981,10 +1082,10 @@ class AtomicChargeLoss(nn.Module):
         """
         if self.key not in pred:
             raise KeyError(
-                f"{self.key!r} is not among the predictions {sorted(pred)}; declare it on "
-                "ForceFieldPredictions so the charge solve runs"
+                f"{self.key!r} is not among the predictions {sorted(pred)}; ask the model "
+                "for it (Rondo(outputs=('charge',)))"
             )
-        charges = pred[self.key].reshape(-1)
+        charges = _read_prediction(pred, self.key).reshape(-1)
         atoms = batch["atoms"]
         reference = atoms.get(self.label)
         if reference is None:
@@ -1070,7 +1171,7 @@ class BoltzmannProfileLoss(nn.Module):
     def __init__(
         self,
         *,
-        pred_key: str = "energy",
+        pred_key: str | tuple[str, str] = "energy",
         target_key: str = "energy",
         profile_key: str = "profile",
         clamp: float = 2.0,
@@ -1082,7 +1183,7 @@ class BoltzmannProfileLoss(nn.Module):
             raise ValueError(f"decay must be > 0 kcal/mol, got {decay}")
         if soft_max is not None and soft_max <= 0.0:
             raise ValueError(f"soft_max must be > 0 (kcal/mol)^2, got {soft_max}")
-        self.pred_key = str(pred_key)
+        self.pred_key = _prediction_key(pred_key)
         self.target_key = str(target_key)
         self.profile_key = str(profile_key)
         self.clamp = float(clamp)
@@ -1107,7 +1208,7 @@ class BoltzmannProfileLoss(nn.Module):
         """
         if self.pred_key not in pred:
             raise KeyError(f"{self.pred_key!r} is not among the predictions {sorted(pred)}")
-        energy = pred[self.pred_key].reshape(-1)
+        energy = _read_prediction(pred, self.pred_key).reshape(-1)
         graphs = batch["graphs"]
         reference = graphs.get(self.target_key)
         if reference is None:

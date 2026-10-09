@@ -120,15 +120,12 @@ class EngineAdapter(ABC):
 
     @staticmethod
     def read_energy_triple(out: object) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
-        """Decode the two accepted molnex output shapes into the v3 triple.
+        """Decode a molnex ``TensorDict`` forward into the v3 triple.
 
-        Each shape has exactly one spelling of the per-atom energy
-        (:data:`molix.schema.ATOMIC_ENERGY_FLAT_KEY` documents the
-        correspondence):
-
-        * nested :class:`~tensordict.TensorDict` — ``("graphs", "energy")``,
-          ``("atoms", "forces")``, ``("atoms", "energy")``;
-        * plain ``dict`` — ``"energy"``, ``"forces"``, ``"atomic_energy"``.
+        The per-atom energy is ``("atoms", "energy")``. Forces are optional
+        and live at ``("atoms", "forces")``; the total is ``("graphs", "energy")``.
+        A third-party flat dict is :class:`FlatTensorAdapter`'s own reader,
+        not this one.
 
         Forces are **optional**: the export wrappers derive the deployed forces
         from the site energies themselves, so an energy-only model (e.g.
@@ -141,48 +138,36 @@ class EngineAdapter(ABC):
         die with "backward through the graph a second time" at trace
         preparation.
 
-        Lives on the base class because three call sites share it:
-        :class:`MolnexTensorDictAdapter`, :class:`FlatTensorAdapter`'s dict
-        branch, and :class:`molix.engine.static.StaticForward`. Before v3 each
-        read its own spelling — the dynamic path the flat keys, the fixed-shape
-        path the nested ones — and nothing made them agree.
+        Lives on the base class because :class:`MolnexTensorDictAdapter` and
+        :class:`molix.engine.static.StaticForward` share it.
 
         Args:
-            out: The model's return value — nested ``TensorDict`` or plain dict.
+            out: The model's return value, a nested ``TensorDict``.
 
         Returns:
             ``(energy (), forces (N, 3), atomic_energy (N,))``. The energy is
             summed to a scalar; a ``(1,)`` single-graph energy is the usual input.
 
         Raises:
-            ValueError: If ``out`` is neither shape, or carries no per-atom
-                energy under either accepted spelling. Refusing is deliberate:
-                the per-atom energy is the only source of the LAMMPS partition
-                energy, so dropping it silently would deploy a model that
-                reports zero.
+            ValueError: If ``out`` is not a ``TensorDict``, or carries no
+                per-atom energy. Refusing is deliberate: the per-atom energy
+                is the only source of the LAMMPS partition energy, so dropping
+                it silently would deploy a model that reports zero.
         """
         from tensordict import TensorDict
 
-        if isinstance(out, TensorDict):
-            has_atomic = "atoms" in out.keys() and "energy" in out["atoms"].keys()
-            atomic = out[ATOMIC_ENERGY_KEY] if has_atomic else None
-            has_forces = "atoms" in out.keys() and "forces" in out["atoms"].keys()
-            energy = out[ENERGY_KEY]
-            forces = out[FORCES_KEY] if has_forces else None
-        elif isinstance(out, dict):
-            atomic = out.get(ATOMIC_ENERGY_FLAT_KEY)
-            energy, forces = out["energy"], out.get("forces")
-        else:
-            raise ValueError(
-                "model output must be a nested TensorDict or a plain dict; "
-                f"got {type(out).__name__}"
-            )
+        if not isinstance(out, TensorDict):
+            raise ValueError(f"model output must be a nested TensorDict; got {type(out).__name__}")
+        has_atomic = "atoms" in out.keys() and "energy" in out["atoms"].keys()
+        atomic = out[ATOMIC_ENERGY_KEY] if has_atomic else None
+        has_forces = "atoms" in out.keys() and "forces" in out["atoms"].keys()
+        energy = out[ENERGY_KEY]
+        forces = out[FORCES_KEY] if has_forces else None
         if atomic is None:
             raise ValueError(
                 "model output carries no per-atom energy, which schema v3 requires: "
-                f"expected the flat key {ATOMIC_ENERGY_FLAT_KEY!r} (plain dict) or the "
-                f"nested key {ATOMIC_ENERGY_KEY} (TensorDict). A LAMMPS rank sums only "
-                "the site energies it owns, so a model without them cannot be partitioned."
+                f"expected {ATOMIC_ENERGY_KEY}. A LAMMPS rank sums only the site "
+                "energies it owns, so a model without them cannot be partitioned."
             )
         return energy.sum(), forces, atomic
 
@@ -194,8 +179,8 @@ class MolnexTensorDictAdapter(EngineAdapter):
     """Adapter for molnex-native potentials (PiNet, MACE, … via ``PiNetPotential``-style).
 
     Builds the post-collate nested ``TensorDict`` (``atoms`` / ``pairs`` / ``graphs``
-    per ``CLAUDE.md``), runs ``model(batch)``, reads the
-    ``{energy, forces, atomic_energy}`` output. The per-atom energy is the
+    per ``CLAUDE.md``), runs ``model(batch)``, and reads ``graphs.energy``,
+    ``atoms.forces``, and ``atoms.energy``. The per-atom energy is the
     one the C++ pair style partitions over local sites; the scalar energy is
     read too, but only so :func:`molix.engine.export_for_lammps` can check
     eagerly that the model is decomposable before exporting it.
@@ -262,7 +247,13 @@ class FlatTensorAdapter(EngineAdapter):
 
     def read_outputs(self, out: object) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         if isinstance(out, dict):
-            return self.read_energy_triple(out)
+            atomic = out.get(ATOMIC_ENERGY_FLAT_KEY)
+            if "energy" not in out or atomic is None:
+                raise ValueError(
+                    "flat model dict must carry 'energy' and "
+                    f"{ATOMIC_ENERGY_FLAT_KEY!r}; got keys {sorted(out)}"
+                )
+            return out["energy"].sum(), out.get("forces"), atomic
         # Narrow to a real sequence before counting: a bare Tensor also has a
         # length, so `len(out) != 3` alone would happily unpack the first three
         # ROWS of an (n, ...) tensor into energy/forces/atomic_energy.
@@ -317,7 +308,7 @@ class EngineForward(nn.Module):
       any autograd graph the caller had through ``pos`` is *not* continued —
       this wrapper returns values for an MD engine, it is not a training path.
       The partitioned energy — a masked sum of site energies read from a
-      model output that may be a plain dict — is not the frame-in/frame-out
+      model output — is not the frame-in/frame-out
       shape :class:`molix.autograd.Derivative` differentiates, so the wrapper
       keeps the leaf and the one ``autograd.grad`` itself.
     * the mask is applied by this wrapper, never by an adapter: adapters

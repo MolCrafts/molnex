@@ -54,31 +54,31 @@ class TestProjectionToTarget:
         """Σq_proj must equal q_target=0 (within numerical precision)."""
         head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0)
         out = head(_stub_batch(total_charge=0.0))
-        sum_q = out["atomic_charges"].sum()
+        sum_q = out["atoms", "atomic_charges"].sum()
         assert sum_q.abs().item() < 1e-5
 
     def test_anion_target_minus_one(self):
         """Σq_proj must equal q_target=-1."""
         head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0)
         out = head(_stub_batch(total_charge=-1.0))
-        sum_q = out["atomic_charges"].sum()
+        sum_q = out["atoms", "atomic_charges"].sum()
         torch.testing.assert_close(sum_q, torch.tensor(-1.0), rtol=1e-5, atol=1e-5)
 
     def test_cation_target_plus_two(self):
         head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0)
         out = head(_stub_batch(total_charge=2.0))
-        sum_q = out["atomic_charges"].sum()
+        sum_q = out["atoms", "atomic_charges"].sum()
         torch.testing.assert_close(sum_q, torch.tensor(2.0), rtol=1e-5, atol=1e-5)
 
     def test_diagnostics_record_pre_and_post_sums(self):
         """``charge_sum_pre_proj`` is the raw sum, ``post`` is the projected one."""
         head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0)
         out = head(_stub_batch(total_charge=-1.0))
-        assert "charge_sum_pre_proj" in out
-        assert "charge_sum_post_proj" in out
+        assert "charge_sum_pre_proj" in out["graphs"].keys()
+        assert "charge_sum_post_proj" in out["graphs"].keys()
         # Post-projection sum must match the target.
         torch.testing.assert_close(
-            out["charge_sum_post_proj"],
+            out["graphs", "charge_sum_post_proj"],
             torch.tensor([-1.0]),
             rtol=1e-5,
             atol=1e-5,
@@ -97,7 +97,7 @@ class TestFailFastOnMissingTotalCharge:
         head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0, constrain_total_charge=False)
         # Should not raise even though ``total_charge`` is absent.
         out = head(_stub_batch(total_charge=None))
-        assert "atomic_charges" in out
+        assert "atomic_charges" in out["atoms"].keys()
         # No projection diagnostics emitted in this mode.
-        assert "charge_sum_pre_proj" not in out
-        assert "charge_sum_post_proj" not in out
+        assert "charge_sum_pre_proj" not in out["graphs"].keys()
+        assert "charge_sum_post_proj" not in out["graphs"].keys()

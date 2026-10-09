@@ -113,7 +113,7 @@ def _build_energy_model(encoder: Allegro, avg_nbr: float) -> nn.Module:
             self.encoder = encoder
             self.head = head
 
-        def forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
+        def forward(self, batch: TensorDict) -> TensorDict:
             batch = self.encoder(batch)
             return self.head(batch)
 
@@ -158,8 +158,8 @@ class TestEnergyInvariants:
         g1 = _build_graph(pos, Z, r_cut=enc.r_max)
         g2 = _build_graph(pos + torch.tensor([7.3, -2.1, 0.5]), Z, r_cut=enc.r_max)
         with torch.no_grad():
-            e1 = model(g1)["energy"]
-            e2 = model(g2)["energy"]
+            e1 = model(g1)["graphs", "energy"]
+            e2 = model(g2)["graphs", "energy"]
         assert torch.allclose(e1, e2, rtol=1e-4, atol=1e-5)
 
     def test_rotation_invariance(self):
@@ -173,8 +173,8 @@ class TestEnergyInvariants:
         R = random_rotation_matrix()
         g2 = _build_graph(rotate_vectors(pos, R), Z, r_cut=enc.r_max)
         with torch.no_grad():
-            e1 = model(g1)["energy"]
-            e2 = model(g2)["energy"]
+            e1 = model(g1)["graphs", "energy"]
+            e2 = model(g2)["graphs", "energy"]
         assert torch.allclose(e1, e2, rtol=1e-4, atol=1e-4)
 
     def test_permutation_invariance(self):
@@ -187,8 +187,8 @@ class TestEnergyInvariants:
         perm = torch.tensor([2, 0, 3, 1], dtype=torch.long)
         g2 = _build_graph(pos[perm], Z[perm], r_cut=enc.r_max)
         with torch.no_grad():
-            e1 = model(g1)["energy"]
-            e2 = model(g2)["energy"]
+            e1 = model(g1)["graphs", "energy"]
+            e2 = model(g2)["graphs", "energy"]
         assert torch.allclose(e1, e2, rtol=1e-4, atol=1e-5)
 
     def test_cutoff_vanishing(self):
@@ -205,8 +205,8 @@ class TestEnergyInvariants:
         g_a = _build_graph(pos_a, Z_a, r_cut=r_cut)
         g_b = _build_graph(pos_b, Z_b, r_cut=r_cut)
         with torch.no_grad():
-            e_a = model(g_a)["energy"]
-            e_b = model(g_b)["energy"]
+            e_a = model(g_a)["graphs", "energy"]
+            e_b = model(g_b)["graphs", "energy"]
         # Both should give the same energy (no edge connects atom 2).
         assert torch.allclose(e_a, e_b, rtol=1e-5, atol=1e-5)
 

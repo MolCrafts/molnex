@@ -35,13 +35,13 @@ class TestShape:
     def test_returns_per_graph_energy(self):
         head = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=3.0)
         out = head(_stub_batch())
-        assert set(out.keys()) == {"energy"}
-        assert out["energy"].shape == (1,)
+        assert "energy" in out["graphs"].keys()
+        assert out["graphs", "energy"].shape == (1,)
 
     def test_custom_out_key(self):
         head = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=3.0, out_key="E")
         out = head(_stub_batch())
-        assert "E" in out
+        assert "E" in out["graphs"].keys()
 
 
 class TestNeighborNormalization:
@@ -53,8 +53,8 @@ class TestNeighborNormalization:
         h2 = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=16.0)
         h2.load_state_dict(h1.state_dict())
         with torch.no_grad():
-            e1 = h1(b)["energy"]
-            e2 = h2(b)["energy"]
+            e1 = h1(b)["graphs", "energy"]
+            e2 = h2(b)["graphs", "energy"]
         # √16 / √4 = 2 → e1 should be twice e2.
         torch.testing.assert_close(e1, 2.0 * e2, rtol=1e-5, atol=1e-5)
 
@@ -91,10 +91,10 @@ class TestLinearReadout:
         b4["pairs", "edge_features"] = g
 
         with torch.no_grad():
-            e1 = head(b1)["energy"]
-            e2 = head(b2)["energy"]
-            e3 = head(b3)["energy"]
-            e4 = head(b4)["energy"]
+            e1 = head(b1)["graphs", "energy"]
+            e2 = head(b2)["graphs", "energy"]
+            e3 = head(b3)["graphs", "energy"]
+            e4 = head(b4)["graphs", "energy"]
 
         torch.testing.assert_close(e2, 2.0 * e1, rtol=1e-5, atol=1e-5)
         torch.testing.assert_close(e3, e1 + e4, rtol=1e-5, atol=1e-5)
@@ -122,5 +122,5 @@ class TestEmptyGraph:
         head = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=1.0)
         with torch.no_grad():
             out = head(b)
-        assert out["energy"].shape == (1,)
-        assert out["energy"].item() == 0.0
+        assert out["graphs", "energy"].shape == (1,)
+        assert out["graphs", "energy"].item() == 0.0

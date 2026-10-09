@@ -173,7 +173,8 @@ from molix.core.trainer import Trainer
 
 
 def loss_fn(pred, batch):
-    return F.mse_loss(pred["energy"], batch["graphs", "energy"])
+    # The readout writes graphs.energy, so the reference lives beside it.
+    return F.mse_loss(pred["graphs", "energy"], batch["graphs", "energy_ref"])
 
 
 trainer = Trainer(

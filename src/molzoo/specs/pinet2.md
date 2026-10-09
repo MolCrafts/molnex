@@ -47,6 +47,9 @@ MolNex adaptation:
   The flag gates only the stacking and TensorDict write; the tracks are still
   computed inside each block, so gated and ungated encoders produce
   bit-identical `node_features`, `p1_block_outputs`, energies and forces.
+  `PiNetDipole` and `PiNetPolarizability` return that same batch: each head
+  tensor is a column (`graphs.dipole`, `graphs.alpha`, `atoms.atomic_charges`,
+  `pairs.bond_charges`; the 0-dim `bond_charge_l2` stays at the root).
   Default `True` (PiNN-equivalent emission); `PiNetPotential` defaults the
   encoders it constructs itself to `False`.
 - PiNN cutoff functions are zeroed outside `r_max` because MolNex edges may be

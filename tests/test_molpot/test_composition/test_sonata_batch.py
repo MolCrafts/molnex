@@ -221,10 +221,10 @@ def test_batch_independence(sonata_fp64: Sonata) -> None:
     with torch.no_grad():
         E_single = []
         for g in [g0, g1, g2]:
-            E_single.append(float(sonata_fp64(g)["energy"][0]))
+            E_single.append(float(sonata_fp64(g)["graphs", "energy"][0]))
 
         batched = _stack_graphs([g0, g1, g2])
-        E_batch = sonata_fp64(batched)["energy"]
+        E_batch = sonata_fp64(batched)["graphs", "energy"]
 
     for i, e_s in enumerate(E_single):
         diff = abs(float(E_batch[i]) - e_s)

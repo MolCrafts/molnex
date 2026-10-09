@@ -5,9 +5,11 @@ specialised for the multipole-Ewald path. It owns three required
 sub-modules — an Allegro-style encoder with ``expose_tensor_track=True``,
 a :class:`PermMultipoleHead` predicting ``(q, μ, Θ)``, and an
 :class:`EwaldMultipoleEnergy` evaluator — plus an optional short-range
-energy head. Forward returns a flat dict ``{energy, energy_short,
-energy_es, atomic_*, molecular_dipole, phi, field, [forces], [stress]}``
-addressable by string keys (no nesting).
+energy head. Forward returns the batch. Totals land on ``graphs``
+(``energy``, ``energy_short``, ``energy_es``, ``molecular_dipole``, and
+``stress`` when requested) and per-atom quantities on ``atoms``
+(``atomic_charges`` / ``atomic_dipoles`` / ``atomic_quadrupoles``, ``phi``,
+``field``, and ``forces`` when requested).
 
 What this is NOT
     * **Not a composer for induced-response models.** The forthcoming
@@ -74,8 +76,8 @@ _POLARIZATION_REFUSE_MSG = (
     "Sonata refuses `Polarization` in `short_range_head`: it would "
     "double-count induction against any future inline LES α-mode. "
     "Polarization belongs to the `LesPolarizable` composer line; use "
-    "an `EdgeEnergyHead` (or any head that writes a dict containing "
-    "`'energy_short'`) here instead."
+    "an `EdgeEnergyHead` (or any head that writes `graphs.energy_short`) "
+    "here instead."
 )
 
 
@@ -183,10 +185,10 @@ class Sonata(nn.Module):
         ewald: :class:`EwaldMultipoleEnergy` evaluator. Sonata calls it
             directly (not via :class:`PotentialComposer`).
         short_range_head: Optional ``nn.Module`` (or
-            ``list[nn.Module]``) that consumes ``batch`` and returns a
-            dict containing ``"energy_short"`` ``(B,)``. Refused if it
-            is, or contains, a :class:`Polarization` — that would
-            double-count induction against any future inline LES α-mode.
+            ``list[nn.Module]``) that consumes ``batch`` and writes
+            ``graphs.energy_short`` ``(B,)``. Refused if it is, or contains,
+            a :class:`Polarization` — that would double-count induction
+            against any future inline LES α-mode.
 
     Refused construction kwargs (raise :class:`ValueError`):
         * ``kappa_head=`` — induced-charge response head (future
@@ -196,25 +198,24 @@ class Sonata(nn.Module):
         * Any ``induced_*`` kwarg.
         * ``short_range_head`` containing a :class:`Polarization`.
 
-    Forward output (flat dict):
-        * ``energy``: ``(B,)`` total per-graph energy.
-        * ``energy_short``: ``(B,)`` short-range energy contribution
+    Forward output (the batch):
+        * ``graphs.energy``: ``(B,)`` total per-graph energy.
+        * ``graphs.energy_short``: ``(B,)`` short-range contribution
           (zeros when ``short_range_head`` is ``None``).
-        * ``energy_es``: ``(B,)`` electrostatic (Ewald) energy.
-        * ``atomic_charges``: ``(N,)`` per-atom charges.
-        * ``atomic_dipoles``: ``(N, 3)`` per-atom dipoles (only when
+        * ``graphs.energy_es``: ``(B,)`` electrostatic (Ewald) energy.
+        * ``atoms.atomic_charges``: ``(N,)`` per-atom charges.
+        * ``atoms.atomic_dipoles``: ``(N, 3)`` per-atom dipoles (only when
           the head predicts them).
-        * ``atomic_quadrupoles``: ``(N, 5)`` per-atom quadrupoles in
-          the traceless-symmetric basis (only when the head predicts
-          them).
-        * ``molecular_dipole``: ``(B, 3)`` molecular dipole moment.
-        * ``phi``: ``(N,)`` per-atom electrostatic potential.
-        * ``field``: ``(N, 3)`` per-atom electric field.
-        * ``charge_sum_pre_proj`` / ``charge_sum_post_proj``: per-graph
-          charge sums before and after the head's total-charge
+        * ``atoms.atomic_quadrupoles``: ``(N, 5)`` per-atom quadrupoles in
+          the traceless-symmetric basis (only when the head predicts them).
+        * ``graphs.molecular_dipole``: ``(B, 3)`` molecular dipole moment.
+        * ``atoms.phi``: ``(N,)`` per-atom electrostatic potential.
+        * ``atoms.field``: ``(N, 3)`` per-atom electric field.
+        * ``graphs.charge_sum_pre_proj`` / ``graphs.charge_sum_post_proj``:
+          per-graph charge sums before and after the head's total-charge
           projection (only when the head has projection on).
-        * ``forces``: ``(N, 3)`` only when ``compute_forces=True``.
-        * ``stress``: ``(B, 3, 3)`` symmetric, only when
+        * ``atoms.forces``: ``(N, 3)`` only when ``compute_forces=True``.
+        * ``graphs.stress``: ``(B, 3, 3)`` symmetric, only when
           ``compute_stress=True``.
     """
 
@@ -331,7 +332,7 @@ class Sonata(nn.Module):
         compute_forces: bool = False,
         compute_stress: bool = False,
         kvec_indices: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
+    ) -> TensorDict:
         """Run encoder → multipole head → Ewald → optional short-range.
 
         Args:
@@ -358,7 +359,9 @@ class Sonata(nn.Module):
                 for the canonical FD-stress technique.
 
         Returns:
-            Flat dict with the keys documented in the class docstring.
+            The evaluated batch, with the columns documented on the class.
+            This is a clone of the input: the force and stress paths re-run
+            the pipeline from the caller's batch.
         """
         atom_batch = batch["atoms", "batch"]
         pair_index = batch["pairs", "pair_index"]
@@ -372,7 +375,7 @@ class Sonata(nn.Module):
 
         def _run_pipeline(
             b: TensorDict, pos: torch.Tensor, cell: torch.Tensor | None
-        ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        ) -> tuple[torch.Tensor, TensorDict]:
             """Encoder → multipole head → Ewald → short-range on a prepared batch.
 
             ``b`` must already carry ``pos`` and (for the grad paths) the edge
@@ -382,7 +385,7 @@ class Sonata(nn.Module):
             # -- encoder writes edge_features (and edge_tensor_features) --
             self.encoder(b)
             # -- head writes per-atom moments + molecular dipole --
-            head_out = head(b)
+            head(b)
 
             # -- Ewald: read moments from the batch --
             q = b["atoms", head.out_charge_key]
@@ -420,40 +423,22 @@ class Sonata(nn.Module):
                     else [self.short_range_head]
                 )
                 for sr_head in heads_iter:
-                    sr_out = sr_head(b)
-                    if not isinstance(sr_out, dict):
-                        raise TypeError(
-                            f"Short-range head {type(sr_head).__name__} must return "
-                            f"a dict; got {type(sr_out).__name__}."
-                        )
-                    if "energy_short" not in sr_out:
+                    sr_head(b)
+                    if "energy_short" not in b["graphs"].keys():
                         raise KeyError(
-                            f"Short-range head {type(sr_head).__name__} must return "
-                            f"a dict with key 'energy_short'; got keys {list(sr_out)}."
+                            f"Short-range head {type(sr_head).__name__} must write "
+                            "graphs.energy_short; "
+                            f"graphs has {list(b['graphs'].keys())}."
                         )
-                    energy_short = energy_short + sr_out["energy_short"]
+                    energy_short = energy_short + b["graphs", "energy_short"]
 
             energy = energy_short + energy_es
-
-            out: dict[str, torch.Tensor] = {
-                "energy": energy,
-                "energy_short": energy_short,
-                "energy_es": energy_es,
-                "atomic_charges": q,
-                "phi": ewald_out["phi"],
-                "field": ewald_out["field"],
-            }
-            if mu is not None:
-                out["atomic_dipoles"] = mu
-            if Theta is not None:
-                out["atomic_quadrupoles"] = Theta
-            if "molecular_dipole" in head_out:
-                out["molecular_dipole"] = head_out["molecular_dipole"]
-            if "charge_sum_pre_proj" in head_out:
-                out["charge_sum_pre_proj"] = head_out["charge_sum_pre_proj"]
-            if "charge_sum_post_proj" in head_out:
-                out["charge_sum_post_proj"] = head_out["charge_sum_post_proj"]
-            return energy, out
+            b["graphs", "energy_short"] = energy_short
+            b["graphs", "energy_es"] = energy_es
+            b["graphs", "energy"] = energy
+            b["atoms", "phi"] = ewald_out["phi"]
+            b["atoms", "field"] = ewald_out["field"]
+            return energy, b
 
         def _strained(
             pos_orig: torch.Tensor, strain: torch.Tensor
@@ -495,7 +480,7 @@ class Sonata(nn.Module):
                 _prepare(b, p, cell0)
                 return _run_pipeline(b, p, cell0)[0].sum()
 
-            out["forces"] = self.force_derivation(energy_of_pos, pos0)
+            out["atoms", "forces"] = self.force_derivation(energy_of_pos, pos0)
 
         # -- stress: σ = (1/V) ∂E/∂ε through a differentiable strain
         #    perturbation of positions + cell, by the same autograd route the
@@ -528,7 +513,7 @@ class Sonata(nn.Module):
             # finite-precision backward can leave behind.
             stress_eps_sym = 0.5 * (stress_eps + stress_eps.transpose(-1, -2))
             volume = torch.linalg.det(cell_orig).abs()
-            out["stress"] = stress_eps_sym / volume.unsqueeze(-1).unsqueeze(-1)
+            out["graphs", "stress"] = stress_eps_sym / volume.unsqueeze(-1).unsqueeze(-1)
 
         return out
 

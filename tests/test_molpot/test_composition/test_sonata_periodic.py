@@ -241,7 +241,7 @@ class TestCellPeriodicConsistency:
         )
 
         with torch.no_grad():
-            U_orig = sonata_pipeline(batch_orig.clone())["energy"]
+            U_orig = sonata_pipeline(batch_orig.clone())["graphs", "energy"]
 
         # Atom 0 lives in graph 0; pull graph 0's lattice vectors.
         cell0 = cell[0]
@@ -263,7 +263,7 @@ class TestCellPeriodicConsistency:
                 minimum_image=True,
             )
             with torch.no_grad():
-                U_shifted = sonata_pipeline(batch_shifted)["energy"]
+                U_shifted = sonata_pipeline(batch_shifted)["graphs", "energy"]
 
             rel = (U_shifted - U_orig).abs() / U_orig.abs().clamp(min=1e-12)
             assert rel.max() < 1e-7, f"shift {shift_label}: rel.max()={rel.max():.2e}"
@@ -323,7 +323,7 @@ class TestForceFD:
             cell=cell,
         )
         out = sonata_pipeline(batch_for_grad, compute_forces=True, kvec_indices=nvec)
-        F_auto = out["forces"].detach()
+        F_auto = out["atoms", "forces"].detach()
 
         dh = 1e-4
         F_fd = torch.zeros_like(F_auto)
@@ -340,7 +340,9 @@ class TestForceFD:
                     cell=cell,
                 )
                 with torch.no_grad():
-                    E_plus = sonata_pipeline(batch_plus, kvec_indices=nvec)["energy"].sum()
+                    E_plus = sonata_pipeline(batch_plus, kvec_indices=nvec)[
+                        "graphs", "energy"
+                    ].sum()
 
                 pos_minus = pos.clone()
                 pos_minus[i, c] -= dh
@@ -353,7 +355,9 @@ class TestForceFD:
                     cell=cell,
                 )
                 with torch.no_grad():
-                    E_minus = sonata_pipeline(batch_minus, kvec_indices=nvec)["energy"].sum()
+                    E_minus = sonata_pipeline(batch_minus, kvec_indices=nvec)[
+                        "graphs", "energy"
+                    ].sum()
 
                 F_fd[i, c] = -(E_plus - E_minus) / (2.0 * dh)
 
@@ -374,7 +378,7 @@ class TestForceFD:
         """
         n_atoms = sample_neutral_batch_periodic["atoms", "Z"].shape[0]
         out = sonata_pipeline(sample_neutral_batch_periodic.clone(), compute_forces=True)
-        F = out["forces"]
+        F = out["atoms", "forces"]
         assert F.shape == (n_atoms, 3), f"forces shape {tuple(F.shape)} != ({n_atoms}, 3)"
         assert torch.isfinite(F).all(), "autograd forces contain NaN or Inf"
         # Non-trivial: at least one component must be non-zero (the
@@ -423,7 +427,7 @@ class TestStressFD:
             cell=cell,
         )
         out = sonata(batch_for_grad, compute_stress=True, kvec_indices=nvec)
-        sigma_auto = out["stress"].detach()
+        sigma_auto = out["graphs", "stress"].detach()
         V = float(torch.linalg.det(cell[0]).abs())
 
         dh = 1e-4
@@ -449,7 +453,7 @@ class TestStressFD:
                     cell=cell_plus,
                 )
                 with torch.no_grad():
-                    E_plus = sonata(batch_plus, kvec_indices=nvec)["energy"].sum()
+                    E_plus = sonata(batch_plus, kvec_indices=nvec)["graphs", "energy"].sum()
 
                 pos_minus = pos @ I_minus.T
                 cell_minus = cell.clone()
@@ -463,7 +467,7 @@ class TestStressFD:
                     cell=cell_minus,
                 )
                 with torch.no_grad():
-                    E_minus = sonata(batch_minus, kvec_indices=nvec)["energy"].sum()
+                    E_minus = sonata(batch_minus, kvec_indices=nvec)["graphs", "energy"].sum()
 
                 deriv = (E_plus - E_minus) / (2.0 * dh)
                 # The deformation moves ε_ab *and* ε_ba by dh, so for a shear
@@ -496,7 +500,7 @@ class TestStressFD:
         """
         sonata, batch = single_graph_periodic
         out = sonata(batch.clone(), compute_stress=True)
-        sigma = out["stress"]
+        sigma = out["graphs", "stress"]
         assert sigma.shape == (1, 3, 3), f"stress shape {tuple(sigma.shape)} != (1, 3, 3)"
         assert torch.isfinite(sigma).all(), "autograd stress contains NaN or Inf"
         sigma0 = sigma[0]

@@ -28,8 +28,8 @@ class TestAtomTypeReadout:
         probe = AtomTypeReadout(enc, num_types=3)
         batch = _batch([6, 1], bonds=[(0, 1)])
         out = probe(batch)
-        assert out["logits"].shape == (2, 3)
-        assert out["pred_type_id"].shape == (2,)
+        assert out["atoms", "logits"].shape == (2, 3)
+        assert out["atoms", "pred_type_id"].shape == (2,)
 
     def test_labels_do_not_affect_encoder(self):
         enc = ChemEncoder(atom_dim=8, bond_dim=4)

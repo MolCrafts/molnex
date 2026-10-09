@@ -235,7 +235,7 @@ class _PipelineModule(nn.Module):
         self.encoder = encoder
         self.head = head
 
-    def forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
+    def forward(self, batch: TensorDict) -> TensorDict:
         recompute_edge_geometry(batch)
         batch = self.encoder(batch)
         return self.head(batch)
@@ -266,10 +266,13 @@ class TestTranslationInvariance:
         # Float32 ULP — translation amplifies pos magnitudes by ~10×, so
         # pair_diff differs at ~1e-5; tolerances mirror the encoder tests.
         assert torch.allclose(
-            ref["atomic_charges"], shifted["atomic_charges"], atol=1e-4, rtol=1e-4
+            ref["atoms", "atomic_charges"], shifted["atoms", "atomic_charges"], atol=1e-4, rtol=1e-4
         )
         assert torch.allclose(
-            ref["molecular_dipole"], shifted["molecular_dipole"], atol=1e-4, rtol=1e-4
+            ref["graphs", "molecular_dipole"],
+            shifted["graphs", "molecular_dipole"],
+            atol=1e-4,
+            rtol=1e-4,
         )
 
     @pytest.mark.parametrize("seed", SEEDS)
@@ -282,13 +285,16 @@ class TestTranslationInvariance:
             shifted = charge_dipole_pipeline(translate_graph(small_molecule_neutral, t))
 
         assert torch.allclose(
-            ref["atomic_charges"], shifted["atomic_charges"], atol=1e-4, rtol=1e-4
+            ref["atoms", "atomic_charges"], shifted["atoms", "atomic_charges"], atol=1e-4, rtol=1e-4
         )
         assert torch.allclose(
-            ref["atomic_dipoles"], shifted["atomic_dipoles"], atol=1e-4, rtol=1e-4
+            ref["atoms", "atomic_dipoles"], shifted["atoms", "atomic_dipoles"], atol=1e-4, rtol=1e-4
         )
         assert torch.allclose(
-            ref["molecular_dipole"], shifted["molecular_dipole"], atol=1e-4, rtol=1e-4
+            ref["graphs", "molecular_dipole"],
+            shifted["graphs", "molecular_dipole"],
+            atol=1e-4,
+            rtol=1e-4,
         )
 
     @pytest.mark.parametrize("seed", SEEDS)
@@ -302,10 +308,10 @@ class TestTranslationInvariance:
             shifted = full_multipole_pipeline(translate_graph(small_molecule_neutral, t))
 
         for key in (
-            "atomic_charges",
-            "atomic_dipoles",
-            "molecular_dipole",
-            "atomic_quadrupoles",
+            ("atoms", "atomic_charges"),
+            ("atoms", "atomic_dipoles"),
+            ("graphs", "molecular_dipole"),
+            ("atoms", "atomic_quadrupoles"),
         ):
             assert torch.allclose(ref[key], shifted[key], atol=1e-4, rtol=1e-4), key
 
@@ -327,7 +333,9 @@ class TestRotationEquivariance:
             ref = charge_only_pipeline(small_molecule_neutral.clone())
             rot = charge_only_pipeline(rotate_graph(small_molecule_neutral, R))
 
-        assert torch.allclose(ref["atomic_charges"], rot["atomic_charges"], atol=1e-4, rtol=1e-4)
+        assert torch.allclose(
+            ref["atoms", "atomic_charges"], rot["atoms", "atomic_charges"], atol=1e-4, rtol=1e-4
+        )
 
     @pytest.mark.parametrize("seed", SEEDS)
     def test_molecular_dipole_equivariance(
@@ -341,8 +349,8 @@ class TestRotationEquivariance:
             ref = charge_only_pipeline(small_molecule_neutral.clone())
             rot = charge_only_pipeline(rotate_graph(small_molecule_neutral, R))
 
-        mu_rotated = rotate_vectors(ref["molecular_dipole"], R)
-        assert torch.allclose(mu_rotated, rot["molecular_dipole"], atol=1e-4, rtol=1e-4)
+        mu_rotated = rotate_vectors(ref["graphs", "molecular_dipole"], R)
+        assert torch.allclose(mu_rotated, rot["graphs", "molecular_dipole"], atol=1e-4, rtol=1e-4)
 
     @pytest.mark.parametrize("seed", SEEDS)
     def test_atomic_dipole_equivariance(self, charge_dipole_pipeline, small_molecule_neutral, seed):
@@ -354,8 +362,8 @@ class TestRotationEquivariance:
             ref = charge_dipole_pipeline(small_molecule_neutral.clone())
             rot = charge_dipole_pipeline(rotate_graph(small_molecule_neutral, R))
 
-        mu_rotated = rotate_vectors(ref["atomic_dipoles"], R)
-        assert torch.allclose(mu_rotated, rot["atomic_dipoles"], atol=1e-4, rtol=1e-4)
+        mu_rotated = rotate_vectors(ref["atoms", "atomic_dipoles"], R)
+        assert torch.allclose(mu_rotated, rot["atoms", "atomic_dipoles"], atol=1e-4, rtol=1e-4)
 
     @pytest.mark.parametrize("euler", _EULER_CASES)
     def test_atomic_quadrupole_equivariance(
@@ -375,8 +383,10 @@ class TestRotationEquivariance:
             ref = full_multipole_pipeline(small_molecule_neutral.clone())
             rot = full_multipole_pipeline(rotate_graph(small_molecule_neutral, R))
 
-        theta_rotated = _rotate_l2(ref["atomic_quadrupoles"], gamma, beta, alpha)
-        assert torch.allclose(theta_rotated, rot["atomic_quadrupoles"], atol=1e-4, rtol=1e-4)
+        theta_rotated = _rotate_l2(ref["atoms", "atomic_quadrupoles"], gamma, beta, alpha)
+        assert torch.allclose(
+            theta_rotated, rot["atoms", "atomic_quadrupoles"], atol=1e-4, rtol=1e-4
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +409,10 @@ class TestPermutationEquivariance:
             permuted = charge_only_pipeline(permute_graph(small_molecule_neutral, perm))
 
         assert torch.allclose(
-            ref["molecular_dipole"], permuted["molecular_dipole"], atol=1e-5, rtol=1e-5
+            ref["graphs", "molecular_dipole"],
+            permuted["graphs", "molecular_dipole"],
+            atol=1e-5,
+            rtol=1e-5,
         )
 
     @pytest.mark.parametrize("seed", SEEDS)
@@ -414,8 +427,8 @@ class TestPermutationEquivariance:
             permuted = charge_only_pipeline(permute_graph(small_molecule_neutral, perm))
 
         assert torch.allclose(
-            ref["atomic_charges"][perm],
-            permuted["atomic_charges"],
+            ref["atoms", "atomic_charges"][perm],
+            permuted["atoms", "atomic_charges"],
             atol=1e-5,
             rtol=1e-5,
         )
@@ -434,8 +447,8 @@ class TestPermutationEquivariance:
             permuted = charge_dipole_pipeline(permute_graph(small_molecule_neutral, perm))
 
         assert torch.allclose(
-            ref["atomic_dipoles"][perm],
-            permuted["atomic_dipoles"],
+            ref["atoms", "atomic_dipoles"][perm],
+            permuted["atoms", "atomic_dipoles"],
             atol=1e-5,
             rtol=1e-5,
         )
@@ -454,8 +467,8 @@ class TestPermutationEquivariance:
             permuted = full_multipole_pipeline(permute_graph(small_molecule_neutral, perm))
 
         assert torch.allclose(
-            ref["atomic_quadrupoles"][perm],
-            permuted["atomic_quadrupoles"],
+            ref["atoms", "atomic_quadrupoles"][perm],
+            permuted["atoms", "atomic_quadrupoles"],
             atol=1e-5,
             rtol=1e-5,
         )

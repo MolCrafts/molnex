@@ -516,7 +516,7 @@ readout = EdgeEnergyHead(
 )
 
 pred = readout(batch)
-print(pred["energy"].shape)
+print(pred["graphs", "energy"].shape)
 ```
 
 Expected:
@@ -552,7 +552,8 @@ import torch.nn.functional as F
 
 
 def loss_fn(pred, batch):
-    return F.mse_loss(pred["energy"], batch["graphs", "energy"])
+    # The readout writes graphs.energy, so the reference lives beside it.
+    return F.mse_loss(pred["graphs", "energy"], batch["graphs", "energy_ref"])
 ```
 
 Then train with `molix.core.trainer.Trainer`.

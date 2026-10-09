@@ -204,8 +204,7 @@ class HessianDerivation(nn.Module):
         Args:
             energy_core: Energy core — a callable ``energy_core(batch)`` that
                 runs the model on the batch and writes the per-molecule energies
-                ``graphs.energy`` ``(B,)`` back onto it (or returns a dict with
-                an ``"energy"`` entry).
+                ``graphs.energy`` ``(B,)`` back onto it.
             batch: Post-collate batch carrying ``atoms.pos`` ``(N, 3)`` Å and
                 the graph-membership vector ``atoms.batch`` ``(N,)`` (which
                 molecule each atom belongs to), which must be non-decreasing
@@ -240,10 +239,7 @@ class HessianDerivation(nn.Module):
         with torch.enable_grad():
             batch = absorb_model_output(batch, energy_core(batch))
             if not has_energy(batch):
-                raise RuntimeError(
-                    "energy core must write batch['graphs','energy'] "
-                    "(graphs.energy) or return a dict with 'energy'"
-                )
+                raise RuntimeError("energy core must write batch['graphs', 'energy']")
             write_forces(
                 batch,
                 autograd_forces_from_energy(batch[ENERGY_KEY], leaf, create_graph=True),

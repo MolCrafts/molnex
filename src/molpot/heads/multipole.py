@@ -189,10 +189,10 @@ class PermMultipoleHead(nn.Module):
             quadrupole is on).
 
     Forward output:
-        Dict containing the per-atom moment writes plus
-        ``"molecular_dipole"`` when charges are predicted. When total-charge
-        projection is on, the output also contains ``"charge_sum_pre_proj"``
-        and ``"charge_sum_post_proj"`` per-graph sums for monitoring.
+        The same batch. Per-atom moments land on ``atoms`` under the
+        configured keys. ``graphs.molecular_dipole`` is written when charges
+        are predicted, and ``graphs.charge_sum_pre_proj`` /
+        ``graphs.charge_sum_post_proj`` when total-charge projection is on.
     """
 
     def __init__(
@@ -337,22 +337,20 @@ class PermMultipoleHead(nn.Module):
     # ------------------------------------------------------------------
     # forward
     # ------------------------------------------------------------------
-    def forward(self, batch: TensorDict) -> dict[str, torch.Tensor]:
-        """Read permanent atomic multipoles ``(q, μ, Θ)`` from the batch.
+    def forward(self, batch: TensorDict) -> TensorDict:
+        """Write permanent atomic multipoles ``(q, μ, Θ)`` onto the batch.
 
-        Reads ``edges.edge_features`` / ``edges.pair_index`` / ``atoms.batch``
-        from the collated batch, runs the enabled charge / dipole / quadrupole
-        readouts, and optionally projects the per-graph total charge.
+        Reads ``pairs.edge_features`` / ``pairs.pair_index`` / ``atoms.batch``,
+        runs the enabled charge / dipole / quadrupole readouts, and optionally
+        projects the per-graph total charge.
 
         Args:
             batch: Post-collate :class:`~tensordict.TensorDict` with the
                 ``atoms`` / ``pairs`` / ``graphs`` namespaces.
 
         Returns:
-            Dict keyed by the configured output names (e.g.
-            ``out_charge_key`` ``(N,)``, ``out_dipole_key`` ``(N, 3)``,
-            ``out_quadrupole_key``) plus ``molecular_dipole`` and the
-            pre/post total-charge sums when charge projection is active.
+            ``batch``. Atomic moments are ``(N,)`` / ``(N, 3)`` / ``(N, 5)``
+            under ``atoms``; ``graphs.molecular_dipole`` is ``(B, 3)``.
         """
         edge_features = batch["pairs", "edge_features"]  # (E, F)
         pair_index = batch["pairs", "pair_index"]  # (E, 2)
@@ -367,8 +365,6 @@ class PermMultipoleHead(nn.Module):
             self._scatter_mean_to_atoms(edge_features, pair_index, n_nodes) if self.charge else None
         )  # (N, F)
 
-        out: dict[str, torch.Tensor] = {}
-
         # 2. Heads + per-graph total-charge projection.
         q: torch.Tensor | None = None
         if self.charge:
@@ -377,12 +373,11 @@ class PermMultipoleHead(nn.Module):
                 q, sum_pre, sum_post = self._project_total_charge(
                     q_raw, atom_batch, batch, n_graphs
                 )
-                out["charge_sum_pre_proj"] = sum_pre
-                out["charge_sum_post_proj"] = sum_post
+                batch["graphs", "charge_sum_pre_proj"] = sum_pre
+                batch["graphs", "charge_sum_post_proj"] = sum_post
             else:
                 q = q_raw
-            batch[("atoms", self.out_charge_key)] = q
-            out[self.out_charge_key] = q
+            batch["atoms", self.out_charge_key] = q
 
         mu: torch.Tensor | None = None
         if self.dipole or self.quadrupole:
@@ -400,8 +395,7 @@ class PermMultipoleHead(nn.Module):
                     scalar_proj=self.mu_proj,
                     collapse=self.mu_collapse,
                 )  # (N, 3)
-                batch[("atoms", self.out_dipole_key)] = mu
-                out[self.out_dipole_key] = mu
+                batch["atoms", self.out_dipole_key] = mu
             if self.quadrupole:
                 theta = self._equivariant_moment_readout(
                     tensor_feats=tensor_feats,
@@ -414,18 +408,16 @@ class PermMultipoleHead(nn.Module):
                     scalar_proj=self.theta_proj,
                     collapse=self.theta_collapse,
                 )  # (N, 5)
-                batch[("atoms", self.out_quadrupole_key)] = theta
-                out[self.out_quadrupole_key] = theta
+                batch["atoms", self.out_quadrupole_key] = theta
 
         # 3. Molecular dipole (always derived when charges exist).
         if q is not None:
             mu_mol = self._molecular_dipole(
                 q, mu, batch["atoms", "pos"], atom_batch, n_graphs
             )  # (B, 3)
-            batch[("graphs", "molecular_dipole")] = mu_mol
-            out["molecular_dipole"] = mu_mol
+            batch["graphs", "molecular_dipole"] = mu_mol
 
-        return out
+        return batch
 
     # ------------------------------------------------------------------
     # internals
