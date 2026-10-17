@@ -200,6 +200,7 @@ class TestGTOFieldFeatures:
         )
         assert block.out_dim == 8
         n = 3
+        block.bind_capacity(n)
         out = block(
             torch.randn(n, 4, dtype=torch.float64),
             torch.randn(n, 3, dtype=torch.float64),
@@ -216,6 +217,7 @@ class TestGTOFieldFeatures:
             feature_lmax=1,
             feature_widths=[1.5, 3.0],
         )
+        block.bind_capacity(4)
         torch.manual_seed(0)
         q = torch.randn(4, 4, dtype=torch.float64)
         pos = torch.randn(4, 3, dtype=torch.float64)
@@ -227,12 +229,13 @@ class TestGTOFieldFeatures:
     def test_two_graph_batch_matches_explicit_pair_loop(self):
         """``l = 0``: each row's potential is the loop over same-graph sources ``j ≠ i``.
 
-        Graph 1 starts at the origin like graph 0, so the masked cross-graph
-        pair ``(0, 2)`` sits at zero distance — evaluated, zeroed, harmless.
+        Graphs of 2 and 3 atoms at capacity 3, so graph 0 carries a padding
+        row; its clamped pairs land on real rows and are zeroed by the mask.
         """
         block = GTOFieldFeatures(
             density_sigma=1.5, density_lmax=0, feature_lmax=0, feature_widths=[1.5, 3.0]
         )
+        block.bind_capacity(3)
         pos = torch.tensor(
             PAIR_POS + [[0.0, 0.0, 0.0], [1.1, -0.4, 0.8], [-0.7, 0.9, 0.2]], dtype=torch.float64
         )
@@ -254,9 +257,10 @@ class TestGTOFieldFeatures:
     def test_copy_layout_matches_explicit_pair_loop(self):
         """``orig`` masks the sources that are copies of the receiving atom.
 
-        Three atoms in two graphs, four copies each; copies ``0`` and ``3`` of
-        an atom coincide, so masked zero-distance pairs occur inside a graph
-        as well as across graphs.
+        Three atoms in two graphs (2 + 1), four copies each at a capacity of
+        two atoms — eight rows per graph, so graph 1 is half padding. Copies
+        ``0`` and ``3`` of an atom coincide, so masked zero-distance pairs
+        occur inside a graph too.
         """
         block = _dump_block()
         pos = torch.tensor(PAIR_POS + [[1.0, 2.0, 3.0]], dtype=torch.float64).repeat_interleave(
@@ -267,7 +271,7 @@ class TestGTOFieldFeatures:
         orig = torch.arange(3).repeat_interleave(4)
         batch = torch.tensor([0, 0, 1], dtype=torch.long).repeat_interleave(4)
         q = torch.linspace(-0.6, 0.6, 12, dtype=torch.float64)
-        out = block._pair_features(q, pos, batch, orig)
+        out = block._pair_features(q, pos, batch, 2, 8, orig)
         sigma = block.combined_sigma
         expect = torch.zeros(12, 2, dtype=torch.float64)
         for i in range(12):
@@ -282,11 +286,13 @@ class TestGTOFieldFeatures:
     def test_coincident_graphs_keep_features_and_gradient_finite(self):
         """Two graphs at the same coordinates: the masked zero-distance pairs are inert.
 
-        Every cross-graph pair ``(i, i')`` has ``r = 0``. The batch features
-        and their position gradient must equal those of the graph alone — and
-        in particular carry no NaN from ``0 · inf`` in either direction.
+        Copies ``0`` and ``3`` of every atom coincide, and so do the two
+        graphs. The batch features and their position gradient must equal
+        those of the graph alone — and in particular carry no NaN from
+        ``0 · inf`` in either direction.
         """
         block = _dump_block()
+        block.bind_capacity(2)
         feats = torch.tensor(PAIR_FEATS, dtype=torch.float64)
         pos = torch.tensor(PAIR_POS, dtype=torch.float64)
         leaf = torch.cat([pos, pos]).requires_grad_(True)
@@ -302,11 +308,12 @@ class TestGTOFieldFeatures:
 
     @pytest.mark.slow
     def test_isolated_branch_compiles_to_one_graph(self) -> None:
-        """A pair list that is a function of ``N`` alone → 1 graph, 0 breaks, two graphs in."""
+        """Per-graph pairs at a bound capacity → 1 graph, 0 breaks, graphs of 2 and 1 in."""
         block = _dump_block()
-        feats = torch.tensor(PAIR_FEATS + PAIR_FEATS, dtype=torch.float64)
-        pos = torch.tensor(PAIR_POS + PAIR_POS, dtype=torch.float64)
-        batch = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+        block.bind_capacity(2)
+        feats = torch.tensor(PAIR_FEATS + PAIR_FEATS[:1], dtype=torch.float64)
+        pos = torch.tensor(PAIR_POS + PAIR_POS[:1], dtype=torch.float64)
+        batch = torch.tensor([0, 0, 1], dtype=torch.long)
         explanation = Compiler.explain(block, feats, pos, batch, num_graphs=2)
         assert (explanation.graph_count, explanation.graph_break_count) == (1, 0), (
             explanation.break_sites
@@ -346,6 +353,7 @@ class TestGTOFieldFeatures:
         ``(μ_y, μ_z, μ_x)`` self-subtraction misses by 0.7 eV and fails here.
         """
         block = _dump_block()
+        block.bind_capacity(2)
         pos = torch.tensor(PAIR_POS, dtype=torch.float64) + 30.0
         feats = torch.tensor(PAIR_FEATS, dtype=torch.float64)
         batch = torch.zeros(2, dtype=torch.long)
@@ -471,6 +479,7 @@ class TestGTOFieldFeaturesKspace:
     ) -> None:
         """The reduction kernel swap is ``atol=1e-12``, not bitwise."""
         block = _dump_block(include_self_interaction=include_self_interaction)
+        block.bind_capacity(2)
         pos = torch.tensor(PAIR_POS, dtype=torch.float64)
         feats = torch.tensor(PAIR_FEATS, dtype=torch.float64)
         batch = torch.zeros(2, dtype=torch.long)

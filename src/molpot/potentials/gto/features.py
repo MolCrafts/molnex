@@ -37,11 +37,7 @@ import torch.nn as nn
 
 from molix.F.scatter import scatter_sum_compile_safe
 from molpot.potentials.elec.prefactors import eV_A
-from molpot.potentials.gto.hartree import (
-    _KSpaceGridHolder,
-    complete_directed_pairs,
-    pair_mask,
-)
+from molpot.potentials.gto.hartree import _GTOBindings, graph_pairs
 from molpot.potentials.gto.kspace import (
     KSpaceGrid,
     cartesian_dipole,
@@ -67,8 +63,16 @@ def _cl_sigma(ell: int, sigma: float, normalize: str) -> float:
     raise ValueError(f"normalize must be 'multipoles' or 'receiver', got {normalize!r}")
 
 
-class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
+class GTOFieldFeatures(_GTOBindings, nn.Module):
     """Per-atom electrostatic potential / field features from GTO multipoles.
+
+    **Isolated lifecycle.** ``construct → bind_capacity(max_atoms_per_graph)
+    → compile / export → forward`` each step. The pair list is enumerated per
+    graph at that bound (:func:`~molpot.potentials.gto.hartree.graph_pairs`):
+    ``B · K (K − 1)`` rows with ``K`` the bound (``4 K`` on the
+    finite-difference copy layout), so a batch of small molecules pays for its
+    own pairs rather than the batch's square. Unbound, the forward raises
+    naming :meth:`bind_capacity`.
 
     **Periodic lifecycle.** ``construct → .to(device) → bind_cell(cell)``
     (eager: this is where :class:`~molpot.potentials.gto.kspace.KSpaceGrid`
@@ -229,31 +233,37 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
         charges: torch.Tensor,
         positions: torch.Tensor,
         batch: torch.Tensor,
+        num_graphs: int,
+        capacity: int,
         orig: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Masked all-pairs potential ``eV_A Σ_{j≠i} q_j erf(r_ij/(2σ_w))/r_ij`` per row and width.
+        """Masked per-graph potential ``eV_A Σ_{j≠i} q_j erf(r_ij/(2σ_w))/r_ij`` per row and width.
 
-        Every one of the ``N (N - 1)`` directed pairs of the batch is
-        evaluated and the ones that do not interact are zeroed by the mask, so
-        a multi-graph batch costs ``N²`` over the whole batch — the same as a
-        single graph of that size. A masked pair may sit at zero distance
-        (coincident atoms of two graphs: molecules are routinely centred at
-        the origin), so the distance is replaced by ``1`` before the kernel
-        and the kernel by ``0`` after it — no ``0 · inf`` in the forward, no
-        NaN in the backward.
+        The ``B · K (K − 1)`` directed pairs of
+        :func:`~molpot.potentials.gto.hartree.graph_pairs` are evaluated and
+        the ones that do not exist — padding rows of a graph below the
+        capacity, and on the copy layout the copies of one atom — are zeroed
+        by the mask. A masked pair may sit at zero distance (a padding row
+        clamped onto a real one; coincident copies), so the distance is
+        replaced by ``1`` before the kernel and the kernel by ``0`` after it —
+        no ``0 · inf`` in the forward, no NaN in the backward.
 
         Args:
             charges: Point charges ``(N,)`` in e.
             positions: ``(N, 3)`` in Å.
-            batch: Graph id ``(N,)``.
+            batch: Graph id ``(N,)``, non-decreasing.
+            num_graphs: Number of graphs ``B``.
+            capacity: Rows any one graph may hold, ``K`` (``4 ·
+                max_atoms_per_graph`` on the copy layout).
             orig: Original atom id ``(N,)`` on the copy layout, else ``None``.
 
         Returns:
             ``(N, n_radial)`` in eV/e.
         """
         n = charges.shape[0]
-        src, dst = complete_directed_pairs(n, charges.device)
-        keep = pair_mask(src, dst, batch, orig)
+        src, dst, keep = graph_pairs(batch, num_graphs, capacity)
+        if orig is not None:
+            keep = keep & (orig[src] != orig[dst])
         r = torch.where(keep, (positions[src] - positions[dst]).norm(dim=-1), 1.0).unsqueeze(-1)
         sigma = self.combined_sigma.to(dtype=charges.dtype)
         kernel = torch.erf(r / (2.0 * sigma)) / r.clamp(min=1e-6)
@@ -280,9 +290,8 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
                 one per row. When set, the official k-space potential / field
                 is used and the batch must hold exactly one system (``B = 1``).
             num_graphs: Number of graphs ``B``, dimensionless —
-                ``graphs.batch_size[0]`` of the batch. Only the periodic
-                branch reduces per graph; the isolated pair sum is per atom
-                and never reads it.
+                ``graphs.batch_size[0]`` of the batch. The isolated pair list
+                is enumerated per graph; the periodic branch reduces per graph.
 
         Returns:
             ``(N, out_dim)`` in eV/e, laid out as ``ir_mul`` of
@@ -292,11 +301,15 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
             ValueError: If ``cell`` is given together with more than one graph
                 (the reciprocal sum knows one cell), or if ``cell`` is neither
                 ``(3, 3)`` nor ``(1, 3, 3)``.
-            RuntimeError: On the eager periodic path, when the cell has
-                outgrown the k-grid capacity; under ``torch.compile``, when the
-                grid was never bound with :meth:`bind_cell` (an over-capacity
-                cell then poisons the features with NaN instead of raising, so
-                the k-sum is never silently truncated).
+            RuntimeError: On the isolated path, when the pair capacity was
+                never bound with :meth:`bind_capacity`, when ``batch`` is not
+                non-decreasing, or when a graph holds more atoms than the
+                bound (:func:`~molpot.potentials.gto.hartree.graph_pairs`). On
+                the eager periodic path, when the cell has outgrown the k-grid
+                capacity; under ``torch.compile``, when the grid was never
+                bound with :meth:`bind_cell` (an over-capacity cell then
+                poisons the features with NaN instead of raising, so the k-sum
+                is never silently truncated).
         """
         feats = source_feats.reshape(source_feats.shape[0], -1)
         n = positions.shape[0]
@@ -309,9 +322,10 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
             if not torch.compiler.is_compiling():
                 self.bind_cell(cell)
             return self._kspace_features(feats, positions, batch, cell, num_graphs)
+        capacity = self.max_atoms_per_graph
         need_fd = self.density_lmax == 1 or self.feature_lmax == 1
         if not need_fd:
-            scalars = self._pair_features(feats[:, 0], positions, batch, None)
+            scalars = self._pair_features(feats[:, 0], positions, batch, num_graphs, capacity, None)
             return scalars * self.l0_factors.to(dtype=feats.dtype)
 
         offset = self.offset
@@ -329,7 +343,7 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
             charges[0::4] = feats[:, 0]
         ext_batch = batch.repeat_interleave(4)
         orig = torch.arange(n, device=batch.device).repeat_interleave(4)
-        scalar = self._pair_features(charges, ext_pos, ext_batch, orig)
+        scalar = self._pair_features(charges, ext_pos, ext_batch, num_graphs, 4 * capacity, orig)
         l0 = self.l0_factors.to(dtype=feats.dtype)
         if self.feature_lmax == 0:
             return scalar[0::4] * l0

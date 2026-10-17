@@ -12,6 +12,7 @@ from molpot.potentials.elec.prefactors import eV_A
 from molpot.potentials.gto.hartree import (
     GTOHartreeEnergy,
     complete_directed_pairs,
+    graph_pairs,
     gto_self_overlap,
 )
 from molpot.potentials.gto.kspace import KSpaceGrid
@@ -104,12 +105,40 @@ class TestCompleteDirectedPairs:
         assert set(pairs) == {(i, j) for i in range(n) for j in range(n) if i != j}
 
 
+class TestGraphPairs:
+    """Per-graph directed pairs of a contiguous batch at a bound capacity."""
+
+    def test_keeps_every_same_graph_ordered_pair_once(self) -> None:
+        """Graphs of 3 and 2 rows at capacity 4: ``B · K (K - 1)`` rows, the kept ones exact."""
+        batch = torch.tensor([0, 0, 0, 1, 1], dtype=torch.long)
+        src, dst, keep = graph_pairs(batch, 2, 4)
+        assert src.shape == dst.shape == keep.shape == (2 * 4 * 3,)
+        assert src.dtype == dst.dtype == torch.long and keep.dtype == torch.bool
+        assert bool((src < 5).all()) and bool((dst < 5).all())
+        kept = list(zip(src[keep].tolist(), dst[keep].tolist(), strict=True))
+        assert len(set(kept)) == len(kept)
+        assert set(kept) == {(i, j) for i in range(5) for j in range(5) if i != j} - {
+            (i, j) for i in range(3) for j in range(3, 5)
+        } - {(i, j) for i in range(3, 5) for j in range(3)}
+
+    def test_a_graph_over_capacity_raises(self) -> None:
+        """Overflow raises (``_assert_async``, synchronous in eager), never truncates."""
+        with pytest.raises(RuntimeError, match="bind_capacity"):
+            graph_pairs(torch.tensor([0, 0, 0, 1], dtype=torch.long), 2, 2)
+
+    def test_a_non_contiguous_batch_raises(self) -> None:
+        """The contiguous-block contract is checked, not assumed."""
+        with pytest.raises(RuntimeError, match="non-decreasing"):
+            graph_pairs(torch.tensor([0, 1, 0], dtype=torch.long), 2, 2)
+
+
 class TestGTOHartreeEnergy:
     """l=0 pair Hartree ``k_e q_i q_j erf(r/(2σ))/r``, plus the ``cell`` branch."""
 
     def test_two_unit_charges_one_angstrom_apart(self):
         """σ=1.5 Å, r=1 Å, q=1,1 → eV_A * erf(1/3)."""
         energy = GTOHartreeEnergy(sigma=1.5, l_max=0)
+        energy.bind_capacity(2)
         pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float64)
         q = torch.ones(2, 1, dtype=torch.float64)
         batch = torch.zeros(2, dtype=torch.long)
@@ -121,6 +150,7 @@ class TestGTOHartreeEnergy:
     def test_self_pairs_are_excluded(self):
         """A single charge has no pair energy (self-interaction is a separate term)."""
         energy = GTOHartreeEnergy(sigma=1.5, l_max=0, include_self_interaction=False)
+        energy.bind_capacity(1)
         pos = torch.zeros(1, 3, dtype=torch.float64)
         q = torch.ones(1, 1, dtype=torch.float64)
         batch = torch.zeros(1, dtype=torch.long)
@@ -129,6 +159,7 @@ class TestGTOHartreeEnergy:
     def test_unit_monopole_self_energy(self):
         """Dump σ=1.5 Å: ½ q² eV_A/(σ√π) for a lone unit charge."""
         energy = GTOHartreeEnergy(sigma=1.5, l_max=0, include_self_interaction=True)
+        energy.bind_capacity(1)
         pos = torch.zeros(1, 3, dtype=torch.float64)
         q = torch.ones(1, 1, dtype=torch.float64)
         batch = torch.zeros(1, dtype=torch.long)
@@ -150,17 +181,22 @@ class TestGTOHartreeEnergy:
         q0 = torch.ones(2, 1, dtype=torch.float64)
         q1 = torch.zeros(2, 4, dtype=torch.float64)
         q1[:, 0] = 1.0
-        e0 = GTOHartreeEnergy(sigma=1.5, l_max=0)(q0, pos, batch, num_graphs=1)
-        e1 = GTOHartreeEnergy(sigma=1.5, l_max=1)(q1, pos, batch, num_graphs=1)
+        monopole = GTOHartreeEnergy(sigma=1.5, l_max=0)
+        monopole.bind_capacity(2)
+        dipole = GTOHartreeEnergy(sigma=1.5, l_max=1)
+        dipole.bind_capacity(2)
+        e0 = monopole(q0, pos, batch, num_graphs=1)
+        e1 = dipole(q1, pos, batch, num_graphs=1)
         assert torch.allclose(e0, e1, rtol=1e-10, atol=1e-12)
 
     def test_two_graph_batch_matches_explicit_pair_loop(self):
         """``l_max=0``: the batch energy is the loop over same-graph pairs ``i ≠ j``.
 
-        Graph 1 starts at the origin like graph 0, so the masked cross-graph
-        pair ``(0, 3)`` sits at zero distance — evaluated, zeroed, harmless.
+        Graphs of 3 and 2 atoms at capacity 3, so graph 1 carries a padding
+        row; its clamped pairs land on real rows and are zeroed by the mask.
         """
         energy = GTOHartreeEnergy(sigma=1.5, l_max=0)
+        energy.bind_capacity(3)
         pos = torch.tensor(PROBE_POS + [[0.0, 0.0, 0.0], [1.1, -0.4, 0.8]], dtype=torch.float64)
         q = torch.tensor([0.4, -0.3, -0.1, 0.7, -0.7], dtype=torch.float64)
         batch = torch.tensor([0, 0, 0, 1, 1], dtype=torch.long)
@@ -178,9 +214,10 @@ class TestGTOHartreeEnergy:
     def test_copy_layout_matches_explicit_pair_loop(self):
         """``orig`` masks the pairs of one atom's copies; every other same-graph pair is summed.
 
-        Three atoms in two graphs, four copies each; copies ``0`` and ``3`` of
-        an atom coincide, so masked zero-distance pairs occur inside a graph
-        as well as across graphs.
+        Three atoms in two graphs (2 + 1), four copies each at a capacity of
+        two atoms — eight rows per graph, so graph 1 is half padding. Copies
+        ``0`` and ``3`` of an atom coincide, so masked zero-distance pairs
+        occur inside a graph too.
         """
         model = GTOHartreeEnergy(sigma=1.5, l_max=1)
         pos = torch.tensor(PROBE_POS, dtype=torch.float64).repeat_interleave(4, dim=0)
@@ -189,7 +226,7 @@ class TestGTOHartreeEnergy:
         orig = torch.arange(3).repeat_interleave(4)
         batch = torch.tensor([0, 0, 1], dtype=torch.long).repeat_interleave(4)
         q = torch.linspace(-0.6, 0.6, 12, dtype=torch.float64)
-        out = model._pair_energy(q, pos, batch, 2, orig)
+        out = model._pair_energy(q, pos, batch, 2, 8, orig)
         expect = torch.zeros(2, dtype=torch.float64)
         for i in range(12):
             for j in range(12):
@@ -203,11 +240,13 @@ class TestGTOHartreeEnergy:
     def test_coincident_graphs_keep_energy_and_force_finite(self):
         """Two graphs at the same coordinates: the masked zero-distance pairs are inert.
 
-        Every cross-graph pair ``(i, i')`` has ``r = 0``. The batch energy and
-        its position gradient must equal those of the graph alone — and in
-        particular carry no NaN from ``0 · inf`` in either direction.
+        Copies ``0`` and ``3`` of every atom coincide, and so do the two
+        graphs. The batch energy and its position gradient must equal those
+        of the graph alone — and in particular carry no NaN from ``0 · inf``
+        in either direction.
         """
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=True)
+        model.bind_capacity(3)
         feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
         pos = torch.tensor(PROBE_POS, dtype=torch.float64)
         leaf = torch.cat([pos, pos]).requires_grad_(True)
@@ -221,13 +260,27 @@ class TestGTOHartreeEnergy:
         assert torch.allclose(energy, torch.cat([alone, alone]), rtol=1e-12, atol=0.0)
         assert torch.allclose(grad, torch.cat([grad_alone, grad_alone]), rtol=1e-12, atol=0.0)
 
+    def test_an_unbound_capacity_raises(self) -> None:
+        """No fallback: the isolated forward names ``bind_capacity`` until it is called."""
+        model = GTOHartreeEnergy(sigma=1.5, l_max=0)
+        feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)[:, :1]
+        pos = torch.tensor(PROBE_POS, dtype=torch.float64)
+        batch = torch.zeros(3, dtype=torch.long)
+        with pytest.raises(RuntimeError, match="bind_capacity"):
+            model(feats, pos, batch, num_graphs=1)
+
     @pytest.mark.slow
     def test_isolated_branch_compiles_to_one_graph(self) -> None:
-        """A pair list that is a function of ``N`` alone → 1 graph, 0 breaks, two graphs in."""
+        """Per-graph pairs at a bound capacity → 1 graph, 0 breaks, graphs of 3 and 2 in.
+
+        The two ``_assert_async`` checks of ``graph_pairs`` are inside the
+        trace, so this is also the fact that they do not break the graph.
+        """
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
-        feats = torch.tensor(PROBE_FEATS + PROBE_FEATS, dtype=torch.float64)
-        pos = torch.tensor(PROBE_POS + PROBE_POS, dtype=torch.float64)
-        batch = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.long)
+        model.bind_capacity(3)
+        feats = torch.tensor(PROBE_FEATS + PROBE_FEATS[:2], dtype=torch.float64)
+        pos = torch.tensor(PROBE_POS + PROBE_POS[:2], dtype=torch.float64)
+        batch = torch.tensor([0, 0, 0, 1, 1], dtype=torch.long)
         explanation = Compiler.explain(model, feats, pos, batch, num_graphs=2)
         assert (explanation.graph_count, explanation.graph_break_count) == (1, 0), (
             explanation.break_sites
@@ -244,6 +297,7 @@ class TestGTOHartreeEnergy:
         periodic images (~2e-5 eV at L = 60 Å), well inside ``abs=1e-2``.
         """
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=True)
+        model.bind_capacity(3)
         pos = torch.tensor(PROBE_POS, dtype=torch.float64) + 30.0
         feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
         batch = torch.zeros(3, dtype=torch.long)
@@ -609,6 +663,7 @@ class TestGTOHartreeEnergyKspace:
         model = GTOHartreeEnergy(
             sigma=1.5, l_max=1, include_self_interaction=include_self_interaction
         )
+        model.bind_capacity(3)
         feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
         pos = torch.tensor(PROBE_POS, dtype=torch.float64) + 10.0
         batch = torch.zeros(3, dtype=torch.long)
@@ -627,6 +682,7 @@ class TestGTOHartreeEnergyKspace:
         model = GTOHartreeEnergy(
             sigma=1.5, l_max=0, include_self_interaction=include_self_interaction
         )
+        model.bind_capacity(3)
         feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)[:, :1]
         pos = torch.tensor(PROBE_POS, dtype=torch.float64) + 10.0
         batch = torch.zeros(3, dtype=torch.long)

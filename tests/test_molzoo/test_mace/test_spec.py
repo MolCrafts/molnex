@@ -169,6 +169,19 @@ class TestMaceOfficialConfig:
         """An official config carries far more than the port reads."""
         assert _official(some_upstream_training_key=3).hidden_irreps == "16x0e+16x1o"
 
+    def test_interaction_class_names_build_the_stack(self):
+        """The json dialect's first class, then the other ``num_interactions - 1`` times."""
+        cfg = _official(
+            interaction_cls_first="RealAgnosticInteractionBlock",
+            interaction_cls="RealAgnosticResidualInteractionBlock",
+            num_interactions=3,
+        )
+        assert cfg.interaction_blocks == [
+            "RealAgnosticInteractionBlock",
+            "RealAgnosticResidualInteractionBlock",
+            "RealAgnosticResidualInteractionBlock",
+        ]
+
     def test_body_fields_leaves_out_what_the_archive_does_not_carry(self):
         cfg = MaceOfficialConfig(atomic_numbers=[1], atomic_energies=[0.0], r_max=4.0)
         assert cfg.body_fields() == {"r_max": 4.0}

@@ -8,7 +8,8 @@ Everything a second module in this package needs is defined here exactly once:
 
 * :data:`CLUSTER_POS` / :data:`CLUSTER_Z` and the ``cluster`` /
   ``periodic_cluster`` / ``omol_cluster`` / ``pair_batch`` fixtures — the
-  fixed geometries (no RNG anywhere);
+  fixed geometries (no RNG anywhere) — and :data:`MAX_ATOMS_PER_GRAPH`, the
+  Polar pair capacity they need;
 * :func:`full_edge_index` — the ordered intra-graph pair list;
 * :func:`official_layout` — a model's own ``state_dict`` with the per-element
   maps' weights put back in cuEquivariance's flat layout, for faking an
@@ -128,6 +129,11 @@ PAIR_POS: list[list[float]] = CLUSTER_POS[:4] + [
 ]
 PAIR_Z: list[int] = [8, 1, 1, 6, 8, 1, 1]
 PAIR_BATCH: list[int] = [0, 0, 0, 0, 1, 1, 1]
+
+#: Atoms any one graph may hold, bound into every Polar built on these
+#: geometries (``MacePolar.bind_capacity``): the cluster's five, which also
+#: covers the pair batch's largest graph (four).
+MAX_ATOMS_PER_GRAPH: int = len(CLUSTER_Z)
 
 #: Periodic shift added to the first two edges (Å) — ``unit_shifts @ cell``.
 PERIODIC_SHIFT = 2.0

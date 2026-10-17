@@ -8,10 +8,11 @@ Per atom and per graph, in eV::
 
 The Hartree energy of the equilibrated GTO density is a graph-level term with
 no per-atom attribution, added after the per-atom scatter. Isolated molecules
-take the real-space electrostatics; a batch carrying ``graphs.cell`` switches
-the two GTO (Gaussian-type-orbital) submodules to the official periodic
-reciprocal-space sum, which needs one eager :meth:`MacePolar.bind_cell`
-before compiling or exporting (see that method).
+take the real-space electrostatics, enumerated per graph at the atom bound
+one :meth:`MacePolar.bind_capacity` fixes before compiling or exporting; a
+batch carrying ``graphs.cell`` switches the two GTO (Gaussian-type-orbital)
+submodules to the official periodic reciprocal-space sum, which needs one
+eager :meth:`MacePolar.bind_cell` instead (see both methods).
 
 ``total_spin`` is the spin multiplicity ``M = 2S+1`` (``S`` = total spin, so a
 closed-shell singlet is ``M = 1``) — a multiplicity, not a count of unpaired
@@ -620,11 +621,16 @@ def _expand_field_norms(norms: list[float], n_widths: int, l_max: int) -> list[f
 class MacePolar(MacePotential):
     """MACE-POLAR-1 on the potential contract.
 
-    **Periodic use.** Two submodules hold reciprocal-space grids —
-    ``coulomb_energy`` (:class:`~molpot.potentials.gto.hartree.GTOHartreeEnergy`)
-    and ``electric_potential_descriptor``
-    (:class:`~molpot.potentials.gto.features.GTOFieldFeatures`). Each sizes its
-    grid on its first *eager* call with a cell, so the lifecycle is
+    **Isolated use.** The two GTO submodules — ``coulomb_energy``
+    (:class:`~molpot.potentials.gto.hartree.GTOHartreeEnergy`) and
+    ``electric_potential_descriptor``
+    (:class:`~molpot.potentials.gto.features.GTOFieldFeatures`) — enumerate
+    their pair lists per graph at a bound atom count, so the lifecycle is
+    ``construct → bind_capacity(max_atoms_per_graph) → compile / export →
+    forward each step``. See :meth:`bind_capacity`.
+
+    **Periodic use.** The same two submodules hold reciprocal-space grids,
+    each sized on its first *eager* call with a cell, so the lifecycle is
     ``construct → .to(device) → bind_cell(cell) → compile / export →
     forward(frame with graphs.cell) each step``. See :meth:`bind_cell`.
 
@@ -763,6 +769,29 @@ class MacePolar(MacePotential):
             dtype=dtype,
         )
 
+    def bind_capacity(self, max_atoms_per_graph: int) -> None:
+        """Bound the atoms of any one graph for both isolated pair lists.
+
+        A construction-time precondition of the isolated path: each GTO block
+        enumerates its pair list per graph at this bound, ``B · K (K − 1)``
+        rows with ``K`` the bound (times the four finite-difference copies),
+        so a batch of small molecules pays for its own pairs rather than the
+        batch's square — and the row count is a static shape, which is what
+        lets the isolated forward trace as one graph. A graph holding more
+        atoms than the bound raises on the forward, never truncates; a later
+        call with another value is a new static shape (one recompile).
+
+        Args:
+            max_atoms_per_graph: Largest atom count of any one graph in any
+                batch this model will see — ghost atoms a padder assigns to a
+                graph slot included, as they are rows of that graph.
+
+        Raises:
+            ValueError: Propagated from the GTO blocks, if below ``1``.
+        """
+        self.electric_potential_descriptor.bind_capacity(max_atoms_per_graph)
+        self.coulomb_energy.bind_capacity(max_atoms_per_graph)
+
     def bind_cell(self, cell: torch.Tensor) -> None:
         """Size (first call) or capacity-check (later calls) both k-space grids.
 
@@ -812,8 +841,11 @@ class MacePolar(MacePotential):
         sum never see it. Multiplies only, never a slice.
 
         Raises:
-            RuntimeError: On the eager periodic path, if the cell has outgrown
-                a k-grid's capacity; under ``torch.compile``, if a grid was
+            RuntimeError: On the isolated path, if the pair capacity was never
+                bound (:meth:`bind_capacity`), if ``atoms.batch`` is not laid
+                out graph by graph, or if a graph holds more atoms than the
+                bound. On the eager periodic path, if the cell has outgrown a
+                k-grid's capacity; under ``torch.compile``, if a grid was
                 never bound.
             ValueError: If ``graphs.cell`` is given with more than one graph,
                 or is neither ``(3, 3)`` nor ``(1, 3, 3)``.

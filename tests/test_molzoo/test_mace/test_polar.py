@@ -34,6 +34,7 @@ from tests.test_molzoo.test_mace.conftest import (
     CLUSTER_POS,
     CLUSTER_Z,
     DTYPE,
+    MAX_ATOMS_PER_GRAPH,
     SINGLE_GRAPH,
     TINY_POLAR_KWARGS,
     full_edge_index,
@@ -57,12 +58,13 @@ def _periodic_cluster(cell: torch.Tensor):
 
 
 class TestMacePolar:
-    """Polar's own ``energy``, ``bind_cell`` and construction on the tiny Polar backbone.
+    """Polar's own ``energy``, the two ``bind_*`` steps and construction on the tiny backbone.
 
     The shared product surface (``energy_dtype`` branches, the readout stack,
     the mask) is asserted on MatPES in ``test_potential.py``; here only what
     Polar overrides: the geometry *and* charge/spin cast, the Hartree term on
-    ``graphs.energy``, the ghosts' charges, the two k-space grids.
+    ``graphs.energy``, the ghosts' charges, the two pair capacities and the
+    two k-space grids.
     """
 
     def test_official_runtime_cutoff_overrides_constructor_heuristic(self, tiny_polar_spec):
@@ -79,6 +81,7 @@ class TestMacePolar:
     def test_energy_precision_covers_hartree(self, tiny_polar_spec, omol_cluster, dtype):
         """Polar's ``energy`` lands the Hartree term at ``energy_dtype`` too (``None``: model's)."""
         model = MacePolar(tiny_polar_spec, energy_dtype=dtype, dtype=DTYPE)
+        model.bind_capacity(MAX_ATOMS_PER_GRAPH)
         energy = model(omol_cluster)[ENERGY_KEY]
         assert energy.dtype == (dtype or torch.float64)
 
@@ -94,6 +97,7 @@ class TestMacePolar:
             input_dtype=torch.float32,
             dtype=torch.float32,
         ).eval()
+        model.bind_capacity(MAX_ATOMS_PER_GRAPH)
         pos = omol_cluster["atoms", "pos"]
         before = pos.clone()
         output = model(omol_cluster)
@@ -106,6 +110,7 @@ class TestMacePolar:
     ):
         """``atoms.energy`` is the per-atom part; ``graphs.energy`` adds the Hartree term."""
         model = MacePolar(tiny_polar_spec, dtype=DTYPE).eval()
+        model.bind_capacity(MAX_ATOMS_PER_GRAPH)
         hartree: list[torch.Tensor] = []
         coulomb = model.coulomb_energy.forward
 
@@ -132,7 +137,9 @@ class TestMacePolar:
         equilibration, the field descriptor and the Hartree sum never see a
         ghost charge. The cluster is translated off the origin first: a padded
         ghost sits at ``(0, 0, 0)``, and a real atom coincident with it would
-        exercise the kernels' small-``r`` clamp rather than the mask.
+        exercise the kernels' small-``r`` clamp rather than the mask. Without
+        ``max_graphs`` the padder files the ghosts under graph 0, so they
+        count against that graph's pair capacity.
         """
         from molix.data import MoleculePadder
 
@@ -142,6 +149,7 @@ class TestMacePolar:
         cluster["atoms", "pos"] = cluster["atoms", "pos"] + 2.5
         n_atoms = int(cluster["atoms"].batch_size[0])
         n_pairs = int(cluster["pairs"].batch_size[0])
+        model.bind_capacity(n_atoms + 3)
         reference = model(cluster.clone())
         padded = MoleculePadder(
             max_atoms=n_atoms + 3, max_pairs=n_pairs + 5, cutoff=tiny_polar_spec.r_max
@@ -160,6 +168,7 @@ class TestMacePolar:
         model = MacePolar(
             tiny_polar_spec.model_copy(update={"add_local_electron_energy": False}), dtype=DTYPE
         )
+        model.bind_capacity(MAX_ATOMS_PER_GRAPH)
         model.energy(omol_cluster)[ENERGY_KEY].sum().backward()
         assert all(p.grad is None for p in model.local_electron_energy.parameters())
         assert all(p.grad is not None for p in model.layer_feature_mixer.parameters())
@@ -210,6 +219,33 @@ class TestMacePolar:
         for kwargs in coulomb_calls + descriptor_calls:
             assert kwargs.get("num_graphs") == 1
             assert kwargs.get("cell") is not None
+
+    def test_bind_capacity_reaches_both_gto_blocks(self, tiny_polar_spec: MACEPolarSpec) -> None:
+        """One call bounds both isolated pair lists — the two blocks are independent objects."""
+        model = MacePolar(tiny_polar_spec, dtype=DTYPE)
+        model.bind_capacity(7)
+        assert model.electric_potential_descriptor.max_atoms_per_graph == 7
+        assert model.coulomb_energy.max_atoms_per_graph == 7
+
+    @pytest.mark.slow
+    def test_isolated_forward_compiles_to_one_graph(
+        self, tiny_polar_spec: MACEPolarSpec, pair_batch
+    ) -> None:
+        """Bound capacity + one eager forward → the isolated op is 1 graph, 0 breaks.
+
+        Graphs of 4 and 3 atoms at the cluster's capacity of 5, so both GTO
+        pair lists carry padding rows. Polar's isolated path (the per-graph
+        pair lists with their capacity and contiguity checks) is its own
+        compile seam, distinct from the periodic one below.
+        """
+        model = MacePolar(tiny_polar_spec, dtype=DTYPE).eval()
+        model.bind_capacity(MAX_ATOMS_PER_GRAPH)
+        model(pair_batch.clone())
+        with torch.no_grad():
+            explanation = Compiler.explain(model, pair_batch.clone())
+        assert (explanation.graph_count, explanation.graph_break_count) == (1, 0), (
+            explanation.break_sites
+        )
 
     def test_bind_cell_reaches_both_grids_and_refuses_an_over_capacity_cell(
         self, tiny_polar_spec: MACEPolarSpec, monkeypatch: pytest.MonkeyPatch

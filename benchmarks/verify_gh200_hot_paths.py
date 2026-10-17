@@ -56,6 +56,7 @@ from tests.test_molzoo.test_mace.conftest import (  # noqa: E402
     ATOMIC_NUMBERS,
     CLUSTER_POS,
     CLUSTER_Z,
+    MAX_ATOMS_PER_GRAPH,
     PAIR_BATCH,
     PAIR_POS,
     PAIR_Z,
@@ -463,6 +464,7 @@ def mace_models():
         wrt=("atoms.pos",),
         dtype=DTYPE,
     ).eval()
+    polar.bind_capacity(MAX_ATOMS_PER_GRAPH)
     return {
         "matpes": (matpes, mace_cluster(False)),
         "matpes_pair": (matpes, mace_pair_batch()),
@@ -526,6 +528,7 @@ def check_mace_compile(device: torch.device, moved: dict) -> None:
             .eval()
             .to(device)
         )
+        polar.bind_capacity(MAX_ATOMS_PER_GRAPH)
         cell = (torch.eye(3, dtype=torch.float64) * 10.0).to(device)
         polar.bind_cell(cell)
         periodic = _periodic_cluster(cell.cpu()).to(device)

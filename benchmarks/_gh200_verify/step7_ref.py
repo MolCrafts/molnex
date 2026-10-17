@@ -9,6 +9,7 @@ from tests.test_molzoo.test_mace.conftest import (  # noqa: E402
     ATOMIC_NUMBERS,
     CLUSTER_POS,
     CLUSTER_Z,
+    MAX_ATOMS_PER_GRAPH,
     PAIR_BATCH,
     PAIR_POS,
     PAIR_Z,
@@ -85,6 +86,7 @@ def models():
         wrt=("atoms.pos",),
         dtype=DTYPE,
     ).eval()
+    polar.bind_capacity(MAX_ATOMS_PER_GRAPH)
     return {
         "matpes": (matpes, cluster(False)),
         "matpes_pair": (matpes, pair_batch()),

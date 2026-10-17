@@ -5,9 +5,10 @@ interacting with itself — here the density built from per-atom Gaussian-type
 orbitals (GTO), i.e. charges and dipoles smeared over Gaussians of width ``σ``
 instead of sitting at points.
 
-Isolated molecules use a directed complete graph excluding self-pairs; each
-directed edge carries ``½ eV_A q_i q_j erf(r/(2σ))/r``, with ``q_i`` the charge
-of atom ``i`` in e and ``r`` the pair separation in Å. Periodic systems pass
+Isolated molecules use a directed complete graph excluding self-pairs,
+enumerated per graph at a bound capacity (:func:`graph_pairs`); each directed
+edge carries ``½ eV_A q_i q_j erf(r/(2σ))/r``, with ``q_i`` the charge of atom
+``i`` in e and ``r`` the pair separation in Å. Periodic systems pass
 ``cell`` and switch to the official reciprocal sum
 (:mod:`molpot.potentials.gto.kspace`) — not PME (particle-mesh Ewald).
 
@@ -90,14 +91,13 @@ def complete_directed_pairs(n: int, device: torch.device) -> tuple[torch.Tensor,
 
     A pure function of the row count: ``src`` is ``i`` repeated ``n - 1``
     times and ``dst`` runs over the other rows, skipping ``i`` by one
-    arithmetic step — no ``N×N`` mask, nothing read back from a tensor, no
-    data-dependent shape. Graph membership and the same-atom exclusion are
-    applied downstream as a multiplicative mask (:func:`pair_mask`), which is
-    what lets the molecular path trace as one graph and record into a CUDA
-    graph.
+    arithmetic step — no ``n×n`` mask, nothing read back from a tensor, no
+    data-dependent shape. :func:`graph_pairs` lays this local grid over every
+    graph of a batch.
 
     Args:
-        n: Number of rows (atoms, or atom copies on the ``l_max=1`` layout).
+        n: Rows of one graph's capacity (atoms, or atom copies on the
+            ``l_max=1`` layout).
         device: Device of the returned indices.
 
     Returns:
@@ -109,44 +109,129 @@ def complete_directed_pairs(n: int, device: torch.device) -> tuple[torch.Tensor,
     return src, dst + (dst >= src).to(dtype=dst.dtype)
 
 
-def pair_mask(
-    src: torch.Tensor, dst: torch.Tensor, batch: torch.Tensor, orig: torch.Tensor | None
-) -> torch.Tensor:
-    """Which directed pairs interact: same graph and, with ``orig``, different atom.
+def graph_pairs(
+    batch: torch.Tensor, num_graphs: int, capacity: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Directed same-graph pairs of a contiguous batch, ``capacity`` rows per graph.
 
-    ``orig`` is the pre-duplication atom id of each row (``None`` for
-    ``l_max=0``; ``arange(n).repeat_interleave(4)`` for the dipole
-    finite-difference copies). Copies of one atom never interact — that is
-    the optional self-interaction term.
+    **Contract:** ``batch`` is non-decreasing — collate lays atoms out graph
+    by graph, so every graph is one contiguous block of rows, and the MD
+    driver's single system is one block trivially. On the finite-difference
+    copy layout ``batch.repeat_interleave(copies)`` keeps the blocks
+    contiguous at ``copies · n_g`` rows, so the same enumeration applies with
+    ``capacity = copies · max_atoms_per_graph``.
+
+    Graph ``g`` holds ``n_g`` rows from ``offset_g = Σ_{h<g} n_h``. The local
+    off-diagonal grid ``(i, j)`` of :func:`complete_directed_pairs` over
+    ``capacity`` rows is laid at every offset, ``src = offset_g + i`` and
+    ``dst = offset_g + j`` (clamped into the batch, so a padding row of a
+    small graph indexes a real row harmlessly), and ``keep = (i < n_g) & (j <
+    n_g)`` marks the pairs that exist. The cost is ``B · K (K − 1)`` rows with
+    ``K = capacity``, a function of ``B`` and ``K`` alone: no data-dependent
+    shape, nothing read back to the host — the molecular path traces as one
+    graph and records into a CUDA graph. The counts come from ``index_add_``
+    into a ``(B,)`` buffer (``bincount`` would shape its output off the data).
+
+    Both preconditions are checked with ``torch._assert_async``, which raises
+    on the eager path and stays a device-side check on the traced one.
 
     Args:
-        src: Pair sources ``(P,)``.
-        dst: Pair targets ``(P,)``.
-        batch: Graph id per row ``(N,)``.
-        orig: Original atom id per row ``(N,)``, or ``None``.
+        batch: Graph id per row ``(N,)``, non-decreasing.
+        num_graphs: Number of graphs ``B``.
+        capacity: Rows any one graph may hold, ``K``.
 
     Returns:
-        Boolean ``(P,)``, ``True`` where the pair contributes.
+        ``src, dst`` of ``torch.long`` and ``keep`` of ``torch.bool``, each
+        ``(B · K (K − 1),)``.
+
+    Raises:
+        RuntimeError: If ``batch`` is not non-decreasing, or if a graph holds
+            more than ``capacity`` rows.
     """
-    keep = batch[src] == batch[dst]
-    if orig is None:
-        return keep
-    return keep & (orig[src] != orig[dst])
+    counts = batch.new_zeros(num_graphs).index_add_(0, batch, torch.ones_like(batch))
+    torch._assert_async(
+        (batch[1:] >= batch[:-1]).all(),
+        "graph_pairs: batch must be non-decreasing (one contiguous block of rows per graph)",
+    )
+    torch._assert_async(
+        (counts <= capacity).all(),
+        "graph_pairs: a graph holds more rows than the bound capacity; "
+        "raise bind_capacity(max_atoms_per_graph)",
+    )
+    offset = (torch.cumsum(counts, dim=0) - counts).unsqueeze(1)
+    i, j = complete_directed_pairs(capacity, batch.device)
+    last = batch.shape[0] - 1
+    src = (offset + i).clamp(max=last).reshape(-1)
+    dst = (offset + j).clamp(max=last).reshape(-1)
+    counts = counts.unsqueeze(1)
+    keep = ((i < counts) & (j < counts)).reshape(-1)
+    return src, dst, keep
 
 
-class _KSpaceGridHolder(nn.Module):
-    """Device glue for a module that owns a :class:`KSpaceGrid`.
+class _GTOBindings(nn.Module):
+    """The two runtime bindings of a GTO block, and the grid's device glue.
 
-    The grid is a plain attribute rather than a submodule — it is runtime
-    geometry, not model state, so it must stay out of the ``state_dict`` — and
-    therefore nothing in the module tree carries it along when the holder
-    moves. Both periodic GTO blocks need exactly this and nothing else, which
-    is why it is a mixin here rather than a second copy in ``features.py``.
+    Each block binds two things after construction and before compiling,
+    neither of them model state (both stay out of the ``state_dict``): a
+    :class:`KSpaceGrid` for the periodic path (:meth:`bind_cell`) and a
+    rows-per-graph capacity for the isolated pair list
+    (:meth:`bind_capacity`). The grid is a plain attribute rather than a
+    submodule, so nothing in the module tree carries it along when the holder
+    moves; the capacity is a plain ``int`` — a shape, like the grid's. Both GTO
+    blocks need exactly this and nothing else, which is why it is a mixin
+    here rather than a second copy in ``features.py``.
     """
 
     #: Annotated, never assigned at class level: the holder's ``__init__``
     #: builds it, and ``nn.Module.__setattr__`` keeps it a plain attribute.
     kgrid: KSpaceGrid
+
+    #: Atoms any one graph may hold on the isolated path; ``None`` until
+    #: :meth:`bind_capacity`. Read through :attr:`max_atoms_per_graph`.
+    _max_atoms_per_graph: int | None
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._max_atoms_per_graph = None
+
+    @property
+    def max_atoms_per_graph(self) -> int:
+        """Atoms any one graph may hold, as fixed by :meth:`bind_capacity`.
+
+        Raises:
+            RuntimeError: Before :meth:`bind_capacity` — at trace time under
+                ``torch.compile``, on the first isolated forward in eager.
+        """
+        if self._max_atoms_per_graph is None:
+            raise RuntimeError(
+                f"{type(self).__name__} has no pair capacity: call "
+                "bind_capacity(max_atoms_per_graph) before the isolated forward or compiling"
+            )
+        return self._max_atoms_per_graph
+
+    def bind_capacity(self, max_atoms_per_graph: int) -> None:
+        """Bound the atoms of any one graph for the isolated pair list.
+
+        The pair list is enumerated per graph at this bound
+        (:func:`graph_pairs`), so a batch costs ``B · K (K − 1)`` rows with
+        ``K`` the bound (times the copies of the ``l_max=1`` layout) — a
+        static shape, which is what lets the isolated path trace as one graph.
+        A graph that holds more rows than the bound raises on the forward,
+        never truncates. Unlike the k-grid, nothing is allocated here: a
+        later call with another value is simply a new static shape (one
+        recompile).
+
+        Args:
+            max_atoms_per_graph: Largest atom count of any one graph in any
+                batch this module will see — ghost atoms a padder assigns to
+                a graph slot included, as they are rows of that graph.
+
+        Raises:
+            ValueError: If ``max_atoms_per_graph`` is below ``1``.
+        """
+        if max_atoms_per_graph < 1:
+            raise ValueError(f"max_atoms_per_graph must be >= 1, got {max_atoms_per_graph}")
+        self._max_atoms_per_graph = int(max_atoms_per_graph)
 
     def bind_cell(self, cell: torch.Tensor) -> None:
         """Size (first call) or capacity-check (later calls) the k-space grid.
@@ -180,12 +265,19 @@ class _KSpaceGridHolder(nn.Module):
         return self
 
 
-class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
+class GTOHartreeEnergy(_GTOBindings, nn.Module):
     """GTO Hartree: isolated pair sum, or Polar SI k-space when ``cell`` is set.
 
     Isolated ``l_max=1`` expands each dipole as three displaced scalar charges
     (official offset 0.02 Å). Periodic ``l_max=1`` uses the analytic dipole
     structure factor (SI V.6), not the finite-difference copies.
+
+    **Isolated lifecycle.** ``construct → bind_capacity(max_atoms_per_graph)
+    → compile / export → forward`` each step. The pair list is enumerated per
+    graph at that bound (:func:`graph_pairs`): ``B · K (K − 1)`` rows with
+    ``K`` the bound (``4 K`` on the ``l_max=1`` copy layout), so a batch of
+    small molecules pays for its own pairs rather than the batch's square.
+    Unbound, the forward raises naming :meth:`bind_capacity`.
 
     **Periodic lifecycle.** ``construct → .to(device) → bind_cell(cell)``
     (eager: this is where :class:`~molpot.potentials.gto.kspace.KSpaceGrid`
@@ -290,36 +382,40 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
         positions: torch.Tensor,
         batch: torch.Tensor,
         num_graphs: int,
+        capacity: int,
         orig: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Masked all-pairs sum ``½ eV_A Σ_{i≠j} q_i q_j erf(r_ij/(2σ))/r_ij`` per graph.
+        """Masked per-graph pair sum ``½ eV_A Σ_{i≠j} q_i q_j erf(r_ij/(2σ))/r_ij``.
 
-        Every one of the ``N (N - 1)`` directed pairs of the batch is
-        evaluated and the ones that do not interact are zeroed by the mask, so
-        a multi-graph batch costs ``N²`` over the whole batch — the same as a
-        single graph of that size. A masked pair may sit at zero distance
-        (coincident atoms of two graphs: molecules are routinely centred at
-        the origin), so the distance is replaced by ``1`` before the kernel
-        and the kernel by ``0`` after it — no ``0 · inf`` in the forward, no
-        NaN in the backward.
+        The ``B · K (K − 1)`` directed pairs of :func:`graph_pairs` are
+        evaluated and the ones that do not exist — padding rows of a graph
+        below the capacity, and on the copy layout the copies of one atom —
+        are zeroed by the mask. A masked pair may sit at zero distance (a
+        padding row clamped onto a real one; coincident copies), so the
+        distance is replaced by ``1`` before the kernel and the kernel by
+        ``0`` after it — no ``0 · inf`` in the forward, no NaN in the
+        backward. The rows come out graph-major, so the per-graph sum is one
+        reshape.
 
         Args:
             charges: Point charges ``(N,)`` in e.
             positions: ``(N, 3)`` in Å.
-            batch: Graph id ``(N,)``.
+            batch: Graph id ``(N,)``, non-decreasing.
             num_graphs: Number of graphs ``B``.
+            capacity: Rows any one graph may hold, ``K`` (``4 ·
+                max_atoms_per_graph`` on the copy layout).
             orig: Original atom id ``(N,)`` on the copy layout, else ``None``.
 
         Returns:
             Per-graph energy ``(B,)`` in eV.
         """
-        src, dst = complete_directed_pairs(charges.shape[0], charges.device)
-        keep = pair_mask(src, dst, batch, orig)
+        src, dst, keep = graph_pairs(batch, num_graphs, capacity)
+        if orig is not None:
+            keep = keep & (orig[src] != orig[dst])
         r = (positions[dst] - positions[src]).norm(dim=-1)
         kernel = torch.where(keep, self.kernel(torch.where(keep, r, 1.0)), 0.0)
         edge = 0.5 * eV_A * kernel * charges[src] * charges[dst]
-        node = scatter_sum_compile_safe(edge, dst, charges.shape[0])
-        return scatter_sum_compile_safe(node, batch, num_graphs)
+        return edge.reshape(num_graphs, -1).sum(dim=1)
 
     def _self_energy(
         self, feats: torch.Tensor, batch: torch.Tensor, num_graphs: int
@@ -358,11 +454,15 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
             ValueError: If ``cell`` is given together with more than one graph
                 (the reciprocal sum knows one cell), or if ``cell`` is neither
                 ``(3, 3)`` nor ``(1, 3, 3)``.
-            RuntimeError: On the eager periodic path, when the cell has
-                outgrown the k-grid capacity; under ``torch.compile``, when the
-                grid was never bound with :meth:`bind_cell` (an over-capacity
-                cell then poisons the weights with NaN instead of raising, so
-                the k-sum is never silently truncated).
+            RuntimeError: On the isolated path, when the pair capacity was
+                never bound with :meth:`bind_capacity`, when ``batch`` is not
+                non-decreasing, or when a graph holds more atoms than the
+                bound (:func:`graph_pairs`). On the eager periodic path, when
+                the cell has outgrown the k-grid capacity; under
+                ``torch.compile``, when the grid was never bound with
+                :meth:`bind_cell` (an over-capacity cell then poisons the
+                weights with NaN instead of raising, so the k-sum is never
+                silently truncated).
         """
         feats = source_feats.reshape(source_feats.shape[0], -1)
         if cell is not None:
@@ -379,8 +479,9 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
             if not self.include_self_interaction:
                 energy = energy - self._self_energy(feats, batch, num_graphs)
             return energy
+        capacity = self.max_atoms_per_graph
         if self.l_max == 0:
-            energy = self._pair_energy(feats[:, 0], positions, batch, num_graphs)
+            energy = self._pair_energy(feats[:, 0], positions, batch, num_graphs, capacity)
         else:
             offset = self.offset
             n = positions.shape[0]
@@ -395,7 +496,9 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
             charges[0::4] = feats[:, 0] - (charges[1::4] + charges[2::4] + charges[3::4])
             extended_batch = batch.repeat_interleave(4)
             orig = torch.arange(n, device=batch.device).repeat_interleave(4)
-            energy = self._pair_energy(charges, extended_pos, extended_batch, num_graphs, orig)
+            energy = self._pair_energy(
+                charges, extended_pos, extended_batch, num_graphs, 4 * capacity, orig
+            )
         if self.include_self_interaction:
             energy = energy + self._self_energy(feats, batch, num_graphs)
         return energy
