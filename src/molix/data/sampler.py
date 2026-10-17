@@ -18,8 +18,8 @@ Four layers, deliberately separated:
 * :class:`TokenBudgetBatchSampler` — seeded shuffle + oversize warning on
   top of the packer, over a count-bearing dataset.
 * :class:`FrameLabelTable` — the per-frame ``(task, group)`` identity of one
-  parent index space in bounded integer-code form, built either from the
-  legacy Python label sequences or from a block's ``(F,)`` code columns.
+  parent index space in bounded integer-code form, built either from
+  per-frame label sequences or from ``(F,)`` integer code columns.
 * :class:`TaskMixtureBatchSampler` — hierarchical task → group →
   configuration sampling: one physical task per batch drawn from a caller
   supplied mixture, whole sampling units inside it, packed by the same
@@ -338,15 +338,14 @@ class FrameLabelTable:
     A scheduler has to answer exactly two questions about frame ``i``:
     which physical task it belongs to, and which sampling group (scan,
     trajectory, molecule) it may not be separated from. This type owns
-    that answer in the form the READY-tier block store already emits —
-    two bounded ``(F,)`` integer code columns plus the short dictionaries
-    that render a code as text — so a consumer never has to decode a
-    block's columns into ``F`` Python objects before it can plan.
+    that answer as two bounded ``(F,)`` integer code columns plus the
+    short dictionaries that render a code as text, so a consumer never
+    has to decode ``F`` Python objects before it can plan.
 
     Both representations enter through a constructor of their own and
-    leave in the same shape: the canonical constructor takes a block's
-    code columns verbatim, :meth:`from_labels` factorizes the legacy
-    Python label sequences. Downstream code sees codes only.
+    leave in the same shape: the canonical constructor takes code columns
+    verbatim, :meth:`from_labels` factorizes per-frame label sequences.
+    Downstream code sees codes only.
 
     Args:
         task_codes: ``(F,)`` integral CPU tensor of task codes; ``code``
@@ -398,14 +397,14 @@ class FrameLabelTable:
     def from_labels(
         cls, task_labels: Sequence[str], group_ids: Sequence[str | int]
     ) -> FrameLabelTable:
-        """Build a table from the legacy per-frame Python label sequences.
+        """Build a table from per-frame label sequences.
 
         Both sequences are factorized in **first-appearance order** in a
         single ``O(F)`` pass. That order is plan-irrelevant — a plan
         depends on the ``(task, group)`` pair identity and on
-        ``sorted(mixture)``, never on code values — and it keeps the
-        block-native and label-native tables identical for a block whose
-        codes were themselves assigned on first appearance.
+        ``sorted(mixture)``, never on code values — and it keeps a
+        code-native and a label-native table identical when the codes were
+        themselves assigned on first appearance.
 
         Args:
             task_labels: Per-frame task label, ``F`` long.

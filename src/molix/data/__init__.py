@@ -1,10 +1,8 @@
 """The data layer: an indexable space of molpy ``Frame``\\ s, and the batch a model reads.
 
-One package for one job. It used to be three — ``molix.data`` (datasets),
-``molix.data`` (DataLoader construction) and ``molix.data`` (collate,
-pad, sampler) — with the collator in one package directly owning the padder in
-another, and two ``datamodule`` modules, one of them a re-export shim
-(spec ``data-layer-01-consolidation``).
+One package for one job: the datasets, the batch policies, the collate and
+the loader live here together, and :class:`FrameCollator` owns the padder it
+composes with.
 
 Surfaces, in the order a sample travels:
 

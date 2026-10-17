@@ -40,18 +40,17 @@ class BatchTask:
         """Deterministic identifier — the concrete class name by default."""
         return type(self).__name__
 
-    def execute(self, data: TensorDict | dict) -> TensorDict | dict:
+    def execute(self, data: TensorDict) -> TensorDict:
         """Transform a collated batch — abstract; subclasses must override.
 
         Input and output are both nested ``TensorDict`` batches, not raw
-        sample dicts (the ``dict`` half of the annotation covers legacy
-        callers still passing plain mappings).
+        sample dicts.
 
         Raises:
             NotImplementedError: Always, on this base class.
         """
         raise NotImplementedError
 
-    def __call__(self, data: TensorDict | dict) -> TensorDict | dict:
+    def __call__(self, data: TensorDict) -> TensorDict:
         """Call the task, delegating to :meth:`execute`."""
         return self.execute(data)

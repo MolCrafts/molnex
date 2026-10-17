@@ -1,24 +1,17 @@
 """Sharded Zarr v3 writer for the MolNex training-event journal.
 
-The on-disk layout matches the original ``recorder/zarr_store.py``
-verbatim — only the Python API has been simplified:
-
-* The writer accepts kwargs (``type=``, ``key=``, ``step=``,
-  ``wall_time_ns=``, ``value=``, ``tags=``) instead of a
-  ``MetricRecord`` dataclass — there is one producer
-  (:class:`molix.hooks.journal.JournalHook`) and we YAGNI'd the
-  schema layer.
-* Five reserved ``type`` strings (preserved verbatim from the
-  legacy ``RESERVED_METRIC_TYPES`` tuple) dispatch to per-type
-  parallel arrays inside :meth:`JournalWriter.append` via a
+* One record is one :meth:`JournalWriter.append` call with keyword
+  arguments (``type=``, ``key=``, ``step=``, ``wall_time_ns=``,
+  ``value=``, ``tags=``); the one producer is
+  :class:`molix.hooks.journal.JournalHook`.
+* Five reserved ``type`` strings (:data:`_RESERVED_TYPES`) dispatch to
+  per-type parallel arrays inside :meth:`JournalWriter.append` via a
   ``match`` block; unknown types raise :class:`ValueError`.
 
 The chunk + shard sizes (``chunks=(1024,)``, ``shards=(1_048_576,)``)
 are deliberate: they collapse up to a million rows into a single
-physical file per parallel array, matching the inode-discipline
-posture of the block writer and defending
-against the per-record-subdirectory failure mode of
-``TensorDict.memmap_``.
+physical file per parallel array — one inode per array, not one per
+record, which is the failure mode of ``TensorDict.memmap_``.
 """
 
 from __future__ import annotations

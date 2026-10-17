@@ -201,7 +201,7 @@ class TestSubsetCounts:
         """Subset counts are the parent counts at the subset's packed indices."""
         subset = SubsetDataset(varied_ds, [5, 2, 9])
         counts = BaseDataset.nrows_of(subset, "atoms")
-        # Shape guard: __getattr__ forwarding would return the FULL (64,) vector.
+        # Shape guard: the parent's own vector is the full (64,) one.
         assert counts.shape == (3,)
         assert counts.dtype == torch.long
         assert counts.tolist() == [ATOM_COUNTS[5], ATOM_COUNTS[2], ATOM_COUNTS[9]]

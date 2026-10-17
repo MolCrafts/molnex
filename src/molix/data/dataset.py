@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from functools import cached_property
-from pathlib import Path
 from typing import Any, ClassVar, Final
 
 import numpy as np
@@ -184,40 +182,6 @@ class BaseDataset(Dataset[Any], ABC):
         )
 
 
-def _reject_misfiled_edges(payload: Mapping[str, Any], sink: Path | str) -> None:
-    """Raise if *payload* has no ``edge_ptr`` because its edges were misfiled.
-
-    A packed cache written before edge keys were routed by identity classified
-    ``pair_index`` as a per-atom key whenever ``n_pairs == n_atoms`` held for
-    every sample, which also suppressed ``edge_ptr``. Its edges are then
-    unreadable: the batch gets an empty edges namespace and
-    ``avg_num_neighbors`` would report ``0.0``. A cache with no edge keys at
-    all is a different, legitimate state and is left alone.
-
-    Args:
-        payload: The packed-cache payload mapping.
-        sink: Path of the backing cache file, for the error message.
-
-    Raises:
-        ValueError: ``pair_index`` is packed under the ``atom`` schema kind.
-    """
-    spec = payload.get("schema", {}).get("pair_index")
-    if spec is None or spec[0] != "atom":
-        return
-    raise ValueError(
-        f"cache at {sink} packs 'pair_index' as a per-atom key and has no "
-        "'edge_ptr' pointer — it was written before per-edge keys were routed "
-        "by identity, so its edges are unreadable (this happens when "
-        "n_pairs == n_atoms for every sample). Delete the stale cache and "
-        "re-run the pipeline."
-    )
-
-
-# ---------------------------------------------------------------------------
-# Cache-backed datasets
-# ---------------------------------------------------------------------------
-
-
 # ---------------------------------------------------------------------------
 # SubsetDataset
 # ---------------------------------------------------------------------------
@@ -229,11 +193,10 @@ class SubsetDataset(BaseDataset):
     Produced by :meth:`BaseDataset.split` or constructed directly from
     pre-computed indices (the workflow-driven split-first pattern).
 
-    Connectivity statistics (``avg_num_neighbors``, ``max_atoms``,
-    ``max_pairs``) are recomputed over ``self._indices`` — a train subset
-    reports train-only stats, not the full-dataset values. This is the
-    right semantics for Allegro/MACE normalisation, which must not peek at
-    val/test.
+    Every per-index reading — table lengths through :meth:`count_rows`, the
+    labels at :attr:`task_labels` / :attr:`group_ids` — is the wrapped
+    dataset's, gathered at this view's indices: a train view reports
+    train-only values, and each is ``len(self)`` long.
     """
 
     def __init__(self, dataset: BaseDataset, indices: list[int]) -> None:
@@ -250,26 +213,21 @@ class SubsetDataset(BaseDataset):
         """Parent indices this view exposes, in view order."""
         return self._indices
 
-    def __getattr__(self, name: str) -> Any:
-        """Forward unknown public attributes to the wrapped dataset.
+    @property
+    def task_labels(self) -> tuple[str, ...]:
+        """The wrapped dataset's per-index task labels, gathered at this view's indices.
 
-        Lets subset views transparently expose dataset-declared attributes
-        (e.g. ``task_labels``) so :class:`~molix.data.DataModule`
-        auto-discovery works on splits. Private / dunder names raise
-        :class:`AttributeError` instead of forwarding — during unpickling
-        ``__setstate__`` has not populated ``__dict__`` yet, so reaching
-        for ``self._dataset`` would recurse.
-
-        Args:
-            name: Attribute name being looked up.
-
-        Raises:
-            AttributeError: ``name`` is private/dunder, or absent on the
-                wrapped dataset.
+        The wrapped dataset is a labelled one — :class:`~molix.data.FrameDataset`
+        or :class:`~molix.data.DataMixture` — and the result is ``len(self)`` long.
         """
-        if name.startswith("_"):
-            raise AttributeError(name)
-        return getattr(self._dataset, name)
+        labels = self._dataset.task_labels
+        return tuple(labels[i] for i in self._indices)
+
+    @property
+    def group_ids(self) -> tuple[str, ...]:
+        """The wrapped dataset's per-index sampling groups, gathered at this view's indices."""
+        groups = self._dataset.group_ids
+        return tuple(groups[i] for i in self._indices)
 
     def count_rows(self, table: str) -> torch.Tensor:
         """The parent's lengths, gathered at this subset's indices.
@@ -291,42 +249,6 @@ class SubsetDataset(BaseDataset):
         wrapped dataset.
         """
         return self._dataset[self._indices[idx]]
-
-    @cached_property
-    def max_atoms(self) -> int:
-        """Largest single-sample atom count over this subset's indices.
-
-        Computed from the wrapped dataset's packed ``atom_ptr`` pointers
-        restricted to ``self._indices``. Falls back to the wrapped
-        dataset's ``max_atoms`` when no packed payload is reachable, and is
-        ``0`` when there are no per-atom keys or the subset is empty.
-        """
-        payload = getattr(self._dataset, "_payload", None)
-        if payload is None:
-            return getattr(self._dataset, "max_atoms", 0)
-        atom_ptr = payload.get("atom_ptr")
-        if atom_ptr is None or not self._indices:
-            return 0
-        idx = torch.as_tensor(self._indices, dtype=torch.long)
-        return int((atom_ptr[idx + 1] - atom_ptr[idx]).max().item())
-
-    @cached_property
-    def max_pairs(self) -> int:
-        """Largest single-sample edge count over this subset's indices.
-
-        Computed from the wrapped dataset's packed ``edge_ptr`` pointers
-        restricted to ``self._indices``. Falls back to the wrapped
-        dataset's ``max_pairs`` when no packed payload is reachable, and is
-        ``0`` when there are no per-edge keys or the subset is empty.
-        """
-        payload = getattr(self._dataset, "_payload", None)
-        if payload is None:
-            return getattr(self._dataset, "max_pairs", 0)
-        edge_ptr = payload.get("edge_ptr")
-        if edge_ptr is None or not self._indices:
-            return 0
-        idx = torch.as_tensor(self._indices, dtype=torch.long)
-        return int((edge_ptr[idx + 1] - edge_ptr[idx]).max().item())
 
 
 #: Valence tables name their per-unit count column after the singular family

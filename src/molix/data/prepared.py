@@ -658,13 +658,14 @@ def _exclusive_cumsum(lengths: Sequence[int]) -> np.ndarray:
     return np.cumsum(counts) - counts
 
 
-class PreparedRows:
+class PreparedRows(BaseDataset):
     """A dataset whose rows are :class:`PreparedRow` after the first read.
 
     The loader's collate sees prepared rows and concatenates them. The wrapped
     dataset is read only for a row the store does not have. Cache keys are the
     parent dataset's indices, so a train split and a val split of one shard
-    share the file.
+    share the file. Table lengths (:meth:`count_rows`) are the wrapped
+    dataset's, and the wrapped dataset itself is :attr:`dataset`.
 
     Args:
         dataset: The dataset the loader would have read. A subset view is
@@ -702,6 +703,20 @@ class PreparedRows:
     def store(self) -> RowStore | None:
         """Where the packed rows are kept, or ``None`` when every read prepares afresh."""
         return self._store
+
+    @property
+    def dataset(self) -> BaseDataset:
+        """The dataset the rows are prepared from."""
+        return self._dataset
+
+    def count_rows(self, table: str) -> torch.Tensor:
+        """The wrapped dataset's per-row lengths of *table*.
+
+        Read through the wrapped dataset, not through ``self[i]``: a prepared
+        row is not a Frame, and a dataset that answers from a count sidecar
+        keeps doing so.
+        """
+        return BaseDataset.nrows_of(self._dataset, table)
 
     def __len__(self) -> int:
         return len(self._dataset)
@@ -807,20 +822,3 @@ class PreparedRows:
         if callable(fetch):
             return list(fetch(list(parent)))
         return [source[index] for index in parent]
-
-    def __getattr__(self, name: str) -> Any:
-        """Attributes the wrapped dataset owns (``source_id``, ``manifest``, …).
-
-        ``_dataset`` is read off the instance dict. Unpickling probes the
-        instance before that dict exists, and a lookup that went through
-        ``self._dataset`` would re-enter this method.
-
-        Raises:
-            AttributeError: *name* is not on the wrapped dataset, or this
-                object has not been restored yet.
-        """
-        try:
-            dataset = object.__getattribute__(self, "_dataset")
-        except AttributeError:
-            raise AttributeError(name) from None
-        return getattr(dataset, name)

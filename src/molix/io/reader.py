@@ -6,10 +6,8 @@ fast key enumeration when present, but the reader transparently
 rebuilds the key index from the parallel ``key`` array if the
 subgroup is absent.
 
-Records are yielded as plain ``dict`` instances — the schema
-dataclass that the legacy ``recorder`` package used was YAGNI'd
-during the io-hooks-refactor. Downstream callers index into the
-dict directly: ``record["type"]``, ``record["value"]``, etc.
+Records are yielded as plain ``dict`` instances; callers index into
+them directly: ``record["type"]``, ``record["value"]``, etc.
 """
 
 from __future__ import annotations

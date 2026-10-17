@@ -34,8 +34,6 @@ def _samples(n: int = 8) -> list[dict]:
 class _ListDataset(BaseDataset):
     """Minimal in-memory dataset; module level so pickle can find it."""
 
-    custom_marker = "abc"
-
     def __init__(self, samples: list[dict]) -> None:
         self._samples = samples
 
@@ -56,13 +54,23 @@ class TestSubsetDataset:
         assert torch.equal(sub[1]["Z"], samples[3]["Z"])
         assert torch.equal(sub[2]["Z"], samples[7]["Z"])
 
-    def test_forwards_attribute_access_to_parent(self):
-        sub = SubsetDataset(_ListDataset(_samples(6)), [0, 2, 4])
+    def test_labels_are_gathered_at_the_view_indices(self):
+        ds = FrameDataset(
+            [
+                (_geom([8], molecule_id="a"),),
+                (_geom([6], molecule_id="b"),),
+                (_geom([7], molecule_id="c"),),
+            ],
+            task_labels=("equilibrium", "torsion", "equilibrium"),
+            group_ids=("a", "b", "c"),
+        )
+        sub = SubsetDataset(ds, [2, 0])
 
-        assert sub.custom_marker == "abc"
+        assert sub.task_labels == ("equilibrium", "equilibrium")
+        assert sub.group_ids == ("c", "a")
 
     def test_pickle_roundtrip_preserves_the_view(self):
-        """Workers receive the subset by pickle; ``__getattr__`` must not recurse."""
+        """Workers receive the subset by pickle; the view survives the trip."""
         sub = SubsetDataset(_ListDataset(_samples(6)), [1, 4])
         restored = pickle.loads(pickle.dumps(sub))
 

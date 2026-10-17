@@ -6,10 +6,7 @@ Two concerns, one class each:
   ``task_id``, ``execute`` raising on the base, ``__call__`` delegating to
   ``execute``. No DataLoader involved.
 * ``TestDataModuleBatchTasks`` — ``DataModule(batch_tasks=[...])`` runs the
-  tasks, in declaration order, on **both** collate paths (per-sample
-  ``_CollateFn``), and its ``__init__``
-  exposes ``batch_tasks`` and no longer ``batch_nodes`` (the ETL ``Node``
-  coupling this phase severs).
+  tasks, in declaration order, on the per-sample ``_CollateFn`` path.
 
 Order is proved by a decimal stamp: task with digit *d* rewrites the
 per-graph ``stamp`` leaf as ``stamp * 10 + d``, so ``[1, 2]`` yields ``12``
@@ -17,8 +14,6 @@ and ``[2, 1]`` yields ``21`` — a wrong order cannot pass by accident.
 """
 
 from __future__ import annotations
-
-import inspect
 
 import pytest
 import torch
@@ -70,7 +65,7 @@ class _SampleDictDataset(Dataset):
 class _NoopTask(BatchTask):
     """Subclass that overrides nothing but ``execute`` — pins the default id."""
 
-    def execute(self, data: dict) -> dict:
+    def execute(self, data: TensorDict) -> TensorDict:
         """Return *data* unchanged."""
         return data
 
@@ -79,12 +74,14 @@ class _RecordingTask(BatchTask):
     """Records every ``execute`` call so ``__call__`` delegation is checkable."""
 
     def __init__(self) -> None:
-        self.seen: list[dict] = []
+        self.seen: list[TensorDict] = []
 
-    def execute(self, data: dict) -> dict:
+    def execute(self, data: TensorDict) -> TensorDict:
         """Record *data* and return a marked copy."""
         self.seen.append(data)
-        return {**data, "executed": True}
+        marked = data.clone()
+        marked["executed"] = torch.tensor(True)
+        return marked
 
 
 class _StampTask(BatchTask):
@@ -128,20 +125,20 @@ class TestBatchTask:
     def test_execute_raises_on_base(self):
         """The base has no transform — it must refuse, not silently pass data through."""
         with pytest.raises(NotImplementedError):
-            BatchTask().execute({})
+            BatchTask().execute(TensorDict({}, batch_size=[]))
 
     def test_call_delegates_to_execute(self):
         """``task(batch)`` returns exactly what ``execute(batch)`` returns."""
         task = _RecordingTask()
-        data = {"atoms": 1}
+        data = TensorDict({"atoms": torch.tensor(1)}, batch_size=[])
         out = task(data)
-        assert out == {"atoms": 1, "executed": True}
-        assert task.seen == [data]
+        assert bool(out["executed"]) and "executed" not in data.keys()
+        assert len(task.seen) == 1 and task.seen[0] is data
 
     def test_call_on_base_raises(self):
         """Delegation is real: the base's ``__call__`` surfaces ``execute``'s error."""
         with pytest.raises(NotImplementedError):
-            BatchTask()({})
+            BatchTask()(TensorDict({}, batch_size=[]))
 
 
 # ---------------------------------------------------------------------------
@@ -159,15 +156,7 @@ def _unpacked_dm(**kwargs) -> DataModule:
 
 
 class TestDataModuleBatchTasks:
-    """``batch_tasks`` replaces ``batch_nodes`` and dispatches via ``execute``."""
-
-    def test_init_accepts_batch_tasks(self):
-        """``batch_tasks`` is a keyword argument of ``DataModule.__init__``."""
-        assert "batch_tasks" in inspect.signature(DataModule.__init__).parameters
-
-    def test_init_has_no_batch_nodes(self):
-        """The ETL ``Node`` parameter is gone — no shim, no alias."""
-        assert "batch_nodes" not in inspect.signature(DataModule.__init__).parameters
+    """``DataModule(batch_tasks=[...])`` dispatches via ``execute``, in order."""
 
     def test_default_batch_tasks_is_empty(self):
         """Omitting the kwarg leaves an empty task sequence, not ``None``."""

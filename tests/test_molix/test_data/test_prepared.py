@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from molix.data.collate import collate_molecules
+from molix.data.dataset import BaseDataset
 from molix.data.prepared import PreparedMmap, PreparedRow, PreparedRows
 from molix.data.relation import PairRelation
 from molix.neighbor import NeighborList
@@ -102,8 +103,6 @@ class _Source:
     def __getitems__(self, indices):
         self.asked.append([int(index) for index in indices])
         return [self.rows[int(index)] for index in indices]
-
-    source_id = "fixture"
 
 
 class _Subset:
@@ -208,6 +207,11 @@ class TestPreparedRows:
         again = rows[0]
         assert source.asked == []
         assert again.n_atoms == 4
+
+    def test_counts_are_the_wrapped_datasets(self) -> None:
+        source = _Source([record(0.0), record(5.0, frames=2)])
+        rows = PreparedRows(source, prepare=None, tasks=(), store=_Store())
+        assert BaseDataset.nrows_of(rows, "atoms").tolist() == [4, 8]
 
     def test_an_empty_fetch_reads_nothing(self) -> None:
         source = _Source([record(0.0)])

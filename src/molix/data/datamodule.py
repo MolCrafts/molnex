@@ -407,8 +407,8 @@ class DataModule:
 
         Args:
             dataset: The dataset being packed (train or val).
-            budgets: ``{table: per-batch cap}`` — the padder's or the legacy
-                atoms / edges pair.
+            budgets: ``{table: per-batch cap}`` — the padder's, or the
+                ``max_atoms_per_batch`` / ``max_pairs_per_batch`` pair.
             given: Caller-supplied ``{table: counts}``; every budgeted table
                 it lacks is read with
                 :meth:`~molix.data.dataset.BaseDataset.nrows_of`, except
@@ -621,7 +621,7 @@ class DataModule:
             self._val_loader = loader
         return loader
 
-    def _make_collate_fn(self, dataset: BaseDataset | PreparedRows | None = None) -> "_CollateFn":
+    def _make_collate_fn(self, dataset: BaseDataset | None = None) -> "_CollateFn":
         frame_collator = self.collate_fn
         if frame_collator is None:
             frame_collator = FrameCollator(collator=MoleculeCollator(dtype=self.dtype))
@@ -633,14 +633,7 @@ class DataModule:
         return _CollateFn(frame_collator, self.batch_tasks, dtype=self.dtype, captured=captured)
 
     def _resolve_collation(self, dataset: BaseDataset) -> tuple[object, object]:
-        """Pick ``(loader_dataset, collate_fn)`` — one route, the per-sample collate.
-
-        There used to be a second route here, probed on every dataloader build:
-        a block view got an index dataset plus a block-aware collate. It
-        was removed with the ``molix.block/1`` writer/reader it served, which had
-        no producer, no consumer and no instance on disk (spec
-        ``data-layer-01-consolidation``). The probe could never fire, so this is
-        a deletion, not a behaviour change.
+        """Pick ``(loader_dataset, collate_fn)``: the dataset as given, per-sample collate.
 
         Args:
             dataset: The train or val dataset to collate.
@@ -699,9 +692,8 @@ class _CollateFn:
     :func:`molix.core.steps.cast_compute_floats` with ``dtype`` — the
     :class:`DataModule`'s, the model's build dtype — so compute floating
     leaves follow it. Frame collate emits graph totals at
-    :data:`~molix.schema.FLOAT64_LABEL_KEYS` as IEEE-754 binary64; the
-    store route does not narrow those totals below the mmap column and
-    does not upcast. ``dtype`` is an attribute of this callable, so it is
+    :data:`~molix.schema.FLOAT64_LABEL_KEYS` as IEEE-754 binary64.
+    ``dtype`` is an attribute of this callable, so it is
     pickled into every worker with it: a spawned worker casts exactly as
     the parent would, with no process-wide state to re-read.
     """
