@@ -76,7 +76,7 @@ int parse_atomic_number(const std::string& token, int lammps_type) {
 
 CutoffGraphImpl::CutoffGraphImpl(const molnex::runtime::Metadata& metadata,
                                  double energy_factor,
-                                 molnex::runtime::SiteEnergyExec exec,
+                                 molnex::runtime::AtomEnergyExec exec,
                                  GraphMode mode)
     : cutoff_(metadata.cutoff),
       receptive_field_layers_(metadata.receptive_field_layers),
@@ -200,7 +200,7 @@ void CutoffGraphImpl::init(const LammpsRunEnv& env) {
         "Add 'newton on' to the input script (it is the default)");
   }
 
-  // (3) Fat ghost. A T-layer network's site energy depends on every atom
+  // (3) Fat ghost. A T-layer network's atom energy depends on every atom
   // within T * cutoff, so this rank must hold a copy of all of them. LAMMPS'
   // default ghost cutoff is cutoff + skin, which suffices only at T == 1.
   //
@@ -271,16 +271,16 @@ EvalResult CutoffGraphImpl::compute(const LammpsView& view) {
   // atoms out locals-first, so ownership is the prefix `[0, nlocal)` — the one
   // fact that turns a graph over local + ghost into a PARTITION of the total
   // energy. An all-ones mask here would make the model return
-  // sum_{L u G} E_i and every rank would count its ghosts' site energies as its
+  // sum_{L u G} E_i and every rank would count its ghosts' atom energies as its
   // own; a mask built from anything but the LAMMPS layout would silently select
-  // the wrong sites.
+  // the wrong atoms.
   const at::Tensor local_mask =
       at::zeros({n_graph}, at::TensorOptions().dtype(at::kBool));
   if (view.nlocal > 0) local_mask.narrow(0, 0, view.nlocal).fill_(true);
 
   // stage_nodes copies Z / pos (fp64; the model-dtype cast is the
   // execution's), GraphBridge collects and refilters against the cutoff in
-  // neighbour-list order, SiteEnergyExec runs the model, ForceScatter
+  // neighbour-list order, AtomEnergyExec runs the model, ForceScatter
   // accumulates onto view.f.
   const molnex::lammps_bridge::NodeTensors nodes =
       molnex::lammps_bridge::stage_nodes(view, *species_map_, n_graph);
@@ -288,17 +288,17 @@ EvalResult CutoffGraphImpl::compute(const LammpsView& view) {
   // Ghost copies are staged at their image coordinates: no shift.
   const at::Tensor shifts = at::zeros({pair_index.size(0), 3},
                                       at::TensorOptions().dtype(at::kDouble));
-  const molnex::runtime::SiteEnergyOutputs out =
+  const molnex::runtime::AtomEnergyOutputs out =
       exec_.run(nodes.Z, nodes.pos, pair_index, shifts, local_mask);
   // Forces over ALL n_graph rows, ghosts included. A ghost's force is not a
-  // by-product to be discarded: it is the derivative of LOCAL site energies
+  // by-product to be discarded: it is the derivative of LOCAL atom energies
   // with respect to that ghost's coordinates, and it belongs to the atom the
   // ghost is a copy of. Leaving it in atom->f is precisely what lets the
   // integrator's global reverse comm carry it to its owner.
   force_scatter_.scatter(view, out.forces, n_graph);
 
   EvalResult result;
-  // D1, the partition energy. `site_energy` comes back for all n_graph sites;
+  // D1, the partition energy. `atom_energy` comes back for all n_graph atoms;
   // the first `nlocal` of them are this rank's, and their sum is its share of
   // the total. Slice, convert, then sum — so `e_total` is by construction the
   // sum of the `e_atom` the facade tallies, rather than a second number that
@@ -306,8 +306,8 @@ EvalResult CutoffGraphImpl::compute(const LammpsView& view) {
   // eatom sum, and two independent computations would eventually differ).
   //
   // The model's own scalar `out.energy` is not read here. Deriving both
-  // reported values from `site_energy` keeps them one number and its parts.
-  result.e_atom = out.site_energy.slice(0, 0, view.nlocal) * energy_conv_;
+  // reported values from `atom_energy` keeps them one number and its parts.
+  result.e_atom = out.atom_energy.slice(0, 0, view.nlocal) * energy_conv_;
   result.e_total = result.e_atom.sum().item<double>();
   // THE REDUCTION BELONGS TO THE INTEGRATOR, so this is a constant false.
   // and not an expression. Verlet::run issues one global comm->reverse_comm()
@@ -339,7 +339,7 @@ EvalResult CutoffGraphImpl::compute_folded(const LammpsView& view) {
         "pair_molnex reached compute() before CutoffGraphImpl::init accepted "
         "the run; this is an ordering fault inside the pair style");
   }
-  // Owned atoms only: every site is local, every image a shifted pair.
+  // Owned atoms only: every atom is local, every image a shifted pair.
   const int n = view.nlocal;
   const at::Tensor local_mask =
       at::ones({n}, at::TensorOptions().dtype(at::kBool));
@@ -347,14 +347,14 @@ EvalResult CutoffGraphImpl::compute_folded(const LammpsView& view) {
       molnex::lammps_bridge::stage_nodes(view, *species_map_, n);
   const molnex::lammps_bridge::FoldedGraph graph =
       graph_bridge_.build_folded(view);
-  const molnex::runtime::SiteEnergyOutputs out =
+  const molnex::runtime::AtomEnergyOutputs out =
       exec_.run(nodes.Z, nodes.pos, graph.pair_index, graph.shifts, local_mask);
   // Forces on owned atoms only. A ghost's share is already in its owner's row:
   // the image enters the model as the owner's position plus a constant shift.
   force_scatter_.scatter(view, out.forces, n);
 
   EvalResult result;
-  result.e_atom = out.site_energy * energy_conv_;
+  result.e_atom = out.atom_energy * energy_conv_;
   result.e_total = result.e_atom.sum().item<double>();
   result.needs_pair_reverse_comm = false;
   // The model's +dE/deps, as LAMMPS' -dE/deps in xx yy zz xy xz yz. fdotr

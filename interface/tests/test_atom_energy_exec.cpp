@@ -1,4 +1,4 @@
-// C++ tests for molnex::runtime::SiteEnergyExec.
+// C++ tests for molnex::runtime::AtomEnergyExec.
 //
 // The no-fixture cases run over a stub ModelArtifact; the fixture case runs
 // the five-input graph package generate_fixtures.py wrote, opened the way an
@@ -7,7 +7,7 @@
 // Invariants:
 //
 //   1. The package must return exactly four tensors; forces (n, 3),
-//      site_energy one entry per staged atom, virial (3, 3).
+//      atom_energy one entry per staged atom, virial (3, 3).
 //   2. pos and shifts reach the package in the metadata dtype; Z, pair_index
 //      and local_mask keep theirs.
 //   3. Outputs are CPU float64 copies the caller owns, equal to the reference
@@ -33,13 +33,13 @@
 #include "expect.h"
 #include "molnex/runtime/metadata.h"
 #include "molnex/runtime/model_artifact.h"
-#include "molnex/runtime/site_energy_exec.h"
+#include "molnex/runtime/atom_energy_exec.h"
 
 namespace fs = std::filesystem;
 using molnex::runtime::Metadata;
 using molnex::runtime::ModelArtifact;
-using molnex::runtime::SiteEnergyExec;
-using molnex::runtime::SiteEnergyOutputs;
+using molnex::runtime::AtomEnergyExec;
+using molnex::runtime::AtomEnergyOutputs;
 using molnex::testing::expect_contains;
 using molnex::testing::expect_int;
 using molnex::testing::expect_throws;
@@ -79,9 +79,9 @@ struct Staged {
   at::Tensor local_mask = at::ones({3}, at::TensorOptions().dtype(at::kBool));
 };
 
-SiteEnergyOutputs run_stub(StubArtifact& stub, at::ScalarType dtype) {
+AtomEnergyOutputs run_stub(StubArtifact& stub, at::ScalarType dtype) {
   const Staged s;
-  return SiteEnergyExec(stub, dtype)
+  return AtomEnergyExec(stub, dtype)
       .run(s.Z, s.pos, s.pair_index, s.shifts, s.local_mask);
 }
 
@@ -99,7 +99,6 @@ void test_exec_requires_four_outputs() {
       [&] { (void)run_stub(three, at::kDouble); }, "three outputs");
   expect_contains(few, "3 output", "the diagnostic states the observed count");
   expect_contains(few, "virial", "the diagnostic names the missing one");
-  expect_contains(few, "schema 2", "and says a schema-1 package returns 3");
 
   std::vector<at::Tensor> five_out = four_outputs();
   five_out.push_back(at::zeros({1}, kF64));
@@ -109,12 +108,12 @@ void test_exec_requires_four_outputs() {
       "5 output", "the diagnostic states the observed count");
 }
 
-void test_exec_requires_one_site_energy_per_atom() {
+void test_exec_requires_one_atom_energy_per_atom() {
   std::vector<at::Tensor> outs = four_outputs();
   outs[2] = at::zeros({2}, kF64);
   StubArtifact short_sites(outs);
   const std::string msg = expect_throws(
-      [&] { (void)run_stub(short_sites, at::kDouble); }, "two site energies");
+      [&] { (void)run_stub(short_sites, at::kDouble); }, "two atom energies");
   expect_contains(msg, "2 entries", "states the observed length");
   expect_contains(msg, "3 staged", "states the staged count");
 }
@@ -139,7 +138,7 @@ void test_exec_requires_shaped_forces_and_virial() {
 
 void test_exec_casts_pos_to_model_dtype() {
   StubArtifact stub(four_outputs(at::kFloat));
-  const SiteEnergyOutputs out = run_stub(stub, at::kFloat);
+  const AtomEnergyOutputs out = run_stub(stub, at::kFloat);
   expect_int(static_cast<long long>(stub.seen.size()), 5, "five inputs");
   expect_true(stub.seen[0].scalar_type() == at::kLong, "Z stays int64");
   expect_true(stub.seen[1].scalar_type() == at::kFloat, "pos is cast");
@@ -148,7 +147,7 @@ void test_exec_casts_pos_to_model_dtype() {
   expect_true(stub.seen[3].scalar_type() == at::kFloat, "shifts are cast");
   expect_true(stub.seen[4].scalar_type() == at::kBool, "local_mask stays bool");
   expect_true(out.forces.scalar_type() == at::kDouble &&
-                  out.site_energy.scalar_type() == at::kDouble &&
+                  out.atom_energy.scalar_type() == at::kDouble &&
                   out.energy.scalar_type() == at::kDouble &&
                   out.virial.scalar_type() == at::kDouble,
               "outputs come back float64");
@@ -193,8 +192,8 @@ void test_exec_matches_reference() {
   expect_true(artifact->device().is_cpu(), "the graph fixture is a CPU export");
 
   const auto ref = load_tensor_dict(fixture_dir() / "reference_graph_cpu.pt");
-  SiteEnergyExec exec(*artifact, meta.dtype);
-  const SiteEnergyOutputs out =
+  AtomEnergyExec exec(*artifact, meta.dtype);
+  const AtomEnergyOutputs out =
       exec.run(ref.at("Z"), ref.at("pos"), ref.at("pair_index"),
                ref.at("shifts"), ref.at("local_mask"));
   expect_true(ref.at("shifts").abs().sum().item<double>() > 0.0,
@@ -202,12 +201,12 @@ void test_exec_matches_reference() {
   // A closed-form fp64 package: 1e-12 is a parity claim, not a tolerance.
   expect_close(out.energy, ref.at("energy"), 1e-12, "energy");
   expect_close(out.forces, ref.at("forces"), 1e-12, "forces");
-  expect_close(out.site_energy, ref.at("site_energy"), 1e-12, "site_energy");
+  expect_close(out.atom_energy, ref.at("atom_energy"), 1e-12, "atom_energy");
   expect_close(out.virial, ref.at("virial"), 1e-12, "virial");
   expect_true(out.forces.is_contiguous() && out.forces.device().is_cpu(),
               "forces are contiguous CPU");
 
-  const SiteEnergyOutputs again =
+  const AtomEnergyOutputs again =
       exec.run(ref.at("Z"), ref.at("pos"), ref.at("pair_index"),
                ref.at("shifts"), ref.at("local_mask"));
   expect_true(again.forces.data_ptr() != out.forces.data_ptr(),
@@ -218,8 +217,8 @@ using TestFn = std::function<void()>;
 const std::map<std::string, TestFn>& registry() {
   static const std::map<std::string, TestFn> r = {
       {"exec_requires_four_outputs", test_exec_requires_four_outputs},
-      {"exec_requires_one_site_energy_per_atom",
-       test_exec_requires_one_site_energy_per_atom},
+      {"exec_requires_one_atom_energy_per_atom",
+       test_exec_requires_one_atom_energy_per_atom},
       {"exec_requires_shaped_forces_and_virial",
        test_exec_requires_shaped_forces_and_virial},
       {"exec_casts_pos_to_model_dtype", test_exec_casts_pos_to_model_dtype},

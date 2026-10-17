@@ -1,10 +1,10 @@
-"""The engine-neutral calling convention of a deployed site-energy model.
+"""The engine-neutral calling convention of a deployed atom-energy model.
 
 A deployed model is one flat function:
 
     Z (N,) int64, pos (N, 3), pair_index (E, 2) int64, shifts (E, 3),
     local_mask (N,) bool
-        -> energy (), forces (N, 3), site_energy (N,), virial (3, 3)
+        -> energy (), forces (N, 3), atom_energy (N,), virial (3, 3)
 
 An edge's displacement is ``pos[target] - pos[source] + shifts`` (repo-wide
 convention: ``pair_index[:, 0]`` is the source). Two ways to hand over a
@@ -15,8 +15,8 @@ periodic system, one package for both:
   marks the atoms it owns. The returned energy is the partition
   :math:`E^{(p)} = \\sum_i m_i E_i`; the forces are
   :math:`F_j = -\\partial E^{(p)} / \\partial r_j` for every atom, ghosts
-  included — a ghost owns no site energy, but its coordinates enter its
-  neighbours' site energies.
+  included — a ghost owns no atom energy, but its coordinates enter its
+  neighbours' atom energies.
 * **Folded images** (one process owns every atom): ``N`` is the atom count,
   each pair names the image's owner and carries the lattice translation in
   ``shifts``, and the mask is all true. Nothing is evaluated twice.
@@ -25,7 +25,7 @@ The virial is :math:`\\partial E^{(p)} / \\partial \\varepsilon` under a
 homogeneous strain, :math:`\\sum_e \\operatorname{sym}(d_e \\otimes
 \\partial E / \\partial d_e)` — molnex's ``graphs.virial`` sign
 (:class:`molix.autograd.Derivative`); an engine converts. It is exact in both
-modes because a site energy depends on positions only through its edges.
+modes because an atom's energy depends on positions only through its edges.
 Nothing in the contract names an engine or a file format; an engine adapter
 and a format writer each build on it. The neighbour list is handed over
 unsorted.
@@ -54,14 +54,14 @@ N_ATOMS = torch.export.Dim("n_atoms", min=2, max=1 << 20)
 N_PAIRS = torch.export.Dim("n_pairs", min=1, max=1 << 24)
 DYNAMIC_SHAPES = ({0: N_ATOMS}, {0: N_ATOMS}, {0: N_PAIRS}, {0: N_PAIRS}, {0: N_ATOMS})
 
-#: Relative tolerance of the site-energy partition checks.
+#: Relative tolerance of the atom-energy partition checks.
 PARTITION_RTOL = 1e-6
 #: Relative tolerance of the force-consistency check. Looser than the energy
 #: check: it compares a backward against an independently computed field.
 FORCE_RTOL = 1e-5
 
 
-class SiteEnergyModel(Protocol):
+class AtomEnergyModel(Protocol):
     """Structural type of a deployable model; nothing subclasses it.
 
     A module satisfies it when ``forward`` has the signature below.
@@ -87,15 +87,15 @@ class SiteEnergyModel(Protocol):
             local_mask: ``(N,)`` bool. True for the atoms the caller owns.
 
         Returns:
-            ``energy ()``, ``forces (N, 3)``, ``site_energy (N,)``,
-            ``virial (3, 3)``, with ``energy == (site_energy * local_mask).sum()``,
+            ``energy ()``, ``forces (N, 3)``, ``atom_energy (N,)``,
+            ``virial (3, 3)``, with ``energy == (atom_energy * local_mask).sum()``,
             ``forces == -d(energy)/d(pos)`` and ``virial == d(energy)/d(strain)``.
         """
         ...
 
 
-class SiteEnergyAdapter(nn.Module):
-    """A molnex potential on the site-energy calling convention.
+class AtomEnergyAdapter(nn.Module):
+    """A molnex potential on the atom-energy calling convention.
 
     The potential is called as ``potential(batch)`` on the post-collate batch
     and must write ``atoms.energy``; the adapter replaces the potential's own
@@ -158,7 +158,7 @@ class SiteEnergyAdapter(nn.Module):
     def model_outputs(
         self, Z: torch.Tensor, pos: torch.Tensor, pair_index: torch.Tensor, shifts: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
-        """The potential's own ``(energy (), forces or None, site_energy (N,))``.
+        """The potential's own ``(energy (), forces or None, atom_energy (N,))``.
 
         What :meth:`check` compares the partition against.
 
@@ -178,7 +178,7 @@ class SiteEnergyAdapter(nn.Module):
         if "energy" not in atoms:
             raise ValueError(
                 f"model output carries no per-atom energy: expected {ATOMIC_ENERGY_KEY}. "
-                "A caller sums only the site energies it owns, so a model without "
+                "A caller sums only the atom energies it owns, so a model without "
                 "them cannot be partitioned."
             )
         forces = out[FORCES_KEY] if "forces" in atoms else None
@@ -192,19 +192,19 @@ class SiteEnergyAdapter(nn.Module):
         shifts: torch.Tensor,
         local_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return ``(energy (), forces (N, 3), site_energy (N,), virial (3, 3))``."""
+        """Return ``(energy (), forces (N, 3), atom_energy (N,), virial (3, 3))``."""
         pos = leaf(pos)
         with torch.enable_grad():
             # The shifts as a leaf of their own: dE/dshift_e is dE/dd_e.
             shifts = leaf(shifts)
             batch = self.build_batch(Z, pos, pair_index, shifts)
             diff = batch["pairs", "pair_diff"]
-            _, _, site = self._outputs_of(batch)
-            energy = (site * local_mask.to(site.dtype)).sum()
+            _, _, atom_energy = self._outputs_of(batch)
+            energy = (atom_energy * local_mask.to(atom_energy.dtype)).sum()
             grad_pos, grad_diff = torch.autograd.grad(energy, (pos, shifts))
         virial = diff.detach().transpose(0, 1) @ grad_diff
         virial = 0.5 * (virial + virial.transpose(0, 1))
-        return energy.detach().reshape(()), -grad_pos, site.detach(), virial
+        return energy.detach().reshape(()), -grad_pos, atom_energy.detach(), virial
 
     def check(
         self, Z: torch.Tensor, pos: torch.Tensor, pair_index: torch.Tensor, shifts: torch.Tensor
@@ -212,20 +212,20 @@ class SiteEnergyAdapter(nn.Module):
         """Refuse a potential whose energy the partition would change.
 
         On top of :func:`verify`: the potential's own energy must equal the sum
-        of its site energies (a long-range term with no site attribution
+        of its atom energies (a long-range term with no atom attribution
         fails here), and its own forces, when it writes them, must equal the
         partition's at a full mask.
 
         Raises:
             ValueError: On any of those disagreements.
         """
-        energy, forces, site = self.model_outputs(Z, pos, pair_index, shifts)
+        energy, forces, atom_energy = self.model_outputs(Z, pos, pair_index, shifts)
         _require_close(
             float(energy.detach().sum()),
-            float(site.detach().sum()),
+            float(atom_energy.detach().sum()),
             PARTITION_RTOL,
             "model energy",
-            "the sum of its site energies",
+            "the sum of its atom energies",
         )
         local_mask = torch.ones(Z.shape[0], dtype=torch.bool, device=Z.device)
         _, derived, _, _ = verify(self, Z, pos, pair_index, shifts, local_mask)
@@ -236,9 +236,9 @@ class SiteEnergyAdapter(nn.Module):
         scale = float(reference.abs().max())
         if deviation > FORCE_RTOL * max(scale, 1e-12):
             raise ValueError(
-                f"model forces disagree with -d(sum of site energies)/dpos by {deviation!r} "
+                f"model forces disagree with -d(sum of atom energies)/dpos by {deviation!r} "
                 f"(max |F| {scale!r}, tolerance rel {FORCE_RTOL}). The deployed forces are "
-                "derived from the site energies, so the two must agree when every atom is local."
+                "derived from the atom energies, so the two must agree when every atom is local."
             )
 
 
@@ -250,10 +250,10 @@ def verify(
     shifts: torch.Tensor,
     local_mask: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Run ``model`` once and check it keeps the site-energy contract.
+    """Run ``model`` once and check it keeps the atom-energy contract.
 
     Args:
-        model: Any module with the :class:`SiteEnergyModel` signature.
+        model: Any module with the :class:`AtomEnergyModel` signature.
         Z: Atomic numbers ``(N,)``.
         pos: Positions ``(N, 3)``.
         pair_index: Pairs ``(E, 2)``.
@@ -261,45 +261,45 @@ def verify(
         local_mask: ``(N,)`` bool.
 
     Returns:
-        The model's ``(energy, forces, site_energy, virial)``.
+        The model's ``(energy, forces, atom_energy, virial)``.
 
     Raises:
         ValueError: If it does not return four tensors of shapes ``()``,
             ``(N, 3)``, ``(N,)``, ``(3, 3)``, if the energy is not the masked
-            site-energy sum (rel :data:`PARTITION_RTOL`), or if the forces or
+            atom-energy sum (rel :data:`PARTITION_RTOL`), or if the forces or
             the virial are not finite.
     """
     out = model(Z, pos, pair_index, shifts, local_mask)
     if not isinstance(out, tuple) or len(out) != 4:
         count = len(out) if isinstance(out, tuple | list) else None
         raise ValueError(
-            "forward must return (energy, forces, site_energy, virial), four tensors; "
+            "forward must return (energy, forces, atom_energy, virial), four tensors; "
             f"got {type(out).__name__}" + (f" of length {count}" if count is not None else "")
         )
-    energy, forces, site, virial = out
+    energy, forces, atom_energy, virial = out
     if not all(isinstance(tensor, torch.Tensor) for tensor in out):
-        raise ValueError("forward must return (energy, forces, site_energy, virial) as tensors")
+        raise ValueError("forward must return (energy, forces, atom_energy, virial) as tensors")
     n = Z.shape[0]
     if energy.shape != ():
         raise ValueError(f"energy must have shape (), got {tuple(energy.shape)}")
     if forces.shape != (n, 3):
         raise ValueError(f"forces must have shape ({n}, 3), got {tuple(forces.shape)}")
-    if site.shape != (n,):
-        raise ValueError(f"site_energy must have shape ({n},), got {tuple(site.shape)}")
+    if atom_energy.shape != (n,):
+        raise ValueError(f"atom_energy must have shape ({n},), got {tuple(atom_energy.shape)}")
     if virial.shape != (3, 3):
         raise ValueError(f"virial must have shape (3, 3), got {tuple(virial.shape)}")
     _require_close(
         float(energy.detach()),
-        float((site.detach() * local_mask.to(site.dtype)).sum()),
+        float((atom_energy.detach() * local_mask.to(atom_energy.dtype)).sum()),
         PARTITION_RTOL,
         "returned energy",
-        "the masked sum of its site energies",
+        "the masked sum of its atom energies",
     )
     if not bool(torch.isfinite(forces).all()):
         raise ValueError("forces are not finite on the example system")
     if not bool(torch.isfinite(virial).all()):
         raise ValueError("the virial is not finite on the example system")
-    return energy, forces, site, virial
+    return energy, forces, atom_energy, virial
 
 
 def example_inputs(
@@ -338,6 +338,6 @@ def _require_close(left: float, right: float, rtol: float, left_name: str, right
         raise ValueError(
             f"{left_name} {left!r} is not {right_name} {right!r} "
             f"(difference {abs(left - right)!r}, tolerance rel {rtol}). "
-            "The deployed energy is the masked site-energy sum, so a term with "
-            "no per-site attribution would change the energy at deployment."
+            "The deployed energy is the masked atom-energy sum, so a term with "
+            "no per-atom attribution would change the energy at deployment."
         )

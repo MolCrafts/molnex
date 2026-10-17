@@ -35,14 +35,14 @@ set_tests_properties(fixture_setup PROPERTIES
 # ---------------------------------------------------------------------------
 
 foreach(_exe test_metadata test_op_libraries test_model_artifact
-             test_aoti_artifact test_site_energy_exec)
+             test_aoti_artifact test_atom_energy_exec)
   add_executable(${_exe} ${_exe}.cpp)
   target_link_libraries(${_exe} PRIVATE molnex_runtime Threads::Threads)
 endforeach()
 
 _molnex_cases(test_metadata NONE
   metadata_parses_every_field
-  metadata_refuses_other_schema_version
+  metadata_ignores_unknown_field
   metadata_refuses_bad_species
   metadata_refuses_bad_receptive_field
   metadata_refuses_bad_dtype_and_cutoff
@@ -84,13 +84,13 @@ _molnex_cases(test_aoti_artifact FIXTURE
   load_bad_path_throws
 )
 
-_molnex_cases(test_site_energy_exec NONE
+_molnex_cases(test_atom_energy_exec NONE
   exec_requires_four_outputs
-  exec_requires_one_site_energy_per_atom
+  exec_requires_one_atom_energy_per_atom
   exec_requires_shaped_forces_and_virial
   exec_casts_pos_to_model_dtype
 )
-_molnex_cases(test_site_energy_exec FIXTURE exec_matches_reference)
+_molnex_cases(test_atom_energy_exec FIXTURE exec_matches_reference)
 
 # ---------------------------------------------------------------------------
 # Classical Class-I export parity (spec composable-a0-05-export).

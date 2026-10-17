@@ -8,7 +8,7 @@
 // Invariants:
 //
 //   1. Every field of the Python writer is read, species sorted and unique.
-//   2. Another schema_version is refused.
+//   2. A key this reader does not know is ignored.
 //   3. species must be a non-empty array of whole integers > 0.
 //   4. receptive_field_layers is required, whole and >= 1.
 //   5. dtype is float32 or float64; cutoff is positive.
@@ -42,7 +42,6 @@ using Fields = std::map<std::string, std::string>;
 
 Fields valid_fields() {
   return {
-      {"schema_version", "2"},
       {"format", "\"aoti\""},
       {"cutoff", "5.0"},
       {"species", "[8, 1, 6, 1]"},
@@ -97,12 +96,11 @@ void test_metadata_parses_every_field() {
               "an ATen-only package needs no library");
 }
 
-void test_metadata_refuses_other_schema_version() {
-  expect_contains(refusal(valid_fields(), "schema_version", "1"),
-                  "schema_version",
-                  "a schema-1 package (no shifts, no virial) is refused");
-  expect_contains(refusal(valid_fields(), "schema_version", ""),
-                  "schema_version", "an unversioned document is refused");
+void test_metadata_ignores_unknown_field() {
+  Fields fields = valid_fields();
+  fields["comment"] = "\"written by hand\"";
+  expect_string(Metadata::parse(document(fields)).format, "aoti",
+                "a key the reader does not know is ignored");
 }
 
 void test_metadata_refuses_bad_species() {
@@ -158,8 +156,7 @@ using TestFn = std::function<void()>;
 const std::map<std::string, TestFn>& registry() {
   static const std::map<std::string, TestFn> r = {
       {"metadata_parses_every_field", test_metadata_parses_every_field},
-      {"metadata_refuses_other_schema_version",
-       test_metadata_refuses_other_schema_version},
+      {"metadata_ignores_unknown_field", test_metadata_ignores_unknown_field},
       {"metadata_refuses_bad_species", test_metadata_refuses_bad_species},
       {"metadata_refuses_bad_receptive_field",
        test_metadata_refuses_bad_receptive_field},

@@ -1,6 +1,6 @@
 # Build the generic molnex LAMMPS pair-style plugin (pair_style molnex) against:
 #   - LibTorch (find_package(Torch); from the active venv's torch)
-#   - molnex_runtime (../runtime: metadata, model artifact, site-energy exec)
+#   - molnex_runtime (../runtime: metadata, model artifact, atom-energy exec)
 #   - liblammps.so (a LAMMPS source build with PKG_PLUGIN) + LAMMPS headers
 #
 # Pass on the command line:

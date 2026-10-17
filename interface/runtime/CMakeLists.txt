@@ -1,4 +1,4 @@
-# molnex_runtime: load a deployed model and run the site-energy convention.
+# molnex_runtime: load a deployed model and run the atom-energy convention.
 #
 # Engine-neutral by construction: depends on LibTorch and nothing else — no
 # engine header, no Python. An engine adapter (interface/lammps, ...) links
@@ -28,7 +28,7 @@ add_library(molnex_runtime STATIC
   src/op_libraries.cpp
   src/model_artifact.cpp
   src/aoti_artifact.cpp
-  src/site_energy_exec.cpp
+  src/atom_energy_exec.cpp
 )
 
 set_target_properties(molnex_runtime PROPERTIES

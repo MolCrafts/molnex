@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
 # suite. Two layers, one-way:
 #
 #   runtime/  molnex_runtime — engine-neutral: metadata, model artifact (by
-#             format), native op libraries, site-energy execution. LibTorch
+#             format), native op libraries, atom-energy execution. LibTorch
 #             only.
 #   lammps/   the LAMMPS adapter: bridge/ and impls/ (LAMMPS-free, ctest-able)
 #             and the pair_style plugin (its own project; needs LAMMPS).

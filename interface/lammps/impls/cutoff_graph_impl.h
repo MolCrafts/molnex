@@ -5,13 +5,13 @@
 //
 // This is the composition point of the bridge components — `SpeciesMap`,
 // `stage_nodes`, `GraphBridge`, `ForceScatter`, `pack_reverse_forces` /
-// `unpack_reverse_forces` — and the runtime's `SiteEnergyExec`. It adds no
+// `unpack_reverse_forces` — and the runtime's `AtomEnergyExec`. It adds no
 // numerics of its own: what lives here is the ORDER those components run in
 // and the handful of decisions that order needs (how many atoms are graph
 // nodes, whether the pair style owes a reverse comm, which unit factor
 // applies).
 //
-// One implementation, every model. Any package that follows the site-energy
+// One implementation, every model. Any package that follows the atom-energy
 // convention runs through this class; nothing here is named after a network
 // or a package format.
 //
@@ -33,14 +33,14 @@
 #include "bridge/species_map.h"
 #include "impls/contract_impl.h"
 #include "molnex/runtime/metadata.h"
-#include "molnex/runtime/site_energy_exec.h"
+#include "molnex/runtime/atom_energy_exec.h"
 
 namespace molnex::lammps {
 
 /// How periodic neighbours reach the model.
 ///
 /// * `kGhost` — every ghost within `T * cutoff + skin` is a graph node, the
-///   mask selects the owned sites, shifts are zero, ghost forces go home
+///   mask selects the owned atoms, shifts are zero, ghost forces go home
 ///   through the integrator's reverse comm, the virial is LAMMPS' `fdotr`.
 ///   Works on any number of ranks; costs the whole ghost shell on every step.
 /// * `kFold` — only the `nlocal` owned atoms are graph nodes; a ghost
@@ -60,7 +60,7 @@ enum class GraphMode { kGhost, kFold };
 /// Example:
 /// \code
 ///   CutoffGraphImpl impl(metadata, energy_factor,
-///                        SiteEnergyExec(*artifact, metadata.dtype),
+///                        AtomEnergyExec(*artifact, metadata.dtype),
 ///                        GraphMode::kFold);
 ///   impl.coeff({"1", "6", "8"}, atom->ntypes);
 ///   impl.init(LammpsRunEnv{...});
@@ -84,7 +84,7 @@ class CutoffGraphImpl : public ContractImpl {
   ///                       neighbour request, so it cannot change afterwards.
   /// \throws std::runtime_error  If `metadata.length_unit` is not angstrom.
   CutoffGraphImpl(const molnex::runtime::Metadata& metadata,
-                  double energy_factor, molnex::runtime::SiteEnergyExec exec,
+                  double energy_factor, molnex::runtime::AtomEnergyExec exec,
                   GraphMode mode);
 
   /// The neighbour request this contract needs LAMMPS to make.
@@ -194,7 +194,7 @@ class CutoffGraphImpl : public ContractImpl {
   /// Owned by value: fixed at construction from the energy factor.
   molnex::lammps_bridge::ForceScatter force_scatter_;
   /// The injected execution; never selected here.
-  molnex::runtime::SiteEnergyExec exec_;
+  molnex::runtime::AtomEnergyExec exec_;
 };
 
 }  // namespace molnex::lammps

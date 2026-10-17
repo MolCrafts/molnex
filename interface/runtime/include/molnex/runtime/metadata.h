@@ -6,8 +6,8 @@
 // native operator libraries the package calls. An engine converts into its own
 // unit system and sizes its own ghost shell; nothing here knows any engine.
 //
-// The fields and their validation mirror the Python writer one for one. A
-// document of another `schema_version` is refused.
+// The fields and their validation mirror the Python writer one for one; a
+// key this reader does not know is ignored.
 
 #pragma once
 
@@ -31,11 +31,6 @@ namespace molnex::runtime {
 ///   const double cutoff = meta.cutoff;  // in meta.length_unit
 /// \endcode
 struct Metadata {
-  /// The layout version this reader understands; it also versions the calling
-  /// convention of the package (`SiteEnergyExec`). 2: `shifts` input,
-  /// `virial` output (`molix.deploy.metadata.SCHEMA_VERSION`).
-  static constexpr int kSchemaVersion = 2;
-
   /// Package format, e.g. `"aoti"` (the package is `{name}.pt2`).
   std::string format;
   /// Neighbour cutoff, in `length_unit`.
@@ -44,7 +39,7 @@ struct Metadata {
   std::vector<int> species;
   /// The model's input dtype: `at::kFloat` or `at::kDouble`.
   at::ScalarType dtype = at::kDouble;
-  /// Message-passing depth T: a site energy depends on every atom within
+  /// Message-passing depth T: an atom's energy depends on every atom within
   /// `T * cutoff`.
   int receptive_field_layers = 1;
   /// The model's energy unit, e.g. `"eV"`.
@@ -64,12 +59,11 @@ struct Metadata {
 
   /// Parse and validate a document held in memory.
   ///
-  /// \throws std::runtime_error  On another `schema_version`, a missing or
-  ///                             mistyped field, an empty or non-positive
-  ///                             `species`, a non-positive `cutoff`, a
-  ///                             `receptive_field_layers` below 1, or a
-  ///                             `dtype` other than float32 / float64. The
-  ///                             message names the field.
+  /// \throws std::runtime_error  On a missing or mistyped field, an empty or
+  ///                             non-positive `species`, a non-positive
+  ///                             `cutoff`, a `receptive_field_layers` below
+  ///                             1, or a `dtype` other than float32 /
+  ///                             float64. The message names the field.
   static Metadata parse(const std::string& json_text);
 };
 

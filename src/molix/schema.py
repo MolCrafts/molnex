@@ -52,8 +52,8 @@ FLOAT64_LABEL_KEYS: frozenset[tuple[str, str]] = frozenset({ENERGY_KEY, E0_KEY})
 #: Per-atom energy contributions (``batch["atoms", "energy"]``).
 ATOMIC_ENERGY_KEY: tuple[str, str] = ("atoms", "energy")
 #: Flat spelling of :data:`ATOMIC_ENERGY_KEY`, the third output of the
-#: deployed site-energy contract (:mod:`molix.deploy.contract`). A molnex
-#: potential writes the nested key; :class:`molix.deploy.SiteEnergyAdapter`
+#: deployed atom-energy contract (:mod:`molix.deploy.contract`). A molnex
+#: potential writes the nested key; :class:`molix.deploy.AtomEnergyAdapter`
 #: reads it. A third spelling (``node_energies`` and friends) is not accepted:
 #: the per-atom energy is the only source of the deployed partition, and
 #: dropping it would deploy a model that reports zero.
@@ -68,7 +68,7 @@ ATOMIC_ENERGY_FLAT_KEY: str = "atomic_energy"
 #: finite and inert instead of poisoning the whole step.
 #:
 #: Shared by every producer of a flat export batch, including
-#: :meth:`molix.deploy.SiteEnergyAdapter.build_batch`. One constant
+#: :meth:`molix.deploy.AtomEnergyAdapter.build_batch`. One constant
 #: so two constructions of the same pair cannot clamp at two floors.
 PAIR_DIST_CLAMP_MIN: float = 1e-6
 #: Per-atom forces ``= -∂E/∂pos`` (``batch["atoms", "forces"]``).

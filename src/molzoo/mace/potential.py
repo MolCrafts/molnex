@@ -324,7 +324,7 @@ class MacePotential(Potential, MACEEncoder):
             edge_diff = None if edge_diff is None else edge_diff.to(dtype=self._input_dtype)
         batch = frame["atoms", "batch"]
         num_graphs = frame["graphs"].batch_size[0]
-        site, _ = self._site_energy(
+        atom_energy, _ = self._atom_energy(
             pos,
             Z,
             frame["pairs", "pair_index"].contiguous(),
@@ -337,11 +337,11 @@ class MacePotential(Potential, MACEEncoder):
             total_spin=frame["graphs", "total_spin"] if ("graphs", "total_spin") in keys else None,
             atom_mask=frame["atoms", "mask"] if ("atoms", "mask") in keys else None,
         )
-        frame[ATOMIC_ENERGY_KEY] = site
-        frame[ENERGY_KEY] = scatter_sum_compile_safe(site, batch, num_graphs)
+        frame[ATOMIC_ENERGY_KEY] = atom_energy
+        frame[ENERGY_KEY] = scatter_sum_compile_safe(atom_energy, batch, num_graphs)
         return frame
 
-    def _site_energy(
+    def _atom_energy(
         self,
         positions: torch.Tensor,
         Z: torch.Tensor,
@@ -361,7 +361,7 @@ class MacePotential(Potential, MACEEncoder):
         already cast; ``num_graphs`` is ``B``.
 
         Returns:
-            ``(site (N,) at the accumulation dtype, masked; per-layer node
+            ``(atom energy (N,) at the accumulation dtype, masked; per-layer node
             features)``.
         """
         vectors = edge_vectors(positions, edge_index, edge_diff=edge_diff)
@@ -388,14 +388,16 @@ class MacePotential(Potential, MACEEncoder):
             # The short-range pair term is a per-atom energy on the same
             # footing as the readouts, summed first (MatPES operator order).
             interaction = self.pair_repulsion(lengths, Z, edge_index) + interaction
-        site = self._accumulate(self.atomic_energies(Z)) + self._accumulate(
+        atom_energy = self._accumulate(self.atomic_energies(Z)) + self._accumulate(
             self.scale_shift(interaction)
         )
         if self.embedding_readout is not None:
-            site = site + self._accumulate(self.embedding_readout(node_feats).squeeze(-1))
+            atom_energy = atom_energy + self._accumulate(
+                self.embedding_readout(node_feats).squeeze(-1)
+            )
         if atom_mask is not None:
-            site = site * atom_mask.to(dtype=site.dtype)
-        return site, per_layer
+            atom_energy = atom_energy * atom_mask.to(dtype=atom_energy.dtype)
+        return atom_energy, per_layer
 
     @staticmethod
     def _sum_readouts(readouts: nn.ModuleList, per_layer: list[torch.Tensor]) -> torch.Tensor:
@@ -584,7 +586,7 @@ class MaceLes(MaceOff):
         self.les.bind_cell(cell)
 
     def energy(self, frame: TensorDictBase) -> TensorDictBase:
-        """The MACE-OFF site energies plus the latent Ewald sum on ``graphs.energy``.
+        """The MACE-OFF atom energies plus the latent Ewald sum on ``graphs.energy``.
 
         Reads what :meth:`MacePotential.energy` reads and ``graphs.cell``
         ``(1, 3, 3)`` when present (the periodic LES path; single system).
@@ -604,7 +606,7 @@ class MaceLes(MaceOff):
         batch = frame["atoms", "batch"]
         num_graphs = frame["graphs"].batch_size[0]
         atom_mask = frame["atoms", "mask"] if ("atoms", "mask") in keys else None
-        site, per_layer = self._site_energy(
+        atom_energy, per_layer = self._atom_energy(
             pos,
             Z,
             frame["pairs", "pair_index"].contiguous(),
@@ -620,8 +622,8 @@ class MaceLes(MaceOff):
         charges = self._sum_readouts(self.charge_readouts, per_layer) * self.les_output_scale
         if atom_mask is not None:
             charges = charges * atom_mask.to(dtype=charges.dtype)
-        energy = scatter_sum_compile_safe(site, batch, num_graphs)
+        energy = scatter_sum_compile_safe(atom_energy, batch, num_graphs)
         long_range = self.les(pos, charges, batch, num_graphs, cell=cell)
-        frame[ATOMIC_ENERGY_KEY] = site
+        frame[ATOMIC_ENERGY_KEY] = atom_energy
         frame[ENERGY_KEY] = energy + long_range.to(dtype=energy.dtype)
         return frame

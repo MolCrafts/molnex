@@ -188,18 +188,18 @@ Out of `src/` (architecture counterpart, not a Python package in this inventory)
 **`interface/` — engine-neutral runtime + one generic pair style (repo root, not `src/`):**
 
 - **Runtime** — `interface/runtime/` (`molnex_runtime`, LibTorch only, no
-  engine, no Python). `Metadata` reads `{name}.json` (`molix.deploy.DeployMetadata`,
-  `schema_version` 2: format, cutoff, species, dtype, receptive field, the
-  model's own units, op libraries; the version also names the calling
-  convention). `ModelArtifact::open(dir, name, metadata)`
+  engine, no Python). `Metadata` reads `{name}.json` (`molix.deploy.DeployMetadata`:
+  format, cutoff, species, dtype, receptive field, the model's own units, op
+  libraries; no schema version — a key the reader does not know is ignored, a
+  missing one is refused by name). `ModelArtifact::open(dir, name, metadata)`
   loads the op libraries (`OpLibraries`, `MOLNEX_OP_LIBRARY_PATH`, requirement
   checked through `molnex_op_library_requirement()`) and then the package by
   format — `AotiArtifact` (`AOTIModelPackageLoader`, device from
   `AOTI_DEVICE_KEY`, `update_weights` under a shared_mutex) for `aoti`.
-  `SiteEnergyExec` casts `pos` and `shifts` to the model dtype, runs
+  `AtomEnergyExec` casts `pos` and `shifts` to the model dtype, runs
   `(Z, pos, pair_index, shifts, local_mask)` and accepts exactly
-  `(energy, forces (n, 3), site_energy (n,), virial (3, 3))` as CPU float64
-  copies (2026-10-16, schema 2; `virial` = `+dE/deps`).
+  `(energy, forces (n, 3), atom_energy (n,), virial (3, 3))` as CPU float64
+  copies (2026-10-16; `virial` = `+dE/deps`).
 - **Facade** — `interface/lammps/pair_molnex.{h,cpp}`: `pair_style molnex
   <model_dir> [name] [mode fold|ghost]` (default `fold` on one rank, `ghost`
   otherwise). Reads the metadata, opens the artifact, computes the energy
@@ -214,7 +214,7 @@ Out of `src/` (architecture counterpart, not a Python package in this inventory)
   `shift = x[j] - x[owner(j)]` (exact lattice translation, triclinic included;
   a self-image is `(i, i)` with a non-zero shift).
 - **Impl** — `interface/lammps/impls/cutoff_graph_impl`: over the runtime's
-  `Metadata` + `SiteEnergyExec`. Refuses a length unit other than angstrom;
+  `Metadata` + `AtomEnergyExec`. Refuses a length unit other than angstrom;
   full neighbour list always. `GraphMode::kGhost`: ghost centres, `newton on`,
   ghost cutoff `>= T * cutoff + skin`, `n_graph = nall()`, zero shifts, fdotr
   virial. `GraphMode::kFold` (single rank, refused on more): owned atoms only,
@@ -222,13 +222,13 @@ Out of `src/` (architecture counterpart, not a Python package in this inventory)
   LAMMPS' sign. Measured motivation: ghost staging was 5-6x the atoms for a
   35 A PEO box on one GPU (OFF24-M 927 vs 179 ms/step; Allegro-OAM-L and
   OMol-0 OOM). No per-model pair style.
-- **Python** — `molix.deploy.SiteEnergyModel` is the protocol,
-  `SiteEnergyAdapter` adapts an in-tree potential; `molix.export.aoti.package`
+- **Python** — `molix.deploy.AtomEnergyModel` is the protocol,
+  `AtomEnergyAdapter` adapts an in-tree potential; `molix.export.aoti.package`
   writes the `.pt2`; `DeployMetadata.write` the `{name}.json`. A third party
   writes a module whose `forward` matches the protocol.
 - **Tests** — `interface/tests/` (ctest): runtime cases (`test_metadata`,
   `test_op_libraries`, `test_model_artifact`, `test_aoti_artifact`,
-  `test_site_energy_exec`) and adapter cases (`test_bridge_*`,
+  `test_atom_energy_exec`) and adapter cases (`test_bridge_*`,
   `test_contract_impl`). `generate_fixtures.py` deploys the toy models through
   `molix.export.aoti` + `DeployMetadata`, so the C++ reader is tested against
   the Python writer.

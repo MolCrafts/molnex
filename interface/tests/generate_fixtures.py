@@ -6,7 +6,7 @@ Invoked as a ctest fixture before any subtest that needs a package. Produces:
     <out_dir>/reference_<device>.pt          {input, output}
     <out_dir>/alt_<device>.pt                alternative state_dict
     <out_dir>/reference_alt_<device>.pt      {input, output} with alt weights
-    <out_dir>/model_graph_cpu/model.pt2      site-energy toy potential
+    <out_dir>/model_graph_cpu/model.pt2      atom-energy toy potential
     <out_dir>/model_graph_cpu/model.json     its molix.deploy metadata
     <out_dir>/reference_graph_cpu.pt         its inputs and outputs
 
@@ -14,7 +14,7 @@ Invoked as a ctest fixture before any subtest that needs a package. Produces:
 The graph package is CPU-only.
 
 Packaging is the deployment path itself: ``molix.export.aoti.package`` with the
-site-energy ``DYNAMIC_SHAPES`` of ``molix.deploy.contract``, and the metadata
+atom-energy ``DYNAMIC_SHAPES`` of ``molix.deploy.contract``, and the metadata
 is written by ``molix.deploy.DeployMetadata`` — so the C++ reader is tested
 against the Python writer, not against a copy of its layout. TinyLinear passes
 ``aot_inductor.use_runtime_constant_folding`` so ``update_weights`` can replace
@@ -45,7 +45,7 @@ class TinyLinear(nn.Module):
         return self.linear(x)
 
 
-def _graph_site_energies(
+def _graph_atom_energies(
     Z: torch.Tensor,
     pos: torch.Tensor,
     pair_index: torch.Tensor,
@@ -53,9 +53,9 @@ def _graph_site_energies(
     edge_weight: torch.Tensor,
     local_mask: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Site energies of a toy graph potential, and their masked sum.
+    """Atom energies of a toy graph potential, and their masked sum.
 
-    Each edge term is split evenly between its endpoints, so a site energy
+    Each edge term is split evenly between its endpoints, so an atom energy
     depends on its neighbours:
 
         E_i = Z_i |x_i|^2 + (1/2) sum_{e ni i} w_e |d_e|^2
@@ -72,10 +72,10 @@ def _graph_site_energies(
             - sum_e 2 c_e w_e d_e (delta_{a,t} - delta_{a,s})
         c_e = (1/2) (m_s + m_t)
 
-    An edge between a local and a ghost site contributes half its weight.
+    An edge between a local and a ghost atom contributes half its weight.
 
     The virial is the edge part of the strain derivative,
-    ``sum_e 2 c_e w_e d_e (x) d_e`` — the contract's definition. (The on-site
+    ``sum_e 2 c_e w_e d_e (x) d_e`` — the contract's definition. (The one-body
     ``Z_i |x_i|^2`` is not translation-invariant, so the toy has no complete
     strain derivative; the fixture only has to pin what the package returns.)
 
@@ -85,10 +85,10 @@ def _graph_site_energies(
         pair_index: Source/target pairs ``(e, 2)`` int64.
         shifts: Lattice translation of each target ``(e, 3)``.
         edge_weight: Per-edge weight ``(e,)``, in ``pos``'s dtype.
-        local_mask: Per-site ownership ``(n,)`` bool.
+        local_mask: Per-atom ownership ``(n,)`` bool.
 
     Returns:
-        ``(energy, forces, site_energy, virial)`` — a 0-dim scalar,
+        ``(energy, forces, atom_energy, virial)`` — a 0-dim scalar,
         ``(n, 3)``, ``(n,)``, ``(3, 3)``.
     """
     source = pair_index[:, 0]
@@ -99,22 +99,22 @@ def _graph_site_energies(
 
     edge_energy = edge_weight * diff.pow(2).sum(-1)
     half = 0.5 * edge_energy
-    site_energy = (z_f * pos.pow(2).sum(-1)).index_add(0, target, half).index_add(0, source, half)
-    energy = (site_energy * mask_f).sum()
+    atom_energy = (z_f * pos.pow(2).sum(-1)).index_add(0, target, half).index_add(0, source, half)
+    energy = (atom_energy * mask_f).sum()
 
     c_e = 0.5 * (mask_f.index_select(0, source) + mask_f.index_select(0, target))
     grad = 2.0 * (mask_f * z_f).unsqueeze(-1) * pos
     edge_grad = 2.0 * (c_e * edge_weight).unsqueeze(-1) * diff
     grad = grad.index_add(0, target, edge_grad).index_add(0, source, -edge_grad)
     virial = diff.transpose(0, 1) @ edge_grad
-    return energy, -grad, site_energy, virial
+    return energy, -grad, atom_energy, virial
 
 
 class GraphToy(nn.Module):
-    """``(Z, pos, pair_index, shifts, local_mask) -> (energy, forces, site_energy, virial)``.
+    """``(Z, pos, pair_index, shifts, local_mask) -> (energy, forces, atom_energy, virial)``.
 
     Parameter-free. Every output is the closed form in
-    :func:`_graph_site_energies`.
+    :func:`_graph_atom_energies`.
     """
 
     def forward(
@@ -126,7 +126,7 @@ class GraphToy(nn.Module):
         local_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         weight = torch.ones(pair_index.shape[0], dtype=pos.dtype, device=pos.device)
-        return _graph_site_energies(Z, pos, pair_index, shifts, weight, local_mask)
+        return _graph_atom_energies(Z, pos, pair_index, shifts, weight, local_mask)
 
 
 def _export_tiny(model: nn.Module, example: torch.Tensor, export_dir: Path) -> None:
@@ -182,9 +182,9 @@ _GRAPH_CUTOFF = 2.0
 
 
 def _emit_graph_fixture(out_dir: Path) -> None:
-    """Deploy the site-energy toy potential and write its reference outputs.
+    """Deploy the atom-energy toy potential and write its reference outputs.
 
-    The reference uses an all-ones mask, so the site energies sum to the
+    The reference uses an all-ones mask, so the atom energies sum to the
     undecomposed total, and non-zero shifts on the 2-3 edges, so a runtime that
     dropped or zeroed the shifts would miss it. The package is traced on the
     zero-shift example, as every deployment is.
@@ -209,7 +209,7 @@ def _emit_graph_fixture(out_dir: Path) -> None:
 
     model = GraphToy().to(device).eval()
     with torch.no_grad():
-        energy, forces, site_energy, virial = model(Z, pos, pair_index, shifts, local_mask)
+        energy, forces, atom_energy, virial = model(Z, pos, pair_index, shifts, local_mask)
 
     written = aoti.package(
         model,
@@ -234,7 +234,7 @@ def _emit_graph_fixture(out_dir: Path) -> None:
             "local_mask": local_mask,
             "energy": energy,
             "forces": forces,
-            "site_energy": site_energy,
+            "atom_energy": atom_energy,
             "virial": virial,
         },
         out_dir / "reference_graph_cpu.pt",

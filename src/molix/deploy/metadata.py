@@ -5,12 +5,11 @@ It is engine-neutral: it states the model's own units, cutoff and receptive
 field, and the native operator libraries the package calls; an engine converts
 into its own unit system and decides its own ghost shell. Fields:
 
-* ``schema_version`` — :data:`SCHEMA_VERSION`; a reader refuses another.
 * ``format`` — the package format, e.g. ``"aoti"`` (``{name}.pt2``).
 * ``cutoff`` — neighbour cutoff in ``length_unit``.
 * ``species`` — sorted atomic numbers the model accepts.
 * ``dtype`` — ``"float32"`` or ``"float64"``, the model's input dtype.
-* ``receptive_field_layers`` — message-passing depth ``T``: a site energy
+* ``receptive_field_layers`` — message-passing depth ``T``: an atom energy
   depends on every atom within ``T * cutoff``.
 * ``energy_unit`` / ``length_unit`` — the model's units (``"eV"``,
   ``"angstrom"``); forces are ``energy_unit / length_unit``.
@@ -25,19 +24,14 @@ import ctypes
 import importlib.metadata
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import torch
 
-#: Version of the ``{name}.json`` layout and of the calling convention the
-#: package it describes keeps (:mod:`molix.deploy.contract`). 2: ``shifts``
-#: input, ``virial`` output.
-SCHEMA_VERSION = 2
-
 #: Operator namespace → (native library that registers it for C++ callers,
 #: Python package whose installed version the binding must match). ``None``:
-#: molnex's own library, whose requirement is the schema version it reports.
+#: molnex's own library, whose requirement is the string it reports.
 _NATIVE_OPS: dict[str, tuple[str, str | None]] = {
     "cuequivariance": ("molnex_cueq_ops", "cuequivariance_ops_torch"),
     "molix": ("molnex_opLib", None),
@@ -76,7 +70,7 @@ class DeployMetadata:
         if isinstance(layers, bool) or not isinstance(layers, int) or layers < 1:
             raise ValueError(
                 "receptive_field_layers must be the message-passing depth T >= 1 "
-                f"(a site energy sees every atom within T * cutoff), got {layers!r}"
+                f"(an atom energy sees every atom within T * cutoff), got {layers!r}"
             )
         if self.dtype not in _DTYPES.values():
             raise ValueError(f"dtype must be one of {sorted(_DTYPES.values())}, got {self.dtype!r}")
@@ -123,7 +117,6 @@ class DeployMetadata:
         path = Path(directory) / f"{name}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         document = {
-            "schema_version": SCHEMA_VERSION,
             "format": self.format,
             "cutoff": float(self.cutoff),
             "species": list(self.species),
@@ -138,21 +131,16 @@ class DeployMetadata:
 
     @classmethod
     def read(cls, path: str | Path) -> DeployMetadata:
-        """Read a ``{name}.json``.
-
-        Raises:
-            ValueError: If its ``schema_version`` is not :data:`SCHEMA_VERSION`.
-        """
+        """Read a ``{name}.json``; a field this reader does not know is ignored."""
         document = json.loads(Path(path).read_text())
-        version = document.pop("schema_version", None)
-        if version != SCHEMA_VERSION:
-            raise ValueError(f"{path}: schema_version {version!r}, expected {SCHEMA_VERSION}")
+        known = {name.name for name in fields(cls)}
+        document = {key: value for key, value in document.items() if key in known}
         document["species"] = tuple(document["species"])
         return cls(**document)
 
 
 def _molix_op_requirement() -> str:
-    """The operator-schema version molnex's loaded op library reports.
+    """The requirement string molnex's loaded op library reports.
 
     ``molnex_op_library_requirement`` in ``src/molix/op/src/molix_library.cpp``;
     the C++ runtime checks the library it loads against the same string.

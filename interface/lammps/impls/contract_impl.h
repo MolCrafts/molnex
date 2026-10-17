@@ -3,7 +3,7 @@
 // What a `pair_style molnex` run does with a deployed model.
 //
 // Three LAMMPS-side layers meet at this file, over the engine-neutral
-// `molnex_runtime` (metadata, artifact, site-energy execution):
+// `molnex_runtime` (metadata, artifact, atom-energy execution):
 //
 //   bridge/  — LAMMPS-free primitives that do not know the model exists
 //              (SpeciesMap, stage_nodes, GraphBridge, ForceScatter).
@@ -100,7 +100,7 @@ struct NeighborNeeds {
 /// doing so is also the only thing that can re-activate
 /// `ContractImpl::pack_reverse` / `unpack_reverse`.
 ///
-/// `e_atom` is the local slice of the model's per-site energies. A per-atom
+/// `e_atom` is the local slice of the model's per-atom energies. A per-atom
 /// virial has no producer; `vflag_atom` remains an error in the facade.
 ///
 /// ACCRETION RULE (the same one `LammpsRunEnv` carries, stated on the struct
@@ -118,7 +118,7 @@ struct EvalResult {
   /// LAMMPS unit style. The facade adds it to `eng_vdwl` and does nothing else
   /// to it.
   ///
-  /// It is the sum of `e_atom`, i.e. of the LOCAL site energies only. Summing
+  /// It is the sum of `e_atom`, i.e. of the LOCAL atom energies only. Summing
   /// over ghosts as well would add `sum_{i in G} E_i`, which is dominated by
   /// the per-species constant offset and is therefore tens of eV per ghost — an
   /// error that grows with the rank count and the cutoff, and that no
@@ -127,7 +127,7 @@ struct EvalResult {
   /// Per-atom energies, **length `nlocal`**, already converted.
   ///
   /// THE LENGTH IS THE CONTRACT, and it is `nlocal` rather than `nall`: only
-  /// atoms this rank owns get an entry, because only their site energies belong
+  /// atoms this rank owns get an entry, because only their atom energies belong
   /// to this rank's partition. The facade iterates THIS TENSOR'S OWN EXTENT
   /// when `eflag_atom` is set and must not consult `atom->nlocal` for the bound
   /// — two independent notions of "which atoms are local" would silently

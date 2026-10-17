@@ -8,12 +8,12 @@
 //
 //   1. NeighborNeeds always requests a full neighbour list and ghosts. The
 //      cutoff comes from the metadata.
-//   2. compute() composes stage_nodes, GraphBridge, SiteEnergyExec and
+//   2. compute() composes stage_nodes, GraphBridge, AtomEnergyExec and
 //      ForceScatter, and applies the energy factor once. A model length unit
 //      other than angstrom is refused at construction.
 //   3. n_graph is nall() (locals and ghosts). compute() requires init() first:
 //      newton on is checked there and re-checked in compute().
-//   4. The partition energy sums local site energies only.
+//   4. The partition energy sums local atom energies only.
 //   5. needs_pair_reverse_comm is constantly false.
 //   6. pair_coeff tokens are parsed by full consumption.
 //   7. special_bonds that drop 1-2 / 1-3 / 1-4 pairs are refused on a molecular
@@ -43,7 +43,7 @@
 #include "impls/cutoff_graph_impl.h"
 #include "molnex/runtime/metadata.h"
 #include "molnex/runtime/model_artifact.h"
-#include "molnex/runtime/site_energy_exec.h"
+#include "molnex/runtime/atom_energy_exec.h"
 
 using molnex::lammps::ContractImpl;
 using molnex::lammps::CutoffGraphImpl;
@@ -56,7 +56,7 @@ using molnex::lammps_bridge::pack_reverse_forces;
 using molnex::lammps_bridge::unpack_reverse_forces;
 using molnex::runtime::Metadata;
 using molnex::runtime::ModelArtifact;
-using molnex::runtime::SiteEnergyExec;
+using molnex::runtime::AtomEnergyExec;
 using molnex::testing::expect_contains;
 using molnex::testing::expect_int;
 using molnex::testing::expect_near;
@@ -149,8 +149,8 @@ constexpr double kScatteredForce[kNall][3] = {
 
 /// Scalar energy the stub artifact returns, in MODEL units (eV).
 ///
-/// DELIBERATELY UNRELATED to the site energies below. A real model's scalar is
-/// its masked site-energy sum, but this stub is a probe, not a model: making
+/// DELIBERATELY UNRELATED to the atom energies below. A real model's scalar is
+/// its masked atom-energy sum, but this stub is a probe, not a model: making
 /// the two disagree is what lets these cases tell WHICH output the impl
 /// tallied. An impl that adds `out.energy` to eng_vdwl gets 184.48 where the
 /// partition energy is 34.59, and every energy assertion below fails.
@@ -163,19 +163,19 @@ constexpr double kStubEnergy = 8.0;
 constexpr double kModelVirial[3][3] = {
     {1.0, 2.0, 3.0}, {2.0, 4.0, 5.0}, {3.0, 5.0, 6.0}};
 
-/// Per-site energies the stub returns, in MODEL units (eV), one per graph node.
+/// Per-atom energies the stub returns, in MODEL units (eV), one per graph node.
 ///
 /// Distinct rather than constant, so `e_atom` cannot pass by carrying the right
 /// length with the wrong contents, and so the local sum differs from the
-/// all-sites sum by an amount no rounding could produce.
-constexpr double kModelSiteEnergy[kNall] = {0.25, 0.5, 0.75, 1.0};
+/// all-atoms sum by an amount no rounding could produce.
+constexpr double kModelAtomEnergy[kNall] = {0.25, 0.5, 0.75, 1.0};
 
-/// The three LOCAL site energies in LAMMPS `real` units, by hand:
+/// The three LOCAL atom energies in LAMMPS `real` units, by hand:
 /// 0.25 * 23.060549, 0.5 * 23.060549, 0.75 * 23.060549.
 constexpr double kExpectedEAtom[kNlocal] = {5.76513725, 11.5302745,
                                             17.29541175};
 
-/// Partition energy: the sum of the three LOCAL site energies, converted.
+/// Partition energy: the sum of the three LOCAL atom energies, converted.
 /// (0.25 + 0.5 + 0.75) * 23.060549 = 1.5 * 23.060549.
 constexpr double kExpectedETotal = 34.5908235;
 
@@ -305,14 +305,14 @@ class StubArtifact : public ModelArtifact {
     // partition energy is the impl's decision, and the whole subject of
     // impl_energy_sums_locals_only; a stub that returned only the local ones
     // would be answering that question on the impl's behalf.
-    at::Tensor site_energy = at::zeros({n}, opts);
-    auto ea = site_energy.accessor<double, 1>();
-    for (int64_t i = 0; i < n; ++i) ea[i] = kModelSiteEnergy[i];
+    at::Tensor atom_energy = at::zeros({n}, opts);
+    auto ea = atom_energy.accessor<double, 1>();
+    for (int64_t i = 0; i < n; ++i) ea[i] = kModelAtomEnergy[i];
     at::Tensor virial = at::zeros({3, 3}, opts);
     auto va = virial.accessor<double, 2>();
     for (int a = 0; a < 3; ++a)
       for (int b = 0; b < 3; ++b) va[a][b] = kModelVirial[a][b];
-    return {at::full({1}, kStubEnergy, opts), forces, site_energy, virial};
+    return {at::full({1}, kStubEnergy, opts), forces, atom_energy, virial};
   }
 
   at::Device device() const override { return at::Device(at::kCPU); }
@@ -343,11 +343,11 @@ ImplUnderTest impl_over(const Metadata& meta,
   auto stub = std::make_unique<StubArtifact>();
   StubArtifact* probe = stub.get();
   auto impl = std::make_unique<CutoffGraphImpl>(
-      meta, kEnergyConv, SiteEnergyExec(*stub, meta.dtype), mode);
+      meta, kEnergyConv, AtomEnergyExec(*stub, meta.dtype), mode);
   return ImplUnderTest{std::move(stub), std::move(impl), probe};
 }
 
-/// A three-layer model: T == 3, so a site's energy depends on everything within
+/// A three-layer model: T == 3, so an atom's energy depends on everything within
 /// 3 * cutoff and the default ghost cutoff (cutoff + skin) is too small.
 Metadata deep_metadata() {
   Metadata meta = model_metadata();
@@ -479,13 +479,13 @@ void test_impl_compute_composes_pipeline() {
   // test_bridge_graph.cpp.
   expect_edges(under.exec->edges_seen, kEdgesLocal, "composed pair_index");
 
-  // (3) The energy is the sum of the LOCAL site energies, times the factor,
+  // (3) The energy is the sum of the LOCAL atom energies, times the factor,
   // ONCE: (0.25 + 0.5 + 0.75) eV in a `real` run is 1.5 * 23.060549
   // = 34.5908235 kcal/mol. A missing conversion gives 1.5 and a doubled one
   // 797.7..., so neither can pass — and neither can tallying the stub's
   // scalar 8.0 eV.
   expect_near(result.e_total, kExpectedETotal, 1e-12,
-              "e_total is the local site-energy sum in LAMMPS units");
+              "e_total is the local atom-energy sum in LAMMPS units");
 
   // (4) ForceScatter ran: atom->f ACCUMULATED the converted model forces, from
   // a non-zero starting value. This is the asymmetry EvalResult's docstring
@@ -523,9 +523,9 @@ void test_impl_compute_n_graph_with_ghost() {
   expect_edges(under.exec->edges_seen, kEdgesAll, "ghost-inclusive pair_index");
 
   // EVERY row, ghost included, carries the converted model force — and that is
-  // not an accident of the stub. The partition energy sums local sites only,
+  // not an accident of the stub. The partition energy sums local atoms only,
   // but it is differentiated with respect to ALL coordinates, so a ghost's
-  // force is the cross-term of its local neighbours' site energies. Dropping
+  // force is the cross-term of its local neighbours' atom energies. Dropping
   // it would lose a real contribution; the integrator's global reverse comm is
   // what carries it home to the owning rank.
   for (int i = 0; i < kNall; ++i) {
@@ -533,7 +533,7 @@ void test_impl_compute_n_graph_with_ghost() {
   }
 
   // The energy, however, does NOT grow with the ghost: it stays the local
-  // three-site sum even though four sites were evaluated.
+  // three-atom sum even though four atoms were evaluated.
   expect_near(result.e_total, kExpectedETotal, 1e-12,
               "the partition energy is unchanged by the presence of a ghost");
 }
@@ -593,8 +593,8 @@ void test_impl_reports_no_pair_reverse_comm() {
 
 void test_impl_energy_sums_locals_only() {
   // D1, locked against a hard-coded literal. One ghost is a graph node and gets
-  // a site energy like any other atom; the partition energy must nonetheless be
-  // the sum over the three LOCAL sites.
+  // an atom energy like any other atom; the partition energy must nonetheless be
+  // the sum over the three LOCAL atoms.
   SyntheticSystem sys(/*nghost=*/1);
   ImplUnderTest under = impl_over(model_metadata());
   under.impl->coeff(kCoeffTokens, /*ntypes=*/3);
@@ -602,20 +602,20 @@ void test_impl_energy_sums_locals_only() {
 
   const EvalResult result = under.impl->compute(sys.view());
 
-  // Four sites were evaluated ...
+  // Four atoms were evaluated ...
   expect_int(under.exec->Z_seen.size(0), kNall,
              "the model is evaluated over local + ghost");
   // ... and three of them are summed.
   expect_near(result.e_total, kExpectedETotal, 1e-12,
               "e_total is 1.5 eV * 23.060549 = 34.5908235 kcal/mol, the sum "
-              "over the three LOCAL sites");
+              "over the three LOCAL atoms");
   expect_true(
       result.e_total != kGhostInclusiveETotal,
       "e_total must not be the local+ghost sum 57.6513725 — that error "
       "is dominated by the per-species offset and grows with rank count");
 
   // The mask the model was handed is the other half of D1: the C++ side sums
-  // the local slice, and the model is TOLD which sites are local so its own
+  // the local slice, and the model is TOLD which atoms are local so its own
   // masked sum agrees. All-ones here would make a correct model return the
   // ghost-inclusive energy.
   expect_true(under.exec->local_mask_seen.defined(),
@@ -648,7 +648,7 @@ void test_impl_e_atom_locals_only() {
   expect_true(result.e_atom.scalar_type() == at::kDouble, "e_atom is float64");
   expect_int(result.e_atom.dim(), 1, "e_atom is 1-D");
   expect_int(result.e_atom.size(0), kNlocal,
-             "e_atom has exactly nlocal entries even though nall sites were "
+             "e_atom has exactly nlocal entries even though nall atoms were "
              "evaluated");
 
   // Contents, converted once, against hand-computed literals. Distinct values,
@@ -657,7 +657,7 @@ void test_impl_e_atom_locals_only() {
   for (int i = 0; i < kNlocal; ++i) {
     expect_near(ea[i], kExpectedEAtom[i], 1e-12,
                 "e_atom[" + std::to_string(i) +
-                    "] is the site energy in LAMMPS "
+                    "] is the atom energy in LAMMPS "
                     "units");
   }
 
@@ -870,11 +870,11 @@ void test_impl_init_rejects_newton_off() {
 }
 
 void test_impl_init_rejects_insufficient_ghost_cutoff() {
-  // D3.2, fail-closed. A T-layer network's site energy depends on everything
+  // D3.2, fail-closed. A T-layer network's atom energy depends on everything
   // within T * cutoff, so a single-shot evaluation needs a copy of every atom
   // out to that radius. LAMMPS' default ghost cutoff is cutoff + skin, which is
   // enough only at T == 1; at T == 3 it is less than half of what is required,
-  // and the model would be evaluated on a graph whose outer sites are missing
+  // and the model would be evaluated on a graph whose outer atoms are missing
   // neighbours — quietly, with plausible-looking forces.
   ImplUnderTest under = impl_over(deep_metadata());
 
@@ -1020,7 +1020,7 @@ void test_impl_fold_compute_folds_images_onto_owners() {
              "the model sees the owned atoms only");
   const auto mask = under.exec->local_mask_seen.accessor<bool, 1>();
   for (int i = 0; i < kNlocal; ++i)
-    expect_true(mask[i], "every folded site is local");
+    expect_true(mask[i], "every folded atom is local");
 
   const at::Tensor edges = under.exec->edges_seen;
   const at::Tensor shifts = under.exec->shifts_seen;
@@ -1049,7 +1049,7 @@ void test_impl_fold_compute_folds_images_onto_owners() {
                 "no force is written to a ghost row");
 
   expect_near(result.e_total, kExpectedETotal, 1e-9,
-              "energy: the owned site energies, converted");
+              "energy: the owned atom energies, converted");
   expect_true(result.virial_from_model, "the folded virial is the model's");
   const double voigt[6] = {1.0, 4.0, 6.0, 2.0, 3.0, 5.0};
   for (int k = 0; k < 6; ++k)
@@ -1081,7 +1081,7 @@ void test_impl_refuses_non_angstrom_length() {
   const std::string msg = expect_throws(
       [&] {
         CutoffGraphImpl impl(bohr, kEnergyConv,
-                             SiteEnergyExec(stub, bohr.dtype),
+                             AtomEnergyExec(stub, bohr.dtype),
                              GraphMode::kGhost);
       },
       "a bohr model");

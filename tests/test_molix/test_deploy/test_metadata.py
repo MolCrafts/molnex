@@ -42,18 +42,16 @@ class TestDeployMetadata:
         path = written.write(tmp_path, "pinet")
         assert path.name == "pinet.json"
         document = json.loads(path.read_text())
-        assert document["schema_version"] == metadata_module.SCHEMA_VERSION
         assert document["energy_unit"] == "eV" and document["length_unit"] == "angstrom"
         assert "energy_conv" not in document and "units" not in document
         assert DeployMetadata.read(path) == written
 
-    def test_another_schema_version_is_refused(self, tmp_path):
+    def test_an_unknown_field_is_ignored(self, tmp_path):
         path = _metadata().write(tmp_path)
         document = json.loads(path.read_text())
-        document["schema_version"] = 0
+        document["comment"] = "written by hand"
         path.write_text(json.dumps(document))
-        with pytest.raises(ValueError, match="schema_version"):
-            DeployMetadata.read(path)
+        assert DeployMetadata.read(path) == _metadata()
 
 
 class TestOpLibrariesFor:
@@ -66,7 +64,7 @@ class TestOpLibrariesFor:
             "molnex_cueq_ops": "cuequivariance_ops_torch==9.9.9"
         }
 
-    def test_molix_maps_to_the_schema_version_its_library_reports(self, monkeypatch):
+    def test_molix_maps_to_the_requirement_its_library_reports(self, monkeypatch):
         monkeypatch.setattr(metadata_module, "_molix_op_requirement", lambda: "molix_ops==7")
         assert DeployMetadata.op_libraries_for(["molix"]) == {"molnex_opLib": "molix_ops==7"}
 

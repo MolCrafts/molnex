@@ -231,13 +231,6 @@ Metadata Metadata::read(const std::string& path) {
 Metadata Metadata::parse(const std::string& json_text) {
   const JsonObject doc(json_text);
 
-  const double version = doc.get_number("schema_version");
-  if (version != kSchemaVersion) {
-    throw std::runtime_error("metadata: schema_version " +
-                             std::to_string(version) + ", expected " +
-                             std::to_string(kSchemaVersion));
-  }
-
   Metadata meta;
   meta.format = doc.get_string("format");
   meta.cutoff = doc.get_number("cutoff");

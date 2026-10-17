@@ -3,7 +3,7 @@
 // A loaded model package, whatever its format.
 //
 // The format is the metadata's `format` field; each format is one subclass
-// (`AotiArtifact` for `"aoti"`). Callers above this seam — the site-energy
+// (`AotiArtifact` for `"aoti"`). Callers above this seam — the atom-energy
 // execution, an engine adapter — hold a `ModelArtifact&` and never name a
 // format.
 

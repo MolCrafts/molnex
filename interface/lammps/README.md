@@ -12,7 +12,7 @@ The C++ side of deployment is two layers with a one-way dependency:
 
 | layer | where | knows |
 |---|---|---|
-| `molnex_runtime` | `interface/runtime/` | the model: `Metadata` (`{name}.json`), `ModelArtifact::open` (format → loader; `AotiArtifact` for `aoti`), `OpLibraries` (native operator libraries), `SiteEnergyExec` (the calling convention). LibTorch only — no engine, no Python. |
+| `molnex_runtime` | `interface/runtime/` | the model: `Metadata` (`{name}.json`), `ModelArtifact::open` (format → loader; `AotiArtifact` for `aoti`), `OpLibraries` (native operator libraries), `AtomEnergyExec` (the calling convention). LibTorch only — no engine, no Python. |
 | LAMMPS adapter | `interface/lammps/` | LAMMPS: `bridge/` (atom arrays, neighbour list, forces, reverse comm), `impls/` (`CutoffGraphImpl`), and the `pair_molnex` facade, the only file that includes a LAMMPS header. |
 
 The runtime never references LAMMPS; another engine links `molnex_runtime` and
@@ -35,12 +35,12 @@ pair_coeff * * <Z_type1> <Z_type2> ... <Z_typeN>
 
 ## The calling convention
 
-`molix.deploy.SiteEnergyModel` is a structural `Protocol`; a module satisfies it
+`molix.deploy.AtomEnergyModel` is a structural `Protocol`; a module satisfies it
 when `forward` has this signature. Nothing subclasses it.
 
 ```text
 Z (N,) int64, pos (N, 3), pair_index (E, 2) int64, shifts (E, 3), local_mask (N,) bool
-    -> energy (), forces (N, 3), site_energy (N,), virial (3, 3)
+    -> energy (), forces (N, 3), atom_energy (N,), virial (3, 3)
 ```
 
 | # | tensor | shape | dtype |
@@ -50,13 +50,12 @@ Z (N,) int64, pos (N, 3), pair_index (E, 2) int64, shifts (E, 3), local_mask (N,
 | in 2 | `pair_index` | `(E, 2)` | `int64`. `[:, 0]` is the source, `[:, 1]` the target |
 | in 3 | `shifts` | `(E, 3)` | model dtype. Lattice translation of the target image: the edge is `pos[t] - pos[s] + shifts` |
 | in 4 | `local_mask` | `(N,)` | `bool`. True for atoms this rank owns |
-| out 0 | `energy` | `()` | model dtype. Equals `(site_energy * local_mask).sum()` |
+| out 0 | `energy` | `()` | model dtype. Equals `(atom_energy * local_mask).sum()` |
 | out 1 | `forces` | `(N, 3)` | model dtype. Equals `-d(energy)/d(pos)`, ghosts included |
-| out 2 | `site_energy` | `(N,)` | model dtype |
+| out 2 | `atom_energy` | `(N,)` | model dtype |
 | out 3 | `virial` | `(3, 3)` | model dtype. `+d(energy)/d(strain)`, symmetric — molnex's `graphs.virial` sign |
 
-Metadata `schema_version` 2 names this convention; the runtime refuses any
-other version and any other output count (`SiteEnergyExec`). `N` and `E` are
+The runtime refuses any other output count (`AtomEnergyExec`). `N` and `E` are
 dynamic (`molix.deploy.contract.DYNAMIC_SHAPES`), so one package serves every
 frame. Edges are **not** sorted; a model that needs `(source, target)` order
 sorts inside its own `forward`.
@@ -101,8 +100,8 @@ at `init`; a ghost whose ID no owned atom carries is refused at `compute`. It
 also needs atom IDs (`atom_modify id no` is refused).
 
 A long-range term (MACE-POLAR's electrostatics, MACE-LES's latent Ewald sum) is
-not a sum of site energies, so those models cannot be deployed through this
-convention: `SiteEnergyAdapter.check` refuses them before export.
+not a sum of atom energies, so those models cannot be deployed through this
+convention: `AtomEnergyAdapter.check` refuses them before export.
 
 ## The metadata
 
@@ -112,7 +111,6 @@ LAMMPS unit table.
 
 ```json
 {
-  "schema_version": 1,
   "format": "aoti",
   "cutoff": 5.0,
   "species": [1, 6, 7, 8],
@@ -124,8 +122,8 @@ LAMMPS unit table.
 }
 ```
 
-Another `schema_version` is refused, and so is a missing or mistyped field —
-the message names it. The device is read from the package itself
+A missing or mistyped field is refused — the message names it; a field this
+reader does not know is ignored. The device is read from the package itself
 (`AOTI_DEVICE_KEY`), not from this file.
 
 `op_libraries` names the native libraries that register the package's
@@ -141,13 +139,13 @@ requirement through `molnex_op_library_requirement()`, is refused.
 Three primitives, composed by the caller (see `molix.deploy`):
 
 ```python
-from molix.deploy import DeployMetadata, SiteEnergyAdapter, example_inputs
+from molix.deploy import DeployMetadata, AtomEnergyAdapter, example_inputs
 from molix.deploy.contract import DYNAMIC_SHAPES
 from molix.export import aoti
 
-model = SiteEnergyAdapter(potential).cuda()
+model = AtomEnergyAdapter(potential).cuda()
 inputs = example_inputs([1, 6, 8], 6.0, torch.float32, "cuda")
-model.check(*inputs[:4])                       # site-energy partition + force checks
+model.check(*inputs[:4])                       # atom-energy partition + force checks
 written = aoti.package(model, inputs, "out/model.pt2", dynamic_shapes=DYNAMIC_SHAPES)
 DeployMetadata(
     format="aoti", cutoff=6.0, species=(1, 6, 8), dtype="float32",
@@ -161,12 +159,12 @@ inputs and returns the four outputs, and `aoti.package` + `DeployMetadata`
 deploy it the same way.
 
 `receptive_field_layers` is `T`, the number of message-passing layers, and it
-has **no default**. A site energy depends on everything within `T * cutoff`.
+has **no default**. An atom's energy depends on everything within `T * cutoff`.
 
-`SiteEnergyAdapter.check` runs an example system eagerly before export: the
-potential's energy must equal the sum of its site energies (rel 1e-6) and,
+`AtomEnergyAdapter.check` runs an example system eagerly before export: the
+potential's energy must equal the sum of its atom energies (rel 1e-6) and,
 when the potential emits forces, those forces must match
-`-d(sum of site energies)/d(pos)` (rel 1e-5).
+`-d(sum of atom energies)/d(pos)` (rel 1e-5).
 
 ## Units
 
@@ -213,7 +211,7 @@ its unused coefficients say.
 
 ## Per-atom energy is supported; per-atom stress is refused
 
-`compute pe/atom` reads `site_energy (N,)`. The pair style keeps the entries
+`compute pe/atom` reads `atom_energy (N,)`. The pair style keeps the entries
 for the atoms this rank owns and tallies them into LAMMPS' `eatom`. The total
 energy is the sum of those local entries, re-summed from the same tensor, so
 `compute reduce` over `pe/atom` agrees with `pe`.
@@ -243,7 +241,7 @@ a machine nobody has any more.
 | | |
 |---|---|
 | **claim** | one rank, two ranks and a direct Python evaluation of the same periodic configuration agree on total energy and forces within rel `1e-6` |
-| **proves** | the local-only energy partition (no ghost site energy counted twice) **and** the single reduction path (no ghost force communicated twice). Single-rank alone cannot show the second — only a decomposed run has an inter-rank reduction to double. It is also the full-scale edge-order-invariance check: C++ builds edges in raw neighbour-list order while the Python reference builds them sorted, and they agree. |
+| **proves** | the local-only energy partition (no ghost atom energy counted twice) **and** the single reduction path (no ghost force communicated twice). Single-rank alone cannot show the second — only a decomposed run has an inter-rank reduction to double. It is also the full-scale edge-order-invariance check: C++ builds edges in raw neighbour-list order while the Python reference builds them sorted, and they agree. |
 | **tool** | `scripts/lammps_iface_parity.py` — **tool removed from the tree** (F5 / `lammps-iface-post-chain`): it drives LAMMPS from `scripts/`, which Decision 4 confines to `interface/`, and it has not yet been moved. Until it is, this row's evidence cannot be regenerated. |
 | **owner** | the implementer of the `lammps-iface` chain |
 | **re-run trigger** | **any change under `interface/`, `src/molix/deploy/` or `src/molix/export/`** |
@@ -252,7 +250,7 @@ a machine nobody has any more.
 The block below is the export API of 2026-08-30, kept as the provenance of
 that run. That API (`molix.engine.export_for_lammps`, a LAMMPS unit table in the
 JSON) has since been replaced by `molix.deploy` + `molix.export.aoti`, and the
-calling convention by schema 2 (shifts + virial) with the `fold` / `ghost`
+calling convention by the atom-energy one (shifts + virial) with the `fold` / `ghost`
 modes; the run must be re-recorded against the current layers, now as four
 comparisons — Python, one rank `fold`, one rank `ghost`, two ranks `ghost` —
 plus the `fold` virial against Python's `graphs.virial`.
@@ -476,7 +474,7 @@ above is the supported path.
 
 Ghosts are requested (`Neighbor` full list plus ghost centres). `newton
 on` is required; it is LAMMPS' default. Ghost forces are the derivative of
-local site energies with respect to a ghost's coordinates, and the only thing
+local atom energies with respect to a ghost's coordinates, and the only thing
 that returns them to the owning atom is `Verlet::run`'s global reverse
 communication, which LAMMPS performs only when `force->newton` is set. With
 newton off those cross-terms are discarded, so `init` refuses the script. The
@@ -488,7 +486,7 @@ all-true and that reverse communication is a no-op.
 
 ### `comm_modify cutoff` (ghost mode)
 
-A `T`-layer network's site energy depends on every atom within `T * cutoff`,
+A `T`-layer network's atom energy depends on every atom within `T * cutoff`,
 and the pair style evaluates the model in one shot, so each rank must hold a
 copy of all of them. LAMMPS' default ghost cutoff is `cutoff + skin`, which
 meets the check only at `T == 1`. When the user has not set a ghost cutoff,

@@ -1,7 +1,7 @@
 # The contract-implementation layer: LAMMPS-free, over the runtime.
 #
 #   bridge/  — primitives that do not know the model exists
-#   impls/   — strategy over molnex_runtime (Metadata, SiteEnergyExec)
+#   impls/   — strategy over molnex_runtime (Metadata, AtomEnergyExec)
 #   facade   — pair_molnex.cpp, the only file that includes a LAMMPS header
 #
 # Like bridge/, this target references neither LAMMPS_HEADER_DIR nor LAMMPS_LIB

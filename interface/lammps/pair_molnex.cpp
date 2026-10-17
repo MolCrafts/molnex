@@ -43,7 +43,7 @@
 #include "impls/cutoff_graph_impl.h"
 #include "molnex/runtime/metadata.h"
 #include "molnex/runtime/model_artifact.h"
-#include "molnex/runtime/site_energy_exec.h"
+#include "molnex/runtime/atom_energy_exec.h"
 
 namespace fs = std::filesystem;
 
@@ -131,7 +131,7 @@ void PairMolnex::settings(int narg, char** arg) {
   const double factor = energy_factor(meta.energy_unit);
   try {
     impl_ = std::make_unique<molnex::lammps::CutoffGraphImpl>(
-        meta, factor, molnex::runtime::SiteEnergyExec(*artifact_, meta.dtype),
+        meta, factor, molnex::runtime::AtomEnergyExec(*artifact_, meta.dtype),
         fold_ ? molnex::lammps::GraphMode::kFold
               : molnex::lammps::GraphMode::kGhost);
   } catch (const std::exception& e) {

@@ -1,5 +1,5 @@
 /* PairMolnex — one LAMMPS pair_style for any deployed model that follows the
-   site-energy convention (molix.deploy.SiteEnergyModel). The model is opened
+   atom-energy convention (molix.deploy.AtomEnergyModel). The model is opened
    through the engine-neutral runtime (molnex::runtime::ModelArtifact), in
    whatever package format its metadata names.
 
@@ -7,7 +7,7 @@
    (molix.deploy.DeployMetadata: format, cutoff, species, dtype, depth, the
    model's own units, op libraries) and the package itself (`<name>.pt2` for
    the aoti format). There is no per-model C++: a third party writes a module
-   whose forward returns (energy, forces, site_energy), packages it with
+   whose forward returns (energy, forces, atom_energy), packages it with
    molix.export, and writes its metadata.
 
    THIS FILE IS THE PROTOCOL LAYER, AND NOTHING ELSE. It is the only file in the
@@ -44,7 +44,7 @@
    shift, and takes the virial from the model; `ghost` stages every ghost
    within T * cutoff + skin as a node and takes the virial from LAMMPS'
    virial_fdotr_compute. Edges are never sorted. The model returns energy,
-   forces, per-site energy and its strain derivative. See
+   forces, per-atom energy and its strain derivative. See
    interface/lammps/README.md.
 */
 
