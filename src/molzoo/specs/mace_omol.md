@@ -216,12 +216,19 @@ accumulation, **not** a CG-convention difference (cuEquivariance O3 vs the MACE-
 ~1.4e-8/op, A3). Re-measuring upstream parity needs an out-of-tree oracle
 (route per Appendix A, 2026-08-09).
 
-**Current in-tree verification (2026-08-09).** `MOLNEX_MACE_WEIGHTS_DIR`-gated
+**Current in-tree verification (2026-10-17).** `MOLNEX_MACE_WEIGHTS_DIR`-gated
 `tests/test_molzoo/test_mace/test_checkpoint.py::TestOfficialOMolWeights`:
-strict 104-parameter load through `omol_keys` (`CheckpointRemap`) plus E/F stability goldens on a
-five-atom cluster; the weights dump is regenerated offline by
-`scripts/omol_port/convert_omol_to_cueq_state.py` (no `mace` or other upstream import). This is
-a stability lock on this machine's own output — not an upstream parity claim.
+strict 104-parameter load through `omol_keys` (`CheckpointRemap`;
+`test_official_omol_load_fills_every_learnable`) plus **upstream parity** on a
+five-atom cluster (`test_official_omol_energy_and_forces_match_upstream`): the
+energy and the whole force array against `mace-torch` 0.3.16's own evaluation
+of the same checkpoint on the same conditioned cluster (fp64, CPU;
+`omol_cluster_reference.pt` beside the weights, produced out of tree by the
+asset's `reference.py`), measured ΔE 5.4e-8 eV and max |ΔF| 2.2e-7 eV/Å
+against tolerances of 1e-6 eV / 1e-5 eV/Å (the ~5e-8 eV gap is the order of
+the CPU thread-count scatter). The weights dump is regenerated offline by
+`scripts/omol_port/convert_omol_to_cueq_state.py` (no `mace` or other upstream
+import).
 
 **Bessel frequencies (measured 2026-08-09).** The official `bessel_weights`
 are bit-for-bit the fp32 evaluation of the analytic init `nπ/r_max` (upcast to
@@ -363,3 +370,11 @@ rows.
   `tests/test_molrep/test_embedding/test_geometry.py`); the old alien-checkpoint
   and OMOL net-force rows had no surviving test and were replaced. §8 `pairs`
   namespace and `molix.neighbor.NeighborList`. docs copy re-synced.
+- 2026-10-17: §7.1 "current in-tree verification" is an upstream parity record
+  again: `TestOfficialOMolWeights::test_official_omol_energy_and_forces_match_upstream`
+  compares against `mace-torch`'s evaluation of the checkpoint on the fixture
+  cluster (`omol_cluster_reference.pt`, out-of-tree `reference.py`), replacing
+  the self-measured E/F goldens (`OMOL_GOLDEN_*`, test
+  `test_official_omol_energy_and_forces_match_the_goldens`). Measured ΔE
+  5.4e-8 eV, max |ΔF| 2.2e-7 eV/Å. The 2026-08-09 "stale, pending
+  re-measurement" caveat on §7.1 is closed. docs copy re-synced.

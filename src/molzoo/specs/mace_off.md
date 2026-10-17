@@ -148,6 +148,34 @@ official model to fp32 rounding (max |F| 4.083197 vs 4.083196 eV/Å); the
 8–9 eV total-energy gap there is the official model's fp32 accumulation
 (molnex sums the graph energy in fp64), not a model difference.
 
+In tree (2026-10-17; `MOLNEX_MACE_WEIGHTS_DIR`-gated, `slow`):
+`tests/test_molzoo/test_mace/test_checkpoint.py::TestOfficialOffWeights` and
+`::TestOfficialLesWeights`. `MaceOff.load` / `MaceLes.load` read upstream's own
+config json (`extract_config_mace_model` output — `interaction_cls_first` /
+`interaction_cls`, no block list — `off24_medium_config.json` /
+`les_off_small_config.json`, written out of tree by the asset's
+`convert_config.py` beside the cueq dumps) with strict key coverage
+(`test_official_off_load_fills_every_learnable`,
+`test_official_les_load_fills_every_learnable`), and the loaded surface is
+compared with `mace-torch`'s evaluation of the same checkpoint on the five-atom
+fixture cluster, energy and whole force array (`off24_cluster_reference.pt`,
+`les_cluster_reference.pt`; `test_official_off_energy_and_forces_match_upstream`,
+`test_official_les_energy_and_forces_match_upstream`); CPU, fp64,
+`OMP_NUM_THREADS=1`:
+
+| Model | ΔE (eV) | max ΔF (eV/Å) | tolerance (eV, eV/Å) |
+|---|---|---|---|
+| MACE-OFF24-M | 0 | 5.5e-15 | 1e-6 / 1e-5 |
+| MACE-LES-OFF-S | 2.4e-7 | 2.0e-6 | 1e-6 / 1e-5 |
+
+LES-OFF-S is fp32-trained: upstream evaluates its `.double()`-ed pickle, whose
+non-learnable constants keep their fp32 rounding (Bessel prefactor, e3nn's
+Clebsch–Gordan and contraction tables) where molnex rebuilds them in fp64. An
+fp64 re-conversion of the cueq dump reproduces the gap to the digit, and
+copying upstream's fp32-rounded prefactor alone moves it (ΔE 1.2e-7, max ΔF
+4.0e-6) without removing it — the sum of several such constants, the same
+order as the 96-atom row above.
+
 ### 7.2 Symmetry and Shape Tests
 
 `tests/test_molzoo/test_mace/test_potential.py::TestShortRangeAssembly` (block
@@ -192,3 +220,9 @@ file in the same change and re-run §7.1.
 
 - 2026-10-15: Created with the MACE-OFF official loader and the MACE-LES port
   (charge-only LES, compile-safe reciprocal sum).
+- 2026-10-17: §7.1 gains the in-tree official-weight tests
+  (`TestOfficialOffWeights`, `TestOfficialLesWeights`): strict `load` from
+  upstream's config json and upstream parity on the fixture cluster. Loading
+  that json exposed that `MaceOfficialConfig` read only the pickled-module
+  block list (`interaction_blocks`); it now also reads upstream's
+  `interaction_cls_first` / `interaction_cls` pair. docs copy re-synced.

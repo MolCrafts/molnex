@@ -13,7 +13,13 @@ asserted once in ``tests/test_molzoo/test_checkpoint.py``; the Polar table's
 round trip sits in ``test_polar.py`` beside the blocks it names.
 
 The asset-gated cases load the real official weights
-(:data:`WEIGHTS_DIR_ENV`) and are ``slow``.
+(:data:`WEIGHTS_DIR_ENV`) and are ``slow``. Per shipped family they assert
+two facts: the checkpoint fills its product strictly, and the product's
+energy and forces on the fixture cluster are **upstream's** — ``mace-torch``'s
+own evaluation of the same checkpoint on the same cluster, saved beside the
+weights as ``<family>_cluster_reference.pt`` by the asset's ``reference.py``
+(fp64, CPU; ``REFERENCE.md`` there pins the versions). Nothing here is a
+number molnex measured on itself.
 
 Reference:
     Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
@@ -87,17 +93,31 @@ BESSEL_OFFICIAL_KEY = "radial_embedding.bessel_fn.bessel_weights"
 #: Environment variable pointing at the offline official-weights directory.
 WEIGHTS_DIR_ENV = "MOLNEX_MACE_WEIGHTS_DIR"
 
+#: Differentiate the energy with respect to the positions: the op writes
+#: ``atoms.forces``, which the upstream references carry.
+FORCES: tuple[str, ...] = ("atoms.pos",)
+
+#: Offline MatPES assets inside :data:`WEIGHTS_DIR_ENV`: the config json of
+#: ``MACE-matpes-r2scan-omat-ft`` with its cueq ``state_dict`` beside it (both
+#: converted out of tree with ``mace.cli.convert_e3nn_cueq``), and upstream's
+#: evaluation on the fixture cluster.
+MATPES_CONFIG_FILE = "matpes_r2scan_config.json"
+MATPES_WEIGHTS_FILE = "matpes_r2scan_cueq_state.pt"
+MATPES_REFERENCE_FILE = "matpes_cluster_reference.pt"
+
 #: Hard-coded goldens: the dimensions of ``MACE-matpes-r2scan-omat-ft`` as
 #: published (``hidden_irreps="128x0e+128x1o"``, ``MLP_irreps="16x0e"``).
 OFFICIAL_NUM_FEATURES = 128
 OFFICIAL_MAX_HIDDEN_L = 1
 OFFICIAL_MLP_DIM = 16
 
-#: Offline OMol asset inside :data:`WEIGHTS_DIR_ENV`: the cueq ``state_dict`` of
+#: Offline OMol assets: the cueq ``state_dict`` of
 #: ``MACE-omol-0-extra-large-1024``, dumped out of tree from the pickled
 #: ``OMOL-cueq.model`` (reading that needs ``mace`` and ``e3nn``, which
-#: CLAUDE.md forbids); the converter sits beside the asset.
+#: CLAUDE.md forbids; the converter sits beside the asset), and upstream's
+#: evaluation on the conditioned fixture cluster.
 OMOL_WEIGHTS_FILE = "omol_cueq_state.pt"
+OMOL_REFERENCE_FILE = "omol_cluster_reference.pt"
 
 #: Hard-coded golden: every ``nn.Parameter`` tensor of the OMol model the
 #: official checkpoint has to fill.
@@ -108,24 +128,61 @@ OMOL_PARAMETER_COUNT = 104
 #: into this list is a deliberate decision, not a silent one.
 OMOL_UNEXPECTED_KEYS: list[str] = []
 
-#: Hard-coded goldens (eV, eV/Å): energy, ``max|F|`` and ``F[0]`` of the
-#: ``omol_cluster`` fixture under the official OMol weights, captured at
-#: ``OMP_NUM_THREADS=1`` (see :class:`TestOfficialOMolWeights`).
-OMOL_GOLDEN_ENERGY = -3122.454566006894
-OMOL_GOLDEN_MAX_FORCE = 5.397722165018621
-OMOL_GOLDEN_FIRST_FORCE = (-5.397722165018621, -3.9298849841895853, -3.931997122634094)
+#: Offline MACE-OFF24 medium assets: the config json upstream's own
+#: ``extract_config_mace_model`` writes (``interaction_cls_first`` /
+#: ``interaction_cls``, no block list; the asset's ``convert_config.py``),
+#: its cueq ``state_dict`` beside it, and upstream's evaluation on the cluster.
+OFF_CONFIG_FILE = "off24_medium_config.json"
+OFF_WEIGHTS_FILE = "off24_medium_cueq_state.pt"
+OFF_REFERENCE_FILE = "off24_cluster_reference.pt"
 
-#: The repo's numerical tolerances, not exact ones: the CPU reduction order
-#: inside the cuEquivariance fallback follows ``torch.get_num_threads()``, and
-#: ``{1, 4, 16}`` threads and a 48-thread default disagree by ~3e-8 eV.
-OMOL_ENERGY_TOL = 1e-6
-OMOL_FORCE_TOL = 1e-4
+#: Hard-coded golden: every ``nn.Parameter`` tensor of MACE-OFF24 medium.
+OFF_PARAMETER_COUNT = 23
+
+#: Offline MACE-LES-OFF small assets: the same json dialect plus the ``les``
+#: block ``MaceArchive`` reads off a pickled module, the cueq ``state_dict``
+#: (fp32 — the model was trained in fp32), and upstream's evaluation.
+LES_CONFIG_FILE = "les_off_small_config.json"
+LES_WEIGHTS_FILE = "les_off_small_cueq_state.pt"
+LES_REFERENCE_FILE = "les_cluster_reference.pt"
+
+#: Hard-coded golden: every ``nn.Parameter`` tensor of MACE-LES-OFF small —
+#: MACE-OFF's plus one latent-charge readout per layer.
+LES_PARAMETER_COUNT = 26
+
+#: Upstream parity tolerances (eV, eV/Å) on the fixture cluster, one pair for
+#: the four families. Measured against the ``mace-torch`` references (fp64,
+#: CPU, ``OMP_NUM_THREADS=1``, 2026-10-17): MatPES ΔE 1.4e-14 / max |ΔF|
+#: 6.0e-14, OFF24 0 / 5.5e-15, OMol 5.4e-8 / 2.2e-7, LES-OFF 2.4e-7 / 2.0e-6.
+#: The fp64-native models agree to round-off. OMol's gap is the order of the
+#: CPU reduction-order scatter of the cuEquivariance fallback, which follows
+#: ``torch.get_num_threads()`` (``{1, 4, 16}`` threads and a 48-thread default
+#: disagree by ~3e-8 eV). LES-OFF is the one fp32-trained model: upstream
+#: evaluates its ``.double()``-ed pickle, whose non-learnable constants keep
+#: their fp32 rounding (the Bessel prefactor, e3nn's Clebsch–Gordan and
+#: contraction tables) where molnex rebuilds them exactly in fp64. An fp64
+#: re-conversion of the cueq dump reproduces the gap to the digit, so the
+#: dump is not it; copying upstream's fp32-rounded prefactor alone moves ΔE
+#: to 1.2e-7 and max |ΔF| to 4.0e-6, so no single constant is it either. The
+#: tolerances sit a factor 4–5 above the LES gap and orders above the rest.
+UPSTREAM_ENERGY_TOL = 1e-6
+UPSTREAM_FORCE_TOL = 1e-5
 
 
-def _official_weights_absent(filename: str) -> bool:
-    """Whether the gated offline asset ``filename`` is unavailable."""
+def _official_weights_absent(*filenames: str) -> bool:
+    """Whether any of the gated offline assets ``filenames`` is unavailable."""
     directory = os.environ.get(WEIGHTS_DIR_ENV)
-    return directory is None or not (Path(directory) / filename).is_file()
+    return directory is None or not all((Path(directory) / name).is_file() for name in filenames)
+
+
+def _absent_reason(*filenames: str) -> str:
+    """The skip reason naming every asset a gated case reads."""
+    return f"{WEIGHTS_DIR_ENV} unset or {' / '.join(filenames)} absent — an offline asset"
+
+
+def _asset(filename: str) -> Path:
+    """The path of an offline asset inside :data:`WEIGHTS_DIR_ENV`."""
+    return Path(os.environ[WEIGHTS_DIR_ENV]) / filename
 
 
 def _official_state(model: torch.nn.Module, names: Mapping[str, str]) -> dict[str, torch.Tensor]:
@@ -188,6 +245,31 @@ def _assert_roundtrip(
         source.named_parameters(), target.named_parameters(), strict=True
     ):
         assert torch.equal(want, got), name
+
+
+def _assert_upstream_parity(model: MacePotential, frame: TensorDict, reference_file: str) -> None:
+    """``model`` on ``frame`` reproduces the upstream evaluation saved as ``reference_file``.
+
+    The reference's geometry and conditioning are checked against the frame
+    first, so a drifted fixture fails on the fixture, not on the energy; its
+    cutoff list must be the fixture's full edge set, or the two evaluations
+    would not see the same graph.
+    """
+    reference = torch.load(_asset(reference_file), map_location="cpu", weights_only=True)
+    assert torch.equal(reference["atomic_numbers"], frame["atoms", "Z"])
+    assert torch.equal(reference["positions"], frame["atoms", "pos"])
+    assert reference["cutoff_equals_full"]
+    for column in ("total_charge", "total_spin"):
+        if ("graphs", column) in frame.keys(include_nested=True):
+            assert reference[column] == int(frame["graphs", column].item())
+
+    result = model(frame)
+
+    energy = result["graphs", "energy"]
+    forces = result["atoms", "forces"]
+    assert energy.shape == (1,)
+    torch.testing.assert_close(energy[0], reference["energy"], atol=UPSTREAM_ENERGY_TOL, rtol=0.0)
+    torch.testing.assert_close(forces, reference["forces"], atol=UPSTREAM_FORCE_TOL, rtol=0.0)
 
 
 class TestCheckpointRemap:
@@ -253,53 +335,61 @@ def test_one_hot_weight_refuses_an_equal_numel_in_another_shape() -> None:
 
 @pytest.mark.slow
 @pytest.mark.skipif(
-    os.environ.get(WEIGHTS_DIR_ENV) is None,
-    reason=f"{WEIGHTS_DIR_ENV} unset — the converted official weights are an offline asset",
+    _official_weights_absent(MATPES_CONFIG_FILE, MATPES_WEIGHTS_FILE, MATPES_REFERENCE_FILE),
+    reason=_absent_reason(MATPES_CONFIG_FILE, MATPES_WEIGHTS_FILE, MATPES_REFERENCE_FILE),
 )
-def test_official_checkpoint_bit_parity() -> None:
-    """The real MatPES checkpoint loads identically both ways (``science``).
+class TestOfficialMatpesWeights:
+    """The official MatPES checkpoint through ``MaceMatpes.load`` (``science``)."""
 
-    ``MaceMatpes.load`` against the hand-written "construct + remap" path on
-    ``MACE-matpes-r2scan-omat-ft`` (converted offline with
-    ``mace.cli.convert_e3nn_cueq``; never imported here). Bit parity, not a
-    tolerance. The oracle arm states the published ``128 / 1 / 16`` dimensions
-    literally, so ``load`` has to derive them from the irreps strings unaided.
-    """
-    directory = Path(os.environ[WEIGHTS_DIR_ENV])
-    config_path = directory / "matpes_r2scan_config.json"
-    weights_path = directory / "matpes_r2scan_cueq_state.pt"
-    official = json.loads(config_path.read_text())
+    def test_official_checkpoint_bit_parity(self) -> None:
+        """The real MatPES checkpoint loads identically both ways.
 
-    manual = MaceMatpes(
-        MACEMatpesSpec(
-            atomic_numbers=official["atomic_numbers"],
-            atomic_energies=official["atomic_energies"],
-            r_max=official["r_max"],
-            num_bessel=official["num_bessel"],
-            num_polynomial_cutoff=official["num_polynomial_cutoff"],
-            l_max=official["max_ell"],
-            num_features=OFFICIAL_NUM_FEATURES,
-            max_hidden_l=OFFICIAL_MAX_HIDDEN_L,
-            num_interactions=official["num_interactions"],
-            correlation=official["correlation"],
-            mlp_dim=OFFICIAL_MLP_DIM,
-            radial_mlp=official["radial_MLP"],
-            scale=official["atomic_inter_scale"],
-            shift=official["atomic_inter_shift"],
-        ),
-    )
-    matpes_remap.load(manual, torch.load(weights_path, map_location="cpu", weights_only=True))
+        ``MaceMatpes.load`` against the hand-written "construct + remap" path on
+        ``MACE-matpes-r2scan-omat-ft`` (converted offline with
+        ``mace.cli.convert_e3nn_cueq``; never imported here). Bit parity, not a
+        tolerance. The oracle arm states the published ``128 / 1 / 16`` dimensions
+        literally, so ``load`` has to derive them from the irreps strings unaided.
+        """
+        config_path = _asset(MATPES_CONFIG_FILE)
+        official = json.loads(config_path.read_text())
 
-    built = MaceMatpes.load(config_path)
+        manual = MaceMatpes(
+            MACEMatpesSpec(
+                atomic_numbers=official["atomic_numbers"],
+                atomic_energies=official["atomic_energies"],
+                r_max=official["r_max"],
+                num_bessel=official["num_bessel"],
+                num_polynomial_cutoff=official["num_polynomial_cutoff"],
+                l_max=official["max_ell"],
+                num_features=OFFICIAL_NUM_FEATURES,
+                max_hidden_l=OFFICIAL_MAX_HIDDEN_L,
+                num_interactions=official["num_interactions"],
+                correlation=official["correlation"],
+                mlp_dim=OFFICIAL_MLP_DIM,
+                radial_mlp=official["radial_MLP"],
+                scale=official["atomic_inter_scale"],
+                shift=official["atomic_inter_shift"],
+            ),
+        )
+        matpes_remap.load(
+            manual, torch.load(_asset(MATPES_WEIGHTS_FILE), map_location="cpu", weights_only=True)
+        )
 
-    reference = manual.state_dict()
-    produced = built.state_dict()
-    assert set(produced) == set(reference)
-    for name, want in reference.items():
-        if name.endswith("_extra_state"):  # module metadata (a dict), not a tensor
-            assert produced[name] == want, name
-            continue
-        assert torch.equal(produced[name], want), name
+        built = MaceMatpes.load(config_path)
+
+        reference = manual.state_dict()
+        produced = built.state_dict()
+        assert set(produced) == set(reference)
+        for name, want in reference.items():
+            if name.endswith("_extra_state"):  # module metadata (a dict), not a tensor
+                assert produced[name] == want, name
+                continue
+            assert torch.equal(produced[name], want), name
+
+    def test_official_matpes_energy_and_forces_match_upstream(self, cluster: TensorDict) -> None:
+        """``MaceMatpes.load``'s surface is ``mace-torch``'s on the unconditioned cluster."""
+        model = MaceMatpes.load(_asset(MATPES_CONFIG_FILE), wrt=FORCES).eval()
+        _assert_upstream_parity(model, cluster, MATPES_REFERENCE_FILE)
 
 
 def _official_omol() -> tuple[MaceOmol, dict[str, torch.Tensor]]:
@@ -312,38 +402,34 @@ def _official_omol() -> tuple[MaceOmol, dict[str, torch.Tensor]]:
     ``num_bessel`` 8, ``num_polynomial_cutoff`` 5, ``num_features`` 1024,
     ``charge_classes`` / ``spin_classes`` 201 / 101, ``mlp_dim`` 16).
     """
-    weights_path = Path(os.environ[WEIGHTS_DIR_ENV]) / OMOL_WEIGHTS_FILE
-    state = torch.load(weights_path, map_location="cpu", weights_only=True)
+    state = torch.load(_asset(OMOL_WEIGHTS_FILE), map_location="cpu", weights_only=True)
     spec = MACEOMolSpec(
         atomic_numbers=state["atomic_numbers"].tolist(),
         atomic_energies=state["atomic_energies_fn.atomic_energies"].flatten().tolist(),
         scale=float(state["scale_shift.scale"]),
         shift=float(state["scale_shift.shift"]),
     )
-    model = MaceOmol(spec, wrt=("atoms.pos",))
+    model = MaceOmol(spec, wrt=FORCES)
     omol_remap.load(model, state)
     return model.eval(), state
 
 
-@pytest.mark.skipif(
-    _official_weights_absent(OMOL_WEIGHTS_FILE),
-    reason=(
-        f"{WEIGHTS_DIR_ENV} unset or {OMOL_WEIGHTS_FILE} absent — "
-        "the converted official OMol weights are an offline asset"
-    ),
-)
 @pytest.mark.slow
+@pytest.mark.skipif(
+    _official_weights_absent(OMOL_WEIGHTS_FILE, OMOL_REFERENCE_FILE),
+    reason=_absent_reason(OMOL_WEIGHTS_FILE, OMOL_REFERENCE_FILE),
+)
 class TestOfficialOMolWeights:
     """The official OMol checkpoint, loaded and evaluated in tree (``science``).
 
-    A **stability lock**, not an upstream parity record: nothing here compares
-    against ``mace-torch`` or ``e3nn``. The official weights load strictly, and
-    the resulting surface is the one measured on this machine on 2026-08-09
-    (``torch 2.12.1+cpu``, ``cuequivariance 0.10.0``, CPU, fp64,
-    ``OMP_NUM_THREADS=1``; weights ``omol_cueq_state.pt`` sha256
-    ``074c86154a1d709f…``). The extraction is corroborated at value level:
-    ``radial_embedding.bessel_fn.bessel_weights`` sits 2.2120e-07 Å⁻¹ from the
-    analytic ``nπ/r_max`` init.
+    The weights of ``MACE-omol-0-extra-large-1024`` load strictly through
+    ``omol_keys``, and the loaded surface is upstream's on the conditioned
+    cluster (charge 0, spin 1 — the same ``embedding_specs`` convention on
+    both sides, as the asset's ``REFERENCE.md`` traces). The extraction is
+    corroborated at value level too: the checkpoint's
+    ``radial_embedding.bessel_fn.bessel_weights`` sit 2.2120e-07 Å⁻¹ from the
+    analytic ``nπ/r_max`` init — fp32 rounding of an untrained parameter, which
+    the strict load carries in rather than re-deriving.
     """
 
     def test_official_omol_load_fills_every_learnable(self) -> None:
@@ -357,20 +443,58 @@ class TestOfficialOMolWeights:
         assert parameters <= set(renamed)
         assert sorted(set(renamed) - set(model.state_dict())) == OMOL_UNEXPECTED_KEYS
 
-    def test_official_omol_energy_and_forces_match_the_goldens(
-        self, omol_cluster: TensorDict
-    ) -> None:
-        """The loaded surface reproduces the captured energy and forces."""
+    def test_official_omol_energy_and_forces_match_upstream(self, omol_cluster: TensorDict) -> None:
+        """The loaded surface is ``mace-torch``'s on the conditioned cluster."""
         model, _ = _official_omol()
+        _assert_upstream_parity(model, omol_cluster, OMOL_REFERENCE_FILE)
 
-        result = model(omol_cluster)
 
-        energy = result["graphs", "energy"]
-        forces = result["atoms", "forces"]
-        assert energy.shape == (1,)
-        assert forces.shape == (len(omol_cluster["atoms", "Z"]), 3)
-        assert energy.item() == pytest.approx(OMOL_GOLDEN_ENERGY, abs=OMOL_ENERGY_TOL)
-        assert forces.abs().max().item() == pytest.approx(OMOL_GOLDEN_MAX_FORCE, abs=OMOL_FORCE_TOL)
-        assert forces[0].tolist() == pytest.approx(
-            list(OMOL_GOLDEN_FIRST_FORCE), abs=OMOL_FORCE_TOL
-        )
+@pytest.mark.slow
+@pytest.mark.skipif(
+    _official_weights_absent(OFF_CONFIG_FILE, OFF_WEIGHTS_FILE, OFF_REFERENCE_FILE),
+    reason=_absent_reason(OFF_CONFIG_FILE, OFF_WEIGHTS_FILE, OFF_REFERENCE_FILE),
+)
+class TestOfficialOffWeights:
+    """The official MACE-OFF24 medium checkpoint through ``MaceOff.load`` (``science``)."""
+
+    def test_official_off_load_fills_every_learnable(self) -> None:
+        """``load`` is strict on both sides of the table and builds the published model.
+
+        ``off_keys`` raises on a key with no home, the remap on an unfilled
+        ``nn.Parameter``; the count is the medium model's.
+        """
+        model = MaceOff.load(_asset(OFF_CONFIG_FILE))
+        assert sum(1 for _ in model.parameters()) == OFF_PARAMETER_COUNT
+
+    def test_official_off_energy_and_forces_match_upstream(self, cluster: TensorDict) -> None:
+        """``MaceOff.load``'s surface is ``mace-torch``'s on the unconditioned cluster."""
+        model = MaceOff.load(_asset(OFF_CONFIG_FILE), wrt=FORCES).eval()
+        _assert_upstream_parity(model, cluster, OFF_REFERENCE_FILE)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    _official_weights_absent(LES_CONFIG_FILE, LES_WEIGHTS_FILE, LES_REFERENCE_FILE),
+    reason=_absent_reason(LES_CONFIG_FILE, LES_WEIGHTS_FILE, LES_REFERENCE_FILE),
+)
+class TestOfficialLesWeights:
+    """The official MACE-LES-OFF small checkpoint through ``MaceLes.load`` (``science``).
+
+    The fp32 dump fills the fp64 model; the cluster carries no cell, so the
+    latent-charge term is the isolated Gaussian pair sum on both sides.
+    """
+
+    def test_official_les_load_fills_every_learnable(self) -> None:
+        """``load`` is strict on both sides of the table and builds the published model.
+
+        ``les_keys`` raises on a key with no home, the remap on an unfilled
+        ``nn.Parameter``; the count is the small model's, charge readouts
+        included.
+        """
+        model = MaceLes.load(_asset(LES_CONFIG_FILE))
+        assert sum(1 for _ in model.parameters()) == LES_PARAMETER_COUNT
+
+    def test_official_les_energy_and_forces_match_upstream(self, cluster: TensorDict) -> None:
+        """``MaceLes.load``'s surface is ``mace-torch``'s on the isolated cluster."""
+        model = MaceLes.load(_asset(LES_CONFIG_FILE), wrt=FORCES).eval()
+        _assert_upstream_parity(model, cluster, LES_REFERENCE_FILE)

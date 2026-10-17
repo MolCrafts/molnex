@@ -42,7 +42,7 @@ Reference:
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Literal, NamedTuple, Self
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -149,7 +149,11 @@ class MaceOfficialConfig(BaseModel):
         pair_repulsion, distance_transform: Architecture switches of the
             density families.
         interaction_blocks: Upstream block class names of the stack, first to
-            last (MACE-OFF reads which kind the first layer is).
+            last (MACE-OFF reads which kind the first layer is). A pickled
+            module reports the stack itself; a json written by upstream's
+            ``extract_config_mace_model`` names it as ``interaction_cls_first``
+            + ``interaction_cls`` × ``num_interactions - 1``, which is read
+            into this field when the list is absent.
         avg_num_neighbors: Message normalisation of the agnostic interactions.
         les: The LES block of a MACE-LES archive.
         kspace_cutoff: Serialised reciprocal cutoff of a Polar dump; wins over
@@ -204,6 +208,26 @@ class MaceOfficialConfig(BaseModel):
     quadrupole_feature_corrections: bool | None = None
     use_so3: bool | None = None
     use_agnostic_product: bool | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _stack_from_class_names(cls, data: Any) -> Any:
+        """Read upstream's ``interaction_cls_first`` / ``interaction_cls`` pair as the stack.
+
+        ``mace.tools.scripts_utils.extract_config_mace_model`` writes the two
+        bare class names and ``num_interactions`` instead of the block list a
+        pickled module carries; the list is the first name followed by the
+        other ``num_interactions - 1`` times.
+        """
+        if not isinstance(data, Mapping) or "interaction_blocks" in data:
+            return data
+        first, rest, depth = (
+            data.get(key)
+            for key in ("interaction_cls_first", "interaction_cls", "num_interactions")
+        )
+        if first is None or rest is None or depth is None:
+            return data
+        return {**data, "interaction_blocks": [str(first), *([str(rest)] * (int(depth) - 1))]}
 
     def body_fields(self) -> dict[str, Any]:
         """The shared body fields every family reads, only those the archive carries."""
