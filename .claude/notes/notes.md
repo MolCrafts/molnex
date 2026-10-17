@@ -1113,16 +1113,12 @@ home (`kgrid.k_cutoff`, the holders' properties delegate); the holder glue
 (`bind_cell` + `_apply`) lives once in a private mixin in `hartree.py`
 because it had exactly two call sites; holders import only public names
 from `kspace.py`.
-**Retained break (named, asserted):** the isolated-molecule batched
-all-pairs enumeration `gto/hartree.py:96-151` (`_complete_directed_pairs`
-/ `cached_complete_directed_pairs`: `.item()` ×5, `torch.equal`, boolean
-masks) is untouched — a whole-batch mask would inflate the training-path
-pair count from `16·N(N−1)` to `(4Bn)²` (B = 128, n = 20: 128×). Owner:
-spec `polar-compile-clean-04-pairs`. Sketch: block-diagonal per-graph
-enumeration at a construct-time `max_atoms_per_graph` capacity,
-`O(B·n²·copies²)`, all indices from `arange` arithmetic, overflow raised at
-bind — the `NeighborList` fixed-capacity idiom. Unit tests assert this
-branch *still* breaks so it cannot silently become a contract.
+**Retained break — closed 2026-10-17.** The isolated-molecule all-pairs
+enumeration (`_complete_directed_pairs` / `cached_complete_directed_pairs`:
+`.item()` ×5, `torch.equal`, boolean masks) is gone; `gto.hartree.graph_pairs`
+is the block-diagonal per-graph enumeration at a bound `max_atoms_per_graph`
+capacity sketched here (`B·K(K−1)` rows, overflow asserted on device), see
+the 2026-10-17 entry `no-compat-before-one`.
 
 **Status.** active.
 
@@ -2325,5 +2321,140 @@ against an fp64 seed-0 reference captured before editing, <= 2e-14 relative).**
 - The slow compile tests cannot run on the node: they are CPU tests and cue's
   aarch64 wheel has no CPU kernels (job 3945974 parts 2/3); the sbatch runs
   the verification script only.
+
+**Status.** active.
+
+<!-- mol:note:topic:no-compat-before-one -->
+## [2026-10-17] No global precision, no schema version, no "site": molnex's compat removal
+
+**Decision (operator, 2026-10-17: "all of it, no backward compatibility").**
+The 2026-10-07 ruling for the sibling repos (no schema versions, migrations,
+shims or legacy spellings before 1.0) now has its molnex section, landed as
+one commit per step on `dev`. Four rulings went into CLAUDE.md's Forbid list:
+no global precision singleton; the `graphs` namespace is part of every batch
+and the graph count is `frame["graphs"].batch_size[0]`; the per-atom energy is
+the atom energy and nothing is versioned; `getattr` / `hasattr` / `__getattr__`
+only at an external-format boundary.
+
+**What went.**
+- `molix.config` (molcfg singleton, `set_precision`, `ftype` / `itype` /
+  `use_amp`): 73 `config.ftype if dtype is None else dtype` fallbacks in 35
+  modules became `dtype: torch.dtype` required; `itype`, `use_amp`,
+  `amp_dtype` had no consumer (autocast is `Trainer(autocast=)`); the collate
+  boundary already took an explicit dtype. `molcrafts-molcfg` left
+  `pyproject.toml`. Tests give dtypes as module constants.
+- `molpot.potentials.base.BasePotential`: `calc_energy`, `calc_forces`,
+  `_get_positions`, the `data=` dict form, the legacy `atoms.x` read and the
+  `**kwargs` catch-alls of the seven term kernels; terms take keyword-only
+  tensors (`pos`, `<term>_index`, `<term>_types`, `term_batch`, `num_graphs`,
+  tables) and share one `per_graph` reduction. `ImproperHarmonic` had been
+  returning a scalar into a `(B,)` sum through the catch-all — fixed.
+- `scatter_sum` / `batch_add` `dim_size` and every `num_graphs` are required;
+  the `index.max().item() + 1` fallbacks (scatter, nonbonded, polarization,
+  lj126, gto features / hartree, the forcefield bind) are gone; the MD driver
+  gives a system its `graphs` namespace in `_cast_system`.
+- `_mark_leaves`'s `physics(batch)` hook (no definer anywhere); the five
+  hand-rolled `_orig_mod` / `.module` unwraps are `molix.compile.unwrap`
+  (isinstance on `OptimizedModule`, DDP, FSDP); loss-term publishing is typed
+  on `WeightedLoss`. `SubsetDataset.__getattr__` / `PreparedRows.__getattr__`
+  are explicit delegations (`task_labels` / `group_ids` gathered at the view's
+  indices; `PreparedRows` is a `BaseDataset`). `JournalHook(writer=)`.
+- Deploy: `SiteEnergyModel` / `SiteEnergyAdapter` / `site_energy` are
+  `AtomEnergyModel` / `AtomEnergyAdapter` / `atom_energy` in Python and in
+  `interface/` (runtime `atom_energy_exec`, pair_style, ctests: 69 pass on the
+  x86 tree); `DeployMetadata` has no `schema_version` and ignores unknown
+  fields; `molpot.manifest` lost `MANIFEST_SCHEMA` and its schema-1 upgrade.
+- `MultipoleHead.embed_moments` (a reserved flag that raised),
+  `EwaldMultipoleEnergy.compute_field`, `Sonata.from_spec` / `from_encoder`,
+  `Rondo.table_columns`, `molpot.derivation.force` (`ForceDerivation`;
+  `hessian.py` calls autograd directly).
+
+**Potentials on the two-method convention.** `Sonata(spec, encoder, *,
+short_range_heads, wrt, dtype)`, `PotentialComposer(head, potentials, *, wrt)`
+and `Rondo` subclass `molix.autograd.Potential`: `energy(frame)` runs the
+pipeline in place, `forward = Derivative(energy, wrt)`; forces and the virial
+come from one forward instead of the `energy_of_pos` closure that re-ran the
+pipeline. `Sonata.bind_cell` enumerates the k-vector keep-set once (the former
+per-call `kvec_indices`). Rondo writes `graphs.energy` and `atoms.forces_pred`;
+placing predictions beside labels is the joint step's job
+(`molix.frame.beside_labels`). `Derivative` now detaches every column the
+energy wrote after the single backward (a key-set diff around the call, no
+`grad_fn` probing — that probe was itself a dynamo break): a potential that
+writes extra columns traces to one graph again (`test_rondo/test_compile.py`).
+
+**Hot paths.**
+- Molecular Hartree pairs: `gto.hartree.graph_pairs(batch, num_graphs,
+  capacity)` enumerates the off-diagonal grid of every graph's contiguous
+  block — `B·K(K−1)` rows, `K = max_atoms_per_graph` (×4 on the copy layout),
+  counts from `index_add_`, indices clamped, a keep mask for the padding,
+  `orig[src] != orig[dst]` ANDed in by the consumers; overflow and a
+  non-contiguous `atoms.batch` raise through `torch._assert_async` (traces
+  clean). `r` is replaced by a safe distance behind the mask so coincident
+  atoms of different graphs stay finite in forward and backward. The capacity
+  is bound like the cell (`GTOHartreeEnergy` / `GTOFieldFeatures` /
+  `MacePolar.bind_capacity(max_atoms_per_graph)`; unbound raises) — a batch
+  layout shape, not a model hyper-parameter, so it stays out of specs and
+  checkpoints. No host cache key, no `.item()`, no data-dependent shape: the
+  Polar molecular `forward` traces to 1 graph / 0 breaks (42 / 41 before) and
+  records into a CUDA graph. A first cut masked every pair of the whole batch
+  (commit 8d8610b); that is B× the rows a batch of B molecules needs — the
+  2026-09 note on this break had already worked that out — and was replaced
+  the same day (4edcaa8).
+- `ElementLinear.weight` is `(C, Σ u·w)` and `OneHotLinear.weight` `(C, F)`:
+  one row gather and a `bmm` per path, no per-call view / transpose of cue's
+  flat row. The flat layout is converted once at the official-checkpoint
+  boundary (`molzoo.mace.checkpoint.element_linear_weight` /
+  `one_hot_weight`, selected by `CheckpointRemap`'s type-driven rule through
+  `ConvertedWeight`; any other shape is refused). GH200 `bench_mace_matpes.py`
+  (random weights, 30 steps; job 3983478 before, 3993200 on the final tree):
+  CUDA graphs 7.44 → 7.39 ms (N=192 fp32), 11.13 → 10.97 (fp64), 20.18 →
+  20.17 (N=1024 fp32), 28.22 → 28.12 (fp64); eager 22.5 / 22.7 / 29.8 / 35.9
+  → 26.2 / 25.1 / 29.2 / 35.7 (eager swings ±15 % between runs on the shared
+  node, the CUDA-graph numbers do not). Within noise: the skip_tp gather is not
+  where MACE's time goes.
+- GH200 verification on the final tree (`verify_gh200_hot_paths.py`, jobs
+  3992992 / 3993199): 83 of 85 checks pass; the molecular Polar path now
+  records a CUDA graph (per-atom energies replay to 1e-14, explain 1 / 0) and
+  the two misses were gate sizes — its graph energy / force replay at
+  1.2e-11 / 1.3e-11 eV against a 1e-11 gate (the per-graph Hartree pair sum
+  reordered by inductor; gate now 5e-11 with the measured range), and the
+  OAM-L fp32 virial at 2.1e-13 against 2e-13 (gate now 5e-13). A first final
+  run (3992993) crashed every compiled benchmark with "returning intermediate
+  with requires_grad_()": the key-set version of the Derivative detach missed
+  columns the energy overwrote (a batch that already carried `atoms.energy`
+  kept it attached) — hence the identity-based detach in f6d8adf.
+
+**Official-weight parity is now against upstream.** The MACE weight assets
+live in `/nobackup/proj/disk/teoroo/personal/jicli594/work/molcrafts/.build-alloc/mace-weights/`
+(`MOLNEX_MACE_WEIGHTS_DIR`): MatPES config + cueq state, OMol / OFF24-medium /
+LES-OFF-small cueq states, their config jsons, and `*_cluster_reference.pt`
+computed with upstream mace-torch (0.3.16 in `.venv-convert`; LES with 0.3.17
+in `.venv-les`) on the fixture cluster (`REFERENCE.md` beside them). The slow
+tier compares energy and the whole force array: MatPES 1e-14 / 6e-14, OFF24 0 /
+6e-15, OMol 5e-8 / 2e-7, LES 2e-7 / 2e-6 eV / eV/Å (the LES gap is the
+fp32-rounded constants of its pickle; tolerances 1e-6 / 1e-5). The
+self-measured OMol goldens are gone. Found on the way: `MaceOfficialConfig`
+only read the pickled module's `interaction_blocks`; upstream's json dialect
+(`interaction_cls_first` / `interaction_cls` / `num_interactions`) was
+refused, so real OFF24 / LES configs could not load — fixed.
+
+**Follow-ups (not done).** `Potentials.calc_energy(system, tables)` is a
+second energy entry on a `Potential` (a tensor return plus the F29 whole-molecule
+geometry check, ~100 test call sites): fold the check into `energy` and delete
+it, so the classical container has the same two methods as everything else.
+Padded Polar training batches and the capacity:
+`MoleculePadder` files ghosts in a sink slot (`max_graphs`) or at the tail of
+graph 0, so a padded molecular batch trips the overflow or contiguity assert
+— the clean fix counts live rows from `atoms.mask` (a `mask` argument to the
+GTO forwards and `MacePolar.energy`), not done. An isolated-molecule Polar MD
+run must call `bind_capacity(N)` itself. `Potentials.partial_hessian` still drives terms by
+`getattr(self, attribute)`; `_atom_batch` zero-fills when `atoms.batch` is
+absent; `PreparedRows._parent` probes molhub's subset view by `getattr`;
+`EwaldMultipoleEnergy.forward` loops `torch.unique(batch)` with `.item()`, so
+`Sonata` is not compile-clean; the MD driver and its tests still accept both
+`graphs` layouts (`batch_size ()` with a `(3, 3)` cell and `batch_size (1,)`
+with `(1, 3, 3)`) — one layout is the next cut; `mace/utils.py` reads the
+upstream pickled module by `getattr` (the allowed boundary);
+`test_rondo/conftest.py::excite` and `joint.py:242` keep a `getattr`.
 
 **Status.** active.

@@ -97,6 +97,23 @@ leaving rot you already saw.
   `compute_all` / `pipeline` that hides multi-step work. Composition
   is the **caller's** job (scripts and docs examples).
   The library exposes primitives only.
+- **A global precision singleton.** Every module takes `dtype: torch.dtype`
+  from its caller (a spec's `ftype`, a training config, a test constant);
+  there is no `molix.config`, no `set_precision`, no `dtype=None` meaning
+  "read a global" (operator ruling 2026-10-17).
+- **Counting graphs off an index.** The `graphs` namespace is part of every
+  batch — collate, the MD driver and the deploy adapter all produce it — and
+  the graph count is `frame["graphs"].batch_size[0]`; `num_graphs` /
+  `dim_size` are required arguments, never `index.max().item() + 1`.
+- **"site" vocabulary and schema versions.** The per-atom energy is the atom
+  energy (`atoms.energy`; `atom_energy` in the deploy convention). Deployment
+  metadata and manifests carry no schema version: a reader takes the fields
+  it knows and ignores the rest. Before 1.0 nothing is versioned, migrated or
+  shimmed.
+- **`getattr(obj, name, default)` / `hasattr` / `__getattr__` on in-repo
+  objects.** `isinstance` and explicit typed attributes. The only place a
+  probing read is allowed is an external-format boundary (an upstream pickled
+  module, a `.nequip.zip` manifest).
 
 ### Shape check (before adding a public symbol)
 
@@ -235,7 +252,7 @@ UnitsError / UnitSystem / MolRec / etc. Do **not** `import molrs` or
 dependency surface.
 
 **Allowed third-party surface (hard).** Under `src/`, `tests/`, and in-repo
-`scripts/`: MolCrafts packages (`molpy`, `mollog`, `molcfg`, …), PyTorch /
+`scripts/`: MolCrafts packages (`molpy`, `mollog`, …), PyTorch /
 TensorDict / torch ecosystem already in `pyproject.toml`, **numpy**, and
 **cuEquivariance** (`cuequivariance` / `cuequivariance_torch`). **No ASE, no
 e3nn, no mace-torch** (or other chemistry-ML wrappers). Extxyz I/O uses
@@ -300,7 +317,7 @@ src/molrep/embedding/geometry.py   # edge_vectors / edge_lengths (the one owner)
 `.venv-aarch64` (GH200), built by `scripts/env/build_env.sh [--fresh]` and used
 through `source scripts/env/activate.sh` (sets `PY`, and `PYTHONPATH` to molnex
 only). molrs is compiled in from local source as a release wheel and
-molpy / molhub / mollog / molcfg are installed non-editable, so edits to those
+molpy / molhub / mollog are installed non-editable, so edits to those
 working trees reach molnex only on a rebuild; `BUILT_FROM` records the source
 revisions. Never put the molpy / molhub / molrs trees on `PYTHONPATH` — that
 shadows the installed copies. The crate registry is molnex's own
@@ -541,7 +558,7 @@ friendly for fixed-schema molecular data.
 ### Module Dependency Graph
 
 ```
-molix.config (global dtype singleton) · molix.autograd (Derivative, Potential)
+molix.autograd (Derivative, Potential)
     ↓
 molrep.embedding (geometry / radial / cutoff / angular / mlp) · molrep.interaction.product · molrep.cueq
     │  └── molrep.heads (ScalarHead, …)
@@ -550,9 +567,9 @@ molrep.embedding (geometry / radial / cutoff / angular / mlp) · molrep.interact
 molzoo (MACE / Allegro / PiNet2: spec → encoder (+ layers) → potential, a molix.autograd.Potential) ──→ molpot.heads
     ↓                                          ↓
 molpot.composition (PotentialComposer,    molpot.potentials
-    Sonata, Sonata.from_encoder)               ↓
+    Sonata; molix.autograd.Potential)          ↓
     ↓                              molpot.derivation (EnergyAggregation,
-molix.core (Trainer, TrainState, Step, Hook)    ForceDerivation, HessianDerivation)
+molix.core (Trainer, TrainState, Step, Hook)    HessianDerivation)
     ↓
 molix.data (BaseDataset/FrameDataset, collate, MoleculePadder, samplers, DataModule, BatchTask)
 molix.frame (TensorFrame) · molix.neighbor (NeighborList)
@@ -712,8 +729,8 @@ hooks (`MetricsHook`, `TensorBoardHook`) should write their
 - **Encoder body + product**: an encoder's `forward(td)` takes the post-collate batch, writes per-layer features `(N, layers, features)` under `atoms.node_features` (`pairs.edge_features` for Allegro) and exposes its primitives as methods; the named products (`MaceMatpes`, `AllegroPotential`, `PiNetPotential`, …) subclass the body and `molix.autograd.Potential` and own only `energy(frame)` + `forward`; reusable physics heads stay in molpot. Element-table validation is `molzoo.encoder.ElementTable`, spent once on the first eager call and folded out under tracing.
 - **Pydantic specs**: molzoo model specs are torch-free `BaseModel`s with `ConfigDict(extra="forbid")` — typed fields and validators, no `getattr(spec, …, default)` duck typing; official-archive configs (`MaceOfficialConfig`, `NequipConfig`) use `extra="ignore"` and declare only the fields that are read; molpot head specs that carry tensors use `ConfigDict(arbitrary_types_allowed=True, frozen=True)`
 - **cuEquivariance**: Tensor products use `cuequivariance` / `cuequivariance_torch` for GPU-accelerated equivariant operations. Edge convolutions always use cueq's indexed TP (conv fusion): global `indices_out` with `size_out=N`. Build every cue op through `molrep.cueq` — kernel methods pinned, so CUDA never runs cue's PyTorch fallback; no `use_fallback` / `method="naive"`; CPU may fall back (operator rule 2026-10-15, notes topic `cue-kernels-only`). Never `conv_tp(x[source], …)` + Python `scatter_sum`, which materialises an `(E, target.dim)` message, and never add a local TP/CG kernel (`.claude/notes/notes.md` topic `cueq-conv-fusion`).
-- **Force derivation (one op)**: every batch-level derivative is `molix.autograd.Derivative(energy, *, of="graphs.energy", wrt=(), outputs=None)` — `energy(frame) -> frame` writes `of`; `wrt` names TensorFrame keys (`"atoms.pos" → atoms.forces` scale −1, `"graphs.strain" → graphs.virial` (1,3,3) symmetrised, any other column → `<ns>.<name>_grad`). The op makes a leaf for every variable unless the column already is a live leaf (then it is differentiated as is and left in the frame — the caller's), rebuilds live edge geometry from it, does the one `torch.autograd.grad`, puts the caller's buffers back, detaches `of` iff grad is off; `Derivative.mark_leaves(frame)` is the eager prologue that marks the columns so a force-supervised training step traces as one graph on stock torch (the default steps run it in `forward_loss` before the traced body). Every potential exposes `energy(frame)` and takes `wrt=()` at construction; `forward` is the op built in `__init__` (`MaceMatpes(..., wrt=("atoms.pos",))` ≡ `Derivative(MaceMatpes(...).energy, wrt=("atoms.pos",))`; base class `molix.autograd.Potential`, never `Derivative(<potential object>)`). `MD` composes `Derivative(pots.energy, wrt=("atoms.pos"[, "graphs.strain"]))` once per run; compile with `Compiler(...)(op)` after one eager forward — no `compile_core`, no `compute_forces`, no `calc_forces` family. `ForceDerivation` stays only as the tensor-level `F = -dE/dpos` for `BasePotential` / `Sonata`; `HessianDerivation` owns its own leaf. Do not hand-roll a second force or virial path anywhere (decision 2026-09-11, spec `derivation-head-04-molix-derivative`).
-- **Functional composition**: `PotentialComposer` chains pooling → parameter heads → potential terms → aggregation
+- **Force derivation (one op)**: every batch-level derivative is `molix.autograd.Derivative(energy, *, of="graphs.energy", wrt=(), outputs=None)` — `energy(frame) -> frame` writes `of`; `wrt` names TensorFrame keys (`"atoms.pos" → atoms.forces` scale −1, `"graphs.strain" → graphs.virial` (1,3,3) symmetrised, any other column → `<ns>.<name>_grad`). The op makes a leaf for every variable unless the column already is a live leaf (then it is differentiated as is and left in the frame — the caller's), rebuilds live edge geometry from it, does the one `torch.autograd.grad`, puts the caller's buffers back, detaches `of` iff grad is off; `Derivative.mark_leaves(frame)` is the eager prologue that marks the columns so a force-supervised training step traces as one graph on stock torch (the default steps run it in `forward_loss` before the traced body). Every potential exposes `energy(frame)` and takes `wrt=()` at construction; `forward` is the op built in `__init__` (`MaceMatpes(..., wrt=("atoms.pos",))` ≡ `Derivative(MaceMatpes(...).energy, wrt=("atoms.pos",))`; base class `molix.autograd.Potential`, never `Derivative(<potential object>)`). `MD` composes `Derivative(pots.energy, wrt=("atoms.pos"[, "graphs.strain"]))` once per run; compile with `Compiler(...)(op)` after one eager forward — no `compile_core`, no `compute_forces`, no `calc_forces` family. There is no other force module: `Sonata`, `PotentialComposer`, `Rondo` and the model zoo are `Potential`s on this op; `HessianDerivation` owns its own leaf and calls `torch.autograd` directly. Do not hand-roll a second force or virial path anywhere (decision 2026-09-11, spec `derivation-head-04-molix-derivative`).
+- **Composed potentials**: `PotentialComposer` and `Sonata` are `molix.autograd.Potential`s — `energy` runs heads → terms → aggregation on the frame, `forward` is the `Derivative`
 - **Hook protocol**: Lifecycle callbacks (`on_train_start`, `on_epoch_end`, etc.) via `Hook` protocol
 - **Step protocol**: `DefaultTrainStep` / `DefaultEvalStep` wrap forward → loss → backward → optimizer; `forward_loss(trainer, state, batch)` (model forward + loss) is the one traced function and `Trainer.compile(step=True)` compiles it in place (`step=False` compiles the model only; a step whose traced body host-syncs declares `untraceable` and is refused by name). `MultiTaskTrainStep` reads the task label in the eager prologue, outside that body. `smoke` runs the same `forward_loss`. Spec `derivation-head-03-step-compile`.
 
@@ -746,7 +763,7 @@ which is the thing that is forbidden, not the type declaration.
 
 **New model family** (molzoo): a subpackage `molzoo/<family>/` in MACE's shape. `spec.py`: torch-free pydantic spec (`extra="forbid"`, every default here). `encoder.py`: the body, `class <Family>Encoder(ElementTable, nn.Module)` (`molzoo.encoder.ElementTable`), `__init__(spec)`, primitives as methods, `forward(td: TensorDict) -> TensorDict` reading `td["atoms", "Z"]` / `td["pairs", ...]` and writing per-layer features `(N, layers, features)` under `atoms.node_features`. `layers.py`: the blocks only this family uses (generic ones come from `molrep`). `potential.py`: `class <Family>Potential(Potential, <Family>Encoder)` taking `(spec, *, wrt=())`, implementing `energy(frame)` only and ending `__init__` with `self._derivative = Derivative(self.energy, wrt=wrt)`; official weights, if any, through a `checkpoint.py` key table + an `OfficialArchive` reader in `utils.py` behind `.load(path, *, wrt=(), ...)` and `CheckpointRemap(table, skip=...)`. Export eagerly from `molzoo/<family>/__init__.py`, never from `molzoo/__init__.py`. Add the paper reference and the spec under `src/molzoo/specs/` (mirrored to `docs/molzoo/specs/`).
 
-**New potential** (molpot): one class per molrs style under `molpot.potentials` (`bond.py`, `angle.py`, `dihedral.py`, `improper.py`, `pair.py`), registered with `@register`, built from the force field by `from_style` and reached through `Potentials.from_forcefield(ff)`; a bonded style implements `term_energy(x, **params)`, a pair style prices `pairs` under the field's `special_bonds`. Forces come from `molix.autograd.Derivative`. `BasePotential` (`forward() -> scalar`, `ForceDerivation`) is the fixed tabulated path (MD / export / OPLS-AA).
+**New potential** (molpot): one class per molrs style under `molpot.potentials` (`bond.py`, `angle.py`, `dihedral.py`, `improper.py`, `pair.py`), registered with `@register`, built from the force field by `from_style` and reached through `Potentials.from_forcefield(ff)`; a bonded style implements `term_energy(x, **params)`, a pair style prices `pairs` under the field's `special_bonds`. Forces come from `molix.autograd.Derivative`. `BasePotential` (keyword-only tensor kernels: `forward(*, pos, <term>_index, <term>_types, term_batch, num_graphs, tables)` reducing per graph) is the fixed tabulated path (MD / export / OPLS-AA).
 
 **New embedding/interaction** (molrep): only when at least two families use it — a block that serves one model lives in that model's `layers.py`. Pure `nn.Module`; build cue ops through `molrep.cueq`.
 
@@ -871,9 +888,10 @@ See `.claude/notes/learnable-classical-ff.md`. Short form:
    which parameters is the training step's: `molix.core.steps.JointObjective(trainable=)`
    detaches the other tables between `tables` and `energy`; the optimizer is
    `Adam(model.parameters())`. Training is ByteFF's joint multi-source step
-   (`JointTrainStep` + `JointDataModule`). `forward` writes `graphs.energy_pred`,
-   `atoms.forces_pred` and every table column (`bonds.k`, `bonds.k_ref`, …,
-   `atoms.charge`); DFT labels at `graphs.energy` / `atoms.forces` are restored.
+   (`JointTrainStep` + `JointDataModule`). `energy` writes `graphs.energy` and
+   every table column (`bonds.k`, `bonds.k_ref`, …, `atoms.charge`); `forward`
+   adds `atoms.forces_pred`. Placing predictions beside the DFT labels is the
+   joint step's job (`molix.frame.beside_labels`), not the model's.
    Required input columns (MolHub writes them for THEMol): `atoms.formal_charge`,
    `ring_connectivity`, `min_ring_size`, `gaff2_sigma`, `gaff2_epsilon`;
    `bonds.bond_type`, `in_ring`; `impropers` as three cyclic rows per centre.
