@@ -98,6 +98,13 @@ TOL_GRAPH_E = 1e-11  # eV, |E| ~ 1e3-1e4 so 2e-13 is below one ulp
 #: whose terms inductor reorders: per-atom energies replay to 0.0, the k-space
 #: term to 2.3e-12 eV and its force gradient to 1.3e-12 eV/A (job 3978557).
 TOL_GRAPH_F_KSPACE = 5e-12
+#: Polar's molecular path sums every same-graph pair of the Hartree kernel in one
+#: reduction inductor reorders: per-atom energies replay to 1e-14, the force
+#: array to 6.4e-12 eV/A (job 3992992).
+TOL_GRAPH_F_HARTREE = 1e-11
+#: Allegro-OAM-L is an fp32 package: its virial under CUDA graphs sits at
+#: 2.0-2.4e-13 eV against eager (jobs 3945974, 3992992), fp32 replay noise.
+TOL_GRAPH_W_FP32 = 5e-13
 
 
 class Report:
@@ -186,7 +193,13 @@ def explain_one_graph(name: str, target, batch) -> None:
 
 
 def cuda_graph_vs_eager(
-    name: str, model, batch, *, want_virial: bool = False, tol_f: float = TOL_GRAPH_F
+    name: str,
+    model,
+    batch,
+    *,
+    want_virial: bool = False,
+    tol_f: float = TOL_GRAPH_F,
+    tol_w: float = TOL_GRAPH_F,
 ) -> None:
     """``Compiler(cuda_graphs=True)(model)`` under no_grad, replayed, vs eager."""
     keys = [ENERGY_KEY, ATOMIC_ENERGY_KEY, FORCES_KEY] + ([VIRIAL_KEY] if want_virial else [])
@@ -224,7 +237,7 @@ def cuda_graph_vs_eager(
         report.check(
             f"{name} cuda-graphs vs eager |dW|",
             max_abs(got[VIRIAL_KEY], ref[VIRIAL_KEY]),
-            TOL_GRAPH_F,
+            tol_w,
             "eV",
         )
 
@@ -402,8 +415,9 @@ def check_allegro_models(device: torch.device, *, quick: bool) -> None:
             cuda_graph_vs_eager, "allegro.tiny", tiny_model, tiny_batch
         )
     for name, model, batch, periodic in loaded:
+        tol_w = TOL_GRAPH_W_FP32 if "OAM-L" in name else TOL_GRAPH_F
         guarded(f"{name} cuda-graphs")(
-            cuda_graph_vs_eager, name, model, batch, want_virial=periodic
+            cuda_graph_vs_eager, name, model, batch, want_virial=periodic, tol_w=tol_w
         )
 
 
@@ -570,7 +584,10 @@ def check_mace_compile(device: torch.device, moved: dict) -> None:
     for name in ("matpes", "omol", "polar"):
         if name in moved:
             model, batch = moved[name]
-            guarded(f"mace.{name} cuda-graphs")(cuda_graph_vs_eager, f"mace.{name}", model, batch)
+            tol_f = TOL_GRAPH_F_HARTREE if name == "polar" else TOL_GRAPH_F
+            guarded(f"mace.{name} cuda-graphs")(
+                cuda_graph_vs_eager, f"mace.{name}", model, batch, tol_f=tol_f
+            )
 
 
 # --------------------------------------------------------------------------- main

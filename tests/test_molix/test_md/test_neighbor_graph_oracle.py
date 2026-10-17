@@ -8,6 +8,7 @@ Does **not** import production neighbor backends into the oracle module.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -189,7 +190,11 @@ class TestWrapInvarianceGraph:
 
 
 def _matpes_weights() -> Path | None:
-    p = Path("/home/jicli594/work/mace_models")
+    """The offline MatPES assets (``MOLNEX_MACE_WEIGHTS_DIR``), or ``None``."""
+    directory = os.environ.get("MOLNEX_MACE_WEIGHTS_DIR")
+    if directory is None:
+        return None
+    p = Path(directory)
     if (p / "matpes_r2scan_config.json").is_file() and (
         p / "matpes_r2scan_cueq_state.pt"
     ).is_file():

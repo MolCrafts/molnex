@@ -342,7 +342,7 @@ class Derivative(nn.Module):
                     frame[PAIR_DIST_KEY] = diff.norm(dim=-1)
                 if has_shifts:
                     frame[SHIFTS_KEY] = shifts
-            before = frozenset(frame.keys(include_nested=True, leaves_only=True))
+            before = {key: frame[key] for key in _leaf_keys(frame)}
             frame = self._call(frame, **energy_kwargs)
             energy = cast(torch.Tensor, frame[self.of])
             grads = torch.autograd.grad(
@@ -367,14 +367,18 @@ class Derivative(nn.Module):
                 frame[SHIFTS_KEY] = shifts_buf
         if not create_graph:
             # The single backward consumed the energy graph: every column the
-            # energy attached to it goes back detached (one left attached is a
-            # dynamo break and a later backward's error). The variables were
-            # restored to the caller's own buffers above and are not touched.
-            written = [
-                key
-                for key in frame.keys(include_nested=True, leaves_only=True)
-                if key not in before
-            ]
-            for key in (self.of, *written):
-                frame[key] = cast(torch.Tensor, frame[key]).detach()
+            # energy added or replaced goes back detached (one left attached is
+            # a dynamo break and a later backward's error). The variables were
+            # restored to the caller's own objects above, so they are untouched.
+            for key in _leaf_keys(frame):
+                value = cast(torch.Tensor, frame[key])
+                if key not in before or value is not before[key]:
+                    frame[key] = value.detach()
         return frame
+
+
+def _leaf_keys(frame: TensorDictBase) -> tuple[tuple[str, str], ...]:
+    """``(namespace, column)`` of every tensor column, from the two dict levels."""
+    return tuple(
+        (namespace, column) for namespace in frame.keys() for column in frame[namespace].keys()
+    )
