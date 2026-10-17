@@ -8,11 +8,17 @@ key table and its archive reader (``molzoo.mace.checkpoint`` /
 
 * :class:`CheckpointRemap` — rename by **longest matching prefix** (``None``
   drops the entry), drop the keys whose name contains a ``skip`` substring
-  (what the target rebuilds itself), land upstream's ``(in, out)`` ``.weight``
-  transposed on the ``.linear.weight`` of a module that **declares**
-  ``upstream_linear_layout = "in_out"`` (by type, never by shape), allow only
-  scalar-rank and cuEq-Linear singleton-axis reshapes, and refuse to leave any
-  ``nn.Parameter`` unfilled.
+  (what the target rebuilds itself), land upstream's ``.weight`` in the layout
+  the target module **declares by type, never by shape** — ``(in, out)``
+  transposed on the ``.linear.weight`` of an ``upstream_linear_layout =
+  "in_out"`` module, or converted by the :class:`ConvertedWeight` subclass's
+  ``upstream_weight`` — allow only scalar-rank and cuEq-Linear singleton-axis
+  reshapes, and refuse to leave any ``nn.Parameter`` unfilled.
+* :class:`ConvertedWeight` — the base of a module whose forward reads its
+  ``weight`` in a layout the upstream checkpoint does not ship. The
+  conversion is a function of the model package's checkpoint module (where
+  the official dialect lives), never a method of the module; the subclass
+  names it, and the loader applies it once at the boundary.
 * :class:`OfficialArchive` — the one reader pattern: ``read(path) ->
   (state, config)``, unpickling through :class:`StubUnpickler`, which rebuilds
   a pickled upstream module *tree* without importing upstream (every class
@@ -167,6 +173,22 @@ class OfficialArchive:
         return dict(state)
 
 
+class ConvertedWeight(nn.Module):
+    """A module whose ``weight`` the upstream checkpoint stores in another layout.
+
+    The forward reads one layout; the official checkpoint ships another
+    (cuEquivariance's flat weight operand, for the MACE per-element maps).
+    The conversion belongs to the boundary: a function of the model package's
+    checkpoint module, which a subclass names as :attr:`upstream_weight`.
+    :meth:`CheckpointRemap.load` applies it to upstream's ``<p>.weight`` by
+    this type — never by shape — before any shape comparison, as it transposes
+    a declared ``in_out`` linear.
+    """
+
+    #: ``(module, upstream weight) -> weight`` in the layout the forward reads.
+    upstream_weight: ClassVar[Callable[[nn.Module, torch.Tensor], torch.Tensor]]
+
+
 class CheckpointRemap:
     """Translate official checkpoint keys into molnex ``state_dict`` keys.
 
@@ -254,11 +276,14 @@ class CheckpointRemap:
         """Load an official checkpoint into ``model``, strictly.
 
         Preflight names, shapes and parameter coverage before writing tensors.
-        A module declaring ``upstream_linear_layout = "in_out"`` has upstream's
-        ``<p>.weight`` ``(in, out)`` transposed onto its ``<p>.linear.weight`` —
-        by that declaration, before any shape comparison. Otherwise only scalar
-        rank differences and cuEq Linear's singleton shared-weight axis may be
-        reshaped; equal numel alone does not establish a layout.
+        The target module's type, not the tensor's shape, decides how
+        upstream's ``<p>.weight`` lands: a module declaring
+        ``upstream_linear_layout = "in_out"`` has the ``(in, out)`` matrix
+        transposed onto its ``<p>.linear.weight``; a :class:`ConvertedWeight`
+        has its declared ``upstream_weight`` applied. Both before any shape
+        comparison. Otherwise only scalar rank differences and cuEq Linear's
+        singleton shared-weight axis may be reshaped; equal numel alone does
+        not establish a layout.
 
         "Learnable" is defined as membership in ``model.named_parameters()``.
         Never a ``.weight`` / ``.bias`` name heuristic — that shortcut once
@@ -294,17 +319,22 @@ class CheckpointRemap:
         # model's own must be left as constructed — so it takes no part in the
         # name, shape or coverage preflight below, all of which speak tensors.
         renamed = {k: v for k, v in renamed.items() if not _is_extra_state(k)}
-        # A module declaring ``upstream_linear_layout = "in_out"`` keeps its weight
-        # in a contained ``nn.Linear`` (``<p>.linear.weight``, ``(out, in)``) where
-        # upstream stores ``<p>.weight`` as ``(in, out)``. Type-driven and before
-        # any shape comparison: a square hidden layer would otherwise match by
-        # shape and load untransposed — the silently wrong result the equal-numel
-        # rule below exists to refuse.
+        # The target type decides the layout of upstream's ``<p>.weight``, before
+        # any shape comparison: a module declaring ``upstream_linear_layout =
+        # "in_out"`` keeps its weight in a contained ``nn.Linear``
+        # (``<p>.linear.weight``, ``(out, in)``) where upstream stores ``(in,
+        # out)``; a ``ConvertedWeight`` reads a layout upstream never ships and
+        # names the boundary function that produces it. A square hidden layer,
+        # or an equal-numel flat weight, would otherwise match by shape and load
+        # unconverted — the silently wrong result the equal-numel rule below
+        # exists to refuse.
         for path, module in model.named_modules():
-            if getattr(type(module), "upstream_linear_layout", None) != "in_out":
-                continue
             key = f"{path}.weight" if path else "weight"
-            if key in renamed:
+            if key not in renamed:
+                continue
+            if isinstance(module, ConvertedWeight):
+                renamed[key] = type(module).upstream_weight(module, renamed[key])
+            elif getattr(type(module), "upstream_linear_layout", None) == "in_out":
                 renamed[f"{path}.linear.weight" if path else "linear.weight"] = renamed.pop(key).t()
         own = {k: v for k, v in model.state_dict().items() if not _is_extra_state(k)}
 

@@ -37,6 +37,7 @@ from tests.test_molzoo.test_mace.conftest import (
     SINGLE_GRAPH,
     TINY_POLAR_KWARGS,
     full_edge_index,
+    official_layout,
 )
 
 polar_remap = CheckpointRemap(polar_keys, on_unexpected="return", skip=MACE_SKIP)
@@ -274,6 +275,7 @@ class TestPolarKeys:
             for k, v in model.state_dict().items()
             if torch.is_tensor(v)  # ``_extra_state`` is metadata, not a checkpoint tensor
         }
+        native = official_layout(model, native)
         official = {}
         for key, value in native.items():
             if key.endswith("readout.linear_mid.linear.weight"):

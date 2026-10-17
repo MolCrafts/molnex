@@ -20,6 +20,16 @@ stale), OMol and Polar return the list (those families ship auxiliary heads
 this port does not model) — which each product states as the
 ``on_unexpected`` it passes.
 
+Two weights change **layout** at this boundary, not only name. cuEquivariance
+keeps every product's weight as one flat row ``(1, numel)``; the per-element
+maps of :mod:`molzoo.mace.layers` store theirs element-major, one row per
+element, so a call gathers rows instead of transposing blocks.
+:func:`element_linear_weight` and :func:`one_hot_weight` are those
+conversions — pure functions of the flat tensor and the target module, which
+the module types declare as their ``upstream_weight``
+(:class:`molzoo.checkpoint.ConvertedWeight`) and the loader applies once,
+by type. Nothing downstream ever sees the flat layout.
+
 Reference:
     Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
     Networks for Fast and Accurate Force Fields" NeurIPS 2022.
@@ -29,6 +39,13 @@ Reference:
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import torch
+
+if TYPE_CHECKING:
+    from molzoo.mace.layers import ElementLinear, OneHotLinear
 
 #: Substrings of checkpoint keys that carry nothing learned and that the
 #: modules rebuild from their irreps: cuEquivariance's symbolic graph
@@ -100,3 +117,59 @@ polar_keys: dict[str, str | None] = {
         for name in ("linear_mid", "linear_2")
     },
 }
+
+
+def element_linear_weight(linear: ElementLinear, flat: torch.Tensor) -> torch.Tensor:
+    """``skip_tp``'s weight in :class:`~molzoo.mace.layers.ElementLinear`'s layout.
+
+    The fully connected product keeps one flat row, path by path, each path's
+    block ``(u, C, w)``; the module keeps ``(C, Σ_p u_p·w_p)``, every path's
+    ``(u, w)`` block of an element contiguous in that element's row, at the
+    column the path records.
+
+    Args:
+        linear: The target module; its paths carry each block's offset in the
+            flat weight and its column in the module's.
+        flat: The product's weight ``(1, Σ_p u_p·C·w_p)``.
+
+    Returns:
+        A new tensor ``(C, Σ_p u_p·w_p)``.
+
+    Raises:
+        ValueError: If ``flat`` is not that one-row tensor — an equal numel in
+            another shape is not the product's layout.
+    """
+    elements = linear.num_elements
+    numel = sum(path.u * elements * path.w for path in linear.paths)
+    if tuple(flat.shape) != (1, numel):
+        raise ValueError(
+            f"expected the product's flat weight (1, {numel}), got {tuple(flat.shape)}"
+        )
+    weight = flat.new_empty(elements, sum(path.u * path.w for path in linear.paths))
+    for path in linear.paths:
+        size = path.u * elements * path.w
+        block = flat[0, path.weight_start : path.weight_start + size].view(path.u, elements, path.w)
+        weight[:, path.column : path.column + path.u * path.w] = block.transpose(0, 1).reshape(
+            elements, path.u * path.w
+        )
+    return weight
+
+
+def one_hot_weight(lookup: OneHotLinear, flat: torch.Tensor) -> torch.Tensor:
+    """The linear's weight in :class:`~molzoo.mace.layers.OneHotLinear`'s layout.
+
+    Args:
+        lookup: The target module.
+        flat: ``cuet.Linear(Cx0e → Fx0e)``'s weight ``(1, C·F)``.
+
+    Returns:
+        ``(C, F)``: row ``e`` is the linear's output on ``one_hot(e)`` before
+        the path coefficient.
+
+    Raises:
+        ValueError: If ``flat`` is not that one-row tensor.
+    """
+    shape = (1, lookup.num_elements * lookup.out_features)
+    if tuple(flat.shape) != shape:
+        raise ValueError(f"expected the linear's flat weight {shape}, got {tuple(flat.shape)}")
+    return flat.reshape(lookup.num_elements, lookup.out_features)

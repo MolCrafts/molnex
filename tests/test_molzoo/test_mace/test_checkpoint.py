@@ -2,13 +2,15 @@
 
 Each family's table is exercised through the shared
 :class:`molzoo.checkpoint.CheckpointRemap` with :data:`MACE_SKIP`: a round trip
-of a model's own ``state_dict`` renamed into official cueq names and loaded
+of a model's own ``state_dict`` renamed into official cueq names — and, for
+the per-element maps, put back into cueq's flat layout
+(:func:`tests.test_molzoo.test_mace.conftest.official_layout`) — and loaded
 back into a differently initialised model. The inverse name tables below are
 written out **by hand** rather than derived from the tables under test, so a
 wrong entry in the production table cannot cancel itself out. Generic remap
-behaviour (strictness, reshapes, policies) is asserted once in
-``tests/test_molzoo/test_checkpoint.py``; the Polar table's round trip sits in
-``test_polar.py`` beside the blocks it names.
+behaviour (strictness, reshapes, policies, the type-driven weight rule) is
+asserted once in ``tests/test_molzoo/test_checkpoint.py``; the Polar table's
+round trip sits in ``test_polar.py`` beside the blocks it names.
 
 The asset-gated cases load the real official weights
 (:data:`WEIGHTS_DIR_ENV`) and are ``slow``.
@@ -26,14 +28,25 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+import cuequivariance as cue
 import pytest
 import torch
 from tensordict import TensorDict
 
 from molzoo.checkpoint import CheckpointRemap
-from molzoo.mace.checkpoint import MACE_SKIP, les_keys, matpes_keys, off_keys, omol_keys
+from molzoo.mace.checkpoint import (
+    MACE_SKIP,
+    element_linear_weight,
+    les_keys,
+    matpes_keys,
+    off_keys,
+    omol_keys,
+    one_hot_weight,
+)
+from molzoo.mace.layers import ElementLinear, OneHotLinear
 from molzoo.mace.potential import MaceLes, MaceMatpes, MaceOff, MaceOmol, MacePotential
 from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACESpec
+from tests.test_molzoo.test_mace.conftest import official_layout
 
 matpes_remap = CheckpointRemap(matpes_keys, skip=MACE_SKIP)
 omol_remap = CheckpointRemap(omol_keys, on_unexpected="return", skip=MACE_SKIP)
@@ -116,18 +129,21 @@ def _official_weights_absent(filename: str) -> bool:
 
 
 def _official_state(model: torch.nn.Module, names: Mapping[str, str]) -> dict[str, torch.Tensor]:
-    """Rename a model's own ``state_dict`` back into official cueq key names.
+    """A model's own ``state_dict`` as an official cueq checkpoint would carry it.
+
+    Official key names, and the per-element maps' weights in cueq's flat
+    layout (:func:`official_layout`).
 
     Args:
         model: Source model.
         names: Molnex prefix → official prefix (longest match wins).
 
     Returns:
-        The same tensors under the names an official checkpoint would use.
+        The tensors under the names an official checkpoint would use.
     """
     ordered = sorted(names.items(), key=lambda item: -len(item[0]))
     out: dict[str, torch.Tensor] = {}
-    for key, value in model.state_dict().items():
+    for key, value in official_layout(model, model.state_dict()).items():
         # A cueq checkpoint holds tensors only; ``_extra_state`` is molnex's
         # own module metadata and never appears in the artifact being faked.
         if not torch.is_tensor(value):
@@ -214,6 +230,25 @@ class TestCheckpointRemap:
 
     def test_roundtrip_restores_every_parameter_les(self, tiny_les_spec) -> None:
         _assert_roundtrip(MaceLes, tiny_les_spec, les_keys, LES_OFFICIAL_NAMES)
+
+
+def test_element_linear_weight_refuses_an_equal_numel_in_another_shape() -> None:
+    """The boundary takes the product's one flat row only — the module's own layout is not it."""
+    linear = ElementLinear(
+        cue.Irreps("O3", "4x0e"),
+        cue.Irreps("O3", "3x0e"),
+        cue.Irreps("O3", "5x0e"),
+        dtype=torch.float64,
+    )
+    with pytest.raises(ValueError, match="flat weight"):
+        element_linear_weight(linear, linear.weight.detach())
+
+
+def test_one_hot_weight_refuses_an_equal_numel_in_another_shape() -> None:
+    """The boundary takes the linear's one flat row only — the ``(C, F)`` table is not it."""
+    lookup = OneHotLinear(cue.Irreps("O3", "3x0e"), cue.Irreps("O3", "5x0e"), dtype=torch.float64)
+    with pytest.raises(ValueError, match="flat weight"):
+        one_hot_weight(lookup, lookup.weight.detach())
 
 
 @pytest.mark.slow

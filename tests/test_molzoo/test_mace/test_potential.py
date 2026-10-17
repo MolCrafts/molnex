@@ -39,6 +39,7 @@ from tests.test_molzoo.test_mace.conftest import (
     SINGLE_GRAPH,
     TINY_MATPES_KWARGS,
     full_edge_index,
+    official_layout,
 )
 
 #: fp64 agreement of one energy evaluated two ways (reduction order only).
@@ -149,8 +150,8 @@ def _write_checkpoint(directory: Path, spec: MACEMatpesSpec, model: MaceMatpes) 
 
     The official → molnex key translation is ``test_checkpoint.py``'s fact,
     so the weights carry the model's own names (the remap is the identity on
-    them) with the element table under its official key — the one entry
-    ``load`` reads itself.
+    them), in the official layout (``official_layout``), with the element
+    table under its official key — the one entry ``load`` reads itself.
     """
     official: dict[str, object] = {
         "atomic_numbers": spec.atomic_numbers,
@@ -169,7 +170,9 @@ def _write_checkpoint(directory: Path, spec: MACEMatpesSpec, model: MaceMatpes) 
     }
     config_path = directory / "matpes_config.json"
     config_path.write_text(json.dumps(official))
-    state = {k: v for k, v in model.state_dict().items() if torch.is_tensor(v)}
+    state = official_layout(
+        model, {k: v for k, v in model.state_dict().items() if torch.is_tensor(v)}
+    )
     state["atomic_numbers"] = state.pop("z_table")
     torch.save(state, directory / "matpes_cueq_state.pt")
     return config_path

@@ -9,7 +9,13 @@ import sys
 import pytest
 import torch
 
-from molzoo.checkpoint import CheckpointRemap, ModuleStub, OfficialArchive, StubUnpickler
+from molzoo.checkpoint import (
+    CheckpointRemap,
+    ConvertedWeight,
+    ModuleStub,
+    OfficialArchive,
+    StubUnpickler,
+)
 
 
 class TestCheckpointRemap:
@@ -53,6 +59,27 @@ class TestCheckpointRemap:
         upstream = torch.arange(9.0).reshape(3, 3)  # (in, out); not symmetric
         assert CheckpointRemap({}).load(target, {"m.weight": upstream}) == ([], [])
         torch.testing.assert_close(target.m.linear.weight, upstream.t(), atol=0, rtol=0)
+
+    def test_a_declared_upstream_weight_is_converted_by_type_not_shape(self):
+        """A ``ConvertedWeight`` has its ``upstream_weight`` applied to upstream's
+        ``.weight`` — even when the shapes already agree and no reshape rule
+        would have fired."""
+
+        def transposed(module: torch.nn.Module, weight: torch.Tensor) -> torch.Tensor:
+            return weight.t()
+
+        class Declared(ConvertedWeight):
+            upstream_weight = transposed
+
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.zeros(3, 3))
+
+        target = torch.nn.Module()
+        target.m = Declared()
+        upstream = torch.arange(9.0).reshape(3, 3)  # not symmetric
+        assert CheckpointRemap({}).load(target, {"m.weight": upstream}) == ([], [])
+        torch.testing.assert_close(target.m.weight, upstream.t(), atol=0, rtol=0)
 
     def test_unknown_policy_is_refused(self):
         with pytest.raises(ValueError, match="on_unexpected"):

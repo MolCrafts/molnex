@@ -13,6 +13,7 @@ import torch
 from molix import config
 from molix.F.scatter import scatter_sum
 from molrep import cueq
+from molzoo.mace.checkpoint import element_linear_weight, one_hot_weight
 from molzoo.mace.layers import (
     AgnosticInteraction,
     AgnosticResidualInteraction,
@@ -377,14 +378,19 @@ class TestRadialMLP:
 
 
 def _pair(irreps_in: str, num_elements: int, irreps_out: str):
-    """The fully connected product and an ElementLinear holding its weight."""
+    """The fully connected product and an ElementLinear holding its weight.
+
+    The product's flat weight reaches the module the way an official
+    checkpoint's does: through the boundary conversion.
+    """
     i1, i3 = cue.Irreps("O3", irreps_in), cue.Irreps("O3", irreps_out)
     attrs = cue.Irreps("O3", f"{num_elements}x0e")
     product = cueq.FullyConnectedTensorProduct(
         i1, attrs, i3, layout=cue.ir_mul, dtype=torch.float64
     )
     linear = ElementLinear(i1, attrs, i3, dtype=torch.float64)
-    linear.load_state_dict({"weight": product.weight.detach()})
+    with torch.no_grad():
+        linear.weight.copy_(element_linear_weight(linear, product.weight.detach()))
     return product, linear, i1
 
 
@@ -410,6 +416,11 @@ class TestElementLinear:
             rtol=0.0,
         )
 
+    def test_weight_is_one_row_per_element(self):
+        """``(C, Σ_p u_p·w_p)``: element ``e``'s ``(u, w)`` block of every path is row ``e``."""
+        _, linear, _ = _pair("4x0e+4x1o", 3, "5x0e+5x1o")
+        assert linear.weight.shape == (3, 2 * 4 * 5)
+
     def test_attributes_must_be_scalars(self):
         with pytest.raises(ValueError, match="Cx0e"):
             ElementLinear(
@@ -427,10 +438,18 @@ class TestOneHotLinear:
         attrs, out = cue.Irreps("O3", "7x0e"), cue.Irreps("O3", "5x0e")
         linear = cueq.Linear(attrs, out, layout=cue.ir_mul, dtype=torch.float64)
         lookup = OneHotLinear(attrs, out, dtype=torch.float64)
-        lookup.load_state_dict({"weight": linear.weight.detach()})
+        with torch.no_grad():
+            lookup.weight.copy_(one_hot_weight(lookup, linear.weight.detach()))
         element = torch.randint(0, 7, (13,))
         one_hot = torch.nn.functional.one_hot(element, 7).double()
         torch.testing.assert_close(lookup(element), linear(one_hot), atol=1e-12, rtol=0.0)
+
+    def test_weight_is_the_row_table(self):
+        """``(C, F)``: the lookup indexes the weight directly, no per-call view."""
+        lookup = OneHotLinear(
+            cue.Irreps("O3", "7x0e"), cue.Irreps("O3", "5x0e"), dtype=torch.float64
+        )
+        assert lookup.weight.shape == (7, 5)
 
     @pytest.mark.parametrize(
         ("irreps_in", "irreps_out"),

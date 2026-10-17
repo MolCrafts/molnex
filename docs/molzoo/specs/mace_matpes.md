@@ -171,7 +171,7 @@ There is no `mace` block namespace.
 | A3 | cuEq `O3` group, not the MACE-compatible `O3` variant | same route the OMOL port validated; CG conventions differ by ~1e-8/op | low | §7.1 parity |
 | A4 | Weight import consumes a cueq-converted `state_dict`; conversion runs out of tree | molnex must not import `mace-torch` | low | strict loader, §7.2 |
 | A5 | `skip_tp`'s weight follows the module dtype with no rebuild | it is a plain parameter of `ElementLinear` (A6); the product it replaced baked its precision in at construction | low | `ElementLinear.weight` is a plain `nn.Parameter`: no kernel submodule to rebuild |
-| A6 | `skip_tp` as a per-element linear, `molzoo.mace.layers.ElementLinear`: each atom's `(u, w)` weight block gathered by element and contracted, on every device (2026-10-17; `naive` until 2026-10-15, `fused_tp` on 10-15, cue's `indexed_linear_B` kernel on 10-16) | the product against a one-hot is linear in the element-selected weight block, coefficient `1/sqrt(u·C)` per path (read from cue's descriptor); same parameter and layout as the product, so checkpoints load unchanged. cue's `fused_tp` runs the dense product on a fallback kernel: 791 ms vs 3.7 ms for 4600 atoms (forward + input gradient, GH200), 90% of a MACE-MP force call. cue 0.12.0's `indexed_linear_B` (atoms sorted by element, one call per path) reads the counts on the host — one sync per call — and invalidates a CUDA-graph capture (`cudaErrorStreamCaptureInvalidated`, GH200 job 3972523), so `Compiler(cuda_graphs=True)` cannot run it; against it the gather is 1.1–1.3× slower forward, 1–2× faster forward + input gradient, and holds `u·w` floats per atom and path (4096 atoms, 89 elements, 128 channels, fp32: 0.79 vs 0.45 GiB peak) | low (equal to the product: ≤3.3e-16 fp64 CPU; CUDA graphs = eager to 0.0 eV, job 3972523) | `tests/test_molzoo/test_mace/test_layers.py::TestElementLinear` |
+| A6 | `skip_tp` as a per-element linear, `molzoo.mace.layers.ElementLinear`: the weight is held element-major, `(C, Σ_p u_p·w_p)` — row `e` is element `e`'s `(u, w)` block of every path — so a call gathers every atom's row once (`index_select` on the `ElementIndex`) and runs one `bmm` `(N, d, u) @ (N, u, w)` per path, on every device (2026-10-17 native layout + `bmm`; earlier on 10-17 the gather ran over the product's own flat `(u, C, w)` blocks with a per-call `einsum` transpose; `naive` until 2026-10-15, `fused_tp` on 10-15, cue's `indexed_linear_B` kernel on 10-16) | the product against a one-hot is linear in the element-selected weight block, coefficient `1/sqrt(u·C)` per path (read from cue's descriptor). The product's layout — one flat row of path-major `(u, C, w)` blocks — exists only in the official checkpoint and is converted once at that boundary: `molzoo.mace.checkpoint.element_linear_weight`, applied by `CheckpointRemap.load` by target type (`molzoo.checkpoint.ConvertedWeight`), refusing any other shape of equal numel; `node_embedding` and the residual source / target embeddings likewise (`OneHotLinear`, `(C, F)`, `one_hot_weight`). cue's `fused_tp` runs the dense product on a fallback kernel: 791 ms vs 3.7 ms for 4600 atoms (forward + input gradient, GH200), 90% of a MACE-MP force call. cue 0.12.0's `indexed_linear_B` (atoms sorted by element, one call per path) reads the counts on the host — one sync per call — and invalidates a CUDA-graph capture (`cudaErrorStreamCaptureInvalidated`, GH200 job 3972523), so `Compiler(cuda_graphs=True)` cannot run it; against it the gather is 1.1–1.3× slower forward, 1–2× faster forward + input gradient, and holds `u·w` floats per atom and path (4096 atoms, 89 elements, 128 channels, fp32: 0.79 vs 0.45 GiB peak) | low (equal to the product: ≤3.3e-16 fp64 CPU; CUDA graphs = eager to 0.0 eV with the 10-16 gather, job 3972523 — the `bmm` form awaits its GH200 run) | `tests/test_molzoo/test_mace/test_layers.py::TestElementLinear`, `::TestOneHotLinear`; `test_checkpoint.py::TestCheckpointRemap` round trips through the boundary conversion |
 | A7 | Energy and forces come from one forward differentiated in place, not a re-run closure | MACE's `get_outputs` shape; the closure form cost two full forwards per step | none (same math) | §7.2 `forward` ↔ `energy` row |
 | A8 | Shared configurable graph accumulation and differentiable model-input dtype boundary | fp64 MD state may use strict fp32 model calculation without fp32 baseline summation | numerical policy is not a long-time drift guarantee | `tests/test_molzoo/test_mace/test_potential.py::TestMacePotential::test_energy_dtype_selects_the_accumulation`, `::test_forward_applies_the_input_dtype`; official-weight 193-atom CPU/GPU three-step smoke, job 2063791 |
 
@@ -279,9 +279,12 @@ Block breakdown that located it (fp64, parts sum to the layer): `interaction[0]`
 passing `conv_tp` 0.7 ms.
 
 The measurements are at 193 atoms. Since 2026-10-15 `naive` is not an option
-(kernels only); since 2026-10-17 `skip_tp` is the per-atom gather of A6 (cue's
-`indexed_linear` kernel, run for a day in between, is 3.7 vs 4.3 ms against
-`naive` at 4600 atoms but cannot be captured into a CUDA graph).
+(kernels only); since 2026-10-17 `skip_tp` is the per-atom gather of A6: the
+weight held element-major, one row gather per call and one `bmm` per path, no
+per-call transpose — the product's flat layout exists only in the official
+checkpoint and is converted at load (cue's `indexed_linear` kernel, run for a
+day in between, is 3.7 vs 4.3 ms against `naive` at 4600 atoms but cannot be
+captured into a CUDA graph).
 
 #### `torch.compile` strategy
 
@@ -396,3 +399,11 @@ produces a model that runs and is wrong.
   `test_checkpoint.py::TestLoad`); §7.3 notes that today the whole `forward`
   op compiles; §9 notes the post-restructure removals and adds the docs mirror;
   header related-modules table header fixed.
+- 2026-10-17: §6 A6 and §7.3 — `ElementLinear` / `OneHotLinear` store their
+  weights in the layout the forward reads (`(C, Σ u·w)` / `(C, F)`); cue's
+  flat layout is converted once at the official boundary
+  (`molzoo.mace.checkpoint.element_linear_weight` / `one_hot_weight`, applied
+  by target type through `molzoo.checkpoint.ConvertedWeight`). No numerical
+  claim changed (CPU equality to the product re-measured at ≤3.3e-16); the
+  seeded tiny-model reference `benchmarks/_gh200_verify/step7_ref.pt` was
+  regenerated, since the parameter shapes move the init draw.

@@ -36,10 +36,11 @@ element from a one-hot (``argmax``) or re-sorts per layer.
 **One-hot linear.** :class:`OneHotLinear` is ``cuet.Linear(Cx0e → Fx0e)`` fed a
 one-hot: against a one-hot, the linear is the row lookup
 ``y_n = c · W[e_n, :]`` with ``c`` the descriptor's path coefficient
-(``1/√C``). The weight is the linear's own, same key and layout, so a
-checkpoint loads as before; the lookup replaces an ``(N, C) @ (C, F)`` product
-(MACE's ``node_embedding`` and the residual interaction's source / target
-embeddings).
+(``1/√C``). The weight is held as the ``(C, F)`` table that lookup reads;
+the official checkpoint's flat row is laid out once at load
+(:func:`molzoo.mace.checkpoint.one_hot_weight`). The lookup replaces an
+``(N, C) @ (C, F)`` product (MACE's ``node_embedding`` and the residual
+interaction's source / target embeddings).
 
 **Per-element linear (``skip_tp``).** MACE's ``skip_tp`` is
 ``FullyConnectedTensorProduct(x, one_hot(element))`` with ``C`` scalar
@@ -47,17 +48,21 @@ attributes. Against a one-hot, that product is a linear map whose weights depend
 only on the element: path ``p`` (an input irrep block to the output block of the
 same irrep) contributes
 
-.. math:: y_k = c_p \\, x_i \\, W_p[:, e, :],
+.. math:: y_k = c_p \\, x_i \\, W_p[e],
 
-with ``W_p`` the ``(u, C, w)`` block of the product's weight, ``e`` the atom's
+with ``W_p[e]`` the element's ``(u, w)`` block of the path, ``e`` the atom's
 element and ``c_p = 1/\\sqrt{u C}`` the descriptor's coefficient (identity in the
-irrep components). :class:`ElementLinear` keeps the product's weight unchanged —
-same parameter, same layout, so a checkpoint loads as before — and evaluates the
-map per atom on every device: the element's ``(u, w)`` block of each path is
-gathered (``index_select`` on the :class:`ElementIndex`) and contracted with
-the atom's block. The gather holds ``u·w`` floats per atom and path (MACE-MP's
-first ``skip_tp``, 4096 atoms, 89 elements, fp32: 0.79 GiB peak against 0.45
-GiB for the kernel below), never syncs with the host, and records into a CUDA
+irrep components). :class:`ElementLinear` stores the weight the way the map
+reads it — ``(C, Σ_p u_p·w_p)``, one row per element holding every path's
+block contiguously — and evaluates the map per atom on every device: one row
+gather (``index_select`` on the :class:`ElementIndex`) yields every atom's
+blocks, and each path is one batched matmul ``(N, d, u) @ (N, u, w)``. The
+product's own layout, path-major ``(u, C, w)`` blocks in one flat row, is
+converted once at the official-checkpoint boundary
+(:func:`molzoo.mace.checkpoint.element_linear_weight`); no call transposes.
+The gather holds ``u·w`` floats per atom and path (MACE-MP's first
+``skip_tp``, 4096 atoms, 89 elements, fp32: 0.79 GiB peak against 0.45 GiB
+for the kernel below), never syncs with the host, and records into a CUDA
 graph. The alternatives, measured on GH200: the dense product over the one-hot
 runs on a fallback kernel of cue's ``fused_tp`` (791 ms against 3.7 ms for the
 same ``skip_tp`` on 4600 atoms, forward plus input gradient);
@@ -133,6 +138,8 @@ from molix import config
 from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
 from molrep import cueq
 from molrep.embedding.mlp import MomentNormalizedMLP, normalize2mom
+from molzoo.checkpoint import ConvertedWeight
+from molzoo.mace.checkpoint import element_linear_weight, one_hot_weight
 
 
 class _CueqChannelwiseBlockMixin:
@@ -525,8 +532,12 @@ class ElementIndex(NamedTuple):
     index32: torch.Tensor
 
 
-class OneHotLinear(nn.Module):
+class OneHotLinear(ConvertedWeight):
     """``y = Linear(one_hot(element))`` as a row lookup of the linear's weight.
+
+    The weight is the ``(C, F)`` table the lookup reads, drawn unit normal
+    like the linear's; the official checkpoint's flat row is laid out at the
+    boundary by :func:`molzoo.mace.checkpoint.one_hot_weight`.
 
     Args:
         irreps_in: The one-hot's irreps, ``Cx0e``.
@@ -538,6 +549,8 @@ class OneHotLinear(nn.Module):
             one-hot only ever selects a row, so anything else is not this map.
     """
 
+    upstream_weight = one_hot_weight
+
     def __init__(
         self, irreps_in: cue.Irreps, irreps_out: cue.Irreps, *, dtype: torch.dtype
     ) -> None:
@@ -548,12 +561,11 @@ class OneHotLinear(nn.Module):
             raise ValueError(f"OneHotLinear output must be scalars Fx0e, got {irreps_out}")
         polynomial = cue.descriptors.linear(irreps_in, irreps_out).polynomial
         ((_, product),) = polynomial.operations
-        (weight_operand, _) = polynomial.inputs
         (path,) = product.paths
         self.num_elements = irreps_in.dim
         self.out_features = irreps_out.dim
         self.coefficient = float(np.asarray(path.coefficients).reshape(-1)[0])
-        self.weight = nn.Parameter(torch.randn(1, weight_operand.size, dtype=dtype))
+        self.weight = nn.Parameter(torch.randn(self.num_elements, self.out_features, dtype=dtype))
 
     def forward(self, element: torch.Tensor) -> torch.Tensor:
         """Look up the rows.
@@ -564,24 +576,44 @@ class OneHotLinear(nn.Module):
         Returns:
             ``(N, F)`` — the linear's output on ``one_hot(element)``.
         """
-        rows = self.weight.view(self.num_elements, self.out_features)
-        return F.embedding(element, rows) * self.coefficient
+        return F.embedding(element, self.weight) * self.coefficient
 
 
 class _Path(NamedTuple):
-    """One input irrep block to the output block of the same irrep."""
+    """One input irrep block to the output block of the same irrep.
+
+    Attributes:
+        x_start: First column of the input block in ``x``.
+        out_index: The output segment the path writes.
+        ir_dim: Dimension ``d`` of the irrep (``2l + 1``).
+        u: Input multiplicity.
+        w: Output multiplicity.
+        column: First column of the path's ``(u, w)`` blocks in
+            ``ElementLinear.weight``; the block of element ``e`` is
+            ``weight[e, column : column + u·w]`` viewed ``(u, w)``.
+        weight_start: Offset of the path's ``(u, C, w)`` block in the
+            product's flat weight — the official layout, read only at the
+            checkpoint boundary.
+        coefficient: The descriptor's path coefficient, ``1/√(u·C)``.
+    """
 
     x_start: int
     out_index: int
     ir_dim: int
     u: int
     w: int
+    column: int
     weight_start: int
     coefficient: float
 
 
-class ElementLinear(nn.Module):
+class ElementLinear(ConvertedWeight):
     """``y = skip_tp(x, one_hot(element))``, evaluated as a per-element linear.
+
+    The weight is ``(C, Σ_p u_p·w_p)``: row ``e`` holds element ``e``'s
+    ``(u, w)`` block of every path, contiguous at the path's column, drawn
+    unit normal like the product's. The product's flat row is laid out at the
+    boundary by :func:`molzoo.mace.checkpoint.element_linear_weight`.
 
     Args:
         irreps_in: Input irreps (``ir_mul`` layout).
@@ -594,6 +626,8 @@ class ElementLinear(nn.Module):
             fully connected product is not the identity in its irrep
             components — either way the product is not a per-element linear.
     """
+
+    upstream_weight = element_linear_weight
 
     def __init__(
         self,
@@ -620,6 +654,7 @@ class ElementLinear(nn.Module):
         weight_starts = np.cumsum([0] + [int(np.prod(s)) for s in weight_operand.segments])
         x_starts = np.cumsum([0] + [int(np.prod(s)) for s in x_operand.segments])
         paths = []
+        column = 0
         for path in product.paths:
             weight_index, x_index, _, out_index = path.indices
             coefficients = np.asarray(path.coefficients)[:, 0, :]
@@ -634,14 +669,17 @@ class ElementLinear(nn.Module):
                     ir_dim=coefficients.shape[0],
                     u=u,
                     w=w,
+                    column=column,
                     weight_start=int(weight_starts[weight_index]),
                     coefficient=scale,
                 )
             )
+            column += u * w
         self.num_elements = num_elements
-        self._paths = tuple(paths)
+        #: The paths of the map, in the product's order; read by the boundary.
+        self.paths: tuple[_Path, ...] = tuple(paths)
         self._out_segments = tuple(int(np.prod(s)) for s in out_operand.segments)
-        self.weight = nn.Parameter(torch.randn(1, weight_operand.size, dtype=dtype))
+        self.weight = nn.Parameter(torch.randn(num_elements, column, dtype=dtype))
 
     def forward(self, x: torch.Tensor, elements: ElementIndex) -> torch.Tensor:
         """Apply the map.
@@ -654,19 +692,15 @@ class ElementLinear(nn.Module):
             ``(N, irreps_out.dim)``, ``ir_mul``.
         """
         n = x.shape[0]
+        rows = self.weight.index_select(0, elements.index)  # (N, Σ u·w): every atom's blocks
         outputs: dict[int, torch.Tensor] = {}
-        for path in self._paths:
-            d = path.ir_dim
-            a = x[:, path.x_start : path.x_start + d * path.u].reshape(n, d, path.u)
-            weights = self._blocks(path).index_select(1, elements.index)  # (u, N, w)
-            y = path.coefficient * torch.einsum("ndu,unw->ndw", a, weights)
-            outputs[path.out_index] = y.reshape(n, d * path.w) + outputs.get(path.out_index, 0)
+        for path in self.paths:
+            d, u, w = path.ir_dim, path.u, path.w
+            a = x[:, path.x_start : path.x_start + d * u].reshape(n, d, u)
+            blocks = rows[:, path.column : path.column + u * w].view(n, u, w)
+            y = path.coefficient * torch.bmm(a, blocks)
+            outputs[path.out_index] = y.reshape(n, d * w) + outputs.get(path.out_index, 0)
         return self._assemble(outputs, x)
-
-    def _blocks(self, path: _Path) -> torch.Tensor:
-        size = path.u * self.num_elements * path.w
-        block = self.weight[0, path.weight_start : path.weight_start + size]
-        return block.view(path.u, self.num_elements, path.w)
 
     def _assemble(self, outputs: dict[int, torch.Tensor], like: torch.Tensor) -> torch.Tensor:
         n = like.shape[0]

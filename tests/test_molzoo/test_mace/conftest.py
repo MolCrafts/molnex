@@ -10,19 +10,23 @@ Everything a second module in this package needs is defined here exactly once:
   ``periodic_cluster`` / ``omol_cluster`` / ``pair_batch`` fixtures — the
   fixed geometries (no RNG anywhere);
 * :func:`full_edge_index` — the ordered intra-graph pair list;
+* :func:`official_layout` — a model's own ``state_dict`` with the per-element
+  maps' weights put back in cuEquivariance's flat layout, for faking an
+  official checkpoint;
 * the ``tiny_*_spec`` fixtures — one tiny spec per shipped family;
 * ``matpes_model`` / ``omol_model`` — the tiny energy + force products.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
 import torch
 from tensordict import TensorDict
 
+from molzoo.mace.layers import ElementLinear, OneHotLinear
 from molzoo.mace.potential import MaceMatpes, MaceOmol
 from molzoo.mace.spec import (
     MACELesSpec,
@@ -160,6 +164,44 @@ def wake_zero_init_readout(model: torch.nn.Module) -> None:
         for linear in (model.readout.linear_mid, model.readout.linear_2):
             linear.weight.normal_(generator=generator)
             linear.bias.normal_(generator=generator)
+
+
+def official_layout(model: torch.nn.Module, state: Mapping[str, Any]) -> dict[str, Any]:
+    """``state`` with the per-element maps' weights back in cuEquivariance's flat layout.
+
+    The inverse of :func:`molzoo.mace.checkpoint.element_linear_weight` and
+    :func:`molzoo.mace.checkpoint.one_hot_weight`, which exists only here:
+    an official checkpoint is faked out of a model's own ``state_dict``, and
+    the loader converts the flat layout back. Every
+    :class:`~molzoo.mace.layers.ElementLinear` weight ``(C, Σ u·w)`` goes to
+    the product's one row of ``(u, C, w)`` blocks, every
+    :class:`~molzoo.mace.layers.OneHotLinear` weight ``(C, F)`` to
+    ``(1, C·F)``. Keys stay the model's own; nothing else is touched.
+
+    Args:
+        model: The model whose modules the keys of ``state`` name.
+        state: Its ``state_dict`` (or a copy under the same keys).
+
+    Returns:
+        A new dict; the two kinds of weight are new tensors, the rest the same
+        objects.
+    """
+    out = dict(state)
+    for path, module in model.named_modules():
+        key = f"{path}.weight" if path else "weight"
+        if isinstance(module, ElementLinear):
+            weight = out[key]
+            elements = module.num_elements
+            flat = weight.new_empty(1, sum(p.u * elements * p.w for p in module.paths))
+            for p in module.paths:
+                block = weight[:, p.column : p.column + p.u * p.w].reshape(elements, p.u, p.w)
+                flat[0, p.weight_start : p.weight_start + block.numel()] = block.transpose(
+                    0, 1
+                ).reshape(-1)
+            out[key] = flat
+        elif isinstance(module, OneHotLinear):
+            out[key] = out[key].reshape(1, -1)
+    return out
 
 
 @pytest.fixture(autouse=True)
