@@ -108,7 +108,7 @@ to it. Deleted: `DerivativeHead`, `ForceReadout` / `EnergyReadout`,
 2.15 nightly CPU): op inference 1 graph / 0 breaks for `("atoms.pos",)` and
 `("atoms.pos", "graphs.strain")`; training breaks once at
 `molix/autograd/variables.py::leaf` (pytorch#196653). Residue: the
-`molix.deploy.SiteEnergyAdapter` keeps its own leaf (`molix.autograd.leaf`) because the partitioned
+`molix.deploy.AtomEnergyAdapter` keeps its own leaf (`molix.autograd.leaf`) because the partitioned
 `local_mask` energy is not frame-in/frame-out; molzoo specs still name
 `grad_force_pass` (auditor 📝).
 
@@ -1461,7 +1461,7 @@ The runtime owns everything about the model — `Metadata` (the versioned
 ONNX etc. would be siblings), `OpLibraries` (`dlopen` of `lib<name>.so` from
 `MOLNEX_OP_LIBRARY_PATH`, requirement checked through the library's exported
 `molnex_op_library_requirement()`, never closed because the registrations are
-process-wide), `SiteEnergyExec` (the calling convention; three outputs, CPU
+process-wide), `AtomEnergyExec` (the calling convention; three outputs, CPU
 float64). The LAMMPS layer owns everything about LAMMPS, including the unit
 conversion: `pair_molnex` maps the model energy unit onto a LAMMPS style
 (eV → metal, kcal/mol → real) and calls `utils::get_conversion_factor`;
@@ -2151,7 +2151,7 @@ deleted) and derives, detaches and validates nothing. `forward =
 Derivative(self.energy, wrt)` is built as the last line of `__init__`. The
 operator's words for why: single responsibility, clear boundaries, no double
 forward, fully typed, no meta methods and no dynamic copies. A first proposal
-that put a `site_energy` tensor layer under `energy` and read the frame through
+that put a `atom_energy` tensor layer under `energy` and read the frame through
 a `Geometry.from_frame` view object was rejected as convoluted and as an access
 wrapper — the tensor-level work *is* the body of `energy`, composed from the
 encoder primitives. Landed:

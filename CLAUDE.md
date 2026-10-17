@@ -559,7 +559,7 @@ molix.frame (TensorFrame) · molix.neighbor (NeighborList)
     ↑ dataset acquisition (download / parse / preprocess / cache write) is MolHub's, not molnex's
 molix.md (Langevin velocity-Verlet) ─→ molix.quant (T_eff / quantization scalars)
 molix.compile (Compiler, torch.compile / CUDA graphs)   [leaf execution util]
-molix.deploy (SiteEnergyModel contract, SiteEnergyAdapter, DeployMetadata) ─┐
+molix.deploy (AtomEnergyModel contract, AtomEnergyAdapter, DeployMetadata) ─┐
 molix.export (one module per format: aoti.package / load / custom_op_namespaces) ─┴─→ interface/
 csrc/ (native op libraries: molix/, cueq/) ─→ interface/: runtime/ (format loaders, engine-free) ← lammps/ (pair_style molnex)
 ```
@@ -594,13 +594,13 @@ Notes on cross-package edges (verified against imports):
   training loop imports it.
 - **Deployment is three decoupled layers (decision 2026-10-15): contract →
   format → engine.** `molix.deploy` owns the engine-neutral contract —
-  `SiteEnergyModel` (`(Z, pos, pair_index, shifts, local_mask) -> (energy,
-  forces, site_energy, virial)`; zero `shifts` for staged ghost copies, real
+  `AtomEnergyModel` (`(Z, pos, pair_index, shifts, local_mask) -> (energy,
+  forces, atom_energy, virial)`; zero `shifts` for staged ghost copies, real
   lattice shifts for one process folding its periodic images onto its own
-  atoms), `SiteEnergyAdapter` (a molnex potential on it, with
+  atoms), `AtomEnergyAdapter` (a molnex potential on it, with
   `check`), `verify`, `example_inputs`, and `DeployMetadata` (`{name}.json`:
   the model's own units, cutoff, species, dtype, receptive field, native op
-  libraries; versioned). `molix.export` holds **one module per format**
+  libraries; no schema version). `molix.export` holds **one module per format**
   (`aoti`: `package` → `.pt2` + the non-ATen op namespaces it calls; ONNX etc.
   would be siblings) and knows nothing of what a module computes or which
   engine runs it. Callers compose adapter → `aoti.package` → metadata; there is

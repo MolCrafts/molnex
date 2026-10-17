@@ -138,7 +138,7 @@ Legend: ✅ exists · ◐ partial · ✗ missing. Anchors are `file:line` at com
 | Requirement | Status | Anchor |
 |---|---|---|
 | Differentiable reference | ✅ | `molpot` |
-| Family B compiled neural potential in LAMMPS | ✅ short-range only | `molix.deploy` (`SiteEnergyAdapter`, `DeployMetadata`) + `molix.export.aoti`, `interface/runtime/` + `interface/lammps/` (2026-10-15 split); the site-energy convention has **no cell / charge / long-range / global-constraint** term — `SiteEnergyAdapter.check` refuses a long-range model |
+| Family B compiled neural potential in LAMMPS | ✅ short-range only | `molix.deploy` (`AtomEnergyAdapter`, `DeployMetadata`) + `molix.export.aoti`, `interface/runtime/` + `interface/lammps/` (2026-10-15 split); the site-energy convention has **no cell / charge / long-range / global-constraint** term — `AtomEnergyAdapter.check` refuses a long-range model |
 | No host sync in the force loop | ✅ (law) | `notes.md` topic `compile-no-graph-breaks` |
 | Local vs long-range benchmarked independently | ◐ | ad hoc per-term fp64 splits (`notes.md` Polar parity); no harness |
 | Polarization iteration counts | ✗ | `MDObservables` (`molix/md/types.py:47-80`) has no field |
