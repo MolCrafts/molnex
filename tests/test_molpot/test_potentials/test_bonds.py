@@ -24,7 +24,7 @@ def test_canonical_bond_index_energy_matches_analytic():
     pos = torch.tensor([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]])
     bond_index = torch.tensor([[0], [1]], dtype=torch.long)  # [2, 1] COO
     bond_types = torch.tensor([0], dtype=torch.long)
-    e = pot(pos=pos, bond_index=bond_index, bond_types=bond_types)
+    e = pot(pos=pos, bond_index=bond_index, bond_types=bond_types, num_graphs=1)
     # 0.5 * 2.0 * (1.5 - 1.0)^2 = 0.25
     assert math.isclose(float(e), 0.25, rel_tol=1e-6)
 
@@ -34,7 +34,7 @@ def test_empty_bonds_returns_zero():
     pos = torch.tensor([[0.0, 0.0, 0.0]])
     bond_index = torch.zeros(2, 0, dtype=torch.long)  # [2, 0]
     bond_types = torch.zeros(0, dtype=torch.long)
-    e = pot(pos=pos, bond_index=bond_index, bond_types=bond_types)
+    e = pot(pos=pos, bond_index=bond_index, bond_types=bond_types, num_graphs=1)
     assert float(e) == 0.0
 
 
@@ -46,7 +46,7 @@ def test_rejects_edge_index_as_bond_index():
     pair_index = torch.tensor([[0, 1], [1, 2], [0, 2]], dtype=torch.long)  # [E, 2]
     bond_types = torch.tensor([0, 0, 0], dtype=torch.long)
     with pytest.raises(ValueError, match="bond_index"):
-        pot(pos=pos, bond_index=pair_index, bond_types=bond_types)
+        pot(pos=pos, bond_index=pair_index, bond_types=bond_types, num_graphs=1)
 
 
 def test_omitted_bond_types_prices_the_table_row_per_bond():
@@ -62,28 +62,12 @@ def test_omitted_bond_types_prices_the_table_row_per_bond():
     pot = _potential()
     pos = torch.tensor([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]])
     bond_index = torch.tensor([[0], [1]], dtype=torch.long)
-    identity = pot(pos=pos, bond_index=bond_index, bond_types=torch.zeros(1, dtype=torch.long))
-    omitted = pot(pos=pos, bond_index=bond_index)
+    identity = pot(
+        pos=pos, bond_index=bond_index, bond_types=torch.zeros(1, dtype=torch.long), num_graphs=1
+    )
+    omitted = pot(pos=pos, bond_index=bond_index, num_graphs=1)
     assert math.isclose(float(omitted), float(identity), rel_tol=1e-12)
     assert math.isclose(float(omitted), 0.25, rel_tol=1e-6)
-
-
-def test_missing_bond_index_still_raises():
-    """The *index* is topology and has no default; only the type index is optional."""
-    pot = _potential()
-    pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-    with pytest.raises(ValueError, match="bond_index"):
-        pot(pos=pos)
-
-
-def test_no_edge_index_or_bonds_fallback():
-    # The 3-way fallback is gone: passing pair_index via the data dict must NOT
-    # be silently picked up as bond_index.
-    pot = _potential()
-    pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-    data = {"pos": pos, "pair_index": torch.tensor([[0, 1]], dtype=torch.long)}
-    with pytest.raises(ValueError):
-        pot(data=data)
 
 
 class TestPerCallTables:
@@ -105,6 +89,7 @@ class TestPerCallTables:
             ),
             "bond_index": torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
             "bond_types": torch.tensor([0, 0], dtype=torch.long),
+            "num_graphs": 1,
         }
 
     def test_an_override_replaces_the_registered_table_for_that_call_only(self) -> None:

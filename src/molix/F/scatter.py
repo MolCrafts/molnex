@@ -16,8 +16,10 @@ atomics; workspace is the output ``(dim_size, *src.shape[1:])`` only — no
 module falls back to ``index_add_`` (same math, inductor needs the
 ``register_inductor_fallbacks`` path).
 
-Prefer :func:`scatter_sum_compile_safe` on compile / MACE hot paths:
-``dim_size`` is an argument, never ``int(index.max())``.
+``dim_size`` is always an argument, never ``int(index.max())``: the bucket
+count is a static shape the caller already holds (``graphs.batch_size[0]``,
+the atom count), and reading it off the index is a host sync. Prefer
+:func:`scatter_sum_compile_safe` on compile / MACE hot paths.
 """
 
 from __future__ import annotations
@@ -70,7 +72,8 @@ def scatter_sum(
     src: Tensor,
     index: Tensor,
     dim: int = 0,
-    dim_size: int | None = None,
+    *,
+    dim_size: int,
 ) -> Tensor:
     """Sum ``src`` values grouped by ``index`` along ``dim``.
 
@@ -78,15 +81,13 @@ def scatter_sum(
         src: Source tensor of any shape.
         index: 1-D or broadcastable index tensor. Values must be non-negative.
         dim: Reduction dimension.
-        dim_size: Output size along ``dim``. Defaults to ``int(index.max()) + 1``.
+        dim_size: Output size along ``dim``.
 
     Returns:
         Tensor with ``src.shape`` except ``shape[dim] == dim_size``.
     """
     if dim < 0:
         dim += src.dim()
-    if dim_size is None:
-        dim_size = int(index.max().item()) + 1 if index.numel() else 0
     if dim == 0 and index.dim() == 1 and index.shape[0] == src.shape[0]:
         native = _native_scatter_sum(src, index, dim_size)
         if native is not None:
@@ -121,10 +122,17 @@ def scatter_sum_compile_safe(src: Tensor, index: Tensor, dim_size: int) -> Tenso
     return out.index_add_(0, index, src)
 
 
-def batch_add(src: Tensor, batch: Tensor, dim_size: int | None = None) -> Tensor:
-    """Sum ``src[i]`` into bucket ``batch[i]`` along dim 0."""
-    if dim_size is None:
-        dim_size = int(batch.max().item()) + 1 if batch.numel() else 0
+def batch_add(src: Tensor, batch: Tensor, dim_size: int) -> Tensor:
+    """Sum ``src[i]`` into bucket ``batch[i]`` along dim 0.
+
+    Args:
+        src: Per-row values ``(N, ...)``.
+        batch: Bucket index per row ``(N,)``.
+        dim_size: Number of buckets ``B``.
+
+    Returns:
+        Per-bucket sums ``(B, ...)``.
+    """
     return scatter_sum(src, batch, dim=0, dim_size=dim_size)
 
 

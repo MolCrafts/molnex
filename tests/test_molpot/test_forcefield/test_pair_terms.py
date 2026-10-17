@@ -97,6 +97,7 @@ def _cross_pair_energy(
             epsilon=torch.tensor(CROSS_EPSILON, dtype=DTYPE),
             sigma=torch.tensor(CROSS_SIGMA, dtype=DTYPE),
             scales=torch.ones(1, dtype=DTYPE),
+            num_graphs=1,
         )
     )
 
@@ -109,6 +110,7 @@ def _one_pair_kwargs(*, r: float = R_MIN) -> dict[str, torch.Tensor]:
         "epsilon": torch.full((2,), EPSILON, dtype=DTYPE),
         "sigma": torch.full((2,), SIGMA, dtype=DTYPE),
         "scales": torch.ones(1, dtype=DTYPE),
+        "num_graphs": 1,
     }
 
 
@@ -225,6 +227,7 @@ class TestLJCutPotential:
             epsilon=torch.tensor(CROSS_EPSILON, dtype=DTYPE),
             sigma=torch.tensor(CROSS_SIGMA, dtype=DTYPE),
             scales=torch.ones(1, dtype=DTYPE),
+            num_graphs=1,
         )
 
         leaf = positions.clone().requires_grad_(True)
@@ -313,6 +316,7 @@ class TestLJCutPotential:
             "sigma": torch.full((3,), SIGMA, dtype=DTYPE),
             "scales": torch.ones(2, dtype=DTYPE),
             "pair_mask": torch.tensor([True, False]),
+            "num_graphs": 1,
         }
         masked = _total(potential.energy(**padded))
         assert masked == pytest.approx(_total(potential.energy(**_one_pair_kwargs())), abs=1e-14)
@@ -341,6 +345,7 @@ class TestLJCutPotential:
             sigma=torch.full((3,), SIGMA, dtype=DTYPE),
             scales=torch.ones(4, dtype=DTYPE),
             pair_mask=torch.tensor([True, True, False, False]),
+            num_graphs=1,
         )
         assert (explanation.graph_count, explanation.graph_break_count) == (1, 0)
 
@@ -355,6 +360,7 @@ class TestCoulombOpenPotential:
             distances=torch.tensor([2.0], dtype=DTYPE),
             charges=charges,
             scales=torch.ones(1, dtype=DTYPE),
+            num_graphs=1,
         )
         padded = potential.energy(
             pair_index=torch.tensor([[0, 1], [0, 2]], dtype=torch.long),
@@ -362,5 +368,6 @@ class TestCoulombOpenPotential:
             charges=charges,
             scales=torch.ones(2, dtype=DTYPE),
             pair_mask=torch.tensor([True, False]),
+            num_graphs=1,
         )
         assert float(padded) == pytest.approx(float(live_only), abs=1e-14)

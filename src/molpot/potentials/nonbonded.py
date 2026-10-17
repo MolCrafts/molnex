@@ -183,7 +183,7 @@ def _reduce_pair_energy(
     pair_energy: torch.Tensor,
     bidirectional: bool,
     pair_batch: torch.Tensor | None,
-    num_graphs: int | None,
+    num_graphs: int,
 ) -> torch.Tensor:
     """Sum pair energies into per-graph totals (or a scalar)."""
     if bidirectional:
@@ -191,9 +191,6 @@ def _reduce_pair_energy(
 
     if pair_batch is None:
         return pair_energy.sum()
-
-    if num_graphs is None:
-        num_graphs = int(pair_batch.max().item()) + 1
 
     energy = torch.zeros(num_graphs, dtype=pair_energy.dtype, device=pair_energy.device)
     energy.index_add_(0, pair_batch, pair_energy)
@@ -274,7 +271,7 @@ class RepulsionExp6(nn.Module):
         lam_rep_ij: torch.Tensor,
         r_star_ij: torch.Tensor,
         pair_batch: torch.Tensor | None = None,
-        num_graphs: int | None = None,
+        num_graphs: int,
     ) -> torch.Tensor:
         """Compute repulsion energy.
 
@@ -292,8 +289,8 @@ class RepulsionExp6(nn.Module):
                 at ``1e-6``.
             pair_batch: Index of the graph each edge belongs to ``(E,)``. ``None``
                 sums to a scalar.
-            num_graphs: Number of graphs ``B``; inferred from ``pair_batch`` when
-                ``None``, which costs a host sync and so breaks a compiled graph.
+            num_graphs: Number of graphs ``B`` — the length of the per-graph
+                energy; ``graphs.batch_size[0]`` of the batch.
 
         Returns:
             Per-graph energy ``(B,)``, or a scalar ``()`` when ``pair_batch`` is
@@ -375,7 +372,7 @@ class DispersionC6(nn.Module):
         c6_ij: torch.Tensor,
         r_star_ij: torch.Tensor,
         pair_batch: torch.Tensor | None = None,
-        num_graphs: int | None = None,
+        num_graphs: int,
     ) -> torch.Tensor:
         """Compute dispersion energy.
 
@@ -391,8 +388,8 @@ class DispersionC6(nn.Module):
                 the short-range damping takes over. Also clamped at ``1e-6``.
             pair_batch: Index of the graph each edge belongs to ``(E,)``. ``None``
                 sums to a scalar.
-            num_graphs: Number of graphs ``B``; inferred from ``pair_batch`` when
-                ``None``, which costs a host sync and so breaks a compiled graph.
+            num_graphs: Number of graphs ``B`` — the length of the per-graph
+                energy; ``graphs.batch_size[0]`` of the batch.
 
         Returns:
             Per-graph energy ``(B,)``, or a scalar ``()`` when ``pair_batch`` is
@@ -473,7 +470,7 @@ class ChargeTransfer(nn.Module):
         lam_ct_ij: torch.Tensor,
         r_star_ij: torch.Tensor,
         pair_batch: torch.Tensor | None = None,
-        num_graphs: int | None = None,
+        num_graphs: int,
     ) -> torch.Tensor:
         """Compute charge-transfer energy.
 
@@ -491,8 +488,8 @@ class ChargeTransfer(nn.Module):
                 at ``1e-6``.
             pair_batch: Index of the graph each edge belongs to ``(E,)``. ``None``
                 sums to a scalar.
-            num_graphs: Number of graphs ``B``; inferred from ``pair_batch`` when
-                ``None``, which costs a host sync and so breaks a compiled graph.
+            num_graphs: Number of graphs ``B`` — the length of the per-graph
+                energy; ``graphs.batch_size[0]`` of the batch.
 
         Returns:
             Per-graph energy ``(B,)``, or a scalar ``()`` when ``pair_batch`` is

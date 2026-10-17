@@ -16,8 +16,6 @@ References:
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 
 from molpot.potentials.base import BasePotential
@@ -69,57 +67,46 @@ class ImproperHarmonic(BasePotential):
         self.register_buffer("k", k)
         self.register_buffer("chi0", chi0)
 
-    def forward(self, data: dict[str, Any] | None = None, **kwargs: Any) -> torch.Tensor:
+    def forward(
+        self,
+        *,
+        pos: torch.Tensor,
+        improper_index: torch.Tensor,
+        improper_types: torch.Tensor | None = None,
+        term_batch: torch.Tensor | None = None,
+        num_graphs: int,
+        k: torch.Tensor | None = None,
+        chi0: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Compute harmonic improper energy.
 
         Args:
-            data: Optional dictionary with molecular fields.
-            **kwargs: Explicit tensors:
-                - pos: Positions ``[n_atoms, 3]``.
-                - improper_index: COO improper indices ``[4, N]`` molrs layout
-                  ``[center, i, j, k]`` (center at **row 0**).
-                - improper_types: Improper types ``[N]``.
+            pos: Positions ``[n_atoms, 3]``.
+            improper_index: COO improper indices ``[4, N]`` molrs layout
+                ``[center, i, j, k]`` (center at **row 0**).
+            improper_types: Improper types ``[N]``, or ``None`` when the tables
+                already carry one row per improper.
+            term_batch: Graph index per improper ``[N]``; ``None`` sums to a
+                scalar.
+            num_graphs: Graph count ``B`` — the length of the per-graph energy.
+            k: Per-call force-constant table; ``None`` prices the registered one.
+            chi0: Per-call equilibrium-angle table; ``None`` prices the
+                registered one.
 
         Returns:
-            Total improper energy (scalar).
+            Per-graph energy ``(B,)`` when ``term_batch`` is given, else a scalar.
 
         Raises:
-            ValueError: Missing inputs or ``improper_index`` not ``[4, N]``.
+            ValueError: ``improper_index`` is not ``[4, N]``.
         """
-        pos = kwargs.get("pos")
-        improper_index = kwargs.get("improper_index")
-        improper_types = kwargs.get("improper_types")
-
-        if data is not None and isinstance(data, dict):
-            if pos is None:
-                pos = data.get("pos")
-                if pos is None and isinstance(data.get("atoms"), dict):
-                    pos = data["atoms"].get("pos")
-            if improper_index is None:
-                improper_index = data.get("improper_index")
-            if improper_types is None:
-                improper_types = data.get("improper_types")
-
-        if pos is None or improper_index is None:
-            raise ValueError("ImproperHarmonic requires pos, improper_index, and improper_types.")
-
-        if not isinstance(pos, torch.Tensor):
-            pos = torch.from_numpy(pos).float()
-            improper_index = torch.from_numpy(improper_index).long()
-            improper_types = (
-                None if improper_types is None else torch.from_numpy(improper_types).long()
-            )
-
         _require_index_4_by_n(improper_index, "improper_index")
-
-        if improper_index.size(1) == 0:
-            return torch.tensor(0.0, device=pos.device, dtype=pos.dtype)
+        tables = {"k": k, "chi0": chi0}
 
         chi = _dihedral_phi(pos, _improper_to_dihedral_index(improper_index))
-        k_imp = self.rows("k", kwargs, improper_types)
-        chi0_imp = self.rows("chi0", kwargs, improper_types)
+        k_imp = self.rows("k", tables, improper_types)
+        chi0_imp = self.rows("chi0", tables, improper_types)
         energy_per = 0.5 * k_imp * (chi - chi0_imp) ** 2
-        return energy_per.sum()
+        return self.per_graph(energy_per, term_batch, num_graphs)
 
     def __repr__(self) -> str:
         return f"ImproperHarmonic(n_types={len(self.k)})"

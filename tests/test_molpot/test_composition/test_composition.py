@@ -134,6 +134,7 @@ def test_potential_composer_aggregates_terms_and_derives_forces(molecular_batch)
         "pos": molecular_batch["atoms", "pos"].clone().requires_grad_(True),
         "pair_index": molecular_batch["pairs", "pair_index"],
         "batch": molecular_batch["atoms", "batch"],
+        "num_graphs": molecular_batch["graphs"].batch_size[0],
     }
     outputs = composer(node_features=node_features, data=data, compute_forces=True)
 
@@ -164,6 +165,7 @@ def test_integration_with_mace_encoder(molecular_batch):
         "pos": molecular_batch["atoms", "pos"].clone().requires_grad_(True),
         "pair_index": molecular_batch["pairs", "pair_index"],
         "batch": molecular_batch["atoms", "batch"],
+        "num_graphs": molecular_batch["graphs"].batch_size[0],
     }
     outputs = composer(node_features=node_features, data=data, compute_forces=True)
     assert outputs["energy"].shape == (2,)
@@ -208,6 +210,7 @@ def test_integration_with_allegro_encoder(molecular_batch):
         "pos": molecular_batch["atoms", "pos"].clone().requires_grad_(True),
         "pair_index": molecular_batch["pairs", "pair_index"],
         "batch": molecular_batch["atoms", "batch"],
+        "num_graphs": molecular_batch["graphs"].batch_size[0],
     }
     outputs = composer(node_features=node_features, data=data, compute_forces=True)
     assert outputs["energy"].shape == (2,)

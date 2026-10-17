@@ -244,7 +244,8 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
         positions: torch.Tensor,
         batch: torch.Tensor,
         cell: torch.Tensor | None = None,
-        num_graphs: int | None = None,
+        *,
+        num_graphs: int,
     ) -> torch.Tensor:
         """Evaluate field features.
 
@@ -256,11 +257,10 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
             cell: Optional lattice vectors ``(3, 3)`` or ``(1, 3, 3)`` in Å,
                 one per row. When set, the official k-space potential / field
                 is used and the batch must hold exactly one system (``B = 1``).
-            num_graphs: Number of graphs ``B``, dimensionless. Leaving it
-                ``None`` derives it from ``batch`` with a host sync and is
-                therefore **eager-only**: that fallback lives here and nowhere
-                deeper, so the periodic call chain below stays compile-clean.
-                The isolated branch never reads it.
+            num_graphs: Number of graphs ``B``, dimensionless —
+                ``graphs.batch_size[0]`` of the batch. Only the periodic
+                branch reduces per graph; the isolated pair sum is per atom
+                and never reads it.
 
         Returns:
             ``(N, out_dim)`` in eV/e, laid out as ``ir_mul`` of
@@ -279,12 +279,6 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
         feats = source_feats.reshape(source_feats.shape[0], -1)
         n = positions.shape[0]
         if cell is not None:
-            # Only the periodic branch reduces per graph; the isolated pair
-            # sum below is per atom and never reads ``num_graphs``.
-            if num_graphs is None:
-                n_graphs = int(batch.max().item()) + 1 if batch.numel() else 0
-            else:
-                n_graphs = num_graphs
             # First use of ``torch.compiler.is_compiling()`` under ``src/``:
             # it is a trace-time constant, so dynamo folds this branch away
             # (no host sync in the graph) while eager callers keep sizing the
@@ -292,7 +286,7 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
             # one. Bind before compiling; the grid itself never resizes.
             if not torch.compiler.is_compiling():
                 self.bind_cell(cell)
-            return self._kspace_features(feats, positions, batch, cell, n_graphs)
+            return self._kspace_features(feats, positions, batch, cell, num_graphs)
         need_fd = self.density_lmax == 1 or self.feature_lmax == 1
         if not need_fd:
             scalars = self._pair_features(feats[:, 0], positions, batch, None, n)

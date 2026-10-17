@@ -1,8 +1,21 @@
-from typing import Any
-
 import torch
 
 from molpot.potentials.base import BasePotential
+
+
+def _require_bond_index(bond_index: torch.Tensor) -> None:
+    """Refuse anything but COO ``[2, num_bonds]``.
+
+    Deliberately a different shape from the geometric neighbour graph
+    ``pair_index`` ``[E, 2]``, so a cutoff pair can never be silently
+    mis-indexed as a bond (CLAUDE.md, bond_index vs pair_index).
+    """
+    if bond_index.ndim != 2 or bond_index.shape[0] != 2:
+        raise ValueError(
+            f"bond_index must be COO [2, num_bonds] covalent topology; got shape "
+            f"{tuple(bond_index.shape)}. A neighbour-graph pair_index [E, 2] is not "
+            "a bond list — see the bond_index vs pair_index distinction in CLAUDE.md."
+        )
 
 
 class BondHarmonic(BasePotential):
@@ -50,99 +63,64 @@ class BondHarmonic(BasePotential):
         self.register_buffer("k", k)
         self.register_buffer("r0", r0)
 
-    def forward(self, data: dict[str, Any] | None = None, **kwargs: Any) -> torch.Tensor:
+    def forward(
+        self,
+        *,
+        pos: torch.Tensor,
+        bond_index: torch.Tensor,
+        bond_types: torch.Tensor | None = None,
+        term_batch: torch.Tensor | None = None,
+        num_graphs: int,
+        k: torch.Tensor | None = None,
+        r0: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Compute harmonic bond energy.
 
         Args:
-            data: Optional batch dict. Reads ``pos`` (or ``atoms.pos``),
-                canonical ``bond_index`` (or ``bonds.bond_index``), and
-                ``bond_types`` (or ``bonds.bond_types``). There is no
-                ``pair_index`` fallback — a geometric cutoff edge is not a
-                bond.
-            **kwargs: Alternate way to pass explicit tensors:
-                - pos: Positions [N, 3]
-                - bond_index: COO bond indices [2, num_bonds] (NOT [E, 2])
-                - bond_types: Bond types [num_bonds]
+            pos: Positions ``[N, 3]``.
+            bond_index: COO bond indices ``[2, num_bonds]`` (NOT ``[E, 2]``).
+                There is no ``pair_index`` route — a geometric cutoff edge is
+                not a bond.
+            bond_types: Bond types ``[num_bonds]``, or ``None`` when the tables
+                already carry one row per bond.
+            term_batch: Graph index per bond ``[num_bonds]``; ``None`` sums to
+                a scalar.
+            num_graphs: Graph count ``B`` — the length of the per-graph energy.
+            k: Per-call force-constant table; ``None`` prices the registered one.
+            r0: Per-call equilibrium-length table; ``None`` prices the
+                registered one.
 
         Returns:
-            Total bond energy (scalar).
+            Per-graph energy ``(B,)`` when ``term_batch`` is given, else a scalar.
 
         Raises:
-            ValueError: ``pos`` / ``bond_index`` / ``bond_types`` missing, or
-                ``bond_index`` is not COO ``[2, num_bonds]`` (e.g. a geometric
-                ``pair_index`` ``[E, 2]`` was passed).
+            ValueError: ``bond_index`` is not COO ``[2, num_bonds]`` (e.g. a
+                geometric ``pair_index`` ``[E, 2]`` was passed).
         """
-        # Extract data — canonical covalent connectivity only. There is no
-        # pair_index fallback: a geometric cutoff edge is NOT a chemical bond
-        # (edge != bond), and unlike bond_index it carries no bond_type — so
-        # routing it here is a category error, not a convenience.
-        pos = kwargs.get("pos")
-        bond_index = kwargs.get("bond_index")
-        bond_types = kwargs.get("bond_types")
-        term_batch = kwargs.get("term_batch")
-        num_graphs = kwargs.get("num_graphs")
+        _require_bond_index(bond_index)
+        tables = {"k": k, "r0": r0}
 
-        if data is not None and isinstance(data, dict):
-            if pos is None:
-                pos = data.get("pos")
-                if pos is None and isinstance(data.get("atoms"), dict):
-                    pos = data["atoms"].get("pos")
-            if bond_index is None:
-                bond_index = data.get("bond_index")
-            if bond_types is None:
-                bond_types = data.get("bond_types")
-
-        if pos is None or bond_index is None:
-            raise ValueError("BondHarmonic requires pos and bond_index.")
-
-        # Convert numpy to torch if needed
-        if not isinstance(pos, torch.Tensor):
-            pos = torch.from_numpy(pos).float()
-            bond_index = torch.from_numpy(bond_index).long()
-            bond_types = None if bond_types is None else torch.from_numpy(bond_types).long()
-
-        # Canonical bond_index is COO [2, num_bonds] — deliberately a different
-        # shape from the geometric neighbour graph pair_index [E, 2], so a cutoff
-        # pair can never be silently mis-indexed as a bond. Reject anything else
-        # loudly instead of computing a wrong energy. See CLAUDE.md (bond_index
-        # vs pair_index).
-        if bond_index.ndim != 2 or bond_index.shape[0] != 2:
-            raise ValueError(
-                f"bond_index must be COO [2, num_bonds] covalent topology; got shape "
-                f"{tuple(bond_index.shape)}. A neighbour-graph pair_index [E, 2] is not "
-                "a bond list — see the bond_index vs pair_index distinction in CLAUDE.md."
-            )
-
-        # Handle empty bonds
-        if bond_index.size(1) == 0:
-            return torch.tensor(0.0, device=pos.device, dtype=pos.dtype)
-
-        # Get positions for each bond
-        pos_i = pos[bond_index[0]]  # [num_bonds, 3]
-        pos_j = pos[bond_index[1]]  # [num_bonds, 3]
-
-        # Compute bond vectors and lengths
-        bond_vec = pos_j - pos_i  # [num_bonds, 3]
+        bond_vec = pos[bond_index[1]] - pos[bond_index[0]]  # [num_bonds, 3]
         bond_lengths = torch.norm(bond_vec, dim=-1)  # [num_bonds]
 
-        # Look up parameters for each bond
-        k_bonds = self.rows("k", kwargs, bond_types)  # [num_bonds]
-        r0_bonds = self.rows("r0", kwargs, bond_types)  # [num_bonds]
+        k_bonds = self.rows("k", tables, bond_types)  # [num_bonds]
+        r0_bonds = self.rows("r0", tables, bond_types)  # [num_bonds]
 
-        # Compute harmonic energy: E = 0.5 * k * (r - r0)^2
         displacement = bond_lengths - r0_bonds
         energy_per_bond = 0.5 * k_bonds * displacement**2
+        return self.per_graph(energy_per_bond, term_batch, num_graphs)
 
-        # Sum over all bonds
-        if term_batch is not None:
-            total_energy = energy_per_bond.new_zeros(int(num_graphs))
-            total_energy.index_add_(0, term_batch.long(), energy_per_bond)
-        else:
-            total_energy = energy_per_bond.sum()
-
-        return total_energy
-
-    def energy_forces(self, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
+    def energy_forces(
+        self,
+        *,
+        pos: torch.Tensor,
+        bond_index: torch.Tensor,
+        bond_types: torch.Tensor | None = None,
+        term_batch: torch.Tensor | None = None,
+        num_graphs: int,
+        k: torch.Tensor | None = None,
+        r0: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Energy and analytic forces ``F = -∂E/∂pos`` in one pass.
 
         Closed form ``F_i = k(r − r0) r̂``, ``F_j = −F_i`` (``r̂ = (pos_j −
@@ -150,36 +128,27 @@ class BondHarmonic(BasePotential):
         the force still carries the ordinary gradient w.r.t. ``k`` and ``r0``.
 
         Args:
-            **kwargs: ``pos`` ``[N, 3]``, ``bond_index`` ``[2, M]``,
-                ``bond_types`` ``[M]``, and optional ``term_batch`` /
-                ``num_graphs``.
+            pos: Positions ``[N, 3]``.
+            bond_index: COO bond indices ``[2, num_bonds]``.
+            bond_types: Bond types ``[num_bonds]``, or ``None`` for
+                per-interaction tables.
+            term_batch: Graph index per bond; ``None`` sums to a scalar.
+            num_graphs: Graph count ``B``.
+            k: Per-call force-constant table; ``None`` prices the registered one.
+            r0: Per-call equilibrium-length table; ``None`` prices the
+                registered one.
 
         Returns:
             ``(energy, forces)`` — energy ``(B,)`` (or scalar) and forces
             ``[N, 3]``.
         """
-        pos = kwargs.get("pos")
-        bond_index = kwargs.get("bond_index")
-        bond_types = kwargs.get("bond_types")
-        term_batch = kwargs.get("term_batch")
-        num_graphs = kwargs.get("num_graphs")
-        if pos is None or bond_index is None or bond_types is None:
-            raise ValueError("BondHarmonic.energy_forces requires pos, bond_index, bond_types.")
+        _require_bond_index(bond_index)
+        tables = {"k": k, "r0": r0}
 
-        if bond_index.size(1) == 0:
-            energy = torch.zeros(
-                (int(num_graphs),) if term_batch is not None else (),
-                device=pos.device,
-                dtype=pos.dtype,
-            )
-            return energy, pos.new_zeros((pos.shape[0], 3))
-
-        pos_i = pos[bond_index[0]]
-        pos_j = pos[bond_index[1]]
-        bond_vec = pos_j - pos_i
+        bond_vec = pos[bond_index[1]] - pos[bond_index[0]]
         bond_lengths = torch.norm(bond_vec, dim=-1)
-        k_bonds = self.rows("k", kwargs, bond_types)
-        r0_bonds = self.rows("r0", kwargs, bond_types)
+        k_bonds = self.rows("k", tables, bond_types)
+        r0_bonds = self.rows("r0", tables, bond_types)
         displacement = bond_lengths - r0_bonds
         energy_per_bond = 0.5 * k_bonds * displacement**2
 
@@ -188,12 +157,7 @@ class BondHarmonic(BasePotential):
         forces = pos.new_zeros((pos.shape[0], 3))
         forces.index_add_(0, bond_index[0], force_on_i)
         forces.index_add_(0, bond_index[1], -force_on_i)
-
-        if term_batch is not None:
-            energy = energy_per_bond.new_zeros(int(num_graphs))
-            energy.index_add_(0, term_batch.long(), energy_per_bond)
-            return energy, forces
-        return energy_per_bond.sum(), forces
+        return self.per_graph(energy_per_bond, term_batch, num_graphs), forces
 
     def __repr__(self) -> str:
         num_types = len(self.k)

@@ -21,19 +21,18 @@ class ScatterSum(nn.Module):
         super().__init__()
         self.dim = dim
 
-    def forward(self, src, index, dim_size=None):
+    def forward(self, src, index, dim_size: int):
         """Sum ``src`` over ``dim`` into ``index`` buckets.
 
         Args:
             src: Source values to aggregate.
             index: Bucket index for each ``src`` slice along ``dim``.
-            dim_size: Size of the output ``dim``; inferred from ``index`` if
-                ``None``.
+            dim_size: Size of the output ``dim``.
 
         Returns:
             The scatter-summed tensor.
         """
-        return F.scatter_sum(src, index, self.dim, dim_size)
+        return F.scatter_sum(src, index, self.dim, dim_size=dim_size)
 
     def extra_repr(self):
         """Render the configured scatter ``dim`` for ``repr(module)``."""
@@ -51,13 +50,13 @@ class BatchAggregation(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, src, batch, dim_size=None):
+    def forward(self, src, batch, dim_size: int):
         """Sum ``src`` rows per graph as labelled by ``batch``.
 
         Args:
             src: Per-node values ``(N, ...)``.
             batch: Graph membership index ``(N,)`` mapping each row to a graph.
-            dim_size: Number of graphs; inferred from ``batch`` if ``None``.
+            dim_size: Number of graphs ``B``.
 
         Returns:
             Per-graph sums ``(num_graphs, ...)``.

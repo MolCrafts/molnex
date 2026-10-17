@@ -53,6 +53,7 @@ def test_two_molecule_bondharmonic_equals_sum():
             pos=one["atoms", "pos"],
             bond_index=one["bonds", "bond_index"],
             bond_types=one["bonds", "bond_types"],
+            num_graphs=1,
         )
 
     batch = collate_molecules([m1, m2])
@@ -60,6 +61,7 @@ def test_two_molecule_bondharmonic_equals_sum():
         pos=batch["atoms", "pos"],
         bond_index=batch["bonds", "bond_index"],
         bond_types=batch["bonds", "bond_types"],
+        num_graphs=2,
     )
     assert torch.allclose(batched, energy(m1) + energy(m2), atol=1e-6)
 

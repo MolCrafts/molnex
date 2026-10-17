@@ -120,7 +120,7 @@ class Polarization(nn.Module):
         alpha: torch.Tensor,
         batch: torch.Tensor,
         pair_index: torch.Tensor,
-        num_graphs: int | None = None,
+        num_graphs: int,
     ) -> torch.Tensor:
         """Compute induced-dipole polarization energy.
 
@@ -130,17 +130,15 @@ class Polarization(nn.Module):
             alpha: Isotropic polarizabilities ``(N,)``.
             batch: Graph index per atom ``(N,)``.
             pair_index: Neighbor pairs ``(E, 2)``.
-            num_graphs: Number of graphs.
+            num_graphs: Number of graphs ``B`` — ``graphs.batch_size[0]`` of
+                the batch.
 
         Returns:
-            Per-graph polarization energy ``(B,)`` or scalar.
+            Per-graph polarization energy ``(B,)``.
         """
         N = pos.shape[0]
         device = pos.device
         dtype = pos.dtype
-
-        if num_graphs is None:
-            num_graphs = int(batch.max().item()) + 1
 
         # 1. Permanent electric field at each atom from charges (Coulomb's law).
         # E(r_src) = k_e · Σⱼ qⱼ · (r_src − r_j) / |r_src − r_j|³

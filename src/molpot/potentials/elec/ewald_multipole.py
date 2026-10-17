@@ -59,8 +59,6 @@ What this is NOT:
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -139,8 +137,8 @@ class EwaldMultipoleEnergy(BasePotential):
             ``U_iu = -½ E·u_induced``.
         e_ext: ``(3,)`` external electric field; optional, added to
             the per-atom field before the polarizability response.
-        compute_field: Reserved for API compatibility; the field is
-            always populated. Default ``False``.
+        kvec_indices: Frozen integer k-grid ``(K, 3)`` for the reciprocal
+            path; optional. ``None`` enumerates the grid from ``cell``.
 
     Forward output:
         Dict with keys ``"pot"`` (per-graph energy), ``"phi"`` ``(N,)``,
@@ -199,10 +197,9 @@ class EwaldMultipoleEnergy(BasePotential):
 
     def forward(
         self,
-        data: dict[str, Any] | None = None,
         *,
-        q: torch.Tensor | None = None,
-        pos: torch.Tensor | None = None,
+        q: torch.Tensor,
+        pos: torch.Tensor,
         cell: torch.Tensor | None = None,
         batch: torch.Tensor | None = None,
         mu: torch.Tensor | None = None,
@@ -210,27 +207,15 @@ class EwaldMultipoleEnergy(BasePotential):
         kappa: torch.Tensor | None = None,
         alpha: torch.Tensor | None = None,
         e_ext: torch.Tensor | None = None,
-        compute_field: bool = False,
         kvec_indices: torch.Tensor | None = None,
-        **kwargs: Any,
     ) -> dict[str, torch.Tensor]:
         """Compute total LES electrostatic energy + per-atom Φ, E.
 
         Dispatches between the realspace (non-periodic) and reciprocal
         (periodic) kernel paths based on the presence of ``cell``;
         inlines the non-self-consistent induced response when ``κ``
-        and/or ``α`` are passed.
+        and/or ``α`` are passed. The inputs are documented on the class.
         """
-        if data is not None and q is None:
-            q = data.get("charge") if isinstance(data, dict) else None
-        if data is not None and pos is None:
-            pos = data.get("pos") if isinstance(data, dict) else None
-        if q is None or pos is None:
-            raise ValueError(
-                "EwaldMultipoleEnergy.forward requires `q` and `pos` "
-                "as keyword arguments (or as `data` keys)."
-            )
-
         n = pos.shape[0]
         if batch is None:
             batch_eff = torch.zeros(n, dtype=torch.long, device=pos.device)

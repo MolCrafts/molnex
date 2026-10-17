@@ -350,7 +350,8 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
         positions: torch.Tensor,
         batch: torch.Tensor,
         cell: torch.Tensor | None = None,
-        num_graphs: int | None = None,
+        *,
+        num_graphs: int,
     ) -> torch.Tensor:
         """Hartree energy per graph.
 
@@ -362,10 +363,8 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
                 one per row. When set, the official k-space sum runs and the
                 batch must hold exactly one system (``B = 1``). When omitted,
                 the isolated real-space pair sum runs.
-            num_graphs: Number of graphs ``B``, dimensionless. Leaving it
-                ``None`` derives it from ``batch`` with a host sync and is
-                therefore **eager-only**: that fallback lives here and nowhere
-                deeper, so the periodic call chain below stays compile-clean.
+            num_graphs: Number of graphs ``B``, dimensionless —
+                ``graphs.batch_size[0]`` of the batch.
 
         Returns:
             Per-graph energy ``(B,)`` in eV.
@@ -381,10 +380,6 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
                 the k-sum is never silently truncated).
         """
         feats = source_feats.reshape(source_feats.shape[0], -1)
-        if num_graphs is None:
-            n_graphs = int(batch.max().item()) + 1 if batch.numel() else 0
-        else:
-            n_graphs = num_graphs
         if cell is not None:
             # First use of ``torch.compiler.is_compiling()`` under ``src/``:
             # it is a trace-time constant, so dynamo folds this branch away
@@ -393,14 +388,14 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
             # one. Bind before compiling; the grid itself never resizes.
             if not torch.compiler.is_compiling():
                 self.bind_cell(cell)
-            energy = self._kspace_energy(feats, positions, batch, cell, n_graphs)
+            energy = self._kspace_energy(feats, positions, batch, cell, num_graphs)
             # The reciprocal sum runs over all i, j — the on-site term is
             # already in there. Adding it again is a double count.
             if not self.include_self_interaction:
-                energy = energy - self._self_energy(feats, batch, n_graphs)
+                energy = energy - self._self_energy(feats, batch, num_graphs)
             return energy
         if self.l_max == 0:
-            energy = self._pair_energy(feats[:, 0], positions, batch, n_graphs)
+            energy = self._pair_energy(feats[:, 0], positions, batch, num_graphs)
         else:
             offset = self.offset
             n = positions.shape[0]
@@ -415,9 +410,9 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
             charges[0::4] = feats[:, 0] - (charges[1::4] + charges[2::4] + charges[3::4])
             extended_batch = batch.repeat_interleave(4)
             orig = torch.arange(n, device=batch.device).repeat_interleave(4)
-            energy = self._pair_energy(charges, extended_pos, extended_batch, n_graphs, orig)
+            energy = self._pair_energy(charges, extended_pos, extended_batch, num_graphs, orig)
         if self.include_self_interaction:
-            energy = energy + self._self_energy(feats, batch, n_graphs)
+            energy = energy + self._self_energy(feats, batch, num_graphs)
         return energy
 
     def _kspace_energy(

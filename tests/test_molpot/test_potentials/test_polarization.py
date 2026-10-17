@@ -85,6 +85,7 @@ class TestPolarization:
             alpha=alpha,
             batch=batch,
             pair_index=pair_index,
+            num_graphs=1,
         )
         assert energy.item() < 0
 
@@ -98,6 +99,7 @@ class TestPolarization:
             alpha=alpha,
             batch=batch,
             pair_index=pair_index,
+            num_graphs=1,
         )
         assert abs(energy.item()) < 1e-10
 
@@ -110,6 +112,7 @@ class TestPolarization:
             alpha=torch.tensor([0.5, 0.25, 0.25], dtype=torch.float64),
             batch=batch,
             pair_index=pair_index,
+            num_graphs=1,
         )
         e_large = pol(
             pos=pos,
@@ -117,6 +120,7 @@ class TestPolarization:
             alpha=torch.tensor([5.0, 2.5, 2.5], dtype=torch.float64),
             batch=batch,
             pair_index=pair_index,
+            num_graphs=1,
         )
         # Larger polarizability → more negative energy
         assert e_large.item() < e_small.item()
@@ -144,22 +148,11 @@ class TestPolarization:
             alpha=alpha,
             batch=batch,
             pair_index=pair_index,
+            num_graphs=1,
         )
         energy.sum().backward()
         assert pos.grad is not None
         assert pos.grad.shape == (3, 3)
-
-    def test_num_graphs_inferred(self, two_mol_batch):
-        pos, charge, alpha, batch, pair_index = two_mol_batch
-        pol = Polarization().double()
-        energy = pol(
-            pos=pos,
-            charge=charge,
-            alpha=alpha,
-            batch=batch,
-            pair_index=pair_index,
-        )
-        assert energy.shape == (2,)
 
     def test_forward_never_warns(
         self,

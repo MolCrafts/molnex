@@ -50,9 +50,13 @@ class TestBondedEnergyForces:
         index = torch.tensor([[0], [1]], dtype=torch.long)
         types = torch.tensor([0], dtype=torch.long)
 
-        energy, forces = pot.energy_forces(pos=pos, bond_index=index, bond_types=types)
-        expected_energy = pot(pos=pos, bond_index=index, bond_types=types)
-        expected_forces = _autograd_forces(pot, pos, bond_index=index, bond_types=types)
+        energy, forces = pot.energy_forces(
+            pos=pos, bond_index=index, bond_types=types, num_graphs=1
+        )
+        expected_energy = pot(pos=pos, bond_index=index, bond_types=types, num_graphs=1)
+        expected_forces = _autograd_forces(
+            pot, pos, bond_index=index, bond_types=types, num_graphs=1
+        )
 
         assert torch.allclose(energy, expected_energy, atol=_TOL, rtol=0.0)
         assert torch.allclose(forces, expected_forces, atol=_TOL, rtol=0.0)
@@ -65,9 +69,13 @@ class TestBondedEnergyForces:
         index = torch.tensor([[0], [1], [2]], dtype=torch.long)
         types = torch.tensor([0], dtype=torch.long)
 
-        energy, forces = pot.energy_forces(pos=pos, angle_index=index, angle_types=types)
-        expected_energy = pot(pos=pos, angle_index=index, angle_types=types)
-        expected_forces = _autograd_forces(pot, pos, angle_index=index, angle_types=types)
+        energy, forces = pot.energy_forces(
+            pos=pos, angle_index=index, angle_types=types, num_graphs=1
+        )
+        expected_energy = pot(pos=pos, angle_index=index, angle_types=types, num_graphs=1)
+        expected_forces = _autograd_forces(
+            pot, pos, angle_index=index, angle_types=types, num_graphs=1
+        )
 
         assert torch.allclose(energy, expected_energy, atol=_TOL, rtol=0.0)
         assert torch.allclose(forces, expected_forces, atol=_TOL, rtol=0.0)
@@ -90,7 +98,9 @@ class TestBondedEnergyForces:
         index = torch.tensor([[0], [1], [2]], dtype=torch.long)
         types = torch.tensor([0], dtype=torch.long)
 
-        energy, forces = pot.energy_forces(pos=pos, angle_index=index, angle_types=types)
+        energy, forces = pot.energy_forces(
+            pos=pos, angle_index=index, angle_types=types, num_graphs=1
+        )
         assert torch.isfinite(energy).all()
         assert torch.isfinite(forces).all()
 
@@ -106,9 +116,13 @@ class TestBondedEnergyForces:
         index = torch.tensor([[0], [1], [2], [3]], dtype=torch.long)
         types = torch.tensor([0], dtype=torch.long)
 
-        energy, forces = pot.energy_forces(pos=pos, proper_index=index, proper_types=types)
-        expected_energy = pot(pos=pos, proper_index=index, proper_types=types)
-        expected_forces = _autograd_forces(pot, pos, proper_index=index, proper_types=types)
+        energy, forces = pot.energy_forces(
+            pos=pos, proper_index=index, proper_types=types, num_graphs=1
+        )
+        expected_energy = pot(pos=pos, proper_index=index, proper_types=types, num_graphs=1)
+        expected_forces = _autograd_forces(
+            pot, pos, proper_index=index, proper_types=types, num_graphs=1
+        )
 
         assert torch.allclose(energy, expected_energy, atol=_TOL, rtol=0.0)
         assert torch.allclose(forces, expected_forces, atol=_TOL, rtol=0.0)
@@ -125,9 +139,13 @@ class TestBondedEnergyForces:
         index = torch.tensor([[1], [0], [2], [3]], dtype=torch.long)  # center first
         types = torch.tensor([0], dtype=torch.long)
 
-        energy, forces = pot.energy_forces(pos=pos, improper_index=index, improper_types=types)
-        expected_energy = pot(pos=pos, improper_index=index, improper_types=types)
-        expected_forces = _autograd_forces(pot, pos, improper_index=index, improper_types=types)
+        energy, forces = pot.energy_forces(
+            pos=pos, improper_index=index, improper_types=types, num_graphs=1
+        )
+        expected_energy = pot(pos=pos, improper_index=index, improper_types=types, num_graphs=1)
+        expected_forces = _autograd_forces(
+            pot, pos, improper_index=index, improper_types=types, num_graphs=1
+        )
 
         assert torch.allclose(energy, expected_energy, atol=_TOL, rtol=0.0)
         assert torch.allclose(forces, expected_forces, atol=_TOL, rtol=0.0)
@@ -141,6 +159,7 @@ class TestBondedEnergyForces:
             pos=pos,
             bond_index=torch.tensor([[0], [1]], dtype=torch.long),
             bond_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         torch.mean(forces**2).backward()
         assert k.grad is not None

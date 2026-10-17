@@ -216,7 +216,7 @@ class LJCutPotential:
         sigma: torch.Tensor,
         scales: torch.Tensor,
         pair_batch: torch.Tensor | None = None,
-        num_graphs: int | None = None,
+        num_graphs: int,
         pair_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Repulsive and dispersive LJ energy for a half neighbor list.
@@ -239,8 +239,8 @@ class LJCutPotential:
             pair_batch: Index of the molecule (graph) each edge belongs to
                 ``(E,)``. ``None`` sums to a scalar. Padding rows must still
                 carry an in-range graph index; their contribution is zero.
-            num_graphs: Number of molecules ``B``; required when ``pair_batch``
-                is given.
+            num_graphs: Number of molecules ``B`` — ``graphs.batch_size[0]`` of
+                the batch.
             pair_mask: Live-row mask ``(E,)`` of a fixed-capacity neighbour
                 list. Dead rows contribute **exactly** zero to every returned
                 entry — they are multiplied out, not sliced out, and their
@@ -271,9 +271,8 @@ class LJCutPotential:
         if pair_batch is None:
             return rep_pair.sum(), disp_pair.sum()
         index = pair_batch.long()
-        graphs = int(num_graphs)
-        repulsion = rep_pair.new_zeros(graphs)
-        dispersion = disp_pair.new_zeros(graphs)
+        repulsion = rep_pair.new_zeros(num_graphs)
+        dispersion = disp_pair.new_zeros(num_graphs)
         repulsion.index_add_(0, index, rep_pair)
         dispersion.index_add_(0, index, disp_pair)
         return repulsion, dispersion
@@ -289,7 +288,7 @@ class LJCutPotential:
         sigma: torch.Tensor,
         scales: torch.Tensor,
         pair_batch: torch.Tensor | None = None,
-        num_graphs: int | None = None,
+        num_graphs: int,
         pair_mask: torch.Tensor | None = None,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """LJ energy halves and analytic forces ``F = -∂E/∂pos`` for a half list.
@@ -368,8 +367,8 @@ class LJCutPotential:
             pair_batch: Index of the molecule (graph) each edge belongs to
                 ``(E,)``. ``None`` sums to a scalar. Padding rows must still
                 carry an in-range graph index.
-            num_graphs: Number of molecules ``B``; required when ``pair_batch``
-                is given.
+            num_graphs: Number of molecules ``B`` — ``graphs.batch_size[0]`` of
+                the batch.
             pair_mask: Live-row mask ``(E,)`` of a fixed-capacity neighbour
                 list; see :meth:`energy`. A dead row adds exactly zero to both
                 energy halves and zero force to both of its atoms, without any
@@ -401,9 +400,8 @@ class LJCutPotential:
             repulsion, dispersion = rep_pair.sum(), disp_pair.sum()
         else:
             index = pair_batch.long()
-            graphs = int(num_graphs)
-            repulsion = rep_pair.new_zeros(graphs)
-            dispersion = disp_pair.new_zeros(graphs)
+            repulsion = rep_pair.new_zeros(num_graphs)
+            dispersion = disp_pair.new_zeros(num_graphs)
             repulsion.index_add_(0, index, rep_pair)
             dispersion.index_add_(0, index, disp_pair)
 
@@ -461,7 +459,7 @@ class CoulombOpenPotential:
         charges: torch.Tensor,
         scales: torch.Tensor,
         pair_batch: torch.Tensor | None = None,
-        num_graphs: int | None = None,
+        num_graphs: int,
         pair_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Coulomb energy of a half neighbor list under open boundaries.
@@ -476,8 +474,8 @@ class CoulombOpenPotential:
             pair_batch: Index of the molecule (graph) each edge belongs to
                 ``(E,)``. ``None`` sums to a scalar. Padding rows must still
                 carry an in-range graph index.
-            num_graphs: Number of molecules ``B``; required when ``pair_batch``
-                is given.
+            num_graphs: Number of molecules ``B`` — ``graphs.batch_size[0]`` of
+                the batch.
             pair_mask: Live-row mask ``(E,)`` of a fixed-capacity neighbour
                 list. Dead rows contribute **exactly** zero: they are
                 multiplied out rather than sliced out, at a stand-in distance
@@ -498,7 +496,7 @@ class CoulombOpenPotential:
         pair_energy = scales * qi * qj * v * weight
         if pair_batch is None:
             return pair_energy.sum()
-        energy = pair_energy.new_zeros(int(num_graphs))
+        energy = pair_energy.new_zeros(num_graphs)
         energy.index_add_(0, pair_batch.long(), pair_energy)
         return energy
 

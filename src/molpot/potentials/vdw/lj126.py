@@ -364,7 +364,7 @@ class LJ126(nn.Module):
         epsilon_ij: torch.Tensor,
         sigma_ij: torch.Tensor,
         pair_batch: torch.Tensor | None = None,
-        num_graphs: int | None = None,
+        num_graphs: int,
     ) -> torch.Tensor:
         """Compute LJ 12-6 energy.
 
@@ -374,8 +374,8 @@ class LJ126(nn.Module):
             sigma_ij: Per-pair zero-crossing distance ``σ_ij`` ``(E,)`` in Å.
             pair_batch: Index of the molecule (graph) each edge belongs to
                 ``(E,)``. If None, returns summed scalar.
-            num_graphs: Number of molecules ``B`` (inferred from ``pair_batch``
-                if None).
+            num_graphs: Number of molecules ``B`` — ``graphs.batch_size[0]`` of
+                the batch.
 
         Returns:
             Per-graph energy ``(B,)`` in kcal/mol, or a scalar ``()`` if no
@@ -388,9 +388,6 @@ class LJ126(nn.Module):
 
         if pair_batch is None:
             return pair_energy.sum()
-
-        if num_graphs is None:
-            num_graphs = int(pair_batch.max().item()) + 1
 
         energy = torch.zeros(num_graphs, dtype=pair_energy.dtype, device=pair_energy.device)
         energy.index_add_(0, pair_batch, pair_energy)

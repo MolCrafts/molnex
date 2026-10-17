@@ -19,8 +19,6 @@ References:
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 
 from molpot.potentials.base import BasePotential
@@ -141,64 +139,62 @@ class ProperTorsionPeriodic(BasePotential):
             int(periodicity.max()) if periodicity.numel() else max(int(periodicity.shape[-1]), 1)
         )
 
-    def forward(self, data: dict[str, Any] | None = None, **kwargs: Any) -> torch.Tensor:
+    def forward(
+        self,
+        *,
+        pos: torch.Tensor,
+        proper_index: torch.Tensor,
+        proper_types: torch.Tensor | None = None,
+        term_batch: torch.Tensor | None = None,
+        num_graphs: int,
+        k: torch.Tensor | None = None,
+        periodicity: torch.Tensor | None = None,
+        phase: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Compute Class-I multi-term proper torsion energy.
 
         Args:
-            data: Optional dictionary with molecular fields.
-            **kwargs: Explicit tensors:
-                - pos: Positions ``[n_atoms, 3]``.
-                - proper_index: COO proper indices ``[4, N]`` (i-j-k-l).
-                - proper_types: Proper types ``[N]``.
+            pos: Positions ``[n_atoms, 3]``.
+            proper_index: COO proper indices ``[4, N]`` (i-j-k-l).
+            proper_types: Proper types ``[N]``, or ``None`` when the tables
+                already carry one row per torsion.
+            term_batch: Graph index per torsion ``[N]``; ``None`` sums to a
+                scalar.
+            num_graphs: Graph count ``B`` — the length of the per-graph energy.
+            k: Per-call barrier table; ``None`` prices the registered one.
+            periodicity: Per-call period table; ``None`` prices the registered
+                one.
+            phase: Per-call phase table; ``None`` prices the registered one.
 
         Returns:
-            Total proper torsion energy (scalar).
+            Per-graph energy ``(B,)`` when ``term_batch`` is given, else a scalar.
 
         Raises:
-            ValueError: Missing inputs or ``proper_index`` not ``[4, N]``.
+            ValueError: ``proper_index`` is not ``[4, N]``.
         """
-        pos = kwargs.get("pos")
-        proper_index = kwargs.get("proper_index")
-        proper_types = kwargs.get("proper_types")
-        term_batch = kwargs.get("term_batch")
-        num_graphs = kwargs.get("num_graphs")
-
-        if data is not None and isinstance(data, dict):
-            if pos is None:
-                pos = data.get("pos")
-                if pos is None and isinstance(data.get("atoms"), dict):
-                    pos = data["atoms"].get("pos")
-            if proper_index is None:
-                proper_index = data.get("proper_index")
-            if proper_types is None:
-                proper_types = data.get("proper_types")
-
-        if pos is None or proper_index is None:
-            raise ValueError("ProperTorsionPeriodic requires pos, proper_index, and proper_types.")
-
-        if not isinstance(pos, torch.Tensor):
-            pos = torch.from_numpy(pos).float()
-            proper_index = torch.from_numpy(proper_index).long()
-            proper_types = None if proper_types is None else torch.from_numpy(proper_types).long()
-
         _require_index_4_by_n(proper_index, "proper_index")
-
-        if proper_index.size(1) == 0:
-            return torch.tensor(0.0, device=pos.device, dtype=pos.dtype)
+        tables = {"k": k, "periodicity": periodicity, "phase": phase}
 
         cos_phi, sin_phi = dihedral_cos_sin(*_dihedral_bond_vectors(pos, proper_index))
-        k_t = self.rows("k", kwargs, proper_types)
-        phase_t = self.rows("phase", kwargs, proper_types)
-        n_t = self.rows("periodicity", kwargs, proper_types)
+        k_t = self.rows("k", tables, proper_types)
+        phase_t = self.rows("phase", tables, proper_types)
+        n_t = self.rows("periodicity", tables, proper_types)
         cos_arg = fourier_cos(cos_phi, sin_phi, n_t, phase_t, n_max=self.n_max)
         energy_per_proper = (k_t * (1.0 + cos_arg)).sum(dim=1)
-        if term_batch is not None:
-            energy = energy_per_proper.new_zeros(int(num_graphs))
-            energy.index_add_(0, term_batch.long(), energy_per_proper)
-            return energy
-        return energy_per_proper.sum()
+        return self.per_graph(energy_per_proper, term_batch, num_graphs)
 
-    def energy_forces(self, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
+    def energy_forces(
+        self,
+        *,
+        pos: torch.Tensor,
+        proper_index: torch.Tensor,
+        proper_types: torch.Tensor | None = None,
+        term_batch: torch.Tensor | None = None,
+        num_graphs: int,
+        k: torch.Tensor | None = None,
+        periodicity: torch.Tensor | None = None,
+        phase: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Energy and analytic forces ``F = -∂E/∂pos`` in one pass.
 
         With ``g = Σ_m (k[t,m]/s) · n[m] · sin(n[m]φ − γ[t,m]) = −∂E/∂φ``, the
@@ -207,44 +203,34 @@ class ProperTorsionPeriodic(BasePotential):
         the same Chebyshev recurrence as the energy.
 
         Args:
-            **kwargs: ``pos`` ``[N, 3]``, ``proper_index`` ``[4, M]``,
-                ``proper_types`` ``[M]``, and optional ``term_batch`` /
-                ``num_graphs``.
+            pos: Positions ``[N, 3]``.
+            proper_index: COO proper indices ``[4, M]``.
+            proper_types: Proper types ``[M]``, or ``None`` for
+                per-interaction tables.
+            term_batch: Graph index per torsion; ``None`` sums to a scalar.
+            num_graphs: Graph count ``B``.
+            k: Per-call barrier table; ``None`` prices the registered one.
+            periodicity: Per-call period table; ``None`` prices the registered
+                one.
+            phase: Per-call phase table; ``None`` prices the registered one.
 
         Returns:
             ``(energy, forces)`` — energy ``(B,)`` (or scalar) and forces
             ``[N, 3]``.
         """
-        pos = kwargs.get("pos")
-        proper_index = kwargs.get("proper_index")
-        proper_types = kwargs.get("proper_types")
-        term_batch = kwargs.get("term_batch")
-        num_graphs = kwargs.get("num_graphs")
-        if pos is None or proper_index is None:
-            raise ValueError(
-                "ProperTorsionPeriodic.energy_forces requires pos, proper_index, proper_types."
-            )
         _require_index_4_by_n(proper_index, "proper_index")
-
-        if proper_index.size(1) == 0:
-            energy = torch.zeros(
-                (int(num_graphs),) if term_batch is not None else (),
-                device=pos.device,
-                dtype=pos.dtype,
-            )
-            return energy, pos.new_zeros((pos.shape[0], 3))
+        tables = {"k": k, "periodicity": periodicity, "phase": phase}
 
         b1, b2, b3 = _dihedral_bond_vectors(pos, proper_index)
         cos_phi, sin_phi = dihedral_cos_sin(b1, b2, b3)
-        k_t = self.rows("k", kwargs, proper_types)
-        phase_t = self.rows("phase", kwargs, proper_types)
-        n_t = self.rows("periodicity", kwargs, proper_types)
+        k_t = self.rows("k", tables, proper_types)
+        phase_t = self.rows("phase", tables, proper_types)
+        n_t = self.rows("periodicity", tables, proper_types)
         cos_arg, sin_arg = fourier_cos_sin(cos_phi, sin_phi, n_t, phase_t, n_max=self.n_max)
-        scale = k_t
-        energy_per = (scale * (1.0 + cos_arg)).sum(dim=1)
+        energy_per = (k_t * (1.0 + cos_arg)).sum(dim=1)
 
         n = n_t.to(dtype=k_t.dtype)
-        g = (scale * n * sin_arg).sum(dim=1)
+        g = (k_t * n * sin_arg).sum(dim=1)
         fi, fj, fk, fl = dihedral_phi_grad(b1, b2, b3)
         g = g.unsqueeze(-1)
         forces = pos.new_zeros((pos.shape[0], 3))
@@ -252,12 +238,7 @@ class ProperTorsionPeriodic(BasePotential):
         forces.index_add_(0, proper_index[1], g * fj)
         forces.index_add_(0, proper_index[2], g * fk)
         forces.index_add_(0, proper_index[3], g * fl)
-
-        if term_batch is not None:
-            energy = energy_per.new_zeros(int(num_graphs))
-            energy.index_add_(0, term_batch.long(), energy_per)
-            return energy, forces
-        return energy_per.sum(), forces
+        return self.per_graph(energy_per, term_batch, num_graphs), forces
 
     def __repr__(self) -> str:
         n_types, n_terms = self.k.shape

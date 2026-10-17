@@ -58,6 +58,7 @@ class TestImproperHarmonic:
             pos=_planar_pos(),
             improper_index=_improper_index(),
             improper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         assert math.isclose(float(e), 0.0, rel_tol=1e-10, abs_tol=1e-10)
 
@@ -71,6 +72,7 @@ class TestImproperHarmonic:
             pos=_pi_over_6_pos(),
             improper_index=_improper_index(),
             improper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         expected = (math.pi / 6.0) ** 2
         # float64 geometry + atan2 leaves ~1e-9 residual on (pi/6)**2
@@ -85,6 +87,7 @@ class TestImproperHarmonic:
             pos=_planar_pos(),
             improper_index=torch.zeros(4, 0, dtype=torch.long),
             improper_types=torch.zeros(0, dtype=torch.long),
+            num_graphs=1,
         )
         assert float(e) == 0.0
 
@@ -99,6 +102,7 @@ class TestImproperHarmonic:
                 pos=_planar_pos(),
                 improper_index=wrong,
                 improper_types=torch.tensor([0], dtype=torch.long),
+                num_graphs=1,
             )
 
     def test_forces_are_finite_off_equilibrium(self):
@@ -107,10 +111,11 @@ class TestImproperHarmonic:
             chi0=torch.tensor([0.0], dtype=torch.float64),
         )
         pos = _pi_over_6_pos().clone().requires_grad_(True)
-        forces = pot.calc_forces(
-            pos=pos.detach(),
+        energy = pot(
+            pos=pos,
             improper_index=_improper_index(),
             improper_types=torch.tensor([0], dtype=torch.long),
-            as_numpy=False,
+            num_graphs=1,
         )
+        (forces,) = torch.autograd.grad(-energy, pos)
         assert torch.isfinite(forces).all()

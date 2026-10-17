@@ -78,7 +78,7 @@ def _dimer_energy_fn(
     bond_types = torch.zeros(1, dtype=torch.long)
 
     def energy_fn(pos: torch.Tensor) -> torch.Tensor:
-        return bond(pos=pos, bond_index=bond_index, bond_types=bond_types)
+        return bond(pos=pos, bond_index=bond_index, bond_types=bond_types, num_graphs=1)
 
     return energy_fn
 

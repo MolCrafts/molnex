@@ -36,6 +36,7 @@ class TestAngleHarmonic:
             pos=_right_angle_pos(),
             angle_index=_angle_index(),
             angle_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         assert math.isclose(float(energy), (math.pi / 6) ** 2, rel_tol=1e-10, abs_tol=1e-10)
 
@@ -51,6 +52,7 @@ class TestAngleHarmonic:
             pos=pos,
             angle_index=_angle_index(),
             angle_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         expected = 0.5 * k * (math.pi - theta0) ** 2
         assert torch.isfinite(energy)

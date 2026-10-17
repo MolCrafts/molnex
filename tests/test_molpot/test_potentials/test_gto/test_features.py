@@ -212,6 +212,7 @@ class TestGTOFieldFeatures:
             torch.randn(n, 4, dtype=torch.float64),
             torch.randn(n, 3, dtype=torch.float64),
             torch.zeros(n, dtype=torch.long),
+            num_graphs=1,
         )
         assert out.shape == (n, 8)
 
@@ -227,8 +228,8 @@ class TestGTOFieldFeatures:
         q = torch.randn(4, 4, dtype=torch.float64)
         pos = torch.randn(4, 3, dtype=torch.float64)
         batch = torch.zeros(4, dtype=torch.long)
-        a = block(q, pos, batch)
-        b = block(q, pos + 1.7, batch)
+        a = block(q, pos, batch, num_graphs=1)
+        b = block(q, pos + 1.7, batch, num_graphs=1)
         assert torch.allclose(a, b, atol=1e-8)
 
     def test_periodic_self_overlap_constants(self):
@@ -269,8 +270,8 @@ class TestGTOFieldFeatures:
         feats = torch.tensor(PAIR_FEATS, dtype=torch.float64)
         batch = torch.zeros(2, dtype=torch.long)
         cell = torch.eye(3, dtype=torch.float64) * 60.0
-        periodic = block(feats, pos, batch, cell=cell)
-        isolated = block(feats, pos, batch)
+        periodic = block(feats, pos, batch, cell=cell, num_graphs=1)
+        isolated = block(feats, pos, batch, num_graphs=1)
         own_site = (block.self_overlap_l0 * feats[:, 0:1].abs()).max().item()
         assert own_site > 3.0  # the tolerance below is not vacuous
         assert torch.allclose(periodic, isolated, atol=3e-2, rtol=0.0)
@@ -289,7 +290,9 @@ class TestGTOFieldFeatures:
         feats = torch.tensor(PAIR_FEATS, dtype=torch.float64)
         batch = torch.zeros(2, dtype=torch.long)
         cell = torch.eye(3, dtype=torch.float64) * 20.0
-        delta = keep(feats, pos, batch, cell=cell) - drop(feats, pos, batch, cell=cell)
+        delta = keep(feats, pos, batch, cell=cell, num_graphs=1) - drop(
+            feats, pos, batch, cell=cell, num_graphs=1
+        )
         scalars = drop.self_overlap_l0 * feats[:, 0:1]
         vectors = torch.stack(
             [drop.self_overlap_l1 * feats[:, m : m + 1] for m in (1, 2, 3)], dim=1

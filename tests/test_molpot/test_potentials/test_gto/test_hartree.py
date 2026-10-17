@@ -112,7 +112,7 @@ class TestGTOHartreeEnergy:
         pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float64)
         q = torch.ones(2, 1, dtype=torch.float64)
         batch = torch.zeros(2, dtype=torch.long)
-        out = energy(q, pos, batch)
+        out = energy(q, pos, batch, num_graphs=1)
         expect = eV_A * math.erf(1.0 / 3.0)
         assert out.shape == (1,)
         assert out.item() == pytest.approx(expect, rel=1e-10)
@@ -123,7 +123,7 @@ class TestGTOHartreeEnergy:
         pos = torch.zeros(1, 3, dtype=torch.float64)
         q = torch.ones(1, 1, dtype=torch.float64)
         batch = torch.zeros(1, dtype=torch.long)
-        assert energy(q, pos, batch).item() == pytest.approx(0.0)
+        assert energy(q, pos, batch, num_graphs=1).item() == pytest.approx(0.0)
 
     def test_unit_monopole_self_energy(self):
         """Dump σ=1.5 Å: ½ q² eV_A/(σ√π) for a lone unit charge."""
@@ -132,7 +132,7 @@ class TestGTOHartreeEnergy:
         q = torch.ones(1, 1, dtype=torch.float64)
         batch = torch.zeros(1, dtype=torch.long)
         expect = 0.5 * eV_A / (1.5 * math.sqrt(math.pi))
-        assert energy(q, pos, batch).item() == pytest.approx(expect, rel=1e-8)
+        assert energy(q, pos, batch, num_graphs=1).item() == pytest.approx(expect, rel=1e-8)
 
     def test_self_overlap_polar_dump_sigma(self):
         """Polar-1-M dump overlap_constants at σ=1.5 Å, l_max=1."""
@@ -149,8 +149,8 @@ class TestGTOHartreeEnergy:
         q0 = torch.ones(2, 1, dtype=torch.float64)
         q1 = torch.zeros(2, 4, dtype=torch.float64)
         q1[:, 0] = 1.0
-        e0 = GTOHartreeEnergy(sigma=1.5, l_max=0)(q0, pos, batch)
-        e1 = GTOHartreeEnergy(sigma=1.5, l_max=1)(q1, pos, batch)
+        e0 = GTOHartreeEnergy(sigma=1.5, l_max=0)(q0, pos, batch, num_graphs=1)
+        e1 = GTOHartreeEnergy(sigma=1.5, l_max=1)(q1, pos, batch, num_graphs=1)
         assert torch.allclose(e0, e1, rtol=1e-10, atol=1e-12)
 
     def test_l1_pair_count_skips_same_atom_copies(self):
@@ -177,7 +177,7 @@ class TestGTOHartreeEnergy:
         )
         q = torch.ones(4, 1, dtype=torch.float64)
         batch = torch.tensor([0, 0, 1, 1], dtype=torch.long)
-        out = energy(q, pos, batch)
+        out = energy(q, pos, batch, num_graphs=2)
         expect = eV_A * math.erf(1.0 / 3.0)
         assert out.shape == (2,)
         assert torch.allclose(out, torch.full((2,), expect, dtype=torch.float64), rtol=1e-10)
@@ -197,8 +197,8 @@ class TestGTOHartreeEnergy:
         feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
         batch = torch.zeros(3, dtype=torch.long)
         cell = torch.eye(3, dtype=torch.float64) * 60.0
-        periodic = model(feats, pos, batch, cell=cell)
-        isolated = model(feats, pos, batch)
+        periodic = model(feats, pos, batch, cell=cell, num_graphs=1)
+        isolated = model(feats, pos, batch, num_graphs=1)
         assert periodic.shape == (1,)
         assert periodic.item() == pytest.approx(isolated.item(), abs=1e-2)
 
@@ -217,7 +217,9 @@ class TestGTOHartreeEnergy:
         batch = torch.zeros(1, dtype=torch.long)
         cell = torch.eye(3, dtype=torch.float64) * 40.0
         expect = 0.5 * eV_A / (1.5 * math.sqrt(math.pi)) - 0.5 * CUBIC_MADELUNG * eV_A / 40.0
-        assert model(feats, pos, batch, cell=cell).item() == pytest.approx(expect, rel=3e-3)
+        assert model(feats, pos, batch, cell=cell, num_graphs=1).item() == pytest.approx(
+            expect, rel=3e-3
+        )
 
     def test_kspace_self_flag_subtracts_not_adds(self):
         """Periodic branch: ``True`` is the raw sum, ``False`` removes the on-site term.
@@ -231,8 +233,8 @@ class TestGTOHartreeEnergy:
         cell = torch.eye(3, dtype=torch.float64) * 20.0
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=True)
         without = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
-        e_true = model(feats, pos, batch, cell=cell)
-        e_false = without(feats, pos, batch, cell=cell)
+        e_true = model(feats, pos, batch, cell=cell, num_graphs=1)
+        e_false = without(feats, pos, batch, cell=cell, num_graphs=1)
         overlap = model.self_overlap
         on_site = 0.5 * (overlap * feats * feats).sum()
         assert on_site.item() > 0.1  # not a vacuous difference
@@ -257,7 +259,7 @@ class TestGTOKspaceHartree:
         q = torch.tensor([[1.0], [-1.0]], dtype=torch.float64)
         batch = torch.zeros(2, dtype=torch.long)
         cell = torch.eye(3, dtype=torch.float64) * 12.0
-        out = energy(q, pos, batch, cell=cell)
+        out = energy(q, pos, batch, cell=cell, num_graphs=1)
         assert out.shape == (1,)
         assert torch.isfinite(out).all()
 
@@ -268,7 +270,7 @@ class TestGTOKspaceHartree:
         batch = torch.zeros(2, dtype=torch.long)
         cell = torch.eye(3, dtype=torch.float64) * 14.0
         leaf = pos.detach().requires_grad_(True)
-        energy = GTOHartreeEnergy(sigma=1.5, l_max=0)(q, leaf, batch, cell=cell).sum()
+        energy = GTOHartreeEnergy(sigma=1.5, l_max=0)(q, leaf, batch, cell=cell, num_graphs=1).sum()
         (d_energy,) = torch.autograd.grad(energy, leaf)
         assert torch.allclose(d_energy.sum(dim=0), torch.zeros(3, dtype=torch.float64), atol=1e-10)
         # Attraction: moving atom 0 toward atom 1 lowers E (∂E/∂x_0 < 0).
@@ -281,8 +283,8 @@ class TestGTOKspaceHartree:
         q = torch.tensor([[1.0], [-1.0]], dtype=torch.float64)
         batch = torch.zeros(2, dtype=torch.long)
         cell = torch.eye(3, dtype=torch.float64) * 14.0
-        e0 = energy(q, pos, batch, cell=cell)
-        e1 = energy(q, pos + 1.7, batch, cell=cell)
+        e0 = energy(q, pos, batch, cell=cell, num_graphs=1)
+        e1 = energy(q, pos + 1.7, batch, cell=cell, num_graphs=1)
         assert torch.allclose(e0, e1, atol=1e-9, rtol=0.0)
 
     def test_zero_dipole_matches_monopole(self):
@@ -299,8 +301,8 @@ class TestGTOKspaceHartree:
         monopole = torch.tensor([[0.4], [-0.4]], dtype=torch.float64)
         with_dipole = torch.zeros(2, 4, dtype=torch.float64)
         with_dipole[:, 0] = monopole[:, 0]
-        e0 = model(monopole, pos, batch, cell=cell)
-        e1 = model(with_dipole, pos, batch, cell=cell)
+        e0 = model(monopole, pos, batch, cell=cell, num_graphs=1)
+        e1 = model(with_dipole, pos, batch, cell=cell, num_graphs=1)
         assert torch.allclose(e0, e1, atol=1e-10, rtol=0.0)
 
     def test_half_sphere_matches_full_sphere(self):
@@ -312,7 +314,7 @@ class TestGTOKspaceHartree:
         cell = torch.eye(3, dtype=torch.float64) * 11.0
         sigma = 1.5
         k_cut = model.k_cutoff
-        half = model(q, pos, batch, cell=cell)
+        half = model(q, pos, batch, cell=cell, num_graphs=1)
         g = (2.0 * math.pi) * torch.linalg.inv(cell).T
         nk = max(1, int(11.0 * k_cut / (2.0 * math.pi)) + 1)
         n = torch.arange(-nk, nk + 1)
@@ -336,7 +338,7 @@ class TestGTOKspaceHartree:
         q = torch.tensor([[1.0], [-1.0]], dtype=torch.float64)
         batch = torch.zeros(2, dtype=torch.long)
         cell = (torch.eye(3, dtype=torch.float64) * 13.0).requires_grad_(True)
-        energy = model(q, pos, batch, cell=cell)
+        energy = model(q, pos, batch, cell=cell, num_graphs=1)
         (grad,) = torch.autograd.grad(energy.sum(), cell)
         assert torch.isfinite(grad).all()
         assert grad.abs().sum().item() > 0.0
@@ -348,7 +350,7 @@ class TestGTOKspaceHartree:
         batch = torch.tensor([0, 0, 1, 1], dtype=torch.long)
         cell = torch.eye(3, dtype=torch.float64) * 12.0
         with pytest.raises(ValueError, match="single-system"):
-            energy(q, pos, batch, cell=cell)
+            energy(q, pos, batch, cell=cell, num_graphs=2)
 
 
 class TestGTOHartreeEnergyKspace:
@@ -607,21 +609,6 @@ class TestGTOHartreeEnergyKspace:
         assert torch.equal(flat, batched)
 
     @pytest.mark.slow
-    def test_missing_num_graphs_keeps_the_documented_break(self) -> None:
-        """``num_graphs=None`` is the eager-only fallback and must stay visible."""
-        model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
-        feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
-        pos = torch.tensor(PROBE_POS, dtype=torch.float64)
-        batch = torch.zeros(3, dtype=torch.long)
-        cell = torch.eye(3, dtype=torch.float64) * 10.0
-        model.bind_cell(cell)
-        explanation = Compiler.explain(model, feats, pos, batch, cell=cell)
-        assert explanation.graph_break_count > 0, (
-            "num_graphs=None is the documented eager-only fallback: it keeps "
-            "int(batch.max().item()) and must not silently become compile-clean."
-        )
-
-    @pytest.mark.slow
     def test_isolated_branch_still_breaks_by_design(self) -> None:
         """the retained all-pairs enumeration is a *named* break."""
         model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
@@ -649,13 +636,3 @@ class TestGTOHartreeEnergyKspace:
         with pytest.raises(Exception) as excinfo:
             compiled(feats, pos, batch, cell=cell, num_graphs=1)
         assert "bind_cell" in str(excinfo.value)
-
-    def test_two_graph_batch_is_rejected_with_explicit_num_graphs(self) -> None:
-        """the owner's own single-system guard survives ``num_graphs``."""
-        model = GTOHartreeEnergy(sigma=1.5, l_max=0)
-        pos = torch.zeros(4, 3, dtype=torch.float64)
-        q = torch.ones(4, 1, dtype=torch.float64)
-        batch = torch.tensor([0, 0, 1, 1], dtype=torch.long)
-        cell = torch.eye(3, dtype=torch.float64) * 12.0
-        with pytest.raises(ValueError, match="single-system"):
-            model(q, pos, batch, cell=cell, num_graphs=2)

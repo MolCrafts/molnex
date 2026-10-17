@@ -1,9 +1,7 @@
-from typing import Any
-
 import torch
 
 from molpot.potentials.base import BasePotential
-from molpot.potentials.geom import dihedral_cos_sin
+from molpot.potentials.dihedrals.periodic import _dihedral_phi, _require_index_4_by_n
 
 
 class DihedralHarmonic(BasePotential):
@@ -58,69 +56,47 @@ class DihedralHarmonic(BasePotential):
         self.register_buffer("k", k)
         self.register_buffer("phi0", phi0)
 
-    def forward(self, data: dict[str, Any] | None = None, **kwargs: Any) -> torch.Tensor:
+    def forward(
+        self,
+        *,
+        pos: torch.Tensor,
+        dihedral_index: torch.Tensor,
+        dihedral_types: torch.Tensor | None = None,
+        term_batch: torch.Tensor | None = None,
+        num_graphs: int,
+        k: torch.Tensor | None = None,
+        phi0: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Compute harmonic dihedral energy.
 
         Args:
-            data: Optional dictionary with molecular fields
-            **kwargs: Alternate way to pass explicit tensors, including:
-                - pos: Positions [N, 3]
-                - dihedral_index: Dihedral indices [4, num_dihedrals] (i-j-k-l)
-                - dihedral_types: Dihedral types [num_dihedrals]
+            pos: Positions ``[N, 3]``.
+            dihedral_index: Dihedral indices ``[4, num_dihedrals]`` (i-j-k-l).
+            dihedral_types: Dihedral types ``[num_dihedrals]``, or ``None``
+                when the tables already carry one row per dihedral.
+            term_batch: Graph index per dihedral ``[num_dihedrals]``; ``None``
+                sums to a scalar.
+            num_graphs: Graph count ``B`` — the length of the per-graph energy.
+            k: Per-call force-constant table; ``None`` prices the registered one.
+            phi0: Per-call equilibrium-angle table; ``None`` prices the
+                registered one.
 
         Returns:
-            Total dihedral energy (scalar)
+            Per-graph energy ``(B,)`` when ``term_batch`` is given, else a scalar.
+
+        Raises:
+            ValueError: ``dihedral_index`` is not ``[4, num_dihedrals]``.
         """
-        # Extract data
-        pos = kwargs.get("pos")
-        dihedral_index = kwargs.get("dihedral_index")
-        dihedral_types = kwargs.get("dihedral_types")
+        _require_index_4_by_n(dihedral_index, "dihedral_index")
+        tables = {"k": k, "phi0": phi0}
 
-        if pos is None and data is not None:
-            if isinstance(data, dict):
-                pos = data.get("pos")
-                dihedral_index = (
-                    data.get("dihedral_index") if dihedral_index is None else dihedral_index
-                )
-                dihedral_types = (
-                    data.get("dihedral_types") if dihedral_types is None else dihedral_types
-                )
-                if pos is None and "atoms" in data:
-                    pos = data["atoms"]["x"]
+        phi = _dihedral_phi(pos, dihedral_index)
+        k_dihedrals = self.rows("k", tables, dihedral_types)  # [num_dihedrals]
+        phi0_dihedrals = self.rows("phi0", tables, dihedral_types)  # [num_dihedrals]
 
-        if pos is None or dihedral_index is None:
-            raise ValueError("DihedralHarmonic requires pos, dihedral_index, and dihedral_types.")
-
-        # Convert numpy to torch if needed
-        if not isinstance(pos, torch.Tensor):
-            pos = torch.from_numpy(pos).float()
-            dihedral_index = torch.from_numpy(dihedral_index).long()
-            dihedral_types = (
-                None if dihedral_types is None else torch.from_numpy(dihedral_types).long()
-            )
-
-        # Handle empty dihedrals
-        if dihedral_index.size(1) == 0:
-            return torch.tensor(0.0, device=pos.device, dtype=pos.dtype)
-
-        b1 = pos[dihedral_index[1]] - pos[dihedral_index[0]]
-        b2 = pos[dihedral_index[2]] - pos[dihedral_index[1]]
-        b3 = pos[dihedral_index[3]] - pos[dihedral_index[2]]
-        cos_phi, sin_phi = dihedral_cos_sin(b1, b2, b3)
-        phi = torch.atan2(sin_phi, cos_phi)
-
-        # Look up parameters for each dihedral
-        k_dihedrals = self.rows("k", kwargs, dihedral_types)  # [num_dihedrals]
-        phi0_dihedrals = self.rows("phi0", kwargs, dihedral_types)  # [num_dihedrals]
-
-        # Compute harmonic energy: E = 0.5 * k * (phi - phi0)^2
         displacement = phi - phi0_dihedrals
         energy_per_dihedral = 0.5 * k_dihedrals * displacement**2
-
-        # Sum over all dihedrals
-        total_energy = energy_per_dihedral.sum()
-
-        return total_energy
+        return self.per_graph(energy_per_dihedral, term_batch, num_graphs)
 
     def __repr__(self) -> str:
         num_types = len(self.k)

@@ -102,6 +102,7 @@ class TestProperTorsionPeriodic:
             pos=torch.zeros((4, 3), dtype=torch.float64),
             proper_index=torch.zeros((4, 0), dtype=torch.long),
             proper_types=torch.zeros(0, dtype=torch.long),
+            num_graphs=1,
         )
         assert float(energy) == 0.0
 
@@ -121,6 +122,7 @@ class TestProperTorsionPeriodic:
             pos=_perp_pos(),
             proper_index=_proper_index(),
             proper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         pot.energy_forces(**kwargs)
         explanation = Compiler.explain(pot.energy_forces, **kwargs)
@@ -135,6 +137,7 @@ class TestProperTorsionPeriodic:
             pos=_cis_pos(),
             proper_index=_proper_index(),
             proper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         assert math.isclose(float(e), 2.0, rel_tol=1e-10, abs_tol=1e-10)
 
@@ -145,6 +148,7 @@ class TestProperTorsionPeriodic:
             pos=_trans_pos(),
             proper_index=_proper_index(),
             proper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         assert math.isclose(float(e), 0.0, rel_tol=1e-10, abs_tol=1e-10)
 
@@ -155,6 +159,7 @@ class TestProperTorsionPeriodic:
             pos=_perp_pos(),
             proper_index=_proper_index(),
             proper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         assert math.isclose(float(e), 1.0, rel_tol=1e-10, abs_tol=1e-10)
 
@@ -164,6 +169,7 @@ class TestProperTorsionPeriodic:
             pos=_cis_pos(),
             proper_index=torch.zeros(4, 0, dtype=torch.long),
             proper_types=torch.zeros(0, dtype=torch.long),
+            num_graphs=1,
         )
         assert float(e) == 0.0
 
@@ -175,6 +181,7 @@ class TestProperTorsionPeriodic:
                 pos=_cis_pos(),
                 proper_index=wrong,
                 proper_types=torch.tensor([0], dtype=torch.long),
+                num_graphs=1,
             )
 
     def test_rejects_edge_index_shape(self):
@@ -185,6 +192,7 @@ class TestProperTorsionPeriodic:
                 pos=_cis_pos(),
                 proper_index=edge_like,
                 proper_types=torch.tensor([0, 0], dtype=torch.long),
+                num_graphs=1,
             )
 
     def test_rejects_bond_like_2_by_n_shape(self):
@@ -195,6 +203,7 @@ class TestProperTorsionPeriodic:
                 pos=_cis_pos(),
                 proper_index=bond_like,
                 proper_types=torch.tensor([0], dtype=torch.long),
+                num_graphs=1,
             )
 
     def test_colinear_torsion_is_cos_phi_zero(self):
@@ -208,6 +217,7 @@ class TestProperTorsionPeriodic:
             pos=pos,
             proper_index=_proper_index(),
             proper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         assert math.isclose(float(energy), 1.0, rel_tol=1e-10, abs_tol=1e-10)
 
@@ -228,6 +238,7 @@ class TestProperTorsionPeriodic:
             pos=pos,
             proper_index=index,
             proper_types=torch.tensor([0, 0], dtype=torch.long),
+            num_graphs=1,
         )
         assert torch.isfinite(energy)
         # colinear contributes k=1; cis contributes 2.
@@ -252,5 +263,6 @@ class TestProperTorsionPeriodic:
             pos=_cis_pos(),
             proper_index=_proper_index(),
             proper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         assert math.isclose(float(e), 3.0, rel_tol=1e-10, abs_tol=1e-10)

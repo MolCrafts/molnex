@@ -128,6 +128,7 @@ class TestRepulsionExp6:
             eps_rep_ij=torch.tensor([0.1]),
             lam_rep_ij=torch.tensor([10.0]),
             r_star_ij=torch.tensor([1.5]),
+            num_graphs=1,
         )
         assert energy.shape == ()
 
@@ -139,6 +140,7 @@ class TestRepulsionExp6:
             eps_rep_ij=torch.tensor([0.5]),
             lam_rep_ij=torch.tensor([12.0]),
             r_star_ij=torch.tensor([1.5]),
+            num_graphs=1,
         )
         assert energy.item() > 0
 
@@ -152,7 +154,11 @@ class TestRepulsionExp6:
         }
         energies = []
         for i in range(3):
-            e = pot(distance=distances[i : i + 1], **{k: v[i : i + 1] for k, v in params.items()})
+            e = pot(
+                distance=distances[i : i + 1],
+                num_graphs=1,
+                **{k: v[i : i + 1] for k, v in params.items()},
+            )
             energies.append(e.item())
         assert energies[0] > energies[1] > energies[2]
 
@@ -177,6 +183,7 @@ class TestRepulsionExp6:
             eps_rep_ij=torch.tensor([0.1, 0.1]),
             lam_rep_ij=torch.tensor([10.0, 10.0]),
             r_star_ij=torch.tensor([1.5, 1.5]),
+            num_graphs=1,
         )
         e_uni = RepulsionExp6(bidirectional=False)(**kwargs)
         e_bi = RepulsionExp6(bidirectional=True)(**kwargs)
@@ -209,6 +216,7 @@ class TestDispersionC6:
             distance=torch.tensor([2.0]),
             c6_ij=torch.tensor([5.0]),
             r_star_ij=torch.tensor([1.5]),
+            num_graphs=1,
         )
         assert energy.item() < 0
 
@@ -218,11 +226,13 @@ class TestDispersionC6:
             distance=torch.tensor([2.0]),
             c6_ij=torch.tensor([5.0]),
             r_star_ij=torch.tensor([1.5]),
+            num_graphs=1,
         )
         e_far = pot(
             distance=torch.tensor([100.0]),
             c6_ij=torch.tensor([5.0]),
             r_star_ij=torch.tensor([1.5]),
+            num_graphs=1,
         )
         assert abs(e_far.item()) < abs(e_close.item())
 
@@ -231,6 +241,7 @@ class TestDispersionC6:
             distance=torch.tensor([2.0]),
             c6_ij=torch.tensor([5.0]),
             r_star_ij=torch.tensor([1.5]),
+            num_graphs=1,
         )
         e1 = DispersionC6(bidirectional=False, energy_scale=1.0)(**kwargs)
         e3 = DispersionC6(bidirectional=False, energy_scale=3.0)(**kwargs)
@@ -265,6 +276,7 @@ class TestChargeTransfer:
             eps_ct_ij=torch.tensor([0.01]),
             lam_ct_ij=torch.tensor([3.0]),
             r_star_ij=torch.tensor([1.5]),
+            num_graphs=1,
         )
         assert energy.item() > 0
 
@@ -276,8 +288,8 @@ class TestChargeTransfer:
             "lam_ct_ij": torch.tensor([0.5]),
             "r_star_ij": torch.tensor([1.0]),
         }
-        e_close = pot(distance=torch.tensor([4.0]), **params)
-        e_far = pot(distance=torch.tensor([8.0]), **params)
+        e_close = pot(distance=torch.tensor([4.0]), num_graphs=1, **params)
+        e_far = pot(distance=torch.tensor([8.0]), num_graphs=1, **params)
         assert e_close.item() > e_far.item()
 
     def test_bidirectional(self):
@@ -286,6 +298,7 @@ class TestChargeTransfer:
             eps_ct_ij=torch.tensor([0.01, 0.01]),
             lam_ct_ij=torch.tensor([3.0, 3.0]),
             r_star_ij=torch.tensor([1.5, 1.5]),
+            num_graphs=1,
         )
         e_uni = ChargeTransfer(bidirectional=False)(**kwargs)
         e_bi = ChargeTransfer(bidirectional=True)(**kwargs)
@@ -306,6 +319,7 @@ class TestGradients:
             eps_rep_ij=torch.tensor([0.1]),
             lam_rep_ij=torch.tensor([10.0]),
             r_star_ij=torch.tensor([1.5]),
+            num_graphs=1,
         )
         energy.backward()
         assert d.grad is not None
@@ -318,6 +332,7 @@ class TestGradients:
             distance=d,
             c6_ij=torch.tensor([5.0]),
             r_star_ij=torch.tensor([1.5]),
+            num_graphs=1,
         )
         energy.backward()
         assert d.grad is not None
@@ -330,6 +345,7 @@ class TestGradients:
             eps_ct_ij=torch.tensor([0.01]),
             lam_ct_ij=torch.tensor([3.0]),
             r_star_ij=torch.tensor([1.5]),
+            num_graphs=1,
         )
         energy.backward()
         assert d.grad is not None

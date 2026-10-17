@@ -89,9 +89,10 @@ class PotentialComposer(nn.Module):
 
         Args:
             node_features: Pooled per-node features ``(N, D)``.
-            data: Must contain ``"pair_index"`` ``(E, 2)``,
-                ``"batch"`` ``(N,)``. Must contain ``"pos"`` ``(N, 3)``
-                if ``compute_forces=True``.
+            data: Must contain ``"pair_index"`` ``(E, 2)``, ``"batch"``
+                ``(N,)`` and ``"num_graphs"`` (the graph count ``B``,
+                ``graphs.batch_size[0]`` of the batch). Must contain ``"pos"``
+                ``(N, 3)`` if ``compute_forces=True``.
             compute_forces: Derive forces as ``-dE/dpos``.
             head_kwargs: Extra keyword arguments forwarded to the head
                 (e.g. ``batch``, ``Z`` for MultiHead).
@@ -116,7 +117,7 @@ class PotentialComposer(nn.Module):
 
         # 3. Evaluate each potential (each applies its own mixing)
         pair_batch = batch[src]
-        num_graphs = data.get("num_graphs")
+        num_graphs = data["num_graphs"]
 
         def _term_energies(distance: torch.Tensor) -> dict[str, torch.Tensor]:
             terms: dict[str, torch.Tensor] = {}

@@ -303,10 +303,12 @@ class Potentials(Potential):
         # Exclusion-table fingerprint, not an F29 cache: a mismatch against the
         # live batch raises and demands an explicit rebind (:meth:`_scaled_pairs`).
         self._bound_topology: tuple[int, ...] | None = None
-        # How many graphs the bound batch holds, resolved once at
-        # :meth:`bind_topology` because reading it off ``atoms.batch`` is a host
-        # sync and therefore a graph break on a compiled core (:meth:`_num_graphs`).
-        self._bound_num_graphs: int | None = None
+        # How many graphs the bound batch holds: an int fixed at
+        # :meth:`bind_topology`, written together with ``_bound_topology`` and
+        # served only behind its fingerprint (:meth:`_num_graphs`), because
+        # reading it off ``atoms.batch`` is a host sync and therefore a graph
+        # break on a compiled core.
+        self._bound_num_graphs: int
         #: The field's own per-atom tables at the bound topology's ``N``; see
         #: :meth:`bind_topology`. ``None`` until the first bind.
         self._bound_atom_params: dict[str, torch.Tensor] | None = None
@@ -779,6 +781,7 @@ class Potentials(Potential):
         blocks = pos.new_zeros((n_pairs, 9))
         called_all = tables or {}
         hessian = TermHessian()
+        num_graphs = self._num_graphs(frame)
 
         for label, attribute, index_kwarg, types_kwarg, names in self._PARTIAL_HESSIAN_TERMS:
             if label not in frame.keys():
@@ -832,7 +835,7 @@ class Potentials(Potential):
                 index_kwarg: local_index,
                 types_kwarg: None,
                 "term_batch": None,
-                "num_graphs": None,
+                "num_graphs": num_graphs,
                 **resolved,
             }
 
@@ -2246,15 +2249,14 @@ class Potentials(Potential):
         Returns:
             The graph count ``B`` — ``1`` for an unbatched single molecule.
         """
-        bound = self._bound_num_graphs
         fingerprint = self._bound_topology
-        if bound is not None and fingerprint is not None:
+        if fingerprint is not None:
             pos = frame.atoms.get("pos", None) if "atoms" in frame.keys() else None
             # No ``atoms.pos`` is no atom count to compare; the topology columns
             # still are, so the rest of the fingerprint still has to match.
             n_atoms = fingerprint[0] if pos is None else int(pos.shape[0])
             if self._topology_fingerprint(frame, n_atoms) == fingerprint:
-                return bound
+                return self._bound_num_graphs
         return self._count_graphs(frame)
 
     def _count_graphs(self, frame: TensorFrame) -> int:

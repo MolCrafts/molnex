@@ -19,8 +19,6 @@ References:
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 
 from molpot.potentials.base import BasePotential
@@ -118,70 +116,66 @@ class ImproperPeriodic(BasePotential):
             int(periodicity.max()) if periodicity.numel() else max(int(periodicity.shape[-1]), 1)
         )
 
-    def forward(self, data: dict[str, Any] | None = None, **kwargs: Any) -> torch.Tensor:
+    def forward(
+        self,
+        *,
+        pos: torch.Tensor,
+        improper_index: torch.Tensor,
+        improper_types: torch.Tensor | None = None,
+        term_batch: torch.Tensor | None = None,
+        num_graphs: int,
+        k: torch.Tensor | None = None,
+        periodicity: torch.Tensor | None = None,
+        phase: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Compute Class-I multi-term improper torsion energy.
 
         Args:
-            data: Optional dictionary with molecular fields.
-            **kwargs: Explicit tensors:
-                - pos: Positions ``[n_atoms, 3]``.
-                - improper_index: COO improper indices ``[4, N]`` molrs layout
-                  ``[center, i, j, k]`` (center at **row 0**).
-                - improper_types: Improper types ``[N]``.
+            pos: Positions ``[n_atoms, 3]``.
+            improper_index: COO improper indices ``[4, N]`` molrs layout
+                ``[center, i, j, k]`` (center at **row 0**).
+            improper_types: Improper types ``[N]``, or ``None`` when the tables
+                already carry one row per improper.
+            term_batch: Graph index per improper ``[N]``; ``None`` sums to a
+                scalar.
+            num_graphs: Graph count ``B`` — the length of the per-graph energy.
+            k: Per-call barrier table; ``None`` prices the registered one.
+            periodicity: Per-call period table; ``None`` prices the registered
+                one.
+            phase: Per-call phase table; ``None`` prices the registered one.
 
         Returns:
-            Total improper torsion energy (scalar).
+            Per-graph energy ``(B,)`` when ``term_batch`` is given, else a scalar.
 
         Raises:
-            ValueError: Missing inputs or ``improper_index`` not ``[4, N]``.
+            ValueError: ``improper_index`` is not ``[4, N]``.
         """
-        pos = kwargs.get("pos")
-        improper_index = kwargs.get("improper_index")
-        improper_types = kwargs.get("improper_types")
-        term_batch = kwargs.get("term_batch")
-        num_graphs = kwargs.get("num_graphs")
-
-        if data is not None and isinstance(data, dict):
-            if pos is None:
-                pos = data.get("pos")
-                if pos is None and isinstance(data.get("atoms"), dict):
-                    pos = data["atoms"].get("pos")
-            if improper_index is None:
-                improper_index = data.get("improper_index")
-            if improper_types is None:
-                improper_types = data.get("improper_types")
-
-        if pos is None or improper_index is None:
-            raise ValueError("ImproperPeriodic requires pos, improper_index, and improper_types.")
-
-        if not isinstance(pos, torch.Tensor):
-            pos = torch.from_numpy(pos).float()
-            improper_index = torch.from_numpy(improper_index).long()
-            improper_types = (
-                None if improper_types is None else torch.from_numpy(improper_types).long()
-            )
-
         _require_index_4_by_n(improper_index, "improper_index")
-
-        if improper_index.size(1) == 0:
-            return torch.tensor(0.0, device=pos.device, dtype=pos.dtype)
+        tables = {"k": k, "periodicity": periodicity, "phase": phase}
 
         # molrs [center,i,j,k] → dihedral (i, center, j, k); Chebyshev, no φ.
         cos_phi, sin_phi = dihedral_cos_sin(
             *_dihedral_bond_vectors(pos, _improper_to_dihedral_index(improper_index))
         )
-        k_t = self.rows("k", kwargs, improper_types)
-        phase_t = self.rows("phase", kwargs, improper_types)
-        n_t = self.rows("periodicity", kwargs, improper_types)
+        k_t = self.rows("k", tables, improper_types)
+        phase_t = self.rows("phase", tables, improper_types)
+        n_t = self.rows("periodicity", tables, improper_types)
         cos_arg = fourier_cos(cos_phi, sin_phi, n_t, phase_t, n_max=self.n_max)
         energy_per = (k_t * (1.0 + cos_arg)).sum(dim=1)
-        if term_batch is not None:
-            energy = energy_per.new_zeros(int(num_graphs))
-            energy.index_add_(0, term_batch.long(), energy_per)
-            return energy
-        return energy_per.sum()
+        return self.per_graph(energy_per, term_batch, num_graphs)
 
-    def energy_forces(self, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
+    def energy_forces(
+        self,
+        *,
+        pos: torch.Tensor,
+        improper_index: torch.Tensor,
+        improper_types: torch.Tensor | None = None,
+        term_batch: torch.Tensor | None = None,
+        num_graphs: int,
+        k: torch.Tensor | None = None,
+        periodicity: torch.Tensor | None = None,
+        phase: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Energy and analytic forces ``F = -∂E/∂pos`` in one pass.
 
         Evaluated on the dihedral quartet ``(i, center, j, k)`` (rows 1, 0, 2, 3
@@ -190,45 +184,35 @@ class ImproperPeriodic(BasePotential):
         ``Σ_m (k[t,m]/s) · n[m] · sin(n[m]φ − γ[t,m])``.
 
         Args:
-            **kwargs: ``pos`` ``[N, 3]``, ``improper_index`` ``[4, M]`` (center
-                first), ``improper_types`` ``[M]``, and optional ``term_batch``
-                / ``num_graphs``.
+            pos: Positions ``[N, 3]``.
+            improper_index: COO improper indices ``[4, M]`` (center first).
+            improper_types: Improper types ``[M]``, or ``None`` for
+                per-interaction tables.
+            term_batch: Graph index per improper; ``None`` sums to a scalar.
+            num_graphs: Graph count ``B``.
+            k: Per-call barrier table; ``None`` prices the registered one.
+            periodicity: Per-call period table; ``None`` prices the registered
+                one.
+            phase: Per-call phase table; ``None`` prices the registered one.
 
         Returns:
             ``(energy, forces)`` — energy ``(B,)`` (or scalar) and forces
             ``[N, 3]``.
         """
-        pos = kwargs.get("pos")
-        improper_index = kwargs.get("improper_index")
-        improper_types = kwargs.get("improper_types")
-        term_batch = kwargs.get("term_batch")
-        num_graphs = kwargs.get("num_graphs")
-        if pos is None or improper_index is None:
-            raise ValueError(
-                "ImproperPeriodic.energy_forces requires pos, improper_index, improper_types."
-            )
         _require_index_4_by_n(improper_index, "improper_index")
-
-        if improper_index.size(1) == 0:
-            energy = torch.zeros(
-                (int(num_graphs),) if term_batch is not None else (),
-                device=pos.device,
-                dtype=pos.dtype,
-            )
-            return energy, pos.new_zeros((pos.shape[0], 3))
+        tables = {"k": k, "periodicity": periodicity, "phase": phase}
 
         dihedral_index = _improper_to_dihedral_index(improper_index)
         b1, b2, b3 = _dihedral_bond_vectors(pos, dihedral_index)
         cos_phi, sin_phi = dihedral_cos_sin(b1, b2, b3)
-        k_t = self.rows("k", kwargs, improper_types)
-        phase_t = self.rows("phase", kwargs, improper_types)
-        n_t = self.rows("periodicity", kwargs, improper_types)
+        k_t = self.rows("k", tables, improper_types)
+        phase_t = self.rows("phase", tables, improper_types)
+        n_t = self.rows("periodicity", tables, improper_types)
         cos_arg, sin_arg = fourier_cos_sin(cos_phi, sin_phi, n_t, phase_t, n_max=self.n_max)
-        scale = k_t
-        energy_per = (scale * (1.0 + cos_arg)).sum(dim=1)
+        energy_per = (k_t * (1.0 + cos_arg)).sum(dim=1)
 
         n = n_t.to(dtype=k_t.dtype)
-        g = (scale * n * sin_arg).sum(dim=1)
+        g = (k_t * n * sin_arg).sum(dim=1)
         fi, fj, fk, fl = dihedral_phi_grad(b1, b2, b3)
         g = g.unsqueeze(-1)
         forces = pos.new_zeros((pos.shape[0], 3))
@@ -236,12 +220,7 @@ class ImproperPeriodic(BasePotential):
         forces.index_add_(0, improper_index[0], g * fj)  # dihedral j (center)
         forces.index_add_(0, improper_index[2], g * fk)  # dihedral k
         forces.index_add_(0, improper_index[3], g * fl)  # dihedral l
-
-        if term_batch is not None:
-            energy = energy_per.new_zeros(int(num_graphs))
-            energy.index_add_(0, term_batch.long(), energy_per)
-            return energy, forces
-        return energy_per.sum(), forces
+        return self.per_graph(energy_per, term_batch, num_graphs), forces
 
     def __repr__(self) -> str:
         n_types, n_terms = self.k.shape

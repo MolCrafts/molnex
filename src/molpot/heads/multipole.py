@@ -105,7 +105,6 @@ class PermMultipoleHeadSpec(BaseModel):
     quadrupole: bool = False
     constrain_total_charge: bool = True
     total_charge_key: str = "total_charge"
-    embed_moments: bool = False
     hidden_dim: int = Field(default=128, gt=0)
     out_charge_key: str = "atomic_charges"
     out_dipole_key: str = "atomic_dipoles"
@@ -146,7 +145,6 @@ class PermMultipoleHead(nn.Module):
           the moments this head writes into the batch.
         * **Not QEq.** Charges are direct l=0 predictions of the atom
           embedding, not the result of a charge-equilibration KKT solve.
-          See ``QEqLayer`` (TODO) for the variational variant.
 
     Args:
         input_dim: Per-edge feature dim ``F`` from the encoder.
@@ -175,8 +173,6 @@ class PermMultipoleHead(nn.Module):
             ``KeyError`` at forward. For uniformly-neutral datasets
             (e.g. QM9), write a constant ``0.0`` column into the sample so
             collate routes it under ``graphs``.
-        embed_moments: Reserved. Re-injecting moment information into the
-            encoder is a v1 TODO; passing ``True`` raises today.
         hidden_dim: Hidden width of the per-moment scalar MLP heads.
         out_charge_key: TensorDict key for atomic charges.
         out_dipole_key: TensorDict key for atomic dipoles.
@@ -205,7 +201,6 @@ class PermMultipoleHead(nn.Module):
         quadrupole: bool = False,
         constrain_total_charge: bool = True,
         total_charge_key: str = "total_charge",
-        embed_moments: bool = False,
         hidden_dim: int = 128,
         out_charge_key: str = "atomic_charges",
         out_dipole_key: str = "atomic_dipoles",
@@ -228,7 +223,6 @@ class PermMultipoleHead(nn.Module):
             quadrupole=quadrupole,
             constrain_total_charge=constrain_total_charge,
             total_charge_key=total_charge_key,
-            embed_moments=embed_moments,
             hidden_dim=hidden_dim,
             out_charge_key=out_charge_key,
             out_dipole_key=out_dipole_key,
@@ -240,11 +234,6 @@ class PermMultipoleHead(nn.Module):
             raise ValueError(
                 "PermMultipoleHead needs at least one moment enabled "
                 "(charge / dipole / quadrupole)."
-            )
-        if cfg.embed_moments:
-            raise NotImplementedError(
-                "embed_moments=True is reserved for a v1 release "
-                "(re-inject moments into edge_features)."
             )
 
         # Promote a few flags onto self for hot-path access without

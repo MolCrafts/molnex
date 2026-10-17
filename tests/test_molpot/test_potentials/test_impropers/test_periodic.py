@@ -83,6 +83,7 @@ class TestImproperPeriodic:
             k=torch.ones(1, 2, dtype=torch.float64),
             periodicity=torch.tensor([[1, 2]], dtype=torch.long),
             phase=torch.zeros(1, 2, dtype=torch.float64),
+            num_graphs=1,
         )
         assert torch.isfinite(later).all()
 
@@ -98,6 +99,7 @@ class TestImproperPeriodic:
             pos=_perp_pos(),
             improper_index=torch.zeros((4, 0), dtype=torch.long),
             improper_types=torch.zeros(0, dtype=torch.long),
+            num_graphs=1,
         )
         assert float(energy) == 0.0
 
@@ -111,6 +113,7 @@ class TestImproperPeriodic:
             pos=_perp_pos(),
             improper_index=_improper_index_center_first(),
             improper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         pot.energy_forces(**kwargs)
         explanation = Compiler.explain(pot.energy_forces, **kwargs)
@@ -124,6 +127,7 @@ class TestImproperPeriodic:
             pos=_cis_pos(),
             improper_index=_improper_index_center_first(),
             improper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         assert math.isclose(float(e), 2.0, rel_tol=1e-10, abs_tol=1e-10)
 
@@ -133,6 +137,7 @@ class TestImproperPeriodic:
             pos=_trans_pos(),
             improper_index=_improper_index_center_first(),
             improper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         assert math.isclose(float(e), 0.0, rel_tol=1e-10, abs_tol=1e-10)
 
@@ -142,6 +147,7 @@ class TestImproperPeriodic:
             pos=_perp_pos(),
             improper_index=_improper_index_center_first(),
             improper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         assert math.isclose(float(e), 1.0, rel_tol=1e-10, abs_tol=1e-10)
 
@@ -158,6 +164,7 @@ class TestImproperPeriodic:
             pos=_cis_pos(),
             improper_index=index,
             improper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         assert math.isclose(float(e), 2.0, rel_tol=1e-10, abs_tol=1e-10)
 
@@ -167,6 +174,7 @@ class TestImproperPeriodic:
             pos=_cis_pos(),
             improper_index=torch.zeros(4, 0, dtype=torch.long),
             improper_types=torch.zeros(0, dtype=torch.long),
+            num_graphs=1,
         )
         assert float(e) == 0.0
 
@@ -178,6 +186,7 @@ class TestImproperPeriodic:
                 pos=_cis_pos(),
                 improper_index=wrong,
                 improper_types=torch.tensor([0], dtype=torch.long),
+                num_graphs=1,
             )
 
     def test_multi_term_sums_component_energies(self):
@@ -190,6 +199,7 @@ class TestImproperPeriodic:
             pos=_cis_pos(),
             improper_index=_improper_index_center_first(),
             improper_types=torch.tensor([0], dtype=torch.long),
+            num_graphs=1,
         )
         # 2.0 + 1.0 = 3.0 at phi=0
         assert math.isclose(float(e), 3.0, rel_tol=1e-10, abs_tol=1e-10)
