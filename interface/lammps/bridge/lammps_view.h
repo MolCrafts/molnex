@@ -18,10 +18,11 @@
 // (`ilist` / `numneigh` / `firstneigh` / `inum` / `neigh_mask`) arrived with
 // `lammps-iface-03-graph` because `GraphBridge` — their only consumer — did,
 // and `gnum` arrived with `lammps-iface-05-pbc` for the same reason, when that
-// same consumer started walking the ghost centres too. There is still no `tag`
-// (the tag<->local mapping belongs to a future fixed-graph contract; the
-// fat-ghost single-shot scheme deliberately does no index remapping, so nothing
-// here needs one) and no `q` (no reader).
+// same consumer started walking the ghost centres too. `owner` arrived with the
+// folded periodic mode (`GraphBridge::build_folded`, its one reader): the
+// tag -> local mapping it needs is computed by the facade, which is the layer
+// allowed to read `atom->tag`, and handed over as plain indices. There is no
+// `q` (no reader).
 //
 // The neighbour mask travels as **data**, applied by the `neighbor()` accessor:
 // that is what keeps the bridge from restating a LAMMPS constant. The facade
@@ -60,10 +61,10 @@ struct LammpsView {
   /// Indices of the atoms to evaluate, `(inum + gnum,)`: `NeighList::ilist`.
   ///
   /// Under `REQ_FULL` alone, LAMMPS lists only atoms in `[0, nlocal)` here.
-  /// Under `REQ_FULL | REQ_GHOST` — what a `supports_pbc` contract requests —
-  /// it appends `gnum` GHOST centres after those `inum` local ones, in the same
-  /// array. So the domain of a centre index is `[0, nall())`, and how far a
-  /// consumer walks decides which it gets.
+  /// Under `REQ_FULL | REQ_GHOST` — what this pair style requests — it appends
+  /// `gnum` GHOST centres after those `inum` local ones, in the same array. So
+  /// the domain of a centre index is `[0, nall())`, and how far a consumer
+  /// walks decides which it gets.
   const int* ilist;
   /// Neighbour counts, indexed by *local atom index* (not by `ilist` position):
   /// `NeighList::numneigh`.
@@ -89,6 +90,13 @@ struct LammpsView {
   /// **data** rather than a constant restated here, which is what keeps every
   /// file under `bridge/` free of LAMMPS vocabulary.
   int neigh_mask;
+  /// The owned atom each atom is a copy of, `(nall,)`: `owner[i] == i` for a
+  /// local atom, and for a ghost the local index carrying its tag.
+  ///
+  /// Filled only when every ghost is a periodic image of an atom this rank
+  /// owns — one rank — and read only by `GraphBridge::build_folded`. Null
+  /// otherwise (the member value-initialises when a caller leaves it out).
+  const int* owner;
 
   /// Total number of addressable atoms: owned plus ghosts.
   ///

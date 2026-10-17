@@ -43,9 +43,8 @@ struct NodeTensors {
 ///
 /// \param view     Borrowed LAMMPS atom arrays.
 /// \param species  Validated type -> Z map covering every type in `view`.
-/// \param n_graph  Number of leading atoms to stage: `nlocal` for a
-///                 `supports_pbc=false` export (ghosts excluded), `nall()`
-///                 otherwise.
+/// \param n_graph  Number of leading atoms to stage. The pair style passes
+///                 `nall()` (locals and ghosts).
 /// \returns Freshly allocated `Z` `(n_graph,)` int64 and `pos` `(n_graph, 3)`
 ///          float64, both on the CPU.
 /// \throws std::runtime_error  If `n_graph` is outside `[0, view.nall()]` —

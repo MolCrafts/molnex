@@ -2,9 +2,9 @@
 // (spec lammps-iface-02-view): SpeciesMap, stage_nodes and ForceScatter,
 // driven over a synthetic LammpsView.
 //
-// House style follows test_model_runner.cpp: no test framework, one function
+// House style follows test_aoti_artifact.cpp: no test framework, one function
 // per case, a function-local static map dispatcher, and the [pass]/[fail]/
-// [skip] stderr protocol. Like test_meta_schema.cpp these cases need NO
+// [skip] stderr protocol. Like test_metadata.cpp these cases need NO
 // fixtures — no exported model, no Python generation — and, crucially, no
 // LAMMPS build: the whole point of LammpsView is that the bridge consumes
 // borrowed row-pointer arrays, which a test can hand it out of its own
@@ -103,8 +103,8 @@ namespace {
 // ---- the synthetic system --------------------------------------------------
 
 // Three local atoms plus one ghost. The ghost exists so every case can assert
-// that a component honouring n_graph == nlocal leaves it alone: that is the
-// local-only semantics of a supports_pbc=false export.
+// that a component honouring n_graph == nlocal leaves it alone. The pair style
+// always passes nall(); these cases still exercise the smaller count.
 constexpr int kNlocal = 3;
 constexpr int kNghost = 1;
 constexpr int kNall = kNlocal + kNghost;
@@ -146,7 +146,7 @@ constexpr double kModelForce[kNlocal][3] = {
 };
 
 // Model energy unit expressed in the LAMMPS unit style (dimensionless), as
-// LammpsContract::units_for would have handed it to settings(). eV -> kcal/mol.
+// the pair style's energy factor would be. eV -> kcal/mol.
 constexpr double kForceConv = 23.060549;
 
 // f_in + kForceConv * f_model, computed outside this file and pasted as
@@ -250,8 +250,8 @@ void test_bridge_stage_nodes_shapes_and_values() {
   SyntheticAtoms atoms;
   const SpeciesMap map(kZByType, kMetaSpecies);
 
-  // n_graph == nlocal < nall: the local-only staging of a supports_pbc=false
-  // export. The ghost must contribute nothing.
+  // n_graph == nlocal < nall. The ghost must contribute nothing. The pair
+  // style always passes nall(); this case locks the smaller count.
   const NodeTensors nodes = stage_nodes(atoms.view(), map, kNlocal);
 
   expect_true(nodes.Z.scalar_type() == at::kLong, "Z must be int64");
@@ -404,8 +404,8 @@ void test_bridge_stage_nodes_rejects_n_graph_over_nall() {
   (void)expect_throws([&] { (void)stage_nodes(atoms.view(), map, -1); },
                       "stage_nodes with negative n_graph");
 
-  // The boundary itself is valid: staging every local and ghost atom is exactly
-  // what a supports_pbc=true export asks for.
+  // The boundary itself is valid: staging every local and ghost atom is the
+  // count the pair style passes (nall()).
   const NodeTensors all = stage_nodes(atoms.view(), map, kNall);
   expect_int(all.Z.size(0), kNall, "stage_nodes(n_graph == nall) size");
 }

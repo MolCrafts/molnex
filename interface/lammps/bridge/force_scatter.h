@@ -25,9 +25,9 @@ class ForceScatter {
  public:
   /// \param force_conv  Model force unit expressed in the LAMMPS unit style,
   ///                    e.g. 23.060549 for eV/angstrom -> kcal/mol/angstrom.
-  ///                    Comes from `LammpsContract::units_for`, whose
-  ///                    `force == energy` identity holds only because the model
-  ///                    length unit is asserted to be angstrom.
+  ///                    Equal to the energy factor, which holds only because
+  ///                    `CutoffGraphImpl` asserts the model length unit is
+  ///                    angstrom.
   explicit ForceScatter(double force_conv);
 
   /// Accumulate `forces` onto the first `n_graph` rows of `view.f`.

@@ -1,170 +1,188 @@
-# `pair_style molnex` — one LAMMPS pair style for every molnex potential
+# `pair_style molnex` — one LAMMPS pair style for every deployed molnex model
 
 Classical Class-I / OPLS parameter tables do **not** go through this pair
 style. Compile `ForceField.to_ir()` with `LammpsAdapter` and write
 `system.data` / `system.in.settings` via `LammpsWriter` — see
 [Force-field export](../../docs/molix/user-guide/ff-export.md). This
-document is the AOTI neural-potential path only.
+document is the neural-potential path only.
 
-A single generic LAMMPS pair style that evaluates **any** molnex potential
-exported via `molix.engine.export_for_lammps`. There is no per-model C++: the
-pair style reads everything model-specific (cutoff, native units, compute dtype,
-capabilities) from the export directory's `<name>.meta.json` `lammps` block, and
-runs the AOT-Inductor `.pt2` package through the shared
-`molnex::interface::ModelRunner`. The block also records the model's supported
-species, and every `pair_coeff` atomic number is checked against that list at
-`pair_coeff` time — an element the model was never exported for is refused
-rather than fed forward as an embedding index the network has no row for.
+## Layers
+
+The C++ side of deployment is two layers with a one-way dependency:
+
+| layer | where | knows |
+|---|---|---|
+| `molnex_runtime` | `interface/runtime/` | the model: `Metadata` (`{name}.json`), `ModelArtifact::open` (format → loader; `AotiArtifact` for `aoti`), `OpLibraries` (native operator libraries), `SiteEnergyExec` (the calling convention). LibTorch only — no engine, no Python. |
+| LAMMPS adapter | `interface/lammps/` | LAMMPS: `bridge/` (atom arrays, neighbour list, forces, reverse comm), `impls/` (`CutoffGraphImpl`), and the `pair_molnex` facade, the only file that includes a LAMMPS header. |
+
+The runtime never references LAMMPS; another engine links `molnex_runtime` and
+writes its own adapter. One generic pair style evaluates any model deployed
+with `molix.deploy` — there is no per-model C++.
 
 ```
-pair_style molnex <model_dir> [name]
+pair_style molnex <model_dir> [name] [mode fold|ghost]
 pair_coeff * * <Z_type1> <Z_type2> ... <Z_typeN>
 ```
 
-* `<model_dir>` — an export directory produced by `export_for_lammps`
-  (contains `<name>.pt2` and `<name>.meta.json`).
-* `[name]` — artifact basename inside `<model_dir>` (default `model`).
-* `pair_coeff` maps each LAMMPS atom type to an atomic number `Z`.
+* `<model_dir>` — holds `<name>.json` and the package (`<name>.pt2` for the
+  `aoti` format).
+* `[name]` — basename inside `<model_dir>` (default `model`).
+* `[mode]` — how periodic neighbours reach the model (default `fold` on one
+  rank, `ghost` on several; see [Two modes](#two-modes-fold-and-ghost)).
+* `pair_coeff` maps each LAMMPS atom type to an atomic number `Z`. Every Z is
+  checked against the metadata's `species` — an element the model was not
+  built for is refused.
 
-## The contract (what makes a model "molnex-LAMMPS compatible")
+## The calling convention
 
-The protocol boundary is the **AOTI export calling convention**, not a model's
-in-memory `forward` — a `TensorDict` cannot cross into C++. The exported `.pt2`
-must take flat tensors and return flat tensors, **positionally**, in exactly the
-order the meta's `inputs` / `outputs` lists give:
+`molix.deploy.SiteEnergyModel` is a structural `Protocol`; a module satisfies it
+when `forward` has this signature. Nothing subclasses it.
 
-| position (dynamic / cuda-graph) | input | shape | dtype | present when |
-|---|-------|-------|-------|--------------|
-| 0 / 0 | `Z` | `(N,)` | `int64` | always |
-| 1 / 1 | `pos` | `(N,3)` | model dtype (Å) | always |
-| 2 / 2 | `pair_index` | `(E,2)` | `int64` | always |
-| — / 3 | `pair_mask` | `(E_max,)` | `bool` | `execution: "cuda-graph"` only |
-| 3 / 4 | `local_mask` | `(N,)` | `bool` | always — **last** in either list |
-
-| # | output | shape | dtype | present when |
-|---|--------|-------|-------|--------------|
-| 0 | `energy` | `()` | model dtype | always |
-| 1 | `forces` | `(N,3)` | model dtype | always |
-| 2 | `atomic_energy` | `(N,)` | model dtype | always |
-| 3 | `virial` | `(6,)` | model dtype | `supports_virial: true` only |
-
-So the input list is `["Z", "pos", "pair_index", "local_mask"]` (4) on the
-dynamic path and `["Z", "pos", "pair_index", "pair_mask", "local_mask"]` (5) on
-the cuda-graph path — `local_mask` stays last and `pair_mask` is inserted before
-it. `LammpsContract` refuses any other arity while loading (`kDynamicInputs` /
-`kCudaGraphInputs` in `lammps_contract.h`).
-
-Energies, forces and virial are all in the **model's** native units; the pair
-style converts. `virial` is ordered `(xx, yy, zz, xy, xz, yz)`.
-
-**Two masks, two different things.** `local_mask (N,)` marks the atoms this rank
-OWNS, and the exported energy is `(atomic_energy * local_mask).sum()` — the
-partition sum that makes multi-rank and periodic runs correct. `pair_mask
-(E_max,)` exists only on the fixed-shape path and marks which rows of a padded
-`pair_index` are real. v2 called that one just `mask`; v3 renames it to
-`pair_mask` in the same bump that introduces `local_mask`, because two
-differently-meaning masks sitting in one positional list under the names `mask`
-and `local_mask` is a mis-wiring waiting to happen.
-
-**Edge order is not promised by default.** The C++ side builds `pair_index` in
-the LAMMPS neighbour list's own order and does **not** sort, because every
-in-tree model aggregates with `scatter` / `index_add`-class reductions, which are
-permutation-invariant. A model that needs rows grouped by index (segmented or
-CSR aggregation) must declare `requires_sorted_edges=True` at export; then, and
-only then, does the C++ side sort by `(source, target)`.
-
-On the default (`execution: "dynamic"`) path `N` (atoms) and `E` (edges) are
-exported as **dynamic** dimensions, so one `.pt2` serves every MD frame; the
-fixed-shape path pins them instead (`n_atoms` / `e_max` in the meta) because a
-CUDA graph can only be captured over static shapes. Units, cutoff, dtype,
-species, `receptive_field_layers` and `requires_sorted_edges` travel in
-`meta.json`.
-
-## Exporting a model (Python side)
-
-### molnex-native potential (PiNet, etc.)
-
-```python
-from molix.engine import export_for_lammps
-
-export_for_lammps(
-    pinet_potential,                 # nested-TensorDict forward
-                                     # → {"energy", "forces", "atomic_energy"}
-    "pinet_aspirin",
-    species=[1, 6, 7, 8],
-    cutoff=pinet_potential.encoder.config.r_max,
-    units="real",                    # model native: real=kcal/mol, metal=eV
-    receptive_field_layers=5,        # T — required, no default (see below)
-    device="cuda",                   # or "cpu"
-)
+```text
+Z (N,) int64, pos (N, 3), pair_index (E, 2) int64, shifts (E, 3), local_mask (N,) bool
+    -> energy (), forces (N, 3), site_energy (N,), virial (3, 3)
 ```
 
-`receptive_field_layers` is `T`, the number of message-passing layers, and it has
-**no default**: a site energy depends on everything within `T * cutoff`, and the
-LAMMPS side sizes its ghost shell from that number. Defaulting it to 1 would let
-a 5-layer model pass a check computed at a fifth of the radius it needs, so
-omitting it is a `ValueError` naming the keyword — not a plausible-looking guess.
+| # | tensor | shape | dtype |
+|---|--------|-------|-------|
+| in 0 | `Z` | `(N,)` | `int64` |
+| in 1 | `pos` | `(N, 3)` | model dtype, in the model's length unit |
+| in 2 | `pair_index` | `(E, 2)` | `int64`. `[:, 0]` is the source, `[:, 1]` the target |
+| in 3 | `shifts` | `(E, 3)` | model dtype. Lattice translation of the target image: the edge is `pos[t] - pos[s] + shifts` |
+| in 4 | `local_mask` | `(N,)` | `bool`. True for atoms this rank owns |
+| out 0 | `energy` | `()` | model dtype. Equals `(site_energy * local_mask).sum()` |
+| out 1 | `forces` | `(N, 3)` | model dtype. Equals `-d(energy)/d(pos)`, ghosts included |
+| out 2 | `site_energy` | `(N,)` | model dtype |
+| out 3 | `virial` | `(3, 3)` | model dtype. `+d(energy)/d(strain)`, symmetric — molnex's `graphs.virial` sign |
 
-### third-party model
+Metadata `schema_version` 2 names this convention; the runtime refuses any
+other version and any other output count (`SiteEnergyExec`). `N` and `E` are
+dynamic (`molix.deploy.contract.DYNAMIC_SHAPES`), so one package serves every
+frame. Edges are **not** sorted; a model that needs `(source, target)` order
+sorts inside its own `forward`.
 
-Anything that isn't a molnex potential just needs a Python-side adapter — no C++.
-Two cases:
+## Two modes: `fold` and `ghost`
 
-1. **Already flat** (`forward(Z, pos, pair_index) -> (energy, forces,
-   atomic_energy)`): use the built-in `flat` adapter.
-   ```python
-   export_for_lammps(my_model, "out", species=[1,8], cutoff=5.0,
-                     receptive_field_layers=1, adapter="flat")
-   ```
-   A model that returns only `(energy, forces)` is refused: schema v3 needs the
-   per-site decomposition, and a two-tuple cannot be widened into one.
-2. **Different input/output**: subclass `EngineAdapter` (~15 lines) — map the flat
-   `(Z, pos, pair_index)` onto your model's inputs and read back
-   `(energy, forces, atomic_energy)`:
-   ```python
-   from molix.engine import EngineAdapter, export_for_lammps
+The same package serves both; they differ in what the pair style stages.
 
-   class MyNetAdapter(EngineAdapter):
-       name = "mynet"
-       def build_inputs(self, model, Z, pos, pair_index):
-           # The seam: the engine hands you a chemistry pair list, your model
-           # takes graph edges. Only the left-hand name is yours to choose.
-           return MyGraph(z=Z, r=pos, edges=pair_index)      # your model's input
-       def read_outputs(self, out):
-           # () scalar, (N,3), (N,)
-           return out.total_energy, out.forces, out.site_energy
+| | `fold` (default on one rank) | `ghost` (default on several ranks) |
+|---|---|---|
+| graph nodes | the `nlocal` owned atoms | owned atoms + every ghost within `T * cutoff + skin` |
+| a periodic neighbour | folded onto the atom it copies, `shift = x[image] - x[owner]` | a node of its own, `shift = 0` |
+| `local_mask` | all true | true for the owned prefix |
+| forces written | owned atoms | owned and ghost rows; ghosts go home by the integrator's reverse comm |
+| global virial | the model's `virial`, negated to LAMMPS' `-dE/deps` and converted like the energy | `virial_fdotr_compute()` |
+| ghost shell needed | `cutoff + skin` (LAMMPS' default) | `T * cutoff + skin` (`comm_modify cutoff`) |
+| `newton` | not required | `newton on` required |
 
-   export_for_lammps(my_model, "out", species=[1,8], cutoff=5.0,
-                     receptive_field_layers=1, adapter="mynet")
-   ```
+**Why fold.** On one GPU the ghost mode evaluates the model on the whole ghost
+shell every step. For a 35 Å PEO box (4600 atoms) at `T * cutoff + skin = 14 Å`
+that is about 5-6 times the atoms: MACE-OFF24-M measured 927 ms/step against
+179 ms in molnex's own periodic path, and Allegro-OAM-L / MACE-OMol-0 ran out
+of memory. The folded graph is exactly the periodic graph molnex itself
+evaluates in Python (`molix.md.NeighborList` + shifts), so nothing is computed
+twice.
 
-The adapter name is stamped into `meta.json` for provenance.
+**How the fold is built** (`GraphBridge::build_folded`). The pair style walks
+the full neighbour list of the owned centres only (no `REQ_GHOST`). Each
+neighbour `j` within the cutoff becomes the pair `(i, owner(j))` with
+`shift = x[j] - x[owner(j)]`. `owner(j)` is the owned atom carrying `j`'s atom
+ID, read off a per-step ID table of the owned atoms (`atom_modify map` is not
+needed; LAMMPS' own map would agree — it gives owned atoms precedence over
+images). Because the shift is the difference of two LAMMPS coordinates it is
+exactly the lattice translation LAMMPS applied to make the image, for
+orthogonal and triclinic boxes alike. In a box under twice the cutoff an atom
+can be its own neighbour's original: that is the pair `(i, i)` with a non-zero
+shift, which is the periodic self-interaction the model must see.
+
+The fold requires every ghost to be an image of an owned atom, which holds on
+one rank and not on several, so `mode fold` with more than one rank is refused
+at `init`; a ghost whose ID no owned atom carries is refused at `compute`. It
+also needs atom IDs (`atom_modify id no` is refused).
+
+A long-range term (MACE-POLAR's electrostatics, MACE-LES's latent Ewald sum) is
+not a sum of site energies, so those models cannot be deployed through this
+convention: `SiteEnergyAdapter.check` refuses them before export.
+
+## The metadata
+
+`<name>.json` is `molix.deploy.DeployMetadata`, read by
+`molnex::runtime::Metadata`. It is engine-neutral: the model's own units, not a
+LAMMPS unit table.
+
+```json
+{
+  "schema_version": 1,
+  "format": "aoti",
+  "cutoff": 5.0,
+  "species": [1, 6, 7, 8],
+  "dtype": "float64",
+  "receptive_field_layers": 5,
+  "energy_unit": "eV",
+  "length_unit": "angstrom",
+  "op_libraries": {}
+}
+```
+
+Another `schema_version` is refused, and so is a missing or mistyped field —
+the message names it. The device is read from the package itself
+(`AOTI_DEVICE_KEY`), not from this file.
+
+`op_libraries` names the native libraries that register the package's
+non-ATen operators (a cuEquivariance model needs `molnex_cueq_ops`), each with
+the upstream requirement its binding was built against. `ModelArtifact::open`
+loads every one before the package: `lib<name>.so` from the directories of
+`MOLNEX_OP_LIBRARY_PATH` (colon-separated) or, when that is unset, the dynamic
+loader's own search. A library that is missing, or that reports another
+requirement through `molnex_op_library_requirement()`, is refused.
+
+## Deploying a model
+
+Three primitives, composed by the caller (see `molix.deploy`):
+
+```python
+from molix.deploy import DeployMetadata, SiteEnergyAdapter, example_inputs
+from molix.deploy.contract import DYNAMIC_SHAPES
+from molix.export import aoti
+
+model = SiteEnergyAdapter(potential).cuda()
+inputs = example_inputs([1, 6, 8], 6.0, torch.float32, "cuda")
+model.check(*inputs[:4])                       # site-energy partition + force checks
+written = aoti.package(model, inputs, "out/model.pt2", dynamic_shapes=DYNAMIC_SHAPES)
+DeployMetadata(
+    format="aoti", cutoff=6.0, species=(1, 6, 8), dtype="float32",
+    receptive_field_layers=2,                  # T — required, no default
+    op_libraries=DeployMetadata.op_libraries_for(written.op_namespaces),
+).write("out")
+```
+
+A module from another library subclasses nothing: its `forward` takes the five
+inputs and returns the four outputs, and `aoti.package` + `DeployMetadata`
+deploy it the same way.
+
+`receptive_field_layers` is `T`, the number of message-passing layers, and it
+has **no default**. A site energy depends on everything within `T * cutoff`.
+
+`SiteEnergyAdapter.check` runs an example system eagerly before export: the
+potential's energy must equal the sum of its site energies (rel 1e-6) and,
+when the potential emits forces, those forces must match
+`-d(sum of site energies)/d(pos)` (rel 1e-5).
 
 ## Units
 
-`export_for_lammps(..., units=...)` records the model's native unit system
-(`real` = kcal/mol, `metal` = eV). The export **also stamps an `energy_conv`
-table** into the meta `lammps` block: one entry per LAMMPS unit style, holding
-the value of one model energy unit expressed in that style. Those numbers are
-evaluated on the Python side by `molix.units` (pint), which is the only place
-the conversion is ever computed — `energy_conv[units]` is exactly `1.0` by
-construction.
+The metadata states the model's own units (`energy_unit`, `length_unit`). The
+pair style maps the energy unit onto the LAMMPS unit style that uses it — `eV`
+is `metal`, `kcal/mol` is `real` — and converts into the active style with
+LAMMPS' own table, `utils::get_conversion_factor(utils::ENERGY, METAL2REAL /
+REAL2METAL)`. **No conversion constant is written in molnex**, Python or C++.
+An energy unit with no LAMMPS style, or a run in a style LAMMPS cannot convert
+to (anything but `real` / `metal`), is refused at `pair_style`.
 
-At run time `pair_style molnex` looks up LAMMPS' active unit style
-(`update->unit_style`) in that table, and refuses — listing every style the
-export serves — when there is no entry for it. **No conversion factor is written
-in the C++, and none is written in this README**: the numbers your model is
-actually scaled by are in your own export's `<name>.meta.json`, which is the one
-copy that cannot drift from the model it describes.
-
-Forces reuse the energy factor, and that reuse is *checked* rather than assumed.
-`[F] = [E]/[L]`, so the identity `force_conv = energy_conv` holds only while the
-model measures length the way LAMMPS does. The meta therefore also carries
-`length_unit`, and the pair style asserts it is `angstrom` (LAMMPS `real` and
-`metal` both use Å) before setting the force factor. A model exported in Bohr
-fails loudly instead of being silently mis-scaled by the Bohr/Å ratio; serving
-one would take a length table in the meta, which no schema version pre-builds —
-not even v3, which had every opportunity and no such model to serve.
+Forces reuse the energy factor, and that reuse is *checked*: `[F] = [E]/[L]`,
+so it holds only while the model measures length the way LAMMPS does.
+`CutoffGraphImpl` refuses a `length_unit` other than `angstrom` (LAMMPS `real`
+and `metal` both use Å), so a Bohr model fails loudly instead of being
+mis-scaled by the Bohr/Å ratio.
 
 ## `special_bonds` requirement (molecular systems)
 
@@ -193,99 +211,25 @@ The check fires only when the system has bond topology (`atom->molecular != 0`).
 An `atom_style atomic` system has no special pairs at all, so it runs whatever
 its unused coefficients say.
 
-## Per-atom energy is supported; per-atom stress is refused, not zeroed
+## Per-atom energy is supported; per-atom stress is refused
 
-**`compute pe/atom` works** as of schema v3. A v3 export returns `atomic_energy
-(N,)`, the pair style keeps the entries for the atoms this rank owns, and
-`eflag_atom` tallies them into LAMMPS' `eatom`. The total energy LAMMPS reports
-is the sum of exactly those numbers — `eng_vdwl` and `eatom` are derived from one
-tensor, so `compute reduce` over `pe/atom` agrees with `pe` by construction
-rather than by coincidence.
+`compute pe/atom` reads `site_energy (N,)`. The pair style keeps the entries
+for the atoms this rank owns and tallies them into LAMMPS' `eatom`. The total
+energy is the sum of those local entries, re-summed from the same tensor, so
+`compute reduce` over `pe/atom` agrees with `pe`.
 
-**`compute stress/atom` still errors out**, along with anything that pulls it in
-(a per-atom dump, `fix ave/atom` over it). A model returns at most a *global*
-virial; there is no per-site decomposition of it to hand back. That refusal is
-loud on purpose: LAMMPS' `ev_init` allocates `vatom`, and a pair style that
-never writes it hands the user a legal-looking all-zero field — a per-atom
-stress map that is silently, uniformly wrong. Per-atom energy was refused for
-the same reason until it had a producer; per-atom virial still has none.
+`compute stress/atom` errors out, along with anything that pulls it in (a
+per-atom dump, `fix ave/atom` over it), in both modes. The model returns no
+per-atom virial. LAMMPS' `ev_init` allocates `vatom`, and a pair style that
+never writes it would hand back a legal-looking all-zero field. The refusal
+names the compute and does not mention a file version.
 
-Global thermo output (`etotal`, `press` via the model virial or
-`virial_fdotr_compute`) is unaffected either way.
-
-## Schema versions
-
-The meta `lammps` block is versioned by `schema_version`, currently **3**. The
-plugin and the exports it loads are upgraded as a pair.
-
-### v2 → v3 (breaking) — every earlier export is invalid
-
-**Every `.pt2` exported before schema v3 must be re-exported.** This is not a
-compatibility shim away: the v3 model takes a different NUMBER of inputs, in a
-different order, and returns a different number of outputs in a different order.
-Loading a v2 package under a v3 plugin would read a `(N,)` per-atom energy where
-a `(6,)` virial is expected. `LammpsContract` therefore refuses any
-`schema_version != 3` while loading, naming the re-export.
-
-Re-export with the same arguments you used before, plus `T`:
-
-```python
-from molix.engine import export_for_lammps
-
-export_for_lammps(
-    model,
-    export_dir,
-    species=[...],
-    cutoff=...,
-    receptive_field_layers=<T>,      # NEW, required, no default
-    units="real",
-    supports_pbc=True,               # for periodic / multi-rank runs
-    # requires_sorted_edges=False,   # NEW, default; True only for CSR/segmented
-)
-```
-
-What v3 adds:
-
-| change | kind | why |
-|---|---|---|
-| `atomic_energy (N,)` output | new output, index 2 | the partition energy `Σ_{i∈local} E_i` cannot be formed from a scalar; also makes `compute pe/atom` work |
-| `local_mask (N,)` input | new input, always last | marks the atoms this rank owns; the exported energy is `(atomic_energy * local_mask).sum()` |
-| `mask` → `pair_mask` | rename (cuda-graph only) | two masks in one positional list needed two distinguishable names |
-| `receptive_field_layers` | new meta field, **required** | `T`; the LAMMPS side checks `ghost cutoff >= T * cutoff + skin` |
-| `requires_sorted_edges` | new meta field, default `false` | declares whether the model needs sorted `pair_index`; when false the C++ side skips a per-step sort |
-| `virial` moves to output index 3 | reorder | it now sits behind `atomic_energy` |
-
-**Per-atom energy is authoritative in v3.** The exported energy is *defined* as
-`(atomic_energy * local_mask).sum()`; the model's own scalar `energy` is not read
-by the export path at all. A model whose total energy contains a term that
-cannot be attributed to a site cannot be partitioned across ranks, and is
-therefore outside the v3 contract rather than silently mis-decomposed.
-
-Two eager checks run on the example system **before** anything is traced (they do
-not enter the exported graph, so `torch.export` is unaffected):
-
-* **decomposability** — `|energy − Σ atomic_energy|` within rel `1e-6`, else
-  `ValueError`. This is what catches a non-decomposable total.
-* **force consistency** — with an all-ones mask, the wrapper's derived forces
-  `-∂(Σ E_i)/∂pos` against the model's own, within rel `1e-5`: the masked-energy
-  rewrite must not have changed what is differentiated.
-
-**v1 → v2 (breaking).** A v2 export carries `schema_version`, `contract`,
-`execution`, `energy_conv` and `length_unit`, and **drops** the `cuda_graph`
-boolean. Execution strategy is now `execution: "dynamic" | "cuda-graph"`, and
-`contract: "cutoff-graph" | "fixed-graph"` declares where the model's edge set
-comes from (`fixed-graph` has no implementation yet and is refused explicitly,
-never quietly run down the cutoff path).
-
-The two mixing directions are not symmetric:
-
-* **v2 plugin + v1 export** — refused loudly. That contract validated
-  `schema_version == 2` while loading and told you to re-export; the current
-  plugin validates `== 3` and refuses a v2 export the same way.
-* **v1 plugin + v2 export** — *unsupported, and undetectable from inside the old
-  binary*. A v1 plugin read `get_bool(meta, "cuda_graph", false)`; with the key
-  gone it falls back to `false` and runs a CUDA-graph export down the dynamic
-  path without a word. Rebuild the plugin when you move to v2 exports.
+Global pressure: in the `ghost` mode `virial_fdotr_compute()` when LAMMPS asks
+for the force-times-distance form (`vflag_fdotr`). In the `fold` mode the
+model's `virial` output (`+dE/deps`), negated into LAMMPS' `-dE/deps`,
+converted with the energy factor and tallied as `xx yy zz xy xz yz`; `fdotr` is
+disabled for that mode (`no_virial_fdotr_compute`), because with the images
+folded onto their owners it would miss every periodic contribution.
 
 ## Runbook — parity evidence, and when it expires
 
@@ -302,8 +246,16 @@ a machine nobody has any more.
 | **proves** | the local-only energy partition (no ghost site energy counted twice) **and** the single reduction path (no ghost force communicated twice). Single-rank alone cannot show the second — only a decomposed run has an inter-rank reduction to double. It is also the full-scale edge-order-invariance check: C++ builds edges in raw neighbour-list order while the Python reference builds them sorted, and they agree. |
 | **tool** | `scripts/lammps_iface_parity.py` — **tool removed from the tree** (F5 / `lammps-iface-post-chain`): it drives LAMMPS from `scripts/`, which Decision 4 confines to `interface/`, and it has not yet been moved. Until it is, this row's evidence cannot be regenerated. |
 | **owner** | the implementer of the `lammps-iface` chain |
-| **re-run trigger** | **any change under `interface/` or `src/molix/engine/`** |
+| **re-run trigger** | **any change under `interface/`, `src/molix/deploy/` or `src/molix/export/`** |
 | **status** | **RECORDED 2026-08-30** — all six comparisons OK at ≤1.6e-15 (gate rel 1e-6); provenance below. The tool exits non-zero without a LAMMPS build; it never skips. |
+
+The block below is the export API of 2026-08-30, kept as the provenance of
+that run. That API (`molix.engine.export_for_lammps`, a LAMMPS unit table in the
+JSON) has since been replaced by `molix.deploy` + `molix.export.aoti`, and the
+calling convention by schema 2 (shifts + virial) with the `fold` / `ghost`
+modes; the run must be re-recorded against the current layers, now as four
+comparisons — Python, one rank `fold`, one rank `ghost`, two ranks `ghost` —
+plus the `fold` virial against Python's `graphs.virial`.
 
 Recorded run (SLURM job 1805410, NAISS Arrhenius GH200 node):
 
@@ -473,31 +425,44 @@ exact LAMMPS it will be loaded into — link `liblammps.so` from a
 `-DPKG_PLUGIN=on -DBUILD_SHARED_LIBS=on` **source build**, not a binary wheel.
 (A wheel that ships `PKG_PLUGIN` can still *load* the plugin at runtime, but the
 `.so` itself must be compiled against matching headers/lib — there is no
-universal binary.) Requires LibTorch (the active venv's torch) and a C++17
-compiler; `molix.engine` (CPU-only or CUDA, auto-detected) builds from the
-parent `interface/` directory.
+universal binary.) Requires LibTorch from the molnex venv and a C++20
+compiler. `molnex_runtime` (CPU or CUDA, detected from the toolkit) and the
+adapter's `bridge/` / `impls/` layers are added from their own directories.
 
-The output is **arch-tagged** — `<MOLNEXPLUGIN_OUTPUT_DIR>/molnexplugin.so`,
-defaulting to `<build>/<arch>/` — so x86_64 and aarch64 plugins coexist (mirrors
-the arch-suffixed op lib in `src/molix/op`).
+The LAMMPS-free part of the suite — runtime and adapter layers, no LAMMPS build
+needed — runs from `interface/`:
 
 ```bash
-TORCH_CMAKE=$(python -c "import torch,os;print(os.path.join(os.path.dirname(torch.__file__),'share/cmake'))")
+cmake -S interface -B build/interface-$(uname -m) -DCMAKE_PREFIX_PATH="$TORCH_CMAKE" -DPython_EXECUTABLE="$PY"
+cmake --build build/interface-$(uname -m) -j
+ctest --test-dir build/interface-$(uname -m) -E '^parity_classical_'
+```
+
+Every build is out of source under the repository's `build/`, one directory
+per architecture — `build/interface-<arch>/` (this suite), `build/plugin-<arch>/`
+(the plugin below), `build/csrc-<arch>/` (the native op libraries) — so x86_64
+and aarch64 builds coexist and the source tree holds no artefacts.
+
+```bash
+source scripts/env/activate.sh
+TORCH_CMAKE=$("$PY" -c "import torch,os;print(os.path.join(os.path.dirname(torch.__file__),'share/cmake'))")
 LMP_SRC=/path/to/lammps-src/src                 # source tree headers (pair.h, lammpsplugin.h, version.h)
 LMP_LIB=/path/to/your/source-build/liblammps.so # YOUR build, not the wheel
 
-cmake -S interface/lammps -B build \
+cmake -S interface/lammps -B build/plugin-$(uname -m) \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$TORCH_CMAKE" \
   -DLAMMPS_HEADER_DIR="$LMP_SRC" \
   -DLAMMPS_LIB="$LMP_LIB" \
   -DLAMMPS_MPI_INCLUDE="$LMP_SRC/STUBS"         # serial LAMMPS (BUILD_MPI=off)
-cmake --build build -j                          # → build/<arch>/molnexplugin.so
+cmake --build build/plugin-$(uname -m) -j        # → build/plugin-<arch>/molnexplugin.so
 
 # at runtime
 export LD_LIBRARY_PATH="$(dirname $LMP_LIB):$LD_LIBRARY_PATH"
+# op libraries the metadata lists: build/csrc-<arch>/{molix,cueq} (activate.sh sets this)
+export MOLNEX_OP_LIBRARY_PATH=/path/to/build/csrc-<arch>/molix:/path/to/build/csrc-<arch>/cueq
 # in the LAMMPS input script:
-#   plugin load build/<arch>/molnexplugin.so
+#   plugin load build/plugin-<arch>/molnexplugin.so
 #   pair_style molnex pinet_aspirin
 #   pair_coeff * * 1 6 7 8
 ```
@@ -507,139 +472,65 @@ no wheel — `build_lammps.sh` + `build_plugin.sh`) is kept **outside this
 repository** as developer scratch and is not shipped with molnex; the recipe
 above is the supported path.
 
-## Scope and roadmap
+## The `ghost` mode
 
-### Open-boundary contract (`supports_pbc=false`)
+Ghosts are requested (`Neighbor` full list plus ghost centres). `newton
+on` is required; it is LAMMPS' default. Ghost forces are the derivative of
+local site energies with respect to a ghost's coordinates, and the only thing
+that returns them to the owning atom is `Verlet::run`'s global reverse
+communication, which LAMMPS performs only when `force->newton` is set. With
+newton off those cross-terms are discarded, so `init` refuses the script. The
+pair style issues no reverse communication of its own: doing both would send
+the same contribution home twice. When a rank has no ghosts, `local_mask` is
+all-true and that reverse communication is a no-op.
 
-Single-molecule / one-domain regime:
+`pair_index` is the neighbour list's own order. The pair style does not sort.
 
-* single MPI rank, non-periodic (`boundary f f f`) ⇒ no ghost atoms — and that
-  is enforced, not assumed: a run that presents ghosts to a `supports_pbc=false`
-  export is refused before anything is staged;
-* full neighbour list within the cutoff, over every atom in the system, so the
-  receptive field is complete at any `T` with no `comm_modify` line;
-* `local_mask` is all-ones, and since there are no ghosts the local sum IS the
-  total — the same code path as the periodic one, with nothing to exclude;
-* newton may be on or off (there is no ghost force to reduce);
-* `virial_fdotr_compute` fallback for pressure unless the model emits virial.
+### `comm_modify cutoff` (ghost mode)
 
-### Ghost / PBC path (`supports_pbc=true`)
-
-Export with `export_for_lammps(..., supports_pbc=True)`. At run time the pair
-style:
-
-* builds `Z` / `pos` over **local + ghost** atoms (ghost coordinates already
-  carry the minimum-image placement from LAMMPS);
-* walks ghost centres as well as local ones, so every local atom's complete set
-  of incoming edges is in `pair_index` (in neighbour-list order unless the
-  export declared `requires_sorted_edges=True`);
-* sums site energies over **local atoms only** — `E_rank = Σ_{i∈local} E_i` —
-  using `local_mask`, so no ghost's site energy is counted twice;
-* scatters forces onto ghosts and leaves them in `atom->f` for the
-  **integrator's** global reverse communication to carry home;
-* allows multi-rank domain decomposition.
-
-Models that recompute `pair_diff = pos[target] - pos[source]` from positions
-need no separate `shifts` input in this cut. A future export may still add
-explicit `cell` / `edge_shift` tensors for models that require them.
-
-#### `newton on` is required
-
-A `supports_pbc` run is refused at `init` time unless newton is on (it is
-LAMMPS' default). Ghost forces are the derivative of *local* site energies with
-respect to a ghost's coordinates, and the only thing that returns them to the
-owning atom is `Verlet::run`'s global reverse communication — which LAMMPS
-performs **only** `if (force->newton)`. With newton off nothing reduces them and
-every periodic cross-term is silently discarded, so the pair style refuses
-rather than integrate forces that are quietly incomplete. The pair style issues
-no reverse communication of its own; doing both is exactly the double-counting
-this path was fixed to remove.
-
-#### `comm_modify cutoff` for `T >= 2` (the fat-ghost condition)
-
-**A `T >= 2` model in a periodic run needs a widened ghost shell.** A `T`-layer
-message-passing network's site energy depends on every atom within `T * cutoff`,
-and this pair style evaluates the model in a single shot — so each rank must
-hold a copy of all of them. LAMMPS' default ghost cutoff is `cutoff + skin`,
-which is enough only at `T == 1`.
+A `T`-layer network's site energy depends on every atom within `T * cutoff`,
+and the pair style evaluates the model in one shot, so each rank must hold a
+copy of all of them. LAMMPS' default ghost cutoff is `cutoff + skin`, which
+meets the check only at `T == 1`. When the user has not set a ghost cutoff,
+LAMMPS reports `0` and the pair style treats that as `cutoff + skin`.
 
 ```
 # T = 5, cutoff = 5.0 Å, default skin for real/metal units = 2.0 Å
 comm_modify cutoff 27.0        # T * cutoff + skin
 ```
 
-The rule is
+The rule, checked at `init` and never downgraded to a warning, is
 
 ```
-comm_modify cutoff  >=  receptive_field_layers * cutoff + neighbor skin
+ghost cutoff  >=  receptive_field_layers * cutoff + neighbor skin
 ```
 
-and the pair style **checks it and fails closed** — never a warning. The
-diagnostic states the measured value, the required value and the exact
-`comm_modify cutoff <value>` line to add, because the alternative to failing is
-a run whose outer graph sites are quietly missing neighbours: confident, wrong
-forces with no diagnostic anywhere.
+The diagnostic names `T`, the effective cutoff, the required cutoff, and the
+`comm_modify cutoff` line to add. A wider shell costs memory and communication
+that grow with `T * cutoff`.
 
-The check is scoped to `supports_pbc` exports, since it is a question about
-ghosts. A `supports_pbc=false` export has none — it requests none and refuses to
-run with any — so all of its atoms are graph nodes, its receptive field is
-complete at any `T`, and no `comm_modify` line is needed for a single molecule
-however deep the model.
+On a single non-periodic rank there are no ghosts to widen, `local_mask` is
+all-true, and the same check still runs against whatever ghost cutoff LAMMPS
+reports.
 
-A wider ghost shell costs memory and communication that grow with `T * cutoff`;
-that is the price of the single-shot scheme, and the fix is a shallower model or
-a smaller cutoff, not a smaller `comm_modify`.
+The `fold` mode has no such condition: only the owned atoms are nodes, and a
+neighbour within the cutoff is all it reads, which LAMMPS' default ghost
+cutoff (`cutoff + skin`) always supplies.
 
-A fixed-shape export — `export_for_lammps(..., cuda_graph=True)` on the Python
-side, `execution: "cuda-graph"` in the meta — is **incompatible** with ghosts:
-the ghost count changes as atoms move between domains, while the captured graph
-needs a fixed `N`. The pair style refuses the combination while loading the
-model rather than at the first step. Re-export with `cuda_graph=False` (meta
-`execution: "dynamic"`) for periodic / multi-rank MD.
+## Weight reload
 
-### Virial (`supports_virial=true`)
+`AotiArtifact::update_weights` calls `AOTIModelPackageLoader::load_constants`
+with `use_inactive=false`. That rewrites the **active** constant buffer. A
+`shared_mutex` is held exclusive across the rewrite and shared across `run`:
+the AOTI container does not keep an in-flight `run` off the buffer being
+rewritten, and without the lock the overlap is an intermittent SIGSEGV.
+`load_constants` translates state-dict fully-qualified names itself. The
+package must have been exported with
+`aot_inductor.use_runtime_constant_folding` (an `inductor_configs` entry of
+`molix.export.aoti.package`).
 
-If the AOT package returns a **fourth** tensor of shape `(6,)`
-`(xx, yy, zz, xy, xz, yz)` in the model energy unit — index 3, behind
-`atomic_energy`, since v3 — it is converted and accumulated into the global
-virial. Otherwise LAMMPS falls back to `virial_fdotr_compute` when fdotr virial
-is requested. That virial must be the virial of the **local** energy, the same
-quantity `local_mask` selects; a virial computed over local + ghost sites would
-over-count exactly as an unpartitioned energy would.
-
-> **CPU caveat.** The functorch force path of some molnex potentials (notably
-> PiNet) is currently miscompiled by the torch 2.12 CPU inductor backend; use a
-> CUDA export for those models, or the eager `fix external` driver for CPU
-> prototyping. This is an upstream torch issue, independent of this interface.
-
-### Weight hot-reload (`num_models`) — the opening, on record
-
-`molnex::interface::ModelRunner`'s constructor takes a `num_models` count: the
-number of constant buffers the underlying AOTI runner allocates. That parameter
-is the designed seam for **double-buffered hot reload** (`update_weights`), in
-which the active buffer keeps serving `run()` calls while the inactive one is
-rewritten and a single atomic swap flips them — no inference pause, no
-caller-visible lock. It is what an on-line re-parameterisation loop (train a
-little, swap the weights, keep integrating) would be built on.
-
-**`pair_style molnex` passes `num_models = 1` today, and there is no keyword to
-change it.** The pair style has no hot-reload consumer, and a command-line
-grammar with nothing to drive it is syntax nobody earned: it would have to be
-parsed, validated, documented and kept compatible before a single caller
-existed. The grammar therefore ships with the spec that introduces the consumer
-(a `fix` that reloads weights during a run), not before. This paragraph exists
-so the seam is *recorded* rather than rediscovered — the C++ side needs no
-change to support it.
-
-Two version notes bind that future keyword, and are the reason it cannot be a
-free-floating option:
-
-* **torch ≥ 2.12 makes the two modes mutually exclusive.** `num_models > 1`
-  requires `run_single_threaded = false`; the runner refuses the combination
-  `num_models > 1` with `run_single_threaded = true` outright.
-* **Hot reload therefore excludes CUDA-graph capture.** Capture requires the
-  single-threaded runner (the multi-threaded `run()` does a capture-illegal
-  allocation/synchronisation, PyTorch #158834), so a hot-reloadable run is an
-  `execution: "dynamic"` run. An export with `execution: "cuda-graph"` and a
-  hot-reload request is a contradiction the future keyword must reject rather
-  than resolve.
+`pair_style molnex` opens the package with `num_models=1`. There is no
+pair-style keyword for a second buffer. `num_models > 1` is accepted by
+`AotiArtifact` only together with `run_single_threaded=false` (torch >= 2.12
+rejects the other combination). That flag is not a CUDA-graph switch; this
+pair style does not capture a CUDA graph.

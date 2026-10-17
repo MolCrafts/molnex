@@ -11,9 +11,9 @@
    most of their messages already name the pair style or the component that
    refused. This file therefore forwards `e.what()` unprefixed rather than
    pasting a second "pair_style molnex:" in front of a message that already
-   carries one; FLERR still points at the callback that translated it. The one
-   exception is the meta reader, whose messages start with "meta.json:" and read
-   correctly behind the command that was running.
+   carries one; FLERR still points at the callback that translated it. The
+   runtime's messages ("metadata: ...", a missing op library, a missing
+   package) are prefixed with "pair_style molnex:".
 */
 
 #include "pair_molnex.h"
@@ -26,39 +26,28 @@
 #include "neigh_list.h"
 #include "neighbor.h"
 #include "update.h"
+#include "utils.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
+#include <c10/core/ScalarType.h>
+
 #include "bridge/lammps_view.h"
-#include "impls/contract_impl.h"
-#include "impls/registry.h"
-#include "lammps_contract.h"
-#include "molnex/interface/meta_schema.h"
-#include "molnex/interface/model_runner.h"
+#include "impls/cutoff_graph_impl.h"
+#include "molnex/runtime/metadata.h"
+#include "molnex/runtime/model_artifact.h"
+#include "molnex/runtime/site_energy_exec.h"
 
 namespace fs = std::filesystem;
 
 using namespace LAMMPS_NS;
-
-namespace {
-
-/* Where this export's meta.json is, from the two command-line arguments.
-   Two call sites want it: the reader in settings(), and the per-atom virial
-   refusal in compute(), which names the contract by pointing at the one file
-   that declares it. (It was three until schema v3 gave per-atom ENERGY a
-   producer and turned that refusal into a tally.) */
-std::string meta_path_of(const std::string& model_dir,
-                         const std::string& model_name) {
-  return (fs::path(model_dir) / (model_name + ".meta.json")).string();
-}
-
-}  // namespace
 
 PairMolnex::PairMolnex(LAMMPS* lmp) : Pair(lmp) {
   single_enable = 0;  // no pairwise single() — this is a many-body model
@@ -92,55 +81,59 @@ void PairMolnex::allocate() {
   memory->create(cutsq, n + 1, n + 1, "pair:cutsq");
 }
 
-/* pair_style molnex <model_dir> [name] */
+/* pair_style molnex <model_dir> [name] [mode fold|ghost] */
 void PairMolnex::settings(int narg, char** arg) {
-  if (narg < 1 || narg > 2)
-    error->all(FLERR,
-               "Illegal pair_style molnex command: pair_style molnex "
-               "<model_dir> [name]");
+  constexpr const char* kUsage =
+      "Illegal pair_style molnex command: pair_style molnex <model_dir> "
+      "[name] [mode fold|ghost]";
+  if (narg < 1) error->all(FLERR, kUsage);
   model_dir = arg[0];
-  if (narg == 2) model_name = arg[1];
+  int iarg = 1;
+  if (iarg < narg && strcmp(arg[iarg], "mode") != 0) model_name = arg[iarg++];
+  // The default: fold on one rank, where every ghost is a periodic image of an
+  // owned atom; ghost staging otherwise.
+  fold_ = comm->nprocs == 1;
+  if (iarg < narg) {
+    if (strcmp(arg[iarg], "mode") != 0 || iarg + 2 != narg)
+      error->all(FLERR, kUsage);
+    if (strcmp(arg[iarg + 1], "fold") == 0) {
+      fold_ = true;
+    } else if (strcmp(arg[iarg + 1], "ghost") == 0) {
+      fold_ = false;
+    } else {
+      error->all(FLERR, "pair_style molnex: mode must be fold or ghost, got {}",
+                 arg[iarg + 1]);
+    }
+  }
+  if (fold_ && atom->tag_enable == 0)
+    error->all(FLERR,
+               "pair_style molnex: mode fold maps each periodic image to the "
+               "atom it copies by atom ID, and this system has none "
+               "(atom_modify id no); use mode ghost");
+  // Folded forces sit on owned atoms only, so LAMMPS' force-times-position
+  // virial would miss every periodic image: the model's virial is tallied in
+  // compute() instead.
+  no_virial_fdotr_compute = fold_ ? 1 : 0;
 
-  // --- read the model-agnostic contract from <model_dir>/<name>.meta.json ---
-  const std::string meta_path = meta_path_of(model_dir, model_name);
-  std::optional<molnex::interface::MetaSchema> doc;
+  // Read <model_dir>/<name>.json, then open the package in the format it
+  // names, now, so a bad export fails at pair_style rather than at step 1.
+  // `artifact_` is assigned before `impl_`, which borrows it.
+  molnex::runtime::Metadata meta;
   try {
-    doc = molnex::interface::MetaSchema::from_file(meta_path);
+    meta = molnex::runtime::Metadata::read(
+        (fs::path(model_dir) / (model_name + ".json")).string());
+    artifact_ =
+        molnex::runtime::ModelArtifact::open(model_dir, model_name, meta);
   } catch (const std::exception& e) {
     error->all(FLERR, "pair_style molnex: {}", e.what());
   }
-  if (!doc->has_block("lammps"))
-    error->all(FLERR,
-               "pair_style molnex: {} has no 'lammps' block — export with "
-               "molix.engine.export_for_lammps, not the bare Exporter",
-               meta_path);
 
-  // Constructing the contract hard-validates schema_version == 3: an older meta
-  // is refused here rather than being read with the wrong input arity and the
-  // wrong output order (v3 moved the virial behind atomic_energy). It
-  // is kept because the startup message quotes it — nothing else in this file
-  // reads it, and no capability is copied out of it.
+  const double factor = energy_factor(meta.energy_unit);
   try {
-    contract_.emplace(*doc);
-  } catch (const std::exception& e) {
-    error->all(FLERR, "pair_style molnex: malformed meta.json: {}", e.what());
-  }
-
-  // Load the AOTI model now (so errors surface at setup, not the first step).
-  // num_models = 1: the runner's multi-slot constructor is the seam a future
-  // hot-reload consumer will use (README, "Weight hot-reload"), and until such
-  // a consumer exists there is no pair_style grammar for it to reach.
-  runner = std::make_unique<molnex::interface::ModelRunner>(
-      model_dir, /*num_models=*/1, model_name);
-
-  // The dispatch does the rest: it reads the contract's own key, builds the
-  // execution strategy the meta asks for, and returns the implementation of
-  // that contract — or refuses, listing the contracts that do dispatch. The
-  // runner is borrowed, not transferred: this pair style outlives the impl and
-  // keeps the model alive for the whole of it.
-  try {
-    impl_ = molnex::lammps::ContractImpl::for_contract(
-        contract_->contract(), *contract_, update->unit_style, *runner);
+    impl_ = std::make_unique<molnex::lammps::CutoffGraphImpl>(
+        meta, factor, molnex::runtime::SiteEnergyExec(*artifact_, meta.dtype),
+        fold_ ? molnex::lammps::GraphMode::kFold
+              : molnex::lammps::GraphMode::kGhost);
   } catch (const std::exception& e) {
     error->all(FLERR, "{}", e.what());
   }
@@ -151,12 +144,40 @@ void PairMolnex::settings(int narg, char** arg) {
   comm_reverse_off = needs_.comm_reverse_off;
 
   if (comm->me == 0)
-    utils::logmesg(
-        lmp,
-        "pair_molnex: loaded '{}' from {} (device={}, model units={}, "
-        "LAMMPS units={}, dtype={}, cutoff={:.3f} A)\n",
-        model_name, model_dir, runner->device(), contract_->units(),
-        update->unit_style, contract_->model_dtype(), needs_.cutoff);
+    utils::logmesg(lmp,
+                   "pair_molnex: loaded '{}' from {} (format={}, device={}, "
+                   "dtype={}, model energy={}, LAMMPS units={}, factor={}, "
+                   "cutoff={:.3f} A, layers={}, mode={})\n",
+                   model_name, model_dir, meta.format,
+                   artifact_->device().str(), c10::toString(meta.dtype),
+                   meta.energy_unit, update->unit_style, factor, needs_.cutoff,
+                   meta.receptive_field_layers, fold_ ? "fold" : "ghost");
+}
+
+double PairMolnex::energy_factor(const std::string& model_energy_unit) const {
+  // The LAMMPS unit style whose energy unit the model uses. LAMMPS converts
+  // between real and metal only (utils::get_conversion_factor), so those are
+  // the two the model can be run in.
+  std::string model_style;
+  if (model_energy_unit == "eV") model_style = "metal";
+  if (model_energy_unit == "kcal/mol") model_style = "real";
+  if (model_style.empty())
+    error->all(FLERR,
+               "pair_style molnex: model energy unit '{}' has no LAMMPS unit "
+               "style; eV (metal) and kcal/mol (real) are supported",
+               model_energy_unit);
+
+  const std::string style = update->unit_style;
+  if (style == model_style) return 1.0;
+  if (model_style == "metal" && style == "real")
+    return utils::get_conversion_factor(utils::ENERGY, utils::METAL2REAL);
+  if (model_style == "real" && style == "metal")
+    return utils::get_conversion_factor(utils::ENERGY, utils::REAL2METAL);
+  error->all(FLERR,
+             "pair_style molnex: the model's energy is in {} ({} units), and "
+             "LAMMPS converts it only to real or metal; this run uses units {}",
+             model_energy_unit, model_style, style);
+  return 0.0;
 }
 
 /* pair_coeff * * <Z_type1> <Z_type2> ... <Z_typeN> */
@@ -168,7 +189,7 @@ void PairMolnex::coeff(int narg, char** arg) {
     error->all(
         FLERR,
         "pair_coeff for molnex must come after pair_style molnex: the elements "
-        "the model was exported for are read from its meta.json, and every Z "
+        "the model was exported for are read from its metadata, and every Z "
         "here is checked against them");
 
   // The two literal `*` are the whole of what this file understands about a
@@ -194,10 +215,7 @@ void PairMolnex::coeff(int narg, char** arg) {
 double PairMolnex::init_one(int /*i*/, int /*j*/) { return needs_.cutoff; }
 
 void PairMolnex::init_style() {
-  // Two mechanical translations of the request table into LAMMPS' vocabulary.
-  // `ghost` now follows the export's supports_pbc, and flipping it in the impl
-  // WAS the whole change (lammps-iface-05-pbc): this `|=` was written for that
-  // moment and did not move a character when it came.
+  // The request table, executed verbatim. Ghosts are always requested.
   int flags = needs_.full ? NeighConst::REQ_FULL : NeighConst::REQ_DEFAULT;
   if (needs_.ghost) flags |= NeighConst::REQ_GHOST;
   neighbor->add_request(this, flags);
@@ -238,6 +256,7 @@ void PairMolnex::compute(int eflag, int vflag) {
     error->all(FLERR,
                "pair_style molnex: pair_style/pair_coeff not initialized");
 
+  if (fold_) fold_owners();
   molnex::lammps::EvalResult r{};
   try {
     r = impl_->compute(current_view());
@@ -251,10 +270,7 @@ void PairMolnex::compute(int eflag, int vflag) {
   // and are defined.
   if (eflag_global) eng_vdwl += r.e_total;
 
-  // Per-atom energy: supported since schema v3, because the model now returns
-  // site energies and `EvalResult::e_atom` carries this rank's. Where 04-facade
-  // had to refuse `compute pe/atom` for want of a producer, the producer exists
-  // and the refusal becomes the tally it was always the placeholder for.
+  // Per-atom energy: `EvalResult::e_atom` is this rank's local slice.
   //
   // THE BOUND IS THE RETURNED TENSOR'S OWN EXTENT, NEVER `atom->nlocal`. Both
   // are meant to be the local count, which is exactly why reading the second
@@ -270,48 +286,25 @@ void PairMolnex::compute(int eflag, int vflag) {
   // (pair.cpp: the ghost range is zeroed too when newton is on). `+=` is
   // LAMMPS' accumulation convention, and the zeroing is what makes it right.
   //
-  // No `defined()` guard, deliberately, and the asymmetry with the virial below
-  // is the reason: an undefined virial MEANS "this evaluation produced none",
-  // while there is no contract state in which an evaluation returns without
-  // per-atom energies. A presence test here would invent one.
   if (eflag_atom) {
     const auto e_atom = r.e_atom.accessor<double, 1>();
     for (int64_t i = 0; i < e_atom.size(0); i++) eatom[i] += e_atom[i];
   }
 
-  // Not a missing feature — a refusal. Before this spec BOTH per-atom requests
-  // were met with a silently all-zero eatom / vatom: `ev_init` allocates them,
-  // this pair style never wrote them, and the user got a legal-looking zero
-  // field. Per-atom energy now has a producer; the per-atom VIRIAL still has
-  // none (a model returns at most a global one), so the honest answer there
-  // stays loud.
+  // The model returns no per-atom virial. A silent zero would look legal.
   if (vflag_atom)
-    error->all(
-        FLERR,
-        "pair_molnex: per-atom virial requested (e.g. compute stress/atom) but "
-        "the contract declared in {} provides none — the model returns at most "
-        "a "
-        "global virial; remove the per-atom compute",
-        meta_path_of(model_dir, model_name));
+    error->all(FLERR,
+               "pair_molnex: per-atom virial requested (e.g. compute "
+               "stress/atom); the model returns no per-atom virial. Remove "
+               "the per-atom compute");
 
-  // DO NOT REORDER THESE TWO CONDITIONS. Written the other way round —
-  // `vflag_global` first, then presence — the third case changes behaviour:
-  // vflag_global set, no model virial, vflag_fdotr unset must do NOTHING, and
-  // that is what happens today. `defined()` is the whole presence test:
-  // read_model_outputs leaves the virial undefined unless it holds exactly six
-  // numbers, and the impl has already applied the unit factor.
-  if (r.virial.defined() && vflag_global) {
-    // model virial: (6,) xx,yy,zz,xy,xz,yz, already in LAMMPS energy units
-    auto va = r.virial.accessor<double, 1>();
-    virial[0] += va[0];
-    virial[1] += va[1];
-    virial[2] += va[2];
-    virial[3] += va[3];
-    virial[4] += va[4];
-    virial[5] += va[5];
-  } else if (vflag_fdotr) {
-    virial_fdotr_compute();
-  }
+  // The global virial. Folded: the model's strain derivative, the only source
+  // that sees the periodic images (fdotr is disabled for this mode in
+  // settings). Ghost: LAMMPS' own force-times-distance sum over local and
+  // ghost forces, run when LAMMPS asked for that form.
+  if (vflag_global && r.virial_from_model)
+    for (int k = 0; k < 6; ++k) virial[k] += r.virial[k];
+  if (vflag_fdotr) virial_fdotr_compute();
 
   // The reduction-ownership seam. Whether the pair style itself must reduce is
   // the impl's answer, per step; this side is the mechanical branch on it and
@@ -339,9 +332,36 @@ molnex::lammps_bridge::LammpsView PairMolnex::current_view() const {
   // ones. Transcribed like every other field: how far to walk is the bridge's
   // decision, not this file's.
   return molnex::lammps_bridge::LammpsView{
-      atom->x,      atom->f,     atom->type,     atom->nlocal,
-      atom->nghost, list->ilist, list->numneigh, list->firstneigh,
-      list->inum,   list->gnum,  NEIGHMASK};
+      atom->x,        atom->f,          atom->type,
+      atom->nlocal,   atom->nghost,     list->ilist,
+      list->numneigh, list->firstneigh, list->inum,
+      list->gnum,     NEIGHMASK,        fold_ ? owner_.data() : nullptr};
+}
+
+void PairMolnex::fold_owners() {
+  // owner_[i]: the owned atom atom i is a copy of. On one rank every ghost is
+  // a periodic image of an owned atom, and the owned copy is the one local
+  // index carrying its ID — read off a table of the owned IDs built here, so
+  // this needs no `atom_modify map` (atom->map would give the same answer: it
+  // gives owned atoms precedence over images, atom_map.cpp).
+  const int nlocal = atom->nlocal;
+  const int nall = nlocal + atom->nghost;
+  const tagint* tag = atom->tag;
+  tagint max_tag = 0;
+  for (int i = 0; i < nlocal; ++i) max_tag = std::max(max_tag, tag[i]);
+  local_of_tag_.assign(static_cast<std::size_t>(max_tag) + 1, -1);
+  for (int i = 0; i < nlocal; ++i)
+    local_of_tag_[static_cast<std::size_t>(tag[i])] = i;
+  owner_.resize(static_cast<std::size_t>(nall));
+  for (int i = 0; i < nlocal; ++i) owner_[static_cast<std::size_t>(i)] = i;
+  for (int j = nlocal; j < nall; ++j) {
+    // An ID no owned atom carries maps to -1, which the bridge refuses with a
+    // message naming the ghost: it can only be another rank's atom.
+    const tagint t = tag[j];
+    owner_[static_cast<std::size_t>(j)] =
+        (t > 0 && t <= max_tag) ? local_of_tag_[static_cast<std::size_t>(t)]
+                                : -1;
+  }
 }
 
 /* ----------------------------------------------------------------------

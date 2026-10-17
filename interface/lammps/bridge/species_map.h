@@ -10,10 +10,10 @@
 // SpeciesMap to feed a network from.
 //
 // Deliberately schema-blind: the set of legal atomic numbers arrives as a plain
-// `std::vector<int>`, not as a `LammpsContract`. This component does identity
-// mapping; binding it to the meta.json schema would make it move every time the
-// export format grows a field. No file under `bridge/` includes meta_schema.h
-// or lammps_contract.h.
+// `std::vector<int>`, not as the model's `Metadata`. This component does
+// identity mapping; binding it to the metadata would make it move every time
+// that document grows a field. No file under `bridge/` includes a runtime
+// header.
 
 #pragma once
 
@@ -34,7 +34,7 @@ class SpeciesMap {
   /// \param z_by_type    0-based dense table of atomic numbers, one per LAMMPS
   ///                     type, length `ntypes`. Taken by value and moved.
   /// \param meta_species Every atomic number the model was exported for, e.g.
-  ///                     from `LammpsContract::species()`.
+  ///                     `Metadata::species`.
   /// \throws std::runtime_error  If `z_by_type` is empty (a pair style with no
   ///                             atom types has nothing to map), if any entry
   ///                             is not a positive atomic number, or if any

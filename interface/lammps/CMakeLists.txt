@@ -1,7 +1,7 @@
 # Build the generic molnex LAMMPS pair-style plugin (pair_style molnex) against:
 #   - LibTorch (find_package(Torch); from the active venv's torch)
-#   - molnex_interface (the AOTI C++ runner; the parent interface/ library)
-#   - liblammps.so (from the pip `lammps` wheel or a source build) + LAMMPS headers
+#   - molnex_runtime (../runtime: metadata, model artifact, site-energy exec)
+#   - liblammps.so (a LAMMPS source build with PKG_PLUGIN) + LAMMPS headers
 #
 # Pass on the command line:
 #   -DLAMMPS_HEADER_DIR=<.../lammps-src/src>
@@ -9,9 +9,9 @@
 #   -DCMAKE_PREFIX_PATH=<.../site-packages/torch/share/cmake>
 #   [-DLAMMPS_MPI_INCLUDE=<.../lammps-src/src/STUBS>]   # serial LAMMPS (BUILD_MPI=off)
 #
-# The molnex_interface library is picked up from the parent directory
-# (../  == interface/), so no -DMOLNEX_INTERFACE_DIR is needed when configuring
-# from here. Configure standalone, e.g.:
+# molnex_runtime and the two LAMMPS-free layers (bridge/, impls/) are added
+# from their own directories unless an enclosing build already declared them.
+# Configure standalone, e.g.:
 #   cmake -S interface/lammps -B build/lammps \
 #         -DCMAKE_PREFIX_PATH=$TORCH_CMAKE \
 #         -DLAMMPS_HEADER_DIR=$LMP_SRC -DLAMMPS_LIB=$LMP_LIB
@@ -22,7 +22,7 @@ project(molnexplugin LANGUAGES CXX)
 # C++20, not 17: the ATen headers of the pinned torch (>=2.14, pyproject)
 # hard-`#error` below C++20 and use std::strong_ordering, string_view's
 # starts_with/ends_with and constrained members. Matches
-# src/molix/op/CMakeLists.txt, which is already on 20.
+# csrc/molix/CMakeLists.txt, which is already on 20.
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -36,24 +36,23 @@ endif()
 
 find_package(Torch REQUIRED)
 
-# The AOTI runner library lives one level up (interface/). Build it here as a
-# subdirectory (static, PIC) unless an enclosing build already provides the
-# `molnex_interface` target. That parent also declares `molnex_lammps_bridge`
-# (bridge/) and `molnex_lammps_impls` (impls/), both LAMMPS-free, so one guard
-# covers all three targets on both paths: standalone from here, and from an
-# enclosing interface/ build.
-if(NOT TARGET molnex_interface)
-  set(MOLNEX_INTERFACE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/.. molnex_interface_build)
+if(NOT TARGET molnex_runtime)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../runtime molnex_runtime_build)
+endif()
+if(NOT TARGET molnex_lammps_bridge)
+  add_subdirectory(bridge)
+endif()
+if(NOT TARGET molnex_lammps_impls)
+  add_subdirectory(impls)
 endif()
 
 add_library(molnexplugin MODULE molnexplugin.cpp pair_molnex.cpp)
-# Arch-tagged output dir so x86_64 and aarch64 plugin builds coexist without
-# clobbering each other (mirrors the arch-suffixed op lib in src/molix/op).
-# `plugin load` takes an explicit path, so a per-arch directory is the cleanest
-# separation. Override with -DMOLNEXPLUGIN_OUTPUT_DIR=... if you want a fixed path.
+# Written to the build directory, which is per architecture
+# (build/plugin-<arch>/, see README): `plugin load` takes an explicit path, so
+# x86_64 and aarch64 plugins never share a file. Override with
+# -DMOLNEXPLUGIN_OUTPUT_DIR=... for a fixed path.
 if(NOT MOLNEXPLUGIN_OUTPUT_DIR)
-  set(MOLNEXPLUGIN_OUTPUT_DIR "${CMAKE_BINARY_DIR}/${CMAKE_SYSTEM_PROCESSOR}")
+  set(MOLNEXPLUGIN_OUTPUT_DIR "${CMAKE_BINARY_DIR}")
 endif()
 set_target_properties(molnexplugin PROPERTIES
   PREFIX "" SUFFIX ".so"
@@ -63,22 +62,16 @@ message(STATUS "molnexplugin → ${MOLNEXPLUGIN_OUTPUT_DIR}/molnexplugin.so (${C
 
 target_include_directories(molnexplugin PRIVATE
   ${LAMMPS_HEADER_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}                 # lammps_contract.h + bridge/*.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/../include      # molnex/interface/{meta_schema,model_runner}.h
+  ${CMAKE_CURRENT_SOURCE_DIR}                 # pair_molnex.h
 )
 # when LAMMPS is built serial (BUILD_MPI=off) the plugin still needs the stub mpi.h
 if(LAMMPS_MPI_INCLUDE)
   target_include_directories(molnexplugin PRIVATE ${LAMMPS_MPI_INCLUDE})
 endif()
 target_link_libraries(molnexplugin PRIVATE
-  molnex_interface
-  # Atom-side bridge (SpeciesMap / stage_nodes / ForceScatter). Carries its own
-  # PUBLIC include dir (interface/lammps), so pair_molnex.cpp reaches the
-  # headers as "bridge/xxx.h" with nothing further added above.
-  molnex_lammps_bridge
-  # Contract implementations (ContractImpl / CutoffGraphImpl and the closed-set
-  # dispatch). Same PUBLIC include dir, so the facade reaches them as
-  # "impls/xxx.h"; it carries molnex_lammps_bridge transitively.
+  # CutoffGraphImpl; carries molnex_lammps_bridge and molnex_runtime (their
+  # PUBLIC include dirs give "bridge/xxx.h", "impls/xxx.h" and
+  # "molnex/runtime/xxx.h").
   molnex_lammps_impls
   ${TORCH_LIBRARIES}
   ${LAMMPS_LIB}

@@ -139,7 +139,6 @@ benchmarks/results/
 # machine-local benchmark/probe run logs and arch-tagged op builds
 benchmarks/*.err
 benchmarks/*.out
-src/molix/op/build-*/
 .claude/scheduled_tasks.lock
 
 # machine-local toolchains and virtualenvs (GH200/L40 build environments)
@@ -157,9 +156,14 @@ runs/
 .molq/
 .wheels-gh200/
 
-# CMake build tree for interface/ (7.7 MiB of CMakeCache/ninja output)
-build-interface/
 # Slurm job stdout/stderr; evidence worth keeping goes to the molab workspace
 logs/
-# Provenance of the local native-op build, written by the snapshot/gate pair.
-src/molix/op/BUILT_FROM
+# molnex's own cargo home (scripts/env/build_env.sh)
+.cargo-home/
+.jobs/
+
+# Local developer scripts (env build, test helpers, ports): not tracked.
+scripts/
+
+# Internal only (operator ruling 2026-10-16); see csrc/cueq/INTERNAL.md. Never publish.
+csrc/cueq/

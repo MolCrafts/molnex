@@ -1,20 +1,20 @@
 // Copyright (c) MolNex contributors. SPDX-License-Identifier: MIT
 //
-// The runtime-contract layer: what a `pair_style molnex` run actually DOES,
-// once the export's meta.json has said which contract it speaks.
+// What a `pair_style molnex` run does with a deployed model.
 //
-// Three layers meet at this file, and the gradient between them is the point:
+// Three LAMMPS-side layers meet at this file, over the engine-neutral
+// `molnex_runtime` (metadata, artifact, site-energy execution):
 //
-//   bridge/  — LAMMPS-free primitives that do not know the meta schema exists
-//              (SpeciesMap, stage_nodes, GraphBridge, Exec, ForceScatter).
-//   impls/   — LAMMPS-free strategy that DOES know the contract. The meta
-//              schema enters the C++ here and nowhere below.
+//   bridge/  — LAMMPS-free primitives that do not know the model exists
+//              (SpeciesMap, stage_nodes, GraphBridge, ForceScatter).
+//   impls/   — LAMMPS-free strategy over the runtime: the model's metadata and
+//              execution enter the LAMMPS layer here and nowhere below.
 //   facade   — pair_molnex.cpp, the only file that includes a LAMMPS header.
 //
 // This header therefore includes **no LAMMPS header** — not `pair.h`, not
-// `atom.h`, not `error.h` — which is what keeps the whole of layer 2 + layer 3
-// drivable by ctest on a machine with no LAMMPS build, no CUDA and no `.pt2`
-// (the `Exec` is injected; see `CutoffGraphImpl`). It speaks the same two
+// `atom.h`, not `error.h` — which is what keeps bridge/ + impls/ drivable by
+// ctest on a machine with no LAMMPS build, no CUDA and no package (the
+// execution is injected; see `CutoffGraphImpl`). It speaks the same two
 // dialects as its neighbours: everything here throws std::runtime_error, and
 // pair_molnex.cpp translates at the seam into `error->all(FLERR, ...)`.
 //
@@ -26,18 +26,13 @@
 #ifndef MOLNEX_LAMMPS_IMPLS_CONTRACT_IMPL_H
 #define MOLNEX_LAMMPS_IMPLS_CONTRACT_IMPL_H
 
-#include <memory>
+#include <array>
 #include <string>
 #include <vector>
 
 #include <ATen/Tensor.h>
 
 #include "bridge/lammps_view.h"
-#include "lammps_contract.h"
-
-namespace molnex::interface {
-class ModelRunner;
-}  // namespace molnex::interface
 
 namespace molnex::lammps {
 
@@ -86,8 +81,8 @@ struct NeighborNeeds {
 /// `ForceScatter`) before it returns, because `atom->f` is precisely the array
 /// `comm->reverse_comm` reads and `virial_fdotr_compute` sums. A `forces` field
 /// added here would either duplicate that array or invite a caller to apply it
-/// twice. The asymmetry is deliberate: energy and virial come back as values,
-/// forces are already where LAMMPS keeps them.
+/// twice. Energy comes back as a value; forces are already where LAMMPS
+/// keeps them. The model returns no virial.
 ///
 /// `needs_pair_reverse_comm` IS THE REDUCTION-OWNERSHIP SEAM, and it is stated
 /// next to the forces asymmetry because it is the other half of the same
@@ -105,22 +100,8 @@ struct NeighborNeeds {
 /// doing so is also the only thing that can re-activate
 /// `ContractImpl::pack_reverse` / `unpack_reverse`.
 ///
-/// `virial` is well-formed-or-undefined BY CONSTRUCTION: `read_model_outputs`
-/// (lammps-iface-03-graph) refuses anything that is not exactly six elements
-/// before defining it, so a defined virial always has six readable components
-/// and the facade performs no length check of its own. `virial.defined()` is
-/// the whole presence test — there is no companion flag that could disagree
-/// with it.
-///
-/// `e_atom` ARRIVED WITH ITS PRODUCER, exactly as this struct's accretion rule
-/// requires. Before lammps-iface-05-pbc there was no field, because nothing
-/// could produce one: a model returned a scalar energy, and `compute pe/atom`
-/// was met with an explicit facade error rather than the silent zeros it used
-/// to get. Schema v3 makes per-site energies a mandatory model output — the
-/// partition energy is their local sum — so the producer exists and the field
-/// lands with it. That is the extension the earlier decision anticipated, not a
-/// reversal of it. A per-atom VIRIAL still has no producer and still has no
-/// field; `vflag_atom` remains an error.
+/// `e_atom` is the local slice of the model's per-site energies. A per-atom
+/// virial has no producer; `vflag_atom` remains an error in the facade.
 ///
 /// ACCRETION RULE (the same one `LammpsRunEnv` carries, stated on the struct
 /// most likely to be violated): every field of `EvalResult` is a per-step
@@ -154,11 +135,17 @@ struct EvalResult {
   ///
   /// A CPU float64 1-D tensor the caller owns, never a view of a model output.
   at::Tensor e_atom;
-  /// Global virial `(6,)` in `xx, yy, zz, xy, xz, yz` order, already converted
-  /// — or an undefined tensor when this evaluation produced none.
-  at::Tensor virial;
   /// Whether the facade must issue `comm->reverse_comm(this)` this step.
   bool needs_pair_reverse_comm;
+  /// Whether `virial` holds this evaluation's global virial. False means the
+  /// facade derives it from the forces itself (`virial_fdotr_compute`, which
+  /// needs the ghost forces the ghost mode writes); true means the forces were
+  /// folded onto owned atoms, `fdotr` would miss every periodic image, and the
+  /// model's own strain derivative is the only correct source.
+  bool virial_from_model;
+  /// Global virial in LAMMPS' convention and order — `-dE/deps`, already in
+  /// the active unit style, `xx yy zz xy xz yz` — when `virial_from_model`.
+  std::array<double, 6> virial;
 };
 
 /// The LAMMPS globals the impl's `init` reads, as a read-only snapshot.
@@ -206,17 +193,14 @@ struct LammpsRunEnv {
 
 /// One runtime contract, implemented.
 ///
-/// A `Contract` names where the model's edge set comes from; this class is what
-/// a pair style DOES with such a model. Sub-classing is by contract family
-/// (cutoff graph, fixed topology), never by network — `CutoffGraphImpl` serves
-/// PiNet, MACE and Allegro alike, so "no per-model C++" is not at risk.
+/// What a pair style does with a package whose forward matches the protocol.
+/// `CutoffGraphImpl` is that implementation for every model.
 ///
 /// The six virtuals are the whole of what the facade delegates; between them
 /// they hold every semantic decision `PairMolnex` used to make inline.
 ///
-/// Implementations keep a PUBLIC constructor: direct construction is the
-/// primary constructor story (CLAUDE.md), `for_contract` is the closed-set
-/// dispatch on top of it, and the ctest cases construct directly.
+/// The public constructor is the constructor. The pair style builds
+/// `CutoffGraphImpl` directly, and the ctest cases do the same.
 class ContractImpl {
  public:
   virtual ~ContractImpl();
@@ -257,7 +241,7 @@ class ContractImpl {
   /// Forces are accumulated into `view.f` before returning; see `EvalResult`.
   ///
   /// \param view  Borrowed atom arrays and neighbour spans for this step.
-  /// \returns The energy, optional virial and reverse-comm decision.
+  /// \returns The energy and the reverse-comm decision.
   /// \throws std::runtime_error  If the system does not match the export, or if
   ///                             any staged component refuses.
   virtual EvalResult compute(const molnex::lammps_bridge::LammpsView& view) = 0;
@@ -300,37 +284,6 @@ class ContractImpl {
   /// \param buf   Source, `(3 * n,)` doubles.
   virtual void unpack_reverse(const molnex::lammps_bridge::LammpsView& view,
                               int n, const int* list, const double* buf) = 0;
-
-  /// The implementation for `contract`, over the closed set of contracts.
-  ///
-  /// Dispatch on a closed enum, not a wrapper around one type's construction —
-  /// which is why it is named like `Foo.from_file` rather than `make_*` /
-  /// `create_*`. Defined in `registry.cpp` as an EXHAUSTIVE `switch` with no
-  /// `default:` label, so adding a `Contract` enumerator is a `-Wswitch`
-  /// compile-time error here rather than a runtime miss.
-  ///
-  /// \param contract_kind      Which contract to implement, normally
-  ///                           `contract.contract()`; passed separately so the
-  ///                           dispatch reads its key explicitly.
-  /// \param contract           The validated export contract the impl reads its
-  ///                           cutoff, species, capabilities and unit table
-  ///                           from.
-  /// \param lammps_unit_style  `update->unit_style` — the unit style the
-  ///                           RUNNING simulation asked for, which is the only
-  ///                           piece of this that the meta cannot supply. The
-  ///                           impl converts model energies and forces into it.
-  /// \param runner             Loaded model runner, borrowed for the lifetime
-  ///                           of the returned impl: the caller must keep it
-  ///                           alive at least that long.
-  /// \returns The implementation, never null.
-  /// \throws std::runtime_error  If no implementation exists for
-  ///                             `contract_kind` (the message lists every
-  ///                             contract that does dispatch), or if the
-  ///                             execution strategy cannot be constructed.
-  static std::unique_ptr<ContractImpl> for_contract(
-      Contract contract_kind, const LammpsContract& contract,
-      const std::string& lammps_unit_style,
-      molnex::interface::ModelRunner& runner);
 
  protected:
   ContractImpl() = default;

@@ -3,57 +3,65 @@
 // The cutoff-graph contract: rebuild the neighbour graph from a cutoff every
 // step, evaluate the model over it, scatter the forces back.
 //
-// This is the composition point of every component lammps-iface-02-view and
-// -03-graph produced — `SpeciesMap`, `stage_nodes`, `GraphBridge`, `Exec`,
-// `ForceScatter`, `pack_reverse_forces` / `unpack_reverse_forces` — and it adds
-// no numerics of its own: what lives here is the ORDER those components run in
+// This is the composition point of the bridge components — `SpeciesMap`,
+// `stage_nodes`, `GraphBridge`, `ForceScatter`, `pack_reverse_forces` /
+// `unpack_reverse_forces` — and the runtime's `SiteEnergyExec`. It adds no
+// numerics of its own: what lives here is the ORDER those components run in
 // and the handful of decisions that order needs (how many atoms are graph
 // nodes, whether the pair style owes a reverse comm, which unit factor
 // applies).
 //
-// It is a CONTRACT-FAMILY implementation, not a model implementation. PiNet,
-// MACE and Allegro all export `contract = "cutoff-graph"` and all run through
-// this one class; "no per-model C++" is not at risk, and would be the moment a
-// class here were named after a network.
+// One implementation, every model. Any package that follows the site-energy
+// convention runs through this class; nothing here is named after a network
+// or a package format.
 //
-// NO LAMMPS HEADER, and the `Exec` arrives by CONSTRUCTOR INJECTION. Those two
-// facts together are what let the entire layer-2 + layer-3 stack be exercised
-// by ctest with no LAMMPS build, no CUDA and no `.pt2` package — the tests hand
-// in a stub `Exec` and a synthetic `LammpsView`. Selecting the execution
-// strategy internally would put a semantic branch back into the class and take
-// that testability with it; the `Execution` -> `Exec` mapping is the dispatch's
-// job (`registry.cpp`).
+// NO LAMMPS HEADER, and the execution arrives by constructor injection. Those
+// two facts let ctest drive this class over a stub `ModelArtifact` and a
+// synthetic `LammpsView`. The pair style opens the artifact; this class does
+// not.
 
 #ifndef MOLNEX_LAMMPS_IMPLS_CUTOFF_GRAPH_IMPL_H
 #define MOLNEX_LAMMPS_IMPLS_CUTOFF_GRAPH_IMPL_H
 
-#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
-#include "bridge/exec.h"
 #include "bridge/force_scatter.h"
 #include "bridge/graph_bridge.h"
 #include "bridge/lammps_view.h"
 #include "bridge/species_map.h"
 #include "impls/contract_impl.h"
-#include "lammps_contract.h"
+#include "molnex/runtime/metadata.h"
+#include "molnex/runtime/site_energy_exec.h"
 
 namespace molnex::lammps {
+
+/// How periodic neighbours reach the model.
+///
+/// * `kGhost` — every ghost within `T * cutoff + skin` is a graph node, the
+///   mask selects the owned sites, shifts are zero, ghost forces go home
+///   through the integrator's reverse comm, the virial is LAMMPS' `fdotr`.
+///   Works on any number of ranks; costs the whole ghost shell on every step.
+/// * `kFold` — only the `nlocal` owned atoms are graph nodes; a ghost
+///   neighbour is folded onto its owner with the lattice translation as the
+///   pair's shift, forces land on owned atoms only, the virial is the model's.
+///   Needs every ghost to be an image of an owned atom: one rank.
+enum class GraphMode { kGhost, kFold };
 
 /// The `cutoff-graph` contract, over an injected execution strategy.
 ///
 /// Lifecycle, mirroring the `pair_style` / `pair_coeff` / `init` / `run` order
-/// LAMMPS itself imposes: construct (capabilities, cutoff, unit factors and the
-/// strategy are fixed), `coeff` (the type -> Z map arrives and is validated
+/// LAMMPS itself imposes: construct (capabilities, cutoff, unit factor and the
+/// execution are fixed), `coeff` (the type -> Z map arrives and is validated
 /// against the export's species), `init` (this run's configuration is checked),
 /// then `compute` per step.
 ///
 /// Example:
 /// \code
-///   CutoffGraphImpl impl(contract, update->unit_style,
-///                        std::make_unique<DynamicExec>(...));
+///   CutoffGraphImpl impl(metadata, energy_factor,
+///                        SiteEnergyExec(*artifact, metadata.dtype),
+///                        GraphMode::kFold);
 ///   impl.coeff({"1", "6", "8"}, atom->ntypes);
 ///   impl.init(LammpsRunEnv{...});
 ///   const EvalResult r = impl.compute(view);
@@ -62,34 +70,32 @@ class CutoffGraphImpl : public ContractImpl {
  public:
   /// Fix everything this contract can know before the input script continues.
   ///
-  /// \param contract           Validated export contract; its cutoff, species,
-  ///                           `supports_pbc` / `supports_virial` flags and
-  ///                           unit table are copied out here, so it need not
-  ///                           outlive this object.
-  /// \param lammps_unit_style  `update->unit_style`, the unit style the running
-  ///                           simulation asked for. The one input the meta
-  ///                           cannot supply: `units_for` needs it to turn
-  ///                           model energies and forces into LAMMPS' own.
-  /// \param exec               The execution strategy, taken by ownership.
-  ///                           Injected rather than chosen internally — see the
-  ///                           file comment.
-  /// \throws std::runtime_error  If `exec` is null, or if the contract cannot
-  ///                             serve `lammps_unit_style` (the message lists
-  ///                             the styles it does serve), or if its
-  ///                             `species` list is malformed.
-  CutoffGraphImpl(const LammpsContract& contract,
-                  const std::string& lammps_unit_style,
-                  std::unique_ptr<molnex::lammps_bridge::Exec> exec);
+  /// \param metadata       The model's metadata; its cutoff, depth and species
+  ///                       are copied out here, so it need not outlive this.
+  /// \param energy_factor  One model energy unit in the active LAMMPS unit
+  ///                       style. The facade computes it (it is the one layer
+  ///                       that may call LAMMPS' own conversion table). Forces
+  ///                       share it because the model's length unit is
+  ///                       checked to be angstrom, LAMMPS' length in both
+  ///                       `real` and `metal`.
+  /// \param exec           How the model runs; its artifact must outlive this.
+  /// \param mode           Ghost staging or folded images (`GraphMode`); the
+  ///                       facade picks it at `pair_style`, and it fixes the
+  ///                       neighbour request, so it cannot change afterwards.
+  /// \throws std::runtime_error  If `metadata.length_unit` is not angstrom.
+  CutoffGraphImpl(const molnex::runtime::Metadata& metadata,
+                  double energy_factor, molnex::runtime::SiteEnergyExec exec,
+                  GraphMode mode);
 
   /// The neighbour request this contract needs LAMMPS to make.
   ///
-  /// \returns `{full = true, ghost = <supports_pbc>, cutoff = <meta cutoff>,
-  ///           comm_reverse = 3, comm_reverse_off = 3}`. `ghost` follows the
-  ///           export's `supports_pbc`: a periodic contract needs ghost centres
-  ///           in `ilist` to close its edge set, a local-only one has no ghosts
-  ///           at all. See `NeighborNeeds::ghost` for why that is not the same
-  ///           statement as the reverse-comm decision — the two answers now
-  ///           point in opposite directions.
+  /// \returns `{full = true, ghost, cutoff, comm_reverse = 3,
+  ///           comm_reverse_off = 3}`. In the ghost mode ghost centres are
+  ///           requested so the edge set closes over the ghost region; that
+  ///           request is not the reverse-comm decision —
+  ///           `needs_pair_reverse_comm` stays false, and the integrator
+  ///           reduces ghost forces. The folded mode walks owned centres only
+  ///           and asks for none.
   NeighborNeeds needs() const override;
 
   /// Read one atomic number per LAMMPS atom type and build the species map.
@@ -111,39 +117,34 @@ class CutoffGraphImpl : public ContractImpl {
 
   /// Check this run against the export, and snapshot what `compute` will need.
   ///
-  /// Four predicates, all fail-closed: the single-domain rule, `special_bonds`,
-  /// newton-pair for a periodic contract, and the fat-ghost receptive-field
-  /// condition. None is ever downgraded to a warning — each of them, unmet,
-  /// produces a run that completes and reports wrong physics.
+  /// All predicates fail-closed: `special_bonds` on a molecular system (both
+  /// modes); in the ghost mode `newton on` and the fat-ghost receptive-field
+  /// condition; in the folded mode a single rank. None is downgraded to a
+  /// warning.
   ///
   /// \param env  Snapshot of the LAMMPS globals.
-  /// \throws std::runtime_error  If a non-periodic export is being decomposed
-  ///                             over several ranks with `newton_pair` on; if a
-  ///                             molecular system's `special_bonds`
-  ///                             coefficients are not all 1.0 — LAMMPS deletes
-  ///                             the scaled 1-2 / 1-3 / 1-4 pairs from the
-  ///                             neighbour list, and a many-body model would
-  ///                             then be evaluated on a graph missing its
-  ///                             nearest neighbours; if a `supports_pbc` export
-  ///                             is run with `newton_pair` off, which would
-  ///                             leave every ghost force unreduced; or if the
-  ///                             ghost cutoff is below `T * cutoff + skin`, in
-  ///                             which case the message names
-  ///                             `comm_modify cutoff` and the value to give it.
+  /// \throws std::runtime_error  If a molecular system's `special_bonds`
+  ///                             coefficients are not all 1.0; in the ghost
+  ///                             mode if `newton` is off (ghost forces would be
+  ///                             left unreduced) or the ghost cutoff is below
+  ///                             `T * cutoff + skin` (the message names
+  ///                             `comm_modify cutoff` and the value to give
+  ///                             it); in the folded mode if more than one rank
+  ///                             runs (a ghost would then be another rank's
+  ///                             atom, with no owner here to fold onto).
   void init(const LammpsRunEnv& env) override;
 
   /// Stage, build the graph, run the model, scatter the forces.
   ///
   /// \param view  Borrowed LAMMPS atom arrays and neighbour spans.
   /// \returns The partition energy and its per-atom decomposition (length
-  ///          `nlocal`), the converted virial when this evaluation produced
-  ///          one, and the reverse-comm decision. Forces are already in
-  ///          `view.f`, for local and ghost alike; see `EvalResult`.
-  /// \throws std::runtime_error  If `pair_coeff` has not run, if a
-  ///                             `supports_pbc = false` export is handed ghost
-  ///                             atoms, if a `supports_pbc` export reaches
-  ///                             here without `init` having confirmed newton,
-  ///                             or if any staged component refuses.
+  ///          `nlocal`), the reverse-comm decision (always false), and in the
+  ///          folded mode the model's virial. Forces are already in `view.f`:
+  ///          for local and ghost alike in the ghost mode, for owned atoms
+  ///          only in the folded mode.
+  /// \throws std::runtime_error  If `pair_coeff` has not run, if `compute`
+  ///                             is reached without `init` having confirmed
+  ///                             newton, or if any staged component refuses.
   EvalResult compute(const molnex::lammps_bridge::LammpsView& view) override;
 
   /// Forwards to `molnex::lammps_bridge::pack_reverse_forces`.
@@ -155,24 +156,18 @@ class CutoffGraphImpl : public ContractImpl {
                       const int* list, const double* buf) override;
 
  private:
-  /// Delegated-to constructor, so the unit factors are looked up exactly once
-  /// and `energy_conv_` and `force_scatter_` cannot come from two lookups that
-  /// could disagree.
-  CutoffGraphImpl(const LammpsContract& contract, UnitConversion conv,
-                  std::unique_ptr<molnex::lammps_bridge::Exec> exec);
+  /// `compute` in the folded mode: owned atoms, shifted pairs, model virial.
+  EvalResult compute_folded(const molnex::lammps_bridge::LammpsView& view);
 
   /// Model cutoff in angstrom; reported through `needs()` and squared inside
   /// `graph_bridge_`.
   double cutoff_;
-  /// Whether ghosts are graph nodes: decides `n_graph`, the ghost neighbour
-  /// request, and which run-configuration predicates apply.
-  bool supports_pbc_;
-  /// Whether the export declares a virial output at all.
-  bool supports_virial_;
-  /// T, the model's message-passing depth, from the export meta. The fat-ghost
+  /// T, the model's message-passing depth, from the metadata. The fat-ghost
   /// threshold is `T * cutoff_ + skin`; read once at construction because it is
   /// a property of the model, not of a run.
   int receptive_field_layers_;
+  /// Fixed at construction; see `GraphMode`.
+  GraphMode mode_;
   /// `force->newton_pair` AS SEEN BY `init`, or empty when `init` has not run.
   ///
   /// Optional rather than a plain int with a default, because "init never ran"
@@ -181,12 +176,9 @@ class CutoffGraphImpl : public ContractImpl {
   /// safe. `compute` re-reads it to catch the first; `init` refuses the second
   /// outright.
   ///
-  /// EFFICACY BOUNDARY, stated so the next reader knows what this does NOT
-  /// buy: it is a snapshot taken by this object, so it catches an internal
-  /// ordering fault — `compute` reached on a periodic contract whose newton
-  /// precondition was never validated. It CANNOT catch LAMMPS changing newton
-  /// after `init`; that case is covered by `init_style` re-running at every
-  /// `run` setup, which re-enters `init` and re-checks.
+  /// The snapshot catches an internal ordering fault: `compute` reached before
+  /// `init` confirmed newton. It does not catch LAMMPS changing newton after
+  /// `init`; `init_style` re-runs at every `run` setup and re-enters `init`.
   std::optional<int> newton_pair_;
   /// One model energy unit expressed in the active LAMMPS unit style.
   double energy_conv_;
@@ -196,12 +188,13 @@ class CutoffGraphImpl : public ContractImpl {
   /// Empty until `coeff` runs — a `pair_style` without its `pair_coeff` has no
   /// type -> Z table, and there is no half-built one to evaluate from.
   std::optional<molnex::lammps_bridge::SpeciesMap> species_map_;
-  /// Owned by value: fixed at construction from the cutoff, reused every step.
+  /// Owned by value: fixed at construction from the cutoff, unsorted, reused
+  /// every step.
   molnex::lammps_bridge::GraphBridge graph_bridge_;
-  /// Owned by value: fixed at construction from the force factor.
+  /// Owned by value: fixed at construction from the energy factor.
   molnex::lammps_bridge::ForceScatter force_scatter_;
-  /// The injected strategy; never selected here.
-  std::unique_ptr<molnex::lammps_bridge::Exec> exec_;
+  /// The injected execution; never selected here.
+  molnex::runtime::SiteEnergyExec exec_;
 };
 
 }  // namespace molnex::lammps

@@ -3,18 +3,16 @@
 // Shared assertion helpers for the interface ctest cases.
 //
 // The house style for interface/tests is deliberately framework-free (see
-// test_model_runner.cpp): one function per case, a function-local static map
+// test_aoti_artifact.cpp): one function per case, a function-local static map
 // dispatcher, and the [pass]/[fail]/[skip] stderr protocol, with a failed
 // expectation signalled by throwing std::runtime_error out of the case. These
-// six helpers are that protocol's vocabulary; they were byte-identical copies
-// in test_meta_schema.cpp and test_lammps_contract.cpp and are extracted here
-// at their third use (test_bridge_atoms.cpp).
+// six helpers are that protocol's vocabulary.
 //
 // Test-only, and scoped as such: this header sits in interface/tests/, not
-// under interface/include/, so it is not part of the installed surface.
+// under a library's include/, so it is not part of the installed surface.
 //
 // Dependencies: pure std. Nothing here knows about torch, LAMMPS, or the
-// meta.json schema, so it can be included by a bridge case that links no
+// export JSON, so it can be included by a bridge case that links no
 // library at all as readily as by a contract case.
 
 #pragma once

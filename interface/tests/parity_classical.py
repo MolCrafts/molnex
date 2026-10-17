@@ -126,6 +126,7 @@ if str(_ROOT / "src") not in sys.path:
 
 from molpy import Box, Frame
 
+from molix.autograd import Derivative
 from molix.data import TotalCharge
 from molix.data.collate import collate_molecules
 from molix.ff_export import LammpsAdapter, LammpsWriter
@@ -235,6 +236,11 @@ BUTANE_XYZ = np.array(
     ],
     dtype=float,
 )
+
+
+def _forces(potentials, batch: TensorDict) -> torch.Tensor:
+    """``-dE/dpos`` of a ``Potentials`` on ``batch`` (kcal/mol/Å), batch untouched."""
+    return Derivative(potentials, wrt=("atoms.pos",))(batch.clone())["atoms", "forces"]
 
 
 def butane_frame() -> Frame:
@@ -953,12 +959,12 @@ def capture_block(command: str, version: str) -> str:
     butane = synthetic_opls_ff().to_potentials()
     butane_system = butane_batch()
     e_butane = float(butane.calc_energy(butane_system).detach())
-    f_butane = float(butane.calc_forces(butane_system).detach().abs().max())
+    f_butane = float(_forces(butane, butane_system).detach().abs().max())
 
     periodic_system = water_ion_batch()
     periodic = water_ion_ff(periodic_system, calculator="ewald").to_potentials()
     e_periodic = float(periodic.calc_energy(periodic_system).detach())
-    f_periodic = float(periodic.calc_forces(periodic_system).detach().abs().max())
+    f_periodic = float(_forces(periodic, periodic_system).detach().abs().max())
 
     provenance = {
         "butane": "C4 chain, bonded-only OPLS form, boundary f f f, pair_style zero",
@@ -1017,7 +1023,7 @@ def run_butane(args: argparse.Namespace, workdir: Path) -> tuple[bool, str]:
     pots = ff.to_potentials()
 
     energy = float(pots.calc_energy(batch).detach())
-    forces = pots.calc_forces(batch).detach()
+    forces = _forces(pots, batch).detach()
     force_max = float(forces.abs().max())
     print("=== molnex single point (kcal/mol, kcal/mol/Å) ===")
     print(f"  E        = {energy!r}")
@@ -1105,7 +1111,7 @@ def run_periodic(args: argparse.Namespace, workdir: Path) -> tuple[bool, str]:
     print(
         f"  placed edges = {n_pairs} rows (bidirectional, cutoff {CUTOFF_A} Å < L/2 = {BOX_A / 2})"
     )
-    print(f"  Σq = {float(batch['atoms', 'q'].sum()):+.1e} e")
+    print(f"  Σq = {float(batch['atoms', 'charge'].sum()):+.1e} e")
 
     print("\n=== convergence (both sides must be converged before parity means anything) ===")
     alpha = 1.0 / (SMEARING_A * math.sqrt(2.0))
@@ -1113,11 +1119,11 @@ def run_periodic(args: argparse.Namespace, workdir: Path) -> tuple[bool, str]:
     truncated = math.erfc(alpha * CUTOFF_A)
     print(f"  real space  : erfc(α r_c) = erfc({alpha * CUTOFF_A:.4f}) = {truncated:.3e}")
     energy = float(pots.calc_energy(batch).detach())
-    forces = pots.calc_forces(batch).detach()
+    forces = _forces(pots, batch).detach()
     force_max = float(forces.abs().max())
     mesh = ff_mesh.to_potentials()
     e_mesh = float(mesh.calc_energy(batch).detach())
-    f_mesh = mesh.calc_forces(batch).detach()
+    f_mesh = _forces(mesh, batch).detach()
     rel_kspace = abs(e_mesh - energy) / abs(energy)
     df_kspace = float((f_mesh - forces).abs().max())
     print(f"  ewald (λ_min {LR_WAVELENGTH_A} Å) E = {energy!r}   ← the molnex side below")

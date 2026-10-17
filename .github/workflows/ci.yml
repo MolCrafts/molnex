@@ -25,8 +25,8 @@ jobs:
           export CMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
           pip install -e ".[dev]" --no-build-isolation -v
         timeout-minutes: 20
-      - run: ruff check src/ tests/ scripts/
-      - run: ruff format --check src/ tests/ scripts/
+      - run: ruff check src/ tests/
+      - run: ruff format --check src/ tests/
       - name: Type check
         # BLOCKING at error severity (0 errors as of 2026-08-30). The warn
         # tier is the rule-scoped debt in [tool.ty.rules] (pyproject.toml),
@@ -83,26 +83,17 @@ jobs:
       - name: Configure and build interface (no LAMMPS)
         run: |
           export CMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
-          cmake -S interface -B build-interface -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-interface -j
-      # Explicit filter, never bare ctest: the FIXTURES_SETUP entry would run a
-      # full Python AOTI export; only the no-fixture list plus the CPU-safe
-      # fixture-backed cases belong in this gate.
-      #
-      # -R selects the meta / contract / bridge / impl / registry families. That sweeps in
-      # bridge_dynamic_exec_matches_reference, which is wanted: it is the only
-      # numerical parity evidence for the Exec extraction, its graph-potential
-      # fixture exports on CPU, and ctest pulls fixture_setup in automatically
-      # because that case declares FIXTURES_REQUIRED.
-      #
-      # -E then removes the CUDA-gated case BY FILTER rather than letting it
-      # report a runtime [skip]. A skip that always passes is not a gate, and a
-      # green tick against a case that never ran is the failure mode this
-      # exclusion exists to prevent. (cuda_run_matches_reference needs no entry
-      # here — it does not match -R in the first place.)
-      - name: Run interface ctests (no-fixture list + CPU parity case)
+          cmake -S interface -B build/interface -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/interface -j
+      # Every case except the ones this runner cannot run, removed BY FILTER
+      # rather than left to report a runtime [skip] (a skip that always passes
+      # is not a gate): cuda_run_matches_reference needs a GPU, and
+      # parity_classical_* drive a real `lmp`. The fixture cases pull in
+      # fixture_setup, which packages two toy models on CPU through
+      # molix.export.aoti — the deployment path itself, so the C++ readers are
+      # tested against the Python writer.
+      - name: Run interface ctests (all but CUDA and LAMMPS-driven)
         run: |
-          ctest --test-dir build-interface \
-            -R '^meta_|^contract_|^bridge_|^impl_|^registry_' \
-            -E '^bridge_graphed_exec_matches_dynamic$' \
+          ctest --test-dir build/interface \
+            -E '^cuda_run_matches_reference$|^parity_classical_' \
             --output-on-failure
