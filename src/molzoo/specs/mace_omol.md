@@ -323,10 +323,9 @@ rows.
   multiplicity `2S+1 = 1`), not `0` — `MACEPotential._condition_charge_spin`
   fills `torch.ones(...)`, and `0` would index an untrained embedding row;
   (b) force units written `eV·Å` now read `eV/Å` (§6 A3, §7.1, §7.2 and this
-  log); (c) forces are `torch.autograd.grad`
-  (`molpot.derivation.kernels.grad_force_pass` /
-  `molpot.derivation.force.autograd_forces_from_energy`), never
-  `ForceDerivation(method="functorch")` / `torch.func.grad` — cuEquivariance's
+  log); (c) forces are `torch.autograd.grad` through
+  `molix.autograd.Derivative(self.energy, wrt)` (`forward`), never
+  `torch.func.grad` — cuEquivariance's
   fused ops are legacy `autograd.Function`s that `torch.func.grad` rejects.
   No section added, removed or renamed; §7.4 rows untouched; no numerical
   claim changed. `docs/molzoo/specs/mace_omol.md` re-synced from this file

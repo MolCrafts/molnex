@@ -26,8 +26,6 @@
 
 ::: molpot.derivation.energy
 
-::: molpot.derivation.force
-
 ::: molpot.derivation.hessian
 
 ## ForceField

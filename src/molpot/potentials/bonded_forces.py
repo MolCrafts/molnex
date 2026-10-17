@@ -5,8 +5,7 @@ The bonded kernels (``BondHarmonic`` / ``AngleHarmonic`` /
 so their atomic forces ``F = -∂E/∂pos`` are closed-form too. Evaluating them
 directly removes the ``pos[index]`` gather-and-scatter autograd graph and the
 ``create_graph`` double backward that the generic
-:func:`~molpot.derivation.force.autograd_forces_from_energy` pays for those
-terms.
+:class:`molix.autograd.Derivative` pays for those terms.
 
 Each force below is still an ordinary autograd function of the parameters
 (``k``, ``r0``, ``theta0``, ``phase``, …), so a force loss reaches the

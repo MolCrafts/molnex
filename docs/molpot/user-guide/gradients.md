@@ -12,10 +12,10 @@ There is **one** derivative op for the whole project,
 `molix.autograd.Derivative`, and one backend behind it, `torch.autograd.grad`.
 It works on every model, including cuEquivariance fused kernels (MACE /
 Allegro), and it traces in-graph under `torch.compile`
-(`molix.compile.Compiler` turns on `trace_autograd_ops`). There is no
-`method=` switch, no functorch route, no `compute_forces` flag and no
-`compile_core`. A caller states *which quantity with respect to which
-variable*, as TensorFrame keys.
+(`molix.compile.Compiler` turns on `trace_autograd_ops`). A caller states
+*which quantity with respect to which variable*, as TensorFrame keys; a
+potential takes the same `wrt` at construction and builds the op over its own
+`energy`.
 
 ## The op
 
@@ -99,8 +99,8 @@ frame = compiled(op.mark_leaves(frame))      # 1 graph, 0 breaks, outputs attach
 The default training and evaluation steps do exactly this in `forward_loss`,
 so `Trainer.compile()` — `cuda_graphs=True` included — needs nothing from the
 caller. What an energy needs done eagerly before a trace (MACE's element-table
-check, Polar's k-space grid sizing, the classical topology bind) is the
-potential's precondition: run one eager forward, then compile. For the
+check, Polar's and Sonata's k-space grid binding, the classical topology bind)
+is the potential's precondition: run one eager forward, then compile. For the
 classical container that precondition is *per frame*: `Potentials` memoises
 its typed view and its geometry gate on the batch object, so the compiled op
 is one graph on a frame it has evaluated once before (MD's bound batch) and
@@ -123,64 +123,83 @@ npt = Derivative(ff.to_potentials().energy, wrt=("atoms.pos", "graphs.strain"))
 ```
 
 `Potentials.calc_energy(frame)` is the total-energy tensor (`(B,)`, `()` for
-one molecule); `Potentials.energy(frame)` stores it at `graphs.energy`; there
-is no `calc_forces`, `calc_energy_forces` or `calc_energy_forces_virial`.
+one molecule); `Potentials.energy(frame)` stores it at `graphs.energy`.
 `molix.md.MD` composes `Derivative(pots.energy, wrt=("atoms.pos"[, "graphs.strain"]))`
 once per run and applies `set_compiler`'s compiler to it after one eager
 evaluation (see the MD user guide).
 
-## Tensor level
+## Composed potentials
 
-`molpot.derivation.force` holds the raw-tensor primitives for callers that
-hold an `energy_fn(pos) -> scalar` rather than a batch:
+`PotentialComposer` and `Sonata` (`molpot.composition`) are potentials on the
+same contract. `energy(frame)` runs the pipeline in place — head → mixing →
+terms for the composer, encoder → multipole head → Ewald → short-range heads
+for Sonata — and `forward` is the op built from `wrt`:
 
-| primitive | in | out |
-|-----------|----|-----|
-| `autograd_forces_from_energy(E, leaf)` | `E` already on a leaf | `F` |
-| `autograd_forces(energy_fn, pos)` | `energy_fn(pos) -> E` | `F` |
+```python
+from molpot.composition import LJParameterHead, PotentialComposer
+from molpot.potentials import LJ126
 
-`ForceDerivation()` is the stateless module form of `autograd_forces`
-(`BasePotential.calc_forces`, `PotentialComposer`, `Sonata`);
-`HessianDerivation` differentiates the first derivative a second time on a
-leaf of its own (`molix.autograd.leaf`):
+composer = PotentialComposer(
+    head=LJParameterHead(feature_dim=64, hidden_dim=64, dtype=torch.float64),
+    potentials={"lj126": LJ126()},
+    wrt=("atoms.pos",),
+)
+frame = composer(frame)         # graphs.energy, graphs.energy_lj126, atoms.<parameter>, atoms.forces
+frame = composer.energy(frame)  # the same pipeline without the derivative
+```
+
+The composer's `energy` reads `atoms.node_features` `(N, D)` — the pooled
+per-atom features the caller wrote — with `atoms.{Z,pos,batch}`,
+`pairs.pair_index` and the imaged `pairs.pair_diff` when present, and writes
+`graphs.energy`, one `graphs.energy_<term>` per term and one
+`atoms.<parameter>` per head output. Edge distances come from
+`molrep.embedding.geometry` on the positions the op hands in, so the force
+gradient flows through the geometry the terms price and a force loss reaches
+the head through the double backward. `wrt=("atoms.pos", "graphs.strain")`
+adds `graphs.virial` on a one-graph periodic batch, for either potential.
+
+Sonata's periodic path has one eager precondition: `Sonata.bind_cell(cell)`
+freezes the reciprocal keep-set `0 < k² ≤ k_max²` on the lattice. Every later
+`energy` uses that grid, whatever cell the frame carries; unbound, the Ewald
+term enumerates the grid from each frame's cell on every call, which a traced
+call cannot do and which makes the energy a step function of the cell under
+strain.
+
+## Hessian
+
+`molpot.derivation.HessianDerivation` is the Cartesian second derivative
+`H = ∂²E/∂pos²` in the flat layout `i = 3a + c` (`x0, y0, z0, x1, …`). It does
+not go through the op: the op never lets its leaf out, and the second
+derivative needs that leaf after the first one is taken. So it makes a leaf of
+its own (`molix.autograd.leaf`) and calls `torch.autograd.grad` directly —
+once with `create_graph=True` for `∂E/∂pos`, then once per row of the
+flattened gradient. The rows' `create_graph` follows the ambient grad mode at
+entry: attached to the parameters under training (`∂³E/∂pos²∂θ`, so a Hessian
+loss reaches a parameter head), detached under `torch.no_grad()`. The result
+comes back as computed, not symmetrised, so a broken energy graph shows up as
+`max|H - Hᵀ|` instead of being averaged away.
 
 ```python
 import torch
-from molpot.derivation import ForceDerivation
+from molpot.derivation import HessianDerivation
 
-pos = torch.randn(10, 3)
-forces = ForceDerivation()(lambda p: (p**2).sum(), pos)
-print(forces.shape)  # torch.Size([10, 3])
+hessian = HessianDerivation()
+H = hessian(lambda p: (p**2).sum(), torch.randn(10, 3))   # (30, 30)
+blocks = hessian.graph_blocks(pot.energy, batch)           # one (3Nᵢ, 3Nᵢ) per graph
 ```
 
-`energy_fn` must recompute any position-derived geometry (edge vectors,
-distances) inside itself so the gradient flows `pos → geometry → energy`.
+`forward(energy_fn, pos)` takes a tensor-level `energy_fn(pos) -> scalar` (a
+`(B,)` vector is summed) that recomputes every position-derived quantity
+inside itself, and evaluates it on a private leaf taken from `pos.detach()`.
+`graph_blocks(energy, batch)` takes a potential's `energy` method, installs
+its leaf at `atoms.pos`, runs one energy forward and keeps only each graph's
+own columns of every row — exact on a collated batch, where no term couples
+two molecules. The batch comes back with `atoms.pos` replaced by that leaf
+and `graphs.energy` / `atoms.forces` attached to it. `Rondo.partial_hessian`
+takes the MM `3×3` blocks on the pairs a Hessian objective names through each
+bonded term's `term_energy` instead (`molpot.forcefield.partial_hessian.TermHessian`).
 
 Units throughout: positions Å, energies eV, forces eV/Å on the MLIP side; the
 ForceField's own convention on the classical side. The op only differentiates
 whatever the energy writes, so a core on another unit system produces
 mismatched forces silently.
-
-## With PotentialComposer
-
-`PotentialComposer` derives forces when positions are present in `data`:
-
-```python
-data = {
-    "pair_index": pair_index,
-    "batch": batch,
-    "pos": pos,
-}
-
-outputs = composer(
-    node_features=node_features,
-    data=data,
-    compute_forces=True,
-)
-
-forces = outputs["forces"]
-```
-
-The composer recomputes edge distances from `pos` inside its force closure, so
-the force gradient flows correctly; a force loss keeps the parameters connected
-through the double backward.

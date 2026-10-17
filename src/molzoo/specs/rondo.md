@@ -104,15 +104,19 @@ Every encoder channel column is required: a batch that lacks one raises
 
 ### 2.2 Outputs
 
-`Rondo.forward` returns the batch. The derivative op writes `graphs.energy`
-and `atoms.forces` in place — where a labelled batch carries its DFT targets —
-so both are saved and restored around it (adaptation A6) and the predictions
-land at `ENERGY_PRED_KEY` / `FORCES_PRED_KEY` (`molix.schema`), the label columns untouched (`molix.frame.beside_labels`). `energy` also writes every predicted table as
-columns, references included, so losses and priors read them from the batch.
+`Rondo.forward` returns the batch. `energy` writes `graphs.energy` and every
+predicted table as columns, references included, so losses and priors read
+them from the batch; `forward` adds the force at `atoms.forces_pred`
+(`FORCES_PRED_KEY` in `molix.schema`, the op's output key for `atoms.pos`) —
+a training batch holds the DFT force at `atoms.forces` (A6). The energy lands
+where a labelled batch holds its DFT energy; where it must sit beside that
+label, the training step wraps the call in `molix.frame.beside_labels`
+(`graphs.energy → graphs.energy_pred`, `ENERGY_PRED_KEY`), as
+`molix.core.steps.JointTrainStep` does. The model moves nothing.
 
 | Column | Shape | Written by | Contract |
 |--------|-------|------------|----------|
-| `graphs.energy_pred` | `(B,)` | `forward` | Class-I energy, kcal mol⁻¹ |
+| `graphs.energy` | `(B,)` | `energy` | Class-I energy, kcal mol⁻¹; a training step copies it to `graphs.energy_pred` beside the label (`beside_labels`) |
 | `atoms.forces_pred` | `(N, 3)` | `forward` (when `"atoms.pos" in wrt`) | `-dE/dpos`, kcal mol⁻¹ Å⁻¹ |
 | `bonds.k`, `bonds.r0`, `bonds.k_ref`, `bonds.r0_ref` | `(N_bonds,)` | `energy` | LAMMPS `K` (kcal/mol/Å²), `r0` (Å) and their references |
 | `angles.k`, `angles.theta0`, `angles.k_ref`, `angles.theta0_ref` | `(N_angles,)` | `energy` | `K` (kcal/mol/rad²), `θ0` **degrees** and references |
@@ -346,7 +350,7 @@ zero gradient and Adam leaves it where it starts.
 | ID | Adaptation | Reason | Risk | Validation |
 |----|------------|--------|------|------------|
 | A5 | Tables are predicted inside the traced region | an external `grad_fn` breaks the force's `autograd.grad` under compile | low | `test_compile.py` |
-| A6 | Label columns saved and restored around the derivative op | the op writes where the DFT labels live | high if regressed | `test_model.py::test_forward_keeps_the_label_columns` |
+| A6 | The force lands at `atoms.forces_pred`, the op's output key; the energy stays at `graphs.energy` and the training step moves it beside its label (`molix.frame.beside_labels`) | a training batch holds the DFT labels at `atoms.forces` / `graphs.energy`; the model moves nothing | high if regressed | `test_model.py::TestRondo::test_forces_are_the_negative_gradient_of_the_energy`, `tests/test_molix/test_frame.py::TestBesideLabels` |
 | A7 | No automorphism orbit averaging | message passing is automorphism-equivariant | high if the backbone changes (§10.4) | gate |
 | A11 | Pre-norm hops, every channel layer-normalized | feature RMS grew to 1e3–1e4 without it (job 3213256) | low | `test_encoder.py` |
 | A12 | Heads predict deviations from a reference, zero start | one lr serves every parameter | low | `test_classical.py` |
@@ -393,7 +397,7 @@ Not claimed: the charge model, data and encoder differ from both predecessors.
 | Improper energy symmetric in the outer legs | `test_model.py::test_improper_energy_is_symmetric_in_the_outer_legs` |
 | Linear-centre propers priced at zero | `test_model.py::test_propers_through_a_linear_centre_are_silent` |
 | Partial Hessian equals the full Hessian on the bonded pairs | `test_model.py::test_partial_hessian_is_the_full_hessian_on_the_bonded_pairs` |
-| Label columns survive `forward` | `test_model.py::test_forward_keeps_the_label_columns` |
+| `forward` writes the force at `atoms.forces_pred` and the energy at `graphs.energy`; `-dE/dpos` against `energy` | `test_model.py::TestRondo::test_forces_are_the_negative_gradient_of_the_energy` |
 | Unsupported style refused by name | `test_model.py::test_an_unsupported_style_is_refused_by_name` |
 | `energy(styles=)` sums the named styles only; an unknown name is refused | `test_model.py::test_energy_of_named_styles_sums_only_those`, `test_model.py::test_a_style_selection_outside_the_field_is_refused_by_name` |
 | forward / energy / energy(styles=) / partial_hessian compile at 1 graph, 0 breaks | `test_compile.py` (`slow`) |

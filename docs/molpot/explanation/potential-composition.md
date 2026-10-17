@@ -11,8 +11,8 @@ node_features
   -> potential-specific mixing
   -> per-pair parameters
   -> potential terms
-  -> per-graph energy
-  -> optional force derivation
+  -> per-graph energy          (energy)
+  -> forces / virial           (forward = Derivative(energy, wrt))
 ```
 
 ## Why This Exists
@@ -23,7 +23,9 @@ physical quantities. `molpot` gives that downstream structure a dedicated home:
 - parameter heads learn physical or semi-physical parameters
 - potential terms evaluate known functional forms
 - composition combines multiple terms
-- derivation operators produce forces and stress from energy
+- every composed model is a `molix.autograd.Potential`: `forward` is the
+  `molix.autograd.Derivative` of its `energy`, writing forces and the virial;
+  `molpot.derivation` adds the per-graph aggregation and the Cartesian Hessian
 
 ## Boundary
 

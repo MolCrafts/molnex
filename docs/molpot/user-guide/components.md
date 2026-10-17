@@ -7,7 +7,7 @@ For the learnable Class-I path (`OPLSAAForceField` **is** a
 `molpy.ForceField`, `to_potentials()` is the torch override), use
 [ForceField](forcefield.md) and the
 [Class-I tutorial](../tutorials/class-i-forcefield.md). The
-`PotentialComposer` section below is the older head→term assembly, not
+`PotentialComposer` section below is the generic head→term assembly, not
 the Class-I container.
 
 ## Potential Terms
@@ -56,7 +56,7 @@ Heads predict per-atom parameters from node features.
 ```python
 from molpot.composition import LJParameterHead
 
-head = LJParameterHead(feature_dim=128, hidden_dim=64)
+head = LJParameterHead(feature_dim=128, hidden_dim=64, dtype=torch.float64)
 params = head(node_features)
 ```
 
@@ -73,19 +73,29 @@ sum_pool = SumPooling()
 
 ## Composition
 
+`PotentialComposer` is a `molix.autograd.Potential`: `energy(frame)` runs
+head → mixing → terms in place on a post-collate batch, and `forward` is the
+`molix.autograd.Derivative` built from `wrt`.
+
 ```python
 from molpot.composition import PotentialComposer
 from molpot.potentials import LJ126
 
 composer = PotentialComposer(
-    head=LJParameterHead(feature_dim=64),
+    head=LJParameterHead(feature_dim=64, dtype=torch.float64),
     potentials={"lj126": LJ126()},
+    wrt=("atoms.pos",),
 )
+frame = composer(frame)
 ```
 
-The composer returns:
+`energy` reads `atoms.node_features` `(N, D)`, `atoms.{Z,pos,batch}`,
+`pairs.pair_index` and the imaged `pairs.pair_diff` when present, and writes:
 
-- `energy`
-- `term_energies`
-- `parameters`
-- `forces`, when `compute_forces=True`
+- `graphs.energy` `(B,)`
+- `graphs.energy_<name>`, one per term
+- `atoms.<parameter>`, one per head output
+
+`forward` adds the `wrt` derivatives: `atoms.forces` for `"atoms.pos"`,
+`graphs.virial` for `"graphs.strain"` on a one-graph periodic batch; `wrt=()`
+makes it the energy alone. See [Gradients](gradients.md).

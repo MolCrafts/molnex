@@ -380,11 +380,9 @@ produces a model that runs and is wrong.
 - 2026-08-09: Anchors re-pointed for the `mace-subpackage-restructure` chain
   (`1ddd5ff..e825a51`) — header, §3.1 code anchors, §5 crosswalk, §6 A5/A6, §7.2
   test paths, §7.3 compile target, §8 boundary, §9 pinning row. Two content
-  corrections found while re-pointing: the §5 force row named
-  `ForceDerivation(method="autograd")`, but the MACE path actually runs
-  `molpot.derivation.kernels.grad_force_pass` (batch) and
-  `molpot.derivation.force.autograd_forces_from_energy` (raw) — same autograd
-  math, different symbol; and one force tolerance in §7.1/§7.2 was written
+  corrections found while re-pointing: the §5 force row named a symbol that is
+  not the force path — forces are `molix.autograd.Derivative(self.energy, wrt)`
+  (`forward`), one `torch.autograd.grad`; and one force tolerance in §7.1/§7.2 was written
   `eV·Å` instead of `eV/Å`. No section added, removed or renamed; §7.4 rows
   untouched; no numerical claim changed.
 - 2026-10-15: Refreshed to the current API, no numerical claim changed: §2
