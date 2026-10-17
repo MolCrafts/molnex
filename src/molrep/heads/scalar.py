@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 
-from molix import config
-
 
 class ScalarHead(nn.Module):
     """Pool per-atom representations and predict scalar property.
@@ -26,7 +24,8 @@ class ScalarHead(nn.Module):
         d_model: int = 128,
         hidden_dim: int = 64,
         pooling: str = "mean",
-        dtype: torch.dtype | None = None,
+        *,
+        dtype: torch.dtype,
     ):
         super().__init__()
 
@@ -38,13 +37,12 @@ class ScalarHead(nn.Module):
             raise ValueError(f"Unknown pooling: {pooling}. Use 'mean', 'sum', or 'max'")
 
         # Simple MLP: d_model -> hidden_dim -> 1
-        ftype = config.ftype if dtype is None else dtype  # transitional (2c)
         self.mlp = nn.Sequential(
-            nn.Linear(d_model, hidden_dim, dtype=ftype),
+            nn.Linear(d_model, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim, dtype=ftype),
+            nn.Linear(hidden_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1, dtype=ftype),
+            nn.Linear(hidden_dim, 1, dtype=dtype),
         )
 
     def forward(self, h: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

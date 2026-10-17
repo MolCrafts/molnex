@@ -13,8 +13,6 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from molix import config
-
 if TYPE_CHECKING:
     from molrep.condensation.type_system import TypeSystem
 
@@ -36,7 +34,7 @@ class TypeHead(nn.Module):
         num_types: int,
         dropout: float = 0.0,
         *,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ):
         super().__init__()
         if num_types < 1:
@@ -44,12 +42,11 @@ class TypeHead(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_types = num_types
 
-        ftype = config.ftype if dtype is None else dtype  # transitional (2c)
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim, dtype=ftype),
+            nn.Linear(hidden_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_types, dtype=ftype),
+            nn.Linear(hidden_dim, num_types, dtype=dtype),
         )
 
     @classmethod
@@ -59,7 +56,7 @@ class TypeHead(nn.Module):
         type_system: TypeSystem,
         *,
         dropout: float = 0.0,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> TypeHead:
         """Build a head whose ``num_types`` matches a condensed type system.
 
@@ -140,7 +137,7 @@ class MultiTypeHead(nn.Module):
         type_systems: Mapping[str, TypeSystem],
         *,
         dropout: float = 0.0,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> MultiTypeHead:
         """Build one head per condensed type system.
 

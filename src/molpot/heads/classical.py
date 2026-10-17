@@ -54,7 +54,6 @@ import torch
 import torch.nn as nn
 from molpy import Element
 
-from molix import config
 from molpot.heads._common import scalar_mlp
 
 __all__ = [
@@ -203,11 +202,8 @@ class CovalentRadiusSum(nn.Module):
             not an element and holds ``0``.
     """
 
-    def __init__(self, num_elements: int = 119, *, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, num_elements: int = 119, *, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         radii = [0.0] + [float(Element(z).covalent) for z in range(1, int(num_elements))]
         # Derived from molpy, not learned: kept out of the state dict.
         self.register_buffer("covalent_radius", torch.tensor(radii, dtype=dtype), persistent=False)
@@ -239,12 +235,9 @@ class _Head(nn.Module):
         hidden_dim: int,
         widths: dict[str, int],
         *,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if feature_dim <= 0 or hidden_dim <= 0:
             raise ValueError("feature_dim and hidden_dim must be positive")
         #: The build dtype, for the constant buffers a subclass registers.
@@ -288,7 +281,7 @@ class BondHead(_Head):
         k_ref: float = 450.0,
         k_gain: float = 1.0,
         r0_gain: float = 0.1,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__(feature_dim, hidden_dim, {"k": 1, "r0": 1}, dtype=dtype)
         if k_ref <= 0.0:
@@ -348,7 +341,7 @@ class AngleHead(_Head):
         theta0_gain_deg: float = 20.0,
         theta0_lo_deg: float = 0.5,
         theta0_hi_deg: float = 180.0,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__(feature_dim, hidden_dim, {"k": 1, "theta0": 1}, dtype=dtype)
         if k_ref <= 0.0:
@@ -405,7 +398,7 @@ class PeriodicHead(_Head):
         hidden_dim: int,
         *,
         periodicity: Sequence[int] = (1, 2, 3, 4, 5, 6),
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         n = tuple(int(p) for p in periodicity)
         if not n or min(n) < 1:
@@ -463,7 +456,7 @@ class CvffHead(_Head):
         k_ref: float = 4.291 / 3.0,
         k_gain: float = 1.0,
         periodicity: int = 2,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         if periodicity < 1:
             raise ValueError(f"periodicity must be >= 1, got {periodicity}")
@@ -511,7 +504,7 @@ class LJHead(_Head):
         *,
         sigma_gain: float = 0.1,
         epsilon_gain: float = 1.0,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__(feature_dim, hidden_dim, {"sigma": 1, "epsilon": 1}, dtype=dtype)
         self.sigma_map = ExpAround(sigma_gain, lo=LENGTH_BOUNDS[0], hi=LENGTH_BOUNDS[1])

@@ -10,8 +10,8 @@ This spec covers the MolNex PyTorch port of Teoroo-CMC/PiNN `PiNet2`
 | Class | Role |
 |---|---|
 | `molzoo.pinet.PiNetSpec` | torch-free validated configuration |
-| `molzoo.pinet.PiNetEncoder(spec)` | feature body: element table, basis, `GCBlock` stack, residual updates; primitives + the encoder `forward(td)` |
-| `molzoo.pinet.PiNetPotential(spec, wrt=())` | `PiNetEncoder` + per-block `OutLayer` energy readout, atomic dress, scale; `energy` / `forward = Derivative(energy, wrt)` |
+| `molzoo.pinet.PiNetEncoder(spec, dtype=)` | feature body: element table, basis, `GCBlock` stack, residual updates; primitives + the encoder `forward(td)` |
+| `molzoo.pinet.PiNetPotential(spec, wrt=(), dtype=)` | `PiNetEncoder` + per-block `OutLayer` energy readout, atomic dress, scale; `energy` / `forward = Derivative(energy, wrt)` |
 | `molzoo.pinet.PiNetDipole(spec, ...)` / `PiNetPolarizability(spec, ...)` | `PiNetEncoder` + a `molpot.heads` dipole / charge-response head |
 
 The PiNN layers are model-specific and live in `molzoo.pinet.layers`; only the

@@ -42,6 +42,7 @@ from tests.conftest import (
     butane_pair_positions,
     place_edges,
 )
+from tests.test_molpot.test_forcefield.conftest import with_graphs
 
 DTYPE = torch.float64
 
@@ -121,25 +122,27 @@ FD_VIRIAL_TOL = 1e-5
 
 def _two_atom_bond_batch(*, r: float = BOND_R) -> TensorDict:
     pos = torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=DTYPE)
-    return TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "Z": torch.tensor([1, 1], dtype=torch.long),
-                    "batch": torch.zeros(2, dtype=torch.long),
-                },
-                batch_size=[2],
-            ),
-            "bonds": TensorDict(
-                {
-                    "atomi": torch.tensor([0], dtype=torch.long),
-                    "atomj": torch.tensor([1], dtype=torch.long),
-                },
-                batch_size=[1],
-            ),
-        },
-        batch_size=[],
+    return with_graphs(
+        TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": pos,
+                        "Z": torch.tensor([1, 1], dtype=torch.long),
+                        "batch": torch.zeros(2, dtype=torch.long),
+                    },
+                    batch_size=[2],
+                ),
+                "bonds": TensorDict(
+                    {
+                        "atomi": torch.tensor([0], dtype=torch.long),
+                        "atomj": torch.tensor([1], dtype=torch.long),
+                    },
+                    batch_size=[1],
+                ),
+            },
+            batch_size=[],
+        )
     )
 
 
@@ -154,25 +157,27 @@ def _two_molecule_bond_batch() -> TensorDict:
         ],
         dtype=DTYPE,
     )
-    return TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "Z": torch.tensor([1, 1, 1, 1], dtype=torch.long),
-                    "batch": torch.tensor([0, 0, 1, 1], dtype=torch.long),
-                },
-                batch_size=[4],
-            ),
-            "bonds": TensorDict(
-                {
-                    "atomi": torch.tensor([0, 2], dtype=torch.long),
-                    "atomj": torch.tensor([1, 3], dtype=torch.long),
-                },
-                batch_size=[2],
-            ),
-        },
-        batch_size=[],
+    return with_graphs(
+        TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": pos,
+                        "Z": torch.tensor([1, 1, 1, 1], dtype=torch.long),
+                        "batch": torch.tensor([0, 0, 1, 1], dtype=torch.long),
+                    },
+                    batch_size=[4],
+                ),
+                "bonds": TensorDict(
+                    {
+                        "atomi": torch.tensor([0, 2], dtype=torch.long),
+                        "atomj": torch.tensor([1, 3], dtype=torch.long),
+                    },
+                    batch_size=[2],
+                ),
+            },
+            batch_size=[],
+        )
     )
 
 
@@ -182,26 +187,28 @@ def _angle_batch() -> TensorDict:
         [[0.0, 0.0, 0.0], [BOND_R, 0.0, 0.0], [BOND_R, BOND_R, 0.0]],
         dtype=DTYPE,
     )
-    return TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "Z": torch.tensor([1, 1, 1], dtype=torch.long),
-                    "batch": torch.zeros(3, dtype=torch.long),
-                },
-                batch_size=[3],
-            ),
-            "angles": TensorDict(
-                {
-                    "atomi": torch.tensor([0], dtype=torch.long),
-                    "atomj": torch.tensor([1], dtype=torch.long),
-                    "atomk": torch.tensor([2], dtype=torch.long),
-                },
-                batch_size=[1],
-            ),
-        },
-        batch_size=[],
+    return with_graphs(
+        TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": pos,
+                        "Z": torch.tensor([1, 1, 1], dtype=torch.long),
+                        "batch": torch.zeros(3, dtype=torch.long),
+                    },
+                    batch_size=[3],
+                ),
+                "angles": TensorDict(
+                    {
+                        "atomi": torch.tensor([0], dtype=torch.long),
+                        "atomj": torch.tensor([1], dtype=torch.long),
+                        "atomk": torch.tensor([2], dtype=torch.long),
+                    },
+                    batch_size=[1],
+                ),
+            },
+            batch_size=[],
+        )
     )
 
 
@@ -228,27 +235,29 @@ def _two_proper_batch() -> TensorDict:
         ],
         dtype=DTYPE,
     )
-    return TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "Z": torch.ones(5, dtype=torch.long),
-                    "batch": torch.zeros(5, dtype=torch.long),
-                },
-                batch_size=[5],
-            ),
-            "propers": TensorDict(
-                {
-                    "atomi": torch.tensor([0, 1], dtype=torch.long),
-                    "atomj": torch.tensor([1, 2], dtype=torch.long),
-                    "atomk": torch.tensor([2, 3], dtype=torch.long),
-                    "atoml": torch.tensor([3, 4], dtype=torch.long),
-                },
-                batch_size=[2],
-            ),
-        },
-        batch_size=[],
+    return with_graphs(
+        TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": pos,
+                        "Z": torch.ones(5, dtype=torch.long),
+                        "batch": torch.zeros(5, dtype=torch.long),
+                    },
+                    batch_size=[5],
+                ),
+                "propers": TensorDict(
+                    {
+                        "atomi": torch.tensor([0, 1], dtype=torch.long),
+                        "atomj": torch.tensor([1, 2], dtype=torch.long),
+                        "atomk": torch.tensor([2, 3], dtype=torch.long),
+                        "atoml": torch.tensor([3, 4], dtype=torch.long),
+                    },
+                    batch_size=[2],
+                ),
+            },
+            batch_size=[],
+        )
     )
 
 
@@ -263,27 +272,29 @@ def _torsion_batch(namespace: str) -> TensorDict:
         ],
         dtype=DTYPE,
     )
-    return TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "Z": torch.tensor([1, 1, 1, 1], dtype=torch.long),
-                    "batch": torch.zeros(4, dtype=torch.long),
-                },
-                batch_size=[4],
-            ),
-            namespace: TensorDict(
-                {
-                    "atomi": torch.tensor([0], dtype=torch.long),
-                    "atomj": torch.tensor([1], dtype=torch.long),
-                    "atomk": torch.tensor([2], dtype=torch.long),
-                    "atoml": torch.tensor([3], dtype=torch.long),
-                },
-                batch_size=[1],
-            ),
-        },
-        batch_size=[],
+    return with_graphs(
+        TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": pos,
+                        "Z": torch.tensor([1, 1, 1, 1], dtype=torch.long),
+                        "batch": torch.zeros(4, dtype=torch.long),
+                    },
+                    batch_size=[4],
+                ),
+                namespace: TensorDict(
+                    {
+                        "atomi": torch.tensor([0], dtype=torch.long),
+                        "atomj": torch.tensor([1], dtype=torch.long),
+                        "atomk": torch.tensor([2], dtype=torch.long),
+                        "atoml": torch.tensor([3], dtype=torch.long),
+                    },
+                    batch_size=[1],
+                ),
+            },
+            batch_size=[],
+        )
     )
 
 
@@ -363,18 +374,20 @@ def _lj_pair_batch(*, r: float) -> TensorDict:
     declares, so the list holds exactly the row that style may read.
     """
     pos = torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=DTYPE)
-    batch = TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "Z": torch.tensor([18, 18], dtype=torch.long),
-                    "batch": torch.zeros(2, dtype=torch.long),
-                },
-                batch_size=[2],
-            )
-        },
-        batch_size=[],
+    batch = with_graphs(
+        TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": pos,
+                        "Z": torch.tensor([18, 18], dtype=torch.long),
+                        "batch": torch.zeros(2, dtype=torch.long),
+                    },
+                    batch_size=[2],
+                )
+            },
+            batch_size=[],
+        )
     )
     return place_edges(batch, cutoff=LJ_CUTOFF)
 
@@ -412,25 +425,27 @@ def _class_i_batch() -> TensorDict:
         [[0.0, 0.0, 0.0], [BOND_R, 0.0, 0.0], [0.0, 3.0, 0.0]],
         dtype=DTYPE,
     )
-    batch = TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "Z": torch.tensor([1, 1, 1], dtype=torch.long),
-                    "batch": torch.zeros(3, dtype=torch.long),
-                },
-                batch_size=[3],
-            ),
-            "bonds": TensorDict(
-                {
-                    "atomi": torch.tensor([0], dtype=torch.long),
-                    "atomj": torch.tensor([1], dtype=torch.long),
-                },
-                batch_size=[1],
-            ),
-        },
-        batch_size=[],
+    batch = with_graphs(
+        TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": pos,
+                        "Z": torch.tensor([1, 1, 1], dtype=torch.long),
+                        "batch": torch.zeros(3, dtype=torch.long),
+                    },
+                    batch_size=[3],
+                ),
+                "bonds": TensorDict(
+                    {
+                        "atomi": torch.tensor([0], dtype=torch.long),
+                        "atomj": torch.tensor([1], dtype=torch.long),
+                    },
+                    batch_size=[1],
+                ),
+            },
+            batch_size=[],
+        )
     )
     return place_edges(batch, cutoff=LJ_CUTOFF)
 
@@ -573,22 +588,21 @@ def _lj_boundary_batch(positions: torch.Tensor) -> TensorDict:
     about a pair that is no longer the pair being differentiated.
     """
     return place_edges(
-        TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": positions,
-                        "Z": torch.tensor([18, 18], dtype=torch.long),
-                        "batch": torch.zeros(2, dtype=torch.long),
-                    },
-                    batch_size=[2],
-                ),
-                "graphs": TensorDict(
-                    {"cell": torch.eye(3, dtype=DTYPE) * LJ_BOUNDARY_EDGE},
-                    batch_size=[],
-                ),
-            },
-            batch_size=[],
+        with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": positions,
+                            "Z": torch.tensor([18, 18], dtype=torch.long),
+                            "batch": torch.zeros(2, dtype=torch.long),
+                        },
+                        batch_size=[2],
+                    ),
+                },
+                batch_size=[],
+            ),
+            cell=torch.eye(3, dtype=DTYPE) * LJ_BOUNDARY_EDGE,
         ),
         cutoff=LJ_BOUNDARY_CUTOFF,
     )
@@ -645,29 +659,29 @@ def _periodic_bond_batch(x0: float, x1: float, cell: torch.Tensor | None = None)
         a lattice was given.
     """
     pos = torch.tensor([[x0, 5.0, 5.0], [x1, 5.0, 5.0]], dtype=DTYPE)
-    batch = TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": pos,
-                    "Z": torch.tensor([1, 1], dtype=torch.long),
-                    "batch": torch.zeros(2, dtype=torch.long),
-                },
-                batch_size=[2],
-            ),
-            "bonds": TensorDict(
-                {
-                    "atomi": torch.tensor([0], dtype=torch.long),
-                    "atomj": torch.tensor([1], dtype=torch.long),
-                },
-                batch_size=[1],
-            ),
-        },
-        batch_size=[],
+    return with_graphs(
+        TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": pos,
+                        "Z": torch.tensor([1, 1], dtype=torch.long),
+                        "batch": torch.zeros(2, dtype=torch.long),
+                    },
+                    batch_size=[2],
+                ),
+                "bonds": TensorDict(
+                    {
+                        "atomi": torch.tensor([0], dtype=torch.long),
+                        "atomj": torch.tensor([1], dtype=torch.long),
+                    },
+                    batch_size=[1],
+                ),
+            },
+            batch_size=[],
+        ),
+        cell=cell,
     )
-    if cell is not None:
-        batch["graphs"] = TensorDict({"cell": cell}, batch_size=[])
-    return batch
 
 
 # ---------------------------------------------------------------------------
@@ -1137,18 +1151,20 @@ class TestPotentials:
                 },
             )
         )
-        far_apart = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": torch.tensor([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=DTYPE),
-                        "Z": torch.tensor([1, 1], dtype=torch.long),
-                        "batch": torch.zeros(2, dtype=torch.long),
-                    },
-                    batch_size=[2],
-                )
-            },
-            batch_size=[],
+        far_apart = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": torch.tensor([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=DTYPE),
+                            "Z": torch.tensor([1, 1], dtype=torch.long),
+                            "batch": torch.zeros(2, dtype=torch.long),
+                        },
+                        batch_size=[2],
+                    )
+                },
+                batch_size=[],
+            )
         )
         # The list reaches past the style's cutoff, so the 10 Å pair *is* a row
         # of it — one the ``0 < r < cutoff`` liveness rule marks dead. The
@@ -1868,21 +1884,23 @@ class TestPotentials:
         """Reused lj/cut container: seed N=2, next batch N=3 with this-N tables."""
         potentials = _lj_pair_forcefield().to_potentials()
         potentials.bind_topology(_lj_pair_batch(r=2.0))
-        bigger = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": torch.tensor(
-                            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
-                            dtype=DTYPE,
-                        ),
-                        "Z": torch.tensor([18, 18, 18], dtype=torch.long),
-                        "batch": torch.zeros(3, dtype=torch.long),
-                    },
-                    batch_size=[3],
-                ),
-            },
-            batch_size=[],
+        bigger = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": torch.tensor(
+                                [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+                                dtype=DTYPE,
+                            ),
+                            "Z": torch.tensor([18, 18, 18], dtype=torch.long),
+                            "batch": torch.zeros(3, dtype=torch.long),
+                        },
+                        batch_size=[3],
+                    ),
+                },
+                batch_size=[],
+            )
         )
         bigger = place_edges(bigger, cutoff=LJ_CUTOFF)
         potentials.bind_topology(bigger)
@@ -1899,21 +1917,23 @@ class TestPotentials:
         """Seed epsilon of N=2 must not be gathered with a 3-atom edge list."""
         potentials = _lj_pair_forcefield().to_potentials()
         potentials.bind_topology(_lj_pair_batch(r=2.0))
-        bigger = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": torch.tensor(
-                            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
-                            dtype=DTYPE,
-                        ),
-                        "Z": torch.tensor([18, 18, 18], dtype=torch.long),
-                        "batch": torch.zeros(3, dtype=torch.long),
-                    },
-                    batch_size=[3],
-                ),
-            },
-            batch_size=[],
+        bigger = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": torch.tensor(
+                                [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+                                dtype=DTYPE,
+                            ),
+                            "Z": torch.tensor([18, 18, 18], dtype=torch.long),
+                            "batch": torch.zeros(3, dtype=torch.long),
+                        },
+                        batch_size=[3],
+                    ),
+                },
+                batch_size=[],
+            )
         )
         bigger = place_edges(bigger, cutoff=LJ_CUTOFF)
         potentials.bind_topology(bigger)
@@ -2533,8 +2553,7 @@ class TestPotentials:
             .to_potentials()
         )
         batch = _torsion_batch("propers")
-        # A declared graph count keeps ``_num_graphs`` off its ``int(max())``
-        # fallback, which is a host sync a real collated batch never reaches.
+        # The ``graphs`` namespace is required: ``_num_graphs`` is its batch size.
         batch["graphs"] = TensorDict(
             {"num_atoms": torch.tensor([4], dtype=torch.long)}, batch_size=[1]
         )
@@ -2980,9 +2999,8 @@ def _polar_forcefield() -> tuple[ForceField, nn.Module]:
     come from the mace test package's conftest — one definition of "tiny
     Polar", not a second copy that drifts.
 
-    The caller must already have raised the global precision to fp64 (the
-    ``fp64`` fixture): cuEquivariance freezes its working precision at
-    construction, so a model built here at fp32 stays fp32.
+    Built at :data:`DTYPE` (fp64): cuEquivariance freezes its working
+    precision at construction, so a model built at fp32 would stay fp32.
     """
     from molzoo.mace.polar import MacePolar
     from molzoo.mace.spec import MACEPolarSpec
@@ -2998,7 +3016,7 @@ def _polar_forcefield() -> tuple[ForceField, nn.Module]:
         **TINY_POLAR_KWARGS,
     )
     torch.manual_seed(0)
-    model = MacePolar(spec).eval()
+    model = MacePolar(spec, dtype=DTYPE).eval()
     forcefield = ForceField("mace-polar", units="metal")
     forcefield.def_pairstyle(model)
     return forcefield, model
@@ -3043,24 +3061,6 @@ class TestPotentialsMlip:
     caller compiles — and its ``mlip`` branch of ``calc_energy`` calls the
     mlip's ``energy`` seam, never its ``forward``.
     """
-
-    @pytest.fixture
-    def fp64(self):
-        """Raise the global precision for the Polar build, then put it back.
-
-        ``molix.config`` is a process-wide singleton and cuEquivariance freezes
-        its working precision at **construction**, so the default has to be fp64
-        before the model exists. Leaving it raised would be a cross-file side
-        effect — later modules would be built fp64 while their own fixtures feed
-        fp32 tensors. Same save/restore as
-        ``tests/test_molzoo/test_mace/conftest.py``.
-        """
-        from molix import config
-
-        previous = config["ftype"]
-        config.set_precision("fp64")
-        yield
-        config.set_precision("fp64" if previous == torch.float64 else "fp32")
 
     def test_bind_cell_delegates_behind_the_protocol_guard(self) -> None:
         """Guarded, one-layer, side-effect-free — and molpot stays downstream.
@@ -3186,7 +3186,7 @@ class TestPotentialsMlip:
             )
 
     @pytest.mark.slow
-    def test_the_compiled_route_matches_eager_and_breaks_only_at_the_leaf(self, fp64) -> None:
+    def test_the_compiled_route_matches_eager_and_breaks_only_at_the_leaf(self) -> None:
         """The prescribed sequence: parity, the break split, and fail-closed.
 
         ``bind_cell -> one eager call -> Compiler()(op)`` is the caller's
@@ -3216,8 +3216,8 @@ class TestPotentialsMlip:
 
         forcefield, mlip = _polar_forcefield()
         pots = forcefield.to_potentials()
-        pos = torch.tensor(CLUSTER_POS, dtype=DTYPE)
-        cell = torch.eye(3, dtype=DTYPE) * POLAR_CELL_EDGE
+        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
+        cell = torch.eye(3, dtype=torch.float64) * POLAR_CELL_EDGE
 
         pots.bind_cell(cell)
         pots.calc_energy(_polar_batch(pos, cell))
@@ -3283,7 +3283,7 @@ class TestPotentialsMlip:
         )
 
     @pytest.mark.slow
-    def test_the_grad_enabled_compiled_route_is_one_graph_after_mark_leaves(self, fp64) -> None:
+    def test_the_grad_enabled_compiled_route_is_one_graph_after_mark_leaves(self) -> None:
         """With grad enabled the compiled NPT op answers a create_graph=True call and,
         on marked leaves, traces as one graph with zero breaks on stock torch.
 
@@ -3313,8 +3313,8 @@ class TestPotentialsMlip:
 
         forcefield, _mlip = _polar_forcefield()
         pots = forcefield.to_potentials()
-        pos = torch.tensor(CLUSTER_POS, dtype=DTYPE)
-        cell = torch.eye(3, dtype=DTYPE) * POLAR_CELL_EDGE
+        pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
+        cell = torch.eye(3, dtype=torch.float64) * POLAR_CELL_EDGE
         pots.bind_cell(cell)
         pots.calc_energy(_polar_batch(pos, cell))
         npt = Derivative(pots.energy, wrt=FORCES_AND_VIRIAL)

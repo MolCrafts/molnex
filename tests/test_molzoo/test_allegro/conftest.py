@@ -32,9 +32,9 @@ TINY = {
 WEIGHTS_DIR = Path(os.environ.get("MOLNEX_ALLEGRO_WEIGHTS_DIR", "/nonexistent"))
 
 
-@pytest.fixture(autouse=True)
-def _build_at_fp64(fp64):
-    """Every Allegro test builds at fp64 (``tests.conftest.fp64``)."""
+#: Build dtype of every model: cuEquivariance fixes its working precision at
+#: construction, so fp64 tolerances need an fp64 build.
+DTYPE = torch.float64
 
 
 @pytest.fixture

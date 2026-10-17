@@ -1,9 +1,9 @@
 """Tests for :class:`molpot.heads.dipole.DipoleHead`.
 
 Scope: the construction-time dtype contract. ``atomic_dipole_gate`` and
-``bond_vector_mlp`` already read ``config["ftype"]``; the scalar MLPs
-(``charge_mlp`` / ``bond_scalar_mlp``) must do the same or the head comes
-out mixed-precision under ``config.set_precision("fp64")``.
+``bond_vector_mlp`` are built at the constructor dtype; the scalar MLPs
+(``charge_mlp`` / ``bond_scalar_mlp``) must be too, or the head comes out
+mixed-precision at fp64.
 """
 
 from __future__ import annotations
@@ -12,6 +12,9 @@ import pytest
 import torch
 
 from molpot.heads.dipole import DipoleHead
+
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float64
 
 
 def _make_head(variant: str) -> DipoleHead:
@@ -24,6 +27,7 @@ def _make_head(variant: str) -> DipoleHead:
         edge_vector_dim=2,
         hidden_dim=8,
         variant=variant,
+        dtype=DTYPE,
     )
 
 
@@ -33,12 +37,12 @@ class TestDipoleHead:
         ["ac", "ad", "bc", "ac_ad", "ac_bc"],
         ids=["ac", "ad", "bc", "ac_ad", "ac_bc"],
     )
-    def test_all_parameters_honour_the_fp64_precision(self, fp64, variant):
-        """Every parameter is fp64 when the head is built under fp64.
+    def test_all_parameters_are_built_at_the_given_dtype(self, variant):
+        """Every parameter is fp64 when the head is built at fp64.
 
-        ``config["ftype"]`` is the single source of truth for the working
-        precision; a layer that ignores it leaves the head mixed-precision
-        and its first forward dies on a dtype-mismatched matmul. The
+        A layer that ignored the constructor dtype would leave the head
+        mixed-precision, and its first forward would die on a dtype-mismatched
+        matmul. The
         variants select which term MLPs are constructed, so the sweep
         covers each submodule the head can own.
         """
@@ -46,7 +50,7 @@ class TestDipoleHead:
 
         assert {p.dtype for p in head.parameters()} == {torch.float64}
 
-    def test_forward_runs_under_the_fp64_precision(self, fp64):
+    def test_forward_runs_at_the_given_dtype(self):
         """A head built at fp64 assembles an fp64 dipole from fp64 features."""
         head = _make_head("ac_bc")
 

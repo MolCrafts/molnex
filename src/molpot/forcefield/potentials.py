@@ -303,12 +303,6 @@ class Potentials(Potential):
         # Exclusion-table fingerprint, not an F29 cache: a mismatch against the
         # live batch raises and demands an explicit rebind (:meth:`_scaled_pairs`).
         self._bound_topology: tuple[int, ...] | None = None
-        # How many graphs the bound batch holds: an int fixed at
-        # :meth:`bind_topology`, written together with ``_bound_topology`` and
-        # served only behind its fingerprint (:meth:`_num_graphs`), because
-        # reading it off ``atoms.batch`` is a host sync and therefore a graph
-        # break on a compiled core.
-        self._bound_num_graphs: int
         #: The field's own per-atom tables at the bound topology's ``N``; see
         #: :meth:`bind_topology`. ``None`` until the first bind.
         self._bound_atom_params: dict[str, torch.Tensor] | None = None
@@ -514,17 +508,18 @@ class Potentials(Potential):
     def _term_tables(
         called: Mapping[str, torch.Tensor],
         namespace: TensorDict | None,
-        term: BasePotential | None,
+        term: BasePotential,
         names: tuple[str, ...],
     ) -> dict[str, torch.Tensor]:
-        """Caller's tables, else the term buffers, with dummy rows zeroed."""
-        out = dict(called)
-        if term is not None:
-            for name in names:
-                if name not in out:
-                    value = getattr(term, name, None)
-                    if value is not None:
-                        out[name] = value
+        """The term's tables for this call, with dummy rows zeroed.
+
+        ``names`` are the parameters the term prices; each is the caller's
+        when given, else the term's own registered table
+        (:meth:`~molpot.potentials.base.BasePotential.table`), which raises
+        when neither holds it.
+        """
+        out = {name: term.table(name, called) for name in names}
+        out.update(called)
         return Potentials._mask_term_tables(out, namespace)
 
     @staticmethod
@@ -629,8 +624,8 @@ class Potentials(Potential):
         batch of one graph carries ``graphs`` at ``batch_size=[1]`` and a
         TensorDict refuses to store a ``()`` leaf under it. Every collate in
         molnex produces exactly that batch, so without the reshape the most
-        ordinary case is the one that raises. A batch with no ``graphs``
-        namespace gets one at ``batch_size=[]``.
+        ordinary case is the one that raises. The ``graphs`` namespace is
+        required and sized (:meth:`_num_graphs`).
 
         **Padded batches.** A :class:`molix.data.MoleculePadder` batch
         carries ghost atoms, dead ``(ghost, ghost)`` padding edges and dead
@@ -694,13 +689,7 @@ class Potentials(Potential):
                 "exact on this batch."
             )
         total = self._sum_energy(view, tables)
-        graphs_ns = getattr(view, "_tensordict", None)
-        if not (isinstance(graphs_ns, dict) and graphs_ns.get("graphs") is not None):
-            view["graphs"] = TensorDict({}, batch_size=[])
-        graphs_bs = view.graphs.batch_size
-        # A ``batch_size=[]`` graphs namespace constrains nothing, so the
-        # energy is stored as produced; a sized one is the shape to answer in.
-        view[ENERGY_KEY] = total.reshape(*graphs_bs) if graphs_bs else total
+        view[ENERGY_KEY] = total.reshape(*view["graphs"].batch_size)
         # The caller's own container back, not the view: the write above went
         # into its storage, so the one that was handed in composes onward.
         return frame
@@ -1070,10 +1059,6 @@ class Potentials(Potential):
         # fingerprint is the exclusion-table identity stored below, not an
         # F29 voucher for a later rewrite of the same object.
         fingerprint = self._check_geometry(frame, p)
-        # Host-side, once: how many graphs this batch holds. Off the hot path
-        # it is the one number an evaluation cannot read without a device sync
-        # (see :meth:`_num_graphs`), and a bind is where syncs are allowed.
-        num_graphs = self._count_graphs(frame)
         exclusions = ExclusionTable(
             n_atoms=p.shape[0],
             scaling=self.forcefield.nonbonded_scaling,
@@ -1083,7 +1068,6 @@ class Potentials(Potential):
             device=p.device,
         )
         self._bound_topology = fingerprint
-        self._bound_num_graphs = num_graphs
         self._exclusions = exclusions
         # The field's own per-atom tables, filtered to this topology's N once,
         # here in the eager bind. :meth:`_atom_params_for_n` serves the compiled
@@ -1624,7 +1608,7 @@ class Potentials(Potential):
                     called.get("impropers", {}),
                     frame.get("impropers"),
                     self.improper,
-                    ("k", "chi0", "phase"),
+                    self._improper_table_names(self.improper),
                 )
                 self._require_identity_table("k", n, improper_called, self.improper.k)
                 if isinstance(self.improper, ImproperHarmonic):
@@ -2215,79 +2199,24 @@ class Potentials(Potential):
         return torch.zeros(n, dtype=torch.long, device=device)
 
     def _num_graphs(self, frame: TensorFrame) -> int:
-        """How many graphs the energy is summed into — never a device sync.
+        """The graph count ``B`` the energy is summed into — the ``graphs`` namespace's size.
 
-        Every term needs this number to size its energy vector, so it is read
-        on the hot path, inside :meth:`_sum_energy` and again inside each
-        pair term. Two of the three ways to get it are metadata (a sized
-        ``graphs`` batch_size, or ``graphs.num_atoms``' length); the third —
-        the largest entry of ``atoms.batch`` — is a **value**, and reading a
-        value to Python is a host sync and a graph break under dynamo. So it is
-        resolved once at :meth:`bind_topology` (:meth:`_count_graphs`) and
-        served from there.
-
-        A bind is per batch *shape* as well as per topology: rebind before
-        evaluating a batch with a different graph count, exactly as for the
-        exclusion table. Which batch the bound number may be served to is
-        therefore the same question :meth:`_scaled_pairs` asks about the bound
-        table, and it is asked the same way — the batch's whole
-        :meth:`_topology_fingerprint` against ``_bound_topology``, not just its
-        first entry. The atom count alone is not identity: two batches of the
-        same ``N`` can hold a different number of molecules (fourteen atoms as
-        one butane or as two heptane fragments), and answering the second with
-        the first's count sizes every term's energy vector wrong — a shape
-        error at best, a batch's energy summed into one graph at worst. The
-        limit is the fingerprint's own: two topologies of equal shape are
-        indistinguishable here, as everywhere the fingerprint is used.
+        Every term sizes its energy vector by it, so it is read on the hot
+        path, inside :meth:`_sum_energy` and again inside each pair term. The
+        read is metadata — a ``batch_size`` — never a tensor value, so it is
+        neither a host sync nor a graph break under dynamo, and a trace folds
+        it to a constant. The ``graphs`` namespace is required and sized
+        ``[B]``, which is what every collate and the MD bind path produce; a
+        batch without one raises here rather than being counted off
+        ``atoms.batch``.
 
         Args:
-            frame: The typed view of the batch being evaluated; on the served
-                path its ``atoms.pos`` length and the shapes of its columns are
-                read — shapes only, so nothing here is a host sync, and a trace
-                folds the reads to constants.
+            frame: The typed view of the batch being evaluated.
 
         Returns:
-            The graph count ``B`` — ``1`` for an unbatched single molecule.
+            The graph count ``B`` — ``1`` for a collated single molecule.
         """
-        fingerprint = self._bound_topology
-        if fingerprint is not None:
-            pos = frame.atoms.get("pos", None) if "atoms" in frame.keys() else None
-            # No ``atoms.pos`` is no atom count to compare; the topology columns
-            # still are, so the rest of the fingerprint still has to match.
-            n_atoms = fingerprint[0] if pos is None else int(pos.shape[0])
-            if self._topology_fingerprint(frame, n_atoms) == fingerprint:
-                return self._bound_num_graphs
-        return self._count_graphs(frame)
-
-    def _count_graphs(self, frame: TensorFrame) -> int:
-        """Resolve the graph count from the batch — the sync :meth:`_num_graphs` avoids.
-
-        Three sources, cheapest first: the ``graphs`` namespace's own
-        ``batch_size``, then the length of ``graphs.num_atoms``, then — only if
-        neither exists — the largest entry of ``atoms.batch``, which is a tensor
-        *value* and therefore the one host sync of the three. Called from
-        :meth:`bind_topology`, where a sync is affordable, and from
-        :meth:`_num_graphs` when the batch is not the bound one.
-
-        Args:
-            frame: The typed view whose ``graphs`` / ``atoms`` namespaces are read.
-
-        Returns:
-            The graph count ``B``; ``1`` when the batch names no graphs at all.
-        """
-        if "graphs" in frame.keys():
-            graphs = frame.graphs
-            if graphs.batch_size:
-                return graphs.batch_size[0]
-            num_atoms = graphs.get("num_atoms", None)
-            if num_atoms is not None and num_atoms.ndim >= 1:
-                return num_atoms.shape[0]
-        atom_batch = frame.atoms.get("batch", None) if "atoms" in frame.keys() else None
-        if atom_batch is not None and atom_batch.numel():
-            # ``max``, not ``[-1]``: a collate that interleaves graphs still
-            # answers with the count rather than with the last row's id.
-            return int(atom_batch.detach().max().to("cpu")) + 1
-        return 1
+        return frame["graphs"].batch_size[0]
 
     # --- topology readers ---
 

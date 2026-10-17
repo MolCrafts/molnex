@@ -6,8 +6,6 @@ import torch
 import torch.nn as nn
 from pydantic import BaseModel, Field
 
-from molix import config
-
 from .covalent import covalent_radii
 
 
@@ -76,7 +74,7 @@ class BesselRBF(nn.Module):
         normalize: bool = True,
         normalize_samples: int = 4096,
         trainable: bool = False,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         """Initialize Bessel RBF module.
 
@@ -94,9 +92,6 @@ class BesselRBF(nn.Module):
             dtype: Floating dtype of the basis (the owning module's).
         """
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
 
         self.config = BesselRBFSpec(
             r_cut=r_cut,
@@ -220,11 +215,8 @@ class PolynomialBasis(nn.Module):
     itself does not apply a cutoff; it only shapes the envelope passed in.
     """
 
-    def __init__(self, n_basis: int, *, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, n_basis: int, *, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         powers = list(range(1, int(n_basis) + 1))
         if not powers:
             raise ValueError("n_basis must define at least one polynomial power.")
@@ -272,12 +264,9 @@ class GaussianBasis(nn.Module):
         gamma: float | list[float] = 3.0,
         r_cut: float,
         n_basis: int,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if center is None:
             centers = torch.linspace(0.0, float(r_cut), int(n_basis), dtype=dtype)
         elif isinstance(center, (int, float)):
@@ -366,14 +355,13 @@ class AgnesiTransform(nn.Module):
         a: float = 1.0805,
         max_z: int = 118,
         trainable: bool = False,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        ftype = config.ftype if dtype is None else dtype  # transitional (2c)
         values = {
-            "q": torch.tensor(float(q), dtype=ftype),
-            "p": torch.tensor(float(p), dtype=ftype),
-            "a": torch.tensor(float(a), dtype=ftype),
+            "q": torch.tensor(float(q), dtype=dtype),
+            "p": torch.tensor(float(p), dtype=dtype),
+            "a": torch.tensor(float(a), dtype=dtype),
         }
         for name, value in values.items():
             if trainable:
@@ -384,7 +372,7 @@ class AgnesiTransform(nn.Module):
         self.p: torch.Tensor
         self.a: torch.Tensor
 
-        self.register_buffer("covalent_radii", covalent_radii(max_z, dtype=ftype))
+        self.register_buffer("covalent_radii", covalent_radii(max_z, dtype=dtype))
         self.covalent_radii: torch.Tensor
 
     def forward(

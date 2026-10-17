@@ -52,8 +52,10 @@ class AllegroPotential(Potential, AllegroEncoder):
     ::
 
         spec = AllegroSpec(atomic_numbers=[1, 6, 8], r_max=5.0)
-        model = AllegroPotential(spec, wrt=("atoms.pos",))
-        model = AllegroPotential.load("Allegro-OAM-L-0.1.nequip.zip", wrt=("atoms.pos",))
+        model = AllegroPotential(spec, wrt=("atoms.pos",), dtype=torch.float64)
+        model = AllegroPotential.load(
+            "Allegro-OAM-L-0.1.nequip.zip", wrt=("atoms.pos",), dtype=torch.float64
+        )
 
     Args:
         spec: The configuration (upstream ``FullAllegroModel`` names and defaults).
@@ -61,8 +63,7 @@ class AllegroPotential(Potential, AllegroEncoder):
             against (``"atoms.pos"`` → forces, ``"graphs.strain"`` → virial);
             ``()`` is energy only.
         dtype: Floating dtype every parameter and buffer is built at (the
-            per-type scale/shift stays float64, as upstream); ``None`` is the
-            (transitional) process-wide default.
+            per-type scale/shift stays float64, as upstream).
 
     Raises:
         ValueError: If ``spec.expose_tensor_track`` is set — the exposed track
@@ -75,7 +76,7 @@ class AllegroPotential(Potential, AllegroEncoder):
         spec: AllegroSpec,
         *,
         wrt: Sequence[str | Sequence[str]] = (),
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         if spec.expose_tensor_track:
             raise ValueError("expose_tensor_track is an encoder option; use AllegroEncoder")
@@ -113,7 +114,7 @@ class AllegroPotential(Potential, AllegroEncoder):
         *,
         wrt: Sequence[str | Sequence[str]] = (),
         tp_method: str | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> AllegroPotential:
         """Build the model an official ``.nequip.zip`` describes and load its weights.
 

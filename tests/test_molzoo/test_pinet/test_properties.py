@@ -7,19 +7,19 @@ import torch
 
 from molzoo.pinet import PiNetDipole, PiNetPolarizability, PiNetSpec
 from tests.conftest import random_rotation_matrix, rotate_graph, rotate_vectors, translate_graph
-from tests.test_molzoo.test_pinet.conftest import TINY
+from tests.test_molzoo.test_pinet.conftest import DTYPE, TINY
 
 ATOL = 1e-10
 
 
 def _dipole(variant: str) -> PiNetDipole:
     torch.manual_seed(4)
-    return PiNetDipole(PiNetSpec(**TINY, rank=3), variant=variant)
+    return PiNetDipole(PiNetSpec(**TINY, rank=3), variant=variant, dtype=DTYPE)
 
 
 def _polar(variant: str) -> PiNetPolarizability:
     torch.manual_seed(4)
-    return PiNetPolarizability(PiNetSpec(**TINY, rank=3), variant=variant)
+    return PiNetPolarizability(PiNetSpec(**TINY, rank=3), variant=variant, dtype=DTYPE)
 
 
 class TestPiNetDipole:

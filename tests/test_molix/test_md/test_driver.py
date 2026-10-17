@@ -836,24 +836,6 @@ class TestRebindCell:
 class TestCompiledMlipStep:
     """The composed op over an mlip field, compiled by ``MD`` for the run."""
 
-    @pytest.fixture
-    def fp64(self):
-        """Build the Polar mlip at fp64, then put the global precision back.
-
-        ``molix.config`` is a process-wide singleton and cuEquivariance freezes
-        its working precision at **construction**, so this test has to raise the
-        global default rather than ``.double()`` the model afterwards. Leaving it
-        raised would be a cross-file side effect: every module built later in the
-        same session would be fp64 while its fixtures still feed fp32 tensors.
-        Same save/restore as ``tests/test_molzoo/test_mace/conftest.py``.
-        """
-        from molix import config
-
-        previous = config["ftype"]
-        config.set_precision("fp64")
-        yield
-        config.set_precision("fp64" if previous == torch.float64 else "fp32")
-
     @staticmethod
     def _polar_setup(*, cutoff: float, skin: float, **list_options: object):
         """A tiny periodic Polar mlip field, its list and the system to run."""
@@ -874,7 +856,7 @@ class TestCompiledMlipStep:
             **TINY_POLAR_KWARGS,
         )
         torch.manual_seed(0)
-        mlip = MacePolar(spec).eval()
+        mlip = MacePolar(spec, dtype=torch.float64).eval()
         pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
         n_atoms = len(CLUSTER_Z)
         cell = torch.eye(3, dtype=torch.float64) * 10.0
@@ -888,7 +870,7 @@ class TestCompiledMlipStep:
         return forcefield, neighbors, system
 
     @pytest.mark.slow
-    def test_a_compiled_mlip_run_matches_eager(self, fp64) -> None:
+    def test_a_compiled_mlip_run_matches_eager(self) -> None:
         """``set_compiler`` on an mlip field: one eager warm-up, then the compiled op.
 
         The warm-up ``bind_work`` performs is what spends the element gate and
@@ -922,7 +904,7 @@ class TestCompiledMlipStep:
         torch.testing.assert_close(compiled.energy, eager.energy, atol=1e-10, rtol=0.0)
 
     @pytest.mark.slow
-    def test_an_over_capacity_cell_fails_at_kspace_before_the_neighbour_list(self, fp64) -> None:
+    def test_an_over_capacity_cell_fails_at_kspace_before_the_neighbour_list(self) -> None:
         """MD.run's barostat path names KSpaceGrid, not r_build.
 
         ``_sync_cell`` rebinds the k-grid *before* it scales the neighbour

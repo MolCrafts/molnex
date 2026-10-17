@@ -124,6 +124,7 @@ def build_potential(
             out_nodes=[hidden],
         ),
         wrt=("atoms.pos",) if compute_forces else (),
+        dtype=torch.float32,
     )
 
 
@@ -139,7 +140,8 @@ def build_encoder(*, rank: int = 3, hidden: int = 64, emit: bool = False) -> PiN
             depth=3,
             rank=rank,
             emit_property_features=emit,
-        )
+        ),
+        dtype=torch.float32,
     )
 
 

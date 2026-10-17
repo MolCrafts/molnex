@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 from pydantic import BaseModel, Field, model_validator
 
-from molix import config
 from molrep import cueq
 
 
@@ -118,7 +117,7 @@ class JointEmbedding(nn.Module):
         *,
         embedding_specs: list[DiscreteEmbeddingSpec | ContinuousEmbeddingSpec],
         out_dim: int,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ):
         """Initialize joint embedding module.
 
@@ -137,17 +136,15 @@ class JointEmbedding(nn.Module):
             output_key="_unused",  # Placeholder since we are removing keys
         )
 
-        ftype = config.ftype if dtype is None else dtype  # transitional (2c)
-
         # Store embedders in a list to match spec order
         self.embedders = nn.ModuleList()
         for spec in self.config.specs:
             if isinstance(spec, DiscreteEmbeddingSpec):
-                self.embedders.append(nn.Embedding(spec.num_classes, spec.emb_dim, dtype=ftype))
+                self.embedders.append(nn.Embedding(spec.num_classes, spec.emb_dim, dtype=dtype))
             else:
                 self.embedders.append(
                     nn.Sequential(
-                        nn.Linear(spec.in_dim, spec.emb_dim, bias=spec.use_bias, dtype=ftype),
+                        nn.Linear(spec.in_dim, spec.emb_dim, bias=spec.use_bias, dtype=dtype),
                     )
                 )
 
@@ -160,7 +157,7 @@ class JointEmbedding(nn.Module):
                 cue.Irreps("O3", f"{total_dim}x0e"),
                 cue.Irreps("O3", f"{out_dim}x0e"),
                 layout=cue.ir_mul,
-                dtype=ftype,
+                dtype=dtype,
             ),
         )
 

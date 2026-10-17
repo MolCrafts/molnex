@@ -21,6 +21,7 @@ from molpot.potentials.bonds import BondHarmonic
 from molpot.potentials.dihedrals import ProperTorsionPeriodic
 from molpot.potentials.impropers import ImproperPeriodic
 from tests.conftest import place_edges
+from tests.test_molpot.test_forcefield.conftest import with_graphs
 
 DTYPE = torch.float64
 _TOL = 1e-8
@@ -171,47 +172,49 @@ def _bonded_batch() -> TensorDict:
     pos = torch.tensor(
         [[0.7, 0.1, 0.0], [0.0, 0.0, 0.0], [0.2, 0.8, 0.1], [1.0, 0.9, 0.4]], dtype=DTYPE
     )
-    return TensorDict(
-        {
-            "atoms": TensorDict(
-                {"pos": pos, "batch": torch.zeros(4, dtype=torch.long)},
-                batch_size=[4],
-            ),
-            "bonds": TensorDict(
-                {
-                    "atomi": torch.tensor([0, 1, 2], dtype=torch.long),
-                    "atomj": torch.tensor([1, 2, 3], dtype=torch.long),
-                },
-                batch_size=[3],
-            ),
-            "angles": TensorDict(
-                {
-                    "atomi": torch.tensor([0, 1], dtype=torch.long),
-                    "atomj": torch.tensor([1, 2], dtype=torch.long),
-                    "atomk": torch.tensor([2, 3], dtype=torch.long),
-                },
-                batch_size=[2],
-            ),
-            "propers": TensorDict(
-                {
-                    "atomi": torch.tensor([0], dtype=torch.long),
-                    "atomj": torch.tensor([1], dtype=torch.long),
-                    "atomk": torch.tensor([2], dtype=torch.long),
-                    "atoml": torch.tensor([3], dtype=torch.long),
-                },
-                batch_size=[1],
-            ),
-            "impropers": TensorDict(
-                {
-                    "atomi": torch.tensor([1], dtype=torch.long),  # center
-                    "atomj": torch.tensor([0], dtype=torch.long),
-                    "atomk": torch.tensor([2], dtype=torch.long),
-                    "atoml": torch.tensor([3], dtype=torch.long),
-                },
-                batch_size=[1],
-            ),
-        },
-        batch_size=[],
+    return with_graphs(
+        TensorDict(
+            {
+                "atoms": TensorDict(
+                    {"pos": pos, "batch": torch.zeros(4, dtype=torch.long)},
+                    batch_size=[4],
+                ),
+                "bonds": TensorDict(
+                    {
+                        "atomi": torch.tensor([0, 1, 2], dtype=torch.long),
+                        "atomj": torch.tensor([1, 2, 3], dtype=torch.long),
+                    },
+                    batch_size=[3],
+                ),
+                "angles": TensorDict(
+                    {
+                        "atomi": torch.tensor([0, 1], dtype=torch.long),
+                        "atomj": torch.tensor([1, 2], dtype=torch.long),
+                        "atomk": torch.tensor([2, 3], dtype=torch.long),
+                    },
+                    batch_size=[2],
+                ),
+                "propers": TensorDict(
+                    {
+                        "atomi": torch.tensor([0], dtype=torch.long),
+                        "atomj": torch.tensor([1], dtype=torch.long),
+                        "atomk": torch.tensor([2], dtype=torch.long),
+                        "atoml": torch.tensor([3], dtype=torch.long),
+                    },
+                    batch_size=[1],
+                ),
+                "impropers": TensorDict(
+                    {
+                        "atomi": torch.tensor([1], dtype=torch.long),  # center
+                        "atomj": torch.tensor([0], dtype=torch.long),
+                        "atomk": torch.tensor([2], dtype=torch.long),
+                        "atoml": torch.tensor([3], dtype=torch.long),
+                    },
+                    batch_size=[1],
+                ),
+            },
+            batch_size=[],
+        )
     )
 
 

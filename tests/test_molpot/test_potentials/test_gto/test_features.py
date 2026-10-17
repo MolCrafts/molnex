@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from molix import config
 from molix.compile import Compiler
 from molpot.potentials.elec.prefactors import eV_A
 from molpot.potentials.gto.features import GTOFieldFeatures
@@ -175,14 +174,6 @@ FEAT_ISOLATED_SI: list[list[float]] = [
         -1.5487659836473036,
     ],
 ]
-
-
-@pytest.fixture(autouse=True)
-def fp64():
-    previous = config["ftype"]
-    config.set_precision("fp64")
-    yield
-    config.set_precision("fp64" if previous == torch.float64 else "fp32")
 
 
 def _dump_block(*, include_self_interaction: bool = False) -> GTOFieldFeatures:

@@ -45,7 +45,8 @@ def build_model() -> MACEEncoder:
             max_hidden_l=1,
             num_interactions=2,
             correlation=2,
-        )
+        ),
+        dtype=torch.float32,
     )
 
 

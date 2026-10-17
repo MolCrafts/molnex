@@ -33,7 +33,6 @@ from molpot.ir import (
 )
 from molpot.ir.scaling import ExclusionScales, NonbondedScaling
 from molpot.manifest import (
-    MANIFEST_SCHEMA,
     ElectrostaticsRecord,
     InteractionRecord,
     ModelManifest,
@@ -1130,8 +1129,8 @@ class ForceField(MolpyForceField):
             capacity_factor=capacity_factor,
         )
 
-    def manifest(self, *, profile: str) -> ModelManifest:
-        """Describe this force field as a versioned :class:`ModelManifest` (S2).
+    def manifest(self, *, profile: str, dtype: torch.dtype) -> ModelManifest:
+        """Describe this force field as a :class:`ModelManifest` (S2).
 
         The ForceField is where the styles, their options, the parameter tables
         and the exclusion scaling already live, so it is what fills the
@@ -1150,7 +1149,7 @@ class ForceField(MolpyForceField):
             from molpot.manifest import ProvenanceRecord
 
             manifest = dataclasses.replace(
-                ff.manifest(profile="A0"),
+                ff.manifest(profile="A0", dtype=torch.float64),
                 representation=record,
                 provenance=ProvenanceRecord(
                     reference_method="wB97X-D/def2-TZVPD",
@@ -1171,6 +1170,9 @@ class ForceField(MolpyForceField):
         Args:
             profile: Model profile this force field belongs to — ``"A0"`` for
                 the fixed-charge Class-I form.
+            dtype: The floating dtype the model runs at — its parameters and
+                the batches it prices — recorded as the manifest's
+                :class:`~molpot.manifest.NumericsRecord`.
 
         Returns:
             The manifest: one :class:`~molpot.manifest.InteractionRecord` per
@@ -1178,8 +1180,8 @@ class ForceField(MolpyForceField):
             layout, not a term, and is skipped), the shared
             :class:`~molpot.ir.nonbonded.NonbondedMethodRecord`, the A0
             electrostatics with this ForceField's permanent exclusion scaling,
-            a content hash per filled parameter category, and the global
-            numerical precision. Units are this ForceField's own
+            a content hash per filled parameter category, and the numerical
+            precision the model runs at. Units are this ForceField's own
             (``"real"``: kcal/mol, Å, ``e``).
 
         Raises:
@@ -1199,7 +1201,6 @@ class ForceField(MolpyForceField):
             )
         view = PotentialMeta.schema_for(self.style_names(), units=self.units)
         return ModelManifest(
-            schema_version=MANIFEST_SCHEMA,
             profile=profile,
             units=self.units,
             interactions=tuple(
@@ -1231,7 +1232,7 @@ class ForceField(MolpyForceField):
                 for category, tables in sorted(self._params.items())
                 if tables
             ),
-            numerics=NumericsRecord.from_runtime(),
+            numerics=NumericsRecord.from_runtime(dtype),
         )
 
     def _propers_to_ir(self, pp: dict[str, torch.Tensor]) -> ProperTorsionBag:

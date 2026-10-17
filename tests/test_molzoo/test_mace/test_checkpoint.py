@@ -52,7 +52,7 @@ from molzoo.mace.checkpoint import (
 from molzoo.mace.layers import ElementLinear, OneHotLinear
 from molzoo.mace.potential import MaceLes, MaceMatpes, MaceOff, MaceOmol, MacePotential
 from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACESpec
-from tests.test_molzoo.test_mace.conftest import official_layout
+from tests.test_molzoo.test_mace.conftest import DTYPE, official_layout
 
 matpes_remap = CheckpointRemap(matpes_keys, skip=MACE_SKIP)
 omol_remap = CheckpointRemap(omol_keys, on_unexpected="return", skip=MACE_SKIP)
@@ -221,7 +221,7 @@ def _filled(product: type[MacePotential], spec: MACESpec, seed: int) -> MacePote
     moved.
     """
     torch.manual_seed(seed)
-    model = product(spec)
+    model = product(spec, dtype=DTYPE)
     generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for parameter in model.parameters():
@@ -370,12 +370,13 @@ class TestOfficialMatpesWeights:
                 scale=official["atomic_inter_scale"],
                 shift=official["atomic_inter_shift"],
             ),
+            dtype=DTYPE,
         )
         matpes_remap.load(
             manual, torch.load(_asset(MATPES_WEIGHTS_FILE), map_location="cpu", weights_only=True)
         )
 
-        built = MaceMatpes.load(config_path)
+        built = MaceMatpes.load(config_path, dtype=DTYPE)
 
         reference = manual.state_dict()
         produced = built.state_dict()
@@ -388,7 +389,7 @@ class TestOfficialMatpesWeights:
 
     def test_official_matpes_energy_and_forces_match_upstream(self, cluster: TensorDict) -> None:
         """``MaceMatpes.load``'s surface is ``mace-torch``'s on the unconditioned cluster."""
-        model = MaceMatpes.load(_asset(MATPES_CONFIG_FILE), wrt=FORCES).eval()
+        model = MaceMatpes.load(_asset(MATPES_CONFIG_FILE), wrt=FORCES, dtype=DTYPE).eval()
         _assert_upstream_parity(model, cluster, MATPES_REFERENCE_FILE)
 
 
@@ -409,7 +410,7 @@ def _official_omol() -> tuple[MaceOmol, dict[str, torch.Tensor]]:
         scale=float(state["scale_shift.scale"]),
         shift=float(state["scale_shift.shift"]),
     )
-    model = MaceOmol(spec, wrt=FORCES)
+    model = MaceOmol(spec, wrt=FORCES, dtype=DTYPE)
     omol_remap.load(model, state)
     return model.eval(), state
 
@@ -463,12 +464,12 @@ class TestOfficialOffWeights:
         ``off_keys`` raises on a key with no home, the remap on an unfilled
         ``nn.Parameter``; the count is the medium model's.
         """
-        model = MaceOff.load(_asset(OFF_CONFIG_FILE))
+        model = MaceOff.load(_asset(OFF_CONFIG_FILE), dtype=DTYPE)
         assert sum(1 for _ in model.parameters()) == OFF_PARAMETER_COUNT
 
     def test_official_off_energy_and_forces_match_upstream(self, cluster: TensorDict) -> None:
         """``MaceOff.load``'s surface is ``mace-torch``'s on the unconditioned cluster."""
-        model = MaceOff.load(_asset(OFF_CONFIG_FILE), wrt=FORCES).eval()
+        model = MaceOff.load(_asset(OFF_CONFIG_FILE), wrt=FORCES, dtype=DTYPE).eval()
         _assert_upstream_parity(model, cluster, OFF_REFERENCE_FILE)
 
 
@@ -491,10 +492,10 @@ class TestOfficialLesWeights:
         ``nn.Parameter``; the count is the small model's, charge readouts
         included.
         """
-        model = MaceLes.load(_asset(LES_CONFIG_FILE))
+        model = MaceLes.load(_asset(LES_CONFIG_FILE), dtype=DTYPE)
         assert sum(1 for _ in model.parameters()) == LES_PARAMETER_COUNT
 
     def test_official_les_energy_and_forces_match_upstream(self, cluster: TensorDict) -> None:
         """``MaceLes.load``'s surface is ``mace-torch``'s on the isolated cluster."""
-        model = MaceLes.load(_asset(LES_CONFIG_FILE), wrt=FORCES).eval()
+        model = MaceLes.load(_asset(LES_CONFIG_FILE), wrt=FORCES, dtype=DTYPE).eval()
         _assert_upstream_parity(model, cluster, LES_REFERENCE_FILE)

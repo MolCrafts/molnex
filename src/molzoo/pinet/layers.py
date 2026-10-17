@@ -33,7 +33,6 @@ from typing import NamedTuple
 import torch
 import torch.nn as nn
 
-from molix import config
 from molix.F.scatter import scatter_sum_compile_safe
 from molrep.embedding.mlp import FFLayer
 
@@ -71,13 +70,8 @@ class PIXLayer(nn.Module):
         dtype: Floating dtype of the linears (the owning module's).
     """
 
-    def __init__(
-        self, *, channels: int, weighted: bool = False, dtype: torch.dtype | None = None
-    ) -> None:
+    def __init__(self, *, channels: int, weighted: bool = False, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.weighted = bool(weighted)
         self.channels = int(channels)
         if self.weighted:
@@ -116,13 +110,8 @@ class DotLayer(nn.Module):
         dtype: Floating dtype of the linears (the owning module's).
     """
 
-    def __init__(
-        self, *, channels: int, weighted: bool = False, dtype: torch.dtype | None = None
-    ) -> None:
+    def __init__(self, *, channels: int, weighted: bool = False, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.weighted = bool(weighted)
         self.channels = int(channels)
         if self.weighted:
@@ -163,7 +152,7 @@ class PILayer(nn.Module):
         n_basis: int,
         activation: str | type[nn.Module] | None = None,
         use_bias: bool = True,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
         if not n_nodes:
@@ -227,11 +216,8 @@ class ResUpdate(nn.Module):
         dtype: Floating dtype of the projection (the owning module's).
     """
 
-    def __init__(self, *, in_dim: int, out_dim: int, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, *, in_dim: int, out_dim: int, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.in_dim = int(in_dim)
         self.out_dim = int(out_dim)
         if self.in_dim == self.out_dim:
@@ -272,7 +258,7 @@ class InvarLayer(nn.Module):
         ii_nodes: Sequence[int],
         n_basis: int,
         activation: str | type[nn.Module] | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
         if not pi_nodes:
@@ -321,7 +307,7 @@ class EquivarLayer(nn.Module):
         in_channels: int,
         out_channels: int,
         weighted: bool = False,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
         self.pi_layer = PIXLayer(channels=int(in_channels), weighted=weighted, dtype=dtype)
@@ -409,7 +395,7 @@ class GCBlock(nn.Module):
         p3_in_dim: int = 1,
         p5_in_dim: int = 1,
         activation: str | type[nn.Module] | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
         if rank not in (1, 3, 5):
@@ -525,12 +511,9 @@ class OutLayer(nn.Module):
         in_dim: int,
         out_units: int = 1,
         activation: str | type[nn.Module] | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if not n_nodes:
             raise ValueError("OutLayer requires at least one FF width.")
         self.ff_layer = FFLayer(

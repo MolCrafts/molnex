@@ -17,6 +17,7 @@ from tensordict import TensorDict
 from molpot.forcefield import ForceField
 from molpot.potentials.vdw.lj126 import lj126_pair_energy
 from tests.conftest import place_edges
+from tests.test_molpot.test_forcefield.conftest import with_graphs
 
 #: Cutoff (Å) of every ``lj/cut`` style declared here, and the build radius of
 #: every placed list. Past the largest separation in any fixture below (4 Å),
@@ -69,17 +70,21 @@ class TestLJEnergy:
             .def_pairstyle("lj/cut", cutoff=LJ_CUTOFF)
             .with_params(atoms={"epsilon": eps, "sigma": sig})
         )
-        batch = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=torch.float64),
-                        "batch": torch.zeros(2, dtype=torch.long),
-                    },
-                    batch_size=[2],
-                )
-            },
-            batch_size=[],
+        batch = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": torch.tensor(
+                                [[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=torch.float64
+                            ),
+                            "batch": torch.zeros(2, dtype=torch.long),
+                        },
+                        batch_size=[2],
+                    )
+                },
+                batch_size=[],
+            )
         )
         place_edges(batch, cutoff=LJ_CUTOFF)
         e = ff.to_potentials().calc_energy(batch)
@@ -98,26 +103,28 @@ class TestLJEnergy:
                 }
             )
         )
-        batch = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": torch.tensor(
-                            [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]], dtype=torch.float64
-                        ),
-                        "batch": torch.zeros(2, dtype=torch.long),
-                    },
-                    batch_size=[2],
-                ),
-                "bonds": TensorDict(
-                    {
-                        "atomi": torch.tensor([0], dtype=torch.long),
-                        "atomj": torch.tensor([1], dtype=torch.long),
-                    },
-                    batch_size=[1],
-                ),
-            },
-            batch_size=[],
+        batch = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": torch.tensor(
+                                [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]], dtype=torch.float64
+                            ),
+                            "batch": torch.zeros(2, dtype=torch.long),
+                        },
+                        batch_size=[2],
+                    ),
+                    "bonds": TensorDict(
+                        {
+                            "atomi": torch.tensor([0], dtype=torch.long),
+                            "atomj": torch.tensor([1], dtype=torch.long),
+                        },
+                        batch_size=[1],
+                    ),
+                },
+                batch_size=[],
+            )
         )
         place_edges(batch, cutoff=LJ_CUTOFF)
         e = ff.to_potentials().calc_energy(batch)

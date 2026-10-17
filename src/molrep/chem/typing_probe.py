@@ -31,6 +31,7 @@ class AtomTypeReadout(nn.Module):
         encoder: Continuous chemical perception encoder.
         num_types: Discrete type vocabulary size.
         dropout: TypeHead dropout.
+        dtype: Floating dtype the head is built at (the encoder's).
     """
 
     def __init__(
@@ -39,6 +40,7 @@ class AtomTypeReadout(nn.Module):
         *,
         num_types: int,
         dropout: float = 0.0,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
         self.encoder = encoder
@@ -46,6 +48,7 @@ class AtomTypeReadout(nn.Module):
             hidden_dim=int(encoder.atom_dim),
             num_types=num_types,
             dropout=dropout,
+            dtype=dtype,
         )
         self.num_types = num_types
 

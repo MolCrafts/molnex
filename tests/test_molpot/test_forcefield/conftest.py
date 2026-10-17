@@ -24,6 +24,35 @@ from tests.conftest import (
 )
 
 
+def with_graphs(batch: TensorDict, *, cell: torch.Tensor | None = None) -> TensorDict:
+    """Write the sized ``graphs`` namespace a collated batch carries, from ``atoms.batch``.
+
+    :class:`~molpot.forcefield.Potentials` reads its graph count off
+    ``graphs.batch_size`` — the one metadata read that needs no host sync — so
+    every fixture that reaches a term arrives with the namespace, exactly as a
+    collated training batch does. ``num_atoms`` is the per-graph atom count.
+
+    Args:
+        batch: Post-collate batch with ``atoms.batch`` ``(N,)`` graph membership.
+        cell: One lattice ``(3, 3)`` Å (rows are lattice vectors) shared by
+            every graph, written as ``graphs.cell`` ``(B, 3, 3)``; ``None`` for
+            an open batch.
+
+    Returns:
+        The same ``batch`` object, with ``graphs`` at ``batch_size=[B]``.
+    """
+    membership = batch["atoms", "batch"]
+    n_graphs = int(membership.max().item()) + 1
+    num_atoms = torch.zeros(n_graphs, dtype=torch.long).scatter_add_(
+        0, membership, torch.ones_like(membership)
+    )
+    graphs = TensorDict({"num_atoms": num_atoms}, batch_size=[n_graphs])
+    if cell is not None:
+        graphs["cell"] = cell.unsqueeze(0).expand(n_graphs, 3, 3).clone()
+    batch["graphs"] = graphs
+    return batch
+
+
 @pytest.fixture
 def fake_pol_styles(monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
     """Two induced-polarization pair styles, registered for the test only.
@@ -154,38 +183,40 @@ def butane_batch() -> TensorDict:
     angle_index = torch.tensor(butane_angles(), dtype=torch.long).t().contiguous()
     proper_index = torch.tensor(butane_propers(), dtype=torch.long).t().contiguous()
     bond_index = torch.tensor(BUTANE_BONDS, dtype=torch.long).t().contiguous()
-    batch = TensorDict(
-        {
-            "atoms": TensorDict(
-                {
-                    "pos": torch.tensor(BUTANE_POSITIONS, dtype=torch.float64),
-                    "Z": torch.tensor([6, 6, 6, 6] + [1] * 10, dtype=torch.long),
-                    "batch": torch.zeros(BUTANE_N_ATOMS, dtype=torch.long),
-                },
-                batch_size=[BUTANE_N_ATOMS],
-            ),
-            "bonds": TensorDict(
-                {"atomi": bond_index[0], "atomj": bond_index[1]},
-                batch_size=[bond_index.shape[1]],
-            ),
-            "angles": TensorDict(
-                {
-                    "atomi": angle_index[0],
-                    "atomj": angle_index[1],
-                    "atomk": angle_index[2],
-                },
-                batch_size=[angle_index.shape[1]],
-            ),
-            "propers": TensorDict(
-                {
-                    "atomi": proper_index[0],
-                    "atomj": proper_index[1],
-                    "atomk": proper_index[2],
-                    "atoml": proper_index[3],
-                },
-                batch_size=[proper_index.shape[1]],
-            ),
-        },
-        batch_size=[],
+    batch = with_graphs(
+        TensorDict(
+            {
+                "atoms": TensorDict(
+                    {
+                        "pos": torch.tensor(BUTANE_POSITIONS, dtype=torch.float64),
+                        "Z": torch.tensor([6, 6, 6, 6] + [1] * 10, dtype=torch.long),
+                        "batch": torch.zeros(BUTANE_N_ATOMS, dtype=torch.long),
+                    },
+                    batch_size=[BUTANE_N_ATOMS],
+                ),
+                "bonds": TensorDict(
+                    {"atomi": bond_index[0], "atomj": bond_index[1]},
+                    batch_size=[bond_index.shape[1]],
+                ),
+                "angles": TensorDict(
+                    {
+                        "atomi": angle_index[0],
+                        "atomj": angle_index[1],
+                        "atomk": angle_index[2],
+                    },
+                    batch_size=[angle_index.shape[1]],
+                ),
+                "propers": TensorDict(
+                    {
+                        "atomi": proper_index[0],
+                        "atomj": proper_index[1],
+                        "atomk": proper_index[2],
+                        "atoml": proper_index[3],
+                    },
+                    batch_size=[proper_index.shape[1]],
+                ),
+            },
+            batch_size=[],
+        )
     )
     return place_edges(batch, cutoff=BUTANE_LIST_CUTOFF)

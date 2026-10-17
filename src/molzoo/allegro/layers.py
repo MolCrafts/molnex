@@ -32,7 +32,6 @@ import cuequivariance as cue
 import torch
 import torch.nn as nn
 
-from molix import config
 from molrep import cueq
 from molrep.embedding.mlp import ScalarMLPFunction
 
@@ -53,13 +52,8 @@ class ProductTypeEmbedding(nn.Module):
         ValueError: If ``dim`` is odd.
     """
 
-    def __init__(
-        self, *, num_types: int, num_basis: int, dim: int, dtype: torch.dtype | None = None
-    ) -> None:
+    def __init__(self, *, num_types: int, num_basis: int, dim: int, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if dim % 2:
             raise ValueError(f"dim must be even (split centre/neighbour), got {dim}")
         self.center_embed = nn.Embedding(num_types, dim // 2, dtype=dtype)
@@ -110,13 +104,8 @@ class WeightedChannels(nn.Module):
         ``allegro/nn/_strided/_channels.py::MakeWeightedChannels``.
     """
 
-    def __init__(
-        self, *, irrep_dims: list[int], channels: int, dtype: torch.dtype | None = None
-    ) -> None:
+    def __init__(self, *, irrep_dims: list[int], channels: int, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.channels = int(channels)
         self.num_irreps = len(irrep_dims)
         self.weight_numel = self.channels * self.num_irreps
@@ -191,12 +180,9 @@ class Contracter(nn.Module):
         irreps_out: cue.Irreps,
         channels: int,
         method: str = "uniform_1d",
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         u = int(channels)
         d = cue.SegmentedTensorProduct.from_subscripts("u,iu,ju,ku+ijk")
         for _, ir in irreps_in1:

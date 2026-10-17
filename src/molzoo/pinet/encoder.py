@@ -34,7 +34,6 @@ import torch.nn as nn
 from tensordict import TensorDict
 from tensordict.nn import TensorDictModuleBase
 
-from molix import config
 from molrep.embedding.cutoff import CosineCutoff, HalfCosineCutoff, TanhCutoff
 from molrep.embedding.geometry import edge_lengths, edge_vectors
 from molrep.embedding.radial import GaussianBasis, PolynomialBasis
@@ -74,18 +73,14 @@ class PiNetEncoder(ElementTable, TensorDictModuleBase):
     Args:
         spec: A validated :class:`~molzoo.pinet.spec.PiNetSpec`. Head fields
             (``out_*``, ``atomic_energies``, ``scale``) are ignored here.
-        dtype: Floating dtype every parameter and buffer is built at; ``None``
-            is the (transitional) process-wide default.
+        dtype: Floating dtype every parameter and buffer is built at.
     """
 
     in_keys = [("atoms", "Z"), ("atoms", "pos"), ("pairs", "pair_index")]
     out_keys = [("atoms", "node_features"), ("atoms", "p1_block_outputs")]
 
-    def __init__(self, spec: PiNetSpec, *, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, spec: PiNetSpec, *, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         #: Provenance only. Never read on a hot path.
         self._spec = spec
         #: The build dtype of every float parameter and buffer.

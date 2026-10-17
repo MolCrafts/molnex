@@ -6,7 +6,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-from molix.config import config
 from molix.core.state import TrainState
 from molix.core.trainer import Trainer
 from molix.hooks import (
@@ -14,14 +13,6 @@ from molix.hooks import (
     GradClipHook,
     LinearWarmupHook,
 )
-
-
-@pytest.fixture(autouse=True)
-def _reset_precision():
-    config.set_precision("fp32")
-    yield
-    config.set_precision("fp32")
-
 
 # ---- Test fixtures ----
 

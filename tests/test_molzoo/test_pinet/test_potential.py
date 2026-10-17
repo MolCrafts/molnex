@@ -9,14 +9,14 @@ from tensordict import TensorDict
 from molix.compile import Compiler
 from molzoo.pinet import PiNetPotential, PiNetSpec
 from tests.conftest import make_graph_batch
-from tests.test_molzoo.test_pinet.conftest import PAIRS, TINY
+from tests.test_molzoo.test_pinet.conftest import DTYPE, PAIRS, TINY
 
 FORCES = ("atoms.pos",)
 
 
 def _model(*, wrt=FORCES, seed: int = 0, **overrides) -> PiNetPotential:
     torch.manual_seed(seed)
-    return PiNetPotential(PiNetSpec(**{**TINY, "rank": 3, **overrides}), wrt=wrt)
+    return PiNetPotential(PiNetSpec(**{**TINY, "rank": 3, **overrides}), wrt=wrt, dtype=DTYPE)
 
 
 def _moved(batch: TensorDict, pos: torch.Tensor) -> TensorDict:

@@ -12,6 +12,9 @@ from molrep.condensation import (
 )
 from molrep.heads import Labeler, MultiTypeHead, TypeHead, TypeSystemLabeler
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 
 class TestTypeSystemLabeler:
     def test_labeler_protocol_surface(self):
@@ -56,7 +59,7 @@ class TestTypeSystemLabeler:
 
 class TestTypeHeadMultiSystem:
     def test_existing_type_head_api(self):
-        head = TypeHead(hidden_dim=4, num_types=5)
+        head = TypeHead(hidden_dim=4, num_types=5, dtype=DTYPE)
         out = head(torch.ones(3, 4))
         assert out.shape == torch.Size([3, 5])
         idx = head.decode(out)
@@ -69,7 +72,7 @@ class TestTypeHeadMultiSystem:
             InteractionClass.BOND,
             [{"k": 1.0, "r0": 1.0}, {"k": 2.0, "r0": 1.1}],
         )
-        head = TypeHead.from_type_system(8, ts)
+        head = TypeHead.from_type_system(8, ts, dtype=DTYPE)
         assert head.num_types == 2
         logits = head(torch.randn(4, 8))
         assert logits.shape == (4, 2)
@@ -86,6 +89,7 @@ class TestTypeHeadMultiSystem:
         multi = MultiTypeHead.from_type_systems(
             4,
             {"bond": bond_ts, "angle": angle_ts},
+            dtype=DTYPE,
         )
         assert multi.num_types == {"bond": 1, "angle": 2}
         logits = multi(

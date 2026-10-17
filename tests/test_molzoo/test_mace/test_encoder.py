@@ -30,6 +30,7 @@ from tests.conftest import (
 )
 from tests.test_molzoo.test_mace.conftest import (
     CLUSTER_Z,
+    DTYPE,
     TINY_MATPES_KWARGS,
     TINY_OMOL_KWARGS,
 )
@@ -93,13 +94,13 @@ def _scalar_blocks(encoder: MACEEncoder, batch: TensorDict) -> torch.Tensor:
 @pytest.fixture
 def matpes_encoder(tiny_matpes_spec) -> MACEEncoder:
     """``MACEEncoder`` on the tiny MatPES spec."""
-    return MACEEncoder(tiny_matpes_spec).eval()
+    return MACEEncoder(tiny_matpes_spec, dtype=DTYPE).eval()
 
 
 @pytest.fixture
 def omol_encoder(tiny_omol_spec) -> MACEEncoder:
     """``MACEEncoder`` on the tiny OMOL spec."""
-    return MACEEncoder(tiny_omol_spec).eval()
+    return MACEEncoder(tiny_omol_spec, dtype=DTYPE).eval()
 
 
 class TestMACEEncoder:
@@ -114,7 +115,7 @@ class TestMACEEncoder:
             "DensityResidualInteraction",
         ]
         assert [p.use_sc for p in matpes_encoder.products] == [False, True]
-        off = MACEEncoder(tiny_off_spec)
+        off = MACEEncoder(tiny_off_spec, dtype=DTYPE)
         assert [type(b).__name__ for b in off.interactions] == [
             "AgnosticInteraction",
             "AgnosticResidualInteraction",

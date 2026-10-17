@@ -6,8 +6,6 @@ import torch
 import torch.nn as nn
 from pydantic import BaseModel, Field
 
-from molix import config
-
 Key = str | tuple[str, ...]
 
 
@@ -40,16 +38,13 @@ class CosineCutoff(nn.Module):
         _pi: Buffer storing pi constant.
     """
 
-    def __init__(self, *, r_cut: float, dtype: torch.dtype | None = None):
+    def __init__(self, *, r_cut: float, dtype: torch.dtype):
         """Initialize cosine cutoff module.
 
         Args:
             r_cut: Cutoff radius.
         """
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
 
         self.config = CosineCutoffSpec(
             r_cut=r_cut,
@@ -120,7 +115,7 @@ class PolynomialCutoff(nn.Module):
         exponent: Polynomial exponent ``p``.
     """
 
-    def __init__(self, *, r_cut: float, exponent: int = 6, dtype: torch.dtype | None = None):
+    def __init__(self, *, r_cut: float, exponent: int = 6, dtype: torch.dtype):
         """Initialize polynomial cutoff module.
 
         Args:
@@ -128,9 +123,6 @@ class PolynomialCutoff(nn.Module):
             exponent: Polynomial exponent controlling smoothness. Defaults to 6.
         """
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
 
         self.config = PolynomialCutoffSpec(
             r_cut=r_cut,
@@ -201,11 +193,8 @@ class TanhCutoff(nn.Module):
     ``c(r) = (tanh(1 - r / r_cut) / tanh(1)) ** 3`` for ``r < r_cut``, else 0.
     """
 
-    def __init__(self, *, r_cut: float, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, *, r_cut: float, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.config = TanhCutoffSpec(r_cut=r_cut)
         self.register_buffer("r_cut", torch.tensor(float(r_cut), dtype=dtype))
         self.r_cut: torch.Tensor
@@ -245,11 +234,8 @@ class HalfCosineCutoff(nn.Module):
     ``c(r) = cos(pi * r / (2 * r_cut)) ** 2`` for ``r < r_cut``, else 0.
     """
 
-    def __init__(self, *, r_cut: float, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, *, r_cut: float, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.config = HalfCosineCutoffSpec(r_cut=r_cut)
         self.register_buffer("r_cut", torch.tensor(float(r_cut), dtype=dtype))
         self.r_cut: torch.Tensor

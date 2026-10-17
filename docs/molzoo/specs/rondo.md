@@ -6,7 +6,7 @@ tutorial; use the MolZoo user guide for theory narrative and worked examples.
 | Field | Value |
 |-------|-------|
 | Module | `molzoo.rondo` |
-| Entry point | `Rondo(forcefield, spec, wrt=)` (config `RondoSpec`) |
+| Entry point | `Rondo(forcefield, spec, wrt=, dtype=)` (config `RondoSpec`) |
 | Paper | Not a reproduction. Lineage: Wang *et al.*, "End-to-end differentiable construction of molecular mechanics force fields", *Chem. Sci.* **13**, 12016 (2022) — Espaloma. Structure aligned with: Zheng *et al.*, "Data-driven parametrization of molecular mechanics force fields for expansive chemical space coverage", *Chem. Sci.* (2025) — ByteFF. |
 | arXiv | Lineage [2010.01196](https://arxiv.org/abs/2010.01196) (Espaloma); structure [2408.12817](https://arxiv.org/abs/2408.12817) (ByteFF) |
 | DOI | [10.1039/D2SC02739A](https://doi.org/10.1039/D2SC02739A) (Espaloma) |
@@ -79,13 +79,13 @@ construction.
 | Direction | TensorDict path | Shape | Dtype | Contract |
 |-----------|------------------|-------|-------|----------|
 | In | `atoms.Z` | `(N,)` | int64 | Atomic numbers; ghost rows carry `0` |
-| In | `atoms.pos` | `(N, 3)` | `config.ftype` | Positions, Å. Differentiated against; never read by the encoder |
+| In | `atoms.pos` | `(N, 3)` | the model's `dtype` | Positions, Å. Differentiated against; never read by the encoder |
 | In | `atoms.batch` | `(N,)` | int64 | Graph membership |
 | In | `atoms.formal_charge` | `(N,)` | int64 | Encoder channel (clamped to ±2) |
 | In | `atoms.ring_connectivity` | `(N,)` | int64 | Encoder channel: ring bonds on the atom (clamped to 4) |
 | In | `atoms.min_ring_size` | `(N,)` | int64 | Encoder channel: smallest ring through the atom, `0` none (rings above 8 read as 8) |
-| In | `graphs.total_charge` | `(B,)` | `config.ftype`, integer-valued | Encoder channel (read as an integer class, clamped to ±5) and the charge model's constraint; no neutral fallback |
-| In | `atoms.gaff2_sigma`, `atoms.gaff2_epsilon` | `(N,)` | `config.ftype` | Reference σ (Å) / ε (kcal/mol) of the atom's GAFF2 type; `NaN` for an untyped atom, which makes the batch energy `NaN` rather than pricing silently. Required iff `pair lj/cut` is declared |
+| In | `graphs.total_charge` | `(B,)` | the model's `dtype`, integer-valued | Encoder channel (read as an integer class, clamped to ±5) and the charge model's constraint; no neutral fallback |
+| In | `atoms.gaff2_sigma`, `atoms.gaff2_epsilon` | `(N,)` | the model's `dtype` | Reference σ (Å) / ε (kcal/mol) of the atom's GAFF2 type; `NaN` for an untyped atom, which makes the batch energy `NaN` rather than pricing silently. Required iff `pair lj/cut` is declared |
 | In | `bonds.atomi` / `bonds.atomj` or `bonds.bond_index` | `(N_bonds,)` / `(2, N_bonds)` | int64 | Covalent topology |
 | In | `bonds.bond_type` | `(N_bonds,)` | int64 | Bond order code (1 single, 2 double, 3 triple, 4 aromatic): encoder channel and hybridization input |
 | In | `bonds.in_ring` | `(N_bonds,)` | int64 | Encoder channel |
@@ -93,7 +93,7 @@ construction.
 | In | `propers.atomi` … `atoml` | `(N_propers,)` | int64 | Proper torsions |
 | In | `impropers.atomi` … `atoml` | `(N_impropers,)` | int64 | Impropers, **centre first**; **three rows per centre**, the cyclic orders `[c,i,j,k]`, `[c,j,k,i]`, `[c,k,i,j]` (ByteFF's `k/3` split, `classical_forcefield.py:261-284`) |
 | In | `pairs.pair_index` | `(E, 2)` | int64 | Cutoff pair list at the force field's pair cutoff; read when a pair style is declared |
-| In | `pairs.pair_diff` or `pairs.shifts` | `(E, 3)` | `config.ftype` | Lattice remainder of each pair (detached) |
+| In | `pairs.pair_diff` or `pairs.shifts` | `(E, 3)` | the model's `dtype` | Lattice remainder of each pair (detached) |
 | In | `pairs.relation` | `(E,)` | int8 | `0` none, `1`/`2`/`3` = 1-2/1-3/1-4, from `molix.data.PairRelation` |
 | In | `hessian_pairs`, `<ns>.hpair_<i>_<j>` | — | — | Only for `partial_hessian` |
 | In | `graphs.num_atoms` | `(B,)` | int64 | Graph sizes |
@@ -316,7 +316,7 @@ form is the force field.
 | `heads.lj_sigma_gain`, `heads.lj_epsilon_gain` | §3.4 | `0.1`, `1.0` |
 | `heads.eem_max_atoms`, `heads.eem_jitter` | §3.5 | `512`, `1e-4` |
 
-`Rondo(ff, spec, wrt=("atoms.pos",))`: `wrt=()` makes `forward` the energy
+`Rondo(ff, spec, wrt=("atoms.pos",), dtype=torch.float64)`: `wrt=()` makes `forward` the energy
 alone. The optimizer is `Adam(model.parameters())`: a head with no loss has a
 zero gradient and Adam leaves it where it starts.
 

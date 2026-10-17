@@ -1,7 +1,7 @@
 """pytest plugin: run the CPU-written molnex tests with CUDA as torch's default device.
 
-The test fixtures build every tensor on the CPU and nothing in ``molix.config``
-or the conftests selects a device, so on a GPU node the slow compile tests
+The test fixtures build every tensor on the CPU and nothing in the conftests
+selects a device, so on a GPU node the slow compile tests
 trace the CPU path (cuEquivariance's naive fallback). Loaded with
 ``-p benchmarks._gh200_verify.cuda_default_plugin`` this makes every factory
 call (``torch.tensor`` / ``torch.zeros`` / parameter init) land on CUDA, so

@@ -11,8 +11,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from molix import config
 from molpot.heads.energy import AtomicEnergyMLP, AtomicReferenceEnergy, EnergyHead
+
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
 
 # omol_elem_refs[Z] / eV; index in the scatter table is atomic number.
 # Offline extract of key omol_elem_refs from
@@ -39,35 +41,35 @@ def _omol_hof_table() -> AtomicReferenceEnergy:
 
 
 class TestAtomicEnergyMLP:
-    def test_all_parameters_honour_the_fp64_precision(self, fp64):
-        """Every parameter is fp64 when the head is built under fp64.
+    def test_all_parameters_are_built_at_the_given_dtype(self):
+        """Every parameter is fp64 when the head is built at fp64.
 
-        ``config["ftype"]`` is the single source of truth for the working
-        precision; a layer that ignores it leaves the head mixed-precision
-        and its first forward dies on a dtype-mismatched matmul.
+        A layer that ignored the constructor dtype would leave the head
+        mixed-precision, and its first forward would die on a dtype-mismatched
+        matmul.
         """
-        head = AtomicEnergyMLP(hidden_dim=4)
+        head = AtomicEnergyMLP(hidden_dim=4, dtype=torch.float64)
 
         assert {p.dtype for p in head.parameters()} == {torch.float64}
 
 
 class TestEnergyHead:
     def test_forward_energy(self):
-        head = EnergyHead(hidden_dim=4)
+        head = EnergyHead(hidden_dim=4, dtype=DTYPE)
         h = torch.ones(3, 4)
         batch = torch.tensor([0, 0, 1])
         out = head(h, batch)
         assert out.shape == torch.Size([2])
 
-    def test_all_parameters_honour_the_fp64_precision(self, fp64):
-        """Every parameter is fp64 when the head is built under fp64."""
-        head = EnergyHead(hidden_dim=4)
+    def test_all_parameters_are_built_at_the_given_dtype(self):
+        """Every parameter is fp64 when the head is built at fp64."""
+        head = EnergyHead(hidden_dim=4, dtype=torch.float64)
 
         assert {p.dtype for p in head.parameters()} == {torch.float64}
 
-    def test_forward_runs_under_the_fp64_precision(self, fp64):
+    def test_forward_runs_at_the_given_dtype(self):
         """A head built at fp64 pools fp64 atomic energies into fp64 totals."""
-        head = EnergyHead(hidden_dim=4)
+        head = EnergyHead(hidden_dim=4, dtype=torch.float64)
 
         out = head(torch.ones(3, 4, dtype=torch.float64), torch.tensor([0, 0, 1]))
 
@@ -234,9 +236,8 @@ class TestAtomicReferenceEnergy:
         head.validate(z, mask=mask)
         head.pooled(z, torch.zeros(4, dtype=torch.long), num_graphs=1, mask=mask)
 
-    def test_lookup_buffer_is_float64_under_default_fp32(self):
-        """``c[Z]`` is float64 even when ``config["ftype"]`` is the default fp32."""
-        assert config["ftype"] == torch.float32
+    def test_lookup_buffer_is_float64(self):
+        """``c[Z]`` is float64 whatever dtype the model is built at."""
         head = AtomicReferenceEnergy(
             atomic_energies=[-13.6, -1000.0],
             atomic_numbers=[1, 8],

@@ -30,7 +30,7 @@ if [ ! -x "$VENV/bin/python" ]; then
   python -m venv "$VENV"
   "$VENV/bin/pip" install -q --upgrade pip
   "$VENV/bin/pip" install -q "torch>=2.10" "scikit-build-core>=0.10" "cmake>=4.0.0" ninja \
-    numpy tensordict pydantic "molcrafts-molcfg>=1.0" "molcrafts-mollog>=1.0" \
+    numpy tensordict pydantic "molcrafts-mollog>=1.0" \
     "molcrafts-molpy>=0.3" cuequivariance cuequivariance-torch opt_einsum_fx tqdm typer zarr numcodecs
   # Native op optional for PiNet pure-torch path; soft-skip in the bench if ABI mismatch.
   MOLNEX_OP_ENABLE_CUDA=OFF "$VENV/bin/pip" install -q --no-build-isolation -e . --no-deps || true

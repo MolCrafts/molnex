@@ -12,6 +12,7 @@ from tensordict import TensorDict
 from molpot.forcefield import ForceField, OPLSAAForceField
 from molpot.forcefield.potentials import PAIR_STYLE_DEFAULTS
 from molpot.ir import BondBag, NonbondedMethodRecord, ProperTorsionBag
+from tests.test_molpot.test_forcefield.conftest import with_graphs
 
 
 class TestForceFieldToIR:
@@ -198,21 +199,26 @@ class TestForceFieldToIR:
             )
         )
         assert isinstance(ff, MolpyForceField)
-        system = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {"pos": torch.tensor([[0.0, 0.0, 0.0], [1.53, 0.0, 0.0]])},
-                    batch_size=[2],
-                ),
-                "bonds": TensorDict(
-                    {
-                        "atomi": torch.tensor([0], dtype=torch.long),
-                        "atomj": torch.tensor([1], dtype=torch.long),
-                    },
-                    batch_size=[1],
-                ),
-            },
-            batch_size=[],
+        system = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": torch.tensor([[0.0, 0.0, 0.0], [1.53, 0.0, 0.0]]),
+                            "batch": torch.zeros(2, dtype=torch.long),
+                        },
+                        batch_size=[2],
+                    ),
+                    "bonds": TensorDict(
+                        {
+                            "atomi": torch.tensor([0], dtype=torch.long),
+                            "atomj": torch.tensor([1], dtype=torch.long),
+                        },
+                        batch_size=[1],
+                    ),
+                },
+                batch_size=[],
+            )
         )
         ff.realize(system)
         names = [t.name for t in ff.get_types(BondType)]
@@ -296,20 +302,24 @@ class TestForceFieldToIR:
             ],
             dtype=torch.float64,
         )
-        batch = TensorDict(
-            {
-                "atoms": TensorDict({"pos": pos}, batch_size=[4]),
-                "propers": TensorDict(
-                    {
-                        "atomi": torch.tensor([0], dtype=torch.long),
-                        "atomj": torch.tensor([1], dtype=torch.long),
-                        "atomk": torch.tensor([2], dtype=torch.long),
-                        "atoml": torch.tensor([3], dtype=torch.long),
-                    },
-                    batch_size=[1],
-                ),
-            },
-            batch_size=[],
+        batch = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {"pos": pos, "batch": torch.zeros(4, dtype=torch.long)}, batch_size=[4]
+                    ),
+                    "propers": TensorDict(
+                        {
+                            "atomi": torch.tensor([0], dtype=torch.long),
+                            "atomj": torch.tensor([1], dtype=torch.long),
+                            "atomk": torch.tensor([2], dtype=torch.long),
+                            "atoml": torch.tensor([3], dtype=torch.long),
+                        },
+                        batch_size=[1],
+                    ),
+                },
+                batch_size=[],
+            )
         )
         energy = ff.to_potentials().calc_energy(batch)
         phi = math.pi / 3.0

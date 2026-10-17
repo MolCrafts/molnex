@@ -37,6 +37,10 @@ from molpot.forcefield import ForceField, Potentials
 from molpot.ir.scaling import ExclusionScales, NonbondedScaling
 from molpot.potentials.elec.prefactors import kcalmol_A
 from tests.conftest import place_edges
+from tests.test_molpot.test_forcefield.conftest import with_graphs
+
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
 
 #: Build radius (Å) of the placed list on the **open**-boundary fixtures of
 #: :class:`TestCoulombEnergy`. Open ``pair:coulomb`` declares no cutoff there
@@ -124,19 +128,21 @@ class TestCoulombEnergy:
                 }
             )
         )
-        batch = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": torch.tensor(
-                            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float64
-                        ),
-                        "batch": torch.zeros(2, dtype=torch.long),
-                    },
-                    batch_size=[2],
-                )
-            },
-            batch_size=[],
+        batch = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": torch.tensor(
+                                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float64
+                            ),
+                            "batch": torch.zeros(2, dtype=torch.long),
+                        },
+                        batch_size=[2],
+                    )
+                },
+                batch_size=[],
+            )
         )
         place_edges(batch, cutoff=OPEN_LIST_CUTOFF)
         e = ff.to_potentials().calc_energy(batch)
@@ -152,26 +158,28 @@ class TestCoulombEnergy:
             .def_pairstyle("coulomb")
             .with_params(atoms={"charge": torch.tensor([1.0, -1.0], dtype=torch.float64)})
         )
-        batch = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": torch.tensor(
-                            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float64
-                        ),
-                        "batch": torch.zeros(2, dtype=torch.long),
-                    },
-                    batch_size=[2],
-                ),
-                "bonds": TensorDict(
-                    {
-                        "atomi": torch.tensor([0], dtype=torch.long),
-                        "atomj": torch.tensor([1], dtype=torch.long),
-                    },
-                    batch_size=[1],
-                ),
-            },
-            batch_size=[],
+        batch = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": torch.tensor(
+                                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float64
+                            ),
+                            "batch": torch.zeros(2, dtype=torch.long),
+                        },
+                        batch_size=[2],
+                    ),
+                    "bonds": TensorDict(
+                        {
+                            "atomi": torch.tensor([0], dtype=torch.long),
+                            "atomj": torch.tensor([1], dtype=torch.long),
+                        },
+                        batch_size=[1],
+                    ),
+                },
+                batch_size=[],
+            )
         )
         place_edges(batch, cutoff=OPEN_LIST_CUTOFF)
         e = ff.to_potentials().calc_energy(batch)
@@ -197,30 +205,32 @@ class TestCoulombEnergy:
             .def_pairstyle("coulomb")
             .with_params(atoms={"charge": q})
         )
-        batch = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {"pos": pos, "batch": torch.zeros(4, dtype=torch.long)},
-                    batch_size=[4],
-                ),
-                "bonds": TensorDict(
-                    {
-                        "atomi": torch.tensor([0, 1, 2], dtype=torch.long),
-                        "atomj": torch.tensor([1, 2, 3], dtype=torch.long),
-                    },
-                    batch_size=[3],
-                ),
-                "propers": TensorDict(
-                    {
-                        "atomi": torch.tensor([0], dtype=torch.long),
-                        "atomj": torch.tensor([1], dtype=torch.long),
-                        "atomk": torch.tensor([2], dtype=torch.long),
-                        "atoml": torch.tensor([3], dtype=torch.long),
-                    },
-                    batch_size=[1],
-                ),
-            },
-            batch_size=[],
+        batch = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {"pos": pos, "batch": torch.zeros(4, dtype=torch.long)},
+                        batch_size=[4],
+                    ),
+                    "bonds": TensorDict(
+                        {
+                            "atomi": torch.tensor([0, 1, 2], dtype=torch.long),
+                            "atomj": torch.tensor([1, 2, 3], dtype=torch.long),
+                        },
+                        batch_size=[3],
+                    ),
+                    "propers": TensorDict(
+                        {
+                            "atomi": torch.tensor([0], dtype=torch.long),
+                            "atomj": torch.tensor([1], dtype=torch.long),
+                            "atomk": torch.tensor([2], dtype=torch.long),
+                            "atoml": torch.tensor([3], dtype=torch.long),
+                        },
+                        batch_size=[1],
+                    ),
+                },
+                batch_size=[],
+            )
         )
         place_edges(batch, cutoff=OPEN_LIST_CUTOFF)
         e = ff.to_potentials().calc_energy(batch)
@@ -232,7 +242,7 @@ class TestCoulombEnergy:
     def test_charge_model_into_coulomb(self):
         """EEM q written then Coulomb energy finite and neutral-consistent."""
         charge = AtomicChargeModel(
-            ChiEtaHead(feature_dim=4, hidden_dim=8),
+            ChiEtaHead(feature_dim=4, hidden_dim=8, dtype=DTYPE),
             ElectronegativityEqualization(DiagonalHardnessKernel()),
         )
         ff = (
@@ -240,19 +250,21 @@ class TestCoulombEnergy:
             .def_pairstyle("coulomb")
             .with_params(atoms={"charge": torch.tensor([0.3, -0.3], dtype=torch.float64)})
         )
-        batch = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": torch.tensor(
-                            [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], dtype=torch.float64
-                        ),
-                        "batch": torch.zeros(2, dtype=torch.long),
-                    },
-                    batch_size=[2],
-                )
-            },
-            batch_size=[],
+        batch = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": torch.tensor(
+                                [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], dtype=torch.float64
+                            ),
+                            "batch": torch.zeros(2, dtype=torch.long),
+                        },
+                        batch_size=[2],
+                    )
+                },
+                batch_size=[],
+            )
         )
         place_edges(batch, cutoff=OPEN_LIST_CUTOFF)
         e = ff.to_potentials().calc_energy(batch)
@@ -275,17 +287,21 @@ class TestCoulombEnergy:
         pot = CoulombPotential(prefactor=kcalmol_A)
         e_ref = (q[0] * q[1] * pot.from_dist(torch.tensor([r], dtype=torch.float64))).sum()
         ff = ForceField(name="es").def_pairstyle("coulomb").with_params(atoms={"charge": q})
-        batch = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": torch.tensor([[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=torch.float64),
-                        "batch": torch.zeros(2, dtype=torch.long),
-                    },
-                    batch_size=[2],
-                )
-            },
-            batch_size=[],
+        batch = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": torch.tensor(
+                                [[0.0, 0.0, 0.0], [r, 0.0, 0.0]], dtype=torch.float64
+                            ),
+                            "batch": torch.zeros(2, dtype=torch.long),
+                        },
+                        batch_size=[2],
+                    )
+                },
+                batch_size=[],
+            )
         )
         place_edges(batch, cutoff=OPEN_LIST_CUTOFF)
         e = ff.to_potentials().calc_energy(batch)
@@ -306,25 +322,22 @@ class TestCoulombEnergy:
             )
             .with_params(atoms={"charge": q})
         )
-        batch = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {
-                        "pos": torch.tensor(
-                            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=torch.float64
-                        ),
-                        "batch": torch.zeros(2, dtype=torch.long),
-                    },
-                    batch_size=[2],
-                ),
-                "graphs": TensorDict(
-                    {
-                        "cell": torch.eye(3, dtype=torch.float64) * a,
-                    },
-                    batch_size=[],
-                ),
-            },
-            batch_size=[],
+        batch = with_graphs(
+            TensorDict(
+                {
+                    "atoms": TensorDict(
+                        {
+                            "pos": torch.tensor(
+                                [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=torch.float64
+                            ),
+                            "batch": torch.zeros(2, dtype=torch.long),
+                        },
+                        batch_size=[2],
+                    ),
+                },
+                batch_size=[],
+            ),
+            cell=torch.eye(3, dtype=torch.float64) * a,
         )
         # The style's own ``real_space_cutoff``: the list holds exactly the
         # rows the real-space sum is allowed to read.
@@ -429,7 +442,6 @@ def _periodic_batch(
             {"pos": positions, "batch": torch.zeros(n_atoms, dtype=torch.long)},
             batch_size=[n_atoms],
         ),
-        "graphs": TensorDict({"cell": torch.eye(3, dtype=positions.dtype) * edge}, batch_size=[]),
     }
     if bonds:
         namespaces["bonds"] = TensorDict(
@@ -447,7 +459,13 @@ def _periodic_batch(
             },
             batch_size=[len(propers)],
         )
-    return place_edges(TensorDict(namespaces, batch_size=[]), cutoff=list_cutoff)
+    return place_edges(
+        with_graphs(
+            TensorDict(namespaces, batch_size=[]),
+            cell=torch.eye(3, dtype=positions.dtype) * edge,
+        ),
+        cutoff=list_cutoff,
+    )
 
 
 def _ion_pair(separation: float) -> tuple[torch.Tensor, torch.Tensor]:

@@ -3,12 +3,6 @@
 import sys
 
 import torch
-
-from molix import config
-from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY, FORCES_KEY
-
-config.set_precision("fp64")
-
 from tests.conftest import make_graph_batch  # noqa: E402
 from tests.test_molzoo.test_mace.conftest import (  # noqa: E402
     ATOMIC_ENERGIES,
@@ -26,9 +20,13 @@ from tests.test_molzoo.test_mace.conftest import (  # noqa: E402
     wake_zero_init_readout,
 )
 
+from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY, FORCES_KEY
 from molzoo.mace.polar import MacePolar  # noqa: E402
 from molzoo.mace.potential import MaceMatpes, MaceOmol  # noqa: E402
 from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACEPolarSpec  # noqa: E402
+
+#: Build dtype of every model here (the reference is fp64).
+DTYPE = torch.float64
 
 PATH = sys.argv[1]
 MODE = sys.argv[2]  # "save" | "compare"
@@ -68,6 +66,7 @@ def models():
             atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **TINY_MATPES_KWARGS
         ),
         wrt=("atoms.pos",),
+        dtype=DTYPE,
     ).eval()
     torch.manual_seed(0)
     omol = MaceOmol(
@@ -75,6 +74,7 @@ def models():
             atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **TINY_OMOL_KWARGS
         ),
         wrt=("atoms.pos",),
+        dtype=DTYPE,
     ).eval()
     wake_zero_init_readout(omol)
     torch.manual_seed(0)
@@ -83,6 +83,7 @@ def models():
             atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **TINY_POLAR_KWARGS
         ),
         wrt=("atoms.pos",),
+        dtype=DTYPE,
     ).eval()
     return {
         "matpes": (matpes, cluster(False)),

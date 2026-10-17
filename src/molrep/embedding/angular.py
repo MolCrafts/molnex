@@ -19,7 +19,6 @@ import torch
 import torch.nn as nn
 from pydantic import BaseModel, Field
 
-from molix import config
 from molrep import cueq
 
 
@@ -70,13 +69,8 @@ class SphericalHarmonics(nn.Module):
         normalize: Whether the input direction is normalised.
     """
 
-    def __init__(
-        self, *, l_max: int, normalize: bool = True, dtype: torch.dtype | None = None
-    ) -> None:
+    def __init__(self, *, l_max: int, normalize: bool = True, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.config = SphericalHarmonicsSpec(l_max=l_max, normalize=normalize)
         self.l_max = int(self.config.l_max)
         self.normalize = bool(self.config.normalize)

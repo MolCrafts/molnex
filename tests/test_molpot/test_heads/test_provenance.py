@@ -20,6 +20,9 @@ from molpot.heads.type import TypeHead
 from molrep.condensation.classes import InteractionClass
 from molrep.embedding.support import ChemicalSupportIndex
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 
 class TestCoverageRegime:
     def test_members(self):
@@ -106,7 +109,7 @@ class TestSupportClassifier:
 
     def test_reuses_typehead_decode_with_confidence(self):
         """(indices, confidence) from TypeHead — no local softmax helper."""
-        head = TypeHead(hidden_dim=4, num_types=3)
+        head = TypeHead(hidden_dim=4, num_types=3, dtype=DTYPE)
         # Hand-crafted logits so softmax max is deterministic.
         logits = torch.tensor(
             [

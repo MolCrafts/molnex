@@ -37,7 +37,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from molix import config
 from molrep.chem.embed import BondChemEmbedding
 
 
@@ -62,7 +61,7 @@ class BondContext(nn.Module):
         atom_dim: int,
         bond_dim: int = 32,
         hidden_dim: int | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
         self.bond_dim = int(bond_dim)
@@ -121,12 +120,9 @@ class AngleContext(nn.Module):
         bond_dim: int,
         angle_dim: int = 32,
         hidden_dim: int | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.atom_dim = int(atom_dim)
         self.bond_dim = int(bond_dim)
         self.angle_dim = int(angle_dim)
@@ -188,12 +184,9 @@ class ProperContext(nn.Module):
         bond_dim: int,
         proper_dim: int = 32,
         hidden_dim: int | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.atom_dim = int(atom_dim)
         self.bond_dim = int(bond_dim)
         self.proper_dim = int(proper_dim)
@@ -263,12 +256,9 @@ class ImproperContext(nn.Module):
         bond_dim: int,
         improper_dim: int = 32,
         hidden_dim: int | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.atom_dim = int(atom_dim)
         self.bond_dim = int(bond_dim)
         self.improper_dim = int(improper_dim)

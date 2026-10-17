@@ -14,6 +14,9 @@ from molrep.embedding.mlp import (
     normalize2mom,
 )
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 
 class TestNormalize2Mom:
     """Test the activation second-moment normalisation constant."""
@@ -49,7 +52,7 @@ class TestMomentNormalizedMLP:
         interactions use whichever of the two their radial MLP is.
         """
         torch.manual_seed(0)
-        mlp = MomentNormalizedMLP([12, 8, 5]).double()
+        mlp = MomentNormalizedMLP([12, 8, 5], dtype=DTYPE).double()
         x = torch.randn(6, 12, dtype=torch.float64)
         widths = [4, 5, 3]
         parts = mlp.first_layer_parts(widths)
@@ -61,13 +64,13 @@ class TestMomentNormalizedMLP:
 
     def test_output_shape(self):
         """Maps the last dimension from ``channels[0]`` to ``channels[-1]``."""
-        mlp = MomentNormalizedMLP([10, 64, 512])
+        mlp = MomentNormalizedMLP([10, 64, 512], dtype=DTYPE)
         assert mlp(torch.randn(7, 10)).shape == (7, 512)
 
     def test_each_layer_holds_its_weight_in_a_contained_linear(self):
         """``layerN.linear.weight`` ``(out, in)``: upstream's ``layerN.weight``
         ``(in, out)`` lands there through the loader's declared layout."""
-        mlp = MomentNormalizedMLP([10, 64, 64, 512])
+        mlp = MomentNormalizedMLP([10, 64, 64, 512], dtype=DTYPE)
         names = {n for n, _ in mlp.named_parameters()}
         assert names == {f"layer{i}.linear.weight" for i in range(3)}
         assert set(mlp.state_dict()) == names
@@ -78,30 +81,32 @@ class TestMomentNormalizedMLP:
         """The weight is upstream's ``randn(in, out)`` transposed in — no extra
         RNG draw — so every seeded fixture keeps the model it had."""
         torch.manual_seed(0)
-        mlp = MomentNormalizedMLP([4, 8])
+        mlp = MomentNormalizedMLP([4, 8], dtype=DTYPE)
         torch.manual_seed(0)
         want = torch.randn(4, 8, dtype=mlp.layer0.linear.weight.dtype).t()
         assert torch.equal(mlp.layer0.linear.weight, want)
 
     def test_has_no_biases(self):
         """e3nn's FullyConnectedNet is bias-free; a bias would break transfer."""
-        assert not any("bias" in n for n, _ in MomentNormalizedMLP([4, 8, 2]).named_parameters())
+        assert not any(
+            "bias" in n for n, _ in MomentNormalizedMLP([4, 8, 2], dtype=DTYPE).named_parameters()
+        )
 
     def test_maps_zero_to_zero(self):
         """Bias-free and SiLU(0)=0, so a dead edge contributes nothing."""
-        mlp = MomentNormalizedMLP([6, 12, 3])
+        mlp = MomentNormalizedMLP([6, 12, 3], dtype=DTYPE)
         assert float(mlp(torch.zeros(2, 6)).abs().max()) == 0.0
 
     def test_single_layer_is_a_bare_scaled_linear(self):
         """With two channel entries there is no hidden layer and no activation."""
-        mlp = MomentNormalizedMLP([4, 1]).double()
+        mlp = MomentNormalizedMLP([4, 1], dtype=DTYPE).double()
         x = torch.randn(3, 4, dtype=torch.float64)
         want = F.linear(x, mlp.layer0.linear.weight) * (1.0 / math.sqrt(4))
         assert torch.allclose(mlp(x), want, atol=1e-12)
 
     def test_weight_scaling_is_one_over_sqrt_fan_in(self):
         """The ``1/√fan_in`` factor is applied at forward, not baked into W."""
-        mlp = MomentNormalizedMLP([9, 1]).double()
+        mlp = MomentNormalizedMLP([9, 1], dtype=DTYPE).double()
         with torch.no_grad():
             mlp.layer0.linear.weight.fill_(1.0)
         x = torch.ones(1, 9, dtype=torch.float64)
@@ -110,11 +115,11 @@ class TestMomentNormalizedMLP:
     def test_rejects_too_few_channels(self):
         """A channel list needs at least an input and an output width."""
         with pytest.raises(ValueError, match="channels"):
-            MomentNormalizedMLP([8])
+            MomentNormalizedMLP([8], dtype=DTYPE)
 
     def test_is_differentiable(self):
         """It generates tensor-product weights, so gradients must flow."""
-        mlp = MomentNormalizedMLP([4, 8, 2])
+        mlp = MomentNormalizedMLP([4, 8, 2], dtype=DTYPE)
         x = torch.randn(3, 4, requires_grad=True)
         mlp(x).sum().backward()
         assert x.grad is not None and float(x.grad.abs().sum()) > 0.0
@@ -125,11 +130,16 @@ class TestScalarMLPFunction:
         """``"silu"`` resolves to ``nn.SiLU`` exactly as ``FFLayer`` does."""
         torch.manual_seed(0)
         by_name = ScalarMLPFunction(
-            6, 3, hidden_layers_depth=1, hidden_layers_width=4, nonlinearity="silu"
+            6, 3, hidden_layers_depth=1, hidden_layers_width=4, nonlinearity="silu", dtype=DTYPE
         )
         torch.manual_seed(0)
         by_module = ScalarMLPFunction(
-            6, 3, hidden_layers_depth=1, hidden_layers_width=4, nonlinearity=torch.nn.SiLU
+            6,
+            3,
+            hidden_layers_depth=1,
+            hidden_layers_width=4,
+            nonlinearity=torch.nn.SiLU,
+            dtype=DTYPE,
         )
         x = torch.randn(5, 6, dtype=by_name.mlp[0].linear.weight.dtype)
         torch.testing.assert_close(by_name(x), by_module(x))
@@ -139,7 +149,7 @@ class TestScalarLinearLayer:
     def test_forward_scales_the_contained_linear_and_adds_the_bias_unscaled(self):
         """``linear(x)·α + b``: nequip scales the weight by α, never the bias."""
         torch.manual_seed(0)
-        layer = ScalarLinearLayer(4, 3, alpha=0.5, bias=True).double()
+        layer = ScalarLinearLayer(4, 3, alpha=0.5, bias=True, dtype=DTYPE).double()
         with torch.no_grad():
             layer.bias.normal_()
         x = torch.randn(6, 4, dtype=torch.float64)
@@ -150,7 +160,7 @@ class TestScalarLinearLayer:
         """``U(-√3, √3)`` drawn in upstream's ``(in, out)`` shape and transposed in:
         an ``(out, in)`` weight, a zero bias, and a seeded build equal to the old layout."""
         torch.manual_seed(0)
-        layer = ScalarLinearLayer(32, 16, bias=True)
+        layer = ScalarLinearLayer(32, 16, bias=True, dtype=DTYPE)
         torch.manual_seed(0)
         want = torch.empty(32, 16).uniform_(-math.sqrt(3), math.sqrt(3)).t()
         assert layer.linear.weight.shape == (16, 32)
@@ -160,22 +170,25 @@ class TestScalarLinearLayer:
 
     def test_state_dict_keys_are_linear_weight_and_bias(self):
         """The weight moved into the contained linear; the bias kept its key."""
-        assert set(ScalarLinearLayer(4, 3, bias=True).state_dict()) == {"linear.weight", "bias"}
-        assert set(ScalarLinearLayer(4, 3).state_dict()) == {"linear.weight"}
+        assert set(ScalarLinearLayer(4, 3, bias=True, dtype=DTYPE).state_dict()) == {
+            "linear.weight",
+            "bias",
+        }
+        assert set(ScalarLinearLayer(4, 3, dtype=DTYPE).state_dict()) == {"linear.weight"}
 
 
 class TestFFLayer:
     def test_widths_and_output_dim(self):
-        layer = FFLayer([8, 4], in_dim=6, activation="tanh")
+        layer = FFLayer([8, 4], in_dim=6, activation="tanh", dtype=DTYPE)
         assert layer(torch.randn(5, 6, dtype=layer.layers[0].weight.dtype)).shape == (5, 4)
         assert layer.output_dim == 4
 
     def test_default_is_linear_like_keras_dense(self):
         """PiNN's ``Dense`` has no activation unless one is passed."""
-        layer = FFLayer([3], in_dim=2)
+        layer = FFLayer([3], in_dim=2, dtype=DTYPE)
         x = torch.randn(4, 2, dtype=layer.layers[0].weight.dtype)
         torch.testing.assert_close(layer(2 * x) - layer(0 * x), 2 * (layer(x) - layer(0 * x)))
 
     def test_empty_stack_is_identity(self):
         x = torch.randn(2, 3)
-        torch.testing.assert_close(FFLayer([], in_dim=3)(x), x)
+        torch.testing.assert_close(FFLayer([], in_dim=3, dtype=DTYPE)(x), x)

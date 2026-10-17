@@ -5,16 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from molix import config
 from molpot.potentials.gto.fukui import FukuiEquilibration
-
-
-@pytest.fixture(autouse=True)
-def fp64():
-    previous = config["ftype"]
-    config.set_precision("fp64")
-    yield
-    config.set_precision("fp64" if previous == torch.float64 else "fp32")
 
 
 class TestFukuiEquilibration:

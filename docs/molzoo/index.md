@@ -10,20 +10,21 @@ derivation and composition stay in `molpot` and `molix.autograd`.
 
 | Family | Package | Encoder | Products | Spec |
 |--------|---------|---------|----------|------|
-| Allegro | `molzoo.allegro` | `AllegroEncoder(AllegroSpec(...))` → `pairs.edge_features` | `AllegroPotential` (energy, forces, virial); `AllegroPotential.load("*.nequip.zip")` reads official nequip packages | [`specs/allegro.md`](specs/allegro.md) |
-| MACE | `molzoo.mace` | `MACEEncoder(MACESpec(...))` → `atoms.node_features` (primitives exposed) | `MaceMatpes`, `MaceOmol`, `MacePolar`, `MaceOff`, `MaceLes`; `.load(path, config=...)` reads the official cuEq-converted archives | [`specs/mace_matpes.md`](specs/mace_matpes.md), [`specs/mace_omol.md`](specs/mace_omol.md), [`specs/mace_off.md`](specs/mace_off.md) |
-| PiNet2 | `molzoo.pinet` | `PiNetEncoder(PiNetSpec(...))` → `atoms.node_features` | `PiNetPotential` (energy, forces), `PiNetDipole`, `PiNetPolarizability` | [`specs/pinet2.md`](specs/pinet2.md) |
-| Rondo | `molzoo.rondo` | `ChemEncoder` channels | `Rondo(forcefield, spec, wrt=...)`, the learnable Class-I force field | [`specs/rondo.md`](specs/rondo.md) |
+| Allegro | `molzoo.allegro` | `AllegroEncoder(AllegroSpec(...), dtype=...)` → `pairs.edge_features` | `AllegroPotential` (energy, forces, virial); `AllegroPotential.load("*.nequip.zip")` reads official nequip packages | [`specs/allegro.md`](specs/allegro.md) |
+| MACE | `molzoo.mace` | `MACEEncoder(MACESpec(...), dtype=...)` → `atoms.node_features` (primitives exposed) | `MaceMatpes`, `MaceOmol`, `MacePolar`, `MaceOff`, `MaceLes`; `.load(path, config=...)` reads the official cuEq-converted archives | [`specs/mace_matpes.md`](specs/mace_matpes.md), [`specs/mace_omol.md`](specs/mace_omol.md), [`specs/mace_off.md`](specs/mace_off.md) |
+| PiNet2 | `molzoo.pinet` | `PiNetEncoder(PiNetSpec(...), dtype=...)` → `atoms.node_features` | `PiNetPotential` (energy, forces), `PiNetDipole`, `PiNetPolarizability` | [`specs/pinet2.md`](specs/pinet2.md) |
+| Rondo | `molzoo.rondo` | `ChemEncoder` channels | `Rondo(forcefield, spec, wrt=..., dtype=...)`, the learnable Class-I force field | [`specs/rondo.md`](specs/rondo.md) |
 
 Every product is a `molix.autograd.Potential` with two public methods and no
 layer between them: `energy(frame)` reads its columns straight off the
 post-collate batch and writes `atoms.energy` / `graphs.energy` (the `graphs`
 namespace is required), and `forward` is `Derivative(self.energy, wrt)` fixed
 at construction (`wrt=("atoms.pos",)` → `atoms.forces`; `"graphs.strain"` →
-`graphs.virial`). A product is constructed from its typed spec object —
-`MaceMatpes(MACEMatpesSpec(...), wrt=...)`,
-`AllegroPotential(AllegroSpec(...), wrt=...)`,
-`PiNetPotential(PiNetSpec(...), wrt=...)` — and imported from its subpackage
+`graphs.virial`). A product is constructed from its typed spec object and
+the floating dtype it is built at —
+`MaceMatpes(MACEMatpesSpec(...), wrt=..., dtype=...)`,
+`AllegroPotential(AllegroSpec(...), wrt=..., dtype=...)`,
+`PiNetPotential(PiNetSpec(...), wrt=..., dtype=...)` — and imported from its subpackage
 (`from molzoo.mace import MaceMatpes`; `molzoo` itself exports nothing).
 `Sonata` (encoder + `molpot` heads) lives in `molpot.composition`, not here.
 

@@ -21,7 +21,6 @@ import time
 import torch
 from tensordict import TensorDict
 
-from molix import config
 from molix.compile import Compiler
 from molix.md import NeighborList
 from molzoo.mace import MaceMatpes, MACEMatpesSpec
@@ -48,7 +47,7 @@ def _min_n_atoms() -> int:
     return math.floor(DENSITY * (2.0 * CUTOFF) ** 3) + 1
 
 
-def _build_model() -> MaceMatpes:
+def _build_model(dtype: torch.dtype) -> MaceMatpes:
     torch.manual_seed(0)
     spec = MACEMatpesSpec(
         atomic_numbers=_Z_TABLE,
@@ -63,15 +62,15 @@ def _build_model() -> MaceMatpes:
         correlation=3,
         mlp_dim=16,
     )
-    return MaceMatpes(spec, wrt=("atoms.pos",)).eval()
+    return MaceMatpes(spec, wrt=("atoms.pos",), dtype=dtype).eval()
 
 
-def _system(n_atoms: int, device: torch.device) -> TensorDict:
+def _system(n_atoms: int, device: torch.device, dtype: torch.dtype) -> TensorDict:
     """A periodic random-dense system as the post-collate batch the op reads."""
     torch.manual_seed(1)
     box = _box_length(n_atoms)
-    pos = torch.rand(n_atoms, 3, dtype=config.ftype, device=device) * box
-    cell = torch.eye(3, dtype=config.ftype, device=device) * box
+    pos = torch.rand(n_atoms, 3, dtype=dtype, device=device) * box
+    cell = torch.eye(3, dtype=dtype, device=device) * box
     Z = _Z_TABLE[0] + torch.zeros(n_atoms, dtype=torch.long, device=device)
     Z[::3] = _Z_TABLE[2]
     Z[::5] = _Z_TABLE[3]
@@ -136,12 +135,12 @@ def main() -> int:
             f"Use --n-atoms {_min_n_atoms()} or more."
         )
 
-    config.set_precision("fp64" if args.fp64 else "fp32")
+    dtype = torch.float64 if args.fp64 else torch.float32
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device={device} dtype={config.ftype}")
+    print(f"device={device} dtype={dtype}")
 
-    frame = _system(args.n_atoms, device)
-    model = _build_model().to(device)
+    frame = _system(args.n_atoms, device, dtype)
+    model = _build_model(dtype).to(device)
 
     with torch.no_grad():
         eager = _time(lambda: model(frame)["atoms", "forces"], args.steps)

@@ -39,7 +39,6 @@ import torch.nn as nn
 from tensordict import TensorDict
 from tensordict.nn import TensorDictModuleBase
 
-from molix import config
 from molrep.embedding.angular import SphericalHarmonics
 from molrep.embedding.cutoff import PolynomialCutoff
 from molrep.embedding.geometry import edge_lengths, edge_vectors
@@ -57,6 +56,7 @@ class AllegroEncoder(ElementTable, TensorDictModuleBase):
     Args:
         spec: A validated :class:`~molzoo.allegro.spec.AllegroSpec`. Head
             fields (readout, scales/shifts, ZBL) are ignored here.
+        dtype: Floating dtype every parameter and buffer is built at.
 
     Raises:
         NotImplementedError: If backward irreps pruning would trim the first
@@ -66,11 +66,8 @@ class AllegroEncoder(ElementTable, TensorDictModuleBase):
     in_keys = [("atoms", "Z"), ("atoms", "pos"), ("pairs", "pair_index")]
     out_keys = [("pairs", "edge_features")]
 
-    def __init__(self, spec: AllegroSpec, *, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, spec: AllegroSpec, *, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         #: Provenance only. Never read on a hot path.
         self._spec = spec
         #: The build dtype of every float parameter and buffer.

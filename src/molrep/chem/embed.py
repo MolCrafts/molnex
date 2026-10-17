@@ -17,7 +17,6 @@ import torch
 import torch.nn as nn
 from pydantic import BaseModel, ConfigDict, Field
 
-from molix import config
 from molrep.embedding.node import DiscreteEmbeddingSpec, JointEmbedding
 
 __all__ = ["AtomChemEmbedding", "BondChemEmbedding", "DiscreteChannel", "DiscreteChannels"]
@@ -70,12 +69,9 @@ class DiscreteChannels(nn.Module):
     """
 
     def __init__(
-        self, channels: Sequence[DiscreteChannel], dim: int, *, dtype: torch.dtype | None = None
+        self, channels: Sequence[DiscreteChannel], dim: int, *, dtype: torch.dtype
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
         names = [channel.name for channel in channels]
@@ -159,12 +155,9 @@ class AtomChemEmbedding(nn.Module):
         atom_dim: int = 32,
         num_elements: int = 119,
         emb_dim: int | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if atom_dim <= 0:
             raise ValueError(f"atom_dim must be positive, got {atom_dim}")
         if num_elements <= 0:
@@ -242,12 +235,9 @@ class BondChemEmbedding(nn.Module):
         atom_dim: int,
         bond_dim: int = 32,
         hidden_dim: int | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if atom_dim <= 0 or bond_dim <= 0:
             raise ValueError("atom_dim and bond_dim must be positive")
         self.atom_dim = int(atom_dim)

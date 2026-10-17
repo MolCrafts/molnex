@@ -18,7 +18,6 @@ from tensordict import TensorDict
 
 from molix.autograd import Derivative, Potential
 from molix.compile import Compiler
-from molix.config import config
 from molix.core.losses import energy_force_mse, energy_mse
 from molix.core.state import TrainState
 from molix.core.steps.train import DefaultTrainStep
@@ -37,14 +36,6 @@ from tests.test_molzoo.test_mace.conftest import (
 Batch = Mapping[str, Mapping[str, torch.Tensor]]
 Predictions = dict[str, torch.Tensor]
 LossFn = Callable[[Predictions, Batch], torch.Tensor]
-
-
-@pytest.fixture(autouse=True)
-def _reset_precision() -> None:
-    """Precision is a global singleton — restore fp32 around every test."""
-    config.set_precision("fp32")
-    yield
-    config.set_precision("fp32")
 
 
 class _StubModel(nn.Module):
@@ -202,7 +193,6 @@ def _mace_trainer(*, wrt: tuple[str, ...], loss_fn: LossFn) -> tuple[Trainer, Te
     from molzoo.mace.potential import MaceMatpes
     from molzoo.mace.spec import MACEMatpesSpec
 
-    config.set_precision("fp64")
     torch.manual_seed(0)
     model = MaceMatpes(
         MACEMatpesSpec(
@@ -211,6 +201,7 @@ def _mace_trainer(*, wrt: tuple[str, ...], loss_fn: LossFn) -> tuple[Trainer, Te
             **TINY_MATPES_KWARGS,
         ),
         wrt=wrt,
+        dtype=torch.float64,
     )
     n_atoms = len(CLUSTER_Z)
     batch = make_graph_batch(

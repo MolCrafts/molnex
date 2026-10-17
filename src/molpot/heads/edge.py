@@ -57,6 +57,7 @@ class EdgeEnergyHead(nn.Module):
             derives it from the packed cache pointers without a fit pass.
         out_key: Column under ``graphs`` that receives the per-graph energy.
             ``"energy"`` is the total; a short-range term uses ``"energy_short"``.
+        dtype: Floating dtype the readout is built at (the owning model's).
 
     Forward output:
         The same batch, with ``graphs.<out_key>`` ``(B,)`` written.
@@ -69,6 +70,7 @@ class EdgeEnergyHead(nn.Module):
         hidden_dim: int = 128,
         avg_num_neighbors: float,
         out_key: str = "energy",
+        dtype: torch.dtype,
     ):
         super().__init__()
         if avg_num_neighbors <= 0.0:
@@ -84,6 +86,7 @@ class EdgeEnergyHead(nn.Module):
             hidden_layers_width=hidden_dim,
             nonlinearity=None,
             bias=False,
+            dtype=dtype,
         )
         self.avg_num_neighbors = float(avg_num_neighbors)
         self._inv_sqrt_avg_n = 1.0 / math.sqrt(self.avg_num_neighbors)

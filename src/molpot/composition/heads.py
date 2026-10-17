@@ -8,8 +8,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from molix import config
-
 
 class LJParameterHead(nn.Module):
     """Predict per-atom Lennard-Jones parameters from node features.
@@ -45,12 +43,10 @@ class LJParameterHead(nn.Module):
         max_sigma: float = 5.0,
         init_epsilon: float | None = None,
         init_sigma: float = 1.0,
-        dtype: torch.dtype | None = None,
+        *,
+        dtype: torch.dtype,
     ):
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if max_epsilon <= min_epsilon:
             raise ValueError(f"max_epsilon {max_epsilon} must exceed min_epsilon {min_epsilon}")
         if max_sigma <= min_sigma:
@@ -139,12 +135,10 @@ class RepulsionParameterHead(nn.Module):
         hidden_dim: int = 64,
         min_eps: float = 1e-4,
         min_lam: float = 1e-4,
-        dtype: torch.dtype | None = None,
+        *,
+        dtype: torch.dtype,
     ):
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.min_eps = min_eps
         self.min_lam = min_lam
         self.mlp = nn.Sequential(
@@ -186,12 +180,10 @@ class ChargeTransferParameterHead(nn.Module):
         hidden_dim: int = 64,
         min_eps: float = 1e-4,
         min_lam: float = 1e-4,
-        dtype: torch.dtype | None = None,
+        *,
+        dtype: torch.dtype,
     ):
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.min_eps = min_eps
         self.min_lam = min_lam
         self.mlp = nn.Sequential(
@@ -233,12 +225,10 @@ class ChargeHead(nn.Module):
         feature_dim: int,
         hidden_dim: int = 64,
         total_charge: float = 0.0,
-        dtype: torch.dtype | None = None,
+        *,
+        dtype: torch.dtype,
     ):
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.total_charge = total_charge
         self.mlp = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim, dtype=dtype),
@@ -298,12 +288,10 @@ class TSScalingHead(nn.Module):
         alpha_free: torch.Tensor,
         r_star_free: torch.Tensor,
         hidden_dim: int = 64,
-        dtype: torch.dtype | None = None,
+        *,
+        dtype: torch.dtype,
     ):
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.register_buffer("c6_free", c6_free)
         self.register_buffer("alpha_free", alpha_free)
         self.register_buffer("r_star_free", r_star_free)

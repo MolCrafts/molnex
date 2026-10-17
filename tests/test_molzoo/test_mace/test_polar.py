@@ -3,7 +3,7 @@
 The blocks are pinned against their closed forms and the official dump's
 widths; the product only on what it adds over :class:`MacePotential`
 (``test_potential.py``): the Hartree term, the charge-aware mask, the two
-k-space grids. Everything builds at fp64 (``conftest._build_at_fp64``).
+k-space grids. Everything builds at fp64 (``conftest.DTYPE``).
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import cuequivariance as cue
 import pytest
 import torch
 
-from molix import config
 from molix.compile import Compiler
 from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY, FORCES_KEY
 from molzoo.checkpoint import CheckpointRemap
@@ -34,6 +33,7 @@ from tests.test_molzoo.test_mace.conftest import (
     ATOMIC_NUMBERS,
     CLUSTER_POS,
     CLUSTER_Z,
+    DTYPE,
     SINGLE_GRAPH,
     TINY_POLAR_KWARGS,
     full_edge_index,
@@ -67,7 +67,10 @@ class TestMacePolar:
 
     def test_official_runtime_cutoff_overrides_constructor_heuristic(self, tiny_polar_spec):
         model = MacePolar(
-            tiny_polar_spec.model_copy(update={"kspace_cutoff": 1.234, "kspace_cutoff_factor": 1.5})
+            tiny_polar_spec.model_copy(
+                update={"kspace_cutoff": 1.234, "kspace_cutoff_factor": 1.5}
+            ),
+            dtype=DTYPE,
         )
         assert model.electric_potential_descriptor.k_cutoff == 1.234
         assert model.coulomb_energy.k_cutoff == 1.234
@@ -75,25 +78,22 @@ class TestMacePolar:
     @pytest.mark.parametrize("dtype", [None, torch.float32])
     def test_energy_precision_covers_hartree(self, tiny_polar_spec, omol_cluster, dtype):
         """Polar's ``energy`` lands the Hartree term at ``energy_dtype`` too (``None``: model's)."""
-        model = MacePolar(tiny_polar_spec, energy_dtype=dtype)
+        model = MacePolar(tiny_polar_spec, energy_dtype=dtype, dtype=DTYPE)
         energy = model(omol_cluster)[ENERGY_KEY]
         assert energy.dtype == (dtype or torch.float64)
 
     def test_input_dtype_keeps_md_geometry_and_force_dtype(self, omol_cluster):
         """Polar's own ``energy`` casts the geometry (and charge / spin) too."""
-        config.set_precision("fp32")
-        try:
-            model = MacePolar(
-                MACEPolarSpec(
-                    atomic_numbers=ATOMIC_NUMBERS,
-                    atomic_energies=ATOMIC_ENERGIES,
-                    **TINY_POLAR_KWARGS,
-                ),
-                wrt=FORCES,
-                input_dtype=torch.float32,
-            ).eval()
-        finally:
-            config.set_precision("fp64")
+        model = MacePolar(
+            MACEPolarSpec(
+                atomic_numbers=ATOMIC_NUMBERS,
+                atomic_energies=ATOMIC_ENERGIES,
+                **TINY_POLAR_KWARGS,
+            ),
+            wrt=FORCES,
+            input_dtype=torch.float32,
+            dtype=torch.float32,
+        ).eval()
         pos = omol_cluster["atoms", "pos"]
         before = pos.clone()
         output = model(omol_cluster)
@@ -105,7 +105,7 @@ class TestMacePolar:
         self, tiny_polar_spec: MACEPolarSpec, omol_cluster, monkeypatch: pytest.MonkeyPatch
     ):
         """``atoms.energy`` is the per-atom part; ``graphs.energy`` adds the Hartree term."""
-        model = MacePolar(tiny_polar_spec).eval()
+        model = MacePolar(tiny_polar_spec, dtype=DTYPE).eval()
         hartree: list[torch.Tensor] = []
         coulomb = model.coulomb_energy.forward
 
@@ -137,7 +137,7 @@ class TestMacePolar:
         from molix.data import MoleculePadder
 
         torch.manual_seed(0)
-        model = MacePolar(tiny_polar_spec, wrt=FORCES).eval()
+        model = MacePolar(tiny_polar_spec, wrt=FORCES, dtype=DTYPE).eval()
         cluster = omol_cluster.clone()
         cluster["atoms", "pos"] = cluster["atoms", "pos"] + 2.5
         n_atoms = int(cluster["atoms"].batch_size[0])
@@ -157,7 +157,9 @@ class TestMacePolar:
 
     def test_local_electron_energy_is_skipped_when_disabled(self, tiny_polar_spec, omol_cluster):
         """``add_local_electron_energy=False`` never calls the readout: no grad reaches it."""
-        model = MacePolar(tiny_polar_spec.model_copy(update={"add_local_electron_energy": False}))
+        model = MacePolar(
+            tiny_polar_spec.model_copy(update={"add_local_electron_energy": False}), dtype=DTYPE
+        )
         model.energy(omol_cluster)[ENERGY_KEY].sum().backward()
         assert all(p.grad is None for p in model.local_electron_energy.parameters())
         assert all(p.grad is not None for p in model.layer_feature_mixer.parameters())
@@ -166,13 +168,14 @@ class TestMacePolar:
         self, tiny_polar_spec: MACEPolarSpec
     ):
         """Hartree keeps the on-site term by default, field features drop it."""
-        model = MacePolar(tiny_polar_spec)
+        model = MacePolar(tiny_polar_spec, dtype=DTYPE)
         assert model.coulomb_energy.include_self_interaction is True
         assert model.electric_potential_descriptor.include_self_interaction is False
         flipped = MacePolar(
             tiny_polar_spec.model_copy(
                 update={"electrostatic_self_interaction": False, "field_self_interaction": True}
-            )
+            ),
+            dtype=DTYPE,
         )
         assert flipped.coulomb_energy.include_self_interaction is False
         assert flipped.electric_potential_descriptor.include_self_interaction is True
@@ -181,7 +184,7 @@ class TestMacePolar:
         self, tiny_polar_spec: MACEPolarSpec, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """One coulomb call and two descriptor calls per recursion step, each with ``B`` + cell."""
-        model = MacePolar(tiny_polar_spec).eval()
+        model = MacePolar(tiny_polar_spec, dtype=DTYPE).eval()
         coulomb_calls: list[dict[str, object]] = []
         descriptor_calls: list[dict[str, object]] = []
         coulomb_forward = model.coulomb_energy.forward
@@ -220,7 +223,7 @@ class TestMacePolar:
         ``(1, 3, 3)`` batched layout must take the identical route as ``(3, 3)``.
         An over-capacity cell fails closed and the message names the grid.
         """
-        model = MacePolar(tiny_polar_spec).eval()
+        model = MacePolar(tiny_polar_spec, dtype=DTYPE).eval()
         field: list[int] = []
         hartree: list[int] = []
         monkeypatch.setattr(
@@ -253,7 +256,7 @@ class TestMacePolar:
         ``forward``) is its own compile seam, distinct from MatPES's
         ``forward`` traced in ``test_potential.py``.
         """
-        model = MacePolar(tiny_polar_spec).eval()
+        model = MacePolar(tiny_polar_spec, dtype=DTYPE).eval()
         cell = torch.eye(3, dtype=torch.float64) * 10.0
         model.bind_cell(cell)
         model(_periodic_cluster(cell))
@@ -269,7 +272,7 @@ class TestPolarKeys:
 
     def test_synthetic_state_fills_parameters(self, tiny_polar_spec: MACEPolarSpec):
         """A native-key dump plus one remapped nested weight loads without unfilled params."""
-        model = MacePolar(tiny_polar_spec)
+        model = MacePolar(tiny_polar_spec, dtype=DTYPE)
         native = {
             k: v.detach().clone()
             for k, v in model.state_dict().items()
@@ -310,7 +313,8 @@ class TestSparseUvuTensorProduct:
             cue.Irreps("O3", "2x0e+2x1o"),
             cue.Irreps("O3", "2x0e+2x1o"),
             cue.Irreps("O3", "2x0e+2x1o"),
-        ).double()
+            dtype=DTYPE,
+        )
         x1 = torch.randn(3, tp.irreps_in1.dim, dtype=torch.float32)
         x2 = torch.randn(3, tp.irreps_in2.dim, dtype=torch.float32)
         out = tp(x1.double(), x2)
@@ -319,7 +323,7 @@ class TestSparseUvuTensorProduct:
 
     def test_l0_contraction_is_product_times_weight(self):
         """W=1, x1=2, x2=3 → 6. path_weight=1 and √(2·0+1)=1."""
-        tp = SparseUvuTensorProduct("1x0e", "1x0e", "1x0e")
+        tp = SparseUvuTensorProduct("1x0e", "1x0e", "1x0e", dtype=DTYPE)
         with torch.no_grad():
             tp.weight.fill_(1.0)
         out = tp(
@@ -334,7 +338,7 @@ class TestSparseUvuTensorProduct:
 
         The upstream element path weight is ``1/√mul_in2 = 1/√2``.
         """
-        tp = SparseUvuTensorProduct("2x0e", "2x0e", "2x0e")
+        tp = SparseUvuTensorProduct("2x0e", "2x0e", "2x0e", dtype=DTYPE)
         with torch.no_grad():
             tp.weight.copy_(torch.eye(2, dtype=torch.float64).reshape(-1))
         out = tp(
@@ -346,7 +350,7 @@ class TestSparseUvuTensorProduct:
 
     def test_vector_dot_is_z_rotation_invariant(self):
         """(1o × 1o → 0e) equals a·b / √3 and survives a z-rotation."""
-        tp = SparseUvuTensorProduct("1x1o", "1x1o", "1x0e")
+        tp = SparseUvuTensorProduct("1x1o", "1x1o", "1x0e", dtype=DTYPE)
         with torch.no_grad():
             tp.weight.fill_(1.0)
         torch.manual_seed(0)
@@ -370,7 +374,7 @@ class TestSparseUvuTensorProduct:
     def test_reassociated_dot_matches_literal_pair_and_its_gradients(self):
         """GEMM-first uvu is the literal ``(N,u,v)`` contraction algebraically."""
         torch.manual_seed(4)
-        tp = SparseUvuTensorProduct("3x0e+3x1o", "3x0e+3x1o", "3x0e")
+        tp = SparseUvuTensorProduct("3x0e+3x1o", "3x0e+3x1o", "3x0e", dtype=DTYPE)
         x1 = torch.randn(7, 12, dtype=torch.float64, requires_grad=True)
         x2 = torch.randn(7, 12, dtype=torch.float64, requires_grad=True)
         actual = tp(x1, x2)
@@ -397,7 +401,7 @@ class TestSparseUvuTensorProduct:
 
     def test_dot_mixed_second_derivatives(self):
         """Force training differentiates through feature and parameter gradients."""
-        tp = SparseUvuTensorProduct("2x0e+2x1o", "2x0e+2x1o", "2x0e")
+        tp = SparseUvuTensorProduct("2x0e+2x1o", "2x0e+2x1o", "2x0e", dtype=DTYPE)
         x1 = torch.randn(2, 8, dtype=torch.float64, requires_grad=True)
         x2 = torch.randn(2, 8, dtype=torch.float64, requires_grad=True)
 
@@ -408,7 +412,7 @@ class TestSparseUvuTensorProduct:
 
     def test_scalar_modulation_scales_vector(self):
         """(1o × 0e → 1o): path_weight √3 cancels the √(2ℓ+1) kernel factor."""
-        tp = SparseUvuTensorProduct("1x1o", "1x0e", "1x1o")
+        tp = SparseUvuTensorProduct("1x1o", "1x0e", "1x1o", dtype=DTYPE)
         with torch.no_grad():
             tp.weight.fill_(1.0)
         vec = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float64)
@@ -419,11 +423,11 @@ class TestSparseUvuTensorProduct:
     def test_rejects_non_uvu_paths(self):
         """Only (ℓ×ℓ→0) and (ℓ×0→ℓ); a leftover vector path is refused."""
         with pytest.raises(NotImplementedError, match="uvu"):
-            SparseUvuTensorProduct("1x1o", "1x1o", "1x1o")
+            SparseUvuTensorProduct("1x1o", "1x1o", "1x1o", dtype=DTYPE)
 
     def test_rejects_non_2d_inputs(self):
         """Flattened (N, irreps.dim) only — a 3-D view would mix ir_mul axes."""
-        tp = SparseUvuTensorProduct("1x0e", "1x0e", "1x0e")
+        tp = SparseUvuTensorProduct("1x0e", "1x0e", "1x0e", dtype=DTYPE)
         with pytest.raises(ValueError, match="2-D"):
             tp(torch.zeros(2, 1, 1, dtype=torch.float64), torch.zeros(2, 1, dtype=torch.float64))
 
@@ -436,7 +440,7 @@ class TestMultiLayerFeatureMixer:
         torch.manual_seed(0)
         irreps = "4x0e+4x1o"
         dim = cue.Irreps("O3", irreps).dim
-        mixer = MultiLayerFeatureMixer(irreps=irreps, num_layers=2)
+        mixer = MultiLayerFeatureMixer(irreps=irreps, num_layers=2, dtype=DTYPE)
         stacked = torch.randn(2, 3, dim, dtype=torch.float64)
         out = mixer(stacked)
         expect = mixer.linears[0](stacked[0]) + mixer.linears[1](stacked[1])
@@ -446,7 +450,7 @@ class TestMultiLayerFeatureMixer:
     def test_stack_length_must_match_num_layers(self):
         """A silent truncate would mix the wrong Polar layers."""
         irreps = "4x0e"
-        mixer = MultiLayerFeatureMixer(irreps=irreps, num_layers=2)
+        mixer = MultiLayerFeatureMixer(irreps=irreps, num_layers=2, dtype=DTYPE)
         stacked = torch.zeros(3, 1, cue.Irreps("O3", irreps).dim, dtype=torch.float64)
         with pytest.raises(ValueError, match="3 layers.*num_layers=2"):
             mixer(stacked)
@@ -454,7 +458,7 @@ class TestMultiLayerFeatureMixer:
     def test_rejects_zero_layers(self):
         """``num_layers >= 1`` — Polar-1-M dump is 2."""
         with pytest.raises(ValueError, match="num_layers"):
-            MultiLayerFeatureMixer(irreps="4x0e", num_layers=0)
+            MultiLayerFeatureMixer(irreps="4x0e", num_layers=0, dtype=DTYPE)
 
 
 class TestEnvironmentDependentSpinSourceBlock:
@@ -463,7 +467,7 @@ class TestEnvironmentDependentSpinSourceBlock:
     def test_forward_view_is_two_y_copies(self):
         """``l_max=1``: flat 8 → ``(N, 2, 4)`` with monopoles at ``[:, :, 0]``."""
         torch.manual_seed(0)
-        block = EnvironmentDependentSpinSourceBlock(irreps_in="4x0e+4x1o", l_max=1)
+        block = EnvironmentDependentSpinSourceBlock(irreps_in="4x0e+4x1o", l_max=1, dtype=DTYPE)
         n = 3
         x = torch.randn(n, cue.Irreps("O3", "4x0e+4x1o").dim, dtype=torch.float64)
         out = block(x)
@@ -477,7 +481,10 @@ class TestEnvironmentDependentSpinSourceBlock:
         """Upstream ``zero_charges``: 0e slice exact 0, dipoles may stay."""
         torch.manual_seed(1)
         block = EnvironmentDependentSpinSourceBlock(
-            irreps_in="4x0e+4x1o", l_max=1, zero_charges=True
+            irreps_in="4x0e+4x1o",
+            l_max=1,
+            zero_charges=True,
+            dtype=DTYPE,
         )
         x = torch.randn(2, cue.Irreps("O3", "4x0e+4x1o").dim, dtype=torch.float64)
         out = block(x)
@@ -487,7 +494,7 @@ class TestEnvironmentDependentSpinSourceBlock:
     def test_y_dim_is_l_plus_one_squared(self):
         """``dim Y_l = (l+1)^2``; two copies → ``2*(l+1)^2`` flat width."""
         for l_max, y_dim, flat in ((0, 1, 2), (1, 4, 8), (2, 9, 18)):
-            block = EnvironmentDependentSpinSourceBlock(irreps_in="2x0e", l_max=l_max)
+            block = EnvironmentDependentSpinSourceBlock(irreps_in="2x0e", l_max=l_max, dtype=DTYPE)
             x = torch.zeros(1, cue.Irreps("O3", "2x0e").dim, dtype=torch.float64)
             out = block(x)
             assert out.shape[-1] == y_dim
@@ -509,6 +516,7 @@ def _update():
         node_feats_irreps=_FEATS,
         potential_irreps=_POTENTIAL,
         charges_irreps=_CHARGES,
+        dtype=DTYPE,
     )
 
 
@@ -517,6 +525,7 @@ def _readout():
         node_feats_irreps=_FEATS,
         potential_irreps=_POTENTIAL,
         charges_irreps=_CHARGES,
+        dtype=DTYPE,
     )
 
 

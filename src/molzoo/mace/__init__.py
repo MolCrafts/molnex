@@ -4,8 +4,8 @@ Public construction is a product over its typed spec::
 
     from molzoo.mace import MACEMatpesSpec, MaceMatpes, MaceOmol, MacePolar
 
-    model = MaceMatpes(MACEMatpesSpec(atomic_numbers=..., atomic_energies=...))
-    model = MaceMatpes.load(path, wrt=("atoms.pos",))
+    model = MaceMatpes(MACEMatpesSpec(atomic_numbers=..., atomic_energies=...), dtype=torch.float64)
+    model = MaceMatpes.load(path, wrt=("atoms.pos",), dtype=torch.float64)
 
 Every default lives on the spec. Official archives are read and remapped by
 ``MaceXX.load``; weights must already be the official cuEq-converted ones —

@@ -12,6 +12,9 @@ from molrep.chem.embed import DiscreteChannel
 from molrep.chem.encoder import ChemEncoder
 from molrep.chem.features import ChemEmbeddings
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 
 class TestChemEncoder:
     """ChemEncoder reads valence namespaces and writes chem features."""
@@ -24,6 +27,7 @@ class TestChemEncoder:
             proper_dim=8,
             improper_dim=8,
             num_elements=20,
+            dtype=DTYPE,
         )
         out = enc(mini_batch)
         assert ("atoms", "chem_features") in out.keys(include_nested=True)
@@ -39,7 +43,9 @@ class TestChemEncoder:
         assert out["impropers", "chem_features"].shape == (1, 8)
 
     def test_compose_returns_chem_embeddings(self, mini_batch: TensorDict):
-        enc = ChemEncoder(atom_dim=8, bond_dim=6, angle_dim=6, proper_dim=6, improper_dim=6)
+        enc = ChemEncoder(
+            atom_dim=8, bond_dim=6, angle_dim=6, proper_dim=6, improper_dim=6, dtype=DTYPE
+        )
         emb = enc.compose(mini_batch)
         assert isinstance(emb, ChemEmbeddings)
         assert emb.atom.shape == (4, 8)
@@ -49,14 +55,18 @@ class TestChemEncoder:
         assert emb.improper.shape == (1, 6)
 
     def test_embeddings_view(self, mini_batch: TensorDict):
-        enc = ChemEncoder(atom_dim=8, bond_dim=8, angle_dim=8, proper_dim=8, improper_dim=8)
+        enc = ChemEncoder(
+            atom_dim=8, bond_dim=8, angle_dim=8, proper_dim=8, improper_dim=8, dtype=DTYPE
+        )
         out = enc(mini_batch)
         viewed = enc.embeddings(out)
         assert torch.allclose(viewed.atom, out["atoms", "chem_features"])
         assert torch.allclose(viewed.bond, out["bonds", "chem_features"])
 
     def test_write_batch(self, mini_batch: TensorDict):
-        enc = ChemEncoder(atom_dim=8, bond_dim=8, angle_dim=8, proper_dim=8, improper_dim=8)
+        enc = ChemEncoder(
+            atom_dim=8, bond_dim=8, angle_dim=8, proper_dim=8, improper_dim=8, dtype=DTYPE
+        )
         emb = enc.compose(mini_batch)
         written = enc.write_batch(mini_batch, emb)
         assert written is mini_batch or isinstance(written, TensorDict)
@@ -80,7 +90,9 @@ class TestChemEncoder:
             },
             batch_size=[],
         )
-        enc = ChemEncoder(atom_dim=4, bond_dim=4, angle_dim=4, proper_dim=4, improper_dim=4)
+        enc = ChemEncoder(
+            atom_dim=4, bond_dim=4, angle_dim=4, proper_dim=4, improper_dim=4, dtype=DTYPE
+        )
         out = enc(batch)
         assert out["bonds", "chem_features"].shape == (2, 4)
 
@@ -102,14 +114,18 @@ class TestChemEncoder:
             },
             batch_size=[],
         )
-        enc = ChemEncoder(atom_dim=4, bond_dim=4, angle_dim=5, proper_dim=5, improper_dim=5)
+        enc = ChemEncoder(
+            atom_dim=4, bond_dim=4, angle_dim=5, proper_dim=5, improper_dim=5, dtype=DTYPE
+        )
         emb = enc.compose(batch)
         assert emb.angle.shape == (0, 5)
         assert emb.proper.shape == (0, 5)
         assert emb.improper.shape == (0, 5)
 
     def test_no_energy_keys(self, mini_batch: TensorDict):
-        enc = ChemEncoder(atom_dim=4, bond_dim=4, angle_dim=4, proper_dim=4, improper_dim=4)
+        enc = ChemEncoder(
+            atom_dim=4, bond_dim=4, angle_dim=4, proper_dim=4, improper_dim=4, dtype=DTYPE
+        )
         out = enc(mini_batch)
         flat_keys = {str(k) for k in out.keys(include_nested=True)}
         assert not any("energy" in k for k in flat_keys)
@@ -126,7 +142,9 @@ class TestChemEncoder:
     def test_default_stacks_five_chem_graph_blocks(self):
         from molrep.chem.blocks import ChemGraphBlock
 
-        enc = ChemEncoder(atom_dim=4, bond_dim=4, angle_dim=4, proper_dim=4, improper_dim=4)
+        enc = ChemEncoder(
+            atom_dim=4, bond_dim=4, angle_dim=4, proper_dim=4, improper_dim=4, dtype=DTYPE
+        )
         n_blocks = sum(isinstance(module, ChemGraphBlock) for module in enc.modules())
         assert n_blocks == 5
 
@@ -139,6 +157,7 @@ class TestChemEncoder:
             proper_dim=8,
             improper_dim=8,
             n_blocks=n_blocks,
+            dtype=DTYPE,
         )
         from molrep.chem.blocks import ChemGraphBlock
 
@@ -149,7 +168,7 @@ class TestChemEncoder:
 
     def test_negative_n_blocks_raises(self):
         with pytest.raises(ValueError, match="n_blocks"):
-            ChemEncoder(atom_dim=4, bond_dim=4, n_blocks=-1)
+            ChemEncoder(atom_dim=4, bond_dim=4, n_blocks=-1, dtype=DTYPE)
 
     def test_empty_bonds_yield_zero_bond_features(self):
         batch = TensorDict(
@@ -168,6 +187,7 @@ class TestChemEncoder:
             proper_dim=4,
             improper_dim=4,
             n_blocks=5,
+            dtype=DTYPE,
         )
         emb = enc.compose(batch)
         assert emb.atom.shape == (2, 4)
@@ -185,6 +205,7 @@ class TestChemEncoder:
             proper_dim=8,
             improper_dim=8,
             n_blocks=5,
+            dtype=DTYPE,
         )
         enc.eval()
         zero_pos = enc.compose(mini_batch)
@@ -206,6 +227,7 @@ class TestChemEncoder:
             proper_dim=8,
             improper_dim=8,
             n_blocks=5,
+            dtype=DTYPE,
         )
         enc.eval()
         forward = enc.compose(mini_batch)
@@ -223,7 +245,13 @@ class TestChemEncoder:
         """
         torch.manual_seed(0)
         enc = ChemEncoder(
-            atom_dim=8, bond_dim=8, angle_dim=8, proper_dim=8, improper_dim=8, n_blocks=4
+            atom_dim=8,
+            bond_dim=8,
+            angle_dim=8,
+            proper_dim=8,
+            improper_dim=8,
+            n_blocks=4,
+            dtype=DTYPE,
         )
         with torch.no_grad():
             for module in enc.modules():
@@ -237,7 +265,9 @@ class TestChemEncoder:
     def test_padded_valence_rows_stay_zero_after_the_norm(self, mini_batch: TensorDict):
         """LayerNorm of a zero row is its bias; the mask must still win."""
         torch.manual_seed(0)
-        enc = ChemEncoder(atom_dim=8, bond_dim=8, angle_dim=8, proper_dim=8, improper_dim=8)
+        enc = ChemEncoder(
+            atom_dim=8, bond_dim=8, angle_dim=8, proper_dim=8, improper_dim=8, dtype=DTYPE
+        )
         with torch.no_grad():
             enc.bond_norm.bias.fill_(1.0)
             enc.angle_norm.bias.fill_(1.0)
@@ -262,6 +292,7 @@ class TestChemEncoderChannels:
             proper_dim=8,
             improper_dim=8,
             n_blocks=1,
+            dtype=DTYPE,
             **channels,
         )
 
@@ -360,6 +391,7 @@ class TestChemEncoderTermBonds:
             improper_dim=8,
             n_blocks=2,
             bond_channels=(DiscreteChannel(name="bond_type", num_classes=5),),
+            dtype=DTYPE,
         )
         emb = enc.compose(self._cyclobutadiene())
         # The ring is vertex-transitive: no atom feature can tell the torsions apart.
@@ -383,6 +415,8 @@ class TestChemEncoderTermBonds:
             },
             batch_size=[],
         )
-        enc = ChemEncoder(atom_dim=4, bond_dim=4, angle_dim=4, proper_dim=4, improper_dim=4)
+        enc = ChemEncoder(
+            atom_dim=4, bond_dim=4, angle_dim=4, proper_dim=4, improper_dim=4, dtype=DTYPE
+        )
         with pytest.raises(KeyError, match="angles but no bonds"):
             enc.compose(batch)

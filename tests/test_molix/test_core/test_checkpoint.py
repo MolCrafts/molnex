@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molix.config import config
 from molix.core.checkpoint import (
     Checkpoint,
     TorchSaveBackend,
@@ -20,14 +19,6 @@ from molix.core.checkpoint import (
 from molix.core.state import TrainState
 from molix.core.trainer import Trainer
 from molix.hooks import CheckpointHook
-
-
-@pytest.fixture(autouse=True)
-def _reset_precision():
-    config.set_precision("fp32")
-    yield
-    config.set_precision("fp32")
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

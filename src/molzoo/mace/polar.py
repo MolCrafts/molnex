@@ -59,7 +59,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tensordict import TensorDictBase
 
-from molix import config
 from molix.F.scatter import scatter_sum_compile_safe
 from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY
 from molpot.potentials.gto.features import GTOFieldFeatures
@@ -98,12 +97,9 @@ class SparseUvuTensorProduct(nn.Module):
     """
 
     def __init__(
-        self, irreps_in1: str, irreps_in2: str, irreps_out: str, *, dtype: torch.dtype | None = None
+        self, irreps_in1: str, irreps_in2: str, irreps_out: str, *, dtype: torch.dtype
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         in1 = cue.Irreps("O3", irreps_in1)
         in2 = cue.Irreps("O3", irreps_in2)
         out = cue.Irreps("O3", irreps_out)
@@ -225,11 +221,8 @@ class MultiLayerFeatureMixer(nn.Module):
         ``num_layers``.
     """
 
-    def __init__(self, *, irreps: str, num_layers: int, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, *, irreps: str, num_layers: int, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if num_layers < 1:
             raise ValueError(f"num_layers must be >= 1, got {num_layers}")
         self.num_layers = num_layers
@@ -283,12 +276,9 @@ class EnvironmentDependentSpinSourceBlock(nn.Module):
         irreps_in: str,
         l_max: int,
         zero_charges: bool = False,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if l_max < 0:
             raise ValueError(f"l_max must be >= 0, got {l_max}")
         self.l_max = l_max
@@ -346,13 +336,8 @@ class _LinearWithScalarBias(nn.Module):
     ``2x0e+2x1o+2x0e`` keeps Fukui on the last two channels.
     """
 
-    def __init__(
-        self, irreps_in: str, irreps_out: str, *, dtype: torch.dtype | None = None
-    ) -> None:
+    def __init__(self, irreps_in: str, irreps_out: str, *, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         out = cue.Irreps("O3", irreps_out)
         self.linear = cueq.Linear(
             cue.Irreps("O3", irreps_in),
@@ -397,12 +382,9 @@ class GeneralNonLinearBiasReadout(nn.Module):
         irreps_in: str,
         mlp_irreps: str,
         irreps_out: str,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         mlp = cue.Irreps("O3", mlp_irreps)
         out = cue.Irreps("O3", irreps_out)
         out_ls = {(mi.ir.l, int(mi.ir.p)) for mi in out}
@@ -444,12 +426,9 @@ class _AgnosticChargeBiasedLinearPotentialEmbedding(nn.Module):
         potential_irreps: str,
         node_feats_irreps: str,
         charges_irreps: str,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         feats = cue.Irreps("O3", node_feats_irreps)
         self.potential_linear = cueq.Linear(
             cue.Irreps("O3", potential_irreps),
@@ -503,12 +482,9 @@ class AgnosticEmbeddedOneBodyVariableUpdate(nn.Module):
         node_feats_irreps: str,
         potential_irreps: str,
         charges_irreps: str,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         feats = cue.Irreps("O3", node_feats_irreps)
         charges = cue.Irreps("O3", charges_irreps)
         n_0e = _count_0e(feats)
@@ -588,12 +564,9 @@ class OneBodyMLPFieldReadout(nn.Module):
         node_feats_irreps: str,
         potential_irreps: str,
         charges_irreps: str,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         n_0e = _count_0e(cue.Irreps("O3", node_feats_irreps))
         invar = f"{n_0e}x0e"
         self.linear_up_q = _LinearWithScalarBias(charges_irreps, node_feats_irreps, dtype=dtype)
@@ -677,7 +650,7 @@ class MacePolar(MacePotential):
         wrt: Wrt = (),
         energy_dtype: torch.dtype | None = torch.float64,
         input_dtype: torch.dtype | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__(
             spec,
@@ -775,7 +748,7 @@ class MacePolar(MacePotential):
         wrt: Wrt = (),
         energy_dtype: torch.dtype | None = torch.float64,
         input_dtype: torch.dtype | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> Self:
         """Load an official Polar dump (:meth:`MacePotential.load`)."""
         return cls._load(

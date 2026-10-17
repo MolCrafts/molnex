@@ -52,7 +52,7 @@ class TestLJParameterHead:
         depth) while sigma stays moderate (~1 Å): flooring sigma too would
         zero ``dE/dε`` and leave the head with no learning signal.
         """
-        head = LJParameterHead(feature_dim=16)
+        head = LJParameterHead(feature_dim=16, dtype=torch.float32)
         out = head(node_features)
         assert torch.all(out["epsilon"] < 5e-3), out["epsilon"]
         assert torch.all(out["epsilon"] > 0)
@@ -60,7 +60,9 @@ class TestLJParameterHead:
         assert torch.allclose(out["sigma"], expected_sigma, atol=1e-3), out["sigma"]
 
     def test_init_values_are_configurable(self, node_features):
-        head = LJParameterHead(feature_dim=16, init_epsilon=0.05, init_sigma=1.5)
+        head = LJParameterHead(
+            feature_dim=16, init_epsilon=0.05, init_sigma=1.5, dtype=torch.float32
+        )
         out = head(node_features)
         assert torch.allclose(out["epsilon"], torch.full_like(out["epsilon"], 0.05), atol=1e-3)
         assert torch.allclose(out["sigma"], torch.full_like(out["sigma"], 1.5), atol=1e-3)
@@ -69,9 +71,9 @@ class TestLJParameterHead:
         import pytest
 
         with pytest.raises(ValueError, match="init_sigma"):
-            LJParameterHead(feature_dim=16, init_sigma=0.0)
+            LJParameterHead(feature_dim=16, init_sigma=0.0, dtype=torch.float32)
         with pytest.raises(ValueError, match="init_epsilon"):
-            LJParameterHead(feature_dim=16, init_epsilon=2.0)
+            LJParameterHead(feature_dim=16, init_epsilon=2.0, dtype=torch.float32)
 
     def test_relaxed_contact_has_a_slope_once_epsilon_leaves_the_floor(self):
         """A 2.4 Å pair is where a relaxed nonbonded contact sits.
@@ -90,14 +92,19 @@ class TestLJParameterHead:
             sixth = ratio**6
             return 4.0 * predicted["epsilon"][0] * (sixth * sixth - sixth)
 
-        floor = LJParameterHead(feature_dim=16)
-        learnable = LJParameterHead(feature_dim=16, init_epsilon=0.05, init_sigma=1.5)
+        floor = LJParameterHead(feature_dim=16, dtype=torch.float32)
+        learnable = LJParameterHead(
+            feature_dim=16, init_epsilon=0.05, init_sigma=1.5, dtype=torch.float32
+        )
         energy(floor, 2.4).backward()
         energy(learnable, 2.4).backward()
         floor_bias = floor.mlp[-1].bias.grad.abs().sum()
         learnable_bias = learnable.mlp[-1].bias.grad.abs().sum()
         assert learnable_bias > 100.0 * floor_bias
-        clash = energy(LJParameterHead(feature_dim=16, init_epsilon=0.05, init_sigma=1.5), 0.8)
+        clash = energy(
+            LJParameterHead(feature_dim=16, init_epsilon=0.05, init_sigma=1.5, dtype=torch.float32),
+            0.8,
+        )
         assert clash.abs() < 1000.0
 
 
@@ -108,7 +115,7 @@ class TestLJParameterHead:
 
 class TestRepulsionParameterHead:
     def test_output_keys_and_shapes(self, node_features):
-        head = RepulsionParameterHead(feature_dim=16)
+        head = RepulsionParameterHead(feature_dim=16, dtype=torch.float32)
         out = head(node_features)
         assert "eps_rep" in out
         assert "lam_rep" in out
@@ -116,13 +123,13 @@ class TestRepulsionParameterHead:
         assert out["lam_rep"].shape == (5,)
 
     def test_outputs_positive(self, node_features):
-        head = RepulsionParameterHead(feature_dim=16)
+        head = RepulsionParameterHead(feature_dim=16, dtype=torch.float32)
         out = head(node_features)
         assert torch.all(out["eps_rep"] > 0)
         assert torch.all(out["lam_rep"] > 0)
 
     def test_min_floor(self):
-        head = RepulsionParameterHead(feature_dim=4, min_eps=0.5, min_lam=0.3)
+        head = RepulsionParameterHead(feature_dim=4, min_eps=0.5, min_lam=0.3, dtype=torch.float32)
         out = head(torch.zeros(3, 4))
         assert torch.all(out["eps_rep"] >= 0.5)
         assert torch.all(out["lam_rep"] >= 0.3)
@@ -140,7 +147,7 @@ class TestRepulsionParameterHead:
 
 class TestChargeTransferParameterHead:
     def test_output_keys_and_shapes(self, node_features):
-        head = ChargeTransferParameterHead(feature_dim=16)
+        head = ChargeTransferParameterHead(feature_dim=16, dtype=torch.float32)
         out = head(node_features)
         assert "eps_ct" in out
         assert "lam_ct" in out
@@ -148,7 +155,7 @@ class TestChargeTransferParameterHead:
         assert out["lam_ct"].shape == (5,)
 
     def test_outputs_positive(self, node_features):
-        head = ChargeTransferParameterHead(feature_dim=16)
+        head = ChargeTransferParameterHead(feature_dim=16, dtype=torch.float32)
         out = head(node_features)
         assert torch.all(out["eps_ct"] > 0)
         assert torch.all(out["lam_ct"] > 0)
@@ -166,13 +173,13 @@ class TestChargeTransferParameterHead:
 
 class TestChargeHead:
     def test_output_shape(self, node_features, batch):
-        head = ChargeHead(feature_dim=16)
+        head = ChargeHead(feature_dim=16, dtype=torch.float32)
         out = head(node_features, batch=batch)
         assert "charge" in out
         assert out["charge"].shape == (5,)
 
     def test_charge_conservation_neutral(self, node_features, batch):
-        head = ChargeHead(feature_dim=16, total_charge=0.0)
+        head = ChargeHead(feature_dim=16, total_charge=0.0, dtype=torch.float32)
         out = head(node_features, batch=batch)
         charge = out["charge"]
         # Sum per molecule should be ~0
@@ -182,7 +189,7 @@ class TestChargeHead:
         assert abs(mol1_sum.item()) < 1e-5
 
     def test_charge_conservation_nonzero(self, node_features, batch):
-        head = ChargeHead(feature_dim=16, total_charge=1.0)
+        head = ChargeHead(feature_dim=16, total_charge=1.0, dtype=torch.float32)
         out = head(node_features, batch=batch)
         charge = out["charge"]
         mol0_sum = charge[:3].sum()
@@ -191,7 +198,7 @@ class TestChargeHead:
         assert abs(mol1_sum.item() - 1.0) < 1e-5
 
     def test_grad_flows(self, batch):
-        head = ChargeHead(feature_dim=8)
+        head = ChargeHead(feature_dim=8, dtype=torch.float32)
         x = torch.randn(5, 8, requires_grad=True)
         out = head(x, batch=batch)
         out["charge"].sum().backward()
@@ -226,6 +233,7 @@ class TestTSScalingHead:
             c6_free=torch.rand(num_elements) * 10,
             alpha_free=torch.rand(num_elements) * 5,
             r_star_free=torch.rand(num_elements) * 2 + 1.0,
+            dtype=torch.float32,
         )
 
     def test_output_keys_and_shapes(self, ts_head, node_features):

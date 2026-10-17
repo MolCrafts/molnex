@@ -142,7 +142,9 @@ def test_edge_to_node_pooling():
 class TestPotentialComposer:
     def test_an_empty_term_set_is_refused(self) -> None:
         with pytest.raises(ValueError, match="at least one potential"):
-            PotentialComposer(head=LJParameterHead(feature_dim=16), potentials={})
+            PotentialComposer(
+                head=LJParameterHead(feature_dim=16, dtype=torch.float32), potentials={}
+            )
 
     def test_energy_sums_the_terms_and_writes_them_with_the_parameters(self) -> None:
         out = _composer(wrt=()).energy(_batch(_positions(torch.float64)))

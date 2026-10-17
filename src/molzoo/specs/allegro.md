@@ -7,7 +7,7 @@ Allegro energy model (`nequip` ≥ 0.7 framework) that loads official
 | Field | Value |
 |-------|-------|
 | Module | `molzoo.allegro` |
-| Entry points | `AllegroEncoder(spec)` (body), `AllegroPotential(spec, wrt=())` (energy model), `AllegroPotential.load(path)` |
+| Entry points | `AllegroEncoder(spec, dtype=)` (body), `AllegroPotential(spec, wrt=(), dtype=)` (energy model), `AllegroPotential.load(path, dtype=)` |
 | Config | `AllegroSpec` (torch-free) |
 | Paper | Musaelian et al., *Learning Local Equivariant Representations for Large-Scale Atomistic Dynamics*, Nat. Commun. 14, 579 (2023) — https://arxiv.org/abs/2204.05249 |
 | Reference implementation | `nequip-allegro` 0.8.3 + `nequip` 0.19.1 (PyPI); `Allegro-OAM-L:0.1` built with allegro 0.7.1 (same mathematics) |

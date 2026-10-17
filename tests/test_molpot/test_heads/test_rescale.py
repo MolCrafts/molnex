@@ -7,20 +7,23 @@ import torch
 
 from molpot.heads import GlobalRescale, PerSpeciesScaleShift
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 
 class TestGlobalRescale:
     def test_identity_default(self):
-        m = GlobalRescale()
+        m = GlobalRescale(dtype=DTYPE)
         x = torch.randn(5)
         torch.testing.assert_close(m(x), x)
 
     def test_affine(self):
-        m = GlobalRescale(scale=2.0, shift=1.0)
+        m = GlobalRescale(scale=2.0, shift=1.0, dtype=DTYPE)
         x = torch.tensor([-1.0, 0.0, 1.0])
         torch.testing.assert_close(m(x), torch.tensor([-1.0, 1.0, 3.0]))
 
     def test_buffers_not_trainable(self):
-        m = GlobalRescale(scale=2.0, shift=0.5)
+        m = GlobalRescale(scale=2.0, shift=0.5, dtype=DTYPE)
         params = list(m.parameters())
         assert params == []
         buffers = {name for name, _ in m.named_buffers()}
@@ -29,7 +32,7 @@ class TestGlobalRescale:
 
 class TestPerSpeciesScaleShift:
     def test_shapes_and_defaults(self):
-        m = PerSpeciesScaleShift(num_species=5)
+        m = PerSpeciesScaleShift(num_species=5, dtype=DTYPE)
         x = torch.tensor([1.0, 2.0, 3.0])
         Z = torch.tensor([0, 1, 2])
         # defaults: scale=1, shift=0 → identity
@@ -38,14 +41,14 @@ class TestPerSpeciesScaleShift:
     def test_explicit_shift_scale(self):
         scales = [1.0, 2.0, 0.5]
         shifts = [0.0, 1.0, -1.0]
-        m = PerSpeciesScaleShift(num_species=3, scales=scales, shifts=shifts)
+        m = PerSpeciesScaleShift(num_species=3, scales=scales, shifts=shifts, dtype=DTYPE)
         x = torch.tensor([10.0, 10.0, 10.0])
         Z = torch.tensor([0, 1, 2])
         expected = torch.tensor([10.0, 21.0, 4.0])
         torch.testing.assert_close(m(x, Z), expected)
 
     def test_trainable_flags_are_independent(self):
-        m = PerSpeciesScaleShift(num_species=3, scales_trainable=True)
+        m = PerSpeciesScaleShift(num_species=3, scales_trainable=True, dtype=DTYPE)
         assert isinstance(m.scales, torch.nn.Parameter)
         assert not isinstance(m.shifts, torch.nn.Parameter)
 
@@ -57,4 +60,4 @@ class TestPerSpeciesScaleShift:
 
     def test_wrong_length_raises(self):
         with pytest.raises(ValueError, match="length 5"):
-            PerSpeciesScaleShift(num_species=5, scales=[1.0, 2.0])
+            PerSpeciesScaleShift(num_species=5, scales=[1.0, 2.0], dtype=DTYPE)

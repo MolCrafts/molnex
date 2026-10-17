@@ -13,14 +13,14 @@ from tests.conftest import (
     rotate_vectors,
     translate_graph,
 )
-from tests.test_molzoo.test_pinet.conftest import TINY
+from tests.test_molzoo.test_pinet.conftest import DTYPE, TINY
 
 ATOL = 1e-10
 
 
 def _encoder(rank: int = 3, **overrides) -> PiNetEncoder:
     torch.manual_seed(0)
-    return PiNetEncoder(PiNetSpec(**{**TINY, "rank": rank, **overrides})).eval()
+    return PiNetEncoder(PiNetSpec(**{**TINY, "rank": rank, **overrides}), dtype=DTYPE).eval()
 
 
 def _rotate_p3(p3: torch.Tensor, r: torch.Tensor) -> torch.Tensor:

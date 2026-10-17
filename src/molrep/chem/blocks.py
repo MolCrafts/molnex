@@ -13,7 +13,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from molix import config
 from molrep.chem.context import BondContext
 
 
@@ -58,12 +57,9 @@ class ChemGraphBlock(nn.Module):
         bond_dim: int,
         hidden_dim: int | None = None,
         local_attention: bool = False,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if atom_dim <= 0 or bond_dim <= 0:
             raise ValueError("atom_dim and bond_dim must be positive")
         self.atom_dim = int(atom_dim)

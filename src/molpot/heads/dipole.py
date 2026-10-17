@@ -11,7 +11,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from molix import config
 from molix.F.scatter import scatter_sum
 from molpot.heads._common import graph_counts as _graph_counts
 
@@ -76,12 +75,9 @@ class DipoleHead(nn.Module):
         vector_dipole: bool = True,
         charge_neutrality: bool = True,
         regularization: bool = True,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         variant = variant.lower()
         self.variant = variant
         self.vector_dipole = vector_dipole

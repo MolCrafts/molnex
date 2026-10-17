@@ -14,6 +14,9 @@ from tests.conftest import (
     rotation_matrix_z,
 )
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 
 class TestSphericalHarmonicsSpec:
     """Test SphericalHarmonicsSpec configuration."""
@@ -32,28 +35,28 @@ class TestSphericalHarmonics:
         vectors = torch.randn(10, 3)
 
         # l_max=0: 1 component (scalar)
-        sh0 = SphericalHarmonics(l_max=0)
+        sh0 = SphericalHarmonics(l_max=0, dtype=DTYPE)
         out0 = sh0(vectors)
         assert out0.shape == (10, 1)
 
         # l_max=1: 1 + 3 = 4 components
-        sh1 = SphericalHarmonics(l_max=1)
+        sh1 = SphericalHarmonics(l_max=1, dtype=DTYPE)
         out1 = sh1(vectors)
         assert out1.shape == (10, 4)
 
         # l_max=2: 1 + 3 + 5 = 9 components
-        sh2 = SphericalHarmonics(l_max=2)
+        sh2 = SphericalHarmonics(l_max=2, dtype=DTYPE)
         out2 = sh2(vectors)
         assert out2.shape == (10, 9)
 
         # l_max=3: 1 + 3 + 5 + 7 = 16 components
-        sh3 = SphericalHarmonics(l_max=3)
+        sh3 = SphericalHarmonics(l_max=3, dtype=DTYPE)
         out3 = sh3(vectors)
         assert out3.shape == (10, 16)
 
     def test_forward_batch(self):
         """Test with batched input."""
-        sh = SphericalHarmonics(l_max=2)
+        sh = SphericalHarmonics(l_max=2, dtype=DTYPE)
         # Note: SphericalHarmonics expects (..., 3) shape, flattens internally
         # We can pass (N, 3) where N is total number of vectors
         vectors = torch.randn(100, 3)  # [total_vectors, 3]
@@ -63,7 +66,7 @@ class TestSphericalHarmonics:
 
     def test_normalized_vectors(self):
         """Test with normalized vectors."""
-        sh = SphericalHarmonics(l_max=2)
+        sh = SphericalHarmonics(l_max=2, dtype=DTYPE)
 
         # Create normalized vectors
         vectors = torch.randn(10, 3)
@@ -75,7 +78,7 @@ class TestSphericalHarmonics:
 
     def test_zero_vector(self):
         """Test behavior with zero vectors."""
-        sh = SphericalHarmonics(l_max=2)
+        sh = SphericalHarmonics(l_max=2, dtype=DTYPE)
         vectors = torch.zeros(5, 3)
 
         # Should handle gracefully (likely produces zeros or small values)
@@ -85,7 +88,7 @@ class TestSphericalHarmonics:
 
     def test_rotation_equivariance_l0(self):
         """Test that l=0 (scalars) are rotation invariant."""
-        sh = SphericalHarmonics(l_max=0)
+        sh = SphericalHarmonics(l_max=0, dtype=DTYPE)
 
         # Original vectors
         vectors = torch.randn(10, 3)
@@ -106,7 +109,7 @@ class TestSphericalHarmonics:
 
     def test_differentiable(self):
         """Test that gradients flow through SphericalHarmonics."""
-        sh = SphericalHarmonics(l_max=2)
+        sh = SphericalHarmonics(l_max=2, dtype=DTYPE)
         vectors = torch.randn(10, 3, requires_grad=True)
 
         output = sh(vectors)
@@ -118,7 +121,7 @@ class TestSphericalHarmonics:
 
     def test_orthogonality_property(self):
         """Test approximate orthogonality of spherical harmonics on sphere."""
-        sh = SphericalHarmonics(l_max=2)
+        sh = SphericalHarmonics(l_max=2, dtype=DTYPE)
 
         # Sample many points on unit sphere
         n_samples = 1000
@@ -133,7 +136,7 @@ class TestSphericalHarmonics:
 
     def test_dtype_consistency(self):
         """Test that output dtype matches input."""
-        sh = SphericalHarmonics(l_max=2)
+        sh = SphericalHarmonics(l_max=2, dtype=DTYPE)
 
         # Float32
         vec_f32 = torch.randn(10, 3, dtype=torch.float32)
@@ -150,7 +153,7 @@ class TestSphericalHarmonics:
         vectors = torch.randn(10, 3)
 
         for l_max in [0, 1, 2, 3, 4]:
-            sh = SphericalHarmonics(l_max=l_max)
+            sh = SphericalHarmonics(l_max=l_max, dtype=DTYPE)
             output = sh(vectors)
             expected_dim = (l_max + 1) ** 2
             assert output.shape == (10, expected_dim)
@@ -161,7 +164,7 @@ class TestSphericalHarmonics:
         For l=1, the spherical harmonics should transform like a 3D vector:
         Y_l=1(R·r) should be related to R·Y_l=1(r) by a rotation matrix.
         """
-        sh = SphericalHarmonics(l_max=1)
+        sh = SphericalHarmonics(l_max=1, dtype=DTYPE)
 
         # Original vectors
         vectors = torch.randn(10, 3)
@@ -190,7 +193,7 @@ class TestSphericalHarmonics:
 
     def test_rotation_equivariance_random(self):
         """Test equivariance under random rotations for l=0, l=1, l=2."""
-        sh = SphericalHarmonics(l_max=2)
+        sh = SphericalHarmonics(l_max=2, dtype=DTYPE)
 
         # Generate random vectors
         vectors = torch.randn(20, 3)
@@ -214,7 +217,7 @@ class TestSphericalHarmonics:
 
     def test_rotation_x_axis(self):
         """Test rotation around x-axis."""
-        sh = SphericalHarmonics(l_max=1)
+        sh = SphericalHarmonics(l_max=1, dtype=DTYPE)
 
         vectors = torch.randn(10, 3)
         vectors = vectors / vectors.norm(dim=-1, keepdim=True)
@@ -237,7 +240,7 @@ class TestSphericalHarmonics:
 
     def test_rotation_y_axis(self):
         """Test rotation around y-axis."""
-        sh = SphericalHarmonics(l_max=1)
+        sh = SphericalHarmonics(l_max=1, dtype=DTYPE)
 
         vectors = torch.randn(10, 3)
         vectors = vectors / vectors.norm(dim=-1, keepdim=True)

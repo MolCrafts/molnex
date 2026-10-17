@@ -30,15 +30,16 @@ Construction takes the typed spec object and ``wrt``; every default lives on
 the spec and official weights come through ``load``. Import each family from
 its subpackage (``molzoo`` itself exports nothing)::
 
+    import torch
     from molzoo.allegro import AllegroPotential, AllegroSpec
     from molzoo.mace import MACEMatpesSpec, MaceMatpes
     from molzoo.pinet import PiNetPotential, PiNetSpec
 
-    model = MaceMatpes(MACEMatpesSpec(atomic_numbers=[1, 6, 8], atomic_energies=[-13.6, -1029.0, -2041.0]), wrt=("atoms.pos",))
-    model = MaceMatpes.load(path, wrt=("atoms.pos",))
-    model = AllegroPotential(AllegroSpec(atomic_numbers=[1, 6, 8], r_max=4.0, num_scalar_features=16, num_tensor_features=4), wrt=("atoms.pos",))
-    model = AllegroPotential.load("Allegro-OAM-L-0.1.nequip.zip", wrt=("atoms.pos",))
-    model = PiNetPotential(PiNetSpec(atomic_numbers=[1, 6, 8], rank=3), wrt=("atoms.pos",))
+    model = MaceMatpes(MACEMatpesSpec(atomic_numbers=[1, 6, 8], atomic_energies=[-13.6, -1029.0, -2041.0]), wrt=("atoms.pos",), dtype=torch.float64)
+    model = MaceMatpes.load(path, wrt=("atoms.pos",), dtype=torch.float64)
+    model = AllegroPotential(AllegroSpec(atomic_numbers=[1, 6, 8], r_max=4.0, num_scalar_features=16, num_tensor_features=4), wrt=("atoms.pos",), dtype=torch.float64)
+    model = AllegroPotential.load("Allegro-OAM-L-0.1.nequip.zip", wrt=("atoms.pos",), dtype=torch.float64)
+    model = PiNetPotential(PiNetSpec(atomic_numbers=[1, 6, 8], rank=3), wrt=("atoms.pos",), dtype=torch.float64)
 
 ``model(frame)`` runs ``energy`` and the ``wrt`` derivatives in one forward and
 one ``autograd.grad``; ``Derivative(model.energy, wrt=...)`` composed outside
@@ -95,11 +96,12 @@ Encoders write their features back into the same batch: `MACEEncoder` and
 Encoder contract — a validated spec, one call per batch:
 
 ```python
+import torch
 from molzoo.mace.encoder import MACEEncoder
 from molzoo.mace.spec import MACEMatpesSpec
 
 spec = MACEMatpesSpec(atomic_numbers=[1, 6, 8], atomic_energies=[-13.6, -1029.0, -2041.0])
-batch = MACEEncoder(spec)(batch)  # writes atoms.node_features
+batch = MACEEncoder(spec, dtype=torch.float64)(batch)  # writes atoms.node_features
 # (N, num_interactions, num_features): each layer's invariant 0e block
 features = batch["atoms", "node_features"]
 ```
@@ -107,12 +109,13 @@ features = batch["atoms", "node_features"]
 The same backbone, primitive by primitive, composed by the caller:
 
 ```python
+import torch
 from molrep.embedding.geometry import edge_lengths, edge_vectors
 from molzoo.mace.encoder import MACEEncoder
 from molzoo.mace.spec import MACEMatpesSpec
 
 spec = MACEMatpesSpec(atomic_numbers=[1, 6, 8], atomic_energies=[-13.6, -1029.0, -2041.0])
-encoder = MACEEncoder(spec)
+encoder = MACEEncoder(spec, dtype=torch.float64)
 
 vectors = edge_vectors(pos, edge_index, edge_diff=pair_diff)  # imaged value, gradient via pos
 elements = encoder.element_index(Z)

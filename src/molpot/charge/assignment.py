@@ -99,7 +99,7 @@ class AtomicChargeModel(nn.Module):
 
             import dataclasses
 
-            manifest = ff.manifest(profile="A0")
+            manifest = ff.manifest(profile="A0", dtype=torch.float64)
             manifest = dataclasses.replace(
                 manifest,
                 electrostatics=charge_model.electrostatics_record(

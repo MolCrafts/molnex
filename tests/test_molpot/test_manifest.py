@@ -50,7 +50,6 @@ from pathlib import Path
 import pytest
 import torch
 
-from molix.config import config
 from molpot.contract import (
     Contribution,
     CutoffKind,
@@ -63,7 +62,6 @@ from molpot.forcefield.schema import ParamSpec
 from molpot.ir import ExclusionScales, NonbondedScaling
 from molpot.ir.nonbonded import NonbondedMethodRecord
 from molpot.manifest import (
-    MANIFEST_SCHEMA,
     ElectrostaticsRecord,
     InteractionRecord,
     ModelManifest,
@@ -73,6 +71,9 @@ from molpot.manifest import (
     RepresentationRecord,
     SolverRecord,
 )
+
+#: Floating dtype the described model runs at.
+DTYPE = torch.float64
 
 #: SHA-256 of ``{"k": [1.0, 2.0], "r0": [1.5, 1.6]}`` as fp64 bytes in ``names``
 #: order — hard-coded golden, provenance in the module docstring.
@@ -108,11 +109,9 @@ def _manifest() -> ModelManifest:
     ``nonbonded.lj_mixing`` is the OPLS-AA ``"geometric"`` rather than the
     ``"lorentz-berthelot"`` default, so a codec that dropped the Lennard-Jones
     combining rule — or defaulted it back — fails the round trip instead of
-    agreeing by coincidence. It rides inside the nested ``nonbonded`` record,
-    which is why carrying it needs no ``MANIFEST_SCHEMA`` bump.
+    agreeing by coincidence.
     """
     return ModelManifest(
-        schema_version=MANIFEST_SCHEMA,
         profile="A0",
         units="real",
         interactions=(
@@ -196,23 +195,6 @@ def _manifest() -> ModelManifest:
 
 
 class TestModelManifest:
-    def test_schema_version_is_two(self) -> None:
-        """Pinned literal: bumping it is a breaking change, not a refactor.
-
-        Went to ``2`` on 2026-09-08 with
-        :attr:`~molpot.ir.nonbonded.NonbondedMethodRecord.lj_mixing`, the
-        Lennard-Jones combining rule. The field is *required* on the record, so
-        every schema-2 payload states the rule and a reader never has to guess
-        which force field a manifest describes — which is the whole point of
-        recording it. That is exactly what a version bump is for: a schema-1
-        payload is still readable (below), but it is honestly labelled as
-        coming from before the field existed rather than being retro-fitted
-        into the current layout.
-
-        The LAMMPS pair-style JSON is a different artifact and carries no schema version.
-        """
-        assert MANIFEST_SCHEMA == 2
-
     def test_from_dict_inverts_to_dict(self) -> None:
         """Exact inverse — enums, frozensets and tuples all come back."""
         manifest = _manifest()
@@ -249,9 +231,6 @@ class TestModelManifest:
         manifest = _manifest()
         path = manifest.write(tmp_path / "m.json")
         assert path.read_text() == json.dumps(manifest.to_dict(), sort_keys=True, indent=2)
-        # The version is *in* the file: it is what a reader branches on before
-        # it may interpret a single other key.
-        assert json.loads(path.read_text())["schema_version"] == 2
 
     def test_is_frozen(self) -> None:
         """A manifest describes one model; rewriting a field in place lies."""
@@ -259,46 +238,15 @@ class TestModelManifest:
         with pytest.raises(dataclasses.FrozenInstanceError):
             manifest.profile = "B1"  # ty: ignore[invalid-assignment]
 
-    def test_a_schema_one_payload_reads_back_with_no_declared_mixing_rule(self) -> None:
-        """The previous layout is still readable, and honestly so.
+    def test_a_payload_without_the_mixing_rule_is_defective(self) -> None:
+        """A missing nested field is a truncated or hand-edited file, not an older layout.
 
-        A schema-1 manifest was written before the combining rule was recorded
-        at all, so the only true thing to say about its rule is "none was
-        declared" — ``None``, which the field documents as "Lorentz–Berthelot by
-        the then-default", the rule every molnex model mixed with until
-        2026-09-08. Refusing the payload would strand every manifest already on
-        disk; inventing ``"lorentz-berthelot"`` would claim the run *declared* a
-        rule it never did, and two runs would then compare equal on a field
-        neither of them recorded.
-        """
-        payload = _manifest().to_dict()
-        payload["schema_version"] = 1
-        payload["nonbonded"] = _without_lj_mixing(payload["nonbonded"])
-        assert ModelManifest.from_dict(payload).nonbonded.lj_mixing is None
-
-    def test_a_schema_two_payload_without_the_mixing_rule_is_defective(self) -> None:
-        """Tolerance is for the *old* layout, not for a hole in the current one.
-
-        A payload labelled schema 2 claims to have been written by a molnex
-        that records the rule, so a missing key is a truncated or hand-edited
-        file rather than an older one. Decoding it to ``None`` would give it
-        the same reading as a genuine schema-1 manifest and quietly erase the
-        distinction the version bump exists to draw.
+        Every field of the nonbonded record is required, so the key is refused
+        rather than decoded to ``None``.
         """
         payload = _manifest().to_dict()
         payload["nonbonded"] = _without_lj_mixing(payload["nonbonded"])
         with pytest.raises(TypeError):
-            ModelManifest.from_dict(payload)
-
-    def test_from_dict_refuses_a_schema_version_this_molnex_cannot_read(self) -> None:
-        """A layout this version does not know is not one it may parse.
-
-        The refusal names the offending version, so the payload can be routed
-        to the molnex that wrote it instead of being best-effort decoded into
-        a manifest that describes a model nobody built.
-        """
-        payload = {**_manifest().to_dict(), "schema_version": 99}
-        with pytest.raises(ValueError, match="99"):
             ModelManifest.from_dict(payload)
 
 
@@ -371,14 +319,13 @@ class TestInteractionRecord:
 
 
 class TestNumericsRecord:
-    def test_from_runtime_reads_the_process_wide_precision(self) -> None:
-        """The precision a model runs at has exactly two sources, both read here.
+    def test_from_runtime_records_the_given_dtype_and_torch_matmul_policy(self) -> None:
+        """The dtype is the caller's; the matmul policy is read from torch.
 
-        ``molix.config["ftype"]`` is the global parameter / batch dtype.
         ``matmul_precision`` is not a molnex setting: molnex leaves PyTorch's
         default in place, so the process-wide policy only ever lives in torch.
         The effective policy is what a manifest has to record.
         """
-        record = NumericsRecord.from_runtime()
-        assert record.dtype == str(config["ftype"])
+        record = NumericsRecord.from_runtime(DTYPE)
+        assert record.dtype == str(DTYPE)
         assert record.matmul_precision == torch.get_float32_matmul_precision()

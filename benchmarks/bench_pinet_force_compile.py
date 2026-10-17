@@ -94,6 +94,7 @@ def build(
             out_nodes=[hidden],
         ),
         wrt=("atoms.pos",) if compute_forces else (),
+        dtype=torch.float32,
     )
 
 

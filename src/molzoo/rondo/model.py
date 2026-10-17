@@ -2,7 +2,7 @@
 
 Spec: ``src/molzoo/specs/rondo.md``.
 
-``Rondo(forcefield, spec, wrt=("atoms.pos",))`` is shaped like every other
+``Rondo(forcefield, spec, wrt=("atoms.pos",), dtype=torch.float64)`` is shaped like every other
 molzoo model (:class:`molix.autograd.Potential`): ``forward`` is the
 :class:`~molix.autograd.Derivative` of :meth:`Rondo.energy`, writing
 ``graphs.energy`` and, for ``atoms.pos``, the force at ``atoms.forces_pred`` —
@@ -47,7 +47,6 @@ import torch.nn as nn
 from molpy.ff.forcefield import ForceField
 from tensordict import TensorDict
 
-from molix import config
 from molix.autograd import Derivative, Potential
 from molix.schema import ENERGY_KEY, FORCES_PRED_KEY, POS_KEY
 from molpot.charge import (
@@ -92,8 +91,7 @@ class Rondo(Potential):
         wrt: Variables :meth:`forward` differentiates against, as for every
             molzoo potential (``("atoms.pos",)`` writes ``atoms.forces_pred``;
             ``()`` makes ``forward`` the energy alone).
-        dtype: Floating dtype every parameter and buffer is built at; ``None``
-            is the (transitional) process-wide default.
+        dtype: Floating dtype every parameter and buffer is built at.
 
     Raises:
         ValueError: A declared style has no potential or no head, or a
@@ -105,7 +103,7 @@ class Rondo(Potential):
         ff = mp.ff.ForceField(name="class-i", units="real")
         ff.def_style("bond", "harmonic")
         ...
-        model = Rondo(ff, RondoSpec(), wrt=("atoms.pos",))
+        model = Rondo(ff, RondoSpec(), wrt=("atoms.pos",), dtype=torch.float64)
         out = model(batch)      # graphs.energy, atoms.forces_pred, atoms.charge, bonds.k …
     """
 
@@ -126,12 +124,9 @@ class Rondo(Potential):
         spec: RondoSpec | None = None,
         *,
         wrt: Sequence[str] = ("atoms.pos",),
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         #: The build dtype of every float parameter and buffer.
         self.dtype = dtype
         spec = RondoSpec() if spec is None else spec

@@ -17,7 +17,6 @@ import torch.nn as nn
 from tensordict import TensorDict
 
 from molix.autograd import Derivative
-from molix.config import config
 from molix.core.state import TrainState
 from molix.core.steps.eval import DefaultEvalStep
 from molix.core.trainer import Trainer
@@ -25,14 +24,6 @@ from molix.core.trainer import Trainer
 Batch = Mapping[str, Mapping[str, torch.Tensor]]
 Predictions = dict[str, torch.Tensor]
 LossFn = Callable[[Predictions, Batch], torch.Tensor]
-
-
-@pytest.fixture(autouse=True)
-def _reset_precision() -> None:
-    """Precision is a global singleton — restore fp32 around every test."""
-    config.set_precision("fp32")
-    yield
-    config.set_precision("fp32")
 
 
 class _StubModel(nn.Module):

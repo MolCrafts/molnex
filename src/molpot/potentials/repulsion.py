@@ -19,7 +19,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from molix import config
 from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
 from molrep.embedding.covalent import covalent_radii
 from molrep.embedding.cutoff import PolynomialCutoff
@@ -65,19 +64,18 @@ class ZBLRepulsion(nn.Module):
         a_prefactor: float = 0.4543,
         max_z: int = 118,
         trainable: bool = False,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        ftype = config.ftype if dtype is None else dtype  # transitional (2c)
         self.exponent = int(exponent)
 
-        self.register_buffer("c", torch.tensor(_SCREENING_C, dtype=ftype))
+        self.register_buffer("c", torch.tensor(_SCREENING_C, dtype=dtype))
         self.c: torch.Tensor
-        self.register_buffer("covalent_radii", covalent_radii(max_z, dtype=ftype))
+        self.register_buffer("covalent_radii", covalent_radii(max_z, dtype=dtype))
         self.covalent_radii: torch.Tensor
 
         for name, value in (("a_exp", a_exp), ("a_prefactor", a_prefactor)):
-            tensor = torch.tensor(float(value), dtype=ftype)
+            tensor = torch.tensor(float(value), dtype=dtype)
             if trainable:
                 setattr(self, name, nn.Parameter(tensor))
             else:
@@ -151,9 +149,7 @@ class UniversalZBL(nn.Module):
     _C = (0.02817, 0.28022, 0.50986, 0.18175)
     _D = (-0.20162, -0.40290, -0.94229, -3.19980)
 
-    def __init__(
-        self, *, r_max: float, exponent: int = 6, dtype: torch.dtype | None = None
-    ) -> None:
+    def __init__(self, *, r_max: float, exponent: int = 6, dtype: torch.dtype) -> None:
         super().__init__()
         self.cutoff = PolynomialCutoff(r_cut=r_max, exponent=exponent, dtype=dtype)
         self.register_buffer(

@@ -22,8 +22,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from molix import config
-
 
 class GlobalRescale(nn.Module):
     """Affine transform ``y = scale * x + shift`` with frozen buffers.
@@ -36,11 +34,8 @@ class GlobalRescale(nn.Module):
             already removed the per-species baseline from the target.
     """
 
-    def __init__(self, *, scale: float = 1.0, shift: float = 0.0, dtype: torch.dtype | None = None):
+    def __init__(self, *, scale: float = 1.0, shift: float = 0.0, dtype: torch.dtype):
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.register_buffer("scale", torch.tensor(float(scale), dtype=dtype))
         self.register_buffer("shift", torch.tensor(float(shift), dtype=dtype))
 
@@ -70,8 +65,7 @@ class PerSpeciesScaleShift(nn.Module):
         scales_trainable: Make ``scales`` a learnable ``nn.Parameter``
             (otherwise a buffer).
         shifts_trainable: Same for ``shifts``.
-        dtype: Storage dtype of the tables; ``None`` is the (transitional)
-            process-wide default.
+        dtype: Storage dtype of the tables.
             Allegro passes ``torch.float64`` (upstream ``PerTypeScaleShift``
             always computes in float64, whatever the model dtype).
 
@@ -92,13 +86,12 @@ class PerSpeciesScaleShift(nn.Module):
         shifts: torch.Tensor | list[float] | None = None,
         scales_trainable: bool = False,
         shifts_trainable: bool = False,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ):
         super().__init__()
         if num_species <= 0:
             raise ValueError(f"num_species must be positive, got {num_species}")
 
-        dtype = config.ftype if dtype is None else dtype
         scales_t = self._as_1d_tensor(scales, num_species, fill=1.0, dtype=dtype)
         shifts_t = self._as_1d_tensor(shifts, num_species, fill=0.0, dtype=dtype)
 

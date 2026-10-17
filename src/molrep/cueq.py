@@ -4,8 +4,8 @@ Each class is the ``cuequivariance_torch`` operation of the same name with its
 execution method fixed to a CUDA kernel, so on GPU nothing runs cuEquivariance's
 pure-PyTorch ``naive`` path — which is what ``cuet.Linear`` picks when no method
 is given. On CPU cuEquivariance substitutes its own naive implementation. As in
-cuEquivariance, the precision is fixed at construction: build under the wanted
-``molix.config`` precision rather than calling ``.double()`` afterwards.
+cuEquivariance, the precision is fixed at construction: build at the wanted
+``dtype`` rather than calling ``.double()`` afterwards.
 """
 
 from __future__ import annotations

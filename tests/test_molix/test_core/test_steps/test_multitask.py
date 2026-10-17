@@ -18,7 +18,6 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molix.config import config
 from molix.core.state import TrainState
 from molix.core.steps import multitask as multitask_module
 from molix.core.steps.eval import DefaultEvalStep
@@ -35,14 +34,6 @@ from molix.hooks import GradClipHook
 Batch = Mapping[str, Mapping[str, torch.Tensor]]
 Predictions = dict[str, torch.Tensor]
 LossFn = Callable[[Predictions, Batch], torch.Tensor]
-
-
-@pytest.fixture(autouse=True)
-def _reset_precision() -> None:
-    """Precision is a global singleton — restore fp32 around every test."""
-    config.set_precision("fp32")
-    yield
-    config.set_precision("fp32")
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +443,6 @@ class TestMultiTaskTrainStep:
 
     def test_matches_the_default_step_on_a_single_task_stream(self) -> None:
         """fp64 + fixed seed + ``accumulate_grad_batches=2``: byte-for-byte cadence."""
-        config.set_precision("fp64")
         torch.manual_seed(20260814)
         reference_model = _StubModel(dtype=torch.float64)
         multitask_model = copy.deepcopy(reference_model)

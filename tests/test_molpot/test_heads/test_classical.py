@@ -21,6 +21,9 @@ from molpot.heads.classical import (
     PeriodicHead,
 )
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 FEATURES = torch.randn(4, 8, generator=torch.Generator().manual_seed(0))
 
 
@@ -64,7 +67,7 @@ class TestExpAround:
 
 class TestBounds:
     def test_every_bond_parameter_stays_in_its_window(self):
-        head = BondHead(4, 4)
+        head = BondHead(4, 4, dtype=DTYPE)
         with torch.no_grad():
             for mlp in head.mlps.values():
                 mlp[-1].bias.fill_(50.0)
@@ -74,7 +77,7 @@ class TestBounds:
 
     def test_an_improper_may_go_lower_than_a_force_constant(self):
         assert IMPROPER_K_BOUNDS[0] < K_BOUNDS[0]
-        head = CvffHead(4, 4, k_ref=1.5)
+        head = CvffHead(4, 4, k_ref=1.5, dtype=DTYPE)
         with torch.no_grad():
             head.mlps["k"][-1].bias.fill_(-50.0)
         out = head(torch.zeros(2, 4))
@@ -114,14 +117,14 @@ class TestCovalentRadiusSum:
     def test_sums_molpy_covalent_radii(self):
         from molpy import Element
 
-        got = CovalentRadiusSum()(torch.tensor([6]), torch.tensor([1]))
+        got = CovalentRadiusSum(dtype=DTYPE)(torch.tensor([6]), torch.tensor([1]))
         want = float(Element(6).covalent) + float(Element(1).covalent)
         assert got.item() == pytest.approx(want, rel=1e-6)
 
 
 class TestBondHead:
     def test_starts_at_the_reference(self):
-        head = BondHead(8, 8, k_ref=450.0)
+        head = BondHead(8, 8, k_ref=450.0, dtype=DTYPE)
         r0_ref = torch.tensor([1.52, 1.07, 1.52, 1.07])
         out = head(FEATURES, r0_ref=r0_ref)
         torch.testing.assert_close(out["k"], torch.full((4,), 450.0))
@@ -129,7 +132,7 @@ class TestBondHead:
         assert set(out) == {"k", "r0", "k_ref", "r0_ref"}
 
     def test_r0_moves_ten_percent_per_unit_of_raw(self):
-        head = BondHead(8, 8)
+        head = BondHead(8, 8, dtype=DTYPE)
         _set_raw(head, "r0", 1.0)
         out = head(FEATURES, r0_ref=torch.ones(4))
         # 10 % asked; a little less given, the ×1.4 window bending it
@@ -139,14 +142,14 @@ class TestBondHead:
 
 class TestAngleHead:
     def test_each_centre_starts_at_its_own_reference(self):
-        head = AngleHead(8, 8, k_ref=40.0)
+        head = AngleHead(8, 8, k_ref=40.0, dtype=DTYPE)
         ref = torch.tensor([109.47, 120.0, 177.5, 109.47])
         out = head(FEATURES, theta0_ref=ref)
         torch.testing.assert_close(out["theta0"], ref)
         torch.testing.assert_close(out["k"], torch.full((4,), 40.0))
 
     def test_theta0_moves_about_the_gain_per_unit_on_every_range(self):
-        head = AngleHead(8, 8, theta0_gain_deg=20.0)
+        head = AngleHead(8, 8, theta0_gain_deg=20.0, dtype=DTYPE)
         ref = torch.tensor([60.0, 109.47, 150.0, 177.5])
         _set_raw(head, "theta0", -1.0)
         out = head(FEATURES, theta0_ref=ref)
@@ -155,7 +158,7 @@ class TestAngleHead:
 
     def test_theta0_reaches_180_degrees_and_no_further(self):
         """A linear centre may sit exactly at 180°, where the harmonic bend is smooth."""
-        head = AngleHead(8, 8)
+        head = AngleHead(8, 8, dtype=DTYPE)
         _set_raw(head, "theta0", 3.0)
         out = head(FEATURES, theta0_ref=torch.full((4,), 177.5))
         torch.testing.assert_close(out["theta0"], torch.full((4,), 180.0))
@@ -163,27 +166,27 @@ class TestAngleHead:
 
 class TestPeriodicHead:
     def test_starts_at_zero_torsion(self):
-        out = PeriodicHead(8, 8)(FEATURES)["k"]
+        out = PeriodicHead(8, 8, dtype=DTYPE)(FEATURES)["k"]
         assert out.shape == (4, 6)
         torch.testing.assert_close(out, torch.zeros(4, 6))
 
     def test_a_unit_of_raw_is_one_over_n(self):
-        head = PeriodicHead(8, 8, periodicity=(1, 2, 3))
+        head = PeriodicHead(8, 8, periodicity=(1, 2, 3), dtype=DTYPE)
         _set_raw(head, "k", 1.0)
         torch.testing.assert_close(head(FEATURES)["k"][0], torch.tensor([1.0, 0.5, 1 / 3]))
 
     def test_phases_alternate_zero_and_180_with_the_periodicity(self):
-        head = PeriodicHead(8, 8, periodicity=(1, 2, 3, 4))
+        head = PeriodicHead(8, 8, periodicity=(1, 2, 3, 4), dtype=DTYPE)
         torch.testing.assert_close(head.phase, torch.tensor([0.0, 180.0, 0.0, 180.0]))
 
     def test_rejects_a_nonpositive_periodicity(self):
         with pytest.raises(ValueError, match="periodicity"):
-            PeriodicHead(8, 8, periodicity=(0, 1))
+            PeriodicHead(8, 8, periodicity=(0, 1), dtype=DTYPE)
 
 
 class TestCvffHead:
     def test_starts_on_the_reference(self):
-        head = CvffHead(8, 8, k_ref=1.5, periodicity=2)
+        head = CvffHead(8, 8, k_ref=1.5, periodicity=2, dtype=DTYPE)
         out = head(FEATURES)
         torch.testing.assert_close(out["k"], torch.full((4,), 1.5))
         torch.testing.assert_close(out["k_ref"], torch.full((4,), 1.5))
@@ -192,7 +195,7 @@ class TestCvffHead:
     def test_stays_positive_for_a_negative_raw(self):
         # The strain objective k(1 - cos 2psi) is linear in k: it has a floor
         # only because k cannot cross zero — and the window's floor, 1/64.
-        head = CvffHead(8, 8, k_ref=1.5)
+        head = CvffHead(8, 8, k_ref=1.5, dtype=DTYPE)
         _set_raw(head, "k", -3.0)
         k = head(FEATURES)["k"]
         assert torch.all(k > 1.5 / 64) and torch.all(k < 1.5 * math.exp(-2.0))
@@ -202,20 +205,20 @@ class TestLJHead:
     def test_starts_exactly_on_the_reference_well(self):
         sigma = torch.tensor([3.4, 3.4, 2.6, 3.0])
         epsilon = torch.tensor([0.1, 0.1, 0.02, 0.17])
-        out = LJHead(8, 8)(FEATURES, sigma_ref=sigma, epsilon_ref=epsilon)
+        out = LJHead(8, 8, dtype=DTYPE)(FEATURES, sigma_ref=sigma, epsilon_ref=epsilon)
         torch.testing.assert_close(out["sigma"], sigma)
         torch.testing.assert_close(out["epsilon"], epsilon)
 
     def test_a_nan_reference_makes_a_nan_parameter(self):
         # An atom outside the reference table must not price silently.
         sigma = torch.tensor([3.4, float("nan"), 2.6, 3.0])
-        out = LJHead(8, 8)(FEATURES, sigma_ref=sigma, epsilon_ref=torch.ones(4))
+        out = LJHead(8, 8, dtype=DTYPE)(FEATURES, sigma_ref=sigma, epsilon_ref=torch.ones(4))
         assert torch.isnan(out["sigma"][1]) and not torch.isnan(out["sigma"][0])
 
 
 class TestHeadProtocol:
     @pytest.mark.parametrize("head", [BondHead, AngleHead, PeriodicHead, CvffHead, LJHead])
     def test_every_output_layer_starts_at_zero(self, head):
-        for mlp in head(8, 8).mlps.values():
+        for mlp in head(8, 8, dtype=DTYPE).mlps.values():
             assert mlp[-1].weight.abs().sum().item() == 0.0
             assert mlp[-1].bias.abs().sum().item() == 0.0

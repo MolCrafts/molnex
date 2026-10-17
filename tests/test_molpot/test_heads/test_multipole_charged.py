@@ -12,6 +12,9 @@ from tensordict import TensorDict
 
 from molpot.heads import PermMultipoleHead
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 
 def _stub_batch(
     *,
@@ -52,27 +55,27 @@ def _stub_batch(
 class TestProjectionToTarget:
     def test_neutral_target(self):
         """Σq_proj must equal q_target=0 (within numerical precision)."""
-        head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0)
+        head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0, dtype=DTYPE)
         out = head(_stub_batch(total_charge=0.0))
         sum_q = out["atoms", "atomic_charges"].sum()
         assert sum_q.abs().item() < 1e-5
 
     def test_anion_target_minus_one(self):
         """Σq_proj must equal q_target=-1."""
-        head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0)
+        head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0, dtype=DTYPE)
         out = head(_stub_batch(total_charge=-1.0))
         sum_q = out["atoms", "atomic_charges"].sum()
         torch.testing.assert_close(sum_q, torch.tensor(-1.0), rtol=1e-5, atol=1e-5)
 
     def test_cation_target_plus_two(self):
-        head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0)
+        head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0, dtype=DTYPE)
         out = head(_stub_batch(total_charge=2.0))
         sum_q = out["atoms", "atomic_charges"].sum()
         torch.testing.assert_close(sum_q, torch.tensor(2.0), rtol=1e-5, atol=1e-5)
 
     def test_diagnostics_record_pre_and_post_sums(self):
         """``charge_sum_pre_proj`` is the raw sum, ``post`` is the projected one."""
-        head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0)
+        head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0, dtype=DTYPE)
         out = head(_stub_batch(total_charge=-1.0))
         assert "charge_sum_pre_proj" in out["graphs"].keys()
         assert "charge_sum_post_proj" in out["graphs"].keys()
@@ -88,13 +91,15 @@ class TestProjectionToTarget:
 class TestFailFastOnMissingTotalCharge:
     def test_missing_total_charge_raises(self):
         """Without ``ConstantLabel`` the dataset omits this key → KeyError."""
-        head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0)
+        head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0, dtype=DTYPE)
         with pytest.raises(KeyError):
             head(_stub_batch(total_charge=None))
 
     def test_constrain_off_does_not_require_total_charge(self):
         """When projection is disabled, the field isn't read at all."""
-        head = PermMultipoleHead(input_dim=8, avg_num_neighbors=4.0, constrain_total_charge=False)
+        head = PermMultipoleHead(
+            input_dim=8, avg_num_neighbors=4.0, constrain_total_charge=False, dtype=DTYPE
+        )
         # Should not raise even though ``total_charge`` is absent.
         out = head(_stub_batch(total_charge=None))
         assert "atomic_charges" in out["atoms"].keys()

@@ -8,6 +8,9 @@ from tensordict import TensorDict
 from molzoo.chem import ChemPerception, ChemPerceptionSpec
 from molzoo.chem.encoder import ChemPerception as ChemPerceptionDirect
 
+#: Build dtype of every model in this module.
+DTYPE = torch.float32
+
 
 class TestChemPerception:
     def test_constructs_and_forwards(self):
@@ -18,6 +21,7 @@ class TestChemPerception:
             proper_dim=8,
             improper_dim=8,
             num_elements=20,
+            dtype=DTYPE,
         )
         batch = TensorDict(
             {
@@ -63,6 +67,6 @@ class TestChemPerception:
             improper_dim=4,
             num_elements=10,
         )
-        model = ChemPerception(spec=spec)
+        model = ChemPerception(spec=spec, dtype=DTYPE)
         assert model.config.atom_dim == 4
         assert isinstance(model, ChemPerceptionDirect)

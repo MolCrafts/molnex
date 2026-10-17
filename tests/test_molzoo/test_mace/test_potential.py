@@ -10,8 +10,8 @@ table, invariance of the features, conditioning, the block stack) are
 asserted in ``test_encoder.py``, the specs' rules in ``test_spec.py`` and the
 key tables in ``test_checkpoint.py``.
 
-Every model is tiny (2 layers, 16 channels, ``l_max=1``), fp64 (autouse
-``_build_at_fp64`` in ``conftest.py``), CPU, seeded.
+Every model is tiny (2 layers, 16 channels, ``l_max=1``), fp64
+(``conftest.DTYPE``), CPU, seeded.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix import config
 from molix.autograd import Derivative
 from molix.compile import Compiler
 from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY, FORCES_KEY, VIRIAL_KEY
@@ -35,6 +34,7 @@ from tests.test_molzoo.test_mace.conftest import (
     ATOMIC_NUMBERS,
     CLUSTER_POS,
     CLUSTER_Z,
+    DTYPE,
     PAIR_Z,
     SINGLE_GRAPH,
     TINY_MATPES_KWARGS,
@@ -131,18 +131,14 @@ def _perturb(model: torch.nn.Module) -> None:
 
 
 def _fp32_matpes(**kwargs: object) -> MaceMatpes:
-    """A tiny MatPES product built under fp32, the process precision restored after."""
-    config.set_precision("fp32")
-    try:
-        torch.manual_seed(0)
-        spec = MACEMatpesSpec(
-            atomic_numbers=ATOMIC_NUMBERS,
-            atomic_energies=ATOMIC_ENERGIES,
-            **TINY_MATPES_KWARGS,
-        )
-        return MaceMatpes(spec, wrt=FORCES, **kwargs).eval()
-    finally:
-        config.set_precision("fp64")
+    """A tiny MatPES product built at fp32."""
+    torch.manual_seed(0)
+    spec = MACEMatpesSpec(
+        atomic_numbers=ATOMIC_NUMBERS,
+        atomic_energies=ATOMIC_ENERGIES,
+        **TINY_MATPES_KWARGS,
+    )
+    return MaceMatpes(spec, wrt=FORCES, dtype=torch.float32, **kwargs).eval()
 
 
 def _write_checkpoint(directory: Path, spec: MACEMatpesSpec, model: MaceMatpes) -> Path:
@@ -198,18 +194,18 @@ class TestMacePotential:
 
     def test_invalid_energy_dtype_is_rejected(self, tiny_matpes_spec: MACEMatpesSpec) -> None:
         with pytest.raises(ValueError, match="energy_dtype"):
-            MaceMatpes(tiny_matpes_spec, energy_dtype=torch.float16)
+            MaceMatpes(tiny_matpes_spec, energy_dtype=torch.float16, dtype=DTYPE)
 
     def test_invalid_input_dtype_is_rejected(self, tiny_matpes_spec: MACEMatpesSpec) -> None:
         with pytest.raises(ValueError, match="input_dtype"):
-            MaceMatpes(tiny_matpes_spec, input_dtype=torch.float16)
+            MaceMatpes(tiny_matpes_spec, input_dtype=torch.float16, dtype=DTYPE)
 
     @pytest.mark.parametrize("dtype", [None, torch.float32, torch.float64])
     def test_energy_dtype_selects_the_accumulation(
         self, tiny_matpes_spec: MACEMatpesSpec, cluster: TensorDict, dtype
     ) -> None:
         """Both energy columns land at ``energy_dtype`` (``None``: the model's)."""
-        out = MaceMatpes(tiny_matpes_spec, energy_dtype=dtype).eval()(cluster)
+        out = MaceMatpes(tiny_matpes_spec, energy_dtype=dtype, dtype=DTYPE).eval()(cluster)
         assert out[ENERGY_KEY].dtype == (dtype or torch.float64)
         assert out[ATOMIC_ENERGY_KEY].dtype == (dtype or torch.float64)
 
@@ -291,9 +287,9 @@ class TestMacePotential:
 
         On the OFF spec because MatPES refuses a single interaction.
         """
-        two = MaceOff(tiny_off_spec)
+        two = MaceOff(tiny_off_spec, dtype=DTYPE)
         assert [type(r).__name__ for r in two.readouts] == ["LinearReadout", "NonLinearReadout"]
-        one = MaceOff(tiny_off_spec.model_copy(update={"num_interactions": 1}))
+        one = MaceOff(tiny_off_spec.model_copy(update={"num_interactions": 1}), dtype=DTYPE)
         assert [type(r).__name__ for r in one.readouts] == ["LinearReadout"]
 
     def test_a_padded_batch_returns_the_unpadded_energy_and_forces(
@@ -470,10 +466,10 @@ class TestMaceMatpes:
     ) -> None:
         """``load`` reads the archive, builds the spec, constructs with the kwargs, remaps in."""
         torch.manual_seed(0)
-        source = MaceMatpes(tiny_matpes_spec)
+        source = MaceMatpes(tiny_matpes_spec, dtype=DTYPE)
         config_path = _write_checkpoint(tmp_path, tiny_matpes_spec, source)
         torch.manual_seed(1)  # a different init, so the equality below is the checkpoint's doing
-        built = MaceMatpes.load(config_path, wrt=FORCES, energy_dtype=None)
+        built = MaceMatpes.load(config_path, wrt=FORCES, energy_dtype=None, dtype=DTYPE)
         assert built.energy_dtype is None
         assert built.derivative.wrt == (("atoms", "pos"),)
         for (name, want), (_, got) in zip(
@@ -486,12 +482,14 @@ class TestMaceMatpes:
     ) -> None:
         """The config's table builds ``E0``; the checkpoint's would misalign it."""
         torch.manual_seed(0)
-        config_path = _write_checkpoint(tmp_path, tiny_matpes_spec, MaceMatpes(tiny_matpes_spec))
+        config_path = _write_checkpoint(
+            tmp_path, tiny_matpes_spec, MaceMatpes(tiny_matpes_spec, dtype=DTYPE)
+        )
         official = json.loads(config_path.read_text())
         official["atomic_numbers"] = [1, 6, 7]
         config_path.write_text(json.dumps(official))
         with pytest.raises(ValueError, match="atomic_numbers"):
-            MaceMatpes.load(config_path)
+            MaceMatpes.load(config_path, dtype=DTYPE)
 
 
 class TestMaceOmol:
@@ -562,7 +560,7 @@ class TestMaceOmol:
 class TestMaceOff:
     def test_off_carries_no_pair_repulsion(self, tiny_off_spec: MACEOffSpec) -> None:
         """Standard MACE: the ZBL term is MatPES's; the OFF spec switches it off."""
-        assert MaceOff(tiny_off_spec).pair_repulsion is None
+        assert MaceOff(tiny_off_spec, dtype=DTYPE).pair_repulsion is None
 
 
 class TestMaceLes:
@@ -571,8 +569,8 @@ class TestMaceLes:
     ) -> None:
         """``atoms.energy`` is the MACE-OFF site energy; ``graphs.energy`` adds the Ewald sum."""
         torch.manual_seed(0)
-        les = MaceLes(tiny_les_spec).eval()
-        off = MaceOff(tiny_les_spec).eval()
+        les = MaceLes(tiny_les_spec, dtype=DTYPE).eval()
+        off = MaceOff(tiny_les_spec, dtype=DTYPE).eval()
         off.load_state_dict(
             {k: v for k, v in les.state_dict().items() if not k.startswith("charge_readouts.")}
         )

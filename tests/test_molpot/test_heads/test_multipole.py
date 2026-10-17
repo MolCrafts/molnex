@@ -1,11 +1,10 @@
 """Tests for :class:`molpot.heads.multipole.PermMultipoleHead`.
 
 Scope: the construction-time dtype contract. ``q_head`` / ``mu_proj`` /
-``theta_proj`` already read ``config["ftype"]``; the two ``cuet.Linear``
-moment-collapse layers (``mu_collapse`` / ``theta_collapse``) must do the
-same or the head comes out mixed-precision under
-``config.set_precision("fp64")`` and its first forward dies on the l=1 / l=2
-collapse with ``expected scalar type Float but found Double``.
+``theta_proj`` are built at the constructor dtype; the two ``cuet.Linear``
+moment-collapse layers (``mu_collapse`` / ``theta_collapse``) must be too,
+or the head comes out mixed-precision at fp64 and its first forward dies on
+the l=1 / l=2 collapse with ``expected scalar type Float but found Double``.
 """
 
 from __future__ import annotations
@@ -16,6 +15,9 @@ import torch
 from tensordict import TensorDict
 
 from molpot.heads import PermMultipoleHead
+
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float64
 
 #: Encoder tensor-track irreps with the uniform multiplicity the head
 #: requires, carrying both the ``1o`` block the dipole readout slices and
@@ -43,6 +45,7 @@ def _make_head(moments: tuple[str, ...]) -> PermMultipoleHead:
         dipole="dipole" in moments,
         quadrupole="quadrupole" in moments,
         tensor_irreps=TENSOR_IRREPS,
+        dtype=DTYPE,
     )
 
 
@@ -82,14 +85,12 @@ class TestPermMultipoleHead:
         MOMENT_CASES,
         ids=["charge", "q_mu", "q_theta", "q_mu_theta", "mu_theta"],
     )
-    def test_all_parameters_honour_the_fp64_precision(
-        self, fp64: None, moments: tuple[str, ...]
-    ) -> None:
-        """Every parameter is fp64 when the head is built under fp64.
+    def test_all_parameters_are_built_at_the_given_dtype(self, moments: tuple[str, ...]) -> None:
+        """Every parameter is fp64 when the head is built at fp64.
 
-        ``config["ftype"]`` is the single source of truth for the working
-        precision; a layer that ignores it leaves the head mixed-precision
-        and its first forward dies on a dtype-mismatched matmul. The sweep
+        A layer that ignored the constructor dtype would leave the head
+        mixed-precision, and its first forward would die on a dtype-mismatched
+        matmul. The sweep
         covers each moment flag, so both ``cuet.Linear`` collapse weights
         (``mu_collapse`` for l=1, ``theta_collapse`` for l=2) are exercised.
         """
@@ -97,11 +98,11 @@ class TestPermMultipoleHead:
 
         assert {p.dtype for p in head.parameters()} == {torch.float64}
 
-    def test_forward_runs_under_the_fp64_precision(self, fp64: None) -> None:
+    def test_forward_runs_at_the_given_dtype(self) -> None:
         """A head built at fp64 reads fp64 features and emits fp64 moments."""
         head = _make_head(("charge", "dipole", "quadrupole"))
 
-        out = head(_stub_batch(torch.float64))
+        out = head(_stub_batch(DTYPE))
 
         assert out["atoms", "atomic_charges"].shape == (3,)
         assert out["atoms", "atomic_charges"].dtype == torch.float64

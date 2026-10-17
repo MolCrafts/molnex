@@ -59,7 +59,6 @@ import torch.nn as nn
 from pydantic import BaseModel, ConfigDict, Field
 from tensordict import TensorDict
 
-from molix import config
 from molpot.heads._common import scalar_mlp as _scalar_mlp
 from molrep import cueq
 
@@ -91,8 +90,8 @@ class PermMultipoleHeadSpec(BaseModel):
 
     Mirrors the ``AllegroSpec`` pattern: every constructor argument is
     captured here so a trained checkpoint carries an exact, validated
-    description of the head it was built with. molcfg-driven training
-    scripts can construct ``PermMultipoleHeadSpec(**cfg["multipole"])`` and
+    description of the head it was built with. Training scripts can
+    construct ``PermMultipoleHeadSpec(**cfg["multipole"])`` and
     pass it straight to ``PermMultipoleHead.from_spec(...)``.
     """
 
@@ -206,12 +205,9 @@ class PermMultipoleHead(nn.Module):
         out_dipole_key: str = "atomic_dipoles",
         out_quadrupole_key: str = "atomic_quadrupoles",
         tensor_irreps: cue.Irreps | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ):
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         # Build (and validate) the spec from the kwargs — single source of
         # truth for the head's configuration. The spec is frozen, so it
         # also serves as a checkpointable description.
@@ -316,7 +312,7 @@ class PermMultipoleHead(nn.Module):
         spec: PermMultipoleHeadSpec,
         *,
         tensor_irreps: cue.Irreps | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> "PermMultipoleHead":
         """Construct from a spec.
 

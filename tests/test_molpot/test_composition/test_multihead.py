@@ -33,9 +33,9 @@ class TestMultiHead:
     def test_merges_outputs(self, node_features, batch):
         multi = MultiHead(
             {
-                "rep": RepulsionParameterHead(feature_dim=16),
-                "ct": ChargeTransferParameterHead(feature_dim=16),
-                "charge": ChargeHead(feature_dim=16),
+                "rep": RepulsionParameterHead(feature_dim=16, dtype=torch.float32),
+                "ct": ChargeTransferParameterHead(feature_dim=16, dtype=torch.float32),
+                "charge": ChargeHead(feature_dim=16, dtype=torch.float32),
             }
         )
         out = multi(node_features, batch=batch)
@@ -48,8 +48,8 @@ class TestMultiHead:
     def test_duplicate_key_raises(self, node_features):
         multi = MultiHead(
             {
-                "a": RepulsionParameterHead(feature_dim=16),
-                "b": RepulsionParameterHead(feature_dim=16),
+                "a": RepulsionParameterHead(feature_dim=16, dtype=torch.float32),
+                "b": RepulsionParameterHead(feature_dim=16, dtype=torch.float32),
             }
         )
         with pytest.raises(ValueError, match="Duplicate key"):
@@ -68,6 +68,7 @@ class TestMultiHead:
                     c6_free=torch.rand(10) * 10,
                     alpha_free=torch.rand(10) * 5,
                     r_star_free=torch.rand(10) * 2 + 1.0,
+                    dtype=torch.float32,
                 ),
             }
         )

@@ -22,8 +22,6 @@ from __future__ import annotations
 
 import torch
 
-from molix import config
-
 #: Radius used where the source tabulates none — index 0 (not an element) and
 #: everything past curium. Matches the reference table byte for byte, which is
 #: what a MACE checkpoint's own ``covalent_radii`` buffer carries.
@@ -140,7 +138,7 @@ _COVALENT_RADII: tuple[float, ...] = (
 )
 
 
-def covalent_radii(max_z: int = MAX_Z, *, dtype: torch.dtype | None = None) -> torch.Tensor:
+def covalent_radii(max_z: int = MAX_Z, *, dtype: torch.dtype) -> torch.Tensor:
     """Build a dense ``Z``-indexed covalent-radius table.
 
     Args:
@@ -157,5 +155,4 @@ def covalent_radii(max_z: int = MAX_Z, *, dtype: torch.dtype | None = None) -> t
     """
     if not 1 <= max_z <= MAX_Z:
         raise ValueError(f"max_z must be in [1, {MAX_Z}], got {max_z}")
-    dtype = config.ftype if dtype is None else dtype  # transitional: goes with molix.config (2c)
     return torch.tensor(_COVALENT_RADII[: max_z + 1], dtype=dtype)

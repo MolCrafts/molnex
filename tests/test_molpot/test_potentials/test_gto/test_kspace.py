@@ -12,7 +12,6 @@ import math
 import pytest
 import torch
 
-from molix import config
 from molix.compile import Compiler
 from molpot.potentials.gto.kspace import (
     KSpaceGrid,
@@ -126,14 +125,6 @@ TRICLINIC_HALF_SPHERE: list[list[float]] = [
     [1.2566370614359172, 0.9773843811168244, -0.4014257279586958],
     [1.2566370614359172, 0.9773843811168244, 0.3839724354387525],
 ]
-
-
-@pytest.fixture(autouse=True)
-def fp64():
-    previous = config["ftype"]
-    config.set_precision("fp64")
-    yield
-    config.set_precision("fp64" if previous == torch.float64 else "fp32")
 
 
 class TestKspaceCutoff:

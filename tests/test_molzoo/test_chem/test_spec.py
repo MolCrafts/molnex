@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import pytest
+import torch
 from pydantic import ValidationError
 
 from molzoo.chem import ChemPerception, ChemPerceptionSpec
+
+#: Build dtype of every model in this module.
+DTYPE = torch.float32
 
 
 class TestChemPerceptionSpec:
@@ -14,12 +18,15 @@ class TestChemPerceptionSpec:
         # A spec field that never reaches the constructor is a knob that
         # silently does nothing — the receptive field would stay at the
         # parent's default no matter what the caller asked for.
-        model = ChemPerception(ChemPerceptionSpec(atom_dim=8, bond_dim=8, n_blocks=n_blocks))
+        model = ChemPerception(
+            ChemPerceptionSpec(atom_dim=8, bond_dim=8, n_blocks=n_blocks), dtype=DTYPE
+        )
         assert len(model.blocks) == n_blocks
 
     def test_local_attention_reaches_the_blocks(self):
         model = ChemPerception(
-            ChemPerceptionSpec(atom_dim=8, bond_dim=8, n_blocks=1, local_attention=True)
+            ChemPerceptionSpec(atom_dim=8, bond_dim=8, n_blocks=1, local_attention=True),
+            dtype=DTYPE,
         )
         assert all(block.local_attention for block in model.blocks)
 

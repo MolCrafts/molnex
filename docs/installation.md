@@ -9,7 +9,6 @@ Before installing MolNex, ensure you have:
 - `molcrafts-molpy` ≥ 0.13 with `UnitSystem` `k_B` / `openmm` preset
   (pint-style `molix.units.units` requires them)
 - `molcrafts-mollog` ≥ 1.3.0
-- `molcrafts-molcfg` ≥ 1.5.0
 
 Check your versions:
 

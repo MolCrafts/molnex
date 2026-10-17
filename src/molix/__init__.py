@@ -119,7 +119,6 @@ _load_ops_library()
 from molix import logger, logging
 from molix.autograd import Derivative
 from molix.compile import Compiler, ExplainSummary, register_inductor_fallbacks
-from molix.config import config
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
 from molix.core.losses import MAELoss, MSELoss, WeightedLoss
 from molix.core.state import Stage, StepResult, TrainState
@@ -142,7 +141,6 @@ __all__ = [
     "TrainState",
     "Trainer",
     "WeightedLoss",
-    "config",
     "logger",
     "logging",
     "register_inductor_fallbacks",

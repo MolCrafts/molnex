@@ -7,16 +7,7 @@ import math
 import pytest
 import torch
 
-from molix import config
 from molpot.potentials.gto.kernel import GTOCoulombKernel
-
-
-@pytest.fixture(autouse=True)
-def fp64():
-    previous = config["ftype"]
-    config.set_precision("fp64")
-    yield
-    config.set_precision("fp64" if previous == torch.float64 else "fp32")
 
 
 class TestGTOCoulombKernel:

@@ -23,10 +23,9 @@ The contract under test:
    directly — the kernel is a pure tensor function, and the head
    *calls* it. The shape/dtype contract holds and the resulting energy
    is finite and differentiable through the head MLP.
-7. **Construction-time precision.** Built under
-   ``config.set_precision("fp64")`` the head's parameters come out fp64
-   on their own — the post-hoc ``.to(dtype=torch.float64)`` inside
-   ``_build_head`` is a convenience for the cases above, not the contract.
+7. **Construction-time precision.** Built with ``dtype=torch.float64`` the
+   head's parameters come out fp64 on their own; nothing is cast after
+   construction.
 """
 
 from __future__ import annotations
@@ -36,6 +35,9 @@ import torch
 
 from molpot.heads import BondChargeHead
 from molpot.potentials.elec.kernels import MultipoleEwaldKernel
+
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float64
 
 
 def _bidirectional_edges(n_atoms: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -74,8 +76,7 @@ def _make_inputs(n_atoms: int = 5, node_dim: int = 8, seed: int = 0):
 
 
 def _build_head(node_dim: int = 8, **kwargs) -> BondChargeHead:
-    head = BondChargeHead(node_dim=node_dim, hidden_dim=32, **kwargs)
-    return head.to(dtype=torch.float64)
+    return BondChargeHead(node_dim=node_dim, hidden_dim=32, dtype=DTYPE, **kwargs)
 
 
 def test_neutral_sum_is_zero_without_projection():
@@ -257,7 +258,7 @@ def test_head_calls_kernel_directly():
     Validates the q-q + q-μ + μ-μ kernels are exercised end-to-end and
     that gradients flow through the head MLP via the kernel.
     """
-    head = _build_head(charge_projection=False).double()
+    head = _build_head(charge_projection=False)
     kernel = MultipoleEwaldKernel(sigma=1.0, remove_self_interaction=True).double()
 
     inp = _make_inputs(n_atoms=5)
@@ -287,23 +288,21 @@ def test_head_calls_kernel_directly():
 
 
 @pytest.mark.parametrize("edge_dim", [None, 4], ids=["no-edge-features", "edge-features"])
-def test_all_parameters_honour_the_fp64_precision(fp64, edge_dim):
-    """Every parameter is fp64 when the head is built under fp64.
+def test_all_parameters_are_built_at_the_given_dtype(edge_dim):
+    """Every parameter is fp64 when the head is built at fp64.
 
-    ``config["ftype"]`` is the single source of truth for the working
-    precision; a layer that ignores it leaves the head mixed-precision and
-    its first forward dies on a dtype-mismatched matmul. Built directly —
-    no ``_build_head`` cast — because the cast is exactly what would mask
-    the defect.
+    A layer that ignored the constructor dtype would leave the head
+    mixed-precision, and its first forward would die on a dtype-mismatched
+    matmul.
     """
-    head = BondChargeHead(node_dim=8, edge_dim=edge_dim, hidden_dim=32)
+    head = BondChargeHead(node_dim=8, edge_dim=edge_dim, hidden_dim=32, dtype=torch.float64)
 
     assert {p.dtype for p in head.parameters()} == {torch.float64}
 
 
-def test_forward_runs_under_the_fp64_precision(fp64):
+def test_forward_runs_at_the_given_dtype():
     """A head built at fp64 emits fp64 charges from the fp64 sample inputs."""
-    head = BondChargeHead(node_dim=8, hidden_dim=32, charge_projection=False)
+    head = BondChargeHead(node_dim=8, hidden_dim=32, charge_projection=False, dtype=torch.float64)
     inp = _make_inputs()
 
     out = head(

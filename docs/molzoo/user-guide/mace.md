@@ -10,10 +10,11 @@ A product is constructed from its typed spec, and every default lives on the
 spec:
 
 ```python
+import torch
 from molzoo.mace import MACEMatpesSpec, MaceMatpes
 
 spec = MACEMatpesSpec(atomic_numbers=[1, 6, 8], atomic_energies=[-13.6, -1029.0, -2041.0])
-model = MaceMatpes(spec, wrt=("atoms.pos",))   # forward writes graphs.energy and atoms.forces
+model = MaceMatpes(spec, wrt=("atoms.pos",), dtype=torch.float64)  # writes graphs.energy, atoms.forces
 ```
 
 A product has two public methods. `energy(frame)` reads the post-collate
@@ -26,18 +27,19 @@ composed outside is the same op. MACE-LES and Polar carry a graph-level
 electrostatic term: their `graphs.energy` is the sum of `atoms.energy` plus
 that term.
 
-## Choose precision before construction and compilation
+## Choose precision at construction
+
+Every module takes its build dtype from its caller: the constructor's and
+`load`'s `dtype` argument. There is no process-wide precision setting.
 
 ```python
 import torch
-from molix import config
 from molzoo.mace import MaceMatpes
 
-# fp32 parameters; the matmul policy stays PyTorch's default (no TF32).
-config.set_precision("fp32")
 model = MaceMatpes.load(
     "matpes_r2scan_cueq_state.pt",
     config="matpes_r2scan_config.json",
+    dtype=torch.float32,         # fp32 parameters; the matmul policy stays PyTorch's default (no TF32)
     energy_dtype=torch.float64,
     input_dtype=torch.float32,   # fp64 MD state drives the fp32 model
     wrt=("atoms.pos",),
@@ -53,7 +55,7 @@ precision settings first.
 
 | Control | Meaning |
 | --- | --- |
-| `config.set_precision("fp64")` before loading | Construct parameters in fp64; `fp32` selects fp32 parameters |
+| `dtype=torch.float64` | Construct parameters in fp64; `torch.float32` selects fp32 parameters |
 | `energy_dtype=torch.float64` (default) | Accumulate per-atom and graph energies in fp64, preserving small interactions alongside large atomic baselines |
 | `energy_dtype=torch.float32` / `None` | Explicit fp32 / model-dtype accumulation |
 | `input_dtype=torch.float32` | fp32 model inputs with an independently chosen MD-state dtype |

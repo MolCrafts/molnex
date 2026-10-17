@@ -195,6 +195,7 @@ def _tiny_potential() -> PiNetPotential:
             ),
             # Monomorphic: what is derived is fixed at construction.
             wrt=("atoms.pos",),
+            dtype=torch.float32,
         )
         .to(_DEVICE)
         .eval()

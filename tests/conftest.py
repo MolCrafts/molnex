@@ -51,32 +51,16 @@ from typing import TYPE_CHECKING
 
 import cuequivariance as cue
 import numpy as np
-import pytest
 import torch
 from molpy import Box, Frame
 from tensordict import TensorDict
 
-from molix import config
 from molix.data import TotalCharge
 from molix.data.collate import collate_molecules
 from molix.neighbor import NeighborList
 
 if TYPE_CHECKING:
     from molpot.forcefield import ForceField
-
-
-@pytest.fixture
-def fp64():
-    """Build models at fp64 for the duration of one test.
-
-    cuEquivariance fixes its working precision at construction, so a model
-    built under the default fp32 and then ``.double()``-d still computes in
-    float32. Tests that need fp64 build under this fixture instead.
-    """
-    previous = config["ftype"]
-    config.set_precision("fp64")
-    yield
-    config.set_precision("fp64" if previous == torch.float64 else "fp32")
 
 
 def frame(

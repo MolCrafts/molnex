@@ -122,9 +122,10 @@ on composition.
 
 ## 4. Build the Model
 
-The energy model is one class over the spec, plus `wrt`:
+The energy model is one class over the spec, plus `wrt` and the build `dtype`:
 
 ```python
+import torch
 from molzoo.allegro import AllegroPotential, AllegroSpec
 
 model = AllegroPotential(
@@ -138,6 +139,7 @@ model = AllegroPotential(
         num_tensor_features=16,
     ),
     wrt=("atoms.pos",),  # forces; add "graphs.strain" for the virial
+    dtype=torch.float64,
 )
 ```
 
@@ -147,7 +149,9 @@ and `atoms.forces` `(N, 3)` into the batch in place.
 To start from an official Allegro model instead, load its package:
 
 ```python
-model = AllegroPotential.load("Allegro-OAM-L-0.1.nequip.zip", wrt=("atoms.pos",))
+model = AllegroPotential.load(
+    "Allegro-OAM-L-0.1.nequip.zip", wrt=("atoms.pos",), dtype=torch.float64
+)
 ```
 
 When only the features are wanted — for a custom head — use the encoder:
@@ -156,7 +160,8 @@ When only the features are wanted — for a custom head — use the encoder:
 from molzoo.allegro import AllegroEncoder, AllegroSpec
 
 encoder = AllegroEncoder(
-    AllegroSpec(atomic_numbers=[1, 6, 7, 8], r_max=5.0, avg_num_neighbors=avg_num_neighbors)
+    AllegroSpec(atomic_numbers=[1, 6, 7, 8], r_max=5.0, avg_num_neighbors=avg_num_neighbors),
+    dtype=torch.float64,
 )
 # encoder(batch)["pairs", "edge_features"]  ->  (E, encoder.output_dim)
 ```

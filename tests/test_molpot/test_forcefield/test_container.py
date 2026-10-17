@@ -23,6 +23,9 @@ from tests.conftest import (
     frame,
 )
 
+#: Floating dtype the described model runs at.
+DTYPE = torch.float64
+
 #: Per-species ``(ε kcal/mol, σ Å, q e, mass amu)`` of the periodic parity case
 #: — TIP3P water with OPLS-shaped ions, copied from
 #: ``interface/tests/parity_classical.py`` rather than imported (``interface/``
@@ -650,7 +653,7 @@ class TestForceFieldManifest:
     def test_interactions_are_the_energy_bearing_declared_styles(self):
         """Every declared style but ``atom:*``, which is a record layout."""
         ff = _filled_oplsaa()
-        manifest = ff.manifest(profile="A0")
+        manifest = ff.manifest(profile="A0", dtype=DTYPE)
         assert isinstance(manifest, ModelManifest)
         assert [record.style for record in manifest.interactions] == [
             key for key in ff.style_names() if not key.startswith("atom:")
@@ -659,12 +662,12 @@ class TestForceFieldManifest:
     def test_nonbonded_record_is_the_one_to_ir_reports(self):
         """One nonbonded-method record, shared with ``PotentialIR`` — not two."""
         ff = _filled_oplsaa()
-        assert ff.manifest(profile="A0").nonbonded == ff.to_ir().nonbonded_method
+        assert ff.manifest(profile="A0", dtype=DTYPE).nonbonded == ff.to_ir().nonbonded_method
 
     def test_electrostatics_carries_the_permanent_exclusion_scaling(self):
         """S5: the permanent scaling is model identity, not a runtime detail."""
         ff = _filled_oplsaa()
-        electrostatics = ff.manifest(profile="A0").electrostatics
+        electrostatics = ff.manifest(profile="A0", dtype=DTYPE).electrostatics
         assert electrostatics is not None
         assert electrostatics.permanent_scaling == ff.nonbonded_scaling
 
@@ -679,7 +682,7 @@ class TestForceFieldManifest:
         constraint here describes a solver this container never ran — and
         says it even for a field whose ``atoms.charge`` came from a file.
         """
-        electrostatics = _filled_oplsaa().manifest(profile="A0").electrostatics
+        electrostatics = _filled_oplsaa().manifest(profile="A0", dtype=DTYPE).electrostatics
         assert electrostatics is not None
         assert electrostatics.multipole_order == 0
         assert electrostatics.charge_constraint == "none"
@@ -693,7 +696,9 @@ class TestForceFieldManifest:
         so reading ``manifest.nonbonded.lj_cutoff`` is always legal.
         """
         manifest = (
-            ForceField(name="bonded", units="real").def_bondstyle("harmonic").manifest(profile="A0")
+            ForceField(name="bonded", units="real")
+            .def_bondstyle("harmonic")
+            .manifest(profile="A0", dtype=DTYPE)
         )
         nonbonded = manifest.nonbonded
         assert nonbonded is not None
@@ -713,25 +718,29 @@ class TestForceFieldManifest:
         """
         ff = _filled_oplsaa()
         with pytest.raises(ValueError) as excinfo:
-            ff.manifest(profile="A1")
+            ff.manifest(profile="A1", dtype=DTYPE)
         assert "A1" in str(excinfo.value)
         assert "A0" in str(excinfo.value)
-        ff.manifest(profile="A0")
+        ff.manifest(profile="A0", dtype=DTYPE)
 
     def test_numerics_is_the_runtime_record_rather_than_a_second_reading(self):
-        """One reader of the global precision, and the force field defers to it.
+        """One reader of the matmul policy, and the force field defers to it.
 
         What ``NumericsRecord.from_runtime`` reports is pinned in
         ``tests/test_molpot/test_manifest.py``; this pins only that the
-        container does not take its own reading of ``molix.config["ftype"]``
-        and ``torch.get_float32_matmul_precision()``.
+        container hands the dtype it was given to that record and takes no
+        reading of ``torch.get_float32_matmul_precision()`` of its own.
         """
-        assert _filled_oplsaa().manifest(profile="A0").numerics == NumericsRecord.from_runtime()
+        assert _filled_oplsaa().manifest(
+            profile="A0", dtype=DTYPE
+        ).numerics == NumericsRecord.from_runtime(DTYPE)
 
     def test_tables_content_hash_the_filled_parameter_tables(self):
         """Each filled category is hashed by ``ParamTableRecord``, not re-derived."""
         ff = _filled_oplsaa()
-        tables = {record.category: record for record in ff.manifest(profile="A0").tables}
+        tables = {
+            record.category: record for record in ff.manifest(profile="A0", dtype=DTYPE).tables
+        }
         assert set(tables) == {"bonds", "atoms"}
         bonds = ff.params("bonds")
         assert bonds is not None  # filled by ``_filled_oplsaa``; narrows ``dict | None``
@@ -739,7 +748,7 @@ class TestForceFieldManifest:
 
     def test_profile_is_recorded_and_composition_is_left_to_the_caller(self):
         """No façade fills representation / provenance; the caller replaces them."""
-        manifest = _filled_oplsaa().manifest(profile="A0")
+        manifest = _filled_oplsaa().manifest(profile="A0", dtype=DTYPE)
         assert manifest.profile == "A0"
         assert manifest.representation is None
         assert manifest.provenance is None

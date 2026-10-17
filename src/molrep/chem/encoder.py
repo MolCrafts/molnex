@@ -14,7 +14,6 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molix import config
 from molrep.chem.blocks import ChemGraphBlock
 from molrep.chem.bond_table import BondTable
 from molrep.chem.context import (
@@ -80,8 +79,8 @@ def _empty(dim: int, like: torch.Tensor) -> torch.Tensor:
 
     dtype and device come from *like* — pass the atom embedding, whose dtype is
     by definition the one these features would have had. Reading a process-wide
-    config here instead was a **graph break**: molcfg resolves every
-    attribute through a custom ``__getattribute__``, which dynamo cannot trace
+    config here instead was a **graph break**: that config object resolved
+    every attribute through a custom ``__getattribute__``, which dynamo cannot trace
     ("expected 1 argument, got 2"), and this function sits on the traced half of
     a Class-I step (measured on a GH200).
     """
@@ -170,12 +169,9 @@ class ChemEncoder(nn.Module):
         bond_channels: Sequence[DiscreteChannel] = (),
         n_blocks: int = 5,
         local_attention: bool = False,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         n_blocks = int(n_blocks)
         if n_blocks < 0:
             raise ValueError(f"n_blocks must be >= 0, got {n_blocks}")

@@ -28,8 +28,8 @@ from molzoo.pinet import PiNetEncoder, PiNetSpec
 ATOM_TYPES = list(range(1, 8))  # cover MockBatch Z ∈ [1, 7]
 
 
-def build_pinet() -> PiNetEncoder:
-    """A representative PiNet encoder (depth 3, 64-wide MLPs, rank 3)."""
+def build_pinet(dtype: torch.dtype) -> PiNetEncoder:
+    """A representative PiNet encoder (depth 3, 64-wide MLPs, rank 3) built at ``dtype``."""
     return PiNetEncoder(
         PiNetSpec(
             atomic_numbers=ATOM_TYPES,
@@ -40,7 +40,8 @@ def build_pinet() -> PiNetEncoder:
             ii_nodes=[64, 64],
             depth=3,
             rank=3,
-        )
+        ),
+        dtype=dtype,
     )
 
 
@@ -73,7 +74,7 @@ def cpu_hotspots(n_steps: int) -> None:
     from torch.profiler import ProfilerActivity, profile
 
     print(f"\n{'#' * 78}\nPiNet CPU hotspots\n{'#' * 78}")
-    enc = build_pinet()
+    enc = build_pinet(torch.float32)
     opt = torch.optim.Adam(enc.parameters(), lr=1e-3)
     report = profile_training(
         enc, _loss, opt, _factory("cpu"), warmup=3, steps=n_steps, device="cpu"
@@ -81,7 +82,7 @@ def cpu_hotspots(n_steps: int) -> None:
     print(report.model_dump_json(indent=2))
 
     # CPU op-level attribution complements the structured profiler hotspots.
-    enc2 = build_pinet()
+    enc2 = build_pinet(torch.float32)
     batch = _factory("cpu")()
     for _ in range(3):
         _loss(enc2(batch)).backward()
@@ -122,11 +123,11 @@ class _AutocastWrap(torch.nn.Module):
 
 def _make_variant(precision: str):
     """Return (model, batch_factory) configured for *precision* on cuda."""
-    enc = build_pinet().cuda()
+    if precision == "fp64":
+        return build_pinet(torch.float64).cuda(), _factory("cuda", torch.float64)
+    enc = build_pinet(torch.float32).cuda()
     if precision == "fp32":
         return enc, _factory("cuda")
-    if precision == "fp64":
-        return enc.double(), _factory("cuda", torch.float64)
     dtype = torch.bfloat16 if precision == "bf16-mixed" else torch.float16
     return _AutocastWrap(enc, dtype), _factory("cuda")
 

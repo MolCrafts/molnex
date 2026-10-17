@@ -19,6 +19,9 @@ import torch
 
 from molpot.heads import HardnessHead, PolarizabilityHead
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 SEEDS = (0, 1, 2, 3, 4)
 
 
@@ -31,7 +34,7 @@ class TestHardnessHead:
     @pytest.mark.parametrize("seed", SEEDS)
     def test_softplus_positivity(self, seed: int) -> None:
         torch.manual_seed(seed)
-        head = HardnessHead(input_dim=8, hidden_dim=16)
+        head = HardnessHead(input_dim=8, hidden_dim=16, dtype=DTYPE)
         # Use large negative inputs to verify softplus saturates above 0.
         x = -100.0 * torch.ones(7, 8)
         kappa = head(x)
@@ -41,7 +44,7 @@ class TestHardnessHead:
     @pytest.mark.parametrize("seed", SEEDS)
     def test_random_input_positivity(self, seed: int) -> None:
         torch.manual_seed(seed)
-        head = HardnessHead(input_dim=8, hidden_dim=16)
+        head = HardnessHead(input_dim=8, hidden_dim=16, dtype=DTYPE)
         x = torch.randn(10, 8)
         kappa = head(x)
         assert (kappa > 0).all()
@@ -52,7 +55,7 @@ class TestHardnessHead:
         feature dim unchanged. Mirrors the encoder-side scalar invariance
         check; sanity rather than equivariance."""
         torch.manual_seed(0)
-        head = HardnessHead(input_dim=8, hidden_dim=16)
+        head = HardnessHead(input_dim=8, hidden_dim=16, dtype=DTYPE)
         x = torch.randn(7, 8)
         # The only "rotation" l=0 features see is identity in the feature
         # dim — but a permutation along the feature axis would break
@@ -72,7 +75,7 @@ class TestPolarizabilityHeadIsotropic:
     @pytest.mark.parametrize("seed", SEEDS)
     def test_alpha_iso_positivity(self, seed: int) -> None:
         torch.manual_seed(seed)
-        head = PolarizabilityHead(input_dim=8, hidden_dim=16, anisotropic=False)
+        head = PolarizabilityHead(input_dim=8, hidden_dim=16, anisotropic=False, dtype=DTYPE)
         x = torch.randn(5, 8)
         alpha = head(x)
         assert isinstance(alpha, torch.Tensor)
@@ -81,7 +84,7 @@ class TestPolarizabilityHeadIsotropic:
 
     def test_iso_returns_tensor_not_dict(self) -> None:
         torch.manual_seed(0)
-        head = PolarizabilityHead(input_dim=8, anisotropic=False)
+        head = PolarizabilityHead(input_dim=8, anisotropic=False, dtype=DTYPE)
         x = torch.randn(3, 8)
         out = head(x)
         # Type assertion: isotropic path returns a bare tensor.
@@ -102,6 +105,7 @@ def _build_anisotropic_head(input_dim: int = 4, mul: int = 3) -> PolarizabilityH
         anisotropic=True,
         tensor_irreps=irreps,
         avg_num_neighbors=4.0,
+        dtype=DTYPE,
     )
 
 

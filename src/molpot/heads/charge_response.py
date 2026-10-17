@@ -17,7 +17,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from molix import config
 from molix.F.scatter import scatter_sum
 
 ANG2BOHR = 1.8897259886
@@ -81,12 +80,9 @@ class ChargeResponseHead(nn.Module):
         hidden_dim: int = 64,
         epsilon: float = 0.01,
         sigma: dict[int, float] | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         variant = variant.lower()
         if variant.endswith("_iso"):
             variant = variant[:-4]

@@ -20,7 +20,7 @@ from tensordict import TensorDict
 from molix.compile import Compiler
 from molzoo.allegro import AllegroPotential, AllegroSpec
 from tests.conftest import make_graph_batch, rotate_graph, rotation_matrix_x
-from tests.test_molzoo.test_allegro.conftest import TINY, WEIGHTS_DIR
+from tests.test_molzoo.test_allegro.conftest import DTYPE, TINY, WEIGHTS_DIR
 
 FORCES = ("atoms.pos",)
 ATOL = 1e-10
@@ -42,7 +42,7 @@ needs_assets = pytest.mark.skipif(
 
 def _model(*, wrt=FORCES, **overrides) -> AllegroPotential:
     torch.manual_seed(0)
-    return AllegroPotential(AllegroSpec(**{**TINY, **overrides}), wrt=wrt)
+    return AllegroPotential(AllegroSpec(**{**TINY, **overrides}), wrt=wrt, dtype=DTYPE)
 
 
 def _energy(model: AllegroPotential, batch: TensorDict) -> torch.Tensor:
@@ -167,7 +167,7 @@ class TestAllegroPotential:
         record = torch.load(WEIGHTS_DIR / goldens, weights_only=True)[structure]
         periodic = record.get("cell") is not None
         wrt = ("atoms.pos", "graphs.strain") if periodic else ("atoms.pos",)
-        model = AllegroPotential.load(WEIGHTS_DIR / package, wrt=wrt)
+        model = AllegroPotential.load(WEIGHTS_DIR / package, wrt=wrt, dtype=DTYPE)
         out = model(_golden_batch(record))
         n = record["pos"].shape[0]
         energy = out["graphs", "energy"].detach()

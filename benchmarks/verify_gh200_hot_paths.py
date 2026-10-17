@@ -6,9 +6,9 @@ fallback; this script runs the same checks on the fused kernels. One
 status is non-zero when any check fails.
 
 1. Allegro
-   * ``WeightedChannels(basis, weights, index=source, num_rows=N)`` (one
+   * ``WeightedChannels(basis, weights, index=source, num_rows=N, dtype=DTYPE)`` (one
      ``SegmentedPolynomial`` with ``output_indices`` / ``output_shapes``)
-     equals ``scatter_sum_compile_safe(WeightedChannels(basis, weights),
+     equals ``scatter_sum_compile_safe(WeightedChannels(basis, weights, dtype=DTYPE),
      source, N)`` — fp64 and fp32.
    * ``AllegroPotential`` on the tiny spec (CUDA eager vs CPU eager) and on
      the official packages (CUDA eager vs the upstream goldens at the test's
@@ -45,9 +45,8 @@ from pathlib import Path
 
 import torch
 
-from molix import config
-
-config.set_precision("fp64")
+#: Build dtype of every model here (the references are fp64).
+DTYPE = torch.float64
 
 from tests.conftest import make_graph_batch  # noqa: E402
 from tests.test_molzoo.test_allegro.conftest import TINY, WEIGHTS_DIR  # noqa: E402
@@ -273,7 +272,7 @@ def check_allegro_models(device: torch.device, *, quick: bool) -> None:
     tiny_model = tiny_batch = None
     try:
         torch.manual_seed(0)
-        model = AllegroPotential(AllegroSpec(**TINY), wrt=("atoms.pos",)).eval()
+        model = AllegroPotential(AllegroSpec(**TINY), wrt=("atoms.pos",), dtype=DTYPE).eval()
         cluster = allegro_cluster()
         cpu = eager(model, cluster, keys)
         model = model.to(device)
@@ -348,7 +347,11 @@ def check_allegro_models(device: torch.device, *, quick: bool) -> None:
                     record = records[structure]
                     periodic = record.get("cell") is not None
                     wrt = ("atoms.pos", "graphs.strain") if periodic else ("atoms.pos",)
-                    model = AllegroPotential.load(WEIGHTS_DIR / package, wrt=wrt).to(device).eval()
+                    model = (
+                        AllegroPotential.load(WEIGHTS_DIR / package, wrt=wrt, dtype=DTYPE)
+                        .to(device)
+                        .eval()
+                    )
                     batch = _golden_batch(record).to(device)
                     out = model(batch.clone())
                     n = record["pos"].shape[0]
@@ -441,6 +444,7 @@ def mace_models():
             atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **TINY_MATPES_KWARGS
         ),
         wrt=("atoms.pos",),
+        dtype=DTYPE,
     ).eval()
     torch.manual_seed(0)
     omol = MaceOmol(
@@ -448,6 +452,7 @@ def mace_models():
             atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **TINY_OMOL_KWARGS
         ),
         wrt=("atoms.pos",),
+        dtype=DTYPE,
     ).eval()
     wake_zero_init_readout(omol)
     torch.manual_seed(0)
@@ -456,6 +461,7 @@ def mace_models():
             atomic_numbers=ATOMIC_NUMBERS, atomic_energies=ATOMIC_ENERGIES, **TINY_POLAR_KWARGS
         ),
         wrt=("atoms.pos",),
+        dtype=DTYPE,
     ).eval()
     return {
         "matpes": (matpes, mace_cluster(False)),
@@ -515,6 +521,7 @@ def check_mace_compile(device: torch.device, moved: dict) -> None:
                     **TINY_POLAR_KWARGS,
                 ),
                 wrt=("atoms.pos",),
+                dtype=DTYPE,
             )
             .eval()
             .to(device)
@@ -543,7 +550,8 @@ def check_mace_compile(device: torch.device, moved: dict) -> None:
                     atomic_numbers=ATOMIC_NUMBERS,
                     atomic_energies=ATOMIC_ENERGIES,
                     **TINY_MATPES_KWARGS,
-                )
+                ),
+                dtype=DTYPE,
             )
             .eval()
             .to(device)
@@ -586,10 +594,7 @@ def main() -> int:
         "=== molix::scatter_sum native op loaded: "
         f"{getattr(torch.ops.molix, 'scatter_sum', None) is not None}"
     )
-    print(
-        f"=== config.ftype={config['ftype']} weights_dir={WEIGHTS_DIR} "
-        f"step7_ref={STEP7_REF.exists()}"
-    )
+    print(f"=== dtype={DTYPE} weights_dir={WEIGHTS_DIR} step7_ref={STEP7_REF.exists()}")
 
     print("--- 1. Allegro")
     check_weighted_channels(device)

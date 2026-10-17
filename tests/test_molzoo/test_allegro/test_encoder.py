@@ -18,7 +18,7 @@ from tests.conftest import (
     rotation_matrix_z,
     translate_graph,
 )
-from tests.test_molzoo.test_allegro.conftest import TINY
+from tests.test_molzoo.test_allegro.conftest import DTYPE, TINY
 
 #: Rigid translation (Å), ``Rz(γ) @ Rx(β)`` angles (rad) and a relabelling of
 #: the five cluster atoms — all fixed, no RNG.
@@ -33,7 +33,7 @@ INVARIANCE_ATOL = 1e-10
 
 def _encoder(**overrides) -> AllegroEncoder:
     torch.manual_seed(0)
-    return AllegroEncoder(AllegroSpec(**{**TINY, **overrides}))
+    return AllegroEncoder(AllegroSpec(**{**TINY, **overrides}), dtype=DTYPE)
 
 
 def _edge_features(encoder: AllegroEncoder, batch) -> torch.Tensor:

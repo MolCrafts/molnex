@@ -156,7 +156,7 @@ and exits 77 — ctest's SKIP — without one.
 This path is independent of neural-potential deployment (`molix.deploy` and
 `molix.export.aoti`, run in LAMMPS by `pair_style molnex`). A provenance
 manifest for such a package is the caller's own file: write
-`ff.manifest(profile="A0").to_dict()` as JSON beside the package. No engine
+`ff.manifest(profile="A0", dtype=torch.float64).to_dict()` as JSON beside the package. No engine
 reads it.
 
 ## Compile to a ForceSpec

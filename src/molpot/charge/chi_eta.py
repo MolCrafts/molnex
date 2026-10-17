@@ -5,8 +5,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from molix import config
-
 __all__ = ["ChiEtaHead"]
 
 
@@ -26,12 +24,9 @@ class ChiEtaHead(nn.Module):
         min_eta: float = 1e-3,
         max_eta: float = 20.0,
         max_chi: float = 5.0,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if max_eta <= min_eta:
             raise ValueError(f"max_eta {max_eta} must exceed min_eta {min_eta}")
         if max_chi <= 0:

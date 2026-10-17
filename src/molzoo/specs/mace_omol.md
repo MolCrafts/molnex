@@ -46,7 +46,7 @@ when built with `wrt=("atoms.pos",)`, `atoms.forces` — not `atoms.node_feature
 | Direction | TensorDict path | Shape | Dtype | Contract |
 |-----------|------------------|-------|-------|----------|
 | In | `atoms.Z` | `(N,)` | long | Atomic numbers; must be present in the construction `atomic_numbers` table |
-| In | `atoms.pos` | `(N, 3)` | float (`config.ftype`) | Cartesian positions; forces are `-∂E/∂pos` |
+| In | `atoms.pos` | `(N, 3)` | float (the model's `dtype`) | Cartesian positions; forces are `-∂E/∂pos` |
 | In | `atoms.batch` | `(N,)` | long | Graph membership index `0..B-1` |
 | In | `pairs.pair_index` | `(E, 2)` | long | `[:,0]`=source/sender, `[:,1]`=target/receiver (MolNex convention) |
 | In | `graphs.total_charge` | `(B,)` | long | Optional; per-graph total charge in units of `e`. Absent → neutral (`0`) |
@@ -194,7 +194,7 @@ keyword arguments).
 | A3 | cuEquivariance `"O3"` group everywhere (not the MACE-compatible `O3` variant) | weights are converted into the cue-O3 twin, so O3 is the native target; the two O3 variants' CG differ only ~1.4e-8/op and the O3 twin already matches the official checkpoint (pre-conversion) to 1.5e-8 — the MACE-compatible variant would not reduce the residual and would add a dependency outside cuEquivariance | low | residual 7e-7 eV / 4.3e-6 eV/Å vs official (reimplementation accumulation, not a convention diff) — inside the 1e-4 bar |
 | A4 | `forward` is `molix.autograd.Derivative(self.energy, wrt=...)`, fixed at construction — one `torch.autograd.grad`; the earlier `torch.func.grad` plan was dropped because cuEquivariance's fused ops register legacy `autograd.Function`s without `setup_context` | compile-friendly molnex contract | low | `tests/test_molzoo/test_mace/test_potential.py::TestMacePotential::test_forward_is_the_same_op_composed_outside`, `tests/test_molzoo/test_mace/test_potential.py::TestMaceOmol::test_force_loss_through_forward_reaches_the_parameters` |
 | A5 | edge convention `v=pos[t]-pos[s]`, `pair_index (E,2)` (read as `edge_index`) end to end (upstream's `(2,E)` transposed away at the port boundary) | MolNex collate schema | low | `tests/test_molrep/test_embedding/test_geometry.py::TestEdgeVectors`, `tests/test_molzoo/test_mace/test_potential.py::TestMaceOmol` |
-| A6 | `RadialMLP` honors `config.ftype` | fp64-via-config without `.double()` | low | `tests/test_molzoo/test_mace/test_potential.py::TestMaceOmol` (autouse fp64 fixture) |
+| A6 | `RadialMLP` is built at the constructor's `dtype` | fp64 without `.double()` | low | `tests/test_molzoo/test_mace/test_potential.py::TestMaceOmol` (`conftest.DTYPE`) |
 | A7 | per-layer irreps from `MACEOMolSpec.body_schedule()`: hidden order `l_max-1`, mid-layer edge irreps and radial MLP at `edge_channels` (default 128), scalar last layer, one shared product | faithful OMOL weight load | medium | `tests/test_molzoo/test_mace/test_checkpoint.py::TestCheckpointRemap::test_roundtrip_restores_every_parameter_omol`, `tests/test_molzoo/test_mace/test_spec.py::TestMACEOMolSpec::test_scalar_only_angular_order_is_rejected` |
 
 ## 7. Validation Contract

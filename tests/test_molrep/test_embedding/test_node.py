@@ -10,6 +10,9 @@ from molrep.embedding.node import (
     JointEmbeddingSpec,
 )
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 
 class TestDiscreteEmbeddingSpec:
     """Test DiscreteEmbeddingSpec configuration."""
@@ -78,7 +81,7 @@ class TestJointEmbedding:
             DiscreteEmbeddingSpec(input_key="Z", num_classes=10, emb_dim=16),
             ContinuousEmbeddingSpec(input_key="pos", in_dim=3, emb_dim=32),
         ]
-        joint = JointEmbedding(embedding_specs=specs, out_dim=64)
+        joint = JointEmbedding(embedding_specs=specs, out_dim=64, dtype=DTYPE)
 
         assert len(joint.embedders) == 2
         assert isinstance(joint.embedders[0], torch.nn.Embedding)
@@ -91,7 +94,7 @@ class TestJointEmbedding:
             ContinuousEmbeddingSpec(input_key="pos", in_dim=3, emb_dim=32),
         ]
         out_dim = 64
-        joint = JointEmbedding(embedding_specs=specs, out_dim=out_dim)
+        joint = JointEmbedding(embedding_specs=specs, out_dim=out_dim, dtype=DTYPE)
 
         n_atoms = 5
         z = torch.randint(0, 10, (n_atoms,))
@@ -104,12 +107,12 @@ class TestJointEmbedding:
     def test_empty_specs_error(self):
         """Test error when no specs are provided."""
         with pytest.raises(ValueError, match="No feature embeddings configured."):
-            JointEmbedding(embedding_specs=[], out_dim=64)
+            JointEmbedding(embedding_specs=[], out_dim=64, dtype=DTYPE)
 
     def test_gradient_flow(self):
         """Test that gradients flow through the joint embedding."""
         specs = [ContinuousEmbeddingSpec(input_key="attr", in_dim=5, emb_dim=16)]
-        joint = JointEmbedding(embedding_specs=specs, out_dim=32)
+        joint = JointEmbedding(embedding_specs=specs, out_dim=32, dtype=DTYPE)
 
         attr = torch.randn(5, 5, requires_grad=True)
 
@@ -125,12 +128,12 @@ class TestJointEmbedding:
         [("discrete",), ("continuous",), ("discrete", "continuous")],
         ids=["discrete", "continuous", "both"],
     )
-    def test_all_parameters_honour_the_fp64_precision(self, fp64, spec_kinds):
-        """Every parameter is fp64 when the module is built under fp64.
+    def test_all_parameters_are_built_at_the_given_dtype(self, spec_kinds):
+        """Every parameter is fp64 when the module is built at fp64.
 
-        ``config["ftype"]`` is the single source of truth for the working
-        precision; a layer that ignores it leaves the module mixed-precision
-        and its first forward dies on a dtype-mismatched matmul.
+        A layer that ignored the constructor dtype would leave the module
+        mixed-precision, and its first forward would die on a dtype-mismatched
+        matmul.
         """
         available = {
             "discrete": DiscreteEmbeddingSpec(input_key="Z", num_classes=10, emb_dim=16),
@@ -139,17 +142,18 @@ class TestJointEmbedding:
         joint = JointEmbedding(
             embedding_specs=[available[kind] for kind in spec_kinds],
             out_dim=32,
+            dtype=torch.float64,
         )
 
         assert {p.dtype for p in joint.parameters()} == {torch.float64}
 
-    def test_forward_runs_under_the_fp64_precision(self, fp64):
+    def test_forward_runs_at_the_given_dtype(self):
         """A module built at fp64 consumes fp64 inputs and emits fp64."""
         specs = [
             DiscreteEmbeddingSpec(input_key="Z", num_classes=10, emb_dim=16),
             ContinuousEmbeddingSpec(input_key="pos", in_dim=3, emb_dim=32),
         ]
-        joint = JointEmbedding(embedding_specs=specs, out_dim=64)
+        joint = JointEmbedding(embedding_specs=specs, out_dim=64, dtype=torch.float64)
 
         n_atoms = 5
         z = torch.zeros(n_atoms, dtype=torch.long)

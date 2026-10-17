@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 from molpy.core import UnitsError
 
-from molix import config
 from molix.units import units
 from molpot.derivation.energy import EnergyAggregation
 
@@ -269,11 +268,8 @@ class AtomicEnergyMLP(nn.Module):
         hidden_dim: Dimension of input hidden representation.
     """
 
-    def __init__(self, hidden_dim: int = 64, *, dtype: torch.dtype | None = None):
+    def __init__(self, hidden_dim: int = 64, *, dtype: torch.dtype):
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
@@ -300,11 +296,8 @@ class EnergyHead(nn.Module):
     explicitly.
     """
 
-    def __init__(self, hidden_dim: int = 64, *, dtype: torch.dtype | None = None):
+    def __init__(self, hidden_dim: int = 64, *, dtype: torch.dtype):
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.atomic_mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),

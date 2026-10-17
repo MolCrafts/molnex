@@ -1,6 +1,6 @@
 """Tests for molzoo.mace.layers.
 
-The whole ``test_mace`` suite builds at fp64 (``conftest._build_at_fp64``):
+The whole ``test_mace`` suite builds at fp64 (``conftest.DTYPE``):
 cuEquivariance fixes its precision at construction.
 """
 
@@ -10,7 +10,6 @@ import cuequivariance as cue
 import pytest
 import torch
 
-from molix import config
 from molix.F.scatter import scatter_sum
 from molrep import cueq
 from molzoo.mace.checkpoint import element_linear_weight, one_hot_weight
@@ -27,6 +26,7 @@ from molzoo.mace.layers import (
     ResidualInteraction,
     _partition_gate,
 )
+from tests.test_molzoo.test_mace.conftest import DTYPE
 
 N_ELEMENTS = 3
 N_NODES = 4
@@ -73,8 +73,11 @@ def _common():
 @pytest.fixture
 def first_layer():
     return DensityInteraction(
-        node_feats_irreps=f"{FEATURES}x0e", edge_irreps=f"{FEATURES}x0e", **_common()
-    ).double()
+        node_feats_irreps=f"{FEATURES}x0e",
+        edge_irreps=f"{FEATURES}x0e",
+        **_common(),
+        dtype=DTYPE,
+    )
 
 
 @pytest.fixture
@@ -84,7 +87,8 @@ def residual_layer():
         edge_irreps=f"{FEATURES}x0e",
         hidden_irreps=f"{FEATURES}x0e",
         **_common(),
-    ).double()
+        dtype=DTYPE,
+    )
 
 
 def _density_message(layer, graph):
@@ -209,7 +213,8 @@ class TestAgnosticInteraction:
             edge_irreps=f"{FEATURES}x0e",
             avg_num_neighbors=AVG_NUM_NEIGHBORS,
             **_common(),
-        ).double()
+            dtype=DTYPE,
+        )
         out, skip = layer(**graph)
         expected = layer.skip_tp(_agnostic_message(layer, graph), graph["elements"])
         assert skip is None
@@ -226,7 +231,8 @@ class TestAgnosticResidualInteraction:
             hidden_irreps=f"{FEATURES}x0e",
             avg_num_neighbors=AVG_NUM_NEIGHBORS,
             **_common(),
-        ).double()
+            dtype=DTYPE,
+        )
         out, skip = layer(**graph)
         torch.testing.assert_close(out, _agnostic_message(layer, graph))
         torch.testing.assert_close(skip, layer.skip_tp(graph["node_feats"], graph["elements"]))
@@ -243,7 +249,8 @@ def layer():
         target_irreps=TARGET,
         hidden_irreps=HIDDEN,
         radial_mlp=[8],
-    ).double()
+        dtype=DTYPE,
+    )
 
 
 def _residual_message(layer: ResidualInteraction, graph: dict) -> torch.Tensor:
@@ -356,7 +363,7 @@ class TestRadialMLP:
 
     def test_split_parts_plus_bias_reproduce_forward(self):
         torch.manual_seed(0)
-        mlp = RadialMLP([12, 16, 5]).double()
+        mlp = RadialMLP([12, 16, 5], dtype=DTYPE)
         x = torch.randn(7, 12, dtype=torch.float64)
         widths = [4, 5, 3]
         weights = mlp.first_layer_parts(widths)
@@ -368,13 +375,13 @@ class TestRadialMLP:
 
     def test_single_layer_network_needs_no_activation(self):
         """``forward_from_first`` on a one-layer net is the identity."""
-        mlp = RadialMLP([6, 3]).double()
+        mlp = RadialMLP([6, 3], dtype=DTYPE)
         hidden = torch.randn(4, 3, dtype=torch.float64)
         torch.testing.assert_close(mlp.forward_from_first(hidden), hidden, atol=0, rtol=0)
 
     def test_widths_must_partition_the_input(self):
         with pytest.raises(ValueError, match="do not partition"):
-            RadialMLP([12, 16, 5]).first_layer_parts([4, 4])
+            RadialMLP([12, 16, 5], dtype=DTYPE).first_layer_parts([4, 4])
 
 
 def _pair(irreps_in: str, num_elements: int, irreps_out: str):
@@ -472,13 +479,17 @@ N = 5
 def feats() -> torch.Tensor:
     """``(N, irreps_in.dim)`` = ``(5, 4 + 12)`` features in ``ir_mul``."""
     torch.manual_seed(0)
-    return torch.randn(N, 4 * MUL, dtype=config.ftype)
+    return torch.randn(N, 4 * MUL, dtype=DTYPE)
 
 
 def _block(**kw) -> EquivariantProductBasis:
     torch.manual_seed(1)
     return EquivariantProductBasis(
-        node_feats_irreps=IRREPS_IN, target_irreps=IRREPS_OUT, correlation=2, **kw
+        node_feats_irreps=IRREPS_IN,
+        target_irreps=IRREPS_OUT,
+        correlation=2,
+        **kw,
+        dtype=DTYPE,
     )
 
 
@@ -489,13 +500,13 @@ class TestEquivariantProductBasis:
 
     def test_skip_connection_is_added(self, feats):
         block = _block()
-        sc = torch.randn(N, 4 * MUL, dtype=config.ftype)
+        sc = torch.randn(N, 4 * MUL, dtype=DTYPE)
         elements = _elements(torch.zeros(N, dtype=torch.long))
         torch.testing.assert_close(block(feats, sc, elements) - block(feats, None, elements), sc)
 
     def test_use_sc_false_ignores_the_skip(self, feats):
         block = _block(use_sc=False)
-        sc = torch.randn(N, 4 * MUL, dtype=config.ftype)
+        sc = torch.randn(N, 4 * MUL, dtype=DTYPE)
         elements = _elements(torch.zeros(N, dtype=torch.long))
         torch.testing.assert_close(block(feats, sc, elements), block(feats, None, elements))
 

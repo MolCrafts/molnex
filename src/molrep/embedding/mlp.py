@@ -27,7 +27,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from molix import config
 from molix.nn.activation import activation_from_name
 
 
@@ -62,12 +61,9 @@ class ScalarLinearLayer(nn.Module):
         alpha: float = 1.0,
         bias: bool = False,
         *,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.in_features = in_features
         self.out_features = out_features
         self.register_buffer("alpha", torch.tensor(float(alpha), dtype=dtype), persistent=False)
@@ -128,7 +124,8 @@ class ScalarMLPFunction(nn.Module):
         hidden_layers_width: Optional[int] = None,
         nonlinearity: str | type[nn.Module] | None = nn.SiLU,
         bias: bool = False,
-        dtype: torch.dtype | None = None,
+        *,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
         if hidden_layers_depth != 0:
@@ -246,11 +243,8 @@ class MomentNormalizedMLP(nn.Module):
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             return self.linear(x) * self.alpha
 
-    def __init__(self, channels: list[int], *, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, channels: list[int], *, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if len(channels) < 2:
             raise ValueError(f"channels must have at least [in, out], got {channels}")
         self.channels = list(channels)
@@ -350,12 +344,9 @@ class FFLayer(nn.Module):
         in_dim: int,
         activation: str | type[nn.Module] | None = None,
         use_bias: bool = True,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         if int(in_dim) <= 0:
             raise ValueError(f"in_dim must be positive, got {in_dim}.")
         act_cls = activation_from_name(activation)

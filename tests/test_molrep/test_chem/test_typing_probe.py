@@ -7,6 +7,9 @@ from tensordict import TensorDict
 
 from molrep.chem import AtomTypeReadout, ChemEncoder
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 
 def _batch(Z: list[int], bonds: list[tuple[int, int]] | None = None) -> TensorDict:
     n = len(Z)
@@ -24,16 +27,16 @@ def _batch(Z: list[int], bonds: list[tuple[int, int]] | None = None) -> TensorDi
 
 class TestAtomTypeReadout:
     def test_forward_shapes(self):
-        enc = ChemEncoder(atom_dim=8, bond_dim=4)
-        probe = AtomTypeReadout(enc, num_types=3)
+        enc = ChemEncoder(atom_dim=8, bond_dim=4, dtype=DTYPE)
+        probe = AtomTypeReadout(enc, num_types=3, dtype=DTYPE)
         batch = _batch([6, 1], bonds=[(0, 1)])
         out = probe(batch)
         assert out["atoms", "logits"].shape == (2, 3)
         assert out["atoms", "pred_type_id"].shape == (2,)
 
     def test_labels_do_not_affect_encoder(self):
-        enc = ChemEncoder(atom_dim=8, bond_dim=4)
-        probe = AtomTypeReadout(enc, num_types=2)
+        enc = ChemEncoder(atom_dim=8, bond_dim=4, dtype=DTYPE)
+        probe = AtomTypeReadout(enc, num_types=2, dtype=DTYPE)
         b1 = _batch([6, 8], bonds=[(0, 1)])
         b2 = _batch([6, 8], bonds=[(0, 1)])
         b2["atoms", "atom_type_id"] = torch.tensor([0, 1], dtype=torch.long)

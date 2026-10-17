@@ -176,17 +176,16 @@ There is no `mace` block namespace.
 | A8 | Shared configurable graph accumulation and differentiable model-input dtype boundary | fp64 MD state may use strict fp32 model calculation without fp32 baseline summation | numerical policy is not a long-time drift guarantee | `tests/test_molzoo/test_mace/test_potential.py::TestMacePotential::test_energy_dtype_selects_the_accumulation`, `::test_forward_applies_the_input_dtype`; official-weight 193-atom CPU/GPU three-step smoke, job 2063791 |
 
 Precision/loading controls and current acceptance limits are documented in
-`docs/molzoo/user-guide/mace.md`. The parameter dtype must be selected before
-construction/compilation (`config.set_precision(...)`); molnex leaves the fp32
-matmul policy at PyTorch's default. Official loading accepts converted cuEq weights, not a raw
+`docs/molzoo/user-guide/mace.md`. The parameter dtype is the constructor's
+`dtype` argument, fixed at construction and before compilation; molnex leaves
+the fp32 matmul policy at PyTorch's default. Official loading accepts converted cuEq weights, not a raw
 unconverted (pre-cuEquivariance) contraction concatenation. Shared scalar/Linear singleton ranks are the
 only checkpoint reshapes; no in-tree basis conversion is implemented.
 
 **Known limitation.** cuEquivariance freezes `math_dtype` at construction, and
 `EquivariantProductBasis` (shared with `MaceOmol`) is not rebuilt on `.double()`.
-A model built under the default fp32 and then `.double()`-d therefore still
-contracts in float32 (~1e-8 eV noise). For fp64 work call
-`molix.config.set_precision("fp64")` **before** construction.
+A model built at fp32 and then `.double()`-d therefore still contracts in
+float32 (~1e-8 eV noise). For fp64 work construct with `dtype=torch.float64`.
 
 ## 7. Validation Contract
 

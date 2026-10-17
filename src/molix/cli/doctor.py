@@ -8,7 +8,7 @@ needs and reports a per-item verdict:
 * The native C++ ops library (``torch.ops.molix.*``) — loaded and registered.
 * ``cuequivariance`` (required for equivariant models).
 * GPU telemetry via ``nvidia-ml-py`` (``pynvml``).
-* Core runtime dependencies (tensordict, molpy, mollog, molcfg, …).
+* Core runtime dependencies (tensordict, molpy, mollog, …).
 
 The checks never mutate global state and each returns an immutable
 :class:`CheckResult`; rendering lives in :mod:`molix.cli`.
@@ -38,7 +38,6 @@ _CORE_DEPS: Final[tuple[tuple[str, str], ...]] = (
     ("zarr", "zarr"),
     ("molpy", "molcrafts-molpy"),
     ("mollog", "molcrafts-mollog"),
-    ("molcfg", "molcrafts-molcfg"),
 )
 
 # Canonical native op used to confirm the C++ library loaded + registered.

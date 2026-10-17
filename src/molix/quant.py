@@ -17,9 +17,9 @@ Object model (strategy pattern, no free functions):
   registers the parametrization on every float weight in place; the model's own
   code is never edited. PTQ on a checkpoint is :meth:`Quantizer.quantize_state_dict`.
 
-Compute *dtype* (fp32/fp64/mixed) is the orthogonal axis and stays with
-:meth:`molix.config.MolnexConfig.set_precision`. Quantization here perturbs
-weight *values* while compute stays at ``config["ftype"]``.
+Compute *dtype* (fp32/fp64) is the orthogonal axis: the ``dtype`` every module
+is built at. Quantization here perturbs weight *values* while compute stays at
+the module's build dtype.
 """
 
 from __future__ import annotations

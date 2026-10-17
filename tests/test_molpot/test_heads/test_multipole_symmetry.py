@@ -60,6 +60,9 @@ from tests.conftest import (
     translate_graph,
 )
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 SEEDS = (0, 1, 2, 3, 4)
 
 
@@ -169,7 +172,8 @@ def _build_allegro(*, expose_tensor_track: bool) -> AllegroEncoder:
             allegro_mlp_hidden_layers_width=16,
             avg_num_neighbors=4.0,
             expose_tensor_track=expose_tensor_track,
-        )
+        ),
+        dtype=DTYPE,
     )
     encoder.eval()
     return encoder
@@ -187,6 +191,7 @@ def charge_only_pipeline():
         quadrupole=False,
         constrain_total_charge=True,
         hidden_dim=16,
+        dtype=DTYPE,
     ).eval()
     return _PipelineModule(encoder, head)
 
@@ -204,6 +209,7 @@ def charge_dipole_pipeline():
         constrain_total_charge=True,
         hidden_dim=16,
         tensor_irreps=encoder.tensor_track_irreps,
+        dtype=DTYPE,
     ).eval()
     return _PipelineModule(encoder, head)
 
@@ -221,6 +227,7 @@ def full_multipole_pipeline():
         constrain_total_charge=True,
         hidden_dim=16,
         tensor_irreps=encoder.tensor_track_irreps,
+        dtype=DTYPE,
     ).eval()
     return _PipelineModule(encoder, head)
 

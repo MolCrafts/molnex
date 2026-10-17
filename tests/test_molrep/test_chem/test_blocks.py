@@ -10,6 +10,9 @@ import torch
 from molrep.chem.blocks import ChemGraphBlock
 from molrep.chem.embed import AtomChemEmbedding
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 
 class TestChemGraphBlock:
     """ChemGraphBlock updates ``(h_atom, h_bond)`` on the undirected covalent graph."""
@@ -17,7 +20,7 @@ class TestChemGraphBlock:
     def test_forward_preserves_shapes(self):
         torch.manual_seed(0)
         atom_dim, bond_dim = 8, 6
-        block = ChemGraphBlock(atom_dim=atom_dim, bond_dim=bond_dim)
+        block = ChemGraphBlock(atom_dim=atom_dim, bond_dim=bond_dim, dtype=DTYPE)
         h_atom = torch.randn(4, atom_dim)
         h_bond = torch.randn(3, bond_dim)
         atomi = torch.tensor([0, 0, 0], dtype=torch.long)
@@ -29,7 +32,7 @@ class TestChemGraphBlock:
     def test_reverse_endpoints_bond_features_equal(self):
         torch.manual_seed(1)
         atom_dim, bond_dim = 8, 6
-        block = ChemGraphBlock(atom_dim=atom_dim, bond_dim=bond_dim)
+        block = ChemGraphBlock(atom_dim=atom_dim, bond_dim=bond_dim, dtype=DTYPE)
         block.eval()
         h_atom = torch.randn(4, atom_dim)
         h_bond = torch.randn(3, bond_dim)
@@ -43,8 +46,8 @@ class TestChemGraphBlock:
         """One hop: changing a non-adjacent atom's Z leaves target ``h_i`` unchanged."""
         torch.manual_seed(2)
         atom_dim, bond_dim = 8, 8
-        atom_emb = AtomChemEmbedding(atom_dim=atom_dim, num_elements=20)
-        block = ChemGraphBlock(atom_dim=atom_dim, bond_dim=bond_dim)
+        atom_emb = AtomChemEmbedding(atom_dim=atom_dim, num_elements=20, dtype=DTYPE)
+        block = ChemGraphBlock(atom_dim=atom_dim, bond_dim=bond_dim, dtype=DTYPE)
         block.eval()
         # Star 1-0-2 / 0-3: atom 1's only neighbor is 0; atom 2 is not adjacent to 1.
         z = torch.tensor([8, 1, 1, 6], dtype=torch.long)
@@ -61,8 +64,8 @@ class TestChemGraphBlock:
     def test_one_block_neighbor_change_affects_atom(self):
         torch.manual_seed(2)
         atom_dim, bond_dim = 8, 8
-        atom_emb = AtomChemEmbedding(atom_dim=atom_dim, num_elements=20)
-        block = ChemGraphBlock(atom_dim=atom_dim, bond_dim=bond_dim)
+        atom_emb = AtomChemEmbedding(atom_dim=atom_dim, num_elements=20, dtype=DTYPE)
+        block = ChemGraphBlock(atom_dim=atom_dim, bond_dim=bond_dim, dtype=DTYPE)
         block.eval()
         z = torch.tensor([8, 1, 1, 6], dtype=torch.long)
         h_bond = torch.zeros(3, bond_dim)
@@ -78,8 +81,10 @@ class TestChemGraphBlock:
         """``local_attention=True`` must not softmax over all E bonds."""
         torch.manual_seed(3)
         atom_dim, bond_dim = 8, 8
-        atom_emb = AtomChemEmbedding(atom_dim=atom_dim, num_elements=20)
-        block = ChemGraphBlock(atom_dim=atom_dim, bond_dim=bond_dim, local_attention=True)
+        atom_emb = AtomChemEmbedding(atom_dim=atom_dim, num_elements=20, dtype=DTYPE)
+        block = ChemGraphBlock(
+            atom_dim=atom_dim, bond_dim=bond_dim, local_attention=True, dtype=DTYPE
+        )
         block.eval()
         # Disjoint bonds 0-1 and 2-3: a global softmax would leak component {2,3} into {0,1}.
         z = torch.tensor([8, 1, 6, 1], dtype=torch.long)
@@ -105,12 +110,12 @@ class TestChemGraphBlock:
         params = inspect.signature(ChemGraphBlock.__init__).parameters
         assert "pos" not in params
         with pytest.raises(TypeError):
-            ChemGraphBlock(atom_dim=8, bond_dim=8, pos=torch.zeros(4, 3))
+            ChemGraphBlock(atom_dim=8, bond_dim=8, pos=torch.zeros(4, 3), dtype=DTYPE)
 
     def test_empty_bonds_preserves_shapes(self):
         torch.manual_seed(4)
         atom_dim, bond_dim = 8, 6
-        block = ChemGraphBlock(atom_dim=atom_dim, bond_dim=bond_dim)
+        block = ChemGraphBlock(atom_dim=atom_dim, bond_dim=bond_dim, dtype=DTYPE)
         h_atom = torch.randn(3, atom_dim)
         h_bond = torch.zeros(0, bond_dim)
         empty = torch.zeros(0, dtype=torch.long)
@@ -125,7 +130,7 @@ class TestChemGraphBlock:
         so the residual stream cannot compound across hops.
         """
         torch.manual_seed(3)
-        block = ChemGraphBlock(atom_dim=8, bond_dim=8).double()
+        block = ChemGraphBlock(atom_dim=8, bond_dim=8, dtype=DTYPE).double()
         h_atom = torch.randn(4, 8, dtype=torch.float64)
         h_bond = torch.randn(3, 8, dtype=torch.float64)
         atomi = torch.tensor([0, 0, 0], dtype=torch.long)

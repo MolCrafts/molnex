@@ -213,7 +213,7 @@ spec = AllegroSpec(
     num_tensor_features=4,
     avg_num_neighbors=2.0,
 )
-encoder = AllegroEncoder(spec)
+encoder = AllegroEncoder(spec, dtype=torch.float64)
 batch = encoder(water())
 print(batch["pairs", "edge_features"].shape, encoder.output_dim)  # torch.Size([6, 48]) 48
 print([tp.num_paths for tp in encoder.tps])                       # [11, 3]
@@ -249,7 +249,9 @@ call; it is never re-checked inside a compiled region.
 collapsing to scalars and writes them for equivariant heads:
 
 ```python
-tensor_encoder = AllegroEncoder(spec.model_copy(update={"expose_tensor_track": True}))
+tensor_encoder = AllegroEncoder(
+    spec.model_copy(update={"expose_tensor_track": True}), dtype=torch.float64
+)
 batch = tensor_encoder(water())
 print(tensor_encoder.tensor_track_irreps)            # 4x0e+4x0o+4x1e+4x1o+4x2e+4x2o
 print(batch["pairs", "edge_tensor_features"].shape)  # torch.Size([6, 72])
@@ -263,7 +265,7 @@ option only; `AllegroPotential` raises on a spec with `expose_tensor_track=True`
 `AllegroPotential` is a `molix.autograd.Potential` over the encoder: it
 subclasses the body and registers upstream's `edge_readout`,
 `per_type_energy_scale_shift` and optional `pair_potential` (ZBL) at the
-module root, so its `state_dict` is flat. It takes the spec and `wrt`:
+module root, so its `state_dict` is flat. It takes the spec, `wrt` and the build `dtype`:
 
 ```python
 from molzoo.allegro import AllegroPotential, AllegroSpec
@@ -278,6 +280,7 @@ model = AllegroPotential(
         per_type_energy_shifts=[-13.6, -2041.0],
     ),
     wrt=("atoms.pos",),
+    dtype=torch.float64,
 )
 out = model(water())
 print(out["graphs", "energy"].dtype, out["graphs", "energy"].shape)  # torch.float64 torch.Size([1])
@@ -306,6 +309,7 @@ periodic["graphs", "cell"] = cell.view(1, 3, 3)
 stress_model = AllegroPotential(
     AllegroSpec(atomic_numbers=[1, 8], r_max=4.0, num_scalar_features=16, num_tensor_features=4),
     wrt=("atoms.pos", "graphs.strain"),
+    dtype=torch.float64,
 )
 print(stress_model(periodic)["graphs", "virial"].shape)  # torch.Size([1, 3, 3])
 ```
@@ -330,7 +334,9 @@ hyper-parameters are read off it.
 ```python
 from molzoo.allegro import AllegroPotential
 
-model = AllegroPotential.load("Allegro-OAM-L-0.1.nequip.zip", wrt=("atoms.pos",))
+model = AllegroPotential.load(
+    "Allegro-OAM-L-0.1.nequip.zip", wrt=("atoms.pos",), dtype=torch.float64
+)
 ```
 
 For example `Allegro-OAM-L:0.1` (Zenodo record
@@ -341,8 +347,8 @@ For example `Allegro-OAM-L:0.1` (Zenodo record
   a kernel choice that leaves the weights alone. Everything else about the
   architecture is the package's — `NequipPackage.read` fills a `NequipConfig`
   from the module tree and `AllegroSpec.from_package` builds the spec from it.
-- Build precision is `molix.config.ftype`: an fp32 package loaded under
-  `config.set_precision("fp64")` evaluates its fp32 weights in fp64.
+- Build precision is the `dtype` argument: an fp32 package loaded with
+  `dtype=torch.float64` evaluates its fp32 weights in fp64.
 - molnex leaves PyTorch's fp32 matmul policy at its default (`"highest"`,
   no TF32). Do not lower it for Allegro-OAM-L: TF32 matmuls put it off by
   ~4e-3 eV/atom and ~0.1 eV/Å on a periodic cell (GH200, 2026-10-15).

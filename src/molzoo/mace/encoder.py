@@ -45,7 +45,6 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molix import config
 from molrep.embedding.angular import SphericalHarmonics
 from molrep.embedding.cutoff import PolynomialCutoff
 from molrep.embedding.geometry import edge_lengths, edge_vectors
@@ -74,18 +73,16 @@ class MACEEncoder(ElementTable, nn.Module):
         spec: A validated :class:`~molzoo.mace.spec.MACESpec`. The interaction
             kind and :meth:`~molzoo.mace.spec.MACESpec.body_schedule` select
             the stack. Energy-head fields on the same object are ignored.
+        dtype: Floating dtype every parameter and buffer is built at.
     """
 
     in_keys = [("atoms", "Z"), ("atoms", "pos"), ("pairs", "pair_index")]
     out_keys = [("atoms", "node_features")]
 
-    def __init__(self, spec: MACESpec, *, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, spec: MACESpec, *, dtype: torch.dtype) -> None:
         super().__init__()
-        ftype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         #: The build dtype of every float parameter and buffer.
-        self.dtype = ftype
+        self.dtype = dtype
         #: Provenance only. Never read on a hot path.
         self._spec = spec
 
@@ -132,9 +129,9 @@ class MACEEncoder(ElementTable, nn.Module):
 
         # ---- embeddings ----
         self.node_embedding = OneHotLinear(
-            cue.Irreps("O3", node_attrs_irreps), cue.Irreps("O3", feat0), dtype=ftype
+            cue.Irreps("O3", node_attrs_irreps), cue.Irreps("O3", feat0), dtype=dtype
         )
-        self.spherical_harmonics = SphericalHarmonics(l_max=l_max, dtype=ftype)
+        self.spherical_harmonics = SphericalHarmonics(l_max=l_max, dtype=dtype)
         # normalize=False + eps=0 + trainable reproduces MACE's BesselBasis exactly.
         self.bessel = BesselRBF(
             r_cut=spec.r_max,
@@ -142,13 +139,13 @@ class MACEEncoder(ElementTable, nn.Module):
             normalize=False,
             eps=0.0,
             trainable=True,
-            dtype=ftype,
+            dtype=dtype,
         )
         self.distance_transform: AgnesiTransform | None = (
-            AgnesiTransform(dtype=ftype) if spec.distance_transform == "agnesi" else None
+            AgnesiTransform(dtype=dtype) if spec.distance_transform == "agnesi" else None
         )
         self.cutoff_fn = PolynomialCutoff(
-            r_cut=spec.r_max, exponent=spec.num_polynomial_cutoff, dtype=ftype
+            r_cut=spec.r_max, exponent=spec.num_polynomial_cutoff, dtype=dtype
         )
         self.joint_embedding: JointFeatureEmbedding | None = None
         if spec.conditioning == "charge_spin":
@@ -173,7 +170,7 @@ class MACEEncoder(ElementTable, nn.Module):
                     ),
                 ],
                 out_dim=num_features,
-                dtype=ftype,
+                dtype=dtype,
             )
         self.register_buffer(
             "z_table", torch.tensor(spec.atomic_numbers, dtype=torch.long), persistent=True
@@ -194,7 +191,7 @@ class MACEEncoder(ElementTable, nn.Module):
                     target_irreps=target,
                     hidden_irreps=hidden_sched[i],
                     radial_mlp=radial_mlp,
-                    dtype=ftype,
+                    dtype=dtype,
                 )
             elif spec.interaction == "agnostic":
                 # MACE-OFF / MACE-MP-0: normalised by the training set's
@@ -208,7 +205,7 @@ class MACEEncoder(ElementTable, nn.Module):
                     target_irreps=target,
                     radial_mlp=radial_mlp,
                     avg_num_neighbors=spec.avg_num_neighbors,
-                    dtype=ftype,
+                    dtype=dtype,
                 )
                 interaction = (
                     AgnosticInteraction(**common)
@@ -225,7 +222,7 @@ class MACEEncoder(ElementTable, nn.Module):
                     edge_irreps=edge_irr[i],
                     target_irreps=target,
                     radial_mlp=radial_mlp,
-                    dtype=ftype,
+                    dtype=dtype,
                 )
             else:
                 interaction = DensityResidualInteraction(
@@ -237,7 +234,7 @@ class MACEEncoder(ElementTable, nn.Module):
                     target_irreps=target,
                     hidden_irreps=hidden_sched[i],
                     radial_mlp=radial_mlp,
-                    dtype=ftype,
+                    dtype=dtype,
                 )
             self.interactions.append(interaction)
             self.products.append(
@@ -249,7 +246,7 @@ class MACEEncoder(ElementTable, nn.Module):
                     correlation=spec.correlation,
                     num_elements=product_elements,
                     use_sc=is_residual or residual_first or i > 0,
-                    dtype=ftype,
+                    dtype=dtype,
                 )
             )
 

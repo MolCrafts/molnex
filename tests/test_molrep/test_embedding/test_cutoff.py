@@ -12,6 +12,9 @@ from molrep.embedding.cutoff import (
     PolynomialCutoffSpec,
 )
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 #: A radius with no exact fp32 representation — ``float32(5.1)`` is
 #: ``5.099999904632568``, off by ~9.5e-8. Any buffer that silently lands in
 #: fp32 shifts the whole envelope by that much, far above the 1e-12 position
@@ -36,7 +39,7 @@ class TestCosineCutoff:
 
     def test_forward_shape(self):
         """Test output shape matches input."""
-        cutoff = CosineCutoff(r_cut=5.0)
+        cutoff = CosineCutoff(r_cut=5.0, dtype=DTYPE)
         distances = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0])
 
         output = cutoff(distances)
@@ -44,7 +47,7 @@ class TestCosineCutoff:
 
     def test_forward_batch(self):
         """Test with batched input."""
-        cutoff = CosineCutoff(r_cut=10.0)
+        cutoff = CosineCutoff(r_cut=10.0, dtype=DTYPE)
         distances = torch.randn(5, 20).abs()
 
         output = cutoff(distances)
@@ -52,7 +55,7 @@ class TestCosineCutoff:
 
     def test_cutoff_values(self):
         """Test cutoff behavior at specific distances."""
-        cutoff = CosineCutoff(r_cut=5.0)
+        cutoff = CosineCutoff(r_cut=5.0, dtype=DTYPE)
 
         # At r=0, cutoff should be 1.0
         out0 = cutoff(torch.tensor([0.0]))
@@ -68,7 +71,7 @@ class TestCosineCutoff:
 
     def test_smoothness(self):
         """Test that cutoff is smooth between 0 and r_cut."""
-        cutoff = CosineCutoff(r_cut=5.0)
+        cutoff = CosineCutoff(r_cut=5.0, dtype=DTYPE)
 
         # Sample points between 0 and r_cut
         distances = torch.linspace(0, 5.0, 100)
@@ -83,7 +86,7 @@ class TestCosineCutoff:
 
     def test_differentiable(self):
         """Test that gradients flow through cutoff."""
-        cutoff = CosineCutoff(r_cut=5.0)
+        cutoff = CosineCutoff(r_cut=5.0, dtype=DTYPE)
         distances = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
 
         output = cutoff(distances)
@@ -95,7 +98,7 @@ class TestCosineCutoff:
 
     def test_gradient_at_cutoff(self):
         """Test that gradient is zero at cutoff (smooth boundary)."""
-        cutoff = CosineCutoff(r_cut=5.0)
+        cutoff = CosineCutoff(r_cut=5.0, dtype=DTYPE)
         distances = torch.tensor([5.0], requires_grad=True)
 
         output = cutoff(distances)
@@ -107,7 +110,7 @@ class TestCosineCutoff:
     def test_different_r_cut_values(self):
         """Test with different cutoff radii."""
         for r_cut in [1.0, 3.0, 5.0, 10.0]:
-            cutoff = CosineCutoff(r_cut=r_cut)
+            cutoff = CosineCutoff(r_cut=r_cut, dtype=DTYPE)
 
             # Test at 0, mid, and beyond cutoff
             distances = torch.tensor([0.0, r_cut / 2, r_cut, r_cut + 1.0])
@@ -121,7 +124,7 @@ class TestCosineCutoff:
 
     def test_dtype_consistency(self):
         """Test that output dtype matches input."""
-        cutoff = CosineCutoff(r_cut=5.0)
+        cutoff = CosineCutoff(r_cut=5.0, dtype=DTYPE)
 
         # Float32
         dist_f32 = torch.tensor([1.0, 2.0], dtype=torch.float32)
@@ -133,30 +136,29 @@ class TestCosineCutoff:
         out_f64 = cutoff(dist_f64)
         assert out_f64.dtype == torch.float64
 
-    def test_r_cut_buffer_honours_the_fp64_precision(self, fp64):
-        """The ``r_cut`` buffer is fp64 when the module is built under fp64.
+    def test_r_cut_buffer_is_built_at_the_given_dtype(self):
+        """The ``r_cut`` buffer is fp64 when the module is built at fp64.
 
-        ``config["ftype"]`` is the single source of truth for the working
-        precision; an fp32 ``r_cut`` inside an otherwise-fp64 model silently
-        demotes every distance ratio it participates in.
+        An fp32 ``r_cut`` inside an otherwise-fp64 model silently demotes every
+        distance ratio it participates in.
         """
-        cutoff = CosineCutoff(r_cut=5.0)
+        cutoff = CosineCutoff(r_cut=5.0, dtype=torch.float64)
 
         assert cutoff.r_cut.dtype == torch.float64
 
-    def test_r_cut_keeps_full_precision_for_a_non_fp32_representable_radius(self, fp64):
+    def test_r_cut_keeps_full_precision_for_a_non_fp32_representable_radius(self):
         """An fp32 ``r_cut`` truncates the requested radius by ~1e-7 Å."""
-        cutoff = CosineCutoff(r_cut=R_CUT_NOT_FP32_EXACT)
+        cutoff = CosineCutoff(r_cut=R_CUT_NOT_FP32_EXACT, dtype=torch.float64)
 
         assert float(cutoff.r_cut) == pytest.approx(R_CUT_NOT_FP32_EXACT, abs=1e-12)
 
-    def test_forward_matches_the_fp64_envelope(self, fp64):
+    def test_forward_matches_the_fp64_envelope(self):
         """c(r) matches the double-precision formula at the fp64 tolerance.
 
         The tolerance sits well above fp64 round-off (~1e-16) and well below
         the ~1e-8 error an fp32-truncated ``r_cut`` introduces.
         """
-        cutoff = CosineCutoff(r_cut=R_CUT_NOT_FP32_EXACT)
+        cutoff = CosineCutoff(r_cut=R_CUT_NOT_FP32_EXACT, dtype=torch.float64)
         r = torch.tensor([0.5, 2.55, 4.0], dtype=torch.float64)
 
         got = cutoff(r)
@@ -166,7 +168,7 @@ class TestCosineCutoff:
 
     def test_broadcasting(self):
         """Test broadcasting behavior."""
-        cutoff = CosineCutoff(r_cut=5.0)
+        cutoff = CosineCutoff(r_cut=5.0, dtype=DTYPE)
 
         # Different shapes
         dist1d = torch.tensor([1.0, 2.0, 3.0])
@@ -188,7 +190,7 @@ class TestPolynomialCutoff:
     def test_boundary_values(self):
         """u(0) == 1 and u(r >= r_cut) == 0 for all supported exponents."""
         for p in (2, 6, 48):
-            cutoff = PolynomialCutoff(r_cut=5.0, exponent=p)
+            cutoff = PolynomialCutoff(r_cut=5.0, exponent=p, dtype=DTYPE)
             r = torch.tensor([0.0, 5.0, 6.0, 10.0])
             out = cutoff(r)
             assert torch.isclose(out[0], torch.tensor(1.0))
@@ -199,7 +201,7 @@ class TestPolynomialCutoff:
     @pytest.mark.parametrize("p", [2, 6, 48])
     def test_matches_paper_formula(self, p):
         """u(x) == 1 - (p+1)(p+2)/2·x^p + p(p+2)·x^(p+1) - p(p+1)/2·x^(p+2)."""
-        cutoff = PolynomialCutoff(r_cut=1.0, exponent=p)
+        cutoff = PolynomialCutoff(r_cut=1.0, exponent=p, dtype=DTYPE)
         r = torch.tensor([0.25, 0.5, 0.75, 0.9])
         got = cutoff(r)
         expected = (
@@ -212,7 +214,7 @@ class TestPolynomialCutoff:
 
     def test_smooth_gradient_at_cutoff(self):
         """Derivative vanishes at r = r_cut (critical for autograd forces)."""
-        cutoff = PolynomialCutoff(r_cut=5.0, exponent=6)
+        cutoff = PolynomialCutoff(r_cut=5.0, exponent=6, dtype=DTYPE)
         r = torch.tensor([5.0 - 1e-4], requires_grad=True)
         out = cutoff(r).sum()
         out.backward()
@@ -224,20 +226,20 @@ class TestPolynomialCutoff:
         with pytest.raises(ValueError):
             PolynomialCutoffSpec(r_cut=5.0, exponent=-1)
 
-    def test_r_cut_buffer_honours_the_fp64_precision(self, fp64):
-        """The ``r_cut`` buffer is fp64 when the module is built under fp64.
+    def test_r_cut_buffer_is_built_at_the_given_dtype(self):
+        """The ``r_cut`` buffer is fp64 when the module is built at fp64.
 
         Same construction-time contract as :class:`CosineCutoff` — this
         envelope is the NequIP/Allegro default, so an fp32 ``r_cut`` here
         demotes the radial ratio on the main representation path.
         """
-        cutoff = PolynomialCutoff(r_cut=5.0, exponent=6)
+        cutoff = PolynomialCutoff(r_cut=5.0, exponent=6, dtype=torch.float64)
 
         assert cutoff.r_cut.dtype == torch.float64
 
-    def test_r_cut_keeps_full_precision_for_a_non_fp32_representable_radius(self, fp64):
+    def test_r_cut_keeps_full_precision_for_a_non_fp32_representable_radius(self):
         """An fp32 ``r_cut`` truncates the requested radius by ~1e-7 Å."""
-        cutoff = PolynomialCutoff(r_cut=R_CUT_NOT_FP32_EXACT, exponent=6)
+        cutoff = PolynomialCutoff(r_cut=R_CUT_NOT_FP32_EXACT, exponent=6, dtype=torch.float64)
 
         assert float(cutoff.r_cut) == pytest.approx(R_CUT_NOT_FP32_EXACT, abs=1e-12)
 
@@ -247,7 +249,7 @@ class TestPolynomialCutoffEnvelope:
 
     def test_matches_forward_for_the_module_radius(self):
         """The module's forward is the static envelope at its own r_cut."""
-        cutoff = PolynomialCutoff(r_cut=5.0, exponent=5)
+        cutoff = PolynomialCutoff(r_cut=5.0, exponent=5, dtype=DTYPE)
         r = torch.linspace(0.0, 6.0, 25)
         assert torch.allclose(cutoff(r), PolynomialCutoff.envelope(r, 5.0, 5))
 

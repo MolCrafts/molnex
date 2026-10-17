@@ -32,10 +32,16 @@ class _PiNetProperty(PiNetEncoder):
     #: Head key → namespace (``None`` = the batch root, for 0-dim values).
     _COLUMNS: dict[str, str | None] = {}
 
-    def __init__(self, spec: PiNetSpec, layer_reduction: Literal["mean", "sum", "last"]) -> None:
+    def __init__(
+        self,
+        spec: PiNetSpec,
+        layer_reduction: Literal["mean", "sum", "last"],
+        *,
+        dtype: torch.dtype,
+    ) -> None:
         if layer_reduction not in ("mean", "sum", "last"):
             raise ValueError(f"layer_reduction must be mean, sum or last; got {layer_reduction!r}")
-        super().__init__(spec)
+        super().__init__(spec, dtype=dtype)
         self.layer_reduction = layer_reduction
 
     def _pool(self, tracks: list[torch.Tensor]) -> torch.Tensor:
@@ -67,6 +73,7 @@ class PiNetDipole(_PiNetProperty):
         charge_neutrality: Project atomic charges onto ``graphs.total_charge``
             (``0`` when the batch has none).
         regularization: Report the bond-charge L2 penalty.
+        dtype: Floating dtype every parameter and buffer is built at.
     """
 
     _COLUMNS = {
@@ -92,8 +99,9 @@ class PiNetDipole(_PiNetProperty):
         vector_dipole: bool = True,
         charge_neutrality: bool = True,
         regularization: bool = True,
+        dtype: torch.dtype,
     ) -> None:
-        super().__init__(spec, layer_reduction)
+        super().__init__(spec, layer_reduction, dtype=dtype)
         c = self.feature_dim
         self.head = DipoleHead(
             node_scalar_dim=c,
@@ -105,6 +113,7 @@ class PiNetDipole(_PiNetProperty):
             vector_dipole=vector_dipole,
             charge_neutrality=charge_neutrality,
             regularization=regularization,
+            dtype=self.dtype,
         )
 
     def forward(self, batch: TensorDict) -> TensorDict:
@@ -161,6 +170,7 @@ class PiNetPolarizability(_PiNetProperty):
         layer_reduction: How the per-block tracks are pooled.
         epsilon: Head regulariser.
         sigma: Per-element Gaussian charge widths.
+        dtype: Floating dtype every parameter and buffer is built at.
     """
 
     _COLUMNS = {
@@ -186,8 +196,9 @@ class PiNetPolarizability(_PiNetProperty):
         layer_reduction: Literal["mean", "sum", "last"] = "mean",
         epsilon: float = 0.01,
         sigma: dict[int, float] | None = None,
+        dtype: torch.dtype,
     ) -> None:
-        super().__init__(spec, layer_reduction)
+        super().__init__(spec, layer_reduction, dtype=dtype)
         c = self.feature_dim
         self.head = ChargeResponseHead(
             node_scalar_dim=c,
@@ -199,6 +210,7 @@ class PiNetPolarizability(_PiNetProperty):
             hidden_dim=hidden_dim,
             epsilon=epsilon,
             sigma=sigma,
+            dtype=self.dtype,
         )
 
     def forward(self, batch: TensorDict) -> TensorDict:

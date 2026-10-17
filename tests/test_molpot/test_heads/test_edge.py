@@ -8,6 +8,9 @@ from tensordict import TensorDict
 
 from molpot.heads import EdgeEnergyHead
 
+#: Floating dtype every module under test is built at.
+DTYPE = torch.float32
+
 
 def _stub_batch(*, n_atoms=3, n_pairs=6, feat_dim=8):
     torch.manual_seed(0)
@@ -33,13 +36,15 @@ def _stub_batch(*, n_atoms=3, n_pairs=6, feat_dim=8):
 
 class TestShape:
     def test_returns_per_graph_energy(self):
-        head = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=3.0)
+        head = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=3.0, dtype=DTYPE)
         out = head(_stub_batch())
         assert "energy" in out["graphs"].keys()
         assert out["graphs", "energy"].shape == (1,)
 
     def test_custom_out_key(self):
-        head = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=3.0, out_key="E")
+        head = EdgeEnergyHead(
+            input_dim=8, hidden_dim=4, avg_num_neighbors=3.0, out_key="E", dtype=DTYPE
+        )
         out = head(_stub_batch())
         assert "E" in out["graphs"].keys()
 
@@ -49,8 +54,8 @@ class TestNeighborNormalization:
         """Halving ``avg_num_neighbors`` scales edge energy by √2."""
         b = _stub_batch()
         # two heads with different avg_num_neighbors but identical parameters
-        h1 = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=4.0)
-        h2 = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=16.0)
+        h1 = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=4.0, dtype=DTYPE)
+        h2 = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=16.0, dtype=DTYPE)
         h2.load_state_dict(h1.state_dict())
         with torch.no_grad():
             e1 = h1(b)["graphs", "energy"]
@@ -60,7 +65,7 @@ class TestNeighborNormalization:
 
     def test_rejects_non_positive_avg_num_neighbors(self):
         with pytest.raises(ValueError, match="avg_num_neighbors"):
-            EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=0.0)
+            EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=0.0, dtype=DTYPE)
 
 
 class TestLinearReadout:
@@ -74,7 +79,7 @@ class TestLinearReadout:
     def test_energy_is_linear_in_edge_features(self):
         torch.manual_seed(7)
         b = _stub_batch()
-        head = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=3.0)
+        head = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=3.0, dtype=DTYPE)
 
         # Energy at (a) features f, (b) features 2f, (c) features f + g should
         # satisfy E(2f) = 2 E(f) and E(f+g) = E(f) + E(g) (within numerical noise).
@@ -119,7 +124,7 @@ class TestEmptyGraph:
         graphs = TensorDict(num_atoms=torch.tensor([1]), batch_size=[1])
         b = TensorDict(atoms=atoms, pairs=pairs, graphs=graphs, batch_size=[])
 
-        head = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=1.0)
+        head = EdgeEnergyHead(input_dim=8, hidden_dim=4, avg_num_neighbors=1.0, dtype=DTYPE)
         with torch.no_grad():
             out = head(b)
         assert out["graphs", "energy"].shape == (1,)

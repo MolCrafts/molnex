@@ -7,15 +7,13 @@ from collections.abc import Sequence
 import torch
 import torch.nn as nn
 
-from molix import config
 from molix.F.scatter import scatter_sum
 
 
 def scalar_mlp(
-    in_dim: int, hidden: Sequence[int], out_dim: int, *, dtype: torch.dtype | None = None
+    in_dim: int, hidden: Sequence[int], out_dim: int, *, dtype: torch.dtype
 ) -> nn.Sequential:
     """``[Linear → SiLU] × len(hidden) → Linear`` at ``dtype`` (no activation on the last)."""
-    dtype = config.ftype if dtype is None else dtype  # transitional: goes with molix.config (2c)
     layers: list[nn.Module] = []
     prev = in_dim
     for h in hidden:

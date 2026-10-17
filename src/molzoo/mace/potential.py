@@ -38,8 +38,9 @@ Two public methods, as :mod:`molix.autograd.potential` prescribes:
 
 ``forward(frame) -> frame``
     The :class:`~molix.autograd.Derivative` built once in ``__init__`` from
-    the ``wrt`` keys: ``MaceMatpes(spec)`` writes the energy alone,
-    ``MaceMatpes(spec, wrt=("atoms.pos",))`` the energy and ``atoms.forces``
+    the ``wrt`` keys: ``MaceMatpes(spec, dtype=torch.float64)`` writes the
+    energy alone, ``MaceMatpes(spec, wrt=("atoms.pos",), dtype=torch.float64)``
+    the energy and ``atoms.forces``
     (``F_i = -∂E/∂r_i``, eV/Å), ``("atoms.pos", "graphs.strain")`` adds
     ``graphs.virial``. Compile it with ``Compiler(...)(model)`` after one eager
     forward.
@@ -126,8 +127,7 @@ class MacePotential(Potential, MACEEncoder):
             fp64 MD state can drive an fp32 model. The cast is differentiable:
             forces still refer to the caller's leaf and come back at its
             dtype. ``None`` leaves the inputs untouched.
-        dtype: Floating dtype every parameter and buffer is built at; ``None``
-            is the (transitional) process-wide default.
+        dtype: Floating dtype every parameter and buffer is built at.
 
     Raises:
         ValueError: If ``energy_dtype`` or ``input_dtype`` is not
@@ -144,7 +144,7 @@ class MacePotential(Potential, MACEEncoder):
         wrt: Wrt = (),
         energy_dtype: torch.dtype | None = torch.float64,
         input_dtype: torch.dtype | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__(spec, dtype=dtype)
         if energy_dtype not in _FLOAT_DTYPES:
@@ -224,7 +224,7 @@ class MacePotential(Potential, MACEEncoder):
         wrt: Wrt = (),
         energy_dtype: torch.dtype | None = torch.float64,
         input_dtype: torch.dtype | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> Self:
         """Construct from an official archive and load its weights.
 
@@ -262,7 +262,7 @@ class MacePotential(Potential, MACEEncoder):
         wrt: Wrt,
         energy_dtype: torch.dtype | None,
         input_dtype: torch.dtype | None,
-        dtype: torch.dtype | None,
+        dtype: torch.dtype,
     ) -> Self:
         """Read the archive, build the spec, construct, remap the weights in.
 
@@ -428,7 +428,7 @@ class MaceMatpes(MacePotential):
         wrt: Wrt = (),
         energy_dtype: torch.dtype | None = torch.float64,
         input_dtype: torch.dtype | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> Self:
         """Load an official MatPES archive (:meth:`MacePotential.load`)."""
         return cls._load(
@@ -460,7 +460,7 @@ class MaceOmol(MacePotential):
         wrt: Wrt = (),
         energy_dtype: torch.dtype | None = torch.float64,
         input_dtype: torch.dtype | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> Self:
         """Load an official OMol archive (:meth:`MacePotential.load`)."""
         return cls._load(
@@ -492,7 +492,7 @@ class MaceOff(MacePotential):
         wrt: Wrt = (),
         energy_dtype: torch.dtype | None = torch.float64,
         input_dtype: torch.dtype | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> Self:
         """Load an official MACE-OFF archive (:meth:`MacePotential.load`)."""
         return cls._load(
@@ -530,7 +530,7 @@ class MaceLes(MaceOff):
         wrt: Wrt = (),
         energy_dtype: torch.dtype | None = torch.float64,
         input_dtype: torch.dtype | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__(
             spec,
@@ -557,7 +557,7 @@ class MaceLes(MaceOff):
         wrt: Wrt = (),
         energy_dtype: torch.dtype | None = torch.float64,
         input_dtype: torch.dtype | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> Self:
         """Load an official MACE-LES archive (:meth:`MacePotential.load`)."""
         return cls._load(

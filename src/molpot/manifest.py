@@ -1,4 +1,4 @@
-"""ModelManifest — the versioned description of *which model this is* (S2).
+"""ModelManifest — the description of *which model this is* (S2).
 
 One manifest answers, for a single trained or hand-built model: what
 representation and checkpoint produced its parameters, which interaction terms
@@ -27,13 +27,12 @@ the exact inverse of :meth:`ModelManifest.to_dict`. The payload is therefore
 deterministic — the same model always serialises to the same bytes, which is
 what lets two runs be compared (and a manifest itself be hashed).
 
-:data:`MANIFEST_SCHEMA` versions this layout. The deployment metadata written
-by :class:`molix.deploy.DeployMetadata` is a different artifact with its own
-schema version. The two move for different reasons.
+The layout carries no schema version — there are none before 1.0 — so a
+payload either is this layout or is refused by the codec where it differs.
 
 Layering: this module sits *below* the ForceField package. It imports
 :mod:`molpot.contract` (including :class:`~molpot.contract.ParamSpec`),
-:mod:`molpot.ir`, :mod:`molix.config`, torch, numpy (only to take the
+:mod:`molpot.ir`, torch, numpy (only to take the
 little-endian fp64 bytes :meth:`ParamTableRecord.from_tables` hashes) and the
 standard library, and
 nothing from ``molpot.forcefield`` at all — not the container that fills a
@@ -62,7 +61,6 @@ from typing import TYPE_CHECKING, Union, get_args, get_origin, get_type_hints
 import numpy as np
 import torch
 
-from molix.config import config
 from molpot.contract import InteractionContract, ParamSpec
 from molpot.ir.nonbonded import NonbondedMethodRecord
 from molpot.ir.scaling import NonbondedScaling
@@ -73,7 +71,6 @@ if TYPE_CHECKING:  # the stubs-only protocol "is a dataclass type", for the code
 __all__ = [
     "ElectrostaticsRecord",
     "InteractionRecord",
-    "MANIFEST_SCHEMA",
     "ModelManifest",
     "NumericsRecord",
     "ParamTableRecord",
@@ -81,25 +78,6 @@ __all__ = [
     "RepresentationRecord",
     "SolverRecord",
 ]
-
-#: Version of the :class:`ModelManifest` layout. Bumping it is a breaking
-#: change to every consumer that reads a manifest, not a refactor; it is
-#: The LAMMPS pair-style JSON is a different artifact and is unversioned.
-#:
-#: ``2`` (2026-09-08) added
-#: :attr:`~molpot.ir.nonbonded.NonbondedMethodRecord.lj_mixing`, the
-#: Lennard-Jones combining rule. The field rides inside a nested record, so a
-#: schema-1 payload still parses — :meth:`ModelManifest.from_dict` reads one and
-#: fills the field with ``None``, the value that field defines as
-#: "Lorentz–Berthelot by the then-default". The bump is nonetheless required in
-#: the *other* direction: without it a reader of this vintage would silently
-#: accept a newer payload and drop whatever model-identity fields it grew, which
-#: is exactly the failure a version exists to prevent.
-MANIFEST_SCHEMA = 2
-
-#: Payload versions :meth:`ModelManifest.from_dict` can read, oldest first. A
-#: version outside this set is refused rather than parsed best-effort.
-_READABLE_SCHEMAS = (1, MANIFEST_SCHEMA)
 
 
 @dataclass(frozen=True)
@@ -310,12 +288,12 @@ class NumericsRecord:
     """Numerical precision the model runs at.
 
     Attributes:
-        dtype: Global parameter / batch dtype, spelled ``str(torch.float32)``
-            — ``molix.config["ftype"]``.
+        dtype: The model's floating dtype — its parameters and the batch it
+            is evaluated on — spelled ``str(torch.float32)``.
         matmul_precision: Process-wide fp32 matmul policy, ``"highest"``,
             ``"high"`` or ``"medium"``. It lives only in torch
-            (``torch.get_float32_matmul_precision()``), never in the config
-            mapping, so the effective policy is what is recorded.
+            (``torch.get_float32_matmul_precision()``), so the effective
+            policy is what is recorded.
         energy_dtype: Dtype the energy is accumulated in when it differs from
             :attr:`dtype`; ``None`` when it does not.
     """
@@ -325,28 +303,24 @@ class NumericsRecord:
     energy_dtype: str | None = None
 
     @classmethod
-    def from_runtime(cls, dtype: torch.dtype | None = None) -> NumericsRecord:
-        """Read the precision this process is actually running at.
+    def from_runtime(cls, dtype: torch.dtype) -> NumericsRecord:
+        """The record for a model built at ``dtype`` under this process's matmul policy.
 
-        The two sources are read here and nowhere else, so a manifest and the
-        model it describes cannot disagree about precision:
-        ``molix.config["ftype"]`` for the global parameter / batch dtype, and
-        :func:`torch.get_float32_matmul_precision` for the fp32 matmul policy.
-        The policy is not a molnex setting at all — molnex leaves it at
-        PyTorch's default unless the caller sets it — so torch holds the only
-        effective value.
+        The policy is read here and nowhere else, so a manifest and the model
+        it describes cannot disagree about it. It is not a molnex setting at
+        all — molnex leaves it at PyTorch's default unless the caller sets it
+        — so torch holds the only effective value.
 
         Args:
-            dtype: The model's build dtype; ``None`` reads the (transitional)
-                process-wide default.
+            dtype: The model's build dtype, the one its caller handed it.
 
         Returns:
             The record. :attr:`energy_dtype` is ``None``: molnex accumulates
-            energies in the global dtype, and a record that named a second one
+            energies in the model dtype, and a record that named a second one
             would describe an accumulation nothing performs.
         """
         return cls(
-            dtype=str(config["ftype"] if dtype is None else dtype),
+            dtype=str(dtype),
             matmul_precision=torch.get_float32_matmul_precision(),
             energy_dtype=None,
         )
@@ -383,13 +357,12 @@ class ProvenanceRecord:
 
 @dataclass(frozen=True)
 class ModelManifest:
-    """Versioned, JSON-round-trippable identity of one model (S2).
+    """JSON-round-trippable identity of one model (S2).
 
     Frozen: a manifest describes one model at one moment, and rewriting a
     field in place would make it describe neither.
 
     Attributes:
-        schema_version: :data:`MANIFEST_SCHEMA` at the time of writing.
         profile: Model profile this manifest belongs to — ``"A0"`` for the
             fixed-charge Class-I form, ``"A1"`` once polarization lands.
         units: Unit set the parameter tables are expressed in. ``"real"`` is
@@ -432,7 +405,7 @@ class ModelManifest:
             import dataclasses
 
             manifest = dataclasses.replace(
-                ff.manifest(profile="A0"),
+                ff.manifest(profile="A0", dtype=torch.float64),
                 representation=record,
                 electrostatics=charge_model.electrostatics_record(
                     permanent_scaling=ff.nonbonded_scaling
@@ -448,7 +421,6 @@ class ModelManifest:
             assert ModelManifest.read("model.json") == manifest
     """
 
-    schema_version: int
     profile: str
     units: str
     interactions: tuple[InteractionRecord, ...]
@@ -476,25 +448,9 @@ class ModelManifest:
     def from_dict(cls, payload: Mapping[str, object]) -> ModelManifest:
         """Rebuild a manifest from :meth:`to_dict` output — its exact inverse.
 
-        Reads **schema 1 and schema 2**, and nothing else. The difference
-        between them is one key of one nested record:
-        :attr:`~molpot.ir.nonbonded.NonbondedMethodRecord.lj_mixing`, the
-        Lennard-Jones combining rule, which the record grew on 2026-09-08. In a
-        schema-1 payload that key is absent and is filled with ``None`` — a
-        value that field *defines* as "Lorentz–Berthelot by the then-default",
-        which is what every molnex model mixed with when such a payload could
-        have been written, so nothing is invented by supplying it. In a schema-2
-        payload the key is required like any other: the tolerance is a property
-        of the *older* layout, not a permanent softness in the codec.
-
-        A newer version is refused rather than read leniently. The absent key of
-        a schema-1 payload has a defined meaning; the fields a schema-3 payload
-        might add do not, and accepting one here would mean quietly discarding
-        whatever model identity it carries — the failure the version number
-        exists to prevent. This is also why the field could not simply be added
-        to schema 1 in place: tolerating the absence costs nothing, but a reader
-        that tolerates it *and* claims to read every schema-1 payload gives a
-        newer writer no way to say "you are missing something".
+        The layout is the current one and nothing else: a manifest carries no
+        schema version, so every key is required exactly as the records
+        declare it and a payload is refused where it differs.
 
         Args:
             payload: A mapping produced by :meth:`to_dict` (directly or through
@@ -502,54 +458,29 @@ class ModelManifest:
 
         Returns:
             The reconstructed manifest, with every nested record, enum and
-            frozenset restored. Its :attr:`schema_version` is always the current
-            :data:`MANIFEST_SCHEMA`: a schema-1 payload is *upgraded* on read —
-            the ``None`` rule is now stated rather than implied — so writing it
-            back out emits the newer layout, and the payload it came from is not
-            silently re-emitted as something this molnex would read differently.
+            frozenset restored.
 
         Raises:
-            ValueError: ``payload`` carries a ``schema_version`` outside
-                :data:`_READABLE_SCHEMAS`. Refused rather than best-effort
-                parsed: a layout this version does not know is not a manifest
-                it can honestly report on.
             KeyError: A required top-level key (``profile``, ``units``,
                 ``interactions``, ``nonbonded``, ``electrostatics``, ``tables``,
                 ``numerics``) is absent. Only ``representation`` and
                 ``provenance`` are optional, because they are optional on the
-                manifest itself; an absent ``schema_version`` reads as ``None``
-                and so raises the ``ValueError`` above instead.
+                manifest itself.
             TypeError: A value has the wrong JSON shape (a list where an object
                 belongs, or the reverse), or a *nested* record is missing a
                 field. The nested case arrives as a ``TypeError`` from that
                 record's own constructor rather than as a ``KeyError``, because
                 the codec omits an absent key and lets the frozen record decide
-                whether it had a default — which is precisely why ``lj_mixing``
-                is defaulted for a schema-1 payload instead of being left out:
-                all ten fields of
-                :class:`~molpot.ir.nonbonded.NonbondedMethodRecord` are
-                required, so an absent key would otherwise arrive as that
-                ``TypeError``. In a schema-2 payload it does arrive that way,
-                like any other missing field.
+                whether it had a default — every field of
+                :class:`~molpot.ir.nonbonded.NonbondedMethodRecord` is
+                required, so a payload without its ``lj_mixing`` key arrives
+                that way.
         """
-        version = payload.get("schema_version")
-        if version not in _READABLE_SCHEMAS:
-            raise ValueError(
-                f"manifest schema_version {version!r} is not one this molnex reads "
-                f"({', '.join(str(v) for v in _READABLE_SCHEMAS)})"
-            )
-        # Schema 1 has no ``lj_mixing`` key; supply the ``None`` that layout
-        # implies. Schema 2 is passed through untouched, so a missing key there
-        # reaches the record's constructor and raises like any other.
-        nonbonded = _as_mapping(payload["nonbonded"])
-        if version == 1:
-            nonbonded = {"lj_mixing": None, **nonbonded}
         return cls(
-            schema_version=MANIFEST_SCHEMA,
             profile=_decode_str(payload["profile"]),
             units=_decode_str(payload["units"]),
             interactions=_decode_tuple(InteractionRecord, payload["interactions"]),
-            nonbonded=_decode_record(NonbondedMethodRecord, nonbonded),
+            nonbonded=_decode_record(NonbondedMethodRecord, payload["nonbonded"]),
             electrostatics=_decode_record(ElectrostaticsRecord, payload["electrostatics"]),
             tables=_decode_tuple(ParamTableRecord, payload["tables"]),
             numerics=_decode_record(NumericsRecord, payload["numerics"]),
@@ -582,9 +513,6 @@ class ModelManifest:
 
         Returns:
             The reconstructed manifest.
-
-        Raises:
-            ValueError: The file carries a different :data:`MANIFEST_SCHEMA`.
         """
         return cls.from_dict(json.loads(Path(path).read_text()))
 

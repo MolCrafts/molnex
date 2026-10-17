@@ -24,7 +24,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pydantic import BaseModel, ConfigDict, Field
 
-from molix import config
 from molpot.heads._common import scalar_mlp as _scalar_mlp
 from molrep import cueq
 
@@ -159,7 +158,7 @@ class HardnessHead(nn.Module):
         input_dim: int,
         hidden_dim: int = 128,
         softplus_beta: float = 1.0,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ):
         super().__init__()
         self.config = HardnessHeadSpec(
@@ -222,12 +221,9 @@ class PolarizabilityHead(nn.Module):
         softplus_beta: float = 1.0,
         tensor_irreps: cue.Irreps | None = None,
         avg_num_neighbors: float | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ):
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.config = PolarizabilityHeadSpec(
             input_dim=input_dim,
             hidden_dim=hidden_dim,

@@ -134,7 +134,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from molix import config
 from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
 from molrep import cueq
 from molrep.embedding.mlp import MomentNormalizedMLP, normalize2mom
@@ -282,7 +281,7 @@ class RadialMLP(nn.Module):
         https://arxiv.org/abs/2206.07697
     """
 
-    def __init__(self, channels_list: list[int], *, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, channels_list: list[int], *, dtype: torch.dtype) -> None:
         """Initialize the radial MLP.
 
         Args:
@@ -295,14 +294,11 @@ class RadialMLP(nn.Module):
         modules: list[nn.Module] = []
         in_channels = channels_list[0]
         n = len(channels_list)
-        ftype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         for idx, out_channels in enumerate(channels_list[1:], start=1):
-            modules.append(nn.Linear(in_channels, out_channels, bias=True, dtype=ftype))
+            modules.append(nn.Linear(in_channels, out_channels, bias=True, dtype=dtype))
             in_channels = out_channels
             if idx < n - 1:
-                modules.append(nn.LayerNorm(out_channels, dtype=ftype))
+                modules.append(nn.LayerNorm(out_channels, dtype=dtype))
                 modules.append(nn.SiLU())
         self.net = nn.Sequential(*modules)
         self.hs = list(channels_list)
@@ -739,14 +735,11 @@ class _ChannelwiseInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
         edge_irreps: str,
         target_irreps: str,
         radial_mlp: list[int],
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        ftype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         #: The build dtype, read by the skip mixins and the density head.
-        self.dtype = ftype
+        self.dtype = dtype
 
         node_feats = cue.Irreps("O3", node_feats_irreps)
         edge_attrs = cue.Irreps("O3", edge_attrs_irreps)
@@ -757,7 +750,7 @@ class _ChannelwiseInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
         self.irreps_out = target
         self._skip_tp_in = node_feats
 
-        self.linear_up = cueq.Linear(node_feats, edge_ir, layout=cue.ir_mul, dtype=ftype)
+        self.linear_up = cueq.Linear(node_feats, edge_ir, layout=cue.ir_mul, dtype=dtype)
 
         self.conv_tp = cueq.ChannelWiseTensorProduct(
             edge_ir,
@@ -766,18 +759,18 @@ class _ChannelwiseInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
             layout=cue.ir_mul,
             shared_weights=False,
             internal_weights=False,
-            dtype=ftype,
+            dtype=dtype,
         )
 
         self._num_radial = edge_feats.dim
         self.conv_tp_weights = MomentNormalizedMLP(
-            [self._num_radial] + list(radial_mlp) + [self.conv_tp.weight_numel], dtype=ftype
+            [self._num_radial] + list(radial_mlp) + [self.conv_tp.weight_numel], dtype=dtype
         )
         # Built right after the weight MLP: parameter creation order is what a
         # seeded initialisation reproduces.
         self.density_fn = self._build_density_head()
 
-        self.linear = cueq.Linear(self.conv_tp.irreps_out, target, layout=cue.ir_mul, dtype=ftype)
+        self.linear = cueq.Linear(self.conv_tp.irreps_out, target, layout=cue.ir_mul, dtype=dtype)
 
     def _build_density_head(self) -> nn.Module | None:
         """The learned edge-density MLP, or ``None`` for a constant normalisation."""
@@ -998,12 +991,9 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
         target_irreps: str,
         hidden_irreps: str,
         radial_mlp: list[int],
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        ftype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
 
         node_feats = cue.Irreps("O3", node_feats_irreps)
         edge_attrs = cue.Irreps("O3", edge_attrs_irreps)
@@ -1017,10 +1007,10 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
         node_scalar = cue.Irreps("O3", f"{n_scalar}x0e")
 
         def lin(i_in, i_out):
-            return cueq.Linear(i_in, i_out, layout=cue.ir_mul, dtype=ftype)
+            return cueq.Linear(i_in, i_out, layout=cue.ir_mul, dtype=dtype)
 
-        self.source_embedding = OneHotLinear(node_attrs, node_scalar, dtype=ftype)
-        self.target_embedding = OneHotLinear(node_attrs, node_scalar, dtype=ftype)
+        self.source_embedding = OneHotLinear(node_attrs, node_scalar, dtype=dtype)
+        self.target_embedding = OneHotLinear(node_attrs, node_scalar, dtype=dtype)
         self.linear_up = lin(node_feats, edge_ir)
 
         self.conv_tp = cueq.ChannelWiseTensorProduct(
@@ -1030,13 +1020,13 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
             layout=cue.ir_mul,
             shared_weights=False,
             internal_weights=False,
-            dtype=ftype,
+            dtype=dtype,
         )
         irreps_mid = self.conv_tp.irreps_out
 
         input_dim = edge_feats.dim + 2 * node_scalar.dim
         self.conv_tp_weights = RadialMLP(
-            [input_dim] + list(radial_mlp) + [self.conv_tp.weight_numel], dtype=ftype
+            [input_dim] + list(radial_mlp) + [self.conv_tp.weight_numel], dtype=dtype
         )
 
         self.skip_tp = lin(node_feats, hidden)
@@ -1056,9 +1046,9 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
         self.linear_1 = lin(irreps_mid, irreps_nonlin)
         self.linear_2 = lin(target, target)
 
-        self.density_fn = RadialMLP([input_dim, 64, 1], dtype=ftype)
-        self.alpha = nn.Parameter(torch.tensor(20.0, dtype=ftype))
-        self.beta = nn.Parameter(torch.tensor(0.0, dtype=ftype))
+        self.density_fn = RadialMLP([input_dim, 64, 1], dtype=dtype)
+        self.alpha = nn.Parameter(torch.tensor(20.0, dtype=dtype))
+        self.beta = nn.Parameter(torch.tensor(0.0, dtype=dtype))
 
     def forward(
         self,
@@ -1132,12 +1122,9 @@ class EquivariantProductBasis(nn.Module):
         num_elements: int = 1,
         use_sc: bool = True,
         group: type = cue.O3,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        ftype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.use_sc = use_sc
         self.num_elements = int(num_elements)
         #: Element-agnostic product: every atom reads weight row 0.
@@ -1154,15 +1141,15 @@ class EquivariantProductBasis(nn.Module):
             layout_in=cue.ir_mul,
             layout_out=cue.ir_mul,
             original_mace=True,
-            dtype=ftype,
-            math_dtype=ftype,
+            dtype=dtype,
+            math_dtype=dtype,
         )
         # A linear map acts per irrep; it has no coupling to take a phase from.
         self.linear = cueq.Linear(
             cue.Irreps("O3", target_irreps),
             cue.Irreps("O3", target_irreps),
             layout=cue.ir_mul,
-            dtype=ftype,
+            dtype=dtype,
         )
 
     def forward(

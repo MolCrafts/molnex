@@ -60,7 +60,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from molix import config
 from molix.F.scatter import scatter_sum
 from molpot.heads._common import graph_counts as _graph_counts
 
@@ -133,12 +132,9 @@ class BondChargeHead(nn.Module):
         hidden_dim: int = 64,
         full_neighbor_list: bool = True,
         charge_projection: bool = True,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.node_dim = node_dim
         self.edge_dim = edge_dim or 0
         self.full_neighbor_list = full_neighbor_list

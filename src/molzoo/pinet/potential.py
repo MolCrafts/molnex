@@ -47,7 +47,9 @@ class PiNetPotential(Potential, PiNetEncoder):
 
     ::
 
-        model = PiNetPotential(PiNetSpec(atomic_numbers=[1, 6, 8]), wrt=("atoms.pos",))
+        model = PiNetPotential(
+            PiNetSpec(atomic_numbers=[1, 6, 8]), wrt=("atoms.pos",), dtype=torch.float64
+        )
         frame = model(frame)  # graphs.energy, atoms.energy, atoms.forces
 
     Args:
@@ -58,8 +60,7 @@ class PiNetPotential(Potential, PiNetEncoder):
         wrt: TensorFrame keys :meth:`forward` differentiates the energy
             against (``"atoms.pos"`` → forces, ``"graphs.strain"`` → virial);
             ``()`` is energy only.
-        dtype: Floating dtype every parameter and buffer is built at; ``None``
-            is the (transitional) process-wide default.
+        dtype: Floating dtype every parameter and buffer is built at.
     """
 
     def __init__(
@@ -67,7 +68,7 @@ class PiNetPotential(Potential, PiNetEncoder):
         spec: PiNetSpec = PiNetSpec(),
         *,
         wrt: Sequence[str | Sequence[str]] = (),
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__(spec, dtype=dtype)
         self.out_layers = nn.ModuleList(

@@ -7,7 +7,6 @@ import math
 import pytest
 import torch
 
-from molix import config
 from molix.compile import Compiler
 from molpot.potentials.elec.prefactors import eV_A
 from molpot.potentials.gto.hartree import (
@@ -89,14 +88,6 @@ PROBE_ISOLATED_SI = 0.04313372746319044
 #: Isolated ``l_max=0`` energy (eV) of ``PROBE_POS + 10`` (monopoles only).
 PROBE_ISOLATED_L0_NOSI = -0.6665851178517852
 PROBE_ISOLATED_L0_SI = 0.03750614756736037
-
-
-@pytest.fixture(autouse=True)
-def fp64():
-    previous = config["ftype"]
-    config.set_precision("fp64")
-    yield
-    config.set_precision("fp64" if previous == torch.float64 else "fp32")
 
 
 class TestCompleteDirectedPairs:

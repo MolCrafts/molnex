@@ -13,6 +13,7 @@ Everything a second module in this package needs is defined here exactly once:
 * :func:`official_layout` — a model's own ``state_dict`` with the per-element
   maps' weights put back in cuEquivariance's flat layout, for faking an
   official checkpoint;
+* :data:`DTYPE` — the build dtype of every model;
 * the ``tiny_*_spec`` fixtures — one tiny spec per shipped family;
 * ``matpes_model`` / ``omol_model`` — the tiny energy + force products.
 """
@@ -36,6 +37,10 @@ from molzoo.mace.spec import (
     MACEPolarSpec,
 )
 from tests.conftest import make_graph_batch
+
+#: Build dtype of every model in this package: cuEquivariance fixes its
+#: working precision at construction, so fp64 tolerances need an fp64 build.
+DTYPE = torch.float64
 
 #: Element table (z-table) shared by every model built in this package.
 #: Ascending and duplicate-free — ``torch.searchsorted`` requires it.
@@ -204,11 +209,6 @@ def official_layout(model: torch.nn.Module, state: Mapping[str, Any]) -> dict[st
     return out
 
 
-@pytest.fixture(autouse=True)
-def _build_at_fp64(fp64):
-    """Every MACE test builds at fp64 (``tests.conftest.fp64``)."""
-
-
 @pytest.fixture
 def tiny_matpes_spec() -> MACEMatpesSpec:
     """Tiny :class:`molzoo.mace.spec.MACEMatpesSpec`."""
@@ -317,7 +317,7 @@ def omol_cluster() -> TensorDict:
 def matpes_model(tiny_matpes_spec: MACEMatpesSpec) -> MaceMatpes:
     """Tiny energy + force :class:`~molzoo.mace.potential.MaceMatpes`, seeded."""
     torch.manual_seed(0)
-    return MaceMatpes(tiny_matpes_spec, wrt=("atoms.pos",)).eval()
+    return MaceMatpes(tiny_matpes_spec, wrt=("atoms.pos",), dtype=DTYPE).eval()
 
 
 @pytest.fixture
@@ -327,6 +327,6 @@ def omol_model(tiny_omol_spec: MACEOMolSpec) -> MaceOmol:
     See :func:`wake_zero_init_readout` for why the readout is filled.
     """
     torch.manual_seed(0)
-    model = MaceOmol(tiny_omol_spec, wrt=("atoms.pos",)).eval()
+    model = MaceOmol(tiny_omol_spec, wrt=("atoms.pos",), dtype=DTYPE).eval()
     wake_zero_init_readout(model)
     return model

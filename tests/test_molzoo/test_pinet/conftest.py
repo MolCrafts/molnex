@@ -6,7 +6,6 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix import config
 from tests.conftest import make_graph_batch
 
 #: A small but complete architecture; tests override ``rank`` / ``depth``.
@@ -24,13 +23,8 @@ TINY = {
 PAIRS = [[i, j] for i in range(4) for j in range(4) if i != j]
 
 
-@pytest.fixture(autouse=True)
-def fp64():
-    """Build every model at fp64 so invariance and finite-difference checks are tight."""
-    previous = config["ftype"]
-    config.set_precision("fp64")
-    yield
-    config.set_precision("fp64" if previous == torch.float64 else "fp32")
+#: Build dtype of every model: fp64, so invariance and finite-difference checks are tight.
+DTYPE = torch.float64
 
 
 @pytest.fixture

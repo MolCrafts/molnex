@@ -6,6 +6,7 @@ No energy head, no molpot import.
 
 from __future__ import annotations
 
+import torch
 from tensordict import TensorDict
 
 from molrep.chem.encoder import ChemEncoder
@@ -24,6 +25,7 @@ class ChemPerception(ChemEncoder):
         spec: Optional :class:`ChemPerceptionSpec`. When omitted, keyword
             arguments populate a new spec (same fields as the parent
             encoder).
+        dtype: Floating dtype every parameter and buffer is built at.
         **kwargs: Forwarded to :class:`ChemPerceptionSpec` when ``spec`` is
             not provided.
 
@@ -31,13 +33,15 @@ class ChemPerception(ChemEncoder):
 
         from molzoo.chem import ChemPerception, ChemPerceptionSpec
 
-        model = ChemPerception(atom_dim=16, bond_dim=16)
+        model = ChemPerception(atom_dim=16, bond_dim=16, dtype=torch.float32)
         batch = model(batch)  # writes atoms/bonds/… chem_features
     """
 
     def __init__(
         self,
         spec: ChemPerceptionSpec | None = None,
+        *,
+        dtype: torch.dtype,
         **kwargs,
     ) -> None:
         if spec is None:
@@ -58,6 +62,7 @@ class ChemPerception(ChemEncoder):
             bond_channels=spec.bond_channels,
             n_blocks=spec.n_blocks,
             local_attention=spec.local_attention,
+            dtype=dtype,
         )
         self.config = spec
 

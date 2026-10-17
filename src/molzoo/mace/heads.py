@@ -35,7 +35,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pydantic import BaseModel, Field
 
-from molix import config
 from molrep import cueq
 from molrep.embedding.mlp import normalize2mom
 
@@ -92,7 +91,7 @@ class JointFeatureEmbedding(nn.Module):
         *,
         feature_specs: list[JointFeatureSpec],
         out_dim: int,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         """Initialize the joint feature embedding.
 
@@ -109,28 +108,24 @@ class JointFeatureEmbedding(nn.Module):
         self.specs = feature_specs
         self.out_dim = int(out_dim)
 
-        ftype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
-
         self.embedders = nn.ModuleDict()
         for s in feature_specs:
             if s.kind == "categorical":
                 if s.num_classes is None:
                     raise ValueError(f"categorical feature {s.name!r} needs num_classes.")
-                self.embedders[s.name] = nn.Embedding(s.num_classes, s.emb_dim, dtype=ftype)
+                self.embedders[s.name] = nn.Embedding(s.num_classes, s.emb_dim, dtype=dtype)
             else:
                 if s.in_dim is None:
                     raise ValueError(f"continuous feature {s.name!r} needs in_dim.")
                 self.embedders[s.name] = nn.Sequential(
-                    nn.Linear(s.in_dim, s.emb_dim, bias=s.use_bias, dtype=ftype),
+                    nn.Linear(s.in_dim, s.emb_dim, bias=s.use_bias, dtype=dtype),
                     nn.SiLU(),
-                    nn.Linear(s.emb_dim, s.emb_dim, bias=s.use_bias, dtype=ftype),
+                    nn.Linear(s.emb_dim, s.emb_dim, bias=s.use_bias, dtype=dtype),
                 )
 
         total_dim = sum(s.emb_dim for s in feature_specs)
         self.project = nn.Sequential(
-            nn.Linear(total_dim, self.out_dim, bias=False, dtype=ftype),
+            nn.Linear(total_dim, self.out_dim, bias=False, dtype=dtype),
             nn.SiLU(),
         )
 
@@ -174,11 +169,8 @@ class _ScalarO3Linear(nn.Module):
     the random init exactly, so weight-transfer paths are unaffected.
     """
 
-    def __init__(self, in_mul: int, out_mul: int, *, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, in_mul: int, out_mul: int, *, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.in_mul, self.out_mul = in_mul, out_mul
         self.weight = nn.Parameter(torch.randn(in_mul * out_mul, dtype=dtype))
         self.bias = nn.Parameter(torch.zeros(out_mul, dtype=dtype))
@@ -205,12 +197,9 @@ class NonLinearBiasReadout(nn.Module):
         irreps_in: str,
         mlp_dim: int = 16,
         out_mul: int = 1,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.linear_1 = cueq.Linear(
             cue.Irreps("O3", irreps_in),
             cue.Irreps("O3", f"{mlp_dim}x0e"),
@@ -254,11 +243,8 @@ class LinearReadout(nn.Module):
         https://arxiv.org/abs/2206.07697
     """
 
-    def __init__(self, *, irreps_in: str, dtype: torch.dtype | None = None) -> None:
+    def __init__(self, *, irreps_in: str, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.linear = cueq.Linear(
             cue.Irreps("O3", irreps_in),
             cue.Irreps("O3", "1x0e"),
@@ -299,13 +285,8 @@ class NonLinearReadout(nn.Module):
         https://arxiv.org/abs/2206.07697
     """
 
-    def __init__(
-        self, *, irreps_in: str, mlp_dim: int = 16, dtype: torch.dtype | None = None
-    ) -> None:
+    def __init__(self, *, irreps_in: str, mlp_dim: int = 16, dtype: torch.dtype) -> None:
         super().__init__()
-        dtype = (
-            config.ftype if dtype is None else dtype
-        )  # transitional: goes with molix.config (2c)
         self.linear_1 = cueq.Linear(
             cue.Irreps("O3", irreps_in),
             cue.Irreps("O3", f"{mlp_dim}x0e"),
